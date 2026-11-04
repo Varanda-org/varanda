@@ -1211,6 +1211,20 @@ test('walletPolicy: maxCents and fee texts when present, refused when malformed'
   }
 })
 
+test('walletPolicy: maxUsdcMicros when present, refused when malformed', async (t) => {
+  const a = await load()
+  stub(t, json(200, { available: true, network: 'polygon', mode: 'pix', maxCents: 300000 }))
+  t.is((await a.walletPolicy()).maxUsdcMicros, undefined, 'absent: no client cap')
+  stub(t, json(200, { available: true, network: 'polygon', mode: 'pix', maxCents: 300000, maxUsdcMicros: 500000000 }))
+  t.alike(await a.walletPolicy(), { available: true, network: 'polygon', mode: 'pix', actions: PIX_ACTIONS, maxCents: 300000, maxUsdcMicros: 500000000 })
+  stub(t, json(200, { available: true, network: 'polygon', mode: 'pix', maxUsdcMicros: 1 }))
+  t.is((await a.walletPolicy()).maxUsdcMicros, 1, 'the lowest cap')
+  for (const bad of [0, -1, 1.5, '500000000', null, Number.MAX_SAFE_INTEGER + 1]) {
+    stub(t, json(200, { available: true, network: 'polygon', mode: 'pix', maxUsdcMicros: bad }))
+    t.is(await a.walletPolicy(), null, JSON.stringify(bad))
+  }
+})
+
 test('money calls: path, action, the exact signed op; reads 20 s, debits and deposits 100 s (C2)', async (t) => {
   const a = await load()
   const cases = [
@@ -1243,13 +1257,15 @@ test('money calls: path, action, the exact signed op; reads 20 s, debits and dep
 test('walletBalance: integers and the address, anything else refused', async (t) => {
   const a = await load()
   stub(t, json(200, { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150, extra: 'x' }))
-  t.alike(await a.walletBalance(signed({})), { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150, usdcMicros: 0 },
+  t.alike(await a.walletBalance(signed({})), { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150, usdcMicros: 0, pendingUsdcMicros: 0 },
     'an older service sends no USDC balance')
-  stub(t, json(200, { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150, usdcMicros: 2500000 }))
-  t.alike(await a.walletBalance(signed({})), { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150, usdcMicros: 2500000 })
+  stub(t, json(200, { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150, usdcMicros: 2500000, pendingUsdcMicros: 1000 }))
+  t.alike(await a.walletBalance(signed({})), { cents: 5000, address: ADDR, network: 'polygon', pendingFeeCents: 150, usdcMicros: 2500000, pendingUsdcMicros: 1000 })
   for (const usdcMicros of [-1, 1.5, '2500000', 2 ** 53]) {
     stub(t, json(200, { cents: 5000, pendingFeeCents: 0, usdcMicros }))
     await expectError(t, a.walletBalance(signed({})), 'indisponivel', false, 'usdcMicros ' + JSON.stringify(usdcMicros))
+    stub(t, json(200, { cents: 5000, pendingFeeCents: 0, pendingUsdcMicros: usdcMicros }))
+    await expectError(t, a.walletBalance(signed({})), 'indisponivel', false, 'pendingUsdcMicros ' + JSON.stringify(usdcMicros))
   }
   for (const body of [{ cents: 1.5, pendingFeeCents: 0 }, { cents: -1, pendingFeeCents: 0 }, { cents: '5000', pendingFeeCents: 0 },
     { cents: 5000 }, { cents: 5000, pendingFeeCents: 0, address: 'x' }, { cents: 5000, pendingFeeCents: 0, network: 'Poly' }]) {
@@ -1642,6 +1658,142 @@ test('walletStatement: USDC rows in micros; BRL rows without the new fields unch
     { ...ROW, fee: { cents: 150, status: 'cobrada', asset: 'EUR' } }, { ...ROW, fee: { cents: null, status: 'cobrada' } }
   ]
   for (const row of bad) {
+    stub(t, json(200, { items: [ROW, row], cursor: null }))
+    await expectError(t, a.walletStatement(signed({})), 'indisponivel', false, JSON.stringify(row))
+  }
+})
+
+const SWAP_ACTIONS = ['swap-quote', 'swap']
+const MICROS_PREVIEW = { amountMicros: 2500000, varandaFeeMicros: 10000, pendingFeeMicros: 0, pendingFeeRef: '', totalDebitMicros: 2510000, netReceivedMicros: 2500000 }
+
+test('walletPolicy: swap actions are known when listed, never derived from the mode', async (t) => {
+  const a = await load()
+  const all = [...PIX_ACTIONS, 'transfer', 'send-crypto', ...SWAP_ACTIONS]
+  stub(t, json(200, { available: true, network: 'polygon', mode: 'completo', actions: all }))
+  const listed = await a.walletPolicy()
+  t.alike(listed.actions, all, 'a PR 2 service list stays readable')
+  t.ok(a.hasAction(listed, 'swap-quote'))
+  t.ok(a.hasAction(listed, 'swap'))
+  stub(t, json(200, { available: true, network: 'polygon', mode: 'completo' }))
+  const derived = await a.walletPolicy()
+  t.absent(a.hasAction(derived, 'swap'), 'no actions field: no Converter')
+  t.absent(a.hasAction(derived, 'swap-quote'))
+})
+
+test('walletCryptoPreview: micros that add up, recipient gets the amount; walletPreview refuses the micros shape', async (t) => {
+  const a = await load()
+  const args = signed({ kind: 'crypto', asset: 'USDC', source: 'USDC', amountMicros: 2500000, address: ADDR })
+  const calls = stub(t, json(200, MICROS_PREVIEW))
+  t.alike(await a.walletCryptoPreview(args), { ok: true, reason: null, ...MICROS_PREVIEW })
+  t.is(calls[0].url, '/account/wallet/preview')
+  t.is(JSON.parse(calls[0].init.body).action, 'preview')
+  stub(t, json(200, MICROS_PREVIEW))
+  await expectError(t, a.walletPreview(args), 'indisponivel', false, 'a micros preview is never read as centavos')
+  stub(t, json(200, PREVIEW))
+  await expectError(t, a.walletCryptoPreview(args), 'indisponivel', false, 'a centavos preview is not a micros preview')
+  const pending = { ...MICROS_PREVIEW, pendingFeeMicros: 500, pendingFeeRef: 'var-' + 'd4'.repeat(16) + ':taxa', totalDebitMicros: 2510500 }
+  stub(t, json(200, pending))
+  t.alike(await a.walletCryptoPreview(args), { ok: true, reason: null, ...pending })
+  for (const k of ['amountMicros', 'varandaFeeMicros', 'pendingFeeMicros', 'totalDebitMicros', 'netReceivedMicros']) {
+    for (const v of [1.5, -1, '10', null]) {
+      stub(t, json(200, { ...MICROS_PREVIEW, [k]: v }))
+      await expectError(t, a.walletCryptoPreview(args), 'indisponivel', false, k + ' ' + JSON.stringify(v))
+    }
+  }
+  for (const bad of [{ totalDebitMicros: 2500000 }, { netReceivedMicros: 2490000 }, { pendingFeeRef: 'var-x:taxa' },
+    { ...pending, pendingFeeRef: '' }, { ok: 'yes' }, { reason: 5 }]) {
+    stub(t, json(200, { ...MICROS_PREVIEW, ...bad }))
+    await expectError(t, a.walletCryptoPreview(args), 'indisponivel', false, JSON.stringify(bad))
+  }
+  stub(t, json(200, { ...MICROS_PREVIEW, ok: false, reason: 'saldo-insuficiente' }))
+  const refused = await a.walletCryptoPreview(args)
+  t.is(refused.ok, false)
+  t.is(refused.reason, 'saldo-insuficiente')
+  // The other pending USDC fees held in the balance reach the confirmation.
+  stub(t, json(200, { ...MICROS_PREVIEW, reservedFeeMicros: 150000 }))
+  t.is((await a.walletCryptoPreview(args)).reservedFeeMicros, 150000)
+  for (const v of [1.5, -1, '10']) {
+    stub(t, json(200, { ...MICROS_PREVIEW, reservedFeeMicros: v }))
+    await expectError(t, a.walletCryptoPreview(args), 'indisponivel', false, 'reservedFeeMicros ' + JSON.stringify(v))
+  }
+})
+
+test('debitTerms: a USDC preview binds micros terms (C10)', async (t) => {
+  const a = await load()
+  const pending = { ...MICROS_PREVIEW, pendingFeeMicros: 500, pendingFeeRef: 'var-' + 'd4'.repeat(16) + ':taxa', totalDebitMicros: 2510500 }
+  t.alike(a.debitTerms(pending), { feeMicros: 10000, pendingFeeMicros: 500, pendingFeeRef: pending.pendingFeeRef, totalDebitMicros: 2510500 })
+  t.alike(a.debitTerms(PREVIEW), { feeCents: 150, pendingFeeCents: 0, pendingFeeRef: '', totalDebitCents: 10240 }, 'BRL terms unchanged')
+})
+
+test('walletSendCrypto: asset and source forwarded in the signed op unchanged', async (t) => {
+  const a = await load()
+  const op = { opId: OP_ID, amountMicros: 2500000, address: ADDR, asset: 'USDC', source: 'USDC', ...a.debitTerms(MICROS_PREVIEW) }
+  const calls = stub(t, json(200, { externalId: EXT, status: 'concluido', fee: { asset: 'USDC', cents: null, feeMicros: 10000, status: 'cobrada' }, txHash: TX }))
+  const out = await a.walletSendCrypto({ ...signed(op), pin: '135790' })
+  t.alike(JSON.parse(calls[0].init.body).op, op)
+  t.alike(out.fee, { cents: null, feeMicros: 10000, status: 'cobrada', asset: 'USDC' })
+})
+
+test('walletSwapQuote: indicative integers only, read 20 s, never uncertain', async (t) => {
+  const a = await load()
+  const quote = { amountInMicros: 2500000, hodleFeeMicros: 5000, brlaOutCents: 1290, rateCents: 518, indicative: true }
+  const calls = stub(t, json(200, { ...quote, extra: 'x' }))
+  const delays = spyTimeouts(t)
+  t.alike(await a.walletSwapQuote(signed({ amountMicros: 2500000 })), quote)
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/wallet/swap-quote')
+  t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: NONCE, action: 'swap-quote', op: { amountMicros: 2500000 }, signature: SIG })
+  t.ok(delays.includes(20000))
+  for (const k of ['amountInMicros', 'hodleFeeMicros', 'brlaOutCents', 'rateCents']) {
+    for (const v of [1.5, -1, '10', null]) {
+      stub(t, json(200, { ...quote, [k]: v }))
+      await expectError(t, a.walletSwapQuote(signed({ amountMicros: 2500000 })), 'indisponivel', false, k + ' ' + JSON.stringify(v))
+    }
+  }
+  for (const bad of [{ indicative: false }, { indicative: undefined }, { hodleFeeMicros: 2500001 }]) {
+    stub(t, json(200, { ...quote, ...bad }))
+    await expectError(t, a.walletSwapQuote(signed({ amountMicros: 2500000 })), 'indisponivel', false, JSON.stringify(bad))
+  }
+  stub(t, json(503, { error: 'resultado-incerto' }))
+  await expectError(t, a.walletSwapQuote(signed({ amountMicros: 2500000 })), 'indisponivel', false, 'a quote is never uncertain')
+})
+
+test('walletSwap: op and PIN forwarded, 100 s, never retried; result with and without providerId', async (t) => {
+  const a = await load()
+  const op = { opId: OP_ID, amountMicros: 2500000 }
+  const args = { ...signed(op), pin: '135790' }
+  const calls = stub(t, json(200, { externalId: EXT, status: 'pendente', providerId: 'swap-123', extra: 'x' }))
+  const delays = spyTimeouts(t)
+  t.alike(await a.walletSwap(args), { externalId: EXT, status: 'pendente', providerId: 'swap-123' })
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/wallet/swap')
+  t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: NONCE, action: 'swap', op, signature: SIG, pin: '135790' })
+  t.absent(Object.keys(JSON.parse(calls[0].init.body).op).includes('pin'), 'the PIN is not in the signed op')
+  t.ok(delays.includes(100000))
+  stub(t, json(200, { externalId: EXT, status: 'incerto' }))
+  t.alike(await a.walletSwap(args), { externalId: EXT, status: 'incerto', providerId: null }, 'no providerId yet')
+  for (const bad of [{ providerId: '..' }, { providerId: 'a b' }, { providerId: 5 }, { providerId: 'x'.repeat(129) },
+    { status: 'pago' }, { externalId: 'var-x' }]) {
+    stub(t, json(200, { externalId: EXT, status: 'pendente', ...bad }))
+    await expectError(t, a.walletSwap(args), 'indisponivel', true, 'unusable success: ' + JSON.stringify(bad))
+  }
+  const sent = stub(t, () => { throw new Error('rede') })
+  await expectError(t, a.walletSwap(args), 'indisponivel', true, 'no answer')
+  t.is(sent.length, 1, 'never retried')
+  stub(t, json(400, { error: 'pin-invalido' }))
+  await expectError(t, a.walletSwap(args), 'pin-invalido', false)
+})
+
+test('walletStatement: swap and USDC rows carry source and providerId; BRL rows without them stay valid', async (t) => {
+  const a = await load()
+  const swap = { kind: 'swap', status: 'concluido', asset: 'USDC', cents: 0, amountMicros: 2500000, externalId: EXT, providerId: 'swap-123' }
+  const usdcSend = { kind: 'crypto', status: 'pendente', asset: 'USDC', source: 'USDC', cents: 0, amountMicros: 1000000 }
+  stub(t, json(200, { items: [ROW, swap, usdcSend], cursor: null }))
+  const out = await a.walletStatement(signed({}))
+  t.absent('source' in out.items[0], 'a BRL row keeps its shape')
+  t.absent('providerId' in out.items[0])
+  t.is(out.items[1].providerId, 'swap-123')
+  t.is(out.items[1].kind, 'swap')
+  t.is(out.items[2].source, 'USDC')
+  for (const row of [{ ...usdcSend, source: 'USDT' }, { ...usdcSend, source: 5 }, { ...swap, providerId: '...' }, { ...swap, providerId: 'a/b' }]) {
     stub(t, json(200, { items: [ROW, row], cursor: null }))
     await expectError(t, a.walletStatement(signed({})), 'indisponivel', false, JSON.stringify(row))
   }

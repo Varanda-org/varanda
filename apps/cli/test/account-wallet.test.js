@@ -33,7 +33,7 @@ const PIN = '482915'
 // The policy's action lists, by mode.
 const CADASTRO_ACTIONS = Object.freeze(['optin', 'kyc-document', 'kyc-submit', 'status', 'kyc-liveness-validate', 'kyc-liveness-retry'])
 const PIX_ACTIONS = Object.freeze([...CADASTRO_ACTIONS, 'wallet-create', 'balance', 'statement', 'deposit', 'payout-quote', 'preview', 'payout', 'op-status'])
-const COMPLETO_ACTIONS = Object.freeze([...PIX_ACTIONS, 'transfer', 'send-crypto'])
+const COMPLETO_ACTIONS = Object.freeze([...PIX_ACTIONS, 'transfer', 'send-crypto', 'swap-quote', 'swap'])
 const ADULT = Object.freeze({ adult: 1 })
 const KYC = Object.freeze({
   fullName: 'Fulana de Tal',
@@ -80,7 +80,7 @@ function kycHash (kyc) {
 
 // `on: false` leaves hodle and wallets null. `timeoutMs` shortens the Hodle
 // client's deadline for the lost-answer tests.
-async function setup (t, { on = true, mode, dailyLimit, timeoutMs, withAges = false, burst, fees, maxCents, moneyTimeoutMs } = {}) {
+async function setup (t, { on = true, mode, dailyLimit, timeoutMs, withAges = false, burst, fees, maxCents, maxUsdcMicros, moneyTimeoutMs } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   // `c.failAfter` = 'METHOD /path': wallet.json writes start failing as
   // soon as Hodle answered that call.
@@ -125,6 +125,7 @@ async function setup (t, { on = true, mode, dailyLimit, timeoutMs, withAges = fa
   }
   if (fees !== undefined) opts.fees = fees
   if (maxCents !== undefined) opts.walletMaxCents = maxCents
+  if (maxUsdcMicros !== undefined) opts.walletMaxUsdcMicros = maxUsdcMicros
   if (moneyTimeoutMs !== undefined) opts.walletMoneyTimeoutMs = moneyTimeoutMs
   if (mode !== undefined) opts.walletMode = mode
   if (dailyLimit !== undefined) opts.walletDailyLimit = dailyLimit
@@ -1412,6 +1413,7 @@ test('wallet money: actions are 404 outside pix and completo; policy adds the ca
   const p = await s.api('GET', '/account/wallet/policy')
   t.is(p.body.mode, 'pix')
   t.is(p.body.maxCents, 200000)
+  t.is(p.body.maxUsdcMicros, undefined, 'pix has no USDC route to cap')
   t.is(p.body.fees.payout, 'R$ 0,50 + 1%')
   t.is(p.body.fees.transfer, 'sem taxa')
   t.alike(p.body.actions, PIX_ACTIONS)
@@ -1425,7 +1427,7 @@ test('wallet money: balance verifies the stored wallet once and reports pending 
   await funded(t, s, 12345)
   const b = await s.step(s.m, 'balance')
   t.is(b.status, 200, b.text)
-  t.alike(b.body, { cents: 12345, usdcMicros: 0, address: s.entry().wallet.address, network: 'polygon', pendingFeeCents: 0 })
+  t.alike(b.body, { cents: 12345, usdcMicros: 0, address: s.entry().wallet.address, network: 'polygon', pendingFeeCents: 0, pendingUsdcMicros: 0 })
   await s.step(s.m, 'balance')
   const checks = s.seen('POST', '/api/wallet/get').filter((q) => q.body.walletId === s.entry().wallet.id && q.body.sync === false)
   t.is(checks.length, 1, 'one wallet/get check, then cached')
@@ -2502,6 +2504,7 @@ test('wallet completo: policy lists the actions; pix 404s the sends and refuses 
   t.alike(p.body.actions, COMPLETO_ACTIONS)
   t.is(p.body.fees.transfer, 'R$ 0,10 + 1%')
   t.is(p.body.fees.crypto, 'R$ 0,30 + 1,5%')
+  t.is(p.body.maxUsdcMicros, 500000000, 'the default USDC cap')
 
   const s = await setup(t, { mode: 'pix' })
   await funded(t, s, 10000)
@@ -2768,4 +2771,442 @@ test('wallet completo: a send above one transfer is valor-invalido before any ro
   t.alike((await s.step(s.m, 'transfer', { ...op, cents: 0, totalDebitCents: 0 }, { pin: PIN })).body, { error: 'valor-invalido' })
   t.is(s.ledger(), ledgerBefore)
   t.alike((await s.step(s.m, 'transfer', { ...op, cents: 100, totalDebitCents: 100 }, { pin: '12' })).body, { error: 'pin-invalido' })
+})
+
+const PRUNE_LATER = Date.now() + 100 * 24 * 3600 * 1000
+
+async function sendUsdc (t, s, micros, address, { id = opId(), pin = PIN, extra = {} } = {}) {
+  const pv = await s.step(s.m, 'preview', { kind: 'crypto', asset: 'USDC', source: 'USDC', amountMicros: micros, address })
+  t.is(pv.status, 200, pv.text)
+  const op = {
+    opId: id,
+    amountMicros: micros,
+    asset: 'USDC',
+    source: 'USDC',
+    address,
+    feeMicros: pv.body.varandaFeeMicros,
+    pendingFeeMicros: pv.body.pendingFeeMicros,
+    pendingFeeRef: pv.body.pendingFeeRef,
+    totalDebitMicros: pv.body.totalDebitMicros,
+    ...extra
+  }
+  return { op, preview: pv.body, r: await s.step(s.m, 'send-crypto', op, { pin }) }
+}
+
+function swapPosts (s) {
+  return s.seen('POST', '/api/wallet/swap')
+}
+
+test('wallet usdc: pix 404s swap-quote and swap; swap-quote needs no PIN, writes no row and answers integers', async (t) => {
+  const p = await setup(t, { mode: 'pix' })
+  await funded(t, p, 1000)
+  for (const action of ['swap-quote', 'swap']) {
+    t.is((await p.start(p.m, action)).status, 404, 'start ' + action)
+    const r = await p.post('/account/wallet/' + action, { member: p.m.hex, nonce: 'A'.repeat(43), action, op: {}, signature: 'a'.repeat(128), pin: PIN })
+    t.is(r.status, 404, action)
+  }
+
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  const sub = await funded(t, s, 1000)
+  s.fake.state.usdc.set(sub, '20.000000')
+  const ledgerBefore = s.ledger()
+  const q = await s.step(s.m, 'swap-quote', { amountMicros: 10000000 })
+  t.is(q.status, 200, q.text)
+  // 0.7% of 10 USDC stays with Hodle; 9.93 USDC at R$ 5,00 is R$ 49,65.
+  t.alike(q.body, { amountInMicros: 10000000, hodleFeeMicros: 70000, brlaOutCents: 4965, rateCents: 500, indicative: true })
+  t.is(s.ledger(), ledgerBefore, 'no row')
+  t.is(s.fake.state.sends.swap, 0)
+  t.is(s.seen('GET', '/api/wallet/swap/quote').length, 1)
+  t.alike((await s.step(s.m, 'swap-quote', { amountMicros: 0 })).body, { error: 'valor-invalido' })
+  t.alike((await s.step(s.m, 'swap-quote', { amountMicros: 1000000, feeMicros: 0 })).body, { error: 'pedido-invalido' })
+  s.fake.state.swapAnswer = 'notEnabled'
+  t.alike((await s.step(s.m, 'swap-quote', { amountMicros: 1000000 })).body, { error: 'indisponivel' })
+  t.is(s.ledger(), ledgerBefore)
+})
+
+test('wallet usdc: a swap is written before its one POST, sends no address, and op-status completes it by its id', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  const sub = await funded(t, s, 1000)
+  s.fake.state.usdc.set(sub, '20.000000')
+  s.fake.state.swapOutcome = null
+  t.alike((await s.step(s.m, 'swap', { opId: opId(), amountMicros: 1000000, feeMicros: 0 }, { pin: PIN })).body, { error: 'pedido-invalido' }, 'a fee field is refused')
+  t.alike((await s.step(s.m, 'swap', { opId: opId(), amountMicros: 1000000, address: OUTSIDE }, { pin: PIN })).body, { error: 'pedido-invalido' }, 'an address is refused')
+  t.alike((await s.step(s.m, 'swap', { opId: opId(), amountMicros: 1000000 }, { pin: '12' })).body, { error: 'pin-invalido' })
+  t.is(swapPosts(s).length, 0)
+
+  const op = { opId: opId(), amountMicros: 10000000 }
+  const r = await s.step(s.m, 'swap', op, { pin: PIN })
+  t.is(r.status, 200, r.text)
+  const { externalId, providerId } = r.body
+  t.alike(r.body, { externalId, status: 'pendente', providerId })
+  t.ok(s.fake.state.swaps.has(providerId), 'the swapId is the provider id')
+  const row = s.ops.get(externalId)
+  t.is(row.kind, 'swap')
+  t.is(row.asset, 'USDC')
+  t.is(row.source, null)
+  t.is(row.amountMicros, 10000000)
+  t.is(row.cents, 0)
+  t.is(row.to, null)
+  t.alike([row.fee.asset, row.fee.cents, row.fee.status], ['USDC', 0, 'nenhuma'])
+  const posted = swapPosts(s)
+  t.is(posted.length, 1)
+  t.is(posted[0].body.reference, externalId)
+  t.is(posted[0].body.amount, '10.000000')
+  t.absent(Object.keys(posted[0].body).some((k) => /address/i.test(k)), 'no address is ever sent')
+  t.ok(logged(s, 'conversao'))
+  t.absent(s.logs.some((l) => l.includes(PIN)))
+
+  const again = await s.step(s.m, 'swap', op, { pin: PIN })
+  t.alike(again.body, { externalId, status: 'pendente', providerId }, 'the stored row, never a second POST')
+  t.alike((await s.step(s.m, 'swap', { ...op, amountMicros: 5000000 }, { pin: PIN })).body, { error: 'operacao-divergente' })
+  t.is(s.fake.state.sends.swap, 1)
+
+  const pending = await s.step(s.m, 'op-status', { externalId })
+  t.is(pending.body.status, 'pendente')
+  t.is(pending.body.providerId, providerId)
+  t.is(pending.body.asset, 'USDC')
+  t.is(pending.body.amountMicros, 10000000)
+  s.fake.state.swapOutcome = 'COMPLETED'
+  s.c.offset += 11000
+  const done = await s.step(s.m, 'op-status', { externalId })
+  t.is(done.body.status, 'concluido')
+  t.is(s.fake.state.balances.get(sub), 1000 + 4965, 'the BRLA arrived')
+  t.is(s.fake.state.sends.swap, 1, 'nothing re-POSTs')
+
+  const st = await s.step(s.m, 'statement')
+  const item = st.body.items.find((i) => i.externalId === externalId)
+  t.is(item.kind, 'swap')
+  t.is(item.providerId, providerId)
+  t.is(item.amountMicros, 10000000)
+  t.is(swapPosts(s).every((q) => !Object.keys(q.body).some((k) => /address/i.test(k))), true)
+})
+
+test('wallet usdc: a lost swap answer is one POST; the next debit is operacao-pendente; the same opId never POSTs again; only its statement row settles it', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES, moneyTimeoutMs: 300 })
+  const sub = await funded(t, s, 10000)
+  s.fake.state.usdc.set(sub, '20.000000')
+  s.fake.state.swapAnswer = 'timeout'
+  const op = { opId: opId(), amountMicros: 5000000 }
+  const first = await s.step(s.m, 'swap', op, { pin: PIN })
+  t.is(first.status, 503, first.text)
+  t.is(first.body.error, 'resultado-incerto')
+  const externalId = first.body.externalId
+  t.is(externalId, externalIdFor(s.m.hex, 'swap', op.opId))
+  t.is(s.ops.get(externalId).status, 'incerto')
+  t.is(s.ops.get(externalId).providerId, null)
+  t.is(s.fake.state.sends.swap, 1)
+  s.fake.state.swapAnswer = 'running'
+
+  t.alike((await s.step(s.m, 'swap', { opId: opId(), amountMicros: 1000000 }, { pin: PIN })).body, { error: 'operacao-pendente' })
+  t.alike((await sendTo(t, s, 'crypto', 500, OUTSIDE)).r.body, { error: 'operacao-pendente' })
+  const again = await s.step(s.m, 'swap', op, { pin: PIN })
+  t.is(again.status, 200, again.text)
+  t.alike(again.body, { externalId, status: 'incerto', providerId: null })
+  t.is(s.fake.state.sends.swap, 1, 'the same opId never POSTs again')
+
+  s.fake.state.swapRows.push({ subAccountId: sub, reference: 'var-' + '0'.repeat(32), amount: '5.000000', status: 'COMPLETED' })
+  const miss = await s.step(s.m, 'op-status', { externalId })
+  t.is(miss.body.status, 'incerto', 'a miss leaves it incerto')
+  // Another leg of a different amount under this reference never settles it.
+  s.fake.state.swapRows.push({ subAccountId: sub, reference: externalId, amount: '0.035000', status: 'COMPLETED' })
+  s.c.offset += 11000
+  t.is((await s.step(s.m, 'op-status', { externalId })).body.status, 'incerto', 'another amount leaves it incerto')
+  s.fake.state.swapRows.push({ subAccountId: sub, reference: externalId, amount: '5.000000', status: 'COMPLETED' })
+  s.c.offset += 11000
+  const found = await s.step(s.m, 'op-status', { externalId })
+  t.is(found.body.status, 'concluido')
+  t.is(s.fake.state.sends.swap, 1)
+  t.is(s.seen('GET', /^\/api\/wallet\/swap\/(?!quote)/).length, 0, 'without an id there is no status read')
+})
+
+test('wallet usdc: a 502 with a swapId stays incerto with the id and completes by GET; FAILED and STRANDED go to support', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  const sub = await funded(t, s, 1000)
+  s.fake.state.usdc.set(sub, '30.000000')
+  s.fake.state.swapAnswer = 'fail502-with-id'
+  const r = await s.step(s.m, 'swap', { opId: opId(), amountMicros: 5000000 }, { pin: PIN })
+  t.is(r.body.error, 'resultado-incerto', r.text)
+  const externalId = r.body.externalId
+  const row = s.ops.get(externalId)
+  t.is(row.status, 'incerto')
+  t.ok(s.fake.state.swaps.has(row.providerId), 'the provider id is kept')
+  t.alike((await s.step(s.m, 'swap', { opId: opId(), amountMicros: 1000000 }, { pin: PIN })).body, { error: 'operacao-pendente' }, 'it keeps the one-debit lock')
+  const st = await s.step(s.m, 'op-status', { externalId })
+  t.is(st.body.status, 'concluido')
+  t.is(st.body.providerId, row.providerId)
+  t.is(s.fake.state.sends.swap, 1)
+
+  s.fake.state.swapAnswer = 'running'
+  for (const outcome of ['FAILED', 'STRANDED']) {
+    s.fake.state.swapOutcome = null
+    const w = await s.step(s.m, 'swap', { opId: opId(), amountMicros: 1000000 }, { pin: PIN })
+    t.is(w.body.status, 'pendente', w.text)
+    s.fake.settleSwap(w.body.providerId, outcome)
+    const f = await s.step(s.m, 'op-status', { externalId: w.body.externalId })
+    t.is(f.body.status, 'falhou', outcome)
+    t.is(s.ops.get(w.body.externalId).suporte, true, outcome + ' goes to support')
+  }
+  t.is(s.fake.state.sends.swap, 3)
+
+  // A refusal that still names a swap means Hodle registered it: incerto with
+  // its id, read by op-status, never an ordinary failure.
+  s.fake.script({ swap (req, res, ctx) { ctx.json(res, 400, { success: false, errorCode: 'INSUFFICIENT_BALANCE', swapId: 'swap_refused_1' }) } })
+  const named = await s.step(s.m, 'swap', { opId: opId(), amountMicros: 1000000 }, { pin: PIN })
+  t.is(named.body.error, 'resultado-incerto', named.text)
+  const namedRow = s.ops.get(named.body.externalId)
+  t.is(namedRow.status, 'incerto')
+  t.is(namedRow.providerId, 'swap_refused_1')
+  s.fake.script({})
+})
+
+test('wallet usdc: a USDC send charges its USDC fee only once concluded; the pending fee is reserved from a swap, ignored by BRLA, and collected by the next USDC send', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  // Exactly a R$ 10,00 crypto send and its R$ 0,45 fee.
+  const sub = await funded(t, s, 1045)
+  s.fake.state.usdc.set(sub, '10.000000')
+
+  const ledgerBefore = s.ledger()
+  const mixed = { opId: opId(), amountMicros: 1000000, asset: 'USDC', source: 'BRLA', address: OUTSIDE, feeMicros: 15000, pendingFeeMicros: 0, pendingFeeRef: '', totalDebitMicros: 1015000 }
+  t.alike((await s.step(s.m, 'send-crypto', mixed, { pin: PIN })).body, { error: 'pedido-invalido' }, '(USDC, BRLA) is refused')
+  t.alike((await s.step(s.m, 'preview', { kind: 'crypto', asset: 'USDC', source: 'BRLA', amountMicros: 1000000 })).body, { error: 'pedido-invalido' })
+  t.alike((await s.step(s.m, 'send-crypto', { ...mixed, source: 'USDC', feeCents: 1 }, { pin: PIN })).body, { error: 'pedido-invalido' }, 'no centavos field on a USDC send')
+  t.is(s.ledger(), ledgerBefore)
+  t.is(s.fake.state.posts.transfer, 0)
+
+  s.fake.state.transferAnswer = 'pending202'
+  const first = await sendUsdc(t, s, 2000000, OUTSIDE)
+  t.is(first.preview.varandaFeeMicros, 30000, '1,5% of 2 USDC')
+  t.is(first.preview.netReceivedMicros, 2000000)
+  t.is(first.r.status, 200, first.r.text)
+  const externalId = first.r.body.externalId
+  t.alike(first.r.body, { externalId, status: 'pendente', fee: { asset: 'USDC', cents: null, feeMicros: 30000, status: 'pendente' }, pendingFee: null, txHash: null })
+  const row = s.ops.get(externalId)
+  t.alike([row.kind, row.asset, row.source, row.amountMicros, row.cents], ['crypto', 'USDC', 'USDC', 2000000, 0])
+  t.alike([row.fee.asset, row.fee.cents, row.totalDebitCents], ['USDC', 30000, 2030000])
+  const sent = s.seen('POST', '/api/wallet/transfer')
+  t.is(sent.length, 1)
+  t.is(sent[0].body.asset, 'USDC')
+  t.is(sent[0].body.amount, '2.000000')
+  t.is(s.fake.state.creditedUsdc.get(TREASURY), undefined, 'no fee leg on a pending principal')
+  t.is((await s.step(s.m, 'op-status', { externalId })).body.source, 'USDC')
+
+  // 8 USDC held, 0.03 of it reserved for the fee.
+  s.fake.state.transferAnswer = 'done'
+  t.alike((await s.step(s.m, 'swap', { opId: opId(), amountMicros: 8000000 }, { pin: PIN })).body, { error: 'saldo-insuficiente' })
+  t.is(s.fake.state.sends.swap, 0)
+
+  const brla = await sendTo(t, s, 'crypto', 1000, OUTSIDE)
+  t.is(brla.r.status, 200, brla.r.text)
+  t.is(brla.preview.totalDebitCents, 1045)
+  t.is(brla.preview.pendingFeeCents, 0)
+  t.is(brla.r.body.pendingFee, null)
+  t.is(s.ops.get(externalId).fee.status, 'pendente', 'a BRLA send leaves the USDC fee alone')
+
+  s.fake.settleTransfer(externalId, 'COMPLETED')
+  s.c.offset += 11000
+  const st = await s.step(s.m, 'op-status', { externalId })
+  t.is(st.body.status, 'concluido')
+  t.alike(st.body.fee, { asset: 'USDC', cents: null, feeMicros: 30000, status: 'pendente' }, 'op-status sends no fee')
+  t.is(s.fake.state.creditedUsdc.get(TREASURY), undefined)
+  const bal = await s.step(s.m, 'balance')
+  t.is(bal.body.pendingUsdcMicros, 30000)
+  t.is(bal.body.pendingFeeCents, 0)
+  await s.ops.prune(PRUNE_LATER)
+  t.ok(s.ops.get(externalId), 'an owed fee keeps the row')
+
+  const second = await sendUsdc(t, s, 1000000, OUTSIDE)
+  t.is(second.preview.pendingFeeMicros, 30000)
+  t.is(second.preview.pendingFeeRef, externalId + ':taxa')
+  t.is(second.r.status, 200, second.r.text)
+  t.alike(second.r.body.fee, { asset: 'USDC', cents: null, feeMicros: 15000, status: 'cobrada' })
+  t.alike(second.r.body.pendingFee, { asset: 'USDC', cents: null, feeMicros: 30000, status: 'cobrada' })
+  t.is(s.fake.state.creditedUsdc.get(TREASURY), 45000)
+  t.is(s.fake.state.creditedUsdc.get(OUTSIDE.toLowerCase()), 3000000)
+  t.is(s.fake.state.credited.get(TREASURY), 45, 'the BRLA fee went in BRLA')
+  const fees = s.seen('POST', '/api/wallet/transfer').filter((q) => q.body.reference.endsWith(':taxa'))
+  t.alike(fees.map((q) => [q.body.asset, q.body.amount]), [['BRLA', '0.45'], ['USDC', '0.015000'], ['USDC', '0.030000']])
+  t.is(s.ops.get(externalId).fee.status, 'cobrada')
+  await s.ops.prune(PRUNE_LATER)
+  t.is(s.ops.get(externalId), null, 'collected, the row is prunable')
+})
+
+test('wallet usdc: a USDC fee leg accepted but not completed is settled by op-status on its micros', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  const sub = await funded(t, s, 1000)
+  s.fake.state.usdc.set(sub, '5.000000')
+  s.fake.script({
+    transfer (req, res, ctx) {
+      const o = s.fake.apply('transfer', ctx)
+      if (!String(ctx.body.reference).endsWith(':taxa')) return ctx.json(res, o.code, o.body)
+      ctx.json(res, 200, { success: true, data: { amount: ctx.body.amount } })
+    }
+  })
+  const { r } = await sendUsdc(t, s, 1000000, OUTSIDE)
+  t.is(r.status, 200, r.text)
+  const externalId = r.body.externalId
+  t.alike(r.body.fee, { asset: 'USDC', cents: null, feeMicros: 15000, status: 'enviada' })
+  s.fake.script({})
+  const st = await s.step(s.m, 'op-status', { externalId })
+  t.is(st.status, 200, st.text)
+  t.alike(st.body.fee, { asset: 'USDC', cents: null, feeMicros: 15000, status: 'cobrada' })
+  t.is(s.seen('POST', '/api/wallet/transfer').length, 2, 'never resent')
+  const mine = await s.step(s.m, 'statement')
+  t.is(mine.body.items.filter((i) => i.externalId === externalId).length, 1, 'the fee leg folds into its USDC send')
+})
+
+test('wallet usdc: a lost swap is settled by its USDC swap row even when the BRLA leg carries the same reference first', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES, moneyTimeoutMs: 300 })
+  const sub = await funded(t, s, 1000)
+  s.fake.state.usdc.set(sub, '20.000000')
+  s.fake.state.swapAnswer = 'timeout'
+  const first = await s.step(s.m, 'swap', { opId: opId(), amountMicros: 5000000 }, { pin: PIN })
+  t.is(first.body.error, 'resultado-incerto', first.text)
+  const externalId = first.body.externalId
+  s.fake.state.swapAnswer = 'running'
+  s.fake.state.swapRows.push({ subAccountId: sub, reference: externalId, amount: '5.000000', status: 'COMPLETED' })
+  // The BRLA credit of the same conversion, newer, listed first.
+  const leg = { id: 'op_leg', type: 'swap', status: 'COMPLETED', amount: '24.65', asset: 'BRLA', valueInBrl: '24.65', fee: '0', direction: 'in', reference: externalId, createdAt: new Date().toISOString() }
+  s.fake.script({
+    statement (req, res, ctx) {
+      const o = s.fake.apply('statement', ctx)
+      if (o.code === 200) o.body.data.operations.unshift(leg)
+      ctx.json(res, o.code, o.body)
+    }
+  })
+  s.c.offset += 11000
+  const found = await s.step(s.m, 'op-status', { externalId })
+  t.is(found.body.status, 'concluido', found.text)
+  t.is(s.ops.get(externalId).providerId, null, 'a settled swap stores no statement id')
+  t.is(s.fake.state.sends.swap, 1)
+})
+
+test('wallet usdc: a lost swap the statement shows FAILED settles to falhou with support and the statement id', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES, moneyTimeoutMs: 300 })
+  const sub = await funded(t, s, 1000)
+  s.fake.state.usdc.set(sub, '20.000000')
+  s.fake.state.swapAnswer = 'timeout'
+  const first = await s.step(s.m, 'swap', { opId: opId(), amountMicros: 5000000 }, { pin: PIN })
+  t.is(first.body.error, 'resultado-incerto', first.text)
+  const externalId = first.body.externalId
+  s.fake.state.swapAnswer = 'running'
+  s.fake.state.swapRows.push({ subAccountId: sub, reference: externalId, amount: '5.000000', status: 'RUNNING' })
+  s.c.offset += 11000
+  t.is((await s.step(s.m, 'op-status', { externalId })).body.status, 'pendente')
+  t.is(s.ops.get(externalId).providerId, null, 'a pending swap never stores a statement id')
+  s.fake.state.swapRows[0].status = 'FAILED'
+  s.c.offset += 11000
+  const f = await s.step(s.m, 'op-status', { externalId })
+  t.is(f.body.status, 'falhou', f.text)
+  const row = s.ops.get(externalId)
+  t.ok(/^op_[0-9]+$/.test(row.providerId), 'the statement operation id is kept for support')
+  t.is(row.suporte, true)
+  t.is(s.seen('GET', /^\/api\/wallet\/swap\/(?!quote)/).length, 0, 'no status read by a statement id')
+})
+
+test('wallet usdc: the statement reads a stranded provider swap as falhou and a settled swap of ours as the ledger has it', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  const sub = await funded(t, s, 1000)
+  s.fake.state.usdc.set(sub, '20.000000')
+  s.fake.state.swapRows.push({ subAccountId: sub, reference: 'var-' + '1'.repeat(32), amount: '3.000000', status: 'STRANDED' })
+  const r = await s.step(s.m, 'swap', { opId: opId(), amountMicros: 2000000 }, { pin: PIN })
+  t.is(r.status, 200, r.text)
+  const externalId = r.body.externalId
+  s.c.offset += 11000
+  t.is((await s.step(s.m, 'op-status', { externalId })).body.status, 'concluido')
+  s.fake.state.swapRows.push({ subAccountId: sub, reference: externalId, amount: '2.000000', status: 'RUNNING' })
+  const st = await s.step(s.m, 'statement')
+  t.is(st.status, 200, st.text)
+  const stranded = st.body.items.find((i) => i.externalId === null && i.amountMicros === 3000000)
+  t.ok(stranded, 'the provider row is listed')
+  t.is(stranded.status, 'falhou')
+  const mine = st.body.items.filter((i) => i.externalId === externalId)
+  t.is(mine.length, 1)
+  t.is(mine[0].status, 'concluido')
+})
+
+test('wallet money: old USDC fees never hide a BRL fee from a BRL send', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  await funded(t, s, 1045 + 100)
+  for (let i = 0; i < 21; i++) {
+    const id = externalIdFor(s.m.hex, 'crypto', opId())
+    await s.ops.put({ externalId: id, member: s.m.hex, kind: 'crypto', status: 'concluido', cents: 0, asset: 'USDC', source: 'USDC', amountMicros: 1000000, fee: { asset: 'USDC', cents: 15000, status: 'pendente', reference: feeReference(id) }, totalDebitCents: 1015000 })
+    s.c.offset += 1000
+  }
+  const owedId = externalIdFor(s.m.hex, 'payout', opId())
+  await s.ops.put({ externalId: owedId, member: s.m.hex, kind: 'payout', status: 'concluido', cents: 1000, fee: { cents: 100, status: 'pendente', reference: feeReference(owedId) }, to: '***1234', totalDebitCents: 1175 })
+  t.is((await s.step(s.m, 'balance')).body.pendingFeeCents, 100)
+  const { preview, r } = await sendTo(t, s, 'crypto', 1000, OUTSIDE)
+  t.is(preview.pendingFeeCents, 100)
+  t.is(preview.pendingFeeRef, feeReference(owedId))
+  t.is(r.status, 200, r.text)
+  t.is(s.ops.get(owedId).fee.status, 'cobrada')
+})
+
+test('wallet usdc: the operator cap bounds a USDC send with its fees, a swap and a swap quote before any row or provider call', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES, maxUsdcMicros: 2000000 })
+  const p = await s.api('GET', '/account/wallet/policy')
+  t.is(p.body.maxUsdcMicros, 2000000)
+  const sub = await funded(t, s, 1000)
+  s.fake.state.usdc.set(sub, '20.000000')
+  const ledgerBefore = s.ledger()
+
+  const over = await s.step(s.m, 'preview', { kind: 'crypto', asset: 'USDC', source: 'USDC', amountMicros: 2000001, address: OUTSIDE })
+  t.alike(over.body, { error: 'valor-invalido' }, 'a principal above the cap')
+  // 1.98 USDC fits, but its 1,5% fee (29700) takes the total past 2 USDC.
+  const pv = await s.step(s.m, 'preview', { kind: 'crypto', asset: 'USDC', source: 'USDC', amountMicros: 1980000, address: OUTSIDE })
+  t.is(pv.status, 200, pv.text)
+  t.is(pv.body.ok, false, 'the total with fees is above the cap')
+  t.is(pv.body.reason, 'valor-invalido')
+  const op = { opId: opId(), amountMicros: 1980000, asset: 'USDC', source: 'USDC', address: OUTSIDE, feeMicros: 29700, pendingFeeMicros: 0, pendingFeeRef: '', totalDebitMicros: 2009700 }
+  t.alike((await s.step(s.m, 'send-crypto', op, { pin: PIN })).body, { error: 'valor-invalido' })
+  t.alike((await s.step(s.m, 'send-crypto', { ...op, opId: opId(), amountMicros: 2000001, totalDebitMicros: 2030001 }, { pin: PIN })).body, { error: 'valor-invalido' })
+  const fits = await s.step(s.m, 'preview', { kind: 'crypto', asset: 'USDC', source: 'USDC', amountMicros: 1970000, address: OUTSIDE })
+  t.is(fits.body.ok, true, 'a total at or under the cap is accepted')
+
+  t.alike((await s.step(s.m, 'swap-quote', { amountMicros: 2000001 })).body, { error: 'valor-invalido' })
+  t.alike((await s.step(s.m, 'swap', { opId: opId(), amountMicros: 2000001 }, { pin: PIN })).body, { error: 'valor-invalido' })
+  t.is(s.ledger(), ledgerBefore, 'no row')
+  t.is(s.fake.state.posts.transfer, 0, 'no transfer POST')
+  t.is(swapPosts(s).length, 0, 'no swap POST')
+  t.is(s.seen('GET', '/api/wallet/swap/quote').length, 0, 'no quote call')
+  const q = await s.step(s.m, 'swap-quote', { amountMicros: 2000000 })
+  t.is(q.status, 200, q.text)
+})
+
+test('wallet usdc: a swap quote spends the shared daily ceiling', async (t) => {
+  // At 5 the member's share (10) is above the ceiling, so the ceiling refuses.
+  const s = await setup(t, { mode: 'completo', dailyLimit: 5 })
+  const sub = await funded(t, s, 1000)
+  s.fake.state.usdc.set(sub, '20.000000')
+  let refused = null
+  for (let i = 0; i < 10 && refused === null; i++) {
+    const q = await s.step(s.m, 'swap-quote', { amountMicros: 1000000 })
+    if (q.status !== 200) refused = q
+  }
+  if (refused === null) return t.fail('a swap quote is refused by the ceiling')
+  t.is(refused.status, 503)
+  t.alike(refused.body, { error: 'indisponivel' })
+  t.ok(s.logs.includes(JSON.stringify({ event: 'carteira', reason: 'teto-diario' })))
+  const quotes = s.seen('GET', '/api/wallet/swap/quote').length
+  t.alike((await s.step(s.m, 'swap-quote', { amountMicros: 1000000 })).body, { error: 'indisponivel' })
+  t.is(s.seen('GET', '/api/wallet/swap/quote').length, quotes, 'no Hodle call past the ceiling')
+})
+
+test('wallet usdc: a swap quote fee in the smallest unit falls back to its bps', async (t) => {
+  const s = await setup(t, { mode: 'completo', fees: SEND_FEES })
+  const sub = await funded(t, s, 1000)
+  s.fake.state.usdc.set(sub, '20.000000')
+  s.fake.script({
+    swapQuote (req, res, ctx) {
+      const o = s.fake.apply('swapQuote', ctx)
+      if (o.code === 200) o.body.fee.amount = String(Math.round(Number(o.body.fee.amount) * 1000000))
+      ctx.json(res, o.code, o.body)
+    }
+  })
+  const q = await s.step(s.m, 'swap-quote', { amountMicros: 10000000 })
+  t.is(q.status, 200, q.text)
+  t.alike(q.body, { amountInMicros: 10000000, hodleFeeMicros: 70000, brlaOutCents: 4965, rateCents: 500, indicative: true })
+  const odd = await s.step(s.m, 'swap-quote', { amountMicros: 1000001 })
+  t.is(odd.status, 200, odd.text)
+  t.is(odd.body.hodleFeeMicros, 7001, '0.7% rounded up')
 })

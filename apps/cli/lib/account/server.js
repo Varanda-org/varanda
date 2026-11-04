@@ -618,7 +618,7 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // { available: false }. In the pix and completo modes `ops` (an
 // openWalletOpsStore of ./wallet-ops-store.js) is the money ledger, `fees`
 // the parseFees result of ./fees.js, `walletMaxCents` the largest debit or
-// deposit and `walletMoneyTimeoutMs` each money leg's deadline.
+// deposit, `walletMaxUsdcMicros` the largest USDC debit or conversion and `walletMoneyTimeoutMs` each money leg's deadline.
 // `walletWebhookSecrets` (a Map from Hodle event to its hex secret or
 // 'registrar', or null for no sink) turns on ./wallet-webhook.js.
 function createAccountServer ({
@@ -651,6 +651,7 @@ function createAccountServer ({
   ops = null,
   fees = null,
   walletMaxCents = 300000,
+  walletMaxUsdcMicros = 500000000,
   walletMoneyTimeoutMs,
   walletWebhookSecrets = null,
   maxConnections = MAX_SOCKETS,
@@ -743,6 +744,7 @@ function createAccountServer ({
     ops,
     fees,
     maxCents: walletMaxCents,
+    maxUsdcMicros: walletMaxUsdcMicros,
     moneyTimeoutMs: walletMoneyTimeoutMs,
     http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
   })

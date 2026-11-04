@@ -1525,13 +1525,13 @@ test('readEnv: Hodle on with its key, other variables ignored while off, values 
   t.is(readEnv(env).hodle, null, 'unset: off')
   t.is(readEnv({ ...env, VARANDA_HODLE_API_KEY: '' }).hodle, null, 'empty: off')
   t.is(readEnv({ ...env, VARANDA_HODLE_NETWORK: 'x', VARANDA_HODLE_MODE: 'pix', VARANDA_HODLE_DAILY_LIMIT: 'abc' }).hodle, null, 'the rest is ignored while off')
-  t.alike(readEnv({ ...env, VARANDA_HODLE_API_KEY: KEY }).hodle, { apiKey: KEY, network: 'polygon', mode: 'cadastro', dailyLimit: 100, maxCents: 300000, fees: NO_FEES, webhookSecrets: null })
+  t.alike(readEnv({ ...env, VARANDA_HODLE_API_KEY: KEY }).hodle, { apiKey: KEY, network: 'polygon', mode: 'cadastro', dailyLimit: 100, maxCents: 300000, maxUsdcMicros: 500000000, fees: NO_FEES, webhookSecrets: null })
   t.alike(readEnv({ ...env, VARANDA_HODLE_API_KEY: 'hodle_live_' + 'k'.repeat(40), VARANDA_HODLE_NETWORK: 'base', VARANDA_HODLE_MODE: 'carteira', VARANDA_HODLE_DAILY_LIMIT: '50' }).hodle,
-    { apiKey: 'hodle_live_' + 'k'.repeat(40), network: 'base', mode: 'carteira', dailyLimit: 50, maxCents: 300000, fees: NO_FEES, webhookSecrets: null })
+    { apiKey: 'hodle_live_' + 'k'.repeat(40), network: 'base', mode: 'carteira', dailyLimit: 50, maxCents: 300000, maxUsdcMicros: 500000000, fees: NO_FEES, webhookSecrets: null })
   const empties = readEnv({ ...env, VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_NETWORK: '', VARANDA_HODLE_MODE: '', VARANDA_HODLE_DAILY_LIMIT: '', VARANDA_HODLE_MAX_CENTS: '', VARANDA_HODLE_WEBHOOK_SECRETS: '' }).hodle
-  t.alike(empties, { apiKey: KEY, network: 'polygon', mode: 'cadastro', dailyLimit: 100, maxCents: 300000, fees: NO_FEES, webhookSecrets: null }, 'empty values: defaults')
+  t.alike(empties, { apiKey: KEY, network: 'polygon', mode: 'cadastro', dailyLimit: 100, maxCents: 300000, maxUsdcMicros: 500000000, fees: NO_FEES, webhookSecrets: null }, 'empty values: defaults')
   t.alike(readEnv({ ...env, VARANDA_HODLE_API_KEY: KEY, VARANDA_HODLE_MODE: 'completo' }).hodle,
-    { apiKey: KEY, network: 'polygon', mode: 'completo', dailyLimit: 100, maxCents: 300000, fees: NO_FEES, webhookSecrets: null }, 'completo accepted')
+    { apiKey: KEY, network: 'polygon', mode: 'completo', dailyLimit: 100, maxCents: 300000, maxUsdcMicros: 500000000, fees: NO_FEES, webhookSecrets: null }, 'completo accepted')
 
   const bad = [
     [{ VARANDA_HODLE_API_KEY: 'chave-sentinela-hodle' }, 'VARANDA_HODLE_API_KEY inválido'],
@@ -1579,6 +1579,11 @@ test('readEnv: Hodle pix mode with cap, fees, treasury and webhook secrets; valu
   t.is(plain.webhookSecrets, null, 'no sink by default')
   t.is(readEnv({ ...pix, VARANDA_HODLE_MAX_CENTS: '100' }).hodle.maxCents, 100, 'lowest cap')
   t.is(readEnv({ ...pix, VARANDA_HODLE_MAX_CENTS: ' 100000000 ' }).hodle.maxCents, 100000000, 'highest cap, trimmed')
+  t.is(plain.maxUsdcMicros, 500000000, 'default USDC cap: 500 USDC')
+  t.is(readEnv({ ...pix, VARANDA_HODLE_MAX_USDC: '' }).hodle.maxUsdcMicros, 500000000, 'empty USDC cap: default')
+  t.is(readEnv({ ...pix, VARANDA_HODLE_MAX_USDC: '1' }).hodle.maxUsdcMicros, 1000000, 'lowest USDC cap, in micros')
+  t.is(readEnv({ ...pix, VARANDA_HODLE_MAX_USDC: ' 10000 ' }).hodle.maxUsdcMicros, 10000000000, 'highest USDC cap, trimmed')
+  t.is(readEnv({ ...pix, VARANDA_HODLE_MAX_USDC: '250' }).hodle.maxUsdcMicros, 250000000)
 
   const charged = readEnv({ ...pix, VARANDA_FEE_PAYOUT_CENTS: '50', VARANDA_FEE_PAYOUT_BPS: '100', VARANDA_FEE_TREASURY: 'sub:tesouro' }).hodle.fees
   t.alike(charged.rates.payout, { cents: 50, bps: 100 })
@@ -1621,6 +1626,12 @@ test('readEnv: Hodle pix mode with cap, fees, treasury and webhook secrets; valu
     [{ VARANDA_HODLE_MAX_CENTS: '0300000' }, 'VARANDA_HODLE_MAX_CENTS inválido'],
     [{ VARANDA_HODLE_MAX_CENTS: '3000.5' }, 'VARANDA_HODLE_MAX_CENTS inválido'],
     [{ VARANDA_HODLE_MAX_CENTS: '1e6' }, 'VARANDA_HODLE_MAX_CENTS inválido'],
+    [{ VARANDA_HODLE_MAX_USDC: '0' }, 'VARANDA_HODLE_MAX_USDC inválido'],
+    [{ VARANDA_HODLE_MAX_USDC: '10001' }, 'VARANDA_HODLE_MAX_USDC inválido'],
+    [{ VARANDA_HODLE_MAX_USDC: '1.5' }, 'VARANDA_HODLE_MAX_USDC inválido'],
+    [{ VARANDA_HODLE_MAX_USDC: 'abc' }, 'VARANDA_HODLE_MAX_USDC inválido'],
+    [{ VARANDA_HODLE_MAX_USDC: '0500' }, 'VARANDA_HODLE_MAX_USDC inválido'],
+    [{ VARANDA_HODLE_MAX_USDC: '-5' }, 'VARANDA_HODLE_MAX_USDC inválido'],
     [{ VARANDA_FEE_PAYOUT_CENTS: '777777' }, 'VARANDA_FEE_PAYOUT_CENTS inválido'],
     [{ VARANDA_FEE_PAYOUT_BPS: '50.5', VARANDA_FEE_TREASURY: 'sub:tesouro' }, 'VARANDA_FEE_PAYOUT_BPS inválido'],
     [{ VARANDA_FEE_PAYOUT_CENTS: '50' }, 'VARANDA_FEE_TREASURY obrigatório com taxa'],
@@ -1800,7 +1811,12 @@ test('account (serve): Hodle wiring by mode, the key never printed, an unreadabl
     const policy = await (await fetch('http://127.0.0.1:' + port + '/account/wallet/policy')).json()
     t.is(policy.mode, 'completo')
     t.ok(policy.actions.includes('transfer') && policy.actions.includes('send-crypto'), 'completo: the sends exist')
+    t.is(policy.maxUsdcMicros, 500000000, 'completo: the default USDC cap')
     t.absent(svc.stdout().includes('tesouro-sentinela'), 'the treasury is not printed')
+  })
+  await run({ ...base, VARANDA_HODLE_MODE: 'completo', VARANDA_HODLE_MAX_USDC: '1' }, async (port) => {
+    const policy = await (await fetch('http://127.0.0.1:' + port + '/account/wallet/policy')).json()
+    t.is(policy.maxUsdcMicros, 1000000, 'the USDC cap reaches the routes, in micros')
   })
 
   // A bad mode stops the service before anything opens, without the values.
@@ -1820,7 +1836,8 @@ test('account (serve): Hodle wiring by mode, the key never printed, an unreadabl
     [{ VARANDA_HODLE_MODE: 'pix', VARANDA_FEE_DEPOSIT_BPS: '30', VARANDA_FEE_TREASURY: 'sub:tesouro-sentinela' }, 'VARANDA_FEE_DEPOSIT_* ainda não suportado'],
     [{ VARANDA_HODLE_MODE: 'pix', VARANDA_FEE_TREASURY_PIN: '975310' }, 'VARANDA_FEE_TREASURY_PIN não é aceito'],
     [{ VARANDA_HODLE_MODE: 'completo', VARANDA_FEE_TREASURY_PIN: '975310' }, 'VARANDA_FEE_TREASURY_PIN não é aceito'],
-    [{ VARANDA_HODLE_MODE: 'completo', VARANDA_HODLE_PIN: '975310' }, 'VARANDA_HODLE_PIN não é aceito']
+    [{ VARANDA_HODLE_MODE: 'completo', VARANDA_HODLE_PIN: '975310' }, 'VARANDA_HODLE_PIN não é aceito'],
+    [{ VARANDA_HODLE_MODE: 'completo', VARANDA_HODLE_MAX_USDC: '975310' }, 'VARANDA_HODLE_MAX_USDC inválido']
   ]
   for (const [vars, message] of refusals) {
     const d = path.join(tmpDir(t), 'account')

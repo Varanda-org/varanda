@@ -5,7 +5,7 @@
 // disk, no network, integers only (BRLA in centavos, USDC in micro-units),
 // so the server and the app reach the same number for the same input.
 // quote() prices centavos only (BRLA debits); a crypto send paid from the
-// USDC balance and a swap use cryptoFee / swapFeeMicros, never quote().
+// USDC balance uses quoteMicros(), and a swap is never charged.
 
 const KINDS = ['transfer', 'payout', 'crypto', 'deposit', 'swap']
 
@@ -136,8 +136,9 @@ const ZERO_QUOTE = Object.freeze({
   reason: 'valor-invalido'
 })
 
-// The full debit a member signs, in centavos only (BRLA debits): USDC-funded
-// crypto sends and swaps go through cryptoFee / swapFeeMicros. The cap covers
+// The full debit a member signs, in centavos only (BRLA debits): a USDC send
+// from the USDC balance goes through quoteMicros, and a swap has no Varanda
+// fee. The cap covers
 // everything that leaves the balance, the pending fee included. Only an
 // absent maxCents means no cap. maxFeeCents caps the new fee alone: a fee
 // above what one transfer can carry could never be collected. Never throws:
@@ -188,6 +189,72 @@ function debitTerms (q) {
 function checkDebit (op, q) {
   if (!op || typeof op !== 'object' || !q || typeof q !== 'object' || q.ok !== true) return 'taxa-mudou'
   const terms = debitTerms(q)
+  for (const key of Object.keys(terms)) {
+    if (!Object.prototype.hasOwnProperty.call(op, key) || op[key] !== terms[key]) return 'taxa-mudou'
+  }
+  return null
+}
+
+const ZERO_QUOTE_MICROS = Object.freeze({
+  amountMicros: 0,
+  varandaFeeMicros: 0,
+  pendingFeeMicros: 0,
+  pendingFeeRef: '',
+  totalDebitMicros: 0,
+  netReceivedMicros: 0,
+  ok: false,
+  reason: 'valor-invalido'
+})
+
+// The full debit a member signs for a crypto send paid from the USDC
+// balance, in micro-units. Only kind 'crypto': a swap is never charged and
+// the other kinds debit BRLA through quote(). Hodle charges nothing on it,
+// so there is no Hodle fee field. Each leg is its own Hodle transfer, so the
+// principal and each fee are capped at AMOUNT_MAX (10000 USDC, also what the
+// ledger's fee.cents holds), while maxMicros, when given, caps the total that
+// leaves the balance. Never throws.
+function quoteMicros ({ kind, amountMicros, rates, pendingFeeMicros = 0, pendingFeeRef = '', maxMicros, maxFeeMicros, minMicros = 1 } = {}) {
+  const rate = rates && kind === 'crypto' ? rates.crypto : null
+  if (!isValidRate(rate) ||
+      !isSafeAmount(amountMicros) || !isSafeAmount(pendingFeeMicros) ||
+      typeof pendingFeeRef !== 'string' || (pendingFeeMicros > 0 && pendingFeeRef === '') ||
+      !Number.isSafeInteger(minMicros) || minMicros < 0 ||
+      (maxMicros !== undefined && (!Number.isSafeInteger(maxMicros) || maxMicros < 0)) ||
+      (maxFeeMicros !== undefined && (!Number.isSafeInteger(maxFeeMicros) || maxFeeMicros < 0))) {
+    return { ...ZERO_QUOTE_MICROS }
+  }
+  const varandaFeeMicros = usdcFeeMicros(rate.bps, amountMicros)
+  const totalDebitMicros = amountMicros + varandaFeeMicros + pendingFeeMicros
+  const feeCap = maxFeeMicros === undefined ? AMOUNT_MAX : Math.min(maxFeeMicros, AMOUNT_MAX)
+  const tooSmall = amountMicros < Math.max(minMicros, 1)
+  const tooBig = amountMicros > AMOUNT_MAX || varandaFeeMicros > feeCap || pendingFeeMicros > AMOUNT_MAX ||
+    (maxMicros !== undefined && totalDebitMicros > maxMicros)
+  const ok = !tooSmall && !tooBig
+  return {
+    amountMicros,
+    varandaFeeMicros,
+    pendingFeeMicros,
+    pendingFeeRef: pendingFeeMicros > 0 ? pendingFeeRef : '',
+    totalDebitMicros,
+    netReceivedMicros: amountMicros,
+    ok,
+    reason: ok ? null : 'valor-invalido'
+  }
+}
+
+function debitTermsMicros (q) {
+  return {
+    feeMicros: q.varandaFeeMicros,
+    pendingFeeMicros: q.pendingFeeMicros,
+    pendingFeeRef: q.pendingFeeRef,
+    totalDebitMicros: q.totalDebitMicros
+  }
+}
+
+// checkDebit's rule for a quoteMicros quote.
+function checkDebitMicros (op, q) {
+  if (!op || typeof op !== 'object' || !q || typeof q !== 'object' || q.ok !== true) return 'taxa-mudou'
+  const terms = debitTermsMicros(q)
   for (const key of Object.keys(terms)) {
     if (!Object.prototype.hasOwnProperty.call(op, key) || op[key] !== terms[key]) return 'taxa-mudou'
   }
@@ -279,6 +346,9 @@ module.exports = {
   quote,
   debitTerms,
   checkDebit,
+  quoteMicros,
+  debitTermsMicros,
+  checkDebitMicros,
   isSelfTreasury,
   feeReference,
   isActive,
