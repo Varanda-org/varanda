@@ -4044,6 +4044,8 @@ As caixas ficam desmarcadas até alguém executar o passo. Primeiro no Android, 
 - [ ] Na lista, o cartão de convite de quem não participa ainda entra com um toque, e Tirar da lista e Devolver à lista continuam no criador com o reparo ativo.
 - [ ] Um grupo privado ou bloqueado mostra a linha sem texto cifrado.
 - [ ] Uma mensagem escondida aparece como "mensagem escondida".
+- [ ] A sua última mensagem mostra "Você:" em verde; a de um par com o nome "Você" aparece em cinza, como qualquer outro nome.
+- [ ] Enquanto a comunidade ainda chega, a barra do topo mostra o nome que o índice já deu; sem ele, "Comunidade ainda chegando".
 
 #### iOS (simulador)
 

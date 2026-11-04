@@ -207,6 +207,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Corrigido
 
+- Lista da comunidade: a sua última mensagem mostra "Você:" em destaque, desenhado à parte, e um par com o nome "Você" não se passa mais por você; enquanto a comunidade ainda chega, a barra do topo mostra o nome que o índice já deu; convidar por @nome não apaga mais o que a pessoa digitou enquanto o envio estava em andamento (PR `fix/comunidade-ajustes-lista`). Detalhes em `docs/verification.md` seção 73.
 - `group.seen` aceita a mensagem de corte (`upTo`) e a tela do grupo envia a mais nova que pintou: uma mensagem que chega depois não conta como lida (detalhes em `docs/verification.md` seção 76).
 - Uma quebra de linha numa mensagem de grupo aparecia como `�`; agora a mensagem mostra as linhas como foram escritas. O link na mensagem segue a regra das publicações também para caracteres de direção e de controle: a palavra que tem um deles fica toda sem link, em vez de virar link até o `�`.
 - Na web hospedada, depois de criar a conta (o passo do Google recarrega a página em `/?conta=`), a folha Ajustes › Conta abria por cima do passo do nome e depois de A Rua; agora o app chega em A Rua sem nada por cima, e a folha só abre (uma vez, depois de desbloquear) para quem já tinha certificado e vinculou o Google em Ajustes › Conta (PR `fix/rua-after-onboarding`). No Android e no iOS nada muda (o passo do Google volta por uma sessão de autenticação e o app já chegava em A Rua). Detalhes em `docs/verification.md` seção 70.
