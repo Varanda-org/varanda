@@ -9,10 +9,11 @@ import { useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { relativeTime } from '../format'
 import { LABELS } from '../dm'
+import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { Pill } from './Pill'
 import { colors } from './theme'
 
-export function DmMessageRow ({ item, onReply, onReport, now = Date.now() }) {
+export function DmMessageRow ({ item, onReply, onReport, onOpenInvite, origin = '', now = Date.now() }) {
   const [open, setOpen] = useState(false)
   const mine = item.mine === true
   const time = item.at ? relativeTime(item.at, now) : ''
@@ -20,6 +21,10 @@ export function DmMessageRow ({ item, onReply, onReport, now = Date.now() }) {
     setOpen(false)
     if (typeof fn === 'function') fn()
   }
+  // A tap only opens the community or group screen, where the one-tap card lives.
+  const link = item.deleted === true || typeof onOpenInvite !== 'function'
+    ? null
+    : inviteLinkOf(typeof item.rawText === 'string' ? item.rawText : item.text, origin)
   const actions = []
   if (typeof onReply === 'function') actions.push({ name: 'reply', label: 'Responder a esta mensagem' })
   if (!mine && typeof onReport === 'function') actions.push({ name: 'report', label: 'Denunciar esta mensagem' })
@@ -43,6 +48,7 @@ export function DmMessageRow ({ item, onReply, onReport, now = Date.now() }) {
         <Text style={styles.text} selectable>{item.text}</Text>
         <Text style={styles.meta}>{mine ? LABELS.sent + (time ? ' · ' + time : '') : time}</Text>
       </Pressable>
+      {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
       {open
         ? (
           <View style={styles.actions}>

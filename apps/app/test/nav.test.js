@@ -195,10 +195,10 @@ test('history.web tolerates a missing history API; native is a no-op', async (t)
 
 test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'mensagem'])
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
-  for (const screen of ['grupo', 'comunidade']) {
+  for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
     t.ok(validEntry({ screen, key: A }))
     const stack = push(EMPTY, { screen, key: A })
     t.alike(top(stack), { screen, key: A, params: {} })
@@ -227,4 +227,18 @@ test('mensagem accepts a lowercase hex64 key and refuses uppercase', async (t) =
     t.absent(validEntry({ screen: 'mensagem', key }), String(key))
     t.is(push(EMPTY, { screen: 'mensagem', key }), EMPTY)
   }
+})
+
+test('seguindo is keyed by a lowercase hex64 key and refuses uppercase or post refs', async (t) => {
+  const { EMPTY, push, top, validEntry } = await loadNav()
+  t.ok(validEntry({ screen: 'seguindo', key: A }))
+  const stack = push(EMPTY, { screen: 'seguindo', key: A })
+  t.alike(top(stack), { screen: 'seguindo', key: A, params: {} })
+  t.is(push(stack, { screen: 'seguindo', key: A }), stack, 'same top is a no-op')
+  t.is(push(stack, { screen: 'seguindo', key: A, params: { seed: 2 } }), stack, 'params do not change the no-op')
+  t.absent(validEntry({ screen: 'seguindo', key: A.toUpperCase() }))
+  t.is(push(EMPTY, { screen: 'seguindo', key: A.toUpperCase() }), EMPTY)
+  t.absent(validEntry({ screen: 'seguindo', key: A + ':1' }))
+  t.is(push(EMPTY, { screen: 'seguindo', key: A + ':1' }), EMPTY)
+  t.ok(validEntry({ screen: 'mensagem', key: A }), 'mensagem is still valid')
 })

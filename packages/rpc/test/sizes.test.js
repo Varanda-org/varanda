@@ -283,7 +283,7 @@ test('group.members: GROUP_MEMBERS_LIMIT_MAX fits', (t) => {
 
 test('community.info: MAX_GROUPS_PER_COMMUNITY groups with maximal names fit', (t) => {
   t.is(MAX_GROUPS_PER_COMMUNITY, 32)
-  const group = { group: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), visibility: 'private', join: 'approval', role: 'creator', general: false }
+  const group = { group: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), visibility: 'private', join: 'approval', role: 'creator', general: false, last: { name: '\ud800'.repeat(MAX_NAME), username: 'u'.repeat(20), preview: '\ud800'.repeat(140), at: AT, mine: false, hidden: false }, unread: 99 }
   const s = size({ community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), join: 'approval', creator: HEX, role: 'creator', state: 'ready', members: SEQ, admins: SEQ, groups: Array(MAX_GROUPS_PER_COMMUNITY).fill(group), general: HEX, incomplete: true, leavePending: true })
   t.comment('community.info worst case at ' + MAX_GROUPS_PER_COMMUNITY + ' groups: ' + s + ' bytes')
   t.ok(s <= MAX_MESSAGE)

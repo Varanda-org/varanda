@@ -33,7 +33,6 @@ import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
 import { ErrorText, SectionHeader, Soft, colors, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
-import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
@@ -41,10 +40,11 @@ import { RefreshableList } from '../ui/RefreshableList'
 import { ShareProfile } from '../ui/ShareProfile'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
-import { SunsetBand } from '../ui/SunsetBand'
+import { ProfileHeader } from '../ui/ProfileHeader'
+import { BellButton } from '../ui/TopActions'
 import { HelpButton } from '../ui/Help'
 import { HELP } from '../help'
-import { fonts, type } from '../ui/theme'
+import { type } from '../ui/theme'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, refOf, socialRowProps, useSocial } from './ARua'
 import { DeletePrompt, useDelete } from './Conversa'
@@ -130,7 +130,7 @@ function postOf (author, seq, record) {
   }
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, ownKey, scrollToTop, onDeletedPost }) {
+export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople }) {
   const node = useNode()
   const names = useNames()
   const outbox = useOutbox()
@@ -262,6 +262,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const profileUrl = node.hosted === true && publicKey ? buildProfileUrl({ origin: installationOrigin() || globalThis.location?.origin || null, username: profile ? profile.username : null, publicKey }) : null
 
   const bandHeight = insets.top + BAND
+  const hasBell = typeof onAvisos === 'function'
 
   // Only this identity's items for this association.
   const pending = info && node.config ? outbox.itemsFor(info.publicKey, node.config.association) : []
@@ -328,38 +329,38 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       )
     : (
       <View>
-        <SunsetBand height={bandHeight}>
-          <HelpButton doc={HELP.diario} color='#ffffff' style={styles.info} />
-          <Pressable
-            accessibilityRole='button'
-            accessibilityLabel='ajustes'
-            hitSlop={8}
-            onPress={() => onSettings('lista')}
-            style={styles.gear}
-          >
-            <Icon name='engrenagem' size={20} color='#ffffff' />
-          </Pressable>
-        </SunsetBand>
-        {/* The row rises into the band (marginTop -44) and is drawn after it,
-            so its empty space would take the gear's touches: only the avatar
-            takes touches. */}
-        <View style={styles.headRow} pointerEvents='box-none'>
-          <Avatar name={who.avatarName} publicKey={info.publicKey} size={88} picture={profile && profile.avatar} persist ring />
-        </View>
-        <View style={styles.data}>
-          <Text style={styles.name}>{displayText(who.title)}</Text>
-          {who.subtitle ? <Text style={styles.keyText}>{displayText(who.subtitle)}</Text> : null}
-          {bio
-            ? <Text style={styles.bio}>{displayText(bio, { multiline: true })}</Text>
-            : null}
-          <Text style={styles.counts}>
-            <Text style={styles.countsNum}>{displayText(String(info.followCount))}</Text> seguindo
-          </Text>
-          <View style={styles.actions}>
-            <View style={styles.action}><Pill label='Editar perfil' onPress={() => setEditing(true)} /></View>
-            {profileUrl !== null ? <View style={styles.action}><Pill label='Compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /></View> : null}
-          </View>
-        </View>
+        <ProfileHeader
+          bandHeight={bandHeight}
+          topInset={insets.top}
+          bandButtons={(
+            <>
+              <HelpButton doc={HELP.diario} color='#ffffff' style={hasBell ? styles.infoShifted : styles.info} />
+              <Pressable
+                accessibilityRole='button'
+                accessibilityLabel='ajustes'
+                hitSlop={8}
+                onPress={() => onSettings('lista')}
+                style={hasBell ? styles.gearShifted : styles.gear}
+              >
+                <Icon name='engrenagem' size={20} color='#ffffff' />
+              </Pressable>
+              {hasBell ? <BellButton color='#ffffff' badged={avisosNew === true} onPress={onAvisos} style={styles.bell} /> : null}
+            </>
+          )}
+          avatar={{ name: who.avatarName, publicKey: info.publicKey, picture: profile && profile.avatar, persist: true }}
+          title={displayText(who.title)}
+          subtitle={who.subtitle ? displayText(who.subtitle) : null}
+          bio={bio || null}
+          counts={[{
+            label: 'seguindo',
+            value: info.followCount === undefined || info.followCount === null ? null : displayText(String(info.followCount)),
+            onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguindo') : undefined
+          }]}
+          actions={[
+            <Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} />,
+            profileUrl !== null ? <Pill key='share' label='Compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /> : null
+          ]}
+        />
         {outboxList}
         <SectionHeader>Publicações</SectionHeader>
         <CountsNote social={social} />
@@ -496,47 +497,26 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   )
 }
 
+const bandButton = {
+  position: 'absolute',
+  bottom: 12,
+  width: 34,
+  height: 34,
+  borderRadius: 17,
+  backgroundColor: colors.dim,
+  alignItems: 'center',
+  justifyContent: 'center'
+}
+
 const styles = StyleSheet.create({
   list: { flex: 1, backgroundColor: colors.bg },
   plainBand: { backgroundColor: colors.bg },
-  gear: {
-    position: 'absolute',
-    right: 16,
-    bottom: 12,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: colors.dim,
-    alignItems: 'center',
-    justifyContent: 'center'
-  },
-  info: {
-    position: 'absolute',
-    right: 58,
-    bottom: 12,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: colors.dim,
-    alignItems: 'center',
-    justifyContent: 'center'
-  },
-  headRow: {
-    marginTop: -44,
-    paddingHorizontal: 16,
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    justifyContent: 'space-between'
-  },
-  data: { paddingTop: 10, paddingHorizontal: 16, paddingBottom: 12, gap: 2 },
-  name: { ...type.profileName, fontFamily: fonts.title, color: colors.ink },
-  keyText: { ...type.postMeta, color: colors.soft },
-  bio: { ...type.postText, color: colors.ink, marginTop: 8 },
-  counts: { fontSize: 15, color: colors.soft, marginTop: 8 },
-  countsNum: { color: colors.ink, fontWeight: '700' },
-  // Pill sets no width, so the column has to stretch it.
-  actions: { flexDirection: 'row', gap: 8, marginTop: 12 },
-  action: { flex: 1, alignItems: 'stretch' },
+  // The band buttons, right to left: bell (when there is one), gear, help.
+  bell: { ...bandButton, right: 16 },
+  gear: { ...bandButton, right: 16 },
+  gearShifted: { ...bandButton, right: 58 },
+  info: { ...bandButton, right: 58 },
+  infoShifted: { ...bandButton, right: 100 },
   shareBody: { padding: 16, gap: 12 },
   pending: {
     paddingVertical: 10,

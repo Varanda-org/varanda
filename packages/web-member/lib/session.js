@@ -1978,6 +1978,7 @@ function createBrowserSession ({
     'group.leave': groupWrite(member.groupLeave),
     'group.post': groupWrite(member.groupPost),
     'group.read': serial((params) => withStore((c) => member.groupRead(c, params))),
+    'group.seen': serial((params) => withStore((c) => member.groupSeen(c, params))),
     'group.list': serial((params) => withStore((c) => member.groupList(c, params))),
     'group.info': serial((params) => withStore((c) => member.groupInfo(c, params))),
     'group.members': serial((params) => withStore((c) => member.groupMembers(c, params))),

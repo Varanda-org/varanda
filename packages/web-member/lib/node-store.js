@@ -1176,6 +1176,7 @@ async function deleteGroupData (storage) {
   }
   await storage.writeJson('groupWriters', null)
   await storage.writeJson('groupReplicas', null)
+  await storage.writeJson('groupSeen', null)
   await storage.writeJson('communityCreate', null)
   await storage.writeJson('communityLeave', null)
   // A new identity on this storage derives a new box key pair: the old
@@ -1363,6 +1364,41 @@ function writeDmSeen (storage, ids) {
   return storage.writeJson('dmSeen', { v: 1, ids: list.slice(-MAX_DM_SEEN) })
 }
 
+// kv groupSeen = { v: 1, marks: [{ group, at, writer, seq }] }: per group the
+// newest post marked seen on this device (rpc.md 5.82), newest last, at most
+// MAX_GROUP_SEEN (the least recently marked dropped first). Plain, like kv
+// groupWriters: it holds only group and writer keys, a time and a seq.
+const MAX_GROUP_SEEN = 512
+
+function validSeenMark (m) {
+  return m !== null && typeof m === 'object' && isHex64(m.group) && isHex64(m.writer) &&
+    isCanonicalIso(m.at) && Number.isSafeInteger(m.seq) && m.seq >= 1
+}
+
+// One mark per group, the last one written kept (at its own place). Walked
+// from the end so a hand-edited kv value of any length costs one pass.
+function seenMarks (marks) {
+  const out = []
+  const taken = new Set()
+  for (let i = marks.length - 1; i >= 0 && out.length < MAX_GROUP_SEEN; i--) {
+    const m = marks[i]
+    if (!validSeenMark(m) || taken.has(m.group)) continue
+    taken.add(m.group)
+    out.push({ group: m.group, at: m.at, writer: m.writer, seq: m.seq })
+  }
+  return out.reverse()
+}
+
+async function readGroupSeen (storage) {
+  const data = await readKv(storage, 'groupSeen')
+  if (!isVersioned(data) || !Array.isArray(data.marks)) return []
+  return seenMarks(data.marks)
+}
+
+function writeGroupSeen (storage, marks) {
+  return storage.writeJson('groupSeen', { v: 1, marks: seenMarks(marks) })
+}
+
 // A secretbox under the local dm key (./dm-store.js seal): { nonce, box }.
 // Stamps and queued drops are bearer values (anyone holding one can spend
 // it), so kv holds them only sealed; plaintext entries of the earlier v1
@@ -1444,6 +1480,9 @@ module.exports = {
   writeDmCursor,
   readDmSeen,
   writeDmSeen,
+  readGroupSeen,
+  writeGroupSeen,
+  MAX_GROUP_SEEN,
   readDmStamps,
   writeDmStamps,
   deleteDmData,

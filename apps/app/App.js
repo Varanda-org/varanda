@@ -7,7 +7,8 @@
 // decides the step: on the web's browser node 'Entrar' with the passkey, the
 // account link; natively identity and member certificate; then the own name)
 // and then the tabs (src/tabs.js) with the top bar (an info button
-// that opens the screen's 'Como funciona' sheet), the
+// that opens the screen's 'Como funciona' sheet and, on a hosted node, the
+// bell that opens Avisos, a screen kept outside the tab bar), the
 // 'Sem internet' note under it (only while offline), the 'Instalar o Varanda'
 // note under it too (hosted web, phones and iPad; below 'Sem internet' when
 // both show; its close is remembered for 30 days), then the 'Receber avisos
@@ -90,15 +91,18 @@ import { nextLaunch } from './src/push-state'
 import { loadIcons } from './src/ui/Icon'
 import { TabBar } from './src/ui/TabBar'
 import { TopBar } from './src/ui/TopBar'
+import { TopActions } from './src/ui/TopActions'
 import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
 import { HELP } from './src/help'
 import { layout, type } from './src/ui/theme'
 import Avisos from './src/screens/Avisos'
+import BuscaGlobal from './src/screens/BuscaGlobal'
 import { Grupo } from './src/screens/Grupo'
 import { Conversas } from './src/screens/Conversas'
 import { Mensagem } from './src/screens/Mensagem'
 import { DEFAULT_SEGMENT, onDmOpen, requestDmOpen } from './src/dm-open'
 import { Comunidade } from './src/screens/Comunidade'
+import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
 import ARua from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
@@ -122,7 +126,7 @@ import Termos from './src/screens/Termos'
 const GATE_URL = process.env.EXPO_PUBLIC_VARANDA_GATE_URL
 
 const TOAST_MS = 2500
-const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo', avisos: 'Avisos', comunidades: 'Conversas' }
+const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', comunidades: 'Conversas', busca: 'Busca', avisos: 'Avisos' }
 // 'Um instante' offers 'Continuar mesmo assim' after this long.
 const SLOW_LOOKUP_MS = 10000
 // While the own profile is still unknown, it is asked again this often (the
@@ -240,8 +244,16 @@ function Member () {
   useEffect(() => { if (ready) setSeen(true) }, [ready])
 
   const [tab, setTab] = useState('rua')
+  const tabRef = useRef(tab)
+  tabRef.current = tab
+  // Avisos is reached from the bell, not the tab bar: its back returns here.
+  const [returnTab, setReturnTab] = useState('rua')
+  const returnTabRef = useRef(returnTab)
+  returnTabRef.current = returnTab
   // Per tab, bumped when its tab is selected again: the screen scrolls to top.
   const [scrollSignal, setScrollSignal] = useState({})
+  // Bumped to make Busca show its Contas pane.
+  const [buscaPane, setBuscaPane] = useState(0)
   // reply and quote are mutually exclusive.
   const [composer, setComposer] = useState({ open: false, reply: null, quote: null })
   // The screens pushed above the tabs (src/nav.js), oldest first.
@@ -269,7 +281,7 @@ function Member () {
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
   }, [])
-  // Avisos has something unseen: a plain dot on its tab, never a number.
+  // Avisos has something unseen: a plain dot on the bell, never a number.
   const [avisosNew, setAvisosNew] = useState(false)
   const [info, setInfo] = useState(null)
   const [infoError, setInfoError] = useState('')
@@ -1062,6 +1074,13 @@ function Member () {
   const openCommunity = useCallback((community, opts) => {
     pushScreen({ screen: 'comunidade', key: typeof community === 'string' ? community.toLowerCase() : community, params: opts && typeof opts.group === 'string' ? { group: opts.group.toLowerCase() } : {} })
   }, [pushScreen])
+  const openCommunityInfo = useCallback((community) => {
+    pushScreen({ screen: 'comunidade-info', key: typeof community === 'string' ? community.toLowerCase() : community, params: {} })
+  }, [pushScreen])
+  // group.seen emits no event: Grupo reports the mark so the community list
+  // under it re-reads its unread counts.
+  const [seenTick, setSeenTick] = useState(0)
+  const bumpSeen = useCallback(() => setSeenTick((n) => n + 1), [])
   const openMember = useCallback((author, seed) => {
     const key = typeof author === 'string' ? author.toLowerCase() : author
     if (typeof ownKey === 'string' && key === ownKey.toLowerCase()) {
@@ -1071,6 +1090,21 @@ function Member () {
     }
     pushScreen({ screen: 'membro', key, params: { seed: seed || null } })
   }, [pushScreen, clearStack, ownKey])
+  // Only the own following list opens in this version; other kinds wait.
+  const openPeople = useCallback((key, kind) => {
+    if (kind !== 'seguindo' || typeof key !== 'string') return
+    pushScreen({ screen: 'seguindo', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
+  const enterAvisos = useCallback(() => {
+    if (tabRef.current !== 'avisos') setReturnTab(tabRef.current)
+    setTab('avisos')
+  }, [])
+  // Back from Avisos lands on the tab it was opened from, or A Rua when that
+  // tab is not in this mode's bar.
+  const closeAvisos = useCallback(() => {
+    const back = returnTabRef.current
+    setTab(tabsFor(mode).some((t) => t.id === back) ? back : 'rua')
+  }, [mode])
   // A lock, unlock or reset closes the pushed screens too.
   useEffect(() => clearStack(), [generation, locked, clearStack])
   // A tap on @nome in a post. The row author's own verified name opens with
@@ -1284,7 +1318,7 @@ function Member () {
     if (intent.recipient !== launchKey.toLowerCase()) return
     if (intent.kind === 'follow') {
       clearStack()
-      setTab('avisos')
+      enterAvisos()
       setAvisosReload((n) => n + 1)
     } else {
       const shownNow = nav.top(stackRef.current)
@@ -1294,7 +1328,7 @@ function Member () {
         openThread({ ref: intent.ref })
       }
     }
-  }, [launchSeq, atTabs, launchKey, clearStack, openThread])
+  }, [launchSeq, atTabs, launchKey, clearStack, openThread, enterAvisos])
   // The record is untrusted and may have changed in another render: every
   // step re-reads it (from tab storage, or memory when storage refused it).
   // The memory copy keeps the stored record's 1 h limit (readInvite applies
@@ -1432,7 +1466,12 @@ function Member () {
   useEffect(() => {
     if (Platform.OS === 'android') {
       const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-        if (helpOpenRef.current || sheetOpenRef.current || nav.depth(stackRef.current) === 0) return false
+        if (helpOpenRef.current || sheetOpenRef.current) return false
+        if (nav.depth(stackRef.current) === 0) {
+          if (tabRef.current !== 'avisos') return false
+          closeAvisos()
+          return true
+        }
         commitStack(nav.pop(stackRef.current))
         return true
       })
@@ -1440,14 +1479,19 @@ function Member () {
     }
     if (Platform.OS !== 'web' || typeof globalThis.addEventListener !== 'function') return
     const onKey = (event) => {
-      if (event.key !== 'Escape' || event.defaultPrevented || helpOpenRef.current || sheetOpenRef.current || nav.depth(stackRef.current) === 0) return
-      goBack()
+      if (event.key !== 'Escape' || event.defaultPrevented || helpOpenRef.current || sheetOpenRef.current) return
+      if (nav.depth(stackRef.current) > 0) goBack()
+      else if (tabRef.current === 'avisos') closeAvisos()
     }
     globalThis.addEventListener('keydown', onKey)
     return () => globalThis.removeEventListener('keydown', onKey)
-  }, [commitStack, goBack])
+  }, [commitStack, goBack, closeAvisos])
   const openComposer = () => setComposer((c) => ({ ...c, open: true }))
   const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
+  const openAvisos = () => {
+    if (tab === 'avisos') reselectTab('avisos')
+    else enterAvisos()
+  }
   // Side insets (landscape notch/cutout): the larger one on both sides, so
   // centred content stays centred when only one side has a cutout.
   const sidePad = Math.max(insets.left, insets.right)
@@ -1623,12 +1667,16 @@ function Member () {
       </View>
     )
   } else {
-    // The five tabs stay mounted (drafts and scroll survive a tab change);
+    // The tabs stay mounted (drafts and scroll survive a tab change);
     // `active` makes a screen reload its data when it is shown, and again
     // when the connection comes back.
     const on = (id) => tab === id && ready
     const shown = (id) => (tab === id ? styles.flex : styles.hidden)
     const stacked = nav.depth(stack) > 0
+    // The Diário tab's avatar: from the profiles cache, like the composer's.
+    const tabMe = typeof ownKey === 'string'
+      ? { name: ownProfile ? (ownProfile.name || ownProfile.username || null) : null, publicKey: ownKey, picture: ownProfile ? ownProfile.avatar : undefined }
+      : null
     const screenProps = {
       ownKey,
       onBack: goBack,
@@ -1647,7 +1695,13 @@ function Member () {
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
         {tab !== 'diario'
-          ? <TopBar title={TAB_TITLES[tab]} right={stacked ? null : <HelpButton key={tab} doc={HELP[tab === 'comunidades' ? 'conversas' : tab]} />} />
+          ? (
+            <TopBar
+              title={TAB_TITLES[tab]}
+              onBack={tab === 'avisos' && !stacked ? closeAvisos : undefined}
+              right={stacked ? null : <TopActions key={tab} help={HELP[tab === 'comunidades' ? 'conversas' : tab]} onAvisos={mode === 'hosted' ? openAvisos : undefined} avisosNew={avisosNew} avisosActive={tab === 'avisos'} />}
+            />
+            )
           : null}
         <OfflineNote inset={tab === 'diario'} />
         {updateReady && !updateDismissed
@@ -1674,7 +1728,10 @@ function Member () {
               ownKey={ownKey}
               scrollToTop={scrollSignal.rua}
               followCount={followCount}
-              onFollowSomeone={() => setTab('seguindo')}
+              onFollowSomeone={() => {
+                setTab('busca')
+                setBuscaPane((n) => n + 1)
+              }}
             />
           </View>
           <View style={shown('espiadinha')}>
@@ -1696,19 +1753,25 @@ function Member () {
               onToast={showToast}
             />
           </View>
-          <View style={shown('seguindo')}>
-            <Seguindo
-              active={on('seguindo')}
-              onReport={setReport}
-              onOpenThread={openThread}
-              onOpenMember={openMember}
-              onQuote={startQuote}
-              scrollToTop={scrollSignal.seguindo}
-              onFollowsChanged={followsChanged}
+          <View style={shown('busca')}>
+            <BuscaGlobal
+              active={on('busca')}
+              refresh={version}
+              paneRequest={buscaPane}
               ownKey={ownKey}
-              followsTick={version}
+              scrollToTop={scrollSignal.busca}
+              onOpenMember={openMember}
+              onFollowsChanged={followsChanged}
+              onToast={showToast}
+              onReply={startReply}
+              onReport={setReport}
+              onQuote={startQuote}
+              onOpenThread={openThread}
+              onOpenMention={mentionHandler}
+              onOpenEngagers={openEngagers}
             />
           </View>
+          {/* Not a tab: kept mounted so its poll lights the bell's dot. */}
           <View style={shown('avisos')}>
             <Avisos
               active={on('avisos')}
@@ -1745,6 +1808,9 @@ function Member () {
               onQuote={startQuote}
               ownKey={ownKey}
               scrollToTop={scrollSignal.diario}
+              onAvisos={mode === 'hosted' ? openAvisos : undefined}
+              avisosNew={avisosNew}
+              onOpenPeople={openPeople}
             />
           </View>
         </View>
@@ -1752,21 +1818,41 @@ function Member () {
           ? (
             <View style={styles.layer}>
               {stack.map((entry, i) => {
-                if (entry.screen === 'grupo' || entry.screen === 'comunidade') {
+                if (entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') {
                   // Keyed by the node epoch: a lock, unlock or identity change
                   // remounts the screen, so late answers from before are dropped.
                   return (
                     <View key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
                       {entry.screen === 'grupo'
-                        ? <Grupo group={entry.key} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onReport={setReport} />
-                        : <Comunidade community={entry.key} afterGroup={entry.params.group || null} onBack={goBack} onOpenGroup={openGroup} onOpenMember={openMember} />}
+                        ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onReport={setReport} onSeen={bumpSeen} />
+                        : entry.screen === 'comunidade-info'
+                          ? <ComunidadeInfo community={entry.key} onBack={goBack} onOpenMember={openMember} />
+                          : <Comunidade community={entry.key} afterGroup={entry.params.group || null} isTop={i === stack.length - 1} seenTick={seenTick} onBack={goBack} onOpenGroup={openGroup} onOpenInfo={openCommunityInfo} />}
                     </View>
                   )
                 }
                 if (entry.screen === 'mensagem') {
                   return (
                     <View key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
-                      <Mensagem peer={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onReport={setReport} />
+                      <Mensagem peer={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} />
+                    </View>
+                  )
+                }
+                if (entry.screen === 'seguindo') {
+                  return (
+                    <View key={i + ':seguindo:' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
+                      <Seguindo
+                        active={ready}
+                        entry={entry}
+                        ownKey={ownKey}
+                        onBack={goBack}
+                        onReport={setReport}
+                        onFollowsChanged={followsChanged}
+                        onOpenMember={openMember}
+                        onToast={showToast}
+                        followsTick={version}
+                        isTop={i === stack.length - 1}
+                      />
                     </View>
                   )
                 }
@@ -1788,7 +1874,8 @@ function Member () {
             )
           : null}
         {showPostButton({ tab, screen: stacked ? nav.top(stack).screen : null }) ? <Fab onPress={openComposer} /> : null}
-        {stacked ? null : <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} badges={{ avisos: avisosNew, comunidades: groupsBadge || dmDot }} tabs={tabsFor(mode)} />}
+        {/* Avisos is not a tab: the bar keeps the tab it was opened from, and that tab's icon closes it. */}
+        {stacked ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot }} tabs={tabsFor(mode)} me={tabMe} />}
       </View>
     )
   }
@@ -1801,10 +1888,14 @@ function Member () {
     username: ownProfile ? (ownProfile.username || null) : null,
     avatar: ownProfile ? ownProfile.avatar : undefined
   }
-  // Light over the Diário band (dark over the offline note above it). The
-  // sheets leave the status bar over the (dimmed) screen behind, so they keep
-  // it light there too.
-  const light = tab === 'diario' && step === 'pronto' && node.online !== false && nav.depth(stack) === 0
+  // Light over the Diário band (dark over the offline note above it) and over
+  // Membro's band, which stays on top while offline (its note sits below the
+  // band and the stack layer covers the shell's). The sheets leave the status
+  // bar over the (dimmed) screen behind, so they keep it light there too.
+  const light = step === 'pronto' && (
+    (topEntry !== null && topEntry.screen === 'membro') ||
+    (topEntry === null && tab === 'diario' && node.online !== false)
+  )
 
   // Side insets are applied once here (sidePad); top and bottom by each bar;
   // Modal content (sheets, photo viewer) pads itself.
