@@ -355,6 +355,12 @@ Cada comunidade tem um link `/c/<chave>` e cada grupo, um link `/g/<chave>`, com
 - Sem resposta a uma mensagem específica e sem remover administrador da comunidade nas telas.
 - Salas de áudio ao vivo ficam fora (veja "Fora do piloto").
 
+## Interações da Rua
+
+- **Toque duplo para curtir.** Só no app nativo (iOS e Android); na web, o duplo clique continua selecionando texto. O toque duplo curte e nunca descurte, com um coração de 64 pt sobre a publicação. Um toque simples abre a conversa depois de 280 ms; um toque em outra publicação ou em outro botão cancela essa abertura. Leitores de tela abrem a conversa na hora e nunca curtem. Limite aceito: um arrasto que começa fora de qualquer publicação, dentro desses 280 ms, não cancela a abertura.
+- **Desfazer.** Só o "Desfazer" do aviso "Republicado" (4 s) desfaz, e só depois que a republicação foi gravada com sucesso: antes disso, o aviso diz "Aguarde um instante e tente de novo.". Desfazer manda desligar a republicação, sem republicar de novo. Não há desfazer para curtida, apagar nem seguir. Limites aceitos: um desfazer durante a atualização puxada pode deixar a contagem uma a mais até a próxima atualização; o desfazer atualiza só a tela que mostrou o aviso; um desfazer enquanto uma curtida da mesma publicação está pendente não entra na fila (o botão de republicar da linha continua desfazendo).
+- **Fio da conversa.** Na Conversa, uma linha de 2 pt liga o avatar da publicação respondida ao da publicação em destaque. A linha não recebe toques, e a publicação em destaque mantém a barra verde à esquerda.
+
 ## Fora do piloto
 
 - **Salas de áudio ao vivo (Comunidades):** pedem transmissão em tempo real entre aparelhos. Os grupos de texto estão na seção Comunidades, no nó hospedado (site e app instalado).

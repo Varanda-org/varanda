@@ -4169,3 +4169,55 @@ Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
 - O pré-splash da web e a cor do navegador antes do JS seguem o sistema, não a escolha manual. Por isso, com uma escolha diferente do sistema, pode aparecer um quadro do modo do sistema.
 - O splash nativo não segue a escolha manual: fica creme nos dois modos.
 - `manifest.webmanifest` continua creme nos dois modos.
+
+## 82. Interações da Rua: curtir animado, toque duplo, fio da conversa, desfazer (PR feat/rua-interacoes)
+
+A Rua e a Conversa ganham quatro interações: o coração curtido cheio com pulo e vibração leve, o toque duplo para curtir (só no app nativo), o fio que liga a resposta à publicação em destaque na Conversa, e o aviso "Republicado" com "Desfazer" por 4 s. Pílulas e abas ganham toque mais claro (opacidade 0,65 ao pressionar; no Android, ondulação nas abas). A vibração vem de `expo-haptics` 55.0.18 (`apps/app/src/ui/haptics.native.js`); na web é um no-op. O toque duplo fica em `apps/app/src/doubleTap.js`, com a abertura pendente compartilhada pela lista. Detalhes no [app.md](app.md) ("Interações da Rua") e no [app-design.md](../apps/site/artwork/app-design.md) ("Componentes").
+
+Regras que os passos abaixo conferem (só a janela do toque duplo tem teste automático):
+
+- Um pulo e uma vibração só vêm de ação da própria pessoa na linha; curtidas que chegam numa atualização não pulam nem vibram. Descurtir não pula nem vibra.
+- Com "Reduzir movimento" ligado, o pulo e o coração do toque duplo somem; a vibração continua.
+- O toque duplo nunca descurte. Um toque simples abre a conversa depois de 280 ms, e uma abertura pendente é cancelada por qualquer toque em outra publicação ou botão.
+- Leitores de tela abrem a conversa na hora e nunca curtem por toque duplo.
+- "Desfazer" só desliga a republicação; se a gravação ainda está pendente, o aviso diz "Aguarde um instante e tente de novo.".
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Teste desta parte: `apps/app/test/doubleTap.test.js` (a janela de 280 ms, a abertura pendente única e o cancelamento). As caixas abaixo ficam desmarcadas até alguém executar o passo, num aparelho ou navegador de verdade.
+
+Android (aparelho ou emulador, primeiro):
+
+- [ ] Toque duplo numa publicação de A Rua (fora de links, menções e fotos) curte, mostra o coração de 64 pt sobre a publicação e vibra de leve. Tocar de novo nessa publicação não descurte.
+- [ ] Toque simples numa publicação abre a Conversa, depois de uma pausa perceptível; um toque simples em outra publicação logo em seguida não abre a primeira.
+- [ ] Toque em um link, em uma menção e em uma foto abre na hora, sem curtir.
+- [ ] Com "Remover animações" (ou "Reduzir movimento") ligado nas configurações de acessibilidade, o toque duplo curte sem o coração de 64 pt, o coração não pula, e a vibração continua.
+- [ ] Com TalkBack ligado, a ativação de uma publicação abre a Conversa na hora e nunca curte.
+- [ ] Tocar no coração curte com pulo e vibração; tocar de novo descurte sem pulo nem vibração.
+- [ ] Republicar mostra "Republicado" com "Desfazer" por 4 s; "Desfazer" desliga a republicação e a contagem volta. Repetir "Desfazer" não republica.
+- [ ] Ao republicar e desfazer logo em seguida, com a gravação ainda pendente, o aviso diz "Aguarde um instante e tente de novo.".
+- [ ] Na Conversa, o fio de 2 pt liga o avatar da resposta ao avatar da publicação em destaque, e a barra verde de 3 pt fica à esquerda sem deslocar os avatares.
+- [ ] Pílulas e abas ficam mais claras ao pressionar; nas abas, a ondulação aparece e não tem borda.
+- [ ] TalkBack lê os botões de curtir e republicar com o estado (curtido ou não) e o aviso "Republicado" com o botão "Desfazer".
+
+iOS (simulador ou aparelho, depois do Android):
+
+- [ ] Os mesmos passos de toque duplo, toque simples, links e fotos, e de "Reduzir movimento" (Ajustes › Acessibilidade › Movimento).
+- [ ] Com VoiceOver ligado, a ativação de uma publicação abre a Conversa e nunca curte.
+- [ ] A vibração de curtir e de republicar acontece num aparelho com Taptic Engine (o simulador não vibra).
+- [ ] O fio, as pílulas e as abas, e o aviso "Republicado" com "Desfazer".
+
+Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
+
+- [ ] Duplo clique numa publicação não curte: o texto é selecionado, como antes.
+- [ ] Curtir e republicar não vibram, e o coração curtido continua cheio e verde.
+- [ ] O aviso "Republicado" com "Desfazer" aparece por 4 s, e "Desfazer" desliga a republicação.
+- [ ] O fio da Conversa e o toque mais claro das pílulas e abas.
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação. Os testes automáticos cobrem só a janela do toque duplo e a abertura pendente; o pulo, o coração de 64 pt, a vibração e o aviso ainda precisam de aparelho.
+- Um desfazer durante a atualização puxada pode deixar a contagem uma a mais até a próxima atualização.
+- O desfazer atualiza só a tela que mostrou o aviso.
+- Um desfazer enquanto uma curtida da mesma publicação está pendente não entra na fila; o botão de republicar da linha continua desfazendo.
+- Um arrasto que começa fora de qualquer publicação, dentro dos 280 ms, não cancela a abertura da conversa.

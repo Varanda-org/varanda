@@ -323,11 +323,18 @@ export function useEngagement ({ request, onToast }) {
   }, [])
   const setCount = useCallback((ref, c) => setCounts((m) => mergeCounts(m, { [ref]: c })), [])
 
-  const toggle = useCallback(async (kind, ref) => {
-    if (pendingRef.current.has(ref)) return
+  const toggle = useCallback(async (kind, ref, requestedOn) => {
+    if (pendingRef.current.has(ref)) {
+      if (requestedOn === false && typeof onToast === 'function') onToast('Aguarde um instante e tente de novo.')
+      return
+    }
     const field = kind === 'like' ? 'liked' : 'reposted'
-    const on = !stateRef.current[field].has(ref)
-    const delta = on ? 1 : -1
+    const was = stateRef.current[field].has(ref)
+    // The undo always sends off: idempotent on the diary, and it still lands
+    // when a refresh has cleared the local state (then the count is left alone).
+    const on = requestedOn === false ? false : !was
+    const delta = on ? 1 : (was ? -1 : 0)
+    let succeeded = false
     const nextPending = new Map(pendingRef.current).set(ref, kind)
     pendingRef.current = nextPending
     setPending(nextPending)
@@ -342,9 +349,10 @@ export function useEngagement ({ request, onToast }) {
       // Already in that state on the diary: the state is right, the count
       // had already counted it.
       if (r && r.changed === false) setCounts((m) => (m.has(ref) ? new Map(m).set(ref, countsAfter(m.get(ref), kind, -delta)) : m))
+      succeeded = kind === 'repost' && on && !(r && r.on === false) && !(r && r.changed === false)
     } catch (err) {
       touch(field, ref)
-      setState((s) => applyToggle(s, kind, ref, !on))
+      setState((s) => applyToggle(s, kind, ref, was))
       setCounts((m) => (m.has(ref) ? new Map(m).set(ref, countsAfter(m.get(ref), kind, -delta)) : m))
       if (typeof onToast === 'function') onToast(errorText(err))
     } finally {
@@ -352,6 +360,10 @@ export function useEngagement ({ request, onToast }) {
       after.delete(ref)
       pendingRef.current = after
       setPending(after)
+    }
+    // After pending cleared, so the undo (a second signed write) is not dropped.
+    if (succeeded && typeof onToast === 'function') {
+      onToast({ text: 'Republicado', actionLabel: 'Desfazer', onAction: () => toggle('repost', ref, false) })
     }
   }, [request, onToast])
 
@@ -485,6 +497,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   const eng = useEngagement({ request, onToast })
   const { follows, load: loadFollows } = useFollowSet(request)
   const [view, setView] = useState(INITIAL)
+  const [parentHeight, setParentHeight] = useState(null)
   const viewRef = useRef(view)
   const peekedRef = useRef(new Map())
   const followsRef = useRef(Promise.resolve(new Set()))
@@ -660,10 +673,10 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   if (unavailable > 0) notes.push(unavailable === 1 ? '1 resposta indisponível' : String(unavailable) + ' respostas indisponíveis')
 
   const header = (
-    <View>
+    <View style={styles.header}>
       {parent
         ? (
-          <View style={styles.parent}>
+          <View style={styles.parent} onLayout={(e) => setParentHeight(e.nativeEvent.layout.height)}>
             <PostRow {...props(parent)} />
           </View>
           )
@@ -672,8 +685,13 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
         ? (
           <View style={styles.focal}>
             <PostRow {...props(post, parent ? { onOpenParent: () => onOpenThread({ ref: refOf(parent.author, parent.seq), seed: parent }), replyToName: whoOf(identityOf(names, parent.author, parent)).title } : {})} />
+            {/* After the row: PostRow paints an opaque bg, and later siblings paint on top. */}
+            <View pointerEvents='none' style={styles.accentBar} />
           </View>
           )
+        : null}
+      {parent && post && parentHeight !== null
+        ? <View pointerEvents='none' accessible={false} style={[styles.connector, { height: parentHeight - 52 }]} />
         : null}
       {phase === 'ready' && !view.post
         ? <View style={styles.note}><Soft>Esta publicação não pôde ser verificada agora.</Soft></View>
@@ -736,8 +754,12 @@ const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   note: { paddingHorizontal: 16, paddingVertical: 12 },
   prompt: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
+  header: { position: 'relative' },
   parent: { opacity: 0.72 },
-  focal: { borderLeftWidth: 3, borderLeftColor: colors.accent },
+  focal: { position: 'relative' },
+  accentBar: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: colors.accent },
+  // Avatar centre x is 38 (paddingHorizontal 16 + 44 / 2); starts 4 below the parent avatar (12 + 44).
+  connector: { position: 'absolute', left: 37, top: 60, width: 2, backgroundColor: colors.line },
   repliesHead: { paddingHorizontal: 16, paddingVertical: 12, gap: 4, borderBottomWidth: 1, borderBottomColor: colors.line },
   repliesTitle: { ...type.section, color: colors.soft }
 })

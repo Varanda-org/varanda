@@ -20,6 +20,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Interações da Rua no app: curtir com coração cheio e pulo, toque duplo para curtir no app nativo (nunca na web), fio ligando a resposta à publicação na Conversa, pílulas e abas com toque mais claro, e "Republicado" com "Desfazer" por 4 s. Detalhes em `docs/app.md` ("Interações da Rua") e `docs/verification.md` seção 82.
 - Aparência: Ajustes › Aparência com Sistema (padrão), Claro e Escuro, guardada neste aparelho, e um tema escuro quente (verde e creme, nunca preto) no app, na web e na barra de status.
 - Avisos mostram curtidas e republicações das suas publicações, uma linha por pessoa, canal `varanda/notices/3`; semeadores e clientes antigos continuam como antes.
 - Comunidades em lista, como no Telegram: a tela da comunidade mostra cada grupo com quem escreveu por último, o texto, a hora e as mensagens não lidas ("99+" a partir de 99). Tocar no nome ou no ⋯ abre Informações da comunidade, com Compartilhar, sair, convidar, membros, pedidos, quem pode convidar e Ajustes. As não lidas são por aparelho: abrir o grupo zera a contagem só aqui, sem avisar ninguém.

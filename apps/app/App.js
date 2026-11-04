@@ -130,6 +130,7 @@ import Termos from './src/screens/Termos'
 const GATE_URL = process.env.EXPO_PUBLIC_VARANDA_GATE_URL
 
 const TOAST_MS = 2500
+const TOAST_ACTION_MS = 4000
 // The native splash stays cream in both schemes (Splash.js), and so does what
 // wraps it: the side insets around it would otherwise show the dark bg.
 const SPLASH_WRAP = Platform.OS === 'web' ? null : { backgroundColor: paletteFor('light').bg }
@@ -306,7 +307,7 @@ function Member () {
   // Latched once node.info confirmed the identity and the certificate: a
   // later failed or slow read never hides the tabs again.
   const [setupDone, setSetupDone] = useState(false)
-  const [toast, setToast] = useState('')
+  const [toast, setToast] = useState(null)
   const toastTimer = useRef(null)
   // The pending profile invite (src/profileLink.js): the record in tab
   // storage, re-read before every step that acts on it.
@@ -952,10 +953,15 @@ function Member () {
 
   useEffect(() => () => clearTimeout(toastTimer.current), [])
 
-  const showToast = (text) => {
+  // A string, or { text, actionLabel, onAction }. A new toast replaces the
+  // previous one together with its action.
+  const showToast = (input) => {
     clearTimeout(toastTimer.current)
-    setToast(text)
-    toastTimer.current = setTimeout(() => setToast(''), TOAST_MS)
+    const t = typeof input === 'string' ? { text: input } : input
+    if (!t || !t.text) return setToast(null)
+    const withAction = typeof t.onAction === 'function' && t.actionLabel
+    setToast(withAction ? t : { text: t.text })
+    toastTimer.current = setTimeout(() => setToast(null), withAction ? TOAST_ACTION_MS : TOAST_MS)
   }
 
   // The outbox (browser node) is sent only while a publish could go out
@@ -1946,8 +1952,25 @@ function Member () {
           : null}
         {toast
           ? (
-            <View style={[styles.toast, { bottom: (stacked ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='none'>
-              <Text style={styles.toastText} accessibilityRole='alert'>{toast}</Text>
+            <View style={[styles.toast, { bottom: (stacked ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='box-none'>
+              {/* Only the action takes touches: under box-none the label would
+                  otherwise swallow taps meant for the screen below. */}
+              <View pointerEvents='none'>
+                <Text style={styles.toastText} accessibilityRole='alert'>{toast.text}</Text>
+              </View>
+              {toast.onAction
+                ? (
+                  <Pressable
+                    onPress={() => { clearTimeout(toastTimer.current); setToast(null); toast.onAction() }}
+                    accessibilityRole='button'
+                    accessibilityLabel={toast.actionLabel}
+                    hitSlop={8}
+                    style={styles.toastAction}
+                  >
+                    <Text style={styles.toastActionText}>{toast.actionLabel}</Text>
+                  </Pressable>
+                  )
+                : null}
             </View>
             )
           : null}
@@ -2076,7 +2099,11 @@ const makeStyles = (colors) => StyleSheet.create({
     backgroundColor: colors.toastBg,
     borderRadius: 999,
     paddingVertical: 8,
-    paddingHorizontal: 14
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center'
   },
-  toastText: { ...type.counter, color: colors.toastInk }
+  toastText: { ...type.counter, color: colors.toastInk },
+  toastAction: { marginLeft: 8 },
+  toastActionText: { ...type.counter, color: colors.toastInk, fontWeight: '800' }
 })

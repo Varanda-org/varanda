@@ -39,20 +39,23 @@ export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TAB
               }
             }}
             style={styles.tab}
+            android_ripple={{ color: colors.line, borderless: true }}
           >
-            <View style={styles.iconWrap}>
-              {showAvatar
-                ? (
-                  <View
-                    style={[styles.avatarRing, { borderColor: selected ? colors.accent : 'transparent' }]}
-                    accessible={false}
-                  >
-                    <Avatar name={me.name} publicKey={me.publicKey} size={28} picture={me.picture} persist />
-                  </View>
-                  )
-                : <Icon name={tab.icon} size={27} color={tint} />}
-              {badged && <View style={styles.dot} />}
-            </View>
+            {({ pressed }) => (
+              <View style={[styles.iconWrap, pressed && styles.pressed]}>
+                {showAvatar
+                  ? (
+                    <View
+                      style={[styles.avatarRing, { borderColor: selected ? colors.accent : 'transparent' }]}
+                      accessible={false}
+                    >
+                      <Avatar name={me.name} publicKey={me.publicKey} size={28} picture={me.picture} persist />
+                    </View>
+                    )
+                  : <Icon name={tab.icon} size={27} color={tint} />}
+                {badged && <View style={styles.dot} />}
+              </View>
+            )}
           </Pressable>
         )
       })}
@@ -77,6 +80,7 @@ const makeStyles = (colors) => StyleSheet.create({
   tab: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   // Anchors the dot to the icon's corner rather than the whole tab.
   iconWrap: { position: 'relative' },
+  pressed: { opacity: 0.65 },
   // The border is always 2 pt (transparent when not selected) so the size never shifts.
   avatarRing: { borderWidth: 2, borderRadius: 16 },
   // A plain dot: no text, no number.

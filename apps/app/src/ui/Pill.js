@@ -15,11 +15,12 @@ export function Pill ({ label, onPress, filled, danger, disabled, pending, acces
       disabled={off}
       onPress={onPress}
       hitSlop={4}
-      style={[
+      style={({ pressed }) => [
         styles.pill,
         filled ? styles.filled : styles.outline,
         !filled && danger && styles.outlineDanger,
-        off && styles.off
+        off && styles.off,
+        pressed && styles.pressed
       ]}
     >
       <Text style={[styles.text, filled ? styles.textFilled : danger ? styles.textDanger : styles.textInk]}>
@@ -35,6 +36,7 @@ const makeStyles = (colors) => StyleSheet.create({
   outline: { borderWidth: 1.5, borderColor: colors.outline, paddingVertical: 8, paddingHorizontal: 15 },
   outlineDanger: { borderColor: colors.danger },
   off: { opacity: 0.45 },
+  pressed: { opacity: 0.65 },
   text: { ...type.pill },
   textFilled: { color: colors.accentInk },
   textInk: { color: colors.ink },
