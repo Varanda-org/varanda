@@ -19,6 +19,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Comunidades em lista, como no Telegram: a tela da comunidade mostra cada grupo com quem escreveu por último, o texto, a hora e as mensagens não lidas ("99+" a partir de 99). Tocar no nome ou no ⋯ abre Informações da comunidade, com Compartilhar, sair, convidar, membros, pedidos, quem pode convidar e Ajustes. As não lidas são por aparelho: abrir o grupo zera a contagem só aqui, sem avisar ninguém.
 - Convidar por @nome pelas Conversas: quem pode convidar vê **Convidar** na comunidade e **Convidar para o grupo** nos Ajustes do grupo, digita @nome e a pessoa recebe o convite como mensagem privada (em Pedidos se não seguir quem convidou). Quem ainda não usa as Conversas recebe a orientação de mandar o link pelo Compartilhar. Na conversa, um link de convite desta instalação mostra **Abrir convite**, que abre o cartão de convite sem entrar. Envio incerto oferece **Tentar de novo**, nunca automático. "Quem pode convidar" controla só o botão.
 - Aba Busca, com as categorias Contas (por nome ou @nome na versão hospedada; seguir por @nome na versão hospedada, ou pelo código de 64 letras e números em qualquer instalação) e Publicações (palavras nas publicações públicas, só ao enviar, só na versão hospedada). Detalhes em `docs/verification.md`, seção 71.
 - Painel de emojis do composer com cerca de 400 emojis em 11 grupos, cada um com nome em português, e um campo "buscar emoji" que filtra pelo nome sem diferenciar acento nem maiúsculas.

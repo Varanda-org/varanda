@@ -776,6 +776,7 @@ function createSession ({
     }),
 
     'group.read': serial((params) => withStore((c) => member.groupRead(c, params))),
+    'group.seen': serial((params) => withStore((c) => member.groupSeen(c, params))),
 
     'group.list': serial((params) => withStore((c) => member.groupList(c, params))),
 

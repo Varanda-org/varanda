@@ -1,8 +1,11 @@
 // Grupo: one group's conversation, pushed above the tabs (nav.js screen
 // 'grupo', keyed by the group root). Props: { group, onBack,
 // onOpenCommunity(community, { group }?), onOpenMember(diary),
-// onReport(target) }, with `target` in Denunciar's shape { author, name,
-// username, seq, text, group, writer, private }. Renders GrupoAjustes itself
+// onReport(target), onSeen(group), isTop }, with `target` in Denunciar's shape
+// { author, name, username, seq, text, group, writer, private }; onSeen runs
+// after every group.seen attempt, answered or not. Only what the person sees
+// is marked seen: the app visible, this screen on top (isTop false: buried
+// under another screen) and the latest read painted. Renders GrupoAjustes itself
 // as a sheet. The top bar names the group's community (a pill that opens it).
 // A group without a community (orphan) is read-only. Joining needs the
 // community first: a group opened from a /g/<hex> link this node does not
@@ -57,7 +60,7 @@ const CHECK_NOT_LANDED = 'Não foi aplicado. Você pode tentar de novo.'
 const READERS = ['creator', 'admin', 'member']
 const JOINABLE = [null, 'left', 'pending']
 
-export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport }) {
+export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport, onSeen, isTop = true }) {
   const node = useNode()
   const now = useNow(60000)
   const hosted = node.hosted === true
@@ -98,6 +101,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport 
   const seqRef = useRef(0)
   const storeRef = useRef(store)
   storeRef.current = store
+  const onSeenRef = useRef(onSeen)
+  onSeenRef.current = onSeen
+  // The load whose newest read painted; equal to seqRef when none is in flight.
+  const paintedRef = useRef(0)
   const listRef = useRef(null)
 
   const infoRef = useRef(info)
@@ -136,6 +143,16 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport 
     return read
   }, [request, group, commitRead])
 
+  // group.seen emits nothing, and a lost answer may have written the mark, so
+  // the caller hears of every attempt, even after a quick back.
+  const markSeen = useCallback(async () => {
+    try {
+      await request('group.seen', { group })
+    } catch {} finally {
+      if (typeof onSeenRef.current === 'function') onSeenRef.current(group)
+    }
+  }, [request, group])
+
   const load = useCallback(async (pull = false) => {
     if (!hosted) return
     const mine = ++seqRef.current
@@ -152,6 +169,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport 
       try {
         await readNewest()
         if (mine !== seqRef.current) return
+        paintedRef.current = mine
         setMoreError('')
       } catch (err) {
         if (mine === seqRef.current) setLoadError(errorText(err))
@@ -326,6 +344,17 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport 
   useEffect(() => {
     if (lastId !== null) scrollToEnd()
   }, [lastId])
+
+  // A buried screen keeps re-reading but never marks; a failed or unfinished
+  // read marks nothing. Keyed on the newest message on screen, so any paint
+  // marks it; uncovering the screen or bringing the app back marks what
+  // already shows, without a reload that would drop the older pages.
+  const visible = node.visible !== false
+  useEffect(() => {
+    if (!visible || !isTop || !reader || lastId === null || loadedAt === null || loadError !== '') return
+    if (paintedRef.current !== seqRef.current) return
+    markSeen()
+  }, [visible, isTop, reader, lastId, loadedAt, loadError, markSeen])
 
   const nameText = info && typeof info.name === 'string' && info.name !== ''
     ? displayText(info.name)
