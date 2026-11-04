@@ -11,7 +11,7 @@
   ],
   "scripts": {
     "lint": "standard",
-    "test": "npm test --workspaces --if-present",
+    "test": "node scripts/run-tests.js --workspaces",
     "demo": "npm run demo -w apps/cli --",
     "eas-build-post-install": "npm run eas-build-post-install -w apps/app"
   },
