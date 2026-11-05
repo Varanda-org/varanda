@@ -276,7 +276,65 @@ function validDeleteRanges (media) {
   return true
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key'])
+// Pages (lib/page.js): shape only here; the signatures are checked where a
+// page diary is read. A bad page record is 'malformed', never thrown.
+const MAX_PAGE_ADMINS = 16
+const MAX_PAGE_GEN = 4294967295
+const PAGE_NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
+const PAGE_KEYS = Object.freeze({
+  'page-roster': ['type', 'page', 'gen', 'owner', 'admins', 'prev', 'at', 'nonce', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature', 'countersignature'],
+  'page-origin': ['type', 'page', 'from', 'fromSeq', 'gen', 'owner', 'admins', 'at', 'nonce', 'actor', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature', 'countersignature'],
+  'page-close': ['type', 'page', 'gen', 'at', 'nonce', 'actor', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature', 'countersignature'],
+  'page-moved': ['type', 'page', 'to', 'gen', 'at', 'nonce', 'actor', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature', 'countersignature'],
+  'page-accept': ['type', 'page', 'gen', 'rosterSignature', 'at', 'nonce', 'actor', 'signature'],
+  'page-offer': ['type', 'page', 'to', 'exp', 'gen', 'at', 'nonce', 'actor', 'signature'],
+  'page-link': ['type', 'page', 'diary', 'actor', 'at', 'nonce', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature'],
+  'page-delegate': ['type', 'actor', 'at']
+})
+
+// Sorted strictly ascending (so unique), by index: a sparse hole is invalid.
+function validPageAdmins (admins, owner) {
+  if (!Array.isArray(admins) || admins.length > MAX_PAGE_ADMINS) return false
+  for (let i = 0; i < admins.length; i++) {
+    const a = admins[i]
+    if (!isHex64(a) || a === owner) return false
+    if (i > 0 && !(admins[i - 1] < a)) return false
+  }
+  return true
+}
+
+function validPageShape (r) {
+  const type = r.type
+  if (!hasExactKeys(r, PAGE_KEYS[type])) return false
+  if (type === 'page-delegate') return isHex64(r.actor) && isCanonicalIso(r.at)
+  if (!isHex64(r.page) || !isCanonicalIso(r.at) || typeof r.nonce !== 'string' || !PAGE_NONCE_RE.test(r.nonce)) return false
+  if (type === 'page-link') {
+    return isHex64(r.diary) && isHex64(r.actor) && r.diary !== r.page && r.actor !== r.diary && r.actor !== r.page &&
+      validDelegation(r) && isHex128(r.signature)
+  }
+  if (!isHex128(r.signature)) return false
+  const minGen = type === 'page-close' || type === 'page-accept' ? 2 : 1
+  if (!isIntIn(r.gen, minGen, MAX_PAGE_GEN)) return false
+  if (type === 'page-accept') return isHex64(r.actor) && isHex128(r.rosterSignature)
+  if (type === 'page-offer') {
+    if (!isHex64(r.actor)) return false
+    if (r.to === null) return r.exp === null
+    return isHex64(r.to) && isCanonicalIso(r.exp)
+  }
+  if (!validDelegation(r) || !isHex128(r.countersignature)) return false
+  if (type === 'page-roster') {
+    return isHex64(r.owner) && validPageAdmins(r.admins, r.owner) &&
+      (r.prev === null || (Number.isSafeInteger(r.prev) && r.prev >= 1))
+  }
+  if (!isHex64(r.actor)) return false
+  if (type === 'page-close') return true
+  if (type === 'page-moved') return isHex64(r.to) && r.to !== r.page
+  // page-origin: signed by its owner.
+  return isHex64(r.from) && r.from !== r.page && Number.isSafeInteger(r.fromSeq) && r.fromSeq >= 1 &&
+    isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
+}
+
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -304,6 +362,7 @@ function check (record, seq) {
   // Shape only: the issuer signatures are checked by verifyUsernameRecord
   // (lib/cert.js) where the username is read (lib/username.js).
   if (type === 'username') return validUsernameShape(record) ? null : 'malformed'
+  if (Object.prototype.hasOwnProperty.call(PAGE_KEYS, type)) return validPageShape(record) ? null : 'malformed'
   if (type === 'profile') {
     const withAvatar = hasExactKeys(record, PROFILE_AVATAR_KEYS)
     if (!withAvatar && !hasExactKeys(record, PROFILE_KEYS)) return 'malformed'
@@ -589,6 +648,9 @@ module.exports = {
   MAX_GROUP_NAME,
   MAX_GROUP_WRITERS_PER_DIARY,
   TYPES,
+  PAGE_KEYS,
+  MAX_PAGE_ADMINS,
+  MAX_PAGE_GEN,
   DM_KEY_KEYS,
   MAX_DM_KEY_GEN,
   AVATAR_SIDE,
@@ -604,6 +666,7 @@ module.exports = {
   charLength,
   plainCopy,
   isHex64,
+  isHex128,
   isCanonicalIso,
   decodeBlock,
   memberCertRecord,

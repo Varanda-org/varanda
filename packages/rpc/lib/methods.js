@@ -338,6 +338,123 @@ function isDmListCursor (v) {
   return isCanonicalIso(v.at) && isKey(v.peer)
 }
 
+// page.sign (docs/rpc.md 5.84). Duplicated from @varanda/core
+// lib/page-proof.js (ACTIONS, PAGELESS and the canonicalOp rules) because
+// this package has no dependencies. The record actions sign page records
+// (records.js), not a page statement, so page-proof does not list them.
+// 'offer-cancel' of page-proof is not signed here: an offer only ends on the
+// diary through the signed cancel offer ({ to: null, exp: null }).
+const PAGE_ACTIONS = [
+  'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar',
+  'rename', 'invite', 'dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen', 'follow',
+  'follows', 'media', 'notices', 'terms', 'community-join', 'community-leave', 'group-join', 'group-leave',
+  'group-post', 'group-read',
+  'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
+]
+const PAGE_PAGELESS = ['create', 'list', 'terms']
+const PAGE_OP_MAX_BYTES = 16 * 1024
+const PAGE_OP_MAX_DEPTH = 8
+// association is filled by the node from its own configured association,
+// never taken from the caller (docs/rpc.md 5.84).
+const PAGE_OP_FORBIDDEN = ['secretKey', 'pin', 'seed', 'association']
+const PAGE_OP_INDEX_KEY_RE = /^(0|[1-9][0-9]*)$/
+// page.feed: the newest follows of the page the app peeks at once.
+const PAGE_FEED_KEYS_MAX = 64
+// page.read: the follows a result carries (newest by seq) and its links (one
+// per roster member in force, MAX_PAGE_ADMINS of records.js plus the owner),
+// so its worst case fits MAX_MESSAGE where 4095 follows would not.
+const PAGE_READ_FOLLOWS_MAX = 64
+const PAGE_READ_LINKS_MAX = 16 + 1
+
+const isPageAction = (v) => typeof v === 'string' && PAGE_ACTIONS.includes(v)
+const isPagePage = (v) => v === '' || isKey(v)
+
+// The 'offer' op: `to` and `exp` both null (the cancel) or a key and a
+// canonical ISO date; the rest of its shape is the node's check.
+function isPageOfferPair (op) {
+  if (!hasOwn(op, 'to') || !hasOwn(op, 'exp')) return true
+  if (op.to === null || op.exp === null) return op.to === null && op.exp === null
+  return isKey(op.to) && isCanonicalIso(op.exp)
+}
+
+function isPageOpString (s) {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const next = s.charCodeAt(i + 1)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false
+      i++
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return false
+    }
+  }
+  return true
+}
+
+// A running lower bound of the canonical JSON size stops a huge op before
+// JSON.stringify sees it; the exact size is checked at the end.
+function pageOpValue (v, depth, budget) {
+  const charge = (n) => {
+    budget.used += n
+    if (budget.used > PAGE_OP_MAX_BYTES) throw new TypeError('page op too large')
+  }
+  if (v === null || typeof v === 'boolean') return charge(4)
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v) || Object.is(v, -0)) throw new TypeError('invalid page op')
+    return charge(1)
+  }
+  if (typeof v === 'string') {
+    charge(v.length + 2)
+    if (!isPageOpString(v)) throw new TypeError('invalid page op')
+    return
+  }
+  if (depth >= PAGE_OP_MAX_DEPTH) throw new TypeError('page op too deep')
+  const array = Array.isArray(v)
+  if (array ? Object.getPrototypeOf(v) !== Array.prototype : !isPlainObject(v)) throw new TypeError('invalid page op')
+  const own = Reflect.ownKeys(v)
+  if (array && own.length !== v.length + 1) throw new TypeError('invalid page op')
+  // The same charge as canonicalOp: own keys of an array include 'length'.
+  charge(1 + Math.max(array ? v.length : own.length, 1))
+  for (const key of own) {
+    if (array && key === 'length') continue
+    if (typeof key !== 'string') throw new TypeError('invalid page op')
+    if (array) {
+      if (!PAGE_OP_INDEX_KEY_RE.test(key) || Number(key) >= v.length) throw new TypeError('invalid page op')
+    } else {
+      // An index-like key would be reordered by JSON.stringify, so canonicalOp
+      // refuses it too.
+      if (PAGE_OP_FORBIDDEN.includes(key) || PAGE_OP_INDEX_KEY_RE.test(key) || !isPageOpString(key)) throw new TypeError('invalid page op')
+      charge(key.length + 3)
+    }
+    const d = Object.getOwnPropertyDescriptor(v, key)
+    if (d === undefined || !('value' in d) || !d.enumerable) throw new TypeError('invalid page op')
+    pageOpValue(d.value, depth + 1, budget)
+  }
+}
+
+// A plain object whose canonical JSON (page-proof canonicalOp) is at most
+// 16 KiB, with no key named secretKey, pin, seed or association and no
+// array-index-like object key ("0", "10") at any depth.
+function isPageOp (v) {
+  if (!isPlainObject(v)) return false
+  try {
+    pageOpValue(v, 0, { used: 0 })
+    return utf8ByteLength(JSON.stringify(v)) <= PAGE_OP_MAX_BYTES
+  } catch {
+    return false
+  }
+}
+
+function isPageFeedKeys (v) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > PAGE_FEED_KEYS_MAX) return false
+  const seen = new Set()
+  for (let i = 0; i < v.length; i++) {
+    if (!isKey(v[i]) || seen.has(v[i])) return false
+    seen.add(v[i])
+  }
+  return true
+}
+
 function isCert (v) {
   if (!isPlainObject(v)) return false
   return utf8ByteLength(JSON.stringify(v)) <= L.MAX_CERT_BYTES
@@ -734,6 +851,35 @@ const SPECS = {
       quote: req(str(1, L.MAX_TEXT))
     }
   },
+  // Páginas (docs/rpc.md 5.84 to 5.87). page.sign signs a page statement or
+  // a page record and appends nothing; the node fills in member, actor and
+  // association, so a caller never chooses the bytes. The exact op of each
+  // record action is the node's check.
+  'page.sign': {
+    fields: {
+      action: req(isPageAction),
+      nonce: req(isNonce),
+      page: req(isPagePage),
+      op: req(isPageOp)
+    },
+    cross (given, value) {
+      if (value.page === '' && !PAGE_PAGELESS.includes(value.action)) return 'parâmetro inválido: page'
+      if (value.action === 'offer' && !isPageOfferPair(value.op)) return 'parâmetro inválido: op'
+      return null
+    }
+  },
+  'page.read': { fields: { key: req(isKey), full: opt(isBool, false) } },
+  // Browser node only. A page of feed.read rows over the page's follows; a
+  // larger limit would not fit MAX_MESSAGE (FEED_LIMIT_MAX, test/sizes.test.js).
+  'page.feed': {
+    fields: {
+      page: req(isKey),
+      keys: req(isPageFeedKeys),
+      limit: opt(int(1, L.FEED_LIMIT_MAX), L.FEED_LIMIT_DEFAULT)
+    }
+  },
+  // Core node only: the Ed25519 delegate a core diary signs pages with.
+  'page.register': { fields: none, mutating: true },
   'group.meta': {
     fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,
@@ -848,5 +994,7 @@ module.exports = {
   hasOwn,
   isId,
   isKey,
-  isRef
+  isRef,
+  PAGE_READ_FOLLOWS_MAX,
+  PAGE_READ_LINKS_MAX
 }

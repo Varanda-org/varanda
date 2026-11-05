@@ -311,11 +311,15 @@ const {
   presentState,
   presentLength,
   deletedRanges,
-  clearDeleted
+  clearDeleted,
+  downloadExceptPages,
+  pageTargets
 } = require('@varanda/core/lib/deletion')
 const { memoryStorage } = require('./storage')
 const { guardedWsStream } = require('./ws-stream')
 const store = require('./node-store')
+const { followSet } = require('@varanda/core/lib/media')
+const { pageLifecycle, originOf, verifyClose, verifyMoved } = require('@varanda/core/lib/page-lifecycle')
 
 const GATE_TIMEOUT_MS = 15000
 const GATE_MIN_TIMEOUT_MS = 250
@@ -365,6 +369,18 @@ const HINT_REASONS = new Set(['wrong-group', 'wrong-diary', 'unbound', 'diary-un
 const MAX_GATE_HINTS = 4
 
 const HEX64 = /^[0-9a-f]{64}$/
+// docs/protocol.md "Mudar de chave": a chain of moves stops here.
+const MAX_PAGE_MOVES = 4
+// A move not final yet ('unreadable', 'locked', 'failed') is retried after
+// each of these delays, then given up until a restart.
+const PAGE_MIGRATE_RETRY_MS = [2000, 5000, 15000, 30000, 60000]
+const PAGE_MIGRATE_RETRYABLE = new Set(['unreadable', 'locked', 'failed'])
+// kv pageMigrated = { v: 1, migrated: { K1: K2 } }: moves already followed.
+const PAGE_MIGRATED_KV = 'pageMigrated'
+const MAX_PAGE_MIGRATED = 4096
+const MAX_PAGE_LATE = 64
+// What scanPageAt keeps (page-origin only at block 3).
+const PAGE_SCAN_TYPES = new Set(['page-close', 'page-moved', 'page-origin'])
 const REPLICA_INDEX = 'replicas'
 // diary.peek outcomes (the session maps both to NOT_FOUND).
 const SEEDER_UNAVAILABLE = 'semeador indisponível'
@@ -836,8 +852,19 @@ function foldTargets (tombs) {
 // history more than `newest` blocks behind runs the head again. The
 // reported length stays the present length on both phases.
 // -> also expect(length), the length a seeder advertised (a hint only).
-function trackPresent (core, { noClear = false, download = true, newest = 0, tailMax = TAIL_MAX, stallMs = HEAD_STALL_MS, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop, onNewest = noop }) {
+// A diary known not to be a page: every deleted target leaves the download.
+const PERSONAL_GUARD = Object.freeze({
+  page: () => false,
+  excludable: async (deleted) => new Set(deleted),
+  watch: () => noop,
+  destroy: noop
+})
+
+// `pages` false: the diary is known not to be a page (this member's own),
+// so the page guard never reads its genesis blocks.
+function trackPresent (core, { noClear = false, download = true, newest = 0, tailMax = TAIL_MAX, stallMs = HEAD_STALL_MS, pages = true, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop, onNewest = noop }) {
   const tombs = new Map() // seq -> target of each local valid tombstone
+  const pageGuard = pages ? pageTargets(core) : PERSONAL_GUARD
   const retry = new Map() // index -> failed reads of a block not yet learned
   let deleted = new Set()
   let present = 0
@@ -897,7 +924,10 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
     }
     deleted = next
     if (range !== null) await range.update(next)
-    else if (!noClear) await clearDeleted(core, next)
+    else if (!noClear) {
+      try { await pageGuard.excludable(next) } catch {}
+      await clearDeleted(core, next)
+    }
     return from
   }
   const openBody = () => {
@@ -906,7 +936,11 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
       const plain = core.download({ start: 0, end: -1, linear: true })
       range = { update: async () => [], destroy: () => plain.destroy() }
     } else {
-      range = linearExcept(core, deleted)
+      // A page diary keeps an unheld tombstone target in the range until it
+      // is read once (docs/protocol.md §12): this follower learns the
+      // newest blocks first, so a tombstone often arrives before a
+      // page-close or page-moved it names.
+      range = pages ? downloadExceptPages(core, deleted, { make: linearExcept, guard: pageGuard }) : linearExcept(core, deleted)
     }
   }
 
@@ -953,12 +987,12 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
     }, stallMs)
   }
   const wantHead = (target) => newest > 0 && target > bodyAt && target - newest > Math.max(present, HEAD_LOW)
-  // [start, end) without the deleted seqs, as [start, end) pairs.
-  const around = (start, end) => {
+  // [start, end) without the seqs of `skip`, as [start, end) pairs.
+  const around = (start, end, skip) => {
     const out = []
     let from = start
     for (let i = start; i < end; i++) {
-      if (!deleted.has(i)) continue
+      if (!skip.has(i)) continue
       if (i > from) out.push([from, i])
       from = i + 1
     }
@@ -985,16 +1019,27 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
     const len = core.length
     const target = Math.max(len, hint)
     if (!wantHead(target)) return toBody()
+    // A settled page skips only the excludable deleted seqs (docs/protocol.md
+    // §12): a tombstoned page-close or page-moved not yet held is asked for
+    // in the newest window, not left to the linear body. An unsettled type
+    // skips every deleted seq here: excludable() would let the unheld ones
+    // of a personal diary through before block 2 lands; the body still
+    // fetches a page's terminal block once the type settles.
+    let skip = deleted
+    if (!noClear && pageGuard.page() === true) {
+      try { skip = await pageGuard.excludable(deleted) } catch {}
+      if (stopped) return
+    }
     const segs = []
     let done = false
     if (!(await localRange(core, 0, 1))) {
-      segs.push(...around(0, HEAD_LOW))
+      segs.push(...around(0, HEAD_LOW, skip))
     } else {
-      segs.push(...around(0, Math.min(HEAD_LOW, len)))
+      segs.push(...around(0, Math.min(HEAD_LOW, len), skip))
       if (len >= target) {
         let ws = Math.max(HEAD_LOW, len - newest)
         if (top > present && top < ws && len - top <= tailMax) ws = top
-        const window = around(ws, len)
+        const window = around(ws, len, skip)
         done = true
         for (const [a, b] of window) {
           if (!(await localRange(core, a, b))) done = false
@@ -1049,7 +1094,7 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
   const onDownload = (index) => {
     arrived.push(index)
     if (phase === 'head') {
-      if (!noClear && deleted.has(index)) clearDeleted(core, [index]).catch(noop)
+      if (!noClear && deleted.has(index)) pageGuard.excludable([index]).catch(noop).then(() => clearDeleted(core, [index])).catch(noop)
       armStall()
     }
     queue()
@@ -1068,6 +1113,7 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
       try { range.destroy() } catch {}
       range = null
     }
+    pageGuard.destroy()
   }
 
   // Listening first: a block that arrives during the scan is checked again
@@ -1085,7 +1131,13 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
     present = state.present
     top = Math.max(top, state.raw.length)
     if (stopped) return
-    if (!noClear) await clearDeleted(core, deleted)
+    if (!noClear) {
+      // The held targets are read before the clear, so a cleared one is
+      // not fetched back (lib/deletion.js pageTargets).
+      try { await pageGuard.excludable(deleted) } catch {}
+      if (stopped) return
+      await clearDeleted(core, deleted)
+    }
     if (stopped) return
     scheduling = true
     await schedule()
@@ -1234,6 +1286,7 @@ async function syncRun ({
   signal,
   maxLogBlocks = MAX_LOG_BLOCKS,
   maxLogBytes = MAX_LOG_BYTES,
+  maxPageLate = MAX_PAGE_LATE,
   maxFollows = MAX_INVENTORY - 1,
   gateTimeoutMs = GATE_TIMEOUT_MS,
   connectTimeoutMs = CONNECT_TIMEOUT_MS,
@@ -1250,7 +1303,12 @@ async function syncRun ({
   newestBlocks = NEWEST_BLOCKS, // followed diaries: trackPresent `newest`
   tailBlocks = TAIL_MAX, // followed diaries: trackPresent `tailMax`
   headStallMs = HEAD_STALL_MS,
-  noClear = false // keep the bytes of deleted blocks (tombstones still apply)
+  noClear = false, // keep the bytes of deleted blocks (tombstones still apply)
+  // true never follows the new key of a moved page.
+  noPageMigrate = false,
+  // async (key) => queues a signed follow of key (member-ops followAdd);
+  // null while the session is locked, so a move is then left for later.
+  followPage = null
 } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
   // The trust root is checked before anything is opened.
@@ -1652,6 +1710,7 @@ async function syncRun ({
         }
         l.hello = true
         onVerified(l)
+        for (const e of follows.values()) maybeMigrate(e)
         for (const [key, length] of peer.remoteHave) {
           if (relevant(key)) {
             l.lastAdv.set(key, length)
@@ -2072,7 +2131,14 @@ async function syncRun ({
       }
     })
     entry.tracker = tracker
-    entry.stopGrow = () => tracker.destroy()
+    const onPageBlock = (index) => {
+      if (entry.core === core) pageArrived(entry, index)
+    }
+    core.on('download', onPageBlock)
+    entry.stopGrow = () => {
+      core.off('download', onPageBlock)
+      tracker.destroy()
+    }
     expectLength(entry, theirs(entry.key) || 0)
     if (checkQuota(entry)) return
     const l = seederLink()
@@ -2099,6 +2165,7 @@ async function syncRun ({
     if (entry.state !== 'active') return
     send({ type: 'have', key: entry.key, length })
     emit({ event: 'downloaded', key: entry.key, length })
+    maybeMigrate(entry)
     evaluate()
   }
 
@@ -2125,6 +2192,7 @@ async function syncRun ({
     if (ended) return
     if (checkQuota(entry)) return
     if (present > 0) send({ type: 'have', key: entry.key, length: present })
+    maybeMigrate(entry)
     evaluate()
   }
 
@@ -2153,6 +2221,7 @@ async function syncRun ({
       send({ type: 'have', key: entry.key, length })
       emit({ event: 'downloaded', key: entry.key, length })
       if (entry.newestHeld > 0) onNewest(entry, entry.newestHeld)
+      maybeMigrate(entry)
       evaluate()
     }, () => {
       entry.gating = false
@@ -2160,6 +2229,256 @@ async function syncRun ({
       hardError('bloco 0 divergente: ' + key8(entry.key) + ' (not-in-log)')
       failFollow(entry, 'not-in-log', { purge: true })
     })
+  }
+
+  // ---- page key moves (docs/protocol.md "Mudar de chave") ----
+  // A followed page that moved to K2 makes this device follow K2 once, after
+  // it verified both page-moved (on K1) and page-origin (on K2, read from the
+  // verified seeder into memory) itself; the seeder's word is never enough.
+  // The follow goes through followPage (signed, so only while unlocked); K1
+  // stays followed.
+
+  async function readMigrated () {
+    let data = null
+    try {
+      data = await storage.readJson(PAGE_MIGRATED_KV)
+    } catch {}
+    const out = new Map()
+    if (data === null || typeof data !== 'object' || data.v !== 1 || data.migrated === null || typeof data.migrated !== 'object') return out
+    for (const [from, to] of Object.entries(data.migrated)) {
+      if (HEX64.test(from) && typeof to === 'string' && HEX64.test(to)) out.set(from, to)
+    }
+    return out
+  }
+
+  async function rememberMigrated (from, to) {
+    const map = await readMigrated()
+    if (map.size >= MAX_PAGE_MIGRATED && !map.has(from)) return
+    map.set(from, to)
+    await storage.writeJson(PAGE_MIGRATED_KV, { v: 1, migrated: Object.fromEntries(map) })
+  }
+
+  // One check per followed diary at a time; growth meanwhile asks for one
+  // more pass. Tracked, so a once run waits for it. Without a verified link
+  // it waits for the next hello.
+  function maybeMigrate (entry) {
+    if (noPageMigrate === true || ended || entry.migrateDone || entry.state !== 'active' || entry.core === null) return
+    if (seederLink() === null) return
+    if (entry.migrating !== null) {
+      entry.migrating.again = true
+      return
+    }
+    const state = { again: false }
+    entry.migrating = state
+    track((async () => {
+      try {
+        for (;;) {
+          state.again = false
+          await migrateOnce(entry)
+          if (!state.again || ended || entry.migrateDone) break
+        }
+      } finally {
+        entry.migrating = null
+      }
+    })(), noop, noop)
+  }
+
+  // Each page-close or page-moved is verified as it is read: pageRecs keeps
+  // only the first one that verifies (it is terminal, lib/page-lifecycle.js)
+  // and the scan stops there, so a leaked key padding the log with
+  // unverifiable copies costs nothing and cannot push a genuine one out. A
+  // kept record whose issuer was revoked since is dropped and the scan
+  // resumes right after it.
+  async function scanPageRecords (entry, core) {
+    const opts = gateOpts()
+    if (entry.pageRecs.length > 0 && !verifiedEnd(entry.pageRecs[0].record, entry.key, opts)) {
+      entry.pageScan = Math.min(entry.pageScan, entry.pageRecs[0].seq + 1)
+      entry.pageRecs = []
+    }
+    if (entry.pageRecs.length > 0) return true
+    // Holes the cursor passed that were filled since (pageArrived).
+    const late = [...entry.pageLate].sort((a, b) => a - b)
+    entry.pageLate.clear()
+    for (const i of late) {
+      if (ended || entry.core !== core) return false
+      if (i < entry.pageScan && await scanPageAt(entry, core, i, opts)) return true
+    }
+    const end = Math.min(entryPresent(entry), maxLogBlocks)
+    // A pageLate overflow during the awaits rewinds the cursor (pageArrived)
+    // and asks for another pass; the walk then leaves it where it was put.
+    const rewinds = entry.pageRewinds
+    for (let i = entry.pageScan; i < end; i++) {
+      if (ended || entry.core !== core) return false
+      if (await scanPageAt(entry, core, i, opts)) {
+        if (entry.pageRewinds === rewinds) entry.pageScan = i + 1
+        return true
+      }
+    }
+    if (entry.pageRewinds === rewinds && end > entry.pageScan) entry.pageScan = end
+    return true
+  }
+
+  // -> true when block i is held and is a page-close or page-moved that
+  // verifies (kept in pageRecs).
+  async function scanPageAt (entry, core, i, opts) {
+    if (!(await core.has(i))) return false
+    let record = null
+    try {
+      record = decodeBlock(await core.get(i, { wait: false, raw: true }))
+    } catch {}
+    if (record === null || typeof record !== 'object') return false
+    if (i === 3 && record.type === 'page-origin') entry.originRec = { seq: 3, record }
+    if ((record.type === 'page-moved' || record.type === 'page-close') && verifiedEnd(record, entry.key, opts)) {
+      entry.pageRecs = [{ seq: i, record }]
+      return true
+    }
+    return false
+  }
+
+  // The present length steps over a tombstone target this replica does not
+  // hold, so the scan passes it; a page-* block named by a leaked key's
+  // tombstone is still fetched later (pageTargets in trackPresent) and is
+  // scanned when it lands. Bounded: past MAX_PAGE_LATE the cursor rewinds to
+  // the lowest one instead.
+  // Only a held page-* block takes a slot: the scan looks for nothing else,
+  // so late posts never force a rewind.
+  function pageArrived (entry, index) {
+    if (entry.migrateDone || index >= Math.min(entryPresent(entry), maxLogBlocks)) return
+    const core = entry.core
+    track((async () => {
+      if (!(await heldPageType(core, index))) return
+      if (entry.core !== core || entry.migrateDone || ended) return
+      if (entry.pageLate.size < maxPageLate) entry.pageLate.add(index)
+      else {
+        entry.pageScan = Math.min(entry.pageScan, index, ...entry.pageLate)
+        entry.pageLate.clear()
+        entry.pageRewinds++
+      }
+      maybeMigrate(entry)
+    })(), noop, noop)
+  }
+
+  async function heldPageType (core, index) {
+    try {
+      if (!(await core.has(index))) return false
+      const record = decodeBlock(await core.get(index, { wait: false, raw: true }))
+      return record !== null && typeof record === 'object' && PAGE_SCAN_TYPES.has(record.type)
+    } catch {
+      return false
+    }
+  }
+
+  function verifiedEnd (record, key, opts) {
+    try {
+      const verify = record.type === 'page-moved' ? verifyMoved : record.type === 'page-close' ? verifyClose : null
+      return verify !== null && verify(record, key, association, opts).ok === true
+    } catch {
+      return false
+    }
+  }
+
+  async function migrateOnce (entry) {
+    const core = entry.core
+    if (!(await scanPageRecords(entry, core))) return
+    if (entry.pageRecs.length === 0) return
+    const opts = gateOpts()
+    const moved = pageLifecycle(entry.pageRecs, entry.key, association, opts).movedTo
+    if (moved === null) return
+    const l = seederLink()
+    if (l === null) return
+    let reason
+    try {
+      reason = await migrate(entry, l, String(moved.to).toLowerCase(), moved.seq, opts)
+    } catch {
+      reason = 'failed'
+    }
+    emit({ event: 'page-migrate', reason })
+    if (!PAGE_MIGRATE_RETRYABLE.has(reason)) entry.migrateDone = true
+    else if (!ended) migrateAgain(entry)
+  }
+
+  // A move whose K2 could not be read yet (not served, a timeout), or that a
+  // locked session or an error stopped, is tried again on a later pass, a
+  // bounded number of times; every other outcome is final.
+  function migrateAgain (entry) {
+    const tries = (entry.migrateTries || 0) + 1
+    entry.migrateTries = tries
+    if (tries > PAGE_MIGRATE_RETRY_MS.length) {
+      entry.migrateDone = true
+      return
+    }
+    later(() => maybeMigrate(entry), PAGE_MIGRATE_RETRY_MS[tries - 1])
+  }
+
+  // The number of moves that led to K1, K1 -> K2 included, read from the
+  // page-origin records this device holds.
+  function moveCount (entry, opts) {
+    let count = 1
+    const seen = new Set([entry.key])
+    let cur = entry
+    while (cur && cur.originRec !== null) {
+      const origin = originOf([cur.originRec], cur.key, association, opts)
+      if (origin === null) break
+      count++
+      if (count > MAX_PAGE_MOVES) return count
+      const prev = String(origin.from).toLowerCase()
+      if (seen.has(prev)) return MAX_PAGE_MOVES + 1
+      seen.add(prev)
+      cur = follows.get(prev)
+    }
+    return count
+  }
+
+  // Blocks 0 and 3 of K2 from the verified seeder, in memory only.
+  async function readOrigin (l, k2) {
+    let held
+    try {
+      held = await acquireLinkCore(l, k2)
+    } catch {
+      return { ok: false, reason: 'unreadable' }
+    }
+    try {
+      const left = deadline - Date.now()
+      const timeout = once ? Math.max(1, Math.min(gateTimeoutMs, left)) : gateTimeoutMs
+      const raw0 = await held.core.get(0, { raw: true, timeout })
+      if (gateVerdict(raw0, k2, association, gateOpts()) !== null) return { ok: false, reason: 'unverified' }
+      const raw3 = await held.core.get(3, { raw: true, timeout })
+      return { ok: true, entries: [{ seq: 3, record: decodeBlock(raw3) }] }
+    } catch {
+      return { ok: false, reason: 'unreadable' }
+    } finally {
+      held.release()
+      await held.closed
+    }
+  }
+
+  async function migrate (entry, l, k2, fromSeq, opts) {
+    const k1 = entry.key
+    if ((await readMigrated()).has(k1)) return 'already-migrated'
+    if (typeof followPage !== 'function') return 'locked'
+    if (!HEX64.test(k2) || k2 === ownHex || k2 === k1) return 'unverified'
+    if (isBlockedKey(k2)) return 'blocked'
+    if (moveCount(entry, opts) > MAX_PAGE_MOVES) return 'chain'
+    const kvFollows = (await store.readFollows(storage)).map((k) => String(k).toLowerCase())
+    if (kvFollows.includes(k2) || followSet(await store.readAll(diary), ownHex).includes(k2)) {
+      await rememberMigrated(k1, k2)
+      return 'already-following'
+    }
+    const read = await readOrigin(l, k2)
+    if (!read.ok) return read.reason
+    const origin = originOf(read.entries, k2, association, opts)
+    // fromSeq is the last K1 block the owner saw; the leaves and the
+    // page-moved land after it.
+    if (origin === null || String(origin.from).toLowerCase() !== k1 || origin.fromSeq > fromSeq) return 'unverified'
+    if (ended) return 'unreadable'
+    if (kvFollows.length >= maxFollows) return 'limit'
+    try {
+      await followPage(k2, ownHex)
+    } catch (err) {
+      return err && err.message === store.LOCKED ? 'locked' : 'failed'
+    }
+    await rememberMigrated(k1, k2)
+    return 'migrated'
   }
 
   function onFork (entry) {
@@ -4732,6 +5051,7 @@ async function syncRun ({
     // diary, onVerified), deleted blocks never.
     ownTracker = trackPresent(diary, {
       noClear,
+      pages: false,
       onScan: seedFold,
       onGrow: (length) => {
         send({ type: 'have', key: ownHex, length })
@@ -4836,7 +5156,14 @@ async function syncRun ({
           cutByDeadline: false,
           discardedRegate: false,
           newestSent: new Set(), // lengths whose `newest` line was emitted
-          newestHeld: 0 // a `newest` length seen in regate
+          newestHeld: 0, // a `newest` length seen in regate
+          pageScan: 0, // blocks below this were scanned for page lifecycle records
+          pageLate: new Set(), // holes below pageScan filled since, at most MAX_PAGE_LATE
+          pageRewinds: 0, // pageLate overflows: a walk that saw one keeps the rewound cursor
+          pageRecs: [], // [{ seq, record }]: the first verified page-close or page-moved
+          originRec: null, // { seq: 3, record } when block 3 is a page-origin
+          migrating: null, // { again } while a page migration check runs
+          migrateDone: false // a verified move was handled in this run
         }
         follows.set(key, entry)
         if (blocked) {

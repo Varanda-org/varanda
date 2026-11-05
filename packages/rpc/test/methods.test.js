@@ -22,14 +22,15 @@ test('method list and mutating set', (t) => {
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.reset', 'identity.sessionSaved',
-    'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.uploadFile', 'node.close', 'node.info', 'notices.list', 'peek.read',
+    'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.uploadFile', 'node.close', 'node.info', 'notices.list',
+    'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set',
     'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add', 'wallet.sign'
   ])
   t.alike([...MUTATING].sort(), [
     'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
-    'identity.install', 'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile', 'node.close', 'post.create', 'post.delete',
+    'identity.install', 'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
     'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
   ])
@@ -1246,4 +1247,154 @@ test('dm.* (Conversas)', (t) => {
   for (const k of ['member', 'association', 'signature', 'payload', 'seq', 'id', 'key']) {
     bad(t, 'dm.reportSign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
   }
+})
+
+test('page.* (Páginas)', (t) => {
+  const nonce = 'n'.repeat(43)
+  const at = '2026-11-03T12:00:00.000Z'
+  const base = { action: 'post', nonce, page: KEY, op: { text: 'olá' } }
+  t.absent(isMutating('page.sign'))
+  t.absent(isMutating('page.read'))
+  t.absent(isMutating('page.feed'))
+  t.ok(isMutating('page.register'))
+
+  ok(t, 'page.sign', base, base)
+  for (const action of ['list', 'status', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar', 'rename', 'invite',
+    'dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen', 'follow', 'follows', 'media', 'notices', 'terms',
+    'community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read',
+    'accept', 'remove', 'offer', 'transfer-accept', 'create', 'close', 'move']) {
+    ok(t, 'page.sign', { ...base, action })
+  }
+  for (const action of ['create', 'list', 'terms']) ok(t, 'page.sign', { ...base, action, page: '' })
+  // A core delegate's terms acceptance (5.84): the op the node also signs a
+  // terms signature for.
+  ok(t, 'page.sign', { action: 'terms', nonce, page: '', op: { version: 13, diary: KEY } })
+  bad(t, 'page.sign', { ...base, action: 'offer-cancel', op: {} }, 'the unsigned offer-cancel is gone')
+  // An offer names a recipient and an expiry, or neither (the cancel).
+  const offerOp = { to: 'cd'.repeat(32), exp: '2026-11-10T12:00:00.000Z', gen: 2, at, nonce }
+  ok(t, 'page.sign', { ...base, action: 'offer', op: offerOp })
+  ok(t, 'page.sign', { ...base, action: 'offer', op: { ...offerOp, to: null, exp: null } })
+  bad(t, 'page.sign', { ...base, action: 'offer', op: { ...offerOp, to: null } }, 'to null with an exp')
+  bad(t, 'page.sign', { ...base, action: 'offer', op: { ...offerOp, exp: null } }, 'exp null with a to')
+  bad(t, 'page.sign', { ...base, action: 'offer', op: { ...offerOp, to: 'CD'.repeat(32) } }, 'an uppercase to')
+  bad(t, 'page.sign', { ...base, action: 'offer', op: { ...offerOp, exp: '2026-11-10' } }, 'a non-canonical exp')
+  for (const action of ['post', 'move', 'accept', 'invite']) bad(t, 'page.sign', { ...base, action, page: '' }, 'empty page for ' + action)
+  ok(t, 'page.sign', {
+    action: 'create',
+    nonce,
+    page: KEY,
+    op: { username: 'padaria', name: 'Padaria', bio: '', roster: { gen: 1, admins: [], prev: null, at, nonce } }
+  })
+  ok(t, 'page.sign', {
+    action: 'move',
+    nonce,
+    page: KEY,
+    op: { to: 'cd'.repeat(32), gen: 3, fromSeq: 40, owner: KEY, admins: ['cd'.repeat(32)], at, nonce }
+  })
+  const nullProto = Object.create(null)
+  nullProto.text = 'x'
+  ok(t, 'page.sign', { ...base, op: nullProto })
+  ok(t, 'page.sign', { ...base, op: { text: 'x'.repeat(16 * 1024 - 20) } })
+
+  bad(t, 'page.sign', {})
+  for (const k of ['action', 'nonce', 'page', 'op']) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'page.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the actor, the association, a hash,
+  // a signature or the bytes.
+  for (const k of ['member', 'actor', 'association', 'opHash', 'signature', 'countersignature', 'payload', 'key']) {
+    bad(t, 'page.sign', { ...base, [k]: KEY }, 'extra ' + k)
+  }
+  for (const action of ['POST', 'optin', 'page-roster', 'post ', '', null, 1]) bad(t, 'page.sign', { ...base, action }, 'action ' + action)
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 1]) bad(t, 'page.sign', { ...base, nonce: n }, 'nonce ' + n)
+  for (const page of [KEY.toUpperCase(), KEY.slice(1), null, 1]) bad(t, 'page.sign', { ...base, page }, 'page ' + page)
+  bad(t, 'page.sign', { ...base, op: { text: 'x'.repeat(16 * 1024) } }, 'op over 16 KiB')
+  // Charged as canonicalOp charges an array: exactly 16 KiB passes, one more byte fails.
+  const exact = (n) => ({ rows: ['x'.repeat(n)] })
+  const fill = 16 * 1024 - JSON.stringify(exact(0)).length
+  t.is(JSON.stringify(exact(fill)).length, 16 * 1024)
+  t.ok(validateParams('page.sign', { ...base, op: exact(fill) }).ok, 'array op of exactly 16 KiB')
+  bad(t, 'page.sign', { ...base, op: exact(fill + 1) }, 'array op over 16 KiB')
+  // The node fills association from its own configuration.
+  bad(t, 'page.sign', { ...base, action: 'close', op: { gen: 2, at, nonce, association: KEY } }, 'op association')
+  bad(t, 'page.sign', { ...base, action: 'create', op: { username: 'padaria', name: 'Padaria', bio: '', roster: { gen: 1, admins: [], prev: null, at, nonce, association: KEY } } }, 'nested op association')
+  bad(t, 'page.sign', { ...base, action: 'invite', op: { member: KEY, gen: 2, rosterSignature: '', roster: { owner: KEY, admins: [KEY], prev: 'cd'.repeat(64), at, nonce, association: KEY } } }, 'invite roster association')
+  bad(t, 'page.sign', { ...base, op: { rows: new Array(20000).fill(1) } }, 'huge op array')
+  for (const k of ['secretKey', 'pin', 'seed']) {
+    bad(t, 'page.sign', { ...base, op: { [k]: 'x' } }, 'op key ' + k)
+    bad(t, 'page.sign', { ...base, op: { roster: { inner: [{ [k]: 'x' }] } } }, 'nested op key ' + k)
+  }
+  // JSON.stringify reorders array-index-like keys, so canonicalOp refuses them.
+  for (const op of [{ 10: 1, 2: 2 }, { 0: 'x' }, { text: 'x', media: [{ 7: 1 }] }]) {
+    bad(t, 'page.sign', { ...base, op }, 'index-like op key ' + JSON.stringify(op))
+  }
+  t.ok(validateParams('page.sign', { ...base, op: { '01': 1, '-1': 2, 1.5: 3, '2a': 4 } }).ok, 'non-index numeric-looking keys')
+  let deep = { x: 1 }
+  for (let i = 0; i < 8; i++) deep = { d: deep }
+  bad(t, 'page.sign', { ...base, op: deep }, 'op too deep')
+  const sparse = [1, 2]
+  delete sparse[0]
+  for (const op of [null, [], 'x', 1, new Date(), { n: NaN }, { n: Infinity }, { n: -0 }, { s: '\ud800' }, { f: () => 1 }, { u: undefined }, { a: sparse }]) {
+    bad(t, 'page.sign', { ...base, op }, 'bad op')
+  }
+  const sym = { text: 'x' }
+  sym[Symbol('s')] = 1
+  bad(t, 'page.sign', { ...base, op: sym }, 'symbol key in op')
+  const getter = {}
+  Object.defineProperty(getter, 'text', { get: () => 'x', enumerable: true })
+  bad(t, 'page.sign', { ...base, op: getter }, 'getter in op')
+
+  ok(t, 'page.read', { key: KEY }, { key: KEY, full: false })
+  ok(t, 'page.read', { key: KEY, full: true }, { key: KEY, full: true })
+  bad(t, 'page.read', {})
+  bad(t, 'page.read', { key: KEY.toUpperCase() })
+  bad(t, 'page.read', { key: KEY, full: 1 })
+  bad(t, 'page.read', { key: KEY, page: KEY }, 'extra page')
+
+  const keys = []
+  for (let i = 0; i < 64; i++) keys.push(i.toString(16).padStart(2, '0').repeat(32))
+  ok(t, 'page.feed', { page: KEY, keys: [KEY] }, { page: KEY, keys: [KEY], limit: 30 })
+  ok(t, 'page.feed', { page: KEY, keys, limit: FEED_LIMIT_MAX })
+  ok(t, 'page.feed', { page: KEY, keys, limit: 1 })
+  bad(t, 'page.feed', { page: KEY, keys: [...keys, 'ff'.repeat(32)] }, '65th feed key')
+  bad(t, 'page.feed', { page: KEY, keys: [] }, 'no keys')
+  bad(t, 'page.feed', { page: KEY, keys: [KEY, KEY] }, 'duplicate key')
+  bad(t, 'page.feed', { page: KEY, keys: [KEY.toUpperCase()] }, 'uppercase key')
+  bad(t, 'page.feed', { page: KEY, keys: [KEY], limit: 0 })
+  bad(t, 'page.feed', { page: KEY, keys: [KEY], limit: FEED_LIMIT_MAX + 1 })
+  bad(t, 'page.feed', { page: KEY, keys: [KEY], before: { at, author: KEY, seq: 1 } }, 'no cursor')
+  bad(t, 'page.feed', { keys: [KEY] }, 'missing page')
+
+  ok(t, 'page.register', {}, {})
+  bad(t, 'page.register', { key: KEY }, 'extra key')
+})
+
+test('page.read worst-case result fits MAX_MESSAGE', (t) => {
+  const { PAGE_READ_FOLLOWS_MAX, PAGE_READ_LINKS_MAX } = require('../lib/methods')
+  const { MAX_MESSAGE } = require('..')
+  const hex = (i) => (i % 256).toString(16).padStart(2, '0').repeat(32)
+  const seq = Number.MAX_SAFE_INTEGER
+  const result = {
+    page: hex(1),
+    owner: hex(2),
+    admins: Array.from({ length: 16 }, (_, i) => hex(i + 3)),
+    gen: seq,
+    seq,
+    isOwner: false,
+    isAdmin: false,
+    complete: false,
+    follows: Array.from({ length: PAGE_READ_FOLLOWS_MAX }, (_, i) => ({ key: hex(i), seq })),
+    followsCount: seq,
+    followsTruncated: true,
+    closed: false,
+    movedTo: { to: hex(4), seq },
+    movedFrom: { from: hex(5), fromSeq: seq },
+    links: Array.from({ length: PAGE_READ_LINKS_MAX }, (_, i) => ({ actor: hex(i), diary: hex(i + 1) }))
+  }
+  const line = JSON.stringify({ v: 1, id: 'x'.repeat(64), ok: true, result })
+  t.ok(line.length < MAX_MESSAGE, 'page.read result ' + line.length + ' bytes')
+  // The shape this replaced: every follow (4095) as a bare key.
+  t.ok(JSON.stringify(new Array(4095).fill(hex(0))).length > MAX_MESSAGE)
 })

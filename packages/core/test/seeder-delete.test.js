@@ -1155,13 +1155,141 @@ test('a restart prepares a bounded number of diaries at once, each cleared befor
   }
   const atDownload = []
   const downloader = s._downloader.bind(s)
-  s._downloader = (core, deleted) => {
+  s._downloader = (core, deleted, ...rest) => {
     atDownload.push(core.has(2))
-    return downloader(core, deleted)
+    return downloader(core, deleted, ...rest)
   }
   await s.start()
   t.ok(peak >= 1 && peak <= 2, 'at most 2 diaries prepared at once (peak ' + peak + ')')
   t.is(atDownload.length, members.length, 'every stored diary was prepared')
   t.alike(await Promise.all(atDownload), members.map(() => false), 'each deleted block was cleared before its download began')
   for (const m of members) t.is(s._served.get(m.key).present, 4, 'the present length skips the hole')
+})
+
+// docs/protocol.md §12: a delete of a page-* record has no effect, and the
+// seeder's own bookkeeping follows it (a leaked page key must not make the
+// name index lose the end pointer, nor postBlock refuse the close). The real
+// _applyDelete, _runIndex, _rebuildIndex and postBlock over an in-memory
+// diary whose blocks arrive by hand.
+const { createNameIndex } = require('../lib/name-index')
+const { createEngagementIndex } = require('../lib/engagement-index')
+
+const PAGE_AT = '2026-01-01T00:00:00.000Z'
+const PAGE_KEY = 'a'.repeat(64)
+const PAGE_DELEGATION = { association: 'b'.repeat(64), issuer: 'c'.repeat(64), issuerDate: PAGE_AT, issuerSignature: 'e'.repeat(128) }
+const PAGE_BLOCKS = [
+  { type: 'member-cert', cert: { member: PAGE_KEY } },
+  { type: 'post', text: 'vazada', at: PAGE_AT, replyTo: null },
+  { type: 'page-close', page: PAGE_KEY, gen: 2, at: PAGE_AT, nonce: 'c'.repeat(43), actor: 'd'.repeat(64), ...PAGE_DELEGATION, signature: 'a'.repeat(128), countersignature: 'b'.repeat(128) },
+  { type: 'delete', seq: 2, at: PAGE_AT },
+  { type: 'delete', seq: 1, at: PAGE_AT }
+]
+
+function pageFixture (held) {
+  const seeder = Object.create(Seeder.prototype)
+  Object.assign(seeder, {
+    _index: createEngagementIndex(),
+    _topics: { removePost () {}, removeDiary () { return false } },
+    _postNotices: { removePost () {} },
+    // The signatures are checked elsewhere (name-index.test.js): here only
+    // the bookkeeping is.
+    _names: createNameIndex({ maxAuthors: 16, verifyPage: () => true }),
+    _indexQueue: Promise.resolve(),
+    _indexStartup: null,
+    _indexDropped: new Set(),
+    _indexRebuildQueued: false,
+    _served: new Map(),
+    _admitted: new Map([[PAGE_KEY, true]]),
+    _closing: false,
+    _moderationGen: 0,
+    _isBlocked: () => false,
+    _topicDiary () {}
+  })
+  const entry = {
+    gated: true,
+    dropped: false,
+    indexed: 1,
+    indexPaused: false,
+    indexQueued: false,
+    indexRetry: null,
+    indexReadFailures: 0,
+    topicIndexed: 1,
+    topicPaused: false,
+    present: PAGE_BLOCKS.length,
+    scanned: PAGE_BLOCKS.length,
+    gone: new Set(),
+    deleted: new Set(),
+    tombstones: new Map(),
+    effective: null,
+    pageSeqs: new Set(),
+    core: {
+      fork: 0,
+      length: PAGE_BLOCKS.length,
+      has: async (i) => held.has(i),
+      get: async (i) => held.has(i) ? b4a.from(JSON.stringify(PAGE_BLOCKS[i])) : null
+    }
+  }
+  seeder._served.set(PAGE_KEY, entry)
+  return { seeder, entry }
+}
+
+async function settleIndexQueue (seeder) {
+  let queue
+  do {
+    queue = seeder._indexQueue
+    await queue
+    await new Promise((resolve) => setImmediate(resolve))
+  } while (queue !== seeder._indexQueue)
+}
+
+async function learnTombstones (seeder, entry) {
+  for (const seq of [3, 4]) {
+    const r = PAGE_BLOCKS[seq]
+    entry.tombstones.set(seq, r.seq)
+    entry.effective = null
+    entry.gone.add(r.seq)
+    await seeder._applyDelete(PAGE_KEY, entry, seq, r, { media: false })
+  }
+}
+
+test('a leaked-key tombstone of the page-close learned before the close arrives keeps the end pointer, after a rebuild too, and postBlock serves the close', async (t) => {
+  // The tombstones are known (stored above a hole, or arrived above the
+  // scan cursor) before the close itself is held.
+  const held = new Set([0, 1, 3, 4])
+  const { seeder, entry } = pageFixture(held)
+  await learnTombstones(seeder, entry)
+  held.add(2)
+  held.delete(1)
+  seeder._indexDiary(PAGE_KEY, entry)
+  await settleIndexQueue(seeder)
+  t.is(seeder._names.endSeq(PAGE_KEY), 2, 'the name index keeps the verified end pointer (/index/page-end)')
+
+  // The scan (or a download below its cursor) reads the close once.
+  await seeder._pageArrived(PAGE_KEY, entry, 2)
+  t.absent(entry.deleted.has(2), 'the close leaves the deleted bookkeeping')
+  t.ok(entry.deleted.has(1), 'the deleted post stays deleted')
+  t.absent(seeder._effectiveDeleted(entry).has(2), 'nor is it in the readers\' fold')
+  t.ok(seeder._effectiveDeleted(entry).has(1))
+
+  seeder._rebuildIndex()
+  await settleIndexQueue(seeder)
+  t.is(entry.indexed, PAGE_BLOCKS.length, 'the rebuild rescanned the diary')
+  t.is(seeder._names.endSeq(PAGE_KEY), 2, 'the end pointer survives an index rebuild')
+
+  const served = await seeder.postBlock(PAGE_KEY, 2)
+  t.ok(served, 'postBlock serves the page-close')
+  t.is(JSON.parse(b4a.toString(served.block)).type, 'page-close')
+  t.is(await seeder.postBlock(PAGE_KEY, 1), null, 'the deleted post is still refused')
+})
+
+test('a leaked-key tombstone of a held page-close never enters the deleted bookkeeping', async (t) => {
+  const { seeder, entry } = pageFixture(new Set([0, 2, 3, 4]))
+  await learnTombstones(seeder, entry)
+  t.absent(entry.deleted.has(2), 'the held close is not deleted')
+  t.ok(entry.pageSeqs.has(2))
+  t.alike([...seeder._effectiveDeleted(entry)], [1], 'only the post is in the readers\' fold')
+  seeder._rebuildIndex()
+  await settleIndexQueue(seeder)
+  t.is(seeder._names.endSeq(PAGE_KEY), 2)
+  t.ok(await seeder.postBlock(PAGE_KEY, 2), 'postBlock serves the close')
 })

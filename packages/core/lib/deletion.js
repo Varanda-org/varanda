@@ -2,13 +2,25 @@
 
 // Deletion fold over one diary's entries ({ seq, record }). A `delete`
 // record (lib/records.js) at block b removes block `seq` whatever that
-// block is and whether or not this replica holds it. Walking from the
+// block is (a page-* record aside, below) and whether or not this replica
+// holds it. Walking from the
 // highest block down, a tombstone takes effect only if no later effective
 // tombstone deleted it, so the result is the same on every replica that
 // holds the same blocks. The fold is pure: no I/O, never throws (also
 // loaded by the browser node).
+// A tombstone whose target is a page-* record has no effect (docs/
+// protocol.md §12): a leaked page key must not undo a roster, a close or a
+// move. The fold can only tell when the target block is present; a
+// tombstone over a block this replica never held is folded as before, and
+// the clear path never clears a page-* block, so a present one stays.
 
-const { validRecordCopy, decodeBlock, MAX_LOG_BLOCKS } = require('./records')
+const { validRecordCopy, decodeBlock, MAX_LOG_BLOCKS, PAGE_KEYS } = require('./records')
+
+const PAGE_TYPES = new Set(Object.keys(PAGE_KEYS))
+
+function isPageType (type) {
+  return typeof type === 'string' && PAGE_TYPES.has(type)
+}
 
 // Always a fresh copy: reading entries can run getters, which must not be
 // able to change a caller's set while the fold consults it.
@@ -37,11 +49,29 @@ function tombstones (entries) {
   return out.sort((a, b) => b.seq - a.seq)
 }
 
+// Seqs of the valid page-* records among entries.
+function pageSeqs (entries) {
+  const out = new Set()
+  if (!Array.isArray(entries)) return out
+  for (let i = 0; i < entries.length; i++) {
+    try {
+      const entry = entries[i]
+      if (entry === null || typeof entry !== 'object') continue
+      const seq = entry.seq
+      if (!Number.isSafeInteger(seq)) continue
+      const copy = validRecordCopy(entry.record, seq)
+      if (copy !== null && isPageType(copy.type)) out.add(seq)
+    } catch {}
+  }
+  return out
+}
+
 function fold (entries) {
   const deleted = new Set()
   const effective = []
+  const pages = pageSeqs(entries)
   for (const t of tombstones(entries)) {
-    if (deleted.has(t.seq)) continue
+    if (deleted.has(t.seq) || pages.has(t.record.seq)) continue
     deleted.add(t.record.seq)
     effective.push(t)
   }
@@ -334,10 +364,12 @@ function sortedSeqs (deleted) {
   return [...toSet(deleted)].filter((s) => Number.isSafeInteger(s) && s > 0).sort((a, b) => a - b)
 }
 
-// Clears every deleted block still local -> the cleared seqs. Block 0 and
-// tombstones are never cleared: every replica needs the tombstones to
-// compute the same fold, and a tombstone a later one deleted becomes
-// effective again if that later one is itself deleted.
+// Clears every deleted block still local -> the cleared seqs. Block 0,
+// tombstones and page-* records are never cleared: every replica needs the
+// tombstones to compute the same fold, a tombstone a later one deleted
+// becomes effective again if that later one is itself deleted, and a page-*
+// record is never deletable (a seeder holding a set computed elsewhere
+// still keeps it).
 async function clearDeleted (core, deleted) {
   return clearSeqs(core, sortedSeqs(deleted), () => true)
 }
@@ -355,15 +387,16 @@ async function clearSeqs (core, seqs, stillDeleted) {
   return cleared
 }
 
-// Fails closed: only a block read back and known not to be a valid
-// tombstone may be cleared; a read error or a missing block never is.
+// Fails closed: only a block read back and known to be neither a valid
+// tombstone nor a valid page-* record may be cleared; a read error or a
+// missing block never is.
 async function clearable (core, seq, stillDeleted) {
   try {
     if (!stillDeleted(seq) || seq >= core.length || !(await core.has(seq))) return false
     const block = await core.get(seq, { wait: false, raw: true })
     if (block === null || block === undefined) return false
     const copy = validRecordCopy(decodeBlock(block), seq)
-    if (copy !== null && copy.type === 'delete') return false
+    if (copy !== null && (copy.type === 'delete' || isPageType(copy.type))) return false
     return stillDeleted(seq) && seq < core.length
   } catch {
     return false
@@ -508,6 +541,276 @@ function downloadExcept (core, deleted) {
   }
 }
 
+// Page diaries (docs/protocol.md §12): the fold ignores a tombstone whose
+// target is a page-* record only when the target is held, so a replica that
+// learns the tombstone first must still fetch the target, or a leaked page
+// key hides a page-close or page-moved from it. A diary is a page diary when
+// its block 1 or 2 is a page-roster (the genesis puts it at 2), and a
+// personal one once block 2 was read as anything else; until then it may be
+// one, and every target stays in the download (fail toward fetching). A target leaves the download once held: read as a
+// non page-* record it is remembered and leaves for good (it is cleared),
+// and a page-* one is never cleared. Personal diaries exclude every target
+// at once, as before. There is no give-up: Hypercore only asks a peer that
+// advertises a block, so a target nobody serves any more costs no request,
+// only its seq in the range.
+// A tombstone over an unheld block 2 settles the type first: block 2 ALONE
+// is asked from a peer that advertises it, within ROSTER_PROBE_MS (a leaked
+// page key may delete the roster and the close together, so "deleted block
+// 2 means personal" would lose the cut). Only block 2 actually read settles
+// it: a page-roster makes it a page; anything else makes it personal and is
+// cleared at once. Until then no other target is fetched (the privacy
+// rule), and block 2 is probed again later: on the next call, when a peer
+// connects, or when a pending retry fires. A probe that timed out waits
+// ROSTER_REPROBE_MS before the next one, and only one runs at a time, so a
+// personal diary whose block 2 is gone for good costs almost nothing. A
+// probe with no peer connected returns at once and does not count.
+const PAGE_GENESIS_SEQS = [1, 2]
+const ROSTER_SEQ = 2
+const ROSTER_PROBE_MS = 2000
+const ROSTER_REPROBE_MS = 30000
+const PROBE_POLL_MS = 50
+
+// Whether a connected peer advertised block seq (Hypercore: its
+// contiguous range, then its bitfield), and whether any peer is connected.
+function advertisedBy (core, seq) {
+  let peers = false
+  try {
+    for (const peer of core.peers) {
+      peers = true
+      if (seq < peer.remoteContiguousLength || peer.remoteBitfield.get(seq) === true) return { peers, yes: true }
+    }
+  } catch {}
+  return { peers, yes: false }
+}
+
+// -> the type of block 2 fetched alone ('' for an invalid record), null
+// when no peer advertised it in time (or it did not arrive), 'none' at
+// once when no peer is connected.
+async function probeRoster (core, probeMs) {
+  const deadline = Date.now() + probeMs
+  for (let first = true; ; first = false) {
+    const ad = advertisedBy(core, ROSTER_SEQ)
+    if (first && !ad.peers) return 'none'
+    const left = deadline - Date.now()
+    if (ad.yes && left > 0) {
+      try {
+        const block = await core.get(ROSTER_SEQ, { raw: true, timeout: left })
+        if (block !== null && block !== undefined) {
+          const copy = validRecordCopy(decodeBlock(block), ROSTER_SEQ)
+          return copy === null ? '' : copy.type
+        }
+      } catch {}
+      return null
+    }
+    if (left <= 0) return null
+    await new Promise((resolve) => setTimeout(resolve, Math.min(PROBE_POLL_MS, left)))
+  }
+}
+
+// The type of the held block at seq, '' for a block that is not a valid
+// record, null when it is not held (or the read failed).
+async function heldType (core, seq) {
+  try {
+    if (seq >= core.length || !(await core.has(seq))) return null
+    const block = await core.get(seq, { wait: false, raw: true })
+    if (block === null || block === undefined) return null
+    const copy = validRecordCopy(decodeBlock(block), seq)
+    return copy === null ? '' : copy.type
+  } catch {
+    return null
+  }
+}
+
+// -> { excludable (deleted, { wait }) -> Set, page () -> true | false |
+// null, watch (fn) -> unwatch, destroy () }: the seqs of `deleted` that may
+// leave the download now. Read every held target before a clear, so a
+// cleared one is not fetched back. `wait` false does not wait for a roster
+// probe (it settles later; watch(fn) is told). The guard may outlive one
+// download (the browser follower reopens it), so only its owner destroys it;
+// the peer-add listener also goes once the type is settled.
+function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPROBE_MS } = {}) {
+  let page = null
+  const read = new Set()
+  let probing = null
+  let nextAt = 0
+  let timer = null
+  let armed = false
+  let destroyed = false
+  const watchers = new Set()
+  const disarm = () => {
+    if (armed) core.off('peer-add', onPeer)
+    armed = false
+    clearTimeout(timer)
+    timer = null
+  }
+  const settled = () => {
+    disarm()
+    for (const fn of [...watchers]) {
+      try { fn() } catch {}
+    }
+  }
+  const probe = () => {
+    if (probing !== null) return probing
+    if (page !== null || destroyed) return null
+    const wait = nextAt - Date.now()
+    if (wait > 0) {
+      if (timer === null) {
+        timer = setTimeout(() => {
+          timer = null
+          probe()
+        }, wait)
+        if (timer.unref) timer.unref()
+      }
+      return null
+    }
+    probing = (async () => {
+      const type = await probeRoster(core, probeMs)
+      if (page !== null || destroyed) return
+      if (type === null) {
+        nextAt = Date.now() + reprobeMs
+        return
+      }
+      if (type === 'none') return
+      // Classification only: once the diary reads as a person, every target
+      // is excluded and the download's own clear path, which checks that the
+      // block is still deleted, clears block 2. Clearing here could drop a
+      // block whose tombstone was undone during the probe.
+      page = type === 'page-roster'
+    })().catch(() => {}).finally(() => {
+      probing = null
+      if (page !== null && !destroyed) settled()
+      // A timed-out probe arms its own retry: with a stable peer set and no
+      // further call nothing else would probe again.
+      else if (page === null && !destroyed && nextAt > Date.now()) probe()
+    })
+    return probing
+  }
+  function onPeer () {
+    if (page !== null || destroyed) return disarm()
+    probe()
+  }
+  const arm = () => {
+    if (armed || destroyed || page !== null) return
+    armed = true
+    core.on('peer-add', onPeer)
+  }
+  return {
+    page: () => page,
+    watch (fn) {
+      watchers.add(fn)
+      return () => watchers.delete(fn)
+    },
+    destroy () {
+      destroyed = true
+      disarm()
+      watchers.clear()
+    },
+    async excludable (deleted, { wait = true } = {}) {
+      const all = sortedSeqs(deleted)
+      if (page === null) {
+        for (const seq of PAGE_GENESIS_SEQS) {
+          const type = await heldType(core, seq)
+          if (type === 'page-roster') page = true
+          else if (type !== null && seq === ROSTER_SEQ) page = false
+          if (page !== null) break
+        }
+      }
+      // An unheld block 2 named by a tombstone: block 2 alone settles it.
+      // Fetching the other targets on "maybe" would pull deleted posts
+      // from stale peers.
+      const unsettled = () => page === null && all.includes(ROSTER_SEQ)
+      if (unsettled()) {
+        arm()
+        const run = probe()
+        if (wait && run !== null) await run
+      }
+      if (page === false) return new Set(all)
+      const out = new Set()
+      for (const seq of all) {
+        if (!read.has(seq)) {
+          const type = await heldType(core, seq)
+          if (type === null) continue
+          if (!isPageType(type)) read.add(seq)
+          // A deleted block 2 read once settles it, cleared or not.
+          if (seq === ROSTER_SEQ && page === null) {
+            page = type === 'page-roster'
+            settled()
+          }
+        }
+        out.add(seq)
+      }
+      // Until block 2 settles the type, every target stays out: a personal
+      // diary never fetches a deleted post from a stale or hostile peer, and
+      // a page fetches its targets once the roster lands (downloadExceptPages
+      // refreshes on block 1 or 2).
+      if (page !== true) return new Set(all)
+      return out
+    }
+  }
+}
+
+// make(core, skip) (downloadExcept, or the browser's linearExcept) over the
+// excludable part of `deleted` only (pageTargets); a 'download' of a target
+// still in the range, or of a genesis block, recomputes it. Same { update,
+// destroy, idle } as make's handle; the first ranges open once the first
+// read is done, and update(next) waits for the recompute.
+function downloadExceptPages (core, deleted, { make = downloadExcept, guard: given = null } = {}) {
+  // A guard made here is this download's own; a given one is its caller's.
+  const guard = given !== null ? given : pageTargets(core)
+  let wanted = toSet(deleted)
+  let waiting = new Set(sortedSeqs(wanted))
+  let inner = null
+  let destroyed = false
+  let unsettled = false // the type was unknown at the last refresh
+  let chain = Promise.resolve()
+  const refresh = (clear) => {
+    const run = chain.then(async () => {
+      if (destroyed) return []
+      const next = wanted
+      const skip = await guard.excludable(next)
+      if (destroyed) return []
+      unsettled = guard.page() === null
+      const wait = new Set()
+      for (const seq of sortedSeqs(next)) if (!skip.has(seq)) wait.add(seq)
+      waiting = wait
+      if (inner === null) {
+        inner = make(core, skip)
+        if (!clear) return []
+      }
+      return (await inner.update(skip)) || []
+    })
+    chain = run.catch(() => {})
+    return run
+  }
+  const onDownload = (index) => {
+    if (destroyed) return
+    if (waiting.has(index) || (PAGE_GENESIS_SEQS.includes(index) && (waiting.size > 0 || unsettled))) refresh(true).catch(() => {})
+  }
+  core.on('download', onDownload)
+  // A roster probe settled outside a refresh (a peer connected, a retry).
+  const unwatch = typeof guard.watch === 'function' ? guard.watch(() => { refresh(true).catch(() => {}) }) : null
+  refresh(false).catch(() => {})
+  return {
+    update (next) {
+      if (destroyed) return Promise.resolve([])
+      wanted = toSet(next)
+      return refresh(true)
+    },
+    destroy () {
+      if (destroyed) return
+      destroyed = true
+      core.off('download', onDownload)
+      if (unwatch !== null) unwatch()
+      if (given === null) guard.destroy()
+      if (inner !== null) inner.destroy()
+    },
+    async idle () {
+      await chain
+      if (inner !== null && typeof inner.idle === 'function') await inner.idle()
+    }
+  }
+}
+
 // Clears media ranges ({ start, blocks }) of the core passed in, clamped to
 // its length; the caller picks the core named by each range.
 async function clearRanges (core, ranges) {
@@ -532,5 +835,7 @@ module.exports = {
   tombstoneAt,
   clearDeleted,
   downloadExcept,
+  downloadExceptPages,
+  pageTargets,
   clearRanges
 }

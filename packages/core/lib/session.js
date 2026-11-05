@@ -579,6 +579,25 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
+    // Page statements and records (docs/rpc.md 5.84) are signed with the
+    // page delegate (5.87), never with a key the caller names. It reads only
+    // private/page-actor.json, so no store is opened and a running sync is
+    // not preempted.
+    'page.sign': serial(async ({ action, nonce, page, op }) => member.pageSign(ctx(), { action, nonce, page, op })),
+
+    // A page diary this node already holds, read whole (docs/rpc.md 5.85).
+    'page.read': serial(({ key }) => withStore((c) => member.pageRead(c, { key }))),
+
+    // A page's feed peeks diaries over the browser node's seeder link
+    // (docs/rpc.md 5.86). Nothing is opened.
+    'page.feed': serial(async () => {
+      throw new UsageError('feed de página disponível só no navegador')
+    }),
+
+    // The page delegate (docs/rpc.md 5.87): a pair kept in
+    // private/page-actor.json and named by a page-delegate in the own diary.
+    'page.register': serial(() => withStore((c) => member.pageRegister(c))),
+
     // Espiadinha reads diaries this node does not store through the browser
     // node's seeder WebSocket link (packages/web-member/lib/peek.js).
     // Nothing is opened.
