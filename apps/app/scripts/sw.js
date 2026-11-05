@@ -26,7 +26,10 @@ const CACHE = PREFIX + VERSION
 
 // Paths that are never intercepted (besides /seeder/..., /account/..., /media/... and /index/...):
 // live configuration, the worker script itself and the seeder's own pages.
-const BYPASS = new Set(['/varanda.json', '/sw.js', '/seeder'])
+// /version.json is live deploy state written by deploy.sh: never precached,
+// never answered from the cache or with the shell, so offline it fails like
+// any network error. The pathname check below already ignores a query string.
+const BYPASS = new Set(['/varanda.json', '/sw.js', '/seeder', '/version.json'])
 // The account service (Google link, @username; a later moderation panel under
 // /account/mod/) is reverse-proxied by Caddy and never part of the shell. The
 // Google step returns by a top-level navigation to /account/callback?code=…,

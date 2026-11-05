@@ -571,6 +571,11 @@ servido_moderacao() {
 # conferida à mão, com curl. Uma volta para um www sem sw.js (ou sem bundle
 # citado no index.html) ainda passa: a sonda só roda se o arquivo existe.
 # O bundle prova que o Caddy serve o arquivo com hash, não o index.html.
+# O version.json é comparado com a cópia de www, não com $target: uma volta
+# para um www sem o arquivo, ou com o do commit anterior, ainda passa. Na
+# implantação que o traz esta sonda não roda (o shell já carregou o deploy.sh
+# anterior), mas o arquivo é publicado mesmo assim: o build-web.sh novo o
+# grava no dist da cópia e o cp antigo o leva para www.
 aguardar_web() {
   local fim=$((SECONDS + 60)) json=0 conta=0 moderacao=0 bundle
   if grep -q 'handle /varanda.json' "$root/deploy/seeder/Caddyfile"; then
@@ -588,6 +593,7 @@ aguardar_web() {
     if servido_igual index.html '' && servido_igual varanda-node.js varanda-node.js \
       && { [ "$json" = 0 ] || servido_json; } \
       && { [ ! -f "$www/sw.js" ] || servido_igual sw.js sw.js; } \
+      && { [ ! -f "$www/version.json" ] || servido_igual version.json version.json; } \
       && { [ -z "$bundle" ] || servido_igual "${bundle#/}" "${bundle#/}"; } \
       && { [ "$conta" = 0 ] || servido_conta; } \
       && { [ "$moderacao" = 0 ] || servido_moderacao; }; then
@@ -656,7 +662,12 @@ construir_web() {
   # E $base (0700, de root, fora do contêiner) impede que outro usuário do
   # servidor alcance o que o build deixar em $stage.
   chown -R 65534:65534 "$stage"
-  bash deploy/seeder/build-web.sh "$stage"
+  # O commit vai para o app (Ajustes) só na forma exata.
+  if ! [[ $target =~ $sha_re ]]; then
+    log 'alvo não é um commit'
+    return 1
+  fi
+  EXPO_PUBLIC_VARANDA_COMMIT="$target" bash deploy/seeder/build-web.sh "$stage"
   dist="$stage/apps/app/dist"
   for p in "$stage/apps" "$stage/apps/app" "$dist"; do
     if [ -L "$p" ] || [ ! -d "$p" ]; then
@@ -688,6 +699,8 @@ publicar_web() {
   find "$www" -mindepth 1 -delete
   cp -R "$base/src/apps/app/dist/." "$www/"
   publicar_associacoes
+  # Root refaz os bytes a partir do $target conferido; nunca os lê da cópia.
+  gravar_versao "$www" "$target"
   rm -rf "$base"
 }
 
