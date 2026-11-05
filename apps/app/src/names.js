@@ -31,7 +31,17 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
 import { useNode } from './node'
 import { namesQuiet } from './autoSyncPolicy'
-import { applySeed, authoritative, viewOf } from './namesCache'
+import { applySeed, authoritative, fieldsOf, viewOf } from './namesCache'
+
+// The seeder's page hint rides with the name (only a hint: Membro verifies
+// with page.read). profile.read never says it, so it is carried over.
+function pageHintFields (f, known) {
+  if (typeof f.page === 'boolean') {
+    const page = f.page
+    return { page, closed: page && f.closed === true, moved: page && f.moved === true }
+  }
+  return known && known.page === true ? { page: true, closed: known.closed === true, moved: known.moved === true } : null
+}
 
 const DEBOUNCE_MS = 100
 const MIN_GAP_MS = 1000
@@ -101,8 +111,14 @@ export function NamesProvider ({ children }) {
     for (const [rawKey, value] of entries) {
       if (typeof rawKey !== 'string' || !isKey(rawKey)) continue
       const key = rawKey.toLowerCase()
-      const merged = applySeed(next.get(key) || null, value)
-      if (merged === null) continue
+      const known = next.get(key) || null
+      let merged = applySeed(known, value)
+      const hint = pageHintFields(fieldsOf(value), known)
+      const had = known && known.page === true
+      const same = merged === null && known !== null && (hint === null ? !had : had ? hint.page && hint.closed === known.closed && hint.moved === known.moved : !hint.page)
+      if (merged === null && !(known !== null && !same)) continue
+      if (merged === null) merged = { ...known }
+      if (hint !== null) Object.assign(merged, hint)
       next.set(key, merged)
       changed = true
     }
@@ -158,7 +174,10 @@ export function NamesProvider ({ children }) {
         if (!p || typeof p.author !== 'string') continue
         const key = p.author.toLowerCase()
         // Authoritative: a null removes what a seed said (username included).
-        next.set(key, authoritative(p))
+        const old = next.get(key)
+        const entry = authoritative(p)
+        if (old && old.page === true) Object.assign(entry, { page: true, closed: old.closed === true, moved: old.moved === true })
+        next.set(key, entry)
         retryRef.current.delete(key)
       }
       for (const rawKey of (res && res.missing) || []) {
@@ -346,7 +365,8 @@ export function NamesProvider ({ children }) {
     const entry = cache.get(key.toLowerCase())
     if (entry === undefined) return unsupported ? null : undefined
     if (entry === null) return null
-    return viewOf(entry)
+    const view = viewOf(entry)
+    return entry.page === true ? { ...view, page: true, closed: entry.closed === true, moved: entry.moved === true } : view
   }, [cache, unsupported])
 
   // Compat: string | null (looked up, no name) | undefined (unknown).

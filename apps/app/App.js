@@ -59,6 +59,8 @@ import { BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useW
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
 import { hostedPage } from './src/configStore'
+import { pagesOn, setCoreReach } from './src/pageGate'
+import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin } from './src/installation'
 import { NamesProvider, useNames } from './src/names'
 import { agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
@@ -127,6 +129,10 @@ import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, li
 import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
 import Pessoas from './src/screens/Pessoas'
+import Paginas from './src/screens/Paginas'
+import NovaPagina from './src/screens/NovaPagina'
+import PaginaAjustes from './src/screens/PaginaAjustes'
+import * as actingAs from './src/actingAs'
 import Publicar from './src/screens/Publicar'
 import Seguindo from './src/screens/Seguindo'
 import Termos from './src/screens/Termos'
@@ -212,6 +218,7 @@ const CAPTURED_ENTRY = captureEntryLink()
 // same for the whole run, and Member may mount again.
 let initialUrlTaken = false
 const NATIVE_APP = Platform.OS !== 'web'
+setCoreReach(CROSS_ORIGIN_PAGES)
 const NO_VERSIONS = Object.freeze({})
 // Lookup retries for a profile link while the account service does not
 // answer (offline, 429, 5xx, timeout): 15 s, 30 s, then every 60 s, 10 times.
@@ -1333,6 +1340,13 @@ function Member () {
   }, [mode])
   // A lock, unlock or reset closes the pushed screens too.
   useEffect(() => clearStack(), [generation, locked, clearStack])
+  // The seed of a page answer: Membro tells a page from a person with it.
+  const pageSeed = (found) => {
+    const seed = { page: true }
+    if (found.closed === true) seed.closed = true
+    if (typeof found.movedTo === 'string') seed.movedTo = found.movedTo
+    return seed
+  }
   // A tap on @nome in a post. The row author's own verified name opens with
   // no request; any other name goes through the account lookup (current
   // holder only). No seed: Membro re-verifies and a seed would flash.
@@ -1350,10 +1364,11 @@ function Member () {
       return
     }
     const gen = generationRef.current
-    const r = await resolveInvite({ username }, lookupUsername)
+    let found = null
+    const r = await resolveInvite({ username }, async (name) => { found = await lookupUsername(name); return found })
     // A newer tap, a lock or an identity change meanwhile drops this answer.
     if (tap !== mentionSeq.current || gen !== generationRef.current || lockedRef.current) return
-    if (r.status === 'ready') openMember(r.key)
+    if (r.status === 'ready') openMember(r.key, found && found.kind === 'page' ? pageSeed(found) : undefined)
     else showToast(r.status === 'not-found' ? NOT_FOUND_TEXT : 'Não foi possível abrir o @nome agora.')
   }, [openMember, node.online])
   const mentionHandler = node.hosted === true ? openMention : undefined
@@ -1375,6 +1390,11 @@ function Member () {
   // epoch and compared with !==. The dot shows when a group the node follows
   // moved since the Comunidades tab (or that group) was last on screen.
   const nodeEpoch = node.epoch
+  // A lock, a sign-out or another identity ends Publicar como. A socket
+  // reconnect also bumps the epoch, but the same unlocked identity keeps
+  // acting as its page (and the page screens keep their drafts).
+  const actingIdentity = locked ? 'locked' : (typeof ownKey === 'string' ? ownKey : 'none')
+  useEffect(() => { actingAs.reset() }, [actingIdentity])
   const [groupSeen, setGroupSeen] = useState({ epoch: nodeEpoch, map: {} })
   const seenMap = groupSeen.epoch === nodeEpoch ? groupSeen.map : {}
   const topEntry = nav.top(stack)
@@ -1959,6 +1979,7 @@ function Member () {
       onFollowsChanged: followsChanged,
       onMessage: openMessage,
       onDeletedPost: deletedPost,
+      onOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
       onOpenPeople: openPeople
     }
     content = (
@@ -2127,6 +2148,21 @@ function Member () {
                     </View>
                   )
                 }
+                // No pagesOn guard: a reconnect clears accountOrigin until
+                // node.info answers, and a page screen must never fall through
+                // to Membro. Each renders its own 'Disponível em breve.'.
+                if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'paginaajustes') {
+                  const top = i === stack.length - 1
+                  return (
+                    <View key={i + ':' + entry.screen + ':' + (entry.key || '') + ':' + actingIdentity} style={top ? styles.flex : styles.hidden}>
+                      {entry.screen === 'paginas'
+                        ? <Paginas active={top} onBack={goBack} onNewPage={() => pushScreen({ screen: 'novapagina' })} onOpenPage={(key, row) => openMember(key, { page: true, closed: !!(row && row.closed), movedTo: row && typeof row.movedTo === 'string' ? row.movedTo : null })} onChanged={followsChanged} />
+                        : entry.screen === 'novapagina'
+                          ? <NovaPagina onBack={goBack} onCreated={(pageKey) => openMember(pageKey, { page: true })} />
+                          : <PaginaAjustes entry={entry} onBack={goBack} onChanged={followsChanged} onOpenMember={openMember} />}
+                    </View>
+                  )
+                }
                 if (entry.screen === 'seguindo' || entry.screen === 'seguidores') {
                   return (
                     <View key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
@@ -2244,7 +2280,7 @@ function Member () {
           showToast(text)
         }}
       />
-      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} />
+      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} />
       {/* Mounted after the splash, so it wins: while the boot cover shows it
           follows the splash, which stays cream on native (Splash.js). */}
       <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light })} />

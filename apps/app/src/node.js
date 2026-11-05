@@ -103,6 +103,7 @@ import { EMPTY_GROUP_VERSIONS, bumpGroupVersion, clearGroupVersions, readGroupVe
 import { EMPTY_SIGNALS, endIdle, foldSignal, waitForCatchUp, ackFresh as ackFreshSignals } from './syncSignals'
 import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, effectiveBackoff, graceExpired, nextBackoff, reconcileIdle, refreshPlan, shouldStopForHidden, startFailure, visibilityChange, wantsStart } from './autoSyncPolicy'
 import { errorText } from './ui'
+import { accountOriginOf } from './pageGate'
 import { slowRequestLine } from './slowRequest'
 
 const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
@@ -155,6 +156,11 @@ export function NodeProvider ({ children }) {
   // true when the live configuration came from the installation's
   // /varanda.json (discovered, never saved).
   const [hosted, setHosted] = useState(false)
+  // The https account origin a core node was configured with, or the one its
+  // node.info answers (varanda-serve --account-origin, docs/rpc.md 5.2), else
+  // undefined (src/pageGate.js decides whether Páginas show).
+  const [infoOrigin, setInfoOrigin] = useState(undefined)
+  const accountOrigin = useMemo(() => accountOriginOf(config && config.accountOrigin) || infoOrigin, [config, infoOrigin])
   // 'live' | 'remembered' | null (see the header).
   const [hostedSource, setHostedSource] = useState(null)
   const [online, setOnline] = useState(() => isOnline())
@@ -449,6 +455,7 @@ export function NodeProvider ({ children }) {
       })
       holder.conn = conn
       connRef.current = conn
+      setInfoOrigin(undefined)
       if (save && cfg) {
         try { await saveConfig(cfg) } catch { setError('a configuração não pôde ser guardada neste aparelho') }
       }
@@ -832,6 +839,20 @@ export function NodeProvider ({ children }) {
     readPasskey()
   }, [recovery, sync.stopped, sync.active, request, readPasskey, startRecoveryRun])
 
+  // One node.info read per connection of a node that is not hosted: its
+  // accountOrigin, if any, turns the Páginas on (a failed read leaves them
+  // off until the next connection).
+  const infoConnRef = useRef(null)
+  useEffect(() => {
+    if (phase !== 'ready' || hosted) return
+    const conn = connRef.current
+    if (!conn || infoConnRef.current === conn) return
+    infoConnRef.current = conn
+    request('node.info', {}).then((info) => {
+      if (connRef.current === conn) setInfoOrigin(accountOriginOf(info && info.accountOrigin))
+    }, () => {})
+  }, [phase, hosted, request])
+
   // An awaited continuation of `conn` in the epoch/generation it began in.
   const stillCurrent = useCallback((conn, ep, gen) => (
     connRef.current === conn && epochRef.current === ep && pkGenRef.current === gen
@@ -1096,8 +1117,8 @@ export function NodeProvider ({ children }) {
   const legacyFollows = useMemo(() => (hasPasskey && hasLegacy && unlocked ? { keys: legacyKeys, confirm: legacyConfirm } : null), [hasPasskey, hasLegacy, unlocked, legacyKeys, legacyConfirm])
 
   const value = useMemo(() => ({
-    phase, config, error, hosted, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, autoSync, signals, ackFresh, setAutoSync, syncNow
-  }), [phase, config, error, hosted, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, autoSync, signals, ackFresh, setAutoSync, syncNow])
+    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, autoSync, signals, ackFresh, setAutoSync, syncNow
+  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, autoSync, signals, ackFresh, setAutoSync, syncNow])
 
   return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
 }

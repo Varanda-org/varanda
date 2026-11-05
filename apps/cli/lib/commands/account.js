@@ -14,6 +14,8 @@ const { openAccountStore } = require('../account/store')
 const { openTermsStore } = require('../account/terms-store')
 const { openInvitesStore } = require('../account/invites-store')
 const { openPushStore } = require('../account/push-store')
+const { openPageKeys } = require('../account/page-keys')
+const { openPagesStore } = require('../account/pages-store')
 const { openAgeStore } = require('../account/age-store')
 const { startAgeCheck, directoryFloor } = require('../account/age-check-state')
 const { createDidit } = require('../account/didit')
@@ -458,6 +460,21 @@ function readTriageEnv (env, dataDir) {
   return { mode: AI_MODES[ai], token, seederHttp, modelDir }
 }
 
+// The hosted pages (business and project diaries), off unless VARANDA_PAGE_KEYS
+// is set. The key's shape is checked here, before the lock is taken, and again
+// by openPageKeys; no value is ever echoed. The writer module loads only when
+// pages are on.
+function readPagesEnv (env) {
+  const key = env.VARANDA_PAGE_KEYS
+  if (key === undefined || key === '') return null
+  if (typeof key !== 'string' || !HEX64_RE.test(key)) {
+    throw new UsageError('VARANDA_PAGE_KEYS inválida: use 64 caracteres hexadecimais minúsculos')
+  }
+  const { parseSeederWs } = require('../account/pages-writer')
+  if (parseSeederWs(env.VARANDA_SEEDER_WS) === null) throw new UsageError('VARANDA_SEEDER_WS inválido')
+  return { seederWs: env.VARANDA_SEEDER_WS }
+}
+
 // Read once, validated by shape only; no value is ever printed.
 function readEnv (env, dataDir) {
   const origin = env.VARANDA_PUBLIC_ORIGIN
@@ -631,6 +648,7 @@ async function serve (flags, env) {
   const host = flags.accountHost || DEFAULT_HOST
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
+  const pagesConfig = readPagesEnv(env)
   const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince } = readEnv(env, flags.dataDir)
   const { maxMembers = null, invitesPerWeek = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
@@ -662,12 +680,18 @@ async function serve (flags, env) {
   let stopHeal = null
   let stopInvitesHeal = null
   let stopPushHeal = null
+  let pageKeys = null
+  let pagesWriter = null
+  let pagesStore = null
+  // The page clients (notices, delegates, Conversas, communities): closed
+  // before the lock goes, failed when it is lost.
+  let pageClients = []
   let ages = null
   let stopAgeHeal = null
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms, invites, pushStore, ages)
+      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients)
     }
   })
   let listener = null
@@ -774,11 +798,34 @@ async function serve (flags, env) {
       })
     }
     log({ event: 'usage', reason: usage === null ? 'desligada' : 'ligada' })
+    // Pages, only with VARANDA_PAGE_KEYS set. A key file that does not open
+    // under that key keeps the service up with the page routes off, as the
+    // other sidecars do. The model load above may have outlived the lock or
+    // met a signal: then nothing of the pages is opened, so no core or key
+    // file is touched by a holder that is no longer the writer.
+    if (pagesConfig === null) log({ event: 'paginas', reason: 'desligada' })
+    else if (stopRequested || lost || !lock.owned()) log({ event: 'paginas', reason: 'indisponivel' })
+    else {
+      const { createPagesWriter } = require('../account/pages-writer')
+      try {
+        pageKeys = openPageKeys({ dir: flags.dataDir, env, log, guard: () => lock.owned() })
+      } catch (err) {
+        if (err.code !== 'indisponivel') throw err
+      }
+      if (pageKeys === null) log({ event: 'paginas', reason: 'indisponivel' })
+      else {
+        pagesWriter = createPagesWriter({ dir: flags.dataDir, keys: pageKeys, association, seederWs: pagesConfig.seederWs, log, guard: () => lock.owned() })
+        pagesStore = openPagesStore(flags.dataDir, { guard: () => lock.owned() })
+        log({ event: 'paginas', reason: pagesStore.available() ? 'ligada' : 'indisponivel' })
+        await closeOrphanPages(store, pagesWriter, pagesStore, log)
+        pageClients = openPageClients({ dataDir: flags.dataDir, env, association, seederWs: pagesConfig.seederWs, moderation, keys: pageKeys, writer: pagesWriter, pagesStore, guard: () => lock.owned(), log })
+      }
+    }
     // A signal (or a lost lock) during the model load: do not open the port
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
       const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, invites, push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, maxConnections, ratePerSecond, burst })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, invites, push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -795,6 +842,9 @@ async function serve (flags, env) {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     if (listener) await listener.close()
+    // The page links close before the lock goes: nothing is appended after it.
+    await closePageClients(pageClients)
+    if (pagesWriter !== null) await pagesWriter.close()
     // The worker ends its running job (bounded) before the lock goes: it
     // writes moderation.json, exemplars.json and the ledger.
     if (triage !== null) {
@@ -823,6 +873,10 @@ async function serve (flags, env) {
     // A failed store has nothing it could fold safely (close() would only
     // answer 'indisponivel'), so it is skipped like a lost lock.
     closing = await closeIfOwned(store, lock, lost || unavailable, log)
+    // A handler the listener close did not wait for writes no page key or
+    // block once the lock is released.
+    if (pageKeys !== null) pageKeys.fail()
+    if (pagesWriter !== null) pagesWriter.fail()
     lock.release()
   }
   return lost || unavailable || closing === 'failed' ? 1 : 0
@@ -837,17 +891,96 @@ function storeUnavailable (log, stop) {
   stop()
 }
 
+// The page clients of ./pages-routes.js over the same writer, key table and
+// ACL: pages-notices (a page's notices), pages-delegate (core-node
+// delegates), pages-dm (Conversas as the page) and pages-groups
+// (communities). The blocklist and the revoked issuers are the moderation
+// desk's published state, read on every call. A client that does not open
+// is left out (its routes answer 'indisponivel' or 'nao-encontrado') and
+// the service stays up. pages-groups needs no rebuild at start: it reads
+// each page's writer rows from pagesStore when the page is first used.
+// -> [{ name, client }].
+function openPageClients ({ dataDir, env, association, seederWs, moderation, keys, writer, pagesStore, guard, log }) {
+  const blocklist = {
+    has (key) {
+      return moderation.blocked().some((b) => b.member === key)
+    }
+  }
+  const revokedIssuers = () => revokedIssuerSet(moderation.pending().published.snapshot)
+  const { createPagesNotices } = require('../account/pages-notices')
+  const { createPagesDelegate } = require('../account/pages-delegate')
+  const { createPagesDm } = require('../account/pages-dm')
+  const { createPagesGroups } = require('../account/pages-groups')
+  const makers = [
+    ['pagesNotices', () => createPagesNotices({ keys, writer, seederWs, association, blocklist, revokedIssuers, env, log })],
+    ['pagesDelegate', () => createPagesDelegate({ seederWs, association, blocklist, revokedIssuers, log })],
+    ['pagesDm', () => createPagesDm({ writer, pagesStore, keys, association, seederWs, dir: dataDir, env, blocklist, revokedIssuers, guard, log })],
+    ['pagesGroups', () => createPagesGroups({ dir: dataDir, writer, pagesStore, keys, association, blocklist, revokedIssuers, seederWs, guard, log })]
+  ]
+  const out = []
+  for (const [name, make] of makers) {
+    try {
+      const client = make()
+      if (typeof client.ready === 'function') client.ready().catch(() => log({ event: 'paginas', reason: name + '-indisponivel' }))
+      out.push({ name, client })
+    } catch {
+      log({ event: 'paginas', reason: name + '-indisponivel' })
+    }
+  }
+  return out
+}
+
+// A directory page with neither a writer page nor an ACL row is a creation
+// cut short between the name reservation and the writer: it is closed so
+// lookup stops answering it as live. Only a count is logged; a failure
+// leaves the directory as it was.
+async function closeOrphanPages (store, writer, pagesStore, log) {
+  try {
+    await writer.ready()
+    if (!pagesStore.available()) return
+    const held = new Set(writer.pageKeys())
+    const closed = await store.closeOrphanPages((key) => held.has(key) || pagesStore.get(key) !== null)
+    if (closed > 0) log({ event: 'paginas', reason: 'orfas-encerradas', count: closed })
+  } catch {
+    log({ event: 'paginas', reason: 'orfas-pendentes' })
+  }
+}
+
+function pageClientsOf (pageClients) {
+  const out = {}
+  for (const { name, client } of pageClients) out[name] = client
+  return out
+}
+
+async function closePageClients (pageClients) {
+  for (const { client } of pageClients) {
+    try {
+      await client.close()
+    } catch {}
+  }
+}
+
 // The lock is lost: the store is marked unavailable first, synchronously,
 // so no request still draining during the stop appends beside the writer
 // that took the lock over (store.js, "Writer guard"); then the service
-// stops. The terms, invites, push and age stores too: their
-// next write must not land either.
-function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null) {
+// stops. The terms, invites, push and age stores, the page keys and the
+// page writer too: their next write must not land either.
+function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = []) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
   if (invites !== null) invites.fail()
   if (pushStore !== null) pushStore.fail()
   if (ages !== null) ages.fail()
+  if (pagesStore !== null) pagesStore.fail()
+  if (pageKeys !== null) pageKeys.fail()
+  if (pagesWriter !== null) pagesWriter.fail()
+  // A client without fail() is closed: nothing it holds is written again.
+  for (const { client } of pageClients) {
+    try {
+      if (typeof client.fail === 'function') client.fail()
+      else Promise.resolve(client.close()).catch(() => {})
+    } catch {}
+  }
   log({ event: 'lock', reason: 'perdido' })
   stop()
 }
@@ -960,6 +1093,7 @@ async function run (flags) {
 }
 
 module.exports = {
+  closeOrphanPages,
   commands: {
     account: { summary: 'serviço de vínculo de conta Google', run }
   },

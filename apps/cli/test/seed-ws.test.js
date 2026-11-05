@@ -1023,6 +1023,11 @@ function indexSeeder ({ gate = null } = {}) {
     await wait()
     return author === A ? { length: 9, profileSeq: 1, usernameSeq: null, posts: [8, 5, 2], postsTotal: 3, indexing: false, complete: true } : null
   }
+  stub.indexPageEnd = async (author) => {
+    stub.calls.push(['indexPageEnd', author])
+    await wait()
+    return author === A ? { endSeq: 7 } : null
+  }
   // A one-character segment is too short (null); 'ana' hits A, anything else
   // is a valid query with no hit.
   stub.indexSearch = async (segment) => {
@@ -1109,6 +1114,15 @@ test('startSeedWs /index: GET answers JSON with the parsed arguments, HEAD sends
   const before = await mediaRequest(server.port, '/index/member/' + A + '/5')
   t.is(before.status, 200)
   t.alike(seeder.calls[5], ['indexMember', A, 5])
+  seeder.calls.splice(6)
+  const end = await mediaRequest(server.port, '/index/page-end/' + A)
+  t.is(end.status, 200)
+  jsonHeaders(t, end)
+  t.alike(JSON.parse(end.body.toString()), { endSeq: 7 })
+  t.alike(seeder.calls.splice(6), [['indexPageEnd', A]])
+  t.is((await mediaRequest(server.port, '/index/page-end/' + B)).status, 404, 'null -> 404')
+  t.is((await mediaRequest(server.port, '/index/page-end/' + A + '/1')).status, 404, 'no suffix')
+  seeder.calls.splice(6)
 
   const head = await mediaRequest(server.port, '/index/post/' + A + '/12', { method: 'HEAD' })
   t.is(head.status, 200)

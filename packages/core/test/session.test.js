@@ -18,7 +18,10 @@ const { initAssociation, issueCertificate, issueIssuerCertificate } = require('.
 const { createCert, createUsernameRecord } = require('../lib/cert')
 const { Seeder } = require('../lib/seeder')
 const { UsageError } = require('../lib/errors')
-const { postRecord, profileRecord, profileRecords, validateRecord, memberCertRecord } = require('../lib/records')
+const { postRecord, profileRecord, profileRecords, validateRecord, memberCertRecord, followRecord, deleteRecord } = require('../lib/records')
+const pageLib = require('../lib/page')
+const pageProof = require('../lib/page-proof')
+const { issuerSignLink } = require('../lib/page-lifecycle')
 const store = require('../lib/store')
 
 // A bootstrap that is never dialled: these tests start no sync.
@@ -406,6 +409,266 @@ test('age.proof is refused by the node session (USAGE, not INTERNAL)', async (t)
   t.alike(await failure(m.call('age.proof', params)), NO, 'after identity.create')
   t.alike(await m.call('log.read'), before, 'nothing written')
   t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
+test('page.sign without a delegate and page.feed are refused by the node session (USAGE), nothing opened or written', async (t) => {
+  const SIGN = { code: 'USAGE', message: 'chave de página não registrada' }
+  const FEED = { code: 'USAGE', message: 'feed de página disponível só no navegador' }
+  const sign = { action: 'post', nonce: 'n'.repeat(43), page: randomKey(), op: { text: 'oi' } }
+  const feed = { page: randomKey(), keys: [randomKey()] }
+  const fresh = await member(t)
+  const files = fs.readdirSync(fresh.dataDir)
+  t.alike(await failure(fresh.call('page.sign', sign)), SIGN, 'page.sign before an identity')
+  t.alike(await failure(fresh.call('page.feed', feed)), FEED, 'page.feed before an identity')
+  t.alike(await failure(fresh.call('page.register', {})), { code: 'NOT_FOUND', message: 'identidade não encontrada' }, 'page.register before an identity')
+  t.alike(fs.readdirSync(fresh.dataDir), files, 'no store opened')
+  const m = await member(t, { cert: true })
+  const before = await m.call('log.read')
+  const mfiles = fs.readdirSync(m.dataDir)
+  t.alike(await failure(m.call('page.sign', sign)), SIGN, 'page.sign after an identity')
+  t.alike(await failure(m.call('page.sign', { ...sign, action: 'create', page: '', op: {} })), SIGN, 'a pageless action too')
+  t.alike(await failure(m.call('page.feed', { ...feed, limit: 5 })), FEED, 'page.feed after an identity')
+  t.alike(fs.readdirSync(m.dataDir), mfiles, 'no private dir created')
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
+test('page.register: an Ed25519 delegate in private/page-actor.json, named once in the diary; page.sign signs as it', async (t) => {
+  const m = await member(t, { cert: true })
+  const r = await m.call('page.register', {})
+  t.alike(Object.keys(r), ['actor'])
+  t.ok(/^[0-9a-f]{64}$/.test(r.actor))
+  t.not(r.actor, m.publicKey, 'not the diary key')
+  const file = path.join(m.dataDir, 'private', 'page-actor.json')
+  t.is(fs.statSync(file).mode & 0o777, 0o600, 'key file 0600')
+  const stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+  t.is(stored.publicKey, r.actor)
+  t.absent(JSON.stringify(r).includes(stored.secretKey), 'no secret in the result')
+  const log = await m.call('log.read')
+  const delegates = log.entries.filter((e) => e.record && e.record.type === 'page-delegate')
+  t.is(delegates.length, 1)
+  t.is(delegates[0].record.actor, r.actor, 'the diary names the stored key')
+  t.alike(await m.call('page.register', {}), r, 'a repeat returns the same key')
+  t.alike(await m.call('log.read'), log, 'and appends nothing')
+
+  const page = randomKey()
+  const nonce = 'n'.repeat(43)
+  const op = { text: 'oi' }
+  const s = await m.call('page.sign', { action: 'post', nonce, page, op })
+  const fields = { action: 'post', nonce, member: r.actor, page, association: m.assoc.hex, opHash: pageProof.opHash(op) }
+  t.alike(pageProof.verifyPage(fields, s.signature), { ok: true }, 'verifies under the delegate')
+  t.is(pageProof.verifyPage({ ...fields, member: m.publicKey }, s.signature).ok, false, 'the manifest diary key does not verify')
+  const moved = await m.call('page.sign', {
+    action: 'move',
+    nonce,
+    page,
+    op: { to: randomKey(), gen: 2, fromSeq: 3, owner: r.actor, admins: [], at: '2026-01-01T00:00:00.000Z', nonce: 'm'.repeat(43) }
+  })
+  t.alike([moved.record.actor, moved.origin.actor, moved.roster.owner], [r.actor, r.actor, r.actor], 'move: every part as the delegate')
+  t.alike(await failure(m.call('page.sign', { action: 'close', nonce, page, op: { gen: 2 } })), { code: 'USAGE', message: 'operação de página inválida' })
+  t.alike(await m.call('log.read'), log, 'page.sign appends nothing')
+  t.absent(JSON.stringify(m.session.internal).includes(stored.secretKey), 'no secret logged')
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('page.read: isOwner and isAdmin compare with the registered delegate, never the diary key', async (t) => {
+  const m = await member(t, { cert: true })
+  const s = pageSigners(m)
+  const pageOfDiary = await heldDiary(t, m, (key) => [s.roster(key)])
+  t.alike([(await m.call('page.read', { key: pageOfDiary })).isOwner], [false], 'no delegate: false')
+  const { actor } = await m.call('page.register', {})
+  const stored = JSON.parse(fs.readFileSync(path.join(m.dataDir, 'private', 'page-actor.json'), 'utf8'))
+  const delegate = { publicKey: b4a.from(stored.publicKey, 'hex'), secretKey: b4a.from(stored.secretKey, 'hex') }
+  const issuerKp = crypto.keyPair()
+  const issuerCert = issueIssuerCertificate(m.assoc.dir, { issuer: b4a.toString(issuerKp.publicKey, 'hex') })
+  const AT = '2026-01-01T00:00:00.000Z'
+  const roster = (page, owner, admins, kp, gen = 1, prev = null) => {
+    const f = { type: 'page-roster', page, gen, owner, admins, prev, at: AT, nonce: 'r'.repeat(43), association: m.assoc.hex }
+    return pageLib.issuerCountersign({ ...f, signature: pageLib.signRoster(f, kp) }, issuerKp, issuerCert)
+  }
+  // gen 1 by the owner, then the invitee's accept and the gen-2 roster it names.
+  const withAdmin = (page, owner, adminKp) => {
+    const adminHex = b4a.toString(adminKp.publicKey, 'hex')
+    const next = roster(page, b4a.toString(owner.publicKey, 'hex'), [adminHex], owner, 2, 1)
+    const f = { page, gen: 2, rosterSignature: next.signature, at: AT, nonce: 'a'.repeat(43), actor: adminHex }
+    return [roster(page, b4a.toString(owner.publicKey, 'hex'), [], owner), { type: 'page-accept', ...f, signature: pageLib.signAccept(f, adminKp) }, next]
+  }
+  const owned = await heldDiary(t, m, (key) => [roster(key, actor, [], delegate)])
+  const o = await m.call('page.read', { key: owned })
+  t.alike([o.owner, o.isOwner, o.isAdmin], [actor, true, false], 'owner by the delegate')
+  const other = crypto.keyPair()
+  const otherHex = b4a.toString(other.publicKey, 'hex')
+  const admin = await heldDiary(t, m, (key) => withAdmin(key, other, delegate))
+  const a = await m.call('page.read', { key: admin })
+  t.alike([a.admins, a.isOwner, a.isAdmin], [[actor], false, true], 'admin by the delegate')
+  const foreign = await heldDiary(t, m, (key) => [roster(key, otherHex, [], other)])
+  const f = await m.call('page.read', { key: foreign })
+  t.alike([f.owner, f.isOwner, f.isAdmin], [otherHex, false, false], 'another owner')
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+// A diary built from `records(key)` (block 0 a member certificate for its
+// key), replicated in-process into the member's store. `missing` blocks at
+// the end are left undownloaded; `fork` truncates the source once first, so
+// the replica is forked.
+async function heldDiary (t, m, records, { missing = 0, fork = false } = {}) {
+  const src = await store.openStore(tmpDir(t))
+  const dst = await store.openStore(m.dataDir)
+  try {
+    const core = src.get({ name: 'diary', valueEncoding: 'json' })
+    await core.ready()
+    const key = b4a.toString(core.key, 'hex')
+    await core.append(memberCertRecord(issueCertificate(m.assoc.dir, { member: key })))
+    if (fork) {
+      await core.append(profileRecord({ name: 'x', bio: '' }))
+      await core.truncate(1)
+    }
+    for (const r of records(key)) await core.append(r)
+    const s1 = src.replicate(true)
+    const s2 = dst.replicate(false)
+    s1.pipe(s2).pipe(s1)
+    const replica = dst.get({ key: core.key, valueEncoding: 'json' })
+    await replica.ready()
+    await replica.download({ start: 0, end: core.length - missing }).done()
+    if (missing > 0) await replica.update({ wait: true })
+    s1.destroy()
+    s2.destroy()
+    return key
+  } finally {
+    await dst.close()
+    await src.close()
+  }
+}
+
+function pageSigners (m) {
+  const issuerKp = crypto.keyPair()
+  const issuerCert = issueIssuerCertificate(m.assoc.dir, { issuer: b4a.toString(issuerKp.publicKey, 'hex') })
+  const owner = crypto.keyPair()
+  const ownerHex = b4a.toString(owner.publicKey, 'hex')
+  const AT = '2026-01-01T00:00:00.000Z'
+  const nonce = (c) => c.repeat(43)
+  const counter = (r) => pageLib.issuerCountersign(r, issuerKp, issuerCert)
+  return {
+    ownerHex,
+    roster (page) {
+      const f = { type: 'page-roster', page, gen: 1, owner: ownerHex, admins: [], prev: null, at: AT, nonce: nonce('r'), association: m.assoc.hex }
+      return counter({ ...f, signature: pageLib.signRoster(f, owner) })
+    },
+    close (page) {
+      const f = { type: 'page-close', page, gen: 2, at: AT, nonce: nonce('c'), actor: ownerHex, association: m.assoc.hex }
+      return counter({ ...f, signature: pageLib.signClose(f, owner) })
+    },
+    moved (page, to) {
+      const f = { type: 'page-moved', page, to, gen: 2, at: AT, nonce: nonce('m'), actor: ownerHex, association: m.assoc.hex }
+      return counter({ ...f, signature: pageLib.signMoved(f, owner) })
+    },
+    origin (page, from) {
+      const f = { type: 'page-origin', page, from, fromSeq: 9, gen: 2, owner: ownerHex, admins: [], at: AT, nonce: nonce('g'), actor: ownerHex, association: m.assoc.hex }
+      return counter({ ...f, signature: pageLib.signOrigin(f, owner) })
+    },
+    link (page, actor, diary) {
+      return issuerSignLink({ page, diary, actor, at: AT, nonce: nonce('l') }, issuerKp, issuerCert)
+    }
+  }
+}
+
+test('page.read: roster, follows and lifecycle of a held page diary, over the raw blocks', async (t) => {
+  const m = await member(t, { cert: true })
+  const s = pageSigners(m)
+  const [x, y, z, ownerDiary, stranger] = [randomKey(), randomKey(), randomKey(), randomKey(), randomKey()]
+  const AT = '2026-01-01T00:00:00.000Z'
+  const page = await heldDiary(t, m, (key) => [
+    s.roster(key), // 1
+    followRecord({ key: x, on: true, at: AT }), // 2
+    followRecord({ key: y, on: true, at: AT }), // 3
+    followRecord({ key: x, on: false, at: AT }), // 4
+    followRecord({ key: x, on: true, at: AT }), // 5
+    s.link(key, s.ownerHex, ownerDiary), // 6
+    s.link(key, stranger, randomKey()), // 7: not in the roster
+    s.close(key), // 8
+    // A tombstone of the close must not reopen the page.
+    deleteRecord({ seq: 8, at: AT }), // 9
+    followRecord({ key: z, on: true, at: AT }) // 10: after the close
+  ])
+  const r = await m.call('page.read', { key: page })
+  t.alike(r, {
+    page,
+    owner: s.ownerHex,
+    admins: [],
+    gen: 1,
+    seq: 1,
+    isOwner: false,
+    isAdmin: false,
+    complete: true,
+    follows: [{ key: x, seq: 5 }, { key: y, seq: 3 }],
+    followsCount: 2,
+    followsTruncated: false,
+    closed: true,
+    movedTo: null,
+    movedFrom: null,
+    links: [{ actor: s.ownerHex, diary: ownerDiary, seq: 6 }]
+  })
+  t.alike(await m.call('page.read', { key: page, full: true }), r, 'full reads the same')
+
+  const k2 = randomKey()
+  const k1 = await heldDiary(t, m, (key) => [s.roster(key), s.moved(key, k2), s.close(key)])
+  const moved = await m.call('page.read', { key: k1 })
+  t.alike([moved.closed, moved.movedTo, moved.owner], [false, { to: k2, seq: 2 }, s.ownerHex], 'the first terminal record wins')
+
+  const k3 = await heldDiary(t, m, (key) => [profileRecord({ name: 'Nova', bio: '', at: AT }), s.roster(key), s.origin(key, k1)])
+  t.alike((await m.call('page.read', { key: k3 })).movedFrom, { from: k1, fromSeq: 9 })
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('page.read: follow tombstones apply, movedFrom only before the cut, complete only when every block is held, a fork is NOT_FOUND', async (t) => {
+  const m = await member(t, { cert: true })
+  const s = pageSigners(m)
+  const [x, y] = [randomKey(), randomKey()]
+  const AT = '2026-01-01T00:00:00.000Z'
+  const page = await heldDiary(t, m, (key) => [
+    s.roster(key), // 1
+    followRecord({ key: x, on: true, at: AT }), // 2
+    followRecord({ key: y, on: true, at: AT }), // 3
+    deleteRecord({ seq: 3, at: AT }), // 4: the follow of y is gone
+    followRecord({ key: x, on: false, at: AT }), // 5
+    deleteRecord({ seq: 5, at: AT }) // 6: the unfollow of x is gone
+  ])
+  const r = await m.call('page.read', { key: page })
+  t.alike([r.follows, r.followsCount, r.complete], [[{ key: x, seq: 2 }], 1, true], 'tombstoned follow and unfollow')
+
+  const k1 = randomKey()
+  const late = await heldDiary(t, m, (key) => [s.roster(key), s.close(key), s.origin(key, k1)])
+  const closed = await m.call('page.read', { key: late })
+  t.alike([closed.closed, closed.movedFrom], [true, null], 'an origin after the close does not count')
+
+  const partial = await heldDiary(t, m, (key) => [s.roster(key), followRecord({ key: x, on: true, at: AT })], { missing: 1 })
+  const p = await m.call('page.read', { key: partial })
+  t.alike([p.complete, p.owner, p.follows], [false, s.ownerHex, []], 'the last block is not held')
+  t.is((await m.call('page.read', { key: partial, full: true })).complete, false, 'full does not make it complete')
+
+  const forked = await heldDiary(t, m, (key) => [s.roster(key)], { fork: true })
+  t.alike(await failure(m.call('page.read', { key: forked })), { code: 'NOT_FOUND', message: 'sem dados locais para este diário' }, 'a forked replica')
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('page.read: a person diary is not a page; a key not held is NOT_FOUND and gets no core', async (t) => {
+  const m = await member(t, { cert: true })
+  await m.call('post.create', { text: 'oi' })
+  const person = await heldDiary(t, m, () => [profileRecord({ name: 'Ana', bio: '' })])
+  for (const key of [person, m.publicKey]) {
+    const r = await m.call('page.read', { key })
+    t.alike([r.page, r.owner, r.admins, r.gen, r.seq, r.isOwner, r.isAdmin, r.closed, r.movedTo, r.movedFrom, r.links, r.follows],
+      [key, null, [], null, null, false, false, false, null, null, [], []])
+  }
+  const unknown = randomKey()
+  t.alike(await failure(m.call('page.read', { key: unknown })), { code: 'NOT_FOUND', message: 'sem dados locais para este diário' })
+  const s = await store.openStore(m.dataDir)
+  try {
+    t.absent(await s.storage.hasCore(crypto.discoveryKey(b4a.from(unknown, 'hex'))), 'no core was created')
+  } finally {
+    await s.close()
+  }
+  t.alike(m.session.internal, [], 'no internal error')
 })
 
 test('peek.read is refused by the node session (USAGE), nothing opened or written', async (t) => {

@@ -358,7 +358,9 @@ async function readAll (core) {
 // run needs block 0 (moderation reads it) and is never read past
 // MAX_LOG_BLOCKS. A tombstone comes after its target, so every tombstone
 // that can delete a block of the run lies inside the run: stored, and
-// applied to the whole result by the same fold.
+// applied to the whole result by the same fold. raw: the same blocks as
+// entries, tombstones not applied, for the page cut of buildFeed (a
+// tombstone naming a page-close or page-moved never moves it).
 async function readVisible (core) {
   assertOpen(core)
   const length = core.length
@@ -376,8 +378,9 @@ async function readVisible (core) {
   }
   const { raw, entries, deleted, present } = await presentState(view)
   const prefix = entries.slice(0, present)
+  const rawPrefix = raw.slice(0, present)
   if (present < 1 || present >= length || length > MAX_LOG_BLOCKS || raw.length < length) {
-    return { entries: prefix, present, tail: length }
+    return { entries: prefix, raw: rawPrefix, present, tail: length }
   }
   let tail = length
   while (tail > present) {
@@ -394,11 +397,14 @@ async function readVisible (core) {
   }
   // Only a block that arrived after presentState can close the gap: the
   // next read shows it.
-  if (tail <= present) return { entries: prefix, present, tail: length }
+  if (tail <= present) return { entries: prefix, raw: rawPrefix, present, tail: length }
   for (let seq = tail; seq < length; seq++) {
-    if (stored.has(seq)) prefix.push(entries[seq])
+    if (stored.has(seq)) {
+      prefix.push(entries[seq])
+      rawPrefix.push(raw[seq])
+    }
   }
-  return { entries: prefix, present, tail }
+  return { entries: prefix, raw: rawPrefix, present, tail }
 }
 
 // Every block as decoded up to the same end, tombstones not applied (the
@@ -408,6 +414,24 @@ async function readRaw (core) {
   assertOpen(core)
   const { raw, present } = await presentState(core)
   return raw.slice(0, present)
+}
+
+// EVERY stored block as decoded, in seq order, holes skipped (not only the
+// present prefix: a followed diary downloads newest-first, so its tail can
+// be stored past a gap), tombstones not applied. length: the core's, so the
+// caller can tell whether every block of [0, length) was read.
+async function readHeld (core) {
+  assertOpen(core)
+  const length = core.length
+  const limit = Math.min(length, MAX_LOG_BLOCKS)
+  const entries = []
+  for (let i = 0; i < limit; i++) {
+    if (!(await core.has(i))) continue
+    const block = await core.get(i, { wait: false, raw: true })
+    if (block === null) continue
+    entries.push({ seq: i, record: decodeBlock(block) })
+  }
+  return { entries, length }
 }
 
 // As @varanda/core readBlocks: a group core's blocks, decoded, tombstones
@@ -1560,6 +1584,7 @@ module.exports = {
   readAll,
   readVisible,
   readRaw,
+  readHeld,
   readBlocks,
   readBlock0,
   appendRecord,

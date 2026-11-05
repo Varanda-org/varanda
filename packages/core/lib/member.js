@@ -10,7 +10,7 @@ const fs = require('#fs')
 const path = require('#path')
 const process = require('#process')
 const b4a = require('b4a')
-const { discoveryKey, randomBytes } = require('hypercore-crypto')
+const { discoveryKey, randomBytes, keyPair: newKeyPair } = require('hypercore-crypto')
 const { certForKey, verifyUsernameRecord } = require('./cert')
 const { linkNew } = require('./link-new')
 const { latestUsernameRecord, latestUsername } = require('./username')
@@ -65,6 +65,10 @@ const { engagementState } = require('./engagement')
 const { safe } = require('./safe')
 const { UsageError } = require('./errors')
 const groups = require('./group')
+const { pageState, signRoster, signAccept, signOffer, signOrigin, signClose, signMoved } = require('./page')
+const { pageLifecycle, cutEntries, originOf, latestDelegate } = require('./page-lifecycle')
+const { signPage, canonicalOp, opHash: pageOpHash, ACTIONS: PAGE_STATEMENTS } = require('./page-proof')
+const { signTerms } = require('./terms')
 const groupCrypto = require('./group-crypto')
 const { recordBoundRoot } = require('./sync')
 const { COMMUNITY_LIST_MAX } = require('@varanda/rpc')
@@ -695,7 +699,7 @@ async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => 
   return withIdentity(ctx, async ({ store, diary, ownHex, association }) => {
     const { blocked, revokedIssuers } = enforcedBlocklist(ctx.dataDir, association)
     // The own diary is always shown, even when the association blocked it.
-    const kept = [{ key: ownHex, entries: await readAll(diary) }]
+    const kept = [{ key: ownHex, ...(await readFeedLog(diary)) }]
     const skippedLogs = []
     const incomplete = []
     const seen = new Set([ownHex])
@@ -719,7 +723,7 @@ async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => 
         continue
       }
       const replica = await openReplica(store, key)
-      const entries = await readAll(replica)
+      const { entries, raw: held } = await readFeedLog(replica)
       // The reason (fork check included) is computed BEFORE an empty core is
       // purged, so an empty forked replica is still reported 'fork'.
       const reason = skipReason(replica, entries, key, association, blocked, revokedIssuers)
@@ -730,7 +734,7 @@ async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => 
       // An empty core must not linger in the main store.
       if (replica.contiguousLength === 0) await purgeReplica(store, key)
       if (reason === null) {
-        kept.push({ key, entries })
+        kept.push({ key, entries, raw: held })
       } else {
         skipLog(skippedLogs, key, reason)
       }
@@ -742,6 +746,19 @@ async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => 
 }
 
 // ---- profiles ----
+
+// readAll and readRaw from one presentState: the raw blocks decide the page
+// cut in buildFeed, so a tombstone naming a page-close or page-moved never
+// moves it, whatever the fold does.
+async function readFeedLog (core) {
+  if (core.closing) {
+    const err = new Error('SESSION_CLOSED: cannot read from a closed session')
+    err.code = 'SESSION_CLOSED'
+    throw err
+  }
+  const { raw, entries, present } = await presentState(core)
+  return { entries: entries.slice(0, present), raw }
+}
 
 // Profiles of `authors` (docs/rpc.md 5.21) -> { profiles, missing }, one entry
 // per distinct lowercase key in first-occurrence order. An author is readable
@@ -797,6 +814,306 @@ async function profileRead (ctx, { authors }) {
     }
     return { profiles, missing }
   })
+}
+
+// ---- pages (docs/rpc.md 5.85) ----
+
+// PAGE_READ_FOLLOWS_MAX and PAGE_READ_LINKS_MAX of @varanda/rpc
+// lib/methods.js, which the package index does not export.
+const PAGE_READ_FOLLOWS_MAX = 64
+const PAGE_READ_LINKS_MAX = 16 + 1
+
+// The winning follow record's seq for each key of `follows`, newest first.
+function pageFollows (entries, follows) {
+  const wanted = new Set(follows)
+  const winning = new Map()
+  for (const entry of entries) {
+    const copy = entry.record === null ? null : validRecordCopy(entry.record, entry.seq)
+    if (copy === null || copy.type !== 'follow' || !wanted.has(copy.key)) continue
+    const prev = winning.get(copy.key)
+    if (prev === undefined || entry.seq > prev) winning.set(copy.key, entry.seq)
+  }
+  return [...winning].map(([key, seq]) => ({ key, seq })).sort((a, b) => (b.seq - a.seq) || (a.key < b.key ? -1 : 1))
+}
+
+// A page diary this store already holds, read whole: `full` changes
+// nothing here, and `complete` is true only when every block up to the
+// core's length was read. The roster and lifecycle folds run over the RAW
+// blocks: a tombstone of a page-* record must not undo a close, a move or a
+// roster. Follows are not page-* records, so their tombstones apply. A key
+// not held, or a forked replica, answers like log.read and opens no core.
+async function pageRead (ctx, { key }) {
+  // The core diary key is a manifest hash, never a roster key: the own
+  // roster key is the page delegate's, when there is one.
+  let actorHex = null
+  try {
+    const pair = readDelegate(ctx)
+    if (pair !== null) {
+      actorHex = hex(pair.publicKey)
+      pair.secretKey.fill(0)
+    }
+  } catch {}
+  return withIdentity(ctx, async ({ store, diary, ownHex, association }) => {
+    const pageHex = typeof key === 'string' ? key.toLowerCase() : ''
+    if (!HEX64.test(pageHex)) throw new Error(NO_LOCAL_DATA)
+    const { blocked, revokedIssuers } = enforcedBlocklist(ctx.dataDir, association)
+    let raw
+    let length
+    if (pageHex === ownHex) {
+      raw = await readRaw(diary)
+      length = diary.length
+    } else {
+      if (blocked.has(pageHex) || !(await replicaStored(store, pageHex))) throw new Error(NO_LOCAL_DATA)
+      const replica = await openReplica(store, pageHex)
+      raw = await readRaw(replica)
+      length = replica.length
+      // Checked BEFORE an empty core is purged, as feedRead does.
+      const forked = replica.fork !== 0
+      if (replica.contiguousLength === 0) await purgeReplica(store, pageHex)
+      if (forked) throw new Error(NO_LOCAL_DATA)
+      if (revokedIssuers.size > 0 && revokedIssuerReason(raw, pageHex, association, revokedIssuers)) {
+        throw new Error(NO_LOCAL_DATA)
+      }
+    }
+    const opts = { revokedIssuers }
+    const lifecycle = pageLifecycle(raw, pageHex, association, opts)
+    const cut = cutEntries(raw, lifecycle)
+    // The chain walk needs every block: a prefix that stops short (a moved
+    // page's page-origin at seq 3 not stored yet) would reject a genesis
+    // roster the bounded fold still verifies, as the browser node does.
+    const whole = raw.length === length
+    const state = pageState(cut, pageHex, association, { revokedIssuers, full: whole })
+    const origin = originOf(cut, pageHex, association, opts)
+    const live = applyDeletes(cut)
+    const follows = pageFollows(live, followSet(live, pageHex))
+    const roster = state.page ? [state.owner, ...state.admins] : []
+    const links = new Map()
+    for (const link of lifecycle.links) {
+      if (roster.includes(link.actor)) links.set(link.actor, link)
+    }
+    return {
+      page: pageHex,
+      owner: state.owner,
+      admins: state.admins,
+      gen: state.page ? state.gen : null,
+      seq: state.seq,
+      isOwner: state.page && actorHex !== null && state.owner === actorHex,
+      isAdmin: state.page && actorHex !== null && state.admins.includes(actorHex),
+      complete: whole,
+      follows: follows.slice(0, PAGE_READ_FOLLOWS_MAX),
+      followsCount: follows.length,
+      followsTruncated: follows.length > PAGE_READ_FOLLOWS_MAX,
+      closed: lifecycle.closed !== null,
+      movedTo: lifecycle.movedTo === null ? null : { to: lifecycle.movedTo.to, seq: lifecycle.movedTo.seq },
+      movedFrom: origin === null ? null : { from: origin.from, fromSeq: origin.fromSeq },
+      links: [...links.values()].sort((a, b) => b.seq - a.seq).slice(0, PAGE_READ_LINKS_MAX)
+        .map((l) => ({ actor: l.actor, diary: l.diary, seq: l.seq }))
+    }
+  })
+}
+
+// ---- page delegate (docs/rpc.md 5.87) ----
+
+const PAGE_KEY_INVALID = 'chave de página inválida'
+const PAGE_KEY_MISSING = 'chave de página não registrada'
+const BAD_PAGE = 'operação de página inválida'
+
+function pageActorFile (dataDir) {
+  return path.join(dataDir, 'private', 'page-actor.json')
+}
+
+// <dataDir>/private, 0o700 like store.js privateDir, except that a symlink
+// there is refused: the key file must never land where a link points.
+function pagePrivateDir (dataDir) {
+  const dir = path.join(dataDir, 'private')
+  const check = () => {
+    try {
+      if (!fs.lstatSync(dir).isDirectory()) throw new UsageError(PAGE_KEY_INVALID)
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err
+    }
+  }
+  check()
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  check()
+  fs.chmodSync(dir, 0o700)
+}
+
+// The page delegate's Ed25519 pair, or null when the file is absent. A
+// symlink, a non-file, or a malformed or inconsistent file is a usage error
+// whose message never carries the file's bytes.
+function readDelegate (ctx) {
+  const file = pageActorFile(ctx.dataDir)
+  let text
+  try {
+    if (!fs.lstatSync(path.dirname(file)).isDirectory()) throw new UsageError(PAGE_KEY_INVALID)
+    if (!fs.lstatSync(file).isFile()) throw new UsageError(PAGE_KEY_INVALID)
+    const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+    try {
+      text = fs.readFileSync(fd, 'utf8')
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch (err) {
+    if (err.code === 'ENOENT') return null
+    throw new UsageError(PAGE_KEY_INVALID)
+  }
+  let data = null
+  try {
+    data = JSON.parse(text)
+  } catch {}
+  if (data === null || typeof data !== 'object' || data.v !== 1 ||
+      typeof data.publicKey !== 'string' || !/^[0-9a-f]{64}$/.test(data.publicKey) ||
+      typeof data.secretKey !== 'string' || !/^[0-9a-f]{128}$/.test(data.secretKey)) {
+    throw new UsageError(PAGE_KEY_INVALID)
+  }
+  const publicKey = b4a.from(data.publicKey, 'hex')
+  const secretKey = b4a.from(data.secretKey, 'hex')
+  // An Ed25519 secret key ends with its public key: a pair that cannot sign
+  // for the stored public key is refused rather than used.
+  if (!b4a.equals(secretKey.subarray(32), publicKey)) {
+    secretKey.fill(0)
+    throw new UsageError(PAGE_KEY_INVALID)
+  }
+  return { publicKey, secretKey }
+}
+
+// Registers this node's page delegate: a fresh pair kept in
+// private/page-actor.json (0o600), named by a page-delegate in the own
+// diary. A repeat, or a call after a crash between the file and the append,
+// appends only when the newest live page-delegate does not name the stored
+// key. -> { actor }, never the secret.
+async function pageRegister (ctx) {
+  let pair = readDelegate(ctx)
+  try {
+    return await withIdentity(ctx, async ({ diary }) => {
+      if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+      if (pair === null) {
+        const fresh = newKeyPair()
+        pagePrivateDir(ctx.dataDir)
+        storeLib.writeJsonAtomic(pageActorFile(ctx.dataDir), {
+          v: 1,
+          publicKey: hex(fresh.publicKey),
+          secretKey: hex(fresh.secretKey)
+        }, 0o600)
+        pair = fresh
+      }
+      const actor = hex(pair.publicKey)
+      if (latestDelegate(await readRaw(diary)) !== actor) {
+        await appendRecord(diary, { type: 'page-delegate', actor, at: nowIso() })
+      }
+      return { actor }
+    })
+  } finally {
+    if (pair !== null) pair.secretKey.fill(0)
+  }
+}
+
+function hasOwn (o, k) {
+  return Object.prototype.hasOwnProperty.call(o, k)
+}
+
+// Exactly `keys` as own keys of a plain object, else TypeError.
+function exactOp (o, keys) {
+  if (o === null || typeof o !== 'object' || Array.isArray(o)) throw new TypeError('invalid page op')
+  const own = Object.keys(o)
+  if (own.length !== keys.length || !keys.every((k) => hasOwn(o, k))) throw new TypeError('invalid page op')
+  return o
+}
+
+function copyList (v) {
+  return Array.isArray(v) ? [...v] : v
+}
+
+// The association is the node's own: an op that names one at any depth is
+// refused, as the RPC layer does for callers that skip it.
+function namesAssociation (v) {
+  if (Array.isArray(v)) return v.some(namesAssociation)
+  if (v === null || typeof v !== 'object') return false
+  return Object.keys(v).some((k) => k === 'association' || namesAssociation(v[k]))
+}
+
+// The browser node's rules (@varanda/web-member lib/session.js
+// pageSignResult, which core cannot import), with the delegate as member,
+// actor or owner. The record builders (lib/page.js) check every field the
+// signer covers and that the pair is the record's signer, so a malformed op
+// is a TypeError, never a signature.
+function pageSignResult ({ action, nonce, page, op }, own, keyPair, association) {
+  if (namesAssociation(JSON.parse(canonicalOp(op)))) throw new TypeError('invalid page op')
+  const statement = (o) => signPage({ action, nonce, member: own, page, association, opHash: pageOpHash(o) }, keyPair)
+  const roster = (f) => ({ type: 'page-roster', ...f, signature: signRoster(f, keyPair) })
+  switch (action) {
+    case 'accept': {
+      exactOp(op, ['gen', 'rosterSignature', 'at', 'nonce'])
+      const f = { page, gen: op.gen, rosterSignature: op.rosterSignature, at: op.at, nonce: op.nonce, actor: own }
+      return { record: { type: 'page-accept', ...f, signature: signAccept(f, keyPair) } }
+    }
+    case 'remove':
+    case 'transfer-accept':
+      exactOp(op, ['gen', 'owner', 'admins', 'prev', 'at', 'nonce'])
+      return { record: roster({ page, gen: op.gen, owner: op.owner, admins: copyList(op.admins), prev: op.prev, at: op.at, nonce: op.nonce, association }) }
+    case 'offer': {
+      exactOp(op, ['to', 'exp', 'gen', 'at', 'nonce'])
+      const f = { page, to: op.to, exp: op.exp, gen: op.gen, at: op.at, nonce: op.nonce, actor: own }
+      return { record: { type: 'page-offer', ...f, signature: signOffer(f, keyPair) } }
+    }
+    case 'close': {
+      exactOp(op, ['gen', 'at', 'nonce'])
+      const f = { page, gen: op.gen, at: op.at, nonce: op.nonce, actor: own, association }
+      return { record: { type: 'page-close', ...f, signature: signClose(f, keyPair) } }
+    }
+    case 'move': {
+      exactOp(op, ['to', 'gen', 'fromSeq', 'owner', 'admins', 'at', 'nonce'])
+      if (op.to === page) throw new TypeError('invalid page op')
+      const moved = { page, to: op.to, gen: op.gen, at: op.at, nonce: op.nonce, actor: own, association }
+      const origin = { page: op.to, from: page, fromSeq: op.fromSeq, gen: op.gen, owner: op.owner, admins: copyList(op.admins), at: op.at, nonce: op.nonce, actor: own, association }
+      return {
+        record: { type: 'page-moved', ...moved, signature: signMoved(moved, keyPair) },
+        origin: { type: 'page-origin', ...origin, signature: signOrigin(origin, keyPair) },
+        roster: roster({ page: op.to, gen: 1, owner: op.owner, admins: copyList(op.admins), prev: null, at: op.at, nonce: op.nonce, association })
+      }
+    }
+    case 'create': {
+      exactOp(op, ['username', 'name', 'bio', 'roster'])
+      const r = exactOp(op.roster, ['gen', 'admins', 'prev', 'at', 'nonce'])
+      if (r.gen !== 1 || r.prev !== null || !Array.isArray(r.admins) || r.admins.length !== 0) throw new TypeError('invalid page op')
+      const record = roster({ page, gen: 1, owner: own, admins: [], prev: null, at: r.at, nonce: r.nonce, association })
+      return { signature: statement(op), record }
+    }
+    case 'invite': {
+      exactOp(op, ['member', 'gen', 'rosterSignature', 'roster'])
+      const r = exactOp(op.roster, ['owner', 'admins', 'prev', 'at', 'nonce'])
+      if (typeof op.rosterSignature !== 'string') throw new TypeError('invalid page op')
+      const record = roster({ page, gen: op.gen, owner: r.owner, admins: copyList(r.admins), prev: r.prev, at: r.at, nonce: r.nonce, association })
+      return { signature: statement({ ...op, rosterSignature: record.signature }), record }
+    }
+    case 'terms': {
+      // The service records the delegate's acceptance under the actor, so it
+      // checks a terms signature (terms.js) with the actor as member.
+      exactOp(op, ['version', 'diary'])
+      const termsSignature = signTerms({ nonce, member: own, association, version: op.version }, keyPair)
+      return { signature: statement(op), termsSignature }
+    }
+    default:
+      if (!PAGE_STATEMENTS.includes(action)) throw new TypeError('invalid page action')
+      return { signature: statement(op) }
+  }
+}
+
+// page.sign with the page delegate (docs/rpc.md 5.84): no store opened and
+// no append. The member or actor is always the delegate, never the caller's.
+function pageSign (ctx, { action, nonce, page, op }) {
+  const pair = readDelegate(ctx)
+  if (pair === null) throw new UsageError(PAGE_KEY_MISSING)
+  try {
+    const association = trustRoot(ctx)
+    return pageSignResult({ action, nonce, page, op }, hex(pair.publicKey), pair, association)
+  } catch (err) {
+    if (err instanceof TypeError || err instanceof SyntaxError) throw new UsageError(BAD_PAGE)
+    throw err
+  } finally {
+    pair.secretKey.fill(0)
+  }
 }
 
 // ---- groups ----
@@ -3394,6 +3711,10 @@ module.exports = {
   logRead,
   feedRead,
   profileRead,
+  pageRead,
+  pageRegister,
+  pageSign,
+  readDelegate,
   groupCreate,
   groupJoin,
   groupLeave,

@@ -195,7 +195,7 @@ test('history.web tolerates a missing history API; native is a no-op', async (t)
 
 test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores'])
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
   for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
@@ -257,4 +257,23 @@ test('seguidores is keyed by a lowercase hex64 key and refuses uppercase or post
   const onFollowing = push(push(EMPTY, { screen: 'seguindo', key: A }), { screen: 'seguidores', key: A })
   t.is(onFollowing.length, 2, 'same key on seguindo is a new entry')
   t.alike(top(onFollowing), { screen: 'seguidores', key: A, params: {} })
+})
+
+test('paginas and novapagina take no key, paginaajustes a lowercase hex64 page key', async (t) => {
+  const { EMPTY, push, top, validEntry } = await loadNav()
+  for (const screen of ['paginas', 'novapagina']) {
+    t.ok(validEntry({ screen }))
+    const stack = push(EMPTY, { screen })
+    t.is(top(stack).screen, screen)
+    t.is(push(stack, { screen }), stack, 'same top is a no-op')
+    t.absent(validEntry({ screen, key: A }), 'a key is refused')
+    t.is(push(EMPTY, { screen, key: A }), EMPTY)
+  }
+  t.ok(validEntry({ screen: 'paginaajustes', key: A }))
+  const stack = push(EMPTY, { screen: 'paginaajustes', key: A })
+  t.alike(top(stack), { screen: 'paginaajustes', key: A, params: {} })
+  for (const key of [A.toUpperCase(), 'ab', A + ':1', 42, null, undefined, A + '0']) {
+    t.absent(validEntry({ screen: 'paginaajustes', key }), String(key))
+    t.is(push(EMPTY, { screen: 'paginaajustes', key }), EMPTY)
+  }
 })

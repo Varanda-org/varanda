@@ -246,6 +246,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
               <MemberRow
                 key={hit.author}
                 hit={hit}
+                hint={names.profileOf(hit.author)}
                 avatar={pickAvatar(names.profileOf(hit.author), hit)}
                 following={follows === null ? null : follows.has(hit.author)}
                 onOpen={onOpenMember}

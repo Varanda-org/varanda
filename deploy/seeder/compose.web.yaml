@@ -170,6 +170,11 @@ services:
       # O mesmo segredo do serviço seeder para os avisos push; vazio desliga
       # os avisos. A chave VAPID fica em push-vapid.json, em account-data.
       VARANDA_PUSH_TOKEN: "${VARANDA_PUSH_TOKEN:-}"
+      # Páginas: a chave que sela page-keys.json (64 hex); vazio desliga as
+      # páginas. A conta grava os diários delas e os entrega ao semeador pelo
+      # WebSocket dele em 127.0.0.1:8789. Só loopback.
+      VARANDA_PAGE_KEYS: "${VARANDA_PAGE_KEYS:-}"
+      VARANDA_SEEDER_WS: "${VARANDA_SEEDER_WS:-ws://127.0.0.1:8789}"
       # Pesos do modelo, dentro de account-data; baixados uma vez pelo
       # operador (scripts/fetch-ai-model.js), nunca em tempo de execução.
       VARANDA_AI_MODEL_DIR: "/data/ai-model"

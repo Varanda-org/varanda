@@ -777,3 +777,36 @@ test('newest-first: a hole named only by a cancelled tombstone stops the run (th
   t.absent(textsOf(feed, W.key).includes('t37'), 'the deleted post is not shown')
   t.alike(textsOf(feed, W.key), ['t0', 'v0', 'v1', 'v2', 'v3', 'v4'])
 })
+
+// A delete of a page-* record has no effect (docs/protocol.md §12): a leaked
+// page key's tombstone of the page-close leaves the cut in place.
+test('readVisible and feed: a delete of the page-close keeps the cut', async (t) => {
+  const Hypercore = createRequire(require.resolve('../lib/sync'))('hypercore')
+  const lc = require('@varanda/core/lib/page-lifecycle')
+  const { buildFeed } = require('@varanda/core/lib/feed')
+  const { memberCertRecord } = require('@varanda/core/lib/records')
+  const hexOf = (kp) => b4a.toString(kp.publicKey, 'hex')
+  const assocKp = crypto.keyPair()
+  const issuerKp = crypto.keyPair()
+  const issuerCert = createIssuerCert({ issuer: hexOf(issuerKp), date: '2026-01-01T00:00:00.000Z' }, assocKp)
+  const ownerKp = crypto.keyPair()
+  const core = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
+  await core.ready()
+  t.teardown(() => core.close(), { force: true })
+  const P = b4a.toString(core.key, 'hex')
+  const at = '2026-01-01T00:00:00.000Z'
+  const fields = { type: 'page-close', page: P, gen: 2, at, nonce: 'c'.repeat(43), actor: hexOf(ownerKp), association: issuerCert.association }
+  const closed = lc.issuerCountersign({ ...fields, signature: lc.signClose(fields, ownerKp) }, issuerKp, issuerCert)
+  await core.append(memberCertRecord(createCert({ member: P }, assocKp)))
+  await core.append(postRecord({ text: 'antes' }))
+  await core.append(closed)
+  await core.append(deleteRecord({ seq: 2, at }))
+  await core.append(postRecord({ text: 'depois' }))
+  await core.append(deleteRecord({ seq: 1, at }))
+  const read = await store.readVisible(core)
+  t.alike(read.entries[2].record, closed, 'readVisible keeps the page-close block')
+  t.is(read.raw.length, read.entries.length, 'raw is aligned with entries')
+  const texts = (logs) => buildFeed({ logs, association: issuerCert.association }).items.map((i) => i.text)
+  t.alike(texts([{ key: P, entries: read.entries }]), [], 'the cut holds on the folded entries')
+  t.alike(texts([{ key: P, entries: read.entries, raw: read.raw }]), ['antes'], 'with raw, a tombstone past the cut deletes nothing')
+})

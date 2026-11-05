@@ -31,6 +31,18 @@
 // the best RESULTS_MAX by (rank, author) with bounded insertion, never
 // sorting all matches.
 //
+// Page hint: a page-roster whose `page` is the author sets page: true; a
+// page-close or page-moved of the author sets closed or moved and forgets
+// the author's names (see markPage). Each is first checked through the
+// injected verifyPage(author, record) (the countersigned check for the
+// author's log, revocation included); only a literal true counts, and
+// without verifyPage no hint is ever set, so an unsigned shape-valid copy
+// cannot label a person "Página". Booleans and one seq inside the author's
+// entry (no extra memory, same maxAuthors bound). endSeq(author) is the seq
+// of the first verified close or move (the lowest seq noted wins, as in
+// lib/page-lifecycle.js pageLifecycle): a pointer for page.feed, which
+// fetches and verifies that block itself (docs/protocol.md §12).
+//
 // Pure and total: no I/O, no timers, and no method ever throws (hostile
 // records, verifiers and predicates included: a throw answers false / null
 // / not usable / not visible).
@@ -41,6 +53,7 @@ const {
   isQueryTokens,
   searchRank
 } = require('./search-text')
+const { validRecordCopy } = require('./records')
 
 const DEFAULT_MAX_AUTHORS = 4096
 const NAME_MAX = 80
@@ -50,6 +63,7 @@ const HEX64 = /^[0-9a-f]{64}$/
 // per-author memory bound holds whatever extra payload a record carries.
 const USERNAME_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 const FIELD_MAX = 256
+const PAGE_ENDS = { 'page-close': 'closed', 'page-moved': 'moved' }
 
 function isHex64 (s) {
   return typeof s === 'string' && HEX64.test(s)
@@ -89,7 +103,13 @@ function newEntry () {
     username: null,
     usernameTokens: null,
     usernameSeq: null,
-    issuer: null
+    issuer: null,
+    // Page hint (a boolean each, no record kept): a hint only, the app
+    // verifies a page with page.read.
+    page: false,
+    closed: false,
+    moved: false,
+    endSeq: null
   }
 }
 
@@ -99,7 +119,7 @@ function better (a, b) {
   return a.author < b.author
 }
 
-function createNameIndex ({ maxAuthors, verifyUsername } = {}) {
+function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
   const cap = Number.isSafeInteger(maxAuthors) && maxAuthors >= 0 ? maxAuthors : DEFAULT_MAX_AUTHORS
   const entries = new Map()
   // author -> every seq forget() was called with, current profile or not and
@@ -113,6 +133,19 @@ function createNameIndex ({ maxAuthors, verifyUsername } = {}) {
       const type = record.type
       let profileName = null
       let username = null
+      if (type === 'page-roster' || type === 'page-close' || type === 'page-moved') {
+        // About its own log only, and verified for it.
+        const copy = validRecordCopy(record, seq)
+        if (copy === null || copy.page !== author) return true
+        let ok = false
+        try {
+          ok = typeof verifyPage === 'function' && verifyPage(author, copy) === true
+        } catch {
+          ok = false
+        }
+        if (!ok) return true
+        return markPage(author, PAGE_ENDS[type] ?? null, seq)
+      }
       if (type === 'profile') {
         const name = record.name
         if (typeof name !== 'string') return true
@@ -136,6 +169,8 @@ function createNameIndex ({ maxAuthors, verifyUsername } = {}) {
         entry = newEntry()
         entries.set(author, entry)
       }
+      // A closed or moved page answers to no name: it stays forgotten.
+      if (entry.closed || entry.moved) return true
       if (profileName !== null) {
         if (entry.profileSeq === null || seq > entry.profileSeq) {
           entry.profileSeq = seq
@@ -155,6 +190,65 @@ function createNameIndex ({ maxAuthors, verifyUsername } = {}) {
     }
   }
 
+  // Sets the page hint; a close or move also nulls every name field of the
+  // author so search stops matching it (a moved page's @nome answers only on
+  // the new key, whose own username record indexes it). false only for a NEW
+  // author at the cap, like note().
+  function markPage (author, end, seq) {
+    let entry = entries.get(author)
+    if (entry === undefined) {
+      if (entries.size >= cap) return false
+      entry = newEntry()
+      entries.set(author, entry)
+    }
+    entry.page = true
+    // The first close or move is terminal (lib/page-lifecycle.js): a later one
+    // (a leaked key can append a shape-valid copy) changes nothing. A lower
+    // seq noted later (a rescan) is the earlier one in block order: it wins.
+    if (end !== null && (entry.closed || entry.moved) && seq < entry.endSeq) {
+      entry.closed = end === 'closed'
+      entry.moved = end === 'moved'
+      entry.endSeq = seq
+    }
+    if (end !== null && !entry.closed && !entry.moved) {
+      entry[end] = true
+      entry.endSeq = seq
+      entry.profileSeq = null
+      entry.nameTokens = []
+      entry.candidate = null
+      entry.username = null
+      entry.usernameTokens = null
+      entry.usernameSeq = null
+      entry.issuer = null
+    }
+    return true
+  }
+
+  // Only a page carries the keys: a person's row keeps its old shape.
+  function pageFlags (entry) {
+    return { page: true, closed: entry.closed, moved: entry.moved }
+  }
+
+  function hint (author) {
+    try {
+      const entry = typeof author === 'string' ? entries.get(author) : undefined
+      return entry !== undefined && entry.page ? pageFlags(entry) : {}
+    } catch {
+      return {}
+    }
+  }
+
+  // -> the seq of the author's first verified page-close or page-moved, or
+  // null. A pointer only: the reader verifies the block itself.
+  function endSeq (author) {
+    try {
+      const entry = typeof author === 'string' ? entries.get(author) : undefined
+      return entry !== undefined && Number.isSafeInteger(entry.endSeq) ? entry.endSeq : null
+    } catch {
+      return null
+    }
+  }
+
   function settle (author) {
     try {
       if (typeof author !== 'string') return
@@ -169,7 +263,8 @@ function createNameIndex ({ maxAuthors, verifyUsername } = {}) {
         ok = false
       }
       // A newer candidate noted (or the entry removed) while verifying wins.
-      if (!ok || entries.get(author) !== entry || entry.usernameWatermark !== seq) return
+      // A close or move noted while verifying ends the name too.
+      if (!ok || entries.get(author) !== entry || entry.usernameWatermark !== seq || entry.closed || entry.moved) return
       entry.username = record.username
       entry.usernameTokens = foldTokens(record.username)
       entry.usernameSeq = seq
@@ -239,7 +334,7 @@ function createNameIndex ({ maxAuthors, verifyUsername } = {}) {
         if (entry.profileSeq === null && usernameSeq === null) continue
         const rank = searchRank(qTokens, entry.nameTokens, effective, effective === null ? null : entry.usernameTokens)
         if (rank < 0) continue
-        const hit = { rank, author, profileSeq: entry.profileSeq, usernameSeq }
+        const hit = { rank, author, profileSeq: entry.profileSeq, usernameSeq, hint: entry.page ? pageFlags(entry) : null }
         if (best.length >= RESULTS_MAX && !better(hit, best[best.length - 1])) {
           if (shown(visible, author)) more = true
           continue
@@ -254,7 +349,7 @@ function createNameIndex ({ maxAuthors, verifyUsername } = {}) {
         }
       }
       return {
-        members: best.map(({ author, profileSeq, usernameSeq }) => ({ author, profileSeq, usernameSeq })),
+        members: best.map(({ author, profileSeq, usernameSeq, hint }) => ({ author, profileSeq, usernameSeq, ...hint })),
         more
       }
     } catch {
@@ -266,7 +361,7 @@ function createNameIndex ({ maxAuthors, verifyUsername } = {}) {
     return { authors: entries.size, maxAuthors: cap }
   }
 
-  return { note, settle, forget, remove, clear, search, stats }
+  return { note, settle, forget, remove, clear, search, stats, hint, endSeq }
 }
 
 module.exports = {

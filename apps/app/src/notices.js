@@ -343,3 +343,126 @@ export function withoutAuthor (items, key) {
 export function isWebOnlyError (err) {
   return Boolean(err && err.code === 'USAGE' && WEB_ONLY_MESSAGES.includes(err.message))
 }
+
+// A page key is 64 hex, the same shape as a member key. Seen tokens for a
+// page live in the same stored document, but under `page:<key>`, which can
+// never equal `own`. Otherwise marking one list seen would mark the other,
+// including when the page key and the member key are the same hex.
+const KEY64 = /^[0-9a-f]{64}$/
+const PAGE_SEEN_PREFIX = 'page:'
+
+export const PAGE_EMPTY_TITLE = 'Nenhum aviso da página ainda'
+export const PAGE_EMPTY_TEXT = 'Quando alguém seguir a página, responder, citar ou mencionar o @nome dela, aparece aqui.'
+export const PAGE_NOTICES_UNAVAILABLE_TITLE = 'Avisos da página ainda não disponíveis'
+export const PAGE_SEEN_MAX = 8
+
+// The service has no notices route yet: it answers pedido-invalido or 404.
+export function isPageNoticesUnavailable (err) {
+  return Boolean(err && (err.code === 'pedido-invalido' || err.code === 'nao-encontrado'))
+}
+
+export const PAGE_NOTICES_READ_LINE = 'A associação lê estes avisos para a página'
+
+export function pageSeenNamespace (pageKey) {
+  if (typeof pageKey !== 'string') return null
+  const key = pageKey.toLowerCase()
+  if (!KEY64.test(key)) return null
+  return PAGE_SEEN_PREFIX + key
+}
+
+export function isPageSeenNamespace (namespace) {
+  if (typeof namespace !== 'string' || !namespace.startsWith(PAGE_SEEN_PREFIX)) return false
+  return KEY64.test(namespace.slice(PAGE_SEEN_PREFIX.length))
+}
+
+// One line for the list header. A raw key is not a name.
+export function pageNoticesHeader (name) {
+  const title = oneLineName(name)
+  const bare = title.startsWith('@') ? title.slice(1) : title
+  if (title === '' || KEY64.test(bare.toLowerCase())) return 'Avisos da página'
+  return 'Avisos da página ' + title
+}
+
+function oneLineName (name) {
+  if (typeof name !== 'string') return ''
+  let out = ''
+  for (const ch of name) {
+    const cp = ch.codePointAt(0)
+    out += cp < 32 || cp === 127 ? ' ' : ch
+  }
+  return out.replace(/ +/g, ' ').trim()
+}
+
+function validSeenIds (ids) {
+  if (!Array.isArray(ids) || ids.length > SEEN_MAX) return false
+  for (const id of ids) {
+    if (!isHex32(id)) return false
+  }
+  return true
+}
+
+// Page lists only. A bare member key in `pages` is ignored, so it cannot
+// be read back as a page namespace.
+function pageMap (parsed) {
+  const pages = parsed && parsed.pages
+  if (!pages || typeof pages !== 'object' || Array.isArray(pages)) return {}
+  const out = {}
+  for (const key of Object.keys(pages)) {
+    if (!isPageSeenNamespace(key) || !validSeenIds(pages[key])) continue
+    out[key] = pages[key]
+  }
+  return out
+}
+
+// Personal ids only when they would pass parseSeen. Anything else (a v1
+// list of follower keys, a v2 digest list) is dropped rather than copied
+// forward into the shared document.
+function personalIds (parsed) {
+  if (!parsed || parsed.v !== 3 || !validSeenIds(parsed.ids)) return []
+  return parsed.ids
+}
+
+// The id list for one namespace. A 64-hex namespace is the person
+// (parseSeen). A page namespace reads `pages` and never the person's ids.
+export function parseSeenNamespace (text, namespace) {
+  if (isPageSeenNamespace(namespace)) {
+    try {
+      const ids = pageMap(JSON.parse(text))[namespace]
+      return ids || []
+    } catch {
+      return []
+    }
+  }
+  return parseSeen(text, namespace)
+}
+
+// Writes one namespace and keeps the others. A page write never sets `own`
+// to the page namespace and never puts page tokens in `ids`.
+export function writeSeenNamespace (text, namespace, ids) {
+  let parsed = null
+  try { parsed = JSON.parse(text) } catch {}
+  let pages = pageMap(parsed)
+  if (isPageSeenNamespace(namespace)) {
+    // Re-inserting moves the key last, so the first keys are the least
+    // recently written.
+    delete pages[namespace]
+    pages[namespace] = ids
+    const keys = Object.keys(pages)
+    for (const key of keys.slice(0, Math.max(0, keys.length - PAGE_SEEN_MAX))) delete pages[key]
+    const own = parsed && typeof parsed.own === 'string' ? parsed.own : ''
+    return JSON.stringify({ v: 3, own, ids: personalIds(parsed), pages })
+  }
+  // Another identity: its page lists go with its personal list.
+  if (!parsed || parsed.own !== namespace) pages = {}
+  const body = { v: 3, own: namespace, ids }
+  if (Object.keys(pages).length > 0) body.pages = pages
+  return JSON.stringify(body)
+}
+
+export function hasPageSeenNamespaces (text) {
+  try {
+    return Object.keys(pageMap(JSON.parse(text))).length > 0
+  } catch {
+    return false
+  }
+}

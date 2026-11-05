@@ -8,7 +8,9 @@
 // generation: one that started before a folder switch or a newer read is
 // dropped. The first row is always "Pedidos de mensagem" with a
 // dot, never a count. Previews are peer text and go through displayText.
-// Props: { onOpenThread(peer) }.
+// Acting as a page (actingAs.js), the list comes from the page's dm-list under
+// 'Conversas da página <nome>' with the custody sentence; the pages.js actions
+// carry the same shapes. Props: { onOpenThread(peer) }.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
@@ -19,7 +21,9 @@ import { useNames } from '../names'
 import { whoOf } from '../who'
 import { relativeTime } from '../format'
 import { LABELS, requestsDot, sortConversations } from '../dm'
-import { previewLine } from '../dm-screen'
+import { PAGE_DM_CUSTODY, pageDmRequest, pageInboxTitle, previewLine } from '../dm-screen'
+import { pagesDm } from '../pages'
+import { pagesOn } from '../pageGate'
 import { useMemberSearch } from '../useMemberSearch'
 import { Btn, ErrorText, Soft, errorText, useAction, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
@@ -27,7 +31,9 @@ import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, Skeleton } from '../ui/States'
 import { layout, type } from '../ui/theme'
+import { label as actingLabel } from '../actingAs'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
+import { memberKeyOf, useActing } from './Conversa'
 
 export const PULL_EVERY_MS = 5 * 60 * 1000
 const LOCKED_TEXT = 'Desbloqueie com a passkey para ler suas mensagens.'
@@ -115,6 +121,16 @@ export function Mensagens ({ onOpenThread }) {
   const now = useNow(60000)
   const { request } = node
   const hosted = node.hosted === true
+  const acting = useActing()
+  const pageKey = acting.kind === 'page' && pagesOn({ hosted, accountOrigin: node.accountOrigin }) ? acting.key : null
+  // Read at call time: on a core node the page statements go to its account
+  // origin through the node, and the memo keeps depending on `request` only.
+  const nodeRef = useRef(node)
+  nodeRef.current = node
+  const dm = useMemo(() => {
+    if (pageKey === null) return request
+    return pageDmRequest(async (action, op) => pagesDm(nodeRef.current, { member: await memberKeyOf(request, nodeRef.current), page: pageKey, action, op }))
+  }, [request, pageKey])
   const unlocked = !!(node.passkey && node.passkey.status && node.passkey.status.unlocked === true)
   const [folder, setFolder] = useState('inbox')
   const [rows, setRows] = useState([])
@@ -142,7 +158,7 @@ export function Mensagens ({ onOpenThread }) {
     const gen = ++genRef.current
     const asked = folderRef.current
     try {
-      const r = await request('dm.list', { folder: asked })
+      const r = await dm('dm.list', { folder: asked })
       if (gen !== genRef.current) return
       // A refresh starts over from the first page: older pages are loaded
       // again on scroll, never left stale.
@@ -157,15 +173,15 @@ export function Mensagens ({ onOpenThread }) {
       setError(errorText(err))
       setLoaded(true)
     }
-  }, [request])
+  }, [dm])
 
   // A pull that failed may still have filed messages: read again either way
   // (the bump re-reads this list, an open thread and the tab dot).
   const refresh = useCallback(async () => {
-    try { await request('dm.pull', {}) } catch {}
+    try { await dm('dm.pull', {}) } catch {}
     if (typeof bumpDm === 'function') bumpDm()
     else await list()
-  }, [request, list, bumpDm])
+  }, [dm, list, bumpDm])
   const refreshRef = useRef(refresh)
   refreshRef.current = refresh
 
@@ -178,13 +194,13 @@ export function Mensagens ({ onOpenThread }) {
       if (!enabled.current) {
         enabled.current = true
         // Starts the wallet top-up early; the first send calls it again.
-        try { await request('dm.enable', {}) } catch { enabled.current = false }
+        try { await dm('dm.enable', {}) } catch { enabled.current = false }
       }
       if (alive) refreshRef.current()
     }
     start()
     return () => { alive = false }
-  }, [ready, request, node.epoch])
+  }, [ready, dm, node.epoch])
 
   // Runs only while the app is visible; hiding it clears the timer.
   useEffect(() => {
@@ -195,13 +211,27 @@ export function Mensagens ({ onOpenThread }) {
     return () => clearInterval(timer)
   }, [ready, visible])
 
+  // Another acting identity is another inbox: the old rows never stay.
+  const seenPage = useRef(pageKey)
+  useEffect(() => {
+    if (seenPage.current === pageKey) return
+    seenPage.current = pageKey
+    genRef.current++
+    setRows([])
+    setNext(null)
+    setRequests(false)
+    setError('')
+    setPageError('')
+    setLoaded(false)
+  }, [pageKey])
+
   useEffect(() => {
     if (ready) list()
   }, [ready, node.dmVersion, folder, list])
 
   // A lost answer may still have applied: read again either way.
   const decideOn = (peer, state) => {
-    decide.run(() => request('dm.set', { peer, state })).then(() => {
+    decide.run(() => dm('dm.set', { peer, state })).then(() => {
       if (typeof bumpDm === 'function') bumpDm()
       else list()
     })
@@ -232,7 +262,7 @@ export function Mensagens ({ onOpenThread }) {
     setLoadingMore(true)
     setPageError('')
     try {
-      const r = await request('dm.list', { folder: asked, before: cursor })
+      const r = await dm('dm.list', { folder: asked, before: cursor })
       if (gen === genRef.current && asked === folderRef.current && cursor === nextRef.current) {
         const page = Array.isArray(r.conversations) ? r.conversations : []
         setRows((cur) => {
@@ -264,6 +294,14 @@ export function Mensagens ({ onOpenThread }) {
   const inRequests = folder === 'request'
   const header = (
     <View>
+      {pageKey !== null
+        ? (
+          <View style={styles.pad}>
+            <Text style={styles.name}>{pageInboxTitle(actingLabel())}</Text>
+            <Soft>{PAGE_DM_CUSTODY}</Soft>
+          </View>
+          )
+        : null}
       {inRequests
         ? (
           <Pressable accessibilityRole='button' onPress={() => switchFolder('inbox')} style={styles.back}>

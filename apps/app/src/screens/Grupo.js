@@ -31,9 +31,9 @@ import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars } from '../format'
 import {
-  DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT,
-  EMPTY_PAGES, PRIVATE_LABEL, REKEY_PENDING_LABEL,
-  applyPage, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, joinLabel, membersLabel, needsDeviceJoin, reconcile, roleLabel, roleOf, rowsOf, sealedLabel, visibilityLabel
+  AS_PAGE_LABEL, DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT,
+  EMPTY_PAGES, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PRIVATE_LABEL, REKEY_PENDING_LABEL,
+  applyPage, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, joinLabel, membersLabel, needsDeviceJoin, pageCan, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, rowsOf, sealedLabel, visibilityLabel
 } from '../groups'
 import { Btn, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -44,6 +44,10 @@ import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { fetchGroup } from '../indexClient'
+import { useNames } from '../names'
+import { pagesOn } from '../pageGate'
+import { pagesGroup } from '../pages'
+import { memberKeyOf, useActing } from './Conversa'
 import { shouldRedirectToCommunity } from '../groupRedirect'
 import { GrupoAjustes } from './GrupoAjustes'
 
@@ -73,6 +77,11 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   const now = useNow(60000)
   const hosted = node.hosted === true
   const ownKey = node.passkey && node.passkey.status ? node.passkey.status.publicKey : null
+  const acting = useActing()
+  const asPage = pageMode({ acting, on: pagesOn({ hosted, accountOrigin: node.accountOrigin }) })
+  const names = useNames()
+  const namesRef = useRef(names)
+  namesRef.current = names
   const version = node.getGroupVersion(group)
   const { request } = node
 
@@ -105,6 +114,12 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   const [reserveConfirm, setReserveConfirm] = useState(false)
   const [indexRole, setIndexRole] = useState(undefined)
   const [lookupTick, setLookupTick] = useState(0)
+  // As a page: its standing in the group (null until an answer says it), the
+  // last failure, and the resend of a signed statement whose outcome is unknown.
+  const [pageRole, setPageRole] = useState(null)
+  const [pageError, setPageError] = useState('')
+  const [pageRetry, setPageRetry] = useState(null)
+  const [pagePending, setPagePending] = useState(false)
   // The text of a post whose outcome is not known: no second send until the
   // person edits the draft or asks for it.
   const [postHold, setPostHold] = useState(null)
@@ -126,9 +141,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
 
   const infoRef = useRef(info)
   infoRef.current = info
-  const role = roleOf(info, ownKey)
-  const reader = READERS.includes(role)
-  const deviceJoin = needsDeviceJoin(info)
+  const role = asPage.page ? pageRole : roleOf(info, ownKey)
+  // group-read answers for a page that is not a member too (public groups).
+  const reader = asPage.page ? loadedAt !== null && loadError === '' : READERS.includes(role)
+  const deviceJoin = !asPage.page && needsDeviceJoin(info)
   const writerNow = info ? info.writerHere : undefined
   useEffect(() => { if (writerNow === true) setDeviceJoinSent(false) }, [writerNow])
   useEffect(() => { setDeviceJoinSent(false); setReserveConfirm(false) }, [group])
@@ -158,11 +174,19 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
     }
   }, [])
 
+  const readGroup = useCallback(async (before) => {
+    if (!asPage.page) return request('group.read', before ? { group, before } : { group })
+    const member = await memberKeyOf(request, node)
+    return pagesGroup(node, { member, page: asPage.key, action: 'group-read', op: before ? { group, before } : { group } })
+  }, [request, group, node, asPage.page, asPage.key])
+
   const readNewest = useCallback(async () => {
-    const read = await request('group.read', { group })
+    const read = await readGroup()
     commitRead(read, null)
+    const mine = asPage.page ? pageRoleOf(read) : null
+    if (mine !== null) setPageRole(mine)
     return read
-  }, [request, group, commitRead])
+  }, [readGroup, commitRead, asPage.page])
 
   // The call carries the newest painted row, so the node marks that post and a
   // message that lands after the paint stays unread. group.seen emits nothing,
@@ -184,6 +208,20 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
     if (pull) setRefreshing(true)
     else if (loadedAt === null) setLoading(true)
     setLoadError('')
+    if (asPage.page) {
+      try {
+        await readNewest()
+        if (mine !== seqRef.current) return
+        setMoreError('')
+      } catch (err) {
+        if (mine === seqRef.current) setLoadError(pageErrorText(err))
+      }
+      if (mine !== seqRef.current) return
+      setLoadedAt(Date.now())
+      setLoading(false)
+      setRefreshing(false)
+      return
+    }
     const fresh = await loadInfo()
     if (mine !== seqRef.current) return
     // A failed info read keeps the last known info and transcript: only a
@@ -206,7 +244,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
     setLoadedAt(Date.now())
     setLoading(false)
     setRefreshing(false)
-  }, [hosted, loadInfo, readNewest, ownKey, loadedAt])
+  }, [hosted, loadInfo, readNewest, ownKey, loadedAt, asPage.page])
 
   const loadRef = useRef(load)
   loadRef.current = load
@@ -221,13 +259,35 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
 
   useEffect(() => () => { seqRef.current += 1 }, [])
 
+  // The authors of a page-mode read are named through the shared names store.
+  useEffect(() => {
+    const n = namesRef.current
+    if (!asPage.page || !n || typeof n.resolveMany !== 'function') return
+    const keys = [...new Set(itemsOf(store).map((i) => i.diary).filter((k) => typeof k === 'string'))]
+    if (keys.length > 0) n.resolveMany(keys)
+  }, [asPage.page, store])
+
+  // Another identity reads another transcript: nothing of the old one stays.
+  const seenPage = useRef(asPage.key)
+  useEffect(() => {
+    if (seenPage.current === asPage.key) return
+    seenPage.current = asPage.key
+    setStore(EMPTY_PAGES)
+    setPageRole(null)
+    setPageError('')
+    setPageRetry(null)
+    setLoadError('')
+    setLoadedAt(null)
+    loadRef.current()
+  }, [asPage.key])
+
   const loadOlder = useCallback(async () => {
     const before = storeRef.current.next
     if (!before || loadingMore) return
     setLoadingMore(true)
     setMoreError('')
     try {
-      const read = await request('group.read', { group, before })
+      const read = await readGroup(before)
       const next = applyPage(storeRef.current, read, before)
       if (next.stale) {
         await readNewest()
@@ -239,7 +299,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
     } finally {
       setLoadingMore(false)
     }
-  }, [request, group, loadingMore, readNewest])
+  }, [readGroup, loadingMore, readNewest])
 
   const rawItems = useMemo(() => itemsOf(store), [store])
   const rows = useMemo(() => rowsOf(rawItems), [rawItems])
@@ -288,8 +348,62 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
 
   // `text` is the original text: a retry after an uncertain post resends it,
   // never whatever the draft holds by then.
+  // A page's statement is signed once. An unknown outcome keeps err.retry (the
+  // same signed bytes) for settle's "tentar de novo"; nothing signs again.
+  const pageSend = async (fn, text, sentAt) => {
+    setPagePending(true)
+    setPageError('')
+    try {
+      await fn()
+      setDraft((d) => (d === text ? '' : d))
+      setPostHold(null)
+      setCheck(null)
+      readNewest().then(() => scrollToEnd(), () => {})
+    } catch (err) {
+      if (err && err.uncertain === true && typeof err.retry === 'function') {
+        setPostHold(text)
+        settle({ action: 'post', diary: asPage.key, text, sentAt }, () => pageSend(err.retry, text, sentAt))
+      } else {
+        setPageError(pageErrorText(err))
+      }
+    } finally {
+      setPagePending(false)
+    }
+  }
+
+  // Join or leave as the page; same rule as pageSend.
+  const pageMembership = async (fn) => {
+    setPagePending(true)
+    setPageError('')
+    setPageRetry(null)
+    try {
+      const answer = await fn()
+      const mine = pageRoleOf(answer)
+      if (mine !== null) setPageRole(mine)
+      loadRef.current()
+    } catch (err) {
+      if (err && err.uncertain === true && typeof err.retry === 'function') {
+        setPageRetry(() => () => pageMembership(err.retry))
+        setPageError(CHECK_UNKNOWN)
+      } else {
+        setPageError(pageErrorText(err))
+      }
+    } finally {
+      setPagePending(false)
+    }
+  }
+
+  const pageStatement = (action, op) => async () => {
+    const member = await memberKeyOf(request, node)
+    return pagesGroup(node, { member, page: asPage.key, action, op })
+  }
+
   const sendPost = async (text) => {
     if (typeof text !== 'string' || text.trim() === '' || !node.online) return
+    if (asPage.page) {
+      pageSend(pageStatement('group-post', { group, text }), text, Date.now())
+      return
+    }
     setCheck(null)
     setPostHold(null)
     const sentAt = Date.now()
@@ -328,6 +442,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   }
 
   const enter = async () => {
+    if (asPage.page) {
+      pageMembership(pageStatement('group-join', communityKey !== null ? { group, community: communityKey } : { group }))
+      return
+    }
     setCheck(null)
     setNeedCommunity(false)
     // A pending root has no community yet: the index's answer names it.
@@ -376,12 +494,14 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   // read marks nothing. Keyed on the newest message on screen, so any paint
   // marks it; uncovering the screen or bringing the app back marks what
   // already shows, without a reload that would drop the older pages.
+  // Reading as a page never moves the person's own seen mark.
   const visible = node.visible !== false
   useEffect(() => {
+    if (asPage.page) return
     if (!visible || !isTop || !reader || lastId === null || loadedAt === null || loadError !== '') return
     if (paintedRef.current !== seqRef.current) return
     markSeen()
-  }, [visible, isTop, reader, lastId, loadedAt, loadError, markSeen])
+  }, [asPage.page, visible, isTop, reader, lastId, loadedAt, loadError, markSeen])
 
   const nameText = info && typeof info.name === 'string' && info.name !== ''
     ? displayText(info.name)
@@ -508,7 +628,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
       {heldCommunity && typeof onOpenCommunity === 'function'
         ? <Pill label={communityName !== '' ? displayText(communityName) : 'comunidade'} onPress={() => onOpenCommunity(heldCommunity)} accessibilityLabel='abrir a comunidade' />
         : null}
-      {info
+      {asPage.page ? <Pill label={AS_PAGE_LABEL} accessibilityLabel='você está como a página' /> : null}
+      {info && !asPage.page
         ? (
           <Pressable
             accessibilityRole='button'
@@ -622,12 +743,12 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
     return (
       <GroupMessageRow
         item={item}
-        name={raw ? raw.name : null}
+        name={raw && raw.name ? raw.name : (asPage.page && names && item.diary ? (names.nameOf(item.diary) || null) : null)}
         username={raw ? raw.username : null}
         own={own}
         now={now}
-        canHide={can('hide', role, { own })}
-        canBan={can('ban', role) && !!item.diary}
+        canHide={!asPage.page && can('hide', role, { own })}
+        canBan={!asPage.page && can('ban', role) && !!item.diary}
         canReport={typeof onReport === 'function' && !!item.diary}
         onHide={(on) => hide(item, on)}
         onBan={() => setBanTarget(item)}
@@ -637,14 +758,16 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
     )
   }
 
-  const canPost = reader && can('post', role) && meta.state === 'ok' && !orphan && canWriteHere(info)
+  const canPost = asPage.page
+    ? pageCan('post', pageRole) && meta.state === 'ok'
+    : reader && can('post', role) && meta.state === 'ok' && !orphan && canWriteHere(info)
   const left = MAX_TEXT - countChars(draft)
   // A writer is here but a post would still be refused. rekey-pending already
   // says so in the placeholder, so it gets no second note.
   const showJoinCard = deviceJoin && !deviceJoinSent
   // Private, writer here, but no epoch key yet: the same words as rekey-pending.
-  const awaitingKey = isPrivate && !canWriteHere(info) && !deviceJoin && meta.state !== 'rekey-pending' && info !== null && info.writerHere !== false
-  const waitToWrite = !showJoinCard && !orphan && !canWriteHere(info) && (role === 'creator' || role === 'admin' || role === 'member') && meta.state !== 'rekey-pending'
+  const awaitingKey = !asPage.page && isPrivate && !canWriteHere(info) && !deviceJoin && meta.state !== 'rekey-pending' && info !== null && info.writerHere !== false
+  const waitToWrite = !asPage.page && !showJoinCard && !orphan && !canWriteHere(info) && (role === 'creator' || role === 'admin' || role === 'member') && meta.state !== 'rekey-pending'
   let composer = null
   if (reader && showJoinCard && !orphan) {
     composer = (
@@ -655,7 +778,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
         <ErrorText>{join.error}</ErrorText>
       </View>
     )
-  } else if (reader) {
+  } else if (asPage.page ? pageRole === 'member' : reader) {
     composer = (
       <View style={styles.composer}>
         {waitToWrite ? <Soft>{awaitingKey ? REKEY_PENDING_LABEL : (communityJoin === 'approval' && !isPrivate ? DEVICE_APPROVAL_TEXT : DEVICE_WAIT_TEXT)}</Soft> : null}
@@ -705,8 +828,32 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
         refreshing={refreshing}
         keepVisiblePosition
       />
+      {asPage.page
+        ? (
+          <View style={styles.note}>
+            {pageRoleLabel(pageRole) ? <Soft>{AS_PAGE_LABEL + ' · ' + pageRoleLabel(pageRole)}</Soft> : null}
+            {pageRole === 'member' || pageRole === 'requested'
+              ? <Pill label={PAGE_LEAVE_LABEL} onPress={() => pageMembership(pageStatement('group-leave', { group }))} pending={pagePending} />
+              : <Btn label={PAGE_JOIN_LABEL} onPress={enter} pending={pagePending} disabled={!node.online} />}
+            {pageRetry ? <Pill label='conferir de novo' onPress={pageRetry} pending={pagePending} /> : null}
+            <ErrorText>{pageError}</ErrorText>
+          </View>
+          )
+        : null}
+      {asPage.page
+        ? (
+          <View style={styles.note}>
+            {pageRoleLabel(pageRole) ? <Soft>{AS_PAGE_LABEL + ' · ' + pageRoleLabel(pageRole)}</Soft> : null}
+            {pageRole === 'member' || pageRole === 'requested'
+              ? <Pill label={PAGE_LEAVE_LABEL} onPress={() => pageMembership(pageStatement('group-leave', { group }))} pending={pagePending} />
+              : <Btn label={PAGE_JOIN_LABEL} onPress={enter} pending={pagePending} disabled={!node.online} />}
+            {pageRetry ? <Pill label='conferir de novo' onPress={pageRetry} pending={pagePending} /> : null}
+            <ErrorText>{pageError}</ErrorText>
+          </View>
+          )
+        : null}
       {composer}
-      {info
+      {info && !asPage.page
         ? (
           <GrupoAjustes
             group={group}

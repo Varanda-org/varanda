@@ -803,7 +803,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -1163,4 +1163,91 @@ test('dm-key: no notice row', (t) => {
   const page = posts.pageV2({ target: K1, issuerUsable: () => true, now: Date.parse(AT) + 60000 })
   t.is(page.items.length, 1, 'only the reply row')
   t.is(page.items[0].seq, 2)
+})
+
+// Pages (lib/page.js): shapes only, the signatures are checked by the reader.
+test('validateRecord: page records', (t) => {
+  const { PAGE_KEYS, validRecordCopy } = records
+  const P = '1'.repeat(64)
+  const O = '2'.repeat(64)
+  const A1 = '3'.repeat(64)
+  const A2 = '4'.repeat(64)
+  const N = 'n'.repeat(43)
+  const SIG = 'c'.repeat(128)
+  const trio = { association: K2, issuer: '5'.repeat(64), issuerDate: AT, issuerSignature: SIG }
+  const valid = {
+    'page-roster': { type: 'page-roster', page: P, gen: 1, owner: O, admins: [A1, A2], prev: null, at: AT, nonce: N, ...trio, signature: SIG, countersignature: SIG },
+    'page-origin': { type: 'page-origin', page: P, from: K1, fromSeq: 4, gen: 3, owner: O, admins: [], at: AT, nonce: N, actor: O, ...trio, signature: SIG, countersignature: SIG },
+    'page-close': { type: 'page-close', page: P, gen: 2, at: AT, nonce: N, actor: O, ...trio, signature: SIG, countersignature: SIG },
+    'page-moved': { type: 'page-moved', page: P, to: K1, gen: 1, at: AT, nonce: N, actor: O, ...trio, signature: SIG, countersignature: SIG },
+    'page-accept': { type: 'page-accept', page: P, gen: 2, rosterSignature: SIG, at: AT, nonce: N, actor: A1, signature: SIG },
+    'page-offer': { type: 'page-offer', page: P, to: A1, exp: AT, gen: 1, at: AT, nonce: N, actor: O, signature: SIG },
+    'page-link': { type: 'page-link', page: P, diary: K1, actor: A1, at: AT, nonce: N, ...trio, signature: SIG },
+    'page-delegate': { type: 'page-delegate', actor: A1, at: AT }
+  }
+  for (const [type, r] of Object.entries(valid)) {
+    t.alike(Object.keys(r).sort(), [...PAGE_KEYS[type]].sort(), type + ' keys')
+    t.is(validateRecord(r, 3), null, type + ' valid')
+    t.alike(validRecordCopy(r, 3), r, type + ' copy')
+    t.is(validateRecord({ ...r, extra: 1 }, 3), 'malformed', type + ' extra key')
+    for (const k of Object.keys(r)) {
+      const missing = { ...r }
+      delete missing[k]
+      t.is(validateRecord(missing, 3), 'malformed', type + ' without ' + k)
+    }
+    t.is(validateRecord(r, 0), 'genesis-required', type + ' at seq 0')
+  }
+  const bad = (type, over, why) => t.is(validateRecord({ ...valid[type], ...over }, 3), 'malformed', type + ': ' + why)
+
+  bad('page-roster', { gen: 0 }, 'gen 0')
+  bad('page-roster', { gen: 4294967296 }, 'gen above uint32')
+  t.is(validateRecord({ ...valid['page-roster'], gen: 4294967295, prev: 9 }, 3), null, 'gen 2^32 - 1')
+  bad('page-roster', { gen: '1' }, 'gen string')
+  bad('page-roster', { prev: 0 }, 'prev 0')
+  bad('page-roster', { prev: 1.5 }, 'prev not an integer')
+  bad('page-roster', { admins: [A2, A1] }, 'admins unsorted')
+  bad('page-roster', { admins: [A1, A1] }, 'admins repeated')
+  bad('page-roster', { admins: [O] }, 'owner among admins')
+  bad('page-roster', { admins: ['A'.repeat(64)] }, 'uppercase admin')
+  bad('page-roster', { admins: 'x' }, 'admins not an array')
+  bad('page-roster', { admins: new Array(1) }, 'sparse admins')
+  const many = Array.from({ length: 17 }, (_, i) => (i + 16).toString(16).padStart(64, '0'))
+  t.is(validateRecord({ ...valid['page-roster'], admins: many.slice(0, 16) }, 3), null, '16 admins')
+  bad('page-roster', { admins: many }, '17 admins')
+  bad('page-roster', { nonce: 'n'.repeat(42) }, 'short nonce')
+  bad('page-roster', { nonce: 'n'.repeat(42) + '=' }, 'nonce charset')
+  bad('page-roster', { at: 'nope' }, 'bad date')
+  bad('page-roster', { page: 'A'.repeat(64) }, 'uppercase page')
+  bad('page-roster', { issuer: K2 }, 'issuer equals the association')
+  bad('page-roster', { countersignature: 'c'.repeat(127) }, 'short countersignature')
+  bad('page-origin', { from: P }, 'from equals page')
+  bad('page-origin', { fromSeq: 0 }, 'fromSeq 0')
+  bad('page-origin', { actor: A1 }, 'actor is not the owner')
+  bad('page-origin', { admins: [O] }, 'owner among admins')
+  bad('page-close', { gen: 1 }, 'gen 1')
+  bad('page-moved', { to: P }, 'moved to itself')
+  bad('page-accept', { gen: 1 }, 'gen 1')
+  bad('page-accept', { rosterSignature: 'x' }, 'bad rosterSignature')
+  t.is(validateRecord({ ...valid['page-offer'], to: null, exp: null }, 3), null, 'offer cancel')
+  bad('page-offer', { to: null }, 'to null with exp')
+  bad('page-offer', { exp: null }, 'exp null with to')
+  bad('page-offer', { exp: 'nope' }, 'bad exp')
+  bad('page-link', { diary: P }, 'diary equals page')
+  bad('page-link', { actor: K1 }, 'actor equals diary')
+  bad('page-link', { actor: P }, 'actor equals page')
+  bad('page-delegate', { actor: 'x' }, 'bad actor')
+
+  const noAssoc = (type) => {
+    const r = { ...valid[type] }
+    delete r.association
+    return r
+  }
+  t.is(validateRecord(noAssoc('page-link'), 3), 'malformed', 'page-link without association')
+  t.is(validateRecord(noAssoc('page-close'), 3), 'malformed', 'page-close without association')
+  t.is(validateRecord({ type: 'page-invite', page: P, at: AT }, 3), 'malformed', 'no page-invite record')
+
+  const hostile = { ...valid['page-roster'] }
+  Object.defineProperty(hostile, 'admins', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(hostile, 3), 'malformed')
+  t.is(validRecordCopy(hostile, 3), null)
 })

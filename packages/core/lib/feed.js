@@ -9,6 +9,7 @@ const { validRecordCopy, latestProfile, formatRef, parseRef } = require('./recor
 const { latestUsername } = require('./username')
 const { engagementState } = require('./engagement')
 const { applyDeletes, deletedSeqs } = require('./deletion')
+const { pageLifecycle, cutEntries } = require('./page-lifecycle')
 
 const MAX_FUTURE_MS = 86400000
 
@@ -31,6 +32,41 @@ function feedCursor (before) {
   return { t, author, seq }
 }
 
+// A page's first verified page-close or page-moved ends the log at its seq:
+// no later block (post, repost, tombstone, profile) counts, so a leaked page
+// key cannot keep feeding readers. The fold reads the raw entries, before
+// applyDeletes, so a tombstone naming the terminal record cannot undo the
+// cut. Blocks past the cut are dropped silently: `future` is the clock-skew
+// channel and they never become items.
+function movedCut (raw, key, association, revokedIssuers) {
+  if (!raw.some((e) => e.record !== null && (e.record.type === 'page-moved' || e.record.type === 'page-close'))) return raw
+  const lifecycle = pageLifecycle(raw, key, association, { revokedIssuers })
+  if (lifecycle.movedTo === null && lifecycle.closed === null) return raw
+  return cutEntries(raw, lifecycle)
+}
+
+// With raw blocks: a cut log is folded again from its raw blocks below the
+// cut, so a tombstone past the cut (already applied by the caller's fold)
+// deletes nothing; only the seqs `entries` shows stay. Without a cut the
+// caller's fold stands.
+function heldFold (raw, held, key, association, revokedIssuers) {
+  const cut = movedCut(held, key, association, revokedIssuers)
+  if (cut === held) return applyDeletes(raw)
+  const shown = new Set(raw.map((e) => e.seq))
+  return applyDeletes(cut).filter((e) => shown.has(e.seq))
+}
+
+// Validated copies of a log's optional raw blocks, or null.
+function heldCopies (held) {
+  if (!Array.isArray(held)) return null
+  const out = []
+  for (const e of held) {
+    if (e === null || typeof e !== 'object' || !Number.isSafeInteger(e.seq)) continue
+    out.push({ seq: e.seq, record: validRecordCopy(e.record, e.seq) })
+  }
+  return out
+}
+
 // Pure: no I/O, inputs are not mutated. `revokedIssuers` (a Set of issuer
 // keys, blocklist.js revokedIssuerSet, or null) makes a username record from a
 // revoked issuer invalid (username.js), so a stolen issuer key cannot keep
@@ -41,6 +77,9 @@ function feedCursor (before) {
 // Every item has `kind`: 'post' ({ ..., text, replyTo, quote, media }, never
 // both replyTo and quote) or 'repost' ({ ..., to, text: null, replyTo: null,
 // quote: null, media: null }, seq/at of the latest `on` record for `to`).
+// A log may carry `raw` (its blocks, tombstones not applied, holes as
+// { seq, record: null }): the page cut is then read and folded from it
+// (heldFold), so it never depends on a fold the caller already ran.
 function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null }) {
   if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1)) throw new TypeError('limit inválido')
   const cursor = before === null ? null : feedCursor(before)
@@ -52,9 +91,10 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
   // readAll, because the web node and tests pass partial entries.
   const deletedRefs = new Set()
   const prepared = []
-  for (const { key, entries } of logs) {
-    const snapshot = entries.map(({ seq, record }) => ({ seq, record: validRecordCopy(record, seq) }))
-    const copied = applyDeletes(snapshot)
+  for (const { key, entries, raw: rawBlocks } of logs) {
+    const raw = entries.map(({ seq, record }) => ({ seq, record: validRecordCopy(record, seq) }))
+    const held = heldCopies(rawBlocks)
+    const copied = held === null ? applyDeletes(movedCut(raw, key, association, revokedIssuers)) : heldFold(raw, held, key, association, revokedIssuers)
     for (const seq of deletedSeqs(copied)) deletedRefs.add(formatRef({ author: key, seq }))
     prepared.push({ key, copied })
   }

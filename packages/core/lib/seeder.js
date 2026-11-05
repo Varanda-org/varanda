@@ -164,15 +164,18 @@ const {
   MAX_MEDIA_CORES,
   MAX_GROUP_WRITERS,
   MAX_GROUPS_PER_DIARY,
-  MAX_GROUP_WRITERS_PER_DIARY
+  MAX_GROUP_WRITERS_PER_DIARY,
+  PAGE_KEYS
 } = require('./records')
 const { validateMediaHeader, latestMediaCores } = require('./media')
 const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins } = require('./group')
 const { createGroupIndex } = require('./group-index')
 const { attachGroups } = require('./groups-net')
-const { presentState, presentLength, clearDeleted, downloadExcept, deletedRanges } = require('./deletion')
+const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges } = require('./deletion')
 const { createEngagementIndex } = require('./engagement-index')
 const { createNameIndex } = require('./name-index')
+const { verifyRoster } = require('./page')
+const { verifyClose, verifyMoved } = require('./page-lifecycle')
 const { parseQuery } = require('./search-text')
 const { createTopicIndex, QUERY_RE } = require('./topic-index')
 const { UsageError } = require('./errors')
@@ -203,6 +206,12 @@ const SCAN_RETRIES_MAX = 8
 // one diary into memory): at start every surviving diary is served
 // together, and unbounded the peak heap is the sum of all of them.
 const PREPARE_CONCURRENCY = 2
+
+// A delete whose target is a page-* record has no effect (lib/deletion.js
+// fold, docs/protocol.md §12): the seeder's own bookkeeping follows it.
+function isPageType (type) {
+  return typeof type === 'string' && Object.prototype.hasOwnProperty.call(PAGE_KEYS, type)
+}
 // Tombstones queued for an incremental irregular media memo update; more
 // before the memo is next used rebuild it (bounds the queue of a regular
 // diary, which never uses it).
@@ -226,7 +235,7 @@ const MAX_BAD_ANNOUNCES = 16
 
 const HEX64 = /^[0-9a-f]{64}$/
 // Record types the engagement index reads from a diary's blocks.
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -2007,9 +2016,12 @@ class Seeder {
       // follow (countShown, tombstoneIrregular: mediaRead then refuses all
       // of this diary's media until a re-serve), `mediaRecounts` how many
       // recounts this serve ran and `mediaRecounting` one is running.
+      // `pageSeqs` the tombstone targets read as page-* records: never in
+      // `deleted` nor `effective` (a delete of one has no effect).
       deleted: new Set(),
       tombstones: new Map(),
       effective: null,
+      pageSeqs: new Set(),
       media: new Map(),
       mediaRefs: new Map(),
       mediaTombs: new Set(),
@@ -2159,7 +2171,18 @@ class Seeder {
       state = null
     }
     for (const seq of this._effectiveDeleted(entry)) entry.excluded.add(seq)
+    // A page diary keeps an unheld tombstone target in the download until
+    // it is read once (lib/deletion.js downloadExceptPages, docs/protocol.md
+    // §12). The held targets are read before the clear below, so a cleared
+    // one is not fetched back.
+    const pageGuard = pageTargets(core)
     if (!this.noClear) {
+      try {
+        // The roster probe settles later (the download is told): it must not
+        // hold a PREPARE_CONCURRENCY slot.
+        await pageGuard.excludable(entry.excluded, { wait: false })
+      } catch {}
+      if (stale()) return
       try {
         await clearDeleted(core, entry.excluded)
       } catch {}
@@ -2170,7 +2193,7 @@ class Seeder {
     } catch {}
     if (stale()) return
     entry.present = Math.max(entry.present, present)
-    entry.download = this._downloader(core, entry.excluded)
+    entry.download = this._downloader(core, entry.excluded, pageGuard)
     // Growth is measured on the present length (has() only: no block is
     // read here, the scan reads each one). A block arriving above the scan
     // cursor queues a pass, which applies a tombstone among such blocks
@@ -2201,6 +2224,9 @@ class Seeder {
     const onDownload = (index) => {
       if (index >= entry.scanned) entry.arrived.add(index)
       if (index > entry.scanned) above = true
+      // A tombstone target the scan skipped as a hole: a page-* one leaves
+      // the deleted bookkeeping and reaches the name index.
+      if (index < entry.scanned && entry.gone.has(index)) this._pageArrived(key, entry, index).catch(noop)
       check()
     }
     core.on('append', onAppend)
@@ -2208,6 +2234,7 @@ class Seeder {
     entry.stopGrow = () => {
       core.off('append', onAppend)
       core.off('download', onDownload)
+      pageGuard.destroy()
     }
     // A replica opened for re-gating may already hold block 0.
     if (regate && entry.present >= 1) this._onGrow(key, entry, entry.present)
@@ -2217,8 +2244,8 @@ class Seeder {
   // The live download of a diary or media core minus `deleted`
   // (lib/deletion.js downloadExcept: update() clears and re-ranges). With
   // noClear every block is downloaded and kept, as before byte deletion.
-  _downloader (core, deleted) {
-    if (!this.noClear) return downloadExcept(core, deleted)
+  _downloader (core, deleted, pageGuard = null) {
+    if (!this.noClear) return pageGuard !== null ? downloadExceptPages(core, deleted, { guard: pageGuard }) : downloadExcept(core, deleted)
     const range = core.download({ start: 0, end: -1 })
     return { update: async () => [], destroy: () => range.destroy(), idle: async () => {} }
   }
@@ -2495,6 +2522,11 @@ class Seeder {
       // apply keeps failing reads fine every pass and would never hit the cap.
       entry.scanRetries = 0
       if (block === null) continue
+      if (entry.gone.has(i) && isPageType(block.type)) {
+        const r = validRecordCopy(block, i)
+        if (r !== null) this._notePage(key, entry, i, r)
+        continue
+      }
       if (block.type === 'follow') {
         const r = validRecordCopy(block, i)
         if (r !== null) this._notices.foldFollow(key, i, r)
@@ -2865,6 +2897,15 @@ class Seeder {
     if (entry.dropped || this._closing || this._served.get(key) !== entry) return true
     const block = raw === null ? null : decodeBlock(raw)
     if (block !== null && (block.type === 'follow' || block.type === 'media-core')) return true
+    // A page-* target: the delete has no effect. One not held yet is
+    // taken back out of `deleted` when it arrives (_notePage).
+    if (block !== null && isPageType(block.type)) {
+      const copy = validRecordCopy(block, target)
+      if (copy !== null) {
+        this._notePage(key, entry, target, copy)
+        return true
+      }
+    }
     entry.deleted.add(target)
     if (media) countTombstone(entry, seq, record, block)
     this._index.removeRecord(key, target)
@@ -2941,11 +2982,40 @@ class Seeder {
       const out = new Set()
       const seqs = Array.from(entry.tombstones.keys()).sort((a, b) => a - b)
       for (let n = seqs.length - 1; n >= 0; n--) {
-        if (!out.has(seqs[n])) out.add(entry.tombstones.get(seqs[n]))
+        const target = entry.tombstones.get(seqs[n])
+        if (!out.has(seqs[n]) && !entry.pageSeqs.has(target)) out.add(target)
       }
       entry.effective = out
     }
     return entry.effective
+  }
+
+  // A tombstone target read as a valid page-* record: the delete has no
+  // effect. It leaves `deleted` (the index cursors read it again) and the
+  // readers' fold; a cursor that already skipped it as deleted hands it to
+  // the name index here (a retry of a noted seq is a no-op there).
+  _notePage (key, entry, seq, record) {
+    if (entry.pageSeqs.has(seq)) return
+    entry.pageSeqs.add(seq)
+    entry.effective = null
+    const skipped = entry.deleted.delete(seq)
+    if (!entry.gated || entry.dropped || this._closing || this._served.get(key) !== entry) return
+    if (skipped || seq < entry.indexed) this._names.note(key, seq, record)
+  }
+
+  // A tombstone target below the scan cursor arrived (the scan passed it
+  // as a hole): read it once to learn whether it is a page-* record.
+  async _pageArrived (key, entry, seq) {
+    if (entry.pageSeqs.has(seq)) return
+    let raw = null
+    try {
+      raw = await entry.core.get(seq, { wait: false, raw: true })
+    } catch {}
+    if (raw === null || entry.dropped || this._closing || this._served.get(key) !== entry) return
+    const block = decodeBlock(raw)
+    if (block === null || !isPageType(block.type)) return
+    const r = validRecordCopy(block, seq)
+    if (r !== null) this._notePage(key, entry, seq, r)
   }
 
   // Diary D's first group scan since start ended (or gave up, or D left):
@@ -4551,16 +4621,20 @@ class Seeder {
           this._retryIndex(key, entry)
           return
         }
-        const block = raw === null || entry.deleted?.has(i) ? null : decodeBlock(raw)
+        let block = raw === null ? null : decodeBlock(raw)
+        // A page-* block is never deleted (_notePage takes it back out).
+        if (block !== null && entry.deleted?.has(i) && !isPageType(block.type)) block = null
         if (block !== null && INDEX_TYPES.has(block.type)) {
           const record = validRecordCopy(block, i)
           // The name index refuses only a new author at its cap: pause like
           // an engagement cap (a retry of the same seq is a no-op there).
-          if (record !== null && (record.type === 'profile' || record.type === 'username') && !this._names.note(key, i, record)) {
+          const isPage = record !== null && record.type.startsWith('page-')
+          if (record !== null && (isPage || record.type === 'profile' || record.type === 'username') && !this._names.note(key, i, record)) {
             entry.indexPaused = true
             return
           }
-          if (record !== null && !this._index.add(key, i, record)) {
+          // Page records only feed the name index's hint.
+          if (record !== null && !isPage && !this._index.add(key, i, record)) {
             entry.indexPaused = true
             return
           }
@@ -4603,6 +4677,17 @@ class Seeder {
       verifyUsername: (author, record) => {
         try {
           return cert.verifyUsernameRecord(record, author, this.association).ok === true
+        } catch {
+          return false
+        }
+      },
+      // The page hint needs the record verified for the author's log, so a
+      // shape-valid unsigned copy never labels a person "Página".
+      verifyPage: (author, record) => {
+        try {
+          const verify = record.type === 'page-roster' ? verifyRoster : record.type === 'page-close' ? verifyClose : record.type === 'page-moved' ? verifyMoved : null
+          if (verify === null) return false
+          return verify(record, author, this.association, this._certOpts()).ok === true
         } catch {
           return false
         }
@@ -5037,7 +5122,20 @@ class Seeder {
       if (before !== null && (!Number.isSafeInteger(before) || before < 1)) return null
       const page = this._index.member(authorHex, before) || { profileSeq: null, usernameSeq: null, posts: [], postsTotal: 0 }
       const entry = this._served.get(authorHex)
-      return { length: entry.present, ...page, ...this._indexFlags() }
+      return { length: entry.present, ...page, ...this._names.hint(authorHex), ...this._indexFlags() }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/page-end/<author>: the seq of the author's first verified
+  // page-close or page-moved the name index noted (null when none); null
+  // when not visible. A pointer only: page.feed fetches that block and
+  // verifies it itself (docs/protocol.md §12).
+  indexPageEnd (authorHex) {
+    try {
+      if (!this._indexVisible(authorHex)) return null
+      return { endSeq: this._names.endSeq(authorHex) }
     } catch {
       return null
     }

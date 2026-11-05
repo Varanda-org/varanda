@@ -94,7 +94,7 @@ Comandos:
   seed key|cert add          chave do semeador e seu certificado (--cert-file)
   seed list|status           diários admitidos e estado do semeador
   seed drop <chave>          apaga um diário do semeador parado
-  account                    serviço de vínculo de conta Google (--account-port, --account-host)
+  account                    serviço de vínculo de conta Google (--account-port, --account-host); páginas com VARANDA_PAGE_KEYS e VARANDA_SEEDER_WS (desligadas por padrão)
   account key                chave do emissor do serviço de conta (imprime só a pública)
   account cert add           grava o certificado do emissor (--cert-file <f>)
   account push-key           chave dos avisos push da versão web (imprime só a pública)
@@ -126,6 +126,17 @@ Comandos:
   community admit|ban|admin <chave>    modera um membro da comunidade (--member, --undo)
   community meta <chave>     muda nome ou entrada da comunidade (--name, --join)
   community remove-group <chave> <grupo>  tira um grupo da lista da comunidade (quem criou, de volta após sair; --undo devolve)
+  page register              registra o delegado de página deste nó (imprime só a chave pública)
+  page terms                 aceita os Termos para o delegado no serviço de conta
+  page create                cria uma página (--username, --name, --bio)
+  page list                  páginas que você tem ou administra, convites e ofertas
+  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 4)
+  page photo                 foto da página (--page, --file, --name, --bio)
+  page follow|unfollow       a página segue ou deixa de seguir uma chave (--page, --key)
+  page notices               avisos da página (--page, --limit)
+  page close|move            encerra a página ou muda a sua chave (--page)
+  page join|leave            a página entra ou sai (--page, --community ou --group)
+  page group-post            a página publica num grupo (--page, --group, --text)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -133,11 +144,12 @@ Opções globais:
   --bootstrap <host:porta>   repetível (ou VARANDA_BOOTSTRAP, separado por vírgula)
   --dht-host <ip>            endereço local da DHT (ou VARANDA_DHT_HOST)
   --json                     saída JSON na última linha
+  page: VARANDA_ACCOUNT_ORIGIN, origem https do serviço de conta
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm
+  --join --undo --private --community --force --no-dm --page --key --username --group --file
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
 ```
 
@@ -218,6 +230,8 @@ Num comando seguinte, `--association` e `VARANDA_ASSOCIATION` são opcionais. Se
 | `VARANDA_ACCOUNT_BURST` | Rajada permitida acima da taxa no balde global do serviço `account`, de 1 a 100000. Padrão 100. |
 | `VARANDA_ACCOUNT_MAX_PENDING` | Vínculos pendentes ao mesmo tempo no serviço `account`, de 1 a 100000. Padrão 1000. |
 | `VARANDA_PUSH_TOKEN` | Segredo do `POST /push-event` entre o semeador e o serviço de conta: 64 hex minúsculos, o mesmo valor nos dois (`openssl rand -hex 32`). Vazio ou ausente desliga os avisos push (a rota responde 404). Em `deploy/seeder/.env`. O erro de formato não repete o valor (`uso: VARANDA_PUSH_TOKEN inválido`). |
+| `VARANDA_PAGE_KEYS` | Chave de custódia das páginas (empresas e projetos) no serviço `account`: 64 hex minúsculos (`openssl rand -hex 32`), em `deploy/seeder/.env`, só o serviço `account` a recebe (reiniciar para mudar). Vazia ou ausente, as páginas ficam desligadas. Malformada, o serviço recusa subir e o erro nunca repete o valor. Ver "Páginas", no operador. |
+| `VARANDA_SEEDER_WS` | URL WebSocket de loopback do semeador onde o escritor das páginas se liga, `ws://127.0.0.1:<porta>` (a porta de `VARANDA_WS_PORT`, sem o `/seeder`, que é acrescentado). Obrigatória com `VARANDA_PAGE_KEYS`: ausente ou fora de loopback, o serviço recusa subir. Ignorada com as páginas desligadas. |
 | `VARANDA_ACCOUNT_HTTP` | Onde o semeador alcança o HTTP do serviço de conta. Padrão `http://127.0.0.1:8790`. Só HTTP em loopback (`127.0.0.1`, `localhost` ou `[::1]`), com porta explícita. Outra forma é `uso: VARANDA_ACCOUNT_HTTP inválido`. |
 | `VARANDA_MAX_EXTERNAL` | Conexões externas (WebSocket) que o `seed` aceita ao mesmo tempo, de 1 a 4096. Padrão 32, independente do limite do enxame. Cada aba visível da web hospedada mantém uma conexão enquanto estiver visível: dimensione para as abas visíveis ao mesmo tempo mais folga para os links curtos da Espiadinha e dos Avisos (`apps/cli/scripts/load-ws.js` mede conexões seguradas). No pior caso cada uma segura até 8 MiB de quadro: a memória fica em ≈ `VARANDA_MAX_EXTERNAL` × 8 MiB + `VARANDA_FRAME_MEMORY`. |
 | `VARANDA_FRAME_MEMORY` | Memória total, em bytes, para quadros grandes em montagem no `seed`, de 8454144 (8 MiB + 64 KiB, o maior quadro válido) a 1073741824 (1 GiB). Padrão 64 MiB. Some à regra de memória: ≈ `VARANDA_MAX_EXTERNAL` × 8 MiB + `VARANDA_FRAME_MEMORY` no pior caso. |
@@ -605,7 +619,7 @@ O retrato e o diário andam juntos: o retrato na versão 2 guarda o identificado
 
 **Restaurar um backup é um evento de segurança.** O backup copia os três arquivos juntos, com o serviço parado; ao restaurar, restaure só o `directory.json` e o `directory.journal.*` que ele nomeia, sempre da cópia MAIS RECENTE, e MANTENHA o `directory.hwm` que já está no volume (restaure o `directory.hwm` do backup apenas se o volume o perdeu): sobrescrever a marca atual pela do backup a baixaria e a recusa de cópia restaurada nunca dispararia. uma cópia mais antiga faz o diretório esquecer os @nomes e as contas Google vinculados depois dela, que poderiam ser entregues de novo a outra pessoa. Por isso o `directory.hwm` guarda o maior `seq` confirmado e o número de vínculos e de @nomes naquele ponto (atualizado a cada compactação e na parada limpa, nunca para trás) fora do par retrato+diário: se o par restaurado termina abaixo dessa marca, o serviço recusa abrir com `diretório de contas restaurado de uma cópia antiga; confira o backup` (e registra `store restaurado`), e `account status`, `account export` e `account reports` ainda leem, mas avisam. Um `directory.json` com `seq` é julgado pelo `seq`; um sem `seq` (gravado por uma versão anterior, ver abaixo) é julgado só pelas contagens: recusado quando tem menos vínculos ou menos @nomes que a marca. Confira primeiro se não há um backup mais recente. Se a restauração de uma cópia antiga for mesmo intencional, o operador a reconhece apagando o `directory.hwm` depois de confirmar que nenhum @nome e nenhuma conta Google foram emitidos desde aquela cópia; o próximo serviço grava uma marca nova a partir dela. Mudanças feitas depois da última compactação ou parada limpa e perdidas numa queda não entram na marca.
 
-Antes de voltar a uma versão anterior a esta, pare o serviço com a parada limpa: `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml stop account`. Confira que o `directory.json` traz `"v":1` e que não há nenhum arquivo `directory.journal.*`; só então suba a versão anterior (ela ignora o `directory.hwm`). Se a parada registrar `close falhou` (e o serviço sair com código 1), ou se o serviço foi morto à força (ou saiu com `lock perdido`), o `directory.json` fica na versão 2 (toda abertura desta versão o grava assim), que a versão anterior recusa com `diretório de contas inválido`. Nesse caso, suba esta versão, deixe-a abrir o diretório, pare-a com a parada limpa e só então volte. Para voltar a esta versão depois, não é preciso mexer no `directory.hwm`: a versão anterior grava o `directory.json` sem `seq`, e esta versão o compara pelas contagens com a marca, abre se nenhum vínculo nem @nome se perdeu e segue a numeração a partir da marca. Só apague o `directory.hwm` se a volta for recusada com `restaurado de uma cópia antiga` e a perda de vínculos ou @nomes for mesmo intencional.
+Criar a primeira página é uma migração de mão única do diretório de contas: depois dela, uma versão anterior recusa o diretório, e voltar a ela só é possível com a cópia do volume `account-data` feita antes da primeira página. Antes de voltar a uma versão anterior a esta, pare o serviço com a parada limpa: `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml stop account`. Confira que o `directory.json` traz `"v":1` e que não há nenhum arquivo `directory.journal.*`; só então suba a versão anterior (ela ignora o `directory.hwm`). Se a parada registrar `close falhou` (e o serviço sair com código 1), ou se o serviço foi morto à força (ou saiu com `lock perdido`), o `directory.json` fica na versão 2 (toda abertura desta versão o grava assim), que a versão anterior recusa com `diretório de contas inválido`. Nesse caso, suba esta versão, deixe-a abrir o diretório, pare-a com a parada limpa e só então volte. Para voltar a esta versão depois, não é preciso mexer no `directory.hwm`: a versão anterior grava o `directory.json` sem `seq`, e esta versão o compara pelas contagens com a marca, abre se nenhum vínculo nem @nome se perdeu e segue a numeração a partir da marca. Só apague o `directory.hwm` se a volta for recusada com `restaurado de uma cópia antiga` e a perda de vínculos ou @nomes for mesmo intencional.
 
 Os aceites dos Termos de Uso e da Política de Privacidade ficam num arquivo à parte no mesmo volume, `terms.json` (modo `0600`): para cada chave de membro, a versão aceita, a data (do relógio do serviço), o nonce e a assinatura que provaram o aceite; nunca o e-mail. Só um membro já vinculado registra aceite (`POST /account/terms/start` e `/account/terms/finish`, com uma prova da chave do diário). Inclua `terms.json` no backup do volume `account-data`, junto do diretório de contas. Restaurar uma cópia mais antiga perde os aceites feitos depois dela, e os aparelhos que já sincronizaram o aceite não o reenviam. `account export` traz em cada linha o campo `terms`, a lista `[{ "version", "acceptedAt" }]` dos aceites daquele membro (`[]` sem aceite; nunca o nonce nem a assinatura), e sai com `terms.json inválido` (código 1) se o arquivo estiver corrompido; `account status` mostra `aceites dos termos: <n>` ou `aceites dos termos: indisponível (terms.json inválido)`. Com o arquivo inválido o serviço continua no ar, registra `terms indisponivel` e responde "indisponível" (HTTP 503) só nessas duas rotas. Uma versão anterior a esta ignora o `terms.json` e responde 404 nas duas rotas: voltar a ela não perde os aceites gravados, que reaparecem quando esta versão volta.
 
@@ -672,6 +686,37 @@ Diagnóstico: quando o app mostra "A verificação de idade está fora do ar ago
 Os mesmos motivos, com `didit-decisao-` no lugar de `didit-sessao-`, valem para a leitura do resultado.
 
 Antes do lançamento é preciso existir um canal privado de contato para contestação da decisão. Defina-o com os mantenedores; este documento não inventa um.
+
+#### Páginas (opcional, serviço `account`)
+
+Páginas são diários de empresa ou projeto, com @nome próprio, administrados por membros. O serviço `account` guarda a chave de cada página e é o único que assina e grava no diário dela. Quem administra age por pedidos assinados com a chave do próprio diário e nunca recebe a chave da página.
+
+Desligadas por padrão. Para ligar, defina em `deploy/seeder/.env` (reinicie o serviço `account`):
+
+- `VARANDA_PAGE_KEYS`: 64 hex minúsculos, gerados com `openssl rand -hex 32`. Sem ela, o serviço não abre o arquivo de chaves nem o escritor das páginas, e o registro mostra `paginas desligada`.
+- `VARANDA_SEEDER_WS`: `ws://127.0.0.1:<porta>`, a porta de WebSocket do semeador (`VARANDA_WS_PORT`). Obrigatória com a chave.
+
+Guarde `VARANDA_PAGE_KEYS` junto com o backup do volume `account-data`: sem ela, o `page-keys.json` não abre. Um arquivo que não abre com a chave dada faz o serviço subir sem páginas e registrar `paginas indisponivel`, sem reescrever nada.
+
+Ao iniciar, o serviço de conta encerra no diretório as páginas que não têm diário de página nem registro de administração (uma criação interrompida entre a reserva do @nome e o diário); o log traz `{ event: 'paginas', reason: 'orfas-encerradas', count }`, e `orfas-pendentes` se a limpeza falhou. `VARANDA_NO_PAGE_MIGRATE=1` vale só para o nó core.
+
+O que fica no volume `account-data`:
+
+- `page-keys.json`: as chaves das páginas, cifradas com AES-256-GCM sob `VARANDA_PAGE_KEYS`; modo `0600`. Nada é impresso nem registrado.
+- `pages.json`: a lista de controle das páginas (dono, administradores, convites pendentes, encerramento e mudança), sem nenhuma chave secreta; modo `0600`.
+- `pages-store/`: os diários das páginas e as cópias das fotos.
+- `pages-groups/` e `pages-replicas/`: os núcleos de escritor das páginas em comunidades e grupos (só chaves públicas) e as cópias dos grupos que elas leem. Os segredos de escritor e a caixa dos grupos privados ficam em `page-keys.json`.
+- `page-invite-rosters.json` e `page-nonce-key.json`: convites pendentes e a chave que autentica os nonces, modo `0600`.
+
+Regras de operação:
+
+- As páginas dividem o inventário do semeador, com no máximo 256 páginas no total.
+- Uma página pode publicar fotos nas publicações e seguir outras contas, por ação do dono ou de um administrador.
+- Encerrar a página é definitivo: o @nome fica reservado e nunca é emitido de novo. O serviço continua servindo a página encerrada, só para leitura, e apaga as chaves dela depois que o semeador recebeu o encerramento (isso é refeito depois de um reinício). Cada dono faz no máximo 2 encerramentos ou mudanças de chave a cada 24 h (contagem em memória, zera ao reiniciar). Para uma chave vazada, `mod block` da chave da página é o remédio do operador.
+- Mudar a chave de uma página publica uma declaração sucessora, assinada pela chave antiga, que aponta para a nova. Quem segue a página vê a troca nessa declaração.
+- Páginas em comunidades ficam ligadas sempre que as páginas estão ligadas. Não há interruptor separado. O serviço guarda a caixa dos grupos privados da página e pode ler as publicações dela ali, e lê os avisos endereçados à página em nome de quem a administra (Termos 15).
+- Um nó core administra páginas com uma chave de delegado guardada no aparelho. A CLI usa `VARANDA_ACCOUNT_ORIGIN` (https) e o `varanda-serve --account-origin https://<host>` liga as Páginas no app servido por ele. O `VARANDA_NO_PAGE_MIGRATE=1` desliga o acompanhamento automático da chave nova de uma página nos aparelhos de quem segue.
+- Criar a primeira página é uma migração de mão única do diretório de contas (ver o parágrafo sobre voltar a versões anteriores em "Vínculo de conta Google e @nome").
 
 ### Implantação automática pelo GitHub Actions
 

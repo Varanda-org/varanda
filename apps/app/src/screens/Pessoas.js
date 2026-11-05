@@ -232,7 +232,9 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
       moreError: ''
     })
     learnPeeked(learnMany, page.peeked)
-  }, [hosted, author, readPage, patch, learnMany])
+    // The names cache carries the seeder's page hint for MemberRow's badge.
+    resolveMany(page.rows.map((r) => r.key))
+  }, [hosted, author, readPage, patch, learnMany, resolveMany])
 
   const loadMore = useCallback(async () => {
     const cur = listRef.current
@@ -258,7 +260,8 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
       meta: { indexing: value.indexing, complete: now.meta.complete && value.complete }
     })
     learnPeeked(learnMany, page.peeked)
-  }, [hosted, online, readPage, patch, learnMany])
+    resolveMany(page.rows.map((r) => r.key))
+  }, [hosted, online, readPage, patch, learnMany, resolveMany])
 
   const { phase, rows, unavailable, next, total, meta, unsupported, loadingMore, moreError, refreshing, error } = list
 
@@ -454,6 +457,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
     return (
       <MemberRow
         hit={hit}
+        hint={profileOf(item.key)}
         avatar={pickAvatar(profileOf(item.key), item)}
         following={follows === null ? null : follows.has(item.key)}
         onOpen={onOpenMember}
