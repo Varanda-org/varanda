@@ -21,9 +21,9 @@ import { useNames } from '../names'
 import { shouldReloadOnShow } from '../paging'
 import { HELP } from '../help'
 import {
-  PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WEB_ONLY_MESSAGE,
+  PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WARM_DELAY_MS, PEEK_WEB_ONLY_MESSAGE,
   isExpiredPeekError, isLastPeekPage, isWebOnlyError, mergePage, pageNeeds, peekKey, peekNotice,
-  recordFollow, skippedText, withoutFollowed
+  recordFollow, shouldWarmPeek, skippedText, withoutFollowed
 } from '../peek'
 import { whoOf } from '../who'
 import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useSocial } from './ARua'
@@ -70,6 +70,18 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   })
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, expired, loadedAt, meta, unsupported, following } = state
   const stateRef = useRef(state)
+  // Read after a wait: the warm decides from the latest tab and refresh, not
+  // the render that armed the timer.
+  const activeRef = useRef(active)
+  activeRef.current = active
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
+  // The epoch whose hidden first page was already requested.
+  const warmedEpochRef = useRef(null)
+  // pageNeeds held back until the tab is shown.
+  const pendingIngestRef = useRef(null)
+  // A refresh bump that landed while a peek.read was already in flight.
+  const reloadAfterRef = useRef(false)
   // Only the latest read may commit; the ref also blocks duplicate end reaches.
   const seqRef = useRef(0)
   const commit = useCallback((patch) => {
@@ -140,8 +152,11 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     commit({ items: unfollowed(stateRef.current.items) })
   }, [request, commit, unfollowed, markFollowed])
 
-  const loadFirst = useCallback(async () => {
+  const loadFirst = useCallback(async (opts) => {
     if (!hosted || stateRef.current.unsupported) return
+    // Pills pass the press event and pull-to-refresh passes nothing. Only the
+    // hidden warm sets quiet.
+    const quiet = !!(opts && opts.quiet === true)
     const mine = ++seqRef.current
     const before = new Map(followedHereRef.current)
     commit({
@@ -161,7 +176,14 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         if (followedHereRef.current.get(a) === stamp) followedHereRef.current.delete(a)
       }
       const rows = unfollowed(page.items)
-      ingest({ ...pageNeeds(rows), reset: true })
+      // A hidden warm must not put follow.list, engagement.read, counts and
+      // diary peeks on the node while A Rua is loading. The first show ingests.
+      if (quiet && !activeRef.current) {
+        pendingIngestRef.current = pageNeeds(rows)
+      } else {
+        ingest({ ...pageNeeds(rows), reset: true })
+        pendingIngestRef.current = null
+      }
       commit({
         items: mergePage([], rows).items,
         next: page.next,
@@ -175,15 +197,30 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       // Signals that arrived while loadedAt was null share this one pass.
       // Clear the flag as it starts. Nothing cleans this pass up: it has to
       // finish so the rows just committed lose those authors.
-      if (followsPending.current) {
+      // A hidden warm leaves it for the first show (follow.list stays off
+      // the node's queue while A Rua loads).
+      if (followsPending.current && activeRef.current) {
         followsPending.current = false
         reconcileFollows(() => true)
       }
     } catch (err) {
       if (mine !== seqRef.current) return
       // An old node bundle or a native / serve node: never asked again.
+      // A quiet miss while hidden sets no error: the first real show loads.
       if (isWebOnlyError(err)) commit({ unsupported: true, loading: false, refreshing: false })
+      else if (quiet && !activeRef.current) commit({ loading: false, refreshing: false })
       else commit({ loading: false, refreshing: false, loadError: errorText(err) })
+      // A failed refresh keeps the warm rows on screen: their held needs
+      // still load.
+      if (activeRef.current && pendingIngestRef.current !== null) {
+        ingest({ ...pendingIngestRef.current, reset: true })
+        pendingIngestRef.current = null
+      }
+      // Follows held while the tab was hidden still drop their rows.
+      if (activeRef.current && followsPending.current && stateRef.current.loadedAt !== null) {
+        followsPending.current = false
+        reconcileFollows(() => true)
+      }
     }
   }, [hosted, peek, commit, ingest, unfollowed, reconcileFollows])
 
@@ -221,7 +258,40 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   }, [active, hosted, peek, commit, ingest, unfollowed])
 
   // Reload rules as A Rua: first show, a reselect after 60 s, a refresh bump.
+  // The warm page's quotes, counts and hearts start on the first show. A read
+  // already in flight is not joined by another: a refresh bump waits for it,
+  // a show or a reselect just waits.
   const previous = useRef({ active: false, refresh, scrollToTop })
+  const seederVerified = !!(node.signals && node.signals.seederVerified)
+  // Warm the first page while this tab is hidden, once the seeder link is
+  // verified, so opening it finds the rows already there. The refresh stored
+  // on `previous` is consumed: this read is newer than a bump that arrived
+  // before it.
+  useEffect(() => {
+    if (!shouldWarmPeek({
+      hosted,
+      online: node.online,
+      phase: node.phase,
+      seederVerified,
+      visible: node.visible,
+      active,
+      loadedAt: state.loadedAt,
+      loading: state.loading,
+      refreshing: state.refreshing,
+      unsupported: state.unsupported,
+      attempted: warmedEpochRef.current === node.epoch
+    })) return
+    const timer = setTimeout(() => {
+      const current = stateRef.current
+      // The tab may have opened, or a read started, during the delay.
+      if (current.loadedAt !== null || current.loading || current.refreshing || activeRef.current) return
+      warmedEpochRef.current = node.epoch
+      previous.current = { ...previous.current, refresh: refreshRef.current }
+      loadFirst({ quiet: true })
+    }, PEEK_WARM_DELAY_MS)
+    return () => clearTimeout(timer)
+  }, [hosted, node.online, node.phase, seederVerified, node.visible, node.epoch, active, state.loadedAt, state.loading, state.refreshing, state.unsupported, loadFirst])
+
   useEffect(() => {
     const prev = previous.current
     const shown = active && !prev.active
@@ -230,9 +300,44 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop }
     if (!active) return
     const current = stateRef.current
+    if (current.loading || current.refreshing) {
+      if (changed) reloadAfterRef.current = true
+      return
+    }
     const stale = shouldReloadOnShow({ loadedAt: current.loadedAt, now: Date.now(), fresh: false })
-    if (changed || ((shown || reselected) && stale && !current.loading && !current.refreshing)) loadFirst()
-  }, [active, refresh, scrollToTop, loadFirst])
+    if (changed || ((shown || reselected) && stale)) {
+      // This load ingests its own page on success (and the warm page's held
+      // needs on failure); a deferred refresh is covered by it.
+      reloadAfterRef.current = false
+      loadFirst()
+      return
+    }
+    if (pendingIngestRef.current !== null) {
+      ingest({ ...pendingIngestRef.current, reset: true })
+      pendingIngestRef.current = null
+    }
+    if (followsPending.current && current.loadedAt !== null) {
+      followsPending.current = false
+      reconcileFollows(() => true)
+    }
+  }, [active, refresh, scrollToTop, loadFirst, ingest, reconcileFollows])
+
+  // A warm page nobody has seen is dropped with its node session: its cursor
+  // lived in that session's snapshot. The next epoch warms again.
+  const shownOnceRef = useRef(false)
+  if (active) shownOnceRef.current = true
+  useEffect(() => {
+    if (shownOnceRef.current || stateRef.current.loadedAt === null) return
+    seqRef.current += 1
+    pendingIngestRef.current = null
+    commit({ items: [], next: null, atEnd: false, expired: false, loadedAt: null, meta: { diaries: 0, skipped: 0, incomplete: false }, loading: false, refreshing: false, loadError: '', moreError: '' })
+  }, [node.epoch, commit])
+
+  useEffect(() => {
+    if (!active || state.loading || state.refreshing || !reloadAfterRef.current) return
+    reloadAfterRef.current = false
+    loadFirst()
+  }, [active, state.loading, state.refreshing, loadFirst])
 
   // A follow made elsewhere (Membro, Seguindo, A Rua, another device): drop
   // the followed authors' rows without reloading, so the pages and the
@@ -248,7 +353,8 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     if (!hosted) return
     // The page in flight was read with the old follow set. Keep the signal
     // until that page commits, or that author's rows stay until a refresh.
-    if (stateRef.current.loadedAt === null) {
+    // A hidden list keeps it for the next show.
+    if (stateRef.current.loadedAt === null || !activeRef.current) {
       followsPending.current = true
       return
     }

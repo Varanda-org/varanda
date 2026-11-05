@@ -64,6 +64,17 @@ export function peekNotice ({ supported, hosted, online, loadedAt }) {
   return null
 }
 
+// The hidden tab reads its first page once the seeder link is verified, so
+// opening Espiadinha does not wait on a new socket and does not dial before
+// that link is up. One try per epoch (`attempted`).
+export const PEEK_WARM_DELAY_MS = 1000
+
+export function shouldWarmPeek ({ hosted, online, phase, seederVerified, visible, active, loadedAt, loading, refreshing, unsupported, attempted }) {
+  return hosted === true && online !== false && phase === 'ready' && seederVerified === true &&
+    visible !== false && active === false && loadedAt === null && !loading && !refreshing &&
+    !unsupported && attempted !== true
+}
+
 export function isWebOnlyError (err) {
   return Boolean(err && err.code === 'USAGE' && WEB_ONLY_MESSAGES.includes(err.message))
 }

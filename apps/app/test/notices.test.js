@@ -15,6 +15,7 @@ test('the fixed texts are the approved Portuguese', async (t) => {
     NOTICES_INCOMPLETE_TEXT,
     SEEN_STORAGE_KEY,
     NOTICES_POLL_MS,
+    NOTICES_FIRST_READ_MS,
     SEEN_MAX
   } = await load()
   t.is(EMPTY_TITLE, 'Ninguém novo por aqui')
@@ -26,6 +27,7 @@ test('the fixed texts are the approved Portuguese', async (t) => {
   t.is(NOTICES_INCOMPLETE_TEXT, 'Alguns avisos ainda podem chegar.')
   t.is(SEEN_STORAGE_KEY, 'varanda-notices-seen')
   t.is(NOTICES_POLL_MS, 300000)
+  t.is(NOTICES_FIRST_READ_MS, 6000)
   t.is(SEEN_MAX, 2048)
 })
 
@@ -498,6 +500,64 @@ function fakeRequest (pages) {
 
 const cursor = (n) => ({ at: '2026-01-01T00:00:0' + n + '.000Z', key: 'k' + n })
 
+test('readNotices delivers cumulative pages before requesting the next one', async (t) => {
+  const { readNotices } = await load()
+  const a = item('a', 1)
+  const b = item('b', 1)
+  const pages = [
+    { notices: [a], next: cursor(1), incomplete: true, supported: true, activity: false },
+    { notices: [a, b], next: cursor(2), incomplete: false, supported: true, activity: true },
+    { notices: [], next: null, incomplete: false, supported: true }
+  ]
+  const events = []
+  const partials = []
+  const { request, calls } = fakeRequest(pages.slice())
+  const result = await readNotices((method, params) => {
+    events.push('request ' + (calls.length + 1))
+    return request(method, params)
+  }, {
+    limit: 30,
+    onPage: (partial) => {
+      partials.push(partial)
+      events.push('page ' + partials.length)
+    }
+  })
+  t.alike(events, ['request 1', 'page 1', 'request 2', 'page 2', 'request 3', 'page 3'])
+  t.alike(partials, [
+    { notices: [a], next: cursor(1), incomplete: true, activity: false },
+    { notices: [a, b], next: cursor(2), incomplete: true, activity: false },
+    { notices: [a, b], next: null, incomplete: true, activity: false }
+  ])
+  t.alike(result, { notices: [a, b], next: null, incomplete: true, supported: true, activity: false })
+  t.alike(await readNotices(fakeRequest(pages).request, { limit: 30 }), result, 'omitting onPage preserves the result')
+})
+
+test('readNotices delivers the first page even when a continuation fails', async (t) => {
+  const { readNotices } = await load()
+  const a = item('a', 1)
+  const partials = []
+  const failure = new Error('continuation failed')
+  let reads = 0
+  const result = readNotices(async () => {
+    if (++reads === 2) throw failure
+    return { notices: [a], next: cursor(1), incomplete: false, supported: true }
+  }, { limit: 30, onPage: (partial) => partials.push(partial) })
+  await t.exception(result, failure)
+  t.is(reads, 2)
+  t.alike(partials, [{ notices: [a], next: cursor(1), incomplete: false, activity: true }])
+})
+
+test('readNotices propagates an onPage error', async (t) => {
+  const { readNotices } = await load()
+  const failure = new Error('callback failed')
+  const { request, calls } = fakeRequest([{ notices: [], next: cursor(1), supported: true }])
+  await t.exception(readNotices(request, {
+    limit: 30,
+    onPage: () => { throw failure }
+  }), failure)
+  t.is(calls.length, 1)
+})
+
 test('readNotices reads past a gap: an empty page with a cursor is followed by the page after it', async (t) => {
   const { readNotices, NOTICES_AUTO_PAGES } = await load()
   t.is(NOTICES_AUTO_PAGES, 4)
@@ -557,12 +617,17 @@ test('readNotices is bounded: at most NOTICES_AUTO_PAGES continuations, then the
 
 test('readNotices never spins on a cursor that does not move', async (t) => {
   const { readNotices } = await load()
+  const partials = []
   const { request, calls } = fakeRequest([
     { notices: [], next: cursor(1), incomplete: false, supported: true },
     { notices: [], next: { at: cursor(1).at, key: cursor(1).key }, incomplete: false, supported: true }
   ])
-  const r = await readNotices(request, { limit: 30 })
+  const r = await readNotices(request, { limit: 30, onPage: (partial) => partials.push(partial) })
   t.is(calls.length, 2)
+  t.alike(partials, [
+    { notices: [], next: cursor(1), incomplete: false, activity: true },
+    { notices: [], next: null, incomplete: false, activity: true }
+  ])
   t.alike(r, { notices: [], next: null, incomplete: false, supported: true, activity: true }, 'a stuck cursor ends the list')
   const same = fakeRequest([{ notices: [item('a', 1)], next: cursor(0), incomplete: false, supported: true }])
   const r2 = await readNotices(same.request, { limit: 30, after: cursor(0) })
@@ -572,15 +637,19 @@ test('readNotices never spins on a cursor that does not move', async (t) => {
 
 test('readNotices returns an unsupported page as is and stops when no longer live', async (t) => {
   const { readNotices } = await load()
+  const partials = []
+  const onPage = (partial) => partials.push(partial)
   const unsupported = { notices: [], next: null, incomplete: false, supported: false }
   const one = fakeRequest([unsupported])
-  t.is(await readNotices(one.request, { limit: 30 }), unsupported)
+  t.is(await readNotices(one.request, { limit: 30, onPage }), unsupported)
+  t.alike(partials, [], 'an unsupported page is never delivered')
   const gone = fakeRequest([
     { notices: [], next: cursor(1), incomplete: false, supported: true },
     { notices: [item('a', 1)], next: null, incomplete: false, supported: true }
   ])
-  const r = await readNotices(gone.request, { limit: 30, live: () => false })
+  const r = await readNotices(gone.request, { limit: 30, live: () => false, onPage })
   t.is(gone.calls.length, 1, 'no page is read for a read that is no longer the latest')
+  t.alike(partials, [{ notices: [], next: cursor(1), incomplete: false, activity: true }], 'the current page is delivered before checking live')
   t.alike(r, { notices: [], next: cursor(1), incomplete: false, supported: true, activity: true })
 })
 

@@ -4504,3 +4504,46 @@ Limites desta parte:
 - Já era assim antes: se outro aparelho publica durante a leitura do Diário, o aviso de novidade é dado como visto; com a nova regra, a volta à aba em menos de 60 s não relê, e a publicação aparece ao puxar para atualizar ou depois de 60 s.
 - Este documento não traz medidas depois da mudança: os números novos saem dos passos acima, no mesmo tipo de visita usado nas medidas do dono.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 93. Espiadinha e Avisos prontos ao abrir (PR perf/warm-tabs)
+
+No nó hospedado (web e app com a instalação), a Espiadinha e os Avisos começam a carregar antes de a pessoa abrir a aba. Não muda o que é gravado nem o que o nó guarda; muda a ordem e o momento dos pedidos. Medidas do dono antes da mudança (Chrome, produção, visita repetida): a primeira abertura da Espiadinha falhou com "Sem conexão agora"; na segunda tentativa, as linhas apareceram em 1,67 s e as citações cerca de 8,8 s depois. Avisos ficou em branco por 2,75 s. Este documento não traz medidas novas: os números depois da mudança saem dos passos abaixo.
+
+Regras que os passos abaixo conferem:
+
+- Espiadinha: no nó hospedado, com a aba escondida, o app lê a primeira página da Espiadinha uma vez por conexão, cerca de 1 s depois de a ligação com o semeador ser confirmada (sinal `peer seeder`), e só com a página visível e em linha. Ao abrir a aba, as linhas já estão lá. As citações, contagens e corações dessa página só começam quando a aba aparece, para não disputar a fila do nó com A Rua. Uma falha escondida não mostra erro; a aba, ao abrir, tenta de novo. Abrir a aba durante essa leitura mostra o esqueleto e espera, sem segunda leitura. No nó nativo sem instalação, nada muda (lá a Espiadinha não existe).
+- Avisos: cada página aparece assim que chega (antes, a tela esperava até 5 leituras e mostrava tudo de uma vez), com o indicador de atualização enquanto as continuações chegam. Com a aba escondida, uma leitura da primeira página acontece uma vez por conexão, 6 s depois da ligação com o semeador, e a leitura de 5 min também preenche a lista antes da primeira abertura. A lista escondida só muda o ponto do sino: nada é marcado como visto até a aba aparecer. Uma falha numa continuação mantém as linhas e oferece "tentar de novo" no fim da lista. Cada leitura continua com sua própria ligação curta ao semeador (decisão do dono).
+- Um "atualizar" vindo de fora (seguir, apagar, publicar) que chega durante uma leitura em andamento espera ela terminar e então relê uma vez.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes desta parte: `apps/app/test/peek.test.js` (shouldWarmPeek), `apps/app/test/notices.test.js` (onPage de readNotices) e `apps/app/test/avisosHosted.test.js`. As caixas abaixo ficam desmarcadas até alguém executar o passo, num aparelho ou navegador de verdade.
+
+Android (aparelho ou emulador, primeiro):
+
+- [ ] Com o registro do nó aberto e a instalação hospedada, abrir o app em A Rua: cerca de 1 s depois de "peer seeder", um peek.read; cerca de 6 s depois, um notices.list.
+- [ ] Abrir a Espiadinha depois disso: as linhas aparecem na hora, sem esqueleto.
+- [ ] Abrir a Espiadinha durante a leitura escondida: esqueleto, depois linhas, sem segundo peek.read.
+- [ ] Abrir Avisos antes de 6 s: a primeira página aparece assim que chega, com o indicador de atualização.
+- [ ] Com avisos novos e a aba escondida: o ponto do sino acende e, ao abrir, os avisos passam a vistos.
+- [ ] O primeiro feed.read e o primeiro /index/counts de A Rua não ficam mais lentos.
+- [ ] No nó nativo sem instalação, nenhuma leitura escondida acontece.
+
+iOS (simulador ou aparelho, depois do Android):
+
+- [ ] Os passos de Espiadinha e Avisos acima, no simulador ou num aparelho com a instalação hospedada.
+- [ ] O primeiro feed.read de A Rua não fica mais lento (conferir no log).
+
+Web (navegador, depois do iOS):
+
+- [ ] Na web hospedada, com o registro de rede aberto, carregar a página: peek.read cerca de 1 s depois de "peer seeder", e notices.list cerca de 6 s depois.
+- [ ] Na web hospedada, abrir a Espiadinha depois disso: as linhas aparecem na hora.
+- [ ] Na web hospedada, abrir Avisos antes de 6 s: a primeira página aparece assim que chega.
+
+Limites desta parte:
+
+- O sinal do semeador vale para a ligação da sincronização, não para a ligação própria da Espiadinha, então a leitura escondida ainda pode falhar. Nesse caso fica quieta, e a aba tenta de novo ao abrir.
+- A leitura escondida gasta uma ligação curta a mais ao semeador por conexão, mesmo que a pessoa nunca abra a aba.
+- Abrir a Espiadinha mais de 60 s depois da leitura escondida mostra as linhas na hora, mas sem citações nem contagens, e relê a página (a regra de 60 s de sempre); as citações e contagens chegam com a página nova.
+- No Android e no iOS, a primeira abertura dos Avisos pode mostrar o indicador de puxar para atualizar enquanto as continuações chegam.
+- Nenhuma caixa executada nesta documentação.
