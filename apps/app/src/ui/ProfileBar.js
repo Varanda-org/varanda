@@ -63,19 +63,21 @@ export function useProfileBar (bandHeight, { controlsBottom = bandHeight } = {})
 export function ProfileBar ({ bar, topInset = 0, title, onBack, children }) {
   const styles = useStyles(makeStyles)
   const on = bar.interactive
+  // Shown, the opaque bar takes every tap on itself: box-none would pass taps
+  // on its empty parts to the profile under it (a bio link, Seguir).
   return (
     <Animated.View
-      pointerEvents={on ? 'box-none' : 'none'}
+      pointerEvents={on ? 'auto' : 'none'}
       accessibilityElementsHidden={!on}
       importantForAccessibility={on ? 'auto' : 'no-hide-descendants'}
       aria-hidden={!on}
       style={[styles.wrap, { height: topInset + BAR, opacity: bar.opacity }]}
     >
-      <View pointerEvents={on ? 'box-none' : 'none'}>
+      <View pointerEvents={on ? 'auto' : 'none'}>
         <View pointerEvents='none'>
           <SunsetBand height={topInset + BAR} />
         </View>
-        <View style={[styles.row, { top: topInset }]} pointerEvents={on ? 'box-none' : 'none'}>
+        <View style={[styles.row, { top: topInset }]} pointerEvents={on ? 'auto' : 'none'}>
           {/* The buttons mount only while the bar is interactive: on the web
               box-none gives children pointer-events auto past a hidden parent,
               and a mounted Pressable stays focusable at opacity 0. */}
