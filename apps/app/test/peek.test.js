@@ -156,7 +156,7 @@ test('page needs: posts are local and shown; their quote and reply targets are n
 })
 
 test('a hidden ready tab warms its first page only after the seeder link and the sync run are ready', async (t) => {
-  const { shouldWarmPeek, PEEK_WARM_DELAY_MS } = await load()
+  const { shouldWarmPeek, PEEK_WARM_QUIET_MS } = await load()
   const ready = {
     hosted: true,
     online: true,
@@ -184,5 +184,5 @@ test('a hidden ready tab warms its first page only after the seeder link and the
   t.is(shouldWarmPeek({ ...ready, refreshing: true }), false, 'refreshing')
   t.is(shouldWarmPeek({ ...ready, unsupported: true }), false, 'unsupported')
   t.is(shouldWarmPeek({ ...ready, attempted: true }), false, 'attempted')
-  t.is(PEEK_WARM_DELAY_MS, 3000)
+  t.is(PEEK_WARM_QUIET_MS, 3000)
 })

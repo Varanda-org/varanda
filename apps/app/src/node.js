@@ -105,6 +105,7 @@ import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, effec
 import { errorText } from './ui'
 import { accountOriginOf } from './pageGate'
 import { slowRequestLine } from './slowRequest'
+import { createIdleTracker } from './idle'
 
 const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
 // Native only (configStore.native.js): reads the saved or build-time
@@ -187,6 +188,9 @@ export function NodeProvider ({ children }) {
   // sync.start requests in flight: a lookup sent before the sync.started event
   // would preempt a once-run and end it for good (docs/rpc.md 6.1).
   const startingRef = useRef(0)
+  // Requests in flight, for whenIdle (optional work waits for a quiet app).
+  const idleRef = useRef(null)
+  if (idleRef.current === null) idleRef.current = createIdleTracker()
   const [starting, setStarting] = useState(false)
   // Passkey identity of the browser node (see the header).
   const [hasPasskey, setHasPasskey] = useState(false)
@@ -613,8 +617,11 @@ export function NodeProvider ({ children }) {
     const waiting = awaitingRef.current !== 0
     if (waiting) extendWait()
     const startedAt = Date.now()
+    const idle = idleRef.current
+    idle.begin()
     const done = () => {
       const line = slowRequestLine(method, startedAt, Date.now())
+      idle.end()
       if (line !== null && connRef.current === conn) setSync((prev) => appendLine(prev, 'aviso: ' + line))
     }
     if (method !== 'sync.start') {
@@ -635,6 +642,8 @@ export function NodeProvider ({ children }) {
     pending.then(settled, settled)
     return pending
   }, [extendWait])
+
+  const whenIdle = useCallback((quietMs) => idleRef.current.whenIdle(quietMs), [])
 
   // Re-reads identity.status() of `conn` (the current connection by
   // default); a result for a connection that is no longer current is dropped.
@@ -1117,8 +1126,8 @@ export function NodeProvider ({ children }) {
   const legacyFollows = useMemo(() => (hasPasskey && hasLegacy && unlocked ? { keys: legacyKeys, confirm: legacyConfirm } : null), [hasPasskey, hasLegacy, unlocked, legacyKeys, legacyConfirm])
 
   const value = useMemo(() => ({
-    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, autoSync, signals, ackFresh, setAutoSync, syncNow
-  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, autoSync, signals, ackFresh, setAutoSync, syncNow])
+    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, autoSync, signals, ackFresh, setAutoSync, syncNow, whenIdle
+  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, autoSync, signals, ackFresh, setAutoSync, syncNow, whenIdle])
 
   return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
 }
