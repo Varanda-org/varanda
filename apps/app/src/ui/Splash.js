@@ -1,7 +1,8 @@
 /* global document, getComputedStyle */
 // Presentational splash while the app decides its first screen: the chair
-// rises and settles, the letters of the name enter one by one, then the hint
-// fades in and pulses. On native it stays cream in both schemes to match the
+// rises and settles, the letters of the name enter one by one, then the
+// progress bar fades in and pulses; its fill follows `progress` (real boot
+// steps, src/splashGate.js bootProgress). On native it stays cream in both schemes to match the
 // launch screens (their raster chair has an ink frame that vanishes on dark);
 // on the web it follows the scheme, like the pre-splash in index.html.
 // On the web, public/index.html paints its own opaque overlay with the same
@@ -16,7 +17,7 @@ import { light, statusBarStyle } from '../appearance'
 import { useStyles, useTheme } from './ThemeProvider'
 import { fonts, type } from './theme'
 import { loopTiming } from './loopMotion'
-import { SPLASH_HINT, SPLASH_LABEL, SPLASH_WORD, PULSE_MS, splashMotion } from './splashMotion'
+import { BAR_MS, BAR_WIDTH, SPLASH_LABEL, SPLASH_WORD, PULSE_MS, splashMotion } from './splashMotion'
 
 const mark = require('../../assets/cadeira.png')
 
@@ -29,7 +30,9 @@ const hiddenFromReaders = {
   importantForAccessibility: 'no-hide-descendants'
 }
 
-export function Splash ({ sidePad = 0, edges, hint = SPLASH_HINT }) {
+const unit = (x) => (Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0)
+
+export function Splash ({ sidePad = 0, edges, progress = 0 }) {
   const themed = useStyles(makeStyles)
   const theme = useTheme()
   const styles = nativeStyles || themed
@@ -70,6 +73,24 @@ export function Splash ({ sidePad = 0, edges, hint = SPLASH_HINT }) {
   }
   const hintOpacity = useRef(null)
   if (hintOpacity.current === null) hintOpacity.current = new Animated.Value(full.current.hint.from.opacity)
+  const fill = useRef(null)
+  if (fill.current === null) fill.current = new Animated.Value(unit(progress))
+  // Reduce motion (or the silent splash under the web overlay): the fill
+  // jumps instead of sliding.
+  const stillRef = useRef(false)
+  // The web overlay (public/index.html) draws its own bar from this variable.
+  useEffect(() => {
+    const p = unit(progress)
+    const shell = shellRef.current
+    if (shell && shell.style && typeof shell.style.setProperty === 'function') shell.style.setProperty('--varanda-progress', String(p))
+    if (stillRef.current) {
+      fill.current.setValue(p)
+      return
+    }
+    const anim = Animated.timing(fill.current, { toValue: p, duration: BAR_MS, easing: Easing.out(Easing.quad), useNativeDriver: false, isInteraction: false })
+    anim.start()
+    return () => anim.stop()
+  }, [progress])
 
   useEffect(() => {
     const shell = shellRef.current
@@ -86,6 +107,7 @@ export function Splash ({ sidePad = 0, edges, hint = SPLASH_HINT }) {
     }
     const settle = () => {
       reduced = true
+      stillRef.current = true
       stopAll()
       const c = chair.current
       c.opacity.setValue(m.chair.to.opacity)
@@ -157,6 +179,7 @@ export function Splash ({ sidePad = 0, edges, hint = SPLASH_HINT }) {
         if (cancelled) return
         setUnderShell(false)
         reduced = false
+        stillRef.current = false
         watchReduceMotion()
         try {
           Promise.resolve(AccessibilityInfo.isReduceMotionEnabled()).then((reduce) => {
@@ -223,9 +246,9 @@ export function Splash ({ sidePad = 0, edges, hint = SPLASH_HINT }) {
           </Animated.Text>
         ))}
       </View>
-      <Animated.Text {...hiddenFromReaders} style={[styles.hint, { opacity: hintOpacity.current }]}>
-        {hint}
-      </Animated.Text>
+      <Animated.View {...hiddenFromReaders} style={[styles.bar, { opacity: hintOpacity.current }]}>
+        <Animated.View style={[styles.barFill, { width: fill.current.interpolate({ inputRange: [0, 1], outputRange: [0, BAR_WIDTH] }) }]} />
+      </Animated.View>
       <StatusBar style={statusBarStyle(scheme)} />
     </SafeAreaView>
   )
@@ -249,11 +272,18 @@ const makeStyles = (colors) => StyleSheet.create({
     fontFamily: fonts.title,
     color: colors.accent
   },
-  hint: {
-    fontSize: 14,
-    lineHeight: 20,
-    color: colors.soft,
-    textAlign: 'center'
+  bar: {
+    width: BAR_WIDTH,
+    height: 4,
+    marginTop: 8,
+    borderRadius: 2,
+    overflow: 'hidden',
+    backgroundColor: colors.line
+  },
+  barFill: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.accent
   }
 })
 

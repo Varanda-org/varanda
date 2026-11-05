@@ -18,6 +18,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Abertura até A Rua ficar pronta: a tela de abertura fica até a primeira página aparecer com nomes e números (no máximo 5 s a mais) e mostra uma barra de progresso por etapas no lugar de "conectando…" (detalhes em `docs/verification.md` §95).
 - Ajustes mostra no fim da lista a versão do app (web, Android ou iOS, commit curto, data do build em UTC e, na web, o id da release) e o commit que o servidor implantou por último (`/version.json`, gravado pelo deploy). Tocar copia os detalhes completos para um relatório de erro. O que falta aparece como `desconhecido`. O carimbo do app vem de `EXPO_PUBLIC_VARANDA_COMMIT` e `EXPO_PUBLIC_VARANDA_BUILD_DATE`, que `apps/app/metro.config.js` (`scripts/resolve-build-info.js`) define quando o bundler começa.
 - O app abre A Rua direto quando a idade da conta já foi confirmada (provas assinadas pelo serviço e conferidas pelo nó; o aparelho guarda só recusas), com conferência em segundo plano. Detalhes em `docs/verification.md` §82.
 - Interações da Rua no app: curtir com coração cheio e pulo, toque duplo para curtir no app nativo (nunca na web), fio ligando a resposta à publicação na Conversa, pílulas e abas com toque mais claro, e "Republicado" com "Desfazer" por 4 s. Detalhes em `docs/app.md` ("Interações da Rua") e `docs/verification.md` seção 83.
