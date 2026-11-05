@@ -59,7 +59,7 @@ function createBucket (rate, burst, now = Date.now) {
 }
 
 // session: a createSession() result. -> { listen(), close(), port }
-function createServeServer ({ session, port, origins = [], uiRoot = null, token, openTimeoutMs = 5000 }) {
+function createServeServer ({ session, port, origins = [], uiRoot = null, token, openTimeoutMs = 5000, accountOrigin = null }) {
   let boundPort = null
   let headers = null
   let allowedOrigins = null
@@ -146,13 +146,22 @@ function createServeServer ({ session, port, origins = [], uiRoot = null, token,
     try { conn.ws.close(code, reason) } catch {}
   }
 
+  // node.info carries the account origin (docs/rpc.md 5.2): the app reads it
+  // as config.accountOrigin to turn the Páginas on for this core node.
+  function handlersOf () {
+    const handlers = session.handlers
+    if (accountOrigin === null) return handlers
+    const info = handlers['node.info']
+    return { ...handlers, 'node.info': async (params) => ({ ...(await info(params)), accountOrigin }) }
+  }
+
   function onConnection (ws) {
     const conn = { ws, dispatcher: null, timer: null, closing: false, take: createBucket(RATE_PER_SECOND, RATE_BURST) }
     conns.add(conn)
     ws.on('error', noop)
 
     conn.dispatcher = createServerDispatcher({
-      handlers: session.handlers,
+      handlers: handlersOf(),
       token,
       send (message, text) {
         if (conn.closing || ws.readyState !== WebSocket.OPEN) return

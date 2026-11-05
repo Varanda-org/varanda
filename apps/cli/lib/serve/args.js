@@ -21,6 +21,7 @@ Opções:
   --port <n>                 porta local (padrão 8787; 0 = qualquer porta livre)
   --origin <url>             origem permitida no WebSocket, repetível (ex.: http://localhost:8081)
   --ui <dir>                 diretório com a exportação web estática a servir
+  --account-origin <url>     origem https pública do serviço de conta, liga as Páginas no app (ex.: https://varanda.org)
   --public-dht               usa a DHT pública (opt-in; exclusivo com --bootstrap)
   --data <dir>               diretório de dados do membro (ou VARANDA_DATA, padrão ./data)
   --association <hex>        chave pública da associação (ou VARANDA_ASSOCIATION)
@@ -32,7 +33,7 @@ const DEFAULT_PORT = 8787
 const DEFAULT_OPEN_TIMEOUT_MS = 5000
 
 const memberFlags = new Set(['--data', '--association', '--bootstrap', '--dht-host'])
-const ownStringFlags = new Set(['--port', '--origin', '--ui'])
+const ownStringFlags = new Set(['--port', '--origin', '--ui', '--account-origin'])
 
 function port (value) {
   if (!/^[0-9]{1,5}$/.test(value) || Number(value) > 65535) throw new UsageError('porta inválida')
@@ -50,6 +51,19 @@ function origin (value) {
   }
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.origin !== value) {
     throw new UsageError('origem inválida ' + value)
+  }
+  return value
+}
+
+// The account service the app's Páginas call: a public https origin only
+// (the app's pageGate ignores anything else), in canonical form. Not a secret.
+function accountOrigin (value) {
+  let url = null
+  try {
+    url = new URL(value)
+  } catch {}
+  if (url === null || url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.origin !== value) {
+    throw new UsageError('--account-origin inválido: use https://<host>')
   }
   return value
 }
@@ -101,6 +115,7 @@ function parseServeArgs (argv, env = process.env, cwd = process.cwd()) {
   const origins = []
   let portValue = null
   let ui = null
+  let accountOriginValue = null
   let publicDht = false
   let help = false
   for (let i = 0; i < argv.length; i++) {
@@ -116,6 +131,7 @@ function parseServeArgs (argv, env = process.env, cwd = process.cwd()) {
       if (token === '--port') portValue = value
       else if (token === '--origin') origins.push(value)
       else if (token === '--ui') ui = value
+      else if (token === '--account-origin') accountOriginValue = value
       else rest.push(token, value)
     } else if (token.startsWith('-')) {
       throw new UsageError('opção desconhecida ' + token)
@@ -129,6 +145,7 @@ function parseServeArgs (argv, env = process.env, cwd = process.cwd()) {
   const listenPort = portValue === null ? DEFAULT_PORT : port(portValue)
   const allowed = origins.map(origin)
   const root = ui === null ? null : uiRoot(ui, cwd)
+  const account = accountOriginValue === null ? null : accountOrigin(accountOriginValue)
   if (root === null && allowed.length === 0) throw new UsageError('informe --origin ou --ui')
   if (publicDht && flags.bootstrap !== undefined) throw new UsageError('--bootstrap e --public-dht são exclusivos')
   if (!publicDht && flags.bootstrap === undefined) throw new UsageError('informe --bootstrap ou --public-dht')
@@ -142,6 +159,7 @@ function parseServeArgs (argv, env = process.env, cwd = process.cwd()) {
     uiRoot: root,
     token,
     openTimeoutMs,
+    accountOrigin: account,
     session: {
       dataDir: flags.dataDir,
       association: association(flags),

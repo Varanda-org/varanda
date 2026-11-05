@@ -30,7 +30,7 @@ Comandos:
   seed key|cert add          chave do semeador e seu certificado (--cert-file)
   seed list|status           diários admitidos e estado do semeador
   seed drop <chave>          apaga um diário do semeador parado
-  account                    serviço de vínculo de conta Google (--account-port, --account-host)
+  account                    serviço de vínculo de conta Google (--account-port, --account-host); páginas com VARANDA_PAGE_KEYS e VARANDA_SEEDER_WS (desligadas por padrão)
   account key                chave do emissor do serviço de conta (imprime só a pública)
   account cert add           grava o certificado do emissor (--cert-file <f>)
   account push-key           chave dos avisos push da versão web (imprime só a pública)
@@ -62,6 +62,17 @@ Comandos:
   community admit|ban|admin <chave>    modera um membro da comunidade (--member, --undo)
   community meta <chave>     muda nome ou entrada da comunidade (--name, --join)
   community remove-group <chave> <grupo>  tira um grupo da lista da comunidade (quem criou, de volta após sair; --undo devolve)
+  page register              registra o delegado de página deste nó (imprime só a chave pública)
+  page terms                 aceita os Termos para o delegado no serviço de conta
+  page create                cria uma página (--username, --name, --bio)
+  page list                  páginas que você tem ou administra, convites e ofertas
+  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 4)
+  page photo                 foto da página (--page, --file, --name, --bio)
+  page follow|unfollow       a página segue ou deixa de seguir uma chave (--page, --key)
+  page notices               avisos da página (--page, --limit)
+  page close|move            encerra a página ou muda a sua chave (--page)
+  page join|leave            a página entra ou sai (--page, --community ou --group)
+  page group-post            a página publica num grupo (--page, --group, --text)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -69,11 +80,12 @@ Opções globais:
   --bootstrap <host:porta>   repetível (ou VARANDA_BOOTSTRAP, separado por vírgula)
   --dht-host <ip>            endereço local da DHT (ou VARANDA_DHT_HOST)
   --json                     saída JSON na última linha
+  page: VARANDA_ACCOUNT_ORIGIN, origem https do serviço de conta
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm
+  --join --undo --private --community --force --no-dm --page --key --username --group --file
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.`
 
 function parse (argv = [], env = {}) {
@@ -96,7 +108,7 @@ function spawn (argv, extraEnv = {}) {
   const env = { ...process.env }
   delete env.VARANDA_PUSH_TOKEN
   delete env.VARANDA_ACCOUNT_HTTP
-  for (const name of ['VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN', 'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST', 'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST']) delete env[name]
+  for (const name of ['VARANDA_PAGE_KEYS', 'VARANDA_SEEDER_WS', 'VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN', 'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST', 'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST']) delete env[name]
   return spawnSync(process.execPath, [bin, ...argv], {
     cwd: root,
     env: { ...env, ...extraEnv },
@@ -169,6 +181,21 @@ test('CLI push settings are environment only and validate without echoing values
   usage(t, ['--account-http', 'http://127.0.0.1:8790'], 'opção desconhecida --account-http')
 })
 
+test('CLI page flags: keys checked, --file repeatable, the account origin raw', (t) => {
+  const k = 'ab'.repeat(32)
+  const f = parse(['page', 'post', '--page', k.toUpperCase(), '--key', k, '--group', k, '--username', 'cafe', '--file', 'a.jpg', '--file', '/tmp/b.png'])
+  t.is(f.page, k)
+  t.is(f.key, k)
+  t.is(f.group, k)
+  t.is(f.username, 'cafe')
+  t.alike(f.files, [path.join(root, 'a.jpg'), '/tmp/b.png'])
+  usage(t, ['--page', 'xyz'], 'chave da página inválida')
+  usage(t, ['--group', 'xyz'], 'chave do grupo inválida')
+  usage(t, ['--key', 'xyz'], 'chave inválida')
+  t.is(parse([], { VARANDA_ACCOUNT_ORIGIN: 'https://varanda.test' }).accountOrigin, 'https://varanda.test')
+  t.is(parse([], { VARANDA_ACCOUNT_ORIGIN: 'http://example.com' }).accountOrigin, 'http://example.com', 'checked by the page commands only')
+})
+
 test('CLI parser, R5 help and command router', async (t) => {
   t.timeout(60000)
 
@@ -195,6 +222,12 @@ test('CLI parser, R5 help and command router', async (t) => {
     seeder: null,
     issuer: null,
     moderator: null,
+    page: null,
+    key: null,
+    group: null,
+    username: null,
+    files: [],
+    accountOrigin: null,
     dhtHost: null,
     healthPort: null,
     healthHost: null,
@@ -508,4 +541,17 @@ test('README and protocol help blocks match the root CLI byte for byte', (t) => 
   const flags = parse(['delete', '--to', upperKey + ':42'])
   t.is(flags.command, 'delete')
   t.alike(flags.to, { author: lowerKey, seq: 42 })
+})
+
+test('account refuses a malformed page key or seeder socket without echoing it', (t) => {
+  const badKey = spawn(['account'], { VARANDA_PAGE_KEYS: upperKey })
+  t.is(badKey.status, 2)
+  t.is(badKey.stderr, 'uso: VARANDA_PAGE_KEYS inválida: use 64 caracteres hexadecimais minúsculos\n')
+  t.is(badKey.stdout, '')
+  t.absent(badKey.stderr.includes(upperKey), 'the page key is never printed')
+
+  const badSocket = spawn(['account'], { VARANDA_PAGE_KEYS: lowerKey, VARANDA_SEEDER_WS: 'wss://127.0.0.1:8789' })
+  t.is(badSocket.status, 2)
+  t.is(badSocket.stderr, 'uso: VARANDA_SEEDER_WS inválido\n')
+  t.is(badSocket.stdout, '')
 })

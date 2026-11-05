@@ -1115,7 +1115,7 @@ Comandos:
   seed key|cert add          chave do semeador e seu certificado (--cert-file)
   seed list|status           diários admitidos e estado do semeador
   seed drop <chave>          apaga um diário do semeador parado
-  account                    serviço de vínculo de conta Google (--account-port, --account-host)
+  account                    serviço de vínculo de conta Google (--account-port, --account-host); páginas com VARANDA_PAGE_KEYS e VARANDA_SEEDER_WS (desligadas por padrão)
   account key                chave do emissor do serviço de conta (imprime só a pública)
   account cert add           grava o certificado do emissor (--cert-file <f>)
   account push-key           chave dos avisos push da versão web (imprime só a pública)
@@ -1147,6 +1147,17 @@ Comandos:
   community admit|ban|admin <chave>    modera um membro da comunidade (--member, --undo)
   community meta <chave>     muda nome ou entrada da comunidade (--name, --join)
   community remove-group <chave> <grupo>  tira um grupo da lista da comunidade (quem criou, de volta após sair; --undo devolve)
+  page register              registra o delegado de página deste nó (imprime só a chave pública)
+  page terms                 aceita os Termos para o delegado no serviço de conta
+  page create                cria uma página (--username, --name, --bio)
+  page list                  páginas que você tem ou administra, convites e ofertas
+  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 4)
+  page photo                 foto da página (--page, --file, --name, --bio)
+  page follow|unfollow       a página segue ou deixa de seguir uma chave (--page, --key)
+  page notices               avisos da página (--page, --limit)
+  page close|move            encerra a página ou muda a sua chave (--page)
+  page join|leave            a página entra ou sai (--page, --community ou --group)
+  page group-post            a página publica num grupo (--page, --group, --text)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -1154,11 +1165,12 @@ Opções globais:
   --bootstrap <host:porta>   repetível (ou VARANDA_BOOTSTRAP, separado por vírgula)
   --dht-host <ip>            endereço local da DHT (ou VARANDA_DHT_HOST)
   --json                     saída JSON na última linha
+  page: VARANDA_ACCOUNT_ORIGIN, origem https do serviço de conta
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm
+  --join --undo --private --community --force --no-dm --page --key --username --group --file
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
 ```
 
