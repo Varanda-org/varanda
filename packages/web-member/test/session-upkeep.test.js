@@ -29,7 +29,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // A device of the account `keyPair` / `prf`. `storage` already holding a
 // diary (a second device's copy) gets no certificate: one would fork it.
-async function setup (t, { assoc = generateAssociationKeyPair(), factory = createBrowserNode, writeGate = false, storage = memoryNodeStorage(), keyPair = crypto.keyPair(), prf = crypto.randomBytes(32), upkeepDelayMs } = {}) {
+async function setup (t, { assoc = generateAssociationKeyPair(), factory = createBrowserNode, writeGate = false, storage = memoryNodeStorage(), keyPair = crypto.keyPair(), prf = crypto.randomBytes(32), upkeepDelayMs, upkeepFullMaxAgeMs } = {}) {
   const association = hex(assoc.publicKey)
   const ctx = { storage, association, keyPair, groupKeyPair: (nonce) => groupKeyPairFromPrf(prf, nonce) }
   const key = hex(keyPair.publicKey)
@@ -45,6 +45,7 @@ async function setup (t, { assoc = generateAssociationKeyPair(), factory = creat
     createSocket: () => { throw new Error('unexpected socket') },
     writeGate,
     upkeepDelayMs,
+    upkeepFullMaxAgeMs,
     onInternalError: (err) => internal.push(err)
   })
   t.teardown(() => node.close(), { force: true })
@@ -109,7 +110,10 @@ function nodeWithSync (runSync) {
 // session then drops the continuous intent).
 function controlledSync ({ failOnAbort = () => false } = {}) {
   const runs = []
-  const factory = nodeWithSync(async ({ storage, onEvent, signal, once }) => {
+  const factory = nodeWithSync(async ({ storage, onEvent, signal, once, reader }) => {
+    // The borrowed own diary, as the real run publishes it for withCores.
+    const diary = await store.openDiary(storage)
+    if (reader) reader.set({ diary, replica: () => null, hold: () => true, release: () => {} })
     let finish
     const done = new Promise((resolve) => { finish = resolve })
     const result = { ok: true, errors: [], peers: 1, seederConfirmed: true }
@@ -128,7 +132,13 @@ function controlledSync ({ failOnAbort = () => false } = {}) {
     const r = { once, writers, emit: onEvent, finish: stop, get aborted () { return signal.aborted } }
     runs.push(r)
     let out
-    try { out = await done } finally { signal.removeEventListener('abort', stop) }
+    try { out = await done } finally {
+      signal.removeEventListener('abort', stop)
+      if (reader) reader.clear()
+      // Not awaited: the run ends as promptly as before (a shared open
+      // waits for the close by itself).
+      diary.close().catch(() => {})
+    }
     if (out === null) throw new Error('falha simulada da sincronização')
     return out
   })
@@ -167,12 +177,12 @@ const warningsOf = (s) => s.web.events.filter((e) => e.name === 'warning').map((
 
 // A's community through its RPC, and a second device B of A holding A's
 // diary and `roots` (both roots unless told otherwise), on a controlled sync.
-async function account (t, { roots = true, upkeepDelayMs = 20 } = {}) {
+async function account (t, { roots = true, upkeepDelayMs = 20, upkeepFullMaxAgeMs } = {}) {
   const a = await setup(t)
   const { community, group } = await a.web.request('community.create', { name: 'Bairro', join: 'open' })
   const sync = controlledSync()
   const storage = await secondStorage(a, roots ? [community, group] : [])
-  const b = await setup(t, { assoc: a.assoc, keyPair: a.keyPair, prf: a.prf, storage, factory: sync.factory, upkeepDelayMs })
+  const b = await setup(t, { assoc: a.assoc, keyPair: a.keyPair, prf: a.prf, storage, factory: sync.factory, upkeepDelayMs, upkeepFullMaxAgeMs })
   return { a, b, sync, community, group }
 }
 
@@ -332,6 +342,11 @@ test('automatic re-share on the creator\'s device after its diary grows', async 
   const before = (await coreRecords(a, P)).length
   const grown = await diaryLength(a)
 
+  // The sync reports each writer core it stores for the first time: the
+  // shares a distributor owes need that full plan, which no precheck sees.
+  for (const [group, writer] of [[community, await ownWriter(d, community)], [general, await ownWriter(d, general)], [P, dw]]) {
+    live.emit({ event: 'group-writer', group, writer })
+  }
   live.emit({ event: 'own-synced', length: grown })
   const gate = await sync.next(2)
   t.is(gate.once, true, 'the write gate')
@@ -511,6 +526,244 @@ test('a group-writer event arms the pass afresh, once per writer key', async (t)
   next.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)) })
   await sync.next(3)
   t.is(plans.calls, 2, 'another writer arms again')
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+// B enrolled by its first pass, the echo of that write seen: the live run
+// (index 1) has nothing left to do.
+async function enrolled (t, opts) {
+  const s = await account(t, opts)
+  await s.b.web.request('sync.start')
+  const live = await s.sync.next(0)
+  live.emit({ event: 'own-synced', length: await diaryLength(s.b) })
+  const restarted = await s.sync.next(1)
+  await until(async () => (await ownWriter(s.b, s.group)) !== null, { name: 'the first pass', timeoutMs: 5000 })
+  restarted.emit({ event: 'own-synced', length: await diaryLength(s.b) })
+  await pause(150)
+  t.absent(restarted.aborted, 'the echo arms nothing')
+  return { ...s, restarted }
+}
+
+// A post written on B itself: its write restarts the run (index `next`).
+async function localPost (s, next) {
+  await s.b.web.request('post.create', { text: 'deste aparelho' })
+  return { length: await diaryLength(s.b), run: await s.sync.next(next) }
+}
+
+// Records each precheck answer and whether it ran on the borrowed cores.
+function spyNeeded (t) {
+  const needed = ops.deviceUpkeepNeeded
+  const answers = []
+  ops.deviceUpkeepNeeded = async (c) => {
+    const r = await needed(c)
+    answers.push([r, c.cores !== undefined])
+    return r
+  }
+  t.teardown(() => { ops.deviceUpkeepNeeded = needed })
+  return answers
+}
+
+test('a new own length on an enrolled device does not stop the live run', async (t) => {
+  const s = await enrolled(t)
+  const { b, sync, community } = s
+  // The length of this device's own write: no other device's blocks in it.
+  const { length, run } = await localPost(s, 2)
+  const plans = countPlans(t)
+  const answers = spyNeeded(t)
+  run.emit({ event: 'own-synced', length })
+  await until(() => answers.length === 1, { name: 'the precheck', timeoutMs: 5000 })
+  await pause(150)
+  t.alike(answers, [[false, true]], 'asked once, on the borrowed cores: nothing to do')
+  t.absent(run.aborted, 'the precheck on the borrowed diary ends the pass')
+  t.is(sync.runs.length, 3, 'no run started')
+  t.is(plans.calls, 0, 'no plan under the store')
+  t.alike(warningsOf(b), [], 'no warning at all')
+
+  // A group-writer still plans in full: shares are invisible to the precheck.
+  run.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)) })
+  await sync.next(3)
+  t.ok(run.aborted, 'the group-writer preempted the run')
+  t.is(plans.calls, 1, 'one full plan')
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('an own length past this device\'s last write plans in full', async (t) => {
+  const { b, sync, restarted } = await enrolled(t)
+  const plans = countPlans(t)
+  const answers = spyNeeded(t)
+  // Another device appended: its joins may bind a writer owed a share.
+  restarted.emit({ event: 'own-synced', length: (await diaryLength(b)) + 1 })
+  await sync.next(2)
+  t.ok(restarted.aborted, 'the pass preempted the run')
+  t.is(plans.calls, 1, 'a full plan')
+  t.alike(answers, [], 'no precheck')
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('a group-writer on a once run makes the next arming plan in full', async (t) => {
+  const s = await enrolled(t)
+  const { b, sync, group } = s
+  const { length } = await localPost(s, 2)
+  await b.web.request('sync.stop')
+  await b.web.request('sync.start', { once: true })
+  const once = await sync.next(3)
+  t.is(once.once, true)
+  once.emit({ event: 'group-writer', group, writer: hex(crypto.randomBytes(32)) })
+  await pause(100)
+  t.absent(once.aborted, 'a once run arms nothing')
+  once.finish()
+  const plans = countPlans(t)
+  const answers = spyNeeded(t)
+  await pause(100)
+  await b.web.request('sync.start')
+  const live = await sync.next(4)
+  live.emit({ event: 'own-synced', length })
+  await sync.next(5)
+  t.ok(live.aborted, 'the arming preempted the run')
+  t.is(plans.calls, 1, 'a full plan')
+  t.alike(answers, [], 'no precheck')
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('a full plan older than its maximum age is made again', async (t) => {
+  const s = await enrolled(t, { upkeepFullMaxAgeMs: 300 })
+  const { b, sync } = s
+  const { length, run } = await localPost(s, 2)
+  await pause(400)
+  const plans = countPlans(t)
+  const answers = spyNeeded(t)
+  run.emit({ event: 'own-synced', length })
+  await sync.next(3)
+  t.ok(run.aborted, 'the pass preempted the run')
+  t.is(plans.calls, 1, 'a full plan')
+  t.alike(answers, [], 'no precheck')
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+// Fakes a pass whose write step finds the diary longer than the plan saw
+// (the gate brought another device's blocks): the plan's own length reads
+// one less, once.
+function shrinkPlanLength (t) {
+  const withIdentity = ops.withIdentity
+  const state = { shrink: false }
+  ops.withIdentity = (c, fn) => withIdentity(c, async (id) => {
+    const r = await fn(id)
+    if (!state.shrink) return r
+    state.shrink = false
+    return r - 1
+  })
+  t.teardown(() => { ops.withIdentity = withIdentity })
+  return state
+}
+
+function failingShare (t, group, onPlan = () => {}) {
+  const writer = hex(crypto.randomBytes(32))
+  const plan = ops.deviceUpkeepPlan
+  const run = ops.deviceUpkeep
+  const counts = { plans: 0, steps: 0, writer }
+  ops.deviceUpkeepPlan = async () => {
+    counts.plans++
+    onPlan(counts.plans)
+    return { enrol: [], share: [{ group, writer }], skipped: [] }
+  }
+  ops.deviceUpkeep = async () => {
+    counts.steps++
+    return { enrolled: [], shared: [], failed: [{ root: group, message: 'falha simulada' }], changed: [] }
+  }
+  counts.restore = () => {
+    ops.deviceUpkeepPlan = plan
+    ops.deviceUpkeep = run
+  }
+  t.teardown(counts.restore)
+  return counts
+}
+
+test('a share that failed on an enrolled device is planned in full again', async (t) => {
+  const { b, group, restarted } = await enrolled(t)
+  const counts = failingShare(t, group)
+  restarted.emit({ event: 'group-writer', group, writer: counts.writer })
+  await until(() => counts.steps === MAX_UPKEEP_PASSES, { name: 'the retries', timeoutMs: 5000 })
+  await pause(200)
+  t.is(counts.plans, MAX_UPKEEP_PASSES, 'every retry planned in full')
+  t.is(counts.steps, MAX_UPKEEP_PASSES)
+  t.is(warningsOf(b).filter((l) => l === UPKEEP_WARNING).length, MAX_UPKEEP_PASSES)
+  counts.restore()
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('a failed share in a pass the gate brought blocks to is planned in full again', async (t) => {
+  const { b, group, restarted } = await enrolled(t)
+  const shrink = shrinkPlanLength(t)
+  const counts = failingShare(t, group, (n) => { if (n === 1) shrink.shrink = true })
+  restarted.emit({ event: 'group-writer', group, writer: counts.writer })
+  await until(() => counts.steps === MAX_UPKEEP_PASSES, { name: 'the retries', timeoutMs: 5000 })
+  await pause(200)
+  t.is(counts.plans, MAX_UPKEEP_PASSES, 'the retry after the arrival planned in full')
+  counts.restore()
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('a groups-changed while an echo pass is pending plans in full', async (t) => {
+  const s = await enrolled(t, { upkeepDelayMs: 300 })
+  const { b, sync, community } = s
+  const { length, run } = await localPost(s, 2)
+  const plans = countPlans(t)
+  const answers = spyNeeded(t)
+  // The echo of the post arms a precheck pass; a groups-changed (an admit
+  // landed in a group core) arrives before it runs, right after a fresh
+  // full plan.
+  run.emit({ event: 'own-synced', length })
+  run.emit({ event: 'groups-changed', group: community })
+  await sync.next(3)
+  t.ok(run.aborted, 'the pass preempted the run')
+  t.is(plans.calls, 1, 'a full plan')
+  t.alike(answers, [], 'no precheck')
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('the follow-up of a pass the gate brought blocks to plans in full', async (t) => {
+  const s = await enrolled(t)
+  const { b, sync, group } = s
+  const { length, run } = await localPost(s, 2)
+  // The echo's precheck finds work once; the pass then plans a share that
+  // succeeds while the gate brings another device's blocks.
+  const needed = ops.deviceUpkeepNeeded
+  let asked = 0
+  ops.deviceUpkeepNeeded = async (c) => {
+    asked++
+    return asked === 1 ? true : needed(c)
+  }
+  t.teardown(() => { ops.deviceUpkeepNeeded = needed })
+  const shrink = shrinkPlanLength(t)
+  const plan = ops.deviceUpkeepPlan
+  const step = ops.deviceUpkeep
+  let plans = 0
+  ops.deviceUpkeepPlan = async () => {
+    plans++
+    if (plans === 1) shrink.shrink = true
+    return { enrol: [], share: [{ group, writer: hex(crypto.randomBytes(32)) }], skipped: [] }
+  }
+  ops.deviceUpkeep = async () => ({ enrolled: [], shared: [], failed: [], changed: [] })
+  t.teardown(() => {
+    ops.deviceUpkeepPlan = plan
+    ops.deviceUpkeep = step
+  })
+  run.emit({ event: 'own-synced', length })
+  await until(() => plans === 2, { name: 'the follow-up plan', timeoutMs: 5000 })
+  await pause(150)
+  t.is(asked, 1, 'only the echo asked the precheck')
+  t.is(plans, 2, 'the follow-up planned in full')
+  ops.deviceUpkeepPlan = plan
+  ops.deviceUpkeep = step
+  await sync.next(3)
   await b.web.request('sync.stop')
   t.alike(b.internal, [])
 })
