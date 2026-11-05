@@ -2,7 +2,8 @@
 
 // Direct messages in the browser node (lib/dm.js through lib/session.js and
 // lib/node.js, an in-memory client), against the loopback seeder stand-in of
-// helpers/dm-seeder.js. Loopback only, no DHT.
+// helpers/dm-seeder.js. Catch-up tests use a real seeder on a local DHT so
+// they can verify freshness against another device's longer diary.
 const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
@@ -23,9 +24,12 @@ const store = require('../lib/node-store')
 const { connectClient, errorOf } = require('./helpers/session')
 const { dmSeeder, rsaKey } = require('./helpers/dm-seeder')
 const postage = require('@varanda/core/lib/dm-postage')
+const { testnet } = require('./helpers/net')
+const { seederOverWs, once } = require('./helpers/sync-groups')
 
 const LOCKED = 'identidade bloqueada: entre com a passkey'
 const SECRET = 'mensagem-secreta-zqx'
+const GATE_LINE = 'sincronizando antes de publicar'
 
 function noop () {}
 
@@ -55,7 +59,7 @@ async function wallet (storage) {
 }
 
 // A member node: identity created and certified, dm keys from `prf`.
-async function memberNode (t, assoc, url, { keyPair = crypto.keyPair(), prf = crypto.randomBytes(32), enable = true, walletAt = dmCore.DM_STAMP_WALLET, dm = {}, options = {} } = {}) {
+async function memberNode (t, assoc, url, { keyPair = crypto.keyPair(), prf = crypto.randomBytes(32), enable = true, certify = true, walletAt = dmCore.DM_STAMP_WALLET, dm = {}, options = {} } = {}) {
   const storage = memoryNodeStorage()
   const node = createBrowserNode({
     storage,
@@ -74,7 +78,7 @@ async function memberNode (t, assoc, url, { keyPair = crypto.keyPair(), prf = cr
   await node.setKeyPair(keyPair, { prf })
   const web = await connectClient(node, { timeoutMs: 60000 })
   const { publicKey } = await web.request('identity.create')
-  await web.request('cert.add', { cert: createCert({ member: publicKey }, assoc) })
+  if (certify) await web.request('cert.add', { cert: createCert({ member: publicKey }, assoc) })
   let enabled = null
   if (enable) {
     enabled = await web.request('dm.enable')
@@ -272,6 +276,84 @@ async function ownDmKey (n) {
 async function posts (n, count) {
   for (let i = 0; i < count; i++) await n.web.request('post.create', { text: 'p' + i })
 }
+
+test('dm.enable skips the write gate for a current key and refuses an empty diary', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await seederOverWs(t, assoc, bootstrap)
+  const A = await memberNode(t, assoc, seeder.url, { enable: false, certify: false, options: { writeGate: true } })
+  const err = await errorOf(A.web.request('dm.enable'))
+  t.is(err && err.message, member.GENESIS_REQUIRED, 'an empty diary still needs its certificate')
+  t.is(await store.readDmKey(A.storage), null, 'the refusal does not enable messages locally')
+  await A.web.request('cert.add', { cert: createCert({ member: A.key }, assoc) })
+  const first = await A.web.request('dm.enable')
+  t.ok(first.seq !== null, 'a missing key is appended through the gate')
+  t.ok(A.web.events.some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'the gate ran for writes')
+
+  await A.storage.writeJson('dmKey', null)
+  const from = A.web.events.length
+  t.alike(await A.web.request('dm.enable'), { ...first, seq: null }, 'a current key appends nothing')
+  t.alike(await store.readDmKey(A.storage), { v: 1, gen: first.gen }, 'the shortcut restores the local marker')
+  t.absent(A.web.events.slice(from).some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'no write-gate line for a current key')
+  t.absent(A.web.events.slice(from).some((e) => e.name === 'sync.started'), 'no gate or push run')
+
+  const { runId } = await A.web.request('sync.start', {})
+  await until(() => A.web.events.some((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line.startsWith('diário próprio sincronizado')))
+  await A.web.request('dm.list', {})
+  t.alike(await A.web.request('sync.status'), { state: 'running', runId, once: false }, 'a current key rechecked after catch-up keeps the live run')
+  t.absent(A.web.events.slice(from).some((e) => e.name === 'sync.stopped' && e.data.reason === 'preempted'), 'the recheck reads the live cores')
+  await A.web.request('sync.stop')
+})
+
+test('a current dm-key checked before catch-up is refreshed once after the diary catches up', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await seederOverWs(t, assoc, bootstrap)
+  const A = await memberNode(t, assoc, seeder.url, { enable: false, options: { writeGate: true } })
+  const first = await A.web.request('dm.enable')
+  t.is((await A.web.request('dm.enable')).seq, null, 'current with no continuous run')
+
+  // A sibling extends the same diary while this device keeps its old tip.
+  const storage = memoryNodeStorage()
+  const ctx = { storage, association: hex(assoc.publicKey), keyPair: A.keyPair }
+  await member.idCreate(ctx)
+  const src = await store.openDiary(A.storage)
+  const dst = await store.openDiary(storage)
+  const a = src.replicate(true)
+  const b = dst.replicate(false)
+  a.pipe(b).pipe(a)
+  await dst.download({ start: 0, end: src.length }).done()
+  a.destroy()
+  b.destroy()
+  await src.close()
+  await dst.close()
+  for (let i = 0; i <= member.DM_KEY_REFRESH_BLOCKS; i++) await member.postCreate(ctx, { text: 'p' + i })
+  const pushed = await once({ storage }, seeder.url, [])
+  t.is(pushed.seederConfirmed, true, 'the seeder holds the longer diary')
+  const before = await ownDmKey(A)
+  t.is(before.seq, first.seq)
+  t.is(before.length, first.seq + 1, 'this device still has the short diary')
+
+  const from = A.web.events.length
+  const { runId } = await A.web.request('sync.start', {})
+  await until(() => A.web.events.some((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line === 'diário próprio sincronizado (' + (before.length + member.DM_KEY_REFRESH_BLOCKS + 1) + ')'))
+  const refreshed = () => A.web.events.slice(from).some((e) => e.name === 'sync.stopped' && e.data.runId === runId && e.data.reason === 'preempted')
+  await until(refreshed)
+  await A.web.request('sync.stop')
+  const after = await ownDmKey(A)
+  t.is(after.seq, before.length + member.DM_KEY_REFRESH_BLOCKS + 1, 'catch-up appended the key after the sibling posts')
+  t.is(after.length, after.seq + 1, 'exactly one refresh was appended')
+  t.absent(A.web.events.slice(from).some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'the caught-up continuous run satisfies the gate')
+
+  const next = await A.web.request('sync.start', {})
+  await until(() => A.web.events.some((e) => e.name === 'sync.event' && e.data.runId === next.runId && e.data.line.startsWith('diário próprio sincronizado')))
+  await A.web.request('dm.list', {})
+  t.alike(await A.web.request('sync.status'), { state: 'running', runId: next.runId, once: false }, 'the next catch-up keeps the current key and live run')
+  await A.web.request('sync.stop')
+  t.alike(await ownDmKey(A), after, 'no second refresh')
+})
 
 test('the own dm-key is refreshed once it leaves the newest 256 blocks (enable and unlock)', async (t) => {
   t.timeout(240000)
