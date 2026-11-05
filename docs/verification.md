@@ -4546,3 +4546,57 @@ Limites desta parte:
 - Abrir a Espiadinha mais de 60 s depois da leitura escondida mostra as linhas na hora, mas sem citações nem contagens, e relê a página (a regra de 60 s de sempre); as citações e contagens chegam com a página nova.
 - No Android e no iOS, a primeira abertura dos Avisos pode mostrar o indicador de puxar para atualizar enquanto as continuações chegam.
 - Nenhuma caixa executada nesta documentação.
+
+## 94. Leituras do nó hospedado sem reiniciar a sincronização (PR perf/borrowed-group-reads)
+
+No nó hospedado (web, PWA e app com a instalação), as leituras de comunidades e grupos e o plano da participação automática passam a usar os núcleos que a sincronização já tem abertos, como `feed.read`, `profile.read` e `log.read` já faziam (seção 46). Antes, cada uma delas parava a sincronização e a reiniciava depois (novo aperto de mão com o semeador e nova abertura de todos os núcleos). A sincronização agora empresta também os seus núcleos de grupo (os próprios e os de outros que ficam guardados quando ela termina) e os diários de quem escreve nesses grupos. Todos os nós (navegador, core e semeador) leem o diário com uma passagem só pelos registros de apagamento, em vez de três. Nada muda no que é gravado nem nas respostas.
+
+A reinicialização que o log do celular mostrava logo depois de `dm.pull` não vinha de `dm.pull` (que não para a sincronização): era o primeiro plano da participação automática, 1,5 s depois da primeira linha "diário próprio sincronizado", que relia as comunidades parando a sincronização. Com o plano nos núcleos emprestados, um plano sem nada a escrever não para mais a sincronização; só uma escrita de verdade passa pela trava de escrita e reinicia.
+
+Medidas (repetição local no Node, DHT local, semeador no mesmo processo atrás de um WebSocket, armazenamento IndexedDB falso; a mesma rajada de pedidos do início do app em `main@b84a420` e nesta mudança; "latência 4 ms" acrescenta 4 ms a cada carga de arquivo de núcleo e a cada leitura de kv, como um IndexedDB de celular). Não são medidas de celular: servem para comparar antes e depois.
+
+| Cenário | Rajada do início | Execuções paradas | Núcleos abertos | CPU (rajada + 6 s) |
+|---|---|---|---|---|
+| Médio, sem latência | 315 ms -> 166 ms | 5 -> 0 | 96 -> 20 | 540 ms -> 285 ms |
+| Médio, latência 4 ms | 2,33 s -> 1,05 s | 4 -> 0 | 78 -> 20 | 735 ms -> 441 ms |
+| Grande, sem latência | 970 ms -> 608 ms | 5 -> 0 | 149 -> 38 | 1,61 s -> 0,84 s |
+| Grande, latência 4 ms | 3,13 s -> 1,46 s | 3 -> 0 | 109 -> 38 | 2,17 s -> 0,84 s |
+
+Médio: 200 posts próprios, 12 seguidos com 40 posts cada, 40 curtidas, uma comunidade com Geral. Grande: 800 posts próprios, 30 seguidos com 150 posts cada, 150 curtidas. No grande com latência, `community.info` caiu de 503 ms para 108 ms, `group.read` de 863 ms para 271 ms e `group.seen` de 392 ms para 70 ms. No perfil de CPU do cenário grande, a validação de registros (`validRecordCopy`) caiu de 470 ms para 317 ms, e a parte dela que vinha das três passagens por apagamentos, de 207 ms para 25 ms.
+
+Regras que os passos abaixo conferem:
+
+- Com uma sincronização em andamento, `community.list`, `community.info`, `community.members`, `community.requests`, `group.list`, `group.info`, `group.read`, `group.members`, `group.requests` e `group.seen` respondem sem `sync.stopped` `'preempted'`, com o mesmo `runId`, e com a mesma resposta que dariam sem sincronização.
+- Uma leitura que precisa de um núcleo guardado que a sincronização não tem aberto (por exemplo, um núcleo ainda na checagem de entrada) volta ao caminho exclusivo e para a sincronização uma vez, com a mesma resposta.
+- Um plano da participação automática sem nada a escrever não para a sincronização. Um plano com algo a escrever continua passando pela trava de escrita e pelo envio ao semeador, como antes.
+- Uma leitura nos núcleos emprestados nunca abre um núcleo no armazenamento ao lado da sincronização. Se a sincronização deixa de emprestar uma réplica no meio de `page.read` (ela a separa e só fecha depois), a leitura é refeita no caminho exclusivo, depois de a sincronização parar.
+- A leitura do diário com apagamentos (`presentState`) dá as mesmas respostas de antes.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes desta parte: `packages/web-member/test/read-while-sync.test.js` (leituras de comunidade e grupo na sincronização em andamento, a volta ao caminho exclusivo e a réplica que deixa de ser emprestada no meio de `page.read`), `packages/web-member/test/session-upkeep.test.js` (plano vazio sem parar a sincronização, limite de passagens) e `packages/core/test/deletion.test.js` (`presentState` igual às três passagens em diários aleatórios). As caixas abaixo ficam desmarcadas até alguém executar o passo, num aparelho ou navegador de verdade.
+
+Android (aparelho ou emulador com a instalação hospedada, primeiro):
+
+- [ ] Com o registro de Sincronização aberto, abrir o app e esperar "sync ready": abrir Conversas e depois uma comunidade não cria um novo "sync ready" (antes apareciam #2 e #3).
+- [ ] Cerca de 2 s depois de "diário próprio sincronizado", nenhuma reinicialização da sincronização (antes vinha o plano da participação automática).
+- [ ] As linhas "pedido lento" de `community.list`, `community.info`, `dm.list` e `profile.read` diminuem ou somem, comparando com o mesmo aparelho antes da mudança.
+- [ ] Com a mesma passkey em dois aparelhos e uma comunidade, o segundo aparelho ainda entra sozinho na comunidade e no Geral.
+
+iOS (simulador ou aparelho com a instalação hospedada, depois do Android):
+
+- [ ] Os três primeiros passos do Android.
+
+Web (navegador, depois do iOS):
+
+- [ ] Na web hospedada, com o registro de rede aberto, recarregar: os GETs de `/media` dos avatares começam mais cedo que antes.
+- [ ] Abrir uma comunidade e um grupo com a sincronização ligada: o estado da sincronização em Ajustes não muda de execução.
+
+Limites desta parte:
+
+- As medidas são do Node com IndexedDB falso e latência simulada, não do celular. Os números do celular saem dos passos acima.
+- Um núcleo de grupo ainda na checagem de entrada, o diário de um membro que a sincronização ainda está abrindo logo na partida, ou um núcleo que a sincronização não guarda ainda param a sincronização uma vez, como antes.
+- Os pedidos continuam um de cada vez na fila do nó: um pedido ainda espera os que chegaram antes dele.
+- Uma leitura que responde com erro (comunidade inexistente, `group.requests` de quem não administra) ainda é refeita no caminho exclusivo e para a sincronização uma vez, como `feed.read` desde a seção 46. O app só pede `group.requests` a quem administra.
+- A maior parte da CPU restante das leituras é revalidar os mesmos registros a cada leitura (históricos de entrada, confirmação e corte dos grupos, nome de usuário e perfil). Proposta para um próximo PR: o mesmo filtro por tipo antes da validação nesses pontos, ou guardar os registros decodificados por núcleo enquanto a sincronização vive.
+- Nenhuma caixa executada nesta documentação.

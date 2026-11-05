@@ -25,7 +25,9 @@ const { createBrowserSession } = require('../lib/session')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { memoryStorage } = require('../lib/storage')
 const store = require('../lib/node-store')
-const { DM_KEY_REFRESH_BLOCKS } = require('../lib/member-ops')
+const ops = require('../lib/member-ops')
+const { DM_KEY_REFRESH_BLOCKS } = ops
+const { groupKeyPairFromPrf } = require('../lib/passkey')
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
@@ -111,6 +113,34 @@ async function fixture (t, { blockFollowed = false, readerWaitMs } = {}) {
     await store.writeBlocklist(storage, createSnapshot({ seq: 1, blocked: [F], revokedIssuers: [] }, mod, cert))
   }
   return { node, web, storage, assoc, own, F, U, internal, keyPair }
+}
+
+// A community of the fixture's member written by member-ops while no run
+// is live (no gate), with two posts in its Geral; the session gets the prf.
+// -> { community, group } (Geral).
+async function communityOf (f, name = 'Bairro') {
+  const prf = crypto.randomBytes(32)
+  await f.node.setKeyPair(f.keyPair, { prf })
+  const ctx = { storage: f.storage, association: f.assoc.hex, keyPair: f.keyPair, groupKeyPair: (nonce) => groupKeyPairFromPrf(prf, nonce) }
+  const made = await ops.communityCreate(ctx, { name, join: 'open' })
+  await ops.groupPost(ctx, { group: made.group, text: 'um' })
+  await ops.groupPost(ctx, { group: made.group, text: 'dois' })
+  return made
+}
+
+// Every community and group read of the app for `community` and `group`.
+async function communityReads (web, community, group) {
+  return {
+    list: await web.request('community.list'),
+    info: await web.request('community.info', { community }),
+    members: await web.request('community.members', { community }),
+    requests: await web.request('community.requests', { community }),
+    groups: await web.request('group.list', {}),
+    group: await web.request('group.info', { group }),
+    posts: await web.request('group.read', { group }),
+    groupMembers: await web.request('group.members', { group }),
+    groupRequests: await web.request('group.requests', { group })
+  }
 }
 
 function preempted (web, from = 0) {
@@ -231,6 +261,67 @@ test('feed, log, profile and engagement reads are served on the live run without
   t.absent(web.events.slice(from).some((e) => e.name === 'sync.started'), 'no run was started')
   await web.request('sync.stop')
   t.alike(internal, [])
+})
+
+test('community and group reads are served on the live run without preempting it', async (t) => {
+  await testnet(t)
+  const f = await fixture(t)
+  const { web, own, internal } = f
+  const { community, group } = await communityOf(f)
+  const R0 = await communityReads(web, community, group)
+  t.is(R0.posts.items.length, 2, 'both Geral posts')
+  t.ok(R0.list.communities.some((c) => c.community === community && c.state === 'ready'), 'the community is listed')
+
+  const { runId } = await web.request('sync.start', {})
+  // The run published its cores once a borrowed read went through.
+  await web.request('profile.read', { authors: [own] })
+  const from = web.events.length
+  t.alike(await communityReads(web, community, group), R0, 'the same answers on the run\'s cores')
+  t.alike(await web.request('group.seen', { group }), { ok: true })
+  const seen = await communityReads(web, community, group)
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false }, 'the same run is live')
+  t.is(preempted(web, from).length, 0, 'no read preempted the run')
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.started'), 'no run was started')
+  await web.request('sync.stop')
+  t.alike(await communityReads(web, community, group), seen, 'the exclusive path answers the same')
+  t.alike(internal, [])
+})
+
+test('a stored group core the run does not hold falls back to the exclusive path and preempts once', async (t) => {
+  await testnet(t)
+  const f = await fixture(t)
+  const { web, own, storage, assoc } = f
+  await communityOf(f)
+  // Another member's community root, stored here but listed nowhere: the
+  // run never opens it, yet community.info reads it.
+  const other = memoryNodeStorage()
+  const otherPair = crypto.keyPair()
+  const otherPrf = crypto.randomBytes(32)
+  const otherCtx = { storage: other, association: assoc.hex, keyPair: otherPair, groupKeyPair: (nonce) => groupKeyPairFromPrf(otherPrf, nonce) }
+  await ops.idCreate(otherCtx)
+  await ops.certAdd(otherCtx, createCert({ member: hex(otherPair.publicKey) }, assoc.kp))
+  const { community: C } = await ops.communityCreate(otherCtx, { name: 'Vizinha', join: 'open' })
+  const source = await store.openGroupCoreReadOnly(other, C)
+  const target = await store.openGroupReplica(storage, C)
+  const a = source.replicate(true)
+  const b = target.replicate(false)
+  a.pipe(b).pipe(a)
+  await target.download({ start: 0, end: source.length }).done()
+  a.destroy()
+  b.destroy()
+  await source.close()
+  await target.close()
+  const I0 = await web.request('community.info', { community: C })
+  t.is(I0.name, 'Vizinha', 'the stored root folds')
+
+  const { runId } = await web.request('sync.start', {})
+  await web.request('profile.read', { authors: [own] })
+  const from = web.events.length
+  t.alike(await web.request('community.info', { community: C }), I0, 'the same answer')
+  const stops = preempted(web, from)
+  t.is(stops.length, 1, 'one preemption')
+  t.is(stops[0].data.runId, runId)
+  await web.request('sync.stop')
 })
 
 test('borrowed reads of a followed diary the run holds never ask the storage whether it exists', async (t) => {
@@ -355,6 +446,67 @@ test('a stored replica the run does not hold falls back to the exclusive path an
   const stops = preempted(web, from)
   t.is(stops.length, 1, 'one preemption')
   t.is(stops[0].data.runId, runId)
+  await web.request('sync.stop')
+})
+
+// Reload only the transport and session while substituting the sync
+// boundary (as session-upkeep.test.js); the cache is restored afterwards.
+function nodeWithSync (runSync) {
+  const sync = require('../lib/sync')
+  const original = sync.runSync
+  const ids = [require.resolve('../lib/node'), require.resolve('../lib/session')]
+  const cached = ids.map((id) => require.cache[id])
+  try {
+    sync.runSync = runSync
+    for (const id of ids) delete require.cache[id]
+    return require('../lib/node').createBrowserNode
+  } finally {
+    sync.runSync = original
+    ids.forEach((id, i) => { require.cache[id] = cached[i] })
+  }
+}
+
+test('a replica the run stops lending mid-read is never opened beside the run\'s instance', async (t) => {
+  await testnet(t)
+  const f = await fixture(t)
+  await f.node.close()
+  // A run that lends F's replica once, as one that detaches it during a
+  // read (its core set aside, the close still queued) and keeps it open.
+  const run = { open: false, published: false }
+  const factory = nodeWithSync(async ({ storage, signal, reader }) => {
+    const diary = await store.openDiary(storage)
+    const core = await store.openReplica(storage, f.F)
+    run.open = true
+    let lends = 0
+    if (reader) reader.set({ diary, replica: (key) => (key === f.F && lends++ === 0 ? core : null), group: () => null, hold: () => true, release: () => {} })
+    run.published = true
+    await new Promise((resolve) => {
+      if (signal.aborted) resolve()
+      else signal.addEventListener('abort', resolve, { once: true })
+    })
+    if (reader) reader.clear()
+    await core.close()
+    await diary.close()
+    run.open = false
+    return { ok: true, errors: [], peers: 0, seederConfirmed: false }
+  })
+  const node = factory({ storage: f.storage, association: f.assoc.hex, seederUrl: 'ws://127.0.0.1:9/seeder', createSocket: () => { throw new Error('unexpected socket') }, writeGate: false })
+  t.teardown(() => node.close(), { force: true })
+  const web = await connectClient(node)
+  const { runId } = await web.request('sync.start', {})
+  await until(() => run.published, { name: 'the run lends its cores' })
+  const openReplica = store.openReplica
+  const opens = []
+  store.openReplica = function (...args) {
+    if (args[1] === f.F) opens.push(run.open)
+    return openReplica.apply(this, args)
+  }
+  t.teardown(() => { store.openReplica = openReplica })
+  await errorOf(web.request('page.read', { key: f.F }))
+  store.openReplica = openReplica
+  t.ok(opens.length > 0, 'the replica was read from the storage')
+  t.alike(opens.filter((held) => held), [], 'never while the run held it open')
+  t.ok(preempted(web).some((e) => e.data.runId === runId), 'the read reran on the exclusive path')
   await web.request('sync.stop')
 })
 
