@@ -421,6 +421,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
 
   const del = useDelete({
     request,
+    node,
     onToast,
     recheck: () => loadNewest(false),
     // The slot stays (as the node reports it) so the paging cursor holds.

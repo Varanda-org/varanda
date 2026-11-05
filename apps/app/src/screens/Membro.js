@@ -12,9 +12,23 @@
 // diary.peek (src/thread.js assembleMember). Natively, or offline, only the
 // header shows, with a note. No key is ever shown; every peer string goes
 // through displayText (PostRow does it for the rows).
+//
+// A page (docs/protocol.md section 12) is told by the index hint or the seed
+// (`page: true`) or by page.read on a hosted node: the header then shows a
+// 'Página' badge and the verified roster. The index hint only says where to
+// look; the roster comes from page.read alone and an incomplete read never
+// invents admins. Owners and admins can act as the page (actingAs store);
+// while acting as a page, Seguir on any other diary is the page's follow.
+//
+// A closed page shows 'Esta página foi encerrada' and no Seguir or action. A
+// moved page (page.read's movedTo, or on a hosted node the successor
+// statement once K2's verified origin names the same pair, src/pageMove.js)
+// shows a banner that opens the new key and 'Seguir a chave nova', the manual
+// way to follow K2. The node also follows K2 by itself, once, after it
+// verified the move (Terms 15). K1's posts past the move are not shown.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { StyleSheet, View } from 'react-native'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -23,6 +37,10 @@ import { avatarOf } from '../media/avatar'
 import { fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { whoOf } from '../who'
+import * as actingAs from '../actingAs'
+import { TEXTS, pagesFollow, pagesFollows, pagesSuccessor } from '../pages'
+import { MAX_HOPS, moveOf, pageMoveView, resolveChain, shownUnderCut, successorOf } from '../pageMove'
+import { rosterRows } from '../pageRoster'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
@@ -34,13 +52,83 @@ import { useFollowCounts } from '../useFollowCounts'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
+import { type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
-import { isSeederDown, knownAuthors, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet } from './Conversa'
+import { pagesOn } from '../pageGate'
+import { isSeederDown, knownAuthors, memberKeyOf, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet } from './Conversa'
 
 const NOT_HOSTED_NOTE = 'Publicações completas disponíveis na versão web, com internet.'
 const OFFLINE_NOTE = 'Sem internet: as publicações completas aparecem quando a conexão voltar.'
 
 const BAND = 96
+
+const PAGE_NO_DM = 'Esta página ainda não recebe mensagens'
+const ROSTER_UNAVAILABLE = 'lista de administradores indisponível'
+const PAGE_UNCERTAIN = 'Não sabemos se a mudança foi feita. Confira antes de tentar de novo.'
+
+// The 'Página' badge text from an index hint, a seed or a page.read answer:
+// null for a person. Closed and moved pages say so.
+export function pageBadgeLabel (info) {
+  if (!info || typeof info !== 'object' || info.page !== true) return null
+  if (info.closed === true) return 'Página · encerrada'
+  if (info.moved === true || (info.movedTo !== undefined && info.movedTo !== null)) return 'Página · mudou de chave'
+  return 'Página'
+}
+
+// Whether a page.read answer is about a page (a person's diary has no roster).
+function isPageRead (r, key) {
+  if (!r || typeof r !== 'object' || r.page !== key) return false
+  return r.gen !== null || r.owner !== null || r.closed === true || (r.movedTo !== null && r.movedTo !== undefined)
+}
+
+function useActingAs () {
+  const [state, setState] = useState(() => actingAs.get())
+  useEffect(() => {
+    setState(actingAs.get())
+    return actingAs.subscribe(() => setState(actingAs.get()))
+  }, [])
+  return state
+}
+
+// The verified Dono / Administradores list. An owner or admin that has a
+// verified link is shown with its diary's profile name.
+function PageRoster ({ read, names, onOpenMember }) {
+  const styles = useStyles(makeStyles)
+  if (!read || read.complete === false) return <Text style={styles.rosterSoft}>{ROSTER_UNAVAILABLE}</Text>
+  const links = Array.isArray(read.links) ? read.links : []
+  const { sections } = rosterRows(read)
+  return (
+    <View style={styles.roster}>
+      {sections.map((section) => (
+        <View key={section.title} style={styles.rosterSection}>
+          <Text style={styles.rosterTitle}>{section.title}</Text>
+          {section.keys.map((key) => {
+            const link = links.find((l) => l && l.actor === key)
+            const shown = link && typeof link.diary === 'string' ? link.diary : key
+            const profile = names.profileOf(shown)
+            const who = whoOf(profile)
+            const title = displayText(who.title)
+            const open = typeof onOpenMember === 'function'
+              ? () => onOpenMember(shown, { name: profile ? profile.name : null, username: profile ? profile.username : null })
+              : undefined
+            return (
+              <Pressable
+                key={key}
+                accessibilityRole='link'
+                accessibilityLabel={'ver o perfil de ' + title}
+                disabled={!open}
+                onPress={open}
+                style={({ pressed }) => [pressed && open && styles.pressed]}
+              >
+                <Text style={styles.rosterName} numberOfLines={1}>{title}</Text>
+              </Pressable>
+            )
+          })}
+        </View>
+      ))}
+    </View>
+  )
+}
 
 const str = (v) => (typeof v === 'string' && v !== '' ? v : null)
 
@@ -77,7 +165,7 @@ const INITIAL_POSTS = {
   refreshing: false
 }
 
-export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPeople, onToast }) {
+export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onToast }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -88,7 +176,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const full = !!node.hosted && node.online !== false
   const { request } = node
   const { learnMany, resolveMany } = names
-  const eng = useEngagement({ request, onToast })
+  const eng = useEngagement({ request, node, onToast })
   const { follows, load: loadFollows, mark } = useFollowSet(request)
   const [header, setHeader] = useState(() => ({
     name: seed ? str(seed.name) : null,
@@ -104,6 +192,25 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const followsRef = useRef(Promise.resolve(new Set()))
   const genRef = useRef(0)
   const [following, setFollowing] = useState(false)
+  const [pageRead, setPageRead] = useState(null)
+  // The index's page/closed/moved fields (a hint until page.read answers),
+  // and whether page.read said "not a page" (it overrides every hint).
+  const [idxHint, setIdxHint] = useState(null)
+  const [notPage, setNotPage] = useState(false)
+  // { statement, targetRead, chain } for pageMoveView, once the moves are read.
+  const [moveInfo, setMoveInfo] = useState(null)
+  const [followingNew, setFollowingNew] = useState(false)
+  const acting = useActingAs()
+  const actingKey = acting.kind === 'page' ? acting.key : null
+  const asPageMode = actingKey !== null && actingKey !== author && typeof ownKey === 'string' && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })
+  // null while unknown; the keys the acting page follows.
+  const [pageFollows, setPageFollows] = useState(null)
+  const [pageFollowsFailed, setPageFollowsFailed] = useState(false)
+  const followsSeqRef = useRef(0)
+  const followsKeyRef = useRef(null)
+  const loadPageFollowsRef = useRef(() => {})
+  const nodeRef = useRef(node)
+  nodeRef.current = node
   const [tick, setTick] = useState(0)
   const c = useFollowCounts(author, tick)
 
@@ -132,6 +239,58 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     }
   }, [request, author, commitHeader, learnMany])
 
+  // The moves out of the opened page, up to MAX_HOPS keys: each hop needs
+  // page.read of its target, which is what verifies a successor statement.
+  const resolveMoves = useCallback(async (r, alive) => {
+    const entries = new Map()
+    let read = r
+    for (let hop = 0; hop < MAX_HOPS && read && read.closed !== true; hop++) {
+      let statement = null
+      if (!read.movedTo && node.hosted === true) {
+        try { statement = successorOf(await pagesSuccessor(read.page)) } catch {}
+        if (!alive()) return
+      }
+      const to = read.movedTo && typeof read.movedTo.to === 'string' ? read.movedTo.to : statement ? statement.to : null
+      if (to === null || to === author || entries.has(to)) {
+        entries.set(read.page, { read, statement })
+        break
+      }
+      let targetRead = null
+      try { targetRead = await request('page.read', { key: to }) } catch {}
+      if (!alive()) return
+      entries.set(read.page, { read, statement, targetRead })
+      if (moveOf(read, { statement, targetRead }) === null || !targetRead || targetRead.page !== to) break
+      read = targetRead
+    }
+    const first = entries.get(author) || {}
+    setMoveInfo({ statement: first.statement || null, targetRead: first.targetRead || null, chain: resolveChain(author, (k) => entries.get(k) || null) })
+  }, [request, author, node.hosted])
+
+  // page.read of the opened key (hosted only): the roster and lifecycle. A
+  // failed read keeps what was known (the previous answer, the index hint)
+  // and only a successful "not a page" answer clears the page state.
+  const readPageInfo = useCallback(async (alive) => {
+    let r
+    try {
+      r = await request('page.read', { key: author })
+    } catch {
+      return
+    }
+    if (!alive()) return
+    if (isPageRead(r, author)) {
+      setPageRead(r)
+      setNotPage(false)
+      const h = headerRef.current
+      learnMany([[author, { name: h.name, username: h.username, page: true, closed: r.closed === true, moved: r.movedTo !== null && r.movedTo !== undefined }]])
+      resolveMoves(r, alive)
+    } else if (r && r.complete === true) {
+      // Only a read that covered the whole diary proves it is not a page; an
+      // incomplete one (roster blocks not fetched yet) keeps what is known.
+      setPageRead(null)
+      setNotPage(true)
+    }
+  }, [request, author, learnMany, resolveMoves])
+
   // The header from a peek (verified profile/username fields only).
   const headerFromPeek = useCallback((peek) => {
     if (!peek) return
@@ -154,6 +313,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       throw err
     }
     const index = res.value
+    setIdxHint(index.page === true ? { page: true, closed: index.closed === true, moved: index.moved === true } : null)
     const peeked = peekedRef.current
     const hints = { [author]: { profileSeq: index.profileSeq, usernameSeq: index.usernameSeq } }
     const refs = index.posts.map((seq) => refOf(author, seq))
@@ -206,6 +366,10 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     const held = await readProfile()
     if (!alive()) return
     followsRef.current = loadFollows()
+    if (pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })) {
+      readPageInfo(alive)
+      if (refreshing) loadPageFollowsRef.current()
+    }
     if (!full) {
       commit({ phase: 'ready', refreshing: false })
       return
@@ -239,7 +403,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       if (!alive()) return
       commit({ phase: 'error', refreshing: false, error: isSeederDown(err) ? 'Sem conexão com o servidor agora.' : (err && err.reason ? err.message : errorText(err)) })
     }
-  }, [commit, commitHeader, readProfile, loadFollows, full, reset, readPage, afterPage])
+  }, [commit, commitHeader, readProfile, loadFollows, full, reset, readPage, afterPage, readPageInfo, node.hosted, node.accountOrigin])
 
   const loadMore = useCallback(async () => {
     const current = postsRef.current
@@ -273,6 +437,80 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     return () => { genRef.current += 1 }
   }, [load])
 
+  const isPage = !notPage && ((seed && seed.page === true) || (idxHint !== null && idxHint.page === true) || pageRead !== null)
+  const roster = isPage && pageRead !== null ? rosterRows(pageRead) : null
+  useEffect(() => {
+    if (!roster) return
+    const keys = new Set(roster.rows.map((r) => r.key))
+    for (const l of Array.isArray(pageRead.links) ? pageRead.links : []) {
+      if (l && keys.has(l.actor) && typeof l.diary === 'string') keys.add(l.diary)
+    }
+    resolveMany([...keys])
+  }, [roster, pageRead, resolveMany])
+
+  // The page's follows, signed by memberKeyOf (a core node's delegate, never
+  // the diary key). Every read and change belongs to the acting page key
+  // it was issued for: a result for another page is ignored. A failed read
+  // stays retryable (pull-to-refresh, the pill, the next acting change).
+  const loadPageFollows = useCallback(async () => {
+    const forKey = followsKeyRef.current
+    if (forKey === null) return false
+    const seq = ++followsSeqRef.current
+    setPageFollowsFailed(false)
+    try {
+      const rows = await pagesFollows(nodeRef.current, { member: await memberKeyOf(nodeRef.current.request, nodeRef.current), page: forKey })
+      if (seq !== followsSeqRef.current || followsKeyRef.current !== forKey) return false
+      setPageFollows(new Set(rows.map((f) => f.key)))
+      return true
+    } catch {
+      if (seq === followsSeqRef.current && followsKeyRef.current === forKey) {
+        setPageFollows(null)
+        setPageFollowsFailed(true)
+      }
+      return false
+    }
+  }, [ownKey])
+  loadPageFollowsRef.current = loadPageFollows
+  followsKeyRef.current = asPageMode ? actingKey : null
+
+  useEffect(() => {
+    followsSeqRef.current += 1
+    setPageFollows(null)
+    setPageFollowsFailed(false)
+    if (asPageMode) loadPageFollows()
+    return () => { followsSeqRef.current += 1 }
+  }, [asPageMode, actingKey, loadPageFollows])
+
+  const togglePageFollow = async () => {
+    if (following || pageFollows === null) return
+    const forKey = actingKey
+    const on = !pageFollows.has(author)
+    setFollowing(true)
+    try {
+      await pagesFollow(nodeRef.current, { member: await memberKeyOf(nodeRef.current.request, nodeRef.current), page: forKey, key: author, on })
+      if (followsKeyRef.current === forKey) {
+        // A follows read that started before this change must not land on top.
+        followsSeqRef.current += 1
+        setPageFollows((cur) => {
+          const next = new Set(cur || [])
+          if (on) next.add(author)
+          else next.delete(author)
+          return next
+        })
+      }
+      if (typeof onFollowsChanged === 'function') onFollowsChanged()
+    } catch (err) {
+      if (typeof onToast === 'function') onToast(err && err.uncertain === true ? PAGE_UNCERTAIN : errorText(err))
+      // Unknown outcome: the list is read again before the next change.
+      if (followsKeyRef.current === forKey) {
+        setPageFollows(null)
+        await loadPageFollows()
+      }
+    } finally {
+      setFollowing(false)
+    }
+  }
+
   const isFollowed = follows !== null && follows.has(author)
   const toggleFollow = async () => {
     if (following || follows === null) return
@@ -295,6 +533,68 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const who = whoOf({ name: header.name, username: header.username })
   const own = typeof ownKey === 'string' && author === ownKey
   const canReport = full && !own && typeof onReport === 'function' && typeof ownKey === 'string'
+
+  const moveView = pageRead !== null ? pageMoveView(pageRead, moveInfo || {}) : null
+  const movedView = moveView !== null && moveView.moved ? moveView : null
+  const pageMoved = pageRead !== null && ((pageRead.movedTo !== null && pageRead.movedTo !== undefined) || movedView !== null)
+  const canAct = isPage && pageRead !== null && (pageRead.isOwner === true || pageRead.isAdmin === true) && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) &&
+    pageRead.closed !== true && !pageMoved && pageRead.complete !== false
+  const actingHere = actingKey === author
+  // page.read when it answered, else the index hint, else the seed.
+  const lifecycle = pageRead !== null
+    ? { closed: pageRead.closed === true, moved: pageMoved }
+    : idxHint !== null
+      ? { closed: idxHint.closed, moved: idxHint.moved }
+      : { closed: !!seed && seed.closed === true, moved: !!seed && (seed.moved === true || (seed.movedTo !== undefined && seed.movedTo !== null)) }
+  const badge = pageBadgeLabel({ page: isPage, closed: lifecycle.closed, moved: lifecycle.moved })
+  const closedPage = isPage && lifecycle.closed === true
+  const newKey = movedView !== null ? movedView.key : null
+  const canFollowNew = newKey !== null && movedView.follow && !own && !asPageMode && follows !== null && !follows.has(newKey) && newKey !== ownKey
+
+  // Only on this tap: following K2 is never automatic.
+  const followNew = async () => {
+    if (followingNew || newKey === null) return
+    setFollowingNew(true)
+    try {
+      await request('follow.add', { key: newKey })
+      mark(newKey, true)
+      if (typeof onFollowsChanged === 'function') onFollowsChanged()
+    } catch (err) {
+      if (typeof onToast === 'function') onToast(errorText(err))
+      await loadFollows()
+    } finally {
+      setFollowingNew(false)
+    }
+  }
+
+  let banner = null
+  if (closedPage) {
+    banner = <Text style={styles.banner} accessibilityRole='text'>{TEXTS.encerrada}</Text>
+  } else if (isPage && lifecycle.moved) {
+    banner = (
+      <View style={styles.bannerBox}>
+        <Text style={styles.banner} accessibilityRole='text'>{TEXTS.movida}</Text>
+        {newKey !== null
+          ? (
+            <View style={styles.bannerRow}>
+              {typeof onOpenMember === 'function' ? <Pill label='Ver a página nova' onPress={() => onOpenMember(newKey, { page: true })} /> : null}
+              {canFollowNew ? <Pill label='Seguir a chave nova' filled pending={followingNew} onPress={followNew} /> : null}
+            </View>
+            )
+          : null}
+      </View>
+    )
+  }
+  const pageNote = badge !== null
+    ? (
+      <View style={styles.pageNote}>
+        <Text style={styles.badge} accessibilityRole='text'>{badge}</Text>
+        {banner}
+        <PageRoster read={pageRead} names={names} onOpenMember={onOpenMember} />
+      </View>
+      )
+    : null
+  const countsNote = c.incomplete && (c.seguindo !== null || c.seguidores !== null) ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null
 
   const insets = useSafeAreaInsets()
   const head = (
@@ -319,9 +619,36 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
           onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(author, 'seguidores') : undefined
         }
       ]}
-      note={c.incomplete && (c.seguindo !== null || c.seguidores !== null) ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
+      note={pageNote !== null ? <View>{pageNote}{countsNote}</View> : countsNote}
       actions={[
-        !own
+        canAct
+          ? (
+            <Pill
+              label={actingHere ? 'Deixar de agir como a página' : 'Agir como esta página'}
+              onPress={() => (actingHere
+                ? actingAs.me()
+                : actingAs.asPage({ key: author, name: header.name, username: header.username, closed: pageRead.closed }))}
+            />
+            )
+          : null,
+        !canAct && actingHere
+          ? <Pill label='Deixar de agir como a página' onPress={() => actingAs.me()} />
+          : null,
+        canAct && typeof onOpenPageSettings === 'function'
+          ? <Pill label='Ajustes da página' onPress={() => onOpenPageSettings(author)} />
+          : null,
+        !own && asPageMode && !closedPage
+          ? (
+            <Pill
+              label={pageFollowsFailed ? 'Tentar de novo' : pageFollows !== null && pageFollows.has(author) ? 'Deixar de seguir como a página' : 'Seguir como a página'}
+              filled={!pageFollowsFailed && !(pageFollows !== null && pageFollows.has(author))}
+              pending={following}
+              disabled={pageFollows === null && !pageFollowsFailed}
+              onPress={pageFollowsFailed ? loadPageFollows : togglePageFollow}
+            />
+            )
+          : null,
+        !own && !asPageMode && !closedPage
           ? (
             <FollowPill
               following={follows === null ? null : isFollowed}
@@ -333,7 +660,10 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
             />
             )
           : null,
-        !own && node.hosted === true && typeof onMessage === 'function'
+        !own && isPage && !closedPage && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })
+          ? <Pill label={PAGE_NO_DM} disabled />
+          : null,
+        !own && !isPage && node.hosted === true && typeof onMessage === 'function'
           ? <Pill label={LABELS.message} onPress={() => onMessage(author)} />
           : null,
         canReport
@@ -362,6 +692,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   }
 
   const { phase, error, items, unavailable, atEnd, indexing, complete, loadingMore, moreError, refreshing } = posts
+  // K1's blocks past its move are what a leaked key appended: never shown.
+  const cut = movedView !== null ? movedView.cut : null
+  const shownItems = cut === null ? items : items.filter((i) => shownUnderCut(cut, i.seq))
   const notes = []
   if (phase === 'ready' && indexing) notes.push('Ainda montando a lista completa…')
   else if (phase === 'ready' && complete === false) notes.push('Algumas publicações podem faltar.')
@@ -396,7 +729,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     <View style={styles.flex}>
       <View style={styles.flex}>
         <RefreshableList
-          data={phase === 'ready' ? items : []}
+          data={phase === 'ready' ? shownItems : []}
           keyExtractor={(i) => i.kind + ':' + i.seq}
           renderItem={renderItem}
           extraData={{ eng, follows, now, header, profileOf: names.profileOf }}
@@ -406,7 +739,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
             ? (
               <ListFooter
                 loading={loadingMore}
-                atEnd={atEnd && items.length > 0}
+                atEnd={atEnd && shownItems.length > 0}
                 endText='Isso é tudo por enquanto.'
                 error={moreError}
                 onRetry={loadMore}
@@ -430,5 +763,16 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   note: { paddingHorizontal: 16, paddingVertical: 12, gap: 4 },
+  pageNote: { marginTop: 8, gap: 8 },
+  badge: { ...type.postMeta, color: colors.ink, fontWeight: '700' },
+  banner: { ...type.postName, color: colors.ink },
+  bannerBox: { gap: 8 },
+  bannerRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  roster: { gap: 6 },
+  rosterSection: { gap: 2 },
+  rosterTitle: { ...type.postMeta, color: colors.soft },
+  rosterName: { ...type.postName, color: colors.ink },
+  rosterSoft: { ...type.postMeta, color: colors.soft },
+  pressed: { opacity: 0.6 },
   countsNote: { marginTop: 4 }
 })

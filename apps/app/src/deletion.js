@@ -1,16 +1,26 @@
 // Pure helpers for deleting own posts and profile versions (docs/rpc.md 5.33,
 // 5.34). No imports: the app tests load it directly.
 
-// Only the author's own post: a repost wrapper never makes another author's
-// original deletable.
-export function canDelete (post, own) {
-  return typeof own === 'string' && own !== '' && post !== null && typeof post === 'object' &&
-    post.author === own && Number.isInteger(post.seq) && post.seq >= 1
+const KEY_RE = /^[0-9a-f]{64}$/
+
+// Only the author's own post, or the post of the page the person acts as
+// (`page`, a hex64 key or null): a repost wrapper never makes another
+// author's original deletable.
+export function canDelete (post, own, page = null) {
+  if (post === null || typeof post !== 'object') return false
+  const mine = typeof own === 'string' && own !== '' && post.author === own
+  const pages = typeof page === 'string' && KEY_RE.test(page) && post.author === page
+  return (mine || pages) && Number.isInteger(post.seq) && post.seq >= 1
 }
 
-// The ref of a deletable own post, or null.
-export function deleteRef (post, own) {
-  return canDelete(post, own) ? post.author + ':' + post.seq : null
+// The ref of a deletable own (or acting page's) post, or null.
+export function deleteRef (post, own, page = null) {
+  return canDelete(post, own, page) ? post.author + ':' + post.seq : null
+}
+
+// True when `ref` ('<author>:<seq>') is a post of the page being acted as.
+export function isPageRef (ref, page) {
+  return typeof ref === 'string' && typeof page === 'string' && KEY_RE.test(page) && ref.startsWith(page + ':')
 }
 
 // Keep the slots for pagination, but discard the post and every repost of it.

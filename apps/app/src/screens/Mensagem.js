@@ -16,8 +16,12 @@
 // the same bytes), discards it, or confirms sending a different text. No
 // read, delivered or typing state anywhere; an own message shows only
 // LABELS.sent.
+// Acting as a page (actingAs.js), the same calls go through the page's signed
+// actions (pages.js); the composer then stays locked after an uncertain send
+// until "Tentar de novo" (the same signed bytes) or "Descartar", and never
+// signs a second message.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyboardAvoidingView, Platform, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -26,7 +30,9 @@ import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
 import { countChars } from '../format'
 import { LABELS, UNSURE_SEND } from '../dm'
-import { mergeMessages, newestOf, refreshThread, sendPlan, threadRows } from '../dm-screen'
+import { mergeMessages, newestOf, pageDmRequest, refreshThread, sendPlan, threadRows } from '../dm-screen'
+import { pagesDm } from '../pages'
+import { pagesOn } from '../pageGate'
 import { Btn, ErrorText, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { DmMessageRow } from '../ui/DmMessageRow'
@@ -36,6 +42,7 @@ import { RefreshableList } from '../ui/RefreshableList'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
+import { memberKeyOf, useActing } from './Conversa'
 
 const BLOCKED_SEND = 'você bloqueou esta pessoa'
 
@@ -47,6 +54,16 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
   const now = useNow(60000)
   const { request } = node
   const hosted = node.hosted === true
+  const acting = useActing()
+  const pageKey = acting.kind === 'page' && pagesOn({ hosted, accountOrigin: node.accountOrigin }) ? acting.key : null
+  // Read at call time: on a core node the page statements go to its account
+  // origin through the node, and the memo keeps depending on `request` only.
+  const nodeRef = useRef(node)
+  nodeRef.current = node
+  const dm = useMemo(() => {
+    if (pageKey === null) return request
+    return pageDmRequest(async (action, op) => pagesDm(nodeRef.current, { member: await memberKeyOf(request, nodeRef.current), page: pageKey, action, op }))
+  }, [request, pageKey])
   const status = node.passkey && node.passkey.status ? node.passkey.status : null
   const unlocked = !!(status && status.unlocked === true)
   const ownKey = status ? status.publicKey : null
@@ -90,7 +107,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
   const readThread = useCallback(async () => {
     const gen = ++genRef.current
     try {
-      const r = await request('dm.thread', { peer })
+      const r = await dm('dm.thread', { peer })
       if (gen !== genRef.current) return
       const page = Array.isArray(r.messages) ? r.messages : []
       const held = refreshThread(rawRef.current, page)
@@ -106,9 +123,27 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
       if (gen === genRef.current) setLoadError(errorText(err))
     }
     if (gen === genRef.current) setLoaded(true)
-  }, [request, peer])
+  }, [dm, peer])
 
   const ready = hosted && unlocked
+
+  // Another acting identity is another inbox: nothing of the old one stays.
+  const seenPage = useRef(pageKey)
+  useEffect(() => {
+    if (seenPage.current === pageKey) return
+    seenPage.current = pageKey
+    genRef.current++
+    olderRef.current = false
+    rawRef.current = []
+    setRaw([])
+    setNext(null)
+    setNewest('')
+    setFolder(null)
+    setBlocked(false)
+    setLoaded(false)
+    setHold(null)
+    setAskNew(false)
+  }, [pageKey])
 
   useEffect(() => {
     if (!ready) return
@@ -139,8 +174,8 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
   useEffect(() => {
     if (!ready || !loaded || !visible || !isTop || newest === '') return
     // Local mark only; a lost answer may still have marked it, so read again.
-    request('dm.seen', { peer }).catch(() => {}).then(reread)
-  }, [ready, loaded, visible, isTop, request, peer, reread, newest])
+    dm('dm.seen', { peer }).catch(() => {}).then(reread)
+  }, [ready, loaded, visible, isTop, dm, peer, reread, newest])
 
   // The newest line sits at the bottom: show it on open and when a newer one
   // arrives; an older page loaded above leaves the position alone.
@@ -157,7 +192,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
   }, [loaded, newest])
 
   const decide = async (state) => {
-    const r = await act.run(() => request('dm.set', { peer, state }))
+    const r = await act.run(() => dm('dm.set', { peer, state }))
     reread()
     if (!r.ok) return
     setMenu(false)
@@ -171,7 +206,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
     lastErr.current = null
     const r = await post.run(async () => {
       try {
-        return await request('dm.send', { to: peer, text, ...(quoteId ? { replyTo: quoteId } : {}) })
+        return await dm('dm.send', { to: peer, text, ...(quoteId ? { replyTo: quoteId } : {}) })
       } catch (err) {
         lastErr.current = err
         throw err
@@ -183,14 +218,38 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
       setReplyTo(null)
       setHold(null)
     } else if (r.uncertain || (err && err.message === UNSURE_SEND)) {
-      setHold({ text, quoteId })
+      setHold({ text, quoteId, retry: pageKey !== null && err && typeof err.retry === 'function' ? err.retry : null })
     } else if (err && err.message === BLOCKED_SEND) {
       setBlocked(true)
     }
     reread()
   }
 
+  // A page's held send resends the same signed bytes, never a new signature.
+  const retryHeld = async () => {
+    if (typeof hold.retry !== 'function') return undefined
+    lastErr.current = null
+    const r = await post.run(async () => {
+      try {
+        return await hold.retry()
+      } catch (err) {
+        lastErr.current = err
+        throw err
+      }
+    })
+    const err = lastErr.current
+    if (r.ok) {
+      setDraft('')
+      setReplyTo(null)
+      setHold(null)
+    } else if (r.uncertain && err && typeof err.retry === 'function') {
+      setHold({ ...hold, retry: err.retry })
+    }
+    reread()
+  }
+
   const onSend = () => {
+    if (hold && pageKey !== null) return retryHeld()
     const quoteId = replyTo ? replyTo.id : null
     const plan = sendPlan(hold, draft, quoteId)
     if (plan === 'confirm') setAskNew(true)
@@ -200,7 +259,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
 
   const refreshAll = async () => {
     setRefreshing(true)
-    try { await request('dm.pull', {}) } catch {}
+    try { await dm('dm.pull', {}) } catch {}
     reread()
     readLookup()
     setRefreshing(false)
@@ -213,7 +272,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
     if (!cursor || loadingMore) return
     setLoadingMore(true)
     try {
-      const r = await request('dm.thread', { peer, before: cursor })
+      const r = await dm('dm.thread', { peer, before: cursor })
       if (cursor === nextRef.current) {
         olderRef.current = true
         const merged = mergeMessages(Array.isArray(r.messages) ? r.messages : [], rawRef.current)
@@ -248,7 +307,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
 
   let blockNote = null
   if (blocked) blockNote = LABELS.blockedSend
-  else if (peer === ownKey) blockNote = LABELS.selfSend
+  else if (peer === ownKey || peer === pageKey) blockNote = LABELS.selfSend
   else if (lookup === null) blockNote = LABELS.noBox
 
   const left = MAX_TEXT - countChars(draft)
@@ -309,12 +368,12 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
           ? (
             <View style={styles.inline}>
               <Soft>{LABELS.uncertain}</Soft>
-              <Pill label='Tentar de novo' onPress={() => send(hold.text, hold.quoteId)} pending={post.pending} />
+              <Pill label='Tentar de novo' onPress={retryHeld} pending={post.pending} />
               <Pill label='descartar' onPress={() => { setHold(null); setAskNew(false) }} />
             </View>
             )
           : <ErrorText>{post.error}</ErrorText>}
-        {hold && askNew
+        {hold && askNew && pageKey === null
           ? (
             <View style={styles.inline}>
               <Soft>A mensagem anterior pode já ter chegado. Enviar este novo texto também?</Soft>
@@ -327,6 +386,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
           <TextInput
             style={styles.input}
             value={draft}
+            editable={!(hold && pageKey !== null)}
             onChangeText={(t) => { setDraft(t); setAskNew(false) }}
             multiline
             maxLength={MAX_TEXT * 2}

@@ -108,3 +108,44 @@ export function sendPlan (hold, text, quoteId) {
   if (hold.text === text && (hold.quoteId || null) === (quoteId || null)) return 'retry'
   return 'confirm'
 }
+
+// Conversas as a page: the screens call the same dm.* names and this maps
+// them to the page's signed actions. `act(action, op)` is the page's actAs
+// bound to its member and key. dm.pull and dm.enable have no page form (the
+// service holds the page's box and pulls), so they answer nothing.
+export const PAGE_DM_ACTIONS = Object.freeze({
+  'dm.list': 'dm-list',
+  'dm.thread': 'dm-thread',
+  'dm.send': 'dm-send',
+  'dm.set': 'dm-set',
+  'dm.seen': 'dm-seen'
+})
+
+export const PAGE_DM_SOON = 'Conversas da página em breve'
+export const PAGE_DM_CUSTODY = 'A associação pode ler as mensagens desta página'
+
+export function pageInboxTitle (name) {
+  const shown = typeof name === 'string' ? name.trim() : ''
+  return shown === '' ? 'Conversas da página' : 'Conversas da página ' + shown
+}
+
+// A service that has no such action yet answers these two: say so, never
+// 'Pedido inválido'. Everything else (and uncertain, retry) passes through.
+export function pageDmFailure (err) {
+  if (!err || (err.code !== 'pedido-invalido' && err.code !== 'nao-encontrado')) return err
+  const soon = new Error(PAGE_DM_SOON)
+  soon.code = err.code
+  return soon
+}
+
+export function pageDmRequest (act) {
+  return async (method, params) => {
+    const action = PAGE_DM_ACTIONS[method]
+    if (action === undefined) return {}
+    try {
+      return await act(action, params || {})
+    } catch (err) {
+      throw pageDmFailure(err)
+    }
+  }
+}

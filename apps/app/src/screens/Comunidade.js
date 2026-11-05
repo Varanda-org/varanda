@@ -25,9 +25,12 @@ import { shareCommunity } from '../communityShare'
 import { fetchCommunity } from '../indexClient'
 import { relativeTime } from '../format'
 import {
-  COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, OWN_LABEL, PRIVATE_LABEL,
-  can, communityReserveReached, lastIsOwn, needsReserveConfirm, lastLine, membersLabel, needsDeviceJoin, reconcile, roleLabel, showNewGroup, unreadLabel, visibilityLabel
+  AS_PAGE_LABEL, COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, OWN_LABEL, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PRIVATE_LABEL,
+  can, communityReserveReached, lastIsOwn, needsReserveConfirm, lastLine, membersLabel, needsDeviceJoin, pageCommunities, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, showNewGroup, unreadLabel, visibilityLabel
 } from '../groups'
+import { pagesOn } from '../pageGate'
+import { actAs, pagesGroup } from '../pages'
+import { memberKeyOf, useActing } from './Conversa'
 import { Body, Btn, Card, ErrorText, SectionHeader, Soft, Title, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
@@ -115,11 +118,84 @@ function GroupRow ({ title, detail, own, time, unread, onPress }) {
   )
 }
 
+// Join or leave as the page acted as. The signed statement goes out once: an
+// uncertain outcome keeps err.retry, which resends the same bytes, and the
+// screen never signs again on its own. The personal controls stay hidden.
+function PagePanel ({ node, community, page }) {
+  const styles = useStyles(makeStyles)
+  const [role, setRole] = useState(null)
+  const [error, setError] = useState('')
+  const [retry, setRetry] = useState(null)
+  const [pending, setPending] = useState(false)
+  const { request } = node
+  // Read at call time, so the status read keeps depending on `request` only.
+  const nodeRef = useRef(node)
+  nodeRef.current = node
+
+  useEffect(() => {
+    let live = true
+    setRole(null)
+    ;(async () => {
+      try {
+        const member = await memberKeyOf(request, nodeRef.current)
+        const status = await actAs(nodeRef.current, { member, action: 'status', page })
+        const mine = pageCommunities(status).find((c) => c.community === community)
+        if (live && mine) setRole(pageRoleOf(mine))
+      } catch {}
+    })()
+    return () => { live = false }
+  }, [request, community, page])
+
+  const settle = (answer) => {
+    setRetry(null)
+    setError('')
+    setRole(pageRoleOf(answer))
+  }
+  const fail = (err) => {
+    if (err && err.uncertain === true && typeof err.retry === 'function') {
+      setRetry(() => async () => {
+        setPending(true)
+        try { settle(await err.retry()) } catch (e) { fail(e) } finally { setPending(false) }
+      })
+      setError('Não deu para confirmar. Confira antes de tentar de novo.')
+      return
+    }
+    setError(pageErrorText(err))
+  }
+  const run = async (action) => {
+    setPending(true)
+    setError('')
+    setRetry(null)
+    try {
+      const member = await memberKeyOf(request, node)
+      settle(await pagesGroup(node, { member, page, action, op: { community } }))
+    } catch (err) {
+      fail(err)
+    } finally {
+      setPending(false)
+    }
+  }
+  const inside = role === 'member' || role === 'requested'
+  return (
+    <View style={styles.block}>
+      <Soft>{AS_PAGE_LABEL}{pageRoleLabel(role) ? ' · ' + pageRoleLabel(role) : ''}</Soft>
+      {retry
+        ? <Btn label='Conferir de novo' secondary pending={pending} onPress={retry} />
+        : inside
+          ? <Btn label={PAGE_LEAVE_LABEL} danger secondary pending={pending} disabled={node.online === false} onPress={() => run('community-leave')} />
+          : <Btn label={PAGE_JOIN_LABEL} pending={pending} disabled={node.online === false} onPress={() => run('community-join')} />}
+      <ErrorText>{error}</ErrorText>
+    </View>
+  )
+}
+
 export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, onOpenGroup, onOpenInfo }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
   const hosted = node.hosted === true
+  const acting = useActing()
+  const asPage = pageMode({ acting, on: pagesOn({ hosted, accountOrigin: node.accountOrigin }) })
   const bottomPad = useBottomPad()
   const now = useNow(60000)
   const [info, setInfo] = useState(null)
@@ -229,15 +305,15 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
     if (hosted) load()
   }, [hosted, seenTick, load])
 
-  const role = info && typeof info.role === 'string' ? info.role : null
+  const role = !asPage.page && info && typeof info.role === 'string' ? info.role : null
   const isMember = role === 'creator' || role === 'admin' || role === 'member'
   const staff = isMember && (role === 'creator' || role === 'admin')
-  const deviceJoin = needsDeviceJoin(info)
+  const deviceJoin = !asPage.page && needsDeviceJoin(info)
   const writerNow = info ? info.writerHere : undefined
   useEffect(() => { if (writerNow === true) setDeviceJoinSent(false) }, [writerNow])
   useEffect(() => { setDeviceJoinSent(false); setReserveConfirm(false) }, [community])
   const canCreate = isMember && can('create', role) && showNewGroup(info)
-  const dropped = info && info.repair === true && Array.isArray(info.dropped) ? info.dropped.filter((g) => typeof g === 'string' && HEX64.test(g)) : []
+  const dropped = !asPage.page && info && info.repair === true && Array.isArray(info.dropped) ? info.dropped.filter((g) => typeof g === 'string' && HEX64.test(g)) : []
   const droppedKey = dropped.join(',')
 
   // A join note from earlier in this visit would sit next to the card's
@@ -363,7 +439,9 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   }
 
   const openGroup = (g) => { if (typeof onOpenGroup === 'function') onOpenGroup(g) }
-  const canInfo = info !== null && typeof onOpenInfo === 'function'
+  // Informações holds the personal controls (leave, invite, members): a page
+  // never reaches them.
+  const canInfo = !asPage.page && info !== null && typeof onOpenInfo === 'function'
   const openInfo = () => onOpenInfo(community)
 
   const confirmBox = confirm
@@ -433,9 +511,10 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   } else {
     // Role 'pending' on a held root: the account is in by another device and
     // its writers are still arriving here, so no newcomer join is offered.
-    const joinable = !isMember && role !== 'banned' && role !== 'requested' && role !== 'pending' && !pending && info.leavePending !== true
+    const joinable = !asPage.page && !isMember && role !== 'banned' && role !== 'requested' && role !== 'pending' && !pending && info.leavePending !== true
     body = (
       <View>
+        {asPage.page ? <PagePanel node={node} community={community} page={asPage.key} /> : null}
         {joinable
           ? (
             <JoinCard
@@ -478,6 +557,8 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
           ? <View style={styles.block}><Soft>Nenhum grupo ainda.</Soft></View>
           : ordered.map((g) => {
             const name = typeof g.name === 'string' && g.name !== '' ? displayText(g.name) : (g.general === true ? GENERAL_LABEL : PRIVATE_LABEL)
+            // As the page: no personal role, last line or unread count.
+            if (asPage.page) return <GroupRow key={g.group} title={name} detail={[g.general === true ? 'grupo principal' : '', visibilityLabel(g.visibility)].filter(Boolean).join(' · ')} onPress={() => openGroup(g.group)} />
             const last = g.last && typeof g.last === 'object' ? g.last : null
             const line = lastLine(last)
             const own = line !== '' && lastIsOwn(last)

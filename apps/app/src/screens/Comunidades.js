@@ -15,7 +15,10 @@ import rpc from '@varanda/rpc'
 import { useNode } from '../node'
 import { fetchCommunity, fetchGroup, fetchGroupSearch } from '../indexClient'
 import { queryPath } from '../search'
-import { COMMUNITY_JOIN_LABELS, PUBLIC_LABEL, membersLabel, roleLabel } from '../groups'
+import { COMMUNITY_JOIN_LABELS, PAGE_EMPTY_TEXT, PUBLIC_LABEL, membersLabel, pageCommunities, pageErrorText, pageMode, pageRoleOf, roleLabel } from '../groups'
+import { pagesOn } from '../pageGate'
+import { actAs } from '../pages'
+import { memberKeyOf, useActing } from './Conversa'
 import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
 import { Icon } from '../ui/Icon'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -189,6 +192,9 @@ export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const hosted = node.hosted === true
+  const acting = useActing()
+  const asPage = pageMode({ acting, on: pagesOn({ hosted, accountOrigin: node.accountOrigin }) })
+  const pageKey = asPage.key
   const bottomPad = useBottomPad()
   const [list, setList] = useState({ rows: [], loaded: false, loading: false, error: '' })
   const [query, setQuery] = useState('')
@@ -201,20 +207,31 @@ export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
   const loadGen = useRef(0)
   const requestRef = useRef(node.request)
   requestRef.current = node.request
+  const nodeRef = useRef(node)
+  nodeRef.current = node
 
   const load = useCallback(async () => {
     const mine = ++loadGen.current
     setList((l) => ({ ...l, loading: true, error: '' }))
     try {
+      if (pageKey !== null) {
+        // The page's own communities come from its signed status read.
+        const member = await memberKeyOf(requestRef.current, nodeRef.current)
+        const status = await actAs(nodeRef.current, { member, action: 'status', page: pageKey })
+        if (mine !== loadGen.current) return
+        const rows = pageCommunities(status).map((c) => ({ ...c, state: 'ready', role: pageRoleOf(c) === 'requested' ? 'requested' : (typeof c.role === 'string' ? c.role : 'member') }))
+        setList({ rows, loaded: true, loading: false, error: '' })
+        return
+      }
       const res = await requestRef.current('community.list', {})
       if (mine !== loadGen.current) return
       const rows = Array.isArray(res && res.communities) ? res.communities : []
       setList({ rows: rows.filter((c) => c && typeof c.community === 'string' && HEX64.test(c.community)), loaded: true, loading: false, error: '' })
     } catch (err) {
       if (mine !== loadGen.current) return
-      setList((l) => ({ ...l, loading: false, error: errorText(err) }))
+      setList((l) => ({ ...l, loading: false, error: pageKey !== null ? pageErrorText(err) : errorText(err) }))
     }
-  }, [])
+  }, [pageKey])
 
   useEffect(() => {
     if (hosted) load()
@@ -280,9 +297,13 @@ export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
       </View>
       {hits.length > 0 ? <View>{hits}</View> : null}
       {search.status === 'done' && search.more ? <View style={styles.block}><Soft>Há mais resultados: refine a busca.</Soft></View> : null}
-      <View style={styles.block}>
-        <Btn label='Nova comunidade' onPress={() => setCreating(true)} />
-      </View>
+      {pageKey === null
+        ? (
+          <View style={styles.block}>
+            <Btn label='Nova comunidade' onPress={() => setCreating(true)} />
+          </View>
+          )
+        : null}
       <SectionHeader>Minhas comunidades</SectionHeader>
       {list.error && list.rows.length > 0 ? <ErrorState message={list.error} onRetry={load} pending={list.loading} /> : null}
     </View>
@@ -294,7 +315,7 @@ export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
   } else if (!list.loaded) {
     empty = <Skeleton />
   } else {
-    empty = <EmptyState icon='cadeira' title='Nenhuma comunidade ainda' body='Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou.' />
+    empty = <EmptyState icon='cadeira' title='Nenhuma comunidade ainda' body={pageKey !== null ? PAGE_EMPTY_TEXT : 'Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou.'} />
   }
 
   const renderItem = ({ item }) => {

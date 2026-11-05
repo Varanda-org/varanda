@@ -160,6 +160,23 @@ function hasExactKeys (o, keys) {
   return got.length === keys.length && got.every((k, i) => k === keys[i])
 }
 
+// An older seeder sends no page hint; a newer one sends `page` and, for a
+// page, `closed` and `moved`. Only booleans pass. Only a hint: Membro checks
+// with page.read.
+const PAGE_HINT_KEYS = ['closed', 'moved', 'page']
+
+// -> { page, closed, moved } (absent = false), or null for a bad shape.
+function pageHintOf (o, keys) {
+  if (!isPlain(o)) return null
+  const extra = []
+  for (const k of Object.keys(o)) if (!keys.includes(k)) extra.push(k)
+  if (extra.some((k) => !PAGE_HINT_KEYS.includes(k))) return null
+  if (keys.some((k) => !Object.prototype.hasOwnProperty.call(o, k))) return null
+  for (const k of PAGE_HINT_KEYS) if (k in o && typeof o[k] !== 'boolean') return null
+  // No keys at all for a person: absent reads as false.
+  return o.page === true ? { page: true, closed: o.closed === true, moved: o.moved === true } : {}
+}
+
 // A list of distinct valid refs within `max`, or null.
 function refList (v, max) {
   if (!Array.isArray(v) || v.length > max) return null
@@ -681,7 +698,8 @@ export function validCounts (body, asked) {
 // Posts: <= 100 seqs, strictly descending, each below `length` and below
 // `before` when given.
 export function validMemberIndex (body, before = null) {
-  if (!hasExactKeys(body, MEMBER_KEYS)) return null
+  const hint = pageHintOf(body, MEMBER_KEYS)
+  if (hint === null) return null
   if (!isCount(body.length) || !isCount(body.postsTotal)) return null
   if (!isHint(body.profileSeq) || !isHint(body.usernameSeq)) return null
   if (typeof body.indexing !== 'boolean' || typeof body.complete !== 'boolean') return null
@@ -699,7 +717,8 @@ export function validMemberIndex (body, before = null) {
     posts: posts.slice(),
     postsTotal: body.postsTotal,
     indexing: body.indexing,
-    complete: body.complete
+    complete: body.complete,
+    ...hint
   }
 }
 
@@ -816,11 +835,12 @@ export function validSearch (body) {
   const seen = new Set()
   const members = []
   for (const m of list) {
-    if (!hasExactKeys(m, HIT_KEYS) || !isHex64(m.author) || seen.has(m.author)) return null
+    const hint = pageHintOf(m, HIT_KEYS)
+    if (hint === null || !isHex64(m.author) || seen.has(m.author)) return null
     if (!isHint(m.profileSeq) || !isHint(m.usernameSeq)) return null
     if (m.profileSeq === null && m.usernameSeq === null) return null
     seen.add(m.author)
-    members.push({ author: m.author, profileSeq: m.profileSeq, usernameSeq: m.usernameSeq })
+    members.push({ author: m.author, profileSeq: m.profileSeq, usernameSeq: m.usernameSeq, ...hint })
   }
   return { members, more: body.more, indexing: body.indexing, complete: body.complete }
 }

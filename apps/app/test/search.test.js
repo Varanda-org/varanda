@@ -310,3 +310,20 @@ test('confirmedHits with a non-Map peek set or bad tokens confirms nothing', asy
   evil.get = () => { throw new Error('boom') }
   t.alike(confirmedHits(['ana'], members, evil, OWN), { hits: [], dropped: 0, unconfirmed: 0 })
 })
+
+test('confirmedHits carries only boolean page hints and leaves old hits unchanged', async (t) => {
+  const { confirmedHits } = await load()
+  const members = [
+    { author: A, page: true, closed: true, moved: 'x' },
+    { author: B }
+  ]
+  const peeked = new Map([
+    [A, peekOf(A, 'Ana', null)],
+    [B, peekOf(B, 'Ana B', null)]
+  ])
+  const r = confirmedHits(['ana'], members, peeked, OWN)
+  t.is(r.hits[0].page, true)
+  t.is(r.hits[0].closed, true)
+  t.absent('moved' in r.hits[0])
+  t.alike(Object.keys(r.hits[1]).sort(), ['author', 'avatar', 'name', 'username'])
+})
