@@ -107,13 +107,23 @@ function nodeWithSync (runSync) {
 }
 
 // failOnAbort(index): run `index` ends with an error when stopped (the
-// session then drops the continuous intent).
-function controlledSync ({ failOnAbort = () => false } = {}) {
+// session then drops the continuous intent). lendGroups: the run also holds
+// and lends its own group cores, as the real run does.
+function controlledSync ({ failOnAbort = () => false, lendGroups = false } = {}) {
   const runs = []
   const factory = nodeWithSync(async ({ storage, onEvent, signal, once, reader }) => {
     // The borrowed own diary, as the real run publishes it for withCores.
     const diary = await store.openDiary(storage)
-    if (reader) reader.set({ diary, replica: () => null, hold: () => true, release: () => {} })
+    const lent = new Map()
+    if (lendGroups) {
+      for (const entry of await store.readGroupWriters(storage)) {
+        for (const key of new Set([entry.key, ...(entry.rootNonce === null ? [] : [entry.group])])) {
+          const core = await store.openGroupCoreReadOnly(storage, key)
+          if (core !== null) lent.set(key, core)
+        }
+      }
+    }
+    if (reader) reader.set({ diary, replica: () => null, ...(lendGroups ? { group: (key) => lent.get(key) || null } : {}), hold: () => true, release: () => {} })
     let finish
     const done = new Promise((resolve) => { finish = resolve })
     const result = { ok: true, errors: [], peers: 1, seederConfirmed: true }
@@ -124,6 +134,10 @@ function controlledSync ({ failOnAbort = () => false } = {}) {
     const writers = new Map()
     for (const entry of await store.readGroupWriters(storage)) {
       for (const key of new Set([entry.key, ...(entry.rootNonce === null ? [] : [entry.group])])) {
+        if (lent.has(key)) {
+          writers.set(key, lent.get(key).length)
+          continue
+        }
         const core = await store.openGroupCoreReadOnly(storage, key)
         if (core === null) continue
         try { writers.set(key, core.length) } finally { await core.close() }
@@ -138,6 +152,7 @@ function controlledSync ({ failOnAbort = () => false } = {}) {
       // Not awaited: the run ends as promptly as before (a shared open
       // waits for the close by itself).
       diary.close().catch(() => {})
+      for (const core of lent.values()) core.close().catch(() => {})
     }
     if (out === null) throw new Error('falha simulada da sincronização')
     return out
@@ -172,6 +187,20 @@ async function ownWriter (s, group) {
   return e === undefined ? null : e.key
 }
 
+// Every plan of the upkeep, as it returns: { borrowed (on the run's cores),
+// enrol, share } (counts).
+function planSpy (t) {
+  const plan = ops.deviceUpkeepPlan
+  const plans = []
+  ops.deviceUpkeepPlan = async function (c) {
+    const out = await plan.apply(this, arguments)
+    plans.push({ borrowed: !!c.cores, enrol: out.enrol.length, share: out.share.length })
+    return out
+  }
+  t.teardown(() => { ops.deviceUpkeepPlan = plan })
+  return plans
+}
+
 const changedOf = (s) => s.web.events.filter((e) => e.name === 'groups.changed').map((e) => e.data.group)
 const warningsOf = (s) => s.web.events.filter((e) => e.name === 'warning').map((e) => e.data.line)
 
@@ -185,6 +214,27 @@ async function account (t, { roots = true, upkeepDelayMs = 20, upkeepFullMaxAgeM
   const b = await setup(t, { assoc: a.assoc, keyPair: a.keyPair, prf: a.prf, storage, factory: sync.factory, upkeepDelayMs, upkeepFullMaxAgeMs })
   return { a, b, sync, community, group }
 }
+
+test('a pass with nothing to do plans on the run\'s cores and leaves the continuous run alone', async (t) => {
+  const a = await setup(t)
+  await a.web.request('community.create', { name: 'Bairro', join: 'open' })
+  await a.node.close()
+  const sync = controlledSync({ lendGroups: true })
+  const b = await setup(t, { assoc: a.assoc, keyPair: a.keyPair, prf: a.prf, storage: a.storage, factory: sync.factory, upkeepDelayMs: 20 })
+  const plans = planSpy(t)
+
+  await b.web.request('sync.start')
+  const live = await sync.next(0)
+  live.emit({ event: 'own-synced', length: await diaryLength(b) })
+  await until(() => plans.length > 0, { name: 'the pass planned', timeoutMs: 5000 })
+  await pause(200)
+  t.alike(plans, [{ borrowed: true, enrol: 0, share: 0 }], 'one empty plan, on the borrowed cores')
+  t.absent(live.aborted, 'the run was not stopped')
+  t.is(sync.runs.length, 1, 'no run was started')
+  t.absent(b.web.events.some((e) => e.name === 'sync.stopped'))
+  t.alike(warningsOf(b), [])
+  await b.web.request('sync.stop')
+})
 
 test('the upkeep adds no RPC method', async (t) => {
   const browser = createBrowserSession({ storage: memoryNodeStorage(), association: KEY, seederUrl: 'ws://127.0.0.1:9/seeder', createSocket: () => null })
@@ -234,36 +284,38 @@ test('a second device enrols by itself after its diary is synced', async (t) => 
 
 test('the pass is bounded and never loops', async (t) => {
   const { b, sync } = await account(t, { roots: false })
+  const plans = planSpy(t)
   const length = await diaryLength(b)
   await b.web.request('sync.start')
-  const first = await sync.next(0)
-  first.emit({ event: 'own-synced', length })
-  let current = await sync.next(1)
-  t.ok(first.aborted, 'pass 1 planned under the store')
+  const live = await sync.next(0)
+  const passes = (n) => until(() => plans.length >= n, { name: 'pass ' + n, timeoutMs: 5000 })
+  live.emit({ event: 'own-synced', length })
+  await passes(1)
+  t.ok(plans[0].borrowed, 'pass 1 planned on the run\'s cores: no root is stored here')
   // A burst coalesces into one pass.
-  for (let i = 0; i < 3; i++) current.emit({ event: 'groups-changed', group: KEY })
-  current = await sync.next(2)
-  current.emit({ event: 'groups-changed', group: KEY })
-  current = await sync.next(3)
-  current.emit({ event: 'groups-changed', group: KEY })
-  current.emit({ event: 'own-synced', length })
+  for (let i = 0; i < 3; i++) live.emit({ event: 'groups-changed', group: KEY })
+  await passes(2)
+  live.emit({ event: 'groups-changed', group: KEY })
+  await passes(3)
+  live.emit({ event: 'groups-changed', group: KEY })
+  live.emit({ event: 'own-synced', length })
   await pause(150)
-  t.is(sync.runs.length, 1 + MAX_UPKEEP_PASSES, 'at most MAX_UPKEEP_PASSES preemptions')
-  t.absent(current.aborted)
+  t.is(plans.length, MAX_UPKEEP_PASSES, 'at most MAX_UPKEEP_PASSES passes')
 
   // A settled run re-arms once.
-  current.emit({ event: 'settled', settled: true, mediaPending: false })
-  current = await sync.next(4)
-  current.emit({ event: 'settled', settled: true, mediaPending: false })
-  current.emit({ event: 'groups-changed', group: KEY })
-  current = await sync.next(5)
-  current.emit({ event: 'groups-changed', group: KEY })
-  current = await sync.next(6)
-  current.emit({ event: 'settled', settled: true, mediaPending: false })
-  current.emit({ event: 'groups-changed', group: KEY })
+  live.emit({ event: 'settled', settled: true, mediaPending: false })
+  await passes(4)
+  live.emit({ event: 'settled', settled: true, mediaPending: false })
+  live.emit({ event: 'groups-changed', group: KEY })
+  await passes(5)
+  live.emit({ event: 'groups-changed', group: KEY })
+  await passes(6)
+  live.emit({ event: 'settled', settled: true, mediaPending: false })
+  live.emit({ event: 'groups-changed', group: KEY })
   await pause(150)
-  t.is(sync.runs.length, 7, 'one re-arming per arming')
-  t.absent(current.aborted)
+  t.is(plans.length, 6, 'one re-arming per arming')
+  t.is(sync.runs.length, 1, 'no pass stopped the run: nothing to write')
+  t.absent(live.aborted)
   t.alike(await store.readGroupWriters(b.storage), [], 'nothing written')
   t.is(await diaryLength(b), length)
   t.alike(warningsOf(b).filter((l) => l === UPKEEP_WARNING), [], 'a plan with nothing to do is no failure')
@@ -469,13 +521,22 @@ test('a reconnected client\'s first own-synced arms afresh at the same length', 
   t.alike(b.internal, [])
 })
 
-// Counts deviceUpkeepPlan calls (each is one pass).
+// Counts deviceUpkeepPlan calls (each is one pass). A plan tried on the
+// run's cores that the run cannot serve (NEEDS_EXCLUSIVE: these runs lend no
+// group core) is rerun on the exclusive path within the same pass, so only
+// the rerun counts.
 function countPlans (t) {
   const original = ops.deviceUpkeepPlan
   const counter = { calls: 0 }
   ops.deviceUpkeepPlan = async (...args) => {
-    counter.calls++
-    return original(...args)
+    try {
+      const out = await original(...args)
+      counter.calls++
+      return out
+    } catch (err) {
+      if (!ops.isNeedsExclusive(err)) counter.calls++
+      throw err
+    }
   }
   t.teardown(() => { ops.deviceUpkeepPlan = original })
   return counter

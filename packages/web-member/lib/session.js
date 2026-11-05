@@ -14,13 +14,14 @@
 // - Every member operation opens the own diary, and a running sync holds it
 //   open. Two Hypercore instances on the same storage would corrupt it, so
 //   a core is never opened twice: a read that opens cores (feed.read,
-//   log.read, profile.read, engagement.read, the notices own-diary read) is
-//   served from the live run's cores while a run exists (withCores, web
-//   only; the run keeps going, same runId), and opens and closes the storage
-//   itself when none does. Only writes, and reads the run cannot serve,
-//   preempt: a running sync is aborted and awaited first; a continuous run
-//   is restarted afterwards with a new runId (sync.stopped 'preempted',
-//   then sync.started).
+//   log.read, profile.read, engagement.read, the community.* and group.*
+//   reads, the notices own-diary read, the upkeep's plan) is served from
+//   the live run's cores while a run exists (withCores, web only; the run
+//   keeps going, same runId), and opens and closes the storage itself when
+//   none does. Only writes, and reads the run cannot serve, preempt: a
+//   running sync is aborted and awaited first; a continuous run is
+//   restarted afterwards with a new runId (sync.stopped 'preempted', then
+//   sync.started).
 // - Configuration (association, seeder address) is fixed here and checked
 //   before anything touches the storage or the network. There is no DHT, so
 //   node.info reports publicDht false.
@@ -128,9 +129,10 @@
 // (member-ops deviceUpkeepPlan / deviceUpkeep: a CW and the Geral writer
 // here, epoch keys handed by the creator's device to the account's new
 // writers). ONE serial pass at a time, never inside onEvent. A pass plans
-// in full under withStore (the fold opens group cores the borrowed path
-// does not serve, and the shares a distributor owes show only there),
-// with one exception: the echo of a write made on this device (an own
+// in full on the live run's cores (withCores: the run lends its own group
+// cores and the foreign ones it keeps; a core it does not lend reruns the
+// plan under withStore), so an empty plan never stops the run. One
+// exception skips the full plan: the echo of a write made on this device (an own
 // length equal to its last write: a post, a like, a follow), after the
 // session's first full plan, with no failure, transient skip or unarmed
 // 'group-writer' since, and a full plan younger than upkeepFullMaxAgeMs,
@@ -153,8 +155,8 @@
 // plans after the new device's writer arrived; while armed, a
 // 'groups-changed' (the root or writer a skipped root waited for) queues
 // another pass. A timer (upkeepDelayMs) coalesces a burst into one pass, at
-// most MAX_UPKEEP_PASSES per arming, so a device with nothing to do stops
-// its continuous run a bounded number of times per new own length;
+// most MAX_UPKEEP_PASSES per arming, so a plan the run's cores cannot serve
+// stops its continuous run a bounded number of times per new own length;
 // progress earns fresh passes for what the write unblocked, and a pass
 // that leaves nothing waiting (no failure, no skip a sync can resolve) and
 // saw no newer arming disarms. A step that threw after writing still sends
@@ -1325,7 +1327,7 @@ function createBrowserSession ({
       return withStore(fn)
     }
     try {
-      return await fn({ ...ctx(), cores: { diary: api.diary, replica: api.replica } })
+      return await fn({ ...ctx(), cores: { diary: api.diary, replica: api.replica, group: api.group } })
     } catch (err) {
       if (!member.isNeedsExclusive(err)) throw err
     } finally {
@@ -1335,11 +1337,15 @@ function createBrowserSession ({
   }
 
   // Whether the stored replica of `key` is forked, on the run's core when
-  // c lends it (a read just served there), else on the storage's.
+  // c lends it (a read just served there), else on the storage's. A
+  // borrowed read never opens it: the run may have stopped lending a core
+  // it has not closed yet, and a second instance would corrupt it, so that
+  // read reruns on the exclusive path.
   async function replicaForked (c, key) {
     const lent = c.cores ? c.cores.replica(key) : null
     if (lent !== null) return lent.fork !== 0
     if (!(await store.replicaExists(c.storage, key))) return false
+    if (c.cores) throw member.needsExclusive()
     const core = await store.openReplica(c.storage, key)
     try {
       return core.fork !== 0
@@ -1956,7 +1962,7 @@ function createBrowserSession ({
     const ownLength = (c) => member.withIdentity(c, async ({ diary }) => diary.length)
     const stale = () => closed || epoch !== connection || generation !== groupEpoch || keyPair === null
     try {
-      const { plan, planLength } = await withStore(async (c) => ({ plan: await member.deviceUpkeepPlan(c), planLength: await ownLength(c) }))
+      const { plan, planLength } = await withCores(async (c) => ({ plan: await member.deviceUpkeepPlan(c), planLength: await ownLength(c) }))
       shareChecked = true
       upkeepFullAt = Date.now()
       // Only what a later sync can bring keeps the arming: a root skipped
@@ -2761,12 +2767,12 @@ function createBrowserSession ({
     'group.join': groupWrite(member.groupJoin),
     'group.leave': groupWrite(member.groupLeave),
     'group.post': groupWrite(member.groupPost),
-    'group.read': serial((params) => withStore((c) => member.groupRead(c, params))),
-    'group.seen': serial((params) => withStore((c) => member.groupSeen(c, params))),
-    'group.list': serial((params) => withStore((c) => member.groupList(c, params))),
-    'group.info': serial((params) => withStore((c) => member.groupInfo(c, params))),
-    'group.members': serial((params) => withStore((c) => member.groupMembers(c, params))),
-    'group.requests': serial((params) => withStore((c) => member.groupRequests(c, params))),
+    'group.read': serial((params) => withCores((c) => member.groupRead(c, params))),
+    'group.seen': serial((params) => withCores((c) => member.groupSeen(c, params))),
+    'group.list': serial((params) => withCores((c) => member.groupList(c, params))),
+    'group.info': serial((params) => withCores((c) => member.groupInfo(c, params))),
+    'group.members': serial((params) => withCores((c) => member.groupMembers(c, params))),
+    'group.requests': serial((params) => withCores((c) => member.groupRequests(c, params))),
     'group.admit': groupWrite(member.groupAdmit, GROUP_AND_COMMUNITY),
     'group.ban': groupWrite(member.groupBan, GROUP_AND_COMMUNITY),
     'group.admin': groupWrite(member.groupAdmin),
@@ -2803,10 +2809,10 @@ function createBrowserSession ({
       roots: (params) => [params.community],
       changed: async (c, result, params) => [params.community, String(params.group).toLowerCase()]
     }),
-    'community.members': serial((params) => withStore((c) => member.communityMembers(c, params))),
-    'community.requests': serial((params) => withStore((c) => member.communityRequests(c, params))),
-    'community.info': serial((params) => withStore((c) => member.communityInfo(c, params))),
-    'community.list': serial(() => withStore((c) => member.communityList(c))),
+    'community.members': serial((params) => withCores((c) => member.communityMembers(c, params))),
+    'community.requests': serial((params) => withCores((c) => member.communityRequests(c, params))),
+    'community.info': serial((params) => withCores((c) => member.communityInfo(c, params))),
+    'community.list': serial(() => withCores((c) => member.communityList(c))),
 
     'dm.enable': serial(async (_, epoch) => {
       const r = await dmEnable(epoch)
