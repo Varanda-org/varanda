@@ -281,7 +281,6 @@ Why some pins are what they are (chosen on 2026-10-22, preferring releases at le
 - The Expo-managed packages (`react-dom`, `react-native-web`, `@expo/metro-runtime`, `expo-file-system`, `expo-build-properties`, `react-native-safe-area-context`) take the versions in `expo/bundledNativeModules.json`. `react-native-web` is 0.21.3 rather than 0.21.4, which was two weeks old.
 - `bare-pack` 2.2.4, not the 3.x line. 3.0.0 is a major released after `react-native-bare-kit` 0.16.0; 2.2.4 shipped the same day as bare-kit 0.16.0 and has the same `--linked`, `--host` and `--format` options.
 - `bare-runtime` 1.33.4 (dev only, packages/core), for the desktop Bare smoke test. It is the Bare that `react-native-bare-kit` 0.16.0 embeds (the gate prints `bare=v1.33.4`), so the smoke test and the app run the same runtime. 1.34.1 was used until 2026-10-29.
-- `@aws-amplify/ui-react-liveness` 3.7.0 and `aws-amplify` 6.22.2 (`apps/app`), for the in-app face liveness capture on web. The widget needs `aws-amplify` 6.x as a peer (6.15.9 or newer); 6.22.2 is the newest 6.x release published on or before 2026-10-19. `@aws-amplify/core` resolves to 6.19.3 through the lockfile and needs no pin of its own. No `@aws-sdk` package is a direct dependency.
 
 ### Accepted `npm audit` advisories
 
