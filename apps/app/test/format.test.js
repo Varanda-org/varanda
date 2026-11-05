@@ -63,3 +63,12 @@ test('interpolateStops', async (t) => {
   t.is(middle, '#d37561')
   t.alike(interpolateStops(stops, 3), ['#f7b267', middle, '#2b2a4a'])
 })
+
+test('dayHeading names today, yesterday and older days', async (t) => {
+  const { dayHeading } = await load()
+  t.is(dayHeading(new Date(2026, 9, 23, 0, 5).toISOString(), NOW), 'hoje')
+  t.is(dayHeading(new Date(2026, 9, 22, 23, 59).toISOString(), NOW), 'ontem')
+  t.is(dayHeading(new Date(2026, 9, 3, 9).toISOString(), NOW), '3 out')
+  t.is(dayHeading(new Date(2025, 9, 3, 9).toISOString(), NOW), '3 out 2025')
+  t.is(dayHeading('nope', NOW), null)
+})

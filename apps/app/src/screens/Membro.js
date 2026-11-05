@@ -46,6 +46,7 @@ import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { ProfileHeader } from '../ui/ProfileHeader'
+import { ProfileBar, useProfileBar } from '../ui/ProfileBar'
 import { LABELS } from '../dm'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
 import { useFollowCounts } from '../useFollowCounts'
@@ -597,11 +598,12 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const countsNote = c.incomplete && (c.seguindo !== null || c.seguidores !== null) ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null
 
   const insets = useSafeAreaInsets()
+  const bar = useProfileBar(insets.top + BAND, { controlsBottom: insets.top + 42 })
   const head = (
     <ProfileHeader
       bandHeight={insets.top + BAND}
       topInset={insets.top}
-      onBack={onBack}
+      onBack={full && bar.interactive ? undefined : onBack}
       bandButtons={null}
       avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
       title={displayText(who.title)}
@@ -754,7 +756,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
           loadingMore={loadingMore}
           loadMoreError={!!moreError}
           atEnd={atEnd}
+          onScrollFrame={bar.handleScrollFrame}
         />
+        <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)} onBack={onBack} />
       </View>
     </View>
   )

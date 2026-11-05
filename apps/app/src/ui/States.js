@@ -89,7 +89,7 @@ export function ListFooter ({ loading, atEnd, endText = 'Isso é tudo por enquan
 
 // A pill over the top of a list ("novos posts"); fades and slides in and
 // out, and renders nothing once the exit animation has finished.
-export function NewItemsPill ({ label, visible, onPress }) {
+export function NewItemsPill ({ label, visible, onPress, top = 8 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const anim = useRef(new Animated.Value(visible ? 1 : 0)).current
@@ -105,7 +105,7 @@ export function NewItemsPill ({ label, visible, onPress }) {
   if (!visible && !shown) return null
   return (
     <Animated.View
-      style={[styles.newWrap, { opacity: anim, transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [-8, 0] }) }] }]}
+      style={[styles.newWrap, { top, opacity: anim, transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [-8, 0] }) }] }]}
       pointerEvents={visible ? 'box-none' : 'none'}
     >
       <Pressable accessibilityRole='button' accessibilityLabel={label} onPress={onPress} hitSlop={4} style={styles.newPill}>
@@ -124,7 +124,7 @@ const makeStyles = (colors) => StyleSheet.create({
   empty: { alignItems: 'center', gap: 12, paddingVertical: 32, paddingHorizontal: 16 },
   emptyTitle: { ...type.emptyTitle, color: colors.ink, textAlign: 'center' },
   footer: { minHeight: 56, alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 8, paddingHorizontal: 16 },
-  newWrap: { position: 'absolute', top: 8, alignSelf: 'center', zIndex: 2 },
+  newWrap: { position: 'absolute', alignSelf: 'center', zIndex: 2 },
   newPill: {
     minHeight: 44,
     flexDirection: 'row',

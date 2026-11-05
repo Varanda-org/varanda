@@ -82,6 +82,55 @@ test('notice lines follow the kind, and the default kind is a follow', async (t)
   }
 })
 
+test('noticeParts is the name and the rest of the line, and the two join back into it', async (t) => {
+  const { noticeParts, noticeLine } = await load()
+  const bia = Object.freeze({ title: 'Bia' })
+  const rests = {
+    follow: ' começou a seguir você',
+    reply: ' respondeu à sua publicação',
+    quote: ' citou sua publicação',
+    mention: ' mencionou você',
+    like: ' curtiu sua publicação',
+    repost: ' republicou sua publicação'
+  }
+  for (const kind of ['follow', 'reply', 'quote', 'mention', 'like', 'repost']) {
+    const parts = noticeParts(bia, kind)
+    t.is(parts.name, 'Bia', kind)
+    t.is(parts.rest, rests[kind], kind)
+    t.is(parts.name + parts.rest, noticeLine(bia, kind), kind)
+    const someone = noticeParts(Object.freeze({ title: 'sem nome' }), kind)
+    t.is(someone.name, 'Alguém', kind)
+    t.is(someone.rest, rests[kind], kind)
+    t.is(someone.name + someone.rest, noticeLine({ title: 'sem nome' }, kind), kind)
+  }
+  for (const title of ['', null, undefined, 7]) {
+    const parts = noticeParts(Object.freeze({ title }))
+    t.is(parts.name, 'Alguém')
+    t.is(parts.name + parts.rest, noticeLine({ title }))
+  }
+  t.is(noticeParts(bia).name + noticeParts(bia).rest, noticeLine(bia), 'the default kind is a follow')
+  const pin = noticeParts(bia, 'pin')
+  t.is(pin.rest, ' começou a seguir você')
+  t.is(pin.name + pin.rest, noticeLine(bia, 'pin'), 'an unknown kind still joins into the line')
+})
+
+test('noticeIcon is the avatar glyph for each kind and null for an unknown one', async (t) => {
+  const { noticeIcon } = await load()
+  t.is(noticeIcon('follow'), 'seguir')
+  t.is(noticeIcon('reply'), 'resposta')
+  t.is(noticeIcon('quote'), 'citar')
+  t.is(noticeIcon('mention'), 'at-sign')
+  t.is(noticeIcon('like'), 'coracao')
+  t.is(noticeIcon('repost'), 'republicar')
+  t.is(noticeIcon('pin'), null)
+  t.is(noticeIcon('FOLLOW'), null)
+  t.is(noticeIcon('LIKE'), null)
+  t.is(noticeIcon(''), null)
+  t.is(noticeIcon(null), null)
+  t.is(noticeIcon(undefined), null)
+  t.is(noticeIcon(), null)
+})
+
 test('noticeKind is the row kind, and a row from an older node reads as a follow', async (t) => {
   const { noticeKind } = await load()
   t.is(noticeKind({ kind: 'follow' }), 'follow')

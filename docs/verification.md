@@ -4397,3 +4397,59 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 - Um escritor vazado pode escrever com data anterior até a saída, o limite do aparelho que saiu da seção 10 do protocolo.
 - Uma página pausada que mudou de chave não sai dos grupos sozinha: vale `mod block`.
 - As Conversas da página não acompanham a mudança de chave.
+
+## 91. Perfil fixo, Avisos, Mensagens e Publicar (PR feat/perfil-avisos-dm-publicar)
+
+Quatro partes do app ganham ajustes visuais e de toque: a barra fixa ao rolar o Diário e um perfil; o selo de tipo e o nome em negrito nos Avisos; os marcadores de dia e os grupos de bolhas nas Mensagens; e, na Publicar, o autor ao lado do avatar, o anel com a contagem restante, as vibrações e a alça da folha. O roteiro está em [app.md](app.md), seção "Perfil fixo, Avisos, Mensagens e Publicar".
+
+Regras que os passos abaixo conferem:
+
+- A barra fixa só aparece depois que a faixa do perfil sai da tela, nunca no topo. Cada botão responde uma vez: o da faixa ou o da barra, nunca os dois.
+- Com "Reduzir movimento" ligado, a barra aparece de uma vez.
+- Nos Avisos, o selo é decorativo e a linha lê a mesma frase de antes.
+- Nas Mensagens, mensagens do mesmo lado até 5 min da primeira do grupo, no mesmo dia e sem convite entre elas, formam um grupo; só a última mostra a hora.
+- Na Publicar, o anel e a contagem mudam a partir de 90 % do limite, e a vibração de sucesso só vale para envio de fato, não para a fila de saída.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes desta parte: `apps/app/test/profileBar.test.js` (limites da barra), `apps/app/test/composeRing.test.js` (tons e contagem do anel), e `apps/app/test/format.test.js`, `apps/app/test/notices.test.js` e `apps/app/test/conversas.test.js` (dias, grupos e frases dos Avisos). As caixas abaixo ficam desmarcadas até alguém executar o passo, num aparelho ou navegador de verdade.
+
+Android (aparelho ou emulador, primeiro):
+
+- [ ] No Diário, ao rolar, a barra de 44 pt com o nome, a ajuda, a engrenagem e o sino aparece aos poucos, e não aparece no topo do perfil.
+- [ ] Tocar em ajuda, engrenagem e sino pela barra abre o mesmo que pela faixa; um toque nunca dispara os dois.
+- [ ] No Diário, "ver novidades" aparece abaixo da barra e responde ao toque.
+- [ ] Abrir o perfil de outra pessoa (Membro) e rolar: a barra aparece com o nome e a seta de voltar, e voltar pela barra funciona.
+- [ ] Com "Remover animações" ligado, a barra aparece de uma vez.
+- [ ] Nos Avisos, cada linha tem um selo verde de 20 pt com o ícone do tipo (seguir, resposta, citar, @, coração, republicar); o nome está em negrito e o resto da frase, não.
+- [ ] Nos Avisos, nenhuma linha mostra trecho do texto, não há divisão "Novos" e "Anteriores", e tocar na linha abre a mesma tela de antes.
+- [ ] Com TalkBack, a linha de Avisos lê a mesma frase de antes; o selo não é lido à parte.
+- [ ] Nas Mensagens, "hoje", "ontem" e uma data antiga aparecem entre os dias certos.
+- [ ] Nas Mensagens, duas mensagens seguidas do mesmo lado com menos de 5 min da primeira formam grupo: a bolha de cima fecha os cantos do lado de quem enviou, e só a última mostra a hora.
+- [ ] Nas Mensagens, uma mensagem a mais de 5 min da primeira do grupo começa um grupo novo.
+- [ ] Nas Mensagens, com um convite entre duas mensagens do mesmo lado, elas não formam grupo.
+- [ ] Pressionar e segurar uma mensagem de grupo abre a bolha inteira, com a hora; fechar o menu devolve o grupo.
+- [ ] Na Publicar, o nome e o @nome aparecem ao lado do avatar, acima do campo de texto.
+- [ ] Na Publicar, com cerca de 900 caracteres o anel fica âmbar e a contagem mostra quantos faltam; passando de 1000, o anel fica vermelho e o número fica negativo.
+- [ ] Na Publicar, quando aparece a nota de limite de caracteres, vibra de aviso; publicar de fato vibra de sucesso; guardar na fila (sem rede) não vibra.
+- [ ] Na Publicar, a alça aparece centralizada no topo da folha, sem tapar os botões, e o campo de texto não mostra anel de foco.
+
+iOS (simulador ou aparelho, depois do Android):
+
+- [ ] Os passos de barra fixa, Avisos, Mensagens e Publicar acima, e a barra com VoiceOver ligado: cada botão é lido uma vez, e a seta de voltar da faixa não aparece duplicada.
+- [ ] Na Publicar, a alça aparece centralizada no topo da folha (só uma alça).
+- [ ] A vibração de sucesso e a de aviso da Publicar acontecem num aparelho com Taptic Engine (o simulador não vibra).
+
+Web (navegador, depois do iOS):
+
+- [ ] No Diário e no Membro, a barra fixa aparece ao rolar, e os botões respondem ao mouse e ao teclado (Tab), sem duplicar.
+- [ ] Nos Avisos e nas Mensagens, selo, negrito, dias e grupos aparecem iguais aos do app nativo.
+- [ ] Na Publicar, a alça aparece no topo da folha. Não há vibração na web.
+- [ ] Na Publicar, o campo de texto não mostra contorno do navegador ao receber o foco; o cursor mostra o foco.
+
+Limites desta parte:
+
+- As abas Publicações e Respostas do perfil não entram nesta etapa: uma resposta é `record.replyTo` dentro de `log.read` paginado, e não há leitura só de respostas.
+- O anel e a contagem não mudam o limite de 1000 caracteres.
+- Nas Mensagens, ao carregar mensagens anteriores do mesmo dia, o marcador do dia passa para a nova primeira mensagem daquele dia; a linha que tinha o marcador perde essa altura e pode subir um pouco se estiver na tela.
+- Nenhuma caixa acima foi executada nesta documentação.

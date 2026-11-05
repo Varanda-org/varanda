@@ -35,18 +35,19 @@ function TopRow ({ onClose, title, left, right }) {
 }
 
 // Inside the iOS page sheet: its own safe-area insets.
-function IosContent ({ onClose, title, left, right, background, children }) {
+function IosContent ({ onClose, title, left, right, background, grabber, children }) {
   const styles = useStyles(makeStyles)
   const insets = useSafeAreaInsets()
   return (
     <View style={styles.iosRoot}>
       <TopRow onClose={onClose} title={title} left={left} right={right} />
+      {grabber ? <View style={styles.grabberRow} pointerEvents='none'><View style={styles.grabber} /></View> : null}
       <View style={[styles.children, { paddingBottom: insets.bottom, backgroundColor: background }]}>{children}</View>
     </View>
   )
 }
 
-export function Sheet ({ open, onClose, title, left, right, background, children }) {
+export function Sheet ({ open, onClose, title, left, right, background, grabber = false, children }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const bodyBackground = background ?? colors.card
@@ -62,7 +63,7 @@ export function Sheet ({ open, onClose, title, left, right, background, children
         allowSwipeDismissal
       >
         <SafeAreaProvider>
-          <IosContent onClose={onClose} title={title} left={left} right={right} background={bodyBackground}>{children}</IosContent>
+          <IosContent onClose={onClose} title={title} left={left} right={right} background={bodyBackground} grabber={grabber}>{children}</IosContent>
         </SafeAreaProvider>
       </Modal>
     )
@@ -83,6 +84,7 @@ export function Sheet ({ open, onClose, title, left, right, background, children
     >
       <Pressable style={styles.backdrop} accessibilityRole='button' accessibilityLabel='fechar' onPress={onClose} />
       <View style={[styles.panel, { top: insets.top + layout.sheetTop }]}>
+        {grabber ? <View style={styles.grabberRow} pointerEvents='none'><View style={styles.grabber} /></View> : null}
         <View style={{ paddingLeft: padL, paddingRight: padR }}>
           <TopRow onClose={onClose} title={title} left={left} right={right} />
         </View>
@@ -112,6 +114,12 @@ const makeStyles = (colors) => StyleSheet.create({
     borderTopRightRadius: layout.sheetRadius,
     overflow: 'hidden'
   },
+  // Floats over the top row so the row does not move. Drawn on iOS too: the
+  // page sheet has no system grabber (prefersGrabberVisible is never set).
+  // A full-width row centres the pill on every platform (absolute + alignSelf
+  // centres on the wrong axis on the web) and takes no touches.
+  grabberRow: { position: 'absolute', top: 6, left: 0, right: 0, alignItems: 'center', zIndex: 1 },
+  grabber: { width: 36, height: 4, borderRadius: 2, backgroundColor: colors.line },
   topRow: {
     height: layout.sheetTopRow,
     paddingHorizontal: 16,

@@ -48,6 +48,7 @@ import { useOutbox } from '../outboxProvider'
 import { GATE_MESSAGE, isQuoteRecord } from '../outbox'
 import { countChars } from '../format'
 import { whoOf } from '../who'
+import { ringState } from '../composeRing'
 import { countAfterInsert, insertAt } from '../emoji'
 import { MAX_MEDIA_PER_POST } from '../media/plan'
 import { validDescriptor } from '../media/fetch'
@@ -60,6 +61,7 @@ import { EmojiPicker } from '../ui/EmojiPicker'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
+import { tap } from '../ui/haptics'
 import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
@@ -116,11 +118,13 @@ const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0'
 let lastItemId = 0
 const nextItemId = () => ++lastItemId
 
-// Progress ring: a grey track and a green arc drawn with two half masks.
+// Progress ring: a grey track and a toned arc drawn with two half masks.
 // Each half (10x20, overflow hidden) holds a 20x20 circle whose top and right
-// borders are green; rotating the circle slides its half-circle arc into view.
-function Ring ({ progress }) {
+// borders take the tone colour; rotating the circle slides its half-circle arc into view.
+function Ring ({ progress, tone }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  const arcColor = colors[tone] || colors.accent
   const deg = Math.max(0, Math.min(1, progress)) * 360
   const rightDeg = -135 + Math.min(deg, 180)
   const leftDeg = 45 + Math.max(0, deg - 180)
@@ -130,14 +134,14 @@ function Ring ({ progress }) {
       {deg > 0
         ? (
           <View style={[styles.half, styles.halfRight]}>
-            <View style={[styles.arc, styles.arcInRight, { transform: [{ rotate: rightDeg + 'deg' }] }]} />
+            <View style={[styles.arc, styles.arcInRight, { borderTopColor: arcColor, borderRightColor: arcColor, transform: [{ rotate: rightDeg + 'deg' }] }]} />
           </View>
           )
         : null}
       {deg > 180
         ? (
           <View style={[styles.half, styles.halfLeft]}>
-            <View style={[styles.arc, styles.arcInLeft, { transform: [{ rotate: leftDeg + 'deg' }] }]} />
+            <View style={[styles.arc, styles.arcInLeft, { borderTopColor: arcColor, borderRightColor: arcColor, transform: [{ rotate: leftDeg + 'deg' }] }]} />
           </View>
           )
         : null}
@@ -459,6 +463,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     const next = insertAt(text, selRef.current, emoji)
     if (!countAfterInsert(next.text, '', MAX_TEXT).allowed) {
       setNote('limite de ' + MAX_TEXT + ' caracteres')
+      tap('warn')
       return
     }
     setNote('')
@@ -481,6 +486,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
       // Selection and token were checked above and rows carry valid names,
       // so the only refusal left is the length limit.
       setNote('limite de ' + MAX_TEXT + ' caracteres')
+      tap('warn')
       return
     }
     setNote('')
@@ -508,6 +514,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   // shell, which shows the toast and clears the reply or quote if it still
   // matches.
   const published = (sent, sentReply, sentIds = [], sentQuote = null) => {
+    tap('success')
     setText((current) => (current === sent ? '' : current))
     if (sentIds.length > 0) removeItems(sentIds)
     if (sentQuote) return onPublished('quote', sentQuote.ref)
@@ -700,6 +707,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
 
   const replyName = reply ? displayText(whoOf({ name: reply.name, username: reply.username }).title) : ''
   const quoteName = quote ? displayText(whoOf({ name: quote.name, username: quote.username }).title) : ''
+  const ring = ringState(len, MAX_TEXT)
+  const selfWho = whoOf({ name: self.name, username: self.username })
   const attachOff = !mediaOnline || quoteOffline
   // Locked: the draft is what was signed and waits for its retry. Frozen
   // also covers a page send in flight.
@@ -711,6 +720,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     <Sheet
       open={open}
       onClose={onClose}
+      grabber
       right={<Pill label={pillLabel} filled onPress={send} pending={busy} disabled={!valid} />}
     >
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -790,26 +800,32 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
             : null}
           <View style={styles.compose}>
             <Avatar name={self.name || self.username || null} publicKey={self.publicKey || ''} size={40} picture={self.avatar} persist />
-            <TextInput
-              ref={inputRef}
-              style={styles.input}
-              value={text}
-              onChangeText={setText}
-              editable={!frozen}
-              selection={forcedSel || undefined}
-              onSelectionChange={(event) => {
-                selRef.current = event.nativeEvent.selection
-                setCaret(event.nativeEvent.selection.start)
-                setCollapsed(event.nativeEvent.selection.start === event.nativeEvent.selection.end)
-                if (forcedSel) setForcedSel(null)
-              }}
-              multiline
-              placeholder='O que está rolando na varanda?'
-              placeholderTextColor={colors.placeholder}
-              autoFocus
-              textAlignVertical='top'
-              accessibilityLabel='texto da publicação'
-            />
+            <View style={styles.composeBody}>
+              <Text style={styles.author} numberOfLines={1}>
+                <Text style={styles.authorName}>{displayText(selfWho.title)}</Text>
+                {selfWho.subtitle ? <Text style={styles.authorMeta}>{'  ' + displayText(selfWho.subtitle)}</Text> : null}
+              </Text>
+              <TextInput
+                ref={inputRef}
+                style={styles.input}
+                value={text}
+                onChangeText={setText}
+                editable={!frozen}
+                selection={forcedSel || undefined}
+                onSelectionChange={(event) => {
+                  selRef.current = event.nativeEvent.selection
+                  setCaret(event.nativeEvent.selection.start)
+                  setCollapsed(event.nativeEvent.selection.start === event.nativeEvent.selection.end)
+                  if (forcedSel) setForcedSel(null)
+                }}
+                multiline
+                placeholder='O que está rolando na varanda?'
+                placeholderTextColor={colors.placeholder}
+                autoFocus
+                textAlignVertical='top'
+                accessibilityLabel='texto da publicação'
+              />
+            </View>
           </View>
           {hasMedia
             ? (
@@ -863,8 +879,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
                 : null}
             </View>
             <View style={styles.count}>
-              <Ring progress={len / MAX_TEXT} />
-              <Text style={[styles.counter, len >= MAX_TEXT && styles.counterFull]}>{len + '/' + MAX_TEXT}</Text>
+              <Ring progress={ring.progress} tone={ring.tone} />
+              <Text style={[styles.counter, ring.tone === 'warn' && styles.counterWarn, ring.tone === 'danger' && styles.counterFull]}>
+                {ring.remaining === null ? len + '/' + MAX_TEXT : String(ring.remaining)}
+              </Text>
             </View>
           </View>
           <EmojiPicker open={emojiOpen && !frozen} onPick={pickEmoji} />
@@ -1032,10 +1050,15 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   quoteCardName: { ...type.postName, color: colors.ink, paddingHorizontal: 16 },
   compose: { flexDirection: 'row', gap: 12, paddingTop: 10, paddingHorizontal: 16 },
+  // minWidth 0 so a long name ellipsizes instead of widening the row on native.
+  composeBody: { flex: 1, minWidth: 0 },
+  author: { paddingTop: 2 },
+  authorName: { ...type.postName, color: colors.ink },
+  authorMeta: { ...type.postMeta, color: colors.soft },
   // Bare text on the sheet (no box); on the web the caret shows focus, so the
-  // browser outline is dropped.
+  // browser outline is dropped. No flex: inside the author column a basis-0
+  // flex would pin the field at minHeight instead of growing with the draft.
   input: {
-    flex: 1,
     ...type.compose,
     color: colors.ink,
     minHeight: 120,
@@ -1053,6 +1076,7 @@ const makeStyles = (colors) => StyleSheet.create({
     paddingHorizontal: 12
   },
   counter: { ...type.counter, color: colors.soft },
+  counterWarn: { color: colors.warn },
   counterFull: { color: colors.danger },
   errors: { paddingHorizontal: 16, gap: 4 },
   ring: { width: 20, height: 20 },

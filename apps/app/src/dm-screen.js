@@ -2,6 +2,7 @@
 // imports, so they run in the tests.
 
 import { threadOf } from './dm.js'
+import { dayHeading } from './format.js'
 
 // A message id is unique only per sender (docs/rpc.md 5.78): a row is keyed
 // by sender and id together.
@@ -53,6 +54,58 @@ export function threadRows (messages) {
       rawText: typeof source.text === 'string' ? source.text : ''
     }
   })
+}
+
+// Maximum duration of a bubble group, measured from its first message.
+export const DM_GROUP_MS = 300000
+
+function dayKey (at) {
+  const t = timeOf(at)
+  if (t === null) return null
+  const d = new Date(t)
+  return d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate()
+}
+
+// The same row objects (so keys and the scroll anchor stay), each with a
+// dayMark: the day heading on the first row of a local calendar day, else null.
+export function withDayMarks (rows, now = Date.now()) {
+  let last = null
+  return rows.map((row) => {
+    const key = dayKey(row.at)
+    const mark = key !== null && key !== last ? dayHeading(row.at, now) : null
+    if (key !== null) last = key
+    return { ...row, dayMark: mark }
+  })
+}
+
+function joins (a, b) {
+  if (!a || !b || a.mine !== b.mine || a.from !== b.from) return false
+  if (a.inviteLink) return false
+  const ta = timeOf(a.at)
+  const tb = timeOf(b.at)
+  if (ta === null || tb === null || Math.abs(tb - ta) > DM_GROUP_MS) return false
+  return !b.dayMark && dayKey(a.at) === dayKey(b.at)
+}
+
+// 'single' | 'first' | 'middle' | 'last': where row i sits in its group. The
+// row whose key is breakKey (its menu is open) stays apart from both
+// neighbours, so they end their runs instead of facing its full corners.
+export function bubbleShape (rows, i, { breakKey = null } = {}) {
+  const apart = (a, b) => breakKey !== null && ((a && a.key === breakKey) || (b && b.key === breakKey))
+  const joined = (a, b) => !apart(a, b) && joins(a, b)
+  let start = i
+  while (start > 0 && joined(rows[start - 1], rows[start])) start--
+  // Replay from the uninterrupted sender run so time limits stay anchored
+  // to each group's first message, regardless of which row renders first.
+  for (let j = start + 1; j <= i; j++) {
+    if (Math.abs(timeOf(rows[j].at) - timeOf(rows[start].at)) > DM_GROUP_MS) start = j
+  }
+  const up = start < i
+  const down = joined(rows[i], rows[i + 1]) && Math.abs(timeOf(rows[i + 1].at) - timeOf(rows[start].at)) <= DM_GROUP_MS
+  if (up && down) return 'middle'
+  if (down) return 'first'
+  if (up) return 'last'
+  return 'single'
 }
 
 // An older page prepended to what the screen holds; the held copy wins.

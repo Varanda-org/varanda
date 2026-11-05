@@ -389,6 +389,40 @@ Uma **Página** é o diário de um negócio ou projeto, com @nome próprio, um d
 - Até 16 administradores por página; A Rua da página mostra só as publicações dos 64 seguidos mais recentes; os demais não aparecem ali.
 - As Conversas da página não acompanham a mudança de chave: a chave nova começa uma caixa nova.
 
+## Perfil fixo, Avisos, Mensagens e Publicar
+
+Esta parte muda como as telas se comportam ao rolar e como as linhas aparecem. Não muda dados nem o que vai ao nó. Os passos de conferência estão em `docs/verification.md` §91.
+
+### Diário e Membro: barra fixa
+
+- Ao rolar um perfil, a faixa de 96 pt sai da tela e aparece no topo uma barra de 44 pt, somada à área segura, com o nome e os botões da faixa: no Diário, ajuda, engrenagem e sino; no Membro, voltar. Sem "Reduzir movimento", a barra surge aos poucos; com ele ligado, surge de uma vez.
+- A barra só recebe toques quando os botões da faixa já saíram da tela, então cada botão responde uma vez só. No Membro, a seta de voltar da faixa fica desligada enquanto a barra está ativa.
+- No Diário, a pílula "ver novidades" fica abaixo da barra e continua tocável.
+- No topo do perfil, a tela é a mesma de antes. Os limites exatos da troca estão em `apps/app/src/profileBar.js`.
+
+### Avisos
+
+- Cada linha tem um selo verde de 20 pt no canto do avatar, com o ícone do tipo: seguir, resposta, citar, menção, curtida (coração) e republicação. Tipo sem ícone não tem selo.
+- O nome aparece em negrito e o resto da frase em peso normal. A linha abre o mesmo lugar de antes, e o leitor de tela lê a mesma frase.
+- Os Avisos não mostram trecho do texto da publicação nem a divisão "Novos" e "Anteriores".
+
+### Mensagens
+
+- Entre dias diferentes aparece um marcador: "hoje", "ontem" ou dia e mês ("D mmm"), com o ano quando não é o ano atual. O dia é o do aparelho.
+- Mensagens seguidas do mesmo lado formam um grupo quando cada uma cai até 5 minutos da primeira do grupo, no mesmo dia e sem pílula de convite entre elas. Dentro do grupo, os cantos do lado de quem enviou ficam mais fechados, e só a última mostra a hora (e "Enviada", nas próprias).
+- Pressionar e segurar uma mensagem abre o menu com a bolha inteira: cantos cheios e hora. Não há confirmação de leitura nem avatar nas mensagens.
+
+### Publicar
+
+- O avatar de 40 pt ganha, ao lado, o nome em negrito e o `@nome`, acima do campo de texto.
+- O anel de progresso muda de tom: verde até 90 % do limite, âmbar a partir de 90 % e vermelho acima do limite. A partir de 90 %, o contador mostra quantos caracteres faltam, negativo quando passa do limite.
+- No app nativo, uma vibração de sucesso marca a publicação enviada de fato, não a que vai para a fila de saída. Uma vibração de aviso marca a nota de limite de caracteres.
+- A folha tem uma alça no topo no Android, no iOS e na web. O campo não ganha anel de foco.
+
+### Publicações e Respostas: fora desta etapa
+
+As abas Publicações e Respostas do perfil não entram nesta etapa. Uma resposta do Diário é o campo `record.replyTo` de um registro dentro do `log.read` paginado, e não há leitura só de respostas. Uma aba de respostas exigiria essa leitura nova, que fica para outra etapa.
+
 ## Fora do piloto
 
 - **Salas de áudio ao vivo (Comunidades):** pedem transmissão em tempo real entre aparelhos. Os grupos de texto estão na seção Comunidades, no nó hospedado (site e app instalado).

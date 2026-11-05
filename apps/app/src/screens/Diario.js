@@ -44,6 +44,7 @@ import { ShareProfile } from '../ui/ShareProfile'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { ProfileHeader } from '../ui/ProfileHeader'
+import { BAR, ProfileBar, useProfileBar } from '../ui/ProfileBar'
 import { BellButton } from '../ui/TopActions'
 import { HelpButton } from '../ui/Help'
 import { HELP } from '../help'
@@ -275,6 +276,23 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
 
   const bandHeight = insets.top + BAND
   const hasBell = typeof onAvisos === 'function'
+  const bar = useProfileBar(bandHeight, { controlsBottom: bandHeight - 12 })
+  // The band's controls, drawn in the header and again in the pinned bar.
+  const bandControls = (inBar) => (
+    <>
+      <HelpButton doc={HELP.diario} color='#ffffff' style={inBar ? styles.barButton : (hasBell ? styles.infoShifted : styles.info)} />
+      <Pressable
+        accessibilityRole='button'
+        accessibilityLabel='ajustes'
+        hitSlop={8}
+        onPress={() => onSettings('lista')}
+        style={inBar ? styles.barButton : (hasBell ? styles.gearShifted : styles.gear)}
+      >
+        <Icon name='engrenagem' size={20} color='#ffffff' />
+      </Pressable>
+      {hasBell ? <BellButton color='#ffffff' badged={avisosNew === true} onPress={onAvisos} style={inBar ? styles.barButton : styles.bell} /> : null}
+    </>
+  )
 
   // Only this identity's items for this association.
   const pending = info && node.config ? outbox.itemsFor(info.publicKey, node.config.association) : []
@@ -344,21 +362,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         <ProfileHeader
           bandHeight={bandHeight}
           topInset={insets.top}
-          bandButtons={(
-            <>
-              <HelpButton doc={HELP.diario} color='#ffffff' style={hasBell ? styles.infoShifted : styles.info} />
-              <Pressable
-                accessibilityRole='button'
-                accessibilityLabel='ajustes'
-                hitSlop={8}
-                onPress={() => onSettings('lista')}
-                style={hasBell ? styles.gearShifted : styles.gear}
-              >
-                <Icon name='engrenagem' size={20} color='#ffffff' />
-              </Pressable>
-              {hasBell ? <BellButton color='#ffffff' badged={avisosNew === true} onPress={onAvisos} style={styles.bell} /> : null}
-            </>
-          )}
+          bandButtons={bar.interactive ? null : bandControls(false)}
           avatar={{ name: who.avatarName, publicKey: info.publicKey, picture: profile && profile.avatar, persist: true }}
           title={displayText(who.title)}
           subtitle={who.subtitle ? displayText(who.subtitle) : null}
@@ -480,12 +484,21 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         loadMoreError={!!olderError}
         atEnd={data === null ? true : data.atEnd}
         scrollToTopSignal={scrollToTop}
+        onScrollFrame={bar.handleScrollFrame}
+        newItemsTop={info !== null && bar.interactive ? insets.top + BAR + 8 : undefined}
         newItems={{
           label: 'ver novidades',
           visible: !!(node.signals && node.signals.fresh && node.signals.fresh.own),
           onPress: reload
         }}
       />
+      {info !== null
+        ? (
+          <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)}>
+            {bandControls(true)}
+          </ProfileBar>
+          )
+        : null}
       <Perfil
         open={editing}
         ownKey={info ? info.publicKey : null}
@@ -528,6 +541,7 @@ const bandButton = (colors) => ({
 
 const makeStyles = (colors) => StyleSheet.create({
   list: { flex: 1, backgroundColor: colors.bg },
+  barButton: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.dim, alignItems: 'center', justifyContent: 'center' },
   plainBand: { backgroundColor: colors.bg },
   // The band buttons, right to left: bell (when there is one), gear, help.
   bell: { ...bandButton(colors), right: 16 },
