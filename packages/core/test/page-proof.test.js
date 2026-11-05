@@ -2,7 +2,7 @@
 
 // lib/page-proof.js: the exact bytes (golden vector), the canonical
 // operation and its hash, that every field is bound by the signature, domain
-// separation from the wallet statement, refused actions, forbidden operation
+// separation from the other statements, refused actions, forbidden operation
 // keys, shape checks, hostile input, and that the module stays pure.
 const test = require('brittle')
 const path = require('node:path')
@@ -20,7 +20,6 @@ const {
   verifyPage
 } = require('../lib/page-proof')
 const accountLink = require('../lib/account-link')
-const wallet = require('../lib/wallet-proof')
 
 const coreRoot = path.join(__dirname, '..')
 
@@ -248,21 +247,16 @@ test('every field is bound by the signature', (t) => {
   t.alike(verifyPage(FIELDS, flipped), { ok: false, reason: 'bad-signature' }, 'one flipped digit')
 })
 
-test('a wallet signature over the same fields is not a page statement, and vice versa', (t) => {
-  {
-    const action = 'status'
-    const walletFields = { action, nonce: NONCE, member: MEMBER, association: ASSOCIATION, opHash: OP_HASH }
-    const pageFields = { ...FIELDS, action }
-    const sigWallet = wallet.signWallet(walletFields, MEMBER_KP)
-    const sigPage = signPage(pageFields, MEMBER_KP)
-    t.alike(verifyPage(pageFields, sigWallet), { ok: false, reason: 'bad-signature' }, 'wallet as page')
-    t.alike(wallet.verifyWallet(walletFields, sigPage), { ok: false, reason: 'bad-signature' }, 'page as wallet')
-  }
+test('the same fields under another statement prefix are not a page statement', (t) => {
   // The same bytes after the prefix line: only the prefix tells them apart.
   const pageFields = { ...FIELDS, action: 'status' }
   const rest = b4a.toString(pagePayload(pageFields)).split('\n').slice(1).join('\n')
-  const forged = b4a.toString(crypto.sign(b4a.from('varanda-wallet-v1\n' + rest), MEMBER_KP.secretKey), 'hex')
-  t.alike(verifyPage(pageFields, forged), { ok: false, reason: 'bad-signature' }, 'prefix separation')
+  for (const prefix of ['varanda-account-link-v1', 'varanda-age-v1', 'varanda-invite-v1', 'varanda-push-v1', 'varanda-terms-v1']) {
+    const forged = b4a.toString(crypto.sign(b4a.from(prefix + '\n' + rest), MEMBER_KP.secretKey), 'hex')
+    t.alike(verifyPage(pageFields, forged), { ok: false, reason: 'bad-signature' }, prefix)
+  }
+  const honest = signPage(pageFields, MEMBER_KP)
+  t.alike(verifyPage(pageFields, honest), { ok: true }, 'the page prefix verifies')
   t.ok(b4a.toString(pagePayload(FIELDS)).startsWith('varanda-page-v1\n'))
 })
 

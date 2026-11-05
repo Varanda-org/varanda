@@ -28,7 +28,7 @@ Os valores estão em `apps/app/src/appearance.js` (fonte única; `light` e `dark
 | Nome | Hex | Uso |
 |---|---|---|
 | fundo | `#1c2622` | fundo das telas, barra do topo, barra de abas |
-| cartão | `#24302b` | folhas (Publicar) e cartões (Ajustes, Carteira) |
+| cartão | `#24302b` | folhas (Publicar) e cartões (Ajustes) |
 | tinta | `#f4f0e6` | texto, nomes, ícones ativos |
 | texto suave | `#b7c4bb` | @nome, tempo, bio, abas inativas, contador |
 | fio | `rgba(244,240,230,0.14)` | divisórias de 1 pt |
@@ -110,6 +110,12 @@ Cantos arredondados, botões em pílula, entrelinha generosa, nomes em negrito.
 - **Primeiros passos**: a primeira configuração é um passo a passo com "Passo n de 3". Na web: "Bem-vindo à Varanda", "Escolha seu @nome", "Como você quer aparecer"; no nativo e no `varanda-serve`: "Criar sua conta", "Liberar sua conta", "Como você quer aparecer". Cada passo tem uma frase curta e o botão de ajuda na barra do topo; na web, o passo de entrada diz "Se perder a passkey, perde a conta." que termina com o botão de informação. O nome e a bio são opcionais ("Pular por enquanto"); ao terminar, "Tudo pronto. Siga pessoas para encher a Rua."
 - **Estado de conexão**: só a nota "Sem internet" sem rede e, em detalhe, Ajustes › Avançado › Conexão e Sincronização; nenhum banner sobre a linha do tempo. A nota "Instalar o Varanda" não é um estado de conexão e, como "Sem internet", fica no fluxo da tela. Na web hospedada, a tela Conectar da primeira visita mostra "conectando…" e, se falha, uma frase simples com "Tentar de novo"; a configuração e o resto da parte técnica ficam sob "Detalhes técnicos", recolhido.
 - **Aguardando envio**: uma publicação esperando na fila de saída é uma linha no Diário, na seção "Aguardando envio", nunca um cartão em A Rua e nunca um banner.
+- **Curtir**: o coração curtido é cheio (Ionicons `heart`) e verde. Um toque da pessoa na linha (no coração, ao republicar ou num toque duplo) faz o coração dar um pulo de mola (1 → 1,35 → 1) e uma vibração leve; quando as curtidas chegam de uma atualização, nada pula nem vibra. Descurtir não pula nem vibra. Com "Reduzir movimento" ligado no aparelho, o pulo some e a vibração fica.
+- **Toque duplo para curtir**: só no app nativo (iOS e Android), nunca na web, onde o duplo clique seleciona texto. O toque duplo curte (nunca descurte) e mostra sobre a publicação um coração de 64 pt que some sozinho; com "Reduzir movimento" ligado, o coração não aparece. Um toque simples abre a conversa depois de 280 ms, para dar tempo ao segundo toque. Uma só abertura pendente vale para a lista inteira: um toque em outra publicação ou em qualquer outro botão cancela a abertura. Leitores de tela (VoiceOver e TalkBack) abrem a conversa na hora e nunca curtem; links, menções e fotos abrem na hora.
+- **Fio da conversa**: uma linha de 2 pt, na cor do fio, liga o avatar da publicação respondida ao avatar da publicação em destaque, de avatar a avatar. Ela fica por cima das linhas e não recebe toques. A publicação em destaque mantém a barra verde de 3 pt à esquerda, agora sobreposta, para os dois avatares ficarem alinhados.
+- **Toque nas pílulas e abas**: pílulas e ícones das abas ficam com opacidade de 0,65 enquanto estão pressionados; no Android, as abas ganham também a ondulação (ripple) sem borda.
+- **Aviso com ação**: depois de uma republicação que de fato ligou, o aviso diz "Republicado" com o botão "Desfazer" por 4 s; avisos sem ação continuam por 2,5 s. "Desfazer" sempre desliga a republicação e nunca republica. Se ainda há uma gravação pendente dessa publicação, o aviso diz "Aguarde um instante e tente de novo.". Só o botão "Desfazer" recebe toques; o texto do aviso não bloqueia a tela. Não há desfazer para curtida (basta tocar o coração de novo), para apagar nem para seguir.
+- **Vibração**: só no app nativo. Na web não há vibração.
 
 ## Navegação
 

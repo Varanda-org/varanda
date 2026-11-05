@@ -18,6 +18,7 @@ import { useStyles, useTheme } from './ThemeProvider'
 import { layout } from './theme'
 import { paletteFor } from '../appearance'
 import { TABS } from '../tabs'
+import { pendingOpen } from '../doubleTap'
 
 export { TABS, tabsFor } from '../tabs'
 
@@ -43,7 +44,11 @@ export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TAB
             accessibilityRole='tab'
             accessibilityState={{ selected }}
             accessibilityLabel={badged ? `${tab.label}, novidades` : tab.label}
+            // On touch down too: a finger held past the double tap window
+            // would otherwise let the post open under the tab.
+            onPressIn={() => pendingOpen.cancel()}
             onPress={() => {
+              pendingOpen.cancel()
               if (selected) {
                 if (onReselect) onReselect(tab.id)
               } else {
@@ -51,20 +56,23 @@ export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TAB
               }
             }}
             style={styles.tab}
+            android_ripple={{ color: colors.line, borderless: true }}
           >
-            <View style={styles.iconWrap}>
-              {showAvatar
-                ? (
-                  <View
-                    style={[styles.avatarRing, { borderColor: selected ? colors.accent : 'transparent' }]}
-                    accessible={false}
-                  >
-                    <Avatar name={me.name} publicKey={me.publicKey} size={28} picture={me.picture} persist />
-                  </View>
-                  )
-                : <Icon name={tab.icon} size={27} color={tint} />}
-              {badged && <View style={styles.dot} />}
-            </View>
+            {({ pressed }) => (
+              <View style={[styles.iconWrap, pressed && styles.pressed]}>
+                {showAvatar
+                  ? (
+                    <View
+                      style={[styles.avatarRing, { borderColor: selected ? colors.accent : 'transparent' }]}
+                      accessible={false}
+                    >
+                      <Avatar name={me.name} publicKey={me.publicKey} size={28} picture={me.picture} persist />
+                    </View>
+                    )
+                  : <Icon name={tab.icon} size={27} color={tint} />}
+                {badged && <View style={styles.dot} />}
+              </View>
+            )}
           </Pressable>
         )
       })}
@@ -89,6 +97,7 @@ const makeStyles = (colors) => StyleSheet.create({
   tab: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   // Anchors the dot to the icon's corner rather than the whole tab.
   iconWrap: { position: 'relative' },
+  pressed: { opacity: 0.65 },
   // The border is always 2 pt (transparent when not selected) so the size never shifts.
   avatarRing: { borderWidth: 2, borderRadius: 16 },
   // A plain dot: no text, no number.

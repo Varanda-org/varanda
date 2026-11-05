@@ -3,6 +3,7 @@
 // glyph has one fixed weight, so the colour carries the active state instead.
 
 import Feather from '@expo/vector-icons/Feather'
+import Ionicons from '@expo/vector-icons/Ionicons'
 import { View } from 'react-native'
 import { useTheme } from './ThemeProvider'
 
@@ -39,7 +40,7 @@ const GLYPHS = {
 
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the
 // default line height adds about 10 %, which pushed the tab labels out).
-export function Icon ({ name, size = 24, color, style }) {
+export function Icon ({ name, size = 24, color, style, filled }) {
   const { colors } = useTheme()
   const tint = color === undefined ? colors.ink : color
   // Feather has no chair: drawn on its 24-unit grid with the same 2-unit stroke.
@@ -75,13 +76,18 @@ export function Icon ({ name, size = 24, color, style }) {
       </View>
     )
   }
+  // Feather has outline glyphs only: a liked heart is the solid Ionicons one.
+  if (name === 'coracao' && filled) {
+    return <Ionicons name='heart' size={size} color={tint} style={[{ lineHeight: size }, style]} />
+  }
   return <Feather name={GLYPHS[name] || name} size={size} color={tint} style={[{ lineHeight: size }, style]} />
 }
 
-// Loads the icon font; resolves even when loading fails (glyphs then show
+// Loads the icon fonts; resolves even when loading fails (glyphs then show
 // as blanks rather than crashing the app).
 export async function loadIcons () {
   try {
     await Feather.loadFont()
+    await Ionicons.loadFont()
   } catch {}
 }

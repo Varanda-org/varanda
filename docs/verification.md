@@ -2793,126 +2793,6 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 - Com duas abas abertas, uma não vê a inscrição feita na outra até ler de novo (abrir Ajustes, voltar a conexão, bloquear e desbloquear). Ativar nessa aba recebe do navegador a inscrição que já existe e, se um passo seguinte falhar com recusa, a desfaz, como já acontecia na linha de Ajustes; a nota aumenta essa janela porque a leitura dela vale até a próxima.
 - Não há push nativo, repetição automática de pedidos nem teste automatizado no navegador.
 
-## 48. Conta de pagamentos opcional: abertura e KYC (feat/hodle-account, 2026-10-30)
-
-As seções 1 a 47 não mudam. Esta seção documenta o PR1: opt-in, KYC e PIN da conta de pagamentos na web hospedada. O envio de dinheiro fica para a seção 53 e para a próxima etapa.
-
-### O que mudou
-
-- Recurso opcional, só na web hospedada, por um parceiro (Hodle). O saldo previsto é BRLA, emitido pela Avenia, 1 real, na Polygon (padrão documentado da Hodle). Não rende. Sem abrir a conta, o app segue igual. Decisão do dono do produto em 2026-10-30. O papel da associação ainda depende de parecer, e a ida ao ar depende do parecer jurídico (`docs/design.md`, Conta de pagamentos).
-- Cliente de saída `apps/cli/lib/account/hodle.js`: subconta, documento, prova de vida, envio do KYC, leitura do resultado e criação da carteira. A chave de API, o PIN, o CPF e o JSON do parceiro não saem num resultado nem num erro. Chamada que muda estado e pode ter chegado ao parceiro volta com `uncertain: true` e não é repetida. Redes aceitas: `polygon` e `base`, padrão `polygon`.
-- Arquivo `wallet.json` (`apps/cli/lib/account/wallet-store.js`, modo 0600, volume `account-data`): `subAccountId`, rede, estado do KYC, `attemptId`, `documentId`, `selfieId`, `walletId`, endereço e chave embrulhada. As marcas de criação incerta vão para o disco antes da chamada. A primeira carteira fica. O PIN, o CPF, o nome, o endereço, as fotos, as URLs e os saldos não entram.
-- Declaração `varanda-wallet-v1` (`packages/core/lib/wallet-proof.js`) e método RPC `wallet.sign` (`docs/rpc.md` 5.35), só no nó do navegador. O nó do núcleo, o `varanda-serve` e a CLI respondem `USAGE` `assinatura disponível só no navegador`. A operação assinada não leva PIN nem CPF.
-- App, módulo puro `apps/app/src/wallet.js`: os passos do opt-in ao PIN, a idade mínima de 18 anos no formulário, o PIN de 6 dígitos sem sequência óbvia, e os textos fixos. O operador escolhe `VARANDA_HODLE_MODE`, na ordem de ativação `cadastro` < `carteira` < `pix` < `completo`. O padrão `cadastro` permite só subconta e KYC e para no KYC aprovado. O modo `carteira` acrescenta a criação da carteira com o PIN da própria pessoa e só deve ser configurado depois que a Hodle confirmar por escrito o PIN por pessoa. Nesta versão existem apenas `cadastro` e `carteira`; `pix` e `completo` chegam nos próximos PRs.
-- As fotos não passam pelo serviço de conta. O documento sobe direto para o endereço que a Hodle devolve, só se o domínio for exatamente `uploads.hodle.com.br` ou `brla4platforms-production-uploaded-documents.s3.eu-west-1.amazonaws.com` (o que a produção usa). A selfie abre a página de prova de vida, só se o domínio for exatamente `app.hodle.com.br` ou `in.sumsub.com` (a Sumsub, que a produção usa). O endereço de envio vale 30 s (`X-Amz-Expires`) e a assinatura dele cobre `if-none-match`: frente e verso sobem ao mesmo tempo, com `if-none-match: *`.
-- Variáveis: `VARANDA_HODLE_API_KEY` (`hodle_live_` ou `hodle_test_`; sem ela o recurso fica desligado), `VARANDA_HODLE_NETWORK` (`polygon` ou `base`, padrão `polygon`, só antes da primeira carteira), `VARANDA_HODLE_MODE` (`cadastro` por padrão, ou `carteira`) e `VARANDA_HODLE_DAILY_LIMIT`.
-- Termos de Uso e Política de Privacidade versão 7, com novo aceite. O `wallet-ops.json` é do PR2 e não faz parte desta abertura.
-- Bloqueio que continua: a documentação da Hodle descreve um PIN da plataforma herdado pela subconta. A Varanda quer um PIN por pessoa. Enquanto a Hodle não confirmar, a carteira não deve ser criada na API real. O sandbox é Base Sepolia e não exercita subcontas.
-
-### Testes automatizados
-
-Todos os testes desta etapa usam o falso em `127.0.0.1` (`apps/cli/test/helpers/fake-hodle.js`) ou não abrem rede. Nenhum cobre a Hodle real, o sandbox, a tela no navegador nem o parecer. Rodados em 30/10/2026 no Node 24 e no Node 20, sem falha.
-
-- `node apps/cli/test/hodle.test.js`
-- `node apps/cli/test/wallet-store.test.js`
-- `node apps/cli/test/account-wallet.test.js` (rotas do serviço de conta)
-- `node apps/cli/test/account-wallet-e2e.test.js` (do `wallet.sign` no navegador até o falso, com reinício)
-- `node apps/cli/test/account.test.js` (variáveis `VARANDA_HODLE_*`, partida por modo, perda do lock)
-- `node apps/app/test/account.test.js` (cliente do app)
-- `node packages/core/test/wallet-proof.test.js`
-- `node packages/core/test/session.test.js`
-- `node packages/web-member/test/session.test.js`
-- `node packages/rpc/test/methods.test.js`
-- `node apps/app/test/wallet.test.js`
-- `node apps/app/test/legal.test.js`
-- `node packages/core/test/terms.test.js`
-
-### Verificação manual
-
-Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
-
-1. [ ] Sem `VARANDA_HODLE_API_KEY`: a conta de pagamentos não aparece e o restante do app não muda (não realizada ainda).
-2. [ ] `VARANDA_HODLE_MODE` em `cadastro` (padrão): opt-in, documento, selfie, dados e KYC aprovado terminam na frase de que a carteira será liberada em breve, sem pedir PIN (não realizada ainda).
-3. [ ] Com `VARANDA_HODLE_MODE=carteira`: depois do KYC aprovado, o app pede o PIN e cria uma carteira. Uma segunda criação não cunha outra (não realizada ainda).
-4. [ ] "Deixar para depois" não cria subconta e a Varanda segue utilizável (não realizada ainda).
-5. [ ] Os textos dizem que a conta na Hodle não pode ser apagada, que o saldo não rende e que a Varanda não é banco (não realizada ainda).
-6. [ ] Data de nascimento de quem tem menos de 18 anos: o app recusa e o serviço não chama a Hodle (não realizada ainda).
-7. [ ] PIN `111111`, `123456` e `654321` não passam no app. Um PIN aceito não aparece no `wallet.json` nem no registro (não realizada ainda).
-8. [ ] O `wallet.json` tem só identificadores, chave embrulhada, estado e ids. Sem CPF, nome, endereço ou foto (não realizada ainda).
-9. [ ] A foto do documento não passa pelo serviço de conta. A selfie abre a página da Hodle em outra janela (não realizada ainda).
-10. [ ] Resposta perdida na criação: fica o estado incerto, a pessoa toca em Conferir, e o serviço não cria outra sozinho (não realizada ainda).
-11. [ ] Três PINs errados bloqueiam a criação da carteira por 24 horas na Hodle, sem nova tentativa automática (não realizada ainda).
-12. [ ] O aceite dos Termos e da Política versão 7 aparece de novo para quem aceitou a versão 6 (não realizada ainda).
-13. [ ] No app nativo e na CLI, `wallet.sign` responde que a assinatura só existe no navegador (não realizada ainda).
-14. [ ] `VARANDA_HODLE_NETWORK` mudada depois da primeira carteira não muda a rede já guardada (não realizada ainda).
-15. [ ] Enquanto a Hodle não confirmar por escrito o PIN por pessoa, o operador mantém `VARANDA_HODLE_MODE` em `cadastro` para deixar a criação de carteira na API real desligada. Isso é uma configuração do operador, não uma trava no código (não realizada ainda).
-16. [ ] Nenhum teste desta etapa abre rede externa. Só `127.0.0.1` (não realizada ainda).
-
-### Captura da selfie dentro da página (feat/in-app-liveness, 2026-11-03)
-
-Quando a resposta da Hodle traz os quatro campos do detector, a selfie é feita dentro do app, com o Amazon Rekognition Face Liveness: no navegador (PR #294) e no app instalado de Android e iOS (módulo `apps/app/modules/face-liveness`, SDKs oficiais da AWS). Sem eles, ou com o módulo nativo indisponível, tudo segue como antes (página da Sumsub). Termos e Política passam à versão 9 (web) e à versão 10 (captura nativa). Nada abaixo foi exercitado contra a Hodle, a AWS, um navegador ou um aparelho reais: os testes usam só o falso de loopback.
-
-Notas de ameaça:
-
-- O `validateLivenessToken` fica só na memória do serviço de conta (`apps/cli/lib/account/liveness-tokens.js`, 30 minutos). Não vai ao aparelho, a arquivo, a registro, a erro ou a resposta. O aparelho recebe só `{ sessionId, region, identityPoolId }`.
-- Validar e refazer são as ações assinadas `kyc-liveness-validate` e `kyc-liveness-retry`, com `op` vazio (`docs/rpc.md` 5.35). As duas dividem um `once()` por membro, então toques repetidos, ou validar e refazer ao mesmo tempo, viram uma só chamada à Hodle.
-- Uma validação cuja resposta se perdeu volta como incerta e nunca é reenviada sozinha, como as outras chamadas que mudam o estado na Hodle.
-- O serviço chama as rotas públicas de prova de vida da Hodle sem a chave de API.
-- O CSP lista os hosts exatos, sem curinga: `cdn.liveness.rekognition.amazonaws.com`, as oito regiões de streaming e o Cognito de cada uma. `media-src blob:` e `camera=(self)` valem só nesta origem. O estilo da AWS vem de `/liveness/amplify-ui.css`, no mesmo domínio.
-- O aparelho obtém as credenciais de convidado no Cognito (`apps/app/src/livenessCredentials.js`). A Varanda nunca as vê.
-- O vídeo vai do navegador, ou do app instalado, à AWS. A Varanda e a Hodle não o recebem.
-- No app instalado, as credenciais de convidado são obtidas em JavaScript (`livenessCredentials.js`) e passadas em memória à chamada nativa `start()`. Não vão a arquivo, a registro, a Intent nem a estado do React. O código nativo não registra nada.
-- A câmera é pedida só dentro do `start()` nativo, na tela da selfie. `CAMERA` está em `apps/app/android/app/src/main/AndroidManifest.xml` (`camera.any` não obrigatório) e `NSCameraUsageDescription` em `apps/app/ios/Varanda/Info.plist`.
-- Sem o módulo (simulador do iOS, sem câmera) ou com algum campo ausente, o app cai na página da Sumsub, como antes. O aplicativo instalado deixa de ser só Sumsub quando o módulo está disponível.
-
-Verificação manual no navegador hospedado (a fazer quando a Hodle ligar os campos, Pergunta 5):
-
-1. [ ] Chrome no desktop: a câmera só é pedida no passo da selfie, nunca antes (não realizada ainda).
-2. [ ] Chrome no Android: o mesmo (não realizada ainda).
-3. [ ] Safari no iPhone: o pedido de permissão da câmera só aparece depois do toque em "Começar a verificação", na tela inicial do próprio detector, nunca ao abrir o passo da selfie. Negar a permissão mantém o detector na tela, com o botão "Tentar de novo" (não realizada ainda).
-4. [ ] A aba Rede mostra `cognito-identity`, `cdn.liveness.rekognition` e o WebSocket de `streaming-rekognition`, e nenhum outro host novo (não realizada ainda).
-5. [ ] O console não mostra violação de CSP nem de Permissions-Policy (não realizada ainda).
-6. [ ] Ao terminar, o estado passa a `selfieReady` (não realizada ainda).
-7. [ ] `kyc-submit` segue normalmente depois da selfie (não realizada ainda).
-8. [ ] Sem os campos do detector na resposta, a página da Sumsub abre como antes (não realizada ainda).
-9. [ ] Num build sem o módulo nativo (ou com ele indisponível), o app instalado abre a página da Sumsub (não realizada ainda).
-10. [ ] O termo de aceite da versão 10 aparece de novo para quem aceitou a versão 9 (não realizada ainda).
-11. [ ] Com o token da selfie vencido ou perdido (por exemplo, depois de reiniciar o serviço de conta ou passados 30 minutos), validar volta `selfie-ausente` e o app oferece uma selfie nova, em vez de travar no passo (não realizada ainda).
-12. [ ] `npm run web` copia o estilo para `apps/app/public/liveness/amplify-ui.css` (fora do git) e o detector abre estilizado no servidor de desenvolvimento, com um indicador de carregamento enquanto o estilo chega (não realizada ainda).
-13. [ ] Se a selfie termina enquanto outra ação da Carteira ainda está em andamento, o app mostra "Confirmar a selfie" e só valida depois desse toque; nada é enviado sozinho (não realizada ainda).
-
-Verificação manual no app instalado (feat/native-liveness; a fazer, nada foi realizado ainda):
-
-1. [ ] Android, build de debug com câmera frontal virtual: o pedido de permissão da câmera só aparece no passo da selfie, nunca antes.
-2. [ ] Android: negar a permissão mostra a dica e o botão "Tentar de novo", e o botão da página da Sumsub continua disponível.
-3. [ ] Simulador do iOS (sem câmera): abre a página da Sumsub, como antes.
-4. [ ] EAS preview em um Android real: captura completa, estado `selfieReady` e `kyc-submit` normal.
-5. [ ] EAS preview em um iPhone real: o mesmo, com o pedido da câmera só no passo da selfie e a mensagem de `NSCameraUsageDescription` correta.
-6. [ ] Logcat (Android) e Console (iOS) durante uma captura: `accessKeyId`, `secretAccessKey`, `sessionToken` e `eyJ` não aparecem (as buscas devem vir vazias).
-7. [ ] O termo de aceite da versão 10 aparece de novo para quem aceitou a versão 9.
-8. [ ] Android, build de debug depois da mudança para Kotlin 2.3.0: o app inteiro funciona (entrar, A Rua, Publicar, Carteira, push).
-9. [ ] O manifesto mesclado (`app/build/intermediates/merged_manifests/debug`) tem `camera`, `camera.any`, `camera.autofocus` e `camera.front` todos com `required` falso.
-10. [ ] No console do Google Play, depois do próximo envio, o catálogo de aparelhos ainda lista aparelhos sem câmera traseira.
-11. [ ] Um build de iOS da EAS passa com as duas chaves (`IDESkipPackagePluginFingerprintValidatation` e `IDESkipMacroFingerprintValidation`).
-12. [ ] `cancel()`: sair da Carteira com a tela nativa aberta a fecha.
-13. [ ] Android com "Não manter atividades" ligado nas opções do desenvolvedor: abrir a selfie, voltar ao app e tentar de novo. A captura fecha com falha (o Expo perde o resultado quando a tela de baixo é destruída) e a próxima tentativa abre normalmente, sem ficar presa em "já está aberta".
-14. [ ] iPhone: o botão "Fechar" sobre a tela da AWS fecha a captura em qualquer etapa, inclusive na tela de carregamento, e a Carteira volta a oferecer a selfie. Na tela de preparação do desafio com luz, o botão cobre o começo do título do aviso: conferir se fica aceitável.
-15. [ ] iPhone com a rede cortada depois de abrir a captura: a tela não fica presa; "Fechar" funciona e, sem toque, a captura termina sozinha com falha 240 s depois de abrir. Os 240 s supõem que a sessão da AWS dura cerca de 3 minutos; esse prazo não foi conferido na documentação da AWS.
-
-### Limites
-
-- O sandbox da Hodle não exercita subconta. O que os testes provam é o falso de loopback.
-- Até a Hodle confirmar por escrito o PIN por pessoa, o operador deve manter `VARANDA_HODLE_MODE` em `cadastro` para deixar a criação da carteira na API real desligada.
-- A subconta não pode ser apagada na Hodle. A eliminação pedida pelo titular segue em aberto, com a retenção (issue #38).
-- Quem tem 16 ou 17 anos não abre esta conta nesta etapa.
-- Esta etapa não envia dinheiro, não cobra taxa e não cria `wallet-ops.json`.
-- Sem `VARANDA_HODLE_API_KEY`, ninguém vê o recurso.
-- Uma criação cuja resposta se perdeu fica parada até leitura adotável ou limpeza pelo operador.
-- Uma recusa definitiva da Hodle no envio do KYC (por exemplo, um campo que ela não aceita) encerra a tentativa como recusada, e a pessoa refaz documento e selfie.
-- Se a gravação do `wallet.json` falhar logo depois de uma recusa da Hodle, a marca de incerteza pode ficar, e a pessoa fica parada até o operador limpar.
-- Dois processos gravando o mesmo `wallet.json` só acontecem depois de perder o lock; nesse caso a mesclagem pode trazer de volta um identificador apagado. O serviço deixa de gravar ao perder o lock.
-- 16 e 17 anos: a barreira é a declaração no opt-in e a data de nascimento conferida pela Hodle no documento.
-
 ## 49. Grupos públicos (PR feat/groups-public, 2026-10-28)
 
 Primeira parte de Cadeiras de Praia: grupos públicos de texto, `docs/protocol.md` seção 10 e `docs/rpc.md` 5.36 a 5.49. Cada aparelho escreve o próprio núcleo, o leitor dobra todos (`buildGroup`), o semeador admite os núcleos e responde os índices, e a moderação segue a seção 10 do protocolo e `docs/design.md`.
@@ -3145,71 +3025,9 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado.
 - No Diário, uma página mais antiga cancelada por uma releitura (voltar à aba) conta como página seca; três seguidas pausam a lista.
 - A lista em si (RefreshableList) não tem teste automatizado: só as regras puras de `paging.js` têm. As verificações acima cobrem o componente.
 
-## 53. Conta de pagamentos: saldo, receber e pagar por Pix, taxa da Varanda (feat/hodle-pix, 2026-10-30)
-
-As seções 1 a 47 e 49 a 52 não mudam; a 48 perde o limite da verificação perdida. Esta seção documenta o PR2: saldo, Pix de entrada e de saída, taxa da Varanda, webhook e Termos versão 8.
-
-### O que mudou
-
-- Modos de `VARANDA_HODLE_MODE`, em ordem: `cadastro` (padrão) < `carteira` < `pix`; `completo` vem no próximo PR. A criação da carteira tem o próprio modo: em `cadastro` ela responde 404 e o app mostra "Verificação aprovada. A carteira será liberada em breve.". O operador só define `carteira` depois que o Hodle confirmar por escrito que PINs escolhidos pelo membro funcionam em subcontas individuais.
-- Em `pix`: saldo, receber por Pix (inclusive de CPF de outra pessoa) e pagar por Pix. A consulta ao Hodle é a fonte de verdade. O webhook só acelera o estado e nunca cria movimento ou dinheiro. `DISPUTE_*` vira uma marca ao lado do estado.
-- Webhook (`VARANDA_HODLE_WEBHOOK_SECRETS`, lista `EVENTO:hex64`; vazia, a rota responde 404): com `EVENTO:registrar`, só um corpo cujo evento é exatamente `WEBHOOK_TEST` recebe 200 `{}`, sem verificar e sem tocar em armazenamento, e todo outro corpo recebe 401. Com `EVENTO:<hex64>`, toda entrega é verificada, `WEBHOOK_TEST` inclusive.
-- Taxa da Varanda: ordem principal, taxa nova (só quando a resposta da principal diz que o Pix foi concluído; senão fica pendente) e no máximo uma taxa pendente, só de um Pix já concluído (só se as pernas anteriores deram 2xx em menos de 45 s). Como o Pix de saída costuma levar de 30 a 90 s, a taxa em geral é cobrada no próximo envio confirmado com o PIN. Pix que falha ou volta antes de concluir nunca paga taxa. Reserva: para enviar, o saldo precisa cobrir valor, taxa do Hodle, taxa nova e todas as taxas pendentes; a conferência mostra o valor reservado. A troca de moeda não tem taxa da Varanda (`VARANDA_FEE_SWAP_*` diferente de zero recusa a partida); `CRYPTO` mantém a taxa configurável. Nenhuma taxa pendente sai antes da principal. Cada perna é gravada no `wallet-ops.json` antes de sair. Prazo de 30 s por perna. PIN errado ou bloqueado na primeira perna aborta as outras. Estados: `cobrada`, `pendente`, `incerta`. Um 409 de referência existente só conta como cobrada com estado `completed` ou `txHash`. A resposta mostra principal e taxa em separado. Chamadas de dinheiro do app têm prazo de 100 s. A taxa sobre o Pix de entrada está desligada.
-- `wallet-ops.json` (0600): tipo, estado, valor, taxas, id do parceiro, destino mascarado e marca de contestação. Nunca a chave Pix inteira nem o CPF. Linhas finais são apagadas depois de 90 dias, exceto enquanto uma taxa da Varanda ainda puder ser cobrada, uma contestação estiver aberta ou uma revisão de suporte estiver aberta; um Pix de entrada que falhou e ainda está sendo devolvido não conta como finalizado.
-- Corrigido neste PR: um envio de KYC da segunda tentativa em diante que perde a resposta não fica mais em andamento. A lista `previousAttemptIds` separa uma tentativa anterior da nova, e a nova é adotada mesmo já encerrada. `kyc-incerto` agora só aparece quando a consulta achou o id de uma tentativa anterior.
-- Variáveis: `VARANDA_HODLE_MAX_CENTS` (padrão 300000; de 100 a 100000000), `VARANDA_HODLE_WEBHOOK_SECRETS`, `VARANDA_FEE_{TRANSFER,PAYOUT,CRYPTO,DEPOSIT}_{CENTS,BPS}`, `VARANDA_FEE_SWAP_BPS` e `VARANDA_FEE_TREASURY`. `DEPOSIT` deve ficar em zero. Qualquer taxa exige a tesouraria. Taxas são recusadas na partida nos modos `cadastro` e `carteira`, e em `pix` as de transferência, `CRYPTO` e `SWAP`; só `PAYOUT` é aceita. `VARANDA_HODLE_PIN` e `VARANDA_FEE_TREASURY_PIN` com qualquer valor recusam a partida. Webhook: `EVENTO:hex64` ou `EVENTO:registrar`.
-- Termos de Uso e Política de Privacidade versão 8, com novo aceite: cobranças do Pix, CPF de terceiro, taxa do Hodle como cotada, taxa da Varanda (desligada até o operador definir, sempre em reais antes de confirmar, presente no extrato, nenhuma ao receber), taxa cobrada só depois que o Pix é concluído, em geral no próximo envio confirmado com o PIN, nunca cobrada se o Pix falhar ou voltar antes, reserva das taxas pendentes no saldo, Pix concluído e depois devolvido não devolve sozinho uma taxa já cobrada.
-
-### Testes automatizados
-
-Todos usam o falso em `127.0.0.1` ou não abrem rede. Nenhum cobre o Hodle real, o sandbox, a tela no navegador nem o parecer.
-
-- `node apps/cli/test/fees.test.js`
-- `node apps/cli/test/hodle.test.js`
-- `node apps/cli/test/wallet-ops-store.test.js`
-- `node apps/cli/test/wallet-webhook.test.js`
-- `node apps/cli/test/account-wallet.test.js`
-- `node apps/cli/test/account-wallet-e2e.test.js` (o teste 5 é o e2e de dinheiro e taxa)
-- `node apps/cli/test/account.test.js`
-- `node apps/app/test/account.test.js`
-- `node apps/cli/test/deploy.test.js` (variáveis só no serviço `account`)
-- `node apps/cli/test/caddyfile.test.js`
-- `node apps/app/test/wallet.test.js`
-- `node apps/app/test/legal.test.js`
-- `node apps/app/test/terms-version.test.js`
-- `node packages/core/test/terms.test.js`
-
-### Verificação manual
-
-Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
-
-1. [ ] Pagar o próprio CPF com R$ 1,00 por Pix: o app mostra valor, taxa do parceiro, taxa da Varanda e total em reais antes do PIN, e o saldo cai pelo total (não realizada ainda).
-2. [ ] Depósito de terceiro: um Pix de outro CPF para a chave da conta chega ao saldo, com o Hodle habilitado para terceiros (não realizada ainda).
-3. [ ] Três PINs errados: o app mostra o bloqueio, nenhuma perna seguinte sai e a tentativa de PIN gasta é uma só por toque (não realizada ainda).
-4. [ ] Matar o serviço no meio de um saque e subir de novo: a operação fica `incerta`, nada é refeito sozinho e o Hodle mostra um único saque para o `externalId` `var-` (não realizada ainda).
-5. [ ] A perna da taxa aparece na tesouraria, com a referência terminada em `:taxa` (não realizada ainda).
-6. [ ] Uma taxa que respondeu `WALLET_BUSY` aparece como `pendente` e é cobrada no envio seguinte que a pessoa confirma com o PIN, nunca por relógio (não realizada ainda).
-7. [ ] Webhook: cadastrar com `EVENTO:registrar`, copiar o segredo, trocar por `EVENTO:<hex64>` e reiniciar. Um corpo que não é `WEBHOOK_TEST` recebe 401 antes da troca, e depois dela toda entrega é verificada (não realizada ainda).
-8. [ ] Sem `VARANDA_HODLE_WEBHOOK_SECRETS`, a rota de webhook responde 404 (não realizada ainda).
-9. [ ] Em `cadastro`, criar a carteira responde 404 e o app mostra que a carteira será liberada em breve (não realizada ainda).
-10. [ ] `wallet-ops.json` tem modo 0600 e não contém chave Pix inteira, CPF nem PIN (não realizada ainda).
-11. [ ] `VARANDA_FEE_DEPOSIT_CENTS` diferente de zero recusa a partida do serviço, e uma taxa sem `VARANDA_FEE_TREASURY` também (não realizada ainda).
-12. [ ] O aceite dos Termos e da Política versão 8 aparece de novo para quem aceitou a versão 7 (não realizada ainda).
-13. [ ] Nenhum teste desta etapa abre rede externa. Só `127.0.0.1` (não realizada ainda).
-14. [ ] Com taxa de `PAYOUT` ligada, pagar por Pix: a taxa nova fica `pendente` enquanto o Pix não for concluído e só é cobrada no envio seguinte confirmado com o PIN, depois do Pix concluído. Um Pix que falha ou volta antes de concluir nunca tem a taxa cobrada (não realizada ainda).
-15. [ ] Com uma taxa pendente, tentar enviar com saldo que cobre valor, taxa do Hodle e taxa nova mas não todas as pendentes: o serviço recusa com saldo insuficiente. Com saldo suficiente, a conferência mostra o valor reservado para taxas pendentes, e esse valor continua no saldo depois do envio (não realizada ainda).
-
-### Limites
-
-- Não há tela de contestação: `DISPUTE_*` só marca a operação.
-- A taxa sobre o Pix de entrada está desligada.
-- Um Pix devolvido não devolve sozinho uma taxa da Varanda já debitada.
-- O sandbox da Hodle não exercita subconta. O que os testes provam é o falso de loopback.
-- A ida ao ar depende do parecer jurídico, inclusive sobre o Código de Defesa do Consumidor.
-
 ## 54. Web hospedada conectada enquanto visível (PR perf/stay-connected, 2026-10-30)
 
-As seções 1 a 53 não mudam, exceto "Duty cycle" (seção 17), marcada como substituída.
+As seções 1 a 52 não mudam, exceto "Duty cycle" (seção 17), marcada como substituída.
 
 ### O que mudou
 
@@ -3623,7 +3441,7 @@ Duas janelas com perfis do navegador diferentes (A e B, cada uma com a própria 
 
 ## 65. App no Android arm64: build de debug, Metro e links (pilha "celular primeiro", 2026-11-01)
 
-Verificação do app nativo com todas as mudanças da pilha "celular primeiro" aplicadas sobre `main@a0303c2` (links de grupo e comunidade, origem dos links compartilhados, `expo-clipboard`, visibilidade nativa, textos do nó hospedado, Carteira, trava `platformGate`). É a primeira execução do ciclo local no Mac Apple Silicon descrito em [development.md](development.md) ("macOS setup").
+Verificação do app nativo com todas as mudanças da pilha "celular primeiro" aplicadas sobre `main@a0303c2` (links de grupo e comunidade, origem dos links compartilhados, `expo-clipboard`, visibilidade nativa, textos do nó hospedado, trava `platformGate`). É a primeira execução do ciclo local no Mac Apple Silicon descrito em [development.md](development.md) ("macOS setup").
 
 - Aparelho: emulador AVD `varanda-api36`, ABI `arm64-v8a`, API 36, imagem `google_apis`, sem janela (`-no-window -no-audio -no-snapshot`). Evidência por `adb exec-out screencap -p` (as imagens ficaram fora do repositório).
 - Versões: JDK 17 (Homebrew `openjdk@17`), Gradle 9.0.0, Expo 55.0.31 (o Metro avisou que o esperado é ~55.0.32), id da aplicação `app.varanda.debug`.
@@ -3651,7 +3469,7 @@ Verificação do app nativo com todas as mudanças da pilha "celular primeiro" a
 - Aparelho real, emulador x86_64, build de release.
 - Entrar com passkey: precisa de conta Google e bloqueio de tela no emulador, que não foram criados. Além disso, o build de debug (`app.varanda.debug`) não casa com o `assetlinks` da instalação de produção (`app.varanda`), então não entra por passkey nela. Por isso nenhuma tela autenticada foi aberta, inclusive cadeira e comunidade depois do login.
 - O rodapé "Conexão" nos passos de configuração do celular com a instalação ficou como na `main` (escondido): mostrá-lo deixaria trocar de instalação no meio do cadastro, e a política de idade, o resultado da idade e o convite guardado ainda não são zerados por instalação nesse caminho. Fica para um PR próprio.
-- Pagamentos e KYC, push do sistema, login no iOS.
+- Push do sistema, login no iOS.
 - O workflow `native.yml` não foi disparado.
 
 ### CI local
@@ -4181,112 +3999,6 @@ As caixas ficam desmarcadas até alguém executar o passo. Primeiro no Android, 
 - Se a mensagem pintada sai da lista legível entre a pintura e a marca (autor bloqueado, autor removido), a marca não anda e a contagem fica até uma mensagem listada posterior ser pintada.
 - A marca continua por aparelho e vale para no máximo 512 grupos, como na seção 73.
 
-## 77. Conta de pagamentos: transferência por @nome e envio a endereço (feat/hodle-transfers, 2026-11-03)
-
-As seções 1 a 76 não mudam; onde a 53 diz que o modo `completo` vem no próximo PR, vale esta seção. Esta seção documenta o PR1 da etapa de transferências: o modo `completo`, com transferência de BRLA por @nome e envio de BRLA a um endereço de fora.
-
-### O que mudou
-
-- `VARANDA_HODLE_MODE` ganha `completo`, depois de `pix`. Ele acrescenta as ações `transfer` e `send-crypto`, e a política (`policy.actions`) as lista. O padrão continua `cadastro`. O USDC recebido no endereço aparece só para leitura: não há conversão nem envio de USDC.
-- Regras do envio: PIN por membro, repassado por pedido e nunca guardado; teto de cada envio igual ao menor entre `VARANDA_HODLE_MAX_CENTS` e R$ 10.000; 10 transferências e 10 envios a endereço por dia por membro, com a janela gasta também por um destino recusado; um destino recusado recebe sempre `destino-invalido`.
-- C9: um débito sem resolução bloqueia outro do mesmo membro. C10: a operação assinada liga o débito inteiro (valor, taxa nova, taxa pendente e total); divergência dá `taxa-mudou`.
-- Resultado do parceiro: um 202 é `pendente` e a taxa espera. `TRANSFER_IN_PROGRESS` é `incerto` e bloqueia novos débitos. `WALLET_BUSY` é uma recusa: a linha do registro vai a `falhou` e nenhum dinheiro sai. O envio concluído traz o `txHash` da rede.
-- Taxa da Varanda: `VARANDA_FEE_TRANSFER_*` e `VARANDA_FEE_CRYPTO_*` (centavos e pontos-base) só no `completo`, só cobrada depois que o envio concluiu. Nada sobre dinheiro que entra. `VARANDA_FEE_SWAP_*` diferente de zero recusa a partida em todos os modos.
-- Registros novos: `transferencia`, `envio-cripto`, `destino-invalido`, `pendente-202`, além dos passos `transferencia` e `envio-cripto` em `hodle-<passo>-<causa>`.
-- O teto diário e o saldo são conferidos antes do destino: sem saldo, qualquer @nome recebe o mesmo `saldo-insuficiente`, e a recusa não diz quem tem carteira.
-- O app recusa um endereço com letras maiúsculas e minúsculas cujo checksum EIP-55 não confere (`apps/app/src/evmAddress.js`, com o keccak-256 do `@noble/hashes` que o app já usa). Endereço todo em minúsculas ou maiúsculas não tem checksum e passa.
-- Termos de Uso e Política de Privacidade versão 13, com novo aceite.
-
-### Testes automatizados
-
-Todos usam o falso em `127.0.0.1` ou não abrem rede. Nenhum cobre o Hodle real, o sandbox, a tela num aparelho nem o parecer.
-
-- `node apps/cli/test/fees.test.js`
-- `node apps/cli/test/hodle.test.js`
-- `node apps/cli/test/account-wallet.test.js`
-- `node apps/cli/test/account-wallet-e2e.test.js`
-- `node apps/cli/test/account.test.js`
-- `node apps/app/test/account.test.js`
-- `node apps/app/test/wallet.test.js`
-- `node apps/app/test/help.test.js`
-- `node apps/app/test/legal.test.js`
-- `node apps/app/test/carteiraNative.test.js`
-- `node apps/app/test/evmAddress.test.js`
-- `node packages/core/test/terms.test.js`
-
-### Verificação manual
-
-Nenhuma verificação manual foi feita ainda. Todos os itens estão em aberto:
-
-1. [ ] No sandbox, com `completo` e a conta principal, transferir R$ 1,00 por @nome para outro membro: o app mostra valor, taxa e total em reais antes do PIN, o saldo cai pelo total e o `externalId` `var-` aparece no painel do Hodle (não realizada ainda).
-2. [ ] Um envio que o Hodle aceita com 202: a linha fica `pendente`, o registro `pendente-202` aparece, a taxa da Varanda não é cobrada e só sai no envio seguinte que a pessoa confirma com o PIN, depois de o envio concluir (não realizada ainda).
-3. [ ] Enviar R$ 1,00 de BRLA a um endereço de carteira de teste: o resultado traz o `txHash` e ele confere na rede (não realizada ainda).
-4. [ ] Um @nome desconhecido, o próprio @nome e o endereço zero respondem o mesmo `destino-invalido`, e cada tentativa gasta uma das 10 da janela diária (não realizada ainda).
-5. [ ] Com um envio `incerto`, um segundo envio é recusado com `operacao-pendente`, e só `op-status` o resolve (não realizada ainda).
-6. [ ] Em `pix`, `transfer` e `send-crypto` respondem 404, e `VARANDA_FEE_TRANSFER_CENTS` diferente de zero recusa a partida; `VARANDA_FEE_SWAP_BPS` diferente de zero recusa a partida em todos os modos (não realizada ainda).
-7. [ ] O aceite dos Termos e da Política versão 13 aparece de novo para quem aceitou a versão 12 (não realizada ainda).
-8. [ ] O USDC recebido no endereço aparece só para leitura, sem botão de converter nem de enviar (não realizada ainda).
-
-### Limites
-
-- Só o falso de loopback foi exercitado. O sandbox da Hodle não roda fluxos de dinheiro de subconta, então ele não prova nada sobre subcontas.
-- A conversão de USDC para BRLA e qualquer envio de USDC ficam para o próximo PR.
-- Um envio `incerto` só se resolve pela leitura do extrato do parceiro por referência (`op-status`). Se o extrato nunca o mostrar, ele continua bloqueando os débitos do membro, e não há caminho para o operador.
-- Quando o `wallet.json` está indisponível, o serviço responde 503 depois de resolver um nome e 400 para um nome desconhecido: nessa janela, isso revela que um @nome está vinculado.
-- Um envio ao endereço da subconta da tesouraria não é recusado quando a tesouraria é `sub:<id>`; só uma tesouraria em endereço é comparada.
-- Um membro com saldo que manda um PIN errado de propósito recebe `destino-invalido` para um @nome sem carteira e `pin-invalido` para um com carteira, sem mover dinheiro: só o parceiro confere o PIN, e só ao enviar. Aceito pelo dono em 03/11/2026 (mandar R$ 0,01 revela o mesmo; cada tentativa gasta uma das três antes do bloqueio de 24 horas).
-- A ida ao ar do `completo` depende da confirmação escrita do Hodle sobre o PIN por membro e do parecer jurídico.
-
-## 78. Conta de pagamentos: USDC e Converter (feat/hodle-usdc, 2026-11-03)
-
-As seções 1 a 77 não mudam; onde a 77 diz que a conversão de USDC e o envio de USDC ficam para o próximo PR, vale esta seção. Ela documenta o PR2 da etapa de transferências: o Converter (USDC para BRLA) e o envio de USDC, ambos no modo `completo`. Os Termos de Uso e a Política de Privacidade ficam na versão 13 (a versão 13 já descreve o USDC como função que o serviço pode oferecer), sem aceite novo.
-
-### O que mudou
-
-- A política em `completo` ganha `swap-quote` e `swap`. `swap-quote` não pede PIN, não grava linha e responde inteiros (`amountInMicros`, `hodleFeeMicros`, `brlaOutCents`, `rateCents`) com `indicative: true`; a taxa de câmbio aparece em centavos e é só indicativa.
-- `swap` recebe `{ opId, amountMicros }` com o PIN no corpo. A linha é gravada antes da chamada ao Hodle e a chamada nunca é reenviada. Uma resposta com `swapId` é lida pelo `op-status`: `RUNNING` é `pendente`, `COMPLETED` é `concluido`, `FAILED` ou `STRANDED` é `falhou` com o aviso de suporte. Uma resposta perdida sem `swapId` fica `incerto` e bloqueia todo débito do membro até uma linha do extrato com a referência aparecer. Um 502 com `swapId` é `incerto` com esse `providerId`.
-- Uma conversão recusada antes de o Hodle registrá-la (sem `swapId`, por exemplo `NOT_ENABLED` ou PIN errado) é um `falhou` comum, sem aviso de suporte, e sai da lista como qualquer linha. Uma resposta que já traz um `swapId`, mesmo de recusa, vira `incerto` com esse id e é lida pelo `op-status`.
-- Uma conversão `incerto` sem `swapId` só se resolve por uma linha do extrato do tipo conversão, em USDC, de saída, com a referência dela e o mesmo valor; outra perna da mesma referência é ignorada. Uma conversão que o extrato mostra como falha guarda o id dessa linha e vai para o suporte.
-- Nenhuma taxa da Varanda na conversão nem no que entra. Nunca há conversão automática.
-- Envio de USDC (`send-crypto`) sai só do saldo de USDC. A taxa da Varanda é o percentual de cripto, em USDC (a parte fixa em centavos não vale), cobrada só depois de o envio concluir e só por um envio de USDC seguinte. As taxas em reais e em USDC são reservadas e cobradas à parte. Um envio de USDC pago com BRLA em um passo é recusado.
-- Registros novos: `conversao`, `cotacao-conversao-formato`, e os passos `cotacao-conversao` e `conversao` em `hodle-<passo>-<causa>`.
-- O envio de USDC usa a mesma checagem de checksum EIP-55 da seção 77.
-- `VARANDA_HODLE_MAX_USDC` (USDC inteiros, de 1 a 10000, padrão 500; outro valor recusa a partida citando só o nome da variável) limita cada envio de USDC, com a taxa nova e a pendente incluídas, e cada conversão (`swap-quote` e `swap`). Acima dele a resposta é `valor-invalido` antes de qualquer linha ou chamada ao Hodle. A política do `completo` traz `maxUsdcMicros`, e o app recusa o valor acima do teto antes da prévia ou da cotação. Cada `swap-quote` passa a contar no teto diário `VARANDA_HODLE_DAILY_LIMIT` e na parte de cada membro, como `payout-quote`.
-
-### Testes automatizados
-
-Todos usam o falso em `127.0.0.1` ou não abrem rede. O falso não é o Hodle: ele não prova nada sobre o preço, a idempotência nem o extrato de uma conversão real.
-
-- `node apps/cli/test/fees.test.js`
-- `node apps/cli/test/hodle.test.js`
-- `node apps/cli/test/wallet-ops-store.test.js`
-- `node apps/cli/test/account-wallet.test.js`
-- `node apps/cli/test/account-wallet-e2e.test.js`
-- `node apps/app/test/account.test.js`
-- `node apps/app/test/wallet.test.js`
-- `node apps/app/test/help.test.js`
-- `node apps/app/test/carteiraNative.test.js`
-
-### Verificação manual
-
-Nenhuma verificação manual foi feita ainda. Todos os itens são de produção e estão em aberto:
-
-1. [ ] Em produção, com o Converter habilitado pelo Hodle numa subconta de teste, cotar e converter uma quantia mínima de USDC em BRLA: o app mostra a cotação como indicativa, o PIN é pedido, o saldo de BRLA sobe, o de USDC cai e o `externalId` `var-` aparece no painel do Hodle (não realizada ainda).
-2. [ ] Deixar uma conversão encalhada (`STRANDED` ou `FAILED`) para o suporte: o cartão mostra o texto de suporte com o código do Hodle, sem botão de repetir (só "Fechar"), e o suporte do Hodle consegue achá-la por esse código (não realizada ainda).
-3. [ ] Enviar uma quantia mínima de USDC a um endereço de teste: o BRLA não se mexe, o saldo de USDC cai e o `txHash` confere na rede (não realizada ainda).
-4. [ ] Com um envio de USDC e uma taxa de cripto diferente de zero, a taxa em USDC não sai nesse envio e só é cobrada por um envio de USDC seguinte depois de o primeiro concluir (não realizada ainda).
-5. [ ] Perguntar ao Hodle e anotar a resposta: a referência de uma conversão é idempotente? Ela aparece no extrato? (não realizada ainda).
-
-### Limites
-
-- O sandbox do Hodle não cota nem executa uma conversão. O Converter só foi exercitado no falso de loopback e precisa dos itens acima em produção. Nenhuma execução real do Converter foi feita.
-- O Hodle não respondeu se a referência de uma conversão é idempotente nem se ela aparece no extrato. Uma conversão `incerto` sem `swapId` pode precisar do suporte do Hodle e, até lá, bloqueia os débitos do membro.
-- Uma conversão que falhou não tem botão de repetir: o cartão mostra o texto de suporte com o código do Hodle e só "Fechar" (o Hodle pede para falar com o suporte antes de tentar de novo); uma nova conversão é outra ação, com outro pedido. O texto de suporte aparece em todo cartão de conversão que falhou.
-- Se o extrato do Hodle mostrar uma conversão com valor diferente do pedido (por exemplo, já sem a taxa), uma conversão `incerto` sem `swapId` não se resolve sozinha e fica para o suporte.
-- Uma conversão `pendente` não bloqueia outros débitos, como um Pix `pendente`.
-- A taxa de câmbio da cotação aparece em centavos e é indicativa: o Hodle refaz o preço ao executar.
-- A ida ao ar do `completo` continua dependendo da confirmação escrita do Hodle sobre o PIN por membro e do parecer jurídico.
-
 ## 79. Modo escuro e Aparência (PR feat/tema-escuro)
 
 O app ganha modo escuro. Em Ajustes › Aparência a pessoa escolhe Sistema (o padrão), Claro ou Escuro, e a escolha fica guardada só neste aparelho (`localStorage` com a chave `varanda-aparencia` na web; `varanda-aparencia.json` na pasta de documentos no app). As duas paletas estão em `apps/app/src/appearance.js`, com as mesmas chaves; o escuro é quente e verde, nunca preto, e `dim` é sempre um véu escuro. O provedor e a receita de migração de uma tela ficam em `apps/app/src/ui/ThemeProvider.js`. A barra de status segue o tema. Mudanças nativas: `userInterfaceStyle` automatic em `app.json`, `UIUserInterfaceStyle` removido de `Info.plist`, `UIStatusBarStyle` em `UIStatusBarStyleDarkContent`. O splash nativo (iOS, Android e o React no nativo) continua creme nos dois modos, para não haver flash de creme para escuro. Na web, o splash do app segue a escolha, e o pré-splash de `index.html` segue o sistema até o JavaScript do app rodar. Detalhes em [app.md](app.md) ("Aparência") e [development.md](development.md) ("Tema claro e escuro").
@@ -4436,3 +4148,56 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 - Apagar uma recusa do registro do aparelho só tira um auxílio que falha fechado; o serviço continua recusando.
 - Os limites da janela confiam no relógio do serviço de conta: um erro de relógio durante uma troca de desligado para ligado pode deixar passar um certificado que não deveria valer.
 - `ageVerifiedDate`, `ageSince` e `age.proof` existem só no nó do navegador (`packages/web-member`), que o app nativo também roda no worklet no modo hospedado; o nó do núcleo (CLI) não os tem, e ali a porta só abre com a resposta do serviço.
+
+## 83. Interações da Rua: curtir animado, toque duplo, fio da conversa, desfazer (PR feat/rua-interacoes)
+
+A Rua e a Conversa ganham quatro interações: o coração curtido cheio com pulo e vibração leve, o toque duplo para curtir (só no app nativo), o fio que liga a resposta à publicação em destaque na Conversa, e o aviso "Republicado" com "Desfazer" por 4 s. Pílulas e abas ganham toque mais claro (opacidade 0,65 ao pressionar; no Android, ondulação nas abas). A vibração vem de `expo-haptics` 55.0.18 (`apps/app/src/ui/haptics.native.js`); na web é um no-op. O toque duplo fica em `apps/app/src/doubleTap.js`, com a abertura pendente compartilhada pela lista. Detalhes no [app.md](app.md) ("Interações da Rua") e no [app-design.md](../apps/site/artwork/app-design.md) ("Componentes").
+
+Regras que os passos abaixo conferem (só a janela do toque duplo tem teste automático):
+
+- Um pulo e uma vibração só vêm de ação da própria pessoa na linha; curtidas que chegam numa atualização não pulam nem vibram. Descurtir não pula nem vibra.
+- Com "Reduzir movimento" ligado, o pulo e o coração do toque duplo somem; a vibração continua.
+- O toque duplo nunca descurte. Um toque simples abre a conversa depois de 280 ms, e uma abertura pendente é cancelada por qualquer toque em outra publicação ou botão.
+- Leitores de tela abrem a conversa na hora e nunca curtem por toque duplo.
+- "Desfazer" só desliga a republicação; se a gravação ainda está pendente, o aviso diz "Aguarde um instante e tente de novo.".
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Teste desta parte: `apps/app/test/doubleTap.test.js` (a janela de 280 ms, a abertura pendente única e o cancelamento). As caixas abaixo ficam desmarcadas até alguém executar o passo, num aparelho ou navegador de verdade.
+
+Android (aparelho ou emulador, primeiro):
+
+- [ ] Toque duplo numa publicação de A Rua (fora de links, menções e fotos) curte, mostra o coração de 64 pt sobre a publicação e vibra de leve. Tocar de novo nessa publicação não descurte.
+- [ ] Toque simples numa publicação abre a Conversa, depois de uma pausa perceptível; um toque simples em outra publicação logo em seguida não abre a primeira.
+- [ ] Toque em um link, em uma menção e em uma foto abre na hora, sem curtir.
+- [ ] Com "Remover animações" (ou "Reduzir movimento") ligado nas configurações de acessibilidade, o toque duplo curte sem o coração de 64 pt, o coração não pula, e a vibração continua.
+- [ ] Com TalkBack ligado, a ativação de uma publicação abre a Conversa na hora e nunca curte.
+- [ ] Tocar no coração curte com pulo e vibração; tocar de novo descurte sem pulo nem vibração.
+- [ ] Republicar mostra "Republicado" com "Desfazer" por 4 s; "Desfazer" desliga a republicação e a contagem volta. Repetir "Desfazer" não republica.
+- [ ] Ao republicar e desfazer logo em seguida, com a gravação ainda pendente, o aviso diz "Aguarde um instante e tente de novo.".
+- [ ] Na Conversa, o fio de 2 pt liga o avatar da resposta ao avatar da publicação em destaque, e a barra verde de 3 pt fica à esquerda sem deslocar os avatares.
+- [ ] Pílulas e abas ficam mais claras ao pressionar; nas abas, a ondulação aparece e não tem borda.
+- [ ] TalkBack lê os botões de curtir e republicar com o estado (curtido ou não) e o aviso "Republicado" com o botão "Desfazer".
+
+iOS (simulador ou aparelho, depois do Android):
+
+- [ ] Os mesmos passos de toque duplo, toque simples, links e fotos, e de "Reduzir movimento" (Ajustes › Acessibilidade › Movimento).
+- [ ] Com VoiceOver ligado, a ativação de uma publicação abre a Conversa e nunca curte.
+- [ ] Com VoiceOver ligado, numa publicação com link ou menção no texto, ativar o texto duas vezes seguidas abre a Conversa e não curte (com leitor de tela ligado, o toque duplo para curtir fica desligado).
+- [ ] A vibração de curtir e de republicar acontece num aparelho com Taptic Engine (o simulador não vibra).
+- [ ] O fio, as pílulas e as abas, e o aviso "Republicado" com "Desfazer".
+
+Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
+
+- [ ] Duplo clique numa publicação não curte: o texto é selecionado, como antes.
+- [ ] Curtir e republicar não vibram, e o coração curtido continua cheio e verde.
+- [ ] O aviso "Republicado" com "Desfazer" aparece por 4 s, e "Desfazer" desliga a republicação.
+- [ ] O fio da Conversa e o toque mais claro das pílulas e abas.
+
+### Não verificado / limites conhecidos
+
+- Nenhuma caixa acima foi executada nesta documentação. Os testes automáticos cobrem só a janela do toque duplo e a abertura pendente; o pulo, o coração de 64 pt, a vibração e o aviso ainda precisam de aparelho.
+- Um desfazer durante a atualização puxada pode deixar a contagem uma a mais até a próxima atualização.
+- O desfazer atualiza só a tela que mostrou o aviso.
+- Um desfazer enquanto uma curtida da mesma publicação está pendente não entra na fila; o botão de republicar da linha continua desfazendo.
+- Um arrasto que começa fora de qualquer publicação, dentro dos 280 ms, não cancela a abertura da conversa. Tocar numa aba cancela.

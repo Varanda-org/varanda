@@ -574,11 +574,6 @@ function createSession ({
       throw new UsageError('disponível só no navegador')
     }),
 
-    // And for the wallet statement (docs/rpc.md 5.35).
-    'wallet.sign': serial(async () => {
-      throw new UsageError('assinatura disponível só no navegador')
-    }),
-
     // Page statements and records (docs/rpc.md 5.84) are signed with the
     // page delegate (5.87), never with a key the caller names. It reads only
     // private/page-actor.json, so no store is opened and a running sync is

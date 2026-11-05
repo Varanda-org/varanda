@@ -179,10 +179,21 @@ export function useSocial ({ ownKey, onToast }) {
   const [toast, setToast] = useState('')
   const toastTimer = useRef(null)
   useEffect(() => () => clearTimeout(toastTimer.current), [])
-  const showToast = useCallback((text) => {
-    if (typeof onToast === 'function') return onToast(text)
+  const showToast = useCallback((input) => {
+    if (typeof onToast === 'function') return onToast(input)
     clearTimeout(toastTimer.current)
-    setToast(text)
+    const t = typeof input === 'string' ? { text: input } : input
+    const withAction = t && typeof t.onAction === 'function' && t.actionLabel
+    setToast(withAction
+      ? {
+          ...t,
+          onAction: () => {
+            clearTimeout(toastTimer.current)
+            setToast('')
+            t.onAction()
+          }
+        }
+      : (t && t.text) || '')
     toastTimer.current = setTimeout(() => setToast(''), TOAST_MS)
   }, [onToast])
 
@@ -495,12 +506,18 @@ export function useSocial ({ ownKey, onToast }) {
     return run
   }, [])
 
-  const toggle = useCallback(async (kind, ref) => {
-    if ((kind !== 'like' && kind !== 'repost') || typeof ref !== 'string' || socialRef.current.pending.has(ref)) return
+  const toggle = useCallback(async (kind, ref, requestedOn) => {
+    if ((kind !== 'like' && kind !== 'repost') || typeof ref !== 'string') return
+    if (socialRef.current.pending.has(ref)) {
+      if (requestedOn === false) showToast('Aguarde um instante e tente de novo.')
+      return
+    }
     const field = kind === 'like' ? 'liked' : 'reposted'
     const was = socialRef.current.eng[field].has(ref)
-    const on = !was
-    const delta = on ? 1 : -1
+    // The undo always sends off: idempotent on the diary, and it still lands
+    // when a refresh has cleared the local state (then the count is left alone).
+    const on = requestedOn === false ? false : !was
+    const delta = on ? 1 : (was ? -1 : 0)
     const shift = (prev, d) => {
       if (!prev.counts.has(ref)) return prev.counts
       const counts = new Map(prev.counts)
@@ -526,6 +543,10 @@ export function useSocial ({ ownKey, onToast }) {
         counts: r && r.changed === false ? shift(prev, -delta) : prev.counts,
         pending: pendingWith(prev, false)
       }))
+      // The undo is a second signed write, so it waits until pending cleared.
+      if (kind === 'repost' && on && final && !(r && r.changed === false)) {
+        showToast({ text: 'Republicado', actionLabel: 'Desfazer', onAction: () => toggle('repost', ref, false) })
+      }
     } catch (err) {
       if (!mountedRef.current) return
       touchedRef.current.set(field + '|' + ref, ++clockRef.current)
@@ -718,10 +739,22 @@ export function RepostPlaceholder ({ repostedBy, missing, transient, onRetry, on
 // The transient error line of a failed toggle (when the shell gives no toast).
 export function SocialToast ({ text }) {
   const styles = useStyles(makeStyles)
-  if (!text) return null
+  const t = typeof text === 'string' ? { text } : text
+  if (!t || !t.text) return null
   return (
-    <View style={styles.toast} pointerEvents='none'>
-      <Text style={styles.toastText} accessibilityRole='alert'>{text}</Text>
+    <View style={styles.toast} pointerEvents='box-none'>
+      <View style={styles.toastPill} pointerEvents='box-none'>
+        <View pointerEvents='none'>
+          <Text style={styles.toastText} accessibilityRole='alert'>{t.text}</Text>
+        </View>
+        {t.onAction
+          ? (
+            <Pressable onPress={() => t.onAction()} accessibilityRole='button' accessibilityLabel={t.actionLabel} hitSlop={8} style={styles.toastAction}>
+              <Text style={styles.toastActionText}>{t.actionLabel}</Text>
+            </Pressable>
+            )
+          : null}
+      </View>
     </View>
   )
 }
@@ -1218,13 +1251,15 @@ const makeStyles = (colors) => StyleSheet.create({
     right: 16,
     alignItems: 'center'
   },
-  toastText: {
-    ...type.counter,
-    color: colors.toastInk,
+  toastPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: colors.toastBg,
     borderRadius: 18,
     paddingVertical: 8,
-    paddingHorizontal: 14,
-    overflow: 'hidden'
-  }
+    paddingHorizontal: 14
+  },
+  toastText: { ...type.counter, color: colors.toastInk },
+  toastAction: { marginLeft: 8 },
+  toastActionText: { ...type.counter, color: colors.toastInk, fontWeight: '800' }
 })

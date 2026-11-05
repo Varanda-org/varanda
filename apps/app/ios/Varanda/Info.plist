@@ -45,8 +45,6 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
-	<key>NSCameraUsageDescription</key>
-	<string>O Varanda usa a câmera frontal só para a selfie com prova de vida ao abrir a conta de pagamentos. A câmera não é usada para mais nada.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>O Varanda abre sua fototeca só para você escolher fotos. As fotos são refeitas sem dados de localização e os GIFs são enviados como estão. Nada é publicado até você tocar em Publicar ou Salvar.</string>
 	<key>VarandaWebCredentials</key>
