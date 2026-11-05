@@ -131,3 +131,14 @@ test('INTRO_CARDS: three frozen cards with plain text and existing icons', async
     }
   }
 })
+
+test('Icon GLYPHS: chat and overflow names parse, unknown names do not', (t) => {
+  const source = readFileSync(join(__dirname, '../src/ui/Icon.js'), 'utf8')
+  const glyphBlock = source.match(/const GLYPHS = \{([^}]+)\}/)
+  const names = new Set([...glyphBlock[1].matchAll(/^\s+(\w+):/gm)].map((match) => match[1]))
+  const added = ['mais', 'compartilhar', 'link', 'microfone', 'camera', 'imagem', 'encaminhar', 'responder', 'tocar', 'pausar', 'parar', 'sorriso', 'clipe']
+  for (const name of added) {
+    t.ok(names.has(name), name)
+  }
+  t.absent(names.has('naoExiste'), 'an unknown name is not a glyph')
+})

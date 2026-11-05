@@ -4593,3 +4593,50 @@ Limites desta linha de base:
 - Uma caminhada aprovada não libera o login nativo real: esse é o portão separado, marcado acima.
 - A caminhada não corrige nada. As correções entram em rodadas posteriores, cada uma com as capturas da rodada anterior como comparação.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 95. Transições, gesto de borda, movimento reduzido e Voltar (PR feat/ui-tokens-motion)
+
+Roteiro da transição entre telas da pilha (`apps/app/src/ui/StackLayer.js`, com os planos em `apps/app/src/stackMotion.js`), do gesto de voltar pela borda esquerda e do botão Voltar, nas três plataformas e nos dois temas. Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
+
+Regras que os passos conferem:
+
+- Uma tela aberta desliza da direita em 250 ms, e a volta a faz sair para a direita. A tela de baixo fica parada, e a barra de abas some enquanto há uma tela aberta (veja [app.md](app.md), "Navegação").
+- Movimento reduzido: a tela chega ao lugar final sem deslizar, na mesma direção e sem atraso. Conferir com o ajuste de movimento reduzido ligado e desligado, na abertura e na volta.
+- Gesto de borda: só um arrasto que começa a até 24 pt da borda esquerda da tela volta uma tela. Um arrasto que começa sobre o conteúdo é do que rola ali, e nada volta. Vale só para arrastar para a direita, com movimento mais horizontal que vertical.
+- Soltar: se o arrasto passou de 35% da largura, ou se foi um toque rápido com velocidade acima de 0,5 px por ms, a volta se completa a partir do ponto em que a tela está, na mesma velocidade. Senão a tela retorna ao lugar. Um arrasto que termina para a esquerda nunca volta, mesmo rápido.
+- Um segundo Voltar, ou um segundo arrasto, durante o deslize é ignorado. No Android, o botão Voltar é consumido nesse intervalo, e o app não sai.
+- Web: cada tela aberta é uma entrada do histórico. O Voltar do navegador e a tecla Escape fazem a mesma volta com o mesmo deslize, e histórico e pilha andam juntos.
+- Durante o deslize, nenhuma tela some, pisca, perde o estado (rolagem, rascunho) nem repete um carregamento.
+
+Android (AVD `varanda-api36`, primeiro):
+
+- [ ] Abrir Conversa a partir de A Rua: a tela desliza da direita. A volta pela seta da barra do topo a faz sair para a direita.
+- [ ] Arrasto a partir da borda esquerda passando de 35%: volta. Arrasto mais curto e solto: a tela retorna. Toque rápido e curto para a direita: volta.
+- [ ] Arrasto que começa no meio da tela, sobre uma lista: a lista rola e nenhuma tela volta.
+- [ ] Botão Voltar do Android durante o deslize: ignorado, o app continua aberto. Depois que o deslize termina: volta uma tela.
+- [ ] Movimento reduzido ligado: abrir e voltar sem deslize, com a mesma tela final.
+- [ ] Tema claro e tema escuro: nenhuma tela cortada, sobreposta ou vazia durante o deslize. Capturas em `~/Workspace/evidencias/feat/ui-tokens-motion/android/`.
+
+iOS (simulador iPhone 16e, depois do Android):
+
+- [ ] Os mesmos passos de abertura, volta e arrasto pela borda esquerda. Conferir que o gesto do próprio sistema, que começa na borda do simulador, não disputa com o do app.
+- [ ] Movimento reduzido ligado nos Ajustes de Acessibilidade do simulador: abrir e voltar sem deslize.
+- [ ] Tema claro e tema escuro, com a mesma conferência de corte e sobreposição do Android. Capturas em `~/Workspace/evidencias/feat/ui-tokens-motion/ios/`.
+
+Web (Chrome, depois do iOS):
+
+- [ ] Em 390 px e em 1280 px, nos temas claro e escuro: abrir uma tela e voltar pelo botão Voltar do navegador desliza e volta à tela de baixo; a tecla Escape faz o mesmo.
+- [ ] Em 390 px, com a emulação de toque do DevTools, arrasto a partir da borda esquerda: volta. Em 1280 px, anotar no registro se o arrasto pela borda funciona no conteúdo centrado, que fica numa coluna de 640 px.
+- [ ] Movimento reduzido ligado no sistema: abrir e voltar sem deslize, nas duas larguras. Capturas em `~/Workspace/evidencias/feat/ui-tokens-motion/web/`.
+
+Como verificar, antes da caminhada, a partir da raiz:
+
+- `npm run lint`, que tem de passar.
+- `node apps/app/test/stackMotion.test.js` e `node apps/app/test/stackEntries.test.js`, um arquivo por vez. Cobrem os planos de movimento, a regra de borda e a lista de telas, mas não o toque, o deslize nem a animação de verdade: só a caminhada mostra isso.
+
+Limites desta caminhada:
+
+- O bloqueio de um segundo Voltar dura até o fim do deslize mais 100 ms, para que a pilha nunca fique presa se a animação não avisar o próprio fim. Se um passo mostrar uma tela presa, anotar o caminho que levou a ela.
+- Não há medida de quadros por segundo nem de desempenho do deslize nesta caminhada.
+- O gesto de borda vale só para o app: o Safari do iOS e o navegador do Android têm gestos próprios, e a caminhada registra o que cada um faz, sem tratá-los como erro do app.
+- Nenhuma caixa acima foi executada nesta documentação.

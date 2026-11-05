@@ -1,5 +1,6 @@
 // Design tokens of the app (docs: apps/site/artwork/app-design.md): colors,
-// avatar stripes, the sunset gradient, fonts, text styles and layout sizes.
+// avatar stripes, the sunset gradient, fonts, text styles, spacing, radii
+// and layout sizes.
 
 import { Platform } from 'react-native'
 
@@ -48,7 +49,25 @@ export const type = {
   stepLabel: { fontSize: 13, fontWeight: '700', lineHeight: 16, letterSpacing: 0.5, textTransform: 'uppercase' }
 }
 
-export const layout = {
+// The scale below is frozen so one screen cannot resize it for the rest.
+export const space = Object.freeze({
+  xs: 4,
+  sm: 8,
+  md: 12,
+  lg: 16,
+  xl: 24,
+  xxl: 32
+})
+
+export const radius = Object.freeze({
+  sm: 8,
+  md: 12,
+  lg: 18,
+  bubble: 18,
+  pill: 999
+})
+
+export const layout = Object.freeze({
   topBar: 52,
   tabBar: 49,
   fabSize: 56,
@@ -58,5 +77,6 @@ export const layout = {
   sheetRadius: 18,
   sheetTopRow: 56,
   band: 150,
-  column: 640
-}
+  column: 640,
+  hit: 44
+})

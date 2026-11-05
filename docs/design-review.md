@@ -73,7 +73,7 @@ O login nativo real por passkey e por conta ainda depende do domínio associado 
 
 ## Limites da Vitrine
 
-A Vitrine responde a todos os métodos que o app chama, com dados fixos e sem rede, para mostrar as telas preenchidas. Ela não reproduz cada regra do nó: por exemplo, bloquear uma conversa não esconde as mensagens antigas, seguir de volta não tira o aviso de quem seguiu, e banir alguém da comunidade não reflete nos grupos dela. Para conferir um fluxo de comportamento (bloqueio, moderação, avisos, envio), use o laboratório hospedado com duas pessoas de verdade. A Vitrine serve para conferir aparência e navegação.
+A Vitrine responde a todos os métodos que o app chama, com dados fixos e sem rede, para mostrar as telas preenchidas. Ela não reproduz cada regra do nó: por exemplo, bloquear uma conversa não esconde as mensagens antigas, seguir de volta não tira o aviso de quem seguiu, e banir alguém da comunidade não reflete nos grupos dela. O índice da Vitrine (conversas, perfis, contagens, busca) responde com os dados fixos: uma publicação feita durante a sessão aparece em A Rua e no Diário, mas não abre como conversa nem soma nas contagens. Para conferir um fluxo de comportamento (bloqueio, moderação, avisos, envio), use o laboratório hospedado com duas pessoas de verdade. A Vitrine serve para conferir aparência e navegação.
 
 ## Registro
 
