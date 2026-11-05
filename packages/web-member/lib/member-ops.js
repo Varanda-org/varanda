@@ -3921,6 +3921,26 @@ async function deviceUpkeepPlan (ctx) {
   })
 }
 
+// True when the own diary binds a root this device has no diary-bound own
+// writer for, exactly the enrol and repair candidates of deviceUpkeepPlan,
+// ignoring moderation: it may answer true for a blocked root, never false
+// when the plan could enrol. It cannot see the distributor share step, so
+// a false answer means no enrol and no repair, not an empty share list.
+// The session decides when the full plan runs. Only the own diary and the
+// kv writer list are read: a second Hypercore on a group core the live
+// sync holds would corrupt it (see withIdentity).
+async function deviceUpkeepNeeded (ctx) {
+  return withIdentity(ctx, async ({ diary }) => {
+    const entries = await store.readAll(diary)
+    const listed = new Map((await store.readGroupWriters(ctx.storage)).map((e) => [e.group, e]))
+    for (const key of diaryGroupKeys(entries)) {
+      const entry = listed.get(key)
+      if (entry === undefined || !diaryBinds(entries, key, entry.key)) return true
+    }
+    return false
+  })
+}
+
 function upkeepKeys (list, field) {
   const out = new Set()
   for (const x of Array.isArray(list) ? list : []) {
@@ -4185,6 +4205,7 @@ module.exports = {
   communityGroups,
   groupCommunityOf,
   deviceUpkeepPlan,
+  deviceUpkeepNeeded,
   deviceUpkeep,
   AUTO_ENROL_RESERVE,
   isNeedsExclusive

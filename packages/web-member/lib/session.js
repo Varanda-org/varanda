@@ -128,9 +128,20 @@
 // takes part by itself in the communities and groups its diary binds
 // (member-ops deviceUpkeepPlan / deviceUpkeep: a CW and the Geral writer
 // here, epoch keys handed by the creator's device to the account's new
-// writers). ONE serial pass at a time, never inside onEvent: it plans under
-// withStore (the fold opens group cores the borrowed path does not serve),
-// and only a non-empty plan writes, through the write gate, then pushes,
+// writers). ONE serial pass at a time, never inside onEvent. A pass plans
+// in full under withStore (the fold opens group cores the borrowed path
+// does not serve, and the shares a distributor owes show only there),
+// with one exception: the echo of a write made on this device (an own
+// length equal to its last write: a post, a like, a follow), after the
+// session's first full plan, with no failure, transient skip or unarmed
+// 'group-writer' since, and a full plan younger than upkeepFullMaxAgeMs,
+// first asks on the borrowed diary (withCores) whether a root lacks a
+// bound writer of this device, and ends there without stopping the run.
+// Any other trigger arriving before that pass makes it plan in full. That
+// is safe: a write here that creates share work (an admit, a role change)
+// lands in a group core and arrives as 'groups-changed', which plans in
+// full, and a diary join is enrol work the precheck sees.
+// Only a non-empty plan writes, through the write gate, then pushes,
 // like a diary write. It is armed by a NEW own length on a user's
 // continuous run (another device appended, or a write here landed; the
 // pass's own write does not re-arm it, unless the write gate brought blocks
@@ -339,6 +350,8 @@ const UPKEEP_DELAY_MS = 1500
 const MAX_UPKEEP_TOTAL = 3 * MAX_UPKEEP_PASSES
 // Writer keys whose 'group-writer' armed the upkeep, per session.
 const MAX_UPKEEP_WRITERS = 512
+// The longest the upkeep trusts the precheck before planning in full again.
+const UPKEEP_FULL_MAX_AGE_MS = 10 * 60 * 1000
 // The lease (see the header): the gap after an idle end, how long a run
 // waits for an unconfirmed media core, and the longest a borrow holds it.
 const LEASE_GAP_MS = 45000
@@ -508,6 +521,7 @@ function readyWithin (ready, ms) {
 // its gap and its media wait. noClear: keep the bytes of deleted blocks
 // (the browser's VARANDA_NO_CLEAR kill switch; tombstones still hide them).
 // upkeepDelayMs: the device upkeep's coalescing delay (tests).
+// upkeepFullMaxAgeMs: the age after which it plans in full again (tests).
 function createBrowserSession ({
   storage,
   association,
@@ -524,7 +538,8 @@ function createBrowserSession ({
   leaseGapMs = LEASE_GAP_MS,
   leaseMediaMaxMs = LEASE_MEDIA_MAX_MS,
   noClear = false,
-  upkeepDelayMs = UPKEEP_DELAY_MS
+  upkeepDelayMs = UPKEEP_DELAY_MS,
+  upkeepFullMaxAgeMs = UPKEEP_FULL_MAX_AGE_MS
 } = {}) {
   const cfg = checkConfig({ storage, association, seederUrl, createSocket })
   const reportInternal = (err) => {
@@ -636,6 +651,13 @@ function createBrowserSession ({
   const upkeepWriters = new Set()
   // Bumped by every arming: a pass disarms only the arming it ran for.
   let upkeepArming = 0
+  // Whether a full plan (withStore) ran in this session, whether the next
+  // pass must plan in full anyway (header), when the last full plan ran,
+  // and whether the next pass is only the echo of a write made here.
+  let shareChecked = false
+  let upkeepFull = false
+  let upkeepFullAt = 0
+  let upkeepQuick = false
   // The own length of the last fold the continuous run was restarted for.
   let lastFoldLength = null
   // Last own-sync verdict of a run: the own diary held what the verified
@@ -835,7 +857,13 @@ function createBrowserSession ({
                   // Kept while locked too: the link reports each length once,
                   // so the unlock arms from it (setKeyPair).
                   r.ownLength = ev.length
-                  if (ev.length !== upkeepLength) armUpkeep(ev.length)
+                  if (ev.length !== upkeepLength) {
+                    // The echo of a write made here may take the precheck,
+                    // unless another trigger already queued a pass.
+                    const pending = upkeepTimer !== null || upkeepQueued
+                    armUpkeep(ev.length)
+                    if (!pending && localLength !== null && ev.length === localLength) upkeepQuick = true
+                  }
                 }
                 return
               case 'group-skipped':
@@ -844,7 +872,10 @@ function createBrowserSession ({
                 return
               case 'groups-changed':
                 if (typeof ev.group === 'string' && HEX64.test(ev.group)) send('groups.changed', { group: ev.group }, epoch)
-                // What a skipped root waited for may have arrived.
+                // What a skipped root waited for may have arrived. A group
+                // change can create share work the precheck cannot see, so
+                // even the next echo of a local write plans in full.
+                if (!once && !internal) upkeepFull = true
                 if (!once && !internal && upkeepRoom()) scheduleUpkeep()
                 return
               case 'group-writer':
@@ -854,6 +885,10 @@ function createBrowserSession ({
                 if (!once && !internal && keyPair !== null && groupPrf !== null && typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer) && upkeepWriters.size < MAX_UPKEEP_WRITERS) {
                   upkeepWriters.add(ev.writer)
                   armUpkeep(upkeepLength)
+                } else if (typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer)) {
+                  // Not armed for (a once or internal run, the key cap,
+                  // locked): a later echo still plans the shares in full.
+                  upkeepFull = true
                 }
                 return
               case 'group-synced':
@@ -1660,6 +1695,8 @@ function createBrowserSession ({
   // One pass per timer: the delay turns a burst of triggers into one stop of
   // the continuous run.
   function scheduleUpkeep () {
+    // Every trigger but an own write's echo (which sets it after) plans in full.
+    upkeepQuick = false
     if (upkeepQueued || upkeepTimer !== null || closed || keyPair === null || groupPrf === null) return
     upkeepTimer = setTimeout(() => {
       upkeepTimer = null
@@ -1679,6 +1716,10 @@ function createBrowserSession ({
     upkeepRearmed = false
     upkeepWanted = false
     upkeepWriters.clear()
+    shareChecked = false
+    upkeepFull = false
+    upkeepFullAt = 0
+    upkeepQuick = false
   }
 
   // The pass never calls another serial handler and never runs inside
@@ -1699,6 +1740,25 @@ function createBrowserSession ({
     }
     upkeepWanted = false
     const arming = upkeepArming
+    // The echo of a write made here, with every bound root served by a
+    // writer of this device, has nothing a full plan would find: the run is
+    // not stopped for it. A precheck that throws plans in full, which
+    // reports the failure.
+    const quick = upkeepQuick && shareChecked && !upkeepFull && Date.now() - upkeepFullAt < upkeepFullMaxAgeMs
+    upkeepQuick = false
+    if (!quick) {
+      upkeepFull = false
+    } else {
+      let needed = true
+      try { needed = await withCores((c) => member.deviceUpkeepNeeded(c)) } catch {}
+      if (!needed) {
+        // A full-plan trigger that arrived during the await keeps the arming
+        // so its scheduled pass still runs.
+        if (arming === upkeepArming && !upkeepFull) upkeepArmed = false
+        return
+      }
+      try { checkGroupOperation(epoch, generation) } catch { return }
+    }
     upkeepPasses++
     upkeepTotal++
     groupWriting = true
@@ -1706,9 +1766,14 @@ function createBrowserSession ({
     const stale = () => closed || epoch !== connection || generation !== groupEpoch || keyPair === null
     try {
       const { plan, planLength } = await withStore(async (c) => ({ plan: await member.deviceUpkeepPlan(c), planLength: await ownLength(c) }))
+      shareChecked = true
+      upkeepFullAt = Date.now()
       // Only what a later sync can bring keeps the arming: a root skipped
       // for good (reserve, full, orphan, status) does not.
       let waiting = plan.skipped.filter((x) => x.transient === true).map((x) => x.root)
+      // A transient skip may be a share (its root lists here, so the
+      // precheck passes it): even an echo plans in full until it resolves.
+      if (waiting.length > 0) upkeepFull = true
       let arrived = false
       let failed = 0
       if (plan.enrol.length > 0 || plan.share.length > 0) {
@@ -1765,7 +1830,12 @@ function createBrowserSession ({
         const changed = new Set(result.changed)
         failed = result.failed.length
         waiting = waiting.filter((root) => !changed.has(root)).concat(result.failed.map((f) => f.root))
-        if (failed > 0) warning(UPKEEP_WARNING, epoch)
+        if (failed > 0) {
+          // A failed share is invisible to the precheck: even an echo
+          // plans in full until a pass succeeds.
+          upkeepFull = true
+          warning(UPKEEP_WARNING, epoch)
+        }
         checkGroupOperation(epoch, generation)
         await pushAfterWrite()
       }
@@ -1775,6 +1845,7 @@ function createBrowserSession ({
         if (upkeepRoom()) scheduleUpkeep()
       } else if (waiting.length === 0 && arming === upkeepArming) upkeepArmed = false
     } catch (err) {
+      upkeepFull = true
       if (!stale()) {
         warning(UPKEEP_WARNING, epoch)
         // Still armed: another pass of this bounded arming tries again.
