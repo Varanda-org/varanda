@@ -14,8 +14,6 @@ const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 const { createAgeRoutes } = require('./age-routes')
 const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, mintRedeem, redeemMatches, accountReturnUrl, appReturnPage, header } = require('./app-return')
-const { createWalletRoutes } = require('./wallet-routes')
-const { createWalletWebhook } = require('./wallet-webhook')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -135,29 +133,7 @@ const ERROR_STATUS = Object.freeze({
   // The age routes could not tell whether something was applied (the provider
   // timed out after maybe creating a session, a write that may have landed):
   // unlike 'indisponivel', the app must not read this as a plain refusal.
-  'resultado-incerto': 503,
-  // The optional payments account (./wallet-routes.js).
-  'carteira-pendente': 403,
-  'kyc-pendente': 409,
-  'kyc-recusado': 403,
-  'documentos-pendentes': 409,
-  // In-app liveness: no validation token for the current selfie, or Hodle
-  // refused the capture.
-  'selfie-ausente': 409,
-  'selfie-recusada': 400,
-  'pin-invalido': 400,
-  'pin-bloqueado': 429,
-  'limite-carteira': 429,
-  'valor-invalido': 400,
-  'destino-invalido': 400,
-  'saldo-insuficiente': 409,
-  'carteira-incerta': 503,
-  'taxa-mudou': 409,
-  // One unresolved debit per member, and one set of terms per tap.
-  'operacao-pendente': 409,
-  'operacao-divergente': 409,
-  'idade-minima': 403,
-  'rede-divergente': 409
+  'resultado-incerto': 503
 })
 
 const BASE_HEADERS = Object.freeze({
@@ -618,18 +594,6 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // `ageDirectoryFloor` (the directoryFloor result of ./age-check-state.js, or
 // null for none) does the same with the latest certificate of an unbanded
 // link.
-// `hodle` (a
-// createHodle of ./hodle.js) and `wallets` (an openWalletStore of
-// ./wallet-store.js) turn on the optional payments account when both are
-// set; `walletMode` (cadastro, carteira, pix or completo) picks its routes,
-// `walletDailyLimit` caps the paid Hodle calls per day and `walletNetwork`
-// names the chain. Either null keeps the wallet policy at
-// { available: false }. In the pix and completo modes `ops` (an
-// openWalletOpsStore of ./wallet-ops-store.js) is the money ledger, `fees`
-// the parseFees result of ./fees.js, `walletMaxCents` the largest debit or
-// deposit, `walletMaxUsdcMicros` the largest USDC debit or conversion and `walletMoneyTimeoutMs` each money leg's deadline.
-// `walletWebhookSecrets` (a Map from Hodle event to its hex secret or
-// 'registrar', or null for no sink) turns on ./wallet-webhook.js.
 function createAccountServer ({
   association,
   origin,
@@ -655,17 +619,6 @@ function createAccountServer ({
   ageSince = null,
   ageCheck = null,
   ageDirectoryFloor = null,
-  hodle = null,
-  wallets = null,
-  walletMode = 'cadastro',
-  walletDailyLimit = 100,
-  walletNetwork,
-  ops = null,
-  fees = null,
-  walletMaxCents = 300000,
-  walletMaxUsdcMicros = 500000000,
-  walletMoneyTimeoutMs,
-  walletWebhookSecrets = null,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -741,40 +694,6 @@ function createAccountServer ({
     directoryFloor: ageDirectoryFloor,
     issuer,
     http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
-  })
-
-  // Always mounted, so /account/wallet/policy answers even when the feature is off.
-  const walletRoutes = createWalletRoutes({
-    hodle,
-    wallets,
-    ages,
-    terms,
-    mode: walletMode,
-    association,
-    origin,
-    store,
-    log,
-    now,
-    dailyLimit: walletDailyLimit,
-    network: walletNetwork,
-    ops,
-    fees,
-    maxCents: walletMaxCents,
-    maxUsdcMicros: walletMaxUsdcMicros,
-    moneyTimeoutMs: walletMoneyTimeoutMs,
-    http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
-  })
-
-  // Hodle's deliveries are authenticated by their signature and bounded by
-  // the sink's own window, never by the browsers' budget.
-  const walletWebhook = createWalletWebhook({
-    secrets: walletWebhookSecrets,
-    ops,
-    wallets,
-    refresh: walletRoutes.refreshOp,
-    log,
-    now,
-    http: { send, sendError, refuse, RouteError, fixedWindow }
   })
 
   // With age verification on, no key without a band on record gets a Google
@@ -1478,14 +1397,12 @@ function createAccountServer ({
     // The seeder's relay never spends the browsers' global bucket; its own
     // token, dedupe and caps bound it (./push-routes.js).
     if (pushRoutes !== null && pathname === '/push-event') return pushRoutes.handleRelay(req, res)
-    if (walletWebhook.owns(pathname)) return walletWebhook.handle(req, res, url)
     if (!limits.global()) throw over()
     if (now() - appSweptAt >= APP_SWEEP_MS) sweepApps()
     // Before the issuer-only routes: see the note at the top of the file.
     if (mod.owns(pathname)) return mod.handle(req, res, url)
     if (pushRoutes !== null && pushRoutes.owns(pathname)) return pushRoutes.handle(req, res, url)
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
-    if (walletRoutes.owns(pathname)) return walletRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === APP_RETURN_PATH) return appReturn(res)
@@ -1555,7 +1472,7 @@ function createAccountServer ({
   // modStats: table sizes of the moderation desk (counts only, never a
   // nonce), so tests can show that unauthenticated traffic grows nothing.
   // appStats: counts of app rows and of those holding a Google answer.
-  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), walletStats: () => walletRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {
