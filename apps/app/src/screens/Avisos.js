@@ -643,7 +643,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // The poll runs even when the tab is not active (the screen stays mounted).
   const polling = shouldPoll({ hosted, online: node.online, visible: node.visible }) && !unsupported && !locked
   useEffect(() => {
-    if (!polling || !node.signals || node.signals.seederVerified !== true || stateRef.current.loadedAt !== null || firstReadEpochRef.current === node.epoch) return
+    // After the sync run is ready too: its boot reads come first.
+    if (!polling || !node.signals || node.signals.seederVerified !== true || node.signals.ready !== true || stateRef.current.loadedAt !== null || firstReadEpochRef.current === node.epoch) return
     const timer = setTimeout(() => {
       const current = stateRef.current
       if (current.loadedAt !== null || current.loading || current.refreshing || current.loadingMore) return
@@ -652,7 +653,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       loadFirst()
     }, NOTICES_FIRST_READ_MS)
     return () => clearTimeout(timer)
-  }, [polling, node.signals?.seederVerified, node.epoch, loadFirst])
+  }, [polling, node.signals?.seederVerified, node.signals?.ready, node.epoch, loadFirst])
 
   useEffect(() => {
     if (!polling) return

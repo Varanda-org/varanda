@@ -4456,11 +4456,11 @@ Limites desta parte:
 
 ## 92. Dados mais cedo em A Rua e no Diário (PR perf/first-paint)
 
-Quatro partes do app passam a mostrar dados mais cedo: as fotos dos autores em A Rua, as contagens de curtidas, respostas, republicações e citações, as citações e respostas de quem você não segue, e o Diário ao voltar à aba. Não muda o que é gravado nem o que o nó guarda; muda a ordem e o intervalo dos pedidos. Medidas do dono antes da mudança (Chrome, produção, visita repetida): as fotos dos autores começavam entre 2,35 s e 3,4 s; as contagens, em 3,4 s e 4,2 s; cada pedido de rede levava de 2 a 26 ms; o Diário levava cerca de 0,8 s a cada volta. Este documento não traz medidas novas: os números depois da mudança saem dos passos abaixo.
+Três partes do app passam a mostrar dados mais cedo: as contagens de curtidas, respostas, republicações e citações, as citações e respostas de quem você não segue, e o Diário ao voltar à aba. Não muda o que é gravado nem o que o nó guarda; muda a ordem e o intervalo dos pedidos. Medidas do dono antes da mudança (Chrome, produção, visita repetida): as fotos dos autores começavam entre 2,35 s e 3,4 s; as contagens, em 3,4 s e 4,2 s; cada pedido de rede levava de 2 a 26 ms; o Diário levava cerca de 0,8 s a cada volta. Este documento não traz medidas novas: os números depois da mudança saem dos passos abaixo.
 
 Regras que os passos abaixo conferem:
 
-- Fotos dos autores: no nó hospedado (web e app com a instalação), os nomes e fotos na tela não esperam mais o intervalo de 1 s entre um pedido profile.read e o seguinte. O nó nativo sem instalação e os pedidos de fundo mantêm o intervalo, porque lá a leitura pausa a sincronização. O agrupamento de 100 ms continua, então uma página não gera dois pedidos.
+- Fotos dos autores: sem mudança (PR fix/quiet-boot-warm). Tirar o intervalo de 1 s entre pedidos profile.read não mudou nada na medida do dono: as fotos esperam a fila do nó no início, não esse intervalo.
 - Contagens: o pedido ao índice do semeador (/index/counts) sai junto com a página, antes de follow.list e engagement.read, e não espera por eles. Uma curtida feita enquanto a contagem chega não é desfeita pela resposta antiga. "Indexando" continua escondendo as contagens.
 - Citações e respostas de quem você não segue: os autores são lidos dois por vez (a busca do nome de um enquanto o outro é lido), e cada autor aparece assim que chega, sem esperar o mais lento. Todas as telas e a Conversa dividem uma só vaga de diary.peek do app, e a outra vaga do nó fica livre para a primeira mensagem privada e para a leitura de uma página. Uma Conversa ou um perfil aberto pela pessoa passa na frente das leituras de fundo de A Rua (espera no máximo a leitura em andamento). "Ocupado" deixa de ser o caso comum.
 - Diário: voltar à aba em menos de 60 s não relê o diário (sem node.info nem log.read) e as citações não piscam. Relê na primeira vez, depois de 60 s, ao puxar para atualizar, depois de publicar ou apagar, depois de curtir ou republicar em outra aba, na primeira vez que a aba aparece depois de uma reconexão, depois de uma leitura que falhou, e quando outro aparelho publicou. No nó nativo sem instalação (sem o sinal de diário próprio), continua relendo a cada vez que a aba aparece.
@@ -4472,7 +4472,6 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 Android (aparelho ou emulador, primeiro):
 
 - [ ] Com o registro de rede aberto, recarregar A Rua: o primeiro /index/counts sai antes da resposta de engagement.read.
-- [ ] Em A Rua, com a conexão normal, as fotos dos autores começam a carregar até cerca de 300 ms depois da própria foto.
 - [ ] Curtir uma publicação enquanto as contagens de A Rua ainda carregam: a curtida fica marcada e a contagem não volta ao valor antigo.
 - [ ] Com o índice em "indexando", as contagens continuam escondidas.
 - [ ] Em A Rua, as citações e respostas de quem você não segue: cada autor aparece assim que o nome chega, sem esperar o último.
@@ -4491,13 +4490,13 @@ iOS (simulador ou aparelho, depois do Android):
 
 Web (navegador, depois do iOS):
 
-- [ ] Na web hospedada, com o registro de rede aberto, recarregar A Rua: o /index/counts sai antes de engagement.read, e os profile.read saem sem a pausa de 1 s entre um e outro.
+- [ ] Na web hospedada, com o registro de rede aberto, recarregar A Rua: o /index/counts sai antes de engagement.read.
 - [ ] Na web hospedada, trocar A Rua > Diário > A Rua > Diário em menos de 60 s: o Diário não relê e as citações não piscam.
 - [ ] Curtir em A Rua enquanto a contagem chega: a curtida não é desfeita.
 
 Limites desta parte:
 
-- O intervalo de 1 s no nó nativo sem instalação e nos pedidos de fundo fica de propósito; a leitura lá pausa a sincronização.
+- O intervalo de 1 s entre pedidos profile.read continua em todo nó; acelerar as fotos exige mexer na fila do nó no início (fica para depois).
 - Já era assim antes e continua: uma curtida tocada antes de a publicação ter qualquer número fica sem número (ou sem o +1) até a próxima leitura; e um "atualizar" com o índice ainda indexando mostra os números antigos até a resposta nova chegar.
 - Novo e aceito: um bloqueio da associação que chega enquanto o Diário está fresco tira a publicação citada ou republicada de quem foi bloqueado até 60 s depois (na próxima releitura), a mesma janela que A Rua já usa.
 - Já era assim antes: republicar numa Conversa aberta por cima do Diário e voltar não relê o Diário (a aba não mudou); a republicação aparece na próxima troca de aba ou ao puxar para atualizar.
@@ -4511,8 +4510,8 @@ No nó hospedado (web e app com a instalação), a Espiadinha e os Avisos começ
 
 Regras que os passos abaixo conferem:
 
-- Espiadinha: no nó hospedado, com a aba escondida, o app lê a primeira página da Espiadinha uma vez por conexão, cerca de 1 s depois de a ligação com o semeador ser confirmada (sinal `peer seeder`), e só com a página visível e em linha. Ao abrir a aba, as linhas já estão lá. As citações, contagens e corações dessa página só começam quando a aba aparece, para não disputar a fila do nó com A Rua. Uma falha escondida não mostra erro; a aba, ao abrir, tenta de novo. Abrir a aba durante essa leitura mostra o esqueleto e espera, sem segunda leitura. No nó nativo sem instalação, nada muda (lá a Espiadinha não existe).
-- Avisos: cada página aparece assim que chega (antes, a tela esperava até 5 leituras e mostrava tudo de uma vez), com o indicador de atualização enquanto as continuações chegam. Com a aba escondida, uma leitura da primeira página acontece uma vez por conexão, 6 s depois da ligação com o semeador, e a leitura de 5 min também preenche a lista antes da primeira abertura. A lista escondida só muda o ponto do sino: nada é marcado como visto até a aba aparecer. Uma falha numa continuação mantém as linhas e oferece "tentar de novo" no fim da lista. Cada leitura continua com sua própria ligação curta ao semeador (decisão do dono).
+- Espiadinha: no nó hospedado, com a aba escondida, o app lê a primeira página da Espiadinha uma vez por conexão, cerca de 3 s depois de a sincronização ficar pronta (linha `sync ready`, que vem depois de `peer seeder` e das leituras do início), e só com a página visível e em linha. A página fica guardada fora da tela (nada é desenhado com a aba escondida) e aparece na hora ao abrir a aba (PR fix/quiet-boot-warm: no celular, desenhar a lista escondida disputava a tela com A Rua). As citações, contagens e corações dessa página só começam quando a aba aparece, para não disputar a fila do nó com A Rua. Uma falha escondida não mostra erro; a aba, ao abrir, tenta de novo. Abrir a aba durante essa leitura mostra o esqueleto e espera, sem segunda leitura. No nó nativo sem instalação, nada muda (lá a Espiadinha não existe).
+- Avisos: cada página aparece assim que chega (antes, a tela esperava até 5 leituras e mostrava tudo de uma vez), com o indicador de atualização enquanto as continuações chegam. Com a aba escondida, uma leitura da primeira página acontece uma vez por conexão, 6 s depois de a sincronização ficar pronta, e a leitura de 5 min também preenche a lista antes da primeira abertura. A lista escondida só muda o ponto do sino: nada é marcado como visto até a aba aparecer. Uma falha numa continuação mantém as linhas e oferece "tentar de novo" no fim da lista. Cada leitura continua com sua própria ligação curta ao semeador (decisão do dono).
 - Um "atualizar" vindo de fora (seguir, apagar, publicar) que chega durante uma leitura em andamento espera ela terminar e então relê uma vez.
 
 ### Como verificar
@@ -4521,10 +4520,10 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 
 Android (aparelho ou emulador, primeiro):
 
-- [ ] Com o registro do nó aberto e a instalação hospedada, abrir o app em A Rua: cerca de 1 s depois de "peer seeder", um peek.read; cerca de 6 s depois, um notices.list.
+- [ ] Com o registro do nó aberto e a instalação hospedada, abrir o app em A Rua: nenhum peek.read nem notices.list antes de "sync ready"; cerca de 3 s depois dele, um peek.read; cerca de 6 s depois, um notices.list.
 - [ ] Abrir a Espiadinha depois disso: as linhas aparecem na hora, sem esqueleto.
 - [ ] Abrir a Espiadinha durante a leitura escondida: esqueleto, depois linhas, sem segundo peek.read.
-- [ ] Abrir Avisos antes de 6 s: a primeira página aparece assim que chega, com o indicador de atualização.
+- [ ] Abrir Avisos antes da leitura escondida: a primeira página aparece assim que chega, com o indicador de atualização.
 - [ ] Com avisos novos e a aba escondida: o ponto do sino acende e, ao abrir, os avisos passam a vistos.
 - [ ] O primeiro feed.read e o primeiro /index/counts de A Rua não ficam mais lentos.
 - [ ] No nó nativo sem instalação, nenhuma leitura escondida acontece.
@@ -4536,9 +4535,9 @@ iOS (simulador ou aparelho, depois do Android):
 
 Web (navegador, depois do iOS):
 
-- [ ] Na web hospedada, com o registro de rede aberto, carregar a página: peek.read cerca de 1 s depois de "peer seeder", e notices.list cerca de 6 s depois.
+- [ ] Na web hospedada, com o registro de rede aberto, carregar a página: peek.read cerca de 3 s depois de "sync ready", e notices.list cerca de 6 s depois dele.
 - [ ] Na web hospedada, abrir a Espiadinha depois disso: as linhas aparecem na hora.
-- [ ] Na web hospedada, abrir Avisos antes de 6 s: a primeira página aparece assim que chega.
+- [ ] Na web hospedada, abrir Avisos antes da leitura escondida: a primeira página aparece assim que chega.
 
 Limites desta parte:
 
