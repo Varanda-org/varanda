@@ -12,8 +12,10 @@
 // sync (docs/rpc.md 6.1) and that node restarts a continuous run after it.
 // The browser node serves the read from the live run's cores. Lookups stay
 // batched (100 ms debounce, at most PROFILE_LIMIT_MAX keys per request, one
-// request in flight, at least 1 s between automatic batches) so bursts from
-// several screens coalesce: fewer requests, and fewer native preemptions.
+// request in flight) so bursts from several screens coalesce. The 1 s gap
+// between automatic batches (fewer native preemptions) applies to native
+// batches and to background batches; on the hosted node an on-screen batch
+// skips it, so author photos start loading sooner.
 // The own key and the keys a screen asks for (resolve, resolveMany: what is
 // on screen) go first. BACKGROUND batches (freshness re-fetches and failure
 // retries) wait until the current continuous run has lasted 5 s or entered
@@ -31,7 +33,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
 import { useNode } from './node'
 import { namesQuiet } from './autoSyncPolicy'
-import { applySeed, authoritative, fieldsOf, viewOf } from './namesCache'
+import { applySeed, authoritative, batchWait, fieldsOf, promoteTimer, viewOf } from './namesCache'
 
 // The seeder's page hint rides with the name (only a hint: Membro verifies
 // with page.read). profile.read never says it, so it is carried over.
@@ -88,6 +90,9 @@ export function NamesProvider ({ children }) {
   const scopeRef = useRef(0)
   const ownKeyRef = useRef(ownKey)
   ownKeyRef.current = ownKey
+  const timerAtRef = useRef(0)
+  const hostedRef = useRef(node.hosted === true)
+  hostedRef.current = node.hosted === true
 
   const gate = phase === 'ready' &&
     !(sync.active && sync.active.once) &&
@@ -135,6 +140,7 @@ export function NamesProvider ({ children }) {
 
   const schedule = useCallback((ms = DEBOUNCE_MS) => {
     if (!mountedRef.current || timerRef.current !== null) return
+    timerAtRef.current = Date.now() + ms
     timerRef.current = setTimeout(() => {
       timerRef.current = null
       flushRef.current()
@@ -147,7 +153,7 @@ export function NamesProvider ({ children }) {
     const back = backRef.current
     if (front.size === 0 && back.size === 0) return
     const now = Date.now()
-    const wait = lastBatchRef.current + MIN_GAP_MS - now
+    const wait = batchWait({ hosted: hostedRef.current, front: front.size, lastBatchAt: lastBatchRef.current, now, minGapMs: MIN_GAP_MS })
     if (wait > 0) { schedule(wait); return }
     const quiet = quietOk(now)
     const order = []
@@ -204,7 +210,7 @@ export function NamesProvider ({ children }) {
       for (const key of authors) retryRef.current.set(key, at)
     } finally {
       busyRef.current = false
-      if (mountedRef.current && (frontRef.current.size > 0 || backRef.current.size > 0)) schedule(MIN_GAP_MS)
+      if (mountedRef.current && (frontRef.current.size > 0 || backRef.current.size > 0)) schedule(hostedRef.current && frontRef.current.size > 0 ? DEBOUNCE_MS : MIN_GAP_MS)
     }
   }
 
@@ -269,7 +275,15 @@ export function NamesProvider ({ children }) {
       frontRef.current.add(key)
       queued = true
     }
-    if (queued) schedule()
+    if (queued) {
+      // A gap or background timer must not hold on-screen keys back; the
+      // re-run flush recomputes the background wait itself.
+      if (promoteTimer({ hosted: hostedRef.current, armed: timerRef.current !== null, busy: busyRef.current, firesAt: timerAtRef.current, now: Date.now(), debounceMs: DEBOUNCE_MS })) {
+        clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+      schedule()
+    }
   }, [schedule])
 
   const resolve = useCallback((key) => askFront([key]), [askFront])

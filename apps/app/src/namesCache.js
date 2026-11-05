@@ -54,3 +54,18 @@ export function authoritative (p) {
 export function viewOf (entry) {
   return { name: entry.name, username: entry.username, bio: entry.bio, avatar: entry.avatar }
 }
+
+// Ms to wait before the next profile.read. The hosted node reads from the live
+// run's cores, so on-screen keys (front > 0) need no gap; native reads preempt
+// sync and background batches keep it.
+export function batchWait ({ hosted, front, lastBatchAt, now, minGapMs }) {
+  if (hosted === true && front > 0) return 0
+  return Math.max(0, lastBatchAt + minGapMs - now)
+}
+
+// Whether a newly queued on-screen key replaces the armed timer (hosted only).
+// Only a timer due later than one debounce is replaced: replacing the
+// debounce itself would push the batch back on every new key of a burst.
+export function promoteTimer ({ hosted, armed, busy, firesAt, now, debounceMs }) {
+  return hosted === true && armed === true && busy !== true && firesAt - now > debounceMs
+}

@@ -38,7 +38,7 @@ import { freshKeys, hasFresh, syncLengths } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
-import { applyToggle, countsAfter, emptyState, mergeCounts, secondPassRefs } from '../engagement'
+import { applyToggle, countsAfter, diaryPeekSlots, emptyState, mergeCounts, poolMap, secondPassRefs } from '../engagement'
 import { DeletePrompt, actingPageKey, isBusy, isDiaryGone, isSeederDown, memberKeyOf, pageEngagement, readEngagement, setEngagement, useActing, useDelete } from './Conversa'
 import { canDelete } from '../deletion'
 import { label as actingLabel } from '../actingAs'
@@ -51,6 +51,7 @@ import { Icon } from '../ui/Icon'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
+import { noteLocalWrite } from '../localWrites'
 import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
@@ -61,7 +62,9 @@ const TOAST_MS = 4000
 const LOG_WINDOW = 36
 const FALLBACK_WINDOWS = 4
 // Transient peek errors: 'semeador indisponível' is retried once after 2 s,
-// 'ocupado' up to 3 times with a growing pause (like Conversa's peekAll); if
+// 'ocupado' (diaryPeekSlots keeps the app within the node's limit; a
+// page.read probe can still take a slot) up to 3 times with a growing pause
+// (like Conversa's peekAll); if
 // it persists, the refs stay undefined (a later pass retries them).
 const SEEDER_RETRY_MS = 2000
 const BUSY_RETRY_MS = 600
@@ -265,7 +268,8 @@ export function useSocial ({ ownKey, onToast }) {
       let failure = null
       for (;;) {
         try {
-          peek = await request('diary.peek', chunk)
+          // A screen gone while its peek waited for a slot frees it at once.
+          peek = await diaryPeekSlots.run(() => mountedRef.current ? request('diary.peek', chunk) : Promise.reject(new Error('unmounted')))
           break
         } catch (err) {
           if (isSeederDown(err) && !seederRetried) {
@@ -377,29 +381,38 @@ export function useSocial ({ ownKey, onToast }) {
     if ([...byAuthor.keys()].some((a) => !isKnown(a))) await loadFollows()
     const found = new Map()
     const missed = []
-    for (const [author, refs] of byAuthor) {
+    await poolMap([...byAuthor], 2, async ([author, refs]) => {
+      // A screen gone or a dropped pass reads no further authors.
+      if (!mountedRef.current || epoch !== epochRef.current) return
       let got
       try {
         got = await readAuthor(author, refs)
       } catch {
         got = new Map()
       }
-      if (!mountedRef.current) return []
+      if (!mountedRef.current) return
+      if (epoch !== epochRef.current) return
+      const part = new Map()
       const later = got.transient || new Set()
-      for (const ref of refs) found.set(ref, got.get(ref) || (later.has(ref) ? TRANSIENT : null))
+      for (const ref of refs) {
+        const item = got.get(ref) || (later.has(ref) ? TRANSIENT : null)
+        part.set(ref, item)
+        found.set(ref, item)
+      }
       if (got.memberMiss && got.memberMiss.ok === false) missed.push({ refs, retryAfterMs: got.memberMiss.retryAfterMs })
-    }
+      change((prev) => {
+        const originals = new Map(prev.originals)
+        for (const [ref, item] of part) {
+          const cur = originals.get(ref)
+          if (!cur || cur === TRANSIENT) originals.set(ref, item)
+          else if (replaceNameless && !hasName(cur) && hasName(item)) originals.set(ref, item)
+        }
+        return { originals }
+      })
+    })
+    if (!mountedRef.current) return []
     // The originals were dropped while reading: these results are stale.
     if (epoch !== epochRef.current) return []
-    change((prev) => {
-      const originals = new Map(prev.originals)
-      for (const [ref, item] of found) {
-        const cur = originals.get(ref)
-        if (!cur || cur === TRANSIENT) originals.set(ref, item)
-        else if (replaceNameless && !hasName(cur) && hasName(item)) originals.set(ref, item)
-      }
-      return { originals }
-    })
     // Failed member lookup, and the original came back with no name: one
     // later re-read of exactly those refs. Not on the replace path (that
     // re-read is the one try; another failure must not schedule a loop).
@@ -433,6 +446,41 @@ export function useSocial ({ ownKey, onToast }) {
       dropNameRetries()
     }
     for (const a of authors) if (typeof a === 'string') knownRef.current.add(a.toLowerCase())
+    const refs = [...new Set(shown.filter((r) => typeof r === 'string'))]
+    if (reset) change(() => ({ flags: { indexing: false, complete: true } }))
+    // The chunks answer in any order: indexing is on when any of this
+    // ingest's answers says so, never switched off by a slower one.
+    let indexing = false
+    const countsDone = hosted && online && refs.length > 0
+      ? Promise.all(chunks(refs, COUNTS_MAX).map(async (chunk) => {
+        const started = ++clockRef.current
+        const r = await fetchCounts(chunk)
+        if (!mountedRef.current) return
+        if (!r.ok) {
+          // This chunk's numbers never arrived. indexing stays as it is; an
+          // incomplete index is what CountsNote already explains.
+          change((prev) => ({ flags: { indexing: prev.flags.indexing, complete: false } }))
+          return
+        }
+        indexing = indexing || r.value.indexing === true
+        change((prev) => {
+          const fetched = {}
+          for (const ref of Object.keys(r.value.counts)) {
+            if (prev.pending.has(ref)) continue
+            // A toggle that settled while this read was in flight already
+            // moved the number on screen; an answer read before it would
+            // undo that. With no number yet there is nothing to keep.
+            const touched = Math.max(touchedRef.current.get('liked|' + ref) || 0, touchedRef.current.get('reposted|' + ref) || 0)
+            if (touched > started && prev.counts.has(ref)) continue
+            fetched[ref] = r.value.counts[ref]
+          }
+          // Keep the index flags: indexing hides the counts, an incomplete
+          // index gets a note.
+          const flags = { indexing, complete: prev.flags.complete && r.value.complete !== false }
+          return { counts: mergeCounts(prev.counts, fetched), flags }
+        })
+      })).catch(() => {})
+      : Promise.resolve()
     if (reset) await loadFollows()
     // Reply parents: only those of strangers are read (verified, with the
     // name and @nome); own and followed parent authors come from profile.read.
@@ -455,9 +503,8 @@ export function useSocial ({ ownKey, onToast }) {
       // association has blocked since.
       const originals = reset ? new Map() : new Map(prev.originals)
       for (const [ref, item] of local) originals.set(ref, item)
-      return { originals, ...(reset ? { flags: { indexing: false, complete: true } } : {}) }
+      return { originals }
     })
-    const refs = [...new Set(shown.filter((r) => typeof r === 'string'))]
     // A reload (or a page whose state is unknown) reads the page's status
     // fresh. When that fails the hearts stay unknown, not 'all off', and the
     // next refresh tries again.
@@ -503,26 +550,6 @@ export function useSocial ({ ownKey, onToast }) {
       }
       if (!mountedRef.current) return
     }
-    if (hosted && online) {
-      for (const chunk of chunks(refs, COUNTS_MAX)) {
-        const r = await fetchCounts(chunk)
-        if (!mountedRef.current) return
-        if (!r.ok) {
-          // This chunk's numbers never arrived. indexing stays as it is; an
-          // incomplete index is what CountsNote already explains.
-          change((prev) => ({ flags: { indexing: prev.flags.indexing, complete: false } }))
-          continue
-        }
-        change((prev) => {
-          const fetched = {}
-          for (const ref of Object.keys(r.value.counts)) if (!prev.pending.has(ref)) fetched[ref] = r.value.counts[ref]
-          // Keep the index flags: indexing hides the counts, an incomplete
-          // index gets a note.
-          const flags = { indexing: r.value.indexing === true, complete: prev.flags.complete && r.value.complete !== false }
-          return { counts: mergeCounts(prev.counts, fetched), flags }
-        })
-      }
-    }
     // Originals, then (one level) what those originals quote or reply to,
     // then the page's stranger reply parents in a pass of their own: a slow
     // parent lookup (only a name) never holds back the originals already
@@ -539,6 +566,7 @@ export function useSocial ({ ownKey, onToast }) {
     const second = secondPassRefs(firstRefs.map(at).filter(Boolean))
     if (second.length > 0 && mountedRef.current) await resolve(second)
     if (strangers.length > 0 && mountedRef.current) await resolve([...new Set(strangers)])
+    await countsDone
   }, [request, hosted, online, change, resolve, loadFollows, isKnown, dropNameRetries])
 
   // Stable identity (the screens' load callbacks depend on it): the queued
@@ -614,6 +642,7 @@ export function useSocial ({ ownKey, onToast }) {
       const r = await (held !== null ? held.retry() : setEngagement(nodeRef.current, kind, ref, on, as))
       if (pageRetries.get(key) === held) pageRetries.delete(key)
       shiftedRef.current.delete(key)
+      noteLocalWrite()
       if (!mountedRef.current) return
       touchedRef.current.set(field + '|' + ref, ++clockRef.current)
       const final = r && typeof r.on === 'boolean' ? r.on : on
