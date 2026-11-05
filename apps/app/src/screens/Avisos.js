@@ -27,7 +27,7 @@ import { get as actingGet, subscribe as actingSubscribe } from '../actingAs'
 import { relativeTime } from '../format'
 import { useNode } from '../node'
 import {
-  ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
+  ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
   NOTICES_UNSUPPORTED_MESSAGE, NOTICES_WEB_ONLY_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
   compareNotices, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
   padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, shouldPoll, writeSeenNamespace
@@ -289,9 +289,9 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // further page. Acting as yourself calls notices.list, as before. Acting
   // as a page calls pagesNotices once per page of that loop. No push opt-in
   // either way: a page has none.
-  const read = useCallback((mine, after = null) => {
+  const read = useCallback((mine, after = null, onPage) => {
     const live = () => mine === seqRef.current
-    const opts = { limit: NOTICES_LIMIT_DEFAULT, after, live }
+    const opts = { limit: NOTICES_LIMIT_DEFAULT, after, live, onPage }
     if (!pageKeyRef.current) return readNotices(request, opts)
     const page = pageKeyRef.current
     return readNotices(async (method, params) => {
@@ -317,6 +317,10 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const backoffRef = useRef(false)
   const busyRetryRef = useRef(null)
   const loadFirstRef = useRef(null)
+  const firstReadEpochRef = useRef(null)
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
+  const reloadAfterRef = useRef(false)
 
   const badge = useCallback((value) => {
     if (typeof onBadgeRef.current === 'function') onBadgeRef.current(value)
@@ -370,8 +374,29 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       loadError: '',
       moreError: ''
     })
+    let painted = false
     try {
-      const page = await read(mine)
+      const page = await read(mine, null, (partial) => {
+        if (mine !== seqRef.current) return
+        // An empty page with a cursor (filtered candidates) is not the empty
+        // list: the skeleton stays until a row or the end arrives.
+        if (partial.notices.length === 0 && partial.next !== null) return
+        const items = mergePage([], partial.notices).items
+        commit({
+          items,
+          next: partial.next,
+          atEnd: partial.next === null,
+          incomplete: partial.incomplete === true,
+          activity: partial.activity !== false,
+          notSupportedByNode: false,
+          pageUnavailable: false,
+          loadedAt: Date.now(),
+          loading: false,
+          refreshing: true
+        })
+        painted = true
+        settle(items)
+      })
       if (mine !== seqRef.current) return
       backoffRef.current = false
       if (page.supported === false) {
@@ -395,7 +420,14 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       settle(merged)
     } catch (err) {
       if (mine !== seqRef.current) return
-      if (pageKeyRef.current && isPageNoticesUnavailable(err)) {
+      if (painted && !isLockedError(err)) {
+        // A continuation failed after rows were shown: they stay, and the
+        // footer retries from the last cursor.
+        backoffRef.current = true
+        commit({ loading: false, refreshing: false, moreError: errorText(err) })
+        // Opened during a hidden read: what is on screen is seen now.
+        if (activeRef.current) settle(stateRef.current.items)
+      } else if (pageKeyRef.current && isPageNoticesUnavailable(err)) {
         commit({ items: [], next: null, atEnd: true, pageUnavailable: true, loadedAt: Date.now(), loading: false, refreshing: false })
         badge(false)
       } else if (isWebOnlyError(err)) {
@@ -413,7 +445,11 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         }, BUSY_RETRY_MS)
       } else {
         backoffRef.current = true
-        commit({ loading: false, refreshing: false, loadError: errorText(err) })
+        if (!activeRef.current) {
+          commit({ loading: false, refreshing: false })
+        } else {
+          commit({ loading: false, refreshing: false, loadError: errorText(err) })
+        }
       }
     }
   }, [hosted, read, commit, settle, badge])
@@ -454,7 +490,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     const current = stateRef.current
     if (!hosted || current.unsupported || current.locked) return
     if (pageKeyRef.current && typeof ownKeyRef.current !== 'string') return
-    if (activeRef.current && current.loadedAt === null) {
+    if (current.loadedAt === null) {
       loadFirst()
       return
     }
@@ -521,10 +557,26 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop }
     if (!active) return
     const current = stateRef.current
+    if (current.loading || current.refreshing) {
+      if (changed) reloadAfterRef.current = true
+      // Rows a hidden read already painted are on screen now: seen.
+      if (shown && current.loadedAt !== null) settle(current.items)
+      return
+    }
     const stale = shouldReloadOnShow({ loadedAt: current.loadedAt, now: Date.now(), fresh: false })
-    if (changed || ((shown || reselected) && stale && !current.loading && !current.refreshing)) loadFirst()
-    else if (shown && current.loadedAt !== null) settle(current.items)
+    if (changed || ((shown || reselected) && stale)) {
+      // This load covers a refresh deferred while a read was in flight.
+      reloadAfterRef.current = false
+      loadFirst()
+    } else if (shown && current.loadedAt !== null) settle(current.items)
   }, [active, refresh, scrollToTop, loadFirst, settle])
+
+  useEffect(() => {
+    if (active && !state.loading && !state.refreshing && reloadAfterRef.current) {
+      reloadAfterRef.current = false
+      loadFirst()
+    }
+  }, [active, state.loading, state.refreshing, loadFirst])
 
   // Follows changed (here or on another device): the list is read again, also
   // while the tab is not shown.
@@ -590,6 +642,18 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
 
   // The poll runs even when the tab is not active (the screen stays mounted).
   const polling = shouldPoll({ hosted, online: node.online, visible: node.visible }) && !unsupported && !locked
+  useEffect(() => {
+    if (!polling || !node.signals || node.signals.seederVerified !== true || stateRef.current.loadedAt !== null || firstReadEpochRef.current === node.epoch) return
+    const timer = setTimeout(() => {
+      const current = stateRef.current
+      if (current.loadedAt !== null || current.loading || current.refreshing || current.loadingMore) return
+      firstReadEpochRef.current = node.epoch
+      previous.current = { ...previous.current, refresh: refreshRef.current }
+      loadFirst()
+    }, NOTICES_FIRST_READ_MS)
+    return () => clearTimeout(timer)
+  }, [polling, node.signals?.seederVerified, node.epoch, loadFirst])
+
   useEffect(() => {
     if (!polling) return
     const timer = setInterval(() => {

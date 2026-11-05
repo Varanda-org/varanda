@@ -15,6 +15,8 @@ export const NOTICES_INCOMPLETE_TEXT = 'Alguns avisos ainda podem chegar.'
 export const SEEN_STORAGE_KEY = 'varanda-notices-seen'
 // Five minutes between polls while the tab is on screen.
 export const NOTICES_POLL_MS = 300000
+// Wait for A Rua's first reads and Espiadinha's warm read so short seeder sockets rarely overlap.
+export const NOTICES_FIRST_READ_MS = 6000
 export const SEEN_MAX = 2048
 // Pages read on their own after a short one with a cursor, per user action.
 export const NOTICES_AUTO_PAGES = 4
@@ -308,7 +310,7 @@ export function isLastNoticesPage (page) {
 // or says true: an older node has no activity field and only sends follows.
 // A page with supported false is returned as is.
 // request: (method, params) => Promise.
-export async function readNotices (request, { limit, after = null, maxContinuations = NOTICES_AUTO_PAGES, live = () => true }) {
+export async function readNotices (request, { limit, after = null, maxContinuations = NOTICES_AUTO_PAGES, live = () => true, onPage }) {
   let notices = []
   let cursor = after
   let incomplete = false
@@ -327,6 +329,7 @@ export async function readNotices (request, { limit, after = null, maxContinuati
     const stuck = nextPage !== null && cursor !== null &&
       nextPage.at === cursor.at && nextPage.key === cursor.key && nextPage.seq === cursor.seq
     const next = stuck ? null : nextPage
+    if (onPage) onPage({ notices, next, incomplete, activity })
     if (next === null || notices.length >= limit || reads >= maxContinuations || !live()) {
       return { notices, next, incomplete, supported: true, activity }
     }
