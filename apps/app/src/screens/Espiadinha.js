@@ -21,7 +21,7 @@ import { useNames } from '../names'
 import { shouldReloadOnShow } from '../paging'
 import { HELP } from '../help'
 import {
-  PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WARM_DELAY_MS, PEEK_WEB_ONLY_MESSAGE,
+  PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WARM_QUIET_MS, PEEK_WEB_ONLY_MESSAGE,
   isExpiredPeekError, isLastPeekPage, isWebOnlyError, mergePage, pageNeeds, peekKey, peekNotice,
   recordFollow, shouldWarmPeek, skippedText, withoutFollowed
 } from '../peek'
@@ -292,16 +292,18 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       unsupported: state.unsupported,
       attempted: warmedEpochRef.current === node.epoch
     })) return
-    const timer = setTimeout(() => {
+    // Only once the app has been quiet: the boot reads come first.
+    const wait = node.whenIdle(PEEK_WARM_QUIET_MS)
+    wait.promise.then(() => {
       const current = stateRef.current
-      // The tab may have opened, or a read started, during the delay.
-      if (current.loadedAt !== null || current.loading || current.refreshing || activeRef.current) return
+      // The tab may have opened, or a read started, during the wait.
+      if (current.loadedAt !== null || current.loading || current.refreshing || activeRef.current || heldRef.current !== null) return
       warmedEpochRef.current = node.epoch
       previous.current = { ...previous.current, refresh: refreshRef.current }
       loadFirst({ quiet: true })
-    }, PEEK_WARM_DELAY_MS)
-    return () => clearTimeout(timer)
-  }, [hosted, node.online, node.phase, seederVerified, syncReady, node.visible, node.epoch, active, state.loadedAt, state.loading, state.refreshing, state.unsupported, loadFirst])
+    })
+    return () => wait.cancel()
+  }, [hosted, node.online, node.phase, seederVerified, syncReady, node.visible, node.epoch, node.whenIdle, active, state.loadedAt, state.loading, state.refreshing, state.unsupported, loadFirst])
 
   useEffect(() => {
     const prev = previous.current
