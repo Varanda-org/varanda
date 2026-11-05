@@ -7,6 +7,10 @@ import { pushCheck, pushKey } from './account'
 import { disablePush, enablePush, getPushState, pushSupportNow } from './pushClient'
 import { createPushStore } from './push-offer'
 import { requestDmOpen } from './dm-open'
+import { vitrineEnabled } from './vitrine/enabled'
+
+/* global __DEV__ */
+const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
 
 const store = createPushStore({ getPushState, pushKey, pushCheck, enablePush, disablePush, pushSupportNow, storage: () => localStorage })
 
@@ -48,6 +52,9 @@ export function togglePush (arg) {
 }
 
 export function turnOffPush (arg) {
+  // Ajustes turns push off before Sair and Recomeçar, which the Vitrine
+  // refuses: it must not drop a real subscription this origin already holds.
+  if (VITRINE) return Promise.resolve()
   return store.offHere(arg)
 }
 

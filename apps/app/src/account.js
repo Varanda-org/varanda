@@ -3,18 +3,22 @@
 // The page talks to the same-origin account service; it cannot verify
 // signatures, so usernameMatches is only a consistency check on data the same
 // origin serves.
+/* global __DEV__ */
 
 import { applicationServerKey } from './push-state.js'
 import { AGE_STATES } from './age.js'
 import { resolveUrl } from './installation.js'
 import { accountOriginOf } from './pageGate.js'
 import { isAppClient } from './appClient.js'
+import { vitrineEnabled } from './vitrine/enabled.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
 const TIMEOUT_MS = 8000
 const MAX_BODY = 4096
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/
+// The literal member access is what Expo inlines into the bundle.
+const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
 
 // Lives here, not in signupInvite.js (which re-exports both), so the two
 // modules never import each other.
@@ -128,6 +132,9 @@ export async function readJson (res, maxBody = MAX_BODY) {
 // `extra` headers (the app's link proofs) apply to app requests only, so the
 // web's requests stay as they were.
 export function buildRequest (method, path, body, extra) {
+  // pages.js builds its own requests from here, so this guard keeps every
+  // account and page call off the network in the Vitrine too.
+  if (VITRINE) throw toError('indisponivel')
   const init = { method, credentials: 'same-origin', cache: 'no-store', headers: { accept: 'application/json' } }
   if (body !== undefined) {
     init.headers['content-type'] = 'application/json'
@@ -153,6 +160,9 @@ export function buildRequest (method, path, body, extra) {
 // `origin`: a core node's https account origin (pages.js pagesOrigin); the
 // hosted web app passes none and keeps the relative path.
 async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin } = {}) {
+  // The Vitrine has no account service: every call is a definite refusal,
+  // before any request leaves the page.
+  if (VITRINE) throw toError('indisponivel')
   const built = buildRequest(method, path, body, headers)
   const { init } = built
   const base = accountOriginOf(origin)
@@ -314,7 +324,9 @@ export const invitesFinish = async ({ member, nonce, signature }) => {
 
 // Hosted age check (src/age.js). The policy read answers null on any failure;
 // ageGate treats null as required, so a broken read never lets anyone past.
+// The Vitrine has no account service to ask, and the read fails closed.
 export const agePolicy = async () => {
+  if (VITRINE) return { required: false }
   try {
     const data = await call('GET', '/account/age/policy')
     return exactKeys(data, ['required']) && typeof data.required === 'boolean' ? { required: data.required } : null
@@ -340,6 +352,10 @@ const verifiedAnswer = (data) => isAgeProof(data.proof) ? { state: 'verificado',
 // without a recorded band). The object, null when the service has none, or
 // undefined on any failure, so a broken read never changes what the node holds.
 export const ageSince = async () => {
+  // The Vitrine never settles: App.js sends any answer to age.proof and
+  // retries a failed one forever, while a pending read does neither and asks
+  // nothing (the age step is already clear through agePolicy).
+  if (VITRINE) return new Promise(() => {})
   try {
     const data = await call('GET', '/account/age/since')
     if (!exactKeys(data, ['since'])) return undefined

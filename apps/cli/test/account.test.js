@@ -666,6 +666,9 @@ test('createAccountServer refuses an issuer certificate for another association 
   throwsMessage(t, () => createAccountServer({ association: iss.association, origin: ORIGIN, google, store, issuer: { keyPair: iss.keyPair, cert: otherIss.cert } }), /another association or key/, 'cert of another association')
   throwsMessage(t, () => createAccountServer({ association: iss.association, origin: ORIGIN, google, store, issuer: { keyPair: otherIss.keyPair, cert: iss.cert } }), /another association or key/, 'cert for another key')
   throwsMessage(t, () => createAccountServer({ association: iss.association, origin: 'http://varanda.test', google, store, issuer: null }), /origin/, 'http origin')
+  throwsMessage(t, () => createAccountServer({ association: iss.association, origin: 'http://example.test', google, store, issuer: null }), /origin/, 'http origin on another host')
+  throwsMessage(t, () => createAccountServer({ association: iss.association, origin: 'http://192.168.1.2', google, store, issuer: null }), /origin/, 'http origin on a LAN address')
+  t.ok(createAccountServer({ association: iss.association, origin: 'http://localhost:8080', google, store, issuer: null }), 'http://localhost:8080 (the hosted lab) accepted')
   const server = createAccountServer({ association: iss.association, origin: ORIGIN, google, store, issuer: null })
   throwsMessage(t, () => server.listen({ host: '0.0.0.0', port: 0 }), /account-host/, 'any-address bind')
 

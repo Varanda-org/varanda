@@ -18,6 +18,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Laboratório de revisão visual: `apps/cli/scripts/hosted-lab.js` sobe uma instalação hospedada inteira em loopback, com um provedor de entrada falso (`apps/cli/scripts/oauth-stub.js`, Pessoa 1 a 3) para duas pessoas trocarem mensagens em dois perfis do Chrome; a Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`) mostra as telas com dados de exemplo; `apps/app/scripts/review-shots.sh` tira as capturas; o ciclo está em `docs/design-review.md`. A linha de base da caminhada, ainda não executada, está em `docs/verification.md` seção 94, e os detalhes de uso em `docs/development.md` ("Instalação hospedada local" e "Revisão visual").
 - O app abre A Rua direto quando a idade da conta já foi confirmada (provas assinadas pelo serviço e conferidas pelo nó; o aparelho guarda só recusas), com conferência em segundo plano. Detalhes em `docs/verification.md` §82.
 - Interações da Rua no app: curtir com coração cheio e pulo, toque duplo para curtir no app nativo (nunca na web), fio ligando a resposta à publicação na Conversa, pílulas e abas com toque mais claro, e "Republicado" com "Desfazer" por 4 s. Detalhes em `docs/app.md` ("Interações da Rua") e `docs/verification.md` seção 83.
 - Aparência: Ajustes › Aparência com Sistema (padrão), Claro e Escuro, guardada neste aparelho, e um tema escuro quente (verde e creme, nunca preto) no app, na web e na barra de status.

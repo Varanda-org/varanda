@@ -4547,3 +4547,49 @@ Limites desta parte:
 - Abrir a Espiadinha mais de 60 s depois da leitura escondida mostra as linhas na hora, mas sem citações nem contagens, e relê a página (a regra de 60 s de sempre); as citações e contagens chegam com a página nova.
 - No Android e no iOS, a primeira abertura dos Avisos pode mostrar o indicador de puxar para atualizar enquanto as continuações chegam.
 - Nenhuma caixa executada nesta documentação.
+
+## 94. Linha de base da revisão visual (PR chore/assessment-lab)
+
+Primeira caminhada completa pelas telas do ciclo de [design-review.md](design-review.md), nas três plataformas, antes de qualquer correção visual deste PR. Serve de referência: as capturas mostram o ponto de partida, e cada rodada de correção depois compara com elas. A caminhada usa a Vitrine (dados de exemplo) para as telas sem conta e o laboratório hospedado (`apps/cli/scripts/hosted-lab.js`, em [development.md](development.md), "Instalação hospedada local") para a troca de mensagens entre duas pessoas.
+
+Regras que os passos conferem:
+
+- Cada tela sai nos temas claro e escuro, com texto grande e com movimento reduzido, nas plataformas em que a caminhada roda.
+- As capturas ficam fora do git, em `~/Workspace/evidencias/chore/assessment-lab/<plataforma>/`, uma pasta por plataforma, gravadas por `apps/app/scripts/review-shots.sh` com o rótulo `base-<tela>`. O registro do PR cita o caminho de cada uma.
+- Uma caixa só é marcada depois que o passo foi executado e a captura guardada. Nada abaixo foi executado nesta documentação.
+
+Como verificar, antes da caminhada, a partir da raiz:
+
+- `npm run lint`, que tem de passar.
+- `node apps/cli/test/hosted-lab.test.js` e `node apps/app/test/vitrine.test.js`, um arquivo por vez. São os testes do laboratório e da Vitrine; não substituem a caminhada.
+
+Android (AVD `varanda-api36`, primeiro):
+
+- [ ] A Vitrine sobe com `EXPO_PUBLIC_VARANDA_VITRINE=1`, e as telas do ciclo (A Rua, Conversa, Membro, Diário, Conversas e filtros, Mensagem, Comunidade, Grupo, ComunidadeInfo, Avisos, Busca, Publicar, Ajustes e Introdução) abrem com dados de exemplo. Capturas: `~/Workspace/evidencias/chore/assessment-lab/android/`.
+- [ ] Cada tela em tema claro e em tema escuro, com uma crítica curta (o que está bom, o que quebra a referência, a correção proposta) anotada no registro.
+- [ ] Texto grande e movimento reduzido: nenhum texto cortado, sobreposto ou escondido, e nenhum alvo de toque menor que 44 pt.
+
+iOS (simulador iPhone 16e, depois do Android):
+
+- [ ] As mesmas telas, em tema claro e escuro, com a Vitrine; capturas em `~/Workspace/evidencias/chore/assessment-lab/ios/`.
+- [ ] Texto grande e movimento reduzido, com a mesma conferência de corte, sobreposição e alvo de toque do Android.
+
+Web (Chrome, depois do iOS):
+
+- [ ] As mesmas telas em 390 px e em 1280 px, nos temas claro e escuro, com a Vitrine. Capturas em `~/Workspace/evidencias/chore/assessment-lab/web/`.
+- [ ] Laboratório hospedado com dois perfis do Chrome: Pessoa 1 e Pessoa 2 entram, trocam uma mensagem direta e uma publicação em grupo, e as duas telas mostram o que foi enviado. Registrar o número de cada passo que falhou, se algum.
+- [ ] Texto grande e movimento reduzido na web, sem corte nem sobreposição.
+
+Entrada nativa real (caixa separada: não é parte da revisão visual):
+
+- [ ] entrada nativa real: entrar com passkey e conta no app instalado, no Android e no iOS. Pré-requisitos que ainda faltam:
+  - iOS: o domínio associado da conta Apple Developer, sem o qual a passkey não entra.
+  - Android: o `assetlinks.json` da instalação precisa associar o build de debug (`app.varanda.debug`), o que a instalação de produção não faz e não deve fazer com a chave pública de debug. Até lá, o login com conta no Android usa o APK de preview do EAS (ver a seção Android de [development.md](development.md)).
+  - A configuração hospedada do app nativo exige `https`.
+
+Limites desta linha de base:
+
+- O laboratório só troca mensagens diretas no Chrome: o nó do aparelho recusa `dm.*` (`packages/core/lib/session.js`, linhas 614 a 621).
+- Uma caminhada aprovada não libera o login nativo real: esse é o portão separado, marcado acima.
+- A caminhada não corrige nada. As correções entram em rodadas posteriores, cada uma com as capturas da rodada anterior como comparação.
+- Nenhuma caixa acima foi executada nesta documentação.
