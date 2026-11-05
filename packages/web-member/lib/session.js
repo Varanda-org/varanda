@@ -128,9 +128,20 @@
 // takes part by itself in the communities and groups its diary binds
 // (member-ops deviceUpkeepPlan / deviceUpkeep: a CW and the Geral writer
 // here, epoch keys handed by the creator's device to the account's new
-// writers). ONE serial pass at a time, never inside onEvent: it plans under
-// withStore (the fold opens group cores the borrowed path does not serve),
-// and only a non-empty plan writes, through the write gate, then pushes,
+// writers). ONE serial pass at a time, never inside onEvent. A pass plans
+// in full under withStore (the fold opens group cores the borrowed path
+// does not serve, and the shares a distributor owes show only there),
+// with one exception: the echo of a write made on this device (an own
+// length equal to its last write: a post, a like, a follow), after the
+// session's first full plan, with no failure, transient skip or unarmed
+// 'group-writer' since, and a full plan younger than upkeepFullMaxAgeMs,
+// first asks on the borrowed diary (withCores) whether a root lacks a
+// bound writer of this device, and ends there without stopping the run.
+// Any other trigger arriving before that pass makes it plan in full. That
+// is safe: a write here that creates share work (an admit, a role change)
+// lands in a group core and arrives as 'groups-changed', which plans in
+// full, and a diary join is enrol work the precheck sees.
+// Only a non-empty plan writes, through the write gate, then pushes,
 // like a diary write. It is armed by a NEW own length on a user's
 // continuous run (another device appended, or a write here landed; the
 // pass's own write does not re-arm it, unless the write gate brought blocks
@@ -279,6 +290,7 @@ const { signAge } = require('@varanda/core/lib/age')
 const { signWallet, opHash } = require('@varanda/core/lib/wallet-proof')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
+const { verifyAgeVerified, verifyAgeSince } = require('@varanda/core/lib/age-proof')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const member = require('./member-ops')
@@ -298,6 +310,7 @@ const CLOSED_MESSAGE = 'sessão encerrada'
 const INTERNAL_MESSAGE = 'erro interno'
 const NOT_SYNCED_MESSAGE = 'sincronize com o semeador antes de publicar'
 const BAD_USERNAME_RECORD = 'registro de nome inválido'
+const BAD_AGE_PROOF = 'comprovante de idade inválido'
 const OLD_USERNAME_RECORD = 'registro de nome antigo'
 const SELF_REPORT = 'não é possível denunciar a própria chave'
 const BAD_REPORT = 'denúncia inválida'
@@ -337,6 +350,8 @@ const UPKEEP_DELAY_MS = 1500
 const MAX_UPKEEP_TOTAL = 3 * MAX_UPKEEP_PASSES
 // Writer keys whose 'group-writer' armed the upkeep, per session.
 const MAX_UPKEEP_WRITERS = 512
+// The longest the upkeep trusts the precheck before planning in full again.
+const UPKEEP_FULL_MAX_AGE_MS = 10 * 60 * 1000
 // The lease (see the header): the gap after an idle end, how long a run
 // waits for an unconfirmed media core, and the longest a borrow holds it.
 const LEASE_GAP_MS = 45000
@@ -506,6 +521,7 @@ function readyWithin (ready, ms) {
 // its gap and its media wait. noClear: keep the bytes of deleted blocks
 // (the browser's VARANDA_NO_CLEAR kill switch; tombstones still hide them).
 // upkeepDelayMs: the device upkeep's coalescing delay (tests).
+// upkeepFullMaxAgeMs: the age after which it plans in full again (tests).
 function createBrowserSession ({
   storage,
   association,
@@ -522,7 +538,8 @@ function createBrowserSession ({
   leaseGapMs = LEASE_GAP_MS,
   leaseMediaMaxMs = LEASE_MEDIA_MAX_MS,
   noClear = false,
-  upkeepDelayMs = UPKEEP_DELAY_MS
+  upkeepDelayMs = UPKEEP_DELAY_MS,
+  upkeepFullMaxAgeMs = UPKEEP_FULL_MAX_AGE_MS
 } = {}) {
   const cfg = checkConfig({ storage, association, seederUrl, createSocket })
   const reportInternal = (err) => {
@@ -563,9 +580,33 @@ function createBrowserSession ({
   let borrows = 0
   let borrowedSince = null
   // Own identity, cached once known (the key never changes; block 0 is
-  // append-only, so only `memberCert: true` is cached).
+  // append-only, so only `memberCert: true` is cached). certDate is the
+  // verified certificate's date; null while certKnown came from a path that
+  // did not see the certificate (own-recovered), so identity() reads once.
   let ownKey = null
   let certKnown = false
+  let certDate = null
+  // The cached certificate's issuer (null for a v1 certificate): node.info
+  // checks it against the current revoked issuers on every call.
+  let certIssuer = null
+  // The stored age attestations (kv ageVerified / ageSince), re-verified
+  // from storage once per identity (kv is device-owner writable) and then
+  // cached like certDate: the age-verified date for the own key and the
+  // age-since `since` and `date`, each null when absent or not verifying.
+  // The age-since vouches only for certificates dated in [since, date] and
+  // signed by its own issuer, so its issuer is cached beside them.
+  let ageVerifiedDate = null
+  let ageSinceDate = null
+  let ageSinceUntil = null
+  let ageSinceIssuer = null
+  let ageChecked = false
+  // The revoked issuers both attestations are checked against (as member
+  // certificates and username records are), cached per stored blocklist
+  // snapshot: a snapshot a sync run adopted after the first read drops the
+  // age cache too, so a revoked issuer's attestation reads as null on the
+  // next node.info.
+  let ageSnapshotKey = null
+  let ageRevoked = new Set()
   // Identity changes (reset, setKeyPair, clearKeyPair) called and not yet
   // settled: counted synchronously on the call, before they queue, so a
   // peek.read / notices.list arriving while one waits on the chain (ownKey
@@ -610,6 +651,13 @@ function createBrowserSession ({
   const upkeepWriters = new Set()
   // Bumped by every arming: a pass disarms only the arming it ran for.
   let upkeepArming = 0
+  // Whether a full plan (withStore) ran in this session, whether the next
+  // pass must plan in full anyway (header), when the last full plan ran,
+  // and whether the next pass is only the echo of a write made here.
+  let shareChecked = false
+  let upkeepFull = false
+  let upkeepFullAt = 0
+  let upkeepQuick = false
   // The own length of the last fold the continuous run was restarted for.
   let lastFoldLength = null
   // Last own-sync verdict of a run: the own diary held what the verified
@@ -716,6 +764,9 @@ function createBrowserSession ({
     limits: syncOptions.dm
   })
   let dmLastPull = 0
+  let dmRecheck = false
+  let dmRecheckTries = 0
+  const DM_RECHECK_TRIES = 3
 
   // The sync loop's direct message tick: while a continuous run lives and
   // the identity is unlocked with a published dm-key, a pull every
@@ -793,14 +844,26 @@ function createBrowserSession ({
                 if (!r.ownSynced) {
                   r.ownSynced = true
                   try { onOwnSynced(r) } catch {}
-                  if (!once && !internal) dmTick()
+                  if (!once && !internal) {
+                    dmTick()
+                    if (dmRecheck) {
+                      dmRecheck = false
+                      dmRefresh({ recheck: true }).catch(noop)
+                    }
+                  }
                   if (!once && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
                 }
                 if (!once && !internal && Number.isSafeInteger(ev.length)) {
                   // Kept while locked too: the link reports each length once,
                   // so the unlock arms from it (setKeyPair).
                   r.ownLength = ev.length
-                  if (ev.length !== upkeepLength) armUpkeep(ev.length)
+                  if (ev.length !== upkeepLength) {
+                    // The echo of a write made here may take the precheck,
+                    // unless another trigger already queued a pass.
+                    const pending = upkeepTimer !== null || upkeepQueued
+                    armUpkeep(ev.length)
+                    if (!pending && localLength !== null && ev.length === localLength) upkeepQuick = true
+                  }
                 }
                 return
               case 'group-skipped':
@@ -809,7 +872,10 @@ function createBrowserSession ({
                 return
               case 'groups-changed':
                 if (typeof ev.group === 'string' && HEX64.test(ev.group)) send('groups.changed', { group: ev.group }, epoch)
-                // What a skipped root waited for may have arrived.
+                // What a skipped root waited for may have arrived. A group
+                // change can create share work the precheck cannot see, so
+                // even the next echo of a local write plans in full.
+                if (!once && !internal) upkeepFull = true
                 if (!once && !internal && upkeepRoom()) scheduleUpkeep()
                 return
               case 'group-writer':
@@ -819,6 +885,10 @@ function createBrowserSession ({
                 if (!once && !internal && keyPair !== null && groupPrf !== null && typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer) && upkeepWriters.size < MAX_UPKEEP_WRITERS) {
                   upkeepWriters.add(ev.writer)
                   armUpkeep(upkeepLength)
+                } else if (typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer)) {
+                  // Not armed for (a once or internal run, the key cap,
+                  // locked): a later echo still plans the shares in full.
+                  upkeepFull = true
                 }
                 return
               case 'group-synced':
@@ -1360,10 +1430,17 @@ function createBrowserSession ({
   // ---- identity ----
 
   async function identity () {
-    if (ownKey !== null && certKnown) return { publicKey: ownKey, memberCert: true }
-    const r = await withStore((c) => member.identityState(c))
+    if (ownKey !== null && certKnown && certDate !== null) return { publicKey: ownKey, memberCert: true, memberCertDate: certDate, memberCertIssuer: certIssuer }
+    // Only the date is missing (own-recovered saw no certificate): a read on
+    // the live run's cores, so node.info never stops a sync for it.
+    const read = ownKey !== null && certKnown ? withCores : withStore
+    const r = await read((c) => member.identityState(c))
     if (r.publicKey !== null) ownKey = r.publicKey
-    if (r.memberCert) certKnown = true
+    if (r.memberCert) {
+      certKnown = true
+      certDate = r.memberCertDate
+      certIssuer = r.memberCertIssuer
+    }
     return r
   }
 
@@ -1402,6 +1479,46 @@ function createBrowserSession ({
       noticing = null
     }
     return p().finally(() => { identityPending-- })
+  }
+
+  // -> { ageVerifiedDate, ageSince, ageSinceUntil } for the own key `own`
+  // (null: no identity, nothing cached). Kv reads only: never opens a store,
+  // so it never preempts a sync. An object that does not verify reads as null.
+  async function ageState (own) {
+    if (own === null) return { ageVerifiedDate: null, ageSince: null, ageSinceUntil: null }
+    const revokedIssuers = await ageRevokedIssuers()
+    if (!ageChecked) {
+      const verified = await store.readAgeVerified(storage)
+      const since = await store.readAgeSince(storage)
+      ageVerifiedDate = verified !== null && verifyAgeVerified(verified, own, cfg.association, { revokedIssuers }).ok ? verified.date : null
+      const sinceOk = since !== null && verifyAgeSince(since, cfg.association, { revokedIssuers }).ok
+      ageSinceDate = sinceOk ? since.since : null
+      ageSinceUntil = sinceOk ? since.date : null
+      ageSinceIssuer = sinceOk ? since.issuer.toLowerCase() : null
+      ageChecked = true
+    }
+    // An issuer vouches only for its own certificates: the age-since counts
+    // for the cached block-0 v2 certificate of the same issuer, never for one
+    // of another issuer or a v1 certificate (certIssuer null).
+    const bound = ageSinceIssuer !== null && certKnown && typeof certIssuer === 'string' && certIssuer.toLowerCase() === ageSinceIssuer
+    return { ageVerifiedDate, ageSince: bound ? ageSinceDate : null, ageSinceUntil: bound ? ageSinceUntil : null }
+  }
+
+  // -> the stored snapshot's revoked issuers (empty when none verifies). The
+  // cache key is the snapshot's identity (moderator, moderatorDate, seq and
+  // signature: every adopted snapshot differs in one of them), so a large
+  // snapshot is neither serialized nor verified on every read; a change
+  // re-verifies the attestations on the next read.
+  async function ageRevokedIssuers () {
+    const data = await store.readBlocklist(storage)
+    const sn = data === null ? null : data.snapshot
+    const key = sn === null ? '' : [sn.moderator, sn.moderatorDate, sn.seq, sn.signature].map(String).join('|')
+    if (key !== ageSnapshotKey) {
+      ageRevoked = (await member.moderation(storage, cfg.association)).revokedIssuers
+      ageSnapshotKey = key
+      ageChecked = false
+    }
+    return ageRevoked
   }
 
   async function requireOwnKey () {
@@ -1578,6 +1695,8 @@ function createBrowserSession ({
   // One pass per timer: the delay turns a burst of triggers into one stop of
   // the continuous run.
   function scheduleUpkeep () {
+    // Every trigger but an own write's echo (which sets it after) plans in full.
+    upkeepQuick = false
     if (upkeepQueued || upkeepTimer !== null || closed || keyPair === null || groupPrf === null) return
     upkeepTimer = setTimeout(() => {
       upkeepTimer = null
@@ -1597,6 +1716,10 @@ function createBrowserSession ({
     upkeepRearmed = false
     upkeepWanted = false
     upkeepWriters.clear()
+    shareChecked = false
+    upkeepFull = false
+    upkeepFullAt = 0
+    upkeepQuick = false
   }
 
   // The pass never calls another serial handler and never runs inside
@@ -1617,6 +1740,25 @@ function createBrowserSession ({
     }
     upkeepWanted = false
     const arming = upkeepArming
+    // The echo of a write made here, with every bound root served by a
+    // writer of this device, has nothing a full plan would find: the run is
+    // not stopped for it. A precheck that throws plans in full, which
+    // reports the failure.
+    const quick = upkeepQuick && shareChecked && !upkeepFull && Date.now() - upkeepFullAt < upkeepFullMaxAgeMs
+    upkeepQuick = false
+    if (!quick) {
+      upkeepFull = false
+    } else {
+      let needed = true
+      try { needed = await withCores((c) => member.deviceUpkeepNeeded(c)) } catch {}
+      if (!needed) {
+        // A full-plan trigger that arrived during the await keeps the arming
+        // so its scheduled pass still runs.
+        if (arming === upkeepArming && !upkeepFull) upkeepArmed = false
+        return
+      }
+      try { checkGroupOperation(epoch, generation) } catch { return }
+    }
     upkeepPasses++
     upkeepTotal++
     groupWriting = true
@@ -1624,9 +1766,14 @@ function createBrowserSession ({
     const stale = () => closed || epoch !== connection || generation !== groupEpoch || keyPair === null
     try {
       const { plan, planLength } = await withStore(async (c) => ({ plan: await member.deviceUpkeepPlan(c), planLength: await ownLength(c) }))
+      shareChecked = true
+      upkeepFullAt = Date.now()
       // Only what a later sync can bring keeps the arming: a root skipped
       // for good (reserve, full, orphan, status) does not.
       let waiting = plan.skipped.filter((x) => x.transient === true).map((x) => x.root)
+      // A transient skip may be a share (its root lists here, so the
+      // precheck passes it): even an echo plans in full until it resolves.
+      if (waiting.length > 0) upkeepFull = true
       let arrived = false
       let failed = 0
       if (plan.enrol.length > 0 || plan.share.length > 0) {
@@ -1683,7 +1830,12 @@ function createBrowserSession ({
         const changed = new Set(result.changed)
         failed = result.failed.length
         waiting = waiting.filter((root) => !changed.has(root)).concat(result.failed.map((f) => f.root))
-        if (failed > 0) warning(UPKEEP_WARNING, epoch)
+        if (failed > 0) {
+          // A failed share is invisible to the precheck: even an echo
+          // plans in full until a pass succeeds.
+          upkeepFull = true
+          warning(UPKEEP_WARNING, epoch)
+        }
         checkGroupOperation(epoch, generation)
         await pushAfterWrite()
       }
@@ -1693,6 +1845,7 @@ function createBrowserSession ({
         if (upkeepRoom()) scheduleUpkeep()
       } else if (waiting.length === 0 && arming === upkeepArming) upkeepArmed = false
     } catch (err) {
+      upkeepFull = true
       if (!stale()) {
         warning(UPKEEP_WARNING, epoch)
         // Still armed: another pass of this bounded arming tries again.
@@ -1750,10 +1903,25 @@ function createBrowserSession ({
     return best === null ? { box: null, gen: null } : { box: best.box, gen: best.gen }
   }
 
-  // dm.enable's body: the dm-key through the write gate, kv dmKey after.
+  // Read the live run's cores so a current dm-key costs no write gate or
+  // preemption. An append still goes through the gate; a check before
+  // catch-up is confirmed once the continuous run first catches up.
   async function dmEnable (epoch) {
     await requireDm()
     const { box, gen } = dmEngine.boxHex()
+    const state = await withCores(async (c) => {
+      const length = await member.withIdentity(c, ({ diary }) => diary.length)
+      if (length === 0) return 'empty'
+      return await member.dmKeyStale(c, { box, gen }) ? 'stale' : 'current'
+    })
+    if (state === 'current') {
+      if (!trackingOwn()) dmRecheck = true
+      if ((await store.readDmKey(storage)) === null) await store.writeDmKey(storage, gen)
+      // Only a write made in this session can still be waiting for its push
+      // (an earlier dm.enable whose push failed); a fresh start pushes nothing.
+      if (localLength !== null) await pushAfterWrite()
+      return { box, gen, seq: null }
+    }
     await ensureCaughtUp(epoch)
     const r = await withStore((c) => member.dmKeyEnsure(c, { box, gen }))
     if (r.seq !== null) wrote(r.seq)
@@ -1762,17 +1930,28 @@ function createBrowserSession ({
     return r
   }
 
-  // Once after an unlock with a dm-key: an own dm-key fallen out of the
-  // newest member-ops DM_KEY_REFRESH_BLOCKS is appended again through the
-  // write gate (dm.enable's path); otherwise nothing runs. A failure is a
-  // warning only.
-  const dmRefresh = serial(async (_, epoch) => {
+  // Read the live run's cores after unlock, and after the next catch-up
+  // when dm.enable checked an unsynced diary, so a current key keeps the
+  // run alive. A stale key still appends through dm.enable's write gate.
+  // A failure is a warning; a failed check that came from a catch-up is armed
+  // again for the next catch-up, at most DM_RECHECK_TRIES times per identity,
+  // so a dropped link cannot leave the key outside readers' scan window.
+  const dmRefresh = serial(async (params, epoch) => {
+    const recheck = params !== null && typeof params === 'object' && params.recheck === true
     try {
       if (keyPair === null || !dmEngine.unlocked()) return
       const { box, gen } = dmEngine.boxHex()
-      if (!(await withStore((c) => member.dmKeyStale(c, { box, gen })))) return
+      if (!(await withCores((c) => member.dmKeyStale(c, { box, gen })))) {
+        // Judged on a diary that may be behind: confirm after the next catch-up.
+        if (!trackingOwn()) dmRecheck = true
+        return
+      }
       await dmEnable(epoch)
     } catch {
+      if (recheck && dmRecheckTries < DM_RECHECK_TRIES) {
+        dmRecheckTries++
+        dmRecheck = true
+      }
       warning('aviso: chave de mensagens não renovada')
     }
   })
@@ -1781,11 +1960,16 @@ function createBrowserSession ({
 
   const handlers = {
     'node.info': serial(async () => {
-      const { publicKey, memberCert } = await identity()
+      const { publicKey, memberCert, memberCertDate, memberCertIssuer } = await identity()
       restartWhenIdle(1)
+      // The date vouches for the age policy, so a certificate whose issuer
+      // was revoked after it was cached answers null (memberCert unchanged).
+      const revoked = memberCertDate !== null && memberCertIssuer !== null && (await ageRevokedIssuers()).has(memberCertIssuer.toLowerCase())
       return {
         publicKey,
         memberCert,
+        memberCertDate: revoked ? null : memberCertDate,
+        ...(await ageState(publicKey)),
         followCount: (await store.readFollows(storage)).length,
         sync: syncState(),
         publicDht: false,
@@ -1816,6 +2000,9 @@ function createBrowserSession ({
       await ensureCaughtUp(epoch)
       const r = await withStore((c) => member.certAdd(c, cert))
       certKnown = true
+      // certAdd verified this certificate and block 0 now equals it.
+      certDate = cert.date
+      certIssuer = typeof cert.issuer === 'string' ? cert.issuer : null
       if (r.appended) wrote(r.seq)
       await pushAfterWrite()
       // Block 0 exists now: follows queued before it can reach the diary.
@@ -1928,6 +2115,38 @@ function createBrowserSession ({
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
       const signature = signAge({ action, nonce, member: own, association: cfg.association }, keyPair)
       return { signature }
+    }),
+
+    // Stores the account service's signed age attestations (docs/rpc.md
+    // 5.83) after verifying them against the own key and the association.
+    // Nothing is signed, so no unlock and no certificate (the age step runs
+    // before the link). Both objects are verified before anything is
+    // written, so a bad pair stores nothing.
+    'age.proof': serial(async ({ verified, since }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      const revokedIssuers = await ageRevokedIssuers()
+      if (verified !== undefined && !verifyAgeVerified(verified, own, cfg.association, { revokedIssuers }).ok) throw new UsageError(BAD_AGE_PROOF)
+      if (since !== undefined && since !== null) {
+        if (!verifyAgeSince(since, cfg.association, { revokedIssuers }).ok) throw new UsageError(BAD_AGE_PROOF)
+        // Monotonic: a replayed older age-since never replaces a newer one
+        // that still verifies, or certificates issued while the check was
+        // off would vouch again.
+        const stored = await store.readAgeSince(storage)
+        if (stored !== null && verifyAgeSince(stored, cfg.association, { revokedIssuers }).ok && Date.parse(since.date) < Date.parse(stored.date)) throw new UsageError(BAD_AGE_PROOF)
+      }
+      // Dropped first (a failed write leaves no stale cache), then re-read
+      // and re-verified against the snapshot stored now, which a sync may
+      // have replaced since the check above.
+      ageChecked = false
+      if (verified !== undefined) await store.writeAgeVerified(storage, verified)
+      if (since !== undefined) await store.writeAgeSince(storage, since)
+      return await ageState(own)
     }),
 
     // Signs the wallet statement with the in-memory key (docs/rpc.md 5.35),
@@ -2422,6 +2641,8 @@ function createBrowserSession ({
     groupPrf = null
     boxKeys.lock()
     dmEngine.lock()
+    dmRecheck = false
+    dmRecheckTries = 0
     for (const pair of groupPairs) zeroPair(pair)
     groupPairs.clear()
     // The next own-synced after an unlock (or a reload) arms afresh.
@@ -2470,6 +2691,13 @@ function createBrowserSession ({
       synced = false
       ownKey = null
       certKnown = false
+      certDate = null
+      certIssuer = null
+      ageVerifiedDate = null
+      ageSinceDate = null
+      ageSinceUntil = null
+      ageSinceIssuer = null
+      ageChecked = false
       if (prfCopy !== null) {
         // Without the box pair private groups read as locked; the identity
         // itself is unlocked either way.
@@ -2614,6 +2842,16 @@ function createBrowserSession ({
     syncIntent = null
     kickLease()
     await stopRun('stopped')
+    // Dropped before any delete, so a failed reset never serves a cached
+    // certificate date or age attestation for data it deleted.
+    certKnown = false
+    certDate = null
+    certIssuer = null
+    ageVerifiedDate = null
+    ageSinceDate = null
+    ageSinceUntil = null
+    ageSinceIssuer = null
+    ageChecked = false
     await storage.deleteCore(store.DIARY)
     store.forgetLegacy(storage)
     await store.deleteMediaCores(storage)
@@ -2624,8 +2862,8 @@ function createBrowserSession ({
     // A pull, send or top-up still unwinding must not see its store go.
     await dmEngine.idle()
     await store.deleteDmData(storage)
+    await store.deleteAgeProofs(storage)
     ownKey = null
-    certKnown = false
     diaryInfo = null
     synced = false
     unpushed = true

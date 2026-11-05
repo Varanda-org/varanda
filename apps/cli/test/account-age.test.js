@@ -15,6 +15,7 @@ const crypto = require('hypercore-crypto')
 const { createIssuerCert } = require('@varanda/core/lib/cert')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { signAge } = require('@varanda/core/lib/age')
+const { verifyAgeVerified, verifyAgeSince } = require('@varanda/core/lib/age-proof')
 const { signTerms, TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { signInvite } = require('@varanda/core/lib/invite')
 const { openAccountStore } = require('../lib/account/store')
@@ -22,6 +23,10 @@ const { openAgeStore } = require('../lib/account/age-store')
 const { openInvitesStore, inviteId } = require('../lib/account/invites-store')
 const { createDidit } = require('../lib/account/didit')
 const { createAccountServer, COOKIE } = require('../lib/account/server')
+const { createAgeRoutes } = require('../lib/account/age-routes')
+const { settleAgeCheck, readAgeCheck, startAgeCheck, directoryFloor } = require('../lib/account/age-check-state')
+const { readEnv } = require('../lib/commands/account')
+const { UsageError } = require('../lib/cli')
 const { startFakeDidit, loopbackFetch, SESSION_TOKEN } = require('./helpers/fake-didit')
 const { tmpDir } = require('./helpers/net')
 
@@ -81,8 +86,8 @@ async function waitFor (fn, ms = 3000) {
 
 // `age: false` leaves didit and ages null. `inviting` opens an invites
 // sidecar; `maxMembers` caps the directory. `c.guardOk = false` makes every
-// age.json write fail.
-async function setup (t, { age = true, inviting = false, maxMembers = null, dailyLimit, diditTimeoutMs, burst } = {}) {
+// age.json write fail. `withIssuer: false` builds a service with no issuer.
+async function setup (t, { age = true, inviting = false, maxMembers = null, dailyLimit, diditTimeoutMs, burst, since, withIssuer = true, ageCheck, floor } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = { offset: 0, guardOk: true }
   c.now = () => Date.now() + c.offset
@@ -103,7 +108,7 @@ async function setup (t, { age = true, inviting = false, maxMembers = null, dail
     origin: ORIGIN,
     google,
     store,
-    issuer: { keyPair: iss.keyPair, cert: iss.cert },
+    issuer: withIssuer ? { keyPair: iss.keyPair, cert: iss.cert } : null,
     invites,
     log: (e) => logs.push(JSON.stringify(e)),
     now: c.now
@@ -113,6 +118,10 @@ async function setup (t, { age = true, inviting = false, maxMembers = null, dail
     opts.ages = ages
   }
   if (dailyLimit !== undefined) opts.ageDailyLimit = dailyLimit
+  if (since !== undefined) opts.ageSince = since
+  if (ageCheck !== undefined) opts.ageCheck = ageCheck
+  // `floor(store, ages, linked)`: the directory floor as a start computes it.
+  if (floor !== undefined) opts.ageDirectoryFloor = await floor(store, ages, linked)
   if (burst !== undefined) {
     opts.burst = burst
     opts.ratePerSecond = burst
@@ -266,6 +275,338 @@ test('age off: policy says not required, the routes answer 503, the gates stay o
   t.is(s.creates().length, 0, 'Didit never called')
 })
 
+const SINCE = '2026-10-29T00:00:00.000Z'
+
+// Installed app versions refuse a policy body with any key besides
+// `required`, so since lives on its own route.
+test('age on with since: the policy stays exactly { required: true }', async (t) => {
+  const s = await setup(t, { since: SINCE })
+  const policy = await s.api('GET', '/account/age/policy')
+  t.is(policy.status, 200)
+  t.alike(policy.body, { required: true })
+  t.absent('since' in policy.body)
+})
+
+const BEFORE = '2026-10-28T09:00:00.000Z'
+const AFTER = '2026-10-30T15:30:00.000Z'
+
+test('age since route: null until the first band, then signed and never earlier than the day after that band', async (t) => {
+  const s = await setup(t, { since: SINCE })
+  const none = await s.api('GET', '/account/age/since')
+  t.is(none.status, 200)
+  t.alike(none.body, { since: null }, 'no band on record yet')
+
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: AFTER })
+  const r = await s.api('GET', '/account/age/since')
+  t.is(r.status, 200)
+  t.alike(Object.keys(r.body), ['since'])
+  t.is(r.body.since.type, 'age-since')
+  t.is(r.body.since.since, '2026-10-31T00:00:00.000Z', 'the first band is later than since: the next UTC day after it, never its own timestamp')
+  t.alike(verifyAgeSince(r.body.since, s.iss.association), { ok: true })
+  t.is(verifyAgeSince(r.body.since, b4a.toString(crypto.keyPair().publicKey, 'hex')).reason, 'untrusted-association')
+  t.alike((await s.api('GET', '/account/age/since')).body, r.body, 'the same object on the next call')
+
+  // An earlier band moves the floor: a new value, signed anew.
+  await s.ages.record({ member: member().hex, band: '16-17', method: 'didit', checkedAt: BEFORE })
+  const moved = await s.api('GET', '/account/age/since')
+  t.is(moved.body.since.since, SINCE, 'a band before since: since itself')
+  t.alike(verifyAgeSince(moved.body.since, s.iss.association), { ok: true })
+})
+
+test('age since route: a first band before since answers since', async (t) => {
+  const s = await setup(t, { since: SINCE })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+  const r = await s.api('GET', '/account/age/since')
+  t.is(r.body.since.since, SINCE)
+  t.alike(verifyAgeSince(r.body.since, s.iss.association), { ok: true })
+})
+
+test('age since route: an unavailable age store is a failure, never null', async (t) => {
+  const s = await setup(t, { since: SINCE })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: AFTER })
+  s.ages.fail()
+  const r = await s.api('GET', '/account/age/since')
+  t.is(r.status, 503)
+  t.alike(r.body, { error: 'indisponivel' })
+  t.ok(s.logs.includes(JSON.stringify({ event: 'idade', reason: 'armazenamento-indisponivel' })))
+})
+
+test('age since route: the floor is the next UTC day after the earliest band, even at midnight', async (t) => {
+  const s = await setup(t, { since: SINCE })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: '2026-11-01T00:00:00.000Z' })
+  t.is((await s.api('GET', '/account/age/since')).body.since.since, '2026-11-02T00:00:00.000Z')
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: '2026-10-30T23:59:59.999Z' })
+  t.is((await s.api('GET', '/account/age/since')).body.since.since, '2026-10-31T00:00:00.000Z')
+})
+
+test('age since route: a fresh signing date, the signed object cached for at most 60 s', async (t) => {
+  const s = await setup(t, { since: SINCE })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+  const first = (await s.api('GET', '/account/age/since')).body.since
+  t.ok(Math.abs(new Date(first.date).getTime() - s.c.now()) < 5000, 'dated now')
+  s.c.offset += 30 * 1000
+  t.alike((await s.api('GET', '/account/age/since')).body.since, first, 'within 60 s: the same object')
+  s.c.offset += 31 * 1000
+  const later = (await s.api('GET', '/account/age/since')).body.since
+  t.is(later.since, first.since)
+  t.ok(new Date(later.date).getTime() >= new Date(first.date).getTime() + 60 * 1000, 'past 60 s: re-signed with a later date')
+  t.alike(verifyAgeSince(later, s.iss.association), { ok: true })
+  t.alike((await s.api('GET', '/account/age/since')).body.since, later, 'cached again')
+})
+
+test('age check state: a missing file with a configured since uses that since', async (t) => {
+  const dir = path.join(tmpDir(t), 'state')
+  fs.mkdirSync(dir, { recursive: true })
+  const at = Date.parse('2026-11-03T12:00:00.000Z')
+  const settled = settleAgeCheck(dir, { on: true, since: SINCE, now: () => at })
+  t.alike(settled, { ok: true, on: true, enabledAt: SINCE })
+  t.alike(readAgeCheck(dir).state, { v: 1, on: true, enabledAt: SINCE })
+  t.is(fs.statSync(path.join(dir, 'age-check.json')).mode & 0o777, 0o600)
+  t.alike(settleAgeCheck(path.join(tmpDir(t), 'nosince'), { on: true, now: () => at }).enabledAt, '2026-11-03T12:00:00.000Z', 'no since: now')
+
+  const s = await setup(t, { since: SINCE, ageCheck: settled })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+  t.is((await s.api('GET', '/account/age/since')).body.since.since, SINCE)
+})
+
+test('age check state: off then on moves enabledAt to the re-enable time and the served since with it', async (t) => {
+  const dir = path.join(tmpDir(t), 'state')
+  fs.mkdirSync(dir, { recursive: true })
+  const T1 = '2026-11-01T08:00:00.000Z'
+  const T2 = '2026-11-02T10:00:00.000Z'
+  const T3 = '2026-11-03T10:00:00.000Z'
+  t.is(settleAgeCheck(dir, { on: true, since: SINCE, now: () => Date.parse(T1) }).enabledAt, SINCE)
+  t.alike(settleAgeCheck(dir, { on: false, now: () => Date.parse(T1) }), { ok: true, on: false, enabledAt: null })
+  t.alike(readAgeCheck(dir).state, { v: 1, on: false, enabledAt: null })
+  // The same old VARANDA_AGE_SINCE configured again: the re-enable time wins.
+  const settled = settleAgeCheck(dir, { on: true, since: SINCE, now: () => Date.parse(T2) })
+  t.alike(settled, { ok: true, on: true, enabledAt: T2 })
+  t.alike(settleAgeCheck(dir, { on: true, since: SINCE, now: () => Date.parse(T3) }), settled, 'a later on start keeps it')
+
+  const s = await setup(t, { since: SINCE, ageCheck: settled })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+  const r = await s.api('GET', '/account/age/since')
+  t.is(r.body.since.since, T2)
+  t.ok(r.body.since.since >= settled.enabledAt)
+  t.alike(verifyAgeSince(r.body.since, s.iss.association), { ok: true })
+})
+
+test('age check state: an invalid file answers the since route 503 and is left alone while on', async (t) => {
+  const dir = path.join(tmpDir(t), 'state')
+  fs.mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, 'age-check.json')
+  for (const bad of ['not json', '{"v":1,"on":true,"enabledAt":null}', '{"v":1,"on":false,"enabledAt":"2026-11-01T00:00:00.000Z"}', '{"v":2,"on":false,"enabledAt":null}']) {
+    fs.writeFileSync(file, bad)
+    t.alike(readAgeCheck(dir), { error: 'indisponivel' }, bad)
+    t.alike(settleAgeCheck(dir, { on: true, since: SINCE }), { ok: false }, bad)
+    t.is(fs.readFileSync(file, 'utf8'), bad, 'untouched')
+  }
+  const s = await setup(t, { since: SINCE, ageCheck: { ok: false } })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+  for (let i = 0; i < 2; i++) {
+    const r = await s.api('GET', '/account/age/since')
+    t.is(r.status, 503)
+    t.alike(r.body, { error: 'indisponivel' })
+  }
+  t.is(s.logs.filter((l) => l === JSON.stringify({ event: 'idade', reason: 'estado-indisponivel' })).length, 1, 'logged once')
+  // An off start records the off period even over an invalid file.
+  t.alike(settleAgeCheck(dir, { on: false }), { ok: true, on: false, enabledAt: null })
+  t.alike(readAgeCheck(dir).state, { v: 1, on: false, enabledAt: null })
+})
+
+test('age directory floor: an unbanded link dated after since raises the served since to just after it', async (t) => {
+  const s = await setup(t, { since: SINCE, floor: (store, ages) => directoryFloor(store, ages) })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+  const linkedAt = s.store.exportLinks().find((l) => l.member === s.linked.hex).linkedAt
+  t.ok(linkedAt > SINCE)
+  const r = await s.api('GET', '/account/age/since')
+  t.is(r.status, 200)
+  t.is(r.body.since.since, new Date(Date.parse(linkedAt) + 1).toISOString(), 'the unbanded certificate itself is not covered')
+  t.alike(verifyAgeSince(r.body.since, s.iss.association), { ok: true })
+})
+
+test('age directory floor: a banded link leaves the configured since', async (t) => {
+  const s = await setup(t, {
+    since: SINCE,
+    floor: async (store, ages, linked) => {
+      await ages.record({ member: linked.hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+      const floor = directoryFloor(store, ages)
+      t.alike(floor, { ok: true, floor: null })
+      return floor
+    }
+  })
+  const r = await s.api('GET', '/account/age/since')
+  t.is(r.body.since.since, SINCE)
+})
+
+test('age directory floor: a directory or age store that cannot answer at start is a 503, never a lower since', async (t) => {
+  const s = await setup(t, { since: SINCE, floor: (store, ages) => directoryFloor({ exportLinks () { throw new Error('indisponivel') } }, ages) })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+  for (let i = 0; i < 2; i++) {
+    const r = await s.api('GET', '/account/age/since')
+    t.is(r.status, 503)
+    t.alike(r.body, { error: 'indisponivel' })
+  }
+  t.is(s.logs.filter((l) => l === JSON.stringify({ event: 'idade', reason: 'estado-indisponivel' })).length, 1, 'logged once')
+  const failingAges = { get () { throw new Error('indisponivel') } }
+  t.alike(directoryFloor(s.store, failingAges), { ok: false }, 'an age store that cannot answer')
+  t.alike(directoryFloor({ exportLinks: () => [{ member: s.linked.hex, linkedAt: 'x' }] }, s.ages), { ok: false }, 'a malformed date')
+})
+
+test('age check state: an off start that cannot record the off period throws; an on start does not', (t) => {
+  const dir = path.join(tmpDir(t), 'state')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'age-check.json'), JSON.stringify({ v: 1, on: true, enabledAt: SINCE }))
+  t.exception(() => startAgeCheck(dir, { on: false, guard: () => false }), /age-check\.json/)
+  t.alike(readAgeCheck(dir).state, { v: 1, on: true, enabledAt: SINCE }, 'the stale record is still there')
+  t.alike(startAgeCheck(path.join(tmpDir(t), 'fresh'), { on: true, since: SINCE, guard: () => false }), { ok: false }, 'on: the since route answers 503 instead')
+  t.alike(startAgeCheck(dir, { on: false }), { ok: true, on: false, enabledAt: null })
+})
+
+test('age: a service with no issuer answers since null and a verified result without proof', async (t) => {
+  const s = await setup(t, { since: SINCE, withIssuer: false })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: AFTER })
+  t.alike((await s.api('GET', '/account/age/since')).body, { since: null })
+  const m = member()
+  await opened(s, m, FACE(30))
+  const r = await s.step(m, 'result')
+  t.is(r.status, 200, r.text)
+  t.alike(r.body, { state: 'verificado' })
+  t.alike((await s.step(m, 'session')).body, { state: 'verificado' })
+})
+
+test('age: a verified result and session carry a proof for that member and association only', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  await opened(s, m, DOC(17))
+  const r = await s.step(m, 'result')
+  t.is(r.status, 200, r.text)
+  t.alike(Object.keys(r.body), ['state', 'proof'])
+  t.is(r.body.state, 'verificado')
+  const proof = r.body.proof
+  t.alike(verifyAgeVerified(proof, m.hex, s.iss.association), { ok: true })
+  t.is(proof.date, s.ages.get(m.hex).checkedAt, 'dated the band\'s checkedAt')
+  t.absent(/16-17|18\+|band/.test(r.text), 'no band anywhere in the body')
+  t.is(verifyAgeVerified(proof, member().hex, s.iss.association).reason, 'member-mismatch')
+  t.is(verifyAgeVerified(proof, m.hex, b4a.toString(crypto.keyPair().publicKey, 'hex')).reason, 'untrusted-association')
+
+  // Deterministic: the same proof from later calls of either route.
+  const again = await s.step(m, 'result')
+  t.alike(again.body, { state: 'verificado', proof })
+  s.c.offset += 3600 * 1000
+  const sess = await s.step(m, 'session')
+  t.alike(sess.body, { state: 'verificado', proof })
+  t.absent(/16-17|18\+|band/.test(sess.text))
+  noPersonalData(t, s)
+})
+
+test('age since route: on without since answers null', async (t) => {
+  const s = await setup(t)
+  const r = await s.api('GET', '/account/age/since')
+  t.is(r.status, 200)
+  t.alike(r.body, { since: null })
+})
+
+test('age since route: off never serves since, even when passed in', async (t) => {
+  const s = await setup(t, { age: false, since: SINCE })
+  const policy = await s.api('GET', '/account/age/policy')
+  t.alike(policy.body, { required: false })
+  const r = await s.api('GET', '/account/age/since')
+  t.is(r.status, 200)
+  t.alike(r.body, { since: null })
+})
+
+test('age since route: GET only, refused like the policy on a wrong method', async (t) => {
+  const s = await setup(t, { since: SINCE })
+  const wrongPolicy = await s.api('POST', '/account/age/policy', { body: {} })
+  const wrongSince = await s.api('POST', '/account/age/since', { body: {} })
+  t.not(wrongPolicy.status, 200)
+  t.is(wrongSince.status, wrongPolicy.status)
+  t.alike(wrongSince.body, wrongPolicy.body)
+})
+
+test('age since route: its rate limit is separate from the policy\'s', async (t) => {
+  // Each window allows one call, so a second call on the same route is a 429
+  // and only a shared window would make the other route refuse.
+  class RouteError extends Error {
+    constructor (token, status) { super(token); this.token = token; this.status = status }
+  }
+  const sent = []
+  const iss = issuer()
+  const routes = createAgeRoutes({
+    association: iss.association,
+    origin: ORIGIN,
+    store: {},
+    didit: { createSession: async () => {}, decision: async () => {}, deleteSession: async () => {} },
+    ages: { earliest: () => BEFORE },
+    since: SINCE,
+    issuer: { keyPair: iss.keyPair, cert: iss.cert },
+    http: {
+      send: (res, status, body) => sent.push({ status, body }),
+      RouteError,
+      refuse: (token) => new RouteError(token, 404),
+      keyedWindow: () => () => true,
+      fixedWindow: () => { let left = 1; return () => left-- > 0 }
+    }
+  })
+  const get = (pathname) => routes.handle({ method: 'GET' }, {}, new URL(pathname, ORIGIN))
+  await get('/account/age/policy')
+  await t.exception(get('/account/age/policy'), /pedido-invalido/, 'policy window spent')
+  await get('/account/age/since')
+  await t.exception(get('/account/age/since'), /pedido-invalido/, 'since window spent')
+  t.is(sent.length, 2)
+  t.alike(sent[0], { status: 200, body: { required: true } })
+  t.is(sent[1].status, 200)
+  t.is(sent[1].body.since.since, SINCE)
+  t.alike(verifyAgeSince(sent[1].body.since, iss.association), { ok: true })
+})
+
+test('createAgeRoutes: a non-canonical since throws', (t) => {
+  const iss = issuer()
+  const base = { association: iss.association, origin: ORIGIN, store: {}, http: { keyedWindow: () => () => true, fixedWindow: () => () => true } }
+  for (const bad of ['2026-10-29', '2026-10-29T00:00:00Z', '2026-10-29T00:00:00.000+00:00', ' 2026-10-29T00:00:00.000Z', '2026-13-01T00:00:00.000Z', 'xxxx-xx-xxTxx:xx:xx.xxxZ', 1761696000000, '']) {
+    t.exception.all(() => createAgeRoutes({ ...base, since: bad }), TypeError, JSON.stringify(bad))
+  }
+  t.execution(() => createAgeRoutes({ ...base, since: SINCE }), 'canonical: accepted')
+})
+
+test('createAgeRoutes: a malformed issuer throws', (t) => {
+  const iss = issuer()
+  const base = { association: iss.association, origin: ORIGIN, store: {}, http: { keyedWindow: () => () => true, fixedWindow: () => () => true } }
+  for (const bad of [{}, { keyPair: iss.keyPair }, { cert: iss.cert }, 'issuer', 42, false]) {
+    t.exception.all(() => createAgeRoutes({ ...base, issuer: bad }), TypeError, JSON.stringify(bad))
+  }
+  t.execution(() => createAgeRoutes({ ...base, issuer: null }), 'null: accepted')
+  t.execution(() => createAgeRoutes({ ...base, issuer: { keyPair: iss.keyPair, cert: iss.cert } }), 'a key pair and certificate: accepted')
+})
+
+test('readEnv: VARANDA_AGE_SINCE needs the age check on and a canonical ISO', (t) => {
+  const env = { VARANDA_PUBLIC_ORIGIN: ORIGIN, VARANDA_GOOGLE_CLIENT_ID: 'client-123.apps.googleusercontent.com', VARANDA_GOOGLE_CLIENT_SECRET: 'segredo-de-teste' }
+  const on = { ...env, VARANDA_DIDIT_API_KEY: 'chave-sentinela-didit-77', VARANDA_DIDIT_WORKFLOW_ID: '0a1B2c3D-4e5F-6789-abcd-EF0123456789' }
+  t.is(readEnv(env).ageSince, null, 'unset: no since')
+  t.is(readEnv({ ...env, VARANDA_AGE_SINCE: '' }).ageSince, null, 'empty: no since')
+  t.is(readEnv(on).ageSince, null, 'on, unset: no since')
+  t.is(readEnv({ ...on, VARANDA_AGE_SINCE: SINCE }).ageSince, SINCE)
+  for (const off of [env, { ...env, VARANDA_DIDIT_API_KEY: '', VARANDA_DIDIT_WORKFLOW_ID: '' }]) {
+    try {
+      readEnv({ ...off, VARANDA_AGE_SINCE: SINCE })
+      t.fail('since with the check off: accepted')
+    } catch (err) {
+      t.ok(err instanceof UsageError, 'check off: usage error')
+      t.is(err.message, 'VARANDA_AGE_SINCE exige a verificação de idade ligada (VARANDA_DIDIT_API_KEY e VARANDA_DIDIT_WORKFLOW_ID).')
+    }
+  }
+  for (const bad of ['2026-10-29', '2026-10-29T00:00:00Z', ' ' + SINCE, '2026-02-30T00:00:00.000Z', 'ontem']) {
+    try {
+      readEnv({ ...on, VARANDA_AGE_SINCE: bad })
+      t.fail(bad + ': accepted')
+    } catch (err) {
+      t.ok(err instanceof UsageError, bad + ': usage error')
+      t.is(err.message, 'VARANDA_AGE_SINCE inválido: use uma data ISO como 2026-10-29T00:00:00.000Z')
+    }
+  }
+})
+
 test('age on: policy, a fresh unlinked key starts, opens a session and reads the result', async (t) => {
   const s = await setup(t)
   const policy = await s.api('GET', '/account/age/policy')
@@ -411,7 +752,7 @@ test('age: an approval that lands while a replacement is being created deletes t
   })
   const r = await s.post('/account/age/session', { member: m.hex, nonce: a.body.nonce, signature: s.signFor(m, 'session', a.body.nonce) })
   t.is(r.status, 200, r.text)
-  t.alike(r.body, { state: 'verificado' }, 'no url for a member already approved')
+  t.is(r.body.state, 'verificado', 'no url for a member already approved')
   t.ok(await waitFor(() => s.deletes().some((d) => d.path.includes('sess-late'))), 'the useless session is deleted')
 })
 
@@ -478,7 +819,8 @@ test('age decisions: bands stored, refusals and inconclusive store nothing, ever
     const id = s.lastSession()
     const res = await s.step(m, 'result')
     t.is(res.status, 200, res.text)
-    t.alike(res.body, { state: k.state })
+    t.is(res.body.state, k.state)
+    t.alike(Object.keys(res.body), k.band === null ? ['state'] : ['state', 'proof'])
     const file = ageFile(s)
     const entry = file && file.members[m.hex]
     if (k.band === null) {
@@ -498,7 +840,7 @@ test('age decisions: bands stored, refusals and inconclusive store nothing, ever
 
     // The session is gone: the next result says 'nenhum' (or 'verificado').
     const next = await s.step(m, 'result')
-    t.alike(next.body, { state: k.band === null ? 'nenhum' : 'verificado' })
+    t.is(next.body.state, k.band === null ? 'nenhum' : 'verificado')
   }
 
   // In Review keeps the session; Approved later verifies.
@@ -510,7 +852,7 @@ test('age decisions: bands stored, refusals and inconclusive store nothing, ever
   t.is(s.deletes().filter((d) => d.path.includes(id)).length, 0, 'no delete while pending')
   s.fake.sessions.set(id, DOC(30))
   const ok = await s.step(m, 'result')
-  t.alike(ok.body, { state: 'verificado' })
+  t.is(ok.body.state, 'verificado')
   t.is(ageFile(s).members[m.hex].band, '18+')
 
   // After verificado, neither result nor session calls Didit.
@@ -519,9 +861,9 @@ test('age decisions: bands stored, refusals and inconclusive store nothing, ever
   const seenAfterDelete = s.fake.seen.length
   t.ok(seenAfterDelete >= seen)
   const again = await s.step(m, 'result')
-  t.alike(again.body, { state: 'verificado' })
+  t.is(again.body.state, 'verificado')
   const sess = await s.step(m, 'session')
-  t.alike(sess.body, { state: 'verificado' })
+  t.is(sess.body.state, 'verificado')
   t.is(s.fake.seen.length, seenAfterDelete, 'Didit not called once verified')
 
   // Nothing about the person in age.json.
@@ -674,7 +1016,7 @@ test('age gates on: authorize, finish, rename and invites refuse an unverified k
 
   // Verify the linked member through the routes.
   await opened(s, s.linked, FACE(40))
-  t.alike((await s.step(s.linked, 'result')).body, { state: 'verificado' })
+  t.is((await s.step(s.linked, 'result')).body.state, 'verificado')
   t.is((await renameStart(s, s.linked, 'ana')).status, 200)
   const st = await s.post('/account/invites/start', { member: s.linked.hex })
   t.is(st.status, 200)
@@ -703,7 +1045,7 @@ test('age gates on: authorize, finish, rename and invites refuse an unverified k
 
   // Verified: a new start, authorize and finish go through.
   await opened(s, m, DOC(16), { invite: code })
-  t.alike((await s.step(m, 'result')).body, { state: 'verificado' })
+  t.is((await s.step(m, 'result')).body.state, 'verificado')
   const b = await authorize(s, m, 'bia', code, a.cookie)
   t.is(b.auth.status, 200, b.auth.text)
   t.is(b.auth.body.authorizeUrl, GOOGLE_URL)
@@ -731,7 +1073,7 @@ test('age: a failed age.json write answers 503 resultado-incerto and the member 
 
   s.c.guardOk = true
   const retry = await s.step(m, 'result')
-  t.alike(retry.body, { state: 'verificado' })
+  t.is(retry.body.state, 'verificado')
   t.ok(s.ages.verified(m.hex))
   noPersonalData(t, s)
 })
@@ -833,14 +1175,14 @@ test('age app clients: a session is reused only by the client kind that opened i
   s.fake.sessions.set(appId, FACE(30))
   const read = await appResult(s, n)
   t.is(read.status, 200, read.text)
-  t.alike(read.body, { state: 'verificado' })
+  t.is(read.body.state, 'verificado')
   t.ok(s.decisions().some((r) => r.path.includes(appId)), 'the app result read the app session')
   t.ok(s.ages.verified(n.hex))
   // The verifying call itself closes the web session too, with no later call.
   await waitFor(() => s.deletes().length === 2)
   t.is(s.deletes().length, 2, 'both sessions of the approved member are deleted by the first verifying call')
   t.ok(s.deletes().some((r) => r.path.includes(appId)))
-  t.alike((await s.step(n, 'result')).body, { state: 'verificado' })
+  t.is((await s.step(n, 'result')).body.state, 'verificado')
   t.is(s.deletes().length, 2, 'nothing left to delete')
 })
 

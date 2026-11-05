@@ -26,6 +26,7 @@ const { WebSocket } = require('ws')
 const { createClient, parseMessage, EVENTS, MAX_MESSAGE } = require('@varanda/rpc')
 const { createIssuerCert, certForKey } = require('@varanda/core/lib/cert')
 const { signTerms, TERMS_VERSION } = require('@varanda/core/lib/terms')
+const { verifyAgeVerified } = require('@varanda/core/lib/age-proof')
 const { tmpDir } = require('./helpers/net')
 const { startFakeDidit, loopbackFetch } = require('./helpers/fake-didit')
 const { createGoogle } = require('../lib/account/google')
@@ -148,6 +149,14 @@ async function connectClient (node) {
   for (const name of EVENTS) client.on(name, (data) => events.push({ name, data }))
   await client.request('session.open', {})
   return { events, request: (method, params = {}) => client.request(method, params) }
+}
+
+// A 'verificado' answer from a service with an issuer: exactly the state and
+// a proof that verifies for this member and association.
+function isVerified (t, h, body, memberHex, msg = 'verificado') {
+  t.alike(Object.keys(body || {}), ['state', 'proof'], msg + ': state and proof')
+  t.is(body && body.state, 'verificado', msg)
+  t.alike(verifyAgeVerified(body && body.proof, memberHex, h.association), { ok: true }, msg + ': the proof verifies')
 }
 
 // The whole harness for one scenario. `serve()` opens one service lifetime
@@ -320,7 +329,7 @@ test('age e2e 1: a fresh hosted key verifies 17 by document, then links with Goo
   h.fake.sessions.set(h.lastSession(), DOC(17))
   const res = await c.age('result')
   t.is(res.status, 200, res.text)
-  t.alike(res.body, { state: 'verificado' })
+  isVerified(t, h, res.body, dev.hex)
   const entry = h.ageFile().members[dev.hex]
   t.is(entry.band, '16-17', 'age.json holds 16-17 for the key')
   t.is(entry.method, 'didit')
@@ -401,7 +410,7 @@ test('age e2e 2: an already-linked v2 member is held at rename and invites until
   t.is((await c.age('session')).status, 200, 'session opened')
   h.fake.sessions.set(h.lastSession(), FACE(25))
   const pend = await c.age('result')
-  t.alike(pend.body, { state: 'verificado' }, 'face 25 verifies')
+  isVerified(t, h, pend.body, dev.hex, 'face 25 verifies')
   t.is(h.ageFile().members[dev.hex].band, '18+', 'age.json: 18+')
 
   const after = { status: await status(), byName: await byName(), files: directoryBytes(h.dir) }
@@ -462,7 +471,7 @@ test('age e2e 4: In Review answers pendente, then an approved face of 22 verifie
   t.absent(h.svc.ages.verified(dev.hex))
 
   h.fake.sessions.set(id, FACE(22))
-  t.alike((await c.age('result')).body, { state: 'verificado' })
+  isVerified(t, h, (await c.age('result')).body, dev.hex)
   t.is(h.ageFile().members[dev.hex].band, '18+')
   t.ok(await waitFor(() => h.deletes().length === 1), 'deleted once final')
   const linked = await c.link('duda')
@@ -479,7 +488,8 @@ test('age e2e 5: after a restart the band is still on record and a session left 
   const b = h.client(open)
   t.is((await a.age('session')).status, 200)
   h.fake.sessions.set(h.lastSession(), FACE(30))
-  t.alike((await a.age('result')).body, { state: 'verificado' })
+  const first = (await a.age('result')).body
+  isVerified(t, h, first, done.hex)
   t.is((await b.age('session')).status, 200)
   h.fake.sessions.set(h.lastSession(), { status: 'In Progress' })
   t.alike((await b.age('result')).body, { state: 'pendente' })
@@ -491,8 +501,9 @@ test('age e2e 5: after a restart the band is still on record and a session left 
   t.ok(svc.ages.verified(done.hex), 'the reopened store holds the band')
   const again = await a.age('result')
   t.is(again.status, 200, again.text)
-  t.alike(again.body, { state: 'verificado' }, 'verificado after the restart')
-  t.alike((await a.age('session')).body, { state: 'verificado' }, 'and no new session')
+  isVerified(t, h, again.body, done.hex, 'verificado after the restart')
+  t.alike(again.body.proof, first.proof, 'the same proof after the restart')
+  isVerified(t, h, (await a.age('session')).body, done.hex, 'and no new session')
   t.is(h.fake.seen.length, seen, 'no Didit call for a verified member')
   const lost = await b.age('result')
   t.alike(lost.body, { state: 'nenhum' }, 'the pending session did not survive')
@@ -582,7 +593,9 @@ test('age e2e 8: no birth date, document number, session token, api key, session
     session_token: TOKEN,
     id_verifications: [{ status: 'Approved', age: 38, date_of_birth: DOB, document_number: DOC_NUMBER, first_name: 'Fulana' }]
   })
-  t.alike((await c.age('result')).body, { state: 'verificado' })
+  const verdict = (await c.age('result')).body
+  isVerified(t, h, verdict, dev.hex)
+  t.absent(/16-17|18\+|"band"|"age"|"method"/.test(JSON.stringify(verdict.proof)), 'the proof carries no band, age or method')
   t.ok(await waitFor(() => h.deletes().length === 1), 'deleted')
   const linked = await c.link('fabi')
   t.is(linked.done && linked.done.status, 200, 'linked')

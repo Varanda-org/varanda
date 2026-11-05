@@ -276,15 +276,21 @@ async function idShow (ctx) {
   return withIdentity(ctx, ({ ownHex, association }) => ({ publicKey: ownHex, association }))
 }
 
-// -> { publicKey, memberCert } without creating anything.
+// -> { publicKey, memberCert, memberCertDate } without creating anything.
+// The date comes only from the certificate certForKey just verified (it is
+// covered by the issuer's signature), so the app can trust it for the age
+// policy.
 async function identityState (ctx) {
   if ((await store.readConfig(ctx.storage)) === null || !(await store.diaryExists(ctx.storage))) {
-    return { publicKey: null, memberCert: false }
+    return { publicKey: null, memberCert: false, memberCertDate: null, memberCertIssuer: null }
   }
   return withIdentity(ctx, async ({ diary, ownHex, association }) => {
     const block0 = await store.readBlock0(diary)
     const ok = block0 !== null && validateRecord(block0, 0) === null && certForKey(block0.cert, ownHex, association).ok
-    return { publicKey: ownHex, memberCert: ok }
+    // memberCertIssuer: the v2 certificate's issuer (null for v1), so the
+    // session can withhold the date once that issuer is revoked.
+    const issuer = ok && typeof block0.cert.issuer === 'string' ? block0.cert.issuer : null
+    return { publicKey: ownHex, memberCert: ok, memberCertDate: ok ? block0.cert.date : null, memberCertIssuer: issuer }
   })
 }
 
@@ -3915,6 +3921,26 @@ async function deviceUpkeepPlan (ctx) {
   })
 }
 
+// True when the own diary binds a root this device has no diary-bound own
+// writer for, exactly the enrol and repair candidates of deviceUpkeepPlan,
+// ignoring moderation: it may answer true for a blocked root, never false
+// when the plan could enrol. It cannot see the distributor share step, so
+// a false answer means no enrol and no repair, not an empty share list.
+// The session decides when the full plan runs. Only the own diary and the
+// kv writer list are read: a second Hypercore on a group core the live
+// sync holds would corrupt it (see withIdentity).
+async function deviceUpkeepNeeded (ctx) {
+  return withIdentity(ctx, async ({ diary }) => {
+    const entries = await store.readAll(diary)
+    const listed = new Map((await store.readGroupWriters(ctx.storage)).map((e) => [e.group, e]))
+    for (const key of diaryGroupKeys(entries)) {
+      const entry = listed.get(key)
+      if (entry === undefined || !diaryBinds(entries, key, entry.key)) return true
+    }
+    return false
+  })
+}
+
 function upkeepKeys (list, field) {
   const out = new Set()
   for (const x of Array.isArray(list) ? list : []) {
@@ -4179,6 +4205,7 @@ module.exports = {
   communityGroups,
   groupCommunityOf,
   deviceUpkeepPlan,
+  deviceUpkeepNeeded,
   deviceUpkeep,
   AUTO_ENROL_RESERVE,
   isNeedsExclusive

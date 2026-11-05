@@ -600,3 +600,75 @@ test('a listed writer this device did not derive is never bound, by the upkeep n
   t.absent((await diaryJoins(d)).some((j) => j.writer === plantedFeira), 'the group join does not bind it')
   t.not(await ownWriter(d, feira), plantedFeira)
 })
+
+// Group-core opens on `storage` while later code runs. member-ops opens one
+// through the store (openGroupCoreReadOnly and the other openers) or, when
+// the storage has those methods, through the storage; either way the open
+// names a core file under group/. A second Hypercore on files the live sync
+// holds corrupts them, so the precheck must stay at zero.
+function groupCoreOpens (t, storage) {
+  let calls = 0
+  const originals = []
+  const wrap = (target, name, hit) => {
+    if (typeof target[name] !== 'function') return
+    const original = target[name]
+    originals.push([target, name, original])
+    target[name] = function (...args) {
+      if (hit(args)) calls++
+      return original.apply(this, args)
+    }
+  }
+  const names = ['openGroupCoreReadOnly', 'readGroupCore', 'openGroupReplica', 'openGroupWriter']
+  for (const name of names) {
+    wrap(store, name, (args) => args[0] === storage)
+    wrap(storage, name, () => true)
+  }
+  const groupFile = (args) => typeof args[0] === 'string' && args[0].startsWith(store.GROUP_PREFIX)
+  wrap(storage, 'core', groupFile)
+  wrap(storage, 'hasCore', groupFile)
+  t.teardown(() => {
+    for (let i = originals.length - 1; i >= 0; i--) {
+      const [target, name, original] = originals[i]
+      target[name] = original
+    }
+  }, { force: true })
+  return () => calls
+}
+
+test('deviceUpkeepNeeded is true until this device\'s writer is diary-bound, and true again for a repair', async (t) => {
+  t.is(typeof ops.deviceUpkeepNeeded, 'function')
+  const { a, community, general } = await world(t)
+  const d = await secondDevice(t, a, [community, general])
+  t.is(await ownWriter(d, community), null, 'no kv writer yet')
+  t.is(await ops.deviceUpkeepNeeded(d.ctx), true)
+
+  const res = await ops.deviceUpkeep(d.ctx, await ops.deviceUpkeepPlan(d.ctx))
+  t.alike(res.failed, [])
+  const cw = await ownWriter(d, community)
+  const gw = await ownWriter(d, general)
+  const joins = await diaryJoins(d)
+  t.ok(joins.some((j) => j.group === community && j.writer === cw && j.on === true), 'the diary binds the community writer')
+  t.ok(joins.some((j) => j.group === general && j.writer === gw && j.on === true), 'the diary binds the Geral writer')
+  t.is(await ops.deviceUpkeepNeeded(d.ctx), false)
+
+  const entry = (await store.readGroupWriters(d.storage)).find((e) => e.group === community)
+  const unbound = hex(crypto.randomBytes(32))
+  await store.putGroupWriter(d.storage, { ...entry, key: unbound })
+  t.is(await ownWriter(d, community), unbound, 'a kv writer the diary does not bind')
+  t.absent((await diaryJoins(d)).some((j) => j.writer === unbound))
+  t.is(await ops.deviceUpkeepNeeded(d.ctx), true, 'repair')
+})
+
+test('deviceUpkeepNeeded is false when the diary binds no group root', async (t) => {
+  const plain = await setup(t)
+  t.alike(await diaryJoins(plain), [])
+  t.is(await ops.deviceUpkeepNeeded(plain.ctx), false)
+})
+
+test('deviceUpkeepNeeded opens no group core', async (t) => {
+  const { a, community, general } = await world(t)
+  const d = await secondDevice(t, a, [community, general])
+  const opens = groupCoreOpens(t, d.storage)
+  t.is(await ops.deviceUpkeepNeeded(d.ctx), true)
+  t.is(opens(), 0)
+})

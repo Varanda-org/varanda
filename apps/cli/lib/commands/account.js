@@ -7,7 +7,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { UsageError } = require('../cli')
 const { readConfig, writeConfig, writeJsonAtomic } = require('@varanda/core/lib/store')
-const { loadKeyPairFile, saveKeyPairFile, refuseSymlinkDir } = require('@varanda/core/lib/cert')
+const { loadKeyPairFile, saveKeyPairFile, refuseSymlinkDir, isCanonicalIso } = require('@varanda/core/lib/cert')
 const { safe, jsonLine } = require('@varanda/core/lib/safe')
 const { createGoogle } = require('../account/google')
 const { openAccountStore } = require('../account/store')
@@ -15,6 +15,7 @@ const { openTermsStore } = require('../account/terms-store')
 const { openInvitesStore } = require('../account/invites-store')
 const { openPushStore } = require('../account/push-store')
 const { openAgeStore } = require('../account/age-store')
+const { startAgeCheck, directoryFloor } = require('../account/age-check-state')
 const { createDidit } = require('../account/didit')
 const { createHodle, NETWORKS: HODLE_NETWORKS } = require('../account/hodle')
 const { openWalletStore } = require('../account/wallet-store')
@@ -531,7 +532,8 @@ function readEnv (env, dataDir) {
     if (typeof tokenEnv !== 'string' || !HEX64_RE.test(tokenEnv)) throw new UsageError('VARANDA_TRIAGE_TOKEN inválido')
     groupToken = tokenEnv
   }
-  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits: readLimits(env), triage, didit: readDiditEnv(env), hodle: readHodleEnv(env) }
+  const didit = readDiditEnv(env)
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits: readLimits(env), triage, didit, ageSince: readAgeSinceEnv(env, didit), hodle: readHodleEnv(env) }
 }
 
 // Hosted age verification: both variables set is on, both unset or empty is
@@ -556,6 +558,18 @@ function readDiditEnv (env) {
     dailyLimit = value
   }
   return { apiKey, workflowId, dailyLimit }
+}
+
+// When the age check started to apply on this install: the app trusts a
+// member certificate dated on or after it as proof of a recorded band.
+// Refused while the check is off: certificates issued then carry no band, so
+// a since left set across an off period would vouch for them.
+function readAgeSinceEnv (env, didit) {
+  const raw = env.VARANDA_AGE_SINCE
+  if (raw === undefined || raw === '') return null
+  if (!isCanonicalIso(raw)) throw new UsageError('VARANDA_AGE_SINCE inválido: use uma data ISO como 2026-10-29T00:00:00.000Z')
+  if (didit === null) throw new UsageError('VARANDA_AGE_SINCE exige a verificação de idade ligada (VARANDA_DIDIT_API_KEY e VARANDA_DIDIT_WORKFLOW_ID).')
+  return raw
 }
 
 // The optional payments account with Hodle: off unless the API key is set,
@@ -730,7 +744,7 @@ async function serve (flags, env) {
   const host = flags.accountHost || DEFAULT_HOST
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
-  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, hodle: hodleConfig } = readEnv(env, flags.dataDir)
+  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, hodle: hodleConfig } = readEnv(env, flags.dataDir)
   const { maxMembers = null, invitesPerWeek = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
@@ -840,6 +854,16 @@ async function serve (flags, env) {
     }
     // 'desligada' reminds the operator that nobody is being asked.
     log({ event: 'idade', reason: didit !== null ? 'ligada' : 'desligada' })
+    // On every start, on or off, so an off period always moves the since
+    // floor (age-check.json). An off start that cannot record it stops the
+    // service; an on start that cannot read it stays up and the since route
+    // answers 503.
+    const ageOn = didit !== null && ages !== null
+    const ageCheck = startAgeCheck(flags.dataDir, { on: ageOn, since: ageSince, guard: () => lock.owned() })
+    if (!ageCheck.ok) log({ event: 'idade', reason: 'estado-indisponivel' })
+    // Read once, before any link of this run (all of them banded).
+    const ageDirectoryFloor = ageOn && ageSince !== null ? directoryFloor(store, ages) : null
+    if (ageDirectoryFloor !== null && !ageDirectoryFloor.ok) log({ event: 'idade', reason: 'estado-indisponivel' })
     // The payments account (wallet.json), only with VARANDA_HODLE_API_KEY
     // set. The routes log 'ligada' or 'desligada' themselves; an unreadable
     // file is logged here and keeps the service up with the routes failing
@@ -885,7 +909,7 @@ async function serve (flags, env) {
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
       const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, invites, push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, hodle, wallets, walletMode: hodleConfig === null ? undefined : hodleConfig.mode, walletDailyLimit: hodleConfig === null ? undefined : hodleConfig.dailyLimit, walletNetwork: hodleConfig === null ? undefined : hodleConfig.network, ops, fees: hodleConfig === null ? null : hodleConfig.fees, walletMaxCents: hodleConfig === null ? undefined : hodleConfig.maxCents, walletMaxUsdcMicros: hodleConfig === null ? undefined : hodleConfig.maxUsdcMicros, walletWebhookSecrets: hodleConfig === null ? null : hodleConfig.webhookSecrets, maxConnections, ratePerSecond, burst })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, invites, push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, hodle, wallets, walletMode: hodleConfig === null ? undefined : hodleConfig.mode, walletDailyLimit: hodleConfig === null ? undefined : hodleConfig.dailyLimit, walletNetwork: hodleConfig === null ? undefined : hodleConfig.network, ops, fees: hodleConfig === null ? null : hodleConfig.fees, walletMaxCents: hodleConfig === null ? undefined : hodleConfig.maxCents, walletMaxUsdcMicros: hodleConfig === null ? undefined : hodleConfig.maxUsdcMicros, walletWebhookSecrets: hodleConfig === null ? null : hodleConfig.webhookSecrets, maxConnections, ratePerSecond, burst })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {

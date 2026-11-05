@@ -249,10 +249,21 @@ function openAgeStore (dataDir, { now = Date.now, guard = () => true, readOnly =
     return get(member) !== null
   }
 
+  // The smallest checkedAt on record, or null when nobody is verified yet.
+  function earliest () {
+    usable()
+    let min = null
+    for (const e of Object.values(state.members)) {
+      if (min === null || e.checkedAt < min) min = e.checkedAt
+    }
+    return min
+  }
+
   return {
     record,
     get,
     verified,
+    earliest,
     heal,
     fail () { failed = true },
     available () { return !failed }

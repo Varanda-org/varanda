@@ -1,7 +1,11 @@
 // Hosted age check (minimum 16). Pure ES module: imports nothing, so Node's
-// import() tests every branch. Nothing read from the URL or from storage can
-// open the gate: only a 'verificado' state that the account service answered
-// does, and the caller is the one that asks it.
+// import() tests every branch. The gate opens on a 'verificado' state, and
+// the caller decides where it comes from: an answer of the account service,
+// or what the node verified with the issuer's signature (an age-verified
+// attestation, or the member certificate dated on or after a signed `since`;
+// nodeVouches in src/ageMemory.js). Device storage keeps only refusals, which
+// can close the gate and never open it. The next service answer overrides
+// all of them. Nothing read from the URL or from a peer can open it.
 
 export const MIN_AGE = 16
 export const RETURN_PARAM = 'idade'
@@ -34,6 +38,14 @@ export function ageGate ({ hosted, policy, state } = {}) {
 
 export function ageBlocking (gate) {
   return gate === 'loading' || gate === 'needed'
+}
+
+// Whether the member's result may be asked of the service now: a hosted,
+// ready, unlocked node with the current terms accepted and a policy that
+// says the check is required. Strict: anything doubtful is false.
+export function ageReadAllowed ({ hosted, ready, termsOk, locked, member, policyKnown, policyRequired } = {}) {
+  return hosted === true && ready === true && termsOk === true && locked === false &&
+    typeof member === 'string' && policyKnown === true && policyRequired === true
 }
 
 export const AGE_TEXTS = Object.freeze({

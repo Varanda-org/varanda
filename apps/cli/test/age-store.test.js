@@ -243,6 +243,23 @@ test('fail() refuses later calls', async (t) => {
   await rejects(t, store.record({ member: memberKey(), band: '18+', method: 'didit' }), 'indisponivel', 'after fail')
 })
 
+test('earliest(): null when empty, the smallest checkedAt on record, indisponivel when failed', async (t) => {
+  const { store, open, file } = setup(t)
+  t.is(store.earliest(), null, 'empty')
+  await store.record({ member: memberKey(), band: '18+', method: 'didit', checkedAt: iso(T0 + 2 * HOUR) })
+  t.is(store.earliest(), iso(T0 + 2 * HOUR), 'one record')
+  await store.record({ member: memberKey(), band: '16-17', method: 'didit', checkedAt: iso(T0 + HOUR) })
+  t.is(store.earliest(), iso(T0 + HOUR), 'the smaller of two')
+  await store.record({ member: memberKey(), band: '18+', method: 'didit', checkedAt: iso(T0 + 5 * HOUR) })
+  t.is(store.earliest(), iso(T0 + HOUR), 'unchanged by a later record')
+  t.is(open({ readOnly: true }).earliest(), iso(T0 + HOUR), 'read back from the file')
+
+  store.fail()
+  t.exception(() => store.earliest(), /indisponivel/, 'after fail()')
+  fs.writeFileSync(file, 'garbage')
+  t.exception(() => open().earliest(), /indisponivel/, 'malformed file')
+})
+
 test('reopen reads the band back', async (t) => {
   const { store, open } = setup(t)
   const m = memberKey()

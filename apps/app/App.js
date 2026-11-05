@@ -45,8 +45,12 @@
 // The age gate (a hosted node, on the site or in the app on an installation;
 // src/age.js) holds every member, linked or
 // not, at 'Confirme sua idade' until the account service answers
-// 'verificado'; it fails closed while the policy or the result is unknown,
-// and nothing about it is stored on the device.
+// 'verificado'; it fails closed while the policy or the result is unknown.
+// A pass is proved by what the node reports from two issuer-signed
+// attestations it checks on every read (the member's age-verified
+// attestation, or the member certificate dated on or after the signed
+// since); the device keeps only refusals (src/ageMemory.js, never the band).
+// The service is still asked in the background and its answer wins.
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -57,8 +61,9 @@ import { NodeProvider, useNode } from './src/node'
 import { hostedPage } from './src/configStore'
 import { installationOrigin } from './src/installation'
 import { NamesProvider, useNames } from './src/names'
-import { agePolicy as readAgePolicy, ageResult, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
-import { ageBlocking, ageErrorText, ageGate, parseReturnAge } from './src/age'
+import { agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
+import { ageBlocking, ageErrorText, ageGate, ageReadAllowed, parseReturnAge } from './src/age'
+import { ageAnswerOutcome, ageStateShown, nodeVouches } from './src/ageMemory.js'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
@@ -72,6 +77,7 @@ import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { LEGAL_VERSION } from './src/legal'
 import { shouldSyncTerms, termsDecision, termsSyncAttempted, termsSyncStep } from './src/terms'
 import { useTerms } from './src/useTerms'
+import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
 import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, coverBoot, coverConnecting, holdBootCover, holdSplash } from './src/splashGate'
@@ -147,6 +153,8 @@ const TERMS_REARM_MAX = 5
 // A failed age policy read is tried again after 5 s, 15 s, then every 60 s
 // (and when the connection comes back); the member stays blocked meanwhile.
 const agePolicyDelay = (n) => (n === 0 ? 5000 : n === 1 ? 15000 : 60000)
+// The node.info read for the certificate proof on the age step, same idea.
+const ageInfoDelay = (n) => (n === 0 ? 2000 : n === 1 ? 5000 : n === 2 ? 15000 : 30000)
 const AGE_REDIRECT_TEXT = 'Vamos abrir a verificação e, na volta, pedir sua passkey de novo.'
 
 // The steps the setup branch (Identidade, Idade) renders; the others belong
@@ -499,10 +507,46 @@ function Member () {
     setAgePolicyTick((n) => n + 1)
   }, [node.online, agePolicyKnown])
 
+  // Owner decision 2026-11-04: the check is remembered per account,
+  // independent of the device, so a member who passed it opens A Rua after
+  // the splash instead of waiting on the service. Two proofs, never the band,
+  // both signed by the account service's issuer and checked by the node on
+  // every read: the member's age-verified attestation (node.info
+  // ageVerifiedDate), and the member certificate dated on or after the
+  // installation's signed since and no later than its signing date
+  // (ageSince <= memberCertDate <= ageSinceUntil; the service issues no
+  // certificate to a key without a recorded band). Nothing the
+  // device stores can open the gate: it keeps only refusals. The service is
+  // still asked in the background, and its answer wins.
+  const ageMemory = useAgeMemory()
+  // node.info as read for this member only: it is cleared on every lock,
+  // unlock and reset, and a read from an older generation is dropped.
+  const ageInfo = info !== null && member !== null && info.publicKey === member ? info : null
+  // Only once the refusals are loaded (a denial on record must not flash the
+  // gate open), and a refusal on record or in this run wins over both proofs,
+  // offline too (openNow).
+  const ageRemembered = member !== null && ageMemory.loaded &&
+    ageMemory.open(member, ageOrigin, nodeVouches({ ageVerifiedDate: ageInfo?.ageVerifiedDate, memberCertDate: ageInfo?.memberCertDate, ageSince: ageInfo?.ageSince, ageSinceUntil: ageInfo?.ageSinceUntil }))
+  // node.info after the node stored a proof. Not while a recovery or once
+  // sync runs (node.info may open the store and preempt it): held, and read
+  // when that run is over.
+  const ageInfoFreeRef = useRef(false)
+  ageInfoFreeRef.current = !recovering && !onceSync
+  const ageInfoHeld = useRef(false)
+  const ageInfoAfterProof = () => {
+    if (ageInfoFreeRef.current) return readInfo()
+    ageInfoHeld.current = true
+  }
+  useEffect(() => {
+    if (recovering || onceSync || !ageInfoHeld.current) return
+    ageInfoHeld.current = false
+    readInfo()
+  }, [recovering, onceSync, readInfo])
+
   // The member's result, asked of the account service (never taken from the
-  // URL or from storage): once per generation and member, and again on
-  // 'Conferir de novo'. Not while the recovery after an unlock or a once sync
-  // runs: age.sign is a member request and would preempt that run.
+  // URL or from storage): once per generation, member and installation, and
+  // again on 'Conferir de novo'. It runs even when the gate is already open
+  // from memory, so a later refusal closes it again.
   const [ageState, setAgeState] = useState(undefined)
   const [ageBusy, setAgeBusy] = useState(false)
   const [ageError, setAgeError] = useState('')
@@ -512,6 +556,12 @@ function Member () {
   // answer that arrives under another number is dropped.
   const ageSeq = useRef(0)
   const ageRan = useRef(null)
+  // The key of the last background read that finished (see ageReadPending).
+  const [ageReadDone, setAgeReadDone] = useState(null)
+  // The key the screen is waiting on now, set on every render.
+  const ageReadKeyRef = useRef(null)
+  const ageOriginRef = useRef(ageOrigin)
+  ageOriginRef.current = ageOrigin
   useEffect(() => {
     ageSeq.current += 1
     ageRan.current = null
@@ -519,22 +569,53 @@ function Member () {
     setAgeBusy(false)
     setAgeError('')
     setAgeNote('')
-  }, [generation, locked])
+  }, [generation, locked, ageOrigin])
   // termsOk: reading the result records the band and closes the partner's
   // session, which must not happen before the current terms are accepted.
   // Only once the service said the check is required: an unknown policy keeps
   // the member blocked (ageGate) and is retried, without calling the age routes.
-  const ageReadNow = ageHosted && ready && termsOk && !locked && member !== null && !recovering && !onceSync &&
-    agePolicyKnown && agePolicy.required === true
+  // Not held back by the recovery after an unlock or a once sync: once the own
+  // key is known age.sign signs in memory and never opens the store
+  // (packages/web-member/lib/session.js), and the rest is HTTP, so a new
+  // device without a certificate can have its answer ready when 'recuperando'
+  // ends.
+  const ageReadNow = ageReadAllowed({
+    hosted: ageHosted,
+    ready,
+    termsOk,
+    locked,
+    member,
+    policyKnown: agePolicyKnown,
+    policyRequired: agePolicyKnown ? agePolicy.required : undefined
+  })
+  // The only writer of the refusals and the only sender of an age-verified
+  // attestation: an answer of the service, for the member and installation
+  // the request started with. The URL return, app links and peers never
+  // reach it. A failed store changes nothing: the live answer already opened
+  // this run, and the node verifies whatever it is handed.
+  const answerAge = (state, who, origin, proof) => {
+    setAgeState(state)
+    const outcome = ageAnswerOutcome(state)
+    if (outcome === 'deny') ageMemory.deny(who, origin)
+    else if (outcome === 'clear') {
+      ageMemory.clearDenial(who, origin)
+      if (proof !== null && typeof proof === 'object') {
+        node.request('age.proof', { verified: proof }).then(ageInfoAfterProof).catch(() => {})
+      }
+    }
+  }
   const ageRequest = (work) => {
     const seq = ++ageSeq.current
     const gen = generationRef.current
     const who = memberRef.current
-    const stale = () => seq !== ageSeq.current || gen !== generationRef.current || who !== memberRef.current
+    const origin = ageOriginRef.current
+    // An answer that started under another installation is dropped too.
+    const stale = () => seq !== ageSeq.current || gen !== generationRef.current || who !== memberRef.current ||
+      origin !== ageOriginRef.current
     setAgeBusy(true)
     setAgeError('')
     setAgeNote('')
-    work(stale).catch((err) => {
+    work(stale, who, origin).catch((err) => {
       if (stale()) return
       // The app drops a refused code so the paste field shows again; the web
       // keeps its stored code as it always did.
@@ -575,32 +656,48 @@ function Member () {
   }
   useEffect(() => {
     if (!ageReadNow) return
-    const key = generation + '#' + member + '#' + ageCheckTick
+    const key = generation + '#' + member + '#' + ageOrigin + '#' + ageCheckTick
     if (ageRan.current === key) return
     ageRan.current = key
-    ageRequest(async (stale) => {
-      const { nonce } = await ageStart({ member })
-      if (stale()) return
-      const { signature } = await node.request('age.sign', { action: 'result', nonce })
-      if (stale()) return
-      const { state } = await ageResult({ member, nonce, signature })
-      if (!stale()) setAgeState(state)
+    ageRequest(async (stale, who, origin) => {
+      try {
+        const { nonce } = await ageStart({ member })
+        if (stale()) return
+        const { signature } = await node.request('age.sign', { action: 'result', nonce })
+        if (stale()) return
+        const { state, proof } = await ageResult({ member, nonce, signature })
+        if (!stale()) answerAge(state, who, origin, proof)
+      } finally {
+        // Only the current key: an older read that ends after a newer one
+        // must not overwrite its mark and leave "Conferindo" with nothing in
+        // flight. Not held back by stale(), which a later start would make
+        // true for good.
+        if (key === ageReadKeyRef.current) setAgeReadDone(key)
+      }
     })
-  }, [ageReadNow, generation, member, ageCheckTick])
+  }, [ageReadNow, generation, member, ageOrigin, ageCheckTick])
+  // True only while the background read for the current key has not finished:
+  // with the error cleared and no verdict (an invite pasted, the browser left
+  // without a return) the screen must not stay on "Conferindo" with nothing
+  // in flight. An unknown policy counts as pending: its read is retried with a
+  // backoff, and the age routes cannot be used before it answers.
+  const ageReadKey = generation + '#' + member + '#' + ageOrigin + '#' + ageCheckTick
+  ageReadKeyRef.current = ageReadKey
+  const ageReadPending = (ageReadNow && ageReadDone !== ageReadKey) || (ageHosted && !agePolicyKnown)
   const checkAge = () => setAgeCheckTick((n) => n + 1)
   // A new verification session: the service answers 'verificado' when the
   // band is already recorded, otherwise the provider's page, opened as a full
   // page navigation (it comes back with ?idade=volta).
   const startAge = () => {
     if (member === null || ageBusy) return
-    ageRequest(async (stale) => {
+    ageRequest(async (stale, who, origin) => {
       const { nonce } = await ageStart({ member })
       if (stale()) return
       const { signature } = await node.request('age.sign', { action: 'session', nonce })
       if (stale()) return
       const r = await ageSession({ member, nonce, signature, invite: loadSignupInvite()?.code })
       if (stale()) return
-      if (r.state === 'verificado') return setAgeState('verificado')
+      if (r.state === 'verificado') return answerAge('verificado', who, origin, r.proof)
       if (typeof r.url !== 'string' || !r.url.startsWith('https://')) throw new Error('serviço indisponível')
       // The app opens the provider in the system browser, which comes back
       // through varanda://idade?volta=1 (the Linking effect below).
@@ -613,8 +710,114 @@ function Member () {
       globalThis.location.assign(r.url)
     })
   }
-  const ageNeeded = ageGate({ hosted: ageHosted, policy: agePolicy, state: ageState })
+  const ageShown = ageStateShown({ answered: ageState, remembered: ageRemembered })
+  const ageNeeded = ageGate({ hosted: ageHosted, policy: agePolicy, state: ageShown })
   const ageClear = !ageBlocking(ageNeeded)
+  // On the hosted setup only Identidade reads node.info, and the age step
+  // replaces it: node.info is read here so the node's proofs can open the
+  // gate. Held back like Identidade while a recovery or once sync runs
+  // (node.info may open the store and preempt it).
+  const ageInfoNow = ageHosted && ready && !locked && member !== null && !recovering && !onceSync &&
+    !ageClear && info === null
+  // A failed read is tried again after 2 s, 5 s, 15 s, then every 30 s while
+  // the step still needs it (a read, so the retry is allowed), and at once
+  // when the connection comes back.
+  const [ageInfoTick, setAgeInfoTick] = useState(0)
+  const ageInfoTries = useRef(0)
+  useEffect(() => { ageInfoTries.current = 0 }, [generation])
+  useEffect(() => {
+    if (!ageInfoNow) return
+    let cancelled = false
+    let timer = null
+    readInfo().then(() => {
+      if (cancelled) return
+      timer = setTimeout(() => setAgeInfoTick((n) => n + 1), ageInfoDelay(ageInfoTries.current))
+      ageInfoTries.current += 1
+    })
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [ageInfoNow, generation, readInfo, ageInfoTick])
+  const ageInfoOnlineRef = useRef(node.online)
+  useEffect(() => {
+    const was = ageInfoOnlineRef.current
+    ageInfoOnlineRef.current = node.online
+    if (was !== false || node.online !== true || !ageInfoNow) return
+    setAgeInfoTick((n) => n + 1)
+  }, [node.online, ageInfoNow])
+  // A sync run that ended may have brought the member certificate (a new
+  // device): while the step still has neither proof from the node, read
+  // node.info again (as Identidade does for the setup). A run that ended
+  // during a recovery or once sync is read when that ends: the recovery may be
+  // what brought the certificate, and nothing else would re-run this. The
+  // deps re-run it mid-recovery too: return then, so node.info never preempts
+  // the store (ageInfoHeld stays for when the run ends).
+  const ageNoProofRef = useRef(false)
+  ageNoProofRef.current = ageHosted && !ageClear && !locked && !recovering && !onceSync && ageInfo !== null &&
+    ageInfo.memberCertDate == null && ageInfo.ageVerifiedDate == null
+  const ageStopped = node.sync.stopped
+  useEffect(() => {
+    if (ageStopped === null || ageStopped === undefined) return
+    if (recovering || onceSync) return
+    if (!ageNoProofRef.current && !ageInfoHeld.current) return
+    ageInfoHeld.current = false
+    readInfo()
+  }, [ageStopped, readInfo, recovering, onceSync])
+
+  // The installation's signed since, handed to the node, which verifies it
+  // and keeps it (age.proof): the app never compares against a since of its
+  // own. Asked once per installation and generation (a reset clears the
+  // node's copy); a failed read (undefined) or store is tried again after
+  // 5 s, 15 s, then every 60 s, and at once when the connection comes back.
+  // Only the latest request is applied. A live null clears a stale stored
+  // since. Not held back by a recovery or once sync: age.proof is a kv write;
+  // only while neither the own key nor the diary info is known yet does it
+  // resolve the key as age.sign does, which may read the store once.
+  const ageSinceNow = ageHosted && ready && !locked && member !== null && ageOrigin !== ''
+  const ageSinceSeq = useRef(0)
+  const ageSinceDone = useRef(null)
+  const ageSinceTries = useRef(0)
+  const [ageSinceTick, setAgeSinceTick] = useState(0)
+  useEffect(() => {
+    if (!ageSinceNow) return
+    const origin = ageOrigin
+    if (origin !== (installationOrigin() || globalThis.location?.origin || '')) return
+    const key = generation + '#' + origin
+    if (ageSinceDone.current === key) return
+    const seq = ++ageSinceSeq.current
+    const latest = () => seq === ageSinceSeq.current && generation === generationRef.current &&
+      origin === ageOriginRef.current
+    let cancelled = false
+    let timer = null
+    const retry = () => {
+      if (cancelled || !latest()) return
+      timer = setTimeout(() => setAgeSinceTick((n) => n + 1), agePolicyDelay(ageSinceTries.current))
+      ageSinceTries.current += 1
+    }
+    readAgeSince().then((since) => {
+      if (cancelled || !latest()) return
+      if (since === undefined) return retry()
+      return node.request('age.proof', { since }).then(() => {
+        if (!latest()) return
+        ageSinceDone.current = key
+        ageSinceTries.current = 0
+        return ageInfoAfterProof()
+      }, retry)
+    }).catch(() => {})
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [ageSinceNow, generation, ageOrigin, ageSinceTick, node.request])
+  const ageSinceOnlineRef = useRef(node.online)
+  useEffect(() => {
+    const was = ageSinceOnlineRef.current
+    ageSinceOnlineRef.current = node.online
+    if (was !== false || node.online !== true || !ageSinceNow) return
+    if (ageSinceDone.current === generation + '#' + ageOrigin) return
+    setAgeSinceTick((n) => n + 1)
+  }, [node.online, ageSinceNow, generation, ageOrigin])
 
   // The gates: `confirmed` can latch setupDone for a member already linked,
   // so setupDone alone never opens the tabs, autosync, the outbox, the terms
@@ -1639,8 +1842,8 @@ function Member () {
       // Idade already on screen.
       body = (
         <Idade
-          state={ageState}
-          busy={ageBusy || (ageState === undefined && !ageError)}
+          state={ageShown}
+          busy={ageBusy || (ageShown === undefined && !ageError && ageReadPending)}
           error={ageError}
           note={ageNote}
           offline={node.online === false}
