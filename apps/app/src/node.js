@@ -103,6 +103,7 @@ import { EMPTY_GROUP_VERSIONS, bumpGroupVersion, clearGroupVersions, readGroupVe
 import { EMPTY_SIGNALS, endIdle, foldSignal, waitForCatchUp, ackFresh as ackFreshSignals } from './syncSignals'
 import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, effectiveBackoff, graceExpired, nextBackoff, reconcileIdle, refreshPlan, shouldStopForHidden, startFailure, visibilityChange, wantsStart } from './autoSyncPolicy'
 import { errorText } from './ui'
+import { slowRequestLine } from './slowRequest'
 
 const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
 // Native only (configStore.native.js): reads the saved or build-time
@@ -111,6 +112,11 @@ const loadInstallation = typeof configStore.loadInstallation === 'function' ? co
 
 const MAX_SYNC_LINES = 200
 const RECOVERY_TIMEOUT_MS = 30000
+
+function appendLine (prev, line) {
+  const lines = prev.lines.concat([line])
+  return { ...prev, lines: lines.length > MAX_SYNC_LINES ? lines.slice(lines.length - MAX_SYNC_LINES) : lines }
+}
 
 const NodeContext = createContext(null)
 
@@ -411,8 +417,7 @@ export function NodeProvider ({ children }) {
         return { ...prev, active, stopped }
       }
       const line = name === 'warning' ? 'aviso: ' + data.line : '#' + data.runId + ' ' + data.line
-      const lines = prev.lines.concat([line])
-      return { ...prev, lines: lines.length > MAX_SYNC_LINES ? lines.slice(lines.length - MAX_SYNC_LINES) : lines }
+      return appendLine(prev, line)
     })
   }, [setWait, setBackoff, resetSignals])
 
@@ -600,8 +605,14 @@ export function NodeProvider ({ children }) {
     if (!conn) return noConnection()
     const waiting = awaitingRef.current !== 0
     if (waiting) extendWait()
+    const startedAt = Date.now()
+    const done = () => {
+      const line = slowRequestLine(method, startedAt, Date.now())
+      if (line !== null && connRef.current === conn) setSync((prev) => appendLine(prev, 'aviso: ' + line))
+    }
     if (method !== 'sync.start') {
       const pending = conn.request(method, params)
+      pending.then(done, done)
       if (waiting) pending.then(extendWait, extendWait)
       return pending
     }
@@ -613,6 +624,7 @@ export function NodeProvider ({ children }) {
       if (waiting) extendWait()
     }
     const pending = conn.request(method, params)
+    pending.then(done, done)
     pending.then(settled, settled)
     return pending
   }, [extendWait])
