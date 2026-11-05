@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 14
-export const LEGAL_DATE = '04/11/2026'
-export const REVIEW_NOTE = 'Versão 14, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const LEGAL_VERSION = 15
+export const LEGAL_DATE = '05/11/2026'
+export const REVIEW_NOTE = 'Versão 15, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -69,6 +69,21 @@ export const TERMS = {
       ]
     },
     {
+      heading: 'Páginas',
+      paragraphs: [
+        'Uma página é o diário de um negócio ou projeto, com @nome próprio. Quem a cria é o dono. O serviço de conta da associação escreve no diário da página em nome do dono e dos administradores, com uma chave de assinatura da página que fica com o serviço, não no seu aparelho. Esse desenho ainda depende de parecer jurídico.',
+        'O dono e os administradores que aceitaram o convite formam uma lista pública de @nomes na página. Qualquer pessoa que tenha o diário da página vê essa lista. O @nome de uma página vem do mesmo conjunto dos @nomes de pessoas, e um nome já usado nunca é dado a outra conta ou página. Uma página renomeada pode retomar o próprio nome anterior depois do período de espera, e o nome de uma página encerrada fica queimado para sempre.',
+        'Só o dono convida e remove administradores. Passar a página para outra pessoa só vale se ela aceitar. O dono anterior continua administrador até ser removido.',
+        'Tudo o que a página publica, como publicações, fotos e quem ela segue, é público como a página, e os limites da exclusão abaixo valem do mesmo jeito.',
+        'Uma página também pode ter Conversas. Ao contrário das suas Conversas pessoais, a chave de mensagens da página fica com o serviço de conta da associação, que pode ler as mensagens enviadas para a página e as enviadas por ela. Quem administra a página lê e envia pelo serviço. Um administrador removido perde o acesso a essas mensagens no momento da remoção. As Conversas de uma página não acompanham uma troca de chave da página: a nova chave começa uma caixa nova.',
+        'Uma página pode entrar em comunidades e grupos. O que ela segue, as fotos que publica e o que escreve em comunidades e grupos públicos é público como a página. As chaves que a página usa nas comunidades, a caixa dos grupos privados e as chaves de escrita, ficam com o serviço de conta da associação, que por isso pode ler as publicações da página em grupos privados.',
+        'O serviço de conta também lê os avisos enviados para a página, em nome de quem a administra, para mostrá-los a eles.',
+        'Encerrar uma página é definitivo. As publicações deixam de aparecer para quem está com o aplicativo em dia, mas as cópias que alguém já guardou continuam existindo, e o @nome nunca mais é dado a ninguém.',
+        'O dono pode mudar a chave da página. A página nova publica que sucede a antiga, e o histórico da chave antiga continua legível. Se a chave antiga tiver vazado, ela ainda pode aparecer até que quem lê tenha o aviso de mudança assinado ou até que a associação a bloqueie. Os aparelhos de quem segue a página passam a seguir a chave nova sozinhos, depois de conferirem eles mesmos o aviso de mudança.',
+        'Quem administra uma página a partir de um nó core usa uma chave guardada naquele aparelho. Ela aparece junto com o diário daquele aparelho, e não com um @nome.'
+      ]
+    },
+    {
       heading: 'Limites da exclusão',
       paragraphs: [
         'Você pode apagar uma publicação (resposta e citação incluídas) e uma versão do perfil. Os semeadores e apps oficiais e atualizados deixam de mostrar o item e descartam os bytes dele nas suas cópias, inclusive as imagens que só ele usava. Isso não é um apagamento garantido em qualquer lugar: um aparelho que acabou de seguir você pode guardar o conteúdo por pouco tempo, até receber a exclusão. Apps e semeadores antigos ou modificados não obedecem, e cópias que já chegaram a outros aparelhos, fotos já baixadas, capturas de tela, imagens guardadas em cache e as citações guardadas pelo serviço de conta numa denúncia podem manter o conteúdo. Um diário que já atingiu o limite de blocos não aceita mais nem o registro de exclusão. O app ainda não permite excluir a conta por conta própria, e o pedido de exclusão assinado descrito no desenho é planejado. Limpar os dados do site só apaga os dados locais; não apaga as cópias que já chegaram a outros aparelhos ou semeadores.',
@@ -112,6 +127,16 @@ export const PRIVACY = {
         'O Varanda é para pessoas com 16 anos ou mais, um limite adotado pelo Varanda com base no ECA Digital. Na web hospedada, antes de a conta ser liberada, a idade é confirmada por um serviço parceiro de verificação, a Didit. Isso vale para todos os membros da web hospedada, inclusive quem entrou antes, e o app fica bloqueado até a verificação dar certo. No app nativo, com certificado dado pela associação, essa verificação ainda não é feita nesta versão.',
         'A verificação costuma estimar a idade por uma selfie e pode pedir um documento. A selfie e o documento são tratados pelo parceiro e nunca chegam ao Varanda. O serviço de conta guarda só a faixa de idade (16 a 17 anos ou 18 anos ou mais), a forma de verificação e a data, nunca a foto, o documento ou a data de nascimento. Se o resultado não for conclusivo, você pode tentar de novo com um documento.',
         'O Varanda pede ao parceiro que apague a sessão de verificação logo depois da decisão, e as configurações de retenção do parceiro ficam no mínimo. A imagem do rosto é um dado sensível; a base legal para esse tratamento ainda será confirmada por parecer jurídico. O vínculo com o Google e o certificado atual não afirmam a idade. O guardião e o e-mail de recuperação são planejados.'
+      ]
+    },
+    {
+      heading: 'Páginas',
+      paragraphs: [
+        'O diário de uma página (publicações, perfil, foto do perfil, fotos das publicações e a lista de quem a página segue) é público, como o de uma pessoa, e fica nos mesmos lugares: aparelhos de quem segue a página e semeadores no Brasil. O serviço de conta da associação também guarda uma cópia completa do diário da página (publicações, perfil, fotos e quem ela segue) no próprio armazenamento, porque escreve e replica a página para o semeador. Como o de qualquer diário, ele pode ficar na memória do navegador de quem espia pela Espiadinha. A lista de administradores, com o @nome do dono e dos administradores que aceitaram, também é pública.',
+        'A chave que assina o diário da página fica no serviço de conta, no Brasil, e não no aparelho de quem a administra. A proposta é execução de contrato, Art. 7º, V, ainda sem parecer jurídico.',
+        'As mensagens enviadas para uma página e as enviadas por ela podem ser lidas pelo serviço de conta, porque a chave de mensagens da página fica com ele; o serviço guarda as mensagens da página cifradas, e quem administra a página as lê por ele. Esse desenho ainda depende de parecer jurídico.',
+        'O serviço de conta guarda as chaves que a página usa em comunidades e grupos (a caixa dos grupos privados e as chaves de escrita) e pode ler as publicações da página em grupos privados. Ele lê os avisos enviados para a página em nome de quem a administra. Num nó core, a chave de quem administra fica guardada no próprio aparelho, e o serviço guarda só o ponto até onde já leu as mensagens da página.',
+        'Encerrar uma página é definitivo: os dados que o serviço guarda dela são apagados, o @nome fica queimado, e as cópias que já estão em outros aparelhos e semeadores continuam existindo.'
       ]
     },
     {

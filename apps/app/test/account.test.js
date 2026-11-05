@@ -123,6 +123,21 @@ test('request builders: URL, method, headers, body', async (t) => {
   t.alike(JSON.parse(calls[5].init.body), { member: M, nonce: 'n', signature: 'ff' })
 })
 
+test('lookupUsername: absolute only with an https account origin', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.lookupUsername('ana', { origin: 'https://contas.example.test' }), null)
+  await a.lookupUsername('ana', {})
+  await a.lookupUsername('ana', { origin: undefined })
+  await a.lookupUsername('ana', { origin: 'http://contas.example.test' })
+  t.alike(calls.map(c => c.url), [
+    'https://contas.example.test/account/username/ana',
+    '/account/username/ana',
+    '/account/username/ana',
+    '/account/username/ana'
+  ])
+})
+
 test('404 gives null for pending and lookup, an error elsewhere', async (t) => {
   const a = await load()
   stub(t, json(404, { error: 'nao-encontrado' }))

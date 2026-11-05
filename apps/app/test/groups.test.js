@@ -482,3 +482,53 @@ test('reconcile: create matches the community, name and creator role', async (t)
   t.is(reconcile({ action: 'create', community: C }, view), 'unknown')
   t.is(reconcile({ action: 'create', name: 'Praia' }, view), 'unknown')
 })
+
+test('page mode: needs a page identity and the gate', async (t) => {
+  const { pageMode } = await load()
+  t.alike(pageMode({ acting: { kind: 'page', key: A }, on: true }), { page: true, key: A })
+  t.is(pageMode({ acting: { kind: 'page', key: A }, on: false }).page, false, 'gate off acts as the member')
+  t.is(pageMode({ acting: { kind: 'me' }, on: true }).page, false)
+  t.is(pageMode({ acting: { kind: 'page', key: 'nope' }, on: true }).page, false)
+  t.is(pageMode({}).page, false)
+  t.is(pageMode().page, false)
+})
+
+test('page mode: a page never gets staff controls', async (t) => {
+  const { canAsPage, pageCan } = await load()
+  for (const a of ['create', 'ban', 'admit', 'admin', 'hide', 'meta', 'rekey', 'invite', 'invitePolicy']) {
+    t.is(canAsPage(a), false, a)
+    t.is(pageCan(a, 'creator'), false, a + ' even with a staff role')
+  }
+  t.is(pageCan('post', 'member'), true)
+  t.is(pageCan('post', 'requested'), false)
+  t.is(pageCan('leave', 'requested'), true)
+  t.is(pageCan('leave', 'left'), false)
+})
+
+test('page mode: requested shows pedido enviado, unusable answers show nothing', async (t) => {
+  const { pageRoleOf, pageRoleLabel } = await load()
+  t.is(pageRoleOf({ state: 'requested' }), 'requested')
+  t.is(pageRoleOf({ role: 'member' }), 'member')
+  t.is(pageRoleOf({ role: 'left' }), 'left')
+  t.is(pageRoleOf({ state: 'pending' }), null)
+  t.is(pageRoleOf(null), null)
+  t.is(pageRoleLabel('requested'), 'pedido enviado')
+  t.is(pageRoleLabel('left'), '')
+})
+
+test('page mode: a missing service route is "em breve", an uncertain one is not', async (t) => {
+  const { pageErrorText, isPageSoon, PAGE_SOON_TEXT } = await load()
+  t.is(pageErrorText({ code: 'pedido-invalido', message: 'x' }), PAGE_SOON_TEXT)
+  t.is(pageErrorText({ code: 'nao-encontrado', message: 'x' }), PAGE_SOON_TEXT)
+  t.is(isPageSoon({ code: 'pedido-invalido', uncertain: true }), false, 'after a signature it is never "em breve"')
+  t.is(pageErrorText({ code: 'limite', message: 'Limite atingido' }), 'Limite atingido')
+  t.is(pageErrorText(null), 'Serviço indisponível')
+})
+
+test('page mode: read rows and communities are filtered', async (t) => {
+  const { pageReadItems, pageCommunities } = await load()
+  t.is(pageReadItems({ items: [{ writer: A, seq: 1 }, { writer: A }, null, { seq: 2 }] }).length, 1)
+  t.alike(pageReadItems(null), [])
+  t.alike(pageCommunities({ communities: [{ community: C }, { community: 'x' }, null] }), [{ community: C }])
+  t.alike(pageCommunities({}), [])
+})

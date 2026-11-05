@@ -6,14 +6,23 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { whoOf } from '../who'
+import { pageBadgeLabel } from '../pageBadge'
 import { Avatar } from './Avatar'
 import { FollowPill } from './FollowPill'
 import { type } from './theme'
 import { useStyles } from './ThemeProvider'
 
-export function MemberRow ({ hit, avatar, following, onOpen, onFollow, onUnfollow, pending, disabled }) {
+// `hint` is the names view (its page flags are the seeder's hint, when names
+// learned one) and `hit` the search row (its own seeder hint). Either may say
+// page; a names view without the flags must not hide the hit's badge.
+const flag = (k, a, b) => (a && a[k] === true) || (b && b[k] === true)
+export const mergePageInfo = (hint, hit) => ({ page: flag('page', hint, hit), closed: flag('closed', hint, hit), moved: flag('moved', hint, hit) })
+
+export function MemberRow ({ hit, hint, avatar, following, onOpen, onFollow, onUnfollow, pending, disabled }) {
+  const pageInfo = mergePageInfo(hint, hit)
+  const profile = { name: hit.name, username: hit.username, ...(pageInfo.page === true ? { page: true } : {}) }
+  const badge = pageBadgeLabel(pageInfo)
   const styles = useStyles(makeStyles)
-  const profile = { name: hit.name, username: hit.username }
   const who = whoOf(profile)
   const title = displayText(who.title)
   const subtitle = who.subtitle ? displayText(who.subtitle) : null
@@ -31,6 +40,7 @@ export function MemberRow ({ hit, avatar, following, onOpen, onFollow, onUnfollo
         <View style={styles.who}>
           <Text style={styles.name} numberOfLines={1}>{title}</Text>
           {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
+          {badge ? <Text style={styles.handle} numberOfLines={1}>{badge}</Text> : null}
         </View>
       </Pressable>
       <FollowPill

@@ -628,3 +628,106 @@ test('a web-only error is a USAGE error with one of the two known messages', asy
   t.is(isWebOnlyError(null), false)
   t.is(isWebOnlyError(undefined), false)
 })
+
+const PAGE = 'ab'.repeat(32)
+
+test('a page seen namespace never equals a member key, even the same hex', async (t) => {
+  const { pageSeenNamespace, isPageSeenNamespace } = await load()
+  const ns = pageSeenNamespace(OWN)
+  t.is(ns, 'page:' + OWN)
+  t.not(ns, OWN)
+  t.is(ns.length === OWN.length, false)
+  t.is(isPageSeenNamespace(ns), true)
+  t.is(isPageSeenNamespace(OWN), false)
+  t.is(isPageSeenNamespace('page:' + PAGE), true)
+  t.is(pageSeenNamespace(OWN.toUpperCase()), 'page:' + OWN)
+  t.is(pageSeenNamespace(PAGE), 'page:' + PAGE)
+  t.not(pageSeenNamespace(PAGE), pageSeenNamespace(OWN))
+  t.is(pageSeenNamespace('zz'), null)
+  t.is(pageSeenNamespace(''), null)
+  t.is(pageSeenNamespace(null), null)
+  t.is(pageSeenNamespace(undefined), null)
+  t.is(pageSeenNamespace(OWN + 'aa'), null)
+  t.is(isPageSeenNamespace('page:' + 'ab'), false)
+  t.is(isPageSeenNamespace('page:' + OWN.toUpperCase()), false)
+})
+
+test('the page notices header names the page and never a key', async (t) => {
+  const { pageNoticesHeader, PAGE_NOTICES_READ_LINE } = await load()
+  t.is(pageNoticesHeader('Café'), 'Avisos da página Café')
+  t.is(pageNoticesHeader('  Café  '), 'Avisos da página Café')
+  t.is(pageNoticesHeader('@cafe'), 'Avisos da página @cafe')
+  t.is(pageNoticesHeader(''), 'Avisos da página')
+  t.is(pageNoticesHeader('   '), 'Avisos da página')
+  t.is(pageNoticesHeader(null), 'Avisos da página')
+  t.is(pageNoticesHeader(undefined), 'Avisos da página')
+  t.is(pageNoticesHeader(7), 'Avisos da página')
+  t.is(pageNoticesHeader(OWN), 'Avisos da página')
+  t.is(pageNoticesHeader(OWN.toUpperCase()), 'Avisos da página')
+  t.is(pageNoticesHeader('@' + OWN), 'Avisos da página')
+  t.is(pageNoticesHeader('Café\nSilva'), 'Avisos da página Café Silva')
+  const header = pageNoticesHeader('Café')
+  t.is(header.includes(OWN), false)
+  t.is(header.includes(PAGE), false)
+  t.is(/[0-9a-f]{16,}/i.test(pageNoticesHeader(OWN)), false)
+  t.is(PAGE_NOTICES_READ_LINE, 'A associação lê estes avisos para a página')
+})
+
+test('page seen ids share the stored text and never collide with the person', async (t) => {
+  const {
+    serializeSeen, parseSeen, parseSeenNamespace, writeSeenNamespace,
+    pageSeenNamespace, hasNew, hasPageSeenNamespaces
+  } = await load()
+  // The page key is the member key on purpose: the hex must not be enough
+  // to share a seen list.
+  const ns = pageSeenNamespace(OWN)
+  const other = pageSeenNamespace(PAGE)
+  const personal = [d(1), d(2)]
+  const pageIds = [d(3), d(4)]
+  const otherIds = [d(5)]
+  let text = writeSeenNamespace(serializeSeen(OWN, personal), ns, pageIds)
+  text = writeSeenNamespace(text, other, otherIds)
+
+  t.alike(parseSeen(text, OWN), personal)
+  t.alike(parseSeenNamespace(text, OWN), personal)
+  t.alike(parseSeenNamespace(text, ns), pageIds)
+  t.alike(parseSeenNamespace(text, other), otherIds)
+  t.alike(parseSeen(text, ns), [], 'the page namespace is not a personal own key')
+  t.alike(parseSeen(text, OWN), personal)
+  t.is(JSON.parse(text).own, OWN)
+  t.not(JSON.parse(text).own, ns)
+  t.is(JSON.parse(text).ids.includes(d(3)), false)
+  t.is(JSON.parse(text).ids.includes(d(5)), false)
+
+  const personRows = Object.freeze([tok(1), tok(3)])
+  const pageRows = Object.freeze([tok(3), tok(1)])
+  t.is(hasNew(personRows, parseSeen(text, OWN)), true, 'a page token is still unseen for the person')
+  t.is(hasNew([tok(1)], parseSeen(text, OWN)), false)
+  t.is(hasNew(pageRows, parseSeenNamespace(text, ns)), true, 'a personal token is still unseen for the page')
+  t.is(hasNew([tok(3), tok(4)], parseSeenNamespace(text, ns)), false)
+  t.is(hasNew([tok(5)], parseSeenNamespace(text, other)), false)
+  t.is(hasNew([tok(3)], parseSeenNamespace(text, other)), true, 'another page does not see this page')
+
+  // A later personal write keeps every page list.
+  const next = writeSeenNamespace(text, OWN, [d(1), d(9)])
+  t.alike(parseSeen(next, OWN), [d(1), d(9)])
+  t.alike(parseSeenNamespace(next, ns), pageIds)
+  t.alike(parseSeenNamespace(next, other), otherIds)
+  t.is(hasPageSeenNamespaces(serializeSeen(OWN, personal)), false)
+  t.is(hasPageSeenNamespaces(next), true)
+  t.is(hasPageSeenNamespaces('nope'), false)
+  t.is(hasPageSeenNamespaces(null), false)
+
+  // An old personal entry still reads, and a page list is empty there.
+  t.alike(parseSeenNamespace(serializeSeen(OWN, personal), OWN), personal)
+  t.alike(parseSeenNamespace(serializeSeen(OWN, personal), ns), [])
+
+  // A v1 blob of follower keys is not copied into the shared document.
+  const v1 = JSON.stringify({ v: 1, own: OWN, ids: [OWN + ':4', PAGE + ':1'] })
+  const dropped = writeSeenNamespace(v1, ns, pageIds)
+  t.alike(parseSeen(dropped, OWN), [])
+  t.alike(parseSeenNamespace(dropped, ns), pageIds)
+  t.is(dropped.includes(OWN + ':4'), false)
+  t.is(dropped.includes(PAGE + ':1'), false)
+  t.is(dropped.includes(PAGE), false, 'the other key was only in the discarded v1 ids')
+})

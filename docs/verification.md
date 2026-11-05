@@ -4201,3 +4201,199 @@ Web (Chrome ou Safari, com o nó no navegador ou com o `varanda-serve`):
 - O desfazer atualiza só a tela que mostrou o aviso.
 - Um desfazer enquanto uma curtida da mesma publicação está pendente não entra na fila; o botão de republicar da linha continua desfazendo.
 - Um arrasto que começa fora de qualquer publicação, dentro dos 280 ms, não cancela a abertura da conversa. Tocar numa aba cancela.
+
+## 84. Páginas (PR feat/pages-app)
+
+Uma Página é o diário de um negócio ou projeto, com @nome, dono e administradores. O serviço de conta escreve no diário da página em nome deles. Protocolo na seção 12 de `docs/protocol.md`; dados em `docs/design.md` (LGPD); telas em `docs/app.md` ("Páginas"). Termos e Política na versão 15.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes ligados a esta etapa: `packages/core/test/terms.test.js` e `apps/app/test/terms-version.test.js` (versão 15 nos dois lados), `apps/app/test/legal.test.js` (texto e digest) e os arquivos de páginas listados nas seções de protocolo e de app.
+
+### Checagens humanas (a fazer)
+
+Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emulador, instalação hospedada) e depois na web. Use duas contas: A (dona) e B (administradora convidada).
+
+1. **Aceite da versão 15.** Ao abrir o app com a versão 14 aceita, o aceite dos Termos e da Política aparece de novo; a seção "Páginas" está nos dois documentos e não fala de mensagens.
+2. **Criar.** Páginas > Nova página: nome e @nome livres criam a página; ela aparece em Páginas. Um @nome já usado por uma pessoa ou por outra página é recusado, e um @nome usado antes não volta.
+3. **Seguir.** Com a conta B (que não administra), abra o perfil da página em Membro e toque em Seguir; a página aparece em Seguindo.
+4. **Publicar como a página.** Na conta A, o chip "Publicar como" escolhe a página; a publicação aparece no diário da página e, na conta B, em A Rua.
+5. **Convidar e aceitar.** Em Ajustes da página, A convida B pelo @nome; B vê o convite e aceita. O @nome de B aparece na lista pública de administradores no perfil da página, visto por uma terceira conta.
+6. **Administradora publica.** B publica como a página e a publicação sai no diário da página.
+7. **Remover.** A remove B. B não consegue mais publicar como a página (o chip some ou o envio é recusado) e uma publicação de B enviada antes da remoção continua no diário.
+8. **Passar a página.** A passa a página para B; só vale depois de B aceitar. Depois, A continua administradora até ser removida por B.
+9. **Perfil por @nome.** O link `/@nome` da página abre o perfil da página.
+10. **Busca.** Busca > Contas por nome ou @nome mostra a página com o selo de página.
+11. **Incerto.** Com a rede cortada no meio do envio, o app mostra "incerto" e não publica de novo sozinho; conferir no diário que há no máximo uma publicação.
+12. **Só hospedado.** Numa configuração manual, as telas de Páginas mostram "Só na versão web".
+
+### Não verificado / limites conhecidos
+
+- Nada foi rodado num navegador nem num aparelho pelo agente.
+- Mensagens da página (seção 85), comunidades da página, encerrar e mover a página e os avisos da página não fazem parte desta etapa.
+
+## 85. Conversas como página (PR feat/pages-app)
+
+Uma Página tem Conversas, mas a chave de mensagens dela fica no serviço de conta, que pode ler as mensagens enviadas e recebidas pela página. Protocolo na seção 12 de `docs/protocol.md` ("Conversas como página"); dados em `docs/design.md` (LGPD); telas em `docs/app.md` ("Páginas"). Termos e Política na versão 15.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes ligados a esta etapa: `packages/core/test/terms.test.js` e `apps/app/test/terms-version.test.js` (versão 15 nos dois lados) e `apps/app/test/legal.test.js` (texto e digest).
+
+### Checagens humanas (a fazer)
+
+Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emulador, instalação hospedada) e depois na web. Use A (dona), B (administradora) e C (outra pessoa).
+
+1. **Termos.** Não há aceite novo só para as Conversas da página: a versão 15 (seção 84) já diz que o serviço de conta pode ler as mensagens da página.
+2. **Enviar como a página.** A abre as Conversas da página e envia uma mensagem a C. A mensagem sai com o cabeçalho "como página".
+3. **A outra pessoa vê a página.** C recebe a mensagem como vinda da página (nome e @nome da página), sem o nome de A, e responde.
+4. **Resposta na caixa da página.** A resposta de C aparece na caixa da página para A e para B, e a contagem de não lidas some depois de abrir.
+5. **Administradora lê e envia.** B abre a mesma conversa, vê o histórico e responde como a página.
+6. **Remover.** A remove B. B deixa de ver a caixa da página e o envio como a página é recusado. Uma mensagem que B enviou antes continua na conversa de C.
+7. **Incerto.** Com a rede cortada no meio de um envio, o app mostra "incerto" e não envia de novo sozinho; conferir com C que chegou no máximo uma mensagem.
+8. **Só hospedado.** Numa configuração manual, as Conversas da página mostram "Só na versão web".
+
+### Não verificado / limites conhecidos
+
+- Nada foi rodado num navegador nem num aparelho pelo agente.
+- O serviço lê as mensagens da página (decisão do dono, no Termos 15). As Conversas de uma página não acompanham uma troca de chave da página.
+
+## 86. Páginas: seguir, fotos e A Rua (PR feat/pages-app)
+
+A página segue pessoas e outras páginas, mostra A Rua da página (janela de 64 seguidos por vez) e publica fotos e GIFs como uma pessoa.
+
+### Como verificar
+
+Do repositório: `npm run lint`, `npm test` e `npm run demo`. Os testes dos módulos puros de páginas ficam em `apps/app/test/`.
+
+### Checagens humanas (a fazer)
+
+Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emulador, instalação hospedada) e depois na web.
+
+1. **Seguir como a página.** Na conta A, com a página escolhida, abra o perfil de uma pessoa e use "Seguir como a página"; a pessoa aparece em quem a página segue.
+2. **A Rua da página.** Uma publicação nova dessa pessoa aparece em "A Rua da página". Com mais de 64 seguidos, a lista lê uma janela por vez e o rodapé indica que há mais.
+3. **Foto como a página.** Publique como a página com uma foto; ela aparece na publicação, em A Rua de uma terceira conta e é servida pela rota de mídia do semeador (a imagem carrega sem a conta A aberta).
+4. **GIF como a página.** Publique um GIF como a página; ele anima na publicação e em A Rua da terceira conta.
+5. **Deixar de seguir como a página.** A remoção tira a pessoa de A Rua da página sem mexer no que a própria conta A segue.
+6. **Só hospedado.** Numa configuração manual, essas ações não aparecem.
+
+### Não verificado / limites conhecidos
+
+- Nada foi rodado num navegador nem num aparelho pelo agente.
+
+## 87. Páginas: encerrar e mudar de chave (PR feat/pages-app)
+
+O dono encerra a página ou muda a chave dela em Ajustes da página. O app mostra as páginas encerradas e as que mudaram de chave e não mostra o que a chave antiga publicou depois do fim. O nó corta o diário no primeiro `page-close` ou `page-moved` verificado; o app confia só no que o nó verificou (`page.read`), e a declaração de `GET /account/pages/successor/<K1>` só vale junto com um `page-origin` de K2 que nomeia o mesmo par (`apps/app/src/pageMove.js`).
+
+### Como verificar
+
+Do repositório: `npm run lint`, `npm test` e `npm run demo`. Os módulos puros ficam em `apps/app/test/pageMove.test.js` (declaração sem origem igual ignorada, cadeia parada em 4, encerrada sem "Seguir a chave nova") e `apps/app/test/pages.test.js` (textos de `encerrada`, `movida` e do limite diário).
+
+### Checagens humanas (a fazer)
+
+Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emulador, instalação hospedada) e depois na web.
+
+1. **Só o dono vê.** Um administrador que não é dono abre Ajustes da página e não vê "Encerrar página" nem "Mudar a chave".
+2. **Encerrar.** O dono toca "Encerrar página"; a primeira confirmação cita o @nome e diz que as publicações somem para quem está em dia e que cópias já guardadas continuam; a segunda diz que o @nome nunca volta. Depois de "Encerrar de vez", as publicações somem do perfil e de A Rua numa segunda conta que seguia a página, e a página fica cinza em Páginas.
+3. **Nome indisponível.** Criar uma página nova ou trocar o @nome de outra conta para o @nome da página encerrada responde "Esse @nome já está em uso".
+4. **Chave vazada depois do encerramento.** Um bloco acrescentado ao diário da página encerrada com a chave antiga (fixture de teste) não aparece em nenhuma tela.
+5. **Perfil encerrado.** O perfil mostra "Esta página foi encerrada", sem Seguir, sem "Seguir como a página" e sem "Agir como esta página".
+6. **Mudar a chave.** O dono toca "Mudar a chave" e confirma; a tela mostra a chave nova e o @nome continua o mesmo (a Busca pelo @nome abre a chave nova).
+7. **Aviso no perfil antigo.** Numa segunda conta que seguia a página, o perfil da chave antiga mostra "Esta página mudou para uma nova chave" e "Ver a página nova" abre o perfil da chave nova. O aparelho pode já ter seguido a chave nova sozinho, uma vez, depois de conferir a mudança (Termos 15); "Seguir a chave nova" é a forma manual.
+8. **Seguir a chave nova.** Se o aparelho ainda não seguiu, "Seguir a chave nova" passa a seguir a chave nova (aparece em Seguindo) e o botão some.
+9. **Publicações antigas.** As publicações de antes da mudança continuam legíveis no perfil antigo e em A Rua.
+10. **Chave antiga vazada depois da mudança.** Um bloco acrescentado à chave antiga depois da mudança (fixture de teste) não aparece no perfil nem em A Rua.
+11. **Incerto.** Com a rede cortada logo depois de confirmar, a tela mostra "Tentar de novo"; o toque reenvia o mesmo pedido e não pede outra assinatura.
+12. **Limite.** Passado o limite diário, a resposta é "Limite de mudanças atingido, tente amanhã".
+
+### Não verificado / limites conhecidos
+
+- Nada foi rodado num navegador nem num aparelho pelo agente.
+- O app não confere assinaturas (o Metro não alcança `packages/core`): vale o que o nó verificou. A declaração do serviço é só uma dica.
+- Com a chave antiga pausada (sem `page-moved` no diário), o perfil da chave antiga esconde os blocos depois de `fromSeq`, mas A Rua não consulta a rota `successor` para cada página seguida: ali o corte depende só do nó.
+
+## 88. Avisos da página (PR feat/pages-app)
+
+O dono e os administradores leem em Avisos o que chega para a página: quem começou a seguir a página, as respostas, as citações e as menções (sem as curtidas e republicações do canal `notices/3`). O serviço de conta lê os avisos pelo semeador, confere cada linha e responde só ao dono e aos administradores (ação `notices`, leitura assinada, 8 por minuto por página; página mudada de chave responde `movida`). Nenhum Web Push vai para uma página. Contrato em `docs/protocol.md` seção 12 ("Avisos de uma página") e em `docs/rpc.md` (5.84); dados em `docs/design.md` (LGPD).
+
+### Como verificar
+
+Do repositório: `npm run lint`, `npm test` e `npm run demo`. Testes desta etapa: `apps/cli/test/account-pages-notices.test.js` (linhas verificadas, limite por página, administrador removido) e `apps/app/test/notices.test.js`. Não rode nada contra o serviço de produção.
+
+### Checagens humanas (a fazer)
+
+Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emulador, instalação hospedada) e depois na web. Contas: A (dona), B (administradora) e C (terceira).
+
+1. **Seguir a página.** C segue a página; em A e em B, Avisos mostra "começou a seguir a página" com o nome de C.
+2. **Menção.** C publica um texto com o @nome da página; o aviso de menção aparece para A e para B, sem o texto cru de um par fora de `displayText`.
+3. **Quem não administra.** C não vê os avisos da página em nenhuma tela.
+4. **Administrador removido.** A remove B; B deixa de ver os avisos da página no próximo carregamento.
+5. **Limite.** Atualizar Avisos da página mais de 8 vezes em um minuto mostra o limite e nada quebra; passado o minuto, funciona de novo.
+6. **Sem push.** Nenhuma notificação do sistema chega ao aparelho por causa de um aviso da página.
+7. **Página encerrada.** Depois de encerrar a página, Avisos da página responde "Esta página foi encerrada".
+
+### Não verificado / limites conhecidos
+
+- Nada foi rodado num navegador nem num aparelho pelo agente.
+- O limite de 8 por minuto por página fica na memória do serviço e recomeça quando ele reinicia.
+- O serviço lê os avisos da página em nome dos administradores (Termos 15).
+
+## 89. Páginas no nó core (PR feat/pages-app)
+
+Um nó core (CLI e `varanda-serve`) administra páginas com uma chave de delegado que fica no aparelho (`private/page-actor.json`), registrada pelo diário do nó com `page-delegate` (`page.register`, 5.87). O serviço de conta aceita o delegado só depois de replicar o diário pelo semeador e de o delegado aceitar os Termos 15. A CLI fala com o serviço em `VARANDA_ACCOUNT_ORIGIN`; o app servido por `varanda-serve --account-origin https://<host>` mostra as Páginas pelo mesmo serviço.
+
+### Como verificar
+
+Do repositório: `npm run lint`, `npm test` e `npm run demo`. Testes desta etapa: `apps/cli/test/account-pages-delegate.test.js`, `apps/cli/test/cli.test.js` e `apps/cli/test/readme-help.test.js` (ajuda idêntica ao README), `packages/core/test/terms.test.js` e `apps/app/test/terms-version.test.js` (versão 15).
+
+### Checagens humanas (a fazer)
+
+Todas a fazer (nenhuma foi rodada). Primeiro o app no Android (build de debug apontando para um `varanda-serve --account-origin` de teste) e depois a web e a CLI. Use só um serviço de conta de teste.
+
+1. **Registrar.** `page register` mostra a chave pública do delegado e nunca a secreta; repetir não acrescenta outro `page-delegate`. Antes de existir identidade a CLI diz "identidade não encontrada"; antes do certificado de membro, que é preciso gravar o certificado primeiro; um arquivo de chave malformado ou ligado por link diz "chave de página inválida" e nenhum arquivo é escrito.
+2. **Termos.** `page terms` aceita a versão 15 pelo delegado; sem isso, as ações respondem "este nó não tem delegado aceito pelo serviço" ou "aceite os Termos antes". Uma conta ligada ao Google não registra delegado para o próprio diário.
+3. **Criar.** `page create --username ... --name ...` cria a página; ela aparece em `page list` e na Busca.
+4. **Publicar, responder e foto.** `page post`, `page reply --to <chave>:<seq>` e `page photo` publicam no diário da página e aparecem em outra conta que a segue. Repetir o mesmo pedido assinado nunca publica duas vezes.
+5. **Seguir.** `page follow --page <chave> --key <chave>` e `page unfollow` mudam a lista pública da página.
+6. **Avisos.** `page notices --page <chave>` lista os avisos da página (seção 88).
+7. **Encerrar e mudar.** `page close` e `page move` seguem a seção 87; depois do fim, uma ação responde "esta página foi encerrada" ou "esta página mudou para uma nova chave".
+8. **Núcleo com o app.** No app nativo (Android primeiro) com um nó core que informa `accountOrigin` (o `varanda-serve --account-origin https://<host>` publica o campo no `node.info`), Ajustes mostra Páginas. O primeiro uso registra o delegado, aceita os Termos com ele e mostra a chave do delegado copiável com "convites chegam por esta chave"; só então "Criar página" funciona. A interface web do `varanda-serve` não mostra Páginas, mesmo com a origem (o serviço de conta não aceita outra origem de navegador). Uma origem que não seja https é recusada com "--account-origin inválido".
+9. **Administrador de nó core.** A lista pública de administradores mostra, para esse administrador, a chave do diário do nó e não um @nome.
+
+### Não verificado / limites conhecidos
+
+- Nada foi rodado num navegador, num aparelho nem contra o serviço de produção pelo agente.
+- Um delegado não tem @nome e é convidado pela chave.
+- Perder `page-actor.json` perde o acesso do nó: registre de novo e peça o convite outra vez.
+- Limite aceito: a interface web do `varanda-serve` não tem Páginas (o serviço de conta não envia CORS e confere a origem). Avisos, Conversas e comunidades como a página seguem só no nó hospedado; no nó core, os avisos da página vêm pela CLI.
+- A CLI nunca reenvia um pedido: um resultado incerto pede conferência antes de repetir.
+
+## 90. Páginas em comunidades (PR feat/pages-app)
+
+Uma página entra em comunidades e grupos como membro, por núcleos de escritor próprios que o serviço de conta guarda (`pages-groups`). Ela só entra, sai, lê e escreve: nunca cria, admite, bane, nomeia, oculta nem troca a chave de um grupo. Em comunidade de aprovação a página fica "pedida" até os administradores a admitirem. Nos grupos privados o serviço guarda a caixa da página e pode ler as publicações (Termos 15). Contrato em `docs/protocol.md` seção 12 ("Comunidades como página") e `docs/rpc.md` (5.84).
+
+### Como verificar
+
+Do repositório: `npm run lint`, `npm test` e `npm run demo`. Testes desta etapa: `apps/cli/test/account-pages.test.js` (ações de comunidade e de grupo), `apps/app/test/groups.test.js` e `apps/app/test/group-flow.test.js` (a página como quem age).
+
+### Checagens humanas (a fazer)
+
+Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emulador, instalação hospedada) e depois na web. Contas: A (dona da página), B (criadora de uma comunidade aberta e de uma de aprovação).
+
+1. **Comunidade aberta.** Em Comunidade, "Agir como" a página e entrar; a página aparece como membro, com o @nome dela, na lista de membros.
+2. **Comunidade de aprovação.** A página entra e fica como pedida; B admite a página e ela passa a membro.
+3. **Grupo público.** A página entra no grupo e publica; o texto sai com o nome da página e é público como a página.
+4. **Grupo privado.** A página entra num grupo privado e lê e escreve; um membro comum vê o texto, e quem não é membro não vê.
+5. **Sair.** A página sai do grupo e da comunidade; o membro some da lista e uma publicação anterior continua.
+6. **Mudar a chave.** Depois de "Mudar a chave" (seção 87), a chave nova volta para as mesmas comunidades e grupos; os de aprovação voltam a "pedida".
+7. **Encerrar.** Encerrar a página a tira de todas as comunidades e grupos.
+8. **Administrador removido.** A remove um administrador; ele perde o controle dos grupos da página no mesmo instante.
+9. **Limite.** Mais de 16 núcleos de escritor ou 64 grupos por página respondem o limite.
+10. **Só entra e sai.** A página não vê nenhuma ação de criar, admitir, banir, nomear, ocultar ou trocar a chave de um grupo.
+
+### Não verificado / limites conhecidos
+
+- Nada foi rodado num navegador nem num aparelho pelo agente.
+- Um escritor vazado pode escrever com data anterior até a saída, o limite do aparelho que saiu da seção 10 do protocolo.
+- Uma página pausada que mudou de chave não sai dos grupos sozinha: vale `mod block`.
+- As Conversas da página não acompanham a mudança de chave.

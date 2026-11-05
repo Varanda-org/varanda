@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 14)
-  t.is(LEGAL_DATE, '04/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 14, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 15)
+  t.is(LEGAL_DATE, '05/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 15, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: complete documents with plain, visible text and project URLs', async (t) => {
@@ -56,5 +56,29 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'ec5f39aea48b710aedef533ac8862b46adb10dfbecc93e949aeb565278ebb0d5', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'b4cba88eee335cb5c99a6f1343e370a4aa814bed4aff73b2dbeb2b0d8ac1898d', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+})
+
+test('legal: pages are described in Terms and Privacy, including service-readable messages', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.filter(({ heading }) => heading === 'Páginas').flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('Só o dono convida e remove administradores'))
+  t.ok(text(TERMS).includes('só vale se ela aceitar'))
+  t.ok(text(PRIVACY).includes('lista de administradores'))
+  t.ok(text(TERMS).includes('pode ler as mensagens enviadas para a página'))
+  t.ok(text(TERMS).includes('perde o acesso a essas mensagens no momento da remoção'))
+  t.ok(text(TERMS).includes('começa uma caixa nova'))
+  t.ok(text(PRIVACY).includes('podem ser lidas pelo serviço de conta'))
+})
+
+test('legal: version 15 names the group box, the notices custody, the burned name and the automatic follow', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.filter(({ heading }) => heading === 'Páginas').flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('a caixa dos grupos privados e as chaves de escrita'))
+  t.ok(text(TERMS).includes('lê os avisos enviados para a página'))
+  t.ok(text(TERMS).includes('o @nome nunca mais é dado a ninguém'))
+  t.ok(text(TERMS).includes('passam a seguir a chave nova sozinhos'))
+  t.ok(text(TERMS).includes('uma chave guardada naquele aparelho'))
+  t.ok(text(PRIVACY).includes('pode ler as publicações da página em grupos privados'))
+  t.ok(text(PRIVACY).includes('lê os avisos enviados para a página'))
 })

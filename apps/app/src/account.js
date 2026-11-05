@@ -7,6 +7,7 @@
 import { applicationServerKey } from './push-state.js'
 import { AGE_STATES } from './age.js'
 import { resolveUrl } from './installation.js'
+import { accountOriginOf } from './pageGate.js'
 import { isAppClient } from './appClient.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
@@ -115,7 +116,7 @@ export function toError (code, nextChangeAt) {
   return err
 }
 
-async function readJson (res, maxBody = MAX_BODY) {
+export async function readJson (res, maxBody = MAX_BODY) {
   const type = res.headers && res.headers.get ? res.headers.get('content-type') : ''
   if (!/^application\/json\b/i.test(type || '')) return null
   let text
@@ -149,8 +150,13 @@ export function buildRequest (method, path, body, extra) {
 // `uncertain`: a state-changing call whose outcome is unknown (no answer, a
 // 5xx, or a success without a readable body) says so, so the caller can tell
 // it from a refusal and re-read instead of repeating it (docs/app.md).
-async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers } = {}) {
-  const { url, init } = buildRequest(method, path, body, headers)
+// `origin`: a core node's https account origin (pages.js pagesOrigin); the
+// hosted web app passes none and keeps the relative path.
+async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin } = {}) {
+  const built = buildRequest(method, path, body, headers)
+  const { init } = built
+  const base = accountOriginOf(origin)
+  const url = base === undefined ? built.url : base + path
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), timeoutMs)
   const fail = (code, nextChangeAt, unknown) => {
@@ -219,8 +225,8 @@ export const finishLink = ({ signature, linkSecret, redeem }) => {
   if (appMissingProofs({ linkSecret, redeem })) return Promise.reject(toError('expirado'))
   return call('POST', '/account/finish', { signature }, { headers: linkHeaders({ linkSecret, redeem }) })
 }
-export const lookupUsername = (name) =>
-  call('GET', '/account/username/' + encodeURIComponent(name), undefined, { allow404: true })
+export const lookupUsername = (name, { origin } = {}) =>
+  call('GET', '/account/username/' + encodeURIComponent(name), undefined, { allow404: true, origin })
 export const renameStart = ({ member, username }) =>
   call('POST', '/account/rename/start', { member, username })
 export const renameFinish = ({ member, nonce, signature }) =>

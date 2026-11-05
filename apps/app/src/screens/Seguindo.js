@@ -34,6 +34,7 @@ import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ListFooter, Skeleton } from '../ui/States'
 import { OfflineNote } from '../ui/OfflineNote'
 import { TopBar } from '../ui/TopBar'
+import { pageBadgeLabel } from './Membro'
 import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
@@ -51,8 +52,9 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
   const who = whoOf(profile)
   const title = displayText(who.title)
   const subtitle = who.subtitle ? displayText(who.subtitle) : null
+  const badge = pageBadgeLabel(profile)
   const open = typeof onOpen === 'function'
-    ? () => onOpen(followKey, { name: profile ? profile.name : null, username: profile ? profile.username : null })
+    ? () => onOpen(followKey, { name: profile ? profile.name : null, username: profile ? profile.username : null, ...(profile && profile.page === true ? { page: true, closed: profile.closed === true, moved: profile.moved === true } : { page: false }) })
     : undefined
   return (
     <View style={styles.row}>
@@ -70,6 +72,7 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
               <>
                 <Text style={styles.name} numberOfLines={1}>{title}</Text>
                 {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
+                {badge ? <Text style={styles.handle} numberOfLines={1}>{badge}</Text> : null}
               </>
               )
             : <View style={styles.skeleton} accessible={false} />}

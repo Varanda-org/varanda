@@ -24,6 +24,22 @@ test('canDelete: only the own author', async (t) => {
   t.not(d.canDelete(null, A))
 })
 
+test('canDelete: also the acting page own posts, never another page', async (t) => {
+  const d = await load()
+  const P = 'd'.repeat(64)
+  t.ok(d.canDelete({ author: P, seq: 2 }, A, P), 'the page post')
+  t.ok(d.canDelete({ author: A, seq: 2 }, A, P), 'the member post still')
+  t.not(d.canDelete({ author: P, seq: 2 }, A), 'no page chosen')
+  t.not(d.canDelete({ author: B, seq: 2 }, A, P), 'a stranger')
+  t.not(d.canDelete({ author: P, seq: 0 }, A, P), 'block 0')
+  t.not(d.canDelete({ author: P, seq: 2 }, A, 'nope'), 'a bad page key')
+  t.is(d.deleteRef({ author: P, seq: 5 }, A, P), P + ':5')
+  t.is(d.deleteRef({ author: P, seq: 5 }, A), null)
+  t.ok(d.isPageRef(P + ':5', P))
+  t.not(d.isPageRef(A + ':5', P))
+  t.not(d.isPageRef(P + ':5', null))
+})
+
 test('deleteRef: a stranger original through a repost is never deletable', async (t) => {
   const d = await load()
   t.is(d.deleteRef({ author: A, seq: 4 }, A), A + ':4')

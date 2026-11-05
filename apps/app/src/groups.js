@@ -445,3 +445,74 @@ export function applyPage (store, read, before = null) {
 export function itemsOf (store) {
   return store && Array.isArray(store.pages) ? mergePages(store.pages) : []
 }
+
+// --- acting as a page (Páginas) ---
+
+export const PAGE_JOIN_LABEL = 'Entrar como a página'
+export const PAGE_LEAVE_LABEL = 'Sair como a página'
+export const PAGE_REQUESTED_LABEL = 'pedido enviado'
+export const PAGE_SOON_TEXT = 'Comunidades como página em breve'
+export const AS_PAGE_LABEL = 'como página'
+export const PAGE_EMPTY_TEXT = 'A página ainda não está em nenhuma comunidade.'
+
+// The service answers these until its group routes exist; they are no error.
+const PAGE_SOON_CODES = ['pedido-invalido', 'nao-encontrado']
+
+// A page never creates, admits, bans, appoints, hides, rekeys or edits.
+const PAGE_ACTIONS = Object.freeze(['post', 'leave'])
+
+// A stale page identity with the gate off acts as the member, so page mode
+// needs both the acting state and the pagesOn gate.
+export function pageMode ({ acting, on } = {}) {
+  const page = !!acting && acting.kind === 'page' && typeof acting.key === 'string' && HEX64.test(acting.key)
+  return page && on === true ? { page: true, key: acting.key } : { page: false, key: null }
+}
+
+export function canAsPage (action) {
+  return PAGE_ACTIONS.includes(action)
+}
+
+// What a page may do in a group, by its own standing and never a staff role.
+export function pageCan (action, role) {
+  if (!canAsPage(action)) return false
+  if (action === 'post') return role === 'member'
+  return role === 'member' || role === 'requested'
+}
+
+// The page's standing from a join, leave or read answer: 'member',
+// 'requested', 'left', or null when the answer says nothing usable.
+export function pageRoleOf (answer) {
+  if (!answer || typeof answer !== 'object') return null
+  const v = typeof answer.role === 'string' ? answer.role : answer.state
+  if (v === 'requested') return 'requested'
+  if (v === 'member' || v === 'creator' || v === 'admin') return 'member'
+  if (v === 'left' || v === 'none') return 'left'
+  return null
+}
+
+export function pageRoleLabel (role) {
+  if (role === 'requested') return PAGE_REQUESTED_LABEL
+  return role === 'member' ? 'membro' : ''
+}
+
+export function isPageSoon (err) {
+  return !!err && PAGE_SOON_CODES.includes(err.code) && err.uncertain !== true
+}
+
+// An uncertain outcome never invites a resend: the screen keeps err.retry.
+export function pageErrorText (err) {
+  if (isPageSoon(err)) return PAGE_SOON_TEXT
+  return err && typeof err.message === 'string' && err.message !== '' ? err.message : 'Serviço indisponível'
+}
+
+// The rows of a group-read answer; the author of each is the page key.
+export function pageReadItems (read) {
+  const items = read && Array.isArray(read.items) ? read.items : []
+  return items.filter((i) => i && typeof i === 'object' && typeof i.writer === 'string' && Number.isSafeInteger(i.seq))
+}
+
+// The communities of a page from its signed status read.
+export function pageCommunities (status) {
+  const list = status && Array.isArray(status.communities) ? status.communities : []
+  return list.filter((c) => c && typeof c.community === 'string' && HEX64.test(c.community))
+}

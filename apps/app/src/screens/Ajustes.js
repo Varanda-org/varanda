@@ -47,6 +47,7 @@ import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MODES, MODE_LABELS } from '../appearance'
 import { Btn, ErrorText, Notice, Page, Row, Soft, useAction } from '../ui'
+import { pagesOn } from '../pageGate'
 import Conexao from './Conexao'
 import Convites from './Convites'
 import Identidade from './Identidade'
@@ -106,7 +107,7 @@ function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailin
   )
 }
 
-export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset }) {
+export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, onOpenPaginas }) {
   const styles = useStyles(makeStyles)
   const { colors, mode, setMode } = useTheme()
   const node = useNode()
@@ -138,6 +139,12 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const sheetOpen = screen !== null
   const policySeq = useRef(0)
   const member = unlocked && typeof passkey.status.publicKey === 'string' ? passkey.status.publicKey : null
+  // A core node registers its delegate and accepts the Terms on the page
+  // screens' first use (Paginas.js usePageMember); this row only opens them.
+  const openPaginas = () => {
+    onClose()
+    onOpenPaginas()
+  }
   const pushEligible = node.hosted === true && member !== null
   // Avisos no aparelho, from the store the shell's note shares (null: not
   // read yet, or this node is not the hosted one for this member any more).
@@ -277,6 +284,9 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
               {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
+              {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function'
+                ? <Item icon='gente' label='Páginas' onPress={openPaginas} />
+                : null}
               <Item icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
               <Item icon='sun' label='Aparência' trailingText={MODE_LABELS[mode]} onPress={() => onNavigate('aparencia')} />
               {pushRow
