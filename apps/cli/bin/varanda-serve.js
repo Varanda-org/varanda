@@ -45,7 +45,8 @@ async function main () {
     origins: config.origins,
     uiRoot: config.uiRoot,
     token: config.token,
-    openTimeoutMs: config.openTimeoutMs
+    openTimeoutMs: config.openTimeoutMs,
+    accountOrigin: config.accountOrigin
   })
 
   let port

@@ -16,6 +16,7 @@ const { createAgeRoutes } = require('./age-routes')
 const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, mintRedeem, redeemMatches, accountReturnUrl, appReturnPage, header } = require('./app-return')
 const { createWalletRoutes } = require('./wallet-routes')
 const { createWalletWebhook } = require('./wallet-webhook')
+const { createPagesRoutes } = require('./pages-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -157,7 +158,12 @@ const ERROR_STATUS = Object.freeze({
   'operacao-pendente': 409,
   'operacao-divergente': 409,
   'idade-minima': 403,
-  'rede-divergente': 409
+  'rede-divergente': 409,
+  // Páginas (./pages-routes.js).
+  'sem-permissao': 403,
+  pausada: 409,
+  encerrada: 410,
+  'midia-invalida': 400
 })
 
 const BASE_HEADERS = Object.freeze({
@@ -562,6 +568,16 @@ function signatureParam (value) {
   return value
 }
 
+// The published blocklist of the moderation desk as { has(key) }, or null.
+function moderationBlocklist (moderation) {
+  if (moderation === null || typeof moderation.blocked !== 'function') return null
+  return {
+    has (key) {
+      return moderation.blocked().some((b) => b.member === key)
+    }
+  }
+}
+
 // --- the service --------------------------------------------------------------
 
 // The POST rules of every browser route: the exact Origin (a browser's
@@ -577,6 +593,15 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
   if (requireOrigin && req.headers.origin !== origin && !(req.headers.origin === undefined && isAppRequest(req))) throw new RouteError('pedido-invalido', 403)
   const type = String(req.headers['content-type'] || '').toLowerCase()
   if (!/^application\/json(\s*;.*)?$/.test(type)) throw refuse('pedido-invalido')
+}
+
+// The same Origin rule for a raw upload (./pages-routes.js media and
+// avatar): an octet-stream body is a simple request a cross-site form could
+// send, so the exact Origin (or the app header) is what stops it here.
+function checkRawPost (req, origin) {
+  if (req.headers.origin !== origin && !(req.headers.origin === undefined && isAppRequest(req))) throw new RouteError('pedido-invalido', 403)
+  const type = String(req.headers['content-type'] || '').toLowerCase()
+  if (!/^application\/octet-stream(\s*;.*)?$/.test(type)) throw refuse('pedido-invalido')
 }
 
 // createAccountServer({ association, origin, google, store, issuer, log, now,
@@ -630,6 +655,9 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // deposit, `walletMaxUsdcMicros` the largest USDC debit or conversion and `walletMoneyTimeoutMs` each money leg's deadline.
 // `walletWebhookSecrets` (a Map from Hodle event to its hex secret or
 // 'registrar', or null for no sink) turns on ./wallet-webhook.js.
+// `pages` (null: every page POST answers 404 and the policy { available:
+// false }) is { keys, writer, pagesStore, dir, blocklist? } for
+// ./pages-routes.js; without a blocklist the moderation desk's is used.
 function createAccountServer ({
   association,
   origin,
@@ -666,6 +694,7 @@ function createAccountServer ({
   walletMaxUsdcMicros = 500000000,
   walletMoneyTimeoutMs,
   walletWebhookSecrets = null,
+  pages = null,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -763,6 +792,33 @@ function createAccountServer ({
     maxUsdcMicros: walletMaxUsdcMicros,
     moneyTimeoutMs: walletMoneyTimeoutMs,
     http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
+  })
+
+  // Always mounted, so /account/pages/policy answers even when pages are off.
+  // `pages` is null or { keys, writer, pagesStore, dir, blocklist, ...the
+  // optional pagesDm, pagesNotices, pagesGroups, pagesDelegate clients }.
+  const pagesRoutes = createPagesRoutes({
+    ...(pages || {}),
+    store,
+    termsStore: terms,
+    blocklist: pages && pages.blocklist ? pages.blocklist : moderationBlocklist(moderation),
+    issuerKeyPair: issuer === null ? null : issuer.keyPair,
+    issuerCert: issuer === null ? null : issuer.cert,
+    association,
+    origin,
+    log,
+    now,
+    http: {
+      send,
+      sendError,
+      readJsonBody,
+      checkPost: (req, opts) => checkPost(req, origin, opts),
+      checkRawPost: (req) => checkRawPost(req, origin),
+      RouteError,
+      refuse,
+      fromStore,
+      keyedWindow
+    }
   })
 
   // Hodle's deliveries are authenticated by their signature and bounded by
@@ -1486,6 +1542,7 @@ function createAccountServer ({
     if (pushRoutes !== null && pushRoutes.owns(pathname)) return pushRoutes.handle(req, res, url)
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
     if (walletRoutes.owns(pathname)) return walletRoutes.handle(req, res, url)
+    if (pagesRoutes.owns(pathname)) return pagesRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === APP_RETURN_PATH) return appReturn(res)
@@ -1555,7 +1612,7 @@ function createAccountServer ({
   // modStats: table sizes of the moderation desk (counts only, never a
   // nonce), so tests can show that unauthenticated traffic grows nothing.
   // appStats: counts of app rows and of those holding a Google answer.
-  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), walletStats: () => walletRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), walletStats: () => walletRoutes.stats(), pagesStats: () => pagesRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {

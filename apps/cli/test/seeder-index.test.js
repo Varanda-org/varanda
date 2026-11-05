@@ -26,6 +26,7 @@ const { metricsText } = require('../lib/health')
 const { createEngagementIndex } = require('@varanda/core/lib/engagement-index')
 const { createNoticeIndex } = require('@varanda/core/lib/notices')
 const { createPostNoticeIndex } = require('@varanda/core/lib/post-notices')
+const { signRoster, signClose, issuerCountersign } = require('@varanda/core/lib/page')
 const { startSeedWs } = require('../lib/seed-ws')
 const http = require('node:http')
 
@@ -1688,7 +1689,7 @@ function nameFixture (options = {}) {
     const r = f.seeder.indexSearch(segment)
     return r === null ? null : r.members.map((m) => m.author)
   }
-  return { ...f, assoc, issuer, username, profile, serve, authors }
+  return { ...f, assoc, issuer, issuerKp, issuerCert, username, profile, serve, authors }
 }
 
 function badSignature (record) {
@@ -1918,4 +1919,57 @@ test('name search: GET /index/search over loopback answers members/more/indexing
   t.is(bad.status, 404)
   t.is(bad.body, 'não encontrado\n')
   t.absent(bad.body.includes('JOAO'))
+})
+
+function pageRecord (type, page, extra = {}) {
+  return {
+    type,
+    page,
+    gen: type === 'page-roster' ? 1 : 2,
+    at: at(1),
+    nonce: 'n'.repeat(43),
+    association: 'cd'.repeat(32),
+    issuer: 'ee'.repeat(32),
+    issuerDate: at(1),
+    issuerSignature: 'ef'.repeat(64),
+    signature: 'ab'.repeat(64),
+    countersignature: '12'.repeat(64),
+    ...extra
+  }
+}
+
+test('name search: a page hint reaches search and member rows, a closed page drops its name', async (t) => {
+  const { seeder, serve, profile, authors, assoc, issuerKp, issuerCert } = nameFixture()
+  const P = authorKey(1)
+  const C = authorKey(2)
+  const H = authorKey(3)
+  // The hint needs records that verify (owner-signed, issuer-countersigned).
+  const ownerKp = signingKeyPair()
+  const owner = hex(ownerKp.publicKey)
+  const signed = (type, page, fields, sign) => {
+    const f = { page, ...fields, at: at(1), nonce: 'n'.repeat(43), association: assoc.hex }
+    return issuerCountersign({ type, ...f, signature: sign(f, ownerKp) }, issuerKp, issuerCert)
+  }
+  const roster = (k) => signed('page-roster', k, { gen: 1, owner, admins: [], prev: null }, signRoster)
+  const closeOf = (k) => signed('page-close', k, { gen: 2, actor: owner }, signClose)
+  // H is a person who appended a shape-valid roster with fake signatures.
+  serve(H, [profile('Loja Ana'), pageRecord('page-roster', H, { gen: 1, owner, admins: [], prev: null })])
+  serve(P, [profile('Loja Sol'), roster(P)])
+  serve(C, [profile('Loja Lua'), roster(C)])
+  await settleIndex(seeder)
+  const flags = () => Object.fromEntries(seeder.indexSearch('loja').members.map((m) => [m.author, [m.page, m.closed, m.moved]]))
+  t.alike(flags(), { [P]: [true, false, false], [C]: [true, false, false], [H]: [undefined, undefined, undefined] })
+  t.absent(seeder.indexMember(H).page, 'a forged roster sets no hint: the person keeps the old row shape')
+  t.is(seeder.indexMember(P).page, true)
+
+  const closed = serve(C, [profile('Loja Lua'), roster(C), closeOf(C)])
+  await settleIndex(seeder)
+  t.ok(closed)
+  t.alike(authors('loja').sort(), [P, H].sort(), 'a closed page no longer searches by name')
+  t.alike(authors('lua'), [])
+  const m = seeder.indexMember(C)
+  t.is(m.page, true)
+  t.is(m.closed, true)
+  t.is(m.moved, false)
+  t.is(seeder.indexMember(P).closed, false)
 })
