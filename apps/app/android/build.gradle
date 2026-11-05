@@ -8,11 +8,7 @@ buildscript {
   dependencies {
     classpath('com.android.tools.build:gradle')
     classpath('com.facebook.react:react-native-gradle-plugin')
-    // Pinned to android.kotlinVersion (expoLibs reads it from
-    // gradle.properties): without a version the React Native Gradle plugin
-    // brings its own older Kotlin, which cannot read the metadata of the
-    // face liveness SDK's dependencies.
-    classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${expoLibs.versions.kotlin.get()}")
+    classpath('org.jetbrains.kotlin:kotlin-gradle-plugin')
   }
 }
 

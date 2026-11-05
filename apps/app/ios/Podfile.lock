@@ -80,8 +80,6 @@ PODS:
     - ReactCommon
   - ExpoSecureStore (55.0.18):
     - ExpoModulesCore
-  - FaceLivenessCapture (0.1.0):
-    - ExpoModulesCore
   - FBLazyVector (0.83.10)
   - hermes-engine (0.14.1):
     - hermes-engine/Pre-built (= 0.14.1)
@@ -2053,7 +2051,6 @@ DEPENDENCIES:
   - ExpoModulesCore (from `../../../node_modules/expo-modules-core`)
   - ExpoModulesJSI (from `../../../node_modules/expo-modules-core`)
   - ExpoSecureStore (from `../../../node_modules/expo-secure-store/ios`)
-  - FaceLivenessCapture (from `../modules/face-liveness/ios`)
   - FBLazyVector (from `../../../node_modules/react-native/Libraries/FBLazyVector`)
   - hermes-engine (from `../../../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
   - PasskeyPrf (from `../modules/passkey-prf/ios`)
@@ -2173,8 +2170,6 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/expo-modules-core"
   ExpoSecureStore:
     :path: "../../../node_modules/expo-secure-store/ios"
-  FaceLivenessCapture:
-    :path: "../modules/face-liveness/ios"
   FBLazyVector:
     :path: "../../../node_modules/react-native/Libraries/FBLazyVector"
   hermes-engine:
@@ -2350,7 +2345,6 @@ SPEC CHECKSUMS:
   ExpoModulesCore: 99b45daa1dfb80b09f7920a928cbd0033c11e106
   ExpoModulesJSI: 1bf2fab061d2c9635ff63b6fcc26747a68af9f12
   ExpoSecureStore: 422f8e24d8ba1693600bc3720f0a71a17ddcbea0
-  FaceLivenessCapture: 0286ce80df89df1796985caf20405423368d8eb4
   FBLazyVector: b88945378388c6651d3725b0e8c2624fbb37ec64
   hermes-engine: a2a9fc7160af80292783f30b771f14a477f29712
   libwebp: af5937a13536ef73f3784d69cc342b98961acf33
@@ -2363,7 +2357,7 @@ SPEC CHECKSUMS:
   React: c8a434eb4c7720649ce29b79ec65a8a085d9ef89
   React-callinvoker: 4c2b5f172ed44389be239e98c3f337c5196cace7
   React-Core: bf2977380d26b10c311fc205c66f856bc46d19cd
-  React-Core-prebuilt: f7dfa4dd2f6e525c2b1a58a7d60025eafbf5b03c
+  React-Core-prebuilt: 1fe5b6ea9d0913451ae245575e0d8d38e011b049
   React-CoreModules: a3ce5ded6a0e1ce1994afe27108d91a3c1cfb815
   React-cxxreact: f6321e3f111c22152d95505cfdb5ca7f31319276
   React-debug: 4f438e5a751a73ea73cded17cd51db62588d7bac
@@ -2428,7 +2422,7 @@ SPEC CHECKSUMS:
   ReactAppDependencyProvider: 5cc0b8b95a5be99ad92aee2d59bc59987df97753
   ReactCodegen: cb89ace4a86e49ba3b808eeba24088e166b75ab6
   ReactCommon: 4d9dcc879c31dcfb3ebcef8d3189293ba501d6b3
-  ReactNativeDependencies: 5adf130c0a9b82d99efa27ae01cdf6ab60b08109
+  ReactNativeDependencies: 6e8598ca6525f2c38334c1daaec4d77ae55fff9b
   SDWebImage: e9fc87c1aab89a8ab1bbd74eba378c6f53be8abf
   SDWebImageWebPCoder: 0e06e365080397465cc73a7a9b472d8a3bd0f377
   Yoga: 3a3ee5afb97f3a990839cfae6092b0540c7441a4
