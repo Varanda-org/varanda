@@ -4600,3 +4600,66 @@ Limites desta parte:
 - Uma leitura que responde com erro (comunidade inexistente, `group.requests` de quem não administra) ainda é refeita no caminho exclusivo e para a sincronização uma vez, como `feed.read` desde a seção 46. O app só pede `group.requests` a quem administra.
 - A maior parte da CPU restante das leituras é revalidar os mesmos registros a cada leitura (históricos de entrada, confirmação e corte dos grupos, nome de usuário e perfil). Proposta para um próximo PR: o mesmo filtro por tipo antes da validação nesses pontos, ou guardar os registros decodificados por núcleo enquanto a sincronização vive.
 - Nenhuma caixa executada nesta documentação.
+
+## 95. Primeira leitura de A Rua sem verificar de novo as mesmas assinaturas (PR perf/first-feed-read)
+
+No nó hospedado (web, PWA e app com a instalação), o nó roda no navegador, e o navegador verifica assinaturas Ed25519 em JavaScript puro (sodium-javascript): cerca de 4 ms por assinatura neste Mac e várias vezes isso num celular, contra 0,07 ms da biblioteca nativa do Node. Cada leitura verificava de novo as mesmas assinaturas: o certificado de cada diário seguido (duas, com o emissor), o registro de nome de usuário (mais duas) e a lista de bloqueio guardada (duas, e cada leitura a lê duas vezes). Isso acontecia na checagem de entrada da sincronização, em `feed.read`, de novo em `profile.read` e em `dm.enable`. Era a maior parte do tempo de `feed.read` e `profile.read` no início do app. As repetições anteriores no Node usavam a biblioteca nativa e não mostravam esse custo.
+
+Duas mudanças, em todos os nós (navegador, core e semeador):
+
+- Uma assinatura que já verificou não é verificada de novo enquanto a página (ou o processo) vive. Para cada chave pública e assinatura, a memória guarda uma cópia exata da mensagem e só responde quando a mensagem é igual byte a byte. Só guarda verificações que deram certo, no máximo 4096 e 4 MiB de mensagens. Revogação de emissor, associação e forma do registro continuam conferidas em toda leitura, então um bloqueio ou uma revogação nova vale na leitura seguinte, como antes.
+- `feed.read` (e o feed da CLI) só confere o nome de usuário de quem aparece na página pedida (20 itens no app), não de todos os seguidos. A resposta é a mesma.
+
+Nada muda no que é gravado, nas respostas nem nos caminhos emprestado e exclusivo das leituras (seção 46).
+
+Medidas (repetição local no Node, a mesma da seção 94: DHT local, semeador no mesmo processo atrás de um WebSocket, IndexedDB falso; a rajada de pedidos do início do app em `main@95048d8` e nesta mudança; aqui com certificados v2 de um emissor, nome de usuário em todos os diários, lista de bloqueio guardada com 40 chaves e verificação com sodium-javascript, como no navegador). "Latência 4 ms" acrescenta 4 ms a cada carga de arquivo de núcleo e a cada leitura de kv. Não são medidas de celular: servem para comparar antes e depois. Pelos números do dono, o celular gastou cerca de 3 vezes o tempo desta repetição em `feed.read` (2,9 s contra 0,9 s), mas essa proporção é só uma estimativa.
+
+| Cenário | `feed.read` | `profile.read` | `dm.enable` | Assinaturas verificadas | CPU da rajada |
+|---|---|---|---|---|---|
+| Dono, sem latência | 890-895 ms -> 232-235 ms | 1,39 s -> 352-357 ms | 1,00-1,01 s -> 123-189 ms | 431 -> 78 | 2,66-2,83 s -> 0,78-0,82 s |
+| Dono, latência 4 ms | 1,34-1,39 s -> 773-774 ms | 1,84-1,91 s -> 922-941 ms | 1,08-1,09 s -> 268-296 ms | 431 -> 78 a 80 | 2,83-3,21 s -> 0,94-1,00 s |
+| Grande, latência 4 ms | 2,22 s -> 1,36 s | 3,06 s -> 1,63 s | 1,90 s -> 555 ms | 671 -> 128 | 5,10 s -> 2,37 s |
+
+Dono: 36 seguidos com 60 posts cada, diário próprio com 170 posts (272 blocos), 60 curtidas, uma comunidade com Geral; duas repetições de cada lado (os intervalos acima). Grande: 60 seguidos com 150 posts cada, 800 posts próprios, 150 curtidas; uma repetição. No Dono sem latência, o trabalho de `feed.read` nos núcleos caiu de cerca de 530 ms para 63 ms e o de `profile.read` de cerca de 490 ms para cerca de 120 ms (os nomes de usuário de quem não apareceu na primeira página passam a ser conferidos aqui, uma vez). A sincronização passou a emprestar os núcleos cerca de 170 ms depois de começar, em vez de cerca de 360 ms: a checagem de entrada dos seguidos caiu de cerca de 300 ms para cerca de 150 ms, porque a delegação do emissor, igual em todos os certificados, é verificada uma vez só (medido com marcas temporárias nas etapas da partida, que não ficam no código). O que sobra de verificação são assinaturas diferentes: um certificado por seguido na partida, a delegação do emissor uma vez, o nome de usuário de cada autor uma vez e a lista de bloqueio uma vez. Com latência, o que sobra da espera de `feed.read` é quase todo a partida da sincronização (ver os limites).
+
+O script `packages/web-member/scripts/startup-bench.js` mede só a partida da sincronização e as primeiras leituras nos núcleos emprestados, sem rede, e serve para repetir a comparação: `node packages/web-member/scripts/startup-bench.js --follows 36 --blocks 60 --own 172 --issued --js-verify --reads --runs 5` (e `--idb` para o IndexedDB falso). Medianas de 5 execuções neste Mac, `main@95048d8` -> esta mudança:
+
+| Armazenamento | Até emprestar os núcleos | Primeira `feed.read` | `profile.read` de todos | Assinaturas verificadas |
+|---|---|---|---|---|
+| Memória | 230 ms -> 128 ms | 470 ms -> 38 ms | 442 ms -> 108 ms | 362 -> 74 |
+| IndexedDB falso | 295 ms -> 176 ms | 457 ms -> 31 ms | 448 ms -> 113 ms | 362 -> 74 |
+
+Regras que os passos abaixo conferem:
+
+- Com a sincronização em andamento, a segunda `feed.read` e a segunda `profile.read` não verificam nenhuma assinatura de novo e respondem igual à primeira.
+- Uma lista de bloqueio gravada depois dessas leituras esconde o diário bloqueado já na leitura seguinte, em `feed.read` e em `profile.read`.
+- Com a memória já preenchida, um certificado ou um nome de usuário de um emissor revogado continua recusado (`revoked-issuer`), e um registro alterado com a mesma assinatura continua recusado (`bad-signature`).
+- Uma verificação que falhou é refeita sempre. Chave ou assinatura de outro tamanho nunca usa a memória.
+- `feed.read` dá os mesmos nomes de usuário em todas as páginas, e confere o nome só de quem tem item na página.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes desta parte: `packages/core/test/verified.test.js` (memória: mesmas respostas, cópia da mensagem, tamanhos, limites, revogação e alteração com a memória preenchida), `packages/core/test/feed.test.js` (nome de usuário só da página, mesmas respostas) e `packages/web-member/test/read-while-sync.test.js` (leituras repetidas na sincronização sem verificar de novo, e o bloqueio novo que esconde na leitura seguinte). As caixas abaixo ficam desmarcadas até alguém executar o passo, num aparelho ou navegador de verdade.
+
+Android (aparelho ou emulador com a instalação hospedada, primeiro):
+
+- [ ] Com o registro de Sincronização aberto, abrir o app: as linhas "pedido lento" de `feed.read`, `profile.read`, `engagement.read`, `dm.enable`, `dm.list`, `community.list` e `dm.pull` diminuem ou somem, comparando com o mesmo aparelho antes da mudança.
+- [ ] A Rua mostra os posts e os @nomes de quem aparece como antes.
+- [ ] Uma conta bloqueada pela moderação continua fora de A Rua e sem nome.
+
+iOS (simulador ou aparelho com a instalação hospedada, depois do Android):
+
+- [ ] Os três passos do Android.
+
+Web (navegador, depois do iOS):
+
+- [ ] No Chrome do computador, com o registro de rede aberto, recarregar A Rua: os GETs de `/media` das fotos dos autores começam antes de cerca de 2,4 s (o que se via depois da seção 93).
+
+Limites desta parte:
+
+- As medidas são do Node com IndexedDB falso e latência simulada, não do celular. Os números do celular saem dos passos acima.
+- A memória vive enquanto a página vive: cada carga da página verifica de novo, uma vez, cada assinatura. Guardar a memória no armazenamento do navegador confiaria num lugar que qualquer pessoa com acesso ao perfil do navegador pode escrever, então isso não foi feito.
+- Com latência de armazenamento, o que sobra da espera da primeira `feed.read` é a partida da sincronização: abrir os núcleos de grupo próprios, abrir as réplicas e a varredura de bloqueados, que pergunta ao IndexedDB por cada chave bloqueada, uma de cada vez (cerca de 160 ms com 40 chaves e 4 ms por pergunta). Ficam para um próximo PR.
+- A memória tem limite, mas quem pode assinar coisas que o nó verifica (no serviço de conta, as provas de página de qualquer chave; nos outros nós, emissores e moderadores) pode encher a memória e tirar dela outras entradas. O efeito é só verificar de novo, como antes desta mudança.
+- Uma verificação Ed25519 mais rápida no navegador (por exemplo `@noble/curves`) mudaria as regras de aceitação em casos de borda (equação com ou sem cofator, pontos de ordem pequena) em relação ao libsodium dos outros nós, e não foi feita.
+- Nenhuma caixa executada nesta documentação.

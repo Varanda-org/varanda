@@ -176,6 +176,45 @@ test('junk username records cost one candidate verification per log', (t) => {
   t.is(b.calls, 1, 'exactly one candidate verification')
 })
 
+test('usernames are verified only for the logs the page returns, with the same answers', (t) => {
+  const associationKey = crypto.keyPair()
+  const issuerKey = crypto.keyPair()
+  const association = b4a.toString(associationKey.publicKey, 'hex')
+  const issuerCert = createIssuerCert({ issuer: b4a.toString(issuerKey.publicKey, 'hex'), date: AT }, associationKey)
+  const KC = 'c'.repeat(64)
+  const at = (day) => '2026-01-0' + day + 'T00:00:00.000Z'
+  // KA: posts on days 1 and 5; KB: a post on day 2 and a repost of KA:1 on
+  // day 6; KC: a post on day 3 and no username record.
+  const logs = [
+    { key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: post('a1', at(1)) }, { seq: 2, record: createUsernameRecord({ member: KA, username: 'ana', date: AT }, issuerKey, issuerCert) }, { seq: 3, record: post('a2', at(5)) }] },
+    { key: KB, entries: [{ seq: 0, record: cert(KB) }, { seq: 1, record: createUsernameRecord({ member: KB, username: 'bia', date: AT }, issuerKey, issuerCert) }, { seq: 2, record: post('b1', at(2)) }, { seq: 3, record: { type: 'repost', to: { author: KA, seq: 1 }, on: true, at: at(6) } }] },
+    { key: KC, entries: [{ seq: 0, record: cert(KC) }, { seq: 1, record: post('c1', at(3)) }] }
+  ]
+  let calls = 0
+  const original = certModule.verifyUsernameRecord
+  certModule.verifyUsernameRecord = (...args) => {
+    calls++
+    return original(...args)
+  }
+  t.teardown(() => { certModule.verifyUsernameRecord = original })
+  const read = (opts) => {
+    calls = 0
+    const { items } = buildFeed({ logs, association, now: NOW, ...opts })
+    return { items: items.map((i) => [i.kind, i.author, i.seq, i.username]), calls }
+  }
+
+  const all = read({})
+  t.alike(all.items, [
+    ['post', KA, 1, 'ana'], ['post', KB, 2, 'bia'], ['post', KC, 1, null], ['post', KA, 3, 'ana'], ['repost', KB, 3, 'bia']
+  ])
+  t.is(all.calls, 2, 'one candidate per log that has one')
+  t.alike(read({ limit: 1 }), { items: [['repost', KB, 3, 'bia']], calls: 1 }, 'only the repost author')
+  t.alike(read({ limit: 2 }), { items: [['post', KA, 3, 'ana'], ['repost', KB, 3, 'bia']], calls: 2 })
+  t.alike(read({ limit: 1, before: { at: at(5), author: KA, seq: 3 } }), { items: [['post', KC, 1, null]], calls: 0 }, 'no record, no check')
+  t.alike(read({ limit: 3, before: { at: at(6), author: KB, seq: 3 } }), { items: [['post', KB, 2, 'bia'], ['post', KC, 1, null], ['post', KA, 3, 'ana']], calls: 2 }, 'once per log, not per item')
+  t.alike(read({ limit: 2, before: { at: at(3), author: KC, seq: 1 } }).items, all.items.slice(0, 2), 'the same usernames on every page')
+})
+
 test('limit must be Infinity or an integer >= 1', async (t) => {
   await testnet(t)
   const logs = [{ key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: post('p', AT) }] }]
