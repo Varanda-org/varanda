@@ -9,23 +9,12 @@ const load = () => import('../src/dm.js')
 test('dm.js exports the list helpers, the thread and the labels', async (t) => {
   const dm = await load()
   t.alike(Object.keys(dm).sort(), [
-    'LABELS', 'UNSURE_SEND', 'requestsDot', 'selectorItems', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
+    'LABELS', 'UNSURE_SEND', 'requestsDot', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
   ].sort())
   const imports = readFileSync(join(__dirname, '../src/dm.js'), 'utf8')
     .split('\n')
     .filter((line) => line.startsWith('import '))
   t.alike(imports, ["import rpc from '@varanda/rpc'"])
-})
-
-test('selectorItems lists Mensagens then Comunidades', async (t) => {
-  const { selectorItems } = await load()
-  const first = selectorItems()
-  t.alike(first, [
-    { id: 'mensagens', label: 'Mensagens' },
-    { id: 'comunidades', label: 'Comunidades' }
-  ])
-  first[0].label = 'alterado'
-  t.is(selectorItems()[0].label, 'Mensagens', 'each call returns its own list')
 })
 
 test('LABELS are the approved Portuguese', async (t) => {

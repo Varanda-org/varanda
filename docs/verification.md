@@ -4640,3 +4640,53 @@ Limites desta caminhada:
 - Não há medida de quadros por segundo nem de desempenho do deslize nesta caminhada.
 - O gesto de borda vale só para o app: o Safari do iOS e o navegador do Android têm gestos próprios, e a caminhada registra o que cada um faz, sem tratá-los como erro do app.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 96. Conversas numa lista só (PR feat/conversas-inbox)
+
+Roteiro da aba Conversas como uma lista só no nó hospedado: busca, filtros, fixados, linhas, Pedidos de mensagem, Nova conversa, Comunidades, carga parcial e a volta pela notificação, nas três plataformas, nos dois temas, com texto grande e movimento reduzido. O comportamento descrito está em [app.md](app.md), seção "Conversas". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
+
+Regras que os passos conferem:
+
+- A lista traz as conversas privadas e os grupos das comunidades da pessoa, do mais recente para o mais antigo. O cabeçalho tem **+** (Nova conversa), ⓘ (ajuda) e o sino de Avisos.
+- **Buscar conversas** fica acima dos filtros, filtra as linhas carregadas, e o X limpa. Com texto na busca, os fixados somem, e o filtro escolhido continua valendo.
+- Os filtros são **Todas**, **Não lidas** e **Grupos**.
+- Fixados no topo: **Pedidos de mensagem**, com um ponto quando há pedido não lido (nunca um número; em **Não lidas**, só quando há pedido não lido), e **Comunidades**, com uma seta.
+- Cada linha tem avatar (pessoa redonda; grupo e comunidade em quadrado arredondado com iniciais), nome, prévia de uma linha ("Você:" à parte na própria última mensagem; em grupo, "Autor: texto"), hora relativa e um ponto (conversa privada) ou contador (grupo) na cor de destaque. Não há marcas de lido, de entrega nem de digitação.
+- **Pedidos de mensagem** é uma tela empilhada: entra deslizando, e a borda e o Voltar a fecham. Uma nota no topo diz que, até aceitar, quem enviou não sabe se você leu. Aceitar, Recusar e Bloquear ficam na conversa.
+- **+** abre Nova conversa: busca de pessoa pelo nome; **Novo grupo** abre Comunidades; **Nova comunidade** cria uma comunidade; com a busca vazia, **Conversas recentes** mostra até 8 pessoas.
+- **Comunidades** é uma tela empilhada que volta para Conversas, com grupos públicos, criação de comunidade e as minhas comunidades, com avatares quadrados.
+- A carga parcial mostra "Algumas conversas ainda não carregaram." com **tentar de novo**, distinto de "Nenhuma conversa ainda".
+- Tocar numa notificação volta para a lista inteira, com o filtro Todas e a busca limpa.
+
+Android (AVD `varanda-api36`, build de debug, primeiro):
+
+- [ ] Lista em tema claro e em tema escuro: ordem do mais recente, avatar redondo para pessoa e quadrado para grupo, prévia com "Você:" e "Autor: texto", hora, ponto ou contador.
+- [ ] Busca: o campo filtra as linhas e o X limpa. Com texto na busca, os fixados somem e o filtro escolhido continua valendo.
+- [ ] Filtros Todas, Não lidas e Grupos. Em Não lidas, Pedidos de mensagem só aparece com pedido não lido.
+- [ ] Pedidos de mensagem: ponto, nunca número. Abre como tela empilhada, que volta pela borda e pelo Voltar. Nota no topo. Aceitar, Recusar e Bloquear na conversa.
+- [ ] **+** abre Nova conversa: busca por nome, Novo grupo abre Comunidades, Nova comunidade, e Conversas recentes com a busca vazia.
+- [ ] Comunidades: volta para Conversas, mostra grupos públicos, cria comunidade e lista as minhas comunidades com avatares quadrados.
+- [ ] Carga parcial: "Algumas conversas ainda não carregaram." com tentar de novo, distinto do vazio "Nenhuma conversa ainda".
+- [ ] Notificação: a lista volta com o filtro Todas e a busca limpa.
+- [ ] Texto grande e movimento reduzido: nenhum texto cortado, sobreposto ou escondido, e nenhum alvo de toque menor que 44 pt. Capturas fora do git, uma pasta por plataforma.
+
+iOS (simulador iPhone 16e, depois do Android):
+
+- [ ] Os mesmos passos do Android, em tema claro e em tema escuro.
+- [ ] Texto grande e movimento reduzido, com a mesma conferência de corte, sobreposição e alvo de toque do Android.
+- [ ] Pedidos de mensagem e Comunidades, abertos e voltados pela borda esquerda: o gesto do próprio sistema, que começa na borda do simulador, não disputa com o do app.
+
+Web (Chrome, depois do iOS):
+
+- [ ] Em 390 px e em 1280 px, nos temas claro e escuro: lista, filtros, busca, Pedidos de mensagem, Nova conversa e Comunidades aparecem como descrito acima.
+- [ ] Em 390 px: Pedidos de mensagem e Comunidades abrem deslizando e voltam pelo Voltar do navegador.
+- [ ] Texto grande e movimento reduzido, nas duas larguras, sem corte nem sobreposição.
+
+Como verificar, antes da caminhada, a partir da raiz:
+
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- Na Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`), as conversas são dados de exemplo. Envio, aceite de pedido e busca com conversas reais só se conferem no laboratório hospedado, com duas pessoas, como na seção 94.
+- Nenhuma caixa acima foi executada nesta documentação.

@@ -36,13 +36,6 @@ export const LABELS = Object.freeze({
   reportNote: 'Só esta mensagem e a conta de quem enviou vão para a moderação. Nada mais da conversa.'
 })
 
-export function selectorItems () {
-  return [
-    { id: 'mensagens', label: 'Mensagens' },
-    { id: 'comunidades', label: 'Comunidades' }
-  ]
-}
-
 // Date.parse, not string order: a negative-year ISO date sorts wrong as text
 // (notices.js compareNotices).
 function timeOf (item) {
