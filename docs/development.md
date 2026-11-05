@@ -271,6 +271,7 @@ Why some pins are what they are (chosen on 2026-10-22, preferring releases at le
 
 - `expo` 55.0.31 and `react-native` 0.83.10, from `expo-template-blank` 55.1.38. SDK 55 is the line Holepunch's bare-expo example uses; the later 55.0.32 was one day old.
 - The Expo-managed packages (`react-dom`, `react-native-web`, `@expo/metro-runtime`, `expo-file-system`, `expo-build-properties`, `react-native-safe-area-context`) take the versions in `expo/bundledNativeModules.json`. `react-native-web` is 0.21.3 rather than 0.21.4, which was two weeks old.
+- `expo-haptics` 55.0.18 comes from `expo/bundledNativeModules.json`, as an exact pin. It is a native module, so after `pod install` the rule for the two `SPEC CHECKSUMS` lines above applies, and the `ExpoHaptics` entry in `Podfile.lock` is committed.
 - `bare-pack` 2.2.4, not the 3.x line. 3.0.0 is a major released after `react-native-bare-kit` 0.16.0; 2.2.4 shipped the same day as bare-kit 0.16.0 and has the same `--linked`, `--host` and `--format` options.
 - `bare-runtime` 1.33.4 (dev only, packages/core), for the desktop Bare smoke test. It is the Bare that `react-native-bare-kit` 0.16.0 embeds (the gate prints `bare=v1.33.4`), so the smoke test and the app run the same runtime. 1.34.1 was used until 2026-10-29.
 
