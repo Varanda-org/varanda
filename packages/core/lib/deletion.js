@@ -29,30 +29,14 @@ function toSet (v) {
   return new Set(Array.isArray(v) ? v : [])
 }
 
-// Valid tombstones, highest block first, one per block.
-function tombstones (entries) {
+// Valid tombstones, highest block first, one per block, and the seqs of the
+// valid page-* records, in one pass: validating each record once keeps the
+// fold as cheap as it was before the page rule.
+function scan (entries) {
   const out = []
-  if (!Array.isArray(entries)) return out
+  const pages = new Set()
+  if (!Array.isArray(entries)) return { tombstones: out, pages }
   const seen = new Set()
-  for (let i = 0; i < entries.length; i++) {
-    try {
-      const entry = entries[i]
-      if (entry === null || typeof entry !== 'object') continue
-      const seq = entry.seq
-      if (!Number.isSafeInteger(seq) || seen.has(seq)) continue
-      const copy = validRecordCopy(entry.record, seq)
-      if (copy === null || copy.type !== 'delete') continue
-      seen.add(seq)
-      out.push({ seq, record: copy })
-    } catch {}
-  }
-  return out.sort((a, b) => b.seq - a.seq)
-}
-
-// Seqs of the valid page-* records among entries.
-function pageSeqs (entries) {
-  const out = new Set()
-  if (!Array.isArray(entries)) return out
   for (let i = 0; i < entries.length; i++) {
     try {
       const entry = entries[i]
@@ -60,17 +44,27 @@ function pageSeqs (entries) {
       const seq = entry.seq
       if (!Number.isSafeInteger(seq)) continue
       const copy = validRecordCopy(entry.record, seq)
-      if (copy !== null && isPageType(copy.type)) out.add(seq)
+      if (copy === null) continue
+      if (isPageType(copy.type)) pages.add(seq)
+      else if (copy.type === 'delete' && !seen.has(seq)) {
+        seen.add(seq)
+        out.push({ seq, record: copy })
+      }
     } catch {}
   }
-  return out
+  out.sort((a, b) => b.seq - a.seq)
+  return { tombstones: out, pages }
+}
+
+function tombstones (entries) {
+  return scan(entries).tombstones
 }
 
 function fold (entries) {
   const deleted = new Set()
   const effective = []
-  const pages = pageSeqs(entries)
-  for (const t of tombstones(entries)) {
+  const { tombstones: valid, pages } = scan(entries)
+  for (const t of valid) {
     if (deleted.has(t.seq) || pages.has(t.record.seq)) continue
     deleted.add(t.record.seq)
     effective.push(t)
