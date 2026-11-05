@@ -340,6 +340,33 @@ export const agePolicy = async () => {
     return null
   }
 }
+// An issuer-signed age attestation is opaque here: a plain object within the
+// node's byte cap. The node verifies it (age.proof); the app only bounds and
+// forwards it, so a bad one is dropped, never an error.
+export const MAX_AGE_PROOF_BYTES = 1024
+function isAgeProof (v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v) || Object.getPrototypeOf(v) !== Object.prototype) return false
+  try {
+    return new TextEncoder().encode(JSON.stringify(v)).length <= MAX_AGE_PROOF_BYTES
+  } catch {
+    return false
+  }
+}
+const verifiedAnswer = (data) => isAgeProof(data.proof) ? { state: 'verificado', proof: data.proof } : { state: 'verificado' }
+// The installation's signed age-since attestation: a member certificate dated
+// on or after its `since` proves the account passed (the service issues none
+// without a recorded band). The object, null when the service has none, or
+// undefined on any failure, so a broken read never changes what the node holds.
+export const ageSince = async () => {
+  try {
+    const data = await call('GET', '/account/age/since')
+    if (!exactKeys(data, ['since'])) return undefined
+    if (data.since === null) return null
+    return isAgeProof(data.since) ? data.since : undefined
+  } catch {
+    return undefined
+  }
+}
 export const ageStart = async ({ member }) => {
   const data = await call('POST', '/account/age/start', { member })
   if (typeof data.nonce !== 'string') throw toError('indisponivel')
@@ -362,7 +389,7 @@ export const ageSession = async ({ member, nonce, signature, invite }) => {
   if (typeof invite === 'string' && INVITE_CODE_RE.test(invite)) body.invite = invite
   const data = await call('POST', '/account/age/session', body, { uncertain: true, definite: true })
   if (isVerificationUrl(data.url)) return { url: data.url }
-  if (data.state === 'verificado') return { state: 'verificado' }
+  if (data.state === 'verificado') return verifiedAnswer(data)
   const err = toError('indisponivel')
   err.uncertain = true
   throw err
@@ -372,6 +399,7 @@ export const ageSession = async ({ member, nonce, signature, invite }) => {
 // only before the band is recorded.
 export const ageResult = async ({ member, nonce, signature }) => {
   const data = await call('POST', '/account/age/result', { member, nonce, signature }, { uncertain: true, definite: true })
+  if (data.state === 'verificado') return verifiedAnswer(data)
   if (typeof data.state === 'string' && AGE_STATES.includes(data.state)) return { state: data.state }
   const err = toError('indisponivel')
   err.uncertain = true

@@ -609,7 +609,16 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // rename/start and invites/start then refuse 'idade-pendente' until the
 // member's band is on record. Either null keeps today's behaviour and the
 // age policy route answers { required: false }. `ageDailyLimit` caps the
-// paid Didit sessions opened per day across all members. `hodle` (a
+// paid Didit sessions opened per day across all members. `ageSince` (a
+// canonical ISO timestamp or null) is when the check started to apply; the
+// /account/age/since route serves it while the check is on. `ageCheck` (the
+// settleAgeCheck result of ./age-check-state.js, or null for no floor)
+// keeps that route from serving a since earlier than the last time the check
+// was turned on, and makes it answer 503 when age-check.json is unusable.
+// `ageDirectoryFloor` (the directoryFloor result of ./age-check-state.js, or
+// null for none) does the same with the latest certificate of an unbanded
+// link.
+// `hodle` (a
 // createHodle of ./hodle.js) and `wallets` (an openWalletStore of
 // ./wallet-store.js) turn on the optional payments account when both are
 // set; `walletMode` (cadastro, carteira, pix or completo) picks its routes,
@@ -643,6 +652,9 @@ function createAccountServer ({
   didit = null,
   ages = null,
   ageDailyLimit = 200,
+  ageSince = null,
+  ageCheck = null,
+  ageDirectoryFloor = null,
   hodle = null,
   wallets = null,
   walletMode = 'cadastro',
@@ -724,6 +736,10 @@ function createAccountServer ({
     log,
     now,
     dailyLimit: ageDailyLimit,
+    since: ageSince,
+    ageCheck,
+    directoryFloor: ageDirectoryFloor,
+    issuer,
     http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
   })
 

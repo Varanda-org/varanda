@@ -276,15 +276,21 @@ async function idShow (ctx) {
   return withIdentity(ctx, ({ ownHex, association }) => ({ publicKey: ownHex, association }))
 }
 
-// -> { publicKey, memberCert } without creating anything.
+// -> { publicKey, memberCert, memberCertDate } without creating anything.
+// The date comes only from the certificate certForKey just verified (it is
+// covered by the issuer's signature), so the app can trust it for the age
+// policy.
 async function identityState (ctx) {
   if ((await store.readConfig(ctx.storage)) === null || !(await store.diaryExists(ctx.storage))) {
-    return { publicKey: null, memberCert: false }
+    return { publicKey: null, memberCert: false, memberCertDate: null, memberCertIssuer: null }
   }
   return withIdentity(ctx, async ({ diary, ownHex, association }) => {
     const block0 = await store.readBlock0(diary)
     const ok = block0 !== null && validateRecord(block0, 0) === null && certForKey(block0.cert, ownHex, association).ok
-    return { publicKey: ownHex, memberCert: ok }
+    // memberCertIssuer: the v2 certificate's issuer (null for v1), so the
+    // session can withhold the date once that issuer is revoked.
+    const issuer = ok && typeof block0.cert.issuer === 'string' ? block0.cert.issuer : null
+    return { publicKey: ownHex, memberCert: ok, memberCertDate: ok ? block0.cert.date : null, memberCertIssuer: issuer }
   })
 }
 

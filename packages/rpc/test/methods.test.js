@@ -17,7 +17,7 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.sign', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
+    'account.sign', 'age.proof', 'age.sign', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
     'dm.enable', 'dm.list', 'dm.lookup', 'dm.pull', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seen',
@@ -164,6 +164,31 @@ test('age.sign', (t) => {
   for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
     bad(t, 'age.sign', { ...base, nonce: n }, 'nonce ' + n)
   }
+})
+
+test('age.proof', (t) => {
+  const proof = { type: 'age-verified', member: KEY, date: '2026-10-30T12:00:00.000Z' }
+  const since = { type: 'age-since', since: '2026-10-29T00:00:00.000Z' }
+  t.absent(isMutating('age.proof'))
+  ok(t, 'age.proof', { verified: proof }, { verified: proof })
+  ok(t, 'age.proof', { since }, { since })
+  ok(t, 'age.proof', { since: null }, { since: null })
+  ok(t, 'age.proof', { verified: proof, since: null }, { verified: proof, since: null })
+  ok(t, 'age.proof', { verified: proof, since })
+  bad(t, 'age.proof', {}, 'neither field')
+  t.is(validateParams('age.proof', {}).message, 'parâmetro obrigatório: verified')
+  bad(t, 'age.proof', { verified: null }, 'verified null')
+  for (const v of ['x', 1, [], true]) {
+    bad(t, 'age.proof', { verified: v }, 'verified ' + JSON.stringify(v))
+    bad(t, 'age.proof', { since: v }, 'since ' + JSON.stringify(v))
+  }
+  // Size bound only: the node verifies the signature chain.
+  const big = { pad: 'x'.repeat(1024) }
+  bad(t, 'age.proof', { verified: big }, 'oversize verified')
+  bad(t, 'age.proof', { since: big }, 'oversize since')
+  ok(t, 'age.proof', { verified: { pad: 'x'.repeat(1024 - 10) } })
+  bad(t, 'age.proof', { verified: proof, member: KEY }, 'extra key')
+  bad(t, 'age.proof', { proof }, 'unknown key')
 })
 
 test('wallet.sign', (t) => {

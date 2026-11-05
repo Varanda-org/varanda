@@ -2,6 +2,8 @@
 
 const nodeCrypto = require('node:crypto')
 const { verifyAge } = require('@varanda/core/lib/age')
+const { createAgeVerified, createAgeSince } = require('@varanda/core/lib/age-proof')
+const { isCanonicalIso } = require('@varanda/core/lib/cert')
 const { inviteId, CODE_RE } = require('./invites-store')
 const { isAppRequest, ageReturnUrl } = require('./app-return')
 
@@ -9,7 +11,28 @@ const { isAppRequest, ageReturnUrl } = require('./app-return')
 //
 //   - GET /account/age/policy answers { required } even when the feature is
 //     off: the app treats any failure as "required", so the off answer has
-//     to be explicit.
+//     to be explicit. Its body stays exactly { required }: installed app
+//     versions refuse a policy with any other key.
+//   - GET /account/age/since answers { since: null | AgeSince }: an age-since
+//     attestation (packages/core/lib/age-proof.js) signed by the issuer while
+//     the check is on, `since` is configured, the service has an issuer and
+//     at least one band is on record. It is signed fresh, its `date` the
+//     signing time (one signed object is reused for at most a minute), and
+//     the node accepts it only for member certificates dated within
+//     [since, date]: a saved older attestation never vouches for
+//     certificates issued after it, when the check may have been off. Its
+//     `since` is never earlier than the start of the UTC day after the first
+//     band on record (never a record's own timestamp) nor than the last time
+//     the check was turned on (enabledAt of ./age-check-state.js, kept in
+//     age-check.json in the data directory) nor than the directory floor
+//     (directoryFloor of ./age-check-state.js: just after the latest
+//     certificate of a linked member with no band). The service issues no
+//     certificate to a key without a recorded band while the check is on, so
+//     the node treats a member certificate dated in that window as already
+//     verified, on any device. An age store, age-check.json or directory
+//     floor that cannot answer is the usual 503 indisponivel, never a null: null tells the node
+//     to drop the since it holds, so it is kept for the cases above. A
+//     separate route because installed apps parse the policy strictly.
 //   - start mints a single-use nonce for a member key with no proof and no
 //     directory link (the key may be a fresh passkey that is not linked yet),
 //     bounded like the other unsigned starts by its table and the global
@@ -23,7 +46,9 @@ const { isAppRequest, ageReturnUrl } = require('./app-return')
 //     invite), so nobody shows a face or a document for a link that would
 //     be refused anyway. result reads the decision and records only the age
 //     band in age.json (./age-store.js), then asks Didit to delete the
-//     session.
+//     session. A 'verificado' answer from either carries `proof`, an
+//     age-verified attestation for the member dated the band's checkedAt
+//     (never the band itself), when the service has an issuer.
 //
 // The open sessions live in memory only: a restart forgets them and the
 // member starts over. The Didit session id and URL, the API key, the vendor
@@ -43,6 +68,7 @@ const URL_REUSE_MS = 3600 * 1000
 const SESSION_TTL_MS = 24 * 3600 * 1000
 const MAX_SESSIONS = 10000
 const DAY_MS = 24 * 3600 * 1000
+const SINCE_RESIGN_MS = 60 * 1000
 const HEX64_RE = /^[0-9a-f]{64}$/
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const LOG_TOKEN_RE = /^[a-z0-9_-]{1,48}$/
@@ -53,6 +79,12 @@ function createFailureToken (reason) {
   return reason === 'entrada' || /^http-4\d\d$/.test(String(reason)) ? 'indisponivel' : 'resultado-incerto'
 }
 const CLEANUP_DELAYS_MS = Object.freeze([30 * 1000, 120 * 1000, 600 * 1000])
+
+// The start of the UTC day after the one holding `iso`.
+function nextUtcDay (iso) {
+  const d = new Date(iso)
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)).toISOString()
+}
 
 // A fixed window whose room can be checked without spending it: a request is
 // only charged once every narrower limit let it through, so refused attempts
@@ -85,6 +117,10 @@ function createAgeRoutes ({
   now = Date.now,
   http,
   dailyLimit = 200,
+  since = null,
+  issuer = null,
+  ageCheck = null,
+  directoryFloor = null,
   cleanupDelays = CLEANUP_DELAYS_MS
 }) {
   const { send, redirect, readJsonBody, checkPost, RouteError, refuse, keyedWindow, fixedWindow } = http
@@ -92,6 +128,14 @@ function createAgeRoutes ({
     throw new TypeError('didit inválido')
   }
   if (!Number.isSafeInteger(dailyLimit) || dailyLimit < 1) throw new TypeError('ageDailyLimit must be a positive integer')
+  if (since !== null && !isCanonicalIso(since)) throw new TypeError('since must be a canonical ISO timestamp')
+  if (issuer !== null && (typeof issuer !== 'object' || !issuer.keyPair || !issuer.cert)) throw new TypeError('issuer must be { keyPair, cert } or null')
+  if (ageCheck !== null && (typeof ageCheck !== 'object' || (ageCheck.ok === true && ageCheck.enabledAt !== null && !isCanonicalIso(ageCheck.enabledAt)))) {
+    throw new TypeError('ageCheck must be a settleAgeCheck result or null')
+  }
+  if (directoryFloor !== null && (typeof directoryFloor !== 'object' || (directoryFloor.ok === true && directoryFloor.floor !== null && !isCanonicalIso(directoryFloor.floor)))) {
+    throw new TypeError('directoryFloor must be a directoryFloor result or null')
+  }
 
   const on = didit !== null && ages !== null
 
@@ -108,7 +152,8 @@ function createAgeRoutes ({
     dailyLinked: ceiling(dailyLimit, DAY_MS, now),
     // The policy answer is a constant the app needs before anything else: its
     // own window, so a flood of other lookups cannot 429 it.
-    policy: fixedWindow(6000, 60 * 1000, now)
+    policy: fixedWindow(6000, 60 * 1000, now),
+    since: fixedWindow(6000, 60 * 1000, now)
   }
 
   // nonce -> { member, expiresAt }, single-use, the oldest evicted for room.
@@ -244,6 +289,74 @@ function createAgeRoutes ({
     send(res, 200, { required: on })
   }
 
+  // null when there is no issuer or no band on record for `member` (or the
+  // store just became unreadable: the answer is still 'verificado', only
+  // without the proof). The attestation is deterministic per member, so it
+  // needs no cache.
+  function proofFor (member) {
+    if (issuer === null) return null
+    let entry
+    try {
+      entry = ages.get(member)
+    } catch {
+      return null
+    }
+    if (entry === null) return null
+    return createAgeVerified({ member, date: entry.checkedAt }, issuer.keyPair, issuer.cert)
+  }
+
+  function sendVerified (res, member) {
+    const proof = proofFor(member)
+    send(res, 200, proof === null ? { state: 'verificado' } : { state: 'verificado', proof })
+  }
+
+  // Off, `since` is never served: certificates issued then carry no band.
+  // Before the first band on record no certificate can vouch, and a value
+  // earlier than that band's next UTC day, or than the last time the check
+  // was turned on, or than the latest certificate of an unbanded link, would
+  // vouch for certificates issued while it was not really on. A failing
+  // store, age-check.json or directory floor refuses instead: null would
+  // tell the node to drop the since it already holds.
+  let checkLogged = false
+  function effectiveSince () {
+    if (!on || since === null || issuer === null) return null
+    if ((ageCheck !== null && ageCheck.ok !== true) || (directoryFloor !== null && directoryFloor.ok !== true)) {
+      if (!checkLogged) log({ event: 'idade', reason: 'estado-indisponivel' })
+      checkLogged = true
+      throw refuse('indisponivel')
+    }
+    let first
+    try {
+      first = ages.earliest()
+    } catch {
+      log({ event: 'idade', reason: 'armazenamento-indisponivel' })
+      throw refuse('indisponivel')
+    }
+    if (first === null) return null
+    let effective = since
+    const floors = [nextUtcDay(first), ageCheck === null ? null : ageCheck.enabledAt, directoryFloor === null ? null : directoryFloor.floor]
+    for (const floor of floors) {
+      if (floor !== null && floor > effective) effective = floor
+    }
+    return effective
+  }
+
+  // Re-signed once the cached date is a minute old, so the date (the upper
+  // bound the node applies) stays fresh.
+  let sinceSigned = null
+  let sinceSignedAt = 0
+  async function sinceRoute (req, res) {
+    if (!limits.since()) throw new RouteError('pedido-invalido', 429)
+    const effective = effectiveSince()
+    if (effective === null) return send(res, 200, { since: null })
+    const t = now()
+    if (sinceSigned === null || sinceSigned.since !== effective || t - sinceSignedAt >= SINCE_RESIGN_MS || t < sinceSignedAt) {
+      sinceSigned = createAgeSince({ since: effective, date: new Date(t).toISOString() }, issuer.keyPair, issuer.cert)
+      sinceSignedAt = t
+    }
+    send(res, 200, { since: sinceSigned })
+  }
+
   // No window of its own: a fixed redirect with no secret and no paid call,
   // and a 429 here would strand the browser on an error page instead of
   // returning to the app. The global bucket still bounds it.
@@ -264,7 +377,7 @@ function createAgeRoutes ({
   async function session (req, res, body) {
     available()
     const member = prove(body, 'session')
-    if (verified(member)) return send(res, 200, { state: 'verificado' })
+    if (verified(member)) return sendVerified(res, member)
     const app = isAppRequest(req)
     const slot = slotOf(member, app)
     const open = sessions.get(slot)
@@ -278,7 +391,7 @@ function createAgeRoutes ({
       const shared = await inflight
       if (shared.url) return send(res, 200, { url: shared.url })
       // The creation was dropped because the member got approved meanwhile.
-      if (verified(member)) return send(res, 200, { state: 'verificado' })
+      if (verified(member)) return sendVerified(res, member)
       throw refuse(shared.error || 'indisponivel')
     }
     // Eligibility before biometrics: a key the link would refuse never pays
@@ -323,7 +436,7 @@ function createAgeRoutes ({
     if (r.ok && verified(member)) {
       settle({})
       cleanup(r.sessionId)
-      return send(res, 200, { state: 'verificado' })
+      return sendVerified(res, member)
     }
     if (!r.ok) {
       logProvider('didit-sessao', r)
@@ -356,7 +469,7 @@ function createAgeRoutes ({
       // A session left open after the approval (a race with a replacement)
       // is closed here rather than at the 24 h sweep.
       finalizeAll(member)
-      return send(res, 200, { state: 'verificado' })
+      return sendVerified(res, member)
     }
     // Each client reads the session it opened.
     const slot = slotOf(member, isAppRequest(req))
@@ -393,6 +506,7 @@ function createAgeRoutes ({
       throw refuse('indisponivel')
     }
     log({ event: 'idade', reason: state })
+    if (state === 'verificado') return sendVerified(res, member)
     send(res, 200, { state })
   }
 
@@ -409,6 +523,7 @@ function createAgeRoutes ({
   async function handle (req, res, url) {
     const p = url.pathname
     if (req.method === 'GET' && p === '/account/age/policy') return policy(req, res)
+    if (req.method === 'GET' && p === '/account/age/since') return sinceRoute(req, res)
     if (req.method === 'GET' && p === '/account/age/app-return') return appReturn(req, res)
     if (req.method === 'POST' && Object.hasOwn(POST, p)) {
       checkPost(req)

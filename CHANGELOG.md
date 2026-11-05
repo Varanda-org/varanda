@@ -20,6 +20,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- O app abre A Rua direto quando a idade da conta já foi confirmada (provas assinadas pelo serviço e conferidas pelo nó; o aparelho guarda só recusas), com conferência em segundo plano. Detalhes em `docs/verification.md` §82.
 - Aparência: Ajustes › Aparência com Sistema (padrão), Claro e Escuro, guardada neste aparelho, e um tema escuro quente (verde e creme, nunca preto) no app, na web e na barra de status.
 - Conta de pagamentos, modo `completo`: o USDC recebido aparece como saldo próprio e pode ser enviado a um endereço de fora, e o Converter troca USDC por BRLA na carteira da pessoa, com cotação indicativa e PIN do membro. A taxa da conversão é a do Hodle, sem taxa da Varanda. Nada é reenviado nem convertido sozinho. `VARANDA_HODLE_MAX_USDC` (padrão 500 USDC; de 1 a 10000) limita cada envio de USDC, taxas incluídas, e cada conversão, e cada cotação de conversão conta no teto diário. O sandbox do Hodle não prova a conversão, que só foi exercitada no falso de loopback e precisa de verificação em produção. Detalhes em `docs/design.md` e `docs/verification.md` §73.
 - Avisos mostram curtidas e republicações das suas publicações, uma linha por pessoa, canal `varanda/notices/3`; semeadores e clientes antigos continuam como antes.

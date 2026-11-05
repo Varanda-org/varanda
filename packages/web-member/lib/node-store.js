@@ -1470,7 +1470,54 @@ async function deleteDmData (storage) {
   for (const key of ['dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'dmCtlQueue']) await storage.writeJson(key, null)
 }
 
+// kv ageVerified / ageSince = { v: 1, proof }: the account service's signed
+// age attestations (@varanda/core lib/age-proof.js). Shape and size only:
+// kv is device-owner writable, so the session re-verifies every read
+// against the own key and the association.
+const MAX_AGE_PROOF_BYTES = 1024
+
+function isAgeProof (proof) {
+  return proof !== null && typeof proof === 'object' && !Array.isArray(proof) &&
+    b4a.byteLength(JSON.stringify(proof)) <= MAX_AGE_PROOF_BYTES
+}
+
+async function readAgeProof (storage, key) {
+  const data = await readKv(storage, key)
+  return isVersioned(data) && isAgeProof(data.proof) ? data.proof : null
+}
+
+function writeAgeProof (storage, key, proof) {
+  if (!isAgeProof(proof)) throw new TypeError('comprovante de idade inválido')
+  return storage.writeJson(key, { v: 1, proof })
+}
+
+function readAgeVerified (storage) {
+  return readAgeProof(storage, 'ageVerified')
+}
+
+function writeAgeVerified (storage, proof) {
+  return writeAgeProof(storage, 'ageVerified', proof)
+}
+
+function readAgeSince (storage) {
+  return readAgeProof(storage, 'ageSince')
+}
+
+function writeAgeSince (storage, proof) {
+  if (proof === null) return storage.writeJson('ageSince', null)
+  return writeAgeProof(storage, 'ageSince', proof)
+}
+
+async function deleteAgeProofs (storage) {
+  for (const key of ['ageVerified', 'ageSince']) await storage.writeJson(key, null)
+}
+
 module.exports = {
+  readAgeVerified,
+  writeAgeVerified,
+  readAgeSince,
+  writeAgeSince,
+  deleteAgeProofs,
   DM_LOCAL,
   openDmLocal,
   deleteDmLocal,

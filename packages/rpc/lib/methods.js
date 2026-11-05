@@ -352,6 +352,16 @@ function isUsernameRecord (v) {
   return utf8ByteLength(JSON.stringify(v)) <= MAX_USERNAME_RECORD_BYTES
 }
 
+// age.proof (docs/rpc.md 5.83): an issuer-signed age attestation; the node
+// verifies it against its own key and the association, this only bounds the
+// size.
+const MAX_AGE_PROOF_BYTES = 1024
+
+function isAgeProof (v) {
+  if (!isPlainObject(v)) return false
+  return utf8ByteLength(JSON.stringify(v)) <= MAX_AGE_PROOF_BYTES
+}
+
 // field(check, { optional, fallback }): `fallback` is filled in when the
 // field is absent (the handler always sees it).
 function req (check) {
@@ -437,6 +447,18 @@ const SPECS = {
     fields: {
       action: req(isAgeAction),
       nonce: req(isNonce)
+    }
+  },
+  // Stores the account service's signed age attestations in the browser
+  // node after verifying them; since: null clears the stored one. A local,
+  // idempotent store, so not mutating: the client re-reads node.info.
+  'age.proof': {
+    fields: {
+      verified: opt(isAgeProof),
+      since: opt((v) => v === null || isAgeProof(v))
+    },
+    cross (given) {
+      return hasOwn(given, 'verified') || hasOwn(given, 'since') ? null : 'parâmetro obrigatório: verified'
     }
   },
   // Signs the wallet statement with the identity key; the node fills in
