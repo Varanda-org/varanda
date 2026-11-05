@@ -6,9 +6,9 @@
 //   - GET /account/pages/policy answers { available } even when pages are
 //     off, so the app can hide them explicitly.
 //   - POST /account/pages/start mints a single-use nonce bound to a member
-//     key and one action, with no proof and no state (an HMAC token, as the
-//     wallet routes do); for 'create' it also answers the new page key,
-//     whose pair page-keys.js keeps in memory until the page is written.
+//     key and one action, with no proof and no state (an HMAC token); for
+//     'create' it also answers the new page key, whose pair page-keys.js
+//     keeps in memory until the page is written.
 //   - every other POST is /account/pages/<action>. A statement action
 //     carries the member's diary-key signature over the nonce and the hash
 //     of the operation (packages/core/lib/page-proof.js); a record action

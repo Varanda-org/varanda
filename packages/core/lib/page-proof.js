@@ -7,18 +7,18 @@
 // replayed into another request. The service holds the page key and is the
 // only appender of the page diary; this statement is how it knows who asked.
 // The bytes start with 'varanda-page-v1', so a signature over them can never
-// be a wallet statement (varanda-wallet-v1), an age request, a push opt-in,
-// a terms acceptance, an account link, a page record (varanda-page-*-v1 with
-// a longer prefix line) or a Hypercore block signature, and vice versa.
+// be an age request, a push opt-in, a terms acceptance, an account link, a
+// page record (varanda-page-*-v1 with a longer prefix line) or a Hypercore
+// block signature, and vice versa.
 //
 // Accept, remove, offer, transfer-accept, close and move are not actions:
 // they are authenticated by the signatures on their own page records
 // (records.js, page-lifecycle), which readers verify too.
 //
 // The operation itself is not signed, only a hash of its canonical form: the
-// account service recomputes the hash from the operation it receives. Unlike
-// a wallet op, a page op carries post text and nested media rows, so it
-// accepts JSON values, bounded in size and depth.
+// account service recomputes the hash from the operation it receives. A page
+// op carries post text and nested media rows, so it accepts JSON values,
+// bounded in size and depth.
 //
 // Pure: b4a and hypercore-crypto only (loaded by the browser bundle and the
 // account service alike; no '#fs', no network).
@@ -60,7 +60,7 @@ const ACTIONS = Object.freeze([
 // Actions that are not about one existing page sign page = ''.
 const PAGELESS = Object.freeze(['create', 'list', 'terms'])
 // A base64url nonce of at least 32 bytes of entropy (same rule as
-// account-link.js and wallet-proof.js).
+// account-link.js).
 const NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
 const HEX64 = /^[0-9a-f]{64}$/
 const HEX128 = /^[0-9a-f]{128}$/
@@ -69,7 +69,7 @@ const OP_MAX_BYTES = 16 * 1024
 // Deep enough for media rows inside a post, shallow enough that a hostile
 // op can never exhaust the stack.
 const OP_MAX_DEPTH = 8
-// A key pair, a wallet PIN or a seed never enters an op, even as a hash.
+// A key pair, a PIN or a seed never enters an op, even as a hash.
 const OP_FORBIDDEN = Object.freeze(['secretKey', 'pin', 'seed'])
 const INDEX_KEY_RE = /^(0|[1-9][0-9]*)$/
 

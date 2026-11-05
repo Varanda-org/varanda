@@ -86,11 +86,6 @@ android {
 
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
-    // The AWS Face Liveness SDK (its Amplify core libraries) needs core
-    // library desugaring in the app module.
-    compileOptions {
-        coreLibraryDesugaringEnabled true
-    }
 
     namespace 'app.varanda'
     defaultConfig {
@@ -190,8 +185,6 @@ dependencies {
             implementation("com.facebook.fresco:animated-webp:${expoLibs.versions.fresco.get()}")
         }
     }
-
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

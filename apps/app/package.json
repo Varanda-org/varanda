@@ -10,7 +10,7 @@
     "android": "bash scripts/link-addons.sh check android && expo run:android",
     "ios": "bash scripts/link-addons.sh check ios && expo run:ios",
     "build:node": "node ../../packages/web-member/scripts/build.js --node public/varanda-node.js",
-    "web": "npm run build:node && node scripts/copy-liveness-css.js public && expo start --web",
+    "web": "npm run build:node && expo start --web",
     "export:web": "npm run build:node && expo export --platform web && node scripts/finish-web.js",
     "prepare:native": "bash scripts/prepare-native.sh",
     "eas-build-post-install": "bash scripts/eas-post-install.sh",
@@ -20,7 +20,6 @@
     "test": "node ../../scripts/run-tests.js"
   },
   "dependencies": {
-    "@aws-amplify/ui-react-liveness": "3.7.0",
     "@expo/metro-runtime": "55.0.12",
     "@expo/vector-icons": "15.1.1",
     "@noble/hashes": "2.4.0",
@@ -28,7 +27,6 @@
     "@varanda/core": "0.1.0",
     "@varanda/rpc": "0.1.0",
     "@varanda/web-member": "0.1.0",
-    "aws-amplify": "6.22.2",
     "bare-crypto": "1.15.4",
     "bare-ws": "3.2.0",
     "expo": "55.0.31",
@@ -36,6 +34,7 @@
     "expo-clipboard": "55.0.17",
     "expo-crypto": "55.0.19",
     "expo-file-system": "55.0.26",
+    "expo-haptics": "55.0.18",
     "expo-image-manipulator": "55.0.21",
     "expo-image-picker": "55.0.24",
     "expo-secure-store": "55.0.18",

@@ -19,11 +19,7 @@ const { openPagesStore } = require('../account/pages-store')
 const { openAgeStore } = require('../account/age-store')
 const { startAgeCheck, directoryFloor } = require('../account/age-check-state')
 const { createDidit } = require('../account/didit')
-const { createHodle, NETWORKS: HODLE_NETWORKS } = require('../account/hodle')
-const { openWalletStore } = require('../account/wallet-store')
-const { openWalletOpsStore } = require('../account/wallet-ops-store')
-const { parseFees, isActive: feesActive } = require('../account/fees')
-const { parseWebhookSecrets } = require('../account/wallet-webhook')
+const { removeWalletFiles } = require('../account/wallet-cleanup')
 const { generateVapidKeys } = require('../account/web-push')
 const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moderation-store')
 const { parseModEmails } = require('../account/mod-routes')
@@ -111,40 +107,6 @@ const DIDIT_KEY_RE = /^[\x21-\x7e]+$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const DIDIT_DAILY_DEFAULT = 200
 const DIDIT_DAILY_MAX = 100000
-// The client's own key shape (../account/hodle.js), so a key readEnv lets
-// through is never one createHodle refuses at start.
-const HODLE_KEY_RE = /^hodle_(live|test)_[\x21-\x7e]{8,200}$/
-// The modes of wallet-routes.js MODES: cadastro (subaccount and KYC only),
-// carteira (adds wallet-create with the member's PIN), the latter only once
-// Hodle confirmed in writing that member-chosen PINs work on individual
-// subaccounts, pix (adds balance, Pix deposits and Pix payouts) and completo
-// (adds BRLA transfers by @nome and sends to an outside address).
-const HODLE_MODES = Object.freeze(['cadastro', 'carteira', 'pix', 'completo'])
-const HODLE_DAILY_DEFAULT = 100
-const HODLE_DAILY_MAX = 100000
-// wallet-routes.js refuses a cap below its minimum deposit (R$ 1,00).
-const HODLE_MAX_CENTS_MIN = 100
-const HODLE_MAX_CENTS_MAX = 100000000
-const HODLE_MAX_CENTS_DEFAULT = 300000
-// Whole USDC per send (fees included) or conversion. The top is Hodle's own
-// per-transfer limit (MAX_TRANSFER_MICROS in hodle.js).
-const HODLE_MAX_USDC_MIN = 1
-const HODLE_MAX_USDC_MAX = 10000
-const HODLE_MAX_USDC_DEFAULT = 500
-const MICROS_PER_USDC = 1000000
-// The fee kinds each mode can actually charge. A rate for any other kind
-// would never be collected, and the operator must not believe it is. Money
-// coming in (deposit) and a USDC to BRLA conversion (swap) are never charged.
-const FEE_KINDS_BY_MODE = Object.freeze({
-  cadastro: [],
-  carteira: [],
-  pix: ['payout'],
-  completo: ['payout', 'transfer', 'crypto']
-})
-// PINs belong to members, typed at the moment they sign; the service never
-// holds one, the treasury's included, so one in the environment is a mistake.
-const FORBIDDEN_PIN_VARS = Object.freeze(['VARANDA_HODLE_PIN', 'VARANDA_FEE_TREASURY_PIN'])
-const WALLET_PRUNE_MS = 6 * 60 * 60 * 1000
 
 function print (flags, result, line) {
   process.stdout.write((flags.json ? jsonLine(result) : line) + '\n')
@@ -550,7 +512,7 @@ function readEnv (env, dataDir) {
     groupToken = tokenEnv
   }
   const didit = readDiditEnv(env)
-  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits: readLimits(env), triage, didit, ageSince: readAgeSinceEnv(env, didit), hodle: readHodleEnv(env) }
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits: readLimits(env), triage, didit, ageSince: readAgeSinceEnv(env, didit) }
 }
 
 // Hosted age verification: both variables set is on, both unset or empty is
@@ -586,81 +548,6 @@ function readAgeSinceEnv (env, didit) {
   if (raw === undefined || raw === '') return null
   if (!isCanonicalIso(raw)) throw new UsageError('VARANDA_AGE_SINCE inválido: use uma data ISO como 2026-10-29T00:00:00.000Z')
   if (didit === null) throw new UsageError('VARANDA_AGE_SINCE exige a verificação de idade ligada (VARANDA_DIDIT_API_KEY e VARANDA_DIDIT_WORKFLOW_ID).')
-  return raw
-}
-
-// The optional payments account with Hodle: off unless the API key is set,
-// and then every other VARANDA_HODLE_* and VARANDA_FEE_* is ignored, except
-// a PIN variable, refused either way. No value is ever echoed.
-function readHodleEnv (env) {
-  for (const name of FORBIDDEN_PIN_VARS) {
-    if (env[name] !== undefined && env[name] !== '') throw new UsageError(name + ' não é aceito')
-  }
-  const apiKey = env.VARANDA_HODLE_API_KEY
-  if (apiKey === undefined || apiKey === '') return null
-  if (typeof apiKey !== 'string' || apiKey.length > MAX_SECRET || !HODLE_KEY_RE.test(apiKey)) {
-    throw new UsageError('VARANDA_HODLE_API_KEY inválido')
-  }
-  const network = optionalChoice(env.VARANDA_HODLE_NETWORK, HODLE_NETWORKS, 'polygon', 'VARANDA_HODLE_NETWORK inválido')
-  const mode = optionalChoice(env.VARANDA_HODLE_MODE, HODLE_MODES, 'cadastro', 'VARANDA_HODLE_MODE inválido')
-  let dailyLimit = HODLE_DAILY_DEFAULT
-  const raw = env.VARANDA_HODLE_DAILY_LIMIT
-  const text = typeof raw === 'string' ? raw.trim() : null
-  if (raw !== undefined && text !== '') {
-    const value = text !== null && CANONICAL_INT_RE.test(text) ? Number(text) : NaN
-    if (!(value >= 1 && value <= HODLE_DAILY_MAX)) throw new UsageError('VARANDA_HODLE_DAILY_LIMIT inválido')
-    dailyLimit = value
-  }
-  let maxCents = HODLE_MAX_CENTS_DEFAULT
-  const rawMax = env.VARANDA_HODLE_MAX_CENTS
-  const maxText = typeof rawMax === 'string' ? rawMax.trim() : null
-  if (rawMax !== undefined && maxText !== '') {
-    const value = maxText !== null && CANONICAL_INT_RE.test(maxText) ? Number(maxText) : NaN
-    if (!(value >= HODLE_MAX_CENTS_MIN && value <= HODLE_MAX_CENTS_MAX)) throw new UsageError('VARANDA_HODLE_MAX_CENTS inválido')
-    maxCents = value
-  }
-  let maxUsdc = HODLE_MAX_USDC_DEFAULT
-  const rawUsdc = env.VARANDA_HODLE_MAX_USDC
-  const usdcText = typeof rawUsdc === 'string' ? rawUsdc.trim() : null
-  if (rawUsdc !== undefined && usdcText !== '') {
-    const value = usdcText !== null && CANONICAL_INT_RE.test(usdcText) ? Number(usdcText) : NaN
-    if (!(value >= HODLE_MAX_USDC_MIN && value <= HODLE_MAX_USDC_MAX)) throw new UsageError('VARANDA_HODLE_MAX_USDC inválido')
-    maxUsdc = value
-  }
-  const maxUsdcMicros = maxUsdc * MICROS_PER_USDC
-  const fees = readFeesEnv(env, mode)
-  let webhookSecrets
-  try {
-    // Kept as the strings Hodle shows: the HMAC is keyed with the text.
-    webhookSecrets = parseWebhookSecrets(env.VARANDA_HODLE_WEBHOOK_SECRETS)
-  } catch {
-    throw new UsageError('VARANDA_HODLE_WEBHOOK_SECRETS inválido')
-  }
-  return { apiKey, network, mode, dailyLimit, maxCents, maxUsdcMicros, fees, webhookSecrets }
-}
-
-// parseFees (../account/fees.js) names only the variable in its RangeError.
-function readFeesEnv (env, mode) {
-  let fees
-  try {
-    fees = parseFees(env)
-  } catch (err) {
-    if (err instanceof RangeError) throw new UsageError(err.message)
-    throw err
-  }
-  const charged = FEE_KINDS_BY_MODE[mode]
-  for (const [kind, rate] of Object.entries(fees.rates)) {
-    if (charged.includes(kind)) continue
-    const prefix = 'VARANDA_FEE_' + kind.toUpperCase()
-    if (rate.cents !== 0) throw new UsageError(prefix + '_CENTS não suportado no modo ' + mode)
-    if (rate.bps !== 0) throw new UsageError(prefix + '_BPS não suportado no modo ' + mode)
-  }
-  return fees
-}
-
-function optionalChoice (raw, choices, fallback, message) {
-  if (raw === undefined || raw === '') return fallback
-  if (typeof raw !== 'string' || !choices.includes(raw)) throw new UsageError(message)
   return raw
 }
 
@@ -762,7 +649,7 @@ async function serve (flags, env) {
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
   const pagesConfig = readPagesEnv(env)
-  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, hodle: hodleConfig } = readEnv(env, flags.dataDir)
+  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince } = readEnv(env, flags.dataDir)
   const { maxMembers = null, invitesPerWeek = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
@@ -801,15 +688,10 @@ async function serve (flags, env) {
   let pageClients = []
   let ages = null
   let stopAgeHeal = null
-  let wallets = null
-  let stopWalletHeal = null
-  let ops = null
-  let stopOpsHeal = null
-  let stopOpsPrune = null
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms, invites, pushStore, ages, wallets, ops, pagesStore, pageKeys, pagesWriter, pageClients)
+      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients)
     }
   })
   let listener = null
@@ -820,6 +702,11 @@ async function serve (flags, env) {
   process.once('SIGINT', onSignal)
   process.once('SIGTERM', onSignal)
   try {
+    // The payments files belong to a removed feature: they go once the lock
+    // is ours, logged by name only (../account/wallet-cleanup.js).
+    const cleanup = removeWalletFiles(flags.dataDir)
+    for (const file of cleanup.removed) log({ event: 'carteira', reason: 'removido', file })
+    for (const { file, code } of cleanup.failed) log({ event: 'carteira', reason: 'remocao-falhou', file, code })
     try {
       store = openAccountStore(flags.dataDir, {
         maxMembers,
@@ -888,24 +775,6 @@ async function serve (flags, env) {
     // Read once, before any link of this run (all of them banded).
     const ageDirectoryFloor = ageOn && ageSince !== null ? directoryFloor(store, ages) : null
     if (ageDirectoryFloor !== null && !ageDirectoryFloor.ok) log({ event: 'idade', reason: 'estado-indisponivel' })
-    // The payments account (wallet.json), only with VARANDA_HODLE_API_KEY
-    // set. The routes log 'ligada' or 'desligada' themselves; an unreadable
-    // file is logged here and keeps the service up with the routes failing
-    // closed.
-    let hodle = null
-    if (hodleConfig !== null) {
-      hodle = createHodle({ apiKey: hodleConfig.apiKey, network: hodleConfig.network })
-      wallets = openWalletStore(flags.dataDir, { guard: () => lock.owned() })
-      if (!wallets.available()) log({ event: 'carteira', reason: 'indisponivel' })
-      stopWalletHeal = startHeal(wallets, 'carteira', log)
-      // The money ledger (wallet-ops.json), opened in every mode so rows
-      // written under pix stay readable after a step back to carteira.
-      ops = openWalletOpsStore(flags.dataDir, { guard: () => lock.owned() })
-      if (!ops.available()) log({ event: 'carteira', reason: 'indisponivel' })
-      stopOpsHeal = startHeal(ops, 'carteira', log)
-      stopOpsPrune = startPrune(ops)
-      log({ event: 'carteira', reason: feesActive(hodleConfig.fees.rates) ? 'taxa-ligada' : 'taxa-desligada' })
-    }
     const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
     if (triageConfig === null) log({ event: 'triage', reason: 'desligada' })
@@ -956,7 +825,7 @@ async function serve (flags, env) {
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
       const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, invites, push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, hodle, wallets, walletMode: hodleConfig === null ? undefined : hodleConfig.mode, walletDailyLimit: hodleConfig === null ? undefined : hodleConfig.dailyLimit, walletNetwork: hodleConfig === null ? undefined : hodleConfig.network, ops, fees: hodleConfig === null ? null : hodleConfig.fees, walletMaxCents: hodleConfig === null ? undefined : hodleConfig.maxCents, walletMaxUsdcMicros: hodleConfig === null ? undefined : hodleConfig.maxUsdcMicros, walletWebhookSecrets: hodleConfig === null ? null : hodleConfig.webhookSecrets, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, invites, push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -993,15 +862,10 @@ async function serve (flags, env) {
     if (stopInvitesHeal !== null) stopInvitesHeal()
     if (stopPushHeal !== null) stopPushHeal()
     if (stopAgeHeal !== null) stopAgeHeal()
-    if (stopWalletHeal !== null) stopWalletHeal()
-    if (stopOpsHeal !== null) stopOpsHeal()
-    if (stopOpsPrune !== null) stopOpsPrune()
     if (terms !== null && terms.available()) await terms.heal()
     if (invites !== null && invites.available()) await invites.heal()
     if (pushStore !== null && pushStore.available()) await pushStore.heal()
     if (ages !== null && ages.available()) await ages.heal()
-    if (wallets !== null && wallets.available()) await wallets.heal()
-    if (ops !== null && ops.available()) await ops.heal()
     // The sampler waits for an in-flight read and writes the day's last
     // counts while the lock is still ours; a lost lock or a failed store
     // skips the write, as closeIfOwned below does.
@@ -1099,16 +963,14 @@ async function closePageClients (pageClients) {
 // The lock is lost: the store is marked unavailable first, synchronously,
 // so no request still draining during the stop appends beside the writer
 // that took the lock over (store.js, "Writer guard"); then the service
-// stops. The terms, invites, push, age, wallet and ledger stores, the page
-// keys and the page writer too: their next write must not land either.
-function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, wallets = null, ops = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = []) {
+// stops. The terms, invites, push and age stores, the page keys and the
+// page writer too: their next write must not land either.
+function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = []) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
   if (invites !== null) invites.fail()
   if (pushStore !== null) pushStore.fail()
   if (ages !== null) ages.fail()
-  if (wallets !== null) wallets.fail()
-  if (ops !== null) ops.fail()
   if (pagesStore !== null) pagesStore.fail()
   if (pageKeys !== null) pageKeys.fail()
   if (pagesWriter !== null) pagesWriter.fail()
@@ -1142,24 +1004,6 @@ function startHeal (sidecar, event, log, ms = LOCK_HEARTBEAT_MS) {
     try {
       if (await sidecar.heal()) log({ event, reason: 'reparado' })
     } finally {
-      running = false
-    }
-  }, ms)
-  timer.unref()
-  return () => clearInterval(timer)
-}
-
-// Final ledger rows older than 90 days go (wallet-ops-store.js prune). A
-// failed prune is retried on the next tick; the store already refuses writes
-// once the lock is lost.
-function startPrune (ops, ms = WALLET_PRUNE_MS) {
-  let running = false
-  const timer = setInterval(async () => {
-    if (running || !ops.available()) return
-    running = true
-    try {
-      await ops.prune(Date.now())
-    } catch {} finally {
       running = false
     }
   }, ms)
