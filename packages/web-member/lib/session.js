@@ -295,6 +295,12 @@ const member = require('./member-ops')
 const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
 const { createPeeker } = require('./peek')
 const { createNoticer } = require('./notices')
+const { createPageFeeder } = require('./page-feed')
+const { signPage, canonicalOp, opHash: pageOpHash, ACTIONS: PAGE_STATEMENTS } = require('@varanda/core/lib/page-proof')
+const { signRoster, signAccept, signOffer, signOrigin, signClose, signMoved, pageState, PAGE_ROSTER_REFRESH_BLOCKS } = require('@varanda/core/lib/page')
+const { pageLifecycle, cutEntries, originOf } = require('@varanda/core/lib/page-lifecycle')
+const { deletedSeqs, applyDeletes } = require('@varanda/core/lib/deletion')
+const { followSet } = require('@varanda/core/lib/media')
 const { signNoticeProof } = require('@varanda/core/lib/notices')
 const store = require('./node-store')
 const { groupKeyPairFromPrf } = require('./passkey')
@@ -322,6 +328,24 @@ const NO_SEEDER = 'sem conexão com o semeador'
 const PEEK_BUSY = 'espiadinha já em andamento'
 const NOTICES_BUSY = 'avisos já em andamento'
 const DIARY_PEEK_BUSY = 'ocupado'
+const BAD_PAGE = 'operação de página inválida'
+const PAGE_FEED_BUSY = 'feed de página já em andamento'
+const PAGE_REGISTER_CORE_ONLY = 'registro de página disponível só no nó core'
+const NO_LOCAL_DATA = 'sem dados locais para este diário'
+// page.read (docs/rpc.md 5.85): the bounded read of a page diary this node
+// does not hold peeks blocks 1..3 and this many windows of PEEK_WINDOW seqs,
+// newest first (288 >= PAGE_ROSTER_REFRESH_BLOCKS, so the roster the
+// service refreshes every 256 blocks is always inside). The result's lists
+// are capped as PAGE_READ_FOLLOWS_MAX / PAGE_READ_LINKS_MAX of @varanda/rpc.
+const PAGE_READ_WINDOWS = 8
+const PAGE_READ_HEAD = 3
+const PAGE_READ_FOLLOWS_MAX = 64
+const PAGE_READ_LINKS_MAX = 16 + 1
+// A window is first asked for under this share of the peek deadline: a
+// block the seeder cleared (its tombstone in the same window) never
+// arrives, so only what the answer's tombstones leave missing is asked for
+// again under the whole deadline.
+const PAGE_READ_PROBE_SHARE = 8
 // Direct messages (see the header): the sync loop pulls at most this often
 // and checks the wallet on this tick; a dm-key lookup by peek reads at most
 // this many windows of PEEK_WINDOW seqs, newest first.
@@ -441,6 +465,144 @@ function rpcError (code, message) {
   const err = new RpcError(code, message)
   err.isSessionError = true
   return err
+}
+
+// ---- pages (docs/rpc.md 5.84 and 5.85) ----
+
+function hasOwn (o, k) {
+  return Object.prototype.hasOwnProperty.call(o, k)
+}
+
+// Exactly `keys` as own keys of a plain object, else TypeError.
+function exactOp (o, keys) {
+  if (o === null || typeof o !== 'object' || Array.isArray(o)) throw new TypeError('invalid page op')
+  const own = Object.keys(o)
+  if (own.length !== keys.length || !keys.every((k) => hasOwn(o, k))) throw new TypeError('invalid page op')
+  return o
+}
+
+function copyList (v) {
+  return Array.isArray(v) ? [...v] : v
+}
+
+// The association is the node's own (cfg.association): an op that names one
+// at any depth is refused, as the RPC layer does for callers that skip it.
+function namesAssociation (v) {
+  if (Array.isArray(v)) return v.some(namesAssociation)
+  if (v === null || typeof v !== 'object') return false
+  return Object.keys(v).some((k) => k === 'association' || namesAssociation(v[k]))
+}
+
+// page.sign's result for the own key `own` (the pair's public key). The
+// record builders (lib/page.js) check every field the signer covers and
+// that the pair is the record's signer (owner or actor), so a roster for
+// another owner or a malformed field is a TypeError, never a signature.
+function pageSignResult ({ action, nonce, page, op }, own, keyPair, association) {
+  if (namesAssociation(JSON.parse(canonicalOp(op)))) throw new TypeError('invalid page op')
+  const statement = (o) => signPage({ action, nonce, member: own, page, association, opHash: pageOpHash(o) }, keyPair)
+  const roster = (f) => ({ type: 'page-roster', ...f, signature: signRoster(f, keyPair) })
+  switch (action) {
+    case 'accept': {
+      exactOp(op, ['gen', 'rosterSignature', 'at', 'nonce'])
+      const f = { page, gen: op.gen, rosterSignature: op.rosterSignature, at: op.at, nonce: op.nonce, actor: own }
+      return { record: { type: 'page-accept', ...f, signature: signAccept(f, keyPair) } }
+    }
+    case 'remove':
+    case 'transfer-accept':
+      exactOp(op, ['gen', 'owner', 'admins', 'prev', 'at', 'nonce'])
+      return { record: roster({ page, gen: op.gen, owner: op.owner, admins: copyList(op.admins), prev: op.prev, at: op.at, nonce: op.nonce, association }) }
+    case 'offer': {
+      exactOp(op, ['to', 'exp', 'gen', 'at', 'nonce'])
+      const f = { page, to: op.to, exp: op.exp, gen: op.gen, at: op.at, nonce: op.nonce, actor: own }
+      return { record: { type: 'page-offer', ...f, signature: signOffer(f, keyPair) } }
+    }
+    case 'close': {
+      exactOp(op, ['gen', 'at', 'nonce'])
+      const f = { page, gen: op.gen, at: op.at, nonce: op.nonce, actor: own, association }
+      return { record: { type: 'page-close', ...f, signature: signClose(f, keyPair) } }
+    }
+    case 'move': {
+      exactOp(op, ['to', 'gen', 'fromSeq', 'owner', 'admins', 'at', 'nonce'])
+      if (op.to === page) throw new TypeError('invalid page op')
+      const moved = { page, to: op.to, gen: op.gen, at: op.at, nonce: op.nonce, actor: own, association }
+      const origin = { page: op.to, from: page, fromSeq: op.fromSeq, gen: op.gen, owner: op.owner, admins: copyList(op.admins), at: op.at, nonce: op.nonce, actor: own, association }
+      return {
+        record: { type: 'page-moved', ...moved, signature: signMoved(moved, keyPair) },
+        origin: { type: 'page-origin', ...origin, signature: signOrigin(origin, keyPair) },
+        roster: roster({ page: op.to, gen: 1, owner: op.owner, admins: copyList(op.admins), prev: null, at: op.at, nonce: op.nonce, association })
+      }
+    }
+    case 'create': {
+      exactOp(op, ['username', 'name', 'bio', 'roster'])
+      const r = exactOp(op.roster, ['gen', 'admins', 'prev', 'at', 'nonce'])
+      if (r.gen !== 1 || r.prev !== null || !Array.isArray(r.admins) || r.admins.length !== 0) throw new TypeError('invalid page op')
+      const record = roster({ page, gen: 1, owner: own, admins: [], prev: null, at: r.at, nonce: r.nonce, association })
+      return { signature: statement(op), record }
+    }
+    case 'invite': {
+      exactOp(op, ['member', 'gen', 'rosterSignature', 'roster'])
+      const r = exactOp(op.roster, ['owner', 'admins', 'prev', 'at', 'nonce'])
+      if (typeof op.rosterSignature !== 'string') throw new TypeError('invalid page op')
+      const record = roster({ page, gen: op.gen, owner: r.owner, admins: copyList(r.admins), prev: r.prev, at: r.at, nonce: r.nonce, association })
+      return { signature: statement({ ...op, rosterSignature: record.signature }), record }
+    }
+    default:
+      if (!PAGE_STATEMENTS.includes(action)) throw new TypeError('invalid page action')
+      return { signature: statement(op) }
+  }
+}
+
+// The winning follow record's seq for each key of `follows`, newest first
+// (@varanda/core lib/member.js pageFollows).
+function pageFollows (entries, follows) {
+  const wanted = new Set(follows)
+  const winning = new Map()
+  for (const entry of entries) {
+    const copy = entry.record == null ? null : validRecordCopy(entry.record, entry.seq)
+    if (copy === null || copy.type !== 'follow' || !wanted.has(copy.key)) continue
+    const prev = winning.get(copy.key)
+    if (prev === undefined || entry.seq > prev) winning.set(copy.key, entry.seq)
+  }
+  return [...winning].map(([key, seq]) => ({ key, seq })).sort((a, b) => (b.seq - a.seq) || (a.key < b.key ? -1 : 1))
+}
+
+// page.read's answer over RAW entries (never after applyDeletes, so a
+// tombstone cannot undo a close, a move or a roster): the lifecycle first,
+// then the roster over the blocks up to a close or a move. Follows are no
+// page-* records, so their tombstones apply. The shape of the core node's
+// (@varanda/core lib/member.js pageRead).
+function pageReadResult ({ pageHex, entries, own, association, revokedIssuers, full, complete }) {
+  const opts = { revokedIssuers }
+  const lifecycle = pageLifecycle(entries, pageHex, association, opts)
+  const cut = cutEntries(entries, lifecycle)
+  const state = pageState(cut, pageHex, association, { revokedIssuers, full })
+  // A page-origin after a terminal close or move does not count (as core).
+  const origin = originOf(cut, pageHex, association, opts)
+  const live = applyDeletes(cut)
+  const follows = pageFollows(live, followSet(live, pageHex))
+  const roster = state.page ? [state.owner, ...state.admins] : []
+  const links = new Map()
+  for (const link of lifecycle.links) {
+    if (roster.includes(link.actor)) links.set(link.actor, link)
+  }
+  return {
+    page: pageHex,
+    owner: state.owner,
+    admins: state.admins,
+    gen: state.page ? state.gen : null,
+    seq: state.seq,
+    isOwner: state.page && state.owner === own,
+    isAdmin: state.page && state.admins.includes(own),
+    complete: complete(state),
+    follows: follows.slice(0, PAGE_READ_FOLLOWS_MAX),
+    followsCount: follows.length,
+    followsTruncated: follows.length > PAGE_READ_FOLLOWS_MAX,
+    closed: lifecycle.closed !== null,
+    movedTo: lifecycle.movedTo === null ? null : { to: lifecycle.movedTo.to, seq: lifecycle.movedTo.seq },
+    movedFrom: origin === null ? null : { from: origin.from, fromSeq: origin.fromSeq },
+    links: [...links.values()].sort((a, b) => b.seq - a.seq).slice(0, PAGE_READ_LINKS_MAX)
+      .map((l) => ({ actor: l.actor, diary: l.diary, seq: l.seq }))
+  }
 }
 
 // ---- configuration ----
@@ -691,6 +853,8 @@ function createBrowserSession ({
   // The one notices.list in flight (its own slot, same rules as `peeking`;
   // its promise joins `unwinding` too).
   let noticing = null
+  // The one page.feed in flight (same rules as `peeking`).
+  let pageFeeding = null
   // The own context of the last v2 notices read (member-ops
   // ownNoticeContext), reused while the own diary's length is unchanged.
   let noticeCtxCache = null
@@ -717,6 +881,16 @@ function createBrowserSession ({
     ownKey: cachedOwnKey,
     log: (text) => warning(safe(text)),
     limits: syncOptions.peek
+  })
+
+  // page.feed (docs/rpc.md 5.86): its own short-lived link, like the peeker.
+  const pageFeeder = createPageFeeder({
+    storage,
+    association: cfg.association,
+    seederUrl: cfg.seederUrl,
+    createSocket,
+    log: (text) => warning(safe(text)),
+    limits: syncOptions.pageFeed
   })
 
   // The proof signer of the notices link: synchronous, with the in-memory
@@ -824,6 +998,7 @@ function createBrowserSession ({
           timeoutMs: once ? timeoutMs : undefined,
           peeker: diaryPeeker,
           reader,
+          followPage: syncOptions.followPage !== undefined ? syncOptions.followPage : followMovedPage,
           log: (text) => {
             const [clean, redacted] = redactLogLine(text)
             if (redacted) reportInternal(new Error(String(text)))
@@ -1159,6 +1334,20 @@ function createBrowserSession ({
     return withStore(fn)
   }
 
+  // Whether the stored replica of `key` is forked, on the run's core when
+  // c lends it (a read just served there), else on the storage's.
+  async function replicaForked (c, key) {
+    const lent = c.cores ? c.cores.replica(key) : null
+    if (lent !== null) return lent.fork !== 0
+    if (!(await store.replicaExists(c.storage, key))) return false
+    const core = await store.openReplica(c.storage, key)
+    try {
+      return core.fork !== 0
+    } finally {
+      await core.close()
+    }
+  }
+
   // ---- the write gate and the push ----
 
   // A live, verified continuous run that confirmed own-sync for the current
@@ -1372,15 +1561,20 @@ function createBrowserSession ({
   // The peek holds the lease (borrow) from its wait to its answer, so the
   // hold cannot end the run under it.
   function diaryPeek (params) {
-    if (closed) return Promise.reject(rpcError('LOCKED', CLOSED_MESSAGE))
-    if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) return Promise.reject(rpcError('USAGE', DIARY_PEEK_BUSY))
-    return borrow(() => diaryPeekWith(params))
+    return diaryPeekWithin(params, peekTimeoutMs)
   }
 
-  async function diaryPeekWith ({ author, seqs, profileSeq, usernameSeq }) {
+  // diary.peek under its own deadline (page.read's probe).
+  function diaryPeekWithin (params, timeoutMs) {
+    if (closed) return Promise.reject(rpcError('LOCKED', CLOSED_MESSAGE))
+    if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) return Promise.reject(rpcError('USAGE', DIARY_PEEK_BUSY))
+    return borrow(() => diaryPeekWith(params, timeoutMs))
+  }
+
+  async function diaryPeekWith ({ author, seqs, profileSeq, usernameSeq }, timeoutMs) {
     diaryPeeksInFlight++
     try {
-      const deadline = Date.now() + peekTimeoutMs
+      const deadline = Date.now() + timeoutMs
       const key = author.toLowerCase()
       let dropped = null
       // Two attempts: a run that stops under the first (preempted by a
@@ -2146,6 +2340,152 @@ function createBrowserSession ({
       return await ageState(own)
     }),
 
+    // Signs a page statement or a page record (docs/rpc.md 5.84) with the
+    // in-memory key, exactly like age.sign: no append, no network, no
+    // core opened while the key is known. The session fills in member,
+    // actor (or owner) and association; the result never carries a key,
+    // the payload or the operation hash.
+    'page.sign': serial(async ({ action, nonce, page, op }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      try {
+        return pageSignResult({ action, nonce, page, op }, own, keyPair, cfg.association)
+      } catch (err) {
+        if (err instanceof TypeError || err instanceof SyntaxError) throw new UsageError(BAD_PAGE)
+        throw err
+      }
+    }),
+
+    // A page's roster and lifecycle (docs/rpc.md 5.85), works locked. NOT
+    // serial as a whole: a page diary this node holds is read on the chain
+    // (withCores, served on a live run's cores); otherwise a bounded
+    // newest-first diary.peek scan runs off it, as dm.lookup's does (a peek
+    // waits for the run, which the chain would hold back).
+    'page.read': async ({ key, full }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const pageHex = key.toLowerCase()
+      const local = await serial(async () => {
+        const own = await requireOwnKey()
+        const mod = await member.moderation(storage, cfg.association)
+        let held = null
+        try {
+          held = await withCores(async (c) => {
+            const read = await member.logReadRaw(c, { author: pageHex })
+            return { ...read, forked: pageHex !== own && await replicaForked(c, pageHex) }
+          })
+        } catch (err) {
+          if (messageOf(err) !== NO_LOCAL_DATA) throw err
+        }
+        return { own, revokedIssuers: mod.revokedIssuers, held }
+      })({})
+      const base = { pageHex, own: local.own, association: cfg.association, revokedIssuers: local.revokedIssuers }
+      // The bounded rule: the service refreshes the roster every
+      // PAGE_ROSTER_REFRESH_BLOCKS blocks, so a verifying roster that new is
+      // the current one; an older one may have been superseded unseen.
+      const fresh = (length) => (state) => state.page && state.seq >= length - PAGE_ROSTER_REFRESH_BLOCKS
+      // A held diary is read RAW: a tombstone a leaked page key appends
+      // cannot reopen a close nor undo a move or a roster. Every stored block
+      // counts (a followed diary downloads newest-first, its tail past a
+      // gap); only a diary held whole is walked as a chain.
+      if (local.held !== null) {
+        // A forked replica answers as the core node's pageRead: no page.
+        if (local.held.forked) throw rpcError('NOT_FOUND', NO_LOCAL_DATA)
+        const { entries, length } = local.held
+        if (entries.length === length) return pageReadResult({ ...base, entries, full: true, complete: () => true })
+        return pageReadResult({ ...base, entries, full: false, complete: fresh(length) })
+      }
+      try {
+        const first = await diaryPeek({ author: pageHex, seqs: [1, 2, 3] })
+        const length = first.length
+        const entries = first.entries.slice()
+        const missing = first.missing.filter((s) => s < length)
+        let skipped = false
+        let hi = length - 1
+        // The seqs of [lo, hi] no tombstone read so far deletes.
+        const notGone = (lo, hi) => {
+          const gone = deletedSeqs(entries.slice().sort((a, b) => a.seq - b.seq))
+          const seqs = []
+          for (let q = lo; q <= hi; q++) {
+            if (gone.has(q)) skipped = true
+            else seqs.push(q)
+          }
+          return seqs
+        }
+        for (let w = 0; hi > PAGE_READ_HEAD && w < PAGE_READ_WINDOWS; w++) {
+          const lo = Math.max(PAGE_READ_HEAD + 1, hi - PEEK_WINDOW + 1)
+          // A tombstone comes after its target, so the newer windows already
+          // read hold it: the seeder clears the target, and asking for it
+          // would only stall the window until the peek deadline.
+          const seqs = notGone(lo, hi)
+          hi = lo - 1
+          if (seqs.length === 0) continue
+          // Its tombstone may sit in this same window: the probe's answer
+          // names it, and only the blocks still missing after it are waited
+          // for. A probe that fails is the plain read.
+          let probe = null
+          try {
+            probe = await diaryPeekWithin({ author: pageHex, seqs }, Math.max(1, Math.floor(peekTimeoutMs / PAGE_READ_PROBE_SHARE)))
+          } catch {}
+          let again = seqs
+          if (probe !== null) {
+            entries.push(...probe.entries)
+            const gone = deletedSeqs(entries.slice().sort((a, b) => a.seq - b.seq))
+            again = probe.missing.filter((q) => {
+              if (!gone.has(q)) return true
+              skipped = true
+              return false
+            })
+          }
+          if (again.length === 0) continue
+          const r = await diaryPeek({ author: pageHex, seqs: again })
+          entries.push(...r.entries)
+          missing.push(...r.missing)
+        }
+        // A skipped block is not read, so the chain walk (full) is off.
+        const whole = hi <= PAGE_READ_HEAD && missing.length === 0 && !skipped
+        const bounded = fresh(length)
+        return pageReadResult({
+          ...base,
+          entries,
+          full: full === true && whole,
+          complete: (state) => whole || bounded(state)
+        })
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    },
+
+    // The newest rows of a page's follows (docs/rpc.md 5.86), works locked.
+    // Shaped like peek.read: not serial, its own slot and its own link
+    // (./page-feed.js); nothing is written anywhere.
+    'page.feed': async ({ keys, limit }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      if (pageFeeding !== null) throw rpcError('USAGE', PAGE_FEED_BUSY)
+      const p = pageFeeder.read({ keys, limit })
+      pageFeeding = p
+      unwinding.add(p)
+      p.then(() => unwinding.delete(p), () => unwinding.delete(p))
+      try {
+        return await p
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      } finally {
+        if (pageFeeding === p) pageFeeding = null
+      }
+    },
+
+    // A browser identity is an Ed25519 key already: no delegate to register.
+    'page.register': serial(async () => {
+      throw new UsageError(PAGE_REGISTER_CORE_ONLY)
+    }),
+
     // Signs the push-subscription statement with the in-memory key
     // (docs/rpc.md 5.31), exactly like terms.sign. The session fills in
     // member, association and the endpoint hash, so the caller never hands
@@ -2626,6 +2966,19 @@ function createBrowserSession ({
     scheduleDrain()
   }
 
+  // The running sync's follow of a moved page's new key: the signed kv
+  // queue only (a follow.add would preempt the run that waits for it), and
+  // the drain appends it after. Read at call time: a lock or another
+  // identity since the run started counts as locked.
+  async function followMovedPage (pageKey, runOwnHex) {
+    if (keyPair === null || ownKey === null || (runOwnHex !== undefined && runOwnHex !== ownKey)) {
+      throw new Error(store.LOCKED)
+    }
+    const r = await member.queueFollowChange(storage, ownKey, keyPair, pageKey, true)
+    if (r.changed) followChanged()
+    return r
+  }
+
   // Unlocks the identity with the pair derived from the passkey, and this
   // device's media key pair when the page derived one (`media`; without it
   // uploads are refused as locked). The optional PRF derives group keys.
@@ -2862,6 +3215,8 @@ function createBrowserSession ({
     peeking = null
     noticer.abort()
     noticing = null
+    pageFeeder.abort()
+    pageFeeding = null
     connection++
     emitter = null
     syncIntent = null
@@ -2886,6 +3241,8 @@ function createBrowserSession ({
     peeking = null
     noticer.abort()
     noticing = null
+    pageFeeder.abort()
+    pageFeeding = null
     closing = (async () => {
       await stopRun('stopped')
       await chain
@@ -2895,6 +3252,7 @@ function createBrowserSession ({
       await stopRun('stopped')
       peeker.close()
       noticer.close()
+      pageFeeder.close()
       zeroKeyPair()
       boxKeys.close()
       await dmEngine.close()

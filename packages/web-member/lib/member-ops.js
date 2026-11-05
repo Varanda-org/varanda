@@ -839,28 +839,35 @@ async function followChange (ctx, author, follow) {
     if (follow && (await moderation(ctx.storage, association)).blocked.has(String(author).toLowerCase())) {
       throw new UsageError('autor bloqueado')
     }
-    return store.withFollowsLock(ctx.storage, async () => {
-      const current = await store.readFollows(ctx.storage)
-      const has = current.includes(author)
-      if (follow === has) return { follows: current, changed: false }
-      // The inventory (own diary + follows) must fit a hello (MAX_INVENTORY).
-      if (follow && current.length >= MAX_INVENTORY - 1) throw new Error('limite de diários seguidos atingido')
-      const next = follow ? [...current, author] : current.filter((k) => k !== author)
-      // The op is queued BEFORE kv follows changes: kv follows only ever
-      // reaches the target state once the op is queued, so a retry that
-      // finds it there (changed: false) never hides an op that was never
-      // queued. A failed pending write changes nothing and propagates; a
-      // failed follows write after it leaves the op queued (the retry
-      // queues it again, harmless: the last op per key wins).
-      const key = String(author).toLowerCase()
-      if (isHex64(key) && key !== ownHex) {
-        const pending = (await store.readFollowsPending(ctx.storage)).filter((op) => op.key !== key)
-        pending.push(signFollowOp({ key, on: follow, at: nowIso() }, ownHex, keyPair))
-        await store.writeFollowsPending(ctx.storage, pending.slice(-(MAX_INVENTORY - 1)))
-      }
-      await store.writeFollows(ctx.storage, next)
-      return { follows: await store.readFollows(ctx.storage), changed: true }
-    })
+    return queueFollowChange(ctx.storage, ownHex, keyPair, author, follow)
+  })
+}
+
+// The kv part of followChange for an identity already checked: kv follows
+// and the signed op in kv followsPending, without opening the diary, so a
+// running sync can call it (./sync.js followPage, a page key move).
+function queueFollowChange (storage, ownHex, keyPair, author, follow) {
+  return store.withFollowsLock(storage, async () => {
+    const current = await store.readFollows(storage)
+    const has = current.includes(author)
+    if (follow === has) return { follows: current, changed: false }
+    // The inventory (own diary + follows) must fit a hello (MAX_INVENTORY).
+    if (follow && current.length >= MAX_INVENTORY - 1) throw new Error('limite de diários seguidos atingido')
+    const next = follow ? [...current, author] : current.filter((k) => k !== author)
+    // The op is queued BEFORE kv follows changes: kv follows only ever
+    // reaches the target state once the op is queued, so a retry that
+    // finds it there (changed: false) never hides an op that was never
+    // queued. A failed pending write changes nothing and propagates; a
+    // failed follows write after it leaves the op queued (the retry
+    // queues it again, harmless: the last op per key wins).
+    const key = String(author).toLowerCase()
+    if (isHex64(key) && key !== ownHex) {
+      const pending = (await store.readFollowsPending(storage)).filter((op) => op.key !== key)
+      pending.push(signFollowOp({ key, on: follow, at: nowIso() }, ownHex, keyPair))
+      await store.writeFollowsPending(storage, pending.slice(-(MAX_INVENTORY - 1)))
+    }
+    await store.writeFollows(storage, next)
+    return { follows: await store.readFollows(storage), changed: true }
   })
 }
 
@@ -1042,16 +1049,25 @@ async function followList (ctx) {
 // Reads a replica that has local data, or throws 'sem dados locais para este
 // diário' without creating anything; an empty replica is purged (D). The
 // entries are feedRead's (store.readVisible): the prefix and the newest
-// run, in seq order, a hole the run passed absent.
-async function readReplica (ctx, key) {
-  const read = HEX64.test(key) ? await withReplica(ctx, key, async (core) => ({ entries: (await store.readVisible(core)).entries, fork: core.fork })) : null
+// run, in seq order, a hole the run passed absent. raw: every stored block
+// with the core's length (store.readHeld).
+async function readReplica (ctx, key, raw = false) {
+  const readCore = raw
+    ? async (core) => ({ ...(await store.readHeld(core)), fork: core.fork })
+    : async (core) => ({ entries: (await store.readVisible(core)).entries, fork: core.fork })
+  const read = HEX64.test(key) ? await withReplica(ctx, key, readCore) : null
   if (read === null) throw new Error('sem dados locais para este diário')
   return read
 }
 
-async function logRead (ctx, { author = null } = {}) {
-  const own = await withIdentity(ctx, async ({ diary, ownHex, association }) => ({ key: ownHex, association, entries: author && author !== ownHex ? null : await store.readAll(diary) }))
-  if (own.entries !== null) return { key: own.key, entries: own.entries }
+// raw: the blocks as decoded, tombstones not applied, for the page folds of
+// @varanda/core lib/page.js, where a delete of a page-* record has no
+// effect; a replica answers every block it stores (holes skipped) and
+// `length`, the core's, so the caller can tell a whole chain from a part.
+async function logRead (ctx, { author = null, raw = false } = {}) {
+  const readOwn = raw ? store.readRaw : store.readAll
+  const own = await withIdentity(ctx, async ({ diary, ownHex, association }) => ({ key: ownHex, association, length: diary.length, entries: author && author !== ownHex ? null : await readOwn(diary) }))
+  if (own.entries !== null) return raw ? { key: own.key, entries: own.entries, length: own.length } : { key: own.key, entries: own.entries }
   // The rule of skipReason: a blocked diary, or one whose block-0
   // certificate comes from a revoked issuer, reads as absent (the same
   // error, never why), even before a sync run purges it and whatever its
@@ -1059,7 +1075,7 @@ async function logRead (ctx, { author = null } = {}) {
   const key = String(author).toLowerCase()
   const mod = await moderation(ctx.storage, own.association)
   if (mod.blocked.has(key)) throw new Error('sem dados locais para este diário')
-  const read = await readReplica(ctx, key)
+  const read = await readReplica(ctx, key, raw)
   const entries = read.entries
   // A snapshot adopted during the read (the run is live) decides the answer.
   const final = await moderation(ctx.storage, own.association)
@@ -1069,13 +1085,17 @@ async function logRead (ctx, { author = null } = {}) {
   if (final.revokedIssuers.size > 0 && revokedIssuerOf(entries, key, own.association, final.revokedIssuers)) {
     throw new Error('sem dados locais para este diário')
   }
-  return { key: author, entries }
+  return raw ? { key: author, entries, length: read.length } : { key: author, entries }
+}
+
+function logReadRaw (ctx, { author = null } = {}) {
+  return logRead(ctx, { author, raw: true })
 }
 
 // Whether the log's block-0 certificate fails only because its issuer is
 // revoked.
 function revokedIssuerOf (entries, key, association, revokedIssuers) {
-  const first = entries.length > 0 ? entries[0].record : null
+  const first = entries.length > 0 && entries[0].seq === 0 ? entries[0].record : null
   if (first === null || validateRecord(first, 0) !== null) return false
   return certForKey(first.cert, key, association, { revokedIssuers }).reason === 'revoked-issuer'
 }
@@ -1116,8 +1136,8 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
     // The prefix plus the newest run (store.readVisible): a diary that
     // downloads newest-first shows its latest posts before its history.
     const read = await withReplica(ctx, key, async (core) => {
-      const { entries, present } = await store.readVisible(core)
-      return { entries, fork: core.fork, behind: core.length > present }
+      const { entries, raw, present } = await store.readVisible(core)
+      return { entries, raw, fork: core.fork, behind: core.length > present }
     })
     slots.push(read === null ? { key, reason: 'no-cert' } : { key, read })
   }
@@ -1134,7 +1154,7 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
       ? (final.blocked.has(key) ? 'blocked' : fixed)
       : skipReason({ fork: forkNow(read) }, read.entries, key, association, final)
     if (reason === null && read.behind) incomplete.push(key)
-    if (reason === null) kept.push({ key, entries: read.entries })
+    if (reason === null) kept.push({ key, entries: read.entries, raw: read.raw })
     else skipped.push({ key, reason })
   }
   const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before })
@@ -4156,6 +4176,7 @@ module.exports = {
   followRemove,
   followList,
   followChange,
+  queueFollowChange,
   followOpPayload,
   signFollowOp,
   verifyFollowOp,
@@ -4168,6 +4189,7 @@ module.exports = {
   declareMediaCore,
   verifyMedia,
   logRead,
+  logReadRaw,
   feedRead,
   profileRead,
   skipReason,
