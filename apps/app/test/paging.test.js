@@ -493,3 +493,15 @@ test('regression: a short range page while the visible feed shrank never ends a 
   // A list that really was at its end stays there.
   t.is(rangeEnd({ step: 'end', cursor, page: short, atEnd: true }).atEnd, true)
 })
+
+test('shouldReloadDiario skips a fresh hosted diary and reloads in every other case', async (t) => {
+  const { shouldReloadDiario } = await load()
+  const base = { hosted: true, loadedAt: 100000, now: 110000, forced: false, wroteAt: 0 }
+  t.is(shouldReloadDiario(base), false)
+  t.is(shouldReloadDiario({ ...base, hosted: false }), true)
+  t.is(shouldReloadDiario({ ...base, forced: true }), true)
+  t.is(shouldReloadDiario({ ...base, now: 160000 }), true)
+  t.is(shouldReloadDiario({ ...base, loadedAt: null }), true)
+  t.is(shouldReloadDiario({ ...base, wroteAt: 100001 }), true)
+  t.is(shouldReloadDiario({ ...base, wroteAt: 100000 }), false)
+})

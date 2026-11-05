@@ -4453,3 +4453,54 @@ Limites desta parte:
 - O anel e a contagem não mudam o limite de 1000 caracteres.
 - Nas Mensagens, ao carregar mensagens anteriores do mesmo dia, o marcador do dia passa para a nova primeira mensagem daquele dia; a linha que tinha o marcador perde essa altura e pode subir um pouco se estiver na tela.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 92. Dados mais cedo em A Rua e no Diário (PR perf/first-paint)
+
+Quatro partes do app passam a mostrar dados mais cedo: as fotos dos autores em A Rua, as contagens de curtidas, respostas, republicações e citações, as citações e respostas de quem você não segue, e o Diário ao voltar à aba. Não muda o que é gravado nem o que o nó guarda; muda a ordem e o intervalo dos pedidos. Medidas do dono antes da mudança (Chrome, produção, visita repetida): as fotos dos autores começavam entre 2,35 s e 3,4 s; as contagens, em 3,4 s e 4,2 s; cada pedido de rede levava de 2 a 26 ms; o Diário levava cerca de 0,8 s a cada volta. Este documento não traz medidas novas: os números depois da mudança saem dos passos abaixo.
+
+Regras que os passos abaixo conferem:
+
+- Fotos dos autores: no nó hospedado (web e app com a instalação), os nomes e fotos na tela não esperam mais o intervalo de 1 s entre um pedido profile.read e o seguinte. O nó nativo sem instalação e os pedidos de fundo mantêm o intervalo, porque lá a leitura pausa a sincronização. O agrupamento de 100 ms continua, então uma página não gera dois pedidos.
+- Contagens: o pedido ao índice do semeador (/index/counts) sai junto com a página, antes de follow.list e engagement.read, e não espera por eles. Uma curtida feita enquanto a contagem chega não é desfeita pela resposta antiga. "Indexando" continua escondendo as contagens.
+- Citações e respostas de quem você não segue: os autores são lidos dois por vez (a busca do nome de um enquanto o outro é lido), e cada autor aparece assim que chega, sem esperar o mais lento. Todas as telas e a Conversa dividem uma só vaga de diary.peek do app, e a outra vaga do nó fica livre para a primeira mensagem privada e para a leitura de uma página. Uma Conversa ou um perfil aberto pela pessoa passa na frente das leituras de fundo de A Rua (espera no máximo a leitura em andamento). "Ocupado" deixa de ser o caso comum.
+- Diário: voltar à aba em menos de 60 s não relê o diário (sem node.info nem log.read) e as citações não piscam. Relê na primeira vez, depois de 60 s, ao puxar para atualizar, depois de publicar ou apagar, depois de curtir ou republicar em outra aba, na primeira vez que a aba aparece depois de uma reconexão, depois de uma leitura que falhou, e quando outro aparelho publicou. No nó nativo sem instalação (sem o sinal de diário próprio), continua relendo a cada vez que a aba aparece.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes desta parte: `apps/app/test/namesCache.test.js` (batchWait e promoteTimer, o intervalo das fotos), `apps/app/test/engagement.test.js` (poolMap e createLimiter, as vagas de citações), `apps/app/test/paging.test.js` (shouldReloadDiario, quando o Diário relê) e `apps/app/test/localWrites.test.js` (a marca da última curtida ou republicação feita neste aparelho, que faz o Diário reler). As caixas abaixo ficam desmarcadas até alguém executar o passo, num aparelho ou navegador de verdade.
+
+Android (aparelho ou emulador, primeiro):
+
+- [ ] Com o registro de rede aberto, recarregar A Rua: o primeiro /index/counts sai antes da resposta de engagement.read.
+- [ ] Em A Rua, com a conexão normal, as fotos dos autores começam a carregar até cerca de 300 ms depois da própria foto.
+- [ ] Curtir uma publicação enquanto as contagens de A Rua ainda carregam: a curtida fica marcada e a contagem não volta ao valor antigo.
+- [ ] Com o índice em "indexando", as contagens continuam escondidas.
+- [ ] Em A Rua, as citações e respostas de quem você não segue: cada autor aparece assim que o nome chega, sem esperar o último.
+- [ ] Abrir uma Conversa e mandar a primeira mensagem para alguém enquanto A Rua carrega citações: não aparece "ocupado".
+- [ ] Trocar A Rua > Diário > A Rua > Diário em menos de 60 s: o Diário não mostra o indicador de atualização e as citações não piscam.
+- [ ] Curtir em A Rua e voltar ao Diário em menos de 60 s: o Diário relê e a curtida aparece.
+- [ ] Deixar o Diário fora da tela por mais de 60 s e voltar: o Diário relê.
+- [ ] Puxar o Diário para atualizar: o Diário relê.
+- [ ] No nó nativo sem instalação, o Diário relê a cada vez que a aba aparece.
+
+iOS (simulador ou aparelho, depois do Android):
+
+- [ ] Os passos de fotos, contagens e citações de A Rua acima, no simulador ou num aparelho.
+- [ ] Trocar A Rua > Diário > A Rua > Diário em menos de 60 s: o Diário não relê (conferir no log, sem node.info nem log.read).
+- [ ] Abrir uma Conversa e mandar a primeira mensagem enquanto A Rua carrega citações: não aparece "ocupado".
+
+Web (navegador, depois do iOS):
+
+- [ ] Na web hospedada, com o registro de rede aberto, recarregar A Rua: o /index/counts sai antes de engagement.read, e os profile.read saem sem a pausa de 1 s entre um e outro.
+- [ ] Na web hospedada, trocar A Rua > Diário > A Rua > Diário em menos de 60 s: o Diário não relê e as citações não piscam.
+- [ ] Curtir em A Rua enquanto a contagem chega: a curtida não é desfeita.
+
+Limites desta parte:
+
+- O intervalo de 1 s no nó nativo sem instalação e nos pedidos de fundo fica de propósito; a leitura lá pausa a sincronização.
+- Já era assim antes e continua: uma curtida tocada antes de a publicação ter qualquer número fica sem número (ou sem o +1) até a próxima leitura; e um "atualizar" com o índice ainda indexando mostra os números antigos até a resposta nova chegar.
+- Novo e aceito: um bloqueio da associação que chega enquanto o Diário está fresco tira a publicação citada ou republicada de quem foi bloqueado até 60 s depois (na próxima releitura), a mesma janela que A Rua já usa.
+- Já era assim antes: republicar numa Conversa aberta por cima do Diário e voltar não relê o Diário (a aba não mudou); a republicação aparece na próxima troca de aba ou ao puxar para atualizar.
+- Já era assim antes: se outro aparelho publica durante a leitura do Diário, o aviso de novidade é dado como visto; com a nova regra, a volta à aba em menos de 60 s não relê, e a publicação aparece ao puxar para atualizar ou depois de 60 s.
+- Este documento não traz medidas depois da mudança: os números novos saem dos passos acima, no mesmo tipo de visita usado nas medidas do dono.
+- Nenhuma caixa acima foi executada nesta documentação.

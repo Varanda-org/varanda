@@ -7,6 +7,137 @@ const load = () => import('../src/engagement.js')
 const R1 = 'ab'.repeat(32) + ':1'
 const R2 = 'cd'.repeat(32) + ':2'
 
+function deferred () {
+  let resolve
+  let reject
+  const promise = new Promise((_resolve, _reject) => { resolve = _resolve; reject = _reject })
+  return { promise, resolve, reject }
+}
+
+const tick = () => new Promise((resolve) => setImmediate(resolve))
+
+test('poolMap starts each item once, two at a time, and waits for all to settle', async (t) => {
+  const { poolMap } = await load()
+  const gates = Array.from({ length: 4 }, deferred)
+  const started = []
+  const settled = []
+  let done = false
+  const run = poolMap([0, 1, 2, 3], 2, async (item) => {
+    started.push(item)
+    try {
+      await gates[item].promise
+    } catch {}
+    settled.push(item)
+  }).then(() => { done = true })
+  await tick()
+  t.alike(started, [0, 1], 'the third waits for a slot')
+  t.absent(done)
+  gates[1].reject(new Error('read failed'))
+  await tick()
+  t.alike(started, [0, 1, 2], 'a caught failure releases the worker')
+  gates[2].resolve()
+  await tick()
+  t.alike(started, [0, 1, 2, 3], 'each item starts once')
+  gates[3].resolve()
+  await tick()
+  t.absent(done, 'still waits for the first item')
+  gates[0].resolve()
+  await run
+  t.ok(done)
+  t.alike(settled, [1, 2, 3, 0])
+})
+
+test('poolMap width one is sequential and an empty pool does not call fn', async (t) => {
+  const { poolMap } = await load()
+  const gates = Array.from({ length: 3 }, deferred)
+  const started = []
+  const run = poolMap([0, 1, 2], 1, async (item) => {
+    started.push(item)
+    await gates[item].promise
+  })
+  for (let i = 0; i < gates.length; i++) {
+    await tick()
+    t.alike(started, Array.from({ length: i + 1 }, (_, j) => j))
+    gates[i].resolve()
+  }
+  await run
+  await poolMap([], 2, () => t.fail('empty pool called fn'))
+})
+
+test('two pools share a limiter of two slots in FIFO order', async (t) => {
+  const { createLimiter, poolMap } = await load()
+  const limiter = createLimiter(2)
+  const gates = Array.from({ length: 6 }, deferred)
+  const started = []
+  let active = 0
+  let peak = 0
+  const read = (item) => limiter.run(async () => {
+    active++
+    peak = Math.max(peak, active)
+    started.push(item)
+    await gates[item].promise
+    active--
+  })
+  const a = poolMap([0, 1, 4], 2, read)
+  const b = poolMap([2, 3, 5], 2, read)
+  await tick()
+  t.alike(started, [0, 1], 'the second pool shares the occupied slots')
+  for (let i = 0; i < gates.length; i++) {
+    gates[i].resolve()
+    await tick()
+    t.alike(started, Array.from({ length: Math.min(i + 3, 6) }, (_, j) => j), 'queued calls start in FIFO order')
+    t.ok(active <= 2, 'no third call runs')
+  }
+  await Promise.all([a, b])
+  t.is(peak, 2)
+  t.is(active, 0)
+})
+
+test('a throwing or rejecting limiter call frees its slot for the next call', async (t) => {
+  const { createLimiter } = await load()
+  const limiter = createLimiter(1)
+  const gate = deferred()
+  const started = []
+  const failure = new Error('read failed')
+  const first = limiter.run(() => {
+    started.push(0)
+    return gate.promise
+  })
+  const throwing = limiter.run(() => {
+    started.push(1)
+    throw failure
+  }).catch((err) => err)
+  const rejecting = limiter.run(async () => {
+    started.push(2)
+    throw failure
+  }).catch((err) => err)
+  const last = limiter.run(() => {
+    started.push(3)
+    return 'last'
+  })
+  t.alike(started, [0], 'all later calls wait')
+  gate.resolve('first')
+  t.alike(await Promise.all([first, throwing, rejecting, last]), ['first', failure, failure, 'last'])
+  t.alike(started, [0, 1, 2, 3], 'both failures release the slot in FIFO order')
+})
+
+test('front limiter calls run before queued background calls, each lane FIFO', async (t) => {
+  const { createLimiter } = await load()
+  const limiter = createLimiter(1)
+  const gate = deferred()
+  const started = []
+  const run = (id, opts) => limiter.run(() => { started.push(id) }, opts)
+  const first = limiter.run(() => {
+    started.push('busy')
+    return gate.promise
+  })
+  const all = [run('back1'), run('back2'), run('front1', { front: true }), run('front2', { front: true })]
+  t.alike(started, ['busy'], 'all wait for the busy slot')
+  gate.resolve()
+  await Promise.all([first, ...all])
+  t.alike(started, ['busy', 'front1', 'front2', 'back1', 'back2'])
+})
+
 test('applyToggle returns a new state and never mutates', async (t) => {
   const { emptyState, applyToggle, fromRead } = await load()
   const s0 = emptyState()

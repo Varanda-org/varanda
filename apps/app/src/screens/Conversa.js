@@ -17,7 +17,8 @@ import { useNode } from '../node'
 import { useNames } from '../names'
 import { fetchCounts, fetchMember, fetchPost, COUNTS_MAX } from '../indexClient'
 import { assembleMember, assembleThread, planPeeks } from '../thread'
-import { applyToggle, countsAfter, emptyState, fromRead, mergeCounts } from '../engagement'
+import { applyToggle, countsAfter, diaryPeekSlots, emptyState, fromRead, mergeCounts } from '../engagement'
+import { noteLocalWrite } from '../localWrites'
 import { replyNameOf, whoOf } from '../who'
 import { avatarOf, pickAvatar } from '../media/avatar'
 import { canDelete, isPageRef } from '../deletion'
@@ -182,10 +183,12 @@ function mergePeek (peeked, peek) {
 }
 
 // Runs the planned diary.peek calls one at a time into `peeked` (a Map,
-// added to). 'semeador indisponível' is retried once after 2 s and then
-// thrown; 'ocupado' (too many peeks at once) is retried a few times and then
-// skipped, like 'diário indisponível' (the posts count as unavailable).
-// `alive()` false stops early.
+// added to), each through the app-wide diaryPeekSlots so every screen stays
+// within the node's peek limit. 'semeador indisponível' is retried once after
+// 2 s and then thrown; 'ocupado' (still possible beside a page.read probe) is
+// retried a few times and then skipped, like 'diário indisponível' (the posts
+// count as unavailable). `alive()` false stops early, also for a peek still
+// waiting for a slot.
 export async function peekAll (request, plan, peeked, alive = () => true) {
   for (const params of plan) {
     if (!alive()) return peeked
@@ -193,7 +196,8 @@ export async function peekAll (request, plan, peeked, alive = () => true) {
     let busyTries = 0
     for (;;) {
       try {
-        const peek = await request('diary.peek', params)
+        // A screen the person opened: ahead of the feed's background quote reads.
+        const peek = await diaryPeekSlots.run(() => alive() ? request('diary.peek', params) : null, { front: true })
         // A delete meanwhile invalidates this load: merging would bring the entry back.
         if (!alive()) return peeked
         mergePeek(peeked, peek)
@@ -480,6 +484,8 @@ export function useEngagement ({ request, node, onToast }) {
     setCounts((m) => (m.has(ref) ? new Map(m).set(ref, countsAfter(m.get(ref), kind, delta)) : m))
     try {
       const r = await setEngagement(sourceRef.current, kind, ref, on, as)
+      // Diário compares this with its load time (it gets no refresh bump).
+      noteLocalWrite()
       // The diary's answer is the state, of the identity it was sent as.
       touch(field, ref)
       moved = as !== actingPageKey()

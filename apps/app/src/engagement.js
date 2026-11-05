@@ -8,6 +8,50 @@
 const FIELD = { like: 'liked', repost: 'reposted' }
 const COUNT = { like: 'likes', repost: 'reposts' }
 
+// `front` calls (a screen the person opened) go ahead of the queued
+// background ones, each lane in arrival order.
+export function createLimiter (width) {
+  let active = 0
+  const front = []
+  const back = []
+  return {
+    run (fn, { front: first = false } = {}) {
+      return new Promise((resolve, reject) => {
+        const start = async () => {
+          active++
+          try {
+            resolve(await fn())
+          } catch (err) {
+            reject(err)
+          } finally {
+            active--
+            const next = front.length > 0 ? front.shift() : back.shift()
+            if (next) next()
+          }
+        }
+        if (active < width) start()
+        else (first ? front : back).push(start)
+      })
+    }
+  }
+}
+
+// Every screen shares one of the browser node's two peek slots (it refuses a
+// third with 'ocupado'); the other stays free for the node's own peeks
+// (dm.lookup before a first message, a page.read probe).
+export const diaryPeekSlots = createLimiter(1)
+
+export async function poolMap (items, width, fn) {
+  let next = 0
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next++]
+      await fn(item)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(width, items.length) }, worker))
+}
+
 export function emptyState () {
   return { liked: new Set(), reposted: new Set() }
 }

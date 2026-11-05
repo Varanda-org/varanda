@@ -31,7 +31,8 @@ import { UNCERTAIN_MESSAGE } from '../outbox'
 import { deletePostRows } from '../deletion'
 import { revokeDeletedMedia } from '../media/cache'
 import { relativeTime } from '../format'
-import { isLastLogPage, logRows, mergeOlderRows, oldestSeq } from '../paging'
+import { isLastLogPage, logRows, mergeOlderRows, oldestSeq, shouldReloadDiario } from '../paging'
+import { lastLocalWrite } from '../localWrites'
 import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
@@ -160,6 +161,8 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   // cursor from the rows that page is about to replace.
   const newestBusy = useRef(false)
   const lastRefresh = useRef(refresh)
+  // When the rows on screen were read; null when not fresh (never, failed, or a new node epoch).
+  const loadedAtRef = useRef(null)
   const dataRef = useRef(null)
   dataRef.current = data
 
@@ -172,6 +175,9 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   // Replaces the rows with the newest page (a refresh).
   const loadNewest = useCallback(async (refreshProfile = false) => {
     const mine = ++seqRef.current
+    // The rows are as fresh as the start of the read: a write that lands
+    // while it runs may be missing, so it must still count as newer.
+    const startedAt = Date.now()
     newestBusy.current = true
     setLoadingMore(false)
     setOlderError('')
@@ -188,6 +194,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       if (mine !== seqRef.current) return
       const rows = logRows(log)
       setData({ info, rows, atEnd: isLastLogPage(log) })
+      loadedAtRef.current = startedAt
       setLoadError('')
       setOlderError('')
       setLoadingMore(false)
@@ -200,7 +207,10 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       }
       if (typeof info.publicKey === 'string') ingest({ ...rowNeeds(rows, info.publicKey), reset: true })
     } catch (err) {
-      if (mine === seqRef.current) setLoadError(errorText(err))
+      if (mine === seqRef.current) {
+        loadedAtRef.current = null
+        setLoadError(errorText(err))
+      }
     } finally {
       if (mine === seqRef.current) newestBusy.current = false
     }
@@ -244,13 +254,16 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const ownGrew = !!(node.signals && node.signals.fresh && typeof node.signals.fresh.own === 'number')
   const ownGrewRef = useRef(ownGrew)
   ownGrewRef.current = ownGrew
+  // Declared before the activation effect: it runs first when the epoch moves.
+  useEffect(() => { loadedAtRef.current = null }, [node.epoch])
   useEffect(() => {
     if (!active) return
     // A refresh bump while hidden is consumed on the next activation.
-    const refreshProfile = refresh !== lastRefresh.current || ownGrewRef.current
+    const forced = refresh !== lastRefresh.current || ownGrewRef.current
+    if (!shouldReloadDiario({ hosted: node.hosted, loadedAt: loadedAtRef.current, now: Date.now(), forced, wroteAt: lastLocalWrite() })) return
     lastRefresh.current = refresh
-    loadNewest(refreshProfile)
-  }, [active, loadNewest, refresh])
+    loadNewest(forced)
+  }, [active, loadNewest, refresh, node.hosted])
 
   const reload = () => {
     setPulls((n) => n + 1)
