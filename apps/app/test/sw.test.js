@@ -216,6 +216,20 @@ test('a second run is byte-identical; any byte change changes the version', (t) 
   t.not(readWorker(dist).version, v2, 'template byte changes the version')
 })
 
+test('a version.json in dist is not precached and does not change the release id', (t) => {
+  const plain = makeDist()
+  quiet(() => finishWeb(plain))
+  const dist = makeDist()
+  fs.writeFileSync(path.join(dist, 'version.json'), '{"commit":"0123456789abcdef"}\n')
+  quiet(() => finishWeb(dist))
+  const sw1 = fs.readFileSync(path.join(dist, 'sw.js'))
+  const { version, precache } = readWorker(dist)
+  t.absent(precache.some((e) => e.url === '/version.json'), 'not precached')
+  t.is(version, readWorker(plain).version, 'same release id as without the file')
+  quiet(() => finishWeb(dist))
+  t.ok(sw1.equals(fs.readFileSync(path.join(dist, 'sw.js'))), 'second run byte-identical')
+})
+
 test('finishWeb refuses an incomplete export', (t) => {
   for (const missing of ['index.html', 'varanda-node.js', 'manifest.webmanifest', BUNDLE.slice(1)]) {
     const dist = makeDist()
@@ -390,7 +404,8 @@ test('/varanda-node.js: network first, cached copy on HTML, 404 or offline', asy
 
 test('bypassed requests are never intercepted', async (t) => {
   const { w } = await installed()
-  for (const url of [ORIGIN + '/varanda.json', ORIGIN + '/sw.js', ORIGIN + '/seeder', ORIGIN + '/seeder/x', 'https://other.test' + BUNDLE]) {
+  for (const url of [ORIGIN + '/varanda.json', ORIGIN + '/sw.js', ORIGIN + '/seeder', ORIGIN + '/seeder/x',
+    ORIGIN + '/version.json', ORIGIN + '/version.json?x=1', 'https://other.test' + BUNDLE]) {
     t.absent((await dispatch(w, url)).responded, url)
   }
   for (const url of [ORIGIN + '/.well-known/assetlinks.json', ORIGIN + '/.well-known/apple-app-site-association']) {
