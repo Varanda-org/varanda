@@ -50,6 +50,3 @@ yarn-error.*
 
 # the browser node bundle (npm run build:node)
 /public/varanda-node.js
-
-# the face liveness stylesheet copied for the dev server (npm run web)
-/public/liveness/

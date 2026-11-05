@@ -28,7 +28,7 @@ Os valores estão em `apps/app/src/appearance.js` (fonte única; `light` e `dark
 | Nome | Hex | Uso |
 |---|---|---|
 | fundo | `#1c2622` | fundo das telas, barra do topo, barra de abas |
-| cartão | `#24302b` | folhas (Publicar) e cartões (Ajustes, Carteira) |
+| cartão | `#24302b` | folhas (Publicar) e cartões (Ajustes) |
 | tinta | `#f4f0e6` | texto, nomes, ícones ativos |
 | texto suave | `#b7c4bb` | @nome, tempo, bio, abas inativas, contador |
 | fio | `rgba(244,240,230,0.14)` | divisórias de 1 pt |

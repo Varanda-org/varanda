@@ -216,30 +216,6 @@ test('a second run is byte-identical; any byte change changes the version', (t) 
   t.not(readWorker(dist).version, v2, 'template byte changes the version')
 })
 
-test('finishWeb copies the liveness stylesheet into dist and precaches it', (t) => {
-  const dist = makeDist()
-  const source = require.resolve('@aws-amplify/ui-react-liveness/styles.css', { paths: [path.join(__dirname, '..')] })
-  const target = path.join(dist, 'liveness', 'amplify-ui.css')
-  quiet(() => finishWeb(dist))
-  t.ok(fs.existsSync(target), 'dist/liveness/amplify-ui.css exists')
-  const css1 = fs.readFileSync(target)
-  t.ok(css1.equals(fs.readFileSync(source)), 'byte for byte the package file')
-  const entry = readWorker(dist).precache.find((e) => e.url === '/liveness/amplify-ui.css')
-  t.ok(entry, 'in the precache list')
-  t.is(entry && entry.sha256, sha256hex(css1), 'with its hash')
-  const sw1 = fs.readFileSync(path.join(dist, 'sw.js'))
-  quiet(() => finishWeb(dist))
-  t.ok(css1.equals(fs.readFileSync(target)), 'second run: stylesheet identical')
-  t.ok(sw1.equals(fs.readFileSync(path.join(dist, 'sw.js'))), 'second run: sw.js identical')
-})
-
-test('finishWeb refuses a missing liveness stylesheet', (t) => {
-  const dist = makeDist()
-  t.exception(() => quiet(() => finishWeb(dist, TEMPLATE, path.join(ROOT, 'missing.css'))), /estilo da verificação de rosto/)
-  t.exception(() => quiet(() => finishWeb(dist, TEMPLATE, null)), /estilo da verificação de rosto/)
-  t.absent(fs.existsSync(path.join(dist, 'sw.js')), 'no worker written')
-})
-
 test('finishWeb refuses an incomplete export', (t) => {
   for (const missing of ['index.html', 'varanda-node.js', 'manifest.webmanifest', BUNDLE.slice(1)]) {
     const dist = makeDist()

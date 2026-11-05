@@ -9,7 +9,7 @@ test('help keys match the supported tabs and setup steps', async (t) => {
   t.alike(Object.keys(HELP).sort(), [
     'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'conversas', 'entrar', 'vinculo',
     'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
-    'instalar', 'denuncia', 'termosAparelho', 'convites', 'carteira'
+    'instalar', 'denuncia', 'termosAparelho', 'convites'
   ].sort())
 })
 
@@ -138,32 +138,6 @@ test('help and short texts avoid jargon and em dashes', async (t) => {
     const words = text.toLowerCase().split(/[^a-zà-ÿ0-9]+/)
     t.alike(words.filter((word) => jargon.has(word)), [], 'no jargon: ' + text)
   }
-})
-
-test('wallet help lists only the fees of features the mode offers', async (t) => {
-  const { HELP, carteiraHelp } = await load()
-  const fees = { payout: 'sem taxa', transfer: 'sem taxa', crypto: 'R$ 1,00 + 1%' }
-  const pix = carteiraHelp({ mode: 'pix', fees, maxCents: null })
-  const pixFee = pix.paragraphs.find((p) => p.startsWith('Taxa da Varanda hoje.'))
-  t.is(pixFee, 'Taxa da Varanda hoje. Pagar por Pix: sem taxa. Receber por Pix: sem taxa da Varanda.')
-  t.absent(pix.paragraphs.some((p) => p.includes('Enviar para')))
-  const full = carteiraHelp({ mode: 'completo', fees, maxCents: null })
-  const fullFee = full.paragraphs.find((p) => p.startsWith('Taxa da Varanda hoje.'))
-  t.is(fullFee, 'Taxa da Varanda hoje. Pagar por Pix: sem taxa. Enviar para alguém da Varanda: sem taxa. Enviar para outra carteira: R$ 1,00 + 1%. Receber por Pix: sem taxa da Varanda.')
-  const completo = (h) => h.paragraphs.some((p) => p.includes('não pode ser convertido nesta versão'))
-  t.ok(completo(full))
-  t.absent(completo(pix))
-  const withSwap = carteiraHelp({ mode: 'completo', fees, maxCents: null, actions: ['swap'] })
-  const converts = (h) => h.paragraphs.some((p) => p.includes('Converter USDC em BRLA tem a taxa da Hodle e não tem taxa da Varanda'))
-  t.ok(converts(withSwap))
-  t.absent(completo(withSwap))
-  t.absent(converts(full))
-  t.absent(converts(carteiraHelp({ mode: 'pix', fees, maxCents: null, actions: ['swap'] })))
-  t.absent(pix.paragraphs.some((p) => p.includes('depois que o envio é concluído')))
-  t.absent(full.paragraphs.some((p) => p.toLowerCase().includes('swap')))
-  t.is(carteiraHelp(null), HELP.carteira)
-  t.ok(HELP.carteira.paragraphs[0].includes('quando o serviço liberar'))
-  t.absent(HELP.carteira.paragraphs.some((p) => p.includes('próximas versões') || p.includes('Quando enviar dinheiro estiver disponível')))
 })
 
 test('conversas help states the private-message rules', async (t) => {
