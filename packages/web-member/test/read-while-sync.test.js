@@ -1,3 +1,5 @@
+'use strict'
+
 // Member reads while a sync run is live (lib/session.js withCores, docs/rpc.md
 // 6.1): feed.read, log.read, profile.read and engagement.read are served on
 // the run's own cores, so the run is not preempted and its runId stays; a
@@ -23,6 +25,7 @@ const { createBrowserSession } = require('../lib/session')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { memoryStorage } = require('../lib/storage')
 const store = require('../lib/node-store')
+const { DM_KEY_REFRESH_BLOCKS } = require('../lib/member-ops')
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
@@ -92,7 +95,8 @@ async function fixture (t, { blockFollowed = false, readerWaitMs } = {}) {
     syncOptions: { retryMinMs: 100, retryMaxMs: 200 }
   })
   t.teardown(() => node.close(), { force: true })
-  await node.setKeyPair(crypto.keyPair())
+  const keyPair = crypto.keyPair()
+  await node.setKeyPair(keyPair)
   const web = await connectClient(node)
   const { publicKey: own } = await web.request('identity.create')
   await web.request('cert.add', { cert: createCert({ member: own }, assoc.kp) })
@@ -106,12 +110,33 @@ async function fixture (t, { blockFollowed = false, readerWaitMs } = {}) {
     const cert = createModeratorCert({ moderator: hex(mod.publicKey) }, assoc.kp)
     await store.writeBlocklist(storage, createSnapshot({ seq: 1, blocked: [F], revokedIssuers: [] }, mod, cert))
   }
-  return { node, web, storage, assoc, own, F, U, internal }
+  return { node, web, storage, assoc, own, F, U, internal, keyPair }
 }
 
 function preempted (web, from = 0) {
   return web.events.slice(from).filter((e) => e.name === 'sync.stopped' && e.data.reason === 'preempted')
 }
+
+test('dm.enable reads a current key on the live run and still appends a stale key', async (t) => {
+  await testnet(t)
+  const { node, web, keyPair } = await fixture(t)
+  await node.setKeyPair(keyPair, { prf: crypto.randomBytes(32) })
+  const first = await web.request('dm.enable')
+  t.ok(first.seq !== null, 'the first enable appends')
+  const { runId } = await web.request('sync.start', {})
+  await until(() => web.events.some((e) => e.name === 'sync.started' && e.data.runId === runId))
+  const from = web.events.length
+  t.alike(await web.request('dm.enable'), { ...first, seq: null }, 'the current key appends nothing')
+  t.is(preempted(web, from).length, 0, 'the current key does not preempt')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false }, 'the same run stays active')
+  await web.request('sync.stop')
+
+  for (let i = 0; i <= DM_KEY_REFRESH_BLOCKS; i++) await web.request('post.create', { text: 'p' + i })
+  const refreshed = await web.request('dm.enable')
+  t.ok(refreshed.seq !== null, 'a stale key still appends')
+  t.is(refreshed.box, first.box)
+  t.is(refreshed.gen, first.gen)
+})
 
 // node-store readAll, made to wait at its next call once armed: `entered`
 // resolves when a read is held there, release() lets it go on.

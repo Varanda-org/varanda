@@ -742,6 +742,9 @@ function createBrowserSession ({
     limits: syncOptions.dm
   })
   let dmLastPull = 0
+  let dmRecheck = false
+  let dmRecheckTries = 0
+  const DM_RECHECK_TRIES = 3
 
   // The sync loop's direct message tick: while a continuous run lives and
   // the identity is unlocked with a published dm-key, a pull every
@@ -819,7 +822,13 @@ function createBrowserSession ({
                 if (!r.ownSynced) {
                   r.ownSynced = true
                   try { onOwnSynced(r) } catch {}
-                  if (!once && !internal) dmTick()
+                  if (!once && !internal) {
+                    dmTick()
+                    if (dmRecheck) {
+                      dmRecheck = false
+                      dmRefresh({ recheck: true }).catch(noop)
+                    }
+                  }
                   if (!once && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
                 }
                 if (!once && !internal && Number.isSafeInteger(ev.length)) {
@@ -1823,10 +1832,25 @@ function createBrowserSession ({
     return best === null ? { box: null, gen: null } : { box: best.box, gen: best.gen }
   }
 
-  // dm.enable's body: the dm-key through the write gate, kv dmKey after.
+  // Read the live run's cores so a current dm-key costs no write gate or
+  // preemption. An append still goes through the gate; a check before
+  // catch-up is confirmed once the continuous run first catches up.
   async function dmEnable (epoch) {
     await requireDm()
     const { box, gen } = dmEngine.boxHex()
+    const state = await withCores(async (c) => {
+      const length = await member.withIdentity(c, ({ diary }) => diary.length)
+      if (length === 0) return 'empty'
+      return await member.dmKeyStale(c, { box, gen }) ? 'stale' : 'current'
+    })
+    if (state === 'current') {
+      if (!trackingOwn()) dmRecheck = true
+      if ((await store.readDmKey(storage)) === null) await store.writeDmKey(storage, gen)
+      // Only a write made in this session can still be waiting for its push
+      // (an earlier dm.enable whose push failed); a fresh start pushes nothing.
+      if (localLength !== null) await pushAfterWrite()
+      return { box, gen, seq: null }
+    }
     await ensureCaughtUp(epoch)
     const r = await withStore((c) => member.dmKeyEnsure(c, { box, gen }))
     if (r.seq !== null) wrote(r.seq)
@@ -1835,17 +1859,28 @@ function createBrowserSession ({
     return r
   }
 
-  // Once after an unlock with a dm-key: an own dm-key fallen out of the
-  // newest member-ops DM_KEY_REFRESH_BLOCKS is appended again through the
-  // write gate (dm.enable's path); otherwise nothing runs. A failure is a
-  // warning only.
-  const dmRefresh = serial(async (_, epoch) => {
+  // Read the live run's cores after unlock, and after the next catch-up
+  // when dm.enable checked an unsynced diary, so a current key keeps the
+  // run alive. A stale key still appends through dm.enable's write gate.
+  // A failure is a warning; a failed check that came from a catch-up is armed
+  // again for the next catch-up, at most DM_RECHECK_TRIES times per identity,
+  // so a dropped link cannot leave the key outside readers' scan window.
+  const dmRefresh = serial(async (params, epoch) => {
+    const recheck = params !== null && typeof params === 'object' && params.recheck === true
     try {
       if (keyPair === null || !dmEngine.unlocked()) return
       const { box, gen } = dmEngine.boxHex()
-      if (!(await withStore((c) => member.dmKeyStale(c, { box, gen })))) return
+      if (!(await withCores((c) => member.dmKeyStale(c, { box, gen })))) {
+        // Judged on a diary that may be behind: confirm after the next catch-up.
+        if (!trackingOwn()) dmRecheck = true
+        return
+      }
       await dmEnable(epoch)
     } catch {
+      if (recheck && dmRecheckTries < DM_RECHECK_TRIES) {
+        dmRecheckTries++
+        dmRecheck = true
+      }
       warning('aviso: chave de mensagens não renovada')
     }
   })
@@ -2535,6 +2570,8 @@ function createBrowserSession ({
     groupPrf = null
     boxKeys.lock()
     dmEngine.lock()
+    dmRecheck = false
+    dmRecheckTries = 0
     for (const pair of groupPairs) zeroPair(pair)
     groupPairs.clear()
     // The next own-synced after an unlock (or a reload) arms afresh.
