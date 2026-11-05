@@ -32,6 +32,19 @@ export function relativeTime (at, now = Date.now()) {
   return date.getFullYear() === today.getFullYear() ? short : short + ' ' + date.getFullYear()
 }
 
+// The heading of a day separator, by the device's local calendar day.
+export function dayHeading (at, now = Date.now()) {
+  const date = new Date(String(at))
+  if (Number.isNaN(date.getTime())) return null
+  const today = new Date(now)
+  const day = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const gap = Math.round((day(today) - day(date)) / 86400000)
+  if (gap === 0) return 'hoje'
+  if (gap === 1) return 'ontem'
+  const short = date.getDate() + ' ' + MONTHS[date.getMonth()]
+  return date.getFullYear() === today.getFullYear() ? short : short + ' ' + date.getFullYear()
+}
+
 export function sinceText (ms, now = Date.now()) {
   const diff = now - ms
   if (diff < 60000) return 'agora'

@@ -22,7 +22,7 @@ import { useNode } from '../node'
 import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
   NOTICES_UNSUPPORTED_MESSAGE, NOTICES_WEB_ONLY_MESSAGE, SEEN_MAX,
-  compareNotices, hasNew, isLastNoticesPage, isWebOnlyError, markSeenPadded, mergePage, noticeId, noticeKind, noticeLine, noticeRef, noticesNotice,
+  compareNotices, hasNew, isLastNoticesPage, isWebOnlyError, markSeenPadded, mergePage, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
   padSeen, parseSeen, readNotices, serializeSeen, shouldPoll
 } from '../notices'
 import { LOCKED_MESSAGE } from '../outbox'
@@ -30,8 +30,9 @@ import { shouldReloadOnShow } from '../paging'
 import { clearSeenText, loadSeenText, saveSeenText } from '../seenStore'
 import { whoOf } from '../who'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
-import { useStyles } from '../ui/ThemeProvider'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
+import { Icon } from '../ui/Icon'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
@@ -103,16 +104,41 @@ function prependNew (currentItems, pageItems) {
 // and stays disabled when it does not (not a profile, and no post to open).
 function NoticeRow ({ item, now, onOpenMember, onOpenThread }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const who = whoOf({ name: item.name, username: item.username })
   const subtitle = who.subtitle ? displayText(who.subtitle) : null
   const time = relativeTime(item.at, now)
   const kind = noticeKind(item)
+  const parts = noticeParts(who, kind)
   const line = displayText(noticeLine(who, kind))
+  const icon = noticeIcon(kind)
   const whoBlock = (
     <View style={styles.who}>
-      <Text style={styles.name} numberOfLines={1}>{line}</Text>
+      <Text style={styles.name} numberOfLines={1}>
+        <Text style={styles.nameBold}>{displayText(parts.name)}</Text>
+        <Text style={styles.nameRest}>{displayText(parts.rest)}</Text>
+      </Text>
       {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
       {time ? <Text style={styles.handle} numberOfLines={1}>{time}</Text> : null}
+    </View>
+  )
+  // Decorative: the row label already says what happened, and the glyph is
+  // not its own control. No badge when the kind has no glyph.
+  const face = (
+    <View style={styles.avatar}>
+      <Avatar name={who.avatarName} publicKey={item.key} size={44} picture={item.avatar} persist={false} />
+      {icon === null
+        ? null
+        : (
+          <View
+            style={styles.kindBadge}
+            accessible={false}
+            accessibilityElementsHidden
+            importantForAccessibility='no-hide-descendants'
+          >
+            <Icon name={icon} size={12} color={colors.accentInk} />
+          </View>
+          )}
     </View>
   )
   if (kind !== 'follow') {
@@ -127,7 +153,7 @@ function NoticeRow ({ item, now, onOpenMember, onOpenThread }) {
         disabled={!open}
         onPress={open}
       >
-        <Avatar name={who.avatarName} publicKey={item.key} size={44} picture={item.avatar} persist={false} />
+        {face}
         {whoBlock}
       </Pressable>
     )
@@ -144,7 +170,7 @@ function NoticeRow ({ item, now, onOpenMember, onOpenThread }) {
       disabled={!open}
       onPress={open}
     >
-      <Avatar name={who.avatarName} publicKey={item.key} size={44} picture={item.avatar} persist={false} />
+      {face}
       {whoBlock}
     </Pressable>
   )
@@ -534,8 +560,26 @@ const makeStyles = (colors) => StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.line
   },
+  avatar: { width: 44, height: 44, position: 'relative' },
+  kindBadge: {
+    position: 'absolute',
+    right: 0,
+    bottom: 0,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.accent,
+    borderWidth: 2,
+    borderColor: colors.bg
+  },
   who: { flex: 1, minWidth: 0 },
-  name: { ...type.postName, color: colors.ink },
+  // The line is one Text so it truncates together. The name is weighed apart
+  // from the rest; postName itself is 700, so the parent is set back to 400.
+  name: { ...type.postName, fontWeight: '400', color: colors.ink },
+  nameBold: { fontWeight: '700' },
+  nameRest: { fontWeight: '400' },
   handle: { ...type.postMeta, color: colors.soft },
   pressed: { opacity: 0.6 },
   footer: { padding: 16, gap: 8 }

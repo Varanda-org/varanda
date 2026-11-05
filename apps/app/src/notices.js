@@ -32,19 +32,39 @@ export function noticeKind (item) {
   return 'follow'
 }
 
-// "Bia começou a seguir você" (respondeu, citou, mencionou, curtiu,
-// republicou for the other kinds), or "Alguém" when the title is "sem nome"
-// or not a non-empty string. The title is the only text used. kind defaults
-// to follow.
-export function noticeLine (who, kind = 'follow') {
+// The bold name and the regular rest of a notice line. name + rest is always
+// noticeLine(who, kind). "Alguém" when the title is "sem nome" or not a
+// non-empty string. The title is the only text used. kind defaults to follow,
+// and any other kind reads as a follow too.
+export function noticeParts (who, kind = 'follow') {
   const title = who.title
   const name = typeof title !== 'string' || title.length === 0 || title === UNNAMED_TITLE ? 'Alguém' : title
-  if (kind === 'reply') return name + ' respondeu à sua publicação'
-  if (kind === 'quote') return name + ' citou sua publicação'
-  if (kind === 'mention') return name + ' mencionou você'
-  if (kind === 'like') return name + ' curtiu sua publicação'
-  if (kind === 'repost') return name + ' republicou sua publicação'
-  return name + ' começou a seguir você'
+  if (kind === 'reply') return { name, rest: ' respondeu à sua publicação' }
+  if (kind === 'quote') return { name, rest: ' citou sua publicação' }
+  if (kind === 'mention') return { name, rest: ' mencionou você' }
+  if (kind === 'like') return { name, rest: ' curtiu sua publicação' }
+  if (kind === 'repost') return { name, rest: ' republicou sua publicação' }
+  return { name, rest: ' começou a seguir você' }
+}
+
+// "Bia começou a seguir você" (respondeu, citou, mencionou, curtiu,
+// republicou for the other kinds).
+export function noticeLine (who, kind = 'follow') {
+  const { name, rest } = noticeParts(who, kind)
+  return name + rest
+}
+
+// The avatar glyph for a known kind. Unknown is null, so the row draws no
+// badge. mention is 'at-sign', a Feather name: Icon uses it when the name is
+// not in its own table.
+export function noticeIcon (kind) {
+  if (kind === 'follow') return 'seguir'
+  if (kind === 'reply') return 'resposta'
+  if (kind === 'quote') return 'citar'
+  if (kind === 'mention') return 'at-sign'
+  if (kind === 'like') return 'coracao'
+  if (kind === 'repost') return 'republicar'
+  return null
 }
 
 // Mirrors isRef in nav.js (this file has no imports): lowercase hex64 and a

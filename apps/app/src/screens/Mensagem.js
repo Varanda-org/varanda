@@ -26,7 +26,8 @@ import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
 import { countChars } from '../format'
 import { LABELS, UNSURE_SEND } from '../dm'
-import { mergeMessages, newestOf, refreshThread, sendPlan, threadRows } from '../dm-screen'
+import { inviteLinkOf } from '../inviteMessage'
+import { mergeMessages, newestOf, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks } from '../dm-screen'
 import { Btn, ErrorText, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { DmMessageRow } from '../ui/DmMessageRow'
@@ -57,6 +58,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
   }, [peer, resolveMany])
   const nameText = whoOf(names.profileOf(peer)).title
 
+  const [menuKey, setMenuKey] = useState(null)
   const [raw, setRaw] = useState([])
   const [next, setNext] = useState(null)
   const [loaded, setLoaded] = useState(false)
@@ -244,7 +246,12 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
     )
   }
 
-  const rows = threadRows(raw)
+  const rows = withDayMarks(threadRows(raw), now)
+  for (const row of rows) {
+    row.inviteLink = row.deleted === true || typeof onOpenInvite !== 'function'
+      ? null
+      : inviteLinkOf(row.rawText, origin)
+  }
 
   let blockNote = null
   if (blocked) blockNote = LABELS.blockedSend
@@ -356,9 +363,12 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
         data={rows}
         listRef={listRef}
         keyExtractor={(row) => row.key}
-        renderItem={({ item }) => (
+        renderItem={({ item, index }) => (
           <DmMessageRow
             item={item}
+            shape={bubbleShape(rows, index, { breakKey: menuKey })}
+            menuKey={menuKey}
+            onMenuChange={(open) => setMenuKey((k) => open ? item.key : k === item.key ? null : k)}
             now={now}
             origin={origin}
             onOpenInvite={onOpenInvite}
@@ -366,7 +376,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
             onReport={typeof onReport === 'function' && !item.mine && !item.deleted ? () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from }) : undefined}
           />
         )}
-        extraData={{ now }}
+        extraData={{ now, menuKey }}
         ListHeaderComponent={next ? <View style={styles.pad}><Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} /></View> : null}
         ListEmptyComponent={empty}
         onRefresh={refreshAll}

@@ -160,8 +160,87 @@ test('an uncertain send stays held until a different text is confirmed', async (
 test('dm-screen stays pure', async (t) => {
   const source = readFileSync(join(__dirname, '../src/dm-screen.js'), 'utf8')
   const imports = source.split('\n').filter((line) => line.startsWith('import '))
-  t.alike(imports, ["import { threadOf } from './dm.js'"])
+  t.alike(imports, ["import { threadOf } from './dm.js'", "import { dayHeading } from './format.js'"])
   t.absent(source.includes(String.fromCharCode(0x2014)))
+})
+
+test('day marks sit on the first row of each local day', async (t) => {
+  const { withDayMarks } = await screen()
+  const now = new Date(2026, 9, 23, 12).getTime()
+  const at = (d, h, m = 0) => new Date(2026, 9, d, h, m).toISOString()
+  const rows = [{ at: at(22, 9) }, { at: at(22, 10) }, { at: at(23, 8) }, { at: 'x' }, { at: at(23, 9) }]
+  const marked = withDayMarks(rows, now)
+  t.alike(marked.map((r) => r.dayMark), ['ontem', null, 'hoje', null, null])
+  t.is(marked[0].at, rows[0].at)
+  const old = withDayMarks([{ at: new Date(2025, 2, 4, 9).toISOString() }, { at: new Date(2026, 2, 4, 9).toISOString() }], now)
+  t.alike(old.map((r) => r.dayMark), ['4 mar 2025', '4 mar'])
+})
+
+test('bubbleShape groups same-side rows within five minutes', async (t) => {
+  const { withDayMarks, bubbleShape } = await screen()
+  const now = new Date(2026, 9, 23, 12).getTime()
+  const at = (d, h, m) => new Date(2026, 9, d, h, m).toISOString()
+  const row = (mine, when, from = 'a') => ({ mine, from: mine ? 'me' : from, at: when })
+  const shapes = (rows) => { const r = withDayMarks(rows, now); return r.map((_, i) => bubbleShape(r, i)) }
+  t.alike(shapes([row(true, at(23, 9, 0)), row(true, at(23, 9, 2)), row(true, at(23, 9, 4))]), ['first', 'middle', 'last'])
+  t.alike(shapes([row(true, at(23, 9, 0)), row(false, at(23, 9, 1)), row(true, at(23, 9, 2))]), ['single', 'single', 'single'])
+  t.alike(shapes([row(true, at(23, 9, 0)), row(true, at(23, 9, 6))]), ['single', 'single'], 'a 6 minute gap splits')
+  t.alike(shapes([row(true, at(22, 23, 59)), row(true, new Date(2026, 9, 23, 0, 1).toISOString())]), ['single', 'single'], 'a day break splits')
+  t.alike(shapes([row(true, 'x'), row(true, 'x')]), ['single', 'single'])
+  t.alike(shapes([row(false, at(23, 9, 0), 'a'), row(false, at(23, 9, 1), 'b')]), ['single', 'single'], 'different senders split')
+})
+
+test('bubble groups span at most five minutes from their first message', async (t) => {
+  const { bubbleShape, withDayMarks, DM_GROUP_MS } = await screen()
+  const start = new Date(2026, 9, 23, 10).getTime()
+  const rowsAt = (minutes) => withDayMarks(minutes.map((minute) => ({
+    mine: true, from: A, at: new Date(start + minute * 60000).toISOString()
+  })), start)
+  const shapes = (rows) => rows.map((_, i) => bubbleShape(rows, i))
+  t.is(DM_GROUP_MS, 300000)
+  t.alike(shapes(rowsAt([0, 4, 9])), ['first', 'last', 'single'])
+  const steady = rowsAt([0, 3, 6, 9, 12, 15, 18, 21, 24])
+  t.alike(shapes(steady), ['first', 'last', 'first', 'last', 'first', 'last', 'first', 'last', 'single'])
+  t.alike(steady.map((_, i) => bubbleShape(steady, steady.length - 1 - i)).reverse(), shapes(steady), 'independent of render order')
+  t.alike(shapes(rowsAt([0, 5, 6])), ['first', 'last', 'single'], 'five minutes is inclusive')
+})
+
+test('an invite pill ends its bubble group', async (t) => {
+  const { bubbleShape, withDayMarks } = await screen()
+  const { inviteLinkOf } = await import('../src/inviteMessage.js')
+  const origin = 'https://example.test'
+  const inviteLink = inviteLinkOf(origin + '/g/' + B, origin)
+  t.ok(inviteLink)
+  const start = new Date(2026, 9, 23, 10).getTime()
+  const rows = withDayMarks([0, 1, 2, 3].map((minute) => ({
+    mine: false,
+    from: B,
+    at: new Date(start + minute * 60000).toISOString(),
+    inviteLink: minute === 1 ? inviteLink : null
+  })), start)
+  const shapes = () => rows.map((_, i) => bubbleShape(rows, i))
+  t.alike(shapes(), ['first', 'last', 'first', 'last'], 'the invite can follow a bubble but ends that run')
+  rows[0].inviteLink = inviteLink
+  t.alike(shapes(), ['single', 'single', 'first', 'last'], 'consecutive invite pills stay apart')
+  rows[0].inviteLink = rows[1].inviteLink = null
+  t.alike(shapes(), ['first', 'middle', 'middle', 'last'], 'without a rendered pill there is no break')
+})
+
+test('an open menu keeps its neighbours from joining it', async (t) => {
+  const { bubbleShape, withDayMarks } = await screen()
+  const start = new Date(2026, 9, 23, 10).getTime()
+  const rows = withDayMarks([0, 1, 2].map((minute) => ({
+    key: B + ':m' + minute,
+    mine: false,
+    from: B,
+    at: new Date(start + minute * 60000).toISOString()
+  })), start)
+  const shapes = (opts) => rows.map((_, i) => bubbleShape(rows, i, opts))
+  t.alike(shapes(), ['first', 'middle', 'last'])
+  t.alike(shapes({ breakKey: null }), ['first', 'middle', 'last'], 'no open menu changes nothing')
+  t.alike(shapes({ breakKey: rows[1].key }), ['single', 'single', 'single'], 'the row above ends its run, the row below starts a new one')
+  t.alike(shapes({ breakKey: rows[0].key }), ['single', 'first', 'last'])
+  t.alike(shapes({ breakKey: 'other' }), ['first', 'middle', 'last'], 'an unknown key changes nothing')
 })
 
 test('a private message links from its raw text, but not beside Abrir convite', (t) => {

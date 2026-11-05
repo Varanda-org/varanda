@@ -103,8 +103,10 @@ export function RefreshableList ({
   atEnd,
   scrollToTopSignal,
   newItems,
+  newItemsTop,
   listRef,
-  keepVisiblePosition = false
+  keepVisiblePosition = false,
+  onScrollFrame
 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -396,8 +398,14 @@ export function RefreshableList ({
     }
   }, [distance, progress])
 
+  // A ref, so a new callback each render does not rebuild onScroll.
+  const scrollFrame = useRef(onScrollFrame)
+  scrollFrame.current = onScrollFrame
   const onScroll = useCallback((e) => {
     const ne = e.nativeEvent
+    if (typeof scrollFrame.current === 'function') {
+      scrollFrame.current({ y: ne.contentOffset.y, contentHeight: ne.contentSize.height, layoutHeight: ne.layoutMeasurement.height })
+    }
     atTop.current = ne.contentOffset.y <= 0
     metrics.current = { offset: ne.contentOffset.y, content: ne.contentSize.height, layout: ne.layoutMeasurement.height }
     measured.current = true
@@ -585,7 +593,7 @@ export function RefreshableList ({
           </Animated.View>
           )
         : null}
-      {newItems ? <NewItemsPill label={newItems.label} visible={!!newItems.visible} onPress={() => newItems.onPress && newItems.onPress()} /> : null}
+      {newItems ? <NewItemsPill top={newItemsTop} label={newItems.label} visible={!!newItems.visible} onPress={() => newItems.onPress && newItems.onPress()} /> : null}
     </View>
   )
 }
