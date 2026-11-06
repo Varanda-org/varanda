@@ -302,7 +302,7 @@ eas build -p ios --profile production --auto-submit
 
 ## Ficha da App Store (EAS Metadata)
 
-`apps/app/store.config.json` guarda a ficha do iOS em pt-BR no formato do EAS Metadata (`configVersion: 0`): nome, subtítulo, descrição, palavras-chave, URLs, categoria, classificação etária e versão. Quem tem a conta Expo e acesso ao App Store Connect roda, da pasta `apps/app`; nenhum destes comandos roda na CI nem num agente, menos o `lint`:
+`apps/app/store.config.json` guarda a ficha do iOS em pt-BR no formato do EAS Metadata (`configVersion: 0`): nome, subtítulo, descrição, palavras-chave, URLs, categoria e versão. Quem tem a conta Expo e acesso ao App Store Connect roda, da pasta `apps/app`; nenhum destes comandos roda na CI nem num agente, menos o `lint`:
 
 ```sh
 eas metadata:lint   # confere o arquivo contra o esquema do eas-cli, sem falar com a Expo nem com a Apple
@@ -314,6 +314,7 @@ eas metadata:pull   # baixa a ficha do App Store Connect e sobrescreve o arquivo
 - Depois de um `pull`, apague o `apple.review` que ele escreve antes de commitar, e confira o diff inteiro.
 - `apple.version` escolhe a versão editável: se ela não existir, o `push` renomeia a versão em preparação para esse número.
 - Sem `apple.copyright`, o eas-cli 27.2.0 envia `copyright: null` no `push`, o que pode apagar um copyright digitado no App Store Connect. Quando a associação decidir o texto, ponha-o no arquivo.
+- A classificação etária (`apple.advisory`) também fica fora do arquivo e se responde à mão em App Store Connect › App Information › Age Rating, com a classificação 16+ (os Termos pedem 16 anos ou mais) e `https://varanda.app/termos/` como Age Suitability URL. O questionário da Apple tem perguntas que o esquema do eas-cli não tem (nem o 27.2.0 nem o 27.5.0): Social Media e Social Media Disabled for Users Under 13. Num app sem classificação, o `push` com o bloco falha em "Failed to update age rating declaration" (falta `socialMedia`); depois do questionário respondido, ele passa, mas regrava as outras respostas a partir de um arquivo que não diz tudo. Sem o bloco, o `push` não mexe na classificação ("Skipped age rating update, no advisory configured"), e ela fica num lugar só. Quando o eas-cli aceitar essas perguntas, o bloco pode voltar.
 - Ficam no App Store Connect, fora do EAS Metadata: privacidade do app (o formulário de dados coletados), preço e disponibilidade, direitos de conteúdo, conformidade de exportação (criptografia) e, enquanto o arquivo não tiver `screenshots`, as capturas.
 
 ## Browser member spike (packages/web-member)
