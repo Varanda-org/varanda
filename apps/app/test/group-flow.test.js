@@ -597,3 +597,14 @@ test('Grupo: the verified handle rides beside the name and Copiar copies what is
   t.ok(src.includes('copyText(shareNav(), displayText(row.rawText, { multiline: true }))'))
   t.ok(dm.includes('copyText(shareNav(), displayText(item.rawText, { multiline: true }))'))
 })
+
+test('Grupo: mentions are tappable and the composer suggests pages with a chip', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const read = (p) => fs.readFileSync(path.join(__dirname, p), 'utf8')
+  t.ok(read('../src/screens/Grupo.js').includes("onOpenMention={typeof onOpenMention === 'function' ? onOpenMention : undefined}"))
+  t.ok(read('../App.js').includes('onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onSeen={bumpSeen}'))
+  t.ok(read('../src/ui/ChatComposer.js').includes('mergeSuggestions(search.hits, [], mentionQuery'))
+  t.ok(read('../src/screens/Publicar.js').includes('mergeSuggestions(search.hits, [], mentionQuery'))
+  t.ok(read('../src/ui/MentionSuggest.js').includes("hit.chipLabel || 'Página'"))
+})

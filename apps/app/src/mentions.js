@@ -10,7 +10,7 @@ export const MENTION_MIN_QUERY = 2
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/
 
-function validUsername (username) {
+export function validUsername (username) {
   return typeof username === 'string' && USERNAME_RE.test(username) && !HEX6_RE.test(username)
 }
 
@@ -54,15 +54,20 @@ export function suggestionRows (hits, query, ownKey, max = MENTION_SUGGESTIONS_M
       : MENTION_SUGGESTIONS_MAX
     const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
     const prefix = typeof query === 'string' ? query.toLowerCase() : ''
-    const matching = []
-    const rest = []
+    const ranked = []
     for (const hit of hits) {
       if (hit === null || typeof hit !== 'object' || !validUsername(hit.username)) continue
+      if (hit.closed === true || hit.moved === true) continue
       if (own !== null && typeof hit.author === 'string' && hit.author.toLowerCase() === own) continue
-      if (hit.username.startsWith(prefix)) matching.push(hit)
-      else rest.push(hit)
+      ranked.push(hit)
     }
-    return matching.concat(rest).slice(0, limit)
+    // An exact @nome comes first, whoever owns it; then username prefixes,
+    // with people before Páginas on that tie; the rest keeps the search order,
+    // so a Página the search ranked high is not pushed out by the cap.
+    const bucket = (h) => h.username === prefix ? 0 : h.username.startsWith(prefix) ? 1 : 2
+    ranked.sort((a, b) => bucket(a) - bucket(b) ||
+      (bucket(a) === 1 ? Number(a.page === true) - Number(b.page === true) : 0))
+    return ranked.slice(0, limit)
   } catch {
     return []
   }
