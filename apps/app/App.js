@@ -82,7 +82,7 @@ import { useTerms } from './src/useTerms'
 import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
-import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, coverBoot, coverConnecting, holdBootCover, holdSplash } from './src/splashGate'
+import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, holdBootCover, holdSplash } from './src/splashGate'
 import { Btn, ErrorText, Soft, Spinner, errorText } from './src/ui'
 import { ThemeProvider, useStyles, useTheme } from './src/ui/ThemeProvider'
 import { Fab } from './src/ui/Fab'
@@ -257,6 +257,11 @@ function Member () {
   const bootCoverAt = useRef(null)
   const bootStepRef = useRef(null)
   const bootSettled = useRef(false)
+  // A Rua's first page and the names and counts of its first rows: the
+  // splash covers 'pronto' until both are in (at most CONTENT_PATIENCE_MS).
+  const [feedBoot, setFeedBoot] = useState({ page: false, details: false })
+  const onFeedBoot = useCallback((stage) => setFeedBoot((b) => (b[stage] ? b : { ...b, [stage]: true })), [])
+  const barRef = useRef(0)
   const [, bumpSplash] = useState(0)
   // A timer can fire a few ms before Date.now() reaches the threshold; the
   // slack makes the re-render see it passed, since nothing re-arms the timer.
@@ -1743,7 +1748,10 @@ function Member () {
   const sidePad = Math.max(insets.left, insets.right)
   const sideEdges = { top: 'additive', bottom: 'additive', left: 'off', right: 'off' }
 
-  const splash = <Splash edges={sideEdges} />
+  // Only grows: a later step or reconnect never moves the bar back.
+  const bootBar = Math.max(barRef.current, bootProgress({ phase: node.phase, step, page: feedBoot.page, details: feedBoot.details }))
+  barRef.current = bootBar
+  const splash = <Splash edges={sideEdges} progress={bootBar} />
   // The intro cards come first, once per device (src/intro.js): presentation
   // only, so autosync, the outbox and the invite keep waiting for termsOk. A
   // Google return skips them for that page load without marking them seen.
@@ -1778,7 +1786,10 @@ function Member () {
   // Conexão must not spend it. SLOW_LOOKUP_MS equals the patience, so
   // 'carregando' needs this clock of its own to reach "Continuar mesmo assim".
   // Render-time ref writes, as with released.current = true.
-  const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, infoKnown: info !== null || infoError !== '', profileSlow: slow })
+  // Only A Rua as the first screen waits for its rows; a stacked screen (a
+  // link opened at boot) or another tab shows at once.
+  const feedReady = feedBoot.details || tab !== 'rua' || topEntry !== null
+  const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, infoKnown: info !== null || infoError !== '', profileSlow: slow, feedReady })
   if (atShell && cover && !bootSettled.current && bootStepRef.current !== step) {
     bootStepRef.current = step
     bootCoverAt.current = Date.now()
@@ -2004,6 +2015,7 @@ function Member () {
         <View style={styles.flex}>
           <View style={shown('rua')}>
             <ARua
+              onBoot={onFeedBoot}
               onDeletedPost={deletedPost}
               active={on('rua')}
               refresh={version}

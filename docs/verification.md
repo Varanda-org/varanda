@@ -4600,3 +4600,42 @@ Limites desta parte:
 - Uma leitura que responde com erro (comunidade inexistente, `group.requests` de quem não administra) ainda é refeita no caminho exclusivo e para a sincronização uma vez, como `feed.read` desde a seção 46. O app só pede `group.requests` a quem administra.
 - A maior parte da CPU restante das leituras é revalidar os mesmos registros a cada leitura (históricos de entrada, confirmação e corte dos grupos, nome de usuário e perfil). Proposta para um próximo PR: o mesmo filtro por tipo antes da validação nesses pontos, ou guardar os registros decodificados por núcleo enquanto a sincronização vive.
 - Nenhuma caixa executada nesta documentação.
+
+## 95. Abertura até A Rua ficar pronta, com barra de progresso (PR feat/splash-until-ready)
+
+A tela de abertura continua sobre A Rua depois de o perfil próprio ficar pronto, até a primeira página estar na tela com os nomes e as contagens das primeiras linhas, e nunca mais que 5 s além disso. A Rua termina de carregar por baixo da abertura; quem abre o app vê a lista já preenchida. O texto "conectando…" saiu: no lugar dele, uma barra fina que avança por etapas reais (conexão, perfil próprio, primeira página, nomes e contagens), nunca por um relógio. A barra só cresce.
+
+Regras que os passos abaixo conferem:
+
+- Só A Rua como primeira tela espera as linhas. Um link aberto na entrada (uma conversa, um perfil) ou outra aba aparece na hora.
+- No máximo 5 s a mais (CONTENT_PATIENCE_MS) depois de o perfil ficar pronto; passou disso, A Rua aparece e termina de carregar à vista.
+- As linhas estão prontas quando os autores das 6 primeiras foram consultados (um perfil sem nome também conta) e as contagens responderam para pelo menos uma delas. Sem nó hospedado, sem rede, com o índice indexando ou com a resposta de contagens falhando, não se espera pelas contagens. Uma primeira leitura que falha também libera a tela.
+- A abertura só aparece uma vez por carregamento: travar e destravar, reconectar ou trocar de aba nunca a traz de volta.
+- Na web e no PWA a barra é desenhada pela camada de `public/index.html`; o app só passa o avanço (variável CSS `--varanda-progress`). No celular nativo, o próprio componente da abertura desenha a barra.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes desta parte: `apps/app/test/splashGate.test.js` (cobertura de 'pronto', teto de 5 s, `feedDetailsReady`, `bootProgress`), `apps/app/test/splashMotion.test.js` e `apps/app/test/pwa.test.js` (barra na camada da web, sem "conectando").
+
+Android (aparelho ou emulador, primeiro):
+
+- [ ] Abrir o app já conectado: a abertura mostra a barra avançando, sem "conectando…", e some com A Rua já com nomes, fotos e números nas primeiras linhas.
+- [ ] Com a rede lenta, a abertura some no máximo cerca de 5 s depois de a barra passar da metade, e A Rua termina de carregar à vista.
+- [ ] Abrir o app por um link de conversa ou de perfil: a tela do link aparece sem esperar A Rua.
+- [ ] Travar e destravar, ou perder e recuperar a rede: a abertura não volta.
+
+iOS (simulador ou aparelho, depois do Android):
+
+- [ ] Os passos acima.
+
+Web e PWA (depois):
+
+- [ ] Recarregar a página: a camada de abertura mostra a barra (sem texto), que avança e some com A Rua preenchida.
+- [ ] Em Ajustes › Aparência, Claro e Escuro: a barra acompanha as cores.
+- [ ] Com "reduzir movimento" ligado no sistema, a barra aparece sem pulsar e sem animação de largura.
+
+Limites desta parte:
+
+- A barra esconde a espera, não a encurta: os dados chegam no mesmo tempo de antes, só que por baixo da abertura.
+- As fotos em si (os bytes) carregam logo depois de os nomes chegarem; a abertura espera os nomes, não cada imagem.
+- Nenhuma caixa acima foi executada nesta documentação.
