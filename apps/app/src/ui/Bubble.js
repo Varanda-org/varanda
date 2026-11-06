@@ -27,12 +27,15 @@
 //   status: 'pending' | 'uncertain' for an own message not yet confirmed
 //   actions: [{ icon, label, danger, onPress }], actionsTitle
 //   onOpenMention(username), below: a node under the bubble (a Pill)
+//   media: a node drawn inside the bubble above the text (ChatMedia); the
+//     text is then the caption and may be empty
 
-import { useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { cloneElement, isValidElement, useState } from 'react'
+import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { LABELS } from '../dm'
 import { ActionsSheet, usableActions } from './ActionsSheet'
+import { chatMediaBlock } from './ChatMedia'
 import { Icon } from './Icon'
 import { MentionText } from './MentionText'
 import { ReplyPreview, senderColor } from './ReplyPreview'
@@ -63,9 +66,13 @@ export function bubbleMeta ({ at, mine, status }) {
   return time
 }
 
-export function Bubble ({ item, mine = false, shape = 'single', name, handle, senderKey, avatar, quote, status, actions, actionsTitle, onOpenMention, below }) {
+// The photos sit this close to the bubble's edge.
+const MEDIA_INSET = 4
+
+export function Bubble ({ item, mine = false, shape = 'single', name, handle, senderKey, avatar, quote, status, actions, actionsTitle, onOpenMention, below, media }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
+  const { width: screen } = useWindowDimensions()
   const [open, setOpen] = useState(false)
   const [hover, setHover] = useState(false)
   const [focus, setFocus] = useState(false)
@@ -87,9 +94,18 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
   const nameKey = typeof senderKey === 'string' ? senderKey : ''
   const withAvatar = !mine && avatar !== undefined && avatar !== null
   const openQuote = quote && typeof quote.onPress === 'function' ? quote.onPress : undefined
-  const body = rich
-    ? <MentionText text={item.rawText} onOpenMention={onOpenMention} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} style={styles.text} />
-    : <Text style={[styles.text, muted && styles.muted]}>{displayText(typeof item.text === 'string' ? item.text : '', { multiline: true })}</Text>
+  const withMedia = media !== undefined && media !== null && !muted
+  // With photos the bubble is as wide as the block (styles.media leaves
+  // MEDIA_INSET on each side, plus the hairline border of theirs), so the
+  // caption wraps under the photos.
+  const block = withMedia && isValidElement(media) ? chatMediaBlock(media.props.refs, screen) : null
+  const hug = block ? { width: block.width + 2 * MEDIA_INSET + (mine ? 0 : 2 * StyleSheet.hairlineWidth) } : null
+  const empty = rich ? item.rawText === '' : typeof item.text !== 'string' || item.text === ''
+  const body = withMedia && empty
+    ? null
+    : rich
+      ? <MentionText text={item.rawText} onOpenMention={onOpenMention} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} style={styles.text} />
+      : <Text style={[styles.text, muted && styles.muted]}>{displayText(typeof item.text === 'string' ? item.text : '', { multiline: true })}</Text>
   return (
     <View>
       {item.dayMark
@@ -113,7 +129,7 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
               onHoverIn={rows.length > 0 ? () => setHover(true) : undefined}
               onHoverOut={rows.length > 0 ? () => setHover(false) : undefined}
               delayLongPress={350}
-              style={[styles.bubble, { backgroundColor: fill }, !mine && styles.bubbleTheirs, corners]}
+              style={[styles.bubble, { backgroundColor: fill }, !mine && styles.bubbleTheirs, corners, hug]}
             >
               {/* The verified @nome rides beside the free-form name, so a member who
                   copies someone else's display name still shows their own handle. */}
@@ -131,6 +147,11 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
                     <ReplyPreview name={quote.name} handle={quote.handle} text={quote.text} senderKey={quote.senderKey} mine={quote.mine} onPress={openQuote} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} />
                   </View>
                   )
+                : null}
+              {/* The media's own presses would swallow the long press: it gets
+                  the bubble's, so holding a photo opens the actions too. */}
+              {withMedia
+                ? <View style={styles.media}>{isValidElement(media) && rows.length > 0 ? cloneElement(media, { onLongPress: () => setOpen(true) }) : media}</View>
                 : null}
               {/* The hidden copy of the time keeps the last line clear for the
                   real one, which floats at the bottom right as in WhatsApp. It is
@@ -214,6 +235,7 @@ const makeStyles = (colors) => StyleSheet.create({
   name: { ...type.counter, marginBottom: 2 },
   handle: { fontWeight: '400', color: colors.soft },
   quote: { marginBottom: space.xs + 2 },
+  media: { marginHorizontal: -(space.md - MEDIA_INSET), marginTop: -3 },
   text: { fontSize: 16, lineHeight: 22, color: colors.ink },
   muted: { color: colors.soft, fontStyle: 'italic' },
   metaSpace: { fontSize: 11, lineHeight: 22, color: 'transparent' },

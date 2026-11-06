@@ -189,8 +189,169 @@ test('dm.js has no read, delivery or typing words and no em dash', async (t) => 
 })
 
 test('the chat screens and components have no read, delivery or typing words', (t) => {
-  for (const file of ['../src/screens/Mensagem.js', '../src/ui/Bubble.js', '../src/ui/ChatComposer.js', '../src/ui/ActionsSheet.js']) {
+  for (const file of ['../src/screens/Mensagem.js', '../src/ui/Bubble.js', '../src/ui/ChatComposer.js', '../src/ui/ActionsSheet.js', '../src/ui/ChatMedia.js', '../src/ui/AttachSheet.js']) {
     const src = readFileSync(join(__dirname, file), 'utf8')
+    for (const word of ['lida', 'entregue', 'digitando']) t.absent(src.includes(word), file + ': ' + word)
+    t.absent(src.includes('\u2014'), file)
+  }
+})
+
+const chatSend = () => import('../src/chatSend.js')
+const plans = () => import('../src/attach-plan.js')
+const HEX = (c) => c.repeat(64)
+const MSG = 'ab'.repeat(16)
+
+test('chatMediaLayout: one keeps its aspect, two side by side, three and four in a grid, never past 240', async (t) => {
+  const { chatMediaLayout, CHAT_MEDIA_MAX_WIDTH } = await chatSend()
+  t.is(CHAT_MEDIA_MAX_WIDTH, 240)
+  const one = chatMediaLayout([{ w: 400, h: 200 }])
+  t.alike(one, { width: 240, height: 120, cells: [{ left: 0, top: 0, width: 240, height: 120 }] })
+  t.is(chatMediaLayout([{ w: 100, h: 1000 }]).height, 480, 'a tall image is clamped to 1:2')
+  t.is(chatMediaLayout([{}]).height, 240, 'unknown size is square')
+  const two = chatMediaLayout([{}, {}])
+  t.is(two.cells.length, 2)
+  t.is(two.cells[0].width + two.cells[1].width + 2, 240)
+  t.is(two.cells[1].left, 240 - two.cells[1].width)
+  const three = chatMediaLayout([{}, {}, {}])
+  t.is(three.cells[2].width, 240, 'the third one is wide')
+  t.is(three.cells[2].top, three.cells[0].height + 2)
+  const four = chatMediaLayout([{}, {}, {}, {}])
+  t.is(four.cells.length, 4)
+  for (const layout of [one, two, three, four]) {
+    for (const c of layout.cells) t.ok(c.left + c.width <= 240, 'inside the width')
+  }
+  t.is(chatMediaLayout([]), null)
+  t.is(chatMediaLayout([{}, {}, {}, {}, {}]), null)
+  t.is(chatMediaLayout([{}], 1000).width, 240, 'a wider column still stops at 240')
+  t.is(chatMediaLayout([{}], 200).width, 200)
+})
+
+test('chatMediaRefs names the DM sender, message and index, and the group diary', async (t) => {
+  const { chatMediaRefs, itemSize } = await chatSend()
+  const a = { id: 'x', w: 3, h: 2 }
+  const b = { unavailable: true }
+  t.alike(chatMediaRefs('dm', { from: HEX('a'), id: MSG, media: [a, b] }), [
+    { kind: 'dm', from: HEX('a'), id: MSG, index: 0, item: a },
+    { kind: 'dm', from: HEX('a'), id: MSG, index: 1, item: b }
+  ])
+  t.alike(chatMediaRefs('group', { diary: HEX('b'), media: [a] }), [{ kind: 'group', diary: HEX('b'), item: a }])
+  t.alike(chatMediaRefs('dm', { from: HEX('a'), id: MSG }), [])
+  t.alike(chatMediaRefs('group', { media: [a] }), [], 'no diary, no ref')
+  t.is(chatMediaRefs('dm', { from: HEX('a'), id: MSG, media: [a, a, a, a, a] }).length, 4)
+  t.alike(itemSize({ w: 3, h: 2 }), { w: 3, h: 2 })
+  t.alike(itemSize({ width: 5, height: 4 }), { w: 5, h: 4 })
+  t.alike(itemSize(null), { w: null, h: null })
+})
+
+test('boundedFile reads the bounds before an upload and takes their size', async (t) => {
+  const { boundedFile } = await chatSend()
+  const bytes = new Uint8Array([1, 2, 3])
+  const calls = []
+  const ok = boundedFile({ bytes, mime: 'image/gif', width: 1, height: 1 }, (b, m) => { calls.push(m); return { width: 9, height: 7 } })
+  t.alike(calls, ['image/gif'])
+  t.is(ok.bytes, bytes, 'GIF bytes are kept as they are')
+  t.is(ok.width, 9)
+  t.is(ok.height, 7)
+  t.is(boundedFile({ bytes, mime: 'image/jpeg' }, () => null), null)
+  t.is(boundedFile({ bytes, mime: 'image/jpeg' }, () => { throw new Error('x') }), null)
+  t.is(boundedFile({ bytes, mime: 'image/svg+xml' }, () => ({ width: 1, height: 1 })), null)
+  t.is(boundedFile({ bytes: new Uint8Array(0), mime: 'image/png' }, () => ({ width: 1, height: 1 })), null)
+  // The real bounds from @varanda/rpc refuse what is not an image.
+  t.is(boundedFile({ bytes, mime: 'image/png' }), null)
+})
+
+function dmItem (n) {
+  return { id: n.toString(16).padStart(64, '0'), key: HEX('a'), nonce: 'c'.repeat(48), chunks: 1, bytes: 144, sha256: HEX('a'), mime: 'image/jpeg', w: 4, h: 3, ms: 0 }
+}
+
+test('runChatSend: idle -> uploading -> sending -> done, uploads in order, one request', async (t) => {
+  const { runChatSend, stagedOf } = await chatSend()
+  const { composePlan } = await plans()
+  const files = [{ bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 4, height: 3 }, { bytes: new Uint8Array([2]), mime: 'image/gif', width: 4, height: 3 }]
+  const plan = composePlan({ text: 'oi', attachments: stagedOf(files), target: { kind: 'dm', to: HEX('d') } })
+  const phases = []
+  const uploaded = []
+  const sent = []
+  const r = await runChatSend({
+    plan,
+    files,
+    upload: async (file, i) => { uploaded.push(file); return dmItem(i + 1) },
+    request: async (method, params) => { sent.push({ method, params }); return { id: MSG } },
+    onPhase: (p) => phases.push(p.phase)
+  })
+  t.is(r.phase, 'done')
+  t.alike(uploaded, files, 'in order, the same bytes')
+  t.is(sent.length, 1)
+  t.is(sent[0].method, 'dm.send')
+  t.is(sent[0].params.media.length, 2)
+  t.alike(phases, ['uploading', 'uploading', 'sending', 'done'])
+})
+
+test('runChatSend: a failed upload sends nothing; Cancelar before the send discards', async (t) => {
+  const { runChatSend, stagedOf } = await chatSend()
+  const { composePlan } = await plans()
+  const files = [{ bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 4, height: 3 }]
+  const target = { kind: 'group', group: HEX('e'), visibility: 'private' }
+  let sent = 0
+  const failed = await runChatSend({
+    plan: composePlan({ text: '', attachments: stagedOf(files), target }),
+    files,
+    upload: async () => { throw new Error('sem rede') },
+    request: async () => { sent++ }
+  })
+  t.is(failed.phase, 'failed')
+  t.is(failed.error.message, 'sem rede')
+  t.is(sent, 0)
+  let alive = true
+  const cancelled = await runChatSend({
+    plan: composePlan({ text: '', attachments: stagedOf(files), target }),
+    files,
+    upload: async () => { alive = false; return {} },
+    request: async () => { sent++ },
+    live: () => alive
+  })
+  t.is(cancelled.phase, 'cancelled')
+  t.is(sent, 0, 'nothing is sent after Cancelar')
+})
+
+test('runChatSend: an uncertain send keeps the exact op and only an explicit retry resends it', async (t) => {
+  const { runChatSend, retryChatSend, stagedOf } = await chatSend()
+  const { composePlan } = await plans()
+  const files = [{ bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 4, height: 3 }]
+  const sent = []
+  let uploads = 0
+  const unsure = Object.assign(new Error('?'), { uncertain: true })
+  const first = await runChatSend({
+    plan: composePlan({ text: 'legenda', attachments: stagedOf(files), target: { kind: 'dm', to: HEX('d') } }),
+    files,
+    upload: async () => { uploads++; return dmItem(1) },
+    request: async (method, params) => { sent.push({ method, params }); throw unsure }
+  })
+  t.is(first.phase, 'uncertain')
+  t.is(sent.length, 1, 'no automatic second request')
+  const phases = []
+  const again = await retryChatSend({
+    op: first.op,
+    request: async (method, params) => { sent.push({ method, params }); return {} },
+    onPhase: (p) => phases.push(p.phase)
+  })
+  t.is(again.phase, 'done')
+  t.is(uploads, 1, 'the retry uploads nothing again')
+  t.is(sent.length, 2)
+  t.alike(sent[1], sent[0], 'the same method and params')
+  t.alike(phases, ['sending', 'done'])
+  const custom = await runChatSend({
+    plan: composePlan({ text: 'x', attachments: [], target: { kind: 'dm', to: HEX('d') } }),
+    request: async () => { throw new Error('talvez') },
+    uncertain: (err) => err.message === 'talvez'
+  })
+  t.is(custom.phase, 'uncertain', 'the caller decides what reads as uncertain')
+})
+
+test('chat media files never name an http(s) image source and no presence words', (t) => {
+  for (const file of ['../src/ui/ChatMedia.js', '../src/ui/AttachSheet.js', '../src/chatSend.js']) {
+    const src = readFileSync(join(__dirname, file), 'utf8')
+    t.absent(/https?:\/\//.test(src), file + ': no http(s) literal')
     for (const word of ['lida', 'entregue', 'digitando']) t.absent(src.includes(word), file + ': ' + word)
     t.absent(src.includes('\u2014'), file)
   }

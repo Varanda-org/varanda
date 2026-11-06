@@ -937,6 +937,7 @@ function createBrowserSession ({
     createSocket,
     log: (text) => warning(safe(text)),
     emit: (event, data) => send(event, data),
+    fetch: fetchMedia,
     limits: syncOptions.dm
   })
   let dmLastPull = 0

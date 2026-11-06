@@ -987,6 +987,30 @@ const SPECS = {
       height: req(int(1, MEDIA_SIDE_MAX))
     },
     mutating: true
+  },
+  // IPC only, in-app web-node worklet (docs/rpc.md 5.89): the opened image
+  // of a chat item is written to a file in the worklet's read directory and
+  // only its name comes back, since a photo is far above MAX_MESSAGE. A DM
+  // item is { kind: 'dm', from, id, index }, a private group item
+  // { kind: 'group', diary, item }. Not mutating: it changes no diary.
+  'media.readFile': {
+    fields: {
+      kind: req((v) => v === 'dm' || v === 'group'),
+      from: opt(isKey),
+      id: opt(isDmId),
+      index: opt(int(0, L.MAX_DM_MEDIA - 1)),
+      diary: opt(isKey),
+      item: opt(isPrivateGroupMediaItem)
+    },
+    cross (given) {
+      const dm = ['from', 'id', 'index']
+      const group = ['diary', 'item']
+      const want = given.kind === 'dm' ? dm : group
+      const other = given.kind === 'dm' ? group : dm
+      for (const k of want) if (!hasOwn(given, k)) return 'parâmetro obrigatório: ' + k
+      for (const k of other) if (hasOwn(given, k)) return 'parâmetro desconhecido'
+      return null
+    }
   }
 }
 

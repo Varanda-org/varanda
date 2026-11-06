@@ -211,8 +211,22 @@ test('an uncertain send stays held until a different text is confirmed', async (
 test('dm-screen stays pure', async (t) => {
   const source = readFileSync(join(__dirname, '../src/dm-screen.js'), 'utf8')
   const imports = source.split('\n').filter((line) => line.startsWith('import '))
-  t.alike(imports, ["import { threadOf } from './dm.js'", "import { dayHeading } from './format.js'"])
+  t.alike(imports, ["import { threadOf } from './dm.js'", "import { dayHeading } from './format.js'", "import { sendPlan as attachmentSendPlan } from './attach-plan.js'"])
   t.absent(source.includes(String.fromCharCode(0x2014)))
+})
+
+test('an uncertain attachment send requires confirmation after a selection changes', async (t) => {
+  const { sendPlan } = await screen()
+  const first = { name: 'first' }
+  const second = { name: 'second' }
+  const hold = { text: '', quoteId: ID, attachments: [first, second] }
+  t.is(sendPlan(null, '', ID, [first]), 'send')
+  t.is(sendPlan(hold, '', ID, [first, second]), 'retry')
+  t.is(sendPlan(hold, '', ID, [second, first]), 'confirm')
+  t.is(sendPlan(hold, '', ID, [first]), 'confirm')
+  t.is(sendPlan(hold, '', ID, [first, { ...second }]), 'confirm')
+  t.is(sendPlan(hold, '', ID), 'confirm')
+  t.is(sendPlan({ text: '', quoteId: ID }, '', ID, [first]), 'confirm')
 })
 
 test('day marks sit on the first row of each local day', async (t) => {

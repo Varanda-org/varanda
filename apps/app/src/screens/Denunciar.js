@@ -15,13 +15,23 @@
 // A private message: `target` = { dm: true, id, text, author } (author = the
 // sender's diary key). Only that message and the sender's key leave the
 // device, signed with dm.reportSign (docs/rpc.md 5.81).
+// A message with photos or GIFs adds `media` (the raw item list of the
+// dm.thread row, or of the group.read item). For a private message or a
+// private group message the first image is opened from the device's own
+// copy, re-encoded as JPEG (report.js prepareAnexo) and shown here as it will
+// be sent; it goes to /account/report/anexo with its digest in the signed
+// statement. Over the cap it is left out and the sheet says so. A public
+// group post keeps pointing at the post, with no image attached.
 
 import { useEffect, useRef, useState } from 'react'
-import { ScrollView, StyleSheet, Text, View } from 'react-native'
+import { AppState, Image, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { accountStatus } from '../account'
-import { NOT_LINKED_MESSAGE, REASONS, TEXT_MAX, submitDmReport, submitReport, validateReportText, wellFormed } from '../report'
+import { ANEXO_NOTICE, ANEXO_TOO_BIG, ANEXO_UNAVAILABLE, NOT_LINKED_MESSAGE, REASONS, TEXT_MAX, anexoRef, prepareAnexo, submitDmReport, submitReport, validateReportText, wellFormed } from '../report'
+import { createChatMedia } from '../media/chatMedia'
+import { revokeUrl, urlFromBytes } from '../media/display'
+import { encodeReportImage } from '../media/reportImage'
 import { LABELS as DM_LABELS } from '../dm'
 import { countChars } from '../format'
 import { whoOf } from '../who'
@@ -37,6 +47,14 @@ const PRIVATE_GROUP_NOTICE = 'Este grupo é privado. Ao enviar, a moderação da
 const PUBLIC_GROUP_NOTICE = 'Este grupo é público. Ao enviar, a moderação da associação recebe o texto acima como citação do denunciante.'
 
 const NOT_HOSTED_MESSAGE = 'Nesta versão, denúncias só pela versão web no site da associação.'
+const ANEXO_LOADING = 'preparando a imagem…'
+const NOTHING_TO_SEND = 'Sem texto e sem a imagem, esta mensagem não pode ser denunciada.'
+
+// Its own source, apart from the chat's: reading for a report never evicts
+// or re-keys what the bubbles show. clearChatMedia (lock, sign-out) clears it
+// too, and it holds one image at most.
+const reportMedia = createChatMedia({ max: 1, concurrency: 1 })
+const display = { urlFromBytes, revokeUrl }
 
 export default function Denunciar ({ open, target, onClose, onSent }) {
   const styles = useStyles(makeStyles)
@@ -50,6 +68,9 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
   const [note, setNote] = useState('')
   const send = useAction()
   const seqRef = useRef(0)
+  // { status: 'none' | 'loading' | 'ok' | 'over' | 'unavailable', ... }
+  const [anexo, setAnexo] = useState({ status: 'none' })
+  const [preview, setPreview] = useState(null)
 
   // A new target (or reopening) starts a fresh form and a fresh status read.
   useEffect(() => {
@@ -72,6 +93,50 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
   const fromPost = !isDm && target !== null && target.seq !== null && target.seq !== undefined
   const postMode = fromPost && !whole
   const inGroup = fromPost && typeof target.group === 'string' && typeof target.writer === 'string'
+  const ref = (isDm || (postMode && inGroup)) && open && hosted ? anexoRef(target) : null
+
+  // Prepared when the sheet opens, before anything is sent: the person sees
+  // the exact image that leaves the device. Local only (the node's copy and
+  // the re-encode); the account service is reached only on 'enviar'.
+  // In the background the decrypted preview is dropped (its file deleted,
+  // its bytes zeroed) like every chat photo, and prepared again on return.
+  const [awake, setAwake] = useState(true)
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'background') setAwake(false)
+      else if (state === 'active') setAwake(true)
+    })
+    return () => sub.remove()
+  }, [])
+
+  useEffect(() => {
+    if (ref === null || typeof member !== 'string' || !awake) {
+      setAnexo({ status: 'none' })
+      return
+    }
+    let live = true
+    setAnexo({ status: 'loading' })
+    prepareAnexo(ref, {
+      source: (r) => reportMedia.sourceFor(r, { node, identity: member, display }),
+      encode: encodeReportImage
+    }).then((out) => { if (live) setAnexo(out) })
+    return () => { live = false }
+  }, [open, target, whole, hosted, member, awake])
+
+  // The thumbnail is the re-encoded JPEG itself, not the chat's copy.
+  useEffect(() => {
+    if (anexo.status !== 'ok') {
+      setPreview(null)
+      return
+    }
+    let url = null
+    try { url = urlFromBytes(anexo.bytes, 'image/jpeg') } catch {}
+    setPreview(typeof url === 'string' ? { uri: url, width: anexo.width, height: anexo.height } : null)
+    // Replaced (sent, closed, backgrounded): the preview file goes. The bytes
+    // are left to the collector: a report already being sent still needs them.
+    return () => { if (url !== null) revokeUrl(url) }
+  }, [anexo])
+
   // The exact text that is signed and sent (lone surrogates normalized, D5).
   // A private message is quoted exactly as the sheet shows it, so the signed
   // quote never carries direction marks the reporter did not see.
@@ -79,12 +144,17 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
     ? displayText(wellFormed(target.text), { multiline: true })
     : postMode ? wellFormed(target.text) : ''
   const noteText = validateReportText(wellFormed(note))
+  const attached = anexo.status === 'ok' ? { bytes: anexo.bytes, digest: anexo.digest } : null
+  // dm.reportSign needs a quote or an image: a photo-only message whose
+  // image cannot go has nothing to report.
+  const nothing = isDm && quote === '' && attached === null && anexo.status !== 'loading'
   const shownName = target === null
     ? ''
     : displayText(whoOf({ name: target.name, username: target.username }).title)
 
   const submit = async () => {
     if (reason === null || noteText === null || target === null || typeof member !== 'string') return
+    if (anexo.status === 'loading' || nothing) return
     // A close, a lock or a new target while this runs makes it stale: a stale
     // run stops before signing and before sending, not only before the toast.
     const mine = seqRef.current
@@ -95,6 +165,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
         reason,
         text: noteText,
         quote,
+        anexo: attached,
         sign: (params) => node.request('dm.reportSign', params),
         isStale: () => mine !== seqRef.current
       })
@@ -108,6 +179,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
         reason,
         text: noteText,
         quote,
+        anexo: attached,
         sign: (params) => node.request('report.sign', params),
         isStale: () => mine !== seqRef.current
       }))
@@ -146,10 +218,18 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
           ? (
             <View style={styles.quoteBox}>
               <Label>Texto que será enviado</Label>
-              <Text style={styles.quote}>{displayText(quote, { multiline: true })}</Text>
+              <Text style={styles.quote}>{quote === '' ? '(sem texto)' : displayText(quote, { multiline: true })}</Text>
+              {preview !== null
+                ? <Image source={{ uri: preview.uri }} style={[styles.thumb, { aspectRatio: preview.width / preview.height }]} resizeMode='contain' accessibilityLabel='Imagem que será enviada' />
+                : null}
             </View>
             )
           : null}
+        {anexo.status === 'loading' ? <Soft>{ANEXO_LOADING}</Soft> : null}
+        {anexo.status === 'ok' ? <Soft>{ANEXO_NOTICE}</Soft> : null}
+        {anexo.status === 'over' ? <Soft>{ANEXO_TOO_BIG}</Soft> : null}
+        {anexo.status === 'unavailable' ? <Soft>{ANEXO_UNAVAILABLE}</Soft> : null}
+        {nothing ? <ErrorText>{NOTHING_TO_SEND}</ErrorText> : null}
         {postMode && inGroup ? <Soft>{target.private === true ? PRIVATE_GROUP_NOTICE : PUBLIC_GROUP_NOTICE}</Soft> : null}
         {isDm ? <Soft>{DM_LABELS.reportNote}</Soft> : null}
         {!postMode && !isDm ? <Soft>Para denunciar o nome, a bio ou a foto do perfil, escolha a conta toda.</Soft> : null}
@@ -169,7 +249,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
           label='enviar denúncia'
           onPress={submit}
           pending={send.pending}
-          disabled={reason === null || noteText === null}
+          disabled={reason === null || noteText === null || anexo.status === 'loading' || nothing}
         />
       </>
     )
@@ -202,6 +282,7 @@ const makeStyles = (colors) => StyleSheet.create({
   pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   quoteBox: { gap: 4, padding: 12, borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.bg },
   quote: { ...type.postText, color: colors.ink },
+  thumb: { width: '100%', maxHeight: 240, borderRadius: 8, backgroundColor: colors.line },
   counter: { ...type.counter, color: colors.soft, alignSelf: 'flex-end' },
   over: { color: colors.danger }
 })
