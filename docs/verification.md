@@ -4702,3 +4702,86 @@ Limites desta parte:
 - A memória tem limite, mas quem pode assinar coisas que o nó verifica (no serviço de conta, as provas de página de qualquer chave; nos outros nós, emissores e moderadores) pode encher a memória e tirar dela outras entradas. O efeito é só verificar de novo, como antes desta mudança.
 - Uma verificação Ed25519 mais rápida no navegador (por exemplo `@noble/curves`) mudaria as regras de aceitação em casos de borda (equação com ou sem cofator, pontos de ordem pequena) em relação ao libsodium dos outros nós, e não foi feita.
 - Nenhuma caixa executada nesta documentação.
+
+## 97. Convites de surpresa (PR feat/invite-drops)
+
+### O que mudou
+
+Com `VARANDA_INVITE_DROPS=1` (exige `VARANDA_INVITES_PER_WEEK`; o `deploy.sh` e o serviço `account` recusam o par incompleto), os N convites da semana de cada membro deixam de abrir todos na segunda 00:00 e passam a abrir um a um, em N minutos sorteados entre 09:00 e 20:59 (horário de Brasília), diferentes por membro, só entre os minutos ainda futuros depois do vínculo e da ativação. O sorteio é uma função do segredo de `invite-drops-key.json` (modo 0600, escrito uma vez junto da data de ativação), da chave do membro e da semana; o `invite-drops.json` (modo 0600) guarda só os índices já avisados, sem horário, e é podado no fim da semana. Um arquivo de chave inválido, ou ausente ao lado de um `invite-drops.json` existente, deixa as concessões indisponíveis (`indisponivel`) em vez de liberar a semana inteira.
+
+- Criar o link antes do momento responde `convite-aguardando` (429). Um convite criado conta na semana, como na seção 37; o que não foi usado some na segunda 00:00; um código já emitido vale 7 dias.
+- Nova rota `POST /account/invites/summary`: o membro assina com `invite.sign` na ação `summary` (uso único do nonce de `/account/invites/start`) e recebe `{ mode, perWeek, opened, used, remaining, resetsAt }`, com `mode` `semanal` ou `sorteio`. Limite de 30 pedidos por 10 minutos por membro, sem verificação de idade (a leitura não cria nada). Sem o recurso, o mesmo pedido responde `semanal`.
+- Aviso push novo, `{ v: 1, kind: 'invite-drop' }`, enviado pelo próprio serviço de conta (nunca pelo semeador nem por `PUSH_KINDS`). Título "Chegou um convite pra sua varanda" e texto "Escolha com carinho quem você quer chamar: alguém próximo, que faz falta na conversa." ficam fixos no service worker (tag `varanda-invite-drop`); o clique abre `/?aviso=convite`. Só vai a quem aceitou Termos e Política na versão 16, a todos os aparelhos do membro ou a nenhum. Os envios de convite ocupam no máximo um quarto da fila e só entram com a fila abaixo da metade. Um aviso que não saiu até 21:00 de Brasília é descartado, e o TTL nunca passa do fim da janela.
+- O aviso só sai dentro da janela. Se o serviço estava parado no minuto sorteado, o aviso é recuperado uma vez na próxima janela, desde que a semana seja a mesma. Os índices são marcados antes do envio e nunca desmarcados.
+- No app (hospedado, o nativo com a instalação inclusive), Ajustes › Convidar pessoas mostra quantos convites já chegaram e um aviso dentro do app, sem dia nem hora. Web Push é só da PWA hospedada.
+- Termos de Uso e Política de Privacidade na versão 16, com novo aceite.
+- Registro de logs do serviço: só `{ event: 'sorteio', reason }` com `ligado`, `indisponivel`, `enviado` ou `descartado`, e `{ event: 'ready', inviteDrops: true }`. Nenhum horário, chave, segredo ou índice.
+
+### Testes automatizados
+
+- `packages/core/test/invite.test.js`: a ação `summary` assina e verifica, e uma assinatura de `issue` não vale como `summary`.
+- `packages/core/test/terms.test.js`: `TERMS_VERSION` 16.
+- `packages/rpc/test/methods.test.js`: `invite.sign` aceita `summary`.
+- `apps/cli/test/invite-drop-time.test.js`: janela 09:00-20:59 em Brasília, semana de segunda, minutos só no futuro depois do vínculo e da ativação, sorteio estável para a mesma chave, diferente por membro, segredo e semana, e uma semana de 100 minutos preenchida inteira.
+- `apps/cli/test/invite-drops.test.js`: chave escrita uma vez, arquivo de chave inválido deixado intacto, chave ausente ao lado de um registro nunca recriada (nem pelo `heal`), registro inválido nunca regravado, união ao reler com poda das semanas encerradas, aviso uma vez entre ciclos e reaberturas, minuto perdido recuperado na janela e nunca às 03:00 nem depois da semana, marcas gravadas mesmo com `none` e `dropped`, lote limitado por `room()`, `guard` falso sem gravar.
+- `apps/cli/test/invites-store.test.js`: `opened`, `convite-aguardando`, `indisponivel` com callback que falha ou devolve valor inválido, `summary` com `opened`.
+- `apps/cli/test/account-invites.test.js`: `POST /account/invites/summary` (assinatura, nonce, limite de 30, modo `semanal` e `sorteio`, sem verificação de idade) e `convite-aguardando` como 429.
+- `apps/cli/test/account-invites-cli.test.js`: `VARANDA_INVITE_DROPS` só liga com `1` e exige `VARANDA_INVITES_PER_WEEK`; a perda do lock marca os sorteios como indisponíveis e para o laço.
+- `apps/cli/test/account-push.test.js`: `notifyInvite` (payload só com o tipo, todos os aparelhos ou nenhum, `none` sem transporte ou aparelho, prazo e TTL, um quarto da fila e metade da fila, argumentos inválidos, o relé continua recusando o evento `invite-drop`).
+- `apps/cli/test/account-store.test.js`: `linkedAt` e `linkRoster` (só chave e data do vínculo).
+- `apps/cli/test/push-text.test.js`: payload `invite-drop` com duas chaves e sem texto.
+- `apps/cli/test/web-push.test.js`: `ttlS` válido e inválido.
+- `apps/cli/test/deploy.test.js`: `VARANDA_INVITE_DROPS` no `deploy.sh`, no `compose.web.yaml` e no `.env.example`, e a recusa sem `VARANDA_INVITES_PER_WEEK`.
+- `apps/app/test/signupInvite.test.js`: `dropView` nos dois modos e os textos.
+- `apps/app/test/account.test.js`: o resumo assinado no cliente, a forma exata, a queda para o serviço antigo e resumos malformados indisponíveis, sem repetição automática.
+- `apps/app/test/push-state.test.js`: `?aviso=convite` e a mensagem `varanda-invite-open`.
+- `apps/app/test/sw.test.js`: o worker mostra o título e o texto fixos, qualquer payload com mais que isso cai no texto genérico, e o clique foca o app e envia `varanda-invite-open`.
+- `apps/app/test/help.test.js` e `apps/app/test/legal.test.js`: texto de ajuda e versão 16 dos Termos.
+- `apps/app/test/inviteDrop.test.js`: o aviso dentro do app e a lógica do que já foi visto.
+
+Resultado da CI local (06/11/2026, Node 24, sobre origin/main@46adbd43): `npm run lint` limpo; `npm test` com 380 arquivos, 378 passaram de primeira; `packages/core/test/seeder-delete.test.js` falhou uma vez no conjunto e passou sozinho (28/28); `apps/cli/test/ai-embedder.test.js` falha nesta máquina também na `main`, porque o caminho da pasta de trabalho contém "sharp" e o teste recusa módulos com esse nome; `npm run demo` terminou com DEMO OK. `npm ci --ignore-scripts` não rodou de novo: nenhuma dependência mudou.
+
+### Verificação humana
+
+As caixas abaixo ficam desmarcadas até alguém executar o passo, num aparelho ou navegador de verdade.
+
+Android (aparelho ou emulador com a instalação hospedada, primeiro):
+
+- [ ] Em Ajustes › Convidar pessoas, aparecem quantos convites já chegaram e o aviso dentro do app, sem notificação do sistema.
+- [ ] Antes do momento do convite, tocar em Criar link mostra que o convite ainda não chegou.
+
+iOS (simulador ou aparelho com a instalação hospedada, depois do Android):
+
+- [ ] Os dois passos do Android.
+
+Web e PWA (depois do iOS):
+
+- [ ] Dentro da janela, o aviso aparece com o título e o texto aprovados.
+- [ ] Tocar no aviso abre Ajustes › Convidar pessoas com o app aberto, fechado e com a identidade bloqueada.
+- [ ] Um segundo ciclo do serviço não envia o aviso de novo.
+- [ ] Reiniciar o serviço dentro da semana não envia nada duas vezes.
+- [ ] Na segunda 03:00Z, um convite não usado some.
+- [ ] `docker logs` do serviço `account` mostra só tokens (`sorteio`, `enviado`, `descartado`), nunca horário, chave ou índice.
+- [ ] Com `VARANDA_INVITE_DROPS` vazio, tudo se comporta como na seção 37.
+- [ ] Com um worker antigo (página aberta antes da atualização), o aviso mostra o texto genérico.
+
+### Limites
+
+- Sem push no app nativo: o convite aparece ao abrir o app.
+- Sem transporte de push (sem chave VAPID ou com `push.json` inválido) nada é reservado: os avisos saem quando o push volta, se a semana for a mesma. Quem não tem inscrição no minuto do convite recebe só o aviso dentro do app: o índice é marcado uma vez e não há novo envio naquela semana.
+- Uma falha ao ler o lock logo depois de gravar a reserva, ou uma fila de push que não esvazia até 21:00, perde o aviso daquele momento (o convite continua aberto e o aviso dentro do app continua valendo).
+- O aviso push só vai a quem aceitou Termos e Política na versão 16. Quem ainda não aceitou não tem o momento reservado: o aviso sai na próxima volta do laço depois do aceite, se a semana for a mesma.
+- Duplicata possível só na janela de troca do lock do serviço (a mesma de `invites-store.js`).
+- Uma queda entre a gravação do `invite-drops.json` e o envio perde o aviso, nunca a concessão.
+- Um momento no domingo à noite deixa poucas horas para usar o convite antes de segunda 00:00.
+- Subir N no meio da semana pode abrir um convite novo na hora.
+- Os envios de convite usam no máximo um quarto da fila de push, um envio que não saiu até 21:00 de Brasília é descartado, e nos 2 minutos antes das 21:00 nenhum momento é reservado (fica para a próxima janela da mesma semana), menos no domingo, que não tem outra janela na semana. Uma falha passageira ao ler o lock só pula aquela volta do laço; a perda real do lock para os sorteios até reiniciar.
+- Apps nativos antigos mostram o texto do modo fixo até atualizar. Ao tocar em Criar link antes do momento, um app nativo antigo mostra a frase "Se o convite foi criado, ele já conta nesta semana." (recusa desconhecida `convite-aguardando`).
+- Apagar o `invite-drops-key.json` não reinicia o sorteio: com o `invite-drops.json` ao lado, o serviço o trata como indisponível.
+- Os aparelhos de um mesmo membro saem um depois do outro: com a fila de push atrasada mais de 2 minutos bem na virada das 21:00, os aparelhos mais novos podem perder o aviso pelo prazo.
+- Se a fila de push enche durante a gravação do `invite-drops.json`, o aviso daquele momento é descartado (registro `descartado`) e não é repetido na semana; o convite continua aberto e o aviso dentro do app continua valendo.
+- Na primeira ativação, uma troca do lock bem no meio da criação do `invite-drops-key.json` pode deixar o processo novo com um segredo diferente do gravado; os índices já avisados passam a valer outros minutos depois do reinício (no pior caso, um aviso repetido ou perdido naquela semana).
+- O registro de aviso visto fica um por aparelho: com duas contas no mesmo aparelho, uma pode ver de novo o aviso de um convite já mostrado depois de recarregar.
+- O TTL do aviso de convite (os segundos até 21:00) é diferente do TTL dos avisos sociais (24 h) e fica visível ao serviço de push do navegador, que assim distingue um aviso de convite de um aviso social; o conteúdo continua cifrado e do mesmo tamanho.
+- Ajustes lê a política de convites ao abrir: se o operador ligar os convites com Ajustes já aberto, um clique no aviso só leva a Convidar pessoas depois de fechar e abrir Ajustes de novo.
+- Nenhuma caixa executada nesta documentação.

@@ -476,7 +476,7 @@ test('compose.web.yaml and env examples: web push variables are optional and sco
   }
 })
 
-for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING', 'VARANDA_INVITES_PER_WEEK', 'VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_DIDIT_DAILY_LIMIT', 'VARANDA_AGE_SINCE']) {
+for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING', 'VARANDA_INVITES_PER_WEEK', 'VARANDA_INVITE_DROPS', 'VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_DIDIT_DAILY_LIMIT', 'VARANDA_AGE_SINCE']) {
   test('compose.web.yaml: ' + name + ' is optional and only on the account service', (t) => {
     const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
     const hits = webLines.map((l, i) => [l, i]).filter(([l]) => l.includes(name))
@@ -1112,6 +1112,15 @@ test('deploy.sh: conferir_antes rejects a bad VARANDA_MAX_MEMBERS and accepts an
   const commented = run('VARANDA_MAX_MEMBERS=300 # vagas\n')
   t.is(commented.status, 0, 'an unquoted value with a trailing comment passes: ' + commented.stderr)
   t.is(run('VARANDA_MAX_MEMBERS = 4097\n').status, 1, 'spaces around = do not hide an out-of-range value')
+  // Surprise invites without the weekly number would stop the service at start.
+  for (const extra of ['VARANDA_INVITE_DROPS=1\n', 'VARANDA_INVITE_DROPS=1\nVARANDA_INVITES_PER_WEEK=\n']) {
+    const res = run(extra)
+    t.is(res.status, 1, 'VARANDA_INVITE_DROPS without VARANDA_INVITES_PER_WEEK exits 1')
+    t.ok(res.stderr.includes('VARANDA_INVITE_DROPS exige VARANDA_INVITES_PER_WEEK em deploy/seeder/.env'), 'says what is missing')
+  }
+  const drops = run('VARANDA_INVITES_PER_WEEK=1\nVARANDA_INVITE_DROPS=1\n')
+  t.is(drops.status, 0, 'both set passes: ' + drops.stderr)
+  t.is(run('VARANDA_INVITE_DROPS=2\nVARANDA_INVITES_PER_WEEK=1\n').status, 1, 'VARANDA_INVITE_DROPS only takes 1')
 })
 
 test('deploy.sh: limites_conta matches the ranges in account.js LIMIT_ENV', (t) => {
@@ -1129,7 +1138,7 @@ test('deploy.sh: limites_conta matches the ranges in account.js LIMIT_ENV', (t) 
     const [name, min, max] = entry.split(':')
     fromSh[name] = [Number(min), Number(max)]
   }
-  t.is(Object.keys(fromJs).length, 6, 'six limits in account.js')
+  t.is(Object.keys(fromJs).length, 7, 'seven limits in account.js')
   t.alike(fromSh, fromJs, 'same names and ranges')
   // The shape check allows at most 8 digits, so every max must fit in it.
   for (const [name, [, max]] of Object.entries(fromSh)) t.ok(max < 1e8, name + ' max fits limite_re')

@@ -934,3 +934,65 @@ test('notificationclick: a DM wake focuses the app and posts varanda-dm-open', a
   t.ok(await click(w, { kind: 'dm-wake', actor: ACTOR }))
   t.is(mine.messages.length, 1)
 })
+
+test('push: an invite drop shows its own title and fixed sentence; anything more is the fallback', async (t) => {
+  const w = renderedWorker()
+  const shown = await push(w, pushData({ v: 1, kind: 'invite-drop' }))
+  t.is(shown.title, 'Chegou um convite pra sua varanda')
+  t.is(shown.options.body, 'Escolha com carinho quem você quer chamar: alguém próximo, que faz falta na conversa.')
+  t.is(shown.options.icon, '/icon-192.png')
+  t.is(shown.options.tag, 'varanda-invite-drop')
+  t.is(shown.options.renotify, false)
+  t.alike(plain(shown.options.data), { kind: 'invite-drop' })
+  const bads = [
+    { v: 1, kind: 'invite-drop', actor: ACTOR },
+    { v: 1, kind: 'invite-drop', body: 'Ana chamou você' },
+    { v: 1, kind: 'invite-drop', recipient: RECIPIENT },
+    { v: 1, kind: 'invite-drop', grant: 'g1' },
+    { v: 2, kind: 'invite-drop' },
+    { kind: 'invite-drop' },
+    { v: 1, kind: 'invite' }
+  ]
+  for (const bad of bads) {
+    const fallback = await push(w, pushData(bad))
+    t.is(fallback.title, 'Varanda', JSON.stringify(bad))
+    t.is(fallback.options.body, FALLBACK, JSON.stringify(bad))
+    t.alike(plain(fallback.options.data), {})
+  }
+
+  // The other kinds keep the Varanda title.
+  t.is((await push(w, pushData({ v: 1, kind: 'dm-wake' }))).title, 'Varanda')
+  t.is((await push(w, pushData(valid()))).title, 'Varanda')
+})
+
+test('notificationclick: an invite drop focuses the app and posts varanda-invite-open', async (t) => {
+  const w = renderedWorker()
+  const mine = fakeWindow(ORIGIN + '/')
+  w.windows = [mine]
+  t.ok(await click(w, { kind: 'invite-drop' }), 'closed')
+  t.is(mine.focused, 1)
+  t.alike(plain(mine.messages), [{ type: 'varanda-invite-open' }])
+  t.alike(w.opened, [])
+
+  const fresh = renderedWorker()
+  t.ok(await click(fresh, { kind: 'invite-drop' }))
+  t.alike(fresh.opened, ['/?aviso=convite'])
+
+  const stuck = renderedWorker()
+  const refusing = fakeWindow(ORIGIN + '/')
+  refusing.focus = async () => { throw new Error('InvalidAccessError') }
+  stuck.windows = [refusing]
+  t.ok(await click(stuck, { kind: 'invite-drop' }))
+  t.alike(stuck.opened, ['/?aviso=convite'])
+  t.alike(refusing.messages, [])
+
+  // Extra fields never navigate to the notice and never post.
+  t.ok(await click(w, { kind: 'invite-drop', actor: ACTOR }))
+  t.is(mine.messages.length, 1)
+  const extra = renderedWorker()
+  await click(extra, { kind: 'invite-drop', recipient: RECIPIENT })
+  await click(extra, { kind: 'invite-drop', ref: REF })
+  // An old worker's generic notification (data {}) still opens the root.
+  await click(extra, {})
+  t.alike(extra.opened, ['/', '/', '/'])
+})

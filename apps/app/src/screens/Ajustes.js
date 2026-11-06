@@ -30,7 +30,7 @@
 // The footer under the list shows the build and the commit the installation
 // serves, only through the src/version.js formatters, and a tap copies them.
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
 import { invitePolicy } from '../account'
@@ -121,7 +121,7 @@ function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailin
   )
 }
 
-export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, onOpenPaginas }) {
+export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, onOpenPaginas, inviteNudge = 0 }) {
   const styles = useStyles(makeStyles)
   const { colors, mode, setMode } = useTheme()
   const node = useNode()
@@ -147,8 +147,9 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const [ownFailed, setOwnFailed] = useState(false)
   const [infoTick, setInfoTick] = useState(0)
   const [saved, setSaved] = useState('')
-  // The signup invite policy, read once per opening of the sheet (null: off,
-  // unknown or unreadable, so the Convidar pessoas row hides).
+  // The signup invite policy, read once per opening of the sheet (null: not
+  // answered yet, so the Convidar pessoas row hides). A convite push can open
+  // the screen before this answer; required false means there is nothing to show.
   const [policy, setPolicy] = useState(null)
   const sheetOpen = screen !== null
   const policySeq = useRef(0)
@@ -228,12 +229,27 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
 
   // Only the hosted web node has an account service on its own origin.
   const hosted = node.hosted === true
-  useEffect(() => {
+  // A 404 (null) is "not required", so a screen opened by a convite push
+  // never waits forever. A failed read keeps the row hidden (policy stays
+  // null) and the convite screen offers a retry instead of leaving.
+  const [policyFailed, setPolicyFailed] = useState(false)
+  const askPolicy = useCallback(() => {
     const mine = ++policySeq.current
+    setPolicyFailed(false)
+    invitePolicy().then((p) => { if (mine === policySeq.current) setPolicy(p === null ? { required: false } : p) }, () => { if (mine === policySeq.current) setPolicyFailed(true) })
+  }, [])
+  useEffect(() => {
+    ++policySeq.current
     setPolicy(null)
     if (!sheetOpen || !hosted) return
-    invitePolicy().then((p) => { if (mine === policySeq.current) setPolicy(p) }, () => {})
-  }, [sheetOpen, hosted])
+    askPolicy()
+  }, [sheetOpen, hosted, askPolicy])
+
+  // The push opens Convidar pessoas before the policy is known. A service
+  // that does not require invites has no such screen.
+  useEffect(() => {
+    if (screen === 'convites' && policy !== null && policy.required === false) onNavigate('lista')
+  }, [screen, policy, onNavigate])
 
   useEffect(() => {
     if ((screen !== 'perfil' && screen !== 'convites') || !ready) return
@@ -468,6 +484,15 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         <View style={shown('conta')}>
           <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} />
         </View>
+        {screen === 'convites' && hosted && policy === null
+          ? (
+            <View style={shown('convites')}>
+              {policyFailed
+                ? <Page><Soft>serviço indisponível</Soft><Btn label='tentar de novo' onPress={askPolicy} /></Page>
+                : <Page><Soft>carregando…</Soft></Page>}
+            </View>
+            )
+          : null}
         {inviting
           ? (
             <View style={shown('convites')}>
@@ -478,6 +503,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 perWeek={policy.perWeek}
                 keyFailed={ownFailed}
                 onRetryKey={() => setInfoTick((n) => n + 1)}
+                inviteNudge={inviteNudge}
               />
             </View>
             )

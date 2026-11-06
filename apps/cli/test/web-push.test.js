@@ -13,6 +13,7 @@ const crypto = require('node:crypto')
 const {
   PUSH_ENDPOINT_HOSTS,
   PUSH_ENDPOINT_SUFFIXES,
+  PUSH_TTL_S,
   generateVapidKeys,
   isAllowedEndpoint,
   vapidAuthorization,
@@ -345,4 +346,22 @@ test('sendPush: bad subscription keys are dropped, bad topic or payload throw', 
   await t.exception.all(sendPush({ ...pushArgs(fetch).args, topic: 'a'.repeat(33) }), /topic/)
   await t.exception.all(sendPush({ ...pushArgs(fetch).args, topic: 'com espaço' }), /topic/)
   await t.exception.all(sendPush({ ...pushArgs(fetch).args, payload: 42 }), /payload/)
+})
+
+test('sendPush: TTL defaults to 86400, an explicit ttlS is honoured', async (t) => {
+  const svc = await fakePushService(t)
+  t.is(PUSH_TTL_S, 86400)
+  t.is(await sendPush(pushArgs(svc.fetch).args), 'ok')
+  t.is(await sendPush(pushArgs(svc.fetch, { ttlS: 3601 }).args), 'ok')
+  t.is(await sendPush(pushArgs(svc.fetch, { ttlS: 1 }).args), 'ok')
+  t.alike(svc.seen.map((r) => r.headers.ttl), ['86400', '3601', '1'])
+})
+
+test('sendPush: an invalid ttlS throws before any request', async (t) => {
+  let calls = 0
+  const fetch = () => { calls++; return Promise.resolve(new Response(null, { status: 201 })) }
+  for (const ttlS of [0, -1, 86401, 1.5, '60', null, NaN, Infinity]) {
+    await t.exception.all(sendPush(pushArgs(fetch, { ttlS }).args), TypeError, String(ttlS))
+  }
+  t.is(calls, 0)
 })

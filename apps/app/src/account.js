@@ -41,6 +41,7 @@ const ERROR_MESSAGES = {
   'convite-obrigatorio': INVITE_NEEDED_TEXT,
   'convite-invalido': 'Este convite não vale mais: já foi usado, venceu ou não existe. Peça outro link para quem te convidou.',
   'limite-convites': 'Você já criou os convites desta semana. Na segunda-feira volta a contar.',
+  'convite-aguardando': 'Seu convite desta semana ainda não chegou. Ele aparece de surpresa, com um aviso.',
   'idade-pendente': 'Confirme sua idade antes de continuar.',
   'limite-idade': 'Muitas tentativas de verificação. Tente de novo amanhã.'
 }
@@ -178,7 +179,9 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
     if (data === null || typeof data !== 'object') throw fail('indisponivel', undefined, true)
     return data
   }
-  if (allow404 && res.status === 404) return null
+  // allow404 'route': only a route the service does not have is null; a
+  // refusal that happens to be a 404 (an expired nonce) stays an error.
+  if (allow404 && res.status === 404 && !(allow404 === 'route' && data && data.error === 'expirado')) return null
   const code = data && typeof data.error === 'string' ? data.error : ''
   // `definite`: the route answers a 5xx with an error token only before it
   // changed anything, so that answer is a refusal, not an unknown outcome. A
@@ -302,6 +305,19 @@ export const invitesStart = async ({ member }) => {
   const data = await call('POST', '/account/invites/start', { member })
   if (typeof data.nonce !== 'string') throw toError('indisponivel')
   return { nonce: data.nonce }
+}
+export const invitesSummary = async ({ member, nonce, signature }) => {
+  const data = await call('POST', '/account/invites/summary', { member, nonce, signature }, { allow404: 'route' })
+  if (data === null) return null
+  if (!exactKeys(data, ['mode', 'perWeek', 'opened', 'used', 'remaining', 'resetsAt'])) throw toError('indisponivel')
+  const { mode, perWeek, opened, used, remaining, resetsAt } = data
+  if ((mode !== 'semanal' && mode !== 'sorteio') || !isPerWeek(perWeek) ||
+    !isCount(opened) || opened > perWeek || !isCount(used) ||
+    remaining !== Math.max(0, opened - used) || (mode === 'semanal' && opened !== perWeek) ||
+    !isIso(resetsAt) || new Date(resetsAt).toISOString() !== resetsAt) {
+    throw toError('indisponivel')
+  }
+  return { mode, perWeek, opened, used, remaining, resetsAt }
 }
 export const invitesFinish = async ({ member, nonce, signature }) => {
   const data = await call('POST', '/account/invites/finish', { member, nonce, signature })

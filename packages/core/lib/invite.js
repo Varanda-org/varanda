@@ -10,9 +10,11 @@
 // (varanda-mod-request-v1), a member certificate, an issuer delegation or a
 // Hypercore block signature, and vice versa.
 //
-// The action field exists so a later action (such as revoke) does not need a
-// new prefix; only 'issue' is accepted now. The statement carries NO date
-// (the account service records its own) and nothing about the invited person.
+// The action field lets one prefix cover several requests: 'issue' asks to
+// mint one invite, 'summary' only reads the member's own weekly allowance.
+// The action is one of the signed lines, so a signature for one action never
+// verifies as another. The statement carries NO date (the account service
+// records its own) and nothing about the invited person.
 //
 // Pure: b4a and hypercore-crypto only (loaded by the browser bundle and the
 // account service alike; no '#fs', no network).
@@ -20,7 +22,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 
 const PREFIX = 'varanda-invite-v1'
-const ACTIONS = Object.freeze(['issue'])
+const ACTIONS = Object.freeze(['issue', 'summary'])
 // A base64url nonce of at least 32 bytes of entropy.
 const NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
 const HEX64 = /^[0-9a-f]{64}$/

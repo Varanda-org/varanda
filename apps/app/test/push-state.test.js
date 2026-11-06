@@ -25,7 +25,7 @@ test('the fixed texts are the approved Portuguese', async (t) => {
   t.is(m.PUSH_LABEL, 'Avisos no aparelho')
   t.is(m.PUSH_ON, 'Ativar avisos neste aparelho')
   t.is(m.PUSH_OFF, 'Desligar avisos neste aparelho')
-  t.is(m.PUSH_HINT, 'Receba um aviso quando alguém seguir você, responder, curtir ou republicar o que você publicou. Mostra o nome de quem fez a ação. Só neste aparelho.')
+  t.is(m.PUSH_HINT, 'Receba um aviso quando alguém seguir você, responder, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. Mostra o nome de quem fez a ação. Só neste aparelho.')
   t.is(m.PUSH_DENIED, 'Os avisos do sistema estão desligados neste aparelho.')
   t.is(m.PUSH_UNAVAILABLE, 'Os avisos ainda não estão disponíveis nesta associação.')
   t.is(m.PUSH_UNSUPPORTED, 'No iPhone e no iPad, os avisos só funcionam com o Varanda na Tela de Início.')
@@ -175,6 +175,41 @@ test('parseMessage reads only the worker message', async (t) => {
   t.is(parseMessage({ source: 'varanda-push', kind: 'like', actor, recipient, ref: 'c'.repeat(64) + ':3' }), null, 'bad ref')
   t.is(parseMessage(null), null)
   t.is(parseMessage('varanda-push'), null)
+})
+
+test('invite launches accept one notice without member fields and clean the query', async (t) => {
+  const { parseLaunch, stripLaunch, nextLaunch } = await load()
+  const invite = { kind: 'convite' }
+  t.alike(parseLaunch('?aviso=convite'), invite)
+  t.alike(parseLaunch('aviso=convite'), invite)
+  t.alike(parseLaunch('?conta=x&aviso=convite'), invite)
+  for (const search of [
+    '?aviso=convite&aviso=convite', '?aviso=convite&aviso=follow',
+    '?aviso=follow&aviso=convite', '?aviso=convite&%61viso=convite',
+    '?aviso=Convite', '?aviso=convite%20', '?aviso=convite&actor=' + actor,
+    '?aviso=convite&recipient=' + recipient, '?aviso=convite&ref=' + ref,
+    '?aviso=convite&actor=', '?aviso=convite&recipient=', '?aviso=convite&ref='
+  ]) t.is(parseLaunch(search), null, search)
+  t.is(stripLaunch('?aviso=convite'), '')
+  t.is(stripLaunch('?conta=x%20y&aviso=convite&a=1'), '?conta=x%20y&a=1')
+  t.is(stripLaunch('?aviso=convite&actor=&aviso=convite'), '')
+  t.is(nextLaunch({ held: { kind: 'dm' }, intent: invite, locked: true }), invite)
+  t.is(nextLaunch({ held: invite, intent: null }), invite)
+  const plain = { other: true }
+  t.is(nextLaunch({ held: invite, intent: plain }), plain)
+})
+
+test('invite messages accept only the single type key on a plain object', async (t) => {
+  const { parseMessage } = await load()
+  const message = { type: 'varanda-invite-open' }
+  t.alike(parseMessage(message), { kind: 'convite' })
+  for (const data of [
+    { ...message, extra: 1 }, { ...message, actor }, { ...message, recipient },
+    { ...message, ref }, { ...message, source: 'varanda-push' },
+    { ...message, kind: 'convite' }, { type: 'varanda-invite-open ' },
+    { type: 'convite' }, { type: null }, {}, [message],
+    Object.create(message), Object.assign(new Date(0), message)
+  ]) t.is(parseMessage(data), null)
 })
 
 test('stripLaunch drops the launch fields and keeps the rest in order', async (t) => {
