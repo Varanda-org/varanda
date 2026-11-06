@@ -67,7 +67,7 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Você entra com uma passkey: sem senha e sem e-mail.',
       'Ela fica no gerenciador de senhas do aparelho e abre com biometria ou PIN.',
-      'Guarde-a no Gerenciador de Senhas do Google para entrar no celular e no computador.',
+      'Guarde-a num gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro): é ele que devolve a passkey num aparelho novo. Num computador sem esse gerenciador, use o celular: para criar a conta, toque em criar com o celular; para entrar, toque em Entrar com a passkey e escolha usar outro aparelho. Nos dois casos, leia com a câmera do celular o QR code que aparece na tela do computador.',
       'Se perder a passkey, perde a conta. Outra passkey é outra conta.'
     ])
   }),

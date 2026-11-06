@@ -8,7 +8,11 @@
 // nothing; a tampered record, another public key or another passkey clears
 // it and leaves the node locked; the per-device media nonce is drawn once and
 // stable across resumes, its key is not the identity key; handle.media.upload
-// delegates to the node's mediaUpload.
+// delegates to the node's mediaUpload. The second test: refused passkeys
+// (NO_PRF, NOT_SYNCED, SUPERSEDED) and a pending creation live in kv
+// 'passkeyAttempts' across restarts, refused ids stay excluded from creation
+// and never block a sign-in, the manager is asked to drop only a passkey this
+// page load created, unlock({ any }) and unlock({ phone }) and reset/signOut.
 /* global indexedDB */
 require('fake-indexeddb/auto')
 const test = require('brittle')
@@ -397,5 +401,825 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
   await h.close()
   h = await start()
   t.is((await h.identity.status()).resumed, true, 'resumes again after that ceremony')
+  await h.close()
+})
+
+// 37 bytes of authenticator data: rpIdHash, flags (UP, UV, BE and BS when
+// synced), signCount.
+function authData (synced) {
+  const bytes = new Uint8Array(37)
+  bytes[32] = synced ? 0x1d : 0x05
+  return arrayBufferOf(bytes)
+}
+
+// A fake CredentialsContainer holding many passkeys. createMode: 'results',
+// 'pending' or 'disabled' (no PRF); createPrf: the PRF output of a
+// 'results' creation; synced: the BE flag of the next
+// creation; getPrf: whether a get returns the PRF output. A get with
+// allowCredentials answers only for one of those ids; without it
+// (discoverable) the newest passkey answers.
+function manyAuthenticator () {
+  const fake = {
+    createMode: 'results',
+    createPrf: FIXED32,
+    synced: true,
+    getPrf: true,
+    creds: [],
+    calls: [],
+    create ({ publicKey }) {
+      fake.calls.push({ kind: 'create', publicKey })
+      const cred = fake.add(new Uint8Array(publicKey.user.id))
+      const ext = fake.createMode === 'results'
+        ? { prf: { enabled: true, results: { first: arrayBufferOf(fake.createPrf) } } }
+        : { prf: { enabled: fake.createMode === 'pending' } }
+      return Promise.resolve(fake.credentialOf(cred, ext, fake.synced))
+    },
+    get ({ publicKey }) {
+      fake.calls.push({ kind: 'get', publicKey })
+      const allow = (publicKey.allowCredentials || []).map((c) => toBase64Url(new Uint8Array(c.id)))
+      const pool = allow.length > 0 ? fake.creds.filter((c) => allow.includes(toBase64Url(c.rawId))) : fake.creds
+      const cred = pool[pool.length - 1]
+      if (!cred) return Promise.reject(Object.assign(new Error('none'), { name: 'NotAllowedError' }))
+      const ext = fake.getPrf ? { prf: { results: { first: arrayBufferOf(FIXED32) } } } : {}
+      return Promise.resolve(fake.credentialOf(cred, ext, false))
+    },
+    add (userId) {
+      const cred = { rawId: globalThis.crypto.getRandomValues(new Uint8Array(16)), userId }
+      fake.creds.push(cred)
+      return cred
+    },
+    last () {
+      return fake.creds[fake.creds.length - 1]
+    },
+    remove (cred) {
+      fake.creds = fake.creds.filter((c) => c !== cred)
+    },
+    credentialOf (cred, ext, synced) {
+      return {
+        type: 'public-key',
+        rawId: arrayBufferOf(cred.rawId),
+        id: toBase64Url(cred.rawId),
+        response: { userHandle: arrayBufferOf(cred.userId), getAuthenticatorData: () => authData(synced) },
+        getClientExtensionResults: () => ext
+      }
+    }
+  }
+  return fake
+}
+
+function deleteDb (name) {
+  return new Promise((resolve) => {
+    const req = indexedDB.deleteDatabase(name)
+    req.onsuccess = req.onerror = req.onblocked = () => resolve()
+  })
+}
+
+test('passkey attempts: refused and pending ids survive a restart, cleanup only for passkeys this page created', async (t) => {
+  t.timeout(60000)
+  await deleteDb('varanda-node')
+  await deleteDb('varanda-session')
+  // A seeder entry that accepts sockets and says nothing: no test here syncs.
+  const wss = new ws.WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  wss.on('connection', (socket) => socket.on('error', () => {}))
+  t.teardown(() => {
+    for (const c of wss.clients) c.terminate()
+    return new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  const seederUrl = 'ws://127.0.0.1:' + wss.address().port + '/seeder'
+  const association = hex(generateAssociationKeyPair().publicKey)
+
+  const fake = manyAuthenticator()
+  const signals = []
+  let signalMode = 'ok'
+  function PublicKeyCredential () {}
+  PublicKeyCredential.getClientCapabilities = async () => ({ 'extension:prf': true, hybridTransport: true, userVerifyingPlatformAuthenticator: false })
+  PublicKeyCredential.signalUnknownCredential = async (arg) => {
+    signals.push(arg)
+    if (signalMode === 'throw') throw new Error('not allowed')
+  }
+  installGlobals(t, {
+    navigator: { credentials: { create: (o) => fake.create(o), get: (o) => fake.get(o) } },
+    PublicKeyCredential,
+    isSecureContext: true,
+    location: { hostname: 'localhost', host: 'localhost' },
+    WebSocket: ws.WebSocket
+  })
+  // The first test ran (and cached) web/node.js: load a fresh copy.
+  delete require.cache[require.resolve('../web/node.js')]
+  t.teardown(() => { delete globalThis.VarandaWebNode })
+  require('../web/node.js')
+  const api = globalThis.VarandaWebNode
+  const key = hex((await keyPairFromPrf(new Uint8Array(FIXED32))).publicKey)
+  const start = async () => {
+    const handle = await api.start({ association, seederUrl })
+    t.teardown(() => handle.close(), { force: true })
+    return handle
+  }
+  const idOf = (cred) => toBase64Url(cred.rawId)
+  const excludedOf = (call) => call.publicKey.excludeCredentials.map((c) => toBase64Url(new Uint8Array(c.id)))
+  const lastCall = (kind) => fake.calls.filter((c) => c.kind === kind).pop()
+
+  let h = await start()
+  t.alike(Object.keys(h.identity).sort(), ['complete', 'lock', 'reset', 'signOut', 'status', 'unlock'], 'no new identity method')
+  let status = await h.identity.status()
+  t.is(status.pending, false)
+  t.alike(status.refused, [])
+  t.is(status.hybrid, 'yes')
+  t.is(status.platform, 'no')
+  t.is(status.signal, 'yes')
+
+  // ---- a created passkey without PRF: refused, cleaned up, excluded ----
+  fake.createMode = 'disabled'
+  const noPrf = await errorOf(h.identity.unlock({ register: true }))
+  const noPrfCred = fake.last()
+  t.is(noPrf.code, 'NO_PRF')
+  t.alike(lastCall('create').publicKey.hints, ['client-device', 'hybrid'], 'the default create hints')
+  t.is(noPrf.credentialId, idOf(noPrfCred))
+  t.is(noPrf.userId, hex(noPrfCred.userId))
+  t.is(noPrf.cleaned, true, 'a created NO_PRF passkey is dropped from the manager')
+  t.alike(signals, [{ rpId: 'localhost', credentialId: idOf(noPrfCred) }], 'the signal names exactly that passkey')
+  status = await h.identity.status()
+  t.alike(status.refused, [{ userId: hex(noPrfCred.userId), code: 'NO_PRF', cleaned: true, created: true }], 'refused, without its credential id')
+  await h.close()
+
+  // ---- after a restart: excluded; a not synced creation is refused ----
+  h = await start()
+  fake.createMode = 'results'
+  fake.synced = false
+  signalMode = 'throw'
+  const notSynced = await errorOf(h.identity.unlock({ register: true }))
+  const boundCred = fake.last()
+  t.ok(excludedOf(lastCall('create')).includes(idOf(noPrfCred)), 'a NO_PRF id stays excluded after a restart')
+  t.is(notSynced.code, 'NOT_SYNCED')
+  t.is(notSynced.credentialId, idOf(boundCred))
+  t.is(notSynced.userId, hex(boundCred.userId))
+  t.is(notSynced.cleaned, false, 'a throwing signal gives cleaned false')
+  t.alike(signals[1], { rpId: 'localhost', credentialId: idOf(boundCred) })
+  status = await h.identity.status()
+  t.is(status.unlocked, false, 'nothing is bound')
+  t.is(status.passkeyKnown, false)
+  t.absent(await kvValue('passkey'), 'no passkey record')
+  t.alike(status.refused.filter((e) => e.code === 'NOT_SYNCED'), [{ userId: hex(boundCred.userId), code: 'NOT_SYNCED', cleaned: false, created: true }])
+  fake.synced = true
+  signalMode = 'ok'
+  await h.close()
+
+  // ---- pending creations: the phone hint, a superseded id, a restart ----
+  h = await start()
+  fake.createMode = 'pending'
+  t.alike(await h.identity.unlock({ register: true, phone: true }), { pending: true })
+  const pendingA = fake.last()
+  t.alike(lastCall('create').publicKey.hints, ['hybrid'], 'register with phone sends the hybrid hint only')
+  t.ok(excludedOf(lastCall('create')).includes(idOf(boundCred)), 'a NOT_SYNCED id is excluded next time')
+  const storedA = await kvValue('passkeyAttempts')
+  t.is(storedA.pending.credentialId, idOf(pendingA), 'the pending creation is stored before { pending: true }')
+  t.is(storedA.pending.phone, true)
+  t.alike(await h.identity.unlock({ register: true, phone: true }), { pending: true })
+  const pendingB = fake.last()
+  t.ok(excludedOf(lastCall('create')).includes(idOf(pendingA)), 'the pending id is excluded from a new creation')
+  status = await h.identity.status()
+  t.alike(status.refused.filter((e) => e.code === 'SUPERSEDED'), [{ userId: hex(pendingA.userId), code: 'SUPERSEDED', cleaned: false, created: true }], 'the superseded pending id is refused')
+  await h.close()
+
+  h = await start()
+  status = await h.identity.status()
+  t.is(status.pending, true, 'a pending creation survives a restart')
+  // A restored pending that fails NO_PRF is not this page's creation: no cleanup.
+  fake.getPrf = false
+  const signalsBefore = signals.length
+  const restoredNoPrf = await errorOf(h.identity.complete())
+  t.is(restoredNoPrf.code, 'NO_PRF')
+  t.alike(lastCall('get').publicKey.hints, ['hybrid'], 'complete() of a phone creation sends the hybrid hint')
+  t.is(signals.length, signalsBefore, 'no signal for a pending restored from kv')
+  t.absent(restoredNoPrf.cleaned, 'cleaned absent or false')
+  status = await h.identity.status()
+  t.is(status.pending, false)
+  t.alike(status.refused.find((e) => e.userId === hex(pendingB.userId)), { userId: hex(pendingB.userId), code: 'NO_PRF', cleaned: false, created: true }, 'a restored pending is still a creation of this page')
+  fake.getPrf = true
+
+  fake.calls.length = 0
+  t.alike(await h.identity.unlock({ register: true }), { pending: true })
+  const pendingC = fake.last()
+  t.alike(excludedOf(fake.calls[0]).sort(), [noPrfCred, boundCred, pendingA, pendingB].map(idOf).sort(), 'every refused id is excluded')
+  await h.close()
+  h = await start()
+  t.is((await h.identity.status()).pending, true)
+  t.alike(await h.identity.complete(), { publicKey: key, created: true }, 'complete() finishes a restored pending creation')
+  t.absent('hints' in lastCall('get').publicKey, 'no hints on a get by default')
+  t.is((await kvValue('passkeyAttempts')).pending, null, 'and clears it from the record')
+  status = await h.identity.status()
+  t.is(status.pending, false)
+  t.is(status.unlocked, true)
+  t.is((await kvValue('passkey')).credentialId, idOf(pendingC))
+
+  // ---- sign-in: hints, a NO_PRF never cleaned up, BE clear still unlocks ----
+  await h.identity.signOut()
+  t.ok(await kvValue('passkeyAttempts'), 'signOut keeps the attempts record')
+  t.alike(await h.identity.unlock({ phone: true }), { publicKey: key, created: false })
+  t.alike(lastCall('get').publicKey.hints, ['hybrid'], 'sign-in with phone sends the hybrid hint')
+  await h.identity.signOut()
+  t.alike(await h.identity.unlock(), { publicKey: key, created: false }, 'a get whose authenticator data has BE clear still unlocks')
+  t.absent('hints' in lastCall('get').publicKey)
+  await h.identity.signOut()
+  fake.getPrf = false
+  const signalsNow = signals.length
+  const signInNoPrf = await errorOf(h.identity.unlock())
+  fake.getPrf = true
+  t.is(signInNoPrf.code, 'NO_PRF')
+  t.is(signals.length, signalsNow, 'a sign-in NO_PRF never asks the manager to drop the passkey')
+  t.absent(signInNoPrf.cleaned)
+  t.alike((await h.identity.status()).refused.find((e) => e.code === 'NO_PRF' && e.userId === hex(pendingC.userId)),
+    { userId: hex(pendingC.userId), code: 'NO_PRF', cleaned: false, created: false }, 'a sign-in NO_PRF is not a creation of this page')
+  t.is((await h.identity.status()).passkeyKnown, true, 'the known passkey stays known')
+  t.alike(await h.identity.unlock(), { publicKey: key, created: false }, 'and still signs in')
+
+  // ---- the known passkey is gone from the manager ----
+  await h.identity.signOut()
+  fake.remove(pendingC)
+  const lost = await errorOf(h.identity.unlock())
+  t.is(lost.code, 'CANCELLED')
+  t.is((await h.identity.status()).passkeyKnown, true, 'a known passkey whose sign-in fails stays known')
+  const other = fake.add(new Uint8Array(32).fill(9))
+  t.alike(await h.identity.unlock({ any: true }), { publicKey: key, created: false }, 'unlock({ any: true }) uses the discoverable passkey')
+  t.absent('allowCredentials' in lastCall('get').publicKey, 'a discoverable get')
+  t.is((await kvValue('passkey')).credentialId, idOf(other))
+
+  // ---- reset drops the record, but the device-bound creation ----
+  await h.identity.reset()
+  t.alike(await kvValue('passkeyAttempts'), {
+    v: 1, rpId: 'localhost', pending: null, refused: [{ credentialId: idOf(boundCred), userId: hex(boundCred.userId), code: 'NOT_SYNCED', cleaned: false, created: true }]
+  }, 'reset keeps only the device-bound creation in the attempts record')
+  status = await h.identity.status()
+  t.alike(status.refused, [{ userId: hex(boundCred.userId), code: 'NOT_SYNCED', cleaned: false, created: true }])
+  t.is(status.pending, false)
+  await h.close()
+})
+
+test('passkey attempts: an immediate-PRF replacement keeps the old pending until bound, a stale pending never resolves', async (t) => {
+  t.timeout(60000)
+  await deleteDb('varanda-node')
+  await deleteDb('varanda-session')
+  const wss = new ws.WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  wss.on('connection', (socket) => socket.on('error', () => {}))
+  t.teardown(() => {
+    for (const c of wss.clients) c.terminate()
+    return new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  const seederUrl = 'ws://127.0.0.1:' + wss.address().port + '/seeder'
+  const association = hex(generateAssociationKeyPair().publicKey)
+
+  const fake = manyAuthenticator()
+  function PublicKeyCredential () {}
+  PublicKeyCredential.getClientCapabilities = async () => ({ 'extension:prf': true })
+  PublicKeyCredential.signalUnknownCredential = async () => {}
+  installGlobals(t, {
+    navigator: { credentials: { create: (o) => fake.create(o), get: (o) => fake.get(o) } },
+    PublicKeyCredential,
+    isSecureContext: true,
+    location: { hostname: 'localhost', host: 'localhost' },
+    WebSocket: ws.WebSocket
+  })
+  // A hook run inside the kv write of 'passkeyAttempts', before it settles.
+  let onAttemptsWrite = null
+  const put = globalThis.IDBObjectStore.prototype.put
+  globalThis.IDBObjectStore.prototype.put = function (value, key) {
+    if (key === 'passkeyAttempts' && onAttemptsWrite !== null) {
+      const hook = onAttemptsWrite
+      onAttemptsWrite = null
+      hook()
+    }
+    return put.apply(this, arguments)
+  }
+  t.teardown(() => { globalThis.IDBObjectStore.prototype.put = put })
+  delete require.cache[require.resolve('../web/node.js')]
+  t.teardown(() => { delete globalThis.VarandaWebNode })
+  require('../web/node.js')
+  const api = globalThis.VarandaWebNode
+  const key = hex((await keyPairFromPrf(new Uint8Array(FIXED32))).publicKey)
+  const h = await api.start({ association, seederUrl })
+  t.teardown(() => h.close(), { force: true })
+  const idOf = (cred) => toBase64Url(cred.rawId)
+  const excludedOf = (call) => call.publicKey.excludeCredentials.map((c) => toBase64Url(new Uint8Array(c.id)))
+  const lastCall = (kind) => fake.calls.filter((c) => c.kind === kind).pop()
+
+  // A diary of the FIXED32 key, then signed out.
+  t.alike(await h.identity.unlock({ register: true }), { publicKey: key, created: true })
+  const web = await connectClient(h, { timeoutMs: 60000 })
+  t.is((await web.request('identity.create')).publicKey, key)
+  await h.identity.signOut()
+
+  // ---- a replacement whose install fails: the old pending stays ----
+  fake.createMode = 'pending'
+  t.alike(await h.identity.unlock({ register: true }), { pending: true })
+  const pendingA = fake.last()
+  fake.createMode = 'results'
+  fake.createPrf = OTHER32
+  const mismatch = await errorOf(h.identity.unlock({ register: true }))
+  const failed = fake.last()
+  fake.createPrf = FIXED32
+  t.is(mismatch && mismatch.code, 'MISMATCH', 'the new passkey is another identity')
+  let status = await h.identity.status()
+  t.is(status.pending, true, 'the old pending survives a failed replacement')
+  t.alike(status.refused, [{ userId: hex(failed.userId), code: 'INSTALL_FAILED', cleaned: false, created: true }], 'the new passkey is refused, the old one is not superseded')
+  const stored = await kvValue('passkeyAttempts')
+  t.is(stored.pending.credentialId, idOf(pendingA), 'the old pending is still stored')
+  t.alike(stored.refused.map((e) => e.credentialId), [idOf(failed)], 'and the failed one is stored refused')
+  t.alike(await h.identity.complete(), { publicKey: key, created: true }, "'concluir' still finishes the old pending")
+  await h.identity.signOut()
+
+  // ---- a replacement that binds: only then the old pending is superseded ----
+  fake.createMode = 'pending'
+  t.alike(await h.identity.unlock({ register: true }), { pending: true })
+  const pendingB = fake.last()
+  fake.createMode = 'results'
+  t.alike(await h.identity.unlock({ register: true }), { publicKey: key, created: true })
+  t.ok(excludedOf(lastCall('create')).includes(idOf(failed)), 'the INSTALL_FAILED passkey is excluded from creation')
+  status = await h.identity.status()
+  t.is(status.pending, false)
+  t.alike(status.refused.find((e) => e.code === 'SUPERSEDED'), { userId: hex(pendingB.userId), code: 'SUPERSEDED', cleaned: false, created: true })
+  const after = await kvValue('passkeyAttempts')
+  t.is(after.pending, null)
+  t.ok(after.refused.some((e) => e.credentialId === idOf(pendingB) && e.code === 'SUPERSEDED' && e.created === true), 'the superseded id is stored')
+  await h.identity.signOut()
+
+  // ---- a reset during the pending write: rejects, nothing resurrected ----
+  fake.createMode = 'pending'
+  let resetting = null
+  onAttemptsWrite = () => { resetting = h.identity.reset() }
+  const stale = await errorOf(h.identity.unlock({ register: true }))
+  t.is(stale && stale.code, 'CANCELLED', 'a pending made stale by a reset never resolves { pending: true }')
+  await resetting
+  status = await h.identity.status()
+  t.is(status.pending, false, 'the cleared pending is not resurrected')
+  t.alike(status.refused, [])
+  t.is(await kvValue('passkeyAttempts'), null)
+
+  // ---- a lock during the pending write rejects too ----
+  onAttemptsWrite = () => { h.identity.lock() }
+  const locked = await errorOf(h.identity.unlock({ register: true }))
+  t.is(locked && locked.code, 'CANCELLED', 'a lock during the write cancels the pending answer')
+  await h.close()
+
+  // ---- an entry stored before `created` existed reads as not created ----
+  const legacyId = toBase64Url(new Uint8Array(16).fill(3))
+  await idb('varanda-node', 'kv', 'readwrite', (s) => s.put(JSON.stringify({
+    v: 1, rpId: 'localhost', pending: null, refused: [{ credentialId: legacyId, userId: 'ab', code: 'NO_PRF', cleaned: false }]
+  }), 'passkeyAttempts'))
+  const h2 = await api.start({ association, seederUrl })
+  t.teardown(() => h2.close(), { force: true })
+  t.alike((await h2.identity.status()).refused, [{ userId: 'ab', code: 'NO_PRF', cleaned: false, created: false }])
+  await h2.close()
+})
+
+test('passkey attempts: device-bound creations never sign in, other sign-ins supersede the pending, a reset is final', async (t) => {
+  t.timeout(60000)
+  await deleteDb('varanda-node')
+  await deleteDb('varanda-session')
+  const wss = new ws.WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  wss.on('connection', (socket) => socket.on('error', () => {}))
+  t.teardown(() => {
+    for (const c of wss.clients) c.terminate()
+    return new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  const seederUrl = 'ws://127.0.0.1:' + wss.address().port + '/seeder'
+  const association = hex(generateAssociationKeyPair().publicKey)
+
+  const fake = manyAuthenticator()
+  const signals = []
+  function PublicKeyCredential () {}
+  PublicKeyCredential.getClientCapabilities = async () => ({ 'extension:prf': true })
+  // A throwing signal: refused entries keep cleaned false.
+  PublicKeyCredential.signalUnknownCredential = async (arg) => {
+    signals.push(arg)
+    throw new Error('not allowed')
+  }
+  // A hook run inside navigator.credentials.get, before it answers.
+  let onGet = null
+  installGlobals(t, {
+    navigator: {
+      credentials: {
+        create: (o) => fake.create(o),
+        get: async (o) => {
+          if (onGet !== null) {
+            const hook = onGet
+            onGet = null
+            await hook()
+          }
+          return fake.get(o)
+        }
+      }
+    },
+    PublicKeyCredential,
+    isSecureContext: true,
+    location: { hostname: 'localhost', host: 'localhost' },
+    WebSocket: ws.WebSocket
+  })
+  let failAttemptsWrite = false
+  const put = globalThis.IDBObjectStore.prototype.put
+  globalThis.IDBObjectStore.prototype.put = function (value, key) {
+    if (key === 'passkeyAttempts' && failAttemptsWrite) throw new Error('disk full')
+    return put.apply(this, arguments)
+  }
+  t.teardown(() => { globalThis.IDBObjectStore.prototype.put = put })
+  delete require.cache[require.resolve('../web/node.js')]
+  t.teardown(() => { delete globalThis.VarandaWebNode })
+  require('../web/node.js')
+  const api = globalThis.VarandaWebNode
+  const key = hex((await keyPairFromPrf(new Uint8Array(FIXED32))).publicKey)
+  const h = await api.start({ association, seederUrl })
+  t.teardown(() => h.close(), { force: true })
+  const idOf = (cred) => toBase64Url(cred.rawId)
+  const refusedOf = async (cred) => (await kvValue('passkeyAttempts')).refused.find((e) => e.credentialId === idOf(cred))
+
+  // ---- a creation refused NOT_SYNCED here never signs in ----
+  fake.synced = false
+  const created = await errorOf(h.identity.unlock({ register: true }))
+  const bound = fake.last()
+  fake.synced = true
+  t.is(created.code, 'NOT_SYNCED')
+  t.alike(await refusedOf(bound), { credentialId: idOf(bound), userId: hex(bound.userId), code: 'NOT_SYNCED', cleaned: false, created: true })
+  const signalsBefore = signals.length
+  const blocked = await errorOf(h.identity.unlock({ any: true }))
+  t.is(blocked && blocked.code, 'NOT_SYNCED', 'signing in with a device-bound passkey made here is refused')
+  t.is(blocked.credentialId, idOf(bound))
+  t.is(blocked.userId, hex(bound.userId))
+  t.is(blocked.cleaned, false)
+  t.is(signals.length, signalsBefore, 'no request to drop it')
+  let status = await h.identity.status()
+  t.is(status.unlocked, false, 'nothing is installed')
+  t.is(status.passkeyKnown, false)
+  t.absent(await kvValue('passkey'), 'no passkey record')
+  t.alike(await refusedOf(bound), { credentialId: idOf(bound), userId: hex(bound.userId), code: 'NOT_SYNCED', cleaned: false, created: true }, 'the entry stays a creation of this page')
+
+  // ---- a sign-in NO_PRF keeps an entry's created true ----
+  fake.getPrf = false
+  const boundNoPrf = await errorOf(h.identity.unlock({ any: true }))
+  fake.getPrf = true
+  t.is(boundNoPrf.code, 'NO_PRF')
+  t.is((await refusedOf(bound)).created, true, 'a sign-in NO_PRF never turns created true into false')
+  t.is((await refusedOf(bound)).code, 'NOT_SYNCED', 'a sign-in NO_PRF never downgrades a device-bound refusal')
+  const boundAgain = await errorOf(h.identity.unlock({ any: true }))
+  t.is(boundAgain && boundAgain.code, 'NOT_SYNCED', 'once the manager returns PRF, the device-bound passkey is still refused')
+  status = await h.identity.status()
+  t.is(status.unlocked, false, 'nothing is installed after the NO_PRF either')
+  t.absent(await kvValue('passkey'), 'still no passkey record')
+
+  // ---- a sign-in NO_PRF of the pending creation: created true ----
+  fake.createMode = 'pending'
+  t.alike(await h.identity.unlock({ register: true }), { pending: true })
+  const pendingA = fake.last()
+  fake.getPrf = false
+  const pendingNoPrf = await errorOf(h.identity.unlock({ any: true }))
+  fake.getPrf = true
+  t.is(pendingNoPrf.code, 'NO_PRF')
+  t.is(pendingNoPrf.credentialId, idOf(pendingA))
+  t.is((await h.identity.status()).pending, false, 'the pending creation is cleared')
+  t.alike(await refusedOf(pendingA), { credentialId: idOf(pendingA), userId: hex(pendingA.userId), code: 'NO_PRF', cleaned: false, created: true }, 'the pending creation was made here')
+
+  // ---- signing in with another passkey supersedes the pending ----
+  t.alike(await h.identity.unlock({ register: true }), { pending: true })
+  const pendingB = fake.last()
+  const elsewhere = fake.add(new Uint8Array(32).fill(5))
+  const signalsNow = signals.length
+  t.alike(await h.identity.unlock({ any: true }), { publicKey: key, created: false }, 'a passkey made elsewhere signs in')
+  t.is(signals.length, signalsNow, 'no request to drop the superseded pending')
+  status = await h.identity.status()
+  t.is(status.pending, false)
+  const storedAfter = await kvValue('passkeyAttempts')
+  t.is(storedAfter.pending, null)
+  t.alike(await refusedOf(pendingB), { credentialId: idOf(pendingB), userId: hex(pendingB.userId), code: 'SUPERSEDED', cleaned: false, created: true }, 'the pending creation is kept as superseded')
+  t.is((await kvValue('passkey')).credentialId, idOf(elsewhere))
+
+  // ---- signing in with the pending passkey itself just clears it ----
+  await h.identity.signOut()
+  t.alike(await h.identity.unlock({ register: true }), { pending: true })
+  const pendingC = fake.last()
+  t.alike(await h.identity.unlock({ any: true }), { publicKey: key, created: false })
+  t.is((await h.identity.status()).pending, false)
+  t.absent(await refusedOf(pendingC), 'the pending passkey is not refused')
+  fake.createMode = 'results'
+
+  // ---- a reset whose attempts write fails changes nothing ----
+  const before = await h.identity.status()
+  failAttemptsWrite = true
+  const resetErr = await errorOf(h.identity.reset())
+  failAttemptsWrite = false
+  t.ok(resetErr, 'reset rejects when the attempts record cannot be cleared')
+  status = await h.identity.status()
+  t.is(status.unlocked, true, 'still unlocked')
+  t.is(status.passkeyKnown, true)
+  t.alike(status.refused, before.refused, 'the refused passkeys are kept')
+  t.ok(await kvValue('passkey'), 'the passkey record is kept')
+
+  // ---- a ceremony that fails after a reset records nothing ----
+  await h.identity.signOut()
+  fake.createMode = 'pending'
+  t.alike(await h.identity.unlock({ register: true }), { pending: true })
+  fake.createMode = 'results'
+  fake.getPrf = false
+  onGet = () => h.identity.reset()
+  const stale = await errorOf(h.identity.complete())
+  fake.getPrf = true
+  t.is(stale && stale.code, 'NO_PRF')
+  status = await h.identity.status()
+  t.is(status.pending, false)
+  const boundEntry = { credentialId: idOf(bound), userId: hex(bound.userId), code: 'NOT_SYNCED', cleaned: false, created: true }
+  t.alike(status.refused, [{ userId: hex(bound.userId), code: 'NOT_SYNCED', cleaned: false, created: true }], 'only the device-bound creation survives the reset')
+  t.alike(await kvValue('passkeyAttempts'), { v: 1, rpId: 'localhost', pending: null, refused: [boundEntry] }, 'and nothing else is written back')
+
+  // ---- after the reset the device-bound passkey still never signs in ----
+  fake.creds = [bound]
+  const afterReset = await errorOf(h.identity.unlock({ any: true }))
+  t.is(afterReset && afterReset.code, 'NOT_SYNCED', 'a reset never lets a device-bound creation sign in')
+  t.is((await h.identity.status()).unlocked, false)
+  await h.close()
+})
+
+test("passkey attempts: a NO_PRF at 'concluir' is refused but never signalled, even for a creation of this start", async (t) => {
+  t.timeout(60000)
+  await deleteDb('varanda-node')
+  await deleteDb('varanda-session')
+  const wss = new ws.WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  wss.on('connection', (socket) => socket.on('error', () => {}))
+  t.teardown(() => {
+    for (const c of wss.clients) c.terminate()
+    return new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  const seederUrl = 'ws://127.0.0.1:' + wss.address().port + '/seeder'
+  const association = hex(generateAssociationKeyPair().publicKey)
+
+  const fake = manyAuthenticator()
+  const signals = []
+  function PublicKeyCredential () {}
+  PublicKeyCredential.getClientCapabilities = async () => ({ 'extension:prf': true })
+  PublicKeyCredential.signalUnknownCredential = async (arg) => { signals.push(arg) }
+  installGlobals(t, {
+    navigator: { credentials: { create: (o) => fake.create(o), get: (o) => fake.get(o) } },
+    PublicKeyCredential,
+    isSecureContext: true,
+    location: { hostname: 'localhost', host: 'localhost' },
+    WebSocket: ws.WebSocket
+  })
+  delete require.cache[require.resolve('../web/node.js')]
+  t.teardown(() => { delete globalThis.VarandaWebNode })
+  require('../web/node.js')
+  const api = globalThis.VarandaWebNode
+  const h = await api.start({ association, seederUrl })
+  t.teardown(() => h.close(), { force: true })
+
+  // Created in this very start, so the create ceremony could have signalled
+  // it; by 'concluir' the synced passkey may be the account on another device.
+  fake.createMode = 'pending'
+  t.alike(await h.identity.unlock({ register: true }), { pending: true })
+  const created = fake.last()
+  fake.createMode = 'results'
+  fake.getPrf = false
+  const err = await errorOf(h.identity.complete())
+  fake.getPrf = true
+  t.is(err && err.code, 'NO_PRF')
+  t.is(err.userId, hex(created.userId))
+  t.absent(err.cleaned, 'cleaned absent or false')
+  t.alike(signals, [], 'complete() never calls signalUnknownCredential')
+  const status = await h.identity.status()
+  t.is(status.pending, false)
+  t.alike(status.refused, [{ userId: hex(created.userId), code: 'NO_PRF', cleaned: false, created: true }], 'still refused as a creation of this page')
+  await h.close()
+})
+
+test('passkey attempts: device-bound entries survive the cap, corrupt ids are dropped, refusals hold the lock, a re-created bound passkey is refused', async (t) => {
+  t.timeout(60000)
+  await deleteDb('varanda-node')
+  await deleteDb('varanda-session')
+  const wss = new ws.WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  wss.on('connection', (socket) => socket.on('error', () => {}))
+  t.teardown(() => {
+    for (const c of wss.clients) c.terminate()
+    return new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  const seederUrl = 'ws://127.0.0.1:' + wss.address().port + '/seeder'
+  const association = hex(generateAssociationKeyPair().publicKey)
+
+  const fake = manyAuthenticator()
+  const signals = []
+  // A signal held open by the test: the refusal bookkeeping waits on it.
+  let holdSignal = null
+  function PublicKeyCredential () {}
+  PublicKeyCredential.getClientCapabilities = async () => ({ 'extension:prf': true })
+  PublicKeyCredential.signalUnknownCredential = async (arg) => {
+    signals.push(arg)
+    if (holdSignal !== null) await holdSignal()
+  }
+  installGlobals(t, {
+    navigator: { credentials: { create: (o) => fake.create(o), get: (o) => fake.get(o) } },
+    PublicKeyCredential,
+    isSecureContext: true,
+    location: { hostname: 'localhost', host: 'localhost' },
+    WebSocket: ws.WebSocket
+  })
+  delete require.cache[require.resolve('../web/node.js')]
+  t.teardown(() => { delete globalThis.VarandaWebNode })
+  require('../web/node.js')
+  const api = globalThis.VarandaWebNode
+  const start = async () => {
+    const handle = await api.start({ association, seederUrl })
+    t.teardown(() => handle.close(), { force: true })
+    return handle
+  }
+  const idOf = (cred) => toBase64Url(cred.rawId)
+  const fakeId = (n) => toBase64Url(new Uint8Array(16).fill(n))
+  const putAttempts = (value) => idb('varanda-node', 'kv', 'readwrite', (s) => s.put(JSON.stringify(value), 'passkeyAttempts'))
+  const boundOf = (credentialId) => ({ credentialId, userId: 'ab', code: 'NOT_SYNCED', cleaned: false, created: true })
+  const fillerOf = (n) => ({ credentialId: fakeId(n), userId: 'cd', code: 'NO_PRF', cleaned: false, created: false })
+
+  // ---- corrupt stored ids are dropped: creation still works ----
+  let h = await start()
+  await h.close()
+  await putAttempts({
+    v: 1,
+    rpId: 'localhost',
+    pending: { credentialId: 'a+b', userId: 'ab', phone: false },
+    refused: [boundOf('abcde'), boundOf('a/b='), fillerOf(1)]
+  })
+  h = await start()
+  let status = await h.identity.status()
+  t.is(status.pending, false, 'a corrupt pending id reads as no pending')
+  t.alike(status.refused, [{ userId: 'cd', code: 'NO_PRF', cleaned: false, created: false }], 'corrupt refused ids are dropped')
+  fake.createMode = 'pending'
+  t.alike(await h.identity.unlock({ register: true }), { pending: true }, 'a creation after a corrupt record reaches WebAuthn')
+  fake.createMode = 'results'
+  await h.close()
+
+  // ---- the cap never evicts a device-bound creation ----
+  const fillers = []
+  for (let i = 0; i < 32; i++) fillers.push(fillerOf(i + 10))
+  await putAttempts({ v: 1, rpId: 'localhost', pending: null, refused: [boundOf(fakeId(2)), ...fillers] })
+  h = await start()
+  status = await h.identity.status()
+  t.is(status.refused.length, 32, 'the loader caps at 32')
+  t.is(status.refused.filter((e) => e.code === 'NOT_SYNCED').length, 1, 'the loader keeps the oldest device-bound entry')
+  fake.createMode = 'disabled'
+  const noPrf = await errorOf(h.identity.unlock({ register: true }))
+  fake.createMode = 'results'
+  t.is(noPrf.code, 'NO_PRF')
+  let stored = await kvValue('passkeyAttempts')
+  t.is(stored.refused.length, 32, 'a new refusal keeps the cap')
+  t.ok(stored.refused.some((e) => e.credentialId === fakeId(2) && e.code === 'NOT_SYNCED'), 'a new refusal never evicts the device-bound entry')
+  t.ok(stored.refused.some((e) => e.credentialId === noPrf.credentialId), 'the new refusal is stored')
+  t.absent(stored.refused.some((e) => e.credentialId === fakeId(10)), 'the oldest other entry is evicted')
+  await h.close()
+
+  // ---- device-bound entries alone over the cap: every one stays ----
+  const many = []
+  for (let i = 0; i < 34; i++) many.push(boundOf(fakeId(i + 60)))
+  await putAttempts({ v: 1, rpId: 'localhost', pending: null, refused: [fillerOf(50), ...many] })
+  h = await start()
+  status = await h.identity.status()
+  t.is(status.refused.length, 34, 'no device-bound entry is evicted')
+  t.ok(status.refused.every((e) => e.code === 'NOT_SYNCED'), 'only device-bound entries stay')
+  await h.close()
+  await putAttempts(null)
+
+  // ---- the refusal bookkeeping holds the ceremony lock ----
+  h = await start()
+  const releases = []
+  let reached = null
+  const signalReached = new Promise((resolve) => { reached = resolve })
+  holdSignal = () => {
+    reached()
+    return new Promise((resolve) => { releases.push(resolve) })
+  }
+  fake.createMode = 'disabled'
+  const first = errorOf(h.identity.unlock({ register: true }))
+  await signalReached
+  const secondP = errorOf(h.identity.unlock({ register: true }))
+  const second = await Promise.race([secondP, new Promise((resolve) => setTimeout(() => resolve('still running'), 2000))])
+  t.is(second && second.code, 'LOCKED', 'a ceremony is LOCKED while the previous refusal is still being recorded')
+  holdSignal = null
+  for (const release of releases) release()
+  await secondP
+  const firstErr = await first
+  t.is(firstErr.code, 'NO_PRF')
+  t.is(firstErr.cleaned, true)
+  fake.createMode = 'results'
+
+  // ---- a creation handing back a device-bound passkey is refused ----
+  fake.synced = false
+  const boundErr = await errorOf(h.identity.unlock({ register: true }))
+  const bound = fake.last()
+  fake.synced = true
+  t.is(boundErr.code, 'NOT_SYNCED')
+  t.is(boundErr.cleaned, true)
+  const signalsBefore = signals.length
+  const create = fake.create
+  let prfGiven = null
+  fake.create = ({ publicKey }) => {
+    fake.calls.push({ kind: 'create', publicKey })
+    prfGiven = new Uint8Array(FIXED32)
+    return Promise.resolve(fake.credentialOf(bound, { prf: { enabled: true, results: { first: prfGiven.buffer } } }, true))
+  }
+  const again = await errorOf(h.identity.unlock({ register: true }))
+  fake.create = create
+  t.is(again && again.code, 'NOT_SYNCED', 'a re-created device-bound passkey is refused')
+  t.is(again.credentialId, idOf(bound))
+  t.is(again.userId, hex(bound.userId))
+  t.is(again.cleaned, false)
+  t.is(signals.length, signalsBefore, 'no request to drop it')
+  status = await h.identity.status()
+  t.is(status.unlocked, false, 'nothing is installed')
+  t.is(status.passkeyKnown, false)
+  t.absent(await kvValue('passkey'), 'no passkey record')
+  stored = await kvValue('passkeyAttempts')
+  t.alike(stored.refused.find((e) => e.credentialId === idOf(bound)), { credentialId: idOf(bound), userId: hex(bound.userId), code: 'NOT_SYNCED', cleaned: true, created: true }, 'the entry stays as it was')
+  await h.close()
+})
+
+test('passkey attempts: an excluded id handed back by a creation is never signalled', async (t) => {
+  t.timeout(60000)
+  await deleteDb('varanda-node')
+  await deleteDb('varanda-session')
+  const wss = new ws.WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  wss.on('connection', (socket) => socket.on('error', () => {}))
+  t.teardown(() => {
+    for (const c of wss.clients) c.terminate()
+    return new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  const seederUrl = 'ws://127.0.0.1:' + wss.address().port + '/seeder'
+  const association = hex(generateAssociationKeyPair().publicKey)
+
+  const fake = manyAuthenticator()
+  const signals = []
+  function PublicKeyCredential () {}
+  PublicKeyCredential.getClientCapabilities = async () => ({ 'extension:prf': true })
+  PublicKeyCredential.signalUnknownCredential = async (arg) => { signals.push(arg) }
+  installGlobals(t, {
+    navigator: { credentials: { create: (o) => fake.create(o), get: (o) => fake.get(o) } },
+    PublicKeyCredential,
+    isSecureContext: true,
+    location: { hostname: 'localhost', host: 'localhost' },
+    WebSocket: ws.WebSocket
+  })
+  delete require.cache[require.resolve('../web/node.js')]
+  t.teardown(() => { delete globalThis.VarandaWebNode })
+  require('../web/node.js')
+  const api = globalThis.VarandaWebNode
+  const start = async () => {
+    const handle = await api.start({ association, seederUrl })
+    t.teardown(() => handle.close(), { force: true })
+    return handle
+  }
+  const idOf = (cred) => toBase64Url(cred.rawId)
+  const excludedOf = (call) => call.publicKey.excludeCredentials.map((c) => toBase64Url(new Uint8Array(c.id)))
+  const lastCall = (kind) => fake.calls.filter((c) => c.kind === kind).pop()
+  // An authenticator that ignores excludeCredentials and hands back `cred`.
+  const handBack = (cred, ext, synced) => {
+    const create = fake.create
+    fake.create = ({ publicKey }) => {
+      fake.calls.push({ kind: 'create', publicKey })
+      fake.create = create
+      return Promise.resolve(fake.credentialOf(cred, ext, synced))
+    }
+  }
+
+  // ---- (a) the pending creation, handed back NO_PRF by a later Criar ----
+  let h = await start()
+  fake.createMode = 'pending'
+  t.alike(await h.identity.unlock({ register: true }), { pending: true })
+  const pendingP = fake.last()
+  await h.close()
+  // A new page load: P is pending from kv, not created by this page load.
+  h = await start()
+  t.is((await h.identity.status()).pending, true)
+  handBack(pendingP, { prf: { enabled: false } }, true)
+  const noPrf = await errorOf(h.identity.unlock({ register: true }))
+  t.ok(excludedOf(lastCall('create')).includes(idOf(pendingP)), 'the pending id was on the exclude list')
+  t.is(noPrf.code, 'NO_PRF')
+  t.is(noPrf.credentialId, idOf(pendingP))
+  t.absent(noPrf.cleaned, 'cleaned absent or false for an excluded id')
+  t.alike(signals.filter((s) => s.credentialId === idOf(pendingP)), [], 'no signalUnknownCredential for the pending passkey')
+  await h.close()
+
+  // ---- (b) a sign-in passkey refused NO_PRF, handed back NOT_SYNCED ----
+  h = await start()
+  const signInS = fake.add(new Uint8Array(32).fill(5))
+  fake.getPrf = false
+  const refusedS = await errorOf(h.identity.unlock({ any: true }))
+  fake.getPrf = true
+  t.is(refusedS.code, 'NO_PRF')
+  t.is(refusedS.credentialId, idOf(signInS))
+  t.is((await kvValue('passkeyAttempts')).refused.find((e) => e.credentialId === idOf(signInS)).created, false, 'refused at sign-in, not a creation')
+  handBack(signInS, { prf: { enabled: true, results: { first: arrayBufferOf(FIXED32) } } }, false)
+  const notSynced = await errorOf(h.identity.unlock({ register: true }))
+  t.ok(excludedOf(lastCall('create')).includes(idOf(signInS)), 'the refused sign-in id was on the exclude list')
+  t.is(notSynced.code, 'NOT_SYNCED')
+  t.is(notSynced.credentialId, idOf(signInS))
+  t.absent(notSynced.cleaned, 'cleaned absent or false for an excluded id')
+  t.alike(signals.filter((s) => s.credentialId === idOf(signInS)), [], 'no signalUnknownCredential for the sign-in passkey')
+  t.alike(signals, [], 'no signal at all')
   await h.close()
 })
