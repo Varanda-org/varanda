@@ -220,3 +220,56 @@ test('group info distinguishes unknown parents and orphans', async (t) => {
     t.alike(JSON.parse(output), result)
   }
 })
+
+test('group read renders safe media markers and preserves descriptors in JSON', async (t) => {
+  const filename = path.join(__dirname, '../lib/commands/group.js')
+  const module = { exports: {} }
+  const G = 'a'.repeat(64)
+  const at = '2026-01-01T00:00:00.000Z'
+  const base = { writer: G, diary: G, at, replyTo: null, hidden: false, name: 'Ana', username: null }
+  const photo = { core: G, mime: 'image/png', start: 1, blocks: 1, bytes: 1, sha256: G, width: 1, height: 1 }
+  const privatePhoto = { core: G, start: 1, ...require('@varanda/core/lib/group-media').sealMedia(Buffer.from('fixture'), { plainMime: 'image/gif', w: 1, h: 1 }).item }
+  const result = {
+    items: [
+      { ...base, seq: 5, text: 'álbum\u001b[31m\n\u202e', media: [photo, { ...photo, start: 2, mime: 'image/gif' }] },
+      { ...base, seq: 4, text: '', media: [privatePhoto, { ...privatePhoto, start: 2, plainMime: 'image/webp' }] },
+      { ...base, seq: 3, text: 'oculto', hidden: true, media: [photo] },
+      { ...base, seq: 2, text: 'texto v1' },
+      { ...base, seq: 1, text: 'texto', media: null }
+    ],
+    next: null,
+    hidden: 1,
+    incomplete: false,
+    sealed: 0,
+    epoch: null,
+    state: 'ok'
+  }
+  let output = ''
+  vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+    module,
+    require: name => {
+      if (name === '@varanda/core/lib/member') return { groupRead: async () => result }
+      const mod = require(name)
+      if (name !== '@varanda/rpc') return mod
+      return { ...mod, validateParams: (method, params) => mod.validateParams(method, JSON.parse(JSON.stringify(params))) }
+    },
+    process: { stdout: { write: text => { output += text } }, stderr: { write: () => t.fail('unexpected warning') } }
+  }, { filename })
+  await module.exports.commands.group.run(parseArgs(['group', 'read', G], {}))
+  t.is(output, [
+    at + ' Ana: álbum\\u{1b}[31m\\u{a}\\u{202e} [foto] [gif]',
+    at + ' Ana:  [gif] [foto]',
+    at + ' Ana: (mensagem oculta)',
+    at + ' Ana: texto v1',
+    at + ' Ana: texto',
+    ''
+  ].join('\n'))
+  output = ''
+  await module.exports.commands.group.run(parseArgs(['group', 'read', G, '--json'], {}))
+  t.alike(JSON.parse(output), {
+    ...result,
+    items: result.items.map(item => ({ ...item, media: !item.hidden && item.media ? item.media.map(({ key, nonce, ...d }) => d) : null }))
+  }, 'JSON retains media rather than the display markers')
+  t.absent(output.includes(privatePhoto.key) || output.includes(privatePhoto.nonce), 'no command prints a private item key or nonce')
+  t.is(output.trim().split('\n').length, 1, 'JSON stays on one terminal line')
+})

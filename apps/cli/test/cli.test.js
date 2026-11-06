@@ -85,8 +85,9 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm --page --key --username --group --file
-  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.`
+  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes
+  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
+  --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).`
 
 function parse (argv = [], env = {}) {
   return parseArgs(argv, env, root)
@@ -208,6 +209,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     once: false,
     noPublish: false,
     noDm: false,
+    blobBytes: null,
     newList: false,
     yes: false,
     undo: false,
@@ -271,6 +273,12 @@ test('CLI parser, R5 help and command router', async (t) => {
   t.is(parse(['--once']).once, true)
   t.is(parse(['seed', '--no-dm']).noDm, true)
   t.is(parse(['seed']).noDm, false)
+  t.is(parse(['seed']).blobBytes, null, 'no --blob-bytes keeps the seeder default')
+  t.is(parse(['seed', '--blob-bytes', '32768']).blobBytes, 32768, 'one chunk is the minimum')
+  usage(t, ['seed', '--blob-bytes', '32767'], 'blob-bytes inválido')
+  usage(t, ['seed', '--blob-bytes', '065536'], 'blob-bytes inválido')
+  usage(t, ['seed', '--blob-bytes', '0'], 'blob-bytes inválido')
+  usage(t, ['seed', '--blob-bytes', '1099511627777'], 'blob-bytes acima do máximo de 1099511627776')
   t.is(parse(['mod', 'block', upperKey, '--no-publish']).noPublish, true)
   t.alike(parse(['mod', 'block', upperKey, '--no-publish']).positionals, ['block', upperKey])
   t.is(parse(['mod', 'block', upperKey, '--new-list']).newList, true)
@@ -314,7 +322,8 @@ test('CLI parser, R5 help and command router', async (t) => {
     'ws-host': ['0.0.0.0', 'wsHost', '0.0.0.0'],
     'account-port': ['8790', 'accountPort', 8790],
     'account-host': ['127.0.0.1', 'accountHost', '127.0.0.1'],
-    server: ['https://varanda.example', 'server', 'https://varanda.example']
+    server: ['https://varanda.example', 'server', 'https://varanda.example'],
+    'blob-bytes': ['65536', 'blobBytes', 65536]
   }
   for (const [name, [value, property, expected]] of Object.entries(strings)) {
     const flag = '--' + name

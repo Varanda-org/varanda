@@ -24,6 +24,13 @@
 // actions (pages.js); the composer then stays locked after an uncertain send
 // until "Tentar de novo" (the same signed bytes) or "Descartar", and never
 // signs a second message.
+// Photos and GIFs (a personal account, when the node offers media.putDm and
+// is online): the clip opens the attach sheet; the photos upload in order,
+// then one dm.send carries them (attach-plan.js composePlan, chatSend.js
+// runChatSend) under a progress ring. Cancelar before the send discards them.
+// An uncertain send keeps that exact request (uploads included) and only
+// "Tentar de novo" resends it; nothing is resent by itself. Received photos
+// render inside the bubble through ChatMedia (chatMedia.js sourceFor).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyboardAvoidingView, Platform, StyleSheet, View } from 'react-native'
@@ -41,10 +48,14 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { mergeMessages, newestOf, pageDmRequest, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
 import { pagesDm } from '../pages'
 import { pagesOn } from '../pageGate'
+import { composePlan } from '../attach-plan'
+import { chatMediaRefs, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { Btn, ErrorText, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
 import { ChatComposer } from '../ui/ChatComposer'
+import { ChatMedia } from '../ui/ChatMedia'
+import { useChatAttachments } from '../ui/AttachSheet'
 import { ChatHeader } from '../ui/ChatHeader'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
@@ -55,6 +66,7 @@ import { TopBar } from '../ui/TopBar'
 import { memberKeyOf, useActing } from './Conversa'
 
 const BLOCKED_SEND = 'você bloqueou esta pessoa'
+const unsureSend = (err) => !!(err && (err.uncertain === true || err.message === UNSURE_SEND))
 
 export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite }) {
   const styles = useStyles(makeStyles)
@@ -109,6 +121,16 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
   const [confirmDelete, setConfirmDelete] = useState(false)
   const post = useAction()
   const act = useAction()
+  const attachments = useChatAttachments()
+  // { phase, progress } of a photo send; mediaHold { op } after an uncertain
+  // one (the exact dm.send it made); sendTokenRef is the running send, which
+  // Cancelar marks dead before its request starts.
+  const [mediaSend, setMediaSend] = useState(null)
+  const [mediaHold, setMediaHold] = useState(null)
+  const [mediaError, setMediaError] = useState('')
+  const sendTokenRef = useRef(null)
+  // A closed screen uploads nothing more and sends nothing.
+  useEffect(() => () => { if (sendTokenRef.current) sendTokenRef.current.live = false }, [])
   const lastErr = useRef(null)
   const genRef = useRef(0)
   const rawRef = useRef(raw)
@@ -160,6 +182,8 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     setLoaded(false)
     setHold(null)
     setAskNew(false)
+    setMediaHold(null)
+    attachments.clear()
   }, [pageKey])
 
   useEffect(() => {
@@ -267,7 +291,78 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     reread()
   }
 
+  const mediaApi = node.media && typeof node.media.putDm === 'function' ? node.media : null
+  const canAttach = mediaApi !== null && pageKey === null && node.online !== false
+  const sendingMedia = mediaSend !== null && (mediaSend.phase === 'uploading' || mediaSend.phase === 'sending')
+
+  const mediaDone = (r, text, quoteId) => {
+    setMediaSend(null)
+    if (r.phase === 'done') {
+      setDraft((d) => (d === text ? '' : d))
+      setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))
+      setMediaHold(null)
+      attachments.clear()
+    } else if (r.phase === 'uncertain') {
+      setMediaHold({ op: r.op, text, quoteId })
+    } else if (r.phase === 'failed') {
+      setMediaHold(null)
+      if (r.error && r.error.message === BLOCKED_SEND) setBlocked(true)
+      setMediaError(errorText(r.error))
+    }
+    if (r.phase === 'done' || r.phase === 'uncertain' || (r.phase === 'failed' && r.op)) reread()
+  }
+
+  const sendMedia = async (text, quoteId) => {
+    if (mediaApi === null || sendingMedia || !attachments.ready) return
+    setMediaError('')
+    setAskNew(false)
+    const files = attachments.files
+    let plan
+    try {
+      plan = composePlan({ text, attachments: stagedOf(files), target: { kind: 'dm', to: peer, ...(quoteId ? { replyTo: quoteId } : {}) } })
+    } catch (err) {
+      setMediaError(errorText(err))
+      return
+    }
+    const token = { live: true }
+    sendTokenRef.current = token
+    const r = await runChatSend({
+      plan,
+      files,
+      upload: (f) => mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: f.width, height: f.height }),
+      request: dm,
+      live: () => token.live,
+      onPhase: (p) => { if (token.live) setMediaSend(p) },
+      uncertain: unsureSend
+    })
+    if (sendTokenRef.current === token) sendTokenRef.current = null
+    if (r.phase === 'cancelled') return
+    mediaDone(r, text, quoteId)
+  }
+
+  // The explicit retry of an uncertain photo send: the same dm.send, once.
+  const retryMedia = async () => {
+    if (!mediaHold || sendingMedia) return
+    const held = mediaHold
+    setMediaError('')
+    const r = await retryChatSend({ op: held.op, request: dm, onPhase: setMediaSend, uncertain: unsureSend })
+    mediaDone(r, held.text, held.quoteId)
+  }
+
+  // Before the request starts, Cancelar drops the photos and nothing is sent.
+  const cancelMedia = () => {
+    if (mediaSend !== null && mediaSend.phase === 'sending') return
+    if (sendTokenRef.current) sendTokenRef.current.live = false
+    sendTokenRef.current = null
+    setMediaSend(null)
+    setMediaHold(null)
+    setMediaError('')
+    attachments.clear()
+  }
+
   const onSend = () => {
+    if (mediaHold) return retryMedia()
+    if (attachments.items.length > 0) return sendMedia(draft, replyTo ? replyTo.id : null)
     if (hold && pageKey !== null) return retryHeld()
     const quoteId = replyTo ? replyTo.id : null
     const plan = sendPlan(hold, draft, quoteId)
@@ -362,7 +457,10 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
   else if (lookup === null) blockNote = LABELS.noBox
 
   const left = MAX_TEXT - countChars(draft)
-  const canSend = blockNote === null && node.online !== false && draft.trim() !== '' && left >= 0
+  const staged = attachments.items.length > 0
+  const canSend = blockNote === null && node.online !== false && left >= 0 &&
+    (staged ? attachments.ready && !sendingMedia : draft.trim() !== '')
+  const mediaOf = new Map(raw.map((m) => [messageKey(m), m.media]))
 
   let composer
   if (folder === null) {
@@ -407,6 +505,16 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
   } else {
     const notice = (
       <View style={styles.notice}>
+        {mediaHold
+          ? (
+            <View style={styles.inline}>
+              <Soft>{LABELS.uncertain}</Soft>
+              <Pill label='Tentar de novo' onPress={retryMedia} pending={sendingMedia} />
+              <Pill label='descartar' onPress={cancelMedia} />
+            </View>
+            )
+          : null}
+        {mediaError || attachments.note ? <ErrorText>{mediaError || attachments.note}</ErrorText> : null}
         {hold
           ? (
             <View style={styles.inline}>
@@ -436,9 +544,14 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
         value={draft}
         onChangeText={(t) => { setDraft(t); setAskNew(false) }}
         onSend={onSend}
-        sending={post.pending}
+        sending={post.pending || sendingMedia}
         sendDisabled={!canSend}
-        editable={!(hold && pageKey !== null)}
+        editable={!(hold && pageKey !== null) && mediaHold === null && !sendingMedia}
+        onAttach={canAttach && !hold ? () => attachments.pick() : null}
+        attachments={staged ? attachments.items : null}
+        onRemoveAttachment={mediaHold === null ? attachments.remove : undefined}
+        onCancelAttachments={mediaHold === null && !(mediaSend && mediaSend.phase === 'sending') ? cancelMedia : undefined}
+        progress={sendingMedia ? mediaSend.progress : null}
         reply={replyTo ? { name: replyTo.name, handle: replyTo.mine ? undefined : quoteHandle, text: replyTo.text, mine: replyTo.mine, senderKey: replyTo.mine ? undefined : peer } : null}
         onCancelReply={() => setReplyTo(null)}
         notice={notice}
@@ -480,13 +593,15 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
             actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
           }
           if (!mine && !item.deleted && typeof onReport === 'function') {
-            actions.push({ icon: 'bandeira', label: LABELS.report, danger: true, onPress: () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from }) })
+            actions.push({ icon: 'bandeira', label: LABELS.report, danger: true, onPress: () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from, ...(Array.isArray(mediaOf.get(item.key)) ? { media: mediaOf.get(item.key) } : {}) }) })
           }
           const quoted = item.replyTo !== null && item.replyTo !== undefined
             ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer }
             : null
+          const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media: mediaOf.get(item.key) })
           return (
             <Bubble
+              media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
               item={{ key: item.key, text: item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark }}
               mine={mine}
               shape={bubbleShape(rows, index)}
@@ -497,7 +612,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
             />
           )
         }}
-        extraData={{ now, nameText }}
+        extraData={{ now, nameText, folder }}
         ListHeaderComponent={next ? <View style={styles.pad}><Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} /></View> : null}
         ListEmptyComponent={empty}
         onRefresh={refreshAll}

@@ -16,8 +16,8 @@
 // that orders after the leave, needs a new admit in approval groups and
 // stays under any ban.
 //
-// Pure: b4a, ./records and ./group-crypto (sodium-universal, which loads in
-// Node, Bare and the browser) only. The fold opens envelopes itself; the
+// Pure: b4a, ./records, ./group-crypto and ./group-media (sodium-universal,
+// which loads in Node, Bare and the browser) only. The fold opens envelopes itself; the
 // device's box secret stays with the caller, behind `keys.unseal`.
 
 const b4a = require('b4a')
@@ -29,6 +29,7 @@ const {
   charLength, plainCopy, validRecordCopy
 } = require('./records')
 const { openRecord, wipe, keyTag, keyCommit, MAX_KEY_RECIPIENTS, MAX_SEALED_INNER_BYTES } = require('./group-crypto')
+const { validGroupMedia, copyGroupMedia } = require('./group-media')
 
 // Same rule as lib/feed.js (not imported, to keep this module pure).
 const MAX_FUTURE_MS = 86400000
@@ -50,6 +51,11 @@ const RECORD_KEYS = {
   'group-sealed': ['type', 'kid', 'nonce', 'box', 'at'],
   'group-invites': ['type', 'on', 'seen', 'at']
 }
+// A post with media (docs/protocol.md section 10, "Group post media"): the
+// one other key set of group-post. `card` (null) and `fwd` (0) are reserved,
+// so a v2 post always has media and every post has one encoding; readers
+// from before it skip the whole post.
+const GROUP_POST_V2_KEYS = ['type', 'text', 'replyTo', 'media', 'card', 'fwd', 'seen', 'at']
 const GROUP_TYPES = Object.freeze(Object.keys(RECORD_KEYS))
 // A first `group-key` block (kid null) also commits to its key.
 const FIRST_KEY_KEYS = ['type', 'kid', 'basis', 'keys', 'auth', 'commit', 'at']
@@ -214,7 +220,7 @@ function checkWriterHeader (h) {
   return isCanonicalIso(h.at) ? null : 'date-invalid'
 }
 
-function checkRecord (record, seq, root, community, priv) {
+function checkRecord (record, seq, root, community, priv, sealed) {
   if (!Number.isSafeInteger(seq) || seq < 0) return 'malformed'
   if (seq === 0) return root ? checkHeader(record) : checkWriterHeader(record)
   if (!isPlainObject(record)) return 'malformed'
@@ -228,7 +234,9 @@ function checkRecord (record, seq, root, community, priv) {
   if ((cwAdmin || cwMeta) && hasExactKeys(record, RECORD_KEYS[type])) return 'root-only'
   const keys = type === 'group-key' && record.kid === null
     ? FIRST_KEY_KEYS
-    : cwAdmin ? CW_ADMIN_KEYS : cwMeta ? CW_META_KEYS : community && Object.prototype.hasOwnProperty.call(COMMUNITY_KEYS, type) ? COMMUNITY_KEYS[type] : RECORD_KEYS[type]
+    : type === 'group-post' && hasExactKeys(record, GROUP_POST_V2_KEYS)
+      ? GROUP_POST_V2_KEYS
+      : cwAdmin ? CW_ADMIN_KEYS : cwMeta ? CW_META_KEYS : community && Object.prototype.hasOwnProperty.call(COMMUNITY_KEYS, type) ? COMMUNITY_KEYS[type] : RECORD_KEYS[type]
   if (!hasExactKeys(record, keys)) return 'malformed'
   // Off the root only a demotion or a community meta: naming an admin stays
   // the root's.
@@ -247,7 +255,12 @@ function checkRecord (record, seq, root, community, priv) {
   if (Object.prototype.hasOwnProperty.call(record, 'seen') && record.seen !== null && !validRef(record.seen, 0)) return 'seen-invalid'
   if (type === 'group-post') {
     const { text } = record
-    if (typeof text !== 'string' || charLength(text) < 1 || charLength(text) > MAX_TEXT) return 'text-length'
+    // Media items are private (secretbox ciphertext, key included) inside a
+    // sealed inner and public everywhere else, never mixed.
+    const v2 = keys === GROUP_POST_V2_KEYS
+    if (v2 && (record.card !== null || record.fwd !== 0)) return 'malformed'
+    if (v2 && !validGroupMedia(record.media, sealed)) return 'media-invalid'
+    if (typeof text !== 'string' || charLength(text) < (v2 ? 0 : 1) || charLength(text) > MAX_TEXT) return 'text-length'
     if (hasControlChars(text, true)) return 'control-chars'
     if (record.replyTo !== null && !validRef(record.replyTo, 1)) return 'reply-invalid'
   } else if (type === 'group-leave') {
@@ -313,17 +326,19 @@ function validateWriterHeader (record) {
 // Seq 0 is the header (group-header in the root, group-writer elsewhere).
 // `community` marks a community core (its root, header kind `community`, or
 // one of its writers), `private` a private group: posts, hides and meta
-// travel only sealed there, and keys and envelopes only there.
-function validateGroupRecord (record, seq, { root = false, community = false, private: priv = false } = {}) {
+// travel only sealed there, and keys and envelopes only there. `sealed`
+// marks the inner record of an envelope: only there a post's media is
+// private.
+function validateGroupRecord (record, seq, { root = false, community = false, private: priv = false, sealed = false } = {}) {
   try {
-    return checkRecord(record, seq, root === true, community === true, priv === true)
+    return checkRecord(record, seq, root === true, community === true, priv === true, sealed === true)
   } catch {
     return 'malformed'
   }
 }
 
-function build (record, seq, root, community = false, priv = false) {
-  const reason = validateGroupRecord(record, seq, { root, community, private: priv })
+function build (record, seq, root, community = false, priv = false, sealed = false) {
+  const reason = validateGroupRecord(record, seq, { root, community, private: priv, sealed })
   if (reason) throw new TypeError(reason)
   return record
 }
@@ -346,8 +361,14 @@ function writerHeader ({ group, diary, member = null, box = null, rejoin = null,
   return build({ type: 'group-writer', v: 2, group, diary, member, box, rejoin: copyRef(rejoin), at }, 0, false)
 }
 
-function groupPost ({ text, replyTo = null, seen = null, at = nowIso() } = {}) {
-  return build({ type: 'group-post', text, replyTo: copyRef(replyTo), seen: copyRef(seen), at }, 1, false)
+// Without media the v1 record, byte for byte. `sealed` builds the inner
+// record of an envelope, whose media items are private.
+function groupPost ({ text, replyTo = null, media = null, seen = null, at = nowIso(), sealed = false } = {}) {
+  if (media === null || media === undefined) {
+    return build({ type: 'group-post', text, replyTo: copyRef(replyTo), seen: copyRef(seen), at }, 1, false)
+  }
+  const record = { type: 'group-post', text, replyTo: copyRef(replyTo), media: copyGroupMedia(media, sealed), card: null, fwd: 0, seen: copyRef(seen), at }
+  return build(record, 1, false, false, false, sealed === true)
 }
 
 function groupHide ({ target, on, seen = null, at = nowIso() } = {}) {
@@ -2160,6 +2181,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       at: r.at,
       text: r.text,
       replyTo: r.replyTo === null ? null : { writer: r.replyTo.writer, seq: r.replyTo.seq },
+      ...(Array.isArray(r.media) ? { media: copyGroupMedia(r.media, typeof r.media[0].key === 'string') } : {}),
       hidden
     })
   }
@@ -2859,7 +2881,7 @@ function openEnvelope (env, writer, seq, G, held) {
   if (!isPlainObject(kid) || !hasExactKeys(kid, REF_KEYS) || kid.writer !== env.kid.writer || kid.seq !== env.kid.seq) return null
   const record = {}
   for (const k of Object.keys(value)) if (!INNER_BINDING.includes(k)) record[k] = value[k]
-  return validateGroupRecord(record, seq, { root: writer === G }) === null ? record : null
+  return validateGroupRecord(record, seq, { root: writer === G, sealed: true }) === null ? record : null
 }
 
 // How many coverage requirements ("Eligibility" 3) each candidate first
@@ -3044,6 +3066,7 @@ module.exports = {
   MAX_KEY_RECIPIENTS,
   MAX_KEY_BASIS,
   MAX_SEALED_INNER_BYTES,
+  GROUP_POST_V2_KEYS,
   isWeakBoxKey,
   validateGroupHeader,
   validateWriterHeader,

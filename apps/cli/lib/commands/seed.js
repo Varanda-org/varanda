@@ -5,7 +5,7 @@ const { UsageError } = require('../cli')
 const { startHealth, DEFAULT_HOST } = require('../health')
 const { safe, jsonLine } = require('@varanda/core/lib/safe')
 const { createPushRelay } = require('../push-relay')
-const { createPostageFile } = require('../dm-postage-file')
+const { createPostageFile, createBlobPostageFile } = require('../dm-postage-file')
 
 const USAGE = 'node bin/varanda.js seed [key|cert add|list|drop <chave>|status]'
 
@@ -41,6 +41,7 @@ function eventLine (event) {
     case 'push': return 'push ' + safe(event.reason)
     case 'dm': return 'dm ' + safe(event.reason)
     case 'dm-stamp': return 'dm-stamp ' + safe(event.reason)
+    case 'blob': return 'blob ' + safe(event.reason)
     default: return safe(event.event)
   }
 }
@@ -85,12 +86,16 @@ async function listenWs (flags, seeder) {
 
 function noop () {}
 
-// The seeder's dm option: direct messages are on unless --no-dm. The postage
-// key file is read or made only when a peer first needs it, never here.
-// onDrop is the push relay's wake when there is one.
+// The seeder's dm option: direct messages are on unless --no-dm, and with
+// them the blob stamps, the blob channel and the /blob route (all off with
+// --no-dm). The postage key files (dm-postage.json and blob-postage.json, two
+// separate key pairs) are read or made only when a peer first needs them,
+// never here. onDrop is the push relay's wake when there is one.
 function dmOption (flags, onDrop = noop) {
   if (flags.noDm === true) return null
-  return { postage: createPostageFile(flags.dataDir), onDrop }
+  const dm = { postage: createPostageFile(flags.dataDir), blobPostage: createBlobPostageFile(flags.dataDir), onDrop }
+  if (flags.blobBytes != null) dm.blobBytes = flags.blobBytes
+  return dm
 }
 
 async function runSeeder (flags) {

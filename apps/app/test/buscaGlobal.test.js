@@ -83,6 +83,63 @@ test('plan for an unknown category is empty', async (t) => {
   t.alike(plan(undefined, 'maria'), { kind: 'empty', value: null })
 })
 
+test('debouncePlan requires two trimmed characters and waits 250 ms', async (t) => {
+  const { debouncePlan } = await load()
+  for (const query of ['', '   ', 'a', ' a ', null, undefined]) {
+    t.alike(debouncePlan(query), { run: false, delayMs: 250, minLength: 2 })
+  }
+  t.alike(debouncePlan(' ar '), { run: true, delayMs: 250, minLength: 2 })
+  t.alike(debouncePlan('céu azul', 'céu'), { run: true, delayMs: 250, minLength: 2 })
+})
+
+test('debouncePlan skips an unchanged query without retaining global state', async (t) => {
+  const { debouncePlan } = await load()
+  t.absent(debouncePlan('céu', 'céu').run)
+  t.absent(debouncePlan(' céu ', 'céu  ').run)
+  t.ok(debouncePlan('céu', '').run)
+  t.ok(debouncePlan('céu', '').run, 'independent callers can plan the same query')
+})
+
+test('staleGuard rejects out-of-order answers and invalidates on clear', async (t) => {
+  const { staleGuard } = await load()
+  let seq = 1
+  const first = staleGuard(seq)
+  t.ok(first(seq))
+  const second = staleGuard(++seq)
+  let shown = ''
+  if (second(seq)) shown = 'new answer'
+  if (first(seq)) shown = 'old answer'
+  t.is(shown, 'new answer', 'a late answer cannot replace the newest results')
+  t.absent(first(seq))
+  t.ok(second(seq), 'the latest request can publish more than once')
+  ++seq
+  t.absent(second(seq), 'clearing invalidates a request even without a replacement')
+  t.absent(staleGuard(2)(1), 'only the current sequence matches')
+})
+
+test('recentQueries promotes and deduplicates queries without mutating device state', async (t) => {
+  const { recentQueries } = await load()
+  const list = Object.freeze(['Chuva', 'Céu', ' céu ', 'Horta'])
+  t.alike(recentQueries(list, ' CÉU '), ['CÉU', 'Chuva', 'Horta'])
+  t.alike(list, ['Chuva', 'Céu', ' céu ', 'Horta'])
+  t.alike(recentQueries([], 'Horta'), ['Horta'], 'another device list stays independent')
+  t.alike(recentQueries(['Céu'], 'ceu'), ['ceu', 'Céu'], 'keeps accents in saved queries')
+  for (const query of ['', ' ', ' a ', null, undefined]) {
+    t.alike(recentQueries(['Céu'], query), ['Céu'])
+  }
+  t.alike(recentQueries([null, '', ' a ', ' Céu ', 'céu'], 'Horta'), ['Horta', 'Céu'])
+  t.alike(recentQueries(undefined, 'Céu'), ['Céu'])
+})
+
+test('recentQueries keeps the newest eight by default and accepts a smaller limit', async (t) => {
+  const { recentQueries } = await load()
+  const list = ['um', 'dois', 'três', 'quatro', 'cinco', 'seis', 'sete', 'oito']
+  t.alike(recentQueries(list, 'nove'), ['nove', 'um', 'dois', 'três', 'quatro', 'cinco', 'seis', 'sete'])
+  t.alike(recentQueries(list, 'oito'), ['oito', 'um', 'dois', 'três', 'quatro', 'cinco', 'seis', 'sete'])
+  t.alike(recentQueries(list, 'nove', 2), ['nove', 'um'])
+  t.alike(recentQueries(list, 'nove', 0), [])
+})
+
 test('buscaNotice gates on hosted only and tolerates any argument', async (t) => {
   const { buscaNotice } = await load()
   t.is(buscaNotice({ hosted: false, online: true }), 'not-hosted')
@@ -107,4 +164,32 @@ test('the module imports nothing from react, react-native or node built-ins', as
     t.absent(/^react(-native)?$/.test(spec) || spec.startsWith('node:'), spec + ' is not a forbidden import')
   }
   t.absent(/from\s+'react/.test(src) || /from\s+'node:/.test(src), 'no react or node: import')
+})
+
+test('BuscaGlobal clears shown posts when the draft does not qualify to search', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'BuscaGlobal.js'), 'utf8')
+  const run = src.slice(src.indexOf('const runPosts'), src.indexOf('const submit'))
+  const type = src.slice(src.indexOf('const typePosts'), src.indexOf('// Own and followed authors only'))
+  const noQuery = run.slice(run.indexOf('r.query === null'), run.indexOf('r.truncated'))
+  t.ok(noQuery.includes("postsSent.current = ''") && noQuery.includes('setQuery(null)'), 'no searchable token clears results and postsSent')
+  const short = type.slice(type.indexOf('next.minLength'), type.indexOf('!next.run'))
+  t.ok(short.includes("postsSent.current = ''") && short.includes('setQuery(null)'), 'under the minimum clears results and postsSent')
+})
+
+test('BuscaGlobal keeps the list when an edit folds to the path already shown', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'BuscaGlobal.js'), 'utf8')
+  const run = src.slice(src.indexOf('const runPosts'), src.indexOf('const submit'))
+  t.ok(run.includes('r.query.path === shownPath.current'), 'compares the planned path with the shown one')
+  t.ok(run.indexOf('r.query.path === shownPath.current') < run.indexOf('setQuery(r.query)'), 'before setQuery')
+  t.ok(run.includes('shownPath.current = r.query.path'), 'remembers the path searched')
+  t.is(src.split('shownPath.current = null').length - 1, 3, 'every clear forgets the shown path')
+})
+
+test('BuscaGlobal: Enter always searches again, a hidden pane never searches, the keyboard never rewrites the query', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'BuscaGlobal.js'), 'utf8')
+  const run = src.slice(src.indexOf('const runPosts'), src.indexOf('const submit'))
+  t.ok(run.includes('if (typing && r.query.path === shownPath.current) return'), 'only typing keeps the shown path')
+  t.ok(/if \(category === 'publicacoes'\) return\n\s*postsSeq\.current \+= 1\n\s*stopPostsTimer\(\)\n\s*\}, \[category\]\)/.test(src), 'leaving Publicações stops the pause timer')
+  t.ok(src.includes("const raw = { autoCapitalize: 'none', autoCorrect: false, spellCheck: false }"), 'both panes turn off autocorrect')
+  t.absent(src.includes('mono='), 'no per-pane switch left')
 })

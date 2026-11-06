@@ -313,6 +313,55 @@ test('post and read: causal order, seen, paging backwards, hide', async (t) => {
   t.is(after.hidden, 1)
 })
 
+// A declared and committed photo in m's media core -> its descriptor.
+async function photo (m, { n = 1000, seed = 1, mime = 'image/png' } = {}) {
+  if (m.ctx.mediaKeyPair === undefined) m.ctx.mediaKeyPair = crypto.keyPair()
+  const bytes = b4a.alloc(n)
+  for (let i = 0; i < n; i++) bytes[i] = (i * 13 + seed) & 0xff
+  const sha256 = b4a.toString(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes)), 'hex')
+  const { core, declared } = await ops.mediaPrepare(m.ctx)
+  if (!declared) await ops.declareMediaCore(m.ctx, core)
+  return ops.mediaCommit(m.ctx, { blocks: [bytes], sha256, mime, width: 10, height: 10 })
+}
+
+test('media posts: own declared descriptors round trip, the list row says Foto or GIF', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  const d = await photo(a)
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: '' }), /parâmetro inválido|text/, 'empty text needs media')
+  const { seq } = await ops.groupPost(a.ctx, { group, text: '', media: [d] })
+  const root = await store.openGroupCoreReadOnly(a.storage, group)
+  const stored = JSON.parse(b4a.toString(await root.get(seq)))
+  await root.close()
+  t.alike(stored.media, [d], 'the v2 record carries the descriptor')
+  t.is(stored.card, null)
+  t.is(stored.fwd, 0)
+
+  await ops.groupPost(a.ctx, { group, text: 'só texto' })
+  const page = await ops.groupRead(a.ctx, { group })
+  t.alike(page.items.map((p) => p.media), [null, [d]], 'media per item, null for a text post')
+  t.alike(Object.keys(page.items[1]).slice(0, 8), ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'media', 'hidden'])
+
+  const community = groupCommunity.get(group)
+  const row = async () => (await ops.communityInfo(a.ctx, { community })).groups.find((g) => g.group === group).last.preview
+  t.is(await row(), 'só texto')
+  await ops.groupPost(a.ctx, { group, text: '', media: [d] })
+  t.is(await row(), 'Foto')
+  const gif = await photo(a, { seed: 2, mime: 'image/gif' })
+  await ops.groupPost(a.ctx, { group, text: '', media: [gif] })
+  t.is(await row(), 'GIF')
+  await ops.groupPost(a.ctx, { group, text: '', media: [gif, d] })
+  t.is(await row(), 'Foto', 'GIF only when every item is one')
+  await ops.groupPost(a.ctx, { group, text: 'legenda', media: [d] })
+  t.is(await row(), 'legenda')
+
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: 'x', media: [d], sealed: true }), /mídia inválida/, 'a public descriptor is not a private item')
+  const foreign = await photo(b)
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: 'x', media: [foreign] }), /mídia inválida/, 'another diary\'s core is refused')
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: 'x', media: [{ ...d, start: d.start + 50 }] }), /mídia inválida/, 'blocks not committed are refused')
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: 'x', sealed: true }), /mídia cifrada só em grupo privado/, 'sealed in a public group')
+})
+
 test('join, post and read across two members match the fold', async (t) => {
   const { a, b } = await pair()
   const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })

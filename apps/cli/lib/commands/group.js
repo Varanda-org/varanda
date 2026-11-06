@@ -116,12 +116,16 @@ async function postRun (flags) {
 
 async function readRun (flags) {
   const result = await member.groupRead(ctxOf(flags), readParams(groupKey(flags), flags))
+  // Nothing here shows an image, and no command prints a secret: a private
+  // item's key and nonce stay out of the output.
+  result.items = result.items.map((item) => ({ ...item, media: !item.hidden && item.media ? item.media.map(({ key, nonce, ...d }) => d) : null }))
   if (flags.json) {
     process.stdout.write(jsonLine(result) + '\n')
     return
   }
   for (const item of result.items) {
-    process.stdout.write(item.at + ' ' + authorLabel(item) + ': ' + (item.hidden ? '(mensagem oculta)' : safe(item.text)) + '\n')
+    const markers = (item.media || []).map((media) => (media.plainMime || media.mime) === 'image/gif' ? ' [gif]' : ' [foto]').join('')
+    process.stdout.write(item.at + ' ' + authorLabel(item) + ': ' + (item.hidden ? '(mensagem oculta)' : safe(item.text + markers)) + '\n')
   }
   if (result.next !== null) {
     process.stdout.write('mais antigas: --before ' + result.next.at + ',' + result.next.writer + ',' + result.next.seq + '\n')

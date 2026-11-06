@@ -140,3 +140,67 @@ test('canonical base64 wire integers', (t) => {
   t.is(fromBase64(null), null)
   t.exception.all(() => bigToBytes(2n ** 2048n), TypeError)
 })
+
+function referenceBlobRep (token) {
+  const seed = Buffer.concat([Buffer.from('varanda/blob-stamp-fdh/v1', 'utf8'), token])
+  const blocks = []
+  for (let i = 0; blocks.length * 32 < 256; i++) {
+    const counter = Buffer.alloc(4)
+    counter.writeUInt32BE(i)
+    blocks.push(crypto.createHash('sha256').update(Buffer.concat([seed, counter])).digest())
+  }
+  return Buffer.concat(blocks).subarray(0, 256)
+}
+
+test('blob stamp constants', (t) => {
+  t.is(postage.BLOB_STAMP_FDH_DOMAIN, 'varanda/blob-stamp-fdh/v1')
+  t.is(postage.BLOB_STAMPS_PER_DAY, 1024)
+  t.alike(postage.STAMP_KINDS, ['dm', 'blob'])
+  t.not(postage.BLOB_STAMP_FDH_DOMAIN, require('../lib/dm').DM_STAMP_FDH_DOMAIN)
+})
+
+test('the blob domain gives other representatives; unknown kinds are refused', (t) => {
+  t.is(representative(TOKEN, 'blob'), BigInt('0x' + referenceBlobRep(FIXTURE.token).toString('hex')), 'blob representative matches node:crypto MGF1')
+  t.is(representative(TOKEN, 'dm'), representative(TOKEN), 'dm is the default')
+  t.not(representative(TOKEN, 'blob'), representative(TOKEN))
+  t.exception.all(() => representative(TOKEN, 'other'), TypeError)
+  t.exception.all(() => newToken(N, 'other'), TypeError)
+  t.absent(isUsableToken(TOKEN, N, 'other'))
+  const sig = fromBase64(FIXTURE.sig)
+  t.absent(verify(TOKEN, sig, PUB, 'other'), 'unknown kind never verifies')
+})
+
+test('a DM stamp never verifies as a blob stamp and back, even under one key', (t) => {
+  // The same key on both sides is the worst case: the domain alone must still
+  // keep the two stamp kinds apart (the seeder also keeps the keys apart).
+  const dmToken = newToken(N)
+  const dmBlind = blind(representative(dmToken), N, E)
+  const dmSig = unblind(sign(dmBlind.blinded, N, D), dmBlind.r, N)
+  t.ok(verify(dmToken, dmSig, PUB))
+  t.ok(verify(dmToken, dmSig, PUB, 'dm'))
+  t.absent(verify(dmToken, dmSig, PUB, 'blob'), 'a DM stamp is no blob stamp')
+
+  const blobToken = newToken(N, 'blob')
+  t.ok(isUsableToken(blobToken, N, 'blob'))
+  const blobBlind = blind(representative(blobToken, 'blob'), N, E)
+  const blobSig = unblind(sign(blobBlind.blinded, N, D), blobBlind.r, N)
+  t.ok(verify(blobToken, blobSig, PUB, 'blob'))
+  t.absent(verify(blobToken, blobSig, PUB), 'a blob stamp is no DM stamp')
+  t.absent(verify(blobToken, blobSig, PUB, 'dm'))
+})
+
+test('a stamp signed by another key verifies under that key only', (t) => {
+  const other = makeFixture()
+  const otherPub = publicKey(other.n, other.e)
+  t.not(otherPub.kid, PUB.kid)
+  // A blinded DM value signed with the other private key, as a blob request
+  // signed by the blob key would be; the value must be below both moduli.
+  let token, blinded, r
+  do {
+    token = newToken(N)
+    ;({ blinded, r } = blind(representative(token), N, E))
+  } while (blinded >= other.n)
+  const crossed = unblind(sign(blinded, other.n, other.d) % N, r, N)
+  t.absent(verify(token, crossed, PUB), 'the DM key refuses a signature by the other key')
+  t.absent(verify(token, crossed, otherPub, 'blob'))
+})

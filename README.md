@@ -149,8 +149,9 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm --page --key --username --group --file
+  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
+  --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).
 ```
 
 `--json` coloca um objeto JSON na última linha da saída padrão. Em `sync` e `seed`, cada evento é uma linha JSON e o resultado fecha a saída. Nenhum comando imprime chave secreta. `seed key` imprime só a chave pública Noise do semeador.
@@ -455,6 +456,10 @@ npm run demo -- --keep
 Para quem mantém um semeador ligado: comandos de operação, saúde e métricas, serviço supervisionado (Docker Compose ou systemd) e a política de registros. Os arquivos de implantação ficam em `deploy/seeder/`.
 
 `seed --no-dm` desliga as mensagens diretas nesse semeador: ele não abre os canais `varanda/dm/1` nem `varanda/dm-stamp/1`, não guarda o conjunto de envelopes e não emite selos, e o membro vê os dois canais como sem suporte. Sem a opção, os dois canais ficam ligados.
+
+Com as mensagens diretas ligadas, o semeador também guarda a mídia cifrada das conversas: o canal anônimo `varanda/blob/1` recebe pedaços selados com selos de mídia, assinados por um par de chaves à parte em `<dados>/blob-postage.json` (mesma rotação de 7 dias e mesmo limite de 14 dias de `dm-postage.json`; um arquivo com a mesma chave das mensagens é recusado e só os selos de mídia param). A contagem diária desses selos fica em `<dados>/blob-stamps.json`, separada de `dm-stamps.json`. Os pedaços ficam em `<dados>/blobs/` por 7 dias, até `--blob-bytes` no total (padrão 2 GiB). `seed --no-dm` desliga também os selos de mídia, o canal e a rota `/blob`.
+
+A mesma porta da entrada WebSocket serve `GET` ou `HEAD /blob/<id>/<índice>` (id em 64 hexadecimais minúsculos, índice decimal canônico): só um pedaço de uma mídia completa, exatamente como foi guardado, com `Cache-Control: private, max-age=604800`, sem autenticação e sem cookie. Qualquer outra coisa, inclusive um pedido com query string, é o mesmo `404` (`não encontrado`, sem cache), sem dizer se o id existe. Divide os limites de `/media` (16 respostas ao mesmo tempo e 64 pedidos por segundo, somando as duas rotas, senão `503 ocupado`). Nada é registrado: nem id, nem índice, nem endereço.
 
 ### Comandos de operação
 

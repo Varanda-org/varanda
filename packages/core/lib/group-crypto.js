@@ -27,7 +27,8 @@ const SEAL_BYTES = sodium.crypto_box_SEALBYTES
 const MAX_KEY_RECIPIENTS = 48
 // The inner record's compact JSON (docs/protocol.md, `group-sealed`): with
 // the base64 growth and the envelope fields it leaves the block under
-// MAX_BLOCK_BYTES.
+// MAX_BLOCK_BYTES. The worst post (1000 lone surrogates, replies and four
+// private media items, lib/group-media.js) takes about 8.5 KB of it.
 const MAX_SEALED_INNER_BYTES = 12000
 const MAX_SEALED_PLAIN_BYTES = 1024
 const KEY_TAG_BYTES = 16

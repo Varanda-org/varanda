@@ -17,6 +17,11 @@
 // file this module would not have written (any other version or shape)
 // fails closed with Error('dm-postage
 // inválido') and is never overwritten: the operator repairs or removes it.
+//
+// The blob stamp keys (media chunks) live apart in <dataDir>/blob-postage.json
+// with the same shape, rotation, maximum age and invariant (blob-pool.js keeps
+// spent tokens for 14 days too); its errors say 'blob-postage inválido'. A key
+// shared by both files is refused by the seeder, never here.
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -24,14 +29,15 @@ const { writeJsonAtomic } = require('@varanda/core/lib/store')
 const { kidOf, parsePublicKey } = require('@varanda/core/lib/dm-postage')
 
 const FILE = 'dm-postage.json'
+const BLOB_FILE = 'blob-postage.json'
 const DAY_MS = 86400000
 const ROTATE_MS = 7 * DAY_MS
 const MAX_AGE_MS = 14 * DAY_MS
 const MAX_KEYS = 2
 const DECIMAL = /^[1-9][0-9]*$/
 
-function invalid () {
-  return new Error('dm-postage inválido')
+function invalid (file = FILE) {
+  return new Error((file === BLOB_FILE ? 'blob-postage' : 'dm-postage') + ' inválido')
 }
 
 function isPlainObject (x) {
@@ -48,15 +54,15 @@ function fromBase64url (s) {
 }
 
 // { kid, n, e, d, createdAt } or throws.
-function checkKey (k) {
-  if (!isPlainObject(k) || !exactKeys(k, ['kid', 'n', 'e', 'd', 'createdAt'])) throw invalid()
-  if (parsePublicKey({ v: 1, kid: k.kid, n: k.n, e: k.e }) === null) throw invalid()
-  if (typeof k.d !== 'string' || !DECIMAL.test(k.d) || BigInt(k.d) >= BigInt(k.n)) throw invalid()
-  if (!Number.isSafeInteger(k.createdAt) || k.createdAt < 0) throw invalid()
+function checkKey (k, name) {
+  if (!isPlainObject(k) || !exactKeys(k, ['kid', 'n', 'e', 'd', 'createdAt'])) throw invalid(name)
+  if (parsePublicKey({ v: 1, kid: k.kid, n: k.n, e: k.e }) === null) throw invalid(name)
+  if (typeof k.d !== 'string' || !DECIMAL.test(k.d) || BigInt(k.d) >= BigInt(k.n)) throw invalid(name)
+  if (!Number.isSafeInteger(k.createdAt) || k.createdAt < 0) throw invalid(name)
   return { kid: k.kid, n: k.n, e: k.e, d: k.d, createdAt: k.createdAt }
 }
 
-function readKeys (file) {
+function readKeys (file, name) {
   let raw
   try {
     raw = fs.readFileSync(file, 'utf8')
@@ -68,13 +74,13 @@ function readKeys (file) {
   try {
     doc = JSON.parse(raw)
   } catch {
-    throw invalid()
+    throw invalid(name)
   }
-  if (!isPlainObject(doc) || doc.v !== 2 || !exactKeys(doc, ['v', 'keys']) || !Array.isArray(doc.keys)) throw invalid()
-  if (doc.keys.length < 1 || doc.keys.length > MAX_KEYS) throw invalid()
-  const keys = doc.keys.map(checkKey)
+  if (!isPlainObject(doc) || doc.v !== 2 || !exactKeys(doc, ['v', 'keys']) || !Array.isArray(doc.keys)) throw invalid(name)
+  if (doc.keys.length < 1 || doc.keys.length > MAX_KEYS) throw invalid(name)
+  const keys = doc.keys.map((k) => checkKey(k, name))
   for (let i = 1; i < keys.length; i++) {
-    if (keys[i].createdAt > keys[i - 1].createdAt || keys[i].kid === keys[i - 1].kid) throw invalid()
+    if (keys[i].createdAt > keys[i - 1].createdAt || keys[i].kid === keys[i - 1].kid) throw invalid(name)
   }
   return keys
 }
@@ -97,16 +103,36 @@ function rotate (keys, now) {
 
 // { kid, n, e, d, keys }: the current key's fields at the top, every usable
 // key (newest first) in keys. Generates and rotates as the header says.
-function loadOrCreate (dataDir, { now = Date.now } = {}) {
+// name is FILE or BLOB_FILE.
+function loadOrCreate (dataDir, { now = Date.now, name = FILE } = {}) {
+  return load(dataDir, now, name).got
+}
+
+// loadOrCreate, and whether it wrote the file.
+function load (dataDir, now, name) {
+  if (name !== FILE && name !== BLOB_FILE) throw new TypeError('invalid postage file name')
   const t = Math.max(0, Math.floor(now()))
-  const file = path.join(dataDir, FILE)
-  const { keys, changed } = rotate(readKeys(file), t)
+  const file = path.join(dataDir, name)
+  const { keys, changed } = rotate(readKeys(file, name), t)
   if (changed) {
     fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 })
     writeJsonAtomic(file, { v: 2, keys }, 0o600)
   }
   const current = keys[0]
-  return { kid: current.kid, n: current.n, e: current.e, d: current.d, keys: keys.map((k) => ({ ...k })) }
+  return { got: { kid: current.kid, n: current.n, e: current.e, d: current.d, keys: keys.map((k) => ({ ...k })) }, wrote: changed }
+}
+
+// What identifies the file on disk without reading it: a replaced, rewritten
+// or removed file gives another string.
+function fileStamp (file) {
+  let st
+  try {
+    st = fs.statSync(file, { bigint: true })
+  } catch (err) {
+    if (err.code === 'ENOENT') return 'missing'
+    throw err
+  }
+  return [st.dev, st.ino, st.size, st.mtimeNs, st.ctimeNs].join(':')
 }
 
 // The public part of a key: never d.
@@ -114,31 +140,47 @@ function publicPart (key) {
   return { v: 1, kid: key.kid, n: key.n, e: key.e }
 }
 
-// The seeder's dm.postage: get() reads the file only on the first call and
-// again once a key is due to rotate or to be forgotten; between those it
-// answers the same object.
-function createPostageFile (dataDir, { now = Date.now } = {}) {
+// The seeder's dm.postage: get() reads the file on the first call, again
+// once a key is due to rotate or to be forgotten, and again whenever the file
+// on disk changed (an operator replaced or removed it); otherwise it answers
+// the same object. name is FILE (the default) or BLOB_FILE.
+function createPostageFile (dataDir, { now = Date.now, name = FILE } = {}) {
+  if (name !== FILE && name !== BLOB_FILE) throw new TypeError('invalid postage file name')
+  const file = path.join(dataDir, name)
   let cached = null
   let dueAt = 0
+  let stamp = null
   return {
     async get () {
       const t = now()
-      if (cached !== null && t < dueAt) return cached
-      const got = loadOrCreate(dataDir, { now: () => t })
+      const before = fileStamp(file)
+      if (cached !== null && t < dueAt && before === stamp) return cached
+      const { got, wrote } = load(dataDir, () => t, name)
       const due = [got.keys[0].createdAt + ROTATE_MS, ...got.keys.slice(1).map((k) => k.createdAt + MAX_AGE_MS)]
       cached = got
       dueAt = Math.min(...due)
+      // Only our own write moves the stamp past `before`: a change made by
+      // someone else while the file was read keeps the old stamp, so the next
+      // get() reads it again.
+      stamp = wrote ? fileStamp(file) : before
       return cached
     }
   }
 }
 
+// The seeder's dm.blobPostage.
+function createBlobPostageFile (dataDir, { now = Date.now } = {}) {
+  return createPostageFile(dataDir, { now, name: BLOB_FILE })
+}
+
 module.exports = {
   FILE,
+  BLOB_FILE,
   ROTATE_MS,
   MAX_AGE_MS,
   MAX_KEYS,
   loadOrCreate,
   publicPart,
-  createPostageFile
+  createPostageFile,
+  createBlobPostageFile
 }
