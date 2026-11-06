@@ -1,10 +1,10 @@
 // The attach sheet of a chat composer and the photos it stages.
 //
-// AttachSheet: opened by the composer's clip button. One row today, 'Foto'
-// (the gallery, up to four images; a GIF chosen there is a photo whose bytes
-// are kept as they are). 'GIF' (search) and 'Áudio' have their slots below
-// but stay out of the sheet until their flows exist: a planned option must
-// never read as available.
+// AttachSheet: opened by the composer's clip button. 'Foto' (the gallery, up
+// to four images; a GIF chosen there is a photo whose bytes are kept as they
+// are), and 'GIF' (GifPicker.js) only where the account service offers the
+// search to this member (`gif`). 'Áudio' keeps its slot below but stays out
+// of the sheet: a planned option must never read as available.
 //
 // useChatAttachments: the staged photos of one composer. Each chosen file is
 // encoded at once (../media/encode: a photo is re-encoded, which strips EXIF
@@ -12,6 +12,9 @@
 // read (chatSend.js boundedFile, mediaBounds from @varanda/rpc) before it can
 // be uploaded. A thumbnail is a device-local URL of those bytes, released on
 // remove, clear and unmount. Nothing is uploaded here: the screen sends.
+// pick(file) stages an already fetched file (a GIF from GifPicker, checked
+// there like a gallery GIF) without opening the gallery; it is bounded again
+// here, so every staged file passed the same check.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { pickImages } from '../media/attach'
@@ -31,11 +34,16 @@ const OPTIONS = [
 
 export const ATTACH_OPTIONS = OPTIONS.filter((o) => o.planned !== true)
 
+// The planned GIF slot is the one option a capability turns on.
+export function attachOptions ({ gif = false } = {}) {
+  return OPTIONS.filter((o) => o.planned !== true || (o.key === 'gif' && gif === true))
+}
+
 // A compact bottom panel as tall as its rows (ActionsSheet), as the chat
 // apps' attach menus are; the picker opens only once the panel is gone, so
 // the system picker never stacks on a closing sheet.
-export function AttachSheet ({ open, onClose, onPick }) {
-  const actions = ATTACH_OPTIONS.map((option) => ({
+export function AttachSheet ({ open, onClose, onPick, gif = false }) {
+  const actions = attachOptions({ gif }).map((option) => ({
     icon: option.icon,
     label: option.label,
     onPress: () => onPick(option.key)
@@ -82,16 +90,21 @@ export function useChatAttachments () {
     setNote('')
   }, [])
 
-  const pick = useCallback(async () => {
+  const pick = useCallback(async (ready) => {
     setNote('')
     // Taken before the picker opens: a clear or an unmount while it is open
     // makes its late result stale, and nothing is staged or created from it.
     const gen = genRef.current
+    const given = ready && typeof ready === 'object' && ready.bytes instanceof Uint8Array ? ready : null
     let picked
-    try {
-      picked = await pickImages()
-    } catch {
-      return
+    if (given !== null) {
+      picked = [given]
+    } else {
+      try {
+        picked = await pickImages()
+      } catch {
+        return
+      }
     }
     if (gen !== genRef.current) return
     if (!Array.isArray(picked) || picked.length === 0) return
@@ -107,7 +120,7 @@ export function useChatAttachments () {
       let file = null
       let error = ''
       try {
-        file = boundedFile(await encodeFile(source))
+        file = boundedFile(given !== null ? source : await encodeFile(source))
         if (file === null) error = 'formato não aceito'
       } catch (err) {
         error = errorText(err)

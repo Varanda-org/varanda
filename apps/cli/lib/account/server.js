@@ -16,6 +16,7 @@ const { createAgeRoutes } = require('./age-routes')
 const { createRecoveryRoutes } = require('./recovery-routes')
 const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, mintRedeem, redeemMatches, accountReturnUrl, appReturnPage, header } = require('./app-return')
 const { createPagesRoutes } = require('./pages-routes')
+const { createGifRoutes } = require('./gif-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -147,7 +148,11 @@ const ERROR_STATUS = Object.freeze({
   'sem-permissao': 403,
   pausada: 409,
   encerrada: 410,
-  'midia-invalida': 400
+  'midia-invalida': 400,
+  // GIF search (./gif-routes.js): the operator left it off, or the member
+  // spent its daily searches or images.
+  'feature-off': 404,
+  'limite-gif': 429
 })
 
 const BASE_HEADERS = Object.freeze({
@@ -633,6 +638,10 @@ function checkRawPost (req, origin) {
 // `pages` (null: every page POST answers 404 and the policy { available:
 // false }) is { keys, writer, pagesStore, dir, blocklist? } for
 // ./pages-routes.js; without a blocklist the moderation desk's is used.
+// `gif` (null: off, the policy answers { enabled: false } and every other
+// /account/gif/* route 404 'feature-off') is a parseGifConfig result of
+// ./gif-routes.js; `gifTransport` ({ request, lookup, allowAddress }) is for
+// tests only, to reach a loopback fake provider.
 // `recovery` is an openRecoveryStore (./recovery-store.js), or null: the
 // recovery routes (./recovery-routes.js) then answer 503 'indisponivel' and
 // everything else stays up.
@@ -663,6 +672,8 @@ function createAccountServer ({
   ageCheck = null,
   ageDirectoryFloor = null,
   pages = null,
+  gif = null,
+  gifTransport = {},
   recovery = null,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
@@ -784,6 +795,19 @@ function createAccountServer ({
       fromStore,
       keyedWindow
     }
+  })
+
+  // Always mounted, so /account/gif/policy answers even when GIFs are off.
+  const gifRoutes = createGifRoutes({
+    ...gifTransport,
+    config: gif,
+    store,
+    terms,
+    blocklist: pages && pages.blocklist ? pages.blocklist : moderationBlocklist(moderation),
+    association,
+    log,
+    now,
+    http: { send, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, keyedWindow }
   })
 
   // With age verification on, no key without a band on record gets a Google
@@ -1520,6 +1544,7 @@ function createAccountServer ({
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
     if (recoveryRoutes.owns(pathname)) return recoveryRoutes.handle(req, res, url)
     if (pagesRoutes.owns(pathname)) return pagesRoutes.handle(req, res, url)
+    if (gifRoutes.owns(pathname)) return gifRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === APP_RETURN_PATH) return appReturn(res)
@@ -1613,7 +1638,7 @@ function createAccountServer ({
     return pushRoutes === null ? 0 : pushRoutes.room()
   }
 
-  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), pagesStats: () => pagesRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), pagesStats: () => pagesRoutes.stats(), gifStats: () => gifRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {

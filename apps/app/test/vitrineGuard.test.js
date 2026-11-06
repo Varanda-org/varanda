@@ -111,7 +111,8 @@ test('every account request is refused before fetch under the guard', (t) => {
   const code = withoutComments(fs.readFileSync(path.join(SRC, 'account.js'), 'utf8'))
   t.ok(/async function call \([^)]*\) \{\s*if \(VITRINE\) throw toError\('indisponivel'\)\s*const built = buildRequest/.test(code), 'call() refuses first')
   t.ok(/export const ageSince = async \(\) => \{\s*if \(VITRINE\) return new Promise\(\(\) => \{\}\)/.test(code), 'ageSince never settles, so App.js never sends age.proof nor retries')
-  t.is(code.match(/\bfetch\(/g).length, 1, 'call() is the only fetch')
+  t.ok(/async function gifImageOnce \([^)]*\) \{\s*if \(VITRINE\) throw toError\('indisponivel'\)/.test(code), 'the GIF image read refuses first')
+  t.is(code.match(/\bfetch\(/g).length, 2, 'call() and the GIF image read are the only fetches')
 })
 
 test('the terms stores import only enabled.js and switch storage under the guard', (t) => {

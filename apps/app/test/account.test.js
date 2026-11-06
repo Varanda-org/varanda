@@ -474,6 +474,300 @@ test('agePolicy: { required } or null on any failure', async (t) => {
   }
 })
 
+test('gifPolicy: probed once per origin, cached, false on any failure', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { enabled: true }))
+  const origin = 'https://gif-a.example.org'
+  t.is(await a.gifPolicy({ origin }), true)
+  t.is(await a.gifPolicy({ origin }), true)
+  t.is(calls.length, 1, 'one probe')
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'GET ' + origin + '/account/gif/policy')
+  for (const [i, body] of [{ enabled: 'true' }, { enabled: true, x: 1 }, {}, []].entries()) {
+    stub(t, json(200, body))
+    t.is(await a.gifPolicy({ origin: 'https://gif-b' + i + '.example.org' }), false, JSON.stringify(body))
+  }
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.gifPolicy({ origin: 'https://gif-c.example.org' }), false, '404')
+  stub(t, json(200, { enabled: false }))
+  t.is(await a.gifPolicy({ origin: 'https://gif-d.example.org' }), false)
+})
+
+test('gifPolicy: a definite answer is kept, a failed probe is asked again after 30 s', async (t) => {
+  const a = await load()
+  let clock = 1000000
+  const now = () => clock
+  const origin = 'https://gif-retry.example.org'
+  let answer = () => { throw new Error('offline') }
+  const calls = stub(t, () => answer())
+  t.is(await a.gifPolicy({ origin, now }), false, 'a network error answers false')
+  t.is(await a.gifPolicy({ origin, now }), false)
+  t.is(calls.length, 1, 'not asked again at once')
+  clock += a.GIF_POLICY_RETRY_MS - 1
+  t.is(await a.gifPolicy({ origin, now }), false)
+  t.is(calls.length, 1, 'not before 30 s')
+  answer = () => json(503, { error: 'indisponivel' })
+  clock += 1
+  t.is(await a.gifPolicy({ origin, now }), false, 'a 503 is a failure too')
+  t.is(calls.length, 2, 'asked again after 30 s')
+  answer = () => json(200, { enabled: 'yes' })
+  clock += a.GIF_POLICY_RETRY_MS
+  t.is(await a.gifPolicy({ origin, now }), false, 'a bad body is a failure')
+  t.is(calls.length, 3)
+  answer = () => json(200, { enabled: true })
+  clock += a.GIF_POLICY_RETRY_MS
+  t.is(await a.gifPolicy({ origin, now }), true, 'the policy came back')
+  t.is(calls.length, 4)
+  clock += 10 * a.GIF_POLICY_RETRY_MS
+  t.is(await a.gifPolicy({ origin, now }), true)
+  t.is(calls.length, 4, 'a definite answer is kept for the session')
+  const off = 'https://gif-retry-off.example.org'
+  answer = () => json(200, { enabled: false })
+  t.is(await a.gifPolicy({ origin: off, now }), false)
+  clock += 10 * a.GIF_POLICY_RETRY_MS
+  t.is(await a.gifPolicy({ origin: off, now }), false)
+  t.is(calls.length, 5, 'a definite false is kept too')
+})
+
+test('gifPolicy: keyed by the installation the request goes to', async (t) => {
+  const a = await load()
+  const { setInstallation } = await import('../src/installation.js')
+  t.teardown(() => setInstallation(null))
+  const calls = stub(t, json(200, { enabled: true }))
+  t.ok(setInstallation('https://gif-inst-a.example.org'))
+  t.is(await a.gifPolicy(), true)
+  t.is(await a.gifPolicy({}), true)
+  t.is(calls.length, 1)
+  t.is(calls[0].url, 'https://gif-inst-a.example.org/account/gif/policy')
+  t.ok(setInstallation('https://gif-inst-b.example.org'))
+  stub(t, json(200, { enabled: false }))
+  t.is(await a.gifPolicy(), false, 'the new installation is asked, not the old answer')
+  t.ok(setInstallation('https://gif-inst-a.example.org'))
+  t.is(await a.gifPolicy(), true, 'each installation keeps its own answer')
+})
+
+const GIF_NONCE = 'n'.repeat(43)
+const GIF_TOKEN = 't'.repeat(43)
+const GIF_LATER = new Date(Date.now() + 12 * 3600 * 1000).toISOString()
+// A fetch that answers by route; `routes[path]` is a response or a function.
+function gifStub (t, routes) {
+  const calls = []
+  const real = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, init })
+    const path = new URL(url, 'https://x.example').pathname
+    const r = routes[path]
+    return typeof r === 'function' ? r(init, calls) : r
+  }
+  t.teardown(() => { globalThis.fetch = real })
+  return calls
+}
+const gifBytes = (n = 20) => { const b = new Uint8Array(n); b.set([71, 73, 70, 56, 57, 97, 2, 0, 1, 0]); return b }
+const binary = (status, bytes, type = 'image/gif') => ({
+  ok: status < 400,
+  status,
+  headers: { get: (h) => (h === 'content-type' ? type : String(bytes.byteLength)) },
+  arrayBuffer: async () => bytes.buffer.slice(0)
+})
+const signer = (calls) => async (method, args) => { calls.push({ method, args }); return { signature: 'ab'.repeat(64) } }
+
+test('gifSearch: start + invite.sign summary + finish, then the header on search, cached', async (t) => {
+  const a = await load()
+  a.forgetGifSession()
+  const signs = []
+  const calls = gifStub(t, {
+    '/account/gif/session/start': json(200, { nonce: GIF_NONCE }),
+    '/account/gif/session/finish': json(200, { token: GIF_TOKEN, expiresAt: GIF_LATER }),
+    '/account/gif/search': json(200, { items: [{ id: 'a1', width: 10, height: 10, bytes: 100 }], next: null })
+  })
+  const opts = { member: M, request: signer(signs) }
+  t.alike(await a.gifSearch('gato', opts), { items: [{ id: 'a1', width: 10, height: 10, bytes: 100 }], next: null })
+  t.alike(signs, [{ method: 'invite.sign', args: { action: 'summary', nonce: GIF_NONCE } }])
+  t.is(calls[0].url, '/account/gif/session/start')
+  t.is(calls[0].init.body, JSON.stringify({ member: M }))
+  t.is(calls[1].init.body, JSON.stringify({ member: M, nonce: GIF_NONCE, signature: 'ab'.repeat(64) }))
+  t.is(calls[2].init.method + ' ' + calls[2].url, 'POST /account/gif/search', 'no query string')
+  t.is(calls[2].init.body, JSON.stringify({ q: 'gato' }), 'the text rides in the body')
+  t.is(calls[2].init.headers.authorization, 'Bearer ' + GIF_TOKEN, 'token in the redacted header')
+  t.absent('x-varanda-gif' in calls[2].init.headers, 'no custom header')
+  t.absent(calls[2].url.includes(GIF_TOKEN), 'never in the URL')
+  await a.gifSearch('cão', { ...opts, cursor: 'c/1' })
+  t.is(calls.length, 4, 'the session is reused')
+  t.is(calls[3].url, '/account/gif/search')
+  t.is(calls[3].init.body, JSON.stringify({ q: 'cão', cursor: 'c/1' }), 'the cursor rides in the body too')
+  for (const c of calls) t.absent('x-varanda-gif' in c.init.headers, 'nothing sends x-varanda-gif')
+  t.is(signs.length, 1)
+  a.forgetGifSession()
+  await Promise.all([a.gifSearch('a', opts), a.gifSearch('b', opts), a.gifSearch('c', opts)])
+  t.is(signs.length, 2, 'parallel reads share one new session')
+})
+
+test('gifSearch: a 401 renews the session once; refusals map to messages', async (t) => {
+  const a = await load()
+  a.forgetGifSession()
+  let searches = 0
+  const calls = gifStub(t, {
+    '/account/gif/session/start': json(200, { nonce: GIF_NONCE }),
+    '/account/gif/session/finish': json(200, { token: GIF_TOKEN, expiresAt: GIF_LATER }),
+    '/account/gif/search': () => (++searches === 1 ? json(401, { error: 'nao-autorizado' }) : json(200, { items: [], next: null }))
+  })
+  t.alike(await a.gifSearch('a', { member: M, request: signer([]) }), { items: [], next: null })
+  t.is(calls.filter((c) => c.url.endsWith('/start')).length, 2, 'a second session')
+  a.forgetGifSession()
+  gifStub(t, {
+    '/account/gif/session/start': json(200, { nonce: GIF_NONCE }),
+    '/account/gif/session/finish': json(200, { token: GIF_TOKEN, expiresAt: GIF_LATER }),
+    '/account/gif/search': json(401, { error: 'nao-autorizado' })
+  })
+  try { await a.gifSearch('a', { member: M, request: signer([]) }); t.fail() } catch (e) { t.is(e.code, 'nao-autorizado', 'only one renewal') }
+  for (const [status, error, code] of [[429, 'limite-gif', 'limite-gif'], [503, 'indisponivel', 'indisponivel'], [404, 'feature-off', 'indisponivel']]) {
+    gifStub(t, { '/account/gif/search': json(status, { error }) })
+    try { await a.gifSearch('a', { member: M, request: signer([]) }); t.fail() } catch (e) { t.is(e.code, code, error) }
+  }
+  t.is(a.toError('limite-gif').message, 'Limite de buscas de GIF por hoje')
+})
+
+test('gifSearch: a bad session answer or signer refuses; an expired cache renews', async (t) => {
+  const a = await load()
+  a.forgetGifSession()
+  gifStub(t, { '/account/gif/session/start': json(200, { nonce: 'x' }) })
+  try { await a.gifSearch('a', { member: M, request: signer([]) }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  gifStub(t, { '/account/gif/session/start': json(200, { nonce: GIF_NONCE }) })
+  try { await a.gifSearch('a', { member: M, request: async () => { throw new Error('x') } }); t.fail() } catch (e) { t.is(e.code, 'assinatura-invalida') }
+  try { await a.gifSearch('a', { member: 'zz', request: signer([]) }); t.fail() } catch (e) { t.is(e.code, 'pedido-invalido') }
+  gifStub(t, {
+    '/account/gif/session/start': json(200, { nonce: GIF_NONCE }),
+    '/account/gif/session/finish': json(200, { token: GIF_TOKEN, expiresAt: 'amanhã' })
+  })
+  try { await a.gifSearch('a', { member: M, request: signer([]) }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  const soon = new Date(Date.now() + 30 * 1000).toISOString()
+  const calls = gifStub(t, {
+    '/account/gif/session/start': json(200, { nonce: GIF_NONCE }),
+    '/account/gif/session/finish': json(200, { token: GIF_TOKEN, expiresAt: soon }),
+    '/account/gif/search': json(200, { items: [], next: null })
+  })
+  await a.gifSearch('a', { member: M, request: signer([]) })
+  await a.gifSearch('a', { member: M, request: signer([]) })
+  t.is(calls.filter((c) => c.url.endsWith('/start')).length, 2, 'a token about to expire is not reused')
+})
+
+test('gifImage: bytes from the account origin, checked', async (t) => {
+  const a = await load()
+  a.forgetGifSession()
+  const origin = 'https://conta.example.org'
+  const routes = {
+    '/account/gif/session/start': json(200, { nonce: GIF_NONCE }),
+    '/account/gif/session/finish': json(200, { token: GIF_TOKEN, expiresAt: GIF_LATER }),
+    '/account/gif/image/a1': binary(200, gifBytes())
+  }
+  const calls = gifStub(t, routes)
+  const opts = { member: M, origin, request: signer([]) }
+  const bytes = await a.gifImage('a1', 'tiny', opts)
+  t.ok(bytes instanceof Uint8Array)
+  t.is(bytes.byteLength, 20)
+  const img = calls[2]
+  t.is(img.url, origin + '/account/gif/image/a1?size=tiny')
+  t.is(img.init.headers.authorization, 'Bearer ' + GIF_TOKEN)
+  t.absent('x-varanda-gif' in img.init.headers)
+  t.is(img.init.redirect, 'error')
+  for (const [res, why] of [
+    [binary(200, gifBytes(), 'image/png'), 'type'],
+    [binary(200, new Uint8Array(20)), 'signature'],
+    [binary(200, gifBytes(512 * 1024 + 1)), 'tiny cap'],
+    [json(503, { error: 'indisponivel' }), '503']
+  ]) {
+    routes['/account/gif/image/a1'] = res
+    try { await a.gifImage('a1', 'tiny', opts); t.fail(why) } catch (e) { t.is(e.code, 'indisponivel', why) }
+  }
+  routes['/account/gif/image/a1'] = binary(200, gifBytes(512 * 1024 + 1))
+  t.is((await a.gifImage('a1', 'full', opts)).byteLength, 512 * 1024 + 1, 'full allows more')
+  for (const id of ['../x', 'https://evil.example/a']) {
+    try { await a.gifImage(id, 'tiny', opts); t.fail(id) } catch (e) { t.is(e.code, 'pedido-invalido', id) }
+  }
+})
+
+test('gifReady: policy on and the member linked', async (t) => {
+  const a = await load()
+  const origin = 'https://gif-ready.example.org'
+  const routes = { '/account/gif/policy': json(200, { enabled: true }), '/account/status': json(200, { linked: true }) }
+  const calls = gifStub(t, routes)
+  a.forgetGifSession()
+  t.is(await a.gifReady({ member: M, origin }), true)
+  t.is(calls[1].url, origin + '/account/status?member=' + M)
+  a.forgetGifSession({ member: M, origin })
+  routes['/account/status'] = json(200, { linked: false })
+  t.is(await a.gifReady({ member: M, origin }), false)
+  routes['/account/status'] = json(503, { error: 'indisponivel' })
+  t.is(await a.gifReady({ member: M, origin }), false)
+  t.is(await a.gifReady({ member: null, origin }), false)
+  gifStub(t, { '/account/gif/policy': json(200, { enabled: false }) })
+  t.is(await a.gifReady({ member: M, origin: 'https://gif-off.example.org' }), false)
+})
+
+test('gifReady: a linked answer is kept 5 minutes per origin and member', async (t) => {
+  const a = await load()
+  a.forgetGifSession()
+  let clock = 5000000
+  const now = () => clock
+  const origin = 'https://gif-ready-cache.example.org'
+  const routes = { '/account/gif/policy': json(200, { enabled: true }), '/account/status': json(200, { linked: true }) }
+  const calls = gifStub(t, routes)
+  const statuses = () => calls.filter((c) => c.url.includes('/account/status')).length
+  t.is(await a.gifReady({ member: M, origin, now }), true)
+  t.is(await a.gifReady({ member: M, origin, now }), true)
+  t.is(statuses(), 1, 'opening the sheet again does not ask the status')
+  const other = 'cd'.repeat(32)
+  await a.gifReady({ member: other, origin, now })
+  t.is(statuses(), 2, 'another member is asked')
+  clock += 5 * 60 * 1000
+  routes['/account/status'] = json(200, { linked: false })
+  t.is(await a.gifReady({ member: M, origin, now }), false, 'after 5 minutes the status is asked again')
+  t.is(statuses(), 3)
+  t.is(await a.gifReady({ member: M, origin, now }), false)
+  t.is(statuses(), 4, 'an unlinked answer is never kept')
+  routes['/account/status'] = json(200, { linked: true })
+  t.is(await a.gifReady({ member: M, origin, now }), true)
+  routes['/account/status'] = json(200, { linked: false })
+  a.forgetGifSession({ member: M, origin })
+  t.is(await a.gifReady({ member: M, origin, now }), false, 'forgetGifSession drops it')
+})
+
+test('gifReady: a fresh session refused with nao-autorizado drops the linked answer', async (t) => {
+  const a = await load()
+  a.forgetGifSession()
+  const origin = 'https://gif-ready-unlinked.example.org'
+  // A token inside the renewal slack: every read opens a fresh session.
+  const soon = new Date(Date.now() + 30 * 1000).toISOString()
+  const routes = {
+    '/account/gif/policy': json(200, { enabled: true }),
+    '/account/status': json(200, { linked: true }),
+    '/account/gif/session/start': json(200, { nonce: GIF_NONCE }),
+    '/account/gif/session/finish': json(200, { token: GIF_TOKEN, expiresAt: soon }),
+    '/account/gif/search': json(200, { items: [], next: null })
+  }
+  const calls = gifStub(t, routes)
+  const statuses = () => calls.filter((c) => c.url.includes('/account/status')).length
+  const opts = { member: M, origin, request: signer([]) }
+  t.is(await a.gifReady({ member: M, origin }), true)
+  await a.gifSearch('a', opts)
+  t.is(await a.gifReady({ member: M, origin }), true)
+  t.is(statuses(), 1)
+  // The member was unlinked: the server refuses a new session.
+  routes['/account/gif/session/start'] = json(401, { error: 'nao-autorizado' })
+  routes['/account/status'] = json(200, { linked: false })
+  try { await a.gifSearch('a', opts); t.fail() } catch (e) { t.is(e.code, 'nao-autorizado') }
+  t.is(await a.gifReady({ member: M, origin }), false, 'the attach sheet stops offering GIF')
+  t.is(statuses(), 2)
+  // The same through finish.
+  routes['/account/status'] = json(200, { linked: true })
+  routes['/account/gif/session/start'] = json(200, { nonce: GIF_NONCE })
+  routes['/account/gif/session/finish'] = json(401, { error: 'nao-autorizado' })
+  t.is(await a.gifReady({ member: M, origin }), true)
+  try { await a.gifSearch('a', opts); t.fail() } catch (e) { t.is(e.code, 'nao-autorizado') }
+  routes['/account/status'] = json(200, { linked: false })
+  t.is(await a.gifReady({ member: M, origin }), false)
+  t.is(statuses(), 4)
+})
+
 // Opaque to the app: the node verifies the signatures (age.proof).
 const SINCE_PROOF = {
   type: 'age-since',

@@ -179,6 +179,12 @@ services:
       # WebSocket dele em 127.0.0.1:8789. Só loopback.
       VARANDA_PAGE_KEYS: "${VARANDA_PAGE_KEYS:-}"
       VARANDA_SEEDER_WS: "${VARANDA_SEEDER_WS:-ws://127.0.0.1:8789}"
+      # Busca de GIF: as duas primeiras juntas, ou nenhuma (desligada). A
+      # chave é segredo e nunca é impressa; a busca sai do endereço do serviço,
+      # nunca do aparelho de quem busca.
+      VARANDA_GIF_API_URL: "${VARANDA_GIF_API_URL:-}"
+      VARANDA_GIF_API_KEY: "${VARANDA_GIF_API_KEY:-}"
+      VARANDA_GIF_MEDIA_HOSTS: "${VARANDA_GIF_MEDIA_HOSTS:-}"
       # Pesos do modelo, dentro de account-data; baixados uma vez pelo
       # operador (scripts/fetch-ai-model.js), nunca em tempo de execução.
       VARANDA_AI_MODEL_DIR: "/data/ai-model"

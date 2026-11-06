@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 19)
+  t.is(LEGAL_VERSION, 20)
   t.is(LEGAL_DATE, '06/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 19, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 20, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: complete documents with plain, visible text and project URLs', async (t) => {
@@ -56,7 +56,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'e66b74a246507b7bf46754d612f45c8fcd4e2c6f782c267f2f373399e425a4a4', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'da12125e6269727f63defe7afb75c722b9f54906e75a39ea4e3b9f1bae38339f', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
@@ -115,7 +115,7 @@ test('legal: version 17 describes photos in chats and the report image', async (
   t.ok(text(TERMS).includes('marcada como não conferida'))
   t.ok(text(PRIVACY).includes('Fotos de grupos públicos são públicas'))
   t.ok(text(PRIVACY).includes('cópia reduzida em JPEG de até 700 KB'))
-  for (const planned of ['busca de GIF', 'prévia de link', 'encaminhar']) {
+  for (const planned of ['prévia de link', 'encaminhar']) {
     t.absent(text(TERMS).includes(planned) || text(PRIVACY).includes(planned), 'not described as available: ' + planned)
   }
 })
@@ -131,4 +131,20 @@ test('legal: version 18 describes voice notes in chats and the report audio', as
   t.ok(text(PRIVACY).includes('As conversas não aceitam vídeo'))
   t.ok(text(PRIVACY).includes('o áudio vai junto com a denúncia, aberto'))
   t.ok(text(PRIVACY).includes('se tiver até 700 KB'))
+})
+
+test('legal: version 20 describes GIF search through the account service', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('Quando a associação liga a busca de GIFs'))
+  t.ok(text(TERMS).includes('O provedor recebe só o texto da busca'))
+  t.ok(text(TERMS).includes('quem recebe nunca fala com o provedor'))
+  t.ok(text(TERMS).includes('até 120 buscas e 60 GIFs por dia'))
+  t.ok(text(TERMS).includes('o botão não aparece'))
+  t.ok(text(PRIVACY).includes('não guarda o texto das buscas'))
+  t.ok(text(PRIVACY).includes('a partir do endereço da associação'))
+  t.ok(text(PRIVACY).includes('esse provedor pode estar fora do Brasil'))
+  for (const name of ['Giphy', 'GIPHY', 'Tenor', 'Klipy']) {
+    t.absent(text(TERMS).includes(name) || text(PRIVACY).includes(name), 'no provider name: ' + name)
+  }
 })

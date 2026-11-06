@@ -1,10 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Later human step (needs the Apple Developer Program): add
-     com.apple.developer.associated-domains with webcredentials:<installation host>
-     (and publish apple-app-site-association there), then set VarandaWebCredentials
-     to true in Info.plist so the passkey-prf module offers the installation's
-     passkeys; until both are done iOS reports passkeys as unavailable. -->
+<!-- webcredentials ties the app to the installation host: iOS offers its
+     passkeys (rp.id bora.varanda.app) to the passkey-prf module and hands the
+     https return of the auth-session module to this app only. It works once
+     https://bora.varanda.app/.well-known/apple-app-site-association lists
+     <TeamID>.app.varanda (VARANDA_IOS_APP_ID in deploy/seeder/.env) and the
+     provisioning profile carries Associated Domains. Info.plist
+     VarandaWebCredentials says the build has this entry; app.json
+     ios.associatedDomains repeats it for prebuild. -->
 <plist version="1.0">
-  <dict/>
+  <dict>
+    <key>com.apple.developer.associated-domains</key>
+    <array>
+      <string>webcredentials:bora.varanda.app</string>
+    </array>
+  </dict>
 </plist>
