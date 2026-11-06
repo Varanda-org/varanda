@@ -6,8 +6,8 @@ import UIKit
 // https callback (iOS 17.4 and later): the system hands the redirect back to
 // this app only, and only for a host tied to it by the webcredentials
 // associated domain (ios/Varanda/Varanda.entitlements). Gated like
-// passkey-prf: Info.plist VarandaWebCredentials is false until the entitlement
-// is added, and while it is false the module reports itself unavailable.
+// passkey-prf: while Info.plist VarandaWebCredentials is false (a build
+// without the entitlement) the module reports itself unavailable.
 // Native error text never reaches JS, and URLs are never logged (they carry
 // the OAuth state and the redeem code).
 public class AuthSessionModule: Module {

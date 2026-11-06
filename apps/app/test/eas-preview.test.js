@@ -12,7 +12,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8')
 
 test('eas.json has no prebuildCommand and no updates', (t) => {
   const eas = JSON.parse(read('eas.json'))
-  t.is(eas.cli.appVersionSource, 'local')
+  t.is(eas.cli.appVersionSource, 'remote', 'EAS keeps the build number (docs/development.md, Envio para a App Store)')
   t.is(eas.build.preview.android.buildType, 'apk')
   t.is(eas.build['preview-simulator'].extends, 'preview')
   for (const profile of Object.values(eas.build)) {
