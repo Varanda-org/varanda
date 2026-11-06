@@ -1,10 +1,12 @@
 'use strict'
 
 // Excluir conta: apps/cli/lib/account/delete-routes.js (start and finish over
-// the account-link proof at phase 'delete'), the directory deletion
+// the account-link proof at phase 'delete' and a fresh assertion of a stored
+// passkey, or a deletion that waits 7 days), the directory deletion
 // (./store.js deleteMember), the queued block in the moderation desk (actor
 // 'titular') and the purge of the other stores (./deletion.js). Loopback
-// only: members are linked in-process and Google is never reached.
+// only: members are linked in-process, Google is never reached and the
+// passkeys are software ones (./helpers/fake-passkey.js).
 
 const test = require('brittle')
 const path = require('node:path')
@@ -24,12 +26,16 @@ const { openModerationStore } = require('../lib/account/moderation-store')
 const { openSeenStore } = require('../lib/account/seen-store')
 const { HASH_NONE } = require('@varanda/core/lib/seen-proof')
 const { SEEN_BLOB_BYTES } = require('@varanda/core/lib/seen-blob')
+const { openPasskeyStore } = require('../lib/account/passkey-store')
+const { keyFromAttestation } = require('../lib/account/webauthn')
+const { createFakePasskey } = require('./helpers/fake-passkey')
 const { createAccountServer } = require('../lib/account/server')
-const { createDeleteRoutes } = require('../lib/account/delete-routes')
+const { createDeleteRoutes, WAIT_MS } = require('../lib/account/delete-routes')
 const { createDeletionSweep } = require('../lib/account/deletion')
 const { tmpDir } = require('./helpers/net')
 
 const ORIGIN = 'https://varanda.test'
+const RP = 'varanda.test'
 const SUB = '1098765432109876543210'
 const EMAIL = 'membro@example.test'
 
@@ -61,14 +67,26 @@ function b64u (buf) {
   return Buffer.from(buf).toString('base64url')
 }
 
+// Stores `pk`'s public key for `member`, as the enrolment at sign-up does.
+async function enrol (passkeys, member, pk) {
+  const key = keyFromAttestation({ attestationObject: pk.attestationObject(), credentialId: pk.credentialId, rpId: RP })
+  await passkeys.add({ member, credentialId: pk.credentialId, ...key })
+}
+
+// The ceremony's answer over a deletion nonce (its 32 bytes are the challenge).
+function assertion (pk, nonce, opts = {}) {
+  return pk.assert({ challenge: Buffer.from(nonce, 'base64url'), origin: ORIGIN, ...opts })
+}
+
 function recoveryBlob () {
   return { v: 1, kind: 'code', nonce: b4a.toString(crypto.randomBytes(24), 'hex'), ciphertext: b4a.toString(crypto.randomBytes(82), 'hex') }
 }
 
 // A service with `m` linked as 'ana' and every store the deletion purges.
-async function setup (t, { moderation: withModeration = true } = {}) {
+async function setup (t, { moderation: withModeration = true, enrolled = true } = {}) {
   const dir = path.join(tmpDir(t), 'account')
-  const now = () => Date.now()
+  const clock = { offset: 0 }
+  const now = () => Date.now() + clock.offset
   const iss = issuer()
   const store = openAccountStore(dir, { now })
   const m = keyPair()
@@ -84,6 +102,9 @@ async function setup (t, { moderation: withModeration = true } = {}) {
   await ages.record({ member: m.hex, band: '18+', method: 'didit' })
   await recovery.put({ member: m.hex, kind: 'code', lookupId: b4a.toString(crypto.randomBytes(32), 'hex'), blob: recoveryBlob() })
   await invites.issue(m.hex)
+  const passkeys = openPasskeyStore(dir, { now })
+  const pk = createFakePasskey({ rpId: RP })
+  if (enrolled) await enrol(passkeys, m.hex, pk)
   const logs = []
   const texts = []
   const server = createAccountServer({
@@ -97,6 +118,7 @@ async function setup (t, { moderation: withModeration = true } = {}) {
     recovery,
     invites,
     moderation,
+    passkeys,
     log: (e) => logs.push(JSON.stringify(e)),
     now
   })
@@ -122,14 +144,16 @@ async function setup (t, { moderation: withModeration = true } = {}) {
 
   const sign = (who, nonce, username) => signAccountLink({ phase: 'delete', nonce, member: who.hex, username, association: iss.association, sub: '' }, who.kp)
   const start = (who) => post('/account/delete/start', { member: who.hex })
-  const finish = (who, nonce, signature) => post('/account/delete/finish', { member: who.hex, nonce, signature })
+  const finish = (who, nonce, signature, extra = {}) => post('/account/delete/finish', { member: who.hex, nonce, signature, ...extra })
 
-  // start -> sign -> finish for `who`.
-  async function del (who) {
+  // start -> passkey ceremony -> sign -> finish for `who` with `withKey`.
+  async function del (who, withKey = pk) {
     const started = await start(who)
     if (started.status !== 200) return started
-    return finish(who, started.body.nonce, sign(who, started.body.nonce, started.body.username))
+    return finish(who, started.body.nonce, sign(who, started.body.nonce, started.body.username), { assertion: assertion(withKey, started.body.nonce) })
   }
+
+  const signCancel = (who, nonce, username) => signAccountLink({ phase: 'cancel', nonce, member: who.hex, username, association: iss.association, sub: '' }, who.kp)
 
   // The operator's `mod apply`: pull, sign a list with the key, ack.
   async function apply (blocked) {
@@ -138,16 +162,18 @@ async function setup (t, { moderation: withModeration = true } = {}) {
     await moderation.ack({ changeIds: pulled.changes.map((c) => c.id), snapshot, moderatorCert: modCert })
   }
 
-  return { dir, iss, store, terms, ages, recovery, invites, moderation, m, logs, texts, post, status, sign, start, finish, del, apply }
+  return { dir, clock, iss, store, terms, ages, recovery, invites, moderation, passkeys, pk, m, logs, texts, post, status, sign, signCancel, start, finish, del, apply, server }
 }
 
 test('Excluir conta: start, sign, finish; the link and every store entry go, the block is queued, status follows the list', async (t) => {
   const s = await setup(t)
   const started = await s.start(s.m)
   t.is(started.status, 200, started.text)
-  t.alike(Object.keys(started.body).sort(), ['nonce', 'username'])
+  t.alike(Object.keys(started.body).sort(), ['nonce', 'passkeys', 'scheduled', 'username'])
   t.is(started.body.username, 'ana')
-  const done = await s.finish(s.m, started.body.nonce, s.sign(s.m, started.body.nonce, 'ana'))
+  t.alike(started.body.passkeys, [s.pk.credentialId], 'the stored credential ids only')
+  t.is(started.body.scheduled, null)
+  const done = await s.finish(s.m, started.body.nonce, s.sign(s.m, started.body.nonce, 'ana'), { assertion: assertion(s.pk, started.body.nonce) })
   t.is(done.status, 200, done.text)
   t.alike(done.body, { deleted: 'pendente' })
 
@@ -157,6 +183,7 @@ test('Excluir conta: start, sign, finish; the link and every store entry go, the
   t.is(s.ages.get(s.m.hex), null, 'age band gone')
   t.alike(s.recovery.list(s.m.hex), [], 'recovery entries gone')
   t.is(s.invites.holds(s.m.hex), false, 'issued invites gone')
+  t.alike(s.passkeys.keys(s.m.hex), [], 'passkey public keys gone')
   const pending = s.moderation.pending().changes
   t.is(pending.length, 1)
   t.is(pending[0].op, 'block')
@@ -224,13 +251,135 @@ test('Excluir conta: a key already deleted answers finish with its state, so a r
   t.alike(r.body, { deleted: 'pendente' })
 })
 
+test('Excluir conta: a missing or forged assertion deletes nothing', async (t) => {
+  const s = await setup(t)
+  const forged = createFakePasskey({ rpId: RP, credentialId: Buffer.from(s.pk.credentialId, 'base64url') })
+  const cases = [
+    ['no assertion and no wait', () => ({})],
+    ['a forged authenticator answering with the stored credential id', (n) => ({ assertion: assertion(forged, n) })],
+    ['the stored passkey over another challenge', () => ({ assertion: assertion(s.pk, crypto.randomBytes(32).toString('base64url')) })],
+    ['another origin', (n) => ({ assertion: assertion(s.pk, n, { origin: 'https://evil.test' }) })],
+    ['another rp', (n) => ({ assertion: assertion(s.pk, n, { rp: 'evil.test' }) })],
+    ['no user verification', (n) => ({ assertion: assertion(s.pk, n, { flags: 0x01 }) })],
+    ['an unknown credential, no wait', (n) => ({ assertion: assertion(createFakePasskey({ rpId: RP }), n) })]
+  ]
+  for (const [label, extra] of cases) {
+    // Past the per-member window (5 verified proofs per 10 minutes).
+    s.clock.offset += 601 * 1000
+    const st = await s.start(s.m)
+    const r = await s.finish(s.m, st.body.nonce, s.sign(s.m, st.body.nonce, 'ana'), extra(st.body.nonce))
+    t.is(r.status, 403, label)
+    t.is(r.body.error, 'passkey-invalida', label)
+  }
+  s.clock.offset += 601 * 1000
+  let st = await s.start(s.m)
+  let r = await s.finish(s.m, st.body.nonce, s.sign(s.m, st.body.nonce, 'ana'), { assertion: { credentialId: 'x' } })
+  t.is(r.body.error, 'pedido-invalido', 'a malformed assertion')
+  st = await s.start(s.m)
+  r = await s.finish(s.m, st.body.nonce, s.sign(s.m, st.body.nonce, 'ana'), { wait: 'yes' })
+  t.is(r.body.error, 'pedido-invalido', 'wait is true or absent')
+
+  // A good assertion cannot be replayed: its nonce is spent.
+  st = await s.start(s.m)
+  const good = assertion(s.pk, st.body.nonce)
+  const bad = await s.finish(s.m, st.body.nonce, s.sign(s.m, st.body.nonce, 'outra'), { assertion: good })
+  t.is(bad.body.error, 'assinatura-invalida')
+  r = await s.finish(s.m, st.body.nonce, s.sign(s.m, st.body.nonce, 'ana'), { assertion: good })
+  t.is(r.body.error, 'expirado', 'the replayed nonce was spent')
+
+  t.is(s.store.status(s.m.hex).linked, true, 'still linked')
+  t.is(s.moderation.pending().changes.length, 0, 'nothing queued')
+  t.is(s.passkeys.hold(s.m.hex), null, 'nothing scheduled')
+  t.ok(s.logs.some((l) => l.includes('"passkey-assinatura"')), 'the refusal reason is logged as a token')
+  t.absent(s.logs.join('\n').includes(s.pk.credentialId), 'no credential id in a log line')
+})
+
+test('Excluir conta: without a usable passkey the deletion waits 7 days, shows on status, and can be cancelled', async (t) => {
+  const s = await setup(t, { enrolled: false })
+  const st = await s.start(s.m)
+  t.alike(st.body.passkeys, [], 'no key stored (an account from before enrolment)')
+  const r = await s.finish(s.m, st.body.nonce, s.sign(s.m, st.body.nonce, 'ana'), { wait: true, assertion: assertion(s.pk, st.body.nonce) })
+  t.is(r.status, 200, r.text)
+  const runAt = r.body.scheduled
+  t.ok(Math.abs(Date.parse(runAt) - Date.now() - WAIT_MS) < 60000, 'seven days ahead')
+  t.is(s.store.status(s.m.hex).linked, true, 'nothing deleted yet')
+  t.is(s.moderation.pending().changes.length, 0, 'nothing queued yet')
+  const linked = await s.status(s.m)
+  t.is(linked.scheduledDeletion, runAt, 'every device learns the date from /account/status')
+  t.ok(s.logs.some((l) => l.includes('"agendada"')))
+
+  // Asking again keeps the first date.
+  s.clock.offset = 3600 * 1000
+  const again = await s.start(s.m)
+  t.is(again.body.scheduled, runAt)
+  const r2 = await s.finish(s.m, again.body.nonce, s.sign(s.m, again.body.nonce, 'ana'), { wait: true })
+  t.is(r2.body.scheduled, runAt)
+
+  // Cancel: a delete proof is no cancel; the cancel proof is.
+  let cs = await s.post('/account/delete/cancel/start', { member: s.m.hex })
+  t.is(cs.status, 200, cs.text)
+  t.alike(Object.keys(cs.body).sort(), ['nonce', 'scheduled', 'username'])
+  t.is(cs.body.scheduled, runAt)
+  t.is(cs.body.username, 'ana')
+  let cf = await s.post('/account/delete/cancel/finish', { member: s.m.hex, nonce: cs.body.nonce, signature: s.sign(s.m, cs.body.nonce, 'ana') })
+  t.is(cf.body.error, 'assinatura-invalida', 'a delete proof does not cancel')
+  cs = await s.post('/account/delete/cancel/start', { member: s.m.hex })
+  const delNonce = (await s.start(s.m)).body.nonce
+  cf = await s.post('/account/delete/cancel/finish', { member: s.m.hex, nonce: delNonce, signature: s.signCancel(s.m, delNonce, 'ana') })
+  t.is(cf.body.error, 'expirado', 'a delete nonce is no cancel nonce')
+  cf = await s.post('/account/delete/cancel/finish', { member: s.m.hex, nonce: cs.body.nonce, signature: s.signCancel(s.m, cs.body.nonce, 'ana') })
+  t.alike(cf.body, { cancelled: true })
+  t.is((await s.status(s.m)).scheduledDeletion, undefined)
+  cs = await s.post('/account/delete/cancel/start', { member: s.m.hex })
+  cf = await s.post('/account/delete/cancel/finish', { member: s.m.hex, nonce: cs.body.nonce, signature: s.signCancel(s.m, cs.body.nonce, 'ana') })
+  t.alike(cf.body, { cancelled: false }, 'nothing left to cancel')
+
+  // A cancelled deletion never runs, even past its date.
+  s.clock.offset = WAIT_MS + 3600 * 1000
+  t.alike(await s.server.deletionSweep(), { members: 0, pending: 0 })
+  t.is(s.store.status(s.m.hex).linked, true)
+})
+
+test('Excluir conta: a waiting deletion runs at its date through the sweep', async (t) => {
+  const s = await setup(t, { enrolled: false })
+  const st = await s.start(s.m)
+  await s.finish(s.m, st.body.nonce, s.sign(s.m, st.body.nonce, 'ana'), { wait: true })
+  s.clock.offset = WAIT_MS - 60000
+  await s.server.deletionSweep()
+  t.is(s.store.status(s.m.hex).linked, true, 'not before its date')
+  s.clock.offset = WAIT_MS + 60000
+  const swept = await s.server.deletionSweep()
+  t.is(swept.members, 1, 'deleted and purged in the same sweep')
+  t.is(s.store.status(s.m.hex).linked, false)
+  t.is(s.moderation.pending().changes[0].by, 'titular')
+  t.is(s.passkeys.holds(s.m.hex), false, 'the schedule went with the purge')
+  t.alike(s.recovery.list(s.m.hex), [])
+  t.ok(s.logs.some((l) => l.includes('"agendada-executada"')))
+  t.alike(await s.status(s.m), { linked: false, deleted: 'pendente' })
+})
+
+test('Excluir conta: a stored passkey still deletes at once while a wait is pending', async (t) => {
+  const s = await setup(t)
+  const st = await s.start(s.m)
+  await s.finish(s.m, st.body.nonce, s.sign(s.m, st.body.nonce, 'ana'), { wait: true })
+  t.ok(s.passkeys.hold(s.m.hex))
+  const r = await s.del(s.m)
+  t.alike(r.body, { deleted: 'pendente' })
+  t.is(s.passkeys.holds(s.m.hex), false)
+})
+
 // The routes alone, with the server's helpers stubbed.
-function routes ({ accounts, pagesStore = null, moderation = { requestDeletion: async () => ({}) }, association }) {
+function routes ({ accounts, pagesStore = null, moderation = { requestDeletion: async () => ({}) }, association, passkeys, notify, now }) {
   const refuse = (token) => Object.assign(new Error(token), { token })
   return createDeleteRoutes({
     accounts,
     moderation,
     pagesStore,
+    passkeys,
+    notify,
+    now,
+    rpId: RP,
+    origins: [ORIGIN],
     association,
     memberLimit: () => true,
     send: (res, status, body) => { res.status = status; res.body = body },
@@ -260,17 +409,20 @@ test('Excluir conta: a member who owns a live page is asked to close or hand it 
   await linkDirect(accounts, iss, m, 'ana')
   const owned = []
   const pagesStore = { listFor: () => ({ owned, admin: [], invites: [], offers: [] }) }
-  const r = routes({ accounts, pagesStore, association: iss.association })
+  const passkeys = openPasskeyStore(dir)
+  const pk = createFakePasskey({ rpId: RP })
+  await enrol(passkeys, m.hex, pk)
+  const r = routes({ accounts, pagesStore, association: iss.association, passkeys })
   owned.push({ page: 'p'.repeat(64), closed: false, movedTo: null })
   t.alike(await call(r, '/account/delete/start', { member: m.hex }), { error: 'paginas-ativas' })
   owned[0] = { page: 'p'.repeat(64), closed: true, movedTo: null }
   const ok = await call(r, '/account/delete/start', { member: m.hex })
   t.is(ok.status, 200, 'a closed page does not hold the deletion')
   owned.push({ page: 'q'.repeat(64), closed: false, movedTo: null })
-  const done = await call(r, '/account/delete/finish', { member: m.hex, nonce: ok.body.nonce, signature: signAccountLink({ phase: 'delete', nonce: ok.body.nonce, member: m.hex, username: 'ana', association: iss.association, sub: '' }, m.kp) })
+  const done = await call(r, '/account/delete/finish', { member: m.hex, nonce: ok.body.nonce, signature: signAccountLink({ phase: 'delete', nonce: ok.body.nonce, member: m.hex, username: 'ana', association: iss.association, sub: '' }, m.kp), assertion: assertion(pk, ok.body.nonce) })
   t.alike(done, { error: 'paginas-ativas' }, 'checked again at finish')
   t.is(accounts.status(m.hex).linked, true)
-  const broken = routes({ accounts, pagesStore: { listFor: () => { throw new Error('x') } }, association: iss.association })
+  const broken = routes({ accounts, pagesStore: { listFor: () => { throw new Error('x') } }, association: iss.association, passkeys })
   t.alike(await call(broken, '/account/delete/start', { member: m.hex }), { error: 'indisponivel' }, 'a pages store that cannot answer refuses')
 })
 
@@ -281,15 +433,18 @@ test('Excluir conta: a failed queue deletes nothing; a failed directory write is
   const m = keyPair()
   await linkDirect(accounts, iss, m, 'ana')
   const sig = (nonce) => signAccountLink({ phase: 'delete', nonce, member: m.hex, username: 'ana', association: iss.association, sub: '' }, m.kp)
-  const full = routes({ accounts, moderation: { requestDeletion: async () => { throw Object.assign(new Error('lotado'), { code: 'lotado' }) } }, association: iss.association })
+  const passkeys = openPasskeyStore(dir)
+  const pk = createFakePasskey({ rpId: RP })
+  await enrol(passkeys, m.hex, pk)
+  const full = routes({ accounts, moderation: { requestDeletion: async () => { throw Object.assign(new Error('lotado'), { code: 'lotado' }) } }, association: iss.association, passkeys })
   let st = await call(full, '/account/delete/start', { member: m.hex })
-  t.alike(await call(full, '/account/delete/finish', { member: m.hex, nonce: st.body.nonce, signature: sig(st.body.nonce) }), { error: 'lotado' })
+  t.alike(await call(full, '/account/delete/finish', { member: m.hex, nonce: st.body.nonce, signature: sig(st.body.nonce), assertion: assertion(pk, st.body.nonce) }), { error: 'lotado' })
   t.is(accounts.status(m.hex).linked, true, 'nothing deleted')
 
   const queued = []
-  const flaky = routes({ accounts: { ...accounts, deleteMember: async () => { throw new Error('disk') } }, moderation: { requestDeletion: async (k) => { queued.push(k) } }, association: iss.association })
+  const flaky = routes({ accounts: { ...accounts, deleteMember: async () => { throw new Error('disk') } }, moderation: { requestDeletion: async (k) => { queued.push(k) } }, association: iss.association, passkeys })
   st = await call(flaky, '/account/delete/start', { member: m.hex })
-  t.alike(await call(flaky, '/account/delete/finish', { member: m.hex, nonce: st.body.nonce, signature: sig(st.body.nonce) }), { error: 'resultado-incerto' })
+  t.alike(await call(flaky, '/account/delete/finish', { member: m.hex, nonce: st.body.nonce, signature: sig(st.body.nonce), assertion: assertion(pk, st.body.nonce) }), { error: 'resultado-incerto' })
   t.alike(queued, [m.hex], 'the block stays queued')
 })
 
@@ -322,8 +477,11 @@ test('deletion sweep: purges every store for each deleted key, retries a store t
     holds: (k) => dropsHeld.has(k),
     forget: async (k) => { dropsHeld.delete(k) }
   }
+  const passkeys = openPasskeyStore(dir)
+  await enrol(passkeys, m.hex, createFakePasskey({ rpId: RP }))
+  await enrol(passkeys, keep.hex, createFakePasskey({ rpId: RP }))
   const logs = []
-  const sweep = createDeletionSweep({ accounts, terms, ages, pushStore, recovery, invites, drops, seen, log: (e) => logs.push(e) })
+  const sweep = createDeletionSweep({ accounts, terms, ages, pushStore, recovery, invites, drops, seen, passkeys, log: (e) => logs.push(e) })
   t.alike(await sweep.sweep(), { members: 0, pending: 0 }, 'nothing deleted yet')
   await accounts.deleteMember(m.hex)
   const first = await sweep.sweep()
@@ -334,6 +492,7 @@ test('deletion sweep: purges every store for each deleted key, retries a store t
   t.alike(recovery.list(m.hex), [])
   t.is(invites.holds(m.hex), false)
   t.is(seen.get(m.hex), null, 'the seen blob is gone')
+  t.is(passkeys.holds(m.hex), false)
   t.ok(dropsHeld.has(m.hex))
   t.alike(logs, [{ event: 'exclusao', reason: 'purga-pendente', count: 1 }])
   dropsUp = true
@@ -345,7 +504,76 @@ test('deletion sweep: purges every store for each deleted key, retries a store t
   t.is(recovery.list(keep.hex).length, 1)
   t.ok(invites.holds(keep.hex))
   t.ok(seen.get(keep.hex) !== null)
+  t.is(passkeys.keys(keep.hex).length, 1)
   t.ok(dropsHeld.has(keep.hex))
   const reopened = openTermsStore(dir)
   t.alike(reopened.list(m.hex), [], 'gone from disk too')
+})
+
+test('Excluir conta: a new wait sends one push notice; a member who came to own a live page is skipped at the date', async (t) => {
+  const iss = issuer()
+  const dir = path.join(tmpDir(t), 'account')
+  const clock = { t: Date.now() }
+  const now = () => clock.t
+  const accounts = openAccountStore(dir, { now })
+  const m = keyPair()
+  await linkDirect(accounts, iss, m, 'ana')
+  const passkeys = openPasskeyStore(dir, { now })
+  const owned = []
+  const notified = []
+  const queued = []
+  const r = routes({
+    accounts,
+    pagesStore: { listFor: () => ({ owned, admin: [], invites: [], offers: [] }) },
+    moderation: { requestDeletion: async (k) => { queued.push(k) } },
+    association: iss.association,
+    passkeys,
+    notify: (k) => notified.push(k),
+    now
+  })
+  const sig = (nonce) => signAccountLink({ phase: 'delete', nonce, member: m.hex, username: 'ana', association: iss.association, sub: '' }, m.kp)
+  for (let i = 0; i < 2; i++) {
+    const st = await call(r, '/account/delete/start', { member: m.hex })
+    const done = await call(r, '/account/delete/finish', { member: m.hex, nonce: st.body.nonce, signature: sig(st.body.nonce), wait: true })
+    t.ok(done.body.scheduled)
+  }
+  t.alike(notified, [m.hex], 'one notice for one schedule')
+
+  owned.push({ page: 'p'.repeat(64), closed: false, movedTo: null })
+  clock.t += WAIT_MS + 1000
+  t.alike(await r.runScheduled(), { ran: 0, skipped: 1 }, 'a live page holds it')
+  t.is(accounts.status(m.hex).linked, true)
+  t.ok(passkeys.hold(m.hex), 'still waiting, retried at the next sweep')
+  owned[0] = { page: 'p'.repeat(64), closed: true, movedTo: null }
+  t.alike(await r.runScheduled(), { ran: 1, skipped: 0 })
+  t.alike(queued, [m.hex])
+  t.is(accounts.status(m.hex).linked, false)
+  t.alike(await r.runScheduled(), { ran: 0, skipped: 0 }, 'nothing left')
+})
+
+test('Excluir conta: a schedule write that fails is resultado-incerto, never a definite refusal', async (t) => {
+  const iss = issuer()
+  const dir = path.join(tmpDir(t), 'account')
+  const accounts = openAccountStore(dir)
+  const m = keyPair()
+  await linkDirect(accounts, iss, m, 'ana')
+  const real = openPasskeyStore(dir)
+  const passkeys = { ...real, available: () => true, keys: real.keys, hold: real.hold, schedule: async () => { throw Object.assign(new Error('indisponivel'), { code: 'indisponivel' }) } }
+  const r = routes({ accounts, association: iss.association, passkeys })
+  const st = await call(r, '/account/delete/start', { member: m.hex })
+  const sig = signAccountLink({ phase: 'delete', nonce: st.body.nonce, member: m.hex, username: 'ana', association: iss.association, sub: '' }, m.kp)
+  t.alike(await call(r, '/account/delete/finish', { member: m.hex, nonce: st.body.nonce, signature: sig, wait: true }), { error: 'resultado-incerto' })
+})
+
+test('Excluir conta: without a usable passkeys.json every route answers indisponivel', async (t) => {
+  const iss = issuer()
+  const dir = path.join(tmpDir(t), 'account')
+  const accounts = openAccountStore(dir)
+  const m = keyPair()
+  await linkDirect(accounts, iss, m, 'ana')
+  const none = routes({ accounts, association: iss.association, passkeys: null })
+  t.alike(await call(none, '/account/delete/start', { member: m.hex }), { error: 'indisponivel' })
+  t.alike(await call(none, '/account/delete/cancel/start', { member: m.hex }), { error: 'indisponivel' })
+  t.alike(await none.runScheduled(), { ran: 0, skipped: 0 })
+  t.is(none.scheduled(m.hex), null)
 })

@@ -320,6 +320,7 @@ async function main () {
   const { openAccountStore } = require('../lib/account/store')
   const { openTermsStore } = require('../lib/account/terms-store')
   const { openModerationStore } = require('../lib/account/moderation-store')
+  const { openPasskeyStore } = require('../lib/account/passkey-store')
   const { createOAuthStub } = require('./oauth-stub')
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-lab-'))
@@ -398,7 +399,11 @@ async function main () {
     // The moderation desk without its panel (no Google moderators): Excluir
     // conta queues its block here and refuses without it.
     const moderation = openModerationStore(accountDir, { association })
-    const account = createAccountServer({ association, origin, google, store, issuer, terms, moderation, didit: null, ages: null })
+    // The passkey public keys and waiting deletions (passkeys.json): the
+    // passkey created in the lab browser is enrolled right after the link,
+    // so Excluir conta there runs with the server-side check.
+    const passkeys = openPasskeyStore(accountDir)
+    const account = createAccountServer({ association, origin, google, store, issuer, terms, moderation, passkeys, didit: null, ages: null })
     const accountListener = await account.listen({ host: '127.0.0.1', port: 0 })
     cleanups.push(() => accountListener.close())
     log('serviço de conta no ar (Google substituído pela página do laboratório)')

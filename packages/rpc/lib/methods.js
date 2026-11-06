@@ -248,7 +248,8 @@ function postCross (given, value) {
 
 // account.sign (docs/rpc.md 5.18). Duplicated from
 // @varanda/core lib/account-link.js, which this package cannot import.
-const ACCOUNT_PHASES = ['reserve', 'finish', 'rename', 'delete']
+const ACCOUNT_PHASES = ['reserve', 'finish', 'rename', 'delete', 'passkey', 'cancel']
+const HEX64_SUB_RE = /^[0-9a-f]{64}$/
 const NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
 const SUB_RE = /^[\x21-\x7e]{1,255}$/
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
@@ -644,7 +645,9 @@ const SPECS = {
       sub: req(isSub)
     },
     cross (given, value) {
-      // A Google subject only at 'finish', and always there.
+      // A Google subject only at 'finish', an attestation hash (hex64) only
+      // at 'passkey', and always there; '' everywhere else.
+      if (value.phase === 'passkey') return HEX64_SUB_RE.test(value.sub) ? null : 'parâmetro inválido: sub'
       if ((value.phase === 'finish') !== (value.sub !== '')) return 'parâmetro inválido: sub'
       return null
     }

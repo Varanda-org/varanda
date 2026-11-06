@@ -120,7 +120,9 @@ export function webNodeHandle (request) {
     addPasskey: native.addPasskey,
     bindPasskey: native.bindPasskey,
     makeRecoveryCode: native.makeRecoveryCode,
-    confirm: native.confirm
+    confirm: native.confirm,
+    enrolment: native.enrolment,
+    dropEnrolment: native.dropEnrolment
   }
 
   // The bytes go through a file in the upload dir: one IPC request is capped

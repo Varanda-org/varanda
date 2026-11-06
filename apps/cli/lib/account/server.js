@@ -17,6 +17,8 @@ const { createAgeRoutes } = require('./age-routes')
 const { createRecoveryRoutes } = require('./recovery-routes')
 const { createDeleteRoutes } = require('./delete-routes')
 const { createDeletionSweep } = require('./deletion')
+const { createPasskeyRoutes } = require('./passkey-routes')
+const { passkeyOrigins } = require('./webauthn')
 const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, mintRedeem, redeemMatches, accountReturnUrl, appReturnPage, header } = require('./app-return')
 const { createPagesRoutes } = require('./pages-routes')
 const { createGifRoutes } = require('./gif-routes')
@@ -131,6 +133,12 @@ const ERROR_STATUS = Object.freeze({
   // person who still owns a live page is asked to close or hand it over first.
   'conta-excluida': 409,
   'paginas-ativas': 409,
+  // Passkeys for Excluir conta (./passkey-routes.js, ./delete-routes.js): an
+  // attestation or assertion that does not verify, a member who already has
+  // a stored key, and an enrolment after the sign-up window.
+  'passkey-invalida': 403,
+  'passkey-registrada': 409,
+  'vinculo-antigo': 409,
   // Sign-up invites (./invites-store.js): one public token for an unknown,
   // used, expired or held code.
   'convite-obrigatorio': 403,
@@ -659,6 +667,11 @@ function checkRawPost (req, origin) {
 // everything else stays up.
 // `drops` is the surprise-invite ledger (./invite-drops.js) or null, only so
 // Excluir conta (./delete-routes.js, ./deletion.js) can purge its marks.
+// `passkeys` is an openPasskeyStore (./passkey-store.js) or null: Excluir
+// conta and the passkey enrolment then answer 503 'indisponivel'.
+// `androidCertSha256` (VARANDA_ANDROID_CERT_SHA256, '' for none) adds the
+// Android app's origin to the ones a passkey assertion may report
+// (./webauthn.js passkeyOrigins).
 function createAccountServer ({
   association,
   origin,
@@ -691,6 +704,8 @@ function createAccountServer ({
   gifTransport = {},
   recovery = null,
   drops = null,
+  passkeys = null,
+  androidCertSha256 = '',
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -702,6 +717,7 @@ function createAccountServer ({
   if (issuer !== null && checkIssuerCert(issuer.cert, issuer.keyPair, association) !== null) {
     throw new TypeError('issuer certificate is for another association or key')
   }
+  const webauthn = passkeyOrigins({ origin, androidCertSha256 })
   for (const [name, value] of [['maxConnections', maxConnections], ['ratePerSecond', ratePerSecond], ['burst', burst]]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(name + ' must be a positive integer')
   }
@@ -796,6 +812,9 @@ function createAccountServer ({
     invites,
     drops,
     seen,
+    passkeys,
+    // Bound late: deleteRoutes is created below with this sweep's purge.
+    scheduled: () => deleteRoutes.runScheduled(),
     log
   })
   const publishedList = moderationBlocklist(moderation)
@@ -810,8 +829,30 @@ function createAccountServer ({
     accounts: store,
     moderation,
     pagesStore: pages !== null && pages.pagesStore ? pages.pagesStore : null,
+    passkeys,
     purge: deletion.purge,
     isBlocked: inPublishedList,
+    notify: (member) => { if (pushRoutes !== null) pushRoutes.notifyDeletion({ member }) },
+    rpId: webauthn.rpId,
+    origins: webauthn.origins,
+    association,
+    now,
+    log,
+    memberLimit: keyedWindow(5, 600 * 1000, now),
+    send,
+    refuse,
+    fromStore,
+    checkPost: (req, opts) => checkPost(req, origin, opts),
+    readJsonBody,
+    over
+  })
+
+  // Always mounted, so a missing or corrupt passkeys.json refuses only these
+  // routes and Excluir conta. add is charged per member after the proof.
+  const passkeyRoutes = createPasskeyRoutes({
+    store: passkeys,
+    accounts: store,
+    rpId: webauthn.rpId,
     association,
     now,
     log,
@@ -1403,7 +1444,10 @@ function createAccountServer ({
     // A deleted key (Excluir conta): whether the published blocklist holds
     // it yet, never the date.
     if (typeof st.deletedAt === 'string') return send(res, 200, { linked: false, deleted: inPublishedList(member) ? 'concluida' : 'pendente' })
-    send(res, 200, st)
+    // A deletion waiting for its date (asked without a verified passkey):
+    // every signed-in device shows it and offers to cancel.
+    const waiting = st.linked === true ? deleteRoutes.scheduled(member) : null
+    send(res, 200, waiting === null ? st : { ...st, scheduledDeletion: waiting })
   }
 
   // Exact keys: the app decides from `required` alone whether start needs a
@@ -1620,6 +1664,7 @@ function createAccountServer ({
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
     if (recoveryRoutes.owns(pathname)) return recoveryRoutes.handle(req, res, url)
     if (deleteRoutes.owns(pathname)) return deleteRoutes.handle(req, res, url)
+    if (passkeyRoutes.owns(pathname)) return passkeyRoutes.handle(req, res, url)
     if (pagesRoutes.owns(pathname)) return pagesRoutes.handle(req, res, url)
     if (gifRoutes.owns(pathname)) return gifRoutes.handle(req, res, url)
     if (req.method === 'GET') {
@@ -1715,7 +1760,7 @@ function createAccountServer ({
     return pushRoutes === null ? 0 : pushRoutes.room()
   }
 
-  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), gifStats: () => gifRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), gifStats: () => gifRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {

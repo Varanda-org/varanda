@@ -7,6 +7,8 @@ const test = require('brittle')
 
 const load = () => import('../src/accountDeletion.js')
 const M = 'ab'.repeat(32)
+const CRED = 'Q1JFRA'
+const ASSERTION = { credentialId: CRED, clientDataJSON: 'e30', authenticatorData: 'AAAA', signature: 'AQID' }
 
 test('typedMatches: the @nome with or without @, any case, spaces around', async (t) => {
   const { typedMatches } = await load()
@@ -38,7 +40,7 @@ test('deletedOf and receiptOf accept only their exact shapes', async (t) => {
 function effects (overrides = {}) {
   const calls = []
   const fx = {
-    confirm: () => { calls.push('confirm'); return Promise.resolve({ ok: true }) },
+    confirm: (args) => { calls.push(['confirm', args]); return Promise.resolve({ ok: true, assertion: ASSERTION }) },
     beforeFinish: async () => { calls.push('push-off') },
     sign: async (args) => { calls.push(['sign', args]); return { signature: 'f'.repeat(128) } },
     finish: async (args) => { calls.push(['finish', args]); return { deleted: 'pendente' } },
@@ -48,14 +50,45 @@ function effects (overrides = {}) {
   return { fx, calls }
 }
 
-test('requestDeletion: typed name, then the passkey check before any await, then push off, sign and finish', async (t) => {
+test('requestDeletion: typed name, then the passkey check over the nonce before any await, then push off, sign and finish with the assertion', async (t) => {
   const { requestDeletion } = await load()
   const { fx, calls } = effects()
-  const prepared = { nonce: 'n'.repeat(43), username: 'ana' }
+  const prepared = { nonce: 'n'.repeat(43), username: 'ana', passkeys: [CRED], scheduled: null }
   const p = requestDeletion({ prepared, typed: '@ana', ...fx })
-  t.alike(calls, ['confirm'], 'the passkey check ran synchronously, inside the tap')
+  t.alike(calls, [['confirm', { challenge: prepared.nonce }]], 'the passkey check ran synchronously, inside the tap, over the nonce')
   t.alike(await p, { deleted: 'pendente' })
-  t.alike(calls, ['confirm', 'push-off', ['sign', { nonce: prepared.nonce, username: 'ana' }], ['finish', { nonce: prepared.nonce, signature: 'f'.repeat(128) }]])
+  t.alike(calls, [['confirm', { challenge: prepared.nonce }], 'push-off', ['sign', { nonce: prepared.nonce, username: 'ana' }], ['finish', { nonce: prepared.nonce, signature: 'f'.repeat(128), assertion: ASSERTION }]])
+})
+
+test('requestDeletion: without a stored passkey (or with another one) it asks to wait and keeps push on', async (t) => {
+  const { requestDeletion, deletionMode } = await load()
+  const at = '2026-11-13T12:00:00.000Z'
+  for (const passkeys of [[], ['T1RIRVI']]) {
+    const { fx, calls } = effects({ finish: async (args) => { calls.push(['finish', args]); return { scheduled: at } } })
+    const prepared = { nonce: 'n'.repeat(43), username: 'ana', passkeys, scheduled: null }
+    t.is(deletionMode(prepared), passkeys.length === 0 ? 'agendada' : 'agora')
+    t.alike(await requestDeletion({ prepared, typed: 'ana', ...fx }), { scheduled: at })
+    t.absent(calls.includes('push-off'), 'a waiting deletion keeps the push notice of its schedule')
+    t.alike(calls[calls.length - 1], ['finish', { nonce: prepared.nonce, signature: 'f'.repeat(128), wait: true }], 'no assertion the service cannot verify')
+  }
+})
+
+test('cancelDeletion, scheduledOf and the date in Brasília time', async (t) => {
+  const { cancelDeletion, scheduledOf, scheduleDate, scheduledText } = await load()
+  const calls = []
+  const out = await cancelDeletion({
+    start: async () => { calls.push('start'); return { nonce: 'c'.repeat(43), username: 'ana' } },
+    sign: async (args) => { calls.push(['sign', args]); return { signature: 'e'.repeat(128) } },
+    finish: async (args) => { calls.push(['finish', args]); return { cancelled: true } }
+  })
+  t.alike(out, { cancelled: true })
+  t.alike(calls, ['start', ['sign', { nonce: 'c'.repeat(43), username: 'ana' }], ['finish', { nonce: 'c'.repeat(43), signature: 'e'.repeat(128) }]])
+  t.is(scheduledOf({ linked: true, scheduledDeletion: '2026-11-13T12:00:00.000Z' }), '2026-11-13T12:00:00.000Z')
+  t.is(scheduledOf({ linked: true }), null)
+  t.is(scheduledOf({ scheduledDeletion: 'amanhã' }), null)
+  t.is(scheduledOf(null), null)
+  t.is(scheduleDate('2026-11-14T02:00:00.000Z'), '13/11/2026', 'still the 13th in Brasília')
+  t.ok(scheduledText('2026-11-13T12:00:00.000Z').includes('13/11/2026'))
 })
 
 test('requestDeletion: a wrong name or a cancelled passkey sends nothing', async (t) => {
@@ -66,7 +99,7 @@ test('requestDeletion: a wrong name or a cancelled passkey sends nothing', async
   t.alike(calls, [])
   ;({ fx, calls } = effects({ confirm: () => Promise.reject(Object.assign(new Error('entrada com a passkey cancelada'), { code: 'CANCELLED' })) }))
   await t.exception(requestDeletion({ prepared, typed: 'ana', ...fx }), /cancelada/)
-  t.alike(calls, [], 'nothing signed or sent after a cancel')
+  t.alike(calls.filter((c) => Array.isArray(c) && c[0] !== 'confirm'), [], 'nothing signed or sent after a cancel')
   await t.exception(requestDeletion({ prepared: null, typed: 'ana', ...fx }), /expirado/)
 })
 
