@@ -54,7 +54,8 @@ const AUDIO_DESCRIPTOR_KEYS = ['blocks', 'bytes', 'core', 'height', 'mime', 'ms'
 
 export const CHAT_MEDIA_MAX = 48
 
-const isIndex = (n) => Number.isInteger(n) && n >= 0 && n < 4
+// 0..3: a media item of the message; 'card': its link card thumbnail.
+const isIndex = (n) => (Number.isInteger(n) && n >= 0 && n < 4) || n === 'card'
 
 function goneError () {
   return new Error('apagada')
@@ -74,7 +75,7 @@ function unavailable (retryable) {
 }
 
 // The cache key of a ref, or null when the ref is not well formed.
-// dm: { kind: 'dm', from, id, index }; group: { kind: 'group', diary, item }.
+// dm: { kind: 'dm', from, id, index } (index 0..3 or 'card'); group: { kind: 'group', diary, item }.
 export function chatMediaKey (identity, ref) {
   if (typeof identity !== 'string' || !HEX64.test(identity)) return null
   if (!ref || typeof ref !== 'object') return null

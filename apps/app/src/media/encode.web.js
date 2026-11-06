@@ -1,4 +1,4 @@
-/* global createImageBitmap, document, Image, URL */
+/* global Blob, createImageBitmap, document, Image, URL */
 
 // Web: turns a chosen file into the bytes that are uploaded.
 // - Photos (jpeg, png, webp) are decoded (createImageBitmap, or an <img> when
@@ -16,6 +16,7 @@
 // -> { bytes: Uint8Array, mime, width, height }; throws an Error with a
 // message for the person.
 
+import rpc from '@varanda/rpc'
 import { gifSize } from './gif.js'
 import { MAX_GIF_BYTES, MAX_IMAGE_SIDE, checkFile, fitWithin, kindOf } from './plan.js'
 
@@ -122,4 +123,60 @@ export async function encodeFile (file) {
   const kind = file ? kindOf(file.type) : null
   if (kind === null) throw fail('formato não aceito')
   return kind === 'gif' ? encodeGif(file) : encodePhoto(file)
+}
+
+// A link card's thumbnail (../linkCard.js): the page image drawn on white
+// and re-encoded as a JPEG at most `side` px on the long side and `maxBytes`
+// bytes, with a lower quality, then a smaller size, until it fits.
+// -> { bytes, mime, width, height } or null when it never fits.
+const THUMB_QUALITIES = [0.7, 0.5, 0.35]
+const THUMB_SCALES = [1, 0.75, 0.5]
+
+function toJpeg (canvas, quality) {
+  return new Promise((resolve) => {
+    try {
+      canvas.toBlob((blob) => resolve(blob || null), 'image/jpeg', quality)
+    } catch {
+      resolve(null)
+    }
+  })
+}
+
+export async function encodeThumbnail (bytes, mime, { side = 320, maxBytes = 32752 } = {}) {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) return null
+  // The page chose the image: its header must declare a size within the
+  // photo bounds before anything decodes it (a decompression bomb).
+  if (rpc.mediaBounds(bytes, mime) === null) return null
+  let decoded
+  try {
+    decoded = await decode(new Blob([bytes], { type: mime }))
+  } catch {
+    return null
+  }
+  const canvas = document.createElement('canvas')
+  try {
+    if (!(decoded.width >= 1 && decoded.height >= 1)) return null
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    for (const scale of THUMB_SCALES) {
+      const { width, height } = fitWithin(decoded.width, decoded.height, Math.max(1, Math.round(side * scale)))
+      canvas.width = width
+      canvas.height = height
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, width, height)
+      ctx.drawImage(decoded.source, 0, 0, width, height)
+      for (const q of THUMB_QUALITIES) {
+        const blob = await toJpeg(canvas, q)
+        if (!blob || blob.type !== 'image/jpeg') return null
+        if (blob.size <= maxBytes) return { bytes: await bytesOf(blob), mime: 'image/jpeg', width, height }
+      }
+    }
+    return null
+  } catch {
+    return null
+  } finally {
+    decoded.release()
+    canvas.width = 0
+    canvas.height = 0
+  }
 }

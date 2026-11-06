@@ -44,7 +44,10 @@
 // Props: { value, onChangeText, onSend, sending, sendDisabled, editable,
 //   placeholder, accessibilityLabel, reply, onCancelReply, attach, notice,
 //   ownKey, mentions = true, max = MAX_TEXT, onAttach, attachments,
-//   onRemoveAttachment(id), onCancelAttachments, progress, onVoice }
+//   onRemoveAttachment(id), onCancelAttachments, progress, onVoice,
+//   linkDraft }
+//   linkDraft: useLinkDraft's answer (below), drawn above the field while
+//   no photo is staged.
 //   reply: { name, text, senderKey, mine } or null (ReplyPreview props)
 //   attachments: [{ id, status: 'encoding' | 'ready' | 'invalid', thumb, error }]
 
@@ -62,6 +65,13 @@ import { useNode } from '../node'
 import { useMemberSearch } from '../useMemberSearch'
 import { AttachSheet } from './AttachSheet'
 import { GifPicker, gifOriginOf, useGifReady } from './GifPicker'
+import { LinkCard } from './LinkCard'
+import { LINK_DRAFT_DELAY_MS, buildDraft, draftView, freezeSnapshot, linkDraftIdle, linkDraftStep, needsBuild } from '../linkCard'
+import { previewTarget } from '../preview'
+import { previewsEnabled } from '../previewPref'
+import { buildPreview, previewPrefStore } from '../previewBuild'
+import { encodeThumbnail } from '../media/encode'
+import { revokeUrl, urlFromBytes } from '../media/display'
 import { EmojiPicker } from './EmojiPicker'
 import { tap } from './haptics'
 import { Icon } from './Icon'
@@ -190,6 +200,102 @@ function useVoiceRecorder ({ onVoice, onNote }) {
 
 // A thin ring around the send button: two half masks, each rotating a
 // half-bordered circle into view (the same drawing as Publicar's ring).
+// The draft link card of a composer (../linkCard.js): LINK_DRAFT_DELAY_MS
+// after a link appears in `text`, one build per distinct URL through the
+// platform's buildPreview (stale work aborted), the thumbnail re-encoded and
+// shown from a local URI that is revoked when the card changes or goes. A
+// staged photo (`photos`) drops the card. With "Prévia de links" off
+// (../previewPref.js) or `enabled` false nothing is built and nothing is
+// fetched. take(text) freezes the ready card for a send (or null); the
+// screen keeps that snapshot with its pending send.
+export function useLinkDraft ({ text, enabled = true, photos = false, member = null }) {
+  const node = useNode()
+  const request = node !== null ? node.request : undefined
+  const origin = gifOriginOf(node)
+  const online = node !== null && node.online !== false
+  const [state, setState] = useState(linkDraftIdle)
+  const stateRef = useRef(state)
+  const dispatch = (event) => {
+    const next = linkDraftStep(stateRef.current, event)
+    stateRef.current = next
+    setState(next)
+  }
+  const photosRef = useRef(photos)
+  photosRef.current = photos
+  const on = enabled === true && online && previewsEnabled(previewPrefStore())
+  const target = on ? previewTarget(typeof text === 'string' ? text : '') : null
+
+  useEffect(() => {
+    if (!on) dispatch({ type: 'reset' })
+  }, [on])
+  useEffect(() => {
+    if (photos) dispatch({ type: 'photo' })
+  }, [photos, target])
+
+  useEffect(() => {
+    if (target === null) {
+      dispatch({ type: 'target', url: null })
+      return undefined
+    }
+    let ctl = null
+    const timer = setTimeout(() => {
+      dispatch({ type: 'target', url: target })
+      if (photosRef.current) dispatch({ type: 'photo' })
+      if (!needsBuild(stateRef.current)) return
+      ctl = new AbortController()
+      const signal = ctl.signal
+      buildDraft(target, { signal, buildPreview, encodeThumbnail, member, request, origin }).then((data) => {
+        if (signal.aborted) return
+        dispatch(data ? { type: 'built', url: target, data } : { type: 'failed', url: target })
+      })
+    }, LINK_DRAFT_DELAY_MS)
+    return () => {
+      clearTimeout(timer)
+      // An aborted build is never remembered: the URL builds again later.
+      if (ctl !== null) ctl.abort()
+    }
+    // request and origin follow the node; a new node drops the draft anyway.
+  }, [target, member])
+
+  // An aborted build leaves 'building' behind: back to idle so it runs again.
+  useEffect(() => {
+    if (state.phase === 'building' && state.url !== target) dispatch({ type: 'target', url: target })
+  }, [state.phase, state.url, target])
+
+  const thumb = state.phase === 'ready' && state.data ? state.data.thumb : null
+  const [imageUri, setImageUri] = useState(null)
+  useEffect(() => {
+    if (thumb === null) {
+      setImageUri(null)
+      return undefined
+    }
+    let uri = null
+    try {
+      uri = urlFromBytes(thumb.bytes, thumb.mime)
+    } catch {}
+    setImageUri(uri)
+    return () => { if (uri !== null) revokeUrl(uri) }
+  }, [thumb])
+
+  return {
+    view: draftView(state),
+    imageUri: thumb !== null ? imageUri : null,
+    dismiss: () => dispatch({ type: 'dismiss' }),
+    take: (sent) => freezeSnapshot(stateRef.current, sent)
+  }
+}
+
+// The draft card above the field, with its remove button.
+export function LinkDraftCard ({ draft }) {
+  const styles = useStyles(makeStyles)
+  if (!draft || !draft.view) return null
+  return (
+    <View style={styles.linkDraft}>
+      <LinkCard draft={draft.view} imageUri={draft.imageUri || undefined} onDismiss={() => draft.dismiss()} />
+    </View>
+  )
+}
+
 function ProgressRing ({ progress }) {
   const styles = useStyles(makeStyles)
   const deg = Math.max(0, Math.min(1, Number.isFinite(progress) ? progress : 0)) * 360
@@ -277,7 +383,8 @@ export function ChatComposer ({
   onRemoveAttachment,
   onCancelAttachments,
   progress = null,
-  onVoice = null
+  onVoice = null,
+  linkDraft = null
 }) {
   const styles = useStyles(makeStyles)
   // The composer sits at the bottom of a stacked screen (no tab bar under it),
@@ -451,6 +558,7 @@ export function ChatComposer ({
       {reply
         ? <ReplyPreview name={reply.name} handle={reply.handle} text={reply.text} senderKey={reply.senderKey} mine={reply.mine} onCancel={onCancelReply} />
         : null}
+      {staged.length === 0 ? <LinkDraftCard draft={linkDraft} /> : null}
       {staged.length > 0
         ? <Thumbs items={staged} onRemove={onRemoveAttachment} onCancel={onCancelAttachments} locked={sending} />
         : null}
@@ -666,6 +774,7 @@ const makeStyles = (colors) => StyleSheet.create({
   ringArcLeft: { left: 0 },
   thumbsRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   thumbs: { gap: space.sm, paddingVertical: space.xs, paddingHorizontal: space.xs },
+  linkDraft: { paddingHorizontal: space.xs, paddingVertical: space.xs },
   thumb: {
     width: THUMB,
     height: THUMB,

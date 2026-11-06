@@ -18,6 +18,10 @@ const {
   MAX_NAME,
   MAX_BIO,
   MAX_TEXT,
+  MAX_CARD_URL,
+  MAX_CARD_TITLE,
+  MAX_CARD_DESC,
+  MAX_CARD_IMAGE_BYTES,
   MAX_MEDIA_BLOCKS,
   MAX_MEDIA_ITEM_BLOCKS,
   MAX_MEDIA_PER_POST,
@@ -67,6 +71,33 @@ const DESCRIPTOR = {
   height: MAX_MEDIA_DIMENSION
 }
 const MEDIA = Array(MAX_MEDIA_PER_POST).fill(DESCRIPTOR)
+// The hostname is repeated in the card, so the longest hostname is widest.
+const CARD_HOST = ['a'.repeat(63), 'b'.repeat(63), 'c'.repeat(63), 'd'.repeat(61)].join('.')
+const CARD_IMAGE = { ...DESCRIPTOR, mime: 'image/jpeg', start: MAX_MEDIA_BLOCKS - 1, blocks: 1, bytes: MAX_CARD_IMAGE_BYTES }
+const CARD = {
+  url: 'https://' + CARD_HOST + '/' + 'a'.repeat(MAX_CARD_URL - 9 - CARD_HOST.length),
+  host: CARD_HOST,
+  title: '\u{1f600}'.repeat(MAX_CARD_TITLE),
+  desc: '\u{1f600}'.repeat(MAX_CARD_DESC),
+  image: CARD_IMAGE
+}
+const PRIVATE_CARD_IMAGE = {
+  core: HEX,
+  mime: 'application/octet-stream',
+  start: MAX_MEDIA_BLOCKS - 1,
+  blocks: 1,
+  bytes: MAX_CARD_IMAGE_BYTES,
+  sha256: HEX,
+  key: HEX,
+  nonce: 'f'.repeat(48),
+  plainMime: 'image/jpeg',
+  plainSha256: HEX,
+  w: MAX_MEDIA_DIMENSION,
+  h: MAX_MEDIA_DIMENSION,
+  ms: 0
+}
+const PRIVATE_CARD = { ...CARD, image: PRIVATE_CARD_IMAGE }
+
 // The widest avatar: the longest avatar mime and the widest start, blocks
 // and bytes (width and height are fixed).
 const WORST_AVATAR = { core: HEX, mime: 'image/webp', start: 8184, blocks: 8, bytes: 262144, sha256: HEX, width: 512, height: 512 }
@@ -75,12 +106,12 @@ function worstProfile (ch) {
   return { type: 'profile', name: ch.repeat(MAX_NAME), bio: ch.repeat(MAX_BIO), at: AT, avatar: WORST_AVATAR }
 }
 
-function worstPost (ch) {
-  return { type: 'post', text: ch.repeat(MAX_TEXT), at: AT, replyTo: { author: HEX, seq: SEQ }, media: MEDIA }
+function worstPost (ch, preview = true) {
+  return { type: 'post', text: ch.repeat(MAX_TEXT), at: AT, replyTo: { author: HEX, seq: SEQ }, ...(preview ? { preview: CARD } : { media: MEDIA }) }
 }
 
-function worstQuote (ch) {
-  return { ...worstPost(ch), replyTo: null, quote: { author: HEX, seq: SEQ } }
+function worstQuote (ch, preview = true) {
+  return { ...worstPost(ch, preview), replyTo: null, quote: { author: HEX, seq: SEQ } }
 }
 
 function size (result) {
@@ -121,8 +152,8 @@ test('seen sync: worst-case request and results fit', (t) => {
   t.comment('seen.merge worst-case result with 512 caught-up keys: ' + merge + ' bytes')
 })
 
-function feedResult (n, ch) {
-  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ }, quote: null, media: MEDIA }
+function feedResult (n, ch, preview = true) {
+  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ }, quote: null, media: preview ? null : MEDIA, preview: preview ? CARD : null }
   return {
     items: Array(n).fill(item),
     skipped: Array(MAX_LIST).fill({ key: HEX, reason: 'untrusted-association' }),
@@ -136,8 +167,8 @@ function feedResult (n, ch) {
 
 // A PeekItem is a FeedItem plus `round` and the author's `avatar`; its worst case is a post with a
 // reply or a quote ref (never both; a repost item is smaller).
-function peekResult (n, ch) {
-  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: null, quote: { author: HEX, seq: SEQ }, media: MEDIA, round: 100000, avatar: WORST_AVATAR }
+function peekResult (n, ch, preview = true) {
+  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: null, quote: { author: HEX, seq: SEQ }, media: preview ? null : MEDIA, preview: preview ? CARD : null, round: 100000, avatar: WORST_AVATAR }
   return {
     items: Array(n).fill(item),
     next: { round: 100000, at: AT, author: HEX, seq: SEQ },
@@ -162,17 +193,17 @@ function noticesResult (n, ch) {
   }
 }
 
-function logResult (n, ch) {
+function logResult (n, ch, preview = true) {
   // Quote records retain replyTo: null and add quote, costing 13 bytes more
   // than plain reply records (FeedItems always carry both fields).
-  return { key: HEX, entries: Array(n).fill({ seq: SEQ, record: worstQuote(ch) }), invalid: [], entriesTruncated: SEQ }
+  return { key: HEX, entries: Array(n).fill({ seq: SEQ, record: worstQuote(ch, preview) }), invalid: [], entriesTruncated: SEQ }
 }
 
-function diaryPeekResult (entries, invalid, missing, ch) {
+function diaryPeekResult (entries, invalid, missing, ch, preview = true) {
   return {
     key: HEX,
     length: SEQ,
-    entries: Array(entries).fill({ seq: SEQ, record: worstQuote(ch) }),
+    entries: Array(entries).fill({ seq: SEQ, record: worstQuote(ch, preview) }),
     invalid: Array(invalid).fill(SEQ),
     missing: Array(missing).fill(SEQ),
     profile: { name: ch.repeat(MAX_NAME), bio: ch.repeat(MAX_BIO), avatar: WORST_AVATAR },
@@ -215,20 +246,22 @@ test('feed quote items are no larger than replies, and reposts are smaller', (t)
   for (const ch of WORST) {
     const post = feedResult(1, ch).items[0]
     const quote = { ...post, replyTo: null, quote: post.replyTo }
-    const repost = { ...post, kind: 'repost', to: post.replyTo, text: null, replyTo: null, quote: null, media: null }
+    const repost = { ...post, kind: 'repost', to: post.replyTo, text: null, replyTo: null, quote: null, media: null, preview: null }
     t.ok(size(quote) <= size(post), 'quote ' + JSON.stringify(ch))
     t.ok(size(repost) < size(post), 'repost ' + JSON.stringify(ch))
   }
 })
 
 test('feed.read: FEED_LIMIT_MAX fits, one more does not', (t) => {
-  // With MAX_MEDIA_PER_POST maximal descriptors in every item.
-  t.is(FEED_LIMIT_MAX, 31)
+  // With a maximal public card in every item.
+  t.is(FEED_LIMIT_MAX, 27)
   t.is(FEED_INCOMPLETE_MAX, 16)
   for (const ch of WORST) t.ok(size(feedResult(FEED_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   const worst = size(feedResult(FEED_LIMIT_MAX, '\ud800'))
+  t.is(worst, 253565)
   t.comment('feed worst case at ' + FEED_LIMIT_MAX + ' items: ' + worst + ' bytes')
   const overflow = size(feedResult(FEED_LIMIT_MAX + 1, '\ud800'))
+  t.is(overflow, 262198)
   t.comment('feed worst case at ' + (FEED_LIMIT_MAX + 1) + ' items: ' + overflow + ' bytes')
   t.ok(overflow > MAX_MESSAGE, 'largest that fits')
   // Lone surrogates are the worst case: one more item of 4-byte characters fits.
@@ -238,8 +271,9 @@ test('feed.read: FEED_LIMIT_MAX fits, one more does not', (t) => {
 })
 
 test('peek.read: PEEK_LIMIT_MAX fits', (t) => {
-  // With MAX_MEDIA_PER_POST maximal descriptors in every item.
+  // With a maximal public card in every item.
   for (const ch of WORST) t.ok(size(peekResult(PEEK_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  t.is(size(peekResult(PEEK_LIMIT_MAX, '\ud800')), 240371)
   t.comment('peek worst case at ' + PEEK_LIMIT_MAX + ' items: ' + size(peekResult(PEEK_LIMIT_MAX, '\ud800')) + ' bytes')
 })
 
@@ -249,16 +283,18 @@ test('notices.list: NOTICES_LIMIT_MAX fits', (t) => {
 })
 
 test('log.read: LOG_LIMIT_MAX fits, one more does not', (t) => {
-  t.is(LOG_LIMIT_MAX, 36)
+  t.is(LOG_LIMIT_MAX, 32)
   for (const ch of WORST) t.ok(size(logResult(LOG_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  t.is(size(logResult(LOG_LIMIT_MAX, '\ud800')), 257170)
   t.comment('log worst case at ' + LOG_LIMIT_MAX + ' entries: ' + size(logResult(LOG_LIMIT_MAX, '\ud800')) + ' bytes')
   const overflow = size(logResult(LOG_LIMIT_MAX + 1, '\ud800'))
+  t.is(overflow, 265201)
   t.comment('log worst case at ' + (LOG_LIMIT_MAX + 1) + ' entries: ' + overflow + ' bytes')
   t.ok(overflow > MAX_MESSAGE, 'largest that fits')
 })
 
 test('diary.peek: every partition of PEEK_SEQS_MAX fits with profile and username', (t) => {
-  t.is(PEEK_SEQS_MAX, 36)
+  t.is(PEEK_SEQS_MAX, 32)
   const worst = size(diaryPeekResult(PEEK_SEQS_MAX, 0, 0, '\ud800'))
   for (const ch of WORST) t.ok(size(diaryPeekResult(PEEK_SEQS_MAX, 0, 0, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   // Each requested seq contributes to exactly one of entries/invalid/missing.
@@ -270,14 +306,17 @@ test('diary.peek: every partition of PEEK_SEQS_MAX fits with profile and usernam
       largest = Math.max(largest, size(diaryPeekResult(entries, invalid, missing, '\ud800')))
     }
   }
-  t.is(largest, worst, '36 quote records dominate all partitions, including 36 invalid or missing seqs')
+  t.is(largest, worst, '32 quote records dominate all partitions, including 32 invalid or missing seqs')
+  t.is(largest, 259643)
   t.ok(largest <= MAX_MESSAGE)
+  t.is(size(diaryPeekResult(PEEK_SEQS_MAX + 1, 0, 0, '\ud800')), 267674)
+  t.ok(size(diaryPeekResult(PEEK_SEQS_MAX + 1, 0, 0, '\ud800')) > MAX_MESSAGE)
   t.comment('diary.peek worst case at ' + PEEK_SEQS_MAX + ' entries with profile and username: ' + largest + ' bytes')
-  // All three arrays full would describe 108 requests, outside the contract.
+  // All three arrays full would describe 96 requests, outside the contract.
   // Keep this counterexample explicit: it cannot be used as a fits proof.
   const impossible = size(diaryPeekResult(PEEK_SEQS_MAX, PEEK_SEQS_MAX, PEEK_SEQS_MAX, '\ud800'))
-  t.comment('diary.peek synthetic 36 entries + 36 invalid + 36 missing: ' + impossible + ' bytes (outside contract)')
-  t.ok(impossible > MAX_MESSAGE)
+  t.comment('diary.peek synthetic 32 entries + 32 invalid + 32 missing: ' + impossible + ' bytes (outside contract)')
+  t.ok(impossible > largest)
 })
 
 test('engagement.read: ENGAGEMENT_LIMIT_MAX liked and reposted refs fit', (t) => {
@@ -304,8 +343,8 @@ test('follow.list: FOLLOW_LIMIT_MAX keys fit with a wide margin', (t) => {
   t.ok(s * 4 < MAX_MESSAGE)
 })
 
-function groupReadResult (n, ch, media) {
-  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, fwd: 1, media, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20) }
+function groupReadResult (n, ch, media, card = null) {
+  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, fwd: 1, media, card, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20) }
   return { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, hidden: SEQ, incomplete: true, sealed: SEQ, epoch: { writer: HEX, seq: SEQ }, state: 'rekey-pending' }
 }
 
@@ -337,8 +376,9 @@ test('group.read: GROUP_LIMIT_MAX with private media fits, one more does not', (
   for (const ch of WORST) t.ok(size(groupReadResult(GROUP_LIMIT_MAX, ch, media)) <= MAX_MESSAGE, JSON.stringify(ch))
   const worst = size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', media))
   const overflow = size(groupReadResult(GROUP_LIMIT_MAX + 1, '\ud800', media))
-  t.is(worst, 257369)
-  t.is(overflow, 266230)
+  t.ok(worst < size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', null, PRIVATE_CARD)))
+  t.is(worst, 257717)
+  t.is(overflow, 266590)
   t.comment('group.read worst private item: ' + utf8ByteLength(JSON.stringify(item)) + ' bytes')
   t.comment('group.read worst case at ' + GROUP_LIMIT_MAX + ' items: ' + worst + ' bytes')
   t.comment('group.read worst case at ' + (GROUP_LIMIT_MAX + 1) + ' items: ' + overflow + ' bytes')
@@ -387,11 +427,13 @@ const DM_MEDIA_ITEM = {
   ms: 0
 }
 
-// Every message at MAX_TEXT code points and MAX_DM_MEDIA items, which the
+const DM_CARD = { ...CARD, image: { ...DM_MEDIA_ITEM, mime: 'image/jpeg', chunks: 1, bytes: MAX_CARD_IMAGE_BYTES } }
+
+// Every message at MAX_TEXT code points and a maximal card, which the
 // sealed frame (DM_INNER_BYTES) cannot even carry together: a bound, not a
 // message that exists.
-function dmThreadResult (n, ch) {
-  const message = { id: 'f'.repeat(32), from: HEX, text: ch.repeat(MAX_TEXT), replyTo: 'f'.repeat(32), fwd: 1, at: AT, mine: false, media: widestDmMedia(MAX_DM_MEDIA) }
+function dmThreadResult (n, ch, card = true) {
+  const message = { id: 'f'.repeat(32), from: HEX, text: ch.repeat(MAX_TEXT), replyTo: 'f'.repeat(32), fwd: 1, at: AT, mine: false, media: card ? null : widestDmMedia(MAX_DM_MEDIA), card: card ? DM_CARD : null }
   return { messages: Array(n).fill(message), next: 'f'.repeat(32), folder: 'request', blocked: false }
 }
 
@@ -410,15 +452,15 @@ test('the widest DM media item is a valid dm.send item', (t) => {
 })
 
 test('dm.thread: DM_THREAD_LIMIT_MAX fits, one more does not', (t) => {
-  t.is(DM_THREAD_LIMIT_MAX, 46)
+  t.is(DM_THREAD_LIMIT_MAX, 42)
   t.ok(validateParams('dm.thread', { peer: HEX, limit: DM_THREAD_LIMIT_MAX }).ok)
   t.absent(validateParams('dm.thread', { peer: HEX, limit: DM_THREAD_LIMIT_MAX + 1 }).ok)
   for (const ch of DM_WORST) t.ok(size(dmThreadResult(DM_THREAD_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   const worst = size(dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}'))
   t.comment('dm.thread worst case at ' + DM_THREAD_LIMIT_MAX + ' messages: ' + worst + ' bytes')
   const overflow = size(dmThreadResult(DM_THREAD_LIMIT_MAX + 1, '\u{1f600}'))
-  t.is(worst, 260908)
-  t.is(overflow, 266577)
+  t.is(worst, 259022)
+  t.is(overflow, 265186)
   t.comment('dm.thread worst case at ' + (DM_THREAD_LIMIT_MAX + 1) + ' messages: ' + overflow + ' bytes')
   t.ok(overflow > MAX_MESSAGE, 'largest that fits')
 })
@@ -435,4 +477,48 @@ test('the dispatcher sends the worst-case feed page unchanged', async (t) => {
   t.is(sent[1].ok, true)
   t.is(sent[1].result.items.length, FEED_LIMIT_MAX)
   t.alike(sent[1].result, feedResult(FEED_LIMIT_MAX, '\ud800'))
+})
+
+test('maximal cards dominate media on affected pages', (t) => {
+  t.is(CARD.url.length, 300)
+  t.is(CARD.host.length, 253)
+  t.is(utf8ByteLength(JSON.stringify(CARD)), 1801)
+  t.is(utf8ByteLength(JSON.stringify(PRIVATE_CARD)), 2051)
+  t.is(utf8ByteLength(JSON.stringify(DM_CARD)), 1916)
+  t.ok(validateParams('post.create', { text: 'x', preview: CARD }).ok)
+  t.ok(validateParams('group.post', { group: HEX, text: 'x', card: PRIVATE_CARD, sealed: true }).ok)
+  t.ok(validateParams('dm.send', { to: HEX, text: 'x', card: DM_CARD }).ok)
+  for (const ch of WORST) {
+    t.is(validateRecord(worstPost(ch), 1), null)
+    t.is(validateRecord(worstQuote(ch), 1), null)
+    t.is(validateRecord(worstPost(ch, false), 1), null)
+    t.is(validateRecord(worstQuote(ch, false), 1), null)
+    for (const result of [feedResult, peekResult, logResult]) {
+      t.ok(size(result(1, ch)) > size(result(1, ch, false)), 'card exceeds four public descriptors')
+    }
+    t.ok(size(diaryPeekResult(1, 0, 0, ch)) > size(diaryPeekResult(1, 0, 0, ch, false)))
+  }
+  t.ok(size(dmThreadResult(1, '\u{1f600}')) > size(dmThreadResult(1, '\u{1f600}', false)), 'DM card exceeds four media items')
+  t.ok(size(groupReadResult(1, '\ud800', MEDIA, null)) < size(groupReadResult(1, '\ud800', null, CARD)))
+})
+
+test('group.read: maximal private cards fit, one more does not', (t) => {
+  t.is(GROUP_LIMIT_MAX, 29)
+  for (const ch of WORST) {
+    const worst = groupReadResult(GROUP_LIMIT_MAX, ch, null, PRIVATE_CARD)
+    t.ok(size(worst) <= MAX_MESSAGE)
+    t.ok(size(groupReadResult(GROUP_LIMIT_MAX, ch, null, CARD)) < size(worst))
+  }
+  const worst = size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', null, PRIVATE_CARD))
+  const overflow = size(groupReadResult(GROUP_LIMIT_MAX + 1, '\ud800', null, PRIVATE_CARD))
+  t.is(worst, 259979)
+  t.is(overflow, 268930)
+  t.ok(overflow > MAX_MESSAGE)
+})
+
+test('page.feed: maximal cards fit the shared feed limit', (t) => {
+  const result = { items: feedResult(FEED_LIMIT_MAX, '\ud800').items, incomplete: false }
+  t.is(size(result), 233164)
+  t.ok(size(result) < size(feedResult(FEED_LIMIT_MAX, '\ud800')))
+  t.ok(size(result) <= MAX_MESSAGE)
 })

@@ -33,6 +33,10 @@
 // ./ExcluirConta.js: App Store guideline 5.1.1(v), deletion starts in the app.
 // The footer under the list shows the build and the commit the installation
 // serves, only through the src/version.js formatters, and a tap copies them.
+// Prévia de links (src/previewPref.js): off, the composers never look up a
+// pasted link; cards other people send still show. The choice lives in the
+// same previewPrefStore() (../previewBuild) the composers read, so it reaches
+// them and survives a restart on every platform.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
@@ -54,6 +58,8 @@ import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MODES, MODE_LABELS } from '../appearance'
 import { Btn, ErrorText, Notice, Page, Row, Soft, useAction } from '../ui'
 import { pagesOn } from '../pageGate'
+import { PREVIEW_PREF_LABEL, previewsEnabled, setPreviewsEnabled } from '../previewPref'
+import { previewPrefStore } from '../previewBuild'
 import { buildInfo, fetchDeployedCommit, versionDetails, versionLines } from '../version'
 import { runningRelease } from '../runningRelease'
 import { installationOrigin } from '../installation'
@@ -90,10 +96,14 @@ const TITLES = {
   excluir: 'Excluir conta'
 }
 
+const PREVIEW_PREF_NOTE = 'Desligada, o app nunca consulta os links que você cola. Prévias que outras pessoas enviam continuam aparecendo.'
+
+// Decided by what exists, not by the platform: a store from the shell, the
+// browser's storage, or memory for this session.
 const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use qualquer passkey cadastrada nesta conta ou o código de recuperação.'
 const RESET_TEXT = 'Isto apaga a conta guardada neste aparelho e as publicações que ainda aguardam envio. Para voltar à mesma conta, entre com qualquer passkey cadastrada nela ou com o código de recuperação. Sem passkey e sem código, a conta antiga não pode ser reconstruída: será preciso entrar de novo e vincular outra vez.'
 
-function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailingText = null, pending = false, disabled = false, expanded, checked }) {
+function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailingText = null, pending = false, disabled = false, expanded, checked, toggle = false }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const state = { disabled: disabled || pending }
@@ -112,7 +122,7 @@ function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailin
   return (
     <Pressable
       style={[styles.row, !first && styles.rowDivider]}
-      accessibilityRole={radio ? 'radio' : 'button'}
+      accessibilityRole={radio ? (toggle ? 'switch' : 'radio') : 'button'}
       accessibilityLabel={label}
       accessibilityState={state}
       aria-checked={radio ? checked : undefined}
@@ -143,6 +153,12 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const install = useInstall()
 
   const [advanced, setAdvanced] = useState(false)
+  const prefStore = previewPrefStore()
+  const [previews, setPreviews] = useState(() => previewsEnabled(prefStore))
+  const togglePreviews = () => {
+    const next = !previews
+    if (setPreviewsEnabled(prefStore, next)) setPreviews(next)
+  }
   const [confirm, setConfirm] = useState(null) // null | 'sair' | 'recomecar'
   const exit = useAction()
   const reset = useAction()
@@ -374,6 +390,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 : null}
               <Item icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
               <Item icon='sun' label='Aparência' trailingText={MODE_LABELS[mode]} onPress={() => onNavigate('aparencia')} />
+              <Item icon='link' label={PREVIEW_PREF_LABEL} toggle checked={previews} trailingText={previews ? 'Ligada' : 'Desligada'} onPress={togglePreviews} />
               {pushRow
                 ? (
                   <Item
@@ -392,6 +409,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 : null}
               {hasPasskey && Platform.OS === 'web' ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
             </View>
+            <Soft>{PREVIEW_PREF_NOTE}</Soft>
             {pushRow && pushUi.note && pushUi.note !== pushError ? <Soft>{pushUi.note}</Soft> : null}
             {pushRow ? <ErrorText>{pushError}</ErrorText> : null}
             {pushUi !== null && push.support === 'unsupported' ? <Soft>{PUSH_UNSUPPORTED}</Soft> : null}

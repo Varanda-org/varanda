@@ -72,10 +72,11 @@ const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, ha
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
-const { applyDeletes, deletedSeqs, liveMediaRefs, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
+const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { UsageError } = require('@varanda/core/lib/errors')
+const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS } = require('@varanda/core/lib/group-media')
@@ -391,24 +392,27 @@ function hasMedia (media) {
   return media !== undefined && media !== null
 }
 
-async function postCreate (ctx, { text, media }) {
+async function postCreate (ctx, { text, media, preview }) {
   if (hasMedia(media)) await verifyMedia(ctx, media)
-  return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, media } : { text })))
+  if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
+  return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, media, preview } : { text, preview })))
 }
 
 // to is the parsed { author, seq } reference.
-async function postReply (ctx, { to, text, media }) {
+async function postReply (ctx, { to, text, media, preview }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
   if (hasMedia(media)) await verifyMedia(ctx, media)
-  return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, replyTo: to, media } : { text, replyTo: to })))
+  if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
+  return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, replyTo: to, media, preview } : { text, replyTo: to, preview })))
 }
 
 // to is the parsed { author, seq } reference of the quoted post; media as
 // for a reply.
-async function postQuote (ctx, { to, text, media }) {
+async function postQuote (ctx, { to, text, media, preview }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
   if (hasMedia(media)) await verifyMedia(ctx, media)
-  return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media } : { text, quote: to })))
+  if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
+  return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media, preview } : { text, quote: to, preview })))
 }
 
 // ---- delete ----
@@ -433,8 +437,7 @@ function recordAt (raw, seq) {
 }
 
 function descriptorsOf (record) {
-  if (record.type === 'post') return Array.isArray(record.media) ? record.media : []
-  return record.avatar !== undefined ? [record.avatar] : []
+  return shownMedia(record)
 }
 
 // The seq of the highest effective tombstone whose target is in targets.
@@ -2091,7 +2094,7 @@ async function groupLeave (ctx, { group }) {
 // sealed: true) in a private group, public descriptors in a public one. The
 // upload is a separate earlier call, so a post that fails here leaves its
 // blocks orphaned in the media core; nothing is retried.
-async function groupPost (ctx, { group, text, replyTo = null, media = null, fwd = 0, sealed = false }) {
+async function groupPost (ctx, { group, text, replyTo = null, media = null, card = null, fwd = 0, sealed = false }) {
   const withMedia = media !== null && media !== undefined
   // Checked before withGroup, which holds the diary open.
   if (withMedia) {
@@ -2099,13 +2102,14 @@ async function groupPost (ctx, { group, text, replyTo = null, media = null, fwd 
     if (Array.isArray(media) && media.length !== 1 && media.some(isVoiceItem)) throw badMedia()
     await verifyMedia(ctx, media, null, sealed === true ? validPrivateItem : (d) => validateDescriptor(d) === null || validAudioDescriptor(d))
   }
+  if (card && card.image !== null) await verifyMedia(ctx, [card.image], null, sealed === true ? validPrivateItem : (d) => validateDescriptor(d) === null)
   return withGroup(ctx, group, true, async ({ ownHex, g }) => {
     if (sealed === true && !g.private) throw new UsageError(GROUP_SEALED_MEDIA_PUBLIC)
-    if (withMedia && sealed !== true && g.private) throw new UsageError(GROUP_PRIVATE_MEDIA_SEALED)
+    if ((withMedia || (card && card.image !== null)) && sealed !== true && g.private) throw new UsageError(GROUP_PRIVATE_MEDIA_SEALED)
     const own = liveOwnWriter(g, ownHex)
     if (own === null || statusOf(g, ownHex) !== 'member') throw new UsageError(GROUP_FORBIDDEN)
     requireCounted(g, own.key)
-    let record = buildRecord(() => grp.groupPost({ text, replyTo, fwd, media: withMedia ? media : null, seen: g.built.last, sealed: g.private }))
+    let record = buildRecord(() => grp.groupPost({ text, replyTo, fwd, card, media: withMedia ? media : null, seen: g.built.last, sealed: g.private }))
     if (g.private) record = sealForGroup(ctx, g, own.key, record)
     return { seq: await appendToOwnGroupCore(ctx, own, record, g.private) }
   })
@@ -2361,6 +2365,7 @@ async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = nu
       replyTo: p.replyTo,
       fwd: p.fwd,
       media: p.hidden || !Array.isArray(p.media) ? null : copyGroupMedia(p.media, typeof p.media[0].key === 'string'),
+      card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
       hidden: p.hidden,
       ...authorOf(g, p.diary, base.association, base.mod)
     }))

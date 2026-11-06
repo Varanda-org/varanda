@@ -20,6 +20,7 @@ const { createDeletionSweep } = require('./deletion')
 const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, mintRedeem, redeemMatches, accountReturnUrl, appReturnPage, header } = require('./app-return')
 const { createPagesRoutes } = require('./pages-routes')
 const { createGifRoutes } = require('./gif-routes')
+const { createPreviewRoutes } = require('./preview-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -162,7 +163,9 @@ const ERROR_STATUS = Object.freeze({
   // GIF search (./gif-routes.js): the operator left it off, or the member
   // spent its daily searches or images.
   'feature-off': 404,
-  'limite-gif': 429
+  'limite-gif': 429,
+  // Link previews (./preview-routes.js): the member spent its daily previews.
+  'limite-previa': 429
 })
 
 const BASE_HEADERS = Object.freeze({
@@ -654,6 +657,11 @@ function checkRawPost (req, origin) {
 // /account/gif/* route 404 'feature-off') is a parseGifConfig result of
 // ./gif-routes.js; `gifTransport` ({ request, lookup, allowAddress }) is for
 // tests only, to reach a loopback fake provider.
+// `preview` (default true: link previews need no third-party key) turns the
+// /account/preview/* routes of ./preview-routes.js on; false answers the
+// policy { enabled: false } and 404 'feature-off' elsewhere.
+// `previewTransport` ({ request, lookup, allowAddress, deadlineMs }) is for
+// tests only, to reach a loopback fixture.
 // `recovery` is an openRecoveryStore (./recovery-store.js), or null: the
 // recovery routes (./recovery-routes.js) then answer 503 'indisponivel' and
 // everything else stays up.
@@ -689,6 +697,8 @@ function createAccountServer ({
   pages = null,
   gif = null,
   gifTransport = {},
+  preview = true,
+  previewTransport = {},
   recovery = null,
   drops = null,
   maxConnections = MAX_SOCKETS,
@@ -872,6 +882,19 @@ function createAccountServer ({
   const gifRoutes = createGifRoutes({
     ...gifTransport,
     config: gif,
+    store,
+    terms,
+    blocklist: pages && pages.blocklist ? pages.blocklist : moderationBlocklist(moderation),
+    association,
+    log,
+    now,
+    http: { send, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, keyedWindow }
+  })
+
+  // Always mounted, so /account/preview/policy answers even when previews are off.
+  const previewRoutes = createPreviewRoutes({
+    ...previewTransport,
+    enabled: preview === true,
     store,
     terms,
     blocklist: pages && pages.blocklist ? pages.blocklist : moderationBlocklist(moderation),
@@ -1622,6 +1645,7 @@ function createAccountServer ({
     if (deleteRoutes.owns(pathname)) return deleteRoutes.handle(req, res, url)
     if (pagesRoutes.owns(pathname)) return pagesRoutes.handle(req, res, url)
     if (gifRoutes.owns(pathname)) return gifRoutes.handle(req, res, url)
+    if (previewRoutes.owns(pathname)) return previewRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === APP_RETURN_PATH) return appReturn(res)
@@ -1715,7 +1739,7 @@ function createAccountServer ({
     return pushRoutes === null ? 0 : pushRoutes.room()
   }
 
-  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), gifStats: () => gifRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {

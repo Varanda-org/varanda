@@ -1016,3 +1016,15 @@ test('runSync log lines with a path or key material are redacted', (t) => {
 test('no response or event of this file carries a path', (t) => {
   scanWire(t, process.env.VARANDA_TEST_TMPDIR || os.tmpdir())
 })
+
+test('core session preserves text previews and refuses images on all post methods', async (t) => {
+  const m = await member(t, { cert: true })
+  const preview = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
+  for (const method of ['post.create', 'post.reply', 'post.quote']) {
+    const params = { text: 'link', preview, ...(method === 'post.create' ? {} : { to: m.publicKey + ':1' }) }
+    const image = { core: 'dd'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: 'ee'.repeat(32), width: 4, height: 4 }
+    t.alike(await failure(m.call(method, { ...params, preview: { ...preview, image } })), { code: 'USAGE', message: 'mídia disponível só na versão web' })
+    const sent = await m.call(method, params)
+    t.alike((await m.call('log.read')).entries.find(e => e.seq === sent.seq).record.preview, preview)
+  }
+})

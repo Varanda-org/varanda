@@ -523,7 +523,7 @@ function readEnv (env, dataDir) {
   if (limits.inviteDrops !== undefined && limits.invitesPerWeek === undefined) {
     throw new UsageError('VARANDA_INVITE_DROPS exige VARANDA_INVITES_PER_WEEK')
   }
-  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), gif: readGifEnv(env) }
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), gif: readGifEnv(env), preview: readPreviewEnv(env) }
 }
 
 // Hosted age verification: both variables set is on, both unset or empty is
@@ -569,6 +569,16 @@ function readGifEnv (env) {
   const config = parseGifConfig({ apiUrl, apiKey, mediaHosts })
   if (config === null) throw new UsageError('VARANDA_GIF_MEDIA_HOSTS inválido: use nomes de host separados por vírgula')
   return config
+}
+
+// Link previews (../account/preview-routes.js) need no third-party key, so
+// they are on unless the operator sets VARANDA_PREVIEW=0. Only '0' and '1'
+// (or unset or empty) are accepted, so a typo never leaves them on unseen.
+function readPreviewEnv (env) {
+  const raw = env.VARANDA_PREVIEW
+  if (raw === undefined || raw === '' || raw === '1') return true
+  if (raw === '0') return false
+  throw new UsageError('VARANDA_PREVIEW inválido: use 0 ou 1')
 }
 
 // When the age check started to apply on this install: the app trusts a
@@ -681,7 +691,7 @@ async function serve (flags, env) {
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
   const pagesConfig = readPagesEnv(env)
-  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, gif } = readEnv(env, flags.dataDir)
+  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, gif, preview } = readEnv(env, flags.dataDir)
   const { maxMembers = null, invitesPerWeek = null, inviteDrops = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
@@ -826,6 +836,7 @@ async function serve (flags, env) {
     // 'desligada' reminds the operator that nobody is being asked.
     log({ event: 'idade', reason: didit !== null ? 'ligada' : 'desligada' })
     log({ event: 'gif', reason: gif !== null ? 'ligada' : 'desligada' })
+    log({ event: 'preview', reason: preview ? 'ligada' : 'desligada' })
     // On every start, on or off, so an off period always moves the since
     // floor (age-check.json). An off start that cannot record it stops the
     // service; an on start that cannot read it stays up and the since route
@@ -886,7 +897,7 @@ async function serve (flags, env) {
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
       const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, invites, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, invites, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {

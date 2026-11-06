@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME, DM_THREAD_LIMIT_MAX } = require('..')
+const { createServerDispatcher, validateResponse, validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME, DM_THREAD_LIMIT_MAX } = require('..')
 
 const KEY = 'ab'.repeat(32)
 const ok = (t, method, params, expected) => {
@@ -577,7 +577,7 @@ test('engagement.read requires distinct refs in a dense bounded array', (t) => {
 })
 
 test('diary.peek requires an author and dense strictly ascending seqs', (t) => {
-  t.is(PEEK_SEQS_MAX, 36)
+  t.is(PEEK_SEQS_MAX, 32)
   t.is(PEEK_TIMEOUT_MS, 8000)
   t.absent(isMutating('diary.peek'))
   const base = { author: KEY, seqs: [1] }
@@ -1115,7 +1115,7 @@ test('log.read', (t) => {
 })
 
 test('feed.read', (t) => {
-  ok(t, 'feed.read', {}, { limit: 30 })
+  ok(t, 'feed.read', {}, { limit: 27 })
   ok(t, 'feed.read', { limit: FEED_LIMIT_MAX }, { limit: FEED_LIMIT_MAX })
   bad(t, 'feed.read', { limit: FEED_LIMIT_MAX + 1 })
   bad(t, 'feed.read', { limit: 0 })
@@ -1126,7 +1126,7 @@ test('feed.read', (t) => {
 test('feed.read before', (t) => {
   const before = { at: '2026-10-24T12:00:00.000Z', author: KEY, seq: 1 }
   ok(t, 'feed.read', { limit: 5, before }, { limit: 5, before })
-  ok(t, 'feed.read', { before }, { limit: 30, before })
+  ok(t, 'feed.read', { before }, { limit: 27, before })
   bad(t, 'feed.read', { before: { ...before, seq: 0 } }, 'seq 0')
   bad(t, 'feed.read', { before: { ...before, seq: 1.5 } }, 'seq 1.5')
   for (const at of ['2026-10-24T12:00:00Z', '2026-10-24', 1, '']) {
@@ -1143,7 +1143,7 @@ test('feed.read before', (t) => {
 
 test('peek.read', (t) => {
   t.absent(isMutating('peek.read'))
-  ok(t, 'peek.read', {}, { limit: 30 })
+  ok(t, 'peek.read', {}, { limit: 27 })
   ok(t, 'peek.read', { limit: PEEK_LIMIT_MAX }, { limit: PEEK_LIMIT_MAX })
   bad(t, 'peek.read', { limit: 0 })
   bad(t, 'peek.read', { limit: PEEK_LIMIT_MAX + 1 })
@@ -1154,7 +1154,7 @@ test('peek.read', (t) => {
 test('peek.read after', (t) => {
   const after = { round: 0, at: '2026-10-24T12:00:00.000Z', author: KEY, seq: 1 }
   ok(t, 'peek.read', { limit: 5, after }, { limit: 5, after })
-  ok(t, 'peek.read', { after }, { limit: 30, after })
+  ok(t, 'peek.read', { after }, { limit: 27, after })
   ok(t, 'peek.read', { after: { ...after, round: 2 } })
   bad(t, 'peek.read', { after: { at: after.at, author: KEY, seq: 1 } }, 'missing round')
   bad(t, 'peek.read', { after: { round: 0, author: KEY, seq: 1 } }, 'missing at')
@@ -1387,6 +1387,7 @@ test('media.readFile', (t) => {
   const dm = { kind: 'dm', from: KEY, id: ID, index: 0 }
   ok(t, 'media.readFile', dm, dm)
   ok(t, 'media.readFile', { ...dm, index: 3 })
+  ok(t, 'media.readFile', { ...dm, index: 'card' })
   for (const index of [-1, 4, 1.5, '0', null]) bad(t, 'media.readFile', { ...dm, index }, 'bad index')
   for (const from of ['AB'.repeat(32), 'ab'.repeat(31), '', null]) bad(t, 'media.readFile', { ...dm, from }, 'bad from')
   for (const id of ['CD'.repeat(16), 'cd'.repeat(15), 'cd'.repeat(32), 1]) bad(t, 'media.readFile', { ...dm, id }, 'bad id')
@@ -1601,7 +1602,7 @@ test('dm.* (Conversas)', (t) => {
   for (const to of ['ab', KEY.toUpperCase(), KEY + '0', KEY.slice(1), 1, null, true, [KEY], { key: KEY }]) bad(t, 'dm.putMedia', { ...put, to }, 'to ' + JSON.stringify(to))
 
   t.absent(isMutating('dm.thread'))
-  t.is(DM_THREAD_LIMIT_MAX, 46)
+  t.is(DM_THREAD_LIMIT_MAX, 42)
   ok(t, 'dm.thread', { peer: KEY }, { peer: KEY, limit: 30 })
   ok(t, 'dm.thread', { peer: KEY, before: ID, limit: DM_THREAD_LIMIT_MAX }, { peer: KEY, before: ID, limit: DM_THREAD_LIMIT_MAX })
   ok(t, 'dm.thread', { peer: KEY, limit: 1 })
@@ -1784,7 +1785,7 @@ test('page.* (Páginas)', (t) => {
 
   const keys = []
   for (let i = 0; i < 64; i++) keys.push(i.toString(16).padStart(2, '0').repeat(32))
-  ok(t, 'page.feed', { page: KEY, keys: [KEY] }, { page: KEY, keys: [KEY], limit: 30 })
+  ok(t, 'page.feed', { page: KEY, keys: [KEY] }, { page: KEY, keys: [KEY], limit: 27 })
   ok(t, 'page.feed', { page: KEY, keys, limit: FEED_LIMIT_MAX })
   ok(t, 'page.feed', { page: KEY, keys, limit: 1 })
   bad(t, 'page.feed', { page: KEY, keys: [...keys, 'ff'.repeat(32)] }, '65th feed key')
@@ -1834,5 +1835,108 @@ test('chat forwards: only numeric 0 or 1, default 0', (t) => {
     for (const fwd of [0, 1]) ok(t, method, { ...base, fwd }, { ...base, fwd })
     for (const fwd of [true, false, -1, 2, 0.5, '0', '1', null, [], {}]) bad(t, method, { ...base, fwd })
     bad(t, method, { ...base, text: '', fwd: 1 })
+  }
+})
+
+const CARD_PUBLIC_IMAGE = { core: KEY, mime: 'image/jpeg', start: 8191, blocks: 1, bytes: 32768, sha256: KEY, width: 16384, height: 16384 }
+const CARD_PRIVATE_IMAGE = { core: KEY, mime: 'application/octet-stream', start: 8191, blocks: 1, bytes: 32768, sha256: KEY, key: KEY, nonce: 'ab'.repeat(24), plainMime: 'image/jpeg', plainSha256: KEY, w: 16384, h: 16384, ms: 0 }
+const CARD_DM_IMAGE = { id: KEY, key: KEY, nonce: 'ab'.repeat(24), chunks: 1, bytes: 32768, sha256: KEY, mime: 'image/jpeg', w: 16384, h: 16384, ms: 0 }
+const LINK_CARD = { url: 'https://example.org/', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
+
+const CARD_CONTEXTS = [
+  ['post.create', { text: 'oi' }, 'preview', CARD_PUBLIC_IMAGE],
+  ['post.reply', { text: 'oi', to: KEY + ':1' }, 'preview', CARD_PUBLIC_IMAGE],
+  ['post.quote', { text: 'oi', to: KEY + ':1' }, 'preview', CARD_PUBLIC_IMAGE],
+  ['group.post', { text: 'oi', group: KEY }, 'card', CARD_PUBLIC_IMAGE],
+  ['group.post', { text: 'oi', group: KEY, sealed: true }, 'card', CARD_PRIVATE_IMAGE],
+  ['dm.send', { text: 'oi', to: KEY }, 'card', CARD_DM_IMAGE]
+]
+
+for (const [method, base, field, image] of CARD_CONTEXTS) {
+  test(method + ': link card with ' + (image.plainMime ? 'private' : image.id ? 'DM' : 'public') + ' image', (t) => {
+    const card = { ...LINK_CARD, image }
+    const params = { ...base, [field]: card }
+    const defaults = field === 'card' ? { fwd: 0 } : {}
+    ok(t, method, params, { ...params, ...defaults })
+    ok(t, method, { ...base, [field]: LINK_CARD })
+    ok(t, method, { ...base, [field]: { ...card, title: '', desc: '' } })
+    ok(t, method, { ...base, [field]: { ...card, url: LINK_CARD.url + 'a'.repeat(300 - LINK_CARD.url.length), title: '😀'.repeat(80), desc: '😀'.repeat(160) } })
+    if (field === 'card') ok(t, method, { ...params, fwd: 1 })
+    if (method === 'group.post' && !base.sealed) ok(t, method, { ...params, sealed: false })
+    if (!base.sealed) ok(t, method, base, { ...base, ...defaults })
+    bad(t, method, { ...params, text: '' }, 'card still needs text')
+    bad(t, method, { ...params, media: [image] }, 'card next to valid media')
+    for (const invalid of [null, undefined, false, [], {}, Object.create(card), { ...card, extra: 1 }]) {
+      bad(t, method, { ...base, [field]: invalid }, 'invalid card shape')
+    }
+    for (const key of Object.keys(card)) {
+      const missing = { ...card }
+      delete missing[key]
+      bad(t, method, { ...base, [field]: missing }, 'card without ' + key)
+    }
+    for (const patch of [
+      { url: 'http://example.org/' }, { url: 'javascript:alert(1)' },
+      { url: LINK_CARD.url + 'a'.repeat(301 - LINK_CARD.url.length) },
+      { url: 'https://127.0.0.1/', host: '127.0.0.1' },
+      { url: 'https://user@example.org/' }, { host: 'other.org' }, { host: 'EXAMPLE.ORG' },
+      { title: '😀'.repeat(81) }, { desc: '😀'.repeat(161) },
+      { title: null }, { desc: 1 }, { title: '\ud800' }, { desc: '\udc00' },
+      { title: '\u202e' }, { desc: '\u0000' }
+    ]) bad(t, method, { ...base, [field]: { ...card, ...patch } }, 'invalid card ' + Object.keys(patch).join(', '))
+    const oversize = image.id
+      ? { ...image, chunks: 2, bytes: 32769 }
+      : { ...image, start: 8190, blocks: 2, bytes: image.plainMime ? 65536 : 32769 }
+    // The oversized image passes its media path, isolating the thumbnail bound.
+    ok(t, method, { ...base, media: [oversize] })
+    for (const invalid of [
+      ...[CARD_PUBLIC_IMAGE, CARD_PRIVATE_IMAGE, CARD_DM_IMAGE].filter((other) => other !== image),
+      oversize, { ...image, bytes: 0 }, { ...image, sha256: 'bad' },
+      { ...image, [image.plainMime ? 'plainMime' : 'mime']: 'image/png' },
+      { ...image, [image.plainMime ? 'plainMime' : 'mime']: 'audio/mp4', ms: 1 },
+      { ...image, extra: true }, 'https://example.org/image.jpg'
+    ]) bad(t, method, { ...base, [field]: { ...card, image: invalid } }, 'invalid card image')
+    for (const key of Object.keys(image)) {
+      const missing = { ...image }
+      delete missing[key]
+      bad(t, method, { ...base, [field]: { ...card, image: missing } }, 'image without ' + key)
+    }
+    if (image.id || image.plainMime) bad(t, method, { ...base, [field]: { ...card, image: { ...image, ms: 1 } } }, 'JPEG duration must be zero')
+    const hostile = { ...card, get title () { throw new Error('hostile') } }
+    bad(t, method, { ...base, [field]: hostile }, 'hostile card does not throw')
+  })
+}
+
+test('read results preserve link cards, nulls, replies and quotes over RPC', async (t) => {
+  const at = '2026-01-01T00:00:00.000Z'
+  const preview = { ...LINK_CARD, image: CARD_PUBLIC_IMAGE }
+  const posts = [null, preview].flatMap((value) => [
+    { kind: 'post', author: KEY, name: 'Nome', username: null, seq: 1, at, text: 'oi', replyTo: { author: KEY, seq: 2 }, quote: null, media: null, preview: value },
+    { kind: 'post', author: KEY, name: 'Nome', username: null, seq: 2, at, text: 'oi', replyTo: null, quote: { author: KEY, seq: 1 }, media: null, preview: value }
+  ])
+  const entries = posts.map(({ text, at, replyTo, quote, preview }, i) => ({ seq: i + 1, record: { type: 'post', text, at, replyTo, ...(quote ? { quote } : {}), ...(preview ? { preview } : {}) } }))
+  const groupItems = [null, CARD_PUBLIC_IMAGE, CARD_PRIVATE_IMAGE].map((image, i) => ({ writer: KEY, diary: KEY, seq: i + 1, at, text: 'oi', replyTo: null, fwd: 0, media: null, card: image ? { ...LINK_CARD, image } : null, hidden: false, name: 'Nome', username: null }))
+  const cases = [
+    ['feed.read', {}, { items: posts, skipped: [], skippedTruncated: 0, future: [], futureTruncated: 0, incomplete: [], incompleteTruncated: 0 }],
+    ['peek.read', {}, { items: posts.map((post) => ({ ...post, round: 0, avatar: null })), next: null, diaries: 1, skipped: 0, incomplete: false }],
+    ['page.feed', { page: KEY, keys: [KEY] }, { items: posts, incomplete: false }],
+    ['log.read', {}, { key: KEY, entries, invalid: [], entriesTruncated: 0 }],
+    ['diary.peek', { author: KEY, seqs: [1, 2, 3, 4] }, { key: KEY, length: 5, entries, invalid: [], missing: [], profile: null, username: null }],
+    ['group.read', { group: KEY }, { items: groupItems, next: null, hidden: 0, incomplete: false, sealed: 0, epoch: null, state: 'ok' }],
+    ['dm.thread', { peer: KEY }, { messages: [null, { ...LINK_CARD, image: CARD_DM_IMAGE }].map((card, i) => ({ id: String(i).repeat(32), from: KEY, text: 'oi', replyTo: null, fwd: 0, at, mine: false, media: null, card })), next: null, folder: 'inbox', blocked: false }]
+  ]
+  for (const [method, params, result] of cases) {
+    let receive
+    const response = new Promise((resolve) => { receive = resolve })
+    const dispatcher = createServerDispatcher({
+      handlers: { [method]: () => result },
+      send: (message, json) => { if (message.id === 2) receive(JSON.parse(json)) }
+    })
+    dispatcher.receive({ v: 1, id: 1, method: 'session.open', params: {} })
+    dispatcher.receive({ v: 1, id: 2, method, params })
+    const message = await response
+    t.ok(validateResponse(message).ok, method + ' response accepted')
+    t.is(message.ok, true, method + ' succeeded')
+    t.alike(message.result, result, method + ' cards preserved')
+    dispatcher.close()
   }
 })

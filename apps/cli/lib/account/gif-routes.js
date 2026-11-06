@@ -2,10 +2,8 @@
 
 const https = require('node:https')
 const dns = require('node:dns')
-const net = require('node:net')
-const nodeCrypto = require('node:crypto')
-const { verifyInvite } = require('@varanda/core/lib/invite')
-const { TERMS_VERSION } = require('@varanda/core/lib/terms')
+const { isHostname, publicAddress, createSafeFetch } = require('./safe-fetch')
+const { FINISH_LIMIT, refundableWindow, createMemberSession } = require('./member-session')
 
 // GIF search through the account service (mounted by ./server.js), off
 // unless the operator sets VARANDA_GIF_API_URL and VARANDA_GIF_API_KEY:
@@ -51,15 +49,13 @@ const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 // so the address that is checked is the address that is dialled). Redirects
 // follow the same rules, at most MAX_REDIRECTS.
 
+//
+// The address checks and the guarded fetch live in ./safe-fetch.js, the
+// session (nonce, finish, token, re-check) in ./member-session.js, shared
+// with the link previews of ./preview-routes.js; each feature keeps its own
+// nonce key, domain and token table.
+
 const FEATURE_OFF = 'feature-off'
-const SESSION_TTL_MS = 12 * 3600 * 1000
-const MAX_SESSIONS = 10000
-const NONCE_TTL_S = 600
-const NONCE_DOMAIN = 'varanda/gif-nonce/v1'
-const MAX_SPENT = 10000
-const FINISH_LIMIT = 10
-const FINISH_WINDOW_MS = 600 * 1000
-const RECHECK_MS = 60 * 1000
 const CACHE_TTL_MS = 3600 * 1000
 const MAX_CACHED = 5000
 const PAGE_SIZE = 24
@@ -81,23 +77,14 @@ const FULL_PER_DAY = 60
 const TINY_PER_DAY = 2000
 const USER_AGENT = 'varanda-gif/1'
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/
-const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
-const BEARER_RE = /^bearer ([A-Za-z0-9_-]{43})$/i
-const HEX64_RE = /^[0-9a-f]{64}$/
-const HEX128_RE = /^[0-9a-f]{128}$/
 const CURSOR_RE = /^(0|[1-9][0-9]{0,3})$/
 const INT_RE = /^(0|[1-9][0-9]{0,9})$/
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/ // eslint-disable-line no-control-regex
-const HOST_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/
 const GIF87 = Buffer.from('GIF87a', 'latin1')
 const GIF89 = Buffer.from('GIF89a', 'latin1')
 const IMAGE_CSP = "default-src 'none'; sandbox"
 
 // --- configuration ---------------------------------------------------------
-
-function isHostname (host) {
-  return typeof host === 'string' && host.length <= 253 && HOST_RE.test(host) && net.isIP(host) === 0
-}
 
 // { apiUrl, apiKey, mediaHosts } -> the parsed config, or null with a token
 // in `reason`. Never echoes a value.
@@ -120,96 +107,6 @@ function parseGifConfig ({ apiUrl, apiKey, mediaHosts = [] } = {}) {
     hosts.add(h)
   }
   return { base: url.origin + url.pathname.replace(/\/+$/, ''), apiHost, apiPort: url.port, apiKey, hosts }
-}
-
-// --- addresses ---------------------------------------------------------------
-
-function v4Public (ip) {
-  const p = ip.split('.').map(Number)
-  if (p.length !== 4 || p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false
-  const [a, b, c] = p
-  if (a === 0 || a === 10 || a === 127) return false
-  if (a === 100 && b >= 64 && b <= 127) return false
-  if (a === 169 && b === 254) return false
-  if (a === 172 && b >= 16 && b <= 31) return false
-  if (a === 192 && b === 168) return false
-  if (a === 192 && b === 0 && (c === 0 || c === 2)) return false
-  if (a === 198 && (b === 18 || b === 19)) return false
-  if (a === 198 && b === 51 && c === 100) return false
-  if (a === 203 && b === 0 && c === 113) return false
-  if (a >= 224) return false
-  return true
-}
-
-// The 8 hextets of an IPv6 literal (embedded IPv4 folded in), or null.
-function v6Hextets (ip) {
-  let text = ip.toLowerCase()
-  const zone = text.indexOf('%')
-  if (zone !== -1) text = text.slice(0, zone)
-  const tail = text.match(/:(\d+\.\d+\.\d+\.\d+)$/)
-  if (tail) {
-    const p = tail[1].split('.').map(Number)
-    text = text.slice(0, -tail[1].length) + ((p[0] << 8) | p[1]).toString(16) + ':' + ((p[2] << 8) | p[3]).toString(16)
-  }
-  const halves = text.split('::')
-  if (halves.length > 2) return null
-  const head = halves[0] === '' ? [] : halves[0].split(':')
-  const rest = halves.length === 2 ? (halves[1] === '' ? [] : halves[1].split(':')) : []
-  const fill = halves.length === 2 ? 8 - head.length - rest.length : 0
-  if (fill < 0) return null
-  const all = [...head, ...new Array(fill).fill('0'), ...rest].map((h) => parseInt(h, 16))
-  if (all.length !== 8 || all.some((n) => !Number.isInteger(n) || n < 0 || n > 0xffff)) return null
-  return all
-}
-
-// Refuses loopback, private, link-local, CGNAT, multicast, reserved and
-// documentation ranges, IPv6 ULA, link-local and site-local, and every
-// IPv6 form that can carry an IPv4 address (IPv4-mapped, IPv4-compatible,
-// IPv4-translated, NAT64, 6to4, Teredo): a GIF provider never needs them,
-// and each can route to an internal IPv4 address.
-function publicAddress (ip) {
-  const family = net.isIP(ip)
-  if (family === 4) return v4Public(ip)
-  if (family !== 6) return false
-  const h = v6Hextets(ip)
-  if (h === null) return false
-  if (h.slice(0, 6).every((n) => n === 0)) return false // ::, ::1 and ::/96
-  if (h.slice(0, 5).every((n) => n === 0) && h[5] === 0xffff) {
-    return v4Public([h[6] >> 8, h[6] & 255, h[7] >> 8, h[7] & 255].join('.'))
-  }
-  if (h.slice(0, 4).every((n) => n === 0) && h[4] === 0xffff && h[5] === 0) return false // IPv4-translated ::ffff:0:0:0/96
-  if ((h[0] & 0xfe00) === 0xfc00) return false
-  if ((h[0] & 0xffc0) === 0xfe80) return false
-  if ((h[0] & 0xffc0) === 0xfec0) return false
-  if ((h[0] & 0xff00) === 0xff00) return false
-  if (h[0] === 0x64 && h[1] === 0xff9b) return false // 64:ff9b::/96 and 64:ff9b:1::/48
-  if (h[0] === 0x2001 && h[1] === 0x0db8) return false
-  if (h[0] === 0x2002) return false
-  if (h[0] === 0x2001 && h[1] === 0) return false
-  return true
-}
-
-// A net lookup that only ever answers addresses `allowAddress` admits:
-// every address of the name must pass, or the socket never opens.
-function guardedLookup (baseLookup, allowAddress) {
-  return (hostname, options, cb) => {
-    if (typeof options === 'function') {
-      cb = options
-      options = {}
-    }
-    const opts = typeof options === 'number' ? { family: options } : (options || {})
-    baseLookup(hostname, { all: true, family: opts.family || 0 }, (err, addrs) => {
-      if (err) return cb(err)
-      const list = Array.isArray(addrs) ? addrs : []
-      if (list.length === 0 || list.some((a) => !a || !allowAddress(a.address))) {
-        const blocked = new Error('endereço recusado')
-        blocked.code = 'EBLOCKED'
-        return cb(blocked)
-      }
-      if (opts.all) return cb(null, list)
-      cb(null, list[0].address, list[0].family)
-    })
-  }
 }
 
 // --- provider adapter ----------------------------------------------------------
@@ -274,37 +171,6 @@ function nextCursor (json, offset) {
 
 // --- routes -------------------------------------------------------------------
 
-// The fixed window of ./server.js keyedWindow (same eviction: a new key is
-// always admitted, a full table forgets the oldest window), plus
-// giveBack(key), which returns one use when the provider failed.
-function refundableWindow (limit, windowMs, now, max = 10000) {
-  const windows = new Map()
-  const take = (key) => {
-    const t = now()
-    let w = windows.get(key)
-    if (w !== undefined && t - w.start >= windowMs) {
-      windows.delete(key)
-      w = undefined
-    }
-    if (w === undefined) {
-      if (windows.size >= max) {
-        for (const [k, v] of windows) if (t - v.start >= windowMs) windows.delete(k)
-        if (windows.size >= max) windows.delete(windows.keys().next().value)
-      }
-      w = { start: t, count: 0 }
-      windows.set(key, w)
-    }
-    if (w.count >= limit) return false
-    w.count++
-    return true
-  }
-  take.giveBack = (key) => {
-    const w = windows.get(key)
-    if (w !== undefined && w.count > 0) w.count--
-  }
-  return take
-}
-
 // `config` is parseGifConfig's result or null (off). `blocklist` ({ has(key) }
 // or null) is the moderation desk's published blocklist. `request`, `lookup` and
 // `allowAddress` default to https.request, dns.lookup and publicAddress;
@@ -321,26 +187,16 @@ function createGifRoutes ({
   request = https.request,
   lookup = dns.lookup,
   allowAddress = publicAddress,
-  maxSpent = MAX_SPENT,
+  maxSpent,
   http
 }) {
   const { send, readJsonBody, checkPost, RouteError, refuse } = http
   const enabled = config !== null
-  const socketLookup = guardedLookup(lookup, allowAddress)
 
-  // Memory only: a restart invalidates every outstanding nonce.
-  const nonceKey = nodeCrypto.randomBytes(32)
-  // nonce -> { expiresAt }: nonces whose signature verified, kept until
-  // they expire so none is used twice.
-  const spent = new Map()
-  // sha256(token) -> { member, expiresAt, checkedAt }: a lookup by digest
-  // leaks no timing about the token itself.
-  const sessions = new Map()
   const cache = new Map()
   let inflight = 0
 
   const limits = {
-    finish: refundableWindow(FINISH_LIMIT, FINISH_WINDOW_MS, now),
     search: refundableWindow(SEARCHES_PER_DAY, DAY_MS, now),
     full: refundableWindow(FULL_PER_DAY, DAY_MS, now),
     tiny: refundableWindow(TINY_PER_DAY, DAY_MS, now)
@@ -350,139 +206,10 @@ function createGifRoutes ({
   const unavailable = () => refuse('indisponivel')
   const overLimit = () => new RouteError('limite-gif', 429)
 
-  function sweep (map) {
-    const t = now()
-    for (const [k, v] of map) if (v.expiresAt <= t) map.delete(k)
-  }
-
-  function digest (token) {
-    return nodeCrypto.createHash('sha256').update(token).digest('hex')
-  }
-
-  // null when `member` may hold a GIF session, else the refusal token. The
-  // one check of session start, finish and every use of a token.
-  function standing (member) {
-    let status
-    let blocked = false
-    try {
-      status = store.status(member)
-      if (blocklist !== null) blocked = blocklist.has(member) === true
-    } catch {
-      throw unavailable()
-    }
-    if (!status || !status.linked) return 'nao-vinculado'
-    if (blocked) return 'sem-permissao'
-    return null
-  }
-
-  function allowed (member) {
-    const reason = standing(member)
-    if (reason !== null) throw refuse(reason)
-  }
-
-  function memberParam (v) {
-    if (typeof v !== 'string' || !HEX64_RE.test(v)) throw refuse('pedido-invalido')
-    return v
-  }
-
-  function session (req) {
-    const header = req.headers.authorization
-    const m = typeof header === 'string' ? header.match(BEARER_RE) : null
-    if (m === null) throw refuse('nao-autorizado')
-    const key = digest(m[1])
-    const row = sessions.get(key)
-    if (row === undefined) throw refuse('nao-autorizado')
-    const t = now()
-    if (row.expiresAt <= t) {
-      sessions.delete(key)
-      throw refuse('nao-autorizado')
-    }
-    if (t - row.checkedAt >= RECHECK_MS) {
-      if (standing(row.member) !== null) {
-        sessions.delete(key)
-        log({ event: 'gif', reason: 'sessao-revogada' })
-        throw refuse('nao-autorizado')
-      }
-      row.checkedAt = t
-    }
-    return row.member
-  }
-
-  function nonceMac (member, random, expiry) {
-    return nodeCrypto.createHmac('sha256', nonceKey)
-      .update(NONCE_DOMAIN)
-      .update(Buffer.from(member, 'hex'))
-      .update(random)
-      .update(expiry)
-      .digest()
-      .subarray(0, 16)
-  }
-
-  // 32 bytes, 43 base64url characters (an invite.sign nonce): 12 random
-  // bytes, the expiry in unix seconds (4 bytes, big-endian) and the first
-  // 16 bytes of the HMAC over the domain, the member key and both.
-  function mintNonce (member) {
-    const random = nodeCrypto.randomBytes(12)
-    const expiry = Buffer.alloc(4)
-    expiry.writeUInt32BE(Math.floor(now() / 1000) + NONCE_TTL_S)
-    return Buffer.concat([random, expiry, nonceMac(member, random, expiry)]).toString('base64url')
-  }
-
-  // The nonce's expiry in ms when it was minted here for `member` and has
-  // not expired, else null. Only the canonical spelling passes, so the
-  // spent table sees one key per nonce.
-  function nonceExpiry (member, nonce) {
-    if (nonce === null) return null
-    const buf = Buffer.from(nonce, 'base64url')
-    if (buf.length !== 32 || buf.toString('base64url') !== nonce) return null
-    const random = buf.subarray(0, 12)
-    const expiry = buf.subarray(12, 16)
-    if (!nodeCrypto.timingSafeEqual(buf.subarray(16), nonceMac(member, random, expiry))) return null
-    const expiresAt = expiry.readUInt32BE(0) * 1000
-    return expiresAt > now() ? expiresAt : null
-  }
-
-  async function sessionStart (req, res, body) {
-    const member = memberParam(body.member)
-    allowed(member)
-    send(res, 200, { nonce: mintNonce(member) })
-  }
-
-  async function sessionFinish (req, res, body) {
-    const member = memberParam(body.member)
-    const nonce = typeof body.nonce === 'string' && TOKEN_RE.test(body.nonce) ? body.nonce : null
-    const signature = typeof body.signature === 'string' && HEX128_RE.test(body.signature) ? body.signature : null
-    const nonceExpiresAt = nonceExpiry(member, nonce)
-    if (nonceExpiresAt === null) throw refuse('expirado')
-    if (signature === null || !verifyInvite({ action: 'summary', nonce, member, association }, signature).ok) throw refuse('assinatura-invalida')
-    // Only a finish signed by the member counts, so nobody else can lock
-    // the member out; a member over the limit keeps the nonce.
-    if (!limits.finish(member)) throw overLimit()
-    sweep(spent)
-    if (spent.has(nonce)) throw refuse('expirado')
-    // Fail closed: forgetting a live entry would let it be replayed.
-    if (spent.size >= maxSpent) throw refuse('indisponivel')
-    spent.set(nonce, { expiresAt: nonceExpiresAt })
-    // The Terms that describe the search text going to the provider (v20)
-    // come before a session, as push and Pages require theirs.
-    if (terms === null || !terms.available()) throw refuse('indisponivel')
-    let accepted
-    try {
-      accepted = terms.list(member).some((e) => e.version === TERMS_VERSION)
-    } catch {
-      throw refuse('indisponivel')
-    }
-    if (!accepted) throw refuse('termos-pendentes')
-    allowed(member)
-    sweep(sessions)
-    while (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value)
-    const token = nodeCrypto.randomBytes(32).toString('base64url')
-    const t = now()
-    const expiresAt = t + SESSION_TTL_MS
-    sessions.set(digest(token), { member, expiresAt, checkedAt: t })
-    log({ event: 'gif', reason: 'sessao' })
-    send(res, 200, { token, expiresAt: new Date(expiresAt).toISOString() })
-  }
+  // The Terms that describe the search text going to the provider (v20)
+  // come before a session.
+  const auth = createMemberSession({ prefix: 'gif', overLimit, store, terms, blocklist, association, log, now, maxSpent, http })
+  const session = auth.member
 
   // A provider URL this service may fetch, as request options, or null.
   function target (href) {
@@ -500,80 +227,13 @@ function createGifRoutes ({
     return { hostname: host, port: url.port === '' ? 443 : Number(url.port), path: url.pathname + url.search, href: url.href }
   }
 
+  const safeFetch = createSafeFetch({ request, lookup, allowAddress, target, userAgent: USER_AGENT, deadlineMs: DEADLINE_MS, maxRedirects: MAX_REDIRECTS })
+
   // GET href -> Buffer of at most `cap` bytes, following at most
   // MAX_REDIRECTS redirects that pass `target` again; one DEADLINE_MS for
   // the whole exchange. Any failure rejects with no detail.
-  function fetchCapped (href, cap, accept) {
-    return new Promise((resolve, reject) => {
-      let done = false
-      let current = null
-      const finish = (err, value) => {
-        if (done) return
-        done = true
-        clearTimeout(timer)
-        if (current) current.destroy()
-        if (err) reject(err)
-        else resolve(value)
-      }
-      const timer = setTimeout(() => finish(new Error('prazo')), DEADLINE_MS)
-      const hop = (location, left) => {
-        const t = target(location)
-        if (t === null) return finish(new Error('destino'))
-        let req
-        try {
-          req = request({
-            hostname: t.hostname,
-            port: t.port,
-            path: t.path,
-            method: 'GET',
-            agent: false,
-            lookup: socketLookup,
-            headers: { 'User-Agent': USER_AGENT, Accept: accept }
-          })
-        } catch {
-          return finish(new Error('pedido'))
-        }
-        current = req
-        req.on('error', () => finish(new Error('rede')))
-        req.on('response', (res) => {
-          const status = res.statusCode
-          if (status >= 300 && status < 400 && res.headers.location !== undefined) {
-            res.resume()
-            if (left < 1) return finish(new Error('redirecionamentos'))
-            let next
-            try {
-              next = new URL(res.headers.location, t.href).href
-            } catch {
-              return finish(new Error('destino'))
-            }
-            current = null
-            req.destroy()
-            return hop(next, left - 1)
-          }
-          if (status !== 200) {
-            res.resume()
-            return finish(new Error('status'))
-          }
-          const declared = Number(res.headers['content-length'])
-          if (Number.isFinite(declared) && declared > cap) return finish(new Error('grande'))
-          const chunks = []
-          let size = 0
-          res.on('data', (chunk) => {
-            size += chunk.length
-            if (size > cap) return finish(new Error('grande'))
-            chunks.push(chunk)
-          })
-          res.on('error', () => finish(new Error('rede')))
-          res.on('aborted', () => finish(new Error('rede')))
-          res.on('end', () => {
-            current = null
-            finish(null, Buffer.concat(chunks))
-          })
-        })
-        req.end()
-      }
-      hop(href, MAX_REDIRECTS)
-    })
+  async function fetchCapped (href, cap, accept) {
+    return (await safeFetch(href, { cap, accept })).body
   }
 
   function remember (item) {
@@ -686,7 +346,7 @@ function createGifRoutes ({
     if (req.method === 'POST' && (pathname === '/account/gif/session/start' || pathname === '/account/gif/session/finish')) {
       checkPost(req)
       const body = await readJsonBody(req)
-      return pathname.endsWith('/start') ? sessionStart(req, res, body) : sessionFinish(req, res, body)
+      return pathname.endsWith('/start') ? auth.start(req, res, body) : auth.finish(req, res, body)
     }
     if (req.method === 'POST' && pathname === '/account/gif/search') {
       checkPost(req)
@@ -698,7 +358,7 @@ function createGifRoutes ({
   }
 
   function stats () {
-    return { sessions: sessions.size, spent: spent.size, cached: cache.size, inflight }
+    return { ...auth.stats(), cached: cache.size, inflight }
   }
 
   return { owns, handle, stats, enabled: () => enabled }

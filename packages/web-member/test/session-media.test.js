@@ -689,3 +689,51 @@ test('reset removes the media cores, the pending follows and the migration marke
   t.alike([again.core, again.start], [d.core, 1], 'a fresh media core for the same device key')
   t.alike(s.internal, [], 'no internal error')
 })
+
+test('post previews validate local images, survive all post writes and free the last thumbnail', async (t) => {
+  const s = await certified(t, { port: 1 })
+  const preview = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
+  preview.image = await upload(s.node, image(100).bytes)
+  const sent = []
+  for (const method of ['post.create', 'post.reply', 'post.quote']) {
+    const args = { text: 'link', preview, ...(method === 'post.create' ? {} : { to: s.key + ':1' }) }
+    for (const bad of [{ sha256: 'ab'.repeat(32) }, { bytes: 99 }, { core: 'cd'.repeat(32) }, { start: 100 }]) {
+      const err = await errorOf(s.web.request(method, { ...args, preview: { ...preview, image: { ...preview.image, ...bad } } }))
+      t.is(err && err.message, BAD_MEDIA)
+    }
+    const r = await s.web.request(method, args)
+    sent.push(r.seq)
+    t.alike((await s.web.request('log.read')).entries.find(e => e.seq === r.seq).record.preview, preview)
+  }
+  t.alike((await s.web.request('feed.read')).items.map(p => p.preview), [preview, preview, preview])
+  for (const seq of sent) {
+    const deleted = await s.web.request('post.delete', { to: s.key + ':' + seq })
+    const tomb = (await s.web.request('log.read')).entries.find(e => e.seq === deleted.seq).record
+    t.alike(tomb.media || [], seq === sent[2] ? [{ core: preview.image.core, start: preview.image.start, blocks: 1 }] : [])
+  }
+  const core = await store.openMediaCoreReadOnly(s.storage, preview.image.core)
+  try { t.absent(await core.has(preview.image.start), 'the unreferenced thumbnail was cleared') } finally { await core.close() }
+  const err = await errorOf(s.web.request('post.create', { text: 'link', preview }))
+  t.is(err && err.message, BAD_MEDIA, 'cleared bytes cannot be published again')
+})
+
+test('group cards pass through the session in public and sealed posts', async (t) => {
+  const s = await certified(t, { port: 1 })
+  await s.node.setKeyPair(s.keyPair, { media: s.mediaKeyPair, prf: crypto.randomBytes(32) })
+  const { community, group: general } = await s.web.request('community.create', { name: 'Bairro', join: 'open' })
+  const { group: secret } = await s.web.request('group.create', { community, name: 'Links', join: 'approval', visibility: 'private' })
+  for (const [group, sealed] of [[general, false], [secret, true]]) {
+    const card = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
+    card.image = await upload(s.node, new Uint8Array([255, 216, 255, 192, 0, 17, 8, 1, 224, 2, 128, 3, 1, 17, 0, 2, 17, 1, 3, 17, 1, 255, 218, 0, 2, 255, 217]), { sealed })
+    const sent = await s.web.request('group.post', { group, text: 'link', card, sealed })
+    t.alike((await s.web.request('group.read', { group })).items[0].card, card)
+    const core = await store.openGroupCoreReadOnly(s.storage, group)
+    try {
+      const r = JSON.parse(b4a.toString(await core.get(sent.seq)))
+      t.is(r.type, sealed ? 'group-sealed' : 'group-post')
+      if (!sealed) t.alike(r.card, card)
+    } finally { await core.close() }
+    const err = await errorOf(s.web.request('group.post', { group, text: 'link', card: { ...card, image: { ...card.image, sha256: 'ab'.repeat(32) } }, sealed }))
+    t.is(err && err.message, BAD_MEDIA)
+  }
+})

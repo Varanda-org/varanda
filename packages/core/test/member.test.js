@@ -465,3 +465,28 @@ test('storeOptions reach openStore', async (t) => {
   await member.idShow({ dataDir, association: null })
   t.alike(calls, [[dataDir, undefined]], 'no storeOptions passes undefined')
 })
+
+test('core post writers keep text previews and refuse thumbnails before opening', async (t) => {
+  const { ctx, publicKey } = await setup(t, { cert: true })
+  const preview = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
+  for (const method of ['postCreate', 'postReply', 'postQuote']) {
+    const args = { text: 'link', to: { author: publicKey, seq: 1 }, preview }
+    const sent = await member[method](ctx, args)
+    t.alike((await member.logRead(ctx)).entries.find(e => e.seq === sent.seq).record.preview, preview)
+    await rejectsWith(t, member[method]({}, { ...args, preview: { ...preview, image: {} } }), 'mídia disponível só na versão web', 'USAGE')
+  }
+  await rejectsWith(t, member.groupPost({}, { group: publicKey, text: 'link', card: { ...preview, image: {} } }), 'mídia disponível só na versão web', 'USAGE')
+})
+
+test('deleting a preview post lists its thumbnail in the tombstone', async (t) => {
+  const { ctx, publicKey } = await setup(t, { cert: true })
+  const image = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: 'cd'.repeat(32), width: 4, height: 4 }
+  const preview = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
+  preview.image = image
+  await member.withIdentity(ctx, async ({ diary }) => {
+    await storeLib.appendRecord(diary, { type: 'media-core', key: image.core, at: new Date().toISOString() })
+    await storeLib.appendRecord(diary, postRecord({ text: 'link', preview }))
+  })
+  const result = await member.postDelete(ctx, { to: { author: publicKey, seq: 2 } })
+  t.alike((await member.logRead(ctx)).entries.find(e => e.seq === result.seq).record.media, [{ core: image.core, start: 1, blocks: 1 }])
+})

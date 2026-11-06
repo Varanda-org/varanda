@@ -16,6 +16,7 @@
 //   a media core, and from the real admission code advertising a full
 //   4096-key inventory, both measured and asserted well under the bound.
 const test = require('brittle')
+const { PEEK_LIMIT_MAX } = require('@varanda/rpc')
 const fs = require('node:fs')
 const path = require('node:path')
 const b4a = require('b4a')
@@ -443,7 +444,7 @@ test('measured: the largest frame of a full multi-page read from a real seeder w
   const pages = []
   let after
   while (true) {
-    const page = await peeker.read(after === undefined ? { limit: 31 } : { limit: 31, after })
+    const page = await peeker.read(after === undefined ? { limit: PEEK_LIMIT_MAX } : { limit: PEEK_LIMIT_MAX, after })
     pages.push(page)
     if (page.next === null) break
     after = page.next
@@ -476,7 +477,7 @@ test('measured: a full 4096-key inventory from the real admission code fits the 
   const warnings = []
   const peeker = createPeeker({ ownKey: async () => '00'.repeat(32), storage: memoryNodeStorage(), association: assoc.hex, seederUrl: seeder.url, createSocket: s.create, log: (line) => warnings.push(line) })
   t.teardown(() => peeker.close(), { force: true })
-  const page = await peeker.read({ limit: 31 })
+  const page = await peeker.read({ limit: PEEK_LIMIT_MAX })
   const max = Math.max(...meters.map((m) => m.max))
   t.comment('4096-key inventory: ' + meters[0].frames + ' frames, largest ' + max + ' bytes')
   t.absent(warnings.includes(FRAME_WARNING), 'never cut')

@@ -12,6 +12,8 @@
 // accessible group, so the links stay reachable, and a mention tap never
 // calls `quote.onOpen`. Web links in a quote stay plain: the 6 line clamp can
 // cut a URL, so the card opens the quoted post, where its links work.
+// `quote.preview`, a stored link card of the quoted post (never with photos),
+// is drawn by ./LinkCard from that stored data only.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
@@ -19,6 +21,7 @@ import { relativeTime } from '../format'
 import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { MediaGrid } from './MediaGrid'
+import { LinkCard } from './LinkCard'
 import { hasMention, MentionText } from './MentionText'
 import { type } from './theme'
 import { useStyles } from './ThemeProvider'
@@ -30,6 +33,9 @@ export function QuoteCard ({ quote, now }) {
   const missing = q.missing === true
   const hasText = typeof q.text === 'string' && q.text !== ''
   const hasMedia = Array.isArray(q.media) && q.media.length > 0
+  const preview = !missing && !hasMedia && q.preview && typeof q.preview === 'object' && typeof q.author === 'string'
+    ? <LinkCard card={q.preview} thumb={{ kind: 'post', author: q.author, persist: q.persist === true }} />
+    : null
   const loading = !missing && !hasText && !hasMedia
   const who = whoOf({ name: q.name, username: q.username })
   const title = displayText(who.title)
@@ -52,6 +58,7 @@ export function QuoteCard ({ quote, now }) {
           {meta ? <Text style={styles.meta} numberOfLines={1}>{meta}</Text> : null}
         </Pressable>
         <MentionText text={q.text} onOpenMention={openMention} onOpenPlain={open} style={styles.text} numberOfLines={6} />
+        {preview}
         {hasMedia || q.hasQuote === true
           ? (
             <Pressable accessible={false} tabIndex={-1} disabled={!open} onPress={open}>
@@ -89,6 +96,7 @@ export function QuoteCard ({ quote, now }) {
             {hasMedia
               ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} persist={q.persist === true} /></View>
               : null}
+            {preview}
             {q.hasQuote === true ? <Text style={styles.soft}>cita outra publicação</Text> : null}
           </>
           )}

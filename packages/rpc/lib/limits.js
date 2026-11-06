@@ -40,21 +40,17 @@ const DM_MEDIA_MAC_BYTES = 16
 
 const LOG_LIMIT_DEFAULT = 20
 // Page maxima: the largest pages whose worst case (every post with
-// MAX_MEDIA_PER_POST maximal descriptors) fits MAX_MESSAGE (docs/rpc.md
+// a maximal link card or media list) fits MAX_MESSAGE (docs/rpc.md
 // section 2, test/sizes.test.js).
-const LOG_LIMIT_MAX = 36
-const FEED_LIMIT_DEFAULT = 30
-const FEED_LIMIT_MAX = 31
-// The 31-item worst case of feed.read leaves about 1.3 KB under MAX_MESSAGE
-// (docs/rpc.md section 2), so this list cannot use MAX_LIST (100 hex64 keys
-// are about 6.7 KB and the dispatcher would answer USAGE 'resposta grande
-// demais', lib/server.js:58).
+const LOG_LIMIT_MAX = 32
+const FEED_LIMIT_DEFAULT = 27
+const FEED_LIMIT_MAX = 27
+// Keep the incomplete list bounded beside maximal cards and the other
+// feed metadata (docs/rpc.md section 2, test/sizes.test.js).
 const FEED_INCOMPLETE_MAX = 16
-// A PeekItem is a FeedItem (with up to MAX_MEDIA_PER_POST maximal media
-// descriptors, hence FEED_LIMIT_MAX) plus `round` (<= 100000);
-// the envelope adds a cursor and three counts, so the same maximum fits
-// MAX_MESSAGE (docs/rpc.md section 2, test/sizes.test.js).
-const PEEK_LIMIT_DEFAULT = 30
+// A PeekItem adds round and avatar but omits the feed metadata lists, so
+// the feed maximum also fits (docs/rpc.md section 2, test/sizes.test.js).
+const PEEK_LIMIT_DEFAULT = 27
 const PEEK_LIMIT_MAX = FEED_LIMIT_MAX
 // Notices per page: the worst case fits MAX_MESSAGE (test/sizes.test.js).
 const NOTICES_LIMIT_DEFAULT = 30
@@ -63,9 +59,9 @@ const NOTICES_LIMIT_MAX = 64
 // spare (docs/rpc.md section 2, test/sizes.test.js).
 const PROFILE_LIMIT_MAX = 100
 const ENGAGEMENT_LIMIT_MAX = 62
-const PEEK_SEQS_MAX = 36
-// The largest page whose worst case includes four private media items per
-// post and still fits MAX_MESSAGE (docs/rpc.md section 2, test/sizes.test.js).
+const PEEK_SEQS_MAX = 32
+// The largest page whose worst case includes a maximal private link card
+// per post and still fits MAX_MESSAGE (docs/rpc.md section 2, test/sizes.test.js).
 const GROUP_LIMIT_DEFAULT = 29
 const GROUP_LIMIT_MAX = 29
 const GROUP_MEMBERS_LIMIT_MAX = 100
@@ -74,10 +70,10 @@ const MAX_GROUP_CUTS = 16
 const MAX_GROUPS_PER_COMMUNITY = 32
 const COMMUNITY_LIST_MAX = 64
 // dm.thread: the largest page whose worst case (MAX_TEXT 4-byte characters
-// and MAX_DM_MEDIA maximal media items in every message) fits MAX_MESSAGE
+// and a maximal link card in every message) fits MAX_MESSAGE
 // (docs/rpc.md 5.78, test/sizes.test.js).
 const DM_THREAD_LIMIT_DEFAULT = 30
-const DM_THREAD_LIMIT_MAX = 46
+const DM_THREAD_LIMIT_MAX = 42
 const PEEK_TIMEOUT_MS = 8000
 const FOLLOW_LIMIT_DEFAULT = 100
 const FOLLOW_LIMIT_MAX = 500

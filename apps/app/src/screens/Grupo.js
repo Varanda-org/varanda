@@ -62,7 +62,8 @@ import { Btn, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../u
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
 import { Bubble } from '../ui/Bubble'
-import { ChatComposer } from '../ui/ChatComposer'
+import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
+import { cardForSend, withCardFallback } from '../linkCard'
 import { ChatHeader } from '../ui/ChatHeader'
 import { Icon } from '../ui/Icon'
 import { OfflineNote } from '../ui/OfflineNote'
@@ -167,6 +168,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
   const act = useAction()
   const join = useAction()
   const attachments = useChatAttachments()
+  // The draft link card (not as a page: its posts are signed statements).
+  const linkDraft = useLinkDraft({ text: draft, enabled: !asPage.page, photos: attachments.items.length > 0, member: ownKey })
   // { phase, progress } of a photo post; mediaHold { op, text, replyKey }
   // after an uncertain one (the exact group.post it made); sendTokenRef is
   // the running post, which Cancelar marks dead before its request starts.
@@ -451,7 +454,11 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
 
   // `replyTo` is { writer, seq } exactly (rpc group.post) or null. A page's
   // statement carries no reply: Responder is not offered as a page.
-  const sendPost = async (text, replyTo = null) => {
+  // heldCard: the card frozen into an uncertain post's retry (null: none); a
+  // fresh post (undefined) takes the draft card and uploads its thumbnail
+  // once, sealed in a private group. A card the rules refuse goes without
+  // its image, then not at all.
+  const sendPost = async (text, replyTo = null, heldCard) => {
     if (typeof text !== 'string' || text.trim() === '' || !node.online) return
     if (asPage.page) {
       pageSend(pageStatement('group-post', { group, text }), text, Date.now())
@@ -460,15 +467,29 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
     setCheck(null)
     setPostHold(null)
     const sentAt = Date.now()
-    const params = replyTo ? { group, text, replyTo: { writer: replyTo.writer, seq: replyTo.seq } } : { group, text }
-    const r = await post.run(() => request('group.post', params))
+    const plain = replyTo ? { group, text, replyTo: { writer: replyTo.writer, seq: replyTo.seq } } : { group, text }
+    // Without the group's info its visibility is unknown: no card, so a
+    // private group's thumbnail is never uploaded in the clear.
+    const snapshot = heldCard === undefined && info !== null ? linkDraft.take(text) : null
+    let card = heldCard === undefined ? null : heldCard
+    const r = await post.run(async () => {
+      const visibility = isPrivate ? 'private' : 'public'
+      if (snapshot !== null) {
+        const upload = mediaApi !== null ? (t) => mediaApi.upload({ bytes: t.bytes, mime: t.mime, width: t.width, height: t.height, ...(visibility === 'private' ? { sealed: true } : {}) }) : null
+        card = await cardForSend(snapshot, { upload })
+      }
+      const target = { kind: 'group', group, visibility, ...(replyTo ? { replyTo: { writer: replyTo.writer, seq: replyTo.seq } } : {}) }
+      const built = withCardFallback((c) => (c ? composePlan({ text, target, card: c }).send().params : plain), card)
+      card = built.card
+      return request('group.post', built.op)
+    })
     if (r.ok) {
       setDraft((d) => (d === text ? '' : d))
       if (replyTo) setReplyKey((k) => (k === replyTo.writer + ':' + replyTo.seq ? null : k))
       readNewest().then(() => scrollToEnd(), () => {})
     } else if (r.uncertain) {
       setPostHold(text)
-      settle({ action: 'post', diary: ownKey, text, sentAt, replyKey: replyTo ? replyTo.writer + ':' + replyTo.seq : null }, () => sendPost(text, replyTo))
+      settle({ action: 'post', diary: ownKey, text, sentAt, replyKey: replyTo ? replyTo.writer + ':' + replyTo.seq : null }, () => sendPost(text, replyTo, card))
     }
   }
 
@@ -1045,7 +1066,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
     return (
       <Bubble
         media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} /> : null}
-        item={{ key: row.key, text: row.text, rawText: row.hidden ? undefined : row.rawText, at: row.at, hidden: row.hidden, dayMark: row.dayMark }}
+        item={{ key: row.key, text: row.text, rawText: row.hidden ? undefined : row.rawText, at: row.at, hidden: row.hidden, dayMark: row.dayMark, card: !row.hidden && rawRow && rawRow.card ? rawRow.card : null }}
+        cardThumb={rawRow ? { kind: 'group', diary: rawRow.diary, identity: ownKey } : undefined}
         mine={mine}
         shape={row.shape}
         forwarded={!row.hidden && !!rawRow && rawRow.fwd === 1}
@@ -1125,6 +1147,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
         onCancelReply={() => setReplyKey(null)}
         notice={notes}
         ownKey={ownKey}
+        linkDraft={linkDraft}
       />
     )
   }

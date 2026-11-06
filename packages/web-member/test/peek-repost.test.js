@@ -14,6 +14,7 @@
 // and the REAL seeder (Hypercore 11, behind startSeedWs as `seed --ws-port`
 // runs it) for the write-path cases.
 const test = require('brittle')
+const { LOG_LIMIT_MAX } = require('@varanda/rpc')
 const fs = require('node:fs')
 const path = require('node:path')
 const b4a = require('b4a')
@@ -56,11 +57,11 @@ function iso (ms) {
 
 // The exact peek.read items (lib/peek.js buildPeekPage: a FeedItem plus round and avatar).
 function repostItem ({ author, name = null, avatar = null, username = null, seq, at, to, round }) {
-  return { kind: 'repost', author, name, avatar, username, seq, at, to: { author: to.author, seq: to.seq }, text: null, replyTo: null, quote: null, media: null, round }
+  return { kind: 'repost', author, name, avatar, username, seq, at, to: { author: to.author, seq: to.seq }, text: null, replyTo: null, quote: null, media: null, preview: null, round }
 }
 
 function postItem ({ author, name = null, avatar = null, username = null, seq, at, text, replyTo = null, quote = null, round }) {
-  return { kind: 'post', author, name, avatar, username, seq, at, text, replyTo, quote, media: null, round }
+  return { kind: 'post', author, name, avatar, username, seq, at, text, replyTo, quote, media: null, preview: null, round }
 }
 
 // A Hypercore 10 diary with the given records (block 0 first); each maker
@@ -381,7 +382,7 @@ function seederHas (events, key, length) {
 
 // A browser node's own records by seq (log.read of its own diary).
 async function ownRecords (web) {
-  const { entries } = await web.request('log.read', { limit: 36 })
+  const { entries } = await web.request('log.read', { limit: LOG_LIMIT_MAX })
   return new Map(entries.map((e) => [e.seq, e.record]))
 }
 

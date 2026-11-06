@@ -225,7 +225,8 @@ async function writeReadFile ({ fs, join, dir, name, bytes, flags }) {
 }
 
 // media.readFile (docs/rpc.md 5.89): opens the chat item through the session
-// and writes the plaintext with write(bytes) -> name. `generation()` changes
+// and writes the plaintext with write(bytes) -> name. The DM index may be
+// 'card', resolved by the session with the same checks as a media item. `generation()` changes
 // on every lock: an image opened before a lock never stays on disk after it.
 // -> { name, mime, w, h } (w, h measured from the bytes), plus ms for a voice
 // note (the container's duration, not the item's claim). The plaintext copy

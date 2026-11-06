@@ -20,6 +20,7 @@
 //    avatar, the index points at the pair's second block, and the plain
 //    block keeps name and bio for readers that know only 4-key profiles.
 const test = require('brittle')
+const { FEED_LIMIT_MAX } = require('@varanda/rpc')
 const fs = require('node:fs')
 const http = require('node:http')
 const path = require('node:path')
@@ -335,7 +336,7 @@ test('photos: browser upload -> real seeder (compat media core) -> /media bytes,
   t.alike(json.skipped, [], 'nothing skipped')
 
   // The browser feed agrees.
-  const feed = await web.request('feed.read', { limit: 30 })
+  const feed = await web.request('feed.read', { limit: FEED_LIMIT_MAX })
   t.alike(feed.items.find((i) => i.author === webKey && i.seq === 2).media, [descriptor], 'the web feed keeps the descriptor')
 
   await web.request('sync.stop')

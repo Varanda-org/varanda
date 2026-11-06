@@ -362,6 +362,7 @@ const PAGE_READ_PROBE_SHARE = 8
 const DM_PULL_EVERY_MS = 120000
 const DM_TICK_MS = 60000
 const DM_LOOKUP_WINDOWS = 8
+// An internal wire window of the node's own peeks, not an rpc page cap.
 const PEEK_WINDOW = 36
 // diary.peek requests in flight at once.
 const MAX_DIARY_PEEKS = 2
@@ -2664,33 +2665,33 @@ function createBrowserSession ({
 
     // `media` (optional): descriptors from mediaUpload, verified by
     // member-ops against the own declared media cores before the append.
-    'post.create': serial(async ({ text, media }, epoch) => {
+    'post.create': serial(async ({ text, media, preview }, epoch) => {
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postCreate(c, { text, media }))
+      const r = await withStore((c) => member.postCreate(c, { text, media, preview }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
     }),
 
-    'post.reply': serial(async ({ to, text, media }, epoch) => {
+    'post.reply': serial(async ({ to, text, media, preview }, epoch) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postReply(c, { to: ref, text, media }))
+      const r = await withStore((c) => member.postReply(c, { to: ref, text, media, preview }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
     }),
 
     // A quote: the post.reply path with a `quote` target.
-    'post.quote': serial(async ({ to, text, media }, epoch) => {
+    'post.quote': serial(async ({ to, text, media, preview }, epoch) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postQuote(c, { to: ref, text, media }))
+      const r = await withStore((c) => member.postQuote(c, { to: ref, text, media, preview }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq }
@@ -2946,7 +2947,7 @@ function createBrowserSession ({
     // The recipient's key is looked up first (off the chain), then the send
     // runs on the chain. A send for an identity without a published dm-key
     // runs dm.enable first.
-    'dm.send': async ({ to, text, replyTo, media, fwd }) => {
+    'dm.send': async ({ to, text, replyTo, media, card, fwd }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       // Self and a blocked peer are refused before any lookup.
       await serial(async () => dmEngine.checkSend(await requireDm(), to))({})
@@ -2959,7 +2960,7 @@ function createBrowserSession ({
       return serial(async (_, epoch) => {
         const own = await requireDm()
         if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
-        return dmEngine.send(own, keyPair, { to, text, fwd, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media }, recipient.box)
+        return dmEngine.send(own, keyPair, { to, text, fwd, card, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media }, recipient.box)
       })({})
     },
 

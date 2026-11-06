@@ -8,6 +8,7 @@
 // Nothing here produces a read, delivered or typing state for the other
 // side: unread is local and never leaves the device.
 
+const { copyLinkCard } = require('./link-card')
 const { DM_REQUESTS_MAX, DM_MESSAGES_PER_PEER } = require('./dm')
 
 const HEX64 = /^[0-9a-f]{64}$/
@@ -128,7 +129,7 @@ function fold ({ self, followSet, messages, ops, seen } = {}) {
     ids.add(key)
     const mine = m.from === self
     const media = Array.isArray(m.media) && m.media.length > 0 ? m.media : null
-    const row = { id: m.id, from: m.from, to: m.to, text: m.text, replyTo: m.replyTo === undefined ? null : m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media, at: new Date(t).toISOString(), sentAt: m.at, mine, peer, t, f }
+    const row = { id: m.id, from: m.from, to: m.to, text: m.text, replyTo: m.replyTo === undefined ? null : m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media, card: media || !m.card ? null : copyLinkCard(m.card, (d) => ({ ...d })), at: new Date(t).toISOString(), sentAt: m.at, mine, peer, t, f }
     if (!byPeer.has(peer)) byPeer.set(peer, [])
     byPeer.get(peer).push(row)
   }
@@ -172,7 +173,7 @@ function fold ({ self, followSet, messages, ops, seen } = {}) {
 // every reader orders and pages by. `sentAt` is the sender's claim, shown
 // only as information.
 function publicRow (r) {
-  return { id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, fwd: r.fwd, media: r.media, at: r.at, sentAt: r.sentAt, mine: r.mine, peer: r.peer }
+  return { id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, fwd: r.fwd, media: r.media, card: r.card, at: r.at, sentAt: r.sentAt, mine: r.mine, peer: r.peer }
 }
 
 // What a conversation list shows for a message: its text, or a fixed label

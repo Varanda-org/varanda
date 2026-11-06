@@ -16,6 +16,7 @@
 // cannot hide a post this page fetched. A tombstone in the fetched window
 // hides its target.
 
+const { copyLinkCard } = require('./link-card')
 const { validRecordCopy, latestProfile, isHex64, isCanonicalIso, parseRef } = require('./records')
 const { applyDeletes } = require('./deletion')
 const { engagementState } = require('./engagement')
@@ -133,7 +134,7 @@ function diaryPeek (input) {
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      result.posts.push({ kind: 'post', seq, at: post.at, text: post.text, replyTo, quote, media })
+      result.posts.push({ kind: 'post', seq, at: post.at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null })
     }
     // Reposts in effect (the last operation per target wins, as in the feed).
     // The tail is contiguous up to the top, so an undo of a repost in it is in
@@ -204,12 +205,12 @@ function buildPeekPage ({ diaries, limit, after = null, hidden = null }) {
       let item
       if (post.kind === 'repost') {
         const to = { author: post.to.author, seq: post.to.seq }
-        item = { kind: 'repost', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, to, text: null, replyTo: null, quote: null, media: null, round }
+        item = { kind: 'repost', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null, round }
       } else {
         const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
         const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
         const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-        item = { kind: 'post', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, text: post.text, replyTo, quote, media, round }
+        item = { kind: 'post', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, round }
       }
       if (cursor === null || pageOrder(item, cursor) > 0) slots.push(item)
     }

@@ -5,6 +5,7 @@
 // reaches the seeder only over its WebSocket entry, the CLI member only over
 // the local DHT.
 const test = require('brittle')
+const { FEED_LIMIT_MAX } = require('@varanda/rpc')
 const fs = require('node:fs')
 const path = require('node:path')
 const { spawn } = require('node:child_process')
@@ -158,7 +159,7 @@ test('the web session and a CLI member exchange posts through the seeder', async
   // follow command appended.
   t.is(stopped2.result.downloaded[cliKey], 4, 'the web session downloaded the CLI diary')
   t.alike(stopped2.result.skipped, [])
-  const feed = await web.request('feed.read', { limit: 30 })
+  const feed = await web.request('feed.read', { limit: FEED_LIMIT_MAX })
   const cliItem = feed.items.find((i) => i.author === cliKey)
   t.ok(cliItem && cliItem.text === CLI_TEXT && cliItem.name === 'Caio', 'the web feed has the CLI post with its name')
   t.ok(feed.items.some((i) => i.author === webKey && i.text === WEB_TEXT), 'and its own post')

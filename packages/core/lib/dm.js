@@ -17,6 +17,7 @@ const { isWeakBoxKey } = require('./group')
 const { certForKey, validateCertShape } = require('./cert')
 const { validateBlobDescriptor, BLOB_MAC_BYTES } = require('./blob')
 const rpc = require('@varanda/rpc')
+const { validLinkCard, validCardImageBytes, CARD_IMAGE_MIME } = require('./link-card')
 
 const DM_PROTOCOL = 'varanda/dm/1'
 const DM_STAMP_PROTOCOL = 'varanda/dm-stamp/1'
@@ -170,11 +171,23 @@ function validMedia (media) {
   return true
 }
 
+// A link card's thumbnail: a still JPEG media item of at most
+// MAX_CARD_IMAGE_BYTES sealed bytes. Never throws (validMediaItem reads
+// every key inside its own checks, and validLinkCard catches).
+function validCardImage (d) {
+  return validMediaItem(d) && d.mime === CARD_IMAGE_MIME && validCardImageBytes(d.bytes)
+}
+
+function validDmCard (card) {
+  return validLinkCard(card, validCardImage)
+}
+
 // The per-kind shape rules, shared by building and opening. `cert` is null
 // or a membership certificate naming `from`; whether it verifies for the
 // association is checked on open only. v1 and v2 are two exact key sets.
-// v2 is only a msg that needs it (media, a reserved card, or a forward),
-// so a plain text message stays v1 and every message has one encoding.
+// v2 is only a msg that needs it (media, a link card, or a forward), so a
+// plain text message stays v1 and every message has one encoding. A card
+// goes with text only: a message with media carries card null.
 function validBody (b) {
   if (!isPlainObject(b)) return false
   if (b.v === 1) {
@@ -182,9 +195,10 @@ function validBody (b) {
   } else if (b.v === 2) {
     if (!hasExactKeys(b, INNER_KEYS_V2) || b.kind !== 'msg') return false
     // A boolean is another JSON type, so it must not count as forwarded.
-    if (b.card !== null || (b.fwd !== 0 && b.fwd !== 1)) return false
-    // Null media is the text forward. fwd 0 with no media is a v1 message.
-    if (b.media === null ? b.fwd !== 1 : !validMedia(b.media)) return false
+    if (b.fwd !== 0 && b.fwd !== 1) return false
+    if (b.card !== null && (b.media !== null || !validDmCard(b.card))) return false
+    // Null media is a card or the text forward. Neither of the three is a v1 message.
+    if (b.media === null ? b.fwd !== 1 && b.card === null : !validMedia(b.media)) return false
   } else {
     return false
   }
@@ -407,6 +421,7 @@ module.exports = Object.freeze({
   DM_MEDIA_MAX,
   DM_MEDIA_MIMES,
   DM_MEDIA_MAX_SIDE,
+  validDmCard,
   DM_AUDIO_MIME,
   DM_AUDIO_MAX_MS,
   DM_AUDIO_MAX_BYTES,

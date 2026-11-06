@@ -13,11 +13,12 @@
 // not list are ignored; a listed ref that cannot be shown counts in
 // `unavailable`. Never throws on malformed input.
 
+import rpc from '@varanda/rpc'
 import { isAuthorKey, isRef } from './nav.js'
 import { avatarOf } from './media/avatar.js'
 
-// Same value as packages/rpc/lib/limits.js PEEK_SEQS_MAX.
-export const PEEK_SEQS_MAX = 36
+// diary.peek refuses a longer seqs list (packages/rpc/lib/limits.js).
+export const PEEK_SEQS_MAX = rpc.PEEK_SEQS_MAX
 
 function parseRef (ref) {
   if (!isRef(ref)) return null
@@ -108,6 +109,8 @@ function postItem (author, seq, record, peek) {
     replyTo,
     quote,
     media: Array.isArray(record.media) && record.media.length > 0 ? record.media.slice() : null,
+    // The node validated the card; only stored data, nothing fetched.
+    preview: record.preview !== null && typeof record.preview === 'object' ? record.preview : null,
     name: profile ? profile.name : null,
     username,
     avatar: profile ? profile.avatar : null

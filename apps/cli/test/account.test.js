@@ -1489,6 +1489,23 @@ test('readEnv: Didit pair on together or off together, values never in the error
   }
 })
 
+test('readEnv: VARANDA_PREVIEW turns link previews off with 0, on otherwise, and refuses other values', (t) => {
+  const env = { VARANDA_PUBLIC_ORIGIN: ORIGIN, VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID, VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET }
+  t.is(readEnv(env).preview, true, 'unset: on')
+  t.is(readEnv({ ...env, VARANDA_PREVIEW: '' }).preview, true, 'empty: on')
+  t.is(readEnv({ ...env, VARANDA_PREVIEW: '1' }).preview, true)
+  t.is(readEnv({ ...env, VARANDA_PREVIEW: '0' }).preview, false)
+  for (const value of ['off', 'false', ' 0', '2']) {
+    try {
+      readEnv({ ...env, VARANDA_PREVIEW: value })
+      t.fail(JSON.stringify(value) + ': accepted')
+    } catch (err) {
+      t.ok(err instanceof UsageError, JSON.stringify(value))
+      t.is(err.message, 'VARANDA_PREVIEW inválido: use 0 ou 1')
+    }
+  }
+})
+
 test('readEnv: GIF pair on together or off together, https only, values never in the error', (t) => {
   const env = { VARANDA_PUBLIC_ORIGIN: ORIGIN, VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID, VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET }
   const URL_OK = 'https://gifs-sentinela.example/v1'

@@ -15,6 +15,8 @@ const DM_INNER_FRAMING_BYTES = 66
 const DM_INNER_KEYS = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'op', 'peer', 'at', 'cert'])
 const DM_INNER_KEYS_V2 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert'])
 const DM_MEDIA_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'])
+// A link card (core lib/link-card.js CARD_KEYS); its image is a media item.
+const DM_CARD_KEYS = Object.freeze(['url', 'host', 'title', 'desc', 'image'])
 
 // Fixed-length stand-ins for values a UI does not know before sending: an
 // id is 32 hex, a key 64 hex, a canonical time 24 characters.
@@ -49,19 +51,34 @@ function canonicalMediaItem (d) {
   return o
 }
 
+function isObject (x) {
+  return x !== null && typeof x === 'object' && !Array.isArray(x)
+}
+
+function canonicalCard (c) {
+  if (!isObject(c)) return c
+  const o = {}
+  for (const k of DM_CARD_KEYS) o[k] = c[k]
+  if (isObject(o.image)) o.image = canonicalMediaItem(o.image)
+  return o
+}
+
 // The v2 key set only when something needs it: a text-only message stays v1
 // so readers without v2 still open it.
 function innerVersion (b) {
   return b.media !== null || b.card !== null || b.fwd !== 0 ? 2 : 1
 }
 
-// body has every key of its version; media items are written in
-// DM_MEDIA_KEYS order whatever order the caller built them in.
+// body has every key of its version; media items (and a card's image) are
+// written in DM_MEDIA_KEYS order and a card in DM_CARD_KEYS order whatever
+// order the caller built them in.
 function canonicalInnerJson (body) {
   const keys = body.v === 2 ? DM_INNER_KEYS_V2 : DM_INNER_KEYS
   const o = {}
   for (const k of keys) {
-    o[k] = k === 'media' && Array.isArray(body.media) ? body.media.map(canonicalMediaItem) : body[k]
+    o[k] = k === 'media' && Array.isArray(body.media)
+      ? body.media.map(canonicalMediaItem)
+      : k === 'card' ? canonicalCard(body.card) : body[k]
   }
   return JSON.stringify(o)
 }
@@ -103,6 +120,7 @@ module.exports = {
   DM_INNER_KEYS,
   DM_INNER_KEYS_V2,
   DM_MEDIA_KEYS,
+  DM_CARD_KEYS,
   innerVersion,
   canonicalInnerJson,
   dmTextBytes,
