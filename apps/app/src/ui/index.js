@@ -43,6 +43,7 @@ const PLAIN = {
   'conexão com o semeador encerrada': 'A conexão foi interrompida. Tente de novo.',
   'não é possível seguir a própria chave': 'Você não pode seguir a si mesmo.',
   'mídia inválida': 'Não foi possível usar esta foto.',
+  'áudio inválido': 'Não foi possível enviar este áudio.',
   'mídia disponível só na versão web': 'Fotos só podem ser publicadas na versão web.',
   'esta conta Google já está vinculada a outra chave': 'Esta conta Google já está em uso por outra conta Varanda.',
   'não foi possível provar a chave': 'Não foi possível confirmar sua conta. Tente de novo.',
