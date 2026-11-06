@@ -493,6 +493,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       for (let i = 0; i < entry.drops.length; i++) {
         if (entry.acked[i]) continue
         let r
+        emit('dm.sending', {})
         try {
           r = await link.put(entry.drops[i])
         } catch {
@@ -550,6 +551,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
           await writeQueue(queue)
         }
         if (link === null) link = await openDmLink(linkOpts)
+        emit('dm.sending', {})
         const r = await link.put(bytes)
         if (!r.ok && r.reason !== 'invalido') return
         if (!r.ok) log('aviso: 1 estado de conversa recusado pelo semeador')

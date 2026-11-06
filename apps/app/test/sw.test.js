@@ -110,12 +110,16 @@ function fakeCaches () {
 }
 
 // Loads the generated worker. `server(pathname, request)` answers fetches; it
-// may throw to simulate being offline.
-function loadWorker (code, server) {
+// may throw to simulate being offline. Passing `caches` simulates a worker
+// restart over the same storage; setting `w.now` fixes the worker's clock.
+function loadWorker (code, server, opts = {}) {
   const handlers = {}
-  const caches = fakeCaches()
+  const caches = opts.caches || fakeCaches()
   const calls = []
-  const w = { handlers, caches, calls, server, shown: [], windows: [], opened: [] }
+  const w = { handlers, caches, calls, server, shown: [], closed: new Set(), windows: [], opened: [], now: null }
+  class WorkerDate extends Date {
+    static now () { return w.now === null ? Date.now() : w.now }
+  }
   const fetch = async (request) => {
     calls.push(request.url)
     return w.server(new URL(request.url).pathname, request)
@@ -124,7 +128,10 @@ function loadWorker (code, server) {
     location: { origin: ORIGIN },
     addEventListener: (type, fn) => { handlers[type] = fn },
     registration: {
-      showNotification: async (title, options) => { w.shown.push({ title, options }) }
+      showNotification: async (title, options) => { w.shown.push({ title, options }) },
+      getNotifications: async (filter) => w.shown
+        .filter((n) => !w.closed.has(n) && (!filter || !filter.tag || n.options.tag === filter.tag))
+        .map((n) => ({ close: () => { w.closed.add(n) } }))
     }
   }
   const clients = {
@@ -134,7 +141,7 @@ function loadWorker (code, server) {
     },
     openWindow: async (url) => { w.opened.push(url) }
   }
-  vm.runInNewContext(code, { self, caches, clients, fetch, Request, Response, Headers, URL, TextDecoder, crypto: globalThis.crypto })
+  vm.runInNewContext(code, { self, caches, clients, fetch, Request, Response, Headers, URL, TextDecoder, crypto: globalThis.crypto, Date: WorkerDate, MessageChannel, setTimeout, clearTimeout })
   return w
 }
 
@@ -703,9 +710,15 @@ async function click (w, data) {
 }
 
 function fakeWindow (url) {
-  const win = { url, focused: 0, messages: [] }
+  // answers: the app's listener (src/usePush.web.js) takes a DM wake and
+  // says so on the port the worker passes along.
+  const win = { url, type: 'window', focused: 0, visibilityState: 'hidden', messages: [], answers: true }
   win.focus = async () => { win.focused++ }
-  win.postMessage = (m) => { win.messages.push(m) }
+  win.postMessage = (m, transfer) => {
+    win.messages.push(m)
+    const port = transfer && transfer[0]
+    if (win.answers && port && m && m.type === 'varanda-dm-wake') port.postMessage({ type: win.answers === 'no' ? 'varanda-dm-wake-no' : 'varanda-dm-wake-ok' })
+  }
   return win
 }
 
@@ -995,4 +1008,257 @@ test('notificationclick: an invite drop focuses the app and posts varanda-invite
   // An old worker's generic notification (data {}) still opens the root.
   await click(extra, {})
   t.alike(extra.opened, ['/', '/', '/'])
+})
+
+const DM_WAKE = { v: 1, kind: 'dm-wake' }
+const MUTE_MS = 120000
+const DM_STATE = ORIGIN + '/__varanda-dm-state'
+
+function activeWindow (url) {
+  const win = fakeWindow(url)
+  win.focused = true
+  win.visibilityState = 'visible'
+  return win
+}
+
+async function message (w, data, source) {
+  const waits = []
+  w.handlers.message({ data, source, ports: [], waitUntil: (p) => waits.push(p) })
+  await Promise.all(waits)
+}
+
+// The notices this wake left on screen: a quiet one shown and closed at once
+// (showQuietlyAndClose) is not among them.
+async function wakeShown (w) {
+  const waits = []
+  const before = w.shown.length
+  w.handlers.push({ data: pushData(DM_WAKE), waitUntil: (p) => waits.push(p) })
+  await Promise.all(waits)
+  return w.shown.slice(before).filter((n) => !w.closed.has(n))
+}
+
+function openNotices (w) {
+  return w.shown.filter((n) => !w.closed.has(n))
+}
+
+test('dm wake: a wake this device hides is still shown, quietly, and closed at once', async (t) => {
+  // WebKit revokes a subscription whose push shows no notification.
+  const focusedCase = renderedWorker()
+  focusedCase.windows = [activeWindow(ORIGIN + '/')]
+  const mutedCase = renderedWorker()
+  await message(mutedCase, { type: 'varanda-dm-sent' }, fakeWindow(ORIGIN + '/'))
+  for (const [label, w] of [['focused window', focusedCase], ['own send', mutedCase]]) {
+    t.alike(await wakeShown(w), [], label + ': nothing left on screen')
+    t.is(w.shown.length, 1, label + ': one notice shown')
+    const quiet = w.shown[0]
+    if (!quiet) continue
+    t.is(quiet.options.tag, 'varanda-dm-wake-quiet', label)
+    t.is(quiet.options.silent, true, label + ': no sound or vibration')
+    t.ok(w.closed.has(quiet), label + ': closed')
+  }
+})
+
+test('dm wake: the quiet notice never closes a real DM wake still on screen', async (t) => {
+  const w = renderedWorker()
+  const real = await wakeShown(w)
+  t.is(real.length, 1, 'a real wake is shown')
+  await message(w, { type: 'varanda-dm-sent' }, fakeWindow(ORIGIN + '/'))
+  t.alike(await wakeShown(w), [], 'the next one is hidden')
+  t.alike(openNotices(w), real, 'the real one stays')
+})
+
+test('dm wake: a visible focused app window gets a message instead of a notification', async (t) => {
+  const w = renderedWorker()
+  const win = activeWindow(ORIGIN + '/')
+  w.windows = [fakeWindow('https://other.test/'), win]
+  t.alike(await wakeShown(w), [], 'nothing shown')
+  t.alike(plain(win.messages), [{ type: 'varanda-dm-wake' }])
+  t.alike(w.matchAllOpts && plain(w.matchAllOpts), { type: 'window', includeUncontrolled: true })
+})
+
+test('dm wake: a window that answers no (the person left it) gets the notice at once', async (t) => {
+  const w = renderedWorker()
+  const win = activeWindow(ORIGIN + '/')
+  win.answers = 'no'
+  w.windows = [win]
+  const started = Date.now()
+  const shown = await wakeShown(w)
+  t.is(shown.length, 1, 'shown')
+  if (shown[0]) t.is(shown[0].options.tag, 'varanda-dm-wake')
+  t.ok(Date.now() - started < 900, 'without waiting for the acknowledgement timeout')
+})
+
+test('dm wake: once a focused window takes the wake, the other app windows are told to re-read', async (t) => {
+  const w = renderedWorker()
+  const focused = activeWindow(ORIGIN + '/')
+  const hidden = fakeWindow(ORIGIN + '/')
+  const panel = fakeWindow(ORIGIN + '/account/mod/')
+  w.windows = [hidden, focused, panel]
+  t.alike(await wakeShown(w), [], 'nothing shown')
+  t.alike(plain(focused.messages), [{ type: 'varanda-dm-wake' }])
+  t.alike(plain(hidden.messages), [{ type: 'varanda-dm-wake' }], 'the hidden app window re-reads')
+  t.alike(panel.messages, [], 'not the moderation panel')
+})
+
+test('dm wake: an unfocused, hidden or non-app window does not stop the notification', async (t) => {
+  const cases = {
+    'visible but unfocused': () => { const x = activeWindow(ORIGIN + '/'); x.focused = false; return x },
+    'hidden and focused': () => { const x = activeWindow(ORIGIN + '/'); x.visibilityState = 'hidden'; return x },
+    'moderation panel': () => activeWindow(ORIGIN + '/account/mod/'),
+    'well-known file': () => activeWindow(ORIGIN + '/.well-known/assetlinks.json'),
+    'other origin': () => activeWindow('https://other.test/'),
+    'focused tab that never answers (an image opened directly)': () => { const x = activeWindow(ORIGIN + '/icon-192.png'); x.answers = false; return x }
+  }
+  for (const [label, make] of Object.entries(cases)) {
+    const w = renderedWorker()
+    const win = make()
+    w.windows = [win]
+    const shown = await wakeShown(w)
+    t.is(shown.length, 1, label)
+    if (shown.length === 1) {
+      t.is(shown[0].options.body, 'Pode haver uma mensagem nova na Varanda', label)
+      t.is(shown[0].options.tag, 'varanda-dm-wake', label)
+    }
+    if (win.answers) t.alike(win.messages, [], label + ': nothing posted')
+    else t.alike(plain(win.messages), [{ type: 'varanda-dm-wake' }], label + ': asked, no answer')
+  }
+})
+
+test('dm wake: muted for 120 s after an own send reported by an app window', async (t) => {
+  const w = renderedWorker()
+  const app = fakeWindow(ORIGIN + '/')
+  w.now = 1000000
+  await message(w, { type: 'varanda-dm-sent' }, app)
+  t.ok(w.caches.stores.has('varanda-dm-state'), 'state cache written')
+  t.alike(await wakeShown(w), [], 'right away')
+  w.now = 1000000 + MUTE_MS - 1
+  t.alike(await wakeShown(w), [], 'just inside the window')
+  w.now = 1000000 + MUTE_MS
+  t.is((await wakeShown(w)).length, 1, 'shown at the deadline')
+  w.now = 1000000 + MUTE_MS + 1
+  const shown = await wakeShown(w)
+  t.is(shown.length, 1, 'shown 1 ms after')
+  t.is(shown[0].options.tag, 'varanda-dm-wake')
+  t.alike(plain(shown[0].options.data), { kind: 'dm-wake' })
+})
+
+test('dm wake: a send reported while the wake reads the mute record still mutes it', async (t) => {
+  const w = renderedWorker()
+  w.now = 1000000
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  let reading = false
+  const open = w.caches.open
+  w.caches.open = async (name) => {
+    const cache = await open.call(w.caches, name)
+    if (name !== 'varanda-dm-state') return cache
+    return {
+      put: (k, v) => cache.put(k, v),
+      // The read takes its answer before the send is reported and hands
+      // it back after: the stale record a real slow read can return.
+      match: async (k) => {
+        const res = await cache.match(k)
+        reading = true
+        await gate
+        return res
+      }
+    }
+  }
+  const waits = []
+  w.handlers.push({ data: pushData(DM_WAKE), waitUntil: (p) => waits.push(p) })
+  await new Promise((resolve) => setImmediate(resolve))
+  t.ok(reading, 'the wake is reading the record')
+  await message(w, { type: 'varanda-dm-sent' }, fakeWindow(ORIGIN + '/'))
+  release()
+  await Promise.all(waits)
+  t.alike(openNotices(w), [], 'muted')
+})
+
+test('dm wake: the deadline comes from the worker clock, never the page', async (t) => {
+  const w = renderedWorker()
+  w.now = 5000
+  await message(w, { type: 'varanda-dm-sent' }, fakeWindow(ORIGIN + '/'))
+  const res = await (await w.caches.open('varanda-dm-state')).match(DM_STATE)
+  t.ok(res, 'record stored')
+  if (res) t.alike(JSON.parse(await res.text()), { v: 1, until: 5000 + MUTE_MS })
+})
+
+test('dm wake: malformed or foreign send reports are ignored', async (t) => {
+  const app = fakeWindow(ORIGIN + '/')
+  const cases = [
+    ['extra key', { type: 'varanda-dm-sent', until: 9e15 }, app],
+    ['non-object', 'varanda-dm-sent', app],
+    ['array', ['varanda-dm-sent'], app],
+    ['account client', { type: 'varanda-dm-sent' }, fakeWindow(ORIGIN + '/account/mod/')],
+    ['media client', { type: 'varanda-dm-sent' }, fakeWindow(ORIGIN + '/media/x')],
+    ['well-known client', { type: 'varanda-dm-sent' }, fakeWindow(ORIGIN + '/.well-known/assetlinks.json')],
+    ['other origin', { type: 'varanda-dm-sent' }, fakeWindow('https://other.test/')],
+    ['worker client', { type: 'varanda-dm-sent' }, { url: ORIGIN + '/', type: 'worker' }],
+    ['no source', { type: 'varanda-dm-sent' }, undefined]
+  ]
+  for (const [label, data, source] of cases) {
+    const w = renderedWorker()
+    await message(w, data, source)
+    t.is((await wakeShown(w)).length, 1, label)
+  }
+  const w = renderedWorker()
+  t.execution(() => w.handlers.message({ data: { type: 'varanda-dm-sent' } }))
+  t.execution(() => w.handlers.message({ data: { type: 'varanda-dm-sent' }, source: app }))
+})
+
+test('dm wake: the mute survives a worker restart and an activate', async (t) => {
+  const dist = makeDist()
+  quiet(() => finishWeb(dist))
+  const { code, version } = readWorker(dist)
+  const first = loadWorker(code, serveDist(dist))
+  await lifecycle(first, 'install')
+  first.now = 2000000
+  await message(first, { type: 'varanda-dm-sent' }, fakeWindow(ORIGIN + '/'))
+
+  const second = loadWorker(code, serveDist(dist), { caches: first.caches })
+  second.now = 2000000 + 1000
+  await lifecycle(second, 'activate')
+  t.ok(first.caches.stores.has('varanda-dm-state'), 'activate keeps the state cache')
+  t.ok(first.caches.stores.has('varanda-shell-' + version), 'and the current release')
+  t.alike(await wakeShown(second), [], 'still muted after restart')
+  second.now = 2000000 + MUTE_MS + 1
+  t.is((await wakeShown(second)).length, 1)
+})
+
+test('dm wake: a cached deadline that is too far, not an integer or malformed is ignored', async (t) => {
+  const cases = {
+    'far future': JSON.stringify({ v: 1, until: 1000 + MUTE_MS + 1 }),
+    'way in the future': JSON.stringify({ v: 1, until: 9e15 }),
+    'not an integer': JSON.stringify({ v: 1, until: 1000 + 0.5 }),
+    'string deadline': JSON.stringify({ v: 1, until: String(1000 + 1000) }),
+    'unsafe integer': JSON.stringify({ v: 1, until: 2 ** 60 }),
+    'wrong version': JSON.stringify({ v: 2, until: 1000 + 1000 }),
+    'extra key': JSON.stringify({ v: 1, until: 1000 + 1000, x: 1 }),
+    'not json': 'mute'
+  }
+  for (const [label, body] of Object.entries(cases)) {
+    const w = renderedWorker()
+    w.now = 1000
+    await (await w.caches.open('varanda-dm-state')).put(DM_STATE, new Response(body))
+    t.is((await wakeShown(w)).length, 1, label)
+  }
+  const ok = renderedWorker()
+  ok.now = 1000
+  await (await ok.caches.open('varanda-dm-state')).put(DM_STATE, new Response(JSON.stringify({ v: 1, until: 1000 + MUTE_MS })))
+  t.alike(await wakeShown(ok), [], 'a well-formed deadline mutes')
+})
+
+test('dm wake: member notices still show while muted or with a focused window', async (t) => {
+  const w = renderedWorker()
+  const win = activeWindow(ORIGIN + '/')
+  w.windows = [win]
+  await message(w, { type: 'varanda-dm-sent' }, win)
+  for (const kind of ['follow', 'reply', 'like', 'repost']) {
+    const over = kind === 'follow' ? { kind, ref: null } : { kind }
+    const shown = await push(w, pushData(valid(over)))
+    t.is(shown.options.body, 'Ana respondeu ao seu post', kind)
+  }
+  const fallback = await push(w, pushData({ v: 1, kind: 'dm-wake', x: 1 }))
+  t.is(fallback.options.body, FALLBACK, 'invalid payload still falls back')
+  t.alike(win.messages, [], 'no wake message for notices')
 })

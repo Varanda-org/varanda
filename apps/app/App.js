@@ -114,7 +114,7 @@ import BuscaGlobal from './src/screens/BuscaGlobal'
 import { Grupo } from './src/screens/Grupo'
 import { Conversas } from './src/screens/Conversas'
 import { Mensagem } from './src/screens/Mensagem'
-import { DEFAULT_SEGMENT, onDmOpen, requestDmOpen } from './src/dm-open'
+import { DEFAULT_SEGMENT, onDmOpen, onDmWake, requestDmOpen } from './src/dm-open'
 import { Comunidade } from './src/screens/Comunidade'
 import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
@@ -1486,6 +1486,21 @@ function Member () {
     setDmOpenCount((n) => n + 1)
     if (dmReady) dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
   }), [clearStack, dmReady, dmRequest, bumpDm])
+  // The worker shows no notice while this window is focused, so a wake that
+  // arrives while locked is kept and pulled once the identity unlocks.
+  const dmWakePending = useRef(false)
+  useEffect(() => onDmWake(() => {
+    if (!dmReady) {
+      dmWakePending.current = true
+      return
+    }
+    dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
+  }), [dmReady, dmRequest, bumpDm])
+  useEffect(() => {
+    if (!dmReady || !dmWakePending.current) return
+    dmWakePending.current = false
+    dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
+  }, [dmReady, dmRequest, bumpDm])
   const openMessage = useCallback((peer) => {
     pushScreen({ screen: 'mensagem', key: typeof peer === 'string' ? peer.toLowerCase() : peer, params: {} })
   }, [pushScreen])

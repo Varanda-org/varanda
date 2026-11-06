@@ -1,4 +1,4 @@
-/* global self, caches, fetch, Request, Response, Headers, URL, TextDecoder, crypto, clients, __VARANDA_VERSION__, __VARANDA_PRECACHE__ */
+/* global self, caches, fetch, Request, Response, Headers, URL, TextDecoder, crypto, clients, MessageChannel, __VARANDA_VERSION__, __VARANDA_PRECACHE__ */
 'use strict'
 
 // Service worker TEMPLATE. scripts/finish-web.js renders it into dist/sw.js
@@ -18,6 +18,19 @@
 // Every cached response is re-verified before it is returned (verifiedMatch):
 // the Cache API is writable by any same-origin script (window.caches), so a
 // cache hit is untrusted until its hash matches this release's list.
+//
+// A DM wake this device should not show is shown quietly and closed at once:
+// while an app window is visible and focused (it gets a varanda-dm-wake
+// message instead), and for DM_WAKE_MUTE_MS after this browser's own app
+// window reported sending a DM (the wake is then most likely our own message
+// echoed back). It is never left unshown: the subscription is userVisibleOnly
+// (src/pushClient.web.js), and WebKit documents that it revokes a
+// subscription whose push handler does not show a notification, for any
+// reason. The quiet notice has its own tag, so it never replaces or closes a
+// real DM wake still on screen. Whether Chrome counts a notice closed at once
+// as shown (with the app in the background it may show its own generic
+// notice) is not verified: the manual matrix in docs/verification.md section
+// 98 records it, and its results go back to the owner.
 
 const VERSION = __VARANDA_VERSION__
 const PRECACHE = __VARANDA_PRECACHE__
@@ -49,6 +62,12 @@ const MEDIA_PREFIX = '/media/'
 // such as /indexes keeps the shell: only the '/index/' prefix is bypassed).
 const INDEX_PREFIX = '/index/'
 const BAD_TYPES = new Set(['opaque', 'opaqueredirect', 'error'])
+// Mute deadline for DM wakes after an own send. The cache name must not start
+// with PREFIX (dropOldCaches deletes those), and the fetch handler only ever
+// opens CACHE, so this synthetic entry is never served.
+const DM_WAKE_MUTE_MS = 120000
+const DM_STATE_CACHE = 'varanda-dm-state'
+const DM_STATE_KEY = self.location.origin + '/__varanda-dm-state'
 
 const abs = (p) => new URL(p, self.location.origin).href
 const RELEASE_META = '<meta name="varanda-release" content="' + VERSION + '">'
@@ -343,6 +362,140 @@ function readPush (data) {
   }
 }
 
+// Same origin is not enough: the moderation panel (/account/mod/) and the
+// other bypassed paths are not the app.
+function isAppWindow (c) {
+  try {
+    const u = new URL(c.url)
+    const p = u.pathname
+    return u.origin === self.location.origin && !BYPASS.has(p) && !p.startsWith('/seeder/') &&
+      !p.startsWith('/.well-known/') && !p.startsWith(ACCOUNT_PREFIX) && !p.startsWith(MEDIA_PREFIX) &&
+      !p.startsWith(INDEX_PREFIX)
+  } catch {
+    return false
+  }
+}
+
+// Writes are chained so a slow put can never land after a newer one.
+let dmStateWrite = Promise.resolve()
+// The same deadline in memory, set at once: a wake read while the cache put
+// is still pending must see it. The cache copy only outlives a restart.
+let dmMutedUntil = 0
+
+function muteDmWakes () {
+  // The worker clock only: a page could hand over any deadline.
+  const until = Date.now() + DM_WAKE_MUTE_MS
+  dmMutedUntil = until
+  dmStateWrite = dmStateWrite.then(async () => {
+    const cache = await caches.open(DM_STATE_CACHE)
+    await cache.put(DM_STATE_KEY, new Response(JSON.stringify({ v: 1, until }), { headers: { 'content-type': 'application/json' } }))
+  }).catch(() => {})
+  return dmStateWrite
+}
+
+// The record is same-origin writable (window.caches): a malformed or
+// oversized deadline is ignored rather than muting wakes indefinitely.
+function mutedInMemory () {
+  const left = dmMutedUntil - Date.now()
+  return left > 0 && left <= DM_WAKE_MUTE_MS
+}
+
+async function mutedInCache () {
+  try {
+    await dmStateWrite
+    const cache = await caches.open(DM_STATE_CACHE)
+    const res = await cache.match(DM_STATE_KEY)
+    if (!res) return false
+    const r = JSON.parse(await res.text())
+    if (!isPlainObject(r) || Object.keys(r).length !== 2 || r.v !== 1 || !Number.isSafeInteger(r.until)) return false
+    const left = r.until - Date.now()
+    return left > 0 && left <= DM_WAKE_MUTE_MS
+  } catch {
+    return false
+  }
+}
+
+// Memory is read again after the cache: a send reported while the cache was
+// being read must still mute this wake.
+async function dmWakesMuted () {
+  if (mutedInMemory()) return true
+  return (await mutedInCache()) || mutedInMemory()
+}
+
+// True when the wake was handed to a visible, focused app window instead.
+const DM_WAKE_ACK_MS = 1000
+
+// True only when the window answers on the port. A focused tab that is not
+// the app (an image opened directly, say) never does, so its wake still
+// becomes a notice.
+function handedOver (client) {
+  return new Promise((resolve) => {
+    let channel
+    try {
+      channel = new MessageChannel()
+    } catch {
+      resolve(false)
+      return
+    }
+    let done = false
+    let timer = null
+    const finish = (ok) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      try { channel.port1.close() } catch {}
+      resolve(ok)
+    }
+    timer = setTimeout(() => finish(false), DM_WAKE_ACK_MS)
+    channel.port1.onmessage = (e) => {
+      const d = e && e.data
+      finish(isPlainObject(d) && Object.keys(d).length === 1 && d.type === 'varanda-dm-wake-ok')
+    }
+    try {
+      client.postMessage({ type: 'varanda-dm-wake' }, [channel.port2])
+    } catch {
+      finish(false)
+    }
+  })
+}
+
+async function wakeFocusedWindow () {
+  try {
+    const list = await clients.matchAll({ type: 'window', includeUncontrolled: true })
+    const apps = list.filter((c) => isAppWindow(c))
+    for (const c of apps) {
+      if (c.visibilityState !== 'visible' || c.focused !== true) continue
+      if (!(await handedOver(c))) continue
+      // The person is looking at the app on this device, so no notice here;
+      // the other app windows of this browser still re-read Conversas.
+      for (const other of apps) {
+        if (other === c) continue
+        try { other.postMessage({ type: 'varanda-dm-wake' }) } catch {}
+      }
+      return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
+const DM_WAKE_QUIET_TAG = 'varanda-dm-wake-quiet'
+
+// Shown, so the push is not a silent one, then closed at once: no sound, no
+// vibration, and only notices with this tag are closed.
+async function showQuietlyAndClose () {
+  try {
+    await self.registration.showNotification('Varanda', {
+      body: DM_WAKE_TEXT, icon: '/icon-192.png', tag: DM_WAKE_QUIET_TAG, renotify: false, silent: true, data: { kind: 'dm-wake' }
+    })
+    const shown = await self.registration.getNotifications({ tag: DM_WAKE_QUIET_TAG })
+    for (const n of shown) {
+      try { n.close() } catch {}
+    }
+  } catch {}
+}
+
 async function showPush (data) {
   const p = readPush(data)
   let title = 'Varanda'
@@ -351,6 +504,10 @@ async function showPush (data) {
     title = INVITE_DROP_TITLE
     options = { body: INVITE_DROP_TEXT, icon: '/icon-192.png', tag: 'varanda-invite-drop', renotify: false, data: { kind: 'invite-drop' } }
   } else if (p && isDmWake(p)) {
+    if ((await wakeFocusedWindow()) || (await dmWakesMuted())) {
+      await showQuietlyAndClose()
+      return
+    }
     options = { body: DM_WAKE_TEXT, icon: '/icon-192.png', tag: 'varanda-dm-wake', renotify: false, data: { kind: 'dm-wake' } }
   } else if (p) {
     options = {
@@ -380,18 +537,7 @@ async function openPush (data) {
   else if (invite) path = '/?aviso=convite'
   try {
     const list = await clients.matchAll({ type: 'window', includeUncontrolled: true })
-    // Same origin is not enough: the moderation panel (/account/mod/) and
-    // the other bypassed paths are not the app.
-    const client = list.find((c) => {
-      try {
-        const u = new URL(c.url)
-        const p = u.pathname
-        return u.origin === self.location.origin && !BYPASS.has(p) && !p.startsWith('/seeder/') &&
-          !p.startsWith(ACCOUNT_PREFIX) && !p.startsWith(MEDIA_PREFIX) && !p.startsWith(INDEX_PREFIX)
-      } catch {
-        return false
-      }
-    })
+    const client = list.find(isAppWindow)
     if (client) {
       let focused = true
       try {
@@ -430,12 +576,21 @@ self.addEventListener('notificationclick', (event) => {
 
 // A new release waits for every window of the previous one to close, so an
 // open page can face an older active worker without the push handler: the
-// page pings before offering the toggle.
+// page pings before offering the toggle. An app window also reports each DM
+// it sends, so the wake that echoes it back stays quiet (DM_WAKE_MUTE_MS).
 self.addEventListener('message', (event) => {
   try {
     const d = event.data
-    if (!isPlainObject(d) || Object.keys(d).length !== 1 || d.type !== 'varanda-push-ping') return
-    const port = event.ports && event.ports[0]
-    if (port) port.postMessage({ source: 'varanda-sw', push: 1 })
+    if (!isPlainObject(d) || Object.keys(d).length !== 1) return
+    if (d.type === 'varanda-push-ping') {
+      const port = event.ports && event.ports[0]
+      if (port) port.postMessage({ source: 'varanda-sw', push: 1 })
+      return
+    }
+    if (d.type !== 'varanda-dm-sent') return
+    const source = event.source
+    if (!source || source.type !== 'window' || !isAppWindow(source)) return
+    const done = muteDmWakes()
+    if (typeof event.waitUntil === 'function') event.waitUntil(done)
   } catch {}
 })

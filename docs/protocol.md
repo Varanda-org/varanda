@@ -1886,7 +1886,7 @@ Only the chosen message leaves the device: the report carries that message's pla
 
 ### Push wake
 
-When a drop is stored the seeder may send `{ v: 1, kind: 'dm-wake' }`: no actor, no recipient, a body that names nobody (`Pode haver uma mensagem nova na Varanda`), coalesced to one per 15 minutes and fanned out to every subscription, since the seeder cannot know the recipient.
+When a drop is stored the seeder may send `{ v: 1, kind: 'dm-wake' }`: no actor, no recipient, a body that names nobody (`Pode haver uma mensagem nova na Varanda`), coalesced to one per 15 minutes and fanned out to every subscription, since the seeder cannot know the recipient. A device suppresses its own wake locally (the sender's device, and an open focused app window), and no server learns the sender.
 
 ### Riscos residuais (DM)
 
