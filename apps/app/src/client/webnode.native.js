@@ -150,7 +150,12 @@ export function webNodeHandle (request) {
     // A voice note also carries its duration and kind (docs/rpc.md 5.56, 5.88).
     upload: ({ bytes, mime, width, height, sealed, ms, kind, onProgress } = {}) =>
       sendFile(bytes, 'media.uploadFile', { mime, width, height, ...voiceOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) }, onProgress),
-    putDm: ({ bytes, mime, width, height, ms, kind } = {}) => sendFile(bytes, 'dm.putMedia', { mime, width, height, ...voiceOf({ ms, kind }) }),
+    // `to`, the destination, is required: it keys the sealed blob to one
+    // conversation (5.95).
+    putDm: async ({ bytes, mime, width, height, ms, kind, to } = {}) => {
+      if (typeof to !== 'string' || !/^[0-9a-f]{64}$/.test(to)) throw new TypeError('mídia inválida')
+      return sendFile(bytes, 'dm.putMedia', { to, mime, width, height, ...voiceOf({ ms, kind }) })
+    },
     read: async (ref) => {
       if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
       const params = ref.kind === 'dm'

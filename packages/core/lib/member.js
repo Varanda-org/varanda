@@ -2285,14 +2285,14 @@ async function groupLeave (ctx, { group }) {
   })
 }
 
-async function groupPost (ctx, { group, text, replyTo = null }) {
+async function groupPost (ctx, { group, text, replyTo = null, fwd = 0 }) {
   return withGroup(ctx, group, async (loaded, identity) => {
     requireParent(loaded)
     const own = liveOwnWriter(loaded, identity.ownHex)
     if (!own || loaded.view.members.get(identity.ownHex) !== 'member') throw groupPermission()
     requireCounted(loaded, own.writer)
     const writer = await ownGroupWriter(loaded, identity)
-    const record = buildRecord(() => groups.groupPost({ text, replyTo, seen: loaded.view.last }))
+    const record = buildRecord(() => groups.groupPost({ text, replyTo, fwd, seen: loaded.view.last }))
     return { seq: await appendGroupRecord(writer, group, groupRecordFor(loaded, writer, record), loaded.private) }
   }, { secrets: true })
 }

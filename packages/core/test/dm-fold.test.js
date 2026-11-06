@@ -283,3 +283,10 @@ test('media rows: carried through, fixed preview labels when the text is empty',
   t.is(previewText({ text: 'ouve', media: [{ id: 'c'.repeat(64), mime: 'audio/mp4' }] }), 'ouve', 'text still wins')
   t.alike(run({ messages: [{ ...from(ANA, 1), media: 'x' }], follows: [ANA] }).inbox[0].messages[0].media, null, 'a non-list media is dropped')
 })
+
+test('thread rows keep forwards and default v1 bodies to 0', (t) => {
+  const messages = [from(ANA, 1), { ...from(ANA, 2), fwd: 1, media: null }, { ...to(ANA, 3), fwd: 1, media: [{ mime: 'image/jpeg' }] }]
+  const rows = run({ messages, follows: [ANA] }).inbox[0].messages
+  t.alike(rows.map(m => m.fwd), [0, 1, 1])
+  t.is(rows[1].media, null)
+})

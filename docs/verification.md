@@ -5453,3 +5453,42 @@ Limites desta caminhada:
 
 - O laboratório hospedado (`apps/cli/scripts/hosted-lab.js`) ainda não liga a busca de GIFs, e o serviço recusa um provedor em loopback; os passos com duas pessoas usam uma instalação de teste com um provedor falso público.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 112. Encaminhar mensagens nas conversas e nos grupos (PR feat/forwarding)
+
+Caminhada de encaminhar uma mensagem de uma conversa (mensagem direta ou grupo) para até 5 conversas ou grupos. A tela está em [app.md](app.md) ("Conversa", "Encaminhar"). Não há mudança nos Termos de Uso nem na Política de Privacidade: nenhum tratamento de dado novo.
+
+Regras que os passos conferem:
+
+- Um toque longo numa mensagem de conversa ou de grupo oferece "Encaminhar", ao lado de Responder, Copiar e Denunciar. A folha lista as conversas e os grupos recentes; dá para escolher até 5 destinos, e a mensagem vai a cada um, em ordem, com o seu próprio estado: "Na fila", "Enviando…", "Encaminhada", "Não deu para confirmar o envio." ou "Não foi enviada.". Um envio sem confirmação mostra "Tentar de novo", que só reenvia com um toque, nunca sozinho.
+- Fotos, GIFs e mensagens de voz são enviados de novo para o destino, cifrados no aparelho quando o destino é mensagem direta ou grupo privado. O destino nunca lê o arquivo do original, e o semeador não consegue dizer que duas conversas têm o mesmo arquivo.
+- Se a mídia não existe mais no aparelho nem na origem (por exemplo, passaram os 7 dias), ela não é enviada e a linha mostra "A mídia expirou"; o texto da mesma mensagem é enviado.
+- Mídia que era privada (mensagem direta ou grupo privado) enviada a um grupo público pede antes: "Esta mídia era privada. Enviar para um grupo público?". Sem o sim, nada vai para esse grupo.
+- Uma mensagem encaminhada mostra a linha pequena "Encaminhada" e nunca diz quem a escreveu originalmente. A marca é posta só por quem encaminha (o campo `fwd`, 0 ou 1, no corpo interno v2 da mensagem direta e no registro de publicação v2 do grupo). Ela não prova de onde o conteúdo veio: qualquer app pode pôr essa marca.
+- A relação de resposta da mensagem original não é mantida: a cópia não aparece como resposta.
+- Num diário em nome de uma Página, "Encaminhar" não é oferecido.
+
+Passos (marcar só depois de executar e guardar o registro), primeiro no Android (build de debug, emulador ou aparelho, feito depois de `npm run prepare:native -w apps/app`), depois no simulador iOS, depois na web e no PWA:
+
+- [ ] Mensagem direta para mensagem direta: A abre uma conversa com B, toca longo numa mensagem de texto, escolhe "Encaminhar", escolhe a conversa com C e envia. Na conversa com C a mensagem aparece com a linha "Encaminhada" e sem nome de quem a escreveu originalmente; o estado passa de "Na fila" a "Enviando…" e a "Encaminhada".
+- [ ] Mensagem direta para grupo privado: encaminhar uma foto de uma conversa para um grupo privado. O grupo recebe a foto como nova mensagem, cifrada; o semeador guarda só o cifrado (conferir no registro ou na aba Rede, sem ver a imagem em claro).
+- [ ] Grupo para mensagem direta: encaminhar uma mensagem de texto de um grupo público para uma conversa. A linha "Encaminhada" aparece, sem o nome de quem escreveu no grupo.
+- [ ] Grupo público para grupo público: encaminhar uma publicação de texto e uma foto. A foto vai como nova foto do grupo de destino e a origem continua intacta.
+- [ ] Privado para público: encaminhar uma foto de uma mensagem direta para um grupo público. A tela pergunta "Esta mídia era privada. Enviar para um grupo público?"; com "Cancelar" nada chega ao grupo, e com o envio a foto aparece como pública no grupo.
+- [ ] Mídia expirada: com uma foto cuja origem já não existe no aparelho nem no semeador (apagar o cache local e deixar passar a janela de 7 dias, ou remover a origem em instalação de teste), encaminhar a mensagem: a linha mostra "A mídia expirou" e o texto da mesma mensagem é enviado.
+- [ ] Limite de 5 destinos: na folha, escolher 5 conversas e tentar uma sexta; a sexta não entra na escolha. Os 5 envios seguem na ordem escolhida.
+- [ ] Envio incerto: com a rede caída no meio de um envio, a linha mostra "Não deu para confirmar o envio." e "Tentar de novo"; o app não reenvia sozinho. Só depois do toque em "Tentar de novo" o envio é feito de novo, e a mensagem aparece uma vez no destino.
+- [ ] Linha "Encaminhada" sem autor: na mensagem encaminhada, a linha mostra só "Encaminhada" e nenhum nome de autor original, nem em grupo público, nem em grupo privado, nem em mensagem direta.
+- [ ] Página: com a conta agindo como Página, abrir uma mensagem de conversa ou publicação de grupo e tocar longo; "Encaminhar" não aparece.
+- [ ] Conferir que a conversa de origem continua igual depois de cada encaminhamento: a mensagem original não muda, não ganha a linha "Encaminhada" e não some.
+- [ ] iOS (simulador): repetir os casos de mensagem direta para mensagem direta, de mídia privada para público e de envio incerto.
+- [ ] Web e PWA instalado: repetir mensagem direta para mensagem direta, grupo para mensagem direta, o aviso de mídia privada e o limite de 5, nos mesmos passos que no Android.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/app/test/forward.test.js` e `node apps/app/test/forwardSheet.test.js`.
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.

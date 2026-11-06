@@ -428,23 +428,23 @@ test('dm media end to end: photo with caption and photo only, the sealed cache o
 
   // A photo of two chunks with a caption, and a photo-only message.
   const photo = png(40000)
-  const item = await A.node.dmPutMedia({ bytes: photo, mime: 'image/png', width: 64, height: 48 })
+  const item = await A.node.dmPutMedia({ bytes: photo, mime: 'image/png', width: 64, height: 48, to: B.key })
   t.alike(Object.keys(item), ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'], 'the media item, nonce included')
   t.is(item.chunks, 2)
   t.alike([item.mime, item.w, item.h, item.ms], ['image/png', 64, 48, 0])
   t.is(fs.readdirSync(path.join(host.dataDir, 'blobs')).length > 0, true, 'the seeder holds the blob')
-  const again = await A.node.dmPutMedia({ bytes: photo, mime: 'image/png', width: 64, height: 48 })
+  const again = await A.node.dmPutMedia({ bytes: photo, mime: 'image/png', width: 64, height: 48, to: B.key })
   t.alike(again, item, 'the same photo again reuses its sealed blob')
   const sent = await A.web.request('dm.send', { to: B.key, text: 'legenda', media: [item] })
   const small = png(1000)
-  const item2 = await A.node.dmPutMedia({ bytes: small, mime: 'image/png', width: 64, height: 48 })
+  const item2 = await A.node.dmPutMedia({ bytes: small, mime: 'image/png', width: 64, height: 48, to: B.key })
   const sent2 = await A.web.request('dm.send', { to: B.key, text: '', media: [item2] })
   const la = await A.web.request('dm.list', {})
   t.is(la.conversations[0].preview, 'Foto', 'a photo-only message previews as Foto, never a key')
 
   // The same caption with other photos is another message, never the first.
-  const p1 = await A.node.dmPutMedia({ bytes: png(300), mime: 'image/png', width: 64, height: 48 })
-  const p2 = await A.node.dmPutMedia({ bytes: png(301), mime: 'image/png', width: 64, height: 48 })
+  const p1 = await A.node.dmPutMedia({ bytes: png(300), mime: 'image/png', width: 64, height: 48, to: B.key })
+  const p2 = await A.node.dmPutMedia({ bytes: png(301), mime: 'image/png', width: 64, height: 48, to: B.key })
   const [s1, s2] = await Promise.all([
     A.web.request('dm.send', { to: B.key, text: 'mesma', media: [p1] }),
     A.web.request('dm.send', { to: B.key, text: 'mesma', media: [p2] })
@@ -481,7 +481,7 @@ test('dm media end to end: photo with caption and photo only, the sealed cache o
   host.blobGone = true
   t.ok(b4a.equals((await B.node.dmReadMedia({ from: A.key, id: sent.id, index: 0 })).bytes, photo), 'the cache outlives the pool')
   t.ok(b4a.equals((await B.node.dmReadMedia({ from: A.key, id: sent2.id, index: 0 })).bytes, small), 'the lazily opened photo too')
-  const item3 = await A.node.dmPutMedia({ bytes: png(500), mime: 'image/png', width: 64, height: 48 })
+  const item3 = await A.node.dmPutMedia({ bytes: png(500), mime: 'image/png', width: 64, height: 48, to: B.key })
   const sent3 = await A.web.request('dm.send', { to: B.key, text: 'tarde demais', media: [item3] })
   t.is((await B.web.request('dm.pull')).added, 1)
   t.is((await rejection(B.node.dmReadMedia({ from: A.key, id: sent3.id, index: 0 }))).message, 'mídia indisponível')
@@ -525,7 +525,7 @@ test('dm media from a stranger: a request fetches nothing until a tap, an accept
   const sent = []
   for (let i = 0; i < 6; i++) {
     photos.push(png(1000 + i))
-    const item = await A.node.dmPutMedia({ bytes: photos[i], mime: 'image/png', width: 64, height: 48 })
+    const item = await A.node.dmPutMedia({ bytes: photos[i], mime: 'image/png', width: 64, height: 48, to: B.key })
     sent.push(await A.web.request('dm.send', { to: B.key, text: 'foto ' + i, media: [item] }))
   }
   t.is((await B.web.request('dm.pull')).added, 6)
@@ -595,16 +595,16 @@ test('dm media failures: a failed put keeps the photo for its retry, a short rea
   // A put that fails after the photo was sealed, then the user's retry.
   const photo = png(40000)
   offline = true
-  t.ok((await rejection(A.node.dmPutMedia({ bytes: photo, mime: 'image/png', width: 64, height: 48 }))) !== null, 'the put fails with the seeder unreachable')
+  t.ok((await rejection(A.node.dmPutMedia({ bytes: photo, mime: 'image/png', width: 64, height: 48, to: B.key }))) !== null, 'the put fails with the seeder unreachable')
   offline = false
-  const item = await A.node.dmPutMedia({ bytes: photo, mime: 'image/png', width: 64, height: 48 })
+  const item = await A.node.dmPutMedia({ bytes: photo, mime: 'image/png', width: 64, height: 48, to: B.key })
   const sentLock = await A.web.request('dm.send', { to: B.key, text: 'trancar', media: [item] })
   const gets = host.blobGets
   const own = await A.node.dmReadMedia({ from: A.key, id: sentLock.id, index: 0 })
   t.ok(b4a.equals(own.bytes, photo), 'the sender cached its real photo, not zeros')
   t.is(host.blobGets, gets, 'without a download')
   const photo2 = png(2000)
-  const item2 = await A.node.dmPutMedia({ bytes: photo2, mime: 'image/png', width: 64, height: 48 })
+  const item2 = await A.node.dmPutMedia({ bytes: photo2, mime: 'image/png', width: 64, height: 48, to: B.key })
   const sentShort = await A.web.request('dm.send', { to: B.key, text: 'curto', media: [item2] })
   t.is((await B.web.request('dm.pull')).added, 2)
 

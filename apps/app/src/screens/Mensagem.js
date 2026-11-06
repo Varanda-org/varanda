@@ -6,7 +6,9 @@
 // open and on new messages. The header (avatar, name, @nome) names the peer
 // from the profile cache, never the raw key; a tap on it opens the profile and
 // one icon opens the conversation options. Rows are shared Bubbles (tails,
-// day chips, five-minute runs); a long press offers Responder, Copiar and
+// day chips, five-minute runs); a long press offers Responder, Copiar,
+// Encaminhar (ui/ForwardSheet, forward.js; a forwarded message shows
+// "Encaminhada" and never its original author) and
 // Denunciar. An @nome in the text opens its profile. Whether the conversation is a request or blocked
 // comes from dm.thread itself (docs/rpc.md 5.78), never from a dm.list page;
 // until the first answer neither the composer nor the request actions show.
@@ -65,6 +67,8 @@ import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, Skeleton } from '../ui/States'
+import { ForwardSheet } from '../ui/ForwardSheet'
+import { dmForwardSource } from '../forward'
 import { TopBar } from '../ui/TopBar'
 import { memberKeyOf, useActing } from './Conversa'
 
@@ -122,6 +126,8 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
   const [hold, setHold] = useState(null)
   const [menu, setMenu] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // { source, refs } of the message the Encaminhar sheet forwards.
+  const [forwarding, setForwarding] = useState(null)
   const post = useAction()
   const act = useAction()
   const attachments = useChatAttachments()
@@ -332,7 +338,8 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     const r = await runChatSend({
       plan,
       files,
-      upload: (f) => mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: f.width, height: f.height }),
+      // `to` keeps this photo's blob to this conversation (rpc 5.95).
+      upload: (f) => mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: f.width, height: f.height, to: peer }),
       request: dm,
       live: () => token.live,
       onPhase: (p) => { if (token.live) setMediaSend(p) },
@@ -365,7 +372,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
       files: [recording],
       upload: async (f) => {
         try {
-          return await mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice' })
+          return await mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice', to: peer })
         } catch (err) {
           throw voiceUploadError(err)
         }
@@ -501,6 +508,9 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
   const canSend = blockNote === null && node.online !== false && left >= 0 &&
     (staged ? attachments.ready && !sendingMedia : draft.trim() !== '')
   const mediaOf = new Map(raw.map((m) => [messageKey(m), m.media]))
+  const fwdOf = new Map(raw.map((m) => [messageKey(m), m.fwd]))
+  // Forwarding writes as the person, never as a page.
+  const canForward = pageKey === null && unlocked
 
   let composer
   if (folder === null) {
@@ -629,9 +639,15 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
           const mine = item.mine === true
           const link = item.inviteLink || null
           const actions = []
+          const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media: mediaOf.get(item.key) })
           if (!item.deleted) {
             actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
             actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
+          }
+          // A message with no text whose media expired has nothing to forward.
+          const forwardSource = !item.deleted && canForward ? dmForwardSource(item.rawText, mediaOf.get(item.key)) : null
+          if (forwardSource !== null) {
+            actions.push({ icon: 'encaminhar', label: 'Encaminhar', onPress: () => setForwarding({ source: forwardSource, refs }) })
           }
           if (!mine && !item.deleted && typeof onReport === 'function') {
             actions.push({ icon: 'bandeira', label: LABELS.report, danger: true, onPress: () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from, ...(Array.isArray(mediaOf.get(item.key)) ? { media: mediaOf.get(item.key) } : {}) }) })
@@ -639,13 +655,13 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
           const quoted = item.replyTo !== null && item.replyTo !== undefined
             ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer }
             : null
-          const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media: mediaOf.get(item.key) })
           return (
             <Bubble
               media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
               item={{ key: item.key, text: item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark }}
               mine={mine}
               shape={bubbleShape(rows, index)}
+              forwarded={!item.deleted && fwdOf.get(item.key) === 1}
               quote={quoted}
               actions={actions}
               onOpenMention={mentionTap}
@@ -661,6 +677,13 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
         keepVisiblePosition
       />
       {composer}
+      <ForwardSheet
+        open={forwarding !== null}
+        onClose={() => setForwarding(null)}
+        source={forwarding ? forwarding.source : null}
+        refs={forwarding ? forwarding.refs : []}
+        identity={ownKey}
+      />
       <Sheet open={menu} onClose={() => setMenu(false)} title='Conversa'>
         <View style={styles.sheet}>
           <ErrorText>{act.error}</ErrorText>

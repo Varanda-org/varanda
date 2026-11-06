@@ -368,7 +368,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       followSet: follows,
       seen,
       ops,
-      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: m.replyTo, media: m.media, at: m.at, filedAt: m.filedAt }))
+      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: m.replyTo, fwd: m.fwd, media: m.media, at: m.at, filedAt: m.filedAt }))
     })
   }
 
@@ -441,7 +441,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     // of theirs is fetched until a tap or an accept.
     const auto = c.folder !== 'request'
     return {
-      messages: page.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, at: m.at, mine: m.mine, media: mediaView(m, auto) })),
+      messages: page.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd, at: m.at, mine: m.mine, media: mediaView(m, auto) })),
       next: start > 0 && page.length > 0 ? page[0].id : null,
       ...state
     }
@@ -651,16 +651,22 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // the entry whole for that retry.
   // A voice note's ms is its container's: a given ms must be within
   // AUDIO_MS_TOLERANCE of it.
-  async function putMedia (own, keyPair, { bytes, mime, width, height, ms }) {
+  // to: the destination's diary key, required, part of the reuse key and
+  // kept on the entry. An entry outlives an uncertain send (kept for its
+  // retry), so without it the same photo forwarded to a second conversation
+  // would carry the first one's blob and let the seeder link the readers of
+  // both; send refuses an item prepared for another destination.
+  async function putMedia (own, keyPair, { bytes, mime, width, height, ms, to }) {
     requireUnlocked()
     const gen = generation
     const voice = mime === dm.DM_AUDIO_MIME
+    const toOk = typeof to === 'string' && /^[0-9a-f]{64}$/.test(to)
     let ok = false
-    if (bytes instanceof Uint8Array && voice) {
+    if (toOk && bytes instanceof Uint8Array && voice) {
       const given = ms === undefined || (Number.isInteger(ms) && ms >= 1 && ms <= dm.DM_AUDIO_MAX_MS)
       ms = given && width === 0 && height === 0 ? voiceMs(bytes, ms) : null
       ok = ms !== null
-    } else if (bytes instanceof Uint8Array) {
+    } else if (toOk && bytes instanceof Uint8Array) {
       ok = dm.DM_MEDIA_MIMES.includes(mime) && (ms === undefined || ms === 0) && mediaBounds(bytes, mime) !== null
       ms = 0
     }
@@ -670,7 +676,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     }
     const plain = new Uint8Array(bytes)
     wipe(bytes)
-    const hash = [sha256Hex(plain), mime, width, height, ms].join('\n')
+    const hash = [sha256Hex(plain), mime, width, height, ms, to].join('\n')
     let entry = sealedByPlain.get(hash)
     if (entry === undefined || entry.plain === null) {
       let sealed
@@ -680,7 +686,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         wipe(plain)
         throw err
       }
-      entry = { sealed, mime, w: width, h: height, ms, plain, hash, lock: Promise.resolve() }
+      entry = { sealed, mime, w: width, h: height, ms, to, plain, hash, lock: Promise.resolve() }
       sealedById.set(sealed.descriptor.id, entry)
       sealedByPlain.set(hash, entry)
       while (sealedById.size > BLOBS_MAX) forgetBlob(sealedById.values().next().value)
@@ -696,10 +702,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // The sealed blob of a dm.send item, which must be exactly what putMedia
-  // answered in this unlock.
-  function entryOfItem (item) {
+  // answered in this unlock for this same destination.
+  function entryOfItem (item, to) {
     const entry = sealedById.get(item.id)
-    if (entry === undefined || entry.plain === null) throw new UsageError(MEDIA_STALE)
+    if (entry === undefined || entry.plain === null || entry.to !== to) throw new UsageError(MEDIA_STALE)
     const want = itemOf(entry)
     if (!DM_MEDIA_KEYS.every((k) => want[k] === item[k])) throw new UsageError(MEDIA_STALE)
     return entry
@@ -986,17 +992,17 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // to: hex64; recipientBox: hex64 | null (dm.lookup). keyPair: identity.
   // media: null or dm.send items (docs/rpc.md 5.75), each answered by
   // putMedia in this unlock.
-  async function send (own, keyPair, { to, text, replyTo = null, media = null }, recipientBox) {
+  async function send (own, keyPair, { to, text, replyTo = null, media = null, fwd = 0 }, recipientBox) {
     checkSend(own, to)
     const items = Array.isArray(media) && media.length > 0 ? media.map(mediaItem) : null
-    const key = to + '\n' + (replyTo || '') + '\n' + text + '\n' + (items === null ? '' : JSON.stringify(items))
+    const key = to + '\n' + (replyTo || '') + '\n' + text + '\n' + fwd + '\n' + (items === null ? '' : JSON.stringify(items))
     let entry = pending.get(key)
     if (entry === undefined) {
-      const sealedBlobs = items === null ? [] : items.map(entryOfItem)
+      const sealedBlobs = items === null ? [] : items.map((item) => entryOfItem(item, to))
       // Copied before any await: an overlapping send of the same blob may
       // forget (and wipe) the shared entry meanwhile.
       const plains = sealedBlobs.map((b) => new Uint8Array(b.plain))
-      entry = await newEntry(own, keyPair, { to, text, replyTo, items, key }, recipientBox, sealedBlobs, plains).catch((err) => {
+      entry = await newEntry(own, keyPair, { to, text, replyTo, fwd, items, key }, recipientBox, sealedBlobs, plains).catch((err) => {
         plains.forEach(wipe)
         throw err
       })
@@ -1016,7 +1022,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // A new pending send: checked, its blobs acked, sealed and stamped.
-  async function newEntry (own, keyPair, { to, text, replyTo, items, key }, recipientBox, sealedBlobs, plains) {
+  async function newEntry (own, keyPair, { to, text, replyTo, fwd, items, key }, recipientBox, sealedBlobs, plains) {
     if (recipientBox === null) throw new UsageError(NO_BOX)
     if (replyTo !== null) {
       const c = await threadOf(own, to)
@@ -1025,7 +1031,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const id = dm.newMessageId()
     const at = nowIso()
     const cert = await certOf(own)
-    if (items !== null && dmTextBytes(text) > dm.textBudget({ kind: 'msg', id, from: own, to, replyTo, media: items, at, cert })) {
+    if (items !== null && dmTextBytes(text) > dm.textBudget({ kind: 'msg', id, from: own, to, replyTo, fwd, media: items, at, cert })) {
       throw new UsageError(TOO_LONG)
     }
     // Every chunk acked before any drop is stamped or put.
@@ -1034,7 +1040,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (gen !== generation) throw new UsageError(LOCKED)
     let inner
     try {
-      inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, cert, ...(items === null ? {} : { media: items }) }, keyPair)
+      inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, fwd, cert, ...(items === null ? {} : { media: items }) }, keyPair)
     } catch (err) {
       throw new UsageError(err && err.message === TOO_LONG ? TOO_LONG : BAD_TEXT)
     }
@@ -1055,7 +1061,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       at,
       drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
       acked: [false, false],
-      row: { t: 'msg', id, peer: to, from: own, text, replyTo, media: items, at, mine: true },
+      row: { t: 'msg', id, peer: to, from: own, text, replyTo, fwd, media: items, at, mine: true },
       blobs: sealedBlobs,
       plains
     }
@@ -1166,7 +1172,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (local.hasMessage(body.from, body.id) || batch.some((r) => r.t === 'msg' && r.from === body.from && r.id === body.id)) return null
     // A blocked sender's messages are dropped once they open.
     if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
-    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, at: body.at, mine: body.mine }
+    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, at: body.at, mine: body.mine }
   }
 
   async function close () {

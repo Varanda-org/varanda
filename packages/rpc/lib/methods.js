@@ -848,7 +848,7 @@ const SPECS = {
   'group.join': { fields: { group: req(isKey), community: opt(isKey) }, mutating: true },
   'group.leave': { fields: { group: req(isKey) }, mutating: true },
   'group.post': {
-    fields: { group: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), media: opt(isGroupMediaList), sealed: opt(isBool) },
+    fields: { group: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), fwd: opt(int(0, 1), 0), media: opt(isGroupMediaList), sealed: opt(isBool) },
     mutating: true,
     cross: (given, value) => {
       if (value.sealed === true && !hasOwn(value, 'media')) return 'parâmetro inválido: sealed'
@@ -964,7 +964,7 @@ const SPECS = {
   // With media the text may be empty, as postCross; the sealed frame's own
   // budget (buildInner, 'mensagem longa demais') is the node's check.
   'dm.send': {
-    fields: { to: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isDmId), media: opt(isDmMediaList) },
+    fields: { to: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isDmId), fwd: opt(int(0, 1), 0), media: opt(isDmMediaList) },
     mutating: true,
     cross: postCross
   },
@@ -1135,10 +1135,13 @@ const SPECS = {
   // chat goes to the anonymous blob channel (protocol section 13) from a
   // cache file, as media.uploadFile; the result is a dm.send media item. On
   // the web the bytes never cross RPC (MAX_REQUEST): the page hands them to
-  // the node's media facade instead.
+  // the node's media facade instead. `to` (5.95, required) keys the sealed
+  // blob to one destination, so the same photo for two conversations never
+  // shares a blob, and dm.send refuses the item for any other destination.
   'dm.putMedia': {
     fields: {
       name: req(isMediaName),
+      to: req(isKey),
       mime: req(isUploadMime),
       width: req(int(0, MEDIA_SIDE_MAX)),
       height: req(int(0, MEDIA_SIDE_MAX)),

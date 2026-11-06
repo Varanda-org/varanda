@@ -97,12 +97,13 @@ function validRow (r) {
   if (r.t !== 'msg') return false
   return HEX32.test(r.id) && HEX64.test(r.from) && typeof r.text === 'string' &&
     (r.replyTo === null || HEX32.test(r.replyTo)) && typeof r.mine === 'boolean' &&
+    (r.fwd === undefined || r.fwd === 0 || r.fwd === 1) &&
     validMedia(r.media === undefined ? null : r.media)
 }
 
 function plainRow (r) {
   if (r.t === 'ctl') return { t: 'ctl', id: r.id, op: r.op, peer: r.peer, at: r.at, filedAt: r.filedAt }
-  return { t: 'msg', id: r.id, peer: r.peer, from: r.from, text: r.text, replyTo: r.replyTo, media: plainMedia(r.media), at: r.at, mine: r.mine, filedAt: r.filedAt }
+  return { t: 'msg', id: r.id, peer: r.peer, from: r.from, text: r.text, replyTo: r.replyTo, fwd: r.fwd === 1 ? 1 : 0, media: plainMedia(r.media), at: r.at, mine: r.mine, filedAt: r.filedAt }
 }
 
 // The row with `pad` last, its JSON rounded up to a ROW_BUCKET multiple.

@@ -449,3 +449,19 @@ test('an unlock superseded while it deletes the core of another key never wipes 
   t.ok(b4a.equals((await again.getMedia(PEER, ID))[0], b4a.from('foto')), 'the media still opens')
   await again.close()
 })
+
+test('forward flags survive storage and legacy rows default to 0', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await s.unlock(key(7))
+  await s.append([msg(s.nextFiled()), { ...msg(s.nextFiled()), id: '56'.repeat(16), fwd: 1, media: null }])
+  t.alike(s.snapshot().messages.map(m => m.fwd), [0, 1])
+  for (const fwd of [true, false, 2, -1, '1', null]) {
+    await t.exception.all(s.append([{ ...msg(s.nextFiled()), fwd }]), /linha inválida/)
+  }
+  await s.close()
+  const again = createDmStore({ storage })
+  await again.unlock(key(7))
+  t.alike(again.snapshot().messages.map(m => m.fwd), [0, 1])
+  await again.close()
+})

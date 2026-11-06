@@ -51,10 +51,10 @@ const RECORD_KEYS = {
   'group-sealed': ['type', 'kid', 'nonce', 'box', 'at'],
   'group-invites': ['type', 'on', 'seen', 'at']
 }
-// A post with media (docs/protocol.md section 10, "Group post media"): the
-// one other key set of group-post. `card` (null) and `fwd` (0) are reserved,
-// so a v2 post always has media and every post has one encoding; readers
-// from before it skip the whole post.
+// A post with media, or a forwarded text post (docs/protocol.md section 10):
+// the one other key set of group-post. `card` stays null. `fwd` is only 0
+// or 1, so a plain text post stays the v1 bytes and every post has one
+// encoding; readers from before v2 skip the whole post.
 const GROUP_POST_V2_KEYS = ['type', 'text', 'replyTo', 'media', 'card', 'fwd', 'seen', 'at']
 const GROUP_TYPES = Object.freeze(Object.keys(RECORD_KEYS))
 // A first `group-key` block (kid null) also commits to its key.
@@ -258,9 +258,13 @@ function checkRecord (record, seq, root, community, priv, sealed) {
     // Media items are private (secretbox ciphertext, key included) inside a
     // sealed inner and public everywhere else, never mixed.
     const v2 = keys === GROUP_POST_V2_KEYS
-    if (v2 && (record.card !== null || record.fwd !== 0)) return 'malformed'
-    if (v2 && !validGroupMedia(record.media, sealed)) return 'media-invalid'
-    if (typeof text !== 'string' || charLength(text) < (v2 ? 0 : 1) || charLength(text) > MAX_TEXT) return 'text-length'
+    // A boolean is another JSON type, so it must not count as forwarded.
+    if (v2 && (record.card !== null || (record.fwd !== 0 && record.fwd !== 1))) return 'malformed'
+    // Null media is the text forward. fwd 0 with no media is a second encoding of v1.
+    if (v2 && !(record.media === null && record.fwd === 1) && !validGroupMedia(record.media, sealed)) return 'media-invalid'
+    // Empty text is a photo with no caption, not a text-only forward.
+    const minText = v2 && record.media !== null ? 0 : 1
+    if (typeof text !== 'string' || charLength(text) < minText || charLength(text) > MAX_TEXT) return 'text-length'
     if (hasControlChars(text, true)) return 'control-chars'
     if (record.replyTo !== null && !validRef(record.replyTo, 1)) return 'reply-invalid'
   } else if (type === 'group-leave') {
@@ -361,13 +365,23 @@ function writerHeader ({ group, diary, member = null, box = null, rejoin = null,
   return build({ type: 'group-writer', v: 2, group, diary, member, box, rejoin: copyRef(rejoin), at }, 0, false)
 }
 
-// Without media the v1 record, byte for byte. `sealed` builds the inner
-// record of an envelope, whose media items are private.
-function groupPost ({ text, replyTo = null, media = null, seen = null, at = nowIso(), sealed = false } = {}) {
-  if (media === null || media === undefined) {
+// No media and no forward mark: the v1 record, byte for byte, so older
+// readers still open a plain text post. `fwd` defaults to 0. `sealed`
+// builds the inner record of an envelope, whose media items are private.
+function groupPost ({ text, replyTo = null, media = null, fwd = 0, seen = null, at = nowIso(), sealed = false } = {}) {
+  if ((media === null || media === undefined) && fwd === 0) {
     return build({ type: 'group-post', text, replyTo: copyRef(replyTo), seen: copyRef(seen), at }, 1, false)
   }
-  const record = { type: 'group-post', text, replyTo: copyRef(replyTo), media: copyGroupMedia(media, sealed), card: null, fwd: 0, seen: copyRef(seen), at }
+  const record = {
+    type: 'group-post',
+    text,
+    replyTo: copyRef(replyTo),
+    media: media === undefined ? null : copyGroupMedia(media, sealed),
+    card: null,
+    fwd,
+    seen: copyRef(seen),
+    at
+  }
   return build(record, 1, false, false, false, sealed === true)
 }
 
@@ -2180,6 +2194,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       seq: n.seq,
       at: r.at,
       text: r.text,
+      fwd: r.fwd === 1 ? 1 : 0,
       replyTo: r.replyTo === null ? null : { writer: r.replyTo.writer, seq: r.replyTo.seq },
       ...(Array.isArray(r.media) ? { media: copyGroupMedia(r.media, typeof r.media[0].key === 'string') } : {}),
       hidden

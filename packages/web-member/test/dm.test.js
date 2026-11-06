@@ -16,9 +16,10 @@ const { verifyDmReport } = require('@varanda/core/lib/report')
 const { createBrowserNode } = require('../lib/node')
 const { createDmEngine, voiceMs } = require('../lib/dm')
 const { createDmStore } = require('../lib/dm-store')
+const { createGroupKeys } = require('../lib/group-keys')
 const member = require('../lib/member-ops')
 const { memoryNodeStorage } = require('../lib/node-storage')
-const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf } = require('../lib/passkey')
+const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf, groupKeyPairFromPrf } = require('../lib/passkey')
 const gc = require('@varanda/core/lib/group-crypto')
 const store = require('../lib/node-store')
 const { connectClient, errorOf } = require('./helpers/session')
@@ -134,7 +135,7 @@ test('request, accept, block, second device, ctl privacy, no plaintext at rest',
   t.alike(await B.web.request('dm.lookup', { member: A.key }), { box: hex(boxA.publicKey), gen: 1 })
 
   t.is((await errorOf(B.web.request('dm.send', { to: B.key, text: 'eu' }))).message, 'não é possível enviar para si')
-  const sent = await B.web.request('dm.send', { to: A.key, text: SECRET })
+  const sent = await B.web.request('dm.send', { to: A.key, text: SECRET, fwd: 1 })
   t.ok(/^[0-9a-f]{32}$/.test(sent.id))
   t.is(seeder.puts.length, 2, 'recipient drop and self copy')
 
@@ -155,6 +156,8 @@ test('request, accept, block, second device, ctl privacy, no plaintext at rest',
   const thread = await A.web.request('dm.thread', { peer: B.key })
   t.is(thread.messages.length, 1)
   t.is(thread.messages[0].text, SECRET)
+  t.is(thread.messages[0].fwd, 1, 'received forward')
+  t.is((await B.web.request('dm.thread', { peer: A.key })).messages[0].fwd, 1, 'locally filed forward')
   t.is(thread.next, null)
   await A.web.request('dm.seen', { peer: B.key })
   t.is((await A.web.request('dm.list', { folder: 'request' })).conversations[0].unread, false)
@@ -190,6 +193,7 @@ test('request, accept, block, second device, ctl privacy, no plaintext at rest',
   t.is((await B2.web.request('dm.pull')).added, 2, 'both sent copies arrive')
   const t2 = await B2.web.request('dm.thread', { peer: A.key })
   t.alike(t2.messages.map((m) => [m.text, m.mine]), [[SECRET, true], ['de novo', true]])
+  t.alike(t2.messages.map(m => m.fwd), [1, 0], 'self copies retain forward and v1 flags')
   await B.web.request('dm.set', { peer: A.key, state: 'deleted' })
   await B2.web.request('dm.pull')
   t.is((await B2.web.request('dm.list', {})).conversations.length, 0, "B's delete ctl reaches the other device")
@@ -855,13 +859,13 @@ test('a failed photo upload is a normal error and sends nothing; an item not put
   await copyDiary(B, A)
   const puts = seeder.puts.length
 
-  const err = await A.node.dmPutMedia({ bytes: png(100), mime: 'image/png', width: 64, height: 48 }).then(() => null, (e) => e)
+  const err = await A.node.dmPutMedia({ bytes: png(100), mime: 'image/png', width: 64, height: 48, to: B.key }).then(() => null, (e) => e)
   t.ok(err !== null, 'the upload fails')
   t.not(err.message, 'não deu para confirmar o envio', 'not the uncertain signal of dm.send')
   t.not(err.message, 'não deu para confirmar o envio da mídia')
   t.absent(err.uncertain, 'never uncertain')
-  t.exception.all(() => A.node.dmPutMedia({ bytes: png(100), mime: 'image/bmp', width: 64, height: 48 }), /mídia inválida/, 'a mime outside the list is refused at once')
-  const bad = await A.node.dmPutMedia({ bytes: b4a.from('not an image'), mime: 'image/png', width: 64, height: 48 }).then(() => null, (e) => e)
+  t.exception.all(() => A.node.dmPutMedia({ bytes: png(100), mime: 'image/bmp', width: 64, height: 48, to: B.key }), /mídia inválida/, 'a mime outside the list is refused at once')
+  const bad = await A.node.dmPutMedia({ bytes: b4a.from('not an image'), mime: 'image/png', width: 64, height: 48, to: B.key }).then(() => null, (e) => e)
   t.is(bad.message, 'mídia inválida', 'bytes that fail the media bounds are refused')
 
   const item = { id: 'ab'.repeat(32), key: 'cd'.repeat(32), nonce: 'ef'.repeat(24), chunks: 1, bytes: 1000, sha256: '12'.repeat(32), mime: 'image/png', w: 64, h: 48, ms: 0 }
@@ -894,7 +898,7 @@ test('a voice note for dm.send: audio only, no sides, its duration; checked befo
   // fails at the put, like a photo, never as 'mídia inválida'.
   const seeder = await dmSeeder(t, { signer: assoc })
   const A = await memberNode(t, assoc, seeder.url, { dm: { blob: { wallet: 4, walletLow: 2, issuePaceMs: 0 } } })
-  const voice = { bytes: m4a({ pad: 200 }), mime: 'audio/mp4', width: 0, height: 0, ms: 3000, kind: 'voice' }
+  const voice = { bytes: m4a({ pad: 200 }), mime: 'audio/mp4', width: 0, height: 0, ms: 3000, kind: 'voice', to: 'ab'.repeat(32) }
   const err = await A.node.dmPutMedia(voice).then(() => null, (e) => e)
   t.ok(err !== null, 'the upload fails at the blob channel')
   t.not(err.message, 'mídia inválida', 'the voice note itself passed')
@@ -913,7 +917,7 @@ test('a voice note for dm.send: audio only, no sides, its duration; checked befo
   for (const [name, over] of Object.entries(bad)) {
     t.exception.all(() => A.node.dmPutMedia({ ...voice, ...over }), /mídia inválida/, name)
   }
-  t.exception.all(() => A.node.dmPutMedia({ bytes: png(100), mime: 'image/png', width: 0, height: 0 }), /mídia inválida/, 'a photo still needs its sides')
+  t.exception.all(() => A.node.dmPutMedia({ bytes: png(100), mime: 'image/png', width: 0, height: 0, to: 'ab'.repeat(32) }), /mídia inválida/, 'a photo still needs its sides')
 })
 
 test('the dm engine opens a voice note only when its bytes are audio only', async (t) => {
@@ -926,7 +930,8 @@ test('the dm engine opens a voice note only when its bytes are audio only', asyn
   await certify(storage, kp, assoc)
   await engine.unlock(crypto.randomBytes(32))
   const own = hex(kp.publicKey)
-  const putErr = async (args) => (await errorOf(engine.putMedia(own, kp, args))).message
+  const to = hex(crypto.keyPair().publicKey)
+  const putErr = async (args) => (await errorOf(engine.putMedia(own, kp, { to, ...args }))).message
   t.is(await putErr({ bytes: m4a({ handlers: ['soun', 'vide'] }), mime: 'audio/mp4', width: 0, height: 0, ms: 3000 }), 'mídia inválida', 'a video track')
   t.is(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0, ms: 0 }), 'mídia inválida', 'ms 0')
   t.is(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 1, height: 1, ms: 3000 }), 'mídia inválida', 'sides')
@@ -935,6 +940,118 @@ test('the dm engine opens a voice note only when its bytes are audio only', asyn
   t.is(await putErr({ bytes: m4a({ ms: 120000 }), mime: 'audio/mp4', width: 0, height: 0, ms: 1 }), 'mídia inválida', 'two minutes claiming 1 ms')
   t.is(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0, ms: 4001 }), 'mídia inválida', 'past the tolerance')
   t.not(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0 }), 'mídia inválida', 'no ms: the container decides')
+})
+
+// A dm engine whose blob channel is a stand-in that acks every frame at once
+// (the loopback seeder has none): lib/dm.js loaded again over a stubbed
+// ./blob createBlobClient, the require cache restored right after.
+function engineWithBlobs (t, seeder, sent) {
+  const blobPath = require.resolve('../lib/blob')
+  const dmPath = require.resolve('../lib/dm')
+  const realBlob = require(blobPath)
+  const realDm = require.cache[dmPath]
+  const fake = {
+    ...realBlob,
+    createBlobClient: () => ({
+      async send (sealed) {
+        sent.push(sealed.descriptor.id)
+        sealed.acked.fill(true)
+      },
+      walletSize: async () => 1000,
+      topUp: async () => 0
+    })
+  }
+  delete require.cache[dmPath]
+  require.cache[blobPath].exports = fake
+  let create
+  try {
+    create = require(dmPath).createDmEngine
+  } finally {
+    require.cache[blobPath].exports = realBlob
+    require.cache[dmPath] = realDm
+  }
+  const storage = memoryNodeStorage()
+  const engine = create({
+    storage,
+    association: seeder.assoc,
+    seederUrl: seeder.url,
+    createSocket: (u) => {
+      const ws = new WebSocket(u)
+      ws.on('error', noop)
+      return ws
+    },
+    limits: { issuePaceMs: 0 }
+  })
+  t.teardown(() => engine.close(), { force: true })
+  return { engine, storage }
+}
+
+// The forward audit: an uncertain send keeps its sealed blob for the retry,
+// and the same photo then forwarded to another conversation must not carry
+// that blob (the seeder would link the readers of both conversations).
+test('dm putMedia: one sealed blob per destination, even after an uncertain send; a retry to the same one reuses it', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  let cut = false
+  const seeder = await dmSeeder(t, { signer: assoc, dropPutAck: (n) => cut && n === seeder.puts.length - 1 && !(cut = false) })
+  seeder.assoc = hex(assoc.publicKey)
+  const sent = []
+  const { engine, storage } = engineWithBlobs(t, seeder, sent)
+  const kp = crypto.keyPair()
+  const own = hex(kp.publicKey)
+  await certify(storage, kp, assoc)
+  await engine.unlock(crypto.randomBytes(32))
+  t.ok((await engine.topUp(kp, { force: true })) > 0)
+  const first = hex(crypto.keyPair().publicKey)
+  const second = hex(crypto.keyPair().publicKey)
+  const firstBox = hex((await dmBoxKeyPairFromPrf(crypto.randomBytes(32), 1)).publicKey)
+  const photo = { mime: 'image/png', width: 64, height: 48 }
+
+  const toFirst = await engine.putMedia(own, kp, { ...photo, bytes: png(100), to: first })
+  cut = true
+  const err = await errorOf(engine.send(own, kp, { to: first, text: '', media: [toFirst], fwd: 1 }, firstBox))
+  t.is(err && err.message, 'não deu para confirmar o envio', 'the first send is uncertain')
+
+  const toSecond = await engine.putMedia(own, kp, { ...photo, bytes: png(100), to: second })
+  for (const k of ['id', 'key', 'nonce', 'sha256']) t.not(toSecond[k], toFirst[k], 'the second destination gets its own ' + k)
+  t.alike(sent, [toFirst.id, toSecond.id], 'two blobs put')
+
+  const retry = await engine.putMedia(own, kp, { ...photo, bytes: png(100), to: first })
+  t.alike(retry, toFirst, 'a retry to the first destination reuses its blob')
+  t.is(sent.length, 2, 'acked frames are not put again')
+
+  // The item is bound to its destination: the first one's item sent to the
+  // second conversation is refused before anything goes out.
+  const secondBox = hex((await dmBoxKeyPairFromPrf(crypto.randomBytes(32), 1)).publicKey)
+  const drops = seeder.puts.length
+  const crossed = await errorOf(engine.send(own, kp, { to: second, text: '', media: [retry], fwd: 1 }, secondBox))
+  t.is(crossed && crossed.message, 'prepare a mídia de novo', 'an item put for another destination is refused')
+  t.is(seeder.puts.length, drops, 'no drop was put')
+  t.is(sent.length, 2, 'no blob was put')
+
+  const resent = await errorOf(engine.send(own, kp, { to: first, text: '', media: [retry], fwd: 1 }, firstBox))
+  t.is(resent, null, 'the retry to the first destination with its own item goes out')
+
+  for (const to of [undefined, 'AB'.repeat(32), 'ab', 1, null]) {
+    t.is((await errorOf(engine.putMedia(own, kp, { ...photo, bytes: png(100), to }))).message, 'mídia inválida', 'to ' + JSON.stringify(to))
+  }
+})
+
+test('dmPutMedia refuses a missing to, or one that is not a lowercase hex64 key, at once', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url, { dm: { blob: { wallet: 4, walletLow: 2, issuePaceMs: 0 } } })
+  for (const to of [undefined, 'AB'.repeat(32), 'ab', 1, null, ['ab'.repeat(32)]]) {
+    // Thrown synchronously, before the engine (which refuses it too) runs.
+    let threw = null
+    try {
+      A.node.dmPutMedia({ bytes: png(100), mime: 'image/png', width: 64, height: 48, to }).catch(() => {})
+    } catch (err) {
+      threw = err
+    }
+    t.ok(threw instanceof TypeError && threw.message === 'mídia inválida', 'to ' + JSON.stringify(to))
+  }
 })
 
 test('voiceMs: a voice note opens only when its item ms matches the container', (t) => {
@@ -949,4 +1066,33 @@ test('voiceMs: a voice note opens only when its item ms matches the container', 
   t.is(voiceMs(m4a({ ms: 120000 }), 1), null, 'two minutes claiming 1 ms')
   t.is(voiceMs(m4a(), '3000'), null, 'not a number')
   t.is(voiceMs(m4a({ handlers: ['soun', 'vide'] }), 3000), null, 'a video track')
+})
+
+test('chat forwards: browser group writes and reads keep flags in public and private posts', async (t) => {
+  const storage = memoryNodeStorage()
+  const keyPair = crypto.keyPair()
+  const prf = crypto.randomBytes(32)
+  const assoc = generateAssociationKeyPair()
+  const groupKeys = createGroupKeys()
+  t.teardown(() => groupKeys.lock())
+  const ctx = { storage, keyPair, association: hex(assoc.publicKey), groupKeys, groupKeyPair: nonce => groupKeyPairFromPrf(prf, nonce) }
+  await member.idCreate(ctx)
+  await member.certAdd(ctx, createCert({ member: hex(keyPair.publicKey) }, assoc))
+  await groupKeys.unlock(storage, new Uint8Array(prf))
+  const { community, group: general } = await member.communityCreate(ctx, { name: 'Bairro', join: 'open' })
+  const { group: privateGroup } = await member.groupCreate(ctx, { community, name: 'Segredo', join: 'approval', visibility: 'private' })
+  for (const group of [general, privateGroup]) {
+    await member.groupPost(ctx, { group, text: 'original' })
+    const sent = await member.groupPost(ctx, { group, text: 'encaminhada', fwd: 1 })
+    const read = await member.groupRead(ctx, { group })
+    t.alike(read.items.map(p => [p.text, p.fwd]), [['encaminhada', 1], ['original', 0]])
+    t.is(read.items[0].media, null)
+    const core = await store.openGroupCoreReadOnly(storage, group)
+    try {
+      const record = JSON.parse(b4a.toString(await core.get(sent.seq)))
+      t.is(record.type, group === general ? 'group-post' : 'group-sealed')
+    } finally {
+      await core.close()
+    }
+  }
 })

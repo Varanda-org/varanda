@@ -189,7 +189,7 @@ test('dm.js has no read, delivery or typing words and no em dash', async (t) => 
 })
 
 test('the chat screens and components have no read, delivery or typing words', (t) => {
-  for (const file of ['../src/screens/Mensagem.js', '../src/ui/Bubble.js', '../src/ui/ChatComposer.js', '../src/ui/ActionsSheet.js', '../src/ui/ChatMedia.js', '../src/ui/AttachSheet.js']) {
+  for (const file of ['../src/screens/Mensagem.js', '../src/ui/Bubble.js', '../src/ui/ChatComposer.js', '../src/ui/ActionsSheet.js', '../src/ui/ChatMedia.js', '../src/ui/AttachSheet.js', '../src/ui/ForwardSheet.js']) {
     const src = readFileSync(join(__dirname, file), 'utf8')
     for (const word of ['lida', 'entregue', 'digitando']) t.absent(src.includes(word), file + ': ' + word)
     t.absent(src.includes('\u2014'), file)
@@ -349,7 +349,7 @@ test('runChatSend: an uncertain send keeps the exact op and only an explicit ret
 })
 
 test('chat media files never name an http(s) image source and no presence words', (t) => {
-  for (const file of ['../src/ui/ChatMedia.js', '../src/ui/AttachSheet.js', '../src/chatSend.js']) {
+  for (const file of ['../src/ui/ChatMedia.js', '../src/ui/AttachSheet.js', '../src/chatSend.js', '../src/ui/ForwardSheet.js']) {
     const src = readFileSync(join(__dirname, file), 'utf8')
     t.absent(/https?:\/\//.test(src), file + ': no http(s) literal')
     for (const word of ['lida', 'entregue', 'digitando']) t.absent(src.includes(word), file + ': ' + word)
@@ -360,7 +360,9 @@ test('chat media files never name an http(s) image source and no presence words'
 test('Mensagem sends a voice note on the blob channel and keeps the photo send state machine', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(src.includes('attachments: [stagedVoice(recording)]'), 'one voice item through composePlan')
-  t.ok(src.includes("mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice' })"), 'the DM blob channel')
+  t.ok(src.includes("mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice', to: peer })"), 'the DM blob channel, one blob per destination')
+  const worklet = readFileSync(join(__dirname, '../worklet/web-node.js'), 'utf8')
+  t.ok(worklet.includes('function putMedia ({ name, mime, width, height, ms, kind, to })') && worklet.includes('{ mime, width, height, ms, kind, to })'), 'the native handler keeps the destination')
   t.ok(src.includes("mediaDone(r, '', quoteId)"), 'the same commit and hold as photos')
   t.ok(src.includes('onVoice={isTop && canAttach && !hold && mediaHold === null'), 'no recording while a send is held or under a pushed screen')
   const composer = readFileSync(join(__dirname, '../src/ui/ChatComposer.js'), 'utf8')
@@ -369,4 +371,17 @@ test('Mensagem sends a voice note on the blob channel and keeps the photo send s
   const bubble = readFileSync(join(__dirname, '../src/ui/VoiceBubble.js'), 'utf8')
   t.absent(/https?:\/\//.test(bubble), 'VoiceBubble: no http(s) literal')
   for (const word of ['lida', 'entregue', 'digitando']) t.absent(bubble.includes(word), 'VoiceBubble: ' + word)
+})
+
+test('Mensagem offers Encaminhar and marks forwarded messages without the original author', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("label: 'Encaminhar'"), 'the long press action')
+  t.ok(src.includes('const canForward = pageKey === null && unlocked'), 'never as a page')
+  t.ok(src.includes('<ForwardSheet'), 'the sheet')
+  t.ok(src.includes('forwarded={!item.deleted && fwdOf.get(item.key) === 1}'), 'fwd 1 from dm.thread shows the line')
+  t.ok(src.includes('dmForwardSource(item.rawText, mediaOf.get(item.key))'), 'expired media maps to an unavailable item')
+  t.ok(src.includes('if (forwardSource !== null) {'), 'no Encaminhar when nothing is left to forward')
+  t.absent(src.includes('media: Array.isArray(media) ? media : []'), 'expired media never becomes a plain text forward')
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes("<Icon name='encaminhar'") && bubble.includes('FORWARDED_LABEL'), 'Encaminhada with the encaminhar icon')
 })

@@ -47,7 +47,9 @@ function IosContent ({ onClose, title, left, right, background, grabber, childre
   )
 }
 
-export function Sheet ({ open, onClose, title, left, right, background, grabber = false, children }) {
+// `dismissable` false turns off the iOS swipe-down, which can close the page
+// sheet without waiting for onClose (a sheet with a send in flight).
+export function Sheet ({ open, onClose, title, left, right, background, grabber = false, dismissable = true, children }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const bodyBackground = background ?? colors.card
@@ -60,7 +62,7 @@ export function Sheet ({ open, onClose, title, left, right, background, grabber 
         animationType='slide'
         presentationStyle='pageSheet'
         onRequestClose={onClose}
-        allowSwipeDismissal
+        allowSwipeDismissal={dismissable}
       >
         <SafeAreaProvider>
           <IosContent onClose={onClose} title={title} left={left} right={right} background={bodyBackground} grabber={grabber}>{children}</IosContent>
