@@ -43,6 +43,7 @@ const noop = () => {}
 const MEDIA_WEB_ONLY = 'mídia disponível só na versão web'
 const PEEK_WEB_ONLY = 'leitura sob demanda só na versão web'
 const DM_WEB_ONLY = 'mensagens diretas disponíveis só no navegador'
+const SEEN_WEB_ONLY = 'estado de vistos sincronizado só no navegador'
 // How long downloads in a group are gathered into one groups.changed.
 const GROUPS_CHANGED_MS = 50
 
@@ -607,6 +608,12 @@ function createSession ({
     'notices.list': serial(async () => {
       throw new UsageError('avisos disponíveis só no navegador')
     }),
+
+    // Only the browser node signs, seals and merges the seen blob (docs/rpc.md
+    // 5.88 and 5.89, docs/protocol.md section 13); these open nothing here,
+    // and group.seen keeps writing group-seen.json only.
+    'seen.sign': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
+    'seen.merge': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
 
     // Conversas seal to an X25519 box key derived from the Ed25519 identity
     // key and talk to the seeder over the browser node's link, so only the

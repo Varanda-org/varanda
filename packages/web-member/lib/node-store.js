@@ -51,6 +51,7 @@ const { mediaHeader } = require('@varanda/core/lib/media')
 const { validateGroupRecord, validateGroupHeader, validateWriterHeader, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS } = require('@varanda/core/lib/group')
 const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
+const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { DIARY_OPTIONS } = require('./diary-options')
 
@@ -1423,6 +1424,70 @@ function writeGroupSeen (storage, marks) {
   return storage.writeJson('groupSeen', { v: 1, marks: seenMarks(marks) })
 }
 
+// kv seenLocal = { v: 1, own: hex64, blob }: the node's full view of what the
+// account service's seen blob should hold (the canonical document of the
+// last merge or write plus Avisos tokens added here since), sealed under the
+// seen key (@varanda/core lib/seen-blob.js seal). Always exactly
+// SEEN_BLOB_BYTES, so kv shows a constant length and a reader without the
+// passkey learns nothing. kv dmSeen and groupSeen stay this device's source
+// of truth; this copy only feeds the sync. Bound to the own key: a value left
+// by another identity reads as absent.
+function isSeenBlob (b64) {
+  return typeof b64 === 'string' && b64.length === SEEN_BLOB_B64 && BASE64_RE.test(b64) &&
+    b4a.byteLength(b64, 'base64') === SEEN_BLOB_BYTES
+}
+
+function sameOwn (data, own) {
+  return isHex64(own) && data.own === own
+}
+
+async function readSeenLocal (storage, own) {
+  const data = await readKv(storage, 'seenLocal')
+  if (!isVersioned(data) || !sameOwn(data, own) || !isSeenBlob(data.blob)) return null
+  return data.blob
+}
+
+function writeSeenLocal (storage, own, b64) {
+  if (!isHex64(own)) throw new TypeError('chave inválida')
+  if (!isSeenBlob(b64)) throw new TypeError('visto inválido')
+  return storage.writeJson('seenLocal', { v: 1, own, blob: b64 })
+}
+
+// kv seenRemote = { v: 1, own: hex64, blob }: the sealed blob exactly as the
+// service holds it at the seenSync cursor (its hash is the cursor), so an
+// unchanged read can still tell which local marks the service lacks. Bound
+// to the own key like seenLocal.
+async function readSeenRemote (storage, own) {
+  const data = await readKv(storage, 'seenRemote')
+  if (!isVersioned(data) || !sameOwn(data, own) || !isSeenBlob(data.blob)) return null
+  return data.blob
+}
+
+function writeSeenRemote (storage, own, b64) {
+  if (!isHex64(own)) throw new TypeError('chave inválida')
+  if (!isSeenBlob(b64)) throw new TypeError('visto inválido')
+  return storage.writeJson('seenRemote', { v: 1, own, blob: b64 })
+}
+
+// kv seenSync = { v: 1, own: hex64, hash: hex64 | null, gen }: the hash of the
+// remote blob last merged (the prevHash of the next compare-and-swap write,
+// null before any) and the local generation.
+function validSeenSync (hash, gen) {
+  return (hash === null || isHex64(hash)) && Number.isSafeInteger(gen) && gen >= 0
+}
+
+async function readSeenSync (storage, own) {
+  const data = await readKv(storage, 'seenSync')
+  if (!isVersioned(data) || !sameOwn(data, own) || !validSeenSync(data.hash, data.gen)) return { hash: null, gen: 0 }
+  return { hash: data.hash, gen: data.gen }
+}
+
+function writeSeenSync (storage, own, { hash = null, gen = 0 } = {}) {
+  if (!isHex64(own)) throw new TypeError('chave inválida')
+  if (!validSeenSync(hash, gen)) throw new TypeError('sincronização inválida')
+  return storage.writeJson('seenSync', { v: 1, own, hash, gen })
+}
+
 // A secretbox under the local dm key (./dm-store.js seal): { nonce, box }.
 // Stamps and queued drops are bearer values (anyone holding one can spend
 // it), so kv holds them only sealed; plaintext entries of the earlier v1
@@ -1491,7 +1556,10 @@ async function pushDmCtlQueue (storage, item) {
 // Every dm kv entry and the local store (reset).
 async function deleteDmData (storage) {
   await storage.deleteCore(DM_LOCAL)
-  for (const key of ['dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'dmCtlQueue']) await storage.writeJson(key, null)
+  // seenSync before seenRemote and seenLocal: an interrupted reset must
+  // never leave the compare-and-swap cursor without the documents it was
+  // taken from.
+  for (const key of ['seenSync', 'seenRemote', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'dmCtlQueue', 'seenLocal']) await storage.writeJson(key, null)
 }
 
 // kv ageVerified / ageSince = { v: 1, proof }: the account service's signed
@@ -1554,6 +1622,12 @@ module.exports = {
   readGroupSeen,
   writeGroupSeen,
   MAX_GROUP_SEEN,
+  readSeenLocal,
+  writeSeenLocal,
+  readSeenSync,
+  writeSeenSync,
+  readSeenRemote,
+  writeSeenRemote,
   readDmStamps,
   writeDmStamps,
   deleteDmData,

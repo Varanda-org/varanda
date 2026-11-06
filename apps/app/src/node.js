@@ -495,6 +495,8 @@ function LiveNodeProvider ({ children }) {
       noteOwnDmDrop()
       return
     }
+    // Carries nothing and is no sync line.
+    if (name === 'seen.changed') return
     if (name === 'groups.changed') {
       setGroupVersions((versions) => bumpGroupVersion(versions, data && data.group))
       return

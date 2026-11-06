@@ -309,6 +309,7 @@ const { groupKeyPairFromPrf } = require('./passkey')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
 const { createDmEngine } = require('./dm')
+const { createSeenSync, groupApplier } = require('./seen-sync')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
 const LOCKED_MESSAGE = 'diretório de dados em uso'
@@ -328,6 +329,7 @@ const UPKEEP_WARNING = 'aviso: participação automática neste aparelho não co
 const BAD_MEDIA_ARGS = 'mídia inválida'
 const NO_SEEDER = 'sem conexão com o semeador'
 const PEEK_BUSY = 'espiadinha já em andamento'
+const SEEN_CHANGED_MS = 5000
 const NOTICES_BUSY = 'avisos já em andamento'
 const DIARY_PEEK_BUSY = 'ocupado'
 const BAD_PAGE = 'operação de página inválida'
@@ -467,6 +469,11 @@ function rpcError (code, message) {
   const err = new RpcError(code, message)
   err.isSessionError = true
   return err
+}
+
+// Plain kv values (string lists, group marks) compared by content.
+function sameJson (a, b) {
+  return JSON.stringify(a) === JSON.stringify(b)
 }
 
 // ---- pages (docs/rpc.md 5.84 and 5.85) ----
@@ -936,6 +943,35 @@ function createBrowserSession ({
     emit: (event, data) => send(event, data),
     limits: syncOptions.dm
   })
+  // The seen-sync engine (docs/rpc.md 5.88, 5.89). Remote group marks go
+  // through the group.seen path on the cores a run lends.
+  const seenSync = createSeenSync({
+    storage,
+    association: cfg.association,
+    log: (text) => warning(safe(text)),
+    currentOwn: () => (keyPair === null ? null : b4a.toString(keyPair.publicKey, 'hex')),
+    applyGroups: groupApplier({ storage, withCores: (fn) => withCores(fn) })
+  })
+  // 'seen.changed' at most once per SEEN_CHANGED_MS: a burst of marks (a
+  // scroll through a group) asks the app for one sync, not one per mark.
+  let seenChangedAt = 0
+  let seenChangedTimer = null
+  function seenChanged () {
+    if (closed || seenChangedTimer !== null) return
+    const wait = seenChangedAt + SEEN_CHANGED_MS - Date.now()
+    if (wait <= 0) {
+      seenChangedAt = Date.now()
+      send('seen.changed', {})
+      return
+    }
+    seenChangedTimer = setTimeout(() => {
+      seenChangedTimer = null
+      if (closed) return
+      seenChangedAt = Date.now()
+      send('seen.changed', {})
+    }, wait)
+  }
+
   let dmLastPull = 0
   let dmRecheck = false
   let dmRecheckTries = 0
@@ -1716,6 +1752,20 @@ function createBrowserSession ({
       ageChecked = false
     }
     return ageRevoked
+  }
+
+  // The own key of a seen request (push.sign's lookup), unlocked and matching.
+  async function seenOwn () {
+    let own
+    if (ownKey !== null) own = ownKey
+    else if (diaryInfo !== null) own = diaryInfo.publicKey
+    else {
+      own = await requireOwnKey()
+      restartWhenIdle(1)
+    }
+    if (keyPair === null) throw new UsageError(store.LOCKED)
+    if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+    return own
   }
 
   async function requireOwnKey () {
@@ -2518,6 +2568,21 @@ function createBrowserSession ({
       return { signature }
     }),
 
+    // The seen statement and the seen document (docs/rpc.md 5.88, 5.89):
+    // own key as push.sign, no diary core opened; the engine fills member,
+    // association and the hashes, so the caller never hands in bytes to sign.
+    'seen.sign': serial(async ({ nonce, action }) => {
+      const own = await seenOwn()
+      return seenSync.sign({ nonce, action }, keyPair, own)
+    }),
+
+    'seen.merge': serial(async ({ blob, avisos, unchanged }) => {
+      const own = await seenOwn()
+      const r = await seenSync.merge({ blob, avisos, unchanged }, keyPair, own)
+      if (r.dmChanged || r.groupChanged) seenChanged()
+      return r
+    }),
+
     'profile.set': serial(async ({ name, bio, avatar }, epoch) => {
       const own = await requireUnlocked()
       await ensureCaughtUp(epoch)
@@ -2768,7 +2833,12 @@ function createBrowserSession ({
     'group.leave': groupWrite(member.groupLeave),
     'group.post': groupWrite(member.groupPost),
     'group.read': serial((params) => withCores((c) => member.groupRead(c, params))),
-    'group.seen': serial((params) => withCores((c) => member.groupSeen(c, params))),
+    'group.seen': serial(async (params) => {
+      const before = await store.readGroupSeen(storage)
+      const r = await withCores((c) => member.groupSeen(c, params))
+      if (!sameJson(before, await store.readGroupSeen(storage))) seenChanged()
+      return r
+    }),
     'group.list': serial((params) => withCores((c) => member.groupList(c, params))),
     'group.info': serial((params) => withCores((c) => member.groupInfo(c, params))),
     'group.members': serial((params) => withCores((c) => member.groupMembers(c, params))),
@@ -2866,7 +2936,13 @@ function createBrowserSession ({
     'dm.list': serial(async (params) => dmEngine.list(await requireDm(), params)),
     'dm.thread': serial(async (params) => dmEngine.thread(await requireDm(), params)),
     'dm.set': serial(async ({ peer, state }) => dmEngine.set(await requireDm(), keyPair, { peer, state })),
-    'dm.seen': serial(async ({ peer }) => dmEngine.seen(await requireDm(), peer)),
+    'dm.seen': serial(async ({ peer }) => {
+      const own = await requireDm()
+      const before = await store.readDmSeen(storage)
+      const r = await dmEngine.seen(own, peer)
+      if (!sameJson(before, await store.readDmSeen(storage))) seenChanged()
+      return r
+    }),
 
     // As report.sign: no diary opened, nothing appended, no network.
     'dm.reportSign': serial(async ({ nonce, target, reason, text, quote }) => {
@@ -2958,6 +3034,7 @@ function createBrowserSession ({
     groupPrf = null
     boxKeys.lock()
     dmEngine.lock()
+    seenSync.forget()
     dmRecheck = false
     dmRecheckTries = 0
     for (const pair of groupPairs) zeroPair(pair)
@@ -3243,6 +3320,8 @@ function createBrowserSession ({
     closed = true
     syncIntent = null
     resetUpkeep()
+    if (seenChangedTimer !== null) clearTimeout(seenChangedTimer)
+    seenChangedTimer = null
     peeker.abort()
     peeking = null
     noticer.abort()

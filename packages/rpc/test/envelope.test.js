@@ -66,7 +66,7 @@ test('response: success and error', (t) => {
 })
 
 test('event names and stop reasons (sync.started and preempted included)', (t) => {
-  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed', 'dm.sending'])
+  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed', 'dm.sending', 'seen.changed'])
   t.alike([...STOP_REASONS], ['done', 'stopped', 'preempted', 'timeout', 'error', 'idle'])
   t.is(STOP_REASONS.length, 6)
   t.ok(Object.isFrozen(EVENTS))
@@ -142,4 +142,14 @@ test('event: dm.sending', (t) => {
   for (const data of [{ n: 1 }, { added: 0 }, { runId: 1, reason: 'done' }, [], null, 'x']) {
     t.absent(ev(data).ok, JSON.stringify(data))
   }
+})
+
+test('event: seen.changed', (t) => {
+  const ev = (data) => validateEvent({ v: 1, event: 'seen.changed', seq: 1, data })
+  t.ok(ev({}).ok)
+  t.alike(ev({}).value, { v: 1, event: 'seen.changed', seq: 1, data: {} })
+  for (const data of [{ added: 0 }, { group: 'ab'.repeat(32) }, { runId: 1, reason: 'done' }, [], null, 'x', Object.create({ extra: 1 })]) {
+    t.absent(ev(data).ok, JSON.stringify(data))
+  }
+  t.absent(validateEvent({ v: 1, event: 'seen.changed', seq: 1 }).ok, 'missing data')
 })
