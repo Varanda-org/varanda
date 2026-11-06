@@ -216,6 +216,20 @@ test('a second run is byte-identical; any byte change changes the version', (t) 
   t.not(readWorker(dist).version, v2, 'template byte changes the version')
 })
 
+test('a version.json in dist is not precached and does not change the release id', (t) => {
+  const plain = makeDist()
+  quiet(() => finishWeb(plain))
+  const dist = makeDist()
+  fs.writeFileSync(path.join(dist, 'version.json'), '{"commit":"0123456789abcdef"}\n')
+  quiet(() => finishWeb(dist))
+  const sw1 = fs.readFileSync(path.join(dist, 'sw.js'))
+  const { version, precache } = readWorker(dist)
+  t.absent(precache.some((e) => e.url === '/version.json'), 'not precached')
+  t.is(version, readWorker(plain).version, 'same release id as without the file')
+  quiet(() => finishWeb(dist))
+  t.ok(sw1.equals(fs.readFileSync(path.join(dist, 'sw.js'))), 'second run byte-identical')
+})
+
 test('finishWeb refuses an incomplete export', (t) => {
   for (const missing of ['index.html', 'varanda-node.js', 'manifest.webmanifest', BUNDLE.slice(1)]) {
     const dist = makeDist()
@@ -390,7 +404,8 @@ test('/varanda-node.js: network first, cached copy on HTML, 404 or offline', asy
 
 test('bypassed requests are never intercepted', async (t) => {
   const { w } = await installed()
-  for (const url of [ORIGIN + '/varanda.json', ORIGIN + '/sw.js', ORIGIN + '/seeder', ORIGIN + '/seeder/x', 'https://other.test' + BUNDLE]) {
+  for (const url of [ORIGIN + '/varanda.json', ORIGIN + '/sw.js', ORIGIN + '/seeder', ORIGIN + '/seeder/x',
+    ORIGIN + '/version.json', ORIGIN + '/version.json?x=1', 'https://other.test' + BUNDLE]) {
     t.absent((await dispatch(w, url)).responded, url)
   }
   for (const url of [ORIGIN + '/.well-known/assetlinks.json', ORIGIN + '/.well-known/apple-app-site-association']) {
@@ -935,4 +950,66 @@ test('notificationclick: a DM wake focuses the app and posts varanda-dm-open', a
   // Extra fields are not a DM wake: nothing is posted.
   t.ok(await click(w, { kind: 'dm-wake', actor: ACTOR }))
   t.is(mine.messages.length, 1)
+})
+
+test('push: an invite drop shows its own title and fixed sentence; anything more is the fallback', async (t) => {
+  const w = renderedWorker()
+  const shown = await push(w, pushData({ v: 1, kind: 'invite-drop' }))
+  t.is(shown.title, 'Chegou um convite pra sua varanda')
+  t.is(shown.options.body, 'Escolha com carinho quem você quer chamar: alguém próximo, que faz falta na conversa.')
+  t.is(shown.options.icon, '/icon-192.png')
+  t.is(shown.options.tag, 'varanda-invite-drop')
+  t.is(shown.options.renotify, false)
+  t.alike(plain(shown.options.data), { kind: 'invite-drop' })
+  const bads = [
+    { v: 1, kind: 'invite-drop', actor: ACTOR },
+    { v: 1, kind: 'invite-drop', body: 'Ana chamou você' },
+    { v: 1, kind: 'invite-drop', recipient: RECIPIENT },
+    { v: 1, kind: 'invite-drop', grant: 'g1' },
+    { v: 2, kind: 'invite-drop' },
+    { kind: 'invite-drop' },
+    { v: 1, kind: 'invite' }
+  ]
+  for (const bad of bads) {
+    const fallback = await push(w, pushData(bad))
+    t.is(fallback.title, 'Varanda', JSON.stringify(bad))
+    t.is(fallback.options.body, FALLBACK, JSON.stringify(bad))
+    t.alike(plain(fallback.options.data), {})
+  }
+
+  // The other kinds keep the Varanda title.
+  t.is((await push(w, pushData({ v: 1, kind: 'dm-wake' }))).title, 'Varanda')
+  t.is((await push(w, pushData(valid()))).title, 'Varanda')
+})
+
+test('notificationclick: an invite drop focuses the app and posts varanda-invite-open', async (t) => {
+  const w = renderedWorker()
+  const mine = fakeWindow(ORIGIN + '/')
+  w.windows = [mine]
+  t.ok(await click(w, { kind: 'invite-drop' }), 'closed')
+  t.is(mine.focused, 1)
+  t.alike(plain(mine.messages), [{ type: 'varanda-invite-open' }])
+  t.alike(w.opened, [])
+
+  const fresh = renderedWorker()
+  t.ok(await click(fresh, { kind: 'invite-drop' }))
+  t.alike(fresh.opened, ['/?aviso=convite'])
+
+  const stuck = renderedWorker()
+  const refusing = fakeWindow(ORIGIN + '/')
+  refusing.focus = async () => { throw new Error('InvalidAccessError') }
+  stuck.windows = [refusing]
+  t.ok(await click(stuck, { kind: 'invite-drop' }))
+  t.alike(stuck.opened, ['/?aviso=convite'])
+  t.alike(refusing.messages, [])
+
+  // Extra fields never navigate to the notice and never post.
+  t.ok(await click(w, { kind: 'invite-drop', actor: ACTOR }))
+  t.is(mine.messages.length, 1)
+  const extra = renderedWorker()
+  await click(extra, { kind: 'invite-drop', recipient: RECIPIENT })
+  await click(extra, { kind: 'invite-drop', ref: REF })
+  // An old worker's generic notification (data {}) still opens the root.
+  await click(extra, {})
+  t.alike(extra.opened, ['/', '/', '/'])
 })

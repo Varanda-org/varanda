@@ -129,6 +129,7 @@ test('invite.sign', (t) => {
   t.absent(isMutating('invite.sign'))
   ok(t, 'invite.sign', base, base)
   ok(t, 'invite.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  ok(t, 'invite.sign', { ...base, action: 'summary' })
   bad(t, 'invite.sign', {})
   for (const k of ['action', 'nonce']) {
     const p = { ...base }
@@ -138,8 +139,9 @@ test('invite.sign', (t) => {
   // The caller never chooses the member, the association or the bytes.
   for (const k of ['member', 'association', 'payload', 'bytes', 'key', 'email']) {
     bad(t, 'invite.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+    bad(t, 'invite.sign', { ...base, action: 'summary', [k]: 'ab'.repeat(32) }, 'summary extra ' + k)
   }
-  for (const action of ['revoke', 'ISSUE', '', null, 1]) bad(t, 'invite.sign', { ...base, action }, 'action ' + action)
+  for (const action of ['revoke', 'read', 'SUMMARY', 'ISSUE', '', null, 1]) bad(t, 'invite.sign', { ...base, action }, 'action ' + action)
   for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
     bad(t, 'invite.sign', { ...base, nonce: n }, 'nonce ' + n)
   }

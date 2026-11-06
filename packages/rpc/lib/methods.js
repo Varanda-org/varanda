@@ -205,7 +205,7 @@ const TERMS_VERSION_MAX = 9999
 
 // invite.sign (docs/rpc.md 5.30). Duplicated from @varanda/core
 // lib/invite.js (ACTIONS), which this package cannot import.
-const INVITE_ACTIONS = ['issue']
+const INVITE_ACTIONS = ['issue', 'summary']
 
 const isInviteAction = (v) => typeof v === 'string' && INVITE_ACTIONS.includes(v)
 

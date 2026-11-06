@@ -15,8 +15,9 @@ export const NOTICES_INCOMPLETE_TEXT = 'Alguns avisos ainda podem chegar.'
 export const SEEN_STORAGE_KEY = 'varanda-notices-seen'
 // Five minutes between polls while the tab is on screen.
 export const NOTICES_POLL_MS = 300000
-// Wait for A Rua's first reads and Espiadinha's warm read so short seeder sockets rarely overlap.
-export const NOTICES_FIRST_READ_MS = 6000
+// Quiet time before the hidden first read: after the boot reads and after
+// Espiadinha's warm read, so short seeder sockets rarely overlap.
+export const NOTICES_FIRST_READ_QUIET_MS = 4000
 export const SEEN_MAX = 2048
 // Pages read on their own after a short one with a cursor, per user action.
 export const NOTICES_AUTO_PAGES = 4

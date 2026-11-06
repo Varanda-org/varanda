@@ -118,10 +118,42 @@ test('absolute URLs are https and on the allowlist', (t) => {
   for (const u of found) {
     const url = new URL(u, 'http://invalid.example')
     t.is(url.protocol, 'https:', 'https: ' + u)
+    // bora.varanda.app is the hosted app the buttons open: only the root, so no tracking parameter gets in
     const ok = url.host === 'varanda.app' ||
+      u === 'https://bora.varanda.app/' ||
       (url.host === 'github.com' &&
         (url.pathname === '/Varanda-org/varanda' || url.pathname.startsWith('/Varanda-org/varanda/')))
     t.ok(ok, 'allowed: ' + u)
+  }
+})
+
+test('calls to action open the hosted install', (t) => {
+  const links = html.match(/href="https:\/\/bora\.varanda\.app\/"/g) || []
+  t.is(links.length, 2, 'exactly two links to the hosted app, each next to a limited-seats notice')
+  for (const id of ['cta-inicio', 'cta-gente']) {
+    const tag = new RegExp('<a\\s[^>]*\\bid="' + id + '"[^>]*>').exec(html)
+    t.ok(tag, 'link #' + id)
+    const a = attrs(tag[0])
+    t.is(a.href, 'https://bora.varanda.app/', id + ' opens the hosted app')
+    t.ok(a['aria-describedby'] && html.includes('id="' + a['aria-describedby'] + '"'), id + ' describedby points to an existing id')
+  }
+  t.ok(html.split('Vagas limitadas nesta abertura').length - 1 >= 2, 'the limited-seats notice appears at least twice')
+})
+
+test('copy rules', (t) => {
+  const banned = [
+    'impossível de derrubar', 'ninguém pode censurar', '100% segura', 'totalmente anônima',
+    'sem moderação', 'nunca sai do ar', 'avisaremos', 'piloto em breve', 'repassa',
+    'como num torrent', 'utm_', 'instagram.com', 'mailto:', 'target=',
+    // the page cannot promise more than the app does when it is full (apps/app/src/account.js)
+    'código aberto', 'notificaremos', 'avisa na hora', 'muito perto de abrir', 'nada sobre você fica guardado'
+  ]
+  const lower = html.toLowerCase()
+  for (const b of banned) t.absent(lower.includes(b), 'absent: ' + b)
+  t.absent(html.includes('\u2014'), 'no em dash in index.html')
+  t.absent(css.includes('\u2014'), 'no em dash in styles.css')
+  for (const id of ['inicio', 'por-que', 'a-varanda', 'como-e-usar', 'o-que-muda', 'gente', 'perguntas', 'para-desenvolvedores', 'contato', 'privacidade', 'termos']) {
+    t.ok(html.includes('id="' + id + '"'), 'id exists: ' + id)
   }
 })
 
@@ -191,11 +223,10 @@ test('size budgets', (t) => {
   }
 })
 
-// The app preview: each mock screen is one role="img" element, labelled, with
-// nothing focusable or interactive inside (spans, divs and inline SVG only).
+// The page has no role="img" today. If one comes back, it needs a label and
+// nothing focusable or interactive inside.
 test('every role="img" element has a label and contains nothing interactive', (t) => {
   const starts = [...html.matchAll(/<([a-z0-9]+)\s[^>]*\brole="img"[^>]*>/g)]
-  t.ok(starts.length > 0, 'role="img" elements found (' + starts.length + ')')
   for (const m of starts) {
     const a = attrs(m[0])
     t.ok(a['aria-label'] && a['aria-label'].trim() !== '', 'aria-label on ' + m[0].slice(0, 60))

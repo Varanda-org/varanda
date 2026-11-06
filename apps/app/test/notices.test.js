@@ -15,7 +15,7 @@ test('the fixed texts are the approved Portuguese', async (t) => {
     NOTICES_INCOMPLETE_TEXT,
     SEEN_STORAGE_KEY,
     NOTICES_POLL_MS,
-    NOTICES_FIRST_READ_MS,
+    NOTICES_FIRST_READ_QUIET_MS,
     SEEN_MAX
   } = await load()
   t.is(EMPTY_TITLE, 'Ninguém novo por aqui')
@@ -27,7 +27,7 @@ test('the fixed texts are the approved Portuguese', async (t) => {
   t.is(NOTICES_INCOMPLETE_TEXT, 'Alguns avisos ainda podem chegar.')
   t.is(SEEN_STORAGE_KEY, 'varanda-notices-seen')
   t.is(NOTICES_POLL_MS, 300000)
-  t.is(NOTICES_FIRST_READ_MS, 6000)
+  t.is(NOTICES_FIRST_READ_QUIET_MS, 4000)
   t.is(SEEN_MAX, 2048)
 })
 
