@@ -22,16 +22,21 @@
 // be sent; it goes to /account/report/anexo with its digest in the signed
 // statement. Over the cap it is left out and the sheet says so. A public
 // group post keeps pointing at the post, with no image attached.
+// A voice note goes the same way, never re-encoded: its local copy is read
+// as it is (media/reportAudio.*.js), checked with audioBounds and the same
+// cap, and the sheet plays it (VoiceBubble) before anything is sent. In the
+// background the player is released with the preview.
 
 import { useEffect, useRef, useState } from 'react'
 import { AppState, Image, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { accountStatus } from '../account'
-import { ANEXO_NOTICE, ANEXO_TOO_BIG, ANEXO_UNAVAILABLE, NOT_LINKED_MESSAGE, REASONS, TEXT_MAX, anexoRef, prepareAnexo, submitDmReport, submitReport, validateReportText, wellFormed } from '../report'
+import { ANEXO_AUDIO_NOTICE, ANEXO_AUDIO_TOO_BIG, ANEXO_AUDIO_UNAVAILABLE, ANEXO_NOTICE, ANEXO_TOO_BIG, ANEXO_UNAVAILABLE, NOT_LINKED_MESSAGE, REASONS, TEXT_MAX, anexoRef, isAudioItem, prepareAnexo, submitDmReport, submitReport, validateReportText, wellFormed } from '../report'
 import { createChatMedia } from '../media/chatMedia'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { encodeReportImage } from '../media/reportImage'
+import { readReportAudio } from '../media/reportAudio'
 import { LABELS as DM_LABELS } from '../dm'
 import { countChars } from '../format'
 import { whoOf } from '../who'
@@ -40,6 +45,7 @@ import { Btn, ErrorText, Field, Label, Soft, errorText, useAction } from '../ui'
 import { HelpNote } from '../ui/Help'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
+import { VoiceBubble } from '../ui/VoiceBubble'
 import { type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 
@@ -48,7 +54,9 @@ const PUBLIC_GROUP_NOTICE = 'Este grupo é público. Ao enviar, a moderação da
 
 const NOT_HOSTED_MESSAGE = 'Nesta versão, denúncias só pela versão web no site da associação.'
 const ANEXO_LOADING = 'preparando a imagem…'
+const ANEXO_AUDIO_LOADING = 'preparando o áudio…'
 const NOTHING_TO_SEND = 'Sem texto e sem a imagem, esta mensagem não pode ser denunciada.'
+const NOTHING_TO_SEND_AUDIO = 'Sem texto e sem o áudio, esta mensagem não pode ser denunciada.'
 
 // Its own source, apart from the chat's: reading for a report never evicts
 // or re-keys what the bubbles show. clearChatMedia (lock, sign-out) clears it
@@ -118,14 +126,16 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
     setAnexo({ status: 'loading' })
     prepareAnexo(ref, {
       source: (r) => reportMedia.sourceFor(r, { node, identity: member, display }),
-      encode: encodeReportImage
+      encode: encodeReportImage,
+      readBytes: readReportAudio
     }).then((out) => { if (live) setAnexo(out) })
     return () => { live = false }
   }, [open, target, whole, hosted, member, awake])
 
-  // The thumbnail is the re-encoded JPEG itself, not the chat's copy.
+  // The thumbnail is the re-encoded JPEG itself, not the chat's copy. A voice
+  // note has none: it plays from the local copy whose bytes are sent.
   useEffect(() => {
-    if (anexo.status !== 'ok') {
+    if (anexo.status !== 'ok' || anexo.kind === 'audio') {
       setPreview(null)
       return
     }
@@ -148,6 +158,8 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
   // dm.reportSign needs a quote or an image: a photo-only message whose
   // image cannot go has nothing to report.
   const nothing = isDm && quote === '' && attached === null && anexo.status !== 'loading'
+  // Known before the bytes are read, so the loading line names it too.
+  const audio = anexo.kind === 'audio' || (ref !== null && isAudioItem(ref.item))
   const shownName = target === null
     ? ''
     : displayText(whoOf({ name: target.name, username: target.username }).title)
@@ -219,17 +231,20 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
             <View style={styles.quoteBox}>
               <Label>Texto que será enviado</Label>
               <Text style={styles.quote}>{quote === '' ? '(sem texto)' : displayText(quote, { multiline: true })}</Text>
+              {anexo.status === 'ok' && anexo.kind === 'audio'
+                ? <VoiceBubble state='ok' uri={anexo.uri} durationMs={anexo.ms} />
+                : null}
               {preview !== null
                 ? <Image source={{ uri: preview.uri }} style={[styles.thumb, { aspectRatio: preview.width / preview.height }]} resizeMode='contain' accessibilityLabel='Imagem que será enviada' />
                 : null}
             </View>
             )
           : null}
-        {anexo.status === 'loading' ? <Soft>{ANEXO_LOADING}</Soft> : null}
-        {anexo.status === 'ok' ? <Soft>{ANEXO_NOTICE}</Soft> : null}
-        {anexo.status === 'over' ? <Soft>{ANEXO_TOO_BIG}</Soft> : null}
-        {anexo.status === 'unavailable' ? <Soft>{ANEXO_UNAVAILABLE}</Soft> : null}
-        {nothing ? <ErrorText>{NOTHING_TO_SEND}</ErrorText> : null}
+        {anexo.status === 'loading' ? <Soft>{audio ? ANEXO_AUDIO_LOADING : ANEXO_LOADING}</Soft> : null}
+        {anexo.status === 'ok' ? <Soft>{audio ? ANEXO_AUDIO_NOTICE : ANEXO_NOTICE}</Soft> : null}
+        {anexo.status === 'over' ? <Soft>{audio ? ANEXO_AUDIO_TOO_BIG : ANEXO_TOO_BIG}</Soft> : null}
+        {anexo.status === 'unavailable' ? <Soft>{audio ? ANEXO_AUDIO_UNAVAILABLE : ANEXO_UNAVAILABLE}</Soft> : null}
+        {nothing ? <ErrorText>{audio ? NOTHING_TO_SEND_AUDIO : NOTHING_TO_SEND}</ErrorText> : null}
         {postMode && inGroup ? <Soft>{target.private === true ? PRIVATE_GROUP_NOTICE : PUBLIC_GROUP_NOTICE}</Soft> : null}
         {isDm ? <Soft>{DM_LABELS.reportNote}</Soft> : null}
         {!postMode && !isDm ? <Soft>Para denunciar o nome, a bio ou a foto do perfil, escolha a conta toda.</Soft> : null}

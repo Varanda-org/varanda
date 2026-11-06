@@ -190,7 +190,7 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   const handle = await api.start({ association, seederUrl })
   t.alike(Object.keys(handle).sort(), ['close', 'connect', 'follows', 'identity', 'media'], 'only connect, close, follows, identity and media are exposed')
   t.ok(Object.isFrozen(handle) && Object.isFrozen(handle.identity) && Object.isFrozen(handle.media) && Object.isFrozen(handle.follows), 'the handle, identity, media and follows are frozen')
-  t.alike(Object.keys(handle.identity).sort(), ['complete', 'lock', 'reset', 'signOut', 'status', 'unlock'], 'no getter, no signer')
+  t.alike(Object.keys(handle.identity).sort(), ['addPasskey', 'bindPasskey', 'cancelRecovery', 'complete', 'finishRecovery', 'lock', 'makeRecoveryCode', 'reset', 'signOut', 'status', 'unlock', 'unlockWithCode', 'unlockWrapped'], 'no getter, no signer')
   t.alike(Object.keys(handle.media), ['upload', 'putDm', 'readDm', 'readGroup'], 'media: post upload, DM media put and read (rpc.md 5.88), private group media read')
   t.alike(Object.keys(handle.follows).sort(), ['confirmLegacy', 'legacy'])
   const badKeys = await errorOf(handle.follows.confirmLegacy('x'))
@@ -204,6 +204,8 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   t.is(first.prf, 'yes')
   t.is(first.rpId, 'localhost')
   t.is(first.passkeyKnown, false)
+  t.is(first.pending, false)
+  t.alike(first.refused, [])
   t.absent('rpIdError' in first)
   const locked = await errorOf(web.request('identity.create'))
   t.is(locked && locked.code, 'USAGE')
@@ -220,6 +222,7 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   t.is(afterNoPrf.unlocked, false)
   t.is(afterNoPrf.exists, false)
   t.is(afterNoPrf.passkeyKnown, false)
+  t.alike(afterNoPrf.refused, [{ userId: hex(unusable.userId), code: 'NO_PRF', cleaned: false, created: true }], 'the refused passkey, without its id')
 
   // PRF only enabled on create: pending, then complete() fetches it.
   fake.createMode = 'pending'
@@ -232,6 +235,7 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
     'the unusable passkey is excluded from the next creation')
   t.alike(await pendingCall, { pending: true }, 'a creation without the PRF output is pending')
   t.is((await handle.identity.status()).unlocked, false, 'still locked while pending')
+  t.is((await handle.identity.status()).pending, true)
 
   // A second creation while one is pending excludes the pending passkey
   // (and, when the manager creates another anyway, replaces it).

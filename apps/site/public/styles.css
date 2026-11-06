@@ -435,6 +435,23 @@ h2::after {
 .prosa { margin-top: 28px; }
 .prosa p + p { margin-top: 16px; }
 
+/* Termos e privacidade (termos/ e privacidade/, gerados por scripts/render-legal.js) */
+.legal__topo { padding: 18px 0; }
+.legal { padding: 16px 0 72px; }
+.legal h1 { font-size: clamp(2.25rem, 8vw, 3.25rem); }
+.legal__aviso {
+  margin-top: 24px;
+  padding: 16px 20px;
+  border-radius: 16px;
+  background: var(--morno);
+  border-left: 6px solid var(--verde);
+  font-weight: 600;
+}
+.legal__intro { margin-top: 16px; color: var(--texto-suave); }
+.legal__texto h2 { margin-top: 44px; font-size: 1.5rem; }
+.legal__texto h2::after { width: 40px; height: 4px; margin-top: 10px; }
+.legal__texto p { margin-top: 14px; }
+
 .passos {
   margin: 40px 0 0;
   padding: 0;

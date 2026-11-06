@@ -45,6 +45,9 @@ const native = `
 import { Directory, Paths } from 'expo-file-system'
 export function uploadDirectory () { return new Directory(Paths.cache, 'varanda-upload') }
 `
+const audio = `
+export function sweepVoiceCache () { globalThis.__voiceSweeps = (globalThis.__voiceSweeps || 0) + 1 }
+`
 const installation = `
 export function rpIdOf () { return 'varanda.test' }
 export function installationOrigin () { return 'https://varanda.test' }
@@ -62,6 +65,7 @@ const stubs = {
   'expo-file-system': url(${JSON.stringify(fileSystem)}),
   '../identity': url(${JSON.stringify(identity)}),
   './native': url(${JSON.stringify(native)}),
+  '../media/audio': url(${JSON.stringify(audio)}),
   '../installation': url(${JSON.stringify(installation)}),
   '@varanda/rpc': url(${JSON.stringify(rpc)})
 }
@@ -187,6 +191,15 @@ test('creating the handle sweeps leftover read files, nothing else', async (t) =
   for (const uri of others) box().files.delete(uri)
 })
 
+test('creating the handle sweeps a voice recording left in the cache', async (t) => {
+  const { webNodeHandle } = await load()
+  const before = globalThis.__voiceSweeps || 0
+  let asked = false
+  webNodeHandle(async () => { asked = true; return {} })
+  t.is(globalThis.__voiceSweeps, before + 1, 'sweepVoiceCache runs once per handle')
+  t.absent(asked, 'before any request')
+})
+
 test('read refuses an answer that is not a read-dir name', async (t) => {
   const { webNodeHandle } = await load()
   for (const name of ['../x.bin', 'AB'.repeat(16) + '.bin', '/abs/' + 'a'.repeat(32) + '.bin', null]) {
@@ -228,4 +241,18 @@ test('web: mediaOf gives the facade the same shape, bytes in the page', async (t
   t.alike(Object.keys(uploadOnly), ['upload'], 'a missing facade method is an absent capability')
   const dmOnly = mediaOf({ readDm: facade.readDm })
   await t.exception.all(dmOnly.read({ kind: 'group', diary: 'd', item: {} }), /mídia inválida/)
+})
+
+test('a voice note keeps its duration and kind across the IPC; an image request keeps its exact keys', async (t) => {
+  const { webNodeHandle } = await load()
+  const { request, calls } = mockRequest(() => ({ ok: true }))
+  const { media } = webNodeHandle(request)
+  await media.putDm({ bytes: new Uint8Array([1]), mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice' })
+  await media.upload({ bytes: new Uint8Array([2]), mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice', sealed: true })
+  await media.upload({ bytes: new Uint8Array([3]), mime: 'image/png', width: 2, height: 2, ms: 9, kind: 'other' })
+  const put = calls.find((c) => c.method === 'dm.putMedia')
+  const ups = calls.filter((c) => c.method === 'media.uploadFile')
+  t.alike(put.params, { name: put.params.name, mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice' })
+  t.alike(ups[0].params, { name: ups[0].params.name, mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice', sealed: true })
+  t.alike(ups[1].params, { name: ups[1].params.name, mime: 'image/png', width: 2, height: 2 })
 })

@@ -13,6 +13,7 @@ const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const test = require('brittle')
 const { patchAppDelegate, patchBuildGradle, patchGradleProperties } = require('../plugins/hardening-patches')
+const { patchInfoPlist, patchAndroidManifest, MICROPHONE_USAGE } = require('../plugins/with-hardening')
 
 const root = path.join(__dirname, '..')
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8')
@@ -22,6 +23,11 @@ const APP_DELEGATE = 'ios/Varanda/AppDelegate.swift'
 const BUILD_GRADLE = 'android/app/build.gradle'
 const GRADLE_PROPERTIES = 'android/gradle.properties'
 const PRIVACY_MANIFEST = 'ios/Varanda/PrivacyInfo.xcprivacy'
+const INFO_PLIST = 'ios/Varanda/Info.plist'
+const ANDROID_MANIFEST = 'android/app/src/main/AndroidManifest.xml'
+const MIC_PLIST = '<key>NSMicrophoneUsageDescription</key><string>' + MICROPHONE_USAGE + '</string>'
+const RECORD_AUDIO_LINE = '<uses-permission android:name="android.permission.RECORD_AUDIO"/>'
+const CAMERA_REMOVED = '<uses-permission android:name="android.permission.CAMERA" tools:node="remove"/>'
 
 test('the patches change nothing in the committed files', (t) => {
   t.is(patchAppDelegate(read(APP_DELEGATE)), read(APP_DELEGATE))
@@ -62,6 +68,41 @@ test('a changed template fails instead of dropping an edit', (t) => {
   t.exception(() => patchGradleProperties([]), /ABI list/)
 })
 
+test('the microphone is declared the same way everywhere, the camera stays removed', (t) => {
+  const app = JSON.parse(read('app.json')).expo
+  t.is(app.ios.infoPlist.NSMicrophoneUsageDescription, MICROPHONE_USAGE)
+  t.ok(app.android.permissions.includes('android.permission.RECORD_AUDIO'))
+  t.absent(app.android.permissions.includes('android.permission.CAMERA'))
+  t.ok(compact(read(INFO_PLIST)).includes(MIC_PLIST), INFO_PLIST)
+  t.ok(read(ANDROID_MANIFEST).includes(RECORD_AUDIO_LINE), ANDROID_MANIFEST)
+  t.ok(read(ANDROID_MANIFEST).includes(CAMERA_REMOVED), ANDROID_MANIFEST)
+})
+
+test('the plugin restores the microphone and the camera removal', (t) => {
+  t.alike(patchInfoPlist({ CFBundleName: 'Varanda' }), { CFBundleName: 'Varanda', NSMicrophoneUsageDescription: MICROPHONE_USAGE })
+  const once = patchAndroidManifest({
+    manifest: {
+      $: { 'xmlns:android': 'http://schemas.android.com/apk/res/android' },
+      'uses-permission': [
+        { $: { 'android:name': 'android.permission.INTERNET' } },
+        { $: { 'android:name': 'android.permission.CAMERA' } },
+        { $: { 'android:name': 'android.permission.RECORD_AUDIO', 'tools:node': 'remove' } }
+      ]
+    }
+  })
+  const perms = once.manifest['uses-permission'].map((item) => item.$)
+  t.is(once.manifest.$['xmlns:tools'], 'http://schemas.android.com/tools')
+  t.alike(perms, [
+    { 'android:name': 'android.permission.INTERNET' },
+    { 'android:name': 'android.permission.CAMERA', 'tools:node': 'remove' },
+    { 'android:name': 'android.permission.RECORD_AUDIO' }
+  ])
+  const twice = patchAndroidManifest(JSON.parse(JSON.stringify(once)))
+  t.alike(twice, once, 'idempotent')
+  const empty = patchAndroidManifest({ manifest: {} })
+  t.is(empty.manifest['uses-permission'].length, 2)
+})
+
 // The Vitrine (src/vitrine/enabled.js) swaps the node for fixtures. A release
 // bundle has __DEV__ false, and no build config may set the opt-in either.
 test('a release build cannot turn on the Vitrine', async (t) => {
@@ -93,4 +134,8 @@ test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
     t.is(fs.readFileSync(path.join(dir, file), 'utf8'), read(file), file)
   }
   t.is(compact(fs.readFileSync(path.join(dir, PRIVACY_MANIFEST), 'utf8')), compact(read(PRIVACY_MANIFEST)), PRIVACY_MANIFEST)
+  t.ok(compact(fs.readFileSync(path.join(dir, INFO_PLIST), 'utf8')).includes(MIC_PLIST), INFO_PLIST + ' declares the microphone')
+  const manifest = fs.readFileSync(path.join(dir, ANDROID_MANIFEST), 'utf8')
+  t.ok(manifest.includes(RECORD_AUDIO_LINE), ANDROID_MANIFEST + ' asks for RECORD_AUDIO')
+  t.ok(manifest.includes(CAMERA_REMOVED), ANDROID_MANIFEST + ' removes CAMERA')
 })

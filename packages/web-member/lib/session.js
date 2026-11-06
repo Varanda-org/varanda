@@ -270,7 +270,7 @@
 // unlock with a dm-key). reset() removes the local store and the dm kv.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, FEED_INCOMPLETE_MAX, mediaBounds } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 const {
   validRecordCopy,
   validateRecord,
@@ -278,7 +278,10 @@ const {
   MEDIA_BLOCK_BYTES,
   MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES,
-  MAX_MEDIA_DIMENSION
+  MAX_MEDIA_DIMENSION,
+  AUDIO_MIME,
+  MAX_AUDIO_MS,
+  MAX_AUDIO_BYTES
 } = require('@varanda/core/lib/records')
 const { formatEvent, key8 } = require('@varanda/core/lib/sync-format')
 const { safe } = require('@varanda/core/lib/safe')
@@ -286,6 +289,7 @@ const { UsageError } = require('@varanda/core/lib/errors')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { signReport, signDmReport } = require('@varanda/core/lib/report')
 const { signTerms } = require('@varanda/core/lib/terms')
+const { signRecovery, blobHashOf } = require('@varanda/core/lib/recovery-proof')
 const { signInvite } = require('@varanda/core/lib/invite')
 const { signAge } = require('@varanda/core/lib/age')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
@@ -2287,6 +2291,38 @@ function createBrowserSession ({
       return { signature }
     }),
 
+    // Signs a recovery-entry request with the in-memory key (docs/rpc.md
+    // 5.90), exactly like terms.sign: not a diary write, no append, no
+    // network, and the result never carries the payload, the blob or a key.
+    // The session fills in member and association and hashes the blob
+    // itself, so the caller can never sign a hash of something else. It uses
+    // only the diary key pair, never the group PRF, which native installs do
+    // not hold.
+    'recovery.sign': serial(async ({ action, nonce, kind, lookupId, blob }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      const put = action === 'put'
+      const list = action === 'list'
+      const fields = {
+        action,
+        nonce,
+        member: own,
+        association: cfg.association,
+        kind: list ? '' : kind,
+        lookupId: list ? '' : lookupId,
+        blobHash: put ? blobHashOf({ kind, lookupId, blob }) : ''
+      }
+      const signature = signRecovery(fields, keyPair)
+      return { signature }
+    }),
+
     // Signs the signup-invite request with the in-memory key (docs/rpc.md
     // 5.30), exactly like terms.sign. The session fills in member and
     // association.
@@ -3087,8 +3123,13 @@ function createBrowserSession ({
   // image under a fresh key (group-media sealMedia), stores only the
   // ciphertext and returns the private item, the one place its key leaves
   // the node.
-  function mediaUpload ({ bytes, mime, width, height, sealed = false, onProgress } = {}) {
+  // A voice note (group chats only) is { bytes, mime: 'audio/mp4', width: 0,
+  // height: 0, ms, kind: 'voice', sealed? }: its bytes must pass audioBounds
+  // (audio only, no video track) and the result is an audio descriptor, or
+  // a private item with plainMime 'audio/mp4' when sealed.
+  function mediaUpload ({ bytes, mime, width, height, ms, kind, sealed = false, onProgress } = {}) {
     if (sealed !== true && sealed !== false) throw new TypeError(BAD_MEDIA_ARGS)
+    if (kind !== undefined || mime === AUDIO_MIME) return voiceUpload({ bytes, mime, width, height, ms, kind, sealed, onProgress })
     const maxBytes = sealed ? MAX_SEALED_MEDIA_PLAIN_BYTES : MAX_MEDIA_ITEM_BYTES
     if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > maxBytes) throw new TypeError(BAD_MEDIA_ARGS)
     if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
@@ -3131,11 +3172,58 @@ function createBrowserSession ({
     })({})
   }
 
+  // -> the voice note's container duration in ms, or null. The caller's ms
+  // must be within AUDIO_MS_TOLERANCE of it; what gets stored is the
+  // container's, so a file never claims another length. The bytes are the
+  // sender's own recording, still with its udta and meta (stripAudioMetadata
+  // removes them next), so only here is metadata tolerated.
+  function voiceArgsMs ({ bytes, mime, width, height, ms, kind }) {
+    if (!(kind === 'voice' && mime === AUDIO_MIME && width === 0 && height === 0 && isIntIn(ms, 1, MAX_AUDIO_MS) &&
+      bytes instanceof Uint8Array && bytes.byteLength >= 1 && bytes.byteLength <= MAX_AUDIO_BYTES)) return null
+    const audio = audioBounds(bytes, { metadata: true })
+    return audio !== null && Math.abs(ms - audio.ms) <= AUDIO_MS_TOLERANCE ? audio.ms : null
+  }
+
+  // mediaUpload's voice note path, on the same chain and gate. What is
+  // hashed, sealed and stored is the stripped copy: no recording time, no
+  // device tags.
+  function voiceUpload ({ bytes, mime, width, height, ms: given, kind, sealed, onProgress }) {
+    const ms = voiceArgsMs({ bytes, mime, width, height, ms: given, kind })
+    const copy = ms === null ? null : stripAudioMetadata(bytes)
+    if (copy === null) throw new TypeError(BAD_MEDIA_ARGS)
+    const progress = typeof onProgress === 'function' ? (fraction) => { try { onProgress(fraction) } catch {} } : noop
+    return serial(async (_, epoch) => {
+      await requireUnlocked()
+      if (mediaKeyPair === null) throw new UsageError(store.LOCKED)
+      if (!(await identity()).memberCert) throw new Error(member.GENESIS_REQUIRED)
+      if (sealed) return sealedUpload(copy, { mime, width: 0, height: 0, ms, epoch, progress })
+      const subtle = globalThis.crypto && globalThis.crypto.subtle
+      if (!subtle) throw new Error('WebCrypto indisponível')
+      const sha256 = b4a.toString(new Uint8Array(await subtle.digest('SHA-256', copy)), 'hex')
+      progress(0.25)
+      const blocks = []
+      for (let at = 0; at < copy.byteLength; at += MEDIA_BLOCK_BYTES) {
+        blocks.push(copy.subarray(at, Math.min(copy.byteLength, at + MEDIA_BLOCK_BYTES)))
+      }
+      const { core, declared } = await withStore((c) => member.mediaPrepare(c))
+      if (!declared) {
+        await ensureCaughtUp(epoch)
+        const { seq } = await withStore((c) => member.declareMediaCore(c, core))
+        wrote(seq)
+        await pushAfterWrite()
+      }
+      const descriptor = await withStore((c) => member.mediaCommitAudio(c, { blocks, sha256, ms }))
+      progress(0.75)
+      progress(1)
+      return descriptor
+    })({})
+  }
+
   // On mediaUpload's chain: the plaintext copy is wiped once sealed.
-  async function sealedUpload (copy, { mime, width, height, epoch, progress }) {
+  async function sealedUpload (copy, { mime, width, height, ms = 0, epoch, progress }) {
     let sealedItem
     try {
-      sealedItem = sealMedia(copy, { plainMime: mime, w: width, h: height, ms: 0 })
+      sealedItem = sealMedia(copy, { plainMime: mime, w: width, h: height, ms })
     } finally {
       copy.fill(0)
     }
@@ -3158,19 +3246,30 @@ function createBrowserSession ({
   // storage core): sealed and put on the anonymous blob channel by the dm
   // engine -> the media item. The native IPC dm.putMedia reads its cache
   // file and calls this same function. Nothing about the bytes is logged.
-  function dmPutMedia ({ bytes, mime, width, height } = {}) {
-    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > MAX_MEDIA_ITEM_BYTES) throw new TypeError(BAD_MEDIA_ARGS)
-    if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
-    if (!isIntIn(width, 1, MAX_MEDIA_DIMENSION) || !isIntIn(height, 1, MAX_MEDIA_DIMENSION)) throw new TypeError(BAD_MEDIA_ARGS)
-    const copy = new Uint8Array(bytes.byteLength)
-    copy.set(bytes)
+  // A voice note is { bytes, mime: 'audio/mp4', width: 0, height: 0, ms,
+  // kind: 'voice' }, checked with audioBounds.
+  function dmPutMedia ({ bytes, mime, width, height, ms, kind } = {}) {
+    const voice = kind !== undefined || mime === AUDIO_MIME
+    let copy
+    if (voice) {
+      ms = voiceArgsMs({ bytes, mime, width, height, ms, kind })
+      // The note is sealed without its recording time or device tags.
+      copy = ms === null ? null : stripAudioMetadata(bytes)
+      if (copy === null) throw new TypeError(BAD_MEDIA_ARGS)
+    } else {
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > MAX_MEDIA_ITEM_BYTES) throw new TypeError(BAD_MEDIA_ARGS)
+      if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
+      if (!isIntIn(width, 1, MAX_MEDIA_DIMENSION) || !isIntIn(height, 1, MAX_MEDIA_DIMENSION)) throw new TypeError(BAD_MEDIA_ARGS)
+      copy = new Uint8Array(bytes.byteLength)
+      copy.set(bytes)
+    }
     return (async () => {
       try {
         if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
         const own = await serial(() => requireDm())({})
         const pair = keyPair
         if (pair === null) throw new UsageError(store.LOCKED)
-        return await dmEngine.putMedia(own, pair, { bytes: copy, mime, width, height })
+        return await dmEngine.putMedia(own, pair, voice ? { bytes: copy, mime, width: 0, height: 0, ms } : { bytes: copy, mime, width, height })
       } catch (err) {
         copy.fill(0)
         throw toRpcError(err, reportInternal)
@@ -3223,11 +3322,13 @@ function createBrowserSession ({
         if (plain === null) throw new UsageError(GROUP_MEDIA_UNAVAILABLE)
         // The bytes decide, not the item: a member could seal anything under
         // an image label, and the page decodes what it gets.
-        if (mediaBounds(plain, it.plainMime) === null) {
+        const voice = it.plainMime === AUDIO_MIME
+        const audio = voice && plain.byteLength <= MAX_AUDIO_BYTES ? audioBounds(plain) : null
+        if (voice ? audio === null : mediaBounds(plain, it.plainMime) === null) {
           plain.fill(0)
           throw new UsageError(GROUP_MEDIA_UNAVAILABLE)
         }
-        return { bytes: plain, mime: it.plainMime, w: it.w, h: it.h }
+        return voice ? { bytes: plain, mime: it.plainMime, w: 0, h: 0, ms: audio.ms } : { bytes: plain, mime: it.plainMime, w: it.w, h: it.h }
       } catch (err) {
         throw toRpcError(err, reportInternal)
       }

@@ -4,7 +4,9 @@
 
 Uma página estática em `apps/site/public`, publicada na GitHub Pages em https://varanda.app/ (e, antes do domínio, em https://varanda-org.github.io/varanda/). Não há JavaScript, formulários, cookies nem rastreadores na página. A página convida para https://bora.varanda.app/ pelos dois botões principais, avisa que as vagas desta abertura são limitadas e não sabe se o teto de contas já fechou; não há lista de espera neste site. A própria GitHub Pages registra o endereço IP de cada visitante por segurança (documentação da GitHub, "What is GitHub Pages?", seção "Data collection").
 
-`apps/site/public` é a raiz publicável. `apps/site/artwork` (fontes do logotipo, `og.html`, `screens.md`) e `apps/site/scripts` (`serve.js`, `render-assets.js`) são fontes e nunca são enviados.
+Duas páginas geradas publicam o texto que o app apresenta para aceite: https://varanda.app/termos/ (Termos de Uso) e https://varanda.app/privacidade/ (Política de Privacidade, o endereço de política de privacidade nas lojas de aplicativos). Veja "Termos e privacidade" abaixo.
+
+`apps/site/public` é a raiz publicável. `apps/site/artwork` (fontes do logotipo, `og.html`, `screens.md`) e `apps/site/scripts` (`serve.js`, `render-assets.js`, `render-legal.js`) são fontes e nunca são enviados.
 
 ## Como ver localmente
 
@@ -29,10 +31,22 @@ O que conferir:
 - As perguntas frequentes abrem e fecham sem JavaScript (`details` e `summary`).
 - No celular o menu do header não aparece e o rodapé tem os links.
 - A nota "Abriu pelo Instagram? Se a entrada não funcionar, abra o link no Chrome ou no Safari." aparece na abertura.
+- http://127.0.0.1:4173/termos/ e http://127.0.0.1:4173/privacidade/ abrem com o estilo do site, a versão e a nota de revisão jurídica no topo, e os links das seções `#privacidade` e `#termos` da página inicial levam até elas (também com `--prefix /varanda`).
 
 ## Como atualizar
 
 Edite os arquivos em `apps/site/public` e abra um pull request. A publicação roda sozinha quando o pull request entra em `main`: o fluxo `.github/workflows/site.yml` roda no push para `main` e no disparo manual (os dois restritos a `main`), envia só `apps/site/public` com `actions/upload-pages-artifact` v5.0.0 e publica com `actions/deploy-pages` v5.0.1 (ambos fixados por SHA). Não há arquivo `CNAME`: o domínio próprio fica nas configurações de Pages do repositório.
+
+## Termos e privacidade
+
+`apps/site/public/termos/index.html` e `apps/site/public/privacidade/index.html` são gerados de `apps/app/src/legal.js` (`TERMS`, `PRIVACY`, `LEGAL_VERSION`, `LEGAL_DATE`, `REVIEW_NOTE`) e nunca se editam à mão. O site não tem texto jurídico próprio: as páginas mostram a mesma versão que o app apresenta para aceite, com a nota de revisão jurídica, e o aceite continua no app.
+
+```sh
+node apps/site/scripts/render-legal.js          # regenera as duas páginas
+node apps/site/scripts/render-legal.js --check  # verifica sem gravar
+```
+
+Quem muda `legal.js` (uma nova versão dos Termos) roda o script no mesmo PR. `apps/site/test/legal.test.js` falha quando as páginas não batem com `legal.js`, e também confere nelas as regras da página inicial: sem JavaScript, mesma política de conteúdo (CSP), links locais relativos e só URLs absolutas de varanda.app e do repositório no GitHub. As páginas entram no ar com o próximo push para `main`, como o resto do site, independentemente da implantação do app: por um instante a versão do site pode estar à frente da que o app hospedado mostra.
 
 ## Vagas e lotação
 
@@ -99,6 +113,8 @@ dig +short www.varanda.app CNAME                     # varanda-org.github.io.
 curl -sI https://varanda.app/                        # 200, server: GitHub.com
 curl -sI https://www.varanda.app/                    # 301 para https://varanda.app/
 curl -sI https://varanda.app/assets/og-varanda.jpg   # 200, image/jpeg
+curl -sI https://varanda.app/privacidade/            # 200, text/html
+curl -sI https://varanda.app/termos/                 # 200, text/html
 ```
 
 - Pendente até a publicação: abra o site no celular.
