@@ -8,9 +8,11 @@
 //   { connect(send, { onClose }), close(), identity, media, follows }:
 //
 //   identity.status()   -> Promise<{ exists, publicKey, legacy, unlocked, synced,
-//                          webauthn, prf: 'yes'|'no'|'unknown', rpId,
-//                          rpIdError?, passkeyKnown, resumed }>
-//   identity.unlock({ register = false } = {})
+//                          webauthn, prf, hybrid, platform, signal (each
+//                          'yes'|'no'|'unknown'), rpId, rpIdError?,
+//                          passkeyKnown, resumed, pending,
+//                          refused: [{ userId, code, cleaned, created }] }>
+//   identity.unlock({ register = false, any = false, phone = false } = {})
 //                       -> Promise<{ publicKey, created, sessionSaved? } | { pending: true }>
 //   identity.complete() -> Promise<{ publicKey, created, sessionSaved? }>
 //   identity.lock()     -> Promise   (the keys are zero-filled; reads still
@@ -64,11 +66,28 @@
 // call ended a passkey creation. lock(), reset() and close() cancel a
 // ceremony in flight (its result is zeroed and it rejects CANCELLED); one
 // unlock/complete runs at a time (LOCKED). Errors carry a `.code`
-// (UNSUPPORTED, NO_PRF, CANCELLED, EXISTS, WEBAUTHN, MISMATCH, LOCKED) and a
-// pt-BR message; a NO_PRF from a passkey that was created anyway (register,
-// or complete) also carries `.credentialId` and `.userId` (hex), and that
-// passkey is excluded from the next creation; MISMATCH (the stored diary belongs to another key) also
-// carries `.legacy` (a store from before the passkeys: only reset() leaves it).
+// (UNSUPPORTED, NO_PRF, NOT_SYNCED, CANCELLED, EXISTS, WEBAUTHN, MISMATCH,
+// LOCKED) and a pt-BR message; a NO_PRF or NOT_SYNCED from a passkey that
+// exists anyway also carries `.credentialId` and `.userId` (hex), and that
+// passkey is excluded from every later creation; when the create ceremony of
+// this page load refused it (never at 'concluir' or at sign-in, when it may
+// already be an identity elsewhere) the browser is asked to drop it
+// (passkey.forgetCredential) and `.cleaned` says whether that call went
+// through (not that the passkey is gone). MISMATCH (the stored
+// diary belongs to another key) also carries `.legacy` (a store from before
+// the passkeys: only reset() leaves it).
+// unlock({ any: true }) signs in with any Varanda passkey (a discoverable
+// get), for a stored record whose passkey is gone; unlock({ phone: true })
+// narrows the hints to ['hybrid'] (the phone QR) for that call only.
+// The kv entry 'passkeyAttempts' ({ v: 1, rpId, pending, refused }, no
+// secret) keeps the pending creation and the refused passkeys across
+// reloads: refused ids stay excluded from creation, never from sign-in,
+// except a creation of this page refused NOT_SYNCED (it never signs in). A
+// sign-in with another passkey moves the pending creation to SUPERSEDED.
+// Each refused entry says whether this page created it (`created`). A new
+// creation replaces a pending one only once it is bound; if its install
+// fails, the old pending stays and the new id is refused INSTALL_FAILED.
+// reset() drops it; signOut() keeps it.
 //
 // Stay signed in until 'Sair': after a successful unlock (and only then: a
 // MISMATCH or any other failure saves nothing) the 32-byte PRF output is
@@ -109,6 +128,9 @@ const { createSessionStore } = require('../lib/session-store')
 const DB_NAME = 'varanda-node'
 const LOCK_NAME = 'varanda-node'
 const PASSKEY_KEY = 'passkey'
+const PASSKEY_ATTEMPTS_KEY = 'passkeyAttempts'
+const REFUSED_MAX = 32
+const PHONE_HINTS = ['hybrid']
 const NONCE_BYTES = 32
 const SIGNED_OUT_KEY = 'signedOut'
 const SESSION_DB = 'varanda-session'
@@ -150,6 +172,61 @@ function passkeyRecord (value) {
   if (typeof value.rpId !== 'string' || value.rpId === '') return null
   const userId = typeof value.userId === 'string' ? value.userId : null
   return { v: 1, credentialId: value.credentialId, rpId: value.rpId, userId }
+}
+
+function nonEmptyString (value) {
+  return typeof value === 'string' && value !== ''
+}
+
+// The check passkey.fromBase64Url applies: a stored id that fails it would
+// make every later creation (its excludeCredentials) throw before WebAuthn
+// until a reset, so the loader drops it.
+function credentialIdOk (value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]+$/.test(value) && value.length % 4 !== 1
+}
+
+// A passkey this page created and refused as bound to one device: only its
+// entry keeps it from signing in, so the cap and reset() never drop it.
+function isDeviceBound (e) {
+  return e.code === 'NOT_SYNCED' && e.created === true
+}
+
+// Caps refused at REFUSED_MAX, evicting the oldest other entries first.
+// Device-bound entries are never evicted, even past the cap: each one took a
+// creation by the person, so the list stays small.
+function capRefused (refused) {
+  if (refused.length <= REFUSED_MAX) return refused
+  const bound = refused.filter(isDeviceBound).length
+  if (bound >= REFUSED_MAX) return refused.filter(isDeviceBound)
+  let drop = refused.length - REFUSED_MAX
+  return refused.filter((e) => {
+    if (drop > 0 && !isDeviceBound(e)) {
+      drop--
+      return false
+    }
+    return true
+  })
+}
+
+// The stored attempts record for this rp.id -> { pending, refused }; a record
+// for another rp.id, or anything malformed, reads as empty.
+function attemptsRecord (value, rpId) {
+  const empty = { pending: null, refused: [] }
+  if (value === null || typeof value !== 'object' || value.v !== 1 || value.rpId !== rpId) return empty
+  let pending = null
+  const p = value.pending
+  if (p !== null && typeof p === 'object' && credentialIdOk(p.credentialId)) {
+    pending = { credentialId: p.credentialId, userId: typeof p.userId === 'string' ? p.userId : null, phone: p.phone === true }
+  }
+  const refused = []
+  if (Array.isArray(value.refused)) {
+    for (const e of value.refused) {
+      if (e === null || typeof e !== 'object' || !credentialIdOk(e.credentialId) || !nonEmptyString(e.code)) continue
+      // An entry from before `created` existed reads as not created here.
+      refused.push({ credentialId: e.credentialId, userId: typeof e.userId === 'string' ? e.userId : null, code: e.code, cleaned: e.cleaned === true, created: e.created === true })
+    }
+  }
+  return { pending, refused: capRefused(refused) }
 }
 
 function credentialsContainer () {
@@ -195,15 +272,21 @@ function createIdentity (node, storage, sessionStore, idb) {
   }
   let known = null // the stored record, for this rp.id only
   let stored = null // the kv entry as last read or written (any rp.id)
-  let pending = null // { credentialId, userId } of a creation without PRF yet
+  // { credentialId, userId, phone } of a creation without PRF yet, and the
+  // passkeys Varanda refused ({ credentialId, userId, code, cleaned, created }): both
+  // mirrored in kv 'passkeyAttempts' so a reload still excludes them.
+  let pending = null
+  let refused = []
   // The passkey the person chose when the stored diary turned out to be
   // another identity's (MISMATCH): after "recomeçar" (reset) the next
   // "entrar" asks for that passkey only, not any Varanda passkey.
   let chosen = null
-  // Passkeys created here that gave no usable PRF (memory only): excluded
-  // from the next creation so the manager does not offer them again.
-  const unusable = new Set()
+  // Credential ids register() returned since this start(): only those may be
+  // dropped from the manager, never one restored from kv after a reload.
+  const createdHere = new Set()
+  let persisting = Promise.resolve()
   let generation = 0
+  let resets = 0 // reset() emptied pending and refused (but device-bound): never refill them
   let finishing = Promise.resolve() // the post-ceremony part (or the resume) in flight
   let busy = false
   let resumed = false // the current unlock came from the stored session
@@ -224,6 +307,31 @@ function createIdentity (node, storage, sessionStore, idb) {
     return codedError('CANCELLED', passkey.MESSAGES.CANCELLED)
   }
 
+  // Writes the current attempts (null when there are none) after any write
+  // already queued. Never rejects: a failed write keeps the memory copy.
+  function persist () {
+    persisting = persisting.then(() => {
+      const value = pending === null && refused.length === 0
+        ? null
+        : { v: 1, rpId, pending, refused }
+      return storage.writeJson(PASSKEY_ATTEMPTS_KEY, value)
+    }).catch(noop)
+    return persisting
+  }
+
+  function addRefused (entry) {
+    // A device-bound refusal is never downgraded: a later NO_PRF (or any other
+    // code) for the same passkey would otherwise let it sign in once the
+    // manager starts returning PRF, binding the account to one device.
+    const prev = refused.find((e) => e.credentialId === entry.credentialId)
+    if (prev && prev.code === 'NOT_SYNCED' && prev.created === true) {
+      entry = { ...entry, userId: typeof entry.userId === 'string' && entry.userId !== '' ? entry.userId : prev.userId, code: 'NOT_SYNCED', created: true, cleaned: prev.cleaned === true || entry.cleaned === true }
+    }
+    refused = refused.filter((e) => e.credentialId !== entry.credentialId)
+    refused.push(entry)
+    refused = capRefused(refused)
+  }
+
   // Publishes the passkey of a successful unlock: the in-memory record and
   // the kv entry. Any failure (the write, or a lock/close meanwhile) puts the
   // previous record and pending creation back, in memory and in kv, so a
@@ -239,6 +347,14 @@ function createIdentity (node, storage, sessionStore, idb) {
       await storage.writeJson(PASSKEY_KEY, record)
       if (gen !== generation) throw cancelled()
       stored = record
+      refused = refused.filter((e) => e.credentialId !== record.credentialId)
+      // Unlocking with another passkey orphans the pending creation: keep it
+      // refused (excluded from creation, named for deletion) instead of
+      // forgetting it was made here.
+      if (prevPending !== null && prevPending.credentialId !== record.credentialId) {
+        addRefused({ credentialId: prevPending.credentialId, userId: prevPending.userId, code: 'SUPERSEDED', cleaned: false, created: true })
+      }
+      await persist()
     } catch (err) {
       if (known === record) {
         known = prevKnown
@@ -371,85 +487,194 @@ function createIdentity (node, storage, sessionStore, idb) {
   // Runs one ceremony: `ceremony()` must call navigator.credentials first
   // thing (the ../lib/passkey.js functions do), so nothing here awaits
   // before it.
-  async function run (ceremony, after) {
+  // `onFail` (the refusal bookkeeping: refused entry, persist, drop request)
+  // runs inside the locked section, so a new ceremony is LOCKED until it has
+  // settled and no overlapping persist can commit a transient state. The
+  // ceremony itself still starts before the first await (user activation).
+  async function run (ceremony, after, onFail) {
     const err = precheck()
     if (err !== null) throw err
     busy = true
     const gen = generation
     try {
-      const result = await ceremony(credentialsContainer())
-      if (gen !== generation) {
-        if (result.prf) result.prf.fill(0)
-        throw cancelled()
+      try {
+        const result = await ceremony(credentialsContainer())
+        if (gen !== generation) {
+          if (result.prf) result.prf.fill(0)
+          throw cancelled()
+        }
+        const settling = Promise.resolve(after(gen, result))
+        finishing = settling.then(noop, noop)
+        return await settling
+      } catch (failure) {
+        if (typeof onFail !== 'function') throw failure
+        const noting = Promise.resolve().then(() => onFail(failure))
+        finishing = noting.then(noop, noop)
+        throw await noting
       }
-      const settling = Promise.resolve(after(gen, result))
-      finishing = settling.then(noop, noop)
-      return await settling
     } finally {
       busy = false
     }
   }
 
   function excluded () {
-    const ids = new Set(unusable)
+    const ids = new Set(refused.map((e) => e.credentialId))
     if (known !== null) ids.add(known.credentialId)
     if (pending !== null) ids.add(pending.credentialId)
     return [...ids]
   }
 
-  // A NO_PRF from a passkey that now exists in the manager: remember it and
-  // name it on the error (the page tells the person which one to delete,
-  // label 'Varanda ' + userId.slice(0, 6)).
-  function noteUnusable (err, credentialId, userId) {
-    if (!err || err.code !== 'NO_PRF' || typeof credentialId !== 'string') return err
-    unusable.add(credentialId)
+  // A NO_PRF or NOT_SYNCED from a passkey that now exists in the manager:
+  // remember it as refused and name it on the error (the page tells the
+  // person which one it was, label 'Varanda ' + userId.slice(0, 6)). Only
+  // the create ceremony itself (mayDrop) asks the manager to drop it: later
+  // the passkey may be an identity elsewhere. `created` (a
+  // creation by this page, even before a reload) is kept on the entry: the
+  // screen names for deletion only passkeys Varanda made.
+  async function noteUnusable (err, credentialId, userId, mayDrop, created, epoch) {
+    if (!err || (err.code !== 'NO_PRF' && err.code !== 'NOT_SYNCED') || typeof credentialId !== 'string') return err
+    // A reset since the ceremony began emptied pending and refused: never
+    // refill them with a passkey from before it.
+    if (epoch !== resets) return err
+    // The pending creation, or a passkey already recorded as made here, was
+    // created by this page even when it fails at sign-in.
+    const madeHere = created === true ||
+      (pending !== null && pending.credentialId === credentialId) ||
+      refused.some((e) => e.credentialId === credentialId && e.created)
+    const entry = { credentialId, userId: typeof userId === 'string' ? userId : null, code: err.code, cleaned: false, created: madeHere }
+    addRefused(entry)
     if (pending !== null && pending.credentialId === credentialId) pending = null
     err.credentialId = credentialId
     err.userId = userId
+    await persist()
+    const isKnown = known !== null && known.credentialId === credentialId
+    if (mayDrop === true && createdHere.has(credentialId) && !isKnown) {
+      entry.cleaned = (await passkey.forgetCredential(globalThis, { rpId, credentialId })) === true
+      err.cleaned = entry.cleaned
+      if (entry.cleaned) await persist()
+    }
     return err
   }
 
-  function unlock ({ register = false } = {}) {
+  function unlock ({ register = false, any = false, phone = false } = {}) {
+    const hints = phone === true ? PHONE_HINTS : undefined
+    const epoch = resets
     if (register) {
+      let deviceBound = null
+      // Ids this request asks the manager to leave alone (the stored, the
+      // pending and every refused passkey, any of which may be an account
+      // somewhere): if an authenticator ignores the list and hands one back,
+      // it is never treated as made here, so it is never asked to be dropped.
+      const excludedNow = excluded()
+      const wasExcluded = new Set(excludedNow)
       return run(
-        (credentials) => passkey.register(credentials, { rpId, excludeCredentialIds: excluded() }),
+        (credentials) => passkey.register(credentials, { rpId, excludeCredentialIds: excludedNow, hints }),
         async (gen, result) => {
+          const bound = refused.find((e) => e.credentialId === result.credentialId && isDeviceBound(e))
+          if (bound !== undefined) {
+            // An authenticator that ignored excludeCredentials handed back a
+            // passkey refused here as bound to one device, whose data no
+            // longer says so: it never becomes an identity, and its entry stays.
+            if (result.prf) result.prf.fill(0)
+            deviceBound = codedError('NOT_SYNCED', passkey.MESSAGES.NOT_SYNCED)
+            deviceBound.credentialId = result.credentialId
+            // The stored entry names the passkey's own user handle; the
+            // creation's user id is the one this request asked for.
+            deviceBound.userId = bound.userId !== null ? bound.userId : result.userId
+            deviceBound.cleaned = false
+            throw deviceBound
+          }
+          if (!wasExcluded.has(result.credentialId)) createdHere.add(result.credentialId)
           // A pending creation this one replaces can no longer be completed
           // here: its passkey is orphaned in the manager, never offered again.
-          const superseded = pending !== null && pending.credentialId !== result.credentialId ? pending.credentialId : null
+          const old = pending !== null && pending.credentialId !== result.credentialId ? pending : null
+          const supersede = () => addRefused({ credentialId: old.credentialId, userId: old.userId, code: 'SUPERSEDED', cleaned: false, created: true })
           if (result.pending === true) {
-            pending = { credentialId: result.credentialId, userId: result.userId }
-            if (superseded !== null) unusable.add(superseded)
+            if (old !== null) supersede()
+            pending = { credentialId: result.credentialId, userId: result.userId, phone: phone === true }
+            await persist()
+            // A lock/signOut/reset during the write: the caller must not be
+            // told to 'concluir' (reset already dropped this pending).
+            if (gen !== generation) throw cancelled()
             return { pending: true }
           }
-          const out = await finish(gen, result.prf, { credentialId: result.credentialId, userId: result.userId, created: true })
-          if (superseded !== null) unusable.add(superseded)
-          return out
-        }).catch((err) => { throw noteUnusable(err, err && err.credentialId, err && err.userId) })
+          if (old === null) return finish(gen, result.prf, { credentialId: result.credentialId, userId: result.userId, created: true })
+          // The old pending is replaced only once the new passkey is bound:
+          // until then 'concluir' must still reach it.
+          try {
+            const out = await finish(gen, result.prf, { credentialId: result.credentialId, userId: result.userId, created: true })
+            supersede()
+            await persist()
+            return out
+          } catch (err) {
+            if (epoch === resets) {
+              if (known !== null && known.credentialId === result.credentialId) {
+                // Bound, then cancelled while saving the session: the old
+                // pending is gone for good.
+                supersede()
+              } else {
+                addRefused({ credentialId: result.credentialId, userId: result.userId, code: 'INSTALL_FAILED', cleaned: false, created: true })
+              }
+              await persist()
+            }
+            throw err
+          }
+        },
+        async (err) => {
+          if (err === deviceBound) return err
+          const id = err && err.credentialId
+          // A handed-back excluded id was not made by this request: it may be
+          // an account, so it is neither dropped nor named as made here.
+          const madeNow = typeof id === 'string' && !wasExcluded.has(id)
+          if (madeNow && (err.code === 'NO_PRF' || err.code === 'NOT_SYNCED')) createdHere.add(id)
+          if (err && typeof id === 'string' && !madeNow) err.created = false
+          return noteUnusable(err, id, err && err.userId, true, madeNow, epoch)
+        })
     }
+    const allow = any === true ? [] : (known ? [known.credentialId] : (chosen ? [chosen] : []))
+    let deviceBound = null
     return run(
-      (credentials) => passkey.signIn(credentials, { rpId, allowCredentialIds: known ? [known.credentialId] : (chosen ? [chosen] : []) }),
+      (credentials) => passkey.signIn(credentials, { rpId, allowCredentialIds: allow, hints }),
       (gen, result) => {
+        const bound = refused.find((e) => e.credentialId === result.credentialId && e.code === 'NOT_SYNCED' && e.created)
+        if (bound !== undefined) {
+          // This page created it and refused it as bound to one device: it
+          // never became an identity, so signing in with it must not make it
+          // one. Passkeys made elsewhere keep signing in.
+          result.prf.fill(0)
+          deviceBound = codedError('NOT_SYNCED', passkey.MESSAGES.NOT_SYNCED)
+          deviceBound.credentialId = result.credentialId
+          deviceBound.userId = result.userHandle !== null ? result.userHandle : bound.userId
+          deviceBound.cleaned = false
+          throw deviceBound
+        }
         const userId = result.userHandle !== null
           ? result.userHandle
           : (known && known.credentialId === result.credentialId ? known.userId : null)
         return finish(gen, result.prf, { credentialId: result.credentialId, userId, created: false })
-      }).catch((err) => {
-      // A chosen passkey without PRF: name it like a fresh one (userId from
-      // its userHandle, or the stored record when it is that passkey).
-      const id = err && err.credentialId
-      const userId = err && err.userId ? err.userId : (known && known.credentialId === id ? known.userId : null)
-      throw noteUnusable(err, id, userId)
-    })
+      },
+      async (err) => {
+        if (err === deviceBound) return err
+        // A chosen passkey without PRF: name it like a fresh one (userId from
+        // its userHandle, or the stored record when it is that passkey). It is
+        // refused for creation only, and never dropped from the manager.
+        const id = err && err.credentialId
+        const userId = err && err.userId ? err.userId : (known && known.credentialId === id ? known.userId : null)
+        return noteUnusable(err, id, userId, false, false, epoch)
+      })
   }
 
   function complete () {
     if (pending === null) return Promise.reject(codedError('CANCELLED', 'nenhuma criação de passkey pendente'))
     const target = pending
+    const epoch = resets
+    const hints = target.phone === true ? PHONE_HINTS : undefined
     return run(
-      (credentials) => passkey.completeRegistration(credentials, { rpId, credentialId: target.credentialId }),
-      (gen, result) => finish(gen, result.prf, { credentialId: result.credentialId, userId: target.userId, created: true }))
-      .catch((err) => { throw noteUnusable(err, target.credentialId, target.userId) })
+      (credentials) => passkey.completeRegistration(credentials, { rpId, credentialId: target.credentialId, hints }),
+      (gen, result) => finish(gen, result.prf, { credentialId: result.credentialId, userId: target.userId, created: true }),
+      // Never dropped from the manager: between creation and 'concluir' the
+      // synced passkey may already have become the account on another device.
+      (err) => noteUnusable(err, target.credentialId, target.userId, false, true, epoch))
   }
 
   async function status () {
@@ -459,8 +684,13 @@ function createIdentity (node, storage, sessionStore, idb) {
       webauthn: support.webauthn && rpIdError === null && credentialsContainer() !== null,
       prf: support.prf,
       rpId,
+      hybrid: support.hybrid,
+      platform: support.platform,
+      signal: support.signal,
       passkeyKnown: known !== null,
-      resumed: resumed && stored.unlocked === true
+      resumed: resumed && stored.unlocked === true,
+      pending: pending !== null,
+      refused: refused.map(({ userId, code, cleaned, created }) => ({ userId, code, cleaned, created }))
     }
     if (rpIdError !== null) out.rpIdError = rpIdError.message
     return out
@@ -512,16 +742,30 @@ function createIdentity (node, storage, sessionStore, idb) {
   }
 
   async function reset () {
+    // Stale answers of a ceremony in flight are cancelled at once. Then the
+    // attempts record goes first, and its failure is reported: a reset that
+    // cannot forget the refused passkeys leaves them, the record and the
+    // unlocked node as they were. Device-bound refusals stay: they describe
+    // this browser's password managers, not the account, and only they keep
+    // such a passkey from signing in.
     invalidate()
+    const kept = refused.filter(isDeviceBound)
+    const clearing = persisting.then(() => storage.writeJson(PASSKEY_ATTEMPTS_KEY, kept.length === 0 ? null : { v: 1, rpId, pending: null, refused: kept }))
+    persisting = clearing.catch(noop)
+    await clearing
+    resets++
     resumed = false
     known = null
     pending = null
+    refused = kept
     stored = null
     await finishing
     const forgotten = await forgetSignedOut()
     await node.reset()
     // readJson parses the stored 'null' back to null: no record.
     await storage.writeJson(PASSKEY_KEY, null)
+    // Only the kept device-bound refusals remain (null when none).
+    await persist()
     if (!forgotten) throw incomplete()
   }
 
@@ -531,6 +775,9 @@ function createIdentity (node, storage, sessionStore, idb) {
       stored = await storage.readJson(PASSKEY_KEY)
       const record = passkeyRecord(stored)
       known = record !== null && record.rpId === rpId ? record : null
+      const attempts = attemptsRecord(await storage.readJson(PASSKEY_ATTEMPTS_KEY), rpId)
+      pending = attempts.pending
+      refused = attempts.refused
     },
     resume,
     invalidate,

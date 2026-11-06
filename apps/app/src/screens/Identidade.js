@@ -9,8 +9,8 @@
 // concluir a criação when the PRF only arrives on a second ceremony,
 // recomeçar for an account of another identity), a blocking notice when the
 // browser cannot derive it (no PRF), steps and 'tentar de novo' when the
-// chosen passkey's manager gives no PRF (src/passkeyTrouble.js), and after a
-// successful unlock the diary
+// chosen passkey gives no PRF or will not sync (src/passkeyTrouble.js), and
+// after a successful unlock the diary
 // is created if missing and a once sync runs (on a second device it brings
 // the certificate and the posts back from the seeder). The app's in-app web
 // node (the native web kind) shows the same cards with device wording (no
@@ -40,7 +40,7 @@ import { deviceRandomBytes, newLinkSecret } from '../appLinkSecret'
 import { HELP, SHORT } from '../help'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
-import { BROWSER_TEXT, RETRY_LABEL, UNUSABLE_TITLE, deleteStep, unusableSteps } from '../passkeyTrouble'
+import { BROWSER_TEXT, KNOWN_LOST_TEXT, MISSED_TEXT, NONE_TEXT, NOT_SYNCED_TITLE, OTHER_PASSKEY_LABEL, PHONE_HINT, PHONE_LABEL, PHONE_SIGNIN_HINT, PHONE_SIGNIN_LABEL, RETRY_LABEL, SYNC_ADVICE, UNUSABLE_TITLE, notSyncedSteps, unusableSteps } from '../passkeyTrouble'
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
 import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
@@ -799,21 +799,36 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   const [pkPending, setPkPending] = useState(false)
   const [pkError, setPkError] = useState('')
   const [pkNote, setPkNote] = useState('')
-  // null, or { created } once a ceremony reported NO_PRF, until 'tentar de
-  // novo'. staleIds: the user ids of every unusable passkey this page created
-  // (they stay in the password manager, so they outlive a retry).
+  // null, or { created, notSynced, cleaned } once a ceremony reported NO_PRF
+  // or NOT_SYNCED, until 'tentar de novo'. staleIds: user ids of unusable
+  // passkeys the manager still holds (a cleaned one was already sent for
+  // removal). Only failures seen in this page session: a stored refusal is
+  // never a reason to name a passkey, because it may have become the account
+  // on another device or browser since.
   const [noPrf, setNoPrf] = useState(null)
   const [staleIds, setStaleIds] = useState([])
   // null, or { legacy } once a ceremony reported MISMATCH (the stored diary
   // belongs to another identity): offers "recomeçar".
   const [mismatch, setMismatch] = useState(null)
   const [confirmReset, setConfirmReset] = useState(false)
+  // false, true, or { phone: true }. The phone flag has to live here: the
+  // EXISTS confirm is a second click, and that click must repeat the phone
+  // ceremony rather than a plain create.
   const [confirmCreate, setConfirmCreate] = useState(false)
   const [showKey, setShowKey] = useState(false)
+  // Fallback only when status.pending is missing (an older node script).
   const [awaitingComplete, setAwaitingComplete] = useState(false)
   // A passkey chosen at Entrar failed: a creation awaiting 'concluir' may be
   // gone, so 'Criar passkey' is offered beside it (no effect when none awaits).
   const [createToo, setCreateToo] = useState(false)
+  // The known passkey did not appear. A cancel forgets nothing.
+  const [knownLost, setKnownLost] = useState(false)
+  // The web cannot tell a dismissed sheet from a missing passkey (both are
+  // NotAllowedError): one miss only offers another passkey; the lost card
+  // waits for that second try to fail too.
+  const [missedOnce, setMissedOnce] = useState(false)
+  // NONE on Entrar with no known passkey: a notice, not an error line.
+  const [noCredential, setNoCredential] = useState(false)
   // The once sync after an unlock (node.passkey.recovering, shared by every
   // mounted Identidade): no instance sends a request while it runs (any
   // member request would preempt and end it); the one that unlocked reads
@@ -907,18 +922,45 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   }
   // created: the failing passkey was made on this page (Criar or concluir),
   // so it can be named for deletion; one chosen at Entrar may be the account.
-  const pkFail = (err, created = false) => {
+  // Every sign-in path (doUnlock, onOtherPasskey, the phone sign-in) passes
+  // false, so a NOT_SYNCED there shows the card without growing staleIds.
+  // plain: Entrar offered only the known passkey. A cancel there, or NONE,
+  // means that passkey did not appear. Nothing is reset or forgotten.
+  const pkFail = (err, created = false, mode = false) => {
     const code = err && err.code
-    if (code === 'NO_PRF') {
+    if (code === 'NO_PRF' || code === 'NOT_SYNCED') {
       const id = err.userId
-      if (created && typeof id === 'string') setStaleIds((ids) => ids.includes(id) ? ids : [...ids, id])
+      const cleaned = err.cleaned === true
+      // Both codes: a cleaned id was already handed to the manager, so the
+      // list grows only for passkeys the person may still have to remove.
+      // err.created false: the authenticator handed back a passkey that was
+      // not made by this request (it may be an account): never named.
+      if (created && err.created !== false && !cleaned && typeof id === 'string') setStaleIds((ids) => ids.includes(id) ? ids : [...ids, id])
       // After a failure at Entrar a pending creation may be gone (that same
       // passkey) or still live (another one): 'Criar passkey' shows beside
       // 'concluir'.
       if (!created) setCreateToo(true)
-      return setNoPrf({ created })
+      return setNoPrf({ created, notSynced: code === 'NOT_SYNCED', cleaned })
     }
     if (code === 'MISMATCH') return setMismatch({ legacy: err.legacy === true })
+    const known = pkStatus !== null && pkStatus.passkeyKnown === true
+    // NONE (Android: no passkey for this site) or a second miss after
+    // 'entrar com outra passkey': the known passkey is gone from here.
+    if (known && (code === 'NONE' || (mode === 'other' && code === 'CANCELLED'))) {
+      setNoCredential(false)
+      setMissedOnce(false)
+      return setKnownLost(true)
+    }
+    // Platform difference, not a capability: Android reports a missing
+    // passkey as NONE, so its CANCELLED is a real cancel; the browser sends
+    // the same NotAllowedError for both.
+    if (known && mode === 'plain' && code === 'CANCELLED' && !NATIVE) return setMissedOnce(true)
+    if (code === 'NONE') {
+      // The notice says to create one here: offer 'Criar passkey' even
+      // beside a pending 'concluir'.
+      setCreateToo(true)
+      return setNoCredential(true)
+    }
     setPkError(errorText(err))
   }
 
@@ -949,8 +991,10 @@ export default function Identidade ({ active, embedded = false, setup = false, v
 
   // The handle's unlock/complete is called synchronously in the click
   // handler: the WebAuthn ceremony needs this click's user activation, so
-  // nothing is awaited before it.
-  const ceremony = (call, created = false, completing = false) => {
+  // nothing is awaited before it. Phone and "another passkey" go through
+  // the same helper, still inside the click.
+  // plain: Entrar with the known credential only.
+  const ceremony = (call, created = false, completing = false, mode = false) => {
     if (!pkStart()) return
     passkey.beginRecovery()
     let pending
@@ -961,30 +1005,76 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           passkey.endRecovery()
           setAwaitingComplete(true)
           setCreateToo(false)
+          // knownLost stays: a replacement that then fails at 'concluir'
+          // must still offer Criar and another passkey.
+          setNoCredential(false)
           return
         }
         setAwaitingComplete(false)
         setCreateToo(false)
         setMismatch(null)
         setNoPrf(null)
+        setStaleIds([])
+        setKnownLost(false)
+        setMissedOnce(false)
+        setNoCredential(false)
         await afterUnlock()
       }, (err) => {
         passkey.endRecovery()
         // The node drops the pending creation only when its own passkey fails.
+        // Older nodes omit status.pending, so this local flag is the fallback.
         if (completing && err && err.code === 'NO_PRF') setAwaitingComplete(false)
-        pkFail(err, created)
+        pkFail(err, created, mode)
       })
       .finally(pkEnd)
   }
 
-  const doUnlock = () => ceremony(() => passkey.unlock({}))
-  const doRegister = () => ceremony(() => passkey.unlock({ register: true }), true)
+  // status.pending is authoritative when the node sends a boolean (it
+  // survives a reload). The local flag covers an older node script.
+  const showComplete = pkStatus !== null && typeof pkStatus.pending === 'boolean'
+    ? pkStatus.pending
+    : awaitingComplete
+  // knownLost offers Criar again even when this device still has a record
+  // of the passkey that just failed to appear.
+  // While 'concluir' waits, a new creation would abandon that passkey.
+  const createFirst = (knownLost && !showComplete) || (pkStatus !== null && !pkStatus.passkeyKnown && (!showComplete || createToo))
+  // Hybrid transport (the phone QR) is a browser capability. Native has no
+  // such sheet: the button is not offered, and no phone ceremony is started.
+  const phoneOk = !NATIVE && pkStatus !== null && pkStatus.hybrid !== 'no'
+  // Offer creation advice only when creation is available, including when
+  // a known passkey is lost and Criar is offered again.
+  const showPhoneHint = phoneOk && createFirst && (pkStatus.platform !== 'yes' || knownLost)
+
+  const doUnlock = () => ceremony(() => passkey.unlock({}), false, false, 'plain')
+  const doRegister = (phone = false) => {
+    // The press event is truthy and is not a phone choice. The flag set when
+    // the EXISTS confirm opened is what the second click has to forward.
+    const usePhone = phone === true || (typeof confirmCreate === 'object' && confirmCreate !== null && confirmCreate.phone === true)
+    ceremony(() => passkey.unlock(usePhone ? { register: true, phone: true } : { register: true }), true)
+  }
   const doComplete = () => ceremony(() => passkey.complete(), true, true)
 
-  const onCreatePress = () => {
-    if (pkStatus !== null && pkStatus.exists && !confirmCreate) return setConfirmCreate(true)
-    doRegister()
+  const onCreatePress = (phone = false) => {
+    const usePhone = phone === true
+    if (pkStatus !== null && pkStatus.exists && !confirmCreate) {
+      setConfirmCreate(usePhone ? { phone: true } : true)
+      return
+    }
+    doRegister(usePhone)
   }
+
+  const onPhonePress = () => {
+    if (!phoneOk) return
+    // A new account on top of an existing diary still needs the EXISTS
+    // confirm. The ceremony itself stays in that later click (doRegister).
+    if (createFirst && pkStatus !== null && pkStatus.exists && !confirmCreate) {
+      onCreatePress(true)
+      return
+    }
+    ceremony(() => passkey.unlock(createFirst ? { register: true, phone: true } : { phone: true }), createFirst)
+  }
+
+  const onOtherPasskey = () => ceremony(() => passkey.unlock({ any: true }), false, false, 'other')
 
   // Only the reset: the next click is 'entrar com a passkey' (a ceremony
   // after an awaited reset would have lost the click's activation).
@@ -1003,6 +1093,10 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       setMismatch(null)
       setAwaitingComplete(false)
       setCreateToo(false)
+      setKnownLost(false)
+      setMissedOnce(false)
+      setStaleIds([])
+      setNoCredential(false)
       setPkNote('A conta antiga foi apagada ' + (NATIVE ? 'deste aparelho' : 'deste navegador') + '. Entre com a passkey para recomeçar.')
     }, pkFail).finally(pkEnd)
   }
@@ -1048,22 +1142,23 @@ export default function Identidade ({ active, embedded = false, setup = false, v
         </Card>
       )
     } else if (browserBlocked) {
-      const stale = deleteStep(staleIds)
+      // No live failure here, so no passkey is named for deletion.
       entrar = (
         <Card>
           <Notice>{NATIVE ? DEVICE_TEXT : BROWSER_TEXT}</Notice>
-          {stale ? <Body>{stale}</Body> : null}
           {blockedInvite}
         </Card>
       )
     } else if (noPrf !== null) {
-      // A passkey was created or chosen but its password manager gives no
-      // PRF. The node keeps a created one out of the next creation, so
-      // another try can save the new one elsewhere.
-      const steps = unusableSteps({ userIds: staleIds, withLink: inviteHere, created: noPrf.created, known: pkStatus.passkeyKnown === true, native: NATIVE })
+      // A passkey was created or chosen but its manager gives no PRF, or the
+      // new one would stay on this device. The node keeps a created one out
+      // of the next creation, so another try can save the new one elsewhere.
+      const steps = noPrf.notSynced === true
+        ? notSyncedSteps({ userIds: staleIds, cleaned: noPrf.cleaned === true, native: NATIVE, withLink: inviteHere, phone: phoneOk })
+        : unusableSteps({ userIds: staleIds, withLink: inviteHere, created: noPrf.created, known: pkStatus.passkeyKnown === true && noPrf.created !== true, native: NATIVE, cleaned: noPrf.cleaned === true })
       entrar = (
         <Card>
-          <Notice>{UNUSABLE_TITLE}</Notice>
+          <Notice>{noPrf.notSynced === true ? NOT_SYNCED_TITLE : UNUSABLE_TITLE}</Notice>
           {steps.map((step) => <Body key={step}>{step}</Body>)}
           <Btn label={RETRY_LABEL} onPress={() => setNoPrf(null)} disabled={pkPending} />
           {blockedInvite}
@@ -1071,16 +1166,16 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       )
     } else {
       // The welcome. The first ceremony leads: 'Criar passkey' for a browser
-      // with no passkey known, 'Entrar com a passkey' otherwise; the other is
-      // secondary. Same handlers as before (doUnlock, onCreatePress, doRegister,
-      // doComplete): only the order and the labels changed.
-      const createFirst = !pkStatus.passkeyKnown && (!awaitingComplete || createToo)
+      // with no passkey known (or one whose known passkey did not appear),
+      // 'Entrar com a passkey' otherwise; the other is secondary. Same
+      // handlers as before (doUnlock, onCreatePress, doRegister, doComplete):
+      // only the order and the labels changed.
       const entrarBtn = (
         <Btn
           label='Entrar com a passkey'
-          secondary={awaitingComplete || createFirst}
+          secondary={showComplete || createFirst}
           onPress={doUnlock}
-          pending={pkPending && !awaitingComplete}
+          pending={pkPending && !showComplete}
           disabled={pkPending}
         />
       )
@@ -1110,6 +1205,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             : null}
           <Body>{WELCOME_TEXT}</Body>
           <Soft>{SHORT.passkeyLoss}</Soft>
+          {createFirst ? <Soft>{SYNC_ADVICE}</Soft> : null}
+          {knownLost ? <Notice>{KNOWN_LOST_TEXT}</Notice> : null}
+          {noCredential ? <Notice>{NONE_TEXT}</Notice> : null}
           {shownMismatch
             ? (
               <>
@@ -1128,7 +1226,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
               </>
               )
             : null}
-          {awaitingComplete
+          {showComplete
             ? (
               <>
                 <Body>{PENDING_TEXT}</Body>
@@ -1137,7 +1235,12 @@ export default function Identidade ({ active, embedded = false, setup = false, v
               )
             : null}
           {createFirst ? criarBtn : null}
+          {missedOnce && !knownLost ? <Soft>{MISSED_TEXT}</Soft> : null}
+          {knownLost || missedOnce ? <Btn label={OTHER_PASSKEY_LABEL} secondary onPress={onOtherPasskey} disabled={pkPending} /> : null}
           {entrarBtn}
+          {phoneOk ? <Btn label={createFirst ? PHONE_LABEL : PHONE_SIGNIN_LABEL} secondary onPress={onPhonePress} disabled={pkPending || confirmCreate !== false} /> : null}
+          {showPhoneHint ? <Soft>{PHONE_HINT}</Soft> : null}
+          {phoneOk ? <Soft>{PHONE_SIGNIN_HINT}</Soft> : null}
           <ErrorText>{pkError}</ErrorText>
           <Notice>{pkNote}</Notice>
           {node.hosted === true ? <Notice>{takeReturnNotice() || ''}</Notice> : null}

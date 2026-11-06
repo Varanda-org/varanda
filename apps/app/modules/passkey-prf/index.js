@@ -3,7 +3,11 @@
 // base64url fields: create(requestJson) and get(requestJson) resolve the
 // registration or authentication response JSON, including
 // clientExtensionResults.prf. Errors carry a `.code`: CANCELLED, EXISTS,
-// UNSUPPORTED, NO_PRF or WEBAUTHN; their native text is never shown.
+// UNSUPPORTED, NO_PRF, NONE, NOT_SYNCED or WEBAUTHN; their native text is
+// never shown.
+// NONE: no passkey for this rp.id on this device.
+// NOT_SYNCED: raised by src/identity.native.js from the create response
+// (passkey not backup eligible), never by the native module.
 //
 // Autolinked from apps/app/modules (expo-modules-autolinking's default
 // nativeModulesDir); src/identity.native.js is its only caller.

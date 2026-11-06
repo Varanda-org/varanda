@@ -111,3 +111,89 @@ test('messages are the web ones', async (t) => {
   const { MESSAGES } = await load()
   t.alike({ ...MESSAGES }, { ...passkey.MESSAGES })
 })
+
+test('excludeCredentials match the web descriptors; no hints on native', async (t) => {
+  const { buildCreateOptions, fromBase64Url } = await load()
+  const userId = fill(32, 0xab)
+  const ids = ['AQID', b64url(fill(16, 0x42))]
+  const native = buildCreateOptions({ rpId: 'varanda.example', userId, challenge: fill(32, 7), excludeCredentialIds: ids })
+  const web = passkey.createOptions({ rpId: 'varanda.example', userId, excludeCredentialIds: ids })
+  t.is(native.excludeCredentials.length, web.excludeCredentials.length)
+  native.excludeCredentials.forEach((d, i) => {
+    t.is(d.type, web.excludeCredentials[i].type)
+    t.alike(fromBase64Url(d.id), new Uint8Array(web.excludeCredentials[i].id))
+  })
+  t.alike(buildCreateOptions({ rpId: 'varanda.example', userId, challenge: fill(32, 7) }).excludeCredentials, [], 'empty by default')
+  t.exception.all(() => buildCreateOptions({ rpId: 'varanda.example', userId, challenge: fill(32, 7), excludeCredentialIds: ['a+b/'] }))
+  t.exception.all(() => buildCreateOptions({ rpId: 'varanda.example', userId, challenge: fill(32, 7), excludeCredentialIds: 'AQID' }))
+  t.absent('hints' in JSON.parse(JSON.stringify(native)), 'no hints key')
+  t.ok('hints' in web, 'the web has hints')
+})
+
+// rpIdHash (32) + flags (1) + signCount (4).
+function authData (flags) {
+  const out = new Uint8Array(37)
+  out.fill(0x11, 0, 32)
+  out[32] = flags
+  return out
+}
+
+function noneAttestation (data) {
+  const text = (s) => [0x60 + s.length, ...Buffer.from(s, 'utf8')]
+  return new Uint8Array([0xa3, ...text('fmt'), ...text('none'), ...text('attStmt'), 0xa0, ...text('authData'), 0x58, data.length, ...data])
+}
+
+const SYNC_FIXTURES = [
+  ['0x1d', { authenticatorData: authData(0x1d) }, 'synced'],
+  ['0x0d', { authenticatorData: authData(0x0d) }, 'synced'],
+  ['0x45', { authenticatorData: authData(0x45) }, 'bound'],
+  ['0x05', { authenticatorData: authData(0x05) }, 'bound'],
+  ['36 bytes', { authenticatorData: new Uint8Array(36) }, 'unknown'],
+  ['ArrayBuffer', { authenticatorData: authData(0x0d).buffer }, 'synced'],
+  ['none attestation, BE set', { attestationObject: noneAttestation(authData(0x5d)) }, 'synced'],
+  ['none attestation, BE clear', { attestationObject: noneAttestation(authData(0x45)) }, 'bound'],
+  ['truncated attestation', { attestationObject: noneAttestation(authData(0x5d)).subarray(0, 20) }, 'unknown'],
+  ['indefinite map', { attestationObject: new Uint8Array([0xbf, 0xff]) }, 'unknown'],
+  ['nothing', {}, 'unknown']
+]
+
+test('both authenticator data parsers agree on one fixture table', async (t) => {
+  const web = require('@varanda/web-member/lib/authenticator-data')
+  const native = await import('../src/authenticatorData.js')
+  for (const [name, input, expected] of SYNC_FIXTURES) {
+    t.is(web.syncState(input), expected, 'web ' + name)
+    t.is(native.syncState(input), expected, 'native ' + name)
+  }
+  const data = authData(0x5d)
+  t.alike(native.authDataFromAttestationObject(noneAttestation(data)), web.authDataFromAttestationObject(noneAttestation(data)))
+  t.alike(native.parseAuthData(data), web.parseAuthData(data))
+})
+
+test('syncStateOf reads create and get response JSON', async (t) => {
+  const { syncStateOf } = await import('../src/authenticatorData.js')
+  const { fromBase64Url } = await load()
+  const create = JSON.stringify({ id: 'AQID', rawId: 'AQID', response: { attestationObject: b64url(noneAttestation(authData(0x45))) } })
+  t.is(syncStateOf(create, fromBase64Url), 'bound', 'create JSON, attestationObject')
+  const createSynced = { response: { attestationObject: b64url(noneAttestation(authData(0x5d))) } }
+  t.is(syncStateOf(createSynced, fromBase64Url), 'synced')
+  const get = { response: { authenticatorData: b64url(authData(0x1d)), attestationObject: b64url(noneAttestation(authData(0x45))) } }
+  t.is(syncStateOf(get, fromBase64Url), 'synced', 'authenticatorData wins')
+  t.is(syncStateOf({ response: { authenticatorData: b64url(authData(0x05)) } }, fromBase64Url), 'bound', 'get JSON')
+  t.is(syncStateOf({ response: {} }, fromBase64Url), 'unknown', 'iOS without attestationObject')
+  t.is(syncStateOf({ response: { authenticatorData: '%%' } }, fromBase64Url), 'unknown')
+  t.is(syncStateOf('not json', fromBase64Url), 'unknown')
+  t.is(syncStateOf(null, fromBase64Url), 'unknown')
+  t.exception.all(() => syncStateOf({}, null))
+})
+
+test('prfOutputPresent', async (t) => {
+  const { prfOutputPresent } = await load()
+  t.ok(prfOutputPresent({ clientExtensionResults: { prf: { results: { first: b64url(fill(32, 1)) } } } }))
+  t.ok(prfOutputPresent(JSON.stringify({ clientExtensionResults: { prf: { results: { first: '%%' } } } })), 'present but invalid still counts')
+  t.absent(prfOutputPresent({ clientExtensionResults: { prf: { enabled: true } } }))
+  t.absent(prfOutputPresent({ clientExtensionResults: { prf: { results: {} } } }))
+  t.absent(prfOutputPresent({ clientExtensionResults: { prf: { results: null } } }))
+  t.absent(prfOutputPresent({}))
+  t.absent(prfOutputPresent('not json'))
+  t.absent(prfOutputPresent(null))
+})

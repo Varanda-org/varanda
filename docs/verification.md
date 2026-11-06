@@ -2707,6 +2707,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Tentar de novo no mesmo gerenciador sem PRF pode dar "já existe uma passkey do Varanda neste gerenciador: use entrar"; entrar com ela leva de volta ao cartão com os passos.
 - Os textos citam a Apple e o Google para todos; o app não detecta a plataforma.
 - Se a passkey escolhida em Entrar era a da criação pendente, "concluir" continua aparecendo e, tocado, só diz "nenhuma criação de passkey pendente"; "Criar passkey" ao lado resolve. Esconder o "concluir" depois de uma falha dele perderia uma criação ainda viva quando a pessoa só fechou o diálogo, e a tela não distingue os dois casos. Essa passkey também não é nomeada para apagar. Saber qual das duas falhou exigiria o nó informar a criação pendente.
+- Os estados presos e as saídas novas (passkey sem sincronização, caminho pelo celular, passkeys recusadas guardadas, saída de uma passkey conhecida perdida) estão em §109; os resultados desta seção não foram refeitos.
 
 ## 46. Leituras sem parar a sincronização na web (PR perf/faster-content-loading, 2026-10-30)
 
@@ -5280,3 +5281,67 @@ Limites desta caminhada:
 
 - A gravação depende do aparelho e da versão do navegador: os testes rodam com gravadores falsos, não com o microfone.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 109. Passkeys só de gerenciadores que sincronizam, caminho pelo celular (QR code) e saídas dos estados presos (PR fix/passkey-robustness)
+
+### O que mudou
+
+- Criar passkey: o app recusa uma passkey que não sincroniza entre aparelhos (chave USB ou NFC, Windows Hello, perfil local do navegador), porque ela ficaria presa a um aparelho e a conta perderia o acesso ao trocar de aparelho. A checagem lê a flag BE (backup eligible) dos dados de autenticação e exige que ela esteja ligada. Não há lista de gerenciadores no código: o critério é a flag. A recusa aparece como NOT_SYNCED, com o texto de `apps/app/src/passkeyOptions.js`.
+- A flag vale só na criação. Entrar nunca a consulta, então uma passkey que já existe continua entrando, mesmo sem sincronização.
+- Dados de autenticação ilegíveis não bloqueiam a criação: são aceitos.
+- Caminho pelo celular: na criação, o navegador recebe as dicas `client-device` e `hybrid`; quando a pessoa toca "criar com o celular" ou "entrar com o celular", a dica é `hybrid`. As dicas são só orientação para o navegador e não forçam a tela do QR code. Sem gerenciador útil no computador, a página orienta a usar o celular (SYNC_ADVICE e PHONE_HINT em `apps/app/src/passkeyTrouble.js`).
+- Estados presos ficam guardados:
+  - na web, o registro `passkeyAttempts` (versão 1, por rpId) guarda a criação pendente (`pending`: id da credencial, id do usuário e telefone) e as passkeys recusadas (`refused`, até 32 entradas, com código e se foram limpas);
+  - no nativo, o arquivo `varanda-passkey-attempts.json` na pasta de documentos do app, com o mesmo formato (`cleaned` é sempre `false`). Os códigos das recusadas são `NO_PRF`, `NOT_SYNCED`, `SUPERSEDED` (uma criação pendente trocada por outra criação ou por uma entrada com outra passkey), `INSTALL_FAILED` (a passkey nova não chegou a ser instalada) e, só no nativo, `MISSING` (o "concluir" não achou a passkey pendente). Uma recusa `NOT_SYNCED` criada aqui nunca é rebaixada por um `NO_PRF` posterior, então essa passkey nunca abre a conta.
+- A criação pendente sobrevive a recarregar a página, então o "concluir" é pedido ao nó e não depende da memória da tela.
+- Limpeza na web: `PublicKeyCredential.signalUnknownCredential` é chamado de melhor esforço, e só quando a própria cerimônia de criação desta carga da página recusa a passkey (NOT_SYNCED, ou NO_PRF na criação). Nunca no "concluir" (entre a criação e o "concluir" uma passkey que sincroniza pode já ter virado a conta em outro aparelho; a recusa fica guardada, sem pedido de remoção), nunca para uma criação pendente restaurada nem para a passkey conhecida. Quando o navegador aceita a chamada, a entrada sai marcada como `cleaned`, e a página mostra a linha "já pediu ao gerenciador" onde o recurso existe.
+- Entrar: `unlock({ any, phone })` na web e `unlock({ any })` no nativo, para escolher outra passkey ou o celular.
+- Exclusões no nativo: iOS repassa `excludeCredentials` ao módulo. No Android, a exclusão só limpa passkeys do Varanda no mesmo gerenciador, e depende de androidx.credentials 1.5.0.
+- Android: `NoCredentialException` em Entrar vira o estado NONE, com o texto NONE_TEXT (`apps/app/src/passkeyTrouble.js`).
+- PRF malformado conta como NO_PRF, não como erro genérico.
+- Saída de passkey conhecida perdida: sair do cartão não apaga o diário deste aparelho. Se o aparelho não tem o diário, Entrar com uma passkey conhecida que não está mais no gerenciador abre um diário vazio.
+- Passkeys nomeadas para apagar: o cartão só nomeia passkeys criadas nesta sessão da página que falharam agora, nunca as tiradas de `refused` guardado (uma recusa antiga pode ter virado a conta em outro aparelho ou navegador). Os nomes somem a cada entrada bem-sucedida e no "recomeçar", o cartão de navegador sem suporte não nomeia nenhuma, e o passo é condicional: "Se você não usou essa passkey para entrar em outro aparelho, apague a passkey ...".
+- O texto de recuperação (SYNC_ADVICE) manda salvar a passkey num gerenciador que sincroniza, para a conta do Google ou da Apple devolvê-la num aparelho novo.
+
+### Testes automatizados
+
+- `packages/web-member/test/authenticator-data.test.js` (novo).
+- `packages/web-member/test/passkey.test.js`.
+- `packages/web-member/test/resume.test.js`.
+- `packages/web-member/test/node-bundle.test.js`.
+- `apps/app/test/passkeyOptions.test.js`.
+- `apps/app/test/passkeyTrouble.test.js`.
+- `apps/app/test/help.test.js`.
+- `apps/app/test/sessionStoreNative.test.js`.
+
+Resultados (Node 24.22.1, na raiz, sobre `origin/main@04f01a29`): `npm run lint` sem erros; `npm test` com 402 arquivos, 400 passaram de primeira; `packages/core/test/sync-delete.test.js` falhou uma vez na execução completa ("D lacks block 3 after its scan") e passou sozinho (3/3), intermitente e fora desta mudança; `apps/cli/test/ai-embedder.test.js` falha só porque o caminho desta cópia local contém "sharp" (o teste procura módulos com esse nome no caminho), igual na `main` e fora desta mudança; `npm run demo` terminou com DEMO OK. Os testes acima, um por arquivo, passaram.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Chave USB ou NFC: criar passkey é recusada com o aviso de sincronização (não realizada ainda).
+- [ ] Windows Hello: criar passkey é recusada com o aviso de sincronização (não realizada ainda).
+- [ ] Passkey local do perfil do Chrome num Mac: criar é recusada (não realizada ainda).
+- [ ] iCloud Keychain, Google Password Manager, 1Password e Bitwarden: criar é aceito e a passkey entra depois (não realizada ainda).
+- [ ] Computador sem gerenciador útil: o QR code leva a um Android e a um iPhone; criar, concluir e entrar funcionam pelo celular (não realizada ainda).
+- [ ] Passkey já existente, criada num aparelho e sem sincronização, continua entrando (não realizada ainda).
+- [ ] Passkey conhecida perdida: sair do cartão não apaga o diário deste aparelho (não realizada ainda).
+- [ ] Recarregar a página durante "concluir": a criação pendente continua e "concluir" entra (não realizada ainda).
+- [ ] Android com aparelho novo, sem passkey do Varanda: aparece NONE_TEXT (não realizada ainda).
+- [ ] Onde o navegador tem `signalUnknownCredential`: após uma criação recusada, aparece a linha "já pediu ao gerenciador" (não realizada ainda).
+
+### Limites que sobram
+
+- A flag BE é autodeclarada pelo autenticador quando a atestação é `none`; o app não consegue provar que o gerenciador sincroniza.
+- Dados de autenticação ilegíveis são aceitos, então um autenticador que não informa a flag passa na criação.
+- As dicas (`client-device`, `hybrid`) são só orientação: não forçam a tela do QR code.
+- No Android, a limpeza de passkeys é só exclusão, e só com androidx.credentials 1.5.0.
+- No iOS nativo, passkeys ainda esperam o domínio associado da conta Apple Developer.
+- O build de debug do Android (`app.varanda.debug`) não usa passkeys de produção.
+- Entrar com uma passkey do Varanda antiga, num aparelho sem diário, ainda abre um diário vazio.
+- Depois de recarregar a página, o cartão não lembra mais quais passkeys criadas aqui não serviram: a pessoa não recebe o nome para apagar. É de propósito, para nunca mandar apagar uma passkey que virou a conta em outro aparelho.
+- Uma passkey recusada no "concluir" nunca recebe pedido de remoção, mesmo quando foi criada nesta carga da página: ela fica no gerenciador até a pessoa apagá-la.
+- Há uma janela entre o autenticador criar a passkey e o registro local ser gravado: se a página cair nessa janela, a passkey existe no gerenciador sem registro local.
+- A recusa de uma passkey presa a um aparelho (chave de segurança, Windows Hello) vale só no navegador ou na instalação que a recusou: ela sobrevive ao "recomeçar" e ao limite de 32 registros, mas em outro navegador, depois de limpar os dados do site ou depois de reinstalar o app, a mesma passkey pode entrar e abrir uma conta nova presa àquele aparelho. A entrada não lê a flag BE, por decisão do dono: passkeys que já existem continuam entrando. Por isso o cartão de passkey recusada nunca manda abrir o Varanda em outro navegador. Decisão registrada na auditoria de segurança deste PR.
+- Pela mesma regra, uma chave de segurança que este navegador recusou na criação nunca entra neste navegador, mesmo que a pessoa tenha criado a conta com ela em outro computador; a conta continua acessível nos outros aparelhos.
