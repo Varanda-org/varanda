@@ -20,8 +20,8 @@ const { signPush } = require('@varanda/core/lib/push-proof')
 const { openAccountStore } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
 const { openPushStore } = require('../lib/account/push-store')
-const { generateVapidKeys, sendPush } = require('../lib/account/web-push')
-const { createPushRoutes } = require('../lib/account/push-routes')
+const { generateVapidKeys, sendPush, encryptPayload } = require('../lib/account/web-push')
+const { createPushRoutes, PUSH_PAD_TO, INVITE_QUEUE_MAX, MAX_QUEUE, MAX_IN_FLIGHT } = require('../lib/account/push-routes')
 const { createAccountServer } = require('../lib/account/server')
 const { createPushKey, writeJsonExclusive } = require('../lib/commands/account')
 const { tmpDir, until } = require('./helpers/net')
@@ -975,4 +975,300 @@ test('relay: a capped DM wake counts the rest, rotates where the next one starts
   // And a wake inside that new window is dropped.
   await wake()
   t.is(logs[logs.length - 1].reason, 'descartado')
+})
+
+// notifyInvite through createPushRoutes: a real push store on disk, an
+// injected clock, and either the real sendPush over a fake push service or a
+// send stub that records exactly what it was handed.
+async function inviteRoutes (t, { vapid = true, spy = false, hold = false } = {}) {
+  const dir = path.join(tmpDir(t), 'account')
+  const clock = { t: Date.parse('2026-11-05T15:00:00.000Z') }
+  clock.now = () => clock.t
+  const pushStore = openPushStore(dir, { now: clock.now })
+  const keys = generateVapidKeys()
+  const delivered = []
+  const statusOf = new Map()
+  const fakeFetch = async (url, init) => {
+    delivered.push({ url, headers: init.headers, body: init.body })
+    return { status: statusOf.get(url) ?? 201, body: null }
+  }
+  const calls = []
+  const held = []
+  let holding = hold
+  const send = async (args) => {
+    calls.push(args)
+    if (holding) await new Promise((resolve) => held.push(resolve))
+    if (spy) return 'ok'
+    return sendPush({ ...args, fetch: fakeFetch, now: clock.now() })
+  }
+  const logs = []
+  const http = {
+    send: () => {},
+    sendError: () => {},
+    readJsonBody: async () => ({}),
+    checkPost: () => {},
+    RouteError: Error,
+    refuse: (code) => new Error(code),
+    fromStore: (e) => e,
+    keyedWindow: () => () => true
+  }
+  const r = createPushRoutes({
+    association: '0'.repeat(64),
+    accounts: { status: () => ({ linked: false }) },
+    pushStore,
+    vapid: vapid ? { ...keys, subject: ORIGIN } : null,
+    send,
+    topicKey: TOPIC_KEY,
+    log: (e) => logs.push(JSON.stringify(e)),
+    now: clock.now,
+    http
+  })
+  async function subscribe (who, host) {
+    const sub = subscription(host)
+    await pushStore.put({ member: who.hex, endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth })
+    return sub
+  }
+  const release = () => {
+    holding = false
+    while (held.length > 0) held.shift()()
+  }
+  return { r, clock, pushStore, keys, delivered, statusOf, calls, logs, subscribe, release }
+}
+
+const INVITE_TOPIC = 'inviteTopic_0123456789abcdef'
+
+function cleanInviteLogs (t, logs, endpoints) {
+  const all = logs.join('\n')
+  t.absent(/[0-9a-f]{64}/.test(all), 'no 64-hex key in the logs')
+  for (const e of endpoints) t.absent(all.includes(e), 'no endpoint in the logs')
+  t.absent(/convite|invite/i.test(all), 'no notice text in the logs')
+  for (const line of logs) t.ok(Object.keys(JSON.parse(line)).every((k) => k === 'event' || k === 'reason'), 'only event and reason: ' + line)
+}
+
+test('notifyInvite: two devices get the kind-only payload, padded like a like, one topic, TTL from the deadline', async (t) => {
+  const s = await inviteRoutes(t)
+  const m = member()
+  const subs = [await s.subscribe(m), await s.subscribe(m, 'updates.push.services.mozilla.com')]
+  const deadline = s.clock.t + 3600 * 1000 + 500
+  t.is(s.r.notifyInvite({ member: m.hex, topic: INVITE_TOPIC, deadline }), 'queued')
+  await until(() => s.delivered.length === 2, { name: 'two sends' })
+  for (const sub of subs) {
+    const got = s.delivered.find((d) => d.url === sub.endpoint)
+    t.ok(got, 'one send to each device')
+    t.alike(JSON.parse(decrypt(got.body, sub.uaPrivate, sub.auth)), { v: 1, kind: 'invite-drop' })
+    t.is(got.headers.Topic, INVITE_TOPIC)
+    t.is(got.headers.TTL, '3601', 'the seconds left to the deadline, rounded up')
+  }
+  t.is(new Set(s.delivered.map((d) => d.headers.Topic)).size, 1)
+  t.is(s.delivered[0].body.length, s.delivered[1].body.length)
+  for (const c of s.calls) {
+    t.is(c.payload, JSON.stringify({ v: 1, kind: 'invite-drop' }))
+    t.is(c.padTo, PUSH_PAD_TO)
+    t.is(c.ttlS, 3601)
+  }
+  // The same length as a like padded by the same rule.
+  const like = encryptPayload({ p256dh: subs[0].p256dh, auth: subs[0].auth, plaintext: JSON.stringify({ v: 1, kind: 'like', body: 'Bia Souza curtiu seu post', actor: m.hex, recipient: m.hex, ref: m.hex + ':7' }), padTo: PUSH_PAD_TO })
+  t.is(s.delivered[0].body.length, like.length, 'the length tells the kind apart from nothing')
+  cleanInviteLogs(t, s.logs, subs.map((x) => x.endpoint))
+})
+
+test('notifyInvite: no transport or no device is none and sends nothing', async (t) => {
+  const off = await inviteRoutes(t, { vapid: false, spy: true })
+  const m = member()
+  await off.subscribe(m)
+  t.is(off.r.notifyInvite({ member: m.hex, topic: INVITE_TOPIC, deadline: off.clock.t + 60000 }), 'none', 'vapid null')
+  t.is(off.r.room(), 0, 'no transport, no room: the loop claims nothing')
+  const s = await inviteRoutes(t, { spy: true })
+  t.is(s.r.notifyInvite({ member: member().hex, topic: INVITE_TOPIC, deadline: s.clock.t + 60000 }), 'none', 'no subscription')
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  t.is(off.calls.length + s.calls.length, 0)
+  t.is(s.r.stats().queued, 0)
+})
+
+test('notifyInvite: a bad member, topic or deadline is a TypeError', async (t) => {
+  const s = await inviteRoutes(t, { spy: true })
+  const ok = { member: member().hex, topic: INVITE_TOPIC, deadline: s.clock.t + 60000 }
+  for (const bad of [{ member: 'AB'.repeat(32) }, { member: 'ab' }, { topic: 'x'.repeat(33) }, { topic: 'a b' }, { topic: undefined }, { deadline: 1.5 }, { deadline: '1' }, { deadline: undefined }]) {
+    t.exception.all(() => s.r.notifyInvite({ ...ok, ...bad }), TypeError, JSON.stringify(bad))
+  }
+})
+
+test('notifyInvite: a deadline passed at send time sends nothing', async (t) => {
+  const s = await inviteRoutes(t, { spy: true, hold: true })
+  const m = member()
+  const filler = member()
+  for (let i = 0; i < 4; i++) await s.subscribe(filler)
+  const sub = await s.subscribe(m)
+  // Eight sends in flight keep the invite job queued while the clock moves.
+  for (let i = 0; i < 2; i++) s.r.notifyInvite({ member: filler.hex, topic: INVITE_TOPIC, deadline: s.clock.t + 3600 * 1000 })
+  t.is(s.calls.length, MAX_IN_FLIGHT)
+  t.is(s.r.notifyInvite({ member: m.hex, topic: INVITE_TOPIC, deadline: s.clock.t + 1000 }), 'queued')
+  t.is(s.r.stats().queued, 1)
+  s.clock.t += 1000
+  s.release()
+  await until(() => s.r.stats().queued === 0 && s.r.stats().inFlight === 0, { name: 'drained' })
+  t.absent(s.calls.some((c) => c.subscription.endpoint === sub.endpoint), 'past the deadline: never sent')
+  t.ok(s.logs.includes(JSON.stringify({ event: 'push', reason: 'descartado' })))
+  t.is(s.r.room(), INVITE_QUEUE_MAX, 'the dropped job left the invite count')
+  cleanInviteLogs(t, s.logs, [sub.endpoint])
+})
+
+test('notifyInvite: the TTL handed to send is the seconds left, capped at 24 h', async (t) => {
+  const s = await inviteRoutes(t, { spy: true })
+  const m = member()
+  await s.subscribe(m)
+  s.r.notifyInvite({ member: m.hex, topic: INVITE_TOPIC, deadline: s.clock.t + 1 })
+  s.r.notifyInvite({ member: m.hex, topic: INVITE_TOPIC, deadline: s.clock.t + 90 * 1000 })
+  s.r.notifyInvite({ member: m.hex, topic: INVITE_TOPIC, deadline: s.clock.t + 3 * 86400 * 1000 })
+  await until(() => s.calls.length === 3, { name: 'three sends' })
+  t.alike(s.calls.map((c) => c.ttlS), [1, 90, 86400])
+})
+
+test('notifyInvite: room shrinks with queued invite jobs, never past a quarter of the queue, and a like still queues', async (t) => {
+  const s = await inviteRoutes(t, { spy: true, hold: true })
+  t.is(INVITE_QUEUE_MAX, Math.floor(MAX_QUEUE / 4))
+  t.is(s.r.room(), INVITE_QUEUE_MAX)
+  const members = []
+  for (let i = 0; i < 40; i++) {
+    const m = member()
+    for (let j = 0; j < 4; j++) await s.subscribe(m)
+    members.push(m)
+  }
+  const deadline = s.clock.t + 3600 * 1000
+  // The first MAX_IN_FLIGHT jobs leave the queue for delivery at once.
+  t.is(s.r.notifyInvite({ member: members[0].hex, topic: INVITE_TOPIC, deadline }), 'queued')
+  t.is(s.r.notifyInvite({ member: members[1].hex, topic: INVITE_TOPIC, deadline }), 'queued')
+  t.is(s.r.room(), INVITE_QUEUE_MAX)
+  t.is(s.r.notifyInvite({ member: members[2].hex, topic: INVITE_TOPIC, deadline }), 'queued')
+  t.is(s.r.room(), INVITE_QUEUE_MAX - 4)
+  let i = 3
+  let result
+  while ((result = s.r.notifyInvite({ member: members[i++].hex, topic: INVITE_TOPIC, deadline })) === 'queued') {
+    t.ok(s.r.stats().queued <= INVITE_QUEUE_MAX, 'never over the invite cap')
+  }
+  t.is(result, 'dropped', 'devices exist but nothing fit')
+  t.is(s.r.room(), 0)
+  t.is(s.r.stats().queued, INVITE_QUEUE_MAX)
+  t.ok(s.logs.includes(JSON.stringify({ event: 'push', reason: 'descartado' })))
+
+  // The social queue keeps its room: a like still enqueues.
+  const token = 'ab'.repeat(32)
+  const liker = member()
+  const relayed = createPushRoutes({
+    association: '0'.repeat(64),
+    accounts: { status: () => ({ linked: false }) },
+    pushStore: s.pushStore,
+    vapid: { ...s.keys, subject: ORIGIN },
+    send: () => new Promise(() => {}),
+    relayTokenHash: sha256(token),
+    log: () => {},
+    now: s.clock.now,
+    http: {
+      send: () => {},
+      sendError: () => { throw new Error('refused') },
+      readJsonBody: async () => ({ v: 1, kind: 'like', actor: liker.hex, recipient: members[0].hex, seq: 1, ref: members[0].hex + ':7', name: null }),
+      checkPost: () => {},
+      RouteError: Error,
+      refuse: (code) => new Error(code),
+      fromStore: (e) => e,
+      keyedWindow: () => () => true
+    }
+  })
+  // A second routes object whose invite cap is full gets a relayed like.
+  for (let k = 0; k < members.length; k++) relayed.notifyInvite({ member: members[k].hex, topic: INVITE_TOPIC, deadline })
+  t.is(relayed.room(), 0)
+  const queuedBefore = relayed.stats().queued
+  await relayed.handleRelay({ method: 'POST', headers: { authorization: 'Bearer ' + token } }, {})
+  t.is(relayed.stats().queued, queuedBefore + 4, 'the like queued for every device')
+  t.is(relayed.room(), 0, 'and the invite room is unchanged')
+
+  s.release()
+  await until(() => s.r.stats().queued === 0 && s.r.stats().inFlight === 0, { name: 'drained' })
+  t.is(s.r.room(), INVITE_QUEUE_MAX, 'every job that left gave its room back')
+})
+
+test('notifyInvite: a member gets every device or none', async (t) => {
+  const s = await inviteRoutes(t, { spy: true, hold: true })
+  const withDevices = async (n) => {
+    const m = member()
+    for (let j = 0; j < n; j++) await s.subscribe(m)
+    return m
+  }
+  const deadline = s.clock.t + 3600 * 1000
+  while (s.r.room() > 4) t.is(s.r.notifyInvite({ member: (await withDevices(4)).hex, topic: INVITE_TOPIC, deadline }), 'queued')
+  t.is(s.r.room(), 4)
+  t.is(s.r.notifyInvite({ member: (await withDevices(2)).hex, topic: INVITE_TOPIC, deadline }), 'queued')
+  t.is(s.r.room(), 2)
+  const four = await withDevices(4)
+  const before = s.r.stats().queued
+  t.is(s.r.notifyInvite({ member: four.hex, topic: INVITE_TOPIC, deadline }), 'dropped', 'two places left, four devices: none queued')
+  t.is(s.r.stats().queued, before, 'nothing of that member entered the queue')
+  t.ok(s.logs.includes(JSON.stringify({ event: 'push', reason: 'descartado' })))
+  s.release()
+  await until(() => s.r.stats().queued === 0 && s.r.stats().inFlight === 0, { name: 'drained' })
+  const reached = new Set(s.pushStore.list(four.hex).map((x) => x.endpoint))
+  t.absent(s.calls.some((c) => reached.has(c.subscription.endpoint)), 'no device of the dropped member got a send')
+})
+
+test('notifyInvite: no invite enters once member notices fill half the queue', async (t) => {
+  const s = await inviteRoutes(t, { spy: true })
+  const token = 'cd'.repeat(32)
+  const recipient = member()
+  const stored = []
+  for (let j = 0; j < 4; j++) stored.push(await s.subscribe(recipient))
+  let seq = 0
+  const actor = member()
+  const relayed = createPushRoutes({
+    association: '0'.repeat(64),
+    accounts: { status: () => ({ linked: false }) },
+    pushStore: s.pushStore,
+    vapid: { ...s.keys, subject: ORIGIN },
+    send: () => new Promise(() => {}),
+    relayTokenHash: sha256(token),
+    topicKey: TOPIC_KEY,
+    log: () => {},
+    now: s.clock.now,
+    http: {
+      send: () => {},
+      sendError: () => { throw new Error('refused') },
+      readJsonBody: async () => ({ v: 1, kind: 'like', actor: actor.hex, recipient: recipient.hex, seq: ++seq, ref: recipient.hex + ':7', name: null }),
+      checkPost: () => {},
+      RouteError: Error,
+      refuse: (code) => new Error(code),
+      fromStore: (e) => e,
+      keyedWindow: () => () => true
+    }
+  })
+  t.is(relayed.room(), INVITE_QUEUE_MAX)
+  while (relayed.stats().queued < Math.floor(MAX_QUEUE / 2)) {
+    await relayed.handleRelay({ method: 'POST', headers: { authorization: 'Bearer ' + token } }, {})
+  }
+  t.is(relayed.room(), 0, 'half the queue holds member notices: no room for invites')
+  const invited = member()
+  await s.subscribe(invited)
+  t.is(relayed.notifyInvite({ member: invited.hex, topic: INVITE_TOPIC, deadline: s.clock.t + 60000 }), 'dropped')
+  t.is(stored.length, 4)
+})
+
+test('notifyInvite: a 410 removes the row; the relay still refuses an invite-drop event', async (t) => {
+  const s = await inviteRoutes(t)
+  const m = member()
+  const gone = await s.subscribe(m)
+  const live = await s.subscribe(m)
+  s.statusOf.set(gone.endpoint, 410)
+  t.is(s.r.notifyInvite({ member: m.hex, topic: INVITE_TOPIC, deadline: s.clock.t + 60000 }), 'queued')
+  await until(() => s.logs.includes(JSON.stringify({ event: 'push', reason: 'removido' })), { name: 'removido' })
+  t.alike(s.pushStore.list(m.hex).map((r) => r.endpoint), [live.endpoint])
+  cleanInviteLogs(t, s.logs, [gone.endpoint, live.endpoint])
+
+  const relay = await setup(t)
+  await relay.acceptTerms(relay.m)
+  const sub = subscription()
+  await relay.toggle(relay.m, 'on', sub)
+  const res = await relay.relay({ v: 1, kind: 'invite-drop' })
+  t.is(res.status, 400)
+  t.alike(res.body, { error: 'pedido-invalido' })
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  t.is(relay.delivered.length, 0, 'the relay never delivers an invite drop')
+  cleanLogs(t, relay, [sub.endpoint])
 })

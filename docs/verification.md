@@ -4456,11 +4456,11 @@ Limites desta parte:
 
 ## 92. Dados mais cedo em A Rua e no Diário (PR perf/first-paint)
 
-Quatro partes do app passam a mostrar dados mais cedo: as fotos dos autores em A Rua, as contagens de curtidas, respostas, republicações e citações, as citações e respostas de quem você não segue, e o Diário ao voltar à aba. Não muda o que é gravado nem o que o nó guarda; muda a ordem e o intervalo dos pedidos. Medidas do dono antes da mudança (Chrome, produção, visita repetida): as fotos dos autores começavam entre 2,35 s e 3,4 s; as contagens, em 3,4 s e 4,2 s; cada pedido de rede levava de 2 a 26 ms; o Diário levava cerca de 0,8 s a cada volta. Este documento não traz medidas novas: os números depois da mudança saem dos passos abaixo.
+Três partes do app passam a mostrar dados mais cedo: as contagens de curtidas, respostas, republicações e citações, as citações e respostas de quem você não segue, e o Diário ao voltar à aba. Não muda o que é gravado nem o que o nó guarda; muda a ordem e o intervalo dos pedidos. Medidas do dono antes da mudança (Chrome, produção, visita repetida): as fotos dos autores começavam entre 2,35 s e 3,4 s; as contagens, em 3,4 s e 4,2 s; cada pedido de rede levava de 2 a 26 ms; o Diário levava cerca de 0,8 s a cada volta. Este documento não traz medidas novas: os números depois da mudança saem dos passos abaixo.
 
 Regras que os passos abaixo conferem:
 
-- Fotos dos autores: no nó hospedado (web e app com a instalação), os nomes e fotos na tela não esperam mais o intervalo de 1 s entre um pedido profile.read e o seguinte. O nó nativo sem instalação e os pedidos de fundo mantêm o intervalo, porque lá a leitura pausa a sincronização. O agrupamento de 100 ms continua, então uma página não gera dois pedidos.
+- Fotos dos autores: sem mudança (PR fix/quiet-boot-warm). Tirar o intervalo de 1 s entre pedidos profile.read não mudou nada na medida do dono: as fotos esperam a fila do nó no início, não esse intervalo.
 - Contagens: o pedido ao índice do semeador (/index/counts) sai junto com a página, antes de follow.list e engagement.read, e não espera por eles. Uma curtida feita enquanto a contagem chega não é desfeita pela resposta antiga. "Indexando" continua escondendo as contagens.
 - Citações e respostas de quem você não segue: os autores são lidos dois por vez (a busca do nome de um enquanto o outro é lido), e cada autor aparece assim que chega, sem esperar o mais lento. Todas as telas e a Conversa dividem uma só vaga de diary.peek do app, e a outra vaga do nó fica livre para a primeira mensagem privada e para a leitura de uma página. Uma Conversa ou um perfil aberto pela pessoa passa na frente das leituras de fundo de A Rua (espera no máximo a leitura em andamento). "Ocupado" deixa de ser o caso comum.
 - Diário: voltar à aba em menos de 60 s não relê o diário (sem node.info nem log.read) e as citações não piscam. Relê na primeira vez, depois de 60 s, ao puxar para atualizar, depois de publicar ou apagar, depois de curtir ou republicar em outra aba, na primeira vez que a aba aparece depois de uma reconexão, depois de uma leitura que falhou, e quando outro aparelho publicou. No nó nativo sem instalação (sem o sinal de diário próprio), continua relendo a cada vez que a aba aparece.
@@ -4472,7 +4472,6 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 Android (aparelho ou emulador, primeiro):
 
 - [ ] Com o registro de rede aberto, recarregar A Rua: o primeiro /index/counts sai antes da resposta de engagement.read.
-- [ ] Em A Rua, com a conexão normal, as fotos dos autores começam a carregar até cerca de 300 ms depois da própria foto.
 - [ ] Curtir uma publicação enquanto as contagens de A Rua ainda carregam: a curtida fica marcada e a contagem não volta ao valor antigo.
 - [ ] Com o índice em "indexando", as contagens continuam escondidas.
 - [ ] Em A Rua, as citações e respostas de quem você não segue: cada autor aparece assim que o nome chega, sem esperar o último.
@@ -4491,13 +4490,13 @@ iOS (simulador ou aparelho, depois do Android):
 
 Web (navegador, depois do iOS):
 
-- [ ] Na web hospedada, com o registro de rede aberto, recarregar A Rua: o /index/counts sai antes de engagement.read, e os profile.read saem sem a pausa de 1 s entre um e outro.
+- [ ] Na web hospedada, com o registro de rede aberto, recarregar A Rua: o /index/counts sai antes de engagement.read.
 - [ ] Na web hospedada, trocar A Rua > Diário > A Rua > Diário em menos de 60 s: o Diário não relê e as citações não piscam.
 - [ ] Curtir em A Rua enquanto a contagem chega: a curtida não é desfeita.
 
 Limites desta parte:
 
-- O intervalo de 1 s no nó nativo sem instalação e nos pedidos de fundo fica de propósito; a leitura lá pausa a sincronização.
+- O intervalo de 1 s entre pedidos profile.read continua em todo nó; acelerar as fotos exige mexer na fila do nó no início (fica para depois).
 - Já era assim antes e continua: uma curtida tocada antes de a publicação ter qualquer número fica sem número (ou sem o +1) até a próxima leitura; e um "atualizar" com o índice ainda indexando mostra os números antigos até a resposta nova chegar.
 - Novo e aceito: um bloqueio da associação que chega enquanto o Diário está fresco tira a publicação citada ou republicada de quem foi bloqueado até 60 s depois (na próxima releitura), a mesma janela que A Rua já usa.
 - Já era assim antes: republicar numa Conversa aberta por cima do Diário e voltar não relê o Diário (a aba não mudou); a republicação aparece na próxima troca de aba ou ao puxar para atualizar.
@@ -4511,8 +4510,8 @@ No nó hospedado (web e app com a instalação), a Espiadinha e os Avisos começ
 
 Regras que os passos abaixo conferem:
 
-- Espiadinha: no nó hospedado, com a aba escondida, o app lê a primeira página da Espiadinha uma vez por conexão, cerca de 1 s depois de a ligação com o semeador ser confirmada (sinal `peer seeder`), e só com a página visível e em linha. Ao abrir a aba, as linhas já estão lá. As citações, contagens e corações dessa página só começam quando a aba aparece, para não disputar a fila do nó com A Rua. Uma falha escondida não mostra erro; a aba, ao abrir, tenta de novo. Abrir a aba durante essa leitura mostra o esqueleto e espera, sem segunda leitura. No nó nativo sem instalação, nada muda (lá a Espiadinha não existe).
-- Avisos: cada página aparece assim que chega (antes, a tela esperava até 5 leituras e mostrava tudo de uma vez), com o indicador de atualização enquanto as continuações chegam. Com a aba escondida, uma leitura da primeira página acontece uma vez por conexão, 6 s depois da ligação com o semeador, e a leitura de 5 min também preenche a lista antes da primeira abertura. A lista escondida só muda o ponto do sino: nada é marcado como visto até a aba aparecer. Uma falha numa continuação mantém as linhas e oferece "tentar de novo" no fim da lista. Cada leitura continua com sua própria ligação curta ao semeador (decisão do dono).
+- Espiadinha: no nó hospedado, com a aba escondida, o app lê a primeira página da Espiadinha uma vez por conexão, depois de a sincronização ficar pronta (linha `sync ready`) e de o app passar 3 s sem nenhum pedido ao nó (as leituras do início só começam no `sync ready`; PR perf/warm-when-idle), e só com a página visível e em linha. A página fica guardada fora da tela (nada é desenhado com a aba escondida) e aparece na hora ao abrir a aba (PR fix/quiet-boot-warm: no celular, desenhar a lista escondida disputava a tela com A Rua). As citações, contagens e corações dessa página só começam quando a aba aparece, para não disputar a fila do nó com A Rua. Uma falha escondida não mostra erro; a aba, ao abrir, tenta de novo. Abrir a aba durante essa leitura mostra o esqueleto e espera, sem segunda leitura. No nó nativo sem instalação, nada muda (lá a Espiadinha não existe).
+- Avisos: cada página aparece assim que chega (antes, a tela esperava até 5 leituras e mostrava tudo de uma vez), com o indicador de atualização enquanto as continuações chegam. Com a aba escondida, uma leitura da primeira página acontece uma vez por conexão, depois de a sincronização ficar pronta e de o app passar 4 s sem nenhum pedido ao nó (depois da leitura da Espiadinha), e a leitura de 5 min também preenche a lista antes da primeira abertura. A lista escondida só muda o ponto do sino: nada é marcado como visto até a aba aparecer. Uma falha numa continuação mantém as linhas e oferece "tentar de novo" no fim da lista. Cada leitura continua com sua própria ligação curta ao semeador (decisão do dono).
 - Um "atualizar" vindo de fora (seguir, apagar, publicar) que chega durante uma leitura em andamento espera ela terminar e então relê uma vez.
 
 ### Como verificar
@@ -4521,10 +4520,10 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm ru
 
 Android (aparelho ou emulador, primeiro):
 
-- [ ] Com o registro do nó aberto e a instalação hospedada, abrir o app em A Rua: cerca de 1 s depois de "peer seeder", um peek.read; cerca de 6 s depois, um notices.list.
+- [ ] Com o registro do nó aberto e a instalação hospedada, abrir o app em A Rua: nenhum peek.read nem notices.list antes de "sync ready" nem enquanto aparecem pedidos do início (feed.read, profile.read, dm.*, community.*); só depois de uns 3 s sem pedidos, um peek.read; e uns 4 s depois de ele terminar, um notices.list.
 - [ ] Abrir a Espiadinha depois disso: as linhas aparecem na hora, sem esqueleto.
 - [ ] Abrir a Espiadinha durante a leitura escondida: esqueleto, depois linhas, sem segundo peek.read.
-- [ ] Abrir Avisos antes de 6 s: a primeira página aparece assim que chega, com o indicador de atualização.
+- [ ] Abrir Avisos antes da leitura escondida: a primeira página aparece assim que chega, com o indicador de atualização.
 - [ ] Com avisos novos e a aba escondida: o ponto do sino acende e, ao abrir, os avisos passam a vistos.
 - [ ] O primeiro feed.read e o primeiro /index/counts de A Rua não ficam mais lentos.
 - [ ] No nó nativo sem instalação, nenhuma leitura escondida acontece.
@@ -4536,9 +4535,9 @@ iOS (simulador ou aparelho, depois do Android):
 
 Web (navegador, depois do iOS):
 
-- [ ] Na web hospedada, com o registro de rede aberto, carregar a página: peek.read cerca de 1 s depois de "peer seeder", e notices.list cerca de 6 s depois.
+- [ ] Na web hospedada, com o registro de rede aberto, carregar a página: peek.read só depois de uns 3 s sem pedidos ao nó após "sync ready", e notices.list uns 4 s depois de o peek.read terminar.
 - [ ] Na web hospedada, abrir a Espiadinha depois disso: as linhas aparecem na hora.
-- [ ] Na web hospedada, abrir Avisos antes de 6 s: a primeira página aparece assim que chega.
+- [ ] Na web hospedada, abrir Avisos antes da leitura escondida: a primeira página aparece assim que chega.
 
 Limites desta parte:
 
@@ -4548,7 +4547,246 @@ Limites desta parte:
 - No Android e no iOS, a primeira abertura dos Avisos pode mostrar o indicador de puxar para atualizar enquanto as continuações chegam.
 - Nenhuma caixa executada nesta documentação.
 
-## 94. Linha de base da revisão visual (PR chore/assessment-lab)
+## 94. Leituras do nó hospedado sem reiniciar a sincronização (PR perf/borrowed-group-reads)
+
+No nó hospedado (web, PWA e app com a instalação), as leituras de comunidades e grupos e o plano da participação automática passam a usar os núcleos que a sincronização já tem abertos, como `feed.read`, `profile.read` e `log.read` já faziam (seção 46). Antes, cada uma delas parava a sincronização e a reiniciava depois (novo aperto de mão com o semeador e nova abertura de todos os núcleos). A sincronização agora empresta também os seus núcleos de grupo (os próprios e os de outros que ficam guardados quando ela termina) e os diários de quem escreve nesses grupos. Todos os nós (navegador, core e semeador) leem o diário com uma passagem só pelos registros de apagamento, em vez de três. Nada muda no que é gravado nem nas respostas.
+
+A reinicialização que o log do celular mostrava logo depois de `dm.pull` não vinha de `dm.pull` (que não para a sincronização): era o primeiro plano da participação automática, 1,5 s depois da primeira linha "diário próprio sincronizado", que relia as comunidades parando a sincronização. Com o plano nos núcleos emprestados, um plano sem nada a escrever não para mais a sincronização; só uma escrita de verdade passa pela trava de escrita e reinicia.
+
+Medidas (repetição local no Node, DHT local, semeador no mesmo processo atrás de um WebSocket, armazenamento IndexedDB falso; a mesma rajada de pedidos do início do app em `main@b84a420` e nesta mudança; "latência 4 ms" acrescenta 4 ms a cada carga de arquivo de núcleo e a cada leitura de kv, como um IndexedDB de celular). Não são medidas de celular: servem para comparar antes e depois.
+
+| Cenário | Rajada do início | Execuções paradas | Núcleos abertos | CPU (rajada + 6 s) |
+|---|---|---|---|---|
+| Médio, sem latência | 315 ms -> 166 ms | 5 -> 0 | 96 -> 20 | 540 ms -> 285 ms |
+| Médio, latência 4 ms | 2,33 s -> 1,05 s | 4 -> 0 | 78 -> 20 | 735 ms -> 441 ms |
+| Grande, sem latência | 970 ms -> 608 ms | 5 -> 0 | 149 -> 38 | 1,61 s -> 0,84 s |
+| Grande, latência 4 ms | 3,13 s -> 1,46 s | 3 -> 0 | 109 -> 38 | 2,17 s -> 0,84 s |
+
+Médio: 200 posts próprios, 12 seguidos com 40 posts cada, 40 curtidas, uma comunidade com Geral. Grande: 800 posts próprios, 30 seguidos com 150 posts cada, 150 curtidas. No grande com latência, `community.info` caiu de 503 ms para 108 ms, `group.read` de 863 ms para 271 ms e `group.seen` de 392 ms para 70 ms. No perfil de CPU do cenário grande, a validação de registros (`validRecordCopy`) caiu de 470 ms para 317 ms, e a parte dela que vinha das três passagens por apagamentos, de 207 ms para 25 ms.
+
+Regras que os passos abaixo conferem:
+
+- Com uma sincronização em andamento, `community.list`, `community.info`, `community.members`, `community.requests`, `group.list`, `group.info`, `group.read`, `group.members`, `group.requests` e `group.seen` respondem sem `sync.stopped` `'preempted'`, com o mesmo `runId`, e com a mesma resposta que dariam sem sincronização.
+- Uma leitura que precisa de um núcleo guardado que a sincronização não tem aberto (por exemplo, um núcleo ainda na checagem de entrada) volta ao caminho exclusivo e para a sincronização uma vez, com a mesma resposta.
+- Um plano da participação automática sem nada a escrever não para a sincronização. Um plano com algo a escrever continua passando pela trava de escrita e pelo envio ao semeador, como antes.
+- Uma leitura nos núcleos emprestados nunca abre um núcleo no armazenamento ao lado da sincronização. Se a sincronização deixa de emprestar uma réplica no meio de `page.read` (ela a separa e só fecha depois), a leitura é refeita no caminho exclusivo, depois de a sincronização parar.
+- A leitura do diário com apagamentos (`presentState`) dá as mesmas respostas de antes.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes desta parte: `packages/web-member/test/read-while-sync.test.js` (leituras de comunidade e grupo na sincronização em andamento, a volta ao caminho exclusivo e a réplica que deixa de ser emprestada no meio de `page.read`), `packages/web-member/test/session-upkeep.test.js` (plano vazio sem parar a sincronização, limite de passagens) e `packages/core/test/deletion.test.js` (`presentState` igual às três passagens em diários aleatórios). As caixas abaixo ficam desmarcadas até alguém executar o passo, num aparelho ou navegador de verdade.
+
+Android (aparelho ou emulador com a instalação hospedada, primeiro):
+
+- [ ] Com o registro de Sincronização aberto, abrir o app e esperar "sync ready": abrir Conversas e depois uma comunidade não cria um novo "sync ready" (antes apareciam #2 e #3).
+- [ ] Cerca de 2 s depois de "diário próprio sincronizado", nenhuma reinicialização da sincronização (antes vinha o plano da participação automática).
+- [ ] As linhas "pedido lento" de `community.list`, `community.info`, `dm.list` e `profile.read` diminuem ou somem, comparando com o mesmo aparelho antes da mudança.
+- [ ] Com a mesma passkey em dois aparelhos e uma comunidade, o segundo aparelho ainda entra sozinho na comunidade e no Geral.
+
+iOS (simulador ou aparelho com a instalação hospedada, depois do Android):
+
+- [ ] Os três primeiros passos do Android.
+
+Web (navegador, depois do iOS):
+
+- [ ] Na web hospedada, com o registro de rede aberto, recarregar: os GETs de `/media` dos avatares começam mais cedo que antes.
+- [ ] Abrir uma comunidade e um grupo com a sincronização ligada: o estado da sincronização em Ajustes não muda de execução.
+
+Limites desta parte:
+
+- As medidas são do Node com IndexedDB falso e latência simulada, não do celular. Os números do celular saem dos passos acima.
+- Um núcleo de grupo ainda na checagem de entrada, o diário de um membro que a sincronização ainda está abrindo logo na partida, ou um núcleo que a sincronização não guarda ainda param a sincronização uma vez, como antes.
+- Os pedidos continuam um de cada vez na fila do nó: um pedido ainda espera os que chegaram antes dele.
+- Uma leitura que responde com erro (comunidade inexistente, `group.requests` de quem não administra) ainda é refeita no caminho exclusivo e para a sincronização uma vez, como `feed.read` desde a seção 46. O app só pede `group.requests` a quem administra.
+- A maior parte da CPU restante das leituras é revalidar os mesmos registros a cada leitura (históricos de entrada, confirmação e corte dos grupos, nome de usuário e perfil). Proposta para um próximo PR: o mesmo filtro por tipo antes da validação nesses pontos, ou guardar os registros decodificados por núcleo enquanto a sincronização vive.
+- Nenhuma caixa executada nesta documentação.
+
+## 95. Abertura até A Rua ficar pronta, com barra de progresso (PR feat/splash-until-ready)
+
+A tela de abertura continua sobre A Rua depois de o perfil próprio ficar pronto, até a primeira página estar na tela com os nomes e as contagens das primeiras linhas, e nunca mais que 5 s além disso. A Rua termina de carregar por baixo da abertura; quem abre o app vê a lista já preenchida. O texto "conectando…" saiu: no lugar dele, uma barra fina que avança por etapas reais (conexão, perfil próprio, primeira página, nomes e contagens), nunca por um relógio. A barra só cresce.
+
+Regras que os passos abaixo conferem:
+
+- Só A Rua como primeira tela espera as linhas. Um link aberto na entrada (uma conversa, um perfil) ou outra aba aparece na hora.
+- No máximo 5 s a mais (CONTENT_PATIENCE_MS) depois de o perfil ficar pronto; passou disso, A Rua aparece e termina de carregar à vista.
+- As linhas estão prontas quando os autores das 6 primeiras foram consultados (um perfil sem nome também conta) e as contagens responderam para pelo menos uma delas. Sem nó hospedado, sem rede, com o índice indexando ou com a resposta de contagens falhando, não se espera pelas contagens. Uma primeira leitura que falha também libera a tela.
+- A abertura só aparece uma vez por carregamento: travar e destravar, reconectar ou trocar de aba nunca a traz de volta.
+- Na web e no PWA a barra é desenhada pela camada de `public/index.html`; o app só passa o avanço (variável CSS `--varanda-progress`). No celular nativo, o próprio componente da abertura desenha a barra.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes desta parte: `apps/app/test/splashGate.test.js` (cobertura de 'pronto', teto de 5 s, `feedDetailsReady`, `bootProgress`), `apps/app/test/splashMotion.test.js` e `apps/app/test/pwa.test.js` (barra na camada da web, sem "conectando").
+
+Android (aparelho ou emulador, primeiro):
+
+- [ ] Abrir o app já conectado: a abertura mostra a barra avançando, sem "conectando…", e some com A Rua já com nomes, fotos e números nas primeiras linhas.
+- [ ] Com a rede lenta, a abertura some no máximo cerca de 5 s depois de a barra passar da metade, e A Rua termina de carregar à vista.
+- [ ] Abrir o app por um link de conversa ou de perfil: a tela do link aparece sem esperar A Rua.
+- [ ] Travar e destravar, ou perder e recuperar a rede: a abertura não volta.
+
+iOS (simulador ou aparelho, depois do Android):
+
+- [ ] Os passos acima.
+
+Web e PWA (depois):
+
+- [ ] Recarregar a página: a camada de abertura mostra a barra (sem texto), que avança e some com A Rua preenchida.
+- [ ] Em Ajustes › Aparência, Claro e Escuro: a barra acompanha as cores.
+- [ ] Com "reduzir movimento" ligado no sistema, a barra aparece sem pulsar e sem animação de largura.
+
+Limites desta parte:
+
+- A barra esconde a espera, não a encurta: os dados chegam no mesmo tempo de antes, só que por baixo da abertura.
+- As fotos em si (os bytes) carregam logo depois de os nomes chegarem; a abertura espera os nomes, não cada imagem.
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 96. Primeira leitura de A Rua sem verificar de novo as mesmas assinaturas (PR perf/first-feed-read)
+
+No nó hospedado (web, PWA e app com a instalação), o nó roda no navegador, e o navegador verifica assinaturas Ed25519 em JavaScript puro (sodium-javascript): cerca de 4 ms por assinatura neste Mac e várias vezes isso num celular, contra 0,07 ms da biblioteca nativa do Node. Cada leitura verificava de novo as mesmas assinaturas: o certificado de cada diário seguido (duas, com o emissor), o registro de nome de usuário (mais duas) e a lista de bloqueio guardada (duas, e cada leitura a lê duas vezes). Isso acontecia na checagem de entrada da sincronização, em `feed.read`, de novo em `profile.read` e em `dm.enable`. Era a maior parte do tempo de `feed.read` e `profile.read` no início do app. As repetições anteriores no Node usavam a biblioteca nativa e não mostravam esse custo.
+
+Duas mudanças, em todos os nós (navegador, core e semeador):
+
+- Uma assinatura que já verificou não é verificada de novo enquanto a página (ou o processo) vive. Para cada chave pública e assinatura, a memória guarda uma cópia exata da mensagem e só responde quando a mensagem é igual byte a byte. Só guarda verificações que deram certo, no máximo 4096 e 4 MiB de mensagens. Revogação de emissor, associação e forma do registro continuam conferidas em toda leitura, então um bloqueio ou uma revogação nova vale na leitura seguinte, como antes.
+- `feed.read` (e o feed da CLI) só confere o nome de usuário de quem aparece na página pedida (20 itens no app), não de todos os seguidos. A resposta é a mesma.
+
+Nada muda no que é gravado, nas respostas nem nos caminhos emprestado e exclusivo das leituras (seção 46).
+
+Medidas (repetição local no Node, a mesma da seção 94: DHT local, semeador no mesmo processo atrás de um WebSocket, IndexedDB falso; a rajada de pedidos do início do app em `main@95048d8` e nesta mudança; aqui com certificados v2 de um emissor, nome de usuário em todos os diários, lista de bloqueio guardada com 40 chaves e verificação com sodium-javascript, como no navegador). "Latência 4 ms" acrescenta 4 ms a cada carga de arquivo de núcleo e a cada leitura de kv. Não são medidas de celular: servem para comparar antes e depois. Pelos números do dono, o celular gastou cerca de 3 vezes o tempo desta repetição em `feed.read` (2,9 s contra 0,9 s), mas essa proporção é só uma estimativa.
+
+| Cenário | `feed.read` | `profile.read` | `dm.enable` | Assinaturas verificadas | CPU da rajada |
+|---|---|---|---|---|---|
+| Dono, sem latência | 890-895 ms -> 232-235 ms | 1,39 s -> 352-357 ms | 1,00-1,01 s -> 123-189 ms | 431 -> 78 | 2,66-2,83 s -> 0,78-0,82 s |
+| Dono, latência 4 ms | 1,34-1,39 s -> 773-774 ms | 1,84-1,91 s -> 922-941 ms | 1,08-1,09 s -> 268-296 ms | 431 -> 78 a 80 | 2,83-3,21 s -> 0,94-1,00 s |
+| Grande, latência 4 ms | 2,22 s -> 1,36 s | 3,06 s -> 1,63 s | 1,90 s -> 555 ms | 671 -> 128 | 5,10 s -> 2,37 s |
+
+Dono: 36 seguidos com 60 posts cada, diário próprio com 170 posts (272 blocos), 60 curtidas, uma comunidade com Geral; duas repetições de cada lado (os intervalos acima). Grande: 60 seguidos com 150 posts cada, 800 posts próprios, 150 curtidas; uma repetição. No Dono sem latência, o trabalho de `feed.read` nos núcleos caiu de cerca de 530 ms para 63 ms e o de `profile.read` de cerca de 490 ms para cerca de 120 ms (os nomes de usuário de quem não apareceu na primeira página passam a ser conferidos aqui, uma vez). A sincronização passou a emprestar os núcleos cerca de 170 ms depois de começar, em vez de cerca de 360 ms: a checagem de entrada dos seguidos caiu de cerca de 300 ms para cerca de 150 ms, porque a delegação do emissor, igual em todos os certificados, é verificada uma vez só (medido com marcas temporárias nas etapas da partida, que não ficam no código). O que sobra de verificação são assinaturas diferentes: um certificado por seguido na partida, a delegação do emissor uma vez, o nome de usuário de cada autor uma vez e a lista de bloqueio uma vez. Com latência, o que sobra da espera de `feed.read` é quase todo a partida da sincronização (ver os limites).
+
+O script `packages/web-member/scripts/startup-bench.js` mede só a partida da sincronização e as primeiras leituras nos núcleos emprestados, sem rede, e serve para repetir a comparação: `node packages/web-member/scripts/startup-bench.js --follows 36 --blocks 60 --own 172 --issued --js-verify --reads --runs 5` (e `--idb` para o IndexedDB falso). Medianas de 5 execuções neste Mac, `main@95048d8` -> esta mudança:
+
+| Armazenamento | Até emprestar os núcleos | Primeira `feed.read` | `profile.read` de todos | Assinaturas verificadas |
+|---|---|---|---|---|
+| Memória | 230 ms -> 128 ms | 470 ms -> 38 ms | 442 ms -> 108 ms | 362 -> 74 |
+| IndexedDB falso | 295 ms -> 176 ms | 457 ms -> 31 ms | 448 ms -> 113 ms | 362 -> 74 |
+
+Regras que os passos abaixo conferem:
+
+- Com a sincronização em andamento, a segunda `feed.read` e a segunda `profile.read` não verificam nenhuma assinatura de novo e respondem igual à primeira.
+- Uma lista de bloqueio gravada depois dessas leituras esconde o diário bloqueado já na leitura seguinte, em `feed.read` e em `profile.read`.
+- Com a memória já preenchida, um certificado ou um nome de usuário de um emissor revogado continua recusado (`revoked-issuer`), e um registro alterado com a mesma assinatura continua recusado (`bad-signature`).
+- Uma verificação que falhou é refeita sempre. Chave ou assinatura de outro tamanho nunca usa a memória.
+- `feed.read` dá os mesmos nomes de usuário em todas as páginas, e confere o nome só de quem tem item na página.
+
+### Como verificar
+
+Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo`. Testes desta parte: `packages/core/test/verified.test.js` (memória: mesmas respostas, cópia da mensagem, tamanhos, limites, revogação e alteração com a memória preenchida), `packages/core/test/feed.test.js` (nome de usuário só da página, mesmas respostas) e `packages/web-member/test/read-while-sync.test.js` (leituras repetidas na sincronização sem verificar de novo, e o bloqueio novo que esconde na leitura seguinte). As caixas abaixo ficam desmarcadas até alguém executar o passo, num aparelho ou navegador de verdade.
+
+Android (aparelho ou emulador com a instalação hospedada, primeiro):
+
+- [ ] Com o registro de Sincronização aberto, abrir o app: as linhas "pedido lento" de `feed.read`, `profile.read`, `engagement.read`, `dm.enable`, `dm.list`, `community.list` e `dm.pull` diminuem ou somem, comparando com o mesmo aparelho antes da mudança.
+- [ ] A Rua mostra os posts e os @nomes de quem aparece como antes.
+- [ ] Uma conta bloqueada pela moderação continua fora de A Rua e sem nome.
+
+iOS (simulador ou aparelho com a instalação hospedada, depois do Android):
+
+- [ ] Os três passos do Android.
+
+Web (navegador, depois do iOS):
+
+- [ ] No Chrome do computador, com o registro de rede aberto, recarregar A Rua: os GETs de `/media` das fotos dos autores começam antes de cerca de 2,4 s (o que se via depois da seção 93).
+
+Limites desta parte:
+
+- As medidas são do Node com IndexedDB falso e latência simulada, não do celular. Os números do celular saem dos passos acima.
+- A memória vive enquanto a página vive: cada carga da página verifica de novo, uma vez, cada assinatura. Guardar a memória no armazenamento do navegador confiaria num lugar que qualquer pessoa com acesso ao perfil do navegador pode escrever, então isso não foi feito.
+- Com latência de armazenamento, o que sobra da espera da primeira `feed.read` é a partida da sincronização: abrir os núcleos de grupo próprios, abrir as réplicas e a varredura de bloqueados, que pergunta ao IndexedDB por cada chave bloqueada, uma de cada vez (cerca de 160 ms com 40 chaves e 4 ms por pergunta). Ficam para um próximo PR.
+- A memória tem limite, mas quem pode assinar coisas que o nó verifica (no serviço de conta, as provas de página de qualquer chave; nos outros nós, emissores e moderadores) pode encher a memória e tirar dela outras entradas. O efeito é só verificar de novo, como antes desta mudança.
+- Uma verificação Ed25519 mais rápida no navegador (por exemplo `@noble/curves`) mudaria as regras de aceitação em casos de borda (equação com ou sem cofator, pontos de ordem pequena) em relação ao libsodium dos outros nós, e não foi feita.
+- Nenhuma caixa executada nesta documentação.
+
+## 97. Convites de surpresa (PR feat/invite-drops)
+
+### O que mudou
+
+Com `VARANDA_INVITE_DROPS=1` (exige `VARANDA_INVITES_PER_WEEK`; o `deploy.sh` e o serviço `account` recusam o par incompleto), os N convites da semana de cada membro deixam de abrir todos na segunda 00:00 e passam a abrir um a um, em N minutos sorteados entre 09:00 e 20:59 (horário de Brasília), diferentes por membro, só entre os minutos ainda futuros depois do vínculo e da ativação. O sorteio é uma função do segredo de `invite-drops-key.json` (modo 0600, escrito uma vez junto da data de ativação), da chave do membro e da semana; o `invite-drops.json` (modo 0600) guarda só os índices já avisados, sem horário, e é podado no fim da semana. Um arquivo de chave inválido, ou ausente ao lado de um `invite-drops.json` existente, deixa as concessões indisponíveis (`indisponivel`) em vez de liberar a semana inteira.
+
+- Criar o link antes do momento responde `convite-aguardando` (429). Um convite criado conta na semana, como na seção 37; o que não foi usado some na segunda 00:00; um código já emitido vale 7 dias.
+- Nova rota `POST /account/invites/summary`: o membro assina com `invite.sign` na ação `summary` (uso único do nonce de `/account/invites/start`) e recebe `{ mode, perWeek, opened, used, remaining, resetsAt }`, com `mode` `semanal` ou `sorteio`. Limite de 30 pedidos por 10 minutos por membro, sem verificação de idade (a leitura não cria nada). Sem o recurso, o mesmo pedido responde `semanal`.
+- Aviso push novo, `{ v: 1, kind: 'invite-drop' }`, enviado pelo próprio serviço de conta (nunca pelo semeador nem por `PUSH_KINDS`). Título "Chegou um convite pra sua varanda" e texto "Escolha com carinho quem você quer chamar: alguém próximo, que faz falta na conversa." ficam fixos no service worker (tag `varanda-invite-drop`); o clique abre `/?aviso=convite`. Só vai a quem aceitou Termos e Política na versão 16, a todos os aparelhos do membro ou a nenhum. Os envios de convite ocupam no máximo um quarto da fila e só entram com a fila abaixo da metade. Um aviso que não saiu até 21:00 de Brasília é descartado, e o TTL nunca passa do fim da janela.
+- O aviso só sai dentro da janela. Se o serviço estava parado no minuto sorteado, o aviso é recuperado uma vez na próxima janela, desde que a semana seja a mesma. Os índices são marcados antes do envio e nunca desmarcados.
+- No app (hospedado, o nativo com a instalação inclusive), Ajustes › Convidar pessoas mostra quantos convites já chegaram e um aviso dentro do app, sem dia nem hora. Web Push é só da PWA hospedada.
+- Termos de Uso e Política de Privacidade na versão 16, com novo aceite.
+- Registro de logs do serviço: só `{ event: 'sorteio', reason }` com `ligado`, `indisponivel`, `enviado` ou `descartado`, e `{ event: 'ready', inviteDrops: true }`. Nenhum horário, chave, segredo ou índice.
+
+### Testes automatizados
+
+- `packages/core/test/invite.test.js`: a ação `summary` assina e verifica, e uma assinatura de `issue` não vale como `summary`.
+- `packages/core/test/terms.test.js`: `TERMS_VERSION` 16.
+- `packages/rpc/test/methods.test.js`: `invite.sign` aceita `summary`.
+- `apps/cli/test/invite-drop-time.test.js`: janela 09:00-20:59 em Brasília, semana de segunda, minutos só no futuro depois do vínculo e da ativação, sorteio estável para a mesma chave, diferente por membro, segredo e semana, e uma semana de 100 minutos preenchida inteira.
+- `apps/cli/test/invite-drops.test.js`: chave escrita uma vez, arquivo de chave inválido deixado intacto, chave ausente ao lado de um registro nunca recriada (nem pelo `heal`), registro inválido nunca regravado, união ao reler com poda das semanas encerradas, aviso uma vez entre ciclos e reaberturas, minuto perdido recuperado na janela e nunca às 03:00 nem depois da semana, marcas gravadas mesmo com `none` e `dropped`, lote limitado por `room()`, `guard` falso sem gravar.
+- `apps/cli/test/invites-store.test.js`: `opened`, `convite-aguardando`, `indisponivel` com callback que falha ou devolve valor inválido, `summary` com `opened`.
+- `apps/cli/test/account-invites.test.js`: `POST /account/invites/summary` (assinatura, nonce, limite de 30, modo `semanal` e `sorteio`, sem verificação de idade) e `convite-aguardando` como 429.
+- `apps/cli/test/account-invites-cli.test.js`: `VARANDA_INVITE_DROPS` só liga com `1` e exige `VARANDA_INVITES_PER_WEEK`; a perda do lock marca os sorteios como indisponíveis e para o laço.
+- `apps/cli/test/account-push.test.js`: `notifyInvite` (payload só com o tipo, todos os aparelhos ou nenhum, `none` sem transporte ou aparelho, prazo e TTL, um quarto da fila e metade da fila, argumentos inválidos, o relé continua recusando o evento `invite-drop`).
+- `apps/cli/test/account-store.test.js`: `linkedAt` e `linkRoster` (só chave e data do vínculo).
+- `apps/cli/test/push-text.test.js`: payload `invite-drop` com duas chaves e sem texto.
+- `apps/cli/test/web-push.test.js`: `ttlS` válido e inválido.
+- `apps/cli/test/deploy.test.js`: `VARANDA_INVITE_DROPS` no `deploy.sh`, no `compose.web.yaml` e no `.env.example`, e a recusa sem `VARANDA_INVITES_PER_WEEK`.
+- `apps/app/test/signupInvite.test.js`: `dropView` nos dois modos e os textos.
+- `apps/app/test/account.test.js`: o resumo assinado no cliente, a forma exata, a queda para o serviço antigo e resumos malformados indisponíveis, sem repetição automática.
+- `apps/app/test/push-state.test.js`: `?aviso=convite` e a mensagem `varanda-invite-open`.
+- `apps/app/test/sw.test.js`: o worker mostra o título e o texto fixos, qualquer payload com mais que isso cai no texto genérico, e o clique foca o app e envia `varanda-invite-open`.
+- `apps/app/test/help.test.js` e `apps/app/test/legal.test.js`: texto de ajuda e versão 16 dos Termos.
+- `apps/app/test/inviteDrop.test.js`: o aviso dentro do app e a lógica do que já foi visto.
+
+Resultado da CI local (06/11/2026, Node 24, sobre origin/main@46adbd43): `npm run lint` limpo; `npm test` com 380 arquivos, 378 passaram de primeira; `packages/core/test/seeder-delete.test.js` falhou uma vez no conjunto e passou sozinho (28/28); `apps/cli/test/ai-embedder.test.js` falha nesta máquina também na `main`, porque o caminho da pasta de trabalho contém "sharp" e o teste recusa módulos com esse nome; `npm run demo` terminou com DEMO OK. `npm ci --ignore-scripts` não rodou de novo: nenhuma dependência mudou.
+
+### Verificação humana
+
+As caixas abaixo ficam desmarcadas até alguém executar o passo, num aparelho ou navegador de verdade.
+
+Android (aparelho ou emulador com a instalação hospedada, primeiro):
+
+- [ ] Em Ajustes › Convidar pessoas, aparecem quantos convites já chegaram e o aviso dentro do app, sem notificação do sistema.
+- [ ] Antes do momento do convite, tocar em Criar link mostra que o convite ainda não chegou.
+
+iOS (simulador ou aparelho com a instalação hospedada, depois do Android):
+
+- [ ] Os dois passos do Android.
+
+Web e PWA (depois do iOS):
+
+- [ ] Dentro da janela, o aviso aparece com o título e o texto aprovados.
+- [ ] Tocar no aviso abre Ajustes › Convidar pessoas com o app aberto, fechado e com a identidade bloqueada.
+- [ ] Um segundo ciclo do serviço não envia o aviso de novo.
+- [ ] Reiniciar o serviço dentro da semana não envia nada duas vezes.
+- [ ] Na segunda 03:00Z, um convite não usado some.
+- [ ] `docker logs` do serviço `account` mostra só tokens (`sorteio`, `enviado`, `descartado`), nunca horário, chave ou índice.
+- [ ] Com `VARANDA_INVITE_DROPS` vazio, tudo se comporta como na seção 37.
+- [ ] Com um worker antigo (página aberta antes da atualização), o aviso mostra o texto genérico.
+
+### Limites
+
+- Sem push no app nativo: o convite aparece ao abrir o app.
+- Sem transporte de push (sem chave VAPID ou com `push.json` inválido) nada é reservado: os avisos saem quando o push volta, se a semana for a mesma. Quem não tem inscrição no minuto do convite recebe só o aviso dentro do app: o índice é marcado uma vez e não há novo envio naquela semana.
+- Uma falha ao ler o lock logo depois de gravar a reserva, ou uma fila de push que não esvazia até 21:00, perde o aviso daquele momento (o convite continua aberto e o aviso dentro do app continua valendo).
+- O aviso push só vai a quem aceitou Termos e Política na versão 16. Quem ainda não aceitou não tem o momento reservado: o aviso sai na próxima volta do laço depois do aceite, se a semana for a mesma.
+- Duplicata possível só na janela de troca do lock do serviço (a mesma de `invites-store.js`).
+- Uma queda entre a gravação do `invite-drops.json` e o envio perde o aviso, nunca a concessão.
+- Um momento no domingo à noite deixa poucas horas para usar o convite antes de segunda 00:00.
+- Subir N no meio da semana pode abrir um convite novo na hora.
+- Os envios de convite usam no máximo um quarto da fila de push, um envio que não saiu até 21:00 de Brasília é descartado, e nos 2 minutos antes das 21:00 nenhum momento é reservado (fica para a próxima janela da mesma semana), menos no domingo, que não tem outra janela na semana. Uma falha passageira ao ler o lock só pula aquela volta do laço; a perda real do lock para os sorteios até reiniciar.
+- Apps nativos antigos mostram o texto do modo fixo até atualizar. Ao tocar em Criar link antes do momento, um app nativo antigo mostra a frase "Se o convite foi criado, ele já conta nesta semana." (recusa desconhecida `convite-aguardando`).
+- Apagar o `invite-drops-key.json` não reinicia o sorteio: com o `invite-drops.json` ao lado, o serviço o trata como indisponível.
+- Os aparelhos de um mesmo membro saem um depois do outro: com a fila de push atrasada mais de 2 minutos bem na virada das 21:00, os aparelhos mais novos podem perder o aviso pelo prazo.
+- Se a fila de push enche durante a gravação do `invite-drops.json`, o aviso daquele momento é descartado (registro `descartado`) e não é repetido na semana; o convite continua aberto e o aviso dentro do app continua valendo.
+- Na primeira ativação, uma troca do lock bem no meio da criação do `invite-drops-key.json` pode deixar o processo novo com um segredo diferente do gravado; os índices já avisados passam a valer outros minutos depois do reinício (no pior caso, um aviso repetido ou perdido naquela semana).
+- O registro de aviso visto fica um por aparelho: com duas contas no mesmo aparelho, uma pode ver de novo o aviso de um convite já mostrado depois de recarregar.
+- O TTL do aviso de convite (os segundos até 21:00) é diferente do TTL dos avisos sociais (24 h) e fica visível ao serviço de push do navegador, que assim distingue um aviso de convite de um aviso social; o conteúdo continua cifrado e do mesmo tamanho.
+- Ajustes lê a política de convites ao abrir: se o operador ligar os convites com Ajustes já aberto, um clique no aviso só leva a Convidar pessoas depois de fechar e abrir Ajustes de novo.
+- Nenhuma caixa executada nesta documentação.
+
+## 98. Linha de base da revisão visual (PR chore/assessment-lab)
 
 Primeira caminhada completa pelas telas do ciclo de [design-review.md](design-review.md), nas três plataformas, antes de qualquer correção visual deste PR. Serve de referência: as capturas mostram o ponto de partida, e cada rodada de correção depois compara com elas. A caminhada usa a Vitrine (dados de exemplo) para as telas sem conta e o laboratório hospedado (`apps/cli/scripts/hosted-lab.js`, em [development.md](development.md), "Instalação hospedada local") para a troca de mensagens entre duas pessoas.
 
@@ -4594,7 +4832,7 @@ Limites desta linha de base:
 - A caminhada não corrige nada. As correções entram em rodadas posteriores, cada uma com as capturas da rodada anterior como comparação.
 - Nenhuma caixa acima foi executada nesta documentação.
 
-## 95. Transições, gesto de borda, movimento reduzido e Voltar (PR feat/ui-tokens-motion)
+## 99. Transições, gesto de borda, movimento reduzido e Voltar (PR feat/ui-tokens-motion)
 
 Roteiro da transição entre telas da pilha (`apps/app/src/ui/StackLayer.js`, com os planos em `apps/app/src/stackMotion.js`), do gesto de voltar pela borda esquerda e do botão Voltar, nas três plataformas e nos dois temas. Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
 
@@ -4641,7 +4879,7 @@ Limites desta caminhada:
 - O gesto de borda vale só para o app: o Safari do iOS e o navegador do Android têm gestos próprios, e a caminhada registra o que cada um faz, sem tratá-los como erro do app.
 - Nenhuma caixa acima foi executada nesta documentação.
 
-## 96. Conversas numa lista só (PR feat/conversas-inbox)
+## 100. Conversas numa lista só (PR feat/conversas-inbox)
 
 Roteiro da aba Conversas como uma lista só no nó hospedado: busca, filtros, fixados, linhas, Pedidos de mensagem, Nova conversa, Comunidades, carga parcial e a volta pela notificação, nas três plataformas, nos dois temas, com texto grande e movimento reduzido. O comportamento descrito está em [app.md](app.md), seção "Conversas". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
 
@@ -4691,7 +4929,7 @@ Limites desta caminhada:
 - Na Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`), as conversas são dados de exemplo. Envio, aceite de pedido e busca com conversas reais só se conferem no laboratório hospedado, com duas pessoas, como na seção 94.
 - Nenhuma caixa acima foi executada nesta documentação.
 
-## 97. Balões, respostas e cabeçalhos das conversas (PR feat/chat-bubbles-replies)
+## 101. Balões, respostas e cabeçalhos das conversas (PR feat/chat-bubbles-replies)
 
 Roteiro das conversas privadas (Mensagem) e dos grupos (Grupo) com balões, respostas, cabeçalhos, campo de escrever compartilhado e emojis, nas três plataformas, nos dois temas, com texto grande e movimento reduzido. O comportamento descrito está em [app.md](app.md), seção "Conversa". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
 
@@ -4746,7 +4984,7 @@ Limites desta caminhada:
 - Na Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`), as conversas e os grupos são dados de exemplo. Envio, resposta real e menção com conversas reais só se conferem no laboratório hospedado, com duas pessoas, como na seção 94.
 - Nenhuma caixa acima foi executada nesta documentação.
 
-## 98. Menções de pessoas e Páginas nas conversas (PR feat/chat-mentions-pages)
+## 102. Menções de pessoas e Páginas nas conversas (PR feat/chat-mentions-pages)
 
 Roteiro das menções nas conversas privadas (Mensagem), nos grupos (Grupo) e em Publicar: sugestões de @ com pessoas e Páginas, e toque numa menção nas bolhas. O comportamento descrito está em [app.md](app.md), seções "Conversa" e "Grupo". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
 
@@ -4788,7 +5026,7 @@ Limites desta caminhada:
 - As sugestões dependem de conta hospedada e online, e o toque em menção, de conta hospedada. Fora disso o @nome segue como texto.
 - Nenhuma caixa acima foi executada nesta documentação.
 
-## 99. Menu "mais", prévias nos Avisos e Busca ao digitar (PR feat/feed-polish)
+## 103. Menu "mais", prévias nos Avisos e Busca ao digitar (PR feat/feed-polish)
 
 Roteiro da barra de ações das publicações (A Rua, Diário, Conversa, Espiadinha e resultados da Busca), das folhas Republicar e "mais", da nota de números e do espaço do botão Publicar, da pílula "ver novidades", das linhas e prévias dos Avisos, da Busca ao digitar e da foto em Publicar. O comportamento descrito está em [app.md](app.md), seções "Telas", "Interações da Rua" e "Perfil fixo, Avisos, Mensagens e Publicar". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
 
