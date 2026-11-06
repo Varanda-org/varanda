@@ -58,6 +58,15 @@ const ERROR_MESSAGES = {
 const RECOVERY_MESSAGES = {
   'nao-encontrado': 'esta passkey ou este código não está ligado a uma conta neste endereço'
 }
+// Excluir conta (/account/delete/*, apps/cli/lib/account/delete-routes.js).
+const DELETE_MESSAGES = {
+  'conta-excluida': 'esta conta já foi excluída',
+  'paginas-ativas': 'você ainda é dono de uma página: encerre ou transfira suas páginas antes de excluir a conta',
+  'nao-vinculado': 'esta conta não está vinculada ao serviço',
+  expirado: 'o pedido expirou: tente de novo',
+  'assinatura-invalida': 'o @nome digitado não confere com a conta',
+  lotado: 'o serviço não conseguiu registrar o pedido agora: tente de novo mais tarde'
+}
 const FALLBACK_MESSAGE = 'serviço indisponível'
 
 // Normalized username (one leading '@' stripped, lowercased) or null.
@@ -697,4 +706,26 @@ export const recoveryFetch = async (lookupId, { origin } = {}) => {
   if (!exactKeys(data, ['member', 'kind', 'blob']) || !isHex64(data.member) || !isRecoveryKind(data.kind) ||
     !isRecoveryBlob(data.blob) || data.blob.kind !== data.kind) throw toError('indisponivel')
   return { member: data.member, kind: data.kind, blob: { v: 1, kind: data.blob.kind, nonce: data.blob.nonce, ciphertext: data.blob.ciphertext } }
+}
+
+// Excluir conta: start names the current @nome the person must type; finish
+// is the signed request. The route answers 'indisponivel' only before it
+// changed anything (`definite`); after its first write it answers
+// 'resultado-incerto', and any other 5xx is unknown too: the caller then
+// re-reads accountStatus instead of repeating it.
+// -> { deleted: 'pendente' | 'concluida' }
+const DELETE_STATES = ['pendente', 'concluida']
+export const deleteStart = async ({ member }) => {
+  const data = await call('POST', '/account/delete/start', { member }, { messages: DELETE_MESSAGES })
+  if (!exactKeys(data, ['nonce', 'username']) || typeof data.nonce !== 'string' || !isUsername(data.username)) throw toError('indisponivel')
+  return { nonce: data.nonce, username: data.username }
+}
+export const deleteFinish = async ({ member, nonce, signature }) => {
+  const data = await call('POST', '/account/delete/finish', { member, nonce, signature }, { messages: DELETE_MESSAGES, uncertain: true, definite: true })
+  if (!exactKeys(data, ['deleted']) || !DELETE_STATES.includes(data.deleted)) {
+    const err = toError('indisponivel')
+    err.uncertain = true
+    throw err
+  }
+  return { deleted: data.deleted }
 }

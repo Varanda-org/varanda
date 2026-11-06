@@ -39,7 +39,7 @@ const FINISH = {
 }
 
 test('constants', (t) => {
-  t.alike([...PHASES], ['reserve', 'finish', 'rename'])
+  t.alike([...PHASES], ['reserve', 'finish', 'rename', 'delete'])
   t.ok(Object.isFrozen(PHASES))
   t.is(PREFIX, 'varanda-account-link-v1')
   t.ok(NONCE_RE.test('A-_9'.repeat(32)))
@@ -188,4 +188,16 @@ test('the module is pure: no fs, no network, no cert.js', (t) => {
   for (const frag of ['/lib/cert.js', '/lib/node/fs.js', '/hyperswarm/', '/hyperdht/', '/node_modules/hypercore/']) {
     t.absent(cached.some((p) => p.includes(frag)), 'not loaded: ' + frag)
   }
+})
+
+test('a delete proof is bound to its phase and the typed @nome', (t) => {
+  const del = { ...FINISH, phase: 'delete', sub: '' }
+  const sig = signAccountLink(del, MEMBER_KP)
+  t.alike(verifyAccountLink(del, sig), { ok: true })
+  t.alike(verifyAccountLink({ ...del, phase: 'rename' }, sig), { ok: false, reason: 'bad-signature' }, 'not a rename')
+  t.alike(verifyAccountLink({ ...del, username: 'outra_1' }, sig), { ok: false, reason: 'bad-signature' }, 'another @nome')
+  const rename = signAccountLink({ ...del, phase: 'rename' }, MEMBER_KP)
+  t.alike(verifyAccountLink(del, rename), { ok: false, reason: 'bad-signature' }, 'a rename is no delete')
+  t.alike(verifyAccountLink({ ...del, sub: FINISH.sub }, sig), { ok: false, reason: 'malformed' }, 'no Google subject')
+  t.ok(b4a.toString(accountLinkPayload(del)).startsWith('varanda-account-link-v1\ndelete\n'))
 })

@@ -7,7 +7,7 @@ const { verifyReport, verifyDmReport } = require('@varanda/core/lib/report')
 const { verifyModeratorCert } = require('@varanda/core/lib/cert')
 const { canonicalBody, verifyModRequest } = require('@varanda/core/lib/mod-request')
 const { mediaBounds, audioBounds } = require('@varanda/rpc')
-const { MAX_REPORTS, AI_ACTOR, ANEXO_MAX_BYTES, ANEXO_MIMES } = require('./moderation-store')
+const { MAX_REPORTS, AI_ACTOR, OWNER_ACTOR, ANEXO_MAX_BYTES, ANEXO_MIMES } = require('./moderation-store')
 
 // The moderation desk of the account service (mounted by ./server.js before
 // any issuer-only route, so it works on an unconfigured service):
@@ -767,6 +767,7 @@ function createModRoutes ({
       reportIds: [...c.reportIds],
       claimedAt: c.claimedAt ?? null,
       byAi: c.by === AI_ACTOR,
+      byOwner: c.by === OWNER_ACTOR,
       kind: isGroup ? 'grupo' : 'conta'
     }
   }
@@ -947,6 +948,9 @@ function createModRoutes ({
   async function unblock (req, res, session, body) {
     const member = hex64(body.member)
     if (member === ownMember(session)) throw refuse('nao-encontrado')
+    // The member deleted the account (Excluir conta): only the operator's
+    // own `mod unblock`, at a terminal, may bring the diary back.
+    if (typeof accounts.deletedAt === 'function' && accounts.deletedAt(member) !== null) throw refuse('conta-excluida')
     const { change } = await storeAsync(() => moderation.unblock(member, { by: session.email }))
     log({ event: 'unblock' })
     send(res, 200, { change: projectChange(change, new Map()) })
@@ -957,6 +961,9 @@ function createModRoutes ({
     const { changes } = store(() => moderation.pending())
     const target = changes.find((c) => c.id === id)
     if (target === undefined || target.member === ownMember(session)) throw refuse('nao-encontrado')
+    // No change of a deleted member is cancelled from the panel (Excluir
+    // conta): a moderator's earlier block may be what keeps the diary out.
+    if (typeof accounts.deletedAt === 'function' && accounts.deletedAt(target.member) !== null) throw refuse('conta-excluida')
     const { change } = await storeAsync(() => moderation.cancel(id, { by: session.email }))
     log({ event: 'cancel' })
     send(res, 200, { change: projectChange(change, new Map()) })

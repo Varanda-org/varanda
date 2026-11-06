@@ -16,6 +16,12 @@
 // A missing file is created empty. A malformed one is never replaced: every
 // method then throws { code: 'indisponivel' } until an operator repairs it.
 //
+// Excluir conta (./delete-routes.js) appends a block change with by
+// OWNER_ACTOR ('titular'): the member asked to delete their own account.
+// Such a change cannot be cancelled from the panel ('conta-excluida'); the
+// panel's unblock of a deleted key is refused in ./mod-routes.js. Only the
+// operator's own `mod unblock`, at a terminal, can undo it.
+//
 // Pending changes are an ordered intent log (plan D6): each change is
 // { id, op: 'block'|'unblock', member, by, at, reportIds, claimedAt }, kept in
 // insertion order. A member's "net state" is its membership in the published
@@ -93,6 +99,7 @@ const LIST_DEFAULT = 100
 // operator's pull projection carries instead of `by` (never an e-mail).
 const AI_ACTOR = 'ia'
 const HUMAN_ACTOR = 'pessoa'
+const OWNER_ACTOR = 'titular'
 const DAY_MS = 86400000
 // The report rules of packages/core/lib/report.js (T22): same constants and
 // the same character rule, re-checked here because the store is the last
@@ -182,7 +189,7 @@ function emptyState () {
 }
 
 const ID_RE = /^[A-Za-z0-9_-]{22}$/
-const EVENT_ACTIONS = ['bloquear', 'descartar', 'pedido', 'compensado', 'cancelado', 'ja-bloqueada', 'ja-desbloqueada', 'enviado', 'aplicado']
+const EVENT_ACTIONS = ['bloquear', 'descartar', 'pedido', 'compensado', 'cancelado', 'ja-bloqueada', 'ja-desbloqueada', 'enviado', 'aplicado', 'exclusao']
 const EVENT_KEYS = ['at', 'by', 'action', 'member', 'reportId', 'changeId', 'seq']
 const REPORT_KEYS_V1 = ['id', 'at', 'kind', 'target', 'seq', 'quote', 'reporter', 'reason', 'text', 'nonce', 'signature', 'status', 'decidedBy', 'decidedAt', 'note']
 const REPORT_KEYS_V2_EARLY = [...REPORT_KEYS_V1, 'writer', 'group']
@@ -780,12 +787,43 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       if (!isLowerHex(member, 32)) throw fail('nao-encontrado')
       const listed = blockedSet(state.published.snapshot).has(member)
       if (!listed && lastIndexFor(state.pending, member) === -1) throw fail('nao-encontrado')
+      // An Excluir conta block waiting for the operator: only the operator's
+      // own `mod unblock`, at a terminal, may undo a deletion.
+      if (state.pending.some((c) => c.member === member && c.by === OWNER_ACTOR)) throw fail('conta-excluida')
       const before = netBlockedCount(state)
       const next = cloneState(state)
       const { change } = setIntent(next, member, false, by, [], 'pedido')
       checkCapacity(before, next)
       persist(next)
       return { change: change === null ? null : copyChange(change) }
+    })
+  }
+
+  // Excluir conta: a block of the member's own diary, asked by the member
+  // (by OWNER_ACTOR, no report). Already in the published list, or an owner
+  // block already pending: nothing new ('igual'). Blocked only through
+  // someone else's pending change (a moderator's or the AI's), the owner's
+  // block is appended anyway: the panel can then never drop the deletion
+  // (cancel refuses an owner change) and `mod apply --yes` signs it (an
+  // AI-only block would wait for a terminal). -> { change | null, kind }.
+  function requestDeletion (member) {
+    return enqueue(() => {
+      usable()
+      if (!isLowerHex(member, 32)) throw fail('pedido-invalido')
+      if (state.pending.some((c) => c.member === member && c.op === 'block' && c.by === OWNER_ACTOR)) return { change: null, kind: 'igual' }
+      const before = netBlockedCount(state)
+      const next = cloneState(state)
+      let { change, kind } = setIntent(next, member, true, OWNER_ACTOR, [], 'exclusao')
+      if (change === null && !blockedSet(next.published.snapshot).has(member)) {
+        if (next.pending.length >= MAX_PENDING) throw fail('lotado')
+        change = { id: newId(), op: 'block', member, by: OWNER_ACTOR, at: iso(now()), reportIds: [], claimedAt: null }
+        next.pending.push(change)
+        event(next, { by: OWNER_ACTOR, action: 'exclusao', member, changeId: change.id })
+        kind = 'novo'
+      }
+      checkCapacity(before, next)
+      persist(next)
+      return { change: change === null ? null : copyChange(change), kind }
     })
   }
 
@@ -800,6 +838,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       const i = typeof changeId === 'string' ? state.pending.findIndex((c) => c.id === changeId) : -1
       if (i === -1) throw fail('nao-encontrado')
       const c = state.pending[i]
+      if (c.by === OWNER_ACTOR) throw fail('conta-excluida')
       const before = netBlockedCount(state)
       const next = cloneState(state)
       let change = null
@@ -835,6 +874,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
   // each marked claimed (persisted) so a later cancel compensates instead of
   // deleting. A claimed change that is never acked is returned again.
   // `actor` is AI_ACTOR ('ia') when the triage worker created the change and
+  // OWNER_ACTOR ('titular') for an Excluir conta request, and
   // 'pessoa' otherwise; the moderator's `by` (an e-mail) never leaves the
   // store. A human report that later joins an AI-created block change (see
   // decide()) keeps by 'ia', so the operator still reads it as an AI block
@@ -851,7 +891,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
         persist(next)
       }
       return {
-        changes: changes.map(({ id, op, member, at, by }) => ({ id, op, member, at, actor: by === AI_ACTOR ? AI_ACTOR : HUMAN_ACTOR })),
+        changes: changes.map(({ id, op, member, at, by }) => ({ id, op, member, at, actor: by === AI_ACTOR || by === OWNER_ACTOR ? by : HUMAN_ACTOR })),
         published: { snapshot: copySnapshot(state.published.snapshot) }
       }
     })
@@ -1027,7 +1067,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     return false
   }
 
-  return { add, addDm, anexoOf, list, get, decide, unblock, cancel, pending, pull, ack, newestModeratorDate, blocked, groupKeys, stats, exportRows, humanReversed }
+  return { add, addDm, anexoOf, list, get, decide, unblock, requestDeletion, cancel, pending, pull, ack, newestModeratorDate, blocked, groupKeys, stats, exportRows, humanReversed }
 }
 
 module.exports = {
@@ -1039,6 +1079,7 @@ module.exports = {
   MAX_BLOCKED,
   NOTE_MAX,
   AI_ACTOR,
+  OWNER_ACTOR,
   ANEXO_MAX_BYTES,
   ANEXO_MIMES,
   MAX_STORED_ANEXOS,

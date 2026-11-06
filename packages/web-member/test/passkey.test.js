@@ -463,6 +463,42 @@ test('signIn: discoverable, userHandle, errors', async (t) => {
   t.is(await codeOf(invalid.run((c) => signIn(c, { rpId: RP_ID }))), 'WEBAUTHN', 'InvalidStateError on get -> WEBAUTHN')
 })
 
+test('verify: no PRF asked, a PRF handed back is wiped, UV required, errors mapped', async (t) => {
+  const { verify } = passkey
+  const uv = (flags) => { const d = new Uint8Array(37); d[32] = flags; return d.buffer }
+  const verified = (extra = {}) => ({ ...fakeCredential(extra), response: { userHandle: null, authenticatorData: uv(0x05) } })
+  const id = toBase64Url(new Uint8Array([1, 2, 3, 4]))
+
+  t.absent('extensions' in getOptions({ rpId: RP_ID, prf: false }), 'prf: false leaves the extension out')
+  t.ok('extensions' in getOptions({ rpId: RP_ID }), 'the default still asks for it')
+
+  const box = fakeContainer({ get: verified() })
+  t.alike(await box.run((c) => verify(c, { rpId: RP_ID, allowCredentialIds: [id] })), { credentialId: id })
+  const call = box.calls.get[0]
+  t.ok(call.synchronous, 'get() called before the caller awaited')
+  t.absent('extensions' in call.options.publicKey, 'no PRF requested')
+  t.is(call.options.publicKey.userVerification, 'required')
+  t.alike(call.options.publicKey.allowCredentials.map((c) => toBase64Url(c.id)), [id])
+
+  const discoverable = fakeContainer({ get: verified() })
+  await discoverable.run((c) => verify(c, { rpId: RP_ID }))
+  t.absent('allowCredentials' in discoverable.calls.get[0].options.publicKey, 'discoverable without ids')
+
+  const first = new Uint8Array(32).fill(9)
+  const withPrf = fakeContainer({ get: verified({ prf: { results: { first } } }) })
+  t.alike(await withPrf.run((c) => verify(c, { rpId: RP_ID })), { credentialId: id })
+  t.ok(first.every((x) => x === 0), 'a PRF output handed back anyway is wiped')
+
+  const noUv = fakeContainer({ get: { ...fakeCredential(), response: { authenticatorData: uv(0x01) } } })
+  t.is(await codeOf(noUv.run((c) => verify(c, { rpId: RP_ID }))), 'WEBAUTHN', 'UV clear -> WEBAUTHN')
+  const noData = fakeContainer({ get: fakeCredential() })
+  t.is(await codeOf(noData.run((c) => verify(c, { rpId: RP_ID }))), 'WEBAUTHN', 'no authenticator data -> WEBAUTHN')
+  t.is(await codeOf(fakeContainer({ get: null }).run((c) => verify(c, { rpId: RP_ID }))), 'WEBAUTHN', 'no credential -> WEBAUTHN')
+  t.is(await codeOf(fakeContainer({ get: domError('NotAllowedError') }).run((c) => verify(c, { rpId: RP_ID }))), 'CANCELLED')
+  t.is(await codeOf(fakeContainer({ get: domError('SecurityError') }).run((c) => verify(c, { rpId: RP_ID }))), 'UNSUPPORTED')
+  t.is(await codeOf(fakeContainer({ get: domError('UnknownError') }).run((c) => verify(c, { rpId: RP_ID }))), 'WEBAUTHN')
+})
+
 test('derivation end to end: same passkey output, same identity', async (t) => {
   const box = fakeContainer({ get: () => fakeCredential({ prf: { results: { first: new Uint8Array(GOLDEN_PRF) } } }) })
   const a = await box.run((c) => signIn(c, { rpId: RP_ID }))

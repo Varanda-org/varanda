@@ -324,6 +324,35 @@ function openInviteDrops (dataDir, { perWeek, now = Date.now, guard = () => true
     })
   }
 
+  // Excluir conta: drops the member's rows of every week. -> { changed }
+  function forget (member) {
+    return enqueue(() => {
+      if (!isLowerHex(member, 32)) throw new TypeError('member must be 64 lowercase hex characters')
+      writable()
+      const { next, stale } = reread()
+      let changed = false
+      for (const [k, r] of next) {
+        if (r.member !== member) continue
+        next.delete(k)
+        changed = true
+      }
+      if (!changed) {
+        if (stale) persist(next)
+        else rows = next
+        return { changed: false }
+      }
+      persist(next)
+      return { changed: true }
+    })
+  }
+
+  function holds (member) {
+    for (const r of rows.values()) {
+      if (r.member === member) return true
+    }
+    return false
+  }
+
   function markNotified (member, week, slots) {
     return markBatch([{ member, week, slots }])
   }
@@ -398,6 +427,8 @@ function openInviteDrops (dataDir, { perWeek, now = Date.now, guard = () => true
     topic,
     markNotified,
     markBatch,
+    forget,
+    holds,
     wasNotified,
     heal,
     fail () { failed = true }

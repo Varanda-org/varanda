@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 20)
+  t.is(LEGAL_VERSION, 21)
   t.is(LEGAL_DATE, '06/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 20, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 21, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: complete documents with plain, visible text and project URLs', async (t) => {
@@ -56,7 +56,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'da12125e6269727f63defe7afb75c722b9f54906e75a39ea4e3b9f1bae38339f', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '79b87ff5915b79b94e7cb4bdc8e20cdcc7021b722b5173d6f010273dec35dea1', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
@@ -147,4 +147,19 @@ test('legal: version 20 describes GIF search through the account service', async
   for (const name of ['Giphy', 'GIPHY', 'Tenor', 'Klipy']) {
     t.absent(text(TERMS).includes(name) || text(PRIVACY).includes(name), 'no provider name: ' + name)
   }
+})
+
+test('legal: version 21 describes Excluir conta, what goes, what stays and the 7 days', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(text(doc).includes('Ajustes, na tela Excluir conta'), doc.title + ': where to delete')
+    t.absent(text(doc).includes('exclusão de conta por conta própria'), doc.title + ': no claim that it is missing')
+    t.absent(text(doc).includes('não permite excluir a conta'), doc.title + ': no claim that it is missing')
+  }
+  t.ok(text(TERMS).includes('em até 7 dias'))
+  t.ok(text(TERMS).includes('encerrá-la ou transferi-la antes'))
+  t.ok(text(TERMS).includes('deixam de existir para todos os participantes'))
+  t.ok(text(PRIVACY).includes('Ficam a chave pública, a data da exclusão e os @nomes já usados'))
+  t.ok(text(PRIVACY).includes('A mesma conta Google pode criar uma conta nova'))
 })

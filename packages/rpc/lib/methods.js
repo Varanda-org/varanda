@@ -248,7 +248,7 @@ function postCross (given, value) {
 
 // account.sign (docs/rpc.md 5.18). Duplicated from
 // @varanda/core lib/account-link.js, which this package cannot import.
-const ACCOUNT_PHASES = ['reserve', 'finish', 'rename']
+const ACCOUNT_PHASES = ['reserve', 'finish', 'rename', 'delete']
 const NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
 const SUB_RE = /^[\x21-\x7e]{1,255}$/
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/

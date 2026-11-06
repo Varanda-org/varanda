@@ -476,6 +476,27 @@ function openRecoveryStore (dataDir, { now = Date.now, readOnly = false, guard =
     })
   }
 
+  // Excluir conta: every entry of `member` in one write, each leaving the
+  // same tombstone remove() leaves. -> { changed }
+  function removeMember (member) {
+    return enqueue(() => {
+      if (!validMember(member)) throw new TypeError('member must be 64 lowercase hex characters')
+      const { next, stale } = reread()
+      const ids = Object.keys(next.entries).filter((id) => next.entries[id].member === member)
+      if (ids.length === 0) {
+        settle(next, stale)
+        return { changed: false }
+      }
+      const nowMs = now()
+      for (const id of ids) {
+        delete next.entries[id]
+        next.removed[id] = { member, removedAt: new Date(nowMs).toISOString(), gen: nextGen(next) }
+      }
+      persist(normalize(next, nowMs))
+      return { changed: true }
+    })
+  }
+
   // Writes the merge of the file and memory back when the file lacks
   // anything this holder knows (a stale writer's rename may have dropped an
   // acknowledged row or tombstone) or a previous write failed. True when it
@@ -544,6 +565,7 @@ function openRecoveryStore (dataDir, { now = Date.now, readOnly = false, guard =
   return {
     put,
     remove,
+    removeMember,
     heal,
     list,
     fetch,

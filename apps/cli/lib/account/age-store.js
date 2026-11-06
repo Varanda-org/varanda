@@ -216,6 +216,32 @@ function openAgeStore (dataDir, { now = Date.now, guard = () => true, readOnly =
     })
   }
 
+  // Excluir conta: drops the member's age record (as terms-store forget).
+  // -> { changed }
+  function forget (member) {
+    return enqueue(() => {
+      if (!validMember(member)) throw new TypeError('member must be 64 lowercase hex characters')
+      usable()
+      if (readOnly || !guard()) throw fail('indisponivel')
+      let disk
+      try {
+        disk = readState(file)
+      } catch {
+        failed = true
+        throw fail('indisponivel')
+      }
+      const next = merge(state, disk)
+      if (!has(next.members, member)) {
+        if (dirty || canonical(next) !== canonical(disk || emptyState())) persist(next)
+        else state = next
+        return { changed: false }
+      }
+      delete next.members[member]
+      persist(next)
+      return { changed: true }
+    })
+  }
+
   // True when it wrote. Never throws, never writes a file it would not have
   // written.
   function heal () {
@@ -261,6 +287,7 @@ function openAgeStore (dataDir, { now = Date.now, guard = () => true, readOnly =
 
   return {
     record,
+    forget,
     get,
     verified,
     earliest,

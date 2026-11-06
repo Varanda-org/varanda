@@ -29,6 +29,8 @@
 // the key can still sign; a failure there never stops them.
 // Passkeys e recuperação (hosted passkey node, unlocked) opens the extra
 // passkeys and the recovery code of the account (./Passkeys.js).
+// Excluir conta (hosted passkey node, unlocked), under Sair, opens
+// ./ExcluirConta.js: App Store guideline 5.1.1(v), deletion starts in the app.
 // The footer under the list shows the build and the commit the installation
 // serves, only through the src/version.js formatters, and a tap copies them.
 
@@ -58,6 +60,7 @@ import { installationOrigin } from '../installation'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import Conexao from './Conexao'
+import ExcluirConta from './ExcluirConta'
 import Convites from './Convites'
 import Identidade from './Identidade'
 import Passkeys from './Passkeys'
@@ -83,7 +86,8 @@ const TITLES = {
   conexao: 'Conexão',
   sincronizar: 'Sincronização',
   identidade: 'Identidade técnica',
-  convites: 'Convidar pessoas'
+  convites: 'Convidar pessoas',
+  excluir: 'Excluir conta'
 }
 
 const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use qualquer passkey cadastrada nesta conta ou o código de recuperação.'
@@ -399,6 +403,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 <>
                   <View style={styles.group}>
                     <Item first icon='log-out' label='Sair' trailing={null} onPress={() => { exit.clearError(); setConfirm(confirm === 'sair' ? null : 'sair') }} />
+                    {account ? <Item icon='lixeira' label='Excluir conta' onPress={() => { setConfirm(null); onNavigate('excluir') }} /> : null}
                   </View>
                   {confirm === 'sair'
                     ? (
@@ -495,6 +500,19 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           ? (
             <View style={shown('passkeys')}>
               <Passkeys active={ready && screen === 'passkeys'} embedded />
+            </View>
+            )
+          : null}
+        {account && unlocked
+          ? (
+            <View style={shown('excluir')}>
+              <ExcluirConta
+                active={ready && screen === 'excluir'}
+                member={member}
+                onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function' ? openPaginas : undefined}
+                onTermsReset={onTermsReset}
+                onDone={onClose}
+              />
             </View>
             )
           : null}

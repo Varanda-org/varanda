@@ -28,6 +28,10 @@
 // addPasskey(), bindPasskey({ credentialId, userId }), makeRecoveryCode() and
 // cancelRecovery() pass through and re-read the status; addPasskey and
 // finishRecovery run a ceremony, so they are called synchronously too.
+// confirm() is the handle's identity.confirm() (docs/rpc.md section 11): a
+// fresh passkey check before a step the kept session alone must not
+// authorize (deleting the account). Called synchronously as well, it is a
+// check only: no status re-read, no epoch or generation bump, `error` kept.
 // `recovering` is true from an unlock until the once sync that follows it
 // (recover()) has ended: one shared flag, so no screen sends a member request
 // meanwhile (it would preempt that run, docs/rpc.md 6.1). A run preempted
@@ -154,6 +158,8 @@ function recoveryError (message, code) {
   return err
 }
 const RECOVERY_TIMEOUT_MS = 30000
+// A handle from an older node script that lacks the identity method.
+const MISSING_OP_TEXT = 'este aparelho ainda não tem essa função; atualize o Varanda'
 
 function appendLine (prev, line) {
   const lines = prev.lines.concat([line])
@@ -283,6 +289,7 @@ function VitrineNodeProvider ({ children }) {
         bindPasskey: unavailable,
         makeRecoveryCode: unavailable,
         cancelRecovery: unavailable,
+        confirm: unavailable,
         recovering: false,
         beginRecovery: () => {},
         endRecovery: () => {},
@@ -851,7 +858,7 @@ function LiveNodeProvider ({ children }) {
     try {
       // A node script without signOut (an older build) locks instead.
       const op = name === 'signOut' && typeof conn.identity.signOut !== 'function' ? 'lock' : name
-      if (typeof conn.identity[op] !== 'function') throw recoveryError('este aparelho ainda não tem essa função; atualize o Varanda', 'UNSUPPORTED')
+      if (typeof conn.identity[op] !== 'function') throw recoveryError(MISSING_OP_TEXT, 'UNSUPPORTED')
       pending = ARG_OPS.has(op) ? conn.identity[op](arg) : conn.identity[op]()
     } catch (err) {
       pending = Promise.reject(err)
@@ -933,6 +940,18 @@ function LiveNodeProvider ({ children }) {
   const pkLock = useCallback(() => passkeyOp('lock'), [passkeyOp])
   const pkSignOut = useCallback(() => passkeyOp('signOut'), [passkeyOp])
   const pkReset = useCallback(() => passkeyOp('reset'), [passkeyOp])
+  // Not a passkeyOp: a pure check never touches the status, epoch or
+  // generation. Synchronous in the press (WebAuthn).
+  const pkConfirm = useCallback(() => {
+    const conn = connRef.current
+    if (!conn || !conn.identity) return noConnection()
+    try {
+      if (typeof conn.identity.confirm !== 'function') throw recoveryError(MISSING_OP_TEXT, 'UNSUPPORTED')
+      return Promise.resolve(conn.identity.confirm())
+    } catch (err) {
+      return Promise.reject(err)
+    }
+  }, [])
   const pkRefresh = useCallback(() => readPasskey(), [readPasskey])
 
   // The recovery after an unlock. beginRecovery() is called (synchronously)
@@ -1305,8 +1324,8 @@ function LiveNodeProvider ({ children }) {
 
   const recovering = recovery !== null
   const passkey = useMemo(() => (hasPasskey
-    ? { status: pkStatus, error: pkError, generation: pkGeneration, refresh: pkRefresh, unlock: pkUnlock, complete: pkComplete, lock: pkLock, signOut: pkSignOut, reset: pkReset, unlockWithCode: pkUnlockWithCode, finishRecovery: pkFinishRecovery, addPasskey: pkAddPasskey, bindPasskey: pkBindPasskey, makeRecoveryCode: pkMakeRecoveryCode, cancelRecovery: pkCancelRecovery, recovering, beginRecovery, endRecovery, recover }
-    : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkSignOut, pkReset, pkUnlockWithCode, pkFinishRecovery, pkAddPasskey, pkBindPasskey, pkMakeRecoveryCode, pkCancelRecovery, recovering, beginRecovery, endRecovery, recover])
+    ? { status: pkStatus, error: pkError, generation: pkGeneration, refresh: pkRefresh, unlock: pkUnlock, complete: pkComplete, lock: pkLock, signOut: pkSignOut, reset: pkReset, unlockWithCode: pkUnlockWithCode, finishRecovery: pkFinishRecovery, addPasskey: pkAddPasskey, bindPasskey: pkBindPasskey, makeRecoveryCode: pkMakeRecoveryCode, cancelRecovery: pkCancelRecovery, confirm: pkConfirm, recovering, beginRecovery, endRecovery, recover }
+    : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkSignOut, pkReset, pkUnlockWithCode, pkFinishRecovery, pkAddPasskey, pkBindPasskey, pkMakeRecoveryCode, pkCancelRecovery, pkConfirm, recovering, beginRecovery, endRecovery, recover])
 
   // Thin pass-through to the handle (see the header).
   const mediaUpload = useCallback((args) => {

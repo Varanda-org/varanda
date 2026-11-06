@@ -64,7 +64,9 @@ import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin } from './src/installation'
 import { NamesProvider, useNames } from './src/names'
-import { agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
+import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
+import { deletedOf, newReceipt } from './src/accountDeletion'
+import { loadDeletionReceipt, saveDeletionReceipt } from './src/deletionReceiptStore'
 import { ageBlocking, ageErrorText, ageGate, ageReadAllowed, parseReturnAge } from './src/age'
 import { ageAnswerOutcome, ageStateShown, nodeVouches } from './src/ageMemory.js'
 import * as nav from './src/nav'
@@ -143,6 +145,7 @@ import * as actingAs from './src/actingAs'
 import Publicar from './src/screens/Publicar'
 import Seguindo from './src/screens/Seguindo'
 import Termos from './src/screens/Termos'
+import { ContaExcluida, ExclusaoRecibo } from './src/screens/ExcluirConta'
 import { clearChatMedia, onAppStateChange, stopPlayback } from './src/media/chatMedia'
 import { sweepVoiceCache } from './src/media/audio'
 
@@ -465,6 +468,17 @@ function Member () {
   const member = passkey !== null
     ? ((!locked && pkStatus && pkStatus.publicKey) || null)
     : ((info && info.publicKey) || null)
+  // Excluir conta: an unlocked key the account service deleted (another
+  // device asked, or this one could not wipe) is held on a notice, before
+  // the terms gate, until it is erased here. Read once per unlocked member.
+  const [deletedState, setDeletedState] = useState(null)
+  useEffect(() => {
+    setDeletedState(null)
+    if (node.hosted !== true || member === null) return
+    let alive = true
+    accountStatus(member).then((st) => { if (alive) setDeletedState(deletedOf(st)) }, () => {})
+    return () => { alive = false }
+  }, [node.hosted, member])
   const decision = terms.status === 'loading'
     ? 'loading'
     : termsDecision({
@@ -1883,6 +1897,21 @@ function Member () {
   // #varanda-pre-splash happens only when the real screen is ready.
   if (loadingGate || holding) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
   if (showIntro) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
+  if (deletedState !== null && member !== null && passkey !== null) {
+    const erase = async () => {
+      const key = member
+      if (!outbox.forgetAuthor(key)) throw new Error('não foi possível apagar as publicações que aguardam envio neste aparelho')
+      if ((await loadDeletionReceipt()) === null) await saveDeletionReceipt(newReceipt(key, Date.now()))
+      await passkey.reset()
+      dropTermsAndSync(key)
+    }
+    return (
+      <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
+        <ContaExcluida state={deletedState} onErase={erase} />
+        <StatusBar style={statusBarStyle(scheme)} />
+      </SafeAreaView>
+    )
+  }
   if (showTerms) {
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
@@ -1985,6 +2014,7 @@ function Member () {
       <View style={[styles.shell, wide && styles.shellWide]}>
         <TopBar title={STEP_TITLES[step]} right={HELP[step] ? <HelpButton key={step} doc={HELP[step]} /> : null} />
         <OfflineNote />
+        <ExclusaoRecibo />
         {/* Without the Conexão link (hosted page) the body clears the home indicator itself. */}
         <View style={[styles.flex, connectionLink === null && { paddingBottom: insets.bottom }]}>{body}</View>
         {connectionLink}

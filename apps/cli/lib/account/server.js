@@ -14,6 +14,8 @@ const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 const { createAgeRoutes } = require('./age-routes')
 const { createRecoveryRoutes } = require('./recovery-routes')
+const { createDeleteRoutes } = require('./delete-routes')
+const { createDeletionSweep } = require('./deletion')
 const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, mintRedeem, redeemMatches, accountReturnUrl, appReturnPage, header } = require('./app-return')
 const { createPagesRoutes } = require('./pages-routes')
 const { createGifRoutes } = require('./gif-routes')
@@ -124,6 +126,10 @@ const ERROR_STATUS = Object.freeze({
   // confirm as a served diary (it could be a group root).
   'alvo-nao-confirmado': 409,
   'ja-revertido': 409,
+  // Excluir conta (./delete-routes.js): the key deleted its account, and a
+  // person who still owns a live page is asked to close or hand it over first.
+  'conta-excluida': 409,
+  'paginas-ativas': 409,
   // Sign-up invites (./invites-store.js): one public token for an unknown,
   // used, expired or held code.
   'convite-obrigatorio': 403,
@@ -645,6 +651,8 @@ function checkRawPost (req, origin) {
 // `recovery` is an openRecoveryStore (./recovery-store.js), or null: the
 // recovery routes (./recovery-routes.js) then answer 503 'indisponivel' and
 // everything else stays up.
+// `drops` is the surprise-invite ledger (./invite-drops.js) or null, only so
+// Excluir conta (./delete-routes.js, ./deletion.js) can purge its marks.
 function createAccountServer ({
   association,
   origin,
@@ -675,6 +683,7 @@ function createAccountServer ({
   gif = null,
   gifTransport = {},
   recovery = null,
+  drops = null,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -751,6 +760,44 @@ function createAccountServer ({
     directoryFloor: ageDirectoryFloor,
     issuer,
     http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
+  })
+
+  // Excluir conta: always mounted. The sweep purges the other stores for
+  // every deleted key; serve() runs it at start and then periodically.
+  const deletion = createDeletionSweep({
+    accounts: store,
+    terms,
+    ages,
+    pushStore: push !== null && push.pushStore ? push.pushStore : null,
+    recovery,
+    invites,
+    drops,
+    log
+  })
+  const publishedList = moderationBlocklist(moderation)
+  function inPublishedList (key) {
+    try {
+      return publishedList !== null && publishedList.has(key)
+    } catch {
+      return false
+    }
+  }
+  const deleteRoutes = createDeleteRoutes({
+    accounts: store,
+    moderation,
+    pagesStore: pages !== null && pages.pagesStore ? pages.pagesStore : null,
+    purge: deletion.purge,
+    isBlocked: inPublishedList,
+    association,
+    now,
+    log,
+    memberLimit: keyedWindow(5, 600 * 1000, now),
+    send,
+    refuse,
+    fromStore,
+    checkPost: (req, opts) => checkPost(req, origin, opts),
+    readJsonBody,
+    over
   })
 
   // Always mounted, so a missing or corrupt recovery.json refuses only these
@@ -1328,7 +1375,11 @@ function createAccountServer ({
     const member = memberParam(url.searchParams.get('member'))
     // Member keys are public: the weekly invite counts reach a member only
     // in the signed /account/invites/finish answer, never here.
-    send(res, 200, store.status(member))
+    const st = store.status(member)
+    // A deleted key (Excluir conta): whether the published blocklist holds
+    // it yet, never the date.
+    if (typeof st.deletedAt === 'string') return send(res, 200, { linked: false, deleted: inPublishedList(member) ? 'concluida' : 'pendente' })
+    send(res, 200, st)
   }
 
   // Exact keys: the app decides from `required` alone whether start needs a
@@ -1392,8 +1443,8 @@ function createAccountServer ({
 
   // The terms routes need no issuer (an unconfigured service still records
   // acceptances) and never the member cap: only an already linked member
-  // can accept, and it is a member already. Links are never removed (the
-  // store has no unlink op), so a link checked at start still holds.
+  // can accept, and it is a member already. Excluir conta can remove the
+  // link between start and finish, so finish checks it again.
   function termsAvailable () {
     if (terms === null || !terms.available()) throw refuse('indisponivel')
   }
@@ -1543,6 +1594,7 @@ function createAccountServer ({
     if (pushRoutes !== null && pushRoutes.owns(pathname)) return pushRoutes.handle(req, res, url)
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
     if (recoveryRoutes.owns(pathname)) return recoveryRoutes.handle(req, res, url)
+    if (deleteRoutes.owns(pathname)) return deleteRoutes.handle(req, res, url)
     if (pagesRoutes.owns(pathname)) return pagesRoutes.handle(req, res, url)
     if (gifRoutes.owns(pathname)) return gifRoutes.handle(req, res, url)
     if (req.method === 'GET') {
@@ -1638,7 +1690,7 @@ function createAccountServer ({
     return pushRoutes === null ? 0 : pushRoutes.room()
   }
 
-  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), pagesStats: () => pagesRoutes.stats(), gifStats: () => gifRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), gifStats: () => gifRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {

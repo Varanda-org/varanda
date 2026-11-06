@@ -715,6 +715,7 @@ async function serve (flags, env) {
   let drops = null
   let stopDropsHeal = null
   let loop = null
+  let stopDeletionSweep = null
   let stopPushHeal = null
   let pageKeys = null
   let pagesWriter = null
@@ -877,7 +878,7 @@ async function serve (flags, env) {
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
       const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, invites, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, invites, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -885,6 +886,11 @@ async function serve (flags, env) {
         throw new Error('não foi possível abrir o serviço de conta (' + safe(err.code || err.message) + ')')
       }
       log({ event: 'listening', host: listener.host, port: listener.port })
+      // Excluir conta: data of keys deleted before this start that a store
+      // could not drop then (or a stale writer brought back) goes now, and
+      // then every hour.
+      await server.deletionSweep()
+      stopDeletionSweep = server.startDeletionSweep()
       if (drops !== null) {
         loop = startInviteDropLoop({
           drops,
@@ -906,6 +912,7 @@ async function serve (flags, env) {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     if (listener) await listener.close()
+    if (stopDeletionSweep !== null) stopDeletionSweep()
     // A tick in flight writes the drops ledger: it ends before the lock goes.
     if (loop !== null) await loop.stop()
     // The page links close before the lock goes: nothing is appended after it.

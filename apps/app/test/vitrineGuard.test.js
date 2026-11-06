@@ -200,7 +200,7 @@ test('the Vitrine node refuses identity and connection changes', (t) => {
   t.ok(start > 0 && end > start)
   const body = code.slice(start, end)
   t.ok(/const unavailable = \(\) => Promise\.reject\(Object\.assign\(new Error\('indisponível no modo vitrine'\), \{ code: 'USAGE' \}\)\)/.test(body))
-  for (const op of ['restart', 'connect', 'forgetConfig', 'unlock', 'complete', 'lock', 'signOut', 'reset']) {
+  for (const op of ['restart', 'connect', 'forgetConfig', 'unlock', 'complete', 'lock', 'signOut', 'reset', 'confirm']) {
     t.ok(new RegExp('\\b' + op + ': unavailable,').test(body), op + ' refuses')
   }
 })
