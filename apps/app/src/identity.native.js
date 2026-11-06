@@ -15,6 +15,17 @@
 // worklet's signedOut marker first (identity.forget, 5.54), then deletes the
 // stored item; when that delete fails it rejects SIGNOUT_INCOMPLETE with the
 // node locked.
+//
+// Recovery (docs/rpc.md 5.91 to 5.94): a passkey whose user id ends with
+// WRAP_MARK holds no diary key of its own; its PRF output only opens a
+// wrapped copy of the original one (the root) that the account service
+// keeps. signIn() never installs such a PRF: it asks the worklet for the
+// lookup id (identity.recoveryLookup, which keeps the wrap key) and resolves
+// { wrapped, lookupId }; the app fetches the blob and unlockWrapped() opens it
+// in the worklet (identity.recoveryOpen) and installs the ROOT, so the stored
+// session holds the root too. A recovery code works the same way, then
+// finishRecovery() creates a marked passkey for the root. No HTTP here: the
+// app (src/node.js) talks to the account service.
 
 import * as PasskeyPrf from '../modules/passkey-prf'
 import { keychainEpoch, sessionStore } from './sessionStore'
@@ -44,6 +55,27 @@ const SIGNED_OUT_TEXT = 'sessão encerrada neste aparelho: entre com a passkey'
 const SIGNOUT_INCOMPLETE_TEXT = 'não foi possível sair por completo neste aparelho: tente de novo'
 const KNOWN_CODES = ['CANCELLED', 'EXISTS', 'UNSUPPORTED', 'NO_PRF', 'WEBAUTHN', 'NOT_SYNCED', 'NONE']
 const MISSING_TEXT = 'a passkey criada não foi encontrada; toque em Criar passkey de novo'
+// apps/app/worklet/identity-install.js BAD_ENTRY (docs/rpc.md 5.92).
+const BAD_ENTRY_TEXT = 'entrada de recuperação inválida'
+const RECOVERY_EXPIRED_TEXT = 'o tempo da recuperação acabou: entre de novo'
+const SIGN_IN_FIRST_TEXT = 'essa passkey não pôde ser concluída: entre com a sua passkey ou com o código de recuperação'
+const RECOVERY_UNDONE_TEXT = 'não deu para concluir a recuperação: entre com o código de novo'
+const RECOVERY_MS = 120 * 1000
+
+// packages/web-member/lib/recovery.js WRAP_MARK ('varanda-wrap-v1\n'),
+// duplicated as passkeyOptions.js duplicates PRF_INPUT: Metro cannot import
+// web-member (metro.config.js).
+export const WRAP_MARK_HEX = '766172616e64612d777261702d76310a'
+const WRAP_MARK_BYTES = WRAP_MARK_HEX.length / 2
+// The bound user id of a recovery passkey whose manager returned no user
+// handle: its real one is unknown, but the record must still say "wrapping",
+// or the next sign-in without a handle would install that passkey's own PRF.
+export const UNKNOWN_WRAP_USER_ID = '00'.repeat(32 - WRAP_MARK_BYTES) + WRAP_MARK_HEX
+
+// A hex64 user handle whose LAST 16 bytes are WRAP_MARK.
+export function isWrapUserId (hex) {
+  return typeof hex === 'string' && /^[0-9a-f]{64}$/.test(hex) && hex.slice(64 - WRAP_MARK_HEX.length) === WRAP_MARK_HEX
+}
 
 function codedError (code, message) {
   const err = new Error(message)
@@ -64,6 +96,16 @@ function mapCeremonyError (err) {
 }
 
 function noop () {}
+
+// A failure after the manager stored a passkey names it, so the person can
+// find it and delete it there (nothing is deleted automatically).
+function createdError (err, credentialId, userId) {
+  const out = err instanceof Error ? err : new Error(String(err && err.message ? err.message : err))
+  if (err && typeof err.code === 'string' && out.code === undefined) out.code = err.code
+  out.credentialId = credentialId
+  if (userId !== '') out.userId = userId
+  return out
+}
 
 function validId (id) {
   if (typeof id !== 'string' || id === '') return false
@@ -89,7 +131,7 @@ function validId (id) {
 // installed) and rejects CANCELLED. signOut and reset wait for the
 // post-ceremony part in flight (`finishing`) before they delete the stored
 // session, so a save racing 'Sair' is deleted after it.
-export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = PasskeyPrf, store = sessionStore, epoch = keychainEpoch, local = passkeyLocal, random = randomBytes } = {}) {
+export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = PasskeyPrf, store = sessionStore, epoch = keychainEpoch, local = passkeyLocal, random = randomBytes, now = Date.now } = {}) {
   if (typeof request !== 'function') throw new TypeError('request required')
   if (typeof rpIdOf !== 'function') throw new TypeError('rpId required')
 
@@ -109,6 +151,52 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   let loading = Promise.resolve()
   let resuming = Promise.resolve()
   let epochChecked = false
+  // The recovery waiting for the app's fetch: { kind: 'passkey' | 'code',
+  // credentialId, userId, expiresAt }. No PRF output is held: the worklet
+  // keeps the wrap key.
+  let awaiting = null
+  // The root opened from a code, waiting for finishRecovery():
+  // { prfHex, publicKey, expiresAt, pinned }. A string cannot be zero-filled:
+  // it is dropped. pinned: a creation for it is running or pending, so it
+  // does not expire until that settles or the person cancels.
+  let heldRoot = null
+  // { credentialId, userId } of the last install of this run: a passkey the
+  // worklet bound even when its status was read before.
+  let installedCred = null
+
+  function dropAwaiting () {
+    awaiting = null
+  }
+
+  function dropRecovery () {
+    dropAwaiting()
+    heldRoot = null
+  }
+
+  function heldRootValid () {
+    return heldRoot !== null && (heldRoot.pinned === true || now() <= heldRoot.expiresAt)
+  }
+
+  // A creation for the held root settled without using it: the person gets
+  // a fresh window to try again.
+  function unpinHeldRoot () {
+    if (heldRoot !== null && heldRoot.pinned === true) {
+      heldRoot = { ...heldRoot, pinned: false, expiresAt: now() + RECOVERY_MS }
+    }
+  }
+
+  function recoveryExpired () {
+    return codedError('RECOVERY_BAD', RECOVERY_EXPIRED_TEXT)
+  }
+
+  function wrapUserId () {
+    const out = new Uint8Array(USER_ID_BYTES)
+    const rand = random(USER_ID_BYTES - WRAP_MARK_BYTES)
+    out.set(rand)
+    rand.fill(0)
+    for (let i = 0; i < WRAP_MARK_BYTES; i++) out[USER_ID_BYTES - WRAP_MARK_BYTES + i] = parseInt(WRAP_MARK_HEX.slice(i * 2, i * 2 + 2), 16)
+    return out
+  }
 
   // The durable record of rpId, read once (per rp.id) before any ceremony.
   function loadLocal (rpId) {
@@ -266,6 +354,9 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       installed = true
       if (prfBytes !== null) prfBytes.fill(0)
       if (gen !== generation) throw cancelled()
+      installedCred = { credentialId, userId: typeof userId === 'string' ? userId : '' }
+      // A recovery left armed must never install over this sign-in later.
+      dropRecovery()
       if (resumed) {
         done = true
         return { publicKey: result.publicKey, created }
@@ -320,8 +411,21 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
 
   // knownUserId: the pending creation's user id (complete), else null: the
   // assertion's user handle is used only when it is a 32-byte one (the
-  // worklet takes hex64 or ''; status does not expose a bound userId).
-  async function signIn (gen, rpId, allowCredentialIds, created, knownUserId = null) {
+  // worklet takes hex64 or '').
+  // bound: { credentialId, userId } of the passkey bound to the diary (from
+  // identity.status, read before the ceremony), or null.
+  //
+  // The recovery decision, as the browser handle's: the handle checked for
+  // the mark is the returned one, else the bound passkey's user id when the
+  // credential is the bound one, else the user id of a refused entry for the
+  // credential (an abandoned add or recovery passkey). Marked: never
+  // installed, resolves { wrapped, lookupId }. Anything else installs
+  // directly: a lookup id is never derived from a PRF not known to be a
+  // wrapping passkey's, since an ordinary passkey's PRF is the member root
+  // and the service's answer must never decide what becomes an identity. A
+  // compliant authenticator returns the handle, so only a manager that drops
+  // it loses the recovery path.
+  async function signIn (gen, rpId, allowCredentialIds, created, knownUserId = null, bound = null) {
     const response = await ceremony('get', buildGetOptions({ rpId, challenge: random(CHALLENGE_BYTES), allowCredentialIds }))
     if (gen !== generation) throw cancelled()
     const credentialId = credentialIdOf(response)
@@ -349,21 +453,125 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     // A passkey created here and refused as bound to one device never
     // unlocks, whatever manager offers it later: it would lock the member
     // out of every other device.
-    const bound = boundRefusal(credentialId)
-    if (bound) {
+    const refusal = boundRefusal(credentialId)
+    if (refusal) {
       bytes.fill(0)
-      throw boundError(bound, credentialId, userId)
+      throw boundError(refusal, credentialId, userId)
+    }
+    if (created) {
+      // The pending creation of an add or a code recovery: its PRF only
+      // wraps the root, it never becomes a diary key.
+      if (isWrapUserId(userId)) {
+        if (heldRootValid()) return await finishRecover(gen, rpId, bytes, credentialId, userId)
+        return await finishAdd(gen, rpId, bytes, credentialId, userId)
+      }
+    } else {
+      const known = [bound, installedCred].find((b) => b !== null && b.credentialId === credentialId) || null
+      const entry = known !== null ? null : refused.find((r) => r.credentialId === credentialId && isWrapUserId(r.userId)) || null
+      const fallback = known !== null ? known.userId : (entry !== null ? entry.userId : '')
+      const markHandle = handle !== '' ? handle : (typeof fallback === 'string' ? fallback : '')
+      if (isWrapUserId(markHandle)) return await lookupWrapped(gen, bytes, credentialId, markHandle)
     }
     const out = await track(install(gen, { prfBytes: bytes, credentialId, userId, rpId, created, resumed: false }))
     await settleInstalled(rpId, credentialId)
     return out
   }
 
+  // Asks the worklet for the lookup id of a passkey PRF (the wrap key stays
+  // there), only for a marked passkey. The PRF output is zero-filled here.
+  async function lookupWrapped (gen, bytes, credentialId, userId) {
+    try {
+      if (gen !== generation) throw cancelled()
+      const res = await request('identity.recoveryLookup', { kind: 'passkey', secret: toHex(bytes) })
+      if (gen !== generation) throw cancelled()
+      if (!res || typeof res.lookupId !== 'string') throw passkeyError('WEBAUTHN')
+      dropRecovery()
+      awaiting = { kind: 'passkey', credentialId, userId, expiresAt: now() + RECOVERY_MS }
+      return { wrapped: true, lookupId: res.lookupId }
+    } finally {
+      bytes.fill(0)
+    }
+  }
+
+  // An add: the new passkey's PRF wraps the root held by the unlocked
+  // worklet (identity.recoveryWrap); the session stays the original one.
+  async function finishAdd (gen, rpId, bytes, credentialId, userId) {
+    let hex
+    try { hex = toHex(bytes) } finally { bytes.fill(0) }
+    let wrapped
+    try {
+      if (gen !== generation) throw cancelled()
+      wrapped = await request('identity.recoveryWrap', { kind: 'passkey', secret: hex })
+      if (gen !== generation) throw cancelled()
+    } catch (err) {
+      // A pending creation stays pending: 'concluir' can wrap it once unlocked.
+      throw createdError(err, credentialId, userId)
+    }
+    // An older pending creation replaced by this one stays excluded.
+    supersede(credentialId)
+    await persist(rpId)
+    return { credentialId, userId, lookupId: wrapped.lookupId, blob: wrapped.blob }
+  }
+
+  // The end of a code recovery: the held ROOT is installed bound to the new
+  // marked passkey (its session saved with the root), then wrapped under the
+  // new PRF for the app to register. Anything that stops it after the
+  // install (a failed wrap, a cancel, lock or sign-out meanwhile) rolls back:
+  // a device bound to a passkey with no blob at the service could never be
+  // opened from another device, so the node is relocked, its stored session
+  // deleted and the new passkey refused.
+  async function finishRecover (gen, rpId, bytes, credentialId, userId) {
+    let hex
+    try { hex = toHex(bytes) } finally { bytes.fill(0) }
+    const held = heldRoot
+    if (held === null) throw createdError(recoveryExpired(), credentialId, userId)
+    const rollback = async (publicKey) => {
+      heldRoot = null
+      await request('identity.clear').catch(noop)
+      await store.clear({ rpId, publicKey }).catch(noop)
+      addRefused(credentialId, userId, 'INSTALL_FAILED', true)
+      await persist(rpId)
+      return createdError(codedError('RECOVERY_BAD', RECOVERY_UNDONE_TEXT), credentialId, userId)
+    }
+    // One tracked part: signOut and reset wait for the install, the wrap and
+    // any rollback, so neither races the keychain item or the local record.
+    return await track((async () => {
+      let out
+      try {
+        out = await install(gen, { prfHex: held.prfHex, credentialId, userId, rpId, created: true, resumed: false })
+      } catch (err) {
+        if (heldRoot === held) heldRoot = null
+        // A cancel or lock that landed after the worklet bound the new
+        // passkey (install relocked, but its session may be saved): the same
+        // rollback. A failure before the install changed nothing.
+        if (gen !== generation) {
+          const st = await request('identity.status').catch(() => null)
+          if (st && st.credentialId === credentialId) throw await rollback(held.publicKey)
+        }
+        throw createdError(err, credentialId, userId)
+      }
+      if (heldRoot === held) heldRoot = null
+      try {
+        await settleInstalled(rpId, credentialId)
+        if (gen !== generation) throw cancelled()
+        const wrapped = await request('identity.recoveryWrap', { kind: 'passkey', secret: hex })
+        if (gen !== generation) throw cancelled()
+        return { ...out, credentialId, userId, lookupId: wrapped.lookupId, blob: wrapped.blob }
+      } catch {
+        throw await rollback(out.publicKey)
+      }
+    })())
+  }
+
   // A cancelled or failed ceremony keeps the previous pending creation. A
   // passkey bound to one device (BE clear) is refused before its PRF output
   // is read: it would lock the member out of every other device.
-  async function register (gen, rpId) {
-    const userIdBytes = random(USER_ID_BYTES)
+  //
+  // mode: 'unlock' (a new diary), 'add' (a marked passkey whose PRF wraps
+  // the unlocked root) or 'recover' (a marked passkey for the root a code
+  // opened). The marked modes never install the new PRF output.
+  async function register (gen, rpId, mode = 'unlock') {
+    const userIdBytes = mode === 'unlock' ? random(USER_ID_BYTES) : wrapUserId()
     const userId = toHex(userIdBytes)
     const exclude = new Set((await boundCredentials(rpId)).filter(validId))
     if (pendingReg !== null) exclude.add(pendingReg.credentialId)
@@ -412,6 +620,8 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       supersede(credentialId)
       refused = refused.filter((r) => r.credentialId !== credentialId)
       pendingReg = { credentialId, userId }
+      // complete() needs the root as long as the creation is pending: it
+      // stays pinned (finishRecovery).
       await persist(rpId)
       return { pending: true }
     }
@@ -419,6 +629,8 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       bytes.fill(0)
       throw cancelled()
     }
+    if (mode === 'add') return await finishAdd(gen, rpId, bytes, credentialId, userId)
+    if (mode === 'recover') return await finishRecover(gen, rpId, bytes, credentialId, userId)
     // The pending creation is superseded only once the new passkey unlocked:
     // a failed install keeps it, and the new passkey is refused instead.
     let out
@@ -441,12 +653,19 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   // one offered, so another Varanda passkey cannot be picked by mistake
   // (MISMATCH, then 'recomeçar' would delete the diary).
   async function boundCredentials (rpId) {
+    const rec = await boundRecord(rpId)
+    return rec !== null ? [rec.credentialId] : []
+  }
+
+  async function boundRecord (rpId) {
     let st = null
     try {
       st = await request('identity.status')
     } catch {}
-    if (st && typeof st.credentialId === 'string' && st.credentialId !== '' && st.rpId === rpId) return [st.credentialId]
-    return []
+    if (st && typeof st.credentialId === 'string' && st.credentialId !== '' && st.rpId === rpId) {
+      return { credentialId: st.credentialId, userId: typeof st.userId === 'string' ? st.userId : '' }
+    }
+    return null
   }
 
   // any: true offers every Varanda passkey of this rp.id (discoverable), for
@@ -456,12 +675,196 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     await loadLocal(rpIdOf())
     const rpId = begin()
     const gen = generation
+    dropRecovery()
     try {
       if (create) return await register(gen, rpId)
-      return await signIn(gen, rpId, any === true ? [] : await boundCredentials(rpId), false)
+      const bound = await boundRecord(rpId)
+      return await signIn(gen, rpId, any === true || bound === null ? [] : [bound.credentialId], false, null, bound)
     } finally {
       busy = false
     }
+  }
+
+  // After { wrapped } from a passkey: the app's fetched blob is opened in the
+  // worklet (5.92) and its root installed bound to that passkey, so the
+  // stored session holds the root. After a code: the root is held for
+  // finishRecovery() and { needsPasskey: true } resolves; nothing installed.
+  // A missing or expired wait rejects RECOVERY_BAD with the node locked.
+  async function unlockWrapped ({ blob, member } = {}) {
+    await resuming
+    if (awaiting === null || now() > awaiting.expiresAt) {
+      dropAwaiting()
+      throw codedError('RECOVERY_BAD', BAD_ENTRY_TEXT)
+    }
+    const rpId = begin()
+    const gen = generation
+    const wait = awaiting
+    // The wait is consumed whatever the outcome, as the worklet's wrap key.
+    awaiting = null
+    try {
+      let opened
+      try {
+        opened = await request('identity.recoveryOpen', { blob, member })
+      } catch (err) {
+        if (err && err.message === BAD_ENTRY_TEXT) throw codedError('RECOVERY_BAD', BAD_ENTRY_TEXT)
+        throw err
+      }
+      if (gen !== generation) throw cancelled()
+      if (!opened || typeof opened.prf !== 'string' || !/^[0-9a-f]{64}$/.test(opened.prf)) throw codedError('RECOVERY_BAD', BAD_ENTRY_TEXT)
+      if (wait.kind === 'code') {
+        // member: the root's public key, checked by the worklet (5.92).
+        heldRoot = { prfHex: opened.prf, publicKey: member, expiresAt: now() + RECOVERY_MS, pinned: false }
+        return { needsPasskey: true }
+      }
+      // Bound with its marked user id so its next sign-in, even without a
+      // handle, takes this path again.
+      const userId = isWrapUserId(wait.userId) ? wait.userId : UNKNOWN_WRAP_USER_ID
+      const out = await track(install(gen, { prfHex: opened.prf, credentialId: wait.credentialId, userId, rpId, created: false, resumed: false }))
+      await settleInstalled(rpId, wait.credentialId)
+      return out
+    } finally {
+      busy = false
+    }
+  }
+
+  // Kept only so an older caller fails clearly: signIn() never holds a PRF
+  // for a direct install after a lookup (it installs an unmarked passkey at
+  // once), so there is nothing to install here.
+  async function unlockDirect () {
+    throw codedError('USAGE', 'pedido inválido')
+  }
+
+  // The code goes to the worklet (5.91), which decodes it and keeps the wrap
+  // key; a bad code rejects with its USAGE text.
+  async function unlockWithCode ({ code } = {}) {
+    await resuming
+    begin()
+    const gen = generation
+    dropRecovery()
+    try {
+      const res = await request('identity.recoveryLookup', { kind: 'code', code: typeof code === 'string' ? code : '' })
+      if (gen !== generation) throw cancelled()
+      if (!res || typeof res.lookupId !== 'string') throw passkeyError('WEBAUTHN')
+      awaiting = { kind: 'code', credentialId: null, userId: '', expiresAt: now() + RECOVERY_MS }
+      return { wrapped: true, lookupId: res.lookupId }
+    } finally {
+      busy = false
+    }
+  }
+
+  // The app's fetch found nothing or failed, or the person gave up:
+  // everything held is dropped and the node stays locked (the worklet's wrap
+  // key expires on its own). The generation moves too, so an unlockWrapped or
+  // finishRecovery already past its checks cannot install after this.
+  //
+  // A marked creation still pending for the held root (finishRecovery that
+  // answered { pending: true }) is that recovery's own: it is refused
+  // SUPERSEDED (kept excluded) so 'concluir' stops showing and the code
+  // entry comes back, as the web's abortRecovery drops it.
+  async function cancelRecovery () {
+    const ownPending = heldRoot !== null && pendingReg !== null && isWrapUserId(pendingReg.userId)
+    invalidate()
+    dropRecovery()
+    if (ownPending) {
+      addRefused(pendingReg.credentialId, pendingReg.userId, 'SUPERSEDED', true)
+      pendingReg = null
+      const rpId = rpIdOf()
+      if (typeof rpId === 'string' && rpId !== '') await persist(rpId)
+    }
+    return {}
+  }
+
+  // A code recovery's second step: a new marked passkey for the held root.
+  // A stored diary of another identity is refused before any ceremony: the
+  // install would fail MISMATCH after the manager stored a passkey.
+  async function finishRecovery () {
+    await resuming
+    await loadLocal(rpIdOf())
+    if (!heldRootValid()) {
+      heldRoot = null
+      throw recoveryExpired()
+    }
+    const rpId = begin()
+    const gen = generation
+    let result = null
+    try {
+      const held = heldRoot
+      const st = await request('identity.status')
+      if (gen !== generation) throw cancelled()
+      if (heldRoot !== held || !heldRootValid()) throw recoveryExpired()
+      if (st && st.exists === true && (st.publicKey !== held.publicKey || st.legacy === true)) {
+        heldRoot = null
+        throw await mismatchError()
+      }
+      heldRoot = { ...held, pinned: true }
+      result = await register(gen, rpId, 'recover')
+      return result
+    } finally {
+      if (!(result && result.pending === true)) unpinHeldRoot()
+      busy = false
+    }
+  }
+
+  // A second passkey for this account, while unlocked: { credentialId,
+  // userId, lookupId, blob } for the app to register, or { pending: true }
+  // (complete() then returns the same shape).
+  async function addPasskey () {
+    await resuming
+    await loadLocal(rpIdOf())
+    const rpId = begin()
+    const gen = generation
+    try {
+      return await register(gen, rpId, 'add')
+    } finally {
+      busy = false
+    }
+  }
+
+  // After the app registered an added passkey ('Trocar a passkey'): the
+  // worklet binds the diary to it (5.94) and the stored session is saved
+  // again for it, with the root prfHex read back from the current session
+  // (no second copy kept here). The keychain item is keyed by rp.id and
+  // public key, so this save replaces the old passkey's item. With no stored
+  // session (its save failed) only the binding changes; the next sign-in
+  // with the new passkey goes through unlockWrapped, which saves one.
+  // userId: the marked one addPasskey or finishRecovery returned; the bound
+  // record must say "wrapping", so anything else is refused here.
+  async function bindPasskey ({ credentialId, userId } = {}) {
+    if (!validId(credentialId) || !isWrapUserId(userId)) throw codedError('USAGE', 'pedido inválido')
+    await resuming
+    if (busy) throw codedError('LOCKED', 'outra entrada com a passkey em andamento')
+    const rpId = rpIdOf()
+    if (typeof rpId !== 'string' || rpId === '') throw passkeyError('UNSUPPORTED')
+    busy = true
+    const gen = generation
+    try {
+      const st = await request('identity.status')
+      if (gen !== generation) throw cancelled()
+      const publicKey = st && st.unlocked === true && typeof st.publicKey === 'string' ? st.publicKey : null
+      const record = publicKey !== null ? await store.load({ rpId, publicKey }).catch(() => null) : null
+      if (gen !== generation) throw cancelled()
+      await request('identity.recoveryBind', { credentialId, userId })
+      if (gen !== generation) throw cancelled()
+      installedCred = { credentialId, userId }
+      if (record === null) return { sessionSaved: false }
+      try {
+        // Tracked: signOut and reset wait for it, so a completed 'Sair'
+        // never leaves this item behind.
+        await track(store.save({ rpId, credentialId, publicKey, prfHex: record.prfHex }))
+      } catch {
+        return { sessionSaved: false }
+      }
+      return {}
+    } finally {
+      busy = false
+    }
+  }
+
+  // A recovery code for this account, while unlocked: { lookupId, blob, code }.
+  // The code string exists only in this return value.
+  async function makeRecoveryCode () {
+    const res = await request('identity.recoveryWrap', { kind: 'code' })
+    return { code: res.code, lookupId: res.lookupId, blob: res.blob }
   }
 
   // The second gesture of a pending creation: a get() restricted to it.
@@ -473,6 +876,22 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     const rpId = begin()
     const gen = generation
     try {
+      // A marked creation wraps either the held root (code recovery) or the
+      // unlocked one (add). With neither (a restart, the hold dropped)
+      // keeping it pending is useless: a passkey sign-in supersedes it
+      // anyway, and the code entry stays hidden while 'concluir' shows. It is
+      // refused SUPERSEDED (kept excluded) so the person can start over.
+      if (isWrapUserId(target.userId) && !heldRootValid()) {
+        const st = await request('identity.status').catch(() => null)
+        if (gen !== generation) throw cancelled()
+        if (!(st && st.unlocked === true)) {
+          heldRoot = null
+          if (pendingReg !== null && pendingReg.credentialId === target.credentialId) pendingReg = null
+          addRefused(target.credentialId, target.userId, 'SUPERSEDED', true)
+          await persist(rpId)
+          throw codedError('RECOVERY_BAD', SIGN_IN_FIRST_TEXT)
+        }
+      }
       return await signIn(gen, rpId, [target.credentialId], true, target.userId)
     } catch (err) {
       // A reset (or sign-out, lock) while the ceremony was open owns the
@@ -496,6 +915,8 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       }
       throw err
     } finally {
+      // The pending creation is gone without using the held root.
+      if (pendingReg === null) unpinHeldRoot()
       busy = false
     }
   }
@@ -525,6 +946,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   // Memory only: the stored session survives it (the next start resumes).
   function lock () {
     invalidate()
+    dropRecovery()
     return request('identity.clear')
   }
 
@@ -532,6 +954,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   // managers of this device, not the session.
   async function signOut () {
     invalidate()
+    dropRecovery()
     await resuming
     // A post-ceremony part in flight may still save: let it settle first.
     await finishing
@@ -578,6 +1001,8 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       }
     }
     invalidate()
+    dropRecovery()
+    installedCred = null
     pendingReg = null
     refused = kept
     await resuming
@@ -675,5 +1100,21 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     return resuming
   }
 
-  return { status, unlock, complete, lock, signOut, reset, resume }
+  return {
+    status,
+    unlock,
+    complete,
+    lock,
+    signOut,
+    reset,
+    resume,
+    unlockWrapped,
+    unlockDirect,
+    unlockWithCode,
+    cancelRecovery,
+    finishRecovery,
+    addPasskey,
+    bindPasskey,
+    makeRecoveryCode
+  }
 }

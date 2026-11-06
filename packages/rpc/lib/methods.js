@@ -347,6 +347,42 @@ function mediaUploadCross (given, value) {
   return null
 }
 
+// recovery.sign and the identity.recovery* host controls (docs/rpc.md 5.90
+// to 5.94). Duplicated from @varanda/core lib/recovery-proof.js and
+// @varanda/web-member lib/recovery.js, which this package cannot import: a
+// recovery blob is { v: 1, kind, nonce: 24 bytes, ciphertext: 82 bytes } in
+// lowercase hex, exact keys; a recovery code is at most 64 characters before
+// the worklet normalizes it.
+const RECOVERY_ACTIONS = ['put', 'remove', 'list']
+const RECOVERY_KINDS = ['passkey', 'code']
+const RECOVERY_CIPHERTEXT_RE = /^[0-9a-f]{164}$/
+const RECOVERY_BLOB_KEYS = ['v', 'kind', 'nonce', 'ciphertext']
+const RECOVERY_CODE_MAX = 64
+
+const isRecoveryAction = (v) => typeof v === 'string' && RECOVERY_ACTIONS.includes(v)
+const isRecoveryKind = (v) => typeof v === 'string' && RECOVERY_KINDS.includes(v)
+
+function isRecoveryBlob (v) {
+  if (!isPlainObject(v)) return false
+  const own = Object.keys(v)
+  if (own.length !== RECOVERY_BLOB_KEYS.length || !RECOVERY_BLOB_KEYS.every((k) => hasOwn(v, k))) return false
+  return v.v === 1 && isRecoveryKind(v.kind) &&
+    typeof v.nonce === 'string' && HEX48.test(v.nonce) &&
+    typeof v.ciphertext === 'string' && RECOVERY_CIPHERTEXT_RE.test(v.ciphertext)
+}
+
+// A passkey wrap carries the wrapping passkey's PRF (`secret`), a code
+// lookup the typed code; never both.
+function recoverySecretCross (given, value) {
+  if (value.kind === 'passkey') {
+    if (!hasOwn(given, 'secret')) return 'parâmetro obrigatório: secret'
+    if (hasOwn(given, 'code')) return 'code só com kind code'
+  } else {
+    if (hasOwn(given, 'secret')) return 'secret só com kind passkey'
+  }
+  return null
+}
+
 // community.leave's force: true skips every wait of the creator's leave, a
 // list only the waits it names.
 const LEAVE_WAITS = ['root', 'groups', 'devices']
@@ -623,6 +659,34 @@ const SPECS = {
     fields: {
       nonce: req(isNonce),
       version: req(int(1, TERMS_VERSION_MAX))
+    }
+  },
+  // Signs a recovery-entry request with the identity key; the node fills in
+  // member and association and hashes the blob itself, so a caller never
+  // chooses the bytes. Not mutating: it only signs, the account service
+  // stores. `list` names no entry; `put` carries the blob, `remove` does not.
+  'recovery.sign': {
+    fields: {
+      action: req(isRecoveryAction),
+      nonce: req(isNonce),
+      kind: opt(isRecoveryKind),
+      lookupId: opt(isKey),
+      blob: opt(isRecoveryBlob)
+    },
+    cross (given, value) {
+      if (value.action === 'list') {
+        if (hasOwn(given, 'kind') || hasOwn(given, 'lookupId') || hasOwn(given, 'blob')) return 'list sem kind, lookupId nem blob'
+        return null
+      }
+      if (!hasOwn(given, 'kind')) return 'parâmetro obrigatório: kind'
+      if (!hasOwn(given, 'lookupId')) return 'parâmetro obrigatório: lookupId'
+      if (value.action === 'put') {
+        if (!hasOwn(given, 'blob')) return 'parâmetro obrigatório: blob'
+        if (value.blob.kind !== value.kind) return 'parâmetro inválido: blob'
+      } else if (hasOwn(given, 'blob')) {
+        return 'blob só com put'
+      }
+      return null
     }
   },
   // Signs the signup-invite request with the identity key; the node fills in
@@ -1009,6 +1073,51 @@ const SPECS = {
   // Only after the host durably stored the session of a non-resumed install:
   // it lifts the signedOut barrier, which the install itself never does.
   'identity.sessionSaved': { fields: none, mutating: true },
+  // IPC only, in-app web-node worklet (docs/rpc.md 5.91 to 5.94). None
+  // changes a diary; lookup, open and wrap change no stored state (open
+  // consumes the pending wrap key), so they are not mutating; recoveryBind
+  // rewrites the kv passkey record and is. Only recoveryOpen's `prf` and
+  // recoveryWrap's `code` (kind code) carry a secret back; no error or log
+  // names one.
+  'identity.recoveryLookup': {
+    fields: {
+      kind: req(isRecoveryKind),
+      secret: opt(isPrf),
+      code: opt(str(1, RECOVERY_CODE_MAX))
+    },
+    cross (given, value) {
+      const m = recoverySecretCross(given, value)
+      if (m !== null) return m
+      if (value.kind === 'code' && !hasOwn(given, 'code')) return 'parâmetro obrigatório: code'
+      return null
+    }
+  },
+  'identity.recoveryOpen': {
+    fields: {
+      blob: req(isRecoveryBlob),
+      member: req(isKey)
+    }
+  },
+  'identity.recoveryWrap': {
+    fields: {
+      kind: req(isRecoveryKind),
+      secret: opt(isPrf)
+    },
+    cross: recoverySecretCross
+  },
+  // Rebinds the worklet's stored passkey record to a new credential while it
+  // is unlocked and holds the root.
+  // Rewrites the kv passkey record: mutating like identity.install, so a
+  // failed call reports an unknown outcome instead of being retried blindly.
+  // userId: the recovery passkey's wrap-marked user id, never '' (the
+  // worklet checks the mark itself).
+  'identity.recoveryBind': {
+    fields: {
+      credentialId: req(isCredentialId),
+      userId: req(isKey)
+    },
+    mutating: true
+  },
   'media.uploadFile': {
     fields: {
       name: req(isMediaName),

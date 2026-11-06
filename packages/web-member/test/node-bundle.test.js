@@ -190,7 +190,7 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   const handle = await api.start({ association, seederUrl })
   t.alike(Object.keys(handle).sort(), ['close', 'connect', 'follows', 'identity', 'media'], 'only connect, close, follows, identity and media are exposed')
   t.ok(Object.isFrozen(handle) && Object.isFrozen(handle.identity) && Object.isFrozen(handle.media) && Object.isFrozen(handle.follows), 'the handle, identity, media and follows are frozen')
-  t.alike(Object.keys(handle.identity).sort(), ['complete', 'lock', 'reset', 'signOut', 'status', 'unlock'], 'no getter, no signer')
+  t.alike(Object.keys(handle.identity).sort(), ['addPasskey', 'bindPasskey', 'cancelRecovery', 'complete', 'finishRecovery', 'lock', 'makeRecoveryCode', 'reset', 'signOut', 'status', 'unlock', 'unlockWithCode', 'unlockWrapped'], 'no getter, no signer')
   t.alike(Object.keys(handle.media), ['upload', 'putDm', 'readDm', 'readGroup'], 'media: post upload, DM media put and read (rpc.md 5.88), private group media read')
   t.alike(Object.keys(handle.follows).sort(), ['confirmLegacy', 'legacy'])
   const badKeys = await errorOf(handle.follows.confirmLegacy('x'))

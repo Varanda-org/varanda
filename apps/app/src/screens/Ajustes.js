@@ -27,6 +27,8 @@
 // pushManager.subscribe() with nothing awaited first (Safari's user
 // activation). Sair and Recomeçar still switch this browser off first, while
 // the key can still sign; a failure there never stops them.
+// Passkeys e recuperação (hosted passkey node, unlocked) opens the extra
+// passkeys and the recovery code of the account (./Passkeys.js).
 // The footer under the list shows the build and the commit the installation
 // serves, only through the src/version.js formatters, and a tap copies them.
 
@@ -58,6 +60,7 @@ import { shareNav } from '../shareNav'
 import Conexao from './Conexao'
 import Convites from './Convites'
 import Identidade from './Identidade'
+import Passkeys from './Passkeys'
 import Perfil from './Perfil'
 import Sincronizar from './Sincronizar'
 import Termos from './Termos'
@@ -73,6 +76,7 @@ const TITLES = {
   lista: 'Ajustes',
   perfil: 'Editar perfil',
   conta: 'Conta e @nome',
+  passkeys: 'Passkeys e recuperação',
   termos: 'Termos e privacidade',
   aparencia: 'Aparência',
   instalar: 'Instalar o app',
@@ -82,8 +86,8 @@ const TITLES = {
   convites: 'Convidar pessoas'
 }
 
-const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use sua passkey.'
-const RESET_TEXT = 'Isto apaga a conta guardada neste aparelho e as publicações que ainda aguardam envio. A conta antiga não pode ser reconstruída: será preciso entrar de novo e vincular outra vez. Para voltar à mesma conta, use a mesma passkey.'
+const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use qualquer passkey cadastrada nesta conta ou o código de recuperação.'
+const RESET_TEXT = 'Isto apaga a conta guardada neste aparelho e as publicações que ainda aguardam envio. Para voltar à mesma conta, entre com qualquer passkey cadastrada nela ou com o código de recuperação. Sem passkey e sem código, a conta antiga não pode ser reconstruída: será preciso entrar de novo e vincular outra vez.'
 
 function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailingText = null, pending = false, disabled = false, expanded, checked }) {
   const styles = useStyles(makeStyles)
@@ -359,6 +363,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             <View style={styles.group}>
               <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
+              {account && unlocked ? <Item icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}
               {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
               {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function'
                 ? <Item icon='gente' label='Páginas' onPress={openPaginas} />
@@ -484,6 +489,15 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         <View style={shown('conta')}>
           <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} />
         </View>
+        {/* Kept mounted like the others; it drops a shown recovery code as
+            soon as it is not the active screen. */}
+        {account
+          ? (
+            <View style={shown('passkeys')}>
+              <Passkeys active={ready && screen === 'passkeys'} embedded />
+            </View>
+            )
+          : null}
         {screen === 'convites' && hosted && policy === null
           ? (
             <View style={shown('convites')}>

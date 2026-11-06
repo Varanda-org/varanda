@@ -14,7 +14,18 @@
 //                          refused: [{ userId, code, cleaned, created }] }>
 //   identity.unlock({ register = false, any = false, phone = false } = {})
 //                       -> Promise<{ publicKey, created, sessionSaved? } | { pending: true }>
+//                          | { wrapped: true, lookupId }
 //   identity.complete() -> Promise<{ publicKey, created, sessionSaved? }>
+//                          (or the addPasskey/finishRecovery result when the
+//                          pending creation was one of those)
+//   identity.unlockWrapped({ blob, member })
+//                       -> Promise<{ publicKey, created, sessionSaved? } | { needsPasskey: true }>
+//   identity.unlockWithCode({ code }) -> Promise<{ wrapped: true, lookupId }>
+//   identity.cancelRecovery() -> Promise
+//   identity.finishRecovery({ phone }) / identity.addPasskey({ phone })
+//                       -> Promise<{ credentialId, userId, lookupId, blob, sessionSaved? } | { pending: true }>
+//   identity.bindPasskey({ credentialId, userId }) -> Promise<{ sessionSaved? }>
+//   identity.makeRecoveryCode() -> Promise<{ code, lookupId, blob }>
 //   identity.lock()     -> Promise   (the keys are zero-filled; reads still
 //                                     work; the stored session SURVIVES it)
 //   identity.signOut()  -> Promise   ('Sair': lock AND forget the stored
@@ -89,6 +100,37 @@
 // fails, the old pending stays and the new id is refused INSTALL_FAILED.
 // reset() drops it; signOut() keeps it.
 //
+// Member recovery (../lib/recovery.js; the app talks to the account
+// service, this file never fetches): while unlocked a copy of the installed
+// root (the PRF output the diary key derives from) stays in memory, zeroed
+// by lock, signOut, reset and close. A recovery passkey has a marked user id
+// (recovery.isWrapUserId: the returned user handle, or the bound record's);
+// its own PRF output is NEVER installed, so it can never create a diary. A
+// sign-in with one resolves { wrapped: true, lookupId } and holds the wrap
+// key for 120 s; the app fetches the blob and calls unlockWrapped, which
+// requires it to open to a root whose key is `member` and installs that
+// root bound to the passkey (RECOVERY_BAD when it does not open, the node
+// stays locked). A passkey that returned no handle is marked only when it
+// is the bound one or a refused entry here names a marked user id for it;
+// any other passkey installs directly, as before recovery: a lookup id is
+// never derived from a PRF output not known to be a wrapping passkey's (it
+// would send a value derived from a member root to the account service).
+// unlockWithCode() does the same for a code; unlockWrapped then holds the root for 120 s ({ needsPasskey: true })
+// and finishRecovery(), in a click, creates a recovery passkey, wraps the
+// root under it and only then installs the root bound to it (a failed
+// install refuses the new passkey INSTALL_FAILED). addPasskey() creates a
+// recovery passkey and wraps the root under it (the session stays as it
+// is); bindPasskey() binds this device to it and re-seals the session
+// ('Trocar'). makeRecoveryCode() wraps the root under a new code.
+// cancelRecovery() also stops a recovery step already in flight, or only
+// called (the epoch is read when unlock/complete/unlockWithCode is called):
+// nothing it started holds, binds, installs or saves after it. Any successful sign-in, a
+// new unlockWithCode, lock, signOut and reset drop (zeroed) a held wrap key
+// or root. A recovery passkey creation that can no longer be completed is
+// refused SUPERSEDED, so later creations exclude it. A recovery creation
+// without PRF yet is also refused ADD_PENDING (dropped once concluded), so
+// it stays excluded after a reload, which never offers it for 'concluir'.
+//
 // Stay signed in until 'Sair': after a successful unlock (and only then: a
 // MISMATCH or any other failure saves nothing) the 32-byte PRF output is
 // kept by ../lib/session-store.js in its own IndexedDB database
@@ -122,6 +164,7 @@ const b4a = require('b4a')
 const { createBrowserNode } = require('../lib/node')
 const { idbNodeStorage } = require('../lib/node-storage')
 const passkey = require('../lib/passkey')
+const recovery = require('../lib/recovery')
 const store = require('../lib/node-store')
 const { createSessionStore } = require('../lib/session-store')
 
@@ -134,6 +177,8 @@ const PHONE_HINTS = ['hybrid']
 const NONCE_BYTES = 32
 const SIGNED_OUT_KEY = 'signedOut'
 const SESSION_DB = 'varanda-session'
+const RECOVERY_TTL_MS = 120000
+const LOCKED_MESSAGE = 'identidade bloqueada: entre com a passkey'
 
 let current = null
 
@@ -171,7 +216,11 @@ function passkeyRecord (value) {
   if (typeof value.credentialId !== 'string' || value.credentialId === '') return null
   if (typeof value.rpId !== 'string' || value.rpId === '') return null
   const userId = typeof value.userId === 'string' ? value.userId : null
-  return { v: 1, credentialId: value.credentialId, rpId: value.rpId, userId }
+  const record = { v: 1, credentialId: value.credentialId, rpId: value.rpId, userId }
+  // A recovery passkey whose user handle the browser did not return: the
+  // flag keeps the next sign-in on the wrapped path.
+  if (value.wrapped === true) record.wrapped = true
+  return record
 }
 
 function nonEmptyString (value) {
@@ -239,6 +288,21 @@ function webauthnPresent () {
     credentialsContainer() !== null
 }
 
+function zero (bytes) {
+  if (bytes) bytes.fill(0)
+}
+
+function recoveryBad (message = 'entrada de recuperação inválida') {
+  return codedError('RECOVERY_BAD', message)
+}
+
+// A timer that never keeps a Node process (the tests) alive.
+function unrefTimer (fn, ms) {
+  const timer = setTimeout(fn, ms)
+  if (timer && typeof timer.unref === 'function') timer.unref()
+  return timer
+}
+
 function zeroPair (kp) {
   if (kp === null) return
   kp.secretKey.fill(0)
@@ -290,9 +354,81 @@ function createIdentity (node, storage, sessionStore, idb) {
   let finishing = Promise.resolve() // the post-ceremony part (or the resume) in flight
   let busy = false
   let resumed = false // the current unlock came from the stored session
+  // A copy of the installed root (the PRF output the diary key derives from)
+  // and its public key, held only while unlocked: recovery entries wrap it.
+  let root = null
+  let rootMember = null
+  // A wrapped sign-in waiting for its blob: { kind, wrapKey, credentialId,
+  // userId, timer }.
+  let awaiting = null
+  // A code recovery whose blob opened, waiting for the new passkey:
+  // { root, member, timer }.
+  let held = null
+  // A recovery passkey creation without PRF yet ({ credentialId, userId,
+  // phone, mode: 'add' | 'recover', epoch }): memory only, complete() ends it.
+  let addPending = null
+  // Bumped by cancelRecovery and unlockWithCode: a recovery step that
+  // captured an older value never holds, binds, installs or saves after it.
+  let recoveryEpoch = 0
+
+  // A step started at `gen` (and, for a recovery, at recovery epoch `rec`)
+  // that must not commit anymore.
+  function stale (gen, rec) {
+    return gen !== generation || (rec !== undefined && rec !== recoveryEpoch)
+  }
+
+  function dropRoot () {
+    zero(root)
+    root = null
+    rootMember = null
+  }
+
+  function dropAwaiting () {
+    if (awaiting === null) return
+    clearTimeout(awaiting.timer)
+    zero(awaiting.wrapKey)
+    awaiting = null
+  }
+
+  function dropHeld () {
+    if (held === null) return
+    clearTimeout(held.timer)
+    zero(held.root)
+    held = null
+  }
+
+  // The held root's 120 s timer stops while finishRecovery (and a pending
+  // creation's 'concluir') may still need it, and restarts when that fails.
+  function pauseHeld () {
+    if (held === null) return
+    clearTimeout(held.timer)
+    held.timer = null
+  }
+
+  function rearmHeld () {
+    if (held === null || held.timer !== null) return
+    const entry = held
+    entry.timer = unrefTimer(() => { if (held === entry) dropHeld() }, RECOVERY_TTL_MS)
+  }
+
+  // A recovery passkey creation that can no longer be completed here exists
+  // in the manager anyway: it is refused SUPERSEDED (never signalled) so
+  // excluded() keeps it out of later creations, across reloads too.
+  function dropAddPending (target) {
+    if (target === null || addPending !== target) return
+    addPending = null
+    addRefused({ credentialId: target.credentialId, userId: target.userId, code: 'SUPERSEDED', cleaned: false, created: true })
+    const writing = persist()
+    const before = finishing
+    finishing = Promise.all([before, writing]).then(noop, noop)
+  }
 
   function invalidate () {
     generation++
+    dropRoot()
+    dropAwaiting()
+    dropHeld()
+    dropAddPending(addPending)
   }
 
   // -> an Error to reject with, or null when a ceremony may start.
@@ -337,7 +473,8 @@ function createIdentity (node, storage, sessionStore, idb) {
   // previous record and pending creation back, in memory and in kv, so a
   // passkey that never unlocked is never remembered. A reset meanwhile has
   // already replaced both (known is no longer this record): left alone.
-  async function bind (gen, record) {
+  // -> an undo for a recovery cancelled after the bind (same restore).
+  async function bind (gen, record, rec) {
     const prevKnown = known
     const prevPending = pending
     const prevStored = stored
@@ -345,7 +482,7 @@ function createIdentity (node, storage, sessionStore, idb) {
     pending = null
     try {
       await storage.writeJson(PASSKEY_KEY, record)
-      if (gen !== generation) throw cancelled()
+      if (stale(gen, rec)) throw cancelled()
       stored = record
       refused = refused.filter((e) => e.credentialId !== record.credentialId)
       // Unlocking with another passkey orphans the pending creation: keep it
@@ -363,6 +500,17 @@ function createIdentity (node, storage, sessionStore, idb) {
       }
       throw err
     }
+    return async () => {
+      if (known !== record) return
+      known = prevKnown
+      stored = prevStored
+      if (pending === null && prevPending !== null && prevPending.credentialId !== record.credentialId) {
+        pending = prevPending
+        refused = refused.filter((e) => !(e.credentialId === prevPending.credentialId && e.code === 'SUPERSEDED'))
+      }
+      await storage.writeJson(PASSKEY_KEY, prevStored).catch(() => {})
+      await persist()
+    }
   }
 
   // This device's media nonce (kv 'mediaDevice'), drawn and written once.
@@ -378,20 +526,24 @@ function createIdentity (node, storage, sessionStore, idb) {
   // A PRF output -> the unlocked node, for a finished ceremony (resumed
   // false: the passkey record is bound) and for the stored session (resumed
   // true). Saves the session only once everything else succeeded; any
-  // failure leaves the node locked. Zeroes prf.
-  async function install (gen, prf, { credentialId, userId, created, resumed: fromSession }) {
+  // failure leaves the node locked. Zeroes prf. A recovery install (`recovery`,
+  // the recovery epoch it started at) cancelled by cancelRecovery, or
+  // stopped by a generation change, after the bind or the save undoes both.
+  async function install (gen, prf, { credentialId, userId, created, resumed: fromSession, wrapped, recovery: rec }) {
     let kp = null
     let media = null
     let nonce = null
     let installed = false
     let done = false
+    let undoBind = null
+    let saved = false
     try {
-      if (gen !== generation) throw cancelled()
+      if (stale(gen, rec)) throw cancelled()
       kp = await passkey.keyPairFromPrf(prf)
-      if (gen !== generation) throw cancelled()
+      if (stale(gen, rec)) throw cancelled()
       nonce = await mediaNonce()
       media = await passkey.mediaKeyPairFromPrf(prf, nonce)
-      if (gen !== generation) throw cancelled()
+      if (stale(gen, rec)) throw cancelled()
       const publicKey = b4a.toString(kp.publicKey, 'hex')
       // setKeyPair copies both pairs and the PRF (group writer keys derive
       // from it) synchronously: the local copies are zeroed below.
@@ -401,21 +553,28 @@ function createIdentity (node, storage, sessionStore, idb) {
       installed = true
       await setting
       const status = await node.identityStatus()
-      if (gen !== generation) throw cancelled()
+      if (stale(gen, rec)) throw cancelled()
       if (status.exists && (status.publicKey !== publicKey || status.legacy)) {
         const err = codedError('MISMATCH', 'passkey não corresponde ao diário guardado')
         err.legacy = status.legacy === true
-        if (!fromSession) chosen = credentialId
+        // A wrapping (recovery) passkey is never chosen: its own PRF output
+        // must never install, and the next discoverable 'entrar' carries the
+        // handle that routes it to the wrapped path.
+        if (!fromSession) chosen = wrapped === true ? null : credentialId
         throw err
       }
-      if (gen !== generation) throw cancelled()
+      if (stale(gen, rec)) throw cancelled()
       if (!fromSession) {
-        await bind(gen, { v: 1, credentialId, rpId, userId })
+        const record = { v: 1, credentialId, rpId, userId }
+        if (wrapped === true && !recovery.isWrapUserId(userId)) record.wrapped = true
+        undoBind = await bind(gen, record, rec)
         chosen = null
       }
+      if (rec !== undefined && rec !== recoveryEpoch) throw cancelled()
       let sessionSaved = true
       try {
         await sessionStore.save(prf, { rpId, credentialId, publicKey })
+        saved = true
       } catch {
         sessionSaved = false
       }
@@ -424,15 +583,33 @@ function createIdentity (node, storage, sessionStore, idb) {
       if (!fromSession && sessionSaved) await storage.writeJson(SIGNED_OUT_KEY, null).catch(() => {})
       // A lock/signOut/reset during the save: still locked (signOut and
       // reset wait for this to settle before they clear the stored session).
-      if (gen !== generation) throw cancelled()
+      if (stale(gen, rec)) throw cancelled()
       resumed = fromSession === true
+      zero(root)
+      root = new Uint8Array(prf)
+      rootMember = publicKey
+      // Any recovery left armed can never install over this sign-in.
+      dropAwaiting()
+      dropHeld()
       done = true
       const out = { publicKey, created }
       if (!sessionSaved) out.sessionSaved = false
       return out
     } finally {
       // Any failure after the pairs went in leaves the node locked.
-      if (installed && !done) await node.clearKeyPair().catch(() => {})
+      if (installed && !done) {
+        dropRoot()
+        await node.clearKeyPair().catch(() => {})
+      }
+      // A recovery install stopped by cancelRecovery or by a generation
+      // change (lock, signOut, reset, close, another tab): nothing of it
+      // stays, so no device is bound to a recovery passkey whose blob was
+      // never registered. Ordinary installs keep the lock semantics (the
+      // stored session survives a lock).
+      if (!done && rec !== undefined && stale(gen, rec)) {
+        if (saved) await sessionStore.clear().catch(() => {})
+        if (undoBind !== null) await undoBind()
+      }
       prf.fill(0)
       if (nonce !== null) nonce.fill(0)
       zeroPair(kp)
@@ -441,7 +618,13 @@ function createIdentity (node, storage, sessionStore, idb) {
   }
 
   // The PRF output of a finished ceremony -> the unlocked node. Zeroes prf.
+  // A recovery passkey's own PRF output never becomes an identity: only the
+  // root its blob opens to installs (wrapped).
   function finish (gen, prf, details) {
+    if (details.wrapped !== true && recovery.isWrapUserId(details.userId)) {
+      prf.fill(0)
+      return Promise.reject(recoveryBad())
+    }
     return install(gen, prf, { ...details, resumed: false })
   }
 
@@ -521,6 +704,7 @@ function createIdentity (node, storage, sessionStore, idb) {
     const ids = new Set(refused.map((e) => e.credentialId))
     if (known !== null) ids.add(known.credentialId)
     if (pending !== null) ids.add(pending.credentialId)
+    if (addPending !== null) ids.add(addPending.credentialId)
     return [...ids]
   }
 
@@ -632,6 +816,7 @@ function createIdentity (node, storage, sessionStore, idb) {
         })
     }
     const allow = any === true ? [] : (known ? [known.credentialId] : (chosen ? [chosen] : []))
+    const rec = recoveryEpoch
     let deviceBound = null
     return run(
       (credentials) => passkey.signIn(credentials, { rpId, allowCredentialIds: allow, hints }),
@@ -648,10 +833,24 @@ function createIdentity (node, storage, sessionStore, idb) {
           deviceBound.cleaned = false
           throw deviceBound
         }
+        const isBound = known !== null && known.credentialId === result.credentialId
+        const credentialId = result.credentialId
+        // No handle and not the bound passkey: an abandoned recovery or added
+        // passkey refused here still names its wrap-marked user id, so it is
+        // never taken for a plain one (installing its PRF would make a diary).
+        const marked = result.userHandle === null && !isBound
+          ? refused.find((e) => e.credentialId === credentialId && recovery.isWrapUserId(e.userId))
+          : undefined
         const userId = result.userHandle !== null
           ? result.userHandle
-          : (known && known.credentialId === result.credentialId ? known.userId : null)
-        return finish(gen, result.prf, { credentialId: result.credentialId, userId, created: false })
+          : (isBound ? known.userId : (marked !== undefined ? marked.userId : null))
+        // A recovery passkey: its PRF output only opens the blob the app
+        // fetches next (unlockWrapped). Any other passkey installs directly:
+        // the account service never decides whether a passkey is a diary.
+        if (recovery.isWrapUserId(userId) || (isBound && known.wrapped === true)) {
+          return hold(gen, result.prf, { kind: 'passkey', credentialId, userId, rec })
+        }
+        return finish(gen, result.prf, { credentialId, userId, created: false })
       },
       async (err) => {
         if (err === deviceBound) return err
@@ -665,16 +864,369 @@ function createIdentity (node, storage, sessionStore, idb) {
   }
 
   function complete () {
+    if (addPending !== null) return completeWrapped()
     if (pending === null) return Promise.reject(codedError('CANCELLED', 'nenhuma criação de passkey pendente'))
     const target = pending
     const epoch = resets
+    const rec = recoveryEpoch
     const hints = target.phone === true ? PHONE_HINTS : undefined
     return run(
       (credentials) => passkey.completeRegistration(credentials, { rpId, credentialId: target.credentialId, hints }),
-      (gen, result) => finish(gen, result.prf, { credentialId: result.credentialId, userId: target.userId, created: true }),
+      (gen, result) => recovery.isWrapUserId(target.userId)
+        ? hold(gen, result.prf, { kind: 'passkey', credentialId: result.credentialId, userId: target.userId, rec })
+        : finish(gen, result.prf, { credentialId: result.credentialId, userId: target.userId, created: true }),
       // Never dropped from the manager: between creation and 'concluir' the
       // synced passkey may already have become the account on another device.
       (err) => noteUnusable(err, target.credentialId, target.userId, false, true, epoch))
+  }
+
+  // A recovery secret (a passkey's PRF output or a code secret) -> its
+  // lookup id, holding the wrap key for RECOVERY_TTL_MS until unlockWrapped,
+  // cancelRecovery or a lock. Zeroes secret. `rec` is the recovery epoch read
+  // when the caller was called (before WebAuthn or decodeCode): a
+  // cancelRecovery() since then leaves nothing armed.
+  async function hold (gen, secret, { kind, credentialId, userId, rec }) {
+    let keys = null
+    try {
+      if (stale(gen, rec)) throw cancelled()
+      keys = await recovery.deriveRecoveryKeys(secret, kind)
+      if (stale(gen, rec)) throw cancelled()
+      dropAwaiting()
+      dropHeld()
+      const entry = { kind, wrapKey: keys.wrapKey, credentialId, userId, timer: null }
+      entry.timer = unrefTimer(() => { if (awaiting === entry) dropAwaiting() }, RECOVERY_TTL_MS)
+      awaiting = entry
+      const out = { wrapped: true, lookupId: keys.lookupId }
+      keys = null
+      return out
+    } finally {
+      zero(secret)
+      if (keys !== null) zero(keys.wrapKey)
+    }
+  }
+
+  // A non-ceremony step that must not overlap a ceremony (LOCKED otherwise);
+  // `finishing` tracks it like a ceremony's post-WebAuthn part.
+  async function local (fn) {
+    busy = true
+    const gen = generation
+    try {
+      const settling = Promise.resolve().then(() => fn(gen))
+      finishing = settling.then(noop, noop)
+      return await settling
+    } finally {
+      busy = false
+    }
+  }
+
+  function busyError () {
+    return codedError('LOCKED', 'outra entrada com a passkey em andamento')
+  }
+
+  // The blob the app fetched for the held lookup id: it must open to a root
+  // whose diary key is `member`. A passkey recovery then installs the root
+  // bound to that passkey; a code recovery holds the root for
+  // finishRecovery() and resolves { needsPasskey: true }.
+  function unlockWrapped ({ blob, member } = {}) {
+    if (busy) return Promise.reject(busyError())
+    const entry = awaiting
+    if (entry === null) return Promise.reject(recoveryBad('nenhuma recuperação em andamento'))
+    clearTimeout(entry.timer)
+    awaiting = null
+    const rec = recoveryEpoch
+    return local(async (gen) => {
+      let opened = null
+      try {
+        opened = typeof member === 'string' ? recovery.openRoot(blob, entry.wrapKey, { member }) : null
+        zero(entry.wrapKey)
+        if (opened === null || opened.member !== member) throw recoveryBad()
+        const kp = await passkey.keyPairFromPrf(opened.root)
+        const derived = b4a.toString(kp.publicKey, 'hex')
+        zeroPair(kp)
+        if (stale(gen, rec)) throw cancelled()
+        if (derived !== member) throw recoveryBad()
+        if (entry.kind === 'code') {
+          const status = await node.identityStatus()
+          if (stale(gen, rec)) throw cancelled()
+          if (status.exists && (status.publicKey !== member || status.legacy)) {
+            const err = codedError('MISMATCH', 'passkey não corresponde ao diário guardado')
+            err.legacy = status.legacy === true
+            throw err
+          }
+          dropHeld()
+          const next = { root: opened.root, member, timer: null }
+          next.timer = unrefTimer(() => { if (held === next) dropHeld() }, RECOVERY_TTL_MS)
+          held = next
+          opened = null
+          return { needsPasskey: true }
+        }
+        const rootBytes = opened.root
+        opened = null
+        return await finish(gen, rootBytes, { credentialId: entry.credentialId, userId: entry.userId, created: false, wrapped: true, recovery: rec })
+      } finally {
+        zero(entry.wrapKey)
+        if (opened !== null) zero(opened.root)
+      }
+    })
+  }
+
+  // Ends every recovery step in flight or armed: the held wrap key and root
+  // (zeroed) and a pending recovery creation.
+  function abortRecovery () {
+    recoveryEpoch++
+    dropAwaiting()
+    dropHeld()
+    if (addPending !== null && addPending.mode === 'recover') dropAddPending(addPending)
+  }
+
+  function unlockWithCode ({ code } = {}) {
+    if (busy) return Promise.reject(busyError())
+    const secret = recovery.decodeCode(code)
+    if (secret === null) return Promise.reject(codedError('USAGE', 'código de recuperação inválido'))
+    abortRecovery()
+    // Read now, in the call: a cancelRecovery() right after it must win.
+    const rec = recoveryEpoch
+    return local((gen) => hold(gen, secret, { kind: 'code', credentialId: null, userId: null, rec }))
+  }
+
+  function cancelRecovery () {
+    abortRecovery()
+    return Promise.resolve()
+  }
+
+  // An authenticator that ignored excludeCredentials handed back a passkey
+  // refused here as bound to one device: -> the NOT_SYNCED to throw, or null.
+  function deviceBoundCreation (result) {
+    const bound = refused.find((e) => e.credentialId === result.credentialId && isDeviceBound(e))
+    if (bound === undefined) return null
+    if (result.prf) result.prf.fill(0)
+    const err = codedError('NOT_SYNCED', passkey.MESSAGES.NOT_SYNCED)
+    err.credentialId = result.credentialId
+    err.userId = bound.userId !== null ? bound.userId : result.userId
+    err.cleaned = false
+    return err
+  }
+
+  // A new recovery passkey's PRF output -> { credentialId, userId, lookupId,
+  // blob }, the root wrapped under it. 'recover' builds the blob from the
+  // held root first and only then installs that root bound to the new
+  // passkey (the normal bind and sealed session): a failure or a cancel
+  // before the blob exists binds and saves nothing. Zeroes prf. A failed
+  // install drops the held root (that recovery is over) and refuses the new
+  // passkey INSTALL_FAILED unless it ended up bound. `resetEpoch`: the
+  // resets count when the creation began (a reset since then records nothing).
+  async function wrappedCreated (gen, mode, prf, { credentialId, userId, epoch, resetEpoch }) {
+    let keys = null
+    let rootCopy = null
+    try {
+      if (mode === 'recover') {
+        // Cancelled (or locked) before the blob exists: the new passkey is in
+        // the manager anyway, so it stays excluded and is never offered for
+        // 'concluir', across reloads too.
+        const supersede = async (err) => {
+          if (resetEpoch === resets) {
+            if (addPending !== null && addPending.credentialId === credentialId) addPending = null
+            addRefused({ credentialId, userId, code: 'SUPERSEDED', cleaned: false, created: true })
+            await persist()
+          }
+          throw err
+        }
+        if (stale(gen, epoch)) await supersede(cancelled())
+        const entry = held
+        if (entry === null) await supersede(recoveryBad('nenhuma recuperação em andamento'))
+        keys = await recovery.deriveRecoveryKeys(prf, 'passkey')
+        if (stale(gen, epoch)) await supersede(cancelled())
+        if (held !== entry) await supersede(recoveryBad('nenhuma recuperação em andamento'))
+        const blob = recovery.wrapRoot({ root: entry.root, member: entry.member, kind: 'passkey', wrapKey: keys.wrapKey })
+        rootCopy = new Uint8Array(entry.root)
+        const installing = finish(gen, rootCopy, { credentialId, userId, created: true, wrapped: true, recovery: epoch })
+        rootCopy = null
+        let installed
+        try {
+          installed = await installing
+        } catch (err) {
+          if (epoch === recoveryEpoch) dropHeld()
+          const bound = known !== null && known.credentialId === credentialId
+          if (!bound && resetEpoch === resets) {
+            // It exists in the manager with no entry: never concluded or
+            // offered again, and kept out of later creations.
+            if (addPending !== null && addPending.credentialId === credentialId) addPending = null
+            addRefused({ credentialId, userId, code: 'INSTALL_FAILED', cleaned: false, created: true })
+            await persist()
+          }
+          throw err
+        }
+        dropHeld()
+        const out = { credentialId, userId, lookupId: keys.lookupId, blob }
+        if (installed.sessionSaved === false) out.sessionSaved = false
+        return out
+      }
+      if (gen !== generation || root === null) throw cancelled()
+      keys = await recovery.deriveRecoveryKeys(prf, 'passkey')
+      if (gen !== generation || root === null) throw cancelled()
+      const blob = recovery.wrapRoot({ root, member: rootMember, kind: 'passkey', wrapKey: keys.wrapKey })
+      return { credentialId, userId, lookupId: keys.lookupId, blob }
+    } finally {
+      zero(prf)
+      zero(rootCopy)
+      if (keys !== null) zero(keys.wrapKey)
+    }
+  }
+
+  // Creates a recovery passkey (a marked user id): same register() and
+  // exclusions as unlock({ register: true }), WebAuthn before any await. The
+  // new passkey's PRF output is never installed. A creation refused after the
+  // manager stored it is named on the error (as PR 1 does) and never dropped.
+  function createWrapped (mode, phone, rec) {
+    const hints = phone === true ? PHONE_HINTS : undefined
+    const epoch = resets
+    let wrapUserId
+    try {
+      wrapUserId = recovery.newWrapUserId()
+    } catch (err) {
+      return Promise.reject(err)
+    }
+    let deviceBound = null
+    const excludedNow = excluded()
+    const wasExcluded = new Set(excludedNow)
+    return run(
+      (credentials) => passkey.register(credentials, { rpId, userId: wrapUserId, excludeCredentialIds: excludedNow, hints }),
+      async (gen, result) => {
+        deviceBound = deviceBoundCreation(result)
+        if (deviceBound !== null) throw deviceBound
+        if (!wasExcluded.has(result.credentialId)) createdHere.add(result.credentialId)
+        if (mode === 'recover' && rec !== recoveryEpoch) {
+          // Cancelled during the ceremony: the new passkey exists anyway.
+          if (result.prf) result.prf.fill(0)
+          addRefused({ credentialId: result.credentialId, userId: result.userId, code: 'SUPERSEDED', cleaned: false, created: true })
+          await persist()
+          throw cancelled()
+        }
+        if (result.pending === true) {
+          if (addPending !== null && addPending.credentialId !== result.credentialId) dropAddPending(addPending)
+          const next = { credentialId: result.credentialId, userId: result.userId, phone: phone === true, mode, epoch: rec }
+          addPending = next
+          // addPending is memory only: the refused entry keeps the passkey
+          // out of later creations after a reload, which never offers it
+          // for 'concluir'.
+          addRefused({ credentialId: result.credentialId, userId: result.userId, code: 'ADD_PENDING', cleaned: false, created: true })
+          await persist()
+          if (gen !== generation || addPending !== next) throw cancelled()
+          return { pending: true }
+        }
+        return wrappedCreated(gen, mode, result.prf, { credentialId: result.credentialId, userId: result.userId, epoch: rec, resetEpoch: epoch })
+      },
+      (err) => {
+        if (err === deviceBound) return err
+        const id = err && err.credentialId
+        const madeNow = typeof id === 'string' && !wasExcluded.has(id)
+        if (madeNow && (err.code === 'NO_PRF' || err.code === 'NOT_SYNCED')) createdHere.add(id)
+        if (err && typeof id === 'string' && !madeNow) err.created = false
+        return noteUnusable(err, id, err && err.userId, false, madeNow, epoch)
+      })
+  }
+
+  // 'concluir' of a recovery passkey creation that came without PRF. The
+  // pending add stays until it succeeds, or until a failure records its
+  // passkey as refused (NO_PRF / NOT_SYNCED, or SUPERSEDED once the held
+  // root of a recovery is gone), so 'concluir' can be tried again.
+  function completeWrapped () {
+    const target = addPending
+    const epoch = resets
+    const hints = target.phone === true ? PHONE_HINTS : undefined
+    const recovering = target.mode === 'recover'
+    // Like finishRecovery: the held root (rearmed by a failed 'concluir')
+    // does not expire during this ceremony.
+    if (recovering && target.epoch === recoveryEpoch) pauseHeld()
+    return run(
+      (credentials) => passkey.completeRegistration(credentials, { rpId, credentialId: target.credentialId, hints }),
+      async (gen, result) => {
+        const out = await wrappedCreated(gen, target.mode, result.prf, { credentialId: result.credentialId, userId: target.userId, epoch: target.epoch, resetEpoch: epoch })
+        if (addPending === target) addPending = null
+        // It is an entry now (and, for a recovery, the bound passkey).
+        const before = refused.length
+        refused = refused.filter((e) => !(e.credentialId === target.credentialId && e.code === 'ADD_PENDING'))
+        if (refused.length !== before) await persist()
+        return out
+      },
+      (err) => {
+        if (err && (err.code === 'NO_PRF' || err.code === 'NOT_SYNCED') && addPending === target) addPending = null
+        if (recovering && held === null) dropAddPending(target)
+        return noteUnusable(err, target.credentialId, target.userId, false, true, epoch)
+      }).catch((err) => {
+      if (recovering && target.epoch === recoveryEpoch) rearmHeld()
+      throw err
+    })
+  }
+
+  function addPasskey ({ phone = false } = {}) {
+    if (root === null) return Promise.reject(codedError('USAGE', LOCKED_MESSAGE))
+    return createWrapped('add', phone)
+  }
+
+  // Ends a code recovery: called in the click, it creates the passkey the
+  // held root is bound to. The held root does not expire while this runs,
+  // nor while its pending creation waits for 'concluir'; a failure gives it
+  // a fresh 120 s.
+  function finishRecovery ({ phone = false } = {}) {
+    if (held === null) return Promise.reject(recoveryBad('nenhuma recuperação em andamento'))
+    const epoch = recoveryEpoch
+    pauseHeld()
+    return createWrapped('recover', phone, epoch).catch((err) => {
+      if (epoch === recoveryEpoch) rearmHeld()
+      throw err
+    })
+  }
+
+  // 'Trocar': after the app stored the new passkey's blob, this device binds
+  // to it and re-seals the session with the root.
+  function bindPasskey ({ credentialId, userId } = {}) {
+    if (root === null) return Promise.reject(codedError('USAGE', LOCKED_MESSAGE))
+    if (busy) return Promise.reject(busyError())
+    if (!credentialIdOk(credentialId) || typeof userId !== 'string' || !/^[0-9a-f]{64}$/.test(userId) || !recovery.isWrapUserId(userId)) {
+      return Promise.reject(codedError('USAGE', 'passkey de recuperação inválida'))
+    }
+    const copy = new Uint8Array(root)
+    const publicKey = rootMember
+    return local(async (gen) => {
+      try {
+        await bind(gen, { v: 1, credentialId, rpId, userId })
+        chosen = null
+        // bind() dropped its ADD_PENDING entry from refused.
+        if (addPending !== null && addPending.credentialId === credentialId) addPending = null
+        let sessionSaved = true
+        try {
+          await sessionStore.save(copy, { rpId, credentialId, publicKey })
+        } catch {
+          sessionSaved = false
+        }
+        if (sessionSaved) await storage.writeJson(SIGNED_OUT_KEY, null).catch(() => {})
+        if (gen !== generation) throw cancelled()
+        return sessionSaved ? {} : { sessionSaved: false }
+      } finally {
+        zero(copy)
+      }
+    })
+  }
+
+  // -> { code, lookupId, blob }: the code string exists only in this value.
+  function makeRecoveryCode () {
+    if (root === null) return Promise.reject(codedError('USAGE', LOCKED_MESSAGE))
+    if (busy) return Promise.reject(busyError())
+    return local(async (gen) => {
+      const secret = new Uint8Array(recovery.CODE_BYTES)
+      globalThis.crypto.getRandomValues(secret)
+      let keys = null
+      try {
+        keys = await recovery.deriveRecoveryKeys(secret, 'code')
+        if (gen !== generation || root === null) throw cancelled()
+        const blob = recovery.wrapRoot({ root, member: rootMember, kind: 'code', wrapKey: keys.wrapKey })
+        return { code: recovery.encodeCode(secret), lookupId: keys.lookupId, blob }
+      } finally {
+        zero(secret)
+        if (keys !== null) zero(keys.wrapKey)
+      }
+    })
   }
 
   async function status () {
@@ -689,7 +1241,7 @@ function createIdentity (node, storage, sessionStore, idb) {
       signal: support.signal,
       passkeyKnown: known !== null,
       resumed: resumed && stored.unlocked === true,
-      pending: pending !== null,
+      pending: pending !== null || addPending !== null,
       refused: refused.map(({ userId, code, cleaned, created }) => ({ userId, code, cleaned, created }))
     }
     if (rpIdError !== null) out.rpIdError = rpIdError.message
@@ -785,7 +1337,21 @@ function createIdentity (node, storage, sessionStore, idb) {
     // record or its restore, session save) or the resume has settled; never
     // waits on the browser.
     settled: () => finishing,
-    api: Object.freeze({ status, unlock, complete, lock, signOut, reset })
+    api: Object.freeze({
+      status,
+      unlock,
+      complete,
+      lock,
+      signOut,
+      reset,
+      unlockWrapped,
+      unlockWithCode,
+      cancelRecovery,
+      finishRecovery,
+      addPasskey,
+      bindPasskey,
+      makeRecoveryCode
+    })
   }
 }
 

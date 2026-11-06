@@ -24,6 +24,19 @@
 // link, certificate, reset and rename path is the one Ajustes uses. The setup
 // names the key a code and the certificate the association's release.
 //
+// Recovery (docs/rpc.md 5.90 to 5.94): 'entrar com outra passkey' whenever
+// a passkey is known, and 'Entrar com código de recuperação' (a field, then
+// the same ceremony() wrapper). The provider (src/node.js) finishes a passkey
+// or code that opens only a recovery entry; a code ends in { needsPasskey },
+// whose card creates the passkey the account opens with from now on
+// (finishRecovery, in the press) and registers it before the once sync. A
+// registration that fails leaves the device signed in and the passkey held
+// for 'registrar de novo' in Ajustes › Passkeys e recuperação. While that
+// card waits it is the only card: its own pending creation gets its own
+// 'concluir', and nothing else (Entrar, the phone, the code field) can start
+// a ceremony that would abandon the account's root. The code entry is hidden
+// while another creation awaits 'concluir', so a code never starts beside it.
+//
 // The cards keep one short line each; the passkey and Google-link
 // explanations sit behind the info button (src/help.js), whose sheet nests in the
 // Ajustes Sheet when the card renders there.
@@ -33,7 +46,8 @@ import { Platform, StyleSheet, Text, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
-import { authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink, toError } from '../account'
+import { authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, readPending, recoveryPut, recoveryStart, renameFinish, renameStart, startLink, toError } from '../account'
+import { registerEntry } from '../recovery'
 import { isAppClient } from '../appClient'
 import { acceptableAuthorizeUrl } from '../authorizeUrl'
 import { deviceRandomBytes, newLinkSecret } from '../appLinkSecret'
@@ -48,6 +62,7 @@ import { hostOf, installationOrigin } from '../installation'
 import { dropsHeldInvite, parseSessionReturn } from '../linkReturn'
 import * as AuthSession from '../authSession'
 import { InvitePaste } from './Idade'
+import { holdUnregistered, releaseUnregistered } from './Passkeys'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
 import { HelpNote } from '../ui/Help'
 import { ShareProfile } from '../ui/ShareProfile'
@@ -72,13 +87,24 @@ const PLAIN_PARSE_ERROR = 'Não foi possível ler esse texto. Cole tudo o que a 
 // place they name changes.
 const NATIVE = Platform.OS !== 'web'
 const PLACE = NATIVE ? 'neste aparelho' : 'neste navegador'
-const EXISTS_TEXT = 'Já existe uma conta ' + PLACE + '; outra passkey é outra conta.'
+const EXISTS_TEXT = 'Já existe uma conta ' + PLACE + '. Uma passkey criada aqui abre outra conta; para entrar na mesma conta com outra passkey, cadastre-a antes em Ajustes › Passkeys e recuperação.'
+const RECOVERY_ACCOUNT = { recoveryStart, recoveryPut }
+const CODE_LABEL = 'Entrar com código de recuperação'
+const CODE_HINT = 'O código tem 36 letras e números, em 9 grupos de 4.'
+const NEEDS_PASSKEY_TEXT = 'O código abriu a sua conta. Para terminar, crie uma passkey nova: é com ela que você vai entrar daqui em diante. Faça isso agora: depois de dois minutos é preciso digitar o código de novo.'
+const REGISTER_FAILED_TEXT = 'Você entrou, mas a passkey nova não foi cadastrada na conta: depois de sair, ela não abre a conta. Abra Ajustes › Passkeys e recuperação e toque em registrar de novo.'
+const REGISTER_UNCERTAIN_TEXT = 'Você entrou, mas não deu para saber se a passkey nova foi cadastrada na conta. Abra Ajustes › Passkeys e recuperação para conferir.'
 const RESET_TEXT = 'A conta antiga não pode ser reconstruída: será preciso vincular de novo. As publicações dela que ainda aguardam envio são apagadas.'
 // The app's counterpart of BROWSER_TEXT: this device's credential manager
 // gives no PRF (or passkeys are not available here yet), so nothing can be
 // derived on it.
 const DEVICE_TEXT = 'Este aparelho ainda não consegue abrir sua conta com a passkey. Use o Varanda no navegador (Chrome, Edge ou Safari 18 ou mais novo).'
 const PENDING_TEXT = 'A passkey foi criada. Toque abaixo para concluir e entrar.'
+
+// A finishRecovery result (or its 'concluir'): the new passkey's sealed root.
+function finishing (r) {
+  return !!r && typeof r === 'object' && typeof r.lookupId === 'string' && !!r.blob && typeof r.blob === 'object'
+}
 
 function mismatchText (legacy) {
   return 'A conta guardada ' + PLACE + ' é de outra passkey' +
@@ -829,6 +855,18 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   const [missedOnce, setMissedOnce] = useState(false)
   // NONE on Entrar with no known passkey: a notice, not an error line.
   const [noCredential, setNoCredential] = useState(false)
+  // The recovery code field. The typed code leaves the state once the node
+  // took it (or on cancelar); a refused one stays so a typo can be fixed.
+  const [codeOpen, setCodeOpen] = useState(false)
+  const [codeText, setCodeText] = useState('')
+  // A code opened the account's root ({ needsPasskey }): the next press
+  // creates the passkey (finishRecovery).
+  const [needsPasskey, setNeedsPasskey] = useState(false)
+  // The registration of that passkey failed (shown once unlocked).
+  const [regNote, setRegNote] = useState('')
+  // The result of the finishRecovery (or its 'concluir') that installed the
+  // identity: afterUnlock registers it before the once sync starts.
+  const finishedRef = useRef(null)
   // The once sync after an unlock (node.passkey.recovering, shared by every
   // mounted Identidade): no instance sends a request while it runs (any
   // member request would preempt and end it); the one that unlocked reads
@@ -984,9 +1022,33 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       // Google step, even when the recovery ends without a sync (offline).
       try { await passkey.refresh() } catch {}
     }
+    // recovery.sign needs the diary, and never preempts a run.
+    const finished = finishedRef.current
+    finishedRef.current = null
+    if (finished !== null) await registerFinished(finished)
     // Ends the recovery itself when the run cannot start (no identity, a run
     // already active); every Identidade then reads again.
     await passkey.recover()
+  }
+
+  const registerFinished = async (r) => {
+    let member = typeof r.publicKey === 'string' ? r.publicKey : null
+    if (member === null) {
+      try {
+        const st = await passkey.refresh()
+        if (st && typeof st.publicKey === 'string') member = st.publicKey
+      } catch {}
+    }
+    const entry = { member, kind: 'passkey', lookupId: r.lookupId, blob: r.blob, credentialId: r.credentialId, userId: r.userId, change: false }
+    try {
+      if (member === null) throw new Error('identidade não encontrada')
+      await registerEntry({ request: node.request, account: RECOVERY_ACCOUNT, member, kind: 'passkey', lookupId: r.lookupId, blob: r.blob })
+      releaseUnregistered()
+      setRegNote('')
+    } catch (err) {
+      if (member !== null) holdUnregistered(entry)
+      setRegNote(err && err.uncertain === true ? REGISTER_UNCERTAIN_TEXT : REGISTER_FAILED_TEXT)
+    }
   }
 
   // The handle's unlock/complete is called synchronously in the click
@@ -1010,6 +1072,15 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           setNoCredential(false)
           return
         }
+        if (r && r.needsPasskey === true) {
+          passkey.endRecovery()
+          setCodeText('')
+          setCodeOpen(false)
+          return setNeedsPasskey(true)
+        }
+        if (mode === 'code') setCodeText('')
+        finishedRef.current = (mode === 'finish' || completing) && finishing(r) ? r : null
+        setNeedsPasskey(false)
         setAwaitingComplete(false)
         setCreateToo(false)
         setMismatch(null)
@@ -1024,6 +1095,8 @@ export default function Identidade ({ active, embedded = false, setup = false, v
         // The node drops the pending creation only when its own passkey fails.
         // Older nodes omit status.pending, so this local flag is the fallback.
         if (completing && err && err.code === 'NO_PRF') setAwaitingComplete(false)
+        // The node dropped the held root (timeout, lock): the code again.
+        if (mode === 'finish' && err && err.code === 'RECOVERY_BAD') setNeedsPasskey(false)
         pkFail(err, created, mode)
       })
       .finally(pkEnd)
@@ -1075,6 +1148,29 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   }
 
   const onOtherPasskey = () => ceremony(() => passkey.unlock({ any: true }), false, false, 'other')
+
+  // No WebAuthn here: the node checks the code, then the provider fetches the
+  // sealed root. The ceremony wrapper keeps one flow and one busy flag.
+  const onCodeSubmit = () => {
+    const code = codeText.trim()
+    // Another creation awaits 'concluir': it is finished or abandoned first.
+    if (code === '' || showComplete) return
+    ceremony(() => passkey.unlockWithCode(code), false, false, 'code')
+  }
+  const onCodeCancel = () => {
+    setCodeText('')
+    setCodeOpen(false)
+  }
+  // WebAuthn inside the press: finishRecovery is the call itself.
+  const onFinishRecovery = () => ceremony(() => passkey.finishRecovery(), true, false, 'finish')
+  // The recovery's own creation answered { pending: true }: its 'concluir'
+  // keeps the 'finish' mode, so the result is registered and a dropped root
+  // (RECOVERY_BAD) ends the recovery card.
+  const onFinishComplete = () => ceremony(() => passkey.complete(), true, true, 'finish')
+  const onCancelRecovery = () => {
+    setNeedsPasskey(false)
+    passkey.cancelRecovery().catch(() => {})
+  }
 
   // Only the reset: the next click is 'entrar com a passkey' (a ceremony
   // after an awaited reset would have lost the click's activation).
@@ -1164,6 +1260,24 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           {blockedInvite}
         </Card>
       )
+    } else if (needsPasskey) {
+      // Exclusive: a pending creation here can only be the recovery's own
+      // (the code entry is hidden while another one awaits 'concluir').
+      entrar = (
+        <Card>
+          <Body>{NEEDS_PASSKEY_TEXT}</Body>
+          {showComplete
+            ? (
+              <>
+                <Body>{PENDING_TEXT}</Body>
+                <Btn label='concluir a criação da passkey' onPress={onFinishComplete} pending={pkPending} />
+              </>
+              )
+            : <Btn label='Criar passkey nova' onPress={onFinishRecovery} pending={pkPending} />}
+          <Btn label='cancelar' secondary onPress={onCancelRecovery} disabled={pkPending} />
+          <ErrorText>{pkError}</ErrorText>
+        </Card>
+      )
     } else {
       // The welcome. The first ceremony leads: 'Criar passkey' for a browser
       // with no passkey known (or one whose known passkey did not appear),
@@ -1236,11 +1350,37 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             : null}
           {createFirst ? criarBtn : null}
           {missedOnce && !knownLost ? <Soft>{MISSED_TEXT}</Soft> : null}
-          {knownLost || missedOnce ? <Btn label={OTHER_PASSKEY_LABEL} secondary onPress={onOtherPasskey} disabled={pkPending} /> : null}
+          {knownLost || missedOnce || pkStatus.passkeyKnown === true ? <Btn label={OTHER_PASSKEY_LABEL} secondary onPress={onOtherPasskey} disabled={pkPending} /> : null}
           {entrarBtn}
           {phoneOk ? <Btn label={createFirst ? PHONE_LABEL : PHONE_SIGNIN_LABEL} secondary onPress={onPhonePress} disabled={pkPending || confirmCreate !== false} /> : null}
           {showPhoneHint ? <Soft>{PHONE_HINT}</Soft> : null}
           {phoneOk ? <Soft>{PHONE_SIGNIN_HINT}</Soft> : null}
+          {showComplete
+            ? null
+            : codeOpen
+              ? (
+                <>
+                  <Label>Código de recuperação</Label>
+                  <TextInput
+                    style={styles.manual}
+                    value={codeText}
+                    onChangeText={setCodeText}
+                    autoCapitalize='characters'
+                    autoCorrect={false}
+                    spellCheck={false}
+                    autoComplete='off'
+                    importantForAutofill='no'
+                    accessibilityLabel='código de recuperação'
+                    editable={!pkPending}
+                  />
+                  <Soft>{CODE_HINT}</Soft>
+                  <Row>
+                    <Btn label='entrar com o código' onPress={onCodeSubmit} pending={pkPending} disabled={pkPending || codeText.trim() === ''} />
+                    <Btn label='cancelar' secondary onPress={onCodeCancel} disabled={pkPending} />
+                  </Row>
+                </>
+                )
+              : <Btn label={CODE_LABEL} secondary onPress={() => setCodeOpen(true)} disabled={pkPending || confirmCreate !== false} />}
           <ErrorText>{pkError}</ErrorText>
           <Notice>{pkNote}</Notice>
           {node.hosted === true ? <Notice>{takeReturnNotice() || ''}</Notice> : null}
@@ -1284,6 +1424,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     <>
       <ErrorText>{loadError}</ErrorText>
       <ErrorText>{withPasskey ? pkError : ''}</ErrorText>
+      {withPasskey && regNote ? <Notice>{regNote}</Notice> : null}
       {recovering ? <Notice>Buscando sua conta…</Notice> : null}
       {info === null && !loadError ? <Soft>carregando…</Soft> : null}
       {info !== null && info.publicKey === null
