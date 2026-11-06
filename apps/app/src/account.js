@@ -37,7 +37,7 @@ const ERROR_MESSAGES = {
   'termos-pendentes': 'aceite os termos atuais antes de ligar os avisos',
   'pedido-invalido': 'pedido inválido',
   // Member cap (503). Already-linked members never receive this token.
-  'lista-de-espera': 'A Varanda está cheia por enquanto. Nada sobre você foi guardado; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.',
+  'lista-de-espera': 'A Varanda está cheia por enquanto. Esta tentativa não criou conta nem lugar em fila; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.',
   'convite-obrigatorio': INVITE_NEEDED_TEXT,
   'convite-invalido': 'Este convite não vale mais: já foi usado, venceu ou não existe. Peça outro link para quem te convidou.',
   'limite-convites': 'Você já criou os convites desta semana. Na segunda-feira volta a contar.',
