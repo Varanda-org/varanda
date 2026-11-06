@@ -343,8 +343,16 @@ export function reconcile (change, view) {
       // The caller's own writer key is not exposed to the screens: match the
       // diary, the text and a stamp not older than the send (this device's
       // clock stamps `at`; 2 s of slack).
+      // A reply must also point at the same message (change.replyKey,
+      // 'writer:seq'), and a plain post (replyKey null) must point at none, so
+      // the same text sent as another reply never confirms this one.
       const floor = change.sentAt - 2000
-      if (view.items.some((i) => i && i.diary === change.diary && i.text === change.text && i.hidden !== true && Date.parse(i.at) >= floor)) return 'landed'
+      const sameReply = (i) => {
+        if (change.replyKey === undefined) return true
+        const key = i.replyTo && typeof i.replyTo === 'object' ? i.replyTo.writer + ':' + i.replyTo.seq : null
+        return key === change.replyKey
+      }
+      if (view.items.some((i) => i && i.diary === change.diary && i.text === change.text && i.hidden !== true && Date.parse(i.at) >= floor && sameReply(i))) return 'landed'
       // Absence proves nothing unless the read covered every message.
       return view.next === null && view.state === 'ok' ? 'not-landed' : 'unknown'
     }

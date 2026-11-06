@@ -49,6 +49,16 @@ function displayName (s) {
   return rest.join('').trim()
 }
 
+// Whether two names read the same on screen: every invisible code point is
+// dropped (not only a leading run), compatibility forms are folded (NFKC) and
+// case is ignored. A look-alike of a fixed label ("Você" plus a zero-width
+// space) then matches the label it imitates.
+export function readsAs (a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  const fold = (s) => Array.from(s).filter((ch) => !invisible(ch.codePointAt(0))).join('').normalize('NFKC').toLocaleLowerCase('pt-BR')
+  return fold(a) === fold(b)
+}
+
 export function isValidUsername (username) {
   return typeof username === 'string' && /^[a-z][a-z0-9_]{2,19}$/.test(username) && !/^[0-9a-f]{6}$/.test(username)
 }

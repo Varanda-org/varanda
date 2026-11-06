@@ -4928,3 +4928,58 @@ Limites desta caminhada:
 
 - Na Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`), as conversas são dados de exemplo. Envio, aceite de pedido e busca com conversas reais só se conferem no laboratório hospedado, com duas pessoas, como na seção 94.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 101. Balões, respostas e cabeçalhos das conversas (PR feat/chat-bubbles-replies)
+
+Roteiro das conversas privadas (Mensagem) e dos grupos (Grupo) com balões, respostas, cabeçalhos, campo de escrever compartilhado e emojis, nas três plataformas, nos dois temas, com texto grande e movimento reduzido. O comportamento descrito está em [app.md](app.md), seções "Conversa" e "Grupo". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
+
+Regras que os passos conferem:
+
+- Conversa privada: o cabeçalho mostra o avatar, o nome e o @nome, e tocar neles abre o perfil. Um só ícone, **opções da conversa**, reúne bloquear, apagar e denunciar.
+- Balões: as suas à direita, na cor de destaque suave, e as da outra pessoa à esquerda, sobre a cor de cartão. A última mensagem de cada sequência tem cauda; a hora fica dentro do balão, embaixo à direita; os marcadores de dia ficam centralizados.
+- **Enviada** aparece só enquanto um envio está retido ou incerto.
+- Toque longo abre **Responder**, **Copiar** e **Denunciar**. Na web, com mouse ou teclado, uma seta pequena no canto do balão abre as mesmas ações.
+- A citação de uma resposta mostra "Você" ou o nome de quem escreveu a mensagem citada, e nenhum nome enquanto a mensagem citada não está carregada.
+- Campo de escrever: campo arredondado, botão de emoji, sugestões de @ (só na conta hospedada e online), botão de enviar redondo, que só aparece com texto, e barra de resposta com **Cancelar**. A caixa fica acima da área inferior do celular.
+- Menções tocadas abrem o perfil.
+- Pedidos de mensagem e conversa bloqueada seguem como antes.
+- Grupo: o cabeçalho mostra o nome e "N membros", e um só ícone de ajustes do grupo, que não aparece quando a pessoa age como página. A comunidade aparece como uma linha pequena e tocável abaixo do cabeçalho.
+- Comunidade: o cabeçalho mostra o avatar quadrado, o nome e "N membros", com os ícones de compartilhar e de informações; tocar no nome também abre Informações. Informações da comunidade usa o mesmo cabeçalho.
+- Grupo: cada pessoa forma as suas sequências. Na primeira mensagem de uma sequência de outra pessoa aparece o nome, numa cor fixa para cada pessoa; o avatar fica ao lado da última.
+- Grupo: toque longo abre **Responder**, **Copiar**, **Esconder** ou **Mostrar**, **Banir** e **Denunciar**, conforme as permissões de cada um. Responder não aparece quando a pessoa age como página.
+- Grupo: uma resposta real mostra a citação na nova bolha. Tocar na citação rola até a mensagem original, quando ela está carregada, e a resposta continua aparecendo depois de recarregar.
+- Grupo: o painel da página aparece uma vez, sob o cabeçalho.
+- Nenhuma tela mostra **lida**, **entregue** ou **digitando**, nas conversas privadas nem nos grupos.
+
+Android (AVD `varanda-api36`, build de debug, primeiro):
+
+- [ ] Conversa privada e grupo em tema claro e em tema escuro: balões, caudas, hora dentro do balão, marcadores de dia, nome por pessoa no grupo e avatar ao lado da última.
+- [ ] Toque longo abre as ações de cada tela, sem botão **⋯** em cada linha: Responder, Copiar e Denunciar na conversa privada; Responder, Copiar, Esconder ou Mostrar, Banir e Denunciar no grupo, conforme as permissões.
+- [ ] Resposta real num grupo: a citação aparece na nova bolha, tocar nela rola até a original quando ela está carregada, e a resposta continua depois de recarregar o app.
+- [ ] Campo de escrever: emoji, sugestões de @ com conta hospedada e online, enviar redondo só com texto, Cancelar na barra de resposta, e a caixa acima da área inferior do celular.
+- [ ] Cabeçalhos: a conversa privada abre o perfil ao tocar; o grupo mostra "N membros", os ajustes do grupo (ausentes quando a pessoa age como página) e a linha da comunidade.
+- [ ] Comunidade: compartilhar e informações abrem pelos ícones do cabeçalho; a lista de grupos mostra a última linha e o contador de novas.
+- [ ] Menções tocadas abrem o perfil. Pedidos de mensagem e conversa bloqueada seguem como antes.
+- [ ] Nenhuma tela mostra lida, entregue ou digitando.
+- [ ] Texto grande e movimento reduzido: nenhum texto cortado, sobreposto ou escondido, e nenhum alvo de toque menor que 44 pt. Capturas fora do git, uma pasta por plataforma.
+
+iOS (simulador iPhone 16e, depois do Android):
+
+- [ ] Os mesmos passos do Android, em tema claro e em tema escuro.
+- [ ] Texto grande e movimento reduzido, com a mesma conferência de corte, sobreposição e alvo de toque do Android.
+- [ ] A caixa de escrever fica acima da área inferior do aparelho, e o gesto de borda do sistema não disputa com o do app ao voltar de uma conversa.
+
+Web (Chrome, depois do iOS):
+
+- [ ] Em 390 px e em 1280 px, nos temas claro e escuro: os passos acima de balões, respostas, cabeçalhos e campo de escrever.
+- [ ] Em 390 px e em 1280 px, com mouse ou teclado, a seta no canto do balão abre as mesmas ações do toque longo.
+- [ ] Texto grande e movimento reduzido, nas duas larguras, sem corte nem sobreposição.
+
+Como verificar, antes da caminhada, a partir da raiz:
+
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- Na Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`), as conversas e os grupos são dados de exemplo. Envio, resposta real e menção com conversas reais só se conferem no laboratório hospedado, com duas pessoas, como na seção 94.
+- Nenhuma caixa acima foi executada nesta documentação.

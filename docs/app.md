@@ -286,6 +286,12 @@ Tela empilhada: entra deslizando e volta pela borda ou pelo Voltar. Tem linhas c
 
 ### Conversa
 
+- **Cabeçalho.** A barra mostra o avatar, o nome e o @nome da pessoa; tocar neles abre o perfil. Um só ícone, **opções da conversa**, reúne bloquear, apagar e denunciar a conversa.
+- **Balões.** As suas mensagens ficam à direita, na cor de destaque suave, e as da outra pessoa à esquerda, sobre a cor de cartão. A última mensagem de cada sequência tem uma cauda pequena; a hora fica dentro do balão, embaixo à direita, e os marcadores de dia ficam centralizados. "Enviada" aparece só enquanto um envio está retido ou incerto.
+- **Ações.** Tocar longo numa mensagem abre **Responder**, **Copiar** e **Denunciar**. Na web, com mouse ou teclado, uma seta pequena no canto do balão abre as mesmas ações. Não há botão **⋯** em cada linha.
+- **Resposta.** A citação mostra "Você" ou o nome de quem escreveu a mensagem citada, e nenhum nome enquanto a mensagem citada não está carregada.
+- **Campo de escrever.** Campo arredondado com botão de emoji, sugestões de @ (só na conta hospedada e online) e botão de enviar redondo, que só aparece com texto. Com uma resposta em andamento, uma barra mostra a mensagem citada e **Cancelar**. A caixa fica acima da área inferior do celular.
+- **Menções.** Um @nome tocado abre o perfil da pessoa.
 - Não há confirmação de leitura, nem aviso de entrega, nem indicador de digitação, nem fotos. `dm.seen` só apaga o ponto neste aparelho e não manda nada à outra pessoa, ao semeador nem aos outros aparelhos.
 - **Responder** (`dm.send` com `replyTo`) cita uma mensagem desta conversa.
 - **Apagar conversa neste aparelho** (`deleted`) tira a conversa deste aparelho e, pelo `ctl` lacrado só para a própria caixa, dos outros aparelhos da mesma pessoa. A outra pessoa fica com a cópia dela. O semeador não apaga sob pedido: só a retenção de sete dias.
@@ -317,7 +323,7 @@ No nó hospedado (site e app instalado), **Comunidades** é uma tela empilhada q
 
 ### Comunidade
 
-A tela da comunidade é a lista dos seus grupos. A barra do topo mostra o avatar, o nome e, embaixo, só o número de membros ("N membros"). Tocar no nome ou no **⋯** abre **Informações da comunidade** (veja a seção seguinte), também enquanto a comunidade ainda chega a este aparelho. Entrar, o cartão de convite e a lista de grupos ficam aqui; o resto da administração fica em Informações.
+A tela da comunidade é a lista dos seus grupos. A barra do topo mostra o avatar, o nome e, embaixo, só o número de membros ("N membros"), e tem ícones de compartilhar e de informações. O ícone de informações abre **Informações da comunidade** (veja a seção seguinte), também enquanto a comunidade ainda chega a este aparelho. Entrar, o cartão de convite e a lista de grupos ficam aqui; o resto da administração fica em Informações.
 
 - **Cartão de convite.** Quem ainda não participa vê um cartão com o nome, a entrada, o número de membros e, quando a comunidade já está neste aparelho, os administradores, com um só botão: **Entrar** ou **Pedir entrada**, e a frase "Participar é público: sua entrada fica registrada no seu diário.". Abrir um link nunca coloca ninguém na comunidade: só o toque grava a entrada no diário. Quando o aparelho ainda não tem nada da comunidade, o cartão vem do índice do semeador e, quando a resposta da entrada é pendente, mostra "Enviado. Aguardando a comunidade chegar a este aparelho.". Depois de sair, a nota de entrada antiga some. Quem já participa não vê o cartão.
 - **Entrar e Pedir entrada.** Numa comunidade aberta o botão é **Entrar**; numa com aprovação, **Pedir entrada**. Entrar na comunidade leva aos grupos dela.
@@ -328,7 +334,7 @@ A tela da comunidade é a lista dos seus grupos. A barra do topo mostra o avatar
 
 ### Informações da comunidade
 
-Tocar no nome da comunidade ou no **⋯** da lista abre a tela de informações. O topo mostra o avatar, o nome e, quando a comunidade já chegou, uma linha com a entrada (aberta ou com aprovação), o número de membros, o de administradores e o seu papel. Enquanto a comunidade ainda chega, o título é "Comunidade ainda chegando", a linha some e a tela mostra só **Compartilhar** e a nota "Aguardando a sincronização desta comunidade.". Ações e linhas aparecem conforme o papel de quem olha, nesta ordem: Compartilhar, Sair ou Desistir, Concluir saída, Convidar, Membros e Pedidos (para quem modera), Quem pode convidar e Ajustes (para quem criou).
+Tocar no nome da comunidade ou no ícone de informações abre a tela de informações. O topo mostra o avatar, o nome e, quando a comunidade já chegou, uma linha com a entrada (aberta ou com aprovação), o número de membros, o de administradores e o seu papel. Enquanto a comunidade ainda chega, o título é "Comunidade ainda chegando", a linha some e a tela mostra só **Compartilhar** e a nota "Aguardando a sincronização desta comunidade.". Ações e linhas aparecem conforme o papel de quem olha, nesta ordem: Compartilhar, Sair ou Desistir, Concluir saída, Convidar, Membros e Pedidos (para quem modera), Quem pode convidar e Ajustes (para quem criou).
 
 - **Compartilhar.** Abre a folha de compartilhar do sistema ou copia o link `/c/<chave>` e avisa "Link copiado"; o link nunca aparece como texto cru. Qualquer pessoa pode compartilhar.
 - **Sair e Desistir.** Quem já pediu entrada vê **Desistir do pedido** no lugar de Sair, que retira o pedido (some da lista da administração). Sair da comunidade, ou ser banido, vale para todos os grupos dela. Reentrar não ressuscita a participação antiga. Quem criou a comunidade recebe, antes de sair, o aviso: "Você criou esta comunidade: depois de sair, não poderá mais nomear administradores nem criar grupos, mesmo que volte. Ao voltar, ainda poderá mudar o nome e a entrada, tirar grupos da lista e tirar o cargo de administradores."
@@ -347,8 +353,12 @@ Tocar no nome da comunidade ou no **⋯** da lista abre a tela de informações.
 
 ### Grupo
 
-A tela de um grupo mostra o selo da comunidade, a conversa, da mensagem mais antiga para a mais nova, com a mais nova embaixo, e a caixa para escrever. Puxar a tela para baixo atualiza a conversa. O texto das mensagens mantém as quebras de linha e tem os mesmos links sublinhados das publicações; uma mensagem oculta não tem link.
+A tela de um grupo mostra, sob o cabeçalho, a linha da comunidade, a conversa, da mensagem mais antiga para a mais nova, com a mais nova embaixo, e a caixa para escrever. Puxar a tela para baixo atualiza a conversa. O texto das mensagens mantém as quebras de linha e tem os mesmos links sublinhados das publicações; uma mensagem oculta não tem link.
 
+- **Cabeçalho.** A barra mostra o nome do grupo e "N membros", e um só ícone de ajustes do grupo, que não aparece quando a pessoa age como página. Abaixo do cabeçalho, uma linha pequena e tocável leva à comunidade. O painel da página aparece uma vez, sob o cabeçalho.
+- **Balões.** Como nas conversas privadas: as suas à direita e as da outra pessoa à esquerda, com cauda na última de cada sequência e a hora dentro do balão. Cada pessoa forma as suas sequências. Na primeira mensagem de uma sequência de outra pessoa aparece o nome, numa cor fixa para cada pessoa, e o avatar fica ao lado da última.
+- **Ações.** Tocar longo abre **Responder**, **Copiar**, **Esconder** ou **Mostrar**, **Banir** e **Denunciar**, conforme as permissões de cada um. Responder não aparece quando a pessoa age como página.
+- **Respostas.** Uma resposta real mostra a citação na nova bolha. Tocar na citação rola até a mensagem original, quando ela está carregada, e a resposta continua aparecendo depois de recarregar o app.
 - **Em todos os aparelhos.** Um grupo que a pessoa criou ou em que entrou por outro aparelho da mesma passkey aparece aqui depois da sincronização, e a leitura funciona. Quando a pessoa já está no grupo, mas este aparelho ainda não escreve, a caixa de escrever dá lugar ao cartão **Participar neste aparelho**. Um aparelho novo da mesma passkey entra sozinho no grupo depois da sincronização, e o toque só é preciso se a conta já usa 6 das 8 vagas de escrita do grupo, que o semeador nunca devolve (a entrada é um registro público). Nessa reserva, o primeiro toque só mostra o aviso e um segundo toque participa. Se este aparelho ainda não escreve na comunidade, o toque primeiro faz este aparelho participar da comunidade. Depois que este aparelho já participa, se uma mensagem ainda não pode sair, a caixa avisa "Este aparelho ainda não pode escrever aqui. Aguarde a sincronização.". Numa comunidade com aprovação, o aparelho novo espera um administrador aceitar e a caixa avisa "Este aparelho precisa da aprovação de um administrador para escrever.". Num grupo privado, o aparelho que criou o grupo ou o de um administrador envia as chaves ao aparelho novo sozinho e o histórico abre sem toque; até lá, e a caixa responde "aguardando nova chave", também quando o aparelho já participa e só falta a chave. Depois do toque em Participar neste aparelho o cartão some até a leitura seguinte responder, e Sair do grupo só aparece no aparelho que participa. O app com configuração manual tem o próprio diário e não recebe as comunidades de outro aparelho.
 - **Ocultar e banir** aparecem conforme o papel de quem olha. A autora de uma mensagem e quem modera podem ocultá-la; o banimento é feito na comunidade e vale para todos os grupos dela. Ocultar tira a mensagem da conversa e não apaga as cópias que outros aparelhos já têm.
 - **Denunciar.** Cada mensagem de outra pessoa que não está escondida tem "denunciar", que leva o grupo e a posição da mensagem; num grupo privado, a citação é o texto aberto neste aparelho.
@@ -429,8 +439,8 @@ Esta parte muda como as telas se comportam ao rolar e como as linhas aparecem. N
 ### Mensagens
 
 - Entre dias diferentes aparece um marcador: "hoje", "ontem" ou dia e mês ("D mmm"), com o ano quando não é o ano atual. O dia é o do aparelho.
-- Mensagens seguidas do mesmo lado formam um grupo quando cada uma cai até 5 minutos da primeira do grupo, no mesmo dia e sem pílula de convite entre elas. Dentro do grupo, os cantos do lado de quem enviou ficam mais fechados, e só a última mostra a hora (e "Enviada", nas próprias).
-- Pressionar e segurar uma mensagem abre o menu com a bolha inteira: cantos cheios e hora. Não há confirmação de leitura nem avatar nas mensagens.
+- Mensagens seguidas do mesmo lado formam um grupo quando cada uma cai até 5 minutos da primeira do grupo, no mesmo dia e sem pílula de convite entre elas. Dentro do grupo, os cantos do lado de quem enviou ficam mais fechados, e a última bolha tem uma pequena cauda. Cada bolha mostra a hora dentro dela; "Enviada" aparece só enquanto um envio está retido ou incerto.
+- Pressionar e segurar uma mensagem abre as ações (Responder, Copiar, Denunciar); na web, com mouse ou teclado, uma pequena seta no canto da bolha abre as mesmas ações. Não há confirmação de leitura nem avatar nas mensagens privadas.
 
 ### Publicar
 

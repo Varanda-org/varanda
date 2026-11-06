@@ -187,3 +187,11 @@ test('dm.js has no read, delivery or typing words and no em dash', async (t) => 
   t.absent(src.includes('\u2014'))
   for (const text of Object.values(LABELS)) t.absent(text.includes('\u2014'), text)
 })
+
+test('the chat screens and components have no read, delivery or typing words', (t) => {
+  for (const file of ['../src/screens/Mensagem.js', '../src/ui/Bubble.js', '../src/ui/ChatComposer.js', '../src/ui/ActionsSheet.js']) {
+    const src = readFileSync(join(__dirname, file), 'utf8')
+    for (const word of ['lida', 'entregue', 'digitando']) t.absent(src.includes(word), file + ': ' + word)
+    t.absent(src.includes('\u2014'), file)
+  }
+})

@@ -31,6 +31,12 @@ test('App.js: page screens are not gated on pagesOn, so never become Membro', (t
   t.absent(/pagesOn\([^)]*\)\s*&&\s*\(entry\.screen === 'paginas'/.test(src))
 })
 
+test('Grupo.js renders the AS_PAGE_LABEL panel body exactly once', (t) => {
+  const src = read('src/screens/Grupo.js')
+  const body = "{pageRoleLabel(pageRole) ? <Soft>{AS_PAGE_LABEL + ' · ' + pageRoleLabel(pageRole)}</Soft> : null}"
+  t.is(src.split(body).length - 1, 1)
+})
+
 test('MemberRow merges the names hint and the search hit', (t) => {
   const src = read('src/ui/MemberRow.js')
   t.ok(src.includes('const pageInfo = mergePageInfo(hint, hit)'))

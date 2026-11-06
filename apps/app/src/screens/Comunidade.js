@@ -6,7 +6,7 @@
 // also sees Novo grupo and, on repair, Tirar da lista and Devolver à lista.
 // A second device has the diary role but no writer here, so it gets a
 // Participar neste aparelho card above the groups instead.
-// The top bar (or its ⋯) opens Informações da comunidade, where sharing,
+// The header (its name or the info icon) opens Informações da comunidade, where sharing,
 // leaving, inviting and the management panels live. A mutation that comes
 // back uncertain is never resent: the screen re-reads and only then lets the
 // person try again.
@@ -32,12 +32,12 @@ import { pagesOn } from '../pageGate'
 import { actAs, pagesGroup } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { Body, Btn, Card, ErrorText, SectionHeader, Soft, Title, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
-import { Avatar } from '../ui/Avatar'
+import { ChatHeader } from '../ui/ChatHeader'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { TopBar } from '../ui/TopBar'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
-import { type } from '../ui/theme'
+import { radius, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { shouldOpenQueued } from '../groupRedirect'
 import { NovoGrupo } from './NovoGrupo'
@@ -484,10 +484,6 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         {checkBox}
         <View style={styles.block}>
           {idx.partial ? <Soft>O índice ainda está sendo atualizado; a lista pode estar incompleta.</Soft> : null}
-          <View style={styles.inline}>
-            <Btn label='Compartilhar' onPress={share} secondary />
-          </View>
-          {shareNote ? <Soft>{shareNote}</Soft> : null}
         </View>
         <SectionHeader>Grupos</SectionHeader>
         {idx.groups.length === 0
@@ -608,27 +604,20 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
 
   return (
     <View style={styles.root}>
-      <TopBar
+      <ChatHeader
+        group
         title={pending ? (indexName || 'Comunidade ainda chegando') : title}
         subtitle={subtitle}
+        publicKey={community}
         onBack={onBack}
-        leading={<Avatar name={title} publicKey={community} size={36} />}
-        onTitlePress={canInfo ? openInfo : undefined}
-        titleLabel={INFO_LABEL}
-        right={canInfo
-          ? (
-            <Pressable
-              accessibilityRole='button'
-              accessibilityLabel={INFO_LABEL}
-              hitSlop={10}
-              onPress={openInfo}
-              style={({ pressed }) => [styles.gear, pressed && styles.pressed]}
-            >
-              <Text style={styles.gearText}>⋯</Text>
-            </Pressable>
-            )
-          : null}
+        onPress={canInfo ? openInfo : undefined}
+        pressLabel={INFO_LABEL}
+        right={[
+          { icon: 'compartilhar', label: 'Compartilhar', onPress: share },
+          canInfo ? { icon: 'info', label: INFO_LABEL, onPress: openInfo } : null
+        ]}
       />
+      {shareNote ? <View style={styles.block}><Soft>{shareNote}</Soft></View> : null}
       <ScrollView
         contentContainerStyle={{ paddingBottom: bottomPad }}
         keyboardShouldPersistTaps='handled'
@@ -652,28 +641,26 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
 
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  block: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
-  inline: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  block: { paddingHorizontal: space.lg, paddingVertical: space.md, gap: space.sm },
+  inline: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flexWrap: 'wrap' },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
+    gap: space.md,
+    paddingVertical: space.md,
+    paddingHorizontal: space.lg,
     borderBottomWidth: 1,
     borderBottomColor: colors.line
   },
   pressed: { opacity: 0.6 },
-  icon: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.line, alignItems: 'center', justifyContent: 'center' },
-  line: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  icon: { width: 44, height: 44, borderRadius: radius.pill, backgroundColor: colors.line, alignItems: 'center', justifyContent: 'center' },
+  line: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   name: { ...type.postName, color: colors.ink, flex: 1 },
   handle: { ...type.postMeta, color: colors.soft },
   own: { color: colors.accent, fontWeight: '600' },
   time: { fontSize: 12, color: colors.soft },
   grow: { flex: 1 },
-  badge: { minWidth: 22, height: 22, borderRadius: 11, paddingHorizontal: 6, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+  badge: { minWidth: 22, height: 22, borderRadius: radius.pill, paddingHorizontal: space.sm, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
   badgeText: { fontSize: 12, fontWeight: '600', color: colors.accentInk },
-  gear: { paddingHorizontal: 6 },
-  gearText: { fontSize: 22, color: colors.ink },
   hitText: { flex: 1 }
 })

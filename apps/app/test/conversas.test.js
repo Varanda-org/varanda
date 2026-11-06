@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { readFileSync } = require('node:fs')
+const { existsSync, readFileSync } = require('node:fs')
 const { join } = require('node:path')
 
 const load = () => import('../src/dm-open.js')
@@ -295,20 +295,35 @@ test('an open menu keeps its neighbours from joining it', async (t) => {
 })
 
 test('a private message links from its raw text, but not beside Abrir convite', (t) => {
-  const row = readFileSync(join(__dirname, '../src/ui/DmMessageRow.js'), 'utf8')
-  t.ok(row.includes('<MentionText text={item.rawText} style={styles.text} selectable />'), 'MentionText escapes the raw text itself')
-  t.ok(row.includes("const linked = link === null && item.deleted !== true && typeof item.rawText === 'string'"))
-  t.absent(row.includes('onOpenMention'), 'mentions stay plain')
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes('rawText: link ? undefined : item.rawText'), 'Bubble renders the raw text through MentionText, plain beside the invite button')
+  t.absent(existsSync(join(__dirname, '../src/ui/DmMessageRow.js')), 'Bubble replaced the private row')
+})
+
+test('mentions in a private message are tappable and open the profile', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes('onOpenMention={mentionTap}'), 'the bubble gets the mention handler')
+  t.ok(screen.includes('peerProfile.username === username) open()'), 'the peer own @nome opens the profile without a lookup')
+  t.ok(screen.includes('onOpenMention(username)'), 'other mentions go to the app resolver')
+  t.ok(screen.includes('onOpenMember(peer)'))
+})
+
+test('the private header shows the peer and replaces the perfil and mais pills', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes('<ChatHeader') && screen.includes('subtitle={peerWho.subtitle || undefined}') && screen.includes('publicKey={peer}'))
+  t.ok(screen.includes("peerWho.title === UNNAMED ? 'Pessoa' : peerWho.title"), 'never sem nome')
+  t.ok(screen.includes("icon: 'mais', label: 'opções da conversa'"))
+  t.absent(screen.includes("label='perfil'") || screen.includes("label='mais'"))
+  t.ok(screen.includes('<ChatComposer') && screen.includes('notice={notice}'), 'the uncertain hold lives in the composer notice')
+  t.ok(screen.includes("label: 'Responder'") && screen.includes("label: 'Copiar'") && screen.includes('LABELS.report'))
 })
 
 test('invite links in a conversation only open a screen, never join', (t) => {
   const read = (p) => readFileSync(join(__dirname, p), 'utf8')
-  const row = read('../src/ui/DmMessageRow.js')
-  t.ok(row.includes('inviteLinkOf(') && row.includes('OPEN_INVITE'))
-  t.ok(row.includes("link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade'"), 'label follows the link kind')
-  t.absent(/join/i.test(row))
   const screen = read('../src/screens/Mensagem.js')
-  t.ok(screen.includes('onOpenInvite={onOpenInvite}') && screen.includes('origin={origin}'))
+  t.ok(screen.includes('inviteLinkOf(') && screen.includes('OPEN_INVITE'))
+  t.ok(screen.includes("link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade'"), 'label follows the link kind')
+  t.ok(screen.includes('onPress={() => onOpenInvite(link)}') && screen.includes('origin'))
   t.absent(/join/i.test(screen))
   const app = read('../App.js')
   const at = app.indexOf('onOpenInvite={(link)')
@@ -355,4 +370,35 @@ test('an older inbox page never lands after a fresher first page', (t) => {
   const conversas = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
   t.ok(conversas.includes('if (s.next !== cursor) return s'), 'the append checks the cursor in the state it updates')
   t.ok(conversas.includes("else if (!inbox.requests) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />"), 'no "nada novo" beside an unread Pedidos row')
+})
+
+test('App.js hands the mention handler to the private chat', (t) => {
+  const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
+  t.ok(app.includes('onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport}'), 'a mention in a private chat opens the profile')
+})
+
+test('a quote of an unloaded message names no author yet', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes("    if (!target) return ''\n    return target.mine === true ? OWN_LABEL : quoteName"))
+})
+
+test('private chat: quote author, personal retry and one character counter', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes('if (held === undefined || String(r.from) < String(held.from)) rowById.set(r.id, r)'), 'a shared id resolves like threadOf')
+  t.ok(screen.includes("onPress={typeof hold.retry === 'function' ? retryHeld : () => send(hold.text, hold.quoteId)}"), 'Tentar de novo resends on a personal account')
+  t.ok(screen.includes("{typeof hold.retry === 'function' || pageKey === null"), 'a page never signs a second message from this button')
+  t.absent(screen.includes('caracteres restantes'), 'the composer draws the counter once')
+})
+
+test('a retried held message keeps a newer draft', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes("setDraft((d) => (d === text ? '' : d))"))
+  t.ok(screen.includes('setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))'))
+})
+
+test('a peer named like the own label never reads as own in a quote', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes("const quoteName = readsAs(nameText, OWN_LABEL) ? (peerWho.subtitle || 'Pessoa') : nameText"))
+  t.ok(screen.includes('handle: quoteMine(item) ? undefined : quoteHandle'), 'a peer quote carries the verified @nome')
+  t.ok(screen.includes('senderKey: quoteMine(item) ? undefined : peer'), 'a peer quote gets the peer color, not the own accent')
 })
