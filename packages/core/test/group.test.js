@@ -6,7 +6,8 @@ const {
   validateGroupHeader, validateWriterHeader, validateGroupRecord,
   groupHeader, writerHeader, groupPost, groupHide, groupAdmit, groupBan, groupMeta, groupAdmin, groupLeave,
   groupCreateRecord, communityAdmit, communityBan, communityHide, groupInvites,
-  groupJoins, groupJoinHistory, diaryGroupKeys, orderKey, compareOrder, isFuture, buildGroup, buildCommunity
+  groupJoins, groupJoinHistory, diaryGroupKeys, orderKey, compareOrder, isFuture, buildGroup, buildCommunity,
+  GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner
 } = require('../lib/group')
 const { groupJoinRecord } = require('../lib/records')
 const { K, BASE, AT, NOW, community: communityOf, groupIn } = require('./helpers/groups')
@@ -2233,4 +2234,94 @@ test('memberInvite: an invalid record is skipped and the rest still folds', (t) 
   t.is(g.memberInvite, true)
   t.alike(visible(g), [wX + ':1'])
   t.ok(g.admins.has(A))
+})
+
+const b4a = require('b4a')
+const { newBoxKeyPair, newEpochKey, sealEpochKey, openFrom, sealRecord, keyCommit } = require('../lib/group-crypto')
+const { sealMedia } = require('../lib/group-media')
+
+const PHOTO = (start, core = K(0xe0)) => ({ core, mime: 'image/webp', start, blocks: 3, bytes: 81234, sha256: 'b'.repeat(64), width: 2048, height: 1536 })
+const sealedPhoto = (start, core = K(0xe0)) => {
+  const { item } = sealMedia(b4a.alloc(500, 9), { plainMime: 'image/jpeg', w: 640, h: 480 })
+  return { core, start, ...item }
+}
+
+test('group-post v2: one exact key set, only with media', (t) => {
+  const v1 = groupPost({ text: 'oi', at: AT(1) })
+  t.alike(Object.keys(v1), ['type', 'text', 'replyTo', 'seen', 'at'], 'without media the v1 record')
+  t.alike(groupPost({ text: 'oi', media: null, at: AT(1) }), v1, 'media null is v1 too')
+  t.is(JSON.stringify(groupPost({ text: 'oi', replyTo: { writer: wA, seq: 2 }, seen: { writer: wB, seq: 3 }, at: AT(1) })),
+    '{"type":"group-post","text":"oi","replyTo":{"writer":"' + wA + '","seq":2},"seen":{"writer":"' + wB + '","seq":3},"at":"' + AT(1) + '"}', 'v1 byte for byte')
+
+  const p = groupPost({ text: '', media: [PHOTO(1), PHOTO(4)], replyTo: { writer: wA, seq: 1 }, at: AT(2) })
+  t.alike(Object.keys(p), [...GROUP_POST_V2_KEYS])
+  t.alike(GROUP_POST_V2_KEYS, ['type', 'text', 'replyTo', 'media', 'card', 'fwd', 'seen', 'at'])
+  t.is(p.card, null)
+  t.is(p.fwd, 0)
+  t.is(validateGroupRecord(p, 1), null, 'empty text with media')
+  t.is(validateGroupRecord({ ...p, text: 'legenda' }, 1), null)
+  t.is(validateGroupRecord({ ...p, text: 'x'.repeat(1001) }, 1), 'text-length')
+  t.is(validateGroupRecord({ ...p, text: 'a\u0007' }, 1), 'control-chars')
+  t.is(validateGroupRecord({ ...p, media: null }, 1), 'media-invalid', 'v2 always has media: one encoding per post')
+  t.is(validateGroupRecord({ ...p, media: [] }, 1), 'media-invalid')
+  t.is(validateGroupRecord({ ...p, media: [1, 2, 3, 4, 5].map((i) => PHOTO(i * 3)) }, 1), 'media-invalid', 'five items')
+  t.is(validateGroupRecord({ ...p, media: [PHOTO(1), PHOTO(1)] }, 1), 'media-invalid', 'one place twice')
+  t.is(validateGroupRecord({ ...p, media: [{ ...PHOTO(1), mime: 'image/svg+xml' }] }, 1), 'media-invalid')
+  t.is(validateGroupRecord({ ...p, card: {} }, 1), 'malformed', 'card is reserved')
+  t.is(validateGroupRecord({ ...p, fwd: 1 }, 1), 'malformed', 'fwd is reserved')
+  t.is(validateGroupRecord({ ...p, extra: 1 }, 1), 'malformed')
+  const { card, fwd, ...partial } = p
+  t.is(validateGroupRecord(partial, 1), 'malformed', 'v1 keys plus media alone is no key set')
+  t.is(validateGroupRecord({ ...v1, text: '' }, 1), 'text-length', 'v1 text is never empty')
+  t.is(validateGroupRecord({ ...p, replyTo: { writer: wA, seq: 0 } }, 1), 'reply-invalid')
+
+  const priv = sealedPhoto(1)
+  t.is(validateGroupRecord({ ...p, media: [priv] }, 1), 'media-invalid', 'a plain post refuses a private item')
+  t.exception.all(() => groupPost({ text: 'oi', media: [priv], at: AT(2) }), /media-invalid/)
+  const inner = groupPost({ text: '', media: [priv], at: AT(2), sealed: true })
+  t.is(validateGroupRecord(inner, 1, { sealed: true }), null, 'a sealed inner takes private items')
+  t.is(validateGroupRecord(p, 1, { sealed: true }), 'media-invalid', 'a sealed inner refuses a public item')
+  t.exception.all(() => groupPost({ text: 'oi', media: [PHOTO(1)], at: AT(2), sealed: true }), /media-invalid/)
+  t.is(validateGroupRecord({ ...inner, media: [priv, PHOTO(9)] }, 1, { sealed: true }), 'media-invalid', 'never mixed')
+  t.is(validateGroupRecord(v1, 1, { sealed: true }), null, 'a sealed v1 post as before')
+
+  t.is(validateGroupRecord(p, 1, { private: true }), 'sealed-only', 'a private group never takes a plain post')
+  t.is(validateGroupRecord(p, 1, { community: true }), 'group-only')
+  t.is(validateGroupRecord(p, 1, { root: true, community: true }), 'group-only')
+})
+
+test('group-post v2: the fold carries media; v1 posts keep their shape', (t) => {
+  const w = world().add(X, wX)
+  post(w, wX, 1)
+  w.push(wX, groupPost({ text: '', media: [PHOTO(1)], at: AT(2) }))
+  w.push(wX, groupPost({ text: '', media: [sealedPhoto(1)], at: AT(3), sealed: true }))
+  const g = buildGroup(w.input())
+  t.alike(visible(g), [wX + ':1', wX + ':2'], 'a private item in a plain post is skipped')
+  t.alike(Object.keys(g.posts[0]), ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'hidden'])
+  t.alike(g.posts[1].media, [PHOTO(1)])
+  t.is(g.posts[1].text, '')
+})
+
+test('group-post v2: a private group reads private media only from the envelope', (t) => {
+  const parent = communityOf({ key: CMG, creator: C, creates: [{ by: C, group: G }] })
+  const box = newBoxKeyPair()
+  const g = groupIn(parent, { key: G, diary: C, join: 'approval', visibility: 'private', box: b4a.toString(box.publicKey, 'hex') })
+  const kid = { writer: G, seq: 1 }
+  const key = newEpochKey()
+  const sealed = b4a.toString(sealEpochKey(key, G, kid, box.publicKey), 'base64')
+  g.push(G, groupKey({ kid: null, basis: [], keys: [{ writer: G, sealed }], commit: b4a.toString(keyCommit(key, G, kid), 'hex'), at: AT(1) }))
+  const seal = (record) => {
+    const { nonce, box: b } = sealRecord(sealedInner(record, { writer: G, group: G, kid }), key)
+    return g.push(G, groupSealed({ kid, nonce, box: b, at: record.at }))
+  }
+  const priv = sealedPhoto(1)
+  seal(groupPost({ text: 'foto', media: [priv], at: AT(2), sealed: true }))
+  // A public item inside an envelope, built by hand past the builder.
+  seal({ type: 'group-post', text: '', replyTo: null, media: [PHOTO(1)], card: null, fwd: 0, seen: null, at: AT(3) })
+  seal(groupPost({ text: 'só texto', at: AT(4) }))
+  const keys = { writers: new Set([G]), unseal: (s) => openFrom(b4a.from(s, 'base64'), box) }
+  const out = buildGroup({ ...g.input(), keys })
+  t.alike(out.posts.map((p) => p.text), ['foto', 'só texto'], 'the envelope with a public item stays unread')
+  t.alike(out.posts[0].media, [priv], 'the key travels to the reader inside the sealed post')
+  t.absent('media' in out.posts[1])
 })

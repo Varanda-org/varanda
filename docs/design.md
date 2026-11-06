@@ -125,7 +125,7 @@ Cada pessoa tem um diário assinado de publicações no próprio celular; quem a
 
 1. O app assina a publicação e a acrescenta ao diário da pessoa, no aparelho.
 2. O app anuncia o diário numa tabela distribuída (DHT) e entrega as novidades a seguidores online e aos semeadores.
-3. Fotos e vídeos ficam em arquivos separados, baixados só quando alguém abre. Hoje: só fotos e GIFs, só pela versão web, num núcleo de fotos por aparelho; o semeador as serve por HTTP (vídeo espera a comparação com listas de hashes, em Moderação).
+3. Fotos e vídeos ficam em arquivos separados, baixados só quando alguém abre. Hoje: só fotos e GIFs, só pela versão web, num núcleo de fotos por aparelho; o semeador as serve por HTTP (vídeo espera a comparação com listas de hashes, em Moderação). Os grupos também levam fotos: num grupo público elas ficam como as do diário; num grupo privado a foto é cifrada no aparelho e o semeador guarda só o cifrado. Mostrar e enviar fotos nas conversas em todas as plataformas fica para uma versão posterior.
 
 **Quem a pessoa segue é público.** A lista de seguidos fica no próprio diário (registros `follow`), para chegar igual a todos os aparelhos da pessoa. Por isso qualquer um que tenha o diário vê quem ela segue; o app diz isso em Seguindo.
 

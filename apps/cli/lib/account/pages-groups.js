@@ -1020,7 +1020,12 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
         }
       }
       const start = Math.max(0, posts.length - n)
-      const items = posts.slice(start).reverse().map((x) => ({ ...x, text: x.hidden ? '' : x.text, ...loaded.profiles.get(x.diary) }))
+      const items = posts.slice(start).reverse().map((x) => ({
+        ...x,
+        text: x.hidden ? '' : x.text,
+        media: x.hidden || !x.media ? null : x.media.map((media) => ({ ...media })),
+        ...loaded.profiles.get(x.diary)
+      }))
       const last = items[items.length - 1]
       const v = loaded.view
       return {

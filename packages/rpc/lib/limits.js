@@ -64,10 +64,10 @@ const NOTICES_LIMIT_MAX = 64
 const PROFILE_LIMIT_MAX = 100
 const ENGAGEMENT_LIMIT_MAX = 62
 const PEEK_SEQS_MAX = 36
-// Group items carry no media, so FEED_LIMIT_MAX is a safe page maximum
-// (docs/rpc.md section 2, test/sizes.test.js).
-const GROUP_LIMIT_DEFAULT = 30
-const GROUP_LIMIT_MAX = 31
+// The largest page whose worst case includes four private media items per
+// post and still fits MAX_MESSAGE (docs/rpc.md section 2, test/sizes.test.js).
+const GROUP_LIMIT_DEFAULT = 29
+const GROUP_LIMIT_MAX = 29
 const GROUP_MEMBERS_LIMIT_MAX = 100
 const MAX_GROUP_NAME = 80 // same value as records.js
 const MAX_GROUP_CUTS = 16

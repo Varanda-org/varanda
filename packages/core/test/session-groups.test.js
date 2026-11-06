@@ -10,6 +10,8 @@ const { createCert, createIssuerCert, createUsernameRecord } = require('../lib/c
 const { groupJoinRecord } = require('../lib/records')
 const member = require('../lib/member')
 const store = require('../lib/store')
+const groups = require('../lib/group')
+const { sealMedia } = require('../lib/group-media')
 
 const BOOTSTRAP = ['127.0.0.1:49737']
 const OTHER = 'ab'.repeat(32)
@@ -165,6 +167,7 @@ test('group posts serialize, page with cursors and retain hidden items', async (
       at: item.at,
       text,
       replyTo: index === 1 ? replyTo : null,
+      media: null,
       hidden: false,
       name: 'Ana',
       username: null
@@ -175,7 +178,7 @@ test('group posts serialize, page with cursors and retain hidden items', async (
   t.is(page.incomplete, false)
   const older = await m.call('group.read', { group, limit: 2, before: page.next })
   t.alike(older, {
-    items: [{ writer: group, diary: m.publicKey, seq: 1, at: older.items[0].at, text: 'um', replyTo: null, hidden: false, name: 'Ana', username: null }],
+    items: [{ writer: group, diary: m.publicKey, seq: 1, at: older.items[0].at, text: 'um', replyTo: null, media: null, hidden: false, name: 'Ana', username: null }],
     next: null,
     hidden: 0,
     incomplete: false,
@@ -224,7 +227,7 @@ test('group requests, admission, administration, bans, metadata and leave throug
   const writer = store.readGroups(b.dataDir).find((g) => g.group === group).writer
   const read = await a.call('group.read', { group })
   t.alike(read, {
-    items: [{ writer, diary: b.publicKey, seq, at: read.items[0].at, text: 'olá', replyTo: null, hidden: false, name: 'Bia', username: null }],
+    items: [{ writer, diary: b.publicKey, seq, at: read.items[0].at, text: 'olá', replyTo: null, media: null, hidden: false, name: 'Bia', username: null }],
     next: null,
     hidden: 0,
     incomplete: false,
@@ -397,5 +400,81 @@ test('group.invitePolicy and community.invitePolicy flip the flag and announce t
   t.alike(await m.call('community.invitePolicy', { community, members: true }), { ok: true })
   t.alike(m.events.splice(0).filter((e) => e.event === 'groups.changed').map((e) => e.data.group), [community])
   t.is((await m.call('community.info', { community })).memberInvite, true)
+  t.alike(m.session.internal, [])
+})
+
+test('group media is refused before opening the store or writing', async (t) => {
+  const session = newSession(t, { dataDir: tmpDir(t), association: OTHER, bootstrap: BOOTSTRAP })
+  const link = await connect(t, session)
+  const media = [{ core: OTHER, mime: 'image/png', start: 1, blocks: 1, bytes: 1, sha256: OTHER, width: 1, height: 1 }]
+  const denied = { code: 'USAGE', message: 'mídia disponível só na versão web' }
+  for (const params of [{ media }, { media, sealed: false }]) {
+    t.alike(await failure(link.call('group.post', { group: OTHER, text: 'foto', ...params })), denied, 'no identity is needed for the media refusal')
+  }
+  t.alike(await failure(link.call('group.post', { group: OTHER, text: 'foto', sealed: true })), { code: 'USAGE', message: 'parâmetro inválido: sealed' }, 'sealed without media fails validation')
+  const m = await person(t)
+  const community = await communityOf(m)
+  for (const visibility of ['public', 'private']) {
+    const { group } = await m.call('group.create', { name: 'Fotos', join: 'approval', visibility, community })
+    const privateItem = { core: OTHER, start: 1, ...sealMedia(b4a.from('fixture'), { plainMime: 'image/gif', w: 1, h: 1 }).item }
+    const before = await m.call('group.read', { group })
+    const log = await m.call('log.read')
+    const length = await member.withIdentity(m, async ({ store: s }) => {
+      const local = store.readGroups(m.dataDir).find((g) => g.group === group)
+      return (await store.openGroupWriter(s, local.nonce)).length
+    })
+    m.events.splice(0)
+    for (const params of [{ media }, { media: [privateItem], sealed: true }]) {
+      t.alike(await failure(m.call('group.post', { group, text: 'foto', ...params })), denied)
+    }
+    t.alike(await m.call('group.read', { group }), before)
+    t.alike(await m.call('log.read'), log)
+    t.alike(m.events, [], 'no change event')
+    const posted = await m.call('group.post', { group, text: 'texto', sealed: false })
+    t.is(posted.seq, length, 'refusals append no writer record')
+  }
+  t.alike(session.internal, [])
+  t.alike(m.session.internal, [])
+})
+
+test('group.read copies v2 public and opened private media, and clears hidden media', async (t) => {
+  const m = await person(t)
+  const community = await communityOf(m)
+  for (const visibility of ['public', 'private']) {
+    const { group } = await m.call('group.create', { name: 'Fotos', join: 'approval', visibility, community })
+    const plain = { core: OTHER, mime: 'image/png', start: 1, blocks: 1, bytes: 1, sha256: OTHER, width: 1, height: 1 }
+    const media = visibility === 'public'
+      ? [plain, { ...plain, start: 2, mime: 'image/gif' }]
+      : [{ core: OTHER, start: 1, ...sealMedia(b4a.from('fixture'), { plainMime: 'image/gif', w: 1, h: 1 }).item }]
+    const textPost = await m.call('group.post', { group, text: 'texto v1' })
+    // Supply a browser-shaped record while retaining the real writer and
+    // private envelope path, without sending media through the core RPC.
+    const original = groups.groupPost
+    let photo
+    try {
+      groups.groupPost = (params) => original({ ...params, media, sealed: visibility === 'private' })
+      photo = await member.groupPost(m, { group, text: '' })
+    } finally {
+      groups.groupPost = original
+    }
+    const page = await m.call('group.read', { group, limit: 1 })
+    t.is(page.items[0].seq, photo.seq)
+    t.is(page.items[0].text, '')
+    t.alike(page.items[0].media, media, 'includes the private item key only after opening the envelope')
+    const older = await m.call('group.read', { group, before: page.next })
+    t.is(older.items[0].seq, textPost.seq)
+    t.is(older.items[0].media, null, 'v1 has no media')
+    // member.groupRead copies out of the fold: two reads share nothing.
+    const first = await member.groupRead(m, { group })
+    const second = await member.groupRead(m, { group })
+    t.not(first.items[0].media, second.items[0].media, 'the array is copied out of the fold')
+    t.not(first.items[0].media[0], second.items[0].media[0], 'each descriptor is copied')
+    await m.call('group.hide', { group, target: { writer: group, seq: photo.seq }, on: true })
+    const hidden = await m.call('group.read', { group, limit: 1 })
+    t.is(hidden.items[0].hidden, true)
+    t.is(hidden.items[0].media, null)
+    await m.call('group.hide', { group, target: { writer: group, seq: photo.seq }, on: false })
+    t.alike((await m.call('group.read', { group, limit: 1 })).items[0].media, media)
+  }
   t.alike(m.session.internal, [])
 })

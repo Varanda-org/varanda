@@ -789,6 +789,7 @@ function createSession ({
     }),
 
     'group.post': serial(async (params, epoch) => {
+      if (params.media !== undefined || params.sealed === true) throw new UsageError(MEDIA_WEB_ONLY)
       const r = await withStore((c) => member.groupPost(c, params))
       send('groups.changed', { group: params.group }, epoch)
       return r

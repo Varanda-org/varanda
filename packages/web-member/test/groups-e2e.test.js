@@ -207,6 +207,23 @@ test('public groups end to end: core creator, browser member, real seeder', asyn
   const readB = await ops.groupRead(b.ctx, { group })
   t.ok(readB.items.some((p) => p.diary === c.key && p.text === 'c1'), 'B reads C post')
 
+  // 3b. B posts a photo (its own declared media core) with no text: the
+  // record travels like any post; B reads the descriptor back.
+  b.ctx.mediaKeyPair = crypto.keyPair()
+  const bytes = b4a.alloc(3000, 7)
+  const sha256 = b4a.toString(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes)), 'hex')
+  const prep = await ops.mediaPrepare(b.ctx)
+  if (!prep.declared) await ops.declareMediaCore(b.ctx, prep.core)
+  const photo = await ops.mediaCommit(b.ctx, { blocks: [bytes], sha256, mime: 'image/png', width: 20, height: 20 })
+  const pm = await ops.groupPost(b.ctx, { group, text: '', media: [photo] })
+  t.ok((await onceB(b, sd.url)).res.ok, 'B pushes the photo post')
+  await until(() => sd.seeder.groupWriters({ group, after: null, limit: 64 }).items.some((it) => it.key === bWriter && it.length > pm.seq), { name: 'photo post on the seeder' })
+  t.ok((await onceC(bootstrap, c)).res.ok, 'C fetches the photo post')
+  t.ok((await coreMember.groupRead(c, { group })).items.some((p) => p.diary === b.ownHex && p.seq === pm.seq && p.text === ''), 'C folds the v2 post')
+  const mine = (await ops.groupRead(b.ctx, { group })).items.find((p) => p.seq === pm.seq && p.writer === bWriter)
+  t.alike(mine.media, [photo], 'B reads its photo descriptor')
+  t.alike((await ops.groupRead(b.ctx, { group })).items.find((p) => p.text === 'b1').media, null, 'a text post has no media')
+
   // 4. Ban: B's later post is hidden for C; B reads banned. Unban lifts it.
   t.alike(await coreMember.groupBan(c, { group, member: b.ownHex, on: true }), { ok: true })
   t.ok((await onceC(bootstrap, c)).res.ok, 'C pushes the ban')

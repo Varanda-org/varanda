@@ -2522,9 +2522,12 @@ async function groupRead (ctx, { group, limit = 30, before = null }) {
   return withGroupOrPending(ctx, group, async (loaded) => {
     const posts = groupOlder(loaded.view.posts.filter((p) => loaded.profiles.has(p.diary)), before)
     const start = Math.max(0, posts.length - limit)
-    const items = posts.slice(start).reverse().map((p) => ({
+    // A hidden post shows neither its text nor its media: a private item
+    // carries its key, which must not reach the reader of a hidden post.
+    const items = posts.slice(start).reverse().map(({ media, ...p }) => ({
       ...p,
       text: p.hidden ? '' : p.text,
+      media: !p.hidden && Array.isArray(media) ? media.map((d) => ({ ...d })) : null,
       ...loaded.profiles.get(p.diary)
     }))
     const last = items[items.length - 1]

@@ -76,6 +76,7 @@ const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/
 const { UsageError } = require('@varanda/core/lib/errors')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
+const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS } = require('@varanda/core/lib/group-media')
 const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, COMMUNITY_LIST_MAX } = require('@varanda/rpc')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const store = require('./node-store')
@@ -702,6 +703,25 @@ async function mediaCommit (ctx, { blocks, mime, width, height, sha256 } = {}) {
   })
 }
 
+// The sealed counterpart of mediaCommit (private groups): appends the
+// ciphertext of sealMedia (whole blocks only) -> the private item, the only
+// place its key appears.
+async function mediaCommitSealed (ctx, { cipher, item } = {}) {
+  if (keyPairOf(ctx) === null || mediaKeyPairOf(ctx) === null) throw new UsageError(store.LOCKED)
+  if (!(cipher instanceof Uint8Array) || cipher.byteLength < MEDIA_BLOCK_BYTES || cipher.byteLength % MEDIA_BLOCK_BYTES !== 0) throw badMedia()
+  const blocks = []
+  for (let i = 0; i < cipher.byteLength; i += MEDIA_BLOCK_BYTES) blocks.push(cipher.subarray(i, i + MEDIA_BLOCK_BYTES))
+  const shape = { ...item, core: '0'.repeat(64), start: 1 }
+  if (!validPrivateItem(shape) || shape.blocks !== blocks.length || (await sha256Hex(blocks)) !== item.sha256) throw badMedia()
+  return withOwnMediaCore(ctx, async ({ core, coreHex }) => {
+    const start = await store.appendMediaBlocks(core, blocks)
+    const out = {}
+    for (const k of PRIVATE_ITEM_KEYS) out[k] = k === 'core' ? coreHex : k === 'start' ? start : item[k]
+    if (!validPrivateItem(out)) throw badMedia()
+    return out
+  })
+}
+
 // Appends the `media-core` record declaring coreHex (publish rules: block 0
 // first) -> { seq }. The own diary key is never a media core.
 async function declareMediaCore (ctx, coreHex) {
@@ -717,7 +737,7 @@ async function declareMediaCore (ctx, coreHex) {
 // the own diary declares among its latest `media-core` records, with every
 // block local and the bytes matching; else 'mídia inválida'. inspect, when
 // given, is called with (descriptor, bytes) and a falsy result refuses it.
-async function verifyMedia (ctx, media, inspect = null) {
+async function verifyMedia (ctx, media, inspect = null, valid = (d) => validateDescriptor(d) === null) {
   if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) throw badMedia()
   const own = new Set(await store.readMediaCores(ctx.storage))
   const { ownHex, declared } = await withIdentity(ctx, async ({ diary, ownHex }) => ({
@@ -725,7 +745,7 @@ async function verifyMedia (ctx, media, inspect = null) {
     declared: new Set(latestMediaCores(await store.readAll(diary), ownHex).map((c) => c.key))
   }))
   for (const descriptor of media) {
-    if (validateDescriptor(descriptor) !== null) throw badMedia()
+    if (!valid(descriptor)) throw badMedia()
     const { core: coreHex, start, blocks, bytes, sha256 } = descriptor
     if (coreHex === ownHex || !own.has(coreHex) || !declared.has(coreHex)) throw badMedia()
     const core = await store.openMediaCoreReadOnly(ctx.storage, coreHex)
@@ -1241,6 +1261,8 @@ async function profileRead (ctx, { authors }) {
 const GROUP_NOT_FOUND = 'grupo não encontrado'
 const GROUP_FORBIDDEN = 'sem permissão no grupo'
 const GROUP_UNCHANGED = 'nada a alterar'
+const GROUP_SEALED_MEDIA_PUBLIC = 'mídia cifrada só em grupo privado'
+const GROUP_PRIVATE_MEDIA_SEALED = 'grupo privado exige mídia cifrada'
 const GROUP_LEAVE_WAIT = 'aguarde a sincronização do grupo para sair'
 const GROUP_LEAVE_CREATOR = 'saia pelo aparelho que criou o grupo'
 const GROUP_ADMIT_WAIT = 'aguarde a sincronização do grupo para admitir'
@@ -2037,12 +2059,22 @@ async function groupLeave (ctx, { group }) {
 }
 
 // -> { seq }. `seen` is the newest record of the local causal order.
-async function groupPost (ctx, { group, text, replyTo = null }) {
+// `media` (optional) points into this device's declared media cores, as
+// post.create's descriptors: private items (sealed, mediaUpload with
+// sealed: true) in a private group, public descriptors in a public one. The
+// upload is a separate earlier call, so a post that fails here leaves its
+// blocks orphaned in the media core; nothing is retried.
+async function groupPost (ctx, { group, text, replyTo = null, media = null, sealed = false }) {
+  const withMedia = media !== null && media !== undefined
+  // Checked before withGroup, which holds the diary open.
+  if (withMedia) await verifyMedia(ctx, media, null, sealed === true ? validPrivateItem : (d) => validateDescriptor(d) === null)
   return withGroup(ctx, group, true, async ({ ownHex, g }) => {
+    if (sealed === true && !g.private) throw new UsageError(GROUP_SEALED_MEDIA_PUBLIC)
+    if (withMedia && sealed !== true && g.private) throw new UsageError(GROUP_PRIVATE_MEDIA_SEALED)
     const own = liveOwnWriter(g, ownHex)
     if (own === null || statusOf(g, ownHex) !== 'member') throw new UsageError(GROUP_FORBIDDEN)
     requireCounted(g, own.key)
-    let record = buildRecord(() => grp.groupPost({ text, replyTo, seen: g.built.last }))
+    let record = buildRecord(() => grp.groupPost({ text, replyTo, media: withMedia ? media : null, seen: g.built.last, sealed: g.private }))
     if (g.private) record = sealForGroup(ctx, g, own.key, record)
     return { seq: await appendToOwnGroupCore(ctx, own, record, g.private) }
   })
@@ -2296,6 +2328,7 @@ async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = nu
       at: p.at,
       text: p.hidden ? '' : p.text,
       replyTo: p.replyTo,
+      media: p.hidden || !Array.isArray(p.media) ? null : copyGroupMedia(p.media, typeof p.media[0].key === 'string'),
       hidden: p.hidden,
       ...authorOf(g, p.diary, base.association, base.mod)
     }))
@@ -3654,6 +3687,14 @@ function postsAfter (posts, mark) {
   return posts.filter((p) => compareOrder(orderKey(p.at, p.writer, p.seq), k) > 0)
 }
 
+// A photo post without text still says what it is in the list row.
+function previewOf (p) {
+  if (p.text === '' && Array.isArray(p.media) && p.media.length > 0) {
+    return p.media.every((d) => (typeof d.plainMime === 'string' ? d.plainMime : d.mime) === 'image/gif') ? 'GIF' : 'Foto'
+  }
+  return Array.from(p.text).slice(0, PREVIEW_MAX).join('')
+}
+
 // rpc.md 5.59: a reader row's newest listed post and the others' posts after
 // this device's mark (own and hidden ones not counted).
 function lastAndUnread (g, base, mark) {
@@ -3664,7 +3705,7 @@ function lastAndUnread (g, base, mark) {
   const last = {
     name,
     username,
-    preview: p.hidden ? '' : Array.from(p.text).slice(0, PREVIEW_MAX).join(''),
+    preview: p.hidden ? '' : previewOf(p),
     at: p.at,
     mine: p.diary === base.ownHex,
     hidden: p.hidden
@@ -4203,6 +4244,7 @@ module.exports = {
   foldFollows,
   mediaPrepare,
   mediaCommit,
+  mediaCommitSealed,
   declareMediaCore,
   verifyMedia,
   logRead,

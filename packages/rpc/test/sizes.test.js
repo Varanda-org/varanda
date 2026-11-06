@@ -31,6 +31,7 @@ const {
   ENGAGEMENT_LIMIT_MAX,
   PEEK_SEQS_MAX,
   FOLLOW_LIMIT_MAX,
+  GROUP_LIMIT_DEFAULT,
   GROUP_LIMIT_MAX,
   GROUP_MEMBERS_LIMIT_MAX,
   MAX_GROUP_NAME,
@@ -267,15 +268,43 @@ test('follow.list: FOLLOW_LIMIT_MAX keys fit with a wide margin', (t) => {
   t.ok(s * 4 < MAX_MESSAGE)
 })
 
-function groupReadResult (n, ch) {
-  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20) }
+function groupReadResult (n, ch, media) {
+  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, media, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20) }
   return { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, hidden: SEQ, incomplete: true, sealed: SEQ, epoch: { writer: HEX, seq: SEQ }, state: 'rekey-pending' }
 }
 
-test('group.read: GROUP_LIMIT_MAX fits', (t) => {
-  t.is(GROUP_LIMIT_MAX, 31)
-  for (const ch of WORST) t.ok(size(groupReadResult(GROUP_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
-  t.comment('group.read worst case at ' + GROUP_LIMIT_MAX + ' items: ' + size(groupReadResult(GROUP_LIMIT_MAX, '\ud800')) + ' bytes')
+test('group.read: public media fits GROUP_LIMIT_MAX', (t) => {
+  const media = MEDIA.map((d, i) => ({ ...d, core: String(i).repeat(64) }))
+  t.is(GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX)
+  t.ok(validateParams('group.post', { group: HEX, text: '\ud800'.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, media }).ok, 'worst public media passes RPC validation')
+  for (const ch of WORST) t.ok(size(groupReadResult(GROUP_LIMIT_MAX, ch, media)) <= MAX_MESSAGE, JSON.stringify(ch))
+  t.comment('group.read public media at ' + GROUP_LIMIT_MAX + ' items: ' + size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', media)) + ' bytes')
+})
+
+test('group.read: GROUP_LIMIT_MAX with private media fits, one more does not', (t) => {
+  const { width, height, ...cipher } = DESCRIPTOR
+  const media = Array.from({ length: MAX_MEDIA_PER_POST }, (_, i) => ({
+    ...cipher,
+    core: String(i).repeat(64),
+    mime: 'application/octet-stream',
+    bytes: cipher.blocks * MEDIA_BLOCK_BYTES,
+    key: HEX,
+    nonce: 'f'.repeat(48),
+    plainMime: MIME,
+    plainSha256: HEX,
+    w: MAX_MEDIA_DIMENSION,
+    h: MAX_MEDIA_DIMENSION,
+    ms: 0
+  }))
+  const item = groupReadResult(1, '\ud800', media).items[0]
+  t.ok(validateParams('group.post', { group: HEX, text: item.text, replyTo: item.replyTo, media, sealed: true }).ok, 'worst private media passes RPC validation')
+  for (const ch of WORST) t.ok(size(groupReadResult(GROUP_LIMIT_MAX, ch, media)) <= MAX_MESSAGE, JSON.stringify(ch))
+  const worst = size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', media))
+  const overflow = size(groupReadResult(GROUP_LIMIT_MAX + 1, '\ud800', media))
+  t.comment('group.read worst private item: ' + utf8ByteLength(JSON.stringify(item)) + ' bytes')
+  t.comment('group.read worst case at ' + GROUP_LIMIT_MAX + ' items: ' + worst + ' bytes')
+  t.comment('group.read worst case at ' + (GROUP_LIMIT_MAX + 1) + ' items: ' + overflow + ' bytes')
+  t.ok(overflow > MAX_MESSAGE, 'largest that fits')
 })
 
 test('group.members: GROUP_MEMBERS_LIMIT_MAX fits', (t) => {

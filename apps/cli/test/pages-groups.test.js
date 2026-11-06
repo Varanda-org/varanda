@@ -10,12 +10,14 @@ const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
+const Corestore = require('corestore')
 const { testnet, tmpDir, until } = require('./helpers/net')
 const { createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { signRoster, issuerCountersign } = require('@varanda/core/lib/page')
 const member = require('@varanda/core/lib/member')
 const coreStore = require('@varanda/core/lib/store')
 const groupLib = require('@varanda/core/lib/group')
+const { sealMedia } = require('@varanda/core/lib/group-media')
 const { groupJoinRecord } = require('@varanda/core/lib/records')
 const { person, startSeeder, syncOnce } = require('../../../packages/core/test/helpers/sync-groups')
 const { startSeedWs } = require('../lib/seed-ws')
@@ -84,6 +86,82 @@ function lastJoins (entries, group) {
   return last
 }
 
+async function mediaPost (ctx, group, media, sealed = false) {
+  // Exercise real replication and private envelopes with a browser-shaped
+  // record, since the core member only creates text posts.
+  const original = groupLib.groupPost
+  try {
+    groupLib.groupPost = (params) => original({ ...params, media, sealed })
+    return await member.groupPost(ctx, { group, text: '' })
+  } finally {
+    groupLib.groupPost = original
+  }
+}
+
+test('pages-groups: cached v1 and v2 posts paginate without a seeder connection', async (t) => {
+  const kp = generateAssociationKeyPair()
+  const association = hex(kp.publicKey)
+  const issuerKp = crypto.keyPair()
+  const ctx = { association, issuerKp, issuerCert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, kp) }
+  const a = await person(t, kp, 'Ana')
+  const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
+  const { group } = await member.groupCreate(a, { name: 'Fotos', join: 'open', community })
+  const textPost = await member.groupPost(a, { group, text: 'texto v1' })
+  const media = [{ core: hex(crypto.randomBytes(32)), mime: 'image/gif', start: 1, blocks: 1, bytes: 1, sha256: hex(crypto.randomBytes(32)), width: 1, height: 1 }]
+  const visible = await mediaPost(a, group, media)
+  const hidden = await mediaPost(a, group, media)
+  await member.groupHide(a, { group, target: { writer: group, seq: hidden.seq }, on: true })
+  const dir = tmpDir(t, 'varanda-account-')
+  const source = await coreStore.openStore(a.dataDir)
+  const target = new Corestore(path.join(dir, 'pages-replicas'))
+  let left
+  let right
+  try {
+    await target.ready()
+    const copies = []
+    for await (const discoveryKey of source.list()) {
+      const from = source.get({ discoveryKey, writable: false })
+      await from.ready()
+      const to = target.get({ key: from.key, writable: false })
+      await to.ready()
+      copies.push({ from, to })
+    }
+    left = source.replicate(true)
+    right = target.replicate(false)
+    left.pipe(right).pipe(left)
+    for (const { from, to } of copies) {
+      for (let seq = 0; seq < from.contiguousLength; seq++) await to.get(seq, { raw: true, timeout: 10000 })
+    }
+  } finally {
+    if (left) left.destroy()
+    if (right) right.destroy()
+    await target.close()
+    await source.close()
+  }
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const pagesStore = openPagesStore(dir)
+  const writer = createPagesWriter({ dir, keys, association })
+  t.teardown(() => writer.close(), { force: true })
+  await writer.ready()
+  const page = newPage(ctx, keys, 'fotos')
+  await writer.createPage(page.args)
+  await pagesStore.create({ page: page.key, owner: page.owner })
+  const pg = createPagesGroups({ dir, writer, pagesStore, keys, association, fetchTimeoutMs: 10 })
+  t.teardown(() => pg.close(), { force: true })
+  await pg.ready()
+  const first = await pg.groupRead(page.key, group, { limit: 2 })
+  t.alike(first.items.map((p) => p.seq), [hidden.seq, visible.seq])
+  t.is(first.items[0].media, null, 'hidden media is omitted')
+  t.is(first.items[0].text, '')
+  t.alike(first.items[1].media, media, 'v2 descriptors survive the cached fold')
+  t.is(first.items[1].text, '')
+  t.is(first.incomplete, true, 'the missing writer listing stays explicit')
+  const older = await pg.groupRead(page.key, group, { before: first.next })
+  t.alike(older.items.map((p) => p.seq), [textPost.seq])
+  t.is(older.items[0].media, null, 'v1 posts have media null')
+  t.is(older.items[0].text, 'texto v1')
+})
+
 test('pages-groups: a page joins, posts, waits for approval, leaves and reads a private group', async (t) => {
   t.timeout(600000)
   const { bootstrap } = await testnet(t)
@@ -103,6 +181,11 @@ test('pages-groups: a page joins, posts, waits for approval, leaves and reads a 
   const { group: GA } = await member.groupCreate(a, { name: 'Clube', join: 'approval', community: C })
   const { group: GP } = await member.groupCreate(a, { name: 'Segredo', join: 'open', visibility: 'private', community: C })
   await member.groupPost(a, { group: GP, text: 'segredo antes' })
+  const photo = { core: hex(crypto.randomBytes(32)), mime: 'image/png', start: 1, blocks: 1, bytes: 1, sha256: hex(crypto.randomBytes(32)), width: 1, height: 1 }
+  const publicMedia = [photo, { ...photo, start: 2, mime: 'image/gif' }]
+  const privateMedia = [{ core: photo.core, start: 1, ...sealMedia(b4a.from('fixture'), { plainMime: 'image/gif', w: 1, h: 1 }).item }]
+  const publicPost = await mediaPost(a, G, publicMedia)
+  const privatePost = await mediaPost(a, GP, privateMedia, true)
   await syncOnce(bootstrap, a)
 
   const dir = tmpDir(t, 'varanda-account-')
@@ -141,6 +224,24 @@ test('pages-groups: a page joins, posts, waits for approval, leaves and reads a 
     return r.items.find((p) => p.text === 'pão quente na praça') || null
   }, { name: 'member reads the page post', timeoutMs: 180000, intervalMs: 500 })
   t.is(seen.diary, page.key, 'attributed to the page diary')
+  await member.withIdentity(a, async ({ store }) => {
+    const replica = await coreStore.openReplica(store, seen.writer)
+    const record = await replica.get(seen.seq)
+    t.alike(Object.keys(record).sort(), ['at', 'replyTo', 'seen', 'text', 'type'], 'the service still writes the exact v1 record')
+  })
+  const publicRead = await until(async () => {
+    const r = await pg.groupRead(page.key, G)
+    return r.items.some((p) => p.writer === G && p.seq === publicPost.seq) ? r : null
+  }, { name: 'page reads public media', timeoutMs: 60000, intervalMs: 500 })
+  t.alike(publicRead.items.find((p) => p.writer === G && p.seq === publicPost.seq).media, publicMedia)
+  t.is(publicRead.items.find((p) => p.diary === page.key).media, null, 'v1 page posts have media null')
+  await member.groupHide(a, { group: G, target: { writer: G, seq: publicPost.seq }, on: true })
+  await syncOnce(bootstrap, a)
+  const hiddenPhoto = await until(async () => {
+    const r = await pg.groupRead(page.key, G)
+    return r.items.find((p) => p.writer === G && p.seq === publicPost.seq && p.hidden) || null
+  }, { name: 'page reads hidden media', timeoutMs: 60000, intervalMs: 500 })
+  t.is(hiddenPhoto.media, null)
 
   // Approval group: requested until the admin admits.
   t.is((await settled(() => pg.groupJoin(page.key, GA), 'approval join')).state, 'requested', 'an approval group stays requested')
@@ -181,9 +282,11 @@ test('pages-groups: a page joins, posts, waits for approval, leaves and reads a 
   await syncOnce(bootstrap, a)
   const priv = await until(async () => {
     const r = await pg.groupRead(page.key, GP)
-    return r.items.some((p) => p.text === 'segredo antes') ? r : null
+    return r.items.some((p) => p.writer === GP && p.seq === privatePost.seq) ? r : null
   }, { name: 'page reads the sealed post', timeoutMs: 120000, intervalMs: 500 })
   t.is(priv.role, 'member')
+  t.alike(priv.items.find((p) => p.writer === GP && p.seq === privatePost.seq).media, privateMedia, 'a member page receives opened private items')
+  t.is(priv.items.find((p) => p.text === 'segredo antes').media, null)
   await settled(() => pg.groupPost(page.key, GP, { text: 'da padaria, em segredo' }), 'private post')
   const back = await until(async () => {
     await syncOnce(bootstrap, a)
@@ -230,6 +333,7 @@ test('pages-groups: a page joins, posts, waits for approval, leaves and reads a 
     if (secrets.some((s) => holdsSecret(buf, s))) t.fail('secret in ' + path.relative(dir, f))
   }
   const logged = JSON.stringify(logs)
+  t.absent(logged.includes(privateMedia[0].key), 'no private media key in the logs')
   t.absent(secrets.some((s) => logged.includes(hex(s))), 'no secret in the logs')
   t.absent(logged.includes(privWriter), 'no key in the logs')
 })

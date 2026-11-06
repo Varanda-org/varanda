@@ -774,18 +774,77 @@ test('group.post', (t) => {
   bad(t, 'group.post', { group: KEY, text: 'oi', seen: [] })
 })
 
+test('group.post with public media', (t) => {
+  const d = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 2, bytes: 32769, sha256: 'cd'.repeat(32), width: 640, height: 480 }
+  const media = Array.from({ length: 4 }, (_, i) => ({ ...d, start: 1 + i * 2 }))
+  const sparse = media.slice()
+  delete sparse[1]
+  const params = { group: KEY, text: '', media }
+  ok(t, 'group.post', params, params)
+  ok(t, 'group.post', { ...params, sealed: false })
+  ok(t, 'group.post', { ...params, text: '\u{1f600}'.repeat(MAX_TEXT), replyTo: { writer: KEY, seq: 1 } })
+  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
+    ok(t, 'group.post', { ...params, media: [{ ...d, mime }] })
+  }
+  bad(t, 'group.post', { ...params, text: 'x'.repeat(MAX_TEXT + 1) }, 'text over limit with media')
+  bad(t, 'group.post', { group: KEY, media }, 'text is required with media')
+  for (const invalid of [null, [], {}, [d, d], [...media, { ...d, start: 9 }], new Array(1), sparse,
+    [{ ...d, mime: 'application/octet-stream' }], [{ ...d, extra: 1 }], [{ ...d, start: 0 }],
+    [{ ...d, blocks: 257 }], [{ ...d, bytes: 32768 }], [{ ...d, width: 0 }]]) {
+    bad(t, 'group.post', { ...params, media: invalid }, 'invalid public media')
+  }
+  bad(t, 'group.post', { ...params, media: [d, { ...d, sha256: KEY }] }, 'same core and start')
+  ok(t, 'group.post', { ...params, media: [d, { ...d, core: 'ef'.repeat(32) }] })
+  bad(t, 'group.post', { ...params, sealed: true }, 'public media cannot be sealed')
+  for (const sealed of [null, 0, 1, 'true']) bad(t, 'group.post', { ...params, sealed }, 'sealed must be boolean')
+})
+
+test('group.post with private media', (t) => {
+  const d = { core: KEY, mime: 'application/octet-stream', start: 7936, blocks: 256, bytes: 8388608, sha256: 'cd'.repeat(32), key: 'ef'.repeat(32), nonce: 'ab'.repeat(24), plainMime: 'image/jpeg', plainSha256: KEY, w: 16384, h: 16384, ms: 0 }
+  const media = Array.from({ length: 4 }, (_, i) => ({ ...d, core: String(i).repeat(64) }))
+  const params = { group: KEY, text: '', media, sealed: true }
+  ok(t, 'group.post', params, params)
+  ok(t, 'group.post', { ...params, text: '\ud800'.repeat(MAX_TEXT), replyTo: { writer: KEY, seq: Number.MAX_SAFE_INTEGER } })
+  ok(t, 'group.post', { ...params, media: [{ ...d, start: 1, blocks: 1, bytes: 32768, w: 1, h: 1 }] })
+  const { sealed, ...unmarked } = params
+  bad(t, 'group.post', unmarked, 'private media requires sealed')
+  bad(t, 'group.post', { ...params, sealed: false }, 'private media requires sealed true')
+  for (const plainMime of ['image/png', 'image/webp', 'image/gif']) ok(t, 'group.post', { ...params, media: [{ ...d, plainMime }] })
+  for (const field of Object.keys(d)) {
+    const missing = { ...d }
+    delete missing[field]
+    bad(t, 'group.post', { ...params, media: [missing] }, 'missing ' + field)
+  }
+  for (const patch of [
+    { extra: 1 }, { core: 'x' }, { key: KEY.toUpperCase() }, { key: '' },
+    { nonce: 'f'.repeat(47) }, { nonce: 'A'.repeat(48) }, { nonce: null },
+    { sha256: 'x' }, { plainSha256: 'x' }, { plainMime: 'application/octet-stream' },
+    { plainMime: 'image/svg+xml' }, { mime: 'image/jpeg' }, { start: 0 }, { start: 7937 },
+    { blocks: 257, bytes: 8421376 }, { bytes: 8388607 }, { width: 1 }, { height: 1 },
+    { w: 0 }, { w: 1.5 }, { h: 16385 }, { ms: 1 }
+  ]) bad(t, 'group.post', { ...params, media: [{ ...d, ...patch }] }, 'invalid private item fields: ' + Object.keys(patch).join(', '))
+  const publicItem = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1, sha256: KEY, width: 1, height: 1 }
+  for (const sealed of [false, true]) bad(t, 'group.post', { ...params, media: [d, publicItem], sealed }, 'mixed media')
+  for (const media of [null, [], new Array(1), [d, d], Array(5).fill(d), [d, { ...d, key: KEY }]]) {
+    bad(t, 'group.post', { ...params, media }, 'invalid private media list')
+  }
+  bad(t, 'post.create', { text: '', media: [d] }, 'private items stay out of public posts')
+  bad(t, 'group.post', { group: KEY, text: '', sealed: true }, 'sealed alone does not allow empty text')
+  bad(t, 'group.post', { group: KEY, text: 'oi', sealed: true }, 'sealed only with media')
+  ok(t, 'group.post', { group: KEY, text: 'oi', sealed: false })
+})
+
 test('group.read', (t) => {
   t.absent(isMutating('group.read'))
-  t.is(GROUP_LIMIT_DEFAULT, 30)
-  t.is(GROUP_LIMIT_MAX, 31)
+  t.is(GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX)
   const AT = '2026-10-28T12:00:00.000Z'
   const cur = { at: AT, writer: KEY, seq: 9 }
-  ok(t, 'group.read', { group: KEY }, { group: KEY, limit: 30 })
+  ok(t, 'group.read', { group: KEY }, { group: KEY, limit: GROUP_LIMIT_DEFAULT })
   ok(t, 'group.read', { group: KEY, limit: 1 })
-  ok(t, 'group.read', { group: KEY, limit: 31, before: cur }, { group: KEY, limit: 31, before: cur })
+  ok(t, 'group.read', { group: KEY, limit: GROUP_LIMIT_MAX, before: cur }, { group: KEY, limit: GROUP_LIMIT_MAX, before: cur })
   bad(t, 'group.read', {})
   bad(t, 'group.read', { group: KEY, limit: 0 })
-  bad(t, 'group.read', { group: KEY, limit: 32 })
+  bad(t, 'group.read', { group: KEY, limit: GROUP_LIMIT_MAX + 1 })
   bad(t, 'group.read', { group: KEY, limit: 1.5 })
   for (const before of [{ at: AT, writer: KEY }, { at: AT, seq: 1 }, { writer: KEY, seq: 1 }, { at: '2026-10-28', writer: KEY, seq: 1 },
     { at: AT, writer: KEY, seq: 0 }, { at: AT, writer: 'x', seq: 1 }, { at: AT, writer: KEY, seq: 1, extra: 1 }, 5, null, []]) {
@@ -795,12 +854,12 @@ test('group.read', (t) => {
 
 test('group.list', (t) => {
   t.absent(isMutating('group.list'))
-  ok(t, 'group.list', {}, { offset: 0, limit: 30 })
-  ok(t, 'group.list', { offset: 40, limit: 31 }, { offset: 40, limit: 31 })
+  ok(t, 'group.list', {}, { offset: 0, limit: GROUP_LIMIT_DEFAULT })
+  ok(t, 'group.list', { offset: 40, limit: GROUP_LIMIT_MAX }, { offset: 40, limit: GROUP_LIMIT_MAX })
   bad(t, 'group.list', { offset: -1 })
   bad(t, 'group.list', { offset: 1.5 })
   bad(t, 'group.list', { limit: 0 })
-  bad(t, 'group.list', { limit: 32 })
+  bad(t, 'group.list', { limit: GROUP_LIMIT_MAX + 1 })
   bad(t, 'group.list', { group: KEY })
 })
 
@@ -1079,6 +1138,16 @@ test('identity.install', (t) => {
   for (const rpId of ['', 'a'.repeat(254), 1, null]) bad(t, 'identity.install', { ...base, rpId }, 'bad rpId')
   for (const resumed of ['true', 1, 0, null]) bad(t, 'identity.install', { ...base, resumed }, 'bad resumed')
   bad(t, 'identity.install', { ...base, secretKey: KEY })
+})
+
+test('media.uploadFile with sealed', (t) => {
+  const params = { name: 'a'.repeat(32) + '.bin', mime: 'image/jpeg', width: 1, height: 1, sealed: true }
+  ok(t, 'media.uploadFile', params, params)
+  ok(t, 'media.uploadFile', { ...params, sealed: false })
+  for (const mime of ['image/png', 'image/webp', 'image/gif']) ok(t, 'media.uploadFile', { ...params, mime })
+  for (const sealed of [null, 0, 1, 'true']) bad(t, 'media.uploadFile', { ...params, sealed }, 'sealed must be boolean')
+  bad(t, 'media.uploadFile', { ...params, mime: 'application/octet-stream' }, 'the node seals: the file is always the image')
+  bad(t, 'dm.putMedia', params, 'group sealing does not use the DM blob channel')
 })
 
 test('media.uploadFile', (t) => {
