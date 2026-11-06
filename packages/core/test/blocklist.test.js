@@ -399,7 +399,7 @@ test('the module is pure: no fs, no network', (t) => {
   t.is(r.status, 0, r.stderr)
   const { asked, cached } = JSON.parse(r.stdout)
   const own = asked.filter(([, parent]) => parent === path.join(coreRoot, 'lib', 'blocklist.js')).map(([id]) => id)
-  t.alike(own.sort(), ['./cert', 'b4a', 'hypercore-crypto'], 'own requires')
+  t.alike(own.sort(), ['./cert', './verified', 'b4a', 'hypercore-crypto'], 'own requires')
   const all = asked.map(([id]) => id)
   for (const id of ['net', 'node:net', 'http', 'node:http', 'https', 'node:https', 'tls', 'node:tls', 'dgram', 'node:dgram']) {
     t.absent(all.includes(id), 'not required: ' + id)

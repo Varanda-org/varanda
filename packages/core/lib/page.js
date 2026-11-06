@@ -13,6 +13,7 @@
 
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
+const { verify } = require('./verified')
 const {
   isHex,
   normalizeHex,
@@ -170,7 +171,7 @@ function revokedSet (opts) {
 }
 
 function sigOk (payload, sigHex, keyHex) {
-  return crypto.verify(payload, b4a.from(sigHex, 'hex'), b4a.from(keyHex, 'hex'))
+  return verify(payload, b4a.from(sigHex, 'hex'), b4a.from(keyHex, 'hex'))
 }
 
 const fail = (reason) => ({ ok: false, reason })

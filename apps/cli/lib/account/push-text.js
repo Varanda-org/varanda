@@ -19,6 +19,12 @@ function dmWakePayload () {
   return JSON.stringify({ v: 1, kind: 'dm-wake' })
 }
 
+// An invite drop names nobody and carries no text either: the worker owns
+// its title and body, so the push service learns only that a notice came.
+function inviteDropPayload () {
+  return JSON.stringify({ v: 1, kind: 'invite-drop' })
+}
+
 const ACTIONS = {
   follow: ' começou a seguir você',
   reply: ' respondeu ao seu post',
@@ -57,5 +63,6 @@ module.exports = {
   PUSH_BODY_MAX,
   DM_WAKE_BODY,
   dmWakePayload,
+  inviteDropPayload,
   pushBody
 }

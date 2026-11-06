@@ -212,11 +212,12 @@ function merge (mem, disk, used) {
   return { v: VERSION, invites: invites.sort(byDate) }
 }
 
-function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = () => true, perWeek = null, isUsed = () => false } = {}) {
+function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = () => true, perWeek = null, isUsed = () => false, opened = null } = {}) {
   if (perWeek !== null && !(Number.isSafeInteger(perWeek) && perWeek >= 1 && perWeek <= PER_WEEK_MAX)) {
     throw new TypeError('perWeek must be null or an integer from 1 to ' + PER_WEEK_MAX)
   }
   if (typeof isUsed !== 'function') throw new TypeError('isUsed must be a function')
+  if (opened !== null && typeof opened !== 'function') throw new TypeError('opened must be null or a function')
   refuseSymlinkDir(dataDir)
   const file = path.join(dataDir, FILE)
   let state = emptyState()
@@ -343,6 +344,20 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
     return n
   }
 
+  // A failing or malformed callback refuses instead of granting the full
+  // week: invites that should still be waiting must never leak early.
+  function allowance (member, nowMs) {
+    if (opened === null) return perWeek
+    let n
+    try {
+      n = opened(member, nowMs)
+    } catch {
+      throw fail('indisponivel')
+    }
+    if (!Number.isSafeInteger(n) || n < 0 || n > perWeek) throw fail('indisponivel')
+    return n
+  }
+
   function issue (member) {
     return enqueue(() => {
       if (!validMember(member)) throw new TypeError('member must be 64 lowercase hex characters')
@@ -362,6 +377,17 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
       if (count >= perWeek) {
         settle(next, stale)
         throw fail('limite-convites')
+      }
+      let limit
+      try {
+        limit = allowance(member, nowMs)
+      } catch (err) {
+        settle(next, stale)
+        throw err
+      }
+      if (count >= limit) {
+        settle(next, stale)
+        throw fail('convite-aguardando')
       }
       if (kept.length >= MAX_ROWS) {
         settle(next, stale)
@@ -383,7 +409,7 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
         code,
         expiresAt: iso(nowMs + INVITE_TTL_MS),
         used: usedNow,
-        remaining: perWeek - usedNow,
+        remaining: Math.max(0, limit - usedNow),
         resetsAt: iso(weekEnd(nowMs))
       }
     })
@@ -450,8 +476,9 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
     usable()
     if (perWeek === null) return null
     const nowMs = now()
+    const limit = allowance(member, nowMs)
     const usedNow = weekCount(state.invites, member, nowMs)
-    return { perWeek, used: usedNow, remaining: Math.max(0, perWeek - usedNow), resetsAt: iso(weekEnd(nowMs)) }
+    return { perWeek, opened: limit, used: usedNow, remaining: Math.max(0, limit - usedNow), resetsAt: iso(weekEnd(nowMs)) }
   }
 
   function count () {

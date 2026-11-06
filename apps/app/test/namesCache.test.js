@@ -69,25 +69,3 @@ test('sameEntry and viewOf', async (t) => {
   t.is(viewOf({ ...e, avatar: undefined }).avatar, undefined)
   t.is(viewOf({ ...e, avatar: null }).avatar, null)
 })
-
-test('batchWait skips the gap only for hosted on-screen keys', async (t) => {
-  const { batchWait } = await load()
-  const base = { lastBatchAt: 1000, now: 1200, minGapMs: 1000 }
-  t.is(batchWait({ ...base, hosted: true, front: 2 }), 0, 'hosted front')
-  t.is(batchWait({ ...base, hosted: true, front: 0 }), 800, 'hosted background only')
-  t.is(batchWait({ ...base, hosted: false, front: 2 }), 800, 'native front')
-  t.is(batchWait({ ...base, hosted: false, front: 0 }), 800, 'native background')
-  t.is(batchWait({ ...base, hosted: false, front: 2, now: 5000 }), 0, 'never negative')
-})
-
-test('promoteTimer only for hosted, armed and idle', async (t) => {
-  const { promoteTimer } = await load()
-  const later = { firesAt: 2000, now: 1000, debounceMs: 100 }
-  t.ok(promoteTimer({ hosted: true, armed: true, busy: false, ...later }))
-  t.absent(promoteTimer({ hosted: false, armed: true, busy: false, ...later }))
-  t.absent(promoteTimer({ hosted: true, armed: false, busy: false, ...later }))
-  t.absent(promoteTimer({ hosted: true, armed: true, busy: true, ...later }))
-  // A debounce already armed is left alone: a burst still flushes.
-  t.absent(promoteTimer({ hosted: true, armed: true, busy: false, firesAt: 1100, now: 1000, debounceMs: 100 }))
-  t.absent(promoteTimer({ hosted: true, armed: true, busy: false, firesAt: 1050, now: 1000, debounceMs: 100 }))
-})

@@ -77,3 +77,44 @@ gravar_associacoes() {
   fi
   rmdir "$dir" 2>/dev/null || true
 }
+
+# Grava $1/version.json com o commit $2, que o app mostra em Ajustes. Os bytes
+# saem sempre daqui, do commit já conferido, nunca do que o build deixou: o
+# build roda código das dependências. Commit vazio (um checkout sem git, por
+# exemplo) apaga o arquivo em vez de servir o de outra versão. Fora da forma
+# exata, retorna 1 sem imprimir o valor. Um link simbólico ou um arquivo
+# especial no caminho também retorna 1: quem chama pode ser root, e a escrita
+# nunca segue um link. A troca é um rename, então o Caddy nunca serve um JSON
+# pela metade.
+gravar_versao() {
+  local dir=$1 commit=$2
+  local arquivo="$dir/version.json" tmp="$dir/version.json.tmp" p
+  # O diretório é conferido antes de tudo, também antes de apagar: um rm por
+  # um diretório que é link apagaria o arquivo de outro lugar.
+  if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+    log "$dir não é um diretório comum; version.json não gravado"
+    return 1
+  fi
+  if [ -z "$commit" ]; then
+    rm -f "$arquivo"
+    return 0
+  fi
+  if ! [[ $commit =~ ^[0-9a-f]{40}$ ]]; then
+    log 'commit inválido para version.json'
+    return 1
+  fi
+  for p in "$arquivo" "$tmp"; do
+    if [ -L "$p" ] || { [ -e "$p" ] && [ ! -f "$p" ]; }; then
+      log "$p não é um arquivo comum; version.json não gravado"
+      return 1
+    fi
+  done
+  # Um .tmp deixado pelo build seria reaproveitado com o dono e o modo dele (um
+  # 000 que o Caddy não lê): ele sai, e o novo nasce com 0644.
+  if ! rm -f "$tmp" || ! printf '{"v":1,"commit":"%s"}\n' "$commit" >"$tmp" \
+    || ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$arquivo"; then
+    rm -f "$tmp" 2>/dev/null || true
+    log "falha ao gravar $arquivo"
+    return 1
+  fi
+}

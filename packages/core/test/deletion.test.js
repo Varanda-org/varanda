@@ -1158,3 +1158,62 @@ test('downloadExceptPages: a guard it made itself goes with destroy (no peer-add
   guard.destroy()
   t.is(r.core.listenerCount('peer-add'), before)
 })
+
+// presentState scans only the tombstone and page-* candidates, once: on
+// random stored diaries (holes, undone and invalid tombstones, tombstones
+// over page records, blocks that do not decode) it answers exactly what the
+// three full folds of the decoded blocks answer.
+test('presentState: one candidate scan answers as the three full folds', async (t) => {
+  let seed = 7
+  const rand = (n) => {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    return (seed >>> 8) % n
+  }
+  const encodeJson = (record) => b4a.from(JSON.stringify(record))
+  let checked = 0
+  let undone = 0
+  let pageKept = 0
+  for (let round = 0; round < 200; round++) {
+    const length = 2 + rand(40)
+    const blocks = new Map([[0, encodeJson(genesis.record)]])
+    for (let seq = 1; seq < length; seq++) {
+      const kind = rand(10)
+      let block
+      if (kind < 4) block = encodeJson(post(seq).record)
+      else if (kind < 7) block = encodeJson(del(seq, 1 + rand(seq)).record)
+      else if (kind === 7) block = encodeJson({ type: 'page-delegate', actor: K3, at: AT })
+      else if (kind === 8) block = encodeJson({ type: 'delete', seq: 1 + rand(seq), at: AT, author: K1 })
+      else block = b4a.from('{oops')
+      if (rand(6) !== 0) blocks.set(seq, block)
+    }
+    const core = {
+      length,
+      has: async (i) => blocks.has(i),
+      get: async (i) => blocks.get(i) || null
+    }
+    const state = await presentState(core)
+    const deleted = deletedSeqs(state.raw)
+    const targets = new Set()
+    const holes = []
+    for (const { seq, record } of state.raw) {
+      if (record === null && !blocks.has(seq)) holes.push(seq)
+      if (record !== null && record.type === 'delete' && validateRecord(record, seq) === null) targets.add(record.seq)
+    }
+    let present = state.raw.length
+    for (const seq of holes) {
+      if (!targets.has(seq)) {
+        present = seq
+        break
+      }
+    }
+    t.alike([...state.deleted].sort((a, b) => a - b), [...deleted].sort((a, b) => a - b), 'deleted ' + round)
+    t.alike(state.entries, applyDeletes(state.raw), 'entries ' + round)
+    t.is(state.present, present, 'present ' + round)
+    checked++
+    if (targets.size > deleted.size) undone++
+    if ([...targets].some((s) => state.raw[s] && state.raw[s].record && state.raw[s].record.type === 'page-delegate')) pageKept++
+  }
+  t.is(checked, 200)
+  t.ok(undone > 0, 'some tombstones were undone')
+  t.ok(pageKept > 0, 'some tombstones named a page record')
+})

@@ -127,6 +127,8 @@ const ERROR_STATUS = Object.freeze({
   'convite-obrigatorio': 403,
   'convite-invalido': 404,
   'limite-convites': 429,
+  // Surprise drops: the member's next invite of the week has not opened yet.
+  'convite-aguardando': 429,
   // Web Push (./push-routes.js): turning notices on needs the current terms.
   'termos-pendentes': 409,
   // Hosted age verification (./age-routes.js): no certificate, rename or
@@ -584,8 +586,9 @@ function checkRawPost (req, origin) {
 
 // createAccountServer({ association, origin, google, store, issuer, log, now,
 // moderation, googleMod, modEmails, triage, statsEmails, usage, panelDir,
-// terms, invites, groupCheck })
-// -> { listen({ host, port }) -> Promise<{ host, port, close }> }.
+// terms, invites, invitesMode, groupCheck })
+// -> { listen({ host, port }) -> Promise<{ host, port, close }>,
+// notifyInvite, inviteRoom, inviteConsent }.
 // `google` is a createGoogle instance (tests inject a loopback fake),
 // `store` an openAccountStore, `issuer` { keyPair, cert } or null
 // (unconfigured: the link routes answer 503 'indisponivel'). The redirect
@@ -604,7 +607,9 @@ function checkRawPost (req, origin) {
 // openInvitesStore (./invites-store.js) or null: null is open sign-up (the
 // policy route answers { required: false }, the two POST invite routes are
 // 404 and start ignores `invite`); otherwise every new link needs a
-// usable invite code, held in memory from start to finish. `push` is null
+// usable invite code, held in memory from start to finish. `invitesMode`
+// ('semanal' or 'sorteio') is only echoed by the signed invites summary: the
+// store's `opened` callback is what holds invites back. `push` is null
 // (the push routes and /push-event are not mounted at all) or the options of
 // ./push-routes.js { pushStore, vapid, send, relayTokenHash }. `didit` (a
 // createDidit of ./didit.js) and `ages` (an openAgeStore of ./age-store.js)
@@ -642,6 +647,7 @@ function createAccountServer ({
   panelDir,
   terms = null,
   invites = null,
+  invitesMode = 'semanal',
   push = null,
   didit = null,
   ages = null,
@@ -674,6 +680,7 @@ function createAccountServer ({
     renameFinish: keyedWindow(5, 600 * 1000, now),
     termsFinish: keyedWindow(5, 600 * 1000, now),
     invitesFinish: keyedWindow(10, 600 * 1000, now),
+    invitesSummary: keyedWindow(30, 600 * 1000, now),
     callback: keyedWindow(3, COOKIE_MAX_AGE_S * 1000, now),
     lookup: fixedWindow(1200, 60 * 1000, now)
   }
@@ -1424,6 +1431,30 @@ function createAccountServer ({
     send(res, 200, { code: result.code, expiresAt: result.expiresAt, used: result.used, remaining: result.remaining, resetsAt: result.resetsAt })
   }
 
+  // The member's own weekly allowance, behind the same single-use nonce as
+  // issue but under a 'summary' signature. A read mints nothing, so there is
+  // no age gate. Never in /account/status: member keys are public.
+  async function invitesSummary (req, res, body) {
+    const member = memberParam(body.member)
+    const nonce = typeof body.nonce === 'string' && TOKEN_RE.test(body.nonce) ? body.nonce : null
+    const signature = signatureParam(body.signature)
+    const row = nonce === null ? undefined : inviteNonces.get(nonce)
+    if (nonce !== null) inviteNonces.delete(nonce)
+    if (row === undefined || row.member !== member || row.expiresAt <= now()) throw refuse('expirado')
+    if (!verifyInvite({ action: 'summary', nonce, member, association }, signature).ok) throw refuse('assinatura-invalida')
+    if (!limits.invitesSummary(member)) throw over()
+    invitesAvailable()
+    linked(member)
+    let result
+    try {
+      result = invites.summary(member)
+    } catch (err) {
+      throw fromStore(err)
+    }
+    if (result === null) throw refuse('indisponivel')
+    send(res, 200, { mode: invitesMode, perWeek: result.perWeek, opened: result.opened, used: result.used, remaining: result.remaining, resetsAt: result.resetsAt })
+  }
+
   const POST = {
     '/account/start': start,
     '/account/authorize': authorize,
@@ -1437,6 +1468,7 @@ function createAccountServer ({
   if (inviting) {
     POST['/account/invites/start'] = invitesStart
     POST['/account/invites/finish'] = invitesFinish
+    POST['/account/invites/summary'] = invitesSummary
   }
 
   async function route (req, res, hostOk) {
@@ -1531,7 +1563,31 @@ function createAccountServer ({
   // modStats: table sizes of the moderation desk (counts only, never a
   // nonce), so tests can show that unauthenticated traffic grows nothing.
   // appStats: counts of app rows and of those holding a Google answer.
-  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), pagesStats: () => pagesRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  // notifyInvite, inviteRoom and inviteConsent are for the invite drop loop
+  // (./invite-drops.js). The loop asks inviteConsent before it claims a
+  // slot, so a member who accepts the current text later in the week still
+  // gets that week's notice. Consent is read again before each notice, as
+  // push-routes.js does before storing an endpoint.
+  function inviteConsent (member) {
+    try {
+      if (terms === null || !terms.available()) return false
+      return terms.list(member).some((e) => e.version === TERMS_VERSION)
+    } catch {
+      return false
+    }
+  }
+
+  function notifyInvite (args) {
+    if (pushRoutes === null) return 'none'
+    if (!inviteConsent(args && args.member)) return 'none'
+    return pushRoutes.notifyInvite(args)
+  }
+
+  function inviteRoom () {
+    return pushRoutes === null ? 0 : pushRoutes.room()
+  }
+
+  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), pagesStats: () => pagesRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {

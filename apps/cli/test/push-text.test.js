@@ -4,7 +4,7 @@
 // carries. Pure: no network, no disk.
 
 const test = require('brittle')
-const { pushBody, PUSH_TITLE, PUSH_FALLBACK_BODY, PUSH_BODY_MAX } = require('../lib/account/push-text')
+const { pushBody, inviteDropPayload, PUSH_TITLE, PUSH_FALLBACK_BODY, PUSH_BODY_MAX } = require('../lib/account/push-text')
 
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/ // eslint-disable-line no-control-regex
 
@@ -79,4 +79,10 @@ test('push text: control characters never survive', (t) => {
     t.absent(CONTROL.test(body), JSON.stringify(name))
     t.ok(body.endsWith(' começou a seguir você'))
   }
+})
+
+test('push text: the invite drop payload names nobody and carries no text', (t) => {
+  t.is(inviteDropPayload(), '{"v":1,"kind":"invite-drop"}')
+  t.alike(Object.keys(JSON.parse(inviteDropPayload())), ['v', 'kind'])
+  t.is(PUSH_TITLE, 'Varanda', 'the worker owns the invite title')
 })
