@@ -77,7 +77,7 @@ test('index.html carries the install metas in pt-BR', (t) => {
 })
 
 test('index.html paints the brand before the bundle runs', (t) => {
-  t.ok(/<div id="root"><\/div>\s*<div id="varanda-pre-splash" role="status" aria-label="Varanda, conectando">/.test(html), 'splash follows the empty root')
+  t.ok(/<div id="root"><\/div>\s*<div id="varanda-pre-splash" role="status" aria-label="Varanda, carregando">/.test(html), 'splash follows the empty root')
   const start = html.indexOf('<div id="varanda-pre-splash"')
   const block = html.slice(start, html.indexOf('</div>', start))
   t.ok(block.includes('<svg'), 'chair svg')
@@ -87,7 +87,9 @@ test('index.html paints the brand before the bundle runs', (t) => {
   }
   t.is((block.match(/<path/g) || []).length, 21, '21 chair paths')
   t.absent(/href|<text|<filter|<img|<iframe|<object|<embed|<script/i.test(block), 'no external or forbidden markup in the splash')
-  t.ok(block.includes('conectando…'), 'hint ellipsis')
+  t.absent(block.includes('conectando'), 'no connecting text')
+  t.ok(html.includes('<div class="bar" aria-hidden="true"><span></span></div>\n    </div>'), 'progress bar, last in the splash')
+  t.ok(html.includes('width: calc(var(--varanda-progress, 0.1) * 100%)'), 'the bar fill follows the app')
   const letters = ['V', 'a', 'r', 'a', 'n', 'd', 'a']
   const spans = letters.map((letter, i) => '<span style="--i:' + i + '">' + letter + '</span>').join('')
   t.ok(block.includes(spans), 'Varanda letter spans in order')

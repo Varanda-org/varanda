@@ -66,6 +66,7 @@ test('invite help keeps the validity, renewal and privacy facts', async (t) => {
   for (const fact of ['uma pessoa só', '7 dias', 'segunda-feira', 'horário de Brasília', 'não acumulam', 'nunca o nome, o e-mail']) {
     t.ok(text.includes(fact), fact)
   }
+  t.ok(text.includes('Quando a associação liga os convites de surpresa, cada convite chega num dia e hora ao acaso, com um aviso. Escolha com carinho quem você quer chamar.'))
   t.ok(HELP.vinculo.paragraphs.join(' ').includes('Se a rede estiver por convite,'))
 })
 
