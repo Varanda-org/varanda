@@ -22,7 +22,7 @@ test('method list and mutating set', (t) => {
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.reset', 'identity.sessionSaved',
-    'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.uploadFile', 'node.close', 'node.info', 'notices.list',
+    'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.readFile', 'media.uploadFile', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set',
     'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
@@ -1148,6 +1148,39 @@ test('media.uploadFile with sealed', (t) => {
   for (const sealed of [null, 0, 1, 'true']) bad(t, 'media.uploadFile', { ...params, sealed }, 'sealed must be boolean')
   bad(t, 'media.uploadFile', { ...params, mime: 'application/octet-stream' }, 'the node seals: the file is always the image')
   bad(t, 'dm.putMedia', params, 'group sealing does not use the DM blob channel')
+})
+
+test('media.readFile', (t) => {
+  t.absent(isMutating('media.readFile'), 'writes only a local temp file')
+  const ID = 'cd'.repeat(16)
+  const dm = { kind: 'dm', from: KEY, id: ID, index: 0 }
+  ok(t, 'media.readFile', dm, dm)
+  ok(t, 'media.readFile', { ...dm, index: 3 })
+  for (const index of [-1, 4, 1.5, '0', null]) bad(t, 'media.readFile', { ...dm, index }, 'bad index')
+  for (const from of ['AB'.repeat(32), 'ab'.repeat(31), '', null]) bad(t, 'media.readFile', { ...dm, from }, 'bad from')
+  for (const id of ['CD'.repeat(16), 'cd'.repeat(15), 'cd'.repeat(32), 1]) bad(t, 'media.readFile', { ...dm, id }, 'bad id')
+  for (const k of ['from', 'id', 'index']) {
+    const p = { ...dm }
+    delete p[k]
+    t.is(validateParams('media.readFile', p).message, 'parâmetro obrigatório: ' + k)
+  }
+  const item = { core: KEY, mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 32768, sha256: 'cd'.repeat(32), key: 'ef'.repeat(32), nonce: 'ab'.repeat(24), plainMime: 'image/jpeg', plainSha256: KEY, w: 10, h: 10, ms: 0 }
+  const group = { kind: 'group', diary: KEY, item }
+  ok(t, 'media.readFile', group, group)
+  for (const k of ['diary', 'item']) {
+    const p = { ...group }
+    delete p[k]
+    t.is(validateParams('media.readFile', p).message, 'parâmetro obrigatório: ' + k)
+  }
+  bad(t, 'media.readFile', { ...group, item: { ...item, mime: 'image/jpeg' } }, 'a public item is not opened by the node')
+  bad(t, 'media.readFile', { ...group, item: { ...item, extra: 1 } }, 'extra item key')
+  bad(t, 'media.readFile', { ...group, diary: 'x' }, 'bad diary')
+  bad(t, 'media.readFile', { ...dm, diary: KEY }, 'dm with a group field')
+  bad(t, 'media.readFile', { ...group, index: 0 }, 'group with a dm field')
+  for (const kind of ['', 'DM', 'blob', null, undefined]) bad(t, 'media.readFile', { ...dm, kind }, 'bad kind')
+  const { kind, ...noKind } = dm
+  bad(t, 'media.readFile', noKind, 'missing kind')
+  for (const k of ['name', 'path', 'bytes']) bad(t, 'media.readFile', { ...dm, [k]: 'a' }, 'extra ' + k)
 })
 
 test('media.uploadFile', (t) => {

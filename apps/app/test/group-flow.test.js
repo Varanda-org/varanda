@@ -608,3 +608,70 @@ test('Grupo: mentions are tappable and the composer suggests pages with a chip',
   t.ok(read('../src/screens/Publicar.js').includes('mergeSuggestions(search.hits, [], mentionQuery'))
   t.ok(read('../src/ui/MentionSuggest.js').includes("hit.chipLabel || 'Página'"))
 })
+
+test('Grupo sends photos through the composer flow and renders them with ChatMedia', (t) => {
+  const src = screen('Grupo.js')
+  t.ok(src.includes("import { ChatMedia } from '../ui/ChatMedia'"))
+  t.ok(src.includes("chatMediaRefs('group', { diary: rawRow.diary, media: rawRow.media })"), 'refs from the raw group.read item')
+  t.ok(src.includes('...(sealed ? { sealed: true } : {})'), 'a private group seals its uploads')
+  t.ok(src.includes('retryChatSend({ op: held.op, request, onPhase: setMediaSend })'), 'the retry resends the held op')
+  t.ok(src.includes('...(isPrivate && Array.isArray(raw.media) ? { media: raw.media } : {})'), 'report media only for a private group')
+  t.absent(/https?:\/\//.test(ui('ChatMedia.js')), 'no http(s) source in ChatMedia')
+  t.absent(/https?:\/\//.test(ui('AttachSheet.js')), 'no http(s) source in AttachSheet')
+  t.ok(ui('AttachSheet.js').includes("{ key: 'gif', label: 'GIF', icon: 'imagem', planned: true }"), 'GIF slot kept, not shown')
+  t.ok(ui('ChatComposer.js').includes("accessibilityLabel='Anexar'"))
+  t.ok(ui('ChatComposer.js').includes("accessibilityLabel='Remover foto'"))
+  for (const f of ['Grupo.js']) for (const w of ['lida', 'entregue', 'digitando']) t.absent(screen(f).includes(w), f + ': ' + w)
+  const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  t.ok(app.includes('useEffect(() => { clearChatMedia() }, [generation, locked])'), 'cleared on lock and sign-out')
+})
+
+test('chatSend layout of 1 to 4 photos stays within 240 pt', async (t) => {
+  const { chatMediaLayout } = await import('../src/chatSend.js')
+  for (let n = 1; n <= 4; n++) {
+    const l = chatMediaLayout(Array.from({ length: n }, () => ({ w: 800, h: 600 })))
+    t.is(l.cells.length, n)
+    t.ok(l.width <= 240)
+  }
+})
+
+test('mediaPostLanded confirms an uncertain photo post only by text, reply and media identity', async (t) => {
+  const { mediaPostLanded } = await import('../src/chatSend.js')
+  const me = 'a'.repeat(64)
+  const core = 'c'.repeat(64)
+  const sentAt = Date.parse('2026-11-06T10:00:00.000Z')
+  const pub = [{ core, start: 5, mime: 'image/jpeg' }]
+  const sealed = [{ core, start: 9, key: 'k', sha256: 'f'.repeat(64) }]
+  const at = '2026-11-06T10:00:01.000Z'
+  const view = (items, next = null) => ({ items, next, state: 'ok' })
+  const change = { diary: me, text: 'oi', sentAt, replyKey: null, media: pub }
+  t.is(mediaPostLanded(change, view([{ diary: me, text: 'oi', at, media: [{ core, start: 5 }] }])), 'landed')
+  t.is(mediaPostLanded(change, view([{ diary: me, text: 'oi', at, media: [{ core, start: 6 }] }])), 'not-landed', 'other photos')
+  t.is(mediaPostLanded(change, view([{ diary: me, text: 'oi', at: '2026-11-06T09:00:00.000Z', media: [{ core, start: 5 }] }])), 'not-landed', 'older post')
+  t.is(mediaPostLanded(change, view([{ diary: 'b'.repeat(64), text: 'oi', at, media: [{ core, start: 5 }] }])), 'not-landed', 'someone else')
+  t.is(mediaPostLanded(change, view([], 'cursor')), 'unknown', 'a partial read proves nothing')
+  const sc = { ...change, media: sealed }
+  t.is(mediaPostLanded(sc, view([{ diary: me, text: 'oi', at, media: [{ core, start: 1, key: 'x', sha256: 'f'.repeat(64) }] }])), 'landed', 'sealed by sha256')
+  t.is(mediaPostLanded({ ...change, replyKey: me + ':3' }, view([{ diary: me, text: 'oi', at, media: [{ core, start: 5 }] }])), 'not-landed', 'reply must match')
+})
+
+test('Grupo reconciles an uncertain photo post and binds its retry to the acting identity', (t) => {
+  const src = screen('Grupo.js')
+  t.ok(src.includes('mediaPostLanded({ diary: ownKey, text: held.text, sentAt: held.sentAt, replyKey: held.replyKey, media: held.op.params.media }, read)'))
+  t.ok(src.includes("if (await mediaLanded(held) === 'landed')"), 'the retry checks first')
+  t.ok(src.includes('if (held.acting !== actingIdRef.current)'), 'a retry as another identity is refused')
+  t.ok(/useEffect\(\(\) => \{\n {4}if \(sendTokenRef\.current\) sendTokenRef\.current\.live = false[\s\S]{0,200}setMediaHold\(null\)[\s\S]{0,200}\}, \[actingId\]\)/.test(src), 'switching identity drops the held post')
+  t.ok(src.includes("{mediaHold.checking ? null : <Pill label='tentar de novo'"), 'no retry while checking')
+})
+
+test('a stale pick is dropped and a long press on a photo opens the bubble actions', (t) => {
+  const sheet = ui('AttachSheet.js')
+  const gen = sheet.indexOf('const gen = genRef.current')
+  const pick = sheet.indexOf('picked = await pickImages()')
+  t.ok(gen > 0 && gen < pick, 'the generation is taken before the picker opens')
+  t.ok(sheet.includes('if (gen !== genRef.current) return\n    if (!Array.isArray(picked)'), 'a stale result is dropped')
+  t.ok(sheet.includes('revokeUrl(thumb)\n        continue'), 'a thumbnail made for a stale item is released')
+  const media = ui('ChatMedia.js')
+  t.is(media.split('onLongPress={onLongPress}').length - 1, 4, 'cells forward the long press (shown, tap to load, retry)')
+  t.ok(ui('Bubble.js').includes('cloneElement(media, { onLongPress: () => setOpen(true) })'))
+})

@@ -5196,3 +5196,44 @@ Limites desta caminhada:
 - O app ainda não mostra nem envia foto de grupo; só o nó, o protocolo, a RPC e os testes exercitam isto.
 - O semeador continua vendo o horário, o tamanho aproximado (em faixas de 32 KiB) e a leitura repetida de cada item privado; isto não é resistência à análise de tráfego.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 107. Fotos e GIFs nas conversas e nos grupos, no app (PR feat/chat-photos-gifs)
+
+Caminhada do app para enviar e ver fotos e GIFs em mensagens diretas e em grupos, públicos e privados, e para a denúncia com imagem. O protocolo e o nó estão nas seções 104, 105 e 106; a tela está em [app.md](app.md) ("Fotos e GIFs", "Nas conversas"). Os Termos de Uso e a Política de Privacidade passam à versão 17 para descrever isso, então quem já aceitou a 16 vê o aceite de novo.
+
+Regras que os passos conferem:
+
+- O clipe do compositor abre "Anexar" com uma só linha, "Foto" ("da galeria, até 4"). GIF por busca e áudio não aparecem, nem desabilitados.
+- Até 4 imagens por mensagem, legenda opcional; nada sai do aparelho antes de tocar em enviar. Uma foto é reencodada sem EXIF nem GPS; um GIF vai como está.
+- Mensagem direta: a foto sai cifrada pelo canal de blobs, sob um id aleatório, e some do semeador em 7 dias; quem abriu guarda a cópia cifrada no cache local, apagado ao bloquear a identidade, em Sair e em Recomeçar.
+- Grupo público: a foto vem pela rota `/media` do semeador, como as fotos das publicações. Grupo privado: só o nó decifra; o app nunca busca o item privado por HTTP.
+- Uma foto que não chega mostra "Mídia indisponível" e o texto da mensagem continua.
+- Denúncia de mensagem direta ou de grupo privado com foto: a primeira imagem aparece em "Imagem que será enviada" antes do envio, como JPEG de até 700 KB; acima disso, "A imagem não coube e não foi enviada.". A denúncia de grupo público aponta para a mensagem, sem imagem.
+- No app instalado, abrir uma foto depende do fetch do worklet Bare (`apps/app/worklet/bare-fetch.js`): só um build de aparelho feito depois de `npm run prepare:native -w apps/app` exercita isso.
+- Os Termos e a Política estão na versão 17 (`LEGAL_VERSION` e `TERMS_VERSION` iguais) e não falam de áudio, busca de GIF, prévia de link nem encaminhamento.
+
+Passos (marcar só depois de executar e guardar o registro), primeiro no Android (build de debug, emulador ou aparelho), depois no simulador iOS, depois no Chrome (web e PWA); a conversa entre duas pessoas usa o laboratório hospedado (`apps/cli/scripts/hosted-lab.js`, dois perfis do Chrome) ou um aparelho e um perfil do Chrome:
+
+- [ ] Num pedido de mensagem com foto (de alguém que você não segue), abrir o pedido não baixa nada: cada foto mostra "Toque para ver a foto" e a aba Rede (web) não registra nenhum pedido de mídia até o toque; depois de aceitar, as fotos abrem sozinhas.
+- [ ] Android: na abertura depois da atualização, o aceite dos Termos aparece com a versão 17; aceitar e seguir.
+- [ ] Android: "Anexar" mostra só "Foto"; escolher 5 imagens da galeria fica em 4; tirar uma miniatura e enviar 3 fotos com legenda numa mensagem direta; a outra pessoa vê as 3 na grade, com a legenda, e um toque abre a tela cheia.
+- [ ] Android: mandar um GIF sem legenda numa mensagem direta; ele chega animado.
+- [ ] Android: postar uma foto num grupo público e outra num grupo privado; as duas aparecem para o outro membro. A foto privada, lida na rota `/media` do semeador, são bytes cifrados (não começa com `FF D8 FF`).
+- [ ] Android: denunciar uma mensagem direta com foto; a tela mostra "Imagem que será enviada" com a imagem, e o painel de moderação recebe a denúncia com a imagem marcada como "não conferida".
+- [ ] Android: depois de abrir uma foto de mensagem direta, bloquear a identidade e desbloquear; a foto abre de novo pelo semeador (o cache local foi apagado). Em Sair, idem.
+- [ ] Android: uma foto de mensagem direta com mais de 7 dias (ou com o conjunto de blobs esvaziado no laboratório), nunca aberta, mostra "Mídia indisponível".
+- [ ] iOS (simulador): repetir os passos do Android acima, num build feito depois de `npm run prepare:native -w apps/app`, e anotar se a foto abre pelo fetch do worklet Bare.
+- [ ] Chrome (web hospedada): repetir os passos acima; na aba Rede, a foto de grupo privado não gera pedido do app à rota `/media` fora do nó, e a foto de mensagem direta vai só a `/blob` na origem do semeador.
+- [ ] Chrome (PWA instalado): enviar e abrir uma foto numa mensagem direta e num grupo; Sair apaga o cache local.
+- [ ] Em todas as plataformas: a Política e os Termos abertos em Ajustes mostram "Versão 17" e não citam áudio, busca de GIF, prévia de link nem encaminhamento.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/app/test/legal.test.js`, `terms-version.test.js` e `node packages/core/test/terms.test.js`.
+- `node apps/app/test/attachPlan.test.js`, `chatMedia.test.js`, `bareFetch.test.js`, `webnodeHandle.test.js`, `report.test.js`, `dm.test.js` e `group-flow.test.js`.
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- A abertura de foto no app instalado só é conferida num build de aparelho depois de `npm run prepare:native -w apps/app`; os testes rodam o fetch Bare isolado, não no worklet.
+- Nenhuma caixa acima foi executada nesta documentação.
