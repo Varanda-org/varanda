@@ -31,18 +31,54 @@ export function coverConnecting ({ phase, canConfigure, elapsedMs, released }) {
 // sets once the first real screen has shown.
 export const BOOT_PATIENCE_MS = 10000
 export const RECOVERY_PATIENCE_MS = 65000
+// 'pronto' stays covered until A Rua's first page is on screen with the
+// names and counts of its first rows (feedReady), so the person does not see
+// them fill in; never longer than this, then A Rua finishes in view.
+export const CONTENT_PATIENCE_MS = 5000
 
 export function bootPatienceMs (step) {
-  return step === 'recuperando' ? RECOVERY_PATIENCE_MS : BOOT_PATIENCE_MS
+  if (step === 'recuperando') return RECOVERY_PATIENCE_MS
+  if (step === 'pronto') return CONTENT_PATIENCE_MS
+  return BOOT_PATIENCE_MS
 }
 
-export function coverBoot ({ step, passkeyKnown, age, ageError, infoKnown, profileSlow } = {}) {
+export function coverBoot ({ step, passkeyKnown, age, ageError, infoKnown, profileSlow, feedReady } = {}) {
   if (step === 'entrar') return passkeyKnown !== true
   if (step === 'recuperando') return true
   if (step === 'idade') return age === 'loading' && !(typeof ageError === 'string' && ageError !== '')
   if (step === 'vinculo' || step === 'identidade' || step === 'certificado') return infoKnown !== true
   if (step === 'carregando') return profileSlow !== true
+  if (step === 'pronto') return feedReady !== true
   return false
+}
+
+// Rows whose names and counts the cover waits for: what fills the first
+// screen of A Rua.
+export const FEED_FIRST_ROWS = 6
+
+// Whether A Rua's first rows are ready to show: every author looked up (a
+// profileOf answer other than undefined, null included), every reposted
+// original answered (hasOriginal, any outcome), and the counts answered for
+// at least one of their posts, unless counts are not read here
+// (countsSkipped: no hosted node, offline, indexing, or a failed answer).
+export function feedDetailsReady ({ authors, shown, profileOf, originals, hasOriginal, hasCount, countsSkipped } = {}) {
+  if (!Array.isArray(authors) || typeof profileOf !== 'function') return false
+  if (!authors.every((a) => profileOf(a) !== undefined)) return false
+  const reposted = Array.isArray(originals) ? originals : []
+  if (reposted.length > 0 && (typeof hasOriginal !== 'function' || !reposted.every(hasOriginal))) return false
+  if (countsSkipped === true) return true
+  const refs = Array.isArray(shown) ? shown : []
+  return refs.length === 0 || (typeof hasCount === 'function' && refs.some(hasCount))
+}
+
+// The bar under the splash: real steps only (connected, own profile known,
+// first page, its names and counts), never a timer. 0..1.
+export function bootProgress ({ phase, step, page, details } = {}) {
+  if (details === true) return 1
+  if (page === true) return 0.8
+  if (step === 'pronto') return 0.6
+  if (phase === 'ready') return 0.35
+  return 0.1
 }
 
 export function holdBootCover ({ cover, elapsedMs, settled, step } = {}) {

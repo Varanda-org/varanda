@@ -3,8 +3,10 @@
 // shell paints before the bundle runs, so change both together.
 
 export const SPLASH_WORD = 'Varanda'
-export const SPLASH_HINT = 'conectando…'
-export const SPLASH_LABEL = 'Varanda, conectando'
+export const SPLASH_LABEL = 'Varanda, carregando'
+// The progress bar under the name (it replaced the 'conectando…' hint).
+export const BAR_WIDTH = 120
+export const BAR_MS = 400
 export const PULSE_MS = 1200
 export const ENTRANCE_MS = 1180
 
