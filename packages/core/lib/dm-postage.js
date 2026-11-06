@@ -7,6 +7,14 @@
 //
 // BigInt modexp is not constant-time. A timing leak on d lets someone forge
 // stamps (spam); it never decrypts a drop.
+//
+// Blob stamps (the media chunk channel) use the same scheme under their own
+// full-domain-hash domain AND their own RSA key pair, kid and rotation list
+// on the seeder. The domain alone would not split the budgets: sign() signs
+// any blinded integer and the domain is applied by the client before
+// blinding, so with one key a request for a blob stamp could mint a DM
+// stamp. With two keys a DM token verifies only under a DM key and a blob
+// token only under a blob key.
 
 const sodium = require('sodium-universal')
 const b4a = require('b4a')
@@ -17,7 +25,13 @@ const MODULUS_BYTES = 256
 const TOKEN_BYTES = 32
 const KID_BYTES = 8
 const E = 65537n
-const DOMAIN = b4a.from(DM_STAMP_FDH_DOMAIN, 'utf8')
+const BLOB_STAMP_FDH_DOMAIN = 'varanda/blob-stamp-fdh/v1'
+const BLOB_STAMPS_PER_DAY = 1024
+const STAMP_KINDS = Object.freeze(['dm', 'blob'])
+const DOMAINS = Object.freeze({
+  dm: b4a.from(DM_STAMP_FDH_DOMAIN, 'utf8'),
+  blob: b4a.from(BLOB_STAMP_FDH_DOMAIN, 'utf8')
+})
 const DECIMAL = /^[1-9][0-9]*$/
 const HEX16 = /^[0-9a-f]{16}$/
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
@@ -83,10 +97,17 @@ function sha256 (bytes) {
   return out
 }
 
-// MGF1 with SHA-256 over domain || token, MODULUS_BYTES long.
-function representative (token) {
+function domainOf (kind) {
+  if (kind !== 'dm' && kind !== 'blob') throw new TypeError('unknown stamp kind')
+  return DOMAINS[kind]
+}
+
+// MGF1 with SHA-256 over domain || token, MODULUS_BYTES long. kind picks the
+// domain: 'dm' (the default, so older callers keep their tokens) or 'blob'.
+function representative (token, kind = 'dm') {
+  const domain = domainOf(kind)
   if (!isBytes(token, TOKEN_BYTES)) throw new TypeError('token must be ' + TOKEN_BYTES + ' bytes')
-  const seed = b4a.concat([DOMAIN, token])
+  const seed = b4a.concat([domain, token])
   const blocks = []
   const counter = b4a.alloc(4)
   for (let i = 0; i * 32 < MODULUS_BYTES; i++) {
@@ -101,9 +122,9 @@ function representative (token) {
 
 // A token whose representative is not below n cannot be signed: the client
 // draws another.
-function isUsableToken (token, n) {
-  if (!isBytes(token, TOKEN_BYTES) || typeof n !== 'bigint') return false
-  const rep = representative(token)
+function isUsableToken (token, n, kind = 'dm') {
+  if (!isBytes(token, TOKEN_BYTES) || typeof n !== 'bigint' || !STAMP_KINDS.includes(kind)) return false
+  const rep = representative(token, kind)
   return rep > 0n && rep < n && gcd(rep, n) === 1n
 }
 
@@ -116,11 +137,12 @@ function randomBelow (n) {
   }
 }
 
-function newToken (n) {
+function newToken (n, kind = 'dm') {
+  domainOf(kind)
   for (;;) {
     const token = b4a.alloc(TOKEN_BYTES)
     sodium.randombytes_buf(token)
-    if (isUsableToken(token, n)) return token
+    if (isUsableToken(token, n, kind)) return token
   }
 }
 
@@ -172,17 +194,19 @@ function parsePublicKey (pub) {
   }
 }
 
-// sig: MODULUS_BYTES big-endian bytes or a BigInt. Never throws.
-function verify (token, sig, pub) {
+// sig: MODULUS_BYTES big-endian bytes or a BigInt. kind must match the key's
+// kind: the caller passes a DM key with 'dm' and a blob key with 'blob'.
+// Never throws.
+function verify (token, sig, pub, kind = 'dm') {
   try {
     const key = parsePublicKey(pub)
-    if (key === null || !isBytes(token, TOKEN_BYTES)) return false
+    if (key === null || !isBytes(token, TOKEN_BYTES) || !STAMP_KINDS.includes(kind)) return false
     let s
     if (typeof sig === 'bigint') s = sig
     else if (isBytes(sig, MODULUS_BYTES)) s = bytesToBig(sig)
     else return false
     if (s < 1n || s >= key.n) return false
-    const rep = representative(token)
+    const rep = representative(token, kind)
     if (rep >= key.n) return false
     return modPow(s, key.e, key.n) === rep
   } catch {
@@ -211,6 +235,9 @@ module.exports = Object.freeze({
   TOKEN_BYTES,
   KID_BYTES,
   E,
+  BLOB_STAMP_FDH_DOMAIN,
+  BLOB_STAMPS_PER_DAY,
+  STAMP_KINDS,
   representative,
   isUsableToken,
   newToken,

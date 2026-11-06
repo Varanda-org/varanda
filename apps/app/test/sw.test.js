@@ -448,6 +448,21 @@ test('/media/* is never intercepted', async (t) => {
   t.ok((await dispatch(w, ORIGIN + '/medias', { mode: 'navigate' })).responded, '/medias is an app route')
 })
 
+// Chat media chunks are proxied by Caddy to the seeder's blob pool: the
+// worker must not cache them, answer them with the shell or turn a failure
+// into a 503.
+test('/blob/* is never intercepted', async (t) => {
+  const { w } = await installed()
+  w.server = offline
+  for (const p of ['/blob/' + 'a'.repeat(64) + '/0', '/blob/' + 'b'.repeat(64) + '/256', '/blob/x']) {
+    t.absent((await dispatch(w, ORIGIN + p)).responded, p)
+    t.absent((await dispatch(w, ORIGIN + p, { method: 'HEAD' })).responded, 'HEAD ' + p)
+    t.absent((await dispatch(w, ORIGIN + p, { mode: 'navigate' })).responded, 'navigate ' + p)
+  }
+  t.is(w.calls.length, 0, 'the worker fetched nothing')
+  t.ok((await dispatch(w, ORIGIN + '/blobs', { mode: 'navigate' })).responded, '/blobs is an app route')
+})
+
 // The seeder's engagement index is proxied by Caddy (no-store, real 404s):
 // the worker must not cache it, answer it from the shell or turn a failure
 // into a 503, for GET or HEAD, online or offline.
@@ -820,12 +835,14 @@ test('notificationclick: the moderation panel and other bypassed pages are never
   const w = renderedWorker()
   const panel = fakeWindow(ORIGIN + '/account/mod/')
   const media = fakeWindow(ORIGIN + '/media/x')
+  const blob = fakeWindow(ORIGIN + '/blob/' + 'a'.repeat(64) + '/0')
   const app = fakeWindow(ORIGIN + '/?conta=1')
-  w.windows = [panel, media, app]
+  w.windows = [panel, media, blob, app]
   await click(w, { kind: 'like', actor: ACTOR, recipient: RECIPIENT, ref: REF })
   t.is(panel.focused, 0)
   t.is(panel.messages.length, 0)
   t.is(media.focused, 0)
+  t.is(blob.focused, 0, 'a /blob/ chunk tab is not the app')
   t.is(app.focused, 1)
   t.is(app.messages.length, 1)
 

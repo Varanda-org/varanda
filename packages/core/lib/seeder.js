@@ -96,6 +96,16 @@
 // only; a drop is accepted under the current or the previous one. The daily
 // stamp budget per diary is kept in <dataDir>/dm-stamps.json for the current
 // and the previous Brasília day only, so the file is no activity log.
+// Blob stamps (media chunks) are issued on the same stamp channel when
+// dm.blobPostage is given: a SEPARATE key pair with its own kid and rotation
+// list (one key for both would let a blob request mint a DM stamp), and a
+// separate daily budget per diary in <dataDir>/blob-stamps.json, so blob
+// issuance never spends the DM allowance.
+// With dm.blobPostage the seeder also keeps the blob pool (lib/blob-pool.js)
+// under <dataDir>/blobs/, at most dm.blobBytes bytes, answers the anonymous
+// 'varanda/blob/1' channel (lib/blob-net.js) on every peer and hands
+// complete blobs' chunks to the HTTP /blob route through blobChunk(). The
+// pool is swept on the DM tick and closed with the seeder.
 const fs = require('#fs')
 const path = require('#path')
 const process = require('#process')
@@ -150,6 +160,9 @@ const { createDmPool } = require('./dm-pool')
 const { attachDm } = require('./dm-net')
 const { attachDmStamp } = require('./dm-stamp-net')
 const dmPostage = require('./dm-postage')
+const { createBlobPool } = require('./blob-pool')
+const { attachBlob } = require('./blob-net')
+const { BLOB_CHUNK_BYTES, BLOB_POOL_BYTES } = require('./blob')
 const { attachNotices, attachNoticesV2, attachNoticesV3 } = require('./notices-net')
 const { createPostNoticeIndex } = require('./post-notices')
 const { pushCandidate, pushName } = require('./push-events')
@@ -220,6 +233,7 @@ const KEY_FILE = 'seeder-key.json'
 const CERT_FILE = 'seeder-cert.json'
 const ADMITTED_FILE = 'admitted.json'
 const DM_STAMPS_FILE = 'dm-stamps.json'
+const BLOB_STAMPS_FILE = 'blob-stamps.json'
 const DM_SWEEP_MS = 60000
 const DM_STAMP_ROWS_MAX = 100000
 const DM_STAMP_ROW_DAYS = 3
@@ -794,28 +808,41 @@ function dmOptions (dm) {
     throw new TypeError('dm.postage.get must be a function')
   }
   const { postage, stampsPerDay = DM_STAMPS_PER_DAY, onDrop = noop } = dm
+  const { blobPostage = null, blobStampsPerDay = dmPostage.BLOB_STAMPS_PER_DAY, blobBytes = BLOB_POOL_BYTES } = dm
   if (!Number.isSafeInteger(stampsPerDay) || stampsPerDay < 1) throw new TypeError('invalid dm.stampsPerDay')
   if (typeof onDrop !== 'function') throw new TypeError('dm.onDrop must be a function')
-  return { postage, stampsPerDay, onDrop }
+  if (blobPostage !== null && (typeof blobPostage !== 'object' || typeof blobPostage.get !== 'function')) {
+    throw new TypeError('dm.blobPostage.get must be a function')
+  }
+  if (blobPostage !== null && blobPostage === postage) throw new TypeError('dm.blobPostage must not be dm.postage')
+  if (!Number.isSafeInteger(blobStampsPerDay) || blobStampsPerDay < 1) throw new TypeError('invalid dm.blobStampsPerDay')
+  if (!Number.isSafeInteger(blobBytes) || blobBytes < BLOB_CHUNK_BYTES) throw new TypeError('invalid dm.blobBytes')
+  return { postage, stampsPerDay, onDrop, blobPostage, blobStampsPerDay, blobBytes }
 }
 
 // The postage keys usable by the seeder, newest first, at most two (the
 // current one and the previous one), each { pub, n, d }; throws on anything
 // that is not a key, so a broken key file never issues or accepts a stamp.
-function dmPostageKeys (got) {
+// label names the key file in the error ('dm-postage' or 'blob-postage').
+function dmPostageKeys (got, label = 'dm-postage') {
+  const invalid = () => new Error(label + ' inválido')
   const list = got !== null && typeof got === 'object' && Array.isArray(got.keys) ? got.keys : [got]
   const keys = []
   for (const k of list.slice(0, 2)) {
-    if (k === null || typeof k !== 'object') throw new Error('dm-postage inválido')
+    if (k === null || typeof k !== 'object') throw invalid()
     const pub = { v: 1, kid: k.kid, n: k.n, e: k.e }
     const parsed = dmPostage.parsePublicKey(pub)
-    if (parsed === null || typeof k.d !== 'string' || !DECIMAL.test(k.d)) throw new Error('dm-postage inválido')
+    if (parsed === null || typeof k.d !== 'string' || !DECIMAL.test(k.d)) throw invalid()
     const d = BigInt(k.d)
-    if (d >= parsed.n) throw new Error('dm-postage inválido')
+    if (d >= parsed.n) throw invalid()
     keys.push({ pub, n: parsed.n, d })
   }
-  if (keys.length === 0) throw new Error('dm-postage inválido')
+  if (keys.length === 0) throw invalid()
   return keys
+}
+
+function sharesKid (keys, others) {
+  return keys.some((k) => others.some((o) => o.pub.kid === k.pub.kid))
 }
 
 function daysBefore (day, n) {
@@ -836,19 +863,20 @@ function isCount (n) {
 
 // dm-stamps.json as a Map diary -> row; an unreadable file counts as empty
 // (the budget restarts, which costs at most one day of stamps). A v1 file
-// ({ diary: { day, count } }) is read as one day per diary.
-function readDmStamps (dataDir, log) {
+// ({ diary: { day, count } }) is read as one day per diary. blob-stamps.json
+// has the same v2 shape.
+function readDmStamps (dataDir, log, name = DM_STAMPS_FILE, reason = 'dm-stamps-unreadable') {
   const out = new Map()
   let file = null
   try {
-    file = readJson(path.join(dataDir, DM_STAMPS_FILE), null)
+    file = readJson(path.join(dataDir, name), null)
   } catch {
-    log({ event: 'warning', reason: 'dm-stamps-unreadable' })
+    log({ event: 'warning', reason })
     return out
   }
   if (file === null) return out
   if (typeof file !== 'object' || (file.v !== 1 && file.v !== 2) || file.days === null || typeof file.days !== 'object') {
-    log({ event: 'warning', reason: 'dm-stamps-unreadable' })
+    log({ event: 'warning', reason })
     return out
   }
   for (const [key, e] of Object.entries(file.days)) {
@@ -905,7 +933,11 @@ class Seeder {
   // the postage keys, { kid, n, e, d } (decimal strings) or { keys: [...] }
   // newest first; only the first two count. onDrop() is called with no
   // arguments after each new drop is stored (a throw is ignored). null
-  // leaves both direct message channels unanswered.
+  // leaves both direct message channels unanswered. blobPostage ({ get() },
+  // same shape, a DIFFERENT key file) turns on blob stamps, with
+  // blobStampsPerDay = BLOB_STAMPS_PER_DAY, and the blob pool and channel,
+  // with blobBytes = BLOB_POOL_BYTES; without it blob requests on the stamp
+  // channel are bad messages and no blob channel is opened.
   // noClear (default: VARANDA_NO_CLEAR=1, the rollout kill switch) keeps
   // the bytes of deleted diary blocks and media ranges: they are only
   // hidden, as before byte deletion.
@@ -985,12 +1017,16 @@ class Seeder {
     this.onPush = onPush
     this._dmOpts = dmOptions(dm)
     this._dm = null
+    this._blob = null
     this._dmTimer = null
     this._dmKeys = []
     this._dmKeysFrom = null
     this._dmStamps = new Map() // diary key -> { day, count }
+    this._blobKeys = []
+    this._blobKeysFrom = null
+    this._blobStamps = new Map() // diary key -> { day: count }, apart from _dmStamps
     this._dmHandles = new Set()
-    this._dmStampChannels = new Map() // seeder stamp handle -> { kid, socket, release }
+    this._dmStampChannels = new Map() // seeder stamp handle -> { kid, blobKid, socket, release }
     this.noClear = noClear === null ? (process.env || {}).VARANDA_NO_CLEAR === '1' : noClear === true
     this.maxLogBlocks = maxLogBlocks
     this.maxLogBytes = maxLogBytes
@@ -6082,6 +6118,21 @@ class Seeder {
       }
       this._dmHandles.add(dm)
       release.push(() => this._dmHandles.delete(dm))
+      if (this._blob !== null) {
+        let blob = null
+        try {
+          blob = attachBlob(socket, {
+            role: 'seeder',
+            put: (bytes) => this._blobPut(bytes),
+            log: (ev) => this.log(ev)
+          })
+        } catch {
+          socket.destroy()
+          return
+        }
+        this._dmHandles.add(blob)
+        release.push(() => this._dmHandles.delete(blob))
+      }
     }
     // Groups channel: writer pages from the group index, before the hello
     // like the notices channel (groups-net.js).
@@ -6136,6 +6187,9 @@ class Seeder {
   _openDm () {
     const { onDrop } = this._dmOpts
     this._dmStamps = readDmStamps(this.dataDir, (ev) => this.log(ev))
+    if (this._dmOpts.blobPostage !== null) {
+      this._blobStamps = readDmStamps(this.dataDir, (ev) => this.log(ev), BLOB_STAMPS_FILE, 'blob-stamps-unreadable')
+    }
     this._dm = createDmPool({
       dir: this.dataDir,
       verifyStamp: (kid, token, sig) => this._verifyStamp(kid, token, sig),
@@ -6145,6 +6199,17 @@ class Seeder {
       },
       log: (ev) => this.log(ev)
     })
+    if (this._dmOpts.blobPostage !== null) {
+      this._blob = createBlobPool({
+        dir: this.dataDir,
+        maxBytes: this._dmOpts.blobBytes,
+        verifyStamp: (kid, token, sig) => this._verifyBlobStamp(kid, token, sig),
+        isKidAccepted: (kid) => this._blobKidAccepted(kid),
+        // Swept on the DM tick, after the keys its token retention reads.
+        sweepMs: 0,
+        log: (ev) => this.log(ev)
+      })
+    }
     this._dmTimer = setInterval(() => { this._dmTick().catch(noop) }, DM_SWEEP_MS)
     if (typeof this._dmTimer.unref === 'function') this._dmTimer.unref()
   }
@@ -6159,13 +6224,44 @@ class Seeder {
     return this._dmKeys
   }
 
+  // The blob keys, as _dmPostageKeys. A blob key that is also a DM key is
+  // refused: it would let a blob request mint a DM stamp.
+  async _blobPostageKeys () {
+    const { blobPostage } = this._dmOpts
+    if (blobPostage === null) throw new Error('blob-postage inválido')
+    const got = await blobPostage.get()
+    const keys = got === this._blobKeysFrom ? this._blobKeys : dmPostageKeys(got, 'blob-postage')
+    if (sharesKid(keys, this._dmKeys)) throw new Error('blob-postage inválido')
+    this._blobKeys = keys
+    this._blobKeysFrom = got
+    return this._blobKeys
+  }
+
   // Current or previous kid only: older stamps are refused, and the pool
-  // remembers spent tokens longer than this window (dm-pool.js).
+  // remembers spent tokens longer than this window (dm-pool.js). A kid that
+  // is also a blob key never pays for a drop.
   _verifyStamp (kid, token, sig) {
+    if (this._blobKeys.some((k) => k.pub.kid === kid)) return false
     for (const k of this._dmKeys) {
-      if (k.pub.kid === kid) return dmPostage.verify(token, sig, k.pub)
+      if (k.pub.kid === kid) return dmPostage.verify(token, sig, k.pub, 'dm')
     }
     return false
+  }
+
+  // The blob side of _verifyStamp, for the blob pool: blob keys and the blob
+  // domain only, so a DM stamp never pays for a chunk.
+  _verifyBlobStamp (kid, token, sig) {
+    if (this._dmKeys.some((k) => k.pub.kid === kid)) return false
+    for (const k of this._blobKeys) {
+      if (k.pub.kid === kid) return dmPostage.verify(token, sig, k.pub, 'blob')
+    }
+    return false
+  }
+
+  // As _dmKidAccepted, for the blob keys.
+  _blobKidAccepted (kid) {
+    if (!Array.isArray(this._blobKeys) || this._blobKeys.length === 0) return true
+    return this._blobKeys.some((k) => k.pub.kid === kid)
   }
 
   // Whether a spent token's kid can still verify a stamp. Before the keys are
@@ -6192,6 +6288,36 @@ class Seeder {
     return result
   }
 
+  // As _dmPut. The DM keys load first: a blob key file holding a DM key is
+  // refused against them, so the put throws and stays uncertain. Only the
+  // outcome is logged, never the id, the index or the peer.
+  async _blobPut (bytes) {
+    try {
+      await this._dmPostageKeys()
+      await this._blobPostageKeys()
+    } catch (err) {
+      this.log({ event: 'blob', reason: 'postage' })
+      throw err
+    }
+    const result = this._blob.submit(bytes)
+    if (result === 'cheio' || result === null) this.log({ event: 'blob', reason: result === null ? 'invalido' : 'cheio' })
+    else if (result.complete && result.repeated !== true) this.log({ event: 'blob', reason: 'completo' })
+    return result
+  }
+
+  // The stored frame of chunk `index` of a complete blob, exactly as stored,
+  // or null (no pool, an unknown or incomplete blob, an index out of range, a
+  // broken blob, a closed pool). Backs the HTTP /blob route.
+  blobChunk (idHex, index) {
+    if (this._blob === null || this._closing) return null
+    if (typeof idHex !== 'string' || !/^[0-9a-f]{64}$/.test(idHex) || !Number.isSafeInteger(index) || index < 0) return null
+    try {
+      return this._blob.read(idHex, index)
+    } catch {
+      return null
+    }
+  }
+
   // protomux awaits this pairing call: the stamp channel opens only after
   // the key is known, and a failure leaves the peer's open rejected.
   async _attachDmStamp (socket, release) {
@@ -6204,6 +6330,17 @@ class Seeder {
       return
     }
     if (this._closing || socket.destroyed || socket._varandaDmStamp) return
+    // A broken blob key file leaves DM stamps working: the channel then has
+    // no blob kind, and the tick reopens it once a blob key loads.
+    let blobKey = null
+    if (this._dmOpts.blobPostage !== null) {
+      try {
+        blobKey = (await this._blobPostageKeys())[0]
+      } catch {
+        this.log({ event: 'dm-stamp', reason: 'blob-postage' })
+      }
+      if (this._closing || socket.destroyed || socket._varandaDmStamp) return
+    }
     // attachDmStamp keeps the key it was given for the channel's life, so a
     // channel whose key is no longer current signs nothing ('ruim', no
     // allowance spent) and is closed by the next key refresh (_dmTick); the
@@ -6224,6 +6361,23 @@ class Seeder {
           check: (diary, day) => this._checkStamp(diary, day),
           take: (diary, day) => this._takeStamp(diary, day)
         },
+        blobPostage: blobKey === null
+          ? undefined
+          : {
+              publicKey: blobKey.pub,
+              sign: (blinded) => {
+                const current = this._blobKeys[0]
+                if (current === undefined || current.pub.kid !== blobKey.pub.kid) return null
+                if (sharesKid([blobKey], this._dmKeys)) return null
+                return dmPostage.sign(blinded, blobKey.n, blobKey.d)
+              }
+            },
+        blobBudget: blobKey === null
+          ? undefined
+          : {
+              check: (diary, day) => this._checkStamp(diary, day, 'blob'),
+              take: (diary, day) => this._takeStamp(diary, day, 'blob')
+            },
         log: (ev) => this.log(ev)
       })
     } catch {
@@ -6231,7 +6385,7 @@ class Seeder {
       return
     }
     this._dmHandles.add(handle)
-    this._dmStampChannels.set(handle, { kid: key.pub.kid, socket, release })
+    this._dmStampChannels.set(handle, { kid: key.pub.kid, blobKid: blobKey === null ? null : blobKey.pub.kid, socket, release })
     release.push(() => {
       this._dmHandles.delete(handle)
       this._dmStampChannels.delete(handle)
@@ -6241,7 +6395,10 @@ class Seeder {
   // The 60 s tick: the current postage keys first (a rotation closes the
   // stamp channels of an older key), then the pool sweep, whose token
   // retention reads those keys. Keys are refreshed only once a DM peer has
-  // loaded them: a seeder no member has used creates no key file.
+  // loaded them: a seeder no member has used creates no key file. Blob keys
+  // are retried on every tick once DM keys are in use, even when their first
+  // load failed: a repaired blob key file then reaches the open stamp
+  // channels below (a channel without a blob kid is stale once one loads).
   async _dmTick () {
     if (this._dmKeysFrom !== null) {
       try {
@@ -6250,10 +6407,20 @@ class Seeder {
         this.log({ event: 'dm-stamp', reason: 'postage' })
       }
     }
+    if (this._dmOpts.blobPostage !== null && (this._blobKeysFrom !== null || this._dmKeysFrom !== null)) {
+      try {
+        await this._blobPostageKeys()
+      } catch {
+        this.log({ event: 'dm-stamp', reason: 'blob-postage' })
+      }
+    }
     if (this._closing || this._dm === null) return
     const current = this._dmKeys.length > 0 ? this._dmKeys[0].pub.kid : null
+    const currentBlob = this._blobKeys.length > 0 ? this._blobKeys[0].pub.kid : null
     for (const [handle, ch] of [...this._dmStampChannels]) {
-      if (current === null || ch.kid === current) continue
+      const dmFresh = current === null || ch.kid === current
+      const blobFresh = currentBlob === null || ch.blobKid === currentBlob
+      if (dmFresh && blobFresh) continue
       this._dmStampChannels.delete(handle)
       this._dmHandles.delete(handle)
       try { handle.close() } catch {}
@@ -6266,6 +6433,13 @@ class Seeder {
     } catch {
       this.log({ event: 'warning', reason: 'dm-sweep-failed' })
     }
+    if (this._blob !== null) {
+      try {
+        this._blob.sweep()
+      } catch {
+        this.log({ event: 'warning', reason: 'blob-sweep-failed' })
+      }
+    }
   }
 
   // A write failure throws: the stamp is then not issued and not counted.
@@ -6276,16 +6450,20 @@ class Seeder {
   // older than DM_STAMP_KEEP_DAYS before the current one are dropped (the
   // file is no activity log); a clock jump past that window can restore an
   // allowance. Rows are capped: past the cap no new diary gets a row (nor a
-  // stamp) until old rows are dropped.
-  _takeStamp (diary, day) {
-    const { stampsPerDay } = this._dmOpts
+  // stamp) until old rows are dropped. kind 'blob' runs the same rules on
+  // its own counter, file and daily allowance: neither kind spends the
+  // other's.
+  _takeStamp (diary, day, kind = 'dm') {
+    const blob = kind === 'blob'
+    const stampsPerDay = blob ? this._dmOpts.blobStampsPerDay : this._dmOpts.stampsPerDay
+    const rows = blob ? this._blobStamps : this._dmStamps
     if (this._isBlocked(diary) || !(this._admitted.has(diary) || this._served.has(diary))) return false
-    const known = this._dmStamps.get(diary)
+    const known = rows.get(diary)
     const count = known !== undefined && isCount(known[day]) ? known[day] : 0
     if (count >= stampsPerDay) return false
     const keepFrom = daysBefore(day, DM_STAMP_KEEP_DAYS)
     const next = new Map()
-    for (const [k, row] of this._dmStamps) {
+    for (const [k, row] of rows) {
       const kept = {}
       for (const d of Object.keys(row)) {
         if (d >= keepFrom) kept[d] = row[d]
@@ -6294,24 +6472,27 @@ class Seeder {
     }
     if (!next.has(diary) && next.size >= this._dmStampRowsMax()) return false
     next.set(diary, trimStampRow({ ...(next.get(diary) || {}), [day]: count + 1 }))
-    writeJsonAtomic(path.join(this.dataDir, DM_STAMPS_FILE), { v: 2, days: Object.fromEntries(next) }, 0o600)
-    this._dmStamps = next
+    writeJsonAtomic(path.join(this.dataDir, blob ? BLOB_STAMPS_FILE : DM_STAMPS_FILE), { v: 2, days: Object.fromEntries(next) }, 0o600)
+    if (blob) this._blobStamps = next
+    else this._dmStamps = next
     return true
   }
 
   // Whether _takeStamp would allow a stamp now, by the same rules, without
   // writing anything: dm-stamp-net asks this before the costly blind
   // signature.
-  _checkStamp (diary, day) {
-    const { stampsPerDay } = this._dmOpts
+  _checkStamp (diary, day, kind = 'dm') {
+    const blob = kind === 'blob'
+    const stampsPerDay = blob ? this._dmOpts.blobStampsPerDay : this._dmOpts.stampsPerDay
+    const table = blob ? this._blobStamps : this._dmStamps
     if (this._isBlocked(diary) || !(this._admitted.has(diary) || this._served.has(diary))) return false
-    const known = this._dmStamps.get(diary)
+    const known = table.get(diary)
     const count = known !== undefined && isCount(known[day]) ? known[day] : 0
     if (count >= stampsPerDay) return false
     const keepFrom = daysBefore(day, DM_STAMP_KEEP_DAYS)
     let rows = 0
     let hasRow = false
-    for (const [k, row] of this._dmStamps) {
+    for (const [k, row] of table) {
       if (!Object.keys(row).some((d) => d >= keepFrom)) continue
       rows++
       if (k === diary) hasRow = true
@@ -6406,6 +6587,9 @@ class Seeder {
       }
       if (this._dm !== null) {
         try { this._dm.close() } catch {}
+      }
+      if (this._blob !== null) {
+        try { this._blob.close() } catch {}
       }
       if (this.store) {
         try { await this.store.close() } catch {}

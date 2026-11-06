@@ -1463,6 +1463,28 @@ function writeDmStamps (storage, { items, kids }) {
   })
 }
 
+// kv blobStamps: the blob stamp wallet (./blob.js), the same shape and
+// rules as kv dmStamps under its own key, holding at most MAX_BLOB_STAMPS
+// (a little over BLOB_STAMP_WALLET).
+const MAX_BLOB_STAMPS = 320
+
+async function readBlobStamps (storage) {
+  const data = await readKv(storage, 'blobStamps')
+  if (!isV2(data)) return { items: [], kids: [] }
+  return {
+    items: data.items.filter((s) => validBox(s) && typeof s.kid === 'string' && HEX16_RE.test(s.kid)).slice(0, MAX_BLOB_STAMPS).map((s) => ({ kid: s.kid, nonce: s.nonce, box: s.box })),
+    kids: validKids(data.kids)
+  }
+}
+
+function writeBlobStamps (storage, { items, kids }) {
+  return storage.writeJson('blobStamps', {
+    v: 2,
+    items: items.filter((s) => validBox(s) && typeof s.kid === 'string' && HEX16_RE.test(s.kid)).slice(0, MAX_BLOB_STAMPS).map((s) => ({ kid: s.kid, nonce: s.nonce, box: s.box })),
+    kids: validKids(kids)
+  })
+}
+
 // kv dmCtlQueue = { v: 2, items: [{ nonce, box }] }: ctls to the own box not
 // put yet, oldest first, at most MAX_DM_CTL_QUEUE, each sealed. Inside, a
 // sealed envelope still waiting for a stamp or, once stamped, the exact
@@ -1491,7 +1513,7 @@ async function pushDmCtlQueue (storage, item) {
 // Every dm kv entry and the local store (reset).
 async function deleteDmData (storage) {
   await storage.deleteCore(DM_LOCAL)
-  for (const key of ['dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'dmCtlQueue']) await storage.writeJson(key, null)
+  for (const key of ['dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue']) await storage.writeJson(key, null)
 }
 
 // kv ageVerified / ageSince = { v: 1, proof }: the account service's signed
@@ -1556,6 +1578,9 @@ module.exports = {
   MAX_GROUP_SEEN,
   readDmStamps,
   writeDmStamps,
+  readBlobStamps,
+  writeBlobStamps,
+  MAX_BLOB_STAMPS,
   deleteDmData,
   readDmCtlQueue,
   writeDmCtlQueue,
