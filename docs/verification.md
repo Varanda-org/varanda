@@ -5471,7 +5471,7 @@ Resultado da matriz: a registrar aqui por navegador, com a data e a versão do n
 
 ## 112. Estado de vistos sincronizado entre aparelhos (PR feat/seen-sync-service)
 
-O serviço de conta guarda, por membro, um bloco cifrado com as marcas de visto de Avisos, Conversas e grupos (`apps/cli/lib/account/seen-store.js`, `seen-routes.js`). O formato, a chave e as regras de fusão e de compare-and-swap estão em [protocol.md](protocol.md), seção 14. Esta parte só confere o serviço: o navegador, que grava e funde o bloco, não está nesta PR. O serviço não lê o bloco, e nenhuma conferência abaixo precisa de acesso ao conteúdo.
+O serviço de conta guarda, por membro, um bloco cifrado com as marcas de visto de Avisos, Conversas e grupos (`apps/cli/lib/account/seen-store.js`, `seen-routes.js`). O formato, a chave e as regras de fusão e de compare-and-swap estão em [protocol.md](protocol.md), seção 14. Esta parte confere o serviço; o navegador, que grava e funde o bloco, e o app estão nas PRs desta pilha, e o roteiro do app está no fim desta seção. O serviço não lê o bloco, e nenhuma conferência abaixo precisa de acesso ao conteúdo.
 
 ### Testes automáticos
 
@@ -5501,9 +5501,27 @@ Pré-requisito: uma conta de teste já vinculada, criada como em `apps/cli/test/
 - [ ] Log: o registro do serviço durante o roteiro não tem o hex do membro, o base64 do bloco nem os hashes. Só aparecem linhas `{ "event": "seen", "reason": ... }`.
 - [ ] Um pedido de outro membro, com a assinatura desse membro, não muda o arquivo do primeiro (a conferência também está em `account-seen.test.js`).
 
+### Roteiro no app
+
+Pré-requisito: a mesma passkey em dois navegadores (ou aba e app instalado) na versão hospedada, com os Termos da versão atual aceitos, e uma conta de teste sem Google. Os pontos são conferidos só com os dois aparelhos na tela; nada disto é verificado por teste automático.
+
+- [ ] Avisos entre navegadores: no navegador A, abrir Avisos com um aviso novo; no B, o ponto do sino some depois da rodada (A grava em até 30 s depois da marca (até 90 s se uma rodada acabou de rodar), e o B perde o ponto ao voltar a aba ou na próxima rodada de 5 minutos).
+- [ ] Conversas: uma mensagem não lida aberta no A deixa de ter ponto no B depois da rodada, e o ponto da aba só some quando não há outra conversa não lida.
+- [ ] Grupos: um grupo aberto no A perde a contagem no B depois da rodada; a aba (`comunidades`) só perde o ponto quando nenhum grupo tem não lidas.
+- [ ] Catch-up offline: com o B sem rede, marcar avisos e conversas no A; voltar a rede no B e esperar a rodada (ou voltar a aba). As marcas chegam e nenhuma some.
+- [ ] Segunda passkey (outra identidade): não vê as marcas da primeira; os pontos dela seguem como antes.
+- [ ] Bloco velho do servidor: colocar no serviço de teste uma cópia anterior do bloco (ensaio) e rodar uma leitura no B. O B não perde as marcas locais: os avisos que ele já viu continuam sem ponto, no máximo um ponto antigo reaparece.
+- [ ] Sem Termos aceitos: a aba não faz nenhum pedido de vistos (conferir na aba de rede do navegador).
+- [ ] Configuração manual e `varanda-serve`: nenhum pedido de vistos; os pontos são os de antes desta funcionalidade.
+- [ ] Nativo (quando houver build de debug com a conta de teste): os mesmos pontos aparecem no app e no navegador. Se não houver build, a conferência fica pendente e não é dada como feita.
+
 ### Limites desta parte
 
+- A rodada de vistos corre só depois que o nó está pronto e online, então um aparelho sem rede não mostra as marcas dos outros até voltar a rede.
+- Migração: uma entrada antiga com enchimento só viaja quando uma linha carregada bate com ela, por isso outro aparelho pode mostrar um aviso antigo como novo até a pessoa abrir a aba onde ele aparece.
+- Os limites do bloco (256 avisos, 4 x 32 em páginas, 736 mensagens de Conversas e 128 grupos) cortam o mais antigo; um item que sai do bloco pode voltar como novo em outro aparelho.
+- O ponto da aba de grupos só é apagado até as versões que o app conhecia quando a fusão foi pedida. Uma publicação que chega durante a fusão mantém o ponto, mesmo que outro aparelho já a tenha lido; ele some ao abrir a aba ou o grupo.
 - A trava da conta não é do sistema operacional. Se o processo perder a trava entre a conferência e o renomear, uma gravação antiga pode substituir um bloco que o novo titular já confirmou. A conferência não reproduz essa corrida; ela se recupera pela fusão, porque cada aparelho reescreve as suas marcas (`seen-store.js`, cabeçalho).
 - Não há apagamento pedido por um aparelho: a rota `delete` existe, mas nenhum cliente a chama. O apagamento hoje é um pedido à associação.
 - A exclusão da conta ainda não existe, e o bloco não é apagado com ela.
-- Não verificado em servidor real: esta seção foi escrita sem executar o roteiro acima.
+- Não verificado em servidor real: esta seção foi escrita sem executar os roteiros acima, o do servidor e o do app.
