@@ -532,6 +532,7 @@ h2::after {
 
 @media (min-width: 620px) {
   .nomes { grid-template-columns: repeat(2, 1fr); }
+  .cartoes { grid-template-columns: repeat(2, 1fr); }
   .acoes { flex-direction: row; flex-wrap: wrap; }
 }
 
@@ -559,7 +560,7 @@ h2::after {
   .heroi__cadeira { max-width: 220px; margin-bottom: -60px; }
 
   .secao { padding: 104px 0; }
-  .cartoes { grid-template-columns: repeat(3, 1fr); gap: 22px; }
+  .cartoes { gap: 22px; }
   .passos { grid-template-columns: repeat(4, 1fr); gap: 24px; }
   .onda--longe { height: 72px; background-size: 192px 72px; animation-name: deslizar-longe-largo; }
   .onda--perto { height: 150px; background-size: 400px 150px; animation-name: deslizar-largo; }
