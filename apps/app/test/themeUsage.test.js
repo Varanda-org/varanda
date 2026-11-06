@@ -145,3 +145,16 @@ test('theme usage: space, radius and the hit target are frozen', async (t) => {
   t.ok(Object.isFrozen(theme.radius))
   t.ok(Object.isFrozen(theme.layout))
 })
+
+test('theme usage: rounded fields drop the browser focus ring and show focus on the pill', (t) => {
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', 'src', rel), 'utf8')
+  t.ok(read('ui/theme.js').includes("export const webInputReset = Platform.OS === 'web' ? { outlineStyle: 'none' } : {}"))
+  for (const rel of ['screens/BuscaGlobal.js', 'screens/Conversas.js', 'screens/NovaConversa.js']) {
+    const src = read(rel)
+    t.ok(src.includes('style={[styles.input, webInputReset]}'), rel + ': ring reset on the input')
+    t.ok(/searchFocused: \{ borderColor: colors\.accent/.test(src), rel + ': focus shown on the pill')
+  }
+  const composer = read('ui/ChatComposer.js')
+  t.ok(composer.includes('style={[styles.input, webInputReset, { height }]}'))
+  t.ok(composer.includes('fieldFocused: { borderColor: colors.accent }'))
+})

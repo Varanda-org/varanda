@@ -5025,3 +5025,53 @@ Limites desta caminhada:
 - O selo "Página" e o filtro de Páginas encerradas ou movidas dependem das marcas que o semeador manda na busca; um semeador antigo, sem essas marcas, mostra a Página como pessoa e não a filtra.
 - As sugestões dependem de conta hospedada e online, e o toque em menção, de conta hospedada. Fora disso o @nome segue como texto.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 103. Menu "mais", prévias nos Avisos e Busca ao digitar (PR feat/feed-polish)
+
+Roteiro da barra de ações das publicações (A Rua, Diário, Conversa, Espiadinha e resultados da Busca), das folhas Republicar e "mais", da nota de números e do espaço do botão Publicar, da pílula "ver novidades", das linhas e prévias dos Avisos, da Busca ao digitar e da foto em Publicar. O comportamento descrito está em [app.md](app.md), seções "Telas", "Interações da Rua" e "Perfil fixo, Avisos, Mensagens e Publicar". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
+
+Regras que os passos conferem:
+
+- Barra de ações: responder, republicar, curtir e "mais" (⋯). Sem lápis, bandeira ou lixeira na barra. O toque duplo para curtir continua valendo no app nativo.
+- Republicar abre a folha "Republicar" (ou "Desfazer republicação", quando já republicou) e "Citar". Sem rede, a folha traz só "Citar".
+- O número de citações não aparece mais na barra (Citar está na folha); o número de republicações não soma citações, para bater com a lista de quem republicou. O leitor de tela anuncia o botão como "republicar ou citar".
+- Na web, os campos arredondados (Busca, a pesquisa de Conversas, Nova conversa e o campo de escrever das conversas) mostram o foco com a borda da pílula na cor de destaque, sem o contorno retangular do navegador. Busca: Enter ou "pesquisar" sempre pesquisa de novo (depois de uma falha, é assim que se tenta outra vez); trocar para Contas cancela a pesquisa de Publicações que esperava a pausa; o teclado não corrige nem põe maiúscula no termo.
+- "Mais" abre "Copiar link" (só quando a publicação tem link público), "Denunciar" (publicações de outros, com a conta conectada) e "Apagar" (publicações próprias, em vermelho, com a confirmação de sempre).
+- "Compartilhar" só aparece quando a publicação tem link público. Hoje nenhuma publicação tem, então o botão não aparece.
+- A Rua: "Alguns números podem estar incompletos." é uma nota pequena e suave, não uma linha; a lista deixa espaço para o botão de publicar não cobrir as ações da última publicação; "ver novidades" nunca aparece sobre o estado vazio.
+- Avisos: cada linha tem o selo de ação no avatar, o nome e a ação numa linha, o @nome verificado na linha suave (quando existe) e, numa linha própria, o começo da publicação entre aspas (até 90 caracteres, em outra cor; nunca no lugar do @nome; sem prévia nas linhas de quem começou a seguir), o tempo à direita e um ponto nas linhas não lidas. As prévias vêm do próprio diário no nó; nada é buscado de fora.
+- Busca: campo arredondado com lupa e X. Publicações pesquisa enquanto a pessoa digita (a partir de 2 caracteres, depois de uma pausa curta; respostas antigas são ignoradas) e ao tocar em enter ou em "pesquisar". Contas já pesquisava enquanto digitava.
+- Publicar: o botão de foto segue a capacidade (seletor de fotos e mídia do nó). Na Vitrine o nó não oferece mídia, então o botão não aparece.
+
+Android (AVD `varanda-api36`, build de debug, primeiro):
+
+- [ ] Barra de ações em A Rua, Diário, Conversa, Espiadinha e Busca: responder, republicar, curtir e "mais"; nenhum lápis, bandeira ou lixeira na barra.
+- [ ] Toque duplo curte e nunca descurte, como antes.
+- [ ] Republicar abre a folha "Republicar" e "Citar"; "Desfazer republicação" aparece depois de republicar; sem rede, só "Citar".
+- [ ] "Mais" em publicação de outra pessoa mostra "Denunciar"; em publicação própria mostra "Apagar", que pede a confirmação e apaga; "Copiar link" não aparece sem link público.
+- [ ] A Rua: a nota "Alguns números podem estar incompletos." aparece como rodapé pequeno, não como linha; ao rolar até o fim, o botão de publicar não cobre as ações da última publicação; "ver novidades" não aparece sobre o estado vazio.
+- [ ] Avisos: selo, nome e ação numa linha; o @nome verificado embaixo; a prévia entre aspas numa linha própria, até 90 caracteres; uma menção cujo texto é só "@outra_pessoa" não aparece no lugar do @nome; tempo à direita; ponto só nas linhas não lidas.
+- [ ] Busca: campo arredondado com lupa; digitar em Publicações pesquisa depois de 2 caracteres e uma pausa; o X limpa o campo e a pesquisa; Contas continua pesquisando enquanto digita.
+- [ ] Publicar: em conta hospedada num build nativo, o seletor de fotos abre e a foto é enviada. Este passo fica aberto: o login com passkey em build de debug está bloqueado (veja `docs/design-review.md`).
+- [ ] Tema claro e tema escuro: selos, prévias, folhas e campo de busca legíveis, sem texto cortado.
+- [ ] Fonte grande: folhas, linhas dos Avisos e barra de ações sem corte.
+- [ ] TalkBack e VoiceOver numa linha dos Avisos: leem a ação, o @nome, a prévia entre aspas e "não lido" nas linhas não lidas.
+- [ ] Na web, focar a Busca, a pesquisa de Conversas, Nova conversa e o campo de uma conversa: borda da pílula na cor de destaque, sem contorno azul retangular; Tab pelo teclado mostra onde está o foco.
+
+iOS (simulador iPhone 16e, depois do Android):
+
+- [ ] Os mesmos passos do Android, em tema claro e em tema escuro, e com fonte grande.
+
+Web (Chrome, depois do iOS):
+
+- [ ] Em 390 px e em 1280 px, nos temas claro e escuro: barra de ações, folhas Republicar e "Mais", nota de números, espaço do botão Publicar, pílula "ver novidades", linhas e prévias dos Avisos, e Busca digitando e limpando.
+
+Como verificar, antes da caminhada, a partir da raiz:
+
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- A Vitrine não tem mídia, então a foto de Publicar só se confere com conta hospedada em build nativo.
+- "Compartilhar" fica sem efeito visível até existirem links públicos de publicação (próximo passo).
+- Nenhuma caixa acima foi executada nesta documentação.

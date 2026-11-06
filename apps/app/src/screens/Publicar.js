@@ -9,10 +9,10 @@
 // ../outboxProvider) and sent later; Diário lists it until then.
 // Emoji: an inline panel (../ui/EmojiPicker) inserts at the caret (the
 // TextInput selection is tracked) within the MAX_TEXT code-point limit.
-// Photos and GIFs (web only, when the node offers `media`, and online): a
-// 'Foto' button picks files (../media/attach), each is encoded at once
-// (../media/encode: photos re-encoded, which strips EXIF/GPS; GIFs as they
-// are) and kept ONLY in this page (bytes in memory, a blob: thumbnail): no
+// Photos and GIFs (when the node offers `media` and the platform has a
+// picker, and online): a 'Foto' button picks files (../media/attach), each is
+// encoded at once (../media/encode: photos re-encoded, which strips
+// EXIF/GPS; GIFs as they are) and kept ONLY in this page (bytes in memory, a blob: thumbnail): no
 // network, no node call. Privacy by construction: the media core is public
 // (the seeder serves any range of it), so nothing is uploaded before the
 // person presses Publicar; removing an item or closing the composer before

@@ -1,7 +1,7 @@
 // The Avisos tab's building blocks: lines for a follow, a reply, a quote, a
-// mention, a like and a repost, seen ids (the node's opaque `seen` tokens,
-// never follower keys), page merging, the notice shown in place of the list
-// and the fixed texts.
+// mention, a like and a repost, a one-line snippet of the post, seen ids
+// (the node's opaque `seen` tokens, never follower keys), page merging, the
+// notice shown in place of the list and the fixed texts.
 // Pure: no imports and no globals, so Node tests load it directly.
 
 export const EMPTY_TITLE = 'Ninguém novo por aqui'
@@ -93,6 +93,21 @@ export function noticeRef (item) {
   if (kind === 'reply' || kind === 'quote' || kind === 'mention') return item.key + ':' + item.seq
   if (kind === 'like' || kind === 'repost') return callerPost(item.post)
   return null
+}
+
+// A follow opens no post, so there is nothing to quote. The screen still
+// runs displayText: a break would show as U+FFFD on that one line, and the
+// cut is in code points so a preview never splits a character. Nothing is
+// appended. An unknown kind reads as a follow and quotes nothing either.
+const SNIPPET_MAX = 90
+
+export function snippetOf (notice, postText) {
+  if (noticeKind(notice) === 'follow') return ''
+  if (typeof postText !== 'string') return ''
+  const flat = postText.replace(/[\r\n\u2028\u2029]+/g, ' ')
+  const chars = Array.from(flat)
+  if (chars.length <= SNIPPET_MAX) return flat
+  return chars.slice(0, SNIPPET_MAX).join('')
 }
 
 // Newest first by Date.parse(at): string order breaks for negative-year ISO
