@@ -834,6 +834,60 @@ test('group.post with private media', (t) => {
   ok(t, 'group.post', { group: KEY, text: 'oi', sealed: false })
 })
 
+test('group.post accepts one public voice item and keeps diary posts image-only', (t) => {
+  const item = { core: KEY, mime: 'audio/mp4', start: 8144, blocks: 48, bytes: 1572864, sha256: KEY, width: 0, height: 0, ms: 120000 }
+  const params = { group: KEY, text: '', media: [item] }
+  ok(t, 'group.post', params, params)
+  ok(t, 'group.post', { ...params, sealed: false })
+  ok(t, 'group.post', { ...params, text: 'Áudio', replyTo: { writer: KEY, seq: 1 }, media: [{ ...item, start: 1, blocks: 1, bytes: 1, ms: 1 }] })
+  bad(t, 'group.post', { ...params, sealed: true }, 'public voice cannot be sealed')
+  for (const patch of [
+    { bytes: 1572865, blocks: 49, start: 1 }, { bytes: 47 * 32768 }, { bytes: 1.5, blocks: 1 },
+    { start: 8145 }, { start: 0 }, { blocks: 0 }, { core: 'x' }, { sha256: 'x' },
+    { width: 1 }, { height: 1 }, { width: '0' }, { mime: 'audio/ogg' }, { mime: 'image/jpeg' },
+    { ms: 0 }, { ms: 120001 }, { ms: 1.5 }, { ms: '1' }, { ms: null }, { kind: 'voice' }
+  ]) bad(t, 'group.post', { ...params, media: [{ ...item, ...patch }] }, 'invalid public voice: ' + JSON.stringify(patch))
+  for (const field of Object.keys(item)) {
+    const missing = { ...item }
+    delete missing[field]
+    bad(t, 'group.post', { ...params, media: [missing] }, 'public voice without ' + field)
+  }
+  const image = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1, sha256: KEY, width: 1, height: 1 }
+  for (const media of [[item, { ...item, core: 'cd'.repeat(32) }], [item, image], [image, item]]) {
+    bad(t, 'group.post', { ...params, media }, 'voice must be alone')
+  }
+  bad(t, 'post.create', { text: '', media: [item] })
+  bad(t, 'post.reply', { text: '', to: KEY + ':1', media: [item] })
+  bad(t, 'post.quote', { text: 'Áudio', to: KEY + ':1', media: [item] })
+  bad(t, 'profile.set', { name: 'Ana', avatar: item })
+})
+
+test('group.post accepts one private voice item within the padded byte cap', (t) => {
+  const item = { core: KEY, mime: 'application/octet-stream', start: 8143, blocks: 49, bytes: 49 * 32768, sha256: KEY, key: KEY, nonce: 'ab'.repeat(24), plainMime: 'audio/mp4', plainSha256: KEY, w: 0, h: 0, ms: 120000 }
+  const params = { group: KEY, text: '', media: [item], sealed: true }
+  ok(t, 'group.post', params, params)
+  ok(t, 'group.post', { ...params, media: [{ ...item, blocks: 1, bytes: 32768, ms: 1 }] })
+  const { sealed, ...unmarked } = params
+  bad(t, 'group.post', unmarked, 'private voice requires sealed')
+  bad(t, 'group.post', { ...params, sealed: false })
+  for (const patch of [
+    { blocks: 50, bytes: 50 * 32768, start: 1 }, { bytes: 49 * 32768 - 1 },
+    { start: 8144 }, { w: 1 }, { h: 1 }, { h: '0' },
+    { ms: 0 }, { ms: 120001 }, { ms: 1.5 }, { ms: '1' }, { ms: null },
+    { plainMime: 'audio/ogg' }, { plainMime: 'image/jpeg' }, { mime: 'audio/mp4' },
+    { key: 'x' }, { nonce: 'x' }, { plainSha256: 'x' }, { kind: 'voice' }
+  ]) bad(t, 'group.post', { ...params, media: [{ ...item, ...patch }] }, 'invalid private voice: ' + JSON.stringify(patch))
+  for (const field of Object.keys(item)) {
+    const missing = { ...item }
+    delete missing[field]
+    bad(t, 'group.post', { ...params, media: [missing] }, 'private voice without ' + field)
+  }
+  const image = { ...item, start: 1, plainMime: 'image/jpeg', w: 1, h: 1, ms: 0 }
+  for (const media of [[item, { ...item, core: 'cd'.repeat(32) }], [item, image], [image, item]]) {
+    bad(t, 'group.post', { ...params, media }, 'private voice must be alone')
+  }
+})
+
 test('group.read', (t) => {
   t.absent(isMutating('group.read'))
   t.is(GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX)
@@ -1183,6 +1237,34 @@ test('media.readFile', (t) => {
   for (const k of ['name', 'path', 'bytes']) bad(t, 'media.readFile', { ...dm, [k]: 'a' }, 'extra ' + k)
 })
 
+test('media uploads require the explicit voice shape for audio', (t) => {
+  const voice = { name: 'ab'.repeat(16) + '.bin', mime: 'audio/mp4', width: 0, height: 0, ms: 120000, kind: 'voice' }
+  for (const method of ['media.uploadFile', 'dm.putMedia']) {
+    ok(t, method, voice, voice)
+    ok(t, method, { ...voice, ms: 1 })
+    for (const field of Object.keys(voice)) {
+      const missing = { ...voice }
+      delete missing[field]
+      bad(t, method, missing, 'voice without ' + field)
+    }
+    for (const patch of [
+      { mime: 'image/jpeg' }, { mime: 'audio/ogg' }, { width: 1 }, { height: 1 },
+      { width: '0' }, { height: -1 }, { ms: 0 }, { ms: 120001 }, { ms: 1.5 },
+      { ms: '1' }, { ms: null }, { kind: 'audio' }, { kind: null }, { bytes: 1 }
+    ]) bad(t, method, { ...voice, ...patch }, 'invalid upload voice: ' + JSON.stringify(patch))
+    const image = { name: voice.name, mime: 'image/png', width: 1, height: 1 }
+    ok(t, method, image, image)
+    bad(t, method, { ...image, kind: 'voice' })
+    bad(t, method, { ...image, kind: 'voice', ms: 1 })
+    bad(t, method, { ...image, ms: 0 }, 'duration only belongs to voice uploads')
+    bad(t, method, { ...image, width: 0, height: 0 })
+  }
+  for (const sealed of [false, true]) {
+    ok(t, 'media.uploadFile', { ...voice, sealed })
+    bad(t, 'dm.putMedia', { ...voice, sealed })
+  }
+})
+
 test('media.uploadFile', (t) => {
   const base = { name: '0123456789abcdef0123456789abcdef.bin', mime: 'image/jpeg', width: 1, height: 16384 }
   ok(t, 'media.uploadFile', base, base)
@@ -1388,6 +1470,29 @@ test('dm.* (Conversas)', (t) => {
   // The caller never chooses the member, the association, a signature or bytes.
   for (const k of ['member', 'association', 'signature', 'payload', 'seq', 'id', 'key']) {
     bad(t, 'dm.reportSign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+})
+
+test('dm.send accepts one voice item within the ciphertext byte cap', (t) => {
+  const item = { id: KEY, key: KEY, nonce: 'ab'.repeat(24), chunks: 49, bytes: 1572864 + 16, sha256: KEY, mime: 'audio/mp4', w: 0, h: 0, ms: 120000 }
+  const params = { to: KEY, text: '', media: [item] }
+  ok(t, 'dm.send', params, params)
+  ok(t, 'dm.send', { ...params, text: 'Áudio', replyTo: 'ab'.repeat(16), media: [{ ...item, chunks: 1, bytes: 17, ms: 1 }] })
+  for (const patch of [
+    { bytes: 1572864 + 17 }, { chunks: 48 }, { chunks: 1, bytes: 16 },
+    { chunks: 1, bytes: 17.5 }, { mime: 'audio/ogg' }, { mime: 'image/jpeg' },
+    { w: 1 }, { h: 1 }, { w: '0' }, { ms: 0 }, { ms: 120001 }, { ms: 1.5 },
+    { ms: '1' }, { ms: null }, { id: 'x' }, { key: 'x' }, { nonce: 'x' },
+    { sha256: 'x' }, { kind: 'voice' }
+  ]) bad(t, 'dm.send', { ...params, media: [{ ...item, ...patch }] }, 'invalid DM voice: ' + JSON.stringify(patch))
+  for (const field of Object.keys(item)) {
+    const missing = { ...item }
+    delete missing[field]
+    bad(t, 'dm.send', { ...params, media: [missing] }, 'DM voice without ' + field)
+  }
+  const image = { ...item, id: 'cd'.repeat(32), mime: 'image/jpeg', w: 1, h: 1, ms: 0 }
+  for (const media of [[item, { ...item, id: image.id }], [item, image], [image, item]]) {
+    bad(t, 'dm.send', { ...params, media }, 'DM voice must be alone')
   }
 })
 

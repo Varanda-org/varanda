@@ -8,7 +8,7 @@ const {
   SEALED_MEDIA_MIME, MAX_SEALED_MEDIA_PLAIN_BYTES, PRIVATE_ITEM_KEYS,
   validPublicItem, validPrivateItem, validGroupMedia, copyGroupItem, copyGroupMedia, sealMedia, openMedia
 } = require('../lib/group-media')
-const { MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_ITEM_BLOCKS, MAX_MEDIA_PER_POST } = require('../lib/records')
+const { MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_ITEM_BLOCKS, MAX_MEDIA_PER_POST, MAX_AUDIO_MS, MAX_AUDIO_BYTES, validDescriptor } = require('../lib/records')
 
 const MAC = sodium.crypto_secretbox_MACBYTES
 const CORE = 'a'.repeat(64)
@@ -223,4 +223,137 @@ test('copyGroupItem keeps exactly the keys of the expected kind', (t) => {
   const copy = copyGroupMedia(list, false)
   t.not(copy, list)
   t.not(copy[0], PUBLIC)
+})
+
+// A minimal MPEG-4 audio file (ftyp, moov with mvhd and one trak per
+// handler with its sample table and a self-contained data reference, mdat):
+// enough for audioBounds, nothing a player needs.
+function m4a ({ ms = 3000, handlers = ['soun'], pad = 0 } = {}) {
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (s) => Array.from(s, (c) => c.charCodeAt(0))
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  const trak = (h) => box('trak', box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(h), be32(0), be32(0), be32(0), [0]),
+    box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(1), be32(ms)), box('stsz', [0, 0, 0, 0], be32(1), be32(1)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(1), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))))
+  const head = [
+    ...box('ftyp', ascii('M4A '), be32(0), ascii('isom')),
+    ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(ms), new Array(80).fill(0)), ...handlers.map(trak))
+  ]
+  return b4a.concat([b4a.from(head), b4a.from(be32(8 + pad)), b4a.from('mdat'), bytesOf(pad)])
+}
+
+const AUDIO = { core: CORE, mime: 'audio/mp4', start: 1, blocks: 2, bytes: 40000, sha256: 'b'.repeat(64), width: 0, height: 0, ms: 4200 }
+
+test('voice note: public descriptor', (t) => {
+  t.ok(validPublicItem(AUDIO))
+  t.absent(validDescriptor(AUDIO), 'diary posts stay still images')
+  t.ok(validPublicItem({ ...AUDIO, blocks: 48, bytes: MAX_AUDIO_BYTES }), 'the largest')
+  t.ok(validPublicItem({ ...AUDIO, ms: 1 }) && validPublicItem({ ...AUDIO, ms: MAX_AUDIO_MS }))
+  const { ms, ...noMs } = AUDIO
+  const bad = {
+    'video mime': { ...AUDIO, mime: 'video/mp4' },
+    'other audio mime': { ...AUDIO, mime: 'audio/mpeg' },
+    'ogg audio': { ...AUDIO, mime: 'audio/ogg' },
+    'upper mime': { ...AUDIO, mime: 'AUDIO/MP4' },
+    'width 1': { ...AUDIO, width: 1 },
+    'height 1': { ...AUDIO, height: 1 },
+    'ms 0': { ...AUDIO, ms: 0 },
+    'ms too long': { ...AUDIO, ms: MAX_AUDIO_MS + 1 },
+    'ms float': { ...AUDIO, ms: 1.5 },
+    'too many bytes': { ...AUDIO, blocks: 49, bytes: MAX_AUDIO_BYTES + 1 },
+    'missing ms': noMs,
+    'extra key': { ...AUDIO, alt: 'x' },
+    'image with ms': { ...PUBLIC, ms: 0 }
+  }
+  for (const [name, d] of Object.entries(bad)) t.absent(validPublicItem(d), name)
+  t.alike(Object.keys(copyGroupItem({ ...AUDIO, extra: 1 }, false)), Object.keys(AUDIO), 'the copy keeps ms')
+  t.ok(validPublicItem(copyGroupItem(AUDIO, false)))
+})
+
+test('voice note: alone in its post, never next to images', (t) => {
+  t.ok(validGroupMedia([AUDIO], false))
+  t.absent(validGroupMedia([AUDIO, { ...AUDIO, start: 5 }], false), 'two voice notes')
+  t.absent(validGroupMedia([AUDIO, { ...PUBLIC, start: 5 }], false), 'voice then image')
+  t.absent(validGroupMedia([{ ...PUBLIC, start: 5 }, AUDIO], false), 'image then voice')
+  const voice = sealMedia(m4a(), { plainMime: 'audio/mp4', w: 0, h: 0, ms: 3000 })
+  const item = { core: CORE, start: 1, ...voice.item }
+  t.ok(validGroupMedia([item], true))
+  t.absent(validGroupMedia([item, sealed(10, { core: CORE, start: 9 }).item], true), 'sealed voice next to an image')
+  t.absent(validGroupMedia([item, { ...item, start: 9 }], true), 'two sealed voice notes')
+  t.absent(validGroupMedia([AUDIO], true), 'a sealed inner refuses a public voice note')
+})
+
+test('voice note: sealed, opened and checked by its bytes', (t) => {
+  const plain = m4a({ pad: 50000 })
+  const { cipher, item } = sealMedia(plain, { plainMime: 'audio/mp4', w: 0, h: 0, ms: 3000 })
+  const full = { core: CORE, start: 1, ...item }
+  t.ok(validPrivateItem(full))
+  t.is(full.plainMime, 'audio/mp4')
+  t.is(full.mime, SEALED_MEDIA_MIME)
+  t.alike(openMedia(cipher, full), plain)
+
+  t.exception.all(() => sealMedia(m4a({ handlers: ['soun', 'vide'] }), { plainMime: 'audio/mp4', w: 0, h: 0, ms: 3000 }), /audio-only/, 'a video track')
+  t.exception.all(() => sealMedia(bytesOf(100), { plainMime: 'audio/mp4', w: 0, h: 0, ms: 3000 }), /audio-only/, 'not MPEG-4')
+  t.exception.all(() => sealMedia(m4a({ ms: MAX_AUDIO_MS + 1 }), { plainMime: 'audio/mp4', w: 0, h: 0, ms: 3000 }), /audio-only/, 'container too long')
+  t.exception.all(() => sealMedia(m4a({ pad: MAX_AUDIO_BYTES }), { plainMime: 'audio/mp4', w: 0, h: 0, ms: 3000 }), /at most/, 'too many bytes')
+  t.exception.all(() => sealMedia(plain, { plainMime: 'audio/mp4', w: 1, h: 0, ms: 3000 }), /w and h 0/)
+  t.exception.all(() => sealMedia(plain, { plainMime: 'audio/mp4', w: 0, h: 0, ms: 0 }), /ms 1/)
+  t.exception.all(() => sealMedia(plain, { plainMime: 'audio/mpeg', w: 0, h: 0, ms: 3000 }), /plainMime/)
+  t.exception.all(() => sealMedia(plain, { plainMime: 'video/mp4', w: 0, h: 0, ms: 3000 }), /plainMime/)
+
+  // The mime is not trusted: a container with a video track sealed under an
+  // image label and relabelled as a voice note does not open.
+  const video = m4a({ handlers: ['vide', 'soun'] })
+  const disguised = sealMedia(video, { plainMime: 'image/jpeg', w: 1, h: 1 })
+  const relabelled = { core: CORE, start: 1, ...disguised.item, plainMime: 'audio/mp4', w: 0, h: 0, ms: 3000 }
+  t.ok(validPrivateItem(relabelled), 'the shape alone passes')
+  t.is(openMedia(disguised.cipher, relabelled), null, 'the bytes do not')
+
+  const bad = {
+    'w 1': { ...full, w: 1 },
+    'ms 0': { ...full, ms: 0 },
+    'ms too long': { ...full, ms: MAX_AUDIO_MS + 1 },
+    'more blocks than a voice note': { ...full, blocks: 50, bytes: 50 * MEDIA_BLOCK_BYTES },
+    'image with ms': { ...sealed(10).item, ms: 1000 }
+  }
+  for (const [name, d] of Object.entries(bad)) t.absent(validPrivateItem(d), name)
+})
+
+test('voice note: the item ms is the container duration, within AUDIO_MS_TOLERANCE', (t) => {
+  const { AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
+  const plain = m4a({ ms: 3000 })
+  const seal = (ms) => sealMedia(plain, { plainMime: 'audio/mp4', w: 0, h: 0, ms })
+  t.is(sealMedia(plain, { plainMime: 'audio/mp4', w: 0, h: 0 }).item.ms, 3000, 'no ms: the container one')
+  t.is(seal(3000 + AUDIO_MS_TOLERANCE).item.ms, 3000, 'a close ms: the container one')
+  t.is(seal(3000 - AUDIO_MS_TOLERANCE).item.ms, 3000)
+  t.exception.all(() => seal(3000 + AUDIO_MS_TOLERANCE + 1), /does not match/, 'too far above')
+  t.exception.all(() => seal(1), /does not match/, 'a two-second gap')
+  const long = m4a({ ms: MAX_AUDIO_MS })
+  t.exception.all(() => sealMedia(long, { plainMime: 'audio/mp4', w: 0, h: 0, ms: 1 }), /does not match/, 'two minutes claiming 1 ms')
+
+  // A peer's item claiming another length does not open.
+  const { cipher, item } = seal(3000)
+  const full = { core: CORE, start: 1, ...item }
+  t.alike(openMedia(cipher, full), plain)
+  t.alike(openMedia(cipher, { ...full, ms: 3000 + AUDIO_MS_TOLERANCE }), plain, 'within the tolerance')
+  t.is(openMedia(cipher, { ...full, ms: 3000 + AUDIO_MS_TOLERANCE + 1 }), null, 'past it')
+  t.is(openMedia(cipher, { ...full, ms: 1 }), null, 'claims 1 ms')
+})
+
+test('voice note: the largest sealed post still fits MAX_SEALED_INNER_BYTES', (t) => {
+  const { groupPost } = require('../lib/group')
+  const { sealRecord, MAX_SEALED_INNER_BYTES } = require('../lib/group-crypto')
+  const { MAX_TEXT } = require('../lib/records')
+  const voice = sealMedia(m4a({ ms: MAX_AUDIO_MS, pad: MAX_AUDIO_BYTES - 1000 }), { plainMime: 'audio/mp4', w: 0, h: 0, ms: MAX_AUDIO_MS })
+  const item = { core: CORE, start: MAX_MEDIA_BLOCKS - voice.item.blocks, ...voice.item }
+  t.ok(validPrivateItem(item))
+  const record = groupPost({
+    text: '\u{1F600}'.repeat(MAX_TEXT),
+    replyTo: { writer: CORE, seq: Number.MAX_SAFE_INTEGER },
+    seen: { writer: CORE, seq: Number.MAX_SAFE_INTEGER },
+    media: [item],
+    sealed: true
+  })
+  const size = b4a.byteLength(JSON.stringify(record))
+  t.ok(size <= MAX_SEALED_INNER_BYTES, 'the largest voice post is ' + size + ' bytes')
+  t.execution(() => sealRecord(record, b4a.alloc(32, 1)))
 })

@@ -68,7 +68,9 @@ const MEDIA_DIR = 'report-media'
 // An anexo: one image of at most 1 MiB, in the formats a DM carries minus
 // PNG (packages/rpc limits.js MEDIA_MIMES).
 const ANEXO_MAX_BYTES = 1048576
-const ANEXO_MIMES = Object.freeze(['image/jpeg', 'image/webp', 'image/gif'])
+// A voice note report carries its audio (mod-routes.js decodeAnexo accepts it
+// only when audioBounds finds a sound-only MPEG-4 container).
+const ANEXO_MIMES = Object.freeze(['image/jpeg', 'image/webp', 'image/gif', 'audio/mp4'])
 // Disk bound for stored anexos (decided reports keep theirs, as evidence):
 // at most this many, so at most ~2 GiB.
 const MAX_STORED_ANEXOS = 2000

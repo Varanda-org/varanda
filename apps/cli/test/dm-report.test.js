@@ -17,7 +17,7 @@ const { createGoogle } = require('../lib/account/google')
 const { openAccountStore } = require('../lib/account/store')
 const { openModerationStore } = require('../lib/account/moderation-store')
 const { createAccountServer } = require('../lib/account/server')
-const { SESSION_COOKIE, LOGIN_COOKIE, ANEXO_LIST_LABEL, ANEXO_PROVENANCE } = require('../lib/account/mod-routes')
+const { SESSION_COOKIE, LOGIN_COOKIE, ANEXO_LIST_LABEL, ANEXO_PROVENANCE, ANEXO_AUDIO_PROVENANCE } = require('../lib/account/mod-routes')
 const { tmpDir } = require('./helpers/net')
 
 const ORIGIN = 'https://varanda.test'
@@ -319,6 +319,46 @@ test('dm report with anexo: digest mismatch, png, junk, plain route, and 2 MiB a
   const v1 = await s.api('POST', '/account/report', { body: await dmBody(s, s.ana, s.bia.hex) })
   t.is(v1.status, 200, v1.text)
   t.absent(Object.hasOwn(s.moderation.get(v1.body.id), 'anexo'))
+})
+
+// A minimal audio-only MPEG-4 (ftyp, moov with one track, mdat), the
+// shape packages/rpc audioBounds reads; `handler` 'vide' declares video.
+function mp4 (handler = 'soun') {
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (x) => Array.from(x, (c) => c.charCodeAt(0))
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  const ftyp = box('ftyp', ascii('M4A '), be32(0), ascii('M4A '), ascii('isom'))
+  const mvhd = box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(2500), new Array(80).fill(0))
+  const hdlr = box('hdlr', [0, 0, 0, 0], be32(0), ascii(handler), be32(0), be32(0), be32(0), [0])
+  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(2500), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(2500)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(2500), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
+  const trak = box('trak', box('tkhd', new Array(84).fill(0)), box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), hdlr, minf))
+  return Buffer.from([...ftyp, ...box('moov', mvhd, trak), ...box('mdat', new Array(2504).fill(1))])
+}
+
+test('dm report with an audio anexo: a voice note is stored and served as audio/mp4; a video container is refused', async (t) => {
+  const s = await setup(t)
+  const VOICE = mp4()
+  const r = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, VOICE) })
+  t.is(r.status, 200, r.text)
+  t.alike(s.moderation.get(r.body.id).anexo, { sha256: sha256(VOICE), mime: 'audio/mp4', size: VOICE.length })
+  t.alike(fs.readFileSync(path.join(s.dir, 'report-media', r.body.id)), VOICE)
+  const cookie = await signIn(s)
+  const list = await s.api('GET', '/account/mod/api/reports', { cookie })
+  const listed = list.body.reports.find((x) => x.id === r.body.id)
+  t.alike(listed.anexo, { mime: 'audio/mp4', size: VOICE.length, label: ANEXO_LIST_LABEL, provenance: ANEXO_AUDIO_PROVENANCE })
+  t.ok(ANEXO_AUDIO_PROVENANCE.includes('áudio não conferido'))
+  const served = await fetchRaw(s, '/account/mod/api/reports/' + r.body.id + '/anexo', cookie)
+  t.is(served.status, 200)
+  t.is(served.headers.get('content-type'), 'audio/mp4')
+  t.is(served.headers.get('x-content-type-options'), 'nosniff')
+  t.ok(String(served.headers.get('cache-control')).includes('no-store'))
+  t.is(served.headers.get('content-security-policy'), "default-src 'none'; sandbox")
+  t.alike(served.bytes, VOICE)
+  t.absent(s.logs.join('\n').includes(VOICE.toString('base64')), 'not in logs')
+
+  const video = await dmAnexoBody(s, s.ana, s.bia.hex, mp4('vide'))
+  t.alike((await s.api('POST', '/account/report/anexo', { body: video })).body, { error: 'pedido-invalido' }, 'a video track is refused by the bytes')
+  t.is(s.moderation.stats().open, 1, 'only the voice note landed')
 })
 
 test('group message report with anexo (v3): stored, never handed to the AI triage', async (t) => {

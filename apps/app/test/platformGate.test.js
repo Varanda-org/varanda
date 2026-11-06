@@ -51,3 +51,10 @@ test('App: hosted product availability does not depend on the web platform', (t)
   const src = withoutComments(fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8'))
   t.absent(src.includes("hostedPage === true && Platform.OS === 'web'"), 'hosted availability is platform-independent')
 })
+
+test('only src/media/audio.web.js touches MediaRecorder', (t) => {
+  const SRC = path.join(__dirname, '../src')
+  const files = [...sources(SRC), path.join(__dirname, '../App.js')]
+  const users = files.filter((file) => withoutComments(fs.readFileSync(file, 'utf8')).includes('MediaRecorder'))
+  t.alike(users.map((file) => path.relative(SRC, file)), [path.join('media', 'audio.web.js')])
+})

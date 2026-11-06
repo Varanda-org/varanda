@@ -11,6 +11,7 @@ const framing = require('./lib/framing')
 const text = require('./lib/text')
 const mentions = require('./lib/mentions')
 const mediaBounds = require('./lib/media-bounds')
+const audioBounds = require('./lib/audio-bounds')
 const dmBudget = require('./lib/dm-budget')
 const { tokensEqual } = require('./lib/token')
 const { createServerDispatcher } = require('./lib/server')
@@ -44,6 +45,10 @@ module.exports = {
   MAX_MEDIA_PIXELS: mediaBounds.MAX_MEDIA_PIXELS,
   MAX_MEDIA_FRAMES: mediaBounds.MAX_MEDIA_FRAMES,
   MAX_MEDIA_TOTAL_PIXELS: mediaBounds.MAX_MEDIA_TOTAL_PIXELS,
+  audioBounds: audioBounds.audioBounds,
+  stripAudioMetadata: audioBounds.stripAudioMetadata,
+  MAX_AUDIO_MS: audioBounds.MAX_AUDIO_MS,
+  AUDIO_MS_TOLERANCE: audioBounds.AUDIO_MS_TOLERANCE,
   utf8ByteLength: text.utf8ByteLength,
   utf8Encode: text.utf8Encode,
   utf8Decode: text.utf8Decode,

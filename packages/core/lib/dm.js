@@ -12,10 +12,10 @@
 const sodium = require('sodium-universal')
 const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
-const { hasExactKeys, isHex64, isCanonicalIso, hasControlChars, charLength, nowIso } = require('./records')
+const { hasExactKeys, isHex64, isCanonicalIso, hasControlChars, charLength, nowIso, AUDIO_MIME, MAX_AUDIO_MS, MAX_AUDIO_BYTES } = require('./records')
 const { isWeakBoxKey } = require('./group')
 const { certForKey, validateCertShape } = require('./cert')
-const { validateBlobDescriptor } = require('./blob')
+const { validateBlobDescriptor, BLOB_MAC_BYTES } = require('./blob')
 const rpc = require('@varanda/rpc')
 
 const DM_PROTOCOL = 'varanda/dm/1'
@@ -77,6 +77,11 @@ const BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha25
 const DM_MEDIA_MAX = 4
 const DM_MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const DM_MEDIA_MAX_SIDE = 16384
+// A voice note: the only item of its message. Its blob is the sealed file,
+// so `bytes` adds the MAC to the plaintext cap that group posts share.
+const DM_AUDIO_MIME = AUDIO_MIME
+const DM_AUDIO_MAX_MS = MAX_AUDIO_MS
+const DM_AUDIO_MAX_BYTES = MAX_AUDIO_BYTES + BLOB_MAC_BYTES
 
 const SIG_BYTES = 64
 const LEN_BYTES = 2
@@ -138,12 +143,17 @@ function isSide (n) {
 }
 
 // A blob descriptor (docs/protocol.md section 13) plus what the bubble needs
-// before the bytes arrive. Still images only for now, so ms is 0.
+// before the bytes arrive: a still image has sides and ms 0, a voice note no
+// sides and its duration. Its bytes are checked once they arrive (rpc
+// audioBounds), since the mime alone is not trusted.
 function validMediaItem (d) {
   if (!isPlainObject(d) || !hasExactKeys(d, DM_MEDIA_KEYS)) return false
   const blob = {}
   for (const k of BLOB_KEYS) blob[k] = d[k]
   if (!validateBlobDescriptor(blob)) return false
+  if (d.mime === DM_AUDIO_MIME) {
+    return d.w === 0 && d.h === 0 && Number.isInteger(d.ms) && d.ms >= 1 && d.ms <= DM_AUDIO_MAX_MS && d.bytes <= DM_AUDIO_MAX_BYTES
+  }
   return DM_MEDIA_MIMES.includes(d.mime) && isSide(d.w) && isSide(d.h) && d.ms === 0
 }
 
@@ -154,6 +164,7 @@ function validMedia (media) {
   const ids = new Set()
   for (let i = 0; i < media.length; i++) {
     if (!Object.hasOwn(media, i) || !validMediaItem(media[i]) || ids.has(media[i].id)) return false
+    if (media[i].mime === DM_AUDIO_MIME && media.length !== 1) return false
     ids.add(media[i].id)
   }
   return true
@@ -392,6 +403,9 @@ module.exports = Object.freeze({
   DM_MEDIA_MAX,
   DM_MEDIA_MIMES,
   DM_MEDIA_MAX_SIDE,
+  DM_AUDIO_MIME,
+  DM_AUDIO_MAX_MS,
+  DM_AUDIO_MAX_BYTES,
   DROP: Object.freeze({
     MAGIC_OFFSET: DROP_MAGIC_OFFSET,
     MAGIC_BYTES: DROP_MAGIC_BYTES,

@@ -27,6 +27,12 @@
 // Bytes this module received are zero-filled once turned into a URL (a Blob
 // and a written file keep their own copy), so media.read hands over a fresh
 // array it does not reuse.
+//
+// Voice notes (audio/mp4) follow the same paths: their bytes are checked with
+// audioBounds (@varanda/rpc), which refuses a container with any track other
+// than sound, before any URL exists; a native file is accepted only as the
+// node answered it, since the worklet checked it the same way. An audio
+// entry has no picture size (w and h 0) and carries its duration in ms.
 
 import rpc from '@varanda/rpc'
 import { createMediaCache, mediaKey } from './cache.js'
@@ -40,6 +46,11 @@ const MSG_ID = /^[0-9a-f]{32}$/
 const READ_FILE = /^[0-9A-Za-z._-]{1,128}$/
 
 const UNAVAILABLE = Object.freeze({ unavailable: true })
+
+export const AUDIO_MIME = 'audio/mp4'
+// The plaintext cap of a voice note (packages/core records MAX_AUDIO_BYTES).
+export const MAX_AUDIO_BYTES = 1572864
+const AUDIO_DESCRIPTOR_KEYS = ['blocks', 'bytes', 'core', 'height', 'mime', 'ms', 'sha256', 'start', 'width']
 
 export const CHAT_MEDIA_MAX = 48
 
@@ -98,8 +109,53 @@ function expectedMime (ref) {
   return typeof item.mime === 'string' ? item.mime : null
 }
 
-function bounded (bytes, mime, bounds) {
+// A public voice note descriptor (exact keys): a post descriptor with no
+// picture size and its duration.
+export function isAudioDescriptor (d) {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return false
+  const keys = Object.keys(d).sort()
+  if (keys.length !== AUDIO_DESCRIPTOR_KEYS.length || keys.some((k, i) => k !== AUDIO_DESCRIPTOR_KEYS[i])) return false
+  return d.mime === AUDIO_MIME && typeof d.core === 'string' && HEX64.test(d.core) &&
+    typeof d.sha256 === 'string' && HEX64.test(d.sha256) &&
+    Number.isSafeInteger(d.start) && d.start >= 1 && Number.isSafeInteger(d.blocks) && d.blocks >= 1 &&
+    Number.isSafeInteger(d.bytes) && d.bytes >= 1 && d.bytes <= MAX_AUDIO_BYTES &&
+    d.width === 0 && d.height === 0 && Number.isInteger(d.ms) && d.ms >= 1 && d.ms <= rpc.MAX_AUDIO_MS
+}
+
+// Whether a chat item (DM item, public descriptor or private item) is a voice
+// note.
+export function isVoiceItem (item) {
+  if (!item || typeof item !== 'object') return false
+  return (typeof item.plainMime === 'string' ? item.plainMime : item.mime) === AUDIO_MIME
+}
+
+// Whether a declared voice note length agrees with the container's (ms
+// from audioBounds): a peer's ms is not trusted, recorders round a little.
+function msAgrees (declared, ms) {
+  return declared === undefined || (Number.isInteger(declared) && Math.abs(declared - ms) <= rpc.AUDIO_MS_TOLERANCE)
+}
+
+// The ms a chat item declares, if any.
+function declaredMs (ref) {
+  return ref && ref.item && typeof ref.item === 'object' && ref.item.ms !== undefined ? ref.item.ms : undefined
+}
+
+// -> { width: 0, height: 0, ms } for audio-only MPEG-4 bytes whose duration
+// agrees with `declared`, else null. The ms shown is the container's.
+function boundedAudio (bytes, audioBounds, declared) {
+  if (bytes.byteLength > MAX_AUDIO_BYTES || typeof audioBounds !== 'function') return null
+  try {
+    const a = audioBounds(bytes)
+    if (!a || !Number.isInteger(a.ms) || a.ms < 1 || !msAgrees(declared, a.ms)) return null
+    return { width: 0, height: 0, ms: a.ms }
+  } catch {
+    return null
+  }
+}
+
+function bounded (bytes, mime, bounds, audioBounds, declared) {
   if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) return null
+  if (mime === AUDIO_MIME) return boundedAudio(bytes, audioBounds, declared)
   if (!MEDIA_MIMES.includes(mime)) return null
   try {
     return bounds(bytes, mime) || null
@@ -127,7 +183,7 @@ const instances = new Set()
 // Node media handles any instance read from, for the host-wide sweep on lock.
 const hosts = new Set()
 
-export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds = rpc.mediaBounds, fetch: fetchItem = fetchMedia } = {}) {
+export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds = rpc.mediaBounds, audioBounds = rpc.audioBounds, fetch: fetchItem = fetchMedia } = {}) {
   const releases = new Map()
   // The screen entry of each cached URL, so a hit answers with its size.
   const entries = new Map()
@@ -176,15 +232,15 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
   }
 
   // Stores how to release `url` and returns the entry the screen gets.
-  const own = (url, fn, mime, w, h) => {
-    const out = { uri: url, mime, w, h }
+  const own = (url, fn, mime, w, h, ms) => {
+    const out = Number.isInteger(ms) ? { uri: url, mime, w, h, ms } : { uri: url, mime, w, h }
     releases.set(url, fn)
     entries.set(url, out)
     return out
   }
 
-  const fromBytes = (bytes, mime, display) => {
-    const b = bounded(bytes, mime, bounds)
+  const fromBytes = (bytes, mime, display, declared) => {
+    const b = bounded(bytes, mime, bounds, audioBounds, declared)
     if (b === null || !display || typeof display.urlFromBytes !== 'function') {
       wipe(bytes)
       return null
@@ -197,7 +253,7 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
     }
     if (typeof url !== 'string' || url === '') return null
     const revoke = typeof display.revokeUrl === 'function' ? display.revokeUrl : () => {}
-    return own(url, () => revoke(url), mime, b.width, b.height)
+    return own(url, () => revoke(url), mime, b.width, b.height, b.ms)
   }
 
   // A private item or a DM item: only the node opens it.
@@ -218,8 +274,22 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
       forgetFile(media, got.uri)
       return null
     }
-    if (got.bytes !== undefined) return fromBytes(got.bytes, mime, display)
+    if (got.bytes !== undefined) return fromBytes(got.bytes, mime, display, declaredMs(ref))
     const name = readFileName(got.uri)
+    // The worklet checked a voice note with audioBounds and answers w/h 0
+    // and the container's ms, which must agree with the item's. A host that
+    // does not pass ms on leaves the item's, which the node already held to
+    // the container.
+    if (mime === AUDIO_MIME) {
+      const declared = declaredMs(ref)
+      const ms = got.ms !== undefined ? got.ms : declared
+      if (name === null || (got.w !== undefined && got.w !== 0) || (got.h !== undefined && got.h !== 0) ||
+        (ms !== undefined && !(Number.isInteger(ms) && ms >= 1 && ms <= rpc.MAX_AUDIO_MS && msAgrees(declared, ms)))) {
+        forgetFile(media, got.uri)
+        return null
+      }
+      return own(got.uri, () => forgetFile(media, got.uri), mime, 0, 0, ms)
+    }
     // The worklet measured the bytes; a file without a real size was not
     // bounded and is never handed to the decoder.
     const w = dims(got.w)
@@ -233,9 +303,11 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
 
   const fromSeeder = async (ref, display, deps) => {
     const d = ref.item
-    if (!validDescriptor(d)) return null
-    const bytes = await fetchItem(ref.diary, d, { ...deps, persist: !!deps && deps.persist === true })
-    return fromBytes(bytes, d.mime, display)
+    if (!validDescriptor(d) && !isAudioDescriptor(d)) return null
+    // chat: a public group voice note is a chat item (fetch.js accepts audio
+    // descriptors for chats only, never for diary posts).
+    const bytes = await fetchItem(ref.diary, d, { ...deps, chat: true, persist: !!deps && deps.persist === true })
+    return fromBytes(bytes, d.mime, display, d.ms)
   }
 
   // Forgets only the files this instance holds (each entry's release):
@@ -373,4 +445,25 @@ export function onAppStateChange (state, { canClear, clear = clearChatMedia } = 
   clear()
   clearedInBackground = true
   return true
+}
+
+// One voice note plays at a time: claiming playback pauses whatever played
+// before. -> release(), which forgets the claim only if it is still current.
+let activePlayer = null
+
+export function claimPlayback (player) {
+  if (!player || typeof player.pause !== 'function') return () => {}
+  if (activePlayer !== null && activePlayer !== player) {
+    try { activePlayer.pause() } catch {}
+  }
+  activePlayer = player
+  return () => { if (activePlayer === player) activePlayer = null }
+}
+
+export function stopPlayback () {
+  const p = activePlayer
+  activePlayer = null
+  if (p !== null) {
+    try { p.pause() } catch {}
+  }
 }

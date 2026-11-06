@@ -1469,3 +1469,16 @@ test('stats: a 401 on the stats GET wins over a decision that later fails', asyn
   t.absent(doc.main.textContent.includes('serviço de moderação indisponível'), 'no bare error screen')
   t.is(f.calls.filter((c) => c.url === '/account/mod/api/me').length, 1, 'the queue is not reloaded behind the login')
 })
+
+test('a voice note report plays in an audio control the panel CSP allows', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../lib/account/panel/app.js'), 'utf8')
+  t.ok(/r\.anexo\.mime === 'audio\/mp4'/.test(src), 'an audio anexo is told apart by its mime')
+  t.ok(/h\('audio', \{ className: 'anexo', src, controls: true, preload: 'none'/.test(src), 'it renders as <audio controls>, loaded only on play')
+  t.ok(/anexoAudioProvenance/.test(src), 'with its own provenance label')
+  const routes = fs.readFileSync(path.join(__dirname, '../lib/account/mod-routes.js'), 'utf8')
+  t.ok(/img-src 'self'; media-src 'self'; frame-ancestors/.test(routes), 'the panel CSP allows same-origin media')
+  const store = require('../lib/account/moderation-store')
+  t.ok(store.ANEXO_MIMES === undefined || store.ANEXO_MIMES.includes('audio/mp4'), 'the store accepts audio/mp4 anexos')
+})
