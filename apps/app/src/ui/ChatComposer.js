@@ -24,7 +24,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, activeMention } from '@varanda/rpc'
 import { countAfterInsert, insertAt } from '../emoji'
 import { countChars } from '../format'
-import { MENTION_MIN_QUERY, insertMention, suggestionRows } from '../mentions'
+import { MENTION_MIN_QUERY, insertMention } from '../mentions'
+import { mergeSuggestions } from '../mentionTargets'
 import { useNode } from '../node'
 import { useMemberSearch } from '../useMemberSearch'
 import { EmojiPicker } from './EmojiPicker'
@@ -114,7 +115,7 @@ export function ChatComposer ({
     else searchClear()
   }, [mentionQuery, searchSet, searchClear])
   const suggestions = mentionQuery !== ''
-    ? suggestionRows(search.hits, mentionQuery, typeof ownKey === 'string' ? ownKey : null)
+    ? mergeSuggestions(search.hits, [], mentionQuery, typeof ownKey === 'string' ? ownKey : null)
     : []
 
   // A sent draft clears the length note with it.

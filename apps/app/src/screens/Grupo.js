@@ -1,6 +1,6 @@
 // Grupo: one group's conversation, pushed above the tabs (nav.js screen
 // 'grupo', keyed by the group root). Props: { group, onBack,
-// onOpenCommunity(community, { group }?), onOpenMember(diary),
+// onOpenCommunity(community, { group }?), onOpenMember(diary), onOpenMention(username),
 // onReport(target), onSeen(group), isTop }, with `target` in Denunciar's shape
 // { author, name, username, seq, text, group, writer, private }; onSeen runs
 // after every group.seen attempt, answered or not. Only what the person sees
@@ -85,7 +85,7 @@ const CHECK_NOT_LANDED = 'Não foi aplicado. Você pode tentar de novo.'
 const READERS = ['creator', 'admin', 'member']
 const JOINABLE = [null, 'left', 'pending']
 
-export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport, onSeen, isTop = true }) {
+export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMention, onReport, onSeen, isTop = true }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -852,6 +852,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
         quote={quote ? { ...quote, onPress: () => scrollToKey(row.replyTo) } : null}
         actions={actionsOf(row)}
         actionsTitle={mine ? undefined : who.title}
+        onOpenMention={typeof onOpenMention === 'function' ? onOpenMention : undefined}
       />
     )
   }

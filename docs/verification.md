@@ -4931,7 +4931,7 @@ Limites desta caminhada:
 
 ## 101. Balões, respostas e cabeçalhos das conversas (PR feat/chat-bubbles-replies)
 
-Roteiro das conversas privadas (Mensagem) e dos grupos (Grupo) com balões, respostas, cabeçalhos, campo de escrever compartilhado e emojis, nas três plataformas, nos dois temas, com texto grande e movimento reduzido. O comportamento descrito está em [app.md](app.md), seções "Conversa" e "Grupo". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
+Roteiro das conversas privadas (Mensagem) e dos grupos (Grupo) com balões, respostas, cabeçalhos, campo de escrever compartilhado e emojis, nas três plataformas, nos dois temas, com texto grande e movimento reduzido. O comportamento descrito está em [app.md](app.md), seção "Conversa". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
 
 Regras que os passos conferem:
 
@@ -4982,4 +4982,46 @@ Como verificar, antes da caminhada, a partir da raiz:
 Limites desta caminhada:
 
 - Na Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`), as conversas e os grupos são dados de exemplo. Envio, resposta real e menção com conversas reais só se conferem no laboratório hospedado, com duas pessoas, como na seção 94.
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 102. Menções de pessoas e Páginas nas conversas (PR feat/chat-mentions-pages)
+
+Roteiro das menções nas conversas privadas (Mensagem), nos grupos (Grupo) e em Publicar: sugestões de @ com pessoas e Páginas, e toque numa menção nas bolhas. O comportamento descrito está em [app.md](app.md), seções "Conversa" e "Grupo". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
+
+Regras que os passos conferem:
+
+- Sugestões de @: a partir de 2 caracteres, só na conta hospedada e online, na conversa privada, no grupo e em Publicar. Pessoas e Páginas aparecem juntas; uma Página tem o chip "Página", e pessoas vêm antes quando os dois casam igualmente.
+- Página encerrada ou movida não aparece nas sugestões.
+- Escolher uma sugestão só escreve o @nome no texto. Nenhuma tela abre.
+- Um @nome tocado numa bolha de conversa privada ou de grupo abre o perfil da pessoa ou o diário da Página, na mesma tela de Membro. Nas publicações, o toque segue como antes.
+- Menções em conversas não criam tipo novo de aviso: Avisos não ganha linha nova por causa delas.
+
+Android (AVD `varanda-api36`, build de debug, primeiro):
+
+- [ ] Conversa privada: um @ seguido de duas letras mostra pessoas e Páginas; escolher uma sugestão só escreve o @nome, e a mensagem enviada mostra a menção tocável.
+- [ ] Conversa privada: tocar a menção de uma pessoa abre o perfil dela; tocar a de uma Página abre o diário da Página.
+- [ ] Grupo: a mesma sugestão e o mesmo toque na bolha; cada toque abre o perfil ou o diário certo.
+- [ ] Publicar: a sugestão com o chip "Página" aparece, e a publicação enviada mostra a menção tocável.
+- [ ] Página encerrada ou movida não aparece nas sugestões das três telas.
+- [ ] Escolher uma sugestão não abre nenhuma tela, nas três telas.
+- [ ] Tema claro e tema escuro: chip, lista de sugestões e menções legíveis, sem texto cortado.
+- [ ] Avisos não ganha linha nova por causa das menções em conversa.
+
+iOS (simulador iPhone 16e, depois do Android):
+
+- [ ] Os mesmos passos do Android, em tema claro e em tema escuro, incluindo a lista de sugestões sobre a caixa de escrever.
+
+Web (Chrome, depois do iOS):
+
+- [ ] Em 390 px e em 1280 px, nos temas claro e escuro: os passos acima de sugestões, chip "Página" e toque nas bolhas e em Publicar.
+- [ ] Em 390 px e em 1280 px, com mouse ou teclado: escolher uma sugestão não navega, e o toque abre o perfil ou o diário certo.
+
+Como verificar, antes da caminhada, a partir da raiz:
+
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- O selo "Página" e o filtro de Páginas encerradas ou movidas dependem das marcas que o semeador manda na busca; um semeador antigo, sem essas marcas, mostra a Página como pessoa e não a filtra.
+- As sugestões dependem de conta hospedada e online, e o toque em menção, de conta hospedada. Fora disso o @nome segue como texto.
 - Nenhuma caixa acima foi executada nesta documentação.

@@ -18,17 +18,18 @@ export function MentionSuggest ({ rows, loading, onPick }) {
     <View style={styles.box} accessibilityLabel='sugestões de menção'>
       {rows.map((hit) => (
         <Pressable
-          key={hit.author}
+          key={hit.key || hit.author}
           accessibilityRole='button'
           accessibilityLabel={'mencionar @' + hit.username}
           onPress={() => onPick(hit)}
           style={({ pressed }) => [styles.row, pressed && styles.pressed]}
         >
-          <Avatar name={hit.name || hit.username || null} publicKey={hit.author} size={32} />
+          <Avatar name={hit.name || hit.username || null} publicKey={hit.key || hit.author} size={32} />
           <View style={styles.text}>
             <Text style={styles.title} numberOfLines={1}>{displayText(whoOf({ name: hit.name, username: hit.username }).title)}</Text>
             <Text style={styles.handle} numberOfLines={1}>{'@' + displayText(hit.username)}</Text>
           </View>
+          {hit.chipLabel || hit.kind === 'page' ? <View style={styles.chip}><Text style={styles.chipText}>{hit.chipLabel || 'Página'}</Text></View> : null}
         </Pressable>
       ))}
       {loading ? <View style={styles.loading}><Soft>procurando...</Soft></View> : null}
@@ -43,5 +44,7 @@ const makeStyles = (colors) => StyleSheet.create({
   text: { flex: 1 },
   title: { ...type.postName, color: colors.ink },
   handle: { color: colors.soft, fontSize: 13 },
+  chip: { borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2, backgroundColor: colors.card },
+  chipText: { color: colors.soft, fontSize: 12 },
   loading: { paddingVertical: 6 }
 })
