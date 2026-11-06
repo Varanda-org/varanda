@@ -643,16 +643,21 @@ test('a failed top-up backs off 60 s, not 10 minutes', async (t) => {
   const seeder = await dmSeeder(t, { signer: assoc })
   seeder.assoc = hex(assoc.publicKey)
   await seeder.close()
+  // The blob wallet's top-up runs next to it and dials once, then waits
+  // its own (default) 60 s back-off.
   const { engine, sockets } = engineFor(t, seeder, { limits: { topUpRetryMs: 100 } })
   await engine.unlock(crypto.randomBytes(32))
   const kp = crypto.keyPair()
   t.is(await engine.topUp(kp), 0)
-  t.is(sockets.length, 1)
+  await engine.idle()
+  t.is(sockets.length, 2, 'one DM and one blob dial')
   t.is(await engine.topUp(kp), 0)
-  t.is(sockets.length, 1, 'within the back-off: no dial')
+  await engine.idle()
+  t.is(sockets.length, 2, 'within the back-off: no dial')
   await new Promise((resolve) => setTimeout(resolve, 150))
   await engine.topUp(kp)
-  t.is(sockets.length, 2, 'after the back-off: dials again')
+  await engine.idle()
+  t.is(sockets.length, 3, 'after the back-off: the DM wallet dials again')
 })
 
 test('reset waits for a pull in flight before deleting the store', async (t) => {
@@ -822,4 +827,46 @@ test('a failed unlock leaves the engine locked', async (t) => {
   t.is(err && err.message, 'disco')
   t.absent(engine.unlocked())
   t.exception(() => engine.boxHex(), /bloqueada/)
+})
+
+// A PNG header the media bounds accept, then `size` random IDAT bytes.
+function png (size) {
+  const out = b4a.alloc(8 + 25 + 12 + size)
+  out.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0)
+  out.writeUInt32BE(13, 8)
+  out.write('IHDR', 12, 'ascii')
+  out.writeUInt32BE(64, 16)
+  out.writeUInt32BE(48, 20)
+  out[24] = 8
+  out[25] = 6
+  out.writeUInt32BE(size, 33)
+  out.write('IDAT', 37, 'ascii')
+  out.fill(7, 41)
+  return out
+}
+
+test('a failed photo upload is a normal error and sends nothing; an item not put here is refused', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  // The stand-in has no blob channel or blob key: every blob step fails.
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url, { dm: { blob: { wallet: 4, walletLow: 2, issuePaceMs: 0 } } })
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+  const puts = seeder.puts.length
+
+  const err = await A.node.dmPutMedia({ bytes: png(100), mime: 'image/png', width: 64, height: 48 }).then(() => null, (e) => e)
+  t.ok(err !== null, 'the upload fails')
+  t.not(err.message, 'não deu para confirmar o envio', 'not the uncertain signal of dm.send')
+  t.not(err.message, 'não deu para confirmar o envio da mídia')
+  t.absent(err.uncertain, 'never uncertain')
+  t.exception.all(() => A.node.dmPutMedia({ bytes: png(100), mime: 'image/bmp', width: 64, height: 48 }), /mídia inválida/, 'a mime outside the list is refused at once')
+  const bad = await A.node.dmPutMedia({ bytes: b4a.from('not an image'), mime: 'image/png', width: 64, height: 48 }).then(() => null, (e) => e)
+  t.is(bad.message, 'mídia inválida', 'bytes that fail the media bounds are refused')
+
+  const item = { id: 'ab'.repeat(32), key: 'cd'.repeat(32), nonce: 'ef'.repeat(24), chunks: 1, bytes: 1000, sha256: '12'.repeat(32), mime: 'image/png', w: 64, h: 48, ms: 0 }
+  const refused = await errorOf(A.web.request('dm.send', { to: B.key, text: 'legenda', media: [item] }))
+  t.is(refused.message, 'prepare a mídia de novo', 'an item this node did not put')
+  t.is(seeder.puts.length, puts, 'no drop was put')
+  t.is((await A.web.request('dm.list', {})).conversations.length, 0, 'nothing filed')
 })

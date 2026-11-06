@@ -2236,7 +2236,9 @@ function createBrowserSession ({
     // exactly like account.sign: not a diary write, no append, no network,
     // and the result never carries the payload or a key. The session fills
     // in member and association; text and quote enter the payload hashed.
-    'report.sign': serial(async ({ nonce, target, seq, reason, text, quote, writer, group }) => {
+    // An `anexo` (a group message only) is the attachment's hex SHA-256: it
+    // switches the statement to report v3, and the bytes never reach here.
+    'report.sign': serial(async ({ nonce, target, seq, reason, text, quote, writer, group, anexo }) => {
       let own
       if (ownKey !== null) own = ownKey
       else if (diaryInfo !== null) own = diaryInfo.publicKey
@@ -2250,6 +2252,7 @@ function createBrowserSession ({
       const fields = { nonce, member: own, association: cfg.association, target, seq: seq === undefined ? null : seq, reason, text, quote }
       if (writer !== undefined) fields.writer = writer
       if (group !== undefined) fields.group = group
+      if (anexo !== undefined) fields.anexo = anexo
       let signature
       try {
         signature = signReport(fields, keyPair)
@@ -2833,7 +2836,7 @@ function createBrowserSession ({
     // The recipient's key is looked up first (off the chain), then the send
     // runs on the chain. A send for an identity without a published dm-key
     // runs dm.enable first.
-    'dm.send': async ({ to, text, replyTo }) => {
+    'dm.send': async ({ to, text, replyTo, media }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       // Self and a blocked peer are refused before any lookup.
       await serial(async () => dmEngine.checkSend(await requireDm(), to))({})
@@ -2846,7 +2849,7 @@ function createBrowserSession ({
       return serial(async (_, epoch) => {
         const own = await requireDm()
         if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
-        return dmEngine.send(own, keyPair, { to, text, replyTo: replyTo === undefined ? null : replyTo }, recipient.box)
+        return dmEngine.send(own, keyPair, { to, text, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media }, recipient.box)
       })({})
     },
 
@@ -2868,8 +2871,9 @@ function createBrowserSession ({
     'dm.set': serial(async ({ peer, state }) => dmEngine.set(await requireDm(), keyPair, { peer, state })),
     'dm.seen': serial(async ({ peer }) => dmEngine.seen(await requireDm(), peer)),
 
-    // As report.sign: no diary opened, nothing appended, no network.
-    'dm.reportSign': serial(async ({ nonce, target, reason, text, quote }) => {
+    // As report.sign: no diary opened, nothing appended, no network. The
+    // `anexo` digest line (dm report v2) is added only when one was given.
+    'dm.reportSign': serial(async ({ nonce, target, reason, text, quote, anexo }) => {
       let own
       if (ownKey !== null) own = ownKey
       else if (diaryInfo !== null) own = diaryInfo.publicKey
@@ -2880,9 +2884,11 @@ function createBrowserSession ({
       if (keyPair === null) throw new UsageError(store.LOCKED)
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
       if (target === own) throw new UsageError(SELF_REPORT)
+      const fields = { nonce, member: own, association: cfg.association, target, reason, text: text === undefined ? '' : text, quote }
+      if (anexo !== undefined) fields.anexo = anexo
       let signature
       try {
-        signature = signDmReport({ nonce, member: own, association: cfg.association, target, reason, text: text === undefined ? '' : text, quote }, keyPair)
+        signature = signDmReport(fields, keyPair)
       } catch (err) {
         if (err instanceof TypeError) throw new UsageError(BAD_REPORT)
         throw err
@@ -3111,11 +3117,62 @@ function createBrowserSession ({
     })({})
   }
 
-  // Locks the identity: the pair is zero-filled. After close() it already is.
+  // A chat photo for dm.send (docs/rpc.md 5.88): validated and copied
+  // synchronously (TypeError), then off the chain, as dm.pull (it opens no
+  // storage core): sealed and put on the anonymous blob channel by the dm
+  // engine -> the media item. The native IPC dm.putMedia reads its cache
+  // file and calls this same function. Nothing about the bytes is logged.
+  function dmPutMedia ({ bytes, mime, width, height } = {}) {
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > MAX_MEDIA_ITEM_BYTES) throw new TypeError(BAD_MEDIA_ARGS)
+    if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
+    if (!isIntIn(width, 1, MAX_MEDIA_DIMENSION) || !isIntIn(height, 1, MAX_MEDIA_DIMENSION)) throw new TypeError(BAD_MEDIA_ARGS)
+    const copy = new Uint8Array(bytes.byteLength)
+    copy.set(bytes)
+    return (async () => {
+      try {
+        if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+        const own = await serial(() => requireDm())({})
+        const pair = keyPair
+        if (pair === null) throw new UsageError(store.LOCKED)
+        return await dmEngine.putMedia(own, pair, { bytes: copy, mime, width, height })
+      } catch (err) {
+        copy.fill(0)
+        throw toRpcError(err, reportInternal)
+      }
+    })()
+  }
+
+  // The plaintext of item `index` of a kept message -> { bytes, mime }, for
+  // the page only (never over RPC: a photo is far above MAX_MESSAGE).
+  function dmReadMedia ({ from, id, index } = {}) {
+    return (async () => {
+      try {
+        if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+        const own = await serial(() => requireDm())({})
+        return await dmEngine.readMedia(own, { from, id, index })
+      } catch (err) {
+        if (err instanceof TypeError) throw err
+        throw toRpcError(err, reportInternal)
+      }
+    })()
+  }
+
+  // Locks the identity: the pair is zero-filled and the chat media cache
+  // deleted (lock and 'Sair' both come here). After close() it already is.
   function clearKeyPair () {
     if (closing !== null) return closing.then(noop)
     cancelGroups()
-    return identityChange(() => serial(async () => { zeroKeyPair() })())
+    return identityChange(() => serial(async () => {
+      zeroKeyPair()
+      // The identity is locked already; a storage failure while wiping the
+      // media cache must not turn the lock into an error (the next unlock
+      // under another key wipes it again).
+      try {
+        await dmEngine.wipeMedia()
+      } catch {
+        warning('aviso: cache de mídia não apagado')
+      }
+    })())
   }
 
   // The follows kept from before `follow` records existed (member-ops
@@ -3192,6 +3249,7 @@ function createBrowserSession ({
     // A pull, send or top-up still unwinding must not see its store go.
     await dmEngine.idle()
     await store.deleteDmData(storage)
+    await dmEngine.wipeMedia()
     await store.deleteAgeProofs(storage)
     ownKey = null
     diaryInfo = null
@@ -3274,6 +3332,8 @@ function createBrowserSession ({
     setKeyPair,
     clearKeyPair,
     mediaUpload,
+    dmPutMedia,
+    dmReadMedia,
     borrow,
     legacyFollows: () => legacyFollows({}),
     confirmLegacyFollows,

@@ -41,7 +41,12 @@
 // stamp. The exact drop bytes are saved under (member, nonce) BEFORE the
 // first put, so a resend of an unanswered request puts the same bytes (the
 // pool answers an identical drop as success) and never mints a second
-// message; a put without an ack throws { code: 'incerto' }.
+// message; a put without an ack throws { code: 'incerto' }. A page answers
+// in text only, so what it sends is always a v1 inner.
+//
+// Media: a member's v2 inner opens like any other; its media items (blob
+// descriptors, section 13) are kept in the sealed rows and handed to the
+// admin device in dm-thread. The service never fetches a blob.
 //
 // Logs carry { event: 'page-dm', reason } only: never a text, key or peer.
 
@@ -124,6 +129,11 @@ function within (promise, ms) {
 
 function preview (text) {
   return Array.from(text).slice(0, PREVIEW_MAX).join('')
+}
+
+// openInner already checked every item of a v2 body; a v1 body or row has none.
+function mediaOf (m) {
+  return Array.isArray(m.media) && m.media.length > 0 ? m.media : null
 }
 
 function emptyState () {
@@ -919,7 +929,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
       followSet: followKeys(page),
       seen: s.seen,
       ops: s.ops,
-      messages: s.messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : page, text: m.text, replyTo: m.replyTo, at: m.at, filedAt: m.filedAt }))
+      messages: s.messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : page, text: m.text, replyTo: m.replyTo, media: mediaOf(m), at: m.at, filedAt: m.filedAt }))
     })
   }
 
@@ -954,7 +964,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
       return {
         conversations: pageRows.map((c) => {
           const last = c.messages[c.messages.length - 1]
-          return { peer: c.peer, folder: c.folder, preview: preview(last.text), at: c.at, unread: c.unread, mine: last.mine }
+          return { peer: c.peer, folder: c.folder, preview: preview(dmFold.previewText(last)), at: c.at, unread: c.unread, mine: last.mine }
         }),
         next: more && tail ? { at: tail.at, peer: tail.peer } : null,
         requests: requests.some((c) => c.unread),
@@ -977,7 +987,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
       const startAt = Math.max(0, end - limit)
       const rows = c.messages.slice(startAt, end)
       return {
-        messages: rows.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, at: m.at, mine: m.mine })),
+        messages: rows.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, media: mediaOf(m), at: m.at, mine: m.mine })),
         next: startAt > 0 && rows.length > 0 ? rows[0].id : null,
         ...state
       }
@@ -1138,6 +1148,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
         const pair = signingPair(page)
         let inner
         try {
+          // No media field: a page answers in text, so this stays a v1 inner.
           inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, cert }, pair)
         } catch (err) {
           throw fail(err && err.message === 'mensagem longa demais' ? 'longa-demais' : 'pedido-invalido')
@@ -1340,7 +1351,10 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
         const peer = body.mine ? body.to : body.from
         if (!body.mine && !dmFold.canSend({ self: page, peer, ops: s.ops })) continue
         if (hasMessage(s, body.from, body.id)) continue
-        s.messages.push({ id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, at: body.at, mine: body.mine, filedAt: nextFiled(s) })
+        const row = { id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, at: body.at, mine: body.mine, filedAt: nextFiled(s) }
+        const media = mediaOf(body)
+        if (media !== null) row.media = media
+        s.messages.push(row)
         n++
       }
       if (n > 0) {

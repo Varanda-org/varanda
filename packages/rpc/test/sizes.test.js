@@ -35,7 +35,11 @@ const {
   GROUP_MEMBERS_LIMIT_MAX,
   MAX_GROUP_NAME,
   MAX_GROUPS_PER_COMMUNITY,
-  COMMUNITY_LIST_MAX
+  COMMUNITY_LIST_MAX,
+  MAX_DM_MEDIA,
+  DM_MEDIA_CHUNK_BYTES,
+  DM_MEDIA_MAX_CHUNKS,
+  DM_THREAD_LIMIT_MAX
 } = require('..')
 
 const HEX = 'f'.repeat(64)
@@ -295,6 +299,59 @@ test('community.list: COMMUNITY_LIST_MAX communities with maximal names fit', (t
   const s = size({ communities: Array(COMMUNITY_LIST_MAX).fill(community) })
   t.comment('community.list worst case at ' + COMMUNITY_LIST_MAX + ' communities: ' + s + ' bytes')
   t.ok(s <= MAX_MESSAGE)
+})
+
+// A DM text is well formed (packages/core/lib/dm.js validText), so a lone
+// surrogate never reaches dm.thread: a 4-byte character is the widest code
+// point there.
+const DM_WORST = ['\u{1f600}', '"', '\\', '\n']
+// The widest media item dm.send accepts: the longest mime, the most chunks
+// and the largest ciphertext, the widest sides (ms is 0 for an image).
+const DM_MEDIA_ITEM = {
+  id: HEX,
+  key: HEX,
+  nonce: 'f'.repeat(48),
+  mime: MIME,
+  chunks: DM_MEDIA_MAX_CHUNKS,
+  bytes: DM_MEDIA_MAX_CHUNKS * DM_MEDIA_CHUNK_BYTES,
+  sha256: HEX,
+  w: MAX_MEDIA_DIMENSION,
+  h: MAX_MEDIA_DIMENSION,
+  ms: 0
+}
+
+// Every message at MAX_TEXT code points and MAX_DM_MEDIA items, which the
+// sealed frame (DM_INNER_BYTES) cannot even carry together: a bound, not a
+// message that exists.
+function dmThreadResult (n, ch) {
+  const message = { id: 'f'.repeat(32), from: HEX, text: ch.repeat(MAX_TEXT), replyTo: 'f'.repeat(32), at: AT, mine: false, media: widestDmMedia(MAX_DM_MEDIA) }
+  return { messages: Array(n).fill(message), next: 'f'.repeat(32), folder: 'request', blocked: false }
+}
+
+// n widest items with distinct blob ids (dm.send refuses repeated ids); every
+// id is 64 hex, so the width is the same as n copies.
+function widestDmMedia (n) {
+  return Array.from({ length: n }, (_, i) => ({ ...DM_MEDIA_ITEM, id: (i + 1).toString(16).padStart(2, '0').repeat(32) }))
+}
+
+test('the widest DM media item is a valid dm.send item', (t) => {
+  t.ok(validateParams('dm.send', { to: HEX, text: '', media: widestDmMedia(MAX_DM_MEDIA) }).ok)
+  t.absent(validateParams('dm.send', { to: HEX, text: '', media: [{ ...DM_MEDIA_ITEM, chunks: DM_MEDIA_MAX_CHUNKS + 1 }] }).ok)
+  t.absent(validateParams('dm.send', { to: HEX, text: '', media: [{ ...DM_MEDIA_ITEM, bytes: DM_MEDIA_ITEM.bytes + 1 }] }).ok)
+  t.absent(validateParams('dm.send', { to: HEX, text: '', media: widestDmMedia(MAX_DM_MEDIA + 1) }).ok)
+  t.comment('widest DM media item: ' + utf8ByteLength(JSON.stringify(DM_MEDIA_ITEM)) + ' bytes')
+})
+
+test('dm.thread: DM_THREAD_LIMIT_MAX fits, one more does not', (t) => {
+  t.is(DM_THREAD_LIMIT_MAX, 46)
+  t.ok(validateParams('dm.thread', { peer: HEX, limit: DM_THREAD_LIMIT_MAX }).ok)
+  t.absent(validateParams('dm.thread', { peer: HEX, limit: DM_THREAD_LIMIT_MAX + 1 }).ok)
+  for (const ch of DM_WORST) t.ok(size(dmThreadResult(DM_THREAD_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  const worst = size(dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}'))
+  t.comment('dm.thread worst case at ' + DM_THREAD_LIMIT_MAX + ' messages: ' + worst + ' bytes')
+  const overflow = size(dmThreadResult(DM_THREAD_LIMIT_MAX + 1, '\u{1f600}'))
+  t.comment('dm.thread worst case at ' + (DM_THREAD_LIMIT_MAX + 1) + ' messages: ' + overflow + ' bytes')
+  t.ok(overflow > MAX_MESSAGE, 'largest that fits')
 })
 
 test('the dispatcher sends the worst-case feed page unchanged', async (t) => {

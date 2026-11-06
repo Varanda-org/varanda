@@ -28,6 +28,10 @@
 //   memory only. A full wallet still asks the seeder for its current blob key
 //   once every KEY_CHECK_MS: a rotated key buys at least one stamp under it,
 //   so the stamps outside the new current and previous pair stop counting.
+//   When the key was last seen current more than ROTATION_MS ago (kv
+//   blobKeyCheck, a bare time), the seeder may have rotated twice since, so
+//   adopting a new kid keeps no stamp under any other kid: the old current
+//   kid is then not the seeder's previous one.
 // - createBlobClient().put(sealed): every frame of the blob, in order, over a
 //   fresh anonymous blob link, each waiting for its ack; it resolves only when
 //   every frame was acked in this call (an ack does not say the blob is
@@ -50,6 +54,9 @@
 //   RETRY_AFTER_MAX_MS, RETRY_DEFAULT_MS without one) and retries that chunk
 //   at most GET_RETRIES times; any other failure, a 404 included, is a
 //   normal error at once. Only these reads are ever retried, never a put.
+//   The GETs bypass the HTTP cache (cache: 'no-store'): the caller's sealed
+//   plaintext cache is the only local copy, and ciphertext must not sit in
+//   the browser's cache for the pool's 7 days.
 //
 // Nothing here logs a key, an id, a token or an address.
 const b4a = require('b4a')
@@ -77,6 +84,7 @@ const TOP_UP_RETRY_MS = 60000
 // The seeder rotates its blob key about every 7 days and accepts the current
 // and the previous kid; a full wallet checks the key this often.
 const KEY_CHECK_MS = 12 * 3600000
+const ROTATION_MS = 7 * 24 * 3600000
 // The seeder's blob issue bucket is 32 at 4/s and its put bucket 32 at 8/s;
 // past a little less than each burst the client paces itself under the rate.
 const ISSUE_BURST = 28
@@ -182,8 +190,8 @@ function sealBlob (plain) {
 // open({ nonce, box }) -> value or null: the caller's local key, as the DM
 // wallet uses it (./dm-store.js); both may throw while locked.
 // limits (tests): wallet, walletLow, issueBurst, issuePaceMs, topUpEveryMs,
-// topUpRetryMs, keyCheckMs, putBurst, putPaceMs, forceMargin, link (dm-link
-// limits).
+// topUpRetryMs, keyCheckMs, rotationMs, putBurst, putPaceMs, forceMargin,
+// link (dm-link limits).
 function createBlobClient ({ seederUrl, createSocket, association, storage, seal, open, log = noop, limits = {} } = {}) {
   if (storage === null || typeof storage !== 'object') throw new TypeError('storage is required')
   if (typeof seal !== 'function' || typeof open !== 'function') throw new TypeError('seal and open are required')
@@ -195,6 +203,7 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
     topUpEveryMs: TOP_UP_EVERY_MS,
     topUpRetryMs: TOP_UP_RETRY_MS,
     keyCheckMs: KEY_CHECK_MS,
+    rotationMs: ROTATION_MS,
     putBurst: PUT_BURST,
     putPaceMs: PUT_PACE_MS,
     forceMargin: FORCE_MARGIN,
@@ -209,6 +218,12 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
   let nextTopUp = 0
   // When the seeder's blob key was last seen current in the wallet.
   let keyCheckedAt = 0
+  // The kv blobKeyCheck time once a read succeeded: null while unread (a
+  // failed read is not cached), 0 when absent.
+  let lastCheckStored = null
+  // keyCheckedAt is not stored yet (a failed write): written again by the
+  // next top-up.
+  let checkUnsaved = false
   // Why the last top-up stopped short: 'teto' (the daily budget), 'seeder'
   // (no link) or 'falha' (a bad answer); null when it filled the wallet.
   let shortBy = null
@@ -234,6 +249,36 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
 
   function writeWallet ({ items, kids }) {
     return store.writeBlobStamps(storage, { items: items.map((s) => ({ kid: s.kid, ...seal({ token: s.token, sig: s.sig }) })), kids })
+  }
+
+  // -> the last key check time, or 0 when unknown. Unknown is never stale:
+  // the stale rule drops the previous kid's stamps, so it acts only on a
+  // time actually read (or set in this process).
+  async function lastKeyCheck () {
+    if (keyCheckedAt > 0) return keyCheckedAt
+    if (lastCheckStored === null) {
+      let v
+      try {
+        v = await storage.readJson('blobKeyCheck')
+      } catch {
+        return 0
+      }
+      lastCheckStored = v !== null && typeof v === 'object' && v.v === 1 && Number.isSafeInteger(v.at) && v.at > 0 ? v.at : 0
+    }
+    return lastCheckStored
+  }
+
+  function keyChecked () {
+    keyCheckedAt = Date.now()
+    return saveKeyCheck()
+  }
+
+  function saveKeyCheck () {
+    const at = keyCheckedAt
+    checkUnsaved = true
+    return storage.writeJson('blobKeyCheck', { v: 1, at }).then(() => {
+      if (keyCheckedAt === at) checkUnsaved = false
+    }, noop)
   }
 
   function usableOf (w) {
@@ -270,6 +315,7 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
     topping = (async () => {
       try {
         let fresh = 0
+        if (checkUnsaved && keyCheckedAt > 0) await saveKeyCheck()
         if (!force && Date.now() < nextTopUp) return 0
         const low = force || (await walletSize()) < L.walletLow
         if (low || Date.now() - keyCheckedAt >= L.keyCheckMs) {
@@ -314,6 +360,10 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
     let pub = null
     let parsed = null
     let need = 0
+    // Unknown (no stored check) is not stale: a wallet that never saw a key
+    // has nothing to drop.
+    const checked = await lastKeyCheck()
+    const stale = checked > 0 && Date.now() - checked >= L.rotationMs
     for (;;) {
       const first = pub === null
       let link
@@ -343,12 +393,12 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
           }
           pub = p
           const isCurrent = (await readWallet()).kids[0] === pub.kid
-          if (isCurrent) keyCheckedAt = Date.now()
+          if (isCurrent) await keyChecked()
           if (keyOnly && isCurrent) return { fresh: 0, current: true }
           // Counted against the stamps still usable once this key is current:
           // a rotation drops the stamps of the pair's older key. A new key
           // needs at least one verified stamp to become current.
-          need = target - await usableAfter(pub.kid)
+          need = target - await usableAfter(pub.kid, stale)
           if (!isCurrent) need = Math.max(need, 1)
         } else if (p === null || typeof p !== 'object' || p.kid !== pub.kid) {
           shortBy = 'falha'
@@ -393,23 +443,25 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
     if (fresh.length === 0) return { fresh: 0, current: false }
     await withWallet(async () => {
       const w = await readWallet()
-      const kids = kidsAfter(w.kids, pub.kid)
+      const kids = kidsAfter(w.kids, pub.kid, stale)
       const known = new Set(w.items.map((s) => s.token))
       const items = [...w.items.filter((s) => kids.includes(s.kid)), ...fresh.filter((s) => !known.has(s.token))]
       await writeWallet({ items, kids })
     })
-    keyCheckedAt = Date.now()
+    await keyChecked()
     return { fresh: fresh.length, current: true }
   }
 
-  // The kids the wallet keeps once a stamp under kid verified.
-  function kidsAfter (kids, kid) {
-    return kids[0] === kid ? kids : [kid, ...kids.slice(0, 1)]
+  // The kids the wallet keeps once a stamp under kid verified; stale: the
+  // last key check is older than a rotation, so a new kid stands alone.
+  function kidsAfter (kids, kid, stale) {
+    if (kids[0] === kid) return kids
+    return stale ? [kid] : [kid, ...kids.slice(0, 1)]
   }
 
-  async function usableAfter (kid) {
+  async function usableAfter (kid, stale) {
     const w = await readWallet()
-    const kids = kidsAfter(w.kids, kid)
+    const kids = kidsAfter(w.kids, kid, stale)
     return w.items.filter((s) => kids.includes(s.kid)).length
   }
 
@@ -542,7 +594,7 @@ async function getFrame (doFetch, url, L, pace) {
   for (let attempt = 0; ; attempt++) {
     await pace()
     try {
-      res = await doFetch(url, { method: 'GET', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'default' })
+      res = await doFetch(url, { method: 'GET', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store' })
     } catch {
       throw new UsageError(NO_SEEDER)
     }
@@ -555,7 +607,9 @@ async function getFrame (doFetch, url, L, pace) {
   const length = header(res, 'content-length')
   if (length !== null && length !== String(BLOB_FRAME_BYTES)) throw new UsageError(BAD_MEDIA)
   const body = await readCapped(res, length !== null)
-  if (body.byteLength !== BLOB_FRAME_BYTES) throw new UsageError(BAD_MEDIA)
+  // A body that ended early says nothing about the blob: a transient read
+  // error, so the media stays retryable instead of marked gone.
+  if (body.byteLength < BLOB_FRAME_BYTES) throw new UsageError(NO_SEEDER)
   return body
 }
 
@@ -693,6 +747,7 @@ module.exports = {
   BLOB_STAMP_WALLET_LOW,
   FORCE_MARGIN,
   KEY_CHECK_MS,
+  ROTATION_MS,
   GET_BURST,
   GET_PACE_MS,
   GET_RETRIES

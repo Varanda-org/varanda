@@ -25,6 +25,13 @@
 //   await node.reset()           // delete the diary, the media cores and the pending
 //                                // follows, and lock; config and follows stay
 //   await node.mediaUpload({ bytes, mime, width, height, onProgress }) // -> descriptor
+//   await node.dmPutMedia({ bytes, mime, width, height }) // -> dm.send media item
+//   await node.dmReadMedia({ from, id, index })           // -> { bytes, mime }
+// The chat photo calls (docs/rpc.md 5.88) are host controls for the same
+// reason: dmPutMedia seals a photo and puts it on the anonymous blob channel
+// (the native IPC dm.putMedia calls the same function after reading its
+// cache file); dmReadMedia hands the page the opened plaintext of one item
+// of a kept message (./dm.js, sealed cache under the local DM key).
 // Uploads are a host control, not an RPC method: one request on the channel
 // is capped at 64 KiB (@varanda/rpc MAX_REQUEST) and an image is up to 8 MiB.
 // The page hands the bytes straight to the session, which stores them in
@@ -121,6 +128,8 @@ function createBrowserNode ({ storage, ...options } = {}) {
     setKeyPair: (keyPair, options) => session.setKeyPair(keyPair, options),
     clearKeyPair: () => session.clearKeyPair(),
     mediaUpload: (args) => session.mediaUpload(args),
+    dmPutMedia: (args) => session.dmPutMedia(args),
+    dmReadMedia: (args) => session.dmReadMedia(args),
     legacyFollows: () => session.legacyFollows(),
     confirmLegacyFollows: (keys) => session.confirmLegacyFollows(keys),
     identityStatus: () => session.identityStatus(),

@@ -23,6 +23,14 @@
 //   media.upload({ bytes, mime, width, height, onProgress })
 //                       -> Promise<descriptor>  (lib/node.js mediaUpload;
 //                          errors keep their .code and .message)
+//   media.putDm({ bytes, mime, width, height })
+//                       -> Promise<media item>  (lib/node.js dmPutMedia: the
+//                          photo sealed and put on the blob channel; the item
+//                          goes back unchanged in dm.send `media`)
+//   media.readDm({ from, id, index })
+//                       -> Promise<{ bytes, mime }>  (lib/node.js dmReadMedia:
+//                          the opened photo of a kept message; errors keep
+//                          .code and .message, 'mídia indisponível' when gone)
 //   follows.legacy()    -> Promise<{ keys }>  (the follows kept from before
 //                          `follow` records existed, awaiting confirmation)
 //   follows.confirmLegacy(keys)
@@ -568,6 +576,21 @@ async function start ({ association, seederUrl } = {}) {
         upload (args) {
           try {
             return Promise.resolve(node.mediaUpload(args))
+          } catch (err) {
+            return Promise.reject(err)
+          }
+        },
+        // Synchronous too: the node copies the photo before any await.
+        putDm (args) {
+          try {
+            return Promise.resolve(node.dmPutMedia(args))
+          } catch (err) {
+            return Promise.reject(err)
+          }
+        },
+        readDm (args) {
+          try {
+            return Promise.resolve(node.dmReadMedia(args))
           } catch (err) {
             return Promise.reject(err)
           }

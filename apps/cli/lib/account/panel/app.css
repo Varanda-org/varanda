@@ -38,6 +38,7 @@ label { display: block; font-size: 0.9em; }
 .card { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid #8888; border-radius: 8px; }
 .meta { font-size: 0.85em; opacity: 0.8; }
 .label { font-size: 0.85em; font-weight: 600; }
+.anexo { max-width: 100%; max-height: 360px; object-fit: contain; align-self: flex-start; border: 1px solid #8888; }
 /* Untrusted text (quotes, comments, notes): inserted with textContent only;
    isolated so bidi controls cannot reorder the labels around it. */
 .untrusted {

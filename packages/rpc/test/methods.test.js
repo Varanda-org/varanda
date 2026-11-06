@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME } = require('..')
+const { validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME, DM_THREAD_LIMIT_MAX } = require('..')
 
 const KEY = 'ab'.repeat(32)
 const ok = (t, method, params, expected) => {
@@ -18,7 +18,7 @@ const bad = (t, method, params, label) => {
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'age.proof', 'age.sign', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
-    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pull', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pull', 'dm.putMedia', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.reset', 'identity.sessionSaved',
@@ -28,7 +28,7 @@ test('method list and mutating set', (t) => {
     'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
-    'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
+    'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
@@ -278,6 +278,15 @@ test('report.sign', (t) => {
   const absentQuote = { ...post }
   delete absentQuote.quote
   ok(t, 'report.sign', absentQuote, { ...post, quote: '' })
+  // anexo: the hex SHA-256 of an attached image, on a group message only.
+  const group = { ...post, writer: KEY, group: 'ab'.repeat(32) }
+  const anexo = 'cd'.repeat(32)
+  ok(t, 'report.sign', { ...group, anexo }, { ...group, anexo })
+  ok(t, 'report.sign', { ...group, quote: '', anexo }, { ...group, quote: '', anexo })
+  t.alike(validateParams('report.sign', { ...post, anexo }), { ok: false, code: 'USAGE', message: 'anexo só com writer' })
+  t.alike(validateParams('report.sign', { ...account, anexo }), { ok: false, code: 'USAGE', message: 'anexo só com writer' })
+  for (const a of ['', anexo.toUpperCase(), anexo.slice(1), anexo + '0', 1, null]) bad(t, 'report.sign', { ...group, anexo: a }, 'anexo ' + a)
+  bad(t, 'report.sign', { ...group, anexo, bytes: 'AAAA' }, 'the image bytes never reach the node')
 })
 
 test('username.add', (t) => {
@@ -1153,15 +1162,87 @@ test('dm.* (Conversas)', (t) => {
   for (const replyTo of [ID.toUpperCase(), ID.slice(1), ID + '0', KEY, null, 1]) {
     t.is(validateParams('dm.send', { to: KEY, text: 'oi', replyTo }).message, 'parâmetro inválido: replyTo')
   }
-  bad(t, 'dm.send', { to: KEY, text: 'oi', media: [] }, 'no photos')
+  bad(t, 'dm.send', { to: KEY, text: 'oi', media: [] }, 'empty media list')
+  bad(t, 'dm.send', { to: KEY, text: 'oi', media: null }, 'null media')
+
+  // media: blob descriptors (core lib/blob.js) plus mime, w, h, ms.
+  const item = { id: 'a1'.repeat(32), key: 'b2'.repeat(32), nonce: 'c3'.repeat(24), mime: 'image/jpeg', chunks: 2, bytes: 32768 + 17, sha256: 'd4'.repeat(32), w: 1080, h: 1920, ms: 0 }
+  ok(t, 'dm.send', { to: KEY, text: '', media: [item] }, { to: KEY, text: '', media: [item] })
+  const four = ['a1', 'a2', 'a3', 'a4'].map((h) => ({ ...item, id: h.repeat(32) }))
+  ok(t, 'dm.send', { to: KEY, text: 'legenda', replyTo: ID, media: four })
+  t.is(validateParams('dm.send', { to: KEY, text: '', media: [item, item] }).message, 'parâmetro inválido: media', 'repeated blob ids refused')
+  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) ok(t, 'dm.send', { to: KEY, text: '', media: [{ ...item, mime }] })
+  ok(t, 'dm.send', { to: KEY, text: '', media: [{ ...item, chunks: 1, bytes: 17 }] })
+  ok(t, 'dm.send', { to: KEY, text: '', media: [{ ...item, chunks: 1, bytes: 32768 }] })
+  ok(t, 'dm.send', { to: KEY, text: '', media: [{ ...item, chunks: 257, bytes: 257 * 32768 }] })
+  ok(t, 'dm.send', { to: KEY, text: '', media: [{ ...item, w: 16384, h: 1 }] })
+  t.is(validateParams('dm.send', { to: KEY, text: '', media: [...four, { ...item, id: 'a5'.repeat(32) }] }).message, 'parâmetro inválido: media')
+  bad(t, 'dm.send', { to: KEY, text: 'x'.repeat(MAX_TEXT + 1), media: [item] }, 'text too long with media')
+  const badItems = [
+    ['chunks 0', { chunks: 0, bytes: 0 }],
+    ['chunks 258', { chunks: 258, bytes: 257 * 32768 + 1 }],
+    ['bytes over the cap', { chunks: 257, bytes: 257 * 32768 + 1 }],
+    ['bytes only the MAC', { chunks: 1, bytes: 16 }],
+    ['chunks not ceil(bytes / 32768)', { chunks: 3, bytes: 32768 + 17 }],
+    ['chunks below ceil(bytes / 32768)', { chunks: 1, bytes: 32769 }],
+    ['fractional bytes', { bytes: 32768.5 }],
+    ['string chunks', { chunks: '2' }],
+    ['uppercase id', { id: 'A1'.repeat(32) }],
+    ['short key', { key: 'b2'.repeat(31) }],
+    ['nonce of 46 hex', { nonce: 'c3'.repeat(23) }],
+    ['nonce of 64 hex', { nonce: 'c3'.repeat(32) }],
+    ['sha256 not hex', { sha256: 'zz'.repeat(32) }],
+    ['video mime', { mime: 'video/mp4' }],
+    ['svg mime', { mime: 'image/svg+xml' }],
+    ['w 0', { w: 0 }],
+    ['h 16385', { h: 16385 }],
+    ['ms 1', { ms: 1 }],
+    ['ms null', { ms: null }]
+  ]
+  for (const [label, patch] of badItems) {
+    t.is(validateParams('dm.send', { to: KEY, text: '', media: [{ ...item, ...patch }] }).message, 'parâmetro inválido: media', label)
+  }
+  for (const k of Object.keys(item)) {
+    const missing = { ...item }
+    delete missing[k]
+    bad(t, 'dm.send', { to: KEY, text: '', media: [missing] }, 'media item without ' + k)
+  }
+  // The post descriptor keys and an extra field are not a DM media item.
+  for (const k of ['core', 'width', 'height', 'card', 'fwd', 'path']) {
+    bad(t, 'dm.send', { to: KEY, text: '', media: [{ ...item, [k]: 1 }] }, 'media item with ' + k)
+  }
+  bad(t, 'dm.send', { to: KEY, text: '', media: [item, undefined] }, 'undefined item')
+  // eslint-disable-next-line no-sparse-arrays
+  bad(t, 'dm.send', { to: KEY, text: '', media: [item, , item] }, 'sparse media list')
+  bad(t, 'dm.send', { to: KEY, text: '', media: item }, 'media not a list')
+  bad(t, 'dm.send', { to: KEY, text: '', media: [Object.assign(Object.create({ x: 1 }), item)] }, 'item with a prototype')
+
+  t.ok(isMutating('dm.putMedia'))
+  const put = { name: 'ab'.repeat(16) + '.bin', mime: 'image/png', width: 640, height: 480 }
+  ok(t, 'dm.putMedia', put, put)
+  for (const k of Object.keys(put)) {
+    const p = { ...put }
+    delete p[k]
+    t.is(validateParams('dm.putMedia', p).message, 'parâmetro obrigatório: ' + k)
+  }
+  for (const name of ['../x.bin', 'ab'.repeat(16) + '.jpg', 'AB'.repeat(16) + '.bin', '/tmp/' + 'ab'.repeat(16) + '.bin', 'ab'.repeat(16)]) {
+    bad(t, 'dm.putMedia', { ...put, name }, 'name ' + name)
+  }
+  bad(t, 'dm.putMedia', { ...put, mime: 'video/mp4' })
+  bad(t, 'dm.putMedia', { ...put, width: 0 })
+  bad(t, 'dm.putMedia', { ...put, height: 16385 })
+  // No bytes over RPC and no recipient: the descriptor goes in a later dm.send.
+  for (const k of ['bytes', 'data', 'path', 'to', 'key']) bad(t, 'dm.putMedia', { ...put, [k]: 'ab' }, 'extra ' + k)
 
   t.absent(isMutating('dm.thread'))
+  t.is(DM_THREAD_LIMIT_MAX, 46)
   ok(t, 'dm.thread', { peer: KEY }, { peer: KEY, limit: 30 })
-  ok(t, 'dm.thread', { peer: KEY, before: ID, limit: 50 }, { peer: KEY, before: ID, limit: 50 })
+  ok(t, 'dm.thread', { peer: KEY, before: ID, limit: DM_THREAD_LIMIT_MAX }, { peer: KEY, before: ID, limit: DM_THREAD_LIMIT_MAX })
   ok(t, 'dm.thread', { peer: KEY, limit: 1 })
   bad(t, 'dm.thread', {})
   bad(t, 'dm.thread', { peer: KEY, limit: 0 })
-  bad(t, 'dm.thread', { peer: KEY, limit: 51 })
+  bad(t, 'dm.thread', { peer: KEY, limit: DM_THREAD_LIMIT_MAX + 1 })
+  bad(t, 'dm.thread', { peer: KEY, limit: 50 })
   bad(t, 'dm.thread', { peer: KEY, limit: 100 })
   bad(t, 'dm.thread', { peer: KEY, before: 'x' })
   bad(t, 'dm.thread', { peer: KEY, offset: 0 })
@@ -1190,6 +1271,14 @@ test('dm.* (Conversas)', (t) => {
     t.is(validateParams('dm.reportSign', p).message, 'parâmetro obrigatório: ' + k)
   }
   bad(t, 'dm.reportSign', { ...base, quote: '' }, 'empty quote')
+  // anexo: the hex SHA-256 of an attached image; only with it may the quote
+  // be empty (a media-only message).
+  const anexo = 'cd'.repeat(32)
+  ok(t, 'dm.reportSign', { ...base, anexo }, { ...base, text: '', anexo })
+  ok(t, 'dm.reportSign', { ...base, quote: '', anexo }, { ...base, text: '', quote: '', anexo })
+  t.is(validateParams('dm.reportSign', { ...base, quote: '' }).message, 'parâmetro inválido: quote')
+  for (const a of ['', anexo.toUpperCase(), anexo.slice(1), anexo + '0', 1, null]) bad(t, 'dm.reportSign', { ...base, anexo: a }, 'anexo ' + a)
+  for (const k of ['bytes', 'media', 'mime', 'image']) bad(t, 'dm.reportSign', { ...base, anexo, [k]: 'AAAA' }, 'extra ' + k)
   bad(t, 'dm.reportSign', { ...base, quote: 'x'.repeat(MAX_TEXT + 1) }, 'quote too long')
   bad(t, 'dm.reportSign', { ...base, text: '😀'.repeat(281) }, 'text of 281 code points')
   for (const target of [KEY.toUpperCase(), KEY.slice(1), 1, null]) bad(t, 'dm.reportSign', { ...base, target }, 'target ' + target)

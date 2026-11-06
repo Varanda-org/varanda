@@ -97,6 +97,9 @@ const TEXT = {
   title: 'Moderação',
   login: 'Entrar com Google',
   logout: 'Sair',
+  anexoLabel: 'com mídia',
+  anexoProvenance: 'imagem enviada por quem denunciou, não conferida',
+  anexoAlt: 'Imagem anexada à denúncia',
   quoteLabel: 'Texto enviado por quem denunciou, não conferido.',
   groupMessage: 'mensagem de grupo',
   groupBlockWarning: 'O bloqueio do grupo vale para todas as mensagens dele, de todos os membros.',
@@ -314,7 +317,8 @@ function reportRow (r) {
     note: str(r.note),
     actor: actorOf(r),
     ai: has(r, 'ia') ? aiOf(r.ia) : null,
-    verified: has(r, 'publicacao') ? verifiedOf(r.publicacao) : null
+    verified: has(r, 'publicacao') ? verifiedOf(r.publicacao) : null,
+    anexo: has(r, 'anexo') && r.anexo !== null && typeof r.anexo === 'object'
   }
 }
 
@@ -556,6 +560,10 @@ function createPanel (env) {
   // and session, beside the run() queue like the stats GET; a hint for the
   // 'Bloquear grupo' button only, the server checks again on decide.
   const groupInfo = new Map()
+  // One <img> per report kept across renders: render() replaces the whole
+  // page and the image is served no-store, so a fresh node on every render
+  // would fetch it again and spend the moderator's request allowance.
+  const anexoImgs = new Map()
   let groupsLast = Promise.resolve()
   let session = 0
   let gen = 0
@@ -574,6 +582,9 @@ function createPanel (env) {
     if (p.text !== undefined) node.textContent = p.text
     if (p.type) node.setAttribute('type', p.type)
     if (p.dir) node.setAttribute('dir', p.dir)
+    // <img>: a same-origin path built here, never a peer-supplied URL.
+    if (p.src) node.setAttribute('src', p.src)
+    if (p.alt !== undefined) node.setAttribute('alt', p.alt)
     if (p.pressed !== undefined) node.setAttribute('aria-pressed', p.pressed ? 'true' : 'false')
     if (p.maxLength) node.setAttribute('maxlength', String(p.maxLength))
     if (p.value !== undefined) node.value = p.value
@@ -588,6 +599,15 @@ function createPanel (env) {
     if (p.label !== undefined) node.setAttribute('aria-label', p.label)
     for (const c of children) if (c) node.appendChild(c)
     return node
+  }
+
+  function anexoImg (id) {
+    let img = anexoImgs.get(id)
+    if (img === undefined) {
+      img = h('img', { className: 'anexo', src: API + 'reports/' + encodeURIComponent(id) + '/anexo', alt: TEXT.anexoAlt })
+      anexoImgs.set(id, img)
+    }
+    return img
   }
 
   function button (text, onClick, extra) {
@@ -678,6 +698,10 @@ function createPanel (env) {
     session++
     statsData = null
     groupInfo.clear()
+    // Report images leave the tab with the session: release each node's
+    // image and forget it, so a later sign-in fetches under its own session.
+    for (const img of anexoImgs.values()) img.removeAttribute('src')
+    anexoImgs.clear()
     statsLoading = false
     statsError = ''
     notice = ''
@@ -1023,6 +1047,9 @@ function createPanel (env) {
         grouped ? groupBlock(r, groupChecked ? info : null) : null,
         r.quote !== '' ? h('p', { className: 'label', text: r.kind === 'dm' ? TEXT.dmQuoteLabel : TEXT.quoteLabel }) : null,
         r.quote !== '' ? untrusted('blockquote', r.quote) : null,
+        r.anexo ? h('p', { className: 'label', text: TEXT.anexoLabel }) : null,
+        r.anexo ? anexoImg(r.id) : null,
+        r.anexo ? h('p', { className: 'label', text: TEXT.anexoProvenance }) : null,
         r.text !== '' ? h('p', { className: 'label', text: TEXT.commentLabel }) : null,
         r.text !== '' ? untrusted('p', r.text) : null,
         h('p', { className: 'meta', text: 'denunciada por: ' + who(r.reporter.member, r.reporter.username) }),
