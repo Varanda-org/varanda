@@ -44,14 +44,18 @@ test('help preserves the peek rule and search explanation', async (t) => {
 test('sign-in help explains synced recovery and phone QR while preserving passkey loss warnings', async (t) => {
   const { HELP, SHORT } = await load()
   const text = HELP.entrar.paragraphs.join(' ')
-  for (const fact of ['sincroniza', 'QR code', 'Se perder a passkey, perde a conta.']) {
+  const { LOSS_TEXT } = await import('../src/recovery.js')
+  for (const fact of ['sincroniza', 'QR code', 'Passkeys e recuperação', LOSS_TEXT]) {
     t.ok(text.includes(fact), fact)
   }
   for (const paragraph of HELP.entrar.paragraphs) {
     t.absent(paragraph.includes('Gerenciador de Senhas do Google'))
   }
-  t.is(HELP.entrar.paragraphs[3], 'Se perder a passkey, perde a conta. Outra passkey é outra conta.')
-  t.is(SHORT.passkeyLoss, 'Se perder a passkey, perde a conta.')
+  t.absent(text.includes('Outra passkey é outra conta'), 'a passkey added in Ajustes opens the same account')
+  t.absent(text.includes('Se perder a passkey, perde a conta'), 'a recovery code or another passkey still opens it')
+  t.is(HELP.entrar.paragraphs[3], 'Em Ajustes → Passkeys e recuperação, cadastre outra passkey ou um código de recuperação: eles abrem a mesma conta. Uma passkey criada fora desse lugar abre outra conta.')
+  t.is(HELP.entrar.paragraphs[4], LOSS_TEXT)
+  t.is(SHORT.passkeyLoss, LOSS_TEXT)
 })
 
 test('link help keeps the account and privacy disclosures', async (t) => {

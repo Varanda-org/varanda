@@ -289,6 +289,7 @@ const { UsageError } = require('@varanda/core/lib/errors')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { signReport, signDmReport } = require('@varanda/core/lib/report')
 const { signTerms } = require('@varanda/core/lib/terms')
+const { signRecovery, blobHashOf } = require('@varanda/core/lib/recovery-proof')
 const { signInvite } = require('@varanda/core/lib/invite')
 const { signAge } = require('@varanda/core/lib/age')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
@@ -2287,6 +2288,38 @@ function createBrowserSession ({
       if (keyPair === null) throw new UsageError(store.LOCKED)
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
       const signature = signTerms({ nonce, member: own, association: cfg.association, version }, keyPair)
+      return { signature }
+    }),
+
+    // Signs a recovery-entry request with the in-memory key (docs/rpc.md
+    // 5.90), exactly like terms.sign: not a diary write, no append, no
+    // network, and the result never carries the payload, the blob or a key.
+    // The session fills in member and association and hashes the blob
+    // itself, so the caller can never sign a hash of something else. It uses
+    // only the diary key pair, never the group PRF, which native installs do
+    // not hold.
+    'recovery.sign': serial(async ({ action, nonce, kind, lookupId, blob }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      const put = action === 'put'
+      const list = action === 'list'
+      const fields = {
+        action,
+        nonce,
+        member: own,
+        association: cfg.association,
+        kind: list ? '' : kind,
+        lookupId: list ? '' : lookupId,
+        blobHash: put ? blobHashOf({ kind, lookupId, blob }) : ''
+      }
+      const signature = signRecovery(fields, keyPair)
       return { signature }
     }),
 

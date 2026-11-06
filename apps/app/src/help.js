@@ -2,6 +2,7 @@
 // Keys match tab and setup-step ids so callers can use those ids directly.
 import { PEEK_RULE_TEXT } from './peek.js'
 import { SEARCH_HINT, SEARCH_MEMORY } from './topics.js'
+import { LOSS_TEXT } from './recovery.js'
 
 export const HELP = Object.freeze({
   rua: Object.freeze({
@@ -68,7 +69,8 @@ export const HELP = Object.freeze({
       'Você entra com uma passkey: sem senha e sem e-mail.',
       'Ela fica no gerenciador de senhas do aparelho e abre com biometria ou PIN.',
       'Guarde-a num gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro): é ele que devolve a passkey num aparelho novo. Num computador sem esse gerenciador, use o celular: para criar a conta, toque em criar com o celular; para entrar, toque em Entrar com a passkey e escolha usar outro aparelho. Nos dois casos, leia com a câmera do celular o QR code que aparece na tela do computador.',
-      'Se perder a passkey, perde a conta. Outra passkey é outra conta.'
+      'Em Ajustes → Passkeys e recuperação, cadastre outra passkey ou um código de recuperação: eles abrem a mesma conta. Uma passkey criada fora desse lugar abre outra conta.',
+      LOSS_TEXT
     ])
   }),
   vinculo: Object.freeze({
@@ -166,7 +168,7 @@ export const HELP = Object.freeze({
 
 export const SHORT = Object.freeze({
   link: 'A associação guarda o vínculo com sua conta Google; o e-mail nunca vai para o seu perfil nem para o seu diário.',
-  passkeyLoss: 'Se perder a passkey, perde a conta.',
+  passkeyLoss: LOSS_TEXT,
   followsPublic: 'Quem você segue e quem segue você é público.',
   install: 'Abra o menu do navegador e escolha instalar o app. No iPhone: Compartilhar e depois Adicionar à Tela de Início.',
   reportPrivacy: 'A pessoa denunciada não vê quem denunciou.',

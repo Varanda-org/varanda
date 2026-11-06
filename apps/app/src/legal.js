@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 18
+export const LEGAL_VERSION = 19
 export const LEGAL_DATE = '06/11/2026'
-export const REVIEW_NOTE = 'Versão 18, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 19, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -27,12 +27,14 @@ export const TERMS = {
     {
       heading: 'Sua conta e sua passkey',
       paragraphs: [
-        'Na versão web, sua conta vem de uma passkey. Perder a passkey é perder a conta. Outra passkey cria outra conta. A passkey fica no gerenciador de senhas do seu aparelho. Não há arquivo de recuperação nem exportação da chave.',
+        'Na versão web, sua conta vem de uma passkey, que fica no gerenciador de senhas do seu aparelho. A passkey com que a conta foi criada continua abrindo a conta, também sem internet, em qualquer aparelho. Não há exportação da chave.',
+        'Em Ajustes, na tela Passkeys e recuperação, você pode adicionar até quatro outras passkeys e um código de recuperação para a mesma conta. Adicionar uma passkey ou um código de recuperação exige a conta vinculada ao Google. Uma passkey adicionada ou o código precisa de internet e do serviço de conta toda vez que você entra de novo com ela ou com ele; uma sessão que continua aberta no aparelho não precisa. Entrar com o código de recuperação termina com a criação de uma passkey nova naquele aparelho. Sem nenhuma passkey e sem o código, a conta não pode ser recuperada. Remover ou trocar o código ou uma passkey adicionada impede novas entradas com ele ou com ela, mas não tira o acesso de quem já entrou, porque a chave da conta não pode ser trocada; se um deles vazar, o caminho seguro é criar uma conta nova.',
+        'O Varanda não consegue invalidar a passkey com que a conta foi criada. Para deixar de usá-la, apague essa passkey no gerenciador de senhas.',
         'Na web hospedada, o vínculo com a conta Google dá o certificado de membro e o @nome.',
         'O Varanda é para pessoas com 16 anos ou mais. Esse limite é uma regra adotada pelo Varanda com base no ECA Digital. Na web hospedada, antes de a conta ser liberada, a idade é confirmada por um serviço parceiro de verificação, a Didit. Isso vale para todos os membros da web hospedada, inclusive quem entrou antes, e o app fica bloqueado até a verificação dar certo.',
         'A verificação costuma estimar a idade por uma selfie e pode pedir um documento. O serviço de conta guarda só a faixa de idade (16 a 17 anos ou 18 anos ou mais), nunca a foto, o documento ou a data de nascimento. Se o resultado não for conclusivo, você pode tentar de novo com um documento.',
         'No app nativo, com certificado dado pela associação, essa verificação ainda não é feita nesta versão.',
-        'O guardião e a recuperação por e-mail são planejados.'
+        'O guardião e a recuperação por e-mail continuam planejados.'
       ]
     },
     {
@@ -208,7 +210,7 @@ export const PRIVACY = {
     {
       heading: 'Segurança e sessão no navegador',
       paragraphs: [
-        'Na web, a chave da conta vem da passkey. Perder a passkey é perder a conta. Outra passkey corresponde a outra conta.',
+        'Na web, a chave da conta vem da passkey com que a conta foi criada, e essa passkey continua abrindo a conta, também sem internet, em qualquer aparelho. Você pode adicionar até quatro outras passkeys e um código de recuperação para a mesma conta. Adicionar uma passkey ou um código de recuperação exige a conta vinculada ao Google. Para cada uma, o serviço de conta guarda só um texto cifrado que ele não consegue abrir, o tipo, a data, a chave pública da conta e um identificador que ele não consegue ligar a uma passkey. Uma passkey adicionada ou o código precisa do serviço de conta toda vez que você entra de novo com ela ou com ele (uma sessão que continua aberta no aparelho não precisa), e entrar com o código termina com a criação de uma passkey nova naquele aparelho. Sem nenhuma passkey e sem o código, a conta não pode ser recuperada. Remover ou trocar o código ou uma passkey adicionada impede novas entradas com ele ou com ela, mas não tira o acesso de quem já entrou, porque a chave da conta não pode ser trocada; se um deles vazar, o caminho seguro é criar uma conta nova. O Varanda não consegue invalidar a passkey original: para deixar de usá-la, apague-a no gerenciador de senhas. O guardião e a recuperação por e-mail continuam planejados.',
         'Para manter você conectado, o navegador guarda o resultado da passkey cifrado, preso ao endereço do app e à identidade. A sessão dura até você tocar em Sair ou ficar 30 dias sem abrir o app. Cada abertura renova esse prazo.',
         'A chave que cifra a sessão fica no mesmo perfil do navegador. Uma cópia desse perfil ou um script que rode no endereço do app pode permitir agir como você. Quem usa seu aparelho desbloqueado também pode publicar em seu nome.',
         'A chave secreta da moderação fica fora do servidor. A lista de bloqueio é assinada e não contém nome, e-mail, conta Google nem motivo da decisão.'

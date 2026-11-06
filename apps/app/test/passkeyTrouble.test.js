@@ -156,6 +156,35 @@ test('Identidade feeds the cards: phone transport, created passkeys and a pendin
   t.ok(resetBody.includes('setStaleIds([])'), 'a reset clears the names')
 })
 
+test('Identidade: the code recovery card is exclusive and owns its pending creation', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'Identidade.js'), 'utf8')
+  t.absent(src.includes('needsPasskey && !showComplete'), 'a pending creation never drops to the welcome card')
+  const start = src.indexOf('} else if (needsPasskey) {')
+  t.ok(start > 0, 'the recovery card is its own branch')
+  const card = src.slice(start, src.indexOf('} else {', start))
+  t.ok(card.includes("<Btn label='concluir a criação da passkey' onPress={onFinishComplete}"), 'its own concluir')
+  t.ok(card.includes("<Btn label='Criar passkey nova' onPress={onFinishRecovery}"))
+  t.ok(card.includes("<Btn label='cancelar' secondary onPress={onCancelRecovery}"))
+  for (const other of ['Entrar com a passkey', 'doComplete', 'onPhonePress', 'CODE_LABEL', 'TextInput', 'onOtherPasskey']) {
+    t.absent(card.includes(other), 'no ' + other + ' on the recovery card')
+  }
+  t.ok(src.includes("const onFinishComplete = () => ceremony(() => passkey.complete(), true, true, 'finish')"), 'concluir runs in the press')
+  const pendingBranch = src.slice(src.indexOf('if (r && r.pending === true) {'), src.indexOf('if (r && r.needsPasskey === true) {'))
+  t.absent(pendingBranch.includes('setNeedsPasskey'), 'a pending result keeps needsPasskey')
+  t.ok(src.includes("if (mode === 'finish' && err && err.code === 'RECOVERY_BAD') setNeedsPasskey(false)"), 'a dropped root ends the card')
+  t.is(src.split('setNeedsPasskey(false)').length - 1, 3, 'cleared only on success, cancel and a definitive failure')
+})
+
+test('Identidade: no code recovery while another creation awaits concluir', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'Identidade.js'), 'utf8')
+  t.ok(/\{showComplete\n\s+\? null\n\s+: codeOpen/.test(src), 'the code entry and field are hidden beside concluir')
+  t.ok(src.includes("if (code === '' || showComplete) return"), 'and a submit is refused then too')
+})
+
 test('notSyncedSteps acknowledges requested cleanup without hiding names still to remove', async (t) => {
   const { notSyncedSteps, deleteStep } = await load()
   const none = notSyncedSteps({ userIds: [], cleaned: true })

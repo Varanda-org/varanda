@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 18)
+  t.is(LEGAL_VERSION, 19)
   t.is(LEGAL_DATE, '06/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 18, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 19, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: complete documents with plain, visible text and project URLs', async (t) => {
@@ -56,7 +56,30 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '07d228c1e98f3a65668393a295e20d7092906c1ad70ce340241495c737b19895', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'e66b74a246507b7bf46754d612f45c8fcd4e2c6f782c267f2f373399e425a4a4', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+})
+
+test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.absent(/outra passkey (?:cria|corresponde a) outra conta/i.test(text(doc)), doc.title + ': no other account per passkey')
+    t.absent(text(doc).includes('Perder a passkey é perder a conta'), doc.title + ': no loss of account per passkey')
+    t.ok(text(doc).includes('até quatro outras passkeys e um código de recuperação para a mesma conta'), doc.title + ': extra passkeys')
+    t.ok(text(doc).includes('criação de uma passkey nova naquele aparelho'), doc.title + ': code ends with a new passkey')
+    t.ok(text(doc).includes('Sem nenhuma passkey e sem o código, a conta não pode ser recuperada'), doc.title + ': no recovery without both')
+    t.ok(text(doc).includes('Adicionar uma passkey ou um código de recuperação exige a conta vinculada ao Google'), doc.title + ': extra entries need a Google-linked account')
+    // The original passkey is never looked up at the service; an added passkey
+    // or the code is fetched from it at every new sign-in ceremony.
+    t.ok(text(doc).includes('também sem internet, em qualquer aparelho'), doc.title + ': original passkey works offline')
+    t.ok(text(doc).includes('Uma passkey adicionada ou o código precisa'), doc.title + ': added passkey or code needs the service')
+    t.ok(text(doc).includes('toda vez que você entra de novo com ela ou com ele'), doc.title + ': at every new sign-in')
+    t.ok(text(doc).includes('uma sessão que continua aberta no aparelho não precisa'), doc.title + ': a kept session avoids it')
+    t.absent(text(doc).includes('Num aparelho novo, a primeira entrada'), doc.title + ': no first-use-only claim')
+  }
+  t.ok(text(TERMS).includes('Passkeys e recuperação'))
+  t.ok(text(PRIVACY).includes('um texto cifrado que ele não consegue abrir'))
+  t.ok(text(PRIVACY).includes('um identificador que ele não consegue ligar a uma passkey'))
 })
 
 test('legal: pages are described in Terms and Privacy, including service-readable messages', async (t) => {

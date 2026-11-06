@@ -6,7 +6,8 @@
 // wss://<installation>/seeder (bare-ws). It answers the same handlers as
 // the browser page's node plus the IPC-only host controls of docs/rpc.md
 // 5.50 to 5.56, 5.88 and 5.89 (./identity-install.js, media.uploadFile,
-// dm.putMedia and media.readFile below).
+// dm.putMedia and media.readFile below), and recovery's 5.91 to 5.94
+// (./identity-install.js).
 //
 // The storage's exclusive LOCK (fileNodeStorage lock(), fs-native-extensions)
 // is taken before anything is opened, and every handler waits for it: a
@@ -168,7 +169,11 @@ function createWebNode (args, { onInternalError } = {}) {
     'identity.status': () => identity.status(),
     'identity.reset': () => afterLock(() => identity.reset()),
     'identity.forget': () => afterLock(() => identity.forget()),
-    'identity.sessionSaved': () => identity.sessionSaved()
+    'identity.sessionSaved': () => identity.sessionSaved(),
+    'identity.recoveryLookup': (params) => identity.recoveryLookup(params),
+    'identity.recoveryOpen': (params) => identity.recoveryOpen(params),
+    'identity.recoveryWrap': (params) => identity.recoveryWrap(params),
+    'identity.recoveryBind': (params) => identity.recoveryBind(params)
   }
   for (const [name, fn] of Object.entries(controls)) {
     handlers[name] = lifecycle.guard(async (params) => {
@@ -193,9 +198,18 @@ function createWebNode (args, { onInternalError } = {}) {
     handlers,
     attach: (emit) => session.attach(emit),
     detach: () => session.detach(),
-    close: () => {
+    // The held root and any pending wrap key go before and after the drain
+    // (a control still running could set them again); the read files go
+    // once any lock in flight settled.
+    close: async () => {
+      identity.close()
       lockGeneration++
-      return lifecycle.close().finally(() => locking.then(clearReads, () => {}))
+      try {
+        return await lifecycle.close()
+      } finally {
+        identity.close()
+        await locking.then(clearReads, () => {})
+      }
     }
   }
 }

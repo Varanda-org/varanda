@@ -26,6 +26,7 @@ const { latestUsername } = require('@varanda/core/lib/username')
 const { verifyAccountLink } = require('@varanda/core/lib/account-link')
 const { verifyReport } = require('@varanda/core/lib/report')
 const { verifyTerms } = require('@varanda/core/lib/terms')
+const { verifyRecovery, blobHashOf } = require('@varanda/core/lib/recovery-proof')
 const { verifyInvite } = require('@varanda/core/lib/invite')
 const { verifyAge } = require('@varanda/core/lib/age')
 const { verifyPush, endpointHash } = require('@varanda/core/lib/push-proof')
@@ -687,6 +688,64 @@ test('invite.sign: the unlocked key signs the signup-invite request, locked and 
 
   const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
   const mismatch = await errorOf(other.web.request('invite.sign', params))
+  t.is(mismatch && mismatch.message, MISMATCH, 'a pair that does not match the stored diary signs nothing')
+})
+
+test('recovery.sign: the unlocked key signs put, remove and list, locked and mismatched refuse', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const nonce = 'A-_9'.repeat(11)
+  const lookupId = 'cd'.repeat(32)
+  const blob = { v: 1, kind: 'passkey', nonce: '01'.repeat(24), ciphertext: '02'.repeat(82) }
+  const put = { action: 'put', nonce, kind: 'passkey', lookupId, blob }
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('recovery.sign', put))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await certified(t, { storage, assoc, keyPair })
+  const before = await s.web.request('log.read', {})
+  const base = { nonce, member: s.key, association: assoc.hex }
+
+  const r = await s.web.request('recovery.sign', put)
+  t.alike(Object.keys(r), ['signature'], 'only the signature: no payload, blob or key')
+  t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+  const fields = { ...base, action: 'put', kind: 'passkey', lookupId, blobHash: blobHashOf({ kind: 'passkey', lookupId, blob }) }
+  t.alike(verifyRecovery(fields, r.signature), { ok: true }, 'verifies against the diary key with the hash the service recomputes')
+  t.alike(verifyRecovery({ ...fields, blobHash: 'ef'.repeat(32) }, r.signature), { ok: false, reason: 'bad-signature' }, 'bound to the blob')
+  t.alike(verifyRecovery({ ...fields, action: 'remove', blobHash: '' }, r.signature), { ok: false, reason: 'bad-signature' }, 'a put is never a remove')
+  t.alike(verifyTerms({ nonce, member: s.key, association: assoc.hex, version: 1 }, r.signature), { ok: false, reason: 'bad-signature' }, 'not a terms acceptance')
+
+  const rm = await s.web.request('recovery.sign', { action: 'remove', nonce, kind: 'passkey', lookupId })
+  t.alike(Object.keys(rm), ['signature'])
+  t.alike(verifyRecovery({ ...base, action: 'remove', kind: 'passkey', lookupId, blobHash: '' }, rm.signature), { ok: true }, 'remove verifies')
+
+  const ls = await s.web.request('recovery.sign', { action: 'list', nonce })
+  t.alike(Object.keys(ls), ['signature'])
+  t.alike(verifyRecovery({ ...base, action: 'list', kind: '', lookupId: '', blobHash: '' }, ls.signature), { ok: true }, 'list verifies')
+
+  for (const k of ['member', 'association', 'blobHash']) {
+    const extra = await errorOf(s.web.request('recovery.sign', { ...put, [k]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot choose the ' + k)
+  }
+  const after = await s.web.request('log.read', {})
+  t.is(after.entries.length, before.entries.length, 'diary length unchanged')
+  t.alike(after, before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('recovery.sign', put))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike(s.internal, [], 'no internal error')
+  await s.node.close()
+
+  const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
+  const mismatch = await errorOf(other.web.request('recovery.sign', put))
   t.is(mismatch && mismatch.message, MISMATCH, 'a pair that does not match the stored diary signs nothing')
 })
 

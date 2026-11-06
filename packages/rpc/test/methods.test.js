@@ -21,16 +21,16 @@ test('method list and mutating set', (t) => {
     'dm.enable', 'dm.list', 'dm.lookup', 'dm.pull', 'dm.putMedia', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seen',
-    'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.reset', 'identity.sessionSaved',
-    'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.readFile', 'media.uploadFile', 'node.close', 'node.info', 'notices.list',
+    'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
+    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.readFile', 'media.uploadFile', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read',
-    'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'report.sign', 'repost.set',
+    'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
     'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
-    'identity.install', 'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile', 'node.close', 'page.register', 'post.create', 'post.delete',
+    'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
     'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
   ])
@@ -1192,6 +1192,104 @@ test('identity.install', (t) => {
   for (const rpId of ['', 'a'.repeat(254), 1, null]) bad(t, 'identity.install', { ...base, rpId }, 'bad rpId')
   for (const resumed of ['true', 1, 0, null]) bad(t, 'identity.install', { ...base, resumed }, 'bad resumed')
   bad(t, 'identity.install', { ...base, secretKey: KEY })
+})
+
+const RBLOB = { v: 1, kind: 'passkey', nonce: 'cd'.repeat(24), ciphertext: 'cd'.repeat(82) }
+const RNONCE = 'A-_9'.repeat(11)
+
+test('recovery.sign', (t) => {
+  t.absent(isMutating('recovery.sign'))
+  const put = { action: 'put', nonce: RNONCE, kind: 'passkey', lookupId: KEY, blob: RBLOB }
+  ok(t, 'recovery.sign', put, put)
+  ok(t, 'recovery.sign', { ...put, kind: 'code', blob: { ...RBLOB, kind: 'code' } })
+  ok(t, 'recovery.sign', { action: 'remove', nonce: RNONCE, kind: 'code', lookupId: KEY })
+  ok(t, 'recovery.sign', { action: 'list', nonce: RNONCE }, { action: 'list', nonce: RNONCE })
+  const { blob, ...noBlob } = put
+  bad(t, 'recovery.sign', noBlob, 'put without blob')
+  bad(t, 'recovery.sign', { ...put, blob: { ...RBLOB, kind: 'code' } }, 'blob kind differs')
+  bad(t, 'recovery.sign', { action: 'remove', nonce: RNONCE, kind: 'code', lookupId: KEY, blob: RBLOB }, 'remove with blob')
+  bad(t, 'recovery.sign', { action: 'list', nonce: RNONCE, lookupId: KEY }, 'list with lookupId')
+  bad(t, 'recovery.sign', { action: 'list', nonce: RNONCE, kind: 'passkey' }, 'list with kind')
+  bad(t, 'recovery.sign', { action: 'list', nonce: RNONCE, blob: RBLOB }, 'list with blob')
+  for (const k of ['action', 'nonce', 'kind', 'lookupId']) {
+    const p = { ...put }
+    delete p[k]
+    bad(t, 'recovery.sign', p, 'missing ' + k)
+  }
+  for (const action of ['get', '', null, 1]) bad(t, 'recovery.sign', { ...put, action }, 'action ' + action)
+  for (const kind of ['prf', 'Passkey', null]) bad(t, 'recovery.sign', { ...put, kind }, 'kind ' + kind)
+  for (const lookupId of ['AB'.repeat(32), 'ab'.repeat(31), '']) bad(t, 'recovery.sign', { ...put, lookupId }, 'lookupId')
+  bad(t, 'recovery.sign', { ...put, nonce: 'short' }, 'nonce')
+  for (const k of ['member', 'association', 'blobHash', 'secret']) bad(t, 'recovery.sign', { ...put, [k]: KEY }, 'extra ' + k)
+  const blobs = [
+    { ...RBLOB, ciphertext: 'cd'.repeat(81) },
+    { ...RBLOB, ciphertext: 'cd'.repeat(83) },
+    { ...RBLOB, ciphertext: 'CD'.repeat(82) },
+    { ...RBLOB, nonce: 'cd'.repeat(23) },
+    { ...RBLOB, v: 2 },
+    { ...RBLOB, kind: 'x' },
+    { ...RBLOB, extra: 1 },
+    { v: 1, kind: 'passkey', nonce: 'cd'.repeat(24) },
+    null,
+    'cd'.repeat(82)
+  ]
+  for (const b of blobs) bad(t, 'recovery.sign', { ...put, blob: b }, 'bad blob ' + JSON.stringify(b))
+})
+
+test('identity.recoveryLookup', (t) => {
+  t.absent(isMutating('identity.recoveryLookup'))
+  const pk = { kind: 'passkey', secret: 'cd'.repeat(32) }
+  const code = { kind: 'code', code: 'ABCD-EFGH' }
+  ok(t, 'identity.recoveryLookup', pk, pk)
+  ok(t, 'identity.recoveryLookup', code, code)
+  ok(t, 'identity.recoveryLookup', { kind: 'code', code: 'x'.repeat(64) })
+  bad(t, 'identity.recoveryLookup', { ...pk, code: 'ABCD' }, 'passkey with both secret and code')
+  bad(t, 'identity.recoveryLookup', { ...code, secret: 'cd'.repeat(32) }, 'code with both secret and code')
+  bad(t, 'identity.recoveryLookup', { kind: 'passkey' }, 'passkey with neither')
+  bad(t, 'identity.recoveryLookup', { kind: 'code' }, 'code with neither')
+  bad(t, 'identity.recoveryLookup', { kind: 'passkey', code: 'ABCD' }, 'passkey with code only')
+  bad(t, 'identity.recoveryLookup', { kind: 'code', secret: 'cd'.repeat(32) }, 'code with secret only')
+  for (const c of ['', 'x'.repeat(65), 1, null]) bad(t, 'identity.recoveryLookup', { kind: 'code', code: c }, 'bad code')
+  for (const s of ['CD'.repeat(32), 'cd'.repeat(31), '', null]) bad(t, 'identity.recoveryLookup', { kind: 'passkey', secret: s }, 'bad secret')
+  bad(t, 'identity.recoveryLookup', { ...pk, member: KEY }, 'extra key')
+  bad(t, 'identity.recoveryLookup', { secret: 'cd'.repeat(32) }, 'missing kind')
+})
+
+test('identity.recoveryOpen', (t) => {
+  t.absent(isMutating('identity.recoveryOpen'))
+  const base = { blob: RBLOB, member: KEY }
+  ok(t, 'identity.recoveryOpen', base, base)
+  ok(t, 'identity.recoveryOpen', { ...base, blob: { ...RBLOB, kind: 'code' } })
+  bad(t, 'identity.recoveryOpen', { ...base, blob: { ...RBLOB, ciphertext: 'cd'.repeat(80) } }, 'ciphertext of the wrong length')
+  bad(t, 'identity.recoveryOpen', { blob: RBLOB }, 'missing member')
+  bad(t, 'identity.recoveryOpen', { member: KEY }, 'missing blob')
+  bad(t, 'identity.recoveryOpen', { ...base, member: 'ab'.repeat(31) }, 'bad member')
+  bad(t, 'identity.recoveryOpen', { ...base, secret: 'cd'.repeat(32) }, 'extra key')
+})
+
+test('identity.recoveryWrap', (t) => {
+  t.absent(isMutating('identity.recoveryWrap'))
+  const pk = { kind: 'passkey', secret: 'cd'.repeat(32) }
+  ok(t, 'identity.recoveryWrap', pk, pk)
+  ok(t, 'identity.recoveryWrap', { kind: 'code' }, { kind: 'code' })
+  bad(t, 'identity.recoveryWrap', { kind: 'passkey' }, 'passkey without secret')
+  bad(t, 'identity.recoveryWrap', { kind: 'code', secret: 'cd'.repeat(32) }, 'code with secret')
+  bad(t, 'identity.recoveryWrap', { kind: 'code', code: 'ABCD' }, 'code is never an input')
+  bad(t, 'identity.recoveryWrap', { ...pk, secret: 'cd'.repeat(31) }, 'bad secret')
+  bad(t, 'identity.recoveryWrap', {}, 'missing kind')
+})
+
+test('identity.recoveryBind', (t) => {
+  t.ok(isMutating('identity.recoveryBind'), 'rewrites the kv passkey record')
+  const base = { credentialId: 'AbC-_9', userId: KEY }
+  ok(t, 'identity.recoveryBind', base, base)
+  bad(t, 'identity.recoveryBind', { ...base, userId: '' }, 'empty userId')
+  bad(t, 'identity.recoveryBind', { ...base, userId: 'AB'.repeat(32) }, 'uppercase userId')
+  bad(t, 'identity.recoveryBind', { ...base, userId: 'ab'.repeat(31) }, 'short userId')
+  bad(t, 'identity.recoveryBind', { credentialId: 'AbC-_9' }, 'missing userId')
+  bad(t, 'identity.recoveryBind', { userId: KEY }, 'missing credentialId')
+  bad(t, 'identity.recoveryBind', { ...base, credentialId: 'a b' }, 'bad credentialId')
+  bad(t, 'identity.recoveryBind', { ...base, prf: 'cd'.repeat(32) }, 'extra key')
 })
 
 test('media.uploadFile with sealed', (t) => {

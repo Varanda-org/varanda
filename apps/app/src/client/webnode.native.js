@@ -2,7 +2,7 @@
 // session inside the Bare worklet, src/client/native.js), shaped like
 // connectBrowserNode's (src/client/browser.js; docs/rpc.md section 11) so
 // src/node.js treats both alike. The host controls cross the IPC as the
-// IPC-only methods of docs/rpc.md 5.50 to 5.56, 5.88 and 5.89.
+// IPC-only methods of docs/rpc.md 5.50 to 5.56, 5.88, 5.89, and recovery's 5.91 to 5.94.
 //
 // The identity API is src/identity.native.js (the passkey ceremony on the
 // device, the PRF output handed over by identity.install). The handle exists
@@ -112,7 +112,14 @@ export function webNodeHandle (request) {
     complete: native.complete,
     lock: afterLock(native.lock),
     signOut: afterLock(native.signOut),
-    reset: afterLock(native.reset)
+    reset: afterLock(native.reset),
+    unlockWrapped: native.unlockWrapped,
+    unlockWithCode: native.unlockWithCode,
+    cancelRecovery: native.cancelRecovery,
+    finishRecovery: native.finishRecovery,
+    addPasskey: native.addPasskey,
+    bindPasskey: native.bindPasskey,
+    makeRecoveryCode: native.makeRecoveryCode
   }
 
   // The bytes go through a file in the upload dir: one IPC request is capped

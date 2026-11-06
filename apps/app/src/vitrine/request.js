@@ -238,6 +238,10 @@ export function createVitrineRequest (fixtures) {
     'identity.reset': unavailable,
     'identity.forget': unavailable,
     'identity.sessionSaved': () => ({}),
+    'identity.recoveryLookup': unavailable,
+    'identity.recoveryOpen': unavailable,
+    'identity.recoveryWrap': unavailable,
+    'identity.recoveryBind': unavailable,
     'profile.delete': unavailable,
     'cert.add': () => ({ seq: 0 }),
     'account.sign': signed,
@@ -247,6 +251,7 @@ export function createVitrineRequest (fixtures) {
     'report.sign': signed,
     'dm.reportSign': signed,
     'terms.sign': signed,
+    'recovery.sign': signed,
     'page.sign': pageSign,
     'page.register': () => ({ actor: data.own }),
     'age.proof': ({ verified, since }) => {

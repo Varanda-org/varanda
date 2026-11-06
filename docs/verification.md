@@ -5345,3 +5345,63 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Há uma janela entre o autenticador criar a passkey e o registro local ser gravado: se a página cair nessa janela, a passkey existe no gerenciador sem registro local.
 - A recusa de uma passkey presa a um aparelho (chave de segurança, Windows Hello) vale só no navegador ou na instalação que a recusou: ela sobrevive ao "recomeçar" e ao limite de 32 registros, mas em outro navegador, depois de limpar os dados do site ou depois de reinstalar o app, a mesma passkey pode entrar e abrir uma conta nova presa àquele aparelho. A entrada não lê a flag BE, por decisão do dono: passkeys que já existem continuam entrando. Por isso o cartão de passkey recusada nunca manda abrir o Varanda em outro navegador. Decisão registrada na auditoria de segurança deste PR.
 - Pela mesma regra, uma chave de segurança que este navegador recusou na criação nunca entra neste navegador, mesmo que a pessoa tenha criado a conta com ela em outro computador; a conta continua acessível nos outros aparelhos.
+
+## 110. Segunda passkey, troca e código de recuperação (PR feat/passkey-recovery)
+
+### O que mudou
+
+- Toda chave do membro continua vindo da raiz: o resultado PRF de 32 bytes da passkey com que a conta foi criada. Uma passkey extra ou o código de recuperação nunca deriva chave: só desembrulha essa raiz, então a identidade, os seguidores e as chaves derivadas continuam os mesmos. Não há registro novo no diário, e o nó não guarda cópia local das raízes embrulhadas.
+- Passkey extra marcada: o identificador do usuário (`user.id`) é 16 bytes aleatórios seguidos de `WRAP_MARK` (`'varanda-wrap-v1\n'`, 16 bytes). Uma credencial marcada nunca é instalada direto: o PRF dela só deriva `lookupId` e `wrapKey`. Sem entrada no serviço, ela falha fechada e o nó fica bloqueado. Uma versão antiga do app, que não conhece a marca, criaria outra identidade com ela.
+- Blob e código como em `docs/protocol.md` ("Web member storage (B2)"): HKDF-SHA-256 com o sal `'varanda/member-recovery/hkdf/v1'` e os rótulos `.../lookup/v1` e `.../wrap/v1` seguidos do byte do tipo (0x01 passkey, 0x02 código); texto claro de 66 bytes (versão, tipo, chave do membro, raiz) selado com `crypto_secretbox_easy`; código de 20 bytes em 36 símbolos Crockford (32 do segredo e 4 de soma de conferência, os 20 primeiros bits de BLAKE2b-256), em 9 grupos de 4.
+- Entrar com uma passkey marcada busca o blob (`POST /account/recovery/fetch`), abre e instala a raiz presa a essa credencial. Entrar com uma credencial sem marca, ou que não devolveu identificador e não é a deste aparelho, instala o PRF da cerimônia direto, como antes, sem perguntar nada ao serviço: nenhum valor derivado do PRF de uma passkey comum vai ao serviço, e nenhuma resposta do serviço transforma uma passkey em outra identidade. Na busca de uma passkey marcada ou de um código, só o 404 `{ error: 'nao-encontrado', recovery: true }` quer dizer "sem entrada"; qualquer outra resposta (falha de rede, ou um 404 sem `recovery: true`, como a rota desconhecida de um servidor antigo) é o serviço indisponível, e o nó fica bloqueado nos dois casos.
+- Código de recuperação: o código deriva `lookupId`, o blob é buscado e aberto, e o nó guarda a raiz por até 120 s enquanto a pessoa toca "Criar passkey nova". A raiz é instalada presa a essa passkey nova (sessão guardada normal) e embrulhada para ela, e o app a cadastra com um put assinado. O código sozinho não instala nem guarda sessão. Se o put falha, o aparelho continua ligado e conectado, e Ajustes oferece cadastrar de novo.
+- Trocar a passkey deste aparelho: adiciona uma passkey marcada, cadastra e liga o aparelho a ela (`identity.recoveryBind` no worklet, `bindPasskey` no nó do navegador). A passkey original continua abrindo a conta onde existir; o Varanda não consegue invalidá-la, então a pessoa a apaga no gerenciador.
+- Serviço de conta: `recovery.json` (modo 0600, arquivo à parte como o `terms.json`, fora de `directory.*`), exatamente `{ v: 1, seq, entries, removed }`, com linhas `{ member, kind, nonce, ciphertext, createdAt, gen }` e lápides `{ member, removedAt, gen }` por `lookupId`. As gerações são uma sequência única e crescente do arquivo inteiro: todo put, todo remove e toda lápide da normalização recebem `gen` = ++`seq`; a mescla fica com o maior `seq` e, por `lookupId`, com o registro de maior geração; um `gen` acima de `seq` torna o arquivo inválido. Duas linhas de código vivas depois de uma mescla: fica só a de geração estritamente maior; linhas empatadas na maior geração ficam as duas (nenhuma é mais nova, e escolher por `lookupId` poderia apagar o código confirmado), e o próximo put de código enterra as duas. Lápides vencem em 30 dias (por `removedAt`); o teto de 32 por membro tira primeiro as de menor geração, mas nunca uma lápide com menos de 10 minutos (`STALE_WINDOW_MS`) nem a mais nova do membro. Depois de uma gravação incerta, `list` e `fetch` releem e mesclam o arquivo antes de responder, ou respondem `indisponivel`. Tetos: 4 passkeys extras e 1 código por membro (`limite-recuperacao`, HTTP 409); um código novo enterra o anterior. Rotas `POST /account/recovery/start|put|remove|list|fetch`; o `lookupId` vai só no corpo do POST. O nonce do `/start` não guarda estado (validade, bytes aleatórios e um HMAC do processo sobre o membro) e não tem cota por membro, então pedir nonces em nome de outro membro não o bloqueia; ele só é gasto depois de uma prova válida e fica na lista de gastos até a própria validade. Respostas: put `{ createdAt, changed }`, remove `{ changed }`, list `{ entries }`, fetch `{ member, kind, blob }` ou 404 `{ error: 'nao-encontrado', recovery: true }` (só essa resposta quer dizer "sem entrada" para o app). Fora de `account export` e `account status`. Arquivo corrompido: 503 só nessas rotas.
+- Declaração assinada `'varanda-recovery-v1'` (`packages/core/lib/recovery-proof.js`, RPC `recovery.sign`, `docs/rpc.md` 5.90): ação, nonce, membro, associação, tipo, `lookupId` e `blobHash`. O `blobHash` (BLAKE2b-256 de tipo, `lookupId`, nonce e texto cifrado) é calculado pela sessão e de novo pelo serviço; o app nunca calcula hash.
+- put e remove mantêm o resultado desconhecido num 503 depois de uma gravação possível: o app mostra o aviso de resultado desconhecido e "conferir" (lista), sem repetir o pedido sozinho.
+- Controles IPC do worklet: `identity.recoveryLookup`, `identity.recoveryOpen`, `identity.recoveryWrap` e `identity.recoveryBind` (`docs/rpc.md` 5.91 a 5.94). `identity.recoveryOpen` consome a chave de desembrulho pendente: repetido, falha com "entrada de recuperação inválida", e o app recomeça com uma cerimônia nova. `identity.recoveryBind` altera estado (regrava o registro da passkey) e só aceita um `userId` com a marca. Quando a entrada com passkey marcada não devolveu identificador, o app liga o aparelho ao `userId` sintético 16 bytes zero seguidos de `WRAP_MARK`.
+- App: Ajustes › Passkeys e recuperação (adicionar passkey, trocar a passkey deste aparelho, criar código de recuperação mostrado uma vez, remover); no cartão Entrar, "entrar com outra passkey" sempre que há passkey conhecida e "Entrar com código de recuperação". Termos e Política na versão 19, que dizem que adicionar passkey ou código exige a conta vinculada ao Google.
+
+### Testes automatizados
+
+- `packages/web-member/test/recovery.test.js` (novo): derivação, embrulho e abertura, marca, código.
+- `packages/core/test/recovery-proof.test.js` (novo): bytes da declaração, separação de domínio, `blobHashOf`.
+- `apps/cli/test/recovery-store.test.js` (novo): arquivo, sequência de gerações, mescla e lápides (prazo, teto, janela de 10 minutos), tetos, troca do código, leituras depois de gravação incerta, arquivo inválido nunca regravado.
+- `packages/rpc/test/methods.test.js` e `packages/rpc/test/server.test.js`: `recovery.sign` e os controles `identity.recovery*`.
+- `apps/app/test/legal.test.js` e `packages/core/test/terms.test.js`: textos e versão 19.
+- `packages/web-member/test/session.test.js`: `recovery.sign`.
+- `apps/cli/test/account-recovery.test.js` (novo): rotas, nonce, prova, tetos, 404, 503 só nessas rotas, registros sem identificador.
+- Worklet (`identity-install.js`): lookup, open, wrap e bind.
+- `apps/app/test/recovery.test.js` (novo): transporte e fluxo puro.
+- `packages/web-member/test/web-node-recovery.test.js` (novo): entrada marcada, sem identificador, código, adicionar e ligar no nó do navegador.
+- `apps/app/test/identityRecoveryNative.test.js` (novo): a mesma tabela de decisão no nativo.
+- `apps/app/test/passkeysScreen.test.js` (novo): a tela, sem API de navegador, e adicionar chamado antes de qualquer `await`.
+- `apps/cli/test/account-recovery-e2e.test.js` (novo): de ponta a ponta, a passkey extra e o código abrem a mesma chave pública.
+
+Resultados (CI local, Node 24.22.1, sobre `fix/passkey-robustness@d7514068`): lint e demo passam (DEMO OK); 415 de 418 arquivos de teste passam na execução completa. `packages/core/test/community-member-leave.test.js` e `group-member.test.js` esgotaram o tempo (180 s por arquivo) com a máquina carregada e passam sozinhos (46/46 e 52/52), como na branch de base. `apps/cli/test/ai-embedder.test.js` falha só porque o caminho desta cópia local contém "sharp", igual na `main`.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Build de preview do Android: adicionar uma segunda passkey noutro gerenciador (não realizada ainda).
+- [ ] Um perfil novo do navegador entra com essa segunda passkey e chega à mesma chave pública (não realizada ainda).
+- [ ] Criar um código de recuperação: aparece uma vez só, com "Anotei o código" (não realizada ainda).
+- [ ] Recuperar com o código num navegador sem passkey: o app leva a criar uma passkey nova e a conta abre com a mesma chave pública (não realizada ainda).
+- [ ] Serviço de conta fora do ar: entrar com a passkey extra mostra a mensagem e o nó fica bloqueado (não realizada ainda).
+- [ ] Remover uma entrada: ela some da lista e deixa de abrir a conta num aparelho novo (não realizada ainda).
+- [ ] Membro antigo sem entradas: entra exatamente como antes, também sem internet (não realizada ainda).
+- [ ] iOS: sem regressão em entrar e criar passkey (não realizada ainda).
+
+### Limites que sobram
+
+- A passkey original não pode ser invalidada: enquanto existir em algum gerenciador, ela abre a conta.
+- Uma passkey extra numa versão antiga do app cria outra identidade, porque a versão antiga não conhece a marca.
+- A passkey original abre a conta sem internet em qualquer aparelho (nunca há busca no serviço para ela). Uma passkey extra ou o código precisa do serviço de conta a cada entrada nova com a passkey ou com o código; só uma sessão guardada no aparelho evita isso.
+- Se um gerenciador de senhas fora do padrão não devolve o identificador do usuário de uma passkey extra (marcada) num aparelho onde ela não está ligada, o aparelho não vê a marca e essa passkey abre ali uma conta separada e vazia em vez da conta do membro. Nada da conta real é afetado, e o código ou a passkey original ainda a recuperam. Um autenticador que segue o padrão devolve o identificador numa entrada sem registro no aparelho.
+- Remover ou trocar uma entrada não troca a raiz: quem buscou aquele blob enquanto a entrada valia e tem o segredo dela ainda abre a conta. Isso vem do desenho da raiz embrulhada. Remover a entrada ou criar um código novo só impede novas entradas num aparelho que ainda não a usou; quem já entrou com ela, ou um aparelho ainda aberto com ela, continua com acesso, porque a chave da conta não pode ser trocada. Se uma passkey adicionada ou o código vazar, o único caminho seguro é criar uma conta nova. O cartão do código, a confirmação de código novo e as duas confirmações de remover dizem isso, e os Termos e a Política também (a versão continua 17).
+- Cancelar a recuperação não desfaz o que já terminou: uma instalação que concluiu antes do cancelamento continua (a conta fica aberta e presa à passkey nova), uma passkey criada durante a cerimônia continua no gerenciador (o Varanda não consegue apagá-la; no navegador ela fica recusada como `SUPERSEDED` e fora das próximas criações) e um put já enviado ao serviço pode ter sido gravado (a lista confirma).
+- Remover uma entrada não desconecta um aparelho que já desembrulhou a raiz com ela.
+- Se o disco do serviço se perder, as entradas somem: o membro entra com a passkey original ou num aparelho ainda conectado e cadastra de novo.
+- Uma cópia de `recovery.json` mais antiga que uma lápide já podada pode trazer de volta aquela linha.
+- Só membros com vínculo Google cadastram entradas.
