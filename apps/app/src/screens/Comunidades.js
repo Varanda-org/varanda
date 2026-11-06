@@ -1,13 +1,14 @@
-// Comunidades: the tab (docs/app.md). Minhas comunidades from community.list
+// Comunidades: browse and create, pushed over the Conversas tab from its
+// Comunidades row (nav 'comunidades'). Minhas comunidades from community.list
 // (rpc 5.62), a search of public groups through the index (/index/group-search;
 // private groups never appear there) whose rows name the community of each
-// group when the index knows it, and the Nova comunidade sheet. There is no
-// paste field: a /c/ or /g/ link opens its screen (App.js). Groups live
-// inside a community: there is no "Novo grupo" here. Hosted node only: a node that is not hosted shows the
-// "só na versão web" note, like Avisos, and calls nothing. App.js draws the
-// top bar.
-// Props: onOpenGroup(group), onOpenCommunity(community); both take a hex64
-// root key. onOpenCommunity also opens a community just made.
+// group when the index knows it, and the Nova comunidade sheet (also opened
+// from the Conversas "+" sheet, hence the export). There is no paste field: a
+// /c/ or /g/ link opens its screen (App.js). Groups live inside a community:
+// there is no "Novo grupo" here. Hosted node only: a node that is not hosted
+// shows the "só na versão web" note, like Avisos, and calls nothing.
+// Props: onBack, onOpenGroup(group), onOpenCommunity(community); both take a
+// hex64 root key. onOpenCommunity also opens a community just made.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -20,13 +21,14 @@ import { pagesOn } from '../pageGate'
 import { actAs } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
-import { Icon } from '../ui/Icon'
+import { Avatar } from '../ui/Avatar'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
-import { useStyles, useTheme } from '../ui/ThemeProvider'
+import { useStyles } from '../ui/ThemeProvider'
 import { Choice, NAME_MAX, nameLength, useEscapeClose } from './NovoGrupo'
 import { Sheet } from '../ui/Sheet'
+import { TopBar } from '../ui/TopBar'
 
 const { displayText } = rpc
 
@@ -46,9 +48,8 @@ function communitySubtitle (row) {
   return [roleLabel(row.role), COMMUNITY_JOIN_LABELS[row.join] || ''].filter(Boolean).join(' · ')
 }
 
-function Row ({ title, subtitle, dot, hint, onPress }) {
+function Row ({ title, subtitle, dot, hint, seed, avatarName, onPress }) {
   const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
@@ -57,7 +58,7 @@ function Row ({ title, subtitle, dot, hint, onPress }) {
       accessibilityHint={hint}
       onPress={onPress}
     >
-      <View style={styles.icon}><Icon name='cadeira' size={24} color={colors.ink} /></View>
+      <Avatar name={avatarName} publicKey={seed} size={44} shape='square' />
       <View style={styles.texts}>
         <Text style={styles.name} numberOfLines={1}>{title}</Text>
         {subtitle ? <Text style={styles.meta} numberOfLines={1}>{subtitle}</Text> : null}
@@ -123,7 +124,7 @@ function useCommunityNames (groups) {
 // Nova comunidade: community.create (rpc 5.57) makes the community and its
 // Geral group. An uncertain create is never resent: the list is re-read and
 // the person is told to check it; only closing the sheet lifts the lock.
-function NovaComunidade ({ visible, onClose, onCreated, onUncertain }) {
+export function NovaComunidade ({ visible, onClose, onCreated, onUncertain }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const [name, setName] = useState('')
@@ -188,7 +189,7 @@ function NovaComunidade ({ visible, onClose, onCreated, onUncertain }) {
   )
 }
 
-export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
+export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const hosted = node.hosted === true
@@ -263,8 +264,14 @@ export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
     if (typeof onOpenGroup === 'function') onOpenGroup(group)
   }, [onOpenGroup])
 
+  const bar = <TopBar title='Comunidades' onBack={onBack} />
   if (!hosted) {
-    return <EmptyState icon='cadeira' title='Só na versão web' body={WEB_ONLY_MESSAGE} />
+    return (
+      <View style={styles.root}>
+        {bar}
+        <EmptyState icon='cadeira' title='Só na versão web' body={WEB_ONLY_MESSAGE} />
+      </View>
+    )
   }
 
   const hits = search.groups.map((h) => {
@@ -275,6 +282,8 @@ export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
         title={typeof h.name === 'string' && h.name !== '' ? displayText(h.name) : PUBLIC_LABEL}
         subtitle={[community ? 'na comunidade ' + community : '', membersLabel(h.writerCount)].filter(Boolean).join(' · ')}
         hint='abre o grupo'
+        seed={h.group}
+        avatarName={typeof h.name === 'string' ? h.name : null}
         onPress={() => openGroup(h.group)}
       />
     )
@@ -326,6 +335,8 @@ export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
         subtitle={communitySubtitle(item)}
         dot={getVersion(item.community) !== seen}
         hint='abre a comunidade'
+        seed={item.community}
+        avatarName={item.state === 'ready' && typeof item.name === 'string' ? item.name : null}
         onPress={() => openCommunity(item.community)}
       />
     )
@@ -333,6 +344,7 @@ export function Comunidades ({ onOpenGroup, onOpenCommunity }) {
 
   return (
     <View style={styles.root}>
+      {bar}
       <RefreshableList
         data={list.rows}
         keyExtractor={(c) => c.community}
@@ -373,7 +385,6 @@ const makeStyles = (colors) => StyleSheet.create({
     borderBottomColor: colors.line
   },
   pressed: { opacity: 0.6 },
-  icon: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.line, alignItems: 'center', justifyContent: 'center' },
   texts: { flex: 1, minWidth: 0 },
   name: { ...type.postName, color: colors.ink },
   meta: { ...type.postMeta, color: colors.soft },

@@ -115,8 +115,10 @@ import Avisos from './src/screens/Avisos'
 import BuscaGlobal from './src/screens/BuscaGlobal'
 import { Grupo } from './src/screens/Grupo'
 import { Conversas } from './src/screens/Conversas'
+import { Mensagens } from './src/screens/Mensagens'
+import { Comunidades } from './src/screens/Comunidades'
 import { Mensagem } from './src/screens/Mensagem'
-import { DEFAULT_SEGMENT, onDmOpen, requestDmOpen } from './src/dm-open'
+import { onDmOpen, requestDmOpen } from './src/dm-open'
 import { Comunidade } from './src/screens/Comunidade'
 import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
@@ -1410,9 +1412,8 @@ function Member () {
   const [groupSeen, setGroupSeen] = useState({ epoch: nodeEpoch, map: {} })
   const seenMap = groupSeen.epoch === nodeEpoch ? groupSeen.map : {}
   const topEntry = nav.top(stack)
-  // The Conversas tab shows the groups only on its Comunidades segment.
-  const [convSegment, setConvSegment] = useState(DEFAULT_SEGMENT)
-  const groupsTab = tab === 'comunidades' && convSegment === 'comunidades'
+  // The Conversas tab lists the groups beside the private conversations.
+  const groupsTab = tab === 'comunidades'
   const groupsOnScreen = mode === 'hosted' && ready && (groupsTab || (topEntry !== null && topEntry.screen === 'grupo'))
   const groupVersions = node.groupVersions || NO_VERSIONS
   useEffect(() => {
@@ -1486,6 +1487,7 @@ function Member () {
   // pull the wake is for runs here too.
   useEffect(() => onDmOpen(() => {
     clearStack()
+    setConvCompose(false)
     setTab('comunidades')
     setDmOpenCount((n) => n + 1)
     if (dmReady) dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
@@ -1493,6 +1495,18 @@ function Member () {
   const openMessage = useCallback((peer) => {
     pushScreen({ screen: 'mensagem', key: typeof peer === 'string' ? peer.toLowerCase() : peer, params: {} })
   }, [pushScreen])
+  const openCommunities = useCallback(() => {
+    pushScreen({ screen: 'comunidades' })
+  }, [pushScreen])
+  const openRequests = useCallback(() => {
+    pushScreen({ screen: 'pedidos' })
+  }, [pushScreen])
+  // The Conversas top bar: the "+" opens the NovaConversa sheet (the search
+  // field lives in the list). A lock, unlock or reset closes it.
+  const [convCompose, setConvCompose] = useState(false)
+  useEffect(() => {
+    setConvCompose(false)
+  }, [generation, locked])
 
   // --- the profile invite (src/profileLink.js) ---
   // The tabs are on screen and nothing hides them, so the follow toast (it
@@ -2000,6 +2014,17 @@ function Member () {
     const on = (id) => tab === id && ready
     const shown = (id) => (tab === id ? styles.flex : styles.hidden)
     const stacked = nav.depth(stack) > 0
+    const tabActions = <TopActions key={tab} help={HELP[tab === 'comunidades' ? 'conversas' : tab]} onAvisos={mode === 'hosted' ? openAvisos : undefined} avisosNew={avisosNew} avisosActive={tab === 'avisos'} />
+    // Conversas puts its "+" before help and the bell (the WhatsApp header);
+    // its search is a field above the chips, not a header action.
+    const topRight = stacked
+      ? null
+      : tab === 'comunidades'
+        ? [
+            { icon: 'plus', label: 'nova conversa', onPress: () => setConvCompose(true) },
+            tabActions
+          ]
+        : tabActions
     // The invite note sits above the other notes, so it takes the top inset on
     // Diário and the note under it does not.
     const inviteNoteShown = !!(inviteDrop.note && atTabs && ajustes !== 'convites' && !stacked)
@@ -2038,6 +2063,20 @@ function Member () {
               : entry.screen === 'comunidade-info'
                 ? <ComunidadeInfo community={entry.key} onBack={goBack} onOpenMember={openMember} />
                 : <Comunidade community={entry.key} afterGroup={entry.params.group || null} isTop={i === stack.length - 1} seenTick={seenTick} onBack={goBack} onOpenGroup={openGroup} onOpenInfo={openCommunityInfo} />}
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'comunidades') {
+        return (
+          <StackLayer key={i + ':comunidades:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Comunidades onBack={goBack} onOpenGroup={openGroup} onOpenCommunity={openCommunity} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'pedidos') {
+        return (
+          <StackLayer key={i + ':pedidos:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Mensagens onBack={goBack} onOpenThread={openMessage} />
           </StackLayer>
         )
       }
@@ -2113,7 +2152,7 @@ function Member () {
             <TopBar
               title={TAB_TITLES[tab]}
               onBack={tab === 'avisos' && !stacked ? closeAvisos : undefined}
-              right={stacked ? null : <TopActions key={tab} help={HELP[tab === 'comunidades' ? 'conversas' : tab]} onAvisos={mode === 'hosted' ? openAvisos : undefined} avisosNew={avisosNew} avisosActive={tab === 'avisos'} />}
+              right={topRight}
             />
             )
           : null}
@@ -2206,7 +2245,19 @@ function Member () {
           {mode === 'hosted'
             ? (
               <View style={shown('comunidades')}>
-                <Conversas key={'g' + nodeEpoch} onOpenGroup={openGroup} onOpenCommunity={openCommunity} onOpenThread={openMessage} showMensagens={dmOpenCount} onSegment={setConvSegment} />
+                <Conversas
+                  key={'g' + nodeEpoch}
+                  active={on('comunidades') && !stacked}
+                  onOpenGroup={openGroup}
+                  onOpenCommunity={openCommunity}
+                  onOpenThread={openMessage}
+                  onOpenCommunities={openCommunities}
+                  onOpenRequests={openRequests}
+                  showInbox={dmOpenCount}
+                  seenTick={seenTick}
+                  composing={convCompose}
+                  onComposing={setConvCompose}
+                />
               </View>
               )
             : null}

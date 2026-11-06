@@ -223,7 +223,7 @@ Onde ficam as telas, incluindo a Espiadinha:
 |---|---|
 | A Rua | aba A Rua |
 | Espiadinha | aba Espiadinha |
-| Conversas | aba Conversas (id interno `comunidades`, ícone de mensagem `conversas`; no nó hospedado: site e app instalado). Seletor Mensagens ou Comunidades. Mensagem, Grupo, Novo grupo, administração e Comunidade abrem por cima das abas |
+| Conversas | aba Conversas (id interno `comunidades`, ícone de mensagem `conversas`; no nó hospedado: site e app instalado). Lista única; Pedidos de mensagem e Comunidades são telas empilhadas, e Nova conversa é uma folha. Mensagem, Grupo, Novo grupo, administração e Comunidade abrem por cima das abas |
 | Seguindo | lista aberta por "N seguindo" no Diário |
 | Avisos | o sino no canto direito da barra do topo (e na faixa do Diário), com um ponto quando há novidade |
 | Busca | aba Busca (lupa): Contas e Publicações |
@@ -260,13 +260,32 @@ Só um nó usa um diretório de dados por vez: um segundo worklet no mesmo diret
 
 Mensagens privadas entre duas pessoas, só texto, cifradas de ponta a ponta. Existem no nó hospedado, no site e no app instalado com a instalação. O protocolo está na seção 11 de [protocol.md](protocol.md); os métodos, em [rpc.md](rpc.md), 5.73 a 5.81 (`dm.enable`, `dm.lookup`, `dm.send`, `dm.pull`, `dm.list`, `dm.thread`, `dm.set`, `dm.seen`, `dm.reportSign`). Todo texto vindo de outra pessoa passa por `displayText`.
 
-No nó hospedado, a aba **Conversas** fica logo depois da Espiadinha, com o ícone de mensagem (`conversas`, o glifo `message-square`). O id interno da aba não muda: continua `comunidades`. A tela tem o seletor **Mensagens** | **Comunidades**. O lado Comunidades é o dos grupos, na seção seguinte. A cadeira da abertura (`Splash.js`, `assets/cadeira.png`), a cadeira da barra do topo (`TopBar.js`) e o ícone `cadeira` do estado vazio dentro de Comunidades continuam os mesmos. O ícone novo é só o da aba.
+No nó hospedado, a aba **Conversas** fica logo depois da Espiadinha, com o ícone de mensagem (`conversas`, o glifo `message-square`). O id interno da aba não muda: continua `comunidades`. A tela é uma lista só, com as conversas privadas e os grupos das comunidades da pessoa, do mais recente para o mais antigo. Não há mais seletor entre Mensagens e Comunidades: os grupos ficam na mesma lista, e Comunidades abre como tela própria (veja "Comunidades"). A cadeira da abertura (`Splash.js`, `assets/cadeira.png`), a cadeira da barra do topo (`TopBar.js`) e o ícone `cadeira` do estado vazio dentro de Comunidades continuam os mesmos. O ícone novo é só o da aba.
 
-### Mensagens
+### Lista
 
-A lista segue a recência (`dm.list`, da mais nova para a mais antiga; no empate, a chave da outra pessoa em ordem crescente). Quem a pessoa segue, uma conversa já aceita ou uma conversa em que ela mesma escreveu aparece em **Mensagens**. Qualquer outra pessoa cai em **Pedidos de mensagem**. Essa entrada ganha um ponto quando há pedido ainda não aberto, nunca uma contagem. A aba também leva um ponto, nunca um número (`requests` e `unread` são booleanos).
+- **Cabeçalho**: **+** abre **Nova conversa**, o ⓘ abre "Como funcionam as Conversas" (`HELP.conversas`) e o sino abre Avisos.
+- **Busca**: o campo arredondado **Buscar conversas**, logo acima dos filtros, filtra as linhas já carregadas; o X limpa. Com texto na busca, os fixados somem, e o filtro escolhido continua valendo.
+- **Filtros**: **Todas**, **Não lidas** e **Grupos**.
+- **Fixados** no topo: **Pedidos de mensagem**, com um ponto quando há pedido ainda não aberto (nunca uma contagem; em **Não lidas**, só aparece com pedido não lido), e **Comunidades**, com uma seta.
+- **Linhas**: avatar (pessoa redonda; grupo e comunidade em quadrado arredondado de cor, com as iniciais), nome, uma linha de prévia, hora relativa e, na cor de destaque, um ponto (conversa privada) ou um contador (grupo). A prévia põe **Você:** à parte quando a última mensagem é da própria pessoa; num grupo, ela é "Autor: texto". Não há marcas de lido, de entrega nem de digitação.
+- A lista segue a recência (`dm.list`, da mais nova para a mais antiga; no empate, a chave da outra pessoa em ordem crescente). Quem a pessoa segue, uma conversa já aceita ou uma conversa em que ela mesma escreveu fica na lista. Qualquer outra pessoa cai em **Pedidos de mensagem**.
+- A aba também leva um ponto, nunca um número (`requests` e `unread` são booleanos).
+- **Carga parcial**: quando parte das conversas não carregou, a lista diz "Algumas conversas ainda não carregaram." com **tentar de novo**. Isso é diferente do vazio "Nenhuma conversa ainda".
+- **Notificação**: tocar numa notificação volta para a lista inteira, com o filtro Todas e a busca limpa.
 
-- **Aceitar** move o pedido para Mensagens (`dm.set` com `accepted`). **Recusar** esconde as mensagens deste pedido (`declined`); uma mensagem posterior da mesma pessoa abre um pedido novo. Aceitar e recusar não avisam a outra pessoa. A tela diz "Até você aceitar, quem enviou não sabe se você leu".
+### Nova conversa
+
+O **+** abre a folha **Nova conversa**, que busca uma pessoa pelo nome. **Novo grupo** abre Comunidades, porque um grupo sempre fica numa comunidade. **Nova comunidade** cria uma comunidade. Com a busca vazia, **Conversas recentes** mostra até 8 pessoas da caixa.
+
+### Pedidos de mensagem
+
+Tela empilhada: entra deslizando e volta pela borda ou pelo Voltar. Tem linhas compactas, e tocar numa abre a conversa, onde ficam **Aceitar**, **Recusar** e **Bloquear**. Uma nota no topo diz "Até você aceitar, quem enviou não sabe se você leu".
+
+- **Aceitar** move o pedido para a lista (`dm.set` com `accepted`). **Recusar** esconde as mensagens deste pedido (`declined`); uma mensagem posterior da mesma pessoa abre um pedido novo. Aceitar e recusar não avisam a outra pessoa.
+
+### Conversa
+
 - Não há confirmação de leitura, nem aviso de entrega, nem indicador de digitação, nem fotos. `dm.seen` só apaga o ponto neste aparelho e não manda nada à outra pessoa, ao semeador nem aos outros aparelhos.
 - **Responder** (`dm.send` com `replyTo`) cita uma mensagem desta conversa.
 - **Apagar conversa neste aparelho** (`deleted`) tira a conversa deste aparelho e, pelo `ctl` lacrado só para a própria caixa, dos outros aparelhos da mesma pessoa. A outra pessoa fica com a cópia dela. O semeador não apaga sob pedido: só a retenção de sete dias.
@@ -275,7 +294,6 @@ A lista segue a recência (`dm.list`, da mais nova para a mais antiga; no empate
 - **Abrir convite.** Uma mensagem com um link de convite desta instalação (`/c/` ou `/g/` da mesma origem) mostra o botão **Abrir convite**, que abre a comunidade (ou o grupo, pela comunidade dele) no cartão de convite de um toque. Abrir nunca coloca ninguém: **Entrar** ou **Pedir entrada** continuam sendo o toque da pessoa. Links de outros endereços não mostram o botão.
 - **Links.** Um link `http://`, `https://` ou `www.` na mensagem fica sublinhado e abre direto, como nas publicações (veja "Linha de publicação"); `@nome` segue como texto. A citação de uma resposta não tem link. Uma mensagem com o botão Abrir convite fica toda sem link: o botão é o caminho dentro do app, e o mesmo endereço não abre também o navegador.
 - No perfil (Membro), a pílula **Mensagem** abre a conversa com essa pessoa.
-- O botão de ajuda abre "Como funcionam as Conversas" (`HELP.conversas`).
 
 ### Limites
 
@@ -291,9 +309,9 @@ A lista segue a recência (`dm.list`, da mais nova para a mais antiga; no empate
 
 As Comunidades reúnem conversas em grupo, só de texto. Uma **Comunidade** contém **Grupos**, públicos ou privados, sob a mesma moderação, e toda comunidade nasce com o grupo **Geral**. Não há grupo fora de uma comunidade. Elas existem no nó hospedado, no site e no app instalado com a instalação. As regras de moderação e de retenção estão em [design.md](design.md) ("Grupos públicos" e "Grupos privados"); o protocolo, na seção 10 de [protocol.md](protocol.md).
 
-### Aba Comunidades
+### Tela Comunidades
 
-No nó hospedado (site e app instalado), **Comunidades** é o lado Comunidades do seletor da aba Conversas (veja "Conversas"), não uma aba própria. A tela tem **Minhas comunidades** (as que a pessoa criou ou em que entrou, cada uma com o nome e o papel), o botão **Nova comunidade** e **Buscar grupos públicos** (grupos privados nunca aparecem). Não há campo para colar link: quem participa manda o link pelo Compartilhar da comunidade, e quem recebe toca nele. Tocar numa comunidade a abre. A lista é lida de novo ao puxar a tela e quando algo muda. A aba aparece sempre no nó hospedado; se o nó não responde aos métodos novos, a lista mostra o erro de carregamento em vez de esconder a aba. A aba e o ponto dela não mudaram com a lista de grupos nova: o ponto continua aparecendo quando algum grupo seguido mudou desde que a aba, ou o grupo, esteve na frente.
+No nó hospedado (site e app instalado), **Comunidades** é uma tela empilhada que abre a partir de **Conversas** e volta para a lista, não uma aba própria. A tela tem **Minhas comunidades** (as que a pessoa criou ou em que entrou, cada uma com o nome, o papel e o avatar quadrado), o botão **Nova comunidade** e **Buscar grupos públicos** (grupos privados nunca aparecem). Não há campo para colar link: quem participa manda o link pelo Compartilhar da comunidade, e quem recebe toca nele. Tocar numa comunidade a abre. A lista é lida de novo ao puxar a tela e quando algo muda. Se o nó não responde aos métodos novos, a lista mostra o erro de carregamento em vez de esconder a entrada. O ponto da aba Conversas não mudou: ele aparece quando algum grupo seguido mudou desde que a aba, ou o grupo, esteve na frente.
 
 - **Nova comunidade.** Folha com o nome e a entrada **aberta** ou **com aprovação**. Criar a comunidade cria também o Geral.
 

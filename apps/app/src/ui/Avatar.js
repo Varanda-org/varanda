@@ -1,4 +1,4 @@
-// A round avatar with the person's initials on the stripe colour picked by
+// A round (or, with shape='square', rounded-square) avatar with the person's initials on the stripe colour picked by
 // the first byte of the key. With no name it shows a person glyph instead:
 // no character derived from a key is ever drawn. Decorative: the name is
 // read elsewhere.
@@ -108,7 +108,7 @@ function initialsFromName (name) {
   return ''
 }
 
-export function Avatar ({ name, publicKey, size = 44, ring = false, picture, persist = false, localUri }) {
+export function Avatar ({ name, publicKey, size = 44, ring = false, picture, persist = false, localUri, shape = 'circle' }) {
   const { colors } = useTheme()
   const fetched = useAvatarUrl(publicKey, picture, persist !== false)
   // The URL that failed to render; the initials stay for it.
@@ -117,12 +117,13 @@ export function Avatar ({ name, publicKey, size = 44, ring = false, picture, per
   // holds a verified copy) falls back to the fetched one.
   const uri = isShownUrl(localUri) && localUri !== broken ? localUri : fetched
   const photo = uri !== null && uri !== broken ? uri : null
+  const corner = shape === 'square' ? Math.round(size * 0.3) : size / 2
   const stripe = stripes[avatarColorOf(publicKey)]
   const fontSize = size >= 80 ? 30 : size <= 40 ? 15 : 16
   const initials = initialsFromName(name)
   const circle = (
     <View
-      style={[styles.circle, { width: size, height: size, borderRadius: size / 2, backgroundColor: stripe.bg }]}
+      style={[styles.circle, { width: size, height: size, borderRadius: corner, backgroundColor: stripe.bg }]}
       accessible={false}
       importantForAccessibility='no-hide-descendants'
     >
@@ -132,7 +133,7 @@ export function Avatar ({ name, publicKey, size = 44, ring = false, picture, per
       {photo !== null && (
         <Image
           source={{ uri: photo }}
-          style={[styles.fill, { borderRadius: size / 2 }]}
+          style={[styles.fill, { borderRadius: corner }]}
           resizeMode='cover'
           accessible={false}
           accessibilityIgnoresInvertColors
@@ -143,9 +144,10 @@ export function Avatar ({ name, publicKey, size = 44, ring = false, picture, per
   )
   if (!ring) return circle
   const outer = size + 8
+  const outerCorner = shape === 'square' ? Math.round(outer * 0.3) : outer / 2
   return (
     <View
-      style={[styles.circle, { width: outer, height: outer, borderRadius: outer / 2, backgroundColor: colors.bg }]}
+      style={[styles.circle, { width: outer, height: outer, borderRadius: outerCorner, backgroundColor: colors.bg }]}
       accessible={false}
       importantForAccessibility='no-hide-descendants'
     >
