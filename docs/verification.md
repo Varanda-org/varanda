@@ -4877,3 +4877,36 @@ Limites desta caminhada:
 - O app ainda não envia nem mostra mídia por este canal; só o semeador e os testes o exercitam.
 - O horário e a leitura repetida do mesmo id continuam visíveis ao semeador (protocol.md, seção 13, "Privacidade"); isto não é resistência à análise de tráfego.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 101. Mídia nas mensagens privadas e anexo nas denúncias (PR feat/dm-media-protocol)
+
+Roteiro do protocolo e do nó para fotos e GIFs em mensagens privadas (corpo interno v2), do cache local cifrado no nó do navegador, da leitura de mídia pelas Páginas e do anexo de imagem nas denúncias de conversa. Ainda não há tela: o app recebe estas peças num PR posterior. O comportamento está em [protocol.md](protocol.md), seções 3, 11 ("Inner v2", "Local storage", "Reports") e 12, e em [rpc.md](rpc.md), 5.20, 5.75, 5.77, 5.78, 5.81 e 5.88. Nada abaixo foi executado nesta documentação.
+
+Regras que os passos conferem:
+
+- Uma mensagem só de texto continua no corpo v1, byte por byte; uma mensagem com mídia vai no v2 (um conjunto exato de chaves, prefixo de assinatura próprio), com 1 a 4 itens de ids distintos, texto vazio só com mídia, e o texto que cabe diminui a cada item.
+- As chaves de mídia chegam só à interface dona da conversa, em `dm.thread`; nenhum evento, registro ou outro aparelho as recebe. O cache de mídia aberta fica cifrado sob a chave local, até 256 MiB (o mais antigo sai primeiro), e é apagado ao bloquear, ao sair e ao zerar.
+- Numa conversa da pasta de pedidos, nada é baixado sozinho: a mídia só desce num toque (leitura explícita) ou depois de aceitar; no máximo 2 aberturas ao mesmo tempo.
+- O envio sobe todos os pedaços antes de mandar a mensagem; uma falha de envio de mídia é um erro comum, nunca incerto, e nada é repetido sozinho.
+- A Página guarda e devolve aos administradores os itens recebidos, nunca busca o blob, e responde só em texto.
+- A denúncia com anexo usa a declaração v2 (conversa) ou v3 (grupo), com o resumo da imagem; a rota `POST /account/report/anexo` aceita JPEG, WebP ou GIF até 1 MiB (2 MiB recebe 413), confere o resumo, guarda o arquivo com modo 0600, e a denúncia vai sempre para uma pessoa; o painel mostra "com mídia" e "imagem enviada por quem denunciou, não conferida".
+
+Passos (marcar só depois de executar e guardar o registro):
+
+- [ ] Dois membros no laboratório hospedado: mandar uma foto com legenda e uma só foto; as duas chegam, `dm.thread` traz os itens com a chave, e nenhum evento `dm.changed` carrega item.
+- [ ] Esvaziar o conjunto de blobs do semeador depois de abrir a foto: ela continua abrindo pelo cache; uma foto nunca aberta passa a `{ unavailable: true }` e o texto continua.
+- [ ] Bloquear a identidade e desbloquear: o cache de mídia foi apagado e a foto abre de novo pelo semeador (se ainda estiver lá).
+- [ ] Uma pessoa desconhecida manda várias fotos: abrir o pedido não baixa nada (observar `/blob` no semeador); um toque baixa só aquela; aceitar a conversa abre as outras, no máximo 2 por vez.
+- [ ] Uma mensagem com mídia para uma Página aparece aos administradores com os itens, e a resposta da Página sai em texto (corpo v1).
+- [ ] Uma denúncia de conversa com anexo chega ao painel com "com mídia", a imagem abre só com a sessão de moderador, e um anexo de 2 MiB recebe 413; uma denúncia v1 antiga ainda confere.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node packages/core/test/dm.test.js`, `dm-fold.test.js` e `report.test.js`; `node packages/rpc/test/dm-budget.test.js`, `methods.test.js` e `sizes.test.js`; `node packages/web-member/test/dm.test.js`, `dm-store.test.js`, `dm-e2e.test.js` e `blob.test.js`; `node apps/cli/test/pages-dm.test.js`, `dm-report.test.js`, `moderation-store.test.js`, `account-mod.test.js` e `panel.test.js`.
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- O app ainda não anexa nem mostra mídia, e o `dm.putMedia` nativo responde erro interno até o PR do app.
+- A rota de anexo tem 4 vagas globais que corpos lentos e anônimos podem ocupar até o tempo limite de 10 s; a autorização assinada nos cabeçalhos, antes de ler o corpo, vem com o envio do app.
+- Nenhuma caixa acima foi executada nesta documentação.

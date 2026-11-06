@@ -17,7 +17,7 @@ const { createGoogle } = require('../lib/account/google')
 const { openAccountStore } = require('../lib/account/store')
 const { openModerationStore } = require('../lib/account/moderation-store')
 const { createAccountServer } = require('../lib/account/server')
-const { SESSION_COOKIE, LOGIN_COOKIE } = require('../lib/account/mod-routes')
+const { SESSION_COOKIE, LOGIN_COOKIE, ANEXO_LIST_LABEL, ANEXO_PROVENANCE } = require('../lib/account/mod-routes')
 const { tmpDir } = require('./helpers/net')
 
 const ORIGIN = 'https://varanda.test'
@@ -136,7 +136,7 @@ async function setup (t) {
     try { parsed = JSON.parse(text) } catch {}
     return { status: res.status, headers: res.headers, body: parsed, text }
   }
-  return { iss, moderation, api, ana, bia, carol, seederCalls, triageCalls, logs }
+  return { iss, moderation, api, ana, bia, carol, seederCalls, triageCalls, logs, dir, base }
 }
 
 // start + a signed DM statement; -> { fields, body } ready to POST.
@@ -236,6 +236,167 @@ test('dm report: the panel lists it with null post fields; Bloquear conta blocks
   t.is(block.body.change.kind, 'conta')
   t.alike(s.seederCalls.map(([k]) => k), ['checkDiary'], 'only the diary check every account block makes')
 })
+
+// A 1x1 GIF: the smallest image mediaBounds accepts.
+const GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
+const sha256 = (b) => require('node:crypto').createHash('sha256').update(b).digest('hex')
+
+// start + a dm v2 statement over `signBytes` (by default the bytes sent).
+async function dmAnexoBody (s, reporter, target, bytes, { quote = '', signBytes = bytes } = {}) {
+  const started = await s.api('POST', '/account/report/start', { body: { member: reporter.hex } })
+  const nonce = started.body.nonce
+  const fields = { nonce, member: reporter.hex, association: s.iss.association, target, reason: 'assedio', text: '', quote, anexo: sha256(signBytes) }
+  const signature = signDmReport(fields, reporter.kp)
+  return { kind: 'dm', member: reporter.hex, nonce, target, reason: 'assedio', text: '', quote, signature, anexo: bytes.toString('base64') }
+}
+
+test('dm report with anexo (v2): stored 0600 under the report id, listed com mídia, served from disk, never in a log', async (t) => {
+  const s = await setup(t)
+  const body = await dmAnexoBody(s, s.ana, s.bia.hex, GIF)
+  const r = await s.api('POST', '/account/report/anexo', { body })
+  t.is(r.status, 200, r.text)
+  const row = s.moderation.get(r.body.id)
+  t.is(row.quote, '', 'a media-only message quotes nothing')
+  t.alike(row.anexo, { sha256: sha256(GIF), mime: 'image/gif', size: GIF.length })
+  const file = path.join(s.dir, 'report-media', r.body.id)
+  t.alike(fs.readFileSync(file), GIF)
+  if (process.platform !== 'win32') {
+    t.is(fs.statSync(file).mode & 0o777, 0o600, 'file 0600')
+    t.is(fs.statSync(path.dirname(file)).mode & 0o777, 0o700, 'dir 0700')
+  }
+  await settle()
+  t.alike(s.triageCalls, [r.body.id], 'handed to the worker, which marks every dm for a human')
+  t.alike(s.seederCalls, [], 'no seeder call')
+  const cookie = await signIn(s)
+  const list = await s.api('GET', '/account/mod/api/reports', { cookie })
+  const listed = list.body.reports.find((x) => x.id === r.body.id)
+  t.alike(listed.anexo, { mime: 'image/gif', size: GIF.length, label: ANEXO_LIST_LABEL, provenance: ANEXO_PROVENANCE })
+  t.is(ANEXO_LIST_LABEL, 'com mídia')
+  t.ok(ANEXO_PROVENANCE.includes('não conferida'))
+  t.absent(list.text.includes(sha256(GIF)), 'the digest stays in the store')
+  const img = await fetchRaw(s, '/account/mod/api/reports/' + r.body.id + '/anexo', cookie)
+  t.is(img.status, 200)
+  t.is(img.headers.get('content-type'), 'image/gif')
+  t.is(img.headers.get('x-content-type-options'), 'nosniff')
+  t.is(img.headers.get('content-security-policy'), "default-src 'none'; sandbox")
+  t.alike(img.bytes, GIF)
+  t.is((await fetchRaw(s, '/account/mod/api/reports/' + r.body.id + '/anexo', null)).status, 401, 'session only')
+  // A tampered file is never served.
+  fs.writeFileSync(file, Buffer.concat([GIF, Buffer.from([0])]))
+  t.is((await fetchRaw(s, '/account/mod/api/reports/' + r.body.id + '/anexo', cookie)).status, 404)
+  const logs = s.logs.join('\n')
+  for (const secret of [GIF.toString('base64'), sha256(GIF), r.body.id]) t.absent(logs.includes(secret), 'not in logs')
+  // The row with its anexo survives a reopen of moderation.json.
+  const reopened = openModerationStore(s.dir, { association: s.iss.association })
+  t.alike(reopened.get(r.body.id).anexo, row.anexo, 'reopened')
+})
+
+test('dm report with anexo: digest mismatch, png, junk, plain route, and 2 MiB are refused; v1 still verifies', async (t) => {
+  const s = await setup(t)
+  const mismatch = await dmAnexoBody(s, s.ana, s.bia.hex, GIF, { signBytes: Buffer.from('outra imagem') })
+  t.alike((await s.api('POST', '/account/report/anexo', { body: mismatch })).body, { error: 'assinatura-invalida' }, 'signed over another digest')
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64')
+  const asPng = await dmAnexoBody(s, s.ana, s.bia.hex, png)
+  t.alike((await s.api('POST', '/account/report/anexo', { body: asPng })).body, { error: 'pedido-invalido' }, 'png refused')
+  const junk = await dmAnexoBody(s, s.ana, s.bia.hex, Buffer.from('não é imagem'))
+  t.alike((await s.api('POST', '/account/report/anexo', { body: junk })).body, { error: 'pedido-invalido' }, 'not an image')
+  // Only this route reads past REPORT_BODY_MAX: 600 KiB of junk is read and refused as junk.
+  const midJunk = await dmAnexoBody(s, s.ana, s.bia.hex, Buffer.alloc(600 * 1024, 0x41))
+  const mid = await s.api('POST', '/account/report/anexo', { body: midJunk })
+  t.alike([mid.status, mid.body], [400, { error: 'pedido-invalido' }], 'a large body is read on the anexo route')
+  t.is(await declaredPost(s, '/account/report', JSON.stringify(midJunk)), 413, '/account/report keeps its cap')
+  const plain = await dmAnexoBody(s, s.ana, s.bia.hex, GIF)
+  t.alike((await s.api('POST', '/account/report', { body: plain })).body, { error: 'pedido-invalido' }, 'no anexo on /account/report')
+  const missing = await dmAnexoBody(s, s.ana, s.bia.hex, GIF)
+  delete missing.anexo
+  t.alike((await s.api('POST', '/account/report/anexo', { body: missing })).body, { error: 'pedido-invalido' }, 'the anexo route needs one')
+  const huge = Buffer.alloc(2 * 1048576, 0x41)
+  const big = await declaredPost(s, '/account/report/anexo', JSON.stringify({ kind: 'dm', member: s.ana.hex, anexo: huge.toString('base64') }))
+  t.is(big, 413, 'a 2 MiB anexo answers 413')
+  t.is(s.moderation.stats().open, 0, 'nothing stored')
+  t.absent(fs.existsSync(path.join(s.dir, 'report-media')) && fs.readdirSync(path.join(s.dir, 'report-media')).length > 0, 'no media written')
+  // v1, unchanged, still lands through /account/report.
+  const v1 = await s.api('POST', '/account/report', { body: await dmBody(s, s.ana, s.bia.hex) })
+  t.is(v1.status, 200, v1.text)
+  t.absent(Object.hasOwn(s.moderation.get(v1.body.id), 'anexo'))
+})
+
+test('group message report with anexo (v3): stored, never handed to the AI triage', async (t) => {
+  const s = await setup(t)
+  const started = await s.api('POST', '/account/report/start', { body: { member: s.ana.hex } })
+  const nonce = started.body.nonce
+  const writer = 'a1'.repeat(32)
+  const group = 'b2'.repeat(32)
+  const fields = { nonce, member: s.ana.hex, association: s.iss.association, target: s.bia.hex, seq: 3, writer, group, reason: 'outro', text: '', quote: '', anexo: sha256(GIF) }
+  const signature = signReport(fields, s.ana.kp)
+  const body = { member: s.ana.hex, nonce, target: s.bia.hex, seq: 3, writer, group, reason: 'outro', text: '', quote: '', signature, anexo: GIF.toString('base64') }
+  const r = await s.api('POST', '/account/report/anexo', { body })
+  t.is(r.status, 200, r.text)
+  t.is(s.moderation.get(r.body.id).anexo.mime, 'image/gif')
+  await settle()
+  t.alike(s.triageCalls, [], 'a person decides it')
+  // A diary post never carries an anexo.
+  const s2 = await s.api('POST', '/account/report/start', { body: { member: s.ana.hex } })
+  const post = { member: s.ana.hex, nonce: s2.body.nonce, target: s.bia.hex, seq: 3, reason: 'outro', text: '', quote: '', signature, anexo: GIF.toString('base64') }
+  t.alike((await s.api('POST', '/account/report/anexo', { body: post })).body, { error: 'pedido-invalido' })
+})
+
+test('report with anexo: the nonce is checked before the attachment is decoded', async (t) => {
+  const s = await setup(t)
+  // Junk bytes would answer pedido-invalido once decoded: 'expirado' says
+  // the request stopped at the nonce, before any decode, sniff or hash.
+  const junk = await dmAnexoBody(s, s.ana, s.bia.hex, Buffer.alloc(600 * 1024, 0x41))
+  const forged = { ...junk, nonce: 'A'.repeat(junk.nonce.length) }
+  const r1 = await s.api('POST', '/account/report/anexo', { body: forged })
+  t.alike([r1.status, r1.body], [400, { error: 'expirado' }], 'forged nonce, junk anexo')
+  const other = { ...junk, member: s.bia.hex, target: s.ana.hex }
+  t.alike((await s.api('POST', '/account/report/anexo', { body: other })).body, { error: 'expirado' }, 'another member\'s nonce')
+  const landed = await dmAnexoBody(s, s.ana, s.bia.hex, GIF)
+  t.is((await s.api('POST', '/account/report/anexo', { body: landed })).status, 200)
+  const spent = { ...landed, anexo: Buffer.from('não é imagem').toString('base64') }
+  t.alike((await s.api('POST', '/account/report/anexo', { body: spent })).body, { error: 'expirado' }, 'spent nonce')
+  // A valid nonce still reaches the decode, which refuses the junk.
+  t.alike((await s.api('POST', '/account/report/anexo', { body: junk })).body, { error: 'pedido-invalido' }, 'valid nonce, junk anexo')
+  const notString = { ...forged, anexo: 12 }
+  t.alike((await s.api('POST', '/account/report/anexo', { body: notString })).body, { error: 'pedido-invalido' }, 'shape checked first')
+  t.is(s.moderation.stats().open, 1, 'only the valid report stored')
+})
+
+test('panel image loads have their own window: many in one minute leave the list and decide their allowance', async (t) => {
+  const s = await setup(t)
+  const r = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, GIF) })
+  t.is(r.status, 200, r.text)
+  const cookie = await signIn(s)
+  const statuses = new Set()
+  for (let i = 0; i < 70; i++) statuses.add((await fetchRaw(s, '/account/mod/api/reports/' + r.body.id + '/anexo', cookie)).status)
+  t.alike([...statuses], [200], '70 image loads in a minute all answer')
+  const list = await s.api('GET', '/account/mod/api/reports', { cookie })
+  t.is(list.status, 200, 'the list keeps its allowance')
+  const block = await s.api('POST', '/account/mod/api/reports/' + r.body.id + '/decide', { cookie, body: { decision: 'bloquear' } })
+  t.is(block.status, 200, block.text)
+})
+
+// Declares the whole body but sends only its start: the 413 must come
+// before the server reads it. -> the status.
+function declaredPost (s, pathname, text) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(s.base + pathname, {
+      method: 'POST',
+      headers: { origin: ORIGIN, 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) }
+    }, (res) => {
+      res.resume()
+      resolve(res.statusCode)
+    })
+    req.on('error', reject)
+    req.write(text.slice(0, 1024))
+  })
+}
+
+async function fetchRaw (s, pathname, cookie) {
+  const base = s.base
+  const res = await fetch(base + pathname, { headers: cookie ? { cookie } : {} })
+  return { status: res.status, headers: res.headers, bytes: Buffer.from(await res.arrayBuffer()) }
+}
 
 // The panel (panel/app.js) under a minimal fake DOM, as panel.test.js does.
 class FakeNode {

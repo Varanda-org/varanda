@@ -12,7 +12,9 @@ const crypto = require('hypercore-crypto')
 const {
   PREFIX,
   PREFIX_V2,
+  PREFIX_V3,
   PREFIX_DM,
+  PREFIX_DM_V2,
   REASONS,
   REASON_LABELS,
   TEXT_MAX,
@@ -467,6 +469,87 @@ test('verifyReport never throws on hostile input', (t) => {
     t.alike(verifyReport(fields, signature), { ok: false, reason: 'malformed' })
   }
   t.alike(verifyReport(undefined, undefined), { ok: false, reason: 'malformed' })
+})
+
+// The SHA-256 of some attachment bytes, as the account service computes it.
+const ANEXO = require('node:crypto').createHash('sha256').update(Buffer.from('imagem')).digest('hex')
+const DM_V2 = { ...DM, anexo: ANEXO }
+const GROUP_V3 = { ...GROUP_POST, anexo: ANEXO }
+
+test('dm report v2 (anexo): exact bytes, nine lines, v1 still verifies', (t) => {
+  t.is(PREFIX_DM_V2, 'varanda-dm-report-v2')
+  const payload = dmReportPayload(DM_V2)
+  t.is(b4a.toString(payload, 'utf8'), [
+    'varanda-dm-report-v2',
+    NONCE,
+    MEMBER,
+    ASSOCIATION,
+    TARGET,
+    'assedio',
+    digest('ofensivo'),
+    digest('linha 1\nlinha 2'),
+    ANEXO
+  ].join('\n'))
+  t.is(b4a.toString(payload).split('\n').length, 9)
+  const signature = signDmReport(DM_V2, MEMBER_KP)
+  t.alike(verifyDmReport(DM_V2, signature), { ok: true })
+  // v1 is unchanged: the golden v1 signature still verifies.
+  t.alike(verifyDmReport(DM, '801be1bfe236f9d251b827fa403572558cb4f73ed982978c867b23e1fdece04645f913be324f2c025a9ba8192a82c39080d7094fd4b295a234646c9d1e61b908'), { ok: true })
+  // A media-only message: v2 may quote nothing, v1 may not.
+  const mediaOnly = { ...DM_V2, quote: '' }
+  t.alike(verifyDmReport(mediaOnly, signDmReport(mediaOnly, MEMBER_KP)), { ok: true })
+  t.exception.all(() => dmReportPayload({ ...DM, quote: '' }), /invalid dm report quote/)
+})
+
+test('dm report v2: the anexo is bound, and v1 and v2 never cross', (t) => {
+  const v2 = signDmReport(DM_V2, MEMBER_KP)
+  const v1 = signDmReport(DM, MEMBER_KP)
+  t.alike(verifyDmReport({ ...DM_V2, anexo: 'ab'.repeat(32) }, v2), { ok: false, reason: 'bad-signature' }, 'another anexo')
+  t.alike(verifyDmReport(DM, v2), { ok: false, reason: 'bad-signature' }, 'a v2 signature without its anexo')
+  t.alike(verifyDmReport(DM_V2, v1), { ok: false, reason: 'bad-signature' }, 'a v1 signature with an anexo added')
+  for (const anexo of [undefined, null, '', ANEXO.toUpperCase(), ANEXO.slice(1), ANEXO + '0', 1]) {
+    t.alike(verifyDmReport({ ...DM, anexo }, v2), { ok: false, reason: 'malformed' }, 'anexo ' + anexo)
+    t.exception.all(() => dmReportPayload({ ...DM, anexo }), TypeError)
+  }
+  t.alike(verifyDmReport({ ...DM_V2, extra: 1 }, v2), { ok: false, reason: 'malformed' }, 'no extra key beside the anexo')
+  t.alike(verifyReport({ ...POST, anexo: ANEXO }, v2), { ok: false, reason: 'malformed' }, 'dm v2 fields are not report fields')
+})
+
+test('group report v3 (anexo): exact bytes, v2 still verifies, never crosses', (t) => {
+  t.is(PREFIX_V3, 'varanda-report-v3')
+  const payload = reportPayload(GROUP_V3)
+  t.is(b4a.toString(payload, 'utf8'), [
+    'varanda-report-v3',
+    NONCE,
+    MEMBER,
+    ASSOCIATION,
+    TARGET,
+    GROUP,
+    WRITER,
+    '7',
+    'assedio',
+    digest('ofensivo'),
+    digest('linha 1\nlinha 2'),
+    ANEXO
+  ].join('\n'))
+  const v3 = signReport(GROUP_V3, MEMBER_KP)
+  const v2 = signReport(GROUP_POST, MEMBER_KP)
+  t.alike(verifyReport(GROUP_V3, v3), { ok: true })
+  t.alike(verifyReport(GROUP_POST, v2), { ok: true }, 'v2 unchanged')
+  t.alike(verifyReport({ ...GROUP_POST, anexo: null }, v2), { ok: true }, 'a null anexo is no anexo')
+  t.alike(verifyReport(GROUP_POST, v3), { ok: false, reason: 'bad-signature' })
+  t.alike(verifyReport(GROUP_V3, v2), { ok: false, reason: 'bad-signature' })
+  t.alike(verifyReport({ ...GROUP_V3, anexo: 'ab'.repeat(32) }, v3), { ok: false, reason: 'bad-signature' })
+  t.alike(verifyDmReport(DM_V2, v3), { ok: false, reason: 'bad-signature' })
+  // A photo-only group message quotes nothing.
+  const photo = { ...GROUP_V3, quote: '' }
+  t.alike(verifyReport(photo, signReport(photo, MEMBER_KP)), { ok: true })
+  // A diary post or an account report never carries an anexo.
+  t.exception.all(() => reportPayload({ ...POST, anexo: ANEXO }), /invalid report anexo/)
+  t.exception.all(() => reportPayload({ ...ACCOUNT, anexo: ANEXO }), /invalid report anexo/)
+  for (const anexo of ['', ANEXO.toUpperCase(), ANEXO.slice(1), 1]) {
+    t.exception.all(() => reportPayload({ ...GROUP_POST, anexo }), /invalid report anexo/, 'anexo ' + anexo)
+  }
 })
 
 // hypercore-crypto loads sodium-native under Node, whose addon loader

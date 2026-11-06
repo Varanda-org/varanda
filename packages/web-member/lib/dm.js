@@ -31,6 +31,32 @@
 // certificate verifies for the association, and drops a sender on the
 // stored blocklist snapshot.
 //
+// Media (docs/rpc.md 5.75, 5.78, 5.88; protocol sections 11 and 13): a
+// photo is checked (mediaBounds), sealed and put on the anonymous blob
+// channel by putMedia (./blob.js), which answers its media item. The sealed
+// blob stays in memory (at most BLOBS_MAX, keyed by its id and by its
+// plaintext), one put at a time per blob, so the user's retry of the same
+// photo re-puts the SAME frames. A failed upload is a normal error, never
+// uncertain: nothing was sent, and a blob never named by a message expires
+// with the pool. A send with media first makes sure every chunk of every
+// item was acked in this session (a user retry re-puts what was not), and
+// only then stamps and puts its drops; an item this engine did not put is
+// refused. The blob wallet is topped up next to the DM wallet (topUp), and
+// a photo whose chunks outnumber the wallet fills it before its put.
+// The message row keeps the media items (blob key included); the plaintext
+// is opened lazily, on the first dm.thread or readMedia of that message,
+// and kept in the store's sealed media cache (./dm-store.js, a total byte
+// budget), which the pool's 7-day sweep does not touch. A thread in the
+// 'request' folder opens nothing by itself: a stranger's blobs are fetched
+// only on an explicit readMedia (a tap) or once the conversation is
+// accepted. At most OPEN_MAX opens run at once, the rest wait in order; a
+// new dm.thread page drops the background opens that have not started, and
+// lock drops every waiting one. A blob gone (404) or that does not
+// verify, with nothing cached, shows as media { unavailable: true } while
+// the text still shows. Only reads are ever repeated, never a put. lock()
+// forgets the sealed blobs; wipeMedia() (lock, sign-out, reset) deletes the
+// cache as well.
+//
 // Nothing here logs a key, a text or a peer.
 const b4a = require('b4a')
 const dm = require('@varanda/core/lib/dm')
@@ -40,6 +66,9 @@ const { nowIso } = require('@varanda/core/lib/records')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { certForKey } = require('@varanda/core/lib/cert')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
+const { mediaBounds, dmTextBytes, DM_MEDIA_KEYS } = require('@varanda/rpc')
+const { sealBlob, createBlobClient, fetchBlob } = require('./blob')
+const sodium = require('./sodium-browser')
 const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf } = require('./passkey')
 const { createDmStore } = require('./dm-store')
 const { openDmLink, openStampLink } = require('./dm-link')
@@ -59,6 +88,13 @@ const SEEDER_FULL = 'o semeador está cheio: tente mais tarde'
 const SEEDER_RATE = 'muitas mensagens seguidas: aguarde um pouco'
 const REFUSED = 'mensagem recusada pelo semeador'
 const NO_CERT = 'grave o certificado de membro antes de publicar'
+const BAD_MEDIA = 'mídia inválida'
+const MEDIA_GONE = 'mídia indisponível'
+const MEDIA_STALE = 'prepare a mídia de novo'
+const UPLOAD_FAILED = 'não deu para enviar a mídia: tente de novo'
+// Sealed blobs kept for a send or a retry (each holds its plaintext and
+// ciphertext in memory).
+const BLOBS_MAX = 8
 const PREVIEW_MAX = 140
 const TOP_UP_EVERY_MS = 600000
 const PENDING_MAX = 32
@@ -67,6 +103,8 @@ const TOP_UP_RETRY_MS = 60000
 // Issues past the stamp channel's burst wait this long (10 per 10 s there).
 const ISSUE_BURST = 8
 const ISSUE_PACE_MS = 1100
+const OPEN_MAX = 2
+const OPEN_DROPPED = 'abertura de mídia cancelada'
 
 function noop () {}
 
@@ -84,6 +122,33 @@ function preview (text) {
   return Array.from(text).slice(0, PREVIEW_MAX).join('')
 }
 
+function wipe (buf) {
+  if (buf instanceof Uint8Array) buf.fill(0)
+}
+
+function sha256Hex (bytes) {
+  const out = b4a.alloc(sodium.crypto_hash_sha256_BYTES)
+  sodium.crypto_hash_sha256(out, bytes)
+  return b4a.toString(out, 'hex')
+}
+
+// The seeder's HTTP origin for GET /blob: the WebSocket address's host with
+// https (wss) or http (ws).
+function httpOriginOf (seederUrl) {
+  try {
+    const u = new URL(seederUrl)
+    return (u.protocol === 'wss:' ? 'https:' : 'http:') + '//' + u.host
+  } catch {
+    return null
+  }
+}
+
+function mediaItem (d) {
+  const o = {}
+  for (const k of DM_MEDIA_KEYS) o[k] = d[k]
+  return o
+}
+
 function zeroPair (pair) {
   if (pair === null) return
   pair.publicKey.fill(0)
@@ -91,8 +156,11 @@ function zeroPair (pair) {
 }
 
 // limits (tests): issueBurst, issuePaceMs, topUpEveryMs, topUpRetryMs,
-// budgetBytes, pageMax, link (dm-link limits). createStore: tests only.
-function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore } = {}) {
+// budgetBytes, pageMax, openMax, cacheBytesMax (./dm-store.js), link
+// (dm-link limits), blob (./blob.js createBlobClient limits), fetch
+// (./blob.js fetchBlob limits).
+// createStore, fetch and mediaOrigin: tests only.
+function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin } = {}) {
   const L = {
     issueBurst: ISSUE_BURST,
     issuePaceMs: ISSUE_PACE_MS,
@@ -100,10 +168,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     topUpRetryMs: TOP_UP_RETRY_MS,
     budgetBytes: dm.DM_PULL_BUDGET_BYTES,
     pageMax: dm.DM_PAGE_MAX,
+    openMax: OPEN_MAX,
+    cacheBytesMax: undefined,
     link: {},
+    blob: {},
+    fetch: {},
     ...(limits || {})
   }
-  const local = createStore({ storage })
+  const local = createStore({ storage, cacheBytesMax: L.cacheBytesMax })
   let box = null // { publicKey, secretKey, gen }
   let generation = 0
   let pulling = false
@@ -119,6 +191,30 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   let ownCert = null
   const pending = new Map()
   const linkOpts = { seederUrl, createSocket, association, log: (t) => { try { log(t) } catch {} }, limits: L.link }
+  // Both throw while locked: the blob wallet is sealed under the local key.
+  const blobs = createBlobClient({
+    seederUrl,
+    createSocket,
+    association,
+    storage,
+    seal: (v) => local.seal(v),
+    open: (b) => local.open(b),
+    log: linkOpts.log,
+    limits: { link: L.link, ...L.blob }
+  })
+  const blobOrigin = mediaOrigin === undefined ? httpOriginOf(seederUrl) : mediaOrigin
+  // Sealed blobs put (or being put) in this unlock: id -> entry and
+  // plaintext key -> entry; entry = { sealed, mime, w, h, plain, hash, lock }.
+  const sealedById = new Map()
+  const sealedByPlain = new Map()
+  // Lazy opens queued or in flight, by sender and message id -> { p, job },
+  // and messages whose blob is gone (this unlock only).
+  const opening = new Map()
+  const gone = new Set()
+  // Opens waiting for one of the L.openMax slots, in order; job =
+  // { key, background, start, cancel }.
+  const openQueue = []
+  let openActive = 0
 
   function track (p) {
     inflight.add(p)
@@ -214,7 +310,20 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     box = null
     ownCert = null
     local.lock()
-    pending.clear()
+    clearPending()
+    forgetAllBlobs()
+    dropQueued(false, LOCKED)
+    opening.clear()
+    gone.clear()
+  }
+
+  // Lock, sign-out and reset: the plaintext cache goes too (needs no key).
+  function wipeMedia () {
+    forgetAllBlobs()
+    dropQueued(false, LOCKED)
+    opening.clear()
+    gone.clear()
+    return track(local.wipeCache())
   }
 
   function unlocked () {
@@ -247,7 +356,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       followSet: follows,
       seen,
       ops,
-      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: m.replyTo, at: m.at, filedAt: m.filedAt }))
+      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: m.replyTo, media: m.media, at: m.at, filedAt: m.filedAt }))
     })
   }
 
@@ -271,7 +380,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const page = all.slice(start, start + limit)
     const conversations = page.map((c) => {
       const last = c.messages[c.messages.length - 1]
-      return { peer: c.peer, folder: c.folder, preview: preview(last.text), at: c.at, unread: c.unread, mine: last.mine }
+      return { peer: c.peer, folder: c.folder, preview: preview(dmFold.previewText(last)), at: c.at, unread: c.unread, mine: last.mine }
     })
     const more = start + page.length < all.length
     const tail = page[page.length - 1]
@@ -314,11 +423,259 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     }
     const start = Math.max(0, end - limit)
     const page = c.messages.slice(start, end)
+    // Another page: what an earlier one queued and did not start is dropped.
+    dropQueued(true, OPEN_DROPPED)
+    // A request is a peer the person neither follows nor accepted: nothing
+    // of theirs is fetched until a tap or an accept.
+    const auto = c.folder !== 'request'
     return {
-      messages: page.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, at: m.at, mine: m.mine })),
+      messages: page.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, at: m.at, mine: m.mine, media: mediaView(m, auto) })),
       next: start > 0 && page.length > 0 ? page[0].id : null,
       ...state
     }
+  }
+
+  // ---- media ----
+
+  function openKey (from, id) {
+    return from + '\n' + id
+  }
+
+  // A thread row's media: the items (cached, or opening in the background
+  // now when `auto`), or { unavailable: true } when the blob is gone and
+  // nothing is cached. Copies: the caller may hand them out.
+  function mediaView (m, auto) {
+    if (!Array.isArray(m.media)) return null
+    if (local.hasMedia(m.from, m.id)) return m.media.map(mediaItem)
+    if (gone.has(openKey(m.from, m.id))) return { unavailable: true }
+    if (auto) openMedia(m, true).catch(noop)
+    return m.media.map(mediaItem)
+  }
+
+  function pumpOpens () {
+    while (openActive < L.openMax && openQueue.length > 0) {
+      const job = openQueue.shift()
+      openActive++
+      const free = () => {
+        openActive--
+        pumpOpens()
+      }
+      job.start().then(free, free)
+    }
+  }
+
+  // Drops the waiting opens (only the background ones when `backgroundOnly`):
+  // each rejects with `reason` and leaves `opening`, so a later read starts
+  // afresh. Running opens finish on their own (they check the generation).
+  function dropQueued (backgroundOnly, reason) {
+    for (let i = openQueue.length - 1; i >= 0; i--) {
+      const job = openQueue[i]
+      if (backgroundOnly && !job.background) continue
+      openQueue.splice(i, 1)
+      const known = opening.get(job.key)
+      if (known !== undefined && known.job === job) opening.delete(job.key)
+      job.cancel(new UsageError(reason))
+    }
+  }
+
+  // Fetches, verifies and opens every item of message m, then caches the
+  // plaintext -> the items' bytes (shared by every waiter: copy before
+  // handing out). One open per message at a time, at most L.openMax at
+  // once; a `background` open (a thread page) may be dropped while it
+  // waits, an explicit one (readMedia) never is, and promotes a waiting
+  // background open of the same message. A blob gone or one that does not
+  // verify marks the message gone and says so with dm.changed (no item in
+  // the event). Any other failure is retried by the next read only.
+  function openMedia (m, background = false) {
+    const k = openKey(m.from, m.id)
+    const known = opening.get(k)
+    if (known !== undefined) {
+      if (!background) known.job.background = false
+      return known.p
+    }
+    const gen = generation
+    const job = { key: k, background, start: null, cancel: null }
+    const p = track(new Promise((resolve, reject) => {
+      job.cancel = reject
+      job.start = () => {
+        const r = runOpen(m, k, gen)
+        r.then(resolve, reject)
+        return r
+      }
+    }))
+    opening.set(k, { p, job })
+    const done = () => {
+      const now = opening.get(k)
+      if (now !== undefined && now.p === p) opening.delete(k)
+    }
+    p.then(done, done)
+    openQueue.push(job)
+    pumpOpens()
+    return p
+  }
+
+  function runOpen (m, k, gen) {
+    return (async () => {
+      if (gen !== generation) throw new UsageError(LOCKED)
+      if (blobOrigin === null) throw new UsageError(MEDIA_GONE)
+      const out = []
+      try {
+        for (const d of m.media) {
+          const r = await fetchBlob({ id: d.id, key: d.key, nonce: d.nonce, chunks: d.chunks, bytes: d.bytes, sha256: d.sha256 }, blobOrigin, { mime: d.mime, fetch: fetchImpl, limits: L.fetch })
+          out.push(r.bytes)
+        }
+      } catch (err) {
+        for (const b of out) wipe(b)
+        const msg = err && err.message
+        if (gen === generation && (msg === MEDIA_GONE || msg === BAD_MEDIA)) {
+          gone.add(k)
+          emit('dm.changed', { added: 0 })
+          throw new UsageError(MEDIA_GONE)
+        }
+        throw err
+      }
+      if (gen !== generation) {
+        for (const b of out) wipe(b)
+        throw new UsageError(LOCKED)
+      }
+      try {
+        await local.putMedia(m.from, m.id, out)
+      } catch {
+        if (gen === generation) log('aviso: mídia aberta mas não guardada neste aparelho')
+      }
+      // A lock while the cache write ran: no plaintext outlives it.
+      if (gen !== generation) {
+        for (const b of out) wipe(b)
+        throw new UsageError(LOCKED)
+      }
+      return out
+    })()
+  }
+
+  // The message (from, id) as the fold keeps it for `own`, or null.
+  async function keptMessage (own, from, id) {
+    const { inbox, requests } = await folded(own)
+    for (const c of [...inbox, ...requests]) {
+      const m = c.messages.find((x) => x.from === from && x.id === id)
+      if (m !== undefined) return m
+    }
+    return null
+  }
+
+  // The plaintext of item `index` of a kept message -> { bytes, mime }
+  // (bytes: a fresh copy the caller owns). Opens the blob when not cached;
+  // a message deleted, blocked, without media or whose blob is gone
+  // answers MEDIA_GONE.
+  async function readMedia (own, { from, id, index }) {
+    requireUnlocked()
+    const gen = generation
+    if (typeof from !== 'string' || !/^[0-9a-f]{64}$/.test(from) || typeof id !== 'string' || !/^[0-9a-f]{32}$/.test(id) ||
+        !Number.isSafeInteger(index) || index < 0 || index >= dm.DM_MEDIA_MAX) {
+      throw new TypeError('parâmetros inválidos')
+    }
+    const m = await keptMessage(own, from, id)
+    if (m === null || !Array.isArray(m.media) || index >= m.media.length) throw new UsageError(MEDIA_GONE)
+    const mime = m.media[index].mime
+    if (local.hasMedia(from, id)) {
+      const items = await local.getMedia(from, id)
+      if (items !== null && gen !== generation) {
+        items.forEach(wipe)
+        throw new UsageError(LOCKED)
+      }
+      if (items !== null && items.length === m.media.length) {
+        items.forEach((b, i) => { if (i !== index) wipe(b) })
+        return { bytes: items[index], mime }
+      }
+      if (items !== null) items.forEach(wipe)
+    }
+    if (gone.has(openKey(from, id))) throw new UsageError(MEDIA_GONE)
+    const items = await openMedia(m)
+    if (gen !== generation) throw new UsageError(LOCKED)
+    const copy = new Uint8Array(items[index].byteLength)
+    copy.set(items[index])
+    return { bytes: copy, mime }
+  }
+
+  function forgetBlob (entry) {
+    if (sealedById.get(entry.sealed.descriptor.id) === entry) sealedById.delete(entry.sealed.descriptor.id)
+    if (sealedByPlain.get(entry.hash) === entry) sealedByPlain.delete(entry.hash)
+    wipe(entry.plain)
+    entry.plain = null
+  }
+
+  function forgetAllBlobs () {
+    for (const entry of [...sealedById.values()]) forgetBlob(entry)
+    sealedByPlain.clear()
+  }
+
+  function itemOf (entry) {
+    return mediaItem({ ...entry.sealed.descriptor, mime: entry.mime, w: entry.w, h: entry.h, ms: 0 })
+  }
+
+  // One put at a time per sealed blob: a second send of the same blob waits
+  // and then finds every frame acked. A lost ack is a normal error here:
+  // nothing was sent yet, and the same frames go again on the user's retry.
+  function upload (entry, keyPair) {
+    const p = entry.lock.then(async () => {
+      if (entry.sealed.acked.every(Boolean)) return
+      try {
+        await blobs.send(entry.sealed, keyPair)
+      } catch (err) {
+        if (err && err.uncertain) throw new UsageError(UPLOAD_FAILED)
+        throw err
+      }
+    })
+    entry.lock = p.catch(noop)
+    return p
+  }
+
+  // bytes: the caller's copy, wiped here. -> the media item a dm.send
+  // carries. The same photo (bytes, mime, sides) again reuses its sealed
+  // blob, so a retry re-puts the same frames. The entry keeps a copy of its
+  // own: the caller wipes its buffer on a failure, and a failed put leaves
+  // the entry whole for that retry.
+  async function putMedia (own, keyPair, { bytes, mime, width, height }) {
+    requireUnlocked()
+    const gen = generation
+    if (!(bytes instanceof Uint8Array) || !dm.DM_MEDIA_MIMES.includes(mime) || mediaBounds(bytes, mime) === null) {
+      if (bytes instanceof Uint8Array) wipe(bytes)
+      throw new UsageError(BAD_MEDIA)
+    }
+    const plain = new Uint8Array(bytes)
+    wipe(bytes)
+    const hash = [sha256Hex(plain), mime, width, height].join('\n')
+    let entry = sealedByPlain.get(hash)
+    if (entry === undefined || entry.plain === null) {
+      let sealed
+      try {
+        sealed = sealBlob(plain)
+      } catch (err) {
+        wipe(plain)
+        throw err
+      }
+      entry = { sealed, mime, w: width, h: height, plain, hash, lock: Promise.resolve() }
+      sealedById.set(sealed.descriptor.id, entry)
+      sealedByPlain.set(hash, entry)
+      while (sealedById.size > BLOBS_MAX) forgetBlob(sealedById.values().next().value)
+    } else {
+      wipe(plain)
+    }
+    const missing = entry.sealed.frames.filter((f) => f === null).length
+    if (missing > 0 && (await blobs.walletSize()) < missing) await blobs.topUp(keyPair, { force: true })
+    if (gen !== generation) throw new UsageError(LOCKED)
+    await upload(entry, keyPair)
+    if (gen !== generation) throw new UsageError(LOCKED)
+    return itemOf(entry)
+  }
+
+  // The sealed blob of a dm.send item, which must be exactly what putMedia
+  // answered in this unlock.
+  function entryOfItem (item) {
+    const entry = sealedById.get(item.id)
+    if (entry === undefined || entry.plain === null) throw new UsageError(MEDIA_STALE)
+    const want = itemOf(entry)
+    if (!DM_MEDIA_KEYS.every((k) => want[k] === item[k])) throw new UsageError(MEDIA_STALE)
+    return entry
   }
 
   async function seen (own, peer) {
@@ -391,7 +748,13 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // Fills the wallet to DM_STAMP_WALLET when below DM_STAMP_WALLET_LOW (or
   // `force`), at most once per topUpEveryMs unless forced. Single flight.
   // keyPair: the identity pair, for the stamp link's proof. Never throws.
-  function topUp (keyPair, { force = false } = {}) {
+  function topUp (keyPair, opts) {
+    // The blob wallet on the same schedule; it limits itself (./blob.js).
+    if (unlocked()) track(blobs.topUp(keyPair).catch(() => 0))
+    return topUpDm(keyPair, opts)
+  }
+
+  function topUpDm (keyPair, { force = false } = {}) {
     if (topping !== null) return topping
     topping = track((async () => {
       try {
@@ -499,7 +862,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
           throw unconfirmed()
         }
         if (!r.ok) {
-          if (r.reason === 'invalido') pending.delete(entry.key)
+          if (r.reason === 'invalido') {
+            pending.delete(entry.key)
+            dropEntry(entry)
+          }
           throw refusal(r.reason)
         }
         entry.acked[i] = true
@@ -516,7 +882,30 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   async function fileSent (entry) {
     if (entry.row === null || !entry.acked[0]) return
     if (!local.hasMessage(entry.row.from, entry.row.id)) await local.append([{ ...entry.row, filedAt: local.nextFiled() }])
+    const row = entry.row
     entry.row = null
+    // The sender's own photos are cached from the bytes it put, so its
+    // thread never downloads them back: from the entry's private copies,
+    // which no other send or forgetBlob touches (the store copies them
+    // before its first await).
+    const plains = entry.plains || []
+    entry.plains = null
+    if (plains.length > 0) {
+      try {
+        await local.putMedia(row.from, row.id, plains)
+      } catch {}
+      plains.forEach(wipe)
+    }
+  }
+
+  function dropEntry (entry) {
+    if (Array.isArray(entry.plains)) entry.plains.forEach(wipe)
+    entry.plains = null
+  }
+
+  function clearPending () {
+    for (const entry of pending.values()) dropEntry(entry)
+    pending.clear()
   }
 
   // Puts the queue (flushCtlQueue). Never throws; warns when something
@@ -568,50 +957,81 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // to: hex64; recipientBox: hex64 | null (dm.lookup). keyPair: identity.
-  async function send (own, keyPair, { to, text, replyTo = null }, recipientBox) {
+  // media: null or dm.send items (docs/rpc.md 5.75), each answered by
+  // putMedia in this unlock.
+  async function send (own, keyPair, { to, text, replyTo = null, media = null }, recipientBox) {
     checkSend(own, to)
-    const key = to + '\n' + (replyTo || '') + '\n' + text
+    const items = Array.isArray(media) && media.length > 0 ? media.map(mediaItem) : null
+    const key = to + '\n' + (replyTo || '') + '\n' + text + '\n' + (items === null ? '' : JSON.stringify(items))
     let entry = pending.get(key)
     if (entry === undefined) {
-      if (recipientBox === null) throw new UsageError(NO_BOX)
-      if (replyTo !== null) {
-        const c = await threadOf(own, to)
-        if (c === null || dmFold.replyTarget(c.messages, replyTo) === null) throw new UsageError(BAD_REPLY)
+      const sealedBlobs = items === null ? [] : items.map(entryOfItem)
+      // Copied before any await: an overlapping send of the same blob may
+      // forget (and wipe) the shared entry meanwhile.
+      const plains = sealedBlobs.map((b) => new Uint8Array(b.plain))
+      entry = await newEntry(own, keyPair, { to, text, replyTo, items, key }, recipientBox, sealedBlobs, plains).catch((err) => {
+        plains.forEach(wipe)
+        throw err
+      })
+      if (pending.size >= PENDING_MAX) {
+        const oldest = pending.keys().next().value
+        dropEntry(pending.get(oldest))
+        pending.delete(oldest)
       }
-      const id = dm.newMessageId()
-      const at = nowIso()
-      const cert = await certOf(own)
-      let inner
-      try {
-        inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, cert }, keyPair)
-      } catch (err) {
-        throw new UsageError(err && err.message === TOO_LONG ? TOO_LONG : BAD_TEXT)
-      }
-      let sealedTo, sealedSelf
-      try {
-        sealedTo = dm.sealInner(inner, recipientBox)
-        sealedSelf = dm.sealInner(inner, b4a.toString(box.publicKey, 'hex'))
-      } catch {
-        throw new UsageError(NO_BOX)
-      } finally {
-        inner.fill(0)
-      }
-      const stamps = await takeStamps(2)
-      if (stamps === null) throw new UsageError(NO_STAMPS)
-      entry = {
-        key,
-        id,
-        at,
-        drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
-        acked: [false, false],
-        row: { t: 'msg', id, peer: to, from: own, text, replyTo, at, mine: true }
-      }
-      if (pending.size >= PENDING_MAX) pending.delete(pending.keys().next().value)
       pending.set(key, entry)
     }
     await deliver(entry)
-    pending.delete(key)
+    if (pending.get(key) === entry) pending.delete(key)
+    dropEntry(entry)
+    for (const b of entry.blobs) forgetBlob(b)
+    entry.blobs = []
     return { id: entry.id, at: entry.at }
+  }
+
+  // A new pending send: checked, its blobs acked, sealed and stamped.
+  async function newEntry (own, keyPair, { to, text, replyTo, items, key }, recipientBox, sealedBlobs, plains) {
+    if (recipientBox === null) throw new UsageError(NO_BOX)
+    if (replyTo !== null) {
+      const c = await threadOf(own, to)
+      if (c === null || dmFold.replyTarget(c.messages, replyTo) === null) throw new UsageError(BAD_REPLY)
+    }
+    const id = dm.newMessageId()
+    const at = nowIso()
+    const cert = await certOf(own)
+    if (items !== null && dmTextBytes(text) > dm.textBudget({ kind: 'msg', id, from: own, to, replyTo, media: items, at, cert })) {
+      throw new UsageError(TOO_LONG)
+    }
+    // Every chunk acked before any drop is stamped or put.
+    const gen = generation
+    for (const b of sealedBlobs) await upload(b, keyPair)
+    if (gen !== generation) throw new UsageError(LOCKED)
+    let inner
+    try {
+      inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, cert, ...(items === null ? {} : { media: items }) }, keyPair)
+    } catch (err) {
+      throw new UsageError(err && err.message === TOO_LONG ? TOO_LONG : BAD_TEXT)
+    }
+    let sealedTo, sealedSelf
+    try {
+      sealedTo = dm.sealInner(inner, recipientBox)
+      sealedSelf = dm.sealInner(inner, b4a.toString(box.publicKey, 'hex'))
+    } catch {
+      throw new UsageError(NO_BOX)
+    } finally {
+      inner.fill(0)
+    }
+    const stamps = await takeStamps(2)
+    if (stamps === null) throw new UsageError(NO_STAMPS)
+    return {
+      key,
+      id,
+      at,
+      drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
+      acked: [false, false],
+      row: { t: 'msg', id, peer: to, from: own, text, replyTo, media: items, at, mine: true },
+      blobs: sealedBlobs,
+      plains
+    }
   }
 
   // The op is filed here first; the ctl to the own box only tells the other
@@ -719,7 +1139,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (local.hasMessage(body.from, body.id) || batch.some((r) => r.t === 'msg' && r.from === body.from && r.id === body.id)) return null
     // A blocked sender's messages are dropped once they open.
     if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
-    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, at: body.at, mine: body.mine }
+    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, at: body.at, mine: body.mine }
   }
 
   async function close () {
@@ -741,6 +1161,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     thread,
     seen: tracked(seen),
     send: tracked(send),
+    putMedia: tracked(putMedia),
+    readMedia: tracked(readMedia),
+    wipeMedia,
     set: tracked(set),
     pull: tracked(pull),
     topUp,
@@ -760,5 +1183,10 @@ module.exports = {
   TOO_LONG,
   PULL_BUSY,
   UNCONFIRMED,
-  NO_CERT
+  NO_CERT,
+  BAD_MEDIA,
+  MEDIA_GONE,
+  MEDIA_STALE,
+  UPLOAD_FAILED,
+  BLOBS_MAX
 }

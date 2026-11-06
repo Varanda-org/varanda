@@ -904,3 +904,180 @@ test('a top-up goes on over a new stamp link when one hits its deadline, and sto
   t.is(await other.topUp(identity), 3, 'teto ends the top-up')
   t.is(capped.connections, 1, 'no new link after teto')
 })
+
+test('every frame GET bypasses the HTTP cache', async (t) => {
+  t.timeout(60000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc })
+  const plain = png(coreBlob.BLOB_CHUNK_BYTES + 10)
+  const sealed = sealBlob(plain)
+  await clientFor(seeder).send(sealed, crypto.keyPair())
+  const inits = []
+  const spying = (url, init) => {
+    inits.push(init)
+    return fetch(url, init)
+  }
+  const { bytes } = await fetchBlob(sealed.descriptor, seeder.origin, { fetch: spying })
+  t.ok(b4a.equals(bytes, plain))
+  t.is(inits.length, 2)
+  for (const init of inits) {
+    t.is(init.cache, 'no-store')
+    t.is(init.credentials, 'omit')
+  }
+})
+
+test('a rotated kid adopted after a stale key check keeps no stamp under any other kid', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc })
+  const identity = crypto.keyPair()
+  const fake = (local, kid, i) => ({ kid, ...local.seal({ token: (i + 1).toString(16).padStart(64, '0'), sig: postage.toBase64(5n) }) })
+  const cur = 'a1'.repeat(8)
+  const prev = 'b2'.repeat(8)
+
+  // Last check 8 days ago: the old current kid may no longer be the previous.
+  const stale = clientFor(seeder, { wallet: 4, walletLow: 2 })
+  await stale.storage.writeJson('blobKeyCheck', { v: 1, at: Date.now() - 8 * 24 * 3600000 })
+  await store.writeBlobStamps(stale.storage, { items: [0, 1, 2].map((i) => fake(stale.local, cur, i)), kids: [cur, prev] })
+  t.is(await stale.topUp(identity), 4, 'every stamp counts as gone, so the fill buys the whole wallet')
+  let w = await store.readBlobStamps(stale.storage)
+  t.alike(w.kids, [seeder.blobPub.kid], 'the new kid stands alone')
+  t.is(w.items.filter((s) => s.kid !== seeder.blobPub.kid).length, 0, 'no stamp under another kid is kept')
+  const check = await stale.storage.readJson('blobKeyCheck')
+  t.ok(check.at > Date.now() - 60000, 'the key check time is stored again')
+
+  // A recent check keeps the pair as before.
+  const fresh = clientFor(seeder, { wallet: 4, walletLow: 2 })
+  await fresh.storage.writeJson('blobKeyCheck', { v: 1, at: Date.now() - 3600000 })
+  await store.writeBlobStamps(fresh.storage, { items: [0, 1, 2].map((i) => fake(fresh.local, cur, i)), kids: [cur, prev] })
+  t.is(await fresh.topUp(identity), 1, 'three stamps stay usable under the previous kid')
+  w = await store.readBlobStamps(fresh.storage)
+  t.alike(w.kids, [seeder.blobPub.kid, cur])
+  t.is(w.items.filter((s) => s.kid === cur).length, 3)
+})
+
+test('a frame body that ended early is a transient error; a complete frame of the wrong size is a bad blob', async (t) => {
+  const origin = 'http://127.0.0.1:1'
+  const bad = (p) => p.then(() => null, (e) => e)
+  const sealed = sealBlob(png(100))
+  const frame = new Uint8Array(await (await fakeRoute(sealed).fetch(origin + '/blob/x/0')).arrayBuffer())
+  const streamOf = (bytes) => {
+    let done = false
+    return {
+      getReader: () => ({
+        read: async () => {
+          if (done) return { done: true, value: undefined }
+          done = true
+          return { done: false, value: bytes }
+        },
+        cancel: async () => {}
+      })
+    }
+  }
+  const answer = (body, length) => async () => ({
+    status: 200,
+    redirected: false,
+    headers: { get: (n) => (n === 'content-length' ? length : null) },
+    body
+  })
+  let err = await bad(fetchBlob(sealed.descriptor, origin, { fetch: answer(streamOf(frame.slice(0, frame.byteLength - 100)), null) }))
+  t.ok(err !== null)
+  t.not(err && err.message, 'mídia inválida', 'a body cut short with no Content-Length is not a bad blob')
+  t.not(err && err.message, 'mídia indisponível')
+  err = await bad(fetchBlob(sealed.descriptor, origin, { fetch: answer(streamOf(frame.slice(0, 1000)), String(frame.byteLength)) }))
+  t.not(err && err.message, 'mídia inválida', 'a body shorter than its Content-Length is not a bad blob')
+  err = await bad(fetchBlob(sealed.descriptor, origin, { fetch: answer(streamOf(frame.slice(0, 1000)), '1000') }))
+  t.is(err && err.message, 'mídia inválida', 'a complete frame of the wrong size is')
+})
+
+test('a failed write of the key check time is retried by the next top-up', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc })
+  const identity = crypto.keyPair()
+  const base = memoryNodeStorage()
+  let failWrite = true
+  const storage = {
+    ...base,
+    async writeJson (k, v) {
+      if (k === 'blobKeyCheck' && failWrite) throw new Error('disco cheio')
+      return base.writeJson(k, v)
+    }
+  }
+  const client = clientFor(seeder, { storage, wallet: 4, walletLow: 2 })
+  const kid = seeder.blobPub.kid
+  const fake = (i) => ({ kid, ...client.local.seal({ token: (i + 1).toString(16).padStart(64, '0'), sig: postage.toBase64(5n) }) })
+  await store.writeBlobStamps(base, { items: [0, 1, 2, 3].map(fake), kids: [kid] })
+  t.is(await client.topUp(identity), 0, 'the key is current')
+  t.is(await base.readJson('blobKeyCheck'), null, 'its check time was not stored')
+  failWrite = false
+  await client.topUp(identity)
+  const check = await base.readJson('blobKeyCheck')
+  t.ok(check !== null && check.at > Date.now() - 60000, 'the next top-up stores it')
+})
+
+test('a failed read of the key check time is not cached: the next top-up reads it and applies the stale rule', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc })
+  const identity = crypto.keyPair()
+  const base = memoryNodeStorage()
+  const local = localSeal()
+  let failRead = true
+  let offline = true
+  const storage = {
+    ...base,
+    async readJson (k) {
+      if (k === 'blobKeyCheck' && failRead) {
+        failRead = false
+        throw new Error('leitura falhou')
+      }
+      return base.readJson(k)
+    }
+  }
+  const client = createBlobClient({
+    seederUrl: seeder.url,
+    createSocket: (u) => createSocket(offline ? 'ws://127.0.0.1:1/' : u),
+    association: seeder.assoc,
+    storage,
+    seal: local.seal,
+    open: local.open,
+    limits: { wallet: 4, walletLow: 2, issuePaceMs: 0 }
+  })
+  const cur = 'a1'.repeat(8)
+  const prev = 'b2'.repeat(8)
+  await base.writeJson('blobKeyCheck', { v: 1, at: Date.now() - 8 * 24 * 3600000 })
+  await store.writeBlobStamps(base, { items: [0, 1, 2].map((i) => ({ kid: cur, ...local.seal({ token: (i + 1).toString(16).padStart(64, '0'), sig: postage.toBase64(5n) }) })), kids: [cur, prev] })
+  t.is(await client.topUp(identity), 0, 'the seeder is unreachable')
+  t.absent(failRead, 'the stored check was read once and failed')
+  offline = false
+  t.is(await client.topUp(identity, { force: true }), 4, 'read again: stale, so every old stamp counts as gone')
+  const w = await store.readBlobStamps(base)
+  t.alike(w.kids, [seeder.blobPub.kid], 'the new kid stands alone')
+})
+
+test('a top-up resolves only once the key check time is stored', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc })
+  const identity = crypto.keyPair()
+  const base = memoryNodeStorage()
+  const storage = {
+    ...base,
+    async writeJson (k, v) {
+      if (k === 'blobKeyCheck') await new Promise((resolve) => setTimeout(resolve, 200))
+      return base.writeJson(k, v)
+    }
+  }
+  const client = clientFor(seeder, { storage, wallet: 4, walletLow: 2 })
+  t.is(await client.topUp(identity, { force: true }), 4, 'a new key bought stamps')
+  const bought = await base.readJson('blobKeyCheck')
+  t.ok(bought !== null && bought.at > Date.now() - 60000, 'stored before the purchase resolved')
+
+  // Any write still in flight lands before the slate is cleared.
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  await base.writeJson('blobKeyCheck', null)
+  t.is(await client.topUp(identity, { force: true }), 0, 'the key is current and the wallet full')
+  const checked = await base.readJson('blobKeyCheck')
+  t.ok(checked !== null && checked.at > Date.now() - 60000, 'stored before the key check resolved')
+})

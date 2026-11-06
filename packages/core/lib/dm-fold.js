@@ -13,6 +13,8 @@ const { DM_REQUESTS_MAX, DM_MESSAGES_PER_PEER } = require('./dm')
 const HEX64 = /^[0-9a-f]{64}$/
 const HEX32 = /^[0-9a-f]{32}$/
 const FOLDER_OPS = ['accepted', 'declined']
+const PREVIEW_PHOTO = 'Foto'
+const PREVIEW_GIF = 'GIF'
 const BLOCK_OPS = ['blocked', 'unblocked']
 
 function isHex64 (s) {
@@ -80,7 +82,8 @@ function byNewest (a, b) {
 // fold({ self, followSet, messages, ops, seen }) -> { inbox, requests },
 // each a list of { peer, folder, messages, at, unread } newest first.
 // seen: Set of seenKey(from, id) strings.
-// messages: verified bodies { id, from, to, text, replyTo, at, filedAt };
+// messages: verified bodies { id, from, to, text, replyTo, media?, at,
+// filedAt } (media null or absent for a v1 body);
 // ops: { op, peer, at, filedAt }. filedAt is the LOCAL time in ms at which
 // this device stored the row (monotonic, assigned by the node; the send
 // time for own messages, the filing or creation time for own ctl ops). A
@@ -123,7 +126,8 @@ function fold ({ self, followSet, messages, ops, seen } = {}) {
     if (ids.has(key)) continue
     ids.add(key)
     const mine = m.from === self
-    const row = { id: m.id, from: m.from, to: m.to, text: m.text, replyTo: m.replyTo === undefined ? null : m.replyTo, at: new Date(t).toISOString(), sentAt: m.at, mine, peer, t, f }
+    const media = Array.isArray(m.media) && m.media.length > 0 ? m.media : null
+    const row = { id: m.id, from: m.from, to: m.to, text: m.text, replyTo: m.replyTo === undefined ? null : m.replyTo, media, at: new Date(t).toISOString(), sentAt: m.at, mine, peer, t, f }
     if (!byPeer.has(peer)) byPeer.set(peer, [])
     byPeer.get(peer).push(row)
   }
@@ -167,7 +171,18 @@ function fold ({ self, followSet, messages, ops, seen } = {}) {
 // every reader orders and pages by. `sentAt` is the sender's claim, shown
 // only as information.
 function publicRow (r) {
-  return { id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, at: r.at, sentAt: r.sentAt, mine: r.mine, peer: r.peer }
+  return { id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, media: r.media, at: r.at, sentAt: r.sentAt, mine: r.mine, peer: r.peer }
+}
+
+// What a conversation list shows for a message: its text, or a fixed label
+// when it is only media, so no peer-chosen string stands in for the photo.
+// GIF only when every item is one.
+function previewText (m) {
+  if (m === null || typeof m !== 'object') return ''
+  const text = typeof m.text === 'string' ? m.text : ''
+  if (text !== '' || !Array.isArray(m.media) || m.media.length === 0) return text
+  const gif = m.media.every(d => d !== null && typeof d === 'object' && d.mime === 'image/gif')
+  return gif ? PREVIEW_GIF : PREVIEW_PHOTO
 }
 
 function dropT (thread) {
@@ -214,5 +229,8 @@ module.exports = Object.freeze({
   seenKey,
   tabDot,
   replyTarget,
-  canSend
+  canSend,
+  previewText,
+  PREVIEW_PHOTO,
+  PREVIEW_GIF
 })

@@ -191,7 +191,7 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   t.alike(Object.keys(handle).sort(), ['close', 'connect', 'follows', 'identity', 'media'], 'only connect, close, follows, identity and media are exposed')
   t.ok(Object.isFrozen(handle) && Object.isFrozen(handle.identity) && Object.isFrozen(handle.media) && Object.isFrozen(handle.follows), 'the handle, identity, media and follows are frozen')
   t.alike(Object.keys(handle.identity).sort(), ['complete', 'lock', 'reset', 'signOut', 'status', 'unlock'], 'no getter, no signer')
-  t.alike(Object.keys(handle.media), ['upload'])
+  t.alike(Object.keys(handle.media), ['upload', 'putDm', 'readDm'], 'media: post upload, and DM media put and read (rpc.md 5.88)')
   t.alike(Object.keys(handle.follows).sort(), ['confirmLegacy', 'legacy'])
   const badKeys = await errorOf(handle.follows.confirmLegacy('x'))
   t.ok(badKeys instanceof TypeError, 'a sync throw becomes a rejection')
@@ -312,8 +312,11 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   const extra = handle.identity.unlock({ register: true })
   t.alike(fake.calls[0].publicKey.excludeCredentials.map((c) => new Uint8Array(c.id)).sort(byBytes),
     [unusable.rawId, firstPending.rawId, current.rawId].sort(byBytes), 'the unusable, superseded and current passkeys are excluded')
+  // Watch the pending ceremony before locking: lock() also wipes the DM
+  // media cache, and the cancelled unlock may reject before it returns.
+  const extraError = errorOf(extra)
   await handle.identity.lock()
-  t.is((await errorOf(extra)).code, 'CANCELLED')
+  t.is((await extraError).code, 'CANCELLED')
   fake.credential = current
   t.alike(await kvValue('passkey'), stored, 'the stored record is untouched')
   await handle.close()
@@ -352,8 +355,9 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
 
   // lock() during a ceremony cancels its result.
   const racing = again.identity.unlock()
+  const racingError = errorOf(racing)
   await again.identity.lock()
-  const cancelled = await errorOf(racing)
+  const cancelled = await racingError
   t.is(cancelled && cancelled.code, 'CANCELLED', 'a ceremony that outlives lock() is discarded')
   t.is((await again.identity.status()).unlocked, false)
 
