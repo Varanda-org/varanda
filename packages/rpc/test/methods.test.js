@@ -150,6 +150,8 @@ test('account.sign', (t) => {
   ok(t, 'account.sign', base, base)
   ok(t, 'account.sign', { ...base, phase: 'rename' })
   ok(t, 'account.sign', { ...base, phase: 'delete' })
+  ok(t, 'account.sign', { ...base, phase: 'cancel' })
+  ok(t, 'account.sign', { ...base, phase: 'passkey', sub: 'ab'.repeat(32) })
   ok(t, 'account.sign', { ...base, phase: 'finish', sub: '1234567890' })
   ok(t, 'account.sign', { ...base, phase: 'finish', sub: '!'.repeat(255) })
   ok(t, 'account.sign', { ...base, nonce: 'A-_9'.repeat(32) })
@@ -179,6 +181,11 @@ test('account.sign', (t) => {
   bad(t, 'account.sign', { ...base, sub: '123' }, 'reserve with sub')
   bad(t, 'account.sign', { ...base, phase: 'rename', sub: '123' }, 'rename with sub')
   bad(t, 'account.sign', { ...base, phase: 'delete', sub: '123' }, 'delete with sub')
+  bad(t, 'account.sign', { ...base, phase: 'cancel', sub: '123' }, 'cancel with sub')
+  // An attestation hash only at passkey: lowercase hex64, always there.
+  for (const sub of ['', 'AB'.repeat(32), 'ab'.repeat(31), 'ab'.repeat(33), '1234567890', null]) {
+    bad(t, 'account.sign', { ...base, phase: 'passkey', sub }, 'passkey sub ' + JSON.stringify(sub))
+  }
 })
 
 test('terms.sign', (t) => {

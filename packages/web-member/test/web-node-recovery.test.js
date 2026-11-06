@@ -103,7 +103,15 @@ function authenticator () {
         type: 'public-key',
         rawId: arrayBufferOf(cred.rawId),
         id: toBase64Url(cred.rawId),
-        response: { userHandle, authenticatorData: authData(fake.flags), getAuthenticatorData: () => authData() },
+        response: {
+          userHandle,
+          authenticatorData: authData(fake.flags),
+          getAuthenticatorData: () => authData(),
+          // Opaque here: the account service, not this node, checks them.
+          clientDataJSON: arrayBufferOf(new TextEncoder().encode('{}')),
+          signature: arrayBufferOf(new Uint8Array([1, 2, 3])),
+          attestationObject: arrayBufferOf(new Uint8Array([0xa0, ...cred.rawId]))
+        },
         getClientExtensionResults: () => ext
       }
     }
@@ -1003,7 +1011,10 @@ test('confirm: a fresh user check with the bound passkey, nothing changes', asyn
   const calls = fake.calls.length
   const confirming = h.identity.confirm()
   t.is(fake.calls.length, calls + 1, 'navigator.credentials.get runs in the call, before any await')
-  t.alike(await confirming, { ok: true })
+  const confirmed = await confirming
+  t.is(confirmed.ok, true)
+  t.is(confirmed.assertion.credentialId, bound, 'the assertion of the bound passkey goes to the account service')
+  t.alike(Object.keys(confirmed.assertion).sort(), ['authenticatorData', 'clientDataJSON', 'credentialId', 'signature'])
   const call = fake.calls[fake.calls.length - 1]
   t.is(call.kind, 'get')
   t.alike(allowOf(call), [bound], 'restricted to the bound passkey')
@@ -1012,7 +1023,12 @@ test('confirm: a fresh user check with the bound passkey, nothing changes', asyn
   t.ok(answered !== null && new Uint8Array(answered).every((b) => b === 0), 'a PRF output handed back anyway is wiped')
   fake.get = realGet
 
-  t.alike(await h.identity.confirm(), { ok: true }, 'a second check runs once the first settled')
+  const nonce = toBase64Url(new Uint8Array(32).fill(0x42))
+  t.is((await h.identity.confirm({ challenge: nonce })).ok, true, 'a second check runs once the first settled')
+  t.is(toBase64Url(new Uint8Array(fake.calls[fake.calls.length - 1].publicKey.challenge)), nonce, 'the account service nonce is the challenge')
+  const n = fake.calls.length
+  t.is((await errorOf(h.identity.confirm({ challenge: 'abc' }))).code, 'USAGE', 'a bad challenge is refused')
+  t.is(fake.calls.length, n, 'and runs no ceremony')
   t.alike(await h.identity.status(), before, 'the status is unchanged')
   t.alike(writes.slice(logged), [], 'no kv write, no session save or clear')
   t.alike(await kvState(), kvBefore, 'the passkey record, attempts and sign-out marker are unchanged')
@@ -1065,7 +1081,7 @@ test('confirm: CANCELLED, MISMATCH, no UV, one ceremony at a time, lock and Sair
   t.is(second.message, 'outra entrada com a passkey em andamento')
   t.is((await errorOf(h.identity.unlock())).code, 'LOCKED', 'so does an unlock')
   held.release()
-  t.alike(await first, { ok: true })
+  t.is((await first).ok, true)
 
   held = gate()
   fake.hold = held.promise
@@ -1093,4 +1109,23 @@ test('confirm: CANCELLED, MISMATCH, no UV, one ceremony at a time, lock and Sair
   held.release()
   t.is((await errorOf(leaving)).code, 'CANCELLED', 'Sair cancels it')
   t.is((await h.identity.status()).unlocked, false)
+})
+
+test('enrolment: a passkey created here keeps its attestation object for the account service until dropped', async (t) => {
+  t.timeout(60000)
+  const { fake, start } = await setup(t)
+  const h = await start()
+  t.is(await h.identity.enrolment(), null, 'nothing while locked')
+  await h.identity.unlock({ register: true })
+  const id = toBase64Url(fake.creds[0].rawId)
+  const enrol = await h.identity.enrolment()
+  t.is(enrol.credentialId, id)
+  t.is(enrol.attestationObject, toBase64Url(new Uint8Array([0xa0, ...fake.creds[0].rawId])))
+  await h.identity.lock()
+  t.is(await h.identity.enrolment(), null, 'answered only while unlocked')
+  await h.identity.unlock()
+  t.is((await h.identity.enrolment()).credentialId, id, 'a sign-in with the same passkey still has it')
+  await h.identity.dropEnrolment()
+  t.is(await h.identity.enrolment(), null, 'gone once the service stored it')
+  t.is(await kvValue('passkeyEnrol'), null)
 })

@@ -254,7 +254,7 @@ test('node: confirm is a pure check, never an identity op', (t) => {
   t.absent(node.match(/const IDENTITY_OPS = new Set\(\[([^\]]*)\]\)/)[1].includes("'confirm'"), 'not in IDENTITY_OPS')
   t.absent(node.match(/const ARG_OPS = new Set\(\[([^\]]*)\]\)/)[1].includes("'confirm'"))
   const fn = node.slice(node.indexOf('const pkConfirm = useCallback'), node.indexOf('const pkRefresh ='))
-  t.ok(fn.includes('return Promise.resolve(conn.identity.confirm())'), 'calls the handle')
+  t.ok(fn.includes('return Promise.resolve(conn.identity.confirm(args))'), 'calls the handle with the challenge')
   t.is(awaitAt(fn), -1, 'nothing awaited before the ceremony')
   for (const touch of ['passkeyOp', 'readPasskey', 'bumpEpoch', 'bumpGeneration', 'setPkStatus', 'setPkError', 'setPhase', 'pendingKindRef']) {
     t.absent(fn.includes(touch), 'never ' + touch)

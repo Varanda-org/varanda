@@ -46,7 +46,8 @@ import { Platform, StyleSheet, Text, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
-import { authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, readPending, recoveryPut, recoveryStart, renameFinish, renameStart, startLink, toError } from '../account'
+import { authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, passkeyAdd, passkeyStart, readPending, recoveryPut, recoveryStart, renameFinish, renameStart, startLink, toError } from '../account'
+import { enrolWith } from '../passkeyEnrol'
 import { registerEntry } from '../recovery'
 import { isAppClient } from '../appClient'
 import { acceptableAuthorizeUrl } from '../authorizeUrl'
@@ -594,6 +595,11 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       if (isAppClient()) appLink = null
       const kept = await apply(done.cert, done.usernameRecord)
       certTried.current.add(JSON.stringify(done.cert))
+      // The passkey that created this identity, while the sign-up window is
+      // open (Excluir conta verifies it later). Best effort, not awaited: a
+      // miss is retried at the next start (App.js) until the service closes
+      // the window.
+      enrolWith({ passkey: node.passkey, request: node.request, member: publicKey, username: row.username, start: passkeyStart, add: passkeyAdd }).catch(() => {})
       dropSignupInvite()
       setWaitlist('')
       setNote(kept ? CERT_KEPT_TEXT : CERT_RECEIVED)

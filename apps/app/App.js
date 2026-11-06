@@ -64,10 +64,11 @@ import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin } from './src/installation'
 import { NamesProvider, useNames } from './src/names'
-import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
+import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
 import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotBefore } from './src/seenSync'
-import { deletedOf, newReceipt } from './src/accountDeletion'
+import { deletedOf, newReceipt, scheduledOf } from './src/accountDeletion'
+import { enrolWith } from './src/passkeyEnrol'
 import { loadDeletionReceipt, saveDeletionReceipt } from './src/deletionReceiptStore'
 import { ageBlocking, ageErrorText, ageGate, ageReadAllowed, parseReturnAge } from './src/age'
 import { ageAnswerOutcome, ageStateShown, nodeVouches } from './src/ageMemory.js'
@@ -96,6 +97,7 @@ import { OfflineNote } from './src/ui/OfflineNote'
 import { InstallNote } from './src/ui/InstallNote'
 import { InstallCard } from './src/ui/InstallCard'
 import { PushNote } from './src/ui/PushNote'
+import { DeletionNote } from './src/ui/DeletionNote'
 import { InviteDropNote } from './src/ui/InviteDropNote'
 import { useInviteDrop } from './src/useInviteDrop'
 import { UpdateNote } from './src/ui/UpdateNote'
@@ -473,14 +475,35 @@ function Member () {
   // Excluir conta: an unlocked key the account service deleted (another
   // device asked, or this one could not wipe) is held on a notice, before
   // the terms gate, until it is erased here. Read once per unlocked member.
+  // The same read gives the date of a deletion waiting for it (asked without
+  // a passkey the service could verify), shown on every signed-in device
+  // (DeletionNote), and, for a linked member, sends the passkey enrolment
+  // left by a creation on this device (src/passkeyEnrol.js), at most one
+  // attempt in flight. refreshAccount() reads again after a schedule or a
+  // cancel.
   const [deletedState, setDeletedState] = useState(null)
+  const [scheduledDeletion, setScheduledDeletion] = useState(null)
+  const [accountTick, setAccountTick] = useState(0)
+  const refreshAccount = useCallback(() => setAccountTick((n) => n + 1), [])
+  const enrolling = useRef(false)
   useEffect(() => {
     setDeletedState(null)
+    setScheduledDeletion(null)
     if (node.hosted !== true || member === null) return
     let alive = true
-    accountStatus(member).then((st) => { if (alive) setDeletedState(deletedOf(st)) }, () => {})
+    accountStatus(member).then((st) => {
+      if (!alive) return
+      setDeletedState(deletedOf(st))
+      setScheduledDeletion(scheduledOf(st))
+      if (st && st.linked === true && typeof st.username === 'string' && passkey !== null && !enrolling.current) {
+        enrolling.current = true
+        enrolWith({ passkey, request: node.request, member, username: st.username, start: passkeyStart, add: passkeyAdd })
+          .catch(() => {})
+          .finally(() => { enrolling.current = false })
+      }
+    }, () => {})
     return () => { alive = false }
-  }, [node.hosted, member])
+  }, [node.hosted, member, accountTick])
   const decision = terms.status === 'loading'
     ? 'loading'
     : termsDecision({
@@ -2346,6 +2369,9 @@ function Member () {
             )
           : null}
         <OfflineNote inset={tab === 'diario'} />
+        {scheduledDeletion !== null
+          ? <DeletionNote scheduled={scheduledDeletion} onOpen={() => setAjustes('excluir')} inset={tab === 'diario' && node.online !== false} />
+          : null}
         {inviteNoteShown
           ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false} />
           : null}
@@ -2572,7 +2598,7 @@ function Member () {
           showToast(text)
         }}
       />
-      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} inviteNudge={inviteNudge} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} />
+      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} />
       {/* Mounted after the splash, so it wins: while the boot cover shows it
           follows the splash, which stays cream on native (Splash.js). */}
       <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light })} />

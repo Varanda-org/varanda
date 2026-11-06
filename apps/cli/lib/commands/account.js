@@ -13,6 +13,7 @@ const { createGoogle } = require('../account/google')
 const { openAccountStore } = require('../account/store')
 const { openTermsStore } = require('../account/terms-store')
 const { openRecoveryStore } = require('../account/recovery-store')
+const { openPasskeyStore } = require('../account/passkey-store')
 const { openInvitesStore } = require('../account/invites-store')
 const { openInviteDrops, startInviteDropLoop } = require('../account/invite-drops')
 const { openPushStore } = require('../account/push-store')
@@ -523,7 +524,21 @@ function readEnv (env, dataDir) {
   if (limits.inviteDrops !== undefined && limits.invitesPerWeek === undefined) {
     throw new UsageError('VARANDA_INVITE_DROPS exige VARANDA_INVITES_PER_WEEK')
   }
-  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), gif: readGifEnv(env) }
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), gif: readGifEnv(env), androidCertSha256: readAndroidCertEnv(env) }
+}
+
+// VARANDA_ANDROID_CERT_SHA256: the Android app's signing certificate, the
+// same value deploy/seeder/well-known.sh publishes in assetlinks.json. Here
+// it adds the app's 'android:apk-key-hash:' origin to the ones a passkey
+// assertion may report at Excluir conta (../account/webauthn.js). Unset or
+// '' leaves only the public origin (a deletion from the Android app then
+// waits its 7 days). Never echoed.
+const ANDROID_CERT_RE = /^[0-9A-F]{2}(:[0-9A-F]{2}){31}$/
+function readAndroidCertEnv (env) {
+  const raw = env.VARANDA_ANDROID_CERT_SHA256
+  if (raw === undefined || raw === '') return ''
+  if (typeof raw !== 'string' || !ANDROID_CERT_RE.test(raw)) throw new UsageError('VARANDA_ANDROID_CERT_SHA256 inválido')
+  return raw
 }
 
 // Hosted age verification: both variables set is on, both unset or empty is
@@ -681,7 +696,7 @@ async function serve (flags, env) {
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
   const pagesConfig = readPagesEnv(env)
-  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, gif } = readEnv(env, flags.dataDir)
+  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, gif, androidCertSha256 } = readEnv(env, flags.dataDir)
   const { maxMembers = null, invitesPerWeek = null, inviteDrops = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
@@ -708,6 +723,8 @@ async function serve (flags, env) {
   let store = null
   let terms = null
   let recovery = null
+  let passkeys = null
+  let stopPasskeysHeal = null
   let invites = null
   let pushStore = null
   let seenStore = null
@@ -731,7 +748,7 @@ async function serve (flags, env) {
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore)
+      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore, passkeys)
     }
   })
   let listener = null
@@ -773,6 +790,12 @@ async function serve (flags, env) {
     recovery = openRecoveryStore(flags.dataDir, { guard: () => lock.owned(), log })
     if (!recovery.available()) log({ event: 'recovery', reason: 'indisponivel' })
     stopRecoveryHeal = startHeal(recovery, 'recovery', log)
+    // The passkey public keys and waiting deletions (passkeys.json): the same
+    // guard. An invalid file leaves Excluir conta and the passkey enrolment
+    // answering 'indisponivel'.
+    passkeys = openPasskeyStore(flags.dataDir, { guard: () => lock.owned(), log })
+    if (!passkeys.available()) log({ event: 'passkeys', reason: 'indisponivel' })
+    stopPasskeysHeal = startHeal(passkeys, 'passkeys', log)
     // Signup invites (invites.json), only when VARANDA_INVITES_PER_WEEK is
     // set: unset, nothing is opened or created. The directory is the
     // single-use authority (isUsed). An invalid file keeps the service up and
@@ -886,7 +909,7 @@ async function serve (flags, env) {
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
       const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, invites, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -941,6 +964,7 @@ async function serve (flags, env) {
     // have dropped acknowledged entries) while the lock is still held.
     if (stopHeal !== null) stopHeal()
     if (stopRecoveryHeal !== null) stopRecoveryHeal()
+    if (stopPasskeysHeal !== null) stopPasskeysHeal()
     if (stopInvitesHeal !== null) stopInvitesHeal()
     if (stopDropsHeal !== null) stopDropsHeal()
     if (stopPushHeal !== null) stopPushHeal()
@@ -948,6 +972,7 @@ async function serve (flags, env) {
     if (stopSeenHeal !== null) stopSeenHeal()
     if (terms !== null && terms.available()) await terms.heal()
     if (recovery !== null && recovery.available()) await recovery.heal()
+    if (passkeys !== null && passkeys.available()) await passkeys.heal()
     if (invites !== null && invites.available()) await invites.heal()
     if (drops !== null && drops.available()) await drops.heal()
     if (pushStore !== null && pushStore.available()) await pushStore.heal()
@@ -1050,13 +1075,14 @@ async function closePageClients (pageClients) {
 // The lock is lost: the store is marked unavailable first, synchronously,
 // so no request still draining during the stop appends beside the writer
 // that took the lock over (store.js, "Writer guard"); then the service
-// stops. The terms, invites, push, seen, age and recovery stores, the page
-// keys, the page writer and the invite drops too: their next write must not
-// land either.
-function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, recovery = null, seenStore = null) {
+// stops. The terms, invites, push, seen, age, recovery and passkey stores,
+// the page keys, the page writer and the invite drops too: their next write
+// must not land either.
+function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, recovery = null, seenStore = null, passkeys = null) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
   if (recovery !== null) recovery.fail()
+  if (passkeys !== null) passkeys.fail()
   if (invites !== null) invites.fail()
   if (drops !== null) drops.fail()
   if (loop !== null) loop.stop().catch(() => {})
