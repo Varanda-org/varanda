@@ -21,6 +21,9 @@ const { openPushStore } = require('../lib/account/push-store')
 const { openRecoveryStore } = require('../lib/account/recovery-store')
 const { openInvitesStore } = require('../lib/account/invites-store')
 const { openModerationStore } = require('../lib/account/moderation-store')
+const { openSeenStore } = require('../lib/account/seen-store')
+const { HASH_NONE } = require('@varanda/core/lib/seen-proof')
+const { SEEN_BLOB_BYTES } = require('@varanda/core/lib/seen-blob')
 const { createAccountServer } = require('../lib/account/server')
 const { createDeleteRoutes } = require('../lib/account/delete-routes')
 const { createDeletionSweep } = require('../lib/account/deletion')
@@ -303,7 +306,9 @@ test('deletion sweep: purges every store for each deleted key, retries a store t
   const pushStore = openPushStore(dir)
   const recovery = openRecoveryStore(dir)
   const invites = openInvitesStore(dir, { perWeek: 3 })
+  const seen = openSeenStore(dir)
   for (const who of [m, keep]) {
+    await seen.put({ member: who.hex, blob: crypto.randomBytes(SEEN_BLOB_BYTES), expectedHash: HASH_NONE })
     await terms.accept({ member: who.hex, version: TERMS_VERSION, nonce: 'n'.repeat(43), signature: 'b'.repeat(128) })
     await ages.record({ member: who.hex, band: '18+', method: 'didit' })
     await pushStore.put({ member: who.hex, endpoint: 'https://fcm.googleapis.com/fcm/send/' + who.hex.slice(0, 8), p256dh: b64u(Buffer.concat([Buffer.from([4]), crypto.randomBytes(64)])), auth: b64u(crypto.randomBytes(16)) })
@@ -318,7 +323,7 @@ test('deletion sweep: purges every store for each deleted key, retries a store t
     forget: async (k) => { dropsHeld.delete(k) }
   }
   const logs = []
-  const sweep = createDeletionSweep({ accounts, terms, ages, pushStore, recovery, invites, drops, log: (e) => logs.push(e) })
+  const sweep = createDeletionSweep({ accounts, terms, ages, pushStore, recovery, invites, drops, seen, log: (e) => logs.push(e) })
   t.alike(await sweep.sweep(), { members: 0, pending: 0 }, 'nothing deleted yet')
   await accounts.deleteMember(m.hex)
   const first = await sweep.sweep()
@@ -328,6 +333,7 @@ test('deletion sweep: purges every store for each deleted key, retries a store t
   t.is(pushStore.devices(m.hex), 0)
   t.alike(recovery.list(m.hex), [])
   t.is(invites.holds(m.hex), false)
+  t.is(seen.get(m.hex), null, 'the seen blob is gone')
   t.ok(dropsHeld.has(m.hex))
   t.alike(logs, [{ event: 'exclusao', reason: 'purga-pendente', count: 1 }])
   dropsUp = true
@@ -338,6 +344,7 @@ test('deletion sweep: purges every store for each deleted key, retries a store t
   t.is(pushStore.devices(keep.hex), 1)
   t.is(recovery.list(keep.hex).length, 1)
   t.ok(invites.holds(keep.hex))
+  t.ok(seen.get(keep.hex) !== null)
   t.ok(dropsHeld.has(keep.hex))
   const reopened = openTermsStore(dir)
   t.alike(reopened.list(m.hex), [], 'gone from disk too')

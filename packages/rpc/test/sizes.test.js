@@ -6,11 +6,13 @@
 const test = require('brittle')
 const { validateRecord } = require('@varanda/core/lib/records')
 const { isUsername } = require('@varanda/core/lib/account-link')
+const { SEEN_BLOB_B64, MERGE_AVISOS_MAX, SYNC_PAGES_MAX, MERGE_PAGE_TOKENS_MAX } = require('@varanda/core/lib/seen-blob')
 const {
   createServerDispatcher,
   validateParams,
   utf8ByteLength,
   MAX_ID,
+  MAX_REQUEST,
   MAX_MESSAGE,
   MAX_LIST,
   MAX_NAME,
@@ -84,6 +86,40 @@ function worstQuote (ch) {
 function size (result) {
   return utf8ByteLength(JSON.stringify({ v: 1, id: MAX_ID, ok: true, result }))
 }
+
+test('seen sync: worst-case request and results fit', (t) => {
+  t.is(SEEN_BLOB_B64, 43744)
+  t.is(MERGE_AVISOS_MAX, 256)
+  t.is(SYNC_PAGES_MAX, 4)
+  t.is(MERGE_PAGE_TOKENS_MAX, 32)
+  t.is(MAX_REQUEST, 65536)
+  t.is(MAX_MESSAGE, 262144)
+  const tokens = (n) => Array.from({ length: n }, (_, i) => i.toString(16).padStart(32, '0'))
+  const avisos = {
+    own: tokens(MERGE_AVISOS_MAX),
+    pages: Object.fromEntries(Array.from({ length: SYNC_PAGES_MAX }, (_, i) => [
+      'page:' + i.toString(16).padStart(64, '0'), tokens(MERGE_PAGE_TOKENS_MAX)
+    ]))
+  }
+  const blob = 'A'.repeat(SEEN_BLOB_B64)
+  const params = { blob, avisos, unchanged: false }
+  t.ok(validateParams('seen.merge', params).ok)
+  const request = utf8ByteLength(JSON.stringify({ v: 1, id: MAX_ID, method: 'seen.merge', params }))
+  t.ok(request < MAX_REQUEST)
+  t.comment('seen.merge worst-case request: ' + request + ' bytes')
+  const write = size({ signature: 'f'.repeat(128), blob, hash: HEX, prevHash: HEX })
+  t.ok(write < MAX_MESSAGE)
+  t.comment('seen.sign worst-case write result: ' + write + ' bytes')
+  const merge = size({
+    avisos,
+    pending: false,
+    dmChanged: false,
+    groupChanged: false,
+    caughtUp: Array.from({ length: 512 }, (_, i) => i.toString(16).padStart(64, '0'))
+  })
+  t.ok(merge < MAX_MESSAGE)
+  t.comment('seen.merge worst-case result with 512 caught-up keys: ' + merge + ' bytes')
+})
 
 function feedResult (n, ch) {
   const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ }, quote: null, media: MEDIA }

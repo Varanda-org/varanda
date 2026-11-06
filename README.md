@@ -992,6 +992,10 @@ O semeador nunca vê a inscrição. Ele só manda o candidato em loopback (`POST
 
 Um aviso que chega com o serviço de conta fora, ou com a fila do repasse cheia (256 no semeador, 512 no serviço), se perde e não é repetido. Um bloco escrito enquanto o semeador estava fora só vira aviso depois que ele volta se o `at` do autor tiver menos de 6 h (`PUSH_MAX_AGE_MS`, só para suprimir). O que já estava guardado quando o diário passou a ser servido não gera aviso, inclusive depois de reiniciar ou de reconstruir o índice.
 
+##### Estado de vistos entre aparelhos
+
+O serviço de conta guarda em `seen/<membro>` (diretório `0700`, arquivos `0600`, no volume `account-data`) um bloco cifrado de 32808 bytes por membro, com as marcações de visto mais recentes de Avisos, Conversas e grupos. Só os aparelhos da passkey abrem o bloco (`docs/protocol.md`, seção 14); o serviço vê só que ele existe, o tamanho fixo e a hora da última gravação. Não há variável para ligar: `POST /account/seen/start` e `POST /account/seen/finish` ficam sempre montadas, e gravar exige o aceite dos Termos atuais. O backup leva o diretório com o resto do volume. Perder o diretório não perde nada para sempre: cada aparelho guarda as próprias marcações e as grava de novo no passe seguinte. Um `seen` que não é um diretório (um link simbólico, um arquivo) deixa o recurso indisponível até ser corrigido, com uma linha `{ event: 'seen', reason: 'diretorio-invalido' }` no registro; nenhum membro, hash ou byte do bloco entra no registro.
+
 #### Aplicar as decisões do painel
 
 Os moderadores decidem as denúncias no painel do serviço de conta (`/account/mod/`), mas o painel não assina nada: cada decisão fica pendente até o operador rodar `mod apply` na própria máquina, com o diretório da moderação. A chave secreta da moderação continua só nessa máquina.
@@ -1024,7 +1028,7 @@ No pedido, o serviço:
 
 1. enfileira no painel o bloqueio da chave, marcado como pedido pela própria pessoa, mesmo quando já havia um bloqueio pendente de moderador ou da IA para ela: o painel não deixa cancelar nenhuma mudança dessa chave nem desbloqueá-la (`conta-excluida`), e o `--yes` assina; só um `mod unblock` do operador, no terminal, desfaz;
 2. apaga do diretório o vínculo (sub, e-mail, certificado, registros e o convite usado) e guarda só a chave pública, a data e os @nomes que a conta usou, que ficam queimados; a mesma chave não volta a se vincular, e a mesma conta Google pode criar uma conta nova com outra passkey;
-3. apaga `terms.json`, `age.json`, `push.json`, `recovery.json` (fica a marca de remoção de 30 dias, com a chave pública), os convites que a pessoa criou e as marcas de `invite-drops.json`. Uma varredura repete isso na partida e a cada hora, para o que não pôde ser apagado na hora; o registro tem só `{ event: 'exclusao', reason }` e contagens, nunca a chave.
+3. apaga `terms.json`, `age.json`, `push.json`, `recovery.json` (fica a marca de remoção de 30 dias, com a chave pública), os convites que a pessoa criou, as marcas de `invite-drops.json` e o bloco cifrado de vistos (`seen/<chave>`). Uma varredura repete isso na partida e a cada hora, para o que não pôde ser apagado na hora; o registro tem só `{ event: 'exclusao', reason }` e contagens, nunca a chave.
 
 Ficam as denúncias e as decisões dos moderadores (`moderation.json`, retenção em aberto na issue #38). Quem ainda é dono de uma página recebe `paginas-ativas` e precisa encerrá-la ou transferi-la antes.
 

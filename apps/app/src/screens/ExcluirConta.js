@@ -22,7 +22,7 @@ import { DELETE_DAYS, DELETED_TEXT, DONE_TEXT, PASSKEY_TEXT, PENDING_TEXT, delet
 import { clearDeletionReceipt, loadDeletionReceipt, saveDeletionReceipt } from '../deletionReceiptStore'
 import { Body, Btn, ErrorText, Field, Page, Row, Soft, errorText, useAction } from '../ui'
 
-const WHAT_GOES = 'Excluir a conta apaga, no serviço de conta da associação, o vínculo com o Google, o registro de idade, os aceites dos Termos, os avisos no aparelho, os convites, as passkeys extras e o código de recuperação. O seu @nome fica reservado e nunca vai para outra pessoa.'
+const WHAT_GOES = 'Excluir a conta apaga, no serviço de conta da associação, o vínculo com o Google, o registro de idade, os aceites dos Termos, os avisos no aparelho, as marcações de visto, os convites, as passkeys extras e o código de recuperação. O seu @nome fica reservado e nunca vai para outra pessoa.'
 const DIARY = 'O diário (publicações, perfil, fotos, quem você segue, curtidas e republicações) sai dos semeadores da associação em até ' + DELETE_DAYS + ' dias. Apps e semeadores modificados, cópias que outras pessoas já baixaram, mensagens já entregues e capturas de tela podem manter o conteúdo.'
 const GROUPS = 'As comunidades e os grupos que você criou deixam de existir para todos os participantes.'
 const KEPT = 'Ficam guardadas as denúncias feitas por você ou contra você e as decisões dos moderadores, para moderação e pedidos legais.'

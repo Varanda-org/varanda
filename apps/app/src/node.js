@@ -309,6 +309,7 @@ function VitrineNodeProvider ({ children }) {
       getGroupVersion,
       dmVersion,
       bumpDm,
+      seenVersion: 0,
       // Never syncing, so always idle: background name reads wait for that
       // (autoSyncPolicy.js namesQuiet).
       autoSync: { wanted: autoWanted, backoffUntil: 0, failureUntil: 0, reconciling: false, idleSince: 1 },
@@ -388,6 +389,8 @@ function LiveNodeProvider ({ children }) {
   // attempt, so the list, the open thread and the tab dot all read again.
   const [dmVersion, setDmVersion] = useState(0)
   const bumpDm = useCallback(() => setDmVersion((n) => n + 1), [])
+  // Bumped per seen.changed: a hint for the seen pass (seenSync.js), never data.
+  const [seenVersion, setSeenVersion] = useState(0)
   // null, or { runId: null (not started yet) | integer, restarted }
   const [recovery, setRecovery] = useState(null)
   const recoveryRef = useRef(null)
@@ -561,6 +564,11 @@ function LiveNodeProvider ({ children }) {
   const onEvent = useCallback((name, data) => {
     if (name === 'dm.sending') {
       noteOwnDmDrop()
+      return
+    }
+    // Carries nothing and is no sync line.
+    if (name === 'seen.changed') {
+      setSeenVersion((n) => n + 1)
       return
     }
     if (name === 'groups.changed') {
@@ -1386,8 +1394,8 @@ function LiveNodeProvider ({ children }) {
   const legacyFollows = useMemo(() => (hasPasskey && hasLegacy && unlocked ? { keys: legacyKeys, confirm: legacyConfirm } : null), [hasPasskey, hasLegacy, unlocked, legacyKeys, legacyConfirm])
 
   const value = useMemo(() => ({
-    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, autoSync, signals, ackFresh, setAutoSync, syncNow, whenIdle
-  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, autoSync, signals, ackFresh, setAutoSync, syncNow, whenIdle])
+    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals, ackFresh, setAutoSync, syncNow, whenIdle
+  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals, ackFresh, setAutoSync, syncNow, whenIdle])
 
   return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
 }

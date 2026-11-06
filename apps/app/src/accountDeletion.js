@@ -11,7 +11,7 @@ const KEY_RE = /^[0-9a-f]{64}$/
 export const DELETE_DAYS = 7
 
 export const DELETED_TEXT = 'Esta conta foi excluída.'
-export const PENDING_TEXT = 'O serviço de conta já apagou o vínculo com o Google, o registro de idade, os aceites dos Termos, os avisos no aparelho, os convites, as passkeys extras e o código de recuperação. O diário sai dos semeadores da associação em até ' + DELETE_DAYS + ' dias.'
+export const PENDING_TEXT = 'O serviço de conta já apagou o vínculo com o Google, o registro de idade, os aceites dos Termos, os avisos no aparelho, as marcações de visto, os convites, as passkeys extras e o código de recuperação. O diário sai dos semeadores da associação em até ' + DELETE_DAYS + ' dias.'
 export const DONE_TEXT = 'Exclusão concluída: o diário saiu dos semeadores da associação.'
 export const PASSKEY_TEXT = 'A passkey continua no gerenciador de senhas do aparelho e o Varanda não consegue apagá-la. Para apagar: no iPhone, app Senhas (ou Ajustes > Senhas); no Android, Gerenciador de senhas do Google; no computador, o gerenciador do navegador. Procure pelo endereço do Varanda.'
 

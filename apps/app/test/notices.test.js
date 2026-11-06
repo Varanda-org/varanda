@@ -299,6 +299,105 @@ function seeded (seed) {
 }
 const HEX = /^[0-9a-f]{32}$/
 
+test('seenOnScreen excludes padding, unseen rows and invalid tokens', async (t) => {
+  const { seenOnScreen, padSeen } = await load()
+  const stored = Object.freeze(padSeen([d(1), d(2)], seeded(7)))
+  const decoy = stored.find((id) => id !== d(1) && id !== d(2))
+  const items = Object.freeze([tok(2), tok(3), tok(1), tok(2), null, row('bad', 1, 'nope')])
+  const ids = seenOnScreen(items, stored)
+  t.alike(ids, [d(2), d(1)])
+  t.is(ids.includes(decoy), false)
+  t.alike(seenOnScreen([], stored), [])
+  t.alike(seenOnScreen(items, []), [])
+  t.alike(seenOnScreen([row('bad', 1, 'nope')], ['nope']), [])
+})
+
+test('seenOnScreen keeps newest loaded rows first and caps personal and page lists', async (t) => {
+  const { seenOnScreen } = await load()
+  const items = Object.freeze(Array.from({ length: 300 }, (_, i) => tok(300 - i)))
+  const stored = Object.freeze(items.map((row) => row.seen).reverse())
+  t.alike(seenOnScreen(items, stored), items.slice(0, 256).map((row) => row.seen))
+  t.alike(seenOnScreen(items, stored, 32), items.slice(0, 32).map((row) => row.seen))
+  t.alike(seenOnScreen(items, stored, 0), [])
+})
+
+test('mergeRemoteSeen never evicts locally seen loaded rows when folding remote tokens', async (t) => {
+  const { mergeRemoteSeen, SEEN_MAX } = await load()
+  // A zero draw would evict the first slot if the local row were not protected.
+  const stored = Object.freeze(Array.from({ length: SEEN_MAX }, (_, i) => d(i + 1)))
+  const remote = Object.freeze([d(SEEN_MAX + 1), d(SEEN_MAX + 2)])
+  const items = Object.freeze([tok(SEEN_MAX + 1), tok(1), tok(2), tok(SEEN_MAX + 3)])
+  const result = mergeRemoteSeen(stored, remote, items, (n) => new Uint8Array(n))
+  t.is(result.changed, true)
+  t.is(result.ids.length, SEEN_MAX)
+  t.is(new Set(result.ids).size, SEEN_MAX)
+  t.ok(result.ids.includes(d(1)), 'the locally seen row in the first slot survives')
+  t.ok(result.ids.includes(d(2)), 'every locally seen loaded row survives')
+  t.ok(result.ids.includes(d(SEEN_MAX + 1)), 'the remote seen loaded row is folded')
+  t.is(result.ids.includes(d(SEEN_MAX + 2)), false, 'an unloaded remote token is not stored')
+  t.is(result.ids.includes(d(SEEN_MAX + 3)), false, 'a loaded unseen row stays unseen')
+  t.alike(stored, Array.from({ length: SEEN_MAX }, (_, i) => d(i + 1)))
+})
+
+test('remoteFoldPlan never marks a hidden poll page and settles nothing after a namespace reset', async (t) => {
+  const { remoteFoldPlan } = await load()
+  const onScreen = [tok(1), tok(2)]
+  const polled = [tok(3), tok(1)]
+
+  const reset = remoteFoldPlan(null, null)
+  t.alike(reset.rows, [])
+  t.is(reset.settle, null, 'no list of this namespace: nothing is settled')
+
+  const hidden = remoteFoldPlan(onScreen, { list: polled, shown: false })
+  t.alike(hidden.rows, onScreen.concat(polled), 'rows on screen and the polled page are protected')
+  t.is(hidden.settle.list, polled)
+  t.is(hidden.settle.shown, false, 'a page read by a hidden poll only moves the dot')
+
+  const visible = remoteFoldPlan(onScreen, { list: onScreen, shown: true })
+  t.alike(visible.rows, onScreen)
+  t.is(visible.settle.list, onScreen)
+  t.is(visible.settle.shown, true)
+
+  const firstPoll = remoteFoldPlan(null, { list: polled, shown: false })
+  t.alike(firstPoll.rows, polled)
+  t.is(firstPoll.settle.shown, false)
+})
+
+test('mergeRemoteSeen leaves storage untouched when remote tokens are present or unloaded', async (t) => {
+  const { mergeRemoteSeen, padSeen } = await load()
+  const stored = Object.freeze(padSeen([d(1), d(2)], seeded(8)))
+  const noRandom = () => { throw new Error('unchanged lists need no randomness') }
+  for (const remote of [[d(1), d(2)], [d(3)], [], ['nope', null]]) {
+    const result = mergeRemoteSeen(stored, Object.freeze(remote), [tok(1), tok(2), null, { seen: 'nope' }], noRandom)
+    t.is(result.changed, false)
+    t.is(result.ids, stored)
+  }
+  const empty = Object.freeze([])
+  t.alike(mergeRemoteSeen(empty, [d(3)], [], noRandom), { ids: empty, changed: false })
+})
+
+test('mergeRemoteSeen pads the first fold and keeps existing local tokens', async (t) => {
+  const { mergeRemoteSeen, SEEN_MAX } = await load()
+  const result = mergeRemoteSeen(Object.freeze([d(1)]), [d(2)], [tok(2), tok(1)], seeded(9))
+  t.is(result.changed, true)
+  t.is(result.ids.length, SEEN_MAX)
+  t.ok(result.ids.includes(d(1)))
+  t.ok(result.ids.includes(d(2)))
+})
+
+test('seenUnion combines valid local and remote tokens for the badge without changing storage', async (t) => {
+  const { seenUnion, hasNew } = await load()
+  const stored = Object.freeze([d(1), d(2)])
+  const remote = Object.freeze([d(2), d(3), d(3), 'nope', null, 7, 'AB'.repeat(16)])
+  const ids = seenUnion(stored, remote)
+  t.alike(ids, [d(1), d(2), d(3)])
+  t.is(hasNew([tok(1), tok(3)], ids), false)
+  t.is(hasNew([tok(4)], ids), true)
+  t.is(hasNew([tok(3)], stored), true)
+  t.alike(seenUnion([], []), [])
+  t.alike(seenUnion(['bad'], [d(3)]), [d(3)])
+})
+
 test('randomToken is 32 lowercase hex from 16 injected bytes and rejects a wrong source', async (t) => {
   const { randomToken } = await load()
   t.is(randomToken(() => new Uint8Array(16).fill(0xab)), 'ab'.repeat(16))

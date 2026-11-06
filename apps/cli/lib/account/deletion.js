@@ -11,8 +11,10 @@
 // What goes: terms acceptances (terms.json), the age band (age.json), the
 // push subscriptions (push.json), the recovery entries (recovery.json, each
 // leaving the store's usual 30-day tombstone with the public key), the
-// invites the member issued (invites.json) and the surprise-invite marks
-// (invite-drops.json). What stays is decided elsewhere: the deleted row and
+// invites the member issued (invites.json), the surprise-invite marks
+// (invite-drops.json) and the encrypted seen blob (seen/<member>, removed
+// with the compare-and-swap of ./seen-store.js: a conflict waits for the
+// next sweep). What stays is decided elsewhere: the deleted row and
 // the burned names in the directory, the reports and decisions in
 // moderation.json (issue #38), and the pending block (./moderation-store.js).
 //
@@ -25,9 +27,9 @@ function usable (s) {
 }
 
 // createDeletionSweep({ accounts, terms, ages, pushStore, recovery, invites,
-// drops, log }) -> { purge(member), sweep(), start() -> stop }. Every store
-// but `accounts` may be null (the feature is off: no file to purge).
-function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, recovery = null, invites = null, drops = null, log = () => {} }) {
+// drops, seen, log }) -> { purge(member), sweep(), start() -> stop }. Every
+// store but `accounts` may be null (the feature is off: no file to purge).
+function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, recovery = null, invites = null, drops = null, seen = null, log = () => {} }) {
   // [name, store, holds(member), forget(member)] for each store that exists.
   const steps = [
     ['terms', terms, (m) => terms.holds(m), (m) => terms.forget(m)],
@@ -35,8 +37,16 @@ function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore =
     ['push', pushStore, (m) => pushStore.devices(m) > 0, (m) => pushStore.removeAll(m)],
     ['recuperacao', recovery, (m) => recovery.list(m).length > 0, (m) => recovery.removeMember(m)],
     ['convites', invites, (m) => invites.holds(m), (m) => invites.forget(m)],
-    ['sorteio', drops, (m) => drops.holds(m), (m) => drops.forget(m)]
+    ['sorteio', drops, (m) => drops.holds(m), (m) => drops.forget(m)],
+    ['vistos', seen, (m) => seen.get(m) !== null, forgetSeen]
   ].filter(([, store]) => store !== null && store !== undefined)
+
+  async function forgetSeen (member) {
+    const current = seen.get(member)
+    if (current === null) return
+    const r = await seen.forget(member, current.hash)
+    if (r.ok !== true) throw new Error('vistos-conflito')
+  }
 
   // -> the number of stores still holding (or unable to answer for) member.
   async function purgeOne (member) {
