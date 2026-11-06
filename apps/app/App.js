@@ -64,7 +64,9 @@ import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin } from './src/installation'
 import { NamesProvider, useNames } from './src/names'
-import { agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
+import { agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
+import { NOTICES_POLL_MS } from './src/notices'
+import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotBefore } from './src/seenSync'
 import { ageBlocking, ageErrorText, ageGate, ageReadAllowed, parseReturnAge } from './src/age'
 import { ageAnswerOutcome, ageStateShown, nodeVouches } from './src/ageMemory.js'
 import * as nav from './src/nav'
@@ -1481,6 +1483,128 @@ function Member () {
       setDmDot(false)
     }
   }, [dmReady, readDmDot, node.dmVersion, stackDepth])
+  // --- Visto em todos os aparelhos (src/seenSync.js) ---
+  // The same passkey on another device marked notices, conversations or
+  // groups as seen: a pass reads the encrypted seen document from the account
+  // service, merges it in the browser node and writes back newer local marks.
+  // Local dots paint first; a pass only clears them afterwards. Hosted only
+  // and behind the same terms gate as the push opt-in: nothing runs on a
+  // manual configuration, varanda-serve or the core node.
+  const seenMember = mode === 'hosted' && ready && !locked && termsOk && pkStatus !== null && typeof pkStatus.publicKey === 'string'
+    ? pkStatus.publicKey.toLowerCase()
+    : null
+  const seenMemberRef = useRef(seenMember)
+  seenMemberRef.current = seenMember
+  const seenOnlineRef = useRef(node.online)
+  seenOnlineRef.current = node.online
+  const seenRequestRef = useRef(node.request)
+  seenRequestRef.current = node.request
+  const groupVersionsRef = useRef(groupVersions)
+  groupVersionsRef.current = groupVersions
+  const nodeEpochRef = useRef(nodeEpoch)
+  nodeEpochRef.current = nodeEpoch
+  // Filled by Avisos: the seen tokens of rows it has loaded, per namespace.
+  const avisosSeenRef = useRef({ own: [], pages: {} })
+  const [remoteSeen, setRemoteSeen] = useState(null)
+  const seenSchedulerRef = useRef(null)
+  // The node's avisos from the last merge answer: rows it already holds are
+  // not sent again and wake nothing.
+  const avisosMergedRef = useRef(null)
+  // Tokens a merge already received this session: never offered again.
+  const avisosDeliveredRef = useRef(new Set())
+  const onAvisosSeen = useCallback((namespace, tokens) => {
+    if (typeof namespace !== 'string' || !Array.isArray(tokens)) return
+    const { pending, fresh } = reportAvisosSeen(avisosSeenRef.current, avisosMergedRef.current, namespace, tokens, ownKey, avisosDeliveredRef.current)
+    avisosSeenRef.current = pending
+    // A row seen here for the first time is a local mark: the pass runs
+    // within the debounce, not only at the next poll.
+    if (fresh && seenSchedulerRef.current) seenSchedulerRef.current.wake('changed')
+  }, [ownKey])
+  useEffect(() => {
+    avisosSeenRef.current = { own: [], pages: {} }
+    avisosMergedRef.current = null
+    avisosDeliveredRef.current = new Set()
+    setRemoteSeen(null)
+  }, [seenMember])
+  useEffect(() => {
+    if (seenMember === null) return
+    const member = seenMember
+    const run = async () => {
+      // caughtUp describes the groups as the merge saw them: only the
+      // versions known when the first merge went out are acknowledged, so a
+      // post that arrives after it keeps its dot. Versions restart per node
+      // epoch, so the epoch is taken with them.
+      const { request, snap } = snapshotBefore(seenRequestRef.current, 'seen.merge', () => ({
+        versions: groupVersionsRef.current,
+        epoch: nodeEpochRef.current
+      }))
+      const sent = cleanAvisos(avisosSeenRef.current)
+      const result = await runSeenPass({
+        member,
+        request,
+        http: { seenStart, seenFinish },
+        avisos: sent
+      })
+      if (seenMemberRef.current !== member) return
+      if (result.avisos) {
+        // The first merge stored what was sent in the node's document.
+        avisosSeenRef.current = dropSent(avisosSeenRef.current, sent)
+        rememberSent(avisosDeliveredRef.current, sent)
+        avisosMergedRef.current = result.avisos
+        setRemoteSeen(result.avisos)
+      }
+      if (result.dmChanged) bumpDm()
+      if (result.groupChanged) {
+        bumpSeen()
+        const taken = snap.value
+        setGroupSeen((cur) => ackCaughtUp(cur, result.caughtUp, taken))
+      }
+    }
+    const scheduler = createSeenScheduler({
+      run,
+      canRun: () => seenMemberRef.current === member && seenOnlineRef.current !== false,
+      now: () => Date.now(),
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (t) => clearTimeout(t)
+    })
+    seenSchedulerRef.current = scheduler
+    return () => {
+      scheduler.stop()
+      if (seenSchedulerRef.current === scheduler) seenSchedulerRef.current = null
+    }
+  }, [seenMember, bumpDm, bumpSeen])
+  const seenGeneration = passkey !== null ? passkey.generation : 0
+  useEffect(() => {
+    if (seenMember !== null && seenSchedulerRef.current) seenSchedulerRef.current.wake('unlock')
+  }, [seenMember, seenGeneration])
+  // The connection came back: marks made offline go out once the minimum
+  // interval allows.
+  const seenWasOnlineRef = useRef(node.online)
+  useEffect(() => {
+    const was = seenWasOnlineRef.current
+    seenWasOnlineRef.current = node.online
+    if (was === false && node.online !== false && seenSchedulerRef.current) seenSchedulerRef.current.wake('online')
+  }, [node.online])
+  const seenVisibleRef = useRef(node.visible)
+  useEffect(() => {
+    const was = seenVisibleRef.current
+    seenVisibleRef.current = node.visible
+    if (!was && node.visible && seenSchedulerRef.current) seenSchedulerRef.current.wake('visible')
+  }, [node.visible])
+  useEffect(() => {
+    if (seenMember === null || !node.visible) return
+    const t = setInterval(() => {
+      if (seenSchedulerRef.current) seenSchedulerRef.current.wake('poll')
+    }, NOTICES_POLL_MS)
+    return () => clearInterval(t)
+  }, [seenMember, node.visible])
+  const seenVersionRef = useRef(node.seenVersion)
+  useEffect(() => {
+    if (seenVersionRef.current === node.seenVersion) return
+    seenVersionRef.current = node.seenVersion
+    if (seenSchedulerRef.current) seenSchedulerRef.current.wake('changed')
+  }, [node.seenVersion])
+
   // Anyone may write to anyone (owner decision 2026-11-03), so every hosted
   // member publishes its message key once per unlocked session, without first
   // opening Conversas; dm.enable appends nothing when the key is already
@@ -2275,6 +2399,8 @@ function Member () {
               onFollowsChanged={followsChanged}
               onToast={showToast}
               onBadge={setAvisosNew}
+              onSeenState={onAvisosSeen}
+              remoteSeen={remoteSeen}
             />
           </View>
           {mode === 'hosted'

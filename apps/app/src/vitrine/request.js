@@ -248,6 +248,10 @@ export function createVitrineRequest (fixtures) {
     'age.sign': signed,
     'invite.sign': signed,
     'push.sign': signed,
+    // No seen sync offline: a signature the account call never uses, and a
+    // merge that changes nothing.
+    'seen.sign': () => ({ signature, prevHash: '0'.repeat(64) }),
+    'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, caughtUp: [] }),
     'report.sign': signed,
     'dm.reportSign': signed,
     'terms.sign': signed,

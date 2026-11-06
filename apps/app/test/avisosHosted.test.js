@@ -74,3 +74,38 @@ test('Avisos gives exhausted snippet refs another chance on reload, and speaks t
   t.ok(source.includes("accessibilityLabel={ref === null ? spoken : spoken + ', abrir publicação'}"))
   t.ok(source.includes("accessibilityLabel={spoken + ', ver perfil'}"))
 })
+
+test('Avisos resets the seen ids before folding remote marks, and a hidden poll neither marks nor reports', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  const reset = source.indexOf('shownListRef.current = null')
+  const fold = source.indexOf('// A seen pass brought the marks of another device')
+  t.ok(reset > 0 && fold > 0)
+  t.ok(reset < fold, 'the namespace reset effect runs before the remote fold effect')
+  t.ok(source.includes('settle(page.notices, false, false)'))
+  t.absent(source.includes('settle(page.notices, false)\n'))
+  t.ok(/if \(shown && typeof onSeenStateRef\.current === 'function'\)/.test(source))
+  // Every settle that only moves the dot stores the loaded rows another
+  // device saw, not only the settle right after a pass.
+  const settleAt = source.indexOf('const settle = useCallback(')
+  const settleEnd = source.indexOf('}, [seenNamespace, badge])', settleAt)
+  t.ok(source.slice(settleAt, settleEnd).includes('mergeRemoteSeen(seen.ids, remote, rows, randomBytes)'))
+})
+
+test('Avisos settles a read begun before the own key through the current namespace', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  const settleAt = source.indexOf('const settle = useCallback(')
+  const body = source.slice(settleAt, source.indexOf('}, [seenNamespace, badge])', settleAt))
+  t.ok(body.includes('if (seenNamespaceRef.current !== seenNamespace) {'))
+  t.ok(body.indexOf('seenNamespaceRef.current !== seenNamespace') < body.indexOf('lastListRef.current = { list, shown }'), 'the stale check runs before any ref is written')
+  t.ok(source.includes('settleRef.current = settle'))
+})
+
+test('Avisos never gives the unread dot to a row read on another device', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  const settleAt = source.indexOf('const settle = useCallback(')
+  const body = source.slice(settleAt, source.indexOf('}, [seenNamespace, badge])', settleAt))
+  t.ok(body.includes('const elsewhere = remote.filter((id) => !stored.has(id))'), 'echoes of this device\'s own marks are left out')
+  t.ok(body.includes('!stored.has(item.seen) && !elsewhere.includes(item.seen)'), 'marks from elsewhere count as seen for the dot')
+  t.ok(body.includes('new Set([...u].filter((id) => !elsewhere.includes(id)))'), 'only marks from elsewhere clear the dot')
+  t.ok(body.indexOf('const stored = new Set(seen.ids)') < body.indexOf('markSeenPadded('), 'stored is read before this settle marks anything')
+})

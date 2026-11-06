@@ -29,8 +29,8 @@ import { useNode } from '../node'
 import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_QUIET_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
   NOTICES_UNSUPPORTED_MESSAGE, NOTICES_WEB_ONLY_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
-  compareNotices, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
-  padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, shouldPoll, snippetOf, writeSeenNamespace
+  compareNotices, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
+  padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, seenOnScreen, seenUnion, shouldPoll, snippetOf, writeSeenNamespace
 } from '../notices'
 import { isRef } from '../nav'
 import { pagesNotices } from '../pages'
@@ -340,7 +340,18 @@ function NoticeRow ({ item, now, unread, postText, onOpenMember, onOpenThread })
   )
 }
 
-export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollowsChanged, onToast, onBadge, onOpenThread, onOpenMember }) {
+// The tokens the latest seen pass returned for this namespace (the person
+// or `page:<key>`), from App.js's remoteSeen.
+function remoteFor (remoteSeen, namespace) {
+  if (!remoteSeen || typeof namespace !== 'string' || namespace.length === 0) return []
+  if (isPageSeenNamespace(namespace)) {
+    const list = remoteSeen.pages && remoteSeen.pages[namespace]
+    return Array.isArray(list) ? list : []
+  }
+  return Array.isArray(remoteSeen.own) ? remoteSeen.own : []
+}
+
+export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollowsChanged, onToast, onBadge, onSeenState, remoteSeen, onOpenThread, onOpenMember }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const now = useNow(60000)
@@ -415,6 +426,10 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   activeRef.current = active
   const onBadgeRef = useRef(onBadge)
   onBadgeRef.current = onBadge
+  const onSeenStateRef = useRef(onSeenState)
+  onSeenStateRef.current = onSeenState
+  const remoteSeenRef = useRef(remoteSeen)
+  remoteSeenRef.current = remoteSeen
   const seenRef = useRef(null)
   const [unread, setUnread] = useState(() => new Set())
   // Set after a poll failed with a non-locked, non-web-only error: the next
@@ -430,10 +445,29 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const badge = useCallback((value) => {
     if (typeof onBadgeRef.current === 'function') onBadgeRef.current(value)
   }, [])
+  // The last list the dot was computed from, and the last one on screen: a
+  // hidden poll settles its fresh page without committing it.
+  const lastListRef = useRef(null)
+  const shownListRef = useRef(null)
 
   // The dot follows what is unseen; with the tab open (mark) everything
-  // loaded is seen at once.
-  const settle = useCallback((list, mark = activeRef.current) => {
+  // loaded is seen at once. A list that is not on screen (shown false) is
+  // never marked and never reported: its page would replace the rows the
+  // pass uploads.
+  const seenNamespaceRef = useRef(seenNamespace)
+  seenNamespaceRef.current = seenNamespace
+  const settleRef = useRef(null)
+  const settle = useCallback((list, mark, shown = true) => {
+    // A read that began before the own key arrived settles through the
+    // current namespace; one of another identity settles nothing.
+    if (seenNamespaceRef.current !== seenNamespace) {
+      if (seenNamespace.length === 0 && settleRef.current !== null) settleRef.current(list, mark, shown)
+      return
+    }
+    if (mark === undefined) mark = activeRef.current
+    lastListRef.current = { list, shown }
+    if (shown) shownListRef.current = list
+    else mark = false
     // Before the identity is known nothing is read or written: an entry
     // stored for `own: null` would replace the real one.
     if (seenNamespace.length === 0) {
@@ -443,10 +477,16 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     if (seenRef.current === null) seenRef.current = loadSeen(seenNamespace)
     const seen = seenRef.current
     // Rows unseen when they first loaded keep their dot while this screen
-    // lives, even though opening the tab marks them seen.
-    const before = new Set(seen.ids)
-    const fresh = list.filter((item) => typeof item.seen === 'string' && !before.has(item.seen)).map((item) => item.seen)
+    // lives, even though opening the tab marks them seen. A row read on
+    // another device of the passkey is not new: it never gets the dot, and
+    // loses it when those marks arrive. The merged marks also echo this
+    // device's own, which are stored here already and clear nothing.
+    const remote = remoteFor(remoteSeenRef.current, seenNamespace)
+    const stored = new Set(seen.ids)
+    const elsewhere = remote.filter((id) => !stored.has(id))
+    const fresh = list.filter((item) => typeof item.seen === 'string' && !stored.has(item.seen) && !elsewhere.includes(item.seen)).map((item) => item.seen)
     if (fresh.length > 0) setUnread((u) => (fresh.every((id) => u.has(id)) ? u : new Set([...u, ...fresh])))
+    if (elsewhere.length > 0) setUnread((u) => (elsewhere.some((id) => u.has(id)) ? new Set([...u].filter((id) => !elsewhere.includes(id))) : u))
     if (mark) {
       if (randomBytes === null) {
         // No random source: remembered in memory only, never written.
@@ -460,18 +500,54 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       }
       badge(false)
     } else {
-      badge(hasNew(list, seen.ids))
+      // Rows read on another device are stored as seen here too, so their
+      // dot stays off after a restart, before any pass. The rows on screen
+      // and the latest polled page stay protected.
+      if (remote.length > 0 && randomBytes !== null) {
+        const { rows } = remoteFoldPlan(shownListRef.current, lastListRef.current)
+        const { ids, changed } = mergeRemoteSeen(seen.ids, remote, rows, randomBytes)
+        if (changed) {
+          seen.ids = ids
+          writeSeen(seenNamespace, ids)
+        }
+      }
+      badge(hasNew(list, seenUnion(seen.ids, remote)))
     }
+    // Only tokens of loaded rows leave: the padding stays on this device.
+    if (shown && typeof onSeenStateRef.current === 'function') onSeenStateRef.current(seenNamespace, seenOnScreen(list, seen.ids))
   }, [seenNamespace, badge])
+  settleRef.current = settle
 
   // Another identity has its own seen ids. Loaded at once when hosted, so a
   // stored entry of an old format (v1 follower keys, v2 salted digests) is
   // removed on the first load, not only at the first settle. A page uses
-  // its own namespace in the same store.
+  // its own namespace in the same store. Declared before the fold below:
+  // effects run in order, and the fold must never see the previous
+  // namespace's ids or lists.
+  const prevNamespaceRef = useRef(null)
   useEffect(() => {
+    const prev = prevNamespaceRef.current
+    prevNamespaceRef.current = seenNamespace
     seenRef.current = hosted && seenNamespace.length > 0 ? loadSeen(seenNamespace) : null
     setUnread(new Set())
-  }, [seenNamespace, hosted])
+    lastListRef.current = null
+    shownListRef.current = null
+    // The own key arrived after the first paint: the personal list on
+    // screen is this identity's, so it is settled now, not at the next poll.
+    if (prev === '' && seenNamespace.length > 0 && !pageKeyRef.current && hosted && stateRef.current.loadedAt !== null) settle(stateRef.current.items)
+  }, [seenNamespace, hosted, settle])
+
+  // A seen pass brought the marks of another device: the latest list is
+  // settled again, which stores the loaded rows they cover as seen and
+  // moves the dot.
+  useEffect(() => {
+    if (!remoteSeen || seenNamespace.length === 0 || !hosted) return
+    if (remoteFor(remoteSeen, seenNamespace).length === 0) return
+    const plan = remoteFoldPlan(shownListRef.current, lastListRef.current)
+    if (plan.settle === null) return
+    if (plan.settle.shown) settle(plan.settle.list)
+    else settle(plan.settle.list, false, false)
+  }, [remoteSeen, seenNamespace, hosted, settle])
 
   const loadFirst = useCallback(async () => {
     const current = stateRef.current
@@ -619,7 +695,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         if ((page.activity === false) !== (stateRef.current.activity === false)) {
           commit({ activity: page.activity !== false })
         }
-        settle(page.notices, false)
+        settle(page.notices, false, false)
         return
       }
       // A full first page whose last row is not on screen yet may leave a gap

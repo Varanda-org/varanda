@@ -16,6 +16,7 @@ const { openRecoveryStore } = require('../account/recovery-store')
 const { openInvitesStore } = require('../account/invites-store')
 const { openInviteDrops, startInviteDropLoop } = require('../account/invite-drops')
 const { openPushStore } = require('../account/push-store')
+const { openSeenStore } = require('../account/seen-store')
 const { openPageKeys } = require('../account/page-keys')
 const { openPagesStore } = require('../account/pages-store')
 const { openAgeStore } = require('../account/age-store')
@@ -709,6 +710,7 @@ async function serve (flags, env) {
   let recovery = null
   let invites = null
   let pushStore = null
+  let seenStore = null
   let stopHeal = null
   let stopRecoveryHeal = null
   let stopInvitesHeal = null
@@ -724,10 +726,11 @@ async function serve (flags, env) {
   let pageClients = []
   let ages = null
   let stopAgeHeal = null
+  let stopSeenHeal = null
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery)
+      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore)
     }
   })
   let listener = null
@@ -805,6 +808,11 @@ async function serve (flags, env) {
       relayTokenHash: flags.pushToken ? nodeCrypto.createHash('sha256').update(flags.pushToken).digest() : null
     }
     log({ event: 'push', reason: vapid !== null ? 'ligado' : 'desligado' })
+    // The seen blobs (seen/): every write asks the lock again. A bad
+    // directory leaves the seen routes answering 'indisponivel'.
+    seenStore = openSeenStore(flags.dataDir, { guard: () => lock.owned(), log })
+    if (!seenStore.available()) log({ event: 'seen', reason: 'indisponivel' })
+    stopSeenHeal = startHeal(seenStore, 'seen', log)
     // Hosted age verification (age.json), only with the Didit pair set. An
     // invalid file keeps the service up and the age routes fail closed.
     let didit = null
@@ -877,7 +885,7 @@ async function serve (flags, env) {
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
       const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, invites, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, invites, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -930,11 +938,13 @@ async function serve (flags, env) {
     if (stopDropsHeal !== null) stopDropsHeal()
     if (stopPushHeal !== null) stopPushHeal()
     if (stopAgeHeal !== null) stopAgeHeal()
+    if (stopSeenHeal !== null) stopSeenHeal()
     if (terms !== null && terms.available()) await terms.heal()
     if (recovery !== null && recovery.available()) await recovery.heal()
     if (invites !== null && invites.available()) await invites.heal()
     if (drops !== null && drops.available()) await drops.heal()
     if (pushStore !== null && pushStore.available()) await pushStore.heal()
+    if (seenStore !== null && seenStore.available()) await seenStore.heal()
     if (ages !== null && ages.available()) await ages.heal()
     // The sampler waits for an in-flight read and writes the day's last
     // counts while the lock is still ours; a lost lock or a failed store
@@ -1033,10 +1043,10 @@ async function closePageClients (pageClients) {
 // The lock is lost: the store is marked unavailable first, synchronously,
 // so no request still draining during the stop appends beside the writer
 // that took the lock over (store.js, "Writer guard"); then the service
-// stops. The terms, invites, push, age and recovery stores, the page keys,
-// the page writer and the invite drops too: their next write must not land
-// either.
-function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, recovery = null) {
+// stops. The terms, invites, push, seen, age and recovery stores, the page
+// keys, the page writer and the invite drops too: their next write must not
+// land either.
+function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, recovery = null, seenStore = null) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
   if (recovery !== null) recovery.fail()
@@ -1044,6 +1054,7 @@ function loseLock (store, log, stop, terms = null, invites = null, pushStore = n
   if (drops !== null) drops.fail()
   if (loop !== null) loop.stop().catch(() => {})
   if (pushStore !== null) pushStore.fail()
+  if (seenStore !== null) seenStore.fail()
   if (ages !== null) ages.fail()
   if (pagesStore !== null) pagesStore.fail()
   if (pageKeys !== null) pageKeys.fail()

@@ -1229,3 +1229,167 @@ test('recoveryPut/recoveryRemove: no answer, any 5xx or an unreadable success is
   stub(t, () => { throw new Error('rede') })
   try { await a.recoveryList({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.absent(e.uncertain, 'list changes nothing') }
 })
+
+const SEEN_HASH = 'cd'.repeat(32)
+const SEEN_BLOB = 'A'.repeat(43744)
+const SEEN_SIG = 'ef'.repeat(64)
+const seenFinish = (a, action, extra = {}) =>
+  a.seenFinish({ member: M, nonce: 'n'.repeat(54), action, signature: SEEN_SIG, prevHash: SEEN_HASH, blob: SEEN_BLOB, ...extra })
+
+test('seenStart: POST with member and action, nonce or a definite refusal', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { nonce: 'n1' }))
+  t.alike(await a.seenStart({ member: M, action: 'write' }), { nonce: 'n1' })
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/seen/start')
+  t.alike(JSON.parse(calls[0].init.body), { member: M, action: 'write' })
+  stub(t, () => { throw new Error('rede') })
+  try { await a.seenStart({ member: M, action: 'write' }); t.fail() } catch (e) {
+    t.is(e.code, 'indisponivel')
+    t.absent(e.uncertain, 'start changes nothing')
+  }
+  stub(t, json(403, { error: 'nao-vinculado' }))
+  try { await a.seenStart({ member: M, action: 'read' }); t.fail() } catch (e) { t.is(e.code, 'nao-vinculado') }
+  stub(t, json(200, { nonce: 7 }))
+  try { await a.seenStart({ member: M, action: 'read' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+})
+
+test('seenFinish: read shapes, and the blob only goes in a write', async (t) => {
+  const a = await load()
+  let calls = stub(t, json(200, { hash: SEEN_HASH, blob: SEEN_BLOB }))
+  t.alike(await seenFinish(a, 'read'), { hash: SEEN_HASH, blob: SEEN_BLOB, unchanged: false })
+  t.is(calls[0].url, '/account/seen/finish')
+  t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: 'n'.repeat(54), action: 'read', signature: SEEN_SIG, prevHash: SEEN_HASH })
+  stub(t, json(200, { hash: null, blob: null }))
+  t.alike(await seenFinish(a, 'read'), { hash: null, blob: null, unchanged: false })
+  stub(t, json(200, { hash: SEEN_HASH, blob: null, unchanged: true }))
+  t.alike(await seenFinish(a, 'read'), { hash: SEEN_HASH, blob: null, unchanged: true })
+  for (const bad of [{ hash: 'zz', blob: SEEN_BLOB }, { hash: SEEN_HASH, blob: 'abc' }, { hash: SEEN_HASH, blob: null }, { hash: null, blob: SEEN_BLOB }]) {
+    stub(t, json(200, bad))
+    try { await seenFinish(a, 'read'); t.fail() } catch (e) {
+      t.is(e.code, 'indisponivel')
+      t.absent(e.uncertain, 'a read changes nothing')
+    }
+  }
+  calls = stub(t, () => { throw new Error('rede') })
+  try { await seenFinish(a, 'read'); t.fail() } catch (e) {
+    t.is(e.code, 'indisponivel')
+    t.absent(e.uncertain, 'a lost read is not uncertain')
+  }
+  t.is(calls.length, 1)
+})
+
+test('seenFinish: a read accepts a 44 KB body', async (t) => {
+  const a = await load()
+  const res = json(200, { hash: SEEN_HASH, blob: SEEN_BLOB })
+  t.ok(JSON.stringify({ hash: SEEN_HASH, blob: SEEN_BLOB }).length > 4096 * 10)
+  stub(t, res)
+  t.alike(await seenFinish(a, 'read'), { hash: SEEN_HASH, blob: SEEN_BLOB, unchanged: false })
+})
+
+test('seenFinish: write and delete success shapes', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { ok: true, hash: SEEN_HASH }))
+  t.alike(await seenFinish(a, 'write'), { ok: true, hash: SEEN_HASH })
+  t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: 'n'.repeat(54), action: 'write', signature: SEEN_SIG, prevHash: SEEN_HASH, blob: SEEN_BLOB })
+  stub(t, json(200, { ok: true, changed: false }))
+  t.alike(await seenFinish(a, 'delete'), { ok: true, changed: false })
+  const del = stub(t, json(200, { ok: true, changed: true }))
+  t.alike(await seenFinish(a, 'delete'), { ok: true, changed: true })
+  t.absent('blob' in JSON.parse(del[0].init.body), 'no blob in a delete')
+})
+
+test('seenFinish: a 409 conflito is definite and carries hash and blob', async (t) => {
+  const a = await load()
+  let calls = stub(t, json(409, { error: 'conflito', hash: SEEN_HASH, blob: SEEN_BLOB }))
+  try { await seenFinish(a, 'write'); t.fail() } catch (e) {
+    t.is(e.code, 'conflito')
+    t.is(e.message, 'Outro aparelho gravou antes.')
+    t.absent(e.uncertain, 'nothing was written')
+    t.is(e.hash, SEEN_HASH)
+    t.is(e.blob, SEEN_BLOB)
+    t.absent(e.body)
+  }
+  t.is(calls.length, 1, 'never a second fetch')
+  stub(t, json(409, { error: 'conflito', hash: '0'.repeat(64), blob: null }))
+  try { await seenFinish(a, 'write'); t.fail() } catch (e) {
+    t.is(e.code, 'conflito')
+    t.is(e.hash, '0'.repeat(64))
+    t.is(e.blob, null)
+  }
+  stub(t, json(409, { error: 'conflito', hash: SEEN_HASH }))
+  try { await seenFinish(a, 'delete'); t.fail() } catch (e) {
+    t.is(e.code, 'conflito')
+    t.absent(e.uncertain)
+    t.is(e.hash, SEEN_HASH)
+    t.is(e.blob, null)
+  }
+  for (const bad of [{ error: 'conflito' }, { error: 'conflito', hash: 'x', blob: null }, { error: 'conflito', hash: SEEN_HASH, blob: 'short' }]) {
+    calls = stub(t, json(409, bad))
+    try { await seenFinish(a, 'write'); t.fail() } catch (e) {
+      t.is(e.code, 'indisponivel', 'a malformed conflict is unavailable')
+      t.absent(e.uncertain, 'a 409 wrote nothing')
+      t.absent(e.hash)
+    }
+    t.is(calls.length, 1)
+  }
+})
+
+test('seenFinish: refusals are definite and carry no body', async (t) => {
+  const a = await load()
+  for (const [status, token] of [[400, 'expirado'], [400, 'assinatura-invalida'], [403, 'termos-pendentes'], [403, 'nao-vinculado'], [400, 'pedido-invalido']]) {
+    stub(t, json(status, { error: token, hash: SEEN_HASH }))
+    try { await seenFinish(a, 'write'); t.fail() } catch (e) {
+      t.is(e.code, token)
+      t.absent(e.uncertain, token + ' is a refusal')
+      t.absent(e.body)
+      t.absent(e.hash)
+    }
+  }
+})
+
+test('seenFinish: a lost answer on write or delete is uncertain and never resent', async (t) => {
+  const a = await load()
+  const cases = [
+    ['transport', () => { throw new Error('rede') }],
+    ['5xx', json(502, {}, 'text/html')],
+    ['5xx token', json(503, { error: 'indisponivel' })],
+    ['bad body', json(200, { ok: true, hash: 'zz' })],
+    ['not JSON', json(200, { ok: true, hash: SEEN_HASH }, 'text/plain')]
+  ]
+  for (const action of ['write', 'delete']) {
+    for (const [name, res] of cases) {
+      const calls = stub(t, res)
+      try { await seenFinish(a, action); t.fail() } catch (e) {
+        t.is(e.code, 'indisponivel', action + ' ' + name)
+        t.is(e.uncertain, true, action + ' ' + name)
+      }
+      t.is(calls.length, 1, action + ' ' + name + ': sent once, never retried')
+    }
+  }
+})
+
+test('readJson refuses an answer over the cap without buffering it whole', async (t) => {
+  const { readJson } = await load()
+  const headers = (extra = {}) => ({ get: (k) => ({ 'content-type': 'application/json', ...extra })[k.toLowerCase()] ?? null })
+  let textCalled = false
+  const declared = { headers: headers({ 'content-length': '999999' }), text: async () => { textCalled = true; return '{}' } }
+  t.is(await readJson(declared, 100), null, 'a declared length over the cap')
+  t.is(textCalled, false, 'nothing read')
+  let pulls = 0
+  let cancelled = false
+  const big = new Uint8Array(64).fill(0x20)
+  const streamed = {
+    headers: headers(),
+    body: {
+      getReader: () => ({
+        read: async () => { pulls++; return pulls > 1000 ? { done: true } : { done: false, value: big } },
+        cancel: async () => { cancelled = true }
+      })
+    }
+  }
+  t.is(await readJson(streamed, 100), null, 'a streamed body over the cap')
+  t.ok(pulls <= 3, 'stops reading at the cap')
+  t.ok(cancelled, 'the stream is cancelled')
+  const ok = { headers: headers(), body: { getReader: () => { let sent = false; return { read: async () => { if (sent) return { done: true }; sent = true; return { done: false, value: new TextEncoder().encode('{"a":1}') } } } } } }
+  t.alike(await readJson(ok, 100), { a: 1 }, 'a small streamed body still parses')
+})
