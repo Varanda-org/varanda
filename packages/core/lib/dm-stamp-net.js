@@ -16,6 +16,18 @@
 //   seeder -> member  { type: 'key', v: 1, kid, n, e }
 //   member -> seeder  { type: 'issue', blinded }          canonical base64, 256 bytes
 //   seeder -> member  { type: 'stamp', kid, sig }  or  { type: 'stamp', error }
+// Blob stamps (media chunks) ride the same channel under the seeder's
+// separate blob key, with a kind field and nothing else added:
+//   member -> seeder  { type: 'key', kind: 'blob' }
+//   seeder -> member  { type: 'key', kind: 'blob', v: 1, kid, n, e }
+//   member -> seeder  { type: 'issue', blinded, kind: 'blob' }
+//   seeder -> member  { type: 'stamp', kid, sig }  or  { type: 'stamp', error }
+// A message without kind is a DM one, byte for byte as before; kind 'dm' is
+// never written, so each message has one encoding. A blob issue is signed
+// only by the blob key and charged only to the blob budget, and a DM issue
+// only by the DM key and the DM budget: a DM-domain value sent as a blob
+// issue gets a signature that no DM key verifies. A seeder without a blob
+// key treats the blob messages as bad, as one from before them does.
 // error is 'teto' (the diary's budget for the day is spent) or 'ruim' (the
 // blinded value cannot be signed). The proof is an Ed25519 signature by the
 // diary key over 'varanda-dm-stamp-v1' LF nonce LF the member's Noise public
@@ -24,11 +36,12 @@
 //
 // Bad messages, drops and lifetime as notices-net.js. Every request waits for
 // a valid proof and one request is in flight at a time. The seeder stores
-// nothing about a blinded value and logs only { event: 'dm-stamp', reason },
-// never a key. A budget may expose check(diary, day), side-effect free: it
-// runs before the costly blind signature, so a key that may get no stamp
-// costs the seeder no modPow. MAX_TETO_DM_STAMP 'teto' answers in a row on
-// one channel drop the peer.
+// nothing about a blinded value and logs only { event: 'dm-stamp', reason }
+// ('blob-stamp' for a blob issue), never a key. A budget may expose
+// check(diary, day), side-effect free: it runs before the costly blind
+// signature, so a key that may get no stamp costs the seeder no modPow.
+// MAX_TETO_DM_STAMP 'teto' answers in a row on one channel, of either kind,
+// drop the peer.
 const b4a = require('b4a')
 const c = require('compact-encoding')
 const hcrypto = require('hypercore-crypto')
@@ -46,6 +59,10 @@ const DM_STAMP_MAX_MESSAGE = 16384
 const DM_STAMP_REQUEST_TIMEOUT_MS = 10000
 const DM_ISSUE_BURST = 10
 const DM_ISSUE_RATE = 1 // tokens per second: 10 per 10 s
+// A media view needs one stamp per chunk, so blob issues have their own,
+// larger bucket and never eat into the DM one.
+const BLOB_ISSUE_BURST = 32
+const BLOB_ISSUE_RATE = 4
 const STAMP_ERRORS = Object.freeze(['teto', 'ruim'])
 const HEX128 = /^[0-9a-f]{128}$/
 const HEX16 = /^[0-9a-f]{16}$/
@@ -114,10 +131,17 @@ function validateDmStampMessage (msg) {
         return hasExactKeys(msg, ['type', 'key', 'sig']) && isHex64(msg.key) && typeof msg.sig === 'string' && HEX128.test(msg.sig)
       case 'key':
         if (hasExactKeys(msg, ['type'])) return true
-        if (!hasExactKeys(msg, ['type', 'v', 'kid', 'n', 'e'])) return false
+        if (hasExactKeys(msg, ['type', 'kind'])) return msg.kind === 'blob'
+        if (hasExactKeys(msg, ['type', 'kind', 'v', 'kid', 'n', 'e'])) {
+          if (msg.kind !== 'blob') return false
+        } else if (!hasExactKeys(msg, ['type', 'v', 'kid', 'n', 'e'])) {
+          return false
+        }
         return parsePublicKey({ v: msg.v, kid: msg.kid, n: msg.n, e: msg.e }) !== null
       case 'issue':
-        return hasExactKeys(msg, ['type', 'blinded']) && isModulusBase64(msg.blinded)
+        if (hasExactKeys(msg, ['type', 'blinded', 'kind']) && msg.kind !== 'blob') return false
+        else if (!hasExactKeys(msg, ['type', 'blinded']) && !hasExactKeys(msg, ['type', 'blinded', 'kind'])) return false
+        return isModulusBase64(msg.blinded)
       case 'stamp':
         if (hasExactKeys(msg, ['type', 'error'])) return STAMP_ERRORS.includes(msg.error)
         return hasExactKeys(msg, ['type', 'kid', 'sig']) && typeof msg.kid === 'string' &&
@@ -139,6 +163,8 @@ function attachDmStamp (socket, opts = {}) {
     role,
     postage,
     budget,
+    blobPostage,
+    blobBudget,
     ownKey,
     sign,
     now = Date.now,
@@ -149,21 +175,24 @@ function attachDmStamp (socket, opts = {}) {
     messageRate = MESSAGE_RATE,
     issueBurst = DM_ISSUE_BURST,
     issueRate = DM_ISSUE_RATE,
+    blobIssueBurst = BLOB_ISSUE_BURST,
+    blobIssueRate = BLOB_ISSUE_RATE,
     requestTimeoutMs = DM_STAMP_REQUEST_TIMEOUT_MS
   } = opts
 
   if (role !== 'seeder' && role !== 'member') throw new TypeError('role must be seeder or member')
-  let pubMsg = null
-  let modulus = null
+  // kind -> { pubMsg, modulus, postage, budget }, seeder only. Each kind
+  // signs with its own key and spends its own budget, never the other's.
+  const kinds = new Map()
   if (role === 'seeder') {
-    if (!isPlainObject(postage) || typeof postage.sign !== 'function') throw new TypeError('invalid postage')
-    const parsed = parsePublicKey(postage.publicKey)
-    if (parsed === null) throw new TypeError('invalid postage public key')
-    modulus = parsed.n
-    const { v, kid, n, e } = postage.publicKey
-    pubMsg = { type: 'key', v, kid, n, e }
-    if (!isPlainObject(budget) || typeof budget.take !== 'function') throw new TypeError('invalid budget')
-    if (budget.check !== undefined && typeof budget.check !== 'function') throw new TypeError('invalid budget')
+    kinds.set('dm', seederKind(postage, budget, 'postage', 'budget', null))
+    if (blobPostage !== undefined && blobPostage !== null) {
+      const blob = seederKind(blobPostage, blobBudget, 'blobPostage', 'blobBudget', 'blob')
+      if (blob.pubMsg.kid === kinds.get('dm').pubMsg.kid) throw new TypeError('blobPostage must use its own key')
+      kinds.set('blob', blob)
+    } else if (blobBudget !== undefined && blobBudget !== null) {
+      throw new TypeError('blobBudget without blobPostage')
+    }
     if (typeof now !== 'function') throw new TypeError('now must be a function')
   } else {
     if (!isHex64(ownKey)) throw new TypeError('invalid ownKey')
@@ -172,7 +201,7 @@ function attachDmStamp (socket, opts = {}) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new TypeError('invalid maxBytes')
   if (!Number.isSafeInteger(maxBad) || maxBad < 0) throw new TypeError('invalid maxBad')
   if (!(requestTimeoutMs > 0)) throw new TypeError('invalid requestTimeoutMs')
-  for (const [burst, rate] of [[messageBurst, messageRate], [issueBurst, issueRate]]) {
+  for (const [burst, rate] of [[messageBurst, messageRate], [issueBurst, issueRate], [blobIssueBurst, blobIssueRate]]) {
     if (!(burst >= 1) || !(rate > 0)) throw new TypeError('invalid rate limits')
   }
 
@@ -188,8 +217,13 @@ function attachDmStamp (socket, opts = {}) {
   let dropped = false
   let settled = false
   let resolveSupported
-  const inbound = tokenBucket(messageBurst, messageRate)
-  const issues = tokenBucket(issueBurst, issueRate)
+  // The flood limit, taken before a message is even parsed. It covers the
+  // message bucket plus both issue buckets (and a seeder sends one reply per
+  // request), so a peer within the issue rates never trips it: a lone shared
+  // bucket at messageRate would drop a member issuing blob stamps at the
+  // allowed rate once its burst ran out.
+  const inbound = tokenBucket(messageBurst + issueBurst + blobIssueBurst, messageRate + issueRate + blobIssueRate)
+  const issues = { dm: tokenBucket(issueBurst, issueRate), blob: tokenBucket(blobIssueBurst, blobIssueRate) }
 
   // Seeder state, per channel.
   let nonce = null
@@ -228,6 +262,17 @@ function attachDmStamp (socket, opts = {}) {
   if (typeof socket.once === 'function') socket.once('close', end)
 
   return handle
+
+  function seederKind (p, b, pName, bName, kind) {
+    if (!isPlainObject(p) || typeof p.sign !== 'function') throw new TypeError('invalid ' + pName)
+    const parsed = parsePublicKey(p.publicKey)
+    if (parsed === null) throw new TypeError('invalid ' + pName + ' public key')
+    if (!isPlainObject(b) || typeof b.take !== 'function') throw new TypeError('invalid ' + bName)
+    if (b.check !== undefined && typeof b.check !== 'function') throw new TypeError('invalid ' + bName)
+    const { v, kid, n, e } = p.publicKey
+    const pubMsg = kind === null ? { type: 'key', v, kid, n, e } : { type: 'key', kind, v, kid, n, e }
+    return { pubMsg, modulus: parsed.n, postage: p, budget: b, event: kind === null ? 'dm-stamp' : 'blob-stamp' }
+  }
 
   function settle (value) {
     if (settled) return
@@ -362,26 +407,30 @@ function attachDmStamp (socket, opts = {}) {
       boundKey = msg.key
       return
     }
-    const isKeyRequest = msg.type === 'key' && Object.keys(msg).length === 1
-    if ((!isKeyRequest && msg.type !== 'issue') || boundKey === null || answering) {
+    // Only requests reach here: a key message with a public key is a reply.
+    const isKeyRequest = msg.type === 'key' && msg.n === undefined
+    const kind = msg.kind === undefined ? 'dm' : msg.kind
+    const k = kinds.get(kind)
+    if ((!isKeyRequest && msg.type !== 'issue') || k === undefined || boundKey === null || answering) {
       badMessage()
       return
     }
     if (isKeyRequest) {
-      rawSend(pubMsg)
+      rawSend(k.pubMsg)
       return
     }
-    if (!issues.take()) {
+    if (!issues[kind].take()) {
       drop('dm-stamp-rate')
       return
     }
-    answerIssue(msg.blinded)
+    answerIssue(msg.blinded, k)
   }
 
   // Not awaited by protomux: a rejected promise there destroys the stream.
-  async function answerIssue (blindedBase64) {
+  async function answerIssue (blindedBase64, k) {
     answering = true
     const ch = channel
+    const { postage, budget, modulus, pubMsg, event } = k
     let reply
     const blinded = fromBase64(blindedBase64)
     const day = localDay(now())
@@ -416,7 +465,7 @@ function attachDmStamp (socket, opts = {}) {
       else if (!allowed) reply = { type: 'stamp', error: 'teto' }
       else reply = { type: 'stamp', kid: pubMsg.kid, sig: toBase64(sig) }
     }
-    log({ event: 'dm-stamp', reason: reply.error === undefined ? 'ok' : reply.error })
+    log({ event, reason: reply.error === undefined ? 'ok' : reply.error })
     if (ch !== channel || ended || dropped) return
     answering = false
     rawSend(reply)
@@ -441,8 +490,9 @@ function attachDmStamp (socket, opts = {}) {
       return
     }
     const r = request
-    const isKeyReply = msg.type === 'key' && Object.keys(msg).length === 5
-    if (r === null || !r.sent || (isKeyReply ? r.expects !== 'key' : msg.type !== 'stamp' || r.expects !== 'stamp')) {
+    const isKeyReply = msg.type === 'key' && msg.n !== undefined
+    const replyKind = msg.kind === undefined ? 'dm' : msg.kind
+    if (r === null || !r.sent || (isKeyReply ? r.expects !== 'key' || r.kind !== replyKind : msg.type !== 'stamp' || r.expects !== 'stamp')) {
       badMessage()
       return
     }
@@ -474,22 +524,26 @@ function attachDmStamp (socket, opts = {}) {
     if (request !== null && !request.sent) sendRequest()
   }
 
-  function requestKey () {
-    return startRequest({ type: 'key' }, 'key')
+  // kind 'dm' (the default) sends the message without a kind field.
+  function requestKey (kind = 'dm') {
+    if (kind !== 'dm' && kind !== 'blob') return Promise.reject(new TypeError('invalid stamp kind'))
+    return startRequest(kind === 'dm' ? { type: 'key' } : { type: 'key', kind }, 'key', kind)
   }
 
-  function requestIssue (blindedBase64) {
+  function requestIssue (blindedBase64, kind = 'dm') {
+    if (kind !== 'dm' && kind !== 'blob') return Promise.reject(new TypeError('invalid stamp kind'))
     if (!isModulusBase64(blindedBase64)) return Promise.reject(new TypeError('invalid blinded value'))
-    return startRequest({ type: 'issue', blinded: blindedBase64 }, 'stamp')
+    const msg = kind === 'dm' ? { type: 'issue', blinded: blindedBase64 } : { type: 'issue', blinded: blindedBase64, kind }
+    return startRequest(msg, 'stamp', kind)
   }
 
   // As notices-net.js: one request in flight, sent after our proof, and a
   // timeout that rejects AND closes the channel (never the socket).
-  function startRequest (msg, expects) {
+  function startRequest (msg, expects, kind) {
     if (ended || dropped) return Promise.reject(new Error('dm stamp channel closed'))
     if (request !== null) return Promise.reject(new Error('a dm stamp request is already in flight'))
     return new Promise((resolve, reject) => {
-      const r = { msg, expects, sent: false, resolve, reject, timer: null }
+      const r = { msg, expects, kind, sent: false, resolve, reject, timer: null }
       r.timer = setTimeout(() => {
         if (request !== r) return
         request = null
@@ -526,6 +580,8 @@ module.exports = {
   DM_STAMP_REQUEST_TIMEOUT_MS,
   DM_ISSUE_BURST,
   DM_ISSUE_RATE,
+  BLOB_ISSUE_BURST,
+  BLOB_ISSUE_RATE,
   encodeProof,
   verifyProof,
   validateDmStampMessage,

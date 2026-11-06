@@ -14,7 +14,11 @@
 // - openStampLink: 'varanda/dm-stamp/1' (lib/dm-stamp-net.js, member role),
 //   the proof signed by the identity key over THIS link's Noise key. Used
 //   for a wallet top-up and closed right after; never the dm link, never the
-//   sync socket.
+//   sync socket. key(kind) and issue(blinded, kind) take the stamp kind,
+//   'dm' (the default, sent without a kind field) or 'blob'.
+// - openBlobLink: the anonymous 'varanda/blob/1' channel (lib/blob-net.js,
+//   member role), shaped like openDmLink: nothing on it names a diary.
+//   put(frame) -> { ok, reason }. A put is never repeated here.
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const Hypercore = require('hypercore')
 const crypto = require('hypercore-crypto')
@@ -23,6 +27,7 @@ const { seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachDm } = require('@varanda/core/lib/dm-net')
 const { attachDmStamp } = require('@varanda/core/lib/dm-stamp-net')
+const { attachBlob } = require('@varanda/core/lib/blob-net')
 const { DM_MAX_MESSAGE } = require('@varanda/core/lib/dm')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { guardedWsStream } = require('./ws-stream')
@@ -32,6 +37,9 @@ const SEEDER_BUSY = 'Semeador ocupado; tente novamente em instantes.'
 const DM_CONNECT_TIMEOUT_MS = 15000
 const DM_LINK_DEADLINE_MS = 25000
 const DM_STAMP_LINK_DEADLINE_MS = 45000
+// Up to BLOB_MAX_CHUNKS puts, each waiting for its ack, paced under the
+// seeder's put bucket and limited by the member's upload speed.
+const BLOB_LINK_DEADLINE_MS = 300000
 // One dm message (DM_MAX_MESSAGE) plus the protomux and Noise framing.
 const DM_MAX_FRAME = DM_MAX_MESSAGE * 2
 
@@ -155,6 +163,35 @@ async function openDmLink ({ seederUrl, createSocket, association, log = noop, l
   }
 }
 
+async function openBlobLink ({ seederUrl, createSocket, association, log = noop, limits = {} } = {}) {
+  let blob = null
+  const link = await dial({
+    seederUrl,
+    createSocket,
+    association,
+    log,
+    connectTimeoutMs: limits.connectTimeoutMs,
+    deadlineMs: limits.blobDeadlineMs || BLOB_LINK_DEADLINE_MS,
+    attach: (noise) => {
+      blob = attachBlob(noise, { role: 'member', ...(limits.requestTimeoutMs ? { requestTimeoutMs: limits.requestTimeoutMs } : {}) })
+    }
+  })
+  return {
+    async put (frame) {
+      try {
+        return await blob.put(frame)
+      } catch (err) {
+        if (err instanceof TypeError) throw err
+        throw lost()
+      }
+    },
+    close () {
+      try { blob.close() } catch {}
+      link.noise.destroy()
+    }
+  }
+}
+
 // keyPair: the identity pair (in memory, the session's copy); the proof is
 // signed only after the hello verified.
 async function openStampLink ({ seederUrl, createSocket, association, keyPair, log = noop, limits = {} } = {}) {
@@ -189,8 +226,8 @@ async function openStampLink ({ seederUrl, createSocket, association, keyPair, l
     }
   }
   return {
-    key: () => wrap(() => stamp.key()),
-    issue: (blindedBase64) => wrap(() => stamp.issue(blindedBase64)),
+    key: (kind = 'dm') => wrap(() => stamp.key(kind)),
+    issue: (blindedBase64, kind = 'dm') => wrap(() => stamp.issue(blindedBase64, kind)),
     close () {
       try { stamp.close() } catch {}
       link.noise.destroy()
@@ -201,8 +238,10 @@ async function openStampLink ({ seederUrl, createSocket, association, keyPair, l
 module.exports = {
   openDmLink,
   openStampLink,
+  openBlobLink,
   NO_SEEDER,
   DM_LINK_DEADLINE_MS,
   DM_STAMP_LINK_DEADLINE_MS,
+  BLOB_LINK_DEADLINE_MS,
   DM_MAX_FRAME
 }

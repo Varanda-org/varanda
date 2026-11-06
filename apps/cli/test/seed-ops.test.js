@@ -537,3 +537,29 @@ test('dm-postage file: get() rotates once the current key is due', async (t) => 
   const next = await pf.get()
   t.alike(next.keys.map((k) => k.kid), [next.kid, first.kid])
 })
+
+test('dm-postage file: get() reads the file again once it changes on disk', async (t) => {
+  const dataDir = tmpDir(t, 'varanda-dm-')
+  const other = tmpDir(t, 'varanda-dm-')
+  const file = path.join(dataDir, 'dm-postage.json')
+  const now = Date.parse('2026-11-03T12:00:00.000Z')
+  const pf = createPostageFile(dataDir, { now: () => now })
+  const first = await pf.get()
+  t.is(await pf.get(), first, 'an unchanged file is not read again')
+
+  const replacement = loadOrCreate(other, { now: () => now })
+  fs.copyFileSync(path.join(other, 'dm-postage.json'), file)
+  const replaced = await pf.get()
+  t.is(replaced.kid, replacement.kid, 'a replaced file is read before its rotation deadline')
+  t.is(await pf.get(), replaced)
+
+  fs.writeFileSync(file, '{"v":2,"keys":[]}')
+  await t.exception(pf.get(), /dm-postage inválido/, 'a broken replacement fails closed, never the cached key')
+  await t.exception(pf.get(), /dm-postage inválido/)
+
+  fs.unlinkSync(file)
+  const created = await pf.get()
+  t.not(created.kid, replaced.kid, 'a removed file is created again, with a new key')
+  t.is(JSON.parse(fs.readFileSync(file, 'utf8')).keys[0].kid, created.kid)
+  t.is(await pf.get(), created, 'our own write is not mistaken for a change')
+})

@@ -4837,3 +4837,43 @@ Limites desta caminhada:
 - A Vitrine não tem mídia, então a foto de Publicar só se confere com conta hospedada em build nativo.
 - "Compartilhar" fica sem efeito visível até existirem links públicos de publicação (próximo passo).
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 100. Blobs anônimos das conversas: selos, canal, conjunto e rota `/blob` (PR feat/blob-channel)
+
+Roteiro do canal de mídia das mensagens diretas no semeador: o tipo de selo `blob`, o canal `'varanda/blob/1'`, o conjunto em `<dados>/blobs/` e a rota `GET|HEAD /blob/<id>/<índice>`. O formato está em [protocol.md](protocol.md), seção 13, e o tipo de selo na seção 11. A função chega ao app só num PR posterior: nenhuma tela usa isto ainda, então nada aqui muda os Termos nem a Política. Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e o registro fica guardado.
+
+Regras que os passos conferem:
+
+- Quadro `VBL1` de 33137 bytes (token aleatório de selo e `check` de conteúdo, sem salt); os selos de blob são comprados antes, numa carteira de 300 (reabastecida abaixo de 150) no link identificado, e gastos depois no link anônimo; o selo de blob tem chave, `kid`, domínio FDH e limite diário (1024 por diário e por dia de Brasília) próprios, à parte dos de mensagem; um selo de um tipo nunca paga o outro.
+- O conjunto guarda um blob por 7 dias a partir do primeiro pedaço (sem renovar), varre o incompleto em 1 hora, conta os pedaços guardados contra o teto de bytes (`--blob-bytes`, padrão 2 GiB, sem reserva adiantada) e responde `cheio` ao pedaço que passaria do teto, sem escrever nada e sem gastar o selo.
+- `GET /blob/<id>/<índice>` não tem autenticação, cookie nem registro: só blobs completos, o mesmo 404 `não encontrado` (`no-store`) para qualquer falha e para qualquer query string, 200 com o quadro guardado e `Cache-Control: private, max-age=604800`.
+- O Caddy repassa `/blob/*` como `/media/*` (Host reescrito, `X-Forwarded-For` e `X-Real-Ip` removidos, sem registro de acesso, zona `blob` de 300 requisições a cada 10 s por cliente) e continua sem repassar `/moderation-post/` nem `/moderation-group-post/`.
+- `seed --no-dm` desliga o selo de blob, o canal e a rota.
+
+Passos manuais, num semeador de teste (nunca na DHT pública; use `127.0.0.1` e a DHT local):
+
+- [ ] `GET /blob/<id>/0` de um blob completo, sem cookie nem cabeçalho de autenticação, responde 200 com 33137 bytes, `application/octet-stream`, `nosniff`, `private, max-age=604800` e `Accept-Ranges: none`. Um `HEAD` traz os mesmos cabeçalhos e nenhum corpo.
+- [ ] O mesmo caminho com `?` (mesmo vazio), um id desconhecido, um blob incompleto, um índice igual ao `count` e um id com maiúsculas dão o mesmo 404 `não encontrado` com `Cache-Control: no-store`. Um `POST` dá 405 com `Allow: GET, HEAD`.
+- [ ] Pelo Caddy de verdade (`deploy/seeder/Caddyfile`): `/blob/*` chega ao semeador sem `X-Forwarded-For` nem `X-Real-Ip`; a 301ª requisição de um mesmo cliente em 10 s volta 429 com `Retry-After`; o Caddy não tem diretiva `log` de acesso.
+- [ ] Pelo Caddy: `/moderation-post/...` e `/moderation-group-post/...` continuam não repassados (caem no app, não no semeador). `node apps/cli/test/caddyfile.test.js` passa.
+- [ ] Um semeador com `seed --no-dm` responde 404 em `/blob/...` e o membro vê o canal e o tipo de selo como não suportados.
+- [ ] Um `put` de um quadro novo recebe `ack` com `ok` verdadeiro; o mesmo quadro de novo também (repetido); outro quadro com o mesmo `(id, índice)` recebe `invalido`; com o conjunto no teto (`--blob-bytes` mínimo), o próximo pedaço recebe `cheio` e nada é escrito em `blobs/`.
+- [ ] Um selo de mensagem usado como selo de pedaço recebe `invalido`, e um pedido de selo `blob` não gasta a cota de mensagens (conferir `blob-stamps.json` e `dm-stamps.json`).
+- [ ] Com a carteira de selos de blob cheia, mandar uma mídia não emite nenhum selo durante o envio (observar o link de selos do semeador); com a carteira curta para o envio, uma compra de selos acontece primeiro, antes do primeiro `put`.
+- [ ] Toda linha de registro ligada a blob traz só um evento fixo e um motivo ou uma contagem (`blob` com `completo`, `cheio`, `invalido` ou `postage`; `blob-stamp`; `peer-dropped`; `blob-put-failed`; `blob-pool-torn`, `-broken`, `-remove-failed` e `-sweep-failed`; `dm-stamp` com `blob-postage`), nunca id, token, chave, endereço nem diário.
+- [ ] Um anexo grande baixa sem 429 nem 503 em velocidade normal, e um 503 do semeador é repetido depois do seu `Retry-After` (no máximo 3 repetições; um 404 falha na hora).
+- [ ] Depois de 7 dias (ou com o relógio de teste adiantado), o blob some e o `GET` dá 404; os resumos dos selos usados seguem em `blobs/tokens.json` até 14 dias.
+- [ ] Uma nova tentativa depois de uma pausa longa (mais de uma hora) reenvia a mídia e ela abre para o destinatário.
+- [ ] Rotacionar a chave de selo de blob do semeador com a carteira cheia: o envio seguinte funciona, sem erros.
+- [ ] O primeiro envio de um item de tamanho máximo, a partir de uma carteira vazia e numa conexão lenta, termina.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node packages/core/test/blob.test.js`, `blob-net.test.js`, `blob-pool.test.js`, `node apps/cli/test/blob-seeder.test.js` e `node apps/cli/test/caddyfile.test.js`.
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- O app ainda não envia nem mostra mídia por este canal; só o semeador e os testes o exercitam.
+- O horário e a leitura repetida do mesmo id continuam visíveis ao semeador (protocol.md, seção 13, "Privacidade"); isto não é resistência à análise de tráfego.
+- Nenhuma caixa acima foi executada nesta documentação.

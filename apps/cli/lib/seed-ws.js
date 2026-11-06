@@ -131,6 +131,22 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 // destroyed. Duplicate refs in /index/counts collapse before the seeder is
 // asked. Nothing is logged and nothing of the path is echoed.
 //
+// The listener also serves the chunks of encrypted DM media (Caddy's
+// `handle /blob/*` proxies here, as /media): GET|HEAD /blob/<id>/<index>,
+// id the blob id (lower-case hex64) and index a canonical decimal, no query
+// string. Seeder#blobChunk(idHex, index) hands back the stored frame of a
+// COMPLETE blob only, exactly as stored (it is ciphertext under a key only
+// the DM carries); an unknown or incomplete blob, an index at or past the
+// blob's count, a seeder without the blob pool (--no-dm) and a query string
+// (even an empty '?') are all the same 404 'não encontrado' with no-store,
+// so the answer never says whether the id exists. No auth and no cookie are
+// read or set; a hit is 200 application/octet-stream, nosniff, with
+// Cache-Control: private, max-age=604800 (the pool keeps a blob 7 days), so
+// a shared cache never keeps it. Host first (421), other methods 405. The
+// load is the /media budget itself (its in-flight cap and its token bucket,
+// shared), so the socket cap below stays right. Nothing is logged: no id, no
+// index, no address.
+//
 // Finally, and only when startSeedWs is given a `triageToken`, the listener
 // answers GET /moderation-post/<D>/<seq> for the account service's report
 // triage. A report carries the reporter's quote, which the reporter chose;
@@ -148,7 +164,7 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 // plus the token-authenticated loopback for authenticity; its own
 // re-validation only guards against malformed or wrong-type records.
 // Exposure: the public never reaches this path. Caddy proxies only
-// /seeder, /account/*, /media/* and /index/* to this listener
+// /seeder, /account/*, /media/*, /blob/* and /index/* to this listener
 // (deploy/seeder/Caddyfile), and this route is deliberately not added
 // there. The token still gates it because "loopback" is not "trusted":
 // any local process, and any browser page through a DNS-rebinding or a
@@ -199,6 +215,15 @@ const MEDIA_HEADERS = {
   'Content-Type': 'application/octet-stream',
   'X-Content-Type-Options': 'nosniff',
   'Cache-Control': 'public, max-age=31536000, immutable',
+  'Accept-Ranges': 'none'
+}
+
+const BLOB_PREFIX = '/blob'
+const BLOB_RE = /^\/blob\/([0-9a-f]{64})\/(0|[1-9][0-9]{0,2})$/
+const BLOB_HEADERS = {
+  'Content-Type': 'application/octet-stream',
+  'X-Content-Type-Options': 'nosniff',
+  'Cache-Control': 'private, max-age=604800',
   'Accept-Ranges': 'none'
 }
 
@@ -811,6 +836,32 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     res.flushHeaders()
     await streamBlocks({ res, blocks: read.blocks, bytes: read.bytes, closed, isClosed, track })
   }
+  // Synchronous read, but the slot is held until the response closes, as
+  // for /media, so slow readers count against the shared cap.
+  function serveBlob (req, res, match) {
+    if (!takeToken() || inFlight >= maxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+    inFlight++
+    let released = false
+    const timer = setTimeout(() => res.destroy(), deadlineMs)
+    timer.unref()
+    res.once('close', () => {
+      clearTimeout(timer)
+      if (released) return
+      released = true
+      inFlight--
+    })
+    let frame = null
+    try {
+      if (typeof seeder.blobChunk === 'function') frame = seeder.blobChunk(match[1], Number(match[2]))
+    } catch {
+      frame = null
+    }
+    if (!(frame instanceof Uint8Array) || frame.byteLength === 0) return send(res, 404, NOT_FOUND)
+    res.writeHead(200, { ...BLOB_HEADERS, 'Content-Length': frame.byteLength })
+    if (req.method === 'HEAD') return res.end()
+    res.end(frame)
+  }
+
   // Filled once listening (port 0 case); no request arrives before that.
   let hosts = new Set()
   const hostOk = (req) => typeof req.headers.host === 'string' && hosts.has(req.headers.host.toLowerCase())
@@ -831,6 +882,16 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       const match = MEDIA_RE.exec(req.url)
       if (!match) return send(res, 404, NOT_FOUND)
       return serveMedia(req, res, match).catch(() => res.destroy())
+    }
+    if (pathname === BLOB_PREFIX || pathname.startsWith(BLOB_PREFIX + '/')) {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
+      const match = req.url.includes('?') ? null : BLOB_RE.exec(req.url)
+      if (!match) return send(res, 404, NOT_FOUND)
+      try {
+        return serveBlob(req, res, match)
+      } catch {
+        return res.destroy()
+      }
     }
     if (pathname === INDEX_PREFIX || pathname.startsWith(INDEX_PREFIX + '/')) {
       if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
@@ -955,6 +1016,7 @@ module.exports = {
   MEDIA_RATE,
   MEDIA_BURST,
   MEDIA_DEADLINE_MS,
+  BLOB_RE,
   INDEX_POST_RE,
   INDEX_COUNTS_RE,
   INDEX_MEMBER_RE,

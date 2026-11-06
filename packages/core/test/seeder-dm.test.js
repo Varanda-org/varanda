@@ -285,6 +285,59 @@ test('seeder dm: a rotation under an open stamp channel never issues under the o
   t.alike(await ch.put(dropFor(s)), { ok: true, reason: null })
 })
 
+test('seeder dm: a blob key file that fails first is retried by the tick and reaches the open stamp channel', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const dataDir = prepareSeederDir(t, assoc)
+  let blobBroken = true
+  let blobGets = 0
+  const { seeder, port, events } = await startSeeder(t, bootstrap, dataDir, assoc, {
+    postage: { get: async () => ({ keys: [K1] }) },
+    blobPostage: {
+      get: async () => {
+        blobGets++
+        if (blobBroken) throw new Error('broken key file')
+        return { keys: [K2] }
+      }
+    },
+    stampsPerDay: 10
+  })
+  const member = await admittedMember(t, port, assoc, events)
+  const noise = await link(t, port)
+  const stamp = stampChannel(noise, member)
+  const pub1 = await stamp.key()
+  t.is((await issue(stamp, pub1)).kid, K1.kid, 'DM stamps work while the blob key fails')
+  t.ok(blobGets >= 1, 'the attach tried the blob key')
+  t.ok(events.some((e) => e.event === 'dm-stamp' && e.reason === 'blob-postage'))
+
+  const failed = blobGets
+  await seeder._dmTick()
+  t.is(blobGets, failed + 1, 'the tick retries a blob key that never loaded')
+  t.is((await issue(stamp, pub1)).kid, K1.kid, 'DM stamps still work after a failed retry')
+
+  blobBroken = false
+  await seeder._dmTick()
+  let closed = false
+  try {
+    await stamp.key()
+  } catch {
+    closed = true
+  }
+  t.ok(closed, 'the tick closed the stamp channel that had no blob kind')
+  const again = stampChannel(noise, member)
+  t.is(await again.supported, true, 'the same socket reopens the channel')
+  const blobPub = await again.key('blob')
+  t.is(blobPub.kid, K2.kid, 'the reopened channel has the blob key')
+  const n = BigInt(blobPub.n)
+  const token = postage.newToken(n, 'blob')
+  const { blinded, r } = postage.blind(postage.representative(token, 'blob'), n)
+  const got = await again.issue(postage.toBase64(blinded), 'blob')
+  t.is(got.kid, K2.kid)
+  t.ok(postage.verify(token, postage.unblind(postage.fromBase64(got.sig), r, n), blobPub, 'blob'), 'the blob stamp verifies')
+  t.is((await issue(again, await again.key())).kid, K1.kid, 'DM stamps keep working')
+})
+
 test('seeder dm: disabled leaves both channels unsupported and needs no postage', async (t) => {
   t.timeout(90000)
   const { bootstrap } = await testnet(t)

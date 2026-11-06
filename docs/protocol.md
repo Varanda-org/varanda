@@ -1170,8 +1170,9 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm --page --key --username --group --file
+  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
+  --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).
 ```
 
 ### Exit codes and output
@@ -1831,6 +1832,9 @@ A drop carries a stamp: a Chaum blind RSA signature (RSA-2048, `e = 65537`) over
 - `{ "type": "issue", "blinded": <canonical base64, 256 bytes> }` -> `{ "type": "stamp", "kid", "sig": <base64> }`, or `{ "type": "stamp", "error": "teto" }` past the daily budget, or `{ "type": "stamp", "error": "ruim" }` when `sign` refuses. At most 10 issues per 10 s per channel.
 - Before computing the blind signature, the seeder checks, without changing anything, that the proved diary could get a stamp now: not blocked, admitted or served, under its daily allowance and within the row cap. If not, it answers `teto` without signing. After 3 `teto` answers in a row on one channel, the seeder drops the peer.
 - The seeder stores nothing about the blinded input and logs only `{ event: 'dm-stamp', reason: 'ok' | 'teto' | 'ruim' }`, with no key.
+- Blob stamp kind (media chunks, section 13). The same channel also issues a second kind of stamp, only when the seeder has a blob key: `{ "type": "key", "kind": "blob" }` -> `{ "type": "key", "kind": "blob", "v": 1, "kid", "n", "e" }` and `{ "type": "issue", "blinded": <canonical base64, 256 bytes>, "kind": "blob" }` -> `{ "type": "stamp", "kid", "sig" }` or `{ "type": "stamp", "error": "teto" | "ruim" }`. The DM messages above are unchanged and the kind `'dm'` never travels (a message with `kind` other than `'blob'` is a bad message). A seeder without a blob key (and any seeder from before this kind) treats the blob messages as bad.
+- The blob kind is separate from the DM kind in every part: its own RSA-2048 key and `kid` (a blob key whose `kid` is a DM key is refused), its own rotation file `<seeder dir>/blob-postage.json` (same shape, 7-day rotation, 14-day acceptance and 2 keys as `dm-postage.json`; errors read `blob-postage inválido`), its own FDH domain `BLOB_STAMP_FDH_DOMAIN = 'varanda/blob-stamp-fdh/v1'` (the DM domain is `varanda/dm-stamp-fdh/v1`), and its own budget `BLOB_STAMPS_PER_DAY = 1024` per diary per Brasília day, kept in `<seeder dir>/blob-stamps.json` (the `dm-stamps.json` v2 shape and rules: admitted or served and not blocked, 3 recent days, row cap, `teto` without signing when over). A blob issue never spends the DM allowance and a DM issue never spends the blob one. Issues of the blob kind have their own bucket per channel (`BLOB_ISSUE_BURST = 32`, `BLOB_ISSUE_RATE = 4` per second); the DM bucket stays at 10 per 10 s. The 3 `teto` answers in a row that drop the peer count both kinds together.
+- DM verification only uses DM keys and the DM domain, and blob verification only blob keys and the blob domain: a stamp of one kind never pays for the other (the seeder refuses a `kid` that belongs to the other kind's keys). The seeder logs a blob issue as `{ event: 'blob-stamp', reason }`, never a key.
 
 ### Seeder storage
 
@@ -1842,7 +1846,7 @@ A drop carries a stamp: a Chaum blind RSA signature (RSA-2048, `e = 65537`) over
 - The seeder logs `{ event: 'dm', reason: 'guardada' | 'cheio' | 'invalido' | 'postage' }` per put (a put over the rate is answered `'ritmo'` by the channel itself) and `{ event: 'dm-stamp', reason }`: counts only, never a key, an address or a bucket.
 - A failed put or page is logged with a fixed reason, never with the error text.
 - A failure of the seeder itself (its postage key file, its disk) is never `invalido`: the put throws, the channel closes without an ack and the member keeps the put as uncertain. Only a drop that is itself bad (frame, stamp, spent token) is `invalido`.
-- `seed --no-dm` attaches neither channel: a member then sees both as unsupported.
+- `seed --no-dm` attaches neither channel: a member then sees both as unsupported. It also turns off the blob stamp kind, the blob channel and the `/blob` route (section 13).
 - The seeder sees an ephemeral Noise key, an IP address, the time, a fixed-size frame and, on the stamp link, that some diary bought stamps today. It does not see the sender, the recipient, the text, nor which stamp belongs to whom.
 
 ### Multi-device
@@ -2015,3 +2019,89 @@ A page has Conversas (section 11) with one difference: the page's box key is hel
 - R6e is closed: the seeder keeps `page-*` blocks out of its own deleted bookkeeping. A tombstone whose target reads as a `page-*` record changes nothing at the seeder (not its indexes, not `postBlock`, not its readers' fold), and one learned before its target arrived is taken back once the block is read, so a leaked-key tombstone of a `page-close`, `page-moved` or `page-roster` keeps the end pointer (`/index/page-end`) and the closed or moved hint, on a fresh seeder and after an index rebuild. What remains is the case above: every peer withholds both the roster and the close.
 - Page Conversas do not follow a key move: K2 starts an empty inbox.
 - The notices rate window (8 per minute per page) and the lifecycle window (2 per owner per 24 h) are in memory and reset on restart.
+
+## 13. Blobs anônimos (`packages/core/lib/blob.js`, `blob-net.js`, `blob-pool.js`, `apps/cli/lib/seed-ws.js`)
+
+A mídia de uma mensagem direta (section 11) vai para o semeador em pedaços de tamanho fixo, cada um com o seu selo, num conjunto comum de blobs. O cliente cifra o objeto inteiro com `secretbox` sob uma chave e um nonce aleatórios antes de cortar; a chave e o nonce só viajam dentro da mensagem direta selada, no descritor, nunca neste canal, então o semeador guarda texto cifrado que não abre. Nada do que vai ao semeador ou volta dele nomeia um diário.
+
+### Id e descritor
+
+- `id`: 32 bytes aleatórios (`newBlobId`), escolhido pelo cliente; não deriva do conteúdo nem da chave.
+- Pedaço (chunk) de `BLOB_CHUNK_BYTES = 32768` bytes; no máximo `BLOB_MAX_CHUNKS = 257` pedaços (8 MiB de texto claro mais o MAC de 16 bytes do `secretbox`).
+- Descritor dentro da mensagem selada, chaves exatas `{ id, key, nonce, chunks, bytes, sha256 }`: `id`, `key` e `sha256` em hex de 64 caracteres, `nonce` em hex de 48 (24 bytes), `bytes` o tamanho do TEXTO CIFRADO (inteiro maior que 16 e até `257 * 32768`), `chunks` exatamente `ceil(bytes / 32768)` (`validateBlobDescriptor`), `sha256` o hash do texto cifrado inteiro.
+
+### Quadro (frame) `VBL1`, exatamente `BLOB_FRAME_BYTES = 33137` bytes
+
+| Campo | Bytes | Posição |
+| --- | --- | --- |
+| magic `VBL1` (ASCII) | 4 | 0..4 |
+| version (`BLOB_VERSION = 1`) | 1 | 4 |
+| id | 32 | 5..37 |
+| index (uint16 big-endian) | 2 | 37..39 |
+| count (uint16 big-endian) | 2 | 39..41 |
+| kid (da chave de selo de blob) | 8 | 41..49 |
+| sig (assinatura cega) | 256 | 49..305 |
+| token (do selo) | 32 | 305..337 |
+| check | 32 | 337..369 |
+| bytes (o último pedaço é completado com zeros) | 32768 | 369..33137 |
+
+`decodeChunk` nunca lança e devolve `null` para quadro de outro tamanho (o de um layout anterior inclusive), magic ou version errados, `count` fora de `1..257`, `index` fora de `count` ou um `check` que não confere. O base64 do quadro tem 44184 caracteres, abaixo de `BLOB_MAX_MESSAGE = 65536`. A última parte é cortada pelo cliente com o `bytes` do descritor.
+
+### Selo, token e check
+
+- O selo é `(kid, sig, token)`, uma assinatura RSA cega (a mesma construção de section 11, "Stamps") sobre `token` sob a chave de selo de blob do semeador, com o domínio FDH `varanda/blob-stamp-fdh/v1`.
+- `token` é um valor aleatório de 32 bytes, como o de uma mensagem direta (`newToken(n, 'blob')` em `dm-postage.js`), sorteado de novo até o representante FDH ser menor que o módulo `n` do semeador. Nunca deriva do pedaço. O cliente o cega (`blind`, tipo `'blob'`), pede o selo no canal de selos (section 11, tipo `blob`) com antecedência, tira a cegueira (`unblind`) e o guarda numa carteira de selos; qualquer selo assinado paga um pedaço qualquer, e um token gasto é recusado para qualquer outro pedaço. O quadro se monta com `encodeChunk({ id, index, count, kid, sig, token, bytes })`.
+- `check = BLAKE2b-256(utf8('varanda/blob-chunk/v1\n') || id || index (uint16 be) || count (uint16 be) || bytes preenchidos)`, recalculado por `decodeChunk`. Ele cobre o lugar do pedaço e os seus bytes, não o selo: um quadro cujo `check` não confere é recusado. `kid`, `sig` e `token` são julgados pela conferência do selo, e o conjunto grava o token e o hash do quadro de cada pedaço guardado, então um `token`, `kid` ou `sig` trocado num arquivo guardado é pego (blob quebrado).
+- Um selo de DM nunca paga um pedaço, e um de blob nunca paga um envelope.
+- Carteira do cliente do navegador (`packages/web-member/lib/blob.js`): só a compra em segundo plano enche a carteira até 300 selos de blob, e ela a reabastece quando restam menos de 150. Os selos são comprados no link identificado de selos (tipo `blob`) e gastos depois no link anônimo de blob. Só quando a carteira não tem selos para um envio o cliente força uma compra logo antes daquele `put`, e ela compra apenas o que falta mais 8 (`FORCE_MARGIN`), nunca mais do que um enchimento completo. A contagem de selos usáveis considera só as chaves aceitas: numa rotação de chave, os selos sob o `kid` descartado não contam.
+- Chave do semeador e compra em vários links (cliente do navegador): com a carteira cheia, o cliente ainda pergunta a chave de blob do semeador quando a última conferência tem mais de 12 horas (`KEY_CHECK_MS`). Uma chave com `kid` novo compra pelo menos um selo e só então vira a atual; os selos fora do par atual/anterior são descartados. Uma compra continua num novo link de selos quando o link fecha ou chega ao prazo de 180 s depois de ter comprado pelo menos um selo, e para ao atingir a meta, no `teto`, numa resposta ruim, num link que não compra nada ou numa troca de `kid`.
+- `put` do cliente do navegador (primeira tentativa ou nova tentativa do usuário): envia todos os quadros em ordem, cada um uma vez, e só tem sucesso quando todos foram confirmados naquela chamada. `cheio`, `ritmo` ou um link perdido para o envio na hora (link perdido ou `ack` ausente é incerto). Um quadro recusado como `invalido` é limpo e os quadros restantes ainda são enviados; depois o `put` falha, e o envio seguinte carimba de novo os quadros limpos com selos da carteira (selos novos). Assim, uma nova tentativa enquanto o blob ainda existe o completa (os pedaços guardados respondem como repetidos, sem selo novo); depois da varredura do incompleto, os quadros de selo gasto são recusados, e o envio seguinte os carimba de novo e guarda o blob outra vez sob o mesmo id.
+- Leitura (`fetchBlob`): os limites de imagem são conferidos pela assinatura dos bytes (JPEG, PNG, GIF, WebP), seja qual for o mime (comparado sem diferenciar maiúsculas de minúsculas); o corpo de um quadro nunca é guardado em memória além de `BLOB_FRAME_BYTES`; uma resposta sem fluxo legível e sem `Content-Length` é recusada.
+
+### Canal `'varanda/blob/1'` (`packages/core/lib/blob-net.js`)
+
+`BLOB_PROTOCOL = 'varanda/blob/1'`, em canal protomux sem desafio e sem prova: nenhuma chave de diário viaja. O membro o abre num link próprio, com uma chave Noise efêmera nova. JSON UTF-8 de chaves exatas, no máximo `BLOB_MAX_MESSAGE = 65536` bytes por mensagem.
+
+- membro para semeador: `{ "type": "put", "chunk": <base64 canônico de exatamente 33137 bytes> }`.
+- semeador para membro: `{ "type": "ack", "ok": <boolean>, "reason": null | "cheio" | "invalido" | "ritmo" }`.
+- Um `put` em andamento por socket (não por canal): um segundo `put` com o primeiro sem resposta é mensagem ruim, também num canal que o membro reabriu. Mais de `MAX_BAD_BLOB = 5` mensagens ruins derrubam o socket; um quadro acima do limite, falha de JSON ou de forma, `chunk` que não é o base64 canônico de 33137 bytes, resposta não pedida e mensagem do outro papel são mensagens ruins.
+- Cada mensagem tira uma ficha do balde do canal (`BLOB_MESSAGE_BURST = 64`, `BLOB_MESSAGE_RATE = 24` por segundo); sem ficha, o par é derrubado. Os `put` têm balde próprio (`BLOB_PUT_BURST = 32`, `BLOB_PUT_RATE = 8` por segundo): acima dele a resposta é `ritmo` e nada é guardado.
+- `invalido`: quadro de tamanho certo que o conjunto recusa (magic ruim, token que não confere, selo ruim ou gasto, repetição com bytes diferentes). `cheio`: sem espaço no teto de bytes. Uma falha do próprio semeador (disco, arquivo de chave) nunca é `invalido`: o `put` lança, o canal fecha sem `ack` e o membro mantém o envio como incerto.
+- O membro tem 15 s (`BLOB_REQUEST_TIMEOUT_MS = 15000`) para a resposta; passado isso, o canal fecha e o envio fica incerto. O nó nunca repete um `put` por conta própria: só a pessoa pode mandar de novo, e o conjunto responde a um quadro idêntico como sucesso repetido.
+- Toda linha de registro ligada a blob (canal, conjunto, semeador e o tipo de selo) leva só um evento fixo e um motivo ou uma contagem, nunca id, token, chave, endereço ou diário. Os eventos são `blob` (motivos `completo`, `cheio`, `invalido`, `postage`), `blob-stamp`, `peer-dropped` (com o motivo), `blob-put-failed`, `blob-pool-torn`, `blob-pool-broken`, `blob-pool-remove-failed`, `blob-pool-sweep-failed`, `dm-stamp` (motivo `blob-postage`) e `warning` (motivo `blob-sweep-failed`).
+
+### Conjunto de blobs (`packages/core/lib/blob-pool.js`)
+
+- Fica em `<seeder dir>/blobs/`: `<id hex>/meta.json` (`{ v: 1, count, receivedAt }`, escrito de forma atômica antes do primeiro pedaço), `<id hex>/<index>` (o quadro inteiro) e `tokens.json` (`{ v: 1, tokens: [{ h, at, kid }] }`), modo 0600 nos arquivos e 0700 nos diretórios. Cada pedaço é escrito num nome temporário, recebe `fsync` e é renomeado, e só então vem o `ack`.
+- Retenção `BLOB_RETENTION_MS = 7 * 86400000` a partir do PRIMEIRO pedaço, pelo relógio do semeador, e nunca renovada (nem por pedaço posterior, nem por `put` repetido). Um blob incompleto é varrido 1 hora (`BLOB_PARTIAL_MS`) depois do primeiro pedaço; um blob completo segue os 7 dias. A varredura roda a cada 60 s junto com a do conjunto de mensagens diretas. Não há apagamento a pedido. Um `receivedAt` mais de 1 dia à frente do relógio é lido como a hora da carga.
+- Teto de bytes do conjunto: `BLOB_POOL_BYTES = 2 GiB` por padrão, mudado por `seed --blob-bytes`. Não há reserva adiantada: o conjunto conta os pedaços que de fato guarda (32768 bytes cada, os de blobs vencidos que ainda estão no disco inclusive), e o pedaço que passaria do teto recebe `cheio` sem nada escrito, depois das conferências do selo e do token gasto, então um pedaço recusado mantém o seu selo. Isso pode acontecer no meio de um blob, cujos pedaços já guardados ficam até a varredura do incompleto.
+- Um blob só é legível com todos os pedaços guardados. Um quadro idêntico ao já guardado é sucesso repetido sem nova conferência de selo; outro quadro para o mesmo `(id, index)`, um `count` diferente do do blob e um token gasto são recusados.
+- Os tokens gastos (BLAKE2b-256 do token) sobrevivem aos pedaços, como em section 11: um resumo só sai quando tem mais de `2 * retenção` = 14 dias E a chave dele já não é aceita. A invariante da section 11 vale: a janela de aceitação de uma chave (14 dias) não passa da retenção dos tokens, então um selo gasto nunca vale duas vezes. `tokens.json` é escrito antes de qualquer pedaço ser apagado.
+- Um arquivo de pedaço ausente, curto ou que não é o quadro confirmado indica corrupção ou adulteração do disco: o blob inteiro é removido (com os tokens dele mantidos como gastos), na carga, na leitura ou no `put`, e quem lê não o encontra mais. Diretórios sem `meta.json` legível e quadros arquivados sob outro blob, índice ou contagem são removidos na carga. Um diretório de blob é removido nesta ordem: `meta.json`, depois os pedaços, depois o diretório (com os tokens já gravados em `tokens.json`); uma queda no meio deixa um diretório sem `meta.json` válido, que a próxima carga remove.
+- `--no-dm` desliga o conjunto: nenhum selo de blob, nenhum canal e nenhuma rota.
+
+### Rota HTTP `GET|HEAD /blob/<id>/<index>` (`apps/cli/lib/seed-ws.js`)
+
+- Caminho exato `/blob/<id>/<index>`: `id` em hex minúsculo de 64 caracteres, `index` decimal canônico de 0 a 999, sem query string (uma URL com `?`, mesmo vazio, nunca casa). Verificação de Host primeiro (421), método que não seja `GET` ou `HEAD` -> 405 com `Allow: GET, HEAD`.
+- Só blobs completos. Todo erro é o mesmo 404 `não encontrado` com `Cache-Control: no-store`: caminho que não casa, query string, id desconhecido ou incompleto, `index` igual ou maior que o `count`, blob quebrado e seeder sem conjunto (`--no-dm`). A resposta nunca diz se o id existe.
+- 200: o quadro guardado, byte a byte (33137 bytes, `Content-Length` exato), `Content-Type: application/octet-stream`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, max-age=604800`, `Accept-Ranges: none`; `HEAD` termina aí. O `private` impede que um cache compartilhado guarde o blob.
+- Sem autenticação, sem cookie, sem registro: nada é lido nem posto, e nem id, índice ou endereço aparecem em log. Quem tem o id pode ler, e o id só chega a quem recebeu a mensagem selada.
+- Cliente do navegador: as leituras dos pedaços são espaçadas (uma rajada de 32 e depois cerca de 16 por segundo). Um GET respondido com 429 ou 503 espera o `Retry-After` (no máximo 10 s, 1 s se não vier) e é repetido no máximo 3 vezes (4 GETs no total); um 404 ou um erro de rede falha na hora. Um `put` nunca é repetido.
+- Carga: é a mesma de `/media` (o mesmo teto de respostas em andamento e o mesmo balde de fichas, section 5, "Seeder media route"), então o teto global não muda; acima dele, 503 `ocupado` com `Retry-After: 1`. Resposta ainda aberta depois do prazo é destruída.
+- Caddy (`deploy/seeder/Caddyfile`): `handle /blob/*` vai para `127.0.0.1:{$VARANDA_WS_PORT}` como `/media/*` (Host reescrito para `{upstream_hostport}`, `X-Forwarded-For` e `X-Real-Ip` removidos, sem registro de acesso), fora de `@mutavel` e de `@ausenteApp` para que o cabeçalho e o 404 do semeador cheguem ao cliente, com zona própria `blob` de 300 requisições a cada 10 s por cliente (429 com `Retry-After`). O Caddy continua sem repassar `/moderation-post/` nem `/moderation-group-post/`. O service worker do PWA nunca intercepta `/blob/*`.
+
+### Privacidade
+
+- O processo do semeador vê quadros de tamanho fixo, ids de blob e horários, pelo Caddy em `127.0.0.1`. Nem o `put` nem o `GET` nomeiam um diário: o `put` vem num link com chave Noise efêmera e sem prova, o `GET` não tem cabeçalho de identidade, e o Caddy não guarda registro de acesso.
+- O selo que paga um pedaço não liga ao pedido de selo (assinatura cega), então o semeador não sabe de que diário saiu o selo gasto. Ele sabe, no canal de selos, que um diário comprou selos de blob hoje (a contagem por diário e por dia), como já sabe dos selos de mensagem. Como os selos vêm da carteira, comprados em segundo plano e gastos depois, o semeador não liga as compras de um diário aos pedaços pelo horário. O resíduo: só quando a carteira está curta para um envio o cliente compra selos logo antes daquele `put`, e então o horário da compra (no link identificado) fica perto do horário dos pedaços (no link anônimo), o que permite ligar aquele envio àquele diário.
+- O que resta é o horário e as leituras repetidas do mesmo id (quando e quanto uma mídia é buscada), a mesma classe de exposição do conjunto de mensagens diretas. Isto NÃO é resistência à análise de tráfego: quem observa a rede ou o semeador pode ligar um envio a uma busca pelo horário, pelo tamanho total (o número de pedaços) e pelo endereço IP (que o semeador não recebe do Caddy, mas o Caddy e a rede recebem).
+- O semeador guarda só texto cifrado, sob uma chave e um nonce que ele não tem: quem tem a mensagem selada tem a chave. Quem opera o binário do semeador sempre vence (registros, horário, recusa de serviço).
+
+### Riscos residuais (blobs)
+
+- Um destinatário que abre o descritor tem a chave: pode guardar e repassar a mídia. Não há apagamento a pedido: o blob sai só pela retenção de 7 dias.
+- Um cliente com selos pode encher o conjunto até o teto de bytes (`cheio` para todos até a varredura; o incompleto sai em 1 hora).
+- A mídia de um blob some do semeador em 7 dias: um aparelho que fica mais tempo offline perde a mídia (a mensagem de texto segue a sua retenção própria).
+- O id é aleatório e o endereço é público: quem o descobrir, descobre o texto cifrado, não o conteúdo. Cada leitura repetida do mesmo id é visível ao semeador.
+- O código RSA em JS não é de tempo constante: selos forjados significam spam, nunca decifrar mídia.
+- O total de pedaços de um blob (até 257) é visível ao semeador pela contagem no quadro.
