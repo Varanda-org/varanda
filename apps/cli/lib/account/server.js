@@ -12,6 +12,7 @@ const { loadKeyPairFile, verifyIssuerCert, refuseSymlinkDir } = require('@varand
 const { createModRoutes } = require('./mod-routes')
 const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
+const { createSeenRoutes } = require('./seen-routes')
 const { createAgeRoutes } = require('./age-routes')
 const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, mintRedeem, redeemMatches, accountReturnUrl, appReturnPage, header } = require('./app-return')
 const { createPagesRoutes } = require('./pages-routes')
@@ -131,6 +132,9 @@ const ERROR_STATUS = Object.freeze({
   'convite-aguardando': 429,
   // Web Push (./push-routes.js): turning notices on needs the current terms.
   'termos-pendentes': 409,
+  // The seen blob (./seen-routes.js): the compare-and-swap lost to another
+  // device's write; the body carries the current hash.
+  conflito: 409,
   // Hosted age verification (./age-routes.js): no certificate, rename or
   // invite for a key whose age band is not on record.
   'idade-pendente': 403,
@@ -611,7 +615,9 @@ function checkRawPost (req, origin) {
 // ('semanal' or 'sorteio') is only echoed by the signed invites summary: the
 // store's `opened` callback is what holds invites back. `push` is null
 // (the push routes and /push-event are not mounted at all) or the options of
-// ./push-routes.js { pushStore, vapid, send, relayTokenHash }. `didit` (a
+// ./push-routes.js { pushStore, vapid, send, relayTokenHash }. `seen` is an
+// openSeenStore (./seen-store.js) or null: the seen routes then answer 503
+// 'indisponivel'. `didit` (a
 // createDidit of ./didit.js) and `ages` (an openAgeStore of ./age-store.js)
 // turn on hosted age verification when both are set: authorize, finish,
 // rename/start and invites/start then refuse 'idade-pendente' until the
@@ -649,6 +655,7 @@ function createAccountServer ({
   invites = null,
   invitesMode = 'semanal',
   push = null,
+  seen = null,
   didit = null,
   ages = null,
   ageDailyLimit = 200,
@@ -681,6 +688,9 @@ function createAccountServer ({
     termsFinish: keyedWindow(5, 600 * 1000, now),
     invitesFinish: keyedWindow(10, 600 * 1000, now),
     invitesSummary: keyedWindow(30, 600 * 1000, now),
+    seenRead: keyedWindow(30, 600 * 1000, now),
+    seenWrite: keyedWindow(10, 600 * 1000, now),
+    seenDelete: keyedWindow(5, 600 * 1000, now),
     callback: keyedWindow(3, COOKIE_MAX_AGE_S * 1000, now),
     lookup: fixedWindow(1200, 60 * 1000, now)
   }
@@ -714,6 +724,19 @@ function createAccountServer ({
       now,
       http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow }
     })
+
+  // Always mounted: without a usable store every seen route answers
+  // 'indisponivel'.
+  const seenRoutes = createSeenRoutes({
+    association,
+    accounts: store,
+    terms,
+    seenStore: seen,
+    limits: { read: limits.seenRead, write: limits.seenWrite, delete: limits.seenDelete },
+    log,
+    now,
+    http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow }
+  })
 
   // Always mounted, so /account/age/policy answers even when the feature is off.
   const ageRoutes = createAgeRoutes({
@@ -1492,6 +1515,7 @@ function createAccountServer ({
     // Before the issuer-only routes: see the note at the top of the file.
     if (mod.owns(pathname)) return mod.handle(req, res, url)
     if (pushRoutes !== null && pushRoutes.owns(pathname)) return pushRoutes.handle(req, res, url)
+    if (seenRoutes.owns(pathname)) return seenRoutes.handle(req, res, url)
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
     if (pagesRoutes.owns(pathname)) return pagesRoutes.handle(req, res, url)
     if (req.method === 'GET') {

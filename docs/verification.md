@@ -5088,3 +5088,42 @@ Resultado da matriz: a registrar aqui por navegador, com a data e a versão do n
 - A janela em foco só fica com o aviso se o app responder ao service worker em até 1 s (`DM_WAKE_ACK_MS`); uma aba em foco que não é o app (uma imagem aberta direto, por exemplo) não responde, e o aviso aparece.
 - Com a janela em foco, o aviso vira só uma releitura. Se a identidade está travada, a releitura espera o destravar. Se já há um `dm.pull` em andamento, a releitura dele falha e a mensagem aparece no próximo. Mensagens de uma página só aparecem quando a pessoa está agindo como a página, como antes. Uma janela em foco fora da área de membro (a abertura, os Termos, a primeira configuração, ou o começo de um carregamento antes de o app ouvir) não responde ao worker, e o aviso aparece normalmente.
 - Nenhuma caixa executada nesta documentação.
+
+## 104. Estado de vistos sincronizado entre aparelhos (PR feat/seen-sync-service)
+
+O serviço de conta guarda, por membro, um bloco cifrado com as marcas de visto de Avisos, Conversas e grupos (`apps/cli/lib/account/seen-store.js`, `seen-routes.js`). O formato, a chave e as regras de fusão e de compare-and-swap estão em [protocol.md](protocol.md), seção 13. Esta parte só confere o serviço: o navegador, que grava e funde o bloco, não está nesta PR. O serviço não lê o bloco, e nenhuma conferência abaixo precisa de acesso ao conteúdo.
+
+### Testes automáticos
+
+Rodar um arquivo por vez, com `node <arquivo>`:
+
+- `node packages/core/test/seen-blob.test.js`: chave, cifra, limites (256, 4 x 32, 736 e 128, 32336 bytes no limite), corte determinístico e fusão comutativa.
+- `node packages/core/test/seen-proof.test.js`: enunciado `varanda-seen-v1`, assinatura e recusa de outro prefixo.
+- `node apps/cli/test/account-seen-store.test.js`: arquivo 0600 num diretório 0700, CAS, duas gravações concorrentes (uma só vence), arquivo de tamanho errado, link simbólico, zerar antes de apagar, limite de membros e registro sem membro nem bytes.
+- `node apps/cli/test/account-seen.test.js`: as rotas `start` e `finish`, conflito 409, nonce de uso único, Termos pendentes, limite de 429, tamanho do arquivo e 503 sem armazenamento.
+- `node apps/app/test/legal.test.js`: texto da Política e dos Termos na versão 17 (versão, nota de revisão e resumo do texto fixados).
+
+### Roteiro no servidor de teste
+
+Pré-requisito: uma conta de teste já vinculada, criada como em `apps/cli/test/account-seen.test.js` (sem Google), com o aceite da versão 17 dos Termos (`POST /account/terms/start` e `finish`). Sem o aceite, toda gravação responde 409 `termos-pendentes`. A chave de assinatura é gerada na hora, num script de uma linha em `node` que chama `signSeen` de `packages/core/lib/seen-proof.js` e imprime só a assinatura. Nem a chave nem a assinatura vão para o registro desta conferência.
+
+- [ ] Leitura sem bloco: `POST /account/seen/start` com `{ "member": "<hex64>", "action": "read" }` responde 200 `{ nonce }`; `POST /account/seen/finish` com `prevHash` de 64 zeros responde 200 `{ hash: null, blob: null }`.
+- [ ] Nonce de uso único: repetir o mesmo `finish` responde 404 `expirado`.
+- [ ] Assinatura com um caractere trocado responde 400 `assinatura-invalida`.
+- [ ] Gravação: `start` com `action: "write"` e `finish` com `prevHash` de 64 zeros, `newHash` igual ao hash do bloco (BLAKE2b-256 do bloco cifrado) e `blob` com 43744 caracteres em base64 de um bloco de 32808 bytes; responde 200 `{ ok: true, hash }`. O arquivo `<dados>/seen/<member>` tem 32808 bytes e modo 600 (`stat`).
+- [ ] Tamanho constante: uma gravação com uma marca e outra com o limite cheio resultam no mesmo tamanho de arquivo (32808 bytes).
+- [ ] Hash velho: uma gravação com um `prevHash` que não é o atual responde 409 `conflito`, com o `hash` atual e o `blob` atual em base64; o arquivo no disco não muda (o hash continua igual).
+- [ ] Depois desse 409, uma gravação com o `hash` devolvido responde 200.
+- [ ] Gravação sem o aceite da versão 17 responde 409 `termos-pendentes` e não muda o arquivo.
+- [ ] Apagamento: com um hash velho responde 409 `conflito`; com o hash atual responde 200 `{ ok: true, changed: true }` e o arquivo some; apagar de novo responde 200 `{ ok: true, changed: false }`. Zerar o arquivo antes de apagar não se confere aqui, porque ele já não existe; a conferência é o teste `forget zeroes the file, then unlinks it` de `account-seen-store.test.js`.
+- [ ] Sem armazenamento usável (por exemplo, `seen` trocado por um link simbólico num ensaio), todas as rotas respondem 503 `indisponivel` e nenhum arquivo de membro é tocado.
+- [ ] Sem arquivos sobrando: depois das gravações, nenhum `.tmp.*` fica no diretório `seen`.
+- [ ] Log: o registro do serviço durante o roteiro não tem o hex do membro, o base64 do bloco nem os hashes. Só aparecem linhas `{ "event": "seen", "reason": ... }`.
+- [ ] Um pedido de outro membro, com a assinatura desse membro, não muda o arquivo do primeiro (a conferência também está em `account-seen.test.js`).
+
+### Limites desta parte
+
+- A trava da conta não é do sistema operacional. Se o processo perder a trava entre a conferência e o renomear, uma gravação antiga pode substituir um bloco que o novo titular já confirmou. A conferência não reproduz essa corrida; ela se recupera pela fusão, porque cada aparelho reescreve as suas marcas (`seen-store.js`, cabeçalho).
+- Não há apagamento pedido por um aparelho: a rota `delete` existe, mas nenhum cliente a chama. O apagamento hoje é um pedido à associação.
+- A exclusão da conta ainda não existe, e o bloco não é apagado com ela.
+- Não verificado em servidor real: esta seção foi escrita sem executar o roteiro acima.
