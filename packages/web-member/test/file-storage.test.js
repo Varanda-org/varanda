@@ -4,6 +4,7 @@
 const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
+const Hypercore = require('hypercore')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -36,6 +37,63 @@ test('a file writes, reads, truncates, stats and deletes', async (t) => {
   t.is(b4a.toString(await call(file, 'read', 0, 5)), 'hello')
   await call(file, 'del', 2, 3)
   t.is(b4a.toString(await call(file, 'read', 0, 2)), 'he', 'bytes before the deleted range stay')
+})
+
+// Bare has no global process: there, random-access-file's process.nextTick
+// for a zero-byte read throws inside a bare-fs callback and aborts the app.
+// Node has process, so the uses coming from random-access-file are counted.
+async function rafTicks (fn) {
+  const tick = process.nextTick
+  let used = 0
+  process.nextTick = function (...args) {
+    if (/random-access-file/.test(new Error().stack)) used++
+    return tick.apply(process, args)
+  }
+  try {
+    await fn()
+  } finally {
+    process.nextTick = tick
+  }
+  return used
+}
+
+test('zero-byte reads answer an empty buffer without process.nextTick', async (t) => {
+  const storage = fileNodeStorage(tmpDir(t))
+  t.teardown(() => storage.close(), { force: true })
+  const factory = storage.core('diary')
+  await call(factory('oplog'), 'write', 0, b4a.alloc(0))
+  await call(factory('data'), 'write', 0, b4a.from('abc'))
+  const used = await rafTicks(async () => {
+    const queued = factory('oplog') // the read waits for the open
+    t.is((await call(queued, 'read', 0, 0)).byteLength, 0, 'queued behind the open')
+    const open = factory('data')
+    t.is(b4a.toString(await call(open, 'read', 0, 3)), 'abc')
+    t.is((await call(open, 'read', 3, 0)).byteLength, 0, 'on an open file')
+  })
+  t.is(used, 0)
+})
+
+test('a core with an empty block or an empty oplog opens and reads on files', async (t) => {
+  const dir = tmpDir(t)
+  const storage = fileNodeStorage(dir)
+  t.teardown(() => storage.close(), { force: true })
+  const first = new Hypercore(storage.core('diary'))
+  await first.append([b4a.from('x'), b4a.alloc(0)])
+  await first.close()
+  // An oplog created but never written (the app killed in between).
+  const broken = path.join(dir, 'cores', b4a.toString(b4a.from('broken'), 'hex'))
+  fs.mkdirSync(broken, { recursive: true })
+  fs.writeFileSync(path.join(broken, 'oplog'), b4a.alloc(0))
+  const used = await rafTicks(async () => {
+    const again = new Hypercore(storage.core('diary'))
+    t.is((await again.get(1)).byteLength, 0, 'the empty block')
+    await again.close()
+    const reopened = new Hypercore(storage.core('broken'))
+    await reopened.ready()
+    t.is(reopened.length, 0, 'the empty oplog opens as a new core')
+    await reopened.close()
+  })
+  t.is(used, 0)
 })
 
 test('hasCore and deleteCore', async (t) => {
