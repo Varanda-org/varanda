@@ -20,7 +20,7 @@
 // both panes stay mounted and only the selected one is visible.
 
 import { useEffect, useRef, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { displayText, isKey } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
 import { useNames } from '../names'
@@ -32,20 +32,57 @@ import { PARTIAL_KEY_TEXT } from '../followInput'
 import { SEARCH_BUTTON, SEARCH_CLEAR, SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_TRUNCATED } from '../topics'
 import {
   BUSCA_EMPTY, BUSCA_EMPTY_CODE, BUSCA_LABEL, BUSCA_NOT_HOSTED, BUSCA_NOT_HOSTED_TITLE, BUSCA_PLACEHOLDER, CATEGORIES, CATEGORY_LABEL,
-  CODE_FIELD_LABEL, buscaNotice, plan
+  CODE_FIELD_LABEL, buscaNotice, debouncePlan, plan, staleGuard
 } from '../buscaGlobal'
-import { Btn, ErrorText, Field, Notice, Soft, useAction, useBottomPad } from '../ui'
+import { Btn, ErrorText, Notice, Soft, useAction, useBottomPad } from '../ui'
 import { HelpNote } from '../ui/Help'
+import { Icon } from '../ui/Icon'
 import { MemberRow } from '../ui/MemberRow'
 import { Pill } from '../ui/Pill'
 import { EmptyState, Skeleton } from '../ui/States'
-import { type } from '../ui/theme'
-import { useStyles } from '../ui/ThemeProvider'
+import { layout, radius, space, type, webInputReset } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { useMemberSearch } from '../useMemberSearch'
 import Busca from './Busca'
 import { useFollowSet } from './Conversa'
 
 const NO_DRAFTS = Object.freeze({ contas: '', publicacoes: '' })
+
+// The rounded field of the Conversas search: lupa, system font, clear X.
+function SearchField ({ label, placeholder, value, onChangeText, maxLength, onSubmitEditing }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  // Both panes: a keyboard that rewrites the query before the typing pause
+  // ends would search for words nobody typed.
+  const raw = { autoCapitalize: 'none', autoCorrect: false, spellCheck: false }
+  const [focused, setFocused] = useState(false)
+  return (
+    <View style={[styles.search, focused && styles.searchFocused]}>
+      <Icon name='lupa' size={20} color={colors.soft} />
+      <TextInput
+        style={[styles.input, webInputReset]}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={placeholder}
+        placeholderTextColor={colors.placeholder}
+        accessibilityLabel={label}
+        maxLength={maxLength}
+        returnKeyType='search'
+        onSubmitEditing={onSubmitEditing}
+        {...raw}
+      />
+      {value !== ''
+        ? (
+          <Pressable accessibilityRole='button' accessibilityLabel={SEARCH_CLEAR} hitSlop={space.md} onPress={() => onChangeText('')} style={styles.clear}>
+            <Icon name='fechar' size={18} color={colors.soft} />
+          </Pressable>
+          )
+        : null}
+    </View>
+  )
+}
 
 // `paneRequest` (number): every change, and the mount, shows Contas.
 // `onFollowsChanged` (optional): called after a follow or unfollow that
@@ -308,24 +345,76 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
   // Publicações.
   const [query, setQuery] = useState(null)
   const postsGate = buscaNotice({ hosted })
-  // Submit only: the seeder allows a few /index requests per client per 10 s.
-  const submit = () => {
+  // While typing, debouncePlan holds a query back until the person pauses
+  // (the seeder allows a few /index requests per client per 10 s); submit
+  // runs it at once. Every edit advances the sequence so a pending timer of
+  // an older draft never fires.
+  const postsSeq = useRef(0)
+  const postsTimer = useRef(null)
+  const postsSent = useRef('')
+  // The path Busca fetches for the query on screen: an edit that folds to the
+  // same path (case, accents, punctuation, a 9th word) keeps the list and its pages.
+  const shownPath = useRef(null)
+  const stopPostsTimer = () => {
+    if (postsTimer.current !== null) clearTimeout(postsTimer.current)
+    postsTimer.current = null
+  }
+  useEffect(() => stopPostsTimer, [])
+  // A pause timer left running behind Contas would search a hidden pane.
+  useEffect(() => {
+    if (category === 'publicacoes') return
+    postsSeq.current += 1
+    stopPostsTimer()
+  }, [category])
+  const runPosts = (text, typing) => {
     if (postsGate !== null) return
-    const r = plan('publicacoes', drafts.publicacoes)
+    const r = plan('publicacoes', text)
     if (r.query === null) {
-      if (typeof onToast === 'function') onToast(SEARCH_INVALID)
+      if (!typing && typeof onToast === 'function') onToast(SEARCH_INVALID)
+      postsSent.current = ''
+      shownPath.current = null
+      setQuery(null)
       return
     }
-    if (r.truncated && typeof onToast === 'function') onToast(SEARCH_TRUNCATED)
+    if (r.truncated && !typing && typeof onToast === 'function') onToast(SEARCH_TRUNCATED)
+    postsSent.current = text
+    // Typing that folds to the same path keeps the list; Enter or "pesquisar"
+    // always searches again (after a failed load, that is the retry).
+    if (typing && r.query.path === shownPath.current) return
     if (!followsAsked.current) {
       followsAsked.current = true
       loadFollows()
     }
+    shownPath.current = r.query.path
     setQuery(r.query)
   }
-  const clear = () => {
-    setQuery(null)
-    setDrafts((d) => ({ ...d, publicacoes: '' }))
+  const submit = () => {
+    postsSeq.current += 1
+    stopPostsTimer()
+    runPosts(drafts.publicacoes, false)
+  }
+  const typePosts = (text) => {
+    const seq = ++postsSeq.current
+    stopPostsTimer()
+    const next = debouncePlan(text, postsSent.current)
+    if (text.trim() === '') {
+      postsSent.current = ''
+      shownPath.current = null
+      setQuery(null)
+      return
+    }
+    if (text.trim().length < next.minLength) {
+      postsSent.current = ''
+      shownPath.current = null
+      setQuery(null)
+      return
+    }
+    if (!next.run) return
+    const fresh = staleGuard(seq)
+    postsTimer.current = setTimeout(() => {
+      postsTimer.current = null
+      if (fresh(postsSeq.current)) runPosts(text, true)
+    }, next.delayMs)
   }
   // Own and followed authors only: a stranger's photo stays no-store.
   const avatarOf = (author) => {
@@ -370,7 +459,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
   const showField = category === 'contas' || postsGate === null
   const onChangeText = (t) => {
     setDraft(t)
-    if (category !== 'contas') return
+    if (category !== 'contas') return typePosts(t)
     setLocalError('')
     const c = plan('contas', t)
     if (hosted) setSearchQuery(c.kind === 'name' || c.kind === 'handle' ? t : '')
@@ -381,14 +470,12 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
       <View style={styles.top}>
         {showField
           ? (
-            <Field
+            <SearchField
               label={category === 'contas' && !hosted ? CODE_FIELD_LABEL : BUSCA_LABEL[category]}
               placeholder={category === 'contas' && !hosted ? 'código da pessoa (64 letras e números)' : BUSCA_PLACEHOLDER[category]}
               value={draft}
               onChangeText={onChangeText}
-              mono
               maxLength={SEARCH_INPUT_MAX}
-              returnKeyType='search'
               onSubmitEditing={category === 'contas' ? (hosted ? handleSearch : undefined) : submit}
             />
             )
@@ -397,13 +484,6 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
           ? (
             <View style={styles.postActions}>
               <Btn label={SEARCH_BUTTON} onPress={submit} disabled={draft.trim() === ''} secondary />
-              {query !== null || draft !== ''
-                ? (
-                  <Pressable accessibilityRole='button' accessibilityLabel={SEARCH_CLEAR} onPress={clear} hitSlop={6}>
-                    <Text style={styles.clear}>{SEARCH_CLEAR}</Text>
-                  </Pressable>
-                  )
-                : null}
             </View>
             )
           : null}
@@ -435,7 +515,20 @@ const makeStyles = (colors) => StyleSheet.create({
   hidden: { display: 'none' },
   top: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, gap: 8 },
   postActions: { gap: 8 },
-  clear: { ...type.counter, color: colors.accent },
+  search: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    paddingHorizontal: space.md,
+    height: layout.hit,
+    borderRadius: radius.md,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+    backgroundColor: colors.inputOff
+  },
+  searchFocused: { borderColor: colors.accent, backgroundColor: colors.card },
+  input: { ...type.postText, flex: 1, minWidth: 0, height: layout.hit - 3, paddingVertical: 0, color: colors.ink },
+  clear: { minWidth: space.xl, minHeight: space.xl, alignItems: 'center', justifyContent: 'center' },
   pane: { paddingVertical: 12, paddingHorizontal: 16, gap: 8 },
   bleed: { marginHorizontal: -16 },
   addRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },

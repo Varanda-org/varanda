@@ -8,6 +8,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const gc = require('@varanda/core/lib/group-crypto')
+const { validPrivateItem, sealMedia } = require('@varanda/core/lib/group-media')
 const { createBrowserNode } = require('../lib/node')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { groupKeyPairFromPrf, boxKeyPairFromPrf } = require('../lib/passkey')
@@ -130,7 +131,7 @@ function holds (buffers, needle) {
   return buffers.some((buf) => b4a.indexOf(buf, n) !== -1)
 }
 
-async function setup (t, { assoc = generateAssociationKeyPair(), storage = recordingStorage(), keyPair = crypto.keyPair(), prf = crypto.randomBytes(32) } = {}) {
+async function setup (t, { assoc = generateAssociationKeyPair(), storage = recordingStorage(), keyPair = crypto.keyPair(), prf = crypto.randomBytes(32), mediaKeyPair = null, fetchMedia } = {}) {
   const association = hex(assoc.publicKey)
   const ctx = { storage, association, keyPair, groupKeyPair: (nonce) => groupKeyPairFromPrf(prf, nonce) }
   const key = hex(keyPair.publicKey)
@@ -145,10 +146,11 @@ async function setup (t, { assoc = generateAssociationKeyPair(), storage = recor
     seederUrl: 'ws://127.0.0.1:9/seeder',
     createSocket: () => { throw new Error('unexpected socket') },
     writeGate: false,
-    onInternalError: (err) => internal.push(err)
+    onInternalError: (err) => internal.push(err),
+    ...(fetchMedia === undefined ? {} : { fetchMedia })
   })
   t.teardown(() => node.close(), { force: true })
-  await node.setKeyPair(keyPair, { prf })
+  await node.setKeyPair(keyPair, mediaKeyPair === null ? { prf } : { prf, media: mediaKeyPair })
   const web = await connectClient(node)
   return inCommunity({ node, web, key, keyPair, prf, assoc, storage, internal })
 }
@@ -638,4 +640,159 @@ test('demoting a community admin rotates the community\'s private groups: no rek
   await b.web.request('group.post', { group, text: 'depois do religamento' })
   await share(b, a, bw)
   t.ok(texts(await a.web.request('group.read', { group })).includes('depois do religamento'), 'a member sends')
+})
+
+function throwsType (fn) {
+  try {
+    fn()
+  } catch (err) {
+    return err instanceof TypeError
+  }
+  return false
+}
+
+// A PNG the media bounds accept (640x480), then `n` patterned IDAT bytes:
+// its magic bytes must never reach the media core.
+function png (n = 40000) {
+  const out = b4a.alloc(8 + 25 + 12 + n)
+  out.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0)
+  out.writeUInt32BE(13, 8)
+  out.write('IHDR', 12, 'ascii')
+  out.writeUInt32BE(640, 16)
+  out.writeUInt32BE(480, 20)
+  out[24] = 8
+  out[25] = 6
+  out.writeUInt32BE(n, 33)
+  out.write('IDAT', 37, 'ascii')
+  for (let i = 0; i < n; i++) out[41 + i] = (i * 31 + 7) & 0xff
+  return out
+}
+
+// A fetch answer like the browser's: 200 with an exact Content-Length.
+function answer (body, { status = 200, length = String(body.byteLength) } = {}) {
+  return {
+    status,
+    redirected: false,
+    headers: { get: (k) => (k.toLowerCase() === 'content-length' ? length : null) },
+    arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength)
+  }
+}
+
+test('private media: sealed upload, sealed post, read back, no image header stored', async (t) => {
+  const fetched = []
+  let serve = null
+  let hold = null
+  const fetchMedia = async (url, opts) => {
+    fetched.push({ url, opts })
+    if (hold !== null) await hold
+    const body = serve()
+    return typeof body === 'function' ? body() : answer(body)
+  }
+  const a = await setup(t, { mediaKeyPair: crypto.keyPair(), fetchMedia })
+  const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'open', visibility: 'private' })
+  const plain = png()
+  const item = await a.node.mediaUpload({ bytes: plain, mime: 'image/png', width: 640, height: 480, sealed: true })
+  t.ok(validPrivateItem(item), 'a private item')
+  t.alike([item.mime, item.plainMime, item.w, item.h, item.ms], ['application/octet-stream', 'image/png', 640, 480, 0])
+
+  const pub = await a.node.mediaUpload({ bytes: plain, mime: 'image/png', width: 640, height: 480 })
+  const errPublic = await errorOf(a.web.request('group.post', { group, text: '', media: [pub] }))
+  t.is(errPublic.message, 'grupo privado exige mídia cifrada')
+
+  const { seq } = await a.web.request('group.post', { group, text: '', media: [item], sealed: true })
+  t.ok(seq >= 1)
+  const page = await a.web.request('group.read', { group })
+  t.alike(page.items[0].media, [item], 'the item comes back from the sealed record')
+  t.is(page.items[0].text, '')
+  const records = await coreRecords(a, await writerOf(a, group))
+  t.is(records[seq].type, 'group-sealed', 'the post travels sealed')
+  t.absent(holds(await storedBytes(a.storage), item.key), 'the item key is stored only sealed')
+
+  const core = await store.openMediaCoreReadOnly(a.storage, item.core)
+  const cipher = []
+  try {
+    for (let i = item.start; i < item.start + item.blocks; i++) cipher.push(await core.get(i, { wait: false }))
+  } finally {
+    await core.close()
+  }
+  const stored = b4a.concat(cipher)
+  t.is(stored.byteLength, item.bytes)
+  t.absent(b4a.equals(stored.subarray(0, 4), b4a.from([0x89, 0x50, 0x4e, 0x47])), 'no PNG header in the stored block')
+  t.absent(b4a.indexOf(stored, plain.subarray(0, 64)) !== -1, 'no plaintext in the stored blocks')
+
+  serve = () => stored
+  const opened = await a.node.groupReadMedia({ diary: a.key, item })
+  t.ok(b4a.equals(opened.bytes, plain), 'the original bytes')
+  t.alike([opened.mime, opened.w, opened.h], ['image/png', 640, 480])
+  t.is(fetched[0].url, 'http://127.0.0.1:9/media/' + a.key + '/' + item.core + '/' + item.start + '/' + item.blocks, 'the node\'s own seeder origin')
+  t.is(fetched[0].opts.cache, 'no-store')
+
+  const tampered = b4a.from(stored)
+  tampered[100] ^= 1
+  serve = () => tampered
+  const bad = await errorOf(a.node.groupReadMedia({ diary: a.key, item }))
+  t.alike([bad.code, bad.message], ['USAGE', 'mídia indisponível'])
+  serve = () => stored.subarray(0, stored.byteLength - 1)
+  t.is((await errorOf(a.node.groupReadMedia({ diary: a.key, item }))).message, 'mídia indisponível', 'a short body')
+  t.ok(throwsType(() => a.node.groupReadMedia({ diary: a.key, item: pub })), 'a public descriptor is not a private item')
+  t.ok(throwsType(() => a.node.groupReadMedia({ diary: 'zz', item })), 'a diary must be hex64')
+  t.ok(throwsType(() => a.node.mediaUpload({ bytes: plain, mime: 'image/png', width: 1, height: 1, sealed: 'yes' })), 'sealed is a boolean')
+  t.ok(throwsType(() => a.node.mediaUpload({ bytes: plain, mime: 'image/jpeg', width: 640, height: 480, sealed: true })), 'a sealed photo must be the image its mime names')
+  t.ok(throwsType(() => a.node.mediaUpload({ bytes: b4a.alloc(5000, 1), mime: 'image/png', width: 1, height: 1, sealed: true })), 'a sealed upload must be an image')
+
+  // The download never buffers past the item: a wrong declared length is
+  // refused unread, a stream longer than the item is cut off.
+  let readWhole = false
+  serve = () => () => ({ ...answer(stored, { length: String(item.bytes + 1) }), arrayBuffer: async () => { readWhole = true; return new ArrayBuffer(0) } })
+  t.is((await errorOf(a.node.groupReadMedia({ diary: a.key, item }))).message, 'mídia indisponível', 'a wrong Content-Length')
+  t.absent(readWhole, 'the body is not read')
+  let cancelled = false
+  serve = () => () => ({
+    status: 200,
+    redirected: false,
+    headers: { get: () => null },
+    body: {
+      getReader: () => {
+        let sent = 0
+        return {
+          read: async () => (sent++ < 2 ? { done: false, value: stored } : { done: true }),
+          cancel: async () => { cancelled = true }
+        }
+      }
+    }
+  })
+  t.is((await errorOf(a.node.groupReadMedia({ diary: a.key, item }))).message, 'mídia indisponível', 'a stream past the item')
+  t.ok(cancelled, 'the stream is cancelled')
+  serve = () => answer(stored, { status: 404 })
+  t.is((await errorOf(a.node.groupReadMedia({ diary: a.key, item }))).message, 'mídia indisponível', 'a missing item')
+
+  // A member who seals something that is not the image its item names: the
+  // reader refuses it after opening.
+  const forged = sealMedia(b4a.alloc(3000, 9), { plainMime: 'image/png', w: 10, h: 10 })
+  const forgedItem = { core: item.core, start: item.start, ...forged.item }
+  serve = () => forged.cipher
+  t.is((await errorOf(a.node.groupReadMedia({ diary: a.key, item: forgedItem }))).message, 'mídia indisponível', 'a sealed non-image is refused')
+
+  // A lock while the download runs: the image is never opened.
+  let release = null
+  hold = new Promise((resolve) => { release = resolve })
+  serve = () => stored
+  const before = fetched.length
+  const reading = a.node.groupReadMedia({ diary: a.key, item }).then(() => null, (err) => err)
+  while (fetched.length === before) await new Promise((resolve) => setTimeout(resolve, 5))
+  await a.node.clearKeyPair()
+  release()
+  const locked = await reading
+  t.ok(locked !== null, 'a read that outlived the lock fails')
+  t.is(locked.code, 'USAGE')
+  t.not(locked.message, 'mídia indisponível', 'it says locked, not unavailable')
+  t.alike(a.internal, [])
+})
+
+test('a public group refuses sealed media', async (t) => {
+  const a = await setup(t, { mediaKeyPair: crypto.keyPair() })
+  const { group } = await a.web.request('group.create', { name: 'Praça', join: 'open' })
+  const item = await a.node.mediaUpload({ bytes: png(1000), mime: 'image/png', width: 10, height: 10, sealed: true })
+  const err = await errorOf(a.web.request('group.post', { group, text: 'x', media: [item], sealed: true }))
+  t.alike([err.code, err.message], ['USAGE', 'mídia cifrada só em grupo privado'])
 })

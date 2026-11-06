@@ -6,6 +6,17 @@ const at = (day, hour, minute = 0) => `2026-11-${String(day).padStart(2, '0')}T$
 
 export const now = at(5, 15)
 
+// Chat photos. Picture p is one of the tiny drawings of ./pictures.js: an
+// item names it through its sha256 (key(PICTURE_BASE + p)), which the
+// Vitrine's media handle reads back (./media.js). Declared sizes are the
+// size a phone photo would have; the drawn pixels are far fewer.
+export const PICTURE_BASE = 700
+const PICTURE_BYTES = [1405, 1291, 1391, 1605]
+const PICTURE_SIZE = [[1280, 960], [768, 1024], [1024, 1024], [1344, 896]]
+const dmPhoto = (n, p) => ({ id: key(710 + n), key: key(720 + n), nonce: '0'.repeat(46) + (n % 100).toString().padStart(2, '0'), chunks: 1, bytes: PICTURE_BYTES[p] + 16, sha256: key(PICTURE_BASE + p), mime: 'image/jpeg', w: PICTURE_SIZE[p][0], h: PICTURE_SIZE[p][1], ms: 0 })
+const publicPhoto = (n, p) => ({ core: key(730), mime: 'image/jpeg', start: 1 + n, blocks: 1, bytes: PICTURE_BYTES[p], sha256: key(PICTURE_BASE + p), width: PICTURE_SIZE[p][0], height: PICTURE_SIZE[p][1] })
+const privatePhoto = (n, p) => ({ core: key(740), mime: 'application/octet-stream', start: 1 + n, blocks: 1, bytes: 32768, sha256: key(750 + n), key: key(760 + n), nonce: '0'.repeat(46) + (n % 100).toString().padStart(2, '0'), plainMime: 'image/jpeg', plainSha256: key(PICTURE_BASE + p), w: PICTURE_SIZE[p][0], h: PICTURE_SIZE[p][1], ms: 0 })
+
 export const members = [
   ['Lia Oliveira', 'lia_oliveira', 'Café, livros e encontros na praça.'],
   ['João Nascimento', 'joao_nascimento', 'Pedalando pelo bairro.'],
@@ -51,9 +62,13 @@ export const conversations = exchanges.map((texts, i) => {
       text,
       replyTo: j === 2 ? id(100 + i * 10 + 1) : null,
       at: at(j < 2 ? 4 : 5, 10 + i % 4, j * 5),
-      mine
+      mine,
+      media: null
     }
   })
+  // A photo-only message, then two photos with a caption.
+  if (i === 2) messages.push({ id: id(100 + i * 10 + 5), from: peer, text: '', replyTo: null, at: at(5, 13, 30), mine: false, media: [dmPhoto(1, 0)] })
+  if (i === 3) messages.push({ id: id(100 + i * 10 + 5), from: peer, text: 'Fotos do encontro de domingo.', replyTo: null, at: at(5, 13, 40), mine: false, media: [dmPhoto(2, 1), dmPhoto(3, 2)] })
   return { peer, folder, unread: i % 2 === 1, blocked: false, messages }
 })
 
@@ -81,6 +96,17 @@ const groupTexts = [
   []
 ]
 
+// Posts with photos added to a public group (1) and a private one (3).
+const groupPhotos = {
+  1: [
+    ['Olha o caminho de hoje 🚲', [publicPhoto(1, 3)]],
+    ['', [publicPhoto(2, 0), publicPhoto(3, 1), publicPhoto(4, 2)]]
+  ],
+  3: [
+    ['Os cartazes ficaram prontos!', [privatePhoto(1, 2)]]
+  ]
+}
+
 export const groups = ['Geral', 'Passeios de bicicleta', 'Geral', 'Organização do clube', 'Geral'].map((name, i) => {
   const community = communities[i < 2 ? 0 : i < 4 ? 1 : 2]
   const group = key(50 + i)
@@ -95,9 +121,15 @@ export const groups = ['Geral', 'Passeios de bicicleta', 'Geral', 'Organização
       text,
       replyTo: i === 0 && j === 3 ? { writer: key(102), seq: 2 } : null,
       hidden: false,
+      media: null,
       name: member.name,
       username: member.username
     }
+  })
+  const photos = groupPhotos[i] || []
+  photos.forEach(([text, media], k) => {
+    const member = members[(i + k + 2) % members.length]
+    items.push({ writer: key(100 + i * 10 + 4 + k), diary: member.author, seq: 2, at: at(5, 13, 10 + k * 10), text, replyTo: null, hidden: false, media, name: member.name, username: member.username })
   })
   return {
     group,

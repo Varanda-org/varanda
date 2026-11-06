@@ -78,8 +78,9 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm --page --key --username --group --file
-  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.`
+  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes
+  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
+  --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).`
 
 const booleanFlags = new Set(['--json', '--once', '--no-publish', '--no-dm', '--new-list', '--yes', '--undo', '--private', '--force', '--help', '-h'])
 const stringFlags = new Set([
@@ -88,7 +89,7 @@ const stringFlags = new Set([
   '--text', '--to', '--author', '--limit', '--before', '--bootstrap', '--dht-host',
   '--health-port', '--health-host', '--ws-port', '--ws-host', '--ws-origin',
   '--issuer', '--account-port', '--account-host', '--moderator', '--server', '--join',
-  '--page', '--key', '--username', '--group', '--file'
+  '--page', '--key', '--username', '--group', '--file', '--blob-bytes'
 ])
 
 function key (value, message = 'chave inválida') {
@@ -121,6 +122,15 @@ function optionalEnvInteger (env, name, min, max) {
   if (value === '') return null
   const number = integer(value, name)
   if (String(number) !== value || number < min || number > max) throw new UsageError(name + ' inválido')
+  return number
+}
+
+// The seeder's blob pool cap: at least one chunk (BLOB_CHUNK_BYTES, a literal
+// so parsing stays cheap), at most 1 TiB, canonical decimal.
+function blobBytes (value) {
+  const number = integer(value, 'blob-bytes', 1099511627776)
+  if (number === null) return null
+  if (String(number) !== value || number < 32768) throw new UsageError('blob-bytes inválido')
   return number
 }
 
@@ -255,6 +265,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     once: get('once') === true,
     noPublish: get('no-publish') === true,
     noDm: get('no-dm') === true,
+    blobBytes: blobBytes(get('blob-bytes')),
     newList: get('new-list') === true,
     yes: get('yes') === true,
     undo: get('undo') === true,

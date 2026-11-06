@@ -13,13 +13,23 @@
 // across re-renders and clear only what was sent. onSend() takes no
 // argument: the caller sends its own value. Nothing here retries a send.
 //
+// Photos: with onAttach (the screen passes it only when the node offers
+// media for this chat) and the node online, a clip button opens AttachSheet;
+// its pick calls onAttach(kind). The staged photos show as thumbnails above
+// the field, each with an x, and 'Cancelar' discards them all; the caption
+// is optional, so the send button shows for photos alone. `progress` (0..1,
+// or null) draws a ring around the send button while the photos upload and
+// the message is sent.
+//
 // Props: { value, onChangeText, onSend, sending, sendDisabled, editable,
 //   placeholder, accessibilityLabel, reply, onCancelReply, attach, notice,
-//   ownKey, mentions = true, max = MAX_TEXT }
+//   ownKey, mentions = true, max = MAX_TEXT, onAttach, attachments,
+//   onRemoveAttachment(id), onCancelAttachments, progress }
 //   reply: { name, text, senderKey, mine } or null (ReplyPreview props)
+//   attachments: [{ id, status: 'encoding' | 'ready' | 'invalid', thumb, error }]
 
 import { useEffect, useRef, useState } from 'react'
-import { ActivityIndicator, Keyboard, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
+import { ActivityIndicator, Image, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, activeMention } from '@varanda/rpc'
 import { countAfterInsert, insertAt } from '../emoji'
@@ -28,13 +38,14 @@ import { MENTION_MIN_QUERY, insertMention } from '../mentions'
 import { mergeSuggestions } from '../mentionTargets'
 import { useNode } from '../node'
 import { useMemberSearch } from '../useMemberSearch'
+import { AttachSheet } from './AttachSheet'
 import { EmojiPicker } from './EmojiPicker'
 import { tap } from './haptics'
 import { Icon } from './Icon'
 import { MentionSuggest } from './MentionSuggest'
 import { ReplyPreview } from './ReplyPreview'
 import { useStyles, useTheme } from './ThemeProvider'
-import { layout, radius, space } from './theme'
+import { layout, radius, space, webInputReset } from './theme'
 
 const LINE = 22
 const PAD_V = 9
@@ -42,6 +53,76 @@ const MIN_HEIGHT = LINE + PAD_V * 2
 const MAX_LINES = 6
 const MAX_HEIGHT = LINE * MAX_LINES + PAD_V * 2
 const SEND = 40
+const THUMB = 64
+const RING = SEND + 6
+
+// A thin ring around the send button: two half masks, each rotating a
+// half-bordered circle into view (the same drawing as Publicar's ring).
+function ProgressRing ({ progress }) {
+  const styles = useStyles(makeStyles)
+  const deg = Math.max(0, Math.min(1, Number.isFinite(progress) ? progress : 0)) * 360
+  const rightDeg = -135 + Math.min(deg, 180)
+  const leftDeg = 45 + Math.max(0, deg - 180)
+  return (
+    <View style={styles.ring} pointerEvents='none' accessible={false} importantForAccessibility='no-hide-descendants'>
+      <View style={styles.ringTrack} />
+      {deg > 0
+        ? (
+          <View style={[styles.ringHalf, styles.ringHalfRight]}>
+            <View style={[styles.ringArc, styles.ringArcRight, { transform: [{ rotate: rightDeg + 'deg' }] }]} />
+          </View>
+          )
+        : null}
+      {deg > 180
+        ? (
+          <View style={[styles.ringHalf, styles.ringHalfLeft]}>
+            <View style={[styles.ringArc, styles.ringArcLeft, { transform: [{ rotate: leftDeg + 'deg' }] }]} />
+          </View>
+          )
+        : null}
+    </View>
+  )
+}
+
+function Thumbs ({ items, onRemove, onCancel, locked }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  return (
+    <View style={styles.thumbsRow}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.thumbs}>
+        {items.map((item, i) => (
+          <View key={item.id} style={styles.thumb} accessible accessibilityLabel={'Foto ' + (i + 1) + (item.status === 'invalid' ? ', ' + item.error : '')}>
+            {item.thumb
+              ? <Image source={{ uri: item.thumb }} style={styles.thumbImage} resizeMode='cover' accessibilityIgnoresInvertColors />
+              : item.status === 'encoding'
+                ? <ActivityIndicator size='small' color={colors.soft} />
+                : <Icon name='imagem' size={20} color={colors.danger} />}
+            {!locked && typeof onRemove === 'function'
+              ? (
+                <Pressable
+                  accessibilityRole='button'
+                  accessibilityLabel='Remover foto'
+                  onPress={() => onRemove(item.id)}
+                  hitSlop={8}
+                  style={styles.thumbX}
+                >
+                  <Icon name='fechar' size={12} color='#ffffff' />
+                </Pressable>
+                )
+              : null}
+          </View>
+        ))}
+      </ScrollView>
+      {typeof onCancel === 'function'
+        ? (
+          <Pressable accessibilityRole='button' accessibilityLabel='Cancelar' onPress={onCancel} hitSlop={8}>
+            <Text style={styles.cancel}>Cancelar</Text>
+          </Pressable>
+          )
+        : null}
+    </View>
+  )
+}
 
 export function ChatComposer ({
   value,
@@ -58,7 +139,12 @@ export function ChatComposer ({
   notice = null,
   ownKey = null,
   mentions = true,
-  max = MAX_TEXT
+  max = MAX_TEXT,
+  onAttach = null,
+  attachments = null,
+  onRemoveAttachment,
+  onCancelAttachments,
+  progress = null
 }) {
   const styles = useStyles(makeStyles)
   // The composer sits at the bottom of a stacked screen (no tab bar under it),
@@ -88,6 +174,7 @@ export function ChatComposer ({
     if (text === '') setHeight(MIN_HEIGHT)
   }, [text])
   const [emojiOpen, setEmojiOpen] = useState(false)
+  const [focused, setFocused] = useState(false)
   const [note, setNote] = useState('')
   // selRef follows the field's selection; forcedSel places the caret once
   // after an insert. `caret` only forces the re-render that moves the @token.
@@ -96,6 +183,8 @@ export function ChatComposer ({
   const inputRef = useRef(null)
   const [caret, setCaret] = useState(0)
   const [collapsed, setCollapsed] = useState(true)
+  const [sheetOpen, setSheetOpen] = useState(false)
+  const staged = Array.isArray(attachments) ? attachments : []
 
   const hosted = node !== null && node.hosted === true
   const online = node !== null && node.online !== false
@@ -124,7 +213,8 @@ export function ChatComposer ({
   }, [text])
 
   const left = max - countChars(text)
-  const hasText = text.trim() !== ''
+  const hasText = text.trim() !== '' || staged.length > 0
+  const canClip = typeof onAttach === 'function' && online && editable && !sending
   const sendOff = !editable || sendDisabled || sending || left < 0
 
   const pickEmoji = (emoji) => {
@@ -182,9 +272,12 @@ export function ChatComposer ({
       {reply
         ? <ReplyPreview name={reply.name} handle={reply.handle} text={reply.text} senderKey={reply.senderKey} mine={reply.mine} onCancel={onCancelReply} />
         : null}
+      {staged.length > 0
+        ? <Thumbs items={staged} onRemove={onRemoveAttachment} onCancel={onCancelAttachments} locked={sending} />
+        : null}
       <MentionSuggest rows={suggestions} loading={mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
       <View style={styles.row}>
-        <View style={[styles.field, !editable && styles.fieldOff]}>
+        <View style={[styles.field, focused && editable && styles.fieldFocused, !editable && styles.fieldOff]}>
           <Pressable
             accessibilityRole='button'
             accessibilityLabel={emojiOpen ? 'fechar emojis' : 'emojis'}
@@ -198,7 +291,9 @@ export function ChatComposer ({
           </Pressable>
           <TextInput
             ref={inputRef}
-            style={[styles.input, { height }]}
+            style={[styles.input, webInputReset, { height }]}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
             value={text}
             onChangeText={change}
             editable={editable}
@@ -224,28 +319,47 @@ export function ChatComposer ({
             accessibilityLabel={accessibilityLabel}
           />
           {attach || null}
+          {canClip
+            ? (
+              <Pressable
+                accessibilityRole='button'
+                accessibilityLabel='Anexar'
+                onPress={() => setSheetOpen(true)}
+                hitSlop={(layout.hit - SEND) / 2}
+                style={({ pressed }) => [styles.tool, pressed && styles.pressed]}
+              >
+                <Icon name='clipe' size={22} color={colors.soft} />
+              </Pressable>
+              )
+            : null}
         </View>
         {hasText
           ? (
-            <Pressable
-              accessibilityRole='button'
-              accessibilityLabel='Enviar'
-              accessibilityState={{ disabled: sendOff, busy: sending }}
-              disabled={sendOff}
-              onPress={onSend}
-              hitSlop={(layout.hit - SEND) / 2}
-              style={({ pressed }) => [styles.send, sendOff && !sending && styles.sendOff, pressed && styles.pressed]}
-            >
-              {sending
-                ? <ActivityIndicator size='small' color={colors.accentInk} />
-                : <Icon name='send' size={18} color={colors.accentInk} />}
-            </Pressable>
+            <View style={styles.sendWrap}>
+              {sending && Number.isFinite(progress) ? <ProgressRing progress={progress} /> : null}
+              <Pressable
+                accessibilityRole='button'
+                accessibilityLabel='Enviar'
+                accessibilityState={{ disabled: sendOff, busy: sending }}
+                disabled={sendOff}
+                onPress={onSend}
+                hitSlop={(layout.hit - SEND) / 2}
+                style={({ pressed }) => [styles.send, sendOff && !sending && styles.sendOff, pressed && styles.pressed]}
+              >
+                {sending
+                  ? <ActivityIndicator size='small' color={colors.accentInk} />
+                  : <Icon name='send' size={18} color={colors.accentInk} />}
+              </Pressable>
+            </View>
             )
           : null}
       </View>
       {note ? <Text style={styles.soft}>{note}</Text> : null}
       {!note && left < 50 ? <Text style={styles.soft}>{left} caracteres restantes</Text> : null}
       <EmojiPicker open={emojiOpen && editable} onPick={pickEmoji} />
+      {typeof onAttach === 'function'
+        ? <AttachSheet open={sheetOpen && canClip} onClose={() => setSheetOpen(false)} onPick={(kind) => { setSheetOpen(false); onAttach(kind) }} />
+        : null}
     </View>
   )
 }
@@ -271,6 +385,7 @@ const makeStyles = (colors) => StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.line
   },
+  fieldFocused: { borderColor: colors.accent },
   fieldOff: { backgroundColor: colors.inputOff },
   tool: { width: SEND, height: SEND, alignItems: 'center', justifyContent: 'center' },
   input: {
@@ -293,6 +408,50 @@ const makeStyles = (colors) => StyleSheet.create({
     justifyContent: 'center'
   },
   sendOff: { opacity: 0.5 },
+  sendWrap: { width: SEND, height: SEND, alignItems: 'center', justifyContent: 'center' },
+  ring: { position: 'absolute', left: (SEND - RING) / 2, top: (SEND - RING) / 2, width: RING, height: RING },
+  ringTrack: { ...StyleSheet.absoluteFillObject, borderRadius: RING / 2, borderWidth: 2.5, borderColor: colors.line },
+  ringHalf: { position: 'absolute', top: 0, width: RING / 2, height: RING, overflow: 'hidden' },
+  ringHalfRight: { left: RING / 2 },
+  ringHalfLeft: { left: 0 },
+  ringArc: {
+    position: 'absolute',
+    top: 0,
+    width: RING,
+    height: RING,
+    borderRadius: RING / 2,
+    borderWidth: 2.5,
+    borderTopColor: colors.accent,
+    borderRightColor: colors.accent,
+    borderBottomColor: 'transparent',
+    borderLeftColor: 'transparent'
+  },
+  ringArcRight: { left: -RING / 2 },
+  ringArcLeft: { left: 0 },
+  thumbsRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  thumbs: { gap: space.sm, paddingVertical: space.xs, paddingHorizontal: space.xs },
+  thumb: {
+    width: THUMB,
+    height: THUMB,
+    borderRadius: radius.md,
+    overflow: 'hidden',
+    backgroundColor: colors.skeleton,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  thumbImage: { ...StyleSheet.absoluteFillObject },
+  thumbX: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.6)'
+  },
+  cancel: { fontSize: 15, lineHeight: 20, color: colors.accent, paddingHorizontal: space.xs },
   soft: { fontSize: 13, lineHeight: 18, color: colors.soft, paddingHorizontal: space.xs },
   pressed: { opacity: 0.6 }
 })

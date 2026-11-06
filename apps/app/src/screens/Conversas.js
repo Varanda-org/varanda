@@ -29,7 +29,7 @@ import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, Skeleton } from '../ui/States'
-import { layout, radius, space, type } from '../ui/theme'
+import { layout, radius, space, type, webInputReset } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { NovaComunidade } from './Comunidades'
 import { NovaConversa } from './NovaConversa'
@@ -221,6 +221,7 @@ export function Conversas ({
   const bumpDm = node.bumpDm
   const [filter, setFilter] = useState('todas')
   const [query, setQuery] = useState('')
+  const [searchFocused, setSearchFocused] = useState(false)
   const [creating, setCreating] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
 
@@ -376,10 +377,12 @@ export function Conversas ({
   const header = (
     <View>
       <PageInboxNote pageKey={pageKey} />
-      <View style={styles.search}>
+      <View style={[styles.search, searchFocused && styles.searchFocused]}>
         <Icon name='lupa' size={20} color={colors.soft} />
         <TextInput
-          style={styles.input}
+          style={[styles.input, webInputReset]}
+          onFocus={() => setSearchFocused(true)}
+          onBlur={() => setSearchFocused(false)}
           value={query}
           onChangeText={setQuery}
           placeholder={SEARCH_PLACEHOLDER}
@@ -515,9 +518,12 @@ const makeStyles = (colors) => StyleSheet.create({
     paddingHorizontal: space.md,
     height: layout.hit,
     borderRadius: radius.md,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
     backgroundColor: colors.inputOff
   },
-  input: { ...type.postText, flex: 1, minWidth: 0, height: layout.hit, paddingVertical: 0, color: colors.ink },
+  searchFocused: { borderColor: colors.accent, backgroundColor: colors.card },
+  input: { ...type.postText, flex: 1, minWidth: 0, height: layout.hit - 3, paddingVertical: 0, color: colors.ink },
   clear: { minWidth: space.xl, minHeight: space.xl, alignItems: 'center', justifyContent: 'center' },
   pressed: { backgroundColor: colors.line },
   pinnedRow: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: PINNED_HEIGHT, paddingHorizontal: space.lg },

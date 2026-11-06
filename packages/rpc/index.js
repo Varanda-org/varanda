@@ -10,6 +10,8 @@ const envelope = require('./lib/envelope')
 const framing = require('./lib/framing')
 const text = require('./lib/text')
 const mentions = require('./lib/mentions')
+const mediaBounds = require('./lib/media-bounds')
+const dmBudget = require('./lib/dm-budget')
 const { tokensEqual } = require('./lib/token')
 const { createServerDispatcher } = require('./lib/server')
 const { createClient } = require('./lib/client')
@@ -38,10 +40,22 @@ module.exports = {
   mentionSegments: mentions.mentionSegments,
   activeMention: mentions.activeMention,
   MENTION_MAX: mentions.MENTION_MAX,
+  mediaBounds: mediaBounds.mediaBounds,
+  MAX_MEDIA_PIXELS: mediaBounds.MAX_MEDIA_PIXELS,
+  MAX_MEDIA_FRAMES: mediaBounds.MAX_MEDIA_FRAMES,
+  MAX_MEDIA_TOTAL_PIXELS: mediaBounds.MAX_MEDIA_TOTAL_PIXELS,
   utf8ByteLength: text.utf8ByteLength,
   utf8Encode: text.utf8Encode,
   utf8Decode: text.utf8Decode,
   clipText: text.clipText,
+  DM_INNER_KEYS: dmBudget.DM_INNER_KEYS,
+  DM_INNER_KEYS_V2: dmBudget.DM_INNER_KEYS_V2,
+  DM_MEDIA_KEYS: dmBudget.DM_MEDIA_KEYS,
+  dmInnerVersion: dmBudget.innerVersion,
+  canonicalDmInnerJson: dmBudget.canonicalInnerJson,
+  dmTextBytes: dmBudget.dmTextBytes,
+  dmTextBudget: dmBudget.dmTextBudget,
+  MEMBER_CERT_STANDIN: dmBudget.MEMBER_CERT_STANDIN,
   tokensEqual,
   createServerDispatcher,
   createClient

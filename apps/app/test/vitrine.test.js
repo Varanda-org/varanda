@@ -58,6 +58,8 @@ const resultKeys = {
   'page.read': ['page', 'owner', 'admins', 'gen', 'seq', 'isOwner', 'isAdmin', 'complete', 'follows', 'followsCount', 'followsTruncated', 'closed', 'movedTo', 'movedFrom', 'links'],
   'page.feed': ['items', 'incomplete'],
   'media.uploadFile': ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'],
+  'dm.putMedia': ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'],
+  'media.readFile': ['name', 'mime', 'w', 'h'],
   'dm.enable': ['box', 'gen', 'seq'],
   'dm.pull': ['added', 'cursor', 'incomplete'],
   'dm.set': ['ok'],
@@ -198,7 +200,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
     t.is(typeof row.unread, 'boolean')
   }
   const thread = await answer(t, request, 'dm.thread', { peer })
-  for (const row of thread.messages) keys(t, row, ['id', 'from', 'text', 'replyTo', 'at', 'mine'])
+  for (const row of thread.messages) keys(t, row, ['id', 'from', 'text', 'replyTo', 'at', 'mine', 'media'])
   t.alike(await answer(t, request, 'dm.seen', { peer }), { ok: true })
   const sent = await answer(t, request, 'dm.send', { to: peer, text: 'Combinado!' })
   t.ok(/^[0-9a-f]{32}$/.test(sent.id))
@@ -210,7 +212,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
   t.is(listed.total, 5)
   for (const row of listed.groups) keys(t, row, ['group', 'name', 'join', 'role', 'members', 'community'])
   const read = await answer(t, request, 'group.read', { group })
-  for (const row of read.items) keys(t, row, ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'hidden', 'name', 'username'])
+  for (const row of read.items) keys(t, row, ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'hidden', 'media', 'name', 'username'])
   t.alike([read.hidden, read.incomplete, read.sealed, read.epoch, read.state], [0, false, 0, null, 'ok'])
   const groupInfo = await answer(t, request, 'group.info', { group })
   t.is(groupInfo.canWrite, true)
@@ -319,7 +321,7 @@ test('local mutations update previews and marks without leaking across requests'
   const sent = await answer(t, request, 'dm.send', { to: peer, text: 'Sim, obrigada!', replyTo })
   const thread = await answer(t, request, 'dm.thread', { peer })
   t.is(thread.messages.length, f.conversations[1].messages.length + 1)
-  t.alike(thread.messages[thread.messages.length - 1], { ...sent, from: f.own, mine: true, text: 'Sim, obrigada!', replyTo })
+  t.alike(thread.messages[thread.messages.length - 1], { ...sent, from: f.own, mine: true, text: 'Sim, obrigada!', replyTo, media: null })
   const list = await answer(t, request, 'dm.list', {})
   t.is(list.conversations[0].preview, 'Sim, obrigada!')
   t.is(list.conversations[0].mine, true)
@@ -491,7 +493,9 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
   const forbidden = new RegExp('(?<!\\p{L})(' + ['li' + 'da', 'entre' + 'gue', 'digi' + 'tando'].join('|') + ')(?!\\p{L})', 'iu')
   const expectedImports = {
     'fixtures.js': [],
-    'request.js': ["import rpc from '@varanda/rpc'"],
+    'pictures.js': [],
+    'media.js': ["import { pictures } from './pictures.js'", "import { PICTURE_BASE } from './fixtures.js'"],
+    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'"],
     'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { fixtures } from './fixtures.js'"]
   }
   for (const file of Object.keys(expectedImports)) {
@@ -558,6 +562,8 @@ function samples (f) {
     'page.read': { key: f.pages[0].author },
     'page.feed': { page: f.pages[0].author, keys: f.follows },
     'media.uploadFile': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
+    'dm.putMedia': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
+    'media.readFile': { kind: 'dm', from: f.members[1].author, id: f.conversations[2].messages[4].id, index: 0 },
     'dm.enable': {},
     'dm.lookup': { member },
     'dm.pull': {},
@@ -940,4 +946,71 @@ test('review shots retries collisions but stops on permanent failures and the re
   result = capture(out, 'full')
   t.is(result.status, 1, '1000 collisions stop')
   t.ok(result.stderr.includes('Não foi possível criar o arquivo em ' + out))
+})
+
+test('fixture chat photos validate, open through the Vitrine media handle and stay offline', async (t) => {
+  const { fixtures: f, createVitrineRequest } = await load()
+  const { mediaBounds } = require('@varanda/rpc')
+  const dm = f.conversations.flatMap((c) => c.messages.filter((m) => m.media).map((m) => ({ c, m })))
+  t.is(dm.length, 2)
+  t.alike(dm.map(({ m }) => [m.text === '', m.media.length]), [[true, 1], [false, 2]], 'one photo-only message and one caption with two photos')
+  for (const { c, m } of dm) t.ok(validateParams('dm.send', { to: c.peer, text: m.text, media: m.media }).ok, 'dm media items match the contract')
+  const groupItems = f.groups.flatMap((g) => g.items.filter((item) => item.media).map((item) => ({ g, item })))
+  t.alike(groupItems.map(({ g, item }) => [g.visibility, item.media.length]), [['public', 1], ['public', 3], ['private', 1]])
+  for (const { g, item } of groupItems) {
+    const sealed = g.visibility === 'private'
+    t.ok(validateParams('group.post', { group: g.group, text: item.text, media: item.media, ...(sealed ? { sealed: true } : {}) }).ok, 'group media items match the contract')
+  }
+
+  const request = createVitrineRequest(f)
+  const media = request.media
+  const thread = (await answer(t, request, 'dm.thread', { peer: dm[1].c.peer })).messages
+  t.alike(thread[thread.length - 1].media, dm[1].m.media)
+  const refs = [
+    ...dm.flatMap(({ m }) => m.media.map((item, index) => ({ kind: 'dm', from: m.from, id: m.id, index }))),
+    ...groupItems.filter(({ g }) => g.visibility === 'private').flatMap(({ item }) => item.media.map((m) => ({ kind: 'group', diary: item.diary, item: m })))
+  ]
+  t.is(refs.length, 4)
+  for (const ref of refs) {
+    const got = await media.read(ref)
+    t.is(got.mime, 'image/jpeg')
+    t.is(mediaBounds(got.bytes, got.mime).width, got.w)
+    got.bytes.fill(0)
+    t.ok((await media.read(ref)).bytes.some((b) => b !== 0), 'every read hands over fresh bytes')
+  }
+  // Public items open from the same pictures (the sha256 names the drawing).
+  for (const { g, item } of groupItems) {
+    if (g.visibility === 'public') for (const m of item.media) t.is((await media.read({ kind: 'group', diary: item.diary, item: m })).mime, 'image/jpeg')
+  }
+  for (const bad of [null, {}, { kind: 'dm', from: f.own, id: 'f'.repeat(32), index: 0 }, { kind: 'group', diary: f.own, item: { sha256: unknown } }]) {
+    try {
+      await media.read(bad)
+      t.fail('an unknown ref must reject')
+    } catch (err) {
+      t.ok(err instanceof Error)
+    }
+  }
+
+  const bytes = Uint8Array.from([0xff, 0xd8, 0xff, 0xd9])
+  const item = await media.putDm({ bytes, mime: 'image/jpeg', width: 640, height: 480 })
+  const peer = f.conversations[0].peer
+  t.ok(validateParams('dm.send', { to: peer, text: '', media: [item] }).ok)
+  const sent = await answer(t, request, 'dm.send', { to: peer, text: '', media: [item] })
+  t.alike((await media.read({ kind: 'dm', from: f.own, id: sent.id, index: 0 })).bytes, bytes, 'a photo sent here opens again')
+  t.is((await answer(t, request, 'dm.list', {})).conversations.find((c) => c.peer === peer).preview, 'Foto')
+  const pub = await media.upload({ bytes, mime: 'image/jpeg', width: 640, height: 480 })
+  const sealed = await media.upload({ bytes, mime: 'image/jpeg', width: 640, height: 480, sealed: true })
+  t.ok(validateParams('group.post', { group: f.groups[0].group, text: '', media: [pub] }).ok)
+  t.ok(validateParams('group.post', { group: f.groups[3].group, text: '', media: [sealed], sealed: true }).ok)
+  await answer(t, request, 'group.post', { group: f.groups[3].group, text: '', media: [sealed], sealed: true })
+  t.alike((await media.read({ kind: 'group', diary: f.own, item: sealed })).bytes, bytes)
+  t.is(media.forgetReadFile('x'), undefined)
+  t.is(media.clearReadFiles(), undefined)
+  await t.exception(() => media.putDm({ bytes: new Uint8Array(0), mime: 'image/jpeg', width: 1, height: 1 }))
+  await t.exception(() => media.upload({ bytes, mime: 'image/bmp', width: 1, height: 1 }))
+
+  for (const file of ['media.js', 'pictures.js']) {
+    const source = readFileSync(join(__dirname, '../src/vitrine', file), 'utf8')
+    t.absent(/https?:\/\//.test(source), file + ' has no network address')
+  }
 })

@@ -2,7 +2,7 @@
 
 // The direct message folders (lib/dm-fold.js). No network.
 const test = require('brittle')
-const { fold, seenKey, tabDot, replyTarget, canSend } = require('../lib/dm-fold')
+const { fold, seenKey, tabDot, replyTarget, canSend, previewText, PREVIEW_PHOTO, PREVIEW_GIF } = require('../lib/dm-fold')
 const { DM_REQUESTS_MAX, DM_MESSAGES_PER_PEER } = require('../lib/dm')
 
 function k (i) {
@@ -258,4 +258,25 @@ test('seen marks are per sender', (t) => {
   t.is(r.inbox.find(x => x.peer === ANA).unread, false)
   t.is(r.inbox.find(x => x.peer === BIA).unread, true, 'same id from another sender stays unread')
   t.is(run({ messages: [seenMsg], follows: [ANA], seen: [seenMsg.id] }).inbox[0].unread, true, 'a bare id marks nothing')
+})
+
+test('media rows: carried through, fixed preview labels when the text is empty', (t) => {
+  const jpeg = { id: 'a'.repeat(64), mime: 'image/jpeg' }
+  const gif = { id: 'b'.repeat(64), mime: 'image/gif' }
+  const photo = { ...from(ANA, 1, ''), media: [jpeg] }
+  const anim = { ...from(ANA, 2, ''), media: [gif, gif] }
+  const mixed = { ...to(ANA, 3, ''), media: [gif, jpeg] }
+  const caption = { ...from(ANA, 4, 'olha'), media: [jpeg] }
+  const plain = from(ANA, 5)
+  const r = run({ messages: [photo, anim, mixed, caption, plain], follows: [ANA] })
+  const rows = r.inbox[0].messages
+  t.alike(rows.map(m => m.media), [[jpeg], [gif, gif], [gif, jpeg], [jpeg], null], 'media kept, null for a text-only row')
+  t.alike(rows.map(previewText), ['Foto', 'GIF', 'Foto', 'olha', 'oi'])
+  t.is(PREVIEW_PHOTO, 'Foto')
+  t.is(PREVIEW_GIF, 'GIF')
+  t.is(previewText({ text: '', media: [] }), '', 'no media, no label')
+  t.is(previewText({ text: '', media: null }), '')
+  t.is(previewText(null), '')
+  t.is(previewText({ text: '', media: [null] }), 'Foto', 'a hostile item never shows peer text')
+  t.alike(run({ messages: [{ ...from(ANA, 1), media: 'x' }], follows: [ANA] }).inbox[0].messages[0].media, null, 'a non-list media is dropped')
 })
