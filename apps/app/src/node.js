@@ -1,4 +1,4 @@
-/* global navigator */
+/* global navigator, __DEV__ */
 
 // The node connection of the app: starts or connects, keeps the phase, the
 // sync state (fed by the node's events, so no event is lost while another tab
@@ -90,7 +90,7 @@
 // `signals` folds the sync events into UI hints (syncSignals.js).
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { displayText } from '@varanda/rpc'
+import { displayText, isMutating } from '@varanda/rpc'
 import { connectNode } from './client/connect'
 import * as configStore from './configStore'
 import { installationOrigin } from './installation'
@@ -106,6 +106,7 @@ import { errorText } from './ui'
 import { accountOriginOf } from './pageGate'
 import { slowRequestLine } from './slowRequest'
 import { createIdleTracker } from './idle'
+import { vitrineEnabled } from './vitrine/enabled'
 
 const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
 // Native only (configStore.native.js): reads the saved or build-time
@@ -148,7 +149,118 @@ export function useNotice (context = null) {
 
 const noConnection = () => Promise.reject(Object.assign(new Error('sem conexão com o nó'), { code: 'CLOSED' }))
 
+// The Vitrine (src/vitrine/enabled.js): development bundles only, behind an
+// opt-in env var. The literal member access is what Expo inlines.
+const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
+let vitrine = null
+if (VITRINE) {
+  const { fixtures } = require('./vitrine/fixtures')
+  const { createVitrineRequest } = require('./vitrine/request')
+  const { saveTermsRecord } = require('./termsStore')
+  const { withMember, withSynced } = require('./terms')
+  const { LEGAL_VERSION } = require('./legal')
+  // Saved before the shell mounts and loads the record (both stores write
+  // synchronously up to here), so the terms gate opens for the fixture key;
+  // synced, so nothing is sent to an account service. Under the Vitrine the
+  // stores use their own key and file, so the device's real record is untouched.
+  saveTermsRecord(withSynced(withMember(null, LEGAL_VERSION, fixtures.own, new Date().toISOString()), fixtures.own)).catch(() => {})
+  vitrine = {
+    fixtures,
+    createVitrineRequest,
+    status: { exists: true, publicKey: fixtures.own, legacy: false, unlocked: true, synced: true, resumed: false, passkeyKnown: false, credentialId: null, rpId: null, signedOut: false }
+  }
+}
+
 export function NodeProvider ({ children }) {
+  return VITRINE ? <VitrineNodeProvider>{children}</VitrineNodeProvider> : <LiveNodeProvider>{children}</LiveNodeProvider>
+}
+
+// What the shell reads to show the hosted, unlocked, member-certified
+// screens over the fixtures: no connection, no sync, no passkey ceremony.
+function VitrineNodeProvider ({ children }) {
+  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures))
+  const [dmVersion, setDmVersion] = useState(0)
+  const bumpDm = useCallback(() => setDmVersion((n) => n + 1), [])
+  const [autoWanted, setAutoWanted] = useState(false)
+  const setAutoSync = useCallback((wanted) => setAutoWanted(wanted === true), [])
+  // The live node bumps these from its events; the fixtures have none, so a
+  // change made here bumps them itself, or lists that reload on a version
+  // change (Comunidades, A Rua, Pessoas) would keep their first read.
+  const [groupVersions, setGroupVersions] = useState(EMPTY_GROUP_VERSIONS)
+  const [followsVersion, setFollowsVersion] = useState(0)
+  const vitrineRequest = useCallback((method, params) => fixtureRequest(method, params).then((result) => {
+    if (/^(group|community)\./.test(method) && isMutating(method)) {
+      setGroupVersions((prev) => {
+        const group = params && typeof params.group === 'string' ? params.group : null
+        return group !== null ? bumpGroupVersion(prev, group) : { ...prev }
+      })
+    }
+    if (method === 'follow.add' || method === 'follow.remove') setFollowsVersion((n) => n + 1)
+    return result
+  }), [fixtureRequest])
+  const getGroupVersion = useCallback((group) => readGroupVersion(groupVersions, group), [groupVersions])
+  const value = useMemo(() => {
+    const done = () => Promise.resolve({})
+    // Anything that would change the identity or the connection refuses, so
+    // callers stop before their own side effects and show the message.
+    const unavailable = () => Promise.reject(Object.assign(new Error('indisponível no modo vitrine'), { code: 'USAGE' }))
+    const status = vitrine.status
+    return {
+      phase: 'ready',
+      config: null,
+      error: '',
+      hosted: true,
+      accountOrigin: 'http://localhost:8080',
+      hostedSource: 'live',
+      online: true,
+      visible: true,
+      sync: { active: null, lines: [], stopped: null, starting: false },
+      epoch: 1,
+      request: vitrineRequest,
+      restart: unavailable,
+      reconnect: done,
+      connect: unavailable,
+      // Hides Ajustes › Conexão: saving an installation address would write
+      // the real configuration before forgetConfig refuses.
+      canConfigure: false,
+      retryDiscovery: done,
+      forgetConfig: unavailable,
+      passkey: {
+        status,
+        error: '',
+        generation: 1,
+        refresh: () => Promise.resolve(status),
+        unlock: unavailable,
+        complete: unavailable,
+        lock: unavailable,
+        signOut: unavailable,
+        reset: unavailable,
+        recovering: false,
+        beginRecovery: () => {},
+        endRecovery: () => {},
+        recover: () => Promise.resolve(false)
+      },
+      media: null,
+      legacyFollows: null,
+      followsVersion,
+      followCount: null,
+      groupVersions,
+      getGroupVersion,
+      dmVersion,
+      bumpDm,
+      // Never syncing, so always idle: background name reads wait for that
+      // (autoSyncPolicy.js namesQuiet).
+      autoSync: { wanted: autoWanted, backoffUntil: 0, failureUntil: 0, reconciling: false, idleSince: 1 },
+      signals: EMPTY_SIGNALS,
+      ackFresh: () => {},
+      setAutoSync,
+      syncNow: () => Promise.resolve()
+    }
+  }, [vitrineRequest, groupVersions, followsVersion, getGroupVersion, dmVersion, bumpDm, autoWanted, setAutoSync])
+  return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
+}
+
+function LiveNodeProvider ({ children }) {
   // loading | config (the Conectar form) | config-error (hosted page, no
   // configuration found: retry) | connecting | ready | error
   const [phase, setPhase] = useState('loading')
