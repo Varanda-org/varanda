@@ -32,9 +32,10 @@ import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { InviteByName } from '../ui/InviteByName'
 import { Pill } from '../ui/Pill'
+import { ChatHeader } from '../ui/ChatHeader'
 import { TopBar } from '../ui/TopBar'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
-import { type } from '../ui/theme'
+import { space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { NAME_MAX, nameLength } from './NovoGrupo'
 import { WEB_ONLY_MESSAGE } from './Comunidades'
@@ -589,7 +590,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
 
   return (
     <View style={styles.root}>
-      <TopBar title='Informações' onBack={onBack} />
+      <ChatHeader group title={title} subtitle='Informações da comunidade' publicKey={community} onBack={onBack} />
       <ScrollView
         contentContainerStyle={{ paddingBottom: bottomPad }}
         keyboardShouldPersistTaps='handled'
@@ -603,16 +604,16 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
 
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  head: { alignItems: 'center', gap: 6, paddingHorizontal: 16, paddingTop: 20, paddingBottom: 6 },
+  head: { alignItems: 'center', gap: space.sm, paddingHorizontal: space.lg, paddingTop: space.xl, paddingBottom: space.sm },
   title: { ...type.barTitle, color: colors.ink, textAlign: 'center' },
-  block: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
-  inline: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  block: { paddingHorizontal: space.lg, paddingVertical: space.md, gap: space.sm },
+  inline: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flexWrap: 'wrap' },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
+    gap: space.md,
+    paddingVertical: space.lg,
+    paddingHorizontal: space.lg,
     borderBottomWidth: 1,
     borderBottomColor: colors.line
   },
@@ -620,7 +621,7 @@ const makeStyles = (colors) => StyleSheet.create({
   pressed: { opacity: 0.6 },
   name: { ...type.postName, color: colors.ink, flex: 1 },
   handle: { ...type.postMeta, color: colors.soft },
-  hit: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 6 },
-  hitWho: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
+  hit: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingHorizontal: space.lg, paddingVertical: space.sm },
+  hitWho: { flexDirection: 'row', alignItems: 'center', gap: space.md, flex: 1 },
   hitText: { flex: 1 }
 })

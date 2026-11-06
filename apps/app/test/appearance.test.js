@@ -31,7 +31,8 @@ test('light palette keeps the strings the app shipped with', async (t) => {
     pillInk: '#ffffff',
     inputOff: '#efece5',
     toastBg: '#1f2a24',
-    toastInk: '#ffffff'
+    toastInk: '#ffffff',
+    bubbleMine: '#d9efe2'
   })
   t.ok(Object.isFrozen(light))
 })

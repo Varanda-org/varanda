@@ -84,3 +84,10 @@ test('insertMention drops the trailing space when only it would overflow', async
   t.is(r.text.length, 1000)
   t.alike(r.selection, { start: 1000, end: 1000 })
 })
+
+test('insertMention honours a caller limit below MAX_TEXT', async (t) => {
+  const { insertMention } = await load()
+  t.is(insertMention('hello @an', { start: 9, end: 9 }, 'ana', 10).text, 'hello @ana', 'the courtesy space goes first')
+  t.is(insertMention('hello @an', { start: 9, end: 9 }, 'ana', 9).changed, false, 'refused when the name itself does not fit')
+  t.is(insertMention('hello @an', { start: 9, end: 9 }, 'ana').text, 'hello @ana ', 'the default limit is MAX_TEXT')
+})

@@ -18,7 +18,7 @@ function unchanged (text, selection) {
   return { text, selection, changed: false }
 }
 
-export function insertMention (text, selection, username) {
+export function insertMention (text, selection, username, max = MAX_TEXT) {
   try {
     if (typeof text !== 'string' || selection === null || typeof selection !== 'object' ||
       typeof selection.start !== 'number' || !Number.isFinite(selection.start) ||
@@ -33,12 +33,12 @@ export function insertMention (text, selection, username) {
     const spaced = /^[ \t\n]/.test(after)
     let insert = spaced ? name : name + ' '
     let next = text.slice(0, active.start) + insert + after
-    if (Array.from(next).length > MAX_TEXT && !spaced) {
+    if (Array.from(next).length > max && !spaced) {
       // Drop only the courtesy space when the name itself still fits.
       insert = name
       next = text.slice(0, active.start) + insert + after
     }
-    if (Array.from(next).length > MAX_TEXT) return unchanged(text, selection)
+    if (Array.from(next).length > max) return unchanged(text, selection)
     const caret = active.start + insert.length + (spaced ? 1 : 0)
     return { text: next, selection: { start: caret, end: caret }, changed: true }
   } catch {

@@ -21,14 +21,14 @@ export function hasMention (text) {
   return textSegments(text, { mentions: true }).some((segment) => segment.username !== null)
 }
 
-export function MentionText ({ text, onOpenMention, onOpenPlain, numberOfLines, style, selectable }) {
+export function MentionText ({ text, onOpenMention, onOpenPlain, onLongPress, numberOfLines, style, selectable }) {
   const styles = useStyles(makeStyles)
   const segments = textSegments(text, { mentions: typeof onOpenMention === 'function' })
   // A clamp can hide part of a URL, so the visible prefix would open another site.
   const links = typeof numberOfLines !== 'number'
   const plain = typeof onOpenPlain === 'function' ? onOpenPlain : undefined
   if (!segments.some((segment) => segment.username !== null || (links && segment.href !== null))) {
-    return <Text style={style} numberOfLines={numberOfLines} selectable={selectable} onPress={plain}>{displayText(text, { multiline: true })}</Text>
+    return <Text style={style} numberOfLines={numberOfLines} selectable={selectable} onPress={plain} onLongPress={onLongPress}>{displayText(text, { multiline: true })}</Text>
   }
   return (
     <Text style={style} numberOfLines={numberOfLines} selectable={selectable}>
@@ -41,6 +41,7 @@ export function MentionText ({ text, onOpenMention, onOpenPlain, numberOfLines, 
               accessible
               accessibilityRole='link'
               accessibilityLabel={'abrir o perfil de @' + segment.username}
+              onLongPress={onLongPress}
               onPress={(e) => {
                 if (e && e.stopPropagation) e.stopPropagation()
                 onOpenMention(segment.username)
@@ -58,7 +59,7 @@ export function MentionText ({ text, onOpenMention, onOpenPlain, numberOfLines, 
           )
         }
         if (!links || segment.href === null || !isHttpUrl(segment.href)) {
-          return <Text key={i} onPress={plain}>{displayText(segment.text, { multiline: true })}</Text>
+          return <Text key={i} onPress={plain} onLongPress={onLongPress}>{displayText(segment.text, { multiline: true })}</Text>
         }
         const href = segment.href
         const link = linkProps(href)
@@ -72,6 +73,7 @@ export function MentionText ({ text, onOpenMention, onOpenPlain, numberOfLines, 
             accessibilityHint='abre no navegador'
             href={link.href}
             hrefAttrs={link.hrefAttrs}
+            onLongPress={onLongPress}
             onPress={(e) => {
               // On web the anchor navigates by itself, so opening here too
               // would open the page twice.
