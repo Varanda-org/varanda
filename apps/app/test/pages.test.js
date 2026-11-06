@@ -561,6 +561,52 @@ test('a retry refused for its bytes is definite', async (t) => {
 
 // ---- Conversas as the page ----------------------------------------------------
 
+test('dm drop observer runs once before each send fetch and never for other dm actions', async (t) => {
+  const { pagesDm, setDmDropObserver } = await load()
+  let drops = 0
+  setDmDropObserver(() => { drops++ })
+  t.teardown(() => setDmDropObserver(() => {}))
+  const observed = []
+  const calls = stub(t, (n, url) => {
+    observed.push(drops)
+    return url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { ok: true })
+  })
+  const node = fakeNode()
+  for (const action of ['dm-send', 'dm-set', 'dm-seen', 'dm-list', 'dm-thread', 'dm-send']) {
+    await pagesDm(node, { member: M, page: P, action })
+  }
+  t.alike(observed, [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2], 'only send fetches see a new marker')
+  t.is(drops, 2, 'once per send run')
+  t.ok(calls.every((call) => !Object.hasOwn(body(call), 'drops')), 'drops never enters an HTTP body')
+})
+
+test('dm drop observer marks every explicit retry after an uncertain send failure', async (t) => {
+  const { pagesDmSend, setDmDropObserver } = await load()
+  let drops = 0
+  setDmDropObserver(() => { drops++ })
+  t.teardown(() => setDmDropObserver(() => {}))
+  const observed = []
+  const calls = stub(t, (n, url) => {
+    observed.push(drops)
+    if (url.endsWith('/start')) return json(200, { nonce: NONCE })
+    return n < 4 ? new Error('offline') : json(200, { ok: true })
+  })
+  const node = fakeNode()
+  const err = await caught(t, pagesDmSend(node, { member: M, page: P, to: K2, text: 'Oi' }))
+  t.is(err.uncertain, true)
+  t.is(drops, 1, 'initial attempt is marked once')
+  t.is(calls.length, 2, 'no automatic resend')
+  const again = await caught(t, err.retry())
+  t.is(again.uncertain, true)
+  t.is(drops, 2, 'failed explicit retry is marked once more')
+  t.alike(await again.retry(), { ok: true })
+  t.is(drops, 3, 'successful explicit retry is marked once more')
+  t.alike(observed, [0, 1, 2, 3], 'each marker precedes its fetch')
+  t.is(node.signs.length, 1, 'retry never signs again')
+  t.ok(calls.slice(1).every((call) => call.init.body === calls[1].init.body), 'retries preserve the signed body')
+  t.ok(calls.every((call) => !Object.hasOwn(body(call), 'drops')), 'drops never enters an HTTP body')
+})
+
 test('dm builders sign and send the params of dm.list, dm.thread, dm.send, dm.set and dm.seen', async (t) => {
   const { pagesDmList, pagesDmThread, pagesDmSend, pagesDmSet, pagesDmSeen, pagesDm } = await load()
   const cases = [

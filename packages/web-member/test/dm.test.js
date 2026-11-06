@@ -604,6 +604,118 @@ async function certify (storage, kp, assoc) {
   await diary.close()
 }
 
+// Restore the cache immediately so other engines keep the real transport.
+function engineWithDmLink (link) {
+  const transport = require('../lib/dm-link')
+  const original = transport.openDmLink
+  const id = require.resolve('../lib/dm')
+  const cached = require.cache[id]
+  try {
+    transport.openDmLink = async () => link
+    delete require.cache[id]
+    return require('../lib/dm').createDmEngine
+  } finally {
+    transport.openDmLink = original
+    require.cache[id] = cached
+  }
+}
+
+async function sendingEngine (t, { stamps = 2, failPut = false } = {}) {
+  const calls = []
+  const link = {
+    failPut,
+    async put () {
+      calls.push(['put'])
+      if (link.failPut) throw new Error('lost ack')
+      return { ok: true, reason: null }
+    },
+    close: noop
+  }
+  const storage = memoryNodeStorage()
+  const assoc = generateAssociationKeyPair()
+  const kp = crypto.keyPair()
+  const own = hex(kp.publicKey)
+  const peer = hex(crypto.keyPair().publicKey)
+  const prf = crypto.randomBytes(32)
+  const engine = engineWithDmLink(link)({
+    storage,
+    association: hex(assoc.publicKey),
+    emit: (name, data) => calls.push([name, data])
+  })
+  t.teardown(() => engine.close(), { force: true })
+  await certify(storage, kp, assoc)
+  await engine.unlock(prf)
+  const local = await opener(prf)
+  const kid = 'ab'.repeat(8)
+  await store.writeDmStamps(storage, {
+    kids: [kid],
+    items: Array.from({ length: stamps }, () => ({
+      kid,
+      ...local.seal({ token: hex(crypto.randomBytes(32)), sig: b4a.toString(b4a.alloc(dmCore.DROP.SIG_BYTES), 'base64') })
+    }))
+  })
+  const recipientBox = hex((await dmBoxKeyPairFromPrf(crypto.randomBytes(32), 1)).publicKey)
+  return {
+    engine,
+    storage,
+    prf,
+    calls,
+    link,
+    send: () => engine.send(own, kp, { to: peer, text: 'oi' }, recipientBox),
+    set: () => engine.set(own, kp, { peer, state: 'accepted' })
+  }
+}
+
+test('dm.send emits an empty dm.sending before each recipient and self-copy put', async (t) => {
+  const { send, calls } = await sendingEngine(t)
+  t.ok((await send()).id)
+  t.alike(calls, [['dm.sending', {}], ['put'], ['dm.sending', {}], ['put']], 'each put is preceded by its own empty event')
+})
+
+test('dm.set emits an empty dm.sending before the ctl flush put', async (t) => {
+  const { set, calls, storage } = await sendingEngine(t)
+  t.alike(await set(), { ok: true })
+  t.alike(calls, [['dm.sending', {}], ['put']], 'one event before the ctl put')
+  t.alike(await store.readDmCtlQueue(storage), [])
+})
+
+test('a throwing send put is still preceded by dm.sending', async (t) => {
+  const { send, calls, engine } = await sendingEngine(t, { failPut: true })
+  const err = await errorOf(send())
+  t.is(err && err.message, 'não deu para confirmar o envio')
+  t.is(err && err.uncertain, true)
+  await engine.idle()
+  t.alike(calls, [['dm.sending', {}], ['put']], 'one attempted put and no automatic resend')
+})
+
+test('a throwing ctl put and its later unlock flush each emit dm.sending first', async (t) => {
+  const { set, calls, engine, storage, prf, link } = await sendingEngine(t, { stamps: 1, failPut: true })
+  t.alike(await set(), { ok: true })
+  t.alike(calls, [['dm.sending', {}], ['put']], 'the failed ctl put was announced')
+  t.is((await store.readDmCtlQueue(storage)).length, 1)
+  engine.lock()
+  link.failPut = false
+  calls.length = 0
+  await engine.unlock(prf)
+  await engine.idle()
+  t.alike(calls, [['dm.sending', {}], ['put']], 'unlock announces the queued stamped ctl before putting it')
+  t.alike(await store.readDmCtlQueue(storage), [])
+})
+
+test('no dm.sending or put when send and ctl flush have no stamps', async (t) => {
+  const { send, set, calls, engine, storage, prf } = await sendingEngine(t, { stamps: 0 })
+  const err = await errorOf(send())
+  t.is(err && err.message, 'o limite de envio de hoje acabou')
+  t.alike(calls, [], 'an unstamped send emits nothing')
+  t.alike(await set(), { ok: true })
+  t.is((await store.readDmCtlQueue(storage)).length, 1)
+  t.alike(calls, [], 'an unstamped ctl stays queued without an event')
+  engine.lock()
+  await engine.unlock(prf)
+  await engine.idle()
+  t.alike(calls, [], 'unlock without stamps still emits nothing')
+})
+
 test('a send whose local filing failed files on the retry without a re-put', async (t) => {
   t.timeout(120000)
   const assoc = generateAssociationKeyPair()
