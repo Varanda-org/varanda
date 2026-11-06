@@ -341,6 +341,9 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
       const key = started + '|' + base
       const hit = cache.peek(key)
       if (hit !== null) return entries.get(hit) || UNAVAILABLE
+      // A forward asks the cache first and reads fresh bytes itself on a
+      // miss (bytesFor): a read here would be thrown away.
+      if (ctx.cachedOnly === true) return UNAVAILABLE
       const publicItem = ref.kind === 'group' && !isPrivateGroupItem(ref.item)
       const media = ctx.node && ctx.node.media
       if (!publicItem && (!media || typeof media.read !== 'function')) return UNAVAILABLE
@@ -372,8 +375,65 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
     }
   }
 
+  // The plaintext of one item for a forward, as bytes, with no display URL:
+  // a native display only takes images, so a voice note turned into a URL
+  // there would be lost. Same checks as sourceFor (mime, bounds, SHA-256 of
+  // a public fetch); nothing is cached. A node file is read with
+  // ctx.readFile(uri) and forgotten at once. The caller owns the bytes and
+  // wipes them after the upload.
+  // -> { bytes, mime, w, h, ms? } or null. Never rejects.
+  const bytesFor = async (ref, ctx = {}) => {
+    let fileMedia = null
+    let fileUri = null
+    try {
+      if (!ref || typeof ref !== 'object') return null
+      if (ref.item && ref.item.unavailable === true) return null
+      if (chatMediaKey(ctx.identity, ref) === null) return null
+      const out = (bytes, mime, declared) => {
+        const b = bounded(bytes, mime, bounds, audioBounds, declared)
+        if (b === null) {
+          wipe(bytes)
+          return null
+        }
+        return Number.isInteger(b.ms) ? { bytes, mime, w: 0, h: 0, ms: b.ms } : { bytes, mime, w: b.width, h: b.height }
+      }
+      if (ref.kind === 'group' && !isPrivateGroupItem(ref.item)) {
+        const d = ref.item
+        if (!validDescriptor(d) && !isAudioDescriptor(d)) return null
+        const deps = ctx.fetchDeps
+        const bytes = await fetchItem(ref.diary, d, { ...deps, chat: true, persist: !!deps && deps.persist === true })
+        return out(bytes, d.mime, d.ms)
+      }
+      const media = ctx.node && ctx.node.media
+      if (!media || typeof media.read !== 'function') return null
+      hosts.add(media)
+      const read = ref.kind === 'dm'
+        ? { kind: 'dm', from: ref.from, id: ref.id, index: ref.index }
+        : { kind: 'group', diary: ref.diary, item: ref.item }
+      const got = await media.read(read)
+      if (!got || typeof got !== 'object') return null
+      if (typeof got.uri === 'string') {
+        fileMedia = media
+        fileUri = got.uri
+      }
+      const want = expectedMime(ref)
+      if (want !== null && got.mime !== want) {
+        wipe(got.bytes)
+        return null
+      }
+      if (got.bytes !== undefined) return out(got.bytes, got.mime, declaredMs(ref))
+      if (readFileName(got.uri) === null || typeof ctx.readFile !== 'function') return null
+      return out(await ctx.readFile(got.uri), got.mime, declaredMs(ref))
+    } catch {
+      return null
+    } finally {
+      if (fileUri !== null) forgetFile(fileMedia, fileUri)
+    }
+  }
+
   const api = {
     sourceFor,
+    bytesFor,
     pin,
     clear,
     get size () { return cache.size }

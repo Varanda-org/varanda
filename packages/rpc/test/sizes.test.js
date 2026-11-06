@@ -305,7 +305,7 @@ test('follow.list: FOLLOW_LIMIT_MAX keys fit with a wide margin', (t) => {
 })
 
 function groupReadResult (n, ch, media) {
-  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, media, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20) }
+  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, fwd: 1, media, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20) }
   return { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, hidden: SEQ, incomplete: true, sealed: SEQ, epoch: { writer: HEX, seq: SEQ }, state: 'rekey-pending' }
 }
 
@@ -337,6 +337,8 @@ test('group.read: GROUP_LIMIT_MAX with private media fits, one more does not', (
   for (const ch of WORST) t.ok(size(groupReadResult(GROUP_LIMIT_MAX, ch, media)) <= MAX_MESSAGE, JSON.stringify(ch))
   const worst = size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', media))
   const overflow = size(groupReadResult(GROUP_LIMIT_MAX + 1, '\ud800', media))
+  t.is(worst, 257369)
+  t.is(overflow, 266230)
   t.comment('group.read worst private item: ' + utf8ByteLength(JSON.stringify(item)) + ' bytes')
   t.comment('group.read worst case at ' + GROUP_LIMIT_MAX + ' items: ' + worst + ' bytes')
   t.comment('group.read worst case at ' + (GROUP_LIMIT_MAX + 1) + ' items: ' + overflow + ' bytes')
@@ -389,7 +391,7 @@ const DM_MEDIA_ITEM = {
 // sealed frame (DM_INNER_BYTES) cannot even carry together: a bound, not a
 // message that exists.
 function dmThreadResult (n, ch) {
-  const message = { id: 'f'.repeat(32), from: HEX, text: ch.repeat(MAX_TEXT), replyTo: 'f'.repeat(32), at: AT, mine: false, media: widestDmMedia(MAX_DM_MEDIA) }
+  const message = { id: 'f'.repeat(32), from: HEX, text: ch.repeat(MAX_TEXT), replyTo: 'f'.repeat(32), fwd: 1, at: AT, mine: false, media: widestDmMedia(MAX_DM_MEDIA) }
   return { messages: Array(n).fill(message), next: 'f'.repeat(32), folder: 'request', blocked: false }
 }
 
@@ -415,6 +417,8 @@ test('dm.thread: DM_THREAD_LIMIT_MAX fits, one more does not', (t) => {
   const worst = size(dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}'))
   t.comment('dm.thread worst case at ' + DM_THREAD_LIMIT_MAX + ' messages: ' + worst + ' bytes')
   const overflow = size(dmThreadResult(DM_THREAD_LIMIT_MAX + 1, '\u{1f600}'))
+  t.is(worst, 260908)
+  t.is(overflow, 266577)
   t.comment('dm.thread worst case at ' + (DM_THREAD_LIMIT_MAX + 1) + ' messages: ' + overflow + ' bytes')
   t.ok(overflow > MAX_MESSAGE, 'largest that fits')
 })

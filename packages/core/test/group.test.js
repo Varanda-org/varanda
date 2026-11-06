@@ -2246,7 +2246,7 @@ const sealedPhoto = (start, core = K(0xe0)) => {
   return { core, start, ...item }
 }
 
-test('group-post v2: one exact key set, only with media', (t) => {
+test('group-post v2: one exact key set, with media or a forward', (t) => {
   const v1 = groupPost({ text: 'oi', at: AT(1) })
   t.alike(Object.keys(v1), ['type', 'text', 'replyTo', 'seen', 'at'], 'without media the v1 record')
   t.alike(groupPost({ text: 'oi', media: null, at: AT(1) }), v1, 'media null is v1 too')
@@ -2262,13 +2262,27 @@ test('group-post v2: one exact key set, only with media', (t) => {
   t.is(validateGroupRecord({ ...p, text: 'legenda' }, 1), null)
   t.is(validateGroupRecord({ ...p, text: 'x'.repeat(1001) }, 1), 'text-length')
   t.is(validateGroupRecord({ ...p, text: 'a\u0007' }, 1), 'control-chars')
-  t.is(validateGroupRecord({ ...p, media: null }, 1), 'media-invalid', 'v2 always has media: one encoding per post')
+  t.is(validateGroupRecord({ ...p, media: null }, 1), 'media-invalid', 'v2 with media null and fwd 0 must stay v1')
   t.is(validateGroupRecord({ ...p, media: [] }, 1), 'media-invalid')
   t.is(validateGroupRecord({ ...p, media: [1, 2, 3, 4, 5].map((i) => PHOTO(i * 3)) }, 1), 'media-invalid', 'five items')
   t.is(validateGroupRecord({ ...p, media: [PHOTO(1), PHOTO(1)] }, 1), 'media-invalid', 'one place twice')
   t.is(validateGroupRecord({ ...p, media: [{ ...PHOTO(1), mime: 'image/svg+xml' }] }, 1), 'media-invalid')
   t.is(validateGroupRecord({ ...p, card: {} }, 1), 'malformed', 'card is reserved')
-  t.is(validateGroupRecord({ ...p, fwd: 1 }, 1), 'malformed', 'fwd is reserved')
+  t.is(validateGroupRecord({ ...p, fwd: 1 }, 1), null, 'fwd 1 with media')
+  t.is(groupPost({ text: 'legenda', media: [PHOTO(1)], fwd: 1, at: AT(2) }).fwd, 1)
+  const textFwd = groupPost({ text: 'encaminhada', fwd: 1, at: AT(2) })
+  t.alike(Object.keys(textFwd), [...GROUP_POST_V2_KEYS], 'fwd 1 text only is v2')
+  t.is(textFwd.media, null)
+  t.is(textFwd.fwd, 1)
+  t.is(textFwd.card, null)
+  t.is(validateGroupRecord(textFwd, 1), null)
+  t.is(validateGroupRecord({ ...textFwd, text: '' }, 1), 'text-length', 'a text forward is not an empty caption')
+  t.alike(groupPost({ text: 'oi', fwd: 0, at: AT(1) }), v1, 'fwd 0 is still the v1 record')
+  for (const bad of [2, true, '1', false]) {
+    t.is(validateGroupRecord({ ...p, fwd: bad }, 1), 'malformed', 'fwd ' + JSON.stringify(bad))
+    t.exception.all(() => groupPost({ text: 'oi', media: [PHOTO(1)], fwd: bad, at: AT(2) }), /malformed/, 'builder refuses fwd ' + JSON.stringify(bad))
+    t.exception.all(() => groupPost({ text: 'oi', fwd: bad, at: AT(2) }), /malformed/, 'builder refuses a text fwd ' + JSON.stringify(bad))
+  }
   t.is(validateGroupRecord({ ...p, extra: 1 }, 1), 'malformed')
   const { card, fwd, ...partial } = p
   t.is(validateGroupRecord(partial, 1), 'malformed', 'v1 keys plus media alone is no key set')
@@ -2295,11 +2309,15 @@ test('group-post v2: the fold carries media; v1 posts keep their shape', (t) => 
   post(w, wX, 1)
   w.push(wX, groupPost({ text: '', media: [PHOTO(1)], at: AT(2) }))
   w.push(wX, groupPost({ text: '', media: [sealedPhoto(1)], at: AT(3), sealed: true }))
+  w.push(wX, groupPost({ text: 'encaminhada', fwd: 1, at: AT(4) }))
   const g = buildGroup(w.input())
-  t.alike(visible(g), [wX + ':1', wX + ':2'], 'a private item in a plain post is skipped')
-  t.alike(Object.keys(g.posts[0]), ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'hidden'])
+  t.alike(visible(g), [wX + ':1', wX + ':2', wX + ':4'], 'a private item in a plain post is skipped')
+  t.alike(Object.keys(g.posts[0]), ['writer', 'diary', 'seq', 'at', 'text', 'fwd', 'replyTo', 'hidden'])
   t.alike(g.posts[1].media, [PHOTO(1)])
   t.is(g.posts[1].text, '')
+  t.is(g.posts[2].text, 'encaminhada', 'a text forward folds')
+  t.alike(g.posts.map(p => p.fwd), [0, 0, 1], 'v1, media and text forward flags survive the fold')
+  t.alike(Object.keys(g.posts[2]), Object.keys(g.posts[0]), 'a text forward folds like a v1 post')
 })
 
 test('group-post v2: a private group reads private media only from the envelope', (t) => {

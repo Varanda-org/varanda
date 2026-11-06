@@ -840,8 +840,8 @@ test('group.join and group.leave', (t) => {
 test('group.post', (t) => {
   t.ok(isMutating('group.post'))
   const reply = { writer: KEY, seq: 4 }
-  ok(t, 'group.post', { group: KEY, text: 'oi' }, { group: KEY, text: 'oi' })
-  ok(t, 'group.post', { group: KEY, text: 'x'.repeat(MAX_TEXT), replyTo: reply }, { group: KEY, text: 'x'.repeat(MAX_TEXT), replyTo: reply })
+  ok(t, 'group.post', { group: KEY, text: 'oi' }, { group: KEY, text: 'oi', fwd: 0 })
+  ok(t, 'group.post', { group: KEY, text: 'x'.repeat(MAX_TEXT), replyTo: reply }, { group: KEY, text: 'x'.repeat(MAX_TEXT), replyTo: reply, fwd: 0 })
   bad(t, 'group.post', { group: KEY, text: '' })
   bad(t, 'group.post', { group: KEY, text: 'x'.repeat(MAX_TEXT + 1) })
   bad(t, 'group.post', { text: 'oi' })
@@ -859,7 +859,7 @@ test('group.post with public media', (t) => {
   const sparse = media.slice()
   delete sparse[1]
   const params = { group: KEY, text: '', media }
-  ok(t, 'group.post', params, params)
+  ok(t, 'group.post', params, { ...params, fwd: 0 })
   ok(t, 'group.post', { ...params, sealed: false })
   ok(t, 'group.post', { ...params, text: '\u{1f600}'.repeat(MAX_TEXT), replyTo: { writer: KEY, seq: 1 } })
   for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
@@ -882,7 +882,7 @@ test('group.post with private media', (t) => {
   const d = { core: KEY, mime: 'application/octet-stream', start: 7936, blocks: 256, bytes: 8388608, sha256: 'cd'.repeat(32), key: 'ef'.repeat(32), nonce: 'ab'.repeat(24), plainMime: 'image/jpeg', plainSha256: KEY, w: 16384, h: 16384, ms: 0 }
   const media = Array.from({ length: 4 }, (_, i) => ({ ...d, core: String(i).repeat(64) }))
   const params = { group: KEY, text: '', media, sealed: true }
-  ok(t, 'group.post', params, params)
+  ok(t, 'group.post', params, { ...params, fwd: 0 })
   ok(t, 'group.post', { ...params, text: '\ud800'.repeat(MAX_TEXT), replyTo: { writer: KEY, seq: Number.MAX_SAFE_INTEGER } })
   ok(t, 'group.post', { ...params, media: [{ ...d, start: 1, blocks: 1, bytes: 32768, w: 1, h: 1 }] })
   const { sealed, ...unmarked } = params
@@ -916,7 +916,7 @@ test('group.post with private media', (t) => {
 test('group.post accepts one public voice item and keeps diary posts image-only', (t) => {
   const item = { core: KEY, mime: 'audio/mp4', start: 8144, blocks: 48, bytes: 1572864, sha256: KEY, width: 0, height: 0, ms: 120000 }
   const params = { group: KEY, text: '', media: [item] }
-  ok(t, 'group.post', params, params)
+  ok(t, 'group.post', params, { ...params, fwd: 0 })
   ok(t, 'group.post', { ...params, sealed: false })
   ok(t, 'group.post', { ...params, text: 'Áudio', replyTo: { writer: KEY, seq: 1 }, media: [{ ...item, start: 1, blocks: 1, bytes: 1, ms: 1 }] })
   bad(t, 'group.post', { ...params, sealed: true }, 'public voice cannot be sealed')
@@ -944,7 +944,7 @@ test('group.post accepts one public voice item and keeps diary posts image-only'
 test('group.post accepts one private voice item within the padded byte cap', (t) => {
   const item = { core: KEY, mime: 'application/octet-stream', start: 8143, blocks: 49, bytes: 49 * 32768, sha256: KEY, key: KEY, nonce: 'ab'.repeat(24), plainMime: 'audio/mp4', plainSha256: KEY, w: 0, h: 0, ms: 120000 }
   const params = { group: KEY, text: '', media: [item], sealed: true }
-  ok(t, 'group.post', params, params)
+  ok(t, 'group.post', params, { ...params, fwd: 0 })
   ok(t, 'group.post', { ...params, media: [{ ...item, blocks: 1, bytes: 32768, ms: 1 }] })
   const { sealed, ...unmarked } = params
   bad(t, 'group.post', unmarked, 'private voice requires sealed')
@@ -1378,7 +1378,7 @@ test('media.uploadFile with sealed', (t) => {
   for (const mime of ['image/png', 'image/webp', 'image/gif']) ok(t, 'media.uploadFile', { ...params, mime })
   for (const sealed of [null, 0, 1, 'true']) bad(t, 'media.uploadFile', { ...params, sealed }, 'sealed must be boolean')
   bad(t, 'media.uploadFile', { ...params, mime: 'application/octet-stream' }, 'the node seals: the file is always the image')
-  bad(t, 'dm.putMedia', params, 'group sealing does not use the DM blob channel')
+  bad(t, 'dm.putMedia', { ...params, to: KEY }, 'group sealing does not use the DM blob channel')
 })
 
 test('media.readFile', (t) => {
@@ -1415,8 +1415,9 @@ test('media.readFile', (t) => {
 })
 
 test('media uploads require the explicit voice shape for audio', (t) => {
-  const voice = { name: 'ab'.repeat(16) + '.bin', mime: 'audio/mp4', width: 0, height: 0, ms: 120000, kind: 'voice' }
+  const upload = { name: 'ab'.repeat(16) + '.bin', mime: 'audio/mp4', width: 0, height: 0, ms: 120000, kind: 'voice' }
   for (const method of ['media.uploadFile', 'dm.putMedia']) {
+    const voice = method === 'dm.putMedia' ? { ...upload, to: KEY } : upload
     ok(t, method, voice, voice)
     ok(t, method, { ...voice, ms: 1 })
     for (const field of Object.keys(voice)) {
@@ -1429,7 +1430,7 @@ test('media uploads require the explicit voice shape for audio', (t) => {
       { width: '0' }, { height: -1 }, { ms: 0 }, { ms: 120001 }, { ms: 1.5 },
       { ms: '1' }, { ms: null }, { kind: 'audio' }, { kind: null }, { bytes: 1 }
     ]) bad(t, method, { ...voice, ...patch }, 'invalid upload voice: ' + JSON.stringify(patch))
-    const image = { name: voice.name, mime: 'image/png', width: 1, height: 1 }
+    const image = { name: voice.name, mime: 'image/png', width: 1, height: 1, ...(method === 'dm.putMedia' ? { to: KEY } : {}) }
     ok(t, method, image, image)
     bad(t, method, { ...image, kind: 'voice' })
     bad(t, method, { ...image, kind: 'voice', ms: 1 })
@@ -1437,8 +1438,8 @@ test('media uploads require the explicit voice shape for audio', (t) => {
     bad(t, method, { ...image, width: 0, height: 0 })
   }
   for (const sealed of [false, true]) {
-    ok(t, 'media.uploadFile', { ...voice, sealed })
-    bad(t, 'dm.putMedia', { ...voice, sealed })
+    ok(t, 'media.uploadFile', { ...upload, sealed })
+    bad(t, 'dm.putMedia', { ...upload, to: KEY, sealed })
   }
 })
 
@@ -1513,9 +1514,9 @@ test('dm.* (Conversas)', (t) => {
   bad(t, 'dm.lookup', { member: KEY, peer: KEY })
 
   t.ok(isMutating('dm.send'))
-  ok(t, 'dm.send', { to: KEY, text: 'oi' }, { to: KEY, text: 'oi' })
+  ok(t, 'dm.send', { to: KEY, text: 'oi' }, { to: KEY, text: 'oi', fwd: 0 })
   ok(t, 'dm.send', { to: KEY, text: 'x' })
-  ok(t, 'dm.send', { to: KEY, text: '😀'.repeat(MAX_TEXT), replyTo: ID }, { to: KEY, text: '😀'.repeat(MAX_TEXT), replyTo: ID })
+  ok(t, 'dm.send', { to: KEY, text: '😀'.repeat(MAX_TEXT), replyTo: ID }, { to: KEY, text: '😀'.repeat(MAX_TEXT), replyTo: ID, fwd: 0 })
   t.is(validateParams('dm.send', { to: KEY, text: '' }).message, 'parâmetro inválido: text')
   bad(t, 'dm.send', { to: KEY, text: 'x'.repeat(MAX_TEXT + 1) }, 'text too long')
   bad(t, 'dm.send', { text: 'oi' })
@@ -1528,7 +1529,7 @@ test('dm.* (Conversas)', (t) => {
 
   // media: blob descriptors (core lib/blob.js) plus mime, w, h, ms.
   const item = { id: 'a1'.repeat(32), key: 'b2'.repeat(32), nonce: 'c3'.repeat(24), mime: 'image/jpeg', chunks: 2, bytes: 32768 + 17, sha256: 'd4'.repeat(32), w: 1080, h: 1920, ms: 0 }
-  ok(t, 'dm.send', { to: KEY, text: '', media: [item] }, { to: KEY, text: '', media: [item] })
+  ok(t, 'dm.send', { to: KEY, text: '', media: [item] }, { to: KEY, text: '', media: [item], fwd: 0 })
   const four = ['a1', 'a2', 'a3', 'a4'].map((h) => ({ ...item, id: h.repeat(32) }))
   ok(t, 'dm.send', { to: KEY, text: 'legenda', replyTo: ID, media: four })
   t.is(validateParams('dm.send', { to: KEY, text: '', media: [item, item] }).message, 'parâmetro inválido: media', 'repeated blob ids refused')
@@ -1579,7 +1580,7 @@ test('dm.* (Conversas)', (t) => {
   bad(t, 'dm.send', { to: KEY, text: '', media: [Object.assign(Object.create({ x: 1 }), item)] }, 'item with a prototype')
 
   t.ok(isMutating('dm.putMedia'))
-  const put = { name: 'ab'.repeat(16) + '.bin', mime: 'image/png', width: 640, height: 480 }
+  const put = { name: 'ab'.repeat(16) + '.bin', to: KEY, mime: 'image/png', width: 640, height: 480 }
   ok(t, 'dm.putMedia', put, put)
   for (const k of Object.keys(put)) {
     const p = { ...put }
@@ -1592,8 +1593,12 @@ test('dm.* (Conversas)', (t) => {
   bad(t, 'dm.putMedia', { ...put, mime: 'video/mp4' })
   bad(t, 'dm.putMedia', { ...put, width: 0 })
   bad(t, 'dm.putMedia', { ...put, height: 16385 })
-  // No bytes over RPC and no recipient: the descriptor goes in a later dm.send.
-  for (const k of ['bytes', 'data', 'path', 'to', 'key']) bad(t, 'dm.putMedia', { ...put, [k]: 'ab' }, 'extra ' + k)
+  // No bytes over RPC: the descriptor goes in a later dm.send.
+  for (const k of ['bytes', 'data', 'path', 'key']) bad(t, 'dm.putMedia', { ...put, [k]: 'ab' }, 'extra ' + k)
+  // `to` (5.97) is required (the missing-key loop above) and only an exact
+  // lowercase hex64 diary key.
+  ok(t, 'dm.putMedia', { ...put, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 2500 }, { ...put, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 2500 })
+  for (const to of ['ab', KEY.toUpperCase(), KEY + '0', KEY.slice(1), 1, null, true, [KEY], { key: KEY }]) bad(t, 'dm.putMedia', { ...put, to }, 'to ' + JSON.stringify(to))
 
   t.absent(isMutating('dm.thread'))
   t.is(DM_THREAD_LIMIT_MAX, 46)
@@ -1653,7 +1658,7 @@ test('dm.* (Conversas)', (t) => {
 test('dm.send accepts one voice item within the ciphertext byte cap', (t) => {
   const item = { id: KEY, key: KEY, nonce: 'ab'.repeat(24), chunks: 49, bytes: 1572864 + 16, sha256: KEY, mime: 'audio/mp4', w: 0, h: 0, ms: 120000 }
   const params = { to: KEY, text: '', media: [item] }
-  ok(t, 'dm.send', params, params)
+  ok(t, 'dm.send', params, { ...params, fwd: 0 })
   ok(t, 'dm.send', { ...params, text: 'Áudio', replyTo: 'ab'.repeat(16), media: [{ ...item, chunks: 1, bytes: 17, ms: 1 }] })
   for (const patch of [
     { bytes: 1572864 + 17 }, { chunks: 48 }, { chunks: 1, bytes: 16 },
@@ -1821,4 +1826,13 @@ test('page.read worst-case result fits MAX_MESSAGE', (t) => {
   t.ok(line.length < MAX_MESSAGE, 'page.read result ' + line.length + ' bytes')
   // The shape this replaced: every follow (4095) as a bare key.
   t.ok(JSON.stringify(new Array(4095).fill(hex(0))).length > MAX_MESSAGE)
+})
+
+test('chat forwards: only numeric 0 or 1, default 0', (t) => {
+  for (const [method, base] of [['dm.send', { to: KEY, text: 'oi' }], ['group.post', { group: KEY, text: 'oi' }]]) {
+    ok(t, method, base, { ...base, fwd: 0 })
+    for (const fwd of [0, 1]) ok(t, method, { ...base, fwd }, { ...base, fwd })
+    for (const fwd of [true, false, -1, 2, 0.5, '0', '1', null, [], {}]) bad(t, method, { ...base, fwd })
+    bad(t, method, { ...base, text: '', fwd: 1 })
+  }
 })

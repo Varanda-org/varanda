@@ -1871,11 +1871,13 @@ function createPagesRoutes ({
       return { peer: peerOf(op.peer), before, limit: limitOf(op.limit) }
     }
     if (action === 'dm-send') {
-      if (!exactKeys(op, ['to', 'text'], ['replyTo'])) throw refuse('pedido-invalido')
+      if (!exactKeys(op, ['to', 'text'], ['replyTo', 'fwd'])) throw refuse('pedido-invalido')
+      const fwd = op.fwd === undefined ? 0 : op.fwd
+      if (fwd !== 0 && fwd !== 1) throw refuse('pedido-invalido')
       const replyTo = op.replyTo === undefined ? null : op.replyTo
       if (replyTo !== null && (typeof replyTo !== 'string' || !HEX32_RE.test(replyTo))) throw refuse('pedido-invalido')
       if (typeof op.text !== 'string' || charLength(op.text) < 1 || charLength(op.text) > DM_MAX_TEXT) throw refuse('pedido-invalido')
-      return { to: peerOf(op.to), text: op.text, replyTo }
+      return { to: peerOf(op.to), text: op.text, replyTo, fwd }
     }
     if (action === 'dm-set') {
       if (!exactKeys(op, ['peer', 'state']) || !DM_STATES.includes(op.state)) throw refuse('pedido-invalido')
@@ -1943,15 +1945,17 @@ function createPagesRoutes ({
       return { key: keyParam(op.group) }
     }
     if (action === 'group-post') {
-      if (!exactKeys(op, ['group', 'text'], ['replyTo'])) throw refuse('pedido-invalido')
+      if (!exactKeys(op, ['group', 'text'], ['replyTo', 'fwd'])) throw refuse('pedido-invalido')
+      const fwd = op.fwd === undefined ? 0 : op.fwd
+      if (fwd !== 0 && fwd !== 1) throw refuse('pedido-invalido')
       const replyTo = op.replyTo === undefined ? null : op.replyTo
       // The group record's own bounds, checked before the page lock.
       try {
-        groupLib.groupPost({ text: op.text, replyTo })
+        groupLib.groupPost({ text: op.text, replyTo, fwd })
       } catch {
         throw refuse('pedido-invalido')
       }
-      return { key: keyParam(op.group), text: op.text, replyTo }
+      return { key: keyParam(op.group), text: op.text, replyTo, fwd }
     }
     if (!exactKeys(op, ['group'], ['before', 'limit'])) throw refuse('pedido-invalido')
     const limit = op.limit === undefined ? GROUP_READ_LIMIT : op.limit
@@ -1982,7 +1986,7 @@ function createPagesRoutes ({
         if (action === 'community-leave') return await pagesGroups.communityLeave(page, params.key)
         if (action === 'group-join') return await pagesGroups.groupJoin(page, params.key)
         if (action === 'group-leave') return await pagesGroups.groupLeave(page, params.key)
-        if (action === 'group-post') return await pagesGroups.groupPost(page, params.key, { text: params.text, replyTo: params.replyTo })
+        if (action === 'group-post') return await pagesGroups.groupPost(page, params.key, { text: params.text, replyTo: params.replyTo, fwd: params.fwd })
         return await pagesGroups.groupRead(page, params.key, { before: params.before, limit: params.limit })
       } catch (err) {
         // A writer core or the diary may have taken a block before the

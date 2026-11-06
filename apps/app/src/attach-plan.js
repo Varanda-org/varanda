@@ -6,7 +6,7 @@ const { displayText, dmTextBudget: textBudget, dmTextBytes, validateParams, MEMB
 // The widest DM media item (packages/rpc isDmMediaItem bounds), so a caption
 // is measured before any upload: a photo is never put on the blob channel for
 // a message that cannot carry it.
-const WIDEST_DM_ITEM = Object.freeze({
+export const WIDEST_DM_ITEM = Object.freeze({
   id: '0'.repeat(64),
   key: '0'.repeat(64),
   nonce: '0'.repeat(48),
@@ -26,7 +26,7 @@ export const MAX_VOICE_MS = 120000
 const MAX_VOICE_BYTES = 1572864
 
 // The widest DM voice item, measured like WIDEST_DM_ITEM.
-const WIDEST_DM_VOICE = Object.freeze({
+export const WIDEST_DM_VOICE = Object.freeze({
   ...WIDEST_DM_ITEM,
   chunks: Math.ceil((MAX_VOICE_BYTES + 16) / 32768),
   bytes: MAX_VOICE_BYTES + 16,
@@ -75,11 +75,17 @@ export function attachmentPreview (text, attachments = []) {
 function checked (method, params) {
   const result = validateParams(method, params)
   if (!result.ok) throw new Error(result.message)
-  return { method, params: result.value }
+  // validateParams fills fwd: 0 when it is absent; the request keeps the
+  // caller's shape, so only a forward (fwd 1) carries the field.
+  const value = { ...result.value }
+  if (!Object.prototype.hasOwnProperty.call(params, 'fwd') && value.fwd === 0) delete value.fwd
+  return { method, params: value }
 }
 
-// target is { kind: 'dm', to, replyTo?, cert? } or
-// { kind: 'group', group, visibility: 'public' | 'private', replyTo? }.
+// target is { kind: 'dm', to, replyTo?, cert?, fwd? } or
+// { kind: 'group', group, visibility: 'public' | 'private', replyTo?, fwd? }.
+// fwd: 1 marks a forwarded message (forward.js); it rides in the request and
+// counts in the DM text budget.
 // Attachments are staged { name, mime, width, height } files. Uploads run
 // in order; send(uploadResults) builds the final request without doing I/O.
 // Real upload descriptors are needed to measure the sealed DM text budget.
@@ -93,6 +99,7 @@ export function composePlan ({ text = '', attachments = [], target }) {
   const method = dm ? 'dm.send' : 'group.post'
   const base = dm ? { to: target.to, text } : { group: target.group, text }
   if (target.replyTo != null) base.replyTo = dm ? target.replyTo : { ...target.replyTo }
+  if (target.fwd === 1) base.fwd = 1
   // Without its own certificate the app measures with the largest one a msg
   // can carry, so the node never refuses as too long what fit here.
   const cert = target.cert == null ? MEMBER_CERT_STANDIN : JSON.parse(JSON.stringify(target.cert))
@@ -102,9 +109,10 @@ export function composePlan ({ text = '', attachments = [], target }) {
   if (voice && count !== 1) throw new Error('áudio vai sozinho na mensagem')
   const uploads = Array.from(attachments, item => {
     if (!item || typeof item !== 'object') throw new Error('anexo inválido')
-    if (voice) return voiceUpload(item, dm, sealed)
+    if (voice) return voiceUpload(item, dm, sealed, target.to)
     const { name, mime, width, height } = item
-    const params = { name, mime, width, height }
+    // A DM blob is sealed for one destination (docs/rpc.md 5.97).
+    const params = dm ? { name, to: target.to, mime, width, height } : { name, mime, width, height }
     if (sealed) params.sealed = true
     return checked(dm ? 'dm.putMedia' : 'media.uploadFile', params)
   })
@@ -135,11 +143,11 @@ export function composePlan ({ text = '', attachments = [], target }) {
 // The node checks the recorded bytes (audioBounds) when it uploads them; here
 // only the shape the upload call takes: { name, mime, width: 0, height: 0,
 // ms }, sealed for a private group.
-function voiceUpload (item, dm, sealed) {
+function voiceUpload (item, dm, sealed, to) {
   const { name, mime, width, height, ms } = item
   if (typeof name !== 'string' || name === '' || mime !== VOICE_MIME || width !== 0 || height !== 0) throw new Error('áudio inválido')
   if (!Number.isInteger(ms) || ms < 1 || ms > MAX_VOICE_MS) throw new Error('áudio inválido')
-  const params = { name, mime, width, height, ms }
+  const params = dm ? { name, to, mime, width, height, ms } : { name, mime, width, height, ms }
   if (sealed) params.sealed = true
   return { method: dm ? 'dm.putMedia' : 'media.uploadFile', params }
 }

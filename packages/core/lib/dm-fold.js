@@ -83,7 +83,7 @@ function byNewest (a, b) {
 // fold({ self, followSet, messages, ops, seen }) -> { inbox, requests },
 // each a list of { peer, folder, messages, at, unread } newest first.
 // seen: Set of seenKey(from, id) strings.
-// messages: verified bodies { id, from, to, text, replyTo, media?, at,
+// messages: verified bodies { id, from, to, text, replyTo, media?, fwd?, at,
 // filedAt } (media null or absent for a v1 body);
 // ops: { op, peer, at, filedAt }. filedAt is the LOCAL time in ms at which
 // this device stored the row (monotonic, assigned by the node; the send
@@ -128,7 +128,7 @@ function fold ({ self, followSet, messages, ops, seen } = {}) {
     ids.add(key)
     const mine = m.from === self
     const media = Array.isArray(m.media) && m.media.length > 0 ? m.media : null
-    const row = { id: m.id, from: m.from, to: m.to, text: m.text, replyTo: m.replyTo === undefined ? null : m.replyTo, media, at: new Date(t).toISOString(), sentAt: m.at, mine, peer, t, f }
+    const row = { id: m.id, from: m.from, to: m.to, text: m.text, replyTo: m.replyTo === undefined ? null : m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media, at: new Date(t).toISOString(), sentAt: m.at, mine, peer, t, f }
     if (!byPeer.has(peer)) byPeer.set(peer, [])
     byPeer.get(peer).push(row)
   }
@@ -172,7 +172,7 @@ function fold ({ self, followSet, messages, ops, seen } = {}) {
 // every reader orders and pages by. `sentAt` is the sender's claim, shown
 // only as information.
 function publicRow (r) {
-  return { id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, media: r.media, at: r.at, sentAt: r.sentAt, mine: r.mine, peer: r.peer }
+  return { id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, fwd: r.fwd, media: r.media, at: r.at, sentAt: r.sentAt, mine: r.mine, peer: r.peer }
 }
 
 // What a conversation list shows for a message: its text, or a fixed label

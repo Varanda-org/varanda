@@ -2946,7 +2946,7 @@ function createBrowserSession ({
     // The recipient's key is looked up first (off the chain), then the send
     // runs on the chain. A send for an identity without a published dm-key
     // runs dm.enable first.
-    'dm.send': async ({ to, text, replyTo, media }) => {
+    'dm.send': async ({ to, text, replyTo, media, fwd }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       // Self and a blocked peer are refused before any lookup.
       await serial(async () => dmEngine.checkSend(await requireDm(), to))({})
@@ -2959,7 +2959,7 @@ function createBrowserSession ({
       return serial(async (_, epoch) => {
         const own = await requireDm()
         if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
-        return dmEngine.send(own, keyPair, { to, text, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media }, recipient.box)
+        return dmEngine.send(own, keyPair, { to, text, fwd, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media }, recipient.box)
       })({})
     },
 
@@ -3324,9 +3324,13 @@ function createBrowserSession ({
   // engine -> the media item. The native IPC dm.putMedia reads its cache
   // file and calls this same function. Nothing about the bytes is logged.
   // A voice note is { bytes, mime: 'audio/mp4', width: 0, height: 0, ms,
-  // kind: 'voice' }, checked with audioBounds.
-  function dmPutMedia ({ bytes, mime, width, height, ms, kind } = {}) {
+  // kind: 'voice' }, checked with audioBounds. `to`, the destination's diary
+  // key, is required: it keeps the same photo for two conversations in two
+  // blobs, and dm.send refuses the item for any other destination (5.97).
+  function dmPutMedia ({ bytes, mime, width, height, ms, kind, to } = {}) {
+    if (typeof to !== 'string' || !/^[0-9a-f]{64}$/.test(to)) throw new TypeError(BAD_MEDIA_ARGS)
     const voice = kind !== undefined || mime === AUDIO_MIME
+    const dest = { to }
     let copy
     if (voice) {
       ms = voiceArgsMs({ bytes, mime, width, height, ms, kind })
@@ -3346,7 +3350,7 @@ function createBrowserSession ({
         const own = await serial(() => requireDm())({})
         const pair = keyPair
         if (pair === null) throw new UsageError(store.LOCKED)
-        return await dmEngine.putMedia(own, pair, voice ? { bytes: copy, mime, width: 0, height: 0, ms } : { bytes: copy, mime, width, height })
+        return await dmEngine.putMedia(own, pair, voice ? { bytes: copy, mime, width: 0, height: 0, ms, ...dest } : { bytes: copy, mime, width, height, ...dest })
       } catch (err) {
         copy.fill(0)
         throw toRpcError(err, reportInternal)

@@ -38,7 +38,7 @@
 //   media.upload({ bytes, mime, width, height, sealed, onProgress })
 //                       -> Promise<descriptor>  (lib/node.js mediaUpload;
 //                          errors keep their .code and .message)
-//   media.putDm({ bytes, mime, width, height })
+//   media.putDm({ bytes, mime, width, height, to })
 //                       -> Promise<media item>  (lib/node.js dmPutMedia: the
 //                          photo sealed and put on the blob channel; the item
 //                          goes back unchanged in dm.send `media`)

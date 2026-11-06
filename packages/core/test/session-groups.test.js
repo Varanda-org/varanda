@@ -146,6 +146,18 @@ test('group create, idempotent join, list, info and members expose every field',
   t.alike(m.session.internal, [])
 })
 
+test('group.post fwd 1 on the core node writes a forward that reads back as fwd 1', async (t) => {
+  const m = await person(t)
+  const community = await communityOf(m)
+  for (const visibility of ['public', 'private']) {
+    const { group } = await m.call('group.create', { name: 'Encaminhar', join: 'approval', visibility, community })
+    await m.call('group.post', { group, text: 'comum' })
+    await m.call('group.post', { group, text: 'encaminhada', fwd: 1 })
+    const page = await m.call('group.read', { group })
+    t.alike(page.items.map((i) => [i.text, i.fwd]), [['encaminhada', 1], ['comum', 0]], visibility)
+  }
+})
+
 test('group posts serialize, page with cursors and retain hidden items', async (t) => {
   const m = await person(t)
   const { group } = await m.call('group.create', { name: 'Horta', join: 'open', community: await communityOf(m) })
@@ -166,6 +178,7 @@ test('group posts serialize, page with cursors and retain hidden items', async (
       seq: 3 - index,
       at: item.at,
       text,
+      fwd: 0,
       replyTo: index === 1 ? replyTo : null,
       media: null,
       hidden: false,
@@ -178,7 +191,7 @@ test('group posts serialize, page with cursors and retain hidden items', async (
   t.is(page.incomplete, false)
   const older = await m.call('group.read', { group, limit: 2, before: page.next })
   t.alike(older, {
-    items: [{ writer: group, diary: m.publicKey, seq: 1, at: older.items[0].at, text: 'um', replyTo: null, media: null, hidden: false, name: 'Ana', username: null }],
+    items: [{ writer: group, diary: m.publicKey, seq: 1, at: older.items[0].at, text: 'um', fwd: 0, replyTo: null, media: null, hidden: false, name: 'Ana', username: null }],
     next: null,
     hidden: 0,
     incomplete: false,
@@ -227,7 +240,7 @@ test('group requests, admission, administration, bans, metadata and leave throug
   const writer = store.readGroups(b.dataDir).find((g) => g.group === group).writer
   const read = await a.call('group.read', { group })
   t.alike(read, {
-    items: [{ writer, diary: b.publicKey, seq, at: read.items[0].at, text: 'olá', replyTo: null, media: null, hidden: false, name: 'Bia', username: null }],
+    items: [{ writer, diary: b.publicKey, seq, at: read.items[0].at, text: 'olá', fwd: 0, replyTo: null, media: null, hidden: false, name: 'Bia', username: null }],
     next: null,
     hidden: 0,
     incomplete: false,

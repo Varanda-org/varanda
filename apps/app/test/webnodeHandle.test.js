@@ -121,16 +121,21 @@ test('putDm goes through dm.putMedia; a failure deletes the file here', async (t
     return item
   })
   const { media } = webNodeHandle(request)
-  t.is(await media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2 }), item)
+  const to = 'ef'.repeat(32)
+  t.is(await media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2, to }), item)
   const put = calls.find((c) => c.method === 'dm.putMedia')
-  t.alike(put.params, { name: put.params.name, mime: 'image/webp', width: 2, height: 2 })
+  t.alike(put.params, { name: put.params.name, mime: 'image/webp', width: 2, height: 2, to }, 'the destination crosses the IPC (rpc 5.97)')
   t.alike(put.file, new Uint8Array([9]))
+  for (const bad of [undefined, 'EF'.repeat(32), 'ef', null]) {
+    await t.exception.all(media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2, to: bad }), /mídia inválida/, 'to ' + JSON.stringify(bad))
+  }
+  t.is(calls.filter((c) => c.method === 'dm.putMedia').length, 1, 'a put without a valid destination never reaches the worklet')
 
   fail = true
-  await t.exception(media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2 }))
+  await t.exception(media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2, to }))
   const failed = calls.filter((c) => c.method === 'dm.putMedia')[1]
   t.absent(box().files.has(UPLOAD + failed.params.name), 'a failed put leaves no upload file')
-  await t.exception.all(media.putDm({ bytes: new Uint8Array(0), mime: 'image/webp', width: 2, height: 2 }), /mídia inválida/)
+  await t.exception.all(media.putDm({ bytes: new Uint8Array(0), mime: 'image/webp', width: 2, height: 2, to }), /mídia inválida/)
 })
 
 test('read names a read-dir file and the handle releases it', async (t) => {
@@ -260,12 +265,12 @@ test('a voice note keeps its duration and kind across the IPC; an image request 
   const { webNodeHandle } = await load()
   const { request, calls } = mockRequest(() => ({ ok: true }))
   const { media } = webNodeHandle(request)
-  await media.putDm({ bytes: new Uint8Array([1]), mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice' })
+  await media.putDm({ bytes: new Uint8Array([1]), mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice', to: 'ef'.repeat(32) })
   await media.upload({ bytes: new Uint8Array([2]), mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice', sealed: true })
   await media.upload({ bytes: new Uint8Array([3]), mime: 'image/png', width: 2, height: 2, ms: 9, kind: 'other' })
   const put = calls.find((c) => c.method === 'dm.putMedia')
   const ups = calls.filter((c) => c.method === 'media.uploadFile')
-  t.alike(put.params, { name: put.params.name, mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice' })
+  t.alike(put.params, { name: put.params.name, to: 'ef'.repeat(32), mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice' })
   t.alike(ups[0].params, { name: ups[0].params.name, mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice', sealed: true })
   t.alike(ups[1].params, { name: ups[1].params.name, mime: 'image/png', width: 2, height: 2 })
 })

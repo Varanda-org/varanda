@@ -2091,7 +2091,7 @@ async function groupLeave (ctx, { group }) {
 // sealed: true) in a private group, public descriptors in a public one. The
 // upload is a separate earlier call, so a post that fails here leaves its
 // blocks orphaned in the media core; nothing is retried.
-async function groupPost (ctx, { group, text, replyTo = null, media = null, sealed = false }) {
+async function groupPost (ctx, { group, text, replyTo = null, media = null, fwd = 0, sealed = false }) {
   const withMedia = media !== null && media !== undefined
   // Checked before withGroup, which holds the diary open.
   if (withMedia) {
@@ -2105,7 +2105,7 @@ async function groupPost (ctx, { group, text, replyTo = null, media = null, seal
     const own = liveOwnWriter(g, ownHex)
     if (own === null || statusOf(g, ownHex) !== 'member') throw new UsageError(GROUP_FORBIDDEN)
     requireCounted(g, own.key)
-    let record = buildRecord(() => grp.groupPost({ text, replyTo, media: withMedia ? media : null, seen: g.built.last, sealed: g.private }))
+    let record = buildRecord(() => grp.groupPost({ text, replyTo, fwd, media: withMedia ? media : null, seen: g.built.last, sealed: g.private }))
     if (g.private) record = sealForGroup(ctx, g, own.key, record)
     return { seq: await appendToOwnGroupCore(ctx, own, record, g.private) }
   })
@@ -2359,6 +2359,7 @@ async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = nu
       at: p.at,
       text: p.hidden ? '' : p.text,
       replyTo: p.replyTo,
+      fwd: p.fwd,
       media: p.hidden || !Array.isArray(p.media) ? null : copyGroupMedia(p.media, typeof p.media[0].key === 'string'),
       hidden: p.hidden,
       ...authorOf(g, p.diary, base.association, base.mod)

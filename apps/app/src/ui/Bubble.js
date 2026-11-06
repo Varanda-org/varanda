@@ -29,11 +29,15 @@
 //   onOpenMention(username), below: a node under the bubble (a Pill)
 //   media: a node drawn inside the bubble above the text (ChatMedia); the
 //     text is then the caption and may be empty
+//   forwarded: true for a message sent with fwd 1 (forward.js): a small
+//     "Encaminhada" line with the encaminhar icon at the top. Nothing ever
+//     names who wrote the original.
 
 import { cloneElement, isValidElement, useState } from 'react'
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { LABELS } from '../dm'
+import { FORWARDED_LABEL } from '../forward'
 import { ActionsSheet, usableActions } from './ActionsSheet'
 import { chatMediaBlock } from './ChatMedia'
 import { Icon } from './Icon'
@@ -69,7 +73,7 @@ export function bubbleMeta ({ at, mine, status }) {
 // The photos sit this close to the bubble's edge.
 const MEDIA_INSET = 4
 
-export function Bubble ({ item, mine = false, shape = 'single', name, handle, senderKey, avatar, quote, status, actions, actionsTitle, onOpenMention, below, media }) {
+export function Bubble ({ item, mine = false, shape = 'single', name, handle, senderKey, avatar, quote, status, actions, actionsTitle, onOpenMention, below, media, forwarded }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
   const { width: screen } = useWindowDimensions()
@@ -139,6 +143,14 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
                     {shownName}
                     {typeof handle === 'string' && handle !== '' ? <Text style={styles.handle}>{' ' + displayText(handle)}</Text> : null}
                   </Text>
+                  )
+                : null}
+              {forwarded === true && !muted
+                ? (
+                  <View style={styles.forwarded} accessibilityLabel={FORWARDED_LABEL}>
+                    <Icon name='encaminhar' size={12} color={colors.soft} />
+                    <Text style={styles.forwardedText} numberOfLines={1}>{FORWARDED_LABEL}</Text>
+                  </View>
                   )
                 : null}
               {quote
@@ -235,6 +247,8 @@ const makeStyles = (colors) => StyleSheet.create({
   name: { ...type.counter, marginBottom: 2 },
   handle: { fontWeight: '400', color: colors.soft },
   quote: { marginBottom: space.xs + 2 },
+  forwarded: { flexDirection: 'row', alignItems: 'center', gap: space.xs, marginBottom: 2 },
+  forwardedText: { fontSize: 12, lineHeight: 16, fontStyle: 'italic', color: colors.soft },
   media: { marginHorizontal: -(space.md - MEDIA_INSET), marginTop: -3 },
   text: { fontSize: 16, lineHeight: 22, color: colors.ink },
   muted: { color: colors.soft, fontStyle: 'italic' },
