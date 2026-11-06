@@ -21,18 +21,35 @@
 // or null) draws a ring around the send button while the photos upload and
 // the message is sent.
 //
+// Voice notes: with onVoice (the screen passes it when the node offers media
+// for this chat), the node online and a recorder that makes audio/mp4
+// (canRecordMp4, the capability), an empty field shows a microphone in place
+// of the send button; without the capability there is no microphone and no
+// note about it. Press and hold records with a running timer and 'deslize
+// para cancelar' (a slide left past CANCEL_DX drops it); lifting the finger
+// sends it, unless it was a slip (recordPlan). A tap on the microphone
+// records without holding (accessibility): 'Parar' sends, 'Cancelar' drops
+// it. At two minutes the recorder stops by itself and the note is sent.
+// onVoice({ bytes, ms, mime }) gets the recording once; nothing here retries
+// it. Leaving the screen, the app leaving the foreground, the composer
+// locking (editable false), going offline or a send starting cancels a
+// recording. A screen buried under another one (isTop false) passes no
+// onVoice, so the microphone hides and a recording there is dropped.
+//
 // Props: { value, onChangeText, onSend, sending, sendDisabled, editable,
 //   placeholder, accessibilityLabel, reply, onCancelReply, attach, notice,
 //   ownKey, mentions = true, max = MAX_TEXT, onAttach, attachments,
-//   onRemoveAttachment(id), onCancelAttachments, progress }
+//   onRemoveAttachment(id), onCancelAttachments, progress, onVoice }
 //   reply: { name, text, senderKey, mine } or null (ReplyPreview props)
 //   attachments: [{ id, status: 'encoding' | 'ready' | 'invalid', thumb, error }]
 
 import { useEffect, useRef, useState } from 'react'
-import { ActivityIndicator, Image, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { ActivityIndicator, AppState, Image, Keyboard, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, activeMention } from '@varanda/rpc'
 import { countAfterInsert, insertAt } from '../emoji'
+import { canRecordMp4, cancelRecording, startRecording, stopRecording } from '../media/audio'
+import { durationLabel, recordPlan, slideToCancel } from '../media/voice'
 import { countChars } from '../format'
 import { MENTION_MIN_QUERY, insertMention } from '../mentions'
 import { mergeSuggestions } from '../mentionTargets'
@@ -55,6 +72,115 @@ const MAX_HEIGHT = LINE * MAX_LINES + PAD_V * 2
 const SEND = 40
 const THUMB = 64
 const RING = SEND + 6
+// A press held this long is a hold-to-record; a shorter one is a tap.
+const HOLD_MS = 250
+
+// The recording state machine of the microphone. rec is null or { mode:
+// 'hold' | 'tap', phase: 'starting' | 'recording', startedAt }, one object
+// per gesture: begin() reads a replaced object as a cancel, so the slide
+// offset (dx) lives apart and a move never replaces it. Every path ends in
+// finish(send): stop and hand over, or cancel and drop.
+function useVoiceRecorder ({ onVoice, onNote }) {
+  const [rec, setRec] = useState(null)
+  const [now, setNow] = useState(0)
+  const [dx, setDxValue] = useState(0)
+  const recRef = useRef(null)
+  const alive = useRef(true)
+  const voiceRef = useRef(onVoice)
+  voiceRef.current = onVoice
+  const update = (next) => {
+    recRef.current = next
+    if (alive.current) setRec(next)
+  }
+
+  const finish = async (send) => {
+    const r = recRef.current
+    if (r === null) return
+    update(null)
+    if (r.phase !== 'recording' || !send) {
+      // A start still waiting (the permission prompt) is dropped when it
+      // resolves: recRef no longer names it.
+      cancelRecording()
+      return
+    }
+    let out
+    try {
+      out = await stopRecording()
+    } catch {
+      if (alive.current) onNote('Não foi possível gravar')
+      return
+    }
+    if (!alive.current) return
+    if (recordPlan(out.ms).cancelled) {
+      onNote('Segure para gravar')
+      return
+    }
+    if (typeof voiceRef.current === 'function') voiceRef.current(out)
+  }
+
+  const begin = async (mode) => {
+    if (recRef.current !== null) return
+    const r = { mode, phase: 'starting', startedAt: 0 }
+    update(r)
+    setDxValue(0)
+    onNote('')
+    try {
+      await startRecording({
+        onInterrupt: () => {
+          if (recRef.current === null) return
+          update(null)
+          if (alive.current) onNote('Gravação interrompida')
+        },
+        onLimit: () => { finish(true) }
+      })
+    } catch (err) {
+      if (recRef.current === r) update(null)
+      if (!alive.current) return
+      if (err && err.code === 'permission') onNote('Sem acesso ao microfone')
+      else if (err && err.code !== 'cancelled' && err.code !== 'busy') onNote('Não foi possível gravar')
+      return
+    }
+    // Released, cancelled or unmounted while the start ran.
+    if (recRef.current !== r || !alive.current) {
+      cancelRecording()
+      return
+    }
+    update({ ...r, phase: 'recording', startedAt: Date.now() })
+  }
+
+  useEffect(() => {
+    if (rec === null || rec.phase !== 'recording') return undefined
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 250)
+    return () => clearInterval(timer)
+  }, [rec])
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active' && recRef.current !== null) finish(false)
+    })
+    return () => {
+      alive.current = false
+      sub.remove()
+      if (recRef.current !== null) {
+        recRef.current = null
+        cancelRecording()
+      }
+    }
+  }, [])
+
+  const elapsed = rec !== null && rec.phase === 'recording' ? Math.max(0, now - rec.startedAt) : 0
+  const setDx = (next) => {
+    const r = recRef.current
+    if (r === null || r.mode !== 'hold') return
+    if (slideToCancel(next)) {
+      finish(false)
+      return
+    }
+    if (alive.current) setDxValue(next)
+  }
+  return { rec, dx, elapsed, begin, finish, setDx, recRef }
+}
 
 // A thin ring around the send button: two half masks, each rotating a
 // half-bordered circle into view (the same drawing as Publicar's ring).
@@ -144,7 +270,8 @@ export function ChatComposer ({
   attachments = null,
   onRemoveAttachment,
   onCancelAttachments,
-  progress = null
+  progress = null,
+  onVoice = null
 }) {
   const styles = useStyles(makeStyles)
   // The composer sits at the bottom of a stacked screen (no tab bar under it),
@@ -216,6 +343,50 @@ export function ChatComposer ({
   const hasText = text.trim() !== '' || staged.length > 0
   const canClip = typeof onAttach === 'function' && online && editable && !sending
   const sendOff = !editable || sendDisabled || sending || left < 0
+  const voice = useVoiceRecorder({ onVoice, onNote: setNote })
+  const recording = voice.rec !== null
+  const micOn = typeof onVoice === 'function' && online && editable && !sending && canRecordMp4()
+  const showMic = recording || (!hasText && micOn)
+  const voiceNow = useRef(voice)
+  voiceNow.current = voice
+  // Locked, offline or sending: a recording in progress is dropped.
+  useEffect(() => {
+    if (!micOn && voiceNow.current.recRef.current !== null) voiceNow.current.finish(false)
+  }, [micOn])
+  const holdTimer = useRef(null)
+  const pan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => voiceNow.current.recRef.current !== null,
+    onPanResponderTerminationRequest: () => false,
+    onPanResponderGrant: () => {
+      if (voiceNow.current.recRef.current !== null) return
+      holdTimer.current = setTimeout(() => {
+        holdTimer.current = null
+        voiceNow.current.begin('hold')
+      }, HOLD_MS)
+    },
+    onPanResponderMove: (_, g) => voiceNow.current.setDx(g.dx),
+    onPanResponderRelease: () => {
+      const v = voiceNow.current
+      if (holdTimer.current !== null) {
+        clearTimeout(holdTimer.current)
+        holdTimer.current = null
+        if (v.recRef.current === null) v.begin('tap')
+        return
+      }
+      const r = v.recRef.current
+      if (r !== null && r.mode === 'hold') v.finish(true)
+    },
+    onPanResponderTerminate: () => {
+      if (holdTimer.current !== null) {
+        clearTimeout(holdTimer.current)
+        holdTimer.current = null
+      }
+      const r = voiceNow.current.recRef.current
+      if (r !== null && r.mode === 'hold') voiceNow.current.finish(false)
+    }
+  })).current
+  useEffect(() => () => { if (holdTimer.current !== null) clearTimeout(holdTimer.current) }, [])
 
   const pickEmoji = (emoji) => {
     if (!editable) return
@@ -277,7 +448,22 @@ export function ChatComposer ({
         : null}
       <MentionSuggest rows={suggestions} loading={mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
       <View style={styles.row}>
-        <View style={[styles.field, focused && editable && styles.fieldFocused, !editable && styles.fieldOff]}>
+        {recording
+          ? (
+            <View style={[styles.field, styles.recField]} accessibilityLiveRegion='polite'>
+              <View style={styles.recDot} />
+              <Text style={styles.recTime} accessibilityLabel={'Gravando, ' + durationLabel(voice.elapsed)}>{durationLabel(voice.elapsed)}</Text>
+              {voice.rec.mode === 'hold'
+                ? <Text style={[styles.recHint, { transform: [{ translateX: Math.min(0, voice.dx) / 2 }] }]} numberOfLines={1}>‹ deslize para cancelar</Text>
+                : (
+                  <Pressable accessibilityRole='button' accessibilityLabel='Cancelar' onPress={() => voice.finish(false)} hitSlop={8} style={styles.recCancel}>
+                    <Text style={styles.cancel}>Cancelar</Text>
+                  </Pressable>
+                  )}
+            </View>
+            )
+          : null}
+        <View style={[styles.field, focused && editable && styles.fieldFocused, !editable && styles.fieldOff, recording && styles.hidden]}>
           <Pressable
             accessibilityRole='button'
             accessibilityLabel={emojiOpen ? 'fechar emojis' : 'emojis'}
@@ -333,7 +519,7 @@ export function ChatComposer ({
               )
             : null}
         </View>
-        {hasText
+        {(hasText && !recording) || (!hasText && sending && Number.isFinite(progress))
           ? (
             <View style={styles.sendWrap}>
               {sending && Number.isFinite(progress) ? <ProgressRing progress={progress} /> : null}
@@ -351,6 +537,36 @@ export function ChatComposer ({
                   : <Icon name='send' size={18} color={colors.accentInk} />}
               </Pressable>
             </View>
+            )
+          : null}
+        {showMic && !(recording && voice.rec.mode === 'tap')
+          ? (
+            <View
+              {...pan.panHandlers}
+              accessible
+              accessibilityRole='button'
+              accessibilityLabel='Gravar mensagem de voz'
+              accessibilityHint='Toque e segure para gravar, ou toque para gravar sem segurar'
+              onAccessibilityTap={() => { if (voice.recRef.current === null) voice.begin('tap') }}
+              style={[styles.send, recording && styles.micHeld]}
+            >
+              <Icon name='microfone' size={20} color={colors.accentInk} />
+            </View>
+            )
+          : null}
+        {recording && voice.rec.mode === 'tap'
+          ? (
+            <Pressable
+              accessibilityRole='button'
+              accessibilityLabel='Parar'
+              accessibilityHint='Para e envia a mensagem de voz'
+              disabled={voice.rec.phase !== 'recording'}
+              onPress={() => voice.finish(true)}
+              hitSlop={(layout.hit - SEND) / 2}
+              style={({ pressed }) => [styles.send, voice.rec.phase !== 'recording' && styles.sendOff, pressed && styles.pressed]}
+            >
+              <Icon name='parar' size={16} color={colors.accentInk} />
+            </Pressable>
             )
           : null}
       </View>
@@ -453,5 +669,12 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   cancel: { fontSize: 15, lineHeight: 20, color: colors.accent, paddingHorizontal: space.xs },
   soft: { fontSize: 13, lineHeight: 18, color: colors.soft, paddingHorizontal: space.xs },
-  pressed: { opacity: 0.6 }
+  pressed: { opacity: 0.6 },
+  hidden: { display: 'none' },
+  recField: { alignItems: 'center', paddingHorizontal: space.md, gap: space.sm },
+  recDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.danger },
+  recTime: { fontSize: 15, lineHeight: 20, color: colors.ink, fontVariant: ['tabular-nums'] },
+  recHint: { flex: 1, minWidth: 0, fontSize: 14, lineHeight: 20, color: colors.soft, textAlign: 'right' },
+  recCancel: { marginLeft: 'auto' },
+  micHeld: { transform: [{ scale: 1.15 }] }
 })

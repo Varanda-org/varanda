@@ -454,6 +454,21 @@ test('uploadMedia hands sealed to the session only when true', async (t) => {
   t.alike(seen, [['bytes', 'mime', 'width', 'height', 'sealed'], ['bytes', 'mime', 'width', 'height'], ['bytes', 'mime', 'width', 'height']])
 })
 
+test('a voice note carries its duration and kind to the session; an image never does', async (t) => {
+  const seen = []
+  const session = {
+    mediaUpload: (args) => { seen.push(['upload', Object.keys(args), args.ms, args.kind]); return Promise.resolve({ ok: true }) },
+    dmPutMedia: (args) => { seen.push(['dm', Object.keys(args), args.ms, args.kind]); return Promise.resolve({ ok: true }) }
+  }
+  const io = { read: async () => ({ file: '/cache/v.bin', bytes: new Uint8Array(4) }), session, unlink: () => {}, isClosing: () => false }
+  await uploadMedia(io, { mime: 'audio/mp4', width: 0, height: 0, ms: 2500, kind: 'voice', sealed: true })
+  await putDmMedia(io, { mime: 'audio/mp4', width: 0, height: 0, ms: 2500, kind: 'voice' })
+  await uploadMedia(io, { mime: 'image/jpeg', width: 1, height: 1, ms: 5, kind: 'other' })
+  t.alike(seen[0], ['upload', ['bytes', 'mime', 'width', 'height', 'ms', 'kind', 'sealed'], 2500, 'voice'])
+  t.alike(seen[1], ['dm', ['bytes', 'mime', 'width', 'height', 'ms', 'kind'], 2500, 'voice'])
+  t.alike(seen[2], ['upload', ['bytes', 'mime', 'width', 'height'], undefined, undefined], 'an image keeps its exact keys')
+})
+
 test('close cancels a running upload by closing the session first', async (t) => {
   let rejectUpload
   const order = []
@@ -597,4 +612,28 @@ test('readMediaToFile refuses bytes mediaBounds rejects: nothing written, plaint
   }
   t.is(written.length, 0, 'no plaintext file is written')
   t.ok(handed.every((b) => b.every((x) => x === 0)), 'the refused plaintext is zeroed')
+})
+
+test('readMediaToFile checks a voice note as audio: a sound-only MPEG-4 passes, a video track does not', async (t) => {
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(2500), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(2500)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(2500), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
+  const trak = (handler) => box('trak', box('tkhd', new Array(84).fill(0)), box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(handler), be32(0), be32(0), be32(0), [0]), minf))
+  const m4a = (tracks) => new Uint8Array([...box('ftyp', ascii('M4A '), be32(0), ascii('M4A '), ascii('isom')), ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(2500), new Array(80).fill(0)), ...tracks.map(trak)), ...box('mdat', new Array(2504).fill(1))])
+  let serve = m4a(['soun'])
+  const written = []
+  const io = {
+    // The session's ms is a claim: the answer carries the container's.
+    session: { dmReadMedia: async () => ({ bytes: new Uint8Array(serve), mime: 'audio/mp4', ms: 1 }), groupReadMedia: async () => ({ bytes: new Uint8Array(serve), mime: 'audio/mp4' }) },
+    write: async (bytes) => { written.push(bytes.length); return MEDIA_NAME },
+    unlink: () => {},
+    generation: () => 0,
+    isClosing: () => false
+  }
+  t.alike(await readMediaToFile(io, { kind: 'dm', from: 'a', id: 'b', index: 0 }), { name: MEDIA_NAME, mime: 'audio/mp4', w: 0, h: 0, ms: 2500 }, 'the container duration')
+  serve = m4a(['soun', 'vide'])
+  const err = await readMediaToFile(io, { kind: 'group', diary: 'd', item: { x: 1 } }).then(() => null, (e) => e)
+  t.ok(err !== null && err.code === 'USAGE', 'a container with a video track is refused')
+  t.is(written.length, 1, 'nothing written for the refused one')
 })

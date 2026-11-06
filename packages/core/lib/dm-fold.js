@@ -15,6 +15,7 @@ const HEX32 = /^[0-9a-f]{32}$/
 const FOLDER_OPS = ['accepted', 'declined']
 const PREVIEW_PHOTO = 'Foto'
 const PREVIEW_GIF = 'GIF'
+const PREVIEW_AUDIO = 'Áudio'
 const BLOCK_OPS = ['blocked', 'unblocked']
 
 function isHex64 (s) {
@@ -176,11 +177,12 @@ function publicRow (r) {
 
 // What a conversation list shows for a message: its text, or a fixed label
 // when it is only media, so no peer-chosen string stands in for the photo.
-// GIF only when every item is one.
+// GIF only when every item is one; a voice note is 'Áudio'.
 function previewText (m) {
   if (m === null || typeof m !== 'object') return ''
   const text = typeof m.text === 'string' ? m.text : ''
   if (text !== '' || !Array.isArray(m.media) || m.media.length === 0) return text
+  if (m.media.some(d => d !== null && typeof d === 'object' && d.mime === 'audio/mp4')) return PREVIEW_AUDIO
   const gif = m.media.every(d => d !== null && typeof d === 'object' && d.mime === 'image/gif')
   return gif ? PREVIEW_GIF : PREVIEW_PHOTO
 }
@@ -232,5 +234,6 @@ module.exports = Object.freeze({
   canSend,
   previewText,
   PREVIEW_PHOTO,
-  PREVIEW_GIF
+  PREVIEW_GIF,
+  PREVIEW_AUDIO
 })

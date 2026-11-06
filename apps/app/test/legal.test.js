@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 17)
+  t.is(LEGAL_VERSION, 18)
   t.is(LEGAL_DATE, '06/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 17, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 18, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: complete documents with plain, visible text and project URLs', async (t) => {
@@ -56,7 +56,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'e4498a16a4234a451776c94a17ea1afba7bc630dc91ffabd1d3f9c1f25d67c22', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '07d228c1e98f3a65668393a295e20d7092906c1ad70ce340241495c737b19895', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: pages are described in Terms and Privacy, including service-readable messages', async (t) => {
@@ -92,7 +92,20 @@ test('legal: version 17 describes photos in chats and the report image', async (
   t.ok(text(TERMS).includes('marcada como não conferida'))
   t.ok(text(PRIVACY).includes('Fotos de grupos públicos são públicas'))
   t.ok(text(PRIVACY).includes('cópia reduzida em JPEG de até 700 KB'))
-  for (const planned of ['áudio', 'mensagem de voz', 'busca de GIF', 'prévia de link', 'encaminhar']) {
+  for (const planned of ['busca de GIF', 'prévia de link', 'encaminhar']) {
     t.absent(text(TERMS).includes(planned) || text(PRIVACY).includes(planned), 'not described as available: ' + planned)
   }
+})
+
+test('legal: version 18 describes voice notes in chats and the report audio', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('mensagem de voz de até dois minutos'))
+  t.ok(text(TERMS).includes('só pede acesso ao microfone quando você começa a gravar'))
+  t.ok(text(TERMS).includes('o botão de gravar não aparece'))
+  t.ok(text(TERMS).includes('só os aparelhos dos membros conseguem ouvi-la'))
+  t.ok(text(TERMS).includes('Vídeos não são aceitos'))
+  t.ok(text(PRIVACY).includes('As conversas não aceitam vídeo'))
+  t.ok(text(PRIVACY).includes('o áudio vai junto com a denúncia, aberto'))
+  t.ok(text(PRIVACY).includes('se tiver até 700 KB'))
 })

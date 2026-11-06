@@ -32,6 +32,7 @@
     "bare-https": "3.1.0",
     "bare-ws": "3.2.0",
     "expo": "55.0.31",
+    "expo-audio": "55.0.18",
     "expo-build-properties": "55.0.18",
     "expo-clipboard": "55.0.17",
     "expo-crypto": "55.0.19",

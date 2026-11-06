@@ -37,6 +37,10 @@
 // runChatSend) under a progress ring. Cancelar before the post discards
 // them. An uncertain post keeps that exact request and only "tentar de novo"
 // resends it. Photos in the thread render inside the bubble (ChatMedia).
+// Voice notes take the same path: with an empty field the composer records
+// one (where the device can make audio/mp4), it is uploaded (sealed in a
+// private group) as the only item of one group.post, and the bubble plays
+// it (VoiceBubble).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
@@ -72,7 +76,7 @@ import { pagesGroup } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { shouldRedirectToCommunity } from '../groupRedirect'
 import { GrupoAjustes } from './GrupoAjustes'
-import { composePlan } from '../attach-plan'
+import { composePlan, stagedVoice } from '../attach-plan'
 import { chatMediaRefs, mediaPostLanded, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
@@ -547,6 +551,41 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
     if (sendTokenRef.current === token) sendTokenRef.current = null
     if (r.phase === 'cancelled') return
     mediaDone(r, text, replyTo ? replyTo.writer + ':' + replyTo.seq : null, sentAt, acting)
+  }
+
+  // A recorded voice note: one upload, then one group.post, under the same
+  // state machine as photos (one commit, retry only on an explicit tap, a
+  // change of acting identity discards it).
+  const sendVoice = async (recording) => {
+    if (mediaApi === null || sendingMedia || mediaHold !== null || attachments.items.length > 0 || !node.online || info === null) return
+    if (!recording || !(recording.bytes instanceof Uint8Array)) return
+    setMediaError('')
+    const k = replyKey !== null ? /^([0-9a-f]{64}):([1-9][0-9]*)$/.exec(replyKey) : null
+    const replyTo = k ? { writer: k[1], seq: Number(k[2]) } : null
+    const visibility = isPrivate ? 'private' : 'public'
+    let plan
+    try {
+      plan = composePlan({ text: '', attachments: [stagedVoice(recording)], target: { kind: 'group', group, visibility, ...(replyTo ? { replyTo } : {}) } })
+    } catch (err) {
+      setMediaError(errorText(err))
+      return
+    }
+    const sealed = visibility === 'private'
+    const acting = actingId
+    const sentAt = Date.now()
+    const token = { live: true }
+    sendTokenRef.current = token
+    const r = await runChatSend({
+      plan,
+      files: [recording],
+      upload: (f) => mediaApi.upload({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice', ...(sealed ? { sealed: true } : {}) }),
+      request,
+      live: () => token.live,
+      onPhase: (p) => { if (token.live) setMediaSend(p) }
+    })
+    if (sendTokenRef.current === token) sendTokenRef.current = null
+    if (r.phase === 'cancelled') return
+    mediaDone(r, '', replyTo ? replyTo.writer + ':' + replyTo.seq : null, sentAt, acting)
   }
 
   // The explicit retry of an uncertain photo post: the same group.post, once.
@@ -1052,6 +1091,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
         sendDisabled={!canPost || !node.online || left < 0 || postHold !== null || mediaBlocked}
         editable={canPost && mediaHold === null && !sendingMedia}
         onAttach={mediaApi !== null && canPost && postHold === null && check === null ? () => attachments.pick() : null}
+        onVoice={isTop && mediaApi !== null && canPost && postHold === null && check === null && mediaHold === null && attachments.items.length === 0 ? sendVoice : null}
         attachments={staged ? attachments.items : null}
         onRemoveAttachment={mediaHold === null ? attachments.remove : undefined}
         onCancelAttachments={mediaHold === null && !(mediaSend && mediaSend.phase === 'sending') ? cancelMedia : undefined}

@@ -6,7 +6,7 @@ const nodeCrypto = require('node:crypto')
 const { verifyReport, verifyDmReport } = require('@varanda/core/lib/report')
 const { verifyModeratorCert } = require('@varanda/core/lib/cert')
 const { canonicalBody, verifyModRequest } = require('@varanda/core/lib/mod-request')
-const { mediaBounds } = require('@varanda/rpc')
+const { mediaBounds, audioBounds } = require('@varanda/rpc')
 const { MAX_REPORTS, AI_ACTOR, ANEXO_MAX_BYTES, ANEXO_MIMES } = require('./moderation-store')
 
 // The moderation desk of the account service (mounted by ./server.js before
@@ -16,8 +16,9 @@ const { MAX_REPORTS, AI_ACTOR, ANEXO_MAX_BYTES, ANEXO_MIMES } = require('./moder
 //     cookie, the reporter's key proof over a single-use nonce is the
 //     authority (packages/core/lib/report.js); only a member linked to a
 //     Google account may report, so every report has an accountable author.
-//     POST /account/report/anexo is the same report carrying one image (a
-//     private or group message, statements dm v2 / v3): the only route with
+//     POST /account/report/anexo is the same report carrying one image or
+//     one voice note (a private or group message, statements dm v2 / v3):
+//     the only route with
 //     a body above REPORT_BODY_MAX, and at most MAX_ANEXO_INFLIGHT such
 //     bodies are read at once. The image is stored as the reporter's word
 //     and served to the panel from local disk only; it never reaches the AI
@@ -53,6 +54,8 @@ const SEALED_PROVENANCE = 'cifrada: citação do denunciante'
 // the image, which like the quote is the reporter's word only.
 const ANEXO_LIST_LABEL = 'com mídia'
 const ANEXO_PROVENANCE = 'imagem enviada por quem denunciou, não conferida'
+const ANEXO_AUDIO_PROVENANCE = 'áudio não conferido, enviado por quem denunciou'
+const ANEXO_AUDIO_MIME = 'audio/mp4'
 const LOGIN_COOKIE = '__Host-varanda-mod-login'
 const SESSION_COOKIE = '__Host-varanda-mod'
 const LOGIN_TTL_MS = 600 * 1000
@@ -114,7 +117,7 @@ const PARAM_RE = /^[\x21-\x7e]{1,512}$/
 const MOD_EMAIL_RE = /^[^\s,@]{1,64}@[^\s,@]{1,255}$/
 const MAX_MOD_EMAILS = 32
 
-const PANEL_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+const PANEL_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; media-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 const ASSETS = Object.freeze({
   '/account/mod/': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/account/mod/app.js': { file: 'app.js', type: 'text/javascript; charset=utf-8' },
@@ -188,14 +191,17 @@ function makeRoom (map, max, now) {
   while (map.size >= max) map.delete(map.keys().next().value)
 }
 
-// Standard base64 of one jpeg, webp or gif image of at most ANEXO_MAX_BYTES
-// that parses within the media bounds -> { bytes, mime, sha256 }, or null.
-// The format comes from the bytes, never from the request.
+// Standard base64 of one jpeg, webp or gif image, or one audio-only MPEG-4
+// voice note, of at most ANEXO_MAX_BYTES that parses within the media or
+// audio bounds -> { bytes, mime, sha256 }, or null. The format comes from
+// the bytes, never from the request: a container that declares a video
+// track fails audioBounds whatever the sender calls it.
 function decodeAnexo (value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > ANEXO_B64_MAX || value.length % 4 !== 0 || !B64_RE.test(value)) return null
   const bytes = Buffer.from(value, 'base64')
   if (bytes.length < 1 || bytes.length > ANEXO_MAX_BYTES || bytes.toString('base64') !== value) return null
-  const mime = ANEXO_MIMES.find((m) => mediaBounds(bytes, m) !== null)
+  let mime = ANEXO_MIMES.find((m) => m !== ANEXO_AUDIO_MIME && mediaBounds(bytes, m) !== null)
+  if (mime === undefined && audioBounds(bytes) !== null) mime = ANEXO_AUDIO_MIME
   if (mime === undefined) return null
   return { bytes, mime, sha256: nodeCrypto.createHash('sha256').update(bytes).digest('hex') }
 }
@@ -719,7 +725,7 @@ function createModRoutes ({
       // The image is fetched from api/reports/<id>/anexo; its digest stays
       // in the store.
       anexo: Object.hasOwn(r, 'anexo')
-        ? { mime: r.anexo.mime, size: r.anexo.size, label: ANEXO_LIST_LABEL, provenance: ANEXO_PROVENANCE }
+        ? { mime: r.anexo.mime, size: r.anexo.size, label: ANEXO_LIST_LABEL, provenance: r.anexo.mime === ANEXO_AUDIO_MIME ? ANEXO_AUDIO_PROVENANCE : ANEXO_PROVENANCE }
         : null,
       reason: r.reason,
       text: r.text,
@@ -1195,6 +1201,7 @@ module.exports = {
   MAX_ANEXO_INFLIGHT,
   ANEXO_LIST_LABEL,
   ANEXO_PROVENANCE,
+  ANEXO_AUDIO_PROVENANCE,
   ACK_BODY_MAX,
   MAX_MOD_EMAILS,
   PANEL_CSP,

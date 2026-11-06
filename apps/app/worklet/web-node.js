@@ -105,14 +105,14 @@ function createWebNode (args, { onInternalError } = {}) {
 
   const unlink = (file) => fs.promises.unlink(file)
 
-  function uploadFile ({ name, mime, width, height, sealed }) {
+  function uploadFile ({ name, mime, width, height, sealed, ms, kind }) {
     if (cacheDir === null) throw new RpcError('USAGE', BAD_MEDIA_FILE)
-    return uploadMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, sealed })
+    return uploadMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, sealed, ms, kind })
   }
 
-  function putMedia ({ name, mime, width, height }) {
+  function putMedia ({ name, mime, width, height, ms, kind }) {
     if (cacheDir === null) throw new RpcError('USAGE', BAD_MEDIA_FILE)
-    return putDmMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height })
+    return putDmMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, ms, kind })
   }
 
   // Opened chat images on disk: cleared at start, on every lock and at
