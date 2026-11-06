@@ -5453,3 +5453,66 @@ Limites desta caminhada:
 
 - O laboratório hospedado (`apps/cli/scripts/hosted-lab.js`) ainda não liga a busca de GIFs, e o serviço recusa um provedor em loopback; os passos com duas pessoas usam uma instalação de teste com um provedor falso público.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 112. Aviso push de mensagem nova não aparece no aparelho que enviou (PR fix/dm-wake-self-notification)
+
+Num nó hospedado no navegador, o aviso push de mensagem direta nova (`dm-wake`, seção 11 de [protocol.md](protocol.md), "Push wake") é global: vai para todas as assinaturas, sem nome nem texto. Um aparelho que acabou de enviar uma mensagem recebia o aviso de volta, "Pode haver uma mensagem nova na Varanda", como se fosse de outra pessoa. A mudança faz três coisas, todas no navegador e sem nada novo no servidor:
+
+- Depois de uma janela da Varanda sinalizar que enviou uma mensagem direta ou mexeu em pasta (o marcador `varanda-dm-sent`, mandado só ao worker do próprio site), o worker de `apps/app/scripts/sw.js` grava no cache `varanda-dm-state` um prazo de 120 s (`DM_WAKE_MUTE_MS`). Só o relógio do worker vale, e um prazo malformado ou longo demais é ignorado. Nesse prazo, esse aparelho não deixa o aviso de `dm-wake` na tela: mostra em silêncio e fecha na hora (ver abaixo).
+- Enquanto uma janela da Varanda estiver visível e em foco, o aviso não fica na tela desse navegador: o worker entrega `varanda-dm-wake` a essa janela (que precisa responder em até 1 s), ela recarrega as Conversas no lugar (`apps/app/src/usePush.web.js` e `apps/app/App.js`), e as outras janelas da Varanda do mesmo navegador também recarregam.
+- Quem envia: o núcleo do navegador (`packages/web-member/lib/dm.js`) emite `dm.sending` antes de cada gravação de uma mensagem ou de uma pasta; a página de Conversas como página (`apps/app/src/pages.js`) marca `dm-send` antes do pedido, também na nova tentativa, e nunca `dm-set`. Em `apps/app/src/node.js` o evento vira o marcador. No app instalado (`dmWakeMute.native.js`) não há nada a fazer.
+
+O aviso é sempre `{ v: 1, kind: 'dm-wake' }`, e o servidor não sabe quem enviou. Limites que a conferência abaixo deve observar:
+
+1. Uma pasta mexida com o aparelho travado é gravada na fila (`packages/web-member/lib/dm.js`, na abertura do cadeado) e sobe ao destravar. Essa gravação pode acontecer antes de a página estar anexada ao núcleo, e os eventos de sessão sem receptor são descartados (`packages/web-member/lib/session.js`, `send`). Assim, esse único aviso ainda pode aparecer no aparelho que enviou.
+2. O evento `dm.sending` chega à página num microtask (`apps/app/src/client/browser.js`), e o marcador é um `postMessage` seguido de `cache.put`, enquanto o semeador dispara o aviso dentro do `put` da gravação (`packages/core/lib/dm-pool.js`). Um aviso muito rápido, em teoria, pode chegar antes do marcador. A conferência registra se isso acontece.
+3. Um aviso entregue depois (o push vale até um dia, `PUSH_TTL_S` em `apps/cli/lib/account/web-push.js`) aparece, mesmo dentro dos 120 s de outro envio. Um aviso que não diz quem escreveu também não é distinguido: um aviso de outra pessoa que chegue nesses 120 s some no aparelho que enviou.
+
+O push nunca termina sem aviso. Nos dois casos acima, o worker mostra o aviso em silêncio (`silent: true`, sem som nem vibração), com uma etiqueta própria (`varanda-dm-wake-quiet`), e o fecha na hora. A etiqueta própria garante que um aviso de verdade que ainda esteja na tela não é trocado nem fechado. Decisão do dono (2026-11-06), depois de a documentação do WebKit dizer que um push sem aviso visível, por qualquer motivo, revoga a assinatura.
+
+### Risco: o aviso fechado na hora ainda pode aparecer, ou o navegador pode tratá-lo como silencioso
+
+A assinatura é `userVisibleOnly` (`apps/app/src/pushClient.web.js`). O WebKit (Safari no Mac e PWA no iPhone) documenta que revoga a assinatura de um push que não mostra aviso. Mostrar e fechar na hora conta como mostrado pelo que o WebKit descreve, mas isso não foi conferido num aparelho. Também não foi conferido se o Chrome, com o app em segundo plano, conta um aviso fechado na hora como mostrado ou mostra o aviso genérico dele ("o site foi atualizado em segundo plano"), nem se o aviso pisca por um instante em algum sistema. Por isso a matriz abaixo é uma conferência, não uma garantia.
+
+Se a matriz mostrar um aviso genérico, um aviso que pisca de forma incômoda ou uma assinatura revogada, o resultado vai ao dono da Varanda para decisão.
+
+### Como verificar
+
+Testes automáticos desta parte: `apps/app/test/sw.test.js` (prazo de 120 s e janela em foco), `apps/app/test/pages.test.js` (marcador em `dm-send`), `apps/app/test/dmWakeMute.test.js` (módulo do aparelho), `packages/web-member/test/dm.test.js` (`dm.sending` antes de cada gravação) e `packages/rpc/test/envelope.test.js` (o evento `dm.sending`). Verificação por lint: `npm run lint`. As caixas abaixo ficam desmarcadas até alguém executar o passo, num navegador de verdade com a instalação web hospedada.
+
+Duas janelas da mesma passkey (A e B) mais um terceiro membro (C), com avisos ligados em A e B:
+
+- [ ] Em A, enviar uma mensagem direta para C (com pelo menos 15 minutos desde o último aviso push de mensagem na instalação, por causa do intervalo global). Em até 2 minutos, A não mostra aviso nenhum; B mostra o aviso "Pode haver uma mensagem nova na Varanda".
+- [ ] Com A visível e em foco, C escreve para você. A não mostra aviso; a bolinha de Conversas em A é atualizada sem recarregar. B, com a janela escondida, mostra o aviso.
+- [ ] Em A (sem foco, mas com a janela aberta), enviar uma mensagem para C. A não mostra o aviso dessa mensagem nos 2 minutos seguintes.
+- [ ] Pela Conversas como página (com a página administrada por você), enviar uma mensagem. A não mostra o aviso dessa mensagem.
+- [ ] Em A, mudar uma conversa de pasta (`dm.set`, por exemplo aceitar um pedido de mensagem). Essa mudança grava um `ctl` no conjunto de mensagens, que também dispara o aviso: esperado, A não mostra o aviso nos 2 minutos seguintes.
+- [ ] Agindo como página, mudar uma conversa da página de pasta (`dm-set` da página). Essa mudança não grava nada no conjunto de mensagens (fica no serviço de conta), então não ativa a regra de A: um aviso de outra mensagem que chegue logo depois aparece em A. Registrar o que foi visto.
+- [ ] Com A travado (senha ou passkey pendente), gravar uma pasta e destravar. Registrar se o aviso dessa pasta aparece em A (limite 1 acima). Esperado: pode aparecer.
+- [ ] Enviar uma mensagem de A para C muito logo depois de C ter respondido por outro aparelho, e registrar se o aviso de C aparece em A (limite 2 acima). Esperado: não aparece; se aparecer, registrar a ordem de chegada.
+
+Matriz de navegadores. Em cada um, instalado como web hospedada (PWA quando houver), depois de três avisos escondidos seguidos (mostrados em silêncio e fechados na hora) e de uma espera de 10 minutos, registrar:
+
+- se o aviso escondido chega a piscar na tela, tocar som ou vibrar;
+- se aparece um aviso genérico do tipo "o site foi atualizado em segundo plano" ou equivalente, sem o texto da Varanda;
+- se a assinatura continua ativa (registrar o estado que o app mostra para o aviso, ou se a Varanda pede para ativar de novo);
+- se o aviso de outra mensagem chega normalmente depois disso.
+
+- [ ] Chrome no computador (aba visível e em foco, depois aba escondida).
+- [ ] Chrome no Android (PWA instalado).
+- [ ] Firefox no computador.
+- [ ] Safari no macOS.
+- [ ] Safari no iOS (PWA instalado na tela de início).
+
+Resultado da matriz: a registrar aqui por navegador, com a data e a versão do navegador. Se algum mostrar aviso genérico ou revogar a assinatura, não corrigir por conta própria: levar ao dono.
+
+### Limites desta parte
+
+- O aviso é do navegador. No app instalado não há aviso do sistema, e nada muda ali.
+- Os 120 s são do aparelho que enviou: os outros aparelhos da mesma pessoa recebem o aviso normalmente, porque o servidor não sabe qual deles enviou.
+- A supressão vale só no aparelho, e o marcador não sai dele: nenhum servidor aprende quem enviou.
+- Os limites 1 e 2 acima são conhecidos e não corrigidos nesta parte. A conferência registra o que acontece.
+- O serviço de conta manda no máximo um aviso de mensagem a cada 15 minutos para todo mundo (`DM_WAKE_COOLDOWN_MS`, já era assim). Se o primeiro aviso desse intervalo foi o do próprio envio, e por isso não apareceu, uma resposta que chegue depois dos 120 s e antes de acabar o intervalo também não gera aviso; ela aparece no próximo `dm.pull` (ao voltar para o app, ao puxar para atualizar ou a cada 5 minutos com o app visível). Antes desta parte essa resposta também não gerava aviso: só aparecia o aviso do próprio envio.
+- A janela em foco só fica com o aviso se o app responder ao service worker em até 1 s (`DM_WAKE_ACK_MS`); uma aba em foco que não é o app (uma imagem aberta direto, por exemplo) não responde, e o aviso aparece.
+- Com a janela em foco, o aviso vira só uma releitura. Se a identidade está travada, a releitura espera o destravar. Se já há um `dm.pull` em andamento, a releitura dele falha e a mensagem aparece no próximo. Mensagens de uma página só aparecem quando a pessoa está agindo como a página, como antes. Uma janela em foco fora da área de membro (a abertura, os Termos, a primeira configuração, ou o começo de um carregamento antes de o app ouvir) não responde ao worker, e o aviso aparece normalmente.
+- Nenhuma caixa executada nesta documentação.
