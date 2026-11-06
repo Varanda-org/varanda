@@ -7,6 +7,11 @@ const test = require('brittle')
 const { webcrypto } = require('node:crypto')
 const { IDBFactory } = require('fake-indexeddb')
 const { createSessionStore, MAX_IDLE_MS, STORE, RECORD_KEY } = require('../lib/session-store')
+const b4a = require('b4a')
+const crypto = require('hypercore-crypto')
+const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
+const { memoryNodeStorage } = require('../lib/node-storage')
+const nodeStore = require('../lib/node-store')
 
 const DAY = 24 * 60 * 60 * 1000
 
@@ -14,6 +19,79 @@ const RP_ID = 'bora.varanda.app'
 const PUBLIC_KEY = 'ab'.repeat(32)
 const OTHER_KEY = 'cd'.repeat(32)
 const CREDENTIAL_ID = 'AAECAwQFBgcICQoLDA0ODw'
+
+test('kv seenLocal: a sealed blob round-trips, bound to the own key and the exact length', async (t) => {
+  const storage = memoryNodeStorage()
+  t.is(await nodeStore.readSeenLocal(storage, PUBLIC_KEY), null, 'absent')
+  const blob = b4a.toString(crypto.randomBytes(SEEN_BLOB_BYTES), 'base64')
+  t.is(blob.length, SEEN_BLOB_B64)
+  await nodeStore.writeSeenLocal(storage, PUBLIC_KEY, blob)
+  t.is(await nodeStore.readSeenLocal(storage, PUBLIC_KEY), blob, 'round trip')
+  t.is(await nodeStore.readSeenLocal(storage, OTHER_KEY), null, 'another own key reads null')
+  t.is(await nodeStore.readSeenLocal(storage, 'zz'), null, 'a malformed own key reads null')
+
+  const short = b4a.toString(crypto.randomBytes(SEEN_BLOB_BYTES - 3), 'base64')
+  const long = b4a.toString(crypto.randomBytes(SEEN_BLOB_BYTES + 3), 'base64')
+  for (const bad of [short, long, blob.slice(0, -1) + '!', 42, null]) {
+    await storage.writeJson('seenLocal', { v: 1, own: PUBLIC_KEY, blob: bad })
+    t.is(await nodeStore.readSeenLocal(storage, PUBLIC_KEY), null, 'wrong blob reads null')
+    t.exception.all(() => nodeStore.writeSeenLocal(storage, PUBLIC_KEY, bad), /visto inválido/, 'and is refused on write')
+  }
+  await storage.writeJson('seenLocal', { v: 2, own: PUBLIC_KEY, blob })
+  t.is(await nodeStore.readSeenLocal(storage, PUBLIC_KEY), null, 'another version reads null')
+  await storage.writeJson('seenLocal', [blob])
+  t.is(await nodeStore.readSeenLocal(storage, PUBLIC_KEY), null, 'a non-object reads null')
+  t.exception.all(() => nodeStore.writeSeenLocal(storage, 'AB'.repeat(32), blob), /chave inválida/, 'own key must be lowercase hex64')
+})
+
+test('kv seenRemote: a sealed blob round-trips, bound to the own key and the exact length', async (t) => {
+  const storage = memoryNodeStorage()
+  t.is(await nodeStore.readSeenRemote(storage, PUBLIC_KEY), null, 'absent')
+  const blob = b4a.toString(crypto.randomBytes(SEEN_BLOB_BYTES), 'base64')
+  await nodeStore.writeSeenRemote(storage, PUBLIC_KEY, blob)
+  t.is(await nodeStore.readSeenRemote(storage, PUBLIC_KEY), blob, 'round trip')
+  t.is(await nodeStore.readSeenRemote(storage, OTHER_KEY), null, 'another own key reads null')
+  const short = b4a.toString(crypto.randomBytes(SEEN_BLOB_BYTES - 3), 'base64')
+  for (const bad of [short, blob.slice(0, -1) + '!', 42, null]) {
+    await storage.writeJson('seenRemote', { v: 1, own: PUBLIC_KEY, blob: bad })
+    t.is(await nodeStore.readSeenRemote(storage, PUBLIC_KEY), null, 'wrong blob reads null')
+    t.exception.all(() => nodeStore.writeSeenRemote(storage, PUBLIC_KEY, bad), /visto inválido/, 'and is refused on write')
+  }
+  await storage.writeJson('seenRemote', { v: 2, own: PUBLIC_KEY, blob })
+  t.is(await nodeStore.readSeenRemote(storage, PUBLIC_KEY), null, 'another version reads null')
+  t.exception.all(() => nodeStore.writeSeenRemote(storage, 'AB'.repeat(32), blob), /chave inválida/, 'own key must be lowercase hex64')
+})
+
+test('kv seenSync: hash and gen round-trip, bound to the own key', async (t) => {
+  const storage = memoryNodeStorage()
+  t.alike(await nodeStore.readSeenSync(storage, PUBLIC_KEY), { hash: null, gen: 0 }, 'absent')
+  const hash = 'ef'.repeat(32)
+  await nodeStore.writeSeenSync(storage, PUBLIC_KEY, { hash, gen: 7 })
+  t.alike(await nodeStore.readSeenSync(storage, PUBLIC_KEY), { hash, gen: 7 }, 'round trip')
+  t.alike(await nodeStore.readSeenSync(storage, OTHER_KEY), { hash: null, gen: 0 }, 'another own key reads the default')
+  await nodeStore.writeSeenSync(storage, PUBLIC_KEY, { hash: null, gen: 0 })
+  t.alike(await nodeStore.readSeenSync(storage, PUBLIC_KEY), { hash: null, gen: 0 }, 'a null hash round-trips')
+
+  for (const [badHash, badGen] of [['ef', 1], [hash, -1], [hash, 1.5], [hash, Number.MAX_SAFE_INTEGER + 1], [hash, '1']]) {
+    await storage.writeJson('seenSync', { v: 1, own: PUBLIC_KEY, hash: badHash, gen: badGen })
+    t.alike(await nodeStore.readSeenSync(storage, PUBLIC_KEY), { hash: null, gen: 0 }, 'malformed reads the default')
+    t.exception.all(() => nodeStore.writeSeenSync(storage, PUBLIC_KEY, { hash: badHash, gen: badGen }), /sincronização inválida/, 'and is refused on write')
+  }
+})
+
+test('deleteDmData clears seenLocal, seenRemote and seenSync with the dm state', async (t) => {
+  const storage = memoryNodeStorage()
+  const blob = b4a.toString(crypto.randomBytes(SEEN_BLOB_BYTES), 'base64')
+  await nodeStore.writeSeenLocal(storage, PUBLIC_KEY, blob)
+  await nodeStore.writeSeenSync(storage, PUBLIC_KEY, { hash: 'ef'.repeat(32), gen: 3 })
+  await nodeStore.writeSeenRemote(storage, PUBLIC_KEY, blob)
+  await nodeStore.writeDmSeen(storage, ['01'.repeat(16)])
+  await nodeStore.deleteDmData(storage)
+  t.is(await nodeStore.readSeenLocal(storage, PUBLIC_KEY), null, 'seenLocal gone')
+  t.alike(await nodeStore.readSeenSync(storage, PUBLIC_KEY), { hash: null, gen: 0 }, 'seenSync gone')
+  t.is(await nodeStore.readSeenRemote(storage, PUBLIC_KEY), null, 'seenRemote gone')
+  t.alike(await nodeStore.readDmSeen(storage), [], 'dmSeen gone as before')
+})
 
 function prfBytes (seed = 7) {
   return new Uint8Array(32).map((_, i) => (i * 13 + seed) & 0xff)

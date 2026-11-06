@@ -2219,6 +2219,8 @@ Como a fusão só soma marcas, ela é comutativa e idempotente: aparelhos que co
 
 Limite de relógio: a marca de um grupo leva a hora do post marcado, e o autor de um post pode datá-lo até 24 h à frente (`MAX_FUTURE_MS`, a mesma regra dos demais feeds). Uma marca copiada de um post desses, vinda de outro aparelho, fica à frente da ordem local: os posts do grupo que vêm antes dela na ordem ficam como lidos, e um post depois dela pode ficar escondido, até o post marcado aparecer na lista local. Esse efeito já existia com a marca local (regra de `postsAfter` em `packages/web-member/lib/member-ops.js`); o bloco só o leva a outros aparelhos da mesma passkey. Relógio do aparelho: cada marca de Avisos e de Conversas leva a hora do aparelho que a marcou, e o corte de uma lista cheia mantém as mais novas. Um aparelho com o relógio muito adiantado faz as marcas dele parecerem as mais novas; com a lista cheia, marcas recentes de outro aparelho saem do bloco e o ponto pode voltar nesse outro aparelho. Nenhum item fica escondido por isso.
 
+Limite aceito, relógio do autor: a marca de um grupo num post que o autor datou antes do post que ele segue (o relógio do autor voltou) é mais nova na ordem do grupo neste aparelho, mas mais antiga pela hora. O documento compartilhado fica com a marca de hora mais recente, então a marca mais nova não é compartilhada até um post seguinte mover a marca de novo. A marca do próprio aparelho fica certa (a regra de avanço de `group.seen`).
+
 ### Leitura, escrita e apagamento (`seen-routes.js`)
 
 As rotas ficam em `/account/seen/`, com a mesma ordem de `/account/push/` e das rotas de idade: `start` e `finish`. Estão sempre montadas; sem armazenamento usável, respondem 503 `indisponivel`.
