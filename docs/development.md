@@ -256,7 +256,7 @@ O ciclo completo, com a ordem das plataformas, a checklist de telas e os critér
 
 ## Builds de teste (EAS)
 
-Configuração em `apps/app/eas.json` (perfis `preview` e `preview-simulator`) e `.easignore` na raiz. Nenhum comando abaixo roda na CI nem num agente: quem tem a conta Expo roda, da pasta `apps/app`.
+Configuração em `apps/app/eas.json` (perfis `preview` e `preview-simulator`; o `production` está na seção seguinte) e `.easignore` na raiz. Nenhum comando abaixo roda na CI nem num agente: quem tem a conta Expo roda, da pasta `apps/app`. A única exceção é o fluxo `ios-release`, da seção seguinte.
 
 ```sh
 eas login
@@ -277,6 +277,28 @@ eas credentials -p android
 - iOS em ad hoc exige conta Apple Developer. Até lá, use `eas build --profile preview-simulator --platform ios`.
 - Passkey no iOS: `ios/Varanda/Varanda.entitlements` declara `webcredentials:bora.varanda.app` (repetido em `ios.associatedDomains` do `app.json`, para o prebuild) e `ios/Varanda/Info.plist` tem `VarandaWebCredentials` em `true`; `test/hardening.test.js` confere que os dois, o host dos App Links do Android e o `apple-app-site-association` do deploy falam do mesmo app e do mesmo host. A passkey e a volta do Google só funcionam depois de três passos do operador: `VARANDA_IOS_APP_ID=<Team ID>.app.varanda` no `deploy/seeder/.env` da produção; um deploy que publique `https://bora.varanda.app/.well-known/apple-app-site-association` com esse id; e um perfil de provisionamento com Associated Domains. O `eas build` logado na conta Apple sincroniza a capacidade a partir do entitlement (linha `Synced capabilities` no terminal) e confere o perfil com a Apple; sem esse login ele não confere, e o perfil se refaz em `eas credentials -p ios`. A Apple lê o arquivo por uma CDN própria, então a mudança pode demorar a chegar aos aparelhos. O build de simulador não é assinado pelo time e não casa com o arquivo: a entrada se confere no TestFlight, num iPhone com iOS 18 ou mais novo.
 - O módulo local `apps/app/modules/auth-session` devolve ao app a etapa do Google na ligação da conta, sem passar o código pelo esquema `varanda://`. No Android usa Auth Tab (androidx.browser 1.9.0): precisa do Chrome 137 ou mais novo e de `/.well-known/assetlinks.json` com `handle_all_urls`. No iOS usa ASWebAuthenticationSession com retorno https (iOS 17.4 ou mais novo), com o mesmo `webcredentials` e a mesma chave `VarandaWebCredentials` da passkey. O app usa o navegador padrão quando ele tem Auth Tab e, se não tiver, só o Chrome que veio instalado no aparelho (outro app poderia se declarar navegador e devolver um código de outra conta Google); sem nenhum dos dois, pede que a pessoa ligue a conta Google no site, com a mesma passkey.
+
+## Envio para a App Store (EAS)
+
+O perfil `production` do `apps/app/eas.json` gera o build de loja do iOS, e o perfil `submit.production` o envia ao App Store Connect (`ascAppId` 6831662804, bundle `app.varanda`). O fluxo `.github/workflows/ios-release.yml` roda `eas build --platform ios --profile production --auto-submit --non-interactive --no-wait` a cada push em `main` que mexe no app (`apps/app`, `packages`, `package.json`, `package-lock.json`, `.easignore`) ou por Run workflow em `main`. O runner só põe o build e o envio na fila: o resultado aparece no expo.dev e no App Store Connect, não no GitHub. O build chega ao TestFlight; mandar uma versão para a revisão da App Store continua manual, no App Store Connect.
+
+Passos únicos, de quem tem as contas Apple e Expo, da pasta `apps/app`:
+
+```sh
+eas build:version:set -p ios
+eas credentials -p ios
+eas env:create --name EXPO_PUBLIC_VARANDA_INSTALLATION --value https://<dominio> --environment production --visibility plaintext
+eas build -p ios --profile production --auto-submit
+```
+
+- `eas build:version:set` passou a numeração para a EAS (`"appVersionSource": "remote"`), e `autoIncrement` sobe o número do build a cada build, sem editar o projeto. O `CFBundleVersion` do `Info.plist` deixa de valer para a loja. Foi rodado em 2026-11-06, a partir de 1; o primeiro build de loja que terminou foi o 4.
+- A versão (`CFBundleShortVersionString`, hoje `0.1.0`) continua no projeto nativo. Para uma versão nova na App Store, mude `MARKETING_VERSION` em `ios/Varanda.xcodeproj/project.pbxproj`, `CFBundleShortVersionString` em `ios/Varanda/Info.plist` e `version` no `app.json`, e confira que a versão aberta no App Store Connect tem o mesmo número.
+- Em `eas credentials -p ios`, escolha `production`, deixe a EAS criar o certificado de distribuição e o perfil de provisionamento, e em "App Store Connect: Manage your API Key" configure a chave que o EAS Submit usa. Sem essa chave guardada na EAS, o envio com `--non-interactive` falha. Só Account Holder ou Admin da conta Apple cria a chave. Ela nunca entra no repositório (`*.p8` está no `.easignore` e o teste confere).
+- O perfil `production` define `npm_config_ignore_scripts=true`. O builder da EAS roda `npm ci --include=dev` na raiz, e sem isso o script de instalação do `sharp` (dependência do `@huggingface/transformers` de `apps/cli`, sem uso no app) tenta compilar do código-fonte no macOS e o build para na etapa Install dependencies. É o mesmo `--ignore-scripts` da CI. O hook `eas-build-post-install` roda mesmo assim, porque o npm executa o script chamado pelo nome. Os perfis `preview` não têm a variável, então um build iOS deles pode cair no mesmo erro.
+- `ITSAppUsesNonExemptEncryption` não está no `Info.plist`: cada build fica em "Missing Compliance" no TestFlight até alguém responder à pergunta de criptografia no App Store Connect. A resposta depende da criptografia de ponta a ponta das conversas e é decisão dos mantenedores. Como `ios/` é mantido à mão, a chave vai direto no `Info.plist`; o `ios.config.usesNonExemptEncryption` do `app.json` só valeria num `expo prebuild`.
+- Para ligar o fluxo: crie um token de acesso da Expo para a conta `varanda-org`; em Settings > Environments, crie o ambiente `app-store`, com deployment branches só `main` e o segredo `EXPO_TOKEN`; em Settings > Secrets and variables > Actions > Variables, crie `VARANDA_IOS_RELEASE` com o valor `true`. Qualquer outro valor pausa os envios, inclusive pelo Run workflow.
+- O fluxo instala o `eas-cli` 27.2.0 com `--ignore-scripts`, a versão do primeiro build e envio deste perfil. Antes de trocar a versão, rode um build local com a nova.
+- Cada push em `main` que mexe no app gasta um build iOS da EAS. `apps/cli/test/ios-release.test.js` fixa a forma do fluxo e os perfis do `eas.json`.
 
 ## Ficha da App Store (EAS Metadata)
 
