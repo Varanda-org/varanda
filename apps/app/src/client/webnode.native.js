@@ -2,7 +2,7 @@
 // session inside the Bare worklet, src/client/native.js), shaped like
 // connectBrowserNode's (src/client/browser.js; docs/rpc.md section 11) so
 // src/node.js treats both alike. The host controls cross the IPC as the
-// IPC-only methods of docs/rpc.md 5.50 to 5.56, 5.88 and 5.89.
+// IPC-only methods of docs/rpc.md 5.50 to 5.56, 5.88, 5.89, and recovery's 5.91 to 5.94.
 //
 // The identity API is src/identity.native.js (the passkey ceremony on the
 // device, the PRF output handed over by identity.install). The handle exists
@@ -15,6 +15,7 @@
 import { Directory, File, Paths } from 'expo-file-system'
 import { rpIdOf, installationOrigin } from '../installation'
 import { createNativeIdentity } from '../identity'
+import { sweepVoiceCache } from '../media/audio'
 import { uploadDirectory } from './native'
 
 function rpIdOrNull () {
@@ -87,8 +88,15 @@ function progress (onProgress, value) {
 }
 
 // request(method, params): the connection's request (connect.native.js).
+// The voice fields, only for a voice note: an image request keeps its exact
+// four or five keys.
+function voiceOf ({ ms, kind }) {
+  return kind === 'voice' ? { ms, kind } : {}
+}
+
 export function webNodeHandle (request) {
   sweepReadDir()
+  sweepVoiceCache()
   const native = createNativeIdentity({ request, rpId: rpIdOrNull })
   native.resume()
   const afterLock = (fn) => async (...args) => {
@@ -104,7 +112,14 @@ export function webNodeHandle (request) {
     complete: native.complete,
     lock: afterLock(native.lock),
     signOut: afterLock(native.signOut),
-    reset: afterLock(native.reset)
+    reset: afterLock(native.reset),
+    unlockWrapped: native.unlockWrapped,
+    unlockWithCode: native.unlockWithCode,
+    cancelRecovery: native.cancelRecovery,
+    finishRecovery: native.finishRecovery,
+    addPasskey: native.addPasskey,
+    bindPasskey: native.bindPasskey,
+    makeRecoveryCode: native.makeRecoveryCode
   }
 
   // The bytes go through a file in the upload dir: one IPC request is capped
@@ -132,9 +147,10 @@ export function webNodeHandle (request) {
   // far above MAX_MESSAGE (docs/rpc.md 5.89). ref: { kind: 'dm', from, id,
   // index } or { kind: 'group', diary, item } -> { uri, mime, w, h }.
   const media = {
-    upload: ({ bytes, mime, width, height, sealed, onProgress } = {}) =>
-      sendFile(bytes, 'media.uploadFile', sealed === true ? { mime, width, height, sealed } : { mime, width, height }, onProgress),
-    putDm: ({ bytes, mime, width, height } = {}) => sendFile(bytes, 'dm.putMedia', { mime, width, height }),
+    // A voice note also carries its duration and kind (docs/rpc.md 5.56, 5.88).
+    upload: ({ bytes, mime, width, height, sealed, ms, kind, onProgress } = {}) =>
+      sendFile(bytes, 'media.uploadFile', { mime, width, height, ...voiceOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) }, onProgress),
+    putDm: ({ bytes, mime, width, height, ms, kind } = {}) => sendFile(bytes, 'dm.putMedia', { mime, width, height, ...voiceOf({ ms, kind }) }),
     read: async (ref) => {
       if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
       const params = ref.kind === 'dm'
@@ -144,7 +160,7 @@ export function webNodeHandle (request) {
       const name = got !== null && typeof got === 'object' ? got.name : null
       if (typeof name !== 'string' || !READ_NAME_RE.test(name)) throw new Error('resposta inválida')
       readFiles.add(name)
-      return { uri: readFileUri(name), mime: got.mime, w: got.w, h: got.h }
+      return { uri: readFileUri(name), mime: got.mime, w: got.w, h: got.h, ...(Number.isSafeInteger(got.ms) ? { ms: got.ms } : {}) }
     },
     forgetReadFile,
     clearReadFiles

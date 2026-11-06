@@ -1,7 +1,7 @@
 'use strict'
 
-// The browser node's seen sync (lib/seen-sync.js, docs/rpc.md 5.90 seen.sign
-// and 5.91 seen.merge): signed statements, the sealed document built from kv,
+// The browser node's seen sync (lib/seen-sync.js, docs/rpc.md 5.95 seen.sign
+// and 5.96 seen.merge): signed statements, the sealed document built from kv,
 // convergence between two devices of one identity, unions at the local caps,
 // the group.seen forward rule for remote marks, caughtUp, and the session
 // wiring (LOCKED, no diary core opened, seen.changed coalesced).

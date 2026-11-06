@@ -277,6 +277,22 @@ eas credentials -p android
 - iOS em ad hoc exige conta Apple Developer. Até lá, use `eas build --profile preview-simulator --platform ios`. Para entrar com passkey no iOS: adicione `webcredentials:<domínio>` em `ios/Varanda/Varanda.entitlements`, defina `VARANDA_IOS_APP_ID` no `.env` do deploy e troque `VarandaWebCredentials` para `true` em `ios/Varanda/Info.plist`.
 - O módulo local `apps/app/modules/auth-session` devolve ao app a etapa do Google na ligação da conta, sem passar o código pelo esquema `varanda://`. No Android usa Auth Tab (androidx.browser 1.9.0): precisa do Chrome 137 ou mais novo e de `/.well-known/assetlinks.json` com `handle_all_urls`. No iOS usa ASWebAuthenticationSession com retorno https (iOS 17.4 ou mais novo), com o mesmo `webcredentials` e a mesma chave `VarandaWebCredentials` da passkey. O app usa o navegador padrão quando ele tem Auth Tab e, se não tiver, só o Chrome que veio instalado no aparelho (outro app poderia se declarar navegador e devolver um código de outra conta Google); sem nenhum dos dois, pede que a pessoa ligue a conta Google no site, com a mesma passkey.
 
+## Ficha da App Store (EAS Metadata)
+
+`apps/app/store.config.json` guarda a ficha do iOS em pt-BR no formato do EAS Metadata (`configVersion: 0`): nome, subtítulo, descrição, palavras-chave, URLs, categoria, classificação etária e versão. Quem tem a conta Expo e acesso ao App Store Connect roda, da pasta `apps/app`; nenhum destes comandos roda na CI nem num agente, menos o `lint`:
+
+```sh
+eas metadata:lint   # confere o arquivo contra o esquema do eas-cli, sem falar com a Expo nem com a Apple
+eas metadata:push   # envia a ficha para a versão editável do App Store Connect
+eas metadata:pull   # baixa a ficha do App Store Connect e sobrescreve o arquivo
+```
+
+- O bloco `apple.review` fica fora do arquivo de propósito: o esquema exige nome, e-mail e telefone do contato da revisão, e o repositório é público. Contato, conta de demonstração e notas para a revisão se preenchem à mão em App Store Connect › App Review Information; sem o bloco, o `push` não mexe neles.
+- Depois de um `pull`, apague o `apple.review` que ele escreve antes de commitar, e confira o diff inteiro.
+- `apple.version` escolhe a versão editável: se ela não existir, o `push` renomeia a versão em preparação para esse número.
+- Sem `apple.copyright`, o eas-cli 27.2.0 envia `copyright: null` no `push`, o que pode apagar um copyright digitado no App Store Connect. Quando a associação decidir o texto, ponha-o no arquivo.
+- Ficam no App Store Connect, fora do EAS Metadata: privacidade do app (o formulário de dados coletados), preço e disponibilidade, direitos de conteúdo, conformidade de exportação (criptografia) e, enquanto o arquivo não tiver `screenshots`, as capturas.
+
 ## Browser member spike (packages/web-member)
 
 The spike of a member whose key lives in the browser, kept next to the browser node it led to (previous section). The spike page and the relay are private and not shipped; the results are in [verification.md](verification.md) section 8, and the browser node's in section 9. Its Node tests need Node 20.19 or newer (`engines` in its package.json): the browser crypto shim loads `@noble/curves` 2.x, which is ESM-only, through `require()`. From the repo root, with a local DHT and a certified seeder already set up (see section 8 for the setup):

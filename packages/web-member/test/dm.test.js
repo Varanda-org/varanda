@@ -14,7 +14,7 @@ const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const dmCore = require('@varanda/core/lib/dm')
 const { verifyDmReport } = require('@varanda/core/lib/report')
 const { createBrowserNode } = require('../lib/node')
-const { createDmEngine } = require('../lib/dm')
+const { createDmEngine, voiceMs } = require('../lib/dm')
 const { createDmStore } = require('../lib/dm-store')
 const member = require('../lib/member-ops')
 const { memoryNodeStorage } = require('../lib/node-storage')
@@ -981,4 +981,84 @@ test('a failed photo upload is a normal error and sends nothing; an item not put
   t.is(refused.message, 'prepare a mídia de novo', 'an item this node did not put')
   t.is(seeder.puts.length, puts, 'no drop was put')
   t.is((await A.web.request('dm.list', {})).conversations.length, 0, 'nothing filed')
+})
+
+// A minimal MPEG-4 audio file (ftyp, moov with mvhd and one trak per
+// handler, mdat): enough for audioBounds.
+function m4a ({ ms = 3000, handlers = ['soun'], pad = 0 } = {}) {
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (s) => Array.from(s, (c) => c.charCodeAt(0))
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  // A real sound track: mdhd timescale 1000, a self-contained data reference,
+  // one mp4a sample entry and a sample table as long as `ms`.
+  const trak = (h) => box('trak', box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(h), be32(0), be32(0), be32(0), [0]), box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(1), be32(ms)), box('stsz', [0, 0, 0, 0], be32(1), be32(1)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(1), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))))
+  return b4a.from([
+    ...box('ftyp', ascii('M4A '), be32(0), ascii('isom')),
+    ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(ms), new Array(80).fill(0)), ...handlers.map(trak)),
+    ...box('mdat', new Array(pad).fill(9))
+  ])
+}
+
+test('a voice note for dm.send: audio only, no sides, its duration; checked before the put', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  // The stand-in has no blob channel: a voice note that passes the checks
+  // fails at the put, like a photo, never as 'mídia inválida'.
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url, { dm: { blob: { wallet: 4, walletLow: 2, issuePaceMs: 0 } } })
+  const voice = { bytes: m4a({ pad: 200 }), mime: 'audio/mp4', width: 0, height: 0, ms: 3000, kind: 'voice' }
+  const err = await A.node.dmPutMedia(voice).then(() => null, (e) => e)
+  t.ok(err !== null, 'the upload fails at the blob channel')
+  t.not(err.message, 'mídia inválida', 'the voice note itself passed')
+  t.absent(err.uncertain, 'never uncertain')
+
+  const bad = {
+    'a video track': { bytes: m4a({ handlers: ['soun', 'vide'] }) },
+    'not MPEG-4': { bytes: b4a.alloc(3000, 1) },
+    'over the byte cap': { bytes: b4a.concat([m4a(), b4a.alloc(1572864)]) },
+    'ms 0': { ms: 0 },
+    'ms over': { ms: 120001 },
+    'with sides': { width: 64, height: 48 },
+    'another audio mime': { mime: 'audio/ogg' },
+    'no kind': { kind: undefined }
+  }
+  for (const [name, over] of Object.entries(bad)) {
+    t.exception.all(() => A.node.dmPutMedia({ ...voice, ...over }), /mídia inválida/, name)
+  }
+  t.exception.all(() => A.node.dmPutMedia({ bytes: png(100), mime: 'image/png', width: 0, height: 0 }), /mídia inválida/, 'a photo still needs its sides')
+})
+
+test('the dm engine opens a voice note only when its bytes are audio only', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  seeder.assoc = hex(assoc.publicKey)
+  const { engine, storage } = engineFor(t, seeder)
+  const kp = crypto.keyPair()
+  await certify(storage, kp, assoc)
+  await engine.unlock(crypto.randomBytes(32))
+  const own = hex(kp.publicKey)
+  const putErr = async (args) => (await errorOf(engine.putMedia(own, kp, args))).message
+  t.is(await putErr({ bytes: m4a({ handlers: ['soun', 'vide'] }), mime: 'audio/mp4', width: 0, height: 0, ms: 3000 }), 'mídia inválida', 'a video track')
+  t.is(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0, ms: 0 }), 'mídia inválida', 'ms 0')
+  t.is(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 1, height: 1, ms: 3000 }), 'mídia inválida', 'sides')
+  t.is(await putErr({ bytes: png(100), mime: 'image/png', width: 64, height: 48, ms: 10 }), 'mídia inválida', 'a photo with a duration')
+  t.not(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0, ms: 3000 }), 'mídia inválida', 'a voice note reaches the put')
+  t.is(await putErr({ bytes: m4a({ ms: 120000 }), mime: 'audio/mp4', width: 0, height: 0, ms: 1 }), 'mídia inválida', 'two minutes claiming 1 ms')
+  t.is(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0, ms: 4001 }), 'mídia inválida', 'past the tolerance')
+  t.not(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0 }), 'mídia inválida', 'no ms: the container decides')
+})
+
+test('voiceMs: a voice note opens only when its item ms matches the container', (t) => {
+  const { AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
+  t.is(AUDIO_MS_TOLERANCE, 1000)
+  t.is(voiceMs(m4a(), undefined), 3000, 'the container duration')
+  t.is(voiceMs(m4a(), 3000), 3000)
+  t.is(voiceMs(m4a(), 2000), 3000, 'a rounded ms within the tolerance')
+  t.is(voiceMs(m4a(), 4000), 3000)
+  t.is(voiceMs(m4a(), 1999), null, 'too short')
+  t.is(voiceMs(m4a(), 4001), null, 'too long')
+  t.is(voiceMs(m4a({ ms: 120000 }), 1), null, 'two minutes claiming 1 ms')
+  t.is(voiceMs(m4a(), '3000'), null, 'not a number')
+  t.is(voiceMs(m4a({ handlers: ['soun', 'vide'] }), 3000), null, 'a video track')
 })

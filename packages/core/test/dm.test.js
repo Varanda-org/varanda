@@ -573,3 +573,69 @@ test('inner v2: a sparse media list is refused before signing', (t) => {
   delete holed[1]
   t.exception.all(() => msg({ media: holed }), /mensagem inválida/, 'a deleted slot is not an item')
 })
+
+function voiceItem (n, over = {}) {
+  return blobItem(n, { chunks: 2, bytes: 40000, mime: 'audio/mp4', w: 0, h: 0, ms: 4200, ...over })
+}
+
+// The largest voice note: a 1572864-byte file sealed, at two minutes.
+function bigVoice (n) {
+  return voiceItem(n, { chunks: 49, bytes: dm.DM_AUDIO_MAX_BYTES, ms: dm.DM_AUDIO_MAX_MS })
+}
+
+test('inner v2: a voice note', (t) => {
+  t.is(dm.DM_AUDIO_MIME, 'audio/mp4')
+  t.is(dm.DM_AUDIO_MAX_MS, 120000)
+  t.is(dm.DM_AUDIO_MAX_BYTES, 1572864 + 16, 'the plaintext cap plus the blob MAC')
+  t.absent(dm.DM_MEDIA_MIMES.includes('audio/mp4'), 'the image mimes stay images')
+  t.alike(openInner(msg({ text: '', media: [voiceItem(1)] }), bia.hex, O).media, [voiceItem(1)])
+  t.alike(openInner(msg({ media: [bigVoice(1)] }), bia.hex, O).media, [bigVoice(1)], 'the largest')
+  t.ok(msg({ media: [voiceItem(1, { ms: 1 })] }), 'the shortest')
+
+  const bad = {
+    'video mime': voiceItem(1, { mime: 'video/mp4' }),
+    'mpeg audio': voiceItem(1, { mime: 'audio/mpeg' }),
+    'ogg audio': voiceItem(1, { mime: 'audio/ogg' }),
+    'webm audio': voiceItem(1, { mime: 'audio/webm' }),
+    'upper mime': voiceItem(1, { mime: 'AUDIO/MP4' }),
+    'w 1': voiceItem(1, { w: 1 }),
+    'h 1': voiceItem(1, { h: 1 }),
+    'ms 0': voiceItem(1, { ms: 0 }),
+    'ms too long': voiceItem(1, { ms: 120001 }),
+    'ms float': voiceItem(1, { ms: 1.5 }),
+    'ms string': voiceItem(1, { ms: '4200' }),
+    'one byte too many': voiceItem(1, { chunks: 49, bytes: dm.DM_AUDIO_MAX_BYTES + 1 }),
+    'image with a duration': blobItem(1, { ms: 4200 })
+  }
+  for (const [name, item] of Object.entries(bad)) {
+    t.exception.all(() => msg({ media: [item] }), /mensagem inválida/, name + ' refused on build')
+    t.is(openInner(forge(v2Body({ media: [item] }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, name + ' refused on open')
+  }
+  const lists = {
+    'two voice notes': [voiceItem(1), voiceItem(2)],
+    'voice then image': [voiceItem(1), blobItem(2)],
+    'image then voice': [blobItem(1), voiceItem(2)],
+    'voice among four': [blobItem(1), blobItem(2), blobItem(3), voiceItem(4)]
+  }
+  for (const [name, media] of Object.entries(lists)) {
+    t.exception.all(() => msg({ media }), /mensagem inválida/, name + ' refused on build')
+    t.is(openInner(forge(v2Body({ media }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, name + ' refused on open')
+  }
+})
+
+test('inner v2: a voice note keeps the text budget', (t) => {
+  const who = largestV2Sender()
+  const R = 'a'.repeat(32)
+  const wide = '\u{1F600}'.repeat(DM_MAX_TEXT)
+  const fields = { kind: 'msg', to: bia.hex, at: AT, replyTo: R, cert: who.cert, media: [bigVoice(1)] }
+  t.exception.all(() => buildInner({ ...fields, text: wide }, who), /mensagem longa demais/, 'a voice note and 1000 four-byte characters')
+  const empty = buildInner({ ...fields, text: '' }, who)
+  const len = (empty[0] << 8) | empty[1]
+  t.ok(len + 66 <= DM_INNER_BYTES, 'a voice note with empty text fits (' + (len + 66) + ' bytes)')
+  t.alike(openInner(empty, bia.hex, O).media, [bigVoice(1)])
+  const budget = textBudget(fields)
+  t.is(budget, DM_INNER_BYTES - len - 66, 'the budget measures the same bytes')
+  t.is(openInner(buildInner({ ...fields, text: textOfBytes(budget) }, who), bia.hex, O).text, textOfBytes(budget), 'text at the budget fits')
+  t.exception.all(() => buildInner({ ...fields, text: textOfBytes(budget) + 'x' }, who), /mensagem longa demais/, 'one byte more throws')
+  t.is(sealInner(empty, boxPair().hex).byteLength, DM_SEALED_BYTES, 'the sealed frame keeps its size')
+})

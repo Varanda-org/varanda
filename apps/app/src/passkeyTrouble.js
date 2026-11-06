@@ -1,11 +1,30 @@
 // The Entrar card when no passkey can open the account (src/screens/Identidade.js).
-// Two cases: the browser says up front it cannot (only another browser helps),
-// or a passkey was created or chosen but its password manager gives no PRF
-// (trying again and saving it elsewhere can work). Pure so Node tests load it.
+// Creation needs a synced manager with PRF; an existing passkey may still
+// open the account. Pure so Node tests load it.
 
 export const BROWSER_TEXT = 'Este navegador não funciona com o Varanda. Use o Chrome, o Edge ou o Safari 18 ou mais novo.'
 export const UNUSABLE_TITLE = 'Não deu para entrar com essa passkey.'
 export const RETRY_LABEL = 'tentar de novo'
+export const SYNC_ADVICE = 'Salve a passkey num gerenciador de senhas que sincroniza entre aparelhos (Google, Apple, 1Password, Bitwarden). Se perder o celular, entrar na conta desse gerenciador no aparelho novo traz a passkey de volta.'
+export const PHONE_HINT = 'Sem gerenciador de passkeys neste aparelho? Toque em criar com o celular: aparece um QR code na tela; leia esse código com a câmera do celular e salve a passkey no gerenciador de senhas dele.'
+export const PHONE_SIGNIN_HINT = 'Sua passkey está no celular? Toque em Entrar com a passkey, escolha usar outro aparelho na janela do sistema e leia com a câmera do celular o QR code que aparece na tela.'
+export const PHONE_LABEL = 'criar com o celular'
+// The same phone button when it opens an existing account instead.
+export const PHONE_SIGNIN_LABEL = 'entrar com o celular'
+export const NOT_SYNCED_TITLE = 'Essa passkey não serve para o Varanda.'
+export const NONE_TEXT = 'Nenhuma passkey do Varanda neste aparelho. Crie uma aqui ou entre no site com a passkey que já tem.'
+export const KNOWN_LOST_TEXT = 'A passkey que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar em outro gerenciador: tente entrar com outra passkey ou crie uma nova conta.'
+// After one sign-in that did not finish (closed sheet or missing passkey).
+export const MISSED_TEXT = 'A passkey não apareceu? Tente entrar de novo ou toque em entrar com outra passkey para escolher outra.'
+export const OTHER_PASSKEY_LABEL = 'entrar com outra passkey'
+
+const CLEANED_STEP = 'O app já pediu ao gerenciador para retirar a passkey que não serviu.'
+
+// cleaned acknowledges the request; userIds are only the ids still to remove, so
+// both lines can show without hiding a name the person must delete.
+function cleanupSteps (cleaned, userIds) {
+  return cleaned ? [CLEANED_STEP, deleteStep(userIds)] : [deleteStep(userIds)]
+}
 
 // The label the passkey carries in the password manager
 // (packages/web-member/lib/passkey.js), or '' for anything but a hex user id.
@@ -15,33 +34,56 @@ export function staleName (userId) {
     : ''
 }
 
-// The unusable passkeys this page saw, by label, so the person can delete them.
+// The unusable passkeys this page session saw fail, by label. Conditional:
+// a passkey created here may still be the account on another device.
 export function deleteStep (userIds) {
   const names = [...new Set((Array.isArray(userIds) ? userIds : []).map(staleName).filter(Boolean))]
   if (names.length === 0) return ''
   const quoted = names.map((n) => '"' + n + '"')
   return names.length === 1
-    ? 'Apague a passkey ' + quoted[0] + ' do app onde você guarda senhas. Ela foi criada, mas não funciona com o Varanda.'
-    : 'Apague as passkeys ' + quoted.slice(0, -1).join(', ') + ' e ' + quoted[quoted.length - 1] + ' do app onde você guarda senhas. Elas foram criadas, mas não funcionam com o Varanda.'
+    ? 'Se você não usou essa passkey para entrar em outro aparelho, apague a passkey ' + quoted[0] + ' do app onde você guarda senhas: ela foi criada aqui, mas não funciona com o Varanda.'
+    : 'Se você não usou essas passkeys para entrar em outro aparelho, apague as passkeys ' + quoted.slice(0, -1).join(', ') + ' e ' + quoted[quoted.length - 1] + ' do app onde você guarda senhas: elas foram criadas aqui, mas não funcionam com o Varanda.'
 }
 
-// Numbered steps for the second case. userIds: only passkeys created on this
+// Numbered steps when PRF is unavailable. userIds: only passkeys created on this
 // page that failed; one only chosen at Entrar may hold the account, so the
 // caller never passes it. created: a passkey made here failed, so another can
 // be created. known: this browser keeps a passkey, and Entrar offers only that
 // one ('Criar passkey' is not shown). withLink: the card already tells the
 // person to open the invite link in another browser. native: the installed
-// app, which has no browser to switch to and saves only to Google's manager.
-export function unusableSteps ({ userIds = [], withLink = false, created = false, known = false, native = false } = {}) {
+// app, which has no browser to switch to. Web and app both point to synced password managers.
+// cleaned means cleanup was requested, not that the manager confirmed deletion.
+export function unusableSteps ({ userIds = [], withLink = false, created = false, known = false, native = false, cleaned = false } = {}) {
   const retry = known
     ? 'Toque em ' + RETRY_LABEL + '.'
     : created
-      ? 'Toque em ' + RETRY_LABEL + ' e crie a passkey outra vez. Se o aparelho perguntar onde salvar, escolha ' + (native ? 'o Gerenciador de Senhas do Google.' : 'as Senhas da Apple (no iPhone) ou o Gerenciador de Senhas do Google.')
+      ? 'Toque em ' + RETRY_LABEL + ' e crie a passkey outra vez. Se o aparelho perguntar onde salvar, escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google ou da Apple).'
       : 'Toque em ' + RETRY_LABEL + ' e escolha outra passkey do Varanda, se tiver.'
   const steps = [
-    deleteStep(userIds),
+    ...cleanupSteps(cleaned, userIds),
     retry,
     withLink ? '' : native ? 'Se não der certo, entre pelo site da associação no Chrome.' : 'Se não der certo, abra o Varanda no Safari ou no Chrome.'
+  ].filter(Boolean)
+  return steps.map((s, i) => (i + 1) + '. ' + s)
+}
+
+// Steps for a passkey that works but does not sync. userIds: only passkeys
+// created here and not yet cleaned; cleaned: cleanup was requested for the rest;
+// native and withLink as in unusableSteps (the phone QR path is web only).
+// phone: the browser offers the hybrid transport; without it the page has no
+// phone button, so the last step points to the phone itself instead.
+export function notSyncedSteps ({ userIds = [], cleaned = false, native = false, withLink = false, phone = true } = {}) {
+  // Never another browser: there the same device-bound passkey has no
+  // refusal record and could sign in, binding a new account to one device.
+  const fallback = native
+    ? 'Se não der certo, escolha nas configurações do aparelho um gerenciador de senhas que sincroniza e crie a passkey de novo.'
+    : phone
+      ? 'Sem gerenciador assim neste aparelho? Toque em ' + RETRY_LABEL + ' e depois em ' + PHONE_LABEL + ': leia com a câmera do celular o QR code que aparece na tela.'
+      : 'Se não der certo, abra o Varanda no celular e crie a passkey lá: o celular guarda a passkey num gerenciador que sincroniza.'
+  const steps = [
+    ...cleanupSteps(cleaned, userIds),
+    'Toque em ' + RETRY_LABEL + ' e, ao criar, escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro), nunca uma chave de segurança, o Windows Hello ou o perfil do navegador.',
+    withLink ? '' : fallback
   ].filter(Boolean)
   return steps.map((s, i) => (i + 1) + '. ' + s)
 }

@@ -12,7 +12,7 @@ const { createCert, createModeratorCert, generateAssociationKeyPair } = require(
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const grp = require('@varanda/core/lib/group')
 const { MAX_GROUPS_PER_DIARY, MAX_GROUP_CUTS } = grp
-const { groupJoinRecord } = require('@varanda/core/lib/records')
+const { groupJoinRecord, validAudioDescriptor } = require('@varanda/core/lib/records')
 const { GROUP_LIMIT_DEFAULT } = require('@varanda/rpc')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { groupKeyPairFromPrf } = require('../lib/passkey')
@@ -360,6 +360,57 @@ test('media posts: own declared descriptors round trip, the list row says Foto o
   await t.exception(() => ops.groupPost(a.ctx, { group, text: 'x', media: [foreign] }), /mídia inválida/, 'another diary\'s core is refused')
   await t.exception(() => ops.groupPost(a.ctx, { group, text: 'x', media: [{ ...d, start: d.start + 50 }] }), /mídia inválida/, 'blocks not committed are refused')
   await t.exception(() => ops.groupPost(a.ctx, { group, text: 'x', sealed: true }), /mídia cifrada só em grupo privado/, 'sealed in a public group')
+})
+
+// A minimal MPEG-4 audio file (ftyp, moov with mvhd and one trak per
+// handler, mdat): enough for audioBounds.
+function m4a ({ ms = 3000, handlers = ['soun'], pad = 0 } = {}) {
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (s) => Array.from(s, (c) => c.charCodeAt(0))
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  const trak = (h) => box('trak', box('mdia', box('hdlr', [0, 0, 0, 0], be32(0), ascii(h), be32(0), be32(0), be32(0), [0])))
+  return b4a.from([
+    ...box('ftyp', ascii('M4A '), be32(0), ascii('isom')),
+    ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(ms), new Array(80).fill(0)), ...handlers.map(trak)),
+    ...box('mdat', new Array(pad).fill(9))
+  ])
+}
+
+// A declared and committed voice note in m's media core -> its descriptor.
+async function voice (m, { ms = 3000, pad = 100 } = {}) {
+  if (m.ctx.mediaKeyPair === undefined) m.ctx.mediaKeyPair = crypto.keyPair()
+  const bytes = m4a({ ms, pad })
+  const sha256 = b4a.toString(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes)), 'hex')
+  const { core, declared } = await ops.mediaPrepare(m.ctx)
+  if (!declared) await ops.declareMediaCore(m.ctx, core)
+  return ops.mediaCommitAudio(m.ctx, { blocks: [bytes], sha256, ms })
+}
+
+test('voice notes: an own audio descriptor posts alone in a public group, the list row says Áudio', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  const v = await voice(a, { ms: 4200 })
+  t.alike([v.mime, v.width, v.height, v.ms], ['audio/mp4', 0, 0, 4200], 'an audio descriptor')
+  t.ok(validAudioDescriptor(v))
+  const { seq } = await ops.groupPost(a.ctx, { group, text: '', media: [v] })
+  const page = await ops.groupRead(a.ctx, { group })
+  t.alike(page.items.find((p) => p.seq === seq).media, [v], 'the descriptor round trips')
+  const community = groupCommunity.get(group)
+  t.is((await ops.communityInfo(a.ctx, { community })).groups.find((g) => g.group === group).last.preview, 'Áudio')
+
+  const d = await photo(a)
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: '', media: [v, d] }), /mídia inválida/, 'never next to a photo')
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: '', media: [d, v] }), /mídia inválida/, 'never after a photo')
+  const foreign = await voice(b)
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: '', media: [foreign] }), /mídia inválida/, 'another diary\'s core is refused')
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: '', media: [{ ...v, ms: 5000, sha256: 'ab'.repeat(32) }] }), /mídia inválida/, 'bytes that do not match are refused')
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: '', media: [v], sealed: true }), /mídia inválida/, 'a public voice note is not a private item')
+
+  const bytes = m4a()
+  const sha256 = b4a.toString(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes)), 'hex')
+  await t.exception(() => ops.mediaCommitAudio(a.ctx, { blocks: [bytes], sha256, ms: 0 }), /mídia inválida/, 'ms 0')
+  await t.exception(() => ops.mediaCommitAudio(a.ctx, { blocks: [bytes], sha256, ms: 120001 }), /mídia inválida/, 'ms over the cap')
+  await t.exception(() => ops.mediaCommitAudio(a.ctx, { blocks: [bytes], sha256: 'ab'.repeat(32), ms: 3000 }), /mídia inválida/, 'a wrong hash')
 })
 
 test('join, post and read across two members match the fold', async (t) => {

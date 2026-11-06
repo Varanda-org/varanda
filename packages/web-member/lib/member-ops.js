@@ -64,7 +64,9 @@ const {
   isHex64,
   MEDIA_BLOCK_BYTES,
   MAX_MEDIA_PER_POST,
-  MAX_MEDIA_ITEM_BLOCKS
+  MAX_MEDIA_ITEM_BLOCKS,
+  AUDIO_MIME,
+  validAudioDescriptor
 } = require('@varanda/core/lib/records')
 const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, hasFollowRecords } = require('@varanda/core/lib/media')
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
@@ -699,6 +701,31 @@ async function mediaCommit (ctx, { blocks, mime, width, height, sha256 } = {}) {
     const start = await store.appendMediaBlocks(core, blocks)
     const descriptor = { core: coreHex, mime, start, blocks: blocks.length, bytes, sha256, width, height }
     if (validateDescriptor(descriptor) !== null) throw badMedia()
+    return descriptor
+  })
+}
+
+// The voice note counterpart of mediaCommit (public groups only): the same
+// blocks, stored as an audio descriptor (no picture size, its duration). The
+// caller (session mediaUpload) has checked the bytes with audioBounds.
+async function mediaCommitAudio (ctx, { blocks, sha256, ms } = {}) {
+  if (keyPairOf(ctx) === null || mediaKeyPairOf(ctx) === null) throw new UsageError(store.LOCKED)
+  if (!Array.isArray(blocks) || blocks.length < 1 || blocks.length > MAX_MEDIA_ITEM_BLOCKS) throw badMedia()
+  let bytes = 0
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i]
+    if (!(block instanceof Uint8Array)) throw badMedia()
+    const n = block.byteLength
+    if (i < blocks.length - 1 ? n !== MEDIA_BLOCK_BYTES : (n < 1 || n > MEDIA_BLOCK_BYTES)) throw badMedia()
+    bytes += n
+  }
+  if (typeof sha256 !== 'string' || !isHex64(sha256) || (await sha256Hex(blocks)) !== sha256) throw badMedia()
+  const shape = { core: '0'.repeat(64), mime: AUDIO_MIME, start: 1, blocks: blocks.length, bytes, sha256, width: 0, height: 0, ms }
+  if (!validAudioDescriptor(shape)) throw badMedia()
+  return withOwnMediaCore(ctx, async ({ core, coreHex }) => {
+    const start = await store.appendMediaBlocks(core, blocks)
+    const descriptor = { core: coreHex, mime: AUDIO_MIME, start, blocks: blocks.length, bytes, sha256, width: 0, height: 0, ms }
+    if (!validAudioDescriptor(descriptor)) throw badMedia()
     return descriptor
   })
 }
@@ -2067,7 +2094,11 @@ async function groupLeave (ctx, { group }) {
 async function groupPost (ctx, { group, text, replyTo = null, media = null, sealed = false }) {
   const withMedia = media !== null && media !== undefined
   // Checked before withGroup, which holds the diary open.
-  if (withMedia) await verifyMedia(ctx, media, null, sealed === true ? validPrivateItem : (d) => validateDescriptor(d) === null)
+  if (withMedia) {
+    // A voice note is the only item of its post, never next to photos.
+    if (Array.isArray(media) && media.length !== 1 && media.some(isVoiceItem)) throw badMedia()
+    await verifyMedia(ctx, media, null, sealed === true ? validPrivateItem : (d) => validateDescriptor(d) === null || validAudioDescriptor(d))
+  }
   return withGroup(ctx, group, true, async ({ ownHex, g }) => {
     if (sealed === true && !g.private) throw new UsageError(GROUP_SEALED_MEDIA_PUBLIC)
     if (withMedia && sealed !== true && g.private) throw new UsageError(GROUP_PRIVATE_MEDIA_SEALED)
@@ -3687,9 +3718,15 @@ function postsAfter (posts, mark) {
   return posts.filter((p) => compareOrder(orderKey(p.at, p.writer, p.seq), k) > 0)
 }
 
-// A photo post without text still says what it is in the list row.
+// A public descriptor or a private item that carries a voice note.
+function isVoiceItem (d) {
+  return d !== null && typeof d === 'object' && (typeof d.plainMime === 'string' ? d.plainMime : d.mime) === AUDIO_MIME
+}
+
+// A photo or voice post without text still says what it is in the list row.
 function previewOf (p) {
   if (p.text === '' && Array.isArray(p.media) && p.media.length > 0) {
+    if (p.media.some(isVoiceItem)) return 'Áudio'
     return p.media.every((d) => (typeof d.plainMime === 'string' ? d.plainMime : d.mime) === 'image/gif') ? 'GIF' : 'Foto'
   }
   return Array.from(p.text).slice(0, PREVIEW_MAX).join('')
@@ -4244,6 +4281,7 @@ module.exports = {
   foldFollows,
   mediaPrepare,
   mediaCommit,
+  mediaCommitAudio,
   mediaCommitSealed,
   declareMediaCore,
   verifyMedia,

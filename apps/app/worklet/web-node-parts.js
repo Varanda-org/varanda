@@ -2,7 +2,7 @@
 // The pure parts of worklet/web-node.js, apart so the Node tests reach them
 // (web-node.js itself loads bare-fs, bare-crypto and bare-ws).
 
-const { RpcError, mediaBounds } = require('@varanda/rpc')
+const { RpcError, mediaBounds, audioBounds } = require('@varanda/rpc')
 
 const CLOSED_MESSAGE = 'sessão encerrada'
 const BAD_MEDIA = 'mídia inválida'
@@ -154,19 +154,25 @@ async function sendFile ({ read, put, unlink, isClosing }) {
 
 // media.uploadFile after the read. `sealed` must reach the session: dropping
 // it would store a private group's photo in the clear (docs/rpc.md 5.56).
-function uploadMedia ({ read, session, unlink, isClosing }, { mime, width, height, sealed }) {
+function uploadMedia ({ read, session, unlink, isClosing }, { mime, width, height, sealed, ms, kind }) {
   return sendFile({
     read,
     unlink,
     isClosing,
-    put: (bytes) => session.mediaUpload(sealed === true ? { bytes, mime, width, height, sealed } : { bytes, mime, width, height })
+    put: (bytes) => session.mediaUpload({ bytes, mime, width, height, ...voiceOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) })
   })
+}
+
+// A voice note's duration and kind reach the session only for a voice note
+// (an image keeps its exact keys).
+function voiceOf ({ ms, kind }) {
+  return kind === 'voice' ? { ms, kind } : {}
 }
 
 // dm.putMedia after the read (docs/rpc.md 5.88): the same file rules, the
 // photo sealed and put on the blob channel by the session.
-function putDmMedia ({ read, session, unlink, isClosing }, { mime, width, height }) {
-  return sendFile({ read, unlink, isClosing, put: (bytes) => session.dmPutMedia({ bytes, mime, width, height }) })
+function putDmMedia ({ read, session, unlink, isClosing }, { mime, width, height, ms, kind }) {
+  return sendFile({ read, unlink, isClosing, put: (bytes) => session.dmPutMedia({ bytes, mime, width, height, ...voiceOf({ ms, kind }) }) })
 }
 
 // Removes every read file (a media name) directly under `dir` and makes
@@ -220,7 +226,8 @@ async function writeReadFile ({ fs, join, dir, name, bytes, flags }) {
 // media.readFile (docs/rpc.md 5.89): opens the chat item through the session
 // and writes the plaintext with write(bytes) -> name. `generation()` changes
 // on every lock: an image opened before a lock never stays on disk after it.
-// -> { name, mime, w, h } (w, h measured from the bytes). The plaintext copy
+// -> { name, mime, w, h } (w, h measured from the bytes), plus ms for a voice
+// note (the container's duration, not the item's claim). The plaintext copy
 // is zeroed once written, or refused (USAGE 'mídia indisponível').
 async function readMediaToFile ({ session, write, unlink, generation, isClosing }, params) {
   const at = generation()
@@ -239,15 +246,27 @@ async function readMediaToFile ({ session, write, unlink, generation, isClosing 
   let name
   let w
   let h
+  let ms
   try {
     // The bytes decide, never the item's claimed size: an image past the
     // canvas or frame limits, or not the mime it says, is never written for
     // a native decoder to open.
-    let b = null
-    try { b = mediaBounds(bytes, got.mime) } catch {}
-    if (b === null) throw new RpcError('USAGE', MEDIA_UNAVAILABLE)
-    w = b.width
-    h = b.height
+    // A voice note is checked as audio (an MPEG-4 container with only a sound
+    // track, docs/protocol.md section 2), never decoded as an image.
+    if (got.mime === 'audio/mp4') {
+      let a = null
+      try { a = audioBounds(bytes) } catch {}
+      if (a === null) throw new RpcError('USAGE', MEDIA_UNAVAILABLE)
+      w = 0
+      h = 0
+      ms = a.ms
+    } else {
+      let b = null
+      try { b = mediaBounds(bytes, got.mime) } catch {}
+      if (b === null) throw new RpcError('USAGE', MEDIA_UNAVAILABLE)
+      w = b.width
+      h = b.height
+    }
     if (isClosing() || generation() !== at) throw closedError()
     name = await write(bytes)
   } finally {
@@ -257,7 +276,7 @@ async function readMediaToFile ({ session, write, unlink, generation, isClosing 
     await Promise.resolve().then(() => unlink(name)).catch(() => {})
     throw closedError()
   }
-  return { name, mime: got.mime, w, h }
+  return ms === undefined ? { name, mime: got.mime, w, h } : { name, mime: got.mime, w, h, ms }
 }
 
 module.exports = { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, clearReadDir, writeReadFile, readMediaToFile, CLOSED_MESSAGE }

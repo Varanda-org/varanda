@@ -771,3 +771,167 @@ test('app link proofs: appProof, x-varanda-link and x-varanda-redeem only from t
   }
   t.is(calls.length, 6, 'a native finish or pending without V and R is never sent')
 })
+
+const LOOKUP = 'cd'.repeat(32)
+const BLOB = { v: 1, kind: 'passkey', nonce: '0a'.repeat(24), ciphertext: '1b'.repeat(82) }
+
+test('recovery calls: same-origin POSTs with exactly those keys', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { nonce: 'n'.repeat(43) }))
+  t.alike(await a.recoveryStart({ member: M }), { nonce: 'n'.repeat(43) })
+  const puts = stub(t, json(200, { createdAt: '2026-11-06T12:00:00.000Z', changed: true }))
+  t.alike(await a.recoveryPut({ member: M, nonce: 'n', signature: 'ff', kind: 'passkey', lookupId: LOOKUP, blob: BLOB }), { ok: true, changed: true, createdAt: '2026-11-06T12:00:00.000Z' })
+  const removes = stub(t, json(200, { changed: true }))
+  t.alike(await a.recoveryRemove({ member: M, nonce: 'n', signature: 'ff', kind: 'code', lookupId: LOOKUP }), { ok: true, changed: true })
+  const writes = [...puts, ...removes]
+  const lists = stub(t, json(200, { entries: [{ lookupId: LOOKUP, kind: 'code', createdAt: '2026-11-06T12:00:00.000Z' }] }))
+  t.alike(await a.recoveryList({ member: M, nonce: 'n', signature: 'ff' }), [{ lookupId: LOOKUP, kind: 'code', createdAt: '2026-11-06T12:00:00.000Z' }])
+  const fetches = stub(t, json(200, { member: M, kind: 'passkey', blob: BLOB }))
+  t.alike(await a.recoveryFetch(LOOKUP), { member: M, kind: 'passkey', blob: BLOB })
+  const all = [...calls, ...writes, ...lists, ...fetches]
+  t.alike(all.map(c => c.init.method + ' ' + c.url), [
+    'POST /account/recovery/start',
+    'POST /account/recovery/put',
+    'POST /account/recovery/remove',
+    'POST /account/recovery/list',
+    'POST /account/recovery/fetch'
+  ])
+  t.alike(all.map(c => JSON.parse(c.init.body)), [
+    { member: M },
+    { member: M, nonce: 'n', signature: 'ff', kind: 'passkey', lookupId: LOOKUP, blob: BLOB },
+    { member: M, nonce: 'n', signature: 'ff', kind: 'code', lookupId: LOOKUP },
+    { member: M, nonce: 'n', signature: 'ff' },
+    { lookupId: LOOKUP }
+  ])
+  for (const c of all) {
+    t.is(c.init.credentials, 'same-origin')
+    t.absent(c.url.includes(LOOKUP), 'the lookup id never rides in a URL')
+  }
+})
+
+test('recoveryFetch: null only on 404, an https origin is absolute, any other failure throws', async (t) => {
+  const a = await load()
+  stub(t, json(404, { error: 'nao-encontrado', recovery: true }))
+  t.is(await a.recoveryFetch(LOOKUP), null)
+  const calls = stub(t, json(404, { error: 'nao-encontrado', recovery: true }))
+  t.is(await a.recoveryFetch(LOOKUP, { origin: 'https://varanda.example' }), null)
+  t.is(calls[0].url, 'https://varanda.example/account/recovery/fetch')
+  for (const [name, res] of [
+    ['503', () => json(503, { error: 'indisponivel' })],
+    ['500 html', () => json(500, {}, 'text/html')],
+    ['no answer', () => { throw new Error('rede') }],
+    ['429', () => json(429, { error: 'limite' })],
+    ['404 html', () => json(404, {}, 'text/html')],
+    ['404 empty', () => ({ ok: false, status: 404, headers: { get: () => 'application/json' }, text: async () => '' })],
+    ['404 not json', () => ({ ok: false, status: 404, headers: { get: () => 'application/json' }, text: async () => 'nada' })],
+    ['404 no error', () => json(404, {})],
+    ['404 other token', () => json(404, { error: 'expirado' })],
+    ['404 without recovery mark', () => json(404, { error: 'nao-encontrado' })],
+    ['404 recovery not true', () => json(404, { error: 'nao-encontrado', recovery: 'true' })],
+    ['other member shape', () => json(200, { member: 'x', kind: 'passkey', blob: BLOB })],
+    ['kind mismatch', () => json(200, { member: M, kind: 'code', blob: BLOB })],
+    ['extra key', () => json(200, { member: M, kind: 'passkey', blob: BLOB, x: 1 })],
+    ['bad blob', () => json(200, { member: M, kind: 'passkey', blob: { ...BLOB, ciphertext: 'zz' } })],
+    ['blob extra key', () => json(200, { member: M, kind: 'passkey', blob: { ...BLOB, x: 1 } })]
+  ]) {
+    stub(t, res)
+    try { await a.recoveryFetch(LOOKUP); t.fail(name) } catch (e) { t.ok(e instanceof Error, name) }
+  }
+  // A 404 that is not the service's own answer is "could not ask", never
+  // "not registered": a null would let the app install a ceremony PRF. An
+  // older server answers its unknown route with a bare 'nao-encontrado'.
+  for (const res of [json(404, {}, 'text/html'), json(404, {}), json(404, { error: 'expirado' }), json(404, { error: 'nao-encontrado' })]) {
+    stub(t, res)
+    try { await a.recoveryFetch(LOOKUP); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  }
+})
+
+test('recoveryPut/recoveryRemove: real answer shapes, changed and createdAt come from the service', async (t) => {
+  const a = await load()
+  const put = () => a.recoveryPut({ member: M, nonce: 'n', signature: 'ff', kind: 'code', lookupId: LOOKUP, blob: { ...BLOB, kind: 'code' } })
+  const remove = () => a.recoveryRemove({ member: M, nonce: 'n', signature: 'ff', kind: 'code', lookupId: LOOKUP })
+  stub(t, json(200, { createdAt: '2026-11-06T12:00:00.000Z', changed: false }))
+  t.alike(await put(), { ok: true, changed: false, createdAt: '2026-11-06T12:00:00.000Z' })
+  stub(t, json(200, { createdAt: 'ontem', changed: true }))
+  t.alike(await put(), { ok: true, changed: true }, 'an unreadable createdAt is left out')
+  stub(t, json(200, { changed: false }))
+  t.alike(await remove(), { ok: true, changed: false })
+  stub(t, json(200, { changed: 'yes' }))
+  t.alike(await remove(), { ok: true, changed: false }, 'only a literal true is a change')
+})
+
+test('recoveryList: exact entry shape or indisponivel', async (t) => {
+  const a = await load()
+  stub(t, json(200, { entries: [] }))
+  t.alike(await a.recoveryList({ member: M, nonce: 'n', signature: 'ff' }), [])
+  for (const body of [
+    {},
+    { entries: {} },
+    { entries: [], x: 1 },
+    { entries: [{ lookupId: LOOKUP, kind: 'code' }] },
+    { entries: [{ lookupId: LOOKUP, kind: 'code', createdAt: 'ontem' }] },
+    { entries: [{ lookupId: 'AB'.repeat(32), kind: 'code', createdAt: '2026-11-06T12:00:00.000Z' }] },
+    { entries: [{ lookupId: LOOKUP, kind: 'senha', createdAt: '2026-11-06T12:00:00.000Z' }] },
+    { entries: [{ lookupId: LOOKUP, kind: 'code', createdAt: '2026-11-06T12:00:00.000Z', blob: BLOB }] }
+  ]) {
+    stub(t, json(200, body))
+    try { await a.recoveryList({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel', JSON.stringify(body)) }
+  }
+  stub(t, json(200, {}))
+  try { await a.recoveryStart({ member: M }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+})
+
+test('recovery tokens: limite-recuperacao everywhere, nao-encontrado only on recovery routes', async (t) => {
+  const a = await load()
+  t.is(a.toError('limite-recuperacao').message, 'você já tem o máximo de passkeys e códigos cadastrados; remova um antes')
+  t.is(a.toError('limite-recuperacao').code, 'limite-recuperacao')
+  t.is(a.toError('limite').code, 'indisponivel', 'the shared cap token is not the recovery one')
+  stub(t, json(409, { error: 'limite-recuperacao' }))
+  try {
+    await a.recoveryPut({ member: M, nonce: 'n', signature: 'ff', kind: 'passkey', lookupId: LOOKUP, blob: BLOB })
+    t.fail()
+  } catch (e) {
+    t.is(e.code, 'limite-recuperacao')
+    t.absent(e.uncertain, 'a 4xx refusal is definite')
+  }
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  try { await a.recoveryRemove({ member: M, nonce: 'n', signature: 'ff', kind: 'code', lookupId: LOOKUP }); t.fail() } catch (e) {
+    t.is(e.code, 'nao-encontrado')
+    t.is(e.message, 'esta passkey ou este código não está ligado a uma conta neste endereço')
+  }
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  try { await a.renameStart({ member: M, username: 'bia' }); t.fail() } catch (e) {
+    t.is(e.code, 'indisponivel', 'rename keeps its fallback')
+    t.is(e.message, 'serviço indisponível')
+  }
+  t.is(a.toError('nao-encontrado').code, 'indisponivel')
+})
+
+test('recoveryPut/recoveryRemove: no answer, any 5xx or an unreadable success is uncertain', async (t) => {
+  const a = await load()
+  const put = () => a.recoveryPut({ member: M, nonce: 'n', signature: 'ff', kind: 'passkey', lookupId: LOOKUP, blob: BLOB })
+  const remove = () => a.recoveryRemove({ member: M, nonce: 'n', signature: 'ff', kind: 'passkey', lookupId: LOOKUP })
+  for (const [name, res] of [
+    ['no answer', () => { throw new Error('rede') }],
+    ['503 indisponivel', () => json(503, { error: 'indisponivel' })],
+    ['503 limite-recuperacao', () => json(503, { error: 'limite-recuperacao' })],
+    ['500 html', () => json(500, {}, 'text/html')],
+    ['200 html', () => json(200, {}, 'text/html')]
+  ]) {
+    for (const fn of [put, remove]) {
+      stub(t, res)
+      try { await fn(); t.fail(name) } catch (e) { t.is(e.uncertain, true, name) }
+    }
+  }
+  for (const token of ['nao-vinculado', 'expirado', 'assinatura-invalida', 'pedido-invalido']) {
+    stub(t, json(token === 'expirado' ? 404 : 400, { error: token }))
+    try { await put(); t.fail() } catch (e) {
+      t.is(e.code, token)
+      t.absent(e.uncertain, token + ' is a refusal')
+    }
+  }
+  stub(t, () => { throw new Error('rede') })
+  try { await a.recoveryStart({ member: M }); t.fail() } catch (e) { t.absent(e.uncertain, 'start changes nothing') }
+  stub(t, () => { throw new Error('rede') })
+  try { await a.recoveryList({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.absent(e.uncertain, 'list changes nothing') }
+})

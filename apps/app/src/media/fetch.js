@@ -26,7 +26,12 @@
 // an image and nothing else. The display module is injected, not imported,
 // so this file stays loadable in Node. Every function takes injectable
 // dependencies for tests.
+// Chat items (deps.chat === true, public group posts only) may also be a
+// voice note: an audio descriptor (validAudioDescriptor), whose verified
+// bytes must still pass audioBounds (audio only, no video track) before they
+// are handed out typed audio/mp4. Diary post descriptors stay images only.
 
+import rpc from '@varanda/rpc'
 import { sha256 as nobleSha256 } from '@noble/hashes/sha2.js'
 import { isAppClient } from '../appClient.js'
 import { installationOrigin, resolveUrl } from '../installation.js'
@@ -37,6 +42,11 @@ export const MAX_MEDIA_BLOCKS = 8192
 
 const HEX64 = /^[0-9a-f]{64}$/
 const KEYS = ['blocks', 'bytes', 'core', 'height', 'mime', 'sha256', 'start', 'width']
+const AUDIO_KEYS = ['blocks', 'bytes', 'core', 'height', 'mime', 'ms', 'sha256', 'start', 'width']
+// Same values as packages/core/lib/records.js.
+export const AUDIO_MIME = 'audio/mp4'
+export const MAX_AUDIO_MS = 120000
+export const MAX_AUDIO_BYTES = 1572864
 
 const isInt = (n, min, max) => Number.isSafeInteger(n) && n >= min && n <= max
 
@@ -57,6 +67,27 @@ export function validDescriptor (d) {
   return true
 }
 
+// A voice note descriptor, as records.js validAudioDescriptor: the post
+// descriptor keys plus ms, mime audio/mp4, no sides, ms 1..MAX_AUDIO_MS and
+// at most MAX_AUDIO_BYTES. Chat items only. Never throws.
+export function validAudioDescriptor (d) {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return false
+  const keys = Object.keys(d).sort()
+  if (keys.length !== AUDIO_KEYS.length || keys.some((k, i) => k !== AUDIO_KEYS[i])) return false
+  if (typeof d.core !== 'string' || !HEX64.test(d.core)) return false
+  if (typeof d.sha256 !== 'string' || !HEX64.test(d.sha256)) return false
+  if (d.mime !== AUDIO_MIME) return false
+  if (!isInt(d.start, 1, MAX_MEDIA_BLOCKS - 1)) return false
+  if (!isInt(d.blocks, 1, MAX_MEDIA_ITEM_BLOCKS) || d.start + d.blocks > MAX_MEDIA_BLOCKS) return false
+  if (!isInt(d.bytes, (d.blocks - 1) * MEDIA_BLOCK_BYTES + 1, Math.min(d.blocks * MEDIA_BLOCK_BYTES, MAX_AUDIO_BYTES))) return false
+  if (d.width !== 0 || d.height !== 0 || !isInt(d.ms, 1, MAX_AUDIO_MS)) return false
+  return true
+}
+
+function validFor (d, chat) {
+  return validDescriptor(d) || (chat === true && validAudioDescriptor(d))
+}
+
 // The author as lowercase hex64, or null.
 function authorOf (author) {
   if (typeof author !== 'string') return null
@@ -65,10 +96,11 @@ function authorOf (author) {
 }
 
 // The URL of an item on the installation (a same-origin path on the web), or
-// null when the author or the descriptor is not valid.
-export function mediaUrl (author, d) {
+// null when the author or the descriptor is not valid. opts.chat: a chat
+// item, which may be a voice note.
+export function mediaUrl (author, d, opts = {}) {
   const a = authorOf(author)
-  if (a === null || !validDescriptor(d)) return null
+  if (a === null || !validFor(d, opts && opts.chat)) return null
   return resolveUrl('/media/' + a + '/' + d.core + '/' + d.start + '/' + d.blocks)
 }
 
@@ -184,7 +216,7 @@ function retryable (message) {
 // verified bytes shown on screen still go only to the cache files
 // ./display.native.js sweeps.
 export async function fetchMedia (author, d, deps) {
-  const url = mediaUrl(author, d)
+  const url = mediaUrl(author, d, { chat: deps && deps.chat })
   if (url === null) throw fail('foto inválida')
   const hashing = defaults(deps)
   const get = hashing.fetch
@@ -226,6 +258,8 @@ export async function fetchMedia (author, d, deps) {
     throw err
   }
   if (await digestHex(hashing, bytes) !== d.sha256) throw fail('conteúdo não confere')
+  // The author's hash proves who stored it, not what it is.
+  if (d.mime === AUDIO_MIME && rpc.audioBounds(bytes) === null) throw fail('conteúdo não confere')
   return bytes
 }
 

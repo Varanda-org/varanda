@@ -30,12 +30,14 @@
 		# 'wasm-unsafe-eval' só permite compilar WebAssembly (os hashes do
 		# nó no navegador), não eval. connect-src: só a própria origem e o
 		# WebSocket do semeador nela. O service worker ignora pedidos de outra
-		# origem.
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+		# origem. img-src e media-src aceitam blob: porque fotos e mensagens de
+		# voz das conversas chegam cifradas e são abertas no aparelho.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "no-referrer"
 		X-Frame-Options "DENY"
-		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		# O microfone só na própria origem, para gravar mensagens de voz.
+		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
 		-Server
 	}
 

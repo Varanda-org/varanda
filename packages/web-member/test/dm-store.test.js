@@ -171,6 +171,28 @@ test('a message row keeps its media descriptors, key included, across a reopen; 
   await again.close()
 })
 
+test('a voice note row: audio/mp4 with no sides and its duration, alone in its message', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await s.unlock(key(7))
+  const voice = { ...mediaItem('04'), mime: 'audio/mp4', w: 0, h: 0, ms: 4200, bytes: 40016, chunks: 1 }
+  await s.append([{ ...msg(s.nextFiled()), text: '', media: [voice] }])
+  t.alike(s.snapshot().messages[0].media, [voice], 'kept exactly')
+  const bad = {
+    'with sides': { ...voice, w: 1, h: 1 },
+    'ms 0': { ...voice, ms: 0 },
+    'ms over': { ...voice, ms: 120001 },
+    'over the byte cap': { ...voice, bytes: 1572864 + 17 },
+    'video mime': { ...voice, mime: 'video/mp4' },
+    'photo with ms': { ...mediaItem('05'), ms: 10 }
+  }
+  for (const [name, item] of Object.entries(bad)) {
+    await t.exception.all(s.append([{ ...msg(s.nextFiled()), id: '78'.repeat(16), media: [item] }]), /linha inválida/, name)
+  }
+  await t.exception.all(s.append([{ ...msg(s.nextFiled()), id: '78'.repeat(16), media: [voice, mediaItem('06')] }]), /linha inválida/, 'never next to a photo')
+  await s.close()
+})
+
 test('the media cache: sealed at rest, keyed by an opaque name, readable only under the key, wiped without it', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })

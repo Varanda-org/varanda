@@ -25,6 +25,10 @@ const resultKeys = {
   'identity.reset': [],
   'identity.forget': [],
   'identity.sessionSaved': [],
+  'identity.recoveryLookup': [],
+  'identity.recoveryOpen': [],
+  'identity.recoveryWrap': [],
+  'identity.recoveryBind': [],
   'profile.delete': [],
   'cert.add': ['seq'],
   'account.sign': ['signature'],
@@ -34,6 +38,7 @@ const resultKeys = {
   'report.sign': ['signature'],
   'dm.reportSign': ['signature'],
   'terms.sign': ['signature'],
+  'recovery.sign': ['signature'],
   'page.sign': ['signature'],
   'page.register': ['actor'],
   'age.proof': ['ageVerifiedDate', 'ageSince', 'ageSinceUntil'],
@@ -509,7 +514,7 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
   }
 })
 
-const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'profile.delete']
+const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap', 'identity.recoveryBind', 'profile.delete']
 
 function samples (f) {
   const group = f.groups[3].group
@@ -557,6 +562,12 @@ function samples (f) {
     'report.sign': { nonce, target: member, reason: 'outro' },
     'dm.reportSign': { nonce, target: member, reason: 'outro', quote: 'Uma mensagem de exemplo.' },
     'terms.sign': { nonce, version: 1 },
+    'recovery.sign': { action: 'list', nonce },
+    'identity.recoveryLookup': { kind: 'passkey', secret: 'a'.repeat(64) },
+    'identity.recoveryOpen': { blob: { v: 1, kind: 'passkey', nonce: 'b'.repeat(48), ciphertext: 'c'.repeat(164) }, member: 'd'.repeat(64) },
+    'identity.recoveryWrap': { kind: 'passkey', secret: 'e'.repeat(64) },
+    // A marked user id: 16 bytes, then utf8 'varanda-wrap-v1\n'.
+    'identity.recoveryBind': { credentialId: 'vitrine', userId: '00'.repeat(16) + '766172616e64612d777261702d76310a' },
     'page.sign': { action: 'list', nonce, page: '', op: {} },
     'page.register': {},
     'page.read': { key: f.pages[0].author },
@@ -898,7 +909,7 @@ test('page signing covers every documented result variant with fake signatures',
   const cancelled = await answer(t, request, 'page.sign', { action: 'offer', nonce, page, op: { ...base, to: null, exp: null } })
   t.is(cancelled.record.to, null)
   t.is(cancelled.record.exp, null)
-  for (const method of ['account.sign', 'age.sign', 'invite.sign', 'push.sign', 'report.sign', 'dm.reportSign', 'terms.sign']) {
+  for (const method of ['account.sign', 'age.sign', 'invite.sign', 'push.sign', 'report.sign', 'dm.reportSign', 'terms.sign', 'recovery.sign']) {
     t.is((await answer(t, request, method, samples(f)[method])).signature, signature)
   }
 })

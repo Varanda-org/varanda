@@ -31,6 +31,9 @@
 // An uncertain send keeps that exact request (uploads included) and only
 // "Tentar de novo" resends it; nothing is resent by itself. Received photos
 // render inside the bubble through ChatMedia (chatMedia.js sourceFor).
+// Voice notes take the same path: with an empty field the composer records
+// one (where the device can make audio/mp4), it goes to the blob channel as
+// the only item of one dm.send, and the bubble plays it (VoiceBubble).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyboardAvoidingView, Platform, StyleSheet, View } from 'react-native'
@@ -48,7 +51,7 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { mergeMessages, newestOf, pageDmRequest, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
 import { pagesDm } from '../pages'
 import { pagesOn } from '../pageGate'
-import { composePlan } from '../attach-plan'
+import { composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
 import { chatMediaRefs, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { Btn, ErrorText, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
@@ -340,6 +343,43 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     mediaDone(r, text, quoteId)
   }
 
+  // A recorded voice note: one upload, then one dm.send, under the same
+  // state machine as photos (one commit, retry only on an explicit tap).
+  const sendVoice = async (recording) => {
+    if (mediaApi === null || sendingMedia || mediaHold !== null || attachments.items.length > 0) return
+    if (!recording || !(recording.bytes instanceof Uint8Array)) return
+    setMediaError('')
+    setAskNew(false)
+    const quoteId = replyTo ? replyTo.id : null
+    let plan
+    try {
+      plan = composePlan({ text: '', attachments: [stagedVoice(recording)], target: { kind: 'dm', to: peer, ...(quoteId ? { replyTo: quoteId } : {}) } })
+    } catch (err) {
+      setMediaError(errorText(err))
+      return
+    }
+    const token = { live: true }
+    sendTokenRef.current = token
+    const r = await runChatSend({
+      plan,
+      files: [recording],
+      upload: async (f) => {
+        try {
+          return await mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice' })
+        } catch (err) {
+          throw voiceUploadError(err)
+        }
+      },
+      request: dm,
+      live: () => token.live,
+      onPhase: (p) => { if (token.live) setMediaSend(p) },
+      uncertain: unsureSend
+    })
+    if (sendTokenRef.current === token) sendTokenRef.current = null
+    if (r.phase === 'cancelled') return
+    mediaDone(r, '', quoteId)
+  }
+
   // The explicit retry of an uncertain photo send: the same dm.send, once.
   const retryMedia = async () => {
     if (!mediaHold || sendingMedia) return
@@ -548,6 +588,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
         sendDisabled={!canSend}
         editable={!(hold && pageKey !== null) && mediaHold === null && !sendingMedia}
         onAttach={canAttach && !hold ? () => attachments.pick() : null}
+        onVoice={isTop && canAttach && !hold && mediaHold === null && attachments.items.length === 0 ? sendVoice : null}
         attachments={staged ? attachments.items : null}
         onRemoveAttachment={mediaHold === null ? attachments.remove : undefined}
         onCancelAttachments={mediaHold === null && !(mediaSend && mediaSend.phase === 'sending') ? cancelMedia : undefined}

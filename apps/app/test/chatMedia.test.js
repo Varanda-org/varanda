@@ -307,6 +307,7 @@ test('public group item: fetched from the installation, verified, then bounded',
   t.is(calls[0].author, DIARY)
   t.is(calls[0].desc, item)
   t.is(calls[0].deps.persist, false, 'chat media is not kept in the HTTP cache by default')
+  t.is(calls[0].deps.chat, true, 'a chat item, so a public voice note descriptor is accepted')
 })
 
 test('public group item: the real fetch checks the SHA-256', async (t) => {
@@ -467,4 +468,128 @@ test('the viewer closes on return from a background clear and a gone item reload
   t.ok(/onChatMediaReturn\(\(\) => setOpen\(null\)\)/.test(src), 'the open viewer closes when its file was cleared')
   t.ok(/\[key, attempt, load, gone, node && node\.media\]/.test(src), 'availability is part of the load effect')
   t.ok(/result\.gone !== gone/.test(src), 'a result for the other availability is not shown')
+})
+
+// Voice notes: audio/mp4 bytes pass only through audioBounds (stubbed here,
+// tested in packages/rpc), native files only as the worklet answered them.
+const voice = () => new Uint8Array([1, 2, 3, 4])
+const audioOk = () => ({ ms: 4200 })
+const voiceDm = (n) => ({ kind: 'dm', from: FROM, id: id(n), index: 0, item: { mime: 'audio/mp4', w: 0, h: 0, ms: 4200 } })
+
+test('web voice note: audioBounds passes, the bytes become a blob: URL with the duration, then are wiped', async (t) => {
+  const { createChatMedia } = await load()
+  const checked = []
+  const media = createChatMedia({ audioBounds: (b) => { checked.push(b.byteLength); return audioOk() } })
+  const d = display()
+  let handed = null
+  const node = webNode(() => { handed = voice(); return { bytes: handed, mime: 'audio/mp4' } })
+  const out = await media.sourceFor(voiceDm(1), { node, identity: ME, display: d })
+  t.alike(out, { uri: 'blob:test/1', mime: 'audio/mp4', w: 0, h: 0, ms: 4200 })
+  t.alike(checked, [4], 'audioBounds read the bytes')
+  t.is(d.made[0].mime, 'audio/mp4')
+  t.ok(handed.every((b) => b === 0), 'the plaintext is zero-filled')
+})
+
+test('web voice note: refused by audioBounds, over the byte cap or a throwing check: no URL', async (t) => {
+  const { createChatMedia, MAX_AUDIO_BYTES } = await load()
+  const cases = [
+    { bounds: () => null, bytes: voice() },
+    { bounds: () => { throw new Error('x') }, bytes: voice() },
+    { bounds: () => ({ ms: 0 }), bytes: voice() },
+    { bounds: audioOk, bytes: new Uint8Array(MAX_AUDIO_BYTES + 1) }
+  ]
+  for (const c of cases) {
+    const media = createChatMedia({ audioBounds: c.bounds })
+    const d = display()
+    const node = webNode(() => ({ bytes: c.bytes, mime: 'audio/mp4' }))
+    t.alike(await media.sourceFor(voiceDm(1), { node, identity: ME, display: d }), { unavailable: true })
+    t.is(d.made.length, 0)
+  }
+})
+
+test('web voice note: the shown ms is the container one; a declared ms past the tolerance is refused', async (t) => {
+  const { createChatMedia } = await load()
+  const run = async (declared, containerMs) => {
+    const media = createChatMedia({ audioBounds: () => ({ ms: containerMs }), fetch: async () => voice() })
+    const d = display()
+    const node = webNode(() => ({ bytes: voice(), mime: 'audio/mp4' }))
+    const ref = { ...voiceDm(1), item: { mime: 'audio/mp4', w: 0, h: 0, ms: declared } }
+    return media.sourceFor(ref, { node, identity: ME, display: d })
+  }
+  t.is((await run(4200, 4900)).ms, 4900, 'within the tolerance: the container length')
+  t.is((await run(4200, 3200)).ms, 3200)
+  t.alike(await run(4200, 5201), { unavailable: true }, 'past the tolerance')
+  t.alike(await run(1, 120000), { unavailable: true }, 'two minutes claiming 1 ms')
+  const media = createChatMedia({ audioBounds: () => ({ ms: 120000 }), fetch: async () => voice() })
+  const pub = { core: 'e5'.repeat(32), mime: 'audio/mp4', start: 1, blocks: 1, bytes: 4, sha256: '0b'.repeat(32), width: 0, height: 0, ms: 1 }
+  t.alike(await media.sourceFor({ kind: 'group', diary: DIARY, item: pub }, { identity: ME, display: display() }), { unavailable: true }, 'a public descriptor too')
+})
+
+test('native voice note: the worklet ms is shown; one past the tolerance is refused and forgotten', async (t) => {
+  const { createChatMedia } = await load()
+  const media = createChatMedia()
+  const ok = nativeNode((ref) => ({ uri: 'file:///c/' + ref.id + '.m4a', mime: 'audio/mp4', w: 0, h: 0, ms: 4900 }))
+  t.is((await media.sourceFor(voiceDm(1), { node: ok, identity: ME })).ms, 4900, 'the container length')
+  const far = nativeNode(() => ({ uri: 'file:///c/z.m4a', mime: 'audio/mp4', w: 0, h: 0, ms: 120000 }))
+  t.alike(await media.sourceFor(voiceDm(2), { node: far, identity: ME }), { unavailable: true })
+  t.alike(far.forgotten, ['z.m4a'])
+})
+
+test('voice note: an image answer for an audio item, or audio for an image item, is refused', async (t) => {
+  const { createChatMedia } = await load()
+  const media = createChatMedia({ audioBounds: audioOk })
+  const d = display()
+  t.alike(await media.sourceFor(voiceDm(1), { node: webNode(), identity: ME, display: d }), { unavailable: true })
+  const node = webNode(() => ({ bytes: voice(), mime: 'audio/mp4' }))
+  t.alike(await media.sourceFor(dmRef(2), { node, identity: ME, display: d }), { unavailable: true })
+  t.is(d.made.length, 0)
+})
+
+test('native voice note: the worklet file with w/h 0 is accepted; a sized answer is refused and forgotten', async (t) => {
+  const { createChatMedia } = await load()
+  const media = createChatMedia()
+  const ok = nativeNode((ref) => ({ uri: 'file:///c/' + ref.id + '.m4a', mime: 'audio/mp4', w: 0, h: 0 }))
+  t.alike(await media.sourceFor(voiceDm(1), { node: ok, identity: ME }), { uri: 'file:///c/' + id(1) + '.m4a', mime: 'audio/mp4', w: 0, h: 0, ms: 4200 })
+  const bad = nativeNode(() => ({ uri: 'file:///c/y.m4a', mime: 'audio/mp4', w: 3, h: 2 }))
+  t.alike(await media.sourceFor(voiceDm(2), { node: bad, identity: ME }), { unavailable: true })
+  t.alike(bad.forgotten, ['y.m4a'])
+  const remote = nativeNode(() => ({ uri: 'https://example.com/y.m4a', mime: 'audio/mp4', w: 0, h: 0 }))
+  t.alike(await media.sourceFor(voiceDm(3), { node: remote, identity: ME }), { unavailable: true })
+})
+
+test('private group voice note is opened by the node; a public audio descriptor is fetched then checked', async (t) => {
+  const { createChatMedia, isAudioDescriptor, isVoiceItem } = await load()
+  const media = createChatMedia({ audioBounds: audioOk, fetch: async () => voice() })
+  const d = display()
+  const priv = { ...privateItem(), plainMime: 'audio/mp4', w: 0, h: 0, ms: 4200 }
+  const node = webNode(() => ({ bytes: voice(), mime: 'audio/mp4' }))
+  const a = await media.sourceFor({ kind: 'group', diary: DIARY, item: priv }, { node, identity: ME, display: d })
+  t.is(a.mime, 'audio/mp4')
+  const pub = { core: 'e5'.repeat(32), mime: 'audio/mp4', start: 1, blocks: 1, bytes: 4, sha256: '0b'.repeat(32), width: 0, height: 0, ms: 4200 }
+  t.ok(isAudioDescriptor(pub))
+  t.absent(isAudioDescriptor({ ...pub, width: 3 }))
+  t.absent(isAudioDescriptor({ ...pub, mime: 'video/mp4' }))
+  t.absent(isAudioDescriptor({ ...pub, ms: 120001 }))
+  const b = await media.sourceFor({ kind: 'group', diary: DIARY, item: pub }, { identity: ME, display: d })
+  t.alike(b, { uri: 'blob:test/2', mime: 'audio/mp4', w: 0, h: 0, ms: 4200 })
+  t.ok(isVoiceItem(priv) && isVoiceItem(pub) && isVoiceItem({ mime: 'audio/mp4' }))
+  t.absent(isVoiceItem(privateItem()) || isVoiceItem(null))
+})
+
+test('one voice note plays at a time', async (t) => {
+  const { claimPlayback, stopPlayback } = await load()
+  const paused = []
+  const a = { pause () { paused.push('a') } }
+  const b = { pause () { paused.push('b') } }
+  const releaseA = claimPlayback(a)
+  claimPlayback(a)
+  t.alike(paused, [], 'claiming again does not pause itself')
+  claimPlayback(b)
+  t.alike(paused, ['a'], 'the previous player is paused')
+  releaseA()
+  stopPlayback()
+  t.alike(paused, ['a', 'b'], 'a stale release does not forget the current player')
+  stopPlayback()
+  t.alike(paused, ['a', 'b'])
+  t.is(typeof claimPlayback(null), 'function')
 })

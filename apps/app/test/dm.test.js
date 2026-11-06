@@ -356,3 +356,17 @@ test('chat media files never name an http(s) image source and no presence words'
     t.absent(src.includes('\u2014'), file)
   }
 })
+
+test('Mensagem sends a voice note on the blob channel and keeps the photo send state machine', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('attachments: [stagedVoice(recording)]'), 'one voice item through composePlan')
+  t.ok(src.includes("mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice' })"), 'the DM blob channel')
+  t.ok(src.includes("mediaDone(r, '', quoteId)"), 'the same commit and hold as photos')
+  t.ok(src.includes('onVoice={isTop && canAttach && !hold && mediaHold === null'), 'no recording while a send is held or under a pushed screen')
+  const composer = readFileSync(join(__dirname, '../src/ui/ChatComposer.js'), 'utf8')
+  t.ok(composer.includes("const micOn = typeof onVoice === 'function'"), 'no onVoice hides the microphone')
+  t.ok(composer.includes('if (!micOn && voiceNow.current.recRef.current !== null) voiceNow.current.finish(false)'), 'and drops a recording')
+  const bubble = readFileSync(join(__dirname, '../src/ui/VoiceBubble.js'), 'utf8')
+  t.absent(/https?:\/\//.test(bubble), 'VoiceBubble: no http(s) literal')
+  for (const word of ['lida', 'entregue', 'digitando']) t.absent(bubble.includes(word), 'VoiceBubble: ' + word)
+})
