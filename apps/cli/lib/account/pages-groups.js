@@ -970,7 +970,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     }
   }
 
-  async function groupPost (page, G, { text, replyTo = null } = {}) {
+  async function groupPost (page, G, { text, replyTo = null, fwd = 0 } = {}) {
     needKey(G)
     return withPage(page, async (p) => {
       const loaded = await loadGroup(page, p, G, { secrets: true })
@@ -981,7 +981,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
         if (!loaded.view.writers.has(w)) throw fail('limite')
         let record
         try {
-          record = groups.groupPost({ text, replyTo, seen: loaded.view.last })
+          record = groups.groupPost({ text, replyTo, fwd, seen: loaded.view.last })
         } catch {
           throw fail('invalido')
         }

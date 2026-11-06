@@ -2260,3 +2260,15 @@ test('memberInvite in a private group is plaintext and folds without the epoch k
   w.comm.push(CM, communityInvites({ group: G, on: false, at: AT(9) }))
   t.is(buildGroup(w.input()).memberInvite, false, 'C\'s creator clears it in G')
 })
+
+test('a sealed text forward keeps its flag through buildGroup', (t) => {
+  const w = pworld()
+  const original = w.seal(wX, w.E1, groupPost({ text: 'original', at: AT(6), sealed: true }))
+  const forward = w.seal(wX, w.E1, groupPost({ text: 'encaminhada', fwd: 1, at: AT(7), sealed: true }))
+  const g = buildGroup(w.input(w.reader(wY)))
+  t.is(g.posts.find(p => p.writer === original.writer && p.seq === original.seq).fwd, 0)
+  const post = g.posts.find(p => p.writer === forward.writer && p.seq === forward.seq)
+  t.is(post.text, 'encaminhada')
+  t.is(post.fwd, 1)
+  t.absent(post.media)
+})

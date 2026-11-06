@@ -8,7 +8,7 @@ const sodium = require('sodium-universal')
 const hcrypto = require('hypercore-crypto')
 const dm = require('../lib/dm')
 const { generateAssociationKeyPair, createCert, createIssuerCert, createIssuedCert } = require('../lib/cert')
-const { MAX_TEXT } = require('@varanda/rpc')
+const { MAX_TEXT, dmTextBudget } = require('@varanda/rpc')
 
 const {
   DM_MAX_TEXT, DM_INNER_BYTES, DM_SEAL_BYTES, DM_SEALED_BYTES, DM_DROP_BYTES, DM_PAGE_MAX, DM_MAX_MESSAGE,
@@ -527,8 +527,11 @@ test('inner v2: one exact key set, one prefix, one encoding', (t) => {
 
   const refused = {
     'card set': v2Body({ card: { url: 'x' } }),
-    'fwd set': v2Body({ fwd: 1 }),
-    'media null': v2Body({ media: null }),
+    'fwd 2': v2Body({ fwd: 2 }),
+    'fwd true': v2Body({ fwd: true }),
+    "fwd '1'": v2Body({ fwd: '1' }),
+    'fwd false': v2Body({ fwd: false }),
+    'media null and fwd 0': v2Body({ media: null }),
     'media null with empty text': v2Body({ media: null, text: '' }),
     'v1 number with v2 keys': v2Body({ v: 1 }),
     'v 3': v2Body({ v: 3 }),
@@ -563,6 +566,37 @@ test('inner v2: one exact key set, one prefix, one encoding', (t) => {
   // A v2 msg still needs the sender's certificate.
   t.is(openInner(forge(v2Body({ cert: null }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'no cert')
   t.is(openInner(msg({ media: [blobItem(1)] }), bia.hex), null, 'no association')
+})
+
+test('inner v2: fwd is 0 or 1, and a forward may be text only', (t) => {
+  const withMedia = openInner(msg({ text: 'foto', media: [blobItem(1)], fwd: 1 }), bia.hex, O)
+  t.is(withMedia.fwd, 1)
+  t.alike(withMedia.media, [blobItem(1)])
+  t.is(withMedia.card, null)
+
+  const textOnly = openInner(msg({ text: 'encaminhada', fwd: 1 }), bia.hex, O)
+  t.is(textOnly.v, 2)
+  t.is(textOnly.fwd, 1)
+  t.is(textOnly.media, null)
+  t.is(textOnly.card, null)
+  t.is(textOnly.text, 'encaminhada')
+  t.alike(Object.keys(textOnly), [...dm.INNER_KEYS_V2, 'mine'])
+
+  // A forward with no photo is still a message: empty text stays the caption case.
+  t.exception.all(() => msg({ text: '', fwd: 1 }), /mensagem inválida/, 'text forward still needs text')
+  t.is(openInner(forge(v2Body({ media: null, text: '', fwd: 1 }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'open refuses an empty text forward')
+
+  for (const fwd of [2, true, '1', false]) {
+    t.exception.all(() => msg({ fwd, media: [blobItem(1)] }), /mensagem inválida/, 'build refuses fwd ' + JSON.stringify(fwd))
+    t.is(openInner(forge(v2Body({ fwd }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'open refuses fwd ' + JSON.stringify(fwd))
+  }
+  t.is(openInner(forge(v2Body({ media: null, fwd: 0 }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'v2 with media null and fwd 0')
+  t.exception.all(() => buildInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: ana.cert, media: null, fwd: 2 }, ana), /mensagem inválida/)
+
+  const v1 = openInner(msg({ text: 'oi' }), bia.hex, O)
+  t.is(v1.v, 1)
+  t.is(v1.text, 'oi')
+  t.alike(Object.keys(v1), [...dm.INNER_KEYS, 'mine'], 'a plain text message stays v1')
 })
 
 test('inner v2: a sparse media list is refused before signing', (t) => {
@@ -638,4 +672,15 @@ test('inner v2: a voice note keeps the text budget', (t) => {
   t.is(openInner(buildInner({ ...fields, text: textOfBytes(budget) }, who), bia.hex, O).text, textOfBytes(budget), 'text at the budget fits')
   t.exception.all(() => buildInner({ ...fields, text: textOfBytes(budget) + 'x' }, who), /mensagem longa demais/, 'one byte more throws')
   t.is(sealInner(empty, boxPair().hex).byteLength, DM_SEALED_BYTES, 'the sealed frame keeps its size')
+})
+
+test('text forward budgets include the v2 keys without media', (t) => {
+  const fields = { kind: 'msg', to: bia.hex, from: ana.hex, at: AT, cert: ana.cert, media: null }
+  const forward = { ...fields, fwd: 1 }
+  const budget = textBudget(forward)
+  t.is(budget, dmTextBudget(forward))
+  t.is(textBudget(fields) - budget, 33, 'media, card and fwd consume the extra JSON bytes')
+  const inner = buildInner({ ...forward, text: 'oi' }, ana)
+  const len = (inner[0] << 8) | inner[1]
+  t.is(budget - 2, DM_INNER_BYTES - len - 66, 'the budget matches the signed inner')
 })

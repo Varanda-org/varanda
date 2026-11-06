@@ -51,7 +51,7 @@ test('DM photos and GIFs upload in order before the exact send request', async (
   const attachments = [attachment(), attachment(2, 'image/gif')]
   const media = [blob(), blob(2, 'image/gif')]
   const plan = composePlan({ text: '', attachments, target: { ...dm, replyTo: ID } })
-  t.alike(plan.uploads, attachments.map(params => ({ method: 'dm.putMedia', params })))
+  t.alike(plan.uploads, attachments.map(({ name, mime, width, height }) => ({ method: 'dm.putMedia', params: { name, to: KEY, mime, width, height } })))
   t.exception(() => plan.send(), /anexos pendentes/)
   t.exception(() => plan.send([media[0]]), /anexos pendentes/)
   t.alike(plan.send(media), { method: 'dm.send', params: { to: KEY, text: '', replyTo: ID, media } })
@@ -179,7 +179,8 @@ test('one voice note plans an upload for a DM, a public and a private group', as
   for (const target of [dm, group, privateGroup]) {
     const plan = composePlan({ text: '', attachments: [staged], target })
     const flags = target.visibility === 'private' ? { sealed: true } : {}
-    t.alike(plan.uploads, [{ method: target.kind === 'dm' ? 'dm.putMedia' : 'media.uploadFile', params: { ...staged, ...flags } }])
+    const dmTo = target.kind === 'dm' ? { to: KEY } : {}
+    t.alike(plan.uploads, [{ method: target.kind === 'dm' ? 'dm.putMedia' : 'media.uploadFile', params: { ...staged, ...dmTo, ...flags } }])
     t.is(plan.preview, 'Áudio')
   }
 })
@@ -232,4 +233,15 @@ test('voice preview label wins over text-less photo labels', async (t) => {
   t.is(attachmentPreview('', [voicePublic()]), 'Áudio')
   t.is(attachmentPreview('', [voicePrivate()]), 'Áudio')
   t.is(attachmentPreview('oi', [voicePublic()]), 'oi')
+})
+
+test('fwd 1 rides in the request and counts in the DM budget', async (t) => {
+  const { composePlan } = await load()
+  t.ok(rpc.dmTextBudget({ to: KEY, fwd: 1, cert: rpc.MEMBER_CERT_STANDIN }) < rpc.dmTextBudget({ to: KEY, cert: rpc.MEMBER_CERT_STANDIN }), 'fwd costs budget')
+  const plan = composePlan({ text: 'a', attachments: [attachment()], target: { ...dm, fwd: 1 } })
+  t.alike(plan.send([blob()]).params, { to: KEY, text: 'a', fwd: 1, media: [blob()] })
+  const post = composePlan({ text: 'a', target: { ...group, fwd: 1 } })
+  t.alike(post.send().params, { group: KEY, text: 'a', fwd: 1 })
+  const plain = composePlan({ text: 'a', target: { ...group, fwd: 0 } })
+  t.absent('fwd' in plain.send().params, 'only fwd 1 is sent')
 })

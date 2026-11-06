@@ -737,3 +737,14 @@ test('voice: lock and background stop playback; lock sweeps the recorder cache',
   t.ok(/useEffect\(\(\) => \{\n {4}stopPlayback\(\)\n {4}clearChatMedia\(\)\n {4}sweepVoiceCache\(\)\n {2}\}, \[generation, locked\]\)/.test(app), 'the lock effect')
   t.ok(app.includes("if (state === 'background') stopPlayback()\n      onAppStateChange(state, { canClear: true })"), 'background')
 })
+
+test('Grupo offers Encaminhar as the person and shows Encaminhada for fwd 1', (t) => {
+  const { readFileSync } = require('node:fs')
+  const { join } = require('node:path')
+  const src = readFileSync(join(__dirname, '../src/screens/Grupo.js'), 'utf8')
+  t.ok(src.includes("label: 'Encaminhar'"), 'the long press action')
+  t.ok(src.includes('if (!asPage.page && !row.hidden && info !== null && rawRow)'), 'never as a page, never a hidden message')
+  t.ok(src.includes("visibility: isPrivate ? 'private' : 'public'"), 'the source carries the group visibility')
+  t.ok(src.includes('<ForwardSheet'), 'the sheet')
+  t.ok(src.includes('forwarded={!row.hidden && !!rawRow && rawRow.fwd === 1}'), 'fwd 1 from group.read shows the line')
+})

@@ -10,7 +10,9 @@
 // settings icon or a tap on its titles. The header shows the group's name
 // and member count; the community is a small line under it that opens it.
 // Messages are bubbles (group-screen.js groupRows, ui/Bubble): a long press
-// offers Responder, Copiar, Esconder, Banir and Denunciar under can(). A reply
+// offers Responder, Copiar, Encaminhar (ui/ForwardSheet, forward.js),
+// Esconder, Banir and Denunciar under can(). A forwarded message (fwd 1)
+// shows "Encaminhada", never its original author. A reply
 // is sent as group.post replyTo { writer, seq } and drawn as a quote of the
 // loaded target only (never fetched).
 // A group without a community (orphan) is read-only. Joining needs the
@@ -68,6 +70,7 @@ import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
+import { ForwardSheet } from '../ui/ForwardSheet'
 import { space } from '../ui/theme'
 import { fetchGroup } from '../indexClient'
 import { useNames } from '../names'
@@ -131,6 +134,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
   const [check, setCheck] = useState(null)
   const [banTarget, setBanTarget] = useState(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // { source, refs } of the message the Encaminhar sheet forwards.
+  const [forwarding, setForwarding] = useState(null)
   // The community of a group this node does not hold yet (from the index),
   // the community's name, and whether a join was refused for lack of one.
   const [indexCommunity, setIndexCommunity] = useState(null)
@@ -998,6 +1003,17 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
     if (!row.hidden && typeof row.rawText === 'string' && row.rawText !== '') {
       list.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(row.rawText, { multiline: true })) } })
     }
+    // Forwarding writes as the person, never as a page; a hidden message is
+    // never forwarded.
+    const rawRow = rawById.get(row.key || row.id)
+    if (!asPage.page && !row.hidden && info !== null && rawRow) {
+      const media = Array.isArray(rawRow.media) ? rawRow.media : []
+      const source = { kind: 'group', visibility: isPrivate ? 'private' : 'public', text: typeof row.rawText === 'string' ? row.rawText : '', media }
+      const refs = chatMediaRefs('group', { diary: rawRow.diary, media })
+      if (source.text !== '' || media.length > 0) {
+        list.push({ icon: 'encaminhar', label: 'Encaminhar', onPress: () => setForwarding({ source, refs }) })
+      }
+    }
     if (!asPage.page && can('hide', role, { own: mine })) {
       list.push({ icon: row.hidden ? 'olho' : 'olho_fechado', label: row.hidden ? 'Mostrar' : 'Esconder', onPress: () => hide(row, !row.hidden) })
     }
@@ -1032,6 +1048,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
         item={{ key: row.key, text: row.text, rawText: row.hidden ? undefined : row.rawText, at: row.at, hidden: row.hidden, dayMark: row.dayMark }}
         mine={mine}
         shape={row.shape}
+        forwarded={!row.hidden && !!rawRow && rawRow.fwd === 1}
         name={mine ? undefined : who.title}
         handle={mine ? undefined : who.subtitle}
         senderKey={row.diary || row.writer}
@@ -1158,6 +1175,17 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
         keepVisiblePosition
       />
       {composer}
+      {!asPage.page
+        ? (
+          <ForwardSheet
+            open={forwarding !== null}
+            onClose={() => setForwarding(null)}
+            source={forwarding ? forwarding.source : null}
+            refs={forwarding ? forwarding.refs : []}
+            identity={ownKey}
+          />
+          )
+        : null}
       {info && !asPage.page
         ? (
           <GrupoAjustes

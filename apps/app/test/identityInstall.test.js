@@ -464,10 +464,10 @@ test('a voice note carries its duration and kind to the session; an image never 
   }
   const io = { read: async () => ({ file: '/cache/v.bin', bytes: new Uint8Array(4) }), session, unlink: () => {}, isClosing: () => false }
   await uploadMedia(io, { mime: 'audio/mp4', width: 0, height: 0, ms: 2500, kind: 'voice', sealed: true })
-  await putDmMedia(io, { mime: 'audio/mp4', width: 0, height: 0, ms: 2500, kind: 'voice' })
+  await putDmMedia(io, { mime: 'audio/mp4', width: 0, height: 0, ms: 2500, kind: 'voice', to: 'ef'.repeat(32) })
   await uploadMedia(io, { mime: 'image/jpeg', width: 1, height: 1, ms: 5, kind: 'other' })
   t.alike(seen[0], ['upload', ['bytes', 'mime', 'width', 'height', 'ms', 'kind', 'sealed'], 2500, 'voice'])
-  t.alike(seen[1], ['dm', ['bytes', 'mime', 'width', 'height', 'ms', 'kind'], 2500, 'voice'])
+  t.alike(seen[1], ['dm', ['bytes', 'mime', 'width', 'height', 'ms', 'kind', 'to'], 2500, 'voice'])
   t.alike(seen[2], ['upload', ['bytes', 'mime', 'width', 'height'], undefined, undefined], 'an image keeps its exact keys')
 })
 
@@ -755,17 +755,23 @@ test('putDmMedia hands the photo to dmPutMedia, zeroes it and unlinks after succ
   const bytes = new Uint8Array([1, 2, 3])
   const session = { dmPutMedia: (args) => { seen.push({ ...args, copy: new Uint8Array(args.bytes) }); return Promise.resolve({ id: 'x' }) } }
   const io = { read: async () => ({ file: '/cache/p.bin', bytes }), session, unlink: (f) => unlinked.push(f), isClosing: () => false }
-  t.alike(await putDmMedia(io, { mime: 'image/png', width: 2, height: 3, sealed: true }), { id: 'x' })
-  t.alike(Object.keys(seen[0]), ['bytes', 'mime', 'width', 'height', 'copy'], 'no sealed on the blob channel')
+  const dest = 'ef'.repeat(32)
+  t.alike(await putDmMedia(io, { mime: 'image/png', width: 2, height: 3, sealed: true, to: dest }), { id: 'x' })
+  t.alike(Object.keys(seen[0]), ['bytes', 'mime', 'width', 'height', 'to', 'copy'], 'no sealed on the blob channel')
   t.alike(seen[0].copy, new Uint8Array([1, 2, 3]))
   t.ok(bytes.every((b) => b === 0), 'the bytes are zeroed')
   t.alike(unlinked, ['/cache/p.bin'])
 
+  await putDmMedia({ ...io, read: async () => ({ file: '/cache/r.bin', bytes: new Uint8Array([4]) }) }, { mime: 'image/png', width: 2, height: 3, to: dest })
+  t.is(seen[1].to, dest, 'the destination reaches the session (rpc 5.97)')
+  await putDmMedia({ ...io, read: async () => ({ file: '/cache/s.bin', bytes: new Uint8Array([5]) }) }, { mime: 'image/png', width: 2, height: 3 })
+  t.ok('to' in seen[2] && seen[2].to === undefined, 'a missing destination still reaches the session, which refuses it')
+
   const failing = { ...io, read: async () => ({ file: '/cache/q.bin', bytes: new Uint8Array(1) }), session: { dmPutMedia: () => { throw new TypeError('mídia inválida') } } }
-  const err = await putDmMedia(failing, { mime: 'image/png', width: 1, height: 1 }).catch((e) => e)
+  const err = await putDmMedia(failing, { mime: 'image/png', width: 1, height: 1, to: dest }).catch((e) => e)
   t.is(err.code, 'USAGE')
-  t.alike(unlinked, ['/cache/p.bin'], 'a refused file is not unlinked')
-  const closing = await putDmMedia({ ...io, isClosing: () => true }, { mime: 'image/png', width: 1, height: 1 }).catch((e) => e)
+  t.alike(unlinked, ['/cache/p.bin', '/cache/r.bin', '/cache/s.bin'], 'a refused file is not unlinked')
+  const closing = await putDmMedia({ ...io, isClosing: () => true }, { mime: 'image/png', width: 1, height: 1, to: dest }).catch((e) => e)
   t.is(closing.code, 'LOCKED')
 })
 

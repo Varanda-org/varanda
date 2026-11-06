@@ -63,7 +63,7 @@ function nonce43 (c) {
   return (String(seqNo) + c.repeat(43)).slice(0, 43)
 }
 
-async function setup (t) {
+async function setup (t, { pagesGroups = null } = {}) {
   const { bootstrap } = await testnet(t)
   const assocKp = generateAssociationKeyPair()
   const association = hex(assocKp.publicKey)
@@ -108,7 +108,7 @@ async function setup (t) {
     issuer: { keyPair: issuerKp, cert: issuerCert },
     terms,
     log,
-    pages: { keys, writer, pagesStore, dir, pagesDm, blocklist: { has: () => false } }
+    pages: { keys, writer, pagesStore, dir, pagesDm, pagesGroups, blocklist: { has: () => false } }
   })
   const l = await server.listen({ host: '127.0.0.1', port: 0 })
   t.teardown(() => l.close(), { force: true })
@@ -316,7 +316,7 @@ test('pages-dm: a member writes to the page, an admin reads and answers through 
   }, { name: 'page box lookup', timeoutMs: 60000 })
   t.ok(/^[0-9a-f]{64}$/.test(box.box), 'the member finds the page box')
   const TEXT_IN = 'oi padaria, tem pão?'
-  await X.web.request('dm.send', { to: page, text: TEXT_IN })
+  await X.web.request('dm.send', { to: page, text: TEXT_IN, fwd: 1 })
   const pulled = await s.pagesDm.pull()
   t.is(pulled.added, 1, 'the page files the message')
 
@@ -330,6 +330,7 @@ test('pages-dm: a member writes to the page, an admin reads and answers through 
   t.is(th.status, 200)
   t.is(th.body.messages.length, 1)
   t.is(th.body.messages[0].text, TEXT_IN)
+  t.is(th.body.messages[0].fwd, 1, 'incoming text forward')
   t.is(th.body.messages[0].from, X.key)
   t.is(th.body.folder, 'request')
   t.is((await s.act(bia, 'dm-seen', page, { peer: X.key })).status, 200)
@@ -358,12 +359,25 @@ test('pages-dm: a member writes to the page, an admin reads and answers through 
   const mine = (await s.act(ana, 'dm-thread', page, { peer: X.key })).body.messages
   t.is(mine.length, 2, 'the self copy does not double the answer')
   t.is(mine[1].mine, true)
+  t.alike(mine.map(m => m.fwd), [1, 0])
+  t.is(fromPage[0].fwd, 0, 'legacy answer')
   // A page answers in text: its inner keeps the v1 key set, so readers from
   // before inner v2 still open it.
   const answer = s.pageInners(page).find((b) => b.id === sent.body.id)
   t.ok(answer, 'the self copy opens with the page box')
   t.is(answer.v, 1)
   t.alike(Object.keys(answer), [...dmCore.INNER_KEYS], 'the legacy key set, no media, card or fwd')
+
+  for (const fwd of [true, false, 2, -1, '1', null]) {
+    const bad = await s.act(bia, 'dm-send', page, { to: X.key, text: TEXT_OUT, fwd })
+    t.is(bad.body.error, 'pedido-invalido')
+  }
+  const forwarded = await s.act(bia, 'dm-send', page, { to: X.key, text: TEXT_OUT, fwd: 1 })
+  t.is(forwarded.status, 200)
+  t.is(s.pageInners(page).find(b => b.id === forwarded.body.id).fwd, 1)
+  await X.web.request('dm.pull')
+  t.is((await X.web.request('dm.thread', { peer: page })).messages.find(m => m.id === forwarded.body.id).fwd, 1)
+  t.is((await s.act(ana, 'dm-thread', page, { peer: X.key })).body.messages.find(m => m.id === forwarded.body.id).fwd, 1)
 
   // The role is lost during the stamp wait, after the first re-check: the
   // second re-check refuses before anything is filed or delivered.
@@ -396,7 +410,7 @@ test('pages-dm: a member writes to the page, an admin reads and answers through 
   for (const [action, op] of [['dm-list', {}], ['dm-thread', { peer: X.key }], ['dm-send', { to: X.key, text: 'ainda?' }], ['dm-set', { peer: X.key, state: 'blocked' }], ['dm-seen', { peer: X.key }]]) {
     t.is((await s.act(bia, action, page, op)).body.error, 'sem-permissao', 'a removed admin: ' + action)
   }
-  t.is((await s.act(ana, 'dm-thread', page, { peer: X.key })).body.messages.length, 2, 'the refused send wrote no drop')
+  t.is((await s.act(ana, 'dm-thread', page, { peer: X.key })).body.messages.length, 3, 'the refused send wrote no drop')
 
   // A second live page, so the pool is read while the first is stopped.
   const other = (await s.create(ana, 'outra')).page
@@ -406,7 +420,7 @@ test('pages-dm: a member writes to the page, an admin reads and answers through 
   await s.pagesDm.stop(page)
   await X.web.request('dm.send', { to: page, text: 'depois da parada' })
   t.is((await s.pagesDm.pull()).added, 0)
-  t.is((await s.act(ana, 'dm-thread', page, { peer: X.key })).body.messages.length, 2, 'nothing filed after stop')
+  t.is((await s.act(ana, 'dm-thread', page, { peer: X.key })).body.messages.length, 3, 'nothing filed after stop')
   t.is((await s.act(ana, 'dm-send', page, { to: X.key, text: 'x' })).body.error, 'encerrada', 'a stopped page sends nothing')
 
   // Enabled again: the drop the other page's pull read past is still the
@@ -459,7 +473,7 @@ test('pages-dm: a member message with media (inner v2) opens and its descriptors
   const CAPTION = 'olha as flores'
   // Distinct times: with one shared `at` the fold orders by the random id.
   const t0 = Date.now()
-  const withText = dmCore.buildInner({ kind: 'msg', to: page, text: CAPTION, media: [photo], cert, at: new Date(t0 - 2000).toISOString() }, mKp)
+  const withText = dmCore.buildInner({ kind: 'msg', to: page, text: CAPTION, media: [photo], fwd: 1, cert, at: new Date(t0 - 2000).toISOString() }, mKp)
   const mediaOnly = dmCore.buildInner({ kind: 'msg', to: page, text: '', media: [gif], cert, at: new Date(t0 - 1000).toISOString() }, mKp)
   await s.putDrop(dmCore.sealInner(withText, boxHex))
   t.is((await s.pagesDm.pull()).added, 1, 'the page files a v2 message')
@@ -471,6 +485,7 @@ test('pages-dm: a member message with media (inner v2) opens and its descriptors
   t.is(th.status, 200)
   t.is(th.body.messages.length, 1)
   t.is(th.body.messages[0].text, CAPTION)
+  t.is(th.body.messages[0].fwd, 1)
   t.alike(th.body.messages[0].media, [photo], 'the descriptor reaches the admin device as sent')
 
   await s.putDrop(dmCore.sealInner(mediaOnly, boxHex))
@@ -489,6 +504,7 @@ test('pages-dm: a member message with media (inner v2) opens and its descriptors
   t.is((await s.pagesDm.pull()).added, 1)
   th = await s.act(ana, 'dm-thread', page, { peer: m })
   t.is(th.body.messages[2].media, null, 'a v1 message has no media')
+  t.alike(th.body.messages.map(m => m.fwd), [1, 0, 0])
 
   const text = JSON.stringify(s.logs)
   for (const d of [photo, gif]) {
@@ -574,7 +590,7 @@ test('pages-dm: filedAt is local ms, and an older file of counters keeps its tim
       stopped: false,
       messages: [
         { id: msgId(), peer, from: peer, text: 'um', replyTo: null, at: AT1, mine: false, filedAt: 1 },
-        { id: msgId(), peer, from: peer, text: 'dois', replyTo: null, at: AT2, mine: false, filedAt: 2 }
+        { id: msgId(), peer, from: peer, text: 'dois', replyTo: null, fwd: 1, at: AT2, mine: false, filedAt: 2 }
       ],
       ops: [],
       seen: [],
@@ -588,6 +604,7 @@ test('pages-dm: filedAt is local ms, and an older file of counters keeps its tim
   const th = await pagesDm.thread(page, { peer })
   t.alike(th.messages.map((m) => m.text), ['um', 'dois'], 'the old order is kept')
   t.alike(th.messages.map((m) => m.at), [AT1, AT2])
+  t.alike(th.messages.map(m => m.fwd), [0, 1], 'legacy and forward flags survive reopening')
 
   const before = Date.now()
   await pagesDm.set(page, { peer: hex(crypto.randomBytes(32)), state: 'accepted' })
@@ -677,4 +694,31 @@ test('pages-dm: a folder op queued behind other work re-checks the role on its t
   t.absent(fs.existsSync(stateFile(dir, page)), 'nothing saved')
   t.alike(await pagesDm.set(page, { peer, state: 'blocked' }, { recheck: () => true }), { ok: true })
   t.is(readRows(dir, page).ops.length, 1, 'a kept role files the op')
+})
+
+test('page group-post routes accept numeric forward flags and pass them to the writer', async (t) => {
+  t.timeout(200000)
+  const posts = []
+  const group = 'ab'.repeat(32)
+  const s = await setup(t, {
+    pagesGroups: {
+      groupPost: async (page, key, params) => {
+        t.is(key, group)
+        posts.push(params)
+        return { seq: posts.length }
+      }
+    }
+  })
+  const ana = await s.newMember('ana')
+  const { page } = await s.create(ana, 'horta')
+  for (const fwd of [true, false, 2, -1, '1', null]) {
+    const bad = await s.act(ana, 'group-post', page, { group, text: 'oi', fwd })
+    t.is(bad.body.error, 'pedido-invalido')
+  }
+  t.is(posts.length, 0, 'invalid flags never reach the writer')
+  for (const op of [{ group, text: 'oi' }, { group, text: 'oi', fwd: 0 }, { group, text: 'oi', fwd: 1 }]) {
+    const out = await s.act(ana, 'group-post', page, op)
+    t.is(out.status, 200, JSON.stringify(out.body))
+  }
+  t.alike(posts, [0, 0, 1].map(fwd => ({ text: 'oi', replyTo: null, fwd })))
 })

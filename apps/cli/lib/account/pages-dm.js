@@ -42,7 +42,7 @@
 // first put, so a resend of an unanswered request puts the same bytes (the
 // pool answers an identical drop as success) and never mints a second
 // message; a put without an ack throws { code: 'incerto' }. A page answers
-// in text only, so what it sends is always a v1 inner.
+// in text only; a forward uses a v2 inner with no media.
 //
 // Media: a member's v2 inner opens like any other; its media items (blob
 // descriptors, section 13) are kept in the sealed rows and handed to the
@@ -929,7 +929,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
       followSet: followKeys(page),
       seen: s.seen,
       ops: s.ops,
-      messages: s.messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : page, text: m.text, replyTo: m.replyTo, media: mediaOf(m), at: m.at, filedAt: m.filedAt }))
+      messages: s.messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : page, text: m.text, replyTo: m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media: mediaOf(m), at: m.at, filedAt: m.filedAt }))
     })
   }
 
@@ -987,7 +987,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
       const startAt = Math.max(0, end - limit)
       const rows = c.messages.slice(startAt, end)
       return {
-        messages: rows.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, media: mediaOf(m), at: m.at, mine: m.mine })),
+        messages: rows.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media: mediaOf(m), at: m.at, mine: m.mine })),
         next: startAt > 0 && rows.length > 0 ? rows[0].id : null,
         ...state
       }
@@ -1042,8 +1042,9 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
 
   // ---- sending ------------------------------------------------------------
 
-  function sendHash (to, text, replyTo) {
-    return nodeCrypto.createHash('sha256').update(JSON.stringify([to, text, replyTo])).digest('hex')
+  // Keep the hash of pending sends saved before forward flags existed.
+  function sendHash (to, text, replyTo, fwd) {
+    return nodeCrypto.createHash('sha256').update(JSON.stringify(fwd === 0 ? [to, text, replyTo] : [to, text, replyTo, fwd])).digest('hex')
   }
 
   function sweepSends (s) {
@@ -1055,7 +1056,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
 
   function fileSent (s, entry) {
     if (!hasMessage(s, entry.from, entry.id)) {
-      s.messages.push({ id: entry.id, peer: entry.to, from: entry.from, text: entry.text, replyTo: entry.replyTo, at: entry.at, mine: true, filedAt: nextFiled(s) })
+      s.messages.push({ id: entry.id, peer: entry.to, from: entry.from, text: entry.text, replyTo: entry.replyTo, fwd: entry.fwd === 1 ? 1 : 0, at: entry.at, mine: true, filedAt: nextFiled(s) })
       trim(s)
     }
   }
@@ -1084,7 +1085,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
   // anything is sealed or delivered as the page: the recipient lookup can
   // take until its deadline, and an admin removed meanwhile is refused
   // 'sem-permissao' with nothing filed. -> { id, at }.
-  async function send (page, { to, text, replyTo = null } = {}, idem = {}) {
+  async function send (page, { to, text, replyTo = null, fwd = 0 } = {}, idem = {}) {
     pageParam(page)
     if (!isPlainObject(idem) || typeof idem.member !== 'string' || typeof idem.nonce !== 'string') throw fail('pedido-invalido')
     if (idem.recheck !== undefined && typeof idem.recheck !== 'function') throw fail('pedido-invalido')
@@ -1098,7 +1099,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
       if (!ok) throw fail('sem-permissao')
     }
     const slot = idem.member + ':' + idem.nonce
-    const hash = sendHash(to, text, replyTo)
+    const hash = sendHash(to, text, replyTo, fwd)
     // -> the saved entry of this request, or null when a new one may be made.
     const admit = (s) => {
       if (s.stopped || !live(page)) throw fail('encerrada')
@@ -1148,8 +1149,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
         const pair = signingPair(page)
         let inner
         try {
-          // No media field: a page answers in text, so this stays a v1 inner.
-          inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, cert }, pair)
+          inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, fwd, cert }, pair)
         } catch (err) {
           throw fail(err && err.message === 'mensagem longa demais' ? 'longa-demais' : 'pedido-invalido')
         } finally {
@@ -1179,6 +1179,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
           to,
           text,
           replyTo,
+          fwd,
           drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])].map((d) => b4a.toString(d, 'base64')),
           acked: [false, false],
           done: false,
@@ -1351,7 +1352,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
         const peer = body.mine ? body.to : body.from
         if (!body.mine && !dmFold.canSend({ self: page, peer, ops: s.ops })) continue
         if (hasMessage(s, body.from, body.id)) continue
-        const row = { id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, at: body.at, mine: body.mine, filedAt: nextFiled(s) }
+        const row = { id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, fwd: body.fwd === 1 ? 1 : 0, at: body.at, mine: body.mine, filedAt: nextFiled(s) }
         const media = mediaOf(body)
         if (media !== null) row.media = media
         s.messages.push(row)

@@ -172,16 +172,19 @@ function validMedia (media) {
 
 // The per-kind shape rules, shared by building and opening. `cert` is null
 // or a membership certificate naming `from`; whether it verifies for the
-// association is checked on open only. v1 and v2 are two exact key sets;
-// a v2 body is a msg that needs v2 (card and fwd are reserved, so today
-// that means media), so every message has one encoding.
+// association is checked on open only. v1 and v2 are two exact key sets.
+// v2 is only a msg that needs it (media, a reserved card, or a forward),
+// so a plain text message stays v1 and every message has one encoding.
 function validBody (b) {
   if (!isPlainObject(b)) return false
   if (b.v === 1) {
     if (!hasExactKeys(b, INNER_KEYS)) return false
   } else if (b.v === 2) {
     if (!hasExactKeys(b, INNER_KEYS_V2) || b.kind !== 'msg') return false
-    if (b.card !== null || b.fwd !== 0 || !validMedia(b.media)) return false
+    // A boolean is another JSON type, so it must not count as forwarded.
+    if (b.card !== null || (b.fwd !== 0 && b.fwd !== 1)) return false
+    // Null media is the text forward. fwd 0 with no media is a v1 message.
+    if (b.media === null ? b.fwd !== 1 : !validMedia(b.media)) return false
   } else {
     return false
   }
@@ -191,7 +194,8 @@ function validBody (b) {
   if (b.kind === 'msg') {
     if (b.op !== null || b.peer !== null || b.from === b.to) return false
     if (b.replyTo !== null && !isHex32(b.replyTo)) return false
-    return validText(b.text, b.v === 2)
+    // Empty text is a photo with no caption, not a text-only forward.
+    return validText(b.text, b.v === 2 && b.media !== null)
   }
   if (b.text !== '' || b.replyTo !== null || b.from !== b.to) return false
   return DM_OPS.includes(b.op) && isHex64(b.peer) && b.peer !== b.from

@@ -170,9 +170,10 @@ function voiceOf ({ ms, kind }) {
 }
 
 // dm.putMedia after the read (docs/rpc.md 5.88): the same file rules, the
-// photo sealed and put on the blob channel by the session.
-function putDmMedia ({ read, session, unlink, isClosing }, { mime, width, height, ms, kind }) {
-  return sendFile({ read, unlink, isClosing, put: (bytes) => session.dmPutMedia({ bytes, mime, width, height, ...voiceOf({ ms, kind }) }) })
+// photo sealed and put on the blob channel by the session. `to`, the
+// destination, is required and the session refuses it missing (5.97).
+function putDmMedia ({ read, session, unlink, isClosing }, { mime, width, height, ms, kind, to }) {
+  return sendFile({ read, unlink, isClosing, put: (bytes) => session.dmPutMedia({ bytes, mime, width, height, ...voiceOf({ ms, kind }), to }) })
 }
 
 // Removes every read file (a media name) directly under `dir` and makes

@@ -577,7 +577,7 @@ function samples (f) {
     'page.read': { key: f.pages[0].author },
     'page.feed': { page: f.pages[0].author, keys: f.follows },
     'media.uploadFile': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
-    'dm.putMedia': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
+    'dm.putMedia': { name: '0'.repeat(32) + '.bin', to: 'a'.repeat(64), mime: 'image/jpeg', width: 512, height: 512 },
     'media.readFile': { kind: 'dm', from: f.members[1].author, id: f.conversations[2].messages[4].id, index: 0 },
     'dm.enable': {},
     'dm.lookup': { member },

@@ -340,7 +340,7 @@ test('media posts: own declared descriptors round trip, the list row says Foto o
   await ops.groupPost(a.ctx, { group, text: 'só texto' })
   const page = await ops.groupRead(a.ctx, { group })
   t.alike(page.items.map((p) => p.media), [null, [d]], 'media per item, null for a text post')
-  t.alike(Object.keys(page.items[1]).slice(0, 8), ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'media', 'hidden'])
+  t.alike(Object.keys(page.items[1]).slice(0, 9), ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'fwd', 'media', 'hidden'])
 
   const community = groupCommunity.get(group)
   const row = async () => (await ops.communityInfo(a.ctx, { community })).groups.find((g) => g.group === group).last.preview
