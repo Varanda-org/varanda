@@ -152,6 +152,23 @@ export function hasNew (items, seenIds) {
   return false
 }
 
+// Loaded rows are newest first. Only their tokens can be distinguished
+// from the random padding, so only these may leave local storage.
+export function seenOnScreen (items, storedIds, max = 256) {
+  const stored = new Set(storedIds)
+  const ids = new Set()
+  for (const item of items) {
+    const id = seenOf(item)
+    if (id !== null && stored.has(id)) ids.add(id)
+  }
+  return [...ids].slice(0, max)
+}
+
+// The badge also needs remote tokens whose rows have not been loaded yet.
+export function seenUnion (storedIds, remoteIds) {
+  return [...new Set([...storedIds, ...remoteIds].filter(isHex32))]
+}
+
 // 32 lowercase hex from 16 bytes of randomBytes(n) => Uint8Array, injected
 // so this file stays pure. Throws on anything but 16 bytes.
 export function randomToken (randomBytes) {
@@ -254,6 +271,31 @@ export function markSeenPadded (stored, items, randomBytes, size = SEEN_MAX) {
     ids[evictable[k]] = fitting[k]
   }
   return { ids, changed: true }
+}
+
+export function mergeRemoteSeen (stored, remoteIds, loadedItems, randomBytes) {
+  const remote = new Set(remoteIds)
+  const local = new Set(stored)
+  // Keep locally seen rows protected too; unloaded remote tokens stay in
+  // the node's canonical document until their rows arrive.
+  const items = loadedItems.filter((row) => {
+    const id = seenOf(row)
+    return id !== null && (remote.has(id) || local.has(id))
+  })
+  return markSeenPadded(stored, items, randomBytes)
+}
+
+// A fold of another device's marks protects the rows on screen and the
+// latest polled page, and settles only the latest list: marked with the tab
+// open when it is the one on screen, dot only when a hidden poll read it.
+// Both lists belong to the current namespace (the screen drops them when it
+// changes), so `null` means there is nothing of this namespace to settle.
+export function remoteFoldPlan (shown, last) {
+  const onScreen = Array.isArray(shown) ? shown : []
+  const latest = last && Array.isArray(last.list) ? last.list : null
+  const rows = latest === null || latest === shown ? onScreen : onScreen.concat(latest)
+  if (latest === null) return { rows, settle: null }
+  return { rows, settle: { list: latest, shown: last.shown === true } }
 }
 
 // The ids from { v: 3, own, ids } when own is this key and ids holds 0 to

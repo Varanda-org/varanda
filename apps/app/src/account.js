@@ -47,7 +47,9 @@ const ERROR_MESSAGES = {
   'limite-convites': 'Você já criou os convites desta semana. Na segunda-feira volta a contar.',
   'convite-aguardando': 'Seu convite desta semana ainda não chegou. Ele aparece de surpresa, com um aviso.',
   'idade-pendente': 'Confirme sua idade antes de continuar.',
-  'limite-idade': 'Muitas tentativas de verificação. Tente de novo amanhã.'
+  'limite-idade': 'Muitas tentativas de verificação. Tente de novo amanhã.',
+  // A seen write or delete lost the compare-and-swap: nothing was written.
+  conflito: 'Outro aparelho gravou antes.'
 }
 const FALLBACK_MESSAGE = 'serviço indisponível'
 
@@ -124,10 +126,36 @@ export function toError (code, nextChangeAt) {
 export async function readJson (res, maxBody = MAX_BODY) {
   const type = res.headers && res.headers.get ? res.headers.get('content-type') : ''
   if (!/^application\/json\b/i.test(type || '')) return null
+  // A declared length over the cap is refused before anything is read, and
+  // a streamed body stops at the cap, so a hostile answer is never buffered
+  // whole (React Native's fetch has no body stream: text() there).
+  const declared = Number(res.headers && res.headers.get ? res.headers.get('content-length') : NaN)
+  if (Number.isFinite(declared) && declared > maxBody) return null
   let text
-  try { text = await res.text() } catch { return null }
+  try { text = await readCapped(res, maxBody) } catch { return null }
   if (typeof text !== 'string' || new TextEncoder().encode(text).length > maxBody) return null
   try { return JSON.parse(text) } catch { return null }
+}
+
+async function readCapped (res, maxBody) {
+  const reader = res.body && typeof res.body.getReader === 'function' ? res.body.getReader() : null
+  if (reader === null) return res.text()
+  const chunks = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.length
+    if (size > maxBody) {
+      try { await reader.cancel() } catch {}
+      return null
+    }
+    chunks.push(value)
+  }
+  const all = new Uint8Array(size)
+  let at = 0
+  for (const c of chunks) { all.set(c, at); at += c.length }
+  return new TextDecoder().decode(all)
 }
 
 // `extra` headers (the app's link proofs) apply to app requests only, so the
@@ -160,7 +188,9 @@ export function buildRequest (method, path, body, extra) {
 // it from a refusal and re-read instead of repeating it (docs/app.md).
 // `origin`: a core node's https account origin (pages.js pagesOrigin); the
 // hosted web app passes none and keeps the relative path.
-async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin } = {}) {
+// `errorBody`: a refusal also carries the parsed JSON body as err.body, for a
+// caller that validates it (seenFinish's conflict), so it never fetches again.
+async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, errorBody = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin } = {}) {
   // The Vitrine has no account service: every call is a definite refusal,
   // before any request leaves the page.
   if (VITRINE) throw toError('indisponivel')
@@ -197,7 +227,9 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
   // changed anything, so that answer is a refusal, not an unknown outcome. A
   // 5xx without a known token (a proxy page, a crash) stays uncertain.
   const known = definite && (code === 'indisponivel' || Object.hasOwn(ERROR_MESSAGES, code))
-  throw fail(code, data && data.nextChangeAt, res.status >= 500 && !known)
+  const err = fail(code, data && data.nextChangeAt, res.status >= 500 && !known)
+  if (errorBody && data && typeof data === 'object') err.body = data
+  throw err
 }
 
 export const accountStatus = (member) =>
@@ -282,6 +314,62 @@ export const pushFinish = async ({ member, nonce, action, signature, endpoint, p
   }
   return { ok: true, changed: data.changed }
 }
+// Seen state shared by the devices of one passkey (seenSync.js). The blob is
+// opaque ciphertext the browser node seals and merges; the client only checks
+// its shape. Read changes nothing; write and delete are compare-and-swaps on
+// prevHash, so a lost answer is uncertain and is never resent here.
+const SEEN_BLOB_B64 = 43744 // packages/core/lib/seen-blob.js SEEN_BLOB_B64
+const SEEN_MAX_BODY = 49152
+const SEEN_TIMEOUT_MS = 20000
+const SEEN_HASH_RE = /^[0-9a-f]{64}$/
+const SEEN_B64_RE = /^[A-Za-z0-9+/]*={0,2}$/
+const isSeenHash = (v) => typeof v === 'string' && SEEN_HASH_RE.test(v)
+const isSeenBlob = (v) => typeof v === 'string' && v.length === SEEN_BLOB_B64 && SEEN_B64_RE.test(v)
+
+export const seenStart = async ({ member, action }) => {
+  const data = await call('POST', '/account/seen/start', { member, action })
+  if (typeof data.nonce !== 'string') throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+
+export const seenFinish = async ({ member, nonce, action, signature, prevHash, blob }) => {
+  const writes = action === 'write' || action === 'delete'
+  const body = { member, nonce, action, signature, prevHash }
+  if (action === 'write') body.blob = blob
+  const bad = () => {
+    const err = toError('indisponivel')
+    if (writes) err.uncertain = true
+    return err
+  }
+  let data
+  try {
+    data = await call('POST', '/account/seen/finish', body, { uncertain: writes, errorBody: true, maxBody: SEEN_MAX_BODY, timeoutMs: SEEN_TIMEOUT_MS })
+  } catch (err) {
+    const b = err.body || {}
+    delete err.body
+    if (err.code !== 'conflito') throw err
+    // A conflict wrote nothing: definite, with the server's current state.
+    const okBlob = action === 'write' ? (b.blob === null || isSeenBlob(b.blob)) : (b.blob === undefined || b.blob === null)
+    if (!writes || !isSeenHash(b.hash) || !okBlob) throw toError('indisponivel')
+    err.hash = b.hash
+    err.blob = action === 'write' ? b.blob : null
+    throw err
+  }
+  if (action === 'read') {
+    if (data.hash === null && data.blob === null) return { hash: null, blob: null, unchanged: false }
+    if (!isSeenHash(data.hash)) throw bad()
+    if (data.unchanged === true && data.blob === null) return { hash: data.hash, blob: null, unchanged: true }
+    if (!isSeenBlob(data.blob)) throw bad()
+    return { hash: data.hash, blob: data.blob, unchanged: false }
+  }
+  if (action === 'write') {
+    if (data.ok !== true || !isSeenHash(data.hash)) throw bad()
+    return { ok: true, hash: data.hash }
+  }
+  if (data.ok !== true || typeof data.changed !== 'boolean') throw bad()
+  return { ok: true, changed: data.changed }
+}
+
 export const pushCheck = async ({ member, endpoint, p256dh, auth }) => {
   try {
     const data = await call('POST', '/account/push/check', { member, endpoint, p256dh, auth })
