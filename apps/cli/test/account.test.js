@@ -1489,6 +1489,43 @@ test('readEnv: Didit pair on together or off together, values never in the error
   }
 })
 
+test('readEnv: GIF pair on together or off together, https only, values never in the error', (t) => {
+  const env = { VARANDA_PUBLIC_ORIGIN: ORIGIN, VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID, VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET }
+  const URL_OK = 'https://gifs-sentinela.example/v1'
+  const KEY = 'chave-sentinela-gif-91'
+  t.is(readEnv(env).gif, null, 'unset: off')
+  t.is(readEnv({ ...env, VARANDA_GIF_API_URL: '', VARANDA_GIF_API_KEY: '' }).gif, null, 'empty: off')
+  t.is(readEnv({ ...env, VARANDA_GIF_MEDIA_HOSTS: '10.0.0.1' }).gif, null, 'media hosts ignored while off')
+  const on = readEnv({ ...env, VARANDA_GIF_API_URL: URL_OK, VARANDA_GIF_API_KEY: KEY, VARANDA_GIF_MEDIA_HOSTS: ' Media.Sentinela.example , cdn.sentinela.example' }).gif
+  t.is(on.base, URL_OK)
+  t.is(on.apiKey, KEY)
+  t.alike([...on.hosts].sort(), ['cdn.sentinela.example', 'gifs-sentinela.example', 'media.sentinela.example'])
+
+  const bad = [
+    [{ VARANDA_GIF_API_URL: URL_OK }, 'VARANDA_GIF_API_URL e VARANDA_GIF_API_KEY vêm juntas'],
+    [{ VARANDA_GIF_API_KEY: KEY }, 'VARANDA_GIF_API_URL e VARANDA_GIF_API_KEY vêm juntas'],
+    [{ VARANDA_GIF_API_URL: 'http://gifs-sentinela.example', VARANDA_GIF_API_KEY: KEY }, 'VARANDA_GIF_API_URL inválido: use uma URL https sem usuário, consulta nem endereço IP'],
+    [{ VARANDA_GIF_API_URL: 'https://10.9.8.7/sentinela', VARANDA_GIF_API_KEY: KEY }, 'VARANDA_GIF_API_URL inválido: use uma URL https sem usuário, consulta nem endereço IP'],
+    [{ VARANDA_GIF_API_URL: URL_OK + '?api_key=sentinela', VARANDA_GIF_API_KEY: KEY }, 'VARANDA_GIF_API_URL inválido: use uma URL https sem usuário, consulta nem endereço IP'],
+    [{ VARANDA_GIF_API_URL: URL_OK, VARANDA_GIF_API_KEY: 'chave sentinela' }, 'VARANDA_GIF_API_KEY inválido'],
+    [{ VARANDA_GIF_API_URL: URL_OK, VARANDA_GIF_API_KEY: KEY, VARANDA_GIF_MEDIA_HOSTS: '10.1.1.1' }, 'VARANDA_GIF_MEDIA_HOSTS inválido: use nomes de host separados por vírgula'],
+    [{ VARANDA_GIF_API_URL: URL_OK, VARANDA_GIF_API_KEY: KEY, VARANDA_GIF_MEDIA_HOSTS: 'ok.example,,sentinela' }, 'VARANDA_GIF_MEDIA_HOSTS inválido: use nomes de host separados por vírgula']
+  ]
+  for (const [vars, message] of bad) {
+    const label = JSON.stringify(vars)
+    try {
+      readEnv({ ...env, ...vars })
+      t.fail(label + ': accepted')
+    } catch (err) {
+      t.ok(err instanceof UsageError, label + ': usage error')
+      t.is(err.message, message, label + ': message')
+      for (const value of Object.values(vars)) {
+        if (value !== '') t.absent(err.message.includes(value), 'the value is not in the message')
+      }
+    }
+  }
+})
+
 test('account (serve): an invalid capacity variable exits 2 without printing it', (t) => {
   const dir = path.join(tmpDir(t), 'account')
   const r = varanda(dir, ['account'], {

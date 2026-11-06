@@ -11,6 +11,7 @@ import { resolveUrl } from './installation.js'
 import { accountOriginOf } from './pageGate.js'
 import { isAppClient } from './appClient.js'
 import { vitrineEnabled } from './vitrine/enabled.js'
+import { MAX_BYTES as GIF_MAX_BYTES, imageUrl, parseSearch, searchBody } from './gif.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
@@ -48,6 +49,8 @@ const ERROR_MESSAGES = {
   'convite-aguardando': 'Seu convite desta semana ainda não chegou. Ele aparece de surpresa, com um aviso.',
   'idade-pendente': 'Confirme sua idade antes de continuar.',
   'limite-idade': 'Muitas tentativas de verificação. Tente de novo amanhã.',
+  'limite-gif': 'Limite de buscas de GIF por hoje',
+  'nao-autorizado': 'a sessão de busca de GIF expirou',
   'limite-recuperacao': 'você já tem o máximo de passkeys e códigos cadastrados; remova um antes'
 }
 // Tokens whose sentence only fits the recovery routes: 'nao-encontrado' also
@@ -170,12 +173,15 @@ export function buildRequest (method, path, body, extra) {
 // it from a refusal and re-read instead of repeating it (docs/app.md).
 // `origin`: a core node's https account origin (pages.js pagesOrigin); the
 // hosted web app passes none and keeps the relative path.
-async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin, messages } = {}) {
+async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin, gifToken, messages } = {}) {
   // The Vitrine has no account service: every call is a definite refusal,
   // before any request leaves the page.
   if (VITRINE) throw toError('indisponivel')
   const built = buildRequest(method, path, body, headers)
   const { init } = built
+  // Unlike `headers` (app only), the GIF session rides on every client, in
+  // the one header a proxy's error log redacts.
+  if (typeof gifToken === 'string') init.headers.authorization = 'Bearer ' + gifToken
   const base = accountOriginOf(origin)
   const url = base === undefined ? built.url : base + path
   const ctl = new AbortController()
@@ -218,8 +224,8 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
   throw fail(code, data && data.nextChangeAt, res.status >= 500 && !known)
 }
 
-export const accountStatus = (member) =>
-  call('GET', '/account/status?member=' + encodeURIComponent(member))
+export const accountStatus = (member, { origin } = {}) =>
+  call('GET', '/account/status?member=' + encodeURIComponent(member), undefined, { origin })
 // The native app's sign-in (apps/cli/lib/account/app-return.js) replaces the
 // web's link cookie with V (linkSecret, kept in the app's memory) and R
 // (redeem, from the auth session's result). Both ride in headers, only from
@@ -438,11 +444,211 @@ export const ageResult = async ({ member, nonce, signature }) => {
   throw err
 }
 
+// GIF search through the account service. Every GIF cache is keyed by the
+// account origin the request really goes to (what call() resolves: the
+// node's https origin, else the installation's, else '' for the page's own
+// origin), so switching installations asks the new one.
+function gifOriginKey (origin) {
+  const base = accountOriginOf(origin)
+  if (base !== undefined) return base
+  return resolveUrl('/').slice(0, -1)
+}
+
+// The policy: a definite answer (200 with { enabled }) is kept for the
+// session. Any failure answers false, so the picker stays hidden rather than
+// offering a search that cannot work, and is asked again on a later call
+// once GIF_POLICY_RETRY_MS have passed.
+export const GIF_POLICY_RETRY_MS = 30 * 1000
+const gifPolicies = new Map()
+export const gifPolicy = ({ origin, now = Date.now } = {}) => {
+  if (VITRINE) return Promise.resolve(false)
+  const key = gifOriginKey(origin)
+  const cached = gifPolicies.get(key)
+  if (cached && cached.retryAt > now()) return cached.answer
+  const entry = { retryAt: Infinity }
+  entry.answer = (async () => {
+    try {
+      const data = await call('GET', '/account/gif/policy', undefined, { origin })
+      if (exactKeys(data, ['enabled']) && typeof data.enabled === 'boolean') return data.enabled
+    } catch {}
+    entry.retryAt = now() + GIF_POLICY_RETRY_MS
+    return false
+  })()
+  gifPolicies.set(key, entry)
+  return entry.answer
+}
+// The GIF session: one token per member and origin, kept in memory until
+// its expiresAt. A missing token, or a 401 on a read, runs start, the node's
+// read-only invite.sign 'summary' statement over the nonce, and finish. Only
+// reads repeat after a fresh session; the session calls themselves never do.
+const GIF_SEARCH_BODY = 32768
+const GIF_TINY_BYTES = 512 * 1024
+const GIF_SESSION_SLACK_MS = 60 * 1000
+const HEX64_RE = /^[0-9a-f]{64}$/
+const gifSessions = new Map()
+const gifOpening = new Map()
+const gifSessionKey = (member, origin) => gifOriginKey(origin) + ' ' + member
+// gifReady's linked answers, by the same key: { at }.
+const GIF_READY_TTL_MS = 5 * 60 * 1000
+const gifLinked = new Map()
+const unauthorized = (err) => Boolean(err) && err.code === 'nao-autorizado'
+
+export const gifSessionStart = async ({ member, origin }) => {
+  const data = await call('POST', '/account/gif/session/start', { member }, { origin })
+  if (!exactKeys(data, ['nonce']) || !isToken(data.nonce)) throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+export const gifSessionFinish = async ({ member, nonce, signature, origin }) => {
+  const data = await call('POST', '/account/gif/session/finish', { member, nonce, signature }, { origin })
+  if (!exactKeys(data, ['token', 'expiresAt']) || !isToken(data.token) || !isIso(data.expiresAt)) throw toError('indisponivel')
+  return { token: data.token, expiresAt: data.expiresAt }
+}
+
+// The cached token, or a new session. `request` is the node's RPC request.
+export async function gifSession ({ member, origin, request, now = Date.now }) {
+  if (typeof member !== 'string' || !HEX64_RE.test(member) || typeof request !== 'function') throw toError('pedido-invalido')
+  const key = gifSessionKey(member, origin)
+  const cached = gifSessions.get(key)
+  if (cached && cached.expiresAt - GIF_SESSION_SLACK_MS > now()) return cached.token
+  gifSessions.delete(key)
+  // Tiles asking at once share one session instead of opening one each.
+  if (gifOpening.has(key)) return gifOpening.get(key)
+  const opening = (async () => {
+    const { nonce } = await gifSessionStart({ member, origin })
+    let signature
+    try {
+      signature = (await request('invite.sign', { action: 'summary', nonce })).signature
+    } catch {
+      throw toError('assinatura-invalida')
+    }
+    if (typeof signature !== 'string') throw toError('assinatura-invalida')
+    const { token, expiresAt } = await gifSessionFinish({ member, nonce, signature, origin })
+    gifSessions.set(key, { token, expiresAt: new Date(expiresAt).getTime() })
+    return token
+  })().catch((err) => {
+    // A member who is no longer linked or is blocked: gifReady asks again.
+    if (unauthorized(err)) gifLinked.delete(key)
+    throw err
+  })
+  gifOpening.set(key, opening)
+  try {
+    return await opening
+  } finally {
+    gifOpening.delete(key)
+  }
+}
+
+export function forgetGifSession ({ member, origin } = {}) {
+  if (typeof member === 'string') {
+    const key = gifSessionKey(member, origin)
+    gifSessions.delete(key)
+    gifLinked.delete(key)
+  } else {
+    gifSessions.clear()
+    gifLinked.clear()
+  }
+}
+
+// A read with the session header; one fresh session and one more try on a
+// 401 (the server forgot the token: a restart, or it expired early).
+async function withGifSession (opts, read) {
+  const token = await gifSession(opts)
+  try {
+    return await read(token)
+  } catch (err) {
+    if (!unauthorized(err)) throw err
+    forgetGifSession(opts)
+    return read(await gifSession(opts))
+  }
+}
+
+// opts: { member, origin, request } (the session) plus cursor.
+export const gifSearch = async (q, { cursor, origin, member, request } = {}) => {
+  const body = searchBody(q, cursor)
+  if (body === null) throw toError('pedido-invalido')
+  return withGifSession({ member, origin, request }, async (gifToken) => {
+    const parsed = parseSearch(await call('POST', '/account/gif/search', body, { origin, gifToken, maxBody: GIF_SEARCH_BODY }))
+    if (parsed === null) throw toError('indisponivel')
+    return parsed
+  })
+}
+
+// GIF bytes from the account origin (never a provider URL): exactly 200,
+// image/gif, at most the size's cap, and the GIF signature. -> Uint8Array.
+async function gifImageOnce ({ id, size, origin, gifToken, timeoutMs = TIMEOUT_MS }) {
+  // The Vitrine never reaches the network, as call() (the only other fetch).
+  if (VITRINE) throw toError('indisponivel')
+  const path = imageUrl('', id, size)
+  if (path === null) throw toError('pedido-invalido')
+  const cap = size === 'tiny' ? GIF_TINY_BYTES : GIF_MAX_BYTES
+  const { url: rel, init } = buildRequest('GET', path)
+  init.headers.accept = 'image/gif'
+  init.headers.authorization = 'Bearer ' + gifToken
+  init.redirect = 'error'
+  const base = accountOriginOf(origin)
+  const url = base === undefined ? rel : base + path
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(), timeoutMs)
+  try {
+    let res
+    try {
+      res = await fetch(url, { ...init, signal: ctl.signal })
+    } catch {
+      throw toError('indisponivel')
+    }
+    if (!res.ok) {
+      let data = null
+      try { data = await readJson(res) } catch {}
+      throw toError(data && typeof data.error === 'string' ? data.error : '')
+    }
+    const type = res.headers && res.headers.get ? res.headers.get('content-type') : ''
+    if (!/^image\/gif\b/i.test(type || '')) throw toError('indisponivel')
+    const declared = Number(res.headers.get('content-length'))
+    if (Number.isFinite(declared) && declared > cap) throw toError('indisponivel')
+    let bytes
+    try {
+      bytes = new Uint8Array(await res.arrayBuffer())
+    } catch {
+      throw toError('indisponivel')
+    }
+    if (bytes.byteLength < 6 || bytes.byteLength > cap) throw toError('indisponivel')
+    const sig = String.fromCharCode(...bytes.subarray(0, 6))
+    if (sig !== 'GIF87a' && sig !== 'GIF89a') throw toError('indisponivel')
+    return bytes
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export const gifImage = (id, size, { origin, member, request } = {}) =>
+  withGifSession({ member, origin, request }, (gifToken) => gifImageOnce({ id, size, origin, gifToken }))
+
+// Whether this member may search: the policy is on and the member is linked.
+// A linked answer is kept GIF_READY_TTL_MS, so opening the attach sheet does
+// not ask the account status each time; forgetGifSession and a fresh session
+// refused with nao-autorizado drop it. An unlinked answer is never kept, so
+// linking shows GIF on the next open.
+export const gifReady = async ({ member, origin, now = Date.now } = {}) => {
+  if (typeof member !== 'string' || !HEX64_RE.test(member)) return false
+  if (!(await gifPolicy({ origin, now }))) return false
+  const key = gifSessionKey(member, origin)
+  const cached = gifLinked.get(key)
+  if (cached && now() - cached.at < GIF_READY_TTL_MS) return true
+  gifLinked.delete(key)
+  try {
+    const status = await accountStatus(member, { origin })
+    const linked = status !== null && typeof status === 'object' && status.linked === true
+    if (linked) gifLinked.set(key, { at: now() })
+    return linked
+  } catch {
+    return false
+  }
+}
+
 // Recovery entries (docs/rpc.md 5.90, src/recovery.js). Every proof is the
 // node's recovery.sign over the service's single-use nonce; the app never
 // hashes or signs here.
 const RECOVERY_KINDS = ['passkey', 'code']
-const HEX64_RE = /^[0-9a-f]{64}$/
 const HEX48_RE = /^[0-9a-f]{48}$/
 const CIPHERTEXT_RE = /^[0-9a-f]{164}$/
 const isRecoveryKind = (v) => typeof v === 'string' && RECOVERY_KINDS.includes(v)

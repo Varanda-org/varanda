@@ -5405,3 +5405,51 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Se o disco do serviço se perder, as entradas somem: o membro entra com a passkey original ou num aparelho ainda conectado e cadastra de novo.
 - Uma cópia de `recovery.json` mais antiga que uma lápide já podada pode trazer de volta aquela linha.
 - Só membros com vínculo Google cadastram entradas.
+
+## 111. Busca de GIFs pelo serviço de conta (PR feat/gif-search)
+
+Caminhada da busca de GIFs nas conversas, ligada pelo operador. A tela está em [app.md](app.md) ("Busca de GIFs nas conversas"); as variáveis estão no `README.md` ("Variáveis de ambiente"). Os Termos de Uso e a Política de Privacidade passam à versão 19 para descrever isso, então quem já aceitou a 18 vê o aceite de novo.
+
+Regras que os passos conferem:
+
+- Sem `VARANDA_GIF_API_URL` e `VARANDA_GIF_API_KEY`, a busca fica desligada: `GET /account/gif/policy` responde `{ "enabled": false }`, as outras rotas `/account/gif/*` respondem 404 `feature-off` e o app não mostra "GIF" em "Anexar". Só uma das duas, ou um valor malformado, faz o serviço recusar subir com um erro que não repete o valor.
+- O texto da busca vai do app ao serviço de conta; o serviço pergunta ao provedor a partir do próprio endereço, com a chave da associação e um User-Agent fixo. O provedor nunca recebe o endereço, a conta, a chave ou um cookie do membro.
+- O app recebe só ids, largura, altura e tamanho; miniaturas e imagens chegam por `/account/gif/image/<id>`, na origem da associação. O GIF escolhido é enviado como uma foto da conversa, e quem recebe o lê da cópia do Varanda, nunca do provedor.
+- Por membro e por dia, 120 buscas e 60 imagens inteiras; acima disso, 429 `limite-gif`. Uma busca ou imagem que falha no provedor (503 `indisponivel`) não conta. O app não repete o pedido sozinho.
+- A busca é `POST /account/gif/search` com o corpo `{ q }` ou `{ q, cursor }`, e o token da sessão vai em `Authorization: Bearer <token>`: o registro de erros do Caddy guarda a URL e os cabeçalhos de um pedido que falha, esconde só `Authorization` e os cookies, e nunca guarda o corpo. `GET /account/gif/search` responde 404 e o cabeçalho `x-varanda-gif` não vale mais.
+- Cada busca ou imagem confere de novo, no máximo a cada 60 s, que o membro continua vinculado e fora da lista de bloqueio; quem não passa recebe 401 `nao-autorizado` e perde a sessão.
+- A chave de um membro é pública, então o início de sessão não guarda nem conta nada: o nonce não fica numa tabela, ele carrega a própria validade (600 s) e uma assinatura HMAC presa àquele membro, com uma chave que só existe na memória do serviço (reiniciar o serviço invalida os nonces em aberto). Pedir muitos inícios com a chave de outra pessoa não invalida o nonce que ela já tem, e um nonce de A não vale para B.
+- No fim da sessão, o serviço confere o nonce (404 `expirado` se adulterado, de outro membro ou vencido) e a assinatura (400 `assinatura-invalida`) antes de contar o limite de 10 fins por membro a cada 10 minutos (429 `limite-gif`): fins forjados com a chave de outra pessoa nunca a bloqueiam. Um nonce com assinatura válida só vale uma vez; quem passou do limite não gasta o nonce. Se a tabela de nonces gastos estiver cheia de entradas válidas, a resposta é 503 `indisponivel`, sem esquecer nenhuma.
+- Nenhum registro do serviço leva o texto da busca, o token da sessão, a chave da API ou uma URL do provedor: só `{ "event": "gif", "reason": ... }`.
+- Os Termos e a Política estão na versão 19 (`LEGAL_VERSION` e `TERMS_VERSION` iguais), falam de "provedor de GIFs" sem nome de empresa e não falam de prévia de link nem de encaminhamento.
+
+Provedor falso: o serviço só fala com hosts `https` que resolvem para endereços públicos, então um servidor em `127.0.0.1` é recusado de propósito. Use um servidor de teste com nome público e certificado válido, que responda `GET <base>/gifs/search` no formato compatível com o Giphy, sirva GIFs pequenos no mesmo host e registre, de cada pedido, só o endereço de origem, o caminho e a consulta. Nunca use a chave de um provedor real nestes passos.
+
+Passos (marcar só depois de executar e guardar o registro), primeiro no Android (build de debug, emulador ou aparelho, feito depois de `npm run prepare:native -w apps/app`), depois no simulador iOS, depois na web e no PWA:
+
+- [ ] Serviço sem as variáveis: o registro de partida mostra `gif` `desligada`; `curl -s https://<origem>/account/gif/policy` responde `{"enabled":false}` e `curl -s -X POST -H 'Content-Type: application/json' -H 'Origin: https://<origem>' -d '{"q":"gato"}' https://<origem>/account/gif/search` responde 404 `feature-off`. No app, "Anexar" mostra só "Foto".
+- [ ] Só `VARANDA_GIF_API_URL` definida: o serviço recusa subir com "VARANDA_GIF_API_URL e VARANDA_GIF_API_KEY vêm juntas". Uma URL `http` ou com IP: recusa com "VARANDA_GIF_API_URL inválido", sem repetir o valor.
+- [ ] Serviço com as duas variáveis apontando para o provedor falso (e `VARANDA_GIF_MEDIA_HOSTS`, se as imagens vierem de outro host): o registro mostra `gif` `ligada` e a política responde `{"enabled":true}`.
+- [ ] Android: na abertura depois da atualização, o aceite dos Termos aparece com a versão 19; aceitar e seguir.
+- [ ] Duas pessoas (um aparelho e um perfil do navegador, ou dois perfis do navegador) na instalação de teste: A abre uma mensagem direta, "Anexar", "GIF", busca "gato", vê as miniaturas, escolhe uma e envia. B recebe o GIF como uma foto da conversa. Repetir num grupo público e num grupo privado.
+- [ ] Na aba Rede do navegador de B: o GIF recebido vem só da origem da instalação (canal de mídia das conversas ou `/media`), nenhum pedido vai ao host do provedor. Na de A: as miniaturas e o GIF vêm só de `/account/gif/image/`, e nenhuma resposta de busca traz URL do provedor.
+- [ ] No registro do provedor falso: todos os pedidos vêm do endereço do serviço de conta; nenhum vem do endereço de A ou de B, e nenhum traz cookie, chave do membro ou cabeçalho além do User-Agent fixo.
+- [ ] Limite: com um teto baixado só no teste (ou um script com o token de sessão em `Authorization: Bearer`), a 121ª busca do dia responde 429 `limite-gif`, e o app mostra o erro sem repetir o pedido.
+- [ ] Pedido antigo: `curl -s https://<origem>/account/gif/search?q=gato` responde 404 `nao-encontrado`, e uma busca com o token em `x-varanda-gif` em vez de `Authorization` responde 401 `nao-autorizado`.
+- [ ] Nonce preso ao membro: com um script, pedir `POST /account/gif/session/start` para o membro A e guardar o nonce; pedir mais 20 inícios e 30 fins com nonce aleatório e assinatura qualquer para a chave de A (respostas 200 e 404 ou 400, nunca 429); depois o app de A abre a busca de GIFs normalmente. O mesmo nonce enviado com a chave de B responde 404 `expirado`, e reenviar um fim que já deu certo também.
+- [ ] Re-conferência: com uma sessão aberta, bloquear o membro pelo painel de moderação (ou desfazer o vínculo numa instalação de teste); em até 60 s a próxima busca responde 401 `nao-autorizado` e a seguinte, mesmo depois de desbloquear, também (a sessão foi apagada). O app pede uma sessão nova.
+- [ ] Registro de erros do Caddy: com o provedor falso parado, uma busca responde 503; a linha de erro do Caddy não tem o texto da busca (o corpo não é registrado) e mostra `Authorization` como `REDACTED`.
+- [ ] Registros: `docker compose logs account` (ou o journal) depois das buscas tem só linhas `gif` com `sessao`, `sessao-revogada`, `busca`, `miniatura`, `imagem` ou `indisponivel`; procurar "gato", o token e a chave da API não encontra nada.
+- [ ] iOS (simulador), Safari e Chrome na web hospedada e o PWA instalado: repetir a busca, o envio e a conferência da aba Rede (na web) ou do registro do provedor.
+- [ ] Em todas as plataformas: a Política e os Termos abertos em Ajustes mostram "Versão 19" e descrevem a busca de GIFs pelo serviço de conta.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/app/test/legal.test.js`, `node apps/app/test/terms-version.test.js` e `node packages/core/test/terms.test.js`.
+- `node apps/cli/test/gif-routes.test.js` (provedor falso em loopback, por requisição injetada), `node apps/app/test/gifClient.test.js`, `node apps/cli/test/account.test.js` e `node apps/cli/test/cli.test.js`.
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- O laboratório hospedado (`apps/cli/scripts/hosted-lab.js`) ainda não liga a busca de GIFs, e o serviço recusa um provedor em loopback; os passos com duas pessoas usam uma instalação de teste com um provedor falso público.
+- Nenhuma caixa acima foi executada nesta documentação.
