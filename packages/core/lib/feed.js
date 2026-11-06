@@ -98,9 +98,13 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
     for (const seq of deletedSeqs(copied)) deletedRefs.add(formatRef({ author: key, seq }))
     prepared.push({ key, copied })
   }
-  for (const { key, copied } of prepared) {
+  // A log's username is only worked out for the items returned (it verifies
+  // a signature): item -> its log, filled in after the page is cut.
+  const logOf = new Map()
+  for (const log of prepared) {
+    const { key, copied } = log
     const name = (latestProfile(copied) || {}).name || null
-    const username = latestUsername(copied, key, association, usernameOpts)
+    const from = items.length
     for (const { seq, record: post } of copied) {
       if (post === null || post.type !== 'post') continue
       if (Date.parse(post.at) - now > MAX_FUTURE_MS) {
@@ -110,7 +114,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // `media`: a copy of the post's descriptors, or null when it has none.
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      items.push({ kind: 'post', author: key, name, username, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media })
+      items.push({ kind: 'post', author: key, name, username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media })
     }
     for (const [ref, { seq, at }] of engagementState(copied).reposted) {
       if (Date.parse(at) - now > MAX_FUTURE_MS) {
@@ -121,8 +125,9 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // this call did not receive stays. A reply or a quote is its own post.
       if (deletedRefs.has(ref)) continue
       const to = parseRef(ref)
-      items.push({ kind: 'repost', author: key, name, username, seq, at, to, text: null, replyTo: null, quote: null, media: null })
+      items.push({ kind: 'repost', author: key, name, username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null })
     }
+    for (let i = from; i < items.length; i++) logOf.set(items[i], log)
   }
   // Numeric time order: string order breaks for negative-year ISO dates.
   items.sort((a, b) => (Date.parse(a.at) - Date.parse(b.at)) || cmp(a.author, b.author) || a.seq - b.seq)
@@ -130,8 +135,14 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
   const kept = cursor === null
     ? items
     : items.filter((it) => ((Date.parse(it.at) - cursor.t) || cmp(it.author, cursor.author) || it.seq - cursor.seq) < 0)
+  const page = limit === Infinity ? kept : kept.slice(Math.max(0, kept.length - limit))
+  for (const item of page) {
+    const log = logOf.get(item)
+    if (log.username === undefined) log.username = latestUsername(log.copied, log.key, association, usernameOpts)
+    item.username = log.username
+  }
   return {
-    items: limit === Infinity ? kept : kept.slice(Math.max(0, kept.length - limit)),
+    items: page,
     future: future.map(formatRef)
   }
 }

@@ -27,6 +27,9 @@ export const INVITE_READY_TEXT = 'Convite pronto para usar.'
 export const INVITE_VALID_TEXT = 'Esse link serve para uma pessoa só e vale 7 dias. Nada sobre quem recebe o link fica guardado.'
 export const WEEK_RESET_TEXT = 'Os convites renovam toda segunda-feira, no horário de Brasília, e os que sobram não acumulam.'
 const INVITES_GONE_TEXT = 'Seus convites desta semana acabaram.'
+export const INVITE_DROP_TITLE = 'Chegou um convite pra sua varanda'
+export const INVITE_DROP_BODY = 'Escolha com carinho quem você quer chamar: alguém próximo, que faz falta na conversa.'
+export const DROPS_HINT_TEXT = 'Os convites chegam de surpresa, um de cada vez, com um aviso. Escolha com carinho quem você quer chamar.'
 
 // Cheap prefix test: any path under /convite is an invite attempt and gets
 // cleaned from the address bar, valid or not.
@@ -184,4 +187,20 @@ export function inviteCountText ({ remaining, perWeek } = {}) {
 export function allowanceText (perWeek) {
   if (!Number.isInteger(perWeek) || perWeek < 1 || perWeek > 100) return ''
   return 'Você pode criar até ' + perWeek + (perWeek === 1 ? ' convite' : ' convites') + ' por semana.'
+}
+
+export function dropView ({ mode, opened, used, remaining, perWeek } = {}) {
+  if ((mode !== 'semanal' && mode !== 'sorteio') ||
+    !Number.isInteger(perWeek) || perWeek < 1 || perWeek > 100 ||
+    !Number.isInteger(opened) || opened < 0 || opened > perWeek ||
+    !Number.isSafeInteger(used) || used < 0 || remaining !== Math.max(0, opened - used) ||
+    (mode === 'semanal' && opened !== perWeek)) {
+    return { text: '', enabled: false }
+  }
+  if (mode === 'semanal') return { text: inviteCountText({ remaining, perWeek }), enabled: remaining > 0 }
+  if (opened === 0) return { text: 'Seu convite desta semana ainda não chegou. Ele aparece de surpresa, com um aviso.', enabled: false }
+  if (remaining > 0) {
+    return { text: 'Você tem ' + remaining + (remaining === 1 ? ' convite' : ' convites') + ' para usar até o fim da semana.', enabled: true }
+  }
+  return { text: 'O próximo convite chega de surpresa.', enabled: false }
 }

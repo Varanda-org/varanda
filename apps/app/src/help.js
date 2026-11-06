@@ -150,7 +150,8 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Quem já está na Varanda pode criar alguns links de convite por semana e mandar como quiser.',
       'Cada link serve para uma pessoa só e vale 7 dias. Os convites renovam toda segunda-feira, no horário de Brasília, e os que sobram não acumulam.',
-      'A associação guarda só quem criou o convite e se ele foi usado; nunca o nome, o e-mail ou a conta de quem recebeu o link.'
+      'A associação guarda só quem criou o convite e se ele foi usado; nunca o nome, o e-mail ou a conta de quem recebeu o link.',
+      'Quando a associação liga os convites de surpresa, cada convite chega num dia e hora ao acaso, com um aviso. Escolha com carinho quem você quer chamar.'
     ])
   }),
   termosAparelho: Object.freeze({

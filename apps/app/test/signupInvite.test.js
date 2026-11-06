@@ -302,3 +302,56 @@ test('texts and the weekly count', async (t) => {
     t.absent(m[k].includes(String.fromCharCode(0x2014)), k)
   }
 })
+
+test('invite drop texts are the approved Portuguese', async (t) => {
+  const m = await load()
+  t.is(m.INVITE_DROP_TITLE, 'Chegou um convite pra sua varanda')
+  t.is(m.INVITE_DROP_BODY, 'Escolha com carinho quem você quer chamar: alguém próximo, que faz falta na conversa.')
+  t.is(m.DROPS_HINT_TEXT, 'Os convites chegam de surpresa, um de cada vez, com um aviso. Escolha com carinho quem você quer chamar.')
+  for (const key of ['INVITE_DROP_TITLE', 'INVITE_DROP_BODY', 'DROPS_HINT_TEXT']) {
+    t.absent(m[key].includes('\u2014'), key)
+  }
+})
+
+test('dropView: weekly counts and surprise drops without promising another slot this week', async (t) => {
+  const { dropView } = await load()
+  const cases = [
+    ['semanal', 5, 1, 4, 5, 'Restam 4 de 5 convites nesta semana.', true],
+    ['semanal', 5, 4, 1, 5, 'Resta 1 de 5 convites nesta semana.', true],
+    ['semanal', 1, 0, 1, 1, 'Resta 1 de 1 convite nesta semana.', true],
+    ['semanal', 5, 5, 0, 5, 'Seus convites desta semana acabaram.', false],
+    ['semanal', 1, 6, 0, 1, 'Seus convites desta semana acabaram.', false],
+    ['sorteio', 0, 0, 0, 5, 'Seu convite desta semana ainda não chegou. Ele aparece de surpresa, com um aviso.', false],
+    ['sorteio', 1, 0, 1, 5, 'Você tem 1 convite para usar até o fim da semana.', true],
+    ['sorteio', 3, 1, 2, 5, 'Você tem 2 convites para usar até o fim da semana.', true],
+    ['sorteio', 5, 0, 5, 5, 'Você tem 5 convites para usar até o fim da semana.', true],
+    ['sorteio', 1, 1, 0, 5, 'O próximo convite chega de surpresa.', false],
+    ['sorteio', 5, 5, 0, 5, 'O próximo convite chega de surpresa.', false],
+    ['sorteio', 1, 6, 0, 1, 'O próximo convite chega de surpresa.', false],
+    ['sorteio', 1, Number.MAX_SAFE_INTEGER, 0, 1, 'O próximo convite chega de surpresa.', false]
+  ]
+  for (const [mode, opened, used, remaining, perWeek, text, enabled] of cases) {
+    const input = { mode, opened, used, remaining, perWeek }
+    t.alike(dropView(input), { text, enabled }, JSON.stringify(input))
+    t.absent(dropView(input).text.includes('\u2014'))
+  }
+})
+
+test('dropView: doubtful counts and modes produce no text and stay disabled', async (t) => {
+  const { dropView } = await load()
+  const summary = { mode: 'sorteio', opened: 2, used: 1, remaining: 1, perWeek: 5 }
+  const empty = { text: '', enabled: false }
+  t.alike(dropView(), empty)
+  t.alike(dropView({ ...summary, mode: 'x' }), empty)
+  t.alike(dropView({ mode: 'semanal', opened: 2, used: 1, remaining: 1, perWeek: 5 }), empty, 'the weekly mode opens the whole allowance')
+  for (const mode of ['semanal', 'sorteio']) {
+    for (const [key, values] of Object.entries({
+      opened: [undefined, -1, 6, 1.5, '2', null, NaN, Infinity],
+      used: [undefined, -1, 1.5, '1', null, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1],
+      remaining: [undefined, -1, 0, 3, 1.5, '1', null, NaN, Infinity],
+      perWeek: [undefined, 0, 101, -1, 1.5, '5', null, NaN, Infinity]
+    })) {
+      for (const value of values) t.alike(dropView({ ...summary, mode, [key]: value }), empty, mode + ': ' + key + '=' + value)
+    }
+  }
+})

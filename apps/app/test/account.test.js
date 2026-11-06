@@ -81,7 +81,7 @@ test('error mapper uses fixed messages and never a raw body', async (t) => {
   t.is(toError('assinatura-invalida').message, 'não foi possível provar a chave')
   t.is(toError('expirado').message, 'o vínculo expirou, comece de novo')
   const waiting = toError('lista-de-espera')
-  t.is(waiting.message, 'A Varanda está cheia por enquanto. Nada sobre você foi guardado; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.')
+  t.is(waiting.message, 'A Varanda está cheia por enquanto. Esta tentativa não criou conta nem lugar em fila; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.')
   t.is(waiting.code, 'lista-de-espera')
   const other = toError('<html>secret@example.com</html>')
   t.is(other.message, 'serviço indisponível')
@@ -143,6 +143,9 @@ test('404 gives null for pending and lookup, an error elsewhere', async (t) => {
   stub(t, json(404, { error: 'nao-encontrado' }))
   t.is(await a.readPending(), null)
   t.is(await a.lookupUsername('ana'), null)
+  // The pending route answers "no pending link" with a 404 expirado: still null.
+  stub(t, json(404, { error: 'expirado' }))
+  t.is(await a.readPending(), null)
   await t.exception(a.accountStatus(M))
 })
 
@@ -296,6 +299,8 @@ test('invite error tokens and parseReturnInvite', async (t) => {
   t.is(toError('convite-obrigatorio').message, 'Para entrar, abra o link de convite que alguém da rede te enviou. Nada sobre você fica guardado enquanto o convite não for usado.')
   t.is(toError('convite-invalido').message, 'Este convite não vale mais: já foi usado, venceu ou não existe. Peça outro link para quem te convidou.')
   t.is(toError('limite-convites').message, 'Você já criou os convites desta semana. Na segunda-feira volta a contar.')
+  t.is(toError('convite-aguardando').code, 'convite-aguardando')
+  t.is(toError('convite-aguardando').message, 'Seu convite desta semana ainda não chegou. Ele aparece de surpresa, com um aviso.')
   t.is(parseReturn('?conta=convite-invalido'), null, 'not a return notice')
   t.is(parseReturnInvite('?conta=convite-invalido'), toError('convite-invalido').message)
   t.is(parseReturnInvite('?x=1&conta=convite-invalido'), toError('convite-invalido').message)
@@ -333,11 +338,78 @@ test('invitePolicy: the two shapes, null on 404, anything else refused', async (
   const bad = [
     { required: false, extra: 1 }, { required: false, perWeek: 5 }, { required: true }, { required: true, perWeek: 0 },
     { required: true, perWeek: 101 }, { required: true, perWeek: 2.5 }, { required: true, perWeek: '5' },
-    { required: true, perWeek: 5, x: 1 }, { required: 'true', perWeek: 5 }, {}, []
+    { required: true, perWeek: 5, x: 1 }, { required: 'true', perWeek: 5 }, {}, [],
+    { required: true, perWeek: 5, mode: 'sorteio' }
   ]
   for (const body of bad) {
     stub(t, json(200, body))
     try { await a.invitePolicy(); t.fail(JSON.stringify(body)) } catch (e) { t.is(e.code, 'indisponivel', JSON.stringify(body)) }
+  }
+})
+
+test('invitesSummary: the exact shape, request and older service fallback', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff' }
+  const summary = { mode: 'sorteio', perWeek: 5, opened: 2, used: 1, remaining: 1, resetsAt: ISO }
+  const calls = stub(t, json(200, summary))
+  t.alike(await a.invitesSummary(args), summary)
+  t.is(calls.length, 1)
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/invites/summary')
+  t.alike(JSON.parse(calls[0].init.body), args)
+  t.is(calls[0].init.credentials, 'same-origin')
+  t.is(calls[0].init.cache, 'no-store')
+  for (const body of [
+    { ...summary, mode: 'semanal', opened: 5, remaining: 4 },
+    { ...summary, opened: 0, used: 0, remaining: 0 },
+    { ...summary, perWeek: 1, opened: 1, used: 0 },
+    { ...summary, perWeek: 100, opened: 100, used: 99 },
+    { ...summary, used: 6, remaining: 0 },
+    { ...summary, used: Number.MAX_SAFE_INTEGER, remaining: 0 }
+  ]) {
+    stub(t, json(200, body))
+    t.alike(await a.invitesSummary(args), body)
+  }
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.invitesSummary(args), null)
+  // An expired nonce is a 404 too, but a refusal, never "older service".
+  stub(t, json(404, { error: 'expirado' }))
+  try { await a.invitesSummary(args); t.fail('expirado must throw') } catch (e) { t.is(e.code, 'expirado') }
+  // The weekly mode always opens the whole allowance.
+  stub(t, json(200, { ...summary, mode: 'semanal', opened: 2, used: 1, remaining: 1 }))
+  try { await a.invitesSummary(args); t.fail('semanal with opened below perWeek') } catch (e) { t.is(e.code, 'indisponivel') }
+})
+
+test('invitesSummary: malformed summaries are unavailable and failures are never retried', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff' }
+  const summary = { mode: 'sorteio', perWeek: 5, opened: 2, used: 1, remaining: 1, resetsAt: ISO }
+  const bad = [null, [], {}, { ...summary, extra: 1 }]
+  for (const key of Object.keys(summary)) {
+    const body = { ...summary }
+    delete body[key]
+    bad.push(body)
+  }
+  for (const [key, values] of Object.entries({
+    mode: ['x', null],
+    perWeek: [0, 101, 1.5, '5', null],
+    opened: [-1, 6, 1.5, '2', null],
+    used: [-1, 1.5, '1', null, Number.MAX_SAFE_INTEGER + 1],
+    remaining: [-1, 0, 3, 1.5, '1', null],
+    resetsAt: [null, 'tomorrow', '2026-11-02T03:00:00Z', '2026-11-02T03:00:00.0Z', '2026-02-30T03:00:00.000Z', '2026-11-02T00:00:00.000-03:00']
+  })) {
+    for (const value of values) bad.push({ ...summary, [key]: value })
+  }
+  for (const body of bad) {
+    stub(t, json(200, body))
+    try { await a.invitesSummary(args); t.fail(JSON.stringify(body)) } catch (e) {
+      t.is(e.code, 'indisponivel', JSON.stringify(body))
+      t.is(e.message, 'serviço indisponível')
+    }
+  }
+  for (const res of [json(503, { error: 'indisponivel' }), () => { throw new Error('network') }]) {
+    const calls = stub(t, res)
+    try { await a.invitesSummary(args); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+    t.is(calls.length, 1, 'never retried')
   }
 })
 

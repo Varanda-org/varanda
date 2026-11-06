@@ -15,12 +15,15 @@ const crypto = require('crypto')
 const VERSION_TOKEN = '__VARANDA_VERSION__'
 const PRECACHE_TOKEN = '__VARANDA_PRECACHE__'
 const RELEASE_META_RE = /<meta name="varanda-release" content="[^"]*">/g
-const EXCLUDED = new Set(['/metadata.json', '/sw.js'])
+const EXCLUDED = new Set(['/metadata.json', '/sw.js', '/version.json'])
 
 const sha256hex = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex')
 
 // Every regular file under distDir as a sorted root-relative POSIX path,
-// except Expo's metadata.json, the worker itself and source maps.
+// except Expo's metadata.json, the worker itself and source maps. A
+// version.json left in dist by build-web.sh is neither precached nor part of
+// the release hash, so the same source yields the same release id whatever
+// commit is stamped there.
 function listAssets (distDir) {
   const out = []
   const walk = (dir, rel) => {
