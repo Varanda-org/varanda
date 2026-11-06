@@ -271,7 +271,7 @@ async function forwardOnce ({ plan: p, target, readCache, readSource, media, req
       try {
         if (step.method === 'dm.putMedia') {
           if (!media || typeof media.putDm !== 'function') throw new Error('anexos indisponíveis')
-          // A blob of its own per destination (rpc 5.95): an uncertain send
+          // A blob of its own per destination (rpc 5.97): an uncertain send
           // to one conversation never lends its blob to the next.
           return await media.putDm({ ...uploadArgs(step, file), to: target.to })
         }

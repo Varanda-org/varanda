@@ -111,7 +111,7 @@ export function composePlan ({ text = '', attachments = [], target }) {
     if (!item || typeof item !== 'object') throw new Error('anexo inválido')
     if (voice) return voiceUpload(item, dm, sealed, target.to)
     const { name, mime, width, height } = item
-    // A DM blob is sealed for one destination (docs/rpc.md 5.95).
+    // A DM blob is sealed for one destination (docs/rpc.md 5.97).
     const params = dm ? { name, to: target.to, mime, width, height } : { name, mime, width, height }
     if (sealed) params.sealed = true
     return checked(dm ? 'dm.putMedia' : 'media.uploadFile', params)

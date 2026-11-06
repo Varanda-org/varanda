@@ -151,7 +151,7 @@ export function webNodeHandle (request) {
     upload: ({ bytes, mime, width, height, sealed, ms, kind, onProgress } = {}) =>
       sendFile(bytes, 'media.uploadFile', { mime, width, height, ...voiceOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) }, onProgress),
     // `to`, the destination, is required: it keys the sealed blob to one
-    // conversation (5.95).
+    // conversation (5.97).
     putDm: async ({ bytes, mime, width, height, ms, kind, to } = {}) => {
       if (typeof to !== 'string' || !/^[0-9a-f]{64}$/.test(to)) throw new TypeError('mídia inválida')
       return sendFile(bytes, 'dm.putMedia', { to, mime, width, height, ...voiceOf({ ms, kind }) })

@@ -124,7 +124,7 @@ test('putDm goes through dm.putMedia; a failure deletes the file here', async (t
   const to = 'ef'.repeat(32)
   t.is(await media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2, to }), item)
   const put = calls.find((c) => c.method === 'dm.putMedia')
-  t.alike(put.params, { name: put.params.name, mime: 'image/webp', width: 2, height: 2, to }, 'the destination crosses the IPC (rpc 5.95)')
+  t.alike(put.params, { name: put.params.name, mime: 'image/webp', width: 2, height: 2, to }, 'the destination crosses the IPC (rpc 5.97)')
   t.alike(put.file, new Uint8Array([9]))
   for (const bad of [undefined, 'EF'.repeat(32), 'ef', null]) {
     await t.exception.all(media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2, to: bad }), /mídia inválida/, 'to ' + JSON.stringify(bad))

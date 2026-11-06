@@ -338,7 +338,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     const r = await runChatSend({
       plan,
       files,
-      // `to` keeps this photo's blob to this conversation (rpc 5.95).
+      // `to` keeps this photo's blob to this conversation (rpc 5.97).
       upload: (f) => mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: f.width, height: f.height, to: peer }),
       request: dm,
       live: () => token.live,

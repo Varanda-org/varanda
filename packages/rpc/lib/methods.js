@@ -296,6 +296,35 @@ const isPushAction = (v) => v === 'on' || v === 'off'
 const isPushP256dh = (v) => typeof v === 'string' && PUSH_P256DH_RE.test(v)
 const isPushAuth = (v) => typeof v === 'string' && PUSH_AUTH_RE.test(v)
 
+// seen.sign / seen.merge (docs/rpc.md 5.95 and 5.96). These bounds mirror
+// core's seen-blob and seen-proof without importing dependencies here.
+const SEEN_BLOB_B64 = 43744
+const SEEN_TOKEN_RE = /^[0-9a-f]{32}$/
+const SEEN_PAGE_RE = /^page:[0-9a-f]{64}$/
+const isSeenAction = (v) => v === 'read' || v === 'write' || v === 'delete'
+
+function isSeenBlob (v) {
+  // 32808 bytes is divisible by three, so canonical base64 has no padding.
+  return v === null || (typeof v === 'string' && v.length === SEEN_BLOB_B64 && !/[^A-Za-z0-9+/]/.test(v))
+}
+
+function isSeenTokens (v, max) {
+  if (!Array.isArray(v) || v.length > max) return false
+  for (let i = 0; i < v.length; i++) {
+    if (typeof v[i] !== 'string' || v[i].length !== 32 || !SEEN_TOKEN_RE.test(v[i])) return false
+  }
+  return true
+}
+
+function isSeenAvisos (v) {
+  if (!isPlainObject(v) || !hasOwn(v, 'own') || !isSeenTokens(v.own, 256)) return false
+  if (Object.keys(v).some((key) => key !== 'own' && key !== 'pages')) return false
+  if (!hasOwn(v, 'pages')) return true
+  if (!isPlainObject(v.pages)) return false
+  const pages = Object.keys(v.pages)
+  return pages.length <= 4 && pages.every((key) => key.length === 69 && SEEN_PAGE_RE.test(key) && isSeenTokens(v.pages[key], 32))
+}
+
 // Global URL, not an import: this package stays free of @varanda/core. The
 // signed statement hashes the exact string, so it must be the string fetch
 // would request: the URL parser strips tab, CR and LF and reads a backslash
@@ -1028,6 +1057,14 @@ const SPECS = {
   },
   // Core node only: the Ed25519 delegate a core diary signs pages with.
   'page.register': { fields: none, mutating: true },
+  'seen.sign': { fields: { nonce: req(isNonce), action: req(isSeenAction) } },
+  // Idempotent local store, like group.seen.
+  'seen.merge': {
+    fields: { blob: req(isSeenBlob), avisos: req(isSeenAvisos), unchanged: req(isBool) },
+    cross (given, value) {
+      return value.unchanged && value.blob !== null ? 'unchanged só com blob nulo' : null
+    }
+  },
   'group.meta': {
     fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,
@@ -1135,7 +1172,7 @@ const SPECS = {
   // chat goes to the anonymous blob channel (protocol section 13) from a
   // cache file, as media.uploadFile; the result is a dm.send media item. On
   // the web the bytes never cross RPC (MAX_REQUEST): the page hands them to
-  // the node's media facade instead. `to` (5.95, required) keys the sealed
+  // the node's media facade instead. `to` (5.97, required) keys the sealed
   // blob to one destination, so the same photo for two conversations never
   // shares a blob, and dm.send refuses the item for any other destination.
   'dm.putMedia': {

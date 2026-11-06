@@ -763,7 +763,7 @@ test('putDmMedia hands the photo to dmPutMedia, zeroes it and unlinks after succ
   t.alike(unlinked, ['/cache/p.bin'])
 
   await putDmMedia({ ...io, read: async () => ({ file: '/cache/r.bin', bytes: new Uint8Array([4]) }) }, { mime: 'image/png', width: 2, height: 3, to: dest })
-  t.is(seen[1].to, dest, 'the destination reaches the session (rpc 5.95)')
+  t.is(seen[1].to, dest, 'the destination reaches the session (rpc 5.97)')
   await putDmMedia({ ...io, read: async () => ({ file: '/cache/s.bin', bytes: new Uint8Array([5]) }) }, { mime: 'image/png', width: 2, height: 3 })
   t.ok('to' in seen[2] && seen[2].to === undefined, 'a missing destination still reaches the session, which refuses it')
 

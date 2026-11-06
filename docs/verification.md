@@ -5517,7 +5517,64 @@ Resultado da matriz: a registrar aqui por navegador, com a data e a versão do n
 - Com a janela em foco, o aviso vira só uma releitura. Se a identidade está travada, a releitura espera o destravar. Se já há um `dm.pull` em andamento, a releitura dele falha e a mensagem aparece no próximo. Mensagens de uma página só aparecem quando a pessoa está agindo como a página, como antes. Uma janela em foco fora da área de membro (a abertura, os Termos, a primeira configuração, ou o começo de um carregamento antes de o app ouvir) não responde ao worker, e o aviso aparece normalmente.
 - Nenhuma caixa executada nesta documentação.
 
-## 113. Encaminhar mensagens nas conversas e nos grupos (PR feat/forwarding)
+## 113. Estado de vistos sincronizado entre aparelhos (PR feat/seen-sync-service)
+
+O serviço de conta guarda, por membro, um bloco cifrado com as marcas de visto de Avisos, Conversas e grupos (`apps/cli/lib/account/seen-store.js`, `seen-routes.js`). O formato, a chave e as regras de fusão e de compare-and-swap estão em [protocol.md](protocol.md), seção 14. Esta parte confere o serviço; o navegador, que grava e funde o bloco, e o app estão nas PRs desta pilha, e o roteiro do app está no fim desta seção. O serviço não lê o bloco, e nenhuma conferência abaixo precisa de acesso ao conteúdo.
+
+### Testes automáticos
+
+Rodar um arquivo por vez, com `node <arquivo>`:
+
+- `node packages/core/test/seen-blob.test.js`: chave, cifra, limites (256, 4 x 32, 736 e 128, 32336 bytes no limite), corte determinístico e fusão comutativa.
+- `node packages/core/test/seen-proof.test.js`: enunciado `varanda-seen-v1`, assinatura e recusa de outro prefixo.
+- `node apps/cli/test/account-seen-store.test.js`: arquivo 0600 num diretório 0700, CAS, duas gravações concorrentes (uma só vence), arquivo de tamanho errado, link simbólico, zerar antes de apagar, limite de membros e registro sem membro nem bytes.
+- `node apps/cli/test/account-seen.test.js`: as rotas `start` e `finish`, conflito 409, nonce de uso único, Termos pendentes, limite de 429, tamanho do arquivo e 503 sem armazenamento.
+- `node apps/app/test/legal.test.js`: texto da Política e dos Termos na versão 21 (versão, nota de revisão e resumo do texto fixados).
+
+### Roteiro no servidor de teste
+
+Pré-requisito: uma conta de teste já vinculada, criada como em `apps/cli/test/account-seen.test.js` (sem Google), com o aceite da versão 21 dos Termos (`POST /account/terms/start` e `finish`). Sem o aceite, toda gravação responde 409 `termos-pendentes`. A chave de assinatura é gerada na hora, num script de uma linha em `node` que chama `signSeen` de `packages/core/lib/seen-proof.js` e imprime só a assinatura. Nem a chave nem a assinatura vão para o registro desta conferência.
+
+- [ ] Leitura sem bloco: `POST /account/seen/start` com `{ "member": "<hex64>", "action": "read" }` responde 200 `{ nonce }`; `POST /account/seen/finish` com `prevHash` de 64 zeros responde 200 `{ hash: null, blob: null }`.
+- [ ] Nonce de uso único: repetir o mesmo `finish` responde 404 `expirado`.
+- [ ] Assinatura com um caractere trocado responde 400 `assinatura-invalida`.
+- [ ] Gravação: `start` com `action: "write"` e `finish` com `prevHash` de 64 zeros, `newHash` igual ao hash do bloco (BLAKE2b-256 do bloco cifrado) e `blob` com 43744 caracteres em base64 de um bloco de 32808 bytes; responde 200 `{ ok: true, hash }`. O arquivo `<dados>/seen/<member>` tem 32808 bytes e modo 600 (`stat`).
+- [ ] Tamanho constante: uma gravação com uma marca e outra com o limite cheio resultam no mesmo tamanho de arquivo (32808 bytes).
+- [ ] Hash velho: uma gravação com um `prevHash` que não é o atual responde 409 `conflito`, com o `hash` atual e o `blob` atual em base64; o arquivo no disco não muda (o hash continua igual).
+- [ ] Depois desse 409, uma gravação com o `hash` devolvido responde 200.
+- [ ] Gravação sem o aceite da versão 21 responde 409 `termos-pendentes` e não muda o arquivo.
+- [ ] Apagamento: com um hash velho responde 409 `conflito`; com o hash atual responde 200 `{ ok: true, changed: true }` e o arquivo some; apagar de novo responde 200 `{ ok: true, changed: false }`. Zerar o arquivo antes de apagar não se confere aqui, porque ele já não existe; a conferência é o teste `forget zeroes the file, then unlinks it` de `account-seen-store.test.js`.
+- [ ] Sem armazenamento usável (por exemplo, `seen` trocado por um link simbólico num ensaio), todas as rotas respondem 503 `indisponivel` e nenhum arquivo de membro é tocado.
+- [ ] Sem arquivos sobrando: depois das gravações, nenhum `.tmp.*` fica no diretório `seen`.
+- [ ] Log: o registro do serviço durante o roteiro não tem o hex do membro, o base64 do bloco nem os hashes. Só aparecem linhas `{ "event": "seen", "reason": ... }`.
+- [ ] Um pedido de outro membro, com a assinatura desse membro, não muda o arquivo do primeiro (a conferência também está em `account-seen.test.js`).
+
+### Roteiro no app
+
+Pré-requisito: a mesma passkey em dois navegadores (ou aba e app instalado) na versão hospedada, com os Termos da versão atual aceitos, e uma conta de teste sem Google. Os pontos são conferidos só com os dois aparelhos na tela; nada disto é verificado por teste automático.
+
+- [ ] Avisos entre navegadores: no navegador A, abrir Avisos com um aviso novo; no B, o ponto do sino some depois da rodada (A grava em até 30 s depois da marca (até 90 s se uma rodada acabou de rodar), e o B perde o ponto ao voltar a aba ou na próxima rodada de 5 minutos).
+- [ ] Conversas: uma mensagem não lida aberta no A deixa de ter ponto no B depois da rodada, e o ponto da aba só some quando não há outra conversa não lida.
+- [ ] Grupos: um grupo aberto no A perde a contagem no B depois da rodada; a aba (`comunidades`) só perde o ponto quando nenhum grupo tem não lidas.
+- [ ] Catch-up offline: com o B sem rede, marcar avisos e conversas no A; voltar a rede no B e esperar a rodada (ou voltar a aba). As marcas chegam e nenhuma some.
+- [ ] Segunda passkey (outra identidade): não vê as marcas da primeira; os pontos dela seguem como antes.
+- [ ] Bloco velho do servidor: colocar no serviço de teste uma cópia anterior do bloco (ensaio) e rodar uma leitura no B. O B não perde as marcas locais: os avisos que ele já viu continuam sem ponto, no máximo um ponto antigo reaparece.
+- [ ] Sem Termos aceitos: a aba não faz nenhum pedido de vistos (conferir na aba de rede do navegador).
+- [ ] Configuração manual e `varanda-serve`: nenhum pedido de vistos; os pontos são os de antes desta funcionalidade.
+- [ ] Nativo (quando houver build de debug com a conta de teste): os mesmos pontos aparecem no app e no navegador. Se não houver build, a conferência fica pendente e não é dada como feita.
+
+### Limites desta parte
+
+- A rodada de vistos corre só depois que o nó está pronto e online, então um aparelho sem rede não mostra as marcas dos outros até voltar a rede.
+- Migração: uma entrada antiga com enchimento só viaja quando uma linha carregada bate com ela, por isso outro aparelho pode mostrar um aviso antigo como novo até a pessoa abrir a aba onde ele aparece.
+- Os limites do bloco (256 avisos, 4 x 32 em páginas, 736 mensagens de Conversas e 128 grupos) cortam o mais antigo; um item que sai do bloco pode voltar como novo em outro aparelho.
+- O ponto da aba de grupos só é apagado até as versões que o app conhecia quando a fusão foi pedida. Uma publicação que chega durante a fusão mantém o ponto, mesmo que outro aparelho já a tenha lido; ele some ao abrir a aba ou o grupo.
+- A trava da conta não é do sistema operacional. Se o processo perder a trava entre a conferência e o renomear, uma gravação antiga pode substituir um bloco que o novo titular já confirmou. A conferência não reproduz essa corrida; ela se recupera pela fusão, porque cada aparelho reescreve as suas marcas (`seen-store.js`, cabeçalho).
+- Não há apagamento pedido por um aparelho: a rota `delete` existe, mas nenhum cliente a chama. O apagamento hoje é um pedido à associação.
+- A exclusão da conta ainda não existe, e o bloco não é apagado com ela.
+- Não verificado em servidor real: esta seção foi escrita sem executar os roteiros acima, o do servidor e o do app.
+
+## 114. Encaminhar mensagens nas conversas e nos grupos (PR feat/forwarding)
 
 Caminhada de encaminhar uma mensagem de uma conversa (mensagem direta ou grupo) para até 5 conversas ou grupos. A tela está em [app.md](app.md) ("Conversa", "Encaminhar"). Não há mudança nos Termos de Uso nem na Política de Privacidade: nenhum tratamento de dado novo.
 

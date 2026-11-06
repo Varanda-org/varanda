@@ -992,6 +992,10 @@ O semeador nunca vê a inscrição. Ele só manda o candidato em loopback (`POST
 
 Um aviso que chega com o serviço de conta fora, ou com a fila do repasse cheia (256 no semeador, 512 no serviço), se perde e não é repetido. Um bloco escrito enquanto o semeador estava fora só vira aviso depois que ele volta se o `at` do autor tiver menos de 6 h (`PUSH_MAX_AGE_MS`, só para suprimir). O que já estava guardado quando o diário passou a ser servido não gera aviso, inclusive depois de reiniciar ou de reconstruir o índice.
 
+##### Estado de vistos entre aparelhos
+
+O serviço de conta guarda em `seen/<membro>` (diretório `0700`, arquivos `0600`, no volume `account-data`) um bloco cifrado de 32808 bytes por membro, com as marcações de visto mais recentes de Avisos, Conversas e grupos. Só os aparelhos da passkey abrem o bloco (`docs/protocol.md`, seção 14); o serviço vê só que ele existe, o tamanho fixo e a hora da última gravação. Não há variável para ligar: `POST /account/seen/start` e `POST /account/seen/finish` ficam sempre montadas, e gravar exige o aceite dos Termos atuais. O backup leva o diretório com o resto do volume. Perder o diretório não perde nada para sempre: cada aparelho guarda as próprias marcações e as grava de novo no passe seguinte. Um `seen` que não é um diretório (um link simbólico, um arquivo) deixa o recurso indisponível até ser corrigido, com uma linha `{ event: 'seen', reason: 'diretorio-invalido' }` no registro; nenhum membro, hash ou byte do bloco entra no registro.
+
 #### Aplicar as decisões do painel
 
 Os moderadores decidem as denúncias no painel do serviço de conta (`/account/mod/`), mas o painel não assina nada: cada decisão fica pendente até o operador rodar `mod apply` na própria máquina, com o diretório da moderação. A chave secreta da moderação continua só nessa máquina.

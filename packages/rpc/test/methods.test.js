@@ -25,7 +25,7 @@ test('method list and mutating set', (t) => {
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.readFile', 'media.uploadFile', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
-    'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
+    'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
     'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
@@ -34,6 +34,83 @@ test('method list and mutating set', (t) => {
     'post.quote', 'post.reply',
     'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
   ])
+})
+
+test('seen.sign', (t) => {
+  const base = { nonce: 'n'.repeat(43), action: 'read' }
+  t.is(isMutating('seen.sign'), isMutating('push.sign'))
+  t.absent(isMutating('seen.sign'))
+  for (const action of ['read', 'write', 'delete']) {
+    ok(t, 'seen.sign', { ...base, action }, { ...base, action })
+  }
+  ok(t, 'seen.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  bad(t, 'seen.sign', {})
+  bad(t, 'seen.sign', { nonce: base.nonce })
+  bad(t, 'seen.sign', { action: 'read' })
+  for (const action of ['', 'READ', 'on', 'merge', null, 1]) bad(t, 'seen.sign', { ...base, action })
+  for (const nonce of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', null, 1]) {
+    bad(t, 'seen.sign', { ...base, nonce })
+  }
+  for (const action of ['read', 'write', 'delete']) {
+    for (const key of ['hash', 'prevHash', 'newHash', 'blob', 'member', 'association', 'payload', 'key']) {
+      bad(t, 'seen.sign', { ...base, action, [key]: KEY })
+    }
+  }
+})
+
+test('seen.merge: shape and unchanged', (t) => {
+  const base = { blob: null, avisos: { own: [] }, unchanged: false }
+  t.absent(isMutating('seen.merge'))
+  ok(t, 'seen.merge', base, base)
+  ok(t, 'seen.merge', { ...base, unchanged: true })
+  ok(t, 'seen.merge', { ...base, avisos: { own: [], pages: {} } })
+  ok(t, 'seen.merge', { ...base, avisos: { own: [], pages: Object.create(null) } })
+  for (const key of Object.keys(base)) {
+    const params = { ...base }
+    delete params[key]
+    bad(t, 'seen.merge', params, 'missing ' + key)
+  }
+  for (const unchanged of [null, 0, 'false']) bad(t, 'seen.merge', { ...base, unchanged })
+  bad(t, 'seen.merge', { ...base, blob: 'A'.repeat(43744), unchanged: true }, 'unchanged with blob')
+  bad(t, 'seen.merge', { ...base, hash: KEY })
+  for (const avisos of [null, [], 'x', {}, { pages: {} }, { own: [], dm: [] }, Object.create({ own: [] })]) {
+    bad(t, 'seen.merge', { ...base, avisos })
+  }
+})
+
+test('seen.merge: exact canonical base64 blob', (t) => {
+  const base = { blob: 'Aa0+/z'.repeat(7290) + 'AAAA', avisos: { own: [] }, unchanged: false }
+  t.is(base.blob.length, 43744)
+  ok(t, 'seen.merge', base)
+  for (const blob of [undefined, 1, {}, '', 'A'.repeat(43743), 'A'.repeat(43745), 'A'.repeat(43740)]) {
+    bad(t, 'seen.merge', { ...base, blob }, 'invalid blob type or length')
+  }
+  for (const char of ['=', '-', '_', ' ', '\n', '\r', 'é']) {
+    bad(t, 'seen.merge', { ...base, blob: 'A'.repeat(43743) + char }, 'noncanonical blob ' + JSON.stringify(char))
+  }
+})
+
+test('seen.merge: bounded notice tokens and page keys', (t) => {
+  const token = 'ab'.repeat(16)
+  const page = 'page:' + KEY
+  const base = { blob: null, avisos: { own: [token], pages: { [page]: [token] } }, unchanged: false }
+  ok(t, 'seen.merge', base, base)
+  ok(t, 'seen.merge', { ...base, avisos: { own: [], pages: { [page]: [] } } })
+  const pages = Object.fromEntries(Array.from({ length: 4 }, (_, i) => ['page:' + String(i).repeat(64), Array(32).fill(token)]))
+  ok(t, 'seen.merge', { ...base, avisos: { own: Array(256).fill(token), pages } })
+  bad(t, 'seen.merge', { ...base, avisos: { own: Array(257).fill(token) } }, '257 own tokens')
+  bad(t, 'seen.merge', { ...base, avisos: { own: [], pages: { ...pages, [page]: [] } } }, 'fifth page')
+  bad(t, 'seen.merge', { ...base, avisos: { own: [], pages: { [page]: Array(33).fill(token) } } }, '33 page tokens')
+  for (const list of [null, {}, token, Array(1), [null], [1], [token.toUpperCase()], [token.slice(1)], [token + '0'], [token + '\n'], [{ token, t: 1 }]]) {
+    bad(t, 'seen.merge', { ...base, avisos: { own: list } })
+    bad(t, 'seen.merge', { ...base, avisos: { own: [], pages: { [page]: list } } })
+  }
+  for (const key of [KEY, 'page:' + KEY.toUpperCase(), page.slice(1), page + '0', page + '\n', '__proto__']) {
+    bad(t, 'seen.merge', { ...base, avisos: { own: [], pages: { [key]: [] } } })
+  }
+  for (const pages of [null, [], 'x', Object.create({ [page]: [] })]) {
+    bad(t, 'seen.merge', { ...base, avisos: { own: [], pages } })
+  }
 })
 
 test('no-param methods reject any key', (t) => {
@@ -1516,7 +1593,7 @@ test('dm.* (Conversas)', (t) => {
   bad(t, 'dm.putMedia', { ...put, height: 16385 })
   // No bytes over RPC: the descriptor goes in a later dm.send.
   for (const k of ['bytes', 'data', 'path', 'key']) bad(t, 'dm.putMedia', { ...put, [k]: 'ab' }, 'extra ' + k)
-  // `to` (5.95) is required (the missing-key loop above) and only an exact
+  // `to` (5.97) is required (the missing-key loop above) and only an exact
   // lowercase hex64 diary key.
   ok(t, 'dm.putMedia', { ...put, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 2500 }, { ...put, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 2500 })
   for (const to of ['ab', KEY.toUpperCase(), KEY + '0', KEY.slice(1), 1, null, true, [KEY], { key: KEY }]) bad(t, 'dm.putMedia', { ...put, to }, 'to ' + JSON.stringify(to))
