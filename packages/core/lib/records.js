@@ -28,6 +28,10 @@ const MAX_MEDIA_PER_POST = 4
 const MAX_MEDIA_ITEM_BLOCKS = 256 // 8 MiB per item
 const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const MAX_MEDIA_DIMENSION = 16384
+// Voice notes (chats only, never diary posts): one MPEG-4 audio item.
+const AUDIO_MIME = 'audio/mp4'
+const MAX_AUDIO_MS = 120000
+const MAX_AUDIO_BYTES = 1572864
 // Groups (lib/group.js): a diary binds a group writer core with `group-join`.
 const MAX_GROUP_WRITERS = 512
 const MAX_GROUPS_PER_DIARY = 64
@@ -53,6 +57,7 @@ const QUOTE_MEDIA_KEYS = ['type', 'text', 'at', 'replyTo', 'quote', 'media']
 const ENGAGEMENT_KEYS = ['type', 'to', 'on', 'at']
 const TARGET_KEYS = ['author', 'seq']
 const DESCRIPTOR_KEYS = Object.freeze(['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
+const AUDIO_DESCRIPTOR_KEYS = Object.freeze(['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height', 'ms'])
 const MEDIA_CORE_KEYS = ['type', 'key', 'at']
 const FOLLOW_KEYS = ['type', 'key', 'on', 'at']
 // A key advertisement only (docs/protocol.md section 11): one per identity,
@@ -236,6 +241,31 @@ function validDescriptor (d) {
       isHex64(sha256) &&
       isIntIn(width, 1, MAX_MEDIA_DIMENSION) &&
       isIntIn(height, 1, MAX_MEDIA_DIMENSION)
+  } catch {
+    return false
+  }
+}
+
+// A voice note descriptor (exact keys): a post descriptor plus its duration,
+// with no picture size. Group posts only; validDescriptor, which diary posts
+// use, stays still images. Never throws.
+function validAudioDescriptor (d) {
+  try {
+    if (!isPlainObject(d) || !hasExactKeys(d, AUDIO_DESCRIPTOR_KEYS)) return false
+    const { core, mime, start, blocks, bytes, sha256, width, height, ms } = d
+    return isHex64(core) &&
+      mime === AUDIO_MIME &&
+      isIntIn(start, 1, MAX_MEDIA_BLOCKS - 1) &&
+      isIntIn(blocks, 1, MAX_MEDIA_ITEM_BLOCKS) &&
+      start + blocks <= MAX_MEDIA_BLOCKS &&
+      Number.isSafeInteger(bytes) &&
+      bytes > (blocks - 1) * MEDIA_BLOCK_BYTES &&
+      bytes <= blocks * MEDIA_BLOCK_BYTES &&
+      bytes <= MAX_AUDIO_BYTES &&
+      isHex64(sha256) &&
+      width === 0 &&
+      height === 0 &&
+      isIntIn(ms, 1, MAX_AUDIO_MS)
   } catch {
     return false
   }
@@ -641,7 +671,11 @@ module.exports = {
   MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES,
   MAX_MEDIA_DIMENSION,
+  AUDIO_MIME,
+  MAX_AUDIO_MS,
+  MAX_AUDIO_BYTES,
   DESCRIPTOR_KEYS,
+  AUDIO_DESCRIPTOR_KEYS,
   MAX_GROUP_WRITERS,
   MAX_GROUPS_PER_DIARY,
   MAX_GROUPS_PER_COMMUNITY,
@@ -683,6 +717,7 @@ module.exports = {
   repostRecord,
   deleteRecord,
   validDescriptor,
+  validAudioDescriptor,
   validAvatar,
   validateRecord,
   validRecordCopy,

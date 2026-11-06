@@ -32,8 +32,9 @@
 // stored blocklist snapshot.
 //
 // Media (docs/rpc.md 5.75, 5.78, 5.88; protocol sections 11 and 13): a
-// photo is checked (mediaBounds), sealed and put on the anonymous blob
-// channel by putMedia (./blob.js), which answers its media item. The sealed
+// photo is checked (mediaBounds; a voice note, audio/mp4, with audioBounds
+// and MAX_AUDIO_BYTES, on put and again on open), sealed and put on the
+// anonymous blob channel by putMedia (./blob.js), which answers its media item. The sealed
 // blob stays in memory (at most BLOBS_MAX, keyed by its id and by its
 // plaintext), one put at a time per blob, so the user's retry of the same
 // photo re-puts the SAME frames. A failed upload is a normal error, never
@@ -62,11 +63,11 @@ const b4a = require('b4a')
 const dm = require('@varanda/core/lib/dm')
 const dmFold = require('@varanda/core/lib/dm-fold')
 const postage = require('@varanda/core/lib/dm-postage')
-const { nowIso } = require('@varanda/core/lib/records')
+const { nowIso, MAX_AUDIO_BYTES } = require('@varanda/core/lib/records')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { certForKey } = require('@varanda/core/lib/cert')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
-const { mediaBounds, dmTextBytes, DM_MEDIA_KEYS } = require('@varanda/rpc')
+const { mediaBounds, audioBounds, dmTextBytes, DM_MEDIA_KEYS, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 const { sealBlob, createBlobClient, fetchBlob } = require('./blob')
 const sodium = require('./sodium-browser')
 const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf } = require('./passkey')
@@ -143,6 +144,17 @@ function httpOriginOf (seederUrl) {
   }
 }
 
+// A voice note's plaintext -> its container duration in ms, or null: audio
+// only, in its duration and size bounds, and within AUDIO_MS_TOLERANCE of
+// `ms` when one is declared (a sender's ms is not trusted).
+function voiceMs (bytes, ms) {
+  if (bytes.byteLength < 1 || bytes.byteLength > MAX_AUDIO_BYTES) return null
+  const audio = audioBounds(bytes)
+  if (audio === null) return null
+  if (ms !== undefined && !(Number.isInteger(ms) && Math.abs(ms - audio.ms) <= AUDIO_MS_TOLERANCE)) return null
+  return audio.ms
+}
+
 function mediaItem (d) {
   const o = {}
   for (const k of DM_MEDIA_KEYS) o[k] = d[k]
@@ -204,7 +216,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   })
   const blobOrigin = mediaOrigin === undefined ? httpOriginOf(seederUrl) : mediaOrigin
   // Sealed blobs put (or being put) in this unlock: id -> entry and
-  // plaintext key -> entry; entry = { sealed, mime, w, h, plain, hash, lock }.
+  // plaintext key -> entry; entry = { sealed, mime, w, h, ms, plain, hash, lock }.
   const sealedById = new Map()
   const sealedByPlain = new Map()
   // Lazy opens queued or in flight, by sender and message id -> { p, job },
@@ -523,6 +535,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         for (const d of m.media) {
           const r = await fetchBlob({ id: d.id, key: d.key, nonce: d.nonce, chunks: d.chunks, bytes: d.bytes, sha256: d.sha256 }, blobOrigin, { mime: d.mime, fetch: fetchImpl, limits: L.fetch })
           out.push(r.bytes)
+          // fetchBlob checks images only; a voice note's bytes decide too
+          // (no video track, a duration in bounds), not its label.
+          if (d.mime === dm.DM_AUDIO_MIME && voiceMs(r.bytes, d.ms) === null) throw new UsageError(BAD_MEDIA)
         }
       } catch (err) {
         for (const b of out) wipe(b)
@@ -609,7 +624,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   function itemOf (entry) {
-    return mediaItem({ ...entry.sealed.descriptor, mime: entry.mime, w: entry.w, h: entry.h, ms: 0 })
+    return mediaItem({ ...entry.sealed.descriptor, mime: entry.mime, w: entry.w, h: entry.h, ms: entry.ms })
   }
 
   // One put at a time per sealed blob: a second send of the same blob waits
@@ -634,16 +649,28 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // blob, so a retry re-puts the same frames. The entry keeps a copy of its
   // own: the caller wipes its buffer on a failure, and a failed put leaves
   // the entry whole for that retry.
-  async function putMedia (own, keyPair, { bytes, mime, width, height }) {
+  // A voice note's ms is its container's: a given ms must be within
+  // AUDIO_MS_TOLERANCE of it.
+  async function putMedia (own, keyPair, { bytes, mime, width, height, ms }) {
     requireUnlocked()
     const gen = generation
-    if (!(bytes instanceof Uint8Array) || !dm.DM_MEDIA_MIMES.includes(mime) || mediaBounds(bytes, mime) === null) {
+    const voice = mime === dm.DM_AUDIO_MIME
+    let ok = false
+    if (bytes instanceof Uint8Array && voice) {
+      const given = ms === undefined || (Number.isInteger(ms) && ms >= 1 && ms <= dm.DM_AUDIO_MAX_MS)
+      ms = given && width === 0 && height === 0 ? voiceMs(bytes, ms) : null
+      ok = ms !== null
+    } else if (bytes instanceof Uint8Array) {
+      ok = dm.DM_MEDIA_MIMES.includes(mime) && (ms === undefined || ms === 0) && mediaBounds(bytes, mime) !== null
+      ms = 0
+    }
+    if (!ok) {
       if (bytes instanceof Uint8Array) wipe(bytes)
       throw new UsageError(BAD_MEDIA)
     }
     const plain = new Uint8Array(bytes)
     wipe(bytes)
-    const hash = [sha256Hex(plain), mime, width, height].join('\n')
+    const hash = [sha256Hex(plain), mime, width, height, ms].join('\n')
     let entry = sealedByPlain.get(hash)
     if (entry === undefined || entry.plain === null) {
       let sealed
@@ -653,7 +680,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         wipe(plain)
         throw err
       }
-      entry = { sealed, mime, w: width, h: height, plain, hash, lock: Promise.resolve() }
+      entry = { sealed, mime, w: width, h: height, ms, plain, hash, lock: Promise.resolve() }
       sealedById.set(sealed.descriptor.id, entry)
       sealedByPlain.set(hash, entry)
       while (sealedById.size > BLOBS_MAX) forgetBlob(sealedById.values().next().value)
@@ -1190,5 +1217,6 @@ module.exports = {
   MEDIA_GONE,
   MEDIA_STALE,
   UPLOAD_FAILED,
-  BLOBS_MAX
+  BLOBS_MAX,
+  voiceMs
 }

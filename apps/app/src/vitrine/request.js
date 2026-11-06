@@ -18,7 +18,7 @@ const targetOf = (ref) => {
 }
 const active = (entity) => ['creator', 'admin', 'member'].includes(entity.role)
 const preview = (text, media) => text === '' && Array.isArray(media) && media.length > 0
-  ? media.every((m) => (m.plainMime || m.mime) === 'image/gif') ? 'GIF' : 'Foto'
+  ? media.some((m) => (m.plainMime || m.mime) === 'audio/mp4') ? 'Áudio' : media.every((m) => (m.plainMime || m.mime) === 'image/gif') ? 'GIF' : 'Foto'
   : [...text].slice(0, 140).join('')
 
 function refuse (code, message) {
@@ -238,6 +238,10 @@ export function createVitrineRequest (fixtures) {
     'identity.reset': unavailable,
     'identity.forget': unavailable,
     'identity.sessionSaved': () => ({}),
+    'identity.recoveryLookup': unavailable,
+    'identity.recoveryOpen': unavailable,
+    'identity.recoveryWrap': unavailable,
+    'identity.recoveryBind': unavailable,
     'profile.delete': unavailable,
     'cert.add': () => ({ seq: 0 }),
     'account.sign': signed,
@@ -247,6 +251,7 @@ export function createVitrineRequest (fixtures) {
     'report.sign': signed,
     'dm.reportSign': signed,
     'terms.sign': signed,
+    'recovery.sign': signed,
     'page.sign': pageSign,
     'page.register': () => ({ actor: data.own }),
     'age.proof': ({ verified, since }) => {

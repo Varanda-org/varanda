@@ -12,6 +12,7 @@ const { safe, jsonLine } = require('@varanda/core/lib/safe')
 const { createGoogle } = require('../account/google')
 const { openAccountStore } = require('../account/store')
 const { openTermsStore } = require('../account/terms-store')
+const { openRecoveryStore } = require('../account/recovery-store')
 const { openInvitesStore } = require('../account/invites-store')
 const { openInviteDrops, startInviteDropLoop } = require('../account/invite-drops')
 const { openPushStore } = require('../account/push-store')
@@ -684,10 +685,12 @@ async function serve (flags, env) {
   let unavailable = false
   let store = null
   let terms = null
+  let recovery = null
   let invites = null
   let pushStore = null
   let seenStore = null
   let stopHeal = null
+  let stopRecoveryHeal = null
   let stopInvitesHeal = null
   let drops = null
   let stopDropsHeal = null
@@ -705,7 +708,7 @@ async function serve (flags, env) {
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, seenStore)
+      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore)
     }
   })
   let listener = null
@@ -742,6 +745,11 @@ async function serve (flags, env) {
     terms = openTermsStore(flags.dataDir, { guard: () => lock.owned(), log })
     if (!terms.available()) log({ event: 'terms', reason: 'indisponivel' })
     stopHeal = startTermsHeal(terms, log)
+    // The recovery entries (recovery.json): the same guard. An invalid file
+    // leaves only the recovery routes answering 'indisponivel'.
+    recovery = openRecoveryStore(flags.dataDir, { guard: () => lock.owned(), log })
+    if (!recovery.available()) log({ event: 'recovery', reason: 'indisponivel' })
+    stopRecoveryHeal = startHeal(recovery, 'recovery', log)
     // Signup invites (invites.json), only when VARANDA_INVITES_PER_WEEK is
     // set: unset, nothing is opened or created. The directory is the
     // single-use authority (isUsed). An invalid file keeps the service up and
@@ -854,7 +862,7 @@ async function serve (flags, env) {
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
       const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, invites, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, invites, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -902,12 +910,14 @@ async function serve (flags, env) {
     // The terms file is healed one last time (a stale writer's rename may
     // have dropped acknowledged entries) while the lock is still held.
     if (stopHeal !== null) stopHeal()
+    if (stopRecoveryHeal !== null) stopRecoveryHeal()
     if (stopInvitesHeal !== null) stopInvitesHeal()
     if (stopDropsHeal !== null) stopDropsHeal()
     if (stopPushHeal !== null) stopPushHeal()
     if (stopAgeHeal !== null) stopAgeHeal()
     if (stopSeenHeal !== null) stopSeenHeal()
     if (terms !== null && terms.available()) await terms.heal()
+    if (recovery !== null && recovery.available()) await recovery.heal()
     if (invites !== null && invites.available()) await invites.heal()
     if (drops !== null && drops.available()) await drops.heal()
     if (pushStore !== null && pushStore.available()) await pushStore.heal()
@@ -1010,11 +1020,13 @@ async function closePageClients (pageClients) {
 // The lock is lost: the store is marked unavailable first, synchronously,
 // so no request still draining during the stop appends beside the writer
 // that took the lock over (store.js, "Writer guard"); then the service
-// stops. The terms, invites, push, seen and age stores, the page keys, the page
-// writer and the invite drops too: their next write must not land either.
-function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, seenStore = null) {
+// stops. The terms, invites, push, seen, age and recovery stores, the page
+// keys, the page writer and the invite drops too: their next write must not
+// land either.
+function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, recovery = null, seenStore = null) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
+  if (recovery !== null) recovery.fail()
   if (invites !== null) invites.fail()
   if (drops !== null) drops.fail()
   if (loop !== null) loop.stop().catch(() => {})

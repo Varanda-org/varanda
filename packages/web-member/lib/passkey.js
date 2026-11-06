@@ -62,6 +62,7 @@
 const b4a = require('b4a')
 const hypercoreCrypto = require('hypercore-crypto')
 const groupCrypto = require('@varanda/core/lib/group-crypto')
+const { syncState } = require('./authenticator-data')
 
 const PRF_EVAL = b4a.from('varanda/member-identity/prf/v1', 'utf8')
 const HKDF_SALT = b4a.from('varanda/member-identity/hkdf/v1', 'utf8')
@@ -89,8 +90,17 @@ const MESSAGES = {
   NO_PRF: 'este navegador ou gerenciador de senhas não oferece a extensão PRF das passkeys; o Varanda precisa dela para derivar a identidade',
   CANCELLED: 'entrada com a passkey cancelada',
   EXISTS: 'já existe uma passkey do Varanda neste gerenciador: use entrar',
-  WEBAUTHN: 'a passkey não respondeu; tente de novo'
+  WEBAUTHN: 'a passkey não respondeu; tente de novo',
+  NOT_SYNCED: 'essa passkey ficaria presa só a este aparelho (chave de segurança, Windows Hello ou perfil do navegador); ao criar, escolha um gerenciador de senhas que sincroniza entre aparelhos ou use o celular pelo QR code',
+  // Only the app emits it (no passkey on the device); kept here so the two
+  // MESSAGES tables stay equal.
+  NONE: 'nenhuma passkey do Varanda neste aparelho'
 }
+// 'client-device' first lets a synced manager on this device answer; 'hybrid'
+// offers the phone QR on a desktop without one. Never 'security-key': a
+// hardware key binds the passkey to itself.
+const DEFAULT_CREATE_HINTS = ['client-device', 'hybrid']
+const ALLOWED_HINTS = new Set(['client-device', 'hybrid'])
 const NO_DOMAIN = 'passkeys exigem um nome de domínio (use localhost no desenvolvimento)'
 const AUTHENTICATOR_UNFIT = 'este autenticador não atende ao que a passkey do Varanda exige (guardada no gerenciador e com biometria ou PIN); use outro gerenciador ou aparelho'
 
@@ -163,6 +173,11 @@ function fromBase64Url (str) {
 function credentialDescriptors (ids) {
   if (!Array.isArray(ids)) throw argumentError('identificadores de passkey inválidos')
   return ids.map((id) => ({ type: 'public-key', id: fromBase64Url(id) }))
+}
+
+function checkHints (hints) {
+  if (!Array.isArray(hints) || !hints.every((h) => ALLOWED_HINTS.has(h))) throw argumentError('hints inválidos')
+  return hints.slice()
 }
 
 function prfExtension () {
@@ -306,26 +321,62 @@ function rpIdFor (hostname) {
   return host
 }
 
-// -> { webauthn, prf: 'yes' | 'no' | 'unknown' }. Only getClientCapabilities()
-// can say 'no' before a ceremony; without it the answer comes from register().
+function capability (value) {
+  if (value === true) return 'yes'
+  if (value === false) return 'no'
+  return 'unknown'
+}
+
+// -> { webauthn, prf, hybrid, platform, signal }, each but webauthn 'yes' |
+// 'no' | 'unknown'. Only getClientCapabilities() can say 'no' before a
+// ceremony; without it the answer comes from register(). hybrid: the phone QR
+// is available; platform: this device has a user-verifying authenticator;
+// signal: forgetCredential() can reach the password manager.
 async function supportStatus (globals = globalThis) {
   const PKC = globals ? globals.PublicKeyCredential : undefined
   const webauthn = typeof PKC === 'function' && globals.isSecureContext === true
   let prf = 'unknown'
+  let hybrid = 'unknown'
+  let platform = 'unknown'
+  let signalCap = 'unknown'
   if (webauthn && typeof PKC.getClientCapabilities === 'function') {
     try {
       const caps = await PKC.getClientCapabilities()
-      const value = caps ? caps['extension:prf'] : undefined
-      if (value === true) prf = 'yes'
-      else if (value === false) prf = 'no'
+      if (caps) {
+        prf = capability(caps['extension:prf'])
+        hybrid = capability(caps.hybridTransport)
+        platform = capability(caps.userVerifyingPlatformAuthenticator)
+        if (platform === 'unknown') platform = capability(caps.passkeyPlatformAuthenticator)
+        signalCap = capability(caps.signalUnknownCredential)
+      }
     } catch {}
   }
-  return { webauthn, prf }
+  // The function can exist where the call cannot succeed (no secure context,
+  // or the client says it does not deliver the signal).
+  let signal = webauthn ? 'no' : 'unknown'
+  if (webauthn && typeof PKC.signalUnknownCredential === 'function' && signalCap !== 'no') signal = 'yes'
+  return { webauthn, prf, hybrid, platform, signal }
+}
+
+// Best effort: asks the password manager to drop a passkey Varanda will never
+// accept (a refused creation), so nobody has to delete it by hand. -> true
+// only when the signal call resolved; false on a missing API or any failure.
+// Never throws.
+async function forgetCredential (globals = globalThis, { rpId, credentialId } = {}) {
+  try {
+    const PKC = globals ? globals.PublicKeyCredential : undefined
+    if (!PKC || typeof PKC.signalUnknownCredential !== 'function') return false
+    await PKC.signalUnknownCredential({ rpId, credentialId })
+    return true
+  } catch {
+    return false
+  }
 }
 
 // userId: the caller's 32 random bytes (the passkey's user handle). The label
 // is 'Varanda <6 hex>': never an email or a Google identifier.
-function createOptions ({ rpId, userId, excludeCredentialIds = [] } = {}) {
+// hints: see DEFAULT_CREATE_HINTS; a caller may narrow it to ['hybrid'].
+function createOptions ({ rpId, userId, excludeCredentialIds = [], hints = DEFAULT_CREATE_HINTS } = {}) {
   if (typeof rpId !== 'string' || rpId === '') throw argumentError('rp.id inválido')
   if (!(userId instanceof Uint8Array) || userId.byteLength !== USER_ID_BYTES) throw argumentError('identificador de usuário inválido')
   const label = RP_NAME + ' ' + b4a.toString(userId, 'hex').slice(0, 6)
@@ -338,13 +389,15 @@ function createOptions ({ rpId, userId, excludeCredentialIds = [] } = {}) {
     attestation: 'none',
     timeout: TIMEOUT_MS,
     excludeCredentials: credentialDescriptors(excludeCredentialIds),
-    extensions: prfExtension()
+    extensions: prfExtension(),
+    hints: checkHints(hints)
   }
 }
 
 // Without ids the request is discoverable: the password manager offers every
-// Varanda passkey for this rp.id.
-function getOptions ({ rpId, allowCredentialIds = [] } = {}) {
+// Varanda passkey for this rp.id. hints only when given: sign-in must reach
+// every existing passkey, whatever holds it.
+function getOptions ({ rpId, allowCredentialIds = [], hints } = {}) {
   if (typeof rpId !== 'string' || rpId === '') throw argumentError('rp.id inválido')
   const options = {
     rpId,
@@ -355,6 +408,7 @@ function getOptions ({ rpId, allowCredentialIds = [] } = {}) {
   }
   const allow = credentialDescriptors(allowCredentialIds)
   if (allow.length > 0) options.allowCredentials = allow
+  if (hints !== undefined) options.hints = checkHints(hints)
   return options
 }
 
@@ -378,6 +432,33 @@ function extensionResults (cred) {
   return ext && ext.prf ? ext.prf : null
 }
 
+// syncState of a creation: getAuthenticatorData() when the browser has it,
+// else the attestationObject. A throwing getter only means 'unknown'.
+function createdSyncState (response) {
+  if (!response) return 'unknown'
+  let authenticatorData = null
+  if (typeof response.getAuthenticatorData === 'function') {
+    try {
+      authenticatorData = copyBytes(response.getAuthenticatorData())
+    } catch {}
+  }
+  // A throwing getter or a detached buffer reads as no data, like a missing one.
+  let attestationObject = null
+  try {
+    attestationObject = copyBytes(response.attestationObject)
+  } catch {}
+  return syncState({ authenticatorData, attestationObject })
+}
+
+// Best effort: zeroes the PRF output of a refused creation in the browser's
+// own result object.
+function wipeExtensionPrf (cred) {
+  try {
+    const ext = cred.getClientExtensionResults()
+    if (ext && ext.prf && ext.prf.results) wipe(ext.prf.results.first)
+  } catch {}
+}
+
 function credentialIdOf (cred) {
   const raw = copyBytes(cred.rawId)
   if (raw === null || raw.byteLength === 0) throw passkeyError('WEBAUTHN')
@@ -390,10 +471,13 @@ function credentialIdOf (cred) {
 // WebAuthn L3): the caller then asks for a second click and calls
 // completeRegistration(). userId is hex. userId may be omitted: 32 random
 // bytes are drawn.
-async function register (credentials, { rpId, userId = randomBytes(USER_ID_BYTES), excludeCredentialIds = [] } = {}) {
+// A passkey whose authenticator data says it is not backup eligible is
+// refused with NOT_SYNCED (credentialId and userId attached); one that says
+// nothing is accepted.
+async function register (credentials, { rpId, userId = randomBytes(USER_ID_BYTES), excludeCredentialIds = [], hints } = {}) {
   let cred
   try {
-    cred = await credentials.create({ publicKey: createOptions({ rpId, userId, excludeCredentialIds }) })
+    cred = await credentials.create({ publicKey: createOptions({ rpId, userId, excludeCredentialIds, hints }) })
   } catch (err) {
     throw mapError(err, 'create')
   }
@@ -402,6 +486,10 @@ async function register (credentials, { rpId, userId = randomBytes(USER_ID_BYTES
   try {
     if (!cred) throw passkeyError('WEBAUTHN')
     credentialId = credentialIdOf(cred)
+    if (createdSyncState(cred.response) === 'bound') {
+      wipeExtensionPrf(cred)
+      throw passkeyError('NOT_SYNCED')
+    }
     const ext = extensionResults(cred)
     const prf = prfFirst(ext)
     if (prf !== null) return { credentialId, userId: userIdHex, prf }
@@ -422,10 +510,11 @@ async function register (credentials, { rpId, userId = randomBytes(USER_ID_BYTES
 // Unlocks with an existing passkey. -> { credentialId, prf, userHandle }:
 // userHandle is the hex of the passkey's user id when the authenticator
 // returns it, else null (a second device has no local record of it).
-async function signIn (credentials, { rpId, allowCredentialIds = [] } = {}) {
+// Existing passkeys always sign in: the flags are never read here.
+async function signIn (credentials, { rpId, allowCredentialIds = [], hints } = {}) {
   let cred
   try {
-    cred = await credentials.get({ publicKey: getOptions({ rpId, allowCredentialIds }) })
+    cred = await credentials.get({ publicKey: getOptions({ rpId, allowCredentialIds, hints }) })
   } catch (err) {
     throw mapError(err, 'get')
   }
@@ -454,8 +543,8 @@ async function signIn (credentials, { rpId, allowCredentialIds = [] } = {}) {
 
 // The second gesture of a pending registration: a get() restricted to the
 // passkey just created.
-function completeRegistration (credentials, { rpId, credentialId } = {}) {
-  return signIn(credentials, { rpId, allowCredentialIds: [credentialId] })
+function completeRegistration (credentials, { rpId, credentialId, hints } = {}) {
+  return signIn(credentials, { rpId, allowCredentialIds: [credentialId], hints })
 }
 
 module.exports = {
@@ -482,6 +571,7 @@ module.exports = {
   dmLocalKeyFromPrf,
   rpIdFor,
   supportStatus,
+  forgetCredential,
   createOptions,
   getOptions,
   register,

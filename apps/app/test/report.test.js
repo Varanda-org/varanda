@@ -531,3 +531,160 @@ test('Denunciar drops the decrypted preview in the background and prepares it ag
   t.ok(/!awake\)/.test(src) && /member, awake\]\)/.test(src), 'the preparation depends on being awake')
   t.ok(/sub\.remove\(\)/.test(src), 'the listener is removed')
 })
+
+// Voice notes: an audio/mp4 item is sent as it is, read from the local copy,
+// checked with audioBounds and hashed (statement dm v2 / report v3).
+
+const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+const ascii = (s) => Array.from(s, (c) => c.charCodeAt(0))
+function box (type, ...parts) {
+  const body = parts.flat()
+  return [...be32(8 + body.length), ...ascii(type), ...body]
+}
+function m4a ({ handler = 'soun', ms = 3000 } = {}) {
+  const hdlr = box('hdlr', [0, 0, 0, 0], be32(0), ascii(handler), be32(0), be32(0), be32(0), [0])
+  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(ms), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(ms)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(ms), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
+  const trak = box('trak', box('tkhd', new Array(84).fill(0)), box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), hdlr, minf))
+  const mvhd = box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(ms), new Array(80).fill(0))
+  return new Uint8Array([...box('ftyp', ascii('M4A '), be32(0), ascii('M4A '), ascii('isom')), ...box('moov', mvhd, trak), ...box('mdat', new Array(ms + 4).fill(1))])
+}
+const M4A = m4a()
+const DM_VOICE = { kind: 'dm', from: T, id: ID, index: 0, item: { id: 'v', mime: 'audio/mp4', w: 0, h: 0, ms: 3000 } }
+const GROUP_VOICE = { kind: 'group', diary: T, item: { core: W, start: 0, blocks: 1, sha256: 'aa'.repeat(32), key: 'k', nonce: 'n', plainMime: 'audio/mp4', ms: 3000 } }
+const neverEncode = async () => { throw new Error('a voice note is never re-encoded') }
+
+test('anexoRef picks a voice note like an image', async (t) => {
+  const { anexoRef, isAudioItem } = await load()
+  t.alike(anexoRef({ dm: true, id: ID, author: T, text: '', media: [DM_VOICE.item] }), DM_VOICE)
+  t.alike(anexoRef({ author: T, seq: 3, text: '', group: G, writer: W, private: true, media: [GROUP_VOICE.item] }), GROUP_VOICE)
+  t.ok(isAudioItem(DM_VOICE.item))
+  t.ok(isAudioItem(GROUP_VOICE.item))
+  t.absent(isAudioItem({ mime: 'image/jpeg' }))
+  t.absent(isAudioItem({ plainMime: 'image/jpeg', mime: 'audio/mp4' }), 'plainMime decides for a sealed item')
+})
+
+test('prepareAnexo: a voice note is read as it is, bounded and hashed', async (t) => {
+  const { prepareAnexo } = await load()
+  const calls = stub(t, json(500, {}))
+  for (const ref of [DM_VOICE, GROUP_VOICE]) {
+    const read = []
+    const out = await prepareAnexo(ref, {
+      source: async () => ({ uri: 'blob:local/v', mime: 'audio/mp4', w: 0, h: 0, ms: 3000 }),
+      encode: neverEncode,
+      readBytes: async (uri) => { read.push(uri); return M4A }
+    })
+    t.alike(read, ['blob:local/v'])
+    t.is(out.status, 'ok')
+    t.is(out.kind, 'audio')
+    t.is(out.mime, 'audio/mp4')
+    t.is(out.ms, 3000)
+    t.is(out.uri, 'blob:local/v')
+    t.alike(out.bytes, M4A, 'the exact bytes, not re-encoded')
+    t.is(out.digest, sha256Hex(M4A))
+  }
+  t.is(calls.length, 0, 'nothing fetched')
+})
+
+test('prepareAnexo: a voice note over the cap, unreadable, not audio only, or remote', async (t) => {
+  const { prepareAnexo, ANEXO_AUDIO_TOO_BIG, ANEXO_MAX_BYTES } = await load()
+  const calls = stub(t, json(500, {}))
+  const local = async () => ({ uri: 'file:///cache/v.m4a', mime: 'audio/mp4', w: 0, h: 0 })
+  t.is(ANEXO_AUDIO_TOO_BIG, 'O áudio não coube e não foi enviado.')
+
+  let bounded = 0
+  const big = await prepareAnexo(DM_VOICE, { source: local, encode: neverEncode, max: M4A.byteLength - 1, readBytes: async () => M4A, audioBounds: () => { bounded++; return { ms: 1 } } })
+  t.alike(big, { status: 'over', kind: 'audio', uri: 'file:///cache/v.m4a' })
+  t.is(bounded, 0, 'a file over the cap is never walked')
+  const huge = new Uint8Array(ANEXO_MAX_BYTES + 1)
+  huge.set(M4A)
+  t.is((await prepareAnexo(DM_VOICE, { source: local, encode: neverEncode, readBytes: async () => huge })).status, 'over', 'the default cap is 700 KB')
+
+  const video = await prepareAnexo(DM_VOICE, { source: local, encode: neverEncode, readBytes: async () => m4a({ handler: 'vide' }) })
+  t.alike(video, { status: 'unavailable', kind: 'audio' }, 'a video track is refused')
+  t.is((await prepareAnexo(DM_VOICE, { source: local, encode: neverEncode, readBytes: async () => m4a({ ms: 120001 }) })).status, 'unavailable', 'too long')
+  t.is((await prepareAnexo(DM_VOICE, { source: local, encode: neverEncode, readBytes: async () => { throw new Error('gone') } })).status, 'unavailable')
+  t.is((await prepareAnexo(DM_VOICE, { source: local, encode: neverEncode, readBytes: async () => new Uint8Array(0) })).status, 'unavailable')
+  t.is((await prepareAnexo(DM_VOICE, { source: local, encode: neverEncode })).status, 'unavailable', 'no reader')
+  t.is((await prepareAnexo(DM_VOICE, { source: async () => ({ unavailable: true }), encode: neverEncode, readBytes: async () => M4A })).status, 'unavailable')
+  t.is((await prepareAnexo(DM_VOICE, { source: async () => ({ uri: 'blob:x', mime: 'image/jpeg', w: 4, h: 4 }), encode: neverEncode, readBytes: async () => M4A })).status, 'unavailable', 'the source must agree it is audio')
+
+  let readCount = 0
+  const remote = await prepareAnexo(DM_VOICE, {
+    source: async () => ({ uri: 'https://cdn.example.com/v.m4a', mime: 'audio/mp4', w: 0, h: 0 }),
+    encode: neverEncode,
+    readBytes: async () => { readCount++; return M4A }
+  })
+  t.alike(remote, { status: 'unavailable', kind: 'audio' }, 'a third-party URL is never used')
+  t.is(readCount, 0)
+  t.is(calls.length, 0, 'nothing fetched')
+})
+
+test('dm report with a voice note: dm v2 verifies over the received bytes', async (t) => {
+  const { prepareAnexo, submitDmReport } = await load()
+  const prepared = await prepareAnexo(DM_VOICE, { source: async () => ({ uri: 'blob:local/v', mime: 'audio/mp4' }), encode: neverEncode, readBytes: async () => M4A })
+  const calls = flowStub(t)
+  const kp = require('hypercore-crypto').keyPair()
+  const member = kp.publicKey.toString('hex')
+  let params = null
+  await submitDmReport({
+    member,
+    target: T,
+    reason: 'assedio',
+    text: '',
+    quote: '',
+    anexo: { bytes: prepared.bytes, digest: prepared.digest },
+    sign: async (p) => {
+      params = p
+      return { signature: core.signDmReport({ ...p, member, association: M }, kp) }
+    },
+    isStale: () => false
+  })
+  t.alike(params, { nonce: NONCE, target: T, reason: 'assedio', text: '', quote: '', anexo: sha256Hex(M4A) })
+  t.ok(calls[1].url.endsWith('/account/report/anexo'))
+  const body = JSON.parse(calls[1].init.body)
+  const received = Buffer.from(body.anexo, 'base64')
+  t.alike(new Uint8Array(received), M4A, 'the exact audio bytes travel')
+  const fields = { nonce: body.nonce, member, association: M, target: body.target, reason: body.reason, text: body.text, quote: body.quote, anexo: sha256Hex(received) }
+  t.ok(core.verifyDmReport(fields, body.signature).ok)
+})
+
+test('private group report with a voice note: report v3 verifies over the received bytes', async (t) => {
+  const { prepareAnexo, submitReport } = await load()
+  const prepared = await prepareAnexo(GROUP_VOICE, { source: async () => ({ uri: 'file:///cache/v.m4a', mime: 'audio/mp4' }), encode: neverEncode, readBytes: async () => M4A })
+  const calls = flowStub(t)
+  const kp = require('hypercore-crypto').keyPair()
+  const member = kp.publicKey.toString('hex')
+  let params = null
+  await submitReport({
+    member,
+    target: T,
+    seq: 9,
+    writer: W,
+    group: G,
+    reason: 'ilegal',
+    text: 'nota',
+    quote: '',
+    anexo: { bytes: prepared.bytes, digest: prepared.digest },
+    sign: async (p) => {
+      params = p
+      return { signature: core.signReport({ ...p, member, association: M }, kp) }
+    },
+    isStale: () => false
+  })
+  t.is(params.anexo, sha256Hex(M4A))
+  t.ok(calls[1].url.endsWith('/account/report/anexo'))
+  const body = JSON.parse(calls[1].init.body)
+  const received = Buffer.from(body.anexo, 'base64')
+  t.alike(new Uint8Array(received), M4A)
+  const fields = { nonce: body.nonce, member, association: M, target: body.target, seq: body.seq, writer: body.writer, group: body.group, reason: body.reason, text: body.text, quote: body.quote, anexo: sha256Hex(received) }
+  t.ok(core.verifyReport(fields, body.signature).ok)
+})
+
+test('Denunciar plays a voice note and says it goes open to moderation', async (t) => {
+  const { ANEXO_AUDIO_NOTICE } = await load()
+  t.is(ANEXO_AUDIO_NOTICE, 'O áudio vai para a moderação, aberto.')
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/screens/Denunciar.js'), 'utf8')
+  t.ok(/<VoiceBubble state='ok' uri=\{anexo\.uri\}/.test(src), 'plays the local copy that is sent')
+  t.ok(/anexo\.status === 'ok' && anexo\.kind === 'audio'/.test(src), 'only once prepared, so a background drop unmounts the player')
+  t.ok(/readBytes: readReportAudio/.test(src), 'reads through the platform reader')
+})

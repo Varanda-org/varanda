@@ -155,15 +155,47 @@ test('rpIdFor: the exact host, never an IP', async (t) => {
 
 test('supportStatus', async (t) => {
   const PKC = function () {}
-  t.alike(await supportStatus({}), { webauthn: false, prf: 'unknown' }, 'no WebAuthn')
-  t.alike(await supportStatus({ PublicKeyCredential: PKC, isSecureContext: false }), { webauthn: false, prf: 'unknown' }, 'insecure context')
-  t.alike(await supportStatus({ PublicKeyCredential: PKC, isSecureContext: true }), { webauthn: true, prf: 'unknown' }, 'no getClientCapabilities')
+  const unknown = { hybrid: 'unknown', platform: 'unknown' }
+  t.alike(await supportStatus({}), { webauthn: false, prf: 'unknown', ...unknown, signal: 'unknown' }, 'no WebAuthn')
+  t.alike(await supportStatus({ PublicKeyCredential: PKC, isSecureContext: false }), { webauthn: false, prf: 'unknown', ...unknown, signal: 'unknown' }, 'insecure context')
+  t.alike(await supportStatus({ PublicKeyCredential: PKC, isSecureContext: true }), { webauthn: true, prf: 'unknown', ...unknown, signal: 'no' }, 'no getClientCapabilities')
   const withCaps = (caps) => Object.assign(function () {}, { getClientCapabilities: async () => caps })
-  t.alike(await supportStatus({ PublicKeyCredential: withCaps({ 'extension:prf': true }), isSecureContext: true }), { webauthn: true, prf: 'yes' })
-  t.alike(await supportStatus({ PublicKeyCredential: withCaps({ 'extension:prf': false }), isSecureContext: true }), { webauthn: true, prf: 'no' })
-  t.alike(await supportStatus({ PublicKeyCredential: withCaps({}), isSecureContext: true }), { webauthn: true, prf: 'unknown' })
+  t.alike(await supportStatus({ PublicKeyCredential: withCaps({ 'extension:prf': true }), isSecureContext: true }), { webauthn: true, prf: 'yes', ...unknown, signal: 'no' })
+  t.alike(await supportStatus({ PublicKeyCredential: withCaps({ 'extension:prf': false }), isSecureContext: true }), { webauthn: true, prf: 'no', ...unknown, signal: 'no' })
+  t.alike(await supportStatus({ PublicKeyCredential: withCaps({}), isSecureContext: true }), { webauthn: true, prf: 'unknown', ...unknown, signal: 'no' })
   const throwing = Object.assign(function () {}, { getClientCapabilities: async () => { throw new Error('x') } })
-  t.alike(await supportStatus({ PublicKeyCredential: throwing, isSecureContext: true }), { webauthn: true, prf: 'unknown' })
+  t.alike(await supportStatus({ PublicKeyCredential: throwing, isSecureContext: true }), { webauthn: true, prf: 'unknown', ...unknown, signal: 'no' })
+
+  const full = withCaps({ 'extension:prf': true, hybridTransport: true, userVerifyingPlatformAuthenticator: false, passkeyPlatformAuthenticator: true })
+  full.signalUnknownCredential = async () => {}
+  t.alike(await supportStatus({ PublicKeyCredential: full, isSecureContext: true }), { webauthn: true, prf: 'yes', hybrid: 'yes', platform: 'no', signal: 'yes' }, 'uvpa wins over passkeyPlatformAuthenticator')
+  const fallback = withCaps({ hybridTransport: false, passkeyPlatformAuthenticator: true })
+  t.alike(await supportStatus({ PublicKeyCredential: fallback, isSecureContext: true }), { webauthn: true, prf: 'unknown', hybrid: 'no', platform: 'yes', signal: 'no' }, 'platform falls back to passkeyPlatformAuthenticator')
+  const signalOnly = Object.assign(function () {}, { signalUnknownCredential: async () => {} })
+  t.is((await supportStatus({ PublicKeyCredential: signalOnly, isSecureContext: true })).signal, 'yes')
+  // The function alone is not enough: an insecure context cannot call it.
+  t.is((await supportStatus({ PublicKeyCredential: signalOnly, isSecureContext: false })).signal, 'unknown', 'insecure context: signal unknown even with the function')
+  const signalRefused = withCaps({ signalUnknownCredential: false })
+  signalRefused.signalUnknownCredential = async () => {}
+  t.is((await supportStatus({ PublicKeyCredential: signalRefused, isSecureContext: true })).signal, 'no', 'capabilities say no: signal no even with the function')
+  const signalUnsaid = withCaps({ 'extension:prf': true })
+  signalUnsaid.signalUnknownCredential = async () => {}
+  t.is((await supportStatus({ PublicKeyCredential: signalUnsaid, isSecureContext: true })).signal, 'yes', 'capabilities omit it, the function exists: signal yes')
+})
+
+test('forgetCredential: true only when the signal resolves, never rejects', async (t) => {
+  const { forgetCredential } = passkey
+  const seen = []
+  const PKC = Object.assign(function () {}, { signalUnknownCredential: async (arg) => { seen.push(arg) } })
+  t.is(await forgetCredential({ PublicKeyCredential: PKC }, { rpId: RP_ID, credentialId: 'AQID' }), true)
+  t.alike(seen, [{ rpId: RP_ID, credentialId: 'AQID' }])
+  t.is(await forgetCredential({ PublicKeyCredential: function () {} }, { rpId: RP_ID, credentialId: 'AQID' }), false, 'missing API')
+  t.is(await forgetCredential({}, { rpId: RP_ID, credentialId: 'AQID' }), false, 'no WebAuthn')
+  t.is(await forgetCredential(null), false, 'no globals')
+  const rejecting = Object.assign(function () {}, { signalUnknownCredential: async () => { throw new Error('x') } })
+  t.is(await forgetCredential({ PublicKeyCredential: rejecting }, { rpId: RP_ID, credentialId: 'AQID' }), false, 'rejecting')
+  const throwing = Object.assign(function () {}, { signalUnknownCredential: () => { throw new Error('x') } })
+  t.is(await forgetCredential({ PublicKeyCredential: throwing }, { rpId: RP_ID, credentialId: 'AQID' }), false, 'synchronous throw')
 })
 
 test('base64url helpers', (t) => {
@@ -218,6 +250,103 @@ test('createOptions and getOptions', (t) => {
   const thrown = (fn) => { try { fn() } catch (err) { return err.message } return null }
   t.is(thrown(() => createOptions({ rpId: RP_ID, userId: new Uint8Array(16) })), 'identificador de usuário inválido')
   t.is(thrown(() => createOptions({ userId })), 'rp.id inválido')
+})
+
+test('hints: create defaults to client-device + hybrid, get has none unless given', (t) => {
+  const userId = new Uint8Array(32).fill(0xab)
+  const c = createOptions({ rpId: RP_ID, userId })
+  t.alike(c.hints, ['client-device', 'hybrid'])
+  t.alike(c.authenticatorSelection, { residentKey: 'required', requireResidentKey: true, userVerification: 'required' }, 'no authenticatorAttachment')
+  t.is(c.attestation, 'none')
+  t.alike(createOptions({ rpId: RP_ID, userId, hints: ['hybrid'] }).hints, ['hybrid'])
+  t.absent('hints' in getOptions({ rpId: RP_ID }), 'no hints on get by default')
+  t.alike(getOptions({ rpId: RP_ID, hints: ['hybrid'] }).hints, ['hybrid'])
+  const thrown = (fn) => { try { fn() } catch (err) { return err.message } return null }
+  t.is(thrown(() => createOptions({ rpId: RP_ID, userId, hints: ['security-key'] })), 'hints inválidos')
+  t.is(thrown(() => createOptions({ rpId: RP_ID, userId, hints: 'hybrid' })), 'hints inválidos')
+  t.is(thrown(() => getOptions({ rpId: RP_ID, hints: ['client-device', 'security-key'] })), 'hints inválidos')
+})
+
+// rpIdHash (32) + flags (1) + signCount (4).
+function authDataWith (flags) {
+  const out = new Uint8Array(37)
+  out[32] = flags
+  return out
+}
+
+// A minimal CBOR {fmt: 'none', attStmt: {}, authData} (keys and values are
+// short, so every head is one byte except authData's 0x58 len).
+function noneAttestation (data) {
+  const text = (s) => [0x60 + s.length, ...Buffer.from(s, 'utf8')]
+  return new Uint8Array([0xa3, ...text('fmt'), ...text('none'), ...text('attStmt'), 0xa0, ...text('authData'), 0x58, data.length, ...data])
+}
+
+test('register: BE clear -> NOT_SYNCED with the ids, no prf; BE set -> normal', async (t) => {
+  const userId = new Uint8Array(32).fill(0x22)
+  const first = new Uint8Array(32).fill(9)
+  const bound = fakeCredential({ prf: { enabled: true, results: { first } } })
+  bound.response.getAuthenticatorData = () => authDataWith(0x45).buffer
+  const box = fakeContainer({ create: bound })
+  let err = null
+  try {
+    await box.run((c) => register(c, { rpId: RP_ID, userId }))
+  } catch (e) {
+    err = e
+  }
+  t.is(err.code, 'NOT_SYNCED')
+  t.is(err.message, passkey.MESSAGES.NOT_SYNCED)
+  t.is(err.credentialId, toBase64Url(new Uint8Array([1, 2, 3, 4])))
+  t.is(err.userId, '22'.repeat(32))
+  t.absent(err.prf, 'no prf on the error')
+  t.ok(first.every((x) => x === 0), 'the browser PRF output is wiped')
+  t.alike(box.calls.create[0].options.publicKey.hints, ['client-device', 'hybrid'])
+
+  const synced = fakeCredential({ prf: { enabled: true, results: { first: new Uint8Array(32).fill(7) } } })
+  synced.response.getAuthenticatorData = () => authDataWith(0x1d).buffer
+  const ok = await fakeContainer({ create: synced }).run((c) => register(c, { rpId: RP_ID, userId }))
+  t.is(hex(ok.prf), '07'.repeat(32))
+
+  const pendingCred = fakeCredential({ prf: { enabled: true } })
+  pendingCred.response.getAuthenticatorData = () => authDataWith(0x0d)
+  const pending = await fakeContainer({ create: pendingCred }).run((c) => register(c, { rpId: RP_ID, userId }))
+  t.is(pending.pending, true, 'pending still works when synced')
+
+  const viaObject = fakeCredential({ prf: { enabled: true, results: { first: new Uint8Array(32).fill(5) } } })
+  viaObject.response.attestationObject = noneAttestation(authDataWith(0x05)).buffer
+  t.is(await codeOf(fakeContainer({ create: viaObject }).run((c) => register(c, { rpId: RP_ID, userId }))), 'NOT_SYNCED', 'attestationObject with BE clear')
+
+  const objectSynced = fakeCredential({ prf: { enabled: true, results: { first: new Uint8Array(32).fill(5) } } })
+  objectSynced.response.attestationObject = noneAttestation(authDataWith(0x0d)).buffer
+  t.ok((await fakeContainer({ create: objectSynced }).run((c) => register(c, { rpId: RP_ID, userId }))).prf, 'attestationObject with BE set')
+
+  const throwingGetter = fakeCredential({ prf: { enabled: true, results: { first: new Uint8Array(32).fill(5) } } })
+  throwingGetter.response.getAuthenticatorData = () => { throw new Error('x') }
+  t.ok((await fakeContainer({ create: throwingGetter }).run((c) => register(c, { rpId: RP_ID, userId }))).prf, 'a throwing getter is unknown, accepted')
+
+  const throwingObject = fakeCredential({ prf: { enabled: true, results: { first: new Uint8Array(32).fill(5) } } })
+  Object.defineProperty(throwingObject.response, 'attestationObject', { get () { throw new Error('detached') } })
+  t.ok((await fakeContainer({ create: throwingObject }).run((c) => register(c, { rpId: RP_ID, userId }))).prf, 'a throwing attestationObject getter without getAuthenticatorData is unknown, accepted')
+
+  const narrowed = fakeContainer({ create: fakeCredential({ prf: { enabled: true, results: { first: new Uint8Array(32).fill(1) } } }) })
+  await narrowed.run((c) => register(c, { rpId: RP_ID, userId, hints: ['hybrid'] }))
+  t.alike(narrowed.calls.create[0].options.publicKey.hints, ['hybrid'], 'hints forwarded')
+})
+
+test('signIn never reads the flags; hints forwarded', async (t) => {
+  const cred = fakeCredential({ prf: { results: { first: new Uint8Array(32).fill(3) } } })
+  cred.response.getAuthenticatorData = () => authDataWith(0x05).buffer
+  const box = fakeContainer({ get: cred })
+  const out = await box.run((c) => signIn(c, { rpId: RP_ID, hints: ['hybrid'] }))
+  t.is(hex(out.prf), '03'.repeat(32), 'BE clear still signs in')
+  t.alike(box.calls.get[0].options.publicKey.hints, ['hybrid'])
+
+  const plain = fakeContainer({ get: fakeCredential({ prf: { results: { first: new Uint8Array(32).fill(3) } } }) })
+  await plain.run((c) => signIn(c, { rpId: RP_ID }))
+  t.absent('hints' in plain.calls.get[0].options.publicKey, 'no hints unless given')
+
+  const done = fakeContainer({ get: fakeCredential({ prf: { results: { first: new Uint8Array(32).fill(3) } } }) })
+  await done.run((c) => completeRegistration(c, { rpId: RP_ID, credentialId: 'AQID', hints: ['client-device'] }))
+  t.alike(done.calls.get[0].options.publicKey.hints, ['client-device'])
 })
 
 test('register: PRF output on create', async (t) => {

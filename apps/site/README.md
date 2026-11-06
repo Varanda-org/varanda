@@ -4,7 +4,7 @@ O site estático do Varanda (varanda.app). Pacote privado do monorepo, sem JavaS
 
 - `public/`: a raiz publicável. Só esta pasta vai para a GitHub Pages.
 - `artwork/`: as fontes do logotipo, `og.html` (a imagem de compartilhamento), `app-design.md` (o desenho novo do app; a página não o mostra mais) e `screens.md` (a receita para capturar o app de verdade quando ele tiver esse desenho). Nunca são publicadas.
-- `scripts/`: `serve.js` (servidor local) e `render-assets.js` (gera ícones, abertura e favicons a partir do logotipo).
+- `scripts/`: `serve.js` (servidor local), `render-assets.js` (gera ícones, abertura e favicons a partir do logotipo) e `render-legal.js` (gera as páginas de termos e privacidade a partir do texto do app).
 
 ```sh
 npm run dev -w apps/site
@@ -21,6 +21,17 @@ A página é a porta de entrada de quem chega do Instagram pelo celular. O títu
 Os dois botões, "Conheça a Varanda" (abertura, `cta-inicio`) e "Quero conhecer a Varanda" (seção `#gente`, `cta-gente`), abrem exatamente https://bora.varanda.app/ na mesma aba. Junto de cada um há a frase "Vagas limitadas nesta abertura.": se a rede estiver cheia, o app avisa durante a entrada e dá para tentar de novo em alguns dias. A frase não promete lista de espera nem aviso posterior, e a página não consulta o teto de contas da instalação. A abertura também traz a nota "Abriu pelo Instagram? Se a entrada não funcionar, abra o link no Chrome ou no Safari.".
 
 O conteúdo técnico, inclusive o que conferir e como publicar, está em [docs/site.md](../../docs/site.md). O desenho do app segue em [artwork/app-design.md](artwork/app-design.md), e a receita para capturar o app de verdade está em [artwork/screens.md](artwork/screens.md). A página não mostra mais telas do app em HTML e CSS.
+
+## Termos e privacidade
+
+`public/termos/index.html` (https://varanda.app/termos/) e `public/privacidade/index.html` (https://varanda.app/privacidade/) publicam os Termos de Uso e a Política de Privacidade que o app apresenta para aceite, com a versão, a data e a nota de revisão jurídica. A segunda serve de endereço da política de privacidade nas lojas de aplicativos. O texto vem só de `apps/app/src/legal.js`: as duas páginas são geradas e nunca se editam à mão.
+
+```sh
+node apps/site/scripts/render-legal.js          # regenera as duas páginas
+node apps/site/scripts/render-legal.js --check  # verifica sem gravar
+```
+
+Mudou `legal.js` (a cada nova versão dos Termos), rode o script no mesmo PR: `test/legal.test.js` falha enquanto as páginas não batem com o texto do app. O aceite continua no app; a página só mostra o texto. A seção `#privacidade` da página inicial trata só da visita ao site.
 
 ## Imagem de compartilhamento
 
