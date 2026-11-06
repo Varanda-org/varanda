@@ -12,6 +12,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createIssuerCert } = require('@varanda/core/lib/cert')
 const { openInvitesStore } = require('../lib/account/invites-store')
+const { openInviteDrops } = require('../lib/account/invite-drops')
 const { readEnv, loseLock } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
 const { tmpDir } = require('./helpers/net')
@@ -54,6 +55,49 @@ test('readEnv: VARANDA_INVITES_PER_WEEK from 1 to 100, unset or blank is open si
       t.is(err.message, 'VARANDA_INVITES_PER_WEEK inválido', value + ': the value is not in the message')
     }
   }
+})
+
+test('readEnv: VARANDA_INVITE_DROPS is off unless 1, and needs VARANDA_INVITES_PER_WEEK', (t) => {
+  const on = { ...ENV, VARANDA_INVITES_PER_WEEK: '2' }
+  t.absent('inviteDrops' in readEnv(on).limits, 'unset: off')
+  t.absent('inviteDrops' in readEnv({ ...on, VARANDA_INVITE_DROPS: '' }).limits, 'empty: off')
+  t.is(readEnv({ ...on, VARANDA_INVITE_DROPS: '1' }).limits.inviteDrops, 1, '1: on')
+
+  for (const value of ['2', '0', 'sim', '01']) {
+    try {
+      readEnv({ ...on, VARANDA_INVITE_DROPS: value })
+      t.fail(value + ': accepted')
+    } catch (err) {
+      t.ok(err instanceof UsageError, value + ': usage error')
+      t.is(err.message, 'VARANDA_INVITE_DROPS inválido', value + ': the value is not in the message')
+    }
+  }
+
+  for (const perWeek of [undefined, '']) {
+    const env = { ...ENV, VARANDA_INVITE_DROPS: '1' }
+    if (perWeek !== undefined) env.VARANDA_INVITES_PER_WEEK = perWeek
+    try {
+      readEnv(env)
+      t.fail('on without VARANDA_INVITES_PER_WEEK accepted')
+    } catch (err) {
+      t.ok(err instanceof UsageError)
+      t.is(err.message, 'VARANDA_INVITE_DROPS exige VARANDA_INVITES_PER_WEEK')
+    }
+  }
+})
+
+test('loseLock: the invite drops fail and their loop stops, trailing arguments stay optional', async (t) => {
+  const calls = []
+  const drops = { fail: () => calls.push('drops') }
+  const loop = { stop: async () => { calls.push('loop') } }
+  loseLock({ fail: () => calls.push('store') }, (event) => calls.push(event.event), () => calls.push('stop'), null, { fail: () => calls.push('invites') }, null, null, null, null, null, [], drops, loop)
+  t.alike(calls, ['store', 'invites', 'drops', 'loop', 'lock', 'stop'])
+
+  const dir = tmpDir(t)
+  const real = openInviteDrops(dir, { perWeek: 2 })
+  t.ok(real.available())
+  loseLock(null, () => {}, () => {}, null, null, null, null, null, null, null, [], real)
+  t.absent(real.available(), 'a real drops sidecar is unavailable afterwards')
 })
 
 test('loseLock: the invites sidecar fails synchronously before the log and the stop', (t) => {

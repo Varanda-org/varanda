@@ -1812,6 +1812,24 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     return { members: linkCount(), maxMembers, byDay }
   }
 
+  // For the invite drop roster (apps/cli/lib/account/invite-drops.js): the
+  // link date only, the same date finish() puts in the member's public
+  // certificate, so it discloses nothing a peer cannot read in block 0.
+  // Pages are not links and answer null. In-memory state only, so a readOnly
+  // or failed store answers too.
+  function linkedAt (member) {
+    if (!isHex(member, 32)) return null
+    const key = member.toLowerCase()
+    if (!has(state.links, key)) return null
+    return state.links[key].linkedAt
+  }
+
+  // Keys and link dates only, sorted by key: never sub, e-mail or username
+  // (those stay on exportLinks, for the operator).
+  function linkRoster () {
+    return Object.keys(state.links).sort().map((member) => ({ member, linkedAt: state.links[member].linkedAt }))
+  }
+
   // For the moderation desk (apps/cli/lib/account/mod-routes.js and
   // `account reports`): the contact of a linked member, or null. Never part
   // of a public answer (status() and lookup() stay without e-mail and sub);
@@ -1876,7 +1894,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     })
   }
 
-  return { start, reserve, putGoogle, markAnswered, get, isFull, inviteUsed, dropPending, finish, rename, status, lookup, reservePage, renamePage, closePage, closeOrphanPages, movePage, pageStatus, exportLinks, linkStats, contact, memberForSub, close, fail: markFailed, restored: isRestored }
+  return { start, reserve, putGoogle, markAnswered, get, isFull, inviteUsed, dropPending, finish, rename, status, lookup, reservePage, renamePage, closePage, closeOrphanPages, movePage, pageStatus, exportLinks, linkStats, linkedAt, linkRoster, contact, memberForSub, close, fail: markFailed, restored: isRestored }
 }
 
 module.exports = {

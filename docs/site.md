@@ -2,7 +2,7 @@
 
 ## O que é
 
-Uma página estática em `apps/site/public`, publicada na GitHub Pages em https://varanda.app/ (e, antes do domínio, em https://varanda-org.github.io/varanda/). Não há JavaScript, formulários, cookies nem rastreadores na página. A própria GitHub Pages registra o endereço IP de cada visitante por segurança (documentação da GitHub, "What is GitHub Pages?", seção "Data collection").
+Uma página estática em `apps/site/public`, publicada na GitHub Pages em https://varanda.app/ (e, antes do domínio, em https://varanda-org.github.io/varanda/). Não há JavaScript, formulários, cookies nem rastreadores na página. A página convida para https://bora.varanda.app/ pelos dois botões principais, avisa que as vagas desta abertura são limitadas e não sabe se o teto de contas já fechou; não há lista de espera neste site. A própria GitHub Pages registra o endereço IP de cada visitante por segurança (documentação da GitHub, "What is GitHub Pages?", seção "Data collection").
 
 `apps/site/public` é a raiz publicável. `apps/site/artwork` (fontes do logotipo, `og.html`, `screens.md`) e `apps/site/scripts` (`serve.js`, `render-assets.js`) são fontes e nunca são enviados.
 
@@ -24,14 +24,23 @@ O que conferir:
 - Reduzir movimento: em macOS Ajustes > Acessibilidade > Tela, ligue "Reduzir movimento" e recarregue; a animação deve parar.
 - Foco com Tab: todo link e botão mostra o foco, na ordem da página.
 - O botão "pausar o movimento" pausa e retoma a animação.
+- Os botões "Conheça a Varanda" e "Quero conhecer a Varanda" abrem https://bora.varanda.app/ sem parâmetros, na mesma aba.
+- A frase "Vagas limitadas nesta abertura." aparece junto dos dois botões.
+- As perguntas frequentes abrem e fecham sem JavaScript (`details` e `summary`).
+- No celular o menu do header não aparece e o rodapé tem os links.
+- A nota "Abriu pelo Instagram? Se a entrada não funcionar, abra o link no Chrome ou no Safari." aparece na abertura.
 
 ## Como atualizar
 
 Edite os arquivos em `apps/site/public` e abra um pull request. A publicação roda sozinha quando o pull request entra em `main`: o fluxo `.github/workflows/site.yml` roda no push para `main` e no disparo manual (os dois restritos a `main`), envia só `apps/site/public` com `actions/upload-pages-artifact` v5.0.0 e publica com `actions/deploy-pages` v5.0.1 (ambos fixados por SHA). Não há arquivo `CNAME`: o domínio próprio fica nas configurações de Pages do repositório.
 
+## Vagas e lotação
+
+A página estática não sabe se a rede está cheia, e não consulta o teto da instalação. O teto é `VARANDA_MAX_MEMBERS` do serviço de conta (exemplo em `deploy/seeder/.env.example`; valor de 1 a 4096; ausente, sem teto), e conta membros vinculados, não visitas. Quando ele é batido, uma pessoa nova é recusada durante a entrada (na confirmação de idade ou no vínculo da conta) com "A Varanda está cheia por enquanto"; a tentativa não vira conta nem fila, ninguém é avisado depois, e quem já entrou continua. `GET /account/invites/policy` com `required: false` só diz que convite não é exigido, não que há vaga: convite e capacidade são coisas diferentes. Reabrir vagas é passo do operador, não mudança no site: edite o `.env` e rode `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml up -d --force-recreate account` (um restart simples não relê o `.env`); a linha `ready` do log do serviço account mostra o `maxMembers` ativo. O texto da página só pode falar em lista de espera se ela passar a existir.
+
 ## Capturas e logotipo
 
-- Telas do app: a página mostra uma prévia do desenho novo do app, em HTML e CSS dentro do telefone, com conteúdo fictício (não são capturas). O desenho está em [apps/site/artwork/app-design.md](../apps/site/artwork/app-design.md). A receita para capturar o app de verdade, quando ele tiver esse desenho, está em [apps/site/artwork/screens.md](../apps/site/artwork/screens.md).
+- Telas do app: a página não mostra mais a prévia do app em HTML e CSS. O desenho continua em [apps/site/artwork/app-design.md](../apps/site/artwork/app-design.md), e a receita para capturar o app de verdade está em [apps/site/artwork/screens.md](../apps/site/artwork/screens.md).
 - Logotipo, ícones, abertura e favicons: gerados das SVGs em `apps/site/artwork/logo`.
 
 ```sh

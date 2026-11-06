@@ -118,10 +118,61 @@ test('splash gate: boot cover only while the deciding read has not answered', as
   t.is(coverBoot({ step: 'carregando', profileSlow: false }), true)
   t.is(coverBoot({ step: 'carregando', profileSlow: undefined }), true)
   t.is(coverBoot({ step: 'carregando', profileSlow: true }), false)
-  for (const step of ['perfil', 'pronto', undefined, 'x']) {
+  for (const step of ['perfil', undefined, 'x']) {
     t.is(coverBoot({ step, passkeyKnown: false, age: 'loading', infoKnown: false }), false, String(step))
   }
   t.is(coverBoot(), false)
+})
+
+test('splash gate: pronto stays covered until A Rua is ready, at most CONTENT_PATIENCE_MS', async (t) => {
+  const { coverBoot, holdBootCover, bootPatienceMs, CONTENT_PATIENCE_MS } = await load()
+  t.is(CONTENT_PATIENCE_MS, 5000)
+  t.is(bootPatienceMs('pronto'), CONTENT_PATIENCE_MS)
+  t.is(coverBoot({ step: 'pronto' }), true, 'not ready yet')
+  t.is(coverBoot({ step: 'pronto', feedReady: false }), true)
+  t.is(coverBoot({ step: 'pronto', feedReady: 1 }), true, 'only literal true')
+  t.is(coverBoot({ step: 'pronto', feedReady: true }), false)
+  t.is(holdBootCover({ cover: true, step: 'pronto', elapsedMs: 4999 }), true)
+  t.is(holdBootCover({ cover: true, step: 'pronto', elapsedMs: 5000 }), false, 'revealed at the cap')
+  t.is(holdBootCover({ cover: true, step: 'pronto', elapsedMs: 0, settled: true }), false, 'never after the first reveal')
+})
+
+test('splash gate: first rows are ready once their names and counts answered', async (t) => {
+  const { feedDetailsReady, FEED_FIRST_ROWS } = await load()
+  t.is(FEED_FIRST_ROWS, 6)
+  const known = new Map([['a', { name: 'A' }], ['b', null]])
+  const profileOf = (k) => known.get(k)
+  const counted = new Set(['a:1'])
+  const hasCount = (r) => counted.has(r)
+  t.is(feedDetailsReady({ authors: ['a', 'b'], shown: ['a:1', 'b:2'], profileOf, hasCount }), true, 'null is a finished lookup')
+  t.is(feedDetailsReady({ authors: ['a', 'c'], shown: ['a:1'], profileOf, hasCount }), false, 'c not looked up yet')
+  t.is(feedDetailsReady({ authors: ['a'], shown: ['x:9'], profileOf, hasCount }), false, 'no count yet')
+  t.is(feedDetailsReady({ authors: ['a'], shown: ['x:9'], profileOf, hasCount, countsSkipped: true }), true, 'counts not read here')
+  t.is(feedDetailsReady({ authors: [], shown: [], profileOf, hasCount }), true, 'an empty feed is ready')
+  t.is(feedDetailsReady({ authors: ['a'], shown: [], profileOf }), true, 'no posts to count')
+  t.is(feedDetailsReady({ authors: ['a'], shown: ['a:1'], profileOf }), false, 'no hasCount')
+  const resolved = new Set(['o:1'])
+  const hasOriginal = (r) => resolved.has(r)
+  t.is(feedDetailsReady({ authors: ['a'], shown: ['a:1'], originals: ['o:1'], hasOriginal, profileOf, hasCount }), true, 'repost original answered')
+  t.is(feedDetailsReady({ authors: ['a'], shown: ['a:1'], originals: ['o:2'], hasOriginal, profileOf, hasCount }), false, 'repost original still loading')
+  t.is(feedDetailsReady({ authors: ['a'], shown: ['a:1'], originals: ['o:1'], profileOf, hasCount }), false, 'no hasOriginal')
+  t.is(feedDetailsReady({ authors: 'a', profileOf }), false)
+  t.is(feedDetailsReady({ authors: ['a'] }), false)
+  t.is(feedDetailsReady(), false)
+})
+
+test('splash gate: the bar follows real steps and only grows along them', async (t) => {
+  const { bootProgress } = await load()
+  const steps = [
+    bootProgress({ phase: 'connecting' }),
+    bootProgress({ phase: 'ready', step: 'carregando' }),
+    bootProgress({ phase: 'ready', step: 'pronto' }),
+    bootProgress({ phase: 'ready', step: 'pronto', page: true }),
+    bootProgress({ phase: 'ready', step: 'pronto', page: true, details: true })
+  ]
+  t.alike(steps, [0.1, 0.35, 0.6, 0.8, 1])
+  t.is(bootProgress(), 0.1)
+  t.is(bootProgress({ details: true }), 1)
 })
 
 test('splash gate: boot patience yields the real screen when a read hangs', async (t) => {

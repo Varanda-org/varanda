@@ -11,14 +11,19 @@ const test = require('brittle')
 const fs = require('node:fs')
 const http = require('node:http')
 const path = require('node:path')
+const nodeCrypto = require('node:crypto')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createIssuerCert } = require('@varanda/core/lib/cert')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { signInvite } = require('@varanda/core/lib/invite')
+const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { createGoogle } = require('../lib/account/google')
 const { openAccountStore } = require('../lib/account/store')
 const { openInvitesStore, inviteId, CODE_RE, FILE } = require('../lib/account/invites-store')
+const { openInviteDrops, KEY_FILE: DROPS_KEY_FILE } = require('../lib/account/invite-drops')
+const { openPushStore } = require('../lib/account/push-store')
+const { generateVapidKeys } = require('../lib/account/web-push')
 const { createAccountServer, COOKIE } = require('../lib/account/server')
 const { tmpDir } = require('./helpers/net')
 
@@ -106,15 +111,19 @@ async function linkDirect (s, m, username) {
 
 // `inviting: false` passes invites = null. `badSidecar` plants an invalid
 // invites.json before the sidecar opens. `wrap` may replace sidecar methods.
-async function setup (t, { inviting = true, badSidecar = false, storeOpts = {}, wrap = (x) => x } = {}) {
+// `frozen` fixes the clock before anything opens; `invitesOpts({ dir, c,
+// store })` adds options to the invites store (the drops' `opened`) and
+// `serverOpts` to the server.
+async function setup (t, { inviting = true, badSidecar = false, storeOpts = {}, wrap = (x) => x, frozen = null, invitesOpts = () => ({}), serverOpts = {} } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = clock()
+  c.frozen = frozen
   const iss = issuer()
   const fake = await fakeGoogle(t)
   const google = createGoogle({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: ORIGIN + '/account/callback', endpoints: fake.endpoints, fetch: fake.fetch })
   const store = openAccountStore(dir, { now: c.now, ...storeOpts })
   if (badSidecar) fs.writeFileSync(path.join(dir, FILE), '{"v":1,"invites":"nope"}\n', { mode: 0o600 })
-  const invites = inviting ? openInvitesStore(dir, { now: c.now, perWeek: 2, isUsed: (id) => store.inviteUsed(id) }) : null
+  const invites = inviting ? openInvitesStore(dir, { now: c.now, perWeek: 2, isUsed: (id) => store.inviteUsed(id), ...invitesOpts({ dir, c, store }) }) : null
   const logs = []
   const texts = []
   const server = createAccountServer({
@@ -125,7 +134,8 @@ async function setup (t, { inviting = true, badSidecar = false, storeOpts = {}, 
     issuer: { keyPair: iss.keyPair, cert: iss.cert },
     invites: invites === null ? null : wrap(invites),
     log: (e) => logs.push(JSON.stringify(e)),
-    now: c.now
+    now: c.now,
+    ...serverOpts
   })
   const listener = await server.listen({ host: '127.0.0.1', port: 0 })
   t.teardown(() => listener.close(), { force: true })
@@ -147,7 +157,7 @@ async function setup (t, { inviting = true, badSidecar = false, storeOpts = {}, 
     return { status: res.status, headers: res.headers, body: parsed, text }
   }
 
-  return { dir, c, iss, fake, store, invites, logs, texts, api }
+  return { dir, c, iss, fake, store, invites, server, logs, texts, api }
 }
 
 function cookieOf (res) {
@@ -676,7 +686,7 @@ test('status never reveals invite counts, healthy or corrupt sidecar', async (t)
     t.is(status.status, 200)
     t.is(status.body.linked, true)
     t.absent('invites' in status.body, badSidecar ? 'corrupt invites.json' : 'healthy invites.json')
-    t.absent(/remaining|perWeek|resetsAt/.test(status.text))
+    t.absent(/remaining|perWeek|resetsAt|opened|used|mode|minute|secret/.test(status.text))
   }
 })
 
@@ -747,4 +757,218 @@ test('without its cookie, or with another row\'s cookie, a proven row is never r
     t.ok(s.store.inviteUsed(inviteId(code)))
     noLeak(t, s, code)
   }
+})
+
+// The signed weekly allowance read: a nonce from invites/start, signed for
+// 'summary' (or `action`) by `signer`.
+async function summary (s, who, { action = 'summary', signer = who } = {}) {
+  const started = await s.api('POST', '/account/invites/start', { body: { member: who.hex } })
+  if (started.status !== 200) return started
+  const nonce = started.body.nonce
+  const signature = signInvite({ action, nonce, member: who.hex, association: s.iss.association }, signer.kp)
+  const res = await s.api('POST', '/account/invites/summary', { body: { member: who.hex, nonce, signature } })
+  res.nonce = nonce
+  res.signature = signature
+  return res
+}
+
+// Monday 00:00 in Brasília.
+const MONDAY = Date.parse('2026-11-09T03:00:00.000Z')
+const WEEK_MS = 7 * DAY_MS
+
+// The real drops sidecar behind the store's `opened`, as serve() wires it.
+function withDrops (holder) {
+  return ({ dir, c, store }) => {
+    holder.drops = openInviteDrops(dir, { perWeek: 2, now: c.now })
+    return { opened: (m, nowMs) => holder.drops.opened(m, store.linkedAt(m), nowMs) }
+  }
+}
+
+test('summary: semanal mode opens the whole week, follows issue, policy unchanged', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  await linkDirect(s, m, 'ana')
+  t.alike((await s.api('GET', '/account/invites/policy')).body, { required: true, perWeek: 2 }, 'policy body unchanged')
+
+  const first = await summary(s, m)
+  t.is(first.status, 200, first.text)
+  t.alike(Object.keys(first.body).sort(), ['mode', 'opened', 'perWeek', 'remaining', 'resetsAt', 'used'])
+  t.is(first.body.mode, 'semanal')
+  t.is(first.body.perWeek, 2)
+  t.is(first.body.opened, 2, 'opened === perWeek')
+  t.is(first.body.used, 0)
+  t.is(first.body.remaining, 2)
+  t.ok(typeof first.body.resetsAt === 'string')
+
+  t.is((await issue(s, m)).status, 200)
+  const after = await summary(s, m)
+  t.is(after.body.used, 1)
+  t.is(after.body.remaining, 1)
+})
+
+test('summary: nonce reuse, an issue signature, an unlinked member and open sign-up are refused', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  await linkDirect(s, m, 'ana')
+  const ok = await summary(s, m)
+  t.is(ok.status, 200)
+  const reused = await s.api('POST', '/account/invites/summary', { body: { member: m.hex, nonce: ok.nonce, signature: ok.signature } })
+  t.is(reused.status, 404)
+  t.alike(reused.body, { error: 'expirado' })
+
+  const wrong = await summary(s, m, { action: 'issue' })
+  t.is(wrong.status, 400)
+  t.alike(wrong.body, { error: 'assinatura-invalida' })
+  const spent = await s.api('POST', '/account/invites/summary', { body: { member: m.hex, nonce: wrong.nonce, signature: signInvite({ action: 'summary', nonce: wrong.nonce, member: m.hex, association: s.iss.association }, m.kp) } })
+  t.alike(spent.body, { error: 'expirado' }, 'the nonce was spent before the signature check')
+
+  const other = member()
+  const stranger = await summary(s, other, { signer: m })
+  t.is(stranger.status, 403)
+  t.alike(stranger.body, { error: 'nao-vinculado' })
+
+  const open = await setup(t, { inviting: false })
+  const none = await open.api('POST', '/account/invites/summary', { body: { member: m.hex, nonce: 'A'.repeat(43), signature: 'a'.repeat(128) } })
+  t.is(none.status, 404)
+})
+
+test('sorteio: issue waits for the drawn minute, then opens one code; Monday clears an unused grant', async (t) => {
+  const holder = {}
+  const s = await setup(t, { frozen: MONDAY, invitesOpts: withDrops(holder), serverOpts: { invitesMode: 'sorteio' } })
+  const m = member()
+  await linkDirect(s, m, 'ana')
+  t.alike((await s.api('GET', '/account/invites/policy')).body, { required: true, perWeek: 2 }, 'policy body unchanged')
+  // minutes() is in slot order, not chronological: sort a copy.
+  const mins = [...holder.drops.minutes(m.hex, s.store.linkedAt(m.hex), MONDAY)].sort((a, b) => a - b)
+  t.is(mins.length, 2)
+  t.ok(mins[0] > MONDAY && mins[1] > mins[0], 'two distinct minutes in the week')
+
+  s.c.frozen = mins[0] - 60000
+  const early = await issue(s, m)
+  t.is(early.status, 429)
+  t.alike(early.body, { error: 'convite-aguardando' })
+  t.absent(fs.existsSync(path.join(s.dir, FILE)) && JSON.parse(fs.readFileSync(path.join(s.dir, FILE), 'utf8')).invites.length > 0, 'nothing minted')
+  const waiting = await summary(s, m)
+  t.alike({ ...waiting.body, resetsAt: null }, { mode: 'sorteio', perWeek: 2, opened: 0, used: 0, remaining: 0, resetsAt: null })
+
+  s.c.frozen = mins[0]
+  const one = await issue(s, m)
+  t.is(one.status, 200, one.text)
+  t.ok(CODE_RE.test(one.body.code))
+  const again = await issue(s, m)
+  t.alike(again.body, { error: 'convite-aguardando' }, 'only one code before the second minute')
+  const used = await summary(s, m)
+  t.is(used.body.opened, 1)
+  t.is(used.body.used, 1)
+  t.is(used.body.remaining, 0, 'remaining 0 while perWeek is 2')
+
+  s.c.frozen = mins[1]
+  t.is((await summary(s, m)).body.remaining, 1, 'the second grant opened, unused')
+  s.c.frozen = MONDAY + WEEK_MS
+  const next = await summary(s, m)
+  t.alike({ ...next.body, resetsAt: null }, { mode: 'sorteio', perWeek: 2, opened: 0, used: 0, remaining: 0, resetsAt: null }, 'the unused grant does not carry over')
+
+  const secret = JSON.parse(fs.readFileSync(path.join(s.dir, DROPS_KEY_FILE), 'utf8')).secret
+  const logs = s.logs.join('\n')
+  t.absent(logs.includes(secret), 'no log line carries the secret')
+  t.absent(logs.includes(m.hex), 'no log line carries the member')
+  for (const ms of mins) {
+    t.absent(logs.includes(String(ms)) || logs.includes(new Date(ms).toISOString()), 'no log line carries a minute')
+  }
+})
+
+test('sorteio: a member whose opened is 0 all week cannot issue', async (t) => {
+  const s = await setup(t, { frozen: MONDAY, invitesOpts: () => ({ opened: () => 0 }), serverOpts: { invitesMode: 'sorteio' } })
+  const m = member()
+  await linkDirect(s, m, 'ana')
+  for (const at of [MONDAY, MONDAY + 3 * DAY_MS + 15 * 3600000, MONDAY + WEEK_MS - 60000]) {
+    s.c.frozen = at
+    const r = await issue(s, m)
+    t.is(r.status, 429)
+    t.alike(r.body, { error: 'convite-aguardando' })
+  }
+  const sum = await summary(s, m)
+  t.is(sum.body.opened, 0)
+  t.is(sum.body.remaining, 0)
+})
+
+test('sorteio: a bad drops key file makes issue and summary indisponivel and writes no invite', async (t) => {
+  const holder = {}
+  const open = withDrops(holder)
+  const s = await setup(t, {
+    frozen: MONDAY + DAY_MS,
+    invitesOpts: (ctx) => {
+      fs.writeFileSync(path.join(ctx.dir, DROPS_KEY_FILE), '{"v":1,"secret":"nope"}\n', { mode: 0o600 })
+      return open(ctx)
+    },
+    serverOpts: { invitesMode: 'sorteio' }
+  })
+  t.absent(holder.drops.available())
+  const m = member()
+  await linkDirect(s, m, 'ana')
+  const r = await issue(s, m)
+  t.is(r.status, 503)
+  t.alike(r.body, { error: 'indisponivel' })
+  const sum = await summary(s, m)
+  t.is(sum.status, 503)
+  t.alike(sum.body, { error: 'indisponivel' })
+  t.absent(fs.existsSync(path.join(s.dir, FILE)) && JSON.parse(fs.readFileSync(path.join(s.dir, FILE), 'utf8')).invites.length > 0, 'no invite row written')
+})
+
+test('notifyInvite: no push without the current terms; inviteRoom follows push', async (t) => {
+  const plain = await setup(t)
+  t.is(plain.server.notifyInvite({ member: member().hex, topic: 't'.repeat(32), deadline: Date.now() + 60000 }), 'none', 'push off')
+  t.is(plain.server.inviteRoom(), 0, 'push off: no room')
+
+  const dir = path.join(tmpDir(t), 'push')
+  fs.mkdirSync(dir, { recursive: true })
+  const pushStore = openPushStore(dir)
+  const sent = []
+  const accepted = member()
+  const pending = member()
+  const terms = {
+    available: () => true,
+    list: (m) => m === accepted.hex ? [{ version: TERMS_VERSION }] : [{ version: TERMS_VERSION - 1 }]
+  }
+  const s = await setup(t, {
+    serverOpts: {
+      terms,
+      push: { pushStore, vapid: { ...generateVapidKeys(), subject: ORIGIN }, send: async (args) => { sent.push(args); return 'ok' }, relayTokenHash: null }
+    }
+  })
+  t.ok(s.server.inviteRoom() > 0)
+  for (const who of [accepted, pending]) {
+    const ua = nodeCrypto.createECDH('prime256v1')
+    ua.generateKeys()
+    await pushStore.put({ member: who.hex, endpoint: 'https://fcm.googleapis.com/fcm/send/' + who.hex.slice(0, 16), p256dh: ua.getPublicKey().toString('base64url'), auth: nodeCrypto.randomBytes(16).toString('base64url') })
+  }
+  const deadline = Date.now() + 3600000
+  t.is(s.server.notifyInvite({ member: pending.hex, topic: 'a'.repeat(32), deadline }), 'none', 'older terms: nothing sent')
+  terms.available = () => false
+  t.is(s.server.notifyInvite({ member: accepted.hex, topic: 'a'.repeat(32), deadline }), 'none', 'terms unavailable: nothing sent')
+  terms.available = () => true
+  t.is(s.server.notifyInvite({ member: accepted.hex, topic: 'a'.repeat(32), deadline }), 'queued')
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  t.is(sent.length, 1, 'only the member with the current terms got a push')
+})
+
+test('inviteConsent: true only with the current terms in an available store', async (t) => {
+  const plain = await setup(t)
+  t.is(plain.server.inviteConsent(member().hex), false, 'no terms store')
+
+  const accepted = member()
+  const older = member()
+  const terms = {
+    available: () => true,
+    list: (m) => m === accepted.hex ? [{ version: TERMS_VERSION - 1 }, { version: TERMS_VERSION }] : m === older.hex ? [{ version: TERMS_VERSION - 1 }] : []
+  }
+  const s = await setup(t, { serverOpts: { terms } })
+  t.is(s.server.inviteConsent(accepted.hex), true)
+  t.is(s.server.inviteConsent(older.hex), false, 'an older version only')
+  t.is(s.server.inviteConsent(member().hex), false, 'never accepted')
+  terms.available = () => false
+  t.is(s.server.inviteConsent(accepted.hex), false, 'store unavailable')
+  terms.available = () => true
+  terms.list = () => { throw new Error('boom') }
+  t.is(s.server.inviteConsent(accepted.hex), false, 'a throwing store')
 })

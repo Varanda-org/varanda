@@ -155,13 +155,14 @@ test('page needs: posts are local and shown; their quote and reply targets are n
   t.alike(pageNeeds([]), { local: new Map(), shown: [], need: [], authors: [] })
 })
 
-test('a hidden ready tab warms its first page only after the seeder link is verified', async (t) => {
-  const { shouldWarmPeek, PEEK_WARM_DELAY_MS } = await load()
+test('a hidden ready tab warms its first page only after the seeder link and the sync run are ready', async (t) => {
+  const { shouldWarmPeek, PEEK_WARM_QUIET_MS } = await load()
   const ready = {
     hosted: true,
     online: true,
     phase: 'ready',
     seederVerified: true,
+    syncReady: true,
     visible: true,
     active: false,
     loadedAt: null,
@@ -172,6 +173,7 @@ test('a hidden ready tab warms its first page only after the seeder link is veri
   }
   t.is(shouldWarmPeek(ready), true)
   t.is(shouldWarmPeek({ ...ready, seederVerified: false }), false, 'seederVerified')
+  t.is(shouldWarmPeek({ ...ready, syncReady: false }), false, 'syncReady')
   t.is(shouldWarmPeek({ ...ready, visible: false }), false, 'visible')
   t.is(shouldWarmPeek({ ...ready, active: true }), false, 'active')
   t.is(shouldWarmPeek({ ...ready, loadedAt: 1 }), false, 'loadedAt')
@@ -182,5 +184,5 @@ test('a hidden ready tab warms its first page only after the seeder link is veri
   t.is(shouldWarmPeek({ ...ready, refreshing: true }), false, 'refreshing')
   t.is(shouldWarmPeek({ ...ready, unsupported: true }), false, 'unsupported')
   t.is(shouldWarmPeek({ ...ready, attempted: true }), false, 'attempted')
-  t.is(PEEK_WARM_DELAY_MS, 1000)
+  t.is(PEEK_WARM_QUIET_MS, 3000)
 })

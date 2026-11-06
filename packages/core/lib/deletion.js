@@ -56,14 +56,13 @@ function scan (entries) {
   return { tombstones: out, pages }
 }
 
-function tombstones (entries) {
-  return scan(entries).tombstones
+function fold (entries) {
+  return foldScanned(scan(entries))
 }
 
-function fold (entries) {
+function foldScanned ({ tombstones: valid, pages }) {
   const deleted = new Set()
   const effective = []
-  const { tombstones: valid, pages } = scan(entries)
   for (const t of valid) {
     if (deleted.has(t.seq) || pages.has(t.record.seq)) continue
     deleted.add(t.record.seq)
@@ -76,17 +75,13 @@ function deletedSeqs (entries) {
   return fold(entries).deleted
 }
 
-// Targets of every valid tombstone, effective or not.
-function targetSeqs (entries) {
-  const out = new Set()
-  for (const t of tombstones(entries)) out.add(t.record.seq)
-  return out
-}
-
 // Same length and order as entries, so slicing by index is unchanged.
 function applyDeletes (entries) {
   if (!Array.isArray(entries)) return []
-  const { deleted } = fold(entries)
+  return withDeleted(entries, fold(entries).deleted)
+}
+
+function withDeleted (entries, deleted) {
   const out = new Array(entries.length)
   for (let i = 0; i < entries.length; i++) {
     let entry
@@ -224,8 +219,14 @@ async function presentState (core) {
     }
     raw.push({ seq: i, record: decodeBlock(block) })
   }
-  const deleted = deletedSeqs(raw)
-  const targets = targetSeqs(raw)
+  // One scan for the three answers, over the only records it can count: raw
+  // holds decodeBlock output (JSON.parse, plain data, no accessors), so the
+  // type read here is the type validRecordCopy would copy, and any other
+  // record is skipped by scan anyway after a clone and a full validation.
+  const scanned = scan(raw.filter((e) => e.record !== null && (e.record.type === 'delete' || isPageType(e.record.type))))
+  const { deleted } = foldScanned(scanned)
+  // Targets of every valid tombstone, effective or not.
+  const targets = new Set(scanned.tombstones.map((t) => t.record.seq))
   let present = raw.length
   for (const seq of holes) {
     if (!targets.has(seq)) {
@@ -233,7 +234,7 @@ async function presentState (core) {
       break
     }
   }
-  return { raw, entries: applyDeletes(raw), deleted, present }
+  return { raw, entries: withDeleted(raw, deleted), deleted, present }
 }
 
 // Present length walked from `from`, a present length the caller computed

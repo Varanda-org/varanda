@@ -10,6 +10,8 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const {
   createIssuerCert,
+  createIssuedCert,
+  createUsernameRecord,
   verifyCert,
   verifyUsernameRecord
 } = require('@varanda/core/lib/cert')
@@ -565,6 +567,44 @@ test('linkStats: a custom dayOf buckets by another day (UTC-3 here)', async (t) 
   const dayOf = (ms) => new Date(ms - 3 * 3600000).toISOString().slice(0, 10)
   t.alike(store.linkStats(dayOf).byDay, [['2026-10-01', 1]], 'counts on the UTC-3 day')
   t.alike(store.linkStats().byDay, [['2026-10-02', 1]], 'the default stays UTC')
+})
+
+test('linkRoster and linkedAt: keys and link dates only; a page is not a link', async (t) => {
+  const { dir, c, iss, store } = setup(t)
+  const a = memberKey()
+  const b = memberKey()
+  c.t = Date.parse('2026-10-01T09:00:00.000Z')
+  await link(store, iss, a, 'ana', 'sub-ana', 'ana@example.test')
+  c.t = Date.parse('2026-10-03T10:00:00.000Z')
+  await link(store, iss, b, 'beto', 'sub-beto', 'beto@example.test')
+  const page = memberKey()
+  const date = new Date(c.t).toISOString()
+  await store.reservePage({
+    key: page,
+    username: 'padaria',
+    cert: createIssuedCert({ member: page, date }, iss.kp, iss.cert),
+    usernameRecord: createUsernameRecord({ member: page, username: 'padaria', date }, iss.kp, iss.cert)
+  })
+
+  const roster = store.linkRoster()
+  t.is(roster.length, store.exportLinks().length, 'one row per link')
+  t.alike(roster.map((r) => r.member), [a, b].sort(), 'sorted by member')
+  for (const row of roster) {
+    t.alike(Object.keys(row).sort(), ['linkedAt', 'member'], 'only the two keys')
+    const json = JSON.stringify(row)
+    t.absent(json.includes('@example.test'), 'no e-mail')
+    t.absent(json.includes('sub-'), 'no sub')
+  }
+  const byMember = Object.fromEntries(store.exportLinks().map((l) => [l.member, l.linkedAt]))
+  for (const row of roster) t.is(row.linkedAt, byMember[row.member], 'the link date')
+  t.is(store.linkedAt(a), '2026-10-01T09:00:00.000Z')
+  t.is(store.linkedAt(b.toUpperCase()), '2026-10-03T10:00:00.000Z', 'any case')
+  t.absent(roster.some((r) => r.member === page), 'the page key is absent')
+  t.is(store.linkedAt(page), null, 'a page answers null')
+  t.is(store.linkedAt(memberKey()), null, 'an unknown key answers null')
+  t.is(store.linkedAt('nope'), null, 'invalid input answers null')
+  t.is(store.linkedAt(undefined), null)
+  t.alike(openAccountStore(dir, { readOnly: true }).linkRoster(), roster, 'a readOnly reopen gives the same answer')
 })
 
 test('a symlinked data dir is refused', (t) => {

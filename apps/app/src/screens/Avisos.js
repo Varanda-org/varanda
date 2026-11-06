@@ -27,7 +27,7 @@ import { get as actingGet, subscribe as actingSubscribe } from '../actingAs'
 import { relativeTime } from '../format'
 import { useNode } from '../node'
 import {
-  ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
+  ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_QUIET_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
   NOTICES_UNSUPPORTED_MESSAGE, NOTICES_WEB_ONLY_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
   compareNotices, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
   padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, shouldPoll, writeSeenNamespace
@@ -643,16 +643,19 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // The poll runs even when the tab is not active (the screen stays mounted).
   const polling = shouldPoll({ hosted, online: node.online, visible: node.visible }) && !unsupported && !locked
   useEffect(() => {
-    if (!polling || !node.signals || node.signals.seederVerified !== true || stateRef.current.loadedAt !== null || firstReadEpochRef.current === node.epoch) return
-    const timer = setTimeout(() => {
+    // After the sync run is ready too: its boot reads come first.
+    if (!polling || !node.signals || node.signals.seederVerified !== true || node.signals.ready !== true || stateRef.current.loadedAt !== null || firstReadEpochRef.current === node.epoch) return
+    // Only once the app has been quiet: the boot reads come first.
+    const wait = node.whenIdle(NOTICES_FIRST_READ_QUIET_MS)
+    wait.promise.then(() => {
       const current = stateRef.current
       if (current.loadedAt !== null || current.loading || current.refreshing || current.loadingMore) return
       firstReadEpochRef.current = node.epoch
       previous.current = { ...previous.current, refresh: refreshRef.current }
       loadFirst()
-    }, NOTICES_FIRST_READ_MS)
-    return () => clearTimeout(timer)
-  }, [polling, node.signals?.seederVerified, node.epoch, loadFirst])
+    })
+    return () => wait.cancel()
+  }, [polling, node.signals?.seederVerified, node.signals?.ready, node.epoch, node.whenIdle, loadFirst])
 
   useEffect(() => {
     if (!polling) return
