@@ -24,9 +24,11 @@
 //   await node.identityStatus()  // { exists, publicKey, legacy, unlocked, synced }
 //   await node.reset()           // delete the diary, the media cores and the pending
 //                                // follows, and lock; config and follows stay
-//   await node.mediaUpload({ bytes, mime, width, height, onProgress }) // -> descriptor
+//   await node.mediaUpload({ bytes, mime, width, height, sealed, onProgress })
+//                                // -> descriptor (sealed: true -> private group item)
 //   await node.dmPutMedia({ bytes, mime, width, height }) // -> dm.send media item
 //   await node.dmReadMedia({ from, id, index })           // -> { bytes, mime }
+//   await node.groupReadMedia({ diary, item })             // -> { bytes, mime, w, h }
 // The chat photo calls (docs/rpc.md 5.88) are host controls for the same
 // reason: dmPutMedia seals a photo and puts it on the anonymous blob channel
 // (the native IPC dm.putMedia calls the same function after reading its
@@ -130,6 +132,7 @@ function createBrowserNode ({ storage, ...options } = {}) {
     mediaUpload: (args) => session.mediaUpload(args),
     dmPutMedia: (args) => session.dmPutMedia(args),
     dmReadMedia: (args) => session.dmReadMedia(args),
+    groupReadMedia: (args) => session.groupReadMedia(args),
     legacyFollows: () => session.legacyFollows(),
     confirmLegacyFollows: (keys) => session.confirmLegacyFollows(keys),
     identityStatus: () => session.identityStatus(),

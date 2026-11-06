@@ -5148,3 +5148,51 @@ Limites desta caminhada:
 - O app ainda não anexa nem mostra mídia, e o `dm.putMedia` nativo responde erro interno até o PR do app.
 - A rota de anexo tem 4 vagas globais que corpos lentos e anônimos podem ocupar até o tempo limite de 10 s; a autorização assinada nos cabeçalhos, antes de ler o corpo, vem com o envio do app.
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 106. Fotos nos grupos públicos e privados: protocolo, nó e RPC (PR feat/group-media-protocol)
+
+Roteiro do protocolo, do nó e da RPC para fotos e GIFs nos grupos, públicos e privados (registro de publicação v2 de grupo). O formato está em [protocol.md](protocol.md), seção 10 ("Group post media" e "Old readers"), e os métodos em [rpc.md](rpc.md), 5.39 (`group.post`), 5.40 (`group.read`) e 5.56 (`media.uploadFile`). Ainda não há tela: o app que mostra e envia fotos de grupo vem num PR posterior (`feat/chat-photos-gifs`), e a versão legal dos Termos não muda neste PR. Nada abaixo foi executado nesta documentação.
+
+Regras que os passos conferem:
+
+- Uma publicação de grupo só de texto continua no registro v1, byte por byte. Com mídia, vai no registro v2 (o conjunto exato de chaves `type`, `text`, `replyTo`, `media`, `card`, `fwd`, `seen`, `at`), com 1 a 4 itens de `(core, start)` distintos, `card` sempre `null` e `fwd` sempre `0`; o texto pode ser vazio só quando há mídia.
+- Um leitor antigo pula o registro v2 inteiro, sem cair no texto: nada aparece como texto solto e o fold não falha.
+- Grupo público: os itens são descritores de publicação comuns, e os bytes ficam no núcleo de mídia do autor, servidos em `/media` como as fotos do diário.
+- Grupo privado: cada foto é selada no aparelho (secretbox, chave e nonce novos, preenchida até blocos inteiros de 32 KiB), e só o cifrado vai ao núcleo de mídia do autor. A chave viaja só dentro da publicação selada pelo grupo. O semeador guarda e serve só o cifrado.
+- `group.read` devolve `media` em cada item (`null` em registro v1 e em publicação oculta); a mídia de uma publicação oculta não sai.
+- `GROUP_LIMIT_MAX` e `GROUP_LIMIT_DEFAULT` valem 29: a página mais pesada de `group.read` (quatro itens privados por publicação) cabe em `MAX_MESSAGE`.
+- A CLI (nó core) recusa mídia em `group.post` com `mídia disponível só na versão web`. No navegador, mídia cifrada só vai a grupo privado (`mídia cifrada só em grupo privado`), e grupo privado exige mídia cifrada (`grupo privado exige mídia cifrada`).
+- Na lista de comunidades, a última publicação só com foto aparece como `Foto` (ou `GIF`).
+- `media.readGroup` busca o cifrado na origem do semeador do próprio nó (rota `/media`, `no-store`, sem cookies e sem redirecionamentos) e abre a imagem; qualquer falha vira `mídia indisponível`, e um bloqueio durante o download é recusado.
+- A CLI imprime ` [foto]` ou ` [gif]` depois do texto e nunca imprime chave nem nonce de item privado, nem no `--json`.
+- As Páginas continuam gravando publicações de texto e leem registros v2.
+
+Passos (marcar só depois de executar e guardar o registro):
+
+- [ ] Num grupo público do laboratório hospedado (dois perfis do Chrome, `apps/cli/scripts/hosted-lab.js`), postar uma foto pelo console da fachada do nó e ler de volta: a publicação traz um item com `core`, `start`, `sha256` e as dimensões, e a foto abre pela `/media` do semeador.
+- [ ] Num grupo público cuja última publicação é só uma foto, a lista de comunidades mostra `Foto`; com um GIF, mostra `GIF`.
+- [ ] Num grupo privado, postar uma foto: o `group.post` vai com `sealed: true`, e a publicação aparece para o outro membro com a foto aberta por `media.readGroup`.
+- [ ] Pela rota `/media` do semeador, o item de um grupo privado não começa com a assinatura de JPEG (`FF D8 FF`) nem de PNG (`89 50 4E 47`): são bytes cifrados.
+- [ ] Na aba Rede do DevTools, o pedido de `media.readGroup` vai só à origem do semeador do próprio nó, sem cookie, sem usar o cache do navegador (`no-store`) e sem seguir redirecionamento.
+- [ ] Com o nó bloqueado durante o download de uma foto privada, `media.readGroup` recusa, e a foto não aparece depois do desbloqueio sem novo pedido.
+- [ ] Um nó do `main` anterior a este PR lê o grupo: a publicação com foto some sem erro, e as publicações só de texto aparecem como antes.
+- [ ] Uma publicação só de texto escrita por este PR tem o mesmo registro v1 do `main` (comparar os bytes do bloco).
+- [ ] Uma publicação com foto oculta: `group.read` devolve `media: null` para ela, e o texto oculto segue como antes.
+- [ ] Uma página de `group.read` com 29 publicações de quatro fotos privadas cabe no limite de mensagem; o teste de tamanho confirma e uma página real também sobe.
+- [ ] `varanda group read` mostra ` [foto]` depois do texto de uma publicação com foto; `varanda group read --json` não contém `key` nem `nonce` de item privado (conferir com `grep`).
+- [ ] O comando de publicar em grupo da CLI recusa uma imagem com `mídia disponível só na versão web` e não grava nenhum registro.
+- [ ] Uma Página que participa de um grupo lê uma publicação v2 e continua publicando só texto.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node packages/core/test/group-crypto.test.js`, `group-media.test.js`, `group.test.js` e `session-groups.test.js`.
+- `node packages/rpc/test/methods.test.js` e `sizes.test.js`.
+- `node packages/web-member/test/group-ops.test.js`, `groups-e2e.test.js`, `private-ops.test.js` e `node-bundle.test.js` (exigem Node 20.19 ou mais novo).
+- `node apps/cli/test/group-commands.test.js`, `pages-groups.test.js` e `node apps/app/test/identityInstall.test.js`.
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- O app ainda não mostra nem envia foto de grupo; só o nó, o protocolo, a RPC e os testes exercitam isto.
+- O semeador continua vendo o horário, o tamanho aproximado (em faixas de 32 KiB) e a leitura repetida de cada item privado; isto não é resistência à análise de tráfego.
+- Nenhuma caixa acima foi executada nesta documentação.

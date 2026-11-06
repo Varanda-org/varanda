@@ -52,7 +52,7 @@ const QUOTE_KEYS = ['type', 'text', 'at', 'replyTo', 'quote']
 const QUOTE_MEDIA_KEYS = ['type', 'text', 'at', 'replyTo', 'quote', 'media']
 const ENGAGEMENT_KEYS = ['type', 'to', 'on', 'at']
 const TARGET_KEYS = ['author', 'seq']
-const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height']
+const DESCRIPTOR_KEYS = Object.freeze(['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
 const MEDIA_CORE_KEYS = ['type', 'key', 'at']
 const FOLLOW_KEYS = ['type', 'key', 'on', 'at']
 // A key advertisement only (docs/protocol.md section 11): one per identity,
@@ -641,6 +641,7 @@ module.exports = {
   MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES,
   MAX_MEDIA_DIMENSION,
+  DESCRIPTOR_KEYS,
   MAX_GROUP_WRITERS,
   MAX_GROUPS_PER_DIARY,
   MAX_GROUPS_PER_COMMUNITY,

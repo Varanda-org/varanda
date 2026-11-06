@@ -20,7 +20,7 @@
 //                                     it could not be deleted, still locked)
 //   identity.reset()    -> Promise   (the diary, the passkey record and the
 //                                     stored session are gone)
-//   media.upload({ bytes, mime, width, height, onProgress })
+//   media.upload({ bytes, mime, width, height, sealed, onProgress })
 //                       -> Promise<descriptor>  (lib/node.js mediaUpload;
 //                          errors keep their .code and .message)
 //   media.putDm({ bytes, mime, width, height })
@@ -31,6 +31,11 @@
 //                       -> Promise<{ bytes, mime }>  (lib/node.js dmReadMedia:
 //                          the opened photo of a kept message; errors keep
 //                          .code and .message, 'mídia indisponível' when gone)
+//   media.readGroup({ diary, item })
+//                       -> Promise<{ bytes, mime, w, h }>  (lib/node.js
+//                          groupReadMedia: a private group item fetched from
+//                          the node's own seeder and opened; 'mídia
+//                          indisponível' on any failure)
 //   follows.legacy()    -> Promise<{ keys }>  (the follows kept from before
 //                          `follow` records existed, awaiting confirmation)
 //   follows.confirmLegacy(keys)
@@ -591,6 +596,13 @@ async function start ({ association, seederUrl } = {}) {
         readDm (args) {
           try {
             return Promise.resolve(node.dmReadMedia(args))
+          } catch (err) {
+            return Promise.reject(err)
+          }
+        },
+        readGroup (args) {
+          try {
+            return Promise.resolve(node.groupReadMedia(args))
           } catch (err) {
             return Promise.reject(err)
           }

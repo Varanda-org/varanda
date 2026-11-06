@@ -133,13 +133,14 @@ function createLifecycle ({ session, storage, locking = Promise.resolve() }) {
 // media.uploadFile after the read: read() -> { file, bytes }; the
 // bytes go to session.mediaUpload only while the node is not closing, are
 // zeroed once the session copied them, and the file is unlinked only after
-// a successful upload.
-async function uploadMedia ({ read, session, unlink, isClosing }, { mime, width, height }) {
+// a successful upload. `sealed` must reach the session: dropping it would
+// store a private group's photo in the clear (docs/rpc.md 5.56).
+async function uploadMedia ({ read, session, unlink, isClosing }, { mime, width, height, sealed }) {
   const { file, bytes } = await read()
   let uploading
   try {
     if (isClosing()) throw closedError()
-    uploading = session.mediaUpload({ bytes, mime, width, height })
+    uploading = session.mediaUpload(sealed === true ? { bytes, mime, width, height, sealed } : { bytes, mime, width, height })
   } catch (err) {
     if (err instanceof RpcError) throw err
     // Synchronous validation (lib/session.js TypeError 'mídia inválida').

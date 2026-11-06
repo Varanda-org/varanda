@@ -444,6 +444,16 @@ test('an upload still reading at close never reaches mediaUpload; close does not
   t.ok(sessionClosed && storage.closed)
 })
 
+test('uploadMedia hands sealed to the session only when true', async (t) => {
+  const seen = []
+  const session = { mediaUpload: (args) => { seen.push(Object.keys(args)); return Promise.resolve({ ok: true }) } }
+  const io = { read: async () => ({ file: '/cache/p.jpg', bytes: new Uint8Array(4) }), session, unlink: () => {}, isClosing: () => false }
+  await uploadMedia(io, { mime: 'image/jpeg', width: 1, height: 1, sealed: true })
+  await uploadMedia(io, { mime: 'image/jpeg', width: 1, height: 1, sealed: false })
+  await uploadMedia(io, { mime: 'image/jpeg', width: 1, height: 1 })
+  t.alike(seen, [['bytes', 'mime', 'width', 'height', 'sealed'], ['bytes', 'mime', 'width', 'height'], ['bytes', 'mime', 'width', 'height']])
+})
+
 test('close cancels a running upload by closing the session first', async (t) => {
   let rejectUpload
   const order = []

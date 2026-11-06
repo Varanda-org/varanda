@@ -171,6 +171,45 @@ function isMediaList (v) {
   return true
 }
 
+// Private group items: where the ciphertext lives in the writer's media core
+// (a descriptor without the image size, which ciphertext does not have),
+// then the secret and what it hides. Same rules as validPrivateItem in
+// @varanda/core lib/group-media.js (protocol section 10).
+const GROUP_PRIVATE_MEDIA_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'key', 'nonce', 'plainMime', 'plainSha256', 'w', 'h', 'ms']
+
+function isPrivateGroupMediaItem (d) {
+  if (!isPlainObject(d) || Object.keys(d).length !== GROUP_PRIVATE_MEDIA_KEYS.length ||
+    !GROUP_PRIVATE_MEDIA_KEYS.every((k) => hasOwn(d, k))) return false
+  return isKey(d.core) &&
+    d.mime === 'application/octet-stream' &&
+    int(1, L.MAX_MEDIA_BLOCKS - 1)(d.start) &&
+    int(1, L.MAX_MEDIA_ITEM_BLOCKS)(d.blocks) &&
+    d.start + d.blocks <= L.MAX_MEDIA_BLOCKS &&
+    d.bytes === d.blocks * L.MEDIA_BLOCK_BYTES &&
+    isKey(d.sha256) &&
+    isKey(d.key) &&
+    typeof d.nonce === 'string' && HEX48.test(d.nonce) &&
+    typeof d.plainMime === 'string' && L.MEDIA_MIMES.includes(d.plainMime) &&
+    isKey(d.plainSha256) &&
+    int(1, L.MAX_MEDIA_DIMENSION)(d.w) &&
+    int(1, L.MAX_MEDIA_DIMENSION)(d.h) &&
+    d.ms === 0
+}
+
+// Group media identities are distinct even when their other fields differ.
+function isGroupMediaList (v) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_MEDIA_PER_POST) return false
+  const identities = new Set()
+  for (let i = 0; i < v.length; i++) {
+    const item = v[i]
+    if (!isDescriptor(item) && !isPrivateGroupMediaItem(item)) return false
+    const identity = item.core + ':' + item.start
+    if (identities.has(identity)) return false
+    identities.add(identity)
+  }
+  return true
+}
+
 // With media the text may be empty (a photo-only post); without, 1..MAX_TEXT.
 function postCross (given, value) {
   if (!hasOwn(value, 'media') && charLength(value.text) < 1) return 'parâmetro inválido: text'
@@ -700,8 +739,13 @@ const SPECS = {
   'group.join': { fields: { group: req(isKey), community: opt(isKey) }, mutating: true },
   'group.leave': { fields: { group: req(isKey) }, mutating: true },
   'group.post': {
-    fields: { group: req(isKey), text: req(str(1, L.MAX_TEXT)), replyTo: opt(isGroupRef) },
-    mutating: true
+    fields: { group: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), media: opt(isGroupMediaList), sealed: opt(isBool) },
+    mutating: true,
+    cross: (given, value) => {
+      if (value.sealed === true && !hasOwn(value, 'media')) return 'parâmetro inválido: sealed'
+      if (value.media && !value.media.every((item) => (item.mime === 'application/octet-stream') === (value.sealed === true))) return 'parâmetro inválido: media'
+      return postCross(given, value)
+    }
   },
   'group.read': {
     fields: {
@@ -925,7 +969,8 @@ const SPECS = {
       name: req(isMediaName),
       mime: req(isMediaMime),
       width: req(int(1, MEDIA_SIDE_MAX)),
-      height: req(int(1, MEDIA_SIDE_MAX))
+      height: req(int(1, MEDIA_SIDE_MAX)),
+      sealed: opt(isBool)
     },
     mutating: true
   },

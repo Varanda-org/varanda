@@ -79,7 +79,7 @@ function createWebNode (args, { onInternalError } = {}) {
 
   const lifecycle = createLifecycle({ session, storage, locking })
 
-  function uploadFile ({ name, mime, width, height }) {
+  function uploadFile ({ name, mime, width, height, sealed }) {
     if (cacheDir === null) throw new RpcError('USAGE', BAD_MEDIA_FILE)
     return uploadMedia({
       read: () => readMediaFile({
@@ -93,7 +93,7 @@ function createWebNode (args, { onInternalError } = {}) {
       session,
       unlink: (file) => fs.promises.unlink(file),
       isClosing: lifecycle.isClosing
-    }, { mime, width, height })
+    }, { mime, width, height, sealed })
   }
 
   const handlers = {}

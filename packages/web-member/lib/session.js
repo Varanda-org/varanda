@@ -270,7 +270,7 @@
 // unlock with a dm-key). reset() removes the local store and the dm kv.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, FEED_INCOMPLETE_MAX } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, FEED_INCOMPLETE_MAX, mediaBounds } = require('@varanda/rpc')
 const {
   validRecordCopy,
   validateRecord,
@@ -303,6 +303,7 @@ const { signRoster, signAccept, signOffer, signOrigin, signClose, signMoved, pag
 const { pageLifecycle, cutEntries, originOf } = require('@varanda/core/lib/page-lifecycle')
 const { deletedSeqs, applyDeletes } = require('@varanda/core/lib/deletion')
 const { followSet } = require('@varanda/core/lib/media')
+const { sealMedia, openMedia, validPrivateItem, PRIVATE_ITEM_KEYS, MAX_SEALED_MEDIA_PLAIN_BYTES } = require('@varanda/core/lib/group-media')
 const { signNoticeProof } = require('@varanda/core/lib/notices')
 const store = require('./node-store')
 const { groupKeyPairFromPrf } = require('./passkey')
@@ -326,6 +327,7 @@ const PUSH_LINE = 'enviando ao semeador'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
 const UPKEEP_WARNING = 'aviso: participação automática neste aparelho não concluída'
 const BAD_MEDIA_ARGS = 'mídia inválida'
+const GROUP_MEDIA_UNAVAILABLE = 'mídia indisponível'
 const NO_SEEDER = 'sem conexão com o semeador'
 const PEEK_BUSY = 'espiadinha já em andamento'
 const NOTICES_BUSY = 'avisos já em andamento'
@@ -700,7 +702,8 @@ function createBrowserSession ({
   leaseMediaMaxMs = LEASE_MEDIA_MAX_MS,
   noClear = false,
   upkeepDelayMs = UPKEEP_DELAY_MS,
-  upkeepFullMaxAgeMs = UPKEEP_FULL_MAX_AGE_MS
+  upkeepFullMaxAgeMs = UPKEEP_FULL_MAX_AGE_MS,
+  fetchMedia = (...args) => globalThis.fetch(...args)
 } = {}) {
   const cfg = checkConfig({ storage, association, seederUrl, createSocket })
   const reportInternal = (err) => {
@@ -3079,10 +3082,19 @@ function createBrowserSession ({
   // stored (mediaCommit, inside withStore). onProgress (optional) hears
   // 0.25 hashed, 0.75 stored, 1 done; errors reach the caller as RPC
   // errors ({ code, message }). Nothing about the bytes is logged.
-  function mediaUpload ({ bytes, mime, width, height, onProgress } = {}) {
-    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > MAX_MEDIA_ITEM_BYTES) throw new TypeError(BAD_MEDIA_ARGS)
+  // `sealed: true` (a private group's photo, docs/rpc.md 5.56) seals the
+  // image under a fresh key (group-media sealMedia), stores only the
+  // ciphertext and returns the private item, the one place its key leaves
+  // the node.
+  function mediaUpload ({ bytes, mime, width, height, sealed = false, onProgress } = {}) {
+    if (sealed !== true && sealed !== false) throw new TypeError(BAD_MEDIA_ARGS)
+    const maxBytes = sealed ? MAX_SEALED_MEDIA_PLAIN_BYTES : MAX_MEDIA_ITEM_BYTES
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > maxBytes) throw new TypeError(BAD_MEDIA_ARGS)
     if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
     if (!isIntIn(width, 1, MAX_MEDIA_DIMENSION) || !isIntIn(height, 1, MAX_MEDIA_DIMENSION)) throw new TypeError(BAD_MEDIA_ARGS)
+    // Nobody but a member can look inside a sealed photo, so the node
+    // checks it is the image it claims before sealing (readers check again).
+    if (sealed && mediaBounds(bytes, mime) === null) throw new TypeError(BAD_MEDIA_ARGS)
     const copy = new Uint8Array(bytes.byteLength)
     copy.set(bytes)
     const progress = typeof onProgress === 'function' ? (fraction) => { try { onProgress(fraction) } catch {} } : noop
@@ -3092,6 +3104,7 @@ function createBrowserSession ({
       // The declaration needs block 0: checked before any byte is stored, so
       // a diary without its certificate gets no orphan media core.
       if (!(await identity()).memberCert) throw new Error(member.GENESIS_REQUIRED)
+      if (sealed) return sealedUpload(copy, { mime, width, height, epoch, progress })
       const subtle = globalThis.crypto && globalThis.crypto.subtle
       if (!subtle) throw new Error('WebCrypto indisponível')
       const sha256 = b4a.toString(new Uint8Array(await subtle.digest('SHA-256', copy)), 'hex')
@@ -3115,6 +3128,28 @@ function createBrowserSession ({
       progress(1)
       return descriptor
     })({})
+  }
+
+  // On mediaUpload's chain: the plaintext copy is wiped once sealed.
+  async function sealedUpload (copy, { mime, width, height, epoch, progress }) {
+    let sealedItem
+    try {
+      sealedItem = sealMedia(copy, { plainMime: mime, w: width, h: height, ms: 0 })
+    } finally {
+      copy.fill(0)
+    }
+    progress(0.25)
+    const { core, declared } = await withStore((c) => member.mediaPrepare(c))
+    if (!declared) {
+      await ensureCaughtUp(epoch)
+      const { seq } = await withStore((c) => member.declareMediaCore(c, core))
+      wrote(seq)
+      await pushAfterWrite()
+    }
+    const item = await withStore((c) => member.mediaCommitSealed(c, sealedItem))
+    progress(0.75)
+    progress(1)
+    return item
   }
 
   // A chat photo for dm.send (docs/rpc.md 5.88): validated and copied
@@ -3155,6 +3190,101 @@ function createBrowserSession ({
         throw toRpcError(err, reportInternal)
       }
     })()
+  }
+
+  // The image of a private group item -> { bytes, mime, w, h }, for the page
+  // only. The ciphertext comes from this node's own seeder (its media route
+  // on the HTTP origin of seederUrl, never another host) and must open under
+  // the item's key; any failure is the same USAGE 'mídia indisponível', so
+  // the answer never says why.
+  function groupReadMedia ({ diary, item } = {}) {
+    if (typeof diary !== 'string' || !HEX64.test(diary) || !validPrivateItem(item)) throw new TypeError(BAD_MEDIA_ARGS)
+    const it = {}
+    for (const k of PRIVATE_ITEM_KEYS) it[k] = item[k]
+    const url = seederMediaUrl(diary.toLowerCase(), it)
+    return (async () => {
+      try {
+        if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+        const pair = await serial(async () => {
+          await requireUnlocked()
+          return keyPair
+        })({})
+        if (url === null) throw new UsageError(GROUP_MEDIA_UNAVAILABLE)
+        let cipher = null
+        try {
+          const res = await fetchMedia(url, { cache: 'no-store', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer' })
+          cipher = await readExact(res, it.bytes)
+        } catch {}
+        // A lock (or a lock and a new unlock) while the download ran: the
+        // image is never opened for the session that asked.
+        if (closed || pair === null || keyPair !== pair) throw new UsageError(store.LOCKED)
+        const plain = cipher !== null ? openMedia(cipher, it) : null
+        if (plain === null) throw new UsageError(GROUP_MEDIA_UNAVAILABLE)
+        // The bytes decide, not the item: a member could seal anything under
+        // an image label, and the page decodes what it gets.
+        if (mediaBounds(plain, it.plainMime) === null) {
+          plain.fill(0)
+          throw new UsageError(GROUP_MEDIA_UNAVAILABLE)
+        }
+        return { bytes: plain, mime: it.plainMime, w: it.w, h: it.h }
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    })()
+  }
+
+  // The media route of this node's own seeder, or null: plain http only for
+  // a loopback seeder (the hosted lab), as the blob channel allows.
+  function seederMediaUrl (diary, it) {
+    let ws
+    try {
+      ws = new URL(cfg.seederUrl)
+    } catch {
+      return null
+    }
+    const loopback = ws.hostname === '127.0.0.1' || ws.hostname === 'localhost' || ws.hostname === '[::1]'
+    if (ws.protocol !== 'wss:' && !(ws.protocol === 'ws:' && loopback)) return null
+    const origin = (ws.protocol === 'wss:' ? 'https://' : 'http://') + ws.host
+    return origin + '/media/' + diary + '/' + it.core + '/' + it.start + '/' + it.blocks
+  }
+
+  // Exactly `size` bytes of a 200 answer, never buffering more: a declared
+  // length other than `size` is refused before reading, a stream is cut off
+  // past it, and a body without a stream is read only under that length.
+  // Anything else (a non-200, a redirect, a short body) is null, and an
+  // unread body is cancelled so it does not hold the seeder's slot.
+  async function readExact (res, size) {
+    const drop = () => { try { if (res && res.body && typeof res.body.cancel === 'function') res.body.cancel().catch(noop) } catch {} }
+    if (!res || res.status !== 200 || res.redirected === true) {
+      drop()
+      return null
+    }
+    const declared = res.headers && typeof res.headers.get === 'function' ? res.headers.get('content-length') : null
+    if (declared !== null && declared !== String(size)) {
+      drop()
+      return null
+    }
+    const stream = res.body
+    if (stream && typeof stream.getReader === 'function') {
+      const reader = stream.getReader()
+      const out = new Uint8Array(size)
+      let n = 0
+      for (;;) {
+        const step = await reader.read()
+        if (step.done) break
+        const v = step.value
+        if (!(v instanceof Uint8Array) || n + v.byteLength > size) {
+          try { reader.cancel().catch(noop) } catch {}
+          return null
+        }
+        out.set(v, n)
+        n += v.byteLength
+      }
+      return n === size ? out : null
+    }
+    if (declared === null) return null
+    const body = new Uint8Array(await res.arrayBuffer())
+    return body.byteLength === size ? body : null
   }
 
   // Locks the identity: the pair is zero-filled and the chat media cache
@@ -3334,6 +3464,7 @@ function createBrowserSession ({
     mediaUpload,
     dmPutMedia,
     dmReadMedia,
+    groupReadMedia,
     borrow,
     legacyFollows: () => legacyFollows({}),
     confirmLegacyFollows,
