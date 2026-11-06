@@ -102,7 +102,7 @@ test('open never creates the file; the first issue writes it with mode 0600', as
   t.alike(fs.readdirSync(dir), [])
   t.alike(store.count(), { total: 0, used: 0 })
   const m = memberKey()
-  t.alike(store.summary(m), { perWeek: 3, used: 0, remaining: 3, resetsAt: '2026-11-02T03:00:00.000Z' })
+  t.alike(store.summary(m), { perWeek: 3, opened: 3, used: 0, remaining: 3, resetsAt: '2026-11-02T03:00:00.000Z' })
   const out = await store.issue(m)
   t.ok(CODE_RE.test(out.code))
   t.alike(out, {
@@ -137,7 +137,7 @@ test('issue N then limite-convites with nothing written; next Monday restores', 
   const before = fs.readFileSync(file)
   await rejects(t, store.issue(m), 'limite-convites', 'fourth refused')
   t.alike(fs.readFileSync(file), before, 'no row written')
-  t.alike(store.summary(m), { perWeek: 3, used: 3, remaining: 0, resetsAt: '2026-11-02T03:00:00.000Z' })
+  t.alike(store.summary(m), { perWeek: 3, opened: 3, used: 3, remaining: 0, resetsAt: '2026-11-02T03:00:00.000Z' })
   const other = memberKey()
   t.is((await store.issue(other)).used, 1, 'per member')
   c.t = MONDAY - 1
@@ -453,4 +453,95 @@ test('a refused issue whose merge write is refused by guard still answers limite
   await rejects(t, store.issue(m), 'limite-convites', 'not masked by the guard refusal')
   t.is(store.available(), true)
   t.ok(readFile(file).invites.some((x) => x.id === null), 'write landed')
+})
+
+test('opened option shape', (t) => {
+  const { open } = setup(t)
+  t.exception.all(() => open({ opened: 2 }), TypeError)
+  t.exception.all(() => open({ opened: 'x' }), TypeError)
+  t.is(open({ opened: null }).summary(memberKey()).opened, 3, 'null keeps perWeek')
+})
+
+test('opened 0 answers convite-aguardando and writes nothing', async (t) => {
+  const { open, dir, file } = setup(t)
+  const m = memberKey()
+  const calls = []
+  const store = open({ opened: (member, nowMs) => { calls.push([member, nowMs]); return 0 } })
+  await rejects(t, store.issue(m), 'convite-aguardando', 'nothing opened')
+  t.alike(fs.readdirSync(dir), [], 'no file created')
+  t.alike(calls, [[m, T0]], 'called with member and now')
+  await open().issue(m)
+  const before = fs.readFileSync(file)
+  await rejects(t, store.issue(m), 'convite-aguardando', 'still waiting')
+  t.alike(fs.readFileSync(file), before, 'file unchanged')
+  t.alike(store.summary(m), { perWeek: 3, opened: 0, used: 1, remaining: 0, resetsAt: '2026-11-02T03:00:00.000Z' })
+})
+
+test('opened grows during the week up to perWeek, then limite-convites', async (t) => {
+  const { open, file } = setup(t)
+  const m = memberKey()
+  let n = 1
+  const store = open({ opened: () => n })
+  const first = await store.issue(m)
+  t.is(first.used, 1)
+  t.is(first.remaining, 0)
+  t.alike(store.summary(m), { perWeek: 3, opened: 1, used: 1, remaining: 0, resetsAt: '2026-11-02T03:00:00.000Z' })
+  const before = fs.readFileSync(file)
+  await rejects(t, store.issue(m), 'convite-aguardando', 'second waits')
+  t.alike(fs.readFileSync(file), before, 'no row written')
+  n = 3
+  t.is(store.summary(m).remaining, 2, 'summary follows the callback')
+  const second = await store.issue(m)
+  t.is(second.used, 2)
+  t.is(second.remaining, 1)
+  const third = await store.issue(m)
+  t.is(third.used, 3)
+  t.is(third.remaining, 0)
+  t.alike(Object.keys(third), ['code', 'expiresAt', 'used', 'remaining', 'resetsAt'])
+  await rejects(t, store.issue(m), 'limite-convites', 'fourth is the weekly limit')
+  t.is(readFile(file).invites.length, 3)
+})
+
+test('a throwing or malformed opened callback is indisponivel and writes nothing', async (t) => {
+  const { open, dir } = setup(t)
+  const m = memberKey()
+  const bad = [
+    () => { throw new Error('boom') },
+    () => 4,
+    () => -1,
+    () => 1.5,
+    () => '2',
+    () => undefined,
+    () => NaN
+  ]
+  for (const fn of bad) {
+    const store = open({ opened: fn })
+    await rejects(t, store.issue(m), 'indisponivel', 'issue refused')
+    t.exception(() => store.summary(m), /indispon/, 'summary refused')
+    t.is(store.available(), true, 'store still usable')
+  }
+  t.alike(fs.readdirSync(dir), [], 'no row')
+})
+
+test('opened: Monday 03:00Z resets used', async (t) => {
+  const { open, c } = setup(t)
+  const m = memberKey()
+  const store = open({ opened: () => 1 })
+  await store.issue(m)
+  await rejects(t, store.issue(m), 'convite-aguardando', 'week used up')
+  c.t = MONDAY
+  t.alike(store.summary(m), { perWeek: 3, opened: 1, used: 0, remaining: 1, resetsAt: '2026-11-09T03:00:00.000Z' })
+  t.is((await store.issue(m)).used, 1)
+})
+
+test('used may exceed a lower opened without a negative remaining', async (t) => {
+  const { store, open } = setup(t)
+  const m = memberKey()
+  for (let i = 0; i < 2; i++) await store.issue(m)
+  const low = open({ opened: () => 1 })
+  t.alike(low.summary(m), { perWeek: 3, opened: 1, used: 2, remaining: 0, resetsAt: '2026-11-02T03:00:00.000Z' })
+  await rejects(t, low.issue(m), 'convite-aguardando', 'over the opened count')
+  const lowWeek = open({ perWeek: 1, opened: () => 1 })
+  t.is(lowWeek.summary(m).remaining, 0)
+  await rejects(t, lowWeek.issue(m), 'limite-convites', 'perWeek wins first')
 })

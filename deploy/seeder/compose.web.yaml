@@ -141,6 +141,10 @@ services:
       # mudar. Com a rede vazia ninguém entra: a primeira pessoa precisa se
       # vincular com a variável vazia.
       VARANDA_INVITES_PER_WEEK: "${VARANDA_INVITES_PER_WEEK:-}"
+      # Convites de surpresa. Vazio = desligado; 1 = os convites da semana
+      # abrem um a um em horários sorteados, com um aviso no aparelho. Exige
+      # VARANDA_INVITES_PER_WEEK.
+      VARANDA_INVITE_DROPS: "${VARANDA_INVITE_DROPS:-}"
       # Verificação de idade (Didit), opcional. Os dois vazios mantêm a
       # checagem desligada; os dois definidos a ligam para todo membro
       # hospedado, inclusive quem já está vinculado. Só o account recebe estas

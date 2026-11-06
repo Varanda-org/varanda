@@ -9,7 +9,7 @@ export const PUSH_KINDS = Object.freeze(['follow', 'reply', 'like', 'repost'])
 export const PUSH_LABEL = 'Avisos no aparelho'
 export const PUSH_ON = 'Ativar avisos neste aparelho'
 export const PUSH_OFF = 'Desligar avisos neste aparelho'
-export const PUSH_HINT = 'Receba um aviso quando alguém seguir você, responder, curtir ou republicar o que você publicou. Mostra o nome de quem fez a ação. Só neste aparelho.'
+export const PUSH_HINT = 'Receba um aviso quando alguém seguir você, responder, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. Mostra o nome de quem fez a ação. Só neste aparelho.'
 export const PUSH_DENIED = 'Os avisos do sistema estão desligados neste aparelho.'
 export const PUSH_UNAVAILABLE = 'Os avisos ainda não estão disponíveis nesta associação.'
 export const PUSH_UNSUPPORTED = 'No iPhone e no iPad, os avisos só funcionam com o Varanda na Tela de Início.'
@@ -172,6 +172,7 @@ export function parseLaunch (search) {
       found[key] = value
     }
     if (!Object.prototype.hasOwnProperty.call(found, 'aviso')) return null
+    if (found.aviso === 'convite') return Object.keys(found).length === 1 ? { kind: 'convite' } : null
     const ref = Object.prototype.hasOwnProperty.call(found, 'ref') ? found.ref : null
     return notice(found.aviso, found.actor, found.recipient, ref)
   } catch {
@@ -184,6 +185,7 @@ export function parseMessage (data) {
   try {
     if (!isPlainObject(data)) return null
     const own = Object.keys(data)
+    if (own.length === 1 && own[0] === 'type' && data.type === 'varanda-invite-open') return { kind: 'convite' }
     if (own.length !== MESSAGE_KEYS.length || !MESSAGE_KEYS.every((k) => own.includes(k))) return null
     if (data.source !== MESSAGE_SOURCE) return null
     return notice(data.kind, data.actor, data.recipient, data.ref)

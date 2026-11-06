@@ -130,9 +130,10 @@ function encryptPayload ({ p256dh, auth, plaintext, padTo = 0, salt = crypto.ran
   return Buffer.concat([header, asPublic, body])
 }
 
-async function sendPush ({ subscription, payload, vapid, topic, padTo = 0, fetch = globalThis.fetch, timeoutMs = 10000, now = Date.now() }) {
+async function sendPush ({ subscription, payload, vapid, topic, padTo = 0, ttlS = PUSH_TTL_S, fetch = globalThis.fetch, timeoutMs = 10000, now = Date.now() }) {
   if (typeof payload !== 'string') throw new TypeError('payload inválido')
   if (typeof topic !== 'string' || !TOPIC_RE.test(topic)) throw new TypeError('topic inválido')
+  if (!Number.isSafeInteger(ttlS) || ttlS < 1 || ttlS > PUSH_TTL_S) throw new TypeError('ttlS inválido')
   if (!subscription || !isAllowedEndpoint(subscription.endpoint)) return 'dropped'
 
   let body
@@ -149,7 +150,7 @@ async function sendPush ({ subscription, payload, vapid, topic, padTo = 0, fetch
     res = await fetch(subscription.endpoint, {
       method: 'POST',
       headers: {
-        TTL: String(PUSH_TTL_S),
+        TTL: String(ttlS),
         'Content-Encoding': 'aes128gcm',
         'Content-Type': 'application/octet-stream',
         Urgency: 'normal',
@@ -176,6 +177,8 @@ module.exports = {
   PUSH_ENDPOINT_HOSTS,
   PUSH_ENDPOINT_SUFFIXES,
   MAX_PLAINTEXT,
+  PUSH_TTL_S,
+  TOPIC_RE,
   generateVapidKeys,
   isAllowedEndpoint,
   vapidAuthorization,
