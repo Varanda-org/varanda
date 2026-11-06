@@ -22,6 +22,7 @@ const { openPagesStore } = require('../account/pages-store')
 const { openAgeStore } = require('../account/age-store')
 const { startAgeCheck, directoryFloor } = require('../account/age-check-state')
 const { createDidit } = require('../account/didit')
+const { parseGifConfig } = require('../account/gif-routes')
 const { removeWalletFiles } = require('../account/wallet-cleanup')
 const { generateVapidKeys } = require('../account/web-push')
 const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moderation-store')
@@ -522,7 +523,7 @@ function readEnv (env, dataDir) {
   if (limits.inviteDrops !== undefined && limits.invitesPerWeek === undefined) {
     throw new UsageError('VARANDA_INVITE_DROPS exige VARANDA_INVITES_PER_WEEK')
   }
-  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit) }
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), gif: readGifEnv(env) }
 }
 
 // Hosted age verification: both variables set is on, both unset or empty is
@@ -547,6 +548,27 @@ function readDiditEnv (env) {
     dailyLimit = value
   }
   return { apiKey, workflowId, dailyLimit }
+}
+
+// GIF search (../account/gif-routes.js): both variables set is on, both
+// unset or empty is off, one alone is a mistake the operator must see.
+// VARANDA_GIF_MEDIA_HOSTS (optional, exact hostnames separated by commas)
+// lists the hosts besides the API's that may serve the images. No value is
+// ever echoed: the key is a secret and the URL may carry one.
+function readGifEnv (env) {
+  const apiUrl = env.VARANDA_GIF_API_URL
+  const apiKey = env.VARANDA_GIF_API_KEY
+  const hasUrl = apiUrl !== undefined && apiUrl !== ''
+  const hasKey = apiKey !== undefined && apiKey !== ''
+  if (!hasUrl && !hasKey) return null
+  if (hasUrl !== hasKey) throw new UsageError('VARANDA_GIF_API_URL e VARANDA_GIF_API_KEY vêm juntas')
+  if (parseGifConfig({ apiUrl, apiKey: 'k' }) === null) throw new UsageError('VARANDA_GIF_API_URL inválido: use uma URL https sem usuário, consulta nem endereço IP')
+  if (parseGifConfig({ apiUrl, apiKey }) === null) throw new UsageError('VARANDA_GIF_API_KEY inválido')
+  const rawHosts = env.VARANDA_GIF_MEDIA_HOSTS
+  const mediaHosts = rawHosts === undefined || rawHosts.trim() === '' ? [] : rawHosts.split(',').map((h) => h.trim().toLowerCase())
+  const config = parseGifConfig({ apiUrl, apiKey, mediaHosts })
+  if (config === null) throw new UsageError('VARANDA_GIF_MEDIA_HOSTS inválido: use nomes de host separados por vírgula')
+  return config
 }
 
 // When the age check started to apply on this install: the app trusts a
@@ -659,7 +681,7 @@ async function serve (flags, env) {
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
   const pagesConfig = readPagesEnv(env)
-  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince } = readEnv(env, flags.dataDir)
+  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, gif } = readEnv(env, flags.dataDir)
   const { maxMembers = null, invitesPerWeek = null, inviteDrops = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
@@ -802,6 +824,7 @@ async function serve (flags, env) {
     }
     // 'desligada' reminds the operator that nobody is being asked.
     log({ event: 'idade', reason: didit !== null ? 'ligada' : 'desligada' })
+    log({ event: 'gif', reason: gif !== null ? 'ligada' : 'desligada' })
     // On every start, on or off, so an off period always moves the since
     // floor (age-check.json). An off start that cannot record it stops the
     // service; an on start that cannot read it stays up and the since route
@@ -862,7 +885,7 @@ async function serve (flags, env) {
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
       const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, invites, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, invites, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {

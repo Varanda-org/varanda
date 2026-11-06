@@ -1096,7 +1096,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
         sending={post.pending || pagePending || sendingMedia}
         sendDisabled={!canPost || !node.online || left < 0 || postHold !== null || mediaBlocked}
         editable={canPost && mediaHold === null && !sendingMedia}
-        onAttach={mediaApi !== null && canPost && postHold === null && check === null ? () => attachments.pick() : null}
+        onAttach={mediaApi !== null && canPost && postHold === null && check === null ? (kind, file) => attachments.pick(file) : null}
         onVoice={isTop && mediaApi !== null && canPost && postHold === null && check === null && mediaHold === null && attachments.items.length === 0 ? sendVoice : null}
         attachments={staged ? attachments.items : null}
         onRemoveAttachment={mediaHold === null ? attachments.remove : undefined}
