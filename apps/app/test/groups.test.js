@@ -60,8 +60,10 @@ test('rowsOf keeps line breaks and hands MentionText the raw text', async (t) =>
   const [hidden] = rowsOf([{ writer: A, diary: A, seq: 2, at, text: 'segredo', hidden: true }])
   t.is(hidden.text, HIDDEN_LABEL)
   t.is(hidden.rawText, '')
-  const source = readFileSync(join(__dirname, '../src/ui/GroupMessageRow.js'), 'utf8')
-  t.ok(source.includes('<MentionText text={item.rawText} style={styles.text} selectable />'))
+  const source = readFileSync(join(__dirname, '../src/screens/Grupo.js'), 'utf8')
+  t.ok(source.includes('rawText: row.hidden ? undefined : row.rawText'), 'Bubble gets the raw text for MentionText, never for a hidden row')
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes('<MentionText text={item.rawText}'), 'Bubble renders rawText through MentionText')
 })
 
 test('roleOf: from info.role, pending state, creator or writers', async (t) => {
@@ -531,4 +533,18 @@ test('page mode: read rows and communities are filtered', async (t) => {
   t.alike(pageReadItems(null), [])
   t.alike(pageCommunities({ communities: [{ community: C }, { community: 'x' }, null] }), [{ community: C }])
   t.alike(pageCommunities({}), [])
+})
+
+test('reconcile post: a reply is confirmed only by a message answering the same target', async (t) => {
+  const { reconcile } = await load()
+  const D = 'd'.repeat(64)
+  const W = 'a'.repeat(64)
+  const at = new Date(Date.now()).toISOString()
+  const sentAt = Date.parse(at)
+  const earlier = { diary: D, text: 'ok', at, hidden: false, replyTo: { writer: W, seq: 1 } }
+  const view = { items: [earlier], next: null, state: 'ok' }
+  t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt, replyKey: W + ':2' }, view), 'not-landed', 'the same text answering another message does not count')
+  t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt, replyKey: W + ':1' }, view), 'landed')
+  t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt, replyKey: null }, view), 'not-landed', 'a plain post is not confirmed by a reply')
+  t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt }, view), 'landed', 'without replyKey the old rule stays')
 })

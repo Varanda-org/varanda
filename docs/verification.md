@@ -4786,7 +4786,247 @@ Web e PWA (depois do iOS):
 - Ajustes lê a política de convites ao abrir: se o operador ligar os convites com Ajustes já aberto, um clique no aviso só leva a Convidar pessoas depois de fechar e abrir Ajustes de novo.
 - Nenhuma caixa executada nesta documentação.
 
-## 98. Aviso push de mensagem nova não aparece no aparelho que enviou (PR fix/dm-wake-self-notification)
+## 98. Linha de base da revisão visual (PR chore/assessment-lab)
+
+Primeira caminhada completa pelas telas do ciclo de [design-review.md](design-review.md), nas três plataformas, antes de qualquer correção visual deste PR. Serve de referência: as capturas mostram o ponto de partida, e cada rodada de correção depois compara com elas. A caminhada usa a Vitrine (dados de exemplo) para as telas sem conta e o laboratório hospedado (`apps/cli/scripts/hosted-lab.js`, em [development.md](development.md), "Instalação hospedada local") para a troca de mensagens entre duas pessoas.
+
+Regras que os passos conferem:
+
+- Cada tela sai nos temas claro e escuro, com texto grande e com movimento reduzido, nas plataformas em que a caminhada roda.
+- As capturas ficam fora do git, em `~/Workspace/evidencias/chore/assessment-lab/<plataforma>/`, uma pasta por plataforma, gravadas por `apps/app/scripts/review-shots.sh` com o rótulo `base-<tela>`. O registro do PR cita o caminho de cada uma.
+- Uma caixa só é marcada depois que o passo foi executado e a captura guardada. Nada abaixo foi executado nesta documentação.
+
+Como verificar, antes da caminhada, a partir da raiz:
+
+- `npm run lint`, que tem de passar.
+- `node apps/cli/test/hosted-lab.test.js` e `node apps/app/test/vitrine.test.js`, um arquivo por vez. São os testes do laboratório e da Vitrine; não substituem a caminhada.
+
+Android (AVD `varanda-api36`, primeiro):
+
+- [ ] A Vitrine sobe com `EXPO_PUBLIC_VARANDA_VITRINE=1`, e as telas do ciclo (A Rua, Conversa, Membro, Diário, Conversas e filtros, Mensagem, Comunidade, Grupo, ComunidadeInfo, Avisos, Busca, Publicar, Ajustes e Introdução) abrem com dados de exemplo. Capturas: `~/Workspace/evidencias/chore/assessment-lab/android/`.
+- [ ] Cada tela em tema claro e em tema escuro, com uma crítica curta (o que está bom, o que quebra a referência, a correção proposta) anotada no registro.
+- [ ] Texto grande e movimento reduzido: nenhum texto cortado, sobreposto ou escondido, e nenhum alvo de toque menor que 44 pt.
+
+iOS (simulador iPhone 16e, depois do Android):
+
+- [ ] As mesmas telas, em tema claro e escuro, com a Vitrine; capturas em `~/Workspace/evidencias/chore/assessment-lab/ios/`.
+- [ ] Texto grande e movimento reduzido, com a mesma conferência de corte, sobreposição e alvo de toque do Android.
+
+Web (Chrome, depois do iOS):
+
+- [ ] As mesmas telas em 390 px e em 1280 px, nos temas claro e escuro, com a Vitrine. Capturas em `~/Workspace/evidencias/chore/assessment-lab/web/`.
+- [ ] Laboratório hospedado com dois perfis do Chrome: Pessoa 1 e Pessoa 2 entram, trocam uma mensagem direta e uma publicação em grupo, e as duas telas mostram o que foi enviado. Registrar o número de cada passo que falhou, se algum.
+- [ ] Texto grande e movimento reduzido na web, sem corte nem sobreposição.
+
+Entrada nativa real (caixa separada: não é parte da revisão visual):
+
+- [ ] entrada nativa real: entrar com passkey e conta no app instalado, no Android e no iOS. Pré-requisitos que ainda faltam:
+  - iOS: o domínio associado da conta Apple Developer, sem o qual a passkey não entra.
+  - Android: o `assetlinks.json` da instalação precisa associar o build de debug (`app.varanda.debug`), o que a instalação de produção não faz e não deve fazer com a chave pública de debug. Até lá, o login com conta no Android usa o APK de preview do EAS (ver a seção Android de [development.md](development.md)).
+  - A configuração hospedada do app nativo exige `https`.
+
+Limites desta linha de base:
+
+- O laboratório só troca mensagens diretas no Chrome: o nó do aparelho recusa `dm.*` (`packages/core/lib/session.js`, linhas 614 a 621).
+- Uma caminhada aprovada não libera o login nativo real: esse é o portão separado, marcado acima.
+- A caminhada não corrige nada. As correções entram em rodadas posteriores, cada uma com as capturas da rodada anterior como comparação.
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 99. Transições, gesto de borda, movimento reduzido e Voltar (PR feat/ui-tokens-motion)
+
+Roteiro da transição entre telas da pilha (`apps/app/src/ui/StackLayer.js`, com os planos em `apps/app/src/stackMotion.js`), do gesto de voltar pela borda esquerda e do botão Voltar, nas três plataformas e nos dois temas. Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
+
+Regras que os passos conferem:
+
+- Uma tela aberta desliza da direita em 250 ms, e a volta a faz sair para a direita. A tela de baixo fica parada, e a barra de abas some enquanto há uma tela aberta (veja [app.md](app.md), "Navegação").
+- Movimento reduzido: a tela chega ao lugar final sem deslizar, na mesma direção e sem atraso. Conferir com o ajuste de movimento reduzido ligado e desligado, na abertura e na volta.
+- Gesto de borda: só um arrasto que começa a até 24 pt da borda esquerda da tela volta uma tela. Um arrasto que começa sobre o conteúdo é do que rola ali, e nada volta. Vale só para arrastar para a direita, com movimento mais horizontal que vertical.
+- Soltar: se o arrasto passou de 35% da largura, ou se foi um toque rápido com velocidade acima de 0,5 px por ms, a volta se completa a partir do ponto em que a tela está, na mesma velocidade. Senão a tela retorna ao lugar. Um arrasto que termina para a esquerda nunca volta, mesmo rápido.
+- Um segundo Voltar, ou um segundo arrasto, durante o deslize é ignorado. No Android, o botão Voltar é consumido nesse intervalo, e o app não sai.
+- Web: cada tela aberta é uma entrada do histórico. O Voltar do navegador e a tecla Escape fazem a mesma volta com o mesmo deslize, e histórico e pilha andam juntos.
+- Durante o deslize, nenhuma tela some, pisca, perde o estado (rolagem, rascunho) nem repete um carregamento.
+
+Android (AVD `varanda-api36`, primeiro):
+
+- [ ] Abrir Conversa a partir de A Rua: a tela desliza da direita. A volta pela seta da barra do topo a faz sair para a direita.
+- [ ] Arrasto a partir da borda esquerda passando de 35%: volta. Arrasto mais curto e solto: a tela retorna. Toque rápido e curto para a direita: volta.
+- [ ] Arrasto que começa no meio da tela, sobre uma lista: a lista rola e nenhuma tela volta.
+- [ ] Botão Voltar do Android durante o deslize: ignorado, o app continua aberto. Depois que o deslize termina: volta uma tela.
+- [ ] Movimento reduzido ligado: abrir e voltar sem deslize, com a mesma tela final.
+- [ ] Tema claro e tema escuro: nenhuma tela cortada, sobreposta ou vazia durante o deslize. Capturas em `~/Workspace/evidencias/feat/ui-tokens-motion/android/`.
+
+iOS (simulador iPhone 16e, depois do Android):
+
+- [ ] Os mesmos passos de abertura, volta e arrasto pela borda esquerda. Conferir que o gesto do próprio sistema, que começa na borda do simulador, não disputa com o do app.
+- [ ] Movimento reduzido ligado nos Ajustes de Acessibilidade do simulador: abrir e voltar sem deslize.
+- [ ] Tema claro e tema escuro, com a mesma conferência de corte e sobreposição do Android. Capturas em `~/Workspace/evidencias/feat/ui-tokens-motion/ios/`.
+
+Web (Chrome, depois do iOS):
+
+- [ ] Em 390 px e em 1280 px, nos temas claro e escuro: abrir uma tela e voltar pelo botão Voltar do navegador desliza e volta à tela de baixo; a tecla Escape faz o mesmo.
+- [ ] Em 390 px, com a emulação de toque do DevTools, arrasto a partir da borda esquerda: volta. Em 1280 px, anotar no registro se o arrasto pela borda funciona no conteúdo centrado, que fica numa coluna de 640 px.
+- [ ] Movimento reduzido ligado no sistema: abrir e voltar sem deslize, nas duas larguras. Capturas em `~/Workspace/evidencias/feat/ui-tokens-motion/web/`.
+
+Como verificar, antes da caminhada, a partir da raiz:
+
+- `npm run lint`, que tem de passar.
+- `node apps/app/test/stackMotion.test.js` e `node apps/app/test/stackEntries.test.js`, um arquivo por vez. Cobrem os planos de movimento, a regra de borda e a lista de telas, mas não o toque, o deslize nem a animação de verdade: só a caminhada mostra isso.
+
+Limites desta caminhada:
+
+- O bloqueio de um segundo Voltar dura até o fim do deslize mais 100 ms, para que a pilha nunca fique presa se a animação não avisar o próprio fim. Se um passo mostrar uma tela presa, anotar o caminho que levou a ela.
+- Não há medida de quadros por segundo nem de desempenho do deslize nesta caminhada.
+- O gesto de borda vale só para o app: o Safari do iOS e o navegador do Android têm gestos próprios, e a caminhada registra o que cada um faz, sem tratá-los como erro do app.
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 100. Conversas numa lista só (PR feat/conversas-inbox)
+
+Roteiro da aba Conversas como uma lista só no nó hospedado: busca, filtros, fixados, linhas, Pedidos de mensagem, Nova conversa, Comunidades, carga parcial e a volta pela notificação, nas três plataformas, nos dois temas, com texto grande e movimento reduzido. O comportamento descrito está em [app.md](app.md), seção "Conversas". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
+
+Regras que os passos conferem:
+
+- A lista traz as conversas privadas e os grupos das comunidades da pessoa, do mais recente para o mais antigo. O cabeçalho tem **+** (Nova conversa), ⓘ (ajuda) e o sino de Avisos.
+- **Buscar conversas** fica acima dos filtros, filtra as linhas carregadas, e o X limpa. Com texto na busca, os fixados somem, e o filtro escolhido continua valendo.
+- Os filtros são **Todas**, **Não lidas** e **Grupos**.
+- Fixados no topo: **Pedidos de mensagem**, com um ponto quando há pedido não lido (nunca um número; em **Não lidas**, só quando há pedido não lido), e **Comunidades**, com uma seta.
+- Cada linha tem avatar (pessoa redonda; grupo e comunidade em quadrado arredondado com iniciais), nome, prévia de uma linha ("Você:" à parte na própria última mensagem; em grupo, "Autor: texto"), hora relativa e um ponto (conversa privada) ou contador (grupo) na cor de destaque. Não há marcas de lido, de entrega nem de digitação.
+- **Pedidos de mensagem** é uma tela empilhada: entra deslizando, e a borda e o Voltar a fecham. Uma nota no topo diz que, até aceitar, quem enviou não sabe se você leu. Aceitar, Recusar e Bloquear ficam na conversa.
+- **+** abre Nova conversa: busca de pessoa pelo nome; **Novo grupo** abre Comunidades; **Nova comunidade** cria uma comunidade; com a busca vazia, **Conversas recentes** mostra até 8 pessoas.
+- **Comunidades** é uma tela empilhada que volta para Conversas, com grupos públicos, criação de comunidade e as minhas comunidades, com avatares quadrados.
+- A carga parcial mostra "Algumas conversas ainda não carregaram." com **tentar de novo**, distinto de "Nenhuma conversa ainda".
+- Tocar numa notificação volta para a lista inteira, com o filtro Todas e a busca limpa.
+
+Android (AVD `varanda-api36`, build de debug, primeiro):
+
+- [ ] Lista em tema claro e em tema escuro: ordem do mais recente, avatar redondo para pessoa e quadrado para grupo, prévia com "Você:" e "Autor: texto", hora, ponto ou contador.
+- [ ] Busca: o campo filtra as linhas e o X limpa. Com texto na busca, os fixados somem e o filtro escolhido continua valendo.
+- [ ] Filtros Todas, Não lidas e Grupos. Em Não lidas, Pedidos de mensagem só aparece com pedido não lido.
+- [ ] Pedidos de mensagem: ponto, nunca número. Abre como tela empilhada, que volta pela borda e pelo Voltar. Nota no topo. Aceitar, Recusar e Bloquear na conversa.
+- [ ] **+** abre Nova conversa: busca por nome, Novo grupo abre Comunidades, Nova comunidade, e Conversas recentes com a busca vazia.
+- [ ] Comunidades: volta para Conversas, mostra grupos públicos, cria comunidade e lista as minhas comunidades com avatares quadrados.
+- [ ] Carga parcial: "Algumas conversas ainda não carregaram." com tentar de novo, distinto do vazio "Nenhuma conversa ainda".
+- [ ] Notificação: a lista volta com o filtro Todas e a busca limpa.
+- [ ] Texto grande e movimento reduzido: nenhum texto cortado, sobreposto ou escondido, e nenhum alvo de toque menor que 44 pt. Capturas fora do git, uma pasta por plataforma.
+
+iOS (simulador iPhone 16e, depois do Android):
+
+- [ ] Os mesmos passos do Android, em tema claro e em tema escuro.
+- [ ] Texto grande e movimento reduzido, com a mesma conferência de corte, sobreposição e alvo de toque do Android.
+- [ ] Pedidos de mensagem e Comunidades, abertos e voltados pela borda esquerda: o gesto do próprio sistema, que começa na borda do simulador, não disputa com o do app.
+
+Web (Chrome, depois do iOS):
+
+- [ ] Em 390 px e em 1280 px, nos temas claro e escuro: lista, filtros, busca, Pedidos de mensagem, Nova conversa e Comunidades aparecem como descrito acima.
+- [ ] Em 390 px: Pedidos de mensagem e Comunidades abrem deslizando e voltam pelo Voltar do navegador.
+- [ ] Texto grande e movimento reduzido, nas duas larguras, sem corte nem sobreposição.
+
+Como verificar, antes da caminhada, a partir da raiz:
+
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- Na Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`), as conversas são dados de exemplo. Envio, aceite de pedido e busca com conversas reais só se conferem no laboratório hospedado, com duas pessoas, como na seção 94.
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 101. Balões, respostas e cabeçalhos das conversas (PR feat/chat-bubbles-replies)
+
+Roteiro das conversas privadas (Mensagem) e dos grupos (Grupo) com balões, respostas, cabeçalhos, campo de escrever compartilhado e emojis, nas três plataformas, nos dois temas, com texto grande e movimento reduzido. O comportamento descrito está em [app.md](app.md), seção "Conversa". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
+
+Regras que os passos conferem:
+
+- Conversa privada: o cabeçalho mostra o avatar, o nome e o @nome, e tocar neles abre o perfil. Um só ícone, **opções da conversa**, reúne bloquear, apagar e denunciar.
+- Balões: as suas à direita, na cor de destaque suave, e as da outra pessoa à esquerda, sobre a cor de cartão. A última mensagem de cada sequência tem cauda; a hora fica dentro do balão, embaixo à direita; os marcadores de dia ficam centralizados.
+- **Enviada** aparece só enquanto um envio está retido ou incerto.
+- Toque longo abre **Responder**, **Copiar** e **Denunciar**. Na web, com mouse ou teclado, uma seta pequena no canto do balão abre as mesmas ações.
+- A citação de uma resposta mostra "Você" ou o nome de quem escreveu a mensagem citada, e nenhum nome enquanto a mensagem citada não está carregada.
+- Campo de escrever: campo arredondado, botão de emoji, sugestões de @ (só na conta hospedada e online), botão de enviar redondo, que só aparece com texto, e barra de resposta com **Cancelar**. A caixa fica acima da área inferior do celular.
+- Menções tocadas abrem o perfil.
+- Pedidos de mensagem e conversa bloqueada seguem como antes.
+- Grupo: o cabeçalho mostra o nome e "N membros", e um só ícone de ajustes do grupo, que não aparece quando a pessoa age como página. A comunidade aparece como uma linha pequena e tocável abaixo do cabeçalho.
+- Comunidade: o cabeçalho mostra o avatar quadrado, o nome e "N membros", com os ícones de compartilhar e de informações; tocar no nome também abre Informações. Informações da comunidade usa o mesmo cabeçalho.
+- Grupo: cada pessoa forma as suas sequências. Na primeira mensagem de uma sequência de outra pessoa aparece o nome, numa cor fixa para cada pessoa; o avatar fica ao lado da última.
+- Grupo: toque longo abre **Responder**, **Copiar**, **Esconder** ou **Mostrar**, **Banir** e **Denunciar**, conforme as permissões de cada um. Responder não aparece quando a pessoa age como página.
+- Grupo: uma resposta real mostra a citação na nova bolha. Tocar na citação rola até a mensagem original, quando ela está carregada, e a resposta continua aparecendo depois de recarregar.
+- Grupo: o painel da página aparece uma vez, sob o cabeçalho.
+- Nenhuma tela mostra **lida**, **entregue** ou **digitando**, nas conversas privadas nem nos grupos.
+
+Android (AVD `varanda-api36`, build de debug, primeiro):
+
+- [ ] Conversa privada e grupo em tema claro e em tema escuro: balões, caudas, hora dentro do balão, marcadores de dia, nome por pessoa no grupo e avatar ao lado da última.
+- [ ] Toque longo abre as ações de cada tela, sem botão **⋯** em cada linha: Responder, Copiar e Denunciar na conversa privada; Responder, Copiar, Esconder ou Mostrar, Banir e Denunciar no grupo, conforme as permissões.
+- [ ] Resposta real num grupo: a citação aparece na nova bolha, tocar nela rola até a original quando ela está carregada, e a resposta continua depois de recarregar o app.
+- [ ] Campo de escrever: emoji, sugestões de @ com conta hospedada e online, enviar redondo só com texto, Cancelar na barra de resposta, e a caixa acima da área inferior do celular.
+- [ ] Cabeçalhos: a conversa privada abre o perfil ao tocar; o grupo mostra "N membros", os ajustes do grupo (ausentes quando a pessoa age como página) e a linha da comunidade.
+- [ ] Comunidade: compartilhar e informações abrem pelos ícones do cabeçalho; a lista de grupos mostra a última linha e o contador de novas.
+- [ ] Menções tocadas abrem o perfil. Pedidos de mensagem e conversa bloqueada seguem como antes.
+- [ ] Nenhuma tela mostra lida, entregue ou digitando.
+- [ ] Texto grande e movimento reduzido: nenhum texto cortado, sobreposto ou escondido, e nenhum alvo de toque menor que 44 pt. Capturas fora do git, uma pasta por plataforma.
+
+iOS (simulador iPhone 16e, depois do Android):
+
+- [ ] Os mesmos passos do Android, em tema claro e em tema escuro.
+- [ ] Texto grande e movimento reduzido, com a mesma conferência de corte, sobreposição e alvo de toque do Android.
+- [ ] A caixa de escrever fica acima da área inferior do aparelho, e o gesto de borda do sistema não disputa com o do app ao voltar de uma conversa.
+
+Web (Chrome, depois do iOS):
+
+- [ ] Em 390 px e em 1280 px, nos temas claro e escuro: os passos acima de balões, respostas, cabeçalhos e campo de escrever.
+- [ ] Em 390 px e em 1280 px, com mouse ou teclado, a seta no canto do balão abre as mesmas ações do toque longo.
+- [ ] Texto grande e movimento reduzido, nas duas larguras, sem corte nem sobreposição.
+
+Como verificar, antes da caminhada, a partir da raiz:
+
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- Na Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`), as conversas e os grupos são dados de exemplo. Envio, resposta real e menção com conversas reais só se conferem no laboratório hospedado, com duas pessoas, como na seção 94.
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 102. Menções de pessoas e Páginas nas conversas (PR feat/chat-mentions-pages)
+
+Roteiro das menções nas conversas privadas (Mensagem), nos grupos (Grupo) e em Publicar: sugestões de @ com pessoas e Páginas, e toque numa menção nas bolhas. O comportamento descrito está em [app.md](app.md), seções "Conversa" e "Grupo". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
+
+Regras que os passos conferem:
+
+- Sugestões de @: a partir de 2 caracteres, só na conta hospedada e online, na conversa privada, no grupo e em Publicar. Pessoas e Páginas aparecem juntas; uma Página tem o chip "Página", e pessoas vêm antes quando os dois casam igualmente.
+- Página encerrada ou movida não aparece nas sugestões.
+- Escolher uma sugestão só escreve o @nome no texto. Nenhuma tela abre.
+- Um @nome tocado numa bolha de conversa privada ou de grupo abre o perfil da pessoa ou o diário da Página, na mesma tela de Membro. Nas publicações, o toque segue como antes.
+- Menções em conversas não criam tipo novo de aviso: Avisos não ganha linha nova por causa delas.
+
+Android (AVD `varanda-api36`, build de debug, primeiro):
+
+- [ ] Conversa privada: um @ seguido de duas letras mostra pessoas e Páginas; escolher uma sugestão só escreve o @nome, e a mensagem enviada mostra a menção tocável.
+- [ ] Conversa privada: tocar a menção de uma pessoa abre o perfil dela; tocar a de uma Página abre o diário da Página.
+- [ ] Grupo: a mesma sugestão e o mesmo toque na bolha; cada toque abre o perfil ou o diário certo.
+- [ ] Publicar: a sugestão com o chip "Página" aparece, e a publicação enviada mostra a menção tocável.
+- [ ] Página encerrada ou movida não aparece nas sugestões das três telas.
+- [ ] Escolher uma sugestão não abre nenhuma tela, nas três telas.
+- [ ] Tema claro e tema escuro: chip, lista de sugestões e menções legíveis, sem texto cortado.
+- [ ] Avisos não ganha linha nova por causa das menções em conversa.
+
+iOS (simulador iPhone 16e, depois do Android):
+
+- [ ] Os mesmos passos do Android, em tema claro e em tema escuro, incluindo a lista de sugestões sobre a caixa de escrever.
+
+Web (Chrome, depois do iOS):
+
+- [ ] Em 390 px e em 1280 px, nos temas claro e escuro: os passos acima de sugestões, chip "Página" e toque nas bolhas e em Publicar.
+- [ ] Em 390 px e em 1280 px, com mouse ou teclado: escolher uma sugestão não navega, e o toque abre o perfil ou o diário certo.
+
+Como verificar, antes da caminhada, a partir da raiz:
+
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- O selo "Página" e o filtro de Páginas encerradas ou movidas dependem das marcas que o semeador manda na busca; um semeador antigo, sem essas marcas, mostra a Página como pessoa e não a filtra.
+- As sugestões dependem de conta hospedada e online, e o toque em menção, de conta hospedada. Fora disso o @nome segue como texto.
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 103. Aviso push de mensagem nova não aparece no aparelho que enviou (PR fix/dm-wake-self-notification)
 
 Num nó hospedado no navegador, o aviso push de mensagem direta nova (`dm-wake`, seção 11 de [protocol.md](protocol.md), "Push wake") é global: vai para todas as assinaturas, sem nome nem texto. Um aparelho que acabou de enviar uma mensagem recebia o aviso de volta, "Pode haver uma mensagem nova na Varanda", como se fosse de outra pessoa. A mudança faz três coisas, todas no navegador e sem nada novo no servidor:
 

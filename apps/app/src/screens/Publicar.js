@@ -35,7 +35,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT, activeMention, displayText } from '@varanda/rpc'
-import { MENTION_MIN_QUERY, insertMention, suggestionRows } from '../mentions'
+import { MENTION_MIN_QUERY, insertMention } from '../mentions'
+import { mergeSuggestions } from '../mentionTargets'
 import { useMemberSearch } from '../useMemberSearch'
 import { MentionSuggest } from '../ui/MentionSuggest'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -200,7 +201,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     else searchClear()
   }, [mentionQuery, searchSet, searchClear])
   const suggestions = mentionQuery !== ''
-    ? suggestionRows(search.hits, mentionQuery, me ? me.publicKey : null)
+    ? mergeSuggestions(search.hits, [], mentionQuery, me ? me.publicKey : null)
     : []
   // Attached items: { id, status: 'encoding' | 'invalid' | 'ready' |
   // 'uploading' | 'failed' | 'done', progress, thumb, encoded, descriptor,

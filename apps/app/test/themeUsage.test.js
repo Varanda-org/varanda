@@ -109,3 +109,39 @@ test('theme usage: no light-only literals in shared chrome', (t) => {
   const app = withoutComments(fs.readFileSync(path.join(APP, 'App.js'), 'utf8'))
   t.absent(app.includes('#ffffff'), 'App.js has no #ffffff')
 })
+
+// theme.js reads Platform only for font names. Swap that import so the token
+// check runs on Node, where react-native itself does not load.
+function themeModuleSource () {
+  const src = fs.readFileSync(path.join(APP, 'src/ui/theme.js'), 'utf8')
+  return src.replace(
+    "import { Platform } from 'react-native'\n",
+    'const Platform = { select (specifics) { return specifics && specifics.default } }\n'
+  )
+}
+
+test('theme usage: space, radius and the hit target are frozen', async (t) => {
+  const src = fs.readFileSync(path.join(APP, 'src/ui/theme.js'), 'utf8')
+  t.absent(src.includes('\u2014'), 'theme.js has no em dash')
+  const stubbed = themeModuleSource()
+  t.absent(stubbed.includes("from 'react-native'"), 'platform import is stubbed')
+  const theme = await import('data:text/javascript,' + encodeURIComponent(stubbed))
+  t.alike({ ...theme.space }, { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 })
+  t.alike({ ...theme.radius }, { sm: 8, md: 12, lg: 18, bubble: 18, pill: 999 })
+  t.alike({ ...theme.layout }, {
+    topBar: 52,
+    tabBar: 49,
+    fabSize: 56,
+    fabRight: 20,
+    fabAboveTabs: 17,
+    sheetTop: 52,
+    sheetRadius: 18,
+    sheetTopRow: 56,
+    band: 150,
+    column: 640,
+    hit: 44
+  })
+  t.ok(Object.isFrozen(theme.space))
+  t.ok(Object.isFrozen(theme.radius))
+  t.ok(Object.isFrozen(theme.layout))
+})

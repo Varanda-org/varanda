@@ -103,3 +103,15 @@ test('replyMarkOf: names cache, then the resolved parent, then pending or sem no
   }
   t.not(replyMarkOf({ cached: f({ name: '@alice', username: null }) }).startsWith('@'), true)
 })
+
+test('readsAs: invisibles, compatibility forms and case do not hide a look-alike', async (t) => {
+  const { readsAs } = await import('../src/who.js')
+  t.ok(readsAs('Você​', 'Você'), 'a trailing zero-width space')
+  t.ok(readsAs('​Vo­cê', 'Você'), 'a soft hyphen inside and a leading invisible')
+  t.ok(readsAs('você', 'Você'), 'case')
+  t.ok(readsAs('Ｖｏｃê', 'Você'), 'fullwidth letters fold under NFKC')
+  t.ok(readsAs('Você', 'Você'), 'a combining accent composes')
+  t.absent(readsAs('Vocês', 'Você'))
+  t.absent(readsAs('Ana', 'Você'))
+  t.absent(readsAs(null, 'Você'))
+})

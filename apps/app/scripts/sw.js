@@ -30,7 +30,7 @@
 // real DM wake still on screen. Whether Chrome counts a notice closed at once
 // as shown (with the app in the background it may show its own generic
 // notice) is not verified: the manual matrix in docs/verification.md section
-// 98 records it, and its results go back to the owner.
+// 103 records it, and its results go back to the owner.
 
 const VERSION = __VARANDA_VERSION__
 const PRECACHE = __VARANDA_PRECACHE__

@@ -104,6 +104,8 @@ import { loadIcons } from './src/ui/Icon'
 import { TabBar } from './src/ui/TabBar'
 import { TopBar } from './src/ui/TopBar'
 import { TopActions } from './src/ui/TopActions'
+import { StackLayer, stackBusy, useStackMotion } from './src/ui/StackLayer'
+import { stackEntries } from './src/stackEntries'
 import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
 import { HELP } from './src/help'
 import { layout, type } from './src/ui/theme'
@@ -113,8 +115,10 @@ import Avisos from './src/screens/Avisos'
 import BuscaGlobal from './src/screens/BuscaGlobal'
 import { Grupo } from './src/screens/Grupo'
 import { Conversas } from './src/screens/Conversas'
+import { Mensagens } from './src/screens/Mensagens'
+import { Comunidades } from './src/screens/Comunidades'
 import { Mensagem } from './src/screens/Mensagem'
-import { DEFAULT_SEGMENT, onDmOpen, onDmWake, requestDmOpen } from './src/dm-open'
+import { onDmOpen, onDmWake, requestDmOpen } from './src/dm-open'
 import { Comunidade } from './src/screens/Comunidade'
 import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
@@ -1225,6 +1229,7 @@ function Member () {
 
   // --- the screen stack ---
   const historyRef = useRef(null)
+  const stackMotion = useStackMotion(stack)
   const commitStack = useCallback((next) => {
     stackRef.current = next
     setStack(next)
@@ -1290,6 +1295,7 @@ function Member () {
   // the popstate handler pops and both stay in step; otherwise directly.
   const goBack = useCallback(() => {
     if (nav.depth(stackRef.current) === 0) return
+    if (stackBusy()) return
     const h = historyInStep()
     if (h) h.back()
     else commitStack(nav.pop(stackRef.current))
@@ -1406,9 +1412,8 @@ function Member () {
   const [groupSeen, setGroupSeen] = useState({ epoch: nodeEpoch, map: {} })
   const seenMap = groupSeen.epoch === nodeEpoch ? groupSeen.map : {}
   const topEntry = nav.top(stack)
-  // The Conversas tab shows the groups only on its Comunidades segment.
-  const [convSegment, setConvSegment] = useState(DEFAULT_SEGMENT)
-  const groupsTab = tab === 'comunidades' && convSegment === 'comunidades'
+  // The Conversas tab lists the groups beside the private conversations.
+  const groupsTab = tab === 'comunidades'
   const groupsOnScreen = mode === 'hosted' && ready && (groupsTab || (topEntry !== null && topEntry.screen === 'grupo'))
   const groupVersions = node.groupVersions || NO_VERSIONS
   useEffect(() => {
@@ -1482,6 +1487,7 @@ function Member () {
   // pull the wake is for runs here too.
   useEffect(() => onDmOpen(() => {
     clearStack()
+    setConvCompose(false)
     setTab('comunidades')
     setDmOpenCount((n) => n + 1)
     if (dmReady) dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
@@ -1504,6 +1510,18 @@ function Member () {
   const openMessage = useCallback((peer) => {
     pushScreen({ screen: 'mensagem', key: typeof peer === 'string' ? peer.toLowerCase() : peer, params: {} })
   }, [pushScreen])
+  const openCommunities = useCallback(() => {
+    pushScreen({ screen: 'comunidades' })
+  }, [pushScreen])
+  const openRequests = useCallback(() => {
+    pushScreen({ screen: 'pedidos' })
+  }, [pushScreen])
+  // The Conversas top bar: the "+" opens the NovaConversa sheet (the search
+  // field lives in the list). A lock, unlock or reset closes it.
+  const [convCompose, setConvCompose] = useState(false)
+  useEffect(() => {
+    setConvCompose(false)
+  }, [generation, locked])
 
   // --- the profile invite (src/profileLink.js) ---
   // The tabs are on screen and nothing hides them, so the follow toast (it
@@ -1761,6 +1779,7 @@ function Member () {
           closeAvisos()
           return true
         }
+        if (stackBusy()) return true
         commitStack(nav.pop(stackRef.current))
         return true
       })
@@ -2010,6 +2029,17 @@ function Member () {
     const on = (id) => tab === id && ready
     const shown = (id) => (tab === id ? styles.flex : styles.hidden)
     const stacked = nav.depth(stack) > 0
+    const tabActions = <TopActions key={tab} help={HELP[tab === 'comunidades' ? 'conversas' : tab]} onAvisos={mode === 'hosted' ? openAvisos : undefined} avisosNew={avisosNew} avisosActive={tab === 'avisos'} />
+    // Conversas puts its "+" before help and the bell (the WhatsApp header);
+    // its search is a field above the chips, not a header action.
+    const topRight = stacked
+      ? null
+      : tab === 'comunidades'
+        ? [
+            { icon: 'plus', label: 'nova conversa', onPress: () => setConvCompose(true) },
+            tabActions
+          ]
+        : tabActions
     // The invite note sits above the other notes, so it takes the top inset on
     // Diário and the note under it does not.
     const inviteNoteShown = !!(inviteDrop.note && atTabs && ajustes !== 'convites' && !stacked)
@@ -2034,6 +2064,102 @@ function Member () {
       onOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
       onOpenPeople: openPeople
     }
+    // Pushed screens, plus the one sliding out after a pop under its old index
+    // (and key), so it stays mounted until StackLayer says it has left. Both
+    // go through one stackEntries list: a separate sibling would remount it.
+    const renderStackEntry = (entry, i) => {
+      if (entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') {
+        // Keyed by the node epoch: a lock, unlock or identity change
+        // remounts the screen, so late answers from before are dropped.
+        return (
+          <StackLayer key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            {entry.screen === 'grupo'
+              ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onSeen={bumpSeen} />
+              : entry.screen === 'comunidade-info'
+                ? <ComunidadeInfo community={entry.key} onBack={goBack} onOpenMember={openMember} />
+                : <Comunidade community={entry.key} afterGroup={entry.params.group || null} isTop={i === stack.length - 1} seenTick={seenTick} onBack={goBack} onOpenGroup={openGroup} onOpenInfo={openCommunityInfo} />}
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'comunidades') {
+        return (
+          <StackLayer key={i + ':comunidades:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Comunidades onBack={goBack} onOpenGroup={openGroup} onOpenCommunity={openCommunity} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'pedidos') {
+        return (
+          <StackLayer key={i + ':pedidos:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Mensagens onBack={goBack} onOpenThread={openMessage} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'mensagem') {
+        return (
+          <StackLayer key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Mensagem peer={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} />
+          </StackLayer>
+        )
+      }
+      // The own following list keeps unfollow and the legacy local
+      // follows card; every other list is the public read-only one.
+      if (entry.screen === 'seguindo' && entry.key === ownKey) {
+        return (
+          <StackLayer key={i + ':seguindo:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Seguindo
+              active={ready}
+              entry={entry}
+              ownKey={ownKey}
+              onBack={goBack}
+              onReport={setReport}
+              onFollowsChanged={followsChanged}
+              onOpenMember={openMember}
+              onToast={showToast}
+              followsTick={version}
+              isTop={i === stack.length - 1}
+            />
+          </StackLayer>
+        )
+      }
+      // No pagesOn guard: a reconnect clears accountOrigin until
+      // node.info answers, and a page screen must never fall through
+      // to Membro. Each renders its own 'Disponível em breve.'.
+      if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'paginaajustes') {
+        const top = i === stack.length - 1
+        return (
+          <StackLayer key={i + ':' + entry.screen + ':' + (entry.key || '') + ':' + actingIdentity} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            {entry.screen === 'paginas'
+              ? <Paginas active={top} onBack={goBack} onNewPage={() => pushScreen({ screen: 'novapagina' })} onOpenPage={(key, row) => openMember(key, { page: true, closed: !!(row && row.closed), movedTo: row && typeof row.movedTo === 'string' ? row.movedTo : null })} onChanged={followsChanged} />
+              : entry.screen === 'novapagina'
+                ? <NovaPagina onBack={goBack} onCreated={(pageKey) => openMember(pageKey, { page: true })} />
+                : <PaginaAjustes entry={entry} onBack={goBack} onChanged={followsChanged} onOpenMember={openMember} />}
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'seguindo' || entry.screen === 'seguidores') {
+        return (
+          <StackLayer key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Pessoas
+              entry={entry}
+              ownKey={ownKey}
+              isTop={i === stack.length - 1}
+              active={ready}
+              onBack={goBack}
+              onOpenMember={openMember}
+              onFollowsChanged={followsChanged}
+              onToast={showToast}
+            />
+          </StackLayer>
+        )
+      }
+      const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
+      return (
+        <StackLayer key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+          <Screen entry={entry} {...screenProps} />
+        </StackLayer>
+      )
+    }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
         {tab !== 'diario'
@@ -2041,7 +2167,7 @@ function Member () {
             <TopBar
               title={TAB_TITLES[tab]}
               onBack={tab === 'avisos' && !stacked ? closeAvisos : undefined}
-              right={stacked ? null : <TopActions key={tab} help={HELP[tab === 'comunidades' ? 'conversas' : tab]} onAvisos={mode === 'hosted' ? openAvisos : undefined} avisosNew={avisosNew} avisosActive={tab === 'avisos'} />}
+              right={topRight}
             />
             )
           : null}
@@ -2134,7 +2260,19 @@ function Member () {
           {mode === 'hosted'
             ? (
               <View style={shown('comunidades')}>
-                <Conversas key={'g' + nodeEpoch} onOpenGroup={openGroup} onOpenCommunity={openCommunity} onOpenThread={openMessage} showMensagens={dmOpenCount} onSegment={setConvSegment} />
+                <Conversas
+                  key={'g' + nodeEpoch}
+                  active={on('comunidades') && !stacked}
+                  onOpenGroup={openGroup}
+                  onOpenCommunity={openCommunity}
+                  onOpenThread={openMessage}
+                  onOpenCommunities={openCommunities}
+                  onOpenRequests={openRequests}
+                  showInbox={dmOpenCount}
+                  seenTick={seenTick}
+                  composing={convCompose}
+                  onComposing={setConvCompose}
+                />
               </View>
               )
             : null}
@@ -2160,88 +2298,10 @@ function Member () {
             />
           </View>
         </View>
-        {stacked
+        {stacked || stackMotion.leaving
           ? (
-            <View style={styles.layer}>
-              {stack.map((entry, i) => {
-                if (entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') {
-                  // Keyed by the node epoch: a lock, unlock or identity change
-                  // remounts the screen, so late answers from before are dropped.
-                  return (
-                    <View key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
-                      {entry.screen === 'grupo'
-                        ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onReport={setReport} onSeen={bumpSeen} />
-                        : entry.screen === 'comunidade-info'
-                          ? <ComunidadeInfo community={entry.key} onBack={goBack} onOpenMember={openMember} />
-                          : <Comunidade community={entry.key} afterGroup={entry.params.group || null} isTop={i === stack.length - 1} seenTick={seenTick} onBack={goBack} onOpenGroup={openGroup} onOpenInfo={openCommunityInfo} />}
-                    </View>
-                  )
-                }
-                if (entry.screen === 'mensagem') {
-                  return (
-                    <View key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
-                      <Mensagem peer={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} />
-                    </View>
-                  )
-                }
-                // The own following list keeps unfollow and the legacy local
-                // follows card; every other list is the public read-only one.
-                if (entry.screen === 'seguindo' && entry.key === ownKey) {
-                  return (
-                    <View key={i + ':seguindo:' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
-                      <Seguindo
-                        active={ready}
-                        entry={entry}
-                        ownKey={ownKey}
-                        onBack={goBack}
-                        onReport={setReport}
-                        onFollowsChanged={followsChanged}
-                        onOpenMember={openMember}
-                        onToast={showToast}
-                        followsTick={version}
-                        isTop={i === stack.length - 1}
-                      />
-                    </View>
-                  )
-                }
-                // No pagesOn guard: a reconnect clears accountOrigin until
-                // node.info answers, and a page screen must never fall through
-                // to Membro. Each renders its own 'Disponível em breve.'.
-                if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'paginaajustes') {
-                  const top = i === stack.length - 1
-                  return (
-                    <View key={i + ':' + entry.screen + ':' + (entry.key || '') + ':' + actingIdentity} style={top ? styles.flex : styles.hidden}>
-                      {entry.screen === 'paginas'
-                        ? <Paginas active={top} onBack={goBack} onNewPage={() => pushScreen({ screen: 'novapagina' })} onOpenPage={(key, row) => openMember(key, { page: true, closed: !!(row && row.closed), movedTo: row && typeof row.movedTo === 'string' ? row.movedTo : null })} onChanged={followsChanged} />
-                        : entry.screen === 'novapagina'
-                          ? <NovaPagina onBack={goBack} onCreated={(pageKey) => openMember(pageKey, { page: true })} />
-                          : <PaginaAjustes entry={entry} onBack={goBack} onChanged={followsChanged} onOpenMember={openMember} />}
-                    </View>
-                  )
-                }
-                if (entry.screen === 'seguindo' || entry.screen === 'seguidores') {
-                  return (
-                    <View key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
-                      <Pessoas
-                        entry={entry}
-                        ownKey={ownKey}
-                        isTop={i === stack.length - 1}
-                        active={ready}
-                        onBack={goBack}
-                        onOpenMember={openMember}
-                        onFollowsChanged={followsChanged}
-                        onToast={showToast}
-                      />
-                    </View>
-                  )
-                }
-                const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
-                return (
-                  <View key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
-                    <Screen entry={entry} {...screenProps} />
-                  </View>
-                )
-              })}
+            <View style={styles.layer} pointerEvents='box-none'>
+              {stackEntries(stack, stackMotion.leaving).map(({ entry, index }) => renderStackEntry(entry, index))}
             </View>
             )
           : null}
@@ -2381,7 +2441,9 @@ const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1, backgroundColor: colors.bg },
   hidden: { display: 'none' },
-  layer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: colors.bg },
+  // Clear: each StackLayer paints its own background, so a slide shows the
+  // screen (or tab) under it.
+  layer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
   center: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', gap: 8 },
   shell: { flex: 1, width: '100%', maxWidth: layout.column, alignSelf: 'center', backgroundColor: colors.bg },
   shellWide: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: colors.line },

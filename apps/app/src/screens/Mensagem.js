@@ -1,9 +1,13 @@
 // Mensagem: one private conversation, pushed above the tabs (nav.js screen
 // 'mensagem', keyed by the peer's diary key). Props: { peer, isTop, onBack,
-// onOpenMember(peer), onReport({ dm, id, text, author }) }.
+// onOpenMember(peer), onOpenMention(username), onReport({ dm, id, text,
+// author }), onOpenInvite(link) }.
 // Oldest message on top, the composer at the bottom, scrolled to the end on
-// open and on new messages. The header names the peer from the profile
-// cache, never the raw key. Whether the conversation is a request or blocked
+// open and on new messages. The header (avatar, name, @nome) names the peer
+// from the profile cache, never the raw key; a tap on it opens the profile and
+// one icon opens the conversation options. Rows are shared Bubbles (tails,
+// day chips, five-minute runs); a long press offers Responder, Copiar and
+// Denunciar. An @nome in the text opens its profile. Whether the conversation is a request or blocked
 // comes from dm.thread itself (docs/rpc.md 5.78), never from a dm.list page;
 // until the first answer neither the composer nor the request actions show.
 // dm.seen runs only while this screen is the top of the stack and the app is
@@ -15,28 +19,33 @@
 // the person taps "Tentar de novo", sends the same text again (both re-put
 // the same bytes), discards it, or confirms sending a different text. No
 // read, delivered or typing state anywhere; an own message shows only
-// LABELS.sent.
+// LABELS.sent, and only while it is held or uncertain.
 // Acting as a page (actingAs.js), the same calls go through the page's signed
 // actions (pages.js); the composer then stays locked after an uncertain send
 // until "Tentar de novo" (the same signed bytes) or "Descartar", and never
 // signs a second message.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { KeyboardAvoidingView, Platform, StyleSheet, Text, TextInput, View } from 'react-native'
-import { MAX_TEXT } from '@varanda/rpc'
+import { KeyboardAvoidingView, Platform, StyleSheet, View } from 'react-native'
+import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { installationOrigin } from '../installation'
-import { whoOf } from '../who'
+import { UNNAMED, readsAs, whoOf } from '../who'
+import { OWN_LABEL } from '../groups'
+import { copyText } from '../share'
+import { shareNav } from '../shareNav'
 import { countChars } from '../format'
 import { LABELS, UNSURE_SEND } from '../dm'
-import { inviteLinkOf } from '../inviteMessage'
-import { mergeMessages, newestOf, pageDmRequest, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks } from '../dm-screen'
+import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
+import { mergeMessages, newestOf, pageDmRequest, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
 import { pagesDm } from '../pages'
 import { pagesOn } from '../pageGate'
 import { Btn, ErrorText, Soft, errorText, useAction, useNow } from '../ui'
-import { useStyles, useTheme } from '../ui/ThemeProvider'
-import { DmMessageRow } from '../ui/DmMessageRow'
+import { useStyles } from '../ui/ThemeProvider'
+import { Bubble } from '../ui/Bubble'
+import { ChatComposer } from '../ui/ChatComposer'
+import { ChatHeader } from '../ui/ChatHeader'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -47,9 +56,8 @@ import { memberKeyOf, useActing } from './Conversa'
 
 const BLOCKED_SEND = 'você bloqueou esta pessoa'
 
-export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, onOpenInvite }) {
+export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite }) {
   const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   const origin = installationOrigin() || globalThis.location?.origin || ''
   const node = useNode()
   const now = useNow(60000)
@@ -73,9 +81,16 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
   useEffect(() => {
     resolveMany([peer])
   }, [peer, resolveMany])
-  const nameText = whoOf(names.profileOf(peer)).title
+  const peerProfile = names.profileOf(peer)
+  const peerWho = whoOf(peerProfile)
+  // A known name or @nome always wins over the placeholder.
+  const nameText = peerWho.title === UNNAMED ? 'Pessoa' : peerWho.title
+  // In a quote the own messages are labelled OWN_LABEL: a peer whose display
+  // name is that same word shows as its @nome (or Pessoa) there, so a quote of
+  // the peer can never read like one of the person's own messages.
+  const quoteName = readsAs(nameText, OWN_LABEL) ? (peerWho.subtitle || 'Pessoa') : nameText
+  const quoteHandle = peerWho.subtitle || undefined
 
-  const [menuKey, setMenuKey] = useState(null)
   const [raw, setRaw] = useState([])
   const [next, setNext] = useState(null)
   const [loaded, setLoaded] = useState(false)
@@ -216,8 +231,10 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
     })
     const err = lastErr.current
     if (r.ok) {
-      setDraft('')
-      setReplyTo(null)
+      // A retry of a held message can land while a newer draft is being
+      // written: only the composer that still holds this text is cleared.
+      setDraft((d) => (d === text ? '' : d))
+      setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))
       setHold(null)
     } else if (r.uncertain || (err && err.message === UNSURE_SEND)) {
       setHold({ text, quoteId, retry: pageKey !== null && err && typeof err.retry === 'function' ? err.retry : null })
@@ -289,12 +306,15 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
   }
 
   const open = onOpenMember ? () => onOpenMember(peer) : undefined
-  const topRight = (
-    <View style={styles.headerRight}>
-      {open ? <Pill label='perfil' onPress={open} /> : null}
-      <Pill label='mais' onPress={() => setMenu(true)} accessibilityLabel='opções da conversa' />
-    </View>
-  )
+  const topRight = { icon: 'mais', label: 'opções da conversa', onPress: () => setMenu(true) }
+  // The peer's own username is known without a lookup, so that mention opens
+  // the profile directly; any other @nome goes to the app's resolver.
+  const mentionTap = onOpenMember || typeof onOpenMention === 'function'
+    ? (username) => {
+        if (open && peerProfile && peerProfile.username === username) open()
+        else if (typeof onOpenMention === 'function') onOpenMention(username)
+      }
+    : undefined
 
   if (!hosted || !unlocked) {
     return (
@@ -310,6 +330,30 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
     row.inviteLink = row.deleted === true || typeof onOpenInvite !== 'function'
       ? null
       : inviteLinkOf(row.rawText, origin)
+  }
+
+  // The author of a quoted message: the row it points to, found through the
+  // raw message's reply id (the row only carries the quote's text).
+  // Ids are unique only per sender: when two rows share one, the smaller
+  // sender key wins, the same rule threadOf uses for the quoted text, so the
+  // author and the text of a quote always come from the same message.
+  const rowById = new Map()
+  for (const r of rows) {
+    const held = rowById.get(r.id)
+    if (held === undefined || String(r.from) < String(held.from)) rowById.set(r.id, r)
+  }
+  const replyIdOf = new Map(raw.map((m) => [messageKey(m), m.replyTo]))
+  const quoteTarget = (item) => rowById.get(replyIdOf.get(item.key))
+  const quoteMine = (item) => {
+    const target = quoteTarget(item)
+    return !!target && target.mine === true
+  }
+  // A quote of a message outside the loaded page has no known author yet: no
+  // name, rather than one that changes when older messages load.
+  const quoteAuthor = (item) => {
+    const target = quoteTarget(item)
+    if (!target) return ''
+    return target.mine === true ? OWN_LABEL : quoteName
   }
 
   let blockNote = null
@@ -361,21 +405,17 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
       </View>
     )
   } else {
-    composer = (
-      <View style={styles.composer}>
-        {replyTo
-          ? (
-            <View style={styles.replying}>
-              <Text style={styles.replyText} numberOfLines={2}>{replyTo.text}</Text>
-              <Pill label='limpar' onPress={() => setReplyTo(null)} />
-            </View>
-            )
-          : null}
+    const notice = (
+      <View style={styles.notice}>
         {hold
           ? (
             <View style={styles.inline}>
               <Soft>{LABELS.uncertain}</Soft>
-              <Pill label='Tentar de novo' onPress={retryHeld} pending={post.pending} />
+              {/* A page re-puts only its signed bytes (hold.retry) and never signs
+                  a second message; a personal account sends the same text again. */}
+              {typeof hold.retry === 'function' || pageKey === null
+                ? <Pill label='Tentar de novo' onPress={typeof hold.retry === 'function' ? retryHeld : () => send(hold.text, hold.quoteId)} pending={post.pending} />
+                : null}
               <Pill label='descartar' onPress={() => { setHold(null); setAskNew(false) }} />
             </View>
             )
@@ -389,22 +429,21 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
             </View>
             )
           : null}
-        <View style={styles.composeRow}>
-          <TextInput
-            style={styles.input}
-            value={draft}
-            editable={!(hold && pageKey !== null)}
-            onChangeText={(t) => { setDraft(t); setAskNew(false) }}
-            multiline
-            maxLength={MAX_TEXT * 2}
-            placeholder='Escreva uma mensagem'
-            placeholderTextColor={colors.placeholder}
-            accessibilityLabel='mensagem'
-          />
-          <Btn label='Enviar' onPress={onSend} pending={post.pending} disabled={!canSend} />
-        </View>
-        {left < 50 ? <Soft>{left} caracteres restantes</Soft> : null}
       </View>
+    )
+    composer = (
+      <ChatComposer
+        value={draft}
+        onChangeText={(t) => { setDraft(t); setAskNew(false) }}
+        onSend={onSend}
+        sending={post.pending}
+        sendDisabled={!canSend}
+        editable={!(hold && pageKey !== null)}
+        reply={replyTo ? { name: replyTo.name, handle: replyTo.mine ? undefined : quoteHandle, text: replyTo.text, mine: replyTo.mine, senderKey: replyTo.mine ? undefined : peer } : null}
+        onCancelReply={() => setReplyTo(null)}
+        notice={notice}
+        ownKey={ownKey}
+      />
     )
   }
 
@@ -417,26 +456,48 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
   // shrinks for it (Android resizes the window itself: adjustResize).
   return (
     <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <TopBar title={nameText} onBack={onBack} right={topRight} />
+      <ChatHeader
+        title={nameText}
+        subtitle={peerWho.subtitle || undefined}
+        publicKey={peer}
+        picture={peerProfile ? peerProfile.avatar : undefined}
+        onBack={onBack}
+        onPress={open}
+        pressLabel='abrir o perfil'
+        right={topRight}
+      />
       <OfflineNote />
       <RefreshableList
         data={rows}
         listRef={listRef}
         keyExtractor={(row) => row.key}
-        renderItem={({ item, index }) => (
-          <DmMessageRow
-            item={item}
-            shape={bubbleShape(rows, index, { breakKey: menuKey })}
-            menuKey={menuKey}
-            onMenuChange={(open) => setMenuKey((k) => open ? item.key : k === item.key ? null : k)}
-            now={now}
-            origin={origin}
-            onOpenInvite={onOpenInvite}
-            onReply={() => setReplyTo({ id: item.id, text: item.deleted ? LABELS.deletedQuote : item.text })}
-            onReport={typeof onReport === 'function' && !item.mine && !item.deleted ? () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from }) : undefined}
-          />
-        )}
-        extraData={{ now, menuKey }}
+        renderItem={({ item, index }) => {
+          const mine = item.mine === true
+          const link = item.inviteLink || null
+          const actions = []
+          if (!item.deleted) {
+            actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
+            actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
+          }
+          if (!mine && !item.deleted && typeof onReport === 'function') {
+            actions.push({ icon: 'bandeira', label: LABELS.report, danger: true, onPress: () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from }) })
+          }
+          const quoted = item.replyTo !== null && item.replyTo !== undefined
+            ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer }
+            : null
+          return (
+            <Bubble
+              item={{ key: item.key, text: item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark }}
+              mine={mine}
+              shape={bubbleShape(rows, index)}
+              quote={quoted}
+              actions={actions}
+              onOpenMention={mentionTap}
+              below={link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
+            />
+          )
+        }}
+        extraData={{ now, nameText }}
         ListHeaderComponent={next ? <View style={styles.pad}><Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} /></View> : null}
         ListEmptyComponent={empty}
         onRefresh={refreshAll}
@@ -467,12 +528,10 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onReport, 
 
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   pad: { padding: 12, alignItems: 'center', gap: 6 },
   sheet: { padding: 16, gap: 12 },
   inline: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
-  replying: { flexDirection: 'row', alignItems: 'center', gap: 8, borderLeftWidth: 3, borderLeftColor: colors.accent, paddingLeft: 8 },
-  replyText: { flex: 1, fontSize: 13, color: colors.soft },
+  notice: { gap: 6, paddingHorizontal: 12, paddingTop: 6 },
   composer: {
     borderTopWidth: 1,
     borderTopColor: colors.line,
@@ -480,19 +539,5 @@ const makeStyles = (colors) => StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
     gap: 6
-  },
-  composeRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
-  input: {
-    flex: 1,
-    minHeight: 40,
-    maxHeight: 140,
-    borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: 20,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    fontSize: 16,
-    color: colors.ink,
-    backgroundColor: colors.bg
   }
 })

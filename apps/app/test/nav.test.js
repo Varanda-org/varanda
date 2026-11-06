@@ -195,7 +195,7 @@ test('history.web tolerates a missing history API; native is a no-op', async (t)
 
 test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes'])
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
   for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
@@ -259,6 +259,27 @@ test('seguidores is keyed by a lowercase hex64 key and refuses uppercase or post
   t.alike(top(onFollowing), { screen: 'seguidores', key: A, params: {} })
 })
 
+test('comunidades and pedidos take no key', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('comunidades'))
+  t.ok(SCREENS.includes('pedidos'))
+  for (const screen of ['comunidades', 'pedidos']) {
+    t.ok(validEntry({ screen }))
+    t.ok(validEntry({ screen, key: null }))
+    t.ok(validEntry({ screen, key: '' }))
+    const stack = push(EMPTY, { screen })
+    t.is(top(stack).screen, screen)
+    t.is(push(stack, { screen }), stack, 'same top is a no-op')
+    t.absent(validEntry({ screen, key: A }), 'a key is refused')
+    t.is(push(EMPTY, { screen, key: A }), EMPTY)
+  }
+  const deeper = push(push(EMPTY, { screen: 'comunidades' }), { screen: 'comunidade', key: A })
+  t.is(deeper.length, 2, 'a community opens on top of the list')
+  const thread = push(push(EMPTY, { screen: 'pedidos' }), { screen: 'mensagem', key: A })
+  t.is(thread.length, 2, 'a request thread opens on top of the folder')
+  t.is(push(push(EMPTY, { screen: 'comunidades' }), { screen: 'pedidos' }).length, 2, 'pedidos is another screen')
+})
+
 test('paginas and novapagina take no key, paginaajustes a lowercase hex64 page key', async (t) => {
   const { EMPTY, push, top, validEntry } = await loadNav()
   for (const screen of ['paginas', 'novapagina']) {
@@ -276,4 +297,43 @@ test('paginas and novapagina take no key, paginaajustes a lowercase hex64 page k
     t.absent(validEntry({ screen: 'paginaajustes', key }), String(key))
     t.is(push(EMPTY, { screen: 'paginaajustes', key }), EMPTY)
   }
+})
+
+test('popTo drops back to an index and refuses bounds outside the stack', async (t) => {
+  const { EMPTY, MAX_DEPTH, SCREENS, push, pop, popTo, top } = await loadNav()
+  t.is(MAX_DEPTH, 20)
+  t.is(SCREENS.length, 14, 'popTo adds no screen id')
+  let stack = EMPTY
+  for (let i = 1; i <= 4; i++) stack = push(stack, { screen: 'conversa', key: A + ':' + i })
+  t.is(popTo(stack, 3), stack, 'the top index is a no-op')
+  t.is(popTo(stack, -1), stack, 'below the first screen is refused')
+  t.is(popTo(stack, 4), stack, 'past the top is refused')
+  t.is(popTo(stack, 1.5), stack, 'a fractional index is refused')
+  t.is(popTo(stack, NaN), stack)
+  t.is(popTo(stack, Infinity), stack)
+  t.is(popTo(stack, '1'), stack)
+  t.is(popTo(null, 0), EMPTY)
+  t.is(popTo(undefined, 0), EMPTY)
+  const mid = popTo(stack, 1)
+  t.is(mid.length, 2)
+  t.ok(Object.isFrozen(mid))
+  t.is(top(mid).key, A + ':2')
+  t.is(mid[0], stack[0], 'entries stay shared')
+  t.is(stack.length, 4, 'popTo does not mutate')
+  t.alike(popTo(stack, stack.length - 2), pop(stack))
+  const root = popTo(stack, 0)
+  t.is(root.length, 1)
+  t.is(top(root).key, A + ':1')
+  t.ok(Object.isFrozen(root))
+  t.is(popTo(root, 0), root, 'already on that screen')
+  t.is(pop(root), EMPTY, 'pop of the last screen still clears')
+  t.is(popTo(EMPTY, 0), EMPTY)
+  t.is(popTo(EMPTY, -1), EMPTY)
+  let deep = EMPTY
+  for (let i = 1; i <= MAX_DEPTH + 3; i++) deep = push(deep, { screen: 'conversa', key: A + ':' + i })
+  t.is(deep.length, MAX_DEPTH)
+  const oldest = popTo(deep, 0)
+  t.is(oldest.length, 1)
+  t.is(oldest[0], deep[0])
+  t.is(MAX_DEPTH, 20, 'popTo does not raise the cap')
 })

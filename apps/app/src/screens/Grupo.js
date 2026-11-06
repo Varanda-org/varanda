@@ -1,12 +1,18 @@
 // Grupo: one group's conversation, pushed above the tabs (nav.js screen
 // 'grupo', keyed by the group root). Props: { group, onBack,
-// onOpenCommunity(community, { group }?), onOpenMember(diary),
+// onOpenCommunity(community, { group }?), onOpenMember(diary), onOpenMention(username),
 // onReport(target), onSeen(group), isTop }, with `target` in Denunciar's shape
 // { author, name, username, seq, text, group, writer, private }; onSeen runs
 // after every group.seen attempt, answered or not. Only what the person sees
 // is marked seen, up to the newest painted row: the app visible, this screen
 // on top (isTop false: buried under another screen) and the latest read
-// painted. Renders GrupoAjustes itself as a sheet. The top bar names the group's community (a pill that opens it).
+// painted. Renders GrupoAjustes itself as a sheet, opened by the header's
+// settings icon or a tap on its titles. The header shows the group's name
+// and member count; the community is a small line under it that opens it.
+// Messages are bubbles (group-screen.js groupRows, ui/Bubble): a long press
+// offers Responder, Copiar, Esconder, Banir and Denunciar under can(). A reply
+// is sent as group.post replyTo { writer, seq } and drawn as a quote of the
+// loaded target only (never fetched).
 // A group without a community (orphan) is read-only. Joining needs the
 // community first: a group opened from a /g/<hex> link this node does not
 // know is looked up in the seeder index, and its community opens first with
@@ -26,23 +32,32 @@
 // state, like Avisos.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
+import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars } from '../format'
+import { groupRows, replyPreview } from '../group-screen'
+import { UNNAMED, readsAs, whoOf } from '../who'
+import { copyText } from '../share'
+import { shareNav } from '../shareNav'
 import {
   AS_PAGE_LABEL, DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT,
-  EMPTY_PAGES, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PRIVATE_LABEL, REKEY_PENDING_LABEL,
-  applyPage, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, joinLabel, membersLabel, needsDeviceJoin, pageCan, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, rowsOf, sealedLabel, visibilityLabel
+  EMPTY_PAGES, OWN_LABEL, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PRIVATE_LABEL, REKEY_PENDING_LABEL,
+  applyPage, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, membersLabel, needsDeviceJoin, pageCan, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
 } from '../groups'
 import { Btn, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
-import { GroupMessageRow } from '../ui/GroupMessageRow'
+import { Avatar } from '../ui/Avatar'
+import { Bubble } from '../ui/Bubble'
+import { ChatComposer } from '../ui/ChatComposer'
+import { ChatHeader } from '../ui/ChatHeader'
+import { Icon } from '../ui/Icon'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
+import { space } from '../ui/theme'
 import { fetchGroup } from '../indexClient'
 import { useNames } from '../names'
 import { pagesOn } from '../pageGate'
@@ -70,11 +85,10 @@ const CHECK_NOT_LANDED = 'Não foi aplicado. Você pode tentar de novo.'
 const READERS = ['creator', 'admin', 'member']
 const JOINABLE = [null, 'left', 'pending']
 
-export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport, onSeen, isTop = true }) {
+export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMention, onReport, onSeen, isTop = true }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
-  const now = useNow(60000)
   const hosted = node.hosted === true
   const ownKey = node.passkey && node.passkey.status ? node.passkey.status.publicKey : null
   const acting = useActing()
@@ -96,6 +110,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   const [moreError, setMoreError] = useState('')
   const [loadingMore, setLoadingMore] = useState(false)
   const [draft, setDraft] = useState('')
+  // The message being answered, as its 'writer:seq' key; null when none.
+  const [replyKey, setReplyKey] = useState(null)
+  const [replyQuote, setReplyQuote] = useState(null)
   const [check, setCheck] = useState(null)
   const [banTarget, setBanTarget] = useState(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -302,7 +319,11 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   }, [readGroup, loadingMore, readNewest])
 
   const rawItems = useMemo(() => itemsOf(store), [store])
-  const rows = useMemo(() => rowsOf(rawItems), [rawItems])
+  // The day chips ("hoje", "ontem") follow the clock: the rows are rebuilt
+  // when the local day changes, even in a quiet group left open.
+  const now = useNow(60 * 1000)
+  const today = new Date(now).toDateString()
+  const rows = useMemo(() => groupRows(rawItems, ownKey, now), [rawItems, ownKey, today])
   const rawById = useMemo(() => {
     const m = new Map()
     for (const i of rawItems) m.set(i.writer + ':' + i.seq, i)
@@ -340,6 +361,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
       if (change.action === 'post') {
         setDraft((d) => (d === change.text ? '' : d))
         setPostHold(null)
+        if (typeof change.replyKey === 'string') setReplyKey((k) => (k === change.replyKey ? null : k))
       }
       return
     }
@@ -398,7 +420,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
     return pagesGroup(node, { member, page: asPage.key, action, op })
   }
 
-  const sendPost = async (text) => {
+  // `replyTo` is { writer, seq } exactly (rpc group.post) or null. A page's
+  // statement carries no reply: Responder is not offered as a page.
+  const sendPost = async (text, replyTo = null) => {
     if (typeof text !== 'string' || text.trim() === '' || !node.online) return
     if (asPage.page) {
       pageSend(pageStatement('group-post', { group, text }), text, Date.now())
@@ -407,14 +431,62 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
     setCheck(null)
     setPostHold(null)
     const sentAt = Date.now()
-    const r = await post.run(() => request('group.post', { group, text }))
+    const params = replyTo ? { group, text, replyTo: { writer: replyTo.writer, seq: replyTo.seq } } : { group, text }
+    const r = await post.run(() => request('group.post', params))
     if (r.ok) {
       setDraft((d) => (d === text ? '' : d))
+      if (replyTo) setReplyKey((k) => (k === replyTo.writer + ':' + replyTo.seq ? null : k))
       readNewest().then(() => scrollToEnd(), () => {})
     } else if (r.uncertain) {
       setPostHold(text)
-      settle({ action: 'post', diary: ownKey, text, sentAt }, () => sendPost(text))
+      settle({ action: 'post', diary: ownKey, text, sentAt, replyKey: replyTo ? replyTo.writer + ':' + replyTo.seq : null }, () => sendPost(text, replyTo))
     }
+  }
+
+  // The reply target is read from its key, never from the loaded pages: a
+  // refresh that drops the target from rawById must not turn the reply into a
+  // plain message.
+  const sendDraft = () => {
+    const m = replyKey !== null && !asPage.page ? /^([0-9a-f]{64}):([1-9][0-9]*)$/.exec(replyKey) : null
+    sendPost(draft, m ? { writer: m[1], seq: Number(m[2]) } : null)
+  }
+
+  // The names cache first, then what the read carried; never key characters.
+  const profileFor = (row) => {
+    const raw = rawById.get(row.key || row.id)
+    const cached = names && typeof row.diary === 'string' ? names.profileOf(row.diary) : undefined
+    return cached || (raw ? { name: raw.name, username: raw.username } : undefined)
+  }
+
+  // A quote of a loaded message only; a hidden target shows its label alone.
+  const quoteOf = (key) => {
+    const p = replyPreview({ replyTo: key }, rawById)
+    if (!p) return null
+    const target = rawById.get(key)
+    const known = target && target.hidden !== true && typeof target.diary === 'string' && names ? names.profileOf(target.diary) : undefined
+    const mine = !!(target && typeof ownKey === 'string' && target.diary === ownKey)
+    // The own message is quoted as OWN_LABEL, as in the private chat; a peer
+    // whose name is that same word shows as its @nome (or Pessoa) instead.
+    const peerName = known ? whoOf(known).title : p.name
+    const peerHandle = known ? whoOf(known).subtitle : (target && !mine ? whoOf({ username: target.username }).subtitle : null)
+    const peerQuoted = readsAs(peerName, OWN_LABEL) ? (peerHandle || 'Pessoa') : peerName
+    return {
+      name: mine && target.hidden !== true ? OWN_LABEL : peerQuoted,
+      handle: mine || !target || target.hidden === true ? undefined : (peerHandle || undefined),
+      text: p.text,
+      senderKey: target ? target.diary || target.writer : undefined,
+      mine
+    }
+  }
+
+  const scrollToKey = (key) => {
+    const index = rows.findIndex((r) => r.key === key)
+    const list = listRef.current
+    if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return
+    // An unmeasured row far up throws without getItemLayout: stay put then.
+    try {
+      list.scrollToIndex({ index, animated: true, viewPosition: 0.5 })
+    } catch {}
   }
 
   const hide = async (row, on) => {
@@ -504,11 +576,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   }, [asPage.page, visible, isTop, reader, lastId, loadedAt, loadError, markSeen])
 
   const nameText = info && typeof info.name === 'string' && info.name !== ''
-    ? displayText(info.name)
+    ? info.name
     : (isPrivate || info === null ? PRIVATE_LABEL : 'grupo')
-  const subtitle = info
-    ? [visibilityLabel(info.visibility), joinLabel(info.join), membersLabel(info.members)].filter(Boolean).join(' · ')
-    : ''
+  const subtitle = info ? membersLabel(info.members) || visibilityLabel(info.visibility) : ''
   const heldCommunity = info && typeof info.community === 'string' && HEX64.test(info.community) ? info.community : null
   const communityKey = heldCommunity || indexCommunity
   const orphan = info !== null && info.orphan === true
@@ -623,27 +693,23 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
     )
   }
 
-  const headerRight = (
-    <View style={styles.headerRight}>
-      {heldCommunity && typeof onOpenCommunity === 'function'
-        ? <Pill label={communityName !== '' ? displayText(communityName) : 'comunidade'} onPress={() => onOpenCommunity(heldCommunity)} accessibilityLabel='abrir a comunidade' />
-        : null}
-      {asPage.page ? <Pill label={AS_PAGE_LABEL} accessibilityLabel='você está como a página' /> : null}
-      {info && !asPage.page
-        ? (
-          <Pressable
-            accessibilityRole='button'
-            accessibilityLabel='ajustes do grupo'
-            hitSlop={10}
-            onPress={() => setSettingsOpen(true)}
-            style={({ pressed }) => [styles.gear, pressed && styles.pressed]}
-          >
-            <Text style={styles.gearText}>⋯</Text>
-          </Pressable>
-          )
-        : null}
-    </View>
-  )
+  const canSettings = info !== null && !asPage.page
+  const openSettings = canSettings ? () => setSettingsOpen(true) : undefined
+  const communityLine = heldCommunity && typeof onOpenCommunity === 'function'
+    ? (
+      <Pressable
+        accessibilityRole='link'
+        accessibilityLabel='abrir a comunidade'
+        onPress={() => onOpenCommunity(heldCommunity)}
+        hitSlop={6}
+        style={({ pressed }) => [styles.community, pressed && styles.pressed]}
+      >
+        <Icon name='gente' size={14} color={colors.soft} />
+        <Text style={styles.communityText} numberOfLines={1}>{communityName !== '' ? displayText(communityName) : 'comunidade'}</Text>
+        <Icon name='seta' size={14} color={colors.soft} />
+      </Pressable>
+      )
+    : null
 
   const checkNote = check
     ? (
@@ -663,7 +729,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   const banNote = banTarget
     ? (
       <View style={styles.note}>
-        <Soft>Banir {banTarget.author} deste grupo? A pessoa não poderá mais escrever aqui.</Soft>
+        <Soft>Banir {displayText(whoOf(profileFor(banTarget)).title)} deste grupo? A pessoa não poderá mais escrever aqui.</Soft>
         <View style={styles.inline}>
           <Pill label='banir' danger onPress={() => ban(banTarget)} pending={act.pending} />
           <Pill label='cancelar' onPress={() => setBanTarget(null)} />
@@ -737,23 +803,56 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   else if (reader) empty = <EmptyState icon='cadeira' title='Nenhuma mensagem ainda' body={deviceJoin ? undefined : 'Escreva a primeira.'} />
   else empty = infoError ? <ErrorState message={infoError} onRetry={() => load()} pending={loading} /> : null
 
-  const renderItem = ({ item }) => {
-    const raw = rawById.get(item.id)
-    const own = typeof ownKey === 'string' && item.diary === ownKey
+  // Esconder, Banir and Denunciar keep the rules of the old row; Responder
+  // needs a post this screen can send, and never as a page.
+  const actionsOf = (row) => {
+    const mine = row.mine === true
+    const list = []
+    if (!asPage.page && canPost && !row.hidden) {
+      list.push({ icon: 'responder', label: 'Responder', onPress: () => { setReplyKey(row.key); setReplyQuote(quoteOf(row.key)) } })
+    }
+    if (!row.hidden && typeof row.rawText === 'string' && row.rawText !== '') {
+      list.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(row.rawText, { multiline: true })) } })
+    }
+    if (!asPage.page && can('hide', role, { own: mine })) {
+      list.push({ icon: row.hidden ? 'olho' : 'olho_fechado', label: row.hidden ? 'Mostrar' : 'Esconder', onPress: () => hide(row, !row.hidden) })
+    }
+    if (!asPage.page && can('ban', role) && !!row.diary && !mine) {
+      list.push({ icon: 'fechar', label: 'Banir', danger: true, onPress: () => setBanTarget(row) })
+    }
+    if (typeof onReport === 'function' && !!row.diary && !mine && !row.hidden) {
+      list.push({ icon: 'bandeira', label: 'Denunciar', danger: true, onPress: () => report(row) })
+    }
+    return list
+  }
+
+  const renderItem = ({ item: row }) => {
+    const mine = row.mine === true
+    const profile = profileFor(row)
+    const known = whoOf(profile)
+    const who = known.title === UNNAMED ? { ...known, title: 'Pessoa' } : known
+    const quote = row.replyTo ? quoteOf(row.replyTo) : null
+    const openMember = typeof onOpenMember === 'function' && row.diary ? () => onOpenMember(row.diary) : undefined
+    const avatar = mine
+      ? undefined
+      : (
+        <Pressable accessibilityRole='link' accessibilityLabel={displayText(who.title) + ', ver perfil'} disabled={!openMember} onPress={openMember} hitSlop={4}>
+          <Avatar name={who.avatarName} publicKey={row.diary || row.writer} picture={profile && profile.avatar ? profile.avatar : undefined} size={32} persist={false} />
+        </Pressable>
+        )
     return (
-      <GroupMessageRow
-        item={item}
-        name={raw && raw.name ? raw.name : (asPage.page && names && item.diary ? (names.nameOf(item.diary) || null) : null)}
-        username={raw ? raw.username : null}
-        own={own}
-        now={now}
-        canHide={!asPage.page && can('hide', role, { own })}
-        canBan={!asPage.page && can('ban', role) && !!item.diary}
-        canReport={typeof onReport === 'function' && !!item.diary}
-        onHide={(on) => hide(item, on)}
-        onBan={() => setBanTarget(item)}
-        onReport={() => report(item)}
-        onOpenMember={typeof onOpenMember === 'function' && item.diary ? () => onOpenMember(item.diary) : undefined}
+      <Bubble
+        item={{ key: row.key, text: row.text, rawText: row.hidden ? undefined : row.rawText, at: row.at, hidden: row.hidden, dayMark: row.dayMark }}
+        mine={mine}
+        shape={row.shape}
+        name={mine ? undefined : who.title}
+        handle={mine ? undefined : who.subtitle}
+        senderKey={row.diary || row.writer}
+        avatar={avatar}
+        quote={quote ? { ...quote, onPress: () => scrollToKey(row.replyTo) } : null}
+        actions={actionsOf(row)}
+        actionsTitle={mine ? undefined : who.title}
+        onOpenMention={typeof onOpenMention === 'function' ? onOpenMention : undefined}
       />
     )
   }
@@ -768,6 +867,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   // Private, writer here, but no epoch key yet: the same words as rekey-pending.
   const awaitingKey = !asPage.page && isPrivate && !canWriteHere(info) && !deviceJoin && meta.state !== 'rekey-pending' && info !== null && info.writerHere !== false
   const waitToWrite = !asPage.page && !showJoinCard && !orphan && !canWriteHere(info) && (role === 'creator' || role === 'admin' || role === 'member') && meta.state !== 'rekey-pending'
+  const replyBar = replyKey !== null && !asPage.page ? (quoteOf(replyKey) || replyQuote) : null
   let composer = null
   if (reader && showJoinCard && !orphan) {
     composer = (
@@ -779,33 +879,31 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
       </View>
     )
   } else if (asPage.page ? pageRole === 'member' : reader) {
-    composer = (
-      <View style={styles.composer}>
-        {waitToWrite ? <Soft>{awaitingKey ? REKEY_PENDING_LABEL : (communityJoin === 'approval' && !isPrivate ? DEVICE_APPROVAL_TEXT : DEVICE_WAIT_TEXT)}</Soft> : null}
-        {orphan ? <Soft>{ORPHAN_TEXT}</Soft> : null}
-        {!node.online ? <Soft>{OFFLINE_POST_TEXT}</Soft> : null}
-        <ErrorText>{post.error}</ErrorText>
-        <View style={styles.composeRow}>
-          <TextInput
-            style={styles.input}
-            value={draft}
-            onChangeText={(t) => { setDraft(t); setPostHold(null) }}
-            multiline
-            maxLength={MAX_TEXT * 2}
-            editable={canPost}
-            placeholder={meta.state === 'rekey-pending' || awaitingKey ? REKEY_PENDING_LABEL : 'Escreva uma mensagem'}
-            placeholderTextColor={colors.placeholder}
-            accessibilityLabel='mensagem para o grupo'
-          />
-          <Btn
-            label='Enviar'
-            onPress={() => sendPost(draft)}
-            pending={post.pending}
-            disabled={!canPost || !node.online || draft.trim() === '' || left < 0 || postHold !== null}
-          />
+    const notes = waitToWrite || orphan || !node.online || post.error
+      ? (
+        <View style={styles.composeNotes}>
+          {waitToWrite ? <Soft>{awaitingKey ? REKEY_PENDING_LABEL : (communityJoin === 'approval' && !isPrivate ? DEVICE_APPROVAL_TEXT : DEVICE_WAIT_TEXT)}</Soft> : null}
+          {orphan ? <Soft>{ORPHAN_TEXT}</Soft> : null}
+          {!node.online ? <Soft>{OFFLINE_POST_TEXT}</Soft> : null}
+          <ErrorText>{post.error}</ErrorText>
         </View>
-        {left < 50 ? <Soft>{left} caracteres restantes</Soft> : null}
-      </View>
+        )
+      : null
+    composer = (
+      <ChatComposer
+        value={draft}
+        onChangeText={(t) => { setDraft(t); setPostHold(null) }}
+        onSend={sendDraft}
+        sending={post.pending || pagePending}
+        sendDisabled={!canPost || !node.online || left < 0 || postHold !== null}
+        editable={canPost}
+        placeholder={meta.state === 'rekey-pending' || awaitingKey ? REKEY_PENDING_LABEL : 'Escreva uma mensagem'}
+        accessibilityLabel='mensagem para o grupo'
+        reply={replyBar ? { name: replyBar.name, text: replyBar.text, senderKey: replyBar.senderKey, mine: replyBar.mine } : null}
+        onCancelReply={() => setReplyKey(null)}
+        notice={notes}
+        ownKey={ownKey}
+      />
     )
   }
 
@@ -813,14 +911,40 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
   // shrinks for it (Android resizes the window itself: adjustResize).
   return (
     <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <TopBar title={nameText} subtitle={subtitle} onBack={onBack} right={headerRight} />
+      <ChatHeader
+        title={nameText}
+        subtitle={subtitle}
+        publicKey={group}
+        group
+        onBack={onBack}
+        onPress={openSettings}
+        pressLabel='informações do grupo'
+        right={canSettings ? { icon: 'engrenagem', label: 'ajustes do grupo', onPress: openSettings } : undefined}
+      />
+      {communityLine}
+      {asPage.page
+        ? (
+          <View style={[styles.note, styles.pagePanel]}>
+            {pageRoleLabel(pageRole) ? <Soft>{AS_PAGE_LABEL + ' · ' + pageRoleLabel(pageRole)}</Soft> : null}
+            {pageRoleLabel(pageRole) ? null : <Soft>{AS_PAGE_LABEL}</Soft>}
+            <View style={styles.inline}>
+              {pageRole === 'member' || pageRole === 'requested'
+                ? <Pill label={PAGE_LEAVE_LABEL} onPress={() => pageMembership(pageStatement('group-leave', { group }))} pending={pagePending} />
+                : <Btn label={PAGE_JOIN_LABEL} onPress={enter} pending={pagePending} disabled={!node.online} />}
+              {pageRetry ? <Pill label='conferir de novo' onPress={pageRetry} pending={pagePending} /> : null}
+            </View>
+            <ErrorText>{pageError}</ErrorText>
+          </View>
+          )
+        : null}
       <OfflineNote />
       <RefreshableList
         listRef={listRef}
         data={reader ? rows : []}
-        keyExtractor={(row) => row.id}
+        keyExtractor={(row) => row.key}
         renderItem={renderItem}
-        extraData={{ now, role, rawById }}
+        extraData={{ role, rawById, names, canPost, replyKey }}
+        contentContainerStyle={styles.thread}
         ListHeaderComponent={stateNotes}
         ListEmptyComponent={empty}
         ListFooterComponent={<View>{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
@@ -828,30 +952,6 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
         refreshing={refreshing}
         keepVisiblePosition
       />
-      {asPage.page
-        ? (
-          <View style={styles.note}>
-            {pageRoleLabel(pageRole) ? <Soft>{AS_PAGE_LABEL + ' · ' + pageRoleLabel(pageRole)}</Soft> : null}
-            {pageRole === 'member' || pageRole === 'requested'
-              ? <Pill label={PAGE_LEAVE_LABEL} onPress={() => pageMembership(pageStatement('group-leave', { group }))} pending={pagePending} />
-              : <Btn label={PAGE_JOIN_LABEL} onPress={enter} pending={pagePending} disabled={!node.online} />}
-            {pageRetry ? <Pill label='conferir de novo' onPress={pageRetry} pending={pagePending} /> : null}
-            <ErrorText>{pageError}</ErrorText>
-          </View>
-          )
-        : null}
-      {asPage.page
-        ? (
-          <View style={styles.note}>
-            {pageRoleLabel(pageRole) ? <Soft>{AS_PAGE_LABEL + ' · ' + pageRoleLabel(pageRole)}</Soft> : null}
-            {pageRole === 'member' || pageRole === 'requested'
-              ? <Pill label={PAGE_LEAVE_LABEL} onPress={() => pageMembership(pageStatement('group-leave', { group }))} pending={pagePending} />
-              : <Btn label={PAGE_JOIN_LABEL} onPress={enter} pending={pagePending} disabled={!node.online} />}
-            {pageRetry ? <Pill label='conferir de novo' onPress={pageRetry} pending={pagePending} /> : null}
-            <ErrorText>{pageError}</ErrorText>
-          </View>
-          )
-        : null}
       {composer}
       {info && !asPage.page
         ? (
@@ -870,10 +970,19 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onReport,
 
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  gear: { paddingHorizontal: 6 },
-  gearText: { fontSize: 22, color: colors.ink },
   pressed: { opacity: 0.6 },
+  community: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.xs,
+    minHeight: 32,
+    paddingHorizontal: space.lg,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.line
+  },
+  communityText: { flexShrink: 1, fontSize: 13, lineHeight: 18, color: colors.soft },
+  pagePanel: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
+  thread: { paddingBottom: space.sm },
   note: { paddingHorizontal: 16, paddingVertical: 8, gap: 6 },
   inline: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   older: { alignItems: 'center', paddingVertical: 10, gap: 4 },
@@ -886,18 +995,5 @@ const makeStyles = (colors) => StyleSheet.create({
     paddingVertical: 8,
     gap: 4
   },
-  composeRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
-  input: {
-    flex: 1,
-    minHeight: 40,
-    maxHeight: 140,
-    borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: 20,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    fontSize: 16,
-    color: colors.ink,
-    backgroundColor: colors.bg
-  }
+  composeNotes: { gap: 4, paddingHorizontal: space.xs }
 })

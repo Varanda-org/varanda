@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { readFileSync } = require('node:fs')
+const { existsSync, readFileSync } = require('node:fs')
 const { join } = require('node:path')
 
 const load = () => import('../src/dm-open.js')
@@ -33,19 +33,64 @@ test('dm-open lets a listener unsubscribe while being notified', async (t) => {
   t.is(calls, 1)
 })
 
-test('Conversas opens on the Mensagens segment', async (t) => {
-  const { initialSegment, DEFAULT_SEGMENT } = await load()
-  const { selectorItems } = await import('../src/dm.js')
-  t.is(DEFAULT_SEGMENT, 'mensagens')
-  t.is(initialSegment(selectorItems()), 'mensagens')
-  t.is(initialSegment([{ id: 'comunidades' }]), 'comunidades')
-  t.is(initialSegment([]), 'mensagens')
-  t.is(initialSegment(null), 'mensagens')
+// Built from parts so this file does not carry the words it forbids.
+const STATE_WORDS = new RegExp(['\\bl' + 'ida\\b', 'entre' + 'gue', 'digi' + 'tando'].join('|'), 'i')
+
+test('Conversas is one list with three chips, a pinned Pedidos dot and nav pushes', async (t) => {
+  const { FILTERS, FILTER_LABELS, requestsRow, communitiesRow } = await import('../src/conversas.js')
+  t.alike(FILTERS.map((id) => FILTER_LABELS[id]), ['Todas', 'Não lidas', 'Grupos'])
+  t.is(requestsRow({ requests: true }).unread, true)
+  t.is(requestsRow({ requests: false }).unread, false)
+  t.is(communitiesRow().kind, 'communities')
+  const src = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  t.ok(src.includes('<FilterChips options={FILTERS.map((id) => ({ id, label: FILTER_LABELS[id] }))} selected={filter} onSelect={setFilter} />'), 'the three chips')
+  t.ok(src.includes('applyFilter([requestsRow({ requests: inbox.requests }), communitiesRow(), ...rows], filter)'), 'Pedidos and Comunidades pinned above the merged rows')
+  t.ok(src.includes("<PinnedRow icon='conversas' title={item.title} dot={item.unread === true} onPress={() => { if (typeof onOpenRequests === 'function') onOpenRequests() }} />"), 'Pedidos shows a dot and pushes the request folder')
+  t.ok(src.includes("<PinnedRow icon='gente' title={item.title} chevron onPress={() => { if (typeof onOpenCommunities === 'function') onOpenCommunities() }} />"), 'Comunidades is a compact pinned row with a chevron')
+  t.ok(src.includes('{dot ? <View style={styles.dot} /> : null}'), 'a dot, never a count')
+  t.ok(src.includes('<Icon name={icon} size={24} color={colors.accent} />') && src.includes('const PINNED_HEIGHT = 56'), 'a 24 pt accent glyph in a 56 pt row')
+  t.absent(src.includes('<Mensagens') || src.includes('setView('), 'the request folder is a stacked screen, not an inline view')
+  t.ok(src.includes('onOpenCommunities()'), 'the Comunidades row pushes the browse screen')
+  t.ok(src.includes('onOpenThread(item.peer)') && src.includes('onOpenGroup(item.group)'))
+  t.ok(src.includes('<NovaConversa') && src.includes('open={composing === true}'), 'the "+" opens the NovaConversa sheet')
+  t.ok(src.includes('<NovaComunidade'), 'Nova comunidade still creates from the sheet')
+  t.ok(src.includes('eachLimited(wanted, INFO_AT_ONCE,') && src.includes('export const INFO_AT_ONCE = 4'), 'bounded community.info reads')
+  t.ok(src.includes("export const PARTIAL_TEXT = 'Algumas conversas ainda não carregaram.'"))
+  t.ok(src.includes("export const EMPTY_TEXT = 'Nenhuma conversa ainda'"))
+  t.absent(src.includes('selectorItems') || src.includes("accessibilityRole='tablist'"), 'no segmented selector')
+  t.absent(src.includes("'group.seen'"), 'the list never marks a group seen')
+  t.ok(src.includes("const SEARCH_PLACEHOLDER = 'Buscar conversas'") && src.includes('placeholder={SEARCH_PLACEHOLDER}'), 'a persistent search field')
+  t.ok(src.indexOf('<TextInput') < src.indexOf('<FilterChips'), 'the search field sits above the chips')
+  t.ok(src.includes("accessibilityLabel='limpar busca'") && src.includes("onPress={() => setQuery('')}"), 'a clear X empties the search')
+  t.absent(src.includes('searching') || src.includes('onSearching'), 'no header search toggle')
+  t.ok(src.includes('recent={recent}') && src.includes('RECENT_MAX') && readFileSync(join(__dirname, '../src/conversas.js'), 'utf8').includes('export const RECENT_MAX = 8'), 'recent partners go to the sheet')
+  const wake = src.slice(src.indexOf('const lastShow = useRef(showInbox)'), src.indexOf('}, [showInbox])'))
+  t.ok(wake.includes("setFilter('todas')") && wake.includes("setQuery('')"), 'a notification open clears the chip and the search')
+  const footer = src.slice(src.indexOf('let footer = null'), src.indexOf('const renderItem'))
+  t.ok(footer.indexOf('inbox.pageError') < footer.indexOf('items.length === 0'), 'a failed older page wins over the empty filter text')
+  t.ok(footer.includes('<Soft>{PARTIAL_TEXT}</Soft>') && footer.includes("<Pill label='tentar de novo' onPress={() => inbox.loadMore()} />"), 'the failed page shows the note and the retry')
+  const mensagens = readFileSync(join(__dirname, '../src/screens/Mensagens.js'), 'utf8')
+  t.absent(mensagens.includes('LABELS.newMessage') || mensagens.includes("folder: 'inbox'"), 'no Nova mensagem footer and no inbox in the request folder')
+  t.ok(mensagens.includes("dm('dm.list', { folder: 'request' })"))
+  t.ok(mensagens.includes('<TopBar title={requestsRow(null).title} onBack={onBack} />'), 'the folder has its own top bar and back')
+  t.ok(mensagens.includes('<ConversationRow') && mensagens.includes('onPress={() => onOpenThread(item.peer)}'), 'compact rows open the thread')
+  t.ok(mensagens.includes('<Soft>{LABELS.requestNote}</Soft>'), 'one short note on top')
+  t.absent(mensagens.includes('LABELS.accept') || mensagens.includes("'dm.set'") || mensagens.includes('lupa'), 'no inline decisions and no search in the folder')
+  const sheet = readFileSync(join(__dirname, '../src/screens/NovaConversa.js'), 'utf8')
+  t.ok(sheet.indexOf("label='Novo grupo'") > 0 && sheet.indexOf("label='Novo grupo'") < sheet.indexOf("label='Nova comunidade'"), 'Novo grupo comes first')
+  t.ok(sheet.includes('color={colors.accentInk}') && sheet.includes('backgroundColor: colors.accent'), 'filled accent circles')
+  t.ok(sheet.includes('Conversas recentes') && sheet.includes("who.title === UNNAMED ? 'Pessoa'"), 'recent partners never read sem nome')
+  for (const file of ['Conversas.js', 'Mensagens.js', 'Comunidades.js', 'NovaConversa.js']) {
+    const text = readFileSync(join(__dirname, '../src/screens', file), 'utf8')
+    t.absent(text.includes(String.fromCharCode(0x2014)), file + ' has no em dash')
+    t.absent(STATE_WORDS.test(text), file + ' names no read, delivered or typing state')
+  }
 })
 
 test('dm-open has no imports', async (t) => {
   const source = readFileSync(join(__dirname, '../src/dm-open.js'), 'utf8')
   t.absent(source.split('\n').some((line) => line.startsWith('import ')))
+  t.absent(source.includes('initialSegment') || source.includes('DEFAULT_SEGMENT'), 'no segment helpers left')
   t.absent(source.includes(String.fromCharCode(0x2014)))
 })
 
@@ -140,12 +185,18 @@ test('a conversation preview is one line', async (t) => {
   t.is(previewLine(null), '')
 })
 
-test('Conversas reports its segment and App.js counts groups only on Comunidades', async (t) => {
-  const conversas = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
-  t.ok(conversas.includes('onSegment(segment)'))
+test('App.js lists the groups on the Conversas tab and stacks Comunidades and Pedidos', async (t) => {
   const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
-  t.ok(app.includes("tab === 'comunidades' && convSegment === 'comunidades'"))
-  t.ok(app.includes('onSegment={setConvSegment}'))
+  t.absent(app.includes('convSegment') || app.includes('onSegment='), 'no segment coupling')
+  t.ok(app.includes("const groupsTab = tab === 'comunidades'"))
+  t.ok(app.includes("if (entry.screen === 'comunidades') {") && app.includes('<Comunidades onBack={goBack} onOpenGroup={openGroup} onOpenCommunity={openCommunity} />'))
+  t.ok(app.includes("pushScreen({ screen: 'comunidades' })"))
+  t.absent(app.includes("{ icon: 'lupa',") || app.includes('convSearch'), 'no lupa in the Conversas top bar')
+  t.ok(app.includes("{ icon: 'plus', label: 'nova conversa', onPress: () => setConvCompose(true) }"), '+ in the top bar')
+  t.ok(app.includes("if (entry.screen === 'pedidos') {") && app.includes('<Mensagens onBack={goBack} onOpenThread={openMessage} />'), 'Pedidos is a stacked screen')
+  t.ok(app.includes("pushScreen({ screen: 'pedidos' })") && app.includes('onOpenRequests={openRequests}'), 'the pinned row pushes it')
+  t.ok(app.includes('composing={convCompose}') && app.includes('onOpenCommunities={openCommunities}') && app.includes('seenTick={seenTick}'))
+  t.ok(app.includes('onSeen={bumpSeen}'), 'group.seen still reported by an opened group')
 })
 
 test('an uncertain send stays held until a different text is confirmed', async (t) => {
@@ -244,20 +295,35 @@ test('an open menu keeps its neighbours from joining it', async (t) => {
 })
 
 test('a private message links from its raw text, but not beside Abrir convite', (t) => {
-  const row = readFileSync(join(__dirname, '../src/ui/DmMessageRow.js'), 'utf8')
-  t.ok(row.includes('<MentionText text={item.rawText} style={styles.text} selectable />'), 'MentionText escapes the raw text itself')
-  t.ok(row.includes("const linked = link === null && item.deleted !== true && typeof item.rawText === 'string'"))
-  t.absent(row.includes('onOpenMention'), 'mentions stay plain')
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes('rawText: link ? undefined : item.rawText'), 'Bubble renders the raw text through MentionText, plain beside the invite button')
+  t.absent(existsSync(join(__dirname, '../src/ui/DmMessageRow.js')), 'Bubble replaced the private row')
+})
+
+test('mentions in a private message are tappable and open the profile', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes('onOpenMention={mentionTap}'), 'the bubble gets the mention handler')
+  t.ok(screen.includes('peerProfile.username === username) open()'), 'the peer own @nome opens the profile without a lookup')
+  t.ok(screen.includes('onOpenMention(username)'), 'other mentions go to the app resolver')
+  t.ok(screen.includes('onOpenMember(peer)'))
+})
+
+test('the private header shows the peer and replaces the perfil and mais pills', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes('<ChatHeader') && screen.includes('subtitle={peerWho.subtitle || undefined}') && screen.includes('publicKey={peer}'))
+  t.ok(screen.includes("peerWho.title === UNNAMED ? 'Pessoa' : peerWho.title"), 'never sem nome')
+  t.ok(screen.includes("icon: 'mais', label: 'opções da conversa'"))
+  t.absent(screen.includes("label='perfil'") || screen.includes("label='mais'"))
+  t.ok(screen.includes('<ChatComposer') && screen.includes('notice={notice}'), 'the uncertain hold lives in the composer notice')
+  t.ok(screen.includes("label: 'Responder'") && screen.includes("label: 'Copiar'") && screen.includes('LABELS.report'))
 })
 
 test('invite links in a conversation only open a screen, never join', (t) => {
   const read = (p) => readFileSync(join(__dirname, p), 'utf8')
-  const row = read('../src/ui/DmMessageRow.js')
-  t.ok(row.includes('inviteLinkOf(') && row.includes('OPEN_INVITE'))
-  t.ok(row.includes("link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade'"), 'label follows the link kind')
-  t.absent(/join/i.test(row))
   const screen = read('../src/screens/Mensagem.js')
-  t.ok(screen.includes('onOpenInvite={onOpenInvite}') && screen.includes('origin={origin}'))
+  t.ok(screen.includes('inviteLinkOf(') && screen.includes('OPEN_INVITE'))
+  t.ok(screen.includes("link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade'"), 'label follows the link kind')
+  t.ok(screen.includes('onPress={() => onOpenInvite(link)}') && screen.includes('origin'))
   t.absent(/join/i.test(screen))
   const app = read('../App.js')
   const at = app.indexOf('onOpenInvite={(link)')
@@ -265,4 +331,74 @@ test('invite links in a conversation only open a screen, never join', (t) => {
   const line = app.slice(at, app.indexOf('\n', at))
   t.ok(line.includes('openGroup(link.key)') && line.includes('openCommunity(link.key)'))
   t.absent(line.includes('community.join'))
+})
+
+test('conversation row: group titles, unread labels and the search share one title rule', (t) => {
+  const row = readFileSync(join(__dirname, '../src/ui/ConversationRow.js'), 'utf8')
+  const conversas = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  t.ok(row.includes('unreadLabel(count)') && row.includes('99 ou mais mensagens novas'))
+  t.ok(row.includes("item.unread === true\n    ? 'mensagens novas'"))
+  t.ok(row.includes("(groupTitle || 'Sem título')") && row.includes('const avatarName = person ? who.avatarName : title'))
+  t.ok(row.includes("whoOf({ name: typeof item.name === 'string' ? item.name : '' }).title"), 'a group name drops a leading at-sign like a person name')
+  t.ok(row.includes('export function personTitle') && conversas.includes('personTitle(profileOf(row.peer))'))
+  t.ok(!conversas.includes('whoOf('))
+})
+
+test('groups older than the loaded inbox wait for the next dm.list page', (t) => {
+  const conversas = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  t.ok(conversas.includes('if (!ready || !inbox.next || inbox.rows.length === 0) return merged'), 'no hold once the inbox is complete')
+  t.ok(conversas.includes('Date.parse(inbox.rows[inbox.rows.length - 1].at)'), 'cut at the oldest loaded conversation')
+  t.ok(conversas.includes("const rows = filter === 'todas' ? paged : merged"), 'Não lidas and Grupos list every group')
+  t.ok(conversas.includes('return applyFilter(merged.filter((row) =>'), 'a search covers every group')
+})
+
+test('a person row is named only by the names cache, never by row fields', (t) => {
+  const row = readFileSync(join(__dirname, '../src/ui/ConversationRow.js'), 'utf8')
+  const folder = readFileSync(join(__dirname, '../src/screens/Mensagens.js'), 'utf8')
+  t.ok(row.includes('? { name: cached ? cached.name : null, username: cached ? cached.username : null }'))
+  t.absent(row.includes('item.username'), 'no username from the row')
+  t.absent(folder.includes('name: item.name'), 'the request folder forwards no name')
+})
+
+test('a group with one new message shows the badge', (t) => {
+  const row = readFileSync(join(__dirname, '../src/ui/ConversationRow.js'), 'utf8')
+  t.ok(row.includes('const dot = item.unread === true\n'), 'only a private conversation gets the dot')
+  t.ok(row.includes('const unread = dot || count > 0\n'), 'any group count above zero is unread')
+})
+
+test('an older inbox page never lands after a fresher first page', (t) => {
+  const conversas = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  t.ok(conversas.includes('if (s.next !== cursor) return s'), 'the append checks the cursor in the state it updates')
+  t.ok(conversas.includes("else if (!inbox.requests) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />"), 'no "nada novo" beside an unread Pedidos row')
+})
+
+test('App.js hands the mention handler to the private chat', (t) => {
+  const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
+  t.ok(app.includes('onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport}'), 'a mention in a private chat opens the profile')
+})
+
+test('a quote of an unloaded message names no author yet', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes("    if (!target) return ''\n    return target.mine === true ? OWN_LABEL : quoteName"))
+})
+
+test('private chat: quote author, personal retry and one character counter', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes('if (held === undefined || String(r.from) < String(held.from)) rowById.set(r.id, r)'), 'a shared id resolves like threadOf')
+  t.ok(screen.includes("onPress={typeof hold.retry === 'function' ? retryHeld : () => send(hold.text, hold.quoteId)}"), 'Tentar de novo resends on a personal account')
+  t.ok(screen.includes("{typeof hold.retry === 'function' || pageKey === null"), 'a page never signs a second message from this button')
+  t.absent(screen.includes('caracteres restantes'), 'the composer draws the counter once')
+})
+
+test('a retried held message keeps a newer draft', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes("setDraft((d) => (d === text ? '' : d))"))
+  t.ok(screen.includes('setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))'))
+})
+
+test('a peer named like the own label never reads as own in a quote', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(screen.includes("const quoteName = readsAs(nameText, OWN_LABEL) ? (peerWho.subtitle || 'Pessoa') : nameText"))
+  t.ok(screen.includes('handle: quoteMine(item) ? undefined : quoteHandle'), 'a peer quote carries the verified @nome')
+  t.ok(screen.includes('senderKey: quoteMine(item) ? undefined : peer'), 'a peer quote gets the peer color, not the own accent')
 })

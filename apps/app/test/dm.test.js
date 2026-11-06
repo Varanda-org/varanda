@@ -9,23 +9,12 @@ const load = () => import('../src/dm.js')
 test('dm.js exports the list helpers, the thread and the labels', async (t) => {
   const dm = await load()
   t.alike(Object.keys(dm).sort(), [
-    'LABELS', 'UNSURE_SEND', 'requestsDot', 'selectorItems', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
+    'LABELS', 'UNSURE_SEND', 'requestsDot', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
   ].sort())
   const imports = readFileSync(join(__dirname, '../src/dm.js'), 'utf8')
     .split('\n')
     .filter((line) => line.startsWith('import '))
   t.alike(imports, ["import rpc from '@varanda/rpc'"])
-})
-
-test('selectorItems lists Mensagens then Comunidades', async (t) => {
-  const { selectorItems } = await load()
-  const first = selectorItems()
-  t.alike(first, [
-    { id: 'mensagens', label: 'Mensagens' },
-    { id: 'comunidades', label: 'Comunidades' }
-  ])
-  first[0].label = 'alterado'
-  t.is(selectorItems()[0].label, 'Mensagens', 'each call returns its own list')
 })
 
 test('LABELS are the approved Portuguese', async (t) => {
@@ -197,4 +186,12 @@ test('dm.js has no read, delivery or typing words and no em dash', async (t) => 
   }
   t.absent(src.includes('\u2014'))
   for (const text of Object.values(LABELS)) t.absent(text.includes('\u2014'), text)
+})
+
+test('the chat screens and components have no read, delivery or typing words', (t) => {
+  for (const file of ['../src/screens/Mensagem.js', '../src/ui/Bubble.js', '../src/ui/ChatComposer.js', '../src/ui/ActionsSheet.js']) {
+    const src = readFileSync(join(__dirname, file), 'utf8')
+    for (const word of ['lida', 'entregue', 'digitando']) t.absent(src.includes(word), file + ': ' + word)
+    t.absent(src.includes('\u2014'), file)
+  }
 })

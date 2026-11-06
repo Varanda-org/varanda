@@ -82,10 +82,12 @@ const LOCK_FILE = '.account-lock'
 const ORIGIN_RE = /^https:\/\/[a-z0-9.-]+(:[0-9]{1,5})?$/
 // Plain HTTP on loopback: accepted by createAccountServer only, for the
 // loopback end-to-end tests that bind the real port into the origin the
-// operator signs (packages/core/lib/mod-request.js LOOPBACK_ORIGIN_RE). The
-// CLI reads VARANDA_PUBLIC_ORIGIN with ORIGIN_RE (https only), so a
-// deployment never runs with it.
-const LOOPBACK_ORIGIN_RE = /^http:\/\/127\.0\.0\.1(:[0-9]{1,5})?$/
+// operator signs (packages/core/lib/mod-request.js LOOPBACK_ORIGIN_RE), and
+// for http://localhost, the origin of the hosted lab
+// (apps/cli/scripts/hosted-lab.js), because a passkey rp.id cannot be an IP.
+// The CLI reads VARANDA_PUBLIC_ORIGIN with ORIGIN_RE (https only), so a
+// deployment never runs with either.
+const LOOPBACK_ORIGIN_RE = /^http:\/\/(127\.0\.0\.1|localhost)(:[0-9]{1,5})?$/
 const HEX64_RE = /^[0-9a-f]{64}$/
 // A store id, nonce or state: 32 random bytes, base64url (store.js randomToken).
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/

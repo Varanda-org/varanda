@@ -35,6 +35,7 @@ import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
 import { authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, readPending, renameFinish, renameStart, startLink, toError } from '../account'
 import { isAppClient } from '../appClient'
+import { acceptableAuthorizeUrl } from '../authorizeUrl'
 import { deviceRandomBytes, newLinkSecret } from '../appLinkSecret'
 import { HELP, SHORT } from '../help'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
@@ -488,7 +489,10 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         }
         const { signature } = await node.request('account.sign', { phase: 'reserve', nonce, username, sub: '' })
         const { authorizeUrl } = await authorizeLink({ signature, linkSecret: link?.secret })
-        if (typeof authorizeUrl !== 'string' || !/^https:\/\//.test(authorizeUrl)) throw new Error('serviço indisponível')
+        // authorizeLink goes to the installation, or on the hosted web app to
+        // the page's own origin, so that is the account origin.
+        const accountOrigin = installationOrigin() ?? globalThis.location?.origin ?? null
+        if (!acceptableAuthorizeUrl(authorizeUrl, accountOrigin)) throw new Error('serviço indisponível')
         setWaitlist('')
         setInviteNote('')
         setNote(RELOAD_TEXT)

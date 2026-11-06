@@ -200,6 +200,56 @@ What the local loop cannot do: the debug build is `app.varanda.debug`, signed wi
 
 Phone first: `apps/app` is one codebase and a screen is checked on the phone before the web. `apps/app/test/platformGate.test.js` fails a shared screen that calls a browser API, and `.github/workflows/native.yml` builds the native app on every pull request that may touch it (it skips the builds only when every changed path is outside the app: `docs/`, `apps/site/`, `apps/cli/`, `deploy/`, top-level Markdown, the other workflows and the GitHub templates): the Android debug APK with the commands above (`ubuntu-24.04`, JDK 17, NDK 27.1.12297006, CMake 3.22.1), the iOS app for the simulator, unsigned (`macos-26`, Xcode 26.2, `check-pods-lock.js` against the committed lock), and the Android and iOS JavaScript bundles with `expo export`. A pull request that does not touch the app skips the builds; the `native` job reports both cases and is the name to make required. The builds prove the app compiles and its bundles resolve, not that a screen works on a device.
 
+## Instalação hospedada local
+
+`apps/cli/scripts/hosted-lab.js` sobe uma instalação hospedada inteira nesta máquina, para conferir o app web entrado no Chrome, sem Google, sem domínio e sem celular. Com a interface do Expo já rodando (`npm run web -w apps/app`, porta 8081):
+
+```sh
+node apps/cli/scripts/hosted-lab.js                          # http://localhost:8080
+node apps/cli/scripts/hosted-lab.js --port 8090 --expo http://127.0.0.1:8081
+node apps/cli/scripts/hosted-lab.js --ui apps/app/dist       # um export já feito
+```
+
+`--port` (padrão 8080), `--host` (só `127.0.0.1` ou `localhost`), `--ui <dist>` ou `--expo <http://127.0.0.1:porta>` (padrão `http://127.0.0.1:8081`). Ctrl-C encerra e apaga os dados do laboratório. O script nunca imprime chave secreta.
+
+O que ele sobe, no mesmo processo:
+
+- uma rede DHT de teste presa a loopback, ou a que `VARANDA_BOOTSTRAP` aponta (precisa ser loopback, por exemplo a de `apps/cli/scripts/local-dht.js`);
+- uma associação e um semeador certificado, com a entrada WebSocket, como `seed --ws-port`;
+- o serviço de conta, com a loja de termos ligada e sem verificação de idade (`GET /account/age/policy` responde `{ required: false }`);
+- um só endereço, `http://localhost:<porta>`, que reúne `/varanda.json`, `/seeder`, `/media/*`, `/index/*` e `/account/*`; o resto vai para o servidor do Expo ou para o `dist` exportado.
+
+### Provedor de entrada falso
+
+`apps/cli/scripts/oauth-stub.js` ocupa o lugar do Google só no laboratório, com o mesmo contrato `{ authorizeUrl, exchange }` que o serviço de conta recebe. Sua página de autorização oferece Pessoa 1, Pessoa 2 e Pessoa 3. Cada uma tem um `sub` próprio (`lab-<n>`) e um e-mail (`lab<n>@example.test`), porque a loja recusa um mesmo `sub` ligado a dois membros. O desafio PKCE continua conferido na troca, e cada código vale uma vez, então o fluxo da conta roda como roda contra o Google. A passkey e os termos são os de verdade. Nada disso é ligado à CLI.
+
+### Duas pessoas numa troca de mensagens
+
+A identidade fica no navegador e no autenticador virtual do perfil do Chrome. Por isso a segunda pessoa entra num perfil novo, não numa aba: abas do mesmo perfil dividem o armazenamento e a passkey.
+
+1. Abra `http://localhost:8080`. Use `localhost`, não `127.0.0.1`: o `rp.id` da passkey não pode ser um IP.
+2. Em DevTools › More tools › WebAuthn, ative o ambiente de autenticador virtual e adicione um autenticador CTAP2 com transporte `internal`, chaves residentes, verificação do usuário e PRF. Sem PRF, o app segue o caminho de passkey sem PRF.
+3. Toque em Entrar e escolha Pessoa 1 na página do laboratório.
+4. Em outro perfil do Chrome, repita os passos 1 a 3 com o autenticador desse perfil e escolha Pessoa 2.
+5. Troque uma mensagem direta e uma publicação em grupo entre os dois perfis.
+
+### Por que o nó do aparelho não envia mensagens diretas
+
+As Conversas selam cada mensagem para uma chave de caixa X25519 derivada da chave de identidade Ed25519 e falam com o semeador pela ligação do nó do navegador. Por isso só o nó do navegador oferece os métodos `dm.*`. Em `packages/core/lib/session.js` (linhas 614 a 621), o nó core responde a cada um com `mensagens diretas disponíveis só no navegador` e não abre nem lê nada. A troca de mensagens do laboratório portanto acontece no Chrome, nunca no app instalado.
+
+### O que o laboratório não cobre
+
+Entrar de verdade no app nativo. A configuração hospedada do app exige `https` (`apps/app/src/config.js`, linha 169); o `rp.id` não pode ser um IP (`apps/app/src/installation.js`, linhas 43 a 49); no iOS a passkey espera o domínio associado; e o build de debug do Android não casa com o `assetlinks.json` da instalação (ver a seção Android). Uma revisão visual feita no laboratório não libera esse fluxo.
+
+## Revisão visual
+
+O ciclo completo, com a ordem das plataformas, a checklist de telas e os critérios de revisão, está em [design-review.md](design-review.md). Os pontos de operação:
+
+- Alvos: Android (AVD `varanda-api36`, referência), iOS (simulador iPhone 16e) e Chrome em 390 px e 1280 px, nos temas claro e escuro. Cada tela também com texto grande e movimento reduzido.
+- Vitrine: com `EXPO_PUBLIC_VARANDA_VITRINE=1` no Metro, as telas hospedadas aparecem com dados de exemplo, sem conta. Os dados estão em `apps/app/src/vitrine/fixtures.js`. `apps/app/src/vitrine/request.js` responde pelo mesmo contrato de `node.request`, a partir de uma cópia dos dados; cada instância guarda o próprio estado, então reabrir um cenário começa do zero. Conversas entre duas pessoas reais pedem o laboratório acima.
+- Capturas: `bash apps/app/scripts/review-shots.sh android <pasta> <rótulo>` (ou `ios`). Grava `<pasta>/<rótulo>-<plataforma>-<n>.png`, com `n` sequencial, e imprime o caminho. O rótulo usa só letras, números, ponto, traço e sublinhado. Sem dispositivo ligado, o script para com `Nenhum simulador ou emulador ligado` e código de saída 1.
+- Evidências ficam fora do git, em uma pasta de evidência do PR (por exemplo `~/Workspace/evidencias/<branch>/`), e o corpo do PR cita o caminho de cada captura.
+
 ## Tema claro e escuro
 
 `app.json` tem `userInterfaceStyle` automatic, e a chave `UIUserInterfaceStyle` do `Info.plist` foi removida, para o aparelho decidir o modo. A cor do splash nativo fica creme nos dois modos: `splashscreen_background` no Android e o colorset `SplashScreenBackground` no iOS não têm variante escura, e `android/app/src/main/res/values-night/colors.xml` fica vazio de propósito, para não trocar o splash. A barra de status do iOS começa com `UIStatusBarStyleDarkContent`, para os ícones ficarem escuros sobre o creme antes do JS. As duas paletas ficam em `apps/app/src/appearance.js`; para migrar uma tela ao tema, siga a receita no comentário do topo de `apps/app/src/ui/ThemeProvider.js` (`useStyles` e `useTheme`). Continua proibido rodar `expo prebuild` para aplicar isso: as edições ficam nos arquivos commitados.

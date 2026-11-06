@@ -62,6 +62,19 @@ test('a changed template fails instead of dropping an edit', (t) => {
   t.exception(() => patchGradleProperties([]), /ABI list/)
 })
 
+// The Vitrine (src/vitrine/enabled.js) swaps the node for fixtures. A release
+// bundle has __DEV__ false, and no build config may set the opt-in either.
+test('a release build cannot turn on the Vitrine', async (t) => {
+  const { vitrineEnabled } = await import('../src/vitrine/enabled.js')
+  t.is(vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: '1' }, false), false)
+  for (const file of ['app.json', 'eas.json', 'metro.config.js', 'index.js', 'App.js']) {
+    t.absent(read(file).includes('EXPO_PUBLIC_VARANDA_VITRINE'), file)
+  }
+  for (const file of ['src/node.js', 'src/account.js']) {
+    t.ok(read(file).includes("typeof __DEV__ !== 'undefined' && __DEV__)"), file + ' passes __DEV__')
+  }
+})
+
 test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
   t.timeout(120000)
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-prebuild-'))

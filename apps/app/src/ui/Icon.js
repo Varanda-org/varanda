@@ -35,7 +35,20 @@ const GLYPHS = {
   republicar: 'repeat',
   citar: 'edit-3',
   lixeira: 'trash-2',
-  lupa: 'search'
+  lupa: 'search',
+  mais: 'more-horizontal',
+  compartilhar: 'share',
+  link: 'link',
+  microfone: 'mic',
+  camera: 'camera',
+  imagem: 'image',
+  encaminhar: 'corner-up-right',
+  responder: 'corner-up-left',
+  tocar: 'play',
+  pausar: 'pause',
+  parar: 'square',
+  sorriso: 'smile',
+  clipe: 'paperclip'
 }
 
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the

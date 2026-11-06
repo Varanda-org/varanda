@@ -28,12 +28,3 @@ export function requestDmWake () {
   for (const fn of list) fn()
   return list.length > 0
 }
-
-// Conversas opens on Mensagens until the person picks another segment.
-export const DEFAULT_SEGMENT = 'mensagens'
-
-export function initialSegment (items) {
-  const list = Array.isArray(items) ? items : []
-  const first = list.find((item) => item && item.id === DEFAULT_SEGMENT)
-  return first ? first.id : (list[0] ? list[0].id : DEFAULT_SEGMENT)
-}
