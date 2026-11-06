@@ -11,9 +11,9 @@ import UIKit
 // UNSUPPORTED. Without the associated domain (webcredentials:<host>, see
 // ios/Varanda/Varanda.entitlements) the system refuses the rp.id, and its error
 // text is localized, so the build says it outright: Info.plist
-// VarandaWebCredentials is false until the entitlement is added, and while it
-// is false the module reports itself unavailable. Native error text never
-// reaches JS.
+// VarandaWebCredentials is true only in a build that carries the entitlement,
+// and while it is false the module reports itself unavailable. Native error
+// text never reaches JS.
 public class PasskeyPrfModule: Module {
   private var ceremony: AnyObject?
 

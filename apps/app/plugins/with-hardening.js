@@ -10,9 +10,13 @@ const RECORD_AUDIO = 'android.permission.RECORD_AUDIO'
 const CAMERA = 'android.permission.CAMERA'
 
 // Voice notes in Conversas need the microphone; the text is the one the
-// committed ios/Varanda/Info.plist carries.
-function patchInfoPlist (plist) {
+// committed ios/Varanda/Info.plist carries. VarandaWebCredentials turns on the
+// passkey-prf and auth-session modules, so it follows the webcredentials entry
+// that prebuild writes to the entitlements from ios.associatedDomains: a build
+// without the entry reports passkeys as unavailable instead of failing.
+function patchInfoPlist (plist, associatedDomains = []) {
   plist.NSMicrophoneUsageDescription = MICROPHONE_USAGE
+  plist.VarandaWebCredentials = associatedDomains.some((entry) => entry.startsWith('webcredentials:'))
   return plist
 }
 
@@ -35,8 +39,9 @@ function patchAndroidManifest (manifest) {
 // Reapplies the hand edits that `expo prebuild --clean` would drop: the iCloud
 // and device backup exclusion of the node's data dir (iOS), release signing
 // from outside the repository and the .debug application ID suffix (Android),
-// the ABI list that matches the linked addons, and the microphone declaration
-// of voice notes (with the camera kept out). See docs/development.md.
+// the ABI list that matches the linked addons, the microphone declaration
+// of voice notes (with the camera kept out) and the passkey flag (iOS). See
+// docs/development.md.
 function withHardening (config) {
   config = withAppDelegate(config, config => {
     if (config.modResults.language !== 'swift') throw new Error('native-hardening: AppDelegate is not Swift')
@@ -48,7 +53,7 @@ function withHardening (config) {
     return config
   })
   config = withInfoPlist(config, config => {
-    config.modResults = patchInfoPlist(config.modResults)
+    config.modResults = patchInfoPlist(config.modResults, config.ios && config.ios.associatedDomains)
     return config
   })
   config = withAndroidManifest(config, config => {
