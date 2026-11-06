@@ -281,6 +281,10 @@ const PUSH_KEYS = ['v', 'kind', 'body', 'actor', 'recipient', 'ref']
 const PUSH_FALLBACK = 'Você tem um aviso novo na Varanda'
 // The DM wake names nobody (packages/core/lib/dm-wake.js DM_WAKE_TEXT).
 const DM_WAKE_TEXT = 'Pode haver uma mensagem nova na Varanda'
+// The invite drop carries no text: the sentence lives here, so a payload can
+// never put words of its own on the lock screen.
+const INVITE_DROP_TITLE = 'Chegou um convite pra sua varanda'
+const INVITE_DROP_TEXT = 'Escolha com carinho quem você quer chamar: alguém próximo, que faz falta na conversa.'
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):[1-9][0-9]{0,14}$/
 
@@ -325,11 +329,15 @@ function isDmWake (p) {
   return isPlainObject(p) && Object.keys(p).length === 2 && p.v === 1 && p.kind === 'dm-wake'
 }
 
+function isInviteDrop (p) {
+  return isPlainObject(p) && Object.keys(p).length === 2 && p.v === 1 && p.kind === 'invite-drop'
+}
+
 function readPush (data) {
   if (!data) return null
   try {
     const p = data.json()
-    return validPush(p) || isDmWake(p) ? p : null
+    return validPush(p) || isDmWake(p) || isInviteDrop(p) ? p : null
   } catch {
     return null
   }
@@ -337,8 +345,12 @@ function readPush (data) {
 
 async function showPush (data) {
   const p = readPush(data)
+  let title = 'Varanda'
   let options = { body: PUSH_FALLBACK, icon: '/icon-192.png', tag: 'varanda-generic', renotify: false, data: {} }
-  if (p && isDmWake(p)) {
+  if (p && isInviteDrop(p)) {
+    title = INVITE_DROP_TITLE
+    options = { body: INVITE_DROP_TEXT, icon: '/icon-192.png', tag: 'varanda-invite-drop', renotify: false, data: { kind: 'invite-drop' } }
+  } else if (p && isDmWake(p)) {
     options = { body: DM_WAKE_TEXT, icon: '/icon-192.png', tag: 'varanda-dm-wake', renotify: false, data: { kind: 'dm-wake' } }
   } else if (p) {
     options = {
@@ -350,7 +362,7 @@ async function showPush (data) {
     }
   }
   try {
-    await self.registration.showNotification('Varanda', options)
+    await self.registration.showNotification(title, options)
   } catch {}
 }
 
@@ -361,9 +373,11 @@ async function openPush (data) {
   const ok = validTarget(d.kind, d.actor, d.recipient, d.ref)
   // A DM wake opens Conversas; it carries nothing else to pass on.
   const dm = Object.keys(d).length === 1 && d.kind === 'dm-wake'
+  const invite = Object.keys(d).length === 1 && d.kind === 'invite-drop'
   let path = '/'
   if (ok) path = '/?aviso=' + d.kind + '&actor=' + d.actor + '&recipient=' + d.recipient + (d.ref ? '&ref=' + d.ref : '')
   else if (dm) path = '/?aviso=dm'
+  else if (invite) path = '/?aviso=convite'
   try {
     const list = await clients.matchAll({ type: 'window', includeUncontrolled: true })
     // Same origin is not enough: the moderation panel (/account/mod/) and
@@ -389,6 +403,7 @@ async function openPush (data) {
       if (focused) {
         if (ok) client.postMessage({ source: 'varanda-push', kind: d.kind, actor: d.actor, recipient: d.recipient, ref: d.ref })
         if (dm) client.postMessage({ type: 'varanda-dm-open' })
+        if (invite) client.postMessage({ type: 'varanda-invite-open' })
         return
       }
     }

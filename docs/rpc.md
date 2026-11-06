@@ -403,7 +403,7 @@ Who started following the caller and whom the caller does not follow yet ("follo
 
 ### 5.30 `invite.sign`
 
-- Params: `{ action, nonce }`, nothing else: `action` is `'issue'` (the only action today; the field exists so a later action does not need a new prefix); `nonce` matches `/^[A-Za-z0-9_-]{43,128}$/` (the account service's base64url nonce from `POST /account/invites/start`).
+- Params: `{ action, nonce }`, nothing else: `action` is `'issue'` (mint one invite, `POST /account/invites/finish`) or `'summary'` (read the member's own weekly allowance, `POST /account/invites/summary`; mints nothing). The action is one of the signed lines, so a signature for one action never verifies as the other; `nonce` matches `/^[A-Za-z0-9_-]{43,128}$/` (the account service's base64url nonce from `POST /account/invites/start`).
 - The caller never passes the member, the association or any bytes: the node fills in `member` = its own diary key and `association` = its configured association, and signs exactly the UTF-8 bytes of these five lines joined by LF (`0x0a`), no trailing LF, no date (`invitePayload`, `packages/core/lib/invite.js`):
 
   ```
@@ -415,7 +415,7 @@ Who started following the caller and whom the caller does not follow yet ("follo
   ```
 
   The prefix separates this statement from every other signature of the protocol (certificates, account links, terms acceptances, reports, moderation requests, Hypercore blocks).
-- Result: `{ signature: hex128 }`, the Ed25519 signature by the identity key; never the payload or a key. The account service checks it with `verifyInvite(fields, signature)`, using `member` as the public key. It proves that this linked member asks the account service to mint one signup invite for this association, bound to a single-use nonce (`POST /account/invites/start`, then `POST /account/invites/finish`, `docs/protocol.md`). The statement carries no e-mail and nothing about the invited person.
+- Result: `{ signature: hex128 }`, the Ed25519 signature by the identity key; never the payload or a key. The account service checks it with `verifyInvite(fields, signature)`, using `member` as the public key. With `'issue'` it proves that this linked member asks the account service to mint one signup invite for this association, bound to a single-use nonce (`POST /account/invites/start`, then `POST /account/invites/finish`, `docs/protocol.md`); with `'summary'` it proves that this linked member asks to read its own weekly allowance (`POST /account/invites/start`, then `POST /account/invites/summary`), and nothing is minted. The statement carries no e-mail and nothing about the invited person.
 - Where it runs: browser node only (`packages/web-member/lib/session.js`), like `terms.sign`: not a diary write, no append, no network. Not mutating.
 - Errors: the node session (`packages/core/lib/session.js`, the CLI and `varanda-serve`) answers `USAGE` `'assinatura disponível só no navegador'`; the identity locked -> `USAGE` `'identidade bloqueada: entre com a passkey'`; an older node -> `USAGE` `'método desconhecido'` (as 5.21).
 

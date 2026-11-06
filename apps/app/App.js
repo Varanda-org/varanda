@@ -35,8 +35,9 @@
 // gets the profile opened.
 // A notification click (hosted web, src/pushClient.web.js) arrives as
 // /?aviso=... at load or as a worker message: held in memory only, it opens
-// Avisos (a follow) or Conversa (a reply, like or repost) once the tabs show
-// for the key it names; nothing is written, followed or retried.
+// Avisos (a follow) or Conversa (a reply, like or repost) for the key it
+// names, or Convidar pessoas (a convite, which names nobody) once the tabs
+// show; nothing is written, followed or retried.
 // A group or community link (/g/<key>, /c/<key>) is announced on Entrar and
 // opens the screen once the tabs show; it is never consent to join.
 // A splash holds a short minimum while the app loads and, on the web, covers
@@ -91,6 +92,8 @@ import { OfflineNote } from './src/ui/OfflineNote'
 import { InstallNote } from './src/ui/InstallNote'
 import { InstallCard } from './src/ui/InstallCard'
 import { PushNote } from './src/ui/PushNote'
+import { InviteDropNote } from './src/ui/InviteDropNote'
+import { useInviteDrop } from './src/useInviteDrop'
 import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
 import { readPush, usePush } from './src/usePush'
@@ -1544,9 +1547,21 @@ function Member () {
   const launchRef = useRef(CAPTURED_LAUNCH)
   const [launchSeq, setLaunchSeq] = useState(0)
   // The screen a click opens reloads even when it is already showing:
-  // Avisos through its refresh prop, the top Conversa by a remount.
+  // Avisos through its refresh prop, the top Conversa by a remount, and
+  // Convidar pessoas through inviteNudge.
   const [avisosReload, setAvisosReload] = useState(0)
   const [threadReload, setThreadReload] = useState({ ref: null, n: 0 })
+  const [inviteNudge, setInviteNudge] = useState(0)
+  const inviteDrop = useInviteDrop({
+    enabled: node.hosted === true && node.visible !== false && ready && !locked && pkStatus?.unlocked === true,
+    member,
+    request: node.request
+  })
+  const handleInviteShown = inviteDrop.markSeen
+  const openInvites = useCallback(() => {
+    setAjustes('convites')
+    setInviteNudge((n) => n + 1)
+  }, [])
   useEffect(() => listenLaunch((intent) => {
     launchRef.current = nextLaunch({ held: launchRef.current, intent })
     setLaunchSeq((n) => n + 1)
@@ -1559,11 +1574,19 @@ function Member () {
   const launchKey = !locked && pkStatus ? pkStatus.publicKey : null
   useEffect(() => {
     const intent = launchRef.current
-    if (intent === null || !atTabs || typeof launchKey !== 'string') return
+    if (intent === null || typeof launchKey !== 'string') return
+    // Ajustes is a sheet, so atTabs is false while it is open: a convite must
+    // still refresh an open Convites now, or a lock before closing drops it.
+    if (!atTabs && !(intent.kind === 'convite' && ajustes !== null)) return
     launchRef.current = null
     // A DM wake names nobody: Conversas opens for whoever is unlocked.
     if (intent.kind === 'dm') {
       requestDmOpen()
+      return
+    }
+    // A convite names nobody: Convidar pessoas opens for whoever is unlocked.
+    if (intent.kind === 'convite') {
+      openInvites()
       return
     }
     if (intent.recipient !== launchKey.toLowerCase()) return
@@ -1579,7 +1602,7 @@ function Member () {
         openThread({ ref: intent.ref })
       }
     }
-  }, [launchSeq, atTabs, launchKey, clearStack, openThread, enterAvisos])
+  }, [launchSeq, atTabs, ajustes, launchKey, clearStack, openThread, enterAvisos, openInvites])
   // The record is untrusted and may have changed in another render: every
   // step re-reads it (from tab storage, or memory when storage refused it).
   // The memory copy keeps the stored record's 1 h limit (readInvite applies
@@ -1972,6 +1995,9 @@ function Member () {
     const on = (id) => tab === id && ready
     const shown = (id) => (tab === id ? styles.flex : styles.hidden)
     const stacked = nav.depth(stack) > 0
+    // The invite note sits above the other notes, so it takes the top inset on
+    // Diário and the note under it does not.
+    const inviteNoteShown = !!(inviteDrop.note && atTabs && ajustes !== 'convites' && !stacked)
     // The Diário tab's avatar: from the profiles cache, like the composer's.
     const tabMe = typeof ownKey === 'string'
       ? { name: ownProfile ? (ownProfile.name || ownProfile.username || null) : null, publicKey: ownKey, picture: ownProfile ? ownProfile.avatar : undefined }
@@ -2005,13 +2031,16 @@ function Member () {
             )
           : null}
         <OfflineNote inset={tab === 'diario'} />
+        {inviteNoteShown
+          ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false} />
+          : null}
         {updateReady && !updateDismissed
-          ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false} />
+          ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
           : installCardOpen && install.card !== 'none'
-            ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
+            ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
             : install.note !== 'none'
-              ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false} />
-              : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false} /> : null}
+              ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
+              : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} /> : null}
         <View style={styles.flex}>
           <View style={shown('rua')}>
             <ARua
@@ -2292,7 +2321,7 @@ function Member () {
           showToast(text)
         }}
       />
-      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} />
+      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} inviteNudge={inviteNudge} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} />
       {/* Mounted after the splash, so it wins: while the boot cover shows it
           follows the splash, which stays cream on native (Splash.js). */}
       <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light })} />

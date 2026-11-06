@@ -37,7 +37,7 @@ const FIELDS = {
 
 test('constants', (t) => {
   t.is(PREFIX, 'varanda-invite-v1')
-  t.alike(ACTIONS, ['issue'])
+  t.alike(ACTIONS, ['issue', 'summary'])
   t.ok(Object.isFrozen(ACTIONS))
   t.is(NONCE_RE.source, accountLink.NONCE_RE.source, 'same nonce rule as account-link')
   t.is(NONCE_RE.source, terms.NONCE_RE.source, 'same nonce rule as terms')
@@ -57,6 +57,17 @@ test('golden vector: exact bytes and signature', (t) => {
   const signature = signInvite(FIELDS, MEMBER_KP)
   t.is(signature, 'c90cef7d2828e019c98327ec609d8e35eaf795d088b2145b8dff2c0bb03f7e6b9b1b96417aea0d77a54c3cce4da6149ddd7e2a654a8473a273d38ad855790906')
   t.alike(verifyInvite(FIELDS, signature), { ok: true })
+})
+
+test('an issue signature is not a summary signature, and vice versa', (t) => {
+  const summary = { ...FIELDS, action: 'summary' }
+  t.is(b4a.toString(invitePayload(summary), 'utf8'), [PREFIX, 'summary', NONCE, MEMBER, ASSOCIATION].join('\n'))
+  const sigIssue = signInvite(FIELDS, MEMBER_KP)
+  const sigSummary = signInvite(summary, MEMBER_KP)
+  t.not(sigIssue, sigSummary)
+  t.alike(verifyInvite(summary, sigSummary), { ok: true })
+  t.alike(verifyInvite(summary, sigIssue), { ok: false, reason: 'bad-signature' }, 'issue as summary')
+  t.alike(verifyInvite(FIELDS, sigSummary), { ok: false, reason: 'bad-signature' }, 'summary as issue')
 })
 
 test('sign and verify round trip', (t) => {

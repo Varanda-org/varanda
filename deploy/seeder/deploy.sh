@@ -56,7 +56,7 @@ moderator_re='^[^[:space:],@]+@[^[:space:],@]+$'
 # LIMIT_ENV em apps/cli/lib/commands/account.js (um teste compara as duas):
 # um valor fora dela derrubaria o serviço só depois de trocar o contêiner.
 limite_re='^[1-9][0-9]{0,7}$'
-limites_conta='VARANDA_MAX_MEMBERS:1:4096 VARANDA_ACCOUNT_MAX_CONNECTIONS:1:4096 VARANDA_ACCOUNT_RATE:1:10000 VARANDA_ACCOUNT_BURST:1:100000 VARANDA_ACCOUNT_MAX_PENDING:1:100000 VARANDA_INVITES_PER_WEEK:1:100'
+limites_conta='VARANDA_MAX_MEMBERS:1:4096 VARANDA_ACCOUNT_MAX_CONNECTIONS:1:4096 VARANDA_ACCOUNT_RATE:1:10000 VARANDA_ACCOUNT_BURST:1:100000 VARANDA_ACCOUNT_MAX_PENDING:1:100000 VARANDA_INVITES_PER_WEEK:1:100 VARANDA_INVITE_DROPS:1:1'
 
 root=''
 www=''
@@ -352,7 +352,17 @@ conferir_antes() {
       log "$nome inválido em deploy/seeder/.env"
       exit 1
     fi
+    case $nome in
+      VARANDA_INVITES_PER_WEEK) por_semana=$limite ;;
+      VARANDA_INVITE_DROPS) sorteio=$limite ;;
+    esac
   done
+  # Os convites de surpresa sem o número semanal derrubariam o serviço na
+  # partida (readEnv em apps/cli/lib/commands/account.js).
+  if [ -n "${sorteio:-}" ] && [ -z "${por_semana:-}" ]; then
+    log "VARANDA_INVITE_DROPS exige VARANDA_INVITES_PER_WEEK em deploy/seeder/.env"
+    exit 1
+  fi
   # Limites do semeador web: opcionais (ausente ou vazio usa o padrão do
   # semeador). Lidos do mesmo jeito, nunca executados e nunca impressos; um
   # valor presente precisa ser inteiro positivo canônico e estar na mesma
