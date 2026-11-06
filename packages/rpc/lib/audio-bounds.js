@@ -14,7 +14,9 @@
 // goes is refused (a player parses their contents, and Media3 loops forever
 // on a zero-size ilst entry), and so is any uuid box. Only the sender, about
 // to strip its own recording, passes { metadata: true }: udta and meta are
-// then skipped, never parsed.
+// then skipped, never parsed, and header durations are not compared, since
+// stripAudioMetadata rewrites them from the samples (recorders write them
+// wrong: Chrome's mdhd).
 
 const MAX_AUDIO_MS = 120000
 // How far a voice note's declared ms may be from its container's duration:
@@ -424,7 +426,7 @@ function editListAgrees (b, elst, timescale, ms) {
 function trackAgrees (b, inTrak, movie, ms, budget) {
   const tkhds = inTrak.filter((x) => x.type === 'tkhd')
   const d = tkhds.length > 1 ? null : tkhdDuration(b, tkhds[0])
-  if (d === null || !agrees(d, movie.timescale, ms)) return false
+  if (d === null || !headerAgrees(budget, d, movie.timescale, ms)) return false
   const edts = inTrak.filter((x) => x.type === 'edts')
   if (edts.length === 0) return true
   if (edts.length > 1) return false
@@ -569,45 +571,56 @@ function agrees (duration, timescale, ms) {
   return duration === 0 || duration === UNKNOWN || Math.abs(toMs(duration, timescale) - ms) <= AUDIO_MS_TOLERANCE
 }
 
+// The duration of mvhd, tkhd, mdhd or mehd agrees with the samples. On the
+// sender's own recording (budget.metadata) it is not compared:
+// stripAudioMetadata rewrites it from the samples before the note leaves
+// the device. Chrome's MPEG-4 writer puts milliseconds in an mdhd whose
+// timescale is 48000, so its header claims 0.1 s for a 5 s recording.
+function headerAgrees (budget, duration, timescale, ms) {
+  return budget.metadata || agrees(duration, timescale, ms)
+}
+
 // A file without mvex: the sound track's samples, from its stts, which
-// the sample size table must count too. Whole ms, or -1.
+// the sample size table must count too. -> { ms, ticks } or null.
 function sampledMs (b, track, movie, budget) {
   const run = sttsTicks(b, track.stts, track.cap)
-  if (run === null || run.samples === 0 || track.sizes.count !== run.samples) return -1
+  if (run === null || run.samples === 0 || track.sizes.count !== run.samples) return null
   const ms = toMs(run.ticks, track.media.timescale)
-  if (!agrees(track.media.duration, track.media.timescale, ms)) return -1
-  if (!trackAgrees(b, track.inTrak, movie, ms, budget)) return -1
-  return ms
+  if (!headerAgrees(budget, track.media.duration, track.media.timescale, ms)) return null
+  if (!trackAgrees(b, track.inTrak, movie, ms, budget)) return null
+  return { ms, ticks: run.ticks }
 }
 
 // A file whose moov has mvex: the samples of its sound track, those listed
 // in moov (as many in stts as in the sample size table) plus every
-// fragment's. mehd must agree. Whole ms, or -1.
+// fragment's. mehd must agree. -> { ms, ticks } or null.
 function fragmentedMs (b, top, mvex, track, movie, budget) {
   const { inTrak, media, stts, sizes, cap } = track
   const id = trackId(b, only(inTrak, 'tkhd'))
   const inMvex = inside(b, mvex, budget)
-  if (id < 1 || !inMvex) return -1
+  if (id < 1 || !inMvex) return null
   const mehds = inMvex.filter((x) => x.type === 'mehd')
-  if (mehds.length > 1) return -1
+  if (mehds.length > 1) return null
   const fallback = trexDefault(b, inMvex, id)
-  if (fallback === null) return -1
+  if (fallback === null) return null
   const inMoov = sttsTicks(b, stts, cap)
-  if (inMoov !== null && inMoov.samples !== sizes.count) return -1
+  if (inMoov !== null && inMoov.samples !== sizes.count) return null
   const ticks = inMoov === null ? null : fragmentTicks(b, top, id, fallback, { ...inMoov, bytes: sizes.bytes }, cap, budget)
-  if (ticks === null) return -1
+  if (ticks === null) return null
   const ms = toMs(ticks, media.timescale)
-  if (!agrees(media.duration, media.timescale, ms)) return -1
-  if (!trackAgrees(b, inTrak, movie, ms, budget)) return -1
+  if (!headerAgrees(budget, media.duration, media.timescale, ms)) return null
+  if (!trackAgrees(b, inTrak, movie, ms, budget)) return null
   if (mehds.length === 1) {
     const d = mehdDuration(b, mehds[0])
-    if (d === null || !agrees(d, movie.timescale, ms)) return -1
+    if (d === null || !headerAgrees(budget, d, movie.timescale, ms)) return null
   }
-  return ms
+  return { ms, ticks }
 }
 
-// -> { top, inMoov, ms } or null. metadata: udta and meta are skipped
-// instead of refused.
+// -> { top, inMoov, ms, ticks, media, movie } or null, with ticks the
+// samples' total in the media timescale (media) and movie the mvhd
+// timescale. metadata: the sender's own recording, whose udta and meta are
+// skipped instead of refused and whose header durations are not compared.
 function parse (bytes, metadata) {
   if (!(bytes instanceof Uint8Array)) return null
   const budget = { n: 0, metadata: metadata === true }
@@ -632,12 +645,13 @@ function parse (bytes, metadata) {
   if (mvexes.length === 0 && top.some((x) => x.type === 'moof' || x.type === 'styp')) return null
   // The samples decide: a player plays every sample whatever the headers
   // say, so each header that gives a duration must agree with them.
-  const ms = mvexes.length === 0
+  const run = mvexes.length === 0
     ? sampledMs(bytes, track, movie, budget)
     : fragmentedMs(bytes, top, mvexes[0], track, movie, budget)
+  const ms = run && run.ms
   if (!Number.isSafeInteger(ms) || ms < 1 || ms > MAX_AUDIO_MS) return null
-  if (!agrees(movie.duration, movie.timescale, ms)) return null
-  return { top, inMoov, ms }
+  if (!headerAgrees(budget, movie.duration, movie.timescale, ms)) return null
+  return { top, inMoov, ms, ticks: run.ticks, media: track.media.timescale, movie: movie.timescale }
 }
 
 // -> { ms } or null. { metadata: true } is for the sender's own recording,
@@ -654,6 +668,8 @@ function audioBounds (bytes, opts) {
 // Boxes whose udta and meta children are blanked by stripAudioMetadata.
 const STRIP_INSIDE = Object.freeze(['moov', 'trak', 'mdia', 'minf', 'dinf', 'stbl', 'edts', 'mvex', 'moof', 'traf'])
 const TIMED = Object.freeze(['mvhd', 'tkhd', 'mdhd'])
+// Where the duration of each header sits in its body: [version 0, version 1].
+const DURATION_AT = Object.freeze({ mvhd: [16, 24], mdhd: [16, 24], tkhd: [20, 28], mehd: [4, 4] })
 
 // Zeroes creation_time and modification_time of mvhd, tkhd or mdhd.
 function zeroTimes (b, box) {
@@ -663,7 +679,38 @@ function zeroTimes (b, box) {
   else if (version === 1 && n >= 20) b.fill(0, box.body + 4, box.body + 20)
 }
 
-function stripBoxes (b, boxes, budget) {
+function putBe32 (b, p, v) {
+  b[p] = (v >>> 24) & 0xff
+  b[p + 1] = (v >>> 16) & 0xff
+  b[p + 2] = (v >>> 8) & 0xff
+  b[p + 3] = v & 0xff
+}
+
+// Sets the duration of mvhd, tkhd, mdhd or mehd to the samples' (media
+// timescale for mdhd, movie timescale for the others). A duration not
+// given (0 or all ones) stays so. false when the box is malformed or the
+// value does not fit a version 0 field.
+function setDuration (b, box, durations) {
+  if (box.end - box.body < 1) return false
+  const version = b[box.body]
+  if (version !== 0 && version !== 1) return false
+  const p = box.body + DURATION_AT[box.type][version]
+  if (p + (version === 0 ? 4 : 8) > box.end) return false
+  const value = box.type === 'mdhd' ? durations.media : durations.movie
+  if (version === 0) {
+    const d = be32(b, p)
+    if (d === 0 || d === 0xffffffff) return true
+    if (value > 0xfffffffe) return false
+    putBe32(b, p, value)
+    return true
+  }
+  if ((be32(b, p) === 0 && be32(b, p + 4) === 0) || allOnes64(b, p)) return true
+  putBe32(b, p, Math.floor(value / 0x100000000))
+  putBe32(b, p + 4, value % 0x100000000)
+  return true
+}
+
+function stripBoxes (b, boxes, budget, durations) {
   for (const x of boxes) {
     if (x.type === 'udta' || x.type === 'meta') {
       // Same size, so every offset (stco, co64, trun data_offset) still holds.
@@ -671,10 +718,13 @@ function stripBoxes (b, boxes, budget) {
       b.fill(0, x.body, x.end)
     } else if (TIMED.includes(x.type)) {
       zeroTimes(b, x)
+      if (!setDuration(b, x, durations)) return false
+    } else if (x.type === 'mehd') {
+      if (!setDuration(b, x, durations)) return false
     } else if (STRIP_INSIDE.includes(x.type)) {
       const inner = children(b, x.body, x.end, budget)
       if (!inner) return false
-      if (!stripBoxes(b, inner, budget)) return false
+      if (!stripBoxes(b, inner, budget, durations)) return false
     }
   }
   return true
@@ -682,18 +732,23 @@ function stripBoxes (b, boxes, budget) {
 
 // A voice note without its recording time or device tags: a copy of bytes
 // with creation and modification times zeroed in mvhd, every tkhd and mdhd,
-// and every udta and meta box (top level and inside moov) turned into a free
-// box of the same size, zero filled. null when audioBounds with
+// every duration those headers and mehd give rewritten from the samples,
+// and every udta and meta box (top level and inside moov) turned into a
+// free box of the same size, zero filled. null when audioBounds with
 // { metadata: true } refuses the bytes, or when the stripped copy fails the
 // strict audioBounds. Never mutates bytes, never throws.
 function stripAudioMetadata (bytes) {
   try {
-    if (parse(bytes, true) === null) return null
+    const parsed = parse(bytes, true)
+    if (parsed === null) return null
+    // ticks is at most 121 s of the media timescale, so the movie value
+    // stays a safe integer.
+    const durations = { media: parsed.ticks, movie: Math.round(parsed.ticks / parsed.media * parsed.movie) }
     const out = new Uint8Array(bytes.byteLength)
     out.set(bytes)
     const budget = { n: 0 }
     const top = children(out, 0, out.byteLength, budget)
-    if (!top || !stripBoxes(out, top, budget)) return null
+    if (!top || !stripBoxes(out, top, budget, durations)) return null
     return parse(out) === null ? null : out
   } catch {
     return null
