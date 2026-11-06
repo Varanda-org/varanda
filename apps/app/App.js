@@ -145,7 +145,8 @@ import * as actingAs from './src/actingAs'
 import Publicar from './src/screens/Publicar'
 import Seguindo from './src/screens/Seguindo'
 import Termos from './src/screens/Termos'
-import { clearChatMedia, onAppStateChange } from './src/media/chatMedia'
+import { clearChatMedia, onAppStateChange, stopPlayback } from './src/media/chatMedia'
+import { sweepVoiceCache } from './src/media/audio'
 
 // Inlined by Expo at build time; set only for the iOS worklet gate
 // (docs/ios-gate.md).
@@ -420,12 +421,21 @@ function Member () {
   // signature still held in its memory).
   useEffect(() => setReport(null), [generation, locked])
   // Sair, Recomeçar and a lock move one of these: every chat photo URL and
-  // node plaintext file of the old session is released.
-  useEffect(() => { clearChatMedia() }, [generation, locked])
+  // node plaintext file of the old session is released, a playing voice note
+  // stops (the chat screen may stay mounted) and a leftover recording file
+  // is swept.
+  useEffect(() => {
+    stopPlayback()
+    clearChatMedia()
+    sweepVoiceCache()
+  }, [generation, locked])
   const canClearReads = node != null && node.media != null && typeof node.media.clearReadFiles === 'function'
   useEffect(() => {
     if (!canClearReads) return
-    const sub = AppState.addEventListener('change', (state) => onAppStateChange(state, { canClear: true }))
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'background') stopPlayback()
+      onAppStateChange(state, { canClear: true })
+    })
     return () => sub.remove()
   }, [canClearReads])
   // A lock ends this account's session in the tab: nothing it opened or

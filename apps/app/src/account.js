@@ -48,8 +48,14 @@ const ERROR_MESSAGES = {
   'convite-aguardando': 'Seu convite desta semana ainda não chegou. Ele aparece de surpresa, com um aviso.',
   'idade-pendente': 'Confirme sua idade antes de continuar.',
   'limite-idade': 'Muitas tentativas de verificação. Tente de novo amanhã.',
+  'limite-recuperacao': 'você já tem o máximo de passkeys e códigos cadastrados; remova um antes',
   // A seen write or delete lost the compare-and-swap: nothing was written.
   conflito: 'Outro aparelho gravou antes.'
+}
+// Tokens whose sentence only fits the recovery routes: 'nao-encontrado' also
+// answers rename and unknown routes, where this sentence would be wrong.
+const RECOVERY_MESSAGES = {
+  'nao-encontrado': 'esta passkey ou este código não está ligado a uma conta neste endereço'
 }
 const FALLBACK_MESSAGE = 'serviço indisponível'
 
@@ -103,8 +109,9 @@ export function formatNextChange (iso) {
   return p(d.getDate()) + '/' + p(d.getMonth() + 1) + '/' + d.getFullYear()
 }
 
-// Never carries a raw body: the message comes from a fixed table.
-export function toError (code, nextChangeAt) {
+// Never carries a raw body: the message comes from a fixed table. `extra`
+// adds route-scoped tokens (RECOVERY_MESSAGES).
+export function toError (code, nextChangeAt, extra) {
   let message
   let token = 'indisponivel'
   if (code === 'troca-bloqueada') {
@@ -114,6 +121,9 @@ export function toError (code, nextChangeAt) {
   } else if (Object.hasOwn(ERROR_MESSAGES, code)) {
     token = code
     message = ERROR_MESSAGES[code]
+  } else if (extra && Object.hasOwn(extra, code)) {
+    token = code
+    message = extra[code]
   } else {
     message = FALLBACK_MESSAGE
   }
@@ -190,7 +200,7 @@ export function buildRequest (method, path, body, extra) {
 // hosted web app passes none and keeps the relative path.
 // `errorBody`: a refusal also carries the parsed JSON body as err.body, for a
 // caller that validates it (seenFinish's conflict), so it never fetches again.
-async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, errorBody = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin } = {}) {
+async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, errorBody = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin, messages } = {}) {
   // The Vitrine has no account service: every call is a definite refusal,
   // before any request leaves the page.
   if (VITRINE) throw toError('indisponivel')
@@ -201,7 +211,7 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), timeoutMs)
   const fail = (code, nextChangeAt, unknown) => {
-    const err = toError(code, nextChangeAt)
+    const err = toError(code, nextChangeAt, messages)
     if (uncertain && unknown) err.uncertain = true
     return err
   }
@@ -219,6 +229,14 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
     if (data === null || typeof data !== 'object') throw fail('indisponivel', undefined, true)
     return data
   }
+  // allow404 'nao-encontrado': only the service's own JSON answer is null; any
+  // other 404 (a proxy page, an empty body, another token, an older server's
+  // unknown route answering a bare 'nao-encontrado') cannot be told from
+  // "could not ask", so it is the service being unavailable.
+  if (allow404 === 'nao-encontrado' && res.status === 404) {
+    if (data && data.error === 'nao-encontrado' && data.recovery === true) return null
+    throw fail('indisponivel')
+  }
   // allow404 'route': only a route the service does not have is null; a
   // refusal that happens to be a 404 (an expired nonce) stays an error.
   if (allow404 && res.status === 404 && !(allow404 === 'route' && data && data.error === 'expirado')) return null
@@ -226,7 +244,7 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
   // `definite`: the route answers a 5xx with an error token only before it
   // changed anything, so that answer is a refusal, not an unknown outcome. A
   // 5xx without a known token (a proxy page, a crash) stays uncertain.
-  const known = definite && (code === 'indisponivel' || Object.hasOwn(ERROR_MESSAGES, code))
+  const known = definite && (code === 'indisponivel' || Object.hasOwn(ERROR_MESSAGES, code) || (!!messages && Object.hasOwn(messages, code)))
   const err = fail(code, data && data.nextChangeAt, res.status >= 500 && !known)
   if (errorBody && data && typeof data === 'object') err.body = data
   throw err
@@ -506,4 +524,59 @@ export const ageResult = async ({ member, nonce, signature }) => {
   const err = toError('indisponivel')
   err.uncertain = true
   throw err
+}
+
+// Recovery entries (docs/rpc.md 5.90, src/recovery.js). Every proof is the
+// node's recovery.sign over the service's single-use nonce; the app never
+// hashes or signs here.
+const RECOVERY_KINDS = ['passkey', 'code']
+const HEX64_RE = /^[0-9a-f]{64}$/
+const HEX48_RE = /^[0-9a-f]{48}$/
+const CIPHERTEXT_RE = /^[0-9a-f]{164}$/
+const isRecoveryKind = (v) => typeof v === 'string' && RECOVERY_KINDS.includes(v)
+const isHex64 = (v) => typeof v === 'string' && HEX64_RE.test(v)
+const isRecoveryBlob = (v) => exactKeys(v, ['v', 'kind', 'nonce', 'ciphertext']) && v.v === 1 &&
+  isRecoveryKind(v.kind) && typeof v.nonce === 'string' && HEX48_RE.test(v.nonce) &&
+  typeof v.ciphertext === 'string' && CIPHERTEXT_RE.test(v.ciphertext)
+const recoveryOpts = (extra) => ({ messages: RECOVERY_MESSAGES, ...extra })
+
+export const recoveryStart = async ({ member }) => {
+  const data = await call('POST', '/account/recovery/start', { member }, recoveryOpts())
+  if (typeof data.nonce !== 'string') throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+// put and remove may write before a 5xx reaches the app, so every 5xx stays
+// an unknown outcome (no `definite`): the caller re-reads with the list. A
+// readable 2xx means the service applied it; `changed` is informative only.
+// put answers { createdAt, changed } and remove { changed }.
+async function recoveryWrite (path, body) {
+  const data = await call('POST', path, body, recoveryOpts({ uncertain: true }))
+  const out = { ok: true, changed: data.changed === true }
+  if (isIso(data.createdAt)) out.createdAt = data.createdAt
+  return out
+}
+export const recoveryPut = ({ member, nonce, signature, kind, lookupId, blob }) =>
+  recoveryWrite('/account/recovery/put', { member, nonce, signature, kind, lookupId, blob })
+export const recoveryRemove = ({ member, nonce, signature, kind, lookupId }) =>
+  recoveryWrite('/account/recovery/remove', { member, nonce, signature, kind, lookupId })
+export const recoveryList = async ({ member, nonce, signature }) => {
+  const data = await call('POST', '/account/recovery/list', { member, nonce, signature }, recoveryOpts())
+  if (!exactKeys(data, ['entries']) || !Array.isArray(data.entries)) throw toError('indisponivel')
+  return data.entries.map((e) => {
+    if (!exactKeys(e, ['lookupId', 'kind', 'createdAt']) || !isHex64(e.lookupId) ||
+      !isRecoveryKind(e.kind) || !isIso(e.createdAt)) throw toError('indisponivel')
+    return { lookupId: e.lookupId, kind: e.kind, createdAt: e.createdAt }
+  })
+}
+// The lookup id rides in a POST body, never in a URL. null only for the
+// service's JSON 404 { error: 'nao-encontrado', recovery: true }; any other
+// failure throws,
+// so "not registered" is never confused with "could not ask" (a null lets
+// the app install a ceremony's PRF directly).
+export const recoveryFetch = async (lookupId, { origin } = {}) => {
+  const data = await call('POST', '/account/recovery/fetch', { lookupId }, recoveryOpts({ allow404: 'nao-encontrado', origin }))
+  if (data === null) return null
+  if (!exactKeys(data, ['member', 'kind', 'blob']) || !isHex64(data.member) || !isRecoveryKind(data.kind) ||
+    !isRecoveryBlob(data.blob) || data.blob.kind !== data.kind) throw toError('indisponivel')
+  return { member: data.member, kind: data.kind, blob: { v: 1, kind: data.blob.kind, nonce: data.blob.nonce, ciphertext: data.blob.ciphertext } }
 }

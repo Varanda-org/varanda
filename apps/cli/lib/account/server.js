@@ -14,6 +14,7 @@ const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 const { createSeenRoutes } = require('./seen-routes')
 const { createAgeRoutes } = require('./age-routes')
+const { createRecoveryRoutes } = require('./recovery-routes')
 const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, mintRedeem, redeemMatches, accountReturnUrl, appReturnPage, header } = require('./app-return')
 const { createPagesRoutes } = require('./pages-routes')
 
@@ -143,6 +144,9 @@ const ERROR_STATUS = Object.freeze({
   // timed out after maybe creating a session, a write that may have landed):
   // unlike 'indisponivel', the app must not read this as a plain refusal.
   'resultado-incerto': 503,
+  // Recovery entries (./recovery-routes.js): the member already holds the
+  // most extra passkeys the store keeps.
+  'limite-recuperacao': 409,
   // Páginas (./pages-routes.js).
   'sem-permissao': 403,
   pausada: 409,
@@ -635,6 +639,9 @@ function checkRawPost (req, origin) {
 // `pages` (null: every page POST answers 404 and the policy { available:
 // false }) is { keys, writer, pagesStore, dir, blocklist? } for
 // ./pages-routes.js; without a blocklist the moderation desk's is used.
+// `recovery` is an openRecoveryStore (./recovery-store.js), or null: the
+// recovery routes (./recovery-routes.js) then answer 503 'indisponivel' and
+// everything else stays up.
 function createAccountServer ({
   association,
   origin,
@@ -663,6 +670,7 @@ function createAccountServer ({
   ageCheck = null,
   ageDirectoryFloor = null,
   pages = null,
+  recovery = null,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -755,6 +763,23 @@ function createAccountServer ({
     directoryFloor: ageDirectoryFloor,
     issuer,
     http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
+  })
+
+  // Always mounted, so a missing or corrupt recovery.json refuses only these
+  // routes. fetch shares the public-read window; put, remove and list are
+  // charged per member after the proof.
+  const recoveryRoutes = createRecoveryRoutes({
+    store: recovery,
+    accounts: store,
+    association,
+    now,
+    log,
+    limits: { lookup: limits.lookup, member: keyedWindow(10, 600 * 1000, now) },
+    send,
+    refuse,
+    checkPost: (req, opts) => checkPost(req, origin, opts),
+    readJsonBody,
+    over
   })
 
   // Always mounted, so /account/pages/policy answers even when pages are off.
@@ -1517,6 +1542,7 @@ function createAccountServer ({
     if (pushRoutes !== null && pushRoutes.owns(pathname)) return pushRoutes.handle(req, res, url)
     if (seenRoutes.owns(pathname)) return seenRoutes.handle(req, res, url)
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
+    if (recoveryRoutes.owns(pathname)) return recoveryRoutes.handle(req, res, url)
     if (pagesRoutes.owns(pathname)) return pagesRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
@@ -1611,7 +1637,7 @@ function createAccountServer ({
     return pushRoutes === null ? 0 : pushRoutes.room()
   }
 
-  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), pagesStats: () => pagesRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), pagesStats: () => pagesRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {

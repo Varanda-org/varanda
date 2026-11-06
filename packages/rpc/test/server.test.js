@@ -202,6 +202,10 @@ test('web-node host controls: INTERNAL without a handler, as node.close', async 
     ['identity.reset', {}],
     ['identity.forget', {}],
     ['identity.sessionSaved', {}],
+    ['identity.recoveryLookup', { kind: 'passkey', secret: 'cd'.repeat(32) }],
+    ['identity.recoveryOpen', { blob: { v: 1, kind: 'passkey', nonce: 'cd'.repeat(24), ciphertext: 'cd'.repeat(82) }, member: 'cd'.repeat(32) }],
+    ['identity.recoveryWrap', { kind: 'code' }],
+    ['identity.recoveryBind', { credentialId: 'abc', userId: 'cd'.repeat(32) }],
     ['media.uploadFile', { name: '0123456789abcdef0123456789abcdef.bin', mime: 'image/jpeg', width: 10, height: 10 }]
   ]
   const plain = setup({ handlers: {} })

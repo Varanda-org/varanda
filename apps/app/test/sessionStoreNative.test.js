@@ -44,8 +44,28 @@ export class File {
   constructor (dir, name) { this.uri = dir.uri + name }
   get exists () { return files.has(this.uri) }
   create () { if (files.has(this.uri)) throw new Error('exists'); files.set(this.uri, '') }
-  write (text) { if (globalThis.__stubWriteFails) throw new Error('disk full'); files.set(this.uri, String(text)) }
-  delete () { files.delete(this.uri) }
+  // A failed write leaves a torn file, as a real disk can.
+  write (text) {
+    if (globalThis.__stubWriteFails) { files.set(this.uri, String(text).slice(0, 5)); throw new Error('disk full') }
+    files.set(this.uri, String(text))
+  }
+  textSync () {
+    if (globalThis.__stubReadFails) throw new Error('io error')
+    if (!files.has(this.uri)) throw new Error('missing')
+    return files.get(this.uri)
+  }
+  delete () { if (!files.has(this.uri)) throw new Error('missing'); files.delete(this.uri) }
+  // As the native modules: neither overwrites an existing destination.
+  copy (dest) {
+    if (!files.has(this.uri) || files.has(dest.uri)) throw new Error('cannot copy')
+    files.set(dest.uri, files.get(this.uri))
+  }
+  move (dest) {
+    if (globalThis.__stubMoveFails || !files.has(this.uri) || files.has(dest.uri)) throw new Error('cannot move')
+    files.set(dest.uri, files.get(this.uri))
+    files.delete(this.uri)
+    this.uri = dest.uri
+  }
 }
 `
 const hooks = `
@@ -58,6 +78,9 @@ export async function resolve (specifier, context, next) {
   if (stubs[specifier]) return { url: stubs[specifier], shortCircuit: true }
   if (specifier === './sessionStore' && context.parentURL && context.parentURL.includes('/src/')) {
     return next('./sessionStore.native.js', context)
+  }
+  if (specifier === './passkeyLocal' && context.parentURL && context.parentURL.includes('/src/')) {
+    return next('./passkeyLocal.native.js', context)
   }
   if (/^\\.\\.?\\/[^.]*$/.test(specifier) && context.parentURL && context.parentURL.includes('/src/')) {
     return next(specifier + '.js', context)
@@ -83,6 +106,8 @@ function resetStubs ({ fresh = false } = {}) {
   globalThis.__stubFiles = globalThis.__stubFiles || new Map()
   if (!fresh) files().set(EPOCH, '1')
   globalThis.__stubWriteFails = false
+  globalThis.__stubReadFails = false
+  globalThis.__stubMoveFails = false
   globalThis.__secureGetFails = false
   globalThis.__secureSetFails = false
   globalThis.__secureSetFailsFor = null
@@ -647,4 +672,789 @@ test('identity: a status with no diary deletes the stored session of this rp.id'
   await createNativeIdentity({ request: client.request, rpId: () => RP, store }).resume()
   t.absent(items().has(itemKey(RP, PK)))
   t.absent(client.methods().includes('identity.install'))
+})
+
+// The pending creation and refused passkeys (src/passkeyLocal.native.js), in
+// memory: the same three functions, shared across identities like the file.
+function memoryLocal () {
+  const byRp = new Map()
+  const copy = (v) => JSON.parse(JSON.stringify(v))
+  return {
+    byRp,
+    load: (rpId) => byRp.has(rpId) ? copy(byRp.get(rpId)) : { pending: null, refused: [] },
+    save: (rpId, rec) => { byRp.set(rpId, copy(rec)) },
+    clear: (rpId) => { byRp.delete(rpId) }
+  }
+}
+
+// A 37-byte authenticator data with the given flags byte.
+function authData (flags) {
+  const bytes = new Uint8Array(37)
+  bytes[32] = flags
+  return bytes
+}
+
+// A CBOR attestationObject { fmt: 'none', attStmt: {}, authData }, by hand.
+function attestationObject (data) {
+  const text = (s) => [0x60 + s.length, ...Buffer.from(s)]
+  return Buffer.from([0xa3, ...text('fmt'), ...text('none'), ...text('attStmt'), 0xa0, ...text('authData'), 0x58, data.length, ...data]).toString('base64url')
+}
+
+const BE_CLEAR = 0x45
+const ID_A = 'QUFBQQ'
+const ID_B = 'QkJCQg'
+const ID_C = 'Q0NDQw'
+
+function credResponse (id, prf, inner = {}) {
+  return JSON.stringify({
+    id,
+    rawId: id,
+    response: { userHandle: Buffer.from(new Uint8Array(32).fill(1)).toString('base64url'), ...inner },
+    clientExtensionResults: prf === null ? {} : { prf }
+  })
+}
+
+const excluded = (entry) => entry.options.excludeCredentials.map((d) => d.id)
+
+test('identity: a passkey bound to one device is NOT_SYNCED, never installed, then excluded', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { MESSAGES } = await import('../src/passkeyOptions.js')
+  const seen = fakePasskey({ create: () => credResponse(ID_A, { enabled: true, results: { first: PRF_B64 } }, { attestationObject: attestationObject(authData(BE_CLEAR)) }) })
+  const client = fakeClient()
+  const local = memoryLocal()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  const err = await id.unlock({ register: true }).catch((e) => e)
+  t.is(err.code, 'NOT_SYNCED')
+  t.is(err.message, MESSAGES.NOT_SYNCED)
+  t.is(err.credentialId, ID_A)
+  t.is(err.userId, '03'.repeat(32))
+  t.absent(client.methods().includes('identity.install'))
+  t.alike(seen[0].options.excludeCredentials, [])
+  await id.unlock({ register: true }).catch((e) => e)
+  t.alike(excluded(seen[1]), [ID_A])
+  const st = await id.status()
+  t.is(st.pending, false)
+  t.alike(st.refused, [{ userId: '03'.repeat(32), code: 'NOT_SYNCED', cleaned: false, created: true }])
+})
+
+test('identity: a malformed PRF output on create is NO_PRF, never pending', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const short = Buffer.from(new Uint8Array(16).fill(7)).toString('base64url')
+  fakePasskey({ create: () => credResponse(ID_A, { enabled: true, results: { first: short } }) })
+  const client = fakeClient()
+  const local = memoryLocal()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  const err = await id.unlock({ register: true }).catch((e) => e)
+  t.is(err.code, 'NO_PRF')
+  t.is(err.credentialId, ID_A)
+  t.absent(client.methods().includes('identity.install'))
+  t.is((await id.status()).pending, false)
+  t.is((await id.complete().catch((e) => e)).code, 'CANCELLED', 'nothing pending')
+  t.alike(local.byRp.get(RP).refused.map((r) => [r.credentialId, r.code]), [[ID_A, 'NO_PRF']])
+})
+
+test('identity: pending and refused passkeys survive a restart; a cancelled replacement keeps the pending one', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  let next = null
+  const seen = fakePasskey({ create: () => next(), get: () => credResponse(ID_B, { results: { first: PRF_B64 } }) })
+  const local = memoryLocal()
+  const id1 = createNativeIdentity({ request: fakeClient().request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  next = () => credResponse(ID_A, { enabled: true })
+  t.alike(await id1.unlock({ register: true }), { pending: true })
+  next = () => credResponse(ID_B, { enabled: true })
+  t.alike(await id1.unlock({ register: true }), { pending: true })
+  t.alike(excluded(seen[1]), [ID_A], 'the pending creation is excluded')
+  next = () => credResponse(ID_C, { enabled: false })
+  t.is((await id1.unlock({ register: true }).catch((e) => e)).code, 'NO_PRF')
+
+  const client = fakeClient()
+  const id2 = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  const st = await id2.status()
+  t.is(st.pending, true)
+  t.alike(st.refused.map((r) => r.code), ['SUPERSEDED', 'NO_PRF'])
+  next = () => { const e = new Error('x'); e.code = 'CANCELLED'; throw e }
+  t.is((await id2.unlock({ register: true }).catch((e) => e)).code, 'CANCELLED')
+  t.alike(excluded(seen[3]).sort(), [ID_A, ID_B, ID_C].sort())
+  t.is((await id2.status()).pending, true, 'a cancelled replacement keeps the pending creation')
+
+  t.alike(await id2.complete(), { publicKey: PK, created: true })
+  t.alike(seen[4].options.allowCredentials, [{ type: 'public-key', id: ID_B }])
+  t.is((await id2.status()).pending, false)
+  t.is(local.byRp.get(RP).pending, null)
+  t.alike(local.byRp.get(RP).refused.map((r) => r.credentialId), [ID_A, ID_C])
+})
+
+test('identity: an immediate PRF creation supersedes the pending one, which stays excluded', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  let next = () => credResponse(ID_A, { enabled: true })
+  const seen = fakePasskey({ create: () => next() })
+  const client = fakeClient()
+  const local = memoryLocal()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  t.alike(await id.unlock({ register: true }), { pending: true })
+  next = () => credResponse(ID_B, { enabled: true, results: { first: PRF_B64 } })
+  t.alike(await id.unlock({ register: true }), { publicKey: PK, created: true })
+  t.is(client.calls.find((c) => c.method === 'identity.install').params.credentialId, ID_B)
+  const st = await id.status()
+  t.is(st.pending, false)
+  t.alike(local.byRp.get(RP).refused.map((r) => [r.credentialId, r.code]), [[ID_A, 'SUPERSEDED']])
+  const again = createNativeIdentity({ request: fakeClient().request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  next = () => { const e = new Error('x'); e.code = 'CANCELLED'; throw e }
+  await again.unlock({ register: true }).catch(() => {})
+  t.alike(excluded(seen[2]), [ID_A])
+})
+
+test('identity: a create handing back an excluded sign-in passkey refuses it as not created here', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const cases = [
+    ['NOT_SYNCED', () => credResponse(ID_A, { enabled: true, results: { first: PRF_B64 } }, { attestationObject: attestationObject(authData(BE_CLEAR)) })],
+    ['NO_PRF', () => credResponse(ID_A, { enabled: false })]
+  ]
+  for (const [code, create] of cases) {
+    const seen = fakePasskey({ get: () => credResponse(ID_A, null), create })
+    const id = createNativeIdentity({ request: fakeClient().request, rpId: () => RP, store: memoryStore(), local: memoryLocal(), random: deterministicRandom })
+    t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NO_PRF', code + ': the sign-in passkey has no PRF')
+    t.alike((await id.status()).refused.map((r) => [r.code, r.created]), [['NO_PRF', false]])
+    const err = await id.unlock({ register: true }).catch((e) => e)
+    t.alike(excluded(seen[1]), [ID_A], code + ': the sign-in passkey is excluded')
+    t.is(err.code, code)
+    t.is(err.created, false, code + ': the error says not created here')
+    t.alike((await id.status()).refused.map((r) => [r.code, r.created]), [[code, false]], code + ': never upgraded to created')
+  }
+})
+
+test('identity: any sign-in skips the bound passkey; NONE keeps its code; a bound sign-in passkey still installs', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { MESSAGES } = await import('../src/passkeyOptions.js')
+  let get = () => credResponse(CRED, { results: { first: PRF_B64 } }, { authenticatorData: Buffer.from(authData(BE_CLEAR)).toString('base64url') })
+  const seen = fakePasskey({ get: () => get() })
+  const bound = fakeClient({ status: { exists: true, publicKey: PK, passkeyKnown: true, credentialId: CRED, rpId: RP } })
+  const id = createNativeIdentity({ request: bound.request, rpId: () => RP, store: memoryStore(), local: memoryLocal(), random: deterministicRandom })
+  t.alike(await id.unlock({ any: true }), { publicKey: PK, created: false }, 'BE clear on sign-in still installs')
+  t.absent(seen[0].options.allowCredentials)
+  get = () => { const e = new Error('native'); e.code = 'NONE'; throw e }
+  const err = await id.unlock({}).catch((e) => e)
+  t.is(err.code, 'NONE')
+  t.is(err.message, MESSAGES.NONE)
+  t.alike(seen[1].options.allowCredentials, [{ type: 'public-key', id: CRED }])
+  const st = await id.status()
+  t.alike(st.refused, [], 'a bound sign-in NONE refuses nothing')
+  t.is(st.hybrid, 'unknown')
+  t.is(st.platform, 'unknown')
+  t.is(st.signal, 'no')
+})
+
+test('identity: reset clears the local record, signOut keeps it', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  fakePasskey({ create: () => credResponse(ID_A, { enabled: true }) })
+  const local = memoryLocal()
+  const id = createNativeIdentity({ request: fakeClient().request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  t.alike(await id.unlock({ register: true }), { pending: true })
+  await id.signOut()
+  t.is(local.byRp.get(RP).pending.credentialId, ID_A)
+  t.is((await id.status()).pending, true)
+  await id.reset()
+  t.absent(local.byRp.has(RP))
+  const st = await id.status()
+  t.is(st.pending, false)
+  t.alike(st.refused, [])
+})
+
+test('passkey local: one file per installation, malformed reads empty, capped', async (t) => {
+  resetStubs()
+  const { createPasskeyLocal, MAX_REFUSED } = await import('../src/passkeyLocal.native.js')
+  const FILE = 'file:///stub/Documents/varanda-passkey-attempts.json'
+  const local = createPasskeyLocal()
+  t.alike(local.load(RP), { pending: null, refused: [] })
+  const userId = 'ab'.repeat(32)
+  const refused = []
+  for (let i = 0; i < MAX_REFUSED + 3; i++) refused.push({ credentialId: 'id' + i, userId, code: 'NO_PRF', cleaned: true })
+  local.save(RP, { pending: { credentialId: ID_A, userId }, refused })
+  local.save('other.example', { pending: null, refused: [] })
+  const loaded = local.load(RP)
+  t.alike(loaded.pending, { credentialId: ID_A, userId })
+  t.is(loaded.refused.length, MAX_REFUSED)
+  t.is(loaded.refused[0].credentialId, 'id3', 'the oldest go first')
+  t.is(loaded.refused[0].cleaned, false)
+  t.absent(files().get(FILE).includes('prf'))
+  local.clear(RP)
+  t.alike(local.load(RP), { pending: null, refused: [] })
+  t.ok(JSON.parse(files().get(FILE)).byRp['other.example'], 'other rp.id kept')
+  files().set(FILE, '{not json')
+  t.alike(local.load('other.example'), { pending: null, refused: [] })
+  files().set(FILE, JSON.stringify({ v: 1, byRp: { [RP]: { pending: { credentialId: 'bad id!', userId }, refused: [{ credentialId: ID_A, userId, code: 'NO_PRF' }, 'junk'] } } }))
+  t.alike(local.load(RP), { pending: null, refused: [{ credentialId: ID_A, userId, code: 'NO_PRF', cleaned: false, created: false }] }, 'an old entry without created reads as created false')
+})
+
+const ATTEMPTS = 'file:///stub/Documents/varanda-passkey-attempts.json'
+const ATTEMPTS_TMP = ATTEMPTS + '.tmp'
+
+test('passkey local: a write that fails leaves the previous content', async (t) => {
+  resetStubs()
+  const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+  const userId = 'ab'.repeat(32)
+  const local = createPasskeyLocal()
+  local.save(RP, { pending: { credentialId: ID_A, userId }, refused: [] })
+  const before = files().get(ATTEMPTS)
+  t.absent(files().has(ATTEMPTS_TMP), 'the temporary file was moved into place')
+  globalThis.__stubWriteFails = true
+  t.exception(() => local.save(RP, { pending: { credentialId: ID_B, userId }, refused: [] }))
+  globalThis.__stubWriteFails = false
+  t.is(files().get(ATTEMPTS), before)
+  t.is(createPasskeyLocal().load(RP).pending.credentialId, ID_A)
+  // Deleted original, temporary file not moved yet: the temporary file is read.
+  globalThis.__stubMoveFails = true
+  t.exception(() => local.save(RP, { pending: { credentialId: ID_C, userId }, refused: [] }))
+  globalThis.__stubMoveFails = false
+  t.absent(files().has(ATTEMPTS))
+  t.is(createPasskeyLocal().load(RP).pending.credentialId, ID_C)
+  local.save('other.example', { pending: null, refused: [] })
+  t.absent(files().has(ATTEMPTS_TMP))
+  t.is(JSON.parse(files().get(ATTEMPTS)).byRp[RP].pending.credentialId, ID_C)
+})
+
+test('passkey local: a failed read never drops another rp.id', async (t) => {
+  resetStubs()
+  const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+  const userId = 'ab'.repeat(32)
+  const local = createPasskeyLocal()
+  local.save('other.example', { pending: null, refused: [{ credentialId: ID_A, userId, code: 'NO_PRF', created: true }] })
+  local.save(RP, { pending: { credentialId: ID_B, userId }, refused: [] })
+  const before = files().get(ATTEMPTS)
+  globalThis.__stubReadFails = true
+  t.is(local.load(RP).pending.credentialId, ID_B, 'the memory copy, not an empty record')
+  t.exception(() => local.save(RP, { pending: null, refused: [] }), 'the write is skipped')
+  t.is(files().get(ATTEMPTS), before)
+  t.is(local.load(RP).pending, null, 'the memory copy has the skipped save')
+  t.exception(() => local.clear(RP))
+  t.is(files().get(ATTEMPTS), before)
+  globalThis.__stubReadFails = false
+  t.alike(local.load('other.example').refused.map((r) => [r.credentialId, r.created]), [[ID_A, true]])
+  local.clear(RP)
+  const doc = JSON.parse(files().get(ATTEMPTS))
+  t.absent(doc.byRp[RP], 'clear after a failed read still removes the rp.id')
+  t.ok(doc.byRp['other.example'])
+})
+
+test('passkey local: an id of length 1 mod 4 is dropped', async (t) => {
+  resetStubs()
+  const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+  const userId = 'ab'.repeat(32)
+  files().set(ATTEMPTS, JSON.stringify({ v: 1, byRp: { [RP]: { pending: { credentialId: 'QUFBQ', userId }, refused: [{ credentialId: 'QUFBQUF', userId, code: 'NO_PRF' }, { credentialId: 'QUFBQ', userId, code: 'NO_PRF' }] } } }))
+  t.alike(createPasskeyLocal().load(RP), { pending: null, refused: [{ credentialId: 'QUFBQUF', userId, code: 'NO_PRF', cleaned: false, created: false }] })
+})
+
+test('identity: a malformed restored id is dropped, never thrown at the creation', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const seen = fakePasskey({ create: () => credResponse(ID_B, { enabled: true }) })
+  const local = memoryLocal()
+  local.byRp.set(RP, { pending: { credentialId: 'QUFBQ', userId: '' }, refused: [{ credentialId: 'Q0NDQ', userId: '', code: 'NO_PRF' }, { credentialId: ID_C, userId: '', code: 'NO_PRF' }] })
+  const id = createNativeIdentity({ request: fakeClient().request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  t.alike(await id.unlock({ register: true }), { pending: true })
+  t.alike(excluded(seen[0]), [ID_C])
+  t.alike(local.byRp.get(RP).refused.map((r) => r.credentialId), [ID_C])
+})
+
+test('identity: a sign-in passkey without PRF is refused with created false and excluded next', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  let get = () => credResponse(ID_A, null)
+  const seen = fakePasskey({ get: () => get(), create: () => { const e = new Error('x'); e.code = 'CANCELLED'; throw e } })
+  const client = fakeClient({ status: { exists: true, publicKey: PK, passkeyKnown: true, credentialId: CRED, rpId: RP } })
+  const local = memoryLocal()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NO_PRF')
+  get = () => credResponse(CRED, null)
+  t.is((await id.unlock({}).catch((e) => e)).code, 'NO_PRF')
+  t.alike(local.byRp.get(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'NO_PRF', false], [CRED, 'NO_PRF', false]])
+  t.alike((await id.status()).refused, [{ userId: '01'.repeat(32), code: 'NO_PRF', cleaned: false, created: false }, { userId: '01'.repeat(32), code: 'NO_PRF', cleaned: false, created: false }])
+  t.absent(client.methods().some((m) => m === 'identity.install' || m === 'identity.reset' || m === 'identity.forget'), 'the bound record is untouched')
+  await id.unlock({ register: true }).catch(() => {})
+  t.alike(excluded(seen[2]).sort(), [CRED, ID_A].sort())
+})
+
+test('identity: an immediate PRF creation supersedes the pending one only after the install', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  let next = () => credResponse(ID_A, { enabled: true })
+  fakePasskey({ create: () => next() })
+  const local = memoryLocal()
+  let duringInstall = null
+  const client = fakeClient({
+    answers: {
+      'identity.install': (params) => {
+        duringInstall = local.byRp.get(RP)
+        return { publicKey: PK, resumed: params.resumed }
+      }
+    }
+  })
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  t.alike(await id.unlock({ register: true }), { pending: true })
+  next = () => credResponse(ID_B, { enabled: true, results: { first: PRF_B64 } })
+  t.alike(await id.unlock({ register: true }), { publicKey: PK, created: true })
+  t.is(duringInstall.pending.credentialId, ID_A, 'still pending while the install runs')
+  t.alike(duringInstall.refused, [])
+  t.alike(local.byRp.get(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'SUPERSEDED', true]])
+})
+
+test('identity: a failed install keeps the pending creation and refuses the new passkey', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  let next = () => credResponse(ID_A, { enabled: true })
+  const seen = fakePasskey({ create: () => next() })
+  const local = memoryLocal()
+  const client = fakeClient({ answers: { 'identity.install': () => { throw new Error('connection lost') } } })
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  t.alike(await id.unlock({ register: true }), { pending: true })
+  next = () => credResponse(ID_B, { enabled: true, results: { first: PRF_B64 } })
+  t.is((await id.unlock({ register: true }).catch((e) => e)).message, 'connection lost')
+  t.is(local.byRp.get(RP).pending.credentialId, ID_A)
+  t.alike(local.byRp.get(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_B, 'INSTALL_FAILED', true]])
+  const st = await id.status()
+  t.is(st.pending, true)
+  t.alike(st.refused, [{ userId: '03'.repeat(32), code: 'INSTALL_FAILED', cleaned: false, created: true }])
+  next = () => { const e = new Error('x'); e.code = 'CANCELLED'; throw e }
+  await id.unlock({ register: true }).catch(() => {})
+  t.alike(excluded(seen[2]).sort(), [ID_A, ID_B].sort())
+})
+
+test('identity: complete with the pending passkey missing refuses it as MISSING', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  fakePasskey({
+    create: () => credResponse(ID_A, { enabled: true }),
+    get: () => { const e = new Error('native'); e.code = 'NONE'; throw e }
+  })
+  const local = memoryLocal()
+  const id = createNativeIdentity({ request: fakeClient().request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  t.alike(await id.unlock({ register: true }), { pending: true })
+  const err = await id.complete().catch((e) => e)
+  t.is(err.code, 'WEBAUTHN')
+  t.is(err.message, 'a passkey criada não foi encontrada; toque em Criar passkey de novo')
+  t.is(local.byRp.get(RP).pending, null)
+  t.alike(local.byRp.get(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'MISSING', true]])
+  const st = await id.status()
+  t.is(st.pending, false)
+  t.alike(st.refused, [{ userId: '03'.repeat(32), code: 'MISSING', cleaned: false, created: true }])
+})
+
+test('passkey local: a temporary file left by a write is promoted first; a failed promotion keeps it', async (t) => {
+  resetStubs()
+  const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+  const userId = 'ab'.repeat(32)
+  const local = createPasskeyLocal()
+  local.save('other.example', { pending: { credentialId: ID_A, userId }, refused: [] })
+  const old = files().get(ATTEMPTS)
+  files().set(ATTEMPTS_TMP, old)
+  files().delete(ATTEMPTS)
+  globalThis.__stubMoveFails = true
+  t.exception(() => local.save(RP, { pending: { credentialId: ID_B, userId }, refused: [] }))
+  t.exception(() => local.clear('other.example'))
+  globalThis.__stubMoveFails = false
+  t.is(files().get(ATTEMPTS_TMP), old, 'the temporary file is never replaced while it is the only copy')
+  t.absent(files().has(ATTEMPTS))
+  t.is(local.load(RP).pending, null, 'the skipped save is not on disk')
+  local.save(RP, { pending: { credentialId: ID_B, userId }, refused: [] })
+  t.absent(files().has(ATTEMPTS_TMP))
+  const doc = JSON.parse(files().get(ATTEMPTS))
+  t.is(doc.byRp['other.example'].pending.credentialId, ID_A)
+  t.is(doc.byRp[RP].pending.credentialId, ID_B)
+})
+
+test('passkey local: a failed read of the temporary file is unreadable, never empty', async (t) => {
+  resetStubs()
+  const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+  const userId = 'ab'.repeat(32)
+  const local = createPasskeyLocal()
+  local.save('other.example', { pending: { credentialId: ID_A, userId }, refused: [] })
+  files().set(ATTEMPTS_TMP, files().get(ATTEMPTS))
+  files().delete(ATTEMPTS)
+  globalThis.__stubReadFails = true
+  globalThis.__stubMoveFails = true
+  t.is(local.load('other.example').pending?.credentialId, ID_A, 'the memory copy, not an empty record')
+  globalThis.__stubMoveFails = false
+  const tmp = files().get(ATTEMPTS_TMP)
+  t.exception(() => local.save(RP, { pending: null, refused: [] }), 'the write is skipped')
+  globalThis.__stubReadFails = false
+  t.is(files().get(ATTEMPTS) || files().get(ATTEMPTS_TMP), tmp)
+  t.is(createPasskeyLocal().load('other.example').pending.credentialId, ID_A)
+  files().set(ATTEMPTS, 'garbage')
+  t.alike(createPasskeyLocal().load('other.example'), { pending: null, refused: [] }, 'content that does not parse still reads empty')
+})
+
+test('identity: reset rejects before any change when the local record cannot be cleared', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  fakePasskey({ create: () => credResponse(ID_A, { enabled: true }) })
+  const local = memoryLocal()
+  const client = fakeClient({ status: { exists: true, publicKey: PK } })
+  const store = memoryStore()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store, local, random: deterministicRandom })
+  t.alike(await id.unlock({ register: true }), { pending: true })
+  const boom = new Error('disk')
+  local.clear = () => { throw boom }
+  t.is(await id.reset().catch((e) => e), boom)
+  t.absent(client.methods().includes('identity.reset'))
+  t.absent(store.log.some((e) => e[0] === 'clear'))
+  t.is((await id.status()).pending, true)
+  t.is(local.byRp.get(RP).pending.credentialId, ID_A)
+})
+
+test('identity: a sign-in with another passkey supersedes the pending creation', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  fakePasskey({ create: () => credResponse(ID_A, { enabled: true }), get: () => credResponse(ID_B, { results: { first: PRF_B64 } }) })
+  const local = memoryLocal()
+  const id = createNativeIdentity({ request: fakeClient().request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  t.alike(await id.unlock({ register: true }), { pending: true })
+  t.alike(await id.unlock({ any: true }), { publicKey: PK, created: false })
+  t.is(local.byRp.get(RP).pending, null)
+  t.alike(local.byRp.get(RP).refused, [{ credentialId: ID_A, userId: '03'.repeat(32), code: 'SUPERSEDED', cleaned: false, created: true }])
+  t.is((await id.status()).pending, false)
+})
+
+test('identity: a passkey created here and refused as NOT_SYNCED never signs in', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  let get = () => credResponse(ID_A, { results: { first: PRF_B64 } })
+  fakePasskey({ create: () => credResponse(ID_A, { enabled: true, results: { first: PRF_B64 } }, { attestationObject: attestationObject(authData(BE_CLEAR)) }), get: () => get() })
+  const client = fakeClient()
+  const local = memoryLocal()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  t.is((await id.unlock({ register: true }).catch((e) => e)).code, 'NOT_SYNCED')
+  const err = await id.unlock({ any: true }).catch((e) => e)
+  t.is(err.code, 'NOT_SYNCED')
+  t.is(err.credentialId, ID_A)
+  t.is(err.userId, '03'.repeat(32))
+  t.absent(client.methods().includes('identity.install'))
+  get = () => credResponse(ID_B, { results: { first: PRF_B64 } })
+  t.alike(await id.unlock({ any: true }), { publicKey: PK, created: false }, 'another passkey still signs in')
+})
+
+test('identity: a sign-in NO_PRF of the pending creation is refused as created; created is never downgraded', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  let create = () => credResponse(ID_A, { enabled: true })
+  let get = () => credResponse(ID_A, null)
+  fakePasskey({ create: () => create(), get: () => get() })
+  const local = memoryLocal()
+  const id = createNativeIdentity({ request: fakeClient().request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  t.alike(await id.unlock({ register: true }), { pending: true })
+  t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NO_PRF')
+  t.is(local.byRp.get(RP).pending, null)
+  t.alike(local.byRp.get(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'NO_PRF', true]])
+  create = () => credResponse(ID_B, { enabled: true, results: { first: PRF_B64 } }, { attestationObject: attestationObject(authData(BE_CLEAR)) })
+  t.is((await id.unlock({ register: true }).catch((e) => e)).code, 'NOT_SYNCED')
+  get = () => credResponse(ID_B, null)
+  t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NO_PRF')
+  t.alike(local.byRp.get(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'NO_PRF', true], [ID_B, 'NOT_SYNCED', true]], 'a device-bound refusal stays NOT_SYNCED')
+  get = () => credResponse(ID_C, null)
+  await id.unlock({ any: true }).catch(() => {})
+  t.alike(local.byRp.get(RP).refused.at(-1).created, false, 'any other sign-in passkey stays created false')
+})
+
+test('identity: a sign-in NO_PRF never downgrades a device-bound refusal; a later PRF still installs nothing', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  let get = () => credResponse(ID_A, null)
+  fakePasskey({ create: () => credResponse(ID_A, { enabled: true, results: { first: PRF_B64 } }, { attestationObject: attestationObject(authData(BE_CLEAR)) }), get: () => get() })
+  const client = fakeClient()
+  const local = memoryLocal()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  t.is((await id.unlock({ register: true }).catch((e) => e)).code, 'NOT_SYNCED')
+  t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NO_PRF')
+  t.alike(local.byRp.get(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'NOT_SYNCED', true]], 'still refused as bound to one device')
+  get = () => credResponse(ID_A, { results: { first: PRF_B64 } })
+  const err = await id.unlock({ any: true }).catch((e) => e)
+  t.is(err.code, 'NOT_SYNCED', 'once PRF comes back the passkey is still refused')
+  t.is(err.credentialId, ID_A)
+  t.absent(client.methods().includes('identity.install'), 'nothing installed')
+  t.alike((await id.status()).refused.map((r) => [r.code, r.created]), [['NOT_SYNCED', true]])
+})
+
+test('identity: a reset while complete waits writes nothing back when the ceremony then fails', async (t) => {
+  for (const code of ['NONE', 'NO_PRF']) {
+    resetStubs()
+    const { createNativeIdentity } = await loadIdentity()
+    const gate = deferred()
+    fakePasskey({
+      create: () => credResponse(ID_A, { enabled: true }),
+      get: async () => { await gate.promise; const e = new Error('native'); e.code = code; throw e }
+    })
+    const local = memoryLocal()
+    const id = createNativeIdentity({ request: fakeClient().request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+    t.alike(await id.unlock({ register: true }), { pending: true })
+    const completing = id.complete().catch((e) => e)
+    await new Promise((resolve) => setImmediate(resolve))
+    await id.reset()
+    t.absent(local.byRp.has(RP), code + ': the reset cleared the local record')
+    gate.resolve()
+    t.is((await completing).code, code, code + ': the late rejection keeps its code')
+    const st = await id.status()
+    t.is(st.pending, false)
+    t.alike(st.refused, [], code + ': nothing refused after the reset')
+    t.absent(local.byRp.has(RP), code + ': nothing written back for this rp.id')
+  }
+})
+
+// The attempts file of an earlier run: a passkey refused as bound to one
+// device (created here) and a pending creation, both for RP.
+function seedAttempts () {
+  const userId = '03'.repeat(32)
+  files().set(ATTEMPTS, JSON.stringify({
+    v: 1,
+    byRp: {
+      [RP]: { pending: { credentialId: ID_B, userId }, refused: [{ credentialId: ID_A, userId, code: 'NOT_SYNCED', cleaned: false, created: true }] },
+      'other.example': { pending: null, refused: [] }
+    }
+  }))
+}
+
+test('passkey local: an unreadable file with no earlier read of the rp.id throws, never reads empty', async (t) => {
+  resetStubs()
+  const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+  seedAttempts()
+  const before = files().get(ATTEMPTS)
+  globalThis.__stubReadFails = true
+  t.exception(() => createPasskeyLocal().load(RP), /unreadable/)
+  const local = createPasskeyLocal()
+  globalThis.__stubReadFails = false
+  t.is(local.load('other.example').pending, null)
+  globalThis.__stubReadFails = true
+  t.is(local.load(RP).pending.credentialId, ID_B, 'an earlier read holds the rp.id')
+  t.exception(() => local.load('third.example'), /unreadable/, 'an rp.id the earlier read did not hold')
+  globalThis.__stubReadFails = false
+  t.is(files().get(ATTEMPTS), before)
+})
+
+test('identity: a failed first read is read again, and its refusals survive the next save', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+  seedAttempts()
+  let get = null
+  const seen = fakePasskey({ create: () => credResponse(ID_C, { enabled: false }), get: () => get() })
+  const client = fakeClient()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local: createPasskeyLocal(), random: deterministicRandom })
+  globalThis.__stubReadFails = true
+  await id.status()
+  globalThis.__stubReadFails = false
+  t.is((await id.unlock({ register: true }).catch((e) => e)).code, 'NO_PRF')
+  t.alike(excluded(seen[0]).sort(), [ID_A, ID_B].sort(), 'the record was read again before the ceremony')
+  const rec = JSON.parse(files().get(ATTEMPTS)).byRp[RP]
+  t.is(rec.pending.credentialId, ID_B, 'the old pending creation is kept')
+  t.alike(rec.refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'NOT_SYNCED', true], [ID_C, 'NO_PRF', true]])
+  get = () => credResponse(ID_A, { results: { first: PRF_B64 } })
+  t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NOT_SYNCED')
+  t.absent(client.methods().includes('identity.install'))
+})
+
+test('identity: a save after a failed load merges the record on disk first', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+  seedAttempts()
+  let get = null
+  // The read fails at the load before the ceremony and works again by the save.
+  fakePasskey({
+    create: () => { globalThis.__stubReadFails = false; return credResponse(ID_C, { enabled: false }) },
+    get: () => get()
+  })
+  const client = fakeClient()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local: createPasskeyLocal(), random: deterministicRandom })
+  globalThis.__stubReadFails = true
+  t.is((await id.unlock({ register: true }).catch((e) => e)).code, 'NO_PRF')
+  t.is(globalThis.__stubReadFails, false)
+  const rec = JSON.parse(files().get(ATTEMPTS)).byRp[RP]
+  t.is(rec.pending.credentialId, ID_B, 'the old pending creation is kept')
+  t.alike(rec.refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'NOT_SYNCED', true], [ID_C, 'NO_PRF', true]])
+  t.ok(JSON.parse(files().get(ATTEMPTS)).byRp['other.example'], 'another rp.id is kept')
+  t.is((await id.status()).pending, true)
+  get = () => credResponse(ID_A, { results: { first: PRF_B64 } })
+  t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NOT_SYNCED', 'the merged refusal still refuses')
+  t.absent(client.methods().includes('identity.install'))
+})
+
+test('identity: reset drops an unreadable attempts file when the store can, else rejects', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+  seedAttempts()
+  const client = fakeClient({ status: { exists: true, publicKey: PK } })
+  const store = memoryStore()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store, local: createPasskeyLocal(), random: deterministicRandom })
+  globalThis.__stubReadFails = true
+  t.alike(await id.reset(), {})
+  globalThis.__stubReadFails = false
+  t.ok(client.methods().includes('identity.reset'))
+  t.ok(store.log.some((e) => e[0] === 'clear'))
+  t.absent(files().has(ATTEMPTS), 'the attempts file is gone')
+  t.absent(files().has(ATTEMPTS_TMP))
+  t.alike((await id.status()).refused, [])
+
+  resetStubs()
+  seedAttempts()
+  const before = files().get(ATTEMPTS)
+  const real = createPasskeyLocal()
+  const noDrop = { load: (rpId) => real.load(rpId), save: (rpId, rec) => real.save(rpId, rec), clear: (rpId) => real.clear(rpId) }
+  const client2 = fakeClient({ status: { exists: true, publicKey: PK } })
+  const store2 = memoryStore()
+  const id2 = createNativeIdentity({ request: client2.request, rpId: () => RP, store: store2, local: noDrop, random: deterministicRandom })
+  globalThis.__stubReadFails = true
+  await t.exception(id2.reset(), /unreadable/)
+  globalThis.__stubReadFails = false
+  t.absent(client2.methods().includes('identity.reset'))
+  t.absent(store2.log.some((e) => e[0] === 'clear'))
+  t.is(files().get(ATTEMPTS), before, 'nothing changed')
+})
+
+const BE_SET = 0x5d
+const credId = (i) => Buffer.from('cred-' + i).toString('base64url')
+const bound = (list) => list.filter((r) => r.code === 'NOT_SYNCED' && r.created === true).map((r) => r.credentialId)
+
+test('passkey local: the cap never evicts a device-bound refusal', async (t) => {
+  resetStubs()
+  const { createPasskeyLocal, MAX_REFUSED } = await import('../src/passkeyLocal.native.js')
+  const userId = 'ab'.repeat(32)
+  const local = createPasskeyLocal()
+  const refused = [{ credentialId: ID_A, userId, code: 'NOT_SYNCED', created: true }]
+  for (let i = 0; i < MAX_REFUSED + 3; i++) refused.push({ credentialId: credId(i), userId, code: 'NO_PRF', created: true })
+  local.save(RP, { pending: null, refused })
+  const loaded = local.load(RP).refused
+  t.is(loaded.length, MAX_REFUSED)
+  t.is(loaded[0].credentialId, ID_A, 'the bound entry stays, the oldest others go')
+  t.is(loaded[1].credentialId, credId(4))
+  t.is(loaded.at(-1).credentialId, credId(MAX_REFUSED + 2))
+
+  const many = []
+  for (let i = 0; i < MAX_REFUSED + 2; i++) many.push({ credentialId: credId(i), userId, code: 'NOT_SYNCED', created: true })
+  many.push({ credentialId: ID_B, userId, code: 'NO_PRF', created: false })
+  local.save(RP, { pending: null, refused: many })
+  const only = local.load(RP).refused
+  t.is(only.length, MAX_REFUSED + 2, 'no bound entry is dropped')
+  t.alike(only.map((r) => r.credentialId), many.slice(0, MAX_REFUSED + 2).map((r) => r.credentialId), 'every bound entry stays')
+})
+
+test('identity: refusals past the cap never evict a device-bound refusal', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { MAX_REFUSED } = await import('../src/passkeyLocal.native.js')
+  let get = null
+  fakePasskey({ create: () => credResponse(ID_A, { enabled: true, results: { first: PRF_B64 } }, { attestationObject: attestationObject(authData(BE_CLEAR)) }), get: () => get() })
+  const client = fakeClient()
+  const local = memoryLocal()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  t.is((await id.unlock({ register: true }).catch((e) => e)).code, 'NOT_SYNCED')
+  for (let i = 0; i < MAX_REFUSED + 2; i++) {
+    get = () => credResponse(credId(i), null)
+    t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NO_PRF')
+  }
+  t.is(local.byRp.get(RP).refused.length, MAX_REFUSED)
+  t.alike(bound(local.byRp.get(RP).refused), [ID_A], 'still on disk')
+  get = () => credResponse(ID_A, { results: { first: PRF_B64 } })
+  t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NOT_SYNCED')
+  t.absent(client.methods().includes('identity.install'))
+})
+
+test('passkey local: clear with keepBound keeps only the device-bound refusals', async (t) => {
+  resetStubs()
+  const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+  seedAttempts()
+  const local = createPasskeyLocal()
+  const userId = '03'.repeat(32)
+  local.save('other.example', { pending: { credentialId: ID_C, userId }, refused: [{ credentialId: ID_B, userId, code: 'NO_PRF', created: true }] })
+  local.clear(RP, { keepBound: true })
+  t.alike(local.load(RP), { pending: null, refused: [{ credentialId: ID_A, userId, code: 'NOT_SYNCED', cleaned: false, created: true }] })
+  local.clear('other.example', { keepBound: true })
+  t.absent(JSON.parse(files().get(ATTEMPTS)).byRp['other.example'], 'an rp.id with no bound entry is removed')
+  const before = files().get(ATTEMPTS)
+  globalThis.__stubReadFails = true
+  t.exception(() => local.clear(RP, { keepBound: true }), /unreadable/)
+  t.is(files().get(ATTEMPTS), before, 'a failed read leaves the file intact')
+  t.alike(bound(local.load(RP).refused), [ID_A], 'the memory copy keeps the bound entry')
+  globalThis.__stubReadFails = false
+})
+
+test('identity: reset keeps the device-bound refusals, on disk and after a restart', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+  let create = () => credResponse(ID_A, { enabled: true, results: { first: PRF_B64 } }, { attestationObject: attestationObject(authData(BE_CLEAR)) })
+  let get = null
+  fakePasskey({ create: () => create(), get: () => get() })
+  const client = fakeClient({ status: { exists: true, publicKey: PK } })
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local: createPasskeyLocal(), random: deterministicRandom })
+  t.is((await id.unlock({ register: true }).catch((e) => e)).code, 'NOT_SYNCED')
+  create = () => credResponse(ID_B, { enabled: true })
+  t.alike(await id.unlock({ register: true }), { pending: true })
+  get = () => credResponse(ID_C, null)
+  t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NO_PRF')
+  t.alike(await id.reset(), {})
+  const rec = createPasskeyLocal().load(RP)
+  t.is(rec.pending, null)
+  t.alike(rec.refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'NOT_SYNCED', true]])
+  const st = await id.status()
+  t.is(st.pending, false)
+  t.alike(st.refused.map((r) => [r.code, r.created]), [['NOT_SYNCED', true]])
+  get = () => credResponse(ID_A, { results: { first: PRF_B64 } })
+  t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NOT_SYNCED')
+  const restarted = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local: createPasskeyLocal(), random: deterministicRandom })
+  t.is((await restarted.unlock({ any: true }).catch((e) => e)).code, 'NOT_SYNCED', 'after a restart too')
+  t.absent(client.methods().includes('identity.install'))
+})
+
+test('identity: a reset that drops an unreadable file writes the bound refusals back, else keeps them in memory', async (t) => {
+  for (const writeFails of [false, true]) {
+    resetStubs()
+    const { createNativeIdentity } = await loadIdentity()
+    const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+    let get = null
+    fakePasskey({ create: () => credResponse(ID_A, { enabled: true, results: { first: PRF_B64 } }, { attestationObject: attestationObject(authData(BE_CLEAR)) }), get: () => get() })
+    const client = fakeClient({ status: { exists: true, publicKey: PK } })
+    const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local: createPasskeyLocal(), random: deterministicRandom })
+    t.is((await id.unlock({ register: true }).catch((e) => e)).code, 'NOT_SYNCED')
+    globalThis.__stubReadFails = true
+    globalThis.__stubWriteFails = writeFails
+    t.alike(await id.reset(), {})
+    globalThis.__stubReadFails = false
+    globalThis.__stubWriteFails = false
+    t.ok(client.methods().includes('identity.reset'))
+    if (writeFails) {
+      t.alike(createPasskeyLocal().load(RP).refused, [], 'no usable fresh record when the write fails')
+    } else {
+      const doc = files().has(ATTEMPTS) ? JSON.parse(files().get(ATTEMPTS)) : { byRp: {} }
+      t.alike(Object.keys(doc.byRp), [RP], 'a fresh file with only this rp.id')
+      t.alike(createPasskeyLocal().load(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'NOT_SYNCED', true]])
+    }
+    get = () => credResponse(ID_A, { results: { first: PRF_B64 } })
+    t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NOT_SYNCED', 'writeFails ' + writeFails + ': the sign-in guard still applies')
+    t.absent(client.methods().includes('identity.install'))
+  }
+})
+
+test('identity: a creation that returns a device-bound refusal again is refused, entry kept', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  let flags = BE_CLEAR
+  fakePasskey({ create: () => credResponse(ID_A, { enabled: true, results: { first: PRF_B64 } }, { attestationObject: attestationObject(authData(flags)) }) })
+  const client = fakeClient()
+  const local = memoryLocal()
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom })
+  t.is((await id.unlock({ register: true }).catch((e) => e)).code, 'NOT_SYNCED')
+  flags = BE_SET
+  const err = await id.unlock({ register: true }).catch((e) => e)
+  t.is(err.code, 'NOT_SYNCED')
+  t.is(err.credentialId, ID_A)
+  t.is(err.userId, '03'.repeat(32))
+  t.absent(client.methods().includes('identity.install'), 'never installed')
+  t.alike(bound(local.byRp.get(RP).refused), [ID_A], 'the entry stays')
+  t.is((await id.status()).pending, false)
 })

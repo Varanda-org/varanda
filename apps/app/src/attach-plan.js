@@ -19,12 +19,56 @@ const WIDEST_DM_ITEM = Object.freeze({
   ms: 0
 })
 
+export const VOICE_MIME = 'audio/mp4'
+export const MAX_VOICE_MS = 120000
+// The plaintext cap of a voice note (packages/core records MAX_AUDIO_BYTES);
+// its blob adds the 16-byte MAC.
+const MAX_VOICE_BYTES = 1572864
+
+// The widest DM voice item, measured like WIDEST_DM_ITEM.
+const WIDEST_DM_VOICE = Object.freeze({
+  ...WIDEST_DM_ITEM,
+  chunks: Math.ceil((MAX_VOICE_BYTES + 16) / 32768),
+  bytes: MAX_VOICE_BYTES + 16,
+  mime: VOICE_MIME,
+  w: 0,
+  h: 0,
+  ms: MAX_VOICE_MS
+})
+
 export const PREVIEW_PHOTO = 'Foto'
 export const PREVIEW_GIF = 'GIF'
+export const PREVIEW_VOICE = 'Áudio'
+
+function isVoice (item) {
+  return !!item && typeof item === 'object' && (typeof item.plainMime === 'string' ? item.plainMime : item.mime) === VOICE_MIME
+}
+
+// The staged attachment of a recorded note ({ ms } from stopRecording):
+// composePlan takes it like a photo, with no picture size.
+export function stagedVoice (recording, index = 0) {
+  return {
+    name: index.toString(16).padStart(32, '0') + '.bin',
+    mime: VOICE_MIME,
+    width: 0,
+    height: 0,
+    ms: recording && recording.ms
+  }
+}
+
+// The node refuses a recording with the message it gives a bad photo
+// ('mídia inválida'); a voice note's send shows its own words instead
+// (BAD_VOICE in ui PLAIN). Anything else passes through unchanged.
+export const BAD_VOICE = 'áudio inválido'
+
+export function voiceUploadError (err) {
+  return err && err.message === 'mídia inválida' && err.uncertain !== true ? new TypeError(BAD_VOICE) : err
+}
 
 export function attachmentPreview (text, attachments = []) {
   if (typeof text === 'string' && text !== '') return displayText(text.replace(/\r?\n/g, ' '))
   if (attachments.length === 0) return ''
+  if (attachments.some(isVoice)) return PREVIEW_VOICE
   return attachments.every(item => item && (item.plainMime || item.mime) === 'image/gif') ? PREVIEW_GIF : PREVIEW_PHOTO
 }
 
@@ -53,14 +97,18 @@ export function composePlan ({ text = '', attachments = [], target }) {
   // can carry, so the node never refuses as too long what fit here.
   const cert = target.cert == null ? MEMBER_CERT_STANDIN : JSON.parse(JSON.stringify(target.cert))
   const count = attachments.length
+  // A voice note is the only item of its message, never next to photos.
+  const voice = Array.from(attachments).some(isVoice)
+  if (voice && count !== 1) throw new Error('áudio vai sozinho na mensagem')
   const uploads = Array.from(attachments, item => {
     if (!item || typeof item !== 'object') throw new Error('anexo inválido')
+    if (voice) return voiceUpload(item, dm, sealed)
     const { name, mime, width, height } = item
     const params = { name, mime, width, height }
     if (sealed) params.sealed = true
     return checked(dm ? 'dm.putMedia' : 'media.uploadFile', params)
   })
-  if (dm && count > 0 && dmTextBytes(text) > textBudget({ ...base, media: Array(count).fill(WIDEST_DM_ITEM), cert })) {
+  if (dm && count > 0 && dmTextBytes(text) > textBudget({ ...base, media: Array(count).fill(voice ? WIDEST_DM_VOICE : WIDEST_DM_ITEM), cert })) {
     throw new Error('texto longo demais com anexo')
   }
 
@@ -82,6 +130,18 @@ export function composePlan ({ text = '', attachments = [], target }) {
   // checked once their uploads supply the actual descriptors.
   if (count === 0) send()
   return { uploads, send, preview: attachmentPreview(text, attachments) }
+}
+
+// The node checks the recorded bytes (audioBounds) when it uploads them; here
+// only the shape the upload call takes: { name, mime, width: 0, height: 0,
+// ms }, sealed for a private group.
+function voiceUpload (item, dm, sealed) {
+  const { name, mime, width, height, ms } = item
+  if (typeof name !== 'string' || name === '' || mime !== VOICE_MIME || width !== 0 || height !== 0) throw new Error('áudio inválido')
+  if (!Number.isInteger(ms) || ms < 1 || ms > MAX_VOICE_MS) throw new Error('áudio inválido')
+  const params = { name, mime, width, height, ms }
+  if (sealed) params.sealed = true
+  return { method: dm ? 'dm.putMedia' : 'media.uploadFile', params }
 }
 
 // This is only a decision for an explicit send press, never an automatic

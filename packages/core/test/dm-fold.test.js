@@ -2,7 +2,7 @@
 
 // The direct message folders (lib/dm-fold.js). No network.
 const test = require('brittle')
-const { fold, seenKey, tabDot, replyTarget, canSend, previewText, PREVIEW_PHOTO, PREVIEW_GIF } = require('../lib/dm-fold')
+const { fold, seenKey, tabDot, replyTarget, canSend, previewText, PREVIEW_PHOTO, PREVIEW_GIF, PREVIEW_AUDIO } = require('../lib/dm-fold')
 const { DM_REQUESTS_MAX, DM_MESSAGES_PER_PEER } = require('../lib/dm')
 
 function k (i) {
@@ -278,5 +278,8 @@ test('media rows: carried through, fixed preview labels when the text is empty',
   t.is(previewText({ text: '', media: null }), '')
   t.is(previewText(null), '')
   t.is(previewText({ text: '', media: [null] }), 'Foto', 'a hostile item never shows peer text')
+  t.is(PREVIEW_AUDIO, 'Áudio')
+  t.is(previewText({ text: '', media: [{ id: 'c'.repeat(64), mime: 'audio/mp4', w: 0, h: 0, ms: 1500 }] }), 'Áudio', 'a voice note previews as Áudio')
+  t.is(previewText({ text: 'ouve', media: [{ id: 'c'.repeat(64), mime: 'audio/mp4' }] }), 'ouve', 'text still wins')
   t.alike(run({ messages: [{ ...from(ANA, 1), media: 'x' }], follows: [ANA] }).inbox[0].messages[0].media, null, 'a non-list media is dropped')
 })

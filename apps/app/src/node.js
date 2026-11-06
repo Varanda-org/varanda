@@ -20,6 +20,14 @@
 // kept session, without a ceremony. A resume is an unlock without a click: no
 // recovery runs for it unless the diary still lacks its member certificate
 // (then the same recovery as after a ceremony, under recoveryPolicy.js).
+// Recovery entries (docs/rpc.md 5.90 to 5.94): an unlock, complete() or
+// unlockWithCode(code) that opens only a recovery entry is finished here
+// (resolveWrapped: the account service's sealed root, then unlockWrapped), so
+// the caller sees an install result, { needsPasskey: true } (a code: the
+// screen then calls finishRecovery() in a press) or a fixed pt-BR error.
+// addPasskey(), bindPasskey({ credentialId, userId }), makeRecoveryCode() and
+// cancelRecovery() pass through and re-read the status; addPasskey and
+// finishRecovery run a ceremony, so they are called synchronously too.
 // `recovering` is true from an unlock until the once sync that follows it
 // (recover()) has ended: one shared flag, so no screen sends a member request
 // meanwhile (it would preempt that run, docs/rpc.md 6.1). A run preempted
@@ -112,6 +120,8 @@ import { createIdleTracker } from './idle'
 import { noteOwnDmDrop } from './dmWakeMute'
 import { setDmDropObserver } from './pages'
 import { vitrineEnabled } from './vitrine/enabled'
+import { recoveryFetch } from './account'
+import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 
 const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
 // At import, not in an effect: a page DM send can then never run before the
@@ -122,6 +132,32 @@ setDmDropObserver(noteOwnDmDrop)
 const loadInstallation = typeof configStore.loadInstallation === 'function' ? configStore.loadInstallation : null
 
 const MAX_SYNC_LINES = 200
+// Identity operations that take their argument through (docs/rpc.md 5.91 to
+// 5.94 and the handles' recovery methods).
+const ARG_OPS = new Set(['unlock', 'unlockWrapped', 'unlockWithCode', 'bindPasskey', 'addPasskey', 'finishRecovery'])
+// Operations that may install (or drop) the unlocked identity: a result that
+// installed nothing ({ pending }, { wrapped }, { needsPasskey }) keeps the
+// epoch and the generation. The rest (addPasskey, makeRecoveryCode,
+// cancelRecovery, bindPasskey) never change who is unlocked.
+const IDENTITY_OPS = new Set(['unlock', 'complete', 'unlockWrapped', 'finishRecovery', 'lock', 'signOut', 'reset'])
+const UNLOCK_OPS = new Set(['unlock', 'complete', 'unlockWrapped', 'finishRecovery'])
+
+function installedNothing (result) {
+  return !!result && (result.pending === true || result.wrapped === true || result.needsPasskey === true)
+}
+
+// A complete() that only finished an added passkey: its wrapped root for the
+// app to register, no install fields.
+function addedOnly (result) {
+  return !!result && typeof result.lookupId === 'string' && result.blob !== undefined &&
+    result.publicKey === undefined && result.created === undefined
+}
+
+function recoveryError (message, code) {
+  const err = new Error(message)
+  err.code = code
+  return err
+}
 const RECOVERY_TIMEOUT_MS = 30000
 
 function appendLine (prev, line) {
@@ -246,6 +282,12 @@ function VitrineNodeProvider ({ children }) {
         lock: unavailable,
         signOut: unavailable,
         reset: unavailable,
+        unlockWithCode: unavailable,
+        finishRecovery: unavailable,
+        addPasskey: unavailable,
+        bindPasskey: unavailable,
+        makeRecoveryCode: unavailable,
+        cancelRecovery: unavailable,
         recovering: false,
         beginRecovery: () => {},
         endRecovery: () => {},
@@ -287,6 +329,8 @@ function LiveNodeProvider ({ children }) {
   // undefined (src/pageGate.js decides whether Páginas show).
   const [infoOrigin, setInfoOrigin] = useState(undefined)
   const accountOrigin = useMemo(() => accountOriginOf(config && config.accountOrigin) || infoOrigin, [config, infoOrigin])
+  const accountOriginRef = useRef(accountOrigin)
+  accountOriginRef.current = accountOrigin
   // 'live' | 'remembered' | null (see the header).
   const [hostedSource, setHostedSource] = useState(null)
   const [online, setOnline] = useState(() => isOnline())
@@ -361,6 +405,13 @@ function LiveNodeProvider ({ children }) {
   // (bumpEpoch, bumpGeneration): an awaited continuation compares them.
   const epochRef = useRef(0)
   const pkGenRef = useRef(0)
+  // Which op left the handle's pending creation ({ conn, kind }): complete()
+  // of an 'add' wraps the unlocked root for a new passkey and installs
+  // nothing, while the web 'recover' result has the same shape and installs.
+  const pendingKindRef = useRef(null)
+  // Bumped by every unlock, unlockWithCode or complete that resolved
+  // { wrapped }: a recovery fetch outlived by a newer one does nothing.
+  const wrappedAttemptRef = useRef(0)
 
   // Auto-sync (see the header). Every value has a ref for the callbacks.
   const [signals, setSignals] = useState(EMPTY_SIGNALS)
@@ -817,13 +868,23 @@ function LiveNodeProvider ({ children }) {
     try {
       // A node script without signOut (an older build) locks instead.
       const op = name === 'signOut' && typeof conn.identity.signOut !== 'function' ? 'lock' : name
-      pending = op === 'unlock' ? conn.identity.unlock(arg) : conn.identity[op]()
+      if (typeof conn.identity[op] !== 'function') throw recoveryError('este aparelho ainda não tem essa função; atualize o Varanda', 'UNSUPPORTED')
+      pending = ARG_OPS.has(op) ? conn.identity[op](arg) : conn.identity[op]()
     } catch (err) {
       pending = Promise.reject(err)
     }
     return Promise.resolve(pending).then(
       async (result) => {
-        const changed = !(result && result.pending === true)
+        const pendingKind = pendingKindRef.current !== null && pendingKindRef.current.conn === conn ? pendingKindRef.current.kind : null
+        if (result && result.pending === true && (name === 'unlock' || name === 'addPasskey' || name === 'finishRecovery')) {
+          pendingKindRef.current = { conn, kind: name === 'addPasskey' ? 'add' : name === 'finishRecovery' ? 'recover' : 'unlock' }
+        } else if (name === 'complete') {
+          pendingKindRef.current = null
+        }
+        // Bumping for an add would reset the shell's setup state and
+        // navigation although the account did not change.
+        const added = name === 'complete' && pendingKind === 'add' && addedOnly(result)
+        const changed = IDENTITY_OPS.has(name) && !installedNothing(result) && !added
         // Locked at once: a failed re-read below keeps this, never the
         // previous unlocked status.
         if ((name === 'lock' || name === 'signOut' || name === 'reset') && connRef.current === conn) {
@@ -834,7 +895,7 @@ function LiveNodeProvider ({ children }) {
         }
         await readPasskey(conn, changed)
         if (changed) bumpEpoch()
-        if (changed && (name === 'unlock' || name === 'complete')) {
+        if (changed && UNLOCK_OPS.has(name)) {
           // Right after the person's own click; a denial changes nothing.
           askPersist(typeof navigator === 'object' && navigator !== null ? navigator.storage : null).catch(() => {})
         }
@@ -847,8 +908,45 @@ function LiveNodeProvider ({ children }) {
     )
   }, [readPasskey, bumpEpoch])
 
-  const pkUnlock = useCallback((opts = {}) => passkeyOp('unlock', opts), [passkeyOp])
-  const pkComplete = useCallback(() => passkeyOp('complete'), [passkeyOp])
+  // A passkey or a code that opened only a recovery entry ({ wrapped,
+  // lookupId }): the account service holds the sealed root under that lookup
+  // id. Only its marked 404 (recovery: true) means no entry, and then the
+  // passkey or code opens nothing here (it is never installed directly).
+  // Any other failure is "could not ask", never "not registered". The fetch
+  // runs after the ceremony, so no WebAuthn call waits on it.
+  const resolveWrapped = useCallback(async (r) => {
+    if (!r || r.wrapped !== true) return r
+    const attempt = ++wrappedAttemptRef.current
+    // The newer attempt owns the held entry: the stale one must not cancel
+    // or open it.
+    const superseded = () => recoveryError('outra tentativa de entrar começou; esta foi deixada de lado', 'SUPERSEDED')
+    const cancel = () => passkeyOp('cancelRecovery').catch(() => {})
+    let entry
+    try {
+      entry = await recoveryFetch(r.lookupId, { origin: hostedRef.current ? undefined : accountOriginRef.current })
+    } catch {
+      if (wrappedAttemptRef.current !== attempt) throw superseded()
+      await cancel()
+      throw recoveryError(SERVICE_DOWN_TEXT, 'RECOVERY_SERVICE')
+    }
+    if (wrappedAttemptRef.current !== attempt) throw superseded()
+    if (entry === null) {
+      await cancel()
+      throw recoveryError(NOT_FOUND_TEXT, 'RECOVERY_NOT_FOUND')
+    }
+    return passkeyOp('unlockWrapped', { blob: entry.blob, member: entry.member })
+  }, [passkeyOp])
+
+  const pkUnlock = useCallback((opts = {}) => passkeyOp('unlock', opts).then(resolveWrapped), [passkeyOp, resolveWrapped])
+  const pkComplete = useCallback(() => passkeyOp('complete').then(resolveWrapped), [passkeyOp, resolveWrapped])
+  // No ceremony: the code is checked in the node, then the same fetch.
+  const pkUnlockWithCode = useCallback((code) => passkeyOp('unlockWithCode', { code }).then(resolveWrapped), [passkeyOp, resolveWrapped])
+  // Synchronous in the press (WebAuthn): never await before these.
+  const pkFinishRecovery = useCallback((opts = {}) => passkeyOp('finishRecovery', opts), [passkeyOp])
+  const pkAddPasskey = useCallback((opts = {}) => passkeyOp('addPasskey', opts), [passkeyOp])
+  const pkBindPasskey = useCallback(({ credentialId, userId }) => passkeyOp('bindPasskey', { credentialId, userId }), [passkeyOp])
+  const pkMakeRecoveryCode = useCallback(() => passkeyOp('makeRecoveryCode'), [passkeyOp])
+  const pkCancelRecovery = useCallback(() => passkeyOp('cancelRecovery'), [passkeyOp])
   const pkLock = useCallback(() => passkeyOp('lock'), [passkeyOp])
   const pkSignOut = useCallback(() => passkeyOp('signOut'), [passkeyOp])
   const pkReset = useCallback(() => passkeyOp('reset'), [passkeyOp])
@@ -1224,8 +1322,8 @@ function LiveNodeProvider ({ children }) {
 
   const recovering = recovery !== null
   const passkey = useMemo(() => (hasPasskey
-    ? { status: pkStatus, error: pkError, generation: pkGeneration, refresh: pkRefresh, unlock: pkUnlock, complete: pkComplete, lock: pkLock, signOut: pkSignOut, reset: pkReset, recovering, beginRecovery, endRecovery, recover }
-    : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkSignOut, pkReset, recovering, beginRecovery, endRecovery, recover])
+    ? { status: pkStatus, error: pkError, generation: pkGeneration, refresh: pkRefresh, unlock: pkUnlock, complete: pkComplete, lock: pkLock, signOut: pkSignOut, reset: pkReset, unlockWithCode: pkUnlockWithCode, finishRecovery: pkFinishRecovery, addPasskey: pkAddPasskey, bindPasskey: pkBindPasskey, makeRecoveryCode: pkMakeRecoveryCode, cancelRecovery: pkCancelRecovery, recovering, beginRecovery, endRecovery, recover }
+    : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkSignOut, pkReset, pkUnlockWithCode, pkFinishRecovery, pkAddPasskey, pkBindPasskey, pkMakeRecoveryCode, pkCancelRecovery, recovering, beginRecovery, endRecovery, recover])
 
   // Thin pass-through to the handle (see the header).
   const mediaUpload = useCallback((args) => {

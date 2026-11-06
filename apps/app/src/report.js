@@ -10,6 +10,7 @@
 // stays untouched.
 
 import { sha256 as nobleSha256 } from '@noble/hashes/sha2.js'
+import rpc from '@varanda/rpc'
 import { resolveUrl } from './installation.js'
 import { isAppClient } from './appClient.js'
 
@@ -39,6 +40,10 @@ const MSG_ID = /^[0-9a-f]{32}$/
 export const ANEXO_NOTICE = 'A imagem vai para a moderação, aberta.'
 export const ANEXO_TOO_BIG = 'A imagem não coube e não foi enviada.'
 export const ANEXO_UNAVAILABLE = 'A imagem não está disponível e não será enviada.'
+export const ANEXO_AUDIO_NOTICE = 'O áudio vai para a moderação, aberto.'
+export const ANEXO_AUDIO_TOO_BIG = 'O áudio não coube e não foi enviado.'
+export const ANEXO_AUDIO_UNAVAILABLE = 'O áudio não está disponível e não será enviado.'
+const AUDIO_MIME = 'audio/mp4'
 
 export const NOT_LINKED_MESSAGE = 'Para denunciar, primeiro vincule sua conta Google em Ajustes → Conta e @nome.'
 
@@ -302,23 +307,39 @@ export function anexoRef (target) {
   return { kind: 'group', diary: target.author, item }
 }
 
-// The image as it will be sent: the device-local copy the chat shows,
-// re-encoded as JPEG (which also drops any metadata) and hashed.
-// `source(ref)` -> { uri, mime, w, h } or { unavailable: true } (chatMedia's
-// sourceFor bound to the screen's context); `encode(entry, maxBytes)` ->
-// { bytes, mime, width, height } (media/reportImage.*.js).
-// -> { status: 'ok', bytes, digest, uri, width, height }, { status: 'over',
-// uri } or { status: 'unavailable' } (gone, or it could not be decoded). Never rejects; never touches the
-// network itself (the uri is a blob: or file:// the node produced).
-export async function prepareAnexo (ref, { source, encode, sha256 = nobleSha256, max = ANEXO_MAX_BYTES }) {
+// Whether a chat item (DM item or private group item) is a voice note, as
+// media/chatMedia.js isVoiceItem.
+export function isAudioItem (item) {
+  if (!item || typeof item !== 'object') return false
+  return (typeof item.plainMime === 'string' ? item.plainMime : item.mime) === AUDIO_MIME
+}
+
+// The image or voice note as it will be sent, from the device-local copy the
+// chat shows. `source(ref)` -> { uri, mime, w, h } or { unavailable: true }
+// (chatMedia's sourceFor bound to the screen's context).
+// An image is re-encoded as JPEG (which also drops any metadata) by
+// `encode(entry, maxBytes)` -> { bytes, mime, width, height }
+// (media/reportImage.*.js), then hashed.
+// A voice note is sent as it is, never re-encoded: `readBytes(uri)` reads the
+// local copy (media/reportAudio.*.js), and the bytes must pass `audioBounds`
+// (audio only, @varanda/rpc) and fit `max`.
+// -> { status: 'ok', bytes, digest, uri, width, height } (an image),
+// { status: 'ok', kind: 'audio', mime: 'audio/mp4', bytes, digest, uri, ms },
+// { status: 'over', uri, kind? } or { status: 'unavailable', kind? } (gone, or
+// it could not be decoded). Never rejects; never touches the network itself
+// (the uri is a blob: or file:// the node produced).
+export async function prepareAnexo (ref, { source, encode, readBytes, audioBounds = rpc.audioBounds, sha256 = nobleSha256, max = ANEXO_MAX_BYTES }) {
   if (ref === null) return { status: 'unavailable' }
+  const audio = isAudioItem(ref.item)
+  const kind = audio ? { kind: 'audio' } : {}
   let entry
   try {
     entry = await source(ref)
   } catch {
-    return { status: 'unavailable' }
+    return { status: 'unavailable', ...kind }
   }
-  if (!entry || entry.unavailable === true || typeof entry.uri !== 'string' || !isLocalUri(entry.uri)) return { status: 'unavailable' }
+  if (!entry || entry.unavailable === true || typeof entry.uri !== 'string' || !isLocalUri(entry.uri)) return { status: 'unavailable', ...kind }
+  if (audio) return prepareAudio(entry, { readBytes, audioBounds, sha256, max })
   let out
   try {
     out = await encode(entry, max)
@@ -328,6 +349,25 @@ export async function prepareAnexo (ref, { source, encode, sha256 = nobleSha256,
   if (!out || !(out.bytes instanceof Uint8Array) || out.bytes.byteLength === 0 || out.mime !== 'image/jpeg') return { status: 'over', uri: entry.uri }
   if (out.bytes.byteLength > max) return { status: 'over', uri: entry.uri }
   return { status: 'ok', bytes: out.bytes, digest: toHexString(sha256(out.bytes)), uri: entry.uri, width: out.width, height: out.height }
+}
+
+async function prepareAudio (entry, { readBytes, audioBounds, sha256, max }) {
+  if (entry.mime !== undefined && entry.mime !== AUDIO_MIME) return { status: 'unavailable', kind: 'audio' }
+  if (typeof readBytes !== 'function' || typeof audioBounds !== 'function') return { status: 'unavailable', kind: 'audio' }
+  let bytes
+  try {
+    bytes = await readBytes(entry.uri)
+  } catch {
+    return { status: 'unavailable', kind: 'audio' }
+  }
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) return { status: 'unavailable', kind: 'audio' }
+  // The cap first: a file past it is never walked, and the person is told it
+  // did not fit rather than that it is gone.
+  if (bytes.byteLength > max) return { status: 'over', kind: 'audio', uri: entry.uri }
+  let bounds = null
+  try { bounds = audioBounds(bytes) } catch {}
+  if (bounds === null || typeof bounds !== 'object') return { status: 'unavailable', kind: 'audio' }
+  return { status: 'ok', kind: 'audio', mime: AUDIO_MIME, bytes, digest: toHexString(sha256(bytes)), uri: entry.uri, ms: bounds.ms }
 }
 
 // Only what the node or the browser made on this device: never an http(s)

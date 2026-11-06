@@ -10,7 +10,8 @@ const b4a = require('b4a')
 const { memoryNodeStorage } = require('@varanda/web-member/lib/node-storage')
 const { hkdfSha256 } = require('@varanda/web-member/lib/hkdf')
 const passkey = require('@varanda/web-member/lib/passkey')
-const { createIdentityHost } = require('../worklet/identity-install')
+const recovery = require('@varanda/web-member/lib/recovery')
+const { createIdentityHost, RECOVERY_PENDING_MS } = require('../worklet/identity-install')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -116,6 +117,7 @@ test('a non-resumed install unlocks and binds the passkey record', async (t) => 
     passkeyKnown: true,
     credentialId: 'cred-1',
     rpId: 'varanda.example',
+    userId: 'cd'.repeat(32),
     signedOut: false
   })
 })
@@ -454,6 +456,21 @@ test('uploadMedia hands sealed to the session only when true', async (t) => {
   t.alike(seen, [['bytes', 'mime', 'width', 'height', 'sealed'], ['bytes', 'mime', 'width', 'height'], ['bytes', 'mime', 'width', 'height']])
 })
 
+test('a voice note carries its duration and kind to the session; an image never does', async (t) => {
+  const seen = []
+  const session = {
+    mediaUpload: (args) => { seen.push(['upload', Object.keys(args), args.ms, args.kind]); return Promise.resolve({ ok: true }) },
+    dmPutMedia: (args) => { seen.push(['dm', Object.keys(args), args.ms, args.kind]); return Promise.resolve({ ok: true }) }
+  }
+  const io = { read: async () => ({ file: '/cache/v.bin', bytes: new Uint8Array(4) }), session, unlink: () => {}, isClosing: () => false }
+  await uploadMedia(io, { mime: 'audio/mp4', width: 0, height: 0, ms: 2500, kind: 'voice', sealed: true })
+  await putDmMedia(io, { mime: 'audio/mp4', width: 0, height: 0, ms: 2500, kind: 'voice' })
+  await uploadMedia(io, { mime: 'image/jpeg', width: 1, height: 1, ms: 5, kind: 'other' })
+  t.alike(seen[0], ['upload', ['bytes', 'mime', 'width', 'height', 'ms', 'kind', 'sealed'], 2500, 'voice'])
+  t.alike(seen[1], ['dm', ['bytes', 'mime', 'width', 'height', 'ms', 'kind'], 2500, 'voice'])
+  t.alike(seen[2], ['upload', ['bytes', 'mime', 'width', 'height'], undefined, undefined], 'an image keeps its exact keys')
+})
+
 test('close cancels a running upload by closing the session first', async (t) => {
   let rejectUpload
   const order = []
@@ -481,6 +498,255 @@ test('close cancels a running upload by closing the session first', async (t) =>
   await lifecycle.close()
   t.alike(order, ['session', 'storage'])
   t.ok(await uploading instanceof Error)
+})
+
+// Recovery controls (docs/rpc.md 5.91 to 5.94).
+
+const WRAP_PRF = 'c3'.repeat(32)
+const NEW_PRF = 'd4'.repeat(32)
+const MARK_HEX = b4a.toString(recovery.WRAP_MARK, 'hex')
+const MARKED_USER = 'ab'.repeat(16) + MARK_HEX
+// src/identity.native.js UNKNOWN_WRAP_USER_ID: a recovery passkey with no handle.
+const UNKNOWN_WRAP_USER = '00'.repeat(16) + MARK_HEX
+const bytesOf = (hex) => new Uint8Array(b4a.from(hex, 'hex'))
+
+function recoverySetup ({ clock = { t: 1000 } } = {}) {
+  const session = fakeSession()
+  const storage = memoryNodeStorage()
+  const host = createIdentityHost({ session, storage, hkdf, randomBytes, now: () => clock.t })
+  return { session, storage, host, clock }
+}
+
+async function blobFor (rootHex, secret, kind, member) {
+  const { lookupId, wrapKey } = await recovery.deriveRecoveryKeys(secret, kind, { hkdf })
+  const blob = recovery.wrapRoot({ root: bytesOf(rootHex), member, kind, wrapKey, randomBytes })
+  return { lookupId, blob }
+}
+
+test('recoveryLookup + recoveryOpen of a passkey blob return the original root', async (t) => {
+  const { host, session } = recoverySetup()
+  const member = await expectedPublicKey(PRF)
+  const made = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', member)
+  const { lookupId } = await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  t.is(lookupId, made.lookupId)
+  const out = await host.recoveryOpen({ blob: made.blob, member })
+  t.alike(out, { prf: PRF })
+  t.is(session.keyPair, null, 'open installs nothing')
+  await t.exception(host.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'the pending key is consumed')
+})
+
+test('recoveryLookup + recoveryOpen of a code blob return the root once', async (t) => {
+  const { host } = recoverySetup()
+  const member = await expectedPublicKey(PRF)
+  const secret = randomBytes(recovery.CODE_BYTES)
+  const code = recovery.encodeCode(secret)
+  const made = await blobFor(PRF, secret, 'code', member)
+  const { lookupId } = await host.recoveryLookup({ kind: 'code', code: code.toUpperCase().replace(/-/g, ' ') })
+  t.is(lookupId, made.lookupId)
+  t.alike(await host.recoveryOpen({ blob: made.blob, member }), { prf: PRF })
+})
+
+test('recoveryLookup refuses a bad code', async (t) => {
+  const { host } = recoverySetup()
+  const err = await host.recoveryLookup({ kind: 'code', code: '0000-0000' }).catch((e) => e)
+  t.is(err.code, 'USAGE')
+  t.is(err.message, 'código de recuperação inválido')
+})
+
+test('recoveryOpen without a pending key, expired, or of another kind is refused', async (t) => {
+  const { host, clock } = recoverySetup()
+  const member = await expectedPublicKey(PRF)
+  const made = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', member)
+  const missing = await host.recoveryOpen({ blob: made.blob, member }).catch((e) => e)
+  t.is(missing.code, 'USAGE')
+  t.is(missing.message, 'entrada de recuperação inválida')
+
+  await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  clock.t += RECOVERY_PENDING_MS + 1
+  await t.exception(host.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'expired')
+
+  const code = recovery.encodeCode(randomBytes(recovery.CODE_BYTES))
+  await host.recoveryLookup({ kind: 'code', code })
+  await t.exception(host.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'a code key never opens a passkey blob')
+})
+
+test('a bad blob or another member is refused with the fixed message and installs nothing', async (t) => {
+  const { host, session, storage } = recoverySetup()
+  const member = await expectedPublicKey(PRF)
+  const made = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', member)
+
+  await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  const tampered = { ...made.blob, ciphertext: (made.blob.ciphertext[0] === '0' ? '1' : '0') + made.blob.ciphertext.slice(1) }
+  const err = await host.recoveryOpen({ blob: tampered, member }).catch((e) => e)
+  t.is(err.code, 'USAGE')
+  t.is(err.message, 'entrada de recuperação inválida')
+  await t.exception(host.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'a failure clears the pending key')
+
+  await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  await t.exception(host.recoveryOpen({ blob: made.blob, member: 'ee'.repeat(32) }), /entrada de recuperação inválida/, 'another member')
+
+  // Sealed with a member key that is not the root's own.
+  const liar = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', 'ee'.repeat(32))
+  await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  await t.exception(host.recoveryOpen({ blob: liar.blob, member: 'ee'.repeat(32) }), /entrada de recuperação inválida/, 'member must derive from the root')
+
+  t.is(session.keyPair, null)
+  t.is(await storage.readJson('passkey'), null)
+})
+
+test('recoveryWrap output opens with lib/recovery to the same root', async (t) => {
+  const { host } = recoverySetup()
+  const { publicKey } = await host.install(params())
+
+  const pk = await host.recoveryWrap({ kind: 'passkey', secret: WRAP_PRF })
+  const pkKeys = await recovery.deriveRecoveryKeys(bytesOf(WRAP_PRF), 'passkey', { hkdf })
+  t.is(pk.lookupId, pkKeys.lookupId)
+  t.is(pk.code, undefined)
+  const opened = recovery.openRoot(pk.blob, pkKeys.wrapKey, { member: publicKey })
+  t.is(b4a.toString(opened.root, 'hex'), PRF)
+
+  const cd = await host.recoveryWrap({ kind: 'code' })
+  t.ok(/^([0-9a-z]{4}-){8}[0-9a-z]{4}$/.test(cd.code))
+  const secret = recovery.decodeCode(cd.code)
+  const cdKeys = await recovery.deriveRecoveryKeys(secret, 'code', { hkdf })
+  t.is(cd.lookupId, cdKeys.lookupId)
+  const openedCode = recovery.openRoot(cd.blob, cdKeys.wrapKey, { member: publicKey })
+  t.is(b4a.toString(openedCode.root, 'hex'), PRF)
+})
+
+test('recoveryWrap is LOCKED without a root; clear, forget, reset and close drop it', async (t) => {
+  const { host } = recoverySetup()
+  const locked = await host.recoveryWrap({ kind: 'code' }).catch((e) => e)
+  t.is(locked.code, 'USAGE')
+  t.is(locked.message, 'identidade bloqueada: entre com a passkey')
+
+  for (const drop of ['clear', 'forget', 'reset', 'close']) {
+    await host.install(params())
+    await host.recoveryWrap({ kind: 'code' })
+    await host[drop]()
+    await t.exception(host.recoveryWrap({ kind: 'code' }), /identidade bloqueada/, drop + ' drops the root')
+    await t.exception(host.recoveryBind({ credentialId: 'cred-2', userId: MARKED_USER }), /identidade bloqueada/, drop + ': bind needs the root')
+  }
+})
+
+test('a failed install drops the root', async (t) => {
+  const { session, host } = recoverySetup()
+  await host.install(params())
+  await host.install(params({ prf: 'zz' })).catch(() => {})
+  t.ok(session.keyPair !== null, 'the earlier pairs stay')
+  await t.exception(host.recoveryWrap({ kind: 'code' }), /identidade bloqueada/)
+})
+
+test('the root, the secret and the pending key are zeroed', async (t) => {
+  const { host } = recoverySetup()
+  const fills = []
+  const realFill = Uint8Array.prototype.fill
+  await host.install(params())
+  const member = await expectedPublicKey(PRF)
+  const made = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', member)
+  // Record what every 32-byte buffer held when it was zeroed during lookup,
+  // open and clear.
+  // A spy on fill: the held root and the pending key are not reachable otherwise.
+  Uint8Array.prototype.fill = function (v, ...rest) { // eslint-disable-line no-extend-native
+    if (v === 0 && this.length === 32) fills.push({ buf: this, was: b4a.toString(b4a.from(this), 'hex') })
+    return realFill.call(this, v, ...rest)
+  }
+  try {
+    await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+    await host.recoveryOpen({ blob: made.blob, member })
+    await host.clear()
+  } finally {
+    Uint8Array.prototype.fill = realFill // eslint-disable-line no-extend-native
+  }
+  const pkKeys = await recovery.deriveRecoveryKeys(bytesOf(WRAP_PRF), 'passkey', { hkdf })
+  const was = fills.map((f) => f.was)
+  t.ok(was.includes(WRAP_PRF), 'the wrapping secret is zeroed')
+  t.ok(was.includes(b4a.toString(pkKeys.wrapKey, 'hex')), 'the pending wrap key is zeroed')
+  t.ok(was.filter((h) => h === PRF).length >= 2, 'the opened root and the held root are zeroed')
+  t.ok(fills.every((f) => allZero(f.buf)))
+})
+
+test('setKeyPair still receives { media } only', async (t) => {
+  const session = fakeSession()
+  const storage = memoryNodeStorage()
+  const calls = []
+  const orig = session.setKeyPair
+  session.setKeyPair = function (kp, opts) {
+    calls.push(Object.keys(opts).sort())
+    return orig.call(session, kp, opts)
+  }
+  const host = createIdentityHost({ session, storage, hkdf, randomBytes })
+  await host.install(params())
+  t.alike(calls, [['media']])
+})
+
+test('recoveryBind rebinds the passkey record and status reports userId', async (t) => {
+  const { host, storage } = recoverySetup()
+  await host.install(params())
+  t.alike(await host.recoveryBind({ credentialId: 'cred-2', userId: MARKED_USER }), {})
+  t.alike(await storage.readJson('passkey'), { v: 1, credentialId: 'cred-2', rpId: 'varanda.example', userId: MARKED_USER })
+  const status = await host.status()
+  t.is(status.credentialId, 'cred-2')
+  t.is(status.userId, MARKED_USER)
+  await host.recoveryBind({ credentialId: 'cred-3', userId: UNKNOWN_WRAP_USER })
+  t.is((await host.status()).userId, UNKNOWN_WRAP_USER)
+})
+
+test('recoveryBind refuses a user id without the wrap mark', async (t) => {
+  const { host, storage } = recoverySetup()
+  await host.install(params())
+  for (const userId of ['', 'ab'.repeat(32), MARK_HEX + 'ab'.repeat(16), 'zz', undefined]) {
+    const err = await host.recoveryBind({ credentialId: 'cred-2', userId }).catch((e) => e)
+    t.is(err.code, 'USAGE', String(userId))
+    t.is(err.message, 'passkey de recuperação inválida')
+  }
+  t.is((await storage.readJson('passkey')).credentialId, 'cred-1', 'the record is unchanged')
+})
+
+test('a recovery passkey with no handle is bound marked and status says so', async (t) => {
+  const { host } = recoverySetup()
+  await host.install(params({ credentialId: 'cred-r', userId: UNKNOWN_WRAP_USER }))
+  const status = await host.status()
+  t.is(status.credentialId, 'cred-r')
+  t.is(status.userId, UNKNOWN_WRAP_USER)
+  t.ok(recovery.isWrapUserId(status.userId))
+})
+
+test('a failed install drops the pending wrap key and the root', async (t) => {
+  const member = await expectedPublicKey(PRF)
+  const made = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', member)
+
+  // MISMATCH: the stored diary is another identity.
+  const session = fakeSession({ diaryKey: 'ee'.repeat(32) })
+  const storage = memoryNodeStorage()
+  const host = createIdentityHost({ session, storage, hkdf, randomBytes })
+  await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  const mismatch = await host.install(params()).catch((e) => e)
+  t.is(mismatch.message, 'passkey não corresponde ao diário guardado')
+  await t.exception(host.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'MISMATCH dropped the pending key')
+  await t.exception(host.recoveryWrap({ kind: 'code' }), /identidade bloqueada/)
+
+  // The passkey record cannot be written.
+  const { host: host2, storage: storage2 } = recoverySetup()
+  const write = storage2.writeJson.bind(storage2)
+  storage2.writeJson = async (key, value) => {
+    if (key === 'passkey' && value !== null) throw new Error('disk full')
+    return write(key, value)
+  }
+  await host2.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  await t.exception(host2.install(params()), /disk full/)
+  await t.exception(host2.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'a record failure dropped the pending key')
+  await t.exception(host2.recoveryWrap({ kind: 'code' }), /identidade bloqueada/)
+})
+
+test('a recovered root installs the same identity', async (t) => {
+  const { host } = recoverySetup()
+  const member = await expectedPublicKey(NEW_PRF)
+  const made = await blobFor(NEW_PRF, bytesOf(WRAP_PRF), 'passkey', member)
+  await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  const { prf } = await host.recoveryOpen({ blob: made.blob, member })
+  const out = await host.install(params({ prf }))
+  t.is(out.publicKey, member)
 })
 
 test('putDmMedia hands the photo to dmPutMedia, zeroes it and unlinks after success', async (t) => {
@@ -597,4 +863,28 @@ test('readMediaToFile refuses bytes mediaBounds rejects: nothing written, plaint
   }
   t.is(written.length, 0, 'no plaintext file is written')
   t.ok(handed.every((b) => b.every((x) => x === 0)), 'the refused plaintext is zeroed')
+})
+
+test('readMediaToFile checks a voice note as audio: a sound-only MPEG-4 passes, a video track does not', async (t) => {
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(2500), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(2500)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(2500), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
+  const trak = (handler) => box('trak', box('tkhd', new Array(84).fill(0)), box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(handler), be32(0), be32(0), be32(0), [0]), minf))
+  const m4a = (tracks) => new Uint8Array([...box('ftyp', ascii('M4A '), be32(0), ascii('M4A '), ascii('isom')), ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(2500), new Array(80).fill(0)), ...tracks.map(trak)), ...box('mdat', new Array(2504).fill(1))])
+  let serve = m4a(['soun'])
+  const written = []
+  const io = {
+    // The session's ms is a claim: the answer carries the container's.
+    session: { dmReadMedia: async () => ({ bytes: new Uint8Array(serve), mime: 'audio/mp4', ms: 1 }), groupReadMedia: async () => ({ bytes: new Uint8Array(serve), mime: 'audio/mp4' }) },
+    write: async (bytes) => { written.push(bytes.length); return MEDIA_NAME },
+    unlink: () => {},
+    generation: () => 0,
+    isClosing: () => false
+  }
+  t.alike(await readMediaToFile(io, { kind: 'dm', from: 'a', id: 'b', index: 0 }), { name: MEDIA_NAME, mime: 'audio/mp4', w: 0, h: 0, ms: 2500 }, 'the container duration')
+  serve = m4a(['soun', 'vide'])
+  const err = await readMediaToFile(io, { kind: 'group', diary: 'd', item: { x: 1 } }).then(() => null, (e) => e)
+  t.ok(err !== null && err.code === 'USAGE', 'a container with a video track is refused')
+  t.is(written.length, 1, 'nothing written for the refused one')
 })

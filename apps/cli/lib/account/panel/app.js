@@ -100,6 +100,8 @@ const TEXT = {
   anexoLabel: 'com mídia',
   anexoProvenance: 'imagem enviada por quem denunciou, não conferida',
   anexoAlt: 'Imagem anexada à denúncia',
+  anexoAudioProvenance: 'áudio enviado por quem denunciou, não conferido',
+  anexoAudioLabel: 'Áudio anexado à denúncia',
   quoteLabel: 'Texto enviado por quem denunciou, não conferido.',
   groupMessage: 'mensagem de grupo',
   groupBlockWarning: 'O bloqueio do grupo vale para todas as mensagens dele, de todos os membros.',
@@ -318,7 +320,8 @@ function reportRow (r) {
     actor: actorOf(r),
     ai: has(r, 'ia') ? aiOf(r.ia) : null,
     verified: has(r, 'publicacao') ? verifiedOf(r.publicacao) : null,
-    anexo: has(r, 'anexo') && r.anexo !== null && typeof r.anexo === 'object'
+    anexo: has(r, 'anexo') && r.anexo !== null && typeof r.anexo === 'object',
+    anexoAudio: has(r, 'anexo') && r.anexo !== null && typeof r.anexo === 'object' && r.anexo.mime === 'audio/mp4'
   }
 }
 
@@ -585,6 +588,10 @@ function createPanel (env) {
     // <img>: a same-origin path built here, never a peer-supplied URL.
     if (p.src) node.setAttribute('src', p.src)
     if (p.alt !== undefined) node.setAttribute('alt', p.alt)
+    // <audio>: the report's own audio, played only when the moderator asks.
+    if (p.controls) node.setAttribute('controls', '')
+    if (p.preload) node.setAttribute('preload', p.preload)
+    if (p['aria-label']) node.setAttribute('aria-label', p['aria-label'])
     if (p.pressed !== undefined) node.setAttribute('aria-pressed', p.pressed ? 'true' : 'false')
     if (p.maxLength) node.setAttribute('maxlength', String(p.maxLength))
     if (p.value !== undefined) node.value = p.value
@@ -601,10 +608,15 @@ function createPanel (env) {
     return node
   }
 
-  function anexoImg (id) {
+  // A voice note report plays in an audio control; an image shows as before.
+  // Both are kept per report between renders and released at logout.
+  function anexoImg (id, audio = false) {
     let img = anexoImgs.get(id)
     if (img === undefined) {
-      img = h('img', { className: 'anexo', src: API + 'reports/' + encodeURIComponent(id) + '/anexo', alt: TEXT.anexoAlt })
+      const src = API + 'reports/' + encodeURIComponent(id) + '/anexo'
+      img = audio
+        ? h('audio', { className: 'anexo', src, controls: true, preload: 'none', 'aria-label': TEXT.anexoAudioLabel })
+        : h('img', { className: 'anexo', src, alt: TEXT.anexoAlt })
       anexoImgs.set(id, img)
     }
     return img
@@ -1048,8 +1060,8 @@ function createPanel (env) {
         r.quote !== '' ? h('p', { className: 'label', text: r.kind === 'dm' ? TEXT.dmQuoteLabel : TEXT.quoteLabel }) : null,
         r.quote !== '' ? untrusted('blockquote', r.quote) : null,
         r.anexo ? h('p', { className: 'label', text: TEXT.anexoLabel }) : null,
-        r.anexo ? anexoImg(r.id) : null,
-        r.anexo ? h('p', { className: 'label', text: TEXT.anexoProvenance }) : null,
+        r.anexo ? anexoImg(r.id, r.anexoAudio) : null,
+        r.anexo ? h('p', { className: 'label', text: r.anexoAudio ? TEXT.anexoAudioProvenance : TEXT.anexoProvenance }) : null,
         r.text !== '' ? h('p', { className: 'label', text: TEXT.commentLabel }) : null,
         r.text !== '' ? untrusted('p', r.text) : null,
         h('p', { className: 'meta', text: 'denunciada por: ' + who(r.reporter.member, r.reporter.username) }),

@@ -2707,6 +2707,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Tentar de novo no mesmo gerenciador sem PRF pode dar "já existe uma passkey do Varanda neste gerenciador: use entrar"; entrar com ela leva de volta ao cartão com os passos.
 - Os textos citam a Apple e o Google para todos; o app não detecta a plataforma.
 - Se a passkey escolhida em Entrar era a da criação pendente, "concluir" continua aparecendo e, tocado, só diz "nenhuma criação de passkey pendente"; "Criar passkey" ao lado resolve. Esconder o "concluir" depois de uma falha dele perderia uma criação ainda viva quando a pessoa só fechou o diálogo, e a tela não distingue os dois casos. Essa passkey também não é nomeada para apagar. Saber qual das duas falhou exigiria o nó informar a criação pendente.
+- Os estados presos e as saídas novas (passkey sem sincronização, caminho pelo celular, passkeys recusadas guardadas, saída de uma passkey conhecida perdida) estão em §109; os resultados desta seção não foram refeitos.
 
 ## 46. Leituras sem parar a sincronização na web (PR perf/faster-content-loading, 2026-10-30)
 
@@ -5238,7 +5239,174 @@ Limites desta caminhada:
 - A abertura de foto no app instalado só é conferida num build de aparelho depois de `npm run prepare:native -w apps/app`; os testes rodam o fetch Bare isolado, não no worklet.
 - Nenhuma caixa acima foi executada nesta documentação.
 
-## 108. Aviso push de mensagem nova não aparece no aparelho que enviou (PR fix/dm-wake-self-notification)
+## 108. Mensagens de voz nas conversas (PR feat/voice-notes)
+
+Caminhada do app para gravar, enviar e ouvir mensagens de voz em mensagens diretas e em grupos, públicos e privados, e para a denúncia com áudio. A tela está em [app.md](app.md) ("Mensagens de voz nas conversas"); o formato está em [protocol.md](protocol.md) e [rpc.md](rpc.md). Os Termos de Uso e a Política de Privacidade passam à versão 18 para descrever isso, então quem já aceitou a 17 vê o aceite de novo.
+
+Regras que os passos conferem:
+
+- Com o compositor vazio, o microfone ocupa o lugar do botão de enviar, só onde o aparelho ou o navegador grava `audio/mp4` (Android e iOS com `expo-audio`; Safari e Chrome recente com `MediaRecorder`). Onde não grava, não há microfone nem aviso.
+- Segurar grava com o tempo correndo e "deslize para cancelar"; soltar envia. Um toque grava sem segurar, com "Parar" (envia) e "Cancelar". Aos 2:00 a gravação para e é enviada. Uma gravação por vez; a mensagem de voz vai sozinha, sem foto nem legenda.
+- O microfone só é pedido quando a pessoa começa a gravar. Sem permissão: "Sem acesso ao microfone".
+- Só `audio/mp4` de até 2 minutos e 1,5 MiB; um arquivo com faixa de vídeo é recusado pelos bytes, mesmo rotulado `audio/mp4`. "Anexar" continua com só "Foto", e a galeria não deixa escolher vídeo.
+- Guarda como as fotos da seção 107: mensagem direta cifrada no canal de blobs por 7 dias; grupo público pela rota `/media`; grupo privado só o nó decifra. Num pedido de mensagem, nada baixa antes de "Toque para ouvir".
+- Denúncia de mensagem direta ou de grupo privado com mensagem de voz: o áudio vai aberto se tiver até 700 KB, com escuta antes do envio; acima disso, "O áudio não coube e não foi enviado.". O painel mostra "áudio não conferido" e serve `audio/mp4` com `nosniff` e `no-store`.
+- Os Termos e a Política estão na versão 18 (`LEGAL_VERSION` e `TERMS_VERSION` iguais) e não falam de vídeo nas conversas como recurso, busca de GIF, prévia de link nem encaminhamento.
+
+Passos (marcar só depois de executar e guardar o registro), primeiro no Android (build de debug, emulador ou aparelho, feito depois de `npm run prepare:native -w apps/app`), depois no simulador iOS, depois na web e no PWA; a conversa entre duas pessoas usa o laboratório hospedado (`apps/cli/scripts/hosted-lab.js`, dois perfis do navegador) ou um aparelho e um perfil do navegador:
+
+- [ ] Android: na abertura depois da atualização, o aceite dos Termos aparece com a versão 18; aceitar e seguir.
+- [ ] Android: abrir uma conversa e, antes de tocar no microfone, conferir que o sistema não pediu acesso ao microfone; o pedido aparece só ao começar a gravar. Negar mostra "Sem acesso ao microfone" e nada é enviado; permitir nas configurações e gravar de novo.
+- [ ] Android: segurar o microfone, falar uns segundos e soltar numa mensagem direta; a outra pessoa recebe "Mensagem de voz", toca e pausa. Segurar e deslizar para a esquerda descarta, sem envio.
+- [ ] Android: tocar no microfone sem segurar; gravar e tocar "Parar" envia; repetir e tocar "Cancelar" descarta.
+- [ ] Android: gravar sem parar até 2:00; a gravação para sozinha e a mensagem chega com 2:00.
+- [ ] Android: mandar uma mensagem de voz num grupo público e outra num grupo privado; as duas tocam para o outro membro. A do grupo privado, lida na rota `/media` do semeador, são bytes cifrados (não começa com uma caixa `ftyp`).
+- [ ] Android: abrir "Anexar" e a galeria; um vídeo não pode ser escolhido (a galeria mostra só imagens).
+- [ ] Android: denunciar uma mensagem direta com mensagem de voz curta; a tela deixa ouvir o áudio antes de enviar, e o painel de moderação mostra a denúncia com "áudio não conferido", que toca no navegador do moderador. Com uma mensagem de voz acima de 700 KB, a tela diz "O áudio não coube e não foi enviado.".
+- [ ] iOS (simulador): repetir os passos do Android acima, num build feito depois de `npm run prepare:native -w apps/app`; conferir o texto do pedido de microfone do sistema.
+- [ ] Safari (web hospedada, macOS e iPhone): o microfone aparece e grava; repetir envio, escuta, cancelamento e "Parar". O pedido de microfone do navegador só aparece ao começar a gravar.
+- [ ] Chrome (web hospedada): numa versão que grava `audio/mp4` com `MediaRecorder`, repetir os passos; a mensagem gravada no Chrome toca no Safari e no Android, e a gravada no Safari toca no Chrome.
+- [ ] Navegador sem `audio/mp4` no `MediaRecorder` (por exemplo um Firefox ou um Chrome antigo): nenhum controle de microfone aparece no compositor, nem desabilitado, nem com aviso; as mensagens de voz recebidas continuam tocando ou mostram "Mídia indisponível".
+- [ ] PWA instalado (Chrome e Safari no iPhone): gravar, enviar e ouvir numa mensagem direta e num grupo; mandar o app para o segundo plano no meio de uma gravação a cancela.
+- [ ] Duas pessoas no laboratório hospedado: um pedido de mensagem com mensagem de voz não baixa nada até "Toque para ouvir" (a aba Rede não registra pedido de mídia antes do toque); depois de aceitar, toca direto.
+- [ ] Em todas as plataformas: a Política e os Termos abertos em Ajustes mostram "Versão 18" e descrevem a mensagem de voz de até dois minutos.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/app/test/legal.test.js`, `terms-version.test.js` e `node packages/core/test/terms.test.js`.
+- `node packages/rpc/test/audio-bounds.test.js`, `node apps/app/test/voice.test.js`, `audio.test.js`, `report.test.js` e `node apps/cli/test/dm-report.test.js` (o anexo de áudio) e `panel.test.js`.
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- A gravação depende do aparelho e da versão do navegador: os testes rodam com gravadores falsos, não com o microfone.
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 109. Passkeys só de gerenciadores que sincronizam, caminho pelo celular (QR code) e saídas dos estados presos (PR fix/passkey-robustness)
+
+### O que mudou
+
+- Criar passkey: o app recusa uma passkey que não sincroniza entre aparelhos (chave USB ou NFC, Windows Hello, perfil local do navegador), porque ela ficaria presa a um aparelho e a conta perderia o acesso ao trocar de aparelho. A checagem lê a flag BE (backup eligible) dos dados de autenticação e exige que ela esteja ligada. Não há lista de gerenciadores no código: o critério é a flag. A recusa aparece como NOT_SYNCED, com o texto de `apps/app/src/passkeyOptions.js`.
+- A flag vale só na criação. Entrar nunca a consulta, então uma passkey que já existe continua entrando, mesmo sem sincronização.
+- Dados de autenticação ilegíveis não bloqueiam a criação: são aceitos.
+- Caminho pelo celular: na criação, o navegador recebe as dicas `client-device` e `hybrid`; quando a pessoa toca "criar com o celular" ou "entrar com o celular", a dica é `hybrid`. As dicas são só orientação para o navegador e não forçam a tela do QR code. Sem gerenciador útil no computador, a página orienta a usar o celular (SYNC_ADVICE e PHONE_HINT em `apps/app/src/passkeyTrouble.js`).
+- Estados presos ficam guardados:
+  - na web, o registro `passkeyAttempts` (versão 1, por rpId) guarda a criação pendente (`pending`: id da credencial, id do usuário e telefone) e as passkeys recusadas (`refused`, até 32 entradas, com código e se foram limpas);
+  - no nativo, o arquivo `varanda-passkey-attempts.json` na pasta de documentos do app, com o mesmo formato (`cleaned` é sempre `false`). Os códigos das recusadas são `NO_PRF`, `NOT_SYNCED`, `SUPERSEDED` (uma criação pendente trocada por outra criação ou por uma entrada com outra passkey), `INSTALL_FAILED` (a passkey nova não chegou a ser instalada) e, só no nativo, `MISSING` (o "concluir" não achou a passkey pendente). Uma recusa `NOT_SYNCED` criada aqui nunca é rebaixada por um `NO_PRF` posterior, então essa passkey nunca abre a conta.
+- A criação pendente sobrevive a recarregar a página, então o "concluir" é pedido ao nó e não depende da memória da tela.
+- Limpeza na web: `PublicKeyCredential.signalUnknownCredential` é chamado de melhor esforço, e só quando a própria cerimônia de criação desta carga da página recusa a passkey (NOT_SYNCED, ou NO_PRF na criação). Nunca no "concluir" (entre a criação e o "concluir" uma passkey que sincroniza pode já ter virado a conta em outro aparelho; a recusa fica guardada, sem pedido de remoção), nunca para uma criação pendente restaurada nem para a passkey conhecida. Quando o navegador aceita a chamada, a entrada sai marcada como `cleaned`, e a página mostra a linha "já pediu ao gerenciador" onde o recurso existe.
+- Entrar: `unlock({ any, phone })` na web e `unlock({ any })` no nativo, para escolher outra passkey ou o celular.
+- Exclusões no nativo: iOS repassa `excludeCredentials` ao módulo. No Android, a exclusão só limpa passkeys do Varanda no mesmo gerenciador, e depende de androidx.credentials 1.5.0.
+- Android: `NoCredentialException` em Entrar vira o estado NONE, com o texto NONE_TEXT (`apps/app/src/passkeyTrouble.js`).
+- PRF malformado conta como NO_PRF, não como erro genérico.
+- Saída de passkey conhecida perdida: sair do cartão não apaga o diário deste aparelho. Se o aparelho não tem o diário, Entrar com uma passkey conhecida que não está mais no gerenciador abre um diário vazio.
+- Passkeys nomeadas para apagar: o cartão só nomeia passkeys criadas nesta sessão da página que falharam agora, nunca as tiradas de `refused` guardado (uma recusa antiga pode ter virado a conta em outro aparelho ou navegador). Os nomes somem a cada entrada bem-sucedida e no "recomeçar", o cartão de navegador sem suporte não nomeia nenhuma, e o passo é condicional: "Se você não usou essa passkey para entrar em outro aparelho, apague a passkey ...".
+- O texto de recuperação (SYNC_ADVICE) manda salvar a passkey num gerenciador que sincroniza, para a conta do Google ou da Apple devolvê-la num aparelho novo.
+
+### Testes automatizados
+
+- `packages/web-member/test/authenticator-data.test.js` (novo).
+- `packages/web-member/test/passkey.test.js`.
+- `packages/web-member/test/resume.test.js`.
+- `packages/web-member/test/node-bundle.test.js`.
+- `apps/app/test/passkeyOptions.test.js`.
+- `apps/app/test/passkeyTrouble.test.js`.
+- `apps/app/test/help.test.js`.
+- `apps/app/test/sessionStoreNative.test.js`.
+
+Resultados (Node 24.22.1, na raiz, sobre `origin/main@04f01a29`): `npm run lint` sem erros; `npm test` com 402 arquivos, 400 passaram de primeira; `packages/core/test/sync-delete.test.js` falhou uma vez na execução completa ("D lacks block 3 after its scan") e passou sozinho (3/3), intermitente e fora desta mudança; `apps/cli/test/ai-embedder.test.js` falha só porque o caminho desta cópia local contém "sharp" (o teste procura módulos com esse nome no caminho), igual na `main` e fora desta mudança; `npm run demo` terminou com DEMO OK. Os testes acima, um por arquivo, passaram.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Chave USB ou NFC: criar passkey é recusada com o aviso de sincronização (não realizada ainda).
+- [ ] Windows Hello: criar passkey é recusada com o aviso de sincronização (não realizada ainda).
+- [ ] Passkey local do perfil do Chrome num Mac: criar é recusada (não realizada ainda).
+- [ ] iCloud Keychain, Google Password Manager, 1Password e Bitwarden: criar é aceito e a passkey entra depois (não realizada ainda).
+- [ ] Computador sem gerenciador útil: o QR code leva a um Android e a um iPhone; criar, concluir e entrar funcionam pelo celular (não realizada ainda).
+- [ ] Passkey já existente, criada num aparelho e sem sincronização, continua entrando (não realizada ainda).
+- [ ] Passkey conhecida perdida: sair do cartão não apaga o diário deste aparelho (não realizada ainda).
+- [ ] Recarregar a página durante "concluir": a criação pendente continua e "concluir" entra (não realizada ainda).
+- [ ] Android com aparelho novo, sem passkey do Varanda: aparece NONE_TEXT (não realizada ainda).
+- [ ] Onde o navegador tem `signalUnknownCredential`: após uma criação recusada, aparece a linha "já pediu ao gerenciador" (não realizada ainda).
+
+### Limites que sobram
+
+- A flag BE é autodeclarada pelo autenticador quando a atestação é `none`; o app não consegue provar que o gerenciador sincroniza.
+- Dados de autenticação ilegíveis são aceitos, então um autenticador que não informa a flag passa na criação.
+- As dicas (`client-device`, `hybrid`) são só orientação: não forçam a tela do QR code.
+- No Android, a limpeza de passkeys é só exclusão, e só com androidx.credentials 1.5.0.
+- No iOS nativo, passkeys ainda esperam o domínio associado da conta Apple Developer.
+- O build de debug do Android (`app.varanda.debug`) não usa passkeys de produção.
+- Entrar com uma passkey do Varanda antiga, num aparelho sem diário, ainda abre um diário vazio.
+- Depois de recarregar a página, o cartão não lembra mais quais passkeys criadas aqui não serviram: a pessoa não recebe o nome para apagar. É de propósito, para nunca mandar apagar uma passkey que virou a conta em outro aparelho.
+- Uma passkey recusada no "concluir" nunca recebe pedido de remoção, mesmo quando foi criada nesta carga da página: ela fica no gerenciador até a pessoa apagá-la.
+- Há uma janela entre o autenticador criar a passkey e o registro local ser gravado: se a página cair nessa janela, a passkey existe no gerenciador sem registro local.
+- A recusa de uma passkey presa a um aparelho (chave de segurança, Windows Hello) vale só no navegador ou na instalação que a recusou: ela sobrevive ao "recomeçar" e ao limite de 32 registros, mas em outro navegador, depois de limpar os dados do site ou depois de reinstalar o app, a mesma passkey pode entrar e abrir uma conta nova presa àquele aparelho. A entrada não lê a flag BE, por decisão do dono: passkeys que já existem continuam entrando. Por isso o cartão de passkey recusada nunca manda abrir o Varanda em outro navegador. Decisão registrada na auditoria de segurança deste PR.
+- Pela mesma regra, uma chave de segurança que este navegador recusou na criação nunca entra neste navegador, mesmo que a pessoa tenha criado a conta com ela em outro computador; a conta continua acessível nos outros aparelhos.
+
+## 110. Segunda passkey, troca e código de recuperação (PR feat/passkey-recovery)
+
+### O que mudou
+
+- Toda chave do membro continua vindo da raiz: o resultado PRF de 32 bytes da passkey com que a conta foi criada. Uma passkey extra ou o código de recuperação nunca deriva chave: só desembrulha essa raiz, então a identidade, os seguidores e as chaves derivadas continuam os mesmos. Não há registro novo no diário, e o nó não guarda cópia local das raízes embrulhadas.
+- Passkey extra marcada: o identificador do usuário (`user.id`) é 16 bytes aleatórios seguidos de `WRAP_MARK` (`'varanda-wrap-v1\n'`, 16 bytes). Uma credencial marcada nunca é instalada direto: o PRF dela só deriva `lookupId` e `wrapKey`. Sem entrada no serviço, ela falha fechada e o nó fica bloqueado. Uma versão antiga do app, que não conhece a marca, criaria outra identidade com ela.
+- Blob e código como em `docs/protocol.md` ("Web member storage (B2)"): HKDF-SHA-256 com o sal `'varanda/member-recovery/hkdf/v1'` e os rótulos `.../lookup/v1` e `.../wrap/v1` seguidos do byte do tipo (0x01 passkey, 0x02 código); texto claro de 66 bytes (versão, tipo, chave do membro, raiz) selado com `crypto_secretbox_easy`; código de 20 bytes em 36 símbolos Crockford (32 do segredo e 4 de soma de conferência, os 20 primeiros bits de BLAKE2b-256), em 9 grupos de 4.
+- Entrar com uma passkey marcada busca o blob (`POST /account/recovery/fetch`), abre e instala a raiz presa a essa credencial. Entrar com uma credencial sem marca, ou que não devolveu identificador e não é a deste aparelho, instala o PRF da cerimônia direto, como antes, sem perguntar nada ao serviço: nenhum valor derivado do PRF de uma passkey comum vai ao serviço, e nenhuma resposta do serviço transforma uma passkey em outra identidade. Na busca de uma passkey marcada ou de um código, só o 404 `{ error: 'nao-encontrado', recovery: true }` quer dizer "sem entrada"; qualquer outra resposta (falha de rede, ou um 404 sem `recovery: true`, como a rota desconhecida de um servidor antigo) é o serviço indisponível, e o nó fica bloqueado nos dois casos.
+- Código de recuperação: o código deriva `lookupId`, o blob é buscado e aberto, e o nó guarda a raiz por até 120 s enquanto a pessoa toca "Criar passkey nova". A raiz é instalada presa a essa passkey nova (sessão guardada normal) e embrulhada para ela, e o app a cadastra com um put assinado. O código sozinho não instala nem guarda sessão. Se o put falha, o aparelho continua ligado e conectado, e Ajustes oferece cadastrar de novo.
+- Trocar a passkey deste aparelho: adiciona uma passkey marcada, cadastra e liga o aparelho a ela (`identity.recoveryBind` no worklet, `bindPasskey` no nó do navegador). A passkey original continua abrindo a conta onde existir; o Varanda não consegue invalidá-la, então a pessoa a apaga no gerenciador.
+- Serviço de conta: `recovery.json` (modo 0600, arquivo à parte como o `terms.json`, fora de `directory.*`), exatamente `{ v: 1, seq, entries, removed }`, com linhas `{ member, kind, nonce, ciphertext, createdAt, gen }` e lápides `{ member, removedAt, gen }` por `lookupId`. As gerações são uma sequência única e crescente do arquivo inteiro: todo put, todo remove e toda lápide da normalização recebem `gen` = ++`seq`; a mescla fica com o maior `seq` e, por `lookupId`, com o registro de maior geração; um `gen` acima de `seq` torna o arquivo inválido. Duas linhas de código vivas depois de uma mescla: fica só a de geração estritamente maior; linhas empatadas na maior geração ficam as duas (nenhuma é mais nova, e escolher por `lookupId` poderia apagar o código confirmado), e o próximo put de código enterra as duas. Lápides vencem em 30 dias (por `removedAt`); o teto de 32 por membro tira primeiro as de menor geração, mas nunca uma lápide com menos de 10 minutos (`STALE_WINDOW_MS`) nem a mais nova do membro. Depois de uma gravação incerta, `list` e `fetch` releem e mesclam o arquivo antes de responder, ou respondem `indisponivel`. Tetos: 4 passkeys extras e 1 código por membro (`limite-recuperacao`, HTTP 409); um código novo enterra o anterior. Rotas `POST /account/recovery/start|put|remove|list|fetch`; o `lookupId` vai só no corpo do POST. O nonce do `/start` não guarda estado (validade, bytes aleatórios e um HMAC do processo sobre o membro) e não tem cota por membro, então pedir nonces em nome de outro membro não o bloqueia; ele só é gasto depois de uma prova válida e fica na lista de gastos até a própria validade. Respostas: put `{ createdAt, changed }`, remove `{ changed }`, list `{ entries }`, fetch `{ member, kind, blob }` ou 404 `{ error: 'nao-encontrado', recovery: true }` (só essa resposta quer dizer "sem entrada" para o app). Fora de `account export` e `account status`. Arquivo corrompido: 503 só nessas rotas.
+- Declaração assinada `'varanda-recovery-v1'` (`packages/core/lib/recovery-proof.js`, RPC `recovery.sign`, `docs/rpc.md` 5.90): ação, nonce, membro, associação, tipo, `lookupId` e `blobHash`. O `blobHash` (BLAKE2b-256 de tipo, `lookupId`, nonce e texto cifrado) é calculado pela sessão e de novo pelo serviço; o app nunca calcula hash.
+- put e remove mantêm o resultado desconhecido num 503 depois de uma gravação possível: o app mostra o aviso de resultado desconhecido e "conferir" (lista), sem repetir o pedido sozinho.
+- Controles IPC do worklet: `identity.recoveryLookup`, `identity.recoveryOpen`, `identity.recoveryWrap` e `identity.recoveryBind` (`docs/rpc.md` 5.91 a 5.94). `identity.recoveryOpen` consome a chave de desembrulho pendente: repetido, falha com "entrada de recuperação inválida", e o app recomeça com uma cerimônia nova. `identity.recoveryBind` altera estado (regrava o registro da passkey) e só aceita um `userId` com a marca. Quando a entrada com passkey marcada não devolveu identificador, o app liga o aparelho ao `userId` sintético 16 bytes zero seguidos de `WRAP_MARK`.
+- App: Ajustes › Passkeys e recuperação (adicionar passkey, trocar a passkey deste aparelho, criar código de recuperação mostrado uma vez, remover); no cartão Entrar, "entrar com outra passkey" sempre que há passkey conhecida e "Entrar com código de recuperação". Termos e Política na versão 19, que dizem que adicionar passkey ou código exige a conta vinculada ao Google.
+
+### Testes automatizados
+
+- `packages/web-member/test/recovery.test.js` (novo): derivação, embrulho e abertura, marca, código.
+- `packages/core/test/recovery-proof.test.js` (novo): bytes da declaração, separação de domínio, `blobHashOf`.
+- `apps/cli/test/recovery-store.test.js` (novo): arquivo, sequência de gerações, mescla e lápides (prazo, teto, janela de 10 minutos), tetos, troca do código, leituras depois de gravação incerta, arquivo inválido nunca regravado.
+- `packages/rpc/test/methods.test.js` e `packages/rpc/test/server.test.js`: `recovery.sign` e os controles `identity.recovery*`.
+- `apps/app/test/legal.test.js` e `packages/core/test/terms.test.js`: textos e versão 19.
+- `packages/web-member/test/session.test.js`: `recovery.sign`.
+- `apps/cli/test/account-recovery.test.js` (novo): rotas, nonce, prova, tetos, 404, 503 só nessas rotas, registros sem identificador.
+- Worklet (`identity-install.js`): lookup, open, wrap e bind.
+- `apps/app/test/recovery.test.js` (novo): transporte e fluxo puro.
+- `packages/web-member/test/web-node-recovery.test.js` (novo): entrada marcada, sem identificador, código, adicionar e ligar no nó do navegador.
+- `apps/app/test/identityRecoveryNative.test.js` (novo): a mesma tabela de decisão no nativo.
+- `apps/app/test/passkeysScreen.test.js` (novo): a tela, sem API de navegador, e adicionar chamado antes de qualquer `await`.
+- `apps/cli/test/account-recovery-e2e.test.js` (novo): de ponta a ponta, a passkey extra e o código abrem a mesma chave pública.
+
+Resultados (CI local, Node 24.22.1, sobre `fix/passkey-robustness@d7514068`): lint e demo passam (DEMO OK); 415 de 418 arquivos de teste passam na execução completa. `packages/core/test/community-member-leave.test.js` e `group-member.test.js` esgotaram o tempo (180 s por arquivo) com a máquina carregada e passam sozinhos (46/46 e 52/52), como na branch de base. `apps/cli/test/ai-embedder.test.js` falha só porque o caminho desta cópia local contém "sharp", igual na `main`.
+
+### Verificação humana
+
+Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, com a saída.
+
+- [ ] Build de preview do Android: adicionar uma segunda passkey noutro gerenciador (não realizada ainda).
+- [ ] Um perfil novo do navegador entra com essa segunda passkey e chega à mesma chave pública (não realizada ainda).
+- [ ] Criar um código de recuperação: aparece uma vez só, com "Anotei o código" (não realizada ainda).
+- [ ] Recuperar com o código num navegador sem passkey: o app leva a criar uma passkey nova e a conta abre com a mesma chave pública (não realizada ainda).
+- [ ] Serviço de conta fora do ar: entrar com a passkey extra mostra a mensagem e o nó fica bloqueado (não realizada ainda).
+- [ ] Remover uma entrada: ela some da lista e deixa de abrir a conta num aparelho novo (não realizada ainda).
+- [ ] Membro antigo sem entradas: entra exatamente como antes, também sem internet (não realizada ainda).
+- [ ] iOS: sem regressão em entrar e criar passkey (não realizada ainda).
+
+### Limites que sobram
+
+- A passkey original não pode ser invalidada: enquanto existir em algum gerenciador, ela abre a conta.
+- Uma passkey extra numa versão antiga do app cria outra identidade, porque a versão antiga não conhece a marca.
+- A passkey original abre a conta sem internet em qualquer aparelho (nunca há busca no serviço para ela). Uma passkey extra ou o código precisa do serviço de conta a cada entrada nova com a passkey ou com o código; só uma sessão guardada no aparelho evita isso.
+- Se um gerenciador de senhas fora do padrão não devolve o identificador do usuário de uma passkey extra (marcada) num aparelho onde ela não está ligada, o aparelho não vê a marca e essa passkey abre ali uma conta separada e vazia em vez da conta do membro. Nada da conta real é afetado, e o código ou a passkey original ainda a recuperam. Um autenticador que segue o padrão devolve o identificador numa entrada sem registro no aparelho.
+- Remover ou trocar uma entrada não troca a raiz: quem buscou aquele blob enquanto a entrada valia e tem o segredo dela ainda abre a conta. Isso vem do desenho da raiz embrulhada. Remover a entrada ou criar um código novo só impede novas entradas num aparelho que ainda não a usou; quem já entrou com ela, ou um aparelho ainda aberto com ela, continua com acesso, porque a chave da conta não pode ser trocada. Se uma passkey adicionada ou o código vazar, o único caminho seguro é criar uma conta nova. O cartão do código, a confirmação de código novo e as duas confirmações de remover dizem isso, e os Termos e a Política também (a versão continua 17).
+- Cancelar a recuperação não desfaz o que já terminou: uma instalação que concluiu antes do cancelamento continua (a conta fica aberta e presa à passkey nova), uma passkey criada durante a cerimônia continua no gerenciador (o Varanda não consegue apagá-la; no navegador ela fica recusada como `SUPERSEDED` e fora das próximas criações) e um put já enviado ao serviço pode ter sido gravado (a lista confirma).
+- Remover uma entrada não desconecta um aparelho que já desembrulhou a raiz com ela.
+- Se o disco do serviço se perder, as entradas somem: o membro entra com a passkey original ou num aparelho ainda conectado e cadastra de novo.
+- Uma cópia de `recovery.json` mais antiga que uma lápide já podada pode trazer de volta aquela linha.
+- Só membros com vínculo Google cadastram entradas.
+
+## 111. Aviso push de mensagem nova não aparece no aparelho que enviou (PR fix/dm-wake-self-notification)
 
 Num nó hospedado no navegador, o aviso push de mensagem direta nova (`dm-wake`, seção 11 de [protocol.md](protocol.md), "Push wake") é global: vai para todas as assinaturas, sem nome nem texto. Um aparelho que acabou de enviar uma mensagem recebia o aviso de volta, "Pode haver uma mensagem nova na Varanda", como se fosse de outra pessoa. A mudança faz três coisas, todas no navegador e sem nada novo no servidor:
 
@@ -5301,7 +5469,7 @@ Resultado da matriz: a registrar aqui por navegador, com a data e a versão do n
 - Com a janela em foco, o aviso vira só uma releitura. Se a identidade está travada, a releitura espera o destravar. Se já há um `dm.pull` em andamento, a releitura dele falha e a mensagem aparece no próximo. Mensagens de uma página só aparecem quando a pessoa está agindo como a página, como antes. Uma janela em foco fora da área de membro (a abertura, os Termos, a primeira configuração, ou o começo de um carregamento antes de o app ouvir) não responde ao worker, e o aviso aparece normalmente.
 - Nenhuma caixa executada nesta documentação.
 
-## 109. Estado de vistos sincronizado entre aparelhos (PR feat/seen-sync-service)
+## 112. Estado de vistos sincronizado entre aparelhos (PR feat/seen-sync-service)
 
 O serviço de conta guarda, por membro, um bloco cifrado com as marcas de visto de Avisos, Conversas e grupos (`apps/cli/lib/account/seen-store.js`, `seen-routes.js`). O formato, a chave e as regras de fusão e de compare-and-swap estão em [protocol.md](protocol.md), seção 14. Esta parte confere o serviço; o navegador, que grava e funde o bloco, e o app estão nas PRs desta pilha, e o roteiro do app está no fim desta seção. O serviço não lê o bloco, e nenhuma conferência abaixo precisa de acesso ao conteúdo.
 
@@ -5313,11 +5481,11 @@ Rodar um arquivo por vez, com `node <arquivo>`:
 - `node packages/core/test/seen-proof.test.js`: enunciado `varanda-seen-v1`, assinatura e recusa de outro prefixo.
 - `node apps/cli/test/account-seen-store.test.js`: arquivo 0600 num diretório 0700, CAS, duas gravações concorrentes (uma só vence), arquivo de tamanho errado, link simbólico, zerar antes de apagar, limite de membros e registro sem membro nem bytes.
 - `node apps/cli/test/account-seen.test.js`: as rotas `start` e `finish`, conflito 409, nonce de uso único, Termos pendentes, limite de 429, tamanho do arquivo e 503 sem armazenamento.
-- `node apps/app/test/legal.test.js`: texto da Política e dos Termos na versão 18 (versão, nota de revisão e resumo do texto fixados).
+- `node apps/app/test/legal.test.js`: texto da Política e dos Termos na versão 20 (versão, nota de revisão e resumo do texto fixados).
 
 ### Roteiro no servidor de teste
 
-Pré-requisito: uma conta de teste já vinculada, criada como em `apps/cli/test/account-seen.test.js` (sem Google), com o aceite da versão 18 dos Termos (`POST /account/terms/start` e `finish`). Sem o aceite, toda gravação responde 409 `termos-pendentes`. A chave de assinatura é gerada na hora, num script de uma linha em `node` que chama `signSeen` de `packages/core/lib/seen-proof.js` e imprime só a assinatura. Nem a chave nem a assinatura vão para o registro desta conferência.
+Pré-requisito: uma conta de teste já vinculada, criada como em `apps/cli/test/account-seen.test.js` (sem Google), com o aceite da versão 20 dos Termos (`POST /account/terms/start` e `finish`). Sem o aceite, toda gravação responde 409 `termos-pendentes`. A chave de assinatura é gerada na hora, num script de uma linha em `node` que chama `signSeen` de `packages/core/lib/seen-proof.js` e imprime só a assinatura. Nem a chave nem a assinatura vão para o registro desta conferência.
 
 - [ ] Leitura sem bloco: `POST /account/seen/start` com `{ "member": "<hex64>", "action": "read" }` responde 200 `{ nonce }`; `POST /account/seen/finish` com `prevHash` de 64 zeros responde 200 `{ hash: null, blob: null }`.
 - [ ] Nonce de uso único: repetir o mesmo `finish` responde 404 `expirado`.
@@ -5326,7 +5494,7 @@ Pré-requisito: uma conta de teste já vinculada, criada como em `apps/cli/test/
 - [ ] Tamanho constante: uma gravação com uma marca e outra com o limite cheio resultam no mesmo tamanho de arquivo (32808 bytes).
 - [ ] Hash velho: uma gravação com um `prevHash` que não é o atual responde 409 `conflito`, com o `hash` atual e o `blob` atual em base64; o arquivo no disco não muda (o hash continua igual).
 - [ ] Depois desse 409, uma gravação com o `hash` devolvido responde 200.
-- [ ] Gravação sem o aceite da versão 18 responde 409 `termos-pendentes` e não muda o arquivo.
+- [ ] Gravação sem o aceite da versão 20 responde 409 `termos-pendentes` e não muda o arquivo.
 - [ ] Apagamento: com um hash velho responde 409 `conflito`; com o hash atual responde 200 `{ ok: true, changed: true }` e o arquivo some; apagar de novo responde 200 `{ ok: true, changed: false }`. Zerar o arquivo antes de apagar não se confere aqui, porque ele já não existe; a conferência é o teste `forget zeroes the file, then unlinks it` de `account-seen-store.test.js`.
 - [ ] Sem armazenamento usável (por exemplo, `seen` trocado por um link simbólico num ensaio), todas as rotas respondem 503 `indisponivel` e nenhum arquivo de membro é tocado.
 - [ ] Sem arquivos sobrando: depois das gravações, nenhum `.tmp.*` fica no diretório `seen`.

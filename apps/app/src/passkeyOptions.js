@@ -26,7 +26,9 @@ export const MESSAGES = Object.freeze({
   NO_PRF: 'este navegador ou gerenciador de senhas não oferece a extensão PRF das passkeys; o Varanda precisa dela para derivar a identidade',
   CANCELLED: 'entrada com a passkey cancelada',
   EXISTS: 'já existe uma passkey do Varanda neste gerenciador: use entrar',
-  WEBAUTHN: 'a passkey não respondeu; tente de novo'
+  WEBAUTHN: 'a passkey não respondeu; tente de novo',
+  NOT_SYNCED: 'essa passkey ficaria presa só a este aparelho (chave de segurança, Windows Hello ou perfil do navegador); ao criar, escolha um gerenciador de senhas que sincroniza entre aparelhos ou use o celular pelo QR code',
+  NONE: 'nenhuma passkey do Varanda neste aparelho'
 })
 
 export function passkeyError (code, message = MESSAGES[code]) {
@@ -104,9 +106,19 @@ function prfExtension () {
   return { prf: { eval: { first: toBase64Url(utf8(PRF_INPUT)) } } }
 }
 
+function credentialDescriptors (ids) {
+  if (!Array.isArray(ids)) throw new TypeError('identificadores de passkey inválidos')
+  return ids.map((id) => {
+    fromBase64Url(id)
+    return { type: 'public-key', id }
+  })
+}
+
 // userId and challenge: 32 random bytes each, drawn by the caller. The label
 // is 'Varanda <6 hex>' like the web's: never an email or a platform account.
-export function buildCreateOptions ({ rpId, userId, challenge } = {}) {
+// No hints here, unlike the web: Android hands this JSON straight to the
+// Credential Manager and iOS builds its own request.
+export function buildCreateOptions ({ rpId, userId, challenge, excludeCredentialIds = [] } = {}) {
   checkRpId(rpId)
   checkBytes(userId, USER_ID_BYTES, 'identificador de usuário inválido')
   checkBytes(challenge, CHALLENGE_BYTES, 'desafio inválido')
@@ -119,7 +131,7 @@ export function buildCreateOptions ({ rpId, userId, challenge } = {}) {
     authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
     attestation: 'none',
     timeout: TIMEOUT_MS,
-    excludeCredentials: [],
+    excludeCredentials: credentialDescriptors(excludeCredentialIds),
     extensions: prfExtension()
   }
 }
@@ -137,12 +149,7 @@ export function buildGetOptions ({ rpId, challenge, allowCredentialIds = [] } = 
     timeout: TIMEOUT_MS,
     extensions: prfExtension()
   }
-  if (allowCredentialIds.length > 0) {
-    options.allowCredentials = allowCredentialIds.map((id) => {
-      fromBase64Url(id)
-      return { type: 'public-key', id }
-    })
-  }
+  if (allowCredentialIds.length > 0) options.allowCredentials = credentialDescriptors(allowCredentialIds)
   return options
 }
 
@@ -186,6 +193,19 @@ export function parsePrf (response) {
 export function prfEnabled (response) {
   const prf = prfResults(response)
   return prf !== null && prf.enabled === true
+}
+
+// Whether the response carries a PRF output at all, valid or not: a present
+// but unusable output is NO_PRF (parsePrf says so), never a pending second
+// ceremony.
+export function prfOutputPresent (response) {
+  let prf
+  try {
+    prf = prfResults(response)
+  } catch {
+    return false
+  }
+  return prf !== null && prf.results !== null && typeof prf.results === 'object' && typeof prf.results.first === 'string'
 }
 
 // The credential id (base64url) of a response, or WEBAUTHN.

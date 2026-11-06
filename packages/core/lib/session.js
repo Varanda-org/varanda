@@ -555,6 +555,11 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
+    // And for the recovery-entry request (docs/rpc.md 5.90).
+    'recovery.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
     // And for the signup-invite request (docs/rpc.md 5.30).
     'invite.sign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')
@@ -610,7 +615,7 @@ function createSession ({
     }),
 
     // Only the browser node signs, seals and merges the seen blob (docs/rpc.md
-    // 5.90 and 5.91, docs/protocol.md section 14); these open nothing here,
+    // 5.95 and 5.96, docs/protocol.md section 14); these open nothing here,
     // and group.seen keeps writing group-seen.json only.
     'seen.sign': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
     'seen.merge': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),

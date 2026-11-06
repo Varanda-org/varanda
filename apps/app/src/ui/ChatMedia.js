@@ -24,6 +24,9 @@
 // A long press on an image is the bubble's (its actions: Responder,
 // Denunciar), never the viewer's: Bubble passes onLongPress down.
 //
+// A voice note (one audio/mp4 item, never next to photos) renders as a
+// VoiceBubble instead, from the same source and the same deferral.
+//
 // Props: { refs, identity, mine, deferred, onLongPress }. refs: chatSend.js chatMediaRefs output;
 // identity: the own diary key (the cache is per identity).
 
@@ -33,11 +36,12 @@ import { Modal, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'r
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useNode } from '../node'
 import { isAppClient } from '../appClient'
-import { chatMediaKey, onChatMediaReturn, pinChatMedia, shouldLoad, sourceFor } from '../media/chatMedia'
+import { chatMediaKey, isVoiceItem, onChatMediaReturn, pinChatMedia, shouldLoad, sourceFor } from '../media/chatMedia'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { chatMediaLayout, itemSize } from '../chatSend'
 import { Icon } from './Icon'
 import { MediaView } from './MediaView'
+import { VOICE_HEIGHT, VOICE_WIDTH, VoiceBubble } from './VoiceBubble'
 import { useStyles, useTheme } from './ThemeProvider'
 import { radius, space } from './theme'
 
@@ -179,7 +183,19 @@ function Viewer ({ uri, onClose }) {
 // photos instead of widening the bubble past them, as in WhatsApp.
 export function chatMediaBlock (refs, screen) {
   const list = Array.isArray(refs) ? refs : []
+  if (isVoiceRefs(list)) return { width: VOICE_WIDTH, height: VOICE_HEIGHT, cells: [] }
   return chatMediaLayout(list.map((ref) => itemSize(ref.item)), Math.floor(screen * 0.8) - space.md * 2)
+}
+
+function isVoiceRefs (list) {
+  return list.length === 1 && !!list[0] && isVoiceItem(list[0].item)
+}
+
+function VoiceCell ({ refItem, identity, deferred, mine, onLongPress }) {
+  const { state, uri, retry, show } = useChatSource(refItem, identity, deferred)
+  usePinned(uri)
+  const ms = refItem && refItem.item && Number.isInteger(refItem.item.ms) ? refItem.item.ms : 0
+  return <VoiceBubble state={state} uri={uri} retry={retry} show={show} durationMs={ms} mine={mine} onLongPress={onLongPress} />
 }
 
 export function ChatMedia ({ refs, identity, mine = false, deferred = false, onLongPress }) {
@@ -190,6 +206,9 @@ export function ChatMedia ({ refs, identity, mine = false, deferred = false, onL
   // viewer (the cell reads again and can be opened anew).
   useEffect(() => onChatMediaReturn(() => setOpen(null)), [])
   const list = Array.isArray(refs) ? refs : []
+  if (isVoiceRefs(list)) {
+    return <VoiceCell refItem={list[0]} identity={identity} deferred={deferred === true} mine={mine} onLongPress={onLongPress} />
+  }
   const layout = chatMediaBlock(list, screen)
   if (layout === null) return null
   return (

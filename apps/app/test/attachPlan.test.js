@@ -160,3 +160,76 @@ test('invalid plans fail without network or platform dependencies', async (t) =>
   t.absent(/@varanda\/(core|web-member)|react-native|node:|Platform\.OS|fetch\(/.test(source))
   t.absent(source.includes(String.fromCharCode(0x2014)))
 })
+
+// Voice notes: one audio/mp4 item, no picture size, its duration.
+function voiceBlob () {
+  return { id: '1'.padStart(64, '0'), key: KEY, nonce: 'c'.repeat(48), chunks: 1, bytes: 4096, sha256: KEY, mime: 'audio/mp4', w: 0, h: 0, ms: 4200 }
+}
+function voicePublic () {
+  return { core: KEY, mime: 'audio/mp4', start: 1, blocks: 1, bytes: 4096, sha256: KEY, width: 0, height: 0, ms: 4200 }
+}
+function voicePrivate () {
+  return { ...privateMedia(), plainMime: 'audio/mp4', w: 0, h: 0, ms: 4200 }
+}
+
+test('one voice note plans an upload for a DM, a public and a private group', async (t) => {
+  const { composePlan, stagedVoice } = await load()
+  const staged = stagedVoice({ ms: 4200 })
+  t.alike(staged, { name: '0'.repeat(32) + '.bin', mime: 'audio/mp4', width: 0, height: 0, ms: 4200 })
+  for (const target of [dm, group, privateGroup]) {
+    const plan = composePlan({ text: '', attachments: [staged], target })
+    const flags = target.visibility === 'private' ? { sealed: true } : {}
+    t.alike(plan.uploads, [{ method: target.kind === 'dm' ? 'dm.putMedia' : 'media.uploadFile', params: { ...staged, ...flags } }])
+    t.is(plan.preview, 'Áudio')
+  }
+})
+
+test('a refused recording reads as a voice note, not a photo', async (t) => {
+  const { voiceUploadError, BAD_VOICE } = await load()
+  const refused = voiceUploadError(new TypeError('mídia inválida'))
+  t.ok(refused instanceof TypeError)
+  t.is(refused.message, BAD_VOICE)
+  const ui = readFileSync(join(__dirname, '..', 'src', 'ui', 'index.js'), 'utf8')
+  t.ok(ui.includes(`'${BAD_VOICE}': 'Não foi possível enviar este áudio.'`), 'ui PLAIN words for it')
+  for (const screen of ['Mensagem.js', 'Grupo.js']) {
+    const src = readFileSync(join(__dirname, '..', 'src', 'screens', screen), 'utf8')
+    t.ok(src.includes('throw voiceUploadError(err)'), screen + ' maps a voice upload refusal')
+  }
+  const uncertain = Object.assign(new Error('mídia inválida'), { uncertain: true })
+  t.is(voiceUploadError(uncertain), uncertain, 'an uncertain failure keeps its flag and message')
+  const other = new Error('sem conexão com o nó')
+  t.is(voiceUploadError(other), other, 'other errors pass through')
+  t.is(voiceUploadError(null), null)
+})
+
+test('voice send requests carry the single voice item', async (t) => {
+  const { composePlan, stagedVoice } = await load()
+  const staged = stagedVoice({ ms: 4200 })
+  const cases = [[dm, voiceBlob()], [group, voicePublic()], [privateGroup, voicePrivate()]]
+  for (const [target, item] of cases) {
+    const plan = composePlan({ text: '', attachments: [staged], target })
+    t.alike(plan.send([item]).params.media, [item])
+  }
+})
+
+test('voice is refused next to photos, twice, out of range or with a caption over the budget', async (t) => {
+  const { composePlan, stagedVoice } = await load()
+  const staged = stagedVoice({ ms: 4200 })
+  for (const target of [dm, group, privateGroup]) {
+    t.exception(() => composePlan({ text: '', attachments: [staged, attachment()], target }), /áudio vai sozinho/)
+    t.exception(() => composePlan({ text: '', attachments: [staged, stagedVoice({ ms: 900 }, 1)], target }), /áudio vai sozinho/)
+    t.exception(() => composePlan({ text: '', attachments: [stagedVoice({ ms: 0 })], target }), /áudio inválido/)
+    t.exception(() => composePlan({ text: '', attachments: [stagedVoice({ ms: 120001 })], target }), /áudio inválido/)
+    t.exception(() => composePlan({ text: '', attachments: [{ ...staged, width: 32 }], target }), /áudio inválido/)
+  }
+  const room = rpc.dmTextBudget({ to: KEY, cert: rpc.MEMBER_CERT_STANDIN, media: [{ ...voiceBlob(), chunks: 49, bytes: 1572880, ms: 120000 }] })
+  t.ok(composePlan({ text: 'x'.repeat(room), attachments: [staged], target: dm }).uploads.length === 1)
+  t.exception(() => composePlan({ text: 'x'.repeat(room + 1), attachments: [staged], target: dm }), /texto longo demais com anexo/)
+})
+
+test('voice preview label wins over text-less photo labels', async (t) => {
+  const { attachmentPreview } = await load()
+  t.is(attachmentPreview('', [voicePublic()]), 'Áudio')
+  t.is(attachmentPreview('', [voicePrivate()]), 'Áudio')
+  t.is(attachmentPreview('oi', [voicePublic()]), 'oi')
+})
