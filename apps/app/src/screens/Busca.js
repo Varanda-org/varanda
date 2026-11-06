@@ -12,7 +12,8 @@
 // Cost: one /index/topic plus one /index/counts per <= 31 refs per page
 // (useSocial), well within Caddy's 20 /index requests per 10 s per client;
 // the peeks run one at a time (peekAll) as the node allows two in flight.
-// Nothing is requested while typing: a query starts only on submit.
+// A query starts when BuscaGlobal hands one over: on submit, or after the
+// typing pause of its debouncePlan (src/buscaGlobal.js), never per keystroke.
 //
 // Order: date order of the seeder's index, newest first; no ranking, no
 // hidden weights. Followed and own authors are included (the search is over

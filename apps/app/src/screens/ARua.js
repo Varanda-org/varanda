@@ -52,7 +52,7 @@ import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { noteLocalWrite } from '../localWrites'
-import { type } from '../ui/theme'
+import { layout, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 // Feed skip reasons that come from the association's signed blocklist.
@@ -736,7 +736,7 @@ export function useSocial ({ ownKey, onToast }) {
   }, [ingest])
   const persistOf = useCallback((author) => typeof author === 'string' && isKnown(author.toLowerCase()), [isKnown])
 
-  return { social, ingest, toggle, original, transient, pending, retry, persistOf, toast, deleteOriginal }
+  return { social, ingest, toggle, original, transient, pending, retry, persistOf, toast, deleteOriginal, notify: showToast }
 }
 
 // The PostRow props of `post` (a post item) whose actions target `ref`.
@@ -814,6 +814,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     onQuote: typeof h.onQuote === 'function' ? () => h.onQuote({ ref, name, username, text: post.text }) : undefined,
     onOpenLikes: typeof h.onOpenEngagers === 'function' ? () => h.onOpenEngagers({ ref, kind: 'likes' }) : undefined,
     onOpenReposts: typeof h.onOpenEngagers === 'function' ? () => h.onOpenEngagers({ ref, kind: 'reposts' }) : undefined,
+    onNotice: typeof social.notify === 'function' ? social.notify : undefined,
     onLike: () => social.toggle('like', ref),
     onRepost: () => social.toggle('repost', ref),
     // Until the own key is known, no post can safely offer a report action.
@@ -833,7 +834,8 @@ export function CountsNote ({ social }) {
   const styles = useStyles(makeStyles)
   const f = social.social.flags
   if (f.indexing || f.complete !== false) return null
-  return <View style={styles.footer}><Soft>{INCOMPLETE_NOTE}</Soft></View>
+  // A footnote, not a row: the feed's first line stays a post.
+  return <Text style={styles.footnote}>{INCOMPLETE_NOTE}</Text>
 }
 
 // A repost whose original is loading (`missing` false) or unavailable.
@@ -972,7 +974,8 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
-  const bottomPad = useBottomPad()
+  // The floating publish button sits over the list's end: clear it too.
+  const bottomPad = useBottomPad() + layout.fabSize
   const social = useSocial({ ownKey, onToast })
   const { ingest } = social
   const { request } = node
@@ -1155,7 +1158,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
-  const bottomPad = useBottomPad()
+  // The floating publish button sits over the list's end: clear it too.
+  const bottomPad = useBottomPad() + layout.fabSize
   const social = useSocial({ ownKey, onToast })
   const { ingest } = social
   const [feed, setFeed] = useState({
@@ -1572,7 +1576,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
         loadMoreError={!!moreError}
         atEnd={atEnd}
         scrollToTopSignal={scrollToTop}
-        newItems={{ label: 'ver novidades', visible: fresh && loadedAt !== null, onPress: showNewItems }}
+        newItems={{ label: 'ver novidades', visible: fresh && loadedAt !== null && items.length > 0, onPress: showNewItems }}
         keepVisiblePosition
       />
       <SocialToast text={social.toast} />
@@ -1583,6 +1587,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
   footer: { padding: 16, gap: 8 },
+  footnote: { ...type.replyMark, fontSize: 12, lineHeight: 16, color: colors.soft, paddingHorizontal: 16, paddingTop: 6, paddingBottom: 2 },
   pageTitle: { ...type.counter, color: colors.ink, fontWeight: '700' },
   placeholder: {
     paddingVertical: 12,

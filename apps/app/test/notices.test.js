@@ -177,6 +177,45 @@ test('noticeRef is the signed block for a reply, quote or mention, item.post for
   t.is(noticeRef({ key, seq: 5, kind: 'like', post: '' }), null)
 })
 
+test('snippetOf quotes the post for every kind but a follow, and is empty when the post is missing', async (t) => {
+  const { snippetOf } = await load()
+  const text = 'Olá, varanda'
+  const key = 'ab'.repeat(32)
+  for (const kind of ['reply', 'quote', 'mention', 'like', 'repost']) {
+    t.is(snippetOf(Object.freeze({ kind, key }), text), text, kind)
+    t.is(snippetOf(Object.freeze({ kind, key })), '', kind + ' with no post text')
+    t.is(snippetOf(Object.freeze({ kind, key }), null), '', kind + ' with a null post')
+    t.is(snippetOf(Object.freeze({ kind, key }), undefined), '', kind + ' with an undefined post')
+    t.is(snippetOf(Object.freeze({ kind, key, post: key + ':7' })), '', kind + ' does not fall back to the ref')
+  }
+  t.is(snippetOf(Object.freeze({ kind: 'follow', key }), text), '', 'a follow has no post')
+  t.is(snippetOf(Object.freeze({ kind: 'follow', key, post: key + ':7' }), text), '')
+  t.is(snippetOf(Object.freeze({ key }), text), '', 'a row with no kind is a follow')
+  t.is(snippetOf(Object.freeze({ kind: 'pin', key }), text), '', 'an unknown kind reads as a follow')
+  t.is(snippetOf(null, text), '')
+  t.is(snippetOf(Object.freeze({ kind: 'reply' }), ''), '')
+  t.is(snippetOf(Object.freeze({ kind: 'reply' }), 7), '')
+  const quoted = snippetOf(Object.freeze({ kind: 'quote', key, post: key + ':7' }), text)
+  t.is(quoted.includes(key), false)
+  t.is(quoted.includes(key.slice(0, 6)), false)
+})
+
+test('snippetOf collapses line breaks and clips to 90 code points on a boundary', async (t) => {
+  const { snippetOf } = await load()
+  const notice = Object.freeze({ kind: 'mention' })
+  t.is(snippetOf(notice, 'um\r\n\ndois\rtrês\u2028quatro\u2029cinco'), 'um dois três quatro cinco')
+  t.is(snippetOf(notice, 'a'.repeat(90)), 'a'.repeat(90))
+  t.is(snippetOf(notice, 'a'.repeat(91)), 'a'.repeat(90), 'nothing is appended')
+  t.is(snippetOf(notice, '😀'.repeat(91)), '😀'.repeat(90))
+  t.is(snippetOf(notice, 'a'.repeat(89) + '😀' + 'z'), 'a'.repeat(89) + '😀', 'an emoji on the boundary stays whole')
+  t.is(snippetOf(notice, 'a'.repeat(89) + '\r\n' + 'z'), 'a'.repeat(89) + ' ', 'line breaks collapse before the cut')
+  t.is(snippetOf(notice, 'a'.repeat(90) + '\n' + 'b'), 'a'.repeat(90))
+  t.is(snippetOf(notice, 'a\n' + 'b'.repeat(100)), 'a ' + 'b'.repeat(88))
+  t.is(snippetOf(Object.freeze({ kind: 'like' }), 'a'.repeat(200) + '\n'), 'a'.repeat(90))
+  t.is(snippetOf(Object.freeze({ kind: 'repost' }), '  dois espaços  '), '  dois espaços  ')
+  t.is(snippetOf(Object.freeze({ kind: 'follow' }), 'a'.repeat(200) + '\n\n'), '')
+})
+
 test('compareNotices orders by time descending, then key ascending, then seq descending', async (t) => {
   const { compareNotices } = await load()
   const at = '2026-06-01T00:00:00.000Z'

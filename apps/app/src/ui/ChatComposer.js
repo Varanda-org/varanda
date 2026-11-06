@@ -34,7 +34,7 @@ import { Icon } from './Icon'
 import { MentionSuggest } from './MentionSuggest'
 import { ReplyPreview } from './ReplyPreview'
 import { useStyles, useTheme } from './ThemeProvider'
-import { layout, radius, space } from './theme'
+import { layout, radius, space, webInputReset } from './theme'
 
 const LINE = 22
 const PAD_V = 9
@@ -88,6 +88,7 @@ export function ChatComposer ({
     if (text === '') setHeight(MIN_HEIGHT)
   }, [text])
   const [emojiOpen, setEmojiOpen] = useState(false)
+  const [focused, setFocused] = useState(false)
   const [note, setNote] = useState('')
   // selRef follows the field's selection; forcedSel places the caret once
   // after an insert. `caret` only forces the re-render that moves the @token.
@@ -184,7 +185,7 @@ export function ChatComposer ({
         : null}
       <MentionSuggest rows={suggestions} loading={mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
       <View style={styles.row}>
-        <View style={[styles.field, !editable && styles.fieldOff]}>
+        <View style={[styles.field, focused && editable && styles.fieldFocused, !editable && styles.fieldOff]}>
           <Pressable
             accessibilityRole='button'
             accessibilityLabel={emojiOpen ? 'fechar emojis' : 'emojis'}
@@ -198,7 +199,9 @@ export function ChatComposer ({
           </Pressable>
           <TextInput
             ref={inputRef}
-            style={[styles.input, { height }]}
+            style={[styles.input, webInputReset, { height }]}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
             value={text}
             onChangeText={change}
             editable={editable}
@@ -271,6 +274,7 @@ const makeStyles = (colors) => StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.line
   },
+  fieldFocused: { borderColor: colors.accent },
   fieldOff: { backgroundColor: colors.inputOff },
   tool: { width: SEND, height: SEND, alignItems: 'center', justifyContent: 'center' },
   input: {
