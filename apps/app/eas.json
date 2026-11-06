@@ -1,6 +1,6 @@
 {
   "cli": {
-    "appVersionSource": "local"
+    "appVersionSource": "remote"
   },
   "build": {
     "preview": {
@@ -18,6 +18,21 @@
       "extends": "preview",
       "ios": {
         "simulator": true
+      }
+    },
+    "production": {
+      "node": "24.22.1",
+      "environment": "production",
+      "autoIncrement": true,
+      "env": {
+        "npm_config_ignore_scripts": "true"
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "ascAppId": "6831662804"
       }
     }
   }
