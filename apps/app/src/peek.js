@@ -64,14 +64,16 @@ export function peekNotice ({ supported, hosted, online, loadedAt }) {
   return null
 }
 
-// The hidden tab reads its first page once the seeder link is verified, so
-// opening Espiadinha does not wait on a new socket and does not dial before
-// that link is up. One try per epoch (`attempted`).
-export const PEEK_WARM_DELAY_MS = 1000
+// The hidden tab reads its first page once the seeder link is verified, the
+// sync run is ready and the app has made no node request for this long (the
+// boot reads only start at 'sync ready'; on a phone the browser node shares
+// the main thread with A Rua), so opening Espiadinha does not wait on a new
+// socket. One try per epoch (`attempted`).
+export const PEEK_WARM_QUIET_MS = 3000
 
-export function shouldWarmPeek ({ hosted, online, phase, seederVerified, visible, active, loadedAt, loading, refreshing, unsupported, attempted }) {
+export function shouldWarmPeek ({ hosted, online, phase, seederVerified, syncReady, visible, active, loadedAt, loading, refreshing, unsupported, attempted }) {
   return hosted === true && online !== false && phase === 'ready' && seederVerified === true &&
-    visible !== false && active === false && loadedAt === null && !loading && !refreshing &&
+    syncReady === true && visible !== false && active === false && loadedAt === null && !loading && !refreshing &&
     !unsupported && attempted !== true
 }
 

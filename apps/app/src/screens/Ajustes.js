@@ -27,8 +27,10 @@
 // pushManager.subscribe() with nothing awaited first (Safari's user
 // activation). Sair and Recomeçar still switch this browser off first, while
 // the key can still sign; a failure there never stops them.
+// The footer under the list shows the build and the commit the installation
+// serves, only through the src/version.js formatters, and a tap copies them.
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
 import { invitePolicy } from '../account'
@@ -48,12 +50,24 @@ import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MODES, MODE_LABELS } from '../appearance'
 import { Btn, ErrorText, Notice, Page, Row, Soft, useAction } from '../ui'
 import { pagesOn } from '../pageGate'
+import { buildInfo, fetchDeployedCommit, versionDetails, versionLines } from '../version'
+import { runningRelease } from '../runningRelease'
+import { installationOrigin } from '../installation'
+import { copyText } from '../share'
+import { shareNav } from '../shareNav'
 import Conexao from './Conexao'
 import Convites from './Convites'
 import Identidade from './Identidade'
 import Perfil from './Perfil'
 import Sincronizar from './Sincronizar'
 import Termos from './Termos'
+
+// The kind of build is the binary itself (web bundle, Android app, iOS app):
+// Platform.OS is the only source, there is no capability to test. Metro
+// inlines the two EXPO_PUBLIC_* member expressions at bundle time
+// (apps/app/metro.config.js sets them; see configStore.native.js
+// loadInstallation).
+const BUILD = buildInfo({ kind: Platform.OS, commit: process.env.EXPO_PUBLIC_VARANDA_COMMIT, builtAt: process.env.EXPO_PUBLIC_VARANDA_BUILD_DATE, release: runningRelease() })
 
 const TITLES = {
   lista: 'Ajustes',
@@ -107,7 +121,7 @@ function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailin
   )
 }
 
-export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, onOpenPaginas }) {
+export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, onOpenPaginas, inviteNudge = 0 }) {
   const styles = useStyles(makeStyles)
   const { colors, mode, setMode } = useTheme()
   const node = useNode()
@@ -133,8 +147,9 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const [ownFailed, setOwnFailed] = useState(false)
   const [infoTick, setInfoTick] = useState(0)
   const [saved, setSaved] = useState('')
-  // The signup invite policy, read once per opening of the sheet (null: off,
-  // unknown or unreadable, so the Convidar pessoas row hides).
+  // The signup invite policy, read once per opening of the sheet (null: not
+  // answered yet, so the Convidar pessoas row hides). A convite push can open
+  // the screen before this answer; required false means there is nothing to show.
   const [policy, setPolicy] = useState(null)
   const sheetOpen = screen !== null
   const policySeq = useRef(0)
@@ -152,14 +167,59 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const push = pushEligible && pushStore.member === member ? pushStore.state : null
   const pushPending = pushStore.pending
   const pushError = pushStore.error
+  const [server, setServer] = useState({ status: 'loading', commit: null })
+  const [versionNote, setVersionNote] = useState('')
+  const noteTimer = useRef(null)
+  // Bumped on every tap and when the sheet closes: only the latest tap, in the
+  // still-open sheet, may show its copy result.
+  const copyTurn = useRef(0)
 
   // A closed sheet forgets the open confirmations.
   useEffect(() => {
     if (screen === null) {
       setConfirm(null)
       setSaved('')
+      setVersionNote('')
+      clearTimeout(noteTimer.current)
+      copyTurn.current++
     }
   }, [screen])
+
+  useEffect(() => () => {
+    clearTimeout(noteTimer.current)
+    copyTurn.current++
+  }, [])
+
+  // On the web the page origin is the installation and the request is
+  // relative, so a null installation still asks; a native build without one
+  // has nowhere to ask.
+  useEffect(() => {
+    if (screen !== 'lista') return
+    const installation = installationOrigin()
+    if (installation === null && Platform.OS !== 'web') {
+      setServer({ status: 'unconfigured', commit: null })
+      return
+    }
+    let alive = true
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 8000)
+    setServer({ status: 'loading', commit: null })
+    fetchDeployedCommit({ installation, fetch: globalThis.fetch, signal: ctrl.signal }).then((r) => { if (alive) setServer(r) })
+    return () => {
+      alive = false
+      clearTimeout(timer)
+      ctrl.abort()
+    }
+  }, [screen])
+
+  const copyVersion = async () => {
+    const turn = ++copyTurn.current
+    const ok = await copyText(shareNav(), versionDetails({ app: BUILD, server }))
+    if (turn !== copyTurn.current) return
+    setVersionNote(ok ? 'Detalhes copiados.' : 'Não foi possível copiar.')
+    clearTimeout(noteTimer.current)
+    noteTimer.current = setTimeout(() => setVersionNote(''), 2000)
+  }
 
   // A fresh read on every opening. Closing keeps the state because the shell
   // needs the registration; a lock clears it through the shell's readPush.
@@ -169,12 +229,27 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
 
   // Only the hosted web node has an account service on its own origin.
   const hosted = node.hosted === true
-  useEffect(() => {
+  // A 404 (null) is "not required", so a screen opened by a convite push
+  // never waits forever. A failed read keeps the row hidden (policy stays
+  // null) and the convite screen offers a retry instead of leaving.
+  const [policyFailed, setPolicyFailed] = useState(false)
+  const askPolicy = useCallback(() => {
     const mine = ++policySeq.current
+    setPolicyFailed(false)
+    invitePolicy().then((p) => { if (mine === policySeq.current) setPolicy(p === null ? { required: false } : p) }, () => { if (mine === policySeq.current) setPolicyFailed(true) })
+  }, [])
+  useEffect(() => {
+    ++policySeq.current
     setPolicy(null)
     if (!sheetOpen || !hosted) return
-    invitePolicy().then((p) => { if (mine === policySeq.current) setPolicy(p) }, () => {})
-  }, [sheetOpen, hosted])
+    askPolicy()
+  }, [sheetOpen, hosted, askPolicy])
+
+  // The push opens Convidar pessoas before the policy is known. A service
+  // that does not require invites has no such screen.
+  useEffect(() => {
+    if (screen === 'convites' && policy !== null && policy.required === false) onNavigate('lista')
+  }, [screen, policy, onNavigate])
 
   useEffect(() => {
     if ((screen !== 'perfil' && screen !== 'convites') || !ready) return
@@ -268,6 +343,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   // A state that could not be confirmed is never labelled "Desligados".
   const pushTrailing = pushUi === null ? null : (pushUi.on ? 'Ligados' : (pushUi.note === PUSH_UNKNOWN ? null : 'Desligados'))
   const inviting = account && policy !== null && policy.required === true
+  const lines = versionLines({ app: BUILD, server })
 
   // While the sheet is open every sub-screen stays mounted (drafts typed in
   // Conexão or Identidade survive going back to the list); the inactive ones
@@ -369,6 +445,17 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 </View>
                 )
               : null}
+            <Pressable
+              style={styles.version}
+              accessibilityRole='button'
+              accessibilityLabel={[lines.appLine, lines.serverLine, versionNote].filter(Boolean).join('. ')}
+              accessibilityHint='copia os detalhes da versão'
+              onPress={copyVersion}
+            >
+              <Text style={styles.versionText}>{lines.appLine}</Text>
+              {lines.serverLine !== null ? <Text style={styles.versionText}>{lines.serverLine}</Text> : null}
+              {versionNote ? <Text style={styles.versionText}>{versionNote}</Text> : null}
+            </Pressable>
           </Page>
         </View>
         <View style={shown('perfil')}>
@@ -397,6 +484,15 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         <View style={shown('conta')}>
           <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} />
         </View>
+        {screen === 'convites' && hosted && policy === null
+          ? (
+            <View style={shown('convites')}>
+              {policyFailed
+                ? <Page><Soft>serviço indisponível</Soft><Btn label='tentar de novo' onPress={askPolicy} /></Page>
+                : <Page><Soft>carregando…</Soft></Page>}
+            </View>
+            )
+          : null}
         {inviting
           ? (
             <View style={shown('convites')}>
@@ -407,6 +503,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 perWeek={policy.perWeek}
                 keyFailed={ownFailed}
                 onRetryKey={() => setInfoTick((n) => n + 1)}
+                inviteNudge={inviteNudge}
               />
             </View>
             )
@@ -479,5 +576,7 @@ const makeStyles = (colors) => StyleSheet.create({
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 16 },
   rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   label: { flex: 1, fontSize: 16, color: colors.ink },
-  trailing: { fontSize: 15, color: colors.soft }
+  trailing: { fontSize: 15, color: colors.soft },
+  version: { alignItems: 'center', justifyContent: 'center', minHeight: 48, paddingVertical: 12, gap: 2 },
+  versionText: { fontSize: 12, lineHeight: 16, color: colors.soft, textAlign: 'center' }
 })

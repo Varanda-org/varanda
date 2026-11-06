@@ -13,6 +13,7 @@ const { createGoogle } = require('../account/google')
 const { openAccountStore } = require('../account/store')
 const { openTermsStore } = require('../account/terms-store')
 const { openInvitesStore } = require('../account/invites-store')
+const { openInviteDrops, startInviteDropLoop } = require('../account/invite-drops')
 const { openPushStore } = require('../account/push-store')
 const { openPageKeys } = require('../account/page-keys')
 const { openPagesStore } = require('../account/pages-store')
@@ -100,7 +101,10 @@ const LIMIT_ENV = Object.freeze({
   VARANDA_ACCOUNT_BURST: ['burst', 1, 100000],
   // Unset is open signup; set, a new member needs an invite. There is no
   // "off" value: removing the feature is unsetting the variable.
-  VARANDA_INVITES_PER_WEEK: ['invitesPerWeek', 1, 100]
+  VARANDA_INVITES_PER_WEEK: ['invitesPerWeek', 1, 100],
+  // Surprise drops: unset or blank is off, '1' spreads the weekly invites
+  // over drawn minutes instead of opening them all on Monday.
+  VARANDA_INVITE_DROPS: ['inviteDrops', 1, 1]
 })
 const CANONICAL_INT_RE = /^[1-9][0-9]{0,8}$/
 const DIDIT_KEY_RE = /^[\x21-\x7e]+$/
@@ -512,7 +516,11 @@ function readEnv (env, dataDir) {
     groupToken = tokenEnv
   }
   const didit = readDiditEnv(env)
-  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits: readLimits(env), triage, didit, ageSince: readAgeSinceEnv(env, didit) }
+  const limits = readLimits(env)
+  if (limits.inviteDrops !== undefined && limits.invitesPerWeek === undefined) {
+    throw new UsageError('VARANDA_INVITE_DROPS exige VARANDA_INVITES_PER_WEEK')
+  }
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit) }
 }
 
 // Hosted age verification: both variables set is on, both unset or empty is
@@ -650,7 +658,7 @@ async function serve (flags, env) {
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
   const pagesConfig = readPagesEnv(env)
   const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince } = readEnv(env, flags.dataDir)
-  const { maxMembers = null, invitesPerWeek = null, maxPending, maxConnections, ratePerSecond, burst } = limits
+  const { maxMembers = null, invitesPerWeek = null, inviteDrops = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
     process.stdout.write((flags.json ? jsonLine(event) : eventLine(event)) + '\n')
@@ -679,6 +687,9 @@ async function serve (flags, env) {
   let pushStore = null
   let stopHeal = null
   let stopInvitesHeal = null
+  let drops = null
+  let stopDropsHeal = null
+  let loop = null
   let stopPushHeal = null
   let pageKeys = null
   let pagesWriter = null
@@ -691,7 +702,7 @@ async function serve (flags, env) {
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients)
+      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop)
     }
   })
   let listener = null
@@ -733,7 +744,17 @@ async function serve (flags, env) {
     // single-use authority (isUsed). An invalid file keeps the service up and
     // the server refuses new members (fail closed).
     if (invitesPerWeek !== null) {
-      invites = openInvitesStore(flags.dataDir, { guard: () => lock.owned(), perWeek: invitesPerWeek, isUsed: (id) => store.inviteUsed(id) })
+      // Surprise drops (invite-drops.json and its key): the store asks them
+      // how many of the week's invites have opened. Unavailable drops make
+      // issue and summary answer 'indisponivel', never the full week.
+      let opened = null
+      if (inviteDrops !== null) {
+        drops = openInviteDrops(flags.dataDir, { perWeek: invitesPerWeek, guard: () => lock.owned() })
+        log({ event: 'sorteio', reason: drops.available() ? 'ligado' : 'indisponivel' })
+        stopDropsHeal = startHeal(drops, 'sorteio', log)
+        opened = (member, nowMs) => drops.opened(member, store.linkedAt(member), nowMs)
+      }
+      invites = openInvitesStore(flags.dataDir, { guard: () => lock.owned(), perWeek: invitesPerWeek, isUsed: (id) => store.inviteUsed(id), opened })
       if (!invites.available()) log({ event: 'invites', reason: 'indisponivel' })
       stopInvitesHeal = startHeal(invites, 'invites', log)
     }
@@ -825,7 +846,7 @@ async function serve (flags, env) {
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
       const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, invites, push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, invites, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -833,7 +854,19 @@ async function serve (flags, env) {
         throw new Error('não foi possível abrir o serviço de conta (' + safe(err.code || err.message) + ')')
       }
       log({ event: 'listening', host: listener.host, port: listener.port })
-      log({ event: 'ready', configured: issuer !== null, ...(maxMembers === null ? {} : { maxMembers }), ...(invitesPerWeek === null ? {} : { invitesPerWeek }) })
+      if (drops !== null) {
+        loop = startInviteDropLoop({
+          drops,
+          listMembers: () => store.linkRoster(),
+          notify: server.notifyInvite,
+          room: () => server.inviteRoom(),
+          canNotify: (m) => server.inviteConsent(m),
+          guard: () => lock.owned(),
+          log
+        })
+        loop.start()
+      }
+      log({ event: 'ready', configured: issuer !== null, ...(maxMembers === null ? {} : { maxMembers }), ...(invitesPerWeek === null ? {} : { invitesPerWeek }), ...(drops === null ? {} : { inviteDrops: true }) })
       if (triage !== null) triage.worker.start()
       if (usage !== null) usage.start()
       await stopped
@@ -842,6 +875,8 @@ async function serve (flags, env) {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     if (listener) await listener.close()
+    // A tick in flight writes the drops ledger: it ends before the lock goes.
+    if (loop !== null) await loop.stop()
     // The page links close before the lock goes: nothing is appended after it.
     await closePageClients(pageClients)
     if (pagesWriter !== null) await pagesWriter.close()
@@ -860,10 +895,12 @@ async function serve (flags, env) {
     // have dropped acknowledged entries) while the lock is still held.
     if (stopHeal !== null) stopHeal()
     if (stopInvitesHeal !== null) stopInvitesHeal()
+    if (stopDropsHeal !== null) stopDropsHeal()
     if (stopPushHeal !== null) stopPushHeal()
     if (stopAgeHeal !== null) stopAgeHeal()
     if (terms !== null && terms.available()) await terms.heal()
     if (invites !== null && invites.available()) await invites.heal()
+    if (drops !== null && drops.available()) await drops.heal()
     if (pushStore !== null && pushStore.available()) await pushStore.heal()
     if (ages !== null && ages.available()) await ages.heal()
     // The sampler waits for an in-flight read and writes the day's last
@@ -963,12 +1000,14 @@ async function closePageClients (pageClients) {
 // The lock is lost: the store is marked unavailable first, synchronously,
 // so no request still draining during the stop appends beside the writer
 // that took the lock over (store.js, "Writer guard"); then the service
-// stops. The terms, invites, push and age stores, the page keys and the
-// page writer too: their next write must not land either.
-function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = []) {
+// stops. The terms, invites, push and age stores, the page keys, the page
+// writer and the invite drops too: their next write must not land either.
+function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
   if (invites !== null) invites.fail()
+  if (drops !== null) drops.fail()
+  if (loop !== null) loop.stop().catch(() => {})
   if (pushStore !== null) pushStore.fail()
   if (ages !== null) ages.fail()
   if (pagesStore !== null) pagesStore.fail()

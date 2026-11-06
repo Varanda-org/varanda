@@ -52,6 +52,7 @@ import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { noteLocalWrite } from '../localWrites'
+import { FEED_FIRST_ROWS, feedDetailsReady } from '../splashGate'
 import { layout, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
@@ -1145,6 +1146,14 @@ export default function ARua (props) {
   const styles = useStyles(makeStyles)
   const acting = useActing()
   const node = useNode()
+  // Acting as a page there is no member feed for the boot cover to wait on.
+  const pageActing = acting.kind === 'page'
+  const { onBoot } = props
+  useEffect(() => {
+    if (!pageActing || typeof onBoot !== 'function') return
+    onBoot('page')
+    onBoot('details')
+  }, [pageActing, onBoot])
   if (acting.kind === 'page') {
     // The core session refuses page.feed, so there is nothing to read here.
     if (node.hosted !== true) return <View style={styles.footer}><Soft>A Rua da página só no app hospedado</Soft></View>
@@ -1153,7 +1162,7 @@ export default function ARua (props) {
   return <MemberARua {...props} />
 }
 
-function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost }) {
+function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onBoot }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -1317,6 +1326,40 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       if (mine === seqRef.current) commit({ loading: false, refreshing: false, loadError: errorText(err) })
     }
   }, [request, ackFresh, commit, learnPage, ingest])
+
+  // The boot cover (App.js) waits for these, once each: the first page in,
+  // then the names and counts of its first rows. A failed first read ends
+  // both: there is nothing more to wait for.
+  const bootRef = useRef({ page: false, details: false })
+  const socialState = social.social
+  useEffect(() => {
+    if (typeof onBoot !== 'function') return
+    const b = bootRef.current
+    if (b.details) return
+    const failed = feed.loadError !== ''
+    if (feed.loadedAt === null && !failed) return
+    if (!b.page) {
+      b.page = true
+      onBoot('page')
+    }
+    const rows = feed.items.slice(0, FEED_FIRST_ROWS)
+    const first = pageNeeds(rows)
+    const flags = socialState.flags
+    const ready = failed || feedDetailsReady({
+      authors: first.authors,
+      shown: first.shown,
+      profileOf: names.profileOf,
+      // A repost row shows its original: wait for its answer (any outcome,
+      // a transient one included), never for a retry.
+      originals: rows.filter((i) => i.kind === 'repost').map((i) => refOf(i.to)).filter((r) => r !== null),
+      hasOriginal: (ref) => socialState.originals.has(ref),
+      hasCount: (ref) => socialState.counts.has(ref),
+      countsSkipped: node.hosted !== true || node.online === false || flags.indexing === true || flags.complete === false
+    })
+    if (!ready) return
+    b.details = true
+    onBoot('details')
+  }, [onBoot, feed.loadedAt, feed.loadError, feed.items, names.profileOf, socialState, node.hosted, node.online])
 
   const loadOlder = useCallback(async ({ fromSync = false } = {}) => {
     const current = feedRef.current

@@ -285,12 +285,16 @@
 // Member reads over the run's cores: the session may hand in a `reader`;
 // once the startup sequence opened the own diary and the stored follows
 // (just before the first connection) the run publishes { diary, replica,
-// hold, release } on it (reader.set), withdrawing it (reader.clear) before
-// teardown closes any core and whenever runSync returns or throws. A second
-// Hypercore instance on the same storage corrupts it, so the reader only
-// ever sees cores this run already holds: replica(key) is the open follow
-// core in whatever state, or null, and never opens one (the run opens
-// replicas itself mid-run, after a quarantine fetch or a sweep). A hold
+// group, hold, release } on it (reader.set), withdrawing it (reader.clear)
+// before teardown closes any core and whenever runSync returns or throws. A
+// second Hypercore instance on the same storage corrupts it, so the reader
+// only ever sees cores this run already holds: replica(key) is the open
+// follow core in whatever state, else the open replica of a binding diary
+// (kv groupDiaries), or null; group(key) is an own group core, or a foreign
+// one whose blocks the storage keeps once the run ends (active, failed but
+// kept, or a regate of a core stored before the run), or null. Neither ever
+// opens a core (the run opens them itself mid-run, after a quarantine fetch
+// or a sweep). A hold
 // keeps teardown from closing the cores until it is released; none starts
 // once the run is ending. Holds do not fence the run's own mid-run closes
 // (a failed or forked follow, a re-gate, a sweep, cleared deleted blocks):
@@ -1443,8 +1447,19 @@ async function syncRun ({
 
   function replica (key) {
     const e = follows.get(key)
-    if (!e || e.core === null || e.core.closing) return null
-    return e.core
+    if (e) return e.core === null || e.core.closing ? null : e.core
+    const gd = groupDiaries.get(key)
+    if (!gd || gd.dropped || gd.core === null || gd.core.closing) return null
+    return gd.core
+  }
+
+  function lentGroup (key) {
+    const m = groupOwn.find((x) => x.key === key)
+    if (m !== undefined) return m.core.closing ? null : m.core
+    const ge = groupCores.get(key)
+    if (!ge || !ge.core || ge.core.closing) return null
+    const kept = ge.state === 'active' || (ge.state === 'failed' && ge.kept === true) || (ge.state === 'regate' && ge.preStored === true)
+    return kept ? ge.core : null
   }
 
   function track (p, onOk, onErr) {
@@ -5226,7 +5241,7 @@ async function syncRun ({
     if (!ending && blocklist.revokedIssuers().size > 0) await sweepRevokedGroups()
 
     if (!ending) {
-      reader.set({ diary, replica, hold, release })
+      reader.set({ diary, replica, group: lentGroup, hold, release })
       startup.step('conexão')
       connect()
     }

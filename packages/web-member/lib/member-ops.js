@@ -130,14 +130,15 @@ function keyPairOf (ctx) {
   return ctx.keyPair === undefined ? null : ctx.keyPair
 }
 
-// Borrowed path (reads only): ctx.cores = { diary, replica(key) } are the
-// cores the live sync run holds (./sync.js reader). A second Hypercore on
-// the same files would corrupt them, and closing or purging one would pull
-// it from under the run, so they are read in place and never closed or
-// purged (the run sweeps empty replicas). Whenever this path cannot give
-// exactly the exclusive path's answer (a stored replica the run does not
-// hold, a core closed or failing under the read) it throws NEEDS_EXCLUSIVE
-// and the session reruns the request exclusively.
+// Borrowed path (reads only): ctx.cores = { diary, replica(key), group(key) }
+// are the cores the live sync run holds (./sync.js reader). A second
+// Hypercore on the same files would corrupt them, and closing or purging one
+// would pull it from under the run, so they are read in place and never
+// closed or purged (the run sweeps empty replicas). Whenever this path
+// cannot give exactly the exclusive path's answer (a stored replica or group
+// core the run does not lend, a core closed, forked or failing under the
+// read) it throws NEEDS_EXCLUSIVE and the session reruns the request
+// exclusively.
 function needsExclusive () {
   const e = new Error('leitura exclusiva necessária')
   e.code = 'NEEDS_EXCLUSIVE'
@@ -1303,36 +1304,62 @@ async function appendToOwnGroupCore (ctx, entry, record, priv = false) {
   }
 }
 
-// A stored group core's entries (store.readBlocks: no diary deletion fold),
-// read-only -> { entries, length, fork } or null.
-async function readGroupCore (storage, key) {
-  const core = await store.openGroupCoreReadOnly(storage, key)
+// read(core) on the stored group core `key` -> its result, or null when none
+// is stored (nothing is created). Borrowed path (ctx.cores.group, as
+// withReplica): the run's own instance is read in place and never closed. A
+// stored core the run does not lend (not opened by it, at rest, still
+// gating) is NEEDS_EXCLUSIVE, and so is a fork during the read.
+async function withGroupCore (ctx, key, read) {
+  const cores = borrowedCores(ctx)
+  if (cores !== null) {
+    const core = typeof cores.group === 'function' ? cores.group(key) : null
+    if (core !== null) {
+      const fork = core.fork
+      const value = await readBorrowed(core, read)
+      if (core.fork !== fork) throw needsExclusive()
+      return value
+    }
+    if (typeof key !== 'string' || !HEX64.test(key) || !(await store.groupCoreExists(ctx.storage, key))) return null
+    throw needsExclusive()
+  }
+  const core = await store.openGroupCoreReadOnly(ctx.storage, key)
   if (core === null) return null
   try {
-    return { entries: await store.readBlocks(core), length: core.contiguousLength, signed: core.length, fork: core.fork }
+    return await read(core)
   } finally {
     await core.close()
   }
+}
+
+// The lengths are taken before the blocks: a borrowed core may grow during
+// the read, and the entries never go past the contiguous length reported.
+async function groupCoreState (core) {
+  const length = core.contiguousLength
+  const signed = core.length
+  const fork = core.fork
+  return { entries: (await store.readBlocks(core)).slice(0, length), length, signed, fork }
+}
+
+// A stored group core's entries (store.readBlocks: no diary deletion fold),
+// read-only -> { entries, length, fork } or null.
+async function readGroupCore (ctx, key) {
+  return withGroupCore(ctx, key, groupCoreState)
 }
 
 // A stored writer core of `group` -> { entries, length, fork, header } or
 // null. Block 0 is decoded first so the cores of other groups are never read
 // in full: every operation on one group would otherwise decode every group
 // core this device holds.
-async function readWriterCoreOf (storage, key, group) {
-  const core = await store.openGroupCoreReadOnly(storage, key)
-  if (core === null) return null
-  try {
+async function readWriterCoreOf (ctx, key, group) {
+  return withGroupCore(ctx, key, async (core) => {
     if (core.contiguousLength === 0 || core.fork !== 0) return null
     let h = null
     try {
       h = decodeBlock(await core.get(0, { wait: false, raw: true }))
     } catch {}
     if (validateWriterHeader(h) !== null || h.group !== group) return null
-    return { entries: await store.readBlocks(core), length: core.contiguousLength, signed: core.length, fork: core.fork }
-  } finally {
-    await core.close()
-  }
+    return groupCoreState(core)
+  })
 }
 
 // Public and private groups fold; a community root never does as a group.
@@ -1342,8 +1369,8 @@ function foldableHeader (h) {
 
 // A stored root that will never fold (its block 0 is no public group
 // header): its kv groupWriters entry may give up its slot.
-async function rootUnfoldable (storage, group) {
-  const root = await readGroupCore(storage, group)
+async function rootUnfoldable (ctx, group) {
+  const root = await readGroupCore(ctx, group)
   if (root === null || root.length === 0) return false
   return root.fork !== 0 || !foldableHeader(root.entries[0].record)
 }
@@ -1390,8 +1417,8 @@ function hasLeave (entries) {
 }
 
 // An own writer still writes for the device until it holds a group-leave.
-async function ownCoreLeft (storage, key) {
-  const core = await readGroupCore(storage, key)
+async function ownCoreLeft (ctx, key) {
+  const core = await readGroupCore(ctx, key)
   return core === null || core.length === 0 || hasLeave(core.entries)
 }
 
@@ -1415,10 +1442,10 @@ async function makeGroupRoom (ctx, base, group, more = []) {
   const left = []
   for (const e of entries) {
     if (e.kind === 'community') {
-      if (await ownCoreLeft(ctx.storage, e.key) || await communityUnfoldable(ctx.storage, e.group) || await communitySaysLeft(ctx, base, e.group)) left.push(e)
+      if (await ownCoreLeft(ctx, e.key) || await communityUnfoldable(ctx, e.group) || await communitySaysLeft(ctx, base, e.group)) left.push(e)
       continue
     }
-    if (await ownCoreLeft(ctx.storage, e.key) || await rootUnfoldable(ctx.storage, e.group) || await foldSaysLeft(ctx, base, e.group)) left.push(e)
+    if (await ownCoreLeft(ctx, e.key) || await rootUnfoldable(ctx, e.group) || await foldSaysLeft(ctx, base, e.group)) left.push(e)
   }
   // A group or community this device created is never evicted: its entry
   // holds the only copy of the root nonce, and the root cannot be written
@@ -1438,7 +1465,7 @@ async function loadGroup (ctx, base, group) {
   // A group block in the stored snapshot names the root key: the group reads
   // as unknown to every operation, its local cores stay where they are.
   if (mod.blocked.has(group)) return null
-  const root = await readGroupCore(ctx.storage, group)
+  const root = await readGroupCore(ctx, group)
   if (root === null || root.length === 0 || root.fork !== 0) return null
   const rootHeader = root.entries[0].record
   if (!foldableHeader(rootHeader)) return null
@@ -1449,7 +1476,7 @@ async function loadGroup (ctx, base, group) {
   const writers = []
   const cores = new Map([[group, { diary: rootHeader.diary, at: rootHeader.at, length: root.length, signed: root.signed, entries: root.entries }]])
   for (const key of [...keys].sort()) {
-    const core = await readWriterCoreOf(ctx.storage, key, group)
+    const core = await readWriterCoreOf(ctx, key, group)
     if (core === null) continue
     const h = core.entries[0].record
     if (validateWriterHeader(h) !== null || h.group !== group) continue
@@ -1718,7 +1745,7 @@ function authorOf (g, d, association, mod) {
 // is blocked.
 async function pendingOf (ctx, mod, group) {
   if (mod.blocked.has(group)) return null
-  const root = await readGroupCore(ctx.storage, group)
+  const root = await readGroupCore(ctx, group)
   if (root !== null && root.length > 0) return null
   return { group, own: (await store.readGroupWriters(ctx.storage)).find((e) => e.group === group) || null }
 }
@@ -1844,7 +1871,7 @@ async function groupCreate (ctx, { name, join, visibility = 'public', community 
 // `member`: the own live community writer a group writer names; a
 // community writer (`community: true`) names none.
 async function pendingJoin (ctx, { group, own }, { diary, ownHex, base }, { member = null, community = false } = {}) {
-  const core = own === null ? null : await readGroupCore(ctx.storage, own.key)
+  const core = own === null ? null : await readGroupCore(ctx, own.key)
   // A listed writer the diary has not bound yet is reused (and named by a
   // new join below) only when this device derives it.
   const ownBound = core !== null && groupJoinHistory(base.ownEntries, group).some((j) => j.on && j.writer === own.key)
@@ -1889,7 +1916,7 @@ async function groupJoin (ctx, { group, community = null }) {
     if (cw === null || statusOf(g.c, ownHex) !== 'member') throw new UsageError(COMMUNITY_FIRST)
     return joinLoaded(ctx, ids, cw.key)
   }, async (p, ids) => {
-    const core = p.own === null ? null : await readGroupCore(ctx.storage, p.own.key)
+    const core = p.own === null ? null : await readGroupCore(ctx, p.own.key)
     // A writer already written answers again without a new one.
     if (core !== null && core.length > 0) return pendingJoin(ctx, p, ids)
     if (hint === null) throw new UsageError(GROUP_COMMUNITY_NEEDED)
@@ -1995,7 +2022,7 @@ async function groupLeave (ctx, { group }) {
     return { state: 'left' }
   }, async (p, { diary, base }) => {
     const own = requirePendingOwn(p)
-    const core = await readGroupCore(ctx.storage, own.key)
+    const core = await readGroupCore(ctx, own.key)
     if (core === null || core.length === 0 || hasLeave(core.entries)) throw new UsageError(GROUP_UNCHANGED)
     // No fold yet, so the leave can list only this device's writer: any
     // other writer the own diary binds (another device, the creator's root)
@@ -2686,15 +2713,10 @@ async function checkRotationRoom (ctx, wk, records) {
 // core is not held.
 async function rotationFits (ctx, wk, records) {
   const limits = { maxLogBlocks: MAX_LOG_BLOCKS, maxLogBytes: MAX_LOG_BYTES, ...ctx.limits }
-  const core = await store.openGroupCoreReadOnly(ctx.storage, wk)
-  if (core === null) return null
-  let length, bytes
-  try {
-    length = core.length
-    bytes = core.byteLength
-  } finally {
-    await core.close()
-  }
+  const held = await withGroupCore(ctx, wk, async (core) => ({ length: core.length, bytes: core.byteLength }))
+  if (held === null) return null
+  const length = held.length
+  let bytes = held.bytes
   for (const r of records) bytes += b4a.byteLength(JSON.stringify(r.record))
   return length + records.length <= limits.maxLogBlocks && bytes <= limits.maxLogBytes
 }
@@ -2843,7 +2865,7 @@ function communityKeyOf (community) {
 async function loadCommunity (ctx, base, key) {
   const { ownHex, ownEntries, association, mod } = base
   if (mod.blocked.has(key)) return null
-  const root = await readGroupCore(ctx.storage, key)
+  const root = await readGroupCore(ctx, key)
   if (root === null || root.length === 0 || root.fork !== 0) return null
   const header = root.entries[0].record
   if (!communityHeader(header)) return null
@@ -2854,7 +2876,7 @@ async function loadCommunity (ctx, base, key) {
   const writers = []
   const cores = new Map([[key, { diary: header.diary, at: header.at, length: root.length, signed: root.signed, entries: root.entries }]])
   for (const k of [...keys].sort()) {
-    const core = await readWriterCoreOf(ctx.storage, k, key)
+    const core = await readWriterCoreOf(ctx, k, key)
     if (core === null) continue
     const h = core.entries[0].record
     writers.push({ key: k, entries: core.entries, diary: h.diary })
@@ -2878,8 +2900,8 @@ async function loadCommunity (ctx, base, key) {
 
 // A stored community root that will never fold (forked, or its block 0 is
 // no v2 community header): its entry may give up its slot.
-async function communityUnfoldable (storage, key) {
-  const root = await readGroupCore(storage, key)
+async function communityUnfoldable (ctx, key) {
+  const root = await readGroupCore(ctx, key)
   if (root === null || root.length === 0) return false
   return root.fork !== 0 || !communityHeader(root.entries[0].record)
 }
@@ -2909,9 +2931,9 @@ async function withCommunity (ctx, community, write, fn, pending = null, unfolda
     if (ids.base.mod.blocked.has(C)) throw new Error(COMMUNITY_NOT_FOUND)
     const c = await loadCommunity(ctx, ids.base, C)
     if (c === null) {
-      const root = await readGroupCore(ctx.storage, C)
+      const root = await readGroupCore(ctx, C)
       const held = root !== null && root.length > 0
-      if (pending === null || (held && !(unfoldable && await communityUnfoldable(ctx.storage, C)))) throw new Error(COMMUNITY_NOT_FOUND)
+      if (pending === null || (held && !(unfoldable && await communityUnfoldable(ctx, C)))) throw new Error(COMMUNITY_NOT_FOUND)
       return pending({ group: C, own: (await store.readGroupWriters(ctx.storage)).find((e) => e.group === C) || null }, ids)
     }
     return fn({ ...ids, c })
@@ -2928,7 +2950,7 @@ async function communityForCreate (ctx, base, C) {
   if (base.mod.blocked.has(C)) throw new Error(COMMUNITY_NOT_FOUND)
   const c = await loadCommunity(ctx, base, C)
   if (c === null) {
-    const root = await readGroupCore(ctx.storage, C)
+    const root = await readGroupCore(ctx, C)
     if (root !== null && root.length > 0) throw new Error(COMMUNITY_NOT_FOUND)
     throw new UsageError(COMMUNITY_WAIT)
   }
@@ -2941,8 +2963,8 @@ async function communityForCreate (ctx, base, C) {
   return { c, root: { group: C, key: C, nonce: c.own.rootNonce, kind: 'community' }, member: live.key }
 }
 
-async function heldLength (storage, key) {
-  const core = await readGroupCore(storage, key)
+async function heldLength (ctx, key) {
+  const core = await readGroupCore(ctx, key)
   return core === null ? 0 : core.length
 }
 
@@ -2962,17 +2984,17 @@ async function finishCommunityCreate (ctx, diary, ownHex, base, plan) {
   const cEntry = { group: C, key: C, nonce: plan.communityNonce, rootNonce: plan.communityNonce, kind: 'community' }
   const gEntry = { group: G, key: G, nonce: plan.groupNonce, rootNonce: plan.groupNonce }
   await makeGroupRoom(ctx, base, C, [G])
-  if (await heldLength(ctx.storage, C) === 0) {
+  if (await heldLength(ctx, C) === 0) {
     await appendToOwnGroupCore(ctx, cEntry, buildRecord(() => grp.groupHeader({ kind: 'community', diary: ownHex, join: plan.join, name: plan.name, at: plan.at })))
   }
   if (!(await store.readGroupWriters(ctx.storage)).some((e) => e.group === C)) await store.putGroupWriter(ctx.storage, cEntry)
   await joinOnce(ctx, diary, C, C)
-  if (await heldLength(ctx.storage, G) === 0) {
+  if (await heldLength(ctx, G) === 0) {
     await appendToOwnGroupCore(ctx, gEntry, buildRecord(() => grp.groupHeader({ kind: 'group', diary: ownHex, community: C, member: C, visibility: 'public', join: 'open', name: GENERAL_NAME, at: plan.at })))
   }
   if (!(await store.readGroupWriters(ctx.storage)).some((e) => e.group === G)) await store.putGroupWriter(ctx.storage, gEntry)
   await joinOnce(ctx, diary, G, G)
-  const root = await readGroupCore(ctx.storage, C)
+  const root = await readGroupCore(ctx, C)
   const created = root.entries.some(({ seq, record }) => seq >= 1 && record !== null && typeof record === 'object' && record.type === 'group-create' && record.group === G)
   if (!created) await appendToOwnGroupCore(ctx, cEntry, buildRecord(() => grp.groupCreateRecord({ group: G, seen: null })))
   await store.writeCommunityCreate(ctx.storage, null)
@@ -2990,7 +3012,7 @@ async function communityCreate (ctx, { name, join }) {
     buildRecord(() => grp.groupHeader({ kind: 'community', diary: ownHex, join, name }))
     const planned = await store.readCommunityCreate(ctx.storage)
     if (planned !== null) {
-      if ((planned.name === name && planned.join === join) || await heldLength(ctx.storage, planned.community) > 0) {
+      if ((planned.name === name && planned.join === join) || await heldLength(ctx, planned.community) > 0) {
         return finishCommunityCreate(ctx, diary, ownHex, base, planned)
       }
       await store.writeCommunityCreate(ctx.storage, null)
@@ -3144,7 +3166,7 @@ async function catalogueRoots (ctx, c, ownEntries, ownHex) {
     const key = groupKeyOf(g)
     if (!groupJoinHistory(ownEntries, key).some((j) => j.on && j.writer === key)) continue
     if (confirmedBefore && !groupCutHistory(ownEntries, key).some((m) => m.writer === key)) continue
-    const root = await readGroupCore(ctx.storage, key)
+    const root = await readGroupCore(ctx, key)
     if (root !== null && root.fork !== 0) continue
     if (root === null || root.length === 0) {
       missing++
@@ -3206,16 +3228,13 @@ async function clearLeaveNote (ctx, C) {
 // `digest`. A forked core never matches (the fold drops it too).
 // The block itself, not the contiguous prefix: a forced leave of the
 // creator lands past a held-back tail of its own root.
-async function leaveAtMatches (storage, key, seq, digest) {
-  const core = await store.openGroupCoreReadOnly(storage, key)
-  if (core === null) return false
-  let entry = null
-  try {
-    if (core.fork === 0 && seq < core.length && await core.has(seq)) entry = { seq, record: decodeBlock(await core.get(seq, { wait: false, raw: true })) }
-  } catch {
-  } finally {
-    await core.close()
-  }
+async function leaveAtMatches (ctx, key, seq, digest) {
+  const entry = await withGroupCore(ctx, key, async (core) => {
+    try {
+      if (core.fork === 0 && seq < core.length && await core.has(seq)) return { seq, record: decodeBlock(await core.get(seq, { wait: false, raw: true })) }
+    } catch {}
+    return null
+  })
   return entry !== null && hasLeave([entry]) && grp.leaveDigest(entry.record) === digest
 }
 
@@ -3233,7 +3252,7 @@ async function notedLeave (ctx, c, ownHex, ownEntries) {
   const core = c.cores.get(own.key)
   const entry = core === undefined ? undefined : core.entries.find((e) => e.seq === note.seq)
   if (entry === undefined || !hasLeave([entry]) || grp.leaveDigest(entry.record) !== note.digest) return null
-  return (await leaveAtMatches(ctx.storage, own.key, note.seq, note.digest)) ? note : null
+  return (await leaveAtMatches(ctx, own.key, note.seq, note.digest)) ? note : null
 }
 
 async function notedLeavePending (ctx, c, ownHex, ownEntries) {
@@ -3337,7 +3356,7 @@ async function communityLeave (ctx, { community, force = false }) {
     // own group leave lies below its cut).
     let note = null
     if (creator) {
-      const core = await readGroupCore(ctx.storage, own.key)
+      const core = await readGroupCore(ctx, own.key)
       if (core === null) throw new UsageError(GROUP_UNCHANGED)
       // The append lands at the signed length, past a held-back tail.
       note = { community: c.key, writer: own.key, seq: core.signed, digest: grp.leaveDigest(record), roots: (await catalogueRoots(ctx, c, base.ownEntries, ownHex)).roots }
@@ -3345,7 +3364,7 @@ async function communityLeave (ctx, { community, force = false }) {
       if (typeof ctx.onLeaveNote === 'function') await ctx.onLeaveNote(c.key)
     }
     const leaveSeq = await appendToOwnGroupCore(ctx, own, record)
-    if (note !== null && (leaveSeq !== note.seq || !(await leaveAtMatches(ctx.storage, own.key, leaveSeq, note.digest)))) {
+    if (note !== null && (leaveSeq !== note.seq || !(await leaveAtMatches(ctx, own.key, leaveSeq, note.digest)))) {
       throw new Error('a saída gravada não confere; tente sair de novo')
     }
     // The creator's diary marks how far each group root it holds went: from
@@ -3368,7 +3387,7 @@ async function communityLeave (ctx, { community, force = false }) {
     return { state: 'left' }
   }, async (p, { diary, base }) => {
     const own = p.own
-    const core = own === null ? null : await readGroupCore(ctx.storage, own.key)
+    const core = own === null ? null : await readGroupCore(ctx, own.key)
     if (core === null || core.length === 0 || hasLeave(core.entries)) throw new UsageError(GROUP_UNCHANGED)
     // No fold yet: the leave can list only this device's writer.
     if (groupJoinHistory(base.ownEntries, p.group).some((j) => j.on && j.writer !== own.key)) throw new UsageError(COMMUNITY_LEAVE_WAIT)
@@ -3404,7 +3423,7 @@ async function plannedGroupLeaves (ctx, base, C, ownHex) {
 // The community named by the held root header of `group`, or null (root not
 // held, forked, or no valid group header).
 async function groupCommunityOf (ctx, group) {
-  const root = await readGroupCore(ctx.storage, groupKeyOf(group))
+  const root = await readGroupCore(ctx, groupKeyOf(group))
   if (root === null || root.length === 0 || root.fork !== 0) return null
   const h = root.entries[0].record
   return validateGroupHeader(h) === null && h.kind === 'group' ? h.community : null
@@ -3750,7 +3769,7 @@ async function communityList (ctx) {
       if (e.kind !== 'community' || base.mod.blocked.has(e.group)) continue
       const c = await loadCommunity(ctx, base, e.group)
       if (c === null) {
-        if (await heldLength(ctx.storage, e.group) > 0) continue
+        if (await heldLength(ctx, e.group) > 0) continue
         list.push({ community: e.group, name: null, join: null, state: 'pending', role: 'pending', general: null })
         continue
       }
@@ -3792,7 +3811,7 @@ async function communityGroups (ctx, { community }) {
     const out = []
     for (const e of await store.readGroupWriters(ctx.storage)) {
       if (e.kind === 'community') continue
-      const root = await readGroupCore(ctx.storage, e.group)
+      const root = await readGroupCore(ctx, e.group)
       const h = root === null || root.length === 0 ? null : root.entries[0].record
       if (h !== null && typeof h === 'object' && h.community === C) out.push(e.group)
     }
@@ -3974,11 +3993,9 @@ function isLocked (err) {
   return !!err && err.message === store.LOCKED
 }
 
-async function coreLength (storage, key) {
+async function coreLength (ctx, key) {
   if (typeof key !== 'string') return null
-  const core = await store.openGroupCoreReadOnly(storage, key)
-  if (core === null) return null
-  try { return core.length } finally { await core.close() }
+  return withGroupCore(ctx, key, async (core) => core.length)
 }
 
 // What a step on `root` can leave behind when it throws half way: the own
@@ -3989,7 +4006,7 @@ async function upkeepFootprint (ctx, root, writer = null) {
   const entry = (await store.readGroupWriters(ctx.storage)).find((e) => e.group === root)
   const own = entry === undefined ? null : entry.key
   const key = writer === null ? own : writer
-  return [length, own, key, await coreLength(ctx.storage, key)].join(':')
+  return [length, own, key, await coreLength(ctx, key)].join(':')
 }
 
 // -> { enrolled: [{ root, kind, state, group }], shared, failed: [{ root,
@@ -4230,5 +4247,6 @@ module.exports = {
   deviceUpkeepNeeded,
   deviceUpkeep,
   AUTO_ENROL_RESERVE,
-  isNeedsExclusive
+  isNeedsExclusive,
+  needsExclusive
 }
