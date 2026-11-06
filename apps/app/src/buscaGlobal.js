@@ -61,6 +61,38 @@ export function plan (category, text) {
   return { kind: 'empty', value: null }
 }
 
+function trimmedQuery (query) {
+  return typeof query === 'string' ? query.trim() : ''
+}
+
+export function debouncePlan (query, previous) {
+  const text = trimmedQuery(query)
+  return { run: text.length >= 2 && text !== trimmedQuery(previous), delayMs: 250, minLength: 2 }
+}
+
+// The caller advances its sequence on edits and clear, even when no search
+// runs, so an in-flight answer cannot restore results for an obsolete query.
+export function staleGuard (seq) {
+  return (current) => seq === current
+}
+
+// History belongs to the caller's device state; this model never sends or
+// persists queries, and leaves the supplied list safe to reuse.
+export function recentQueries (list, q, max = 8) {
+  const limit = Number.isInteger(max) ? Math.max(0, Math.min(max, 8)) : 8
+  const recent = []
+  const seen = new Set()
+  for (const query of [q, ...(Array.isArray(list) ? list : [])]) {
+    if (recent.length >= limit) break
+    const text = trimmedQuery(query)
+    const key = text.toLowerCase()
+    if (text.length < 2 || seen.has(key)) continue
+    seen.add(key)
+    recent.push(text)
+  }
+  return recent
+}
+
 // Gates the Publicações category only: Contas works on every node through the
 // code field. Offline is left to Busca.js (searchNotice in topics.js), which
 // knows whether results already loaded and keeps them on screen. Any

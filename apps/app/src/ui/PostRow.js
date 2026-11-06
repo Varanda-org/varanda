@@ -23,8 +23,13 @@
 //   the photos keep their own viewer taps),
 //   onOpenAuthor (avatar and name), onOpenParent ('respondendo a X'),
 //   onOpenReposter, and the action bar: onReply, onRepost, onQuote, onLike,
-//   onFollow ('seguir', disabled while followPending), onReport, onDelete (each
-//   button shows only with its handler).
+//   onFollow ('seguir', disabled while followPending), onReport, onDelete.
+//   The bar is reply, repost, like, share and 'mais'. The repost button opens
+//   a small sheet (Republicar, and Citar with onQuote); report and delete live
+//   in the 'mais' sheet next to Copiar link, each only with its handler.
+// - link: a public http(s) URL of the post (postActions.shareLink decides);
+//   without one there is no Compartilhar. onNotice(text) shows the toast of
+//   a copy to the clipboard.
 // - onOpenMention(username): makes the @nome in the text and in the quote
 //   tappable (./MentionText). The post text with an http(s)/www link or a
 //   handled mention is rendered outside the body's single accessible element,
@@ -38,7 +43,11 @@ import { displayText } from '@varanda/rpc'
 import { pendingOpen, tapKind } from '../doubleTap'
 import { relativeTime } from '../format'
 import { hasLink } from '../links'
+import { moreActions, repostActions, shareLink } from '../postActions'
+import { canShare, copyText, shareUrl } from '../share'
+import { shareNav } from '../shareNav'
 import { whoOf } from '../who'
+import { ActionsSheet } from './ActionsSheet'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { MediaGrid } from './MediaGrid'
@@ -116,7 +125,7 @@ export function PostRow ({
   author, name, username, avatar, at, text, replyToName, media, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
   onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
-  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onDelete
+  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onDelete, link, onNotice
 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -135,6 +144,7 @@ export function PostRow ({
   const burstScale = useRef(new Animated.Value(0.6)).current
   const burstOpacity = useRef(new Animated.Value(0)).current
   const [burstOn, setBurstOn] = useState(false)
+  const [sheet, setSheet] = useState(null)
   const reduceMotion = useRef(false)
   const rowId = useRef({}).current
   const previousTap = useRef(null)
@@ -174,11 +184,50 @@ export function PostRow ({
     if (!liked) feedback(heartScale)
     return like()
   }))
-  const pressRepost = otherPress(fn(onRepost) && (() => {
+  const doRepost = () => {
     if (pending === 'repost') return
     if (!reposted) feedback(repostScale)
     return onRepost()
+  }
+  // With a quote handler the button asks Republicar or Citar; without one
+  // it keeps toggling the repost at once.
+  const pressRepost = otherPress(fn(onRepost) && (fn(onQuote) ? () => setSheet('repost') : doRepost))
+  // A screen reader hears that the button opens a choice, not a direct toggle.
+  const repostLabel = (reposted ? 'desfazer republicação' : 'republicar') + (fn(onQuote) ? ' ou citar' : '')
+  const href = shareLink(null, { link })
+  const pressShare = otherPress(href !== null && (async () => {
+    // Capability, not platform: the system sheet when the runtime has one,
+    // else the clipboard and a note.
+    const nav = shareNav()
+    if (canShare(nav)) {
+      await shareUrl(nav, { url: href, title: 'Varanda' })
+      return
+    }
+    const ok = await copyText(nav, href)
+    if (fn(onNotice)) onNotice(ok ? 'Link copiado' : 'Não foi possível copiar o link')
   }))
+  const moreRows = [
+    ...moreActions(null, { link, onReport: fn(onReport) ? true : null }),
+    ...(fn(onDelete) ? [{ id: 'delete', icon: 'lixeira', label: 'Apagar', danger: true }] : [])
+  ]
+  const runMore = (row) => {
+    if (row.id === 'copy') {
+      return async () => {
+        const ok = await copyText(shareNav(), href)
+        if (fn(onNotice)) onNotice(ok ? 'Link copiado' : 'Não foi possível copiar o link')
+      }
+    }
+    if (row.id === 'report') return onReport
+    if (row.id === 'delete') return onDelete
+    return undefined
+  }
+  const moreSheet = moreRows.map((row) => ({ icon: row.icon, label: row.label, danger: row.danger, onPress: runMore(row) }))
+  const repostSheet = repostActions(null, { link }).filter((row) => row.id !== 'repost' || fn(onRepost)).map((row) => ({
+    icon: row.icon,
+    label: row.id === 'repost' && reposted ? 'Desfazer republicação' : row.label,
+    onPress: row.id === 'repost' ? doRepost : fn(onQuote)
+  }))
+  const hasMore = moreSheet.length > 0
   const burst = () => {
     if (reduceMotion.current) return
     burstScale.setValue(0.6)
@@ -237,7 +286,7 @@ export function PostRow ({
   // On the reposter's line, never the action bar: that 'seguir' follows the
   // original's author, and under their name it would read as the wrong person.
   const followReposter = reposter ? otherPress(onFollowReposter) : undefined
-  const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onFollow) || fn(onReport) || fn(onDelete)
+  const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onFollow) || hasMore || href !== null
   // Composed label for the post body element: author, reply-to, text, date.
   // The avatar link already provides profile access, so name here is context.
   const bodyParts = [
@@ -400,7 +449,7 @@ export function PostRow ({
                     ? (
                       <View style={styles.splitAction}>
                         <Action
-                          label={reposted ? 'desfazer republicação' : 'republicar'}
+                          label={repostLabel}
                           onPress={pressRepost}
                           disabled={pending === 'repost'}
                           on={!!reposted}
@@ -422,7 +471,7 @@ export function PostRow ({
                       )
                     : (
                       <Action
-                        label={reposted ? 'desfazer republicação' : 'republicar'}
+                        label={repostLabel}
                         onPress={pressRepost}
                         disabled={pending === 'repost'}
                         on={!!reposted}
@@ -431,14 +480,16 @@ export function PostRow ({
                         <Bump scale={repostScale}><Icon name='republicar' size={ICON} color={reposted ? colors.accent : colors.soft} /></Bump>
                       </Action>
                       )
-                  : null}
-                {fn(onQuote)
-                  ? (
-                    <Action label='citar' onPress={otherPress(onQuote)} count={countOf(counts, 'quotes')}>
-                      <Icon name='citar' size={ICON} color={colors.soft} />
-                    </Action>
-                    )
-                  : null}
+                  // Without reposting (offline, a node that is not hosted) the same
+                  // button opens the sheet with Citar alone, so quoting never
+                  // disappears and the row keeps one look.
+                  : fn(onQuote)
+                    ? (
+                      <Action label='citar' onPress={otherPress(() => setSheet('repost'))} count={null}>
+                        <Icon name='republicar' size={ICON} color={colors.soft} />
+                      </Action>
+                      )
+                    : null}
                 {fn(onLike)
                   ? fn(onOpenLikes) && likes !== null
                     ? (
@@ -483,23 +534,25 @@ export function PostRow ({
                     </Action>
                     )
                   : null}
-                {fn(onReport)
+                {href !== null
                   ? (
-                    <Action label={'denunciar publicação de ' + title} onPress={otherPress(onReport)}>
-                      <Icon name='bandeira' size={ICON} color={colors.soft} />
+                    <Action label='compartilhar' onPress={pressShare}>
+                      <Icon name='compartilhar' size={ICON} color={colors.soft} />
                     </Action>
                     )
                   : null}
-                {fn(onDelete)
+                {hasMore
                   ? (
-                    <Action label='apagar publicação' onPress={otherPress(onDelete)}>
-                      <Icon name='lixeira' size={ICON} color={colors.soft} />
+                    <Action label='mais ações' onPress={otherPress(() => setSheet('more'))}>
+                      <Icon name='mais' size={ICON} color={colors.soft} />
                     </Action>
                     )
                   : null}
               </View>
               )
             : null}
+          <ActionsSheet open={sheet === 'repost'} onClose={() => setSheet(null)} actions={repostSheet} />
+          <ActionsSheet open={sheet === 'more'} onClose={() => setSheet(null)} actions={moreSheet} />
           {burstOn
             ? (
               <Animated.View

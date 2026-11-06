@@ -17,6 +17,7 @@ const { DM_STAMP_PROTOCOL } = require('../lib/dm')
 const postage = require('../lib/dm-postage')
 const { noticeV2Payload, signNoticeProof } = require('../lib/notices-v2')
 const { until } = require('./helpers/net')
+const clock = require('../lib/clock')
 
 function fromBase64url (s) {
   return BigInt('0x' + Buffer.from(s, 'base64url').toString('hex'))
@@ -28,6 +29,17 @@ const RSA = (() => {
   return { n: fromBase64url(jwk.n), d: fromBase64url(jwk.d) }
 })()
 const PUB = postage.publicKey(RSA.n)
+// The blob key pair: separate from the DM one, as on the seeder.
+const BLOB_RSA = (() => {
+  const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048, publicExponent: 65537 })
+  const jwk = privateKey.export({ format: 'jwk' })
+  return { n: fromBase64url(jwk.n), d: fromBase64url(jwk.d) }
+})()
+const BLOB_PUB = postage.publicKey(BLOB_RSA.n)
+
+function seederBlobPostage () {
+  return { publicKey: BLOB_PUB, sign: (blinded) => postage.sign(blinded, BLOB_RSA.n, BLOB_RSA.d) }
+}
 
 function seederPostage () {
   return { publicKey: PUB, sign: (blinded) => postage.sign(blinded, RSA.n, RSA.d) }
@@ -355,4 +367,236 @@ test('a member whose sign throws rejects proved; requests reject; the socket sta
   await delay(30)
   t.absent(a.destroyed)
   t.absent(b.destroyed)
+})
+
+test('old clients without kind still get DM stamps when the seeder has a blob key', async (t) => {
+  const { a, b } = streams(t)
+  const m = member()
+  const budget = counterBudget(5)
+  const blobBudget = counterBudget(5)
+  const logged = []
+  attachDmStamp(a, { role: 'seeder', postage: seederPostage(), budget, blobPostage: seederBlobPostage(), blobBudget, log: (e) => logged.push(e) })
+  const raw = rawPeer(b)
+  await until(() => raw.received.length === 1, { name: 'challenge' })
+  raw.sendJson({ type: 'proof', key: m.ownKey, sig: hex(m.sign(encodeProof(raw.received[0].nonce, hex(b.publicKey), m.ownKey))) })
+  raw.sendJson({ type: 'key' })
+  await until(() => raw.received.length === 2, { name: 'dm key' })
+  t.alike(raw.received[1], { type: 'key', ...PUB }, 'the DM key reply is unchanged, without kind')
+  const bt = blindedToken()
+  raw.sendJson({ type: 'issue', blinded: bt.blinded })
+  await until(() => raw.received.length === 3, { name: 'dm stamp' })
+  const reply = raw.received[2]
+  t.alike(Object.keys(reply), ['type', 'kid', 'sig'])
+  t.is(reply.kid, PUB.kid)
+  t.ok(postage.verify(bt.token, postage.unblind(postage.fromBase64(reply.sig), bt.r, RSA.n), PUB), 'a DM stamp')
+  t.is(budget.calls.length, 1)
+  t.is(blobBudget.calls.length, 0, 'the blob budget is untouched')
+  t.alike(logged, [{ event: 'dm-stamp', reason: 'ok' }])
+})
+
+test('blob stamps: own key, own domain, own budget', async (t) => {
+  const { a, b } = streams(t)
+  const m = member()
+  const budget = counterBudget(5)
+  const blobBudget = counterBudget(5)
+  const logged = []
+  attachDmStamp(a, {
+    role: 'seeder',
+    postage: seederPostage(),
+    budget,
+    blobPostage: seederBlobPostage(),
+    blobBudget,
+    log: (e) => logged.push(e),
+    now: () => Date.parse('2026-11-03T12:00:00.000Z')
+  })
+  const hm = attachDmStamp(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  t.alike(await hm.key('blob'), BLOB_PUB)
+  t.alike(await hm.key(), PUB)
+
+  const token = postage.newToken(BLOB_RSA.n, 'blob')
+  const { blinded, r } = postage.blind(postage.representative(token, 'blob'), BLOB_RSA.n)
+  const stamp = await hm.issue(postage.toBase64(blinded), 'blob')
+  t.is(stamp.kid, BLOB_PUB.kid)
+  const sig = postage.unblind(postage.fromBase64(stamp.sig), r, BLOB_RSA.n)
+  t.ok(postage.verify(token, sig, BLOB_PUB, 'blob'), 'the blob stamp verifies under the blob key')
+  t.absent(postage.verify(token, sig, BLOB_PUB, 'dm'), 'never as a DM stamp')
+  t.absent(postage.verify(token, sig, PUB, 'dm'))
+  t.alike(blobBudget.calls, [{ diary: m.ownKey, day: '2026-11-03' }])
+  t.is(budget.calls.length, 0, 'the DM budget is untouched by blob issuance')
+
+  // A DM stamp spent as a blob stamp is refused.
+  const bt = blindedToken()
+  const dm = await hm.issue(bt.blinded)
+  const dmSig = postage.unblind(postage.fromBase64(dm.sig), bt.r, RSA.n)
+  t.ok(postage.verify(bt.token, dmSig, PUB))
+  t.absent(postage.verify(bt.token, dmSig, BLOB_PUB, 'blob'), 'a DM stamp under the blob key')
+  t.absent(postage.verify(bt.token, dmSig, PUB, 'blob'), 'a DM stamp under the blob domain')
+  t.is(budget.calls.length, 1)
+  t.is(blobBudget.calls.length, 1)
+  t.alike(logged, [{ event: 'blob-stamp', reason: 'ok' }, { event: 'dm-stamp', reason: 'ok' }])
+})
+
+test('cross issuance: a DM-domain value sent as a blob issue never yields a DM stamp', async (t) => {
+  const { a, b } = streams(t)
+  const m = member()
+  const budget = counterBudget(5)
+  const blobBudget = counterBudget(5)
+  let dmSigns = 0
+  attachDmStamp(a, {
+    role: 'seeder',
+    postage: { publicKey: PUB, sign: (v) => { dmSigns++; return postage.sign(v, RSA.n, RSA.d) } },
+    budget,
+    blobPostage: seederBlobPostage(),
+    blobBudget
+  })
+  const hm = attachDmStamp(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+
+  // Blinded under the DM key, as a forger wanting a DM stamp would do; it
+  // must also be below the blob modulus to be signed at all.
+  let token, blinded, r
+  do {
+    token = postage.newToken(RSA.n)
+    ;({ blinded, r } = postage.blind(postage.representative(token), RSA.n))
+  } while (blinded >= BLOB_RSA.n)
+  const stamp = await hm.issue(postage.toBase64(blinded), 'blob')
+  t.is(stamp.kid, BLOB_PUB.kid, 'signed, but by the blob key')
+  const s = postage.fromBase64(stamp.sig)
+  t.absent(postage.verify(token, postage.unblind(s, r, RSA.n), PUB), 'the DM verifier refuses it')
+  t.absent(postage.verify(token, postage.unblind(s % RSA.n, r, RSA.n), PUB, 'dm'))
+
+  // Blinded under the blob key with a DM-domain representative.
+  const token2 = postage.newToken(BLOB_RSA.n)
+  const b2 = postage.blind(postage.representative(token2), BLOB_RSA.n)
+  const stamp2 = await hm.issue(postage.toBase64(b2.blinded), 'blob')
+  const sig2 = postage.unblind(postage.fromBase64(stamp2.sig), b2.r, BLOB_RSA.n)
+  // It verifies with the DM domain under the BLOB key, which is why the DM
+  // verifier must only ever use DM keys (seeder._verifyStamp).
+  t.absent(postage.verify(token2, sig2, PUB), 'not a DM stamp under the DM key')
+  t.absent(postage.verify(token2, sig2, BLOB_PUB, 'blob'), 'nor a blob stamp: wrong domain')
+
+  t.is(dmSigns, 0, 'the DM key never signed')
+  t.is(budget.calls.length, 0, 'the DM daily counter is untouched')
+  t.is(blobBudget.calls.length, 2)
+})
+
+test('budgets are counted apart: blob teto leaves DM stamps, DM teto leaves blob stamps', async (t) => {
+  const { a, b } = streams(t)
+  const m = member()
+  const budget = counterBudget(1)
+  const blobBudget = counterBudget(1)
+  attachDmStamp(a, { role: 'seeder', postage: seederPostage(), budget, blobPostage: seederBlobPostage(), blobBudget })
+  const hm = attachDmStamp(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  const blobBlinded = () => {
+    const token = postage.newToken(BLOB_RSA.n, 'blob')
+    return postage.toBase64(postage.blind(postage.representative(token, 'blob'), BLOB_RSA.n).blinded)
+  }
+  t.ok((await hm.issue(blobBlinded(), 'blob')).sig)
+  t.alike(await hm.issue(blobBlinded(), 'blob'), { error: 'teto' })
+  t.ok((await hm.issue(blindedToken().blinded)).sig, 'DM still issues after blob teto')
+  t.alike(await hm.issue(blindedToken().blinded), { error: 'teto' })
+  t.is(budget.calls.length, 2)
+  t.is(blobBudget.calls.length, 2)
+  t.alike(await hm.issue(postage.toBase64(BLOB_RSA.n + 1n), 'blob'), { error: 'ruim' })
+  t.is(blobBudget.calls.length, 2, 'ruim spends no blob budget')
+})
+
+test('a seeder without a blob key treats blob requests as bad', async (t) => {
+  const { a, b } = streams(t)
+  const m = member()
+  const budget = counterBudget(5)
+  const hs = attachDmStamp(a, { role: 'seeder', postage: seederPostage(), budget })
+  const raw = rawPeer(b)
+  await until(() => raw.received.length === 1, { name: 'challenge' })
+  raw.sendJson({ type: 'proof', key: m.ownKey, sig: hex(m.sign(encodeProof(raw.received[0].nonce, hex(b.publicKey), m.ownKey))) })
+  raw.sendJson({ type: 'key', kind: 'blob' })
+  await until(() => hs.badMessages === 1, { name: 'blob key' })
+  raw.sendJson({ type: 'issue', blinded: blindedToken().blinded, kind: 'blob' })
+  await until(() => hs.badMessages === 2, { name: 'blob issue' })
+  await delay(30)
+  t.is(raw.received.length, 1, 'nothing answered')
+  t.is(budget.calls.length, 0, 'no DM budget spent')
+})
+
+test('the seeder refuses one key for both kinds and a blob budget without a key', (t) => {
+  const s = streams(t)
+  t.exception.all(() => attachDmStamp(s.a, { role: 'seeder', postage: seederPostage(), budget: counterBudget(5), blobPostage: seederPostage(), blobBudget: counterBudget(5) }), /own key/)
+  t.exception.all(() => attachDmStamp(s.a, { role: 'seeder', postage: seederPostage(), budget: counterBudget(5), blobPostage: seederBlobPostage() }), /invalid blobBudget/)
+  t.exception.all(() => attachDmStamp(s.a, { role: 'seeder', postage: seederPostage(), budget: counterBudget(5), blobBudget: counterBudget(5) }), /blobBudget without blobPostage/)
+  t.exception.all(() => attachDmStamp(s.a, { role: 'seeder', postage: seederPostage(), budget: counterBudget(5), blobPostage: { publicKey: PUB } }), /invalid blobPostage/)
+})
+
+test('member requests refuse unknown stamp kinds', async (t) => {
+  const { b } = streams(t)
+  const m = member()
+  const hm = attachDmStamp(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  await t.exception.all(hm.key('other'), /invalid stamp kind/)
+  await t.exception.all(hm.issue(blindedToken().blinded, 'other'), /invalid stamp kind/)
+  hm.close()
+})
+
+test('blob message shapes', (t) => {
+  const bt = blindedToken()
+  t.ok(validateDmStampMessage({ type: 'key', kind: 'blob' }))
+  t.absent(validateDmStampMessage({ type: 'key', kind: 'dm' }), 'dm is never written')
+  t.absent(validateDmStampMessage({ type: 'key', kind: 'other' }))
+  t.ok(validateDmStampMessage({ type: 'key', kind: 'blob', ...BLOB_PUB }))
+  t.absent(validateDmStampMessage({ type: 'key', kind: 'dm', ...BLOB_PUB }))
+  t.absent(validateDmStampMessage({ type: 'key', kind: 'blob', ...BLOB_PUB, kid: '00'.repeat(8) }), 'kid must match n')
+  t.absent(validateDmStampMessage({ type: 'key', kind: 'blob', ...BLOB_PUB, extra: 1 }))
+  t.ok(validateDmStampMessage({ type: 'issue', blinded: bt.blinded, kind: 'blob' }))
+  t.absent(validateDmStampMessage({ type: 'issue', blinded: bt.blinded, kind: 'dm' }), 'dm is never written')
+  t.absent(validateDmStampMessage({ type: 'issue', blinded: bt.blinded, kind: 'other' }))
+  t.absent(validateDmStampMessage({ type: 'issue', blinded: bt.blinded, kind: 'blob', extra: 1 }))
+  t.absent(validateDmStampMessage({ type: 'issue', blinded: bt.blinded.slice(0, -4), kind: 'blob' }))
+  t.absent(validateDmStampMessage({ type: 'issue', kind: 'blob' }))
+  t.absent(validateDmStampMessage({ type: 'stamp', kid: PUB.kid, sig: bt.blinded, kind: 'blob' }), 'the stamp reply has no kind')
+})
+
+test('issuing at the allowed blob and DM rates never trips the inbound limit; a flood still does', async (t) => {
+  // A fake monotonic clock: 250 ms per step is exactly BLOB_ISSUE_RATE.
+  const realNow = clock.now
+  let fake = 1e6
+  clock.now = () => fake
+  t.teardown(() => { clock.now = realNow })
+  const { a, b } = streams(t)
+  const m = member()
+  const logged = []
+  // A small message bucket, so the old shared bucket ran dry within steps.
+  const limits = { messageBurst: 4, messageRate: 2 }
+  attachDmStamp(a, {
+    role: 'seeder',
+    postage: seederPostage(),
+    budget: counterBudget(1000),
+    blobPostage: seederBlobPostage(),
+    blobBudget: counterBudget(1000),
+    log: (e) => logged.push(e),
+    ...limits
+  })
+  const hm = attachDmStamp(b, { role: 'member', ownKey: m.ownKey, sign: m.sign, ...limits })
+  await hm.key('blob')
+  const blobBlinded = () => {
+    const token = postage.newToken(BLOB_RSA.n, 'blob')
+    return postage.toBase64(postage.blind(postage.representative(token, 'blob'), BLOB_RSA.n).blinded)
+  }
+  let blobSigned = 0
+  let dmSigned = 0
+  for (let i = 0; i < 48; i++) {
+    fake += 250
+    if ((await hm.issue(blobBlinded(), 'blob')).sig) blobSigned++
+    if (i % 4 === 3 && (await hm.issue(blindedToken().blinded)).sig) dmSigned++
+  }
+  t.is(blobSigned, 48, 'every blob issue signed')
+  t.is(dmSigned, 12, 'every DM issue signed')
+  t.absent(a.destroyed || b.destroyed, 'the socket survives')
+  t.alike(logged.filter((e) => e.event === 'peer-dropped'), [])
+
+  // Garbage still meets a hard flood limit before the bad-message count.
+  const s = streams(t)
+  const logged2 = []
+  attachDmStamp(s.a, { role: 'seeder', postage: seederPostage(), budget: counterBudget(5), log: (e) => logged2.push(e), maxBad: 1000, ...limits })
+  const raw = rawPeer(s.b)
+  await raw.opened
+  for (let i = 0; i < 100; i++) raw.sendJson({ type: 'nope' })
+  await until(() => s.a.destroyed, { name: 'flood drop' })
+  t.alike(logged2, [{ event: 'peer-dropped', reason: 'message-rate' }])
 })

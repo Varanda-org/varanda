@@ -900,3 +900,62 @@ test('bloquear on a dm report blocks the target like an account report; grupo is
   t.is(change.op, 'block')
   t.alike(change.reportIds, [r.id])
 })
+
+test('a group report again with an image is a new report; the same image again is a duplicate', async (t) => {
+  const { store } = setup(t)
+  const target = key()
+  const reporter = key()
+  const writer = key()
+  const group = key()
+  const bytes = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3])
+  const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex')
+  const plain = await store.add(report(target, reporter, { writer, group, quote: '' }))
+  t.is(plain.duplicate, false)
+  const withImage = await store.add(report(target, reporter, { writer, group, quote: '', anexo: { bytes, mime: 'image/gif', sha256 } }))
+  t.is(withImage.duplicate, false, 'the image is new evidence, not a repeat')
+  t.not(withImage.report.id, plain.report.id)
+  const again = await store.add(report(target, reporter, { writer, group, quote: '', anexo: { bytes, mime: 'image/gif', sha256 } }))
+  t.is(again.duplicate, true)
+  t.is(again.report.id, withImage.report.id)
+})
+
+test('the anexo file is written whole even when writeSync writes in pieces', async (t) => {
+  const { store, dir } = setup(t)
+  const bytes = new Uint8Array(4096).map((_, i) => i & 0xff)
+  const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex')
+  const realWrite = fs.writeSync
+  fs.writeSync = (fd, buf, off = 0, len = buf.length - off, pos) => realWrite(fd, buf, off, Math.min(len, 1000), pos)
+  let res
+  try {
+    res = await store.add(report(key(), key(), { writer: key(), group: key(), quote: '', anexo: { bytes, mime: 'image/gif', sha256 } }))
+  } finally {
+    fs.writeSync = realWrite
+  }
+  const file = path.join(dir, 'report-media', res.report.id)
+  t.alike(new Uint8Array(fs.readFileSync(file)), bytes, 'every byte landed')
+})
+
+test('a failed sync of the media directory takes the anexo file back', async (t) => {
+  const { store, dir } = setup(t)
+  const bytes = new Uint8Array([1, 2, 3, 4])
+  const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex')
+  const mediaDir = path.join(dir, 'report-media')
+  const realOpen = fs.openSync
+  let armed = true
+  fs.openSync = (p, ...rest) => {
+    if (armed && p === mediaDir) {
+      armed = false
+      const err = new Error('io')
+      err.code = 'EIO'
+      throw err
+    }
+    return realOpen(p, ...rest)
+  }
+  try {
+    await rejects(t, store.add(report(key(), key(), { writer: key(), group: key(), quote: '', anexo: { bytes, mime: 'image/gif', sha256 } })), 'EIO', 'the add fails')
+  } finally {
+    fs.openSync = realOpen
+  }
+  const left = fs.existsSync(mediaDir) ? fs.readdirSync(mediaDir) : []
+  t.alike(left, [], 'no orphan file outside the cap')
+})

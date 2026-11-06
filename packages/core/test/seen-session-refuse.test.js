@@ -1,6 +1,6 @@
 'use strict'
 
-// The seen blob is browser-node only (docs/protocol.md section 13): the node
+// The seen blob is browser-node only (docs/protocol.md section 14): the node
 // session answers seen.sign and seen.merge with USAGE before anything opens.
 // Those handlers are called directly, because the refusal is the session's
 // and it opens nothing. group.seen still goes through the RPC link and writes
@@ -18,7 +18,7 @@ const BLOB = 'A'.repeat(43744)
 
 const SEEN_NO = { code: 'USAGE', message: 'estado de vistos sincronizado só no navegador' }
 
-// Params the RPC contract accepts (docs/rpc.md 5.88 and 5.89).
+// Params the RPC contract accepts (docs/rpc.md 5.90 and 5.91).
 const CALLS = [
   ['seen.sign', { nonce: NONCE, action: 'read' }],
   ['seen.merge', { blob: null, avisos: { own: [] }, unchanged: false }]

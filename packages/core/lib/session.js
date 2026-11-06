@@ -610,7 +610,7 @@ function createSession ({
     }),
 
     // Only the browser node signs, seals and merges the seen blob (docs/rpc.md
-    // 5.88 and 5.89, docs/protocol.md section 13); these open nothing here,
+    // 5.90 and 5.91, docs/protocol.md section 14); these open nothing here,
     // and group.seen keeps writing group-seen.json only.
     'seen.sign': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
     'seen.merge': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
@@ -796,6 +796,7 @@ function createSession ({
     }),
 
     'group.post': serial(async (params, epoch) => {
+      if (params.media !== undefined || params.sealed === true) throw new UsageError(MEDIA_WEB_ONLY)
       const r = await withStore((c) => member.groupPost(c, params))
       send('groups.changed', { group: params.group }, epoch)
       return r

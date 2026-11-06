@@ -9,7 +9,8 @@
 // passkey (WebAuthn PRF) on 'entrar' and lives only in the page's memory,
 // through the handle's `identity` API (status, unlock, complete, lock,
 // signOut, reset; status carries `resumed`), and its `media` API uploads
-// photos (media.upload). It syncs only through the seeder whose address comes from the
+// photos (media.upload, media.putDm) and opens chat photos (media.read).
+// It syncs only through the seeder whose address comes from the
 // installation's /varanda.json (the page's own origin) or from Conectar.
 //
 // The client side is the same @varanda/rpc createClient the other web and
@@ -18,7 +19,7 @@
 // would over the varanda-serve WebSocket. No token: the channel never leaves
 // the page (docs/rpc.md section 11, as the in-app IPC).
 
-import { createClient, parseMessage, EVENTS, MAX_MESSAGE } from '@varanda/rpc'
+import { createClient, parseMessage, EVENTS, MAX_MESSAGE, mediaBounds } from '@varanda/rpc'
 
 const NODE_SCRIPT = '/varanda-node.js'
 
@@ -57,6 +58,38 @@ function loadNode () {
   })
   loading.catch(() => { loading = null })
   return loading
+}
+
+// The node's media facade in the native handle's shape
+// (./webnode.native.js), so screens see one API: upload, putDm and
+// read(ref) -> { bytes, mime, w, h } (the native handle answers a uri
+// instead). Here the bytes never cross RPC: they stay in the page. A method
+// the facade lacks is a capability this node does not have.
+export function mediaOf (facade) {
+  if (facade === null || typeof facade !== 'object') return null
+  const has = (k) => typeof facade[k] === 'function'
+  const out = {}
+  if (has('upload')) out.upload = (args) => facade.upload(args)
+  if (has('putDm')) out.putDm = (args) => facade.putDm(args)
+  if (has('readDm') || has('readGroup')) {
+    out.read = async (ref) => {
+      if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
+      const dm = ref.kind === 'dm'
+      if (!has(dm ? 'readDm' : 'readGroup')) throw new TypeError('mídia inválida')
+      const got = dm
+        ? await facade.readDm({ from: ref.from, id: ref.id, index: ref.index })
+        : await facade.readGroup({ diary: ref.diary, item: ref.item })
+      let w = got.w
+      let h = got.h
+      if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h)) {
+        const b = mediaBounds(got.bytes, got.mime)
+        w = b === null ? null : b.width
+        h = b === null ? null : b.height
+      }
+      return { bytes: got.bytes, mime: got.mime, w, h }
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null
 }
 
 // config: { association, seederUrl } (src/config.js checkWebForm).
@@ -104,7 +137,7 @@ export async function connectBrowserNode (config, { onEvent, onClose } = {}) {
     request: (method, params = {}) => client.request(method, params),
     close,
     identity: node.identity,
-    media: node.media || null,
+    media: mediaOf(node.media),
     follows: node.follows || null
   }
 }

@@ -30,6 +30,13 @@
 // re-reads, asks groups.js reconcile and only then offers "tentar de novo".
 // Hosted node only: a node that is not hosted sees the "Só na versão web"
 // state, like Avisos.
+// Photos and GIFs (a member posting as themself, when the node offers
+// media.upload and is online): the clip opens the attach sheet; the photos
+// upload in order (sealed for a private group, so only members open them),
+// then one group.post carries them (attach-plan.js composePlan, chatSend.js
+// runChatSend) under a progress ring. Cancelar before the post discards
+// them. An uncertain post keeps that exact request and only "tentar de novo"
+// resends it. Photos in the thread render inside the bubble (ChatMedia).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
@@ -65,6 +72,10 @@ import { pagesGroup } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { shouldRedirectToCommunity } from '../groupRedirect'
 import { GrupoAjustes } from './GrupoAjustes'
+import { composePlan } from '../attach-plan'
+import { chatMediaRefs, mediaPostLanded, retryChatSend, runChatSend, stagedOf } from '../chatSend'
+import { ChatMedia } from '../ui/ChatMedia'
+import { useChatAttachments } from '../ui/AttachSheet'
 
 export const WEB_ONLY_TEXT = 'Comunidades só na versão web'
 const ORPHAN_TEXT = 'Este grupo não pertence a nenhuma comunidade.'
@@ -146,6 +157,15 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
   const post = useAction()
   const act = useAction()
   const join = useAction()
+  const attachments = useChatAttachments()
+  // { phase, progress } of a photo post; mediaHold { op, text, replyKey }
+  // after an uncertain one (the exact group.post it made); sendTokenRef is
+  // the running post, which Cancelar marks dead before its request starts.
+  const [mediaSend, setMediaSend] = useState(null)
+  const [mediaHold, setMediaHold] = useState(null)
+  const [mediaError, setMediaError] = useState('')
+  const sendTokenRef = useRef(null)
+  useEffect(() => () => { if (sendTokenRef.current) sendTokenRef.current.live = false }, [])
   const seqRef = useRef(0)
   const storeRef = useRef(store)
   storeRef.current = store
@@ -446,7 +466,124 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
   // The reply target is read from its key, never from the loaded pages: a
   // refresh that drops the target from rawById must not turn the reply into a
   // plain message.
+  const mediaApi = !asPage.page && node.media && typeof node.media.upload === 'function' ? node.media : null
+  const sendingMedia = mediaSend !== null && (mediaSend.phase === 'uploading' || mediaSend.phase === 'sending')
+
+  // The identity a held photo post belongs to: a retry never goes out as
+  // anyone else (see the effect below).
+  const actingId = asPage.page ? 'page:' + asPage.key : 'self'
+  const actingIdRef = useRef(actingId)
+  actingIdRef.current = actingId
+  useEffect(() => {
+    if (sendTokenRef.current) sendTokenRef.current.live = false
+    sendTokenRef.current = null
+    setMediaSend(null)
+    setMediaHold(null)
+    setMediaError('')
+    attachments.clear()
+    // attachments.clear is stable; only the acting identity matters here.
+  }, [actingId])
+
+  // Re-reads the group: did the uncertain photo post land after all?
+  const mediaLanded = async (held) => {
+    try {
+      const read = await readNewest()
+      return mediaPostLanded({ diary: ownKey, text: held.text, sentAt: held.sentAt, replyKey: held.replyKey, media: held.op.params.media }, read)
+    } catch {
+      return 'unknown'
+    }
+  }
+
+  const mediaDone = async (r, text, replyKeyOf, sentAt, acting) => {
+    setMediaSend(null)
+    if (r.phase === 'uncertain') {
+      const held = { op: r.op, text, replyKey: replyKeyOf, sentAt, acting, checking: true }
+      setMediaHold(held)
+      const verdict = await mediaLanded(held)
+      if (actingIdRef.current !== acting) return
+      if (verdict !== 'landed') {
+        setMediaHold((h) => (h && h.op === held.op ? { ...h, checking: false } : h))
+        return
+      }
+      r = { phase: 'done' }
+    }
+    if (r.phase === 'done') {
+      setDraft((d) => (d === text ? '' : d))
+      if (replyKeyOf) setReplyKey((k) => (k === replyKeyOf ? null : k))
+      setMediaHold(null)
+      attachments.clear()
+      readNewest().then(() => scrollToEnd(), () => {})
+    } else if (r.phase === 'failed') {
+      setMediaHold(null)
+      setMediaError(errorText(r.error))
+    }
+  }
+
+  const sendMedia = async (text, replyTo) => {
+    if (mediaApi === null || sendingMedia || !attachments.ready || !node.online || info === null) return
+    setMediaError('')
+    const files = attachments.files
+    const visibility = isPrivate ? 'private' : 'public'
+    let plan
+    try {
+      plan = composePlan({ text, attachments: stagedOf(files), target: { kind: 'group', group, visibility, ...(replyTo ? { replyTo: { writer: replyTo.writer, seq: replyTo.seq } } : {}) } })
+    } catch (err) {
+      setMediaError(errorText(err))
+      return
+    }
+    const sealed = visibility === 'private'
+    const acting = actingId
+    const sentAt = Date.now()
+    const token = { live: true }
+    sendTokenRef.current = token
+    const r = await runChatSend({
+      plan,
+      files,
+      upload: (f) => mediaApi.upload({ bytes: f.bytes, mime: f.mime, width: f.width, height: f.height, ...(sealed ? { sealed: true } : {}) }),
+      request,
+      live: () => token.live,
+      onPhase: (p) => { if (token.live) setMediaSend(p) }
+    })
+    if (sendTokenRef.current === token) sendTokenRef.current = null
+    if (r.phase === 'cancelled') return
+    mediaDone(r, text, replyTo ? replyTo.writer + ':' + replyTo.seq : null, sentAt, acting)
+  }
+
+  // The explicit retry of an uncertain photo post: the same group.post, once.
+  const retryMedia = async () => {
+    if (!mediaHold || mediaHold.checking || sendingMedia) return
+    const held = mediaHold
+    // Only the identity that made the post may resend it.
+    if (held.acting !== actingIdRef.current) {
+      setMediaHold(null)
+      return
+    }
+    setMediaError('')
+    // A post that landed meanwhile is not sent twice.
+    if (await mediaLanded(held) === 'landed') {
+      mediaDone({ phase: 'done' }, held.text, held.replyKey, held.sentAt, held.acting)
+      return
+    }
+    const r = await retryChatSend({ op: held.op, request, onPhase: setMediaSend })
+    mediaDone(r, held.text, held.replyKey, held.sentAt, held.acting)
+  }
+
+  const cancelMedia = () => {
+    if (mediaSend !== null && mediaSend.phase === 'sending') return
+    if (sendTokenRef.current) sendTokenRef.current.live = false
+    sendTokenRef.current = null
+    setMediaSend(null)
+    setMediaHold(null)
+    setMediaError('')
+    attachments.clear()
+  }
+
   const sendDraft = () => {
+    if (mediaHold) return retryMedia()
+    if (attachments.items.length > 0 && !asPage.page) {
+      const k = replyKey !== null ? /^([0-9a-f]{64}):([1-9][0-9]*)$/.exec(replyKey) : null
+      return sendMedia(draft, k ? { writer: k[1], seq: Number(k[2]) } : null)
+    }
     const m = replyKey !== null && !asPage.page ? /^([0-9a-f]{64}):([1-9][0-9]*)$/.exec(replyKey) : null
     sendPost(draft, m ? { writer: m[1], seq: Number(m[2]) } : null)
   }
@@ -545,7 +682,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
       text: raw.text,
       group,
       writer: raw.writer,
-      private: isPrivate
+      private: isPrivate,
+      // A public post's photos stay out of the report target.
+      ...(isPrivate && Array.isArray(raw.media) ? { media: raw.media } : {})
     })
   }
 
@@ -840,8 +979,11 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
           <Avatar name={who.avatarName} publicKey={row.diary || row.writer} picture={profile && profile.avatar ? profile.avatar : undefined} size={32} persist={false} />
         </Pressable>
         )
+    const rawRow = rawById.get(row.key || row.id)
+    const refs = row.hidden || !rawRow ? [] : chatMediaRefs('group', { diary: rawRow.diary, media: rawRow.media })
     return (
       <Bubble
+        media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} /> : null}
         item={{ key: row.key, text: row.text, rawText: row.hidden ? undefined : row.rawText, at: row.at, hidden: row.hidden, dayMark: row.dayMark }}
         mine={mine}
         shape={row.shape}
@@ -879,24 +1021,41 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
       </View>
     )
   } else if (asPage.page ? pageRole === 'member' : reader) {
-    const notes = waitToWrite || orphan || !node.online || post.error
+    const notes = waitToWrite || orphan || !node.online || post.error || mediaHold || mediaError || attachments.note
       ? (
         <View style={styles.composeNotes}>
           {waitToWrite ? <Soft>{awaitingKey ? REKEY_PENDING_LABEL : (communityJoin === 'approval' && !isPrivate ? DEVICE_APPROVAL_TEXT : DEVICE_WAIT_TEXT)}</Soft> : null}
           {orphan ? <Soft>{ORPHAN_TEXT}</Soft> : null}
           {!node.online ? <Soft>{OFFLINE_POST_TEXT}</Soft> : null}
           <ErrorText>{post.error}</ErrorText>
+          {mediaError || attachments.note ? <ErrorText>{mediaError || attachments.note}</ErrorText> : null}
+          {mediaHold
+            ? (
+              <View style={styles.mediaHold}>
+                <Soft>{CHECK_UNKNOWN}</Soft>
+                {mediaHold.checking ? null : <Pill label='tentar de novo' onPress={retryMedia} pending={sendingMedia} />}
+                <Pill label='descartar' onPress={cancelMedia} />
+              </View>
+              )
+            : null}
         </View>
         )
       : null
+    const staged = attachments.items.length > 0
+    const mediaBlocked = staged && (!attachments.ready || sendingMedia)
     composer = (
       <ChatComposer
         value={draft}
         onChangeText={(t) => { setDraft(t); setPostHold(null) }}
         onSend={sendDraft}
-        sending={post.pending || pagePending}
-        sendDisabled={!canPost || !node.online || left < 0 || postHold !== null}
-        editable={canPost}
+        sending={post.pending || pagePending || sendingMedia}
+        sendDisabled={!canPost || !node.online || left < 0 || postHold !== null || mediaBlocked}
+        editable={canPost && mediaHold === null && !sendingMedia}
+        onAttach={mediaApi !== null && canPost && postHold === null && check === null ? () => attachments.pick() : null}
+        attachments={staged ? attachments.items : null}
+        onRemoveAttachment={mediaHold === null ? attachments.remove : undefined}
+        onCancelAttachments={mediaHold === null && !(mediaSend && mediaSend.phase === 'sending') ? cancelMedia : undefined}
+        progress={sendingMedia ? mediaSend.progress : null}
         placeholder={meta.state === 'rekey-pending' || awaitingKey ? REKEY_PENDING_LABEL : 'Escreva uma mensagem'}
         accessibilityLabel='mensagem para o grupo'
         reply={replyBar ? { name: replyBar.name, text: replyBar.text, senderKey: replyBar.senderKey, mine: replyBar.mine } : null}
@@ -995,5 +1154,6 @@ const makeStyles = (colors) => StyleSheet.create({
     paddingVertical: 8,
     gap: 4
   },
-  composeNotes: { gap: 4, paddingHorizontal: space.xs }
+  composeNotes: { gap: 4, paddingHorizontal: space.xs },
+  mediaHold: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: space.sm }
 })

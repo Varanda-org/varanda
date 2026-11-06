@@ -30,14 +30,14 @@
 // real DM wake still on screen. Whether Chrome counts a notice closed at once
 // as shown (with the app in the background it may show its own generic
 // notice) is not verified: the manual matrix in docs/verification.md section
-// 103 records it, and its results go back to the owner.
+// 108 records it, and its results go back to the owner.
 
 const VERSION = __VARANDA_VERSION__
 const PRECACHE = __VARANDA_PRECACHE__
 const PREFIX = 'varanda-shell-'
 const CACHE = PREFIX + VERSION
 
-// Paths that are never intercepted (besides /seeder/..., /account/..., /media/... and /index/...):
+// Paths that are never intercepted (besides /seeder/..., /account/..., /media/..., /blob/... and /index/...):
 // live configuration, the worker script itself and the seeder's own pages.
 // /version.json is live deploy state written by deploy.sh: never precached,
 // never answered from the cache or with the shell, so offline it fails like
@@ -55,6 +55,10 @@ const ACCOUNT_PREFIX = '/account/'
 // through Caddy with its own long-lived Cache-Control and real 404s. Like the
 // account service, the worker never answers it: no cache lookup, no 503.
 const MEDIA_PREFIX = '/media/'
+// Chat media chunks (/blob/<id>/<index>, sealed ciphertext from the seeder's
+// anonymous blob pool) follow the same rule: never cached in the shell, never
+// answered with the shell or a 503.
+const BLOB_PREFIX = '/blob/'
 // The seeder's engagement index (/index/post/..., /index/counts/...,
 // /index/member/..., the account search /index/search/...) and its topic
 // search (/index/topic/...) are proxied by Caddy the same way, with their own
@@ -279,7 +283,7 @@ self.addEventListener('fetch', (event) => {
   // /.well-known/ holds the native app association files: a missing one must
   // stay a real 404, never the cached shell.
   if (BYPASS.has(pathname) || pathname.startsWith('/seeder/') || pathname.startsWith('/.well-known/') || pathname.startsWith(ACCOUNT_PREFIX) ||
-    pathname.startsWith(MEDIA_PREFIX) || pathname.startsWith(INDEX_PREFIX)) return
+    pathname.startsWith(MEDIA_PREFIX) || pathname.startsWith(BLOB_PREFIX) || pathname.startsWith(INDEX_PREFIX)) return
   if (request.mode === 'navigate') {
     event.respondWith(navigate(request))
   } else if (pathname === '/varanda-node.js') {
@@ -370,7 +374,7 @@ function isAppWindow (c) {
     const p = u.pathname
     return u.origin === self.location.origin && !BYPASS.has(p) && !p.startsWith('/seeder/') &&
       !p.startsWith('/.well-known/') && !p.startsWith(ACCOUNT_PREFIX) && !p.startsWith(MEDIA_PREFIX) &&
-      !p.startsWith(INDEX_PREFIX)
+      !p.startsWith(BLOB_PREFIX) && !p.startsWith(INDEX_PREFIX)
   } catch {
     return false
   }

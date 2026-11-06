@@ -5026,7 +5026,219 @@ Limites desta caminhada:
 - As sugestões dependem de conta hospedada e online, e o toque em menção, de conta hospedada. Fora disso o @nome segue como texto.
 - Nenhuma caixa acima foi executada nesta documentação.
 
-## 103. Aviso push de mensagem nova não aparece no aparelho que enviou (PR fix/dm-wake-self-notification)
+## 103. Menu "mais", prévias nos Avisos e Busca ao digitar (PR feat/feed-polish)
+
+Roteiro da barra de ações das publicações (A Rua, Diário, Conversa, Espiadinha e resultados da Busca), das folhas Republicar e "mais", da nota de números e do espaço do botão Publicar, da pílula "ver novidades", das linhas e prévias dos Avisos, da Busca ao digitar e da foto em Publicar. O comportamento descrito está em [app.md](app.md), seções "Telas", "Interações da Rua" e "Perfil fixo, Avisos, Mensagens e Publicar". Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e a captura, ou o registro, fica guardado.
+
+Regras que os passos conferem:
+
+- Barra de ações: responder, republicar, curtir e "mais" (⋯). Sem lápis, bandeira ou lixeira na barra. O toque duplo para curtir continua valendo no app nativo.
+- Republicar abre a folha "Republicar" (ou "Desfazer republicação", quando já republicou) e "Citar". Sem rede, a folha traz só "Citar".
+- O número de citações não aparece mais na barra (Citar está na folha); o número de republicações não soma citações, para bater com a lista de quem republicou. O leitor de tela anuncia o botão como "republicar ou citar".
+- Na web, os campos arredondados (Busca, a pesquisa de Conversas, Nova conversa e o campo de escrever das conversas) mostram o foco com a borda da pílula na cor de destaque, sem o contorno retangular do navegador. Busca: Enter ou "pesquisar" sempre pesquisa de novo (depois de uma falha, é assim que se tenta outra vez); trocar para Contas cancela a pesquisa de Publicações que esperava a pausa; o teclado não corrige nem põe maiúscula no termo.
+- "Mais" abre "Copiar link" (só quando a publicação tem link público), "Denunciar" (publicações de outros, com a conta conectada) e "Apagar" (publicações próprias, em vermelho, com a confirmação de sempre).
+- "Compartilhar" só aparece quando a publicação tem link público. Hoje nenhuma publicação tem, então o botão não aparece.
+- A Rua: "Alguns números podem estar incompletos." é uma nota pequena e suave, não uma linha; a lista deixa espaço para o botão de publicar não cobrir as ações da última publicação; "ver novidades" nunca aparece sobre o estado vazio.
+- Avisos: cada linha tem o selo de ação no avatar, o nome e a ação numa linha, o @nome verificado na linha suave (quando existe) e, numa linha própria, o começo da publicação entre aspas (até 90 caracteres, em outra cor; nunca no lugar do @nome; sem prévia nas linhas de quem começou a seguir), o tempo à direita e um ponto nas linhas não lidas. As prévias vêm do próprio diário no nó; nada é buscado de fora.
+- Busca: campo arredondado com lupa e X. Publicações pesquisa enquanto a pessoa digita (a partir de 2 caracteres, depois de uma pausa curta; respostas antigas são ignoradas) e ao tocar em enter ou em "pesquisar". Contas já pesquisava enquanto digitava.
+- Publicar: o botão de foto segue a capacidade (seletor de fotos e mídia do nó). Na Vitrine o nó não oferece mídia, então o botão não aparece.
+
+Android (AVD `varanda-api36`, build de debug, primeiro):
+
+- [ ] Barra de ações em A Rua, Diário, Conversa, Espiadinha e Busca: responder, republicar, curtir e "mais"; nenhum lápis, bandeira ou lixeira na barra.
+- [ ] Toque duplo curte e nunca descurte, como antes.
+- [ ] Republicar abre a folha "Republicar" e "Citar"; "Desfazer republicação" aparece depois de republicar; sem rede, só "Citar".
+- [ ] "Mais" em publicação de outra pessoa mostra "Denunciar"; em publicação própria mostra "Apagar", que pede a confirmação e apaga; "Copiar link" não aparece sem link público.
+- [ ] A Rua: a nota "Alguns números podem estar incompletos." aparece como rodapé pequeno, não como linha; ao rolar até o fim, o botão de publicar não cobre as ações da última publicação; "ver novidades" não aparece sobre o estado vazio.
+- [ ] Avisos: selo, nome e ação numa linha; o @nome verificado embaixo; a prévia entre aspas numa linha própria, até 90 caracteres; uma menção cujo texto é só "@outra_pessoa" não aparece no lugar do @nome; tempo à direita; ponto só nas linhas não lidas.
+- [ ] Busca: campo arredondado com lupa; digitar em Publicações pesquisa depois de 2 caracteres e uma pausa; o X limpa o campo e a pesquisa; Contas continua pesquisando enquanto digita.
+- [ ] Publicar: em conta hospedada num build nativo, o seletor de fotos abre e a foto é enviada. Este passo fica aberto: o login com passkey em build de debug está bloqueado (veja `docs/design-review.md`).
+- [ ] Tema claro e tema escuro: selos, prévias, folhas e campo de busca legíveis, sem texto cortado.
+- [ ] Fonte grande: folhas, linhas dos Avisos e barra de ações sem corte.
+- [ ] TalkBack e VoiceOver numa linha dos Avisos: leem a ação, o @nome, a prévia entre aspas e "não lido" nas linhas não lidas.
+- [ ] Na web, focar a Busca, a pesquisa de Conversas, Nova conversa e o campo de uma conversa: borda da pílula na cor de destaque, sem contorno azul retangular; Tab pelo teclado mostra onde está o foco.
+
+iOS (simulador iPhone 16e, depois do Android):
+
+- [ ] Os mesmos passos do Android, em tema claro e em tema escuro, e com fonte grande.
+
+Web (Chrome, depois do iOS):
+
+- [ ] Em 390 px e em 1280 px, nos temas claro e escuro: barra de ações, folhas Republicar e "Mais", nota de números, espaço do botão Publicar, pílula "ver novidades", linhas e prévias dos Avisos, e Busca digitando e limpando.
+
+Como verificar, antes da caminhada, a partir da raiz:
+
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- A Vitrine não tem mídia, então a foto de Publicar só se confere com conta hospedada em build nativo.
+- "Compartilhar" fica sem efeito visível até existirem links públicos de publicação (próximo passo).
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 104. Blobs anônimos das conversas: selos, canal, conjunto e rota `/blob` (PR feat/blob-channel)
+
+Roteiro do canal de mídia das mensagens diretas no semeador: o tipo de selo `blob`, o canal `'varanda/blob/1'`, o conjunto em `<dados>/blobs/` e a rota `GET|HEAD /blob/<id>/<índice>`. O formato está em [protocol.md](protocol.md), seção 13, e o tipo de selo na seção 11. A função chega ao app só num PR posterior: nenhuma tela usa isto ainda, então nada aqui muda os Termos nem a Política. Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e o registro fica guardado.
+
+Regras que os passos conferem:
+
+- Quadro `VBL1` de 33137 bytes (token aleatório de selo e `check` de conteúdo, sem salt); os selos de blob são comprados antes, numa carteira de 300 (reabastecida abaixo de 150) no link identificado, e gastos depois no link anônimo; o selo de blob tem chave, `kid`, domínio FDH e limite diário (1024 por diário e por dia de Brasília) próprios, à parte dos de mensagem; um selo de um tipo nunca paga o outro.
+- O conjunto guarda um blob por 7 dias a partir do primeiro pedaço (sem renovar), varre o incompleto em 1 hora, conta os pedaços guardados contra o teto de bytes (`--blob-bytes`, padrão 2 GiB, sem reserva adiantada) e responde `cheio` ao pedaço que passaria do teto, sem escrever nada e sem gastar o selo.
+- `GET /blob/<id>/<índice>` não tem autenticação, cookie nem registro: só blobs completos, o mesmo 404 `não encontrado` (`no-store`) para qualquer falha e para qualquer query string, 200 com o quadro guardado e `Cache-Control: private, max-age=604800`.
+- O Caddy repassa `/blob/*` como `/media/*` (Host reescrito, `X-Forwarded-For` e `X-Real-Ip` removidos, sem registro de acesso, zona `blob` de 300 requisições a cada 10 s por cliente) e continua sem repassar `/moderation-post/` nem `/moderation-group-post/`.
+- `seed --no-dm` desliga o selo de blob, o canal e a rota.
+
+Passos manuais, num semeador de teste (nunca na DHT pública; use `127.0.0.1` e a DHT local):
+
+- [ ] `GET /blob/<id>/0` de um blob completo, sem cookie nem cabeçalho de autenticação, responde 200 com 33137 bytes, `application/octet-stream`, `nosniff`, `private, max-age=604800` e `Accept-Ranges: none`. Um `HEAD` traz os mesmos cabeçalhos e nenhum corpo.
+- [ ] O mesmo caminho com `?` (mesmo vazio), um id desconhecido, um blob incompleto, um índice igual ao `count` e um id com maiúsculas dão o mesmo 404 `não encontrado` com `Cache-Control: no-store`. Um `POST` dá 405 com `Allow: GET, HEAD`.
+- [ ] Pelo Caddy de verdade (`deploy/seeder/Caddyfile`): `/blob/*` chega ao semeador sem `X-Forwarded-For` nem `X-Real-Ip`; a 301ª requisição de um mesmo cliente em 10 s volta 429 com `Retry-After`; o Caddy não tem diretiva `log` de acesso.
+- [ ] Pelo Caddy: `/moderation-post/...` e `/moderation-group-post/...` continuam não repassados (caem no app, não no semeador). `node apps/cli/test/caddyfile.test.js` passa.
+- [ ] Um semeador com `seed --no-dm` responde 404 em `/blob/...` e o membro vê o canal e o tipo de selo como não suportados.
+- [ ] Um `put` de um quadro novo recebe `ack` com `ok` verdadeiro; o mesmo quadro de novo também (repetido); outro quadro com o mesmo `(id, índice)` recebe `invalido`; com o conjunto no teto (`--blob-bytes` mínimo), o próximo pedaço recebe `cheio` e nada é escrito em `blobs/`.
+- [ ] Um selo de mensagem usado como selo de pedaço recebe `invalido`, e um pedido de selo `blob` não gasta a cota de mensagens (conferir `blob-stamps.json` e `dm-stamps.json`).
+- [ ] Com a carteira de selos de blob cheia, mandar uma mídia não emite nenhum selo durante o envio (observar o link de selos do semeador); com a carteira curta para o envio, uma compra de selos acontece primeiro, antes do primeiro `put`.
+- [ ] Toda linha de registro ligada a blob traz só um evento fixo e um motivo ou uma contagem (`blob` com `completo`, `cheio`, `invalido` ou `postage`; `blob-stamp`; `peer-dropped`; `blob-put-failed`; `blob-pool-torn`, `-broken`, `-remove-failed` e `-sweep-failed`; `dm-stamp` com `blob-postage`), nunca id, token, chave, endereço nem diário.
+- [ ] Um anexo grande baixa sem 429 nem 503 em velocidade normal, e um 503 do semeador é repetido depois do seu `Retry-After` (no máximo 3 repetições; um 404 falha na hora).
+- [ ] Depois de 7 dias (ou com o relógio de teste adiantado), o blob some e o `GET` dá 404; os resumos dos selos usados seguem em `blobs/tokens.json` até 14 dias.
+- [ ] Uma nova tentativa depois de uma pausa longa (mais de uma hora) reenvia a mídia e ela abre para o destinatário.
+- [ ] Rotacionar a chave de selo de blob do semeador com a carteira cheia: o envio seguinte funciona, sem erros.
+- [ ] O primeiro envio de um item de tamanho máximo, a partir de uma carteira vazia e numa conexão lenta, termina.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node packages/core/test/blob.test.js`, `blob-net.test.js`, `blob-pool.test.js`, `node apps/cli/test/blob-seeder.test.js` e `node apps/cli/test/caddyfile.test.js`.
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- O app ainda não envia nem mostra mídia por este canal; só o semeador e os testes o exercitam.
+- O horário e a leitura repetida do mesmo id continuam visíveis ao semeador (protocol.md, seção 13, "Privacidade"); isto não é resistência à análise de tráfego.
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 105. Mídia nas mensagens privadas e anexo nas denúncias (PR feat/dm-media-protocol)
+
+Roteiro do protocolo e do nó para fotos e GIFs em mensagens privadas (corpo interno v2), do cache local cifrado no nó do navegador, da leitura de mídia pelas Páginas e do anexo de imagem nas denúncias de conversa. Ainda não há tela: o app recebe estas peças num PR posterior. O comportamento está em [protocol.md](protocol.md), seções 3, 11 ("Inner v2", "Local storage", "Reports") e 12, e em [rpc.md](rpc.md), 5.20, 5.75, 5.77, 5.78, 5.81 e 5.88. Nada abaixo foi executado nesta documentação.
+
+Regras que os passos conferem:
+
+- Uma mensagem só de texto continua no corpo v1, byte por byte; uma mensagem com mídia vai no v2 (um conjunto exato de chaves, prefixo de assinatura próprio), com 1 a 4 itens de ids distintos, texto vazio só com mídia, e o texto que cabe diminui a cada item.
+- As chaves de mídia chegam só à interface dona da conversa, em `dm.thread`; nenhum evento, registro ou outro aparelho as recebe. O cache de mídia aberta fica cifrado sob a chave local, até 256 MiB (o mais antigo sai primeiro), e é apagado ao bloquear, ao sair e ao zerar.
+- Numa conversa da pasta de pedidos, nada é baixado sozinho: a mídia só desce num toque (leitura explícita) ou depois de aceitar; no máximo 2 aberturas ao mesmo tempo.
+- O envio sobe todos os pedaços antes de mandar a mensagem; uma falha de envio de mídia é um erro comum, nunca incerto, e nada é repetido sozinho.
+- A Página guarda e devolve aos administradores os itens recebidos, nunca busca o blob, e responde só em texto.
+- A denúncia com anexo usa a declaração v2 (conversa) ou v3 (grupo), com o resumo da imagem; a rota `POST /account/report/anexo` aceita JPEG, WebP ou GIF até 1 MiB (2 MiB recebe 413), confere o resumo, guarda o arquivo com modo 0600, e a denúncia vai sempre para uma pessoa; o painel mostra "com mídia" e "imagem enviada por quem denunciou, não conferida".
+
+Passos (marcar só depois de executar e guardar o registro):
+
+- [ ] Dois membros no laboratório hospedado: mandar uma foto com legenda e uma só foto; as duas chegam, `dm.thread` traz os itens com a chave, e nenhum evento `dm.changed` carrega item.
+- [ ] Esvaziar o conjunto de blobs do semeador depois de abrir a foto: ela continua abrindo pelo cache; uma foto nunca aberta passa a `{ unavailable: true }` e o texto continua.
+- [ ] Bloquear a identidade e desbloquear: o cache de mídia foi apagado e a foto abre de novo pelo semeador (se ainda estiver lá).
+- [ ] Uma pessoa desconhecida manda várias fotos: abrir o pedido não baixa nada (observar `/blob` no semeador); um toque baixa só aquela; aceitar a conversa abre as outras, no máximo 2 por vez.
+- [ ] Uma mensagem com mídia para uma Página aparece aos administradores com os itens, e a resposta da Página sai em texto (corpo v1).
+- [ ] Uma denúncia de conversa com anexo chega ao painel com "com mídia", a imagem abre só com a sessão de moderador, e um anexo de 2 MiB recebe 413; uma denúncia v1 antiga ainda confere.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node packages/core/test/dm.test.js`, `dm-fold.test.js` e `report.test.js`; `node packages/rpc/test/dm-budget.test.js`, `methods.test.js` e `sizes.test.js`; `node packages/web-member/test/dm.test.js`, `dm-store.test.js`, `dm-e2e.test.js` e `blob.test.js`; `node apps/cli/test/pages-dm.test.js`, `dm-report.test.js`, `moderation-store.test.js`, `account-mod.test.js` e `panel.test.js`.
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- O app ainda não anexa nem mostra mídia, e o `dm.putMedia` nativo responde erro interno até o PR do app.
+- A rota de anexo tem 4 vagas globais que corpos lentos e anônimos podem ocupar até o tempo limite de 10 s; a autorização assinada nos cabeçalhos, antes de ler o corpo, vem com o envio do app.
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 106. Fotos nos grupos públicos e privados: protocolo, nó e RPC (PR feat/group-media-protocol)
+
+Roteiro do protocolo, do nó e da RPC para fotos e GIFs nos grupos, públicos e privados (registro de publicação v2 de grupo). O formato está em [protocol.md](protocol.md), seção 10 ("Group post media" e "Old readers"), e os métodos em [rpc.md](rpc.md), 5.39 (`group.post`), 5.40 (`group.read`) e 5.56 (`media.uploadFile`). Ainda não há tela: o app que mostra e envia fotos de grupo vem num PR posterior (`feat/chat-photos-gifs`), e a versão legal dos Termos não muda neste PR. Nada abaixo foi executado nesta documentação.
+
+Regras que os passos conferem:
+
+- Uma publicação de grupo só de texto continua no registro v1, byte por byte. Com mídia, vai no registro v2 (o conjunto exato de chaves `type`, `text`, `replyTo`, `media`, `card`, `fwd`, `seen`, `at`), com 1 a 4 itens de `(core, start)` distintos, `card` sempre `null` e `fwd` sempre `0`; o texto pode ser vazio só quando há mídia.
+- Um leitor antigo pula o registro v2 inteiro, sem cair no texto: nada aparece como texto solto e o fold não falha.
+- Grupo público: os itens são descritores de publicação comuns, e os bytes ficam no núcleo de mídia do autor, servidos em `/media` como as fotos do diário.
+- Grupo privado: cada foto é selada no aparelho (secretbox, chave e nonce novos, preenchida até blocos inteiros de 32 KiB), e só o cifrado vai ao núcleo de mídia do autor. A chave viaja só dentro da publicação selada pelo grupo. O semeador guarda e serve só o cifrado.
+- `group.read` devolve `media` em cada item (`null` em registro v1 e em publicação oculta); a mídia de uma publicação oculta não sai.
+- `GROUP_LIMIT_MAX` e `GROUP_LIMIT_DEFAULT` valem 29: a página mais pesada de `group.read` (quatro itens privados por publicação) cabe em `MAX_MESSAGE`.
+- A CLI (nó core) recusa mídia em `group.post` com `mídia disponível só na versão web`. No navegador, mídia cifrada só vai a grupo privado (`mídia cifrada só em grupo privado`), e grupo privado exige mídia cifrada (`grupo privado exige mídia cifrada`).
+- Na lista de comunidades, a última publicação só com foto aparece como `Foto` (ou `GIF`).
+- `media.readGroup` busca o cifrado na origem do semeador do próprio nó (rota `/media`, `no-store`, sem cookies e sem redirecionamentos) e abre a imagem; qualquer falha vira `mídia indisponível`, e um bloqueio durante o download é recusado.
+- A CLI imprime ` [foto]` ou ` [gif]` depois do texto e nunca imprime chave nem nonce de item privado, nem no `--json`.
+- As Páginas continuam gravando publicações de texto e leem registros v2.
+
+Passos (marcar só depois de executar e guardar o registro):
+
+- [ ] Num grupo público do laboratório hospedado (dois perfis do Chrome, `apps/cli/scripts/hosted-lab.js`), postar uma foto pelo console da fachada do nó e ler de volta: a publicação traz um item com `core`, `start`, `sha256` e as dimensões, e a foto abre pela `/media` do semeador.
+- [ ] Num grupo público cuja última publicação é só uma foto, a lista de comunidades mostra `Foto`; com um GIF, mostra `GIF`.
+- [ ] Num grupo privado, postar uma foto: o `group.post` vai com `sealed: true`, e a publicação aparece para o outro membro com a foto aberta por `media.readGroup`.
+- [ ] Pela rota `/media` do semeador, o item de um grupo privado não começa com a assinatura de JPEG (`FF D8 FF`) nem de PNG (`89 50 4E 47`): são bytes cifrados.
+- [ ] Na aba Rede do DevTools, o pedido de `media.readGroup` vai só à origem do semeador do próprio nó, sem cookie, sem usar o cache do navegador (`no-store`) e sem seguir redirecionamento.
+- [ ] Com o nó bloqueado durante o download de uma foto privada, `media.readGroup` recusa, e a foto não aparece depois do desbloqueio sem novo pedido.
+- [ ] Um nó do `main` anterior a este PR lê o grupo: a publicação com foto some sem erro, e as publicações só de texto aparecem como antes.
+- [ ] Uma publicação só de texto escrita por este PR tem o mesmo registro v1 do `main` (comparar os bytes do bloco).
+- [ ] Uma publicação com foto oculta: `group.read` devolve `media: null` para ela, e o texto oculto segue como antes.
+- [ ] Uma página de `group.read` com 29 publicações de quatro fotos privadas cabe no limite de mensagem; o teste de tamanho confirma e uma página real também sobe.
+- [ ] `varanda group read` mostra ` [foto]` depois do texto de uma publicação com foto; `varanda group read --json` não contém `key` nem `nonce` de item privado (conferir com `grep`).
+- [ ] O comando de publicar em grupo da CLI recusa uma imagem com `mídia disponível só na versão web` e não grava nenhum registro.
+- [ ] Uma Página que participa de um grupo lê uma publicação v2 e continua publicando só texto.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node packages/core/test/group-crypto.test.js`, `group-media.test.js`, `group.test.js` e `session-groups.test.js`.
+- `node packages/rpc/test/methods.test.js` e `sizes.test.js`.
+- `node packages/web-member/test/group-ops.test.js`, `groups-e2e.test.js`, `private-ops.test.js` e `node-bundle.test.js` (exigem Node 20.19 ou mais novo).
+- `node apps/cli/test/group-commands.test.js`, `pages-groups.test.js` e `node apps/app/test/identityInstall.test.js`.
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- O app ainda não mostra nem envia foto de grupo; só o nó, o protocolo, a RPC e os testes exercitam isto.
+- O semeador continua vendo o horário, o tamanho aproximado (em faixas de 32 KiB) e a leitura repetida de cada item privado; isto não é resistência à análise de tráfego.
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 107. Fotos e GIFs nas conversas e nos grupos, no app (PR feat/chat-photos-gifs)
+
+Caminhada do app para enviar e ver fotos e GIFs em mensagens diretas e em grupos, públicos e privados, e para a denúncia com imagem. O protocolo e o nó estão nas seções 104, 105 e 106; a tela está em [app.md](app.md) ("Fotos e GIFs", "Nas conversas"). Os Termos de Uso e a Política de Privacidade passam à versão 17 para descrever isso, então quem já aceitou a 16 vê o aceite de novo.
+
+Regras que os passos conferem:
+
+- O clipe do compositor abre "Anexar" com uma só linha, "Foto" ("da galeria, até 4"). GIF por busca e áudio não aparecem, nem desabilitados.
+- Até 4 imagens por mensagem, legenda opcional; nada sai do aparelho antes de tocar em enviar. Uma foto é reencodada sem EXIF nem GPS; um GIF vai como está.
+- Mensagem direta: a foto sai cifrada pelo canal de blobs, sob um id aleatório, e some do semeador em 7 dias; quem abriu guarda a cópia cifrada no cache local, apagado ao bloquear a identidade, em Sair e em Recomeçar.
+- Grupo público: a foto vem pela rota `/media` do semeador, como as fotos das publicações. Grupo privado: só o nó decifra; o app nunca busca o item privado por HTTP.
+- Uma foto que não chega mostra "Mídia indisponível" e o texto da mensagem continua.
+- Denúncia de mensagem direta ou de grupo privado com foto: a primeira imagem aparece em "Imagem que será enviada" antes do envio, como JPEG de até 700 KB; acima disso, "A imagem não coube e não foi enviada.". A denúncia de grupo público aponta para a mensagem, sem imagem.
+- No app instalado, abrir uma foto depende do fetch do worklet Bare (`apps/app/worklet/bare-fetch.js`): só um build de aparelho feito depois de `npm run prepare:native -w apps/app` exercita isso.
+- Os Termos e a Política estão na versão 17 (`LEGAL_VERSION` e `TERMS_VERSION` iguais) e não falam de áudio, busca de GIF, prévia de link nem encaminhamento.
+
+Passos (marcar só depois de executar e guardar o registro), primeiro no Android (build de debug, emulador ou aparelho), depois no simulador iOS, depois no Chrome (web e PWA); a conversa entre duas pessoas usa o laboratório hospedado (`apps/cli/scripts/hosted-lab.js`, dois perfis do Chrome) ou um aparelho e um perfil do Chrome:
+
+- [ ] Num pedido de mensagem com foto (de alguém que você não segue), abrir o pedido não baixa nada: cada foto mostra "Toque para ver a foto" e a aba Rede (web) não registra nenhum pedido de mídia até o toque; depois de aceitar, as fotos abrem sozinhas.
+- [ ] Android: na abertura depois da atualização, o aceite dos Termos aparece com a versão 17; aceitar e seguir.
+- [ ] Android: "Anexar" mostra só "Foto"; escolher 5 imagens da galeria fica em 4; tirar uma miniatura e enviar 3 fotos com legenda numa mensagem direta; a outra pessoa vê as 3 na grade, com a legenda, e um toque abre a tela cheia.
+- [ ] Android: mandar um GIF sem legenda numa mensagem direta; ele chega animado.
+- [ ] Android: postar uma foto num grupo público e outra num grupo privado; as duas aparecem para o outro membro. A foto privada, lida na rota `/media` do semeador, são bytes cifrados (não começa com `FF D8 FF`).
+- [ ] Android: denunciar uma mensagem direta com foto; a tela mostra "Imagem que será enviada" com a imagem, e o painel de moderação recebe a denúncia com a imagem marcada como "não conferida".
+- [ ] Android: depois de abrir uma foto de mensagem direta, bloquear a identidade e desbloquear; a foto abre de novo pelo semeador (o cache local foi apagado). Em Sair, idem.
+- [ ] Android: uma foto de mensagem direta com mais de 7 dias (ou com o conjunto de blobs esvaziado no laboratório), nunca aberta, mostra "Mídia indisponível".
+- [ ] iOS (simulador): repetir os passos do Android acima, num build feito depois de `npm run prepare:native -w apps/app`, e anotar se a foto abre pelo fetch do worklet Bare.
+- [ ] Chrome (web hospedada): repetir os passos acima; na aba Rede, a foto de grupo privado não gera pedido do app à rota `/media` fora do nó, e a foto de mensagem direta vai só a `/blob` na origem do semeador.
+- [ ] Chrome (PWA instalado): enviar e abrir uma foto numa mensagem direta e num grupo; Sair apaga o cache local.
+- [ ] Em todas as plataformas: a Política e os Termos abertos em Ajustes mostram "Versão 17" e não citam áudio, busca de GIF, prévia de link nem encaminhamento.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/app/test/legal.test.js`, `terms-version.test.js` e `node packages/core/test/terms.test.js`.
+- `node apps/app/test/attachPlan.test.js`, `chatMedia.test.js`, `bareFetch.test.js`, `webnodeHandle.test.js`, `report.test.js`, `dm.test.js` e `group-flow.test.js`.
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- A abertura de foto no app instalado só é conferida num build de aparelho depois de `npm run prepare:native -w apps/app`; os testes rodam o fetch Bare isolado, não no worklet.
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 108. Aviso push de mensagem nova não aparece no aparelho que enviou (PR fix/dm-wake-self-notification)
 
 Num nó hospedado no navegador, o aviso push de mensagem direta nova (`dm-wake`, seção 11 de [protocol.md](protocol.md), "Push wake") é global: vai para todas as assinaturas, sem nome nem texto. Um aparelho que acabou de enviar uma mensagem recebia o aviso de volta, "Pode haver uma mensagem nova na Varanda", como se fosse de outra pessoa. A mudança faz três coisas, todas no navegador e sem nada novo no servidor:
 
@@ -5089,9 +5301,9 @@ Resultado da matriz: a registrar aqui por navegador, com a data e a versão do n
 - Com a janela em foco, o aviso vira só uma releitura. Se a identidade está travada, a releitura espera o destravar. Se já há um `dm.pull` em andamento, a releitura dele falha e a mensagem aparece no próximo. Mensagens de uma página só aparecem quando a pessoa está agindo como a página, como antes. Uma janela em foco fora da área de membro (a abertura, os Termos, a primeira configuração, ou o começo de um carregamento antes de o app ouvir) não responde ao worker, e o aviso aparece normalmente.
 - Nenhuma caixa executada nesta documentação.
 
-## 104. Estado de vistos sincronizado entre aparelhos (PR feat/seen-sync-service)
+## 109. Estado de vistos sincronizado entre aparelhos (PR feat/seen-sync-service)
 
-O serviço de conta guarda, por membro, um bloco cifrado com as marcas de visto de Avisos, Conversas e grupos (`apps/cli/lib/account/seen-store.js`, `seen-routes.js`). O formato, a chave e as regras de fusão e de compare-and-swap estão em [protocol.md](protocol.md), seção 13. Esta parte só confere o serviço: o navegador, que grava e funde o bloco, não está nesta PR. O serviço não lê o bloco, e nenhuma conferência abaixo precisa de acesso ao conteúdo.
+O serviço de conta guarda, por membro, um bloco cifrado com as marcas de visto de Avisos, Conversas e grupos (`apps/cli/lib/account/seen-store.js`, `seen-routes.js`). O formato, a chave e as regras de fusão e de compare-and-swap estão em [protocol.md](protocol.md), seção 14. Esta parte só confere o serviço: o navegador, que grava e funde o bloco, não está nesta PR. O serviço não lê o bloco, e nenhuma conferência abaixo precisa de acesso ao conteúdo.
 
 ### Testes automáticos
 
@@ -5101,11 +5313,11 @@ Rodar um arquivo por vez, com `node <arquivo>`:
 - `node packages/core/test/seen-proof.test.js`: enunciado `varanda-seen-v1`, assinatura e recusa de outro prefixo.
 - `node apps/cli/test/account-seen-store.test.js`: arquivo 0600 num diretório 0700, CAS, duas gravações concorrentes (uma só vence), arquivo de tamanho errado, link simbólico, zerar antes de apagar, limite de membros e registro sem membro nem bytes.
 - `node apps/cli/test/account-seen.test.js`: as rotas `start` e `finish`, conflito 409, nonce de uso único, Termos pendentes, limite de 429, tamanho do arquivo e 503 sem armazenamento.
-- `node apps/app/test/legal.test.js`: texto da Política e dos Termos na versão 17 (versão, nota de revisão e resumo do texto fixados).
+- `node apps/app/test/legal.test.js`: texto da Política e dos Termos na versão 18 (versão, nota de revisão e resumo do texto fixados).
 
 ### Roteiro no servidor de teste
 
-Pré-requisito: uma conta de teste já vinculada, criada como em `apps/cli/test/account-seen.test.js` (sem Google), com o aceite da versão 17 dos Termos (`POST /account/terms/start` e `finish`). Sem o aceite, toda gravação responde 409 `termos-pendentes`. A chave de assinatura é gerada na hora, num script de uma linha em `node` que chama `signSeen` de `packages/core/lib/seen-proof.js` e imprime só a assinatura. Nem a chave nem a assinatura vão para o registro desta conferência.
+Pré-requisito: uma conta de teste já vinculada, criada como em `apps/cli/test/account-seen.test.js` (sem Google), com o aceite da versão 18 dos Termos (`POST /account/terms/start` e `finish`). Sem o aceite, toda gravação responde 409 `termos-pendentes`. A chave de assinatura é gerada na hora, num script de uma linha em `node` que chama `signSeen` de `packages/core/lib/seen-proof.js` e imprime só a assinatura. Nem a chave nem a assinatura vão para o registro desta conferência.
 
 - [ ] Leitura sem bloco: `POST /account/seen/start` com `{ "member": "<hex64>", "action": "read" }` responde 200 `{ nonce }`; `POST /account/seen/finish` com `prevHash` de 64 zeros responde 200 `{ hash: null, blob: null }`.
 - [ ] Nonce de uso único: repetir o mesmo `finish` responde 404 `expirado`.
@@ -5114,7 +5326,7 @@ Pré-requisito: uma conta de teste já vinculada, criada como em `apps/cli/test/
 - [ ] Tamanho constante: uma gravação com uma marca e outra com o limite cheio resultam no mesmo tamanho de arquivo (32808 bytes).
 - [ ] Hash velho: uma gravação com um `prevHash` que não é o atual responde 409 `conflito`, com o `hash` atual e o `blob` atual em base64; o arquivo no disco não muda (o hash continua igual).
 - [ ] Depois desse 409, uma gravação com o `hash` devolvido responde 200.
-- [ ] Gravação sem o aceite da versão 17 responde 409 `termos-pendentes` e não muda o arquivo.
+- [ ] Gravação sem o aceite da versão 18 responde 409 `termos-pendentes` e não muda o arquivo.
 - [ ] Apagamento: com um hash velho responde 409 `conflito`; com o hash atual responde 200 `{ ok: true, changed: true }` e o arquivo some; apagar de novo responde 200 `{ ok: true, changed: false }`. Zerar o arquivo antes de apagar não se confere aqui, porque ele já não existe; a conferência é o teste `forget zeroes the file, then unlinks it` de `account-seen-store.test.js`.
 - [ ] Sem armazenamento usável (por exemplo, `seen` trocado por um link simbólico num ensaio), todas as rotas respondem 503 `indisponivel` e nenhum arquivo de membro é tocado.
 - [ ] Sem arquivos sobrando: depois das gravações, nenhum `.tmp.*` fica no diretório `seen`.

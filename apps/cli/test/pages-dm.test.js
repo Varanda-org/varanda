@@ -34,6 +34,9 @@ const { createPagesWriter } = require('../lib/account/pages-writer')
 const { createPagesDm } = require('../lib/account/pages-dm')
 const { createAccountServer } = require('../lib/account/server')
 
+const coreDir = path.dirname(require.resolve('@varanda/core/lib/seeder'))
+const sodium = require(require.resolve('sodium-universal', { paths: [coreDir] }))
+
 const ORIGIN = 'https://varanda.test'
 const PAGE_KEYS = 'cd'.repeat(32)
 
@@ -241,7 +244,42 @@ async function setup (t) {
     return n
   }
 
-  return { api, association, writer, pagesStore, pagesDm, logs, newMember, act, create, invite, accept, remove, rawPage, browserMember }
+  // A drop put straight into the pool, stamped with the test postage key.
+  async function putDrop (sealed) {
+    const n = BigInt(key.n)
+    const token = postage.newToken(n)
+    const sig = postage.modPow(postage.representative(token), BigInt(key.d), n)
+    const drop = dmCore.encodeDrop({ dropId: crypto.randomBytes(32), kid: b4a.from(key.kid, 'hex'), rsaSig: postage.bigToBytes(sig), token, sealed })
+    const r = await seeder._dmPut(drop)
+    if (r === null || typeof r !== 'object') throw new Error('drop refused')
+  }
+
+  // The page's box pair (the test holds the page-keys table).
+  function pageBox (page) {
+    const row = keys.get(page)
+    const secretKey = b4a.from(row.boxSecretKey)
+    const publicKey = b4a.alloc(32)
+    sodium.crypto_scalarmult_base(publicKey, secretKey)
+    return { publicKey, secretKey }
+  }
+
+  // Every inner in the pool the page's box opens, as parsed JSON.
+  function pageInners (page) {
+    const pair = pageBox(page)
+    const out = []
+    const { items } = seeder._dm.page({ after: 0, limit: 1000 })
+    for (const item of items) {
+      const drop = dmCore.decodeDrop(item.bytes)
+      if (drop === null) continue
+      const inner = dmCore.openSealed(drop.sealed, pair)
+      if (inner === null) continue
+      const len = (inner[0] << 8) | inner[1]
+      out.push(JSON.parse(b4a.toString(inner.subarray(2, 2 + len), 'utf8')))
+    }
+    return out
+  }
+
+  return { api, association, assocKp, writer, pagesStore, pagesDm, logs, newMember, act, create, invite, accept, remove, rawPage, browserMember, putDrop, pageBox, pageInners }
 }
 
 test('pages-dm: a member writes to the page, an admin reads and answers through the routes; removal, stop and enable', async (t) => {
@@ -320,6 +358,12 @@ test('pages-dm: a member writes to the page, an admin reads and answers through 
   const mine = (await s.act(ana, 'dm-thread', page, { peer: X.key })).body.messages
   t.is(mine.length, 2, 'the self copy does not double the answer')
   t.is(mine[1].mine, true)
+  // A page answers in text: its inner keeps the v1 key set, so readers from
+  // before inner v2 still open it.
+  const answer = s.pageInners(page).find((b) => b.id === sent.body.id)
+  t.ok(answer, 'the self copy opens with the page box')
+  t.is(answer.v, 1)
+  t.alike(Object.keys(answer), [...dmCore.INNER_KEYS], 'the legacy key set, no media, card or fwd')
 
   // The role is lost during the stamp wait, after the first re-check: the
   // second re-check refuses before anything is filed or delivered.
@@ -387,6 +431,70 @@ test('pages-dm: a member writes to the page, an admin reads and answers through 
   for (const k of [page, other, K2, X.key, ana.hex, bia.hex, box.box, en.box]) t.absent(text.includes(k), 'no key in the logs')
   for (const w of [TEXT_IN, TEXT_OUT, 'depois da parada']) t.absent(text.includes(w), 'no text in the logs')
   t.ok(s.logs.every((e) => e.event !== 'page-dm' || Object.keys(e).join(',') === 'event,reason'))
+})
+
+test('pages-dm: a member message with media (inner v2) opens and its descriptors reach the admin unfetched', async (t) => {
+  t.timeout(200000)
+  const s = await setup(t)
+  const ana = await s.newMember('ana')
+  const made = await s.create(ana, 'floricultura')
+  t.is(made.status, 200, JSON.stringify(made.body))
+  const page = made.page
+  let boxHex = null
+  await until(async () => {
+    const k = (await s.writer.readEntries(page)).find((e) => e.record && e.record.type === 'dm-key' && e.record.gen === 1)
+    boxHex = k ? k.record.box : null
+    return boxHex !== null
+  }, { name: 'page dm-key', timeoutMs: 30000 })
+  t.is(hex(s.pageBox(page).publicKey), boxHex)
+
+  // A member who is only a key and a certificate: the page never looks the
+  // sender up to open what it receives.
+  const mKp = crypto.keyPair()
+  const m = hex(mKp.publicKey)
+  const cert = createCert({ member: m }, s.assocKp)
+  const item = (mime) => ({ id: hex(crypto.randomBytes(32)), key: hex(crypto.randomBytes(32)), nonce: hex(crypto.randomBytes(24)), chunks: 1, bytes: 20000, sha256: hex(crypto.randomBytes(32)), mime, w: 640, h: 480, ms: 0 })
+  const photo = item('image/jpeg')
+  const gif = item('image/gif')
+  const CAPTION = 'olha as flores'
+  // Distinct times: with one shared `at` the fold orders by the random id.
+  const t0 = Date.now()
+  const withText = dmCore.buildInner({ kind: 'msg', to: page, text: CAPTION, media: [photo], cert, at: new Date(t0 - 2000).toISOString() }, mKp)
+  const mediaOnly = dmCore.buildInner({ kind: 'msg', to: page, text: '', media: [gif], cert, at: new Date(t0 - 1000).toISOString() }, mKp)
+  await s.putDrop(dmCore.sealInner(withText, boxHex))
+  t.is((await s.pagesDm.pull()).added, 1, 'the page files a v2 message')
+
+  let l = await s.act(ana, 'dm-list', page, { folder: 'request' })
+  t.is(l.status, 200, JSON.stringify(l.body))
+  t.is(l.body.conversations[0].preview, CAPTION, 'a caption is the preview')
+  let th = await s.act(ana, 'dm-thread', page, { peer: m })
+  t.is(th.status, 200)
+  t.is(th.body.messages.length, 1)
+  t.is(th.body.messages[0].text, CAPTION)
+  t.alike(th.body.messages[0].media, [photo], 'the descriptor reaches the admin device as sent')
+
+  await s.putDrop(dmCore.sealInner(mediaOnly, boxHex))
+  t.is((await s.pagesDm.pull()).added, 1)
+  l = await s.act(ana, 'dm-list', page, { folder: 'request' })
+  t.is(l.body.conversations[0].preview, 'GIF', 'media without text: a fixed label, never a peer string')
+  th = await s.act(ana, 'dm-thread', page, { peer: m })
+  t.is(th.body.messages.length, 2)
+  t.is(th.body.messages[1].text, '')
+  t.alike(th.body.messages[1].media, [gif])
+  t.is((await s.pagesDm.pull()).added, 0, 'filed once')
+
+  // A text-only member message stays v1 and carries no media.
+  const plain = dmCore.buildInner({ kind: 'msg', to: page, text: 'só texto', cert }, mKp)
+  await s.putDrop(dmCore.sealInner(plain, boxHex))
+  t.is((await s.pagesDm.pull()).added, 1)
+  th = await s.act(ana, 'dm-thread', page, { peer: m })
+  t.is(th.body.messages[2].media, null, 'a v1 message has no media')
+
+  const text = JSON.stringify(s.logs)
+  for (const d of [photo, gif]) {
+    for (const k of ['id', 'key', 'nonce', 'sha256']) t.absent(text.includes(d[k]), 'no descriptor field in the logs')
+  }
+  t.absent(text.includes(CAPTION), 'no text in the logs')
 })
 
 // ---- offline: a fake writer and key table, no seeder, loopback only ------

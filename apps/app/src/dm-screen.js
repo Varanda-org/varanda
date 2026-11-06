@@ -3,6 +3,7 @@
 
 import { threadOf } from './dm.js'
 import { dayHeading } from './format.js'
+import { sendPlan as attachmentSendPlan } from './attach-plan.js'
 
 // A message id is unique only per sender (docs/rpc.md 5.78): a row is keyed
 // by sender and id together.
@@ -156,10 +157,8 @@ export function previewLine (value) {
 // Enviar while a send is held as uncertain: the same text and quote re-put
 // the held bytes ('retry'); a different text asks first ('confirm'), since
 // the held one may already have reached the peer. No hold: a plain 'send'.
-export function sendPlan (hold, text, quoteId) {
-  if (!hold) return 'send'
-  if (hold.text === text && (hold.quoteId || null) === (quoteId || null)) return 'retry'
-  return 'confirm'
+export function sendPlan (hold, text, quoteId, attachments = []) {
+  return attachmentSendPlan(hold, text, quoteId, attachments)
 }
 
 // Conversas as a page: the screens call the same dm.* names and this maps

@@ -49,8 +49,11 @@
 // and bumps `followsVersion`.
 // `media` (browser node only, while unlocked; null otherwise): `{ upload(args)
 // }`, a pass-through to the handle's media.upload({ bytes, mime, width,
-// height, onProgress }) -> Promise<descriptor>; the caller shows its errors
-// (errorText).
+// height, sealed?, onProgress }) -> Promise<descriptor or private item>; the
+// caller shows its errors (errorText). When the handle has them, also the
+// chat media calls (client/webnode.native.js, client/browser.js mediaOf):
+// putDm(args), read(ref), forgetReadFile(name), clearReadFiles(); a missing
+// one means that capability is absent.
 //
 // `followsVersion` is bumped once per `follows.changed` event (the follows
 // of the own diary changed, possibly on another device) and `followCount` is
@@ -127,6 +130,9 @@ function appendLine (prev, line) {
 }
 
 const NodeContext = createContext(null)
+
+// The chat media calls a handle may offer besides upload (see the header).
+const CHAT_MEDIA_CALLS = ['putDm', 'read', 'forgetReadFile', 'clearReadFiles']
 
 export function useNode () {
   return useContext(NodeContext)
@@ -245,7 +251,8 @@ function VitrineNodeProvider ({ children }) {
         endRecovery: () => {},
         recover: () => Promise.resolve(false)
       },
-      media: null,
+      // Dev-only fixture photos (src/vitrine/media.js), never the network.
+      media: fixtureRequest.media || null,
       legacyFollows: null,
       followsVersion,
       followCount: null,
@@ -316,6 +323,9 @@ function LiveNodeProvider ({ children }) {
   const [pkGeneration, setPkGeneration] = useState(0)
   // The handle has media.upload (browser node).
   const [hasMedia, setHasMedia] = useState(false)
+  // Which chat media calls the handle has (putDm, read, forgetReadFile,
+  // clearReadFiles); decided once per connection like hasMedia.
+  const [mediaCaps, setMediaCaps] = useState('')
   // The handle has follows.legacy / confirmLegacy (browser node).
   const [hasLegacy, setHasLegacy] = useState(false)
   // follows.changed (see the header): the version never goes back.
@@ -601,6 +611,7 @@ function LiveNodeProvider ({ children }) {
       }
       setHasPasskey(identity !== null)
       setHasMedia(identity !== null && conn.media != null && typeof conn.media.upload === 'function')
+      setMediaCaps(identity !== null && conn.media != null ? CHAT_MEDIA_CALLS.filter((k) => typeof conn.media[k] === 'function').join(',') : '')
       setHasLegacy(identity !== null && conn.follows != null && typeof conn.follows.legacy === 'function' && typeof conn.follows.confirmLegacy === 'function')
       setPkStatus(pk)
       setPkError(pkErr)
@@ -1217,7 +1228,18 @@ function LiveNodeProvider ({ children }) {
     return conn.media.upload(args)
   }, [])
   const unlocked = pkStatus !== null && pkStatus.unlocked === true
-  const media = useMemo(() => (hasPasskey && hasMedia && unlocked ? { upload: mediaUpload } : null), [hasPasskey, hasMedia, unlocked, mediaUpload])
+  const media = useMemo(() => {
+    if (!(hasPasskey && hasMedia && unlocked)) return null
+    const out = { upload: mediaUpload }
+    for (const k of mediaCaps === '' ? [] : mediaCaps.split(',')) {
+      out[k] = (args) => {
+        const conn = connRef.current
+        if (!conn || !conn.media || typeof conn.media[k] !== 'function') return noConnection()
+        return conn.media[k](args)
+      }
+    }
+    return out
+  }, [hasPasskey, hasMedia, unlocked, mediaUpload, mediaCaps])
 
   const [legacyKeys, setLegacyKeys] = useState(null)
   const legacyCheckedRef = useRef(null)

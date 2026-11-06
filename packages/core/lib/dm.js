@@ -15,6 +15,8 @@ const hcrypto = require('hypercore-crypto')
 const { hasExactKeys, isHex64, isCanonicalIso, hasControlChars, charLength, nowIso } = require('./records')
 const { isWeakBoxKey } = require('./group')
 const { certForKey, validateCertShape } = require('./cert')
+const { validateBlobDescriptor } = require('./blob')
+const rpc = require('@varanda/rpc')
 
 const DM_PROTOCOL = 'varanda/dm/1'
 const DM_STAMP_PROTOCOL = 'varanda/dm-stamp/1'
@@ -38,6 +40,7 @@ const DM_STAMP_WALLET_LOW = 10
 const DM_REQUESTS_MAX = 100
 const DM_MESSAGES_PER_PEER = 500
 const DM_SIG_PREFIX = 'varanda-dm-v1\n'
+const DM_SIG_PREFIX_V2 = 'varanda-dm-v2\n'
 const DM_KEY_HKDF_SALT = 'varanda/member-dm-box/hkdf/v1'
 const DM_KEY_HKDF_INFO = 'varanda/member-dm-box/x25519/v1'
 const DM_LOCAL_HKDF_SALT = 'varanda/member-dm-local/hkdf/v1'
@@ -65,11 +68,20 @@ if (DM_PAGE_MAX * (DROP_BASE64_BYTES + 64) + 128 > DM_MAX_MESSAGE) throw new Err
 const DM_KINDS = Object.freeze(['msg', 'ctl'])
 const DM_OPS = Object.freeze(['accepted', 'declined', 'blocked', 'unblocked', 'deleted'])
 // Insertion order is the wire order: the signature covers the exact bytes.
-const INNER_KEYS = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'op', 'peer', 'at', 'cert'])
+// The lists and the canonical JSON live in @varanda/rpc so a UI measures
+// the text budget with the very bytes signed here.
+const INNER_KEYS = rpc.DM_INNER_KEYS
+const INNER_KEYS_V2 = rpc.DM_INNER_KEYS_V2
+const DM_MEDIA_KEYS = rpc.DM_MEDIA_KEYS
+const BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
+const DM_MEDIA_MAX = 4
+const DM_MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+const DM_MEDIA_MAX_SIDE = 16384
 
 const SIG_BYTES = 64
 const LEN_BYTES = 2
 const SIG_PREFIX = b4a.from(DM_SIG_PREFIX, 'utf8')
+const SIG_PREFIX_V2 = b4a.from(DM_SIG_PREFIX_V2, 'utf8')
 const MAGIC = b4a.from(DM_MAGIC, 'ascii')
 const HEX32 = /^[0-9a-f]{32}$/
 
@@ -115,39 +127,84 @@ function newDropId () {
   return randomBytes(DROP_ID_BYTES)
 }
 
-function validText (text) {
+function validText (text, allowEmpty) {
   if (typeof text !== 'string' || !isWellFormed(text)) return false
   const n = charLength(text)
-  return n >= 1 && n <= DM_MAX_TEXT && !hasControlChars(text, true)
+  return n >= (allowEmpty ? 0 : 1) && n <= DM_MAX_TEXT && !hasControlChars(text, true)
+}
+
+function isSide (n) {
+  return Number.isInteger(n) && n >= 1 && n <= DM_MEDIA_MAX_SIDE
+}
+
+// A blob descriptor (docs/protocol.md section 13) plus what the bubble needs
+// before the bytes arrive. Still images only for now, so ms is 0.
+function validMediaItem (d) {
+  if (!isPlainObject(d) || !hasExactKeys(d, DM_MEDIA_KEYS)) return false
+  const blob = {}
+  for (const k of BLOB_KEYS) blob[k] = d[k]
+  if (!validateBlobDescriptor(blob)) return false
+  return DM_MEDIA_MIMES.includes(d.mime) && isSide(d.w) && isSide(d.h) && d.ms === 0
+}
+
+// Walked by index: Array#every skips holes, and a sparse list would be
+// signed with a null item that no reader can open.
+function validMedia (media) {
+  if (!Array.isArray(media) || media.length < 1 || media.length > DM_MEDIA_MAX) return false
+  const ids = new Set()
+  for (let i = 0; i < media.length; i++) {
+    if (!Object.hasOwn(media, i) || !validMediaItem(media[i]) || ids.has(media[i].id)) return false
+    ids.add(media[i].id)
+  }
+  return true
 }
 
 // The per-kind shape rules, shared by building and opening. `cert` is null
 // or a membership certificate naming `from`; whether it verifies for the
-// association is checked on open only.
+// association is checked on open only. v1 and v2 are two exact key sets;
+// a v2 body is a msg that needs v2 (card and fwd are reserved, so today
+// that means media), so every message has one encoding.
 function validBody (b) {
-  if (!isPlainObject(b) || !hasExactKeys(b, INNER_KEYS)) return false
-  if (b.v !== 1 || !DM_KINDS.includes(b.kind)) return false
+  if (!isPlainObject(b)) return false
+  if (b.v === 1) {
+    if (!hasExactKeys(b, INNER_KEYS)) return false
+  } else if (b.v === 2) {
+    if (!hasExactKeys(b, INNER_KEYS_V2) || b.kind !== 'msg') return false
+    if (b.card !== null || b.fwd !== 0 || !validMedia(b.media)) return false
+  } else {
+    return false
+  }
+  if (!DM_KINDS.includes(b.kind)) return false
   if (!isHex32(b.id) || !isHex64(b.from) || !isHex64(b.to) || !isCanonicalIso(b.at)) return false
   if (b.cert !== null && (validateCertShape(b.cert) !== null || b.cert.member !== b.from)) return false
   if (b.kind === 'msg') {
     if (b.op !== null || b.peer !== null || b.from === b.to) return false
     if (b.replyTo !== null && !isHex32(b.replyTo)) return false
-    return validText(b.text)
+    return validText(b.text, b.v === 2)
   }
   if (b.text !== '' || b.replyTo !== null || b.from !== b.to) return false
   return DM_OPS.includes(b.op) && isHex64(b.peer) && b.peer !== b.from
 }
 
 function canonicalJson (b) {
-  const o = {}
-  for (const k of INNER_KEYS) o[k] = b[k]
-  return JSON.stringify(o)
+  return rpc.canonicalDmInnerJson(b)
 }
 
-// fields: { kind, to, text?, replyTo?, op?, peer?, id?, at?, cert? }; from
-// is the signing key; cert is the sender's membership certificate (a msg
-// without one is built but never opens). Returns DM_INNER_BYTES bytes the caller owns (wipe after
-// sealing).
+function sigPrefix (v) {
+  return v === 2 ? SIG_PREFIX_V2 : SIG_PREFIX
+}
+
+// The text bytes (rpc dmTextBytes) that still fit next to the given cert,
+// media and card; below zero nothing fits. buildInner stays the authority.
+function textBudget (fields) {
+  return rpc.dmTextBudget(fields)
+}
+
+// fields: { kind, to, text?, replyTo?, media?, card?, fwd?, op?, peer?, id?,
+// at?, cert? }; from is the signing key; cert is the sender's membership
+// certificate (a msg without one is built but never opens). A body that
+// needs nothing of v2 is written as v1. Returns DM_INNER_BYTES bytes the
+// caller owns (wipe after sealing).
 function buildInner (fields, signKeyPair) {
   if (!isPlainObject(fields)) throw new TypeError('mensagem inválida')
   if (!isPlainObject(signKeyPair) || !isBytes(signKeyPair.publicKey, 32) || !isBytes(signKeyPair.secretKey, 64)) {
@@ -156,8 +213,12 @@ function buildInner (fields, signKeyPair) {
   const from = b4a.toString(signKeyPair.publicKey, 'hex')
   if (fields.from !== undefined && fields.from !== from) throw new TypeError('mensagem inválida')
   const kind = fields.kind
+  const media = fields.media === undefined ? null : fields.media
+  const card = fields.card === undefined ? null : fields.card
+  const fwd = fields.fwd === undefined ? 0 : fields.fwd
+  const v = rpc.dmInnerVersion({ media, card, fwd })
   const body = {
-    v: 1,
+    v,
     kind,
     id: fields.id === undefined ? newMessageId() : fields.id,
     from,
@@ -169,10 +230,15 @@ function buildInner (fields, signKeyPair) {
     at: fields.at === undefined ? nowIso() : fields.at,
     cert: fields.cert === undefined ? null : fields.cert
   }
+  if (v === 2) {
+    body.media = media
+    body.card = card
+    body.fwd = fwd
+  }
   if (!validBody(body)) throw new TypeError('mensagem inválida')
   const json = b4a.from(canonicalJson(body), 'utf8')
   if (json.byteLength + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) throw new TypeError('mensagem longa demais')
-  const sig = hcrypto.sign(b4a.concat([SIG_PREFIX, json]), signKeyPair.secretKey)
+  const sig = hcrypto.sign(b4a.concat([sigPrefix(v), json]), signKeyPair.secretKey)
   const out = b4a.alloc(DM_INNER_BYTES)
   out[0] = json.byteLength >>> 8
   out[1] = json.byteLength & 0xff
@@ -204,7 +270,7 @@ function openInner (buf, ownKey, opts = {}) {
     if (!validBody(body)) return null
     // The exact bytes are signed: a reordered or re-escaped JSON is refused.
     if (canonicalJson(body) !== text) return null
-    if (!hcrypto.verify(b4a.concat([SIG_PREFIX, json]), sig, b4a.from(body.from, 'hex'))) return null
+    if (!hcrypto.verify(b4a.concat([sigPrefix(body.v), json]), sig, b4a.from(body.from, 'hex'))) return null
     if (body.kind === 'ctl') {
       if (body.from !== ownKey) return null
       return { ...body, mine: true }
@@ -312,6 +378,7 @@ module.exports = Object.freeze({
   DM_REQUESTS_MAX,
   DM_MESSAGES_PER_PEER,
   DM_SIG_PREFIX,
+  DM_SIG_PREFIX_V2,
   DM_KEY_HKDF_SALT,
   DM_KEY_HKDF_INFO,
   DM_LOCAL_HKDF_SALT,
@@ -320,6 +387,11 @@ module.exports = Object.freeze({
   DM_KINDS,
   DM_OPS,
   INNER_KEYS,
+  INNER_KEYS_V2,
+  DM_MEDIA_KEYS,
+  DM_MEDIA_MAX,
+  DM_MEDIA_MIMES,
+  DM_MEDIA_MAX_SIDE,
   DROP: Object.freeze({
     MAGIC_OFFSET: DROP_MAGIC_OFFSET,
     MAGIC_BYTES: DROP_MAGIC_BYTES,
@@ -339,6 +411,7 @@ module.exports = Object.freeze({
   isWellFormed,
   newMessageId,
   newDropId,
+  textBudget,
   buildInner,
   openInner,
   sealInner,

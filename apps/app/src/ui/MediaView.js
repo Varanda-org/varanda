@@ -13,6 +13,9 @@
 // false for authors the device does not follow: their photos are fetched with
 // cache: 'no-store' on the web so nothing of them is kept on the device
 // (natively no cache option: see fetchMedia).
+// `uri` (instead of author and descriptor): a device-local blob: or file://
+// URI another module already verified (chat photos, ../media/chatMedia.js);
+// it is shown as is and nothing is fetched. Any other scheme is refused.
 
 import { useEffect, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
@@ -88,10 +91,14 @@ function useMedia (author, descriptor, persist) {
   return { state: 'loading', url: null, retry }
 }
 
-export function MediaView ({ author, descriptor, label = 'foto', fit = 'cover', style, onPress, dark, persist = true }) {
+export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cover', style, onPress, dark, persist = true }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
-  const { state, url, retry } = useMedia(author, descriptor, persist !== false)
+  const local = uri !== undefined
+  const fetched = useMedia(author, local ? null : descriptor, persist !== false)
+  const { state, url, retry } = local
+    ? { state: isShownUrl(uri) ? 'ok' : 'error', url: isShownUrl(uri) ? uri : null, retry: undefined }
+    : fetched
   const failed = state === 'error'
   const press = failed ? retry : onPress
   const a11y = failed ? label + ', indisponível; toque para tentar de novo' : label

@@ -51,10 +51,10 @@
 	# então um cache HTTP longo renderia pouco. /varanda.json e
 	# /.well-known/* têm o seu próprio no-store, /seeder fica como está,
 	# /account/* vem do serviço de conta com o no-store dele, /media/* vem do
-	# semeador com o cache longo dele e /index/* vem do semeador com o
-	# no-store dele.
+	# semeador com o cache longo dele, /blob/* vem do semeador com o cache
+	# privado dele e /index/* vem do semeador com o no-store dele.
 	@mutavel {
-		not path /varanda.json /.well-known/* /seeder /account/* /media/* /index/*
+		not path /varanda.json /.well-known/* /seeder /account/* /media/* /blob/* /index/*
 	}
 	header @mutavel Cache-Control "no-cache"
 
@@ -71,7 +71,7 @@
 	}
 	@ausenteApp {
 		not path *.*
-		not path /.well-known/* /seeder /account/* /media/* /index/*
+		not path /.well-known/* /seeder /account/* /media/* /blob/* /index/*
 		not file /index.html {
 			root /srv/web
 		}
@@ -170,6 +170,34 @@
 			zone media {
 				key {remote_host}
 				events 120
+				window 10s
+			}
+		}
+		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
+			header_up Host {upstream_hostport}
+			header_up -X-Forwarded-For
+			header_up -X-Real-Ip
+		}
+	}
+
+	# Os anexos das conversas (pedaços cifrados de um blob, endereçados por
+	# conteúdo): GET|HEAD /blob/<id>/<índice>, servido pelo semeador na porta
+	# do WebSocket, em 127.0.0.1, só para blobs completos. Igual ao /media/*
+	# acima: só o Host do destino, os cabeçalhos com o endereço do cliente
+	# saem, e o Cache-Control (privado), o 404 e o no-store de um pedido com
+	# query vêm do próprio semeador, por isso /blob/* fica fora de @mutavel e
+	# de @ausenteApp. O CSP não muda (fetch na mesma origem). Antes do handle
+	# abaixo: sem este, /blob/* cairia no index.html. Limite por cliente numa
+	# zona própria, para que um não esgote o outro: 300 pedidos em 10 s, porque
+	# cada pedaço de 32 KiB é um pedido e o maior anexo tem 257 pedaços (um
+	# pedido de /media/* leva até 256 blocos de uma vez); o endereço fica só na
+	# memória do Caddy, durante a janela, nunca em registro nem enviado ao
+	# semeador.
+	handle /blob/* {
+		rate_limit {
+			zone blob {
+				key {remote_host}
+				events 300
 				window 10s
 			}
 		}

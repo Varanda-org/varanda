@@ -30,6 +30,11 @@ export const fonts = {
   mono: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' })
 }
 
+// The browser draws its own focus ring inside our rounded fields; those
+// fields show focus on the whole pill instead (searchFocus below). Web only:
+// native text fields have no such ring.
+export const webInputReset = Platform.OS === 'web' ? { outlineStyle: 'none' } : {}
+
 export const type = {
   barTitle: { fontSize: 21, fontWeight: '800', lineHeight: 25, letterSpacing: -0.2 },
   profileName: { fontSize: 22, fontWeight: '800', lineHeight: 26, letterSpacing: -0.2 },

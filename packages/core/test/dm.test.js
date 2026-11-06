@@ -12,7 +12,8 @@ const { MAX_TEXT } = require('@varanda/rpc')
 
 const {
   DM_MAX_TEXT, DM_INNER_BYTES, DM_SEAL_BYTES, DM_SEALED_BYTES, DM_DROP_BYTES, DM_PAGE_MAX, DM_MAX_MESSAGE,
-  DM_SIG_PREFIX, DROP, buildInner, openInner, sealInner, openSealed, encodeDrop, decodeDrop, newDropId
+  DM_SIG_PREFIX, DM_SIG_PREFIX_V2, DROP, buildInner, openInner, sealInner, openSealed, encodeDrop, decodeDrop, newDropId,
+  textBudget
 } = dm
 
 const AT = '2026-11-03T12:00:00.000Z'
@@ -38,9 +39,9 @@ const caio = signPair()
 for (const p of [ana, bia, caio]) p.cert = createCert({ member: p.hex, date: AT }, assoc)
 
 // A signed inner of any body (for shapes buildInner refuses).
-function forge (body, signer) {
+function forge (body, signer, prefix = DM_SIG_PREFIX) {
   const json = b4a.from(JSON.stringify(body))
-  const sig = hcrypto.sign(b4a.concat([b4a.from(DM_SIG_PREFIX), json]), signer.secretKey)
+  const sig = hcrypto.sign(b4a.concat([b4a.from(prefix), json]), signer.secretKey)
   const out = b4a.alloc(DM_INNER_BYTES)
   out[0] = json.byteLength >> 8
   out[1] = json.byteLength & 0xff
@@ -316,4 +317,259 @@ test('drop: encode and decode', (t) => {
   t.is(decodeDrop('x'), null)
   t.exception.all(() => encodeDrop({ ...fields, kid: b4a.alloc(7) }), TypeError)
   t.unlike(newDropId(), newDropId())
+})
+
+// Frozen before v2 existed: the exact JSON and signature a v1 writer sends.
+// Keys from fixed seeds (association 1, sender 2, recipient 3).
+const GOLDEN_V1 = {
+  json: '{"v":1,"kind":"msg","id":"0123456789abcdef0123456789abcdef","from":"8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394","to":"ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1","replyTo":null,"text":"oi, tudo bem? \u{1F600}","op":null,"peer":null,"at":"2026-11-03T12:00:00.000Z","cert":{"v":1,"member":"8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394","ageBand":"18+","method":"stub","date":"2026-11-03T12:00:00.000Z","association":"8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c","signature":"be6af89dcbfed1d742ceb852998ce7fc39cf057a4d5e1b5ed9b96d2318a2b798c4eb31891adac9d1d9f90a510ec9e6eb9084bcbc890593035def2205f9ac6208"}}',
+  sig: '562a1fe83e8d17e1ae3470838ec1749595c830547562d12afd1303b381a89cc85464c6bf9abcfc771c9bc012c5b3f2ca33af93b87787d4dd32a0e492a471480b',
+  association: '8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c',
+  to: 'ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1'
+}
+
+function goldenInner () {
+  const json = b4a.from(GOLDEN_V1.json)
+  const out = b4a.alloc(DM_INNER_BYTES)
+  out[0] = json.byteLength >> 8
+  out[1] = json.byteLength & 0xff
+  out.set(json, 2)
+  out.set(b4a.from(GOLDEN_V1.sig, 'hex'), 2 + json.byteLength)
+  return out
+}
+
+function blobItem (n, over = {}) {
+  return {
+    id: n.toString(16).padStart(64, '0'),
+    key: 'f'.repeat(64),
+    nonce: 'e'.repeat(48),
+    chunks: 2,
+    bytes: 32768 + 100,
+    sha256: 'd'.repeat(64),
+    mime: 'image/jpeg',
+    w: 640,
+    h: 480,
+    ms: 0,
+    ...over
+  }
+}
+
+// The largest item: 257 chunks of 32768 bytes, a ten-character mime and
+// the widest sides.
+function bigItem (n) {
+  return blobItem(n, { chunks: 257, bytes: 257 * 32768, mime: 'image/webp', w: 16384, h: 16384 })
+}
+
+function largestV2Sender () {
+  const issuer = hcrypto.keyPair()
+  const issuerCert = createIssuerCert({ issuer: b4a.toString(issuer.publicKey, 'hex'), date: AT }, assoc)
+  const who = signPair()
+  who.cert = createIssuedCert({ member: who.hex, date: AT }, issuer, issuerCert)
+  return who
+}
+
+// A text of exactly n JSON bytes with at most 1000 code points.
+function textOfBytes (n) {
+  return '\u{1F600}'.repeat(Math.floor(n / 4)) + 'x'.repeat(n % 4)
+}
+
+function v2Body (over = {}) {
+  return { v: 2, kind: 'msg', id: 'a'.repeat(32), from: ana.hex, to: bia.hex, replyTo: null, text: 'foto', media: [blobItem(1)], card: null, fwd: 0, op: null, peer: null, at: AT, cert: ana.cert, ...over }
+}
+
+test('inner: a v1 golden vector still opens and is still built byte for byte', (t) => {
+  const body = openInner(goldenInner(), GOLDEN_V1.to, { association: GOLDEN_V1.association })
+  t.ok(body, 'opens')
+  t.is(body.v, 1)
+  t.is(body.text, 'oi, tudo bem? \u{1F600}')
+  t.alike(Object.keys(body), [...dm.INNER_KEYS, 'mine'], 'no v2 keys on a v1 body')
+
+  const seed = (c) => b4a.alloc(32, c)
+  const sender = hcrypto.keyPair(seed(2))
+  const cert = JSON.parse(GOLDEN_V1.json).cert
+  const rebuilt = buildInner({ kind: 'msg', to: GOLDEN_V1.to, text: 'oi, tudo bem? \u{1F600}', id: '0123456789abcdef0123456789abcdef', at: AT, cert }, sender)
+  t.alike(rebuilt, goldenInner(), 'a text-only message is still the v1 bytes')
+  const withNulls = buildInner({ kind: 'msg', to: GOLDEN_V1.to, text: 'oi, tudo bem? \u{1F600}', id: '0123456789abcdef0123456789abcdef', at: AT, cert, media: null, card: null, fwd: 0 }, sender)
+  t.alike(withNulls, goldenInner(), 'unused v2 fields keep v1')
+})
+
+test('inner v2: constants and layout', (t) => {
+  t.is(DM_SIG_PREFIX_V2, 'varanda-dm-v2\n')
+  t.alike(dm.INNER_KEYS, ['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'op', 'peer', 'at', 'cert'])
+  t.alike(dm.INNER_KEYS_V2, ['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert'])
+  t.alike(dm.DM_MEDIA_KEYS, ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'])
+  t.is(dm.DM_MEDIA_MAX, 4)
+  t.alike(dm.DM_MEDIA_MIMES, ['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+
+  // Items built in any key order are written in the canonical one.
+  const shuffled = Object.fromEntries(Object.entries(blobItem(1)).reverse())
+  const inner = msg({ media: [shuffled], replyTo: 'c'.repeat(32) })
+  const len = (inner[0] << 8) | inner[1]
+  const json = inner.subarray(2, 2 + len)
+  const parsed = JSON.parse(b4a.toString(json))
+  t.alike(Object.keys(parsed), dm.INNER_KEYS_V2)
+  t.alike(Object.keys(parsed.media[0]), dm.DM_MEDIA_KEYS)
+  t.is(parsed.v, 2)
+  t.is(parsed.card, null)
+  t.is(parsed.fwd, 0)
+  const sig = inner.subarray(2 + len, 2 + len + 64)
+  t.ok(hcrypto.verify(b4a.concat([b4a.from(DM_SIG_PREFIX_V2), json]), sig, ana.publicKey), 'signed under the v2 prefix')
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(DM_SIG_PREFIX), json]), sig, ana.publicKey), 'not under the v1 prefix')
+
+  const body = openInner(inner, bia.hex, O)
+  t.is(body.v, 2)
+  t.alike(body.media, [blobItem(1)])
+  t.is(body.card, null)
+  t.is(body.fwd, 0)
+  t.is(body.replyTo, 'c'.repeat(32))
+  t.is(body.mine, false)
+})
+
+test('inner v2: text rules with media', (t) => {
+  t.exception.all(() => msg({ text: '' }), /mensagem inválida/, 'empty text without media')
+  t.exception.all(() => msg({ text: '', media: null }), /mensagem inválida/, 'empty text with media null')
+  t.is(openInner(msg({ text: '', media: [blobItem(1)] }), bia.hex, O).text, '', 'empty text with media')
+  t.exception.all(() => msg({ text: 'a\tb', media: [blobItem(1)] }), /mensagem inválida/)
+  t.exception.all(() => msg({ text: 'x'.repeat(DM_MAX_TEXT + 1), media: [blobItem(1)] }), /mensagem inválida/)
+  t.exception.all(() => msg({ text: '\ud800', media: [blobItem(1)] }), /mensagem inválida/)
+  t.exception.all(() => msg({ text: '', media: [blobItem(1)], op: 'accepted' }), /mensagem inválida/)
+  t.exception.all(() => buildInner({ kind: 'ctl', op: 'blocked', peer: bia.hex, at: AT, media: [blobItem(1)] }, ana), /mensagem inválida/, 'ops stay v1')
+})
+
+test('inner v2: sizes', (t) => {
+  const v1Cert = signPair()
+  v1Cert.cert = createCert({ member: v1Cert.hex, ageBand: 'a'.repeat(32), method: 'b'.repeat(32), date: AT }, assoc)
+  const v2Cert = largestV2Sender()
+  const wide = '\u{1F600}'.repeat(DM_MAX_TEXT)
+  const R = 'a'.repeat(32)
+
+  for (const who of [v1Cert, v2Cert]) {
+    const worst = buildInner({ kind: 'msg', to: bia.hex, text: wide, at: AT, replyTo: R, cert: who.cert }, who)
+    const len = (worst[0] << 8) | worst[1]
+    t.ok(len + 66 <= DM_INNER_BYTES, 'v1 worst case with a v' + who.cert.v + ' cert fits (' + (len + 66) + ' bytes)')
+    t.is(textBudget({ replyTo: R, cert: who.cert }) - 4 * DM_MAX_TEXT, DM_INNER_BYTES - len - 66, 'the budget measures the same bytes')
+
+    const four = [bigItem(1), bigItem(2), bigItem(3), bigItem(4)]
+    const media = buildInner({ kind: 'msg', to: bia.hex, text: '', at: AT, replyTo: R, cert: who.cert, media: four }, who)
+    const mlen = (media[0] << 8) | media[1]
+    t.ok(mlen + 66 <= DM_INNER_BYTES, 'four descriptors and a v' + who.cert.v + ' cert fit with empty text (' + (mlen + 66) + ' bytes)')
+    t.alike(openInner(media, bia.hex, O).media, four)
+  }
+
+  t.exception.all(() => buildInner({ kind: 'msg', to: bia.hex, text: wide, at: AT, cert: v2Cert.cert, media: [bigItem(1)] }, v2Cert), /mensagem longa demais/, '1000 four-byte characters and one descriptor')
+
+  for (const n of [1, 2, 3, 4]) {
+    const items = [bigItem(1), bigItem(2), bigItem(3), bigItem(4)].slice(0, n)
+    const fields = { kind: 'msg', to: bia.hex, at: AT, replyTo: R, cert: v2Cert.cert, media: items }
+    const budget = textBudget(fields)
+    t.ok(budget > 0 && budget < 4 * DM_MAX_TEXT, n + ' descriptors leave ' + budget + ' bytes of text')
+    const fits = buildInner({ ...fields, text: textOfBytes(budget) }, v2Cert)
+    t.is(openInner(fits, bia.hex, O).text, textOfBytes(budget), 'text at the budget fits')
+    t.exception.all(() => buildInner({ ...fields, text: textOfBytes(budget) + 'x' }, v2Cert), /mensagem longa demais/, 'one byte more throws')
+  }
+
+  // Escapes count as the bytes written.
+  const fields = { kind: 'msg', to: bia.hex, at: AT, cert: v2Cert.cert, media: [bigItem(1), bigItem(2), bigItem(3), bigItem(4)] }
+  const budget = textBudget(fields)
+  const escaped = '"'.repeat(300) + textOfBytes(budget - 600)
+  t.ok(Array.from(escaped).length <= DM_MAX_TEXT)
+  t.is(openInner(buildInner({ ...fields, text: escaped }, v2Cert), bia.hex, O).text, escaped, 'quotes at two bytes each fit at the budget')
+  t.exception.all(() => buildInner({ ...fields, text: escaped + '"' }, v2Cert), /mensagem longa demais/)
+})
+
+test('inner v2: descriptors are validated strictly', (t) => {
+  const bad = {
+    'extra key': blobItem(1, { alt: 'x' }),
+    'missing ms': (() => { const d = blobItem(1); delete d.ms; return d })(),
+    'missing nonce': (() => { const d = blobItem(1); delete d.nonce; return d })(),
+    'svg mime': blobItem(1, { mime: 'image/svg+xml' }),
+    'video mime': blobItem(1, { mime: 'video/mp4' }),
+    'upper mime': blobItem(1, { mime: 'IMAGE/JPEG' }),
+    'w 0': blobItem(1, { w: 0 }),
+    'h too large': blobItem(1, { h: 16385 }),
+    'w fraction': blobItem(1, { w: 1.5 }),
+    'w string': blobItem(1, { w: '640' }),
+    'ms 1': blobItem(1, { ms: 1 }),
+    'chunks 258': blobItem(1, { chunks: 258, bytes: 258 * 32768 }),
+    'chunks 0': blobItem(1, { chunks: 0, bytes: 100 }),
+    'chunks not matching bytes': blobItem(1, { chunks: 3 }),
+    'bytes only the MAC': blobItem(1, { chunks: 1, bytes: 16 }),
+    'short nonce': blobItem(1, { nonce: 'e'.repeat(46) }),
+    'upper sha256': blobItem(1, { sha256: 'D'.repeat(64) }),
+    'short key': blobItem(1, { key: 'f'.repeat(62) }),
+    'null item': null
+  }
+  for (const [name, item] of Object.entries(bad)) {
+    t.exception.all(() => msg({ media: [item] }), /mensagem inválida/, name + ' refused on build')
+    t.is(openInner(forge(v2Body({ media: [item] }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, name + ' refused on open')
+  }
+  const lists = {
+    'empty list': [],
+    'five items': [1, 2, 3, 4, 5].map(n => blobItem(n)),
+    'duplicate ids': [blobItem(1), blobItem(1)],
+    'an object': blobItem(1),
+    'a string': 'x'
+  }
+  for (const [name, media] of Object.entries(lists)) {
+    t.exception.all(() => msg({ media }), /mensagem inválida/, name + ' refused on build')
+    t.is(openInner(forge(v2Body({ media }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, name + ' refused on open')
+  }
+  t.ok(msg({ media: [1, 2, 3, 4].map(n => blobItem(n, { mime: dm.DM_MEDIA_MIMES[n - 1] })) }), 'every mime, four items')
+  t.ok(msg({ media: [blobItem(1, { chunks: 1, bytes: 17 })] }), 'the smallest blob')
+})
+
+test('inner v2: one exact key set, one prefix, one encoding', (t) => {
+  t.ok(openInner(forge(v2Body(), ana, DM_SIG_PREFIX_V2), bia.hex, O), 'the forge helper builds a valid v2')
+  t.is(openInner(forge(v2Body(), ana), bia.hex, O), null, 'v2 under the v1 prefix')
+  const v1Body = { v: 1, kind: 'msg', id: 'a'.repeat(32), from: ana.hex, to: bia.hex, replyTo: null, text: 'oi', op: null, peer: null, at: AT, cert: ana.cert }
+  t.ok(openInner(forge(v1Body, ana), bia.hex, O))
+  t.is(openInner(forge(v1Body, ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'v1 under the v2 prefix')
+
+  const refused = {
+    'card set': v2Body({ card: { url: 'x' } }),
+    'fwd set': v2Body({ fwd: 1 }),
+    'media null': v2Body({ media: null }),
+    'media null with empty text': v2Body({ media: null, text: '' }),
+    'v1 number with v2 keys': v2Body({ v: 1 }),
+    'v 3': v2Body({ v: 3 }),
+    'v string': v2Body({ v: '2' }),
+    'a ctl body': v2Body({ kind: 'ctl', to: ana.hex, text: '', op: 'blocked', peer: bia.hex }),
+    'a v2 key missing': (() => { const b = v2Body(); delete b.card; return b })(),
+    'an extra key': v2Body({ extra: 1 })
+  }
+  for (const [name, body] of Object.entries(refused)) {
+    t.is(openInner(forge(body, ana, DM_SIG_PREFIX_V2), bia.hex, O), null, name)
+  }
+  t.is(openInner(forge({ ...v1Body, v: 2 }, ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'v2 number with v1 keys')
+  t.is(openInner(forge({ ...v1Body, media: [blobItem(1)] }, ana), bia.hex, O), null, 'v1 plus media')
+
+  // Reordered keys inside an item, re-signed: the exact bytes rule refuses it.
+  const shuffled = Object.fromEntries(Object.entries(blobItem(1)).reverse())
+  t.is(openInner(forge(v2Body({ media: [shuffled] }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'item key order')
+  const reordered = v2Body()
+  delete reordered.media
+  reordered.media = [blobItem(1)]
+  t.is(openInner(forge(reordered, ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'body key order')
+  const json = JSON.stringify(v2Body()).replace('"ms":0', '"ms":0.0')
+  const raw = b4a.from(json)
+  const sig = hcrypto.sign(b4a.concat([b4a.from(DM_SIG_PREFIX_V2), raw]), ana.secretKey)
+  const out = b4a.alloc(DM_INNER_BYTES)
+  out[0] = raw.byteLength >> 8
+  out[1] = raw.byteLength & 0xff
+  out.set(raw, 2)
+  out.set(sig, 2 + raw.byteLength)
+  t.is(openInner(out, bia.hex, O), null, 'a number spelled another way')
+
+  // A v2 msg still needs the sender's certificate.
+  t.is(openInner(forge(v2Body({ cert: null }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'no cert')
+  t.is(openInner(msg({ media: [blobItem(1)] }), bia.hex), null, 'no association')
+})
+
+test('inner v2: a sparse media list is refused before signing', (t) => {
+  const sparse = new Array(2)
+  sparse[1] = blobItem(1)
+  t.exception.all(() => msg({ media: sparse }), /mensagem inválida/, 'a hole is not an item')
+  const holed = [blobItem(1), blobItem(2), blobItem(3)]
+  delete holed[1]
+  t.exception.all(() => msg({ media: holed }), /mensagem inválida/, 'a deleted slot is not an item')
 })

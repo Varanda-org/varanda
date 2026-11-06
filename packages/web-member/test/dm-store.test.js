@@ -135,3 +135,295 @@ test('rows are padded to one size class: text length and msg vs ctl do not show 
   t.absent('pad' in snap.ops[0])
   await again.close()
 })
+
+function mediaItem (byte) {
+  return { id: byte.repeat(32), key: 'ee'.repeat(32), nonce: 'ff'.repeat(24), chunks: 1, bytes: 1016, sha256: 'aa'.repeat(32), mime: 'image/png', w: 64, h: 48, ms: 0 }
+}
+
+async function kvText (storage) {
+  const index = await storage.readJson('dmMediaIndex')
+  const out = [JSON.stringify(index)]
+  for (const e of (index && index.items) || []) {
+    for (let i = 0; i < e.c; i++) out.push(JSON.stringify(await storage.readJson('dmMedia/' + e.n + '/' + i)))
+  }
+  return out.join('\n')
+}
+
+test('a message row keeps its media descriptors, key included, across a reopen; a row without media reads as null', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await s.unlock(key(7))
+  const media = [mediaItem('01'), mediaItem('02')]
+  await s.append([msg(s.nextFiled()), { ...msg(s.nextFiled()), id: '56'.repeat(16), text: '', media }])
+  await s.close()
+  const raw = await rawBlocks(storage)
+  t.absent(raw.includes('ee'.repeat(32)), 'no blob key in clear at rest')
+  t.absent(raw.includes('01'.repeat(32)), 'no blob id in clear at rest')
+
+  const again = createDmStore({ storage })
+  await again.unlock(key(7))
+  const [plain, withMedia] = again.snapshot().messages
+  t.is(plain.media, null)
+  t.alike(withMedia.media, media, 'the descriptors come back exactly')
+  t.is(withMedia.text, '')
+  await t.exception.all(again.append([{ ...msg(again.nextFiled()), id: '78'.repeat(16), media: [{ ...mediaItem('03'), extra: 1 }] }]), /linha inválida/)
+  await t.exception.all(again.append([{ ...msg(again.nextFiled()), id: '78'.repeat(16), media: [] }]), /linha inválida/)
+  await again.close()
+})
+
+test('the media cache: sealed at rest, keyed by an opaque name, readable only under the key, wiped without it', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await s.unlock(key(7))
+  const photo = b4a.from('PNG-bytes-segredo-' + 'x'.repeat(100))
+  const second = b4a.from('second-item-segredo')
+  t.absent(s.hasMedia(PEER, ID))
+  t.is(await s.getMedia(PEER, ID), null)
+  await s.putMedia(PEER, ID, [photo, second])
+  t.ok(s.hasMedia(PEER, ID))
+  const got = await s.getMedia(PEER, ID)
+  t.is(got.length, 2)
+  t.ok(b4a.equals(got[0], photo) && b4a.equals(got[1], second), 'the plaintext comes back')
+  t.not(got[0], photo, 'a fresh buffer')
+  const at = await kvText(storage)
+  t.absent(at.includes('segredo'), 'no plaintext in kv')
+  t.absent(at.includes(b4a.toString(photo, 'base64').slice(0, 24)), 'not even its base64')
+  t.absent(at.includes(PEER) || at.includes(ID), 'no sender or message id in kv')
+  await s.close()
+
+  const again = createDmStore({ storage })
+  await again.unlock(key(7))
+  t.ok(again.hasMedia(PEER, ID), 'the cache survives a reopen')
+  t.ok(b4a.equals((await again.getMedia(PEER, ID))[0], photo))
+  again.lock()
+  t.absent(again.hasMedia(PEER, ID), 'locked: nothing is known')
+  await t.exception(again.getMedia(PEER, ID), /bloqueada/)
+  t.exception(() => again.putMedia(PEER, ID, [photo]), /bloqueada/)
+  await again.wipeCache()
+  t.is(await storage.readJson('dmMediaIndex'), null, 'the index is gone')
+  t.is(await storage.readJson('dmMedia/' + 'x'), null)
+  await again.unlock(key(7))
+  t.absent(again.hasMedia(PEER, ID), 'nothing cached after the wipe')
+  t.is(await again.getMedia(PEER, ID), null)
+  await again.close()
+})
+
+test('another key does not open the cache and its unlock wipes it', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await s.unlock(key(7))
+  await s.append([msg(s.nextFiled())])
+  await s.putMedia(PEER, ID, [b4a.from('foto')])
+  const index = await storage.readJson('dmMediaIndex')
+  await s.close()
+  const other = createDmStore({ storage })
+  await other.unlock(key(9))
+  t.absent(other.hasMedia(PEER, ID))
+  t.is(await storage.readJson('dmMediaIndex'), null, 'the index of another key is wiped')
+  t.is(await storage.readJson('dmMedia/' + index.items[0].n + '/0'), null, 'and its entries')
+  await other.close()
+})
+
+test('a cache write issued before a lock is dropped, and a wipe after it runs last', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await s.unlock(key(7))
+  const put = s.putMedia(PEER, ID, [b4a.from('foto')])
+  s.lock()
+  const wiped = s.wipeCache()
+  await t.exception(put, /bloqueada/)
+  await wiped
+  t.is(await storage.readJson('dmMediaIndex'), null)
+  await s.unlock(key(7))
+  t.absent(s.hasMedia(PEER, ID))
+  await s.close()
+})
+
+// Records every dmMedia/<name>/<i> key written; onItem(key) runs after each.
+function itemSpy (storage, onItem) {
+  const written = new Set()
+  return {
+    written,
+    storage: {
+      ...storage,
+      async writeJson (k, v) {
+        await storage.writeJson(k, v)
+        if (k.startsWith('dmMedia/') && v !== null) {
+          written.add(k)
+          await onItem(k)
+        }
+      }
+    }
+  }
+}
+
+test('a lock between two items of one cache write leaves nothing a wipe cannot find', async (t) => {
+  const base = memoryNodeStorage()
+  let s = null
+  const spy = itemSpy(base, () => { if (s.unlocked()) s.lock() })
+  s = createDmStore({ storage: spy.storage })
+  await s.unlock(key(7))
+  await t.exception(s.putMedia(PEER, ID, [b4a.from('foto-um'), b4a.from('foto-dois')]), /bloqueada/)
+  t.is(spy.written.size, 1, 'the first item was written before the lock')
+  await s.wipeCache()
+  for (const k of spy.written) t.is(await base.readJson(k), null, 'the written item is wiped')
+  t.is(await base.readJson('dmMediaIndex'), null)
+  await s.close()
+})
+
+test('an interrupted cache write is never read as cached after a reopen, and is wiped', async (t) => {
+  const base = memoryNodeStorage()
+  let fail = true
+  const spy = itemSpy(base, () => { if (fail) throw new Error('disco cheio') })
+  const s = createDmStore({ storage: spy.storage })
+  await s.unlock(key(7))
+  await t.exception(s.putMedia(PEER, ID, [b4a.from('foto-um'), b4a.from('foto-dois')]), /disco cheio/)
+  t.absent(s.hasMedia(PEER, ID))
+  await s.close()
+  fail = false
+  const again = createDmStore({ storage: spy.storage })
+  await again.unlock(key(7))
+  t.absent(again.hasMedia(PEER, ID), 'an unfinished entry is not cached')
+  t.is(await again.getMedia(PEER, ID), null)
+  again.lock()
+  await again.wipeCache()
+  for (const k of spy.written) t.is(await base.readJson(k), null, 'the item of the unfinished entry is wiped')
+  await again.close()
+})
+
+test('a cache write copies the items at once: the caller may wipe its buffers right away', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await s.unlock(key(7))
+  const photo = b4a.from('PNG-bytes-real')
+  const put = s.putMedia(PEER, ID, [photo])
+  photo.fill(0)
+  await put
+  const got = await s.getMedia(PEER, ID)
+  t.ok(b4a.equals(got[0], b4a.from('PNG-bytes-real')), 'the real bytes were cached, not zeros')
+  await s.close()
+})
+
+test('the media cache stays within its byte budget: the oldest entries go first, an oversized set is not cached', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage, cacheBytesMax: 1000 })
+  await s.unlock(key(7))
+  const ids = ['01', '02', '03', '04'].map((b) => b.repeat(16))
+  const total = async () => (await storage.readJson('dmMediaIndex')).items.reduce((n, e) => n + e.b, 0)
+  t.is(await s.putMedia(PEER, ids[0], [b4a.alloc(300, 1)]), true)
+  t.is(await s.putMedia(PEER, ids[1], [b4a.alloc(200, 2), b4a.alloc(200, 2)]), true)
+  t.is(await total(), 700)
+  const first = (await storage.readJson('dmMediaIndex')).items[0].n
+  t.is(await s.putMedia(PEER, ids[2], [b4a.alloc(400, 3)]), true)
+  t.absent(s.hasMedia(PEER, ids[0]), 'the oldest entry is evicted')
+  t.ok(s.hasMedia(PEER, ids[1]) && s.hasMedia(PEER, ids[2]))
+  t.is(await storage.readJson('dmMedia/' + first + '/0'), null, 'its item is wiped')
+  t.is(await s.getMedia(PEER, ids[0]), null)
+  t.ok((await total()) <= 1000, 'within the budget')
+  t.is(await total(), 800)
+  t.is(await s.putMedia(PEER, ids[3], [b4a.alloc(600, 4), b4a.alloc(401, 4)]), false, 'larger than the whole budget')
+  t.absent(s.hasMedia(PEER, ids[3]))
+  t.ok(s.hasMedia(PEER, ids[1]) && s.hasMedia(PEER, ids[2]), 'nothing evicted for it')
+  t.is(await s.putMedia(PEER, ids[3], [b4a.alloc(1000, 4)]), true, 'exactly the budget fits')
+  t.absent(s.hasMedia(PEER, ids[1]) || s.hasMedia(PEER, ids[2]), 'both older entries evicted')
+  t.is(await total(), 1000)
+  await s.close()
+  const again = createDmStore({ storage, cacheBytesMax: 1000 })
+  await again.unlock(key(7))
+  t.ok(again.hasMedia(PEER, ids[3]), 'the sizes survive a reopen')
+  again.lock()
+  await again.wipeCache()
+  t.is(await storage.readJson('dmMediaIndex'), null, 'lock still wipes')
+  await again.close()
+})
+
+test('an eviction interrupted after an item is gone never leaves that entry read as cached', async (t) => {
+  const base = memoryNodeStorage()
+  let fail = false
+  const storage = {
+    ...base,
+    async writeJson (k, v) {
+      await base.writeJson(k, v)
+      if (fail && k.startsWith('dmMedia/') && v === null) throw new Error('aba fechada')
+    }
+  }
+  const s = createDmStore({ storage, cacheBytesMax: 1000 })
+  await s.unlock(key(7))
+  const ids = ['01', '02'].map((b) => b.repeat(16))
+  t.is(await s.putMedia(PEER, ids[0], [b4a.alloc(600, 1)]), true)
+  fail = true
+  await t.exception(s.putMedia(PEER, ids[1], [b4a.alloc(600, 2)]), /aba fechada/)
+  fail = false
+  t.absent(s.hasMedia(PEER, ids[0]), 'the evicted entry is not cached')
+  await s.close()
+  const again = createDmStore({ storage, cacheBytesMax: 1000 })
+  await again.unlock(key(7))
+  t.absent(again.hasMedia(PEER, ids[0]), 'nor after a reopen, so it is downloaded again')
+  t.is(await again.getMedia(PEER, ids[0]), null)
+  again.lock()
+  await again.wipeCache()
+  t.is(await base.readJson('dmMediaIndex'), null)
+  await again.close()
+})
+
+test('a finished entry with a lost item reads as not cached from then on', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await s.unlock(key(7))
+  await s.putMedia(PEER, ID, [b4a.from('foto-um'), b4a.from('foto-dois')])
+  const name = (await storage.readJson('dmMediaIndex')).items[0].n
+  await storage.writeJson('dmMedia/' + name + '/1', null)
+  t.ok(s.hasMedia(PEER, ID), 'the index still says cached')
+  t.is(await s.getMedia(PEER, ID), null)
+  t.absent(s.hasMedia(PEER, ID), 'the failed read drops it')
+  await s.close()
+  const again = createDmStore({ storage })
+  await again.unlock(key(7))
+  t.absent(again.hasMedia(PEER, ID), 'not cached after a reopen')
+  t.is(await again.putMedia(PEER, ID, [b4a.from('foto-nova')]), true, 'a new download caches it again')
+  t.ok(b4a.equals((await again.getMedia(PEER, ID))[0], b4a.from('foto-nova')))
+  again.lock()
+  await again.wipeCache()
+  t.is(await storage.readJson('dmMedia/' + name + '/0'), null)
+  t.is(await storage.readJson('dmMedia/' + name + '/1'), null)
+  await again.close()
+})
+
+test('an unlock superseded while it deletes the core of another key never wipes that key\'s media', async (t) => {
+  const base = memoryNodeStorage()
+  const first = createDmStore({ storage: base })
+  await first.unlock(key(1))
+  await first.append([msg(first.nextFiled())])
+  await first.putMedia(PEER, ID, [b4a.from('foto')])
+  await first.close()
+  const index = await base.readJson('dmMediaIndex')
+
+  let s = null
+  let tripped = false
+  const storage = new Proxy(base, {
+    get (target, prop) {
+      if (prop === 'deleteCore') {
+        return async (name) => {
+          const out = await target.deleteCore(name)
+          if (!tripped && name === 'dm-local') {
+            tripped = true
+            s.lock()
+          }
+          return out
+        }
+      }
+      const v = target[prop]
+      return typeof v === 'function' ? v.bind(target) : v
+    }
+  })
+  s = createDmStore({ storage })
+  await s.unlock(key(2))
+  t.ok(tripped)
+  t.absent(s.unlocked(), 'superseded: nothing installed')
+  t.alike(await base.readJson('dmMediaIndex'), index, 'the index is kept')
+  const again = createDmStore({ storage: base })
+  await again.unlock(key(1))
+  t.ok(again.hasMedia(PEER, ID))
+  t.ok(b4a.equals((await again.getMedia(PEER, ID))[0], b4a.from('foto')), 'the media still opens')
+  await again.close()
+})

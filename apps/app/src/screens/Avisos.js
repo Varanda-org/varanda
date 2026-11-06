@@ -30,12 +30,14 @@ import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_QUIET_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
   NOTICES_UNSUPPORTED_MESSAGE, NOTICES_WEB_ONLY_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
   compareNotices, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
-  padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, shouldPoll, writeSeenNamespace
+  padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, shouldPoll, snippetOf, writeSeenNamespace
 } from '../notices'
+import { isRef } from '../nav'
 import { pagesNotices } from '../pages'
 import { LOCKED_MESSAGE } from '../outbox'
 import { shouldReloadOnShow } from '../paging'
 import { clearSeenText, loadSeenText, saveSeenText } from '../seenStore'
+import { planPeeks } from '../thread'
 import { whoOf } from '../who'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -43,7 +45,8 @@ import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
-import { type } from '../ui/theme'
+import { space, type } from '../ui/theme'
+import { peekAll, postAt } from './Conversa'
 
 function useActing () {
   return useSyncExternalStore(actingSubscribe, actingGet, actingGet)
@@ -162,7 +165,96 @@ function prependNew (currentItems, pageItems) {
 // A follow row opens the person's profile. A reply, quote or mention opens
 // the post. A like or repost opens the caller's post when noticeRef has one,
 // and stays disabled when it does not (not a profile, and no post to open).
-function NoticeRow ({ item, now, onOpenMember, onOpenThread }) {
+// The post a row talks about: the other person's post for a reply, quote or
+// mention, the caller's own post for a like or repost. Follows have none.
+// Only a canonical '<hex64>:<seq>' ref: page notices come from the pages
+// service unchecked, and a ref with a comma would never split back out of
+// wantedKey, so it would stay untried and re-run the read forever.
+function snippetRef (item) {
+  const ref = noticeRef(item)
+  return isRef(ref) ? ref : null
+}
+
+const SNIPPET_BATCH = 24
+
+// Whether a diary.peek chunk ({ author, seqs }) asked for this canonical ref.
+function chunkHas (params, ref) {
+  const i = ref.indexOf(':')
+  return params.author === ref.slice(0, i) && params.seqs.includes(Number(ref.slice(i + 1)))
+}
+const SNIPPET_TRIES = 2
+
+// Reads the posts of the rows on screen with the node's own diary.peek, one
+// batch at a time and never again for a ref already tried. A failed read just
+// leaves the row without a second line. A read that throws partway keeps the
+// refs it found; the rest get one more try in a later batch, then count as
+// tried, so a seeder that stays down cannot loop.
+function useSnippets (items, request, enabled, retryKey) {
+  const [texts, setTexts] = useState({})
+  const triedRef = useRef(new Set())
+  const triesRef = useRef(new Map())
+  const exhaustedRef = useRef(new Set())
+  const [round, setRound] = useState(0)
+  // A full reload of the list (loadedAt moves: pull to refresh, a reload on
+  // show) gives refs that ran out of tries one more chance. The 5-minute poll
+  // does not move loadedAt, so it does not retry them.
+  useEffect(() => {
+    if (exhaustedRef.current.size === 0) return
+    for (const r of exhaustedRef.current) {
+      triedRef.current.delete(r)
+      triesRef.current.delete(r)
+    }
+    exhaustedRef.current.clear()
+    setRound((n) => n + 1)
+  }, [retryKey])
+  const refs = enabled ? items.map(snippetRef).filter((r) => r !== null) : []
+  const wanted = refs.filter((r) => !triedRef.current.has(r)).slice(0, SNIPPET_BATCH)
+  const wantedKey = wanted.join(',')
+  useEffect(() => {
+    if (wantedKey === '' || typeof request !== 'function') return
+    let alive = true
+    const list = wantedKey.split(',')
+    ;(async () => {
+      const peeked = new Map()
+      // One chunk at a time, so a throw is charged to the chunk that threw:
+      // refs of chunks never asked for keep their tries for a later batch.
+      const done = []
+      let failedAt = null
+      for (const params of planPeeks({ refs: list })) {
+        if (!alive) return
+        try {
+          await peekAll(request, [params], peeked, () => alive)
+          done.push(params)
+        } catch {
+          failedAt = params
+          break
+        }
+      }
+      if (!alive) return
+      const found = {}
+      for (const r of list) {
+        const post = postAt(peeked, r)
+        if (post !== null) found[r] = post.text
+        if (post !== null || done.some((p) => chunkHas(p, r))) {
+          triedRef.current.add(r)
+        } else if (failedAt !== null && chunkHas(failedAt, r)) {
+          const tries = (triesRef.current.get(r) || 0) + 1
+          triesRef.current.set(r, tries)
+          if (tries >= SNIPPET_TRIES) {
+            triedRef.current.add(r)
+            exhaustedRef.current.add(r)
+          }
+        }
+      }
+      if (Object.keys(found).length > 0) setTexts((t) => ({ ...t, ...found }))
+      setRound((n) => n + 1)
+    })()
+    return () => { alive = false }
+  }, [wantedKey, request, round])
+  return texts
+}
+
+function NoticeRow ({ item, now, unread, postText, onOpenMember, onOpenThread }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const who = whoOf({ name: item.name, username: item.username })
@@ -172,15 +264,27 @@ function NoticeRow ({ item, now, onOpenMember, onOpenThread }) {
   const parts = noticeParts(who, kind)
   const line = displayText(noticeLine(who, kind))
   const icon = noticeIcon(kind)
+  const snippet = displayText(snippetOf(item, postText))
+  // The row is one control: a screen reader hears the verified @nome, the
+  // quoted post and the unread state the eye gets from the lines and the dot.
+  const spoken = [line, subtitle, snippet ? '“' + snippet + '”' : null, unread ? 'não lido' : null].filter(Boolean).join(', ')
   const whoBlock = (
-    <View style={styles.who}>
-      <Text style={styles.name} numberOfLines={1}>
-        <Text style={styles.nameBold}>{displayText(parts.name)}</Text>
-        <Text style={styles.nameRest}>{displayText(parts.rest)}</Text>
-      </Text>
-      {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
-      {time ? <Text style={styles.handle} numberOfLines={1}>{time}</Text> : null}
-    </View>
+    <>
+      <View style={styles.who}>
+        <Text style={styles.name} numberOfLines={1}>
+          <Text style={styles.nameBold}>{displayText(parts.name)}</Text>
+          <Text style={styles.nameRest}>{displayText(parts.rest)}</Text>
+        </Text>
+        {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
+        {/* Post text never takes the verified @nome's place or style: a post
+            that reads "@maria" must not pass as the sender's handle. */}
+        {snippet ? <Text style={styles.snippet} numberOfLines={1}>{'“' + snippet + '”'}</Text> : null}
+      </View>
+      <View style={styles.aside}>
+        {time ? <Text style={styles.handle} numberOfLines={1}>{time}</Text> : null}
+        {unread ? <View style={styles.unreadDot} accessible={false} /> : null}
+      </View>
+    </>
   )
   // Decorative: the row label already says what happened, and the glyph is
   // not its own control. No badge when the kind has no glyph.
@@ -208,7 +312,7 @@ function NoticeRow ({ item, now, onOpenMember, onOpenThread }) {
       <Pressable
         style={({ pressed }) => [styles.row, pressed && open && styles.pressed]}
         accessibilityRole='link'
-        accessibilityLabel={ref === null ? line : line + ', abrir publicação'}
+        accessibilityLabel={ref === null ? spoken : spoken + ', abrir publicação'}
         accessibilityHint={ref === null ? undefined : 'abre a conversa'}
         disabled={!open}
         onPress={open}
@@ -225,7 +329,7 @@ function NoticeRow ({ item, now, onOpenMember, onOpenThread }) {
     <Pressable
       style={({ pressed }) => [styles.row, pressed && open && styles.pressed]}
       accessibilityRole='link'
-      accessibilityLabel={line + ', ver perfil'}
+      accessibilityLabel={spoken + ', ver perfil'}
       accessibilityHint='abre o perfil'
       disabled={!open}
       onPress={open}
@@ -312,6 +416,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const onBadgeRef = useRef(onBadge)
   onBadgeRef.current = onBadge
   const seenRef = useRef(null)
+  const [unread, setUnread] = useState(() => new Set())
   // Set after a poll failed with a non-locked, non-web-only error: the next
   // tick is skipped once.
   const backoffRef = useRef(false)
@@ -337,6 +442,11 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     }
     if (seenRef.current === null) seenRef.current = loadSeen(seenNamespace)
     const seen = seenRef.current
+    // Rows unseen when they first loaded keep their dot while this screen
+    // lives, even though opening the tab marks them seen.
+    const before = new Set(seen.ids)
+    const fresh = list.filter((item) => typeof item.seen === 'string' && !before.has(item.seen)).map((item) => item.seen)
+    if (fresh.length > 0) setUnread((u) => (fresh.every((id) => u.has(id)) ? u : new Set([...u, ...fresh])))
     if (mark) {
       if (randomBytes === null) {
         // No random source: remembered in memory only, never written.
@@ -360,6 +470,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // its own namespace in the same store.
   useEffect(() => {
     seenRef.current = hosted && seenNamespace.length > 0 ? loadSeen(seenNamespace) : null
+    setUnread(new Set())
   }, [seenNamespace, hosted])
 
   const loadFirst = useCallback(async () => {
@@ -717,6 +828,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     <NoticeRow
       item={item}
       now={now}
+      unread={unread.has(item.seen)}
+      postText={snippets[snippetRef(item)]}
       onOpenMember={onOpenMember}
       onOpenThread={onOpenThread}
     />
@@ -760,12 +873,13 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   }
 
   const shownItems = notice === null ? items : []
+  const snippets = useSnippets(shownItems, node.request, active && hosted && notice === null, loadedAt)
   return (
     <RefreshableList
       data={shownItems}
       keyExtractor={noticeId}
       renderItem={renderItem}
-      extraData={{ now, onOpenMember, onOpenThread }}
+      extraData={{ now, onOpenMember, onOpenThread, unread, snippets }}
       ListHeaderComponent={header}
       ListEmptyComponent={empty}
       ListFooterComponent={notice === null ? footer : null}
@@ -812,6 +926,9 @@ const makeStyles = (colors) => StyleSheet.create({
   nameBold: { fontWeight: '700' },
   nameRest: { fontWeight: '400' },
   handle: { ...type.postMeta, color: colors.soft },
+  snippet: { ...type.postMeta, color: colors.ink },
+  aside: { alignItems: 'flex-end', gap: space.xs },
+  unreadDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.accent },
   pressed: { opacity: 0.6 },
   footer: { padding: 16, gap: 8 },
   pageTitle: { ...type.emptyTitle, color: colors.ink }

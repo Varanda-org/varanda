@@ -2,6 +2,7 @@
 
 const { utf8ByteLength, charLength } = require('./text')
 const L = require('./limits')
+const { DM_MEDIA_KEYS } = require('./dm-budget')
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):(0|[1-9][0-9]*)$/
@@ -170,6 +171,45 @@ function isMediaList (v) {
   return true
 }
 
+// Private group items: where the ciphertext lives in the writer's media core
+// (a descriptor without the image size, which ciphertext does not have),
+// then the secret and what it hides. Same rules as validPrivateItem in
+// @varanda/core lib/group-media.js (protocol section 10).
+const GROUP_PRIVATE_MEDIA_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'key', 'nonce', 'plainMime', 'plainSha256', 'w', 'h', 'ms']
+
+function isPrivateGroupMediaItem (d) {
+  if (!isPlainObject(d) || Object.keys(d).length !== GROUP_PRIVATE_MEDIA_KEYS.length ||
+    !GROUP_PRIVATE_MEDIA_KEYS.every((k) => hasOwn(d, k))) return false
+  return isKey(d.core) &&
+    d.mime === 'application/octet-stream' &&
+    int(1, L.MAX_MEDIA_BLOCKS - 1)(d.start) &&
+    int(1, L.MAX_MEDIA_ITEM_BLOCKS)(d.blocks) &&
+    d.start + d.blocks <= L.MAX_MEDIA_BLOCKS &&
+    d.bytes === d.blocks * L.MEDIA_BLOCK_BYTES &&
+    isKey(d.sha256) &&
+    isKey(d.key) &&
+    typeof d.nonce === 'string' && HEX48.test(d.nonce) &&
+    typeof d.plainMime === 'string' && L.MEDIA_MIMES.includes(d.plainMime) &&
+    isKey(d.plainSha256) &&
+    int(1, L.MAX_MEDIA_DIMENSION)(d.w) &&
+    int(1, L.MAX_MEDIA_DIMENSION)(d.h) &&
+    d.ms === 0
+}
+
+// Group media identities are distinct even when their other fields differ.
+function isGroupMediaList (v) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_MEDIA_PER_POST) return false
+  const identities = new Set()
+  for (let i = 0; i < v.length; i++) {
+    const item = v[i]
+    if (!isDescriptor(item) && !isPrivateGroupMediaItem(item)) return false
+    const identity = item.core + ':' + item.start
+    if (identities.has(identity)) return false
+    identities.add(identity)
+  }
+  return true
+}
+
 // With media the text may be empty (a photo-only post); without, 1..MAX_TEXT.
 function postCross (given, value) {
   if (!hasOwn(value, 'media') && charLength(value.text) < 1) return 'parâmetro inválido: text'
@@ -226,7 +266,7 @@ const isPushAction = (v) => v === 'on' || v === 'off'
 const isPushP256dh = (v) => typeof v === 'string' && PUSH_P256DH_RE.test(v)
 const isPushAuth = (v) => typeof v === 'string' && PUSH_AUTH_RE.test(v)
 
-// seen.sign / seen.merge (docs/rpc.md 5.88 and 5.89). These bounds mirror
+// seen.sign / seen.merge (docs/rpc.md 5.90 and 5.91). These bounds mirror
 // core's seen-blob and seen-proof without importing dependencies here.
 const SEEN_BLOB_B64 = 43744
 const SEEN_TOKEN_RE = /^[0-9a-f]{32}$/
@@ -298,15 +338,51 @@ const isLeaveForce = (v) => isBool(v) ||
 
 const DM_ID_RE = /^[0-9a-f]{32}$/
 const DM_STATES = ['accepted', 'declined', 'blocked', 'unblocked', 'deleted']
-// Page sizes keep a worst-case page (4-byte code points) far below
-// MAX_MESSAGE (docs/rpc.md 5.77 and 5.78).
-const DM_THREAD_LIMIT_DEFAULT = 30
-const DM_THREAD_LIMIT_MAX = 50
+// dm.list rows are small (docs/rpc.md 5.77); the dm.thread maxima live in
+// limits.js with the other measured page sizes.
 const DM_LIST_LIMIT_DEFAULT = 30
 const DM_LIST_LIMIT_MAX = 50
 const isDmId = (v) => typeof v === 'string' && DM_ID_RE.test(v)
 const isDmState = (v) => typeof v === 'string' && DM_STATES.includes(v)
 const isDmFolder = (v) => v === 'inbox' || v === 'request'
+
+// dm.send `media` (docs/rpc.md 5.75): 1..MAX_DM_MEDIA items, each a blob
+// descriptor (the validateBlobDescriptor rules of @varanda/core lib/blob.js,
+// which this package cannot import) plus mime, w, h and ms, exact keys. bytes
+// counts the ciphertext (plaintext plus the MAC), so chunks is fixed by bytes.
+// ms is reserved for later kinds and is 0 for every image.
+const HEX48 = /^[0-9a-f]{48}$/
+
+function isDmMediaItem (d) {
+  if (!isPlainObject(d)) return false
+  const own = Object.keys(d)
+  if (own.length !== DM_MEDIA_KEYS.length || !DM_MEDIA_KEYS.every((k) => hasOwn(d, k))) return false
+  const { id, key, nonce, chunks, bytes, sha256, mime, w, h, ms } = d
+  return isKey(id) && isKey(key) && isKey(sha256) &&
+    typeof nonce === 'string' && HEX48.test(nonce) &&
+    isMediaMime(mime) &&
+    int(1, L.DM_MEDIA_MAX_CHUNKS)(chunks) &&
+    Number.isSafeInteger(bytes) &&
+    bytes > L.DM_MEDIA_MAC_BYTES &&
+    bytes <= L.DM_MEDIA_MAX_CHUNKS * L.DM_MEDIA_CHUNK_BYTES &&
+    chunks === Math.ceil(bytes / L.DM_MEDIA_CHUNK_BYTES) &&
+    int(1, L.MAX_MEDIA_DIMENSION)(w) &&
+    int(1, L.MAX_MEDIA_DIMENSION)(h) &&
+    ms === 0
+}
+
+// By index, never every(): a hole in a sparse array is undefined and invalid.
+// Distinct blob ids, as the core v2 inner requires (protocol section 11), so
+// a list the node would refuse is refused here as a parameter error.
+function isDmMediaList (v) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_DM_MEDIA) return false
+  const ids = new Set()
+  for (let i = 0; i < v.length; i++) {
+    if (!isDmMediaItem(v[i]) || ids.has(v[i].id)) return false
+    ids.add(v[i].id)
+  }
+  return true
+}
 
 // dm.list `before` (docs/rpc.md 5.77): exactly { at, peer }, the list-order
 // position of the oldest conversation the caller holds.
@@ -499,7 +575,9 @@ const SPECS = {
   // member and association itself and hashes text and quote into the
   // payload, so a caller never chooses the bytes. `seq` absent = a report of
   // the whole account (no quote); present = a report of that post, quoting
-  // its text (empty for a photo-only post).
+  // its text (empty for a photo-only post). `anexo` (a group message only)
+  // is the hex SHA-256 of an attached image: the node signs that digest,
+  // never the bytes.
   'report.sign': {
     fields: {
       nonce: req(isNonce),
@@ -509,13 +587,16 @@ const SPECS = {
       group: opt(isKey),
       reason: req(isReason),
       text: opt(str(0, REPORT_TEXT_MAX), ''),
-      quote: opt(str(0, L.MAX_TEXT), '')
+      quote: opt(str(0, L.MAX_TEXT), ''),
+      anexo: opt(isKey)
     },
     cross (given, value) {
       if (!hasOwn(value, 'seq') && value.quote !== '') return 'quote só com seq'
       // A group post is addressed by its writer core inside the group.
       if (hasOwn(value, 'writer') && (!hasOwn(value, 'seq') || !hasOwn(value, 'group'))) return 'writer só com seq e group'
       if (hasOwn(value, 'group') && !hasOwn(value, 'writer')) return 'group só com writer'
+      // A diary post is on the seeder, where the moderator reads it.
+      if (hasOwn(value, 'anexo') && !hasOwn(value, 'writer')) return 'anexo só com writer'
       return null
     }
   },
@@ -687,8 +768,13 @@ const SPECS = {
   'group.join': { fields: { group: req(isKey), community: opt(isKey) }, mutating: true },
   'group.leave': { fields: { group: req(isKey) }, mutating: true },
   'group.post': {
-    fields: { group: req(isKey), text: req(str(1, L.MAX_TEXT)), replyTo: opt(isGroupRef) },
-    mutating: true
+    fields: { group: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), media: opt(isGroupMediaList), sealed: opt(isBool) },
+    mutating: true,
+    cross: (given, value) => {
+      if (value.sealed === true && !hasOwn(value, 'media')) return 'parâmetro inválido: sealed'
+      if (value.media && !value.media.every((item) => (item.mime === 'application/octet-stream') === (value.sealed === true))) return 'parâmetro inválido: media'
+      return postCross(given, value)
+    }
   },
   'group.read': {
     fields: {
@@ -790,12 +876,18 @@ const SPECS = {
   // The same-value check is the node's.
   'group.invitePolicy': { fields: { group: req(isKey), members: req(isBool) }, mutating: true },
   'community.invitePolicy': { fields: { community: req(isKey), members: req(isBool) }, mutating: true },
-  // Conversas, browser node only (docs/rpc.md 5.73 to 5.81). dm.pull and
+  // Conversas, browser node only (docs/rpc.md 5.73 to 5.81, 5.88). dm.pull and
   // dm.seen write only local state and must survive an uncertain answer, so
   // they are not mutating: the client may repeat them.
   'dm.enable': { fields: none, mutating: true },
   'dm.lookup': { fields: { member: req(isKey) } },
-  'dm.send': { fields: { to: req(isKey), text: req(str(1, L.MAX_TEXT)), replyTo: opt(isDmId) }, mutating: true },
+  // With media the text may be empty, as postCross; the sealed frame's own
+  // budget (buildInner, 'mensagem longa demais') is the node's check.
+  'dm.send': {
+    fields: { to: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isDmId), media: opt(isDmMediaList) },
+    mutating: true,
+    cross: postCross
+  },
   'dm.pull': { fields: none },
   'dm.list': {
     fields: {
@@ -804,19 +896,27 @@ const SPECS = {
       before: opt(isDmListCursor)
     }
   },
-  'dm.thread': { fields: { peer: req(isKey), before: opt(isDmId), limit: opt(int(1, DM_THREAD_LIMIT_MAX), DM_THREAD_LIMIT_DEFAULT) } },
+  'dm.thread': { fields: { peer: req(isKey), before: opt(isDmId), limit: opt(int(1, L.DM_THREAD_LIMIT_MAX), L.DM_THREAD_LIMIT_DEFAULT) } },
   'dm.set': { fields: { peer: req(isKey), state: req(isDmState) }, mutating: true },
   'dm.seen': { fields: { peer: req(isKey) } },
   // The node fills in member and association and hashes text and quote; the
   // quote is the chosen message as this device decrypted it, which no one
   // can verify. target is the sender's diary key, never its signature.
+  // `anexo` is the hex SHA-256 of an attached image (the node signs the
+  // digest, never the bytes); only with it may the quote be empty (a
+  // media-only message).
   'dm.reportSign': {
     fields: {
       nonce: req(isNonce),
       target: req(isKey),
       reason: req(isReason),
       text: opt(str(0, REPORT_TEXT_MAX), ''),
-      quote: req(str(1, L.MAX_TEXT))
+      quote: req(str(0, L.MAX_TEXT)),
+      anexo: opt(isKey)
+    },
+    cross (given, value) {
+      if (value.quote === '' && !hasOwn(value, 'anexo')) return 'parâmetro inválido: quote'
+      return null
     }
   },
   // Páginas (docs/rpc.md 5.84 to 5.87). page.sign signs a page statement or
@@ -906,9 +1006,48 @@ const SPECS = {
       name: req(isMediaName),
       mime: req(isMediaMime),
       width: req(int(1, MEDIA_SIDE_MAX)),
+      height: req(int(1, MEDIA_SIDE_MAX)),
+      sealed: opt(isBool)
+    },
+    mutating: true
+  },
+  // IPC only, in-app web-node worklet (docs/rpc.md 5.88): the photo of a
+  // chat goes to the anonymous blob channel (protocol section 13) from a
+  // cache file, as media.uploadFile; the result is a dm.send media item. On
+  // the web the bytes never cross RPC (MAX_REQUEST): the page hands them to
+  // the node's media facade instead.
+  'dm.putMedia': {
+    fields: {
+      name: req(isMediaName),
+      mime: req(isMediaMime),
+      width: req(int(1, MEDIA_SIDE_MAX)),
       height: req(int(1, MEDIA_SIDE_MAX))
     },
     mutating: true
+  },
+  // IPC only, in-app web-node worklet (docs/rpc.md 5.89): the opened image
+  // of a chat item is written to a file in the worklet's read directory and
+  // only its name comes back, since a photo is far above MAX_MESSAGE. A DM
+  // item is { kind: 'dm', from, id, index }, a private group item
+  // { kind: 'group', diary, item }. Not mutating: it changes no diary.
+  'media.readFile': {
+    fields: {
+      kind: req((v) => v === 'dm' || v === 'group'),
+      from: opt(isKey),
+      id: opt(isDmId),
+      index: opt(int(0, L.MAX_DM_MEDIA - 1)),
+      diary: opt(isKey),
+      item: opt(isPrivateGroupMediaItem)
+    },
+    cross (given) {
+      const dm = ['from', 'id', 'index']
+      const group = ['diary', 'item']
+      const want = given.kind === 'dm' ? dm : group
+      const other = given.kind === 'dm' ? group : dm
+      for (const k of want) if (!hasOwn(given, k)) return 'parâmetro obrigatório: ' + k
+      for (const k of other) if (hasOwn(given, k)) return 'parâmetro desconhecido'
+      return null
+    }
   }
 }
 

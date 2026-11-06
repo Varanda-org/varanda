@@ -1,7 +1,7 @@
 'use strict'
 
-// The seen-sync engine of the browser node (docs/rpc.md 5.88 seen.sign and
-// 5.89 seen.merge): signs the account service's seen statements and merges
+// The seen-sync engine of the browser node (docs/rpc.md 5.90 seen.sign and
+// 5.91 seen.merge): signs the account service's seen statements and merges
 // the member's encrypted seen document (@varanda/core lib/seen-blob.js) with
 // this device's kv dmSeen, groupSeen and seenLocal.
 //
