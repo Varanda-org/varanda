@@ -21,6 +21,23 @@ const DM_MEDIA_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 's
 const ID_STANDIN = '0'.repeat(32)
 const KEY_STANDIN = '0'.repeat(64)
 const AT_STANDIN = '0000-00-00T00:00:00.000Z'
+// The largest membership certificate a msg carries (core lib/cert.js: the
+// issued v2 shape; a v1 certificate is smaller even with 32-character
+// ageBand and method). A UI that does not hold its own certificate measures
+// with this, so a caption that fits here fits with the real one, and no
+// photo is uploaded for a message the node would then refuse as too long.
+const MEMBER_CERT_STANDIN = Object.freeze({
+  v: 2,
+  member: KEY_STANDIN,
+  ageBand: 'unchecked',
+  method: 'google',
+  date: AT_STANDIN,
+  association: KEY_STANDIN,
+  issuer: KEY_STANDIN,
+  issuerDate: AT_STANDIN,
+  issuerSignature: '0'.repeat(128),
+  signature: '0'.repeat(128)
+})
 
 function orNull (x) {
   return x === undefined ? null : x
@@ -80,6 +97,7 @@ function dmTextBudget (fields = {}) {
 }
 
 module.exports = {
+  MEMBER_CERT_STANDIN,
   DM_INNER_BYTES,
   DM_INNER_FRAMING_BYTES,
   DM_INNER_KEYS,

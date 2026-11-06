@@ -14,7 +14,7 @@ const { createIdentityHost } = require('../worklet/identity-install')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia } = require('../worklet/web-node-parts')
+const { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, clearReadDir, writeReadFile, readMediaToFile } = require('../worklet/web-node-parts')
 
 const hmac = (key, data) => new Uint8Array(crypto.createHmac('sha256', key).update(data).digest())
 const hkdf = (ikm, salt, info, length) => hkdfSha256(ikm, salt, info, length, { hmac })
@@ -481,4 +481,120 @@ test('close cancels a running upload by closing the session first', async (t) =>
   await lifecycle.close()
   t.alike(order, ['session', 'storage'])
   t.ok(await uploading instanceof Error)
+})
+
+test('putDmMedia hands the photo to dmPutMedia, zeroes it and unlinks after success', async (t) => {
+  const seen = []
+  const unlinked = []
+  const bytes = new Uint8Array([1, 2, 3])
+  const session = { dmPutMedia: (args) => { seen.push({ ...args, copy: new Uint8Array(args.bytes) }); return Promise.resolve({ id: 'x' }) } }
+  const io = { read: async () => ({ file: '/cache/p.bin', bytes }), session, unlink: (f) => unlinked.push(f), isClosing: () => false }
+  t.alike(await putDmMedia(io, { mime: 'image/png', width: 2, height: 3, sealed: true }), { id: 'x' })
+  t.alike(Object.keys(seen[0]), ['bytes', 'mime', 'width', 'height', 'copy'], 'no sealed on the blob channel')
+  t.alike(seen[0].copy, new Uint8Array([1, 2, 3]))
+  t.ok(bytes.every((b) => b === 0), 'the bytes are zeroed')
+  t.alike(unlinked, ['/cache/p.bin'])
+
+  const failing = { ...io, read: async () => ({ file: '/cache/q.bin', bytes: new Uint8Array(1) }), session: { dmPutMedia: () => { throw new TypeError('mídia inválida') } } }
+  const err = await putDmMedia(failing, { mime: 'image/png', width: 1, height: 1 }).catch((e) => e)
+  t.is(err.code, 'USAGE')
+  t.alike(unlinked, ['/cache/p.bin'], 'a refused file is not unlinked')
+  const closing = await putDmMedia({ ...io, isClosing: () => true }, { mime: 'image/png', width: 1, height: 1 }).catch((e) => e)
+  t.is(closing.code, 'LOCKED')
+})
+
+test('writeReadFile creates the file exclusively with mode 0600; clearReadDir removes read files only', async (t) => {
+  const { root } = mediaDirs(t)
+  const dir = path.join(root, 'media-read')
+  await clearReadDir({ fs: fs.promises, join: path.join, dir })
+  t.ok(fs.statSync(dir).isDirectory(), 'the dir is created')
+  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL
+  const bytes = new Uint8Array(70000).map((_, i) => i % 251)
+  t.is(await writeReadFile({ fs: fs.promises, join: path.join, dir, name: MEDIA_NAME, bytes, flags }), MEDIA_NAME)
+  const file = path.join(dir, MEDIA_NAME)
+  t.alike(new Uint8Array(fs.readFileSync(file)), bytes)
+  t.is(fs.statSync(file).mode & 0o777, 0o600)
+  const again = await writeReadFile({ fs: fs.promises, join: path.join, dir, name: MEDIA_NAME, bytes: new Uint8Array(1), flags }).catch((e) => e)
+  t.is(again.code, 'INTERNAL', 'an existing name is never written through')
+  t.alike(new Uint8Array(fs.readFileSync(file)), bytes, 'and is left as it was')
+  const linked = '1'.repeat(32) + '.bin'
+  fs.writeFileSync(path.join(root, 'target'), 'secret')
+  fs.symlinkSync(path.join(root, 'target'), path.join(dir, linked))
+  const noExcl = fs.constants.O_WRONLY | fs.constants.O_CREAT
+  const viaLink = await writeReadFile({ fs: fs.promises, join: path.join, dir, name: linked, bytes, flags: noExcl }).catch((e) => e)
+  t.is(viaLink.code, 'INTERNAL', 'a planted link is refused without O_EXCL too')
+  t.is(fs.readFileSync(path.join(root, 'target'), 'utf8'), 'secret')
+  fs.unlinkSync(path.join(dir, linked))
+  const bad = await writeReadFile({ fs: fs.promises, join: path.join, dir, name: '../x.bin', bytes, flags }).catch((e) => e)
+  t.is(bad.code, 'INTERNAL')
+  fs.writeFileSync(path.join(dir, 'keep.txt'), 'x')
+  await clearReadDir({ fs: fs.promises, join: path.join, dir })
+  t.alike(fs.readdirSync(dir), ['keep.txt'])
+})
+
+test('readMediaToFile opens a DM or group item through the session and writes it', async (t) => {
+  const written = []
+  // A 3x2 PNG that mediaBounds accepts.
+  const png = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAAAAAC4HznGAAAAC0lEQVR4nGNggAAAAAgAAbdYc5UAAAAASUVORK5CYII=', 'base64'))
+  const calls = []
+  const session = {
+    dmReadMedia: async (args) => { calls.push(['dm', args]); return { bytes: new Uint8Array(png), mime: 'image/png' } },
+    groupReadMedia: async (args) => { calls.push(['group', args]); return { bytes: new Uint8Array(png), mime: 'image/png', w: 4, h: 6 } }
+  }
+  let gen = 0
+  const io = {
+    session,
+    write: async (bytes) => { written.push(new Uint8Array(bytes)); return MEDIA_NAME },
+    unlink: () => {},
+    generation: () => gen,
+    isClosing: () => false
+  }
+  const dm = await readMediaToFile(io, { kind: 'dm', from: 'a', id: 'b', index: 0 })
+  t.alike(calls[0], ['dm', { from: 'a', id: 'b', index: 0 }])
+  t.alike(dm, { name: MEDIA_NAME, mime: 'image/png', w: 3, h: 2 })
+  t.alike(written[0], png)
+  const g = await readMediaToFile(io, { kind: 'group', diary: 'd', item: { x: 1 } })
+  t.alike(calls[1], ['group', { diary: 'd', item: { x: 1 } }])
+  t.alike(g, { name: MEDIA_NAME, mime: 'image/png', w: 3, h: 2 }, 'the size comes from the bytes, not the item')
+
+  const unlinked = []
+  const racing = {
+    ...io,
+    write: async () => { gen++; return MEDIA_NAME },
+    unlink: (name) => unlinked.push(name)
+  }
+  const err = await readMediaToFile(racing, { kind: 'dm', from: 'a', id: 'b', index: 0 }).catch((e) => e)
+  t.is(err.code, 'LOCKED', 'a lock during the read keeps nothing')
+  t.alike(unlinked, [MEDIA_NAME])
+
+  const refused = await readMediaToFile({ ...io, session: { dmReadMedia: () => { throw new TypeError('x') } } }, { kind: 'dm' }).catch((e) => e)
+  t.is(refused.code, 'USAGE')
+  const closed = await readMediaToFile({ ...io, isClosing: () => true }, { kind: 'dm' }).catch((e) => e)
+  t.is(closed.code, 'LOCKED')
+})
+
+test('readMediaToFile refuses bytes mediaBounds rejects: nothing written, plaintext zeroed', async (t) => {
+  const written = []
+  const handed = []
+  const huge = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0xff, 0xff, 0xff, 0xff, 0, 0, 0])
+  const answers = [
+    { bytes: huge, mime: 'image/gif' },
+    { bytes: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]), mime: 'image/png', w: 3, h: 2 },
+    { bytes: new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAAAAAC4HznGAAAAC0lEQVR4nGNggAAAAAgAAbdYc5UAAAAASUVORK5CYII=', 'base64')), mime: 'image/gif' }
+  ]
+  for (const answer of answers) {
+    handed.push(answer.bytes)
+    const io = {
+      session: { dmReadMedia: async () => answer },
+      write: async (bytes) => { written.push(bytes); return MEDIA_NAME },
+      unlink: () => {},
+      generation: () => 0,
+      isClosing: () => false
+    }
+    const err = await readMediaToFile(io, { kind: 'dm', from: 'a', id: 'b', index: 0 }).catch((e) => e)
+    t.is(err.code, 'USAGE')
+    t.is(err.message, 'mídia indisponível')
+  }
+  t.is(written.length, 0, 'no plaintext file is written')
+  t.ok(handed.every((b) => b.every((x) => x === 0)), 'the refused plaintext is zeroed')
 })

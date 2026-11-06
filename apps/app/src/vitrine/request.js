@@ -1,4 +1,5 @@
 import rpc from '@varanda/rpc'
+import { createVitrineMedia } from './media.js'
 
 const { validateParams, RpcError } = rpc
 const copy = (value) => JSON.parse(JSON.stringify(value))
@@ -16,7 +17,9 @@ const targetOf = (ref) => {
   return { author, seq: Number(seq) }
 }
 const active = (entity) => ['creator', 'admin', 'member'].includes(entity.role)
-const preview = (text) => [...text].slice(0, 140).join('')
+const preview = (text, media) => text === '' && Array.isArray(media) && media.length > 0
+  ? media.every((m) => (m.plainMime || m.mime) === 'image/gif') ? 'GIF' : 'Foto'
+  : [...text].slice(0, 140).join('')
 
 function refuse (code, message) {
   throw new RpcError(code, message, { uncertain: false })
@@ -208,7 +211,7 @@ export function createVitrineRequest (fixtures) {
         ? {
             name: last.name,
             username: last.username,
-            preview: last.hidden ? '' : preview(last.text),
+            preview: last.hidden ? '' : preview(last.text, last.media),
             at: last.at,
             mine: last.diary === data.own,
             hidden: last.hidden
@@ -328,6 +331,14 @@ export function createVitrineRequest (fixtures) {
       return { page: key, owner: data.own, admins: [data.members[1].author], gen: 1, seq: 1, isOwner: true, isAdmin: false, complete: true, follows, followsCount: follows.length, followsTruncated: false, closed: false, movedTo: null, movedFrom: null, links: [] }
     },
     'page.feed': ({ keys, limit }) => ({ items: [...data.feed, ...data.noticePosts].filter((p) => keys.includes(p.author)).sort((a, b) => comparePosition(a, b, 'author')).slice(-limit), incomplete: false }),
+    // IPC-only calls of the in-app web node (docs/rpc.md 5.88, 5.89). The
+    // Vitrine screens go through the handle of ./media.js; these answers only
+    // keep the documented shapes.
+    'dm.putMedia': ({ mime, width, height }) => {
+      const n = mediaStart++
+      return { id: keyOf(0x900 + n), key: keyOf(0xa00 + n), nonce: '0'.repeat(46) + (n % 100).toString().padStart(2, '0'), chunks: 1, bytes: 2048, sha256: keyOf(0x800 + n), mime, w: width, h: height, ms: 0 }
+    },
+    'media.readFile': () => ({ name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', w: null, h: null }),
     'media.uploadFile': ({ mime, width, height }) => ({ core: keyOf(950), mime, start: mediaStart++, blocks: 1, bytes: 2048, sha256: keyOf(951), width, height }),
     'dm.enable': () => {
       const seq = dmEnabled ? null : append({ type: 'dm-key', box: data.own, gen: 1, at: stamp() }).seq
@@ -423,7 +434,7 @@ export function createVitrineRequest (fixtures) {
     'dm.list': ({ folder, limit, before }) => {
       const rows = data.conversations.filter((c) => !c.blocked && c.messages.length > 0).map((c) => {
         const last = c.messages[c.messages.length - 1]
-        return { peer: c.peer, folder: c.folder, preview: preview(last.text), at: last.at, unread: c.unread, mine: last.mine }
+        return { peer: c.peer, folder: c.folder, preview: preview(last.text, last.media), at: last.at, unread: c.unread, mine: last.mine }
       })
       const candidates = rows.filter((c) => c.folder === folder && (!before || compareDm(c, before) > 0)).sort(compareDm)
       const conversations = candidates.slice(0, limit)
@@ -452,7 +463,7 @@ export function createVitrineRequest (fixtures) {
       if (c) c.unread = false
       return { ok: true }
     },
-    'dm.send': ({ to, text, replyTo }) => {
+    'dm.send': ({ to, text, replyTo, media }) => {
       if (to === data.own) refuse('USAGE', 'não é possível enviar para si')
       let c = conversationOf(to)
       if (c && c.blocked) refuse('USAGE', 'você bloqueou esta pessoa')
@@ -464,7 +475,7 @@ export function createVitrineRequest (fixtures) {
       }
       const id = (++messageId).toString(16).padStart(32, '0')
       const at = stamp()
-      c.messages.push({ id, from: data.own, text, replyTo: replyTo || null, at, mine: true })
+      c.messages.push({ id, from: data.own, text, replyTo: replyTo || null, at, mine: true, media: media || null })
       c.folder = 'inbox'
       return { id, at }
     },
@@ -476,7 +487,7 @@ export function createVitrineRequest (fixtures) {
     'group.read': ({ group, limit, before }) => {
       const g = groupOf(group)
       const candidates = orderedItems(g).reverse().filter((item) => !before || comparePosition(item, before, 'writer') < 0)
-      const items = candidates.slice(0, limit).map((item) => item.hidden ? { ...item, text: '' } : item)
+      const items = candidates.slice(0, limit).map((item) => item.hidden ? { ...item, text: '', media: null } : item)
       return {
         items,
         next: candidates.length > limit ? groupCursor(items[items.length - 1]) : null,
@@ -498,12 +509,12 @@ export function createVitrineRequest (fixtures) {
       if (item && (!g.seen || comparePosition(item, g.seen, 'writer') > 0)) g.seen = groupCursor(item)
       return { ok: true }
     },
-    'group.post': ({ group, text, replyTo }) => {
+    'group.post': ({ group, text, replyTo, media }) => {
       const g = groupOf(group)
       if (!active(g) || !active(communityOf(g.community)) || communityOf(g.community).dropped.includes(group)) refuse('USAGE', 'sem permissão no grupo')
       const seq = Math.max(1, ...g.items.filter((item) => item.writer === g.writer).map((item) => item.seq)) + 1
       const p = profileOf(data.own)
-      g.items.push({ writer: g.writer, diary: data.own, seq, at: stamp(), text, replyTo: replyTo || null, hidden: false, name: p.name, username: p.username })
+      g.items.push({ writer: g.writer, diary: data.own, seq, at: stamp(), text, replyTo: replyTo || null, hidden: false, media: media || null, name: p.name, username: p.username })
       return { seq }
     },
     'community.list': () => {
@@ -607,10 +618,13 @@ export function createVitrineRequest (fixtures) {
     }
   }
 
-  return async (method, params = {}) => {
+  const request = async (method, params = {}) => {
     if (!Object.hasOwn(handlers, method)) refuse('USAGE', 'método desconhecido')
     const checked = validateParams(method, params)
     if (!checked.ok) refuse(checked.code, checked.message)
     return copy(handlers[method](copy(checked.value)))
   }
+  // The node handle's chat media calls, over the same live state.
+  request.media = createVitrineMedia(data)
+  return request
 }

@@ -362,6 +362,89 @@ test('report with anexo: the nonce is checked before the attachment is decoded',
   t.is(s.moderation.stats().open, 1, 'only the valid report stored')
 })
 
+// An anexo POST over a raw socket that sends `first` and then nothing more
+// (or ends there with `end`). -> { done } resolving to the status, or to
+// 'cut' when the server drops the connection without an answer.
+function rawAnexoPost (s, headers, first, { end = false } = {}) {
+  const req = http.request(s.base + '/account/report/anexo', {
+    method: 'POST',
+    headers: { origin: ORIGIN, 'content-type': 'application/json', ...headers }
+  })
+  const done = new Promise((resolve) => {
+    req.on('response', (res) => {
+      const chunks = []
+      res.on('data', (c) => chunks.push(c))
+      res.on('end', () => {
+        let body = null
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch {}
+        resolve({ status: res.statusCode, body })
+      })
+      res.on('error', () => resolve({ status: res.statusCode, body: null }))
+    })
+    req.on('error', () => resolve('cut'))
+  })
+  req.write(first)
+  if (end) req.end()
+  return { req, done }
+}
+
+test('report with anexo: a body without Content-Length is refused before any slot', async (t) => {
+  const s = await setup(t)
+  const body = JSON.stringify(await dmAnexoBody(s, s.ana, s.bia.hex, GIF))
+  const chunked = await rawAnexoPost(s, {}, body, { end: true }).done
+  t.alike(chunked, { status: 411, body: { error: 'pedido-invalido' } }, 'chunked body refused')
+  t.is(s.moderation.stats().open, 0, 'nothing stored')
+  // The same body with its length lands.
+  const r = await s.api('POST', '/account/report/anexo', { body: JSON.parse(body) })
+  t.is(r.status, 200, r.text)
+})
+
+test('report with anexo: a stalled body is cut and its slot serves the next report', async (t) => {
+  const s = await setup(t)
+  const started = Date.now()
+  const stalled = []
+  // Declared long enough (1 MB: a 10 s deadline) that the idle cut acts first.
+  for (let i = 0; i < 4; i++) stalled.push(rawAnexoPost(s, { 'content-length': 1000000 }, '{"kind":"dm"'))
+  // Every slot is held by a body that stopped sending.
+  await settle()
+  const fifth = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, GIF) })
+  t.alike(fifth.body, { error: 'limite' }, 'all four slots taken')
+  const ends = await Promise.all(stalled.map((x) => x.done))
+  const elapsed = Date.now() - started
+  for (const e of ends) t.ok(e === 'cut' || e.status === 408, 'cut by the server')
+  t.ok(elapsed >= 4500, 'after the idle cut (' + elapsed + ' ms)')
+  t.ok(elapsed < 8000, 'before the deadline and the service request timeout (' + elapsed + ' ms)')
+  const r = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, GIF) })
+  t.is(r.status, 200, r.text)
+  t.alike(s.moderation.get(r.body.id).anexo, { sha256: sha256(GIF), mime: 'image/gif', size: GIF.length }, 'stored with its anexo')
+})
+
+test('report with anexo: a body that drips past its deadline is cut', async (t) => {
+  const s = await setup(t)
+  const started = Date.now()
+  // 8000 bytes declared: a deadline of 2 s plus 64 ms. A byte every 400 ms
+  // keeps the idle cut away, so only the deadline can end it.
+  const drip = rawAnexoPost(s, { 'content-length': 8000 }, '{')
+  const timer = setInterval(() => { if (!drip.req.destroyed) drip.req.write(' ') }, 400)
+  const end = await drip.done
+  clearInterval(timer)
+  const elapsed = Date.now() - started
+  t.ok(end === 'cut' || end.status === 408, 'cut by the server')
+  t.ok(elapsed >= 1900 && elapsed < 4500, 'at the deadline (' + elapsed + ' ms)')
+  const r = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, GIF) })
+  t.is(r.status, 200, 'the slot is free again')
+})
+
+test('report with anexo: a bad signature spends the nonce', async (t) => {
+  const s = await setup(t)
+  const bad = await dmAnexoBody(s, s.ana, s.bia.hex, GIF, { signBytes: Buffer.from('outra imagem') })
+  t.alike((await s.api('POST', '/account/report/anexo', { body: bad })).body, { error: 'assinatura-invalida' })
+  const fields = { nonce: bad.nonce, member: s.ana.hex, association: s.iss.association, target: s.bia.hex, reason: 'assedio', text: '', quote: '', anexo: sha256(GIF) }
+  const good = { ...bad, signature: signDmReport(fields, s.ana.kp) }
+  t.alike((await s.api('POST', '/account/report/anexo', { body: good })).body, { error: 'expirado' }, 'the same nonce is refused as spent')
+  t.is(s.moderation.stats().open, 0, 'nothing stored')
+})
+
 test('panel image loads have their own window: many in one minute leave the list and decide their allowance', async (t) => {
   const s = await setup(t)
   const r = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, GIF) })

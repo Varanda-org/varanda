@@ -55,6 +55,7 @@ module.exports = {
   canonicalDmInnerJson: dmBudget.canonicalInnerJson,
   dmTextBytes: dmBudget.dmTextBytes,
   dmTextBudget: dmBudget.dmTextBudget,
+  MEMBER_CERT_STANDIN: dmBudget.MEMBER_CERT_STANDIN,
   tokensEqual,
   createServerDispatcher,
   createClient

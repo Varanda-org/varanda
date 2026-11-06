@@ -88,6 +88,17 @@ const REPORT_BODY_MAX = 8192
 const ANEXO_B64_MAX = 4 * Math.ceil(ANEXO_MAX_BYTES / 3)
 const ANEXO_BODY_MAX = ANEXO_B64_MAX + REPORT_BODY_MAX
 const MAX_ANEXO_INFLIGHT = 4
+// Reading an anexo body is anonymous until its nonce and signature check, so
+// a slot is never held by a sender that stops: a body with no chunk for
+// ANEXO_IDLE_MS is cut, and every body has a deadline of ANEXO_READ_SLACK_MS
+// plus its declared length at ANEXO_MIN_BITS_PER_MS (1 Mbit/s, a slow mobile
+// link): a full ANEXO_BODY_MAX (about 1.4 MB, 11.3 s at that rate) would get
+// about 13.3 s, a small image a couple of seconds. The service's
+// requestTimeout (server.js) still ends any request first.
+const ANEXO_IDLE_MS = 5000
+const ANEXO_READ_SLACK_MS = 2000
+const ANEXO_MIN_BITS_PER_MS = 1000
+const DECIMAL_RE = /^[0-9]{1,10}$/
 const B64_RE = /^[A-Za-z0-9+/]*={0,2}$/
 // The image itself, served to a signed-in moderator: never a document.
 const ANEXO_CSP = "default-src 'none'; sandbox"
@@ -252,6 +263,10 @@ function createModRoutes ({
   // member's or the moderator's signature over it), and is kept only until
   // its own expiry. Growth is therefore bounded by the rate of VALIDLY
   // SIGNED requests (and the global bucket), never by anonymous traffic.
+  // One exception: /account/report/anexo spends a genuine unspent nonce as
+  // soon as it is checked, before the signature, so one nonce cannot be
+  // replayed into many slot-holding bodies; that growth is still bounded by
+  // the nonces this process minted and by MAX_ANEXO_INFLIGHT reads at once.
   // nonce -> expiresAt.
   const spentReportNonces = new Map()
   const spentChallenges = new Map()
@@ -468,6 +483,9 @@ function createModRoutes ({
     if (expiresAt === null || spentReportNonces.has(nonce)) throw new RouteError('expirado', 400)
     let anexo = null
     if (withAnexo) {
+      // Burnt now, whatever follows: a bad signature or a junk image costs
+      // the sender this nonce (see spentReportNonces).
+      spend(spentReportNonces, nonce, expiresAt)
       anexo = decodeAnexo(body.anexo)
       if (anexo === null) throw refuse('pedido-invalido')
     }
@@ -1026,6 +1044,50 @@ function createModRoutes ({
     return readJsonBody(req, max)
   }
 
+  // The anexo body's declared length, or a refusal before any slot is
+  // taken: a chunked body (no Content-Length) could only be capped as it
+  // streams, and a length past the cap answers 413 unread.
+  function anexoLength (req, res) {
+    const declared = req.headers['content-length']
+    if (req.headers['transfer-encoding'] !== undefined || typeof declared !== 'string' || !DECIMAL_RE.test(declared)) {
+      res.setHeader('Connection', 'close')
+      throw new RouteError('pedido-invalido', 411)
+    }
+    const length = Number(declared)
+    if (length > ANEXO_BODY_MAX) throw new RouteError('pedido-invalido', 413)
+    return length
+  }
+
+  // readJsonBody under the idle cut and the deadline (ANEXO_IDLE_MS): either
+  // destroys the request, which ends the read and so frees its slot.
+  function readAnexoBody (req, length) {
+    return new Promise((resolve, reject) => {
+      let settled = false
+      let idle = null
+      const finish = (err, value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(idle)
+        clearTimeout(deadline)
+        req.removeListener('data', onData)
+        if (err) reject(err)
+        else resolve(value)
+      }
+      const cut = () => {
+        finish(new RouteError('pedido-invalido', 408))
+        req.destroy()
+      }
+      const onData = () => {
+        clearTimeout(idle)
+        idle = setTimeout(cut, ANEXO_IDLE_MS)
+      }
+      const deadline = setTimeout(cut, ANEXO_READ_SLACK_MS + Math.ceil(length * 8 / ANEXO_MIN_BITS_PER_MS))
+      idle = setTimeout(cut, ANEXO_IDLE_MS)
+      req.on('data', onData)
+      readJsonBody(req, ANEXO_BODY_MAX).then((value) => finish(null, value), finish)
+    })
+  }
+
   async function withSession (req, fn, limit = limits.session) {
     const session = sessionOf(req)
     if (session === null) throw unauthorized()
@@ -1043,12 +1105,14 @@ function createModRoutes ({
     if (post && p === '/account/report') return report(req, res, await postBody(req, REPORT_BODY_MAX))
     if (post && p === '/account/report/anexo') {
       needModeration()
+      checkPost(req)
+      const length = anexoLength(req, res)
       if (anexoInflight >= MAX_ANEXO_INFLIGHT) throw refuse('limite')
       anexoInflight++
       // The slot is held until the whole report is handled, so the decode,
       // bounds check and hash of an image are bounded too, not only the read.
       try {
-        const body = await postBody(req, ANEXO_BODY_MAX)
+        const body = await readAnexoBody(req, length)
         return await report(req, res, body, true)
       } finally {
         anexoInflight--
