@@ -184,6 +184,24 @@ test('one voice note plans an upload for a DM, a public and a private group', as
   }
 })
 
+test('a refused recording reads as a voice note, not a photo', async (t) => {
+  const { voiceUploadError, BAD_VOICE } = await load()
+  const refused = voiceUploadError(new TypeError('mídia inválida'))
+  t.ok(refused instanceof TypeError)
+  t.is(refused.message, BAD_VOICE)
+  const ui = readFileSync(join(__dirname, '..', 'src', 'ui', 'index.js'), 'utf8')
+  t.ok(ui.includes(`'${BAD_VOICE}': 'Não foi possível enviar este áudio.'`), 'ui PLAIN words for it')
+  for (const screen of ['Mensagem.js', 'Grupo.js']) {
+    const src = readFileSync(join(__dirname, '..', 'src', 'screens', screen), 'utf8')
+    t.ok(src.includes('throw voiceUploadError(err)'), screen + ' maps a voice upload refusal')
+  }
+  const uncertain = Object.assign(new Error('mídia inválida'), { uncertain: true })
+  t.is(voiceUploadError(uncertain), uncertain, 'an uncertain failure keeps its flag and message')
+  const other = new Error('sem conexão com o nó')
+  t.is(voiceUploadError(other), other, 'other errors pass through')
+  t.is(voiceUploadError(null), null)
+})
+
 test('voice send requests carry the single voice item', async (t) => {
   const { composePlan, stagedVoice } = await load()
   const staged = stagedVoice({ ms: 4200 })

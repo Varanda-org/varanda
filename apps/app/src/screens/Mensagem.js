@@ -51,7 +51,7 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { mergeMessages, newestOf, pageDmRequest, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
 import { pagesDm } from '../pages'
 import { pagesOn } from '../pageGate'
-import { composePlan, stagedVoice } from '../attach-plan'
+import { composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
 import { chatMediaRefs, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { Btn, ErrorText, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
@@ -363,7 +363,13 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     const r = await runChatSend({
       plan,
       files: [recording],
-      upload: (f) => mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice' }),
+      upload: async (f) => {
+        try {
+          return await mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice' })
+        } catch (err) {
+          throw voiceUploadError(err)
+        }
+      },
       request: dm,
       live: () => token.live,
       onPhase: (p) => { if (token.live) setMediaSend(p) },

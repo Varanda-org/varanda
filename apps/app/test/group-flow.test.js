@@ -678,7 +678,7 @@ test('a stale pick is dropped and a long press on a photo opens the bubble actio
 
 test('Grupo sends a voice note through the composer flow and the bubble plays only local sources', (t) => {
   const src = screen('Grupo.js')
-  t.ok(src.includes("import { composePlan, stagedVoice } from '../attach-plan'"))
+  t.ok(src.includes("import { composePlan, stagedVoice, voiceUploadError } from '../attach-plan'"))
   t.ok(src.includes('attachments: [stagedVoice(recording)]'), 'one voice item through composePlan')
   t.ok(src.includes("width: 0, height: 0, ms: f.ms, kind: 'voice', ...(sealed ? { sealed: true } : {})"), 'the group media path, sealed when private')
   t.ok(src.includes('onVoice={isTop && mediaApi !== null && canPost'), 'the microphone only where media can be posted, and only on top')
