@@ -161,7 +161,7 @@ Exibir: a publicação mostra as fotos embaixo do texto (uma, duas lado a lado, 
 
 #### Nas conversas (mensagens diretas e grupos)
 
-Na web hospedada e no app instalado com a instalação, o clipe do compositor de uma conversa abre a folha "Anexar". Hoje é um painel curto com uma só linha, "Foto" (até 4 da galeria); GIF por busca é planejado e fica fora da folha; a mensagem de voz tem um botão próprio no compositor (abaixo). Da galeria saem até 4 imagens por mensagem; uma foto é reencodada (sem EXIF nem GPS) e um GIF vai como está. As escolhidas aparecem como miniaturas acima do campo, cada uma com um botão para tirar, e a legenda é opcional: uma mensagem pode ter só fotos. Nada é enviado antes de tocar em enviar.
+Na web hospedada e no app instalado com a instalação, o clipe do compositor de uma conversa abre a folha "Anexar". Hoje ela tem "Foto" (até 4 da galeria) e, quando a associação liga a busca de GIFs, "GIF" (abaixo); a mensagem de voz tem um botão próprio no compositor (abaixo). Da galeria saem até 4 imagens por mensagem; uma foto é reencodada (sem EXIF nem GPS) e um GIF vai como está. As escolhidas aparecem como miniaturas acima do campo, cada uma com um botão para tirar, e a legenda é opcional: uma mensagem pode ter só fotos. Nada é enviado antes de tocar em enviar.
 
 - Mensagem direta: as fotos são cifradas no aparelho e vão pelo canal de mídia das conversas do semeador, sob um id aleatório, por 7 dias ([protocol.md](protocol.md), seções 11 e 12); a chave só viaja dentro da mensagem selada. O semeador não vê a imagem nem sabe para quem ela é. Numa mensagem de quem ainda está em Pedidos de mensagem nada é baixado sozinho.
 - Grupo público: as fotos vão para o núcleo de fotos de quem escreve e são públicas como o texto do grupo, buscadas como as fotos das publicações.
@@ -185,6 +185,18 @@ Nas mesmas conversas (mensagens diretas, grupos públicos e privados), com o com
 - Ouvir: a bolha "Mensagem de voz" tem tocar e pausar e mostra a duração; tocar uma pausa a que estava tocando. Num pedido de mensagem, nada é baixado sozinho: a bolha mostra "Toque para ouvir" e só baixa depois do toque. Um áudio que não chega mostra "Mídia indisponível".
 - Denunciar uma mensagem direta ou de grupo privado com mensagem de voz: o áudio vai aberto, como foi gravado, se tiver até 700 KB; a tela da denúncia deixa ouvir antes de enviar ("O áudio vai para a moderação, aberto."), e acima disso diz "O áudio não coube e não foi enviado.". O painel de moderação mostra "áudio não conferido", e a denúncia sempre fica para uma pessoa.
 - Conferência manual: [verification.md](verification.md), seção 108.
+
+#### Busca de GIFs nas conversas
+
+Nas mesmas conversas, quando o operador configura um provedor de GIFs no serviço de conta (`VARANDA_GIF_API_URL` e `VARANDA_GIF_API_KEY`), a folha "Anexar" ganha "GIF". A opção existe só com o nó hospedado (na web hospedada e no app instalado com a instalação), que assina a sessão abaixo; com configuração manual ela não aparece. O app pergunta `GET /account/gif/policy` ao serviço de conta da instalação em uso e, com `{ enabled: false }`, não mostra a opção pelo resto da sessão; sem resposta (rede, erro ou resposta inválida), também não mostra, e pergunta de novo numa próxima abertura depois de pelo menos 30 s. Trocar de instalação pergunta à nova. Que a pessoa está vinculada fica guardado por 5 minutos, para a folha "Anexar" não perguntar a cada abertura; uma sessão recusada com `nao-autorizado` esquece essa resposta, e a opção some na próxima abertura. Sem o provedor configurado, as outras rotas `/account/gif/*` respondem 404 `feature-off`.
+
+- Sessão: antes da primeira busca, o nó assina um pedido só de leitura (`invite.sign`, ação `summary`) sobre um nonce do serviço; o serviço confere a chave do membro vinculado e devolve um token de 12 horas, enviado no cabeçalho `authorization: Bearer <token>` (que os registros de erro do proxy apagam), nunca na URL.
+- Busca: `POST /account/gif/search` com o texto e o cursor no corpo JSON (`{ q }` ou `{ q, cursor }`), nunca na URL. O texto (1 a 64 pontos de código) vai do app ao serviço de conta da associação, que pergunta ao provedor de GIFs a partir do próprio endereço e com a chave da associação. O provedor nunca recebe o endereço, a conta, a chave ou um cookie do membro. A resposta ao app traz só ids opacos, largura, altura e tamanho: nenhuma URL do provedor chega ao app, e o app nunca nomeia uma URL.
+- Miniaturas e imagem: chegam pelo serviço de conta (`/account/gif/image/<id>?size=tiny|full`), que só busca URLs da sua própria tabela de resultados recentes, em https, no host da API ou num dos `VARANDA_GIF_MEDIA_HOSTS`, resolvidos só para endereços públicos.
+- Envio: o app baixa o GIF escolhido inteiro pelo serviço de conta (até 8 MiB) e o envia como uma foto da conversa, pelo mesmo caminho e com a mesma proteção (mensagem direta cifrada no canal de blobs por 7 dias; grupo público, público; grupo privado, cifrado). Quem recebe lê a cópia do Varanda e nunca fala com o provedor.
+- Limites: por membro e por dia, 120 buscas e 60 imagens inteiras; acima disso o serviço responde 429 `limite-gif`. O app não repete o pedido sozinho.
+- Registros: o serviço não guarda o texto das buscas; os registros levam só `{ event: 'gif', reason }`, sem consulta, chave nem URL.
+- Conferência manual: [verification.md](verification.md), seção 111.
 
 ### Na web, com o `varanda-serve`: sem Conectar
 

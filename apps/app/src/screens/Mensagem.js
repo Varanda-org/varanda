@@ -587,7 +587,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
         sending={post.pending || sendingMedia}
         sendDisabled={!canSend}
         editable={!(hold && pageKey !== null) && mediaHold === null && !sendingMedia}
-        onAttach={canAttach && !hold ? () => attachments.pick() : null}
+        onAttach={canAttach && !hold ? (kind, file) => attachments.pick(file) : null}
         onVoice={isTop && canAttach && !hold && mediaHold === null && attachments.items.length === 0 ? sendVoice : null}
         attachments={staged ? attachments.items : null}
         onRemoveAttachment={mediaHold === null ? attachments.remove : undefined}

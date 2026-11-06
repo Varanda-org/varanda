@@ -21,6 +21,11 @@
 // or null) draws a ring around the send button while the photos upload and
 // the message is sent.
 //
+// GIF search: where the account service offers it to this member
+// (useGifReady: the policy is on and ownKey is linked), the attach sheet
+// also shows 'GIF', which opens GifPicker; a picked GIF reaches the screen
+// as onAttach('gif', file), to stage like a gallery GIF.
+//
 // Voice notes: with onVoice (the screen passes it when the node offers media
 // for this chat), the node online and a recorder that makes audio/mp4
 // (canRecordMp4, the capability), an empty field shows a microphone in place
@@ -56,6 +61,7 @@ import { mergeSuggestions } from '../mentionTargets'
 import { useNode } from '../node'
 import { useMemberSearch } from '../useMemberSearch'
 import { AttachSheet } from './AttachSheet'
+import { GifPicker, gifOriginOf, useGifReady } from './GifPicker'
 import { EmojiPicker } from './EmojiPicker'
 import { tap } from './haptics'
 import { Icon } from './Icon'
@@ -311,6 +317,7 @@ export function ChatComposer ({
   const [caret, setCaret] = useState(0)
   const [collapsed, setCollapsed] = useState(true)
   const [sheetOpen, setSheetOpen] = useState(false)
+  const [gifOpen, setGifOpen] = useState(false)
   const staged = Array.isArray(attachments) ? attachments : []
 
   const hosted = node !== null && node.hosted === true
@@ -342,6 +349,7 @@ export function ChatComposer ({
   const left = max - countChars(text)
   const hasText = text.trim() !== '' || staged.length > 0
   const canClip = typeof onAttach === 'function' && online && editable && !sending
+  const gifReady = useGifReady({ node: typeof onAttach === 'function' ? node : null, member: typeof ownKey === 'string' ? ownKey : null })
   const sendOff = !editable || sendDisabled || sending || left < 0
   const voice = useVoiceRecorder({ onVoice, onNote: setNote })
   const recording = voice.rec !== null
@@ -574,7 +582,19 @@ export function ChatComposer ({
       {!note && left < 50 ? <Text style={styles.soft}>{left} caracteres restantes</Text> : null}
       <EmojiPicker open={emojiOpen && editable} onPick={pickEmoji} />
       {typeof onAttach === 'function'
-        ? <AttachSheet open={sheetOpen && canClip} onClose={() => setSheetOpen(false)} onPick={(kind) => { setSheetOpen(false); onAttach(kind) }} />
+        ? <AttachSheet open={sheetOpen && canClip} gif={gifReady} onClose={() => setSheetOpen(false)} onPick={(kind) => { setSheetOpen(false); if (kind === 'gif') setGifOpen(true); else onAttach(kind) }} />
+        : null}
+      {typeof onAttach === 'function' && gifReady
+        ? (
+          <GifPicker
+            open={gifOpen && canClip}
+            onClose={() => setGifOpen(false)}
+            onPick={(file) => onAttach('gif', file)}
+            member={ownKey}
+            origin={gifOriginOf(node)}
+            request={node.request}
+          />
+          )
         : null}
     </View>
   )
