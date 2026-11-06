@@ -489,14 +489,19 @@ test('unknown methods and bad params refuse before any local write', async (t) =
 
 test('vitrine sources stay pure and omit forbidden status words', (t) => {
   const forbidden = new RegExp('(?<!\\p{L})(' + ['li' + 'da', 'entre' + 'gue', 'digi' + 'tando'].join('|') + ')(?!\\p{L})', 'iu')
-  for (const file of ['fixtures.js', 'request.js']) {
+  const expectedImports = {
+    'fixtures.js': [],
+    'request.js': ["import rpc from '@varanda/rpc'"],
+    'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { fixtures } from './fixtures.js'"]
+  }
+  for (const file of Object.keys(expectedImports)) {
     const source = readFileSync(join(__dirname, '../src/vitrine', file), 'utf8')
     t.absent(forbidden.test(source), file + ' status vocabulary')
     t.absent(source.includes(String.fromCharCode(0x2014)))
     t.absent(/\b(?:require|process|Buffer|window|document|navigator|fetch|localStorage|setTimeout|setInterval)\b/.test(source))
     t.absent(/Date\.now|Math\.random/.test(source))
     const imports = source.split('\n').filter((line) => line.startsWith('import '))
-    t.alike(imports, file === 'request.js' ? ["import rpc from '@varanda/rpc'"] : [])
+    t.alike(imports, expectedImports[file], file + ' imports')
   }
 })
 

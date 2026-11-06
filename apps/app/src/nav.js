@@ -77,6 +77,17 @@ export function pop (stack) {
   return Object.freeze(stack.slice(0, -1))
 }
 
+// One step back to the screen at index. Popping one entry at a time would
+// show every screen above it; a gesture or a header that returns to a chosen
+// screen needs that tail gone together. An index that is not a position in
+// this stack is refused, same as an invalid push.
+export function popTo (stack, index) {
+  if (!Array.isArray(stack)) return EMPTY
+  if (!Number.isSafeInteger(index) || index < 0 || index >= stack.length) return stack
+  if (index === stack.length - 1) return stack
+  return Object.freeze(stack.slice(0, index + 1))
+}
+
 export function reset () {
   return EMPTY
 }

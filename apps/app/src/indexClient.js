@@ -1,7 +1,22 @@
-/* global fetch, AbortController, TextDecoder */
+/* global fetch, AbortController, TextDecoder, __DEV__ */
 
 import { isAppClient } from './appClient.js'
 import { resolveUrl } from './installation.js'
+import { vitrineEnabled } from './vitrine/enabled.js'
+
+const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
+let vitrineIndex
+if (VITRINE) {
+  const { vitrineIndex: respond } = require('./vitrine/indexResponder')
+  vitrineIndex = (url) => {
+    try {
+      return respond(url)
+    } catch (err) {
+      if (err.reason === 'not-found') throw new Failure('not-found')
+      throw err
+    }
+  }
+}
 
 // Client for the seeder index (hosted web only; same origin, served by the
 // seeder under /index/*). The index only says where to look (refs, seq hints)
@@ -605,6 +620,7 @@ async function attempt (url, deps, clock) {
 // through the scheduler, all within DEADLINE_MS of the call; a cooldown that
 // outlasts the deadline fails at once with the time it still has to run.
 async function getJson (url, deps = {}) {
+  if (VITRINE) return vitrineIndex(url)
   const clock = makeClock(deps)
   const deadline = clock.now() + DEADLINE_MS
   const g = gen
