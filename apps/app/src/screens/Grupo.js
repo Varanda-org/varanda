@@ -76,7 +76,7 @@ import { pagesGroup } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { shouldRedirectToCommunity } from '../groupRedirect'
 import { GrupoAjustes } from './GrupoAjustes'
-import { composePlan, stagedVoice } from '../attach-plan'
+import { composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
 import { chatMediaRefs, mediaPostLanded, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
@@ -578,7 +578,13 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
     const r = await runChatSend({
       plan,
       files: [recording],
-      upload: (f) => mediaApi.upload({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice', ...(sealed ? { sealed: true } : {}) }),
+      upload: async (f) => {
+        try {
+          return await mediaApi.upload({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice', ...(sealed ? { sealed: true } : {}) })
+        } catch (err) {
+          throw voiceUploadError(err)
+        }
+      },
       request,
       live: () => token.live,
       onPhase: (p) => { if (token.live) setMediaSend(p) }

@@ -56,6 +56,15 @@ export function stagedVoice (recording, index = 0) {
   }
 }
 
+// The node refuses a recording with the message it gives a bad photo
+// ('mídia inválida'); a voice note's send shows its own words instead
+// (BAD_VOICE in ui PLAIN). Anything else passes through unchanged.
+export const BAD_VOICE = 'áudio inválido'
+
+export function voiceUploadError (err) {
+  return err && err.message === 'mídia inválida' && err.uncertain !== true ? new TypeError(BAD_VOICE) : err
+}
+
 export function attachmentPreview (text, attachments = []) {
   if (typeof text === 'string' && text !== '') return displayText(text.replace(/\r?\n/g, ' '))
   if (attachments.length === 0) return ''

@@ -92,11 +92,12 @@ function trak ({
   head = tkhd(id),
   edits = [],
   sizes = [stsz(samplesOf(runs))],
-  chunks = chunksOf(samplesOf(runs))
+  chunks = chunksOf(samplesOf(runs)),
+  media = mdhd(timescale, duration)
 } = {}) {
   const hdlr = box('hdlr', [0, 0, 0, 0], be32(0), ascii(handler), be32(0), be32(0), be32(0), [0])
   const minf = box('minf', box('smhd', new Array(8).fill(0)), ...extra, box('dinf', dref(...refs)), box('stbl', stsd(...entries), stts(runs), ...sizes, ...chunks, ...stblExtra))
-  return box('trak', head, ...edits, box('mdia', mdhd(timescale, duration), hdlr, minf))
+  return box('trak', head, ...edits, box('mdia', media, hdlr, minf))
 }
 
 // ms of samples at timescale 1000, with an mvhd that agrees, and an mdat
@@ -715,4 +716,71 @@ test('audioBounds: segment indexes and stray fragments are refused', (t) => {
 test('audioBounds: exactly one track', (t) => {
   t.is(audioBounds(file({ tracks: [{ runs: [[3000, 1]] }, { runs: [[2000, 1]] }] })), null, 'two sound tracks')
   t.is(audioBounds(file({ tracks: [{ runs: [[3000, 1]] }, { runs: [[3000, 1]] }] })), null, 'two equal sound tracks')
+})
+
+const mdhd1 = (timescale, hi, lo) => box('mdhd', [1, 0, 0, 0], be32(0), be32(0), be32(0), be32(0), be32(timescale), be32(hi), be32(lo), [0, 0, 0, 0])
+
+// What Chrome's MediaRecorder writes for audio/mp4 (Opus): mvhd and tkhd in
+// ms at timescale 1000, and an mdhd whose timescale is 48000 but whose
+// duration is the same ms, so it claims about a fiftieth of the length.
+function chrome (ms, version = 1) {
+  const frames = new Array(ms / 100).fill(4800)
+  return fragmented({
+    mvhd: version === 1 ? mvhd1(1000, 0, ms) : mvhd0(1000, ms),
+    tracks: [trak({ id: 1, timescale: 48000, runs: [], entries: [opus()], head: version === 1 ? tkhd1(1, 0, ms) : tkhd(1, ms), media: version === 1 ? mdhd1(48000, 0, ms) : mdhd(48000, ms) })],
+    mvex: [trex(1, 0)],
+    moofs: [moof(traf(tfhd(1), tfdt1(0, 0), trun({ durations: frames })))]
+  })
+}
+
+// The duration field of the first mvhd, tkhd, mdhd or mehd in bytes.
+function durationOf (bytes, type) {
+  const p = findSeq(Array.from(bytes), ascii(type)) + 4
+  const at = { mvhd: [16, 24], mdhd: [16, 24], tkhd: [20, 28], mehd: [4, 4] }[type][bytes[p]]
+  const read = (q) => ((bytes[q] << 24) | (bytes[q + 1] << 16) | (bytes[q + 2] << 8) | bytes[q + 3]) >>> 0
+  return bytes[p] === 0 ? read(p + at) : read(p + at) * 0x100000000 + read(p + at + 4)
+}
+
+test('stripAudioMetadata: a recorder header that disagrees with its samples is rewritten by the sender', (t) => {
+  for (const version of [0, 1]) {
+    const input = chrome(4900, version)
+    t.is(audioBounds(input), null, 'refused as recorded on receipt, version ' + version)
+    t.alike(audioBounds(input, { metadata: true }), { ms: 4900 }, 'the samples decide for its sender, version ' + version)
+    const out = stripAudioMetadata(input)
+    t.alike(audioBounds(out), { ms: 4900 }, 'the copy sent passes the strict check, version ' + version)
+    t.is(durationOf(out, 'mdhd'), 4900 * 48, 'mdhd in its own timescale, version ' + version)
+    t.is(durationOf(out, 'mvhd'), 4900, 'mvhd, version ' + version)
+    t.is(durationOf(out, 'tkhd'), 4900, 'tkhd, version ' + version)
+    t.is(out.byteLength, input.byteLength, 'same size, version ' + version)
+  }
+
+  const liar = file({ mvhd: mvhd0(1000, 9000), tracks: [{ duration: 1, head: tkhd(1, 7000), runs: [[3000, 1]] }] })
+  t.is(audioBounds(liar), null, 'headers off the samples on receipt')
+  t.alike(audioBounds(liar, { metadata: true }), { ms: 3000 }, 'the sender reads the samples')
+  t.alike(stripAudioMetadata(liar), file({ mvhd: mvhd0(1000, 3000), tracks: [{ duration: 3000, head: tkhd(1, 3000), runs: [[3000, 1]] }] }), 'every given duration rewritten, nothing else')
+
+  const movie = file({ mvhd: mvhd0(44100, 9000), tracks: [{ timescale: 44100, duration: 44100 * 3, runs: [[129, 1024], [1, 300]] }] })
+  const ticks = 129 * 1024 + 300
+  const rewritten = stripAudioMetadata(movie)
+  t.alike(audioBounds(rewritten), { ms: Math.round(ticks * 1000 / 44100) }, 'a movie timescale other than 1000')
+  t.is(durationOf(rewritten, 'mvhd'), ticks, 'mvhd in the movie timescale')
+  t.is(durationOf(rewritten, 'mdhd'), ticks, 'mdhd in the media timescale')
+
+  t.alike(stripAudioMetadata(file({ mvhd: mvhd0(1000, 0) })), file({ mvhd: mvhd0(1000, 0) }), 'a duration not given stays not given')
+  t.alike(stripAudioMetadata(file({ mvhd: mvhd0(1000, 0xffffffff) })), file({ mvhd: mvhd0(1000, 0xffffffff) }), 'an unknown duration stays unknown')
+
+  const mehd = fragmented({ mvex: [mehd0(100), trex(1, 0)], moofs: [second(), second()] })
+  t.is(audioBounds(mehd), null, 'a short mehd on receipt')
+  t.is(durationOf(stripAudioMetadata(mehd), 'mehd'), 2000, 'mehd rewritten from the fragments')
+  t.alike(audioBounds(stripAudioMetadata(mehd)), { ms: 2000 })
+
+  // The samples' total at this timescale no longer fits a version 0 mdhd.
+  t.is(stripAudioMetadata(file({ ms: 2000, tracks: [{ timescale: 0xfffffff0, duration: 5, runs: [[2, 0xfffffff0]] }] })), null, 'a value past a version 0 field')
+})
+
+test('audioBounds: the sender still answers to its samples and edit list', (t) => {
+  t.is(audioBounds(file({ mvhd: mvhd0(1000, 3000), tracks: [{ runs: [[6000, 100]] }] }), { metadata: true }), null, 'samples past the limit')
+  t.is(audioBounds(file({ tracks: [{ runs: [[3000, 1]], edits: [edts(0, [[9000, 0]])] }] }), { metadata: true }), null, 'an edit list off the samples')
+  t.is(audioBounds(file({ tracks: [{ runs: [[3000, 1]], head: tkhd1(1, 0x7fffffff, 0) }] }), { metadata: true }), null, 'a tkhd duration that is not a safe integer')
+  t.is(stripAudioMetadata(file({ tracks: [{ runs: [[3000, 1]], edits: [edts(0, [[9000, 0]])] }] })), null, 'nothing to strip into a valid note')
 })
