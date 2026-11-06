@@ -425,6 +425,8 @@ function createPagesRoutes ({
     // A linked person's diary never takes a delegate: that would be a second
     // actor identity, with caps of its own.
     if (isLinked(diary)) throw refuse('pedido-invalido')
+    // Nor a deleted one (Excluir conta), before the blocklist reaches it.
+    if (typeof store.deletedAt === 'function' && store.deletedAt(diary) !== null) throw refuse('nao-vinculado')
     if (needTerms && (row === null || row.diary !== diary || row.termsVersion !== TERMS_VERSION)) throw refuse('termos-pendentes')
     if (blocked(actor) || blocked(diary)) throw refuse('sem-permissao')
     let v

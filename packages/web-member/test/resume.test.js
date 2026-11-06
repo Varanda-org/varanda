@@ -198,7 +198,7 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
   let h = await start()
   t.alike(Object.keys(h).sort(), ['close', 'connect', 'follows', 'identity', 'media'])
   t.ok(Object.isFrozen(h.media), 'media is frozen')
-  t.alike(Object.keys(h.identity).sort(), ['addPasskey', 'bindPasskey', 'cancelRecovery', 'complete', 'finishRecovery', 'lock', 'makeRecoveryCode', 'reset', 'signOut', 'status', 'unlock', 'unlockWithCode', 'unlockWrapped'])
+  t.alike(Object.keys(h.identity).sort(), ['addPasskey', 'bindPasskey', 'cancelRecovery', 'complete', 'confirm', 'finishRecovery', 'lock', 'makeRecoveryCode', 'reset', 'signOut', 'status', 'unlock', 'unlockWithCode', 'unlockWrapped'])
   let status = await h.identity.status()
   t.is(status.unlocked, false)
   t.is(status.resumed, false)
@@ -521,7 +521,7 @@ test('passkey attempts: refused and pending ids survive a restart, cleanup only 
   const lastCall = (kind) => fake.calls.filter((c) => c.kind === kind).pop()
 
   let h = await start()
-  t.alike(Object.keys(h.identity).sort(), ['addPasskey', 'bindPasskey', 'cancelRecovery', 'complete', 'finishRecovery', 'lock', 'makeRecoveryCode', 'reset', 'signOut', 'status', 'unlock', 'unlockWithCode', 'unlockWrapped'], 'the identity methods, recovery included')
+  t.alike(Object.keys(h.identity).sort(), ['addPasskey', 'bindPasskey', 'cancelRecovery', 'complete', 'confirm', 'finishRecovery', 'lock', 'makeRecoveryCode', 'reset', 'signOut', 'status', 'unlock', 'unlockWithCode', 'unlockWrapped'], 'the identity methods, recovery included')
   let status = await h.identity.status()
   t.is(status.pending, false)
   t.alike(status.refused, [])

@@ -319,6 +319,7 @@ async function main () {
   const { createAccountServer, loadIssuer, KEY_FILE, CERT_FILE } = require('../lib/account/server')
   const { openAccountStore } = require('../lib/account/store')
   const { openTermsStore } = require('../lib/account/terms-store')
+  const { openModerationStore } = require('../lib/account/moderation-store')
   const { createOAuthStub } = require('./oauth-stub')
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-lab-'))
@@ -394,7 +395,10 @@ async function main () {
 
     const store = openAccountStore(accountDir)
     const terms = openTermsStore(accountDir)
-    const account = createAccountServer({ association, origin, google, store, issuer, terms, didit: null, ages: null })
+    // The moderation desk without its panel (no Google moderators): Excluir
+    // conta queues its block here and refuses without it.
+    const moderation = openModerationStore(accountDir, { association })
+    const account = createAccountServer({ association, origin, google, store, issuer, terms, moderation, didit: null, ages: null })
     const accountListener = await account.listen({ host: '127.0.0.1', port: 0 })
     cleanups.push(() => accountListener.close())
     log('serviço de conta no ar (Google substituído pela página do laboratório)')

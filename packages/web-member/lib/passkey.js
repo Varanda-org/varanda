@@ -62,7 +62,7 @@
 const b4a = require('b4a')
 const hypercoreCrypto = require('hypercore-crypto')
 const groupCrypto = require('@varanda/core/lib/group-crypto')
-const { syncState } = require('./authenticator-data')
+const { parseAuthData, syncState } = require('./authenticator-data')
 
 const PRF_EVAL = b4a.from('varanda/member-identity/prf/v1', 'utf8')
 const HKDF_SALT = b4a.from('varanda/member-identity/hkdf/v1', 'utf8')
@@ -396,16 +396,17 @@ function createOptions ({ rpId, userId, excludeCredentialIds = [], hints = DEFAU
 
 // Without ids the request is discoverable: the password manager offers every
 // Varanda passkey for this rp.id. hints only when given: sign-in must reach
-// every existing passkey, whatever holds it.
-function getOptions ({ rpId, allowCredentialIds = [], hints } = {}) {
+// every existing passkey, whatever holds it. prf: false (verify) leaves the
+// extension out, so the authenticator computes no member root at all.
+function getOptions ({ rpId, allowCredentialIds = [], hints, prf = true } = {}) {
   if (typeof rpId !== 'string' || rpId === '') throw argumentError('rp.id inválido')
   const options = {
     rpId,
     challenge: randomBytes(CHALLENGE_BYTES),
     userVerification: 'required',
-    timeout: TIMEOUT_MS,
-    extensions: prfExtension()
+    timeout: TIMEOUT_MS
   }
+  if (prf !== false) options.extensions = prfExtension()
   const allow = credentialDescriptors(allowCredentialIds)
   if (allow.length > 0) options.allowCredentials = allow
   if (hints !== undefined) options.hints = checkHints(hints)
@@ -547,6 +548,41 @@ function completeRegistration (credentials, { rpId, credentialId, hints } = {}) 
   return signIn(credentials, { rpId, allowCredentialIds: [credentialId], hints })
 }
 
+// The UV flag of an assertion's authenticator data. Missing, short or
+// unreadable data reads as not verified.
+function userVerified (response) {
+  try {
+    const parsed = response ? parseAuthData(response.authenticatorData) : null
+    return parsed !== null && parsed.flags.uv
+  } catch {
+    return false
+  }
+}
+
+// A fresh user verification (biometrics or device PIN) with an existing
+// passkey, for a step a stored session alone must not authorize. No PRF is
+// asked for; an output handed back anyway is wiped unread. -> { credentialId }.
+// The signature is not checked: nothing here holds the passkey's public key,
+// and the gate is the authenticator's own user verification, which its UV
+// flag must report (WEBAUTHN otherwise).
+async function verify (credentials, { rpId, allowCredentialIds = [], hints } = {}) {
+  let cred
+  try {
+    cred = await credentials.get({ publicKey: getOptions({ rpId, allowCredentialIds, hints, prf: false }) })
+  } catch (err) {
+    throw mapError(err, 'get')
+  }
+  try {
+    if (!cred) throw passkeyError('WEBAUTHN')
+    wipeExtensionPrf(cred)
+    const credentialId = credentialIdOf(cred)
+    if (!userVerified(cred.response)) throw passkeyError('WEBAUTHN')
+    return { credentialId }
+  } catch (err) {
+    throw mapError(err, 'get')
+  }
+}
+
 module.exports = {
   PRF_EVAL,
   HKDF_SALT,
@@ -577,6 +613,7 @@ module.exports = {
   register,
   completeRegistration,
   signIn,
+  verify,
   toBase64Url,
   fromBase64Url
 }

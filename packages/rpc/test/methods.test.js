@@ -149,6 +149,7 @@ test('account.sign', (t) => {
   t.absent(isMutating('account.sign'))
   ok(t, 'account.sign', base, base)
   ok(t, 'account.sign', { ...base, phase: 'rename' })
+  ok(t, 'account.sign', { ...base, phase: 'delete' })
   ok(t, 'account.sign', { ...base, phase: 'finish', sub: '1234567890' })
   ok(t, 'account.sign', { ...base, phase: 'finish', sub: '!'.repeat(255) })
   ok(t, 'account.sign', { ...base, nonce: 'A-_9'.repeat(32) })
@@ -177,6 +178,7 @@ test('account.sign', (t) => {
   bad(t, 'account.sign', { ...base, phase: 'finish', sub: '' }, 'finish without sub')
   bad(t, 'account.sign', { ...base, sub: '123' }, 'reserve with sub')
   bad(t, 'account.sign', { ...base, phase: 'rename', sub: '123' }, 'rename with sub')
+  bad(t, 'account.sign', { ...base, phase: 'delete', sub: '123' }, 'delete with sub')
 })
 
 test('terms.sign', (t) => {

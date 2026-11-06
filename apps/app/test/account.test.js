@@ -1393,3 +1393,46 @@ test('readJson refuses an answer over the cap without buffering it whole', async
   const ok = { headers: headers(), body: { getReader: () => { let sent = false; return { read: async () => { if (sent) return { done: true }; sent = true; return { done: false, value: new TextEncoder().encode('{"a":1}') } } } } } }
   t.alike(await readJson(ok, 100), { a: 1 }, 'a small streamed body still parses')
 })
+
+test('deleteStart/deleteFinish: exact shapes, route tokens in pt-BR, a 5xx finish is uncertain', async (t) => {
+  const a = await load()
+  let calls = stub(t, json(200, { nonce: 'n'.repeat(43), username: 'ana' }))
+  t.alike(await a.deleteStart({ member: M }), { nonce: 'n'.repeat(43), username: 'ana' })
+  t.ok(calls[0].url.endsWith('/account/delete/start'))
+  t.alike(JSON.parse(calls[0].init.body), { member: M })
+  stub(t, json(200, { nonce: 'n'.repeat(43), username: 'ana', extra: 1 }))
+  await t.exception(a.deleteStart({ member: M }), /serviço indisponível/, 'an unexpected shape')
+  stub(t, json(409, { error: 'paginas-ativas' }))
+  try {
+    await a.deleteStart({ member: M })
+    t.fail('resolved')
+  } catch (err) {
+    t.is(err.code, 'paginas-ativas')
+    t.ok(/encerre ou transfira/.test(err.message))
+  }
+  calls = stub(t, json(200, { deleted: 'pendente' }))
+  t.alike(await a.deleteFinish({ member: M, nonce: 'n'.repeat(43), signature: 'f'.repeat(128) }), { deleted: 'pendente' })
+  t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: 'n'.repeat(43), signature: 'f'.repeat(128) })
+  stub(t, json(503, { error: 'resultado-incerto' }))
+  try {
+    await a.deleteFinish({ member: M, nonce: 'n'.repeat(43), signature: 'f'.repeat(128) })
+    t.fail('resolved')
+  } catch (err) {
+    t.is(err.uncertain, true, 'a 5xx after the proof is an unknown outcome')
+  }
+  stub(t, json(503, { error: 'indisponivel' }))
+  try {
+    await a.deleteFinish({ member: M, nonce: 'n'.repeat(43), signature: 'f'.repeat(128) })
+    t.fail('resolved')
+  } catch (err) {
+    t.absent(err.uncertain === true, 'indisponivel comes before any write: a refusal')
+  }
+  stub(t, json(400, { error: 'assinatura-invalida' }))
+  try {
+    await a.deleteFinish({ member: M, nonce: 'n'.repeat(43), signature: 'f'.repeat(128) })
+    t.fail('resolved')
+  } catch (err) {
+    t.is(err.code, 'assinatura-invalida')
+    t.absent(err.uncertain === true)
+  }
+})

@@ -789,6 +789,42 @@ test('--yes applies a block with at least one human block change', async (t) => 
   t.alike(srv.byPath('/account/mod/api/ack')[0].body.changeIds, ['c1', 'c2'])
 })
 
+test('--yes applies an Excluir conta block (actor titular), marked as asked by the person', async (t) => {
+  await testnet(t)
+  const ctx = setup(t)
+  const first = seedList(t, ctx.modDir, X)
+  const srv = await fakeServer(t)
+  const pub = publisher(true)
+  srv.pull = {
+    changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'titular' }],
+    published: { snapshot: first }
+  }
+  const res = await run(ctx, srv, pub.publish, { yes: true })
+  t.is(res.error, null, res.error && res.error.message)
+  t.alike(res.lines, ['bloquear ' + A + ' (exclusão pedida pela pessoa)', 'aplicado: seq 2, 2 chaves bloqueadas'])
+  t.alike(readList(ctx.modDir).blocked, [A, X].sort())
+  t.alike(srv.byPath('/account/mod/api/ack')[0].body.changeIds, ['c1'])
+})
+
+test('--yes applies an AI block joined by an Excluir conta block of the same member', async (t) => {
+  await testnet(t)
+  const ctx = setup(t)
+  const first = seedList(t, ctx.modDir, X)
+  const srv = await fakeServer(t)
+  const pub = publisher(true)
+  srv.pull = {
+    changes: [
+      { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'ia' },
+      { id: 'c2', op: 'block', member: A, at: '2026-10-24T10:00:02.000Z', actor: 'titular' }
+    ],
+    published: { snapshot: first }
+  }
+  const res = await run(ctx, srv, pub.publish, { yes: true })
+  t.is(res.error, null, res.error && res.error.message)
+  t.alike(res.lines, ['bloquear ' + A + ' (exclusão pedida pela pessoa)', 'aplicado: seq 2, 2 chaves bloqueadas'], 'not held as an AI block')
+  t.alike(srv.byPath('/account/mod/api/ack')[0].body.changeIds, ['c1', 'c2'])
+})
+
 test('at a terminal an AI block is marked (ia) and applied after the confirmation', async (t) => {
   await testnet(t)
   const ctx = setup(t)

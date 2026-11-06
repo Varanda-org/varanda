@@ -26,6 +26,8 @@
 //                       -> Promise<{ credentialId, userId, lookupId, blob, sessionSaved? } | { pending: true }>
 //   identity.bindPasskey({ credentialId, userId }) -> Promise<{ sessionSaved? }>
 //   identity.makeRecoveryCode() -> Promise<{ code, lookupId, blob }>
+//   identity.confirm()  -> Promise<{ ok: true }>  (a fresh user verification
+//                          with the bound passkey while unlocked; changes nothing)
 //   identity.lock()     -> Promise   (the keys are zero-filled; reads still
 //                                     work; the stored session SURVIVES it)
 //   identity.signOut()  -> Promise   ('Sair': lock AND forget the stored
@@ -99,6 +101,17 @@
 // creation replaces a pending one only once it is bound; if its install
 // fails, the old pending stays and the new id is refused INSTALL_FAILED.
 // reset() drops it; signOut() keeps it.
+//
+// confirm() is the gate before a step the stored session alone must not
+// authorize (deleting the account): someone holding an unlocked device must
+// still pass the passkey's biometrics or PIN. Only while unlocked (LOCKED
+// otherwise), it runs a get with userVerification 'required' and no PRF,
+// restricted to the bound passkey (NONE when no record is known),
+// navigator.credentials.get before any await. The answer must carry the UV
+// flag (WEBAUTHN otherwise) and be the bound passkey (MISMATCH otherwise).
+// A PRF output handed back anyway is wiped unread; nothing is installed,
+// bound, saved or refused, and the session stays as it was. It counts as a
+// ceremony for LOCKED, and lock/signOut/reset/close cancel it (CANCELLED).
 //
 // Member recovery (../lib/recovery.js; the app talks to the account
 // service, this file never fetches): while unlocked a copy of the installed
@@ -177,6 +190,7 @@ const PHONE_HINTS = ['hybrid']
 const NONCE_BYTES = 32
 const SIGNED_OUT_KEY = 'signedOut'
 const SESSION_DB = 'varanda-session'
+const NO_BOUND_MESSAGE = 'nenhuma passkey ligada a esta sessão: entre de novo com a passkey'
 const RECOVERY_TTL_MS = 120000
 const LOCKED_MESSAGE = 'identidade bloqueada: entre com a passkey'
 
@@ -1209,6 +1223,40 @@ function createIdentity (node, storage, sessionStore, idb) {
     })
   }
 
+  // A fresh user verification with the bound passkey (the record read at
+  // start; discoverable when none is known), for a step the stored session
+  // alone must not authorize. It is a check only: nothing is derived,
+  // installed, bound, saved or refused, and `finishing` is left alone. A
+  // lock, signOut, reset or close meanwhile turns any answer into CANCELLED.
+  function confirm () {
+    if (root === null) return Promise.reject(codedError('LOCKED', LOCKED_MESSAGE))
+    const err = precheck()
+    if (err !== null) return Promise.reject(err)
+    // Strict: only the bound passkey passes. Without a record a discoverable
+    // get would accept any Varanda passkey the holder of the device has.
+    if (known === null) return Promise.reject(codedError('NONE', NO_BOUND_MESSAGE))
+    const expected = known.credentialId
+    const gen = generation
+    busy = true
+    let checking
+    try {
+      checking = passkey.verify(credentialsContainer(), { rpId, allowCredentialIds: [expected] })
+    } catch (failure) {
+      checking = Promise.reject(failure)
+    }
+    return checking.then((result) => {
+      if (gen !== generation) throw cancelled()
+      if (result.credentialId !== expected) {
+        throw codedError('MISMATCH', 'passkey não corresponde ao diário guardado')
+      }
+      return { ok: true }
+    }, (failure) => {
+      throw gen !== generation ? cancelled() : failure
+    }).finally(() => {
+      busy = false
+    })
+  }
+
   // -> { code, lookupId, blob }: the code string exists only in this value.
   function makeRecoveryCode () {
     if (root === null) return Promise.reject(codedError('USAGE', LOCKED_MESSAGE))
@@ -1350,7 +1398,8 @@ function createIdentity (node, storage, sessionStore, idb) {
       finishRecovery,
       addPasskey,
       bindPasskey,
-      makeRecoveryCode
+      makeRecoveryCode,
+      confirm
     })
   }
 }

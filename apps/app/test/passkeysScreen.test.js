@@ -249,6 +249,20 @@ test('node: an added passkey at concluir bumps nothing', (t) => {
   t.ok(added.includes("typeof result.lookupId === 'string'") && added.includes('result.publicKey === undefined') && added.includes('result.created === undefined'))
 })
 
+test('node: confirm is a pure check, never an identity op', (t) => {
+  const node = withoutComments(read('node.js'))
+  t.absent(node.match(/const IDENTITY_OPS = new Set\(\[([^\]]*)\]\)/)[1].includes("'confirm'"), 'not in IDENTITY_OPS')
+  t.absent(node.match(/const ARG_OPS = new Set\(\[([^\]]*)\]\)/)[1].includes("'confirm'"))
+  const fn = node.slice(node.indexOf('const pkConfirm = useCallback'), node.indexOf('const pkRefresh ='))
+  t.ok(fn.includes('return Promise.resolve(conn.identity.confirm())'), 'calls the handle')
+  t.is(awaitAt(fn), -1, 'nothing awaited before the ceremony')
+  for (const touch of ['passkeyOp', 'readPasskey', 'bumpEpoch', 'bumpGeneration', 'setPkStatus', 'setPkError', 'setPhase', 'pendingKindRef']) {
+    t.absent(fn.includes(touch), 'never ' + touch)
+  }
+  t.ok(fn.includes("typeof conn.identity.confirm !== 'function'") && fn.includes("recoveryError(MISSING_OP_TEXT, 'UNSUPPORTED')"), 'an older node script rejects clearly')
+  t.ok(node.includes('confirm: pkConfirm,') && node.includes('pkCancelRecovery, pkConfirm,'), 'on node.passkey, memo dependency included')
+})
+
 test('node: a superseded recovery fetch neither cancels nor opens', (t) => {
   const node = withoutComments(read('node.js'))
   const resolve = node.slice(node.indexOf('const resolveWrapped = useCallback'), node.indexOf('const pkUnlock ='))

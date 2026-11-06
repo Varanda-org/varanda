@@ -5611,4 +5611,46 @@ Como verificar, a partir da raiz (só os arquivos desta área):
 
 Limites desta caminhada:
 
+## 115. Excluir conta pelo app (PR feat/account-deletion)
+
+Caminhada da exclusão da conta pelo próprio app, exigida pela diretriz 5.1.1(v) da App Store. O protocolo está em [protocol.md](protocol.md) ("Account deletion"); a operação, no `README.md` ("Excluir conta"). Os Termos de Uso e a Política de Privacidade passam à versão 22 para descrever isso, então quem já aceitou a 21 aceita de novo.
+
+Regras que os passos conferem:
+
+- A linha "Excluir conta" aparece em Ajustes, abaixo de "Sair", só com a passkey aberta numa instalação hospedada (app ou web). A tela explica o que sai na hora, o que sai em até 7 dias, o que fica e que as comunidades e os grupos criados pela pessoa deixam de existir para todos.
+- O botão "Excluir conta" só fica ativo com o @nome digitado (com ou sem "@", qualquer caixa). Tocar nele pede a passkey de novo (Face ID, digital ou PIN do aparelho) antes de qualquer pedido; cancelar a passkey não manda nada ao serviço.
+- O pedido assinado é `account.sign` na fase `delete` sobre o nonce e o @nome atual. Uma assinatura de outra fase, de outra chave ou com outro @nome responde 400 `assinatura-invalida`; um nonce já usado ou vencido, 404 `expirado`.
+- Quem é dono de uma página que não foi encerrada nem transferida vê "Você ainda é dono de uma página" e o botão "Abrir Páginas" (409 `paginas-ativas`).
+- Depois do pedido, o serviço de conta: enfileira no painel um bloqueio marcado "exclusão da conta pedida pela própria pessoa (não pode ser cancelada aqui)", sem botão de cancelar; responde 409 `conta-excluida` a cancelar ou desbloquear essa chave pelo painel; apaga o vínculo Google, os aceites, a faixa etária, as inscrições de push, as entradas de recuperação, os convites, as marcas de convites de surpresa e o bloco cifrado de vistos da pessoa; guarda só a chave pública, a data e os @nomes já usados.
+- `GET /account/status?member=<chave>` responde `{"linked":false,"deleted":"pendente"}` até `mod apply` publicar a lista com a chave, e `"concluida"` depois. Nenhuma resposta ou registro leva e-mail, sub ou a chave; o registro do serviço tem só `exclusao` com `pedido`, `diretorio-incerto` ou `purga-pendente`.
+- O app apaga a conta do aparelho na hora (como "Recomeçar") e volta para "Entrar", onde mostra "Conta excluída em <data>", o que já saiu, o prazo de 7 dias e como apagar a passkey. Quando o status vira `concluida`, mostra "Exclusão concluída" uma vez, com "Entendi".
+- Entrar de novo com a mesma passkey, ou abrir outro aparelho que continuava com a sessão, mostra "Esta conta foi excluída" e só o botão "Apagar deste aparelho". A mesma chave não volta a se vincular, e os @nomes da conta não vão para outra pessoa. A mesma conta Google consegue criar uma conta nova com outra passkey.
+- `mod apply` mostra `bloquear <chave> (exclusão pedida pela pessoa)`, e `mod apply --yes` assina e publica; o semeador derruba o diário.
+
+Passos (marcar só depois de executar e guardar o registro), primeiro no Android (build de debug, emulador ou aparelho, feito depois de `npm run prepare:native -w apps/app`), depois no simulador iOS, depois na web e no PWA. O build de debug não entra com passkey numa instalação de produção (veja `docs/development.md`): use a instalação de teste ou o APK de preview do EAS para os passos que precisam de conta.
+
+- [ ] Abertura depois da atualização: o aceite dos Termos aparece com a versão 22; aceitar e seguir.
+- [ ] Conta de teste vinculada ao Google, com push ligado, uma passkey extra e um convite criado: Ajustes mostra "Excluir conta" abaixo de "Sair"; a tela abre com o texto e o campo "Para confirmar, digite @<nome>".
+- [ ] Botão desativado com o campo vazio e com outro nome; ativo com "@Nome" em maiúsculas.
+- [ ] Tocar em "Excluir conta" e cancelar a passkey: aparece "entrada com a passkey cancelada" e nada muda (`GET /account/status` continua `linked: true`, o painel não tem bloqueio pendente).
+- [ ] Repetir e confirmar a passkey: o app volta para "Entrar" com "Conta excluída em <data>" e as instruções para apagar a passkey. `GET /account/status?member=<chave>` responde `{"linked":false,"deleted":"pendente"}`. No servidor, `terms.json`, `age.json`, `push.json` e `invites.json` não têm mais a chave, `seen/<chave>` não existe mais, e `recovery.json` tem só a marca de remoção.
+- [ ] Painel de moderação: a mudança aparece com "exclusão da conta pedida pela própria pessoa" e sem "cancelar"; um `curl` de `api/pending/<id>/cancel` e de `api/unblock` com a sessão do painel respondem 409 `conta-excluida`.
+- [ ] Na máquina do operador: `mod apply --yes` mostra `bloquear <chave> (exclusão pedida pela pessoa)`, publica, e `seed status` mostra a lista nova; o diário some de `/index` e da Espiadinha.
+- [ ] De volta ao app em "Entrar": ao abrir de novo, aparece "Exclusão concluída: o diário saiu dos semeadores da associação." e, depois de "Entendi", não aparece mais.
+- [ ] Entrar com a mesma passkey: aparece "Esta conta foi excluída" e "Apagar deste aparelho"; tocar apaga e volta para "Entrar".
+- [ ] Dois aparelhos com a mesma passkey: excluir no primeiro; abrir o segundo mostra "Esta conta foi excluída" antes dos Termos e de A Rua.
+- [ ] Bloqueio já pendente: decidir "bloquear" uma denúncia contra uma conta de teste (sem rodar `mod apply`) e então excluir essa conta pelo app. O painel mostra o bloqueio do moderador e o da pessoa; "cancelar" no do moderador (por `curl` com a sessão do painel) responde 409 `conta-excluida`; `mod apply --yes` assina os dois.
+- [ ] Dono de página (`VARANDA_PAGES` ligado): a tela mostra "Você ainda é dono de uma página" e "Abrir Páginas"; depois de encerrar a página, a exclusão segue.
+- [ ] Criar uma conta nova com a mesma conta Google e outra passkey: o vínculo funciona; escolher o @nome da conta excluída responde "esse nome já está em uso".
+- [ ] Registros do serviço depois de tudo: só linhas `exclusao` com `pedido` (e `purga-pendente` só se algum arquivo estava indisponível); procurar o e-mail, o sub e a chave não encontra nada.
+- [ ] iOS (simulador), Safari e Chrome na web hospedada e o PWA instalado: repetir os passos de exclusão, a passkey pedida de novo e o recibo em "Entrar".
+- [ ] Em todas as plataformas: a Política e os Termos abertos em Ajustes mostram "Versão 22", dizem onde excluir a conta, o que fica e o prazo de 7 dias, e não dizem mais que o app não permite excluir a conta.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/cli/test/account-delete.test.js`, `node apps/cli/test/account-store.test.js`, `node apps/cli/test/moderation-store.test.js`, `node apps/cli/test/account-mod.test.js`, `node apps/cli/test/mod-apply.test.js`, `node apps/cli/test/account-age.test.js` e `node apps/cli/test/invite-drops.test.js`.
+- `node packages/core/test/account-link.test.js`, `node packages/rpc/test/methods.test.js`, `node packages/web-member/test/passkey.test.js` e `node packages/web-member/test/web-node-recovery.test.js`.
+- `node apps/app/test/accountDeletion.test.js`, `node apps/app/test/account.test.js`, `node apps/app/test/sessionStoreNative.test.js`, `node apps/app/test/legal.test.js`, `node apps/app/test/terms-version.test.js`, `node packages/core/test/terms.test.js` e `node apps/site/test/legal.test.js`.
+
+- Sem passkey e sem código de recuperação ainda não há como pedir a exclusão pelo app; a página com o Google é um próximo passo.
 - Nenhuma caixa acima foi executada nesta documentação.

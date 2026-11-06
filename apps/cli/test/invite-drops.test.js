@@ -571,3 +571,17 @@ test('stop clears the timer and awaits the tick in flight', async (t) => {
   t.ok(stopped)
   t.is(a.timer.fn, null, 'no tick is scheduled after stop')
 })
+
+test('forget drops a member\'s marks (Excluir conta) and keeps the others', async (t) => {
+  const s = setup(t)
+  const drops = s.open()
+  const m = member()
+  const other = member()
+  await drops.markBatch([{ member: m, week: WEEK0_ISO, slots: [0] }, { member: other, week: WEEK0_ISO, slots: [0] }])
+  t.ok(drops.holds(m))
+  t.alike(await drops.forget(m), { changed: true })
+  t.absent(drops.holds(m))
+  t.ok(drops.holds(other))
+  t.alike(await drops.forget(m), { changed: false })
+  t.alike(JSON.parse(fs.readFileSync(s.file, 'utf8')).rows.map((r) => r.member), [other])
+})

@@ -26,11 +26,15 @@
 // session holds the root too. A recovery code works the same way, then
 // finishRecovery() creates a marked passkey for the root. No HTTP here: the
 // app (src/node.js) talks to the account service.
+//
+// confirm(), as the browser handle's: a fresh user verification with the
+// bound passkey while unlocked, before a step the stored session alone must
+// not authorize; it never installs, saves or changes anything.
 
 import * as PasskeyPrf from '../modules/passkey-prf'
 import { keychainEpoch, sessionStore } from './sessionStore'
 import { capRefused, isBound, passkeyLocal } from './passkeyLocal'
-import { syncStateOf } from './authenticatorData'
+import { parseAuthData, syncStateOf } from './authenticatorData'
 import {
   CHALLENGE_BYTES,
   USER_ID_BYTES,
@@ -58,8 +62,12 @@ const MISSING_TEXT = 'a passkey criada não foi encontrada; toque em Criar passk
 // apps/app/worklet/identity-install.js BAD_ENTRY (docs/rpc.md 5.92).
 const BAD_ENTRY_TEXT = 'entrada de recuperação inválida'
 const RECOVERY_EXPIRED_TEXT = 'o tempo da recuperação acabou: entre de novo'
+const NO_BOUND_TEXT = 'nenhuma passkey ligada a esta sessão: entre de novo com a passkey'
 const SIGN_IN_FIRST_TEXT = 'essa passkey não pôde ser concluída: entre com a sua passkey ou com o código de recuperação'
 const RECOVERY_UNDONE_TEXT = 'não deu para concluir a recuperação: entre com o código de novo'
+// packages/web-member/web/node.js LOCKED_MESSAGE.
+const LOCKED_TEXT = 'identidade bloqueada: entre com a passkey'
+const BUSY_TEXT = 'outra entrada com a passkey em andamento'
 const RECOVERY_MS = 120 * 1000
 
 // packages/web-member/lib/recovery.js WRAP_MARK ('varanda-wrap-v1\n'),
@@ -96,6 +104,19 @@ function mapCeremonyError (err) {
 }
 
 function noop () {}
+
+// The UV flag of a get response's authenticator data (base64url). Missing or
+// unreadable data reads as not verified.
+function userVerifiedOf (response) {
+  try {
+    const r = typeof response === 'string' ? JSON.parse(response) : response
+    const field = r && r.response ? r.response.authenticatorData : null
+    const parsed = typeof field === 'string' && field !== '' ? parseAuthData(fromBase64Url(field)) : null
+    return parsed !== null && parsed.flags.uv
+  } catch {
+    return false
+  }
+}
 
 // A failure after the manager stored a passkey names it, so the person can
 // find it and delete it there (nothing is deleted automatically).
@@ -867,6 +888,43 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     return { code: res.code, lookupId: res.lookupId, blob: res.blob }
   }
 
+  // A fresh user verification (biometrics or device PIN) with the bound
+  // passkey while unlocked, for a step the stored session alone must not
+  // authorize (deleting the account). A check only: identity.status is its
+  // one request, nothing is installed, saved or refused and the generation
+  // does not move; a lock, signOut or reset meanwhile makes it CANCELLED.
+  // The module always asks for the PRF output (the iOS request needs its
+  // input): that output is never decoded, and being a JS string it cannot be
+  // zero-filled, only dropped with the response.
+  async function confirm () {
+    await resuming
+    if (busy) throw codedError('LOCKED', BUSY_TEXT)
+    const rpId = rpIdOf()
+    if (typeof rpId !== 'string' || rpId === '' || !available()) throw passkeyError('UNSUPPORTED')
+    busy = true
+    const gen = generation
+    try {
+      const st = await request('identity.status')
+      if (gen !== generation) throw cancelled()
+      if (!(st && st.unlocked === true)) throw codedError('LOCKED', LOCKED_TEXT)
+      // Strict: only the bound passkey passes; a discoverable get would
+      // accept any Varanda passkey the holder of the device has.
+      const bound = validId(st.credentialId) && st.rpId === rpId ? st.credentialId : null
+      if (bound === null) throw codedError('NONE', NO_BOUND_TEXT)
+      const response = await ceremony('get', buildGetOptions({ rpId, challenge: random(CHALLENGE_BYTES), allowCredentialIds: [bound] }))
+      if (gen !== generation) throw cancelled()
+      const credentialId = credentialIdOf(response)
+      if (!userVerifiedOf(response)) throw passkeyError('WEBAUTHN')
+      if (credentialId !== bound) throw codedError('MISMATCH', MISMATCH_TEXT)
+      return { ok: true }
+    } catch (err) {
+      if (gen !== generation) throw cancelled()
+      throw err
+    } finally {
+      busy = false
+    }
+  }
+
   // The second gesture of a pending creation: a get() restricted to it.
   async function complete () {
     await resuming
@@ -1115,6 +1173,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     finishRecovery,
     addPasskey,
     bindPasskey,
-    makeRecoveryCode
+    makeRecoveryCode,
+    confirm
   }
 }
