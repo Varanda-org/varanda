@@ -26,34 +26,6 @@
         "supportUrl": "https://github.com/Varanda-org/varanda/issues",
         "privacyPolicyUrl": "https://varanda.app/privacidade/"
       }
-    },
-    "advisory": {
-      "alcoholTobaccoOrDrugUseOrReferences": "NONE",
-      "contests": "NONE",
-      "gamblingSimulated": "NONE",
-      "gunsOrOtherWeapons": "NONE",
-      "horrorOrFearThemes": "NONE",
-      "matureOrSuggestiveThemes": "INFREQUENT_OR_MILD",
-      "medicalOrTreatmentInformation": "NONE",
-      "profanityOrCrudeHumor": "INFREQUENT_OR_MILD",
-      "sexualContentGraphicAndNudity": "NONE",
-      "sexualContentOrNudity": "NONE",
-      "violenceCartoonOrFantasy": "NONE",
-      "violenceRealistic": "NONE",
-      "violenceRealisticProlongedGraphicOrSadistic": "NONE",
-      "gambling": false,
-      "lootBox": false,
-      "unrestrictedWebAccess": false,
-      "advertising": false,
-      "healthOrWellnessTopics": false,
-      "parentalControls": false,
-      "messagingAndChat": true,
-      "userGeneratedContent": true,
-      "ageAssurance": true,
-      "kidsAgeBand": null,
-      "ageRatingOverride": "NONE",
-      "ageRatingOverrideV2": "SIXTEEN_PLUS",
-      "koreaAgeRatingOverride": "NONE"
     }
   }
 }

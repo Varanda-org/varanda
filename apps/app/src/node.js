@@ -121,11 +121,16 @@ import { errorText } from './ui'
 import { accountOriginOf } from './pageGate'
 import { slowRequestLine } from './slowRequest'
 import { createIdleTracker } from './idle'
+import { noteOwnDmDrop } from './dmWakeMute'
+import { setDmDropObserver } from './pages'
 import { vitrineEnabled } from './vitrine/enabled'
 import { recoveryFetch } from './account'
 import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 
 const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
+// At import, not in an effect: a page DM send can then never run before the
+// worker is told about its drops.
+setDmDropObserver(noteOwnDmDrop)
 // Native only (configStore.native.js): reads the saved or build-time
 // installation and sets installationOrigin().
 const loadInstallation = typeof configStore.loadInstallation === 'function' ? configStore.loadInstallation : null
@@ -554,6 +559,10 @@ function LiveNodeProvider ({ children }) {
   useEffect(() => { startPwa().catch(() => {}) }, [])
 
   const onEvent = useCallback((name, data) => {
+    if (name === 'dm.sending') {
+      noteOwnDmDrop()
+      return
+    }
     if (name === 'groups.changed') {
       setGroupVersions((versions) => bumpGroupVersion(versions, data && data.group))
       return

@@ -39,6 +39,12 @@ const READS = ['list', 'status', 'follows', 'notices', 'terms', 'group-read', 'd
 const DEFINITE = ['assinatura-invalida', 'pedido-invalido']
 const FEED_KEYS = 64
 
+let dmDropObserver = () => {}
+
+export function setDmDropObserver (fn) {
+  dmDropObserver = fn
+}
+
 export const TEXTS = Object.freeze({
   'nao-vinculado': 'Esta conta não tem vínculo com uma conta Google',
   'sem-permissao': 'Só o dono pode fazer isso',
@@ -90,7 +96,7 @@ function request (spec, again = false) {
   })
 }
 
-async function run ({ method, path, body, raw, headers, origin, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, signed = false, allow404 = false }) {
+async function run ({ method, path, body, raw, headers, origin, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, signed = false, allow404 = false, drops = false }) {
   const built = buildRequest(method, path, raw === undefined ? body : undefined)
   const { init } = built
   // A core node's account service lives at its own https origin; the hosted
@@ -114,6 +120,9 @@ async function run ({ method, path, body, raw, headers, origin, maxBody = MAX_BO
   let res
   let data
   try {
+    if (drops) {
+      try { dmDropObserver() } catch {}
+    }
     res = await fetch(url, { ...init, signal: ctl.signal })
     data = await readJson(res, maxBody)
   } catch {
@@ -191,6 +200,7 @@ export function pagesAct ({ action, member, nonce, page, op, signature, termsSig
     path: path(action),
     body,
     signed: !READS.includes(action),
+    drops: action === 'dm-send',
     origin,
     maxBody: READS.includes(action) ? READ_MAX_BODY : MAX_BODY
   })
