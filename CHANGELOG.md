@@ -213,6 +213,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Corrigido
 
+- No nó hospedado, A Rua, os nomes e as Conversas ficam prontos bem antes depois de abrir o app: cada assinatura (certificado, nome de usuário, lista de bloqueio) é verificada uma vez enquanto a página vive, não a cada leitura, e o nome de usuário só é conferido para quem aparece na página pedida. Bloqueios e revogações continuam valendo na leitura seguinte (detalhes em `docs/verification.md` §96).
 - Contagens aparecem mais cedo em A Rua, citações de quem você não segue chegam autor por autor, e o Diário não relê nem pisca ao voltar à aba em menos de 60 s (detalhes em `docs/verification.md` §92).
 - Espiadinha e Avisos já chegam prontos ao abrir (primeira página lida com a aba escondida, só depois de a sincronização ficar pronta e de o app ficar alguns segundos sem pedidos ao nó; a da Espiadinha fica fora da tela até a aba abrir) e os Avisos aparecem página por página (detalhes em `docs/verification.md` §93).
 - No nó hospedado, abrir Conversas, uma comunidade ou um grupo não reinicia mais a sincronização, e a participação automática só a para quando tem algo a escrever; a leitura do diário com apagamentos ficou mais barata em todos os nós (detalhes em `docs/verification.md` §94).

@@ -28,6 +28,8 @@ const store = require('../lib/node-store')
 const ops = require('../lib/member-ops')
 const { DM_KEY_REFRESH_BLOCKS } = ops
 const { groupKeyPairFromPrf } = require('../lib/passkey')
+// The copy @varanda/core lib/verified.js checks signatures with.
+const hypercoreCrypto = require(require.resolve('hypercore-crypto', { paths: [require('node:path').dirname(require.resolve('@varanda/core/lib/verified'))] }))
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
@@ -361,6 +363,40 @@ test('a blocked followed diary stays hidden on the borrowed path', async (t) => 
   t.alike(profiles.missing, [F], 'missing from profile.read')
   t.alike(await web.request('sync.status'), { state: 'running', runId, once: false })
   t.is(preempted(web, from).length, 0)
+  await web.request('sync.stop')
+})
+
+// The signatures a read checked (certificates, the blocklist snapshot) are
+// not checked again by the next reads (@varanda/core lib/verified.js), and a
+// snapshot stored afterwards still hides a diary on the next read.
+test('repeated reads on the live run check no signature again, and a new block still hides at once', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc, own, F } = await fixture(t)
+  const mod = crypto.keyPair()
+  const modCert = createModeratorCert({ moderator: hex(mod.publicKey) }, assoc.kp)
+  await store.writeBlocklist(storage, createSnapshot({ seq: 1, blocked: ['11'.repeat(32)], revokedIssuers: [] }, mod, modCert))
+  const real = hypercoreCrypto.verify
+  let checks = 0
+  hypercoreCrypto.verify = function (...args) {
+    checks++
+    return real.apply(this, args)
+  }
+  t.teardown(() => { hypercoreCrypto.verify = real })
+  await web.request('sync.start', {})
+  const feed = await web.request('feed.read', {})
+  t.ok(feed.items.some((i) => i.author === F), 'the followed diary is in the feed')
+  const profiles = await web.request('profile.read', { authors: [own, F] })
+  t.ok(checks > 0, 'the first reads checked the signatures')
+  checks = 0
+  t.alike(await web.request('feed.read', {}), feed, 'the same feed')
+  t.alike(await web.request('profile.read', { authors: [own, F] }), profiles, 'the same profiles')
+  t.is(checks, 0, 'no signature checked again')
+
+  await store.writeBlocklist(storage, createSnapshot({ seq: 2, blocked: [F], revokedIssuers: [] }, mod, modCert))
+  const after = await web.request('feed.read', {})
+  t.absent(after.items.some((i) => i.author === F), 'hidden on the next read')
+  t.ok(after.skipped.some((s) => s.key === F && s.reason === 'blocked'), 'skipped as blocked')
+  t.alike((await web.request('profile.read', { authors: [own, F] })).missing, [F])
   await web.request('sync.stop')
 })
 
