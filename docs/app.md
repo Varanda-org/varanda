@@ -149,7 +149,7 @@ Exibir: a publicação mostra as fotos embaixo do texto (uma, duas lado a lado, 
 
 #### Nas conversas (mensagens diretas e grupos)
 
-Na web hospedada e no app instalado com a instalação, o clipe do compositor de uma conversa abre a folha "Anexar". Hoje é um painel curto com uma só linha, "Foto" (até 4 da galeria); GIF por busca e áudio são planejados e ficam fora da folha. Da galeria saem até 4 imagens por mensagem; uma foto é reencodada (sem EXIF nem GPS) e um GIF vai como está. As escolhidas aparecem como miniaturas acima do campo, cada uma com um botão para tirar, e a legenda é opcional: uma mensagem pode ter só fotos. Nada é enviado antes de tocar em enviar.
+Na web hospedada e no app instalado com a instalação, o clipe do compositor de uma conversa abre a folha "Anexar". Hoje é um painel curto com uma só linha, "Foto" (até 4 da galeria); GIF por busca é planejado e fica fora da folha; a mensagem de voz tem um botão próprio no compositor (abaixo). Da galeria saem até 4 imagens por mensagem; uma foto é reencodada (sem EXIF nem GPS) e um GIF vai como está. As escolhidas aparecem como miniaturas acima do campo, cada uma com um botão para tirar, e a legenda é opcional: uma mensagem pode ter só fotos. Nada é enviado antes de tocar em enviar.
 
 - Mensagem direta: as fotos são cifradas no aparelho e vão pelo canal de mídia das conversas do semeador, sob um id aleatório, por 7 dias ([protocol.md](protocol.md), seções 11 e 12); a chave só viaja dentro da mensagem selada. O semeador não vê a imagem nem sabe para quem ela é. Numa mensagem de quem ainda está em Pedidos de mensagem nada é baixado sozinho.
 - Grupo público: as fotos vão para o núcleo de fotos de quem escreve e são públicas como o texto do grupo, buscadas como as fotos das publicações.
@@ -160,6 +160,19 @@ Na web hospedada e no app instalado com a instalação, o clipe do compositor de
 - No app instalado, uma foto aberta de mensagem direta ou de grupo privado é mostrada a partir de um arquivo decifrado temporário (`<documentos>/varanda/media-read`, só o app o lê). Ele é apagado quando a imagem sai do cache, ao trancar a sessão, em Sair, ao apagar os dados do app, quando o app vai para o segundo plano e na abertura do app (o que sobrou de um fechamento forçado). Ao voltar ao app, as fotos são abertas de novo.
 - Denunciar uma mensagem direta ou uma mensagem de grupo privado com foto: a primeira imagem é aberta da cópia do aparelho, regravada como JPEG de até 700 KB e mostrada em "Imagem que será enviada" antes do envio ("A imagem vai para a moderação, aberta."). Se não couber, a tela diz "A imagem não coube e não foi enviada.". A moderação a vê como "não conferida", e a denúncia sempre fica para uma pessoa. A denúncia de um grupo público aponta para a mensagem, sem imagem.
 - No app instalado, abrir uma foto depende do fetch do worklet Bare (`apps/app/worklet/bare-fetch.js`): confira num build de aparelho depois de `npm run prepare:native -w apps/app` ([verification.md](verification.md), seção 107).
+
+#### Mensagens de voz nas conversas
+
+Nas mesmas conversas (mensagens diretas, grupos públicos e privados), com o compositor vazio, o botão de enviar vira um microfone ("Gravar mensagem de voz"). Ele só aparece quando o nó oferece mídia para a conversa, o nó está online e o aparelho ou o navegador consegue gravar `audio/mp4` (a capacidade, conferida por `canRecordMp4`, nunca por `Platform.OS`): no Android e no iOS com o `expo-audio`, na web com o `MediaRecorder` do Safari e do Chrome recente. Onde não dá para gravar `audio/mp4`, não há microfone nem aviso sobre ele.
+
+- Segurar e gravar: o tempo corre na barra, com "deslize para cancelar"; arrastar para a esquerda descarta a gravação, e soltar o dedo envia. Uma gravação curta demais (um escorregão) não é enviada e a tela mostra "Segure para gravar".
+- Tocar e gravar (acessibilidade): um toque no microfone grava sem segurar; "Parar" para e envia, "Cancelar" descarta.
+- Limite de 2:00: aos dois minutos a gravação para sozinha e a mensagem é enviada. Uma gravação por vez, e uma mensagem de voz vai sozinha na mensagem, sem foto nem legenda.
+- O microfone só é pedido quando a pessoa começa a gravar, nunca antes; sem permissão, a tela diz "Sem acesso ao microfone". Sair da tela, mandar o app para o segundo plano, trancar a sessão ou perder a conexão cancela a gravação. O app não tenta reenviar sozinho uma mensagem de voz que falhou.
+- Guarda e proteção: como as fotos das conversas (acima). Mensagem direta: cifrada no aparelho, no canal de blobs sob um id aleatório por 7 dias. Grupo público: pública como o texto. Grupo privado: cifrada, só o nó decifra. O formato é `audio/mp4` de até 2 minutos e 1,5 MiB; um arquivo que declara uma faixa de vídeo é recusado pelos bytes, não pelo tipo informado. Vídeo não é aceito.
+- Ouvir: a bolha "Mensagem de voz" tem tocar e pausar e mostra a duração; tocar uma pausa a que estava tocando. Num pedido de mensagem, nada é baixado sozinho: a bolha mostra "Toque para ouvir" e só baixa depois do toque. Um áudio que não chega mostra "Mídia indisponível".
+- Denunciar uma mensagem direta ou de grupo privado com mensagem de voz: o áudio vai aberto, como foi gravado, se tiver até 700 KB; a tela da denúncia deixa ouvir antes de enviar ("O áudio vai para a moderação, aberto."), e acima disso diz "O áudio não coube e não foi enviado.". O painel de moderação mostra "áudio não conferido", e a denúncia sempre fica para uma pessoa.
+- Conferência manual: [verification.md](verification.md), seção 108.
 
 ### Na web, com o `varanda-serve`: sem Conectar
 

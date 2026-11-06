@@ -2707,7 +2707,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Tentar de novo no mesmo gerenciador sem PRF pode dar "já existe uma passkey do Varanda neste gerenciador: use entrar"; entrar com ela leva de volta ao cartão com os passos.
 - Os textos citam a Apple e o Google para todos; o app não detecta a plataforma.
 - Se a passkey escolhida em Entrar era a da criação pendente, "concluir" continua aparecendo e, tocado, só diz "nenhuma criação de passkey pendente"; "Criar passkey" ao lado resolve. Esconder o "concluir" depois de uma falha dele perderia uma criação ainda viva quando a pessoa só fechou o diálogo, e a tela não distingue os dois casos. Essa passkey também não é nomeada para apagar. Saber qual das duas falhou exigiria o nó informar a criação pendente.
-- Os estados presos e as saídas novas (passkey sem sincronização, caminho pelo celular, passkeys recusadas guardadas, saída de uma passkey conhecida perdida) estão em §108; os resultados desta seção não foram refeitos.
+- Os estados presos e as saídas novas (passkey sem sincronização, caminho pelo celular, passkeys recusadas guardadas, saída de uma passkey conhecida perdida) estão em §109; os resultados desta seção não foram refeitos.
 
 ## 46. Leituras sem parar a sincronização na web (PR perf/faster-content-loading, 2026-10-30)
 
@@ -5239,7 +5239,50 @@ Limites desta caminhada:
 - A abertura de foto no app instalado só é conferida num build de aparelho depois de `npm run prepare:native -w apps/app`; os testes rodam o fetch Bare isolado, não no worklet.
 - Nenhuma caixa acima foi executada nesta documentação.
 
-## 108. Passkeys só de gerenciadores que sincronizam, caminho pelo celular (QR code) e saídas dos estados presos (PR fix/passkey-robustness)
+## 108. Mensagens de voz nas conversas (PR feat/voice-notes)
+
+Caminhada do app para gravar, enviar e ouvir mensagens de voz em mensagens diretas e em grupos, públicos e privados, e para a denúncia com áudio. A tela está em [app.md](app.md) ("Mensagens de voz nas conversas"); o formato está em [protocol.md](protocol.md) e [rpc.md](rpc.md). Os Termos de Uso e a Política de Privacidade passam à versão 18 para descrever isso, então quem já aceitou a 17 vê o aceite de novo.
+
+Regras que os passos conferem:
+
+- Com o compositor vazio, o microfone ocupa o lugar do botão de enviar, só onde o aparelho ou o navegador grava `audio/mp4` (Android e iOS com `expo-audio`; Safari e Chrome recente com `MediaRecorder`). Onde não grava, não há microfone nem aviso.
+- Segurar grava com o tempo correndo e "deslize para cancelar"; soltar envia. Um toque grava sem segurar, com "Parar" (envia) e "Cancelar". Aos 2:00 a gravação para e é enviada. Uma gravação por vez; a mensagem de voz vai sozinha, sem foto nem legenda.
+- O microfone só é pedido quando a pessoa começa a gravar. Sem permissão: "Sem acesso ao microfone".
+- Só `audio/mp4` de até 2 minutos e 1,5 MiB; um arquivo com faixa de vídeo é recusado pelos bytes, mesmo rotulado `audio/mp4`. "Anexar" continua com só "Foto", e a galeria não deixa escolher vídeo.
+- Guarda como as fotos da seção 107: mensagem direta cifrada no canal de blobs por 7 dias; grupo público pela rota `/media`; grupo privado só o nó decifra. Num pedido de mensagem, nada baixa antes de "Toque para ouvir".
+- Denúncia de mensagem direta ou de grupo privado com mensagem de voz: o áudio vai aberto se tiver até 700 KB, com escuta antes do envio; acima disso, "O áudio não coube e não foi enviado.". O painel mostra "áudio não conferido" e serve `audio/mp4` com `nosniff` e `no-store`.
+- Os Termos e a Política estão na versão 18 (`LEGAL_VERSION` e `TERMS_VERSION` iguais) e não falam de vídeo nas conversas como recurso, busca de GIF, prévia de link nem encaminhamento.
+
+Passos (marcar só depois de executar e guardar o registro), primeiro no Android (build de debug, emulador ou aparelho, feito depois de `npm run prepare:native -w apps/app`), depois no simulador iOS, depois na web e no PWA; a conversa entre duas pessoas usa o laboratório hospedado (`apps/cli/scripts/hosted-lab.js`, dois perfis do navegador) ou um aparelho e um perfil do navegador:
+
+- [ ] Android: na abertura depois da atualização, o aceite dos Termos aparece com a versão 18; aceitar e seguir.
+- [ ] Android: abrir uma conversa e, antes de tocar no microfone, conferir que o sistema não pediu acesso ao microfone; o pedido aparece só ao começar a gravar. Negar mostra "Sem acesso ao microfone" e nada é enviado; permitir nas configurações e gravar de novo.
+- [ ] Android: segurar o microfone, falar uns segundos e soltar numa mensagem direta; a outra pessoa recebe "Mensagem de voz", toca e pausa. Segurar e deslizar para a esquerda descarta, sem envio.
+- [ ] Android: tocar no microfone sem segurar; gravar e tocar "Parar" envia; repetir e tocar "Cancelar" descarta.
+- [ ] Android: gravar sem parar até 2:00; a gravação para sozinha e a mensagem chega com 2:00.
+- [ ] Android: mandar uma mensagem de voz num grupo público e outra num grupo privado; as duas tocam para o outro membro. A do grupo privado, lida na rota `/media` do semeador, são bytes cifrados (não começa com uma caixa `ftyp`).
+- [ ] Android: abrir "Anexar" e a galeria; um vídeo não pode ser escolhido (a galeria mostra só imagens).
+- [ ] Android: denunciar uma mensagem direta com mensagem de voz curta; a tela deixa ouvir o áudio antes de enviar, e o painel de moderação mostra a denúncia com "áudio não conferido", que toca no navegador do moderador. Com uma mensagem de voz acima de 700 KB, a tela diz "O áudio não coube e não foi enviado.".
+- [ ] iOS (simulador): repetir os passos do Android acima, num build feito depois de `npm run prepare:native -w apps/app`; conferir o texto do pedido de microfone do sistema.
+- [ ] Safari (web hospedada, macOS e iPhone): o microfone aparece e grava; repetir envio, escuta, cancelamento e "Parar". O pedido de microfone do navegador só aparece ao começar a gravar.
+- [ ] Chrome (web hospedada): numa versão que grava `audio/mp4` com `MediaRecorder`, repetir os passos; a mensagem gravada no Chrome toca no Safari e no Android, e a gravada no Safari toca no Chrome.
+- [ ] Navegador sem `audio/mp4` no `MediaRecorder` (por exemplo um Firefox ou um Chrome antigo): nenhum controle de microfone aparece no compositor, nem desabilitado, nem com aviso; as mensagens de voz recebidas continuam tocando ou mostram "Mídia indisponível".
+- [ ] PWA instalado (Chrome e Safari no iPhone): gravar, enviar e ouvir numa mensagem direta e num grupo; mandar o app para o segundo plano no meio de uma gravação a cancela.
+- [ ] Duas pessoas no laboratório hospedado: um pedido de mensagem com mensagem de voz não baixa nada até "Toque para ouvir" (a aba Rede não registra pedido de mídia antes do toque); depois de aceitar, toca direto.
+- [ ] Em todas as plataformas: a Política e os Termos abertos em Ajustes mostram "Versão 18" e descrevem a mensagem de voz de até dois minutos.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/app/test/legal.test.js`, `terms-version.test.js` e `node packages/core/test/terms.test.js`.
+- `node packages/rpc/test/audio-bounds.test.js`, `node apps/app/test/voice.test.js`, `audio.test.js`, `report.test.js` e `node apps/cli/test/dm-report.test.js` (o anexo de áudio) e `panel.test.js`.
+- `npm run lint`, que tem de passar.
+
+Limites desta caminhada:
+
+- A gravação depende do aparelho e da versão do navegador: os testes rodam com gravadores falsos, não com o microfone.
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 109. Passkeys só de gerenciadores que sincronizam, caminho pelo celular (QR code) e saídas dos estados presos (PR fix/passkey-robustness)
 
 ### O que mudou
 

@@ -9,12 +9,14 @@ const crypto = require('hypercore-crypto')
 const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, sealMedia } = require('@varanda/core/lib/group-media')
+const { validAudioDescriptor } = require('@varanda/core/lib/records')
 const { createBrowserNode } = require('../lib/node')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { groupKeyPairFromPrf, boxKeyPairFromPrf } = require('../lib/passkey')
 const ops = require('../lib/member-ops')
 const store = require('../lib/node-store')
 const { connectClient, errorOf } = require('./helpers/session')
+const { stripAudioMetadata } = require('@varanda/rpc')
 
 const hex = (buf) => b4a.toString(buf, 'hex')
 const CORE_FILES = ['oplog', 'tree', 'bitfield', 'data', 'header']
@@ -786,6 +788,102 @@ test('private media: sealed upload, sealed post, read back, no image header stor
   t.ok(locked !== null, 'a read that outlived the lock fails')
   t.is(locked.code, 'USAGE')
   t.not(locked.message, 'mídia indisponível', 'it says locked, not unavailable')
+  t.alike(a.internal, [])
+})
+
+// A minimal MPEG-4 audio file as a phone records it (ftyp, moov with mvhd
+// and one trak per handler, each with its sample table, recording times and
+// a udta of device tags, mdat): enough for audioBounds.
+const RECORDED_AT = 0xdeadbeef
+const DEVICE_TAG = 'Pixel 9, 2026-11-06 10:31'
+const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+const ascii = (s) => Array.from(s, (c) => c.charCodeAt(0))
+function m4a ({ ms = 3000, handlers = ['soun'], pad = 0 } = {}) {
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  const at = [...be32(RECORDED_AT), ...be32(RECORDED_AT)]
+  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))),
+    box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(ms), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(ms)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(ms), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
+  const trak = (h) => box('trak', box('tkhd', [0, 0, 0, 7], at, be32(1), new Array(68).fill(0)),
+    box('mdia', box('mdhd', [0, 0, 0, 0], at, be32(1000), be32(ms), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(h), be32(0), be32(0), be32(0), [0]), minf))
+  return b4a.from([
+    ...box('ftyp', ascii('M4A '), be32(0), ascii('isom')),
+    ...box('moov', box('mvhd', [0, 0, 0, 0], at, be32(1000), be32(ms), new Array(80).fill(0)), ...handlers.map(trak), box('udta', ascii(DEVICE_TAG))),
+    ...box('mdat', new Array(pad).fill(9))
+  ])
+}
+
+const contains = (bytes, seq) => b4a.indexOf(bytes, b4a.from(seq)) !== -1
+
+test('voice notes: sealed and public uploads, a sealed read back checked by its bytes', async (t) => {
+  let serve = null
+  const fetchMedia = async () => answer(serve())
+  const a = await setup(t, { mediaKeyPair: crypto.keyPair(), fetchMedia })
+  const plain = m4a({ ms: 4200, pad: 5000 })
+  const voice = { bytes: plain, mime: 'audio/mp4', width: 0, height: 0, ms: 4200, kind: 'voice' }
+
+  const item = await a.node.mediaUpload({ ...voice, sealed: true })
+  t.ok(validPrivateItem(item), 'a private item')
+  t.alike([item.mime, item.plainMime, item.w, item.h, item.ms], ['application/octet-stream', 'audio/mp4', 0, 0, 4200])
+  const pub = await a.node.mediaUpload(voice)
+  t.ok(validAudioDescriptor(pub), 'an audio descriptor')
+  t.alike([pub.mime, pub.width, pub.height, pub.ms, pub.bytes], ['audio/mp4', 0, 0, 4200, plain.byteLength])
+
+  // The stored note carries no recording time and no device tags.
+  const pubCore = await store.openMediaCoreReadOnly(a.storage, pub.core)
+  const stored = []
+  try {
+    for (let i = pub.start; i < pub.start + pub.blocks; i++) stored.push(await pubCore.get(i, { wait: false }))
+  } finally {
+    await pubCore.close()
+  }
+  const kept = b4a.concat(stored)
+  t.ok(contains(plain, be32(RECORDED_AT)) && contains(plain, ascii('udta')), 'the recording had times and tags')
+  t.is(kept.byteLength, plain.byteLength, 'same size')
+  t.absent(contains(kept, be32(RECORDED_AT)), 'no recording time stored')
+  t.absent(contains(kept, ascii('udta')), 'no udta stored')
+  t.absent(contains(kept, ascii(DEVICE_TAG)), 'no device tag stored')
+  t.ok(b4a.equals(kept, stripAudioMetadata(plain)), 'the stripped bytes')
+  t.is(pub.sha256, require('crypto').createHash('sha256').update(kept).digest('hex'), 'hashed after stripping')
+
+  const core = await store.openMediaCoreReadOnly(a.storage, item.core)
+  const cipher = []
+  try {
+    for (let i = item.start; i < item.start + item.blocks; i++) cipher.push(await core.get(i, { wait: false }))
+  } finally {
+    await core.close()
+  }
+  serve = () => b4a.concat(cipher)
+  const opened = await a.node.groupReadMedia({ diary: a.key, item })
+  t.ok(b4a.equals(opened.bytes, stripAudioMetadata(plain)), 'the recorded audio, stripped before sealing')
+  t.absent(contains(opened.bytes, be32(RECORDED_AT)) || contains(opened.bytes, ascii('udta')), 'no time or tags sealed')
+  t.alike([opened.mime, opened.w, opened.h, opened.ms], ['audio/mp4', 0, 0, 4200])
+
+  // A rounded ms within AUDIO_MS_TOLERANCE is accepted, but the container's
+  // duration is what gets stored.
+  const close = { ...voice, ms: 5200 }
+  t.is((await a.node.mediaUpload({ ...close, sealed: true })).ms, 4200, 'sealed: the container ms')
+  t.is((await a.node.mediaUpload(close)).ms, 4200, 'public: the container ms')
+
+  const bad = {
+    'a video track': { bytes: m4a({ handlers: ['soun', 'vide'] }) },
+    'not MPEG-4': { bytes: b4a.alloc(3000, 1) },
+    'no bytes': { bytes: b4a.alloc(0) },
+    'over the byte cap': { bytes: b4a.concat([plain, b4a.alloc(1572864)]) },
+    'ms 0': { ms: 0 },
+    'ms over': { ms: 120001 },
+    'ms past the tolerance': { ms: 5201 },
+    'ms 1 for a 4.2 s file': { ms: 1 },
+    'with sides': { width: 1, height: 1 },
+    'another audio mime': { mime: 'audio/mpeg' },
+    'no kind': { kind: undefined },
+    'another kind': { kind: 'image' }
+  }
+  for (const [name, over] of Object.entries(bad)) {
+    t.ok(throwsType(() => a.node.mediaUpload({ ...voice, ...over })), name)
+    t.ok(throwsType(() => a.node.mediaUpload({ ...voice, ...over, sealed: true })), name + ' (sealed)')
+  }
+  t.ok(throwsType(() => a.node.mediaUpload({ bytes: png(1000), mime: 'image/png', width: 0, height: 0 })), 'a photo still needs its sides')
+
   t.alike(a.internal, [])
 })
 

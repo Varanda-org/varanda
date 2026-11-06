@@ -3,6 +3,7 @@
 const { utf8ByteLength, charLength } = require('./text')
 const L = require('./limits')
 const { DM_MEDIA_KEYS } = require('./dm-budget')
+const { MAX_AUDIO_MS } = require('./audio-bounds')
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):(0|[1-9][0-9]*)$/
@@ -133,6 +134,13 @@ const isGroupVisibility = (v) => v === 'public' || v === 'private'
 // Duplicated from validDescriptor in @varanda/core lib/records.js, which this
 // package cannot import (same rules, exact keys).
 const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height']
+const AUDIO_DESCRIPTOR_KEYS = [...DESCRIPTOR_KEYS, 'ms']
+// Same voice bounds as core records.js, dm.js and group-media.js, without
+// importing core into this package or widening diary image descriptors.
+const AUDIO_MIME = 'audio/mp4'
+const MAX_AUDIO_BYTES = 1572864
+const DM_AUDIO_MAX_BYTES = MAX_AUDIO_BYTES + L.DM_MEDIA_MAC_BYTES
+const MAX_AUDIO_SEALED_BLOCKS = Math.ceil((MAX_AUDIO_BYTES + 16 + 1) / L.MEDIA_BLOCK_BYTES)
 
 function isDescriptor (d) {
   if (!isPlainObject(d)) return false
@@ -150,6 +158,29 @@ function isDescriptor (d) {
     isKey(sha256) &&
     int(1, L.MAX_MEDIA_DIMENSION)(width) &&
     int(1, L.MAX_MEDIA_DIMENSION)(height)
+}
+
+function isAudioDescriptor (d) {
+  if (!isPlainObject(d) || Object.keys(d).length !== AUDIO_DESCRIPTOR_KEYS.length ||
+    !AUDIO_DESCRIPTOR_KEYS.every((k) => hasOwn(d, k))) return false
+  const { core, mime, start, blocks, bytes, sha256, width, height, ms } = d
+  return isKey(core) &&
+    mime === AUDIO_MIME &&
+    int(1, L.MAX_MEDIA_BLOCKS - 1)(start) &&
+    int(1, L.MAX_MEDIA_ITEM_BLOCKS)(blocks) &&
+    start + blocks <= L.MAX_MEDIA_BLOCKS &&
+    Number.isSafeInteger(bytes) &&
+    bytes > (blocks - 1) * L.MEDIA_BLOCK_BYTES &&
+    bytes <= blocks * L.MEDIA_BLOCK_BYTES &&
+    bytes <= MAX_AUDIO_BYTES &&
+    isKey(sha256) &&
+    width === 0 && height === 0 && int(1, MAX_AUDIO_MS)(ms)
+}
+
+function isChatMediaKind (mime, w, h, ms) {
+  if (mime === AUDIO_MIME) return w === 0 && h === 0 && int(1, MAX_AUDIO_MS)(ms)
+  return isMediaMime(mime) && int(1, L.MAX_MEDIA_DIMENSION)(w) &&
+    int(1, L.MAX_MEDIA_DIMENSION)(h) && ms === 0
 }
 
 // profile.set `avatar`: same rules as validAvatar in @varanda/core lib/records.js.
@@ -189,11 +220,9 @@ function isPrivateGroupMediaItem (d) {
     isKey(d.sha256) &&
     isKey(d.key) &&
     typeof d.nonce === 'string' && HEX48.test(d.nonce) &&
-    typeof d.plainMime === 'string' && L.MEDIA_MIMES.includes(d.plainMime) &&
+    (d.plainMime !== AUDIO_MIME || d.blocks <= MAX_AUDIO_SEALED_BLOCKS) &&
     isKey(d.plainSha256) &&
-    int(1, L.MAX_MEDIA_DIMENSION)(d.w) &&
-    int(1, L.MAX_MEDIA_DIMENSION)(d.h) &&
-    d.ms === 0
+    isChatMediaKind(d.plainMime, d.w, d.h, d.ms)
 }
 
 // Group media identities are distinct even when their other fields differ.
@@ -202,7 +231,8 @@ function isGroupMediaList (v) {
   const identities = new Set()
   for (let i = 0; i < v.length; i++) {
     const item = v[i]
-    if (!isDescriptor(item) && !isPrivateGroupMediaItem(item)) return false
+    if (!isDescriptor(item) && !isAudioDescriptor(item) && !isPrivateGroupMediaItem(item)) return false
+    if ((item.mime === AUDIO_MIME || item.plainMime === AUDIO_MIME) && v.length !== 1) return false
     const identity = item.core + ':' + item.start
     if (identities.has(identity)) return false
     identities.add(identity)
@@ -300,6 +330,22 @@ const isPrf = (v) => typeof v === 'string' && PRF_RE.test(v)
 const isCredentialId = (v) => typeof v === 'string' && CREDENTIAL_ID_RE.test(v)
 const isUserId = (v) => v === '' || isKey(v)
 const isMediaMime = (v) => typeof v === 'string' && L.MEDIA_MIMES.includes(v)
+const isUploadMime = (v) => isMediaMime(v) || v === AUDIO_MIME
+
+function mediaUploadCross (given, value) {
+  if (value.mime === AUDIO_MIME) {
+    if (value.kind !== 'voice') return 'parâmetro inválido: kind'
+    if (!hasOwn(value, 'ms')) return 'parâmetro obrigatório: ms'
+    if (value.width !== 0) return 'parâmetro inválido: width'
+    if (value.height !== 0) return 'parâmetro inválido: height'
+  } else {
+    if (hasOwn(value, 'kind')) return 'parâmetro inválido: kind'
+    if (hasOwn(value, 'ms')) return 'parâmetro inválido: ms'
+    if (value.width === 0) return 'parâmetro inválido: width'
+    if (value.height === 0) return 'parâmetro inválido: height'
+  }
+  return null
+}
 
 // community.leave's force: true skips every wait of the creator's leave, a
 // list only the waits it names.
@@ -321,7 +367,7 @@ const isDmFolder = (v) => v === 'inbox' || v === 'request'
 // descriptor (the validateBlobDescriptor rules of @varanda/core lib/blob.js,
 // which this package cannot import) plus mime, w, h and ms, exact keys. bytes
 // counts the ciphertext (plaintext plus the MAC), so chunks is fixed by bytes.
-// ms is reserved for later kinds and is 0 for every image.
+// ms is 0 for images and the bounded duration for a voice note.
 const HEX48 = /^[0-9a-f]{48}$/
 
 function isDmMediaItem (d) {
@@ -331,15 +377,13 @@ function isDmMediaItem (d) {
   const { id, key, nonce, chunks, bytes, sha256, mime, w, h, ms } = d
   return isKey(id) && isKey(key) && isKey(sha256) &&
     typeof nonce === 'string' && HEX48.test(nonce) &&
-    isMediaMime(mime) &&
     int(1, L.DM_MEDIA_MAX_CHUNKS)(chunks) &&
     Number.isSafeInteger(bytes) &&
     bytes > L.DM_MEDIA_MAC_BYTES &&
     bytes <= L.DM_MEDIA_MAX_CHUNKS * L.DM_MEDIA_CHUNK_BYTES &&
     chunks === Math.ceil(bytes / L.DM_MEDIA_CHUNK_BYTES) &&
-    int(1, L.MAX_MEDIA_DIMENSION)(w) &&
-    int(1, L.MAX_MEDIA_DIMENSION)(h) &&
-    ms === 0
+    (mime !== AUDIO_MIME || bytes <= DM_AUDIO_MAX_BYTES) &&
+    isChatMediaKind(mime, w, h, ms)
 }
 
 // By index, never every(): a hole in a sparse array is undefined and invalid.
@@ -350,6 +394,7 @@ function isDmMediaList (v) {
   const ids = new Set()
   for (let i = 0; i < v.length; i++) {
     if (!isDmMediaItem(v[i]) || ids.has(v[i].id)) return false
+    if (v[i].mime === AUDIO_MIME && v.length !== 1) return false
     ids.add(v[i].id)
   }
   return true
@@ -967,12 +1012,15 @@ const SPECS = {
   'media.uploadFile': {
     fields: {
       name: req(isMediaName),
-      mime: req(isMediaMime),
-      width: req(int(1, MEDIA_SIDE_MAX)),
-      height: req(int(1, MEDIA_SIDE_MAX)),
+      mime: req(isUploadMime),
+      width: req(int(0, MEDIA_SIDE_MAX)),
+      height: req(int(0, MEDIA_SIDE_MAX)),
+      kind: opt((v) => v === 'voice'),
+      ms: opt(int(1, MAX_AUDIO_MS)),
       sealed: opt(isBool)
     },
-    mutating: true
+    mutating: true,
+    cross: mediaUploadCross
   },
   // IPC only, in-app web-node worklet (docs/rpc.md 5.88): the photo of a
   // chat goes to the anonymous blob channel (protocol section 13) from a
@@ -982,11 +1030,14 @@ const SPECS = {
   'dm.putMedia': {
     fields: {
       name: req(isMediaName),
-      mime: req(isMediaMime),
-      width: req(int(1, MEDIA_SIDE_MAX)),
-      height: req(int(1, MEDIA_SIDE_MAX))
+      mime: req(isUploadMime),
+      width: req(int(0, MEDIA_SIDE_MAX)),
+      height: req(int(0, MEDIA_SIDE_MAX)),
+      kind: opt((v) => v === 'voice'),
+      ms: opt(int(1, MAX_AUDIO_MS))
     },
-    mutating: true
+    mutating: true,
+    cross: mediaUploadCross
   },
   // IPC only, in-app web-node worklet (docs/rpc.md 5.89): the opened image
   // of a chat item is written to a file in the worklet's read directory and

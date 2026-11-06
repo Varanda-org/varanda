@@ -18,7 +18,7 @@ const targetOf = (ref) => {
 }
 const active = (entity) => ['creator', 'admin', 'member'].includes(entity.role)
 const preview = (text, media) => text === '' && Array.isArray(media) && media.length > 0
-  ? media.every((m) => (m.plainMime || m.mime) === 'image/gif') ? 'GIF' : 'Foto'
+  ? media.some((m) => (m.plainMime || m.mime) === 'audio/mp4') ? 'Áudio' : media.every((m) => (m.plainMime || m.mime) === 'image/gif') ? 'GIF' : 'Foto'
   : [...text].slice(0, 140).join('')
 
 function refuse (code, message) {

@@ -11,7 +11,7 @@ const lines = fs.readFileSync(CADDYFILE, 'utf8').split('\n').filter((l) => !/^\s
 const code = lines.join('\n')
 
 const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
-  "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; " +
+  "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; " +
   "manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; " +
   "object-src 'none'"
 
@@ -36,14 +36,18 @@ test('Caddyfile: CSP unchanged, scripts only from self', (t) => {
   const scriptSrc = CSP.split(';').map((d) => d.trim()).find((d) => d.startsWith('script-src'))
   t.ok(CSP.includes("script-src 'self' 'wasm-unsafe-eval'"), 'script-src self and wasm only')
   t.absent(scriptSrc.includes("'unsafe-inline'"), "no 'unsafe-inline' for scripts")
+  const directive = (name) => CSP.split(';').map((d) => d.trim()).find((d) => d.startsWith(name + ' '))
+  t.ok(directive('img-src').split(/\s+/).includes('blob:'), 'img-src allows blob: (decrypted chat photos)')
+  t.is(directive('media-src'), "media-src 'self' blob:", 'media-src: self and blob: only (voice playback from local copies)')
 })
 
-test('Caddyfile: camera off', (t) => {
+test('Caddyfile: camera off, microphone only for self', (t) => {
   t.is(count('camera=()'), 1, 'camera=() exactly once')
   t.is(count('camera=('), 1, 'no other camera allowlist')
   const pp = lines.filter((l) => /^\s*Permissions-Policy\s/.test(l))
+  t.is(count('microphone=('), 1, 'one microphone allowlist')
   t.is(pp.length, 1, 'one Permissions-Policy line')
-  t.is(pp[0].trim(), 'Permissions-Policy "camera=(), microphone=(), geolocation=()"', 'Permissions-Policy string')
+  t.is(pp[0].trim(), 'Permissions-Policy "camera=(), microphone=(self), geolocation=()"', 'Permissions-Policy string')
 })
 
 test('Caddyfile: existing blocks kept', (t) => {

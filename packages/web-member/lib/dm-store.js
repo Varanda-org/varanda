@@ -39,7 +39,7 @@
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const gc = require('@varanda/core/lib/group-crypto')
-const { DM_OPS } = require('@varanda/core/lib/dm')
+const { DM_OPS, DM_AUDIO_MIME, DM_AUDIO_MAX_MS, DM_AUDIO_MAX_BYTES } = require('@varanda/core/lib/dm')
 const sodium = require('./sodium-browser')
 const store = require('./node-store')
 
@@ -70,13 +70,15 @@ function validMediaItem (d) {
   if (d === null || typeof d !== 'object' || Array.isArray(d)) return false
   const keys = Object.keys(d)
   if (keys.length !== MEDIA_KEYS.length || !MEDIA_KEYS.every((k) => keys.includes(k))) return false
-  return HEX64.test(d.id) && HEX64.test(d.key) && HEX48.test(d.nonce) && HEX64.test(d.sha256) &&
-    isCount(d.chunks, 257) && isCount(d.bytes, 257 * 32768) && MEDIA_MIMES.includes(d.mime) &&
-    isCount(d.w, 16384) && isCount(d.h, 16384) && d.ms === 0
+  if (!(HEX64.test(d.id) && HEX64.test(d.key) && HEX48.test(d.nonce) && HEX64.test(d.sha256) && isCount(d.chunks, 257))) return false
+  if (d.mime === DM_AUDIO_MIME) return isCount(d.bytes, DM_AUDIO_MAX_BYTES) && d.w === 0 && d.h === 0 && isCount(d.ms, DM_AUDIO_MAX_MS)
+  return isCount(d.bytes, 257 * 32768) && MEDIA_MIMES.includes(d.mime) && isCount(d.w, 16384) && isCount(d.h, 16384) && d.ms === 0
 }
 
+// A voice note is the only item of its message.
 function validMedia (m) {
-  return m === null || (Array.isArray(m) && m.length >= 1 && m.length <= MEDIA_ITEMS_MAX && m.every(validMediaItem))
+  return m === null || (Array.isArray(m) && m.length >= 1 && m.length <= MEDIA_ITEMS_MAX && m.every(validMediaItem) &&
+    (m.length === 1 || !m.some((d) => d.mime === DM_AUDIO_MIME)))
 }
 
 function plainMedia (m) {

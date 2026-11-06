@@ -15,6 +15,9 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "app.varanda",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Para gravar mensagens de voz nas Conversas."
+      },
       "privacyManifests": {
         "NSPrivacyTracking": false,
         "NSPrivacyAccessedAPITypes": [
@@ -51,6 +54,9 @@
     "android": {
       "package": "app.varanda",
       "allowBackup": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#fbf8f3",
         "foregroundImage": "./assets/android-icon-foreground.png",
