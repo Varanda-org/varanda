@@ -355,3 +355,204 @@ test('dropView: doubtful counts and modes produce no text and stay disabled', as
     }
   }
 })
+
+const rpc = require('@varanda/rpc')
+const CARD_KEY = 'varanda-signup-invite-card'
+const ORIGIN = 'https://varanda.example'
+
+function cardUrl ({ origin = ORIGIN, code = CODE, design = 'cordel', message = 'Vem pra varanda!' } = {}) {
+  return rpc.buildInviteCardUrl({
+    origin, code, design, name: 'Ana', message, expires: 2_000_000_000, member: 'ab'.repeat(32), signature: 'cd'.repeat(64)
+  })
+}
+const cardBody = (url) => url.slice(url.indexOf('#c1.') + 4)
+const cardQuery = (url) => url.slice(url.indexOf('?'), url.indexOf('#'))
+
+test('card: a plain /convite path stores only the code and keeps #token= byte for byte', async (t) => {
+  const { captureSignupInvite } = await load()
+  const storage = memoryStorage({ [CARD_KEY]: raw({ v: 1, code: CODE2, body: 'x', at: NOW }) })
+  const b = fakeBrowser('/convite/' + CODE, '?conta=ok', '#token=a%20b&x=1')
+  t.alike(captureSignupInvite({ ...b, storage, now: NOW, origin: ORIGIN }), { v: 1, code: CODE, at: NOW })
+  t.absent(storage.map.has(CARD_KEY), 'a new /convite path clears the previous card')
+  t.alike(b.calls.map((c) => c.url), ['/?conta=ok#token=a%20b&x=1'])
+})
+
+test('card: a #c1. card is stored bound to its code and leaves the address bar in the same pass', async (t) => {
+  const { createSignupInviteHolder, decodeSignupInviteCard } = await load()
+  const url = cardUrl()
+  const body = cardBody(url)
+  const s = memoryStorage()
+  const h = createSignupInviteHolder({ getStorage: () => s, now: () => NOW })
+  const location = { pathname: '/convite/' + CODE, search: cardQuery(url) + '&conta=ok', hash: '#c1.' + body + '&token=abc' }
+  const urls = []
+  const history = {
+    state: null,
+    replaceState (st, title, u) {
+      urls.push(u)
+      t.ok(s.map.has(CARD_KEY), 'stored before the bar changes')
+    }
+  }
+  t.alike(h.capture({ location, history, origin: ORIGIN }), { v: 1, code: CODE, at: NOW })
+  t.alike(urls, ['/?conta=ok#token=abc'])
+  t.absent(urls[0].includes('c='), 'no ?c left')
+  t.absent(urls[0].includes('#c1.'), 'no card fragment left')
+  t.alike(JSON.parse(s.map.get(CARD_KEY)), { v: 1, code: CODE, body, at: NOW })
+  const card = h.loadCard()
+  t.alike(card, { v: 1, code: CODE, body, at: NOW })
+  t.ok(Object.isFrozen(card))
+  t.alike(decodeSignupInviteCard(s.map.get(CARD_KEY), NOW), card)
+  t.ok(h.drop())
+  t.alike(h.loadCard(), card, 'drop() keeps the card')
+  t.ok(h.dropCard())
+  t.is(h.loadCard(), null)
+})
+
+test('card: a short origin may carry a body longer than 320 characters', async (t) => {
+  const { createSignupInviteHolder, decodeSignupInviteCard } = await load()
+  const origin = 'https://v.test'
+  const room = rpc.messageRoom({ origin, code: CODE, design: 'cordel', name: 'Ana', expires: 2_000_000_000 })
+  const url = cardUrl({ origin, message: 'a'.repeat(room) })
+  t.is(url.length <= 400, true, 'a valid link')
+  const body = cardBody(url)
+  t.ok(body.length > 320, 'body longer than the bora.varanda.app room: ' + body.length)
+  const s = memoryStorage()
+  const h = createSignupInviteHolder({ getStorage: () => s, now: () => NOW })
+  const location = { pathname: '/convite/' + CODE, search: cardQuery(url), hash: '#c1.' + body }
+  h.capture({ location, history: { state: null, replaceState () {} }, origin })
+  t.alike(h.loadCard(), { v: 1, code: CODE, body, at: NOW }, 'stored')
+  t.alike(decodeSignupInviteCard(s.map.get(CARD_KEY), NOW), { v: 1, code: CODE, body, at: NOW }, 'decodes')
+})
+
+test('card: query and hash cleaning keep the other pieces in order', async (t) => {
+  const { captureSignupInvite } = await load()
+  const url = cardUrl()
+  const piece = '#c1.' + cardBody(url)
+  const q = cardQuery(url).slice(1)
+  const cases = [
+    ['?' + q, piece, '/'],
+    ['?a=1&' + q + '&b=%20', piece, '/?a=1&b=%20'],
+    ['', piece, '/'],
+    ['?' + q, piece + '&token=x&y', '/#token=x&y'],
+    ['?a=1', '#token=x', '/?a=1#token=x'],
+    ['?' + q + '&c=9', piece, '/']
+  ]
+  for (const [search, hash, expected] of cases) {
+    const b = fakeBrowser('/convite/' + CODE + '/', search, hash)
+    captureSignupInvite({ ...b, storage: memoryStorage(), now: NOW, origin: ORIGIN })
+    t.alike(b.calls.map((c) => c.url), [expected], search + hash.slice(0, 8))
+  }
+})
+
+test('card: trailing slash, missing ?c, and a card without a code', async (t) => {
+  const { captureSignupInvite } = await load()
+  const url = cardUrl()
+  const body = cardBody(url)
+  const s1 = memoryStorage()
+  captureSignupInvite({ ...fakeBrowser('/convite/' + CODE + '/', cardQuery(url), '#c1.' + body), storage: s1, now: NOW, origin: ORIGIN })
+  t.is(JSON.parse(s1.map.get(CARD_KEY)).body, body, 'trailing slash')
+  const s2 = memoryStorage()
+  captureSignupInvite({ ...fakeBrowser('/convite/' + CODE, '', '#c1.' + body), storage: s2, now: NOW, origin: ORIGIN })
+  t.is(JSON.parse(s2.map.get(CARD_KEY)).body, body, '?c is optional')
+  const s3 = memoryStorage()
+  const b3 = fakeBrowser('/convite/abc', cardQuery(url), '#c1.' + body)
+  t.is(captureSignupInvite({ ...b3, storage: s3, now: NOW, origin: ORIGIN }), null)
+  t.absent(s3.map.has(CARD_KEY), 'no card without a valid code')
+  t.alike(b3.calls.map((c) => c.url), ['/'])
+})
+
+test('card: a doubtful card never clears a valid code', async (t) => {
+  const { captureSignupInvite } = await load()
+  const url = cardUrl()
+  const body = cardBody(url)
+  const index = rpc.designIndex('cordel')
+  const bad = [
+    ['?c=' + (index + 1), '#c1.' + body, 'a ?c that disagrees with the signed design'],
+    ['?c=x', '#c1.' + body, 'a malformed ?c'],
+    ['?c=' + index + '&c=' + index, '#c1.' + body, 'a repeated ?c'],
+    ['', '#c1.' + body.slice(0, -2), 'a truncated body'],
+    ['', '#c1.' + body + '!', 'a stray character'],
+    ['', '#c1.' + 'A'.repeat(321), 'an oversized body'],
+    ['', '#c1.', 'an empty body']
+  ]
+  for (const [search, hash, label] of bad) {
+    const storage = memoryStorage()
+    const b = fakeBrowser('/convite/' + CODE, search, hash)
+    t.alike(captureSignupInvite({ ...b, storage, now: NOW, origin: ORIGIN }), { v: 1, code: CODE, at: NOW }, label)
+    t.ok(storage.map.has(KEY), label)
+    t.absent(storage.map.has(CARD_KEY), label)
+    t.absent(b.calls[0].url.includes('c='), label)
+    t.absent(b.calls[0].url.includes('#c1.'), label)
+  }
+  const storage = memoryStorage()
+  captureSignupInvite({ ...fakeBrowser('/convite/' + CODE, '', '#c1.' + body), storage, now: NOW, origin: 'http://localhost' })
+  t.absent(storage.map.has(CARD_KEY), 'an origin the codec refuses')
+})
+
+test('card: decode applies TTL, skew and shape and re-parses the body', async (t) => {
+  const { decodeSignupInviteCard, makeCardRecord, SIGNUP_INVITE_TTL_MS, SIGNUP_INVITE_CARD_KEY } = await load()
+  t.is(SIGNUP_INVITE_CARD_KEY, CARD_KEY)
+  const body = cardBody(cardUrl())
+  const ok = { v: 1, code: CODE, body, at: NOW }
+  t.alike(makeCardRecord(CODE, body, NOW), ok)
+  t.alike(decodeSignupInviteCard(raw(ok), NOW), ok)
+  t.alike(decodeSignupInviteCard(ok, NOW), ok, 'an in-memory record')
+  t.alike(decodeSignupInviteCard(raw(ok), NOW + SIGNUP_INVITE_TTL_MS), ok)
+  t.is(decodeSignupInviteCard(raw(ok), NOW + SIGNUP_INVITE_TTL_MS + 1), null, 'expired')
+  t.alike(decodeSignupInviteCard(raw(ok), NOW - 60000), ok)
+  t.is(decodeSignupInviteCard(raw(ok), NOW - 60001), null, 'too far in the future')
+  const extra = decodeSignupInviteCard(raw({ ...ok, verified: true, y: 2 }), NOW)
+  t.alike(Object.keys(extra), ['v', 'code', 'body', 'at'])
+  t.is(extra.verified, undefined, 'never a verified flag')
+  const bad = [
+    null, 'nope', '[]', raw({ ...ok, v: 2 }), raw({ ...ok, code: 'abc' }), raw({ ...ok, body: 5 }),
+    raw({ ...ok, body: '' }), raw({ ...ok, body: body.slice(0, -2) }), raw({ ...ok, body: 'A'.repeat(321) }),
+    raw({ ...ok, at: 1.5 }), 'x'.repeat(600)
+  ]
+  for (const r of bad) t.is(decodeSignupInviteCard(r, NOW), null, String(r).slice(0, 40))
+})
+
+test('card holder: TTL on every load, memory when storage refuses, keepCard validates', async (t) => {
+  const { createSignupInviteHolder, SIGNUP_INVITE_TTL_MS } = await load()
+  const url = cardUrl()
+  const body = cardBody(url)
+  let now = NOW
+  const h = createSignupInviteHolder({ getStorage: throwingStorage, now: () => now })
+  h.capture({ ...fakeBrowser('/convite/' + CODE, cardQuery(url), '#c1.' + body), origin: ORIGIN })
+  t.alike(h.loadCard(), { v: 1, code: CODE, body, at: NOW }, 'kept in memory')
+  h.capture(fakeBrowser('/'))
+  t.is(h.loadCard().body, body, 'a later capture on / keeps it')
+  now = NOW + SIGNUP_INVITE_TTL_MS + 1
+  t.is(h.loadCard(), null, 'expires on load')
+  now = NOW
+  t.is(h.keepCard(CODE, 'junk'), null)
+  t.is(h.keepCard('abc', body), null)
+  t.is(h.keepCard(CODE, body).body, body)
+  h.capture(fakeBrowser('/convite/' + CODE2))
+  t.is(h.loadCard(), null, 'a new /convite path clears the previous card')
+})
+
+test('native store: varanda:/// and pasted https card links keep both code and card', async (t) => {
+  const n = await loadNative()
+  const { setInstallation } = await import('../src/installation.js')
+  t.teardown(() => { setInstallation(null); n.dropSignupInvite(); n.dropSignupInviteCard() })
+  const url = cardUrl()
+  const body = cardBody(url)
+  const scheme = 'varanda:///convite/' + CODE + cardQuery(url) + '#c1.' + body
+  t.is(n.captureSignupInvite(scheme).code, CODE)
+  t.alike(n.loadSignupInviteCard(), { v: 1, code: CODE, body, at: n.loadSignupInviteCard().at })
+  t.is(n.captureSignupInvite('varanda:///convite/' + CODE2).code, CODE2)
+  t.is(n.loadSignupInviteCard(), null, 'a newer plain link drops the card')
+  t.ok(setInstallation(ORIGIN))
+  t.is(n.captureSignupInvite('  ' + url + '\n', { paste: true }).code, CODE)
+  t.is(n.loadSignupInviteCard().body, body)
+  t.is(n.loadSignupInviteCard().code, CODE)
+  t.ok(n.dropSignupInvite())
+  t.is(n.loadSignupInviteCard().body, body, 'dropping the code keeps the card')
+  t.ok(n.dropSignupInviteCard())
+  t.is(n.loadSignupInviteCard(), null)
+  const long = 'varanda:///convite/' + CODE + '#c1.' + 'A'.repeat(401 - 'varanda:///convite/'.length - 43 - 4)
+  t.is(long.length, 401)
+  t.is(n.captureSignupInvite(long), null)
+  t.is(n.loadSignupInvite(), null, 'a 401-char URL keeps no code')
+  t.is(n.loadSignupInviteCard(), null, 'nor a card')
+})

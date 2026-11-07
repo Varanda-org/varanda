@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 25)
-  t.is(LEGAL_DATE, '06/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 25, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 27)
+  t.is(LEGAL_DATE, '07/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 27, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: complete documents with plain, visible text and project URLs', async (t) => {
@@ -66,7 +66,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '990ea9aeb837d2ab99dd6212632059fe0f6575dfd347646ed2b0d317c513f5bd', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'ff45216ea03870c5269b2729feed02ef7342d1ed1f9e29890757eca37f59ead8', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
@@ -197,4 +197,15 @@ test('legal: version 24 describes link previews built once and never fetched by 
   t.ok(text(PRIVACY).includes('O serviço não guarda o link, o título nem a imagem'))
   t.ok(text(PRIVACY).includes('Quem lê nunca fala com o site'))
   t.ok(text(PRIVACY).includes('A chave Prévia de links, em Ajustes, desliga a montagem'))
+})
+
+test('legal: version 27 describes the invite card in the link and the messenger preview', async (t) => {
+  const { PRIVACY } = await load()
+  const text = PRIVACY.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text.includes('vai dentro do link, no trecho que o serviço de conta não recebe'))
+  t.ok(text.includes('Qualquer pessoa com o link consegue ler o cartão'))
+  t.ok(text.includes('por até 24 horas'))
+  t.ok(text.includes('só pela chave, a situação pública da conta de quem convida'))
+  t.ok(text.includes('o @nome de quem convidou para qualquer pessoa com o link'))
+  t.ok(text.includes('sem guardar nada novo'))
 })
