@@ -1,5 +1,5 @@
 // The one-time notice before a member's first message to a Página: the
-// account service keeps a page's inbox and can read it (Termos 25, docs/
+// account service keeps a page's inbox and can read it (Termos 26, docs/
 // design.md LGPD). Shown once per device and page key, from the page's
 // profile (Membro) and from "Conversar" on one of its listings (Anuncio).
 // Pure: the device store comes from pageNoticeStore.web.js / .native.js.

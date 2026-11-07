@@ -38,6 +38,7 @@ const resultKeys = {
   'seen.sign': ['signature', 'prevHash'],
   'seen.merge': ['avisos', 'pending', 'dmChanged', 'groupChanged', 'caughtUp'],
   'report.sign': ['signature'],
+  'appeal.sign': ['signature'],
   'dm.reportSign': ['signature'],
   'terms.sign': ['signature'],
   'recovery.sign': ['signature'],
@@ -510,7 +511,8 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
     'fixtures.js': ["import rpc from '@varanda/rpc'", "import sodium from '@varanda/web-member/lib/sodium-browser'"],
     'pictures.js': [],
     'media.js': ["import { pictures } from './pictures.js'", "import { PICTURE_BASE } from './fixtures.js'"],
-    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { signVitrineConsent, verifyVitrineConsent } from './fixtures.js'"],
+    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { signVitrineConsent, verifyVitrineConsent } from './fixtures.js'", "import { largeFeed } from './large.js'"],
+    'large.js': [],
     'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { fixtures } from './fixtures.js'", "import { createVitrineRequest, vitrineFeiraState } from './request.js'"]
   }
   for (const file of Object.keys(expectedImports)) {
@@ -572,6 +574,7 @@ function samples (f) {
     'seen.sign': { nonce, action: 'read' },
     'seen.merge': { blob: null, avisos: { own: [] }, unchanged: false },
     'report.sign': { nonce, target: member, reason: 'outro' },
+    'appeal.sign': { nonce, text: 'Foi um engano.' },
     'dm.reportSign': { nonce, target: member, reason: 'outro', quote: 'Uma mensagem de exemplo.' },
     'terms.sign': { nonce, version: 1 },
     'recovery.sign': { action: 'list', nonce },
@@ -929,7 +932,7 @@ test('page signing covers every documented result variant with fake signatures',
   const cancelled = await answer(t, request, 'page.sign', { action: 'offer', nonce, page, op: { ...base, to: null, exp: null } })
   t.is(cancelled.record.to, null)
   t.is(cancelled.record.exp, null)
-  for (const method of ['account.sign', 'age.sign', 'invite.sign', 'push.sign', 'report.sign', 'dm.reportSign', 'terms.sign', 'recovery.sign']) {
+  for (const method of ['account.sign', 'age.sign', 'invite.sign', 'push.sign', 'report.sign', 'appeal.sign', 'dm.reportSign', 'terms.sign', 'recovery.sign']) {
     t.is((await answer(t, request, method, samples(f)[method])).signature, signature)
   }
 })

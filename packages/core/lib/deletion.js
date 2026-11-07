@@ -32,7 +32,7 @@ function toSet (v) {
 // Valid tombstones, highest block first, one per block, and the seqs of the
 // valid page-* records, in one pass: validating each record once keeps the
 // fold as cheap as it was before the page rule.
-function scan (entries) {
+function scan (entries, copyOf = validRecordCopy) {
   const out = []
   const pages = new Set()
   if (!Array.isArray(entries)) return { tombstones: out, pages }
@@ -43,7 +43,7 @@ function scan (entries) {
       if (entry === null || typeof entry !== 'object') continue
       const seq = entry.seq
       if (!Number.isSafeInteger(seq)) continue
-      const copy = validRecordCopy(entry.record, seq)
+      const copy = copyOf(entry.record, seq)
       if (copy === null) continue
       if (isPageType(copy.type)) pages.add(seq)
       else if (copy.type === 'delete' && !seen.has(seq)) {
@@ -79,6 +79,21 @@ function deletedSeqs (entries) {
 function applyDeletes (entries) {
   if (!Array.isArray(entries)) return []
   return withDeleted(entries, fold(entries).deleted)
+}
+
+// deletedSeqs and applyDeletes over entries whose records are already
+// validRecordCopy output for that same entry's seq (or null), as lib/feed.js
+// makes once per call. Never pass a caller's records: a tombstone's validity
+// depends on its seq, and these skip both the copy and the check.
+const asCopy = (record) => record
+
+function deletedSeqsOfCopies (copies) {
+  return foldScanned(scan(copies, asCopy)).deleted
+}
+
+function applyDeletesOfCopies (copies) {
+  if (!Array.isArray(copies)) return []
+  return withDeleted(copies, foldScanned(scan(copies, asCopy)).deleted)
 }
 
 function withDeleted (entries, deleted) {
@@ -841,6 +856,8 @@ async function clearRanges (core, ranges) {
 module.exports = {
   deletedSeqs,
   applyDeletes,
+  deletedSeqsOfCopies,
+  applyDeletesOfCopies,
   deletedRanges,
   liveMediaRefs,
   shownMedia,

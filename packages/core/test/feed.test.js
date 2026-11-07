@@ -844,3 +844,213 @@ test('feira records yield no feed items', (t) => {
   entries.push({ seq: 5, record: post('oi', at) })
   t.alike(buildFeed({ logs: [{ key: KA, entries }], now: NOW }).items.map((i) => i.text), ['oi'])
 })
+
+// The buildFeed of main before entries were validated once per call, kept
+// as the oracle: the single-pass version must return the same bytes.
+function oracleFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null }) {
+  const { copyLinkCard } = require('../lib/link-card')
+  const { validRecordCopy, latestProfile, formatRef, parseRef } = require('../lib/records')
+  const { latestUsername } = require('../lib/username')
+  const { engagementState } = require('../lib/engagement')
+  const { applyDeletes, deletedSeqs } = require('../lib/deletion')
+  const { pageLifecycle, cutEntries } = require('../lib/page-lifecycle')
+  const cmp = (a, b) => a < b ? -1 : a > b ? 1 : 0
+  const movedCut = (raw, key) => {
+    if (!raw.some((e) => e.record !== null && (e.record.type === 'page-moved' || e.record.type === 'page-close'))) return raw
+    const lifecycle = pageLifecycle(raw, key, association, { revokedIssuers })
+    if (lifecycle.movedTo === null && lifecycle.closed === null) return raw
+    return cutEntries(raw, lifecycle)
+  }
+  const heldFold = (raw, held, key) => {
+    const cut = movedCut(held, key)
+    if (cut === held) return applyDeletes(raw)
+    const shown = new Set(raw.map((e) => e.seq))
+    return applyDeletes(cut).filter((e) => shown.has(e.seq))
+  }
+  const heldCopies = (held) => {
+    if (!Array.isArray(held)) return null
+    const out = []
+    for (const e of held) {
+      if (e === null || typeof e !== 'object' || !Number.isSafeInteger(e.seq)) continue
+      out.push({ seq: e.seq, record: validRecordCopy(e.record, e.seq) })
+    }
+    return out
+  }
+  let cursor = null
+  if (before !== null) cursor = { t: Date.parse(before.at), author: before.author, seq: before.seq }
+  const items = []
+  const future = []
+  const deletedRefs = new Set()
+  const prepared = []
+  for (const { key, entries, raw: rawBlocks } of logs) {
+    const raw = entries.map(({ seq, record }) => ({ seq, record: validRecordCopy(record, seq) }))
+    const held = heldCopies(rawBlocks)
+    const copied = held === null ? applyDeletes(movedCut(raw, key)) : heldFold(raw, held, key)
+    for (const seq of deletedSeqs(copied)) deletedRefs.add(formatRef({ author: key, seq }))
+    prepared.push({ key, copied })
+  }
+  const logOf = new Map()
+  for (const log of prepared) {
+    const { key, copied } = log
+    const name = (latestProfile(copied) || {}).name || null
+    const from = items.length
+    for (const { seq, record: post } of copied) {
+      if (post === null || post.type !== 'post') continue
+      if (Date.parse(post.at) - now > MAX_FUTURE_MS) {
+        future.push({ author: key, seq })
+        continue
+      }
+      const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
+      const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
+      items.push({ kind: 'post', author: key, name, username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null })
+    }
+    for (const [ref, { seq, at }] of engagementState(copied).reposted) {
+      if (Date.parse(at) - now > MAX_FUTURE_MS) {
+        future.push({ author: key, seq })
+        continue
+      }
+      if (deletedRefs.has(ref)) continue
+      items.push({ kind: 'repost', author: key, name, username: null, seq, at, to: parseRef(ref), text: null, replyTo: null, quote: null, media: null, preview: null })
+    }
+    for (let i = from; i < items.length; i++) logOf.set(items[i], log)
+  }
+  items.sort((a, b) => (Date.parse(a.at) - Date.parse(b.at)) || cmp(a.author, b.author) || a.seq - b.seq)
+  future.sort((a, b) => cmp(a.author, b.author) || a.seq - b.seq)
+  const kept = cursor === null
+    ? items
+    : items.filter((it) => ((Date.parse(it.at) - cursor.t) || cmp(it.author, cursor.author) || it.seq - cursor.seq) < 0)
+  const page = limit === Infinity ? kept : kept.slice(Math.max(0, kept.length - limit))
+  for (const item of page) {
+    const log = logOf.get(item)
+    if (log.username === undefined) log.username = latestUsername(log.copied, log.key, association, { revokedIssuers })
+    item.username = log.username
+  }
+  return { items: page, future: future.map(formatRef) }
+}
+
+// A log that exercises every walker: posts, replies, quotes, reposts, likes,
+// tombstones (one past its own seq, one object at two seqs), a cert past
+// seq 0, future and negative-year dates, malformed blocks, usernames, a
+// getter, and a page log held as raw blocks with a verified move.
+function mixedLogs () {
+  const hex = (kp) => b4a.toString(kp.publicKey, 'hex')
+  const associationKey = crypto.keyPair()
+  const issuerKey = crypto.keyPair()
+  const association = hex(associationKey)
+  const issuerCert = createIssuerCert({ issuer: hex(issuerKey), date: AT }, associationKey)
+  const username = (name, member) => createUsernameRecord({ member, username: name, date: AT }, issuerKey, issuerCert)
+  const twice = tombstone(11)
+  const shifty = { type: 'post', get text () { return 'shifty' }, at: T2, replyTo: null }
+  const a = [
+    { seq: 0, record: { type: 'member-cert', cert: createCert({ member: KA, date: AT }, associationKey) } },
+    { seq: 1, record: profile('Ana') },
+    { seq: 2, record: post('apagado', T1) },
+    { seq: 3, record: post('resposta', T1, { author: KB, seq: 1 }) },
+    { seq: 4, record: { type: 'post', text: 'cita', at: T2, replyTo: null, quote: { author: KB, seq: 2 } } },
+    { seq: 5, record: repost(KB, 1, true, T2) },
+    { seq: 6, record: like(KB, 2, true, T2) },
+    { seq: 7, record: username('ana', KA) },
+    { seq: 8, record: tombstone(2) },
+    { seq: 9, record: tombstone(12) },
+    { seq: 10, record: twice },
+    { seq: 11, record: post('depois apagado', T3) },
+    { seq: 12, record: cert(KA) },
+    { seq: 13, record: twice },
+    { seq: 14, record: post('futuro', iso(NOW + 25 * HOUR)) },
+    { seq: 15, record: post('antigo', '-000002-01-01T00:00:00.000Z') },
+    { seq: 16, record: { type: 'post' } },
+    { seq: 17, record: null },
+    { seq: 18, record: 'lixo' },
+    { seq: 19, record: { type: 'nope' } },
+    { seq: 20, record: repost(KA, 2, true, T3) },
+    { seq: 21, record: repost(KB, 3, true, iso(NOW + 25 * HOUR)) },
+    { seq: 22, record: shifty },
+    { seq: 23, record: profile('Ana Maria') },
+    { seq: 24, record: tombstone(23) },
+    { seq: 25, record: username('outra', KB) },
+    { seq: 26, record: post('mesmo instante', T2) }
+  ]
+  const b = [
+    { seq: 0, record: cert(KB) },
+    { seq: 1, record: post('b1', T1) },
+    { seq: 2, record: post('b2', T2) },
+    { seq: 3, record: post('b3', T2) },
+    { seq: 4, record: tombstone(3) },
+    { seq: 5, record: like(KA, 4, true, T3) },
+    { seq: 6, record: repost(KA, 11, true, T3) },
+    { seq: 7, record: repost(KA, 4, true, T1) },
+    { seq: 8, record: repost(KA, 4, false, T2) }
+  ]
+  const ownerKp = crypto.keyPair()
+  const P = hex(crypto.keyPair())
+  const fields = { type: 'page-moved', page: P, to: 'd'.repeat(64), gen: 2, at: AT, nonce: 'm'.repeat(43), actor: hex(ownerKp), association }
+  const moved = issuerCountersign({ ...fields, signature: signMoved(fields, ownerKp) }, issuerKey, issuerCert)
+  const pageRaw = [
+    { seq: 0, record: cert(P) },
+    { seq: 1, record: post('antes', T1) },
+    { seq: 2, record: repost(KB, 1, true, T1) },
+    { seq: 3, record: moved },
+    { seq: 4, record: post('depois', T2) },
+    { seq: 5, record: tombstone(1) }
+  ]
+  const { applyDeletes } = require('../lib/deletion')
+  const logs = [
+    { key: KA, entries: a },
+    { key: KB, entries: applyDeletes(b), raw: b },
+    { key: P, entries: applyDeletes(pageRaw), raw: pageRaw }
+  ]
+  return { logs, association, issuer: issuerCert.issuer }
+}
+
+test('buildFeed returns the same bytes as the per-walker oracle', (t) => {
+  const { logs, association, issuer } = mixedLogs()
+  const same = (opts, what) => {
+    const got = buildFeed({ logs, association, now: NOW, ...opts })
+    const want = oracleFeed({ logs, association, now: NOW, ...opts })
+    t.is(JSON.stringify(got), JSON.stringify(want), what)
+    t.alike(got, want, what)
+    return got
+  }
+  const all = same({}, 'whole feed')
+  t.ok(all.items.length > 8, 'the mixed log yields items')
+  t.ok(all.future.length > 0, 'and future refs')
+  t.ok(all.items.some((i) => i.username === 'ana'), 'a verified username')
+  t.ok(all.items.some((i) => i.text === 'shifty'), 'the getter post')
+  same({ limit: 3 }, 'limit 3')
+  same({ revokedIssuers: new Set([issuer]) }, 'revoked issuer')
+  same({ association: 'f'.repeat(64) }, 'another association')
+  for (const item of all.items) same({ before: { at: item.at, author: item.author, seq: item.seq }, limit: 4 }, 'before ' + item.author.slice(0, 4) + '#' + item.seq)
+  for (const item of all.items) t.alike(Object.keys(item), ['kind', 'author', 'name', 'username', 'seq', 'at', item.kind === 'post' ? 'text' : 'to', ...(item.kind === 'post' ? ['replyTo', 'quote', 'media', 'preview'] : ['text', 'replyTo', 'quote', 'media', 'preview'])], 'no extra fields')
+})
+
+test('buildFeed copies each entry once, raw blocks that share its record included', (t) => {
+  const quote = { type: 'post', text: 'cita', at: T2, replyTo: null, quote: { author: KB, seq: 1 } }
+  const raw = [
+    { seq: 0, record: cert(KA) },
+    { seq: 1, record: profile('Ana') },
+    { seq: 2, record: post('oi', T1) },
+    { seq: 3, record: quote },
+    { seq: 4, record: repost(KB, 1, true, T2) },
+    { seq: 5, record: like(KB, 1, true, T2) },
+    { seq: 6, record: tombstone(2) },
+    { seq: 7, record: post('fica', T3) }
+  ]
+  const { applyDeletes } = require('../lib/deletion')
+  const entries = applyDeletes(raw)
+  const objects = (list) => list.filter((e) => e.record !== null && typeof e.record === 'object').length
+  const run = (logs) => {
+    const original = globalThis.structuredClone
+    let clones = 0
+    globalThis.structuredClone = (v) => { clones++; return original(v) }
+    try {
+      buildFeed({ logs, now: NOW })
+    } finally {
+      globalThis.structuredClone = original
+    }
+    return clones
+  }
+  t.is(run([{ key: KA, entries: raw }]), objects(raw), 'one clone per entry')
+  t.is(run([{ key: KA, entries, raw }]), objects(raw), 'raw blocks reuse the entry copy')
+  const other = raw.map((e) => ({ seq: e.seq, record: e.record === null ? null : { ...e.record } }))
+  t.is(run([{ key: KA, entries, raw: other }]), objects(entries) + objects(other), 'distinct raw objects are copied themselves')
+})

@@ -261,7 +261,7 @@ const signer = (node) => {
 
 function checkMedia (action, op) {
   if (!['post', 'reply', 'quote', 'listing', 'listing-edit'].includes(action) || !isObject(op) || op.media === undefined) return true
-  // listing.edit takes media null to drop every photo (docs/rpc.md 5.103).
+  // listing.edit takes media null to drop every photo (docs/rpc.md 5.104).
   if (action === 'listing-edit' && op.media === null) return true
   return Array.isArray(op.media) && op.media.length >= 1 && op.media.length <= MAX_MEDIA_PER_POST
 }

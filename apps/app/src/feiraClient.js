@@ -21,7 +21,7 @@ import { listingView } from './feira.js'
 
 const { feira } = rpc
 
-// docs/rpc.md 5.27 PEEK_SEQS_MAX and 5.106 refs.
+// docs/rpc.md 5.27 PEEK_SEQS_MAX and 5.107 refs.
 export const PEEK_SEQS_MAX = 32
 export const RATINGS_REFS_MAX = 32
 

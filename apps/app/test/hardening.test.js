@@ -167,6 +167,18 @@ test('a release build cannot turn on the Vitrine', async (t) => {
   }
 })
 
+// The perf marks (src/perfMarks.js) also expose a dev-only request hook, so
+// they follow the Vitrine's rule: __DEV__ false wins, and no build config
+// sets the opt-in.
+test('a release build cannot turn on the perf marks or their request hook', async (t) => {
+  const { perfEnabled } = await import('../src/perfMarks.js')
+  t.is(perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: '1' }, false), false)
+  for (const file of ['app.json', 'eas.json', 'metro.config.js', 'index.js', 'App.js']) {
+    t.absent(read(file).includes('EXPO_PUBLIC_VARANDA_PERF'), file)
+  }
+  t.ok(read('src/node.js').includes("perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: process.env.EXPO_PUBLIC_VARANDA_PERF }, typeof __DEV__ !== 'undefined' && __DEV__)"), 'node.js passes __DEV__')
+})
+
 test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
   t.timeout(120000)
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-prebuild-'))

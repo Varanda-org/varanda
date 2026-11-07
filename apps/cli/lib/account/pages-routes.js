@@ -18,12 +18,12 @@
 //     directory link, the
 //     current terms and the blocklist; then the ACL of ./pages-store.js.
 //   - listing, listing-edit and listing-status append Feira records by the
-//     node writers' rules (docs/rpc.md 5.99 to 5.103): at most 30 live
+//     node writers' rules (docs/rpc.md 5.100 to 5.104): at most 30 live
 //     listings, an edit only with the live edit's seq as expectedRevision
 //     ('conflito' otherwise) and written with the tombstone of the edit it
 //     replaces, no reservado on a procura. listing-consent appends nothing:
 //     the page key signs the deal of an offer that a member sent the page
-//     in Conversas (docs/rpc.md 5.105), and the admin's app puts that
+//     in Conversas (docs/rpc.md 5.106), and the admin's app puts that
 //     signature in the aceite URL of its text answer (dm-send stays text).
 //   - media and avatar take the raw image as the body and the statement in
 //     x-varanda-page-* headers.
@@ -121,7 +121,7 @@ const DM_STATES = ['accepted', 'declined', 'blocked', 'unblocked', 'deleted']
 // Communities and groups as the page (./pages-groups.js).
 const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read']
 const GROUP_READ_LIMIT = 32
-// Feira listings as the page (docs/rpc.md 5.99 to 5.105).
+// Feira listings as the page (docs/rpc.md 5.100 to 5.106).
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status']
 // listing-consent: the newest pages of the offerer's thread it reads.
 const CONSENT_PAGES = 20
@@ -1129,7 +1129,7 @@ function createPagesRoutes ({
 
   // Whether the page's thread with `rater` holds an inbound message `offer`
   // whose card URL or text is an offer naming exactly listing page:seq, with
-  // no answer in it (the browser node's rule, docs/rpc.md 5.105).
+  // no answer in it (the browser node's rule, docs/rpc.md 5.106).
   async function inboundOffer (page, rater, offer, seq) {
     let before = null
     for (let i = 0; i < CONSENT_PAGES; i++) {

@@ -33,6 +33,21 @@ test('retryDelay: 2 s, 5 s, 15 s for retryable failures, then stop', async (t) =
   t.is(retryDelay(null, 0), null)
 })
 
+test('retryDelay: a busy answer honours retryAfterMs with jitter, then the ladder, still three retries', async (t) => {
+  const { retryDelay } = await load()
+  const busy = Object.assign(new Error('indisponível'), { retryable: true, retryAfterMs: 1000 })
+  t.is(retryDelay(busy, 0, undefined, () => 0), 1500, 'asked delay plus the smallest spread')
+  t.is(retryDelay(busy, 0, undefined, () => 0.99), 2490, 'asked delay plus the largest spread')
+  const quick = Object.assign(new Error('indisponível'), { retryable: true, retryAfterMs: 1 })
+  t.is(retryDelay(quick, 1, undefined, () => 0), 501, 'the spread is added, never compared')
+  const slow = Object.assign(new Error('indisponível'), { retryable: true, retryAfterMs: 3000 })
+  t.not(retryDelay(slow, 0, undefined, () => 0), retryDelay(slow, 0, undefined, () => 0.5), 'a long Retry-After keeps the spread')
+  t.is(retryDelay(busy, 2, undefined, () => 0), 15500, 'ladder for the last retry, plus the spread')
+  const late = Object.assign(new Error('indisponível'), { retryable: true, retryAfterMs: 30000 })
+  t.is(retryDelay(late, 2, undefined, () => 0), 30500, 'the last retry still honours a long Retry-After')
+  t.is(retryDelay(busy, 3, undefined, () => 0), null, 'stops after three')
+})
+
 test('mediaKey joins core, start, blocks and sha256', async (t) => {
   const { mediaKey } = await load()
   t.is(mediaKey({ core: 'a', start: 1, blocks: 2, sha256: 'b' }), 'a:1:2:b')

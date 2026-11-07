@@ -60,6 +60,13 @@ function loadNode () {
   return loading
 }
 
+// The script is large, so the page asks for it while /varanda.json is still
+// in flight (connect.web.js). A failure stays quiet: this never opens a
+// session, and the connect that needs the node is what reports the miss.
+export function preloadNode () {
+  loadNode().catch(() => {})
+}
+
 // The node's media facade in the native handle's shape
 // (./webnode.native.js), so screens see one API: upload, putDm and
 // read(ref) -> { bytes, mime, w, h } (the native handle answers a uri

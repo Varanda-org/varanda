@@ -4,11 +4,12 @@ const fs = require('node:fs')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
 const { verifyReport, verifyDmReport, verifyListingReport } = require('@varanda/core/lib/report')
+const { verifyAppeal } = require('@varanda/core/lib/appeal')
 const { verifyModeratorCert } = require('@varanda/core/lib/cert')
 const { canonicalBody, verifyModRequest } = require('@varanda/core/lib/mod-request')
 const { mediaBounds, audioBounds } = require('@varanda/rpc')
 const { safe } = require('@varanda/core/lib/safe')
-const { MAX_REPORTS, AI_ACTOR, OWNER_ACTOR, ANEXO_MAX_BYTES, ANEXO_MIMES } = require('./moderation-store')
+const { MAX_REPORTS, MAX_APPEALS, AI_ACTOR, OWNER_ACTOR, ANEXO_MAX_BYTES, ANEXO_MIMES } = require('./moderation-store')
 
 // The moderation desk of the account service (mounted by ./server.js before
 // any issuer-only route, so it works on an unconfigured service):
@@ -24,6 +25,10 @@ const { MAX_REPORTS, AI_ACTOR, OWNER_ACTOR, ANEXO_MAX_BYTES, ANEXO_MIMES } = req
 //     bodies are read at once. The image is stored as the reporter's word
 //     and served to the panel from local disk only; it never reaches the AI
 //     triage, a log or the seeder.
+//   - a blocked member's appeal (POST /account/appeal/start, POST
+//     /account/appeal): the same rules as a report (no cookie, the member's
+//     key proof over a single-use nonce, a linked Google account), about the
+//     signer's own key only; the store refuses it unless that key is blocked.
 //   - the moderators' panel: Google sign-in on the server (PKCE, the same
 //     google.js as the link flow, its own redirect URI), an in-memory
 //     session cookie `__Host-varanda-mod` for e-mails in
@@ -77,6 +82,7 @@ const CHALLENGE_TTL_MS = 120 * 1000
 // Nonce domains: a report nonce can never stand in for an operator
 // challenge, nor the reverse.
 const REPORT_NONCE_DOMAIN = 'varanda-report-nonce'
+const APPEAL_NONCE_DOMAIN = 'varanda-appeal-nonce'
 const CHALLENGE_DOMAIN = 'varanda-mod-challenge'
 // expiry (8 bytes) || random (16) || truncated HMAC-SHA256 (16) = 40 bytes,
 // 54 base64url characters: inside the NONCE_RE of report.js and
@@ -283,6 +289,7 @@ function createModRoutes ({
   // the nonces this process minted and by MAX_ANEXO_INFLIGHT reads at once.
   // nonce -> expiresAt.
   const spentReportNonces = new Map()
+  const spentAppealNonces = new Map()
   const spentChallenges = new Map()
   // Anexo bodies being read right now (see MAX_ANEXO_INFLIGHT).
   let anexoInflight = 0
@@ -597,6 +604,36 @@ function createModRoutes ({
     if (!duplicate) afterAnswer(() => triage.onReport(added))
   }
 
+  // --- member appeals ------------------------------------------------------
+
+  // Like reportStart: a linked member only, no quota and no stored row.
+  async function appealStart (req, res, body) {
+    needModeration()
+    const member = hex64(body.member)
+    if (accounts.contact(member) === null) throw refuse('nao-vinculado')
+    if (typeof accounts.deletedAt === 'function' && accounts.deletedAt(member) !== null) throw refuse('conta-excluida')
+    send(res, 200, { nonce: mintNonce(APPEAL_NONCE_DOMAIN, [member], REPORT_NONCE_TTL_MS) })
+  }
+
+  // The statement names no target: the appeal is about the signer's own key,
+  // and the store answers 'nao-bloqueado' unless that key is blocked, so only
+  // the key's owner (who proved it) learns whether it is.
+  async function appeal (req, res, body) {
+    needModeration()
+    const member = hex64(body.member)
+    const nonce = body.nonce
+    const expiresAt = checkNonce(nonce, APPEAL_NONCE_DOMAIN, [member])
+    if (expiresAt === null || spentAppealNonces.has(nonce)) throw new RouteError('expirado', 400)
+    const text = body.text === undefined ? '' : body.text
+    if (!verifyAppeal({ nonce, member, association, text }, body.signature).ok) throw refuse('assinatura-invalida')
+    // Spent only now that the signature verified, with no await in between
+    // (as report).
+    spend(spentAppealNonces, nonce, expiresAt)
+    const { appeal: added, duplicate } = await storeAsync(() => moderation.addAppeal({ member, text, signature: body.signature, nonce }))
+    log({ event: 'appeal', reason: duplicate ? 'duplicado' : 'novo' })
+    send(res, 200, { id: added.id, duplicate })
+  }
+
   // --- moderator sign-in ---------------------------------------------------
 
   async function login (req, res) {
@@ -817,10 +854,12 @@ function createModRoutes ({
     const own = ownMember(session)
     const { reports: rows } = store(() => moderation.list({ status: 'aberta', limit: MAX_REPORTS, exclude: own }))
     const { changes } = store(() => moderation.pending())
+    const { appeals: waiting } = store(() => moderation.listAppeals({ status: 'aberta', limit: MAX_APPEALS, exclude: own, excludeBy: session.email }))
     send(res, 200, {
       email: session.email,
       published: store(publishedInfo),
       open: rows.length,
+      appeals: waiting.length,
       pending: changes.filter((c) => c.member !== own).length,
       // Present only for the stats allow-list; never `stats: false`, so
       // everyone else gets the exact body they always got.
@@ -875,6 +914,63 @@ function createModRoutes ({
       // can reach, older rows may exist that it never shows.
       alemDoLimite: cut && visible.length <= start + REPORTS_PAGE
     })
+  }
+
+  // An appeal is judged by someone who did not decide the block, and never
+  // by the appellant (the same rule as ownCase for reports).
+  function appealHidden (a, session) {
+    return a.member === ownMember(session) || store(() => moderation.blockedBy(a.member)).includes(session.email)
+  }
+
+  function projectAppeal (a, cache) {
+    // A group block blocked the root key, not the diary: not the reason of
+    // this account's block.
+    const blocks = store(() => moderation.exportRows({ member: a.member })).filter((r) => r.status === 'bloquear' && r.blocked !== 'grupo')
+    return {
+      id: a.id,
+      at: a.at,
+      member: a.member,
+      username: usernameOf(a.member, cache),
+      text: a.text,
+      // The reports that blocked the diary, by id, reason and date only: the
+      // panel's Histórico shows the rest.
+      bloqueios: blocks.map((r) => ({ id: r.id, reason: r.reason, at: r.decidedAt })),
+      status: a.status,
+      decidedAt: a.decidedAt,
+      note: a.note
+    }
+  }
+
+  async function appeals (req, res, session, url) {
+    const estado = url.searchParams.get('estado') ?? 'aberta'
+    if (estado !== 'aberta' && estado !== 'decidida') throw refuse('pedido-invalido')
+    // `antes`, as in api/reports: only for the decided ones.
+    const antes = url.searchParams.get('antes')
+    if (antes !== null && (estado !== 'decidida' || !ID_RE.test(antes))) throw refuse('pedido-invalido')
+    const { appeals: visible, truncated: cut } = store(() => moderation.listAppeals({ status: estado, limit: MAX_APPEALS, exclude: ownMember(session), excludeBy: session.email }))
+    let start = 0
+    if (antes !== null) {
+      const at = visible.findIndex((a) => a.id === antes)
+      if (at === -1) throw refuse('pedido-invalido')
+      start = at + 1
+    }
+    const cache = new Map()
+    send(res, 200, {
+      appeals: visible.slice(start, start + REPORTS_PAGE).map((a) => projectAppeal(a, cache)),
+      truncated: visible.length > start + REPORTS_PAGE,
+      alemDoLimite: cut && visible.length <= start + REPORTS_PAGE
+    })
+  }
+
+  async function decideAppeal (req, res, session, id, body) {
+    const row = store(() => moderation.getAppeal(id))
+    if (row === null || appealHidden(row, session)) throw refuse('nao-encontrado')
+    const note = body.note === undefined ? '' : body.note
+    const result = await storeAsync(() => moderation.decideAppeal(id, { decision: body.decision, by: session.email, note }))
+    log({ event: 'appeal-decided', reason: result.appeal.status })
+    const cache = new Map()
+    send(res, 200, { appeal: projectAppeal(result.appeal, cache), change: projectChange(result.change, cache) })
+    if (result.appeal.status === 'aceito') afterAnswer(() => triage.onUnblock(result.appeal.member))
   }
 
   async function decide (req, res, session, id, body) {
@@ -1109,6 +1205,7 @@ function createModRoutes ({
 
   function owns (pathname) {
     return pathname === '/account/report' || pathname.startsWith('/account/report/') ||
+      pathname === '/account/appeal' || pathname.startsWith('/account/appeal/') ||
       pathname === '/account/mod' || pathname.startsWith('/account/mod/')
   }
 
@@ -1186,6 +1283,8 @@ function createModRoutes ({
 
     if (post && p === '/account/report/start') return reportStart(req, res, await postBody(req, undefined))
     if (post && p === '/account/report') return report(req, res, await postBody(req, REPORT_BODY_MAX))
+    if (post && p === '/account/appeal/start') return appealStart(req, res, await postBody(req, undefined))
+    if (post && p === '/account/appeal') return appeal(req, res, await postBody(req, REPORT_BODY_MAX))
     if (post && p === '/account/report/anexo') {
       needModeration()
       checkPost(req)
@@ -1225,6 +1324,7 @@ function createModRoutes ({
     // is disabled: deploy/seeder/deploy.sh probes exactly that.
     if (get && p === '/account/mod/api/me') return withSession(req, (s) => me(req, res, s))
     if (get && p === '/account/mod/api/reports') return withSession(req, (s) => reports(req, res, s, url))
+    if (get && p === '/account/mod/api/appeals') return withSession(req, (s) => appeals(req, res, s, url))
     if (get && p === '/account/mod/api/blocked') return withSession(req, (s) => blocked(req, res, s))
     if (get && p === '/account/mod/api/stats') return withSession(req, (s) => usageStats(req, res, s))
     if (post && p === '/account/mod/api/unblock') {
@@ -1236,6 +1336,12 @@ function createModRoutes ({
       const id = decideMatch[1]
       const body = await postBody(req, undefined)
       return withSession(req, (s) => decide(req, res, s, id, body))
+    }
+    const appealMatch = /^\/account\/mod\/api\/appeals\/([^/]+)\/decide$/.exec(p)
+    if (post && appealMatch && ID_RE.test(appealMatch[1])) {
+      const id = appealMatch[1]
+      const body = await postBody(req, undefined)
+      return withSession(req, (s) => decideAppeal(req, res, s, id, body))
     }
     const groupMatch = /^\/account\/mod\/api\/reports\/([^/]+)\/grupo$/.exec(p)
     if (get && groupMatch && ID_RE.test(groupMatch[1])) {
@@ -1269,7 +1375,7 @@ function createModRoutes ({
   // Sizes only (server.js modStats): tests check that anonymous or invalid
   // requests never grow a table.
   function stats () {
-    return { spentReportNonces: spentReportNonces.size, spentChallenges: spentChallenges.size, spentLogins: spentLogins.size, sessions: sessions.size }
+    return { spentReportNonces: spentReportNonces.size, spentAppealNonces: spentAppealNonces.size, spentChallenges: spentChallenges.size, spentLogins: spentLogins.size, sessions: sessions.size }
   }
 
   return { owns, handle, stats }
