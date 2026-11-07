@@ -160,6 +160,10 @@ function mainWeb (args) {
   // WebCrypto (subtle.digest) for web-member's session and member-ops,
   // before any of them loads.
   require('bare-crypto/global')
+  // Bare has no TextEncoder/TextDecoder. web-member's sodium-browser loads
+  // @noble/curves, whose ed25519 module calls TextEncoder while it loads:
+  // without these the web session never starts and the app stays on Conectar.
+  require('bare-encoding/global')
   const { createWebNode } = require('./web-node')
   try {
     session = createWebNode(args, {

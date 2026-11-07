@@ -241,6 +241,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Corrigido
 
+- App instalado (iOS e Android) preso em "conectando..." na tela Conectar, mesmo com o endereço da instalação embutido: desde a mídia nas conversas, o nó web do worklet carrega o `@noble/curves`, que usa `TextEncoder` ao carregar, e o Bare não tem esse global. O worklet instala `TextEncoder` e `TextDecoder` do `bare-encoding` (1.0.3) antes de carregar o nó web.
 - Mensagens de voz gravadas no Chrome (computador e Android) com mais de cerca de 1 s voltam a ser enviadas: o gravador do Chrome escreve no cabeçalho `mdhd` a duração em milissegundos numa escala de 48000, e a conferência recusava o arquivo com "Não foi possível usar esta foto". Quem envia agora reescreve as durações dos cabeçalhos a partir das amostras antes de guardar a nota, e quem recebe continua exigindo que concordem. Uma nota de voz recusada mostra "Não foi possível enviar este áudio.".
 - Passkeys: a criação pendente e as passkeys recusadas ficam guardadas no aparelho, então recarregar a página não deixa o cartão preso; "concluir" passa a sair do nó, a saída de uma passkey conhecida perdida não apaga o diário deste aparelho, e no Android a falta de passkey neste aparelho mostra o caso NONE em vez de parecer um cancelamento (detalhes em `docs/verification.md` §109).
 - Na web hospedada, o aparelho que enviou uma mensagem direta não mostra mais o aviso dela por 2 minutos, e nenhum aparelho mostra o aviso enquanto a Varanda está aberta e em foco (detalhes em `docs/verification.md` §112).
