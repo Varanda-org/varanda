@@ -5825,6 +5825,166 @@ Limites:
 - A leitura é um pedido só, não uma reserva.
 - Uma configuração digitada à mão na página hospedada não recebe o aviso antecipado.
 
+## 125. Recurso de quem foi bloqueado (PR feat/moderation-appeal, 2026-10-30)
+
+### O que mudou
+
+- `packages/core/lib/appeal.js`: declaração `varanda-appeal-v1` (nonce, membro, associação e `digest(texto)`), assinada pela chave do diário. Sem alvo: o recurso é sempre sobre a própria chave. Método RPC `appeal.sign` (`docs/rpc.md` 5.99) só no nó do navegador; o nó core, o `varanda-serve` e a CLI respondem `USAGE` `'assinatura disponível só no navegador'`.
+- Serviço de conta (`apps/cli/lib/account/mod-routes.js`): `POST /account/appeal/start` (só membro com conta Google vinculada; nonce sem estado, domínio `varanda-appeal-nonce`, 600 s) e `POST /account/appeal` (confere o nonce, a assinatura e grava; o nonce só é gasto depois de a assinatura valer). Respostas `{ id, duplicate }`; `nao-bloqueado` (403) se a chave não está na lista publicada nem tem bloqueio pendente; `limite-recursos` (429) para um novo recurso em 30 dias depois de um recurso negado; `limite` (503) com 2000 abertos ou 20000 guardados.
+- `moderation.json` passa a `v: 3` com `appeals` (linha: `id`, `at`, `member`, `text`, `nonce`, `signature`, `status` `aberta`/`aceito`/`negado`/`encerrado`, `decidedBy`, `decidedAt`, `note`). Um `v: 1` ou `v: 2` é lido sem recursos e regravado como `v: 3`. Linha malformada deixa o armazém `indisponivel`, como as denúncias. Eventos novos: `recurso-aceito`, `recurso-negado` e `recurso-encerrado` (a chave deixou de estar bloqueada com o recurso aberto: desbloqueio, bloqueio cancelado ou lista publicada sem ela), com `appealId`; nunca o texto, a assinatura, o nonce nem a nota.
+- Painel: `GET api/appeals?estado=aberta|decidida` (a decidida aceita `antes=<id>`, como `api/reports`, e a aba tem "mostrar mais") e `POST api/appeals/<id>/decide { decision: 'aceitar'|'negar', note }`. O recurso fica fora da lista e responde `nao-encontrado` para a própria pessoa recorrente e para quem decidiu (por e-mail) uma denúncia `bloquear` daquela chave; a IA não conta como pessoa. `api/me` ganha `appeals` (abertos que a pessoa pode julgar). Aceitar acrescenta uma mudança `unblock` como o botão Desbloquear (se havia um bloqueio pendente ainda não enviado, as duas se anulam), e conta como reversão humana para a triagem por IA; negar não mexe em Pendentes.
+- App: Ajustes › Recorrer de um bloqueio (`apps/app/src/screens/Recurso.js`, `apps/app/src/appeal.js`).
+- Termos de Uso e Política de Privacidade versão 22, com novo aceite (`LEGAL_VERSION` e `TERMS_VERSION` 22): os Termos descrevem o recurso e a Política diz o que o serviço de conta guarda dele (chave pública, texto opcional, assinatura, data, estado, decisão e nota de quem julgou), quem o lê e que não é apagado automaticamente (issue #38).
+
+### Testes automatizados
+
+- `packages/core/test/appeal.test.js`: bytes do payload, todos os campos ligados pela assinatura, separação de domínio de denúncia e termos, limites do texto.
+- `packages/rpc/test/methods.test.js`, `packages/core/test/session.test.js`, `packages/web-member/test/session.test.js`: validação do método, recusa no nó core e assinatura no navegador (bloqueado, sem identidade, sem chave).
+- `apps/cli/test/moderation-store.test.js`: só chave bloqueada recorre, repetição devolve a mesma linha, janela de 30 dias só depois de recurso negado, recurso encerrado quando a chave é desbloqueada, teto de 2000, aceitar e negar, listagem com exclusões, trilha sem dado privado, leitura de `v: 2` e de linha malformada.
+- `apps/cli/test/account-mod.test.js`: rotas do membro (não vinculado, não bloqueado, nonce de denúncia recusado, assinatura de outra chave, texto adulterado, Origin, repetição), painel (quem decidiu o bloqueio e a própria pessoa não veem nem decidem, aceitar vira desbloqueio pendente, negar mantém o bloqueio, limite de 30 dias).
+- `apps/cli/test/panel.test.js`: aba Recursos (texto de par como texto, confirmação, corpo enviado, painel que ainda carrega contra serviço antigo, 401 vai ao login). `apps/app/test/appeal.test.js`: limites, erros fixos e pedidos. `apps/app/test/legal.test.js`: o recurso nos Termos e na Política, versão 25 e o digest do texto.
+
+### Verificação humana
+
+Marcar só o que for de fato executado, com a saída.
+
+Execução de 2026-11-01 (itens 1, 2, 3, 5 e 6), num ambiente local montado só para isso, fora do repositório: a web exportada (`expo export`) servida em `https://varanda.localhost:8800` com certificado autoassinado, junto do `/varanda.json`, do WebSocket do semeador e do serviço de conta com o painel, atrás de um proxy que reescreve o `Host` como o Caddy. Chrome sem interface com passkey virtual (PRF), semeador, serviço de conta, painel e `mod apply` reais, DHT local presa a `127.0.0.1`. O Google é falso: um servidor local com tela de escolha de conta, injetado pelos `endpoints` do `createGoogle`. O OAuth real do Google não foi exercitado. Dois moderadores com e-mails diferentes (`moda` decidiu o bloqueio, `modb` julgou); o `mod apply` rodou no processo com a revisão no terminal respondida `s`.
+
+- [x] O aceite dos Termos e da Política versão 9 aparece de novo para quem aceitou a versão 8. Executado em 2026-11-01: depois de aceitar a versão 9, o registro local `varanda-terms` foi regravado com `version: 8` (mesmo formato que a versão 8 gravava) e a página recarregada. A tela mostrou "Os Termos de Uso e a Política de Privacidade mudaram. Leia e aceite a versão 9 para continuar." com "Li e aceito". O registro de uma versão 8 de verdade não foi usado.
+- [x] Conta bloqueada pela web hospedada: Ajustes › Recorrer de um bloqueio envia e mostra "recurso enviado"; enviar de novo mostra "você já tinha um recurso aberto". Executado em 2026-11-01 com a conta bloqueada pelo painel e publicada pelo `mod apply` (seq 2).
+- [x] Conta não bloqueada: "esta conta não está bloqueada". Executado em 2026-11-01.
+- [ ] App Android com a instalação: o mesmo fluxo, com a conta Google vinculada pelo app (não realizada ainda). Tentada em 2026-11-01 e não concluída: o emulador `LembraApi36` (API 36, `google_apis`) tem 0 contas Google, então o Credential Manager não tem provedor de passkey para criar a identidade com PRF; a passkey de um domínio só vale no Android com o `assetlinks.json` conferido pelo Google, o que um domínio local com certificado autoassinado não passa; e o app nativo só aceita uma instalação em https com certificado confiável. Também não há APK de debug compilado.
+- [x] Segundo moderador no painel real: o recurso aparece em Recursos; o moderador que bloqueou não o vê; Aceitar cria o desbloqueio em Pendentes, `mod apply` pede confirmação e o desbloqueio sai da lista. Executado em 2026-11-01: `moda` viu "Nenhum recurso aberto."; `modb` viu o recurso, aceitou (confirmação do painel) e o desbloqueio apareceu em Pendentes; o `mod apply` fez uma pergunta ("Assinar e publicar estas mudanças? [s/N]"), publicou `seq 3` e a chave saiu da lista do semeador, com a outra chave bloqueada mantida.
+- [x] Negar mantém o bloqueio e a pessoa vê "você já recorreu nos últimos 30 dias" ao tentar de novo. Executado em 2026-11-01: `modb` negou (confirmação do painel), a nova tentativa mostrou a mensagem e a chave continuou na lista do semeador.
+
+### Limites
+
+- Sem recurso pela CLI nem pelo nó nativo sem instalação (Hypercore 11, cuja chave não assina, `docs/protocol.md`): a CLI de membro também não tem cliente do serviço de conta (issue #142). O app com a instalação (tipo `web`) roda o nó do site e usa a mesma tela e as mesmas rotas, com o cabeçalho `x-varanda-client: app`; só os testes de pedido cobrem isso, a tela não foi exercitada em aparelho.
+- `account reports` não exporta recursos; um pedido legal de acesso a esses dados ainda é manual (`moderation.json`).
+- A independência de quem julga compara o e-mail de quem decidiu a denúncia. Um bloqueio feito fora do painel (`mod block`) ou pela IA não tem esse e-mail, e um segundo diário ligado a outra conta Google não é detectável (seção 14). Com um só moderador, o recurso de um bloqueio dele fica sem quem decida.
+- O recurso vale para a chave do diário; bloqueio de chave de grupo (raiz) não tem recurso.
+- O recurso também vale para um bloqueio ainda pendente (não publicado): a pessoa fica sabendo de uma decisão antes de o operador assinar a lista. É intencional: só quem prova a chave do diário envia, e o recurso aceito cancela o bloqueio pendente sem esperar o `mod apply`.
+- A janela de 30 dias conta da negação, não do bloqueio: negado o recurso, uma chave desbloqueada por outro caminho e bloqueada de novo dentro de 30 dias só recorre depois dela.
+- Não há aviso à pessoa quando o recurso é decidido: ela só vê o resultado pela própria conta (desbloqueada ou não) ou ao tentar de novo.
+- Retenção das linhas de recurso é a mesma pendência das denúncias (issue #38).
+
+## 126. Cartão de convite assinado (PR feat/invite-card-sign)
+
+Um membro assina, com a chave do diário, o cartão que acompanha um convite de cadastro: desenho regional, nome, mensagem e validade. O cartão viaja só no fragmento do link e é conferido por quem abre. Esta etapa traz só o contrato, a assinatura e a conferência; ainda não há tela.
+
+Regras que os passos conferem:
+
+- O link tem a forma `origem/convite/<código>?c=<índice do desenho>#c1.<corpo>`. O `?c` é público e só serve à prévia do mensageiro: é opcional ao ler e, quando presente, tem de ser igual ao índice assinado. O fragmento nunca vai a um servidor.
+- A assinatura cobre oito linhas (`varanda-invite-card-v1`, código, desenho, validade, resumo do nome, resumo da mensagem, membro, associação). Nome e mensagem entram por resumo BLAKE2b-256 calculado sempre pelo assinante, e o prefixo impede que a assinatura valha como outro pedido do protocolo.
+- `inviteCard.sign` só existe no navegador (o nó do Node responde `assinatura disponível só no navegador`), exige a identidade aberta e aceita validade de 1 dia atrás a 8 dias à frente.
+- `inviteCard.verify` roda nos dois nós, não precisa de identidade e funciona com a identidade bloqueada. No navegador a chave do membro passa antes por uma conferência estrita (ponto de ordem pequena ou fora da forma canônica é recusado como `malformed`). Um cartão com assinatura boa cuja validade passou há mais de um dia pelo relógio do nó volta `expired`.
+- O link leva no fragmento o nome de quem recebe e a mensagem: o app que abrir o link precisa tirar o cartão da barra de endereço na mesma passada em que o guarda (fica para o PR do app).
+- O link inteiro tem no máximo 400 caracteres.
+
+Passos (marcar só depois de executar e guardar o registro). Ainda não há tela para criar nem abrir o cartão, então cada plataforma só confirma que nada mudou:
+
+- [ ] Android (build de debug, emulador ou aparelho): o app abre e usa convites como antes; não há tela do cartão ainda.
+- [ ] Simulador iOS: o app abre e usa convites como antes; não há tela do cartão ainda.
+- [ ] Web e PWA: o cadastro por convite funciona como antes; não há tela do cartão ainda.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node packages/rpc/test/invite-card.test.js` e `node packages/rpc/test/methods.test.js`.
+- `node packages/core/test/invite-card.test.js`, `node packages/core/test/page-proof.test.js` e `node packages/core/test/session.test.js`.
+- `node packages/web-member/test/invite-card.test.js` e `node packages/web-member/test/session.test.js`.
+- `node apps/app/test/vitrine.test.js`.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- O serviço de conta não muda: não recebe nem guarda o cartão.
+- Links nativos (`varanda://`) continuam com no máximo 400 caracteres, como os de web.
+
+## 127. Cartão de convite regional (PR feat/invite-card-app)
+
+Quem convida pode mandar, junto do link de entrada, um cartão com o nome de quem recebe, uma mensagem curta e um de 13 desenhos regionais. Quem abre o link vê o cartão antes da introdução e, depois de entrar, pode seguir ou mandar um oi para quem escreveu. Esta seção descreve o que o código faz; o contrato e a assinatura estão na seção 126.
+
+Regras que os passos conferem:
+
+- O cartão viaja só no fragmento do link (`#c1.<corpo>`), mais o `?c=<desenho>` público e opcional. Nenhum servidor recebe o fragmento: o app o lê e o tira da barra de endereço na mesma passada em que guarda o código do convite (`captureSignupInvite`), antes de qualquer tela.
+- O cartão é assinado e preso ao código do convite: a assinatura cobre o código, e `inviteCard.verify` roda no nó antes de qualquer tela mostrar o cartão. Um fragmento forjado, trocado de código ou com assinatura ruim não vira cartão, e o convite segue valendo como link comum.
+- O link inteiro tem no máximo 400 caracteres. Por isso um app já instalado, que só conhece o caminho `/convite/<código>`, continua lendo o código e ignora o cartão.
+- Guarda: na web, o registro fica no `sessionStorage` da aba, na chave `varanda-signup-invite-card`, por 24 horas; no app instalado, só na memória do processo. É lido como não confiável a cada uso (reconstruído campo a campo e conferido de novo) e some quando o convite é trocado ou expira.
+- Prévia fora: um link `/convite/...` nunca vira prévia. `apps/app/src/preview.js` não monta cartão para ele e `apps/cli/lib/account/preview-routes.js` recusa o endereço em qualquer host, para o nome e a mensagem não irem ao serviço de prévia.
+- Nada segue ninguém sozinho. Abrir o cartão não cria vínculo; Seguir e Mandar um oi são toques da pessoa, cada um conferido de novo (identidade, registro do cartão e associação) antes de escrever, sem repetição automática.
+- Privacidade, em termos exatos: não há nenhum registro novo de quem convidou quem e nenhum aviso de cadastro. O diretório do serviço de conta já guarda o hash do convite usado no vínculo do novo membro (`apps/cli/lib/account/store.js`, `docs/design.md`, "Vínculo com a conta Google"), como antes do cartão. Tocar em Seguir manda o aviso comum de seguir (`packages/core/lib/notices.js`), como qualquer outro seguir.
+- Os 13 desenhos são desenhados no código, com `View`, e inspirados em tradições regionais (Marajoara, Encontro das águas, Vitória-régia, Cordel, Bandeirinhas, Chita, Ipê-amarelo, Pantanal, Azulejo, Copacabana, Minas, Araucária, Chimarrão). Nenhum copia obra de artista nem padrão protegido.
+
+O fluxo no app:
+
+- Quem convida: em Convites, o botão "Mandar com um cartão" abre nome, região, desenho e mensagem (já vem uma sugestão por desenho). O contador mostra os bytes usados e os que cabem (`messageRoom`); se o nome ou a mensagem não servem, uma linha explica (nome vazio ou longo, mensagem vazia, com símbolos que não aparecem ou longa demais). O botão vira "Criar link com cartão" e "Assinando cartão" durante a assinatura. Se a assinatura falhar, o convite criado vale como link comum e o app avisa que o cartão não entrou.
+- Quem abre, antes da introdução: o cartão aparece antes das telas de introdução, com Entrar, Como funciona (mostra a introdução e volta ao cartão) e Agora não (esconde só nesta abertura). A tela espera o nó ficar pronto por até 6 s (`OPEN_WAIT_MS`); passado esse tempo segue a introdução e, se a conferência terminar depois, o cartão assume o lugar das telas de introdução. Uma assinatura ruim, um cartão vencido, um membro sem vínculo ou uma retomada do Google/idade não mostram o cartão. Sem rede, a pertença do membro fica "desconhecida" e nada é oferecido.
+- Quem chegou: o cartão de chegada aparece no app só para quem passou pela configuração neste aparelho segurando o cartão, nunca para um membro que já estava com a conta aberta. Mostra "Você chegou com o cartão de @nome", com Seguir, Mandar um oi (texto fixo "Oi! Cheguei.", nunca a mensagem do cartão; sem Conversas do outro lado, avisa) e Agora não.
+- Movimento: o cartão entra com um fade e um crescimento curtos, uma vez; com movimento reduzido, já aparece no estado final. O desenho e os textos seguem o tema claro e escuro.
+
+Passos (marcar só depois de executar e guardar o registro):
+
+- [ ] Android (build de debug, emulador ou aparelho): criar um convite com cartão em Convites, abrir o link e conferir o cartão antes da introdução; Agora não; link comum (sem cartão); fragmento forjado; cartão de chegada com Seguir e Mandar um oi; sem rede (status offline); tema claro e escuro; movimento reduzido; os 13 desenhos.
+- [ ] Simulador iOS: o mesmo roteiro do Android.
+- [ ] Web e PWA: o mesmo roteiro, mais as duas barras de endereço (o fragmento e o `?c` somem), o nó lento (a espera de 6 s e a troca tardia pelo cartão) e um viewport de 390 px.
+- [ ] Medir a carga a frio: em cada plataforma, anotar quanto o nó leva para ficar pronto depois de abrir o link com o cache limpo e comparar com os 6 s de `OPEN_WAIT_MS`. Registrar os tempos aqui; se passarem de 6 s com frequência, a espera precisa ser revista. Nenhuma medida foi feita nesta documentação.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/app/test/preview.test.js` e `node apps/cli/test/preview-routes.test.js`.
+- `node apps/app/test/inviteCardCopy.test.js`, `node apps/app/test/inviteCardArt.test.js`, `node apps/app/test/inviteCardMotion.test.js` e `node apps/app/test/inviteCardFrame.test.js`.
+- `node apps/app/test/signupInvite.test.js` e `node apps/app/test/linkReturn.test.js`.
+- `node apps/app/test/inviteCardFlow.test.js` e `node apps/app/test/inviteCardCompose.test.js`.
+- `node apps/app/test/help.test.js`.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- Alguns mensageiros tiram o fragmento do link: o link comum continua funcionando e o convite vale sem cartão.
+- A mensagem é um bilhete curto, de cerca de 134 bytes no endereço bora.varanda.app, dividido com o nome (o contador do app mostra o espaço exato).
+- Não há nota de voz, foto, desenho por estado, compartilhar como imagem nem arte encomendada; a prévia nos mensageiros vem na seção 128.
+- Um app já instalado não mostra o cartão e ainda assim troca o código pelo convite.
+- Quem usa uma configuração salva de outra associação não vê cartão (a conferência falha fechada), e o código continua valendo.
+- Quem tem o link lê o cartão: nome, mensagem e desenho não são cifrados.
+- Para mostrar o @nome de quem escreveu, o aparelho de quem abre o link consulta o status público da conta pela chave de quem convidou, antes do cadastro (o serviço não registra essa consulta; nome e mensagem não saem do aparelho). Um cartão vencido não faz consulta nenhuma.
+- O histórico do próprio navegador pode guardar o endereço como foi aberto, com o fragmento, mesmo depois que o app o tira da barra.
+
+## 128. Prévia do cartão de convite nos mensageiros (PR feat/invite-card-preview)
+
+Quando alguém cola um link de convite no WhatsApp, no Telegram ou no iMessage, o robô do mensageiro lê uma página curta do serviço de conta e mostra o desenho escolhido e, se o convite estiver vivo, "@nome te mandou um convite pra Varanda". Robôs não veem o fragmento (`#c1...`), então o desenho viaja no `?c=N` público; o nome e a mensagem do cartão nunca chegam ao servidor.
+
+Regras que os passos conferem:
+
+- `GET` e `HEAD /account/og/convite/<código>?c=N` (`apps/cli/lib/account/og-routes.js`) respondem sempre 200 com uma página de metadados Open Graph. O título pessoal só sai para um convite vivo, com `c` válido (0 a 999, e que seja um dos 13 desenhos) e quem convidou com conta vinculada e @nome (`inviterOf` em `invites-store.js`, mais o status da conta). Um convite morto (usado, vencido ou desconhecido) com `c` válido ainda recebe a imagem daquele desenho, mas com o título genérico "Você recebeu um convite pra Varanda". Sem `c` válido, a imagem é `convite.png`.
+- Um código malformado nunca é repetido na página: o `og:url` vira a raiz. O `og:url` de um código bem formado mantém o `?c`.
+- Os endereços absolutos (imagem e `og:url`) partem da origem configurada, nunca do cabeçalho `Host`. Todo valor interpolado é escapado.
+- A resposta leva `Cache-Control: no-store`, `X-Robots-Tag: noindex`, `nosniff`, `Referrer-Policy: no-referrer` e uma CSP fechada. O registro guarda só contagens (`{ event: 'og', reason: 'pessoal' | 'generico' }`), nunca o código, a chave de quem convidou ou o @nome. A rota passa pelo limite global de consultas do serviço.
+- As 14 imagens (`apps/app/public/og/convite-<desenho>.png`, 13 desenhos, e `convite.png`) são 1200 x 630, renderizadas por `apps/app/scripts/render-og.js` a partir de `apps/app/src/inviteCardArt.js`: cada uma é a moldura regional com uma cadeira de balanço de varanda no centro, gerada pelo script e commitada; as imagens ficam fora do cache do PWA, porque só os robôs de prévia as buscam. `node apps/app/scripts/render-og.js --check` compara os pixels com os arquivos.
+- `deploy/seeder/Caddyfile`: `@previaConvite` casa `path /convite/*` mais uma lista de `User-Agent` (facebookexternalhit, facebot, whatsapp, telegrambot, twitterbot, slackbot, discordbot, linkedinbot, skypeuripreview, applebot) e reescreve para `/account/og{path}`, seguindo para o serviço de conta. O par é excluído de `@mutavel` (não leva `no-cache`) e de `@ausenteApp`. Uma pessoa em `/convite/*` continua recebendo o `index.html` do app, como antes.
+
+Como verificar, a partir da raiz (um arquivo por vez):
+
+- `node apps/app/test/renderOg.test.js`
+- `node apps/cli/test/og-routes.test.js`
+- `node apps/cli/test/invites-store.test.js`
+- `node apps/cli/test/caddyfile.test.js`
+
+Depois que o operador reimplantar o Caddy e o serviço de conta (o `Caddyfile` mudou, então só `up -d` do Caddy não basta sem recarregar a configuração):
+
+- [ ] Colar um link de cartão (`/convite/<código>?c=3`) no WhatsApp, no Telegram e no iMessage e ver a imagem do desenho e "@nome te mandou um convite pra Varanda".
+- [ ] Um link comum (sem `?c`) e um convite já usado ou vencido mostram a prévia genérica ("Você recebeu um convite pra Varanda", imagem `convite.png` ou a do desenho, conforme o caso).
+- [ ] `curl -sA WhatsApp 'https://<domínio>/convite/<código>?c=3'` devolve `og:image` com `convite-cordel.png`. Isso prova que o `?c` sobrevive à reescrita do Caddy, o que não pôde ser testado sem o binário do Caddy.
+- [ ] `curl -s 'https://<domínio>/convite/<código>'` com um `User-Agent` de navegador continua devolvendo o `index.html` do app, e uma pessoa num navegador abre o app normalmente.
+- [ ] Com o serviço de conta parado, abrir o link com `curl -sA WhatsApp` e ver se o log de erro do Caddy registra o caminho `/convite/<código>`. Anotar aqui o resultado: ______.
+
+Limites:
+
+- Só os robôs conhecidos, pelo `User-Agent`, recebem a prévia pessoal; qualquer outro vê o título e a descrição de hoje.
+- Quem tem um código vivo pode descobrir o @nome de quem convidou pela prévia (o cartão já o mostra).
+- Um link comum postado em público com `?c` acrescentado revelaria quem o emitiu.
+- As imagens são geometria gerada, não arte encomendada.
+- O `User-Agent` é declarado pelo cliente: quem quiser pode se passar por um robô e ver a página de prévia, que não traz nada além do que está acima.
+
 ## 119. Ações em linha única e folhas de mais ações (PR fix/mobile-action-hierarchy)
 
 Caminhada da hierarquia de ações no celular: uma ação principal por tela, fileiras que não quebram e ações raras atrás do botão de mais. As telas estão em [app.md](app.md) ("Telas", "Conversas", "Comunidades") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Componentes").

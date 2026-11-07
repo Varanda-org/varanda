@@ -987,3 +987,214 @@ test('page seen ids share the stored text and never collide with the person', as
   t.is(dropped.includes(PAGE + ':1'), false)
   t.is(dropped.includes(PAGE), false, 'the other key was only in the discarded v1 ids')
 })
+
+const avatarDescriptor = () => Object.freeze({
+  core: 'dd'.repeat(32),
+  mime: 'image/jpeg',
+  start: 1,
+  blocks: 1,
+  bytes: 10,
+  sha256: 'ee'.repeat(32),
+  width: 512,
+  height: 512
+})
+const hostileAvatarInput = () => new Proxy({}, {
+  get () { throw new Error('hostile property') }
+})
+
+test('needsAvatar distinguishes an unknown profile from a confirmed missing photo', async (t) => {
+  const { needsAvatar } = await load()
+  const row = Object.freeze({ ...item('aa'.repeat(32), 12), avatar: null })
+  const descriptor = avatarDescriptor()
+  t.is(needsAvatar({ ...row, avatar: descriptor }), false)
+  t.is(needsAvatar(row, undefined), true)
+  t.is(needsAvatar(row, null), true)
+  t.is(needsAvatar(row, { avatar: undefined }), true)
+  t.is(needsAvatar(row, { avatar: null }), false)
+  t.is(needsAvatar(row, { avatar: descriptor }), false)
+  t.is(needsAvatar(item(row.key, 12)), true, 'an omitted row avatar is unknown')
+  t.is(needsAvatar({ ...row, avatar: false }), false)
+  for (const cached of [false, 1, 'unknown', () => {}]) t.is(needsAvatar(row, cached), false)
+  for (const key of ['zz'.repeat(32), 'aa', row.key.toUpperCase(), 1, null]) {
+    t.is(needsAvatar({ ...row, key }), false)
+  }
+  for (const value of [null, undefined, 1, 'row', () => {}]) t.is(needsAvatar(value), false)
+  t.is(needsAvatar(hostileAvatarInput()), false, 'a throwing row is ignored')
+  t.is(needsAvatar(row, hostileAvatarInput()), false, 'a throwing cache is ignored')
+})
+
+test('avatarPeeks fetches only valid own profile hints once in first-seen order', async (t) => {
+  const { avatarPeeks } = await load()
+  const a = 'aa'.repeat(32)
+  const b = 'bb'.repeat(32)
+  const c = 'cc'.repeat(32)
+  const hints = { [a]: { profileSeq: 4, usernameSeq: 3 }, [b]: { profileSeq: 4 } }
+  const chunks = avatarPeeks([b, a, b, c, a, 'zz'.repeat(32), null, 12], hints)
+  t.is(chunks.length, 2)
+  t.alike(chunks[0], { author: b, seqs: [4], profileSeq: 4 })
+  t.alike(chunks[1], { author: a, seqs: [4], profileSeq: 4 })
+  for (const profileSeq of [null, undefined, 0, -1, 1.5, '4', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    t.alike(avatarPeeks([a], { [a]: { profileSeq } }), [])
+  }
+  for (const hint of [null, undefined, 4, 'hint', { usernameSeq: 3 }]) {
+    t.alike(avatarPeeks([a], { [a]: hint }), [])
+  }
+  t.alike(avatarPeeks([a], Object.create({ [a]: { profileSeq: 4 } })), [])
+  t.alike(avatarPeeks(['zz'.repeat(32)], { ['zz'.repeat(32)]: { profileSeq: 4 } }), [])
+  for (const hints of [null, undefined, 'hints', hostileAvatarInput()]) {
+    t.alike(avatarPeeks([a], hints), [])
+  }
+  t.alike(avatarPeeks([a], { [a]: hostileAvatarInput() }), [])
+  t.alike(avatarPeeks(hostileAvatarInput(), hints), [])
+  t.alike(avatarPeeks(null, hints), [])
+})
+
+test('avatarFromPeek leaves missing profiles unresolved and preserves descriptors', async (t) => {
+  const { avatarFromPeek } = await load()
+  const descriptor = avatarDescriptor()
+  for (const peek of [undefined, null, 1, 'peek', {}, { profile: null }, { profile: 'profile' }]) {
+    t.is(avatarFromPeek(peek), undefined)
+  }
+  for (const avatar of [null, undefined, false, 1, 'avatar']) {
+    t.is(avatarFromPeek({ profile: { avatar } }), null)
+  }
+  t.is(avatarFromPeek({ profile: { avatar: descriptor } }), descriptor)
+  t.is(avatarFromPeek(hostileAvatarInput()), undefined)
+  t.is(avatarFromPeek({ profile: hostileAvatarInput() }), undefined)
+})
+
+test('resolveRowAvatars recovers a photo whose profile pair is outside the notice window', async (t) => {
+  const { needsAvatar, resolveRowAvatars } = await load()
+  const a = 'aa'.repeat(32)
+  const descriptor = avatarDescriptor()
+  // The profile pair at blocks 3 and 4 is outside the node's notice window.
+  const row = Object.freeze({ ...item(a, 80), avatar: null })
+  t.is(needsAvatar(row, null), true)
+  const members = []
+  const peeks = []
+  const events = []
+  const found = await resolveRowAvatars([row.key, row.key], {
+    fetchMember: async (key) => {
+      members.push(key)
+      events.push('member')
+      return { ok: true, value: { profileSeq: 4, usernameSeq: null } }
+    },
+    peekChunk: async (chunk) => {
+      peeks.push(chunk)
+      events.push('peek')
+      t.alike(chunk, { author: a, seqs: [4], profileSeq: 4 })
+      return { key: a, profile: { name: 'Fabi', bio: '', avatar: descriptor } }
+    }
+  })
+  t.alike(found, { [a]: descriptor })
+  t.alike(members, [a])
+  t.is(peeks.length, 1)
+  t.alike(events, ['member', 'peek'])
+})
+
+test('resolveRowAvatars isolates failed members, unresolved profiles and failed or mismatched peeks', async (t) => {
+  const { resolveRowAvatars } = await load()
+  const [a, b, c, e, f, wrong, failed] = ['aa', 'bb', 'cc', 'ee', 'ff', '11', '22'].map((s) => s.repeat(32))
+  const descriptor = avatarDescriptor()
+  const keys = [b, c, f, e, wrong, failed, a]
+  const members = []
+  const peeks = []
+  const events = []
+  const found = await resolveRowAvatars([...keys, a, null, 12, 'zz'.repeat(32)], {
+    fetchMember: async (key) => {
+      members.push(key)
+      events.push('member:' + key)
+      if (key === b) return { ok: false, reason: 'cooldown' }
+      if (key === failed) throw new Error('member unavailable')
+      return { ok: true, value: { profileSeq: 4, usernameSeq: 3 } }
+    },
+    peekChunk: async (chunk) => {
+      peeks.push(chunk.author)
+      events.push('peek:' + chunk.author)
+      t.alike(chunk, { author: chunk.author, seqs: [4], profileSeq: 4 })
+      if (chunk.author === f) throw new Error('peek unavailable')
+      if (chunk.author === c) return { key: c, profile: null }
+      if (chunk.author === e) return { key: e, profile: { avatar: null } }
+      if (chunk.author === wrong) return { key: a, profile: { avatar: descriptor } }
+      return { key: a, profile: { avatar: descriptor } }
+    }
+  })
+  t.alike(found, { [e]: null, [a]: descriptor })
+  t.is(found[e], null)
+  for (const key of [b, c, f, wrong, failed]) t.is(Object.hasOwn(found, key), false)
+  t.alike(members, keys)
+  t.alike(peeks, [c, f, e, wrong, a])
+  t.alike(events, [...keys.map((key) => 'member:' + key), ...peeks.map((key) => 'peek:' + key)])
+})
+
+test('resolveRowAvatars needs a successful member with a valid profile hint', async (t) => {
+  const { resolveRowAvatars } = await load()
+  const a = 'aa'.repeat(32)
+  for (const member of [null, {}, { ok: 1, value: { profileSeq: 4 } }, { ok: true, value: null }, { ok: true, value: 'member' }, { ok: true, value: { usernameSeq: 3 } }, { ok: true, value: { profileSeq: null } }]) {
+    let peeks = 0
+    t.alike(await resolveRowAvatars([a], {
+      fetchMember: async () => member,
+      peekChunk: async () => { peeks++ }
+    }), {})
+    t.is(peeks, 0)
+  }
+  for (const peek of [null, 'peek', { profile: null }, { profile: { avatar: avatarDescriptor() } }]) {
+    t.alike(await resolveRowAvatars([a], {
+      fetchMember: async () => ({ ok: true, value: { profileSeq: 4 } }),
+      peekChunk: async () => peek
+    }), {}, 'a peek must identify the requested author')
+  }
+})
+
+test('resolveRowAvatars stops before more member or peek calls once no longer alive', async (t) => {
+  const { resolveRowAvatars } = await load()
+  const a = 'aa'.repeat(32)
+  const b = 'bb'.repeat(32)
+  for (const keys of [[a, b], [a]]) {
+    let alive = true
+    const members = []
+    const peeks = []
+    t.alike(await resolveRowAvatars(keys, {
+      alive: () => alive,
+      fetchMember: async (key) => {
+        members.push(key)
+        alive = false
+        return { ok: true, value: { profileSeq: 4 } }
+      },
+      peekChunk: async (chunk) => { peeks.push(chunk) }
+    }), {})
+    t.alike(members, [a])
+    t.alike(peeks, [])
+  }
+  let calls = 0
+  t.alike(await resolveRowAvatars([a], {
+    alive: () => false,
+    fetchMember: async () => { calls++ },
+    peekChunk: async () => { calls++ }
+  }), {})
+  t.is(calls, 0)
+})
+
+test('rowAvatarSource prefers a row photo over older peek answers', async (t) => {
+  const { rowAvatarSource } = await load()
+  const descriptor = avatarDescriptor()
+  const newer = Object.freeze({ ...descriptor, start: 2 })
+  const row = Object.freeze({ ...item('aa'.repeat(32), 12), avatar: newer })
+  t.is(rowAvatarSource(row, null), row)
+  t.is(rowAvatarSource(row, descriptor), row)
+  const missing = Object.freeze({ ...row, avatar: null })
+  t.alike(rowAvatarSource(missing, descriptor), { avatar: descriptor })
+  t.alike(rowAvatarSource(missing, null), { avatar: null })
+  t.is(rowAvatarSource(missing, undefined), missing)
+  for (const value of [null, undefined, 'row', 12, hostileAvatarInput()]) {
+    t.is(rowAvatarSource(value, undefined), value)
+  }
+  const hostile = hostileAvatarInput()
+  t.is(rowAvatarSource(hostile, descriptor), hostile)
+  t.alike(rowAvatarSource(undefined, descriptor), { avatar: descriptor })
+})
+
+test('notices helpers keep the pure module free of imports', (t) => {
+  const source = require('fs').readFileSync(require.resolve('../src/notices.js'), 'utf8')
+  t.is(/^import /m.test(source), false)
+})

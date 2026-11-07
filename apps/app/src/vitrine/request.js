@@ -1,5 +1,6 @@
 import rpc from '@varanda/rpc'
 import { createVitrineMedia } from './media.js'
+import { largeFeed } from './large.js'
 
 const { validateParams, RpcError } = rpc
 const copy = (value) => JSON.parse(JSON.stringify(value))
@@ -27,7 +28,7 @@ function refuse (code, message) {
 
 // Like the app's node.request: resolve a result, reject a client error.
 // Each instance owns its state, so reopening a lab scenario resets it.
-export function createVitrineRequest (fixtures) {
+export function createVitrineRequest (fixtures, options) {
   const data = copy(fixtures)
   const profiles = [...data.members, ...data.pages, ...data.applicants]
   const extraFeed = data.noticePosts.filter((p) => !data.follows.includes(p.author))
@@ -70,6 +71,19 @@ export function createVitrineRequest (fixtures) {
       ...[...data.feed, ...data.noticePosts].filter((post) => post.author === p.author).map((post) => ({ seq: post.seq, record: postRecord(post) })),
       ...data.diaryRecords.filter((entry) => entry.author === p.author).map(({ seq, record }) => ({ seq, record }))
     ].sort((a, b) => a.seq - b.seq))
+  }
+
+  // Timing rows are registered in the author logs so open, peek and delete
+  // behave like a fixture post. Reposts have no diary post record.
+  if (options && options.large === true) {
+    const rows = largeFeed(data, 200)
+    data.feed.push(...rows)
+    for (const row of rows) {
+      if (row.kind !== 'post') continue
+      const entries = logs.get(row.author)
+      entries.push({ seq: row.seq, record: postRecord(row) })
+      entries.sort((a, b) => a.seq - b.seq)
+    }
   }
 
   function append (record) {
@@ -247,12 +261,16 @@ export function createVitrineRequest (fixtures) {
     'account.sign': signed,
     'age.sign': signed,
     'invite.sign': signed,
+    'inviteCard.sign': signed,
+    // The development build never attributes an arbitrary card.
+    'inviteCard.verify': () => ({ ok: false, reason: 'bad-signature' }),
     'push.sign': signed,
     // No seen sync offline: a signature the account call never uses, and a
     // merge that changes nothing.
     'seen.sign': () => ({ signature, prevHash: '0'.repeat(64) }),
     'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, caughtUp: [] }),
     'report.sign': signed,
+    'appeal.sign': signed,
     'dm.reportSign': signed,
     'terms.sign': signed,
     'recovery.sign': signed,

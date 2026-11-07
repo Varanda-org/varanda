@@ -516,6 +516,26 @@ test('the real wallet constants fit the largest item', (t) => {
   t.ok(BLOB_STAMP_WALLET >= coreBlob.BLOB_MAX_CHUNKS, 'one maximum item fits a full wallet')
 })
 
+// Bare's URL (bare-url, the app worklet's global) has no origin getter: a
+// check that reads it refused every seeder there, so no DM photo opened.
+test('the seeder origin is checked without URL.prototype.origin', (t) => {
+  const NodeURL = globalThis.URL
+  globalThis.URL = class extends NodeURL {
+    get origin () { return undefined }
+  }
+  try {
+    t.is(seederOrigin('https://example.com/'), 'https://example.com')
+    t.is(seederOrigin('https://example.com'), 'https://example.com')
+    t.is(seederOrigin('http://127.0.0.1:8080'), 'http://127.0.0.1:8080')
+    t.is(seederOrigin('http://[::1]:8080/'), 'http://[::1]:8080')
+    for (const origin of ['http://example.com', 'https://a:b@example.com', 'https://example.com/x', 'https://example.com?q=1', 'https://example.com#x', 'https://example.com:443', 'https://EXAMPLE.com', 'ftp://127.0.0.1', 'javascript:alert(1)']) {
+      t.exception(() => seederOrigin(origin), 'refused: ' + origin)
+    }
+  } finally {
+    globalThis.URL = NodeURL
+  }
+})
+
 test('fetch refuses other origins; a 404 is never retried and a 429 only a bounded number of times', async (t) => {
   t.timeout(120000)
   for (const origin of ['http://example.com', 'https://a:b@example.com', 'https://example.com/x', 'https://example.com?q=1', 'ftp://127.0.0.1', 'javascript:alert(1)']) {
