@@ -34,8 +34,10 @@
 // Recovery (5.91 to 5.94): while the node is unlocked, a zeroable copy of
 // the PRF of the last successful install (the root) is kept to wrap it for
 // a second passkey or a recovery code; every path that drops the key drops
-// the root too, and so does any install attempt until it succeeds. The root
-// is never handed to session.setKeyPair (it gets { media } only). A lookup
+// the root too, and so does any install attempt until it succeeds. This
+// held copy is never the one handed to session.setKeyPair, which copies the
+// PRF for itself (private group and direct message keys) and zeroes its
+// copy on lock, as the browser entry does. A lookup
 // keeps one wrap key pending for RECOVERY_PENDING_MS; the next open consumes
 // it whatever the outcome.
 const b4a = require('b4a')
@@ -57,6 +59,12 @@ const RECOVERY_PENDING_MS = 120 * 1000
 
 function usage (message) {
   return new RpcError('USAGE', message)
+}
+
+// session.identityStatus() of a stored diary of another key, or of a legacy
+// store: the pair is refused ('passkey não corresponde ao diário guardado').
+function otherDiary (status, publicKey) {
+  return status.exists && (status.publicKey !== publicKey || status.legacy)
 }
 
 // The stored passkey record, or null for anything else (web/node.js).
@@ -166,17 +174,28 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
       nonce = await mediaNonce()
       media = await keys.mediaKeyPairFromPrf(prf, nonce, { hkdf })
       const publicKey = b4a.toString(kp.publicKey, 'hex')
-      // Forgotten only now: a refused or failed attempt before the new pairs
-      // go in leaves the previous install (and its sessionSaved) as it was.
+      // Forgotten only now: a refused or failed attempt before this point
+      // leaves the previous install (and its sessionSaved) as it was.
       current = null
-      // setKeyPair copies both pairs synchronously: the local copies are zeroed below.
-      const setting = session.setKeyPair(kp, { media })
+      // A diary of another key is refused before the pairs and the PRF go
+      // in, and the node is locked, as a refusal after them leaves it. With
+      // the PRF the session opens the direct message store under this
+      // passkey's key, and a store of another key is replaced by an empty
+      // one (lib/dm-store.js unlock): a wrong passkey must not erase the
+      // stored identity's messages.
+      if (otherDiary(await session.identityStatus(), publicKey)) {
+        await session.clearKeyPair().catch(() => {})
+        throw usage(store.MISMATCH)
+      }
+      // setKeyPair copies both pairs and the PRF synchronously: the local
+      // copies are zeroed below. Without the PRF the direct message store
+      // and the private group box keys stay locked.
+      const setting = session.setKeyPair(kp, { media, prf })
       zeroPair(kp)
       zeroPair(media)
       installed = true
       await setting
-      const status = await session.identityStatus()
-      if (status.exists && (status.publicKey !== publicKey || status.legacy)) throw usage(store.MISMATCH)
+      if (otherDiary(await session.identityStatus(), publicKey)) throw usage(store.MISMATCH)
       if (!fromSession) {
         await bind({ v: 1, credentialId, rpId, userId: userId === '' ? null : userId })
       }

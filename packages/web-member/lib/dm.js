@@ -173,7 +173,7 @@ function zeroPair (pair) {
 // (dm-link limits), blob (./blob.js createBlobClient limits), fetch
 // (./blob.js fetchBlob limits).
 // createStore, fetch and mediaOrigin: tests only.
-function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin } = {}) {
+function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf } = {}) {
   const L = {
     issueBurst: ISSUE_BURST,
     issuePaceMs: ISSUE_PACE_MS,
@@ -295,8 +295,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     try {
       const kv = await store.readDmKey(storage)
       const g = kv === null ? 1 : kv.gen
-      pair = await dmBoxKeyPairFromPrf(prf, g)
-      key = await dmLocalKeyFromPrf(prf)
+      pair = await dmBoxKeyPairFromPrf(prf, g, { hkdf })
+      key = await dmLocalKeyFromPrf(prf, { hkdf })
       if (gen !== generation) return
       await local.unlock(key)
       if (gen !== generation) {
