@@ -315,3 +315,57 @@ test('Caddyfile: /.well-known/* is served as JSON, no-store, before the SPA hand
   t.ok(lines.filter((l) => /^\s*Strict-Transport-Security\s/.test(l)).length === 1, 'security headers kept')
   t.ok(lines.some((l) => l.trim() === 'X-Content-Type-Options "nosniff"'), 'nosniff kept')
 })
+
+// Link-preview crawlers on /convite/<code> get the account service's og page
+// (GET|HEAD /account/og/convite/<code>?c=N); everyone else keeps index.html.
+// The pair (path, User-Agent) is the same in the matcher and in the two
+// exclusions, so a crawler response carries only the service's no-store.
+const PREVIEW_PATH = 'path /convite/*'
+const PREVIEW_UA = 'header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)'
+
+test('Caddyfile: invite link previews go to the account service, only for crawlers on /convite/*', (t) => {
+  const matcher = block('@previaConvite {')
+  t.ok(matcher.length > 0, '@previaConvite matcher')
+  t.is(lines.filter((l) => l.trim() === '@previaConvite {').length, 1, 'exactly one @previaConvite matcher')
+  t.alike(matcher.slice(1, -1).map((l) => l.trim()), [PREVIEW_PATH, PREVIEW_UA], 'matches only /convite/* with a known crawler User-Agent')
+  for (const bot of ['facebookexternalhit', 'facebot', 'whatsapp', 'telegrambot', 'twitterbot', 'slackbot', 'discordbot', 'linkedinbot', 'skypeuripreview', 'applebot']) {
+    t.ok(PREVIEW_UA.includes(bot), bot + ' listed')
+  }
+  const re = new RegExp(PREVIEW_UA.split(' ').pop().replace('(?i)', ''), 'i')
+  t.ok(re.test('WhatsApp/2.23.20.0 A'), 'case-insensitive: WhatsApp')
+  t.ok(re.test('facebookexternalhit/1.1'), 'facebookexternalhit')
+  t.absent(re.test('Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36'), 'a browser is not a crawler')
+
+  const handle = block('handle @previaConvite {')
+  t.ok(handle.length > 0, 'handle @previaConvite')
+  t.is(count('handle @previaConvite {'), 1, 'exactly one handle @previaConvite')
+  const text = handle.map((l) => l.trim())
+  t.ok(text.includes('rewrite * /account/og{path}'), 'rewrite to /account/og + path, no ? so the query (c=N) is kept')
+  t.absent(text.some((l) => l.startsWith('rewrite') && l.includes('?')), 'rewrite never replaces the query')
+  const rw = text.findIndex((l) => l.startsWith('rewrite '))
+  const rp = text.findIndex((l) => l.startsWith('reverse_proxy '))
+  t.ok(rw !== -1 && rp > rw, 'rewrite before reverse_proxy')
+  const proxy = (b) => b.map((l) => l.trim()).filter((l) => l.startsWith('reverse_proxy ') || l.startsWith('header_up '))
+  t.alike(proxy(handle), proxy(block('handle /account/* {')), 'same proxy target and header_up lines as /account/*')
+  t.ok(text.includes('reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {'), 'account service on loopback')
+  t.absent(text.some((l) => /Cache-Control|file_server|^root\s/.test(l)), 'no Cache-Control, no web root: the service answers')
+
+  const m = lines.findIndex((l) => l.trim() === '@previaConvite {')
+  const h = lines.findIndex((l) => l.trim() === 'handle @previaConvite {')
+  const spa = lines.findIndex((l) => l.trim() === 'handle {')
+  t.ok(m !== -1 && h > m && spa > h, 'matcher and handle come before the catch-all handle')
+  t.is(count('/convite/'), 3, '/convite/ appears only in the matcher and its two exclusions')
+})
+
+test('Caddyfile: the crawler case gets no no-cache, humans on /convite/* keep it', (t) => {
+  for (const head of ['@mutavel {', '@ausenteApp {']) {
+    const b = block(head).map((l) => l.trim())
+    const start = b.indexOf('not {')
+    t.ok(start !== -1, head + ' has a not block')
+    t.alike(b.slice(start + 1, start + 3), [PREVIEW_PATH, PREVIEW_UA], head + ' excludes exactly the crawler pair')
+    t.is(b[start + 3], '}', head + ' not block holds only the pair (AND), so humans on /convite/* still match')
+    t.absent(b.some((l) => /^not path\s/.test(l) && l.includes('/convite')), head + ' never excludes /convite/* by path alone')
+  }
+  t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel still stamps no-cache')
+  t.ok(block('handle {').some((l) => l.trim() === 'rewrite @semExtensao /index.html'), 'humans still get index.html')
+})

@@ -54,16 +54,26 @@
 	# /.well-known/* têm o seu próprio no-store, /seeder fica como está,
 	# /account/* vem do serviço de conta com o no-store dele, /media/* vem do
 	# semeador com o cache longo dele, /blob/* vem do semeador com o cache
-	# privado dele e /index/* e /f/* vem do semeador com o no-store dele.
+	# privado dele e /index/* e /f/* vem do semeador com o no-store dele. Um robô de
+	# prévia de link em /convite/* (o mesmo par de path e User-Agent de
+	# @previaConvite, abaixo) recebe a página do serviço de conta com o
+	# no-store dele; uma pessoa em /convite/* segue com o index.html e o
+	# no-cache de sempre.
 	@mutavel {
 		not path /varanda.json /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/*
+		not {
+			path /convite/*
+			header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
+		}
 	}
 	header @mutavel Cache-Control "no-cache"
 
 	# Um 404 nunca fica guardado em cache (nem pelo navegador, nem pelo
 	# service worker): no-store, por cima do no-cache acima. Com extensão, o
 	# 404 é o arquivo que falta; sem extensão, só se falta o index.html (por
-	# exemplo, enquanto o deploy troca o www).
+	# exemplo, enquanto o deploy troca o www). O robô de prévia em /convite/*
+	# fica fora de @ausenteApp: a resposta dele vem do serviço de conta, não
+	# do www.
 	@ausenteArquivo {
 		path *.*
 		not path /varanda.json
@@ -74,6 +84,10 @@
 	@ausenteApp {
 		not path *.*
 		not path /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/*
+		not {
+			path /convite/*
+			header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
+		}
 		not file /index.html {
 			root /srv/web
 		}
@@ -306,6 +320,38 @@
 			}
 		}
 		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
+			header_up Host {upstream_hostport}
+			header_up -X-Forwarded-For
+			header_up -X-Real-Ip
+		}
+	}
+
+	# A prévia de um convite (/convite/<código>) para os robôs que montam o
+	# cartão de um link no WhatsApp, Telegram, Facebook, X, Slack, Discord,
+	# LinkedIn, Skype e Apple: eles não rodam o app, então leem as tags og:
+	# de uma página que o serviço de conta monta para o código
+	# (GET|HEAD /account/og/convite/<código>?c=N). Só o par path /convite/* e
+	# User-Agent de um desses robôs (sem diferença de maiúsculas) chega aqui;
+	# qualquer outro User-Agent em /convite/* segue para o index.html no
+	# handle abaixo, como sempre. O rewrite só troca o caminho: sem '?' no
+	# destino, o Caddy mantém a query original, então o ?c=N chega ao
+	# serviço. Mesmo proxy do /account/* acima: só o Host do destino, e os
+	# cabeçalhos com o endereço do cliente saem. O Cache-Control (no-store)
+	# vem do serviço: por isso este par fica fora do no-cache de @mutavel e do
+	# no-store de @ausenteApp acima. O User-Agent é declarado pelo cliente:
+	# quem o forja só recebe a mesma página pública que o robô receberia. O
+	# serviço de conta não registra o código, e o Caddy não tem log de
+	# acesso, mas o log de erros do Caddy pode guardar o caminho (que leva o
+	# código do convite) e o endereço do cliente quando o proxy para o
+	# serviço de conta falha, como nas buscas de /index/* acima. Antes do
+	# handle abaixo: sem este, o robô também receberia o index.html.
+	@previaConvite {
+		path /convite/*
+		header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
+	}
+	handle @previaConvite {
+		rewrite * /account/og{path}
+		reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip

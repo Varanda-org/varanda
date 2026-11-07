@@ -513,6 +513,14 @@ function openInvitesStore (dataDir, {
     return null
   }
 
+  // Read-only: the inviter's key of a row that check(id) would accept, else
+  // null. For the link preview, which names the inviter of a live invite,
+  // and for the Feira entry, which charges paid age sessions to that owner.
+  function inviterOf (id) {
+    if (check(id) !== null) return null
+    return byId.get(id).inviter
+  }
+
   // Idempotent: the link commit in the directory is the single-use authority
   // and already happened, so this only drops the hash and marks the row.
   function consume (id) {
@@ -567,15 +575,6 @@ function openInvitesStore (dataDir, {
     return { perWeek, opened: limit, used: usedNow, remaining: Math.max(0, limit - usedNow), resetsAt: iso(weekEnd(nowMs)) }
   }
 
-  // The inviter (quota owner) of a live, unused row with that id, else null.
-  // The Feira entry charges paid age sessions to that owner.
-  function inviterOf (id) {
-    if (!validId(id)) return null
-    usable()
-    const r = byId.get(id)
-    return r && !r.used ? r.inviter : null
-  }
-
   function count () {
     usable()
     let n = 0
@@ -590,11 +589,11 @@ function openInvitesStore (dataDir, {
     forget,
     holds,
     check,
+    inviterOf,
     consume,
     heal,
     summary,
     count,
-    inviterOf,
     fail () { failed = true },
     available () { return !failed }
   }

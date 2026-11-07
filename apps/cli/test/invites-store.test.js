@@ -204,6 +204,31 @@ test('check and consume: valid, consumed, unknown; consume is idempotent', async
   t.absent(fs.readFileSync(file, 'utf8').includes('usedAt'))
 })
 
+test('inviterOf answers the inviter of a live invite only, and never writes', async (t) => {
+  const { open, file, c } = setup(t)
+  const usedIds = new Set()
+  const store = open({ isUsed: (id) => usedIds.has(id) })
+  const m = memberKey()
+  const live = inviteId((await store.issue(m)).code)
+  const consumed = inviteId((await store.issue(m)).code)
+  const directory = inviteId((await store.issue(m)).code)
+  await store.consume(consumed)
+  usedIds.add(directory)
+  const before = fs.readFileSync(file)
+  t.is(store.inviterOf(live), m, 'live')
+  t.is(store.inviterOf(consumed), null, 'used')
+  t.is(store.inviterOf(directory), null, 'used in the directory')
+  t.is(store.inviterOf(inviteId(newCode())), null, 'unknown')
+  t.exception.all(() => store.inviterOf('AB'.repeat(32)), TypeError, 'bad id')
+  t.exception.all(() => store.inviterOf(null), TypeError, 'not a string')
+  c.t = T0 + INVITE_TTL_MS
+  t.is(store.inviterOf(live), null, 'expired')
+  t.alike(fs.readFileSync(file), before, 'nothing written')
+  store.fail()
+  c.t = T0
+  t.exception(() => store.inviterOf(live), /indisponivel/, 'unavailable throws like check')
+})
+
 test('a link is valid until createdAt + 7 days', async (t) => {
   const { store, c } = setup(t)
   const { code } = await store.issue(memberKey())
@@ -554,7 +579,7 @@ test('inviterOf names the owner of a live unused code, null otherwise', async (t
   const id = inviteId(code)
   t.is(store.inviterOf(id), owner)
   t.is(store.inviterOf('b'.repeat(64)), null, 'unknown id')
-  t.is(store.inviterOf('not hex'), null, 'malformed id')
+  t.exception.all(() => store.inviterOf('not hex'), TypeError, 'malformed id throws like check')
   await store.consume(id)
   t.is(store.inviterOf(id), null, 'a used code names nobody')
 })

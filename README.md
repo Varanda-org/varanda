@@ -556,6 +556,8 @@ curl -s http://127.0.0.1:8788/health
 
 A versão web (o PWA: o app com o nó no navegador, a identidade derivada de uma passkey) fica no mesmo servidor do semeador. `deploy/seeder/compose.web.yaml` complementa o `compose.yaml`: liga a entrada WebSocket do semeador só em `127.0.0.1:8789`, aceitando apenas a origem `https://<domínio>`, e sobe um Caddy (`deploy/seeder/Caddyfile`) que pede o certificado TLS sozinho, serve o app publicado em `deploy/seeder/www` e repassa `wss://<domínio>/seeder` ao semeador. O Caddy só termina o TLS: o Noise vai do navegador ao semeador, que o membro verifica pelo certificado do semeador.
 
+Nota: a prévia dos links de convite nos mensageiros muda `deploy/seeder/Caddyfile`, então o Caddy precisa ser reimplantado (e o serviço de conta, que passa a responder `/account/og/convite/<código>`). Detalhes em `docs/verification.md`, seção 128.
+
 Antes: o semeador configurado como na seção anterior; um registro DNS (A e/ou AAAA) do domínio apontando para o servidor; as portas 80 e 443 abertas (o semeador usa a DHT por UDP, como antes). Da raiz do repositório:
 
 ```sh
