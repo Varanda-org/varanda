@@ -30,6 +30,10 @@ const ANDROID_MANIFEST = 'android/app/src/main/AndroidManifest.xml'
 const WELL_KNOWN = '../../deploy/seeder/well-known.sh'
 const MIC_PLIST = '<key>NSMicrophoneUsageDescription</key><string>' + MICROPHONE_USAGE + '</string>'
 const WEB_CREDENTIALS_PLIST = '<key>VarandaWebCredentials</key><true/>'
+// The export compliance answer given in App Store Connect on 2026-11-06
+// (standard algorithms, not distributed in France): without it every build
+// waits on "Missing Compliance". docs/development.md has the conditions.
+const EXPORT_COMPLIANCE_PLIST = '<key>ITSAppUsesNonExemptEncryption</key><false/>'
 const RECORD_AUDIO_LINE = '<uses-permission android:name="android.permission.RECORD_AUDIO"/>'
 const CAMERA_REMOVED = '<uses-permission android:name="android.permission.CAMERA" tools:node="remove"/>'
 
@@ -90,6 +94,12 @@ test('the microphone is declared the same way everywhere, the camera stays remov
   t.ok(compact(read(INFO_PLIST)).includes(MIC_PLIST), INFO_PLIST)
   t.ok(read(ANDROID_MANIFEST).includes(RECORD_AUDIO_LINE), ANDROID_MANIFEST)
   t.ok(read(ANDROID_MANIFEST).includes(CAMERA_REMOVED), ANDROID_MANIFEST)
+})
+
+test('the export compliance answer is declared the same way in app.json and Info.plist', (t) => {
+  const app = JSON.parse(read('app.json')).expo
+  t.is(app.ios.config.usesNonExemptEncryption, false, 'app.json')
+  t.ok(compact(read(INFO_PLIST)).includes(EXPORT_COMPLIANCE_PLIST), INFO_PLIST)
 })
 
 test('the plugin restores the microphone and the camera removal', (t) => {
@@ -179,6 +189,7 @@ test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
   const plist = compact(fs.readFileSync(path.join(dir, INFO_PLIST), 'utf8'))
   t.ok(plist.includes(MIC_PLIST), INFO_PLIST + ' declares the microphone')
   t.ok(plist.includes(WEB_CREDENTIALS_PLIST), INFO_PLIST + ' turns the passkey modules on')
+  t.ok(plist.includes(EXPORT_COMPLIANCE_PLIST), INFO_PLIST + ' declares the export compliance answer')
   t.alike(entitlements(fs.readFileSync(path.join(dir, ENTITLEMENTS), 'utf8')), entitlements(read(ENTITLEMENTS)), ENTITLEMENTS)
   const manifest = fs.readFileSync(path.join(dir, ANDROID_MANIFEST), 'utf8')
   t.ok(manifest.includes(RECORD_AUDIO_LINE), ANDROID_MANIFEST + ' asks for RECORD_AUDIO')
