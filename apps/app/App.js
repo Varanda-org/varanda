@@ -58,7 +58,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
 import { AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
-import { NodeProvider, useNode } from './src/node'
+import { NodeProvider, perfMarks, useNode } from './src/node'
 import { hostedPage } from './src/configStore'
 import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
@@ -2040,6 +2040,25 @@ function Member () {
     const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
     return () => clearTimeout(t)
   }, [coveringBoot, step])
+  // Dev-only timing (src/perfMarks.js): no-ops unless the env opt-in is set.
+  const splashEndMarked = useRef(false)
+  useEffect(() => {
+    if (!atShell || coveringBoot || splashEndMarked.current) return
+    splashEndMarked.current = true
+    perfMarks().mark('splash-end', feedReady ? 'feedReady' : 'patience')
+  }, [atShell, coveringBoot, feedReady])
+  const markedTab = useRef(tab)
+  useEffect(() => {
+    if (markedTab.current === tab) return
+    markedTab.current = tab
+    const marks = perfMarks()
+    marks.mark('tab:' + tab)
+    for (const line of marks.report()) console.log(line)
+  }, [tab])
+  useEffect(() => {
+    if (!feedBoot.details) return
+    for (const line of perfMarks().report()) console.log(line)
+  }, [feedBoot.details])
   // Light over the Diário band (dark over the offline note above it) and over
   // Membro's band, which stays on top while offline (its note sits below the
   // band and the stack layer covers the shell's). The sheets leave the status

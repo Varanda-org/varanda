@@ -502,7 +502,8 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
     'fixtures.js': [],
     'pictures.js': [],
     'media.js': ["import { pictures } from './pictures.js'", "import { PICTURE_BASE } from './fixtures.js'"],
-    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'"],
+    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { largeFeed } from './large.js'"],
+    'large.js': [],
     'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { fixtures } from './fixtures.js'"]
   }
   for (const file of Object.keys(expectedImports)) {
