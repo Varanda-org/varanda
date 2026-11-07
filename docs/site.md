@@ -54,7 +54,7 @@ A página estática não sabe se a rede está cheia, e não consulta o teto da i
 
 ## Capturas e logotipo
 
-- Telas do app: a página não mostra mais a prévia do app em HTML e CSS. O desenho continua em [apps/site/artwork/app-design.md](../apps/site/artwork/app-design.md), e a receita para capturar o app de verdade está em [apps/site/artwork/screens.md](../apps/site/artwork/screens.md).
+- Telas do app: quatro capturas reais do app iOS em modo Vitrine (dados fictícios), em `apps/site/public/assets/screens/`. A receita para capturar está em [apps/site/artwork/screens.md](../apps/site/artwork/screens.md). O desenho continua em [apps/site/artwork/app-design.md](../apps/site/artwork/app-design.md).
 - Logotipo, ícones, abertura e favicons: gerados das SVGs em `apps/site/artwork/logo`.
 
 ```sh

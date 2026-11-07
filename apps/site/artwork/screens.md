@@ -1,126 +1,148 @@
 # App screenshots for varanda.app
 
-> **Note (2026-10-22).** The page no longer shows these screenshots. It shows a design preview of the new app UI, drawn in HTML and CSS inside `public/index.html` and `public/styles.css` (the `.app` classes), with the design written down in [app-design.md](app-design.md). The six `.webp` files were removed from `public/assets/screens/`. The app now has that design (three tabs, publish button and sheet, profile header, settings), so the recipe below is kept for capturing the real app with it; the file sizes, the environment and the screen descriptions further down are the historical inventory of the first, now removed, screenshots and say nothing about the new design; the fictional people and posts are the same ones the preview uses.
-
-The three screens on the site are screenshots of the real Varanda app: the iOS member UI on the iPhone 17 Pro simulator. They are not mockups and nothing was repainted. The people and the posts are fictional.
+The "Como funciona" section (`#como-e-usar`) of `public/index.html` shows four screenshots of the real iOS app, captured on an iPhone 17 Pro simulator (iOS 26.2, 402x874 pt, captured at 1206x2622 px). The app runs in Vitrine mode, with the fixture data in `apps/app/src/vitrine/fixtures.js`, so every person and every post on screen is fictional. Nothing is repainted.
 
 ## Files
 
-All six are in `apps/site/public/assets/screens/`. Each comes from one full-size simulator capture (1206x2622 PNG, kept out of the repository):
+All eight are in `apps/site/public/assets/screens/`. Each one is encoded from a full-size PNG capture kept outside the repository.
 
 | File | Size | Bytes | Budget |
 |---|---|---|---|
-| `a-rua-804.webp` | 804x1748 | 52 888 | 120 KB |
-| `a-rua-402.webp` | 402x874 | 23 440 | 45 KB |
-| `publicar-804.webp` | 804x1748 | 21 570 | 120 KB |
-| `publicar-402.webp` | 402x874 | 9 504 | 45 KB |
-| `diario-804.webp` | 804x1748 | 44 312 | 120 KB |
-| `diario-402.webp` | 402x874 | 19 570 | 45 KB |
+| `a-rua-402.webp` | 402x874 | 33 650 | 45 KB |
+| `a-rua-804.webp` | 804x1748 | 77 812 | 120 KB |
+| `diario-402.webp` | 402x874 | 27 278 | 45 KB |
+| `diario-804.webp` | 804x1748 | 62 390 | 120 KB |
+| `conversas-402.webp` | 402x874 | 26 602 | 45 KB |
+| `conversas-804.webp` | 804x1748 | 61 438 | 120 KB |
+| `conversa-402.webp` | 402x874 | 18 542 | 45 KB |
+| `conversa-804.webp` | 804x1748 | 42 510 | 120 KB |
 
-All six were encoded at `-q 82`. Every file came in under budget, so the quality was never lowered.
+All files are encoded with `cwebp -q 82`, and every one came in under its budget, so the quality was never lowered. The PNG originals stay outside the repository.
 
-What each one shows:
+## What each screen shows
 
-- **A Rua**: the top of the feed. Marília Prado, Bia Carvalho and Seu Nelson are on screen, then Helena Dias's reply with the line "resposta a 16caf418:2". The bottom card is cut off by the screen edge, the way a feed looks while you scroll.
-- **Publicar**: an unsent draft ("Tem um livro parado na estante? Que tal uma troca no fim de semana?") with the "publicar" button enabled. There is no keyboard, no caret and no status notice.
-- **Diário**: Helena's own diary: #3 her reply (with "resposta a 16caf418:2"), #2 her post, #1 her profile and #0 the member certificate.
-
-The status bar is set to 9:41, full battery (charged), 4 cellular bars and 3 Wi-Fi bars. No dev overlay, Metro banner or keyboard is on screen.
-
-## Environment
-
-- App commit: `aa0366a`. This is the Debug build `apps/app/ios/build/Build/Products/Debug-iphonesimulator/Varanda.app`, and the app source is unchanged since that commit. JS was served by Metro from `apps/app`, started without `EXPO_PUBLIC_VARANDA_GATE_URL` and without `CI=1`.
-- Simulator: iPhone 17 Pro, iOS 26.2 (UDID `8802DF5C-6A82-406C-8D4D-29618AEEA2BC`).
-- Network: loopback only. There was a local DHT on `127.0.0.1:49800` and one certified seeder, and nothing joined the public DHT.
-- **The app was uninstalled first** (`xcrun simctl uninstall booted app.varanda`). That erased the old verification demo data on the simulator ("Iara iPhone" and its diary). The app stays installed afterwards with the Helena Dias data.
-- Test data lived in a session scratchpad directory (`<scratch>` below), outside the repository.
-- Captured on 2026-10-22, so the cards show that date. The simulator clock was not changed; only the status bar was overridden.
+- **A Rua** (`a-rua`): the top of the feed. Posts by João Nascimento, Lia Oliveira, Horta do Bairro (text only), Biblioteca da Praça (mentioning @bia_araujo) and André Costa, then Cecília Ramos's post with a link, cut off by the tab bar the way a feed looks while you scroll. The publish button is in the corner.
+- **Diário** (`diario`): Lia Oliveira's own Diário. The sunset band, her initials in place of a photo, the bio "Café, livros e encontros na praça.", 5 seguindo and 2 seguidores, "Editar perfil", then her posts: a text post and her quote of Cecília Ramos's "As primeiras flores apareceram na horta". No photos (see Pitfalls).
+- **Conversas** (`conversas`): the search field, the Todas, Não lidas and Grupos filters, Pedidos de mensagem, Comunidades, then the conversations with Bia Araújo and André Costa and the groups Passeios de bicicleta, Organização do clube, Nosso Bairro and Clube de Leitura, with unread counts.
+- **Conversa** (`conversa`): the direct conversation with Bia Araújo. Messages about the book club, a reply that quotes "Você", and a message with two photos ("Fotos do encontro de domingo."). The photos are the Vitrine's small drawings (`apps/app/src/vitrine/pictures.js`), not real photos. The composer is empty and there is no keyboard.
 
 ## Fictional content
 
-People (CLI members unless noted):
+The people in the Vitrine are:
 
-| Name | Bio |
-|---|---|
-| Marília Prado | café passado na hora e conversa boa |
-| Seu Nelson | aposentado, feirante de coração |
-| Bia Carvalho | professora, corre no calçadão |
-| Helena Dias (the iOS app) | converso de varanda, de frente pro mar |
+- Lia Oliveira (the Vitrine's own account)
+- João Nascimento
+- Cecília Ramos
+- André Costa
+- Bia Araújo
+- Tomás Ferreira
 
-Posts, in the order they were published:
+Applicants: Nina Souza, Caio Lima.
 
-1. Seu Nelson: "Alguém sabe se a feira de sábado muda de rua? A barraca da manga é a melhor."
-2. Bia Carvalho: "Fim de tarde no calçadão, vento bom, o mar de um azul que não cabe na foto."
-3. Marília Prado: "Choveu de tarde e a varanda encheu: café, bolo de fubá e conversa até escurecer."
-4. Marília Prado, reply to Nelson's post: "Mudou sim, duas quadras pra cima. A manga continua lá."
-5. Helena Dias (app): "Terminei de pintar a grade da varanda. Amanhã tem café pra quem passar."
-6. Helena Dias (app), reply to Bia's post: "Esse azul eu conheço. Guarda um pouco de vento pra mim."
-7. Seu Nelson: "Obrigado, Marília. Sábado cedo eu passo."
-8. Bia Carvalho: "Amanhã tem corrida cedo. Quem vem junto?"
-9. Marília Prado: "Helena, guarda uma xícara pra mim!"
+Pages: Biblioteca da Praça, Horta do Bairro.
 
-There is also the unsent draft in Publicar: "Tem um livro parado na estante? Que tal uma troca no fim de semana?"
+Community: Horta Comunitária. Groups: Passeios de bicicleta, Organização do clube, Nosso Bairro, Clube de Leitura.
 
-Posts 7 to 9 are extra and were not in the original brief. A Rua lists the newest posts first. With posts 1 to 6 alone, Helena's two entries sit next to each other and so do Marília's two. No screen-sized window (about 3.6 cards) could then show four different authors. The three short posts at the top of the feed fix that.
+Before using a capture, check that every name on screen is in this list.
 
-## Commands
+## Recipe
 
-Run from the repository root. `<scratch>` is a fresh empty directory.
+1. Install the dependencies and build the Debug app for the simulator:
 
-```sh
-node apps/cli/scripts/local-dht.js --port 49800 &            # background; note the PID
-B="--bootstrap 127.0.0.1:49800 --dht-host 127.0.0.1"
+   ```sh
+   npm ci --ignore-scripts
+   npm run prepare:native -w apps/app -- ios
+   (cd apps/app/ios && xcodebuild -workspace Varanda.xcworkspace -scheme Varanda -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build build)
+   ```
 
-# association and seeder
-line=$(node bin/varanda.js assoc init --data <scratch>/assoc); ASSOC=${line##* }
-line=$(node bin/varanda.js seed key --data <scratch>/seeder --association $ASSOC); SEEDER=${line##* }
-node bin/varanda.js assoc certify-seeder --data <scratch>/assoc --seeder $SEEDER --out <scratch>/certs/seeder.json
-node bin/varanda.js seed cert add --data <scratch>/seeder --association $ASSOC --cert-file <scratch>/certs/seeder.json
-node bin/varanda.js seed --data <scratch>/seeder --association $ASSOC $B &   # background; note the PID
+   `pod install` rewrites two `SPEC CHECKSUMS` lines of `Podfile.lock` and the privacy manifest (see "iOS" in `docs/development.md`). After the build, and only if you made no lock change of your own, put the committed files back:
 
-# each CLI member (marilia, nelson, bia)
-line=$(node bin/varanda.js id create --data <scratch>/<m> --association $ASSOC); KEY=${line##* }
-node bin/varanda.js assoc certify --data <scratch>/assoc --member $KEY --age-band 18+ --method stub --out <scratch>/certs/<m>.json
-node bin/varanda.js cert add --data <scratch>/<m> --cert-file <scratch>/certs/<m>.json
-node bin/varanda.js profile set --data <scratch>/<m> --name '<name>' --bio '<bio>'
+   ```sh
+   git status --short apps/app/ios
+   git restore --worktree apps/app/ios/Podfile.lock apps/app/ios/Varanda/PrivacyInfo.xcprivacy
+   ```
 
-# posts 1-4 (with ~2 s between them), the reply with --to <nelson key>:<seq>
-node bin/varanda.js post  --data <scratch>/nelson  --text '...'
-node bin/varanda.js reply --data <scratch>/marilia --to <nelson key>:2 --text '...'
-# then each member, so the seeder admits them:
-node bin/varanda.js sync --data <scratch>/<m> --once --timeout-ms 30000 $B
-```
+   Restoring breaks the next build's "Check Pods Manifest.lock" phase, so run `prepare:native` again before building again. Never run `expo prebuild`. The `ios/` folder is maintained by hand.
 
-iOS app:
+2. Create and boot a dedicated simulator. List the runtimes to find the iOS 26.2 id, then create the device:
 
-```sh
-xcrun simctl uninstall booted app.varanda
-xcrun simctl install booted apps/app/ios/build/Build/Products/Debug-iphonesimulator/Varanda.app
-(cd apps/app && npx expo start --port 8081 --clear) &        # background; no gate URL, no CI=1
-xcrun simctl launch booted app.varanda
-```
+   ```sh
+   xcrun simctl list runtimes
+   xcrun simctl create "Varanda Vitrine" "iPhone 17 Pro" <iOS 26.2 runtime id>
+   xcrun simctl boot <udid>
+   ```
 
-In the app: **Conectar** (association key, bootstrap `127.0.0.1:49800`, DHT host `127.0.0.1`). Then the standalone **Identidade** step (it shows alone until the identity and the certificate exist): "criar identidade", then `assoc certify --member <app key> ...` and paste the JSON into the certificate field, then "gravar certificado". **Diário › Editar perfil**: Helena Dias. **Seguindo**: the three CLI keys. Sync once from the sync chip (Ajustes › Sincronizar, "sincronizar uma vez"; obsolete: the sync is now automatic, so just wait for the posts). Post 5 with the green publish button. Post 6 with "responder" on Bia's post in **A Rua**. Sync again. Then the CLI posts 7 to 9 with `post` and `sync --once` for each member, and a third app sync.
+   Always address the simulator by its UDID, never `booted`, so other simulators in use are never touched.
 
-Then, for each capture:
+3. Start Metro with the Vitrine on its own port. Run it from `apps/app`:
 
-```sh
-xcrun simctl status_bar booted override --time 9:41 --batteryState charged --batteryLevel 100 --cellularBars 4 --wifiBars 3
-xcrun simctl io booted screenshot --type png <scratch>/<name>.png      # a-rua, publicar, diario
-sips -Z 1748 <scratch>/<name>.png --out <scratch>/<name>-804.png
-sips -Z 874  <scratch>/<name>.png --out <scratch>/<name>-402.png
-cwebp -q 82 -m 6 -metadata none <scratch>/<name>-804.png -o apps/site/public/assets/screens/<name>-804.webp
-cwebp -q 82 -m 6 -metadata none <scratch>/<name>-402.png -o apps/site/public/assets/screens/<name>-402.webp
-xcrun simctl status_bar booted clear
-```
+   ```sh
+   EXPO_PUBLIC_VARANDA_VITRINE=1 CI=1 npx expo start --localhost --port 8082
+   ```
 
-Finally stop Metro, the seeder and the DHT by their PIDs. A process started in the background of a non-interactive shell ignores SIGINT, so use SIGTERM.
+   `CI=1` keeps Metro non-interactive, so it can run in the background. Do not pass `--clear`: the Metro cache is shared with other checkouts. Wait until this prints `packager-status:running` (use `localhost`: Metro may listen only on IPv6 `[::1]`, and then `127.0.0.1` gets no answer):
 
-## How to redo it, and the pitfalls
+   ```sh
+   curl -s http://localhost:8082/status
+   ```
 
-- **Accented text.** Use the simulator's paste, not typed input. With simulated typing or the tool's text paste, "ã" and "é" arrived as MacRoman mojibake ("Amanh√£"). What worked: `printf '%s' '<text>' | LC_ALL=en_US.UTF-8 xcrun simctl pbcopy booted`, then tap the field, tap it again, and choose "Paste". ASCII text (keys, certificate JSON, the name and bio) types fine. Smart quotes in the certificate JSON are handled by the app.
-- **Swallowed taps.** The first tap after typing into a field is sometimes swallowed (see docs/verification.md). Wait about a second before tapping the button, then check that it took effect. If it didn't, tap again.
-- **Tab bar.** There are three tabs (A Rua, Seguindo, Diário) and the bar no longer scrolls. Sincronizar is no longer a tab and there is no sync chip any more: the sync state is in Ajustes › Avançado › Sincronização (the gear on the Diário header), and the sync runs by itself (there is no "sincronizar uma vez"). Offline, a 'Sem internet' note sits under the top bar: capture online. A post with photos shows its grid only on the hosted web app; in the iOS app it shows neutral 'foto' tiles. The Diário no longer shows the key or technical records (profile, certificate), only posts.
-- **Stale notice (obsolete for the new design).** After a reply, Publicar keeps the notice "resposta publicada" while the screen stays mounted. For the Publicar shot, relaunch the app (`simctl terminate` and `launch`: it reopens on the saved config), then paste the draft. Tap an empty area above the card so the caret goes away. Obsolete: the composer is now a sheet and success is a short toast in the shell, so no notice lingers; kept for history.
-- **Simulator screenshots.** The iOS Simulator tool's own screenshot can lag a step behind. Check every state with `xcrun simctl io booted screenshot`.
-- **Before you encode.** Look at each PNG: right tab, no overlay, no keyboard, 9:41 in the status bar, and none of the old test strings.
+4. Install and open the app:
+
+   ```sh
+   xcrun simctl install <udid> apps/app/ios/build/Build/Products/Debug-iphonesimulator/Varanda.app
+   xcrun simctl launch <udid> app.varanda -RCT_jsLocation localhost:8082
+   ```
+
+   If the app still loads port 8081, set the Metro address in the app defaults, stop the running app and launch it again (`simctl launch` does not restart an app that is already running):
+
+   ```sh
+   xcrun simctl spawn <udid> defaults write app.varanda RCT_jsLocation localhost:8082
+   xcrun simctl terminate <udid> app.varanda
+   xcrun simctl launch <udid> app.varanda -RCT_jsLocation localhost:8082
+   ```
+
+   The Debug app's default Metro port is set at pod install, so `RCT_METRO_PORT` at launch has no effect.
+
+5. Check that it is the Vitrine. A Rua must show the follows of Lia Oliveira (João Nascimento, Cecília Ramos, and so on). Skip the intro cards.
+
+6. Set the status bar and the light appearance:
+
+   ```sh
+   xcrun simctl status_bar <udid> override --time 9:41 --dataNetwork wifi --wifiMode active --wifiBars 3 --cellularMode active --cellularBars 4 --batteryState charged --batteryLevel 100
+   xcrun simctl ui <udid> appearance light
+   ```
+
+7. Capture each screen. Save the PNGs in a scratch folder outside the repository:
+
+   ```sh
+   xcrun simctl io <udid> screenshot <scratch>/<stem>.png
+   ```
+
+8. Encode each capture at both sizes. Install the encoder once with `brew install webp`:
+
+   ```sh
+   sips -z 1748 804 <scratch>/<stem>.png --out <scratch>/<stem>-804.png
+   sips -z 874 402 <scratch>/<stem>.png --out <scratch>/<stem>-402.png
+   cwebp -q 82 -metadata none <scratch>/<stem>-804.png -o apps/site/public/assets/screens/<stem>-804.webp
+   cwebp -q 82 -metadata none <scratch>/<stem>-402.png -o apps/site/public/assets/screens/<stem>-402.webp
+   ```
+
+   If a file is over its budget, lower `-q` only as far as needed and note it in the table.
+
+## Pitfalls
+
+- No LogBox or dev overlay may be on screen. Dismiss it before capturing.
+- No keyboard on screen.
+- Avoid the Horta do Bairro post: its photo shows "foto indisponível".
+- The Vitrine is dev-only. It needs a `__DEV__` bundle and `EXPO_PUBLIC_VARANDA_VITRINE=1` (see `apps/app/src/vitrine/enabled.js`), so a release build never shows it.
+- The Diário has no photos, because Vitrine media exists only for direct messages and groups (`apps/app/src/vitrine/media.js`).
+- Never touch another session's simulator or the Metro server on port 8081.
+- The dates on screen depend on the simulator's real clock, not on the status bar override. The fixtures are dated 4 and 5 November 2026 (`apps/app/src/vitrine/fixtures.js`), and `apps/app/src/format.js` shows them as "4 nov" and "5 nov" only from 7 November 2026 to the end of 2026. Earlier they read "hoje", "ontem" or "N h"; from 2027 on they gain the year ("5 nov 2026"). A recapture outside that window changes how the screens look.
+- After replacing a capture, update the Bytes column of the table above and run `node apps/site/test/site.test.js`.
+
+## Environment
+
+- App commit: `ff5958f2` (`main`). Debug build `apps/app/ios/build/Build/Products/Debug-iphonesimulator/Varanda.app`, JS served by Metro on port 8082 with `EXPO_PUBLIC_VARANDA_VITRINE=1`. The `-RCT_jsLocation localhost:8082` launch argument worked on the first try.
+- Simulator: a dedicated "Varanda Vitrine" iPhone 17 Pro, iOS 26.2 (UDID `92F47855-662C-4707-AD55-9769AB60E735`), light appearance.
+- Network: none needed. The Vitrine answers every request from fixtures.
+- Captured on 2026-11-07. The fixtures date everything 4 and 5 November 2026; only the status bar clock was overridden.

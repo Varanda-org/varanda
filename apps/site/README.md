@@ -3,7 +3,7 @@
 O site estático do Varanda (varanda.app). Pacote privado do monorepo, sem JavaScript na página, sem formulários, sem cookies e sem rastreadores. Os botões principais abrem https://bora.varanda.app/, e o teste só permite varanda.app, a raiz de bora.varanda.app e o repositório no GitHub como URLs absolutas.
 
 - `public/`: a raiz publicável. Só esta pasta vai para a GitHub Pages.
-- `artwork/`: as fontes do logotipo, `og.html` (a imagem de compartilhamento), `app-design.md` (o desenho novo do app; a página não o mostra mais) e `screens.md` (a receita para capturar o app de verdade quando ele tiver esse desenho). Nunca são publicadas.
+- `artwork/`: as fontes do logotipo, `og.html` (a imagem de compartilhamento), `app-design.md` (o desenho novo do app) e `screens.md` (a receita para capturar as telas do app que a página mostra). Nunca são publicadas.
 - `scripts/`: `serve.js` (servidor local), `render-assets.js` (gera ícones, abertura e favicons a partir do logotipo) e `render-legal.js` (gera as páginas de termos e privacidade a partir do texto do app).
 
 ```sh
@@ -20,7 +20,7 @@ A página é a porta de entrada de quem chega do Instagram pelo celular. O títu
 
 Os dois botões, "Conheça a Varanda" (abertura, `cta-inicio`) e "Quero conhecer a Varanda" (seção `#gente`, `cta-gente`), abrem exatamente https://bora.varanda.app/ na mesma aba. Junto de cada um há a frase "Vagas limitadas nesta abertura.": se a rede estiver cheia, o app avisa durante a entrada e dá para tentar de novo em alguns dias. A frase não promete lista de espera nem aviso posterior, e a página não consulta o teto de contas da instalação. A abertura também traz a nota "Abriu pelo Instagram? Se a entrada não funcionar, abra o link no Chrome ou no Safari.".
 
-O conteúdo técnico, inclusive o que conferir e como publicar, está em [docs/site.md](../../docs/site.md). O desenho do app segue em [artwork/app-design.md](artwork/app-design.md), e a receita para capturar o app de verdade está em [artwork/screens.md](artwork/screens.md). A página não mostra mais telas do app em HTML e CSS.
+O conteúdo técnico, inclusive o que conferir e como publicar, está em [docs/site.md](../../docs/site.md). O desenho do app segue em [artwork/app-design.md](artwork/app-design.md), e a receita para capturar o app de verdade está em [artwork/screens.md](artwork/screens.md). A página mostra quatro capturas reais do app em modo Vitrine (dados fictícios), em `public/assets/screens/`, feitas com a receita de `artwork/screens.md`.
 
 ## Termos e privacidade
 
