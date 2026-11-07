@@ -3,11 +3,12 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
-const { verifyReport } = require('@varanda/core/lib/report')
+const { verifyReport, verifyDmReport } = require('@varanda/core/lib/report')
 const { verifyAppeal } = require('@varanda/core/lib/appeal')
 const { verifyModeratorCert } = require('@varanda/core/lib/cert')
 const { canonicalBody, verifyModRequest } = require('@varanda/core/lib/mod-request')
-const { MAX_REPORTS, MAX_APPEALS, AI_ACTOR } = require('./moderation-store')
+const { mediaBounds, audioBounds } = require('@varanda/rpc')
+const { MAX_REPORTS, MAX_APPEALS, AI_ACTOR, ANEXO_MAX_BYTES, ANEXO_MIMES } = require('./moderation-store')
 
 // The moderation desk of the account service (mounted by ./server.js before
 // any issuer-only route, so it works on an unconfigured service):
@@ -16,6 +17,13 @@ const { MAX_REPORTS, MAX_APPEALS, AI_ACTOR } = require('./moderation-store')
 //     cookie, the reporter's key proof over a single-use nonce is the
 //     authority (packages/core/lib/report.js); only a member linked to a
 //     Google account may report, so every report has an accountable author.
+//     POST /account/report/anexo is the same report carrying one image or
+//     one voice note (a private or group message, statements dm v2 / v3):
+//     the only route with
+//     a body above REPORT_BODY_MAX, and at most MAX_ANEXO_INFLIGHT such
+//     bodies are read at once. The image is stored as the reporter's word
+//     and served to the panel from local disk only; it never reaches the AI
+//     triage, a log or the seeder.
 //   - a blocked member's appeal (POST /account/appeal/start, POST
 //     /account/appeal): the same rules as a report (no cookie, the member's
 //     key proof over a single-use nonce, a linked Google account), about the
@@ -47,6 +55,12 @@ const { MAX_REPORTS, MAX_APPEALS, AI_ACTOR } = require('./moderation-store')
 // What the panel shows for a private group's report: the seeder holds
 // ciphertext, so the quote is the reporter's word.
 const SEALED_PROVENANCE = 'cifrada: citação do denunciante'
+// What the panel shows for a report with an anexo: in the list, and next to
+// the image, which like the quote is the reporter's word only.
+const ANEXO_LIST_LABEL = 'com mídia'
+const ANEXO_PROVENANCE = 'imagem enviada por quem denunciou, não conferida'
+const ANEXO_AUDIO_PROVENANCE = 'áudio não conferido, enviado por quem denunciou'
+const ANEXO_AUDIO_MIME = 'audio/mp4'
 const LOGIN_COOKIE = '__Host-varanda-mod-login'
 const SESSION_COOKIE = '__Host-varanda-mod'
 const LOGIN_TTL_MS = 600 * 1000
@@ -78,6 +92,25 @@ const NONCE_MAC_BYTES = 16
 // Rows of api/reports per answer (moderation-store.js LIST_DEFAULT).
 const REPORTS_PAGE = 100
 const REPORT_BODY_MAX = 8192
+// A report plus its anexo in standard base64 (4 characters per 3 bytes): a
+// body past this (a 2 MiB image, say) answers 413 unread.
+const ANEXO_B64_MAX = 4 * Math.ceil(ANEXO_MAX_BYTES / 3)
+const ANEXO_BODY_MAX = ANEXO_B64_MAX + REPORT_BODY_MAX
+const MAX_ANEXO_INFLIGHT = 4
+// Reading an anexo body is anonymous until its nonce and signature check, so
+// a slot is never held by a sender that stops: a body with no chunk for
+// ANEXO_IDLE_MS is cut, and every body has a deadline of ANEXO_READ_SLACK_MS
+// plus its declared length at ANEXO_MIN_BITS_PER_MS (1 Mbit/s, a slow mobile
+// link): a full ANEXO_BODY_MAX (about 1.4 MB, 11.3 s at that rate) would get
+// about 13.3 s, a small image a couple of seconds. The service's
+// requestTimeout (server.js) still ends any request first.
+const ANEXO_IDLE_MS = 5000
+const ANEXO_READ_SLACK_MS = 2000
+const ANEXO_MIN_BITS_PER_MS = 1000
+const DECIMAL_RE = /^[0-9]{1,10}$/
+const B64_RE = /^[A-Za-z0-9+/]*={0,2}$/
+// The image itself, served to a signed-in moderator: never a document.
+const ANEXO_CSP = "default-src 'none'; sandbox"
 // A legal snapshot is at most 393216 bytes (blocklist.js MAX_SNAPSHOT_BYTES)
 // plus at most 4096 change ids (mod-request.js MAX_CHANGE_IDS).
 const ACK_BODY_MAX = 524288
@@ -90,7 +123,7 @@ const PARAM_RE = /^[\x21-\x7e]{1,512}$/
 const MOD_EMAIL_RE = /^[^\s,@]{1,64}@[^\s,@]{1,255}$/
 const MAX_MOD_EMAILS = 32
 
-const PANEL_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+const PANEL_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; media-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 const ASSETS = Object.freeze({
   '/account/mod/': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/account/mod/app.js': { file: 'app.js', type: 'text/javascript; charset=utf-8' },
@@ -164,6 +197,21 @@ function makeRoom (map, max, now) {
   while (map.size >= max) map.delete(map.keys().next().value)
 }
 
+// Standard base64 of one jpeg, webp or gif image, or one audio-only MPEG-4
+// voice note, of at most ANEXO_MAX_BYTES that parses within the media or
+// audio bounds -> { bytes, mime, sha256 }, or null. The format comes from
+// the bytes, never from the request: a container that declares a video
+// track fails audioBounds whatever the sender calls it.
+function decodeAnexo (value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > ANEXO_B64_MAX || value.length % 4 !== 0 || !B64_RE.test(value)) return null
+  const bytes = Buffer.from(value, 'base64')
+  if (bytes.length < 1 || bytes.length > ANEXO_MAX_BYTES || bytes.toString('base64') !== value) return null
+  let mime = ANEXO_MIMES.find((m) => m !== ANEXO_AUDIO_MIME && mediaBounds(bytes, m) !== null)
+  if (mime === undefined && audioBounds(bytes) !== null) mime = ANEXO_AUDIO_MIME
+  if (mime === undefined) return null
+  return { bytes, mime, sha256: nodeCrypto.createHash('sha256').update(bytes).digest('hex') }
+}
+
 function createModRoutes ({
   association,
   origin,
@@ -227,10 +275,16 @@ function createModRoutes ({
   // member's or the moderator's signature over it), and is kept only until
   // its own expiry. Growth is therefore bounded by the rate of VALIDLY
   // SIGNED requests (and the global bucket), never by anonymous traffic.
+  // One exception: /account/report/anexo spends a genuine unspent nonce as
+  // soon as it is checked, before the signature, so one nonce cannot be
+  // replayed into many slot-holding bodies; that growth is still bounded by
+  // the nonces this process minted and by MAX_ANEXO_INFLIGHT reads at once.
   // nonce -> expiresAt.
   const spentReportNonces = new Map()
   const spentAppealNonces = new Map()
   const spentChallenges = new Map()
+  // Anexo bodies being read right now (see MAX_ANEXO_INFLIGHT).
+  let anexoInflight = 0
 
   // The moderator sign-in is stateless until the callback: GET /login stores
   // nothing and seals { expiry, loginId, state, verifier } into the login
@@ -265,9 +319,13 @@ function createModRoutes ({
   //   - group: the panel's api/reports/<id>/grupo lookups, keyed on the
   //     session too but in a window of their own, so a queue full of group
   //     reports cannot spend the budget decide and the lists need.
+  //   - anexo: the panel's api/reports/<id>/anexo image loads (one per row
+  //     with an image, loaded on their own), in a window of their own for
+  //     the same reason.
   const limits = {
     session: keyedWindow(60, 60 * 1000, now),
     group: keyedWindow(30, 60 * 1000, now),
+    anexo: keyedWindow(300, 60 * 1000, now),
     operatorSigned: fixedWindow(30, 60 * 1000, now)
   }
   const over = () => new RouteError('pedido-invalido', 429)
@@ -423,17 +481,32 @@ function createModRoutes ({
     send(res, 200, { nonce: mintNonce(REPORT_NONCE_DOMAIN, [member], REPORT_NONCE_TTL_MS) })
   }
 
-  async function report (req, res, body) {
+  // `withAnexo`: the body came through /account/report/anexo and must carry
+  // an `anexo` (standard base64); plain /account/report refuses one.
+  async function report (req, res, body, withAnexo = false) {
     needModeration()
+    // Only the field's presence and type before the nonce: the attachment
+    // is decoded, sniffed and hashed for a request with a valid nonce only.
+    if (withAnexo ? typeof body.anexo !== 'string' : body.anexo !== undefined) throw refuse('pedido-invalido')
     const member = hex64(body.member)
     const nonce = body.nonce
     const expiresAt = checkNonce(nonce, REPORT_NONCE_DOMAIN, [member])
     // Forged, tampered, expired, another member's, or already spent by a
     // verified report.
     if (expiresAt === null || spentReportNonces.has(nonce)) throw new RouteError('expirado', 400)
+    let anexo = null
+    if (withAnexo) {
+      // Burnt now, whatever follows: a bad signature or a junk image costs
+      // the sender this nonce (see spentReportNonces).
+      spend(spentReportNonces, nonce, expiresAt)
+      anexo = decodeAnexo(body.anexo)
+      if (anexo === null) throw refuse('pedido-invalido')
+    }
     const target = hex64(body.target)
     // The own key is never a target; checked before the signature and the store.
     if (target === member) throw refuse('pedido-invalido')
+    if (body.kind === 'dm') return reportDm(res, body, { member, nonce, expiresAt, target, anexo })
+    if (body.kind !== undefined) throw refuse('pedido-invalido')
     const seq = body.seq === undefined || body.seq === null ? null : body.seq
     // A group message (report v2): writer and group come together, only with
     // a seq.
@@ -443,12 +516,16 @@ function createModRoutes ({
     // A group root is not a diary, and a writer core is not one either. The
     // writer MAY be the group key: the creator posts through the root core.
     if (writer !== null && (group === target || writer === target)) throw refuse('pedido-invalido')
+    // A diary post is on the seeder: an image rides on a group message only.
+    if (anexo !== null && writer === null) throw refuse('pedido-invalido')
     const text = body.text === undefined ? '' : body.text
     const quote = body.quote === undefined ? '' : body.quote
     const { reason, signature } = body
     const fields = writer === null
       ? { nonce, member, association, target, seq, reason, text, quote }
       : { nonce, member, association, target, seq, writer, group, reason, text, quote }
+    // The digest is of the bytes received, so another image fails here.
+    if (anexo !== null) fields.anexo = anexo.sha256
     if (!verifyReport(fields, signature).ok) throw refuse('assinatura-invalida')
     // Spent only now that the member's signature over it verified (no await
     // between the check above and this line, so two concurrent copies of one
@@ -456,13 +533,39 @@ function createModRoutes ({
     // the app asks for a fresh nonce, and the store answers a retry of a
     // landed report as a duplicate.
     spend(spentReportNonces, nonce, expiresAt)
-    const { report: added, duplicate } = await storeAsync(() => moderation.add({ reporter: member, target, seq, writer, group, reason, text, quote, signature, nonce }))
+    const { report: added, duplicate } = await storeAsync(() => moderation.add({ reporter: member, target, seq, writer, group, reason, text, quote, signature, nonce, anexo }))
     log({ event: 'report', reason: duplicate ? 'duplicada' : 'nova' })
     send(res, 200, { id: added.id, duplicate })
     // A duplicate is a report the triage already has. A group message never
     // reaches the triage: it reads the diary at `seq`, which is not the
-    // reported block, so only a human decides it.
-    if (!duplicate && writer === null) afterAnswer(() => triage.onReport(added))
+    // reported block, so only a human decides it. Neither does a report
+    // with an anexo (always a group message here, but checked on its own).
+    if (!duplicate && writer === null && anexo === null) afterAnswer(() => triage.onReport(added))
+  }
+
+  // A private message (report kind 'dm', docs/rpc.md 5.81): the message is on
+  // no diary, so the seeder is never asked for it and the quote is the
+  // reporter's word only. Fields of a diary or group report make it invalid.
+  // With an anexo the statement is dm v2, over the digest of the bytes
+  // received; the quote may then be empty (a media-only message).
+  async function reportDm (res, body, { member, nonce, expiresAt, target, anexo }) {
+    for (const k of ['seq', 'writer', 'group', 'peer']) {
+      if (body[k] !== undefined) throw refuse('pedido-invalido')
+    }
+    const text = body.text === undefined ? '' : body.text
+    const { reason, quote, signature } = body
+    const fields = { nonce, member, association, target, reason, text, quote }
+    if (anexo !== null) fields.anexo = anexo.sha256
+    if (!verifyDmReport(fields, signature).ok) throw refuse('assinatura-invalida')
+    // Spent as in report(): no await since the nonce check.
+    spend(spentReportNonces, nonce, expiresAt)
+    const { report: added, duplicate } = await storeAsync(() => moderation.addDm({ reporter: member, target, reason, text, quote, signature, nonce, anexo }))
+    log({ event: 'report', reason: duplicate ? 'duplicada' : 'nova' })
+    send(res, 200, { id: added.id, duplicate })
+    // The worker marks every private message (kind 'dm') for a human
+    // without reading or embedding anything, an anexo included: the row
+    // it gets carries the anexo's shape only, never the bytes.
+    if (!duplicate) afterAnswer(() => triage.onReport(added))
   }
 
   // --- member appeals ------------------------------------------------------
@@ -604,9 +707,15 @@ function createModRoutes ({
     return r.target === own || r.reporter === own
   }
 
+  // A private message row (kind 'dm') has no seq, writer or group keys at
+  // all; every group test reads them through here.
+  function groupOf (r) {
+    return r.kind === 'dm' ? null : r.group
+  }
+
   // -> { ok: true, root, name, creator, texto, sealed? } | { ok: false, code }. Never throws.
   async function confirmGroup (r) {
-    if (r.writer === null || r.group === null) return { ok: false, code: 'pedido-invalido' }
+    if (r.kind === 'dm' || r.writer === null || r.group === null) return { ok: false, code: 'pedido-invalido' }
     if (groupCheck === null) return { ok: false, code: 'config' }
     try {
       const v = await groupCheck.check({ group: r.group, writer: r.writer, diary: r.target, seq: r.seq })
@@ -622,7 +731,7 @@ function createModRoutes ({
   // account), so every such block waits for the seeder to confirm a served
   // diary. -> { ok: true, needed } | { ok: false, code }. Never throws.
   async function confirmTarget (r) {
-    if (r.group !== null) return { ok: true, needed: false }
+    if (groupOf(r) !== null) return { ok: true, needed: false }
     if (groupCheck === null || typeof groupCheck.checkDiary !== 'function') return { ok: false, code: 'config' }
     try {
       const v = await groupCheck.checkDiary({ diary: r.target })
@@ -645,10 +754,15 @@ function createModRoutes ({
       at: r.at,
       kind: r.kind,
       target: r.target,
-      seq: r.seq,
-      writer: r.writer,
-      group: r.group,
+      seq: r.seq ?? null,
+      writer: r.writer ?? null,
+      group: r.group ?? null,
       quote: r.quote,
+      // The image is fetched from api/reports/<id>/anexo; its digest stays
+      // in the store.
+      anexo: Object.hasOwn(r, 'anexo')
+        ? { mime: r.anexo.mime, size: r.anexo.size, label: ANEXO_LIST_LABEL, provenance: r.anexo.mime === ANEXO_AUDIO_MIME ? ANEXO_AUDIO_PROVENANCE : ANEXO_PROVENANCE }
+        : null,
       reason: r.reason,
       text: r.text,
       reporter: { member: r.reporter, username: usernameOf(r.reporter, cache) },
@@ -828,7 +942,7 @@ function createModRoutes ({
     // as author) therefore waits for the seeder to confirm that the writer
     // belongs to that diary, so an invented quote cannot aim a block at a
     // diary that never wrote it. Fails closed; 'descartar' never asks.
-    if (body.decision === 'bloquear' && row.group !== null) {
+    if (body.decision === 'bloquear' && groupOf(row) !== null) {
       const v = await confirmGroup(row)
       if (!v.ok) {
         log({ event: 'grupo', reason: v.code })
@@ -843,7 +957,7 @@ function createModRoutes ({
       }
     }
     // ('grupo' on a report without a group is the store's refusal.)
-    if (body.decision === 'bloquear' && row.group === null && block === 'diario') {
+    if (body.decision === 'bloquear' && groupOf(row) === null && block === 'diario') {
       const v = await confirmTarget(row)
       if (!v.ok) {
         log({ event: 'alvo', reason: v.code })
@@ -880,7 +994,7 @@ function createModRoutes ({
   // only: decide checks again.
   async function groupInfo (req, res, session, id) {
     const row = store(() => moderation.get(id))
-    if (row === null || row.writer === null || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
+    if (row === null || groupOf(row) === null || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
     const v = await confirmGroup(row)
     if (!v.ok) log({ event: 'grupo', reason: v.code })
     // `texto`: the reported message as the seeder decoded it (peer text,
@@ -898,10 +1012,31 @@ function createModRoutes ({
   // again.
   async function targetInfo (req, res, session, id) {
     const row = store(() => moderation.get(id))
-    if (row === null || row.group !== null || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
+    if (row === null || groupOf(row) !== null || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
     const v = await confirmTarget(row)
     if (!v.ok) log({ event: 'alvo', reason: v.code })
     send(res, 200, v.ok ? { confirmed: true } : { confirmed: false, reason: v.code })
+  }
+
+  // The stored image of a report, from local disk only (moderation-store.js
+  // anexoOf re-hashes it): never the seeder, a blob or any third party.
+  async function anexoInfo (req, res, session, id) {
+    const row = store(() => moderation.get(id))
+    if (row === null || !Object.hasOwn(row, 'anexo') || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
+    const found = store(() => moderation.anexoOf(id))
+    if (found === null) {
+      log({ event: 'anexo', reason: 'ausente' })
+      throw refuse('nao-encontrado')
+    }
+    res.writeHead(200, {
+      'Content-Type': found.mime,
+      'Content-Length': found.bytes.length,
+      'Content-Disposition': 'inline',
+      ...BASE_HEADERS,
+      'Content-Security-Policy': ANEXO_CSP,
+      'Cross-Origin-Resource-Policy': 'same-origin'
+    })
+    res.end(found.bytes)
   }
 
   async function unblock (req, res, session, body) {
@@ -1011,6 +1146,50 @@ function createModRoutes ({
     return readJsonBody(req, max)
   }
 
+  // The anexo body's declared length, or a refusal before any slot is
+  // taken: a chunked body (no Content-Length) could only be capped as it
+  // streams, and a length past the cap answers 413 unread.
+  function anexoLength (req, res) {
+    const declared = req.headers['content-length']
+    if (req.headers['transfer-encoding'] !== undefined || typeof declared !== 'string' || !DECIMAL_RE.test(declared)) {
+      res.setHeader('Connection', 'close')
+      throw new RouteError('pedido-invalido', 411)
+    }
+    const length = Number(declared)
+    if (length > ANEXO_BODY_MAX) throw new RouteError('pedido-invalido', 413)
+    return length
+  }
+
+  // readJsonBody under the idle cut and the deadline (ANEXO_IDLE_MS): either
+  // destroys the request, which ends the read and so frees its slot.
+  function readAnexoBody (req, length) {
+    return new Promise((resolve, reject) => {
+      let settled = false
+      let idle = null
+      const finish = (err, value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(idle)
+        clearTimeout(deadline)
+        req.removeListener('data', onData)
+        if (err) reject(err)
+        else resolve(value)
+      }
+      const cut = () => {
+        finish(new RouteError('pedido-invalido', 408))
+        req.destroy()
+      }
+      const onData = () => {
+        clearTimeout(idle)
+        idle = setTimeout(cut, ANEXO_IDLE_MS)
+      }
+      const deadline = setTimeout(cut, ANEXO_READ_SLACK_MS + Math.ceil(length * 8 / ANEXO_MIN_BITS_PER_MS))
+      idle = setTimeout(cut, ANEXO_IDLE_MS)
+      req.on('data', onData)
+      readJsonBody(req, ANEXO_BODY_MAX).then((value) => finish(null, value), finish)
+    })
+  }
+
   async function withSession (req, fn, limit = limits.session) {
     const session = sessionOf(req)
     if (session === null) throw unauthorized()
@@ -1028,6 +1207,21 @@ function createModRoutes ({
     if (post && p === '/account/report') return report(req, res, await postBody(req, REPORT_BODY_MAX))
     if (post && p === '/account/appeal/start') return appealStart(req, res, await postBody(req, undefined))
     if (post && p === '/account/appeal') return appeal(req, res, await postBody(req, REPORT_BODY_MAX))
+    if (post && p === '/account/report/anexo') {
+      needModeration()
+      checkPost(req)
+      const length = anexoLength(req, res)
+      if (anexoInflight >= MAX_ANEXO_INFLIGHT) throw refuse('limite')
+      anexoInflight++
+      // The slot is held until the whole report is handled, so the decode,
+      // bounds check and hash of an image are bounded too, not only the read.
+      try {
+        const body = await readAnexoBody(req, length)
+        return await report(req, res, body, true)
+      } finally {
+        anexoInflight--
+      }
+    }
 
     if (get && p === '/account/mod') return redirectTo(res, origin + '/account/mod/')
     if (get && Object.hasOwn(ASSETS, p)) {
@@ -1076,6 +1270,11 @@ function createModRoutes ({
       const id = groupMatch[1]
       return withSession(req, (s) => groupInfo(req, res, s, id), limits.group)
     }
+    const anexoMatch = /^\/account\/mod\/api\/reports\/([^/]+)\/anexo$/.exec(p)
+    if (get && anexoMatch && ID_RE.test(anexoMatch[1])) {
+      const id = anexoMatch[1]
+      return withSession(req, (s) => anexoInfo(req, res, s, id), limits.anexo)
+    }
     const targetMatch = /^\/account\/mod\/api\/reports\/([^/]+)\/alvo$/.exec(p)
     if (get && targetMatch && ID_RE.test(targetMatch[1])) {
       const id = targetMatch[1]
@@ -1103,6 +1302,11 @@ module.exports = {
   LOGIN_COOKIE,
   SESSION_COOKIE,
   REPORT_BODY_MAX,
+  ANEXO_BODY_MAX,
+  MAX_ANEXO_INFLIGHT,
+  ANEXO_LIST_LABEL,
+  ANEXO_PROVENANCE,
+  ANEXO_AUDIO_PROVENANCE,
   ACK_BODY_MAX,
   MAX_MOD_EMAILS,
   PANEL_CSP,

@@ -68,19 +68,23 @@ test('group-downloaded events become one groups.changed per group', async (t) =>
   t.is(s.events.filter((e) => e.event === 'sync.event' && e.data.line.startsWith('grupo ')).length, 6, 'every download still has its line')
 })
 
-test('a grown community root also changes every group held here', async (t) => {
+test('a grown community core changes the community and every local group whose root names it', async (t) => {
   const G = 'a1'.repeat(32)
   const C = 'c3'.repeat(32)
+  const CW = 'e5'.repeat(32)
   const L = 'd4'.repeat(32)
+  const O = 'f6'.repeat(32)
   scripted = async ({ onEvent }) => {
-    onEvent({ event: 'group-downloaded', key: C, group: C, length: 2 })
-    onEvent({ event: 'group-downloaded', key: L, group: L, length: 1 })
+    onEvent({ event: 'group-parent', key: C, group: G })
+    onEvent({ event: 'group-parent', key: C, group: L })
+    onEvent({ event: 'group-downloaded', key: CW, group: C, length: 2 })
     return { ok: true, downloaded: {}, unadvertised: [], skipped: [], errors: [] }
   }
   const s = await open(t)
-  store.writeGroups(s.dataDir, [{ group: G, writer: G, nonce: 'ab'.repeat(16) }, { group: L, writer: L, nonce: 'cd'.repeat(16) }])
+  store.writeGroups(s.dataDir, [{ group: G, writer: G, nonce: 'ab'.repeat(16) }, { group: L, writer: L, nonce: 'cd'.repeat(16) }, { group: O, writer: O, nonce: 'ef'.repeat(16) }])
   await s.call('sync.start', { once: true })
   for (let i = 0; i < 200 && !s.events.some((e) => e.event === 'sync.stopped'); i++) await new Promise((resolve) => setTimeout(resolve, 10))
   const changed = s.events.filter((e) => e.event === 'groups.changed').map((e) => e.data.group).sort()
-  t.alike(changed, [G, L, C].sort(), 'the community key and every local group')
+  t.alike(changed, [G, L, C].sort(), 'the community and the groups naming it, never another local group')
+  t.absent(s.events.some((e) => e.event === 'sync.event' && e.data.line.includes('c3c3c3c3')), 'group-parent prints nothing')
 })

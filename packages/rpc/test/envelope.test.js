@@ -66,7 +66,7 @@ test('response: success and error', (t) => {
 })
 
 test('event names and stop reasons (sync.started and preempted included)', (t) => {
-  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed'])
+  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed', 'dm.sending', 'seen.changed'])
   t.alike([...STOP_REASONS], ['done', 'stopped', 'preempted', 'timeout', 'error', 'idle'])
   t.is(STOP_REASONS.length, 6)
   t.ok(Object.isFrozen(EVENTS))
@@ -123,4 +123,33 @@ test('event: groups.changed', (t) => {
   for (const data of [{}, { group: group.toUpperCase() }, { group: group.slice(1) }, { group: group + '0' }, { group: 1 }, { group: null }, { group, extra: 1 }, { count: 1 }, [], null]) {
     t.absent(ev(data).ok, JSON.stringify(data))
   }
+})
+
+test('event: dm.changed', (t) => {
+  const ev = (data) => validateEvent({ v: 1, event: 'dm.changed', seq: 1, data })
+  t.ok(ev({ added: 0 }).ok, 'a pull that only applied a ctl')
+  t.ok(ev({ added: 8 }).ok)
+  t.alike(ev({ added: 2 }).value, { v: 1, event: 'dm.changed', seq: 1, data: { added: 2 } })
+  for (const data of [{}, { added: -1 }, { added: 1.5 }, { added: '1' }, { added: null }, { added: 2 ** 53 }, { added: 1, peer: 'ab'.repeat(32) }, { count: 1 }, [], null]) {
+    t.absent(ev(data).ok, JSON.stringify(data))
+  }
+})
+
+test('event: dm.sending', (t) => {
+  const ev = (data) => validateEvent({ v: 1, event: 'dm.sending', seq: 1, data })
+  t.ok(ev({}).ok)
+  t.alike(ev({}).value, { v: 1, event: 'dm.sending', seq: 1, data: {} })
+  for (const data of [{ n: 1 }, { added: 0 }, { runId: 1, reason: 'done' }, [], null, 'x']) {
+    t.absent(ev(data).ok, JSON.stringify(data))
+  }
+})
+
+test('event: seen.changed', (t) => {
+  const ev = (data) => validateEvent({ v: 1, event: 'seen.changed', seq: 1, data })
+  t.ok(ev({}).ok)
+  t.alike(ev({}).value, { v: 1, event: 'seen.changed', seq: 1, data: {} })
+  for (const data of [{ added: 0 }, { group: 'ab'.repeat(32) }, { runId: 1, reason: 'done' }, [], null, 'x', Object.create({ extra: 1 })]) {
+    t.absent(ev(data).ok, JSON.stringify(data))
+  }
+  t.absent(validateEvent({ v: 1, event: 'seen.changed', seq: 1 }).ok, 'missing data')
 })

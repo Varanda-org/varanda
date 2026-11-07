@@ -74,22 +74,25 @@ function groupLine (g) {
 }
 
 async function createRun (flags) {
+  if (flags.community === null) throw usage('informe --community <chave>')
   if (flags.name === null) throw usage('informe --name <nome>')
   const join = joinOf(flags)
   if (flags.private) {
     // A private group always admits by approval (docs/rpc.md 5.36).
     if (join === 'open') throw usage('grupo privado é sempre por aprovação: tire --join open')
-    const result = await mutate(() => member.groupCreate(ctxOf(flags), { name: flags.name, join: 'approval', visibility: 'private' }))
+    const result = await mutate(() => member.groupCreate(ctxOf(flags), { name: flags.name, join: 'approval', visibility: 'private', community: flags.community }))
     print(flags, result, 'grupo privado criado: ' + result.group)
     return
   }
   if (join === null) throw usage('informe --join open|approval')
-  const result = await mutate(() => member.groupCreate(ctxOf(flags), { name: flags.name, join }))
+  const result = await mutate(() => member.groupCreate(ctxOf(flags), { name: flags.name, join, community: flags.community }))
   print(flags, result, 'grupo criado: ' + result.group)
 }
 
 async function joinRun (flags) {
-  const result = await mutate(() => member.groupJoin(ctxOf(flags), { group: groupKey(flags) }))
+  const params = { group: groupKey(flags) }
+  if (flags.community !== null) params.community = flags.community
+  const result = await mutate(() => member.groupJoin(ctxOf(flags), params))
   const lines = {
     member: 'você entrou no grupo',
     requested: 'pedido enviado: aguarde um administrador',
@@ -113,12 +116,16 @@ async function postRun (flags) {
 
 async function readRun (flags) {
   const result = await member.groupRead(ctxOf(flags), readParams(groupKey(flags), flags))
+  // Nothing here shows an image, and no command prints a secret: a private
+  // item's key and nonce stay out of the output.
+  result.items = result.items.map((item) => ({ ...item, media: !item.hidden && item.media ? item.media.map(({ key, nonce, ...d }) => d) : null }))
   if (flags.json) {
     process.stdout.write(jsonLine(result) + '\n')
     return
   }
   for (const item of result.items) {
-    process.stdout.write(item.at + ' ' + authorLabel(item) + ': ' + (item.hidden ? '(mensagem oculta)' : safe(item.text)) + '\n')
+    const markers = (item.media || []).map((media) => (media.plainMime || media.mime) === 'image/gif' ? ' [gif]' : ' [foto]').join('')
+    process.stdout.write(item.at + ' ' + authorLabel(item) + ': ' + (item.hidden ? '(mensagem oculta)' : safe(item.text + markers)) + '\n')
   }
   if (result.next !== null) {
     process.stdout.write('mais antigas: --before ' + result.next.at + ',' + result.next.writer + ',' + result.next.seq + '\n')
@@ -140,14 +147,15 @@ function sealedLine (result) {
 async function listRun (flags) {
   const ctx = ctxOf(flags)
   const result = await allPages((page) => member.groupList(ctx, page), 'groups', GROUP_LIMIT_MAX)
-  print(flags, result, result.groups.map(groupLine).join('\n'))
+  print(flags, result, result.groups.map((g) => groupLine(g) + (g.community === null ? '' : ' [comunidade ' + safe(g.community.slice(0, 8)) + ']')).join('\n'))
 }
 
 async function infoRun (flags) {
   const result = await member.groupInfo(ctxOf(flags), { group: groupKey(flags) })
   const creator = result.creator === null ? 'desconhecido até a sincronização' : result.creator
   const visibility = result.visibility === 'private' ? 'privado (cifrado)' : 'público'
-  print(flags, result, groupLine(result) + '\nvisibilidade: ' + visibility + '\ncriador: ' + creator + '\nsua situação: ' + safe(String(result.state)))
+  const community = result.orphan ? 'grupo sem comunidade' : 'comunidade: ' + (result.community === null ? 'desconhecida até a sincronização' : safe(result.community))
+  print(flags, result, groupLine(result) + '\nvisibilidade: ' + visibility + '\ncriador: ' + creator + '\nsua situação: ' + safe(String(result.state)) + '\n' + community)
 }
 
 function personLabel (p) {
@@ -244,7 +252,8 @@ async function groupRun (flags) {
 
 module.exports = {
   allPages,
+  personLabel,
   commands: {
-    group: { summary: 'grupos públicos e privados', run: groupRun }
+    group: { summary: 'grupos de uma comunidade', run: groupRun }
   }
 }

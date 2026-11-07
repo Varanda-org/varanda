@@ -16,7 +16,8 @@ const { memberCertRecord } = require('@varanda/core/lib/records')
 const { openStore, writeBlocklist } = require('@varanda/core/lib/store')
 const { keyPair: signingKeyPair } = require('hypercore-crypto')
 const { startHealth, metricsText } = require('../lib/health')
-const { listLines } = require('../lib/commands/seed')
+const { listLines, dmOption } = require('../lib/commands/seed')
+const { loadOrCreate, publicPart, createPostageFile, ROTATE_MS, MAX_AGE_MS } = require('../lib/dm-postage-file')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 const HEX64_ANYWHERE = /[0-9a-f]{64}/i
@@ -475,4 +476,90 @@ test('seed list: group cores are indented under their diary, peer text through s
   ])
   t.is(listLines({ admitted: [{ key: k, length: 0, byteLength: 0 }] }), k + ' 0 blocos 0 bytes', 'no groups array is fine')
   t.absent(listLines({ admitted: [{ key: k, length: 0, byteLength: 0, groups: [{ key: 'x\u001b[31m', group: g, length: 1, byteLength: 1 }] }] }).includes('\u001b'), 'control characters are escaped')
+})
+
+test('seed --no-dm: no dm option; on by default and the key file waits for get()', async (t) => {
+  const dataDir = tmpDir(t, 'varanda-dm-')
+  t.is(dmOption({ dataDir, noDm: true }), null, '--no-dm turns direct messages off')
+  const dm = dmOption({ dataDir })
+  t.is(typeof dm.postage.get, 'function')
+  t.is(typeof dm.onDrop, 'function')
+  t.absent(fs.existsSync(path.join(dataDir, 'dm-postage.json')), 'nothing is written before get()')
+  const got = await dm.postage.get()
+  t.is(got.keys.length, 1)
+  t.is(fs.statSync(path.join(dataDir, 'dm-postage.json')).mode & 0o777, 0o600)
+  t.is(await dm.postage.get(), got, 'the same answer until a key is due')
+})
+
+test('dm-postage file: rotation every 7 days, at most 2 keys, v1 or corrupt fails closed', (t) => {
+  const dataDir = tmpDir(t, 'varanda-dm-')
+  const file = path.join(dataDir, 'dm-postage.json')
+  let now = Date.parse('2026-11-03T12:00:00.000Z')
+  const at = () => now
+  const a = loadOrCreate(dataDir, { now: at })
+  t.is(a.keys.length, 1)
+  const pub = publicPart(a)
+  t.alike(Object.keys(pub), ['v', 'kid', 'n', 'e'], 'the public part never includes d')
+  t.is(loadOrCreate(dataDir, { now: at }).kid, a.kid, 'no rotation before 7 days')
+
+  now += ROTATE_MS
+  const b = loadOrCreate(dataDir, { now: at })
+  t.not(b.kid, a.kid, 'rotated after 7 days')
+  t.alike(b.keys.map((k) => k.kid), [b.kid, a.kid], 'current then previous')
+
+  now += ROTATE_MS
+  const c = loadOrCreate(dataDir, { now: at })
+  t.alike(c.keys.map((k) => k.kid), [c.kid, b.kid], 'the file keeps at most 2 keys')
+  t.is(JSON.parse(fs.readFileSync(file, 'utf8')).keys.length, 2)
+
+  now += MAX_AGE_MS
+  const d = loadOrCreate(dataDir, { now: at })
+  t.alike(d.keys.map((k) => k.kid), [d.kid], 'a key older than 14 days is dropped')
+
+  const v1 = JSON.stringify({ v: 1, kid: d.kid, n: d.n, e: d.e, d: d.d })
+  fs.writeFileSync(file, v1)
+  t.exception.all(() => loadOrCreate(dataDir, { now: at }), /dm-postage inválido/, 'a v1 file is never migrated')
+  t.is(fs.readFileSync(file, 'utf8'), v1, 'and never overwritten')
+
+  fs.writeFileSync(file, '{"v":2,"keys":[]}')
+  t.exception.all(() => loadOrCreate(dataDir, { now: at }), /dm-postage inválido/)
+  t.is(fs.readFileSync(file, 'utf8'), '{"v":2,"keys":[]}', 'a corrupt file is not overwritten')
+})
+
+test('dm-postage file: get() rotates once the current key is due', async (t) => {
+  const dataDir = tmpDir(t, 'varanda-dm-')
+  let now = Date.parse('2026-11-03T12:00:00.000Z')
+  const pf = createPostageFile(dataDir, { now: () => now })
+  const first = await pf.get()
+  now += ROTATE_MS - 1
+  t.is(await pf.get(), first)
+  now += 1
+  const next = await pf.get()
+  t.alike(next.keys.map((k) => k.kid), [next.kid, first.kid])
+})
+
+test('dm-postage file: get() reads the file again once it changes on disk', async (t) => {
+  const dataDir = tmpDir(t, 'varanda-dm-')
+  const other = tmpDir(t, 'varanda-dm-')
+  const file = path.join(dataDir, 'dm-postage.json')
+  const now = Date.parse('2026-11-03T12:00:00.000Z')
+  const pf = createPostageFile(dataDir, { now: () => now })
+  const first = await pf.get()
+  t.is(await pf.get(), first, 'an unchanged file is not read again')
+
+  const replacement = loadOrCreate(other, { now: () => now })
+  fs.copyFileSync(path.join(other, 'dm-postage.json'), file)
+  const replaced = await pf.get()
+  t.is(replaced.kid, replacement.kid, 'a replaced file is read before its rotation deadline')
+  t.is(await pf.get(), replaced)
+
+  fs.writeFileSync(file, '{"v":2,"keys":[]}')
+  await t.exception(pf.get(), /dm-postage inválido/, 'a broken replacement fails closed, never the cached key')
+  await t.exception(pf.get(), /dm-postage inválido/)
+
+  fs.unlinkSync(file)
+  const created = await pf.get()
+  t.not(created.kid, replaced.kid, 'a removed file is created again, with a new key')
+  t.is(JSON.parse(fs.readFileSync(file, 'utf8')).keys[0].kid, created.kid)
+  t.is(await pf.get(), created, 'our own write is not mistaken for a change')
 })

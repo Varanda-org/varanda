@@ -4,6 +4,15 @@ export function isVisible () {
   return typeof document === 'undefined' || document.visibilityState !== 'hidden'
 }
 
+// No browser node suspends itself while hidden, so the shell always pauses it.
+export function pausesWhenHidden () {
+  return true
+}
+
+export function effectiveVisible (visible, hosted) {
+  return visible || !pausesWhenHidden(hosted)
+}
+
 // pagehide can precede the browser updating visibilityState.
 export function subscribeVisible (fn) {
   if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return () => {}

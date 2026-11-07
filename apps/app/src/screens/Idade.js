@@ -1,7 +1,9 @@
 // 'Confirme sua idade' (hosted web and the app's web node): the setup step between the
 // recovery and the @nome. Presentational: the shell reads the state from the
 // account service and starts the verification; nothing here comes from the
-// URL, and the state is never stored on the device.
+// URL. The age band is never stored: the device remembers only a refusal, per
+// account and installation (src/ageMemory.js); a pass is proved by the
+// issuer-signed attestations the node checks.
 
 import { useState } from 'react'
 import { Platform } from 'react-native'
@@ -28,6 +30,9 @@ const RESUME_TEXT = 'Se você saiu antes de terminar, continue de onde parou.'
 const NATIVE = Platform.OS !== 'web'
 const APP_BROWSER_TEXT = 'A verificação abre no navegador. Ao terminar, volte para a Varanda: o resultado é conferido de novo.'
 export const AGE_APP_NOTE = 'Abrimos a verificação no navegador. Quando terminar, volte para a Varanda.'
+// The first answer is still on its way: say so, so the disabled button does
+// not look broken.
+export const AGE_CHECKING_TEXT = 'Conferindo sua idade…'
 
 // The app has no App Links: an invite opened in the browser never reaches it,
 // so the steps that need one take the link (or the bare code) pasted by hand.
@@ -65,7 +70,10 @@ export default function Idade ({ state, busy = false, error = '', note = '', off
   const stateText = known && state !== 'nenhum' ? AGE_TEXTS[state] : ''
   const showStart = state === undefined || STARTABLE.has(state)
   const showResume = state === 'pendente'
-  const showCheck = state === 'pendente' || (state === undefined && !!error)
+  // No answer and nothing in flight (an error, an invite just pasted, the
+  // browser left without a return): offer to ask again.
+  const showCheck = state === 'pendente' || (state === undefined && (!!error || !busy))
+  const checking = state === undefined && busy && !error
   return (
     <Page flush padBottom={16}>
       <Stepper index={index} total={total} title={STEP_TITLES.idade} hint={STEP_HINTS.idade}>
@@ -75,6 +83,7 @@ export default function Idade ({ state, busy = false, error = '', note = '', off
         <Card>
           {stateText ? <Body>{stateText}</Body> : null}
           {showResume ? <Soft>{RESUME_TEXT}</Soft> : null}
+          {checking ? <Soft>{AGE_CHECKING_TEXT}</Soft> : null}
           {busy ? <Spinner /> : null}
           {/* No code held: the service would refuse the start, so the field comes first. */}
           {invitePaste

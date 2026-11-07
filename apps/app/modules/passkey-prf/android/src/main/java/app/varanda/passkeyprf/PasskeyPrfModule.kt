@@ -112,9 +112,9 @@ class PasskeyPrfModule : Module() {
 
   private fun getCode(e: GetCredentialException): String = when (e) {
     is GetCredentialCancellationException -> "CANCELLED"
-    // No Varanda passkey for this rp.id: like a browser whose sheet the person
-    // closes, the ceremony simply did not happen.
-    is NoCredentialException -> "CANCELLED"
+    // No Varanda passkey for this rp.id on this device: the screen offers
+    // creating one or using the site, instead of reading it as a cancel.
+    is NoCredentialException -> "NONE"
     is GetCredentialUnsupportedException -> "UNSUPPORTED"
     is GetPublicKeyCredentialDomException -> when (e.domError) {
       is NotAllowedError -> "CANCELLED"

@@ -10,17 +10,22 @@
 //
 // The peek, follow and like/repost helpers are exported for Membro.js.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { fetchCounts, fetchMember, fetchPost, COUNTS_MAX } from '../indexClient'
 import { assembleMember, assembleThread, planPeeks } from '../thread'
-import { applyToggle, countsAfter, emptyState, fromRead, mergeCounts } from '../engagement'
+import { applyToggle, countsAfter, diaryPeekSlots, emptyState, fromRead, mergeCounts } from '../engagement'
+import { noteLocalWrite } from '../localWrites'
 import { replyNameOf, whoOf } from '../who'
 import { avatarOf, pickAvatar } from '../media/avatar'
-import { canDelete } from '../deletion'
+import { canDelete, isPageRef } from '../deletion'
+import * as actingStore from '../actingAs'
+import { actAs } from '../pages'
+import { pagesCore } from '../pageGate'
+import { coreActor } from '../pageCore'
 import { Btn, ErrorText, Row, Soft, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { OfflineNote } from '../ui/OfflineNote'
 import { PostRow } from '../ui/PostRow'
@@ -29,7 +34,8 @@ import { Sheet } from '../ui/Sheet'
 import { ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { revokeDeletedMedia } from '../media/cache'
-import { colors, type } from '../ui/theme'
+import { type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 
 // Same value as packages/rpc/lib/limits.js ENGAGEMENT_LIMIT_MAX.
 export const ENGAGEMENT_MAX = 62
@@ -50,6 +56,95 @@ export function refOf (author, seq) {
 function parseRef (ref) {
   const i = typeof ref === 'string' ? ref.indexOf(':') : -1
   return i > 0 ? { author: ref.slice(0, i), seq: Number(ref.slice(i + 1)) } : null
+}
+
+// Who the app acts as (src/actingAs.js): re-renders on a change.
+export function useActing () {
+  return useSyncExternalStore(actingStore.subscribe, actingStore.get, actingStore.get)
+}
+
+// The key of the page acted as, or null (the member).
+export function actingPageKey () {
+  const a = actingStore.get()
+  return a.kind === 'page' ? a.key : null
+}
+
+// The own member key, for the statements a page acts with. Read on every
+// action, never cached: after a sign-out and the unlock of another diary,
+// page.sign signs with the new key. On a core node (`node` given, pageGate.js
+// pagesCore) it is the node's delegate (pageCore.js coreActor), since its
+// identity.show key is the diary's, which the service never links to a page.
+export async function memberKeyOf (request, node) {
+  if (node && pagesCore({ hosted: node.hosted, accountOrigin: node.accountOrigin })) return (await coreActor(node)).actor
+  const r = await request('identity.show', {})
+  const key = r && typeof r.publicKey === 'string' ? r.publicKey.toLowerCase() : ''
+  if (!/^[0-9a-f]{64}$/.test(key)) throw new Error('Serviço indisponível')
+  return key
+}
+
+// A node, or a bare request function from a caller that has no node (then
+// the hosted path: identity.show and the relative account path).
+const nodeOf = (source) => (typeof source === 'function' ? { request: source } : source)
+
+// The page's own likes and reposts (the signed 'status' read), by page. A
+// toggle that succeeds updates its entry and bumps the page's generation, so
+// a read that started before it never replaces the entry afterwards.
+const pageStatus = new Map()
+const pageGen = new Map()
+const genOf = (page) => pageGen.get(page) || 0
+
+export async function pageEngagement (source, page, { fresh = false } = {}) {
+  if (!fresh && pageStatus.has(page)) return pageStatus.get(page)
+  const started = genOf(page)
+  const node = nodeOf(source)
+  const member = await memberKeyOf(node.request, node)
+  const data = await actAs(node, { member, action: 'status', page })
+  const eng = data && typeof data.engagement === 'object' && data.engagement !== null ? data.engagement : {}
+  const entry = {
+    liked: new Set(Array.isArray(eng.liked) ? eng.liked : []),
+    reposted: new Set(Array.isArray(eng.reposted) ? eng.reposted : [])
+  }
+  if (genOf(page) !== started) return pageStatus.get(page) || entry
+  pageStatus.set(page, entry)
+  return entry
+}
+
+// engagement.read of `refs`, as the member or as the page acted as.
+export async function readEngagement (source, refs, page = actingPageKey()) {
+  if (page === null) return nodeOf(source).request('engagement.read', { refs })
+  const entry = await pageEngagement(source, page)
+  return { liked: refs.filter((r) => entry.liked.has(r)), reposted: refs.filter((r) => entry.reposted.has(r)) }
+}
+
+// like.set / repost.set, as the member or as the page acted as. A page
+// failure after the signature is 'uncertain' (actAs) and never signs again:
+// its err.retry resends the same bytes and settles the cache like a first
+// answer. -> { on, changed }: for a page, `changed` compares with the state
+// cached before this statement (true when none was cached).
+export async function setEngagement (source, kind, ref, on, page = actingPageKey()) {
+  const node = nodeOf(source)
+  if (page === null) return node.request(kind === 'like' ? 'like.set' : 'repost.set', { to: ref, on })
+  const member = await memberKeyOf(node.request, node)
+  const prior = pageStatus.get(page)
+  const was = prior ? (kind === 'like' ? prior.liked : prior.reposted).has(ref) : null
+  const settle = () => {
+    pageGen.set(page, genOf(page) + 1)
+    const entry = pageStatus.get(page)
+    if (entry) {
+      const set = kind === 'like' ? entry.liked : entry.reposted
+      if (on) set.add(ref)
+      else set.delete(ref)
+    }
+    return { on, changed: was === null ? true : was !== on }
+  }
+  const run = (send) => send().then(settle, (err) => {
+    if (err && typeof err.retry === 'function') {
+      const again = err.retry
+      err.retry = () => run(again)
+    }
+    throw err
+  })
+  return run(() => actAs(node, { member, action: kind, page, op: { to: ref, on } }))
 }
 
 function chunks (list, size) {
@@ -88,10 +183,12 @@ function mergePeek (peeked, peek) {
 }
 
 // Runs the planned diary.peek calls one at a time into `peeked` (a Map,
-// added to). 'semeador indisponível' is retried once after 2 s and then
-// thrown; 'ocupado' (too many peeks at once) is retried a few times and then
-// skipped, like 'diário indisponível' (the posts count as unavailable).
-// `alive()` false stops early.
+// added to), each through the app-wide diaryPeekSlots so every screen stays
+// within the node's peek limit. 'semeador indisponível' is retried once after
+// 2 s and then thrown; 'ocupado' (still possible beside a page.read probe) is
+// retried a few times and then skipped, like 'diário indisponível' (the posts
+// count as unavailable). `alive()` false stops early, also for a peek still
+// waiting for a slot.
 export async function peekAll (request, plan, peeked, alive = () => true) {
   for (const params of plan) {
     if (!alive()) return peeked
@@ -99,7 +196,8 @@ export async function peekAll (request, plan, peeked, alive = () => true) {
     let busyTries = 0
     for (;;) {
       try {
-        const peek = await request('diary.peek', params)
+        // A screen the person opened: ahead of the feed's background quote reads.
+        const peek = await diaryPeekSlots.run(() => alive() ? request('diary.peek', params) : null, { front: true })
         // A delete meanwhile invalidates this load: merging would bring the entry back.
         if (!alive()) return peeked
         mergePeek(peeked, peek)
@@ -209,8 +307,11 @@ export function useFollowSet (request) {
 // Deleting an own post: ask({ ref, seq }) opens the confirmation (DeletePrompt),
 // confirm sends post.delete once. After an uncertain failure `recheck` (a read
 // of the diary) runs before the action is offered again; nothing is resent.
-export function useDelete ({ request, onToast, onDeleted, recheck }) {
+// `node` (optional) lets a page post be deleted from a core node.
+export function useDelete ({ request, node, onToast, onDeleted, recheck }) {
   const action = useAction()
+  const sourceRef = useRef(null)
+  sourceRef.current = node || request
   const [target, setTarget] = useState(null)
   const [rechecking, setRechecking] = useState(false)
   const notify = (text) => { if (typeof onToast === 'function') onToast(text) }
@@ -225,7 +326,14 @@ export function useDelete ({ request, onToast, onDeleted, recheck }) {
   }
   const confirm = async () => {
     if (target === null) return
-    const r = await action.run(() => request('post.delete', { to: target.ref }))
+    // A page post is deleted as the page (never the member's own request).
+    const page = isPageRef(target.ref, actingPageKey()) ? actingPageKey() : null
+    const r = await action.run(async () => {
+      if (page === null) return request('post.delete', { to: target.ref })
+      const source = nodeOf(sourceRef.current)
+      const member = await memberKeyOf(source.request, source)
+      return actAs(source, { member, action: 'delete', page, op: { to: target.ref } })
+    })
     if (r.ok) {
       setTarget(null)
       notify('publicação apagada')
@@ -245,6 +353,7 @@ export function useDelete ({ request, onToast, onDeleted, recheck }) {
 }
 
 export function DeletePrompt ({ del }) {
+  const styles = useStyles(makeStyles)
   return (
     <Sheet open={del.target !== null} onClose={() => del.cancel()} title='Apagar publicação'>
       <View style={styles.prompt}>
@@ -263,7 +372,11 @@ export function DeletePrompt ({ del }) {
 // failure reverts it and shows the error. A read never overrides a field
 // (liked/reposted of a ref) with a toggle pending, or one that started or
 // ended after that read started: `touched` keeps a stamp per field and ref.
-export function useEngagement ({ request, onToast }) {
+// `node` (optional): the page statements go through it on a core node. It is
+// read at call time, so the callbacks keep depending on `request` only.
+export function useEngagement ({ request, node, onToast }) {
+  const sourceRef = useRef(null)
+  sourceRef.current = node || request
   const [state, setState] = useState(emptyState)
   const [counts, setCounts] = useState(() => new Map())
   const [pending, setPending] = useState(() => new Map())
@@ -273,6 +386,7 @@ export function useEngagement ({ request, onToast }) {
   const clockRef = useRef(0)
   const touchedRef = useRef(new Map()) // 'liked|<ref>' -> stamp
   const touch = (field, ref) => touchedRef.current.set(field + '|' + ref, ++clockRef.current)
+  const readRefs = useRef(new Set())
 
   const reset = useCallback(() => {
     setState(emptyState())
@@ -288,9 +402,13 @@ export function useEngagement ({ request, onToast }) {
     for (const part of chunks([...new Set(refs)], ENGAGEMENT_MAX)) {
       if (!alive()) return
       const started = ++clockRef.current
+      const as = actingPageKey()
       try {
-        const r = fromRead(await request('engagement.read', { refs: part }))
+        readRefs.current = new Set([...readRefs.current, ...part])
+        const r = fromRead(await readEngagement(sourceRef.current, part, as))
         if (!alive()) return
+        // Read for another identity than the one acted as now.
+        if (as !== actingPageKey()) continue
         const fresh = (field, ref) => !pendingRef.current.has(ref) && !((touchedRef.current.get(field + '|' + ref) || 0) > started)
         setState((s) => {
           const liked = new Set(s.liked)
@@ -321,11 +439,43 @@ export function useEngagement ({ request, onToast }) {
   }, [])
   const setCount = useCallback((ref, c) => setCounts((m) => mergeCounts(m, { [ref]: c })), [])
 
-  const toggle = useCallback(async (kind, ref) => {
-    if (pendingRef.current.has(ref)) return
+  // Acting as another identity: the own state of the rows on screen is the
+  // other identity's, so it is read again.
+  const acting = useActing()
+  const actingKey = acting.kind === 'page' ? acting.key : null
+  const seenActing = useRef(actingKey)
+  useEffect(() => {
+    if (seenActing.current === actingKey) return undefined
+    seenActing.current = actingKey
+    const refs = [...readRefs.current]
+    setState(emptyState())
+    if (refs.length === 0) return undefined
+    let live = true
+    const again = async () => {
+      if (actingKey !== null) {
+        try { await pageEngagement(sourceRef.current, actingKey, { fresh: true }) } catch {}
+      }
+      if (live) await readOwn(refs, () => live)
+    }
+    again()
+    return () => { live = false }
+  }, [actingKey, request, readOwn])
+
+  const toggle = useCallback(async (kind, ref, requestedOn) => {
+    if (pendingRef.current.has(ref)) {
+      if (requestedOn === false && typeof onToast === 'function') onToast('Aguarde um instante e tente de novo.')
+      return
+    }
     const field = kind === 'like' ? 'liked' : 'reposted'
-    const on = !stateRef.current[field].has(ref)
-    const delta = on ? 1 : -1
+    // The identity this toggle is for: its answer is that identity's state.
+    const as = actingPageKey()
+    let moved = false
+    const was = stateRef.current[field].has(ref)
+    // The undo always sends off: idempotent on the diary, and it still lands
+    // when a refresh has cleared the local state (then the count is left alone).
+    const on = requestedOn === false ? false : !was
+    const delta = on ? 1 : (was ? -1 : 0)
+    let succeeded = false
     const nextPending = new Map(pendingRef.current).set(ref, kind)
     pendingRef.current = nextPending
     setPending(nextPending)
@@ -333,16 +483,21 @@ export function useEngagement ({ request, onToast }) {
     setState((s) => applyToggle(s, kind, ref, on))
     setCounts((m) => (m.has(ref) ? new Map(m).set(ref, countsAfter(m.get(ref), kind, delta)) : m))
     try {
-      const r = await request(kind === 'like' ? 'like.set' : 'repost.set', { to: ref, on })
-      // The diary's answer is the state.
+      const r = await setEngagement(sourceRef.current, kind, ref, on, as)
+      // Diário compares this with its load time (it gets no refresh bump).
+      noteLocalWrite()
+      // The diary's answer is the state, of the identity it was sent as.
       touch(field, ref)
-      if (r && typeof r.on === 'boolean') setState((s) => applyToggle(s, kind, ref, r.on))
+      moved = as !== actingPageKey()
+      if (!moved && r && typeof r.on === 'boolean') setState((s) => applyToggle(s, kind, ref, r.on))
       // Already in that state on the diary: the state is right, the count
       // had already counted it.
       if (r && r.changed === false) setCounts((m) => (m.has(ref) ? new Map(m).set(ref, countsAfter(m.get(ref), kind, -delta)) : m))
+      succeeded = kind === 'repost' && on && !(r && r.on === false) && !(r && r.changed === false)
     } catch (err) {
       touch(field, ref)
-      setState((s) => applyToggle(s, kind, ref, !on))
+      moved = as !== actingPageKey()
+      if (!moved) setState((s) => applyToggle(s, kind, ref, was))
       setCounts((m) => (m.has(ref) ? new Map(m).set(ref, countsAfter(m.get(ref), kind, -delta)) : m))
       if (typeof onToast === 'function') onToast(errorText(err))
     } finally {
@@ -351,7 +506,14 @@ export function useEngagement ({ request, onToast }) {
       pendingRef.current = after
       setPending(after)
     }
-  }, [request, onToast])
+    // Acted as someone else meanwhile: the row shows that identity's state.
+    if (moved) readOwn([ref])
+    // After pending cleared, so the undo (a second signed write) is not
+    // dropped; it only undoes as the identity that reposted.
+    if (succeeded && !moved && typeof onToast === 'function') {
+      onToast({ text: 'Republicado', actionLabel: 'Desfazer', onAction: () => { if (actingPageKey() === as) toggle('repost', ref, false) } })
+    }
+  }, [request, onToast, readOwn])
 
   return { state, counts, pending, reset, readOwn, readCounts, setCount, toggle }
 }
@@ -416,7 +578,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     onLike: eng && hasSeq ? () => eng.toggle('like', ref) : undefined,
     onRepost: eng && hasSeq ? () => eng.toggle('repost', ref) : undefined,
     onReport: reportable ? () => onReport({ author: item.author, name: who.name, username: who.username, seq: item.seq, text: item.text }) : undefined,
-    onDelete: hasSeq && typeof onDelete === 'function' && canDelete(item, typeof ownKey === 'string' ? ownKey.toLowerCase() : null)
+    onDelete: hasSeq && typeof onDelete === 'function' && canDelete(item, typeof ownKey === 'string' ? ownKey.toLowerCase() : null, actingPageKey())
       ? () => onDelete({ ref, seq: item.seq })
       : undefined,
     ...extra
@@ -470,6 +632,7 @@ const INITIAL = {
 }
 
 export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast, onDeletedPost }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -479,9 +642,10 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   const full = !!node.hosted && node.online !== false
   const { request } = node
   const { learnMany, resolveMany } = names
-  const eng = useEngagement({ request, onToast })
+  const eng = useEngagement({ request, node, onToast })
   const { follows, load: loadFollows } = useFollowSet(request)
   const [view, setView] = useState(INITIAL)
+  const [parentHeight, setParentHeight] = useState(null)
   const viewRef = useRef(view)
   const peekedRef = useRef(new Map())
   const followsRef = useRef(Promise.resolve(new Set()))
@@ -600,6 +764,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
 
   const del = useDelete({
     request,
+    node,
     onToast,
     recheck: () => load(true),
     onDeleted: async (t) => {
@@ -657,10 +822,10 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   if (unavailable > 0) notes.push(unavailable === 1 ? '1 resposta indisponível' : String(unavailable) + ' respostas indisponíveis')
 
   const header = (
-    <View>
+    <View style={styles.header}>
       {parent
         ? (
-          <View style={styles.parent}>
+          <View style={styles.parent} onLayout={(e) => setParentHeight(e.nativeEvent.layout.height)}>
             <PostRow {...props(parent)} />
           </View>
           )
@@ -669,8 +834,13 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
         ? (
           <View style={styles.focal}>
             <PostRow {...props(post, parent ? { onOpenParent: () => onOpenThread({ ref: refOf(parent.author, parent.seq), seed: parent }), replyToName: whoOf(identityOf(names, parent.author, parent)).title } : {})} />
+            {/* After the row: PostRow paints an opaque bg, and later siblings paint on top. */}
+            <View pointerEvents='none' style={styles.accentBar} />
           </View>
           )
+        : null}
+      {parent && post && parentHeight !== null
+        ? <View pointerEvents='none' accessible={false} style={[styles.connector, { height: parentHeight - 52 }]} />
         : null}
       {phase === 'ready' && !view.post
         ? <View style={styles.note}><Soft>Esta publicação não pôde ser verificada agora.</Soft></View>
@@ -729,12 +899,16 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   note: { paddingHorizontal: 16, paddingVertical: 12 },
   prompt: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
+  header: { position: 'relative' },
   parent: { opacity: 0.72 },
-  focal: { borderLeftWidth: 3, borderLeftColor: colors.accent },
+  focal: { position: 'relative' },
+  accentBar: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: colors.accent },
+  // Avatar centre x is 38 (paddingHorizontal 16 + 44 / 2); starts 4 below the parent avatar (12 + 44).
+  connector: { position: 'absolute', left: 37, top: 60, width: 2, backgroundColor: colors.line },
   repliesHead: { paddingHorizontal: 16, paddingVertical: 12, gap: 4, borderBottomWidth: 1, borderBottomColor: colors.line },
   repliesTitle: { ...type.section, color: colors.soft }
 })

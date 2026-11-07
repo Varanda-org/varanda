@@ -4,6 +4,8 @@
 // return (src/linkReturn.js).
 const test = require('brittle')
 const crypto = require('node:crypto')
+const fs = require('node:fs')
+const path = require('node:path')
 
 const load = () => import('../src/linkReturn.js')
 const R = crypto.randomBytes(32).toString('base64url')
@@ -91,6 +93,52 @@ test('parseAppLink: no https link while the installation is a loopback http one'
   const { parseAppLink } = await load()
   await withOrigin(t, 'http://127.0.0.1:8790')
   t.is(parseAppLink('http://127.0.0.1:8790/convite/' + CODE), null)
+})
+
+test('parseAppLink: group and community links', async (t) => {
+  const { parseAppLink } = await load()
+  t.alike(parseAppLink('varanda:///g/' + KEY), { kind: 'grupo', key: KEY })
+  t.alike(parseAppLink('varanda:///c/' + KEY), { kind: 'comunidade', key: KEY })
+  t.alike(parseAppLink('varanda:///g/' + KEY + '?x=1'), { kind: 'grupo', key: KEY })
+  for (const bad of [
+    'varanda:///g/' + KEY.toUpperCase(), 'varanda:///c/' + KEY.toUpperCase(),
+    'varanda:///g/' + KEY.slice(1), 'varanda:///c/' + KEY.slice(1),
+    'varanda:///g/' + KEY + '/x', 'varanda:///c/' + KEY + '/x',
+    'varanda://g/' + KEY, 'varanda://c/' + KEY, 'varanda:////g/' + KEY,
+    'https://varanda.example/g/' + KEY, 'https://varanda.example/c/' + KEY
+  ]) {
+    t.is(parseAppLink(bad), null, bad)
+  }
+})
+
+test('parseAppLink: https group and community links only on the installation origin', async (t) => {
+  const { parseAppLink } = await load()
+  await withOrigin(t, 'https://varanda.example')
+  t.alike(parseAppLink('https://varanda.example/g/' + KEY), { kind: 'grupo', key: KEY })
+  t.alike(parseAppLink('https://varanda.example/c/' + KEY + '#x'), { kind: 'comunidade', key: KEY })
+  for (const bad of [
+    'https://evil.example/g/' + KEY, 'https://varanda.example.evil/c/' + KEY,
+    'http://varanda.example/g/' + KEY, 'https://varanda.example//g/' + KEY,
+    'https://varanda.example/g/' + KEY.toUpperCase()
+  ]) {
+    t.is(parseAppLink(bad), null, bad)
+  }
+})
+
+test('parseAppLink: no https group link while the installation is a loopback http one', async (t) => {
+  const { parseAppLink } = await load()
+  await withOrigin(t, 'http://127.0.0.1:8790')
+  t.is(parseAppLink('http://127.0.0.1:8790/g/' + KEY), null)
+  t.is(parseAppLink('http://127.0.0.1:8790/c/' + KEY), null)
+})
+
+test('parseInviteInput: a group or community link is not an invite', async (t) => {
+  const { parseInviteInput, parseAppLink } = await load()
+  await withOrigin(t, 'https://varanda.example')
+  for (const url of ['https://varanda.example/g/' + KEY, 'varanda:///g/' + KEY, 'varanda:///c/' + KEY]) {
+    t.ok(parseAppLink(url), url + ' parses as a link')
+    t.is(parseInviteInput(url), null, url)
+  }
 })
 
 test('parseInviteInput: bare code or a full invite link', async (t) => {
@@ -189,4 +237,94 @@ test('parseSessionReturn: nothing without an https installation', async (t) => {
   t.is(parseSessionReturn('https://varanda.example/account/app/conta?conta=ok&codigo=' + R), null, 'no installation set')
   await withOrigin(t, 'http://127.0.0.1:8790')
   t.is(parseSessionReturn('http://127.0.0.1:8790/account/app/conta?conta=ok&codigo=' + R), null, 'loopback http')
+})
+
+test('waitsForInstallation holds only a clean https link while no installation is loaded', async (t) => {
+  const { waitsForInstallation, parseAppLink } = await load()
+  const { setInstallation } = await import('../src/installation.js')
+  setInstallation(null)
+  t.is(waitsForInstallation('https://bora.varanda.app/c/' + KEY), true)
+  for (const bad of [
+    'varanda:///c/' + KEY, 'http://bora.varanda.app/c/' + KEY, 'https://bora.varanda.app/c/ ' + KEY,
+    'https://bora.varanda.app/c/' + KEY + '\n', 'https://bora.varanda.app/' + 'a'.repeat(400), null, undefined, 42, {}
+  ]) {
+    t.is(waitsForInstallation(bad), false, String(bad))
+  }
+  await withOrigin(t, 'https://varanda.example')
+  t.is(waitsForInstallation('https://bora.varanda.app/c/' + KEY), false)
+  t.is(waitsForInstallation('https://varanda.example/c/' + KEY), false)
+  t.alike(parseAppLink('https://varanda.example/c/' + KEY), { kind: 'comunidade', key: KEY })
+  t.is(parseAppLink('https://bora.varanda.app/c/' + KEY), null)
+})
+
+test('linkReturnTaker: a newcomer return belongs to the setup, never to Ajustes', async (t) => {
+  const { linkReturnTaker } = await load()
+  const base = { held: true, termsOk: true }
+  for (const step of ['recuperando', 'idade']) {
+    t.is(linkReturnTaker({ ...base, setupStep: true, step, certMissing: false }), 'wait', step)
+  }
+  t.is(linkReturnTaker({ ...base, setupStep: true, step: 'vinculo', certMissing: true }), 'setup')
+  t.is(linkReturnTaker({ ...base, setupStep: false, step: 'vinculo', certMissing: true }), 'setup')
+  t.is(linkReturnTaker({ ...base, setupStep: true, step: 'vinculo', certMissing: false }), 'wait')
+})
+
+test('linkReturnTaker: nothing is decided behind the terms gate', async (t) => {
+  const { linkReturnTaker } = await load()
+  t.is(linkReturnTaker({ held: true, termsOk: false, step: 'vinculo', certMissing: true }), 'wait')
+  t.is(linkReturnTaker({ held: true, termsOk: false, setupStep: false, step: 'pronto' }), 'wait')
+})
+
+test('linkReturnTaker: a member already certified gets Ajustes > Conta once the tabs show', async (t) => {
+  const { linkReturnTaker } = await load()
+  const base = { held: true, termsOk: true, certMissing: false }
+  t.is(linkReturnTaker({ ...base, setupStep: true, step: 'vinculo' }), 'wait')
+  for (const step of ['pronto', 'perfil', 'carregando']) {
+    t.is(linkReturnTaker({ ...base, setupStep: false, step }), 'conta', step)
+  }
+})
+
+test('linkReturnTaker: nothing held is never taken', async (t) => {
+  const { linkReturnTaker } = await load()
+  for (const held of [false, undefined]) {
+    for (const step of ['vinculo', 'pronto', 'perfil']) {
+      t.is(linkReturnTaker({ held, termsOk: true, setupStep: false, step, certMissing: true }), 'none', String(held) + step)
+    }
+  }
+  t.is(linkReturnTaker({}), 'none')
+  t.is(linkReturnTaker(), 'none')
+  t.is(linkReturnTaker({ held: true }), 'wait')
+  t.is(linkReturnTaker({ held: true, termsOk: true }), 'wait')
+})
+
+test('the shell opens Ajustes > Conta only through linkReturnTaker', (t) => {
+  const s = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  const call = 'linkReturnTaker({ held: linkReturnRef.current, termsOk, setupStep, step, certMissing })'
+  t.ok(s.includes(call))
+  t.ok(s.includes("if (taker === 'conta') setAjustes('conta')"))
+  t.ok(s.includes("if (taker === 'none' || taker === 'wait') return"))
+  t.is(s.split("setAjustes('conta')").length - 1, 1)
+  const at = s.indexOf(call)
+  t.ok(at > s.indexOf('const certMissing = info !== null && info.memberCert !== true'))
+  t.ok(at < s.indexOf("if (linkReturned && step === 'vinculo' && certMissing) signupRef.current = true"))
+  t.absent(s.includes('if (!termsOk || setupStep || !linkReturnRef.current) return'))
+  t.ok(/import \{[^}]*linkReturnTaker[^}]*\} from '\.\/src\/linkReturn'/.test(s))
+  const m = fs.readFileSync(path.join(__dirname, '../src/linkReturn.js'), 'utf8')
+  t.absent(m.includes('Platform'))
+})
+
+test('the setup card drops the Google return when it lands the certificate', (t) => {
+  const s = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  t.ok(s.includes('const dropLinkReturn = useCallback(() => { linkReturnRef.current = false }, [])'))
+  const prop = 'onLinked={dropLinkReturn}'
+  t.is(s.split(prop).length - 1, 1)
+  const open = s.indexOf('<Identidade active={ready} embedded setup')
+  t.ok(s.slice(open, s.indexOf('/>', open)).includes(prop))
+  const id = fs.readFileSync(path.join(__dirname, '../src/screens/Identidade.js'), 'utf8')
+  t.ok(id.includes('onLinked={setup ? onLinked : undefined}'))
+  const call = "if (typeof onLinked === 'function') onLinked()"
+  const at = id.indexOf(call)
+  t.ok(at > id.indexOf("await node.request('cert.add', { cert })"))
+  t.ok(at < id.indexOf("await node.request('username.add', { record })", at))
+  const aj = fs.readFileSync(path.join(__dirname, '../src/screens/Ajustes.js'), 'utf8')
+  t.absent(aj.includes('onLinked'))
 })

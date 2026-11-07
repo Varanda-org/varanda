@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchGroupSearch: 1 }
+const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -880,8 +880,221 @@ test('fetchEngagers: request options, contract, a fresh copy and transport', asy
   t.ok(Number.isFinite(limited.retryAfterMs), 'with the cooldown left')
 })
 
+const AT1 = '2026-10-20T10:00:00.000Z'
+const AT2 = '2026-10-19T09:30:00.000Z'
+// Newer than AT1, so the fixture's rows come after it in the index order.
+const FCURSOR = { atMs: 1800000000000, key: C }
+
+function followsBody (over = {}) {
+  return {
+    author: A,
+    kind: 'seguidores',
+    items: [{ key: B, seq: 9, at: AT1 }, { key: C, seq: 4, at: AT2 }],
+    next: { atMs: Date.parse(AT2), key: C },
+    total: 7,
+    authors: {
+      [B]: { profileSeq: 1, usernameSeq: null },
+      [C]: { profileSeq: null, usernameSeq: null }
+    },
+    indexing: false,
+    complete: true,
+    ...over
+  }
+}
+
+const countsBody = (over = {}) => ({ seguindo: 3, seguidores: 12, indexing: false, complete: true, ...over })
+
+test('followCountsUrl and followsUrl: exact paths, an invalid cursor is null', async (t) => {
+  const { followCountsUrl, followsUrl, fetchFollows, fetchFollowCounts, FOLLOWS_MAX } = await load()
+  t.is(FOLLOWS_MAX, 20)
+  t.is(followCountsUrl(A), '/index/follows/' + A)
+  t.is(followCountsUrl(A.toUpperCase()), '/index/follows/' + A, 'author lowercased')
+  t.is(followsUrl(A, 'seguindo'), '/index/follows/' + A + '/seguindo')
+  t.is(followsUrl(A, 'seguidores'), '/index/follows/' + A + '/seguidores')
+  t.is(followsUrl(A, 'seguidores', FCURSOR), '/index/follows/' + A + '/seguidores/1800000000000.' + C)
+  t.is(followsUrl(A, 'seguindo', { atMs: 0, key: B }), '/index/follows/' + A + '/seguindo/0.' + B, 'atMs 0')
+  for (const author of [A + 'a', 'zz'.repeat(32), A + '/x', '', null, 7]) {
+    t.is(followCountsUrl(author), null, 'author ' + String(author))
+    t.is(followsUrl(author, 'seguindo'), null, 'author ' + String(author))
+  }
+  for (const kind of ['Seguindo', 'seguidor', '', ' seguindo', 'likes', null, undefined, 7]) {
+    t.is(followsUrl(A, kind), null, 'kind ' + String(kind))
+  }
+  const badCursors = [
+    'x',
+    '1760000000000.' + C,
+    { atMs: -1, key: C },
+    { atMs: 1.5, key: C },
+    { atMs: Number.MAX_SAFE_INTEGER + 1, key: C },
+    { atMs: '1', key: C },
+    { atMs: 1, key: C.toUpperCase() },
+    { atMs: 1, key: C + '/x' },
+    { atMs: 1, key: C, extra: 1 },
+    { atMs: 1 },
+    [],
+    7
+  ]
+  for (const cursor of badCursors) t.is(followsUrl(A, 'seguindo', cursor), null, 'cursor ' + JSON.stringify(cursor))
+  let called = false
+  const fetch = async () => { called = true }
+  t.alike(await fetchFollowCounts('nope', { fetch }), { ok: false, reason: 'invalid-input' })
+  for (const [author, kind, cursor] of [[A, 'Seguindo', null], ['nope', 'seguindo', null], [A, 'seguindo', { atMs: -1, key: C }], [A, 'seguidores', 'x']]) {
+    t.alike(await fetchFollows(author, kind, cursor, { fetch }), { ok: false, reason: 'invalid-input' }, author + ' ' + kind + ' ' + JSON.stringify(cursor))
+  }
+  t.absent(called, 'no request for bad input')
+})
+
+test('validFollowCounts: exact keys, counts and flags', async (t) => {
+  const { validFollowCounts } = await load()
+  t.alike(validFollowCounts(countsBody()), countsBody())
+  t.alike(validFollowCounts(countsBody({ seguindo: 0, seguidores: 0, indexing: true, complete: false })), countsBody({ seguindo: 0, seguidores: 0, indexing: true, complete: false }))
+  const missing = countsBody()
+  delete missing.seguindo
+  const bad = [
+    countsBody({ extra: 1 }),
+    missing,
+    countsBody({ seguindo: -1 }),
+    countsBody({ seguidores: 2.5 }),
+    countsBody({ seguidores: '3' }),
+    countsBody({ seguindo: Number.MAX_SAFE_INTEGER + 1 }),
+    countsBody({ indexing: 'no' }),
+    countsBody({ complete: null }),
+    null,
+    []
+  ]
+  for (const body of bad) t.is(validFollowCounts(body), null, JSON.stringify(body))
+})
+
+test('validFollows: exact shape, distinct items, hints for exactly the item keys', async (t) => {
+  const { validFollows } = await load()
+  t.alike(validFollows(followsBody(), A, 'seguidores'), followsBody())
+  t.alike(validFollows(followsBody({ kind: 'seguindo' }), A, 'seguindo'), followsBody({ kind: 'seguindo' }))
+  const empty = { author: A, kind: 'seguindo', items: [], next: null, total: 0, authors: {}, indexing: false, complete: true }
+  t.alike(validFollows(empty, A, 'seguindo'), empty, 'empty page')
+  const moon = { items: [{ key: B, seq: 9, at: '1969-07-20T20:17:40.000Z' }], authors: { [B]: { profileSeq: 1, usernameSeq: null } }, total: 3, next: { atMs: 0, key: B } }
+  t.alike(validFollows(followsBody(moon), A, 'seguidores').next, { atMs: 0, key: B }, 'a pre-1970 row clamps to atMs 0')
+  t.alike(validFollows(followsBody(), A, 'seguidores', FCURSOR), followsBody(), 'rows after the request cursor')
+  const keyOf = (i) => (i + 16).toString(16).padStart(2, '0').repeat(32)
+  const page = (n) => {
+    const items = Array.from({ length: n }, (_, i) => ({ key: keyOf(i), seq: 1, at: AT1 }))
+    const authors = Object.fromEntries(items.map((it) => [it.key, { profileSeq: null, usernameSeq: 1 }]))
+    return followsBody({ items, authors, total: n, next: null })
+  }
+  t.is(validFollows(page(20), A, 'seguidores').items.length, 20, '20 items')
+  const missingKey = followsBody()
+  delete missingKey.total
+  const hintsBC = { [B]: { profileSeq: 1, usernameSeq: null }, [C]: { profileSeq: null, usernameSeq: null } }
+  const bad = [
+    followsBody({ extra: 1 }),
+    missingKey,
+    followsBody({ author: B }),
+    followsBody({ author: A.toUpperCase() }),
+    followsBody({ kind: 'seguindo' }),
+    followsBody({ kind: 'Seguidores' }),
+    page(21),
+    followsBody({ items: [{ key: B, seq: 9, at: AT1 }, { key: B, seq: 3, at: AT2 }], authors: { [B]: hintsBC[B] } }),
+    followsBody({ items: [{ key: A, seq: 9, at: AT1 }, { key: C, seq: 4, at: AT2 }], authors: { [A]: hintsBC[B], [C]: hintsBC[C] } }),
+    followsBody({ items: [{ key: B.toUpperCase(), seq: 9, at: AT1 }, { key: C, seq: 4, at: AT2 }], authors: { [B.toUpperCase()]: hintsBC[B], [C]: hintsBC[C] } }),
+    followsBody({ items: [{ key: 'zz'.repeat(32), seq: 9, at: AT1 }, { key: C, seq: 4, at: AT2 }], authors: { ['zz'.repeat(32)]: hintsBC[B], [C]: hintsBC[C] } }),
+    followsBody({ items: [{ key: B, seq: 0, at: AT1 }, { key: C, seq: 4, at: AT2 }] }),
+    followsBody({ items: [{ key: B, seq: 1.5, at: AT1 }, { key: C, seq: 4, at: AT2 }] }),
+    followsBody({ items: [{ key: B, seq: 9, at: '2026-10-20T10:00:00Z' }, { key: C, seq: 4, at: AT2 }] }),
+    followsBody({ items: [{ key: B, seq: 9, at: 'x' }, { key: C, seq: 4, at: AT2 }] }),
+    followsBody({ items: [{ key: B, seq: 9, at: AT1, extra: 1 }, { key: C, seq: 4, at: AT2 }] }),
+    followsBody({ items: [{ key: B, seq: 9 }, { key: C, seq: 4, at: AT2 }] }),
+    followsBody({ items: [B + ':9', C + ':4'] }),
+    followsBody({ items: 'x' }),
+    followsBody({ next: 'x' }),
+    followsBody({ next: { atMs: -1, key: C } }),
+    followsBody({ next: { atMs: 1.5, key: C } }),
+    followsBody({ next: { atMs: 1, key: 'zz'.repeat(32) } }),
+    followsBody({ next: { atMs: 1, key: C, extra: 1 } }),
+    followsBody({ total: -1 }),
+    followsBody({ total: 2.5 }),
+    followsBody({ total: '7' }),
+    followsBody({ total: 1 }),
+    followsBody({ indexing: 'no' }),
+    followsBody({ complete: null }),
+    followsBody({ authors: { [B]: hintsBC[B] } }),
+    followsBody({ authors: { ...hintsBC, [A]: { profileSeq: 1, usernameSeq: 1 } } }),
+    followsBody({ authors: { [B]: { profileSeq: 1, usernameSeq: null, extra: 1 }, [C]: hintsBC[C] } }),
+    followsBody({ authors: { [B]: { profileSeq: 0, usernameSeq: null }, [C]: hintsBC[C] } }),
+    followsBody({ authors: [] }),
+    null,
+    []
+  ]
+  for (const body of bad) t.is(validFollows(body, A, 'seguidores'), null, JSON.stringify(body).slice(0, 100))
+
+  // A seeder cannot make the reader page backwards or forever.
+  const backwards = [
+    followsBody({ next: { atMs: Date.parse(AT1), key: B } }),
+    followsBody({ next: { atMs: Date.parse(AT2) + 1, key: C } }),
+    followsBody({ items: [], authors: {}, total: 7 }),
+    followsBody({ items: [{ key: C, seq: 4, at: AT2 }, { key: B, seq: 9, at: AT1 }], next: { atMs: Date.parse(AT1), key: B } }),
+    followsBody({ items: [{ key: C, seq: 4, at: AT1 }, { key: B, seq: 9, at: AT1 }], next: { atMs: Date.parse(AT1), key: B } })
+  ]
+  for (const body of backwards) t.is(validFollows(body, A, 'seguidores'), null, 'order ' + JSON.stringify(body.items.map((i) => i.key.slice(0, 2))) + ' next ' + JSON.stringify(body.next))
+  t.is(validFollows(followsBody(), A, 'seguidores', { atMs: Date.parse(AT2), key: A }), null, 'rows before the request cursor')
+  t.is(validFollows(followsBody(), A, 'seguidores', { atMs: Date.parse(AT1), key: B }), null, 'the cursor row itself again')
+})
+
+test('fetchFollowCounts and fetchFollows: request options, contract, a fresh copy and transport', async (t) => {
+  const { fetchFollowCounts, fetchFollows, validFollows } = await load()
+  const calls = []
+  const counts = await fetchFollowCounts(A.toUpperCase(), {
+    fetch: async (url, opts) => {
+      calls.push({ url, opts })
+      return response(JSON.stringify(countsBody()))
+    }
+  })
+  t.alike(counts, { ok: true, value: countsBody() })
+  t.is(calls[0].url, '/index/follows/' + A)
+  const parsed = followsBody()
+  const fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    return response(JSON.stringify(parsed))
+  }
+  const res = await fetchFollows(A.toUpperCase(), 'seguidores', FCURSOR, { fetch })
+  t.is(res.ok, true)
+  t.alike(res.value, followsBody())
+  t.is(calls[1].url, '/index/follows/' + A + '/seguidores/1800000000000.' + C)
+  for (const c of calls) {
+    t.is(c.opts.method, 'GET')
+    t.is(c.opts.credentials, 'omit')
+    t.is(c.opts.redirect, 'error')
+    t.is(c.opts.cache, 'no-store')
+    t.ok(c.opts.signal, 'abortable')
+  }
+  const own = followsBody()
+  const copy = validFollows(own, A, 'seguidores')
+  copy.items[0].seq = 99
+  copy.next.atMs = 1
+  copy.authors[B].profileSeq = 99
+  t.is(own.items[0].seq, 9, 'items copied')
+  t.is(own.next.atMs, Date.parse(AT2), 'cursor copied')
+  t.is(own.authors[B].profileSeq, 1, 'hints copied')
+  for (const body of [followsBody({ extra: 1 }), followsBody({ author: B }), followsBody({ kind: 'seguindo' }), followsBody({ total: 1 })]) {
+    t.alike(await fetchFollows(A, 'seguidores', null, { fetch: json(body) }), { ok: false, reason: 'malformed' }, JSON.stringify(body).slice(0, 80))
+  }
+  t.alike(await fetchFollowCounts(A, { fetch: json(countsBody({ extra: 1 })) }), { ok: false, reason: 'malformed' })
+  const text = JSON.stringify(followsBody())
+  t.is((await fetchFollows(A, 'seguidores', null, { fetch: async () => response(text, { status: 404 }) })).reason, 'not-found')
+  t.is((await fetchFollows(A, 'seguidores', null, { fetch: async () => response(text, { redirected: true }) })).reason, 'status')
+  const big = response(JSON.stringify(followsBody({ pad: 'x'.repeat(70000) })))
+  t.is((await fetchFollows(A, 'seguidores', null, { fetch: async () => big })).reason, 'too-large')
+  t.ok(big.cancelled, 'oversized read is cancelled')
+  const bigCounts = response(JSON.stringify(countsBody({ pad: 'x'.repeat(70000) })))
+  t.is((await fetchFollowCounts(A, { fetch: async () => bigCounts })).reason, 'too-large')
+  // Last: the cooldown a 429 sets outlives the remaining calls.
+  const limited = await fetchFollows(A, 'seguindo', null, { fetch: async () => response(text, { status: 429 }) })
+  t.is(limited.reason, 'rate-limited')
+  t.ok(Number.isFinite(limited.retryAfterMs), 'with the cooldown left')
+  const limitedCounts = await fetchFollowCounts(A, { fetch: async () => response('', { status: 429 }) })
+  t.is(limitedCounts.reason, 'rate-limited', 'counts share the cooldown')
+})
+
 test('with an installation set, every index URL is absolute on that origin only', async (t) => {
-  const { postUrl, countsUrl, memberUrl, topicUrl, engagersUrl, searchUrl, fetchCounts } = await load()
+  const { postUrl, countsUrl, memberUrl, topicUrl, engagersUrl, searchUrl, communityGroupsUrl, fetchCounts } = await load()
   const { setInstallation } = await import('../src/installation.js')
   t.teardown(() => setInstallation(null))
   t.ok(setInstallation('https://example.test'))
@@ -892,6 +1105,7 @@ test('with an installation set, every index URL is absolute on that origin only'
   t.is(topicUrl('ab+cd'), O + '/index/topic/ab+cd')
   t.is(engagersUrl('likes', REF), O + '/index/likes/' + A + '/5')
   t.is(searchUrl('ana-bia'), O + '/index/search/ana-bia')
+  t.is(communityGroupsUrl(C, A), O + '/index/community/' + C + '/groups/' + A)
   t.is(postUrl('bad'), null, 'bad input still refused')
   const urls = []
   const good = { counts: {}, indexing: false, complete: true }
@@ -910,6 +1124,7 @@ function groupBody (over = {}) {
     creator: A,
     rootServed: true,
     community: null,
+    attached: false,
     writers: [
       { key: A, diary: A, length: 4, signed: 5, seq: 1, left: false },
       { key: B, diary: C, length: 2, signed: 2, seq: 3, left: true }
@@ -922,17 +1137,22 @@ function groupBody (over = {}) {
 }
 
 test('group URL builders lowercase and refuse anything else', async (t) => {
-  const { groupUrl, groupsUrl, communityUrl, groupSearchUrl } = await load()
+  const { groupUrl, groupsUrl, communityUrl, communityGroupsUrl, groupSearchUrl } = await load()
   t.is(groupUrl(A), '/index/group/' + A)
   t.is(groupUrl(A.toUpperCase(), B), '/index/group/' + A + '/' + B)
   t.is(groupsUrl(A.toUpperCase()), '/index/groups/' + A)
   t.is(communityUrl(C), '/index/community/' + C)
+  t.is(communityGroupsUrl(C.toUpperCase(), A.toUpperCase()), '/index/community/' + C + '/groups/' + A)
   t.is(groupSearchUrl('praia-azul'), '/index/group-search/praia-azul')
   for (const bad of [null, 7, 'zz'.repeat(32), A + '/..', A.slice(2)]) {
     t.is(groupUrl(bad), null)
     t.is(groupsUrl(bad), null)
     t.is(communityUrl(bad), null)
+    t.is(communityGroupsUrl(bad, A), null)
+    t.is(communityGroupsUrl(C, bad), null)
   }
+  t.is(communityGroupsUrl(C), null, 'a cursor is required')
+  t.is(communityGroupsUrl(C, A + '/x'), null)
   t.is(groupUrl(A, 'nope'), null)
   t.is(groupUrl(A, A + '/x'), null)
   for (const bad of ['a', 'Praia', 'a-', 'x y', '', 'a--b', null, 'a-b-c-d-e']) t.is(groupSearchUrl(bad), null, String(bad))
@@ -950,6 +1170,7 @@ test('fetchGroup: request, exact shape, older seeder without signed', async (t) 
   t.alike(res.value, groupBody({ next: C }))
   t.is(calls[0].url, '/index/group/' + A)
   t.is(calls[0].opts.credentials, 'omit')
+  t.is((await fetchGroup(A, null, { fetch: json(groupBody({ community: C, attached: true })) })).value.attached, true)
   const old = groupBody()
   old.writers = old.writers.map(({ signed, ...w }) => w)
   const res2 = await fetchGroup(A, null, { fetch: json(old) })
@@ -973,6 +1194,10 @@ test('fetchGroup refuses malformed JSON whole', async (t) => {
     groupBody({ name: 'x'.repeat(81) }),
     groupBody({ creator: A.toUpperCase() }),
     groupBody({ community: 'ab' }),
+    groupBody({ attached: null }),
+    groupBody({ attached: 1 }),
+    groupBody({ attached: 'true' }),
+    groupBody({ attached: undefined }),
     groupBody({ next: 'ab' }),
     groupBody({ rootServed: 'yes' }),
     groupBody({ indexing: 1 }),
@@ -1045,34 +1270,153 @@ test('fetchGroupSearch: public hits only, cap 20, null name allowed', async (t) 
   t.is((await fetchGroupSearch('a', { fetch: json(body) })).reason, 'invalid-input')
 })
 
-test('fetchCommunity: a private row is only group and visibility', async (t) => {
-  const { fetchCommunity } = await load()
-  const body = {
+function communityRow (over = {}) {
+  return { group: A, visibility: 'public', join: 'open', name: 'Praia', writerCount: 3, ...over }
+}
+
+function communityBody (over = {}) {
+  return {
     name: 'Cais',
-    groups: [{ group: A, name: 'Praia', writerCount: 3 }, { group: B, visibility: 'private' }],
+    join: 'open',
+    creator: C,
+    members: 2,
+    groups: [communityRow(), communityRow({ group: B, visibility: 'private', join: 'approval', name: null, writerCount: null })],
+    next: B,
     indexing: false,
-    complete: true
+    complete: true,
+    ...over
   }
+}
+
+function badCommunityRows () {
+  const row = communityRow()
+  return [
+    null,
+    'x',
+    Array.from({ length: 33 }, (_, i) => communityRow({ group: i.toString(16).padStart(64, '0') })),
+    [row, row],
+    [communityRow({ group: B }), row],
+    [null],
+    [{ ...row, extra: 1 }],
+    [{ group: A, visibility: 'private' }],
+    [{ group: A, name: 'Praia', writerCount: 3 }],
+    [{ group: A }],
+    ...['group', 'visibility', 'join', 'name', 'writerCount'].map((key) => [Object.fromEntries(Object.entries(row).filter(([k]) => k !== key))]),
+    ...['ab', A.toUpperCase(), null, 7].map((group) => [communityRow({ group })]),
+    ...['secret', null, 7].map((visibility) => [communityRow({ visibility })]),
+    ...['closed', null, 7].map((join) => [communityRow({ join })]),
+    ...[3, '', 'x'.repeat(81)].map((name) => [communityRow({ name })]),
+    ...[-1, 0.5, '3', null, Number.MAX_SAFE_INTEGER + 1].map((writerCount) => [communityRow({ writerCount })]),
+    [communityRow({ visibility: 'private', name: 'Segredo', writerCount: null })],
+    [communityRow({ visibility: 'private', name: null, writerCount: 2 })]
+  ]
+}
+
+test('fetchCommunity: uniform public and private rows, exact response and copies', async (t) => {
+  const { fetchCommunity, validCommunity } = await load()
+  const body = communityBody()
   const calls = []
   const res = await fetchCommunity(C, { fetch: async (url) => { calls.push(url); return response(JSON.stringify(body)) } })
   t.alike(res, { ok: true, value: body })
   t.is(calls[0], '/index/community/' + C)
-  t.is((await fetchCommunity(C, { fetch: json({ ...body, name: null }) })).ok, true, 'name may be null')
-  const hit = (i) => ({ group: String(i).padStart(64, '0'), name: 'n', writerCount: 1 })
-  t.is((await fetchCommunity(C, { fetch: json({ ...body, groups: Array.from({ length: 32 }, (_, i) => hit(i)) }) })).ok, true)
-  const bad = [
-    { ...body, groups: Array.from({ length: 33 }, (_, i) => hit(i)) },
-    { ...body, groups: [{ group: B, visibility: 'private', name: 'Segredo' }] },
-    { ...body, groups: [{ group: B, visibility: 'private', writerCount: 2 }] },
-    { ...body, groups: [{ group: B, visibility: 'public' }] },
-    { ...body, groups: [{ group: B }] },
-    { ...body, groups: [hit(1), { group: String(1).padStart(64, '0'), visibility: 'private' }] },
-    { ...body, groups: [{ ...hit(1), name: 3 }] },
-    { ...body, name: 4 },
-    { ...body, name: '' },
-    { ...body, indexing: 'no' },
-    { name: 'x', groups: [], indexing: false, complete: true, extra: 1 }
-  ]
-  for (const b of bad) t.is((await fetchCommunity(C, { fetch: json(b) })).reason, 'malformed', JSON.stringify(b).slice(0, 80))
+  const copy = validCommunity(body)
+  copy.groups[0].name = 'Outra'
+  copy.groups.push(communityRow({ group: C }))
+  t.is(body.groups.length, 2)
+  t.is(body.groups[0].name, 'Praia')
+  for (const groups of badCommunityRows()) {
+    t.is((await fetchCommunity(C, { fetch: json(communityBody({ groups })) })).reason, 'malformed')
+  }
   t.is((await fetchCommunity('nope', { fetch: json(body) })).reason, 'invalid-input')
+})
+
+test('validCommunity: nullable header, counts, flags, cursor and exact keys', async (t) => {
+  const { validCommunity, COMMUNITY_GROUPS_MAX } = await load()
+  t.is(COMMUNITY_GROUPS_MAX, 32)
+  const full = Array.from({ length: 32 }, (_, i) => communityRow({ group: i.toString(16).padStart(64, '0') }))
+  for (const body of [communityBody(), communityBody({ name: null, join: null, creator: null, members: 0, next: null, groups: [], indexing: true, complete: false }), communityBody({ join: 'approval', groups: full, next: full[31].group }), communityBody({ groups: [communityRow({ name: null, writerCount: 0 })], next: A })]) {
+    t.alike(validCommunity(body), body)
+  }
+  const body = communityBody()
+  const bad = [
+    null, [], { ...body, extra: 1 },
+    ...Object.keys(body).map((key) => Object.fromEntries(Object.entries(body).filter(([k]) => k !== key))),
+    ...[4, '', 'x'.repeat(81)].map((name) => communityBody({ name })),
+    ...['closed', 7].map((join) => communityBody({ join })),
+    ...[A.toUpperCase(), 'ab', 7].map((creator) => communityBody({ creator })),
+    ...[-1, 0.5, '2', null, Number.MAX_SAFE_INTEGER + 1].map((members) => communityBody({ members })),
+    ...['ab', A.toUpperCase(), 7].map((next) => communityBody({ next })),
+    communityBody({ next: A }), communityBody({ next: C }), communityBody({ groups: [], next: B }),
+    communityBody({ indexing: 'no' }), communityBody({ complete: 1 }),
+    ...badCommunityRows().map((groups) => communityBody({ groups }))
+  ]
+  for (const value of bad) t.is(validCommunity(value), null, JSON.stringify(value).slice(0, 100))
+})
+
+test('validCommunityGroups: bounded sorted rows strictly after the cursor', async (t) => {
+  const { validCommunityGroups } = await load()
+  const body = { groups: [communityRow({ group: B })], next: B, indexing: false, complete: true }
+  t.alike(validCommunityGroups(body, A), body)
+  const empty = { groups: [], next: null, indexing: true, complete: false }
+  t.alike(validCommunityGroups(empty, A), empty)
+  const fullRows = Array.from({ length: 32 }, (_, i) => communityRow({ group: (i + 1).toString(16).padStart(64, '0') }))
+  const full = { ...body, groups: fullRows, next: fullRows[31].group }
+  t.alike(validCommunityGroups(full, '0'.repeat(64)), full)
+  const privatePage = { ...body, groups: [communityRow({ group: B, visibility: 'private', join: 'approval', name: null, writerCount: null })] }
+  t.alike(validCommunityGroups(privatePage, A), privatePage)
+  const copy = validCommunityGroups(body, A)
+  copy.groups[0].name = 'Outra'
+  copy.groups.push(communityRow({ group: C }))
+  t.is(body.groups[0].name, 'Praia')
+  t.is(body.groups.length, 1)
+  const bad = [
+    null, [], { ...body, extra: 1 },
+    ...Object.keys(body).map((key) => Object.fromEntries(Object.entries(body).filter(([k]) => k !== key))),
+    ...badCommunityRows().map((groups) => ({ ...body, groups })),
+    { ...body, groups: [communityRow()] },
+    { ...body, indexing: 1 }, { ...body, complete: 'yes' },
+    ...['ab', B.toUpperCase(), 7].map((next) => ({ ...body, next })),
+    { ...body, next: C }, { ...empty, next: B }
+  ]
+  for (const value of bad) t.is(validCommunityGroups(value, A), null)
+  t.is(validCommunityGroups(body, B), null, 'equal to cursor')
+  t.is(validCommunityGroups(body, C), null, 'before cursor')
+  for (const cursor of [undefined, null, 7, 'ab', A.toUpperCase()]) t.is(validCommunityGroups(empty, cursor), null, 'invalid cursor')
+})
+
+test('fetchCommunityGroups: request options, validation, transport and timeout', async (t) => {
+  const { fetchCommunityGroups } = await load()
+  const body = { groups: [communityRow({ group: B })], next: B, indexing: false, complete: true }
+  const calls = []
+  const fetch = async (url, opts) => { calls.push({ url, opts }); return response(JSON.stringify(body)) }
+  t.alike(await fetchCommunityGroups(C.toUpperCase(), A.toUpperCase(), { fetch }), { ok: true, value: body })
+  t.is(calls[0].url, '/index/community/' + C + '/groups/' + A)
+  const opts = calls[0].opts
+  t.is(opts.method, 'GET')
+  t.is(opts.credentials, 'omit')
+  t.is(opts.redirect, 'error')
+  t.is(opts.cache, 'no-store')
+  t.is(opts.headers.Accept, 'application/json')
+  t.ok(opts.signal)
+  t.is((await fetchCommunityGroups(C, A, { fetch })).ok, true)
+  t.is(calls.length, 2, 'never cached')
+  for (const [community, cursor] of [['bad', A], [C, null], [C, 'bad']]) {
+    t.alike(await fetchCommunityGroups(community, cursor, { fetch }), { ok: false, reason: 'invalid-input' })
+  }
+  t.is(calls.length, 2, 'invalid input makes no request')
+  t.is((await fetchCommunityGroups(C, B, { fetch })).reason, 'malformed', 'response is checked against the cursor')
+  t.is((await fetchCommunityGroups(C, A, { fetch: async () => response('{') })).reason, 'malformed')
+  t.is((await fetchCommunityGroups(C, A, { fetch: json(body, { status: 404 }) })).reason, 'not-found')
+  t.is((await fetchCommunityGroups(C, A, { fetch: json(body, { redirected: true }) })).reason, 'status')
+  t.is((await fetchCommunityGroups(C, A, { fetch: async () => { throw new Error('offline') } })).reason, 'network')
+  const big = response('x'.repeat(70000))
+  t.is((await fetchCommunityGroups(C, A, { fetch: async () => big })).reason, 'too-large')
+  t.ok(big.cancelled)
+  let signal
+  const timeout = await fetchCommunityGroups(C, A, { timeoutMs: 10, fetch: (url, opts) => { signal = opts.signal; return new Promise(() => {}) } })
+  t.is(timeout.reason, 'timeout')
+  t.ok(signal.aborted)
+  const limited = await fetchCommunityGroups(C, A, { fetch: json(body, { status: 429 }) })
+  t.is(limited.reason, 'rate-limited')
+  t.ok(Number.isFinite(limited.retryAfterMs))
 })

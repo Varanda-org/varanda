@@ -27,11 +27,15 @@
 // pushManager.subscribe() with nothing awaited first (Safari's user
 // activation). Sair and Recomeçar still switch this browser off first, while
 // the key can still sign; a failure there never stops them.
+// Passkeys e recuperação (hosted passkey node, unlocked) opens the extra
+// passkeys and the recovery code of the account (./Passkeys.js).
+// The footer under the list shows the build and the commit the installation
+// serves, only through the src/version.js formatters, and a tap copies them.
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
-import { invitePolicy, walletPolicy } from '../account'
+import { invitePolicy } from '../account'
 import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
 import { askPersist } from '../persist'
@@ -43,45 +47,76 @@ import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { Sheet } from '../ui/Sheet'
-import { colors, type } from '../ui/theme'
+import { type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
+import { MODES, MODE_LABELS } from '../appearance'
 import { Btn, ErrorText, Notice, Page, Row, Soft, useAction } from '../ui'
+import { pagesOn } from '../pageGate'
+import { buildInfo, fetchDeployedCommit, versionDetails, versionLines } from '../version'
+import { runningRelease } from '../runningRelease'
+import { installationOrigin } from '../installation'
+import { copyText } from '../share'
+import { shareNav } from '../shareNav'
 import Conexao from './Conexao'
-import Carteira from './Carteira'
 import Convites from './Convites'
 import Identidade from './Identidade'
+import Passkeys from './Passkeys'
 import Perfil from './Perfil'
 import Recurso from './Recurso'
 import Sincronizar from './Sincronizar'
 import Termos from './Termos'
 
+// The kind of build is the binary itself (web bundle, Android app, iOS app):
+// Platform.OS is the only source, there is no capability to test. Metro
+// inlines the two EXPO_PUBLIC_* member expressions at bundle time
+// (apps/app/metro.config.js sets them; see configStore.native.js
+// loadInstallation).
+const BUILD = buildInfo({ kind: Platform.OS, commit: process.env.EXPO_PUBLIC_VARANDA_COMMIT, builtAt: process.env.EXPO_PUBLIC_VARANDA_BUILD_DATE, release: runningRelease() })
+
 const TITLES = {
   lista: 'Ajustes',
   perfil: 'Editar perfil',
   conta: 'Conta e @nome',
+  passkeys: 'Passkeys e recuperação',
   termos: 'Termos e privacidade',
+  aparencia: 'Aparência',
   instalar: 'Instalar o app',
   conexao: 'Conexão',
   sincronizar: 'Sincronização',
   identidade: 'Identidade técnica',
   convites: 'Convidar pessoas',
-  recurso: 'Recorrer de um bloqueio',
-  carteira: 'Conta de pagamentos'
+  recurso: 'Recorrer de um bloqueio'
 }
 
-const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use sua passkey.'
-const RESET_TEXT = 'Isto apaga a conta guardada neste aparelho e as publicações que ainda aguardam envio. A conta antiga não pode ser reconstruída: será preciso entrar de novo e vincular outra vez. Para voltar à mesma conta, use a mesma passkey.'
+const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use qualquer passkey cadastrada nesta conta ou o código de recuperação.'
+const RESET_TEXT = 'Isto apaga a conta guardada neste aparelho e as publicações que ainda aguardam envio. Para voltar à mesma conta, entre com qualquer passkey cadastrada nela ou com o código de recuperação. Sem passkey e sem código, a conta antiga não pode ser reconstruída: será preciso entrar de novo e vincular outra vez.'
 
-function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailingText = null, pending = false, disabled = false, expanded }) {
+function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailingText = null, pending = false, disabled = false, expanded, checked }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const state = { disabled: disabled || pending }
   if (expanded !== undefined) state.expanded = expanded
+  if (checked !== undefined) state.checked = checked
+  const radio = checked !== undefined
+  // react-native-web drops accessibilityState (aria-checked carries it) and
+  // presses only buttons on Space, so a radio row handles Space itself.
+  const radioKeys = radio && !(disabled || pending)
+    ? (e) => {
+        if (e.key !== ' ' && e.key !== 'Spacebar') return
+        e.preventDefault()
+        onPress()
+      }
+    : undefined
   return (
     <Pressable
       style={[styles.row, !first && styles.rowDivider]}
-      accessibilityRole='button'
+      accessibilityRole={radio ? 'radio' : 'button'}
       accessibilityLabel={label}
       accessibilityState={state}
+      aria-checked={radio ? checked : undefined}
       disabled={disabled || pending}
       onPress={onPress}
+      onKeyDown={radioKeys}
     >
       <Icon name={icon} size={22} color={colors.soft} />
       <Text style={styles.label}>{pending ? label + '…' : label}</Text>
@@ -92,7 +127,9 @@ function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailin
   )
 }
 
-export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset }) {
+export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, onOpenPaginas, inviteNudge = 0 }) {
+  const styles = useStyles(makeStyles)
+  const { colors, mode, setMode } = useTheme()
   const node = useNode()
   const names = useNames()
   const outbox = useOutbox()
@@ -116,12 +153,19 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const [ownFailed, setOwnFailed] = useState(false)
   const [infoTick, setInfoTick] = useState(0)
   const [saved, setSaved] = useState('')
-  // The signup invite policy, read once per opening of the sheet (null: off,
-  // unknown or unreadable, so the Convidar pessoas row hides).
+  // The signup invite policy, read once per opening of the sheet (null: not
+  // answered yet, so the Convidar pessoas row hides). A convite push can open
+  // the screen before this answer; required false means there is nothing to show.
   const [policy, setPolicy] = useState(null)
   const sheetOpen = screen !== null
   const policySeq = useRef(0)
   const member = unlocked && typeof passkey.status.publicKey === 'string' ? passkey.status.publicKey : null
+  // A core node registers its delegate and accepts the Terms on the page
+  // screens' first use (Paginas.js usePageMember); this row only opens them.
+  const openPaginas = () => {
+    onClose()
+    onOpenPaginas()
+  }
   const pushEligible = node.hosted === true && member !== null
   // Avisos no aparelho, from the store the shell's note shares (null: not
   // read yet, or this node is not the hosted one for this member any more).
@@ -129,14 +173,59 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const push = pushEligible && pushStore.member === member ? pushStore.state : null
   const pushPending = pushStore.pending
   const pushError = pushStore.error
+  const [server, setServer] = useState({ status: 'loading', commit: null })
+  const [versionNote, setVersionNote] = useState('')
+  const noteTimer = useRef(null)
+  // Bumped on every tap and when the sheet closes: only the latest tap, in the
+  // still-open sheet, may show its copy result.
+  const copyTurn = useRef(0)
 
   // A closed sheet forgets the open confirmations.
   useEffect(() => {
     if (screen === null) {
       setConfirm(null)
       setSaved('')
+      setVersionNote('')
+      clearTimeout(noteTimer.current)
+      copyTurn.current++
     }
   }, [screen])
+
+  useEffect(() => () => {
+    clearTimeout(noteTimer.current)
+    copyTurn.current++
+  }, [])
+
+  // On the web the page origin is the installation and the request is
+  // relative, so a null installation still asks; a native build without one
+  // has nowhere to ask.
+  useEffect(() => {
+    if (screen !== 'lista') return
+    const installation = installationOrigin()
+    if (installation === null && Platform.OS !== 'web') {
+      setServer({ status: 'unconfigured', commit: null })
+      return
+    }
+    let alive = true
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 8000)
+    setServer({ status: 'loading', commit: null })
+    fetchDeployedCommit({ installation, fetch: globalThis.fetch, signal: ctrl.signal }).then((r) => { if (alive) setServer(r) })
+    return () => {
+      alive = false
+      clearTimeout(timer)
+      ctrl.abort()
+    }
+  }, [screen])
+
+  const copyVersion = async () => {
+    const turn = ++copyTurn.current
+    const ok = await copyText(shareNav(), versionDetails({ app: BUILD, server }))
+    if (turn !== copyTurn.current) return
+    setVersionNote(ok ? 'Detalhes copiados.' : 'Não foi possível copiar.')
+    clearTimeout(noteTimer.current)
+    noteTimer.current = setTimeout(() => setVersionNote(''), 2000)
+  }
 
   // A fresh read on every opening. Closing keeps the state because the shell
   // needs the registration; a lock clears it through the shell's readPush.
@@ -146,23 +235,27 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
 
   // Only the hosted web node has an account service on its own origin.
   const hosted = node.hosted === true
-  useEffect(() => {
+  // A 404 (null) is "not required", so a screen opened by a convite push
+  // never waits forever. A failed read keeps the row hidden (policy stays
+  // null) and the convite screen offers a retry instead of leaving.
+  const [policyFailed, setPolicyFailed] = useState(false)
+  const askPolicy = useCallback(() => {
     const mine = ++policySeq.current
+    setPolicyFailed(false)
+    invitePolicy().then((p) => { if (mine === policySeq.current) setPolicy(p === null ? { required: false } : p) }, () => { if (mine === policySeq.current) setPolicyFailed(true) })
+  }, [])
+  useEffect(() => {
+    ++policySeq.current
     setPolicy(null)
     if (!sheetOpen || !hosted) return
-    invitePolicy().then((p) => { if (mine === policySeq.current) setPolicy(p) }, () => {})
-  }, [sheetOpen, hosted])
+    askPolicy()
+  }, [sheetOpen, hosted, askPolicy])
 
-  // The payments account policy, read once per opening like the invites one
-  // (null: off or unreadable, so the row hides).
-  const [wallet, setWallet] = useState(null)
-  const walletSeq = useRef(0)
+  // The push opens Convidar pessoas before the policy is known. A service
+  // that does not require invites has no such screen.
   useEffect(() => {
-    const mine = ++walletSeq.current
-    setWallet(null)
-    if (!sheetOpen || !hosted) return
-    walletPolicy().then((p) => { if (mine === walletSeq.current) setWallet(p) }, () => {})
-  }, [sheetOpen, hosted])
+    if (screen === 'convites' && policy !== null && policy.required === false) onNavigate('lista')
+  }, [screen, policy, onNavigate])
 
   useEffect(() => {
     if ((screen !== 'perfil' && screen !== 'convites') || !ready) return
@@ -256,7 +349,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   // A state that could not be confirmed is never labelled "Desligados".
   const pushTrailing = pushUi === null ? null : (pushUi.on ? 'Ligados' : (pushUi.note === PUSH_UNKNOWN ? null : 'Desligados'))
   const inviting = account && policy !== null && policy.required === true
-  const paying = account && wallet !== null && wallet.available === true
+  const lines = versionLines({ app: BUILD, server })
 
   // While the sheet is open every sub-screen stays mounted (drafts typed in
   // Conexão or Identidade survive going back to the list); the inactive ones
@@ -272,10 +365,14 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             <View style={styles.group}>
               <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
+              {account && unlocked ? <Item icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}
               {account ? <Item icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
               {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
-              {paying ? <Item icon='credit-card' label='Conta de pagamentos' onPress={() => onNavigate('carteira')} /> : null}
+              {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function'
+                ? <Item icon='gente' label='Páginas' onPress={openPaginas} />
+                : null}
               <Item icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
+              <Item icon='sun' label='Aparência' trailingText={MODE_LABELS[mode]} onPress={() => onNavigate('aparencia')} />
               {pushRow
                 ? (
                   <Item
@@ -356,6 +453,17 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 </View>
                 )
               : null}
+            <Pressable
+              style={styles.version}
+              accessibilityRole='button'
+              accessibilityLabel={[lines.appLine, lines.serverLine, versionNote].filter(Boolean).join('. ')}
+              accessibilityHint='copia os detalhes da versão'
+              onPress={copyVersion}
+            >
+              <Text style={styles.versionText}>{lines.appLine}</Text>
+              {lines.serverLine !== null ? <Text style={styles.versionText}>{lines.serverLine}</Text> : null}
+              {versionNote ? <Text style={styles.versionText}>{versionNote}</Text> : null}
+            </Pressable>
           </Page>
         </View>
         <View style={shown('perfil')}>
@@ -384,10 +492,28 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         <View style={shown('conta')}>
           <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} />
         </View>
+        {/* Kept mounted like the others; it drops a shown recovery code as
+            soon as it is not the active screen. */}
+        {account
+          ? (
+            <View style={shown('passkeys')}>
+              <Passkeys active={ready && screen === 'passkeys'} embedded />
+            </View>
+            )
+          : null}
         {account
           ? (
             <View style={shown('recurso')}>
               <Recurso open={screen === 'recurso'} active={ready && screen === 'recurso'} />
+            </View>
+            )
+          : null}
+        {screen === 'convites' && hosted && policy === null
+          ? (
+            <View style={shown('convites')}>
+              {policyFailed
+                ? <Page><Soft>serviço indisponível</Soft><Btn label='tentar de novo' onPress={askPolicy} /></Page>
+                : <Page><Soft>carregando…</Soft></Page>}
             </View>
             )
           : null}
@@ -401,19 +527,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 perWeek={policy.perWeek}
                 keyFailed={ownFailed}
                 onRetryKey={() => setInfoTick((n) => n + 1)}
-              />
-            </View>
-            )
-          : null}
-        {paying
-          ? (
-            <View style={shown('carteira')}>
-              <Carteira
-                open={screen === 'carteira'}
-                active={ready && screen === 'carteira'}
-                member={member}
-                node={node}
-                onBack={() => onNavigate('lista')}
+                inviteNudge={inviteNudge}
               />
             </View>
             )
@@ -425,6 +539,24 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             saved={termsInfo ? termsInfo.saved : true}
             syncState={termsInfo ? termsInfo.syncState : null}
           />
+        </View>
+        <View style={shown('aparencia')}>
+          <Page>
+            <View style={styles.group} accessibilityRole='radiogroup' accessibilityLabel='Aparência'>
+              {MODES.map((m, i) => (
+                <Item
+                  key={m}
+                  first={i === 0}
+                  icon={m === 'dark' ? 'moon' : m === 'light' ? 'sun' : 'smartphone'}
+                  label={MODE_LABELS[m]}
+                  checked={mode === m}
+                  trailing={mode === m ? 'ok' : null}
+                  onPress={() => setMode(m)}
+                />
+              ))}
+            </View>
+            <Soft>Sistema segue o modo claro ou escuro do aparelho.</Soft>
+          </Page>
         </View>
         <View style={shown('instalar')}>
           <Page>
@@ -451,7 +583,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
   hidden: { display: 'none' },
   cancel: { ...type.cancel, color: colors.ink },
@@ -468,5 +600,7 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 16 },
   rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   label: { flex: 1, fontSize: 16, color: colors.ink },
-  trailing: { fontSize: 15, color: colors.soft }
+  trailing: { fontSize: 15, color: colors.soft },
+  version: { alignItems: 'center', justifyContent: 'center', minHeight: 48, paddingVertical: 12, gap: 2 },
+  versionText: { fontSize: 12, lineHeight: 16, color: colors.soft, textAlign: 'center' }
 })

@@ -12,7 +12,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8')
 
 test('eas.json has no prebuildCommand and no updates', (t) => {
   const eas = JSON.parse(read('eas.json'))
-  t.is(eas.cli.appVersionSource, 'local')
+  t.is(eas.cli.appVersionSource, 'remote', 'EAS keeps the build number (docs/development.md, Envio para a App Store)')
   t.is(eas.build.preview.android.buildType, 'apk')
   t.is(eas.build['preview-simulator'].extends, 'preview')
   for (const profile of Object.values(eas.build)) {
@@ -70,13 +70,42 @@ test('.easignore keeps the build outputs and every secret out of the upload', (t
 test('the main manifest drops the overlay and write storage permissions', (t) => {
   const manifest = read('android/app/src/main/AndroidManifest.xml')
   t.absent(manifest.includes('SYSTEM_ALERT_WINDOW'))
-  // A library may merge storage or camera permissions; the main manifest only
-  // ever names them to remove them.
+  // A library may merge storage or camera permissions; the main manifest only ever
+  // names them to remove them.
   for (const name of ['WRITE_EXTERNAL_STORAGE', 'READ_EXTERNAL_STORAGE', 'CAMERA']) {
     const lines = manifest.split('\n').filter((l) => l.includes('android.permission.' + name + '"'))
-    t.ok(lines.every((l) => l.includes('tools:node="remove"')), name + ' only as a removal')
+    t.ok(lines.length > 0 && lines.every((l) => l.includes('tools:node="remove"')), name + ' only as a removal')
   }
   t.ok(manifest.includes('android.permission.INTERNET'))
+})
+
+// A wider claim would pull /@, /convite/ or the /account/ passkey pages out of
+// the browser for everyone who has the app installed.
+test('the main manifest claims only /c/ and /g/ of the production host as App Links', (t) => {
+  const manifest = read('android/app/src/main/AndroidManifest.xml')
+  t.is(manifest.split('android:autoVerify="true"').length - 1, 1, 'exactly one autoVerify')
+  const filters = manifest.match(/<intent-filter[^>]*>[\s\S]*?<\/intent-filter>/g) || []
+  const verified = filters.filter((f) => f.includes('android:autoVerify="true"'))
+  t.is(verified.length, 1)
+  const appLinks = verified[0] || ''
+  t.ok(appLinks.includes('<action android:name="android.intent.action.VIEW"/>'))
+  t.ok(appLinks.includes('<category android:name="android.intent.category.DEFAULT"/>'))
+  t.ok(appLinks.includes('<category android:name="android.intent.category.BROWSABLE"/>'))
+  const data = appLinks.match(/<data [^>]*\/>/g) || []
+  t.alike(data, [
+    '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/c/"/>',
+    '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/g/"/>'
+  ])
+  const hosts = manifest.match(/android:host="[^"]*"/g) || []
+  t.ok(hosts.length > 0 && hosts.every((h) => h === 'android:host="bora.varanda.app"'), 'only the production host')
+  t.absent(manifest.includes('android:pathPattern'))
+  t.absent(manifest.includes('android:path='))
+  t.absent(manifest.includes('android:pathAdvancedPattern'))
+  t.alike(manifest.match(/android:pathPrefix="[^"]*"/g), ['android:pathPrefix="/c/"', 'android:pathPrefix="/g/"'])
+  const scheme = filters.filter((f) => f.includes('android:scheme="varanda"'))
+  t.is(scheme.length, 1, 'the varanda scheme filter is kept')
+  t.absent((scheme[0] || '').includes('autoVerify'))
+  t.ok(manifest.includes('android:launchMode="singleTask"'))
 })
 
 test('the iOS marketing version matches app.json', (t) => {

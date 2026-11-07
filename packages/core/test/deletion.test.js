@@ -15,10 +15,12 @@ const {
   tombstoneAt,
   clearDeleted,
   downloadExcept,
+  downloadExceptPages,
+  pageTargets,
   clearRanges
 } = require('../lib/deletion')
 const { watchPresent, watchContiguous, watchFork } = require('../lib/net')
-const { MAX_LOG_BLOCKS } = require('../lib/records')
+const { MAX_LOG_BLOCKS, validateRecord } = require('../lib/records')
 const { until } = require('./helpers/net')
 const { tmpDir } = require('./helpers/tmp')
 
@@ -914,4 +916,304 @@ test('downloadExcept: tens of thousands of deleted seqs open a bounded number of
   t.ok(core.cleared.includes(59999), 'a deleted seq past the range cap is cleared on download')
   t.absent(local.has(59999))
   t.ok(linear, 'every range is linear')
+})
+
+// A delete of a page-* record has no effect (docs/protocol.md §12): the
+// fold keeps a present target and no clear path removes its bytes.
+const pageDelegation = { association: K2, issuer: K3, issuerDate: AT, issuerSignature: 'e'.repeat(128) }
+const pageClose = (seq) => ({ seq, record: { type: 'page-close', page: K1, gen: 2, at: AT, nonce: 'c'.repeat(43), actor: 'd'.repeat(64), ...pageDelegation, signature: 'a'.repeat(128), countersignature: 'b'.repeat(128) } })
+const pageDelegate = (seq) => ({ seq, record: { type: 'page-delegate', actor: K3, at: AT } })
+
+test('deletedSeqs and applyDeletes: a delete of a present page-* record has no effect', (t) => {
+  const entries = [genesis, post(1), pageClose(2), del(3, 2), post(4), del(5, 1), pageDelegate(6), del(7, 6)]
+  t.is(validateRecord(entries[2].record, 2), null, 'the page-close is shape-valid')
+  t.alike([...deletedSeqs(entries)], [1], 'only the post is deleted')
+  const out = applyDeletes(entries)
+  t.alike(out[2], entries[2], 'the page-close block is kept')
+  t.alike(out[6], entries[6], 'the page-delegate block is kept')
+  t.alike(out[1], { seq: 1, record: null, deleted: true })
+  // The fold cannot know the type of a block it does not hold.
+  const hole = [genesis, post(1), { seq: 2, record: null }, del(3, 2)]
+  t.alike([...deletedSeqs(hole)], [2], 'an absent target is folded as before')
+})
+
+test('clearDeleted never clears a page-* block, even when a caller names it', async (t) => {
+  const store = await openCorestore(t, tmpDir(t))
+  const core = store.get({ name: 'page-diary' })
+  await core.ready()
+  const blocks = [genesis, post(1), pageClose(2), del(3, 2), del(4, 1)]
+  for (const { record } of blocks) await core.append(encode(record))
+  t.alike(await clearDeleted(core, [1, 2]), [1], 'the post is cleared, the page-close is not')
+  t.ok(await holds(core, [0, 2, 3, 4]))
+  const state = await presentState(core)
+  t.alike(state.entries[2], { seq: 2, record: blocks[2].record }, 'the page-close still reads back')
+  t.absent(state.deleted.has(2))
+
+  // downloadExcept clears through the same check.
+  const handle = downloadExcept(core, new Set([2]))
+  t.teardown(() => handle.destroy())
+  await handle.update(new Set([2]))
+  await handle.idle()
+  t.ok(await holds(core, [2]), 'downloadExcept keeps the page-close too')
+})
+
+// docs/protocol.md §12: a page diary (page-roster at 2) keeps an unheld
+// tombstone target in the download until it is read once, so a replica
+// that learned the tombstone first still fetches a page-close it names
+// (core sync followRange and the seeder's diary download use this).
+const pageRoster = (seq) => ({ seq, record: { type: 'page-roster', page: K1, gen: 1, owner: 'd'.repeat(64), admins: [], prev: null, at: AT, nonce: 'r'.repeat(43), ...pageDelegation, signature: 'a'.repeat(128), countersignature: 'b'.repeat(128) } })
+
+test('downloadExceptPages: a page diary fetches the page-close a known tombstone names, not the deleted post', async (t) => {
+  const store = await openCorestore(t, tmpDir(t))
+  const source = store.get({ name: 'page' })
+  await source.ready()
+  const PAGE = [genesis, post(1), pageRoster(2), post(3), pageClose(4), post(5), del(6, 4), del(7, 3), post(8)]
+  t.is(validateRecord(PAGE[2].record, 2), null, 'fixture: the roster is shape-valid')
+  for (const { record } of PAGE) await source.append(encode(record))
+  const r = await replica(t, source.key)
+  link(t, r.store, store)
+  const handle = downloadExceptPages(r.core, new Set([4, 3]))
+  t.teardown(() => handle.destroy())
+  await until(() => holds(r.core, [0, 1, 2, 5, 6, 7, 8]), { name: 'the other blocks' })
+  await until(() => r.core.has(4), { name: 'the page-close' })
+  t.ok(await r.core.has(4), 'the page-close named by the tombstone was fetched')
+  await handle.update(new Set([4, 3]))
+  await handle.idle()
+  t.ok(await r.core.has(4), 'and kept')
+  await until(async () => !(await r.core.has(3)), { name: 'the deleted post cleared' })
+  t.absent(await r.core.has(3), 'the deleted post is not kept')
+})
+
+test('downloadExceptPages: a page whose roster and close were tombstoned (a leaked key) is still a page and fetches the close', async (t) => {
+  const store = await openCorestore(t, tmpDir(t))
+  const source = store.get({ name: 'page-tombstoned' })
+  await source.ready()
+  const PAGE = [genesis, post(1), pageRoster(2), post(3), pageClose(4), post(5), del(6, 2), del(7, 4), post(8)]
+  for (const { record } of PAGE) await source.append(encode(record))
+  const r = await replica(t, source.key)
+  const fetched = new Set()
+  r.core.on('download', (index) => fetched.add(index))
+  link(t, r.store, store)
+  const guard = pageTargets(r.core)
+  const handle = downloadExceptPages(r.core, new Set([2, 4]), { guard })
+  t.teardown(() => handle.destroy())
+  await until(() => holds(r.core, [0, 1, 3, 5, 6, 7, 8]), { name: 'the live blocks' })
+  await until(() => r.core.has(4), { name: 'the page-close' })
+  t.is(guard.page(), true, 'block 2 probed once settles it as a page')
+  t.ok(await r.core.has(2), 'the roster is kept')
+  t.ok(await r.core.has(4), 'the page-close named by the tombstone was fetched')
+  await handle.update(new Set([2, 4]))
+  await handle.idle()
+  t.ok(await holds(r.core, [2, 4]), 'and both page-* blocks are kept')
+})
+
+test('downloadExceptPages: a person whose block 2 was deleted is never treated as a page; a stale peer is not asked for deleted posts', async (t) => {
+  const store = await openCorestore(t, tmpDir(t))
+  const source = store.get({ name: 'person' })
+  await source.ready()
+  // The stale peer still holds the deleted bytes of blocks 2 and 4.
+  const PERSON = [genesis, post(1), post(2), post(3), post(4), del(5, 2), del(6, 4), post(7)]
+  for (const { record } of PERSON) await source.append(encode(record))
+  const r = await replica(t, source.key)
+  // A fetched-then-cleared block still crossed the wire: watch the downloads.
+  const fetched = new Set()
+  r.core.on('download', (index) => fetched.add(index))
+  link(t, r.store, store)
+  const guard = pageTargets(r.core)
+  const handle = downloadExceptPages(r.core, new Set([2, 4]), { guard })
+  t.teardown(() => handle.destroy())
+  await until(() => holds(r.core, [0, 1, 3, 5, 6, 7]), { name: 'the live blocks' })
+  await handle.idle()
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  // Block 2 alone may be fetched, once, to settle the type; it is a post,
+  // so the diary is personal and block 2 is cleared at once.
+  t.is(guard.page(), false, 'a person')
+  t.absent(await r.core.has(2), 'block 2 is not kept')
+  t.absent(fetched.has(4), 'nor any other deleted post')
+})
+
+test('downloadExceptPages: a probed block 2 that is itself a tombstone is kept, so every replica refolds the same way', async (t) => {
+  const store = await openCorestore(t, tmpDir(t))
+  const source = store.get({ name: 'person-undo' })
+  await source.ready()
+  // Block 2 deletes block 1; block 4 deletes that tombstone.
+  const PERSON = [genesis, post(1), del(2, 1), post(3), del(4, 2), post(5)]
+  for (const { record } of PERSON) await source.append(encode(record))
+  const r = await replica(t, source.key)
+  link(t, r.store, store)
+  const guard = pageTargets(r.core)
+  const handle = downloadExceptPages(r.core, new Set([2]), { guard })
+  t.teardown(() => handle.destroy())
+  await until(() => holds(r.core, [0, 1, 3, 4, 5]), { name: 'the live blocks' })
+  await handle.idle()
+  await until(() => guard.page() !== null, { name: 'the probe settles' })
+  t.is(guard.page(), false, 'a person')
+  t.ok(await r.core.has(2), 'the tombstone at block 2 is never cleared')
+})
+
+test('downloadExceptPages: a roster probe that timed out is not sticky; the honest peer connecting later still delivers the close', async (t) => {
+  const store = await openCorestore(t, tmpDir(t))
+  const source = store.get({ name: 'page-late-honest' })
+  await source.ready()
+  const PAGE = [genesis, post(1), pageRoster(2), post(3), pageClose(4), post(5), del(6, 2), del(7, 4), post(8)]
+  for (const { record } of PAGE) await source.append(encode(record))
+  // A peer that withholds the roster and the close (cleared).
+  const stale = await replica(t, source.key)
+  const feed = link(t, stale.store, store)
+  await stale.core.download({ start: 0, end: PAGE.length }).done()
+  await stale.core.clear(2, 3)
+  await stale.core.clear(4, 5)
+  feed.destroy()
+  t.absent(await stale.core.has(2))
+
+  const r = await replica(t, source.key)
+  link(t, r.store, stale.store)
+  const guard = pageTargets(r.core, { probeMs: 300, reprobeMs: 200 })
+  const handle = downloadExceptPages(r.core, new Set([2, 4]), { guard })
+  t.teardown(() => handle.destroy())
+  await until(() => holds(r.core, [0, 1, 3, 5, 6, 7, 8]), { name: 'the live blocks from the stale peer' })
+  await new Promise((resolve) => setTimeout(resolve, 600))
+  t.is(guard.page(), null, 'a timed-out probe leaves the type unknown, not personal')
+  t.absent(await r.core.has(4), 'nothing deleted is fetched meanwhile')
+
+  link(t, r.store, store)
+  await until(() => r.core.has(4), { name: 'the page-close from the honest peer' })
+  t.is(guard.page(), true, 'a later probe read the roster')
+  t.ok(await holds(r.core, [2, 4]), 'the roster and the close are kept')
+})
+
+test('pageTargets: with no peer connected the roster probe returns at once; a peer connecting later settles it', async (t) => {
+  const store = await openCorestore(t, tmpDir(t))
+  const source = store.get({ name: 'page-no-peer' })
+  await source.ready()
+  for (const { record } of [genesis, post(1), pageRoster(2), del(3, 2)]) await source.append(encode(record))
+  const r = await replica(t, source.key)
+  const guard = pageTargets(r.core, { probeMs: 2000 })
+  const started = Date.now()
+  const skip = await guard.excludable(new Set([2]))
+  t.ok(Date.now() - started < 1000, 'no 2 s poll without a peer (' + (Date.now() - started) + ' ms)')
+  t.alike([...skip], [2], 'the target stays out meanwhile')
+  t.is(guard.page(), null)
+
+  const waited = Date.now()
+  await guard.excludable(new Set([2]), { wait: false })
+  t.ok(Date.now() - waited < 1000, 'wait: false never waits for a probe')
+
+  link(t, r.store, store)
+  await until(() => guard.page() === true, { name: 'the peer-add probe settles the page' })
+  guard.destroy()
+})
+
+test('pageTargets: a roster probe that timed out retries on its own, with no new peer and no further call', async (t) => {
+  const { EventEmitter } = require('node:events')
+  const ROSTER = encode(pageRoster(2).record)
+  const core = new EventEmitter()
+  core.length = 4
+  let delivered = false
+  let gets = 0
+  // A peer that advertises block 2 but stalls the first request.
+  core.peers = [{ remoteContiguousLength: 4, remoteBitfield: { get: () => true } }]
+  core.has = async (i) => i === 2 && delivered
+  core.get = async (i, { timeout = 0 } = {}) => {
+    gets++
+    if (i === 2 && delivered) return ROSTER
+    await pause(timeout)
+    throw new Error('timeout')
+  }
+  core.clear = async () => {}
+  const guard = pageTargets(core, { probeMs: 100, reprobeMs: 200 })
+  t.teardown(() => guard.destroy())
+  let told = 0
+  guard.watch(() => { told++ })
+  const skip = await guard.excludable(new Set([2, 3]))
+  t.is(guard.page(), null, 'the first probe timed out')
+  t.alike([...skip].sort(), [2, 3], 'every target stays out meanwhile')
+  t.is(gets, 1, 'one request so far')
+  delivered = true
+  await until(() => guard.page() !== null, { name: 'the retry settles the type', timeoutMs: 3000 })
+  t.is(guard.page(), true, 'a page')
+  t.is(told, 1, 'the watcher is told, so the download refreshes')
+  t.is((await guard.excludable(new Set([3]))).size, 0, 'an unheld target (the close) joins the download')
+})
+
+test('downloadExceptPages: a guard it made itself goes with destroy (no peer-add listener left)', async (t) => {
+  const store = await openCorestore(t, tmpDir(t))
+  const source = store.get({ name: 'page-own-guard' })
+  await source.ready()
+  for (const { record } of [genesis, post(1), pageRoster(2), del(3, 2)]) await source.append(encode(record))
+  const r = await replica(t, source.key)
+  const before = r.core.listenerCount('peer-add')
+  // Block 2 unheld and tombstoned: the guard waits for a peer to settle it.
+  const handle = downloadExceptPages(r.core, new Set([2]))
+  await until(() => r.core.listenerCount('peer-add') > before, { name: 'the guard listens for peers' })
+  handle.destroy()
+  t.is(r.core.listenerCount('peer-add'), before, 'the peer-add listener is gone')
+
+  // A guard the caller passes stays the caller's.
+  const guard = pageTargets(r.core)
+  const other = downloadExceptPages(r.core, new Set([2]), { guard })
+  await until(() => r.core.listenerCount('peer-add') > before, { name: 'the given guard listens' })
+  other.destroy()
+  t.is(r.core.listenerCount('peer-add'), before + 1, 'a given guard is not destroyed')
+  guard.destroy()
+  t.is(r.core.listenerCount('peer-add'), before)
+})
+
+// presentState scans only the tombstone and page-* candidates, once: on
+// random stored diaries (holes, undone and invalid tombstones, tombstones
+// over page records, blocks that do not decode) it answers exactly what the
+// three full folds of the decoded blocks answer.
+test('presentState: one candidate scan answers as the three full folds', async (t) => {
+  let seed = 7
+  const rand = (n) => {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    return (seed >>> 8) % n
+  }
+  const encodeJson = (record) => b4a.from(JSON.stringify(record))
+  let checked = 0
+  let undone = 0
+  let pageKept = 0
+  for (let round = 0; round < 200; round++) {
+    const length = 2 + rand(40)
+    const blocks = new Map([[0, encodeJson(genesis.record)]])
+    for (let seq = 1; seq < length; seq++) {
+      const kind = rand(10)
+      let block
+      if (kind < 4) block = encodeJson(post(seq).record)
+      else if (kind < 7) block = encodeJson(del(seq, 1 + rand(seq)).record)
+      else if (kind === 7) block = encodeJson({ type: 'page-delegate', actor: K3, at: AT })
+      else if (kind === 8) block = encodeJson({ type: 'delete', seq: 1 + rand(seq), at: AT, author: K1 })
+      else block = b4a.from('{oops')
+      if (rand(6) !== 0) blocks.set(seq, block)
+    }
+    const core = {
+      length,
+      has: async (i) => blocks.has(i),
+      get: async (i) => blocks.get(i) || null
+    }
+    const state = await presentState(core)
+    const deleted = deletedSeqs(state.raw)
+    const targets = new Set()
+    const holes = []
+    for (const { seq, record } of state.raw) {
+      if (record === null && !blocks.has(seq)) holes.push(seq)
+      if (record !== null && record.type === 'delete' && validateRecord(record, seq) === null) targets.add(record.seq)
+    }
+    let present = state.raw.length
+    for (const seq of holes) {
+      if (!targets.has(seq)) {
+        present = seq
+        break
+      }
+    }
+    t.alike([...state.deleted].sort((a, b) => a - b), [...deleted].sort((a, b) => a - b), 'deleted ' + round)
+    t.alike(state.entries, applyDeletes(state.raw), 'entries ' + round)
+    t.is(state.present, present, 'present ' + round)
+    checked++
+    if (targets.size > deleted.size) undone++
+    if ([...targets].some((s) => state.raw[s] && state.raw[s].record && state.raw[s].record.type === 'page-delegate')) pageKept++
+  }
+  t.is(checked, 200)
+  t.ok(undone > 0, 'some tombstones were undone')
+  t.ok(pageKept > 0, 'some tombstones named a page record')
 })

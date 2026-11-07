@@ -4,6 +4,7 @@ const fs = require('#fs')
 const path = require('#path')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
+const { verify } = require('./verified')
 const { linkNew } = require('./link-new')
 
 const LF = '\n'
@@ -362,7 +363,7 @@ function validateSeederCertShape (cert) {
 }
 
 function checkSignature (payload, cert) {
-  return crypto.verify(payload, b4a.from(cert.signature, 'hex'), b4a.from(cert.association, 'hex'))
+  return verify(payload, b4a.from(cert.signature, 'hex'), b4a.from(cert.association, 'hex'))
 }
 
 function verifyIssuerCert (cert, associationHex) {
@@ -408,7 +409,7 @@ function verifyIssued (o, payload, associationHex, opts) {
   if (o.association !== normalizeHex(associationHex)) return { ok: false, reason: 'untrusted-association' }
   const delegation = { v: 1, issuer: o.issuer, date: o.issuerDate, association: o.association, signature: o.issuerSignature }
   if (!verifyIssuerCert(delegation, o.association).ok) return { ok: false, reason: 'bad-issuer-signature' }
-  if (!crypto.verify(payload, b4a.from(o.signature, 'hex'), b4a.from(o.issuer, 'hex'))) return { ok: false, reason: 'bad-signature' }
+  if (!verify(payload, b4a.from(o.signature, 'hex'), b4a.from(o.issuer, 'hex'))) return { ok: false, reason: 'bad-signature' }
   const revoked = revokedSet(opts)
   if (revoked !== null && revoked.has(o.issuer)) return { ok: false, reason: 'revoked-issuer' }
   return { ok: true }
@@ -621,6 +622,9 @@ module.exports = {
   validateCertShape,
   verifyCert,
   certForKey,
+  checkIssuer,
+  verifyIssued,
+  validDelegation,
   issuerCertPayload,
   createIssuerCert,
   validateIssuerCertShape,

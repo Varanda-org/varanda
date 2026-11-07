@@ -4,9 +4,12 @@ import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { UPDATE_ACTION, UPDATE_TEXT } from '../release'
 import { Icon } from './Icon'
-import { colors, type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
+import { type } from './theme'
 
 export function UpdateNote ({ onUpdate, onClose, inset = false }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const insets = useSafeAreaInsets()
   return (
     <View style={[styles.note, inset && { paddingTop: 6 + insets.top }]}>
@@ -39,7 +42,7 @@ export function UpdateNote ({ onUpdate, onClose, inset = false }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   note: {
     flexDirection: 'row',
     alignItems: 'center',

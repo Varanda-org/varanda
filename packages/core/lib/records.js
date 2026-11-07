@@ -28,13 +28,15 @@ const MAX_MEDIA_PER_POST = 4
 const MAX_MEDIA_ITEM_BLOCKS = 256 // 8 MiB per item
 const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const MAX_MEDIA_DIMENSION = 16384
+// Voice notes (chats only, never diary posts): one MPEG-4 audio item.
+const AUDIO_MIME = 'audio/mp4'
+const MAX_AUDIO_MS = 120000
+const MAX_AUDIO_BYTES = 1572864
 // Groups (lib/group.js): a diary binds a group writer core with `group-join`.
 const MAX_GROUP_WRITERS = 512
 const MAX_GROUPS_PER_DIARY = 64
 const MAX_GROUPS_PER_COMMUNITY = 32
 const MAX_GROUP_CUTS = 16
-// Cuts of a community admin grant or demotion: writers across linked groups.
-const MAX_COMMUNITY_CUTS = 64
 // Writers one diary may count in a group; also the cuts of a group-leave.
 const MAX_GROUP_WRITERS_PER_DIARY = 8
 const MAX_GROUP_NAME = 80
@@ -54,10 +56,28 @@ const QUOTE_KEYS = ['type', 'text', 'at', 'replyTo', 'quote']
 const QUOTE_MEDIA_KEYS = ['type', 'text', 'at', 'replyTo', 'quote', 'media']
 const ENGAGEMENT_KEYS = ['type', 'to', 'on', 'at']
 const TARGET_KEYS = ['author', 'seq']
-const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height']
+const DESCRIPTOR_KEYS = Object.freeze(['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
+const AUDIO_DESCRIPTOR_KEYS = Object.freeze(['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height', 'ms'])
 const MEDIA_CORE_KEYS = ['type', 'key', 'at']
 const FOLLOW_KEYS = ['type', 'key', 'on', 'at']
+// A key advertisement only (docs/protocol.md section 11): one per identity,
+// the highest gen wins.
+const DM_KEY_KEYS = ['type', 'box', 'gen', 'at']
+// The key derivation encodes gen as uint32be: a higher gen no device can
+// derive would outrank every real key.
+const MAX_DM_KEY_GEN = 4294967295
 const GROUP_JOIN_KEYS = ['type', 'group', 'writer', 'on', 'at']
+// A community writer created by a rejoin also names, in its join, the leave
+// its header's `rejoin` names (null otherwise): the diary signs the writer's
+// generation, so an old device key cannot rewrite it.
+const GROUP_JOIN_REJOIN_KEYS = ['type', 'group', 'writer', 'on', 'rejoin', 'at']
+const JOIN_REJOIN_KEYS = ['writer', 'seq']
+// The diary vouches that its writer `writer`'s records in group `group` at
+// seq >= `cut` carry no authority (a group root its creator left behind).
+const GROUP_CUT_KEYS = ['type', 'group', 'writer', 'cut', 'at']
+// The diary confirms the EXACT leave at (`writer`, `seq`) in `group` whose
+// record digest (group.js leaveDigest) is `digest`.
+const GROUP_CONFIRM_KEYS = ['type', 'group', 'writer', 'seq', 'digest', 'at']
 // A tombstone: no author field, the diary signature is the authority, so a
 // tombstone in another diary targets nothing (lib/deletion.js).
 const DELETE_KEYS = ['type', 'seq', 'at']
@@ -184,6 +204,11 @@ function validUsernameShape (record) {
     isCanonicalIso(record.date)
 }
 
+// A group-leave sits at seq >= 1 of its writer (group.js validRef).
+function validJoinRejoin (r) {
+  return isPlainObject(r) && hasExactKeys(r, JOIN_REJOIN_KEYS) && isHex64(r.writer) && Number.isSafeInteger(r.seq) && r.seq >= 1
+}
+
 // A post reference: exactly { author: lowercase hex64, seq: safe int >= 1 }.
 function validTarget (r) {
   if (!isPlainObject(r) || !hasExactKeys(r, TARGET_KEYS)) return false
@@ -216,6 +241,31 @@ function validDescriptor (d) {
       isHex64(sha256) &&
       isIntIn(width, 1, MAX_MEDIA_DIMENSION) &&
       isIntIn(height, 1, MAX_MEDIA_DIMENSION)
+  } catch {
+    return false
+  }
+}
+
+// A voice note descriptor (exact keys): a post descriptor plus its duration,
+// with no picture size. Group posts only; validDescriptor, which diary posts
+// use, stays still images. Never throws.
+function validAudioDescriptor (d) {
+  try {
+    if (!isPlainObject(d) || !hasExactKeys(d, AUDIO_DESCRIPTOR_KEYS)) return false
+    const { core, mime, start, blocks, bytes, sha256, width, height, ms } = d
+    return isHex64(core) &&
+      mime === AUDIO_MIME &&
+      isIntIn(start, 1, MAX_MEDIA_BLOCKS - 1) &&
+      isIntIn(blocks, 1, MAX_MEDIA_ITEM_BLOCKS) &&
+      start + blocks <= MAX_MEDIA_BLOCKS &&
+      Number.isSafeInteger(bytes) &&
+      bytes > (blocks - 1) * MEDIA_BLOCK_BYTES &&
+      bytes <= blocks * MEDIA_BLOCK_BYTES &&
+      bytes <= MAX_AUDIO_BYTES &&
+      isHex64(sha256) &&
+      width === 0 &&
+      height === 0 &&
+      isIntIn(ms, 1, MAX_AUDIO_MS)
   } catch {
     return false
   }
@@ -256,7 +306,70 @@ function validDeleteRanges (media) {
   return true
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete'])
+// Pages (lib/page.js): shape only here; the signatures are checked where a
+// page diary is read. A bad page record is 'malformed', never thrown.
+const MAX_PAGE_ADMINS = 16
+const MAX_PAGE_GEN = 4294967295
+const PAGE_NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
+const PAGE_KEYS = Object.freeze({
+  'page-roster': ['type', 'page', 'gen', 'owner', 'admins', 'prev', 'at', 'nonce', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature', 'countersignature'],
+  'page-origin': ['type', 'page', 'from', 'fromSeq', 'gen', 'owner', 'admins', 'at', 'nonce', 'actor', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature', 'countersignature'],
+  'page-close': ['type', 'page', 'gen', 'at', 'nonce', 'actor', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature', 'countersignature'],
+  'page-moved': ['type', 'page', 'to', 'gen', 'at', 'nonce', 'actor', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature', 'countersignature'],
+  'page-accept': ['type', 'page', 'gen', 'rosterSignature', 'at', 'nonce', 'actor', 'signature'],
+  'page-offer': ['type', 'page', 'to', 'exp', 'gen', 'at', 'nonce', 'actor', 'signature'],
+  'page-link': ['type', 'page', 'diary', 'actor', 'at', 'nonce', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature'],
+  'page-delegate': ['type', 'actor', 'at']
+})
+
+// Sorted strictly ascending (so unique), by index: a sparse hole is invalid.
+function validPageAdmins (admins, owner) {
+  if (!Array.isArray(admins) || admins.length > MAX_PAGE_ADMINS) return false
+  for (let i = 0; i < admins.length; i++) {
+    const a = admins[i]
+    if (!isHex64(a) || a === owner) return false
+    if (i > 0 && !(admins[i - 1] < a)) return false
+  }
+  return true
+}
+
+function validPageShape (r) {
+  const type = r.type
+  if (!hasExactKeys(r, PAGE_KEYS[type])) return false
+  if (type === 'page-delegate') return isHex64(r.actor) && isCanonicalIso(r.at)
+  if (!isHex64(r.page) || !isCanonicalIso(r.at) || typeof r.nonce !== 'string' || !PAGE_NONCE_RE.test(r.nonce)) return false
+  if (type === 'page-link') {
+    return isHex64(r.diary) && isHex64(r.actor) && r.diary !== r.page && r.actor !== r.diary && r.actor !== r.page &&
+      validDelegation(r) && isHex128(r.signature)
+  }
+  if (!isHex128(r.signature)) return false
+  const minGen = type === 'page-close' || type === 'page-accept' ? 2 : 1
+  if (!isIntIn(r.gen, minGen, MAX_PAGE_GEN)) return false
+  if (type === 'page-accept') return isHex64(r.actor) && isHex128(r.rosterSignature)
+  if (type === 'page-offer') {
+    if (!isHex64(r.actor)) return false
+    if (r.to === null) return r.exp === null
+    return isHex64(r.to) && isCanonicalIso(r.exp)
+  }
+  if (!validDelegation(r) || !isHex128(r.countersignature)) return false
+  if (type === 'page-roster') {
+    return isHex64(r.owner) && validPageAdmins(r.admins, r.owner) &&
+      (r.prev === null || (Number.isSafeInteger(r.prev) && r.prev >= 1))
+  }
+  if (!isHex64(r.actor)) return false
+  if (type === 'page-close') return true
+  if (type === 'page-moved') return isHex64(r.to) && r.to !== r.page
+  // page-origin: signed by its owner.
+  return isHex64(r.from) && r.from !== r.page && Number.isSafeInteger(r.fromSeq) && r.fromSeq >= 1 &&
+    isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
+}
+
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link'])
+
+// Required lazily: lib/group.js requires this module at load time.
+function weakBoxKey (hex) {
+  return require('./group').isWeakBoxKey(hex)
+}
 
 function check (record, seq) {
   if (!isPlainObject(record)) return 'malformed'
@@ -279,6 +392,7 @@ function check (record, seq) {
   // Shape only: the issuer signatures are checked by verifyUsernameRecord
   // (lib/cert.js) where the username is read (lib/username.js).
   if (type === 'username') return validUsernameShape(record) ? null : 'malformed'
+  if (Object.prototype.hasOwnProperty.call(PAGE_KEYS, type)) return validPageShape(record) ? null : 'malformed'
   if (type === 'profile') {
     const withAvatar = hasExactKeys(record, PROFILE_AVATAR_KEYS)
     if (!withAvatar && !hasExactKeys(record, PROFILE_KEYS)) return 'malformed'
@@ -298,9 +412,25 @@ function check (record, seq) {
     if (!hasExactKeys(record, FOLLOW_KEYS) || !isHex64(record.key) || typeof record.on !== 'boolean') return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
+  if (type === 'dm-key') {
+    if (!hasExactKeys(record, DM_KEY_KEYS) || !isHex64(record.box) || weakBoxKey(record.box)) return 'malformed'
+    if (!Number.isSafeInteger(record.gen) || record.gen < 1 || record.gen > MAX_DM_KEY_GEN) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
   // The creator binds the group root itself: writer may equal group.
   if (type === 'group-join') {
-    if (!hasExactKeys(record, GROUP_JOIN_KEYS) || !isHex64(record.group) || !isHex64(record.writer) || typeof record.on !== 'boolean') return 'malformed'
+    const withRejoin = hasExactKeys(record, GROUP_JOIN_REJOIN_KEYS)
+    if ((!withRejoin && !hasExactKeys(record, GROUP_JOIN_KEYS)) || !isHex64(record.group) || !isHex64(record.writer) || typeof record.on !== 'boolean') return 'malformed'
+    if (withRejoin && record.rejoin !== null && !validJoinRejoin(record.rejoin)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'group-confirm') {
+    if (!hasExactKeys(record, GROUP_CONFIRM_KEYS) || !isHex64(record.group) || !isHex64(record.writer) || !Number.isSafeInteger(record.seq) || record.seq < 1) return 'malformed'
+    if (!isHex64(record.digest)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'group-cut') {
+    if (!hasExactKeys(record, GROUP_CUT_KEYS) || !isHex64(record.group) || !isHex64(record.writer) || !Number.isSafeInteger(record.cut) || record.cut < 0) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'like' || type === 'repost') {
@@ -400,8 +530,19 @@ function followRecord ({ key, on, at = nowIso() } = {}) {
   return build({ type: 'follow', key, on, at }, 1)
 }
 
-function groupJoinRecord ({ group, writer, on, at = nowIso() } = {}) {
-  return build({ type: 'group-join', group, writer, on, at }, 1)
+// `rejoin` is added only when given (null or { writer, seq }).
+function groupJoinRecord ({ group, writer, on, rejoin, at = nowIso() } = {}) {
+  if (rejoin === undefined) return build({ type: 'group-join', group, writer, on, at }, 1)
+  const ref = isPlainObject(rejoin) ? { writer: rejoin.writer, seq: rejoin.seq } : rejoin
+  return build({ type: 'group-join', group, writer, on, rejoin: ref, at }, 1)
+}
+
+function groupConfirmRecord ({ group, writer, seq, digest, at = nowIso() } = {}) {
+  return build({ type: 'group-confirm', group, writer, seq, digest, at }, 1)
+}
+
+function groupCutRecord ({ group, writer, cut, at = nowIso() } = {}) {
+  return build({ type: 'group-cut', group, writer, cut, at }, 1)
 }
 
 // A copy with exactly the range keys (anything else is passed through for
@@ -530,14 +671,23 @@ module.exports = {
   MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES,
   MAX_MEDIA_DIMENSION,
+  AUDIO_MIME,
+  MAX_AUDIO_MS,
+  MAX_AUDIO_BYTES,
+  DESCRIPTOR_KEYS,
+  AUDIO_DESCRIPTOR_KEYS,
   MAX_GROUP_WRITERS,
   MAX_GROUPS_PER_DIARY,
   MAX_GROUPS_PER_COMMUNITY,
   MAX_GROUP_CUTS,
-  MAX_COMMUNITY_CUTS,
   MAX_GROUP_NAME,
   MAX_GROUP_WRITERS_PER_DIARY,
   TYPES,
+  PAGE_KEYS,
+  MAX_PAGE_ADMINS,
+  MAX_PAGE_GEN,
+  DM_KEY_KEYS,
+  MAX_DM_KEY_GEN,
   AVATAR_SIDE,
   MAX_AVATAR_BLOCKS,
   MAX_AVATAR_BYTES,
@@ -551,6 +701,7 @@ module.exports = {
   charLength,
   plainCopy,
   isHex64,
+  isHex128,
   isCanonicalIso,
   decodeBlock,
   memberCertRecord,
@@ -560,10 +711,13 @@ module.exports = {
   mediaCoreRecord,
   followRecord,
   groupJoinRecord,
+  groupCutRecord,
+  groupConfirmRecord,
   likeRecord,
   repostRecord,
   deleteRecord,
   validDescriptor,
+  validAudioDescriptor,
   validAvatar,
   validateRecord,
   validRecordCopy,

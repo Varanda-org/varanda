@@ -1,7 +1,22 @@
-/* global fetch, AbortController, TextDecoder */
+/* global fetch, AbortController, TextDecoder, __DEV__ */
 
 import { isAppClient } from './appClient.js'
 import { resolveUrl } from './installation.js'
+import { vitrineEnabled } from './vitrine/enabled.js'
+
+const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
+let vitrineIndex
+if (VITRINE) {
+  const { vitrineIndex: respond } = require('./vitrine/indexResponder')
+  vitrineIndex = (url) => {
+    try {
+      return respond(url)
+    } catch (err) {
+      if (err.reason === 'not-found') throw new Failure('not-found')
+      throw err
+    }
+  }
+}
 
 // Client for the seeder index (hosted web only; same origin, served by the
 // seeder under /index/*). The index only says where to look (refs, seq hints)
@@ -36,7 +51,7 @@ import { resolveUrl } from './installation.js'
 // Result convention (never throws): `{ ok: true, value }` or
 // `{ ok: false, reason }`, reason one of 'invalid-input', 'network',
 // 'timeout', 'not-found' (404: not indexed, or author not served; on the
-// topic route: a seeder without that route, or a malformed path — an
+// topic route: a seeder without that route, or a malformed path: an
 // unknown word is a 200 with an empty list), 'status', 'too-large',
 // 'malformed', or 'rate-limited' (then with a numeric `retryAfterMs`: the
 // cooldown still left). The URL builders return null for bad input. Every
@@ -47,6 +62,13 @@ import { resolveUrl } from './installation.js'
 // Groups: /index/group/<G>[/<after>], /index/groups/<D>,
 // /index/community/<C> and /index/group-search/<segment> (the segment as for
 // the account search). Same transport, scheduler and budget; never cached.
+//
+// Follows (public): /index/follows/<author> (the two counts) and
+// /index/follows/<author>/(seguindo|seguidores)[/<atMs>.<key>]. A
+// 'seguidores' item points at the follower's follow block (key = follower),
+// a 'seguindo' item at the author's own follow block (key = the followed
+// target, seq in the author's diary); the node still verifies each one
+// (diary.peek). Never cached: a follow can be undone at any time.
 //
 // Account search, GET /index/search/<segment>: the segment arrives already
 // folded by the caller (1..4 tokens [a-z0-9]{1,20} joined by '-', at least 2
@@ -63,6 +85,7 @@ export const SEARCH_MAX = 20
 export const TOPIC_MAX = 30
 // Must equal ENGAGER_PAGE in packages/core/lib/engagement-index.js.
 export const ENGAGERS_MAX = 20
+export const FOLLOWS_MAX = 20
 export const GROUP_WRITERS_MAX = 64
 export const GROUPS_MAX = 64
 export const GROUP_SEARCH_MAX = 20
@@ -93,7 +116,7 @@ const HINT_KEYS = ['profileSeq', 'usernameSeq']
 const SEARCH_KEYS = ['complete', 'indexing', 'members', 'more']
 const HIT_KEYS = ['author', 'profileSeq', 'usernameSeq']
 const TOPIC_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
-const GROUP_KEYS = ['community', 'complete', 'creator', 'indexing', 'join', 'kind', 'name', 'next', 'rootServed', 'visibility', 'writers']
+const GROUP_KEYS = ['attached', 'community', 'complete', 'creator', 'indexing', 'join', 'kind', 'name', 'next', 'rootServed', 'visibility', 'writers']
 const WRITER_KEYS = ['diary', 'key', 'left', 'length', 'seq', 'signed']
 // An older seeder sends no `signed`.
 const WRITER_KEYS_OLD = ['diary', 'key', 'left', 'length', 'seq']
@@ -101,9 +124,14 @@ const GROUPS_KEYS = ['complete', 'groups', 'indexing']
 const GROUPS_ROW_KEYS = ['group', 'left', 'seq', 'writer']
 const GROUP_SEARCH_KEYS = ['complete', 'groups', 'indexing', 'more']
 const GROUP_HIT_KEYS = ['group', 'name', 'writerCount']
-const COMMUNITY_KEYS = ['complete', 'groups', 'indexing', 'name']
-const COMMUNITY_PRIVATE_KEYS = ['group', 'visibility']
+const COMMUNITY_KEYS = ['complete', 'creator', 'groups', 'indexing', 'join', 'members', 'name', 'next']
+const COMMUNITY_GROUPS_KEYS = ['complete', 'groups', 'indexing', 'next']
+const COMMUNITY_ROW_KEYS = ['group', 'join', 'name', 'visibility', 'writerCount']
 const ENGAGERS_KEYS = ['authors', 'complete', 'indexing', 'items', 'kind', 'next', 'ref', 'total']
+const FOLLOW_COUNTS_KEYS = ['complete', 'indexing', 'seguidores', 'seguindo']
+const FOLLOWS_KEYS = ['author', 'authors', 'complete', 'indexing', 'items', 'kind', 'next', 'total']
+const FOLLOW_ITEM_KEYS = ['at', 'key', 'seq']
+const FOLLOW_CURSOR_KEYS = ['atMs', 'key']
 
 // --- strict checks (response values are never lowercased or coerced) ---
 
@@ -123,6 +151,17 @@ const isHex64 = (s) => typeof s === 'string' && HEX64.test(s)
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0
 const isSeq = (n) => Number.isSafeInteger(n) && n >= 1
 const isHint = (n) => n === null || isSeq(n)
+const isFollowKind = (k) => k === 'seguindo' || k === 'seguidores'
+
+function isCanonicalIso (s) {
+  if (typeof s !== 'string') return false
+  const d = new Date(s)
+  return !Number.isNaN(d.getTime()) && d.toISOString() === s
+}
+
+function isFollowCursor (c) {
+  return hasExactKeys(c, FOLLOW_CURSOR_KEYS) && isCount(c.atMs) && isHex64(c.key)
+}
 
 function isPlain (o) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return false
@@ -134,6 +173,23 @@ function hasExactKeys (o, keys) {
   if (!isPlain(o)) return false
   const got = Object.keys(o).sort()
   return got.length === keys.length && got.every((k, i) => k === keys[i])
+}
+
+// An older seeder sends no page hint; a newer one sends `page` and, for a
+// page, `closed` and `moved`. Only booleans pass. Only a hint: Membro checks
+// with page.read.
+const PAGE_HINT_KEYS = ['closed', 'moved', 'page']
+
+// -> { page, closed, moved } (absent = false), or null for a bad shape.
+function pageHintOf (o, keys) {
+  if (!isPlain(o)) return null
+  const extra = []
+  for (const k of Object.keys(o)) if (!keys.includes(k)) extra.push(k)
+  if (extra.some((k) => !PAGE_HINT_KEYS.includes(k))) return null
+  if (keys.some((k) => !Object.prototype.hasOwnProperty.call(o, k))) return null
+  for (const k of PAGE_HINT_KEYS) if (k in o && typeof o[k] !== 'boolean') return null
+  // No keys at all for a person: absent reads as false.
+  return o.page === true ? { page: true, closed: o.closed === true, moved: o.moved === true } : {}
 }
 
 // A list of distinct valid refs within `max`, or null.
@@ -216,6 +272,20 @@ export function engagersUrl (kind, ref, cursor = null) {
   return resolveUrl('/index/' + kind + '/' + author + '/' + seq + (cursor === null ? '' : '/' + cursor))
 }
 
+export function followCountsUrl (author) {
+  const a = inputAuthor(author)
+  return a === null ? null : resolveUrl('/index/follows/' + a)
+}
+
+// An invalid cursor is null, never dropped: dropping it would silently
+// restart the list from the top.
+export function followsUrl (author, kind, cursor = null) {
+  const a = inputAuthor(author)
+  if (a === null || !isFollowKind(kind)) return null
+  if (cursor !== null && !isFollowCursor(cursor)) return null
+  return resolveUrl('/index/follows/' + a + '/' + kind + (cursor === null ? '' : '/' + cursor.atMs + '.' + cursor.key))
+}
+
 // `segment` is already folded by the caller; it is only checked here.
 export function searchUrl (segment) {
   if (typeof segment !== 'string' || !SEGMENT.test(segment)) return null
@@ -243,6 +313,12 @@ export function groupsUrl (diary) {
 export function communityUrl (community) {
   const c = inputAuthor(community)
   return c === null ? null : resolveUrl('/index/community/' + c)
+}
+
+export function communityGroupsUrl (community, cursor) {
+  const c = inputAuthor(community)
+  const after = inputAuthor(cursor)
+  return c === null || after === null ? null : resolveUrl('/index/community/' + c + '/groups/' + after)
 }
 
 // The segment is built and checked exactly as for the member search.
@@ -544,6 +620,7 @@ async function attempt (url, deps, clock) {
 // through the scheduler, all within DEADLINE_MS of the call; a cooldown that
 // outlasts the deadline fails at once with the time it still has to run.
 async function getJson (url, deps = {}) {
+  if (VITRINE) return vitrineIndex(url)
   const clock = makeClock(deps)
   const deadline = clock.now() + DEADLINE_MS
   const g = gen
@@ -637,7 +714,8 @@ export function validCounts (body, asked) {
 // Posts: <= 100 seqs, strictly descending, each below `length` and below
 // `before` when given.
 export function validMemberIndex (body, before = null) {
-  if (!hasExactKeys(body, MEMBER_KEYS)) return null
+  const hint = pageHintOf(body, MEMBER_KEYS)
+  if (hint === null) return null
   if (!isCount(body.length) || !isCount(body.postsTotal)) return null
   if (!isHint(body.profileSeq) || !isHint(body.usernameSeq)) return null
   if (typeof body.indexing !== 'boolean' || typeof body.complete !== 'boolean') return null
@@ -655,7 +733,8 @@ export function validMemberIndex (body, before = null) {
     posts: posts.slice(),
     postsTotal: body.postsTotal,
     indexing: body.indexing,
-    complete: body.complete
+    complete: body.complete,
+    ...hint
   }
 }
 
@@ -705,6 +784,63 @@ export function validEngagers (body, ref, kind) {
   }
 }
 
+export function validFollowCounts (body) {
+  if (!hasExactKeys(body, FOLLOW_COUNTS_KEYS) || !isFlags(body)) return null
+  if (!isCount(body.seguindo) || !isCount(body.seguidores)) return null
+  return { seguindo: body.seguindo, seguidores: body.seguidores, indexing: body.indexing, complete: body.complete }
+}
+
+// The follow index order: the time clamped at 0, newest first, then key.
+function followT (at) {
+  const t = Date.parse(at)
+  return t > 0 ? t : 0
+}
+
+// Items: <= 20, one per distinct key, never the author itself, each strictly
+// after the previous one (or the request cursor) in the index order. `next`
+// must name the last row: a cursor that pointed anywhere else could send the
+// reader backwards and page forever. Authors: exactly one hint per item key,
+// as in validTopic.
+export function validFollows (body, author, kind, cursor = null) {
+  if (!hasExactKeys(body, FOLLOWS_KEYS) || !isFlags(body)) return null
+  if (!isHex64(body.author) || (author !== undefined && body.author !== author)) return null
+  if (!isFollowKind(body.kind) || (kind !== undefined && body.kind !== kind)) return null
+  const list = body.items
+  if (!Array.isArray(list) || list.length > FOLLOWS_MAX) return null
+  const seen = new Set()
+  const items = []
+  let prev = isFollowCursor(cursor) ? cursor : null
+  for (const it of list) {
+    if (!hasExactKeys(it, FOLLOW_ITEM_KEYS) || !isHex64(it.key) || it.key === body.author) return null
+    if (!isSeq(it.seq) || !isCanonicalIso(it.at) || seen.has(it.key)) return null
+    const t = followT(it.at)
+    if (prev !== null && !(t < prev.atMs || (t === prev.atMs && it.key > prev.key))) return null
+    prev = { atMs: t, key: it.key }
+    seen.add(it.key)
+    items.push({ key: it.key, seq: it.seq, at: it.at })
+  }
+  if (body.next !== null) {
+    if (!isFollowCursor(body.next) || items.length === 0) return null
+    const last = items[items.length - 1]
+    if (body.next.key !== last.key || body.next.atMs !== followT(last.at)) return null
+  }
+  if (!isCount(body.total) || body.total < items.length) return null
+  const authors = validAuthors(body.authors)
+  if (authors === null) return null
+  const got = Object.keys(authors)
+  if (got.length !== seen.size || !got.every((k) => seen.has(k))) return null
+  return {
+    author: body.author,
+    kind: body.kind,
+    items,
+    next: body.next === null ? null : { atMs: body.next.atMs, key: body.next.key },
+    total: body.total,
+    authors,
+    indexing: body.indexing,
+    complete: body.complete
+  }
+}
+
 // Members: <= 20 distinct authors with exact keys, order kept (the seeder's
 // ranking), never both hints null.
 export function validSearch (body) {
@@ -715,11 +851,12 @@ export function validSearch (body) {
   const seen = new Set()
   const members = []
   for (const m of list) {
-    if (!hasExactKeys(m, HIT_KEYS) || !isHex64(m.author) || seen.has(m.author)) return null
+    const hint = pageHintOf(m, HIT_KEYS)
+    if (hint === null || !isHex64(m.author) || seen.has(m.author)) return null
     if (!isHint(m.profileSeq) || !isHint(m.usernameSeq)) return null
     if (m.profileSeq === null && m.usernameSeq === null) return null
     seen.add(m.author)
-    members.push({ author: m.author, profileSeq: m.profileSeq, usernameSeq: m.usernameSeq })
+    members.push({ author: m.author, profileSeq: m.profileSeq, usernameSeq: m.usernameSeq, ...hint })
   }
   return { members, more: body.more, indexing: body.indexing, complete: body.complete }
 }
@@ -730,7 +867,7 @@ const isFlags = (body) => typeof body.indexing === 'boolean' && typeof body.comp
 // `after`: the cursor asked for; every key must come after it. Writers:
 // <= 64, distinct, ascending by key, exact keys. A private group has no name.
 export function validGroup (body, after = null) {
-  if (!hasExactKeys(body, GROUP_KEYS) || !isFlags(body) || typeof body.rootServed !== 'boolean') return null
+  if (!hasExactKeys(body, GROUP_KEYS) || !isFlags(body) || typeof body.rootServed !== 'boolean' || typeof body.attached !== 'boolean') return null
   if (body.kind !== null && body.kind !== 'group' && body.kind !== 'community') return null
   if (body.visibility !== null && body.visibility !== 'public' && body.visibility !== 'private') return null
   if (body.join !== null && body.join !== 'open' && body.join !== 'approval') return null
@@ -758,6 +895,7 @@ export function validGroup (body, after = null) {
     creator: body.creator,
     rootServed: body.rootServed,
     community: body.community,
+    attached: body.attached,
     writers,
     next: body.next,
     indexing: body.indexing,
@@ -800,28 +938,44 @@ export function validGroupSearch (body) {
   return groups === null ? null : { groups, more: body.more, indexing: body.indexing, complete: body.complete }
 }
 
-// <= 32 groups; a private one is only { group, visibility: 'private' }.
-export function validCommunity (body) {
-  if (!hasExactKeys(body, COMMUNITY_KEYS) || !isFlags(body) || !isName(body.name)) return null
-  const list = body.groups
+// `next` must name the page's last row: a cursor that pointed anywhere else
+// could send the reader backwards and page forever.
+function nextOk (next, groups) {
+  return next === null || (groups.length > 0 && next === groups[groups.length - 1].group)
+}
+
+function communityRows (list, cursor = null) {
   if (!Array.isArray(list) || list.length > COMMUNITY_GROUPS_MAX) return null
-  const seen = new Set()
+  let prev = cursor
   const groups = []
   for (const r of list) {
-    let row
-    if (hasExactKeys(r, COMMUNITY_PRIVATE_KEYS)) {
-      if (!isHex64(r.group) || r.visibility !== 'private') return null
-      row = { group: r.group, visibility: 'private' }
-    } else {
-      const one = hitRows([r], 1)
-      if (one === null) return null
-      row = one[0]
-    }
-    if (seen.has(row.group)) return null
-    seen.add(row.group)
-    groups.push(row)
+    if (!hasExactKeys(r, COMMUNITY_ROW_KEYS) || !isHex64(r.group)) return null
+    if (prev !== null && r.group <= prev) return null
+    if (r.join !== 'open' && r.join !== 'approval') return null
+    if (r.visibility === 'private') {
+      if (r.name !== null || r.writerCount !== null) return null
+    } else if (r.visibility !== 'public' || !isName(r.name) || !isCount(r.writerCount)) return null
+    prev = r.group
+    groups.push({ group: r.group, join: r.join, name: r.name, visibility: r.visibility, writerCount: r.writerCount })
   }
-  return { name: body.name, groups, indexing: body.indexing, complete: body.complete }
+  return groups
+}
+
+export function validCommunity (body) {
+  if (!hasExactKeys(body, COMMUNITY_KEYS) || !isFlags(body) || !isName(body.name)) return null
+  if (body.join !== null && body.join !== 'open' && body.join !== 'approval') return null
+  if (body.creator !== null && !isHex64(body.creator)) return null
+  if (!isCount(body.members) || (body.next !== null && !isHex64(body.next))) return null
+  const groups = communityRows(body.groups)
+  if (groups === null || !nextOk(body.next, groups)) return null
+  return { name: body.name, join: body.join, creator: body.creator, members: body.members, groups, next: body.next, indexing: body.indexing, complete: body.complete }
+}
+
+export function validCommunityGroups (body, cursor) {
+  if (!isHex64(cursor) || !hasExactKeys(body, COMMUNITY_GROUPS_KEYS) || !isFlags(body)) return null
+  if (body.next !== null && !isHex64(body.next)) return null
+  const groups = communityRows(body.groups, cursor)
+  return groups === null || !nextOk(body.next, groups) ? null : { groups, next: body.next, indexing: body.indexing, complete: body.complete }
 }
 
 // --- fetchers ---
@@ -918,6 +1072,16 @@ export function fetchEngagers (kind, ref, cursor = null, deps = {}) {
   return run(url, (body) => validEngagers(body, r, kind), deps)
 }
 
+export function fetchFollowCounts (author, deps = {}) {
+  return run(followCountsUrl(author), validFollowCounts, deps)
+}
+
+export function fetchFollows (author, kind, cursor = null, deps = {}) {
+  const url = followsUrl(author, kind, cursor)
+  const a = url === null ? null : inputAuthor(author)
+  return run(url, (body) => validFollows(body, a, kind, cursor), deps)
+}
+
 // Never cached: membership and writers change with every join or leave.
 export function fetchGroup (group, after = null, deps = {}) {
   const url = groupUrl(group, after)
@@ -931,6 +1095,12 @@ export function fetchGroups (diary, deps = {}) {
 
 export function fetchCommunity (community, deps = {}) {
   return run(communityUrl(community), validCommunity, deps)
+}
+
+export function fetchCommunityGroups (community, cursor, deps = {}) {
+  const url = communityGroupsUrl(community, cursor)
+  const after = url === null ? null : inputAuthor(cursor)
+  return run(url, (body) => validCommunityGroups(body, after), deps)
 }
 
 export function fetchGroupSearch (segment, deps = {}) {

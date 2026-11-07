@@ -7,9 +7,9 @@ const load = () => import('../src/help.js')
 test('help keys match the supported tabs and setup steps', async (t) => {
   const { HELP } = await load()
   t.alike(Object.keys(HELP).sort(), [
-    'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'entrar', 'vinculo',
+    'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'conversas', 'entrar', 'vinculo',
     'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
-    'instalar', 'denuncia', 'termosAparelho', 'convites', 'carteira'
+    'instalar', 'denuncia', 'termosAparelho', 'convites'
   ].sort())
 })
 
@@ -41,6 +41,23 @@ test('help preserves the peek rule and search explanation', async (t) => {
   t.is(HELP.busca.paragraphs[1], SEARCH_MEMORY)
 })
 
+test('sign-in help explains synced recovery and phone QR while preserving passkey loss warnings', async (t) => {
+  const { HELP, SHORT } = await load()
+  const text = HELP.entrar.paragraphs.join(' ')
+  const { LOSS_TEXT } = await import('../src/recovery.js')
+  for (const fact of ['sincroniza', 'QR code', 'Passkeys e recuperação', LOSS_TEXT]) {
+    t.ok(text.includes(fact), fact)
+  }
+  for (const paragraph of HELP.entrar.paragraphs) {
+    t.absent(paragraph.includes('Gerenciador de Senhas do Google'))
+  }
+  t.absent(text.includes('Outra passkey é outra conta'), 'a passkey added in Ajustes opens the same account')
+  t.absent(text.includes('Se perder a passkey, perde a conta'), 'a recovery code or another passkey still opens it')
+  t.is(HELP.entrar.paragraphs[3], 'Em Ajustes → Passkeys e recuperação, cadastre outra passkey ou um código de recuperação: eles abrem a mesma conta. Uma passkey criada fora desse lugar abre outra conta.')
+  t.is(HELP.entrar.paragraphs[4], LOSS_TEXT)
+  t.is(SHORT.passkeyLoss, LOSS_TEXT)
+})
+
 test('link help keeps the account and privacy disclosures', async (t) => {
   const { HELP, SHORT } = await load()
   const text = HELP.vinculo.paragraphs.join(' ')
@@ -66,6 +83,7 @@ test('invite help keeps the validity, renewal and privacy facts', async (t) => {
   for (const fact of ['uma pessoa só', '7 dias', 'segunda-feira', 'horário de Brasília', 'não acumulam', 'nunca o nome, o e-mail']) {
     t.ok(text.includes(fact), fact)
   }
+  t.ok(text.includes('Quando a associação liga os convites de surpresa, cada convite chega num dia e hora ao acaso, com um aviso. Escolha com carinho quem você quer chamar.'))
   t.ok(HELP.vinculo.paragraphs.join(' ').includes('Se a rede estiver por convite,'))
 })
 
@@ -106,7 +124,21 @@ test('espiadinha and avisos hold for the site and the app tied to the installati
     t.ok(text.includes('app ligado à instalação da associação'), key)
     t.absent(text.includes('só funciona'), key + ' is no longer web only')
   }
-  t.ok(HELP.seguindo.paragraphs[0].includes('app ligado à instalação'))
+  t.ok(HELP.seguindo.paragraphs[0].includes('qualquer instalação'))
+  t.ok(HELP.seguindo.paragraphs.join(' ').includes('O campo no topo só filtra quem já está nesta lista. Para encontrar outra conta, use a Busca.'))
+})
+
+test('follower counts and lists are public, avisos stay private', async (t) => {
+  const { HELP, SHORT } = await load()
+  const avisos = HELP.avisos.paragraphs.join(' ')
+  const diario = HELP.diario.paragraphs.join(' ')
+  t.ok(avisos.includes('Quantas pessoas seguem alguém, e quem são, aparece no Diário e no perfil de cada pessoa. Os Avisos continuam só seus.'))
+  t.ok(diario.includes('O número ao lado de seguidores é quantas pessoas seguem você.'))
+  t.ok(diario.includes('Qualquer pessoa pode ver os dois números e as duas listas; toque num número para abrir a lista.'))
+  t.ok(diario.includes('O campo da lista só filtra quem já está nela.'))
+  t.is(SHORT.followsPublic, 'Quem você segue e quem segue você é público.')
+  const all = Object.values(HELP).flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.absent(/não mostra contagem|Não há lista de quem segue/.test(all), 'no denial of a follower count or list')
 })
 
 test('help and short texts avoid jargon and em dashes', async (t) => {
@@ -126,17 +158,19 @@ test('help and short texts avoid jargon and em dashes', async (t) => {
   }
 })
 
-test('wallet help lists only the fees of features the mode offers', async (t) => {
-  const { HELP, carteiraHelp } = await load()
-  const fees = { payout: 'sem taxa', transfer: 'sem taxa', crypto: 'R$ 1,00 + 1%' }
-  const pix = carteiraHelp({ mode: 'pix', fees, maxCents: null })
-  const pixFee = pix.paragraphs.find((p) => p.startsWith('Taxa da Varanda hoje.'))
-  t.is(pixFee, 'Taxa da Varanda hoje. Pagar por Pix: sem taxa. Receber por Pix: sem taxa da Varanda.')
-  t.absent(pix.paragraphs.some((p) => p.includes('Enviar para')))
-  const full = carteiraHelp({ mode: 'completo', fees, maxCents: null })
-  const fullFee = full.paragraphs.find((p) => p.startsWith('Taxa da Varanda hoje.'))
-  t.is(fullFee, 'Taxa da Varanda hoje. Pagar por Pix: sem taxa. Enviar para alguém da Varanda: sem taxa. Enviar para outra carteira: R$ 1,00 + 1%. Receber por Pix: sem taxa da Varanda.')
-  t.is(carteiraHelp(null), HELP.carteira)
-  t.ok(HELP.carteira.paragraphs[0].includes('quando o serviço liberar'))
-  t.absent(HELP.carteira.paragraphs.some((p) => p.includes('próximas versões') || p.includes('Quando enviar dinheiro estiver disponível')))
+test('conversas help states the private-message rules', async (t) => {
+  const { HELP } = await load()
+  t.is(HELP.conversas.title, 'Como funcionam as Conversas')
+  t.alike([...HELP.conversas.paragraphs], [
+    'Conversas e grupos de comunidades ficam numa lista só, a mais recente primeiro. Todas mostra a lista inteira; Não lidas e Grupos mostram só parte dela.',
+    'Mensagens são textos privados entre duas pessoas, cifrados de ponta a ponta.',
+    'A associação guarda só envelopes lacrados por sete dias e não consegue ver quem escreve para quem.',
+    'Quem você segue aparece na lista. Qualquer outra pessoa aparece em Pedidos de mensagem, e a mensagem é enviada antes de você aceitar.',
+    'Aceitar ou recusar não avisa a outra pessoa.',
+    'Não há confirmação de leitura.',
+    'Bloquear interrompe as mensagens nos seus aparelhos.',
+    'Apagar remove a conversa só nos seus aparelhos.',
+    'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
+    'A linha Comunidades serve para achar e criar comunidades.'
+  ])
 })

@@ -16,7 +16,6 @@ const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const coreSync = require('@varanda/core/lib/sync')
 const coreMember = require('@varanda/core/lib/member')
-const coreStore = require('@varanda/core/lib/store')
 const { runSync } = require('../lib/sync')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { groupKeyPairFromPrf } = require('../lib/passkey')
@@ -143,8 +142,10 @@ test('private groups end to end: core creator, browser member, non-member, real 
   const b = await browserMember(t, assocKp, 'Bia')
   const n = await coreNode(t, assocKp, 'Nina')
 
-  // 1. The creator makes a private group (approval forced) and posts sealed.
-  const { group } = await coreMember.groupCreate(c, { name: 'Conselho', join: 'open', visibility: 'private' })
+  // 1. The creator makes an open community and a private group in it
+  // (approval forced) and posts sealed.
+  const { community } = await coreMember.communityCreate(c, { name: 'Bairro', join: 'open' })
+  const { group } = await coreMember.groupCreate(c, { name: 'Conselho', join: 'open', visibility: 'private', community })
   const info = await coreMember.groupInfo(c, { group })
   t.is(info.visibility, 'private', 'private, never public')
   t.is(info.join, 'approval', 'approval forced')
@@ -156,36 +157,32 @@ test('private groups end to end: core creator, browser member, non-member, real 
   t.is(idx.header.visibility, 'private', 'the index says private')
   t.is(idx.header.name, null, 'and never names it')
 
-  // 2. The browser joins by key before the root arrives: its pending writer
-  // has no box, so the seeder never takes it; once the run holds the private
-  // root, that writer's push is no goal, so the run ends ok. Joining again
-  // binds a boxed writer (the boxless one is unbound) and requests entry.
-  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'pending' }, 'join before the root is pending')
-  const boxless = (await store.readGroupWriters(b.storage)).find((w) => w.group === group).key
+  // 2. The browser opens the community link: the community root comes with
+  // the private group's root (its catalogue). It joins the community, then
+  // asks to join the group with a boxed writer.
+  await store.addGroupReplica(b.storage, community)
   const first = await onceB(b, sd.url)
-  t.ok(first.res.ok, 'the boxless writer is no push goal once the root arrives: ' + JSON.stringify(first.res.errors))
-  t.ok(await store.groupCoreExists(b.storage, group), 'the root is stored')
-  t.is(writerLength(sd.seeder, group, boxless), 0, 'the seeder never took the boxless writer')
-  t.is((await ops.groupJoin(b.ctx, { group })).state, 'requested', 'boxed rejoin requests entry')
+  t.ok(first.res.ok, 'browser fetches the community ' + JSON.stringify(first.res.errors))
+  t.ok(await store.groupCoreExists(b.storage, group), 'the private root is stored')
+  t.is((await ops.communityJoin(b.ctx, { community })).state, 'member', 'B joins the community')
+  t.is((await ops.groupJoin(b.ctx, { group })).state, 'requested', 'boxed join requests entry')
   const bWriter = (await store.readGroupWriters(b.storage)).filter((w) => w.group === group).pop().key
-  t.not(bWriter, boxless, 'a new boxed writer')
   t.ok((await onceB(b, sd.url)).res.ok, 'browser pushes its boxed writer')
   await until(() => writerLength(sd.seeder, group, bWriter) >= 1, { name: 'B writer on the seeder' })
   const beforeAdmit = await ops.groupRead(b.ctx, { group })
   t.is(beforeAdmit.items.length, 0, 'nothing readable before the admission')
   t.ok(beforeAdmit.sealed >= 1, 'only a sealed count')
 
-  // 3. The third node asks to join and is never admitted.
-  t.alike(await coreMember.groupJoin(n, { group }), { state: 'pending' })
-  // Its first writer has no box (the root was unknown) and the seeder never
-  // takes it, so this run reports that writer's push timing out, nothing else.
-  const nBoxless = coreStore.readGroups(n.dataDir).find((g) => g.group === group).writer
-  const nFirst = await onceC(bootstrap, n)
-  t.ok(nFirst.res.errors.length > 0 && nFirst.res.errors.every((e) => e.startsWith('tempo esgotado: ' + nBoxless)), 'only the boxless writer fails: ' + JSON.stringify(nFirst.res.errors))
+  // 3. The third node joins the community, asks to join the group and is
+  // never admitted.
+  t.is((await coreMember.communityJoin(n, { community })).state, 'pending')
+  t.ok((await onceC(bootstrap, n)).res.ok, 'third node fetches the community')
+  t.is((await coreMember.communityJoin(n, { community })).state, 'member')
+  t.ok((await onceC(bootstrap, n)).res.ok, 'third node pushes its CW and fetches the catalogue')
   t.is((await coreMember.groupJoin(n, { group })).state, 'requested')
 
   // 4. The creator admits B: the history keys travel to B's box.
-  t.ok((await onceC(bootstrap, c)).res.ok, 'creator fetches the request')
+  t.ok((await onceC(bootstrap, c)).res.ok, 'creator fetches the request in one run')
   t.alike((await coreMember.groupRequests(c, { group })).requests.map((r) => r.member).sort(), [b.ownHex], 'C sees B request')
   t.alike(await coreMember.groupAdmit(c, { group, member: b.ownHex, on: true }), { ok: true })
   t.ok((await onceC(bootstrap, c)).res.ok, 'creator pushes the admission and keys')
@@ -236,4 +233,85 @@ test('private groups end to end: core creator, browser member, non-member, real 
   t.absent(JSON.stringify(sd.seeder.indexGroup(group)).includes('Conselho'), 'nor its index')
 
   t.comment('runtime ' + (Date.now() - started) + ' ms')
+})
+
+// The CW of `m` in `community`: -> { key, length }.
+async function cwOf (m, community) {
+  const entry = (await store.readGroupWriters(m.storage)).find((e) => e.group === community && e.key !== community)
+  const core = await store.openGroupCoreReadOnly(m.storage, entry.key)
+  try { return { key: entry.key, length: core.length } } finally { await core.close() }
+}
+
+// The group-key blocks of `m`'s own writer in `group`, as stored.
+async function ownKeyBlocks (m, group) {
+  const entry = (await store.readGroupWriters(m.storage)).filter((e) => e.group === group && e.key !== group).pop()
+  const core = await store.openGroupCoreReadOnly(m.storage, entry.key)
+  try {
+    return (await store.readAll(core)).filter((e) => e.record !== null && e.record.type === 'group-key')
+  } finally {
+    await core.close()
+  }
+}
+
+test('a community admin distributes the key of a private group through auth, and an admitted member reads that epoch', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const assocKp = generateAssociationKeyPair()
+  const sd = await seederOverWs(t, assocKp, bootstrap)
+  const c = await coreNode(t, assocKp, 'Caio')
+  const b = await browserMember(t, assocKp, 'Bia')
+  const n = await coreNode(t, assocKp, 'Nina')
+
+  // The creator makes a community and a private group; B joins the community
+  // and is made a community admin (not a group admin).
+  const { community } = await coreMember.communityCreate(c, { name: 'Bairro', join: 'open' })
+  const { group } = await coreMember.groupCreate(c, { name: 'Conselho', join: 'open', visibility: 'private', community })
+  await coreMember.groupPost(c, { group, text: 'segredo-c1 antes' })
+  t.ok((await onceC(bootstrap, c)).res.ok, 'creator pushes')
+  await until(() => writerLength(sd.seeder, group, group) >= 4, { name: 'root blocks on the seeder' })
+  await store.addGroupReplica(b.storage, community)
+  t.ok((await onceB(b, sd.url)).res.ok, 'B fetches the community')
+  t.is((await ops.communityJoin(b.ctx, { community })).state, 'member', 'B joins the community')
+  t.ok((await onceB(b, sd.url)).res.ok, 'B pushes its CW')
+  t.ok((await onceC(bootstrap, c)).res.ok, 'creator fetches the CW')
+  t.ok((await onceC(bootstrap, c)).res.ok, 'creator fetches it again')
+  t.is((await coreMember.communitySetAdmin(c, { community, member: b.ownHex, on: true })).on, true, 'B is a community admin')
+  t.ok((await onceC(bootstrap, c)).res.ok, 'creator pushes the grant')
+  t.ok((await onceB(b, sd.url)).res.ok, 'B fetches the grant')
+  t.is((await ops.groupJoin(b.ctx, { group })).state, 'member', 'a community admin joins the private group as a member')
+  t.ok((await onceB(b, sd.url)).res.ok, 'B pushes its writer')
+  t.ok((await onceC(bootstrap, c)).res.ok, 'creator fetches it')
+  t.ok((await onceC(bootstrap, c)).res.ok, 'creator fetches it again')
+  await coreMember.groupRekey(c, { group })
+  t.ok((await onceC(bootstrap, c)).res.ok, 'creator pushes the rotation to B')
+  t.ok((await onceB(b, sd.url)).res.ok, 'B fetches the keys')
+  t.is((await ops.groupInfo(b.ctx, { group })).state, 'member', 'B is a member of the group')
+
+  // N joins the community and asks into the group; B, a community admin,
+  // admits it and distributes the key.
+  t.is((await coreMember.communityJoin(n, { community })).state, 'pending')
+  t.ok((await onceC(bootstrap, n)).res.ok, 'N fetches the community')
+  t.is((await coreMember.communityJoin(n, { community })).state, 'member')
+  t.ok((await onceC(bootstrap, n)).res.ok, 'N pushes its CW')
+  t.is((await coreMember.groupJoin(n, { group })).state, 'requested')
+  t.ok((await onceC(bootstrap, n)).res.ok, 'N pushes the request')
+  t.ok((await onceB(b, sd.url)).res.ok, 'B fetches the request')
+  t.ok((await onceB(b, sd.url)).res.ok, 'B fetches it again')
+  t.alike((await ops.groupRequests(b.ctx, { group })).requests.map((r) => r.member), [n.key], 'B sees the request')
+  t.alike(await ops.groupAdmit(b.ctx, { group, member: n.key, on: true }), { ok: true }, 'B admits N')
+  const cw = await cwOf(b, community)
+  t.is((await ops.groupRekey(b.ctx, { group })).group, group, 'B distributes the key')
+  const blocks = await ownKeyBlocks(b, group)
+  const last = blocks[blocks.length - 1].record
+  t.ok(blocks.length >= 1, 'B wrote a group-key block')
+  t.alike(last.auth, { writer: cw.key, seq: cw.length }, 'auth cites B CW at its length when it wrote')
+  t.ok(last.auth.seq >= 1, 'a CW length of at least 1')
+  const post = await ops.groupPost(b.ctx, { group, text: 'segredo-b1 da admin' })
+  t.ok(post.seq >= 1)
+  t.ok((await onceB(b, sd.url)).res.ok, 'B pushes the key and the post')
+  t.ok((await onceC(bootstrap, n)).res.ok, 'N fetches them')
+  t.ok((await onceC(bootstrap, n)).res.ok, 'N fetches again')
+  t.is((await coreMember.groupInfo(n, { group })).state, 'member', 'N is a member')
+  const readN = await coreMember.groupRead(n, { group })
+  t.ok(texts(readN).includes('segredo-b1 da admin'), 'N reads the post sealed under the admin epoch: ' + JSON.stringify(texts(readN)))
 })

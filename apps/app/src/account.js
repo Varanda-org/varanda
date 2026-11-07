@@ -3,18 +3,23 @@
 // The page talks to the same-origin account service; it cannot verify
 // signatures, so usernameMatches is only a consistency check on data the same
 // origin serves.
+/* global __DEV__ */
 
 import { applicationServerKey } from './push-state.js'
 import { AGE_STATES } from './age.js'
 import { resolveUrl } from './installation.js'
+import { accountOriginOf } from './pageGate.js'
 import { isAppClient } from './appClient.js'
-import { KYC_STATES, canonicalJson } from './wallet.js'
+import { vitrineEnabled } from './vitrine/enabled.js'
+import { MAX_BYTES as GIF_MAX_BYTES, imageUrl, parseSearch, searchBody } from './gif.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
 const TIMEOUT_MS = 8000
 const MAX_BODY = 4096
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/
+// The literal member access is what Expo inlines into the bundle.
+const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
 
 // Lives here, not in signupInvite.js (which re-exports both), so the two
 // modules never import each other.
@@ -37,30 +42,23 @@ const ERROR_MESSAGES = {
   'termos-pendentes': 'aceite os termos atuais antes de ligar os avisos',
   'pedido-invalido': 'pedido inválido',
   // Member cap (503). Already-linked members never receive this token.
-  'lista-de-espera': 'A Varanda está cheia por enquanto. Nada sobre você foi guardado; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.',
+  'lista-de-espera': 'A Varanda está cheia por enquanto. Esta tentativa não criou conta nem lugar em fila; volte daqui a alguns dias para tentar de novo. Quem já entrou continua usando a rede normalmente.',
   'convite-obrigatorio': INVITE_NEEDED_TEXT,
   'convite-invalido': 'Este convite não vale mais: já foi usado, venceu ou não existe. Peça outro link para quem te convidou.',
   'limite-convites': 'Você já criou os convites desta semana. Na segunda-feira volta a contar.',
+  'convite-aguardando': 'Seu convite desta semana ainda não chegou. Ele aparece de surpresa, com um aviso.',
   'idade-pendente': 'Confirme sua idade antes de continuar.',
   'limite-idade': 'Muitas tentativas de verificação. Tente de novo amanhã.',
-  'carteira-pendente': 'Abra a conta de pagamentos antes.',
-  'kyc-pendente': 'A verificação de identidade ainda não terminou.',
-  'kyc-recusado': 'A verificação de identidade não foi aprovada.',
-  'documentos-pendentes': 'Envie o documento e a selfie antes.',
-  'pin-invalido': 'PIN incorreto.',
-  'pin-bloqueado': 'PIN bloqueado por 24 horas após três erros.',
-  'limite-carteira': 'Muitas operações. Tente de novo mais tarde.',
-  'valor-invalido': 'Valor inválido.',
-  'destino-invalido': 'Destino inválido.',
-  'saldo-insuficiente': 'Saldo insuficiente. O saldo precisa cobrir também as taxas pendentes.',
-  'carteira-incerta': 'A criação da carteira ainda não foi confirmada.',
-  'taxa-mudou': 'A taxa mudou. Confira de novo antes de confirmar.',
-  'idade-minima': 'Por enquanto a conta de pagamentos só pode ser aberta por quem tem 18 anos ou mais.',
-  'operacao-pendente': 'Uma operação anterior ainda não foi confirmada. Aguarde a confirmação antes de fazer outra.',
-  'operacao-divergente': 'Esta operação já foi pedida com outros valores. Comece de novo.',
-  // Never sent by the service: the app's name for the 404 that wallet
-  // creation answers while the operator keeps the 'cadastro' mode.
-  'aguardando-carteira': 'Verificação aprovada. A carteira será liberada em breve.'
+  'limite-gif': 'Limite de buscas de GIF por hoje',
+  'nao-autorizado': 'a sessão de busca de GIF expirou',
+  'limite-recuperacao': 'você já tem o máximo de passkeys e códigos cadastrados; remova um antes',
+  // A seen write or delete lost the compare-and-swap: nothing was written.
+  conflito: 'Outro aparelho gravou antes.'
+}
+// Tokens whose sentence only fits the recovery routes: 'nao-encontrado' also
+// answers rename and unknown routes, where this sentence would be wrong.
+const RECOVERY_MESSAGES = {
+  'nao-encontrado': 'esta passkey ou este código não está ligado a uma conta neste endereço'
 }
 const FALLBACK_MESSAGE = 'serviço indisponível'
 
@@ -114,8 +112,9 @@ export function formatNextChange (iso) {
   return p(d.getDate()) + '/' + p(d.getMonth() + 1) + '/' + d.getFullYear()
 }
 
-// Never carries a raw body: the message comes from a fixed table.
-export function toError (code, nextChangeAt) {
+// Never carries a raw body: the message comes from a fixed table. `extra`
+// adds route-scoped tokens (RECOVERY_MESSAGES).
+export function toError (code, nextChangeAt, extra) {
   let message
   let token = 'indisponivel'
   if (code === 'troca-bloqueada') {
@@ -125,6 +124,9 @@ export function toError (code, nextChangeAt) {
   } else if (Object.hasOwn(ERROR_MESSAGES, code)) {
     token = code
     message = ERROR_MESSAGES[code]
+  } else if (extra && Object.hasOwn(extra, code)) {
+    token = code
+    message = extra[code]
   } else {
     message = FALLBACK_MESSAGE
   }
@@ -134,18 +136,47 @@ export function toError (code, nextChangeAt) {
   return err
 }
 
-async function readJson (res, maxBody = MAX_BODY) {
+export async function readJson (res, maxBody = MAX_BODY) {
   const type = res.headers && res.headers.get ? res.headers.get('content-type') : ''
   if (!/^application\/json\b/i.test(type || '')) return null
+  // A declared length over the cap is refused before anything is read, and
+  // a streamed body stops at the cap, so a hostile answer is never buffered
+  // whole (React Native's fetch has no body stream: text() there).
+  const declared = Number(res.headers && res.headers.get ? res.headers.get('content-length') : NaN)
+  if (Number.isFinite(declared) && declared > maxBody) return null
   let text
-  try { text = await res.text() } catch { return null }
+  try { text = await readCapped(res, maxBody) } catch { return null }
   if (typeof text !== 'string' || new TextEncoder().encode(text).length > maxBody) return null
   try { return JSON.parse(text) } catch { return null }
+}
+
+async function readCapped (res, maxBody) {
+  const reader = res.body && typeof res.body.getReader === 'function' ? res.body.getReader() : null
+  if (reader === null) return res.text()
+  const chunks = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.length
+    if (size > maxBody) {
+      try { await reader.cancel() } catch {}
+      return null
+    }
+    chunks.push(value)
+  }
+  const all = new Uint8Array(size)
+  let at = 0
+  for (const c of chunks) { all.set(c, at); at += c.length }
+  return new TextDecoder().decode(all)
 }
 
 // `extra` headers (the app's link proofs) apply to app requests only, so the
 // web's requests stay as they were.
 export function buildRequest (method, path, body, extra) {
+  // pages.js builds its own requests from here, so this guard keeps every
+  // account and page call off the network in the Vitrine too.
+  if (VITRINE) throw toError('indisponivel')
   const init = { method, credentials: 'same-origin', cache: 'no-store', headers: { accept: 'application/json' } }
   if (body !== undefined) {
     init.headers['content-type'] = 'application/json'
@@ -168,12 +199,25 @@ export function buildRequest (method, path, body, extra) {
 // `uncertain`: a state-changing call whose outcome is unknown (no answer, a
 // 5xx, or a success without a readable body) says so, so the caller can tell
 // it from a refusal and re-read instead of repeating it (docs/app.md).
-async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, maxBody = MAX_BODY, map404 = null, timeoutMs = TIMEOUT_MS, headers } = {}) {
-  const { url, init } = buildRequest(method, path, body, headers)
+// `origin`: a core node's https account origin (pages.js pagesOrigin); the
+// hosted web app passes none and keeps the relative path.
+// `errorBody`: a refusal also carries the parsed JSON body as err.body, for a
+// caller that validates it (seenFinish's conflict), so it never fetches again.
+async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, errorBody = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin, gifToken, messages } = {}) {
+  // The Vitrine has no account service: every call is a definite refusal,
+  // before any request leaves the page.
+  if (VITRINE) throw toError('indisponivel')
+  const built = buildRequest(method, path, body, headers)
+  const { init } = built
+  // Unlike `headers` (app only), the GIF session rides on every client, in
+  // the one header a proxy's error log redacts.
+  if (typeof gifToken === 'string') init.headers.authorization = 'Bearer ' + gifToken
+  const base = accountOriginOf(origin)
+  const url = base === undefined ? built.url : base + path
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), timeoutMs)
   const fail = (code, nextChangeAt, unknown) => {
-    const err = toError(code, nextChangeAt)
+    const err = toError(code, nextChangeAt, messages)
     if (uncertain && unknown) err.uncertain = true
     return err
   }
@@ -191,18 +235,29 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
     if (data === null || typeof data !== 'object') throw fail('indisponivel', undefined, true)
     return data
   }
-  if (allow404 && res.status === 404) return null
+  // allow404 'nao-encontrado': only the service's own JSON answer is null; any
+  // other 404 (a proxy page, an empty body, another token, an older server's
+  // unknown route answering a bare 'nao-encontrado') cannot be told from
+  // "could not ask", so it is the service being unavailable.
+  if (allow404 === 'nao-encontrado' && res.status === 404) {
+    if (data && data.error === 'nao-encontrado' && data.recovery === true) return null
+    throw fail('indisponivel')
+  }
+  // allow404 'route': only a route the service does not have is null; a
+  // refusal that happens to be a 404 (an expired nonce) stays an error.
+  if (allow404 && res.status === 404 && !(allow404 === 'route' && data && data.error === 'expirado')) return null
   const code = data && typeof data.error === 'string' ? data.error : ''
-  if (map404 && res.status === 404) throw fail(map404(code))
   // `definite`: the route answers a 5xx with an error token only before it
   // changed anything, so that answer is a refusal, not an unknown outcome. A
   // 5xx without a known token (a proxy page, a crash) stays uncertain.
-  const known = definite && (code === 'indisponivel' || Object.hasOwn(ERROR_MESSAGES, code))
-  throw fail(code, data && data.nextChangeAt, res.status >= 500 && !known)
+  const known = definite && (code === 'indisponivel' || Object.hasOwn(ERROR_MESSAGES, code) || (!!messages && Object.hasOwn(messages, code)))
+  const err = fail(code, data && data.nextChangeAt, res.status >= 500 && !known)
+  if (errorBody && data && typeof data === 'object') err.body = data
+  throw err
 }
 
-export const accountStatus = (member) =>
-  call('GET', '/account/status?member=' + encodeURIComponent(member))
+export const accountStatus = (member, { origin } = {}) =>
+  call('GET', '/account/status?member=' + encodeURIComponent(member), undefined, { origin })
 // The native app's sign-in (apps/cli/lib/account/app-return.js) replaces the
 // web's link cookie with V (linkSecret, kept in the app's memory) and R
 // (redeem, from the auth session's result). Both ride in headers, only from
@@ -239,8 +294,8 @@ export const finishLink = ({ signature, linkSecret, redeem }) => {
   if (appMissingProofs({ linkSecret, redeem })) return Promise.reject(toError('expirado'))
   return call('POST', '/account/finish', { signature }, { headers: linkHeaders({ linkSecret, redeem }) })
 }
-export const lookupUsername = (name) =>
-  call('GET', '/account/username/' + encodeURIComponent(name), undefined, { allow404: true })
+export const lookupUsername = (name, { origin } = {}) =>
+  call('GET', '/account/username/' + encodeURIComponent(name), undefined, { allow404: true, origin })
 export const renameStart = ({ member, username }) =>
   call('POST', '/account/rename/start', { member, username })
 export const renameFinish = ({ member, nonce, signature }) =>
@@ -283,6 +338,62 @@ export const pushFinish = async ({ member, nonce, action, signature, endpoint, p
   }
   return { ok: true, changed: data.changed }
 }
+// Seen state shared by the devices of one passkey (seenSync.js). The blob is
+// opaque ciphertext the browser node seals and merges; the client only checks
+// its shape. Read changes nothing; write and delete are compare-and-swaps on
+// prevHash, so a lost answer is uncertain and is never resent here.
+const SEEN_BLOB_B64 = 43744 // packages/core/lib/seen-blob.js SEEN_BLOB_B64
+const SEEN_MAX_BODY = 49152
+const SEEN_TIMEOUT_MS = 20000
+const SEEN_HASH_RE = /^[0-9a-f]{64}$/
+const SEEN_B64_RE = /^[A-Za-z0-9+/]*={0,2}$/
+const isSeenHash = (v) => typeof v === 'string' && SEEN_HASH_RE.test(v)
+const isSeenBlob = (v) => typeof v === 'string' && v.length === SEEN_BLOB_B64 && SEEN_B64_RE.test(v)
+
+export const seenStart = async ({ member, action }) => {
+  const data = await call('POST', '/account/seen/start', { member, action })
+  if (typeof data.nonce !== 'string') throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+
+export const seenFinish = async ({ member, nonce, action, signature, prevHash, blob }) => {
+  const writes = action === 'write' || action === 'delete'
+  const body = { member, nonce, action, signature, prevHash }
+  if (action === 'write') body.blob = blob
+  const bad = () => {
+    const err = toError('indisponivel')
+    if (writes) err.uncertain = true
+    return err
+  }
+  let data
+  try {
+    data = await call('POST', '/account/seen/finish', body, { uncertain: writes, errorBody: true, maxBody: SEEN_MAX_BODY, timeoutMs: SEEN_TIMEOUT_MS })
+  } catch (err) {
+    const b = err.body || {}
+    delete err.body
+    if (err.code !== 'conflito') throw err
+    // A conflict wrote nothing: definite, with the server's current state.
+    const okBlob = action === 'write' ? (b.blob === null || isSeenBlob(b.blob)) : (b.blob === undefined || b.blob === null)
+    if (!writes || !isSeenHash(b.hash) || !okBlob) throw toError('indisponivel')
+    err.hash = b.hash
+    err.blob = action === 'write' ? b.blob : null
+    throw err
+  }
+  if (action === 'read') {
+    if (data.hash === null && data.blob === null) return { hash: null, blob: null, unchanged: false }
+    if (!isSeenHash(data.hash)) throw bad()
+    if (data.unchanged === true && data.blob === null) return { hash: data.hash, blob: null, unchanged: true }
+    if (!isSeenBlob(data.blob)) throw bad()
+    return { hash: data.hash, blob: data.blob, unchanged: false }
+  }
+  if (action === 'write') {
+    if (data.ok !== true || !isSeenHash(data.hash)) throw bad()
+    return { ok: true, hash: data.hash }
+  }
+  if (data.ok !== true || typeof data.changed !== 'boolean') throw bad()
+  return { ok: true, changed: data.changed }
+}
+
 export const pushCheck = async ({ member, endpoint, p256dh, auth }) => {
   try {
     const data = await call('POST', '/account/push/check', { member, endpoint, p256dh, auth })
@@ -317,6 +428,19 @@ export const invitesStart = async ({ member }) => {
   if (typeof data.nonce !== 'string') throw toError('indisponivel')
   return { nonce: data.nonce }
 }
+export const invitesSummary = async ({ member, nonce, signature }) => {
+  const data = await call('POST', '/account/invites/summary', { member, nonce, signature }, { allow404: 'route' })
+  if (data === null) return null
+  if (!exactKeys(data, ['mode', 'perWeek', 'opened', 'used', 'remaining', 'resetsAt'])) throw toError('indisponivel')
+  const { mode, perWeek, opened, used, remaining, resetsAt } = data
+  if ((mode !== 'semanal' && mode !== 'sorteio') || !isPerWeek(perWeek) ||
+    !isCount(opened) || opened > perWeek || !isCount(used) ||
+    remaining !== Math.max(0, opened - used) || (mode === 'semanal' && opened !== perWeek) ||
+    !isIso(resetsAt) || new Date(resetsAt).toISOString() !== resetsAt) {
+    throw toError('indisponivel')
+  }
+  return { mode, perWeek, opened, used, remaining, resetsAt }
+}
 export const invitesFinish = async ({ member, nonce, signature }) => {
   const data = await call('POST', '/account/invites/finish', { member, nonce, signature })
   if (typeof data.code !== 'string' || !INVITE_CODE_RE.test(data.code) || !isIso(data.expiresAt) ||
@@ -328,12 +452,45 @@ export const invitesFinish = async ({ member, nonce, signature }) => {
 
 // Hosted age check (src/age.js). The policy read answers null on any failure;
 // ageGate treats null as required, so a broken read never lets anyone past.
+// The Vitrine has no account service to ask, and the read fails closed.
 export const agePolicy = async () => {
+  if (VITRINE) return { required: false }
   try {
     const data = await call('GET', '/account/age/policy')
     return exactKeys(data, ['required']) && typeof data.required === 'boolean' ? { required: data.required } : null
   } catch {
     return null
+  }
+}
+// An issuer-signed age attestation is opaque here: a plain object within the
+// node's byte cap. The node verifies it (age.proof); the app only bounds and
+// forwards it, so a bad one is dropped, never an error.
+export const MAX_AGE_PROOF_BYTES = 1024
+function isAgeProof (v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v) || Object.getPrototypeOf(v) !== Object.prototype) return false
+  try {
+    return new TextEncoder().encode(JSON.stringify(v)).length <= MAX_AGE_PROOF_BYTES
+  } catch {
+    return false
+  }
+}
+const verifiedAnswer = (data) => isAgeProof(data.proof) ? { state: 'verificado', proof: data.proof } : { state: 'verificado' }
+// The installation's signed age-since attestation: a member certificate dated
+// on or after its `since` proves the account passed (the service issues none
+// without a recorded band). The object, null when the service has none, or
+// undefined on any failure, so a broken read never changes what the node holds.
+export const ageSince = async () => {
+  // The Vitrine never settles: App.js sends any answer to age.proof and
+  // retries a failed one forever, while a pending read does neither and asks
+  // nothing (the age step is already clear through agePolicy).
+  if (VITRINE) return new Promise(() => {})
+  try {
+    const data = await call('GET', '/account/age/since')
+    if (!exactKeys(data, ['since'])) return undefined
+    if (data.since === null) return null
+    return isAgeProof(data.since) ? data.since : undefined
+  } catch {
+    return undefined
   }
 }
 export const ageStart = async ({ member }) => {
@@ -358,7 +515,7 @@ export const ageSession = async ({ member, nonce, signature, invite }) => {
   if (typeof invite === 'string' && INVITE_CODE_RE.test(invite)) body.invite = invite
   const data = await call('POST', '/account/age/session', body, { uncertain: true, definite: true })
   if (isVerificationUrl(data.url)) return { url: data.url }
-  if (data.state === 'verificado') return { state: 'verificado' }
+  if (data.state === 'verificado') return verifiedAnswer(data)
   const err = toError('indisponivel')
   err.uncertain = true
   throw err
@@ -368,432 +525,264 @@ export const ageSession = async ({ member, nonce, signature, invite }) => {
 // only before the band is recorded.
 export const ageResult = async ({ member, nonce, signature }) => {
   const data = await call('POST', '/account/age/result', { member, nonce, signature }, { uncertain: true, definite: true })
+  if (data.state === 'verificado') return verifiedAnswer(data)
   if (typeof data.state === 'string' && AGE_STATES.includes(data.state)) return { state: data.state }
   const err = toError('indisponivel')
   err.uncertain = true
   throw err
 }
 
-// Optional payments account (Hodle). Every signed POST carries the action and
-// the exact op the member signed: the service recomputes the op hash from
-// what it receives. The PIN and the KYC fields go straight into one request
-// body and are never kept here.
-const WALLET_MODES = Object.freeze(['cadastro', 'carteira', 'pix', 'completo'])
-const NETWORK_RE = /^[a-z]{1,16}$/
-const WALLET_ADDRESS_RE = /^0x[0-9a-f]{40}$/
-const UPLOAD_HOST = 'uploads.hodle.com.br'
-const LIVENESS_HOST = 'app.hodle.com.br'
-const UPLOAD_TYPES = Object.freeze(['image/jpeg', 'image/png'])
-const UPLOAD_MAX = 10 * 1024 * 1024
-const UPLOAD_TIMEOUT_MS = 30000
-// Two presigned provider URLs of up to 4096 characters each fit, and so does
-// a statement page (provider rows merged with the ledger's own rows).
-const WALLET_MAX_BODY = 16384
-// Reads and quotes may wait on one or two provider calls; the service's own
-// request timeout bounds receipt of the request, not the handler.
-const WALLET_TIMEOUT_MS = 20000
-// A debit runs up to three provider legs of 30 s each (C2). Giving up sooner
-// would only turn a known outcome into an uncertain one.
-const WALLET_MONEY_TIMEOUT_MS = 100000
-// op-status may read up to 10 statement pages before it answers.
-const WALLET_OP_STATUS_TIMEOUT_MS = 60000
-const FEE_KEY_RE = /^[a-z]{1,16}$/
-const FEE_TEXT_MAX = 64
-
-const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
-// eslint-disable-next-line no-control-regex
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/
-
-function isHodleUrl (v, host) {
-  if (!isVerificationUrl(v)) return false
-  const u = new URL(v)
-  return u.hostname === host && u.port === ''
+// GIF search through the account service. Every GIF cache is keyed by the
+// account origin the request really goes to (what call() resolves: the
+// node's https origin, else the installation's, else '' for the page's own
+// origin), so switching installations asks the new one.
+function gifOriginKey (origin) {
+  const base = accountOriginOf(origin)
+  if (base !== undefined) return base
+  return resolveUrl('/').slice(0, -1)
 }
 
-function uncertainError () {
-  const err = toError('indisponivel')
-  err.uncertain = true
-  return err
+// The policy: a definite answer (200 with { enabled }) is kept for the
+// session. Any failure answers false, so the picker stays hidden rather than
+// offering a search that cannot work, and is asked again on a later call
+// once GIF_POLICY_RETRY_MS have passed.
+export const GIF_POLICY_RETRY_MS = 30 * 1000
+const gifPolicies = new Map()
+export const gifPolicy = ({ origin, now = Date.now } = {}) => {
+  if (VITRINE) return Promise.resolve(false)
+  const key = gifOriginKey(origin)
+  const cached = gifPolicies.get(key)
+  if (cached && cached.retryAt > now()) return cached.answer
+  const entry = { retryAt: Infinity }
+  entry.answer = (async () => {
+    try {
+      const data = await call('GET', '/account/gif/policy', undefined, { origin })
+      if (exactKeys(data, ['enabled']) && typeof data.enabled === 'boolean') return data.enabled
+    } catch {}
+    entry.retryAt = now() + GIF_POLICY_RETRY_MS
+    return false
+  })()
+  gifPolicies.set(key, entry)
+  return entry.answer
 }
+// The GIF session: one token per member and origin, kept in memory until
+// its expiresAt. A missing token, or a 401 on a read, runs start, the node's
+// read-only invite.sign 'summary' statement over the nonce, and finish. Only
+// reads repeat after a fresh session; the session calls themselves never do.
+const GIF_SEARCH_BODY = 32768
+const GIF_TINY_BYTES = 512 * 1024
+const GIF_SESSION_SLACK_MS = 60 * 1000
+const HEX64_RE = /^[0-9a-f]{64}$/
+const gifSessions = new Map()
+const gifOpening = new Map()
+const gifSessionKey = (member, origin) => gifOriginKey(origin) + ' ' + member
+// gifReady's linked answers, by the same key: { at }.
+const GIF_READY_TTL_MS = 5 * 60 * 1000
+const gifLinked = new Map()
+const unauthorized = (err) => Boolean(err) && err.code === 'nao-autorizado'
 
-// The service answers 404 with two tokens: 'nao-encontrado' when the route
-// is not mounted (wallet creation while the operator keeps the 'cadastro'
-// mode) and 'expirado' for a missing or expired nonce. Both are definite.
-async function walletCall (path, body, opts = {}) {
-  const map404 = (code) => {
-    if (code === 'nao-encontrado' && body.action === 'wallet-create') return 'aguardando-carteira'
-    return code === 'expirado' ? 'expirado' : 'indisponivel'
-  }
-  return call('POST', path, body, { maxBody: WALLET_MAX_BODY, ...opts, map404 })
-}
-
-function parseAccount (a) {
-  if (a === null) return null
-  if (!isObject(a) || !isObject(a.kyc)) return undefined
-  const { state, attempt } = a.kyc
-  if (typeof state !== 'string' || !KYC_STATES.includes(state) || !Number.isSafeInteger(attempt) || attempt < 0) return undefined
-  if (typeof a.network !== 'string' || !NETWORK_RE.test(a.network)) return undefined
-  if (a.address !== null && (typeof a.address !== 'string' || !WALLET_ADDRESS_RE.test(a.address))) return undefined
-  let wallet = null
-  if (a.wallet !== null) {
-    if (!isObject(a.wallet) || typeof a.wallet.address !== 'string' || !WALLET_ADDRESS_RE.test(a.wallet.address)) return undefined
-    wallet = { address: a.wallet.address }
-  }
-  for (const k of ['subaccountUncertain', 'walletUncertain', 'documentReady', 'selfieReady']) {
-    if (typeof a[k] !== 'boolean') return undefined
-  }
-  return {
-    kyc: { state, attempt },
-    network: a.network,
-    address: a.address,
-    wallet,
-    subaccountUncertain: a.subaccountUncertain,
-    walletUncertain: a.walletUncertain,
-    documentReady: a.documentReady,
-    selfieReady: a.selfieReady
-  }
-}
-
-// The fee descriptions the service builds (fees.js describe): short texts
-// shown as they are, keyed by operation kind.
-function parseFeeTexts (v) {
-  if (!isObject(v)) return null
-  const keys = Object.keys(v)
-  if (keys.length > 16) return null
-  const out = {}
-  for (const k of keys) {
-    const text = v[k]
-    if (!FEE_KEY_RE.test(k) || typeof text !== 'string' || text.length > FEE_TEXT_MAX || CONTROL_RE.test(text)) return null
-    out[k] = text
-  }
-  return out
-}
-
-// null on any failure: walletStep treats a missing policy as off.
-export const walletPolicy = async () => {
-  try {
-    const data = await call('GET', '/account/wallet/policy')
-    if (!isObject(data) || typeof data.available !== 'boolean' || !WALLET_MODES.includes(data.mode)) return null
-    const network = data.network === undefined ? null : data.network
-    if (network !== null && (typeof network !== 'string' || !NETWORK_RE.test(network))) return null
-    const out = { available: data.available, network, mode: data.mode }
-    // Absent from a service without the money routes.
-    if (data.maxCents !== undefined) {
-      if (!isCount(data.maxCents)) return null
-      out.maxCents = data.maxCents
-    }
-    if (data.fees !== undefined) {
-      const fees = parseFeeTexts(data.fees)
-      if (fees === null) return null
-      out.fees = fees
-    }
-    return out
-  } catch {
-    return null
-  }
-}
-
-export const walletStart = async ({ member, action }) => {
-  const data = await walletCall('/account/wallet/start', { member, action })
-  if (typeof data.nonce !== 'string') throw toError('indisponivel')
+export const gifSessionStart = async ({ member, origin }) => {
+  const data = await call('POST', '/account/gif/session/start', { member }, { origin })
+  if (!exactKeys(data, ['nonce']) || !isToken(data.nonce)) throw toError('indisponivel')
   return { nonce: data.nonce }
 }
-
-// Creates the subaccount at the provider; the service's 503 'indisponivel'
-// comes only before it sent anything.
-export const walletOptin = async ({ member, nonce, signature, op }) => {
-  const data = await walletCall('/account/wallet/optin', { member, nonce, action: 'optin', op, signature }, { uncertain: true, definite: true })
-  const out = { ok: true }
-  if (Object.hasOwn(data, 'account')) {
-    const account = parseAccount(data.account)
-    if (account !== undefined) out.account = account
-  }
-  return out
+export const gifSessionFinish = async ({ member, nonce, signature, origin }) => {
+  const data = await call('POST', '/account/gif/session/finish', { member, nonce, signature }, { origin })
+  if (!exactKeys(data, ['token', 'expiresAt']) || !isToken(data.token) || !isIso(data.expiresAt)) throw toError('indisponivel')
+  return { token: data.token, expiresAt: data.expiresAt }
 }
 
-// The upload and liveness URLs are single-use capabilities: returned to the
-// caller, never kept. The call creates a provider document, so an unknown
-// outcome (or a success without usable URLs) is uncertain.
-export const walletKycDocument = async ({ member, nonce, signature, op }) => {
-  const data = await walletCall('/account/wallet/kyc-document', { member, nonce, action: 'kyc-document', op, signature }, { uncertain: true, definite: true })
-  if (isObject(op) && op.documentType === 'SELFIE-FROM-LIVENESS') {
-    if (isHodleUrl(data.livenessUrl, LIVENESS_HOST)) return { livenessUrl: data.livenessUrl }
-    throw uncertainError()
-  }
-  if (!isHodleUrl(data.uploadUrlFront, UPLOAD_HOST)) throw uncertainError()
-  const out = { uploadUrlFront: data.uploadUrlFront }
-  if (isObject(op) && op.isDoubleSided === 1) {
-    if (!isHodleUrl(data.uploadUrlBack, UPLOAD_HOST)) throw uncertainError()
-    out.uploadUrlBack = data.uploadUrlBack
-  }
-  return out
-}
-
-export const walletKycSubmit = async ({ member, nonce, signature, op, kyc }) => {
-  const data = await walletCall('/account/wallet/kyc-submit', { member, nonce, action: 'kyc-submit', op, signature, kyc }, { uncertain: true, definite: true })
-  const out = { ok: true }
-  if (Object.hasOwn(data, 'account')) {
-    const account = parseAccount(data.account)
-    if (account !== undefined) out.account = account
-  }
-  return out
-}
-
-export const walletStatus = async ({ member, nonce, signature, op }) => {
-  const data = await walletCall('/account/wallet/status', { member, nonce, action: 'status', op, signature })
-  const account = Object.hasOwn(data, 'account') ? parseAccount(data.account) : undefined
-  if (account === undefined) throw toError('indisponivel')
-  return { account }
-}
-
-export const walletCreate = async ({ member, nonce, signature, op, pin }) => {
-  const data = await walletCall('/account/wallet/wallet-create', { member, nonce, action: 'wallet-create', op, signature, pin }, { uncertain: true, definite: true })
-  if (typeof data.address === 'string' && WALLET_ADDRESS_RE.test(data.address)) return { address: data.address }
-  throw uncertainError()
-}
-
-// Money (Pix and BRLA). Every shape is checked before the screen sees it; the
-// screen still passes provider text (names, bank) through displayText.
-// Debits and deposits are never retried here: an unknown outcome is reported
-// as uncertain and settled by walletOpStatus or the statement, under the same
-// opId.
-const OP_KINDS = Object.freeze(['deposit', 'payout', 'transfer', 'crypto', 'swap'])
-const OP_STATUSES = Object.freeze(['enviado', 'incerto', 'pendente', 'expirado', 'concluido', 'falhou', 'devolvido'])
-const FEE_STATUSES = Object.freeze(['nenhuma', 'pendente', 'enviada', 'incerta', 'cobrada'])
-const DISPUTES = Object.freeze(['aberta', 'aceita', 'rejeitada', 'cancelada'])
-const EXTERNAL_ID_RE = /^var-[0-9a-f]{32}$/
-const FEE_REF_RE = /^[A-Za-z0-9_.:-]{1,64}$/
-const QR_RE = /^[\x20-\x7e]{1,1024}$/
-const QUOTE_ID_RE = /^(?!\.+$)[A-Za-z0-9_.:-]{1,128}$/
-const E2E_RE = /^[A-Za-z0-9]{1,64}$/
-const CURSOR_RE = /^[\x21-\x7e]{1,512}$/
-const DIRECTION_RE = /^[a-z]{1,16}$/
-const REASON_RE = /^[a-z-]{1,32}$/
-const PROVIDER_ISO_RE = /^\d{4}-\d{2}-\d{2}T[\x20-\x7e]{1,40}$/
-const STATEMENT_MAX_ITEMS = 100
-const MASKED_TO_MAX = 64
-// The caps the service applies when it relays a quote (hodle.js).
-const OWNER_NAME_MAX = 128
-const TAX_ID_MASKED_MAX = 32
-const BANK_NAME_MAX = 64
-// A first statement page of 100 rows does not fit the 16 KiB wallet reader.
-const STATEMENT_MAX_BODY = 65536
-// Kinds whose recipient gets exactly the amount sent: every fee is on top.
-const FULL_AMOUNT_KINDS = Object.freeze(['payout', 'transfer', 'crypto'])
-
-// Provider timestamps keep their own offset form; any parseable ISO date is
-// accepted.
-const isProviderIso = (v) => typeof v === 'string' && PROVIDER_ISO_RE.test(v) && Number.isFinite(Date.parse(v))
-const isShortText = (v, max) => typeof v === 'string' && v.length <= max && !CONTROL_RE.test(v)
-
-function moneyCall (action, body, opts = {}) {
-  return walletCall('/account/wallet/' + action, { ...body, action }, { timeoutMs: WALLET_TIMEOUT_MS, ...opts })
-}
-
-const signedBody = ({ member, nonce, signature, op }) => ({ member, nonce, op, signature })
-
-// One ledger or statement row, only its known keys. undefined when malformed.
-function parseOp (o) {
-  if (!isObject(o)) return undefined
-  if (!OP_KINDS.includes(o.kind) || !OP_STATUSES.includes(o.status) || !isCount(o.cents)) return undefined
-  const hodleFeeCents = o.hodleFeeCents ?? null
-  if (hodleFeeCents !== null && !isCount(hodleFeeCents)) return undefined
-  let fee = null
-  if (o.fee !== undefined && o.fee !== null) {
-    if (!isObject(o.fee) || !isCount(o.fee.cents) || !FEE_STATUSES.includes(o.fee.status)) return undefined
-    fee = { cents: o.fee.cents, status: o.fee.status }
-  }
-  const dispute = o.dispute ?? null
-  if (dispute !== null && !DISPUTES.includes(dispute)) return undefined
-  const at = o.at ?? null
-  if (at !== null && !isProviderIso(at)) return undefined
-  const to = o.to ?? null
-  if (to !== null && !isShortText(to, MASKED_TO_MAX)) return undefined
-  const direction = o.direction ?? null
-  if (direction !== null && (typeof direction !== 'string' || !DIRECTION_RE.test(direction))) return undefined
-  const externalId = o.externalId ?? null
-  if (externalId !== null && (typeof externalId !== 'string' || !EXTERNAL_ID_RE.test(externalId))) return undefined
-  const out = { kind: o.kind, status: o.status, cents: o.cents, hodleFeeCents, fee, dispute, at, to, direction, externalId }
-  if (o.endToEndId !== undefined && o.endToEndId !== null) {
-    if (typeof o.endToEndId !== 'string' || !E2E_RE.test(o.endToEndId)) return undefined
-    out.endToEndId = o.endToEndId
-  }
-  return out
-}
-
-export const walletBalance = async (args) => {
-  const data = await moneyCall('balance', signedBody(args))
-  const address = data.address ?? null
-  const network = data.network ?? null
-  if (!isCount(data.cents) || !isCount(data.pendingFeeCents) ||
-    (address !== null && (typeof address !== 'string' || !WALLET_ADDRESS_RE.test(address))) ||
-    (network !== null && (typeof network !== 'string' || !NETWORK_RE.test(network)))) {
-    throw toError('indisponivel')
-  }
-  return { cents: data.cents, address, network, pendingFeeCents: data.pendingFeeCents }
-}
-
-// A malformed row refuses the whole page: dropping it could hide an
-// uncertain operation the member has to settle first.
-export const walletStatement = async (args) => {
-  const data = await moneyCall('statement', signedBody(args), { maxBody: STATEMENT_MAX_BODY })
-  const cursor = data.cursor ?? null
-  if (!Array.isArray(data.items) || data.items.length > STATEMENT_MAX_ITEMS ||
-    (cursor !== null && (typeof cursor !== 'string' || !CURSOR_RE.test(cursor)))) {
-    throw toError('indisponivel')
-  }
-  const items = data.items.map(parseOp)
-  if (items.includes(undefined)) throw toError('indisponivel')
-  return { items, cursor }
-}
-
-// Creates a Pix charge at the provider, so an unknown outcome is uncertain; a
-// new tap with the same opId gets the same charge back. expiresAt may be null
-// because the provider does not always send it. qrCode null with a ledger
-// status is a known answer: the charge was reconciled or is already final,
-// so the screen shows the status instead of a code.
-export const walletDeposit = async (args) => {
-  const data = await moneyCall('deposit', signedBody(args), { uncertain: true, definite: true, timeoutMs: WALLET_MONEY_TIMEOUT_MS })
-  const qrCode = data.qrCode ?? null
-  const expiresAt = data.expiresAt ?? null
-  const hodleFeeCents = data.hodleFeeCents ?? null
-  const netCents = data.netCents ?? null
-  const status = data.status ?? null
-  const qrOk = qrCode === null
-    ? OP_STATUSES.includes(status)
-    : typeof qrCode === 'string' && QR_RE.test(qrCode) && qrCode.trim() !== ''
-  if (!qrOk || (status !== null && !OP_STATUSES.includes(status)) ||
-    (expiresAt !== null && !isProviderIso(expiresAt)) ||
-    typeof data.externalId !== 'string' || !EXTERNAL_ID_RE.test(data.externalId) ||
-    (hodleFeeCents !== null && !isCount(hodleFeeCents)) ||
-    (netCents !== null && !isCount(netCents))) {
-    throw uncertainError()
-  }
-  return { qrCode, expiresAt, externalId: data.externalId, hodleFeeCents, netCents, status }
-}
-
-export const walletPayoutQuote = async (args) => {
-  const data = await moneyCall('payout-quote', signedBody(args))
-  const text = (v, max) => v === null || v === undefined ? '' : (isShortText(v, max) ? v : null)
-  const ownerName = text(data.ownerName, OWNER_NAME_MAX)
-  const bankName = text(data.bankName, BANK_NAME_MAX)
-  const taxIdMasked = text(data.taxIdMasked, TAX_ID_MASKED_MAX)
-  const expiresAt = data.expiresAt ?? null
-  if (typeof data.quoteId !== 'string' || !QUOTE_ID_RE.test(data.quoteId) || !isCount(data.feeCents) ||
-    ownerName === null || bankName === null || taxIdMasked === null ||
-    (expiresAt !== null && !isProviderIso(expiresAt))) {
-    throw toError('indisponivel')
-  }
-  return { quoteId: data.quoteId, ownerName, taxIdMasked, bankName, feeCents: data.feeCents, expiresAt }
-}
-
-// The total must be the sum of its lines, so the confirmation never shows a
-// total its lines do not add up to.
-export const walletPreview = async (args) => {
-  const data = await moneyCall('preview', signedBody(args))
-  const keys = ['amountCents', 'varandaFeeCents', 'hodleFeeCents', 'pendingFeeCents', 'totalDebitCents', 'netReceivedCents']
-  if (!keys.every((k) => isCount(data[k]))) throw toError('indisponivel')
-  const ref = data.pendingFeeRef ?? ''
-  const refOk = data.pendingFeeCents === 0 ? ref === '' : (typeof ref === 'string' && FEE_REF_RE.test(ref))
-  const sum = data.amountCents + data.varandaFeeCents + data.hodleFeeCents + data.pendingFeeCents
-  const ok = data.ok ?? true
-  const reason = data.reason ?? null
-  const kind = isObject(args && args.op) ? args.op.kind : undefined
-  const netOk = !FULL_AMOUNT_KINDS.includes(kind) || data.netReceivedCents === data.amountCents
-  if (!refOk || !netOk || !Number.isSafeInteger(sum) || sum !== data.totalDebitCents || typeof ok !== 'boolean' ||
-    (reason !== null && (typeof reason !== 'string' || !REASON_RE.test(reason)))) {
-    throw toError('indisponivel')
-  }
-  // The other pending fees, held in the balance but not debited by this send.
-  // An older service leaves it out.
-  const reserved = data.reservedFeeCents
-  if (reserved !== undefined && reserved !== null && !isCount(reserved)) throw toError('indisponivel')
-  const out = { ok, reason, pendingFeeRef: ref }
-  for (const k of keys) out[k] = data[k]
-  if (isCount(reserved)) out.reservedFeeCents = reserved
-  return out
-}
-
-// The debit fields a signed op carries (C10), exactly as the preview showed
-// them; the service recomputes each one and answers 'taxa-mudou' otherwise.
-export function debitTerms (preview) {
-  return {
-    feeCents: preview.varandaFeeCents,
-    pendingFeeCents: preview.pendingFeeCents,
-    pendingFeeRef: preview.pendingFeeRef,
-    totalDebitCents: preview.totalDebitCents
-  }
-}
-
-function parseLeg (v) {
-  if (v === undefined || v === null) return null
-  if (!isObject(v) || !FEE_STATUSES.includes(v.status)) return undefined
-  const cents = v.cents ?? null
-  if (cents !== null && !isCount(cents)) return undefined
-  return { cents, status: v.status }
-}
-
-// The principal and each fee leg are reported apart (C2): a sent payout whose
-// fee stayed pendente is a success with a separate note, not a failure. The
-// PIN goes into this one request body and nowhere else.
-export const walletPayout = async ({ member, nonce, signature, op, pin }) => {
-  const data = await moneyCall('payout', { member, nonce, op, signature, pin }, { uncertain: true, definite: true, timeoutMs: WALLET_MONEY_TIMEOUT_MS })
-  const principal = isObject(data.principal) ? data.principal : data
-  const externalId = principal.externalId ?? data.externalId
-  const fee = parseLeg(data.fee)
-  const pendingFee = parseLeg(data.pendingFee)
-  if (typeof externalId !== 'string' || !EXTERNAL_ID_RE.test(externalId) || !OP_STATUSES.includes(principal.status) ||
-    fee === undefined || pendingFee === undefined) {
-    throw uncertainError()
-  }
-  return { externalId, status: principal.status, fee, pendingFee }
-}
-
-// One of the member's own operations; the service may poll the provider but
-// never sends anything for it.
-export const walletOpStatus = async (args) => {
-  const data = await moneyCall('op-status', signedBody(args), { timeoutMs: WALLET_OP_STATUS_TIMEOUT_MS })
-  const op = parseOp(isObject(data.operation) ? data.operation : data)
-  if (op === undefined || op.externalId === null) throw toError('indisponivel')
-  return op
-}
-
-function toHex (buf) {
-  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('')
-}
-
-// Lowercase hex SHA-256 of the UTF-8 canonical JSON: the signed op carries
-// only this hash, the service recomputes it from the fields it forwards.
-export async function kycHash (kyc) {
-  const bytes = new TextEncoder().encode(canonicalJson(kyc))
-  return toHex(await globalThis.crypto.subtle.digest('SHA-256', bytes))
-}
-
-// The image goes from the browser straight to the provider's single-use URL,
-// never through the account service; no cookies, no redirects.
-export async function uploadDocument (url, blob) {
-  if (!isHodleUrl(url, UPLOAD_HOST)) throw toError('indisponivel')
-  if (!blob || typeof blob !== 'object' || !UPLOAD_TYPES.includes(blob.type) ||
-    !Number.isSafeInteger(blob.size) || blob.size < 1 || blob.size > UPLOAD_MAX) {
-    throw new Error('arquivo inválido')
-  }
-  const ctl = new AbortController()
-  const timer = setTimeout(() => ctl.abort(), UPLOAD_TIMEOUT_MS)
-  let res
+// The cached token, or a new session. `request` is the node's RPC request.
+export async function gifSession ({ member, origin, request, now = Date.now }) {
+  if (typeof member !== 'string' || !HEX64_RE.test(member) || typeof request !== 'function') throw toError('pedido-invalido')
+  const key = gifSessionKey(member, origin)
+  const cached = gifSessions.get(key)
+  if (cached && cached.expiresAt - GIF_SESSION_SLACK_MS > now()) return cached.token
+  gifSessions.delete(key)
+  // Tiles asking at once share one session instead of opening one each.
+  if (gifOpening.has(key)) return gifOpening.get(key)
+  const opening = (async () => {
+    const { nonce } = await gifSessionStart({ member, origin })
+    let signature
+    try {
+      signature = (await request('invite.sign', { action: 'summary', nonce })).signature
+    } catch {
+      throw toError('assinatura-invalida')
+    }
+    if (typeof signature !== 'string') throw toError('assinatura-invalida')
+    const { token, expiresAt } = await gifSessionFinish({ member, nonce, signature, origin })
+    gifSessions.set(key, { token, expiresAt: new Date(expiresAt).getTime() })
+    return token
+  })().catch((err) => {
+    // A member who is no longer linked or is blocked: gifReady asks again.
+    if (unauthorized(err)) gifLinked.delete(key)
+    throw err
+  })
+  gifOpening.set(key, opening)
   try {
-    res = await fetch(url, {
-      method: 'PUT',
-      body: blob,
-      headers: { 'content-type': blob.type },
-      credentials: 'omit',
-      redirect: 'error',
-      cache: 'no-store',
-      signal: ctl.signal
-    })
-  } catch {
-    throw toError('indisponivel')
+    return await opening
+  } finally {
+    gifOpening.delete(key)
+  }
+}
+
+export function forgetGifSession ({ member, origin } = {}) {
+  if (typeof member === 'string') {
+    const key = gifSessionKey(member, origin)
+    gifSessions.delete(key)
+    gifLinked.delete(key)
+  } else {
+    gifSessions.clear()
+    gifLinked.clear()
+  }
+}
+
+// A read with the session header; one fresh session and one more try on a
+// 401 (the server forgot the token: a restart, or it expired early).
+async function withGifSession (opts, read) {
+  const token = await gifSession(opts)
+  try {
+    return await read(token)
+  } catch (err) {
+    if (!unauthorized(err)) throw err
+    forgetGifSession(opts)
+    return read(await gifSession(opts))
+  }
+}
+
+// opts: { member, origin, request } (the session) plus cursor.
+export const gifSearch = async (q, { cursor, origin, member, request } = {}) => {
+  const body = searchBody(q, cursor)
+  if (body === null) throw toError('pedido-invalido')
+  return withGifSession({ member, origin, request }, async (gifToken) => {
+    const parsed = parseSearch(await call('POST', '/account/gif/search', body, { origin, gifToken, maxBody: GIF_SEARCH_BODY }))
+    if (parsed === null) throw toError('indisponivel')
+    return parsed
+  })
+}
+
+// GIF bytes from the account origin (never a provider URL): exactly 200,
+// image/gif, at most the size's cap, and the GIF signature. -> Uint8Array.
+async function gifImageOnce ({ id, size, origin, gifToken, timeoutMs = TIMEOUT_MS }) {
+  // The Vitrine never reaches the network, as call() (the only other fetch).
+  if (VITRINE) throw toError('indisponivel')
+  const path = imageUrl('', id, size)
+  if (path === null) throw toError('pedido-invalido')
+  const cap = size === 'tiny' ? GIF_TINY_BYTES : GIF_MAX_BYTES
+  const { url: rel, init } = buildRequest('GET', path)
+  init.headers.accept = 'image/gif'
+  init.headers.authorization = 'Bearer ' + gifToken
+  init.redirect = 'error'
+  const base = accountOriginOf(origin)
+  const url = base === undefined ? rel : base + path
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(), timeoutMs)
+  try {
+    let res
+    try {
+      res = await fetch(url, { ...init, signal: ctl.signal })
+    } catch {
+      throw toError('indisponivel')
+    }
+    if (!res.ok) {
+      let data = null
+      try { data = await readJson(res) } catch {}
+      throw toError(data && typeof data.error === 'string' ? data.error : '')
+    }
+    const type = res.headers && res.headers.get ? res.headers.get('content-type') : ''
+    if (!/^image\/gif\b/i.test(type || '')) throw toError('indisponivel')
+    const declared = Number(res.headers.get('content-length'))
+    if (Number.isFinite(declared) && declared > cap) throw toError('indisponivel')
+    let bytes
+    try {
+      bytes = new Uint8Array(await res.arrayBuffer())
+    } catch {
+      throw toError('indisponivel')
+    }
+    if (bytes.byteLength < 6 || bytes.byteLength > cap) throw toError('indisponivel')
+    const sig = String.fromCharCode(...bytes.subarray(0, 6))
+    if (sig !== 'GIF87a' && sig !== 'GIF89a') throw toError('indisponivel')
+    return bytes
   } finally {
     clearTimeout(timer)
   }
-  if (!res || !(res.status >= 200 && res.status < 300)) throw toError('indisponivel')
+}
+
+export const gifImage = (id, size, { origin, member, request } = {}) =>
+  withGifSession({ member, origin, request }, (gifToken) => gifImageOnce({ id, size, origin, gifToken }))
+
+// Whether this member may search: the policy is on and the member is linked.
+// A linked answer is kept GIF_READY_TTL_MS, so opening the attach sheet does
+// not ask the account status each time; forgetGifSession and a fresh session
+// refused with nao-autorizado drop it. An unlinked answer is never kept, so
+// linking shows GIF on the next open.
+export const gifReady = async ({ member, origin, now = Date.now } = {}) => {
+  if (typeof member !== 'string' || !HEX64_RE.test(member)) return false
+  if (!(await gifPolicy({ origin, now }))) return false
+  const key = gifSessionKey(member, origin)
+  const cached = gifLinked.get(key)
+  if (cached && now() - cached.at < GIF_READY_TTL_MS) return true
+  gifLinked.delete(key)
+  try {
+    const status = await accountStatus(member, { origin })
+    const linked = status !== null && typeof status === 'object' && status.linked === true
+    if (linked) gifLinked.set(key, { at: now() })
+    return linked
+  } catch {
+    return false
+  }
+}
+
+// Recovery entries (docs/rpc.md 5.90, src/recovery.js). Every proof is the
+// node's recovery.sign over the service's single-use nonce; the app never
+// hashes or signs here.
+const RECOVERY_KINDS = ['passkey', 'code']
+const HEX48_RE = /^[0-9a-f]{48}$/
+const CIPHERTEXT_RE = /^[0-9a-f]{164}$/
+const isRecoveryKind = (v) => typeof v === 'string' && RECOVERY_KINDS.includes(v)
+const isHex64 = (v) => typeof v === 'string' && HEX64_RE.test(v)
+const isRecoveryBlob = (v) => exactKeys(v, ['v', 'kind', 'nonce', 'ciphertext']) && v.v === 1 &&
+  isRecoveryKind(v.kind) && typeof v.nonce === 'string' && HEX48_RE.test(v.nonce) &&
+  typeof v.ciphertext === 'string' && CIPHERTEXT_RE.test(v.ciphertext)
+const recoveryOpts = (extra) => ({ messages: RECOVERY_MESSAGES, ...extra })
+
+export const recoveryStart = async ({ member }) => {
+  const data = await call('POST', '/account/recovery/start', { member }, recoveryOpts())
+  if (typeof data.nonce !== 'string') throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+// put and remove may write before a 5xx reaches the app, so every 5xx stays
+// an unknown outcome (no `definite`): the caller re-reads with the list. A
+// readable 2xx means the service applied it; `changed` is informative only.
+// put answers { createdAt, changed } and remove { changed }.
+async function recoveryWrite (path, body) {
+  const data = await call('POST', path, body, recoveryOpts({ uncertain: true }))
+  const out = { ok: true, changed: data.changed === true }
+  if (isIso(data.createdAt)) out.createdAt = data.createdAt
+  return out
+}
+export const recoveryPut = ({ member, nonce, signature, kind, lookupId, blob }) =>
+  recoveryWrite('/account/recovery/put', { member, nonce, signature, kind, lookupId, blob })
+export const recoveryRemove = ({ member, nonce, signature, kind, lookupId }) =>
+  recoveryWrite('/account/recovery/remove', { member, nonce, signature, kind, lookupId })
+export const recoveryList = async ({ member, nonce, signature }) => {
+  const data = await call('POST', '/account/recovery/list', { member, nonce, signature }, recoveryOpts())
+  if (!exactKeys(data, ['entries']) || !Array.isArray(data.entries)) throw toError('indisponivel')
+  return data.entries.map((e) => {
+    if (!exactKeys(e, ['lookupId', 'kind', 'createdAt']) || !isHex64(e.lookupId) ||
+      !isRecoveryKind(e.kind) || !isIso(e.createdAt)) throw toError('indisponivel')
+    return { lookupId: e.lookupId, kind: e.kind, createdAt: e.createdAt }
+  })
+}
+// The lookup id rides in a POST body, never in a URL. null only for the
+// service's JSON 404 { error: 'nao-encontrado', recovery: true }; any other
+// failure throws,
+// so "not registered" is never confused with "could not ask" (a null lets
+// the app install a ceremony's PRF directly).
+export const recoveryFetch = async (lookupId, { origin } = {}) => {
+  const data = await call('POST', '/account/recovery/fetch', { lookupId }, recoveryOpts({ allow404: 'nao-encontrado', origin }))
+  if (data === null) return null
+  if (!exactKeys(data, ['member', 'kind', 'blob']) || !isHex64(data.member) || !isRecoveryKind(data.kind) ||
+    !isRecoveryBlob(data.blob) || data.blob.kind !== data.kind) throw toError('indisponivel')
+  return { member: data.member, kind: data.kind, blob: { v: 1, kind: data.blob.kind, nonce: data.blob.nonce, ciphertext: data.blob.ciphertext } }
 }

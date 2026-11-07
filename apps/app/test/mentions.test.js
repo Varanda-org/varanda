@@ -84,3 +84,35 @@ test('insertMention drops the trailing space when only it would overflow', async
   t.is(r.text.length, 1000)
   t.alike(r.selection, { start: 1000, end: 1000 })
 })
+
+test('insertMention honours a caller limit below MAX_TEXT', async (t) => {
+  const { insertMention } = await load()
+  t.is(insertMention('hello @an', { start: 9, end: 9 }, 'ana', 10).text, 'hello @ana', 'the courtesy space goes first')
+  t.is(insertMention('hello @an', { start: 9, end: 9 }, 'ana', 9).changed, false, 'refused when the name itself does not fit')
+  t.is(insertMention('hello @an', { start: 9, end: 9 }, 'ana').text, 'hello @ana ', 'the default limit is MAX_TEXT')
+})
+
+test('suggestionRows keeps open pages and ranks members before pages on prefix ties', async (t) => {
+  const { suggestionRows } = await load()
+  const rows = [
+    { author: key(1), username: 'ana_pagina', page: true },
+    { author: key(2), username: 'bia' },
+    { author: key(3), username: 'ana' },
+    { author: key(4), username: 'ana_fechada', page: true, closed: true },
+    { author: key(5), username: 'ana_movida', page: true, moved: true },
+    { author: key(6), username: 'bia_pagina', page: true }
+  ]
+  t.alike(suggestionRows(rows, 'AN', OWN), [rows[2], rows[0], rows[1], rows[5]])
+})
+
+test('page usernames insert as text and share the eight-mention limit with people', async (t) => {
+  const { insertMention } = await load()
+  const { mentionTokens, MENTION_MAX } = require('@varanda/rpc')
+  const result = insertMention('oi @pa', { start: 6, end: 6 }, 'pagina_cafe')
+  t.alike(result, { text: 'oi @pagina_cafe ', selection: { start: 16, end: 16 }, changed: true })
+  t.alike(mentionTokens(result.text), ['pagina_cafe'])
+  t.is(MENTION_MAX, 8)
+  t.alike(mentionTokens('@ana @pagina_cafe @bia @pagina_livros @cai @pagina_artes @duda @pagina_musica @extra'), [
+    'ana', 'pagina_cafe', 'bia', 'pagina_livros', 'cai', 'pagina_artes', 'duda', 'pagina_musica'
+  ])
+})

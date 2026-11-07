@@ -12,10 +12,12 @@ const { loadKeyPairFile, verifyIssuerCert, refuseSymlinkDir } = require('@varand
 const { createModRoutes } = require('./mod-routes')
 const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
+const { createSeenRoutes } = require('./seen-routes')
 const { createAgeRoutes } = require('./age-routes')
+const { createRecoveryRoutes } = require('./recovery-routes')
 const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, mintRedeem, redeemMatches, accountReturnUrl, appReturnPage, header } = require('./app-return')
-const { createWalletRoutes } = require('./wallet-routes')
-const { createWalletWebhook } = require('./wallet-webhook')
+const { createPagesRoutes } = require('./pages-routes')
+const { createGifRoutes } = require('./gif-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -83,10 +85,12 @@ const LOCK_FILE = '.account-lock'
 const ORIGIN_RE = /^https:\/\/[a-z0-9.-]+(:[0-9]{1,5})?$/
 // Plain HTTP on loopback: accepted by createAccountServer only, for the
 // loopback end-to-end tests that bind the real port into the origin the
-// operator signs (packages/core/lib/mod-request.js LOOPBACK_ORIGIN_RE). The
-// CLI reads VARANDA_PUBLIC_ORIGIN with ORIGIN_RE (https only), so a
-// deployment never runs with it.
-const LOOPBACK_ORIGIN_RE = /^http:\/\/127\.0\.0\.1(:[0-9]{1,5})?$/
+// operator signs (packages/core/lib/mod-request.js LOOPBACK_ORIGIN_RE), and
+// for http://localhost, the origin of the hosted lab
+// (apps/cli/scripts/hosted-lab.js), because a passkey rp.id cannot be an IP.
+// The CLI reads VARANDA_PUBLIC_ORIGIN with ORIGIN_RE (https only), so a
+// deployment never runs with either.
+const LOOPBACK_ORIGIN_RE = /^http:\/\/(127\.0\.0\.1|localhost)(:[0-9]{1,5})?$/
 const HEX64_RE = /^[0-9a-f]{64}$/
 // A store id, nonce or state: 32 random bytes, base64url (store.js randomToken).
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
@@ -129,8 +133,13 @@ const ERROR_STATUS = Object.freeze({
   'convite-obrigatorio': 403,
   'convite-invalido': 404,
   'limite-convites': 429,
+  // Surprise drops: the member's next invite of the week has not opened yet.
+  'convite-aguardando': 429,
   // Web Push (./push-routes.js): turning notices on needs the current terms.
   'termos-pendentes': 409,
+  // The seen blob (./seen-routes.js): the compare-and-swap lost to another
+  // device's write; the body carries the current hash.
+  conflito: 409,
   // Hosted age verification (./age-routes.js): no certificate, rename or
   // invite for a key whose age band is not on record.
   'idade-pendente': 403,
@@ -139,24 +148,18 @@ const ERROR_STATUS = Object.freeze({
   // timed out after maybe creating a session, a write that may have landed):
   // unlike 'indisponivel', the app must not read this as a plain refusal.
   'resultado-incerto': 503,
-  // The optional payments account (./wallet-routes.js).
-  'carteira-pendente': 403,
-  'kyc-pendente': 409,
-  'kyc-recusado': 403,
-  'documentos-pendentes': 409,
-  'pin-invalido': 400,
-  'pin-bloqueado': 429,
-  'limite-carteira': 429,
-  'valor-invalido': 400,
-  'destino-invalido': 400,
-  'saldo-insuficiente': 409,
-  'carteira-incerta': 503,
-  'taxa-mudou': 409,
-  // One unresolved debit per member, and one set of terms per tap.
-  'operacao-pendente': 409,
-  'operacao-divergente': 409,
-  'idade-minima': 403,
-  'rede-divergente': 409
+  // Recovery entries (./recovery-routes.js): the member already holds the
+  // most extra passkeys the store keeps.
+  'limite-recuperacao': 409,
+  // Páginas (./pages-routes.js).
+  'sem-permissao': 403,
+  pausada: 409,
+  encerrada: 410,
+  'midia-invalida': 400,
+  // GIF search (./gif-routes.js): the operator left it off, or the member
+  // spent its daily searches or images.
+  'feature-off': 404,
+  'limite-gif': 429
 })
 
 const BASE_HEADERS = Object.freeze({
@@ -561,6 +564,16 @@ function signatureParam (value) {
   return value
 }
 
+// The published blocklist of the moderation desk as { has(key) }, or null.
+function moderationBlocklist (moderation) {
+  if (moderation === null || typeof moderation.blocked !== 'function') return null
+  return {
+    has (key) {
+      return moderation.blocked().some((b) => b.member === key)
+    }
+  }
+}
+
 // --- the service --------------------------------------------------------------
 
 // The POST rules of every browser route: the exact Origin (a browser's
@@ -578,10 +591,20 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
   if (!/^application\/json(\s*;.*)?$/.test(type)) throw refuse('pedido-invalido')
 }
 
+// The same Origin rule for a raw upload (./pages-routes.js media and
+// avatar): an octet-stream body is a simple request a cross-site form could
+// send, so the exact Origin (or the app header) is what stops it here.
+function checkRawPost (req, origin) {
+  if (req.headers.origin !== origin && !(req.headers.origin === undefined && isAppRequest(req))) throw new RouteError('pedido-invalido', 403)
+  const type = String(req.headers['content-type'] || '').toLowerCase()
+  if (!/^application\/octet-stream(\s*;.*)?$/.test(type)) throw refuse('pedido-invalido')
+}
+
 // createAccountServer({ association, origin, google, store, issuer, log, now,
 // moderation, googleMod, modEmails, triage, statsEmails, usage, panelDir,
-// terms, invites, groupCheck })
-// -> { listen({ host, port }) -> Promise<{ host, port, close }> }.
+// terms, invites, invitesMode, groupCheck })
+// -> { listen({ host, port }) -> Promise<{ host, port, close }>,
+// notifyInvite, inviteRoom, inviteConsent }.
 // `google` is a createGoogle instance (tests inject a loopback fake),
 // `store` an openAccountStore, `issuer` { keyPair, cert } or null
 // (unconfigured: the link routes answer 503 'indisponivel'). The redirect
@@ -600,26 +623,37 @@ function checkPost (req, origin, { requireOrigin = true } = {}) {
 // openInvitesStore (./invites-store.js) or null: null is open sign-up (the
 // policy route answers { required: false }, the two POST invite routes are
 // 404 and start ignores `invite`); otherwise every new link needs a
-// usable invite code, held in memory from start to finish. `push` is null
+// usable invite code, held in memory from start to finish. `invitesMode`
+// ('semanal' or 'sorteio') is only echoed by the signed invites summary: the
+// store's `opened` callback is what holds invites back. `push` is null
 // (the push routes and /push-event are not mounted at all) or the options of
-// ./push-routes.js { pushStore, vapid, send, relayTokenHash }. `didit` (a
+// ./push-routes.js { pushStore, vapid, send, relayTokenHash }. `seen` is an
+// openSeenStore (./seen-store.js) or null: the seen routes then answer 503
+// 'indisponivel'. `didit` (a
 // createDidit of ./didit.js) and `ages` (an openAgeStore of ./age-store.js)
 // turn on hosted age verification when both are set: authorize, finish,
 // rename/start and invites/start then refuse 'idade-pendente' until the
 // member's band is on record. Either null keeps today's behaviour and the
 // age policy route answers { required: false }. `ageDailyLimit` caps the
-// paid Didit sessions opened per day across all members. `hodle` (a
-// createHodle of ./hodle.js) and `wallets` (an openWalletStore of
-// ./wallet-store.js) turn on the optional payments account when both are
-// set; `walletMode` (cadastro, carteira, pix or completo) picks its routes,
-// `walletDailyLimit` caps the paid Hodle calls per day and `walletNetwork`
-// names the chain. Either null keeps the wallet policy at
-// { available: false }. In the pix and completo modes `ops` (an
-// openWalletOpsStore of ./wallet-ops-store.js) is the money ledger, `fees`
-// the parseFees result of ./fees.js, `walletMaxCents` the largest debit or
-// deposit and `walletMoneyTimeoutMs` each money leg's deadline.
-// `walletWebhookSecrets` (a Map from Hodle event to its hex secret or
-// 'registrar', or null for no sink) turns on ./wallet-webhook.js.
+// paid Didit sessions opened per day across all members. `ageSince` (a
+// canonical ISO timestamp or null) is when the check started to apply; the
+// /account/age/since route serves it while the check is on. `ageCheck` (the
+// settleAgeCheck result of ./age-check-state.js, or null for no floor)
+// keeps that route from serving a since earlier than the last time the check
+// was turned on, and makes it answer 503 when age-check.json is unusable.
+// `ageDirectoryFloor` (the directoryFloor result of ./age-check-state.js, or
+// null for none) does the same with the latest certificate of an unbanded
+// link.
+// `pages` (null: every page POST answers 404 and the policy { available:
+// false }) is { keys, writer, pagesStore, dir, blocklist? } for
+// ./pages-routes.js; without a blocklist the moderation desk's is used.
+// `gif` (null: off, the policy answers { enabled: false } and every other
+// /account/gif/* route 404 'feature-off') is a parseGifConfig result of
+// ./gif-routes.js; `gifTransport` ({ request, lookup, allowAddress }) is for
+// tests only, to reach a loopback fake provider.
+// `recovery` is an openRecoveryStore (./recovery-store.js), or null: the
+// recovery routes (./recovery-routes.js) then answer 503 'indisponivel' and
+// everything else stays up.
 function createAccountServer ({
   association,
   origin,
@@ -638,20 +672,19 @@ function createAccountServer ({
   panelDir,
   terms = null,
   invites = null,
+  invitesMode = 'semanal',
   push = null,
+  seen = null,
   didit = null,
   ages = null,
   ageDailyLimit = 200,
-  hodle = null,
-  wallets = null,
-  walletMode = 'cadastro',
-  walletDailyLimit = 100,
-  walletNetwork,
-  ops = null,
-  fees = null,
-  walletMaxCents = 300000,
-  walletMoneyTimeoutMs,
-  walletWebhookSecrets = null,
+  ageSince = null,
+  ageCheck = null,
+  ageDirectoryFloor = null,
+  pages = null,
+  gif = null,
+  gifTransport = {},
+  recovery = null,
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -676,6 +709,10 @@ function createAccountServer ({
     renameFinish: keyedWindow(5, 600 * 1000, now),
     termsFinish: keyedWindow(5, 600 * 1000, now),
     invitesFinish: keyedWindow(10, 600 * 1000, now),
+    invitesSummary: keyedWindow(30, 600 * 1000, now),
+    seenRead: keyedWindow(30, 600 * 1000, now),
+    seenWrite: keyedWindow(10, 600 * 1000, now),
+    seenDelete: keyedWindow(5, 600 * 1000, now),
     callback: keyedWindow(3, COOKIE_MAX_AGE_S * 1000, now),
     lookup: fixedWindow(1200, 60 * 1000, now)
   }
@@ -710,6 +747,19 @@ function createAccountServer ({
       http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow }
     })
 
+  // Always mounted: without a usable store every seen route answers
+  // 'indisponivel'.
+  const seenRoutes = createSeenRoutes({
+    association,
+    accounts: store,
+    terms,
+    seenStore: seen,
+    limits: { read: limits.seenRead, write: limits.seenWrite, delete: limits.seenDelete },
+    log,
+    now,
+    http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow }
+  })
+
   // Always mounted, so /account/age/policy answers even when the feature is off.
   const ageRoutes = createAgeRoutes({
     didit,
@@ -722,40 +772,68 @@ function createAccountServer ({
     log,
     now,
     dailyLimit: ageDailyLimit,
+    since: ageSince,
+    ageCheck,
+    directoryFloor: ageDirectoryFloor,
+    issuer,
     http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
   })
 
-  // Always mounted, so /account/wallet/policy answers even when the feature is off.
-  const walletRoutes = createWalletRoutes({
-    hodle,
-    wallets,
-    ages,
-    terms,
-    mode: walletMode,
+  // Always mounted, so a missing or corrupt recovery.json refuses only these
+  // routes. fetch shares the public-read window; put, remove and list are
+  // charged per member after the proof.
+  const recoveryRoutes = createRecoveryRoutes({
+    store: recovery,
+    accounts: store,
     association,
-    origin,
-    store,
-    log,
     now,
-    dailyLimit: walletDailyLimit,
-    network: walletNetwork,
-    ops,
-    fees,
-    maxCents: walletMaxCents,
-    moneyTimeoutMs: walletMoneyTimeoutMs,
-    http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
+    log,
+    limits: { lookup: limits.lookup, member: keyedWindow(10, 600 * 1000, now) },
+    send,
+    refuse,
+    checkPost: (req, opts) => checkPost(req, origin, opts),
+    readJsonBody,
+    over
   })
 
-  // Hodle's deliveries are authenticated by their signature and bounded by
-  // the sink's own window, never by the browsers' budget.
-  const walletWebhook = createWalletWebhook({
-    secrets: walletWebhookSecrets,
-    ops,
-    wallets,
-    refresh: walletRoutes.refreshOp,
+  // Always mounted, so /account/pages/policy answers even when pages are off.
+  // `pages` is null or { keys, writer, pagesStore, dir, blocklist, ...the
+  // optional pagesDm, pagesNotices, pagesGroups, pagesDelegate clients }.
+  const pagesRoutes = createPagesRoutes({
+    ...(pages || {}),
+    store,
+    termsStore: terms,
+    blocklist: pages && pages.blocklist ? pages.blocklist : moderationBlocklist(moderation),
+    issuerKeyPair: issuer === null ? null : issuer.keyPair,
+    issuerCert: issuer === null ? null : issuer.cert,
+    association,
+    origin,
     log,
     now,
-    http: { send, sendError, refuse, RouteError, fixedWindow }
+    http: {
+      send,
+      sendError,
+      readJsonBody,
+      checkPost: (req, opts) => checkPost(req, origin, opts),
+      checkRawPost: (req) => checkRawPost(req, origin),
+      RouteError,
+      refuse,
+      fromStore,
+      keyedWindow
+    }
+  })
+
+  // Always mounted, so /account/gif/policy answers even when GIFs are off.
+  const gifRoutes = createGifRoutes({
+    ...gifTransport,
+    config: gif,
+    store,
+    terms,
+    blocklist: pages && pages.blocklist ? pages.blocklist : moderationBlocklist(moderation),
+    association,
+    log,
+    now,
+    http: { send, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, keyedWindow }
   })
 
   // With age verification on, no key without a band on record gets a Google
@@ -1428,6 +1506,30 @@ function createAccountServer ({
     send(res, 200, { code: result.code, expiresAt: result.expiresAt, used: result.used, remaining: result.remaining, resetsAt: result.resetsAt })
   }
 
+  // The member's own weekly allowance, behind the same single-use nonce as
+  // issue but under a 'summary' signature. A read mints nothing, so there is
+  // no age gate. Never in /account/status: member keys are public.
+  async function invitesSummary (req, res, body) {
+    const member = memberParam(body.member)
+    const nonce = typeof body.nonce === 'string' && TOKEN_RE.test(body.nonce) ? body.nonce : null
+    const signature = signatureParam(body.signature)
+    const row = nonce === null ? undefined : inviteNonces.get(nonce)
+    if (nonce !== null) inviteNonces.delete(nonce)
+    if (row === undefined || row.member !== member || row.expiresAt <= now()) throw refuse('expirado')
+    if (!verifyInvite({ action: 'summary', nonce, member, association }, signature).ok) throw refuse('assinatura-invalida')
+    if (!limits.invitesSummary(member)) throw over()
+    invitesAvailable()
+    linked(member)
+    let result
+    try {
+      result = invites.summary(member)
+    } catch (err) {
+      throw fromStore(err)
+    }
+    if (result === null) throw refuse('indisponivel')
+    send(res, 200, { mode: invitesMode, perWeek: result.perWeek, opened: result.opened, used: result.used, remaining: result.remaining, resetsAt: result.resetsAt })
+  }
+
   const POST = {
     '/account/start': start,
     '/account/authorize': authorize,
@@ -1441,6 +1543,7 @@ function createAccountServer ({
   if (inviting) {
     POST['/account/invites/start'] = invitesStart
     POST['/account/invites/finish'] = invitesFinish
+    POST['/account/invites/summary'] = invitesSummary
   }
 
   async function route (req, res, hostOk) {
@@ -1459,14 +1562,16 @@ function createAccountServer ({
     // The seeder's relay never spends the browsers' global bucket; its own
     // token, dedupe and caps bound it (./push-routes.js).
     if (pushRoutes !== null && pathname === '/push-event') return pushRoutes.handleRelay(req, res)
-    if (walletWebhook.owns(pathname)) return walletWebhook.handle(req, res, url)
     if (!limits.global()) throw over()
     if (now() - appSweptAt >= APP_SWEEP_MS) sweepApps()
     // Before the issuer-only routes: see the note at the top of the file.
     if (mod.owns(pathname)) return mod.handle(req, res, url)
     if (pushRoutes !== null && pushRoutes.owns(pathname)) return pushRoutes.handle(req, res, url)
+    if (seenRoutes.owns(pathname)) return seenRoutes.handle(req, res, url)
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
-    if (walletRoutes.owns(pathname)) return walletRoutes.handle(req, res, url)
+    if (recoveryRoutes.owns(pathname)) return recoveryRoutes.handle(req, res, url)
+    if (pagesRoutes.owns(pathname)) return pagesRoutes.handle(req, res, url)
+    if (gifRoutes.owns(pathname)) return gifRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === APP_RETURN_PATH) return appReturn(res)
@@ -1536,7 +1641,31 @@ function createAccountServer ({
   // modStats: table sizes of the moderation desk (counts only, never a
   // nonce), so tests can show that unauthenticated traffic grows nothing.
   // appStats: counts of app rows and of those holding a Google answer.
-  return { listen, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), walletStats: () => walletRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  // notifyInvite, inviteRoom and inviteConsent are for the invite drop loop
+  // (./invite-drops.js). The loop asks inviteConsent before it claims a
+  // slot, so a member who accepts the current text later in the week still
+  // gets that week's notice. Consent is read again before each notice, as
+  // push-routes.js does before storing an endpoint.
+  function inviteConsent (member) {
+    try {
+      if (terms === null || !terms.available()) return false
+      return terms.list(member).some((e) => e.version === TERMS_VERSION)
+    } catch {
+      return false
+    }
+  }
+
+  function notifyInvite (args) {
+    if (pushRoutes === null) return 'none'
+    if (!inviteConsent(args && args.member)) return 'none'
+    return pushRoutes.notifyInvite(args)
+  }
+
+  function inviteRoom () {
+    return pushRoutes === null ? 0 : pushRoutes.room()
+  }
+
+  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), pagesStats: () => pagesRoutes.stats(), gifStats: () => gifRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {

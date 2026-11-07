@@ -10,11 +10,12 @@ const b4a = require('b4a')
 const { memoryNodeStorage } = require('@varanda/web-member/lib/node-storage')
 const { hkdfSha256 } = require('@varanda/web-member/lib/hkdf')
 const passkey = require('@varanda/web-member/lib/passkey')
-const { createIdentityHost } = require('../worklet/identity-install')
+const recovery = require('@varanda/web-member/lib/recovery')
+const { createIdentityHost, RECOVERY_PENDING_MS } = require('../worklet/identity-install')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia } = require('../worklet/web-node-parts')
+const { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, clearReadDir, writeReadFile, readMediaToFile } = require('../worklet/web-node-parts')
 
 const hmac = (key, data) => new Uint8Array(crypto.createHmac('sha256', key).update(data).digest())
 const hkdf = (ikm, salt, info, length) => hkdfSha256(ikm, salt, info, length, { hmac })
@@ -116,6 +117,7 @@ test('a non-resumed install unlocks and binds the passkey record', async (t) => 
     passkeyKnown: true,
     credentialId: 'cred-1',
     rpId: 'varanda.example',
+    userId: 'cd'.repeat(32),
     signedOut: false
   })
 })
@@ -444,6 +446,31 @@ test('an upload still reading at close never reaches mediaUpload; close does not
   t.ok(sessionClosed && storage.closed)
 })
 
+test('uploadMedia hands sealed to the session only when true', async (t) => {
+  const seen = []
+  const session = { mediaUpload: (args) => { seen.push(Object.keys(args)); return Promise.resolve({ ok: true }) } }
+  const io = { read: async () => ({ file: '/cache/p.jpg', bytes: new Uint8Array(4) }), session, unlink: () => {}, isClosing: () => false }
+  await uploadMedia(io, { mime: 'image/jpeg', width: 1, height: 1, sealed: true })
+  await uploadMedia(io, { mime: 'image/jpeg', width: 1, height: 1, sealed: false })
+  await uploadMedia(io, { mime: 'image/jpeg', width: 1, height: 1 })
+  t.alike(seen, [['bytes', 'mime', 'width', 'height', 'sealed'], ['bytes', 'mime', 'width', 'height'], ['bytes', 'mime', 'width', 'height']])
+})
+
+test('a voice note carries its duration and kind to the session; an image never does', async (t) => {
+  const seen = []
+  const session = {
+    mediaUpload: (args) => { seen.push(['upload', Object.keys(args), args.ms, args.kind]); return Promise.resolve({ ok: true }) },
+    dmPutMedia: (args) => { seen.push(['dm', Object.keys(args), args.ms, args.kind]); return Promise.resolve({ ok: true }) }
+  }
+  const io = { read: async () => ({ file: '/cache/v.bin', bytes: new Uint8Array(4) }), session, unlink: () => {}, isClosing: () => false }
+  await uploadMedia(io, { mime: 'audio/mp4', width: 0, height: 0, ms: 2500, kind: 'voice', sealed: true })
+  await putDmMedia(io, { mime: 'audio/mp4', width: 0, height: 0, ms: 2500, kind: 'voice', to: 'ef'.repeat(32) })
+  await uploadMedia(io, { mime: 'image/jpeg', width: 1, height: 1, ms: 5, kind: 'other' })
+  t.alike(seen[0], ['upload', ['bytes', 'mime', 'width', 'height', 'ms', 'kind', 'sealed'], 2500, 'voice'])
+  t.alike(seen[1], ['dm', ['bytes', 'mime', 'width', 'height', 'ms', 'kind', 'to'], 2500, 'voice'])
+  t.alike(seen[2], ['upload', ['bytes', 'mime', 'width', 'height'], undefined, undefined], 'an image keeps its exact keys')
+})
+
 test('close cancels a running upload by closing the session first', async (t) => {
   let rejectUpload
   const order = []
@@ -471,4 +498,399 @@ test('close cancels a running upload by closing the session first', async (t) =>
   await lifecycle.close()
   t.alike(order, ['session', 'storage'])
   t.ok(await uploading instanceof Error)
+})
+
+// Recovery controls (docs/rpc.md 5.91 to 5.94).
+
+const WRAP_PRF = 'c3'.repeat(32)
+const NEW_PRF = 'd4'.repeat(32)
+const MARK_HEX = b4a.toString(recovery.WRAP_MARK, 'hex')
+const MARKED_USER = 'ab'.repeat(16) + MARK_HEX
+// src/identity.native.js UNKNOWN_WRAP_USER_ID: a recovery passkey with no handle.
+const UNKNOWN_WRAP_USER = '00'.repeat(16) + MARK_HEX
+const bytesOf = (hex) => new Uint8Array(b4a.from(hex, 'hex'))
+
+function recoverySetup ({ clock = { t: 1000 } } = {}) {
+  const session = fakeSession()
+  const storage = memoryNodeStorage()
+  const host = createIdentityHost({ session, storage, hkdf, randomBytes, now: () => clock.t })
+  return { session, storage, host, clock }
+}
+
+async function blobFor (rootHex, secret, kind, member) {
+  const { lookupId, wrapKey } = await recovery.deriveRecoveryKeys(secret, kind, { hkdf })
+  const blob = recovery.wrapRoot({ root: bytesOf(rootHex), member, kind, wrapKey, randomBytes })
+  return { lookupId, blob }
+}
+
+test('recoveryLookup + recoveryOpen of a passkey blob return the original root', async (t) => {
+  const { host, session } = recoverySetup()
+  const member = await expectedPublicKey(PRF)
+  const made = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', member)
+  const { lookupId } = await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  t.is(lookupId, made.lookupId)
+  const out = await host.recoveryOpen({ blob: made.blob, member })
+  t.alike(out, { prf: PRF })
+  t.is(session.keyPair, null, 'open installs nothing')
+  await t.exception(host.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'the pending key is consumed')
+})
+
+test('recoveryLookup + recoveryOpen of a code blob return the root once', async (t) => {
+  const { host } = recoverySetup()
+  const member = await expectedPublicKey(PRF)
+  const secret = randomBytes(recovery.CODE_BYTES)
+  const code = recovery.encodeCode(secret)
+  const made = await blobFor(PRF, secret, 'code', member)
+  const { lookupId } = await host.recoveryLookup({ kind: 'code', code: code.toUpperCase().replace(/-/g, ' ') })
+  t.is(lookupId, made.lookupId)
+  t.alike(await host.recoveryOpen({ blob: made.blob, member }), { prf: PRF })
+})
+
+test('recoveryLookup refuses a bad code', async (t) => {
+  const { host } = recoverySetup()
+  const err = await host.recoveryLookup({ kind: 'code', code: '0000-0000' }).catch((e) => e)
+  t.is(err.code, 'USAGE')
+  t.is(err.message, 'código de recuperação inválido')
+})
+
+test('recoveryOpen without a pending key, expired, or of another kind is refused', async (t) => {
+  const { host, clock } = recoverySetup()
+  const member = await expectedPublicKey(PRF)
+  const made = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', member)
+  const missing = await host.recoveryOpen({ blob: made.blob, member }).catch((e) => e)
+  t.is(missing.code, 'USAGE')
+  t.is(missing.message, 'entrada de recuperação inválida')
+
+  await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  clock.t += RECOVERY_PENDING_MS + 1
+  await t.exception(host.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'expired')
+
+  const code = recovery.encodeCode(randomBytes(recovery.CODE_BYTES))
+  await host.recoveryLookup({ kind: 'code', code })
+  await t.exception(host.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'a code key never opens a passkey blob')
+})
+
+test('a bad blob or another member is refused with the fixed message and installs nothing', async (t) => {
+  const { host, session, storage } = recoverySetup()
+  const member = await expectedPublicKey(PRF)
+  const made = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', member)
+
+  await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  const tampered = { ...made.blob, ciphertext: (made.blob.ciphertext[0] === '0' ? '1' : '0') + made.blob.ciphertext.slice(1) }
+  const err = await host.recoveryOpen({ blob: tampered, member }).catch((e) => e)
+  t.is(err.code, 'USAGE')
+  t.is(err.message, 'entrada de recuperação inválida')
+  await t.exception(host.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'a failure clears the pending key')
+
+  await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  await t.exception(host.recoveryOpen({ blob: made.blob, member: 'ee'.repeat(32) }), /entrada de recuperação inválida/, 'another member')
+
+  // Sealed with a member key that is not the root's own.
+  const liar = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', 'ee'.repeat(32))
+  await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  await t.exception(host.recoveryOpen({ blob: liar.blob, member: 'ee'.repeat(32) }), /entrada de recuperação inválida/, 'member must derive from the root')
+
+  t.is(session.keyPair, null)
+  t.is(await storage.readJson('passkey'), null)
+})
+
+test('recoveryWrap output opens with lib/recovery to the same root', async (t) => {
+  const { host } = recoverySetup()
+  const { publicKey } = await host.install(params())
+
+  const pk = await host.recoveryWrap({ kind: 'passkey', secret: WRAP_PRF })
+  const pkKeys = await recovery.deriveRecoveryKeys(bytesOf(WRAP_PRF), 'passkey', { hkdf })
+  t.is(pk.lookupId, pkKeys.lookupId)
+  t.is(pk.code, undefined)
+  const opened = recovery.openRoot(pk.blob, pkKeys.wrapKey, { member: publicKey })
+  t.is(b4a.toString(opened.root, 'hex'), PRF)
+
+  const cd = await host.recoveryWrap({ kind: 'code' })
+  t.ok(/^([0-9a-z]{4}-){8}[0-9a-z]{4}$/.test(cd.code))
+  const secret = recovery.decodeCode(cd.code)
+  const cdKeys = await recovery.deriveRecoveryKeys(secret, 'code', { hkdf })
+  t.is(cd.lookupId, cdKeys.lookupId)
+  const openedCode = recovery.openRoot(cd.blob, cdKeys.wrapKey, { member: publicKey })
+  t.is(b4a.toString(openedCode.root, 'hex'), PRF)
+})
+
+test('recoveryWrap is LOCKED without a root; clear, forget, reset and close drop it', async (t) => {
+  const { host } = recoverySetup()
+  const locked = await host.recoveryWrap({ kind: 'code' }).catch((e) => e)
+  t.is(locked.code, 'USAGE')
+  t.is(locked.message, 'identidade bloqueada: entre com a passkey')
+
+  for (const drop of ['clear', 'forget', 'reset', 'close']) {
+    await host.install(params())
+    await host.recoveryWrap({ kind: 'code' })
+    await host[drop]()
+    await t.exception(host.recoveryWrap({ kind: 'code' }), /identidade bloqueada/, drop + ' drops the root')
+    await t.exception(host.recoveryBind({ credentialId: 'cred-2', userId: MARKED_USER }), /identidade bloqueada/, drop + ': bind needs the root')
+  }
+})
+
+test('a failed install drops the root', async (t) => {
+  const { session, host } = recoverySetup()
+  await host.install(params())
+  await host.install(params({ prf: 'zz' })).catch(() => {})
+  t.ok(session.keyPair !== null, 'the earlier pairs stay')
+  await t.exception(host.recoveryWrap({ kind: 'code' }), /identidade bloqueada/)
+})
+
+test('the root, the secret and the pending key are zeroed', async (t) => {
+  const { host } = recoverySetup()
+  const fills = []
+  const realFill = Uint8Array.prototype.fill
+  await host.install(params())
+  const member = await expectedPublicKey(PRF)
+  const made = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', member)
+  // Record what every 32-byte buffer held when it was zeroed during lookup,
+  // open and clear.
+  // A spy on fill: the held root and the pending key are not reachable otherwise.
+  Uint8Array.prototype.fill = function (v, ...rest) { // eslint-disable-line no-extend-native
+    if (v === 0 && this.length === 32) fills.push({ buf: this, was: b4a.toString(b4a.from(this), 'hex') })
+    return realFill.call(this, v, ...rest)
+  }
+  try {
+    await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+    await host.recoveryOpen({ blob: made.blob, member })
+    await host.clear()
+  } finally {
+    Uint8Array.prototype.fill = realFill // eslint-disable-line no-extend-native
+  }
+  const pkKeys = await recovery.deriveRecoveryKeys(bytesOf(WRAP_PRF), 'passkey', { hkdf })
+  const was = fills.map((f) => f.was)
+  t.ok(was.includes(WRAP_PRF), 'the wrapping secret is zeroed')
+  t.ok(was.includes(b4a.toString(pkKeys.wrapKey, 'hex')), 'the pending wrap key is zeroed')
+  t.ok(was.filter((h) => h === PRF).length >= 2, 'the opened root and the held root are zeroed')
+  t.ok(fills.every((f) => allZero(f.buf)))
+})
+
+test('setKeyPair still receives { media } only', async (t) => {
+  const session = fakeSession()
+  const storage = memoryNodeStorage()
+  const calls = []
+  const orig = session.setKeyPair
+  session.setKeyPair = function (kp, opts) {
+    calls.push(Object.keys(opts).sort())
+    return orig.call(session, kp, opts)
+  }
+  const host = createIdentityHost({ session, storage, hkdf, randomBytes })
+  await host.install(params())
+  t.alike(calls, [['media']])
+})
+
+test('recoveryBind rebinds the passkey record and status reports userId', async (t) => {
+  const { host, storage } = recoverySetup()
+  await host.install(params())
+  t.alike(await host.recoveryBind({ credentialId: 'cred-2', userId: MARKED_USER }), {})
+  t.alike(await storage.readJson('passkey'), { v: 1, credentialId: 'cred-2', rpId: 'varanda.example', userId: MARKED_USER })
+  const status = await host.status()
+  t.is(status.credentialId, 'cred-2')
+  t.is(status.userId, MARKED_USER)
+  await host.recoveryBind({ credentialId: 'cred-3', userId: UNKNOWN_WRAP_USER })
+  t.is((await host.status()).userId, UNKNOWN_WRAP_USER)
+})
+
+test('recoveryBind refuses a user id without the wrap mark', async (t) => {
+  const { host, storage } = recoverySetup()
+  await host.install(params())
+  for (const userId of ['', 'ab'.repeat(32), MARK_HEX + 'ab'.repeat(16), 'zz', undefined]) {
+    const err = await host.recoveryBind({ credentialId: 'cred-2', userId }).catch((e) => e)
+    t.is(err.code, 'USAGE', String(userId))
+    t.is(err.message, 'passkey de recuperação inválida')
+  }
+  t.is((await storage.readJson('passkey')).credentialId, 'cred-1', 'the record is unchanged')
+})
+
+test('a recovery passkey with no handle is bound marked and status says so', async (t) => {
+  const { host } = recoverySetup()
+  await host.install(params({ credentialId: 'cred-r', userId: UNKNOWN_WRAP_USER }))
+  const status = await host.status()
+  t.is(status.credentialId, 'cred-r')
+  t.is(status.userId, UNKNOWN_WRAP_USER)
+  t.ok(recovery.isWrapUserId(status.userId))
+})
+
+test('a failed install drops the pending wrap key and the root', async (t) => {
+  const member = await expectedPublicKey(PRF)
+  const made = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', member)
+
+  // MISMATCH: the stored diary is another identity.
+  const session = fakeSession({ diaryKey: 'ee'.repeat(32) })
+  const storage = memoryNodeStorage()
+  const host = createIdentityHost({ session, storage, hkdf, randomBytes })
+  await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  const mismatch = await host.install(params()).catch((e) => e)
+  t.is(mismatch.message, 'passkey não corresponde ao diário guardado')
+  await t.exception(host.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'MISMATCH dropped the pending key')
+  await t.exception(host.recoveryWrap({ kind: 'code' }), /identidade bloqueada/)
+
+  // The passkey record cannot be written.
+  const { host: host2, storage: storage2 } = recoverySetup()
+  const write = storage2.writeJson.bind(storage2)
+  storage2.writeJson = async (key, value) => {
+    if (key === 'passkey' && value !== null) throw new Error('disk full')
+    return write(key, value)
+  }
+  await host2.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  await t.exception(host2.install(params()), /disk full/)
+  await t.exception(host2.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'a record failure dropped the pending key')
+  await t.exception(host2.recoveryWrap({ kind: 'code' }), /identidade bloqueada/)
+})
+
+test('a recovered root installs the same identity', async (t) => {
+  const { host } = recoverySetup()
+  const member = await expectedPublicKey(NEW_PRF)
+  const made = await blobFor(NEW_PRF, bytesOf(WRAP_PRF), 'passkey', member)
+  await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })
+  const { prf } = await host.recoveryOpen({ blob: made.blob, member })
+  const out = await host.install(params({ prf }))
+  t.is(out.publicKey, member)
+})
+
+test('putDmMedia hands the photo to dmPutMedia, zeroes it and unlinks after success', async (t) => {
+  const seen = []
+  const unlinked = []
+  const bytes = new Uint8Array([1, 2, 3])
+  const session = { dmPutMedia: (args) => { seen.push({ ...args, copy: new Uint8Array(args.bytes) }); return Promise.resolve({ id: 'x' }) } }
+  const io = { read: async () => ({ file: '/cache/p.bin', bytes }), session, unlink: (f) => unlinked.push(f), isClosing: () => false }
+  const dest = 'ef'.repeat(32)
+  t.alike(await putDmMedia(io, { mime: 'image/png', width: 2, height: 3, sealed: true, to: dest }), { id: 'x' })
+  t.alike(Object.keys(seen[0]), ['bytes', 'mime', 'width', 'height', 'to', 'copy'], 'no sealed on the blob channel')
+  t.alike(seen[0].copy, new Uint8Array([1, 2, 3]))
+  t.ok(bytes.every((b) => b === 0), 'the bytes are zeroed')
+  t.alike(unlinked, ['/cache/p.bin'])
+
+  await putDmMedia({ ...io, read: async () => ({ file: '/cache/r.bin', bytes: new Uint8Array([4]) }) }, { mime: 'image/png', width: 2, height: 3, to: dest })
+  t.is(seen[1].to, dest, 'the destination reaches the session (rpc 5.97)')
+  await putDmMedia({ ...io, read: async () => ({ file: '/cache/s.bin', bytes: new Uint8Array([5]) }) }, { mime: 'image/png', width: 2, height: 3 })
+  t.ok('to' in seen[2] && seen[2].to === undefined, 'a missing destination still reaches the session, which refuses it')
+
+  const failing = { ...io, read: async () => ({ file: '/cache/q.bin', bytes: new Uint8Array(1) }), session: { dmPutMedia: () => { throw new TypeError('mídia inválida') } } }
+  const err = await putDmMedia(failing, { mime: 'image/png', width: 1, height: 1, to: dest }).catch((e) => e)
+  t.is(err.code, 'USAGE')
+  t.alike(unlinked, ['/cache/p.bin', '/cache/r.bin', '/cache/s.bin'], 'a refused file is not unlinked')
+  const closing = await putDmMedia({ ...io, isClosing: () => true }, { mime: 'image/png', width: 1, height: 1, to: dest }).catch((e) => e)
+  t.is(closing.code, 'LOCKED')
+})
+
+test('writeReadFile creates the file exclusively with mode 0600; clearReadDir removes read files only', async (t) => {
+  const { root } = mediaDirs(t)
+  const dir = path.join(root, 'media-read')
+  await clearReadDir({ fs: fs.promises, join: path.join, dir })
+  t.ok(fs.statSync(dir).isDirectory(), 'the dir is created')
+  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL
+  const bytes = new Uint8Array(70000).map((_, i) => i % 251)
+  t.is(await writeReadFile({ fs: fs.promises, join: path.join, dir, name: MEDIA_NAME, bytes, flags }), MEDIA_NAME)
+  const file = path.join(dir, MEDIA_NAME)
+  t.alike(new Uint8Array(fs.readFileSync(file)), bytes)
+  t.is(fs.statSync(file).mode & 0o777, 0o600)
+  const again = await writeReadFile({ fs: fs.promises, join: path.join, dir, name: MEDIA_NAME, bytes: new Uint8Array(1), flags }).catch((e) => e)
+  t.is(again.code, 'INTERNAL', 'an existing name is never written through')
+  t.alike(new Uint8Array(fs.readFileSync(file)), bytes, 'and is left as it was')
+  const linked = '1'.repeat(32) + '.bin'
+  fs.writeFileSync(path.join(root, 'target'), 'secret')
+  fs.symlinkSync(path.join(root, 'target'), path.join(dir, linked))
+  const noExcl = fs.constants.O_WRONLY | fs.constants.O_CREAT
+  const viaLink = await writeReadFile({ fs: fs.promises, join: path.join, dir, name: linked, bytes, flags: noExcl }).catch((e) => e)
+  t.is(viaLink.code, 'INTERNAL', 'a planted link is refused without O_EXCL too')
+  t.is(fs.readFileSync(path.join(root, 'target'), 'utf8'), 'secret')
+  fs.unlinkSync(path.join(dir, linked))
+  const bad = await writeReadFile({ fs: fs.promises, join: path.join, dir, name: '../x.bin', bytes, flags }).catch((e) => e)
+  t.is(bad.code, 'INTERNAL')
+  fs.writeFileSync(path.join(dir, 'keep.txt'), 'x')
+  await clearReadDir({ fs: fs.promises, join: path.join, dir })
+  t.alike(fs.readdirSync(dir), ['keep.txt'])
+})
+
+test('readMediaToFile opens a DM or group item through the session and writes it', async (t) => {
+  const written = []
+  // A 3x2 PNG that mediaBounds accepts.
+  const png = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAAAAAC4HznGAAAAC0lEQVR4nGNggAAAAAgAAbdYc5UAAAAASUVORK5CYII=', 'base64'))
+  const calls = []
+  const session = {
+    dmReadMedia: async (args) => { calls.push(['dm', args]); return { bytes: new Uint8Array(png), mime: 'image/png' } },
+    groupReadMedia: async (args) => { calls.push(['group', args]); return { bytes: new Uint8Array(png), mime: 'image/png', w: 4, h: 6 } }
+  }
+  let gen = 0
+  const io = {
+    session,
+    write: async (bytes) => { written.push(new Uint8Array(bytes)); return MEDIA_NAME },
+    unlink: () => {},
+    generation: () => gen,
+    isClosing: () => false
+  }
+  const dm = await readMediaToFile(io, { kind: 'dm', from: 'a', id: 'b', index: 0 })
+  t.alike(calls[0], ['dm', { from: 'a', id: 'b', index: 0 }])
+  t.alike(dm, { name: MEDIA_NAME, mime: 'image/png', w: 3, h: 2 })
+  t.alike(written[0], png)
+  const g = await readMediaToFile(io, { kind: 'group', diary: 'd', item: { x: 1 } })
+  t.alike(calls[1], ['group', { diary: 'd', item: { x: 1 } }])
+  t.alike(g, { name: MEDIA_NAME, mime: 'image/png', w: 3, h: 2 }, 'the size comes from the bytes, not the item')
+
+  const unlinked = []
+  const racing = {
+    ...io,
+    write: async () => { gen++; return MEDIA_NAME },
+    unlink: (name) => unlinked.push(name)
+  }
+  const err = await readMediaToFile(racing, { kind: 'dm', from: 'a', id: 'b', index: 0 }).catch((e) => e)
+  t.is(err.code, 'LOCKED', 'a lock during the read keeps nothing')
+  t.alike(unlinked, [MEDIA_NAME])
+
+  const refused = await readMediaToFile({ ...io, session: { dmReadMedia: () => { throw new TypeError('x') } } }, { kind: 'dm' }).catch((e) => e)
+  t.is(refused.code, 'USAGE')
+  const closed = await readMediaToFile({ ...io, isClosing: () => true }, { kind: 'dm' }).catch((e) => e)
+  t.is(closed.code, 'LOCKED')
+})
+
+test('readMediaToFile refuses bytes mediaBounds rejects: nothing written, plaintext zeroed', async (t) => {
+  const written = []
+  const handed = []
+  const huge = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0xff, 0xff, 0xff, 0xff, 0, 0, 0])
+  const answers = [
+    { bytes: huge, mime: 'image/gif' },
+    { bytes: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]), mime: 'image/png', w: 3, h: 2 },
+    { bytes: new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAAAAAC4HznGAAAAC0lEQVR4nGNggAAAAAgAAbdYc5UAAAAASUVORK5CYII=', 'base64')), mime: 'image/gif' }
+  ]
+  for (const answer of answers) {
+    handed.push(answer.bytes)
+    const io = {
+      session: { dmReadMedia: async () => answer },
+      write: async (bytes) => { written.push(bytes); return MEDIA_NAME },
+      unlink: () => {},
+      generation: () => 0,
+      isClosing: () => false
+    }
+    const err = await readMediaToFile(io, { kind: 'dm', from: 'a', id: 'b', index: 0 }).catch((e) => e)
+    t.is(err.code, 'USAGE')
+    t.is(err.message, 'mídia indisponível')
+  }
+  t.is(written.length, 0, 'no plaintext file is written')
+  t.ok(handed.every((b) => b.every((x) => x === 0)), 'the refused plaintext is zeroed')
+})
+
+test('readMediaToFile checks a voice note as audio: a sound-only MPEG-4 passes, a video track does not', async (t) => {
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(2500), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(2500)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(2500), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
+  const trak = (handler) => box('trak', box('tkhd', new Array(84).fill(0)), box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(handler), be32(0), be32(0), be32(0), [0]), minf))
+  const m4a = (tracks) => new Uint8Array([...box('ftyp', ascii('M4A '), be32(0), ascii('M4A '), ascii('isom')), ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(2500), new Array(80).fill(0)), ...tracks.map(trak)), ...box('mdat', new Array(2504).fill(1))])
+  let serve = m4a(['soun'])
+  const written = []
+  const io = {
+    // The session's ms is a claim: the answer carries the container's.
+    session: { dmReadMedia: async () => ({ bytes: new Uint8Array(serve), mime: 'audio/mp4', ms: 1 }), groupReadMedia: async () => ({ bytes: new Uint8Array(serve), mime: 'audio/mp4' }) },
+    write: async (bytes) => { written.push(bytes.length); return MEDIA_NAME },
+    unlink: () => {},
+    generation: () => 0,
+    isClosing: () => false
+  }
+  t.alike(await readMediaToFile(io, { kind: 'dm', from: 'a', id: 'b', index: 0 }), { name: MEDIA_NAME, mime: 'audio/mp4', w: 0, h: 0, ms: 2500 }, 'the container duration')
+  serve = m4a(['soun', 'vide'])
+  const err = await readMediaToFile(io, { kind: 'group', diary: 'd', item: { x: 1 } }).then(() => null, (e) => e)
+  t.ok(err !== null && err.code === 'USAGE', 'a container with a video track is refused')
+  t.is(written.length, 1, 'nothing written for the refused one')
 })

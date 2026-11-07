@@ -59,21 +59,27 @@ const {
   openGroupWriter,
   openGroupReplica,
   readGroups,
+  sweepLegacyGroups,
   readAll,
+  readBlocks,
   readJson,
-  writeJsonAtomic
+  writeJsonAtomic,
+  writeFollows,
+  appendRecord
 } = require('./store')
-const { genesisCert, decodeBlock, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
+const { genesisCert, decodeBlock, validateRecord, validRecordCopy, followRecord, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
+const { followSet } = require('./media')
+const { pageLifecycle, originOf, verifyClose, verifyMoved } = require('./page-lifecycle')
 const { certForKey, seederCertForKey } = require('./cert')
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
 const { attachBlocklist } = require('./blocklist-net')
-const { validateGroupHeader, validateWriterHeader, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY } = require('./group')
+const { validateGroupHeader, validateWriterHeader, buildCommunity, groupJoinHistory, groupConfirmHistory, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
 const { attachGroups, GROUPS_LIMIT_MAX, GROUPS_REQUEST_TIMEOUT_MS, MESSAGE_BURST: GROUPS_BURST, MESSAGE_RATE: GROUPS_RATE } = require('./groups-net')
 const {
   presentState,
   presentLength,
   clearDeleted,
-  downloadExcept
+  downloadExceptPages
 } = require('./deletion')
 const {
   createSwarm,
@@ -96,6 +102,17 @@ const GATE_TIMEOUT_MS = 15000
 const GATE_MIN_TIMEOUT_MS = 250
 const GATE_RETRY_MS = 15000
 const GRACE_MS = 5000
+// docs/protocol.md "Mudar de chave": a chain of moves stops here.
+const MAX_PAGE_MOVES = 4
+// A move not final yet ('unreadable', 'locked', 'failed') is retried after
+// each of these delays, then given up until a restart.
+const PAGE_MIGRATE_RETRY_MS = [2000, 5000, 15000, 30000, 60000]
+const PAGE_MIGRATE_RETRYABLE = new Set(['unreadable', 'locked', 'failed'])
+const PAGE_MIGRATED_FILE = 'page-migrated.json'
+const MAX_PAGE_MIGRATED = 4096
+const MAX_PAGE_LATE = 64
+// What scanPageAt keeps (page-origin only at block 3).
+const PAGE_SCAN_TYPES = new Set(['page-close', 'page-moved', 'page-origin'])
 const REDISCOVER_ONCE_MS = 1000
 const REDISCOVER_LONG_MS = 10000
 // Security audit S2 / H1: ONE run-level budget for unverified peers (anyone
@@ -157,9 +174,11 @@ function createRequestPacer ({ burst = GROUP_REQUEST_BURST, rate = GROUP_REQUEST
 const HEX64 = /^[0-9a-f]{64}$/
 const NONCE = /^[0-9a-f]{32}$/
 const MAX_BOUND_ROOTS = 256
-// The community roots one group root makes the node follow: the same
-// bound as member.js MAX_COMMUNITY_ROOTS (the roots a group fold reads).
-const MAX_COMMUNITY_ROOTS = 32
+// Distinct group-create keys of a community root paged while its held
+// cores do not fold yet (a hint: the fold decides which ones count). Twice
+// the catalogue cap, so creates the fold leaves out never hide one it
+// counts.
+const MAX_CATALOGUE_SCAN = 2 * 32
 const BYTES_HEX = /^(?:[0-9a-f]{2})+$/
 
 // Roots this node saw bound by their creator's diary (its own fold or a
@@ -233,13 +252,14 @@ function gateVerdict (raw, keyHex, associationHex, revokedIssuers = null) {
 
 // Block-0 verdict of a group core `key` claimed for `group` and diary
 // `diary` (same verdicts as the seeder): null = accepted. A root is judged
-// by its own block 0 against a role fixed for the whole run, never against
-// a link view that moves while it is gated: `linkedOnly` marks a `group`
-// this node pages only because a group root's community-link names it
-// (a community root wherever named; a group header there is this node's
-// own verdict 'not-community'), else it is a group this node joined (a
-// group header; a community has no writers to join with).
-function groupHeaderVerdict (raw, key, group, diary, linkedOnly = false) {
+// by its own block 0 against a role fixed when the key is paged, never
+// against a parent view that moves while it is gated: `role` 'community'
+// marks a local community or one a held group root names as its parent (a
+// community root; a group header there is this node's own verdict
+// 'not-community'), 'group' a group this node joined and 'catalogue' a
+// group root paged only so a community can name it (both a group header).
+// A v1 header is 'header-invalid' (validateGroupHeader calls it legacy).
+function groupHeaderVerdict (raw, key, group, diary, role = 'group') {
   try {
     const header = decodeBlock(raw)
     if (header === null) return 'header-invalid'
@@ -248,9 +268,8 @@ function groupHeaderVerdict (raw, key, group, diary, linkedOnly = false) {
       // validateGroupHeader demands its `box` and join approval). Only a
       // group may be private.
       if (validateGroupHeader(header) !== null) return 'header-invalid'
-      if (header.kind === 'community' && header.visibility !== 'public') return 'header-invalid'
-      if (linkedOnly && header.kind === 'group') return 'not-community'
-      if (header.kind !== (linkedOnly ? 'community' : 'group')) return 'header-invalid'
+      if (role === 'community' && header.kind === 'group') return 'not-community'
+      if (header.kind !== (role === 'community' ? 'community' : 'group')) return 'header-invalid'
     } else {
       if (validateWriterHeader(header) !== null) return 'header-invalid'
       if (header.group !== group) return 'wrong-group'
@@ -258,6 +277,31 @@ function groupHeaderVerdict (raw, key, group, diary, linkedOnly = false) {
     return header.diary === diary ? null : 'wrong-diary'
   } catch {
     return 'header-invalid'
+  }
+}
+
+// A writer's `member` must match the kind of core it writes in: null in a
+// community writer (CW), a CW key in a group writer. Only this node knows
+// which role it pages a key under, so a mismatch is its own verdict
+// 'header-invalid', never charged to the seeder (like a `box` mismatch).
+function memberMismatch (raw, key, group, role) {
+  if (key === group) return false
+  try {
+    const header = decodeBlock(raw)
+    if (header === null || validateWriterHeader(header) !== null) return false
+    return (header.member === null) !== (role === 'community')
+  } catch {
+    return false
+  }
+}
+
+// The community a valid group root header names, else null.
+function rootCommunity (raw) {
+  try {
+    const header = decodeBlock(raw)
+    return header !== null && validateGroupHeader(header) === null && header.kind === 'group' ? header.community : null
+  } catch {
+    return null
   }
 }
 
@@ -287,11 +331,11 @@ function rootVisibility (raw) {
 
 // The diary a group core's own block 0 names when it is a valid header for
 // `group`, else null.
-function headerDiary (raw, key, group, linkedOnly = false) {
+function headerDiary (raw, key, group, role = 'group') {
   try {
     const header = decodeBlock(raw)
     if (header === null || typeof header.diary !== 'string') return null
-    return groupHeaderVerdict(raw, key, group, header.diary, linkedOnly) === null ? header.diary : null
+    return groupHeaderVerdict(raw, key, group, header.diary, role) === null ? header.diary : null
   } catch {
     return null
   }
@@ -357,8 +401,10 @@ function sameSet (a, b) {
 // follower stores blocks out of order and readAll sees a gap until the end);
 // from the first deletion on it is downloadExcept, which never asks a stale
 // peer for a deleted block. Same { update, destroy, idle } as downloadExcept.
+// A page diary keeps an unheld tombstone target in the range until it is
+// read once (lib/deletion.js downloadExceptPages, docs/protocol.md §12).
 function followRange (core, deleted) {
-  if (deleted.size > 0) return downloadExcept(core, deleted)
+  if (deleted.size > 0) return downloadExceptPages(core, deleted)
   const linear = core.download({ start: 0, end: -1, linear: true })
   let except = null
   let destroyed = false
@@ -367,8 +413,8 @@ function followRange (core, deleted) {
       if (destroyed) return []
       if (except !== null) return except.update(next)
       linear.destroy()
-      except = downloadExcept(core, next)
-      return clearDeleted(core, next)
+      except = downloadExceptPages(core, next)
+      return except.update(next)
     },
     destroy () {
       if (destroyed) return
@@ -420,6 +466,7 @@ async function runSync ({
   unverifiedBudgetMs = UNVERIFIED_BUDGET_MS,
   maxLogBlocks = MAX_LOG_BLOCKS,
   maxLogBytes = MAX_LOG_BYTES,
+  maxPageLate = MAX_PAGE_LATE,
   maxConnections = MAX_CONNECTIONS,
   maxFetchSockets = maxConnections,
   maxFollows = MAX_INVENTORY - 1,
@@ -437,6 +484,9 @@ async function runSync ({
   // deleted blocks and every unfollowed replica, as before deletion existed;
   // deleted blocks still do not hold the present length back.
   noClear = false,
+  // true (or VARANDA_NO_PAGE_MIGRATE=1, its kill switch) never follows the
+  // new key of a moved page.
+  noPageMigrate = false,
   // Forwarded as is to openStore and openQuarantine (lib/store.js: lock
   // mode, recover, suspend); undefined = their defaults.
   storeOptions
@@ -449,6 +499,7 @@ async function runSync ({
   }
   const association = config.association
   const clearing = noClear !== true && (process.env || {}).VARANDA_NO_CLEAR !== '1'
+  const migratingPages = noPageMigrate !== true && (process.env || {}).VARANDA_NO_PAGE_MIGRATE !== '1'
   const started = Date.now()
   const deadline = started + timeoutMs
 
@@ -477,6 +528,7 @@ async function runSync ({
   let lastClosedPeer = null // test-only (inspectHook)
   let recomputes = 0 // test-only (inspectHook)
   const follows = new Map() // key -> entry
+  let followWrites = Promise.resolve() // migrate's follows.json updates, one at a time
   const topicKeys = new Map() // topic hex -> key hex (own diary and follows)
   const skipped = []
   const errorsSoft = []
@@ -507,21 +559,26 @@ async function runSync ({
   let warnedOwnRevoked = false
   const groupList = [] // groups.json entries whose own writer opened: { group, writer, nonce }
   const groupSet = new Set() // the groups of groupList
-  // Communities (docs/protocol.md section 10 "Communities"): own community
-  // roots listed in groups.json, and every community root a held group
-  // root's community-link records ever named, on or off (acts taken while
-  // a community was linked stay valid after an unlink, so the fold needs
-  // that root). Per group root at most MAX_COMMUNITY_ROOTS distinct keys in
-  // root order of first appearance, the keys member.js folds; a key past
-  // the cap is not followed and the fold reads as incomplete. Each is paged
-  // like a group whose only core is its root, so a run holds at most
-  // groupList.length * MAX_GROUP_WRITERS group cores plus
-  // groupList.length * MAX_COMMUNITY_ROOTS community roots (coreLimit),
-  // each community root with its one creator diary.
-  const ownCommunities = new Set() // groups.json entries whose own root is a community header
-  const linkedCommunities = new Map() // community key -> Set of groups whose root named it
-  const linkScans = new Map() // group -> { core, length, named, run, again }
-  let linksReady = false // own roots are scanned (and rescanned on growth) once startup reaches the scan
+  // Communities (docs/protocol.md section 10, "Member sync", parent
+  // paging): every local community (groups.json `kind: 'community'`, its
+  // root created here or a CW of this device), and the community every held
+  // local group root names in its header. Each is paged like a group: its
+  // root and its community writers (CWs), gated like group writers, with
+  // their binding diaries. The roots of each paged community's catalogue
+  // (the group-create keys its root and the CWs of its creator or of a diary
+  // its root ever made admin hold, a hint the fold verifies) are paged
+  // root only, so community.info can name them. A run holds at most
+  // (local groups + communities) * MAX_GROUP_WRITERS cores plus the
+  // catalogue roots (coreLimit).
+  const ownCommunities = new Set() // groupList entries that are communities
+  const parents = new Map() // community key -> Set of local groups whose held root names it
+  const parentOf = new Map() // local group -> the community its held root names
+  const told = new Set() // communities a community-parent event already named
+  const catScans = new Map() // community core key -> { core, community, length, creates, admins, run, again }
+  const catalogue = new Map() // catalogue root key -> community (not local, not a parent)
+  const catFolds = new Map() // community -> the groups its held cores fold to (buildCommunity)
+  const foldRuns = new Map() // community -> { again } while a fold of its held cores runs
+  let catalogueReady = false // community cores are scanned (and rescanned on growth) once startup reaches the scan
   const ownWriters = new Map() // own writer key -> { group, core }
   const groupCores = new Map() // foreign writer key -> entry (gating, active, failing, failed)
   const rootVis = new Map() // group -> the visibility its verified root header names ('public' | 'private')
@@ -1439,7 +1496,9 @@ async function runSync ({
     entry.deleted = s !== null ? s.deleted : new Set()
     entry.present = s !== null ? s.present : 0
     const onDownload = (index) => {
-      if (entry.core !== core || entry.tombs.has(index)) return
+      if (entry.core !== core) return
+      pageArrived(entry, index)
+      if (entry.tombs.has(index)) return
       track(scanArrived(entry, core, index), noop, noop)
     }
     core.on('download', onDownload)
@@ -1525,6 +1584,262 @@ async function runSync ({
   async function activate (entry, core) {
     entry.state = 'active'
     await watchEntry(entry, core)
+    maybeMigrate(entry)
+  }
+
+  // ---- page key moves (docs/protocol.md "Mudar de chave") ----
+  // A followed page that moved to K2 makes this node follow K2 once, after
+  // it verified both page-moved (on K1) and page-origin (on K2) itself; a
+  // seeder hint is never enough. K1 stays followed.
+
+  function readMigrated () {
+    const data = readJson(path.join(dataDir, PAGE_MIGRATED_FILE), null)
+    const out = new Map()
+    if (data === null || typeof data !== 'object' || data.v !== 1 || data.migrated === null || typeof data.migrated !== 'object') return out
+    for (const [from, to] of Object.entries(data.migrated)) {
+      if (HEX64.test(from) && typeof to === 'string' && HEX64.test(to)) out.set(from, to)
+    }
+    return out
+  }
+
+  function rememberMigrated (from, to) {
+    const map = readMigrated()
+    if (map.size >= MAX_PAGE_MIGRATED && !map.has(from)) return
+    map.set(from, to)
+    writeJsonAtomic(path.join(dataDir, PAGE_MIGRATED_FILE), { v: 1, migrated: Object.fromEntries(map) })
+  }
+
+  // One check per followed diary at a time; growth meanwhile asks for one
+  // more pass. Tracked, so a --once run waits for it.
+  function maybeMigrate (entry) {
+    if (!migratingPages || ended || entry.migrateDone || entry.state !== 'active' || entry.core === null) return
+    if (entry.migrating !== null) {
+      entry.migrating.again = true
+      return
+    }
+    const state = { again: false }
+    entry.migrating = state
+    track((async () => {
+      try {
+        for (;;) {
+          state.again = false
+          await migrateOnce(entry)
+          if (!state.again || ended || entry.migrateDone) break
+        }
+      } finally {
+        entry.migrating = null
+      }
+    })(), noop, noop)
+  }
+
+  // Each page-close or page-moved is verified as it is read: pageRecs keeps
+  // only the first one that verifies (it is terminal, lib/page-lifecycle.js)
+  // and the scan stops there, so a leaked key padding the log with
+  // unverifiable copies costs nothing and cannot push a genuine one out. A
+  // kept record whose issuer was revoked since is dropped and the scan
+  // resumes right after it.
+  async function scanPageRecords (entry, core) {
+    const opts = { revokedIssuers: revokedIssuers() }
+    if (entry.pageRecs.length > 0 && !verifiedEnd(entry.pageRecs[0].record, entry.key, opts)) {
+      entry.pageScan = Math.min(entry.pageScan, entry.pageRecs[0].seq + 1)
+      entry.pageRecs = []
+    }
+    if (entry.pageRecs.length > 0) return true
+    // Holes the cursor passed that were filled since (pageArrived).
+    const late = [...entry.pageLate].sort((a, b) => a - b)
+    entry.pageLate.clear()
+    for (const i of late) {
+      if (ended || entry.core !== core) return false
+      if (i < entry.pageScan && await scanPageAt(entry, core, i, opts)) return true
+    }
+    const end = Math.min(entry.present, maxLogBlocks)
+    // A pageLate overflow during the awaits rewinds the cursor (pageArrived)
+    // and asks for another pass; the walk then leaves it where it was put.
+    const rewinds = entry.pageRewinds
+    for (let i = entry.pageScan; i < end; i++) {
+      if (ended || entry.core !== core) return false
+      if (await scanPageAt(entry, core, i, opts)) {
+        if (entry.pageRewinds === rewinds) entry.pageScan = i + 1
+        return true
+      }
+    }
+    if (entry.pageRewinds === rewinds && end > entry.pageScan) entry.pageScan = end
+    return true
+  }
+
+  // -> true when block i is held and is a page-close or page-moved that
+  // verifies (kept in pageRecs).
+  async function scanPageAt (entry, core, i, opts) {
+    if (!(await core.has(i))) return false
+    let record = null
+    try {
+      record = decodeBlock(await core.get(i, { wait: false, raw: true }))
+    } catch {}
+    if (record === null || typeof record !== 'object') return false
+    if (i === 3 && record.type === 'page-origin') entry.originRec = { seq: 3, record }
+    if ((record.type === 'page-moved' || record.type === 'page-close') && verifiedEnd(record, entry.key, opts)) {
+      entry.pageRecs = [{ seq: i, record }]
+      return true
+    }
+    return false
+  }
+
+  // The present length steps over a tombstone target this replica does not
+  // hold, so the scan passes it; a page-* block named by a leaked key's
+  // tombstone is still fetched later (lib/deletion.js downloadExceptPages)
+  // and is scanned when it lands. Bounded: past MAX_PAGE_LATE the cursor
+  // rewinds to the lowest one instead.
+  // Only a held page-* block takes a slot: the scan looks for nothing else,
+  // so late posts never force a rewind.
+  function pageArrived (entry, index) {
+    if (entry.migrateDone || index >= Math.min(entry.present, maxLogBlocks)) return
+    const core = entry.core
+    track((async () => {
+      if (!(await heldPageType(core, index))) return
+      if (entry.core !== core || entry.migrateDone || ended) return
+      if (entry.pageLate.size < maxPageLate) entry.pageLate.add(index)
+      else {
+        entry.pageScan = Math.min(entry.pageScan, index, ...entry.pageLate)
+        entry.pageLate.clear()
+        entry.pageRewinds++
+      }
+      maybeMigrate(entry)
+    })(), noop, noop)
+  }
+
+  async function heldPageType (core, index) {
+    try {
+      if (!(await core.has(index))) return false
+      const record = decodeBlock(await core.get(index, { wait: false, raw: true }))
+      return record !== null && typeof record === 'object' && PAGE_SCAN_TYPES.has(record.type)
+    } catch {
+      return false
+    }
+  }
+
+  function verifiedEnd (record, key, opts) {
+    try {
+      const verify = record.type === 'page-moved' ? verifyMoved : record.type === 'page-close' ? verifyClose : null
+      return verify !== null && verify(record, key, association, opts).ok === true
+    } catch {
+      return false
+    }
+  }
+
+  async function migrateOnce (entry) {
+    const core = entry.core
+    if (!(await scanPageRecords(entry, core))) return
+    if (entry.pageRecs.length === 0) return
+    const opts = { revokedIssuers: revokedIssuers() }
+    const moved = pageLifecycle(entry.pageRecs, entry.key, association, opts).movedTo
+    if (moved === null) return
+    let reason
+    try {
+      reason = await migrate(entry, String(moved.to).toLowerCase(), moved.seq, opts)
+    } catch {
+      reason = 'failed'
+    }
+    emit({ event: 'page-migrate', reason })
+    if (!PAGE_MIGRATE_RETRYABLE.has(reason)) entry.migrateDone = true
+    else if (!ended) migrateAgain(entry)
+  }
+
+  // A move whose K2 could not be read yet (not served, a timeout), or that a
+  // locked session or an error stopped, is tried again on a later pass, a
+  // bounded number of times; every other outcome is final.
+  function migrateAgain (entry) {
+    const tries = (entry.migrateTries || 0) + 1
+    entry.migrateTries = tries
+    if (tries > PAGE_MIGRATE_RETRY_MS.length) {
+      entry.migrateDone = true
+      return
+    }
+    later(() => maybeMigrate(entry), PAGE_MIGRATE_RETRY_MS[tries - 1])
+  }
+
+  // The number of moves that led to K1, K1 -> K2 included, read from the
+  // page-origin records this node holds.
+  function moveCount (entry, opts) {
+    let count = 1
+    const seen = new Set([entry.key])
+    let cur = entry
+    while (cur && cur.originRec !== null) {
+      const origin = originOf([cur.originRec], cur.key, association, opts)
+      if (origin === null) break
+      count++
+      if (count > MAX_PAGE_MOVES) return count
+      const prev = String(origin.from).toLowerCase()
+      if (seen.has(prev)) return MAX_PAGE_MOVES + 1
+      seen.add(prev)
+      cur = follows.get(prev)
+    }
+    return count
+  }
+
+  async function readOrigin (k2) {
+    const held = follows.get(k2)
+    const opened = held && held.core ? null : await openReplica(store, k2)
+    const core = opened || held.core
+    try {
+      const bound = once ? Math.min(GATE_TIMEOUT_MS, deadline - Date.now()) : GATE_TIMEOUT_MS
+      const timeout = Math.max(GATE_MIN_TIMEOUT_MS, bound)
+      const raw0 = await core.get(0, { raw: true, timeout })
+      if (gateVerdict(raw0, k2, association, revokedIssuers()) !== null) return { ok: false, reason: 'unverified' }
+      const raw3 = await core.get(3, { raw: true, timeout })
+      return { ok: true, entries: [{ seq: 3, record: decodeBlock(raw3) }] }
+    } catch {
+      return { ok: false, reason: 'unreadable' }
+    } finally {
+      if (opened) await opened.close().catch(noop)
+    }
+  }
+
+  async function migrate (entry, k2, fromSeq, opts) {
+    const k1 = entry.key
+    if (readMigrated().has(k1)) return 'already-migrated'
+    if (!HEX64.test(k2) || k2 === ownHex || k2 === k1) return 'unverified'
+    if (isBlockedKey(k2)) return 'blocked'
+    if (moveCount(entry, opts) > MAX_PAGE_MOVES) return 'chain'
+    if (followSet(await readAll(diary), ownHex).includes(k2)) return followK2(k1, k2)
+    const stored = follows.has(k2) || await replicaStored(store, k2).catch(() => true)
+    const read = await readOrigin(k2)
+    let reason = null
+    if (!read.ok) reason = read.reason
+    else {
+      const origin = originOf(read.entries, k2, association, opts)
+      // fromSeq is the last K1 block the owner saw; the leaves and the
+      // page-moved land after it.
+      if (origin === null || String(origin.from).toLowerCase() !== k1 || origin.fromSeq > fromSeq) reason = 'unverified'
+    }
+    if (reason === null && ended) reason = 'unreadable'
+    if (reason !== null) {
+      if (!stored) purgeStored(k2)
+      return reason
+    }
+    return followK2(k1, k2)
+  }
+
+  // follows.json is read and rewritten around an append: one migration at a
+  // time, or two pages moving at once drop one follow. Member operations do
+  // not race it: they take the data-dir lock this run holds (lib/session.js
+  // stops the run first).
+  function followK2 (k1, k2) {
+    const run = followWrites.then(async () => {
+      if (ended) return 'unreadable'
+      const inDiary = followSet(await readAll(diary), ownHex).includes(k2)
+      const current = readFollows(dataDir)
+      if (!current.includes(k2) && current.length >= maxFollows) return 'limit'
+      // Append first, then follows.json, then the memory: a crash in between
+      // finds the follow in the diary on the next run and appends nothing,
+      // and that run writes k2 back to follows.json.
+      if (!inDiary) await appendRecord(diary, followRecord({ key: k2, on: true }))
+      const latest = readFollows(dataDir)
+      if (!latest.includes(k2)) writeFollows(dataDir, [...latest, k2])
+      rememberMigrated(k1, k2)
+      return inDiary ? 'already-following' : 'migrated'
+    })
+    followWrites = run.catch(noop)
+    return run
   }
 
   // Remote gate passed: the replica is open in the main store but nothing it
@@ -1555,6 +1870,7 @@ async function runSync ({
     }
     broadcast({ type: 'have', key: entry.key, length })
     emit({ event: 'downloaded', key: entry.key, length })
+    maybeMigrate(entry)
     evaluate()
   }
 
@@ -1592,6 +1908,7 @@ async function runSync ({
       const length = entry.present
       broadcast({ type: 'have', key: entry.key, length })
       emit({ event: 'downloaded', key: entry.key, length })
+      maybeMigrate(entry)
       evaluate()
     }, () => {
       entry.gating = false
@@ -1794,16 +2111,33 @@ async function runSync ({
       ownWriters.set(g.writer, { group: g.group, core })
       groupList.push({ group: g.group, writer: g.writer, nonce: g.nonce })
       groupSet.add(g.group)
-      if (g.writer === g.group) {
-        if (await ownRootKind(core) === 'community') ownCommunities.add(g.group)
-        try {
-          if (core.length > 0) noteRootVisibility(g.group, rootVisibility(await core.get(0, { wait: false, raw: true })))
-        } catch {}
-        // An own root also grows by replication (a peer holding the same
-        // root key, restored storage): its new blocks are scanned too.
-        const grown = () => { if (linksReady) scanLinks(g.group, core) }
+      if (g.kind === 'community' || (g.writer === g.group && await ownRootKind(core) === 'community')) ownCommunities.add(g.group)
+      if (ownCommunities.has(g.group)) {
+        // An own community core (root or CW) also grows by replication (a
+        // peer holding the same key, restored storage): its new blocks are
+        // scanned for the catalogue too.
+        const grown = () => scanCatalogue(g.group, core)
         core.on('append', grown)
         core.on('download', grown)
+      } else if (g.writer === g.group) {
+        try {
+          if (core.length > 0) {
+            const raw = await core.get(0, { wait: false, raw: true })
+            noteRootVisibility(g.group, rootVisibility(raw))
+            noteParent(g.group, raw)
+          }
+        } catch {}
+      }
+    }
+    // A joined group's root stored by an earlier run names its community
+    // before any seeder lists it again.
+    for (const g of groupList) {
+      if (ending || ownCommunities.has(g.group) || g.writer === g.group || !(await replicaStored(store, g.group))) continue
+      const core = await openGroupReplica(store, g.group)
+      try {
+        noteParent(g.group, await readLocal(core, 0))
+      } catch {} finally {
+        await core.close().catch(noop)
       }
     }
   }
@@ -1865,99 +2199,260 @@ async function runSync ({
     }
   }
 
-  // A key paged as a community: an own community root, or one a held group
-  // root links to that this node does not list as a group of its own.
-  function isCommunity (key) {
-    return ownCommunities.has(key) || (linkedCommunities.has(key) && !groupSet.has(key))
+  // The role a paged key is judged under (groupHeaderVerdict): the local
+  // list first, then a parent a held group root names, else a catalogue
+  // root.
+  function roleOf (group) {
+    if (groupSet.has(group)) return ownCommunities.has(group) ? 'community' : 'group'
+    return parents.has(group) ? 'community' : 'catalogue'
   }
 
-  // Everything paged: groupList, then the linked communities (no own writer).
+  function isCommunity (key) {
+    return roleOf(key) === 'community'
+  }
+
+  // Still paged in this run: a local key, a parent or a catalogue root.
+  function wanted (group) {
+    return groupSet.has(group) || parents.has(group) || catalogue.has(group)
+  }
+
+  // Everything paged: groupList, then the parents and the catalogue roots
+  // (no own writer).
   function pagedList () {
     const out = groupList.slice()
-    for (const c of linkedCommunities.keys()) if (!groupSet.has(c)) out.push({ group: c, writer: null })
+    for (const c of parents.keys()) if (!groupSet.has(c)) out.push({ group: c, writer: null })
+    for (const g of catalogue.keys()) out.push({ group: g, writer: null })
     return out
   }
 
-  function linkedOnlyCount () {
-    let n = 0
-    for (const c of linkedCommunities.keys()) if (!groupSet.has(c)) n++
-    return n
-  }
-
-  // A linked community is a single root core: it raises the run-wide core
-  // bounds by one, never by a group's worth of writers.
+  // groups x MAX_GROUP_WRITERS + communities x MAX_GROUP_WRITERS, plus one
+  // core per catalogue root (paged root only).
   function coreLimit () {
-    return Math.max(1, groupList.length) * MAX_GROUP_WRITERS + linkedOnlyCount()
+    let communities = 0
+    for (const c of parents.keys()) if (!groupSet.has(c)) communities++
+    return Math.max(1, groupList.length + communities) * MAX_GROUP_WRITERS + catalogue.size
   }
 
-  // Reads the community-link records a group root gained since the last
-  // scan (held blocks only, at most maxLogBlocks) and follows every
-  // community they name, up to MAX_COMMUNITY_ROOTS. Own community roots
-  // carry no community-link.
-  function scanLinks (group, core) {
-    if (ending || !groupSet.has(group) || ownCommunities.has(group) || !core) return
-    let st = linkScans.get(group)
+  // A held local group root names its community (the header is
+  // immutable): that community is paged as a parent from now on.
+  function noteParent (group, raw) {
+    if (ending || !groupSet.has(group) || ownCommunities.has(group) || parentOf.has(group)) return
+    const community = raw === null ? null : rootCommunity(raw)
+    if (community === null || community === group) return
+    parentOf.set(group, community)
+    // Not printed: it tells the node session which local groups a grown
+    // community core changes.
+    emit({ event: 'group-parent', key: community, group })
+    let groups = parents.get(community)
+    const fresh = !groups
+    if (fresh) {
+      groups = new Set()
+      parents.set(community, groups)
+    }
+    groups.add(group)
+    if (!fresh || groupSet.has(community)) return
+    catalogue.delete(community)
+    if (!told.has(community)) {
+      told.add(community)
+      emit({ event: 'community-parent', key: community, group })
+    }
+    if (!once) markGroupsDirty(community)
+    evaluate()
+  }
+
+  // An active foreign root: its gated block 0 when kept, else the local one.
+  function noteParentOf (e) {
+    if (!groupSet.has(e.group) || parentOf.has(e.group)) return
+    if (e.gatedRaw) {
+      noteParent(e.group, e.gatedRaw)
+      return
+    }
+    const core = e.core
+    track(readLocal(core, 0), (raw) => { if (e.core === core && e.state === 'active') noteParent(e.group, raw) }, noop)
+  }
+
+  // A failed group root no longer names a parent this node follows.
+  function dropParent (group) {
+    const community = parentOf.get(group)
+    if (community === undefined) return
+    parentOf.delete(group)
+    const groups = parents.get(community)
+    if (!groups) return
+    groups.delete(group)
+    if (groups.size === 0) {
+      parents.delete(community)
+      refreshCatalogue()
+    }
+  }
+
+  // Reads the blocks a community core (its root or a CW) gained since its
+  // last scan (held blocks only, at most maxLogBlocks): its header's diary
+  // and, in the root, its group-create keys (at most MAX_CATALOGUE_SCAN;
+  // only the creator creates groups, so a CW create is never a hint).
+  function scanCatalogue (community, core) {
+    if (ending || !catalogueReady || !core || !isCommunity(community)) return
+    const key = b4a.toString(core.key, 'hex')
+    let st = catScans.get(key)
     if (!st || st.core !== core) {
-      st = { core, length: 1, named: [], run: null, again: false }
-      linkScans.set(group, st)
+      st = { core, community, length: 0, diary: null, dead: false, creates: [], run: null, again: false }
+      catScans.set(key, st)
     }
     if (st.run) {
       st.again = true
       return
     }
     const s = st
+    const root = key === community
     s.run = (async () => {
-      const live = () => !ending && linkScans.get(group) === s
+      const live = () => !ending && catScans.get(key) === s
       do {
         s.again = false
         const end = Math.min(core.contiguousLength, maxLogBlocks)
-        while (s.length < end && s.named.length < MAX_COMMUNITY_ROOTS && live()) {
+        while (s.length < end && !s.dead && live()) {
           const seq = s.length
           const raw = await readLocal(core, seq)
           // A failed read leaves the cursor on seq: the next scan (on the
-          // root's next growth) reads it again, so no block is skipped.
+          // core's next growth) reads it again, so no block is skipped.
           if (raw === null) break
           s.length = seq + 1
           let record = null
           try {
             record = decodeBlock(raw)
           } catch {}
-          // The same keys member.js linkedKeys folds, in the same order.
-          if (record === null || typeof record !== 'object' || record.type !== 'community-link' ||
-            typeof record.community !== 'string' || !/^[0-9a-fA-F]{64}$/.test(record.community)) continue
-          const key = record.community.toLowerCase()
-          if (!s.named.includes(key)) s.named.push(key)
+          if (seq === 0) {
+            const ok = record !== null && (root
+              ? validateGroupHeader(record) === null && record.kind === 'community'
+              : validateWriterHeader(record) === null && record.group === community)
+            if (ok) s.diary = record.diary
+            else s.dead = true
+            continue
+          }
+          if (!root || record === null || typeof record !== 'object') continue
+          if (record.type === 'group-create' && typeof record.group === 'string' && HEX64.test(record.group)) {
+            if (s.creates.length < MAX_CATALOGUE_SCAN && !s.creates.includes(record.group)) s.creates.push(record.group)
+          }
         }
       } while (s.again && live())
-      if (live()) setLinks(group, s.named)
     })().catch(noop).finally(() => {
       s.run = null
+      refreshCatalogue()
+      foldCatalogue(community)
       evaluate()
     })
   }
 
-  function setLinks (group, named) {
-    const keep = new Set(named)
-    for (const [c, groups] of linkedCommunities) {
-      if (keep.has(c) || !groups.has(group)) continue
-      groups.delete(group)
-      if (groups.size === 0) linkedCommunities.delete(c)
+  // A binding diary that grew may hold the join a community fold lacked
+  // (its replica is downloaded after the gate read the join through the
+  // quarantine): every community it binds a held core of folds again.
+  function refoldBoundBy (diaryKey) {
+    const communities = new Set()
+    for (const sc of catScans.values()) if (sc.diary === diaryKey) communities.add(sc.community)
+    for (const community of communities) foldCatalogue(community)
+  }
+
+  // A community core that failed adds nothing to the catalogue any more.
+  function dropCatalogueScan (key) {
+    const sc = catScans.get(key)
+    if (!sc) return
+    catScans.delete(key)
+    refreshCatalogue()
+    foldCatalogue(sc.community)
+  }
+
+  // Folds C from the cores this node holds (its root, the CWs and their
+  // binding diaries), one fold at a time per community; growth meanwhile
+  // folds again.
+  function foldCatalogue (community) {
+    if (ending || !isCommunity(community)) return
+    let st = foldRuns.get(community)
+    if (st) {
+      st.again = true
+      return
     }
-    for (const community of named) {
-      if (community === group) continue
-      let groups = linkedCommunities.get(community)
-      if (groups && groups.has(group)) continue
-      const fresh = !groups
-      if (fresh) {
-        groups = new Set()
-        linkedCommunities.set(community, groups)
-      }
-      groups.add(group)
-      if (fresh && !groupSet.has(community)) {
-        emit({ event: 'community-linked', key: community, group })
-        if (!once) markGroupsDirty(community)
-      }
+    st = { again: false }
+    foldRuns.set(community, st)
+    const run = st
+    ;(async () => {
+      do {
+        run.again = false
+        const groups = await foldHeld(community)
+        if (groups === null) catFolds.delete(community)
+        else catFolds.set(community, groups)
+        if (!run.again || ending) break
+      } while (true)
+    })().catch(noop).finally(() => {
+      foldRuns.delete(community)
+      refreshCatalogue()
+      evaluate()
+    })
+  }
+
+  // The groups buildCommunity counts for C (causal order, at most
+  // MAX_GROUPS_PER_COMMUNITY), or null while C's root is not held or does
+  // not fold (unbound, its creator diary missing).
+  async function foldHeld (community) {
+    const cores = []
+    for (const [key, w] of ownWriters) if (w.group === community) cores.push([key, w.core])
+    for (const e of groupCores.values()) {
+      if (e.group === community && e.state === 'active' && e.core && !ownWriters.has(e.key)) cores.push([e.key, e.core])
     }
+    if (!cores.some(([key]) => key === community)) return null
+    const logs = []
+    for (const [key, core] of cores) {
+      let entries
+      try {
+        entries = await readBlocks(core)
+      } catch {
+        if (key === community) return null
+        continue
+      }
+      const h = entries[0] && entries[0].record
+      if (h === null || typeof h !== 'object' || typeof h.diary !== 'string') continue
+      logs.push({ key, diary: h.diary, entries })
+    }
+    const root = logs.find((l) => l.key === community)
+    if (!root) return null
+    const joins = new Map()
+    // A creator's confirmed leave bounds the root's creates.
+    const confirms = new Map()
+    for (const d of new Set(logs.map((l) => l.diary))) {
+      const core = heldBinding(d, null)
+      if (core === null) continue
+      try {
+        const entries = await readAll(core)
+        joins.set(d, groupJoinHistory(entries, community))
+        confirms.set(d, groupConfirmHistory(entries, community))
+      } catch {}
+    }
+    const view = buildCommunity({ root: { key: community, entries: root.entries }, writers: logs.filter((l) => l !== root), joins, confirms })
+    return view.creator === null ? null : view.groups.slice(0, MAX_GROUPS_PER_COMMUNITY)
+  }
+
+  // The catalogue roots to page, per paged community: the groups its held
+  // cores fold to once they do; until then a hint, the creates its root
+  // holds. Never a local key or a parent.
+  function refreshCatalogue () {
+    const scans = new Map() // community -> [[key, scan]]
+    for (const [key, sc] of catScans) {
+      if (!scans.has(sc.community)) scans.set(sc.community, [])
+      scans.get(sc.community).push([key, sc])
+    }
+    const next = new Map()
+    for (const [community, list] of scans) {
+      if (!isCommunity(community)) continue
+      if (catFolds.has(community)) {
+        for (const g of catFolds.get(community)) if (!groupSet.has(g) && !parents.has(g) && !next.has(g)) next.set(g, community)
+        continue
+      }
+      const root = list.find(([k]) => k === community)
+      if (!root || root[1].diary === null) continue
+      for (const g of root[1].creates) if (!groupSet.has(g) && !parents.has(g) && !next.has(g)) next.set(g, community)
+    }
+    const fresh = []
+    for (const g of next.keys()) if (!catalogue.has(g)) fresh.push(g)
+    catalogue.clear()
+    for (const [g, community] of next) catalogue.set(g, community)
+    if (!once) for (const g of fresh) markGroupsDirty(g)
   }
 
   // A root blocked by the association is not paged and its foreign writers
@@ -2085,7 +2580,8 @@ async function runSync ({
   function groupUnmet () {
     if (groupList.length === 0) return []
     const unmet = []
-    for (const [g, st] of linkScans) if (st.run) unmet.push(g + ':vínculos')
+    for (const [key, st] of catScans) if (st.run) unmet.push(key + ':catálogo')
+    for (const community of foldRuns.keys()) unmet.push(community + ':catálogo')
     const seeders = verifiedSeeders().filter((p) => !p.groupClosed || p.groupPasses.size > 0)
     const live = seeders.some((p) => !p.groupClosed)
     for (const g of pagedList()) {
@@ -2417,11 +2913,9 @@ async function runSync ({
       badHint(peer, 'quota:' + hint, false)
       return
     }
-    // A community has no writers: only its root is ever gated under it.
-    // Protecting an honest seeder from this node's own view of which keys
-    // are communities (a key a community-link names may be a group root to
-    // the seeder): the listing is ignored, never charged.
-    if (item.key !== group && isCommunity(group)) return
+    // A catalogue root is paged root only: the writers a seeder lists with
+    // it are ignored here, never charged.
+    if (item.key !== group && roleOf(group) === 'catalogue') return
     if (groupCores.has(item.key)) {
       noteTarget(item)
       return
@@ -2592,6 +3086,20 @@ async function runSync ({
       const entry = follows.get(key)
       if (entry && entry.fetch) await entry.fetch.promise.catch(noop)
       if (ending) return null
+      // A replica the main store opened while this read waited (the same
+      // diary binding a CW and a group writer, gated at once) owns the
+      // channel: the quarantine would never pair, so the blocks are read
+      // through that replica.
+      const main = mainReplica(key)
+      if (main !== null) {
+        const raws = []
+        for (const seq of seqs) {
+          const raw = await readHeld(main, seq, until)
+          if (raw === null) return null
+          raws.push(raw)
+        }
+        return { raws, length: main.length, byteLength: main.byteLength }
+      }
       const core = qstore.get({ key: b4a.from(key, 'hex') })
       try {
         await core.ready()
@@ -2627,12 +3135,17 @@ async function runSync ({
   // replica opened while the quarantine held the channel never replicates
   // there (corestore counts it attached). Once the quarantine channel is
   // closed the replica is attached again.
-  function reattachMain (key, sockets) {
+  function mainReplica (key) {
     const f = follows.get(key)
     const d = groupDiaries.get(key)
     const w = groupCores.get(key)
     const core = (d && !d.failed && d.core) || (f && f.core) || (w && w.core) || null
-    if (!core || !core.opened || core.closing || core.closed) return
+    return !core || !core.opened || core.closing || core.closed ? null : core
+  }
+
+  function reattachMain (key, sockets) {
+    const core = mainReplica(key)
+    if (core === null) return
     for (const s of sockets) {
       const mux = s.userData
       if (s.destroyed || !mux || typeof mux.pair !== 'function' || typeof mux.opened !== 'function') continue
@@ -2705,9 +3218,9 @@ async function runSync ({
         if (raw0 === null) return fail('timeout')
         // A stored writer's own validated block 0 names its diary: the page
         // item is only a hint.
-        const own = headerDiary(raw0, e.key, e.group, !groupSet.has(e.group))
+        const own = headerDiary(raw0, e.key, e.group, roleOf(e.group))
         if (own !== null) e.diary = own
-        const header = groupHeaderVerdict(raw0, e.key, e.group, e.diary, !groupSet.has(e.group))
+        const header = groupHeaderVerdict(raw0, e.key, e.group, e.diary, roleOf(e.group))
         if (header) return fail(header, ownVerdict(header))
         writerHere = true
         if (core.fork !== 0) return fail('fork', true)
@@ -2721,8 +3234,9 @@ async function runSync ({
       }
       // The hinted diary is judged against the diary the header names
       // ('wrong-diary') before anything about that diary is believed.
-      const reason = groupHeaderVerdict(raw0, e.key, e.group, e.diary, !groupSet.has(e.group))
+      const reason = groupHeaderVerdict(raw0, e.key, e.group, e.diary, roleOf(e.group))
       if (reason) return fail(reason, ownVerdict(reason))
+      if (memberMismatch(raw0, e.key, e.group, roleOf(e.group))) return { ...(await fail('header-invalid', true)), box: true }
       // Protecting an honest seeder that has not served the root yet (it
       // checks a writer's `box` only once it knows the root): a box that
       // does not match the visibility this node verified refuses the
@@ -2880,11 +3394,10 @@ async function runSync ({
       await closeOpened()
       return
     }
-    // Protecting an honest seeder from this node's own link view: a root
-    // paged only as a linked community that no held group root names any
-    // more when its verdict lands is dropped here, never charged nor
-    // remembered as refused.
-    if (!e.accepted && e.key === e.group && !groupSet.has(e.group) && !linkedCommunities.has(e.group)) {
+    // Protecting an honest seeder from this node's own parent and catalogue
+    // view: a core of a key no longer paged when its verdict lands is
+    // dropped here, never charged nor remembered as refused.
+    if (!e.accepted && !wanted(e.group)) {
       await closeOpened()
       emit({ event: 'group-skipped', key: e.key, reason: 'unwanted' })
       e.state = 'failed'
@@ -3191,6 +3704,7 @@ async function runSync ({
     check()
     track(watchGroupDiary(d, dcore, () => {
       withdrawDeletedJoins(key, d)
+      refoldBoundBy(key)
       verify()
       evaluate()
     }), noop, noop)
@@ -3517,7 +4031,8 @@ async function runSync ({
     if (checkGroupQuota(e)) return
     if (e.expected === null) {
       emit({ event: 'group-downloaded', key: e.key, group: e.group, length })
-      if (e.key === e.group) scanLinks(e.group, e.core)
+      if (e.key === e.group) noteParentOf(e)
+      if (isCommunity(e.group)) scanCatalogue(e.group, e.core)
       if (!once) markGroupsDirty(e.group)
       evaluate()
       return
@@ -3544,11 +4059,8 @@ async function runSync ({
     if (e.state === 'failing' || e.state === 'failed') return
     stopGroupCore(e)
     emit({ event: 'group-skipped', key: e.key, reason })
-    // A failed group root no longer names a community this node follows.
-    if (e.key === e.group && linkScans.has(e.group)) {
-      linkScans.delete(e.group)
-      setLinks(e.group, [])
-    }
+    if (e.key === e.group) dropParent(e.group)
+    dropCatalogueScan(e.key)
     const core = e.core
     e.core = null
     // A writer that fails, activated or not, leaves the table once the
@@ -4008,6 +4520,9 @@ async function runSync ({
       : [])
     if (g && certForKey(g, ownHex, association).ok) cert = g
     else log('sem certificado válido no bloco 0: o diário não será anunciado')
+    // Protocol v1 group cores go before any of them is opened or folded
+    // (docs/protocol.md section 10, "Member sync", legacy sweep).
+    await sweepLegacyGroups(dataDir, store, emit)
     // Own writers before the blocklist: they are never purged here, like the
     // own diary (isBlockedKey).
     await openOwnWriters()
@@ -4056,9 +4571,9 @@ async function runSync ({
     // And every stored diary that forked, with what it binds.
     if (!ending) await sweepForkedDiaries()
     if (!ending) await loadDiskSlots()
-    // Growth while a scan runs marks it to go again (scanLinks `again`).
-    linksReady = true
-    for (const g of groupList) if (g.writer === g.group) scanLinks(g.group, ownWriters.get(g.writer).core)
+    // Growth while a scan runs marks it to go again (scanCatalogue `again`).
+    catalogueReady = true
+    for (const g of groupList) if (ownCommunities.has(g.group)) scanCatalogue(g.group, ownWriters.get(g.writer).core)
 
     qstore = await openQuarantine(dataDir, storeOptions)
     if (inspectHook) inspectHook({ claimCount, topicHasPeer, failedSocketCount, lastClosedPeer: () => lastClosedPeer, recomputeCount: () => recomputes, groupTargetCount: () => groupTargets.size, groupCoreCount: () => groupCores.size, groupDiaryKeys: () => [...groupDiaries.keys()], swarmTopicCount: () => swarm ? [...swarm.topics()].length : 0, createMemo: (limit) => createMemo(() => limit), hardError, groupDiverged: groupDivergedError, divergeDiary: (key) => divergeDiary(key, groupDiaries.get(key) || { core: { close: async () => {} }, failed: false }) }) // test-only
@@ -4115,7 +4630,14 @@ async function runSync ({
         claims: new Map(), // peerKey -> { length } (G1 claims, --once only)
         failedSockets: new Set(), // open sockets of failed fetches for this key (H2, --once)
         cutByDeadline: false, // the last fetch ended with the deadline (item 4)
-        discardedRegate: false // purged from regate when the run ended (item 5)
+        discardedRegate: false, // purged from regate when the run ended (item 5)
+        pageScan: 0, // blocks below this were scanned for page lifecycle records
+        pageLate: new Set(), // holes below pageScan filled since, at most MAX_PAGE_LATE
+        pageRewinds: 0, // pageLate overflows: a walk that saw one keeps the rewound cursor
+        pageRecs: [], // [{ seq, record }]: the first verified page-close or page-moved
+        originRec: null, // { seq: 3, record } when block 3 is a page-origin
+        migrating: null, // { again } while a page migration check runs
+        migrateDone: false // a verified move was handled in this run
       }
       follows.set(key, entry)
       // A blocked author stays in follows.json but is never opened (its

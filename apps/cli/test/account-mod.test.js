@@ -1455,11 +1455,14 @@ test('panel assets: literal paths, CSP, 404 when missing, no SPA fallback; loopb
   t.is(options.status, 404, 'no preflight answer')
   t.is(options.headers.get('access-control-allow-origin'), null)
 
-  // An explicit loopback origin is accepted (tests); plain http elsewhere is not.
+  // An explicit loopback origin is accepted (tests, and http://localhost for
+  // the local hosted lab, since a passkey rp.id cannot be an IP); plain http
+  // elsewhere is not. The CLI still requires https (ORIGIN_RE).
   const iss = issuer()
   const base = { association: iss.association, google: { authorizeUrl () {}, exchange () {} }, store: { start () {} } }
   t.ok(createAccountServer({ ...base, origin: 'http://127.0.0.1:8790' }))
-  for (const origin of ['http://varanda.test', 'http://localhost:8790', 'http://127.0.0.2']) {
+  t.ok(createAccountServer({ ...base, origin: 'http://localhost:8790' }))
+  for (const origin of ['http://varanda.test', 'http://localhost.varanda.test', 'http://127.0.0.2']) {
     try {
       createAccountServer({ ...base, origin })
       t.fail(origin + ' accepted')

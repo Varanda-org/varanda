@@ -16,6 +16,7 @@ const ops = require('../lib/member-ops')
 const store = require('../lib/node-store')
 const { connectClient, errorOf } = require('./helpers/session')
 const { tmpDir, until } = require('./helpers/net')
+const { METHODS } = require('@varanda/rpc')
 
 const hex = (buf) => b4a.toString(buf, 'hex')
 const KEY = 'ab'.repeat(32)
@@ -114,39 +115,57 @@ function controlledSync () {
   }
 }
 
+// A community of `s` written by member-ops (no gate): -> { group } (its
+// Geral, a group root of `s` at length 1 like a new group's).
+async function geral (s) {
+  return { group: (await ops.communityCreate(s.ctx, { name: 'Bairro', join: 'open' })).group }
+}
+
+// A community of `s` through the RPC: -> { community, group } (Geral).
+function community (s, name = 'Bairro') {
+  return s.web.request('community.create', { name, join: 'open' })
+}
+
+const COMMUNITY_METHODS = ['community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests']
+
 async function groupLength (s, group) {
   const core = await store.openGroupCoreReadOnly(s.storage, group)
   try { return core.length } finally { await core.close() }
 }
 
-test('group and community RPC handler names match the core session', async (t) => {
+test('group and community RPC handler names match the core session and the method table', async (t) => {
   const core = createSession({ dataDir: tmpDir(t), association: KEY, bootstrap: ['127.0.0.1:1'] })
   const browser = createBrowserSession({ storage: memoryNodeStorage(), association: KEY, seederUrl: 'ws://127.0.0.1:9/seeder', createSocket: () => null })
   t.teardown(() => core.close(), { force: true })
   t.teardown(() => browser.close(), { force: true })
   const keys = (handlers, prefix) => Object.keys(handlers).filter((key) => key.startsWith(prefix)).sort()
-  t.is(keys(core.handlers, 'group.').length, 15)
+  t.is(keys(core.handlers, 'group.').length, 17)
   t.alike(keys(browser.handlers, 'group.'), keys(core.handlers, 'group.'))
-  t.is(keys(core.handlers, 'community.').length, 5)
-  t.alike(keys(browser.handlers, 'community.'), keys(core.handlers, 'community.'))
+  t.alike(keys(browser.handlers, 'community.'), COMMUNITY_METHODS, 'every community method of protocol v2, no community.link')
+  t.alike(METHODS.filter((m) => m.startsWith('community.')).sort(), COMMUNITY_METHODS, 'as the rpc method table')
+  t.absent('community.link' in browser.handlers)
 })
 
 test('groups through connectClient: create, join, post, read and local events', async (t) => {
   const a = await setup(t)
   const b = await setup(t, { assoc: a.assoc })
-  const { group } = await a.web.request('group.create', { name: 'Horta', join: 'open' })
+  const { community: C, group: general } = await community(a)
+  const { group } = await a.web.request('group.create', { name: 'Horta', join: 'open', community: C })
   t.is((await a.web.request('node.info')).groups, true)
-  const entry = (await store.readGroupWriters(a.storage))[0]
+  const entry = (await store.readGroupWriters(a.storage)).find((e) => e.group === group)
   const kp = await groupKeyPairFromPrf(a.prf, b4a.from(entry.nonce, 'hex'))
   t.is(hex(kp.publicKey), group, 'the root uses the PRF derivation')
   t.alike(await a.web.request('group.post', { group, text: 'Olá' }), { seq: 1 })
+  await share(a, b, C)
+  await share(a, b, general)
   await share(a, b, group)
+  t.alike(await b.web.request('community.join', { community: C }), { state: 'member', group: general })
   t.alike(await b.web.request('group.join', { group }), { state: 'member' })
   t.alike(await b.web.request('group.post', { group, text: 'Bom dia', replyTo: { writer: group, seq: 1 } }), { seq: 1 })
   const page = await b.web.request('group.read', { group })
   t.alike(page.items.map((p) => [p.diary, p.text]), [[b.key, 'Bom dia'], [a.key, 'Olá']])
   t.alike(page.items[0].replyTo, { writer: group, seq: 1 })
-  t.is((await b.web.request('group.list')).total, 1)
+  t.is((await b.web.request('group.list')).total, 2, 'Geral and Horta')
   t.is((await b.web.request('group.info', { group })).members, 2)
   t.is((await b.web.request('group.members', { group })).total, 2)
   t.alike(await a.web.request('group.requests', { group }), { requests: [], total: 0 })
@@ -160,7 +179,9 @@ test('groups through connectClient: create, join, post, read and local events', 
   }
   t.alike(await b.web.request('group.leave', { group }), { state: 'left' })
   const events = a.web.events.filter((e) => e.name === 'groups.changed')
-  t.alike(events.map((e) => e.data), [{ group }, { group }, { group }])
+  t.alike(events.map((e) => e.data), [{ group: C }, { group: general }, { group }, { group: C }, { group }, { group }], 'create (C, Geral), group.create (G, C), post, meta')
+  const joined = b.web.events.filter((e) => e.name === 'groups.changed').map((e) => e.data.group)
+  t.alike(joined.slice(0, 2), [C, general], 'community.join: C, then Geral')
   t.absent(a.web.events.some((e) => e.name === 'sync.started'), 'local reads and writes with the gate disabled never dial')
   t.alike(a.internal.concat(b.internal), [])
 })
@@ -171,13 +192,18 @@ test('locked group writes fail, local reads stay available, and PRF bytes are co
   const unlocking = s.node.setKeyPair(s.keyPair, { prf: copy })
   copy.fill(0)
   await unlocking
-  const { group } = await s.web.request('group.create', { name: 'Horta', join: 'open' })
-  const entry = (await store.readGroupWriters(s.storage))[0]
+  const { community: C } = await community(s)
+  const { group } = await s.web.request('group.create', { name: 'Horta', join: 'open', community: C })
+  const entry = (await store.readGroupWriters(s.storage)).find((e) => e.group === group)
   t.is(hex((await groupKeyPairFromPrf(s.prf, b4a.from(entry.nonce, 'hex'))).publicKey), group)
   await s.node.clearKeyPair()
   for (const [method, params] of [
-    ['group.create', { name: 'Horta', join: 'open' }],
+    ['group.create', { name: 'Horta', join: 'open', community: C }],
     ['group.join', { group }], ['group.leave', { group }],
+    ['community.create', { name: 'Outra', join: 'open' }],
+    ['community.join', { community: C }], ['community.leave', { community: C }],
+    ['community.meta', { community: C, name: 'x' }],
+    ...['community.admit', 'community.ban', 'community.admin'].map((method) => [method, { community: C, member: KEY, on: true }]),
     ['group.post', { group, text: 'x' }], ['group.meta', { group, name: 'x' }],
     ['group.hide', { group, target: { writer: group, seq: 1 }, on: true }],
     ...['group.admit', 'group.ban', 'group.admin'].map((method) => [method, { group, member: KEY, on: true }])
@@ -186,15 +212,68 @@ test('locked group writes fail, local reads stay available, and PRF bytes are co
     t.alike([err.code, err.message], ['USAGE', LOCKED], method)
   }
   t.is((await s.web.request('group.read', { group })).items.length, 0)
-  t.is((await s.web.request('group.list')).total, 1)
+  t.is((await s.web.request('group.list')).total, 2)
+  t.is((await s.web.request('community.info', { community: C })).role, 'creator', 'community reads stay available')
   t.is((await s.web.request('group.info', { group })).state, 'member')
   t.is((await s.web.request('group.members', { group })).total, 1)
   t.is((await s.web.request('group.requests', { group })).total, 0)
+  const row = (await s.web.request('community.info', { community: C })).groups.find((g) => g.group === group)
+  t.alike([row.last, row.unread], [null, 0], 'community.info answers the private group while locked')
+  t.alike(await s.web.request('group.seen', { group }), { ok: true }, 'group.seen answers while locked')
   await s.node.setKeyPair(s.keyPair)
   t.is((await errorOf(s.web.request('group.post', { group, text: 'x' }))).message, LOCKED, 'identity without PRF cannot sign a group writer')
   await s.node.setKeyPair(s.keyPair, { prf: s.prf })
   t.alike(await s.web.request('group.post', { group, text: 'desbloqueado' }), { seq: 1 })
   t.alike(s.internal, [])
+})
+
+test('group.seen through request: ok twice, no groups.changed, unread cleared, unknown key', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc })
+  const { community: C, group } = await community(a)
+  await a.web.request('group.post', { group, text: 'Olá' })
+  await share(a, b, C)
+  await share(a, b, group)
+  await b.web.request('community.join', { community: C })
+  const unread = async () => (await b.web.request('community.info', { community: C })).groups.find((g) => g.group === group).unread
+  t.is(await unread(), 1)
+  const before = b.web.events.filter((e) => e.name === 'groups.changed').length
+  t.alike(await b.web.request('group.seen', { group }), { ok: true })
+  t.alike(await b.web.request('group.seen', { group }), { ok: true })
+  t.is(b.web.events.filter((e) => e.name === 'groups.changed').length, before, 'no groups.changed')
+  t.is(await unread(), 0)
+  const err = await errorOf(b.web.request('group.seen', { group: KEY }))
+  t.alike([err.code, err.message], ['NOT_FOUND', 'grupo não encontrado'])
+  t.alike(a.internal.concat(b.internal), [])
+})
+
+test('group.seen with a cut-off through request: inclusive upTo, unlisted and invalid cursors', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc })
+  const { community: C, group } = await community(a)
+  await a.web.request('group.post', { group, text: 'um' })
+  await a.web.request('group.post', { group, text: 'dois' })
+  await share(a, b, C)
+  await share(a, b, group)
+  await b.web.request('community.join', { community: C })
+  const unread = async () => (await b.web.request('community.info', { community: C })).groups.find((g) => g.group === group).unread
+  const items = (await b.web.request('group.read', { group })).items
+  const older = items[1]
+  t.is(await unread(), 2)
+  const before = b.web.events.filter((e) => e.name === 'groups.changed').length
+  t.alike(await b.web.request('group.seen', { group, upTo: { at: older.at, writer: older.writer, seq: older.seq } }), { ok: true })
+  t.is(await unread(), 1, 'the cut-off post is marked, the newer one stays unread')
+  t.is(b.web.events.filter((e) => e.name === 'groups.changed').length, before, 'no groups.changed')
+  t.alike(await b.web.request('group.seen', { group, upTo: { at: older.at, writer: 'ff'.repeat(32), seq: 7 } }), { ok: true }, 'an unlisted cursor is ignored')
+  t.is(await unread(), 1)
+  const malformed = await errorOf(b.web.request('group.seen', { group, upTo: { writer: older.writer, seq: older.seq } }))
+  t.is(malformed.code, 'USAGE', 'a cursor without at is refused')
+  t.is(await unread(), 1)
+  const unknown = await errorOf(b.web.request('group.seen', { group: KEY, upTo: { at: older.at, writer: older.writer, seq: older.seq } }))
+  t.alike([unknown.code, unknown.message], ['NOT_FOUND', 'grupo não encontrado'])
+  t.alike(await b.web.request('group.seen', { group }), { ok: true })
+  t.is(await unread(), 0)
+  t.alike(a.internal.concat(b.internal), [])
 })
 
 test('group error mapping and report.sign v2 bind writer and group', async (t) => {
@@ -222,7 +301,7 @@ test('group error mapping and report.sign v2 bind writer and group', async (t) =
 test('group write gate waits for its writer, forwards sync events and pushes the new length', async (t) => {
   const sync = controlledSync()
   const s = await setup(t, { factory: sync.factory, writeGate: true })
-  const { group } = await ops.groupCreate(s.ctx, { name: 'Horta', join: 'open' })
+  const { group } = await geral(s)
   const posting = s.web.request('group.post', { group, text: 'depois da confirmação' })
   const gate = await sync.next(0)
   gate.emit({ event: 'own-synced', length: 2 })
@@ -244,22 +323,26 @@ test('group write gate waits for its writer, forwards sync events and pushes the
 test('create and rejoin push writers created after the gate run snapshot', async (t) => {
   const sync = controlledSync()
   const s = await setup(t, { factory: sync.factory, writeGate: true })
-  const creating = s.web.request('group.create', { name: 'Horta', join: 'open' })
+  const { community: C } = await ops.communityCreate(s.ctx, { name: 'Bairro', join: 'open' })
+  const creating = s.web.request('group.create', { name: 'Horta', join: 'open', community: C })
   const gate = await sync.next(0)
-  t.is(gate.writers.size, 0)
-  gate.emit({ event: 'own-synced', length: 1 })
+  t.is(gate.writers.size, 2, 'C and Geral roots')
+  gate.emit({ event: 'own-synced', length: 3 })
+  gate.emit({ event: 'group-synced', key: C, length: 2 })
   const push = await sync.next(1)
-  t.is(push.writers.size, 1)
+  t.is(push.writers.size, 3)
+  t.is(push.writers.get(C), 3, 'the group-create in C\'s root is pushed')
   push.finish()
   const { group } = await creating
   t.is(push.writers.get(group), 1)
+  t.alike(s.web.events.filter((e) => e.name === 'groups.changed').map((e) => e.data), [{ group }, { group: C }], 'group.create: G and C')
   await ops.groupLeave(s.ctx, { group })
   const joining = s.web.request('group.join', { group })
   const joiningGate = await sync.next(2)
-  joiningGate.emit({ event: 'own-synced', length: 3 })
+  joiningGate.emit({ event: 'own-synced', length: 5 })
   joiningGate.emit({ event: 'group-synced', key: group, length: 2 })
   const joiningPush = await sync.next(3)
-  t.is(joiningPush.writers.size, 2, 'the new writer and the retained creator root are both pushed')
+  t.is(joiningPush.writers.size, 4, 'the new writer and the retained creator root are both pushed, with C and Geral')
   joiningPush.finish()
   t.alike(await joining, { state: 'member' })
   t.alike(s.internal, [])
@@ -269,7 +352,7 @@ test('a behind or unconfirmed group writer refuses the write without retry', asy
   for (const behind of [true, false]) {
     const sync = controlledSync()
     const s = await setup(t, { factory: sync.factory, writeGate: true })
-    const { group } = await ops.groupCreate(s.ctx, { name: 'Horta', join: 'open' })
+    const { group } = await geral(s)
     const pending = errorOf(s.web.request('group.post', { group, text: 'não gravado' }))
     const gate = await sync.next(0)
     gate.emit({ event: 'own-synced', length: 2 })
@@ -286,7 +369,7 @@ test('a behind or unconfirmed group writer refuses the write without retry', asy
 test('a group-synced at a length shorter than the writer holds never releases a group write', async (t) => {
   const sync = controlledSync()
   const s = await setup(t, { factory: sync.factory, writeGate: true })
-  const { group } = await ops.groupCreate(s.ctx, { name: 'Horta', join: 'open' })
+  const { group } = await geral(s)
   const pending = errorOf(s.web.request('group.post', { group, text: 'não gravado' }))
   const gate = await sync.next(0)
   gate.emit({ event: 'own-synced', length: 2 })
@@ -305,7 +388,7 @@ test('lock, reset and close cancel pending group writes and queued writes', asyn
   for (const action of ['clearKeyPair', 'reset', 'close']) {
     const sync = controlledSync()
     const s = await setup(t, { factory: sync.factory, writeGate: true })
-    const { group } = await ops.groupCreate(s.ctx, { name: 'Horta', join: 'open' })
+    const { group } = await geral(s)
     const first = errorOf(s.web.request('group.post', { group, text: 'pendente' }))
     await sync.next(0)
     const second = errorOf(s.web.request('group.post', { group, text: 'na fila' }))
@@ -324,7 +407,7 @@ test('lock, reset and close cancel pending group writes and queued writes', asyn
 test('a continuous run confirms the group gate until the link closes', async (t) => {
   const sync = controlledSync()
   const s = await setup(t, { factory: sync.factory, writeGate: true })
-  const { group } = await ops.groupCreate(s.ctx, { name: 'Horta', join: 'open' })
+  const { group } = await geral(s)
   await s.web.request('sync.start')
   const live = await sync.next(0)
   live.emit({ event: 'own-synced', length: 2 })
@@ -353,7 +436,7 @@ test('a continuous run confirms the group gate until the link closes', async (t)
 test('locking during the push preserves the appended group post and cancels the request', async (t) => {
   const sync = controlledSync()
   const s = await setup(t, { factory: sync.factory, writeGate: true })
-  const { group } = await ops.groupCreate(s.ctx, { name: 'Horta', join: 'open' })
+  const { group } = await geral(s)
   const pending = errorOf(s.web.request('group.post', { group, text: 'gravado antes do bloqueio' }))
   const gate = await sync.next(0)
   gate.emit({ event: 'own-synced', length: 2 })
@@ -388,15 +471,18 @@ test('reset removes every group core, the group kv lists and unfollowed binding 
   const a = await setup(t)
   const c = await setup(t, { assoc: a.assoc })
   const b = await setup(t, { assoc: a.assoc })
-  const { group: ga } = await a.web.request('group.create', { name: 'Horta', join: 'open' })
-  const { group: gc } = await c.web.request('group.create', { name: 'Feira', join: 'open' })
-  const { group: gb } = await b.web.request('group.create', { name: 'Própria', join: 'open' })
+  const { community: ca, group: ga } = await community(a, 'Horta')
+  const { community: cc, group: gc } = await community(c, 'Feira')
+  const { community: cb, group: gb } = await community(b, 'Própria')
+  await share(a, b, ca)
   await share(a, b, ga)
   await share(c, b, gc)
   await store.writeFollows(b.storage, [c.key])
-  t.is((await b.web.request('group.join', { group: ga })).state, 'member')
+  t.alike(await b.web.request('community.join', { community: ca }), { state: 'member', group: ga })
   const own = (await store.readGroupWriters(b.storage)).find((e) => e.group === ga)
-  const cores = [ga, gc, gb, own.key]
+  const cw = (await store.readGroupWriters(b.storage)).find((e) => e.group === ca)
+  const cores = [ga, gc, gb, cb, ca, own.key, cw.key]
+  t.absent(await store.groupCoreExists(b.storage, cc), 'C of c never shared')
   for (const key of cores) t.ok(await store.groupCoreExists(b.storage, key), 'stored before the reset')
   await b.node.reset()
   for (const key of cores) t.absent(await store.groupCoreExists(b.storage, key), 'group core removed')
@@ -410,7 +496,8 @@ test('reset removes every group core, the group kv lists and unfollowed binding 
 
 test('private groups: locked state wipes keys and reads sealed, unlock and a reload read again, reset drops the box nonce', async (t) => {
   const a = await setup(t)
-  const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'open', visibility: 'private' })
+  const { community: C } = await community(a)
+  const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'open', visibility: 'private', community: C })
   await a.web.request('group.post', { group, text: 'só para membros' })
   t.alike((await a.web.request('group.read', { group })).items.map((p) => p.text), ['só para membros'])
 
@@ -436,4 +523,122 @@ test('private groups: locked state wipes keys and reads sealed, unlock and a rel
   await b.node.reset()
   t.is(await a.storage.readJson('groupBoxDevice'), null, 'reset clears the box nonce')
   t.alike(a.internal.concat(b.internal), [])
+})
+
+async function diaryLength (s) {
+  const diary = await store.openDiary(s.storage)
+  try { return diary.length } finally { await diary.close() }
+}
+
+test('a community-authority ban waits for the caller\'s community writer and pushes it', async (t) => {
+  const sync = controlledSync()
+  const a = await setup(t)
+  const s = await setup(t, { assoc: a.assoc, factory: sync.factory, writeGate: true })
+  // A creates C and G (only the creator creates groups); S joins C and is
+  // made admin: it holds G but no writer in it, so its ban goes to its CW.
+  const { community: C } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  const { group: G } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open', community: C })
+  await share(a, s, C)
+  t.is((await ops.communityJoin(s.ctx, { community: C })).state, 'member')
+  const cw = (await store.readGroupWriters(s.storage)).find((e) => e.group === C).key
+  await share(s, a, cw)
+  await ops.communitySetAdmin(a.ctx, { community: C, member: s.key, on: true })
+  await share(a, s, C)
+  await share(a, s, G)
+  t.absent((await store.readGroupWriters(s.storage)).some((e) => e.group === G), 'S holds no writer in G')
+
+  const before = await groupLength(s, cw)
+  const banning = s.web.request('group.ban', { group: G, member: KEY, on: true })
+  const gate = await sync.next(0)
+  t.is(gate.writers.get(cw), before, 'the gate run holds the CW')
+  gate.emit({ event: 'own-synced', length: await diaryLength(s) })
+  await new Promise((resolve) => setImmediate(resolve))
+  t.absent(gate.aborted, 'the gate waits for the community writer')
+  t.is(sync.runs.length, 1, 'nothing written yet')
+  gate.emit({ event: 'group-synced', key: cw, length: before })
+  const push = await sync.next(1)
+  t.is(push.writers.get(cw), before + 1, 'the ban went to the CW and the push carries its new length')
+  push.emit({ event: 'group-pushed', key: cw, length: before + 1 })
+  push.finish()
+  t.alike(await banning, { ok: true })
+  t.alike(s.internal, [])
+})
+
+// Opens the gate of `gate` for every own core but `held`: the write must
+// still wait for `held`.
+async function gateWaitsFor (t, sync, gate, s, others, held, label) {
+  gate.emit({ event: 'own-synced', length: await diaryLength(s) })
+  for (const [key, length] of others) gate.emit({ event: 'group-synced', key, length })
+  await new Promise((resolve) => setImmediate(resolve))
+  t.absent(gate.aborted, label)
+  t.is(sync.runs.length, 1, 'nothing written yet')
+  gate.emit({ event: 'group-synced', key: held, length: gate.writers.get(held) })
+}
+
+test('community.leave waits for the device\'s group writers before appending to them', async (t) => {
+  const sync = controlledSync()
+  const s = await setup(t, { factory: sync.factory, writeGate: true })
+  const a = await setup(t, { assoc: s.assoc })
+  const { community: C, group: general } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  await share(a, s, C)
+  await share(a, s, general)
+  t.alike(await ops.communityJoin(s.ctx, { community: C }), { state: 'member', group: general })
+  const kv = await store.readGroupWriters(s.storage)
+  const cw = kv.find((e) => e.group === C).key
+  const gw = kv.find((e) => e.group === general).key
+  const leaving = s.web.request('community.leave', { community: C })
+  const gate = await sync.next(0)
+  await gateWaitsFor(t, sync, gate, s, [[cw, gate.writers.get(cw)]], gw, 'the gate waits for the Geral writer')
+  const push = await sync.next(1)
+  t.ok(push.writers.has(gw) && push.writers.has(cw), 'the push carries the CW and the Geral writer')
+  push.finish()
+  t.alike(await leaving, { state: 'left' })
+  t.alike(s.internal, [])
+})
+
+test('community.ban waits for a private group root before rotating its key', async (t) => {
+  // Built through the RPC without the gate (private groups need the box),
+  // then reopened with it.
+  const s0 = await setup(t)
+  const m = await setup(t, { assoc: s0.assoc })
+  const { community: C, group: general } = await s0.web.request('community.create', { name: 'Bairro', join: 'open' })
+  const { group: P } = await s0.web.request('group.create', { name: 'Conselho', join: 'open', visibility: 'private', community: C })
+  await s0.web.request('group.post', { group: P, text: 'segredo' })
+  await share(s0, m, C)
+  t.is((await m.web.request('community.join', { community: C })).state, 'member')
+  await share(m, s0, (await store.readGroupWriters(m.storage)).find((e) => e.group === C).key)
+  await share(s0, m, P)
+  t.is((await m.web.request('group.join', { group: P })).state, 'requested')
+  await share(m, s0, (await store.readGroupWriters(m.storage)).find((e) => e.group === P).key)
+  t.alike(await s0.web.request('group.admit', { group: P, member: m.key, on: true }), { ok: true })
+  await s0.node.close()
+  const sync = controlledSync()
+  const s = await setup(t, { assoc: s0.assoc, storage: s0.storage, keyPair: s0.keyPair, prf: s0.prf, factory: sync.factory, writeGate: true })
+  const before = await groupLength(s, P)
+  const banning = s.web.request('community.ban', { community: C, member: m.key, on: true })
+  const gate = await sync.next(0)
+  await gateWaitsFor(t, sync, gate, s, [[C, gate.writers.get(C)], [general, gate.writers.get(general)]], P, 'the gate waits for the private root')
+  const push = await sync.next(1)
+  t.ok(push.writers.get(P) > before, 'the rotation went to the private root and is pushed')
+  push.finish()
+  t.alike(await banning, { ok: true })
+  t.alike(s.internal, [])
+})
+
+test('a resumed community.create waits for the roots of its plan', async (t) => {
+  const sync = controlledSync()
+  const s = await setup(t, { factory: sync.factory, writeGate: true })
+  let calls = 0
+  const failing = { ...s.ctx, groupKeyPair: (nonce) => { if (++calls === 5) throw new Error('falha injetada'); return s.ctx.groupKeyPair(nonce) } }
+  await t.exception(() => ops.communityCreate(failing, { name: 'Bairro', join: 'open' }), /falha injetada/)
+  const plan = await store.readCommunityCreate(s.storage)
+  t.is(await groupLength(s, plan.community), 1, 'stopped before the group-create')
+  const creating = s.web.request('community.create', { name: 'Bairro', join: 'open' })
+  const gate = await sync.next(0)
+  await gateWaitsFor(t, sync, gate, s, [[plan.group, gate.writers.get(plan.group)]], plan.community, 'the gate waits for the community root')
+  const push = await sync.next(1)
+  t.is(push.writers.get(plan.community), 2, 'the resumed group-create is pushed')
+  push.finish()
+  t.alike(await creating, { community: plan.community, group: plan.group })
+  t.alike(s.internal, [])
 })

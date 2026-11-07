@@ -71,6 +71,13 @@ export function shouldReloadOnShow ({ loadedAt, now, fresh, maxAgeMs = 60000 }) 
   return loadedAt === null || fresh === true || now - loadedAt >= maxAgeMs
 }
 
+// The native node has no own-growth signal, so it reloads on every show; the
+// hosted one reloads when forced, never loaded, written to locally, or stale.
+export function shouldReloadDiario ({ hosted, loadedAt, now, forced, wroteAt, maxAgeMs = 60000 }) {
+  if (hosted !== true || forced === true || loadedAt === null || wroteAt > loadedAt) return true
+  return shouldReloadOnShow({ loadedAt, now, fresh: false, maxAgeMs })
+}
+
 export const FEED_SYNCING_END = 'Ainda sincronizando quem você segue.'
 
 // Every feed.read preempts the sync run, which restarts after it (docs/rpc.md

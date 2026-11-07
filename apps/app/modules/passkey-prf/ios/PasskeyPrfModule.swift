@@ -11,9 +11,9 @@ import UIKit
 // UNSUPPORTED. Without the associated domain (webcredentials:<host>, see
 // ios/Varanda/Varanda.entitlements) the system refuses the rp.id, and its error
 // text is localized, so the build says it outright: Info.plist
-// VarandaWebCredentials is false until the entitlement is added, and while it
-// is false the module reports itself unavailable. Native error text never
-// reaches JS.
+// VarandaWebCredentials is true only in a build that carries the entitlement,
+// and while it is false the module reports itself unavailable. Native error
+// text never reaches JS.
 public class PasskeyPrfModule: Module {
   private var ceremony: AnyObject?
 
@@ -111,6 +111,14 @@ enum PasskeyRequests {
     request.displayName = user["displayName"] as? String ?? name
     request.userVerificationPreference = .required
     request.attestationPreference = .none
+    // Lets the manager refuse a second passkey for the same account (EXISTS)
+    // instead of creating a duplicate.
+    if let exclude = options["excludeCredentials"] as? [[String: Any]], !exclude.isEmpty {
+      request.excludedCredentials = exclude.compactMap { item in
+        guard let id = item["id"] as? String, let raw = Base64Url.decode(id) else { return nil }
+        return ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: raw)
+      }
+    }
     let input = try prfInput(options)
     request.prf = .inputValues(ASAuthorizationPublicKeyCredentialPRFAssertionInput.InputValues(saltInput1: input))
     return request

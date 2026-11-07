@@ -3,14 +3,16 @@
 // Android and web draw a backdrop and a rounded panel. Modal unmounts its
 // children when closed, so callers keep drafts outside the sheet. `background`
 // colours the body down to the bottom edge (home indicator included); it
-// defaults to white.
+// defaults to the card colour.
 
 import { Modal, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
-import { colors, layout, type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
+import { layout, type } from './theme'
 import { sideInset } from './sideInset'
 
 function TopRow ({ onClose, title, left, right }) {
+  const styles = useStyles(makeStyles)
   return (
     <View style={styles.topRow}>
       {title
@@ -33,17 +35,24 @@ function TopRow ({ onClose, title, left, right }) {
 }
 
 // Inside the iOS page sheet: its own safe-area insets.
-function IosContent ({ onClose, title, left, right, background, children }) {
+function IosContent ({ onClose, title, left, right, background, grabber, children }) {
+  const styles = useStyles(makeStyles)
   const insets = useSafeAreaInsets()
   return (
     <View style={styles.iosRoot}>
       <TopRow onClose={onClose} title={title} left={left} right={right} />
+      {grabber ? <View style={styles.grabberRow} pointerEvents='none'><View style={styles.grabber} /></View> : null}
       <View style={[styles.children, { paddingBottom: insets.bottom, backgroundColor: background }]}>{children}</View>
     </View>
   )
 }
 
-export function Sheet ({ open, onClose, title, left, right, background = colors.card, children }) {
+// `dismissable` false turns off the iOS swipe-down, which can close the page
+// sheet without waiting for onClose (a sheet with a send in flight).
+export function Sheet ({ open, onClose, title, left, right, background, grabber = false, dismissable = true, children }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  const bodyBackground = background ?? colors.card
   const insets = useSafeAreaInsets()
   const { width } = useWindowDimensions()
   if (Platform.OS === 'ios') {
@@ -53,10 +62,10 @@ export function Sheet ({ open, onClose, title, left, right, background = colors.
         animationType='slide'
         presentationStyle='pageSheet'
         onRequestClose={onClose}
-        allowSwipeDismissal
+        allowSwipeDismissal={dismissable}
       >
         <SafeAreaProvider>
-          <IosContent onClose={onClose} title={title} left={left} right={right} background={background}>{children}</IosContent>
+          <IosContent onClose={onClose} title={title} left={left} right={right} background={bodyBackground} grabber={grabber}>{children}</IosContent>
         </SafeAreaProvider>
       </Modal>
     )
@@ -77,16 +86,17 @@ export function Sheet ({ open, onClose, title, left, right, background = colors.
     >
       <Pressable style={styles.backdrop} accessibilityRole='button' accessibilityLabel='fechar' onPress={onClose} />
       <View style={[styles.panel, { top: insets.top + layout.sheetTop }]}>
+        {grabber ? <View style={styles.grabberRow} pointerEvents='none'><View style={styles.grabber} /></View> : null}
         <View style={{ paddingLeft: padL, paddingRight: padR }}>
           <TopRow onClose={onClose} title={title} left={left} right={right} />
         </View>
-        <View style={[styles.children, { paddingBottom: insets.bottom, paddingLeft: padL, paddingRight: padR, backgroundColor: background }]}>{children}</View>
+        <View style={[styles.children, { paddingBottom: insets.bottom, paddingLeft: padL, paddingRight: padR, backgroundColor: bodyBackground }]}>{children}</View>
       </View>
     </Modal>
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   iosRoot: { flex: 1, backgroundColor: colors.card },
   backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.45)' },
   panel: {
@@ -106,6 +116,12 @@ const styles = StyleSheet.create({
     borderTopRightRadius: layout.sheetRadius,
     overflow: 'hidden'
   },
+  // Floats over the top row so the row does not move. Drawn on iOS too: the
+  // page sheet has no system grabber (prefersGrabberVisible is never set).
+  // A full-width row centres the pill on every platform (absolute + alignSelf
+  // centres on the wrong axis on the web) and takes no touches.
+  grabberRow: { position: 'absolute', top: 6, left: 0, right: 0, alignItems: 'center', zIndex: 1 },
+  grabber: { width: 36, height: 4, borderRadius: 2, backgroundColor: colors.line },
   topRow: {
     height: layout.sheetTopRow,
     paddingHorizontal: 16,

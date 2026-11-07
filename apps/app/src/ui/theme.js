@@ -1,29 +1,8 @@
 // Design tokens of the app (docs: apps/site/artwork/app-design.md): colors,
-// avatar stripes, the sunset gradient, fonts, text styles and layout sizes.
+// avatar stripes, the sunset gradient, fonts, text styles, spacing, radii
+// and layout sizes.
 
 import { Platform } from 'react-native'
-
-export const colors = {
-  bg: '#fbf8f3',
-  card: '#ffffff',
-  ink: '#1f2a24',
-  soft: '#4a554e',
-  line: 'rgba(31,42,36,0.10)',
-  accent: '#1d6b4f',
-  accentSoft: 'rgba(29,107,79,0.10)',
-  accentInk: '#ffffff',
-  warm: '#fff4e0',
-  outline: 'rgba(31,42,36,0.30)',
-  ring: 'rgba(31,42,36,0.12)',
-  dim: 'rgba(31,42,36,0.35)',
-  tabBar: 'rgba(251,248,243,0.94)',
-  danger: '#a3201a',
-  warn: '#8a5a00',
-  placeholder: '#616c67',
-  skeleton: 'rgba(31,42,36,0.08)',
-  pillBg: '#1d6b4f',
-  pillInk: '#ffffff'
-}
 
 // Animation durations in milliseconds.
 export const motion = { fast: 150, normal: 250 }
@@ -51,6 +30,11 @@ export const fonts = {
   mono: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' })
 }
 
+// The browser draws its own focus ring inside our rounded fields; those
+// fields show focus on the whole pill instead (searchFocus below). Web only:
+// native text fields have no such ring.
+export const webInputReset = Platform.OS === 'web' ? { outlineStyle: 'none' } : {}
+
 export const type = {
   barTitle: { fontSize: 21, fontWeight: '800', lineHeight: 25, letterSpacing: -0.2 },
   profileName: { fontSize: 22, fontWeight: '800', lineHeight: 26, letterSpacing: -0.2 },
@@ -70,7 +54,25 @@ export const type = {
   stepLabel: { fontSize: 13, fontWeight: '700', lineHeight: 16, letterSpacing: 0.5, textTransform: 'uppercase' }
 }
 
-export const layout = {
+// The scale below is frozen so one screen cannot resize it for the rest.
+export const space = Object.freeze({
+  xs: 4,
+  sm: 8,
+  md: 12,
+  lg: 16,
+  xl: 24,
+  xxl: 32
+})
+
+export const radius = Object.freeze({
+  sm: 8,
+  md: 12,
+  lg: 18,
+  bubble: 18,
+  pill: 999
+})
+
+export const layout = Object.freeze({
   topBar: 52,
   tabBar: 49,
   fabSize: 56,
@@ -80,5 +82,6 @@ export const layout = {
   sheetRadius: 18,
   sheetTopRow: 56,
   band: 150,
-  column: 640
-}
+  column: 640,
+  hit: 44
+})

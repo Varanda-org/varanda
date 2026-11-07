@@ -23,23 +23,39 @@
 //   the photos keep their own viewer taps),
 //   onOpenAuthor (avatar and name), onOpenParent ('respondendo a X'),
 //   onOpenReposter, and the action bar: onReply, onRepost, onQuote, onLike,
-//   onFollow ('seguir', disabled while followPending), onReport, onDelete (each
-//   button shows only with its handler).
+//   onFollow ('seguir', disabled while followPending), onReport, onDelete.
+//   The bar is reply, repost, like, share and 'mais'. The repost button opens
+//   a small sheet (Republicar, and Citar with onQuote); report and delete live
+//   in the 'mais' sheet next to Copiar link, each only with its handler.
+// - link: a public http(s) URL of the post (postActions.shareLink decides);
+//   without one there is no Compartilhar. onNotice(text) shows the toast of
+//   a copy to the clipboard.
 // - onOpenMention(username): makes the @nome in the text and in the quote
-//   tappable (./MentionText). A text or quote with a mention is rendered
-//   outside the body's single accessible element, so the link is reachable by
-//   assistive tech and a tap on it never opens the conversation.
+//   tappable (./MentionText). The post text with an http(s)/www link or a
+//   handled mention is rendered outside the body's single accessible element,
+//   so the link is reachable by assistive tech and a tap on it opens the
+//   browser or the profile, never the conversation. A quote is lifted out only
+//   for a handled mention; its web links stay plain (./QuoteCard).
 
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { useEffect, useRef, useState } from 'react'
+import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
+import { pendingOpen, tapKind } from '../doubleTap'
 import { relativeTime } from '../format'
+import { hasLink } from '../links'
+import { moreActions, repostActions, shareLink } from '../postActions'
+import { canShare, copyText, shareUrl } from '../share'
+import { shareNav } from '../shareNav'
 import { whoOf } from '../who'
+import { ActionsSheet } from './ActionsSheet'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { MediaGrid } from './MediaGrid'
+import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
 import { QuoteCard } from './QuoteCard'
-import { colors, type } from './theme'
+import { type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
 
 const ICON = 18
 // A split toggle and its number never share touch area: a mis-tap on the
@@ -56,20 +72,37 @@ function countOf (counts, field) {
   return Number.isSafeInteger(n) && n > 0 ? n : null
 }
 
-// A filled heart: the Feather outline with a solid glyph inside (Feather has
-// outline glyphs only). The text-presentation selector keeps it from turning
-// into a coloured emoji.
-function Heart ({ filled, color }) {
-  if (!filled) return <Icon name='coracao' size={ICON} color={color} />
-  return (
-    <View style={styles.heart}>
-      <Text style={[styles.heartFill, { color }]} accessible={false}>♥︎</Text>
-      <Icon name='coracao' size={ICON} color={color} style={styles.heartLine} />
-    </View>
-  )
+const NATIVE_DRIVER = Platform.OS !== 'web'
+const BURST_MS = 600
+
+// Read at tap time, not per render: while VoiceOver or TalkBack runs, a tap
+// opens at once and never reaches the double tap. VoiceOver turns its own
+// activation of plain text into a synthetic touch, and two of them would like.
+let screenReaderOn = false
+if (Platform.OS !== 'web') {
+  try {
+    Promise.resolve(AccessibilityInfo.isScreenReaderEnabled()).then((on) => { screenReaderOn = on === true }, () => {})
+    AccessibilityInfo.addEventListener('screenReaderChanged', (on) => { screenReaderOn = on === true })
+  } catch {}
+}
+
+// The pop when a toggle turns on: the scale is owned by the row, so the icon
+// keeps it when the bar swaps between its split and plain layouts (the first
+// like gives the count that brings the split in).
+function pop (scale) {
+  scale.setValue(1)
+  Animated.sequence([
+    Animated.spring(scale, { toValue: 1.35, speed: 40, bounciness: 0, useNativeDriver: NATIVE_DRIVER }),
+    Animated.spring(scale, { toValue: 1, friction: 4, useNativeDriver: NATIVE_DRIVER })
+  ]).start()
+}
+
+function Bump ({ scale, children }) {
+  return <Animated.View style={{ transform: [{ scale }] }}>{children}</Animated.View>
 }
 
 function Action ({ label, onPress, disabled, on, count, split, children }) {
+  const styles = useStyles(makeStyles)
   return (
     <Pressable
       accessibilityRole='button'
@@ -92,8 +125,10 @@ export function PostRow ({
   author, name, username, avatar, at, text, replyToName, media, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
   onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
-  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onDelete
+  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onDelete, link, onNotice
 }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const likes = countOf(counts, 'likes')
   const reposts = countOf(counts, 'reposts')
   const hasMedia = Array.isArray(media) && media.length > 0
@@ -103,15 +138,155 @@ export function PostRow ({
   const title = displayText(who.title)
   const meta = who.subtitle ? displayText(who.subtitle) + ' · ' + time : time
   const open = fn(onOpen)
-  const openAuthor = fn(onOpenAuthor)
-  const openParent = fn(onOpenParent)
+  const like = fn(onLike)
+  const heartScale = useRef(new Animated.Value(1)).current
+  const repostScale = useRef(new Animated.Value(1)).current
+  const burstScale = useRef(new Animated.Value(0.6)).current
+  const burstOpacity = useRef(new Animated.Value(0)).current
+  const [burstOn, setBurstOn] = useState(false)
+  const [sheet, setSheet] = useState(null)
+  const reduceMotion = useRef(false)
+  const rowId = useRef({}).current
+  const previousTap = useRef(null)
+  useEffect(() => {
+    let live = true
+    try {
+      Promise.resolve(AccessibilityInfo.isReduceMotionEnabled()).then((reduce) => {
+        if (live) reduceMotion.current = reduce === true
+      }, () => {})
+    } catch {}
+    return () => {
+      live = false
+      pendingOpen.cancelOwn(rowId)
+    }
+  }, [])
+  const cancelPendingOpen = () => {
+    pendingOpen.cancel()
+    previousTap.current = null
+  }
+  const otherPress = (handler) => fn(handler) && ((...args) => {
+    cancelPendingOpen()
+    return handler(...args)
+  })
+  // Touch start also sees links and photos whose press handlers belong to
+  // children. Only a subsequent body press can complete the double tap.
+  const startTouch = () => {
+    const prev = pendingOpen.armedAt(rowId)
+    cancelPendingOpen()
+    previousTap.current = prev
+  }
+  const feedback = (scale) => {
+    tap('light')
+    if (!reduceMotion.current) pop(scale)
+  }
+  const pressLike = otherPress(like && (() => {
+    if (pending === 'like') return
+    if (!liked) feedback(heartScale)
+    return like()
+  }))
+  const doRepost = () => {
+    if (pending === 'repost') return
+    if (!reposted) feedback(repostScale)
+    return onRepost()
+  }
+  // With a quote handler the button asks Republicar or Citar; without one
+  // it keeps toggling the repost at once.
+  const pressRepost = otherPress(fn(onRepost) && (fn(onQuote) ? () => setSheet('repost') : doRepost))
+  // A screen reader hears that the button opens a choice, not a direct toggle.
+  const repostLabel = (reposted ? 'desfazer republicação' : 'republicar') + (fn(onQuote) ? ' ou citar' : '')
+  const href = shareLink(null, { link })
+  const pressShare = otherPress(href !== null && (async () => {
+    // Capability, not platform: the system sheet when the runtime has one,
+    // else the clipboard and a note.
+    const nav = shareNav()
+    if (canShare(nav)) {
+      await shareUrl(nav, { url: href, title: 'Varanda' })
+      return
+    }
+    const ok = await copyText(nav, href)
+    if (fn(onNotice)) onNotice(ok ? 'Link copiado' : 'Não foi possível copiar o link')
+  }))
+  const moreRows = [
+    ...moreActions(null, { link, onReport: fn(onReport) ? true : null }),
+    ...(fn(onDelete) ? [{ id: 'delete', icon: 'lixeira', label: 'Apagar', danger: true }] : [])
+  ]
+  const runMore = (row) => {
+    if (row.id === 'copy') {
+      return async () => {
+        const ok = await copyText(shareNav(), href)
+        if (fn(onNotice)) onNotice(ok ? 'Link copiado' : 'Não foi possível copiar o link')
+      }
+    }
+    if (row.id === 'report') return onReport
+    if (row.id === 'delete') return onDelete
+    return undefined
+  }
+  const moreSheet = moreRows.map((row) => ({ icon: row.icon, label: row.label, danger: row.danger, onPress: runMore(row) }))
+  const repostSheet = repostActions(null, { link }).filter((row) => row.id !== 'repost' || fn(onRepost)).map((row) => ({
+    icon: row.icon,
+    label: row.id === 'repost' && reposted ? 'Desfazer republicação' : row.label,
+    onPress: row.id === 'repost' ? doRepost : fn(onQuote)
+  }))
+  const hasMore = moreSheet.length > 0
+  const burst = () => {
+    if (reduceMotion.current) return
+    burstScale.setValue(0.6)
+    burstOpacity.setValue(0)
+    setBurstOn(true)
+    Animated.parallel([
+      Animated.timing(burstScale, { toValue: 1.2, duration: BURST_MS, useNativeDriver: NATIVE_DRIVER }),
+      Animated.sequence([
+        Animated.timing(burstOpacity, { toValue: 1, duration: BURST_MS / 3, useNativeDriver: NATIVE_DRIVER }),
+        Animated.timing(burstOpacity, { toValue: 0, duration: (BURST_MS * 2) / 3, useNativeDriver: NATIVE_DRIVER })
+      ])
+    ]).start(() => setBurstOn(false))
+  }
+  // Web double clicks select text and must never publish a signed like.
+  const doubleTap = open && like && Platform.OS !== 'web'
+  const openTap = doubleTap
+    ? () => {
+        const now = Date.now()
+        const kind = tapKind(previousTap.current, now)
+        cancelPendingOpen()
+        if (screenReaderOn) {
+          open()
+          return
+        }
+        if (kind === 'double') {
+          // Never unlikes, and never doubles a like already on its way.
+          if (!liked) pressLike()
+          burst()
+          return
+        }
+        pendingOpen.arm(open, rowId, now)
+      }
+    : otherPress(onOpen)
+  // Screen reader activation opens at once and never likes (the heart is its
+  // like control). iOS VoiceOver activates through onAccessibilityTap; without
+  // it the activation becomes a synthetic touch through openTap, and two quick
+  // activations would publish a like. TalkBack uses the 'activate' action.
+  const openNow = () => {
+    cancelPendingOpen()
+    open()
+  }
+  const a11yOpen = doubleTap
+    ? {
+        onAccessibilityTap: openNow,
+        accessibilityActions: [{ name: 'activate' }],
+        onAccessibilityAction: (event) => {
+          if (event.nativeEvent.actionName === 'activate') openNow()
+        }
+      }
+    : null
+  const openAuthor = otherPress(onOpenAuthor)
+  const openParent = otherPress(onOpenParent)
   const reposter = repostedBy && typeof repostedBy === 'object' ? repostedBy : null
   const reposterName = reposter ? displayText(whoOf({ name: reposter.name, username: reposter.username }).title) : ''
-  const openReposter = fn(onOpenReposter)
+  const openReposter = otherPress(onOpenReposter)
   // On the reposter's line, never the action bar: that 'seguir' follows the
   // original's author, and under their name it would read as the wrong person.
-  const followReposter = reposter ? fn(onFollowReposter) : undefined
-  const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onFollow) || fn(onReport) || fn(onDelete)
+  const followReposter = reposter ? otherPress(onFollowReposter) : undefined
+  const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || fn(onFollow) || hasMore || href !== null
   // Composed label for the post body element: author, reply-to, text, date.
   // The avatar link already provides profile access, so name here is context.
   const bodyParts = [
@@ -121,23 +296,24 @@ export function PostRow ({
     time
   ].filter(Boolean)
   const bodyLabel = bodyParts.join('. ')
-  const openMention = fn(onOpenMention)
+  const openMention = otherPress(onOpenMention)
   const quoteOn = quote && typeof quote === 'object'
-  const textOut = !!openMention && hasText && hasMention(text)
+  const textOut = hasText && (hasLink(text) || (!!openMention && hasMention(text)))
   // The screen gives a quote its own handler carrying the quoted author.
-  const quoteMention = (quoteOn && fn(quote.onOpenMention)) || openMention
-  const quoteOut = !!quoteMention && quoteOn && typeof quote.text === 'string' && hasMention(quote.text)
-  const quoteProp = quoteMention && quoteOn ? { ...quote, onOpenMention: quoteMention } : quote
+  const quoteMention = (quoteOn && otherPress(quote.onOpenMention)) || openMention
+  const quoteOut = quoteOn && typeof quote.text === 'string' && !!quoteMention && hasMention(quote.text)
+  const quoteProp = quoteOn ? { ...quote, onOpen: otherPress(quote.onOpen), onOpenMention: quoteMention } : quote
   const label = textOut ? bodyParts.filter((part) => part !== displayText(text, { multiline: true })).join('. ') : bodyLabel
   const textNode = hasText
     ? textOut
-      ? <MentionText text={text} onOpenMention={openMention} onOpenPlain={open} style={styles.text} />
+      ? <MentionText text={text} onOpenMention={openMention} onOpenPlain={openTap} style={styles.text} />
       : (
         <Pressable
           accessibilityRole={open ? 'link' : 'text'}
           accessibilityHint={open ? 'abre a conversa' : undefined}
           disabled={!open}
-          onPress={open}
+          onPress={openTap}
+          {...a11yOpen}
         >
           <Text style={styles.text}>{displayText(text, { multiline: true })}</Text>
         </Pressable>
@@ -146,7 +322,7 @@ export function PostRow ({
   const mediaNode = hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null
   const quoteNode = quoteOn ? <QuoteCard quote={quoteProp} now={now} /> : null
   return (
-    <View style={styles.row}>
+    <View style={styles.row} onTouchStart={Platform.OS !== 'web' ? startTouch : undefined}>
       {reposter
         ? (
           <View style={styles.reposted}>
@@ -195,12 +371,13 @@ export function PostRow ({
             interact with them directly (name, reply-to and text tap targets). */}
         <View style={styles.body}>
           <Pressable
-            onPress={open}
+            onPress={openTap}
             disabled={!open}
             accessible
             accessibilityRole={open ? 'link' : 'text'}
             accessibilityLabel={label}
             accessibilityHint={open ? 'abre a conversa' : undefined}
+            {...a11yOpen}
           >
             <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
               <View style={styles.head}>
@@ -217,7 +394,8 @@ export function PostRow ({
                   accessibilityRole={open ? 'link' : 'text'}
                   accessibilityLabel={open ? 'abrir conversa' : undefined}
                   disabled={!open}
-                  onPress={open}
+                  onPress={openTap}
+                  {...a11yOpen}
                   hitSlop={4}
                   style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
                 >
@@ -247,7 +425,7 @@ export function PostRow ({
           {textOut ? textNode : null}
           {textOut && (mediaNode || (quoteNode && !quoteOut))
             ? (
-              <Pressable accessible={false} tabIndex={-1} onPress={open} disabled={!open}>
+              <Pressable accessible={false} tabIndex={-1} onPress={openTap} disabled={!open}>
                 <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
                   {mediaNode}
                   {quoteOut ? null : quoteNode}
@@ -261,7 +439,7 @@ export function PostRow ({
               <View style={styles.bar}>
                 {fn(onReply)
                   ? (
-                    <Action label={'responder a ' + title} onPress={onReply} count={countOf(counts, 'replies')}>
+                    <Action label={'responder a ' + title} onPress={otherPress(onReply)} count={countOf(counts, 'replies')}>
                       <Icon name='resposta' size={ICON} color={colors.soft} />
                     </Action>
                     )
@@ -271,20 +449,20 @@ export function PostRow ({
                     ? (
                       <View style={styles.splitAction}>
                         <Action
-                          label={reposted ? 'desfazer republicação' : 'republicar'}
-                          onPress={onRepost}
+                          label={repostLabel}
+                          onPress={pressRepost}
                           disabled={pending === 'repost'}
                           on={!!reposted}
                           count={null}
                           split
                         >
-                          <Icon name='republicar' size={ICON} color={reposted ? colors.accent : colors.soft} />
+                          <Bump scale={repostScale}><Icon name='republicar' size={ICON} color={reposted ? colors.accent : colors.soft} /></Bump>
                         </Action>
                         <Pressable
                           accessibilityRole='button'
                           accessibilityLabel={'ver quem republicou, ' + reposts}
                           hitSlop={COUNT_SLOP}
-                          onPress={onOpenReposts}
+                          onPress={otherPress(onOpenReposts)}
                           style={styles.countAction}
                         >
                           <Text style={[styles.count, reposted && styles.countOn]}>{displayText(String(reposts))}</Text>
@@ -293,42 +471,44 @@ export function PostRow ({
                       )
                     : (
                       <Action
-                        label={reposted ? 'desfazer republicação' : 'republicar'}
-                        onPress={onRepost}
+                        label={repostLabel}
+                        onPress={pressRepost}
                         disabled={pending === 'repost'}
                         on={!!reposted}
                         count={reposts}
                       >
-                        <Icon name='republicar' size={ICON} color={reposted ? colors.accent : colors.soft} />
+                        <Bump scale={repostScale}><Icon name='republicar' size={ICON} color={reposted ? colors.accent : colors.soft} /></Bump>
                       </Action>
                       )
-                  : null}
-                {fn(onQuote)
-                  ? (
-                    <Action label='citar' onPress={onQuote} count={countOf(counts, 'quotes')}>
-                      <Icon name='citar' size={ICON} color={colors.soft} />
-                    </Action>
-                    )
-                  : null}
+                  // Without reposting (offline, a node that is not hosted) the same
+                  // button opens the sheet with Citar alone, so quoting never
+                  // disappears and the row keeps one look.
+                  : fn(onQuote)
+                    ? (
+                      <Action label='citar' onPress={otherPress(() => setSheet('repost'))} count={null}>
+                        <Icon name='republicar' size={ICON} color={colors.soft} />
+                      </Action>
+                      )
+                    : null}
                 {fn(onLike)
                   ? fn(onOpenLikes) && likes !== null
                     ? (
                       <View style={styles.splitAction}>
                         <Action
                           label={liked ? 'descurtir' : 'curtir'}
-                          onPress={onLike}
+                          onPress={pressLike}
                           disabled={pending === 'like'}
                           on={!!liked}
                           count={null}
                           split
                         >
-                          <Heart filled={!!liked} color={liked ? colors.accent : colors.soft} />
+                          <Bump scale={heartScale}><Icon name='coracao' filled={!!liked} size={ICON} color={liked ? colors.accent : colors.soft} /></Bump>
                         </Action>
                         <Pressable
                           accessibilityRole='button'
                           accessibilityLabel={'ver quem curtiu, ' + likes}
                           hitSlop={COUNT_SLOP}
-                          onPress={onOpenLikes}
+                          onPress={otherPress(onOpenLikes)}
                           style={styles.countAction}
                         >
                           <Text style={[styles.count, liked && styles.countOn]}>{displayText(String(likes))}</Text>
@@ -338,37 +518,51 @@ export function PostRow ({
                     : (
                       <Action
                         label={liked ? 'descurtir' : 'curtir'}
-                        onPress={onLike}
+                        onPress={pressLike}
                         disabled={pending === 'like'}
                         on={!!liked}
                         count={likes}
                       >
-                        <Heart filled={!!liked} color={liked ? colors.accent : colors.soft} />
+                        <Bump scale={heartScale}><Icon name='coracao' filled={!!liked} size={ICON} color={liked ? colors.accent : colors.soft} /></Bump>
                       </Action>
                       )
                   : null}
                 {fn(onFollow)
                   ? (
-                    <Action label={'seguir ' + title} onPress={onFollow} disabled={!!followPending}>
+                    <Action label={'seguir ' + title} onPress={otherPress(onFollow)} disabled={!!followPending}>
                       <Icon name='seguir' size={ICON} color={colors.soft} />
                     </Action>
                     )
                   : null}
-                {fn(onReport)
+                {href !== null
                   ? (
-                    <Action label={'denunciar publicação de ' + title} onPress={onReport}>
-                      <Icon name='bandeira' size={ICON} color={colors.soft} />
+                    <Action label='compartilhar' onPress={pressShare}>
+                      <Icon name='compartilhar' size={ICON} color={colors.soft} />
                     </Action>
                     )
                   : null}
-                {fn(onDelete)
+                {hasMore
                   ? (
-                    <Action label='apagar publicação' onPress={onDelete}>
-                      <Icon name='lixeira' size={ICON} color={colors.soft} />
+                    <Action label='mais ações' onPress={otherPress(() => setSheet('more'))}>
+                      <Icon name='mais' size={ICON} color={colors.soft} />
                     </Action>
                     )
                   : null}
               </View>
+              )
+            : null}
+          <ActionsSheet open={sheet === 'repost'} onClose={() => setSheet(null)} actions={repostSheet} />
+          <ActionsSheet open={sheet === 'more'} onClose={() => setSheet(null)} actions={moreSheet} />
+          {burstOn
+            ? (
+              <Animated.View
+                pointerEvents='none'
+                accessibilityElementsHidden
+                importantForAccessibility='no-hide-descendants'
+                style={[styles.burst, { opacity: burstOpacity, transform: [{ scale: burstScale }] }]}
+              >
+                <Icon name='coracao' filled size={64} color={colors.accent} />
+              </Animated.View>
               )
             : null}
         </View>
@@ -377,7 +571,7 @@ export function PostRow ({
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   row: {
     paddingTop: 12,
     paddingHorizontal: 16,
@@ -410,9 +604,7 @@ const styles = StyleSheet.create({
   countAction: { minHeight: 36, paddingLeft: 3, paddingRight: 8, justifyContent: 'center' },
   count: { ...type.counter, color: colors.soft },
   countOn: { color: colors.accent },
-  heart: { width: ICON, height: ICON, alignItems: 'center', justifyContent: 'center' },
-  heartFill: { position: 'absolute', fontSize: ICON - 2, lineHeight: ICON, textAlign: 'center' },
-  heartLine: { position: 'absolute' },
+  burst: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
   disabled: { opacity: 0.5 },
   pressed: { opacity: 0.6 }
 })

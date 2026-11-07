@@ -66,10 +66,14 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 // - /index/post/<author>/<seq>[/<cursor>] (cursor `<atMs>.<author>.<seq>`,
 //   the last reply of the previous page) -> Seeder#indexPost;
 // - /index/counts/<ref>,<ref>,... (1..INDEX_MAX_REFS refs) -> indexCounts;
-// - /index/member/<author>[/<before>] -> indexMember;
+// - /index/member/<author>[/<before>] -> indexMember (its answer carries, for a page only, the
+//   page hint page, closed, moved);
+// - /index/page-end/<author> -> indexPageEnd -> null | { endSeq } (the seq of
+//   the first verified page-close or page-moved, or null): a pointer page.feed
+//   fetches and verifies itself (docs/protocol.md §12);
 // - /index/search/<segment> (1..4 tokens of [a-z0-9]{1,20} joined by '-',
 //   the folded search text) -> indexSearch(segment) -> null | { members:
-//   [{ author, profileSeq, usernameSeq }] (at most 20), more, indexing,
+//   [{ author, profileSeq, usernameSeq, [page, closed, moved] }] (at most 20), more, indexing,
 //   complete }; a query with no hit is 200 with members: [].
 // - /index/topic/<tokens>[/<cursor>] -> Seeder#indexTopic: tokens are
 //   folded [a-z0-9] words of 2..32 chars joined by a literal '+', 1..8 of
@@ -90,8 +94,10 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   are null until the seeder has verified the root's header (they stay
 //   while a writer of G is served after the root was purged or refused, with
 //   rootServed false and creator null), `name` stays null for a private root.
-//   `community` is the community the group is linked with from both sides
-//   (hex64), or null.
+//   `community` is the parent community the header names (hex64; null for a
+//   community root or an unverified header) and `attached` whether that
+//   community's catalogue hints attach the group. A community's writers are
+//   its root and its community writers.
 //   /index/groups/<D> -> indexGroups: `{ groups: [{ group, writer, seq,
 //   left }] (one per group, at most 64), indexing, complete }`.
 //   /index/group-search/<segment> (the segment as in /index/search) ->
@@ -100,13 +106,22 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   root header's peer text, returned as data (clients render them through
 //   displayText). Like the topic words, the segment reaches the seeder and
 //   is never logged or echoed.
-// - /index/community/<C> -> Seeder#indexCommunity: `{ name, groups: [{ group,
-//   name, writerCount }] (linked from both sides, at most 32; a private
-//   group is only { group, visibility: 'private' }), indexing,
-//   complete }`; a blocked key or one that is no community root here is
-//   the generic 404.
+// - /index/community/<C> -> Seeder#indexCommunity: `{ name, join, creator,
+//   members, groups: [{ group, visibility, join, name, writerCount }]
+//   (attached groups, key order, at most 32; name and writerCount null for
+//   a private group), next, indexing, complete }`; `next` is null or the
+//   last row's key. /index/community/<C>/groups/<cursor> ->
+//   indexCommunityGroups: `{ groups, next, indexing, complete }`, the rows
+//   after the cursor. A blocked key or one that is no community root here
+//   is the generic 404.
 // - /index/likes|reposts/<author>/<seq>[/<cursor>] -> Seeder#indexEngagers
 //   (at most 20 like/repost record refs, newest first by the engager's at).
+// - /index/follows/<author> -> Seeder#indexFollowCounts (`{ seguindo,
+//   seguidores, indexing, complete }`) and
+//   /index/follows/<author>/seguindo|seguidores[/<cursor>] (cursor
+//   `<atMs>.<key>`, no seq: a follow pair is unique by key) ->
+//   Seeder#indexFollows (at most 20 rows, newest first). Follower counts
+//   and lists are public by decision; the seeder parses the cursor.
 // Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
 // construction (page sizes bound every list; apps/cli/test/seed-ws.test.js
 // proves the worst case); HEAD sends the headers only. Load has its own
@@ -115,6 +130,22 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 // else 503 'ocupado'; a response still open after INDEX_DEADLINE_MS is
 // destroyed. Duplicate refs in /index/counts collapse before the seeder is
 // asked. Nothing is logged and nothing of the path is echoed.
+//
+// The listener also serves the chunks of encrypted DM media (Caddy's
+// `handle /blob/*` proxies here, as /media): GET|HEAD /blob/<id>/<index>,
+// id the blob id (lower-case hex64) and index a canonical decimal, no query
+// string. Seeder#blobChunk(idHex, index) hands back the stored frame of a
+// COMPLETE blob only, exactly as stored (it is ciphertext under a key only
+// the DM carries); an unknown or incomplete blob, an index at or past the
+// blob's count, a seeder without the blob pool (--no-dm) and a query string
+// (even an empty '?') are all the same 404 'não encontrado' with no-store,
+// so the answer never says whether the id exists. No auth and no cookie are
+// read or set; a hit is 200 application/octet-stream, nosniff, with
+// Cache-Control: private, max-age=604800 (the pool keeps a blob 7 days), so
+// a shared cache never keeps it. Host first (421), other methods 405. The
+// load is the /media budget itself (its in-flight cap and its token bucket,
+// shared), so the socket cap below stays right. Nothing is logged: no id, no
+// index, no address.
 //
 // Finally, and only when startSeedWs is given a `triageToken`, the listener
 // answers GET /moderation-post/<D>/<seq> for the account service's report
@@ -133,7 +164,7 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 // plus the token-authenticated loopback for authenticity; its own
 // re-validation only guards against malformed or wrong-type records.
 // Exposure: the public never reaches this path. Caddy proxies only
-// /seeder, /account/*, /media/* and /index/* to this listener
+// /seeder, /account/*, /media/*, /blob/* and /index/* to this listener
 // (deploy/seeder/Caddyfile), and this route is deliberately not added
 // there. The token still gates it because "loopback" is not "trusted":
 // any local process, and any browser page through a DNS-rebinding or a
@@ -187,12 +218,22 @@ const MEDIA_HEADERS = {
   'Accept-Ranges': 'none'
 }
 
+const BLOB_PREFIX = '/blob'
+const BLOB_RE = /^\/blob\/([0-9a-f]{64})\/(0|[1-9][0-9]{0,2})$/
+const BLOB_HEADERS = {
+  'Content-Type': 'application/octet-stream',
+  'X-Content-Type-Options': 'nosniff',
+  'Cache-Control': 'private, max-age=604800',
+  'Accept-Ranges': 'none'
+}
+
 const INDEX_PREFIX = '/index'
 const INDEX_MAX_REFS = 31
 const INDEX_POST_RE = /^\/index\/post\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 // 1..INDEX_MAX_REFS refs `<hex64>:<seq>`, comma-separated, no trailing comma.
 const INDEX_COUNTS_RE = /^\/index\/counts\/([0-9a-f]{64}:[1-9][0-9]{0,14}(?:,[0-9a-f]{64}:[1-9][0-9]{0,14}){0,30})$/
 const INDEX_MEMBER_RE = /^\/index\/member\/([0-9a-f]{64})(?:\/([1-9][0-9]{0,14}))?$/
+const INDEX_PAGE_END_RE = /^\/index\/page-end\/([0-9a-f]{64})$/
 // 1..4 lowercase ascii tokens of 1..20 chars joined by single '-'.
 const INDEX_SEARCH_RE = /^\/index\/search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
 // 1..8 folded words of 2..32 [a-z0-9] chars joined by a literal '+', then an
@@ -204,7 +245,10 @@ const INDEX_GROUP_RE = /^\/index\/group\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
 const INDEX_GROUPS_RE = /^\/index\/groups\/([0-9a-f]{64})$/
 const INDEX_GROUP_SEARCH_RE = /^\/index\/group-search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
 const INDEX_COMMUNITY_RE = /^\/index\/community\/([0-9a-f]{64})$/
+const INDEX_COMMUNITY_GROUPS_RE = /^\/index\/community\/([0-9a-f]{64})\/groups\/([0-9a-f]{64})$/
 const INDEX_ENGAGERS_RE = /^\/index\/(likes|reposts)\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+const INDEX_FOLLOW_COUNTS_RE = /^\/index\/follows\/([0-9a-f]{64})$/
+const INDEX_FOLLOWS_RE = /^\/index\/follows\/([0-9a-f]{64})\/(seguindo|seguidores)(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
 const INDEX_BURST = 64
@@ -429,10 +473,10 @@ function refuse (socket, code, reason) {
 // deadlineMs }), for tests; index: the same for the /index limits
 // ({ maxInFlight, rate, burst }). sockets: optional socket cap of the
 // listener (see socketCap). The seeder's indexPost(authorHex, seq,
-// cursor), indexCounts(refs), indexMember(authorHex, before),
+// cursor), indexCounts(refs), indexMember(authorHex, before), indexPageEnd(authorHex),
 // indexSearch(segment) and indexEngagers(kind, authorHex, seq, cursor) ->
 // null | plain object back /index; indexSearch's
-// object is { members: [{ author, profileSeq, usernameSeq }] (at most 20),
+// object is { members: [{ author, profileSeq, usernameSeq, [page, closed, moved] }] (at most 20),
 // more, indexing, complete }. The search segment shares the index bucket
 // and in-flight cap and is never logged or echoed. triageToken: optional
 // 64 lower-case hex secret that enables /moderation-post (absent, null or
@@ -484,6 +528,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexCounts', [[...new Set(m[1].split(','))]]] // duplicates collapse: each ref costs one lookup
     m = INDEX_MEMBER_RE.exec(url)
     if (m) return ['indexMember', [m[1], m[2] === undefined ? null : Number(m[2])]]
+    m = INDEX_PAGE_END_RE.exec(url)
+    if (m) return ['indexPageEnd', [m[1]]]
     m = INDEX_SEARCH_RE.exec(url)
     if (m) return ['indexSearch', [m[1]]]
     m = INDEX_TOPIC_RE.exec(url)
@@ -496,12 +542,18 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexGroupSearch', [m[1]], searchBody]
     m = INDEX_COMMUNITY_RE.exec(url)
     if (m) return ['indexCommunity', [m[1]], communityBody]
+    m = INDEX_COMMUNITY_GROUPS_RE.exec(url)
+    if (m) return ['indexCommunityGroups', [m[1], m[2]], communityGroupsBody]
+    m = INDEX_FOLLOW_COUNTS_RE.exec(url)
+    if (m) return ['indexFollowCounts', [m[1]]]
+    m = INDEX_FOLLOWS_RE.exec(url)
+    if (m) return ['indexFollows', [m[1], m[2], m[3] === undefined ? null : m[3]]]
     return null
   }
 
   // The seeder's group answers flattened into the wire shape. The root
   // header is null until the root is served.
-  function groupBody ({ header, rootServed, community, writers, next, indexing, complete }) {
+  function groupBody ({ header, rootServed, community, attached, writers, next, indexing, complete }) {
     const h = header || {}
     return {
       kind: h.kind ?? null,
@@ -511,6 +563,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       creator: h.diary ?? null,
       rootServed: rootServed === true,
       community: typeof community === 'string' && HEX64_RE.test(community) ? community : null,
+      attached: attached === true,
       writers,
       next,
       indexing,
@@ -527,15 +580,35 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
   }
 
-  function communityBody ({ name, groups, indexing, complete }) {
+  // A private group's row carries no name and no count. `next` is the last
+  // row's key or null: readers reject any other cursor.
+  function communityRows (groups) {
+    return groups.map(({ group, visibility, join, name, writerCount }) => visibility === 'private'
+      ? { group, visibility: 'private', join, name: null, writerCount: null }
+      : { group, visibility: 'public', join, name: name ?? null, writerCount })
+  }
+
+  function communityNext (next, rows) {
+    return next !== null && rows.length > 0 && next === rows[rows.length - 1].group ? next : null
+  }
+
+  function communityBody ({ name, join, creator, members, groups, next, indexing, complete }) {
+    const rows = communityRows(groups)
     return {
       name: name ?? null,
-      groups: groups.map(({ group, visibility, name, members }) => visibility === 'private'
-        ? { group, visibility: 'private' }
-        : { group, name: name ?? null, writerCount: members }),
+      join: join === 'open' || join === 'approval' ? join : null,
+      creator: typeof creator === 'string' && HEX64_RE.test(creator) ? creator : null,
+      members,
+      groups: rows,
+      next: communityNext(next, rows),
       indexing,
       complete
     }
+  }
+
+  function communityGroupsBody ({ groups, next, indexing, complete }) {
+    const rows = communityRows(groups)
+    return { groups: rows, next: communityNext(next, rows), indexing, complete }
   }
 
   // A null or non-object answer, a missing method, a throw or a rejection,
@@ -763,6 +836,32 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     res.flushHeaders()
     await streamBlocks({ res, blocks: read.blocks, bytes: read.bytes, closed, isClosed, track })
   }
+  // Synchronous read, but the slot is held until the response closes, as
+  // for /media, so slow readers count against the shared cap.
+  function serveBlob (req, res, match) {
+    if (!takeToken() || inFlight >= maxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+    inFlight++
+    let released = false
+    const timer = setTimeout(() => res.destroy(), deadlineMs)
+    timer.unref()
+    res.once('close', () => {
+      clearTimeout(timer)
+      if (released) return
+      released = true
+      inFlight--
+    })
+    let frame = null
+    try {
+      if (typeof seeder.blobChunk === 'function') frame = seeder.blobChunk(match[1], Number(match[2]))
+    } catch {
+      frame = null
+    }
+    if (!(frame instanceof Uint8Array) || frame.byteLength === 0) return send(res, 404, NOT_FOUND)
+    res.writeHead(200, { ...BLOB_HEADERS, 'Content-Length': frame.byteLength })
+    if (req.method === 'HEAD') return res.end()
+    res.end(frame)
+  }
+
   // Filled once listening (port 0 case); no request arrives before that.
   let hosts = new Set()
   const hostOk = (req) => typeof req.headers.host === 'string' && hosts.has(req.headers.host.toLowerCase())
@@ -783,6 +882,16 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       const match = MEDIA_RE.exec(req.url)
       if (!match) return send(res, 404, NOT_FOUND)
       return serveMedia(req, res, match).catch(() => res.destroy())
+    }
+    if (pathname === BLOB_PREFIX || pathname.startsWith(BLOB_PREFIX + '/')) {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
+      const match = req.url.includes('?') ? null : BLOB_RE.exec(req.url)
+      if (!match) return send(res, 404, NOT_FOUND)
+      try {
+        return serveBlob(req, res, match)
+      } catch {
+        return res.destroy()
+      }
     }
     if (pathname === INDEX_PREFIX || pathname.startsWith(INDEX_PREFIX + '/')) {
       if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
@@ -907,6 +1016,7 @@ module.exports = {
   MEDIA_RATE,
   MEDIA_BURST,
   MEDIA_DEADLINE_MS,
+  BLOB_RE,
   INDEX_POST_RE,
   INDEX_COUNTS_RE,
   INDEX_MEMBER_RE,
@@ -916,7 +1026,10 @@ module.exports = {
   INDEX_GROUPS_RE,
   INDEX_GROUP_SEARCH_RE,
   INDEX_COMMUNITY_RE,
+  INDEX_COMMUNITY_GROUPS_RE,
   INDEX_ENGAGERS_RE,
+  INDEX_FOLLOW_COUNTS_RE,
+  INDEX_FOLLOWS_RE,
   INDEX_MAX_REFS,
   INDEX_MAX_IN_FLIGHT,
   INDEX_RATE,

@@ -8,6 +8,7 @@ const { createCert, createIssuerCert, createIssuedCert, createUsernameRecord } =
 const { buildFeed, shortKey, formatFeedItem, MAX_FUTURE_MS } = require('../lib/feed')
 const { testnet } = require('./helpers/net')
 const { displayWidth } = require('../lib/safe')
+const { signMoved, signClose, issuerCountersign } = require('../lib/page-lifecycle')
 
 const KA = 'a'.repeat(64)
 const KB = 'b'.repeat(64)
@@ -173,6 +174,45 @@ test('junk username records cost one candidate verification per log', (t) => {
   const b = run(after)
   t.is(b.username, null, 'junk after the valid record: an invalid newest record yields null')
   t.is(b.calls, 1, 'exactly one candidate verification')
+})
+
+test('usernames are verified only for the logs the page returns, with the same answers', (t) => {
+  const associationKey = crypto.keyPair()
+  const issuerKey = crypto.keyPair()
+  const association = b4a.toString(associationKey.publicKey, 'hex')
+  const issuerCert = createIssuerCert({ issuer: b4a.toString(issuerKey.publicKey, 'hex'), date: AT }, associationKey)
+  const KC = 'c'.repeat(64)
+  const at = (day) => '2026-01-0' + day + 'T00:00:00.000Z'
+  // KA: posts on days 1 and 5; KB: a post on day 2 and a repost of KA:1 on
+  // day 6; KC: a post on day 3 and no username record.
+  const logs = [
+    { key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: post('a1', at(1)) }, { seq: 2, record: createUsernameRecord({ member: KA, username: 'ana', date: AT }, issuerKey, issuerCert) }, { seq: 3, record: post('a2', at(5)) }] },
+    { key: KB, entries: [{ seq: 0, record: cert(KB) }, { seq: 1, record: createUsernameRecord({ member: KB, username: 'bia', date: AT }, issuerKey, issuerCert) }, { seq: 2, record: post('b1', at(2)) }, { seq: 3, record: { type: 'repost', to: { author: KA, seq: 1 }, on: true, at: at(6) } }] },
+    { key: KC, entries: [{ seq: 0, record: cert(KC) }, { seq: 1, record: post('c1', at(3)) }] }
+  ]
+  let calls = 0
+  const original = certModule.verifyUsernameRecord
+  certModule.verifyUsernameRecord = (...args) => {
+    calls++
+    return original(...args)
+  }
+  t.teardown(() => { certModule.verifyUsernameRecord = original })
+  const read = (opts) => {
+    calls = 0
+    const { items } = buildFeed({ logs, association, now: NOW, ...opts })
+    return { items: items.map((i) => [i.kind, i.author, i.seq, i.username]), calls }
+  }
+
+  const all = read({})
+  t.alike(all.items, [
+    ['post', KA, 1, 'ana'], ['post', KB, 2, 'bia'], ['post', KC, 1, null], ['post', KA, 3, 'ana'], ['repost', KB, 3, 'bia']
+  ])
+  t.is(all.calls, 2, 'one candidate per log that has one')
+  t.alike(read({ limit: 1 }), { items: [['repost', KB, 3, 'bia']], calls: 1 }, 'only the repost author')
+  t.alike(read({ limit: 2 }), { items: [['post', KA, 3, 'ana'], ['repost', KB, 3, 'bia']], calls: 2 })
+  t.alike(read({ limit: 1, before: { at: at(5), author: KA, seq: 3 } }), { items: [['post', KC, 1, null]], calls: 0 }, 'no record, no check')
+  t.alike(read({ limit: 3, before: { at: at(6), author: KB, seq: 3 } }), { items: [['post', KB, 2, 'bia'], ['post', KC, 1, null], ['post', KA, 3, 'ana']], calls: 2 }, 'once per log, not per item')
+  t.alike(read({ limit: 2, before: { at: at(3), author: KC, seq: 1 } }).items, all.items.slice(0, 2), 'the same usernames on every page')
 })
 
 test('limit must be Infinity or an integer >= 1', async (t) => {
@@ -717,4 +757,61 @@ test('a deletion leaves future refs, cursors and likes of what remains', (t) => 
   const hidden = buildFeed({ logs: [{ key: KA, entries: partial }, { key: KB, entries: futureRepost }], now: NOW })
   t.alike(hidden.items, [])
   t.alike(hidden.future, [KB + ':1'], 'future reporting is unchanged when only the target was deleted')
+})
+
+test('a verified page-moved hides the log after its seq', (t) => {
+  const hex = (kp) => b4a.toString(kp.publicKey, 'hex')
+  const assocKp = crypto.keyPair()
+  const issuerKp = crypto.keyPair()
+  const issuerCert = createIssuerCert({ issuer: hex(issuerKp), date: AT }, assocKp)
+  const assoc = issuerCert.association
+  const ownerKp = crypto.keyPair()
+  const P = hex(crypto.keyPair())
+  const fields = { type: 'page-moved', page: P, to: 'd'.repeat(64), gen: 2, at: AT, nonce: 'm'.repeat(43), actor: hex(ownerKp), association: assoc }
+  const moved = issuerCountersign({ ...fields, signature: signMoved(fields, ownerKp) }, issuerKp, issuerCert)
+  const entries = (m) => [
+    { seq: 0, record: cert(P) },
+    { seq: 1, record: post('before', T1) },
+    { seq: 2, record: repost(KB, 1, true, T1) },
+    { seq: 3, record: m },
+    { seq: 4, record: post('after', T2) },
+    { seq: 5, record: repost(KB, 2, true, T2) },
+    { seq: 6, record: tombstone(1) },
+    { seq: 7, record: tombstone(3) }
+  ]
+  const read = (m, opts = {}) => buildFeed({ logs: [{ key: P, entries: entries(m) }], association: assoc, now: NOW, ...opts })
+  const label = (i) => i.kind === 'repost' ? 'r' + i.to.seq : i.text
+
+  const cut = read(moved)
+  t.alike(cut.items.map(label), ['before', 'r1'], 'blocks after the move are ignored, a tombstone of the move included')
+  t.alike(cut.future, [], 'blocks past the cut are dropped, not reported as clock-future')
+
+  const bad = { ...moved, countersignature: 'e'.repeat(128) }
+  t.alike(read(bad).items.map(label), ['r1', 'after', 'r2'], 'a bad issuer signature cuts nothing')
+  t.alike(read(bad).future, [])
+  t.alike(read(moved, { revokedIssuers: new Set([issuerCert.issuer]) }).items.map(label), ['r1', 'after', 'r2'], 'a revoked issuer cuts nothing')
+  t.alike(read(moved, { association: 'f'.repeat(64) }).items.map(label), ['r1', 'after', 'r2'], 'another association cuts nothing')
+
+  const cfields = { type: 'page-close', page: P, gen: 2, at: AT, nonce: 'c'.repeat(43), actor: hex(ownerKp), association: assoc }
+  const closed = issuerCountersign({ ...cfields, signature: signClose(cfields, ownerKp) }, issuerKp, issuerCert)
+  const afterClose = read(closed)
+  t.alike(afterClose.items.map(label), ['before', 'r1'], 'a verified page-close ends the log too')
+  t.alike(afterClose.future, [])
+
+  // Callers pass entries already folded by readAll / readVisible: a delete of
+  // the terminal block (seq 3, block 7) must not lift the cut there either.
+  const { applyDeletes } = require('../lib/deletion')
+  for (const [m, what] of [[moved, 'page-moved'], [closed, 'page-close']]) {
+    const folded = applyDeletes(entries(m))
+    t.alike(folded[3], { seq: 3, record: m }, 'the fold keeps the ' + what)
+    const viaFold = buildFeed({ logs: [{ key: P, entries: folded }], association: assoc, now: NOW })
+    // The caller's fold already applied block 6 (a delete of 1 past the cut).
+    t.alike(viaFold.items.map(label), ['r1'], 'folded entries still cut at the ' + what)
+    const withRaw = buildFeed({ logs: [{ key: P, entries: folded, raw: entries(m) }], association: assoc, now: NOW })
+    t.alike(withRaw.items.map(label), ['before', 'r1'], 'with raw, a tombstone past the cut deletes nothing')
+    // A replica whose terminal block reads null in entries still cuts from raw.
+    const stripped = entries(m).map((e) => e.seq === 3 ? { seq: 3, record: null } : e)
+    const viaRaw = buildFeed({ logs: [{ key: P, entries: stripped, raw: entries(m) }], association: assoc, now: NOW })
+    t.alike(viaRaw.items.map(label), ['before', 'r1'], 'raw blocks decide the cut at the ' + what)
+  }
 })

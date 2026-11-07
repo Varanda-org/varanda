@@ -18,7 +18,7 @@ const { createSnapshot } = require('../lib/blocklist')
 const { writerHeader, groupHeader, groupPost, MAX_GROUP_WRITERS_PER_DIARY } = require('../lib/group')
 const { memberCertRecord, groupJoinRecord } = require('../lib/records')
 const store = require('../lib/store')
-const { hex, syncOnce, stored, fakeSeeder, diaryAndWriter, copyInto, runUntil, hasBlocklist, groupMember, never, inBackground, joinedRoot, blockDiary, readCerts, revokeIssuer } = require('./helpers/sync-groups')
+const { hex, PARENT, syncOnce, stored, fakeSeeder, diaryAndWriter, copyInto, runUntil, hasBlocklist, groupMember, never, inBackground, joinedRoot, blockDiary, readCerts, revokeIssuer } = require('./helpers/sync-groups')
 
 test('--once: two unservable hints from one seeder do not exclude a writer another seeder lists', async (t) => {
   t.timeout(120000)
@@ -46,7 +46,7 @@ test('--once: two unservable hints from one seeder do not exclude a writer anoth
   const w2key = hex(w2.key)
   await other.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: okey }, kp)))))
   await other.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: w2key, on: true }))))
-  await w2.append(b4a.from(JSON.stringify(writerHeader({ group, diary: okey }))))
+  await w2.append(b4a.from(JSON.stringify(writerHeader({ group, diary: okey, member: PARENT }))))
   keep = { key: w2key, diary: okey, length: 2, seq: 1 }
   setTimeout(() => { w2.append(b4a.from(JSON.stringify(groupPost({ text: 'tarde' })))).catch(() => {}) }, 4000)
   const m = await groupMember(t, kp, group)
@@ -111,7 +111,7 @@ test('stored writers of one diary listed under other diaries never exceed the pe
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
     cores.push(w)
     keys.push(hex(w.key))
     // Each listed under a diary of its own, so no hinted diary looks full.
@@ -145,7 +145,7 @@ test('writers kept on disk after a quota stop hold their per-diary slots, in the
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
     writers.push(w)
   }
   const keys = writers.map((w) => hex(w.key))
@@ -201,7 +201,7 @@ test('a later writer of a binding diary first gated through the quarantine is ga
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
     writers.push(w)
   }
   const keys = writers.map((w) => hex(w.key))
@@ -242,7 +242,7 @@ test('writers listed latest join first converge on the earliest joins within the
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
     writers.push(w)
   }
   const keys = writers.map((w) => hex(w.key)) // keys[i] joined at seq i + 1
@@ -304,7 +304,7 @@ test('a writer stored in an earlier run gives its slot to an earlier proven join
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
     writers.push(w)
   }
   const keys = writers.map((w) => hex(w.key)) // keys[i] joined at seq i + 1
@@ -392,7 +392,7 @@ test('a writer that serves another, over-quota block 0 after its gate is purged 
   const openHook = async (key) => {
     if (key !== wkey) return
     await w.truncate(0, { fork: 1 })
-    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, at: '2026-01-02T00:00:00.000Z' }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, at: '2026-01-02T00:00:00.000Z', member: PARENT }))))
     for (let i = 0; i < 5; i++) await w.append(b4a.from(JSON.stringify(groupPost({ text: 'x' + i }))))
   }
   const { events } = await syncOnce(bootstrap, m, { maxLogBlocks: 3, openHook, timeoutMs: 15000 })
@@ -435,7 +435,7 @@ test('a fork of a binding diary purges a stored writer of that diary that has no
   await quiet.ready()
   const qkey = hex(quiet.key)
   await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: qkey, on: true }))))
-  await quiet.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+  await quiet.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
   items.push({ key: wkey, diary: dkey, length: 2, seq: 1 })
   const m = await groupMember(t, kp, group)
   await copyInto(fake.store, m, [quiet])
@@ -488,7 +488,7 @@ test('a stored root whose header names a blocked diary that never bound it stays
   const root = cs.get({ name: 'root' })
   await root.ready()
   const rkey = hex(root.key)
-  await root.append(b4a.from(JSON.stringify(groupHeader({ diary: blockedDiary, name: 'Alheio', join: 'open' }))))
+  await root.append(b4a.from(JSON.stringify(groupHeader({ community: PARENT, member: PARENT, diary: blockedDiary, name: 'Alheio', join: 'open' }))))
   await copyInto(cs, m, [other, root])
   const mod = crypto.keyPair()
   store.writeBlocklist(m.dataDir, createSnapshot({ seq: 1, blocked: [blockedDiary] }, mod, createModeratorCert({ moderator: hex(mod.publicKey) }, kp)))
@@ -547,7 +547,7 @@ test('a writer listed after its binding diary rewrote its history is refused for
       // The diverged history binds a second writer, listed now.
       inBackground(async () => {
         await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: w2key, on: true }))))
-        await w2.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey }))))
+        await w2.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
         await w2.append(b4a.from(JSON.stringify(groupPost({ text: 'depois' }))))
         items.push({ key: w2key, diary: dkey, length: 2, seq: 3 })
         items.sort((x, y) => x.key < y.key ? -1 : 1)
@@ -574,7 +574,7 @@ test('a cold start purges the bound root of a blocked creator before the diary g
   const rkey = hex(root.key)
   await creator.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: ckey }, kp)))))
   await creator.append(b4a.from(JSON.stringify(groupJoinRecord({ group: rkey, writer: rkey, on: true }))))
-  await root.append(b4a.from(JSON.stringify(groupHeader({ diary: ckey, name: 'Bloqueado', join: 'open' }))))
+  await root.append(b4a.from(JSON.stringify(groupHeader({ community: PARENT, member: PARENT, diary: ckey, name: 'Bloqueado', join: 'open' }))))
   const m = await groupMember(t, kp, hex(crypto.randomBytes(32)))
   await copyInto(cs, m, [creator, root])
   const mod = crypto.keyPair()
@@ -605,8 +605,8 @@ test('a cold start with a forked stored diary purges the writer and the root it 
   await dcore.truncate(1, { fork: 1 })
   await dcore.append(b4a.from(JSON.stringify(groupJoinRecord({ group: rkey, writer: rkey, on: true }))))
   await dcore.append(b4a.from(JSON.stringify(groupJoinRecord({ group: rkey, writer: wkey, on: true }))))
-  await root.append(b4a.from(JSON.stringify(groupHeader({ diary: dkey, name: 'Bifurcado', join: 'open' }))))
-  await w.append(b4a.from(JSON.stringify(writerHeader({ group: rkey, diary: dkey }))))
+  await root.append(b4a.from(JSON.stringify(groupHeader({ community: PARENT, member: PARENT, diary: dkey, name: 'Bifurcado', join: 'open' }))))
+  await w.append(b4a.from(JSON.stringify(writerHeader({ group: rkey, diary: dkey, member: PARENT }))))
   const m = await groupMember(t, kp, hex(crypto.randomBytes(32)))
   await copyInto(cs, m, [dcore, root, w])
   const r = await runSync({ dataDir: m.dataDir, bootstrap: [], signal: AbortSignal.abort(), onEvent: () => {} })
@@ -677,7 +677,7 @@ test('a recorded bound root goes when its blocked creator is stored without the 
   const root = cs.get({ name: 'root' })
   await root.ready()
   const rkey = hex(root.key)
-  await root.append(b4a.from(JSON.stringify(groupHeader({ diary: ckey, name: 'Parcial', join: 'open' }))))
+  await root.append(b4a.from(JSON.stringify(groupHeader({ community: PARENT, member: PARENT, diary: ckey, name: 'Parcial', join: 'open' }))))
   const m = await groupMember(t, kp, hex(crypto.randomBytes(32)))
   await copyInto(cs, m, [creator, root])
   recordBoundRoot(m.dataDir, rkey)

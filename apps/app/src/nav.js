@@ -1,15 +1,24 @@
 // Pure screen stack for the screens that open above the tabs: 'conversa'
 // (a post and its replies, keyed by the post ref '<author hex64>:<seq>'),
-// 'membro' (a member's profile, keyed by the lowercase hex64 key) and
-// 'curtidas' (who liked or reposted a post, keyed by the post ref, params
-// { kind } with kind 'likes' or 'reposts'), 'cadeira' (a group) and
-// 'comunidade' (a community), both keyed by the lowercase hex64 root key. The stack is an immutable
-// (frozen) array, oldest first. Invalid entries are refused by returning the
-// stack unchanged (never throws); pushing the screen that is already on top
-// is a no-op, whatever its params; past MAX_DEPTH the oldest entry is dropped.
+// 'membro' (a member's profile), 'mensagem' (a private conversation) and
+// 'seguindo' (the list of people someone follows) and 'seguidores' (the people
+// who follow someone), keyed by a lowercase hex64 key (the key of the person whose
+// list it is, own or another member's), 'curtidas' (who liked or reposted a
+// post, keyed by the post ref, params { kind } with kind 'likes' or
+// 'reposts'), 'grupo' (a group), 'comunidade' (a community) and
+// 'comunidade-info' (its information page), all keyed by the lowercase
+// hex64 root key. 'conversa' stays the post thread.
+// 'paginas' (the member's pages) and 'novapagina' (create one) take no key;
+// 'paginaajustes' (one page's settings) is keyed by the page's hex64 key.
+// 'comunidades' (browse and create communities, stacked over the Conversas
+// inbox) and 'pedidos' (the message request folder) take no key either. The
+// stack is an immutable (frozen) array, oldest first. Invalid entries are
+// refused by returning the stack unchanged (never throws); pushing the
+// screen that is already on top is a no-op, whatever its params; past
+// MAX_DEPTH the oldest entry is dropped.
 
 export const MAX_DEPTH = 20
-export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'cadeira', 'comunidade'])
+export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos'])
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
@@ -32,7 +41,9 @@ export function isAuthorKey (s) {
 export function validEntry (entry) {
   if (!entry || typeof entry !== 'object') return false
   if (entry.screen === 'conversa') return isRef(entry.key)
-  if (entry.screen === 'membro' || entry.screen === 'cadeira' || entry.screen === 'comunidade') return isAuthorKey(entry.key)
+  if (entry.screen === 'membro' || entry.screen === 'mensagem' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
+  if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes') return isAuthorKey(entry.key)
+  if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'pedidos') return entry.key === undefined || entry.key === null || entry.key === ''
   if (entry.screen === 'curtidas') {
     const params = entry.params
     if (!params || typeof params !== 'object' || Array.isArray(params)) return false
@@ -66,6 +77,17 @@ export function push (stack, entry) {
 export function pop (stack) {
   if (!Array.isArray(stack) || stack.length <= 1) return EMPTY
   return Object.freeze(stack.slice(0, -1))
+}
+
+// One step back to the screen at index. Popping one entry at a time would
+// show every screen above it; a gesture or a header that returns to a chosen
+// screen needs that tail gone together. An index that is not a position in
+// this stack is refused, same as an invalid push.
+export function popTo (stack, index) {
+  if (!Array.isArray(stack)) return EMPTY
+  if (!Number.isSafeInteger(index) || index < 0 || index >= stack.length) return stack
+  if (index === stack.length - 1) return stack
+  return Object.freeze(stack.slice(0, index + 1))
 }
 
 export function reset () {

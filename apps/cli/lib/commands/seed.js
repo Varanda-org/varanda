@@ -5,6 +5,7 @@ const { UsageError } = require('../cli')
 const { startHealth, DEFAULT_HOST } = require('../health')
 const { safe, jsonLine } = require('@varanda/core/lib/safe')
 const { createPushRelay } = require('../push-relay')
+const { createPostageFile, createBlobPostageFile } = require('../dm-postage-file')
 
 const USAGE = 'node bin/varanda.js seed [key|cert add|list|drop <chave>|status]'
 
@@ -38,6 +39,9 @@ function eventLine (event) {
     case 'media-rejected': return 'media rejected ' + safe(event.key) + ' ' + safe(event.diary) + ' ' + safe(event.reason)
     case 'blocklist': return 'blocklist ' + safe(event.seq)
     case 'push': return 'push ' + safe(event.reason)
+    case 'dm': return 'dm ' + safe(event.reason)
+    case 'dm-stamp': return 'dm-stamp ' + safe(event.reason)
+    case 'blob': return 'blob ' + safe(event.reason)
     default: return safe(event.event)
   }
 }
@@ -80,6 +84,20 @@ async function listenWs (flags, seeder) {
   }
 }
 
+function noop () {}
+
+// The seeder's dm option: direct messages are on unless --no-dm, and with
+// them the blob stamps, the blob channel and the /blob route (all off with
+// --no-dm). The postage key files (dm-postage.json and blob-postage.json, two
+// separate key pairs) are read or made only when a peer first needs them,
+// never here. onDrop is the push relay's wake when there is one.
+function dmOption (flags, onDrop = noop) {
+  if (flags.noDm === true) return null
+  const dm = { postage: createPostageFile(flags.dataDir), blobPostage: createBlobPostageFile(flags.dataDir), onDrop }
+  if (flags.blobBytes != null) dm.blobBytes = flags.blobBytes
+  return dm
+}
+
 async function runSeeder (flags) {
   const log = (event) => {
     process.stdout.write((flags.json ? jsonLine(event) : eventLine(event)) + '\n')
@@ -95,9 +113,10 @@ async function runSeeder (flags) {
   if (flags.maxExternal != null) options.maxExternal = flags.maxExternal
   if (flags.frameMemory != null) options.maxFrameMemory = flags.frameMemory
   // Without VARANDA_PUSH_TOKEN no relay exists and the seeder skips push work.
-  const relay = flags.pushToken == null ? null : createPushRelay({ baseUrl: flags.accountHttp, token: flags.pushToken })
+  const relay = flags.pushToken == null ? null : createPushRelay({ baseUrl: flags.accountHttp, token: flags.pushToken, log })
   if (relay !== null) options.onPush = (ev) => relay.send(ev)
   log({ event: 'push', reason: relay === null ? 'desligado' : 'ligado' })
+  options.dm = dmOption(flags, relay === null ? noop : () => { relay.sendDmWake() })
   const seeder = new Seeder(options)
   // Handlers go in BEFORE start(): a signal during startup (DHT join) must not
   // take Node's default terminate path; the seeder is closed once start settles.
@@ -221,6 +240,7 @@ async function run (flags) {
 
 module.exports = {
   listLines,
+  dmOption,
   commands: {
     seed: { summary: 'semeador sempre ligado', run }
   }

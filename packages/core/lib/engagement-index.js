@@ -48,6 +48,9 @@ const REPLY_PAGE = 50
 const QUOTE_PAGE = 50
 const MEMBER_PAGE = 100
 const ENGAGER_PAGE = 20
+const NOTICE_ROWS_PER_ENGAGER = 64
+const NOTICE_ROWS_MAX = 4096
+const NOTICE_CACHE_AUTHORS = 16
 // Same value as lib/feed.js MAX_FUTURE_MS (not imported: this module only
 // requires ./records). An engager edge dated further ahead is hidden, never
 // removed, and appears once the clock catches up.
@@ -92,6 +95,12 @@ function compareEngagerStored (a, b) {
   if (a.atMs !== b.atMs) return a.atMs < b.atMs ? -1 : 1
   if (a.author !== b.author) return a.author > b.author ? -1 : 1
   return a.seq - b.seq
+}
+
+function compareNoticeRows (a, b) {
+  if (a.atMs !== b.atMs) return a.atMs > b.atMs ? -1 : 1
+  if (a.key !== b.key) return a.key < b.key ? -1 : 1
+  return b.seq - a.seq
 }
 
 function engagerLowerBound (list, key) {
@@ -221,7 +230,16 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   // A slower cursor must not resurrect a removed block or its incoming edges.
   const deleted = new Map()
   const deletedRefs = new Set()
+  // noticeRows memo: author -> qualifying edges sorted newest first, before
+  // the per-call filters. The notices channel admits a burst of 512 page
+  // messages then 2/s, so one member rereading Avisos must not rebuild and
+  // sort every edge aimed at its posts each time. Insertion order is the LRU
+  // order. Any write that can change an author's rows drops its entry.
+  const noticeCache = new Map()
 
+  function invalidateNotices (author) {
+    noticeCache.delete(author)
+  }
   function authorEntry (author) {
     let entry = authors.get(author)
     if (entry === undefined) {
@@ -352,6 +370,8 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       for (const ref of needed) if (!targets.has(ref)) extra++
       if (targets.size + extra > targetCap) return false
       const targetsBefore = targets.size
+      if (type === 'post') invalidateNotices(author)
+      if (to !== null) invalidateNotices(to.slice(0, 64))
       const entry = authorEntry(author)
       if (type === 'post') {
         entry.posts.set(seq, { replyTo, quote })
@@ -428,6 +448,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     try {
       if (typeof author !== 'string' || !HEX64.test(author) || !isSeq(seq)) return false
       const ref = author + ':' + seq
+      invalidateNotices(author)
       markDeleted(author, seq)
       deletedRefs.add(ref)
       const entry = authors.get(author)
@@ -494,6 +515,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       const engagement = entry.engagements.get(seq)
       if (engagement !== undefined) {
         const { type, to } = engagement
+        invalidateNotices(to.slice(0, 64))
         const kind = type === 'like' ? 'likes' : 'reposts'
         const target = targets.get(to)
         const edge = target?.[kind]?.get(author)
@@ -525,6 +547,8 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   // Quotas still count all accepted operations of every remaining diary.
   function removeDiary (author, onIncomingRemoved = null) {
     try {
+      // The diary's own edges sit on other authors' targets too.
+      noticeCache.clear()
       const removed = deleted.get(author)
       if (removed !== undefined) {
         for (const seq of removed) deletedRefs.delete(author + ':' + seq)
@@ -773,6 +797,83 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     }
   }
 
+  // Likes and reposts aimed at `author`'s indexed posts, as notice rows
+  // { key, seq, at, kind } newest first (atMs desc, key asc, seq desc). The
+  // first read of an author is O(edges aimed at its indexed posts), bounded
+  // by maxRecords, and memoized in noticeCache; later reads are one linear
+  // pass until a write touches that author. The notices channel serves it
+  // only to the key that proved itself, at that channel's message rate.
+  // `visible(engagerHex)` and the future rule run before the caps, so an
+  // engager the seeder hides or a far-future edge cannot evict real ones: a
+  // future edge stays hidden, never removed, as in engagers(). The caps
+  // forget older rows and never count: NOTICE_ROWS_PER_ENGAGER per engager
+  // first, so one engager cannot crowd out the others, then NOTICE_ROWS_MAX
+  // overall. Residual: an edge whose `at` is pre-1970 was clamped to atMs 0
+  // by atMillis, so its ISO string would not round-trip to the signed
+  // record; it is skipped, as a browser would drop it anyway. An `at` of
+  // exactly 1970-01-01T00:00:00.000Z is also stored as atMs 0 and skipped
+  // the same way.
+  function noticeRows (author, now, visible = allVisible) {
+    try {
+      if (typeof author !== 'string' || !HEX64.test(author)) return []
+      if (typeof now !== 'number' || !Number.isFinite(now)) return []
+      if (typeof visible !== 'function') visible = allVisible
+      const edges = noticeEdges(author)
+      const perEngager = new Map()
+      const shown = new Map()
+      const rows = []
+      for (const edge of edges) {
+        if (rows.length >= NOTICE_ROWS_MAX) break
+        if (edge.atMs - now > MAX_FUTURE_MS) continue
+        const seen = perEngager.get(edge.key) || 0
+        if (seen >= NOTICE_ROWS_PER_ENGAGER) continue
+        let ok = shown.get(edge.key)
+        if (ok === undefined) {
+          ok = !!visible(edge.key)
+          shown.set(edge.key, ok)
+        }
+        if (!ok) continue
+        perEngager.set(edge.key, seen + 1)
+        rows.push({ key: edge.key, seq: edge.seq, at: new Date(edge.atMs).toISOString(), kind: edge.kind })
+      }
+      return rows
+    } catch {
+      return []
+    }
+  }
+
+  function noticeEdges (author) {
+    const cached = noticeCache.get(author)
+    if (cached !== undefined) {
+      noticeCache.delete(author)
+      noticeCache.set(author, cached)
+      return cached
+    }
+    const edges = []
+    const entry = authors.get(author)
+    const refs = authorTargets.get(author)
+    if (entry !== undefined && refs !== undefined) {
+      for (const ref of refs) {
+        if (deletedRefs.has(ref)) continue
+        const parsed = validRef(ref)
+        if (parsed === null || !entry.posts.has(parsed.seq)) continue
+        const target = targets.get(ref)
+        if (target === undefined) continue
+        for (const [type, kind] of [['likes', 'like'], ['reposts', 'repost']]) {
+          if (target[type] === null) continue
+          for (const [engager, edge] of target[type]) {
+            if (engager === author || edge.atMs === 0) continue
+            edges.push({ key: engager, seq: edge.seq, atMs: edge.atMs, kind })
+          }
+        }
+      }
+      edges.sort(compareNoticeRows)
+    }
+    noticeCache.set(author, edges)
+    if (noticeCache.size > NOTICE_CACHE_AUTHORS) noticeCache.delete(noticeCache.keys().next().value)
+    return edges
+  }
+
   function stats () {
     return { records, targets: targets.size, saturated: records >= cap || targets.size >= targetCap || authorCap === 0 || fullAuthors > 0, maxRecords: cap }
   }
@@ -783,11 +884,12 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     authors.clear()
     deleted.clear()
     deletedRefs.clear()
+    noticeCache.clear()
     records = 0
     fullAuthors = 0
   }
 
-  return { add, removePost, removeRecord, removeDiary, post, counts, engagers, member, hints, stats, clear }
+  return { add, removePost, removeRecord, removeDiary, post, counts, engagers, member, hints, noticeRows, stats, clear }
 }
 
 module.exports = {
@@ -799,5 +901,8 @@ module.exports = {
   QUOTE_PAGE,
   MEMBER_PAGE,
   ENGAGER_PAGE,
+  NOTICE_ROWS_PER_ENGAGER,
+  NOTICE_ROWS_MAX,
+  NOTICE_CACHE_AUTHORS,
   CURSOR_RE
 }

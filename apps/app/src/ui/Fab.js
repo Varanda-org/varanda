@@ -3,9 +3,12 @@
 import { Pressable, StyleSheet } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Icon } from './Icon'
-import { colors, layout } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
+import { layout } from './theme'
 
 export function Fab ({ onPress }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const insets = useSafeAreaInsets()
   return (
     <Pressable
@@ -23,7 +26,7 @@ export function Fab ({ onPress }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   fab: {
     position: 'absolute',
     right: layout.fabRight,

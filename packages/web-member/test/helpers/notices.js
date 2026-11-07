@@ -2,7 +2,8 @@
 
 // Shared fixtures of the notices tests: copies of the helpers of
 // ../notices.test.js (which exports nothing), the seeder stand-in extended
-// with the 'varanda/notices/2' channel. Loopback only.
+// with the 'varanda/notices/2' and 'varanda/notices/3' channels. Loopback
+// only.
 const b4a = require('b4a')
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
@@ -12,7 +13,7 @@ const { connectClient } = require('./session')
 const { createCert, createSeederCert, createModeratorCert, createIssuerCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { memberCertRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
-const { attachNotices, attachNoticesV2, NOTICES_V2_PROTOCOL } = require('@varanda/core/lib/notices-net')
+const { attachNotices, attachNoticesV2, attachNoticesV3, NOTICES_V2_PROTOCOL, NOTICES_V3_PROTOCOL } = require('@varanda/core/lib/notices-net')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { createBrowserNode } = require('../../lib/node')
 const { memoryNodeStorage } = require('../../lib/node-storage')
@@ -71,11 +72,12 @@ function certOf (assoc) {
 // state.cores and an empty inventory. Unless notices is false it answers
 // 'varanda/notices/1' with state.page(target, after, limit, noise); when
 // state.pageV2 is a function it also answers 'varanda/notices/2' with it
-// (pages recorded in seeder.pagesV2). hang(connectionIndex) -> true leaves
-// that connection's pages unanswered. v2Silent: the seeder pairs
-// 'varanda/notices/2' but never opens it back (the member's `supported`
-// never settles).
-async function noticesSeeder (t, { signer, state, notices = true, hang = () => false, v2Silent = false }) {
+// (pages recorded in seeder.pagesV2), and likewise 'varanda/notices/3' with
+// state.pageV3 (seeder.pagesV3). hang(connectionIndex) -> true leaves
+// that connection's pages unanswered. v2Silent / v3Silent: the seeder pairs
+// 'varanda/notices/2' / 'varanda/notices/3' but never opens it back (the
+// member's `supported` never settles).
+async function noticesSeeder (t, { signer, state, notices = true, hang = () => false, v2Silent = false, v3Silent = false }) {
   const keyPair = crypto.keyPair()
   const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
@@ -85,6 +87,7 @@ async function noticesSeeder (t, { signer, state, notices = true, hang = () => f
     connections: 0,
     pages: [],
     pagesV2: [],
+    pagesV3: [],
     async close () {
       for (const s of wss.clients) s.terminate()
       await new Promise((resolve) => wss.close(() => resolve()))
@@ -111,6 +114,7 @@ async function noticesSeeder (t, { signer, state, notices = true, hang = () => f
       // A pairing that never settles keeps the member's open pending
       // (protomux rejects it once the notify resolves without a channel).
       if (v2Silent) noise.noiseStream.userData.pair({ protocol: NOTICES_V2_PROTOCOL }, () => new Promise(noop))
+      if (v3Silent) noise.noiseStream.userData.pair({ protocol: NOTICES_V3_PROTOCOL }, () => new Promise(noop))
       if (typeof state.pageV2 === 'function') {
         attachNoticesV2(noise, {
           role: 'seeder',
@@ -118,6 +122,16 @@ async function noticesSeeder (t, { signer, state, notices = true, hang = () => f
             seeder.pagesV2.push({ target, after, limit })
             if (hang(index)) return new Promise(noop)
             return state.pageV2(target, after, limit, noise)
+          }
+        })
+      }
+      if (typeof state.pageV3 === 'function') {
+        attachNoticesV3(noise, {
+          role: 'seeder',
+          page: ({ target, after, limit }) => {
+            seeder.pagesV3.push({ target, after, limit })
+            if (hang(index)) return new Promise(noop)
+            return state.pageV3(target, after, limit, noise)
           }
         })
       }

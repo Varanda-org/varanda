@@ -4,11 +4,26 @@
 // Never a key, a count, post text or a bio: the push service and the lock
 // screen see this text, and the actor's name is the only peer-supplied part.
 const { pushName } = require('@varanda/core/lib/push-events')
+const { DM_WAKE_TEXT } = require('@varanda/core/lib/dm-wake')
 
 const PUSH_TITLE = 'Varanda'
 const PUSH_FALLBACK_BODY = 'Você tem um aviso novo na Varanda'
 const PUSH_BODY_MAX = 120
 const NOBODY = 'Alguém'
+// The DM wake names nobody: no sender, no recipient. Its payload carries no
+// body: the worker (apps/app/scripts/sw.js) shows DM_WAKE_BODY for exactly
+// { v: 1, kind: 'dm-wake' }, and an older worker shows its fixed fallback.
+const DM_WAKE_BODY = DM_WAKE_TEXT
+
+function dmWakePayload () {
+  return JSON.stringify({ v: 1, kind: 'dm-wake' })
+}
+
+// An invite drop names nobody and carries no text either: the worker owns
+// its title and body, so the push service learns only that a notice came.
+function inviteDropPayload () {
+  return JSON.stringify({ v: 1, kind: 'invite-drop' })
+}
 
 const ACTIONS = {
   follow: ' começou a seguir você',
@@ -46,5 +61,8 @@ module.exports = {
   PUSH_TITLE,
   PUSH_FALLBACK_BODY,
   PUSH_BODY_MAX,
+  DM_WAKE_BODY,
+  dmWakePayload,
+  inviteDropPayload,
   pushBody
 }

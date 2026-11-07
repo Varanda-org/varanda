@@ -9,13 +9,20 @@
 //     return (any app can claim or forge it): the one-time code R arrives
 //     only in the result of the auth session the app opened,
 //     https://<installation>/account/app/conta (parseSessionReturn);
-//   - invite and profile links, either varanda:///<path> (empty host, so the
-//     path is the web path) or an https link of this installation.
-// A link is never consent to follow: the profile store records 'new' only.
+//   - invite, profile, group (/g/<hex64>) and community (/c/<hex64>) links,
+//     either varanda:///<path> (empty host, so the path is the web path) or
+//     an https link of this installation.
+// A link is never consent to follow or to join: the profile store records
+// 'new' only, and a group or community link only names what to open.
+// An https App Link that arrives before the installation loads is held, not
+// parsed (waitsForInstallation).
+// The module also decides who takes the hosted web's ?conta= page load
+// (LINK_RETURN in App.js, linkReturnTaker).
 
 import { installationOrigin } from './installation.js'
 import { parseSignupInvitePath, CODE_RE } from './signupInvite.js'
 import { parseProfilePath } from './profileLink.js'
+import { parseGroupPath, parseCommunityPath } from './groupLink.js'
 
 const MAX_URL = 400
 const AGE_PREFIX = 'varanda://idade?'
@@ -117,7 +124,8 @@ function linkPath (url) {
 }
 
 // -> { kind: 'convite', code } | { kind: 'perfil', username } |
-// { kind: 'perfil', key } | null. The paths go through the web parsers.
+// { kind: 'perfil', key } | { kind: 'grupo', key } |
+// { kind: 'comunidade', key } | null. The paths go through the web parsers.
 export function parseAppLink (url) {
   if (!clean(url)) return null
   const path = linkPath(url)
@@ -125,8 +133,21 @@ export function parseAppLink (url) {
   const code = parseSignupInvitePath(path)
   if (code !== null) return { kind: 'convite', code }
   const target = parseProfilePath(path)
-  if (target === null) return null
+  if (target === null) {
+    const group = parseGroupPath(path)
+    if (group !== null) return { kind: 'grupo', key: group }
+    const community = parseCommunityPath(path)
+    return community !== null ? { kind: 'comunidade', key: community } : null
+  }
   return target.username ? { kind: 'perfil', username: target.username } : { kind: 'perfil', key: target.key }
+}
+
+// An App Link can start the app before the saved installation loads, so
+// linkPath cannot yet tell whether the URL belongs to this installation.
+// App.js holds it and parses it again once one loads; a URL of another host
+// is dropped then.
+export function waitsForInstallation (url) {
+  return clean(url) && url.startsWith('https://') && installationOrigin() === null
 }
 
 // What the person pasted in the invite field: the bare code or a full
@@ -159,6 +180,22 @@ export function dropsHeldInvite (err, native) {
 // just refused the invite.
 export function invitePasteShown ({ native, required, held, refused } = {}) {
   return native === true && held !== true && (required === true || refused === true)
+}
+
+// The web's return from the Google step is one page load. A newcomer still on
+// the setup's 'vinculo' with node.info read and no certificate is finished by
+// the setup's LinkCard, so the shell forgets the return and the tabs come up
+// with nothing on top. While info is null certMissing is false, so the
+// 'vinculo' flash of a member who already has an account waits. 'conta' is
+// only for a member who already held a certificate, once the terms are
+// accepted and the setup is gone: Ajustes > Conta is then the only card that
+// offers 'confirmar vínculo'. Missing fields never give 'conta'.
+export function linkReturnTaker ({ held, termsOk, setupStep, step, certMissing } = {}) {
+  if (held !== true) return 'none'
+  if (termsOk !== true) return 'wait'
+  if (step === 'vinculo' && certMissing === true) return 'setup'
+  if (setupStep !== false) return 'wait'
+  return 'conta'
 }
 
 // One token per captured profile link: a lookup started for an older link

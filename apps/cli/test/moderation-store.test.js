@@ -1101,3 +1101,131 @@ test('appeal: v2 files read with no appeals; a malformed appeal row makes the st
   fs.writeFileSync(path.join(dir, FILE), JSON.stringify(noAppeals), { mode: 0o600 })
   throwsCode(t, () => openModerationStore(dir, { now: () => T0, association: m.association }).listAppeals(), 'indisponivel', 'v3 without appeals')
 })
+
+function dmReport (target, reporter = key(), extra = {}) {
+  return { reporter, target, reason: 'assedio', text: '', quote: 'mensagem ruim', signature: SIG, nonce: NONCE, ...extra }
+}
+
+test('a dm report is stored with its own keys: target and quote, no seq, writer or group', async (t) => {
+  const { dir, store, open } = setup(t)
+  const target = key()
+  const reporter = key()
+  const { report: r, duplicate } = await store.addDm(dmReport(target, reporter))
+  t.is(duplicate, false)
+  t.is(r.kind, 'dm')
+  t.is(r.target, target)
+  t.is(r.quote, 'mensagem ruim')
+  t.alike(Object.keys(r).sort(), ['at', 'blocked', 'decidedAt', 'decidedBy', 'id', 'kind', 'nonce', 'note', 'quote', 'reason', 'reporter', 'signature', 'status', 'target', 'text'])
+  t.is(onDisk(dir).reports[r.id].seq, undefined)
+  const again = await store.addDm(dmReport(target, reporter))
+  t.is(again.duplicate, true, 'same open quote by the same reporter')
+  t.is(again.report.id, r.id)
+  t.is(open().get(r.id).kind, 'dm', 'reopens')
+})
+
+test('addDm refuses a missing or own target and an empty quote', async (t) => {
+  const { store } = setup(t)
+  const reporter = key()
+  await rejects(t, store.addDm(dmReport(undefined, reporter)), 'pedido-invalido', 'no target')
+  await rejects(t, store.addDm(dmReport(reporter, reporter)), 'pedido-invalido', 'own target')
+  await rejects(t, store.addDm(dmReport(key(), reporter, { quote: '' })), 'pedido-invalido', 'empty quote')
+  await rejects(t, store.addDm(dmReport(key(), reporter, { reason: 'x' })), 'pedido-invalido', 'reason')
+})
+
+test('dm reports share the per-reporter daily budget', async (t) => {
+  const { store } = setup(t)
+  const reporter = key()
+  for (let i = 0; i < MAX_PER_REPORTER_DAY - 1; i++) await store.add(report(key(), reporter))
+  await store.addDm(dmReport(key(), reporter))
+  await rejects(t, store.addDm(dmReport(key(), reporter, { quote: 'outra' })), 'limite-denuncias', 'dm over the cap')
+  await rejects(t, store.add(report(key(), reporter)), 'limite-denuncias', 'post over the cap')
+})
+
+test('a dm row on disk with seq, writer or group, without target or with target === reporter is invalid', async (t) => {
+  const mutations = [
+    (r) => ({ ...r, seq: null }),
+    (r) => ({ ...r, writer: null, group: null }),
+    (r) => { const o = { ...r }; delete o.target; return o },
+    (r) => ({ ...r, target: r.reporter }),
+    (r) => ({ ...r, quote: '' })
+  ]
+  for (const mutate of mutations) {
+    const { dir, store, open } = setup(t)
+    const { report: r } = await store.addDm(dmReport(key()))
+    const disk = onDisk(dir)
+    disk.reports[r.id] = mutate(disk.reports[r.id])
+    fs.writeFileSync(path.join(dir, FILE), JSON.stringify(disk))
+    throwsCode(t, () => open().list(), 'indisponivel', 'store refuses the row')
+  }
+})
+
+test('bloquear on a dm report blocks the target like an account report; grupo is refused', async (t) => {
+  const { store } = setup(t)
+  const target = key()
+  const { report: r } = await store.addDm(dmReport(target))
+  await rejects(t, store.decide(r.id, { decision: 'bloquear', by: MOD, block: 'grupo' }), 'pedido-invalido', 'no group')
+  const { report: decided, change } = await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  t.is(decided.blocked, 'diario')
+  t.is(change.member, target)
+  t.is(change.op, 'block')
+  t.alike(change.reportIds, [r.id])
+})
+
+test('a group report again with an image is a new report; the same image again is a duplicate', async (t) => {
+  const { store } = setup(t)
+  const target = key()
+  const reporter = key()
+  const writer = key()
+  const group = key()
+  const bytes = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3])
+  const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex')
+  const plain = await store.add(report(target, reporter, { writer, group, quote: '' }))
+  t.is(plain.duplicate, false)
+  const withImage = await store.add(report(target, reporter, { writer, group, quote: '', anexo: { bytes, mime: 'image/gif', sha256 } }))
+  t.is(withImage.duplicate, false, 'the image is new evidence, not a repeat')
+  t.not(withImage.report.id, plain.report.id)
+  const again = await store.add(report(target, reporter, { writer, group, quote: '', anexo: { bytes, mime: 'image/gif', sha256 } }))
+  t.is(again.duplicate, true)
+  t.is(again.report.id, withImage.report.id)
+})
+
+test('the anexo file is written whole even when writeSync writes in pieces', async (t) => {
+  const { store, dir } = setup(t)
+  const bytes = new Uint8Array(4096).map((_, i) => i & 0xff)
+  const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex')
+  const realWrite = fs.writeSync
+  fs.writeSync = (fd, buf, off = 0, len = buf.length - off, pos) => realWrite(fd, buf, off, Math.min(len, 1000), pos)
+  let res
+  try {
+    res = await store.add(report(key(), key(), { writer: key(), group: key(), quote: '', anexo: { bytes, mime: 'image/gif', sha256 } }))
+  } finally {
+    fs.writeSync = realWrite
+  }
+  const file = path.join(dir, 'report-media', res.report.id)
+  t.alike(new Uint8Array(fs.readFileSync(file)), bytes, 'every byte landed')
+})
+
+test('a failed sync of the media directory takes the anexo file back', async (t) => {
+  const { store, dir } = setup(t)
+  const bytes = new Uint8Array([1, 2, 3, 4])
+  const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex')
+  const mediaDir = path.join(dir, 'report-media')
+  const realOpen = fs.openSync
+  let armed = true
+  fs.openSync = (p, ...rest) => {
+    if (armed && p === mediaDir) {
+      armed = false
+      const err = new Error('io')
+      err.code = 'EIO'
+      throw err
+    }
+    return realOpen(p, ...rest)
+  }
+  try {
+    await rejects(t, store.add(report(key(), key(), { writer: key(), group: key(), quote: '', anexo: { bytes, mime: 'image/gif', sha256 } })), 'EIO', 'the add fails')
+  } finally {
+    fs.openSync = realOpen
+  }
+  const left = fs.existsSync(mediaDir) ? fs.readdirSync(mediaDir) : []
+  t.alike(left, [], 'no orphan file outside the cap')
+})

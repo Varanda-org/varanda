@@ -13,6 +13,9 @@
 // false for authors the device does not follow: their photos are fetched with
 // cache: 'no-store' on the web so nothing of them is kept on the device
 // (natively no cache option: see fetchMedia).
+// `uri` (instead of author and descriptor): a device-local blob: or file://
+// URI another module already verified (chat photos, ../media/chatMedia.js);
+// it is shown as is and nothing is fetched. Any other scheme is refused.
 
 import { useEffect, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
@@ -23,7 +26,7 @@ import { createMediaCache, mediaKey, retryDelay } from '../media/cache'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { isAppClient } from '../appClient'
 import { Icon } from './Icon'
-import { colors } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
 
 // The native app streams media through expo/fetch so the byte cap stops the
 // download (see fetchMedia); the web keeps the global fetch.
@@ -88,8 +91,14 @@ function useMedia (author, descriptor, persist) {
   return { state: 'loading', url: null, retry }
 }
 
-export function MediaView ({ author, descriptor, label = 'foto', fit = 'cover', style, onPress, dark, persist = true }) {
-  const { state, url, retry } = useMedia(author, descriptor, persist !== false)
+export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cover', style, onPress, dark, persist = true }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  const local = uri !== undefined
+  const fetched = useMedia(author, local ? null : descriptor, persist !== false)
+  const { state, url, retry } = local
+    ? { state: isShownUrl(uri) ? 'ok' : 'error', url: isShownUrl(uri) ? uri : null, retry: undefined }
+    : fetched
   const failed = state === 'error'
   const press = failed ? retry : onPress
   const a11y = failed ? label + ', indisponível; toque para tentar de novo' : label
@@ -125,7 +134,7 @@ export function MediaView ({ author, descriptor, label = 'foto', fit = 'cover', 
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   tile: { overflow: 'hidden' },
   fill: { ...StyleSheet.absoluteFillObject },
   loading: { backgroundColor: colors.skeleton },

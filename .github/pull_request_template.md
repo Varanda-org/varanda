@@ -11,4 +11,5 @@ Closes #
 - [ ] `npm run lint`, `npm test` e `npm run demo` passam
 - [ ] docs/protocol.md ou docs/rpc.md atualizados, se um formato mudou
 - [ ] Textos para o usuário estão em pt-BR
+- [ ] Conferido no Android (emulador ou aparelho) e no simulador iOS antes da web/PWA, ou explicado por que não se aplica
 - [ ] Nenhum segredo, chave ou dado pessoal no diff

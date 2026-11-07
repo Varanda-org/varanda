@@ -17,7 +17,23 @@ const { attachBlocklist } = require('../../lib/blocklist-net')
 const { attachGroups } = require('../../lib/groups-net')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('../../lib/net')
 const { memberCertRecord, groupJoinRecord } = require('../../lib/records')
-const { groupHeader, writerHeader, groupPost } = require('../../lib/group')
+const group = require('../../lib/group')
+const { groupPost } = group
+
+// Protocol v2 headers for the seeder tests: a group root names a parent
+// community and its creator device's writer there, a group writer its
+// device's writer. The seeder checks only their shape (the fold judges
+// them), so a parent this seeder never sees is enough unless a test passes
+// its own.
+const PARENT = 'c0'.repeat(32)
+
+function groupHeader (opts = {}) {
+  return (opts.kind || 'group') === 'group' ? group.groupHeader({ community: PARENT, member: PARENT, ...opts }) : group.groupHeader(opts)
+}
+
+function writerHeader (opts = {}) {
+  return group.writerHeader({ member: PARENT, ...opts })
+}
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
@@ -236,6 +252,9 @@ function fakePeer () {
 }
 
 module.exports = {
+  PARENT,
+  groupHeader,
+  writerHeader,
   hex,
   makeAssociation,
   validCert,

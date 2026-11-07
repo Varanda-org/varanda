@@ -7,10 +7,13 @@ import { StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Icon } from './Icon'
 import { Btn, Row, Soft } from './index'
-import { colors, type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
+import { type } from './theme'
 import { INSTALL_CARD_TEXT, INSTALL_CARD_TITLE } from '../install-offer'
 
 export function InstallCard ({ kind, onInstall, onClose, inset = false }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const insets = useSafeAreaInsets()
   if (kind !== 'prompt' && kind !== 'ios') return null
   return (
@@ -34,7 +37,7 @@ export function InstallCard ({ kind, onInstall, onClose, inset = false }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   card: {
     backgroundColor: colors.card,
     marginHorizontal: 16,

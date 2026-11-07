@@ -10,7 +10,8 @@
 // `quote.onOpenMention(username)`, when a function and the text has an @nome,
 // makes the mentions tappable (./MentionText); the card is then not one
 // accessible group, so the links stay reachable, and a mention tap never
-// calls `quote.onOpen`.
+// calls `quote.onOpen`. Web links in a quote stay plain: the 6 line clamp can
+// cut a URL, so the card opens the quoted post, where its links work.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
@@ -19,9 +20,11 @@ import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { MediaGrid } from './MediaGrid'
 import { hasMention, MentionText } from './MentionText'
-import { colors, type } from './theme'
+import { type } from './theme'
+import { useStyles } from './ThemeProvider'
 
 export function QuoteCard ({ quote, now }) {
+  const styles = useStyles(makeStyles)
   const q = quote && typeof quote === 'object' ? quote : {}
   const open = typeof q.onOpen === 'function' ? q.onOpen : undefined
   const missing = q.missing === true
@@ -93,7 +96,7 @@ export function QuoteCard ({ quote, now }) {
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   card: {
     marginTop: 8,
     paddingVertical: 8,

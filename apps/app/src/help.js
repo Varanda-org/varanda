@@ -2,12 +2,7 @@
 // Keys match tab and setup-step ids so callers can use those ids directly.
 import { PEEK_RULE_TEXT } from './peek.js'
 import { SEARCH_HINT, SEARCH_MEMORY } from './topics.js'
-import { PAY_TEXTS } from './wallet.js'
-
-const CARTEIRA_FEES = 'Taxas: a taxa do parceiro (Hodle) e a taxa da Varanda, quando houver, aparecem separadas na conferência, junto com o total, antes de você digitar a senha. A taxa da Varanda de um Pix só é cobrada depois que esse Pix é concluído. Receber por Pix não tem taxa da Varanda; a taxa do parceiro, se houver, aparece junto do código Pix.'
-const CARTEIRA_LIMITS = 'Limites: cada código Pix para receber vale para um único valor, de pelo menos R$ 1,00, e só até o horário mostrado. Cada operação tem um valor máximo, mostrado na tela. A Hodle também tem limites próprios.'
-const CARTEIRA_PENDING = 'Taxa pendente: o Pix costuma levar de 30 a 90 segundos para ser concluído, então a taxa da Varanda dele em geral entra no seu próximo envio, uma taxa antiga por envio, sempre mostrada antes da senha. Se o Pix falhar ou voltar antes de ser concluído, a taxa não é cobrada. Para enviar, o saldo precisa cobrir também todas as taxas pendentes; esse dinheiro fica na sua conta até ser cobrado. Nada é cobrado sem você confirmar.'
-const CARTEIRA_UNCERTAIN = 'Resultado incerto: se não deu para confirmar um envio, a Varanda não manda de novo sozinha. Confira o extrato antes de qualquer outro envio. Enquanto um envio não for confirmado, outro envio fica bloqueado, para o mesmo dinheiro não sair duas vezes.'
+import { LOSS_TEXT } from './recovery.js'
 
 export const HELP = Object.freeze({
   rua: Object.freeze({
@@ -23,25 +18,24 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       PEEK_RULE_TEXT,
       'Essas publicações não ficam guardadas neste aparelho: ficam só enquanto a aba está aberta.',
-      'Em pesquisar por assunto, você procura palavras nas publicações públicas, inclusive de quem você segue.',
       'A Espiadinha funciona no site da associação e no app ligado à instalação da associação. Não funciona com uma configuração manual.'
     ])
   }),
   seguindo: Object.freeze({
     title: 'Como funciona Seguindo',
     paragraphs: Object.freeze([
-      'Siga pessoas para ver as publicações delas na Rua. No site da associação e no app ligado à instalação, dá para encontrar alguém pelo nome ou pelo @nome.',
-      'No lugar do @nome também vale o código da pessoa, com 64 letras e números.',
-      'Quem você segue é público: quem tem o seu diário vê essa lista. Ela aparece igual em todos os seus aparelhos.',
-      'No topo, um só campo encontra pessoas: digite um nome ou @nome para buscar, ou cole o código da pessoa para seguir direto. Para deixar de seguir, toque em Seguindo e confirme. Para denunciar uma conta, toque na bandeira.'
+      'Seguindo é a lista de pessoas que você segue. Abra a lista tocando no número ao lado de seguindo, no Diário. Ela funciona em qualquer instalação.',
+      'Siga pessoas para ver as publicações delas na Rua. Para encontrar alguém, use a Busca.',
+      'Quem você segue é público: no site da associação e no app ligado à instalação, qualquer pessoa vê essa lista. Ela aparece igual em todos os seus aparelhos.',
+      'O campo no topo só filtra quem já está nesta lista. Para encontrar outra conta, use a Busca. Para deixar de seguir, toque em Seguindo e confirme. Para denunciar uma conta, toque na bandeira.'
     ])
   }),
   avisos: Object.freeze({
     title: 'Como funcionam os Avisos',
     paragraphs: Object.freeze([
       'Aqui aparece quem começou a seguir você e que você ainda não segue. Toque no aviso para ver o perfil da pessoa e, se quiser, seguir de volta.',
-      'O Varanda não mostra contagem nem lista de seguidores.',
-      'Quando há algo novo, a aba ganha um ponto, nunca um número.',
+      'Quantas pessoas seguem alguém, e quem são, aparece no Diário e no perfil de cada pessoa. Os Avisos continuam só seus.',
+      'Os Avisos abrem pelo sino no canto superior direito. Quando há algo novo, o sino ganha um ponto, nunca um número.',
       'Os Avisos funcionam no site da associação e no app ligado à instalação da associação. Não funcionam com uma configuração manual.'
     ])
   }),
@@ -49,9 +43,24 @@ export const HELP = Object.freeze({
     title: 'Como funciona o Diário',
     paragraphs: Object.freeze([
       'O Diário é o seu perfil e as suas publicações.',
-      'O número ao lado de seguindo é quantas pessoas você segue. Não há lista de quem segue você.',
+      'O número ao lado de seguindo é quantas pessoas você segue. O número ao lado de seguidores é quantas pessoas seguem você. Qualquer pessoa pode ver os dois números e as duas listas; toque num número para abrir a lista. O campo da lista só filtra quem já está nela.',
       'Uma publicação que ainda aguarda envio leva a data do momento em que sai.',
       'Você pode apagar as suas publicações e versões do perfil. Elas somem do app, mas quem já copiou pode ter guardado.'
+    ])
+  }),
+  conversas: Object.freeze({
+    title: 'Como funcionam as Conversas',
+    paragraphs: Object.freeze([
+      'Conversas e grupos de comunidades ficam numa lista só, a mais recente primeiro. Todas mostra a lista inteira; Não lidas e Grupos mostram só parte dela.',
+      'Mensagens são textos privados entre duas pessoas, cifrados de ponta a ponta.',
+      'A associação guarda só envelopes lacrados por sete dias e não consegue ver quem escreve para quem.',
+      'Quem você segue aparece na lista. Qualquer outra pessoa aparece em Pedidos de mensagem, e a mensagem é enviada antes de você aceitar.',
+      'Aceitar ou recusar não avisa a outra pessoa.',
+      'Não há confirmação de leitura.',
+      'Bloquear interrompe as mensagens nos seus aparelhos.',
+      'Apagar remove a conversa só nos seus aparelhos.',
+      'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
+      'A linha Comunidades serve para achar e criar comunidades.'
     ])
   }),
   entrar: Object.freeze({
@@ -59,8 +68,9 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Você entra com uma passkey: sem senha e sem e-mail.',
       'Ela fica no gerenciador de senhas do aparelho e abre com biometria ou PIN.',
-      'Guarde-a no Gerenciador de Senhas do Google para entrar no celular e no computador.',
-      'Se perder a passkey, perde a conta. Outra passkey é outra conta.'
+      'Guarde-a num gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro): é ele que devolve a passkey num aparelho novo. Num computador sem esse gerenciador, use o celular: para criar a conta, toque em criar com o celular; para entrar, toque em Entrar com a passkey e escolha usar outro aparelho. Nos dois casos, leia com a câmera do celular o QR code que aparece na tela do computador.',
+      'Em Ajustes → Passkeys e recuperação, cadastre outra passkey ou um código de recuperação: eles abrem a mesma conta. Uma passkey criada fora desse lugar abre outra conta.',
+      LOSS_TEXT
     ])
   }),
   vinculo: Object.freeze({
@@ -99,10 +109,11 @@ export const HELP = Object.freeze({
     ])
   }),
   busca: Object.freeze({
-    title: 'Como funciona a pesquisa',
+    title: 'Como funciona a Busca',
     paragraphs: Object.freeze([
       SEARCH_HINT,
       SEARCH_MEMORY,
+      'A Busca tem duas partes. Em Contas, você encontra pessoas pelo nome ou @nome no site da associação e no app ligado à instalação; em qualquer versão, você pode colar o código de 64 letras e números de alguém para seguir. Em Publicações, você procura palavras nas publicações públicas.',
       'Cada resultado é conferido antes de aparecer. O que não pôde ser conferido conta como indisponível e não é mostrado.'
     ])
   }),
@@ -142,7 +153,8 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Quem já está na Varanda pode criar alguns links de convite por semana e mandar como quiser.',
       'Cada link serve para uma pessoa só e vale 7 dias. Os convites renovam toda segunda-feira, no horário de Brasília, e os que sobram não acumulam.',
-      'A associação guarda só quem criou o convite e se ele foi usado; nunca o nome, o e-mail ou a conta de quem recebeu o link.'
+      'A associação guarda só quem criou o convite e se ele foi usado; nunca o nome, o e-mail ou a conta de quem recebeu o link.',
+      'Quando a associação liga os convites de surpresa, cada convite chega num dia e hora ao acaso, com um aviso. Escolha com carinho quem você quer chamar.'
     ])
   }),
   termosAparelho: Object.freeze({
@@ -151,52 +163,13 @@ export const HELP = Object.freeze({
       'Esta conta não tem vínculo com uma conta Google, então o aceite fica registrado só neste aparelho.',
       'Para registrar também na conta, vincule uma conta Google em Ajustes → Conta e @nome.'
     ])
-  }),
-  carteira: Object.freeze({
-    title: 'Sobre a conta de pagamentos',
-    paragraphs: Object.freeze([
-      'A conta de pagamentos é opcional: a Varanda continua funcionando igual sem ela. Ela serve para receber e enviar dinheiro por Pix, quando o serviço liberar.',
-      'Para abrir a conta, a lei pede uma verificação de identidade, feita pela Hodle, empresa parceira, com seus dados, a foto de um documento e uma selfie. Só pessoas com 18 anos ou mais podem abrir.',
-      'Seus dados e fotos vão para a Hodle. A Varanda guarda só os identificadores da conta e da carteira e o estado da verificação, nunca sua senha de 6 dígitos, seu CPF, suas fotos nem seu endereço.',
-      'A conta criada na Hodle não pode ser apagada depois.',
-      'O dinheiro fica em BRLA, uma moeda digital que vale 1 real, numa carteira em seu nome. A Varanda não é banco e o saldo não rende juros. Em alguns envios a Varanda cobra uma taxa própria, sempre mostrada antes de você confirmar.',
-      CARTEIRA_FEES,
-      CARTEIRA_LIMITS,
-      CARTEIRA_PENDING,
-      CARTEIRA_UNCERTAIN
-    ])
   })
 })
 
-// The fee and limit lines come from the service's policy (fees.describe), so
-// the sheet never states a rate the service does not charge. Transfer and
-// crypto exist only in mode completo.
-const FEE_LABELS = Object.freeze({
-  payout: 'Pagar por Pix',
-  transfer: 'Enviar para alguém da Varanda',
-  crypto: 'Enviar para outra carteira'
-})
-
-export function carteiraHelp (policy) {
-  const fees = policy && typeof policy.fees === 'object' && policy.fees !== null ? policy.fees : null
-  const extra = []
-  if (fees !== null) {
-    const kinds = policy.mode === 'completo' ? Object.keys(FEE_LABELS) : ['payout']
-    const lines = kinds
-      .filter((k) => typeof fees[k] === 'string')
-      .map((k) => FEE_LABELS[k] + ': ' + fees[k] + '.')
-    if (lines.length > 0) extra.push('Taxa da Varanda hoje. ' + lines.join(' ') + ' Receber por Pix: sem taxa da Varanda.')
-  }
-  const cap = policy ? PAY_TEXTS.cap(policy.maxCents) : null
-  if (cap !== null) extra.push(cap)
-  if (extra.length === 0) return HELP.carteira
-  return Object.freeze({ title: HELP.carteira.title, paragraphs: Object.freeze([...HELP.carteira.paragraphs, ...extra]) })
-}
-
 export const SHORT = Object.freeze({
   link: 'A associação guarda o vínculo com sua conta Google; o e-mail nunca vai para o seu perfil nem para o seu diário.',
-  passkeyLoss: 'Se perder a passkey, perde a conta.',
-  followsPublic: 'Quem você segue é público.',
+  passkeyLoss: LOSS_TEXT,
+  followsPublic: 'Quem você segue e quem segue você é público.',
   install: 'Abra o menu do navegador e escolha instalar o app. No iPhone: Compartilhar e depois Adicionar à Tela de Início.',
   reportPrivacy: 'A pessoa denunciada não vê quem denunciou.',
   termsDeviceOnly: 'Aceite registrado só neste aparelho.',

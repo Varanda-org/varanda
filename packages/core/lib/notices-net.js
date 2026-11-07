@@ -60,8 +60,19 @@ const {
   verifyNoticeV2Proof,
   validateNoticesV2Message
 } = require('./notices-v2')
+const {
+  NOTICES_V3_PROTOCOL,
+  noticeV3Payload,
+  verifyNoticeV3Proof,
+  validateNoticesV3Message
+} = require('./notices-v3')
 
 const PROTOCOL = NOTICES_PROTOCOL
+// v1, v2 and v3 share one 'close' listener per socket: the seeder's
+// _attachPeer also hangs the blocklist, DM, stamp and group channels on the
+// same socket, and one listener per notices version would cross the
+// EventEmitter default of 10 (a MaxListenersExceededWarning on every peer).
+const CLOSE_HOOKS = Symbol('varanda notices close hooks')
 const MAX_BAD_NOTICES = 5 // more than this many bad messages drops the peer
 const NOTICES_REQUEST_TIMEOUT_MS = 10000
 
@@ -89,6 +100,25 @@ function tokenBucket (burst, rate) {
 
 function emptyPage () {
   return { type: 'items', items: [], next: null, incomplete: true }
+}
+
+function onSocketClose (socket, fn) {
+  if (typeof socket.once !== 'function') return
+  let hooks = socket[CLOSE_HOOKS]
+  if (hooks === undefined) {
+    hooks = new Set()
+    socket[CLOSE_HOOKS] = hooks
+    socket.once('close', () => {
+      if (socket[CLOSE_HOOKS] === hooks) delete socket[CLOSE_HOOKS]
+      for (const f of [...hooks]) f()
+    })
+  }
+  hooks.add(fn)
+}
+
+function offSocketClose (socket, fn) {
+  const hooks = socket[CLOSE_HOOKS]
+  if (hooks !== undefined) hooks.delete(fn)
 }
 
 function projectItemV1 (it) {
@@ -222,7 +252,7 @@ function attachNotices (socket, opts = {}) {
   // Whichever side opens first is paired (blocklist-net.js).
   mux.pair({ protocol }, onpair)
   openChannel()
-  if (typeof socket.once === 'function') socket.once('close', end)
+  onSocketClose(socket, end)
 
   return handle
 
@@ -292,7 +322,7 @@ function attachNotices (socket, opts = {}) {
     if (socket[slot] === handle) delete socket[slot]
     // A finished handle must not stay reachable from a live socket that a
     // caller attaches to again.
-    if (typeof socket.off === 'function') socket.off('close', end)
+    offSocketClose(socket, end)
   }
 
   function close () {
@@ -504,14 +534,34 @@ function attachNoticesV2 (socket, opts = {}) {
   })
 }
 
+// 'varanda/notices/3': v2 plus the like and repost kinds (notices-v3.js),
+// on its own slot so a v3 peer never disturbs v1 or v2 on the same socket.
+function attachNoticesV3 (socket, opts = {}) {
+  return attachNotices(socket, {
+    ...opts,
+    protocol: NOTICES_V3_PROTOCOL,
+    validate: validateNoticesV3Message,
+    payload: noticeV3Payload,
+    verify: verifyNoticeV3Proof,
+    projectItem: projectItemV2,
+    projectCursor: projectCursorV2,
+    slot: '_varandaNoticesV3',
+    dropReason: 'notices-v3',
+    invalidEvent: 'notices-v3-page-invalid',
+    failedEvent: 'notices-v3-page-failed'
+  })
+}
+
 module.exports = {
   PROTOCOL,
   NOTICES_V2_PROTOCOL,
+  NOTICES_V3_PROTOCOL,
   MAX_NOTICES_MESSAGE,
   MAX_BAD_NOTICES,
   NOTICES_REQUEST_TIMEOUT_MS,
   MESSAGE_BURST,
   MESSAGE_RATE,
   attachNotices,
-  attachNoticesV2
+  attachNoticesV2,
+  attachNoticesV3
 }

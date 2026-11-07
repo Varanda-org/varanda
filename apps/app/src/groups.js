@@ -28,14 +28,53 @@ export const STATE_LABELS = Object.freeze({
 
 export const PRIVATE_LABEL = 'grupo privado'
 export const PUBLIC_LABEL = 'grupo público'
+export const GENERAL_LABEL = 'Geral'
+export const ORPHAN_LABEL = 'grupo sem comunidade'
+export const COMMUNITY_JOIN_LABELS = Object.freeze({ open: 'aberta a todos', approval: 'entrada com aprovação' })
 export const HIDDEN_LABEL = 'mensagem escondida'
 export const JOIN_LABELS = Object.freeze({ open: 'aberto a todos', approval: 'entrada com aprovação' })
 export const REKEY_PENDING_LABEL = STATE_LABELS['rekey-pending']
+export const DEVICE_JOIN_LABEL = 'Participar neste aparelho'
+export const DEVICE_JOIN_TEXT = 'Sua conta já participa. Este aparelho costuma entrar sozinho depois da sincronização; se ainda não entrou, toque para participar por ele.'
+export const DEVICE_RESERVE_TEXT = 'Sua conta já usa quase todos os aparelhos permitidos aqui. Entrar por este aparelho gasta uma das últimas vagas, que não voltam.'
+export const DEVICE_RESERVE_JOIN_TEXT = 'Este aparelho ainda não participa desta comunidade, e a conta já usa quase todos os aparelhos permitidos aqui. Para participar por ele, toque em Participar neste aparelho na lista de grupos; a vaga não volta.'
+export const DEVICE_PENDING_JOIN_TEXT = 'Este aparelho ainda não participa desta comunidade. Ele entra sozinho depois da sincronização; se não entrar, toque em Participar neste aparelho na lista de grupos.'
+export const DEVICE_WAIT_TEXT = 'Este aparelho ainda não pode escrever aqui. Aguarde a sincronização.'
+export const DEVICE_STAFF_TEXT = 'Algumas ações de administração só funcionam no aparelho que tem o cargo. Use aquele aparelho ou peça um novo cargo para este.'
+export const DEVICE_ROOT_TEXT = 'Novo grupo, Ajustes e Quem pode convidar só funcionam no aparelho que criou a comunidade.'
+export const DEVICE_APPROVAL_TEXT = 'Este aparelho precisa da aprovação de um administrador para escrever.'
 
 const HEX64 = /^[0-9a-f]{64}$/
-const LINK = /^(?:https?:\/\/[^/?#\s]+)?\/g\/([0-9a-fA-F]{64})\/?(?:[?#].*)?$/
 
-const ACTIONS = Object.freeze(['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'link'])
+// The unread count the node reports caps at 99, meaning 99 or more.
+export function unreadLabel (n) {
+  if (!Number.isInteger(n) || n < 1) return ''
+  return n >= 99 ? '99+' : String(n)
+}
+
+export const OWN_LABEL = 'Você'
+
+// One line for a group row: who said it and what. A hidden message shows
+// only the fixed label, never its preview or its author. The own message
+// carries no author here: the screen draws OWN_LABEL apart (lastIsOwn), so
+// a peer whose display name is "Você" can never look like it.
+export function lastLine (last) {
+  if (!last || typeof last !== 'object') return ''
+  if (last.hidden === true) return HIDDEN_LABEL
+  // A line break would show as U+FFFD.
+  const text = displayText(typeof last.preview === 'string' ? last.preview.replace(/\r?\n/g, ' ') : '')
+  if (last.mine === true) return text
+  let who = ''
+  if (typeof last.name === 'string' && displayText(last.name).trim() !== '') who = displayText(last.name)
+  else if (typeof last.username === 'string' && displayText(last.username).trim() !== '') who = '@' + displayText(last.username)
+  return who === '' ? text : who + ': ' + text
+}
+
+export function lastIsOwn (last) {
+  return !!last && typeof last === 'object' && last.mine === true && last.hidden !== true
+}
+
+const ACTIONS = Object.freeze(['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'create', 'invite', 'invitePolicy'])
 
 // --- merging ---
 
@@ -83,11 +122,15 @@ function authorOf (item, names) {
 // `items` as group.read answers (newest first, hidden ones included with
 // empty text). Rows come oldest first, so the newest sits at the bottom of
 // the conversation. `names` maps a diary key to a name already verified.
+// `text` is escaped with its line breaks. `rawText` goes to MentionText, which
+// escapes each piece itself: a word holding a control or direction mark is
+// only kept unlinked while it still holds the mark, not its U+FFFD.
 export function rowsOf (items, names = {}) {
   const rows = []
   for (const item of mergePages([items])) {
     if (typeof item.writer !== 'string' || !Number.isSafeInteger(item.seq)) continue
     const hidden = item.hidden === true
+    const raw = hidden || typeof item.text !== 'string' ? '' : item.text
     const reply = item.replyTo && typeof item.replyTo.writer === 'string' && Number.isSafeInteger(item.replyTo.seq)
     rows.push({
       id: item.writer + ':' + item.seq,
@@ -97,7 +140,8 @@ export function rowsOf (items, names = {}) {
       at: typeof item.at === 'string' ? item.at : null,
       author: authorOf(item, names),
       hidden,
-      text: hidden ? HIDDEN_LABEL : displayText(typeof item.text === 'string' ? item.text : ''),
+      text: hidden ? HIDDEN_LABEL : displayText(raw, { multiline: true }),
+      rawText: raw,
       replyTo: reply ? item.replyTo.writer + ':' + item.replyTo.seq : null
     })
   }
@@ -128,7 +172,7 @@ export function roleOf (info, ownKey) {
 
 // What a role may do. `opts.own`: the message is the caller's (its author may
 // hide it, even after leaving). `opts.communityAdmin`: the caller holds power
-// in the group through a linked community (the fold decides; the node still
+// in the group through its community (the fold decides; the node still
 // refuses what it does not allow).
 export function can (action, role, opts = {}) {
   if (!ACTIONS.includes(action) || !isRole(role)) return false
@@ -141,11 +185,90 @@ export function can (action, role, opts = {}) {
     case 'admit':
     case 'rekey': return staff || delegated
     case 'admin':
-    case 'meta':
-    case 'link': return role === 'creator'
+    case 'meta': return role === 'creator'
+    case 'create': return role === 'creator'
+    case 'invitePolicy': return staff
+    // Members invite only while the community or group allows it.
+    case 'invite': return staff || (role === 'member' && opts.memberInvite === true)
     case 'leave': return role !== 'banned' && role !== 'left'
   }
   return false
+}
+
+// An older node omits writerHere, canWrite and rootHere. Only an explicit
+// false changes the screen, so today's mocks keep the buttons they have.
+const MEMBER_ROLES = Object.freeze(['creator', 'admin', 'member'])
+
+export function needsDeviceJoin (info) {
+  if (!info || typeof info !== 'object') return false
+  return MEMBER_ROLES.includes(info.role) && info.writerHere === false
+}
+
+// The seeder never frees a device slot (8 per root); the app stops entering by
+// itself at 6 and leaves the last two to the person.
+export function reserveReachedAny (counts) {
+  if (!Array.isArray(counts)) return false
+  return counts.some((n) => Number.isSafeInteger(n) && n >= 6)
+}
+
+// At the reserve the first tap only shows the warning; the person confirms
+// with a second tap, because the slot is never given back.
+export function needsReserveConfirm (counts, confirmed) {
+  return confirmed !== true && reserveReachedAny(counts)
+}
+
+export function deviceReserveReached (info) {
+  if (!info || typeof info !== 'object') return false
+  return reserveReachedAny([info.writersBound])
+}
+
+// community.join spends a slot in the community and in Geral, so either count
+// can be the one that hits the reserve.
+export function communityReserveReached (info) {
+  if (!info || typeof info !== 'object') return false
+  return reserveReachedAny([info.writersBound, info.generalWritersBound])
+}
+
+export function writerOnDevice (info) {
+  if (!info || typeof info !== 'object') return true
+  return info.writerHere !== false
+}
+
+export function canWriteHere (info) {
+  if (!info || typeof info !== 'object') return true
+  return info.canWrite !== false
+}
+
+// Root-only writes (rename, Entrada, Administradores, invite policy) go
+// through the root, which only the creating device holds; staff writes need
+// this device's own writer to carry authority. A missing field is an older
+// node. Repair mode writes meta and invitePolicy through the creator's live
+// community writer, not the root, so those controls stay whatever rootHere says.
+export function rootAdminHere (info) {
+  if (!info || typeof info !== 'object') return true
+  return info.rootHere !== false || info.repair === true
+}
+
+// Which note explains hidden staff controls: 'root' for the creator's second
+// device (a role never grants the root), 'staff' for a device without
+// authority, 'join' when this device does not participate yet (the controls
+// are hidden until it does). One reason at a time, root first for the creator.
+export function deviceStaffNote (info, { owner, staff }) {
+  if (!staff || !info || typeof info !== 'object') return null
+  if (needsDeviceJoin(info)) return 'join'
+  if (owner && !rootAdminHere(info) && info.repair !== true) return 'root'
+  if (info.authorityHere === false) return 'staff'
+  return null
+}
+
+export function authorityHere (info) {
+  if (!info || typeof info !== 'object') return true
+  return info.authorityHere !== false
+}
+
+export function showNewGroup (info) {
+  if (!info || typeof info !== 'object') return false
+  return info.role === 'creator' && info.rootHere !== false
 }
 
 // --- labels ---
@@ -184,14 +307,6 @@ export function joinLink (group) {
   return HEX64.test(g) ? '/g/' + g : null
 }
 
-// '/g/<hex>', optionally with an origin, a query or a hash -> the lowercase
-// key, else null. Nothing else is accepted.
-export function parseJoinLink (text) {
-  if (typeof text !== 'string') return null
-  const m = LINK.exec(text.trim())
-  return m ? m[1].toLowerCase() : null
-}
-
 // --- reconciliation of an uncertain mutation ---
 
 // After a mutation answered `uncertain: true`, the screen re-reads and asks
@@ -203,7 +318,8 @@ export function parseJoinLink (text) {
 //     (admit on also needs `writer`, and view.requests and view.writers)
 //   { action: 'meta', name?, join? }                       view.info
 //   { action: 'rekey', epoch }  (the epoch seen before)    view.epoch
-//   { action: 'link', community, on }                      view.info.communities
+//   { action: 'community-join' }                          view.role
+//   { action: 'create', community, name }                  view.community, groups
 // -> 'landed' (do not retry), 'not-landed' (offer a retry) or 'unknown' (the
 // re-read is missing or incomplete: offer another read, never a blind retry).
 export function reconcile (change, view) {
@@ -212,6 +328,10 @@ export function reconcile (change, view) {
     case 'join': {
       if (typeof view.state !== 'string') return 'unknown'
       return ['member', 'requested', 'pending'].includes(view.state) ? 'landed' : 'not-landed'
+    }
+    case 'community-join': {
+      if (typeof view.role !== 'string') return 'unknown'
+      return ['member', 'requested', 'pending'].includes(view.role) ? 'landed' : 'not-landed'
     }
     case 'leave': {
       if (typeof view.state !== 'string') return 'unknown'
@@ -223,8 +343,16 @@ export function reconcile (change, view) {
       // The caller's own writer key is not exposed to the screens: match the
       // diary, the text and a stamp not older than the send (this device's
       // clock stamps `at`; 2 s of slack).
+      // A reply must also point at the same message (change.replyKey,
+      // 'writer:seq'), and a plain post (replyKey null) must point at none, so
+      // the same text sent as another reply never confirms this one.
       const floor = change.sentAt - 2000
-      if (view.items.some((i) => i && i.diary === change.diary && i.text === change.text && i.hidden !== true && Date.parse(i.at) >= floor)) return 'landed'
+      const sameReply = (i) => {
+        if (change.replyKey === undefined) return true
+        const key = i.replyTo && typeof i.replyTo === 'object' ? i.replyTo.writer + ':' + i.replyTo.seq : null
+        return key === change.replyKey
+      }
+      if (view.items.some((i) => i && i.diary === change.diary && i.text === change.text && i.hidden !== true && Date.parse(i.at) >= floor && sameReply(i))) return 'landed'
       // Absence proves nothing unless the read covered every message.
       return view.next === null && view.state === 'ok' ? 'not-landed' : 'unknown'
     }
@@ -262,6 +390,11 @@ export function reconcile (change, view) {
       const joinOk = change.join === undefined || info.join === change.join
       return nameOk && joinOk ? 'landed' : 'not-landed'
     }
+    case 'invite-policy': {
+      const info = view.info
+      if (!info || typeof info !== 'object' || typeof info.memberInvite !== 'boolean') return 'unknown'
+      return info.memberInvite === change.members ? 'landed' : 'not-landed'
+    }
     case 'rekey': {
       const epoch = view.epoch
       // A locked node reads no epoch at all: that proves nothing.
@@ -272,12 +405,10 @@ export function reconcile (change, view) {
       const same = epoch.writer === before.writer && epoch.seq === before.seq
       return same ? 'not-landed' : 'landed'
     }
-    case 'link': {
-      const list = view.info && view.info.communities
-      if (!Array.isArray(list)) return 'unknown'
-      // Only two-way links are listed: a one-sided success never shows, so a
-      // missing (or still listed) community proves nothing.
-      return list.includes(change.community) === (change.on === true) ? 'landed' : 'unknown'
+    case 'create': {
+      if (typeof change.community !== 'string' || typeof change.name !== 'string') return 'unknown'
+      if (view.community !== change.community || !Array.isArray(view.groups)) return 'unknown'
+      return view.groups.some((g) => g && g.name === change.name && g.role === 'creator') ? 'landed' : 'not-landed'
     }
   }
   return 'unknown'
@@ -321,4 +452,75 @@ export function applyPage (store, read, before = null) {
 
 export function itemsOf (store) {
   return store && Array.isArray(store.pages) ? mergePages(store.pages) : []
+}
+
+// --- acting as a page (Páginas) ---
+
+export const PAGE_JOIN_LABEL = 'Entrar como a página'
+export const PAGE_LEAVE_LABEL = 'Sair como a página'
+export const PAGE_REQUESTED_LABEL = 'pedido enviado'
+export const PAGE_SOON_TEXT = 'Comunidades como página em breve'
+export const AS_PAGE_LABEL = 'como página'
+export const PAGE_EMPTY_TEXT = 'A página ainda não está em nenhuma comunidade.'
+
+// The service answers these until its group routes exist; they are no error.
+const PAGE_SOON_CODES = ['pedido-invalido', 'nao-encontrado']
+
+// A page never creates, admits, bans, appoints, hides, rekeys or edits.
+const PAGE_ACTIONS = Object.freeze(['post', 'leave'])
+
+// A stale page identity with the gate off acts as the member, so page mode
+// needs both the acting state and the pagesOn gate.
+export function pageMode ({ acting, on } = {}) {
+  const page = !!acting && acting.kind === 'page' && typeof acting.key === 'string' && HEX64.test(acting.key)
+  return page && on === true ? { page: true, key: acting.key } : { page: false, key: null }
+}
+
+export function canAsPage (action) {
+  return PAGE_ACTIONS.includes(action)
+}
+
+// What a page may do in a group, by its own standing and never a staff role.
+export function pageCan (action, role) {
+  if (!canAsPage(action)) return false
+  if (action === 'post') return role === 'member'
+  return role === 'member' || role === 'requested'
+}
+
+// The page's standing from a join, leave or read answer: 'member',
+// 'requested', 'left', or null when the answer says nothing usable.
+export function pageRoleOf (answer) {
+  if (!answer || typeof answer !== 'object') return null
+  const v = typeof answer.role === 'string' ? answer.role : answer.state
+  if (v === 'requested') return 'requested'
+  if (v === 'member' || v === 'creator' || v === 'admin') return 'member'
+  if (v === 'left' || v === 'none') return 'left'
+  return null
+}
+
+export function pageRoleLabel (role) {
+  if (role === 'requested') return PAGE_REQUESTED_LABEL
+  return role === 'member' ? 'membro' : ''
+}
+
+export function isPageSoon (err) {
+  return !!err && PAGE_SOON_CODES.includes(err.code) && err.uncertain !== true
+}
+
+// An uncertain outcome never invites a resend: the screen keeps err.retry.
+export function pageErrorText (err) {
+  if (isPageSoon(err)) return PAGE_SOON_TEXT
+  return err && typeof err.message === 'string' && err.message !== '' ? err.message : 'Serviço indisponível'
+}
+
+// The rows of a group-read answer; the author of each is the page key.
+export function pageReadItems (read) {
+  const items = read && Array.isArray(read.items) ? read.items : []
+  return items.filter((i) => i && typeof i === 'object' && typeof i.writer === 'string' && Number.isSafeInteger(i.seq))
+}
+
+// The communities of a page from its signed status read.
+export function pageCommunities (status) {
+  const list = status && Array.isArray(status.communities) ? status.communities : []
+  return list.filter((c) => c && typeof c.community === 'string' && HEX64.test(c.community))
 }

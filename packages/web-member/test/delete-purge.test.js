@@ -18,7 +18,7 @@ const { EventEmitter } = require('node:events')
 const { WebSocketServer, WebSocket } = require('ws')
 const { testnet } = require('./helpers/net')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { MEDIA_BLOCK_BYTES, profileRecords, followRecord, postRecord, memberCertRecord, deleteRecord } = require('@varanda/core/lib/records')
+const { MEDIA_BLOCK_BYTES, profileRecords, followRecord, postRecord, memberCertRecord, deleteRecord, validateRecord } = require('@varanda/core/lib/records')
 const { presentLength, clearDeleted } = require('@varanda/core/lib/deletion')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { runSync, trackPresent, linearExcept, MAX_RANGES } = require('../lib/sync')
@@ -921,4 +921,141 @@ test('a step that throws after a failed tombstone read still retries it on a qui
   t.ok(await until(() => tracker.deleted().has(target), 5000), 'the tombstone is learned on a timed retry')
   t.ok(readFailed && walkFailed, 'fixture: the read and the walk both failed once')
   t.ok(await until(async () => !(await has(target)), 5000), 'its target is cleared')
+})
+
+// docs/protocol.md §12: a page diary keeps an unheld tombstone target in the
+// download until it is read once, so a follower that learns the tombstone
+// first still fetches the page-close it names (the fold ignores a tombstone
+// over a held page-* record, and feed.read cuts there).
+test('newest first: a page diary still fetches the page-close a tombstone learned first names', async (t) => {
+  t.timeout(30000)
+  const assocKp = generateAssociationKeyPair()
+  const source = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
+  await source.ready()
+  t.teardown(() => source.close(), { force: true })
+  const K = hex(source.key)
+  const signed = { association: 'b'.repeat(64), issuer: 'c'.repeat(64), issuerDate: '2026-01-01T00:00:00.000Z', issuerSignature: 'e'.repeat(128), signature: 'a'.repeat(128), countersignature: 'b'.repeat(128) }
+  const roster = { type: 'page-roster', page: K, gen: 1, owner: 'd'.repeat(64), admins: [], prev: null, at: '2026-01-01T00:00:00.000Z', nonce: 'r'.repeat(43), ...signed }
+  const close = { type: 'page-close', page: K, gen: 2, at: '2026-01-01T00:00:00.000Z', nonce: 'c'.repeat(43), actor: 'd'.repeat(64), ...signed }
+  t.is(validateRecord(roster, 2), null, 'fixture: the roster is shape-valid')
+  t.is(validateRecord(close, 10), null, 'fixture: the close is shape-valid')
+  await source.append(memberCertRecord(createCert({ member: K }, assocKp)))
+  await source.append(postRecord({ text: 'p1' }))
+  await source.append(roster)
+  for (let i = 3; i < 10; i++) await source.append(postRecord({ text: 'p' + i }))
+  await source.append(close)
+  for (let i = 11; i < 16; i++) await source.append(postRecord({ text: 'p' + i }))
+  await source.append(deleteRecord({ seq: 10 }))
+  await source.append(deleteRecord({ seq: 5 }))
+  await source.append(postRecord({ text: 'vazado' }))
+  // The replica knows the signed length and the tombstones, not the genesis
+  // nor their targets.
+  const replica = new Hypercore(memoryStorage(), source.key, { valueEncoding: 'json' })
+  await replica.ready()
+  t.teardown(() => replica.close(), { force: true })
+  const a = source.replicate(true)
+  const b = replica.replicate(false)
+  a.pipe(b).pipe(a)
+  await replica.download({ start: 0, end: 1 }).done()
+  await replica.download({ start: 16, end: 18 }).done()
+  a.destroy()
+  b.destroy()
+  t.is(replica.length, 19, 'fixture: the signed length is known')
+
+  const tracker = trackPresent(replica, { newest: 32 })
+  t.teardown(() => tracker.destroy(), { force: true })
+  await tracker.ready
+  const c = source.replicate(true)
+  const d = replica.replicate(false)
+  c.pipe(d).pipe(c)
+  t.teardown(() => { c.destroy(); d.destroy() }, { force: true })
+  t.ok(await until(() => tracker.present() === 19), 'the whole diary arrived')
+  t.ok(await until(() => replica.has(10), 5000), 'the page-close named by a tombstone was fetched')
+  t.ok(await until(async () => !(await replica.has(5)), 5000), 'the deleted post is not kept')
+  t.is((await replica.get(10)).type, 'page-close', 'and it is kept')
+})
+
+// Only a settled page asks for an unheld deleted seq in the newest window:
+// before block 2 lands, a personal diary skips every deleted seq there.
+test('newest first: a diary whose block 2 is not held yet never asks for a deleted post in the head', async (t) => {
+  t.timeout(30000)
+  const assocKp = generateAssociationKeyPair()
+  const source = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
+  await source.ready()
+  t.teardown(() => source.close(), { force: true })
+  await source.append(memberCertRecord(createCert({ member: hex(source.key) }, assocKp)))
+  for (let i = 1; i < 298; i++) await source.append(postRecord({ text: 'p' + i }))
+  await source.append(deleteRecord({ seq: 280 }))
+  await source.append(postRecord({ text: 'última' }))
+  // The serving copy lacks block 2, so the type stays unsettled.
+  const server = new Hypercore(memoryStorage(), source.key, { valueEncoding: 'json' })
+  await server.ready()
+  t.teardown(() => server.close(), { force: true })
+  const replica = new Hypercore(memoryStorage(), source.key, { valueEncoding: 'json' })
+  await replica.ready()
+  t.teardown(() => replica.close(), { force: true })
+  for (const [from, to, blocks] of [[source, server, [0, 300]], [server, replica, [298, 299]]]) {
+    const a = from.replicate(true)
+    const b = to.replicate(false)
+    a.pipe(b).pipe(a)
+    await to.download({ start: blocks[0], end: blocks[1] }).done()
+    a.destroy()
+    b.destroy()
+  }
+  await server.clear(2, 3)
+  t.is(replica.length, 300, 'fixture: the signed length is known')
+
+  const arrived = new Set()
+  const ranges = []
+  let headArrived = null
+  replica.on('download', (index) => arrived.add(index))
+  const download = replica.download.bind(replica)
+  replica.download = (opts) => {
+    if (opts.end === -1 && headArrived === null) headArrived = new Set(arrived)
+    ranges.push([opts.start, opts.end])
+    return download(opts)
+  }
+  const tracker = trackPresent(replica, { newest: 32, stallMs: 60000 })
+  t.teardown(() => tracker.destroy(), { force: true })
+  await tracker.ready
+  const c = server.replicate(true)
+  const d = replica.replicate(false)
+  c.pipe(d).pipe(c)
+  t.teardown(() => { c.destroy(); d.destroy() }, { force: true })
+  t.ok(await until(() => headArrived !== null), 'the body opened once the window was stored')
+  const head = ranges.slice(0, ranges.findIndex(([, end]) => end === -1))
+  t.ok(head.length > 0, 'head ranges opened first')
+  t.absent(headArrived.has(2), 'block 2 was not held during the head')
+  t.absent(head.some(([start, end]) => start <= 280 && end > 280), 'no head range covers the deleted post')
+  t.absent(headArrived.has(280), 'the deleted post did not arrive in the head')
+  // The body keeps every target out while the type is unsettled too.
+  t.ok(await until(() => range(3, 300).every((i) => i === 280 || i === 298 || arrived.has(i))), 'the body brought the rest')
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  t.absent(arrived.has(280), 'the deleted post never arrived in the body either')
+})
+
+test('trackPresent: destroy also drops the page guard\'s peer-add listener', async (t) => {
+  const assocKp = generateAssociationKeyPair()
+  const source = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
+  await source.ready()
+  t.teardown(() => source.close(), { force: true })
+  await source.append(memberCertRecord(createCert({ member: hex(source.key) }, assocKp)))
+  await source.append(postRecord({ text: 'p1' }))
+  await source.append(postRecord({ text: 'p2' }))
+  await source.append(deleteRecord({ seq: 2 }))
+  const replica = new Hypercore(memoryStorage(), source.key, { valueEncoding: 'json' })
+  await replica.ready()
+  t.teardown(() => replica.close(), { force: true })
+  const a = source.replicate(true)
+  const b = replica.replicate(false)
+  a.pipe(b).pipe(a)
+  await replica.download({ start: 3, end: 4 }).done()
+  a.destroy()
+  b.destroy()
+  const before = replica.listenerCount('peer-add')
+  // Block 2 tombstoned and unheld: the guard listens for a peer to settle it.
+  const tracker = trackPresent(replica, {})
+  t.ok(await until(() => replica.listenerCount('peer-add') > before, 5000), 'the guard listens for peers')
+  tracker.destroy()
+  t.is(replica.listenerCount('peer-add'), before, 'the listener is gone after destroy')
 })

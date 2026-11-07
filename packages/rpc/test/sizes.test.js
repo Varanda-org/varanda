@@ -6,11 +6,13 @@
 const test = require('brittle')
 const { validateRecord } = require('@varanda/core/lib/records')
 const { isUsername } = require('@varanda/core/lib/account-link')
+const { SEEN_BLOB_B64, MERGE_AVISOS_MAX, SYNC_PAGES_MAX, MERGE_PAGE_TOKENS_MAX } = require('@varanda/core/lib/seen-blob')
 const {
   createServerDispatcher,
   validateParams,
   utf8ByteLength,
   MAX_ID,
+  MAX_REQUEST,
   MAX_MESSAGE,
   MAX_LIST,
   MAX_NAME,
@@ -31,9 +33,16 @@ const {
   ENGAGEMENT_LIMIT_MAX,
   PEEK_SEQS_MAX,
   FOLLOW_LIMIT_MAX,
+  GROUP_LIMIT_DEFAULT,
   GROUP_LIMIT_MAX,
   GROUP_MEMBERS_LIMIT_MAX,
-  MAX_GROUP_NAME
+  MAX_GROUP_NAME,
+  MAX_GROUPS_PER_COMMUNITY,
+  COMMUNITY_LIST_MAX,
+  MAX_DM_MEDIA,
+  DM_MEDIA_CHUNK_BYTES,
+  DM_MEDIA_MAX_CHUNKS,
+  DM_THREAD_LIMIT_MAX
 } = require('..')
 
 const HEX = 'f'.repeat(64)
@@ -78,6 +87,40 @@ function size (result) {
   return utf8ByteLength(JSON.stringify({ v: 1, id: MAX_ID, ok: true, result }))
 }
 
+test('seen sync: worst-case request and results fit', (t) => {
+  t.is(SEEN_BLOB_B64, 43744)
+  t.is(MERGE_AVISOS_MAX, 256)
+  t.is(SYNC_PAGES_MAX, 4)
+  t.is(MERGE_PAGE_TOKENS_MAX, 32)
+  t.is(MAX_REQUEST, 65536)
+  t.is(MAX_MESSAGE, 262144)
+  const tokens = (n) => Array.from({ length: n }, (_, i) => i.toString(16).padStart(32, '0'))
+  const avisos = {
+    own: tokens(MERGE_AVISOS_MAX),
+    pages: Object.fromEntries(Array.from({ length: SYNC_PAGES_MAX }, (_, i) => [
+      'page:' + i.toString(16).padStart(64, '0'), tokens(MERGE_PAGE_TOKENS_MAX)
+    ]))
+  }
+  const blob = 'A'.repeat(SEEN_BLOB_B64)
+  const params = { blob, avisos, unchanged: false }
+  t.ok(validateParams('seen.merge', params).ok)
+  const request = utf8ByteLength(JSON.stringify({ v: 1, id: MAX_ID, method: 'seen.merge', params }))
+  t.ok(request < MAX_REQUEST)
+  t.comment('seen.merge worst-case request: ' + request + ' bytes')
+  const write = size({ signature: 'f'.repeat(128), blob, hash: HEX, prevHash: HEX })
+  t.ok(write < MAX_MESSAGE)
+  t.comment('seen.sign worst-case write result: ' + write + ' bytes')
+  const merge = size({
+    avisos,
+    pending: false,
+    dmChanged: false,
+    groupChanged: false,
+    caughtUp: Array.from({ length: 512 }, (_, i) => i.toString(16).padStart(64, '0'))
+  })
+  t.ok(merge < MAX_MESSAGE)
+  t.comment('seen.merge worst-case result with 512 caught-up keys: ' + merge + ' bytes')
+})
+
 function feedResult (n, ch) {
   const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ }, quote: null, media: MEDIA }
   return {
@@ -108,7 +151,8 @@ function noticesResult (n, ch) {
   // Derive the maximum from core's username rule, which exports no length limit.
   let username = 'uuu'
   while (isUsername(username + 'u')) username += 'u'
-  const item = { kind: 'mention', key: HEX, seq: SEQ, at: AT, name: ch.repeat(MAX_NAME), username, seen: 'f'.repeat(32), avatar: WORST_AVATAR }
+  // A repost row carries the caller's post ref and the longest kind name.
+  const item = { kind: 'repost', key: HEX, seq: SEQ, at: AT, name: ch.repeat(MAX_NAME), username, seen: 'f'.repeat(32), avatar: WORST_AVATAR, post: HEX + ':' + SEQ }
   return {
     notices: Array(n).fill(item),
     next: { at: AT, key: HEX, seq: SEQ },
@@ -260,15 +304,45 @@ test('follow.list: FOLLOW_LIMIT_MAX keys fit with a wide margin', (t) => {
   t.ok(s * 4 < MAX_MESSAGE)
 })
 
-function groupReadResult (n, ch) {
-  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20) }
+function groupReadResult (n, ch, media) {
+  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, fwd: 1, media, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20) }
   return { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, hidden: SEQ, incomplete: true, sealed: SEQ, epoch: { writer: HEX, seq: SEQ }, state: 'rekey-pending' }
 }
 
-test('group.read: GROUP_LIMIT_MAX fits', (t) => {
-  t.is(GROUP_LIMIT_MAX, 31)
-  for (const ch of WORST) t.ok(size(groupReadResult(GROUP_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
-  t.comment('group.read worst case at ' + GROUP_LIMIT_MAX + ' items: ' + size(groupReadResult(GROUP_LIMIT_MAX, '\ud800')) + ' bytes')
+test('group.read: public media fits GROUP_LIMIT_MAX', (t) => {
+  const media = MEDIA.map((d, i) => ({ ...d, core: String(i).repeat(64) }))
+  t.is(GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX)
+  t.ok(validateParams('group.post', { group: HEX, text: '\ud800'.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, media }).ok, 'worst public media passes RPC validation')
+  for (const ch of WORST) t.ok(size(groupReadResult(GROUP_LIMIT_MAX, ch, media)) <= MAX_MESSAGE, JSON.stringify(ch))
+  t.comment('group.read public media at ' + GROUP_LIMIT_MAX + ' items: ' + size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', media)) + ' bytes')
+})
+
+test('group.read: GROUP_LIMIT_MAX with private media fits, one more does not', (t) => {
+  const { width, height, ...cipher } = DESCRIPTOR
+  const media = Array.from({ length: MAX_MEDIA_PER_POST }, (_, i) => ({
+    ...cipher,
+    core: String(i).repeat(64),
+    mime: 'application/octet-stream',
+    bytes: cipher.blocks * MEDIA_BLOCK_BYTES,
+    key: HEX,
+    nonce: 'f'.repeat(48),
+    plainMime: MIME,
+    plainSha256: HEX,
+    w: MAX_MEDIA_DIMENSION,
+    h: MAX_MEDIA_DIMENSION,
+    ms: 0
+  }))
+  const item = groupReadResult(1, '\ud800', media).items[0]
+  t.ok(validateParams('group.post', { group: HEX, text: item.text, replyTo: item.replyTo, media, sealed: true }).ok, 'worst private media passes RPC validation')
+  for (const ch of WORST) t.ok(size(groupReadResult(GROUP_LIMIT_MAX, ch, media)) <= MAX_MESSAGE, JSON.stringify(ch))
+  const worst = size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', media))
+  const overflow = size(groupReadResult(GROUP_LIMIT_MAX + 1, '\ud800', media))
+  t.is(worst, 257369)
+  t.is(overflow, 266230)
+  t.comment('group.read worst private item: ' + utf8ByteLength(JSON.stringify(item)) + ' bytes')
+  t.comment('group.read worst case at ' + GROUP_LIMIT_MAX + ' items: ' + worst + ' bytes')
+  t.comment('group.read worst case at ' + (GROUP_LIMIT_MAX + 1) + ' items: ' + overflow + ' bytes')
+  t.ok(overflow > MAX_MESSAGE, 'largest that fits')
 })
 
 test('group.members: GROUP_MEMBERS_LIMIT_MAX fits', (t) => {
@@ -278,18 +352,75 @@ test('group.members: GROUP_MEMBERS_LIMIT_MAX fits', (t) => {
   t.ok(s <= MAX_MESSAGE)
 })
 
-test('community.info: 32 groups with maximal names fit', (t) => {
-  const group = { group: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME) }
-  const s = size({ community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), creator: HEX, groups: Array(32).fill(group), admins: SEQ, state: 'ready', incomplete: true })
-  t.comment('community.info worst case at 32 groups: ' + s + ' bytes')
+test('community.info: MAX_GROUPS_PER_COMMUNITY groups with maximal names fit', (t) => {
+  t.is(MAX_GROUPS_PER_COMMUNITY, 32)
+  const group = { group: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), visibility: 'private', join: 'approval', role: 'creator', general: false, last: { name: '\ud800'.repeat(MAX_NAME), username: 'u'.repeat(20), preview: '\ud800'.repeat(140), at: AT, mine: false, hidden: false }, unread: 99 }
+  const s = size({ community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), join: 'approval', creator: HEX, role: 'creator', state: 'ready', members: SEQ, admins: SEQ, groups: Array(MAX_GROUPS_PER_COMMUNITY).fill(group), general: HEX, incomplete: true, leavePending: true })
+  t.comment('community.info worst case at ' + MAX_GROUPS_PER_COMMUNITY + ' groups: ' + s + ' bytes')
   t.ok(s <= MAX_MESSAGE)
 })
 
-test('community.list: 128 communities with maximal names fit', (t) => {
-  const community = { community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), state: 'pending', creator: false, linked: false }
-  const s = size({ communities: Array(128).fill(community) })
-  t.comment('community.list worst case at 128 communities: ' + s + ' bytes')
+test('community.list: COMMUNITY_LIST_MAX communities with maximal names fit', (t) => {
+  t.is(COMMUNITY_LIST_MAX, 64)
+  const community = { community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), join: 'approval', state: 'pending', role: 'creator', general: HEX }
+  const s = size({ communities: Array(COMMUNITY_LIST_MAX).fill(community) })
+  t.comment('community.list worst case at ' + COMMUNITY_LIST_MAX + ' communities: ' + s + ' bytes')
   t.ok(s <= MAX_MESSAGE)
+})
+
+// A DM text is well formed (packages/core/lib/dm.js validText), so a lone
+// surrogate never reaches dm.thread: a 4-byte character is the widest code
+// point there.
+const DM_WORST = ['\u{1f600}', '"', '\\', '\n']
+// The widest media item dm.send accepts: the longest mime, the most chunks
+// and the largest ciphertext, the widest sides (ms is 0 for an image).
+const DM_MEDIA_ITEM = {
+  id: HEX,
+  key: HEX,
+  nonce: 'f'.repeat(48),
+  mime: MIME,
+  chunks: DM_MEDIA_MAX_CHUNKS,
+  bytes: DM_MEDIA_MAX_CHUNKS * DM_MEDIA_CHUNK_BYTES,
+  sha256: HEX,
+  w: MAX_MEDIA_DIMENSION,
+  h: MAX_MEDIA_DIMENSION,
+  ms: 0
+}
+
+// Every message at MAX_TEXT code points and MAX_DM_MEDIA items, which the
+// sealed frame (DM_INNER_BYTES) cannot even carry together: a bound, not a
+// message that exists.
+function dmThreadResult (n, ch) {
+  const message = { id: 'f'.repeat(32), from: HEX, text: ch.repeat(MAX_TEXT), replyTo: 'f'.repeat(32), fwd: 1, at: AT, mine: false, media: widestDmMedia(MAX_DM_MEDIA) }
+  return { messages: Array(n).fill(message), next: 'f'.repeat(32), folder: 'request', blocked: false }
+}
+
+// n widest items with distinct blob ids (dm.send refuses repeated ids); every
+// id is 64 hex, so the width is the same as n copies.
+function widestDmMedia (n) {
+  return Array.from({ length: n }, (_, i) => ({ ...DM_MEDIA_ITEM, id: (i + 1).toString(16).padStart(2, '0').repeat(32) }))
+}
+
+test('the widest DM media item is a valid dm.send item', (t) => {
+  t.ok(validateParams('dm.send', { to: HEX, text: '', media: widestDmMedia(MAX_DM_MEDIA) }).ok)
+  t.absent(validateParams('dm.send', { to: HEX, text: '', media: [{ ...DM_MEDIA_ITEM, chunks: DM_MEDIA_MAX_CHUNKS + 1 }] }).ok)
+  t.absent(validateParams('dm.send', { to: HEX, text: '', media: [{ ...DM_MEDIA_ITEM, bytes: DM_MEDIA_ITEM.bytes + 1 }] }).ok)
+  t.absent(validateParams('dm.send', { to: HEX, text: '', media: widestDmMedia(MAX_DM_MEDIA + 1) }).ok)
+  t.comment('widest DM media item: ' + utf8ByteLength(JSON.stringify(DM_MEDIA_ITEM)) + ' bytes')
+})
+
+test('dm.thread: DM_THREAD_LIMIT_MAX fits, one more does not', (t) => {
+  t.is(DM_THREAD_LIMIT_MAX, 46)
+  t.ok(validateParams('dm.thread', { peer: HEX, limit: DM_THREAD_LIMIT_MAX }).ok)
+  t.absent(validateParams('dm.thread', { peer: HEX, limit: DM_THREAD_LIMIT_MAX + 1 }).ok)
+  for (const ch of DM_WORST) t.ok(size(dmThreadResult(DM_THREAD_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  const worst = size(dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}'))
+  t.comment('dm.thread worst case at ' + DM_THREAD_LIMIT_MAX + ' messages: ' + worst + ' bytes')
+  const overflow = size(dmThreadResult(DM_THREAD_LIMIT_MAX + 1, '\u{1f600}'))
+  t.is(worst, 260908)
+  t.is(overflow, 266577)
+  t.comment('dm.thread worst case at ' + (DM_THREAD_LIMIT_MAX + 1) + ' messages: ' + overflow + ' bytes')
+  t.ok(overflow > MAX_MESSAGE, 'largest that fits')
 })
 
 test('the dispatcher sends the worst-case feed page unchanged', async (t) => {

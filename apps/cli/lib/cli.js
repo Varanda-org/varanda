@@ -23,7 +23,7 @@ Comandos:
   seed key|cert add          chave do semeador e seu certificado (--cert-file)
   seed list|status           diários admitidos e estado do semeador
   seed drop <chave>          apaga um diário do semeador parado
-  account                    serviço de vínculo de conta Google (--account-port, --account-host)
+  account                    serviço de vínculo de conta Google (--account-port, --account-host); páginas com VARANDA_PAGE_KEYS e VARANDA_SEEDER_WS, busca de GIF com VARANDA_GIF_API_URL e VARANDA_GIF_API_KEY (desligadas por padrão)
   account key                chave do emissor do serviço de conta (imprime só a pública)
   account cert add           grava o certificado do emissor (--cert-file <f>)
   account push-key           chave dos avisos push da versão web (imprime só a pública)
@@ -37,8 +37,8 @@ Comandos:
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
   mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
-  group create               cria um grupo (--name, --join open|approval, --private cifrado)
-  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele
+  group create               cria um grupo numa comunidade (--community, --name, --join open|approval, --private cifrado)
+  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele (--community se o grupo ainda não chegou)
   group post <chave>         publica no grupo (--text)
   group read <chave>         lê o grupo, das mais novas (--limit, --before <at>,<escritor>,<seq>)
   group list                 grupos dos quais você participa
@@ -47,10 +47,25 @@ Comandos:
   group hide <chave>         oculta uma mensagem (--to <escritor>:<seq>, --undo)
   group meta <chave>         muda nome ou entrada do grupo (--name, --join)
   group rekey <chave>        gera uma nova chave do grupo privado
-  community create           cria uma comunidade de grupos (--name)
-  community link <comunidade> <grupo>  vincula um grupo à comunidade (--undo desfaz)
-  community admin <comunidade>         nomeia um administrador da comunidade (--member, --undo)
-  community info <chave>     dados da comunidade e seus grupos
+  community create           cria uma comunidade com o grupo Geral (--name, --join open|approval)
+  community join|leave <chave>         entra na comunidade (e no Geral) e sai dela
+  community leave <chave> --force      quem criou sai sem esperar os grupos que ainda não chegaram
+  community info|list        dados da comunidade e seus grupos; suas comunidades
+  community members|requests <chave>   membros e pedidos de entrada da comunidade
+  community admit|ban|admin <chave>    modera um membro da comunidade (--member, --undo)
+  community meta <chave>     muda nome ou entrada da comunidade (--name, --join)
+  community remove-group <chave> <grupo>  tira um grupo da lista da comunidade (quem criou, de volta após sair; --undo devolve)
+  page register              registra o delegado de página deste nó (imprime só a chave pública)
+  page terms                 aceita os Termos para o delegado no serviço de conta
+  page create                cria uma página (--username, --name, --bio)
+  page list                  páginas que você tem ou administra, convites e ofertas
+  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 4)
+  page photo                 foto da página (--page, --file, --name, --bio)
+  page follow|unfollow       a página segue ou deixa de seguir uma chave (--page, --key)
+  page notices               avisos da página (--page, --limit)
+  page close|move            encerra a página ou muda a sua chave (--page)
+  page join|leave            a página entra ou sai (--page, --community ou --group)
+  page group-post            a página publica num grupo (--page, --group, --text)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -58,20 +73,23 @@ Opções globais:
   --bootstrap <host:porta>   repetível (ou VARANDA_BOOTSTRAP, separado por vírgula)
   --dht-host <ip>            endereço local da DHT (ou VARANDA_DHT_HOST)
   --json                     saída JSON na última linha
+  page: VARANDA_ACCOUNT_ORIGIN, origem https do serviço de conta
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private
-  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.`
+  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes
+  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
+  --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).`
 
-const booleanFlags = new Set(['--json', '--once', '--no-publish', '--new-list', '--yes', '--undo', '--private', '--help', '-h'])
+const booleanFlags = new Set(['--json', '--once', '--no-publish', '--no-dm', '--new-list', '--yes', '--undo', '--private', '--force', '--help', '-h'])
 const stringFlags = new Set([
-  '--data', '--association', '--timeout-ms', '--member', '--seeder',
+  '--data', '--association', '--timeout-ms', '--member', '--community', '--seeder',
   '--age-band', '--method', '--out', '--cert-file', '--name', '--bio',
   '--text', '--to', '--author', '--limit', '--before', '--bootstrap', '--dht-host',
   '--health-port', '--health-host', '--ws-port', '--ws-host', '--ws-origin',
-  '--issuer', '--account-port', '--account-host', '--moderator', '--server', '--join'
+  '--issuer', '--account-port', '--account-host', '--moderator', '--server', '--join',
+  '--page', '--key', '--username', '--group', '--file', '--blob-bytes'
 ])
 
 function key (value, message = 'chave inválida') {
@@ -104,6 +122,15 @@ function optionalEnvInteger (env, name, min, max) {
   if (value === '') return null
   const number = integer(value, name)
   if (String(number) !== value || number < min || number > max) throw new UsageError(name + ' inválido')
+  return number
+}
+
+// The seeder's blob pool cap: at least one chunk (BLOB_CHUNK_BYTES, a literal
+// so parsing stays cheap), at most 1 TiB, canonical decimal.
+function blobBytes (value) {
+  const number = integer(value, 'blob-bytes', 1099511627776)
+  if (number === null) return null
+  if (String(number) !== value || number < 32768) throw new UsageError('blob-bytes inválido')
   return number
 }
 
@@ -165,6 +192,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
   const positionals = []
   const bootstraps = []
   const wsOriginFlags = []
+  const files = []
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]
     if (booleanFlags.has(token)) {
@@ -177,6 +205,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
       i++
       if (token === '--bootstrap') bootstraps.push(value)
       else if (token === '--ws-origin') wsOriginFlags.push(value)
+      else if (token === '--file') files.push(path.resolve(cwd, value))
       else values.set(token, value)
     } else if (token.startsWith('-')) {
       throw new UsageError('opção desconhecida ' + token)
@@ -235,18 +264,29 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     json: get('json') === true,
     once: get('once') === true,
     noPublish: get('no-publish') === true,
+    noDm: get('no-dm') === true,
+    blobBytes: blobBytes(get('blob-bytes')),
     newList: get('new-list') === true,
     yes: get('yes') === true,
     undo: get('undo') === true,
     private: get('private') === true,
+    force: get('force') === true,
     dataDir: path.resolve(cwd, get('data') || env.VARANDA_DATA || './data'),
     association: key(get('association') || env.VARANDA_ASSOCIATION || null, 'chave da associação inválida'),
     bootstrap: bootstrap.length ? bootstrap : undefined,
     timeoutMs: integer(get('timeout-ms'), 'timeout-ms', MAX_TIMEOUT_MS),
     member: key(get('member')),
+    community: key(get('community')),
     seeder: key(get('seeder')),
     issuer: key(get('issuer')),
     moderator: key(get('moderator')),
+    page: key(get('page'), 'chave da página inválida'),
+    key: key(get('key')),
+    group: key(get('group'), 'chave do grupo inválida'),
+    username: get('username'),
+    files,
+    // Raw: only the page commands read it (commands/page.js accountOrigin).
+    accountOrigin: env.VARANDA_ACCOUNT_ORIGIN === undefined ? null : env.VARANDA_ACCOUNT_ORIGIN,
     dhtHost,
     healthPort: port(get('health-port') ?? env.VARANDA_HEALTH_PORT ?? null, 'health-port'),
     healthHost,

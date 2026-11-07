@@ -190,8 +190,8 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   const handle = await api.start({ association, seederUrl })
   t.alike(Object.keys(handle).sort(), ['close', 'connect', 'follows', 'identity', 'media'], 'only connect, close, follows, identity and media are exposed')
   t.ok(Object.isFrozen(handle) && Object.isFrozen(handle.identity) && Object.isFrozen(handle.media) && Object.isFrozen(handle.follows), 'the handle, identity, media and follows are frozen')
-  t.alike(Object.keys(handle.identity).sort(), ['complete', 'lock', 'reset', 'signOut', 'status', 'unlock'], 'no getter, no signer')
-  t.alike(Object.keys(handle.media), ['upload'])
+  t.alike(Object.keys(handle.identity).sort(), ['addPasskey', 'bindPasskey', 'cancelRecovery', 'complete', 'finishRecovery', 'lock', 'makeRecoveryCode', 'reset', 'signOut', 'status', 'unlock', 'unlockWithCode', 'unlockWrapped'], 'no getter, no signer')
+  t.alike(Object.keys(handle.media), ['upload', 'putDm', 'readDm', 'readGroup'], 'media: post upload, DM media put and read (rpc.md 5.88), private group media read')
   t.alike(Object.keys(handle.follows).sort(), ['confirmLegacy', 'legacy'])
   const badKeys = await errorOf(handle.follows.confirmLegacy('x'))
   t.ok(badKeys instanceof TypeError, 'a sync throw becomes a rejection')
@@ -204,6 +204,8 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   t.is(first.prf, 'yes')
   t.is(first.rpId, 'localhost')
   t.is(first.passkeyKnown, false)
+  t.is(first.pending, false)
+  t.alike(first.refused, [])
   t.absent('rpIdError' in first)
   const locked = await errorOf(web.request('identity.create'))
   t.is(locked && locked.code, 'USAGE')
@@ -220,6 +222,7 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   t.is(afterNoPrf.unlocked, false)
   t.is(afterNoPrf.exists, false)
   t.is(afterNoPrf.passkeyKnown, false)
+  t.alike(afterNoPrf.refused, [{ userId: hex(unusable.userId), code: 'NO_PRF', cleaned: false, created: true }], 'the refused passkey, without its id')
 
   // PRF only enabled on create: pending, then complete() fetches it.
   fake.createMode = 'pending'
@@ -232,6 +235,7 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
     'the unusable passkey is excluded from the next creation')
   t.alike(await pendingCall, { pending: true }, 'a creation without the PRF output is pending')
   t.is((await handle.identity.status()).unlocked, false, 'still locked while pending')
+  t.is((await handle.identity.status()).pending, true)
 
   // A second creation while one is pending excludes the pending passkey
   // (and, when the manager creates another anyway, replaces it).
@@ -312,8 +316,11 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   const extra = handle.identity.unlock({ register: true })
   t.alike(fake.calls[0].publicKey.excludeCredentials.map((c) => new Uint8Array(c.id)).sort(byBytes),
     [unusable.rawId, firstPending.rawId, current.rawId].sort(byBytes), 'the unusable, superseded and current passkeys are excluded')
+  // Watch the pending ceremony before locking: lock() also wipes the DM
+  // media cache, and the cancelled unlock may reject before it returns.
+  const extraError = errorOf(extra)
   await handle.identity.lock()
-  t.is((await errorOf(extra)).code, 'CANCELLED')
+  t.is((await extraError).code, 'CANCELLED')
   fake.credential = current
   t.alike(await kvValue('passkey'), stored, 'the stored record is untouched')
   await handle.close()
@@ -352,8 +359,9 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
 
   // lock() during a ceremony cancels its result.
   const racing = again.identity.unlock()
+  const racingError = errorOf(racing)
   await again.identity.lock()
-  const cancelled = await errorOf(racing)
+  const cancelled = await racingError
   t.is(cancelled && cancelled.code, 'CANCELLED', 'a ceremony that outlives lock() is discarded')
   t.is((await again.identity.status()).unlocked, false)
 
@@ -463,11 +471,20 @@ test('the built node bundle exchanges public and private group messages with a c
 
   // Public group: the core node creates and posts, the bundle joins and reads,
   // posts, and the core node reads it back.
-  const { group: pub } = await coreMember.groupCreate(coreCtx, { name: 'Praia', join: 'open', visibility: 'public' })
+  const { community } = await coreMember.communityCreate(coreCtx, { name: 'Bairro', join: 'open' })
+  const { group: pub } = await coreMember.groupCreate(coreCtx, { name: 'Praia', join: 'open', visibility: 'public', community })
   await coreMember.groupPost(coreCtx, { group: pub, text: 'publica-c1' })
-  t.ok((await syncCore()).ok, 'core pushes the public group')
+  t.ok((await syncCore()).ok, 'core pushes the community and the public group')
+  await rootOnSeeder(community)
   await rootOnSeeder(pub)
-  t.is((await web.request('group.join', { group: pub })).state, 'pending', 'join before the root is pending')
+  // A group is joined only inside its community: the community first (pending
+  // until its root is held), then the group its catalogue brought.
+  t.is((await web.request('community.join', { community })).state, 'pending', 'join before the community root is pending')
+  await syncWeb()
+  t.is((await web.request('community.join', { community })).state, 'member', 'the bundle joins the community')
+  t.ok((await syncWeb()).ok, 'the bundle pushes its community writer')
+  t.ok((await syncCore()).ok, 'core fetches the community writer')
+  t.is((await web.request('group.join', { group: pub })).state, 'member', 'the open group takes the member at once')
   await syncWeb()
   const infoPub = await web.request('group.info', { group: pub })
   t.is(infoPub.state, 'member', 'the bundle is a member of the open group')
@@ -481,16 +498,15 @@ test('the built node bundle exchanges public and private group messages with a c
   // it holds the root (a boxless writer no seeder admits), syncs, joins
   // again with a boxed writer, reads only a sealed count until admitted, then
   // the history, and posts.
-  const { group: priv } = await coreMember.groupCreate(coreCtx, { name: 'Conselho', join: 'open', visibility: 'private' })
+  const { group: priv } = await coreMember.groupCreate(coreCtx, { name: 'Conselho', join: 'open', visibility: 'private', community })
   await coreMember.groupPost(coreCtx, { group: priv, text: 'privada-c1' })
   t.ok((await syncCore()).ok, 'core pushes the private group')
   await rootOnSeeder(priv)
   t.is(seeder.indexGroup(priv).header.name, null, 'the index never names a private group')
 
-  t.is((await web.request('group.join', { group: priv })).state, 'pending', 'join before the root is pending')
   const first = await syncWeb()
-  t.ok(first.ok, 'the boxless writer is no push goal once the private root arrives' + (first.ok ? '' : ': ' + first.errors.join('; ')))
-  t.is((await web.request('group.join', { group: priv })).state, 'requested', 'a boxed rejoin requests entry')
+  t.ok(first.ok, 'the community catalogue brings the private root' + (first.ok ? '' : ': ' + first.errors.join('; ')))
+  t.is((await web.request('group.join', { group: priv })).state, 'requested', 'a boxed join requests entry')
   t.ok((await syncWeb()).ok, 'the bundle pushes the request')
   const sealedRead = await web.request('group.read', { group: priv })
   t.alike(texts(sealedRead), [], 'a non-member reads no text')

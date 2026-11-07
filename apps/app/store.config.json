@@ -1,0 +1,31 @@
+{
+  "configVersion": 0,
+  "apple": {
+    "version": "0.1.0",
+    "categories": ["SOCIAL_NETWORKING"],
+    "info": {
+      "pt-BR": {
+        "title": "Varanda",
+        "subtitle": "Rede social brasileira",
+        "promoText": "Um lugar para encontrar pessoas, trocar ideias e acompanhar as conversas de quem você escolhe.",
+        "description": "A Varanda é uma rede social brasileira e descentralizada, criada para dar mais autonomia às pessoas e às suas conversas. Um lugar para encontrar pessoas, trocar ideias e acompanhar as conversas de quem você escolhe.\n\nA Rua\nAs publicações de quem você segue aparecem em ordem de chegada, das mais recentes para as mais antigas, sem algoritmo de engajamento escolhendo o que você deve ver.\n\nSeu Diário\nO seu espaço, com o seu perfil e as suas publicações: até 1000 caracteres e até 4 fotos ou GIFs por publicação. O Diário é público: quem visita o seu perfil vê o que você publica.\n\nAs Conversas\nMensagens privadas entre duas pessoas, cifradas de ponta a ponta, com texto, fotos, GIFs e mensagens de voz. Quem você ainda não segue chega em Pedidos de mensagem, e você decide se aceita.\nComunidades reúnem quem divide um bairro, um interesse ou uma causa. Cada grupo é público ou privado. No privado, um administrador sempre aprova quem entra e a conversa é cifrada de ponta a ponta. As conversas com uma Página, e os grupos privados de que uma Página participa, podem ser lidos pelo serviço de conta da associação.\n\nTambém tem a Espiadinha (publicações de quem você não segue, sem algoritmo de engajamento), a Busca, os Avisos e as Páginas, para um negócio ou um projeto.\n\nUma rede descentralizada\nCada publicação sua é assinada no seu aparelho. Quem acompanha você guarda uma cópia do seu Diário, e computadores de apoio, chamados de semeadores, guardam e entregam as publicações pela rede. Assim a conversa não depende de um único servidor central. Nesta abertura, a entrada e a troca de cópias pelo app passam por serviços mantidos pela associação que publica a Varanda.\n\nSegurança e moderação\nDá para denunciar uma publicação, uma conta ou uma mensagem, e a associação analisa as denúncias. Nas Conversas, você pode bloquear as mensagens de uma pessoa. O perfil, o @nome, as publicações do Diário, quem você segue e quem segue você são públicos: a Varanda não é uma rede anônima.\n\nQuem pode participar\nPessoas com 16 anos ou mais. Para entrar, você cria uma chave de acesso (passkey) no aparelho, confirma a idade com um serviço parceiro e escolhe um @nome, que é liberado ao vincular uma conta Google. No iPhone, a entrada com chave de acesso precisa do iOS 18 ou mais novo.\n\nNesta abertura as vagas são limitadas. Se a Varanda já estiver cheia, o app avisa durante a entrada e você pode tentar de novo daqui a alguns dias.\n\nO código-fonte está disponível no GitHub, sob a licença PolyForm Noncommercial 1.0.0.\n\nPuxe sua cadeira. A conversa merece uma varanda.",
+        "keywords": [
+          "descentralizada",
+          "comunidades",
+          "grupos",
+          "mensagens",
+          "conversas",
+          "chat",
+          "diário",
+          "fotos",
+          "sem algoritmo",
+          "amigos",
+          "bairro"
+        ],
+        "marketingUrl": "https://varanda.app/",
+        "supportUrl": "https://github.com/Varanda-org/varanda/issues",
+        "privacyPolicyUrl": "https://varanda.app/privacidade/"
+      }
+    }
+  }
+}

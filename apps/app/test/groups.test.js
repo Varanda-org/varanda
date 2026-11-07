@@ -3,6 +3,8 @@
 'use strict'
 
 const test = require('brittle')
+const { readFileSync } = require('node:fs')
+const { join } = require('node:path')
 const load = () => import('../src/groups.js')
 
 const A = 'ab'.repeat(32)
@@ -49,6 +51,21 @@ test('rowsOf: newest at the bottom, names never raw keys, hidden placeholder', a
   t.alike(rowsOf(null), [])
 })
 
+test('rowsOf keeps line breaks and hands MentionText the raw text', async (t) => {
+  const { rowsOf, HIDDEN_LABEL } = await load()
+  const at = '2026-10-31T10:00:00.000Z'
+  const [row] = rowsOf([{ writer: A, diary: A, seq: 1, at, text: 'oi\nhttps://a.com‮evil', hidden: false }])
+  t.is(row.text, 'oi\nhttps://a.com�evil', 'line feed kept, direction mark escaped')
+  t.is(row.rawText, 'oi\nhttps://a.com‮evil', 'the mark survives so links.js refuses the word')
+  const [hidden] = rowsOf([{ writer: A, diary: A, seq: 2, at, text: 'segredo', hidden: true }])
+  t.is(hidden.text, HIDDEN_LABEL)
+  t.is(hidden.rawText, '')
+  const source = readFileSync(join(__dirname, '../src/screens/Grupo.js'), 'utf8')
+  t.ok(source.includes('rawText: row.hidden ? undefined : row.rawText'), 'Bubble gets the raw text for MentionText, never for a hidden row')
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes('<MentionText text={item.rawText}'), 'Bubble renders rawText through MentionText')
+})
+
 test('roleOf: from info.role, pending state, creator or writers', async (t) => {
   const { roleOf } = await load()
   t.is(roleOf({ role: 'admin' }, A), 'admin')
@@ -66,7 +83,7 @@ test('roleOf: from info.role, pending state, creator or writers', async (t) => {
 test('can: every action per role', async (t) => {
   const { can, ROLES } = await load()
   const table = {
-    creator: { post: 1, hide: 1, ban: 1, admit: 1, admin: 1, meta: 1, rekey: 1, leave: 1, link: 1 },
+    creator: { post: 1, hide: 1, ban: 1, admit: 1, admin: 1, meta: 1, rekey: 1, leave: 1, create: 1 },
     admin: { post: 1, hide: 1, ban: 1, admit: 1, rekey: 1, leave: 1 },
     member: { post: 1, leave: 1 },
     requested: { leave: 1 },
@@ -75,13 +92,34 @@ test('can: every action per role', async (t) => {
     pending: { leave: 1 }
   }
   for (const role of ROLES) {
-    for (const action of ['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'link']) {
+    for (const action of ['post', 'hide', 'ban', 'admit', 'admin', 'meta', 'rekey', 'leave', 'create', 'link']) {
       t.is(can(action, role), table[role][action] === 1, role + ' ' + action)
     }
   }
   t.absent(can('fly', 'creator'))
   t.absent(can('post', 'boss'))
   t.absent(can('post', null))
+})
+
+test('can: invite and invitePolicy', async (t) => {
+  const { can, ROLES } = await load()
+  for (const role of ROLES) {
+    const staff = role === 'creator' || role === 'admin'
+    t.is(can('invitePolicy', role), staff, role + ' invitePolicy')
+    t.is(can('invite', role), staff, role + ' invite')
+    t.is(can('invite', role, { memberInvite: true }), staff || role === 'member', role + ' invite on')
+  }
+  t.absent(can('invite', null, { memberInvite: true }))
+})
+
+test('reconcile: invite-policy', async (t) => {
+  const { reconcile } = await load()
+  const c = { action: 'invite-policy', members: true }
+  t.is(reconcile(c, { info: { memberInvite: true } }), 'landed')
+  t.is(reconcile(c, { info: { memberInvite: false } }), 'not-landed')
+  t.is(reconcile(c, { info: {} }), 'unknown')
+  t.is(reconcile(c, {}), 'unknown')
+  t.is(reconcile({ action: 'invite-policy', members: false }, { info: { memberInvite: false } }), 'landed')
 })
 
 test('can: own messages and community admins', async (t) => {
@@ -98,11 +136,15 @@ test('can: own messages and community admins', async (t) => {
   }
   t.absent(can('admin', 'member', { communityAdmin: true }), 'creator only')
   t.absent(can('meta', 'admin', { communityAdmin: true }))
+  t.absent(can('create', 'member', { communityAdmin: true }), 'creation uses the community role')
   t.absent(can('post', 'left', { communityAdmin: true }))
 })
 
 test('labels in pt-BR', async (t) => {
-  const { roleLabel, stateLabel, sealedLabel, visibilityLabel, joinLabel, membersLabel, REKEY_PENDING_LABEL } = await load()
+  const { roleLabel, stateLabel, sealedLabel, visibilityLabel, joinLabel, membersLabel, REKEY_PENDING_LABEL, GENERAL_LABEL, ORPHAN_LABEL, COMMUNITY_JOIN_LABELS } = await load()
+  t.is(GENERAL_LABEL, 'Geral')
+  t.is(ORPHAN_LABEL, 'grupo sem comunidade')
+  t.alike(COMMUNITY_JOIN_LABELS, { open: 'aberta a todos', approval: 'entrada com aprovação' })
   t.is(roleLabel('creator'), 'criador')
   t.is(roleLabel('admin'), 'administrador')
   t.is(roleLabel('requested'), 'pedido enviado')
@@ -127,22 +169,109 @@ test('labels in pt-BR', async (t) => {
 
 test('no em dash in any label', async (t) => {
   const g = await load()
-  const all = [...Object.values(g.ROLE_LABELS), ...Object.values(g.STATE_LABELS), ...Object.values(g.JOIN_LABELS), g.PRIVATE_LABEL, g.PUBLIC_LABEL, g.HIDDEN_LABEL]
+  const all = [...Object.values(g.ROLE_LABELS), ...Object.values(g.STATE_LABELS), ...Object.values(g.JOIN_LABELS), ...Object.values(g.COMMUNITY_JOIN_LABELS), g.GENERAL_LABEL, g.ORPHAN_LABEL, g.PRIVATE_LABEL, g.PUBLIC_LABEL, g.HIDDEN_LABEL, g.DEVICE_JOIN_LABEL, g.DEVICE_JOIN_TEXT, g.DEVICE_WAIT_TEXT, g.DEVICE_APPROVAL_TEXT, g.DEVICE_RESERVE_TEXT, g.DEVICE_PENDING_JOIN_TEXT]
   t.absent(all.some((s) => s.includes('\u2014')))
 })
 
-test('joinLink and parseJoinLink', async (t) => {
-  const { joinLink, parseJoinLink } = await load()
+test('device join: this device writes, or the account still has to join here', async (t) => {
+  const { needsDeviceJoin, writerOnDevice, canWriteHere, showNewGroup, authorityHere, DEVICE_STAFF_TEXT, DEVICE_ROOT_TEXT, rootAdminHere, deviceStaffNote, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT, DEVICE_APPROVAL_TEXT, DEVICE_RESERVE_TEXT, DEVICE_PENDING_JOIN_TEXT, deviceReserveReached, reserveReachedAny, communityReserveReached, DEVICE_RESERVE_JOIN_TEXT, needsReserveConfirm } = await load()
+  for (const role of ['member', 'admin', 'creator']) {
+    t.ok(needsDeviceJoin({ role, writerHere: false }), role)
+    t.absent(needsDeviceJoin({ role, writerHere: true }), role + ' already writes here')
+    t.absent(needsDeviceJoin({ role }), role + ' field missing')
+  }
+  for (const role of ['requested', 'banned', 'left', 'pending']) {
+    t.absent(needsDeviceJoin({ role, writerHere: false }), role)
+  }
+  t.absent(needsDeviceJoin(null))
+  t.absent(needsDeviceJoin(undefined))
+
+  t.absent(writerOnDevice({ role: 'member', writerHere: false }))
+  t.ok(writerOnDevice({ writerHere: true }))
+  t.ok(writerOnDevice({}))
+  t.ok(writerOnDevice(null))
+  t.ok(writerOnDevice({ writerHere: null }))
+
+  t.absent(canWriteHere({ canWrite: false }))
+  t.ok(canWriteHere({ canWrite: true }))
+  t.ok(canWriteHere({ writerHere: false }))
+  t.ok(canWriteHere({}))
+  t.ok(canWriteHere(null))
+  t.ok(canWriteHere({ canWrite: null }))
+
+  t.ok(showNewGroup({ role: 'creator' }), 'rootHere missing')
+  t.ok(showNewGroup({ role: 'creator', rootHere: true }))
+  t.absent(showNewGroup({ role: 'creator', rootHere: false }))
+  t.absent(showNewGroup({ role: 'admin' }))
+  t.absent(showNewGroup({ role: 'admin', rootHere: true }))
+  t.absent(showNewGroup({ role: 'member', rootHere: true }))
+  t.absent(showNewGroup(null))
+
+  t.ok(authorityHere({}), 'authorityHere missing')
+  t.ok(authorityHere({ authorityHere: true }))
+  t.absent(authorityHere({ authorityHere: false }))
+  t.ok(authorityHere(null))
+  t.absent(DEVICE_STAFF_TEXT.includes('\u2014'))
+  t.absent(DEVICE_ROOT_TEXT.includes('\u2014'))
+  t.is(DEVICE_ROOT_TEXT, 'Novo grupo, Ajustes e Quem pode convidar só funcionam no aparelho que criou a comunidade.')
+
+  t.ok(rootAdminHere({}))
+  t.ok(rootAdminHere(null))
+  t.absent(rootAdminHere({ rootHere: false }))
+  t.ok(rootAdminHere({ rootHere: false, repair: true }), 'repair writes through the live community writer')
+  t.ok(rootAdminHere({ rootHere: true }))
+
+  const creator = { owner: true, staff: true }
+  t.is(deviceStaffNote({ role: 'creator', rootHere: false }, creator), 'root')
+  t.is(deviceStaffNote({ role: 'creator', rootHere: false, authorityHere: false }, creator), 'root', 'one reason at a time')
+  t.is(deviceStaffNote({ role: 'creator', rootHere: true, authorityHere: false }, creator), 'staff')
+  t.is(deviceStaffNote({ role: 'creator', rootHere: false, repair: true }, creator), null)
+  t.is(deviceStaffNote({ role: 'creator', rootHere: true }, creator), null)
+  t.is(deviceStaffNote({ role: 'creator' }, creator), null, 'older node')
+  t.is(deviceStaffNote({ role: 'admin', authorityHere: false }, { owner: false, staff: true }), 'staff')
+  t.is(deviceStaffNote({ role: 'admin', rootHere: false }, { owner: false, staff: true }), null)
+  t.is(deviceStaffNote({ role: 'admin', authorityHere: false, writerHere: false }, { owner: false, staff: true }), 'join', 'not participating yet beats the other notes')
+  t.is(deviceStaffNote({ role: 'creator', writerHere: false, rootHere: false }, creator), 'join')
+  t.is(deviceStaffNote({ role: 'member', writerHere: false }, { owner: false, staff: false }), null)
+  t.is(deviceStaffNote({ role: 'member', authorityHere: false }, { owner: false, staff: false }), null)
+  t.is(deviceStaffNote(null, creator), null)
+
+  t.is(DEVICE_JOIN_LABEL, 'Participar neste aparelho')
+  t.is(DEVICE_JOIN_TEXT, 'Sua conta já participa. Este aparelho costuma entrar sozinho depois da sincronização; se ainda não entrou, toque para participar por ele.')
+  t.is(DEVICE_RESERVE_TEXT, 'Sua conta já usa quase todos os aparelhos permitidos aqui. Entrar por este aparelho gasta uma das últimas vagas, que não voltam.')
+  t.absent(DEVICE_PENDING_JOIN_TEXT.includes('\u2014'))
+  t.absent(deviceReserveReached({ writersBound: 5 }))
+  t.ok(deviceReserveReached({ writersBound: 6 }))
+  t.ok(deviceReserveReached({ writersBound: 8 }))
+  t.absent(deviceReserveReached({}))
+  t.absent(deviceReserveReached(null))
+  t.absent(deviceReserveReached({ writersBound: 6.5 }))
+  t.absent(deviceReserveReached({ writersBound: '6' }))
+  t.ok(reserveReachedAny([0, 6]))
+  t.absent(reserveReachedAny([5, undefined, '6', 5.5]))
+  t.ok(needsReserveConfirm([2, 6], false))
+  t.ok(needsReserveConfirm([6], undefined))
+  t.absent(needsReserveConfirm([6], true))
+  t.absent(needsReserveConfirm([5, undefined], false))
+  t.absent(reserveReachedAny(null))
+  t.ok(communityReserveReached({ writersBound: 2, generalWritersBound: 6 }))
+  t.ok(communityReserveReached({ writersBound: 7 }))
+  t.absent(communityReserveReached({ writersBound: 5, generalWritersBound: 5 }))
+  t.absent(communityReserveReached(null))
+  t.absent(DEVICE_RESERVE_JOIN_TEXT.includes('\u2014'))
+  t.ok(DEVICE_RESERVE_JOIN_TEXT.includes('Participar neste aparelho'))
+  t.is(DEVICE_WAIT_TEXT, 'Este aparelho ainda não pode escrever aqui. Aguarde a sincronização.')
+  t.is(DEVICE_APPROVAL_TEXT, 'Este aparelho precisa da aprovação de um administrador para escrever.')
+})
+
+test('joinLink builds the path; the paste parsers are gone', async (t) => {
+  const g = await load()
+  const { joinLink } = g
   t.is(joinLink(A), '/g/' + A)
   t.is(joinLink(A.toUpperCase()), '/g/' + A)
   for (const bad of [null, 7, 'ab', A + 'a', 'zz'.repeat(32)]) t.is(joinLink(bad), null)
-  t.is(parseJoinLink('/g/' + A), A)
-  t.is(parseJoinLink(' /g/' + A.toUpperCase() + '/ '), A)
-  t.is(parseJoinLink('https://varanda.example/g/' + A + '?x=1#y'), A)
-  t.is(parseJoinLink(joinLink(B)), B, 'round trip')
-  for (const bad of ['/g/' + A + 'a', '/g/ab', '/x/' + A, 'g/' + A, '/g/' + A + '/extra', '//evil.example/g/' + A, 'javascript:/g/' + A, '', null, 3]) {
-    t.is(parseJoinLink(bad), null, String(bad))
-  }
+  t.is(g.parseJoinLink, undefined)
+  t.is(g.parseCommunityJoinLink, undefined)
 })
 
 test('reconcile: join and leave', async (t) => {
@@ -220,9 +349,9 @@ test('reconcile: meta, rekey, link and bad input', async (t) => {
   t.is(reconcile({ action: 'rekey', epoch: before }, { epoch: null, state: 'locked', incomplete: false }), 'unknown', 'a locked node reads no epoch')
   t.is(reconcile({ action: 'rekey', epoch: before }, { epoch: { writer: A, seq: 9 }, state: 'locked' }), 'unknown')
   t.is(reconcile({ action: 'rekey', epoch: before }, {}), 'unknown')
-  t.is(reconcile({ action: 'link', community: C, on: true }, { info: { communities: [C] } }), 'landed')
-  t.is(reconcile({ action: 'link', community: C, on: true }, { info: { communities: [] } }), 'unknown', 'a one-sided success never shows')
-  t.is(reconcile({ action: 'link', community: C, on: false }, { info: { communities: [] } }), 'landed')
+  t.is(reconcile({ action: 'link', community: C, on: true }, { info: { communities: [C] } }), 'unknown')
+  t.is(reconcile({ action: 'link', community: C, on: true }, { info: { communities: [] } }), 'unknown', 'link is no longer supported')
+  t.is(reconcile({ action: 'link', community: C, on: false }, { info: { communities: [] } }), 'unknown')
   t.is(reconcile({ action: 'link', community: C, on: false }, { info: { communities: [C] } }), 'unknown')
   t.is(reconcile({ action: 'rekey', epoch: undefined }, { epoch: { writer: A, seq: 9 }, state: 'ok' }), 'unknown', 'no epoch seen before')
   t.is(reconcile({ action: 'rekey', epoch: null }, { epoch: { writer: A, seq: 9 }, state: 'ok' }), 'unknown')
@@ -275,6 +404,46 @@ test('read pages: a stale cursor or a changed version drops older pages', async 
   t.alike(itemsOf(again).map((i) => i.seq), [6])
 })
 
+test('unreadLabel: empty below 1, the count up to 98, 99+ from 99', async (t) => {
+  const { unreadLabel } = await load()
+  for (const n of [0, -1, 1.5, NaN, null, undefined, '3']) t.is(unreadLabel(n), '', String(n))
+  t.is(unreadLabel(1), '1')
+  t.is(unreadLabel(98), '98')
+  t.is(unreadLabel(99), '99+')
+  t.is(unreadLabel(250), '99+')
+})
+
+test('lastLine: who said it and what, never a hidden preview', async (t) => {
+  const { lastLine, HIDDEN_LABEL } = await load()
+  t.is(lastLine(null), '')
+  t.is(lastLine('oi'), '')
+  t.is(lastLine(undefined), '')
+  const hidden = lastLine({ hidden: true, preview: 'segredo', name: 'Ana', username: 'ana', mine: true })
+  t.is(hidden, HIDDEN_LABEL)
+  t.absent(hidden.includes('segredo') || hidden.includes('Ana') || hidden.includes('ana'))
+  t.is(lastLine({ preview: 'oi', mine: true, name: 'Ana' }), 'oi', 'the own message carries no author in the text')
+  t.is(lastLine({ preview: 'oi', name: 'Ana', username: 'ana' }), 'Ana: oi')
+  t.is(lastLine({ preview: 'oi', name: '  ', username: 'ana' }), '@ana: oi')
+  t.is(lastLine({ preview: 'oi' }), 'oi')
+  t.is(lastLine({ preview: 'oi', name: '', username: '' }), 'oi')
+  t.is(lastLine({ name: 'Ana' }), 'Ana: ')
+  const flat = lastLine({ preview: 'a\nb\r\nc', name: 'Ana' })
+  t.is(flat, 'Ana: a b c')
+  t.absent(/[\n\r�]/.test(flat), 'a line break does not survive')
+})
+
+test('lastIsOwn: the own marker only for an own, visible message', async (t) => {
+  const { lastIsOwn, lastLine, OWN_LABEL } = await load()
+  t.is(OWN_LABEL, 'Você')
+  t.is(lastIsOwn({ preview: 'oi', mine: true }), true)
+  t.is(lastIsOwn({ preview: 'oi', mine: true, hidden: true }), false, 'a hidden message has no author')
+  const fake = { preview: 'oi', name: 'Você', mine: false }
+  t.is(lastLine(fake), 'Você: oi', 'a peer named Você stays in the text')
+  t.is(lastIsOwn(fake), false, 'and never gets the own marker')
+  t.is(lastIsOwn({ preview: 'oi', mine: 'true' }), false)
+  for (const v of [null, undefined, 'oi', 1, true]) t.is(lastIsOwn(v), false, String(v))
+})
+
 test('groups.js stays pure: no React, react-native or Node built-ins', async (t) => {
   const fs = require('fs')
   const path = require('path')
@@ -283,4 +452,99 @@ test('groups.js stays pure: no React, react-native or Node built-ins', async (t)
   t.alike(imports.sort(), ['./format.js', '@varanda/rpc'])
   t.absent(/\b(require|process|Buffer)\b/.test(src.replace(/\/\/.*$/gm, '')))
   t.absent(src.includes('\u2014'))
+})
+
+test('reconcile: community join uses the role from community.info', async (t) => {
+  const { reconcile } = await load()
+  for (const role of ['member', 'requested', 'pending']) {
+    t.is(reconcile({ action: 'community-join' }, { role }), 'landed', role)
+    t.is(reconcile({ action: 'community-join' }, { role, incomplete: true }), 'unknown', 'incomplete ' + role)
+  }
+  for (const role of ['left', 'banned', 'creator', 'admin']) t.is(reconcile({ action: 'community-join' }, { role }), 'not-landed', role)
+  t.is(reconcile({ action: 'community-join' }, { state: 'member' }), 'unknown')
+  t.is(reconcile({ action: 'community-join' }, { role: null }), 'unknown')
+})
+
+test('reconcile: create matches the community, name and creator role', async (t) => {
+  const { reconcile } = await load()
+  const change = { action: 'create', community: C, name: 'Praia' }
+  const row = { group: A, name: 'Praia', role: 'creator' }
+  const view = { community: C, groups: [row], incomplete: false }
+  t.is(reconcile(change, view), 'landed')
+  t.is(reconcile(change, { ...view, groups: [null, { ...row, role: 'member' }, row] }), 'landed')
+  t.is(reconcile(change, { ...view, incomplete: true }), 'unknown')
+  t.is(reconcile(change, { ...view, community: B }), 'unknown', 'another catalogue proves nothing')
+  t.is(reconcile(change, { ...view, groups: [] }), 'not-landed')
+  t.is(reconcile(change, { ...view, groups: [{ ...row, name: 'Outra' }] }), 'not-landed')
+  for (const role of ['admin', 'member', 'requested', 'banned', 'left', 'pending', null]) {
+    t.is(reconcile(change, { ...view, groups: [{ ...row, role }] }), 'not-landed', String(role))
+  }
+  t.is(reconcile(change, { ...view, groups: null }), 'unknown')
+  t.is(reconcile(change, {}), 'unknown')
+  t.is(reconcile({ action: 'create', community: C }, view), 'unknown')
+  t.is(reconcile({ action: 'create', name: 'Praia' }, view), 'unknown')
+})
+
+test('page mode: needs a page identity and the gate', async (t) => {
+  const { pageMode } = await load()
+  t.alike(pageMode({ acting: { kind: 'page', key: A }, on: true }), { page: true, key: A })
+  t.is(pageMode({ acting: { kind: 'page', key: A }, on: false }).page, false, 'gate off acts as the member')
+  t.is(pageMode({ acting: { kind: 'me' }, on: true }).page, false)
+  t.is(pageMode({ acting: { kind: 'page', key: 'nope' }, on: true }).page, false)
+  t.is(pageMode({}).page, false)
+  t.is(pageMode().page, false)
+})
+
+test('page mode: a page never gets staff controls', async (t) => {
+  const { canAsPage, pageCan } = await load()
+  for (const a of ['create', 'ban', 'admit', 'admin', 'hide', 'meta', 'rekey', 'invite', 'invitePolicy']) {
+    t.is(canAsPage(a), false, a)
+    t.is(pageCan(a, 'creator'), false, a + ' even with a staff role')
+  }
+  t.is(pageCan('post', 'member'), true)
+  t.is(pageCan('post', 'requested'), false)
+  t.is(pageCan('leave', 'requested'), true)
+  t.is(pageCan('leave', 'left'), false)
+})
+
+test('page mode: requested shows pedido enviado, unusable answers show nothing', async (t) => {
+  const { pageRoleOf, pageRoleLabel } = await load()
+  t.is(pageRoleOf({ state: 'requested' }), 'requested')
+  t.is(pageRoleOf({ role: 'member' }), 'member')
+  t.is(pageRoleOf({ role: 'left' }), 'left')
+  t.is(pageRoleOf({ state: 'pending' }), null)
+  t.is(pageRoleOf(null), null)
+  t.is(pageRoleLabel('requested'), 'pedido enviado')
+  t.is(pageRoleLabel('left'), '')
+})
+
+test('page mode: a missing service route is "em breve", an uncertain one is not', async (t) => {
+  const { pageErrorText, isPageSoon, PAGE_SOON_TEXT } = await load()
+  t.is(pageErrorText({ code: 'pedido-invalido', message: 'x' }), PAGE_SOON_TEXT)
+  t.is(pageErrorText({ code: 'nao-encontrado', message: 'x' }), PAGE_SOON_TEXT)
+  t.is(isPageSoon({ code: 'pedido-invalido', uncertain: true }), false, 'after a signature it is never "em breve"')
+  t.is(pageErrorText({ code: 'limite', message: 'Limite atingido' }), 'Limite atingido')
+  t.is(pageErrorText(null), 'Serviço indisponível')
+})
+
+test('page mode: read rows and communities are filtered', async (t) => {
+  const { pageReadItems, pageCommunities } = await load()
+  t.is(pageReadItems({ items: [{ writer: A, seq: 1 }, { writer: A }, null, { seq: 2 }] }).length, 1)
+  t.alike(pageReadItems(null), [])
+  t.alike(pageCommunities({ communities: [{ community: C }, { community: 'x' }, null] }), [{ community: C }])
+  t.alike(pageCommunities({}), [])
+})
+
+test('reconcile post: a reply is confirmed only by a message answering the same target', async (t) => {
+  const { reconcile } = await load()
+  const D = 'd'.repeat(64)
+  const W = 'a'.repeat(64)
+  const at = new Date(Date.now()).toISOString()
+  const sentAt = Date.parse(at)
+  const earlier = { diary: D, text: 'ok', at, hidden: false, replyTo: { writer: W, seq: 1 } }
+  const view = { items: [earlier], next: null, state: 'ok' }
+  t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt, replyKey: W + ':2' }, view), 'not-landed', 'the same text answering another message does not count')
+  t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt, replyKey: W + ':1' }, view), 'landed')
+  t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt, replyKey: null }, view), 'not-landed', 'a plain post is not confirmed by a reply')
+  t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt }, view), 'landed', 'without replyKey the old rule stays')
 })

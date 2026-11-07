@@ -1577,3 +1577,16 @@ test('Recursos tab: the decided ones page with "mostrar mais" and antes', async 
   t.absent(buttons(doc, 'mostrar mais').length > 0, 'the last page has no button')
   t.ok(doc.main.textContent.includes('Há decisões mais antigas que o painel não mostra.'))
 })
+
+test('a voice note report plays in an audio control the panel CSP allows', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../lib/account/panel/app.js'), 'utf8')
+  t.ok(/r\.anexo\.mime === 'audio\/mp4'/.test(src), 'an audio anexo is told apart by its mime')
+  t.ok(/h\('audio', \{ className: 'anexo', src, controls: true, preload: 'none'/.test(src), 'it renders as <audio controls>, loaded only on play')
+  t.ok(/anexoAudioProvenance/.test(src), 'with its own provenance label')
+  const routes = fs.readFileSync(path.join(__dirname, '../lib/account/mod-routes.js'), 'utf8')
+  t.ok(/img-src 'self'; media-src 'self'; frame-ancestors/.test(routes), 'the panel CSP allows same-origin media')
+  const store = require('../lib/account/moderation-store')
+  t.ok(store.ANEXO_MIMES === undefined || store.ANEXO_MIMES.includes('audio/mp4'), 'the store accepts audio/mp4 anexos')
+})

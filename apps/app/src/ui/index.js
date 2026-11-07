@@ -7,9 +7,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
-import { colors, fonts, layout, type } from './theme'
+import { fonts, layout, type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
 
-export { colors }
 export { TABS, tabsFor } from '../tabs'
 
 export const UNCERTAIN = 'incerto: pode ter sido aplicado; confira antes de repetir'
@@ -19,6 +19,18 @@ export const UNCERTAIN = 'incerto: pode ter sido aplicado; confira antes de repe
 const PLAIN = {
   'aguardando nova chave': 'Aguarde a atualização de acesso deste grupo.',
   'grupo não encontrado': 'Não encontramos esse grupo.',
+  'comunidade não encontrada': 'Não encontramos essa comunidade.',
+  'só quem criou a comunidade cria grupos': 'Só quem criou a comunidade cria grupos.',
+  'crie pelo aparelho que criou a comunidade': 'Crie o grupo pelo aparelho em que você criou a comunidade.',
+  'entre na comunidade primeiro': 'Entre na comunidade primeiro.',
+  'grupo sem comunidade': 'Este grupo não pertence a nenhuma comunidade.',
+  'aguarde a sincronização da comunidade': 'Aguarde a comunidade terminar de sincronizar e tente de novo.',
+  'a comunidade chegou ao limite de grupos': 'A comunidade chegou ao limite de grupos.',
+  'sem permissão na comunidade': 'Você não tem permissão nesta comunidade.',
+  'a pessoa precisa ser membro da comunidade': 'Essa pessoa ainda não é membro da comunidade.',
+  'o grupo não é dessa comunidade': 'Este grupo não é dessa comunidade.',
+  'informe a comunidade do grupo': 'Abra a comunidade do grupo para entrar nele.',
+  'limite da comunidade atingido': 'A comunidade chegou ao limite de pessoas.',
   'grupo privado exige aprovação': 'Este grupo privado precisa de aprovação para entrar.',
   'sincronize com o semeador antes de publicar': 'Sem conexão com o servidor agora. Tente de novo em instantes.',
   'identidade bloqueada: entre com a passkey': 'Entre com sua passkey para continuar.',
@@ -31,6 +43,7 @@ const PLAIN = {
   'conexão com o semeador encerrada': 'A conexão foi interrompida. Tente de novo.',
   'não é possível seguir a própria chave': 'Você não pode seguir a si mesmo.',
   'mídia inválida': 'Não foi possível usar esta foto.',
+  'áudio inválido': 'Não foi possível enviar este áudio.',
   'mídia disponível só na versão web': 'Fotos só podem ser publicadas na versão web.',
   'esta conta Google já está vinculada a outra chave': 'Esta conta Google já está em uso por outra conta Varanda.',
   'não foi possível provar a chave': 'Não foi possível confirmar sua conta. Tente de novo.',
@@ -98,6 +111,7 @@ export function useBottomPad () {
 }
 
 export function Page ({ children, flush, padBottom = 0, refreshControl }) {
+  const styles = useStyles(makeStyles)
   return (
     <ScrollView
       style={styles.scroll}
@@ -111,6 +125,7 @@ export function Page ({ children, flush, padBottom = 0, refreshControl }) {
 }
 
 export function SectionHeader ({ children, right }) {
+  const styles = useStyles(makeStyles)
   return (
     <View style={styles.section}>
       <Text style={styles.sectionText} accessibilityRole='header'>{children}</Text>
@@ -120,49 +135,60 @@ export function SectionHeader ({ children, right }) {
 }
 
 export function Title ({ children }) {
+  const styles = useStyles(makeStyles)
   return <Text style={styles.title} accessibilityRole='header'>{children}</Text>
 }
 
 export function Label ({ children }) {
+  const styles = useStyles(makeStyles)
   return <Text style={styles.label}>{children}</Text>
 }
 
 export function Body ({ children, style }) {
+  const styles = useStyles(makeStyles)
   return <Text style={[styles.body, style]}>{children}</Text>
 }
 
 export function Soft ({ children }) {
+  const styles = useStyles(makeStyles)
   return <Text style={styles.soft}>{children}</Text>
 }
 
 // Selectable text for keys and other values the person may want to copy.
 export function Mono ({ children }) {
+  const styles = useStyles(makeStyles)
   return <Text style={styles.mono} selectable>{children}</Text>
 }
 
 export function ErrorText ({ children }) {
+  const styles = useStyles(makeStyles)
   if (!children) return null
   return <Text style={styles.error} accessibilityRole='alert'>{children}</Text>
 }
 
 export function Notice ({ children }) {
+  const styles = useStyles(makeStyles)
   if (!children) return null
   return <Text style={styles.notice}>{children}</Text>
 }
 
 export function Spinner ({ size = 'small' }) {
+  const { colors } = useTheme()
   return <ActivityIndicator size={size} color={colors.accent} />
 }
 
 export function Card ({ children }) {
+  const styles = useStyles(makeStyles)
   return <View style={styles.card}>{children}</View>
 }
 
 export function Row ({ children }) {
+  const styles = useStyles(makeStyles)
   return <View style={styles.row}>{children}</View>
 }
 
 export function Btn ({ label, onPress, disabled, pending, secondary, danger }) {
+  const styles = useStyles(makeStyles)
   const off = disabled === true || pending === true
   const outline = secondary || danger
   return (
@@ -189,6 +215,8 @@ export function Btn ({ label, onPress, disabled, pending, secondary, danger }) {
 // Key, JSON and host fields are `mono`: no capitalisation or correction.
 // Free text (name, bio) keeps the platform defaults.
 export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4, onSubmitEditing, returnKeyType }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const raw = mono ? { autoCapitalize: 'none', autoCorrect: false, spellCheck: false } : {}
   // Forwarded only when passed: existing callers are unchanged.
   const submit = {}
@@ -214,7 +242,7 @@ export function Field ({ label, value, onChangeText, multiline, maxLength, edita
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   scroll: { flex: 1, backgroundColor: colors.bg },
   pageContent: { padding: 16 },
   pageFlush: {},
@@ -267,5 +295,5 @@ const styles = StyleSheet.create({
     color: colors.ink
   },
   inputMono: { fontFamily: fonts.mono, fontSize: 14 },
-  inputOff: { backgroundColor: '#efece5', color: colors.soft }
+  inputOff: { backgroundColor: colors.inputOff, color: colors.soft }
 })

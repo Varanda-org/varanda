@@ -8,8 +8,9 @@ const {
   MAX_KEY_RECIPIENTS, MAX_KEY_BASIS,
   validateGroupRecord, validateWriterHeader, validateGroupHeader, isWeakBoxKey,
   groupHeader, writerHeader, groupPost, groupHide, groupMeta, groupAdmit, groupBan, groupAdmin, groupLeave,
-  groupKey, groupSealed, sealedInner, communityAdmin, groupLink, communityLink, buildGroup
+  groupKey, groupSealed, sealedInner, communityAdmit, communityBan, buildGroup, buildCommunity, groupInvites, communityInvites
 } = require('../lib/group')
+const { community } = require('./helpers/groups')
 const { newBoxKeyPair, newEpochKey, sealEpochKey, openFrom, sealRecord, keyTag, keyCommit } = require('../lib/group-crypto')
 
 const K = (n) => n.toString(16).padStart(64, '0')
@@ -31,15 +32,31 @@ const wX2 = K(0x401)
 const wY = K(0x500)
 const wZ = K(0x700)
 const CM = K(0x900)
+// The CW of a diary in CM, and a second one for a rejoin.
+const cwKey = (d) => 'c' + d.slice(1)
+const cwX2 = 'd' + X.slice(1)
 
 const hex = (b) => b4a.toString(b, 'hex')
 const cm = (key, kid) => hex(keyCommit(key, G, kid))
 
-// A private group: C creates G; A is a group admin, X and Y are admitted.
-// The root then opens epoch E1 for every writer and seals the name.
-function pworld ({ base = true } = {}) {
+// A private group inside the open community CM: C creates G; A is a group
+// admin, X and Y are admitted. The root then opens epoch E1 for every
+// writer and seals the name. `cc` is the creator of CM (C by default, whose
+// CW is then CM itself) and `cadmins` are granted in CM's root; every diary
+// that gets a G writer joins CM with a CW of its own first. Only CM's
+// creator creates groups (in CM's root), so with `cc` other than C the
+// header of C names no group of CM: G is an orphan.
+function pworld ({ base = true, cc = C, cadmins = [] } = {}) {
+  const granted = [...new Set([C, ...cadmins])].filter((d) => d !== cc)
+  const comm = community({
+    key: CM,
+    creator: cc,
+    members: granted.map((d) => ({ diary: d, cw: cwKey(d), status: 'member' })),
+    admins: granted,
+    creates: [{ by: C, group: G }]
+  })
   const boxes = new Map([[G, newBoxKeyPair()]])
-  const logs = new Map([[G, { key: G, diary: C, entries: [{ seq: 0, record: groupHeader({ diary: C, visibility: 'private', join: 'approval', box: hex(boxes.get(G).publicKey), at: AT(0) }) }] }]])
+  const logs = new Map([[G, { key: G, diary: C, entries: [{ seq: 0, record: groupHeader({ diary: C, community: CM, member: comm.cwOf(C), visibility: 'private', join: 'approval', box: hex(boxes.get(G).publicKey), at: AT(0) }) }] }]])
   const joins = new Map([[C, [{ writer: G, on: true, seq: 1 }]]])
   const epochs = new Map()
   const w = {
@@ -47,9 +64,12 @@ function pworld ({ base = true } = {}) {
     joins,
     boxes,
     epochs,
-    add (diary, key, { box = true, rejoin = null, at = 0 } = {}) {
+    comm,
+    cwOf: (d) => comm.cwOf(d),
+    add (diary, key, { box = true, rejoin = null, at = 0, cw = null } = {}) {
+      if (!comm.cwOf(diary)) comm.addWriter(diary, cwKey(diary))
       if (box) boxes.set(key, newBoxKeyPair())
-      logs.set(key, { key, diary, entries: [{ seq: 0, record: writerHeader({ group: G, diary, box: box ? hex(boxes.get(key).publicKey) : null, rejoin, at: AT(at) }) }] })
+      logs.set(key, { key, diary, entries: [{ seq: 0, record: writerHeader({ group: G, diary, member: cw || comm.cwOf(diary), box: box ? hex(boxes.get(key).publicKey) : null, rejoin, at: AT(at) }) }] })
       const list = joins.get(diary) || []
       list.push({ writer: key, on: true, seq: list.length + 1 })
       joins.set(diary, list)
@@ -68,13 +88,29 @@ function pworld ({ base = true } = {}) {
       return { writer, sealed: b4a.toString(sealEpochKey(key, group, kid, boxes.get(writer).publicKey), 'base64') }
     },
     // A first block on `by`: a fresh key sealed to `to`.
-    rotate (by, to, { basis = [], at }) {
+    rotate (by, to, { basis = [], auth = null, at }) {
       const kid = { writer: by, seq: w.len(by) }
       const key = newEpochKey()
       epochs.set(kid.writer + ':' + kid.seq, key)
-      w.push(by, groupKey({ kid: null, basis, keys: to.map((x) => w.entry(x, kid, key)), commit: cm(key, kid), at: AT(at) }))
+      w.push(by, groupKey({ kid: null, basis, keys: to.map((x) => w.entry(x, kid, key)), auth, commit: cm(key, kid), at: AT(at) }))
       return kid
     },
+    // A root group-admin of CM for diary d, cut by default at its CW's
+    // current length.
+    cgrant (d, on, { cuts = null, at }) {
+      if (!comm.cwOf(d)) comm.addWriter(d, cwKey(d))
+      return comm.push(CM, groupAdmin({ member: d, on, cuts: cuts || [{ writer: comm.cwOf(d), seq: comm.len(comm.cwOf(d)) }], at: AT(at) }))
+    },
+    // A leave of d's CW in CM.
+    // An honest leave: the leave plus the diary turning that CW off.
+    cleave (d, at) {
+      const cw = comm.cwOf(d)
+      const ref = comm.push(cw, groupLeave({ cuts: [{ writer: cw, seq: comm.len(cw) }], at: AT(at) }))
+      comm.confirm(d, cw)
+      return ref
+    },
+    // The `auth` a node writes: its own CW at its current length.
+    cauth: (d) => ({ writer: comm.cwOf(d), seq: comm.len(comm.cwOf(d)) }),
     keyOf (kid) {
       return epochs.get(kid.writer + ':' + kid.seq)
     },
@@ -91,7 +127,7 @@ function pworld ({ base = true } = {}) {
     },
     input (keys = null, extra = {}) {
       const writers = [...logs.values()].filter((l) => l.key !== G)
-      return { root: logs.get(G), writers, joins, communities: [], keys, now: NOW, ...extra }
+      return { root: logs.get(G), writers, joins, community: comm.input(), keys, now: NOW, ...extra }
     }
   }
   if (base) {
@@ -138,14 +174,14 @@ test('group-key and group-sealed shapes and limits', (t) => {
   const kid = { writer: G, seq: 1 }
   const key = newEpochKey()
   const k = groupKey({ kid: null, basis: [{ writer: wX, seq: 2 }], keys: [w.entry(wX, kid, key)], commit: cm(key, kid), at: AT(1) })
-  t.alike(Object.keys(k), ['type', 'kid', 'basis', 'keys', 'commit', 'at'])
+  t.alike(Object.keys(k), ['type', 'kid', 'basis', 'keys', 'auth', 'commit', 'at'])
   const opts = { private: true }
   t.is(validateGroupRecord(k, 1, opts), null)
   t.is(validateGroupRecord(k, 1, { ...opts, root: true }), null, 'in the root too')
   t.is(validateGroupRecord(k, 1), 'private-only')
   t.is(validateGroupRecord(k, 1, { root: true, community: true, private: true }), 'group-only')
   const cont = groupKey({ kid, keys: k.keys, at: AT(1) })
-  t.alike(Object.keys(cont), ['type', 'kid', 'basis', 'keys', 'at'])
+  t.alike(Object.keys(cont), ['type', 'kid', 'basis', 'keys', 'auth', 'at'])
   t.is(validateGroupRecord(cont, 1, opts), null, 'a continuation')
   t.is(validateGroupRecord({ ...cont, commit: k.commit }, 1, opts), 'malformed', 'a continuation carries no commit')
   const { commit, ...bare } = k
@@ -191,7 +227,7 @@ test('group-key and group-sealed shapes and limits', (t) => {
 })
 
 test('a writer header box must match the visibility', (t) => {
-  const wh = writerHeader({ group: G, diary: B, box: K(9), at: AT(0) })
+  const wh = writerHeader({ group: G, diary: B, member: cwKey(B), box: K(9), at: AT(0) })
   t.is(validateWriterHeader(wh), null)
   const w = pworld()
   w.add(B, wB, { box: false })
@@ -200,7 +236,7 @@ test('a writer header box must match the visibility', (t) => {
   t.absent(g.writers.has(wB), 'no box in a private group: header-invalid')
   t.ok(g.writers.has(wX))
 
-  const pub = { key: G, entries: [{ seq: 0, record: groupHeader({ diary: C, at: AT(0) }) }] }
+  const pub = { key: G, entries: [{ seq: 0, record: groupHeader({ diary: C, community: CM, member: CM, at: AT(0) }) }] }
   const boxed = { key: wB, diary: B, entries: [{ seq: 0, record: wh }] }
   const joins = new Map([[C, [{ writer: G, on: true, seq: 1 }]], [B, [{ writer: wB, on: true, seq: 1 }]]])
   const p = buildGroup({ root: pub, writers: [boxed], joins, now: NOW })
@@ -390,48 +426,39 @@ test('a pending new device of an admitted diary is never an entitled recipient',
   t.is(kidOf(buildGroup(w.input(w.reader(wX2))).epoch), kidOf(E2))
 })
 
-test('a community admin with power receives keys; losing it makes the epoch ineligible', (t) => {
-  const w = pworld({ base: false })
-  w.add(A, wA).add(X, wX).add(Z, wZ)
-  const cuts = [{ writer: wA, seq: 1 }, { writer: wZ, seq: 1 }]
-  w.push(G, communityLink({ community: CM, on: true, cuts, at: AT(1) }))
-  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(2) }))
-  const records = [groupLink({ group: G, on: true, cuts, at: AT(1) }), communityAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(1) })]
-  const community = () => {
-    const entries = [{ seq: 0, record: groupHeader({ kind: 'community', diary: Z, name: 'Bairro', at: AT(0) }) }]
-    for (const record of records) entries.push({ seq: entries.length, record })
-    return { key: CM, entries, joins: new Map([[Z, [{ writer: CM, on: true, seq: 1 }]]]) }
-  }
-  const input = (keys) => w.input(keys, { communities: [community()] })
-  const E1 = w.rotate(G, [G, wA, wX, wZ], { at: 3 })
+test('a community admin receives keys and distributes through auth; a demotion in C ends it, history stays', (t) => {
+  const w = cworld()
+  const E1 = w.rotate(G, [G, wA, wX], { at: 3 })
   sealedPost(w, wX, E1, 4)
-  let g = buildGroup(input(w.reader(wA)))
-  t.is(g.community, CM)
-  t.ok(g.admins.has(A) && g.admins.has(Z))
+  let g = buildGroup(w.input(w.reader(wA)))
+  t.is(g.community.kind, 'community')
+  t.is(g.orphan, false)
+  t.ok(g.admins.has(A), 'a community admin is an admin of G')
+  t.ok(g.entitled.includes(wA), 'and receives keys on its live writer')
   t.alike(g.posts.map((p) => p.text), ['p4'], 'the community admin reads')
   t.is(kidOf(g.epoch), kidOf(E1))
-  // The community admin distributes like a group admin.
-  const E2 = w.rotate(wA, [G, wA, wX, wZ], { at: 5 })
+  const E2 = w.rotate(wA, [G, wA, wX], { auth: w.cauth(A), at: 5 })
   sealedPost(w, wX, E2, 6)
-  g = buildGroup(input(w.reader(wX)))
+  g = buildGroup(w.input(w.reader(wX)))
   t.alike(g.posts.map((p) => p.text), ['p4', 'p6'])
-  t.is(kidOf(g.epoch), kidOf(E2))
+  t.is(kidOf(g.epoch), kidOf(E2), 'the community admin distributes like a group admin')
 
-  records.push(communityAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(7) }))
-  g = buildGroup(input(w.reader(wX)))
+  const demote = w.cgrant(A, false, { at: 7 })
+  g = buildGroup(w.input(w.reader(wX)))
   t.absent(g.admins.has(A))
-  t.is(g.epoch, null, 'the demotion is a removal and A is no longer entitled')
+  t.absent(g.entitled.includes(wA))
+  t.is(g.epoch, null, 'the demotion is a removal and E2 is no longer valid for sending')
   t.is(g.rekeyPending, true)
   t.alike(g.posts.map((p) => p.text), ['p4', 'p6'], 'history stays readable')
-  const E3 = w.rotate(G, [G, wX, wZ], { basis: [{ writer: CM, seq: 3 }], at: 8 })
-  t.is(kidOf(buildGroup(input(w.reader(wX))).epoch), kidOf(E3), 'a basis naming the community record covers it')
-  // A community record alone, about someone E3 never named, still needs a
-  // rotation: regranted, then demoted again.
-  records.push(communityAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(9) }))
-  t.is(kidOf(buildGroup(input(w.reader(wX))).epoch), kidOf(E3))
-  records.push(communityAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(10) }))
-  g = buildGroup(input(w.reader(wX)))
-  t.is(g.epoch, null, 'the uncovered community demotion')
+  t.alike(g.removals, [demote])
+  const E3 = w.rotate(G, [G, wX], { basis: [demote], at: 8 })
+  t.is(kidOf(buildGroup(w.input(w.reader(wX))).epoch), kidOf(E3), 'a basis naming the community record covers it')
+  // Regranted, then demoted again: the new demotion needs a rotation.
+  w.cgrant(A, true, { at: 9 })
+  t.is(kidOf(buildGroup(w.input(w.reader(wX))).epoch), kidOf(E3))
+  w.cgrant(A, false, { at: 10 })
+  g = buildGroup(w.input(w.reader(wX)))
+  t.is(g.epoch, null, 'the uncovered second demotion')
   t.is(g.rekeyPending, true)
 })
 
@@ -533,44 +560,40 @@ test('decrypted edges never change membership or moderation', (t) => {
   t.alike(withKeys.entitled, without.entitled)
 })
 
-function cworld () {
-  const w = pworld({ base: false })
-  w.add(A, wA).add(X, wX).add(Z, wZ)
-  const cuts = [{ writer: wA, seq: 1 }, { writer: wZ, seq: 1 }]
-  w.push(G, communityLink({ community: CM, on: true, cuts, at: AT(1) }))
+// A community admin A (no grant in G) next to the admitted member X.
+function cworld (opts = {}) {
+  const w = pworld({ base: false, cadmins: [A], ...opts })
+  w.add(A, wA).add(X, wX)
   w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(2) }))
-  const records = [groupLink({ group: G, on: true, cuts, at: AT(1) }), communityAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(1) })]
-  const community = () => {
-    const entries = [{ seq: 0, record: groupHeader({ kind: 'community', diary: Z, name: 'Bairro', at: AT(0) }) }]
-    for (const record of records) entries.push({ seq: entries.length, record })
-    return { key: CM, entries, joins: new Map([[Z, [{ writer: CM, on: true, seq: 1 }]]]) }
-  }
-  w.cinput = (keys) => w.input(keys, { communities: [community()] })
-  w.records = records
-  w.cuts = cuts
   return w
 }
 
-test('an unlinked community removes nothing more until it links again', (t) => {
+test('a member who leaves the community is not entitled; rejoining C alone does not re-entitle the old writer', (t) => {
   const w = cworld()
-  w.rotate(G, [G, wA, wX, wZ], { at: 3 })
-  w.records.push(groupLink({ group: G, on: false, cuts: w.cuts, at: AT(4) }))
-  let g = buildGroup(w.cinput(w.reader(wX)))
-  t.is(g.rekeyPending, true, 'the unlink is a removal')
-  const E2 = w.rotate(G, [G, wX], { basis: [{ writer: CM, seq: 3 }], at: 5 })
-  t.is(kidOf(buildGroup(w.cinput(w.reader(wX))).epoch), kidOf(E2))
-  w.records.push(communityAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(6) }))
-  w.records.push(groupLink({ group: G, on: false, cuts: w.cuts, at: AT(7) }))
-  g = buildGroup(w.cinput(w.reader(wX)))
-  t.is(kidOf(g.epoch), kidOf(E2), 'a later demotion and a repeated unlink are not removals')
+  w.rotate(G, [G, wA, wX], { at: 3 })
+  const leave = w.cleave(X, 4)
+  let g = buildGroup(w.input(w.reader(wA)))
+  t.is(g.members.get(X), 'left', 'gated out of G')
+  t.absent(g.entitled.includes(wX))
+  t.is(g.rekeyPending, true, 'the community leave is a removal')
+  t.alike(g.removals, [leave])
+  const E2 = w.rotate(G, [G, wA], { basis: [leave], at: 5 })
+  t.is(kidOf(buildGroup(w.input(w.reader(wA))).epoch), kidOf(E2))
+  w.comm.addWriter(X, cwX2, { rejoin: leave })
+  g = buildGroup(w.input(w.reader(wA)))
+  t.is(g.members.get(X), 'left', 'the old G writer names a retired CW')
+  t.absent(g.entitled.includes(wX))
+  t.is(kidOf(g.epoch), kidOf(E2))
   t.is(g.rekeyPending, false)
 })
 
-test('a community demotion of a member without a grant is not a removal', (t) => {
+test('a community demotion of a member C never granted is not a removal', (t) => {
   const w = cworld()
-  const E1 = w.rotate(G, [G, wA, wX, wZ], { at: 3 })
-  w.records.push(communityAdmin({ member: X, on: false, cuts: [{ writer: wX, seq: w.len(wX) }], at: AT(4) }))
-  t.is(kidOf(buildGroup(w.cinput(w.reader(wX))).epoch), kidOf(E1))
+  const E1 = w.rotate(G, [G, wA, wX], { at: 3 })
+  w.cgrant(X, false, { at: 4 })
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.is(kidOf(g.epoch), kidOf(E1))
+  t.alike(g.removals, [])
 })
 
 // Linear in the epochs: four times the epochs must cost far less than
@@ -708,16 +731,16 @@ test('an unseal that throws midway leaves no key bytes in the result', (t) => {
 
 test('coverage reaches through the basis of an ancestor first block', (t) => {
   const w = cworld()
-  w.rotate(G, [G, wA, wX, wZ], { at: 3 })
-  w.records.push(communityAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(4) }))
-  w.rotate(G, [G, wX, wZ], { basis: [{ writer: CM, seq: 3 }], at: 5 })
-  const E3 = w.rotate(G, [G, wX, wZ], { at: 6 })
-  t.is(kidOf(buildGroup(w.cinput(w.reader(wX))).epoch), kidOf(E3))
+  w.rotate(G, [G, wA, wX], { at: 3 })
+  const d1 = w.cgrant(A, false, { at: 4 })
+  w.rotate(G, [G, wX], { basis: [d1], at: 5 })
+  const E3 = w.rotate(G, [G, wX], { at: 6 })
+  t.is(kidOf(buildGroup(w.input(w.reader(wX))).epoch), kidOf(E3))
   const v = cworld()
-  v.rotate(G, [G, wA, wX, wZ], { at: 3 })
-  v.records.push(communityAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: v.len(wA) }], at: AT(4) }))
-  v.rotate(G, [G, wX, wZ], { at: 6 })
-  t.is(buildGroup(v.cinput(v.reader(wX))).rekeyPending, true, 'without that basis')
+  v.rotate(G, [G, wA, wX], { at: 3 })
+  v.cgrant(A, false, { at: 4 })
+  v.rotate(G, [G, wX], { at: 6 })
+  t.is(buildGroup(v.input(v.reader(wX))).rekeyPending, true, 'without that basis')
 })
 
 const wA3 = K(0x203)
@@ -756,12 +779,11 @@ test('a creator leaving on a secondary writer and rejoining keeps only the new w
   t.absent(g.entitled.includes(wC2))
 })
 
-test('a community admin who rejoins is entitled only on the writer its grant lists', (t) => {
+test('a community admin who leaves G and rejoins is entitled only on its rejoin writer', (t) => {
   const w = cworld()
   const leave = w.push(wA, groupLeave({ cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(3) }))
   w.add(A, wA3, { rejoin: leave })
-  w.records.push(communityAdmin({ member: A, on: true, cuts: [{ writer: wA3, seq: 1 }], at: AT(4) }))
-  const g = buildGroup(w.cinput())
+  const g = buildGroup(w.input())
   t.ok(g.admins.has(A))
   t.ok(g.entitled.includes(wA3))
   t.absent(g.entitled.includes(wA))
@@ -825,8 +847,8 @@ test('a low-order box key is header-invalid in roots and writers', (t) => {
   const good = hex(newBoxKeyPair().publicKey)
   t.absent(isWeakBoxKey(good))
   t.absent(isWeakBoxKey('xyz'))
-  const root = groupHeader({ diary: C, visibility: 'private', join: 'approval', box: good, at: AT(0) })
-  const writer = writerHeader({ group: G, diary: B, box: good, at: AT(0) })
+  const root = groupHeader({ diary: C, community: CM, member: CM, visibility: 'private', join: 'approval', box: good, at: AT(0) })
+  const writer = writerHeader({ group: G, diary: B, member: cwKey(B), box: good, at: AT(0) })
   for (const box of weak) {
     t.ok(isWeakBoxKey(box), box.slice(0, 8) + box.slice(62))
     t.is(validateGroupHeader({ ...root, box }), 'malformed', 'root')
@@ -854,12 +876,12 @@ test('removals lists exactly the refs a rotation basis must cover', (t) => {
   t.alike(g.removals, [ban2], 'the latest counted removal per writer')
   const E2 = w.rotate(G, g.entitled, { basis: g.removals, at: 22 })
   t.is(kidOf(buildGroup(w.input(w.reader(wA))).epoch), kidOf(E2))
-  t.alike(buildGroup({ root: { key: G, entries: [{ seq: 0, record: groupHeader({ diary: C, at: AT(0) }) }] }, writers: [], joins: new Map(), now: NOW }).removals, [], 'public')
+  t.alike(buildGroup({ root: { key: G, entries: [{ seq: 0, record: groupHeader({ diary: C, community: CM, member: CM, at: AT(0) }) }] }, writers: [], joins: new Map(), now: NOW }).removals, [], 'public')
 
   const c = cworld()
-  c.rotate(G, [G, wA, wX, wZ], { at: 3 })
-  c.records.push(groupLink({ group: G, on: false, cuts: c.cuts, at: AT(4) }))
-  t.alike(buildGroup(c.cinput()).removals, [{ writer: CM, seq: 3 }], 'a community unlink')
+  c.rotate(G, [G, wA, wX], { at: 3 })
+  const demote = c.cgrant(A, false, { at: 4 })
+  t.alike(buildGroup(c.input()).removals, [demote], 'a community demotion, as a ref on the C core')
 })
 
 test('an opened post keeps its envelope generation (a pending rejoin cannot post through an old writer)', (t) => {
@@ -880,38 +902,40 @@ test('an opened post keeps its envelope generation (a pending rejoin cannot post
   for (const p of g.posts) t.is(p.hidden, true, p.text + ' hidden')
 })
 
-test('community toggles coalesce to one removal per community root', (t) => {
-  const w = cworld()
-  w.rotate(G, [G, wA, wX, wZ], { at: 3 })
+test('community toggles coalesce to one removal per community core', (t) => {
+  const w = cworld({ cadmins: [A, Z] })
+  const cwZ = w.cwOf(Z)
+  const cwX = w.cwOf(X)
+  w.rotate(G, [G, wA, wX], { at: 3 })
   for (let i = 0; i < 100; i++) {
     const at = 4 + i / 10
-    w.records.push(groupLink({ group: G, on: false, cuts: w.cuts, at: AT(at) }))
-    w.records.push(groupLink({ group: G, on: true, cuts: w.cuts, at: AT(at) }))
-    w.records.push(communityAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: 1 }], at: AT(at) }))
-    w.records.push(communityAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(at) }))
+    w.cgrant(A, false, { at })
+    w.cgrant(A, true, { at })
+    w.comm.push(cwZ, communityAdmit({ member: X, on: false, cuts: [{ writer: cwX, seq: 1 }], at: AT(at) }))
+    w.comm.push(cwZ, communityAdmit({ member: X, on: true, cuts: [{ writer: cwX, seq: 1 }], at: AT(at) }))
   }
-  let g = buildGroup(w.cinput(w.reader(wX)))
-  const fromCM = g.removals.filter((r) => r.writer === CM)
-  t.ok(fromCM.length <= 1, fromCM.length + ' removal from the community')
+  let g = buildGroup(w.input(w.reader(wX)))
+  t.alike(g.removals.map((r) => r.writer).sort(), [CM, cwZ].sort(), 'one removal per community core')
   t.is(g.rekeyPending, true)
   const E2 = w.rotate(G, g.entitled, { basis: g.removals, at: 20 })
-  g = buildGroup(w.cinput(w.reader(wX)))
+  g = buildGroup(w.input(w.reader(wX)))
   t.is(kidOf(g.epoch), kidOf(E2), 'one extra epoch covers the whole storm')
 })
 
-test('after G unlinks a community its records add no removal', (t) => {
+test('a member back in the community enters G only on a new writer an admit lists', (t) => {
   const w = cworld()
-  w.rotate(G, [G, wA, wX, wZ], { at: 3 })
-  const unlink = w.push(G, communityLink({ community: CM, on: false, cuts: w.cuts, at: AT(4) }))
-  let g = buildGroup(w.cinput(w.reader(wX)))
-  t.alike(g.removals, [unlink], 'the G-side unlink')
-  t.absent(g.entitled.includes(wA) || g.entitled.includes(wZ), 'the community powers are gone')
-  const E2 = w.rotate(G, g.entitled, { basis: g.removals, at: 5 })
-  w.records.push(communityAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: 1 }], at: AT(6) }))
-  w.records.push(groupLink({ group: G, on: false, cuts: w.cuts, at: AT(7) }))
-  g = buildGroup(w.cinput(w.reader(wX)))
-  t.alike(g.removals, [unlink], 'nothing from the unlinked community')
-  t.is(kidOf(g.epoch), kidOf(E2))
+  const leave = w.cleave(X, 4)
+  w.comm.addWriter(X, cwX2, { rejoin: leave })
+  w.add(X, wX2)
+  t.is(w.logs.get(wX2).entries[0].record.member, cwX2, 'the new G writer names the new CW')
+  let g = buildGroup(w.input())
+  t.ok(g.requests.includes(X), 'the new writer waits for an admit')
+  t.absent(g.entitled.includes(wX) || g.entitled.includes(wX2))
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX2, seq: 1 }], at: AT(6) }))
+  g = buildGroup(w.input())
+  t.is(g.members.get(X), 'member')
+  t.ok(g.entitled.includes(wX2))
+  t.absent(g.entitled.includes(wX), 'the writer on the retired CW stays out')
 })
 
 const wY2 = K(0x501)
@@ -1064,13 +1088,14 @@ test('a demotion never blinds the history an admin handed out; sending stays str
   }
 })
 
-test('a community demotion beyond the cut cap never blinds history', (t) => {
+test('a community demotion omitting a CW cuts it at 0 for sending; reading stays', (t) => {
   const w = cworld()
-  const E1 = w.rotate(wA, [G, wA, wX, wZ], { at: 3 })
+  const E1 = w.rotate(wA, [G, wA, wX], { auth: w.cauth(A), at: 3 })
   sealedPost(w, wX, E1, 4)
-  // The demotion lists other writers only (the node cuts the rest at 0).
-  w.records.push(communityAdmin({ member: A, on: false, cuts: [{ writer: K(0x9999), seq: 1 }], at: AT(5) }))
-  const g = buildGroup(w.cinput(w.reader(wX)))
+  t.is(kidOf(buildGroup(w.input(w.reader(wX))).epoch), kidOf(E1), 'control')
+  // The demotion lists another writer only: A's CW is cut at 0.
+  w.cgrant(A, false, { cuts: [{ writer: K(0x9999), seq: 1 }], at: 5 })
+  const g = buildGroup(w.input(w.reader(wX)))
   t.alike(g.posts.map((p) => p.text), ['p4'], 'readable')
   t.is(g.epoch, null, 'never eligible for sending')
   t.is(g.rekeyPending, true)
@@ -1297,16 +1322,17 @@ test('a device bound before the latest rejoin never re-enters through an old gra
   t.absent(g.entitled.includes(wA5), 'no grant lists the new rejoin writer yet')
 })
 
-test('community power on an old writer ends with its diary leave', (t) => {
+test('community power on an old G writer ends with its diary leave', (t) => {
   const wA1 = K(0x204)
   const w = cworld()
   w.add(A, wA1)
-  w.records[1] = communityAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }, { writer: wA1, seq: 1 }], at: AT(1) })
-  t.ok(buildGroup(w.cinput()).entitled.includes(wA1), 'control')
+  t.ok(buildGroup(w.input()).entitled.includes(wA1), 'control: every live writer of a community admin')
   const l1 = leaveOn(w, wA, 6)
   w.add(A, wA2, { rejoin: l1 })
   w.push(wA1, groupAdmit({ member: X, on: true, cuts: [], seen: seenRejoin(wA2), at: AT(8) }))
-  t.absent(buildGroup(w.cinput()).entitled.includes(wA1))
+  const g = buildGroup(w.input())
+  t.absent(g.entitled.includes(wA1))
+  t.ok(g.entitled.includes(wA2), 'the rejoin writer')
 })
 
 test('a creator who left and rejoined is entitled only on its rejoin writer', (t) => {
@@ -1530,43 +1556,39 @@ test('alternating leaves and key blocks fold in linear time', (t) => {
 })
 
 test('a community demotion of a diary that keeps power in G takes nothing away', (t) => {
-  const w = cworld()
-  const E1 = w.rotate(G, [G, wA, wX, wZ], { at: 3 })
-  w.records.push(communityAdmin({ member: C, on: true, cuts: [{ writer: G, seq: 1 }], at: AT(4) }))
-  w.records.push(communityAdmin({ member: C, on: false, cuts: [{ writer: G, seq: w.len(G) }], at: AT(5) }))
-  let g = buildGroup(w.cinput(w.reader(wX)))
-  t.is(g.rekeyPending, false, 'the group creator lost nothing')
-  t.is(kidOf(g.epoch), kidOf(E1))
+  const w = pworld({ cadmins: [A, Z] })
+  w.add(Z, wZ)
+  w.cgrant(A, false, { at: 6 })
+  let g = buildGroup(w.input(w.reader(wX)))
+  t.is(g.rekeyPending, false, 'A keeps its G grant')
+  t.is(kidOf(g.epoch), kidOf(w.E1))
   t.alike(g.removals, [])
-  const E2 = w.rotate(G, g.entitled, { at: 6 })
-  g = buildGroup(w.cinput(w.reader(wX)))
+  const E2 = w.rotate(G, g.entitled, { at: 7 })
+  g = buildGroup(w.input(w.reader(wX)))
   t.is(kidOf(g.epoch), kidOf(E2), 'and it still rotates')
-  // A community-only admin demoted in the community is still a requirement.
-  w.records.push(communityAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(7) }))
-  g = buildGroup(w.cinput(w.reader(wX)))
+  // A community-only admin demoted in the community is a requirement.
+  const dz = w.cgrant(Z, false, { at: 8 })
+  g = buildGroup(w.input(w.reader(wX)))
   t.is(g.rekeyPending, true)
-  t.alike(g.removals, [{ writer: CM, seq: 5 }])
+  t.alike(g.removals, [dz])
 })
 
-test('a later community link never makes an earlier one of the same period see a leave', (t) => {
+test('a community admin back in G never distributes from an old sibling writer', (t) => {
   const wZ2 = K(0x701)
   const wZ3 = K(0x702)
-  const w = cworld()
-  w.add(Z, wZ2)
-  w.records.push(groupLink({ group: G, on: true, cuts: [{ writer: wZ2, seq: 1 }], at: AT(2) }))
-  t.ok(buildGroup(w.cinput()).entitled.includes(wZ2), 'control: listed while Z never left')
+  const w = cworld({ cadmins: [A, Z] })
+  w.add(Z, wZ).add(Z, wZ2)
+  t.ok(buildGroup(w.input()).entitled.includes(wZ2), 'control: listed while Z never left')
   const L = leaveOn(w, wZ, 6)
-  const legit = w.rotate(G, buildGroup(w.cinput()).entitled, { basis: [L], at: 6.5 })
+  const legit = w.rotate(G, buildGroup(w.input()).entitled, { basis: [L], at: 6.5 })
   w.add(Z, wZ3, { rejoin: L, at: 7 })
   w.push(wZ2, groupAdmit({ member: X, on: true, cuts: [], seen: { writer: wZ3, seq: 0 }, at: AT(8) }))
-  // Same period: only wZ3 is listed after the leave.
-  w.records.push(groupLink({ group: G, on: true, cuts: [{ writer: wZ3, seq: 1 }], at: AT(9) }))
-  const evil = w.rotate(wZ2, [G, wA, wX], { basis: [L], at: 20 })
+  const evil = w.rotate(wZ2, [G, wA, wX], { basis: [L], auth: w.cauth(Z), at: 20 })
   const got = []
   const reader = w.reader(wX)
   reader.onKey = (kid) => got.push(kidOf(kid))
-  const g = buildGroup(w.cinput(reader))
-  t.ok(g.entitled.includes(wZ3), 'the honest post-leave link entitles the rejoin writer')
+  const g = buildGroup(w.input(reader))
+  t.ok(g.entitled.includes(wZ3), 'the rejoin writer of a community admin')
   t.absent(g.entitled.includes(wZ2), 'the old device stays out')
   t.is(kidOf(g.epoch), kidOf(legit))
   t.absent(got.includes(kidOf(evil)), 'its block is never valid for sending')
@@ -1689,4 +1711,564 @@ test('a departed admin that rejoined without a new grant is no admin in any view
   g = buildGroup(v.input())
   t.ok(g.admins.has(A), 're-granted: an admin again')
   t.is(g.members.get(A), 'member')
+})
+
+test('group-key auth shapes: the cited CW length is at least 1', (t) => {
+  const w = pworld({ base: false }).add(X, wX)
+  const kid = { writer: G, seq: 1 }
+  const key = newEpochKey()
+  const opts = { private: true }
+  const k = groupKey({ kid: null, keys: [w.entry(wX, kid, key)], auth: { writer: CM, seq: 1 }, commit: cm(key, kid), at: AT(1) })
+  t.alike(Object.keys(k), ['type', 'kid', 'basis', 'keys', 'auth', 'commit', 'at'])
+  t.is(validateGroupRecord(k, 1, opts), null)
+  t.is(validateGroupRecord({ ...k, auth: null }, 1, opts), null)
+  t.is(validateGroupRecord({ ...k, auth: { writer: CM, seq: 0 } }, 1, opts), 'malformed', 'seq 0')
+  t.is(validateGroupRecord({ ...k, auth: { writer: CM, seq: 1.5 } }, 1, opts), 'malformed')
+  t.is(validateGroupRecord({ ...k, auth: { writer: 'x', seq: 1 } }, 1, opts), 'malformed')
+  t.is(validateGroupRecord({ ...k, auth: { writer: CM, seq: 1, x: 1 } }, 1, opts), 'malformed')
+  const { auth, ...bare } = k
+  t.is(validateGroupRecord(bare, 1, opts), 'malformed', 'auth is required')
+  const cont = groupKey({ kid, keys: k.keys, auth: { writer: CM, seq: 2 }, at: AT(1) })
+  t.alike(Object.keys(cont), ['type', 'kid', 'basis', 'keys', 'auth', 'at'])
+  t.is(validateGroupRecord(cont, 1, opts), null)
+})
+
+test('auth citing the CW length right after a promotion reads and sends', (t) => {
+  const w = cworld()
+  t.is(w.comm.len(w.cwOf(A)), 1, 'A wrote nothing in its CW since the grant')
+  const E = w.rotate(wA, [G, wA, wX], { auth: { writer: w.cwOf(A), seq: 1 }, at: 3 })
+  sealedPost(w, wX, E, 4)
+  let g = buildGroup(w.input(w.reader(wX)))
+  t.alike(g.posts.map((p) => p.text), ['p4'])
+  t.is(kidOf(g.epoch), kidOf(E))
+  const bare = w.rotate(wA, [G, wA, wX], { at: 5 })
+  sealedPost(w, wX, bare, 6)
+  g = buildGroup(w.input(w.reader(wX)))
+  t.is(g.sealed, 1, 'a block with auth null from a diary without G authority counts for nothing')
+  t.is(kidOf(g.epoch), kidOf(E))
+})
+
+test('auth after a demotion never sends; an older citation still reads', (t) => {
+  const w = cworld()
+  const cwA = w.cwOf(A)
+  // A CW record with no effect (it names a group C never created).
+  w.comm.push(cwA, communityAdmit({ group: K(0x999), member: X, on: true, cuts: [], at: AT(3) }))
+  t.is(w.comm.len(cwA), 2)
+  const before = w.rotate(wA, [G, wA, wX], { auth: { writer: cwA, seq: 2 }, at: 3.5 })
+  t.is(kidOf(buildGroup(w.input(w.reader(wX))).epoch), kidOf(before), 'control: valid before the demotion')
+  w.cgrant(A, false, { at: 4 })
+  t.is(w.comm.logs.get(CM).entries[w.comm.len(CM) - 1].record.cuts[0].seq, 2, 'the demotion cuts at 2')
+  const late = w.rotate(wA, [G, wA, wX], { auth: { writer: cwA, seq: 2 }, at: 5 })
+  const old = w.rotate(wA, [G, wA, wX], { auth: { writer: cwA, seq: 1 }, at: 6 })
+  sealedPost(w, wX, late, 7)
+  sealedPost(w, wX, old, 8)
+  const got = []
+  const reader = w.reader(wX)
+  reader.onKey = (kid) => got.push(kidOf(kid))
+  const g = buildGroup(w.input(reader))
+  t.alike(g.posts.map((p) => p.text), ['p7', 'p8'], 'both read (the accepted residual)')
+  t.is(g.epoch, null, 'nobody sends under a demoted admin')
+  t.is(g.rekeyPending, true)
+  t.absent(got.includes(kidOf(late)) || got.includes(kidOf(old)), 'never handed on')
+})
+
+test('a grant and a demotion at the same CW length keep earlier blocks readable', (t) => {
+  const w = cworld()
+  const E = w.rotate(wA, [G, wA, wX], { auth: w.cauth(A), at: 3 })
+  sealedPost(w, wX, E, 4)
+  const demote = w.cgrant(A, false, { at: 5 })
+  const root = w.comm.logs.get(CM).entries
+  t.is(root[demote.seq].record.cuts[0].seq, 1)
+  t.ok(root.some((e) => e.record.type === 'group-admin' && e.record.on && e.record.cuts[0].seq === 1), 'the grant cut at the same length')
+  const got = []
+  const reader = w.reader(wX)
+  reader.onKey = (kid) => got.push(kidOf(kid))
+  const g = buildGroup(w.input(reader))
+  t.alike(g.posts.map((p) => p.text), ['p4'], 'history stays readable')
+  t.is(g.epoch, null)
+  t.alike(got, [], 'a reading-only epoch is never handed on')
+})
+
+test('auth citing a length beyond the held CW, or a CW of another diary, is ignored', (t) => {
+  for (const [label, auth] of [
+    ['beyond the held length', (w) => ({ writer: w.cwOf(A), seq: 2 })],
+    ['another diary CW', (w) => ({ writer: w.cwOf(X), seq: 1 })],
+    ['the root of C, not the creator', () => ({ writer: CM, seq: 1 })],
+    ['a core outside C', () => ({ writer: K(0x9999), seq: 1 })]
+  ]) {
+    const w = cworld()
+    const E = w.rotate(wA, [G, wA, wX], { auth: auth(w), at: 3 })
+    sealedPost(w, wX, E, 4)
+    const g = buildGroup(w.input(w.reader(wX)))
+    t.alike(g.posts, [], label + ': nothing opens')
+    t.is(g.sealed, 1, label)
+    t.is(g.epoch, null, label)
+  }
+})
+
+test('auth from a diary with G authority is ignored: G authority decides', (t) => {
+  const w = pworld()
+  const E2 = w.rotate(wA, [G, wA, wX, wY], { auth: { writer: w.cwOf(X), seq: 1 }, at: 6 })
+  t.is(kidOf(buildGroup(w.input(w.reader(wX))).epoch), kidOf(E2), 'a G admin with a bogus auth still distributes')
+  const E3 = w.rotate(G, [G, wA, wX, wY], { auth: { writer: K(0x9999), seq: 9 }, at: 7 })
+  t.is(kidOf(buildGroup(w.input(w.reader(wX))).epoch), kidOf(E3), 'and so does the creator')
+})
+
+test('a community ban is covered by a basis ref on the CW that holds it', (t) => {
+  const w = pworld({ cadmins: [Z] })
+  const cwZ = w.cwOf(Z)
+  const cwY = w.cwOf(Y)
+  const ban = w.comm.push(cwZ, communityBan({ member: Y, on: true, cuts: [{ writer: cwY, seq: w.comm.len(cwY) }], at: AT(6) }))
+  let g = buildGroup(w.input(w.reader(wX)))
+  t.is(g.members.get(Y), 'banned', 'banned in C, banned in G')
+  t.absent(g.entitled.includes(wY))
+  t.is(g.epoch, null)
+  t.is(g.rekeyPending, true)
+  t.alike(g.removals, [ban])
+  const elsewhere = w.rotate(G, [G, wA, wX], { basis: [{ writer: CM, seq: w.comm.len(CM) - 1 }], at: 7 })
+  g = buildGroup(w.input(w.reader(wX)))
+  t.not(kidOf(g.epoch), kidOf(elsewhere), 'a ref on another C core covers nothing')
+  t.is(g.rekeyPending, true)
+  const E2 = w.rotate(G, [G, wA, wX], { basis: [ban], at: 8 })
+  t.is(kidOf(buildGroup(w.input(w.reader(wX))).epoch), kidOf(E2))
+})
+
+test('two concurrent removals on two CW cores are both required', (t) => {
+  const w = pworld({ cadmins: [Z, B] })
+  const cwX = w.cwOf(X)
+  const cwY = w.cwOf(Y)
+  const banY = w.comm.push(w.cwOf(Z), communityBan({ member: Y, on: true, cuts: [{ writer: cwY, seq: w.comm.len(cwY) }], at: AT(6) }))
+  const offX = w.comm.push(w.cwOf(B), communityAdmit({ member: X, on: false, cuts: [{ writer: cwX, seq: w.comm.len(cwX) }], at: AT(6) }))
+  let g = buildGroup(w.input(w.reader(wA)))
+  t.alike(g.removals, [banY, offX].sort((a, b) => a.writer < b.writer ? -1 : 1))
+  w.rotate(G, [G, wA, wX], { basis: [banY], at: 7 })
+  g = buildGroup(w.input(w.reader(wA)))
+  t.is(g.epoch, null, 'one of two')
+  t.is(g.rekeyPending, true)
+  const both = w.rotate(G, [G, wA, wX], { basis: [banY, offX], at: 8 })
+  t.is(kidOf(buildGroup(w.input(w.reader(wA))).epoch), kidOf(both))
+})
+
+test('leaving the community leaves the group rekey-pending until a rotation covers the leave', (t) => {
+  const w = cworld()
+  const E1 = w.rotate(wA, [G, wA, wX], { auth: w.cauth(A), at: 3 })
+  sealedPost(w, wX, E1, 3.5)
+  const leave = w.cleave(A, 4)
+  let g = buildGroup(w.input(w.reader(wX)))
+  t.alike(g.posts.map((p) => p.text), ['p3.5'], 'what A handed out stays readable')
+  t.absent(g.admins.has(A), 'a left community admin is no admin of G')
+  t.is(g.members.get(A), 'left')
+  t.is(g.rekeyPending, true)
+  t.alike(g.removals, [leave])
+  const E2 = w.rotate(G, [G, wX], { basis: [leave], at: 5 })
+  g = buildGroup(w.input(w.reader(wX)))
+  t.is(kidOf(g.epoch), kidOf(E2))
+})
+
+test('the creator of C, also G\'s creator, distributes from another G writer by G authority', (t) => {
+  const w = pworld()
+  const wC2 = K(0x110)
+  w.add(C, wC2)
+  t.is(w.cwOf(C), CM)
+  // Its citation of C's root is ignored: G authority decides.
+  const E2 = w.rotate(wC2, [G, wA, wX, wY, wC2], { auth: { writer: CM, seq: w.comm.len(CM) }, at: 6 })
+  sealedPost(w, wX, E2, 7)
+  let g = buildGroup(w.input(w.reader(wY)))
+  t.ok(g.admins.has(C))
+  t.ok(g.entitled.includes(wC2))
+  t.alike(g.posts.map((p) => p.text), ['p7'])
+  t.is(kidOf(g.epoch), kidOf(E2))
+  const E3 = w.rotate(wC2, [G, wA, wX, wY, wC2], { auth: { writer: w.cwOf(X), seq: 1 }, at: 8 })
+  g = buildGroup(w.input(w.reader(wY)))
+  t.is(kidOf(g.epoch), kidOf(E3), 'nor does a CW of another diary take G authority away')
+
+  // The old world (C's creator Z citing C's root in a G whose header names
+  // C): G is an orphan and Z distributes nothing.
+  const o = pworld({ cc: Z })
+  o.add(Z, wZ)
+  t.is(o.cwOf(Z), CM)
+  o.rotate(wZ, [G, wA, wX, wY, wZ], { auth: { writer: CM, seq: o.comm.len(CM) }, at: 6 })
+  const go = buildGroup(o.input(o.reader(wY)))
+  t.is(go.orphan, true, 'only the community creator creates groups')
+  t.alike(go.entitled, [])
+  t.is(go.epoch, null)
+  t.absent(go.admins.has(Z))
+})
+
+test('with the parent community missing nobody is entitled and a key holder is rekey-pending', (t) => {
+  const w = pworld()
+  sealedPost(w, wX, w.E1, 6)
+  const g = buildGroup(w.input(w.reader(wX), { community: null }))
+  t.is(g.community, null)
+  t.is(g.orphan, false)
+  t.is(g.incomplete, true)
+  t.alike(g.entitled, [])
+  t.is(g.epoch, null)
+  t.is(g.rekeyPending, true)
+  t.alike(g.posts.map((p) => p.text), ['p6'], 'readers still read')
+  t.is(buildGroup(w.input(null, { community: null })).rekeyPending, false, 'no key held')
+})
+
+test('an orphan private group has no epoch', (t) => {
+  const w = pworld()
+  const ci = w.comm.input()
+  const orphanC = { ...ci, root: { ...ci.root, entries: ci.root.entries.filter((e) => e.record.type !== 'group-create') } }
+  const g = buildGroup(w.input(w.reader(wX), { community: orphanC }))
+  t.is(g.orphan, true)
+  t.is(g.community, null)
+  t.alike(g.entitled, [])
+  t.is(g.epoch, null)
+  t.is(g.rekeyPending, true)
+  t.is(g.name, 'Segredo', 'still readable')
+})
+
+test('a community admin ban inside G is a removal a basis ref on its CW covers', (t) => {
+  const w = pworld({ cadmins: [Z] })
+  const cwZ = w.cwOf(Z)
+  const ban = w.comm.push(cwZ, communityBan({ group: G, member: Y, on: true, cuts: [{ writer: wY, seq: w.len(wY) }], at: AT(6) }))
+  let g = buildGroup(w.input(w.reader(wX)))
+  t.is(g.members.get(Y), 'banned', 'banned in G only')
+  t.is(g.community.members.get(Y), 'member')
+  t.alike(g.removals, [ban], 'a G-side record of the CW virtual log')
+  t.is(g.rekeyPending, true)
+  const E2 = w.rotate(G, [G, wA, wX], { basis: [ban], at: 7 })
+  g = buildGroup(w.input(w.reader(wX)))
+  t.is(kidOf(g.epoch), kidOf(E2))
+})
+
+test('a G admin demoted in G but still a community admin distributes through auth', (t) => {
+  const w = pworld({ cadmins: [A] })
+  const demote = w.push(G, groupAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(6) }))
+  let g = buildGroup(w.input(w.reader(wX)))
+  t.ok(g.admins.has(A), 'still an admin of G through C')
+  const E2 = w.rotate(wA, [G, wA, wX, wY], { basis: [demote], auth: w.cauth(A), at: 7 })
+  sealedPost(w, wX, E2, 8)
+  g = buildGroup(w.input(w.reader(wX)))
+  t.alike(g.posts.map((p) => p.text), ['p8'])
+  t.is(kidOf(g.epoch), kidOf(E2), 'the block past the G cut counts through the community')
+  t.is(g.rekeyPending, false)
+})
+
+test('a demoted community admin needs a group admit for its posts, earlier ones included', (t) => {
+  const w = pworld({ cadmins: [Z] })
+  w.add(Z, wZ)
+  sealedPost(w, wZ, w.E1, 6)
+  let g = buildGroup(w.input(w.reader(wX)))
+  t.alike(visible(g), [wZ + ':1'], 'a community admin posts without an admit')
+  w.cgrant(Z, false, { at: 7 })
+  g = buildGroup(w.input(w.reader(wX)))
+  t.alike(visible(g), [], 'after the demotion its post needs an admit')
+  t.is(g.members.get(Z), 'requested', 'its status follows C now')
+  w.push(G, groupAdmit({ member: Z, on: true, cuts: [{ writer: wZ, seq: 1 }], at: AT(8) }))
+  g = buildGroup(w.input(w.reader(wX)))
+  t.alike(visible(g), [wZ + ':1'], 'admitted in G, visible again')
+})
+
+test('a community ban hides the banned distributor posts but its epoch still opens', (t) => {
+  const w = pworld({ cadmins: [Z] })
+  const E2 = w.rotate(wA, [G, wA, wX, wY], { at: 6 })
+  sealedPost(w, wA, E2, 7)
+  const cwA = w.cwOf(A)
+  w.comm.push(w.cwOf(Z), communityBan({ member: A, on: true, cuts: [{ writer: cwA, seq: w.comm.len(cwA) }], at: AT(8) }))
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.is(g.members.get(A), 'banned')
+  t.is(g.sealed, 0, 'nothing stays sealed')
+  t.alike(g.posts.map((p) => p.text + ':' + p.hidden), ['p7:true'], 'opened and hidden, as in a public group')
+})
+
+test('a departed group admin backdating an admit under its community leave entitles nobody', (t) => {
+  const w = pworld()
+  w.add(B, wB)
+  w.cleave(A, 50)
+  w.push(wA, groupAdmit({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], at: AT(40) }))
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.absent(g.entitled.includes(wB), 'the collaborator is never entitled')
+  t.ok(g.requests.includes(B))
+  const E2 = w.rotate(G, g.entitled, { basis: g.removals, at: 60 })
+  t.is(kidOf(buildGroup(w.input(w.reader(wX))).epoch), kidOf(E2), 'an honest rotation leaves it out and is eligible')
+})
+
+test('a G leave appended after a backdated admit never revives a departed admin authority', (t) => {
+  const w = pworld()
+  w.add(B, wB)
+  w.cleave(A, 50)
+  w.push(wA, groupAdmit({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], at: AT(40) }))
+  w.push(wA, groupLeave({ cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(45) }))
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.absent(g.entitled.includes(wB), 'the collaborator is never entitled')
+  t.ok(g.requests.includes(B))
+})
+
+test('a group creator out of the community cannot distribute; history stays readable', (t) => {
+  // G's creator is C's creator: it leaves C on C's root.
+  const w = pworld()
+  sealedPost(w, wX, w.E1, 6)
+  w.cleave(C, 50)
+  const E2 = w.rotate(G, [G, wA, wX, wY], { at: 7 })
+  sealedPost(w, wX, E2, 8)
+  const got = []
+  const reader = w.reader(wX)
+  reader.onKey = (kid) => got.push(kidOf(kid))
+  const g = buildGroup(w.input(reader))
+  t.alike(g.posts.map((p) => p.text), ['p6', 'p8'], 'both epochs still read')
+  t.absent(got.includes(kidOf(E2)), 'the departed creator epoch is never handed on')
+  t.absent(got.includes(kidOf(w.E1)), 'nor its earlier one: no authority after leaving')
+  t.not(kidOf(g.epoch), kidOf(E2))
+  t.is(g.name, null, 'its root rename no longer counts')
+})
+
+test('community leaves of a banned or unadmitted diary add no removal requirement', (t) => {
+  // A member banned in C appending leaves to its CW.
+  const w = pworld({ cadmins: [Z] })
+  const cwY = w.cwOf(Y)
+  const ban = w.comm.push(w.cwOf(Z), communityBan({ member: Y, on: true, cuts: [{ writer: cwY, seq: w.comm.len(cwY) }], at: AT(6) }))
+  const E2 = w.rotate(G, [G, wA, wX], { basis: [ban], at: 7 })
+  t.is(kidOf(buildGroup(w.input(w.reader(wX))).epoch), kidOf(E2), 'control')
+  w.cleave(Y, 8)
+  w.cleave(Y, 9)
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.is(kidOf(g.epoch), kidOf(E2), 'leaves under a C ban never reopen rekey-pending')
+  t.is(g.rekeyPending, false)
+  t.alike(g.removals, [ban])
+
+  // A genuine leave of an entitled member forces a rotation; after it, a
+  // rejoin that was never readmitted in G leaving again adds nothing.
+  const v = pworld()
+  const leave = v.cleave(X, 6)
+  let r = buildGroup(v.input(v.reader(wA)))
+  t.is(r.rekeyPending, true, 'the genuine leave is a requirement')
+  const E3 = v.rotate(G, [G, wA, wY], { basis: [leave], at: 7 })
+  t.is(kidOf(buildGroup(v.input(v.reader(wA))).epoch), kidOf(E3))
+  v.comm.addWriter(X, cwX2, { rejoin: leave })
+  v.comm.push(cwX2, groupLeave({ cuts: [{ writer: cwX2, seq: v.comm.len(cwX2) }], at: AT(9) }))
+  r = buildGroup(v.input(v.reader(wA)))
+  t.is(kidOf(r.epoch), kidOf(E3), 'the unadmitted rejoin leaving again needs no rotation')
+  t.is(r.rekeyPending, false)
+})
+
+test('a retired CW never revives: the old device of a diary that left and rejoined on a sibling', (t) => {
+  const w = pworld()
+  w.add(B, wB)
+  const cwA = w.cwOf(A)
+  const cwA2 = 'e' + A.slice(1)
+  const cwA3 = 'f' + A.slice(1)
+  w.comm.addWriter(A, cwA2)
+  const leave = w.comm.push(cwA2, groupLeave({ cuts: [{ writer: cwA2, seq: w.comm.len(cwA2) }], at: AT(20) }))
+  w.comm.addWriter(A, cwA3, { rejoin: leave })
+  // The old CW appends a no-op after the rejoin.
+  w.comm.push(cwA, communityAdmit({ group: K(0x999), member: X, on: true, cuts: [], seen: { writer: cwA3, seq: 0 }, at: AT(30) }))
+  w.push(wA, groupAdmit({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], at: AT(31) }))
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.absent(g.community.liveWriters.has(cwA), 'the old CW stays retired')
+  t.absent(g.authorityWriters.has(wA), 'its G writer has no authority')
+  t.absent(g.entitled.includes(wA), 'nor keys')
+  t.absent(g.entitled.includes(wB), 'and its admit entitles nobody')
+})
+
+test('a C leave set is covered by a basis naming any of its leaves', (t) => {
+  const w = pworld()
+  const leave = w.cleave(X, 20)
+  const E2 = w.rotate(G, [G, wA, wY], { basis: [leave], at: 21 })
+  t.is(kidOf(buildGroup(w.input(w.reader(wA))).epoch), kidOf(E2), 'control')
+  // A backdated leave on a fresh CW joins the same leave set.
+  const fresh = 'e' + X.slice(1)
+  w.comm.addWriter(X, fresh)
+  w.comm.push(fresh, groupLeave({ cuts: [{ writer: fresh, seq: w.comm.len(fresh) }], at: AT(1) }))
+  const g = buildGroup(w.input(w.reader(wA)))
+  t.is(kidOf(g.epoch), kidOf(E2), 'the epoch that covered the genuine leave stays eligible')
+  t.is(g.rekeyPending, false)
+})
+
+test('a C admin who left and rejoined C on a fresh CW is not entitled until re-granted', (t) => {
+  const cwA9 = 'e' + A.slice(1)
+  const wA9 = K(0x209)
+  const w = cworld()
+  const E1 = w.rotate(G, [G, wA, wX], { at: 3 })
+  let g = buildGroup(w.input(w.reader(wX)))
+  t.ok(g.entitled.includes(wA), 'control: a C admin is entitled')
+  t.is(kidOf(g.epoch), kidOf(E1))
+  const leave = w.cleave(A, 4)
+  w.comm.addWriter(A, cwA9, { rejoin: leave })
+  w.add(A, wA9)
+  t.is(w.cwOf(A), cwA9)
+  const E2 = w.rotate(G, [G, wX], { basis: [leave], at: 5 })
+  g = buildGroup(w.input(w.reader(wX)))
+  t.is(kidOf(g.epoch), kidOf(E2))
+  t.absent(g.admins.has(A), 'back in C, the grant never listed the fresh CW')
+  t.absent(g.entitled.includes(wA9), 'not entitled on its new writer')
+  t.absent(g.entitled.includes(wA))
+  t.ok(g.requests.includes(A), 'no approval exemption')
+  t.is(g.rekeyPending, false, 'nobody owes it a key')
+  // It cannot distribute through its new CW either.
+  const E3 = w.rotate(wA9, [G, wX, wA9], { auth: w.cauth(A), at: 6 })
+  t.is(kidOf(buildGroup(w.input(w.reader(wX))).epoch), kidOf(E2), 'its epoch never sends')
+  // Re-granted on the fresh CW, it is entitled there.
+  w.cgrant(A, true, { cuts: [{ writer: cwA9, seq: 1 }], at: 7 })
+  g = buildGroup(w.input(w.reader(wX)))
+  t.ok(g.admins.has(A))
+  t.ok(g.entitled.includes(wA9))
+  t.absent(g.entitled.includes(wA), 'the old writer stays out')
+  t.ok(kidOf(E3))
+})
+
+test('a key block whose auth cites a sibling CW of the same diary is ignored for sending', (t) => {
+  const sib = 'f' + A.slice(1)
+  const build = (cite) => {
+    const w = cworld()
+    w.comm.addWriter(A, sib)
+    // The grant lists both CWs of A; A's G writer names the first.
+    w.cgrant(A, true, { cuts: [{ writer: w.cwOf(A), seq: 1 }, { writer: sib, seq: 1 }], at: 2 })
+    t.is(w.cwOf(A), cwKey(A))
+    const E = w.rotate(wA, [G, wA, wX], { auth: cite(w), at: 3 })
+    return { w, E, g: buildGroup(w.input(w.reader(wX))) }
+  }
+  const own = build((w) => w.cauth(A))
+  t.is(kidOf(own.g.epoch), kidOf(own.E), 'control: citing its own CW sends')
+  const other = build((w) => ({ writer: sib, seq: w.comm.len(sib) }))
+  t.ok(buildCommunity(other.w.comm.input()).admins.has(A), 'the sibling CW is granted too')
+  t.is(other.g.epoch, null, 'a sibling CW is no citation for this writer')
+  t.alike(other.g.posts, [])
+})
+
+test('a lost device leaving again after its owner rejoined forces no rekey', (t) => {
+  const w = pworld()
+  const leave = w.cleave(X, 20)
+  const E2 = w.rotate(G, [G, wA, wY], { basis: [leave], at: 21 })
+  w.comm.addWriter(X, cwX2, { rejoin: leave })
+  const g0 = buildGroup(w.input(w.reader(wA)))
+  t.is(kidOf(g0.epoch), kidOf(E2), 'control')
+  const old = cwKey(X)
+  w.comm.push(old, groupLeave({ cuts: [{ writer: old, seq: w.comm.len(old) }], at: AT(500) }))
+  const g = buildGroup(w.input(w.reader(wA)))
+  t.is(kidOf(g.epoch), kidOf(E2), 'the epoch stays eligible')
+  t.is(g.rekeyPending, false)
+  t.alike(g.removals, g0.removals, 'no new requirement')
+  t.is(g.community.members.get(X), 'member')
+})
+
+test('a demoted device of a diary still admin through another never sends through auth', (t) => {
+  const w = pworld({ base: false, cadmins: [A] })
+  const cwA = w.cwOf(A)
+  const cwA2 = 'e' + A.slice(1)
+  w.comm.addWriter(A, cwA2)
+  w.add(A, wA).add(A, wA2, { cw: cwA2 }).add(X, wX)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(2) }))
+  // CW1 writes a no-op, is demoted past it, and CW2 is granted.
+  w.comm.push(cwA, communityAdmit({ group: K(0x999), member: X, on: true, cuts: [], at: AT(3) }))
+  const demote = w.cgrant(A, false, { cuts: [{ writer: cwA, seq: 2 }], at: 4 })
+  w.cgrant(A, true, { cuts: [{ writer: cwA2, seq: 1 }], at: 5 })
+  // The creator's rotation covers the demotion; later blocks descend from it.
+  const cover = w.rotate(G, [G, wA2, wX], { basis: [demote], at: 5.5 })
+  const got = []
+  const reader = w.reader(wX)
+  reader.onKey = (kid) => got.push(kidOf(kid))
+  const bad = w.rotate(wA, [G, wA2, wX], { basis: [cover], auth: { writer: cwA, seq: 1 }, at: 6 })
+  let g = buildGroup(w.input(reader))
+  t.ok(g.admins.has(A), 'still an admin through CW2')
+  t.is(kidOf(g.epoch), kidOf(cover), 'a citation of the demoted device old position never sends')
+  t.absent(got.includes(kidOf(bad)))
+  const good = w.rotate(wA2, [G, wA2, wX], { basis: [cover], auth: { writer: cwA2, seq: w.comm.len(cwA2) }, at: 7 })
+  g = buildGroup(w.input(w.reader(wX)))
+  t.is(kidOf(g.epoch), kidOf(good), 'the same from a CW2-bound writer sends')
+})
+
+test('a CW a community unban did not list is never entitled until an unban lists it', (t) => {
+  const w = pworld({ cadmins: [Z] })
+  const cwX = w.cwOf(X)
+  const cwX2b = 'e' + X.slice(1)
+  w.comm.addWriter(X, cwX2b)
+  w.add(X, wX2, { cw: cwX2b })
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: 1 }], at: AT(6) }))
+  t.ok(buildGroup(w.input()).entitled.includes(wX2), 'control')
+  const ban = w.comm.push(w.cwOf(Z), communityBan({ member: X, on: true, cuts: [{ writer: cwX, seq: w.comm.len(cwX) }, { writer: cwX2b, seq: w.comm.len(cwX2b) }], at: AT(7) }))
+  w.comm.push(w.cwOf(Z), communityBan({ member: X, on: false, lifts: ban, cuts: [{ writer: cwX, seq: w.comm.len(cwX) }], at: AT(8) }))
+  let g = buildGroup(w.input())
+  t.ok(g.entitled.includes(wX), 'the listed CW is restored')
+  t.absent(g.entitled.includes(wX2), 'the unlisted one stays out')
+  w.comm.push(w.cwOf(Z), communityBan({ member: X, on: false, lifts: ban, cuts: [{ writer: cwX2b, seq: w.comm.len(cwX2b) }], at: AT(9) }))
+  g = buildGroup(w.input())
+  t.ok(g.entitled.includes(wX2), 'an unban listing it restores it')
+})
+
+test('group-cut: a G root key block above the creator mark never sends after the creator returns', (t) => {
+  for (const mode of ['no leave', 'no mark', 'mark']) {
+    const w = pworld()
+    const cwC2 = 'e' + C.slice(1)
+    const cwC3 = 'f' + C.slice(1)
+    w.comm.addWriter(C, cwC2)
+    const L = mode === 'no leave' ? null : w.comm.push(cwC2, groupLeave({ cuts: [{ writer: CM, seq: w.comm.len(CM) }, { writer: cwC2, seq: w.comm.len(cwC2) }], at: AT(20) }))
+    if (L !== null) w.comm.confirm(C, cwC2)
+    const marks = new Map(mode === 'mark' ? [[C, [{ writer: G, cut: w.len(G), seq: 1 }]]] : [])
+    // The stolen creating device rotates from the G root, then C returns.
+    const E2 = w.rotate(G, [G, wA, wX, wY], { basis: L === null ? [] : [L], at: 30 })
+    if (L !== null) w.comm.addWriter(C, cwC3, { rejoin: L })
+    const got = []
+    const reader = w.reader(wX)
+    reader.onKey = (kid) => got.push(kidOf(kid))
+    const g = buildGroup(w.input(reader, { marks }))
+    // onKey reports exactly the epochs valid for sending.
+    if (mode === 'no leave') {
+      t.ok(got.includes(kidOf(E2)), 'control: with no creator leave the root distributes')
+    } else {
+      // Unmarked after a confirmed leave: no authority at any seq (owner
+      // decision, cycle 21).
+      t.absent(got.includes(kidOf(E2)), mode + ': the root block never sends')
+      t.not(kidOf(g.epoch), kidOf(E2))
+    }
+  }
+})
+
+test('group-cut: a marked G root is never entitled again; the returning creator is, on its new writer', (t) => {
+  const w = pworld()
+  const cwC2 = 'e' + C.slice(1)
+  const cwC3 = 'f' + C.slice(1)
+  const wC3 = K(0x104)
+  w.comm.addWriter(C, cwC2)
+  const L = w.comm.push(cwC2, groupLeave({ cuts: [{ writer: CM, seq: w.comm.len(CM) }, { writer: cwC2, seq: w.comm.len(cwC2) }], at: AT(20) }))
+  w.comm.confirm(C, cwC2)
+  const marks = new Map([[C, [{ writer: G, cut: w.len(G), seq: 1 }]]])
+  w.comm.addWriter(C, cwC3, { rejoin: L })
+  w.add(C, wC3, { cw: cwC3 })
+  let g = buildGroup(w.input(null, { marks }))
+  t.is(g.community.members.get(C), 'member', 'the creator is back')
+  t.absent(g.entitled.includes(G), 'the marked root receives no key')
+  t.ok(g.entitled.includes(wC3), 'the creator new writer does')
+  g = buildGroup(w.input(null))
+  t.absent(g.entitled.includes(G), 'without a mark after the confirmed leave, the root is not entitled either')
+  t.ok(g.entitled.includes(wC3))
+  g = buildGroup(pworld().input(null))
+  t.ok(g.entitled.includes(G), 'control: with no creator leave the root is entitled')
+})
+
+test('memberInvite in a private group is plaintext and folds without the epoch key', (t) => {
+  const w = pworld()
+  t.is(buildGroup(w.input()).memberInvite, false, 'no record')
+  const r = groupInvites({ on: true, at: AT(6) })
+  t.is(validateGroupRecord(r, 1, { private: true }), null, 'not sealed-only')
+  w.push(wX, groupInvites({ on: true, at: AT(6) }))
+  t.is(buildGroup(w.input()).memberInvite, false, 'a member record is ignored')
+  w.push(wA, groupInvites({ on: true, at: AT(7) }))
+  const none = buildGroup(w.input())
+  t.is(none.memberInvite, true, 'an admin record counts with no key held')
+  t.is(none.name, null, 'while the sealed name stays unread')
+  t.is(buildGroup(w.input(w.reader(wY))).memberInvite, true, 'and the same with the key')
+  // A sealed copy is never an invites record: only posts, hides and metas
+  // open from an envelope.
+  w.seal(G, w.E1, groupInvites({ on: false, at: AT(8) }))
+  t.is(buildGroup(w.input(w.reader(wY))).memberInvite, true, 'a sealed record stays sealed')
+  // Community staff reach a private group through C's virtual log too.
+  w.comm.push(CM, communityInvites({ group: G, on: false, at: AT(9) }))
+  t.is(buildGroup(w.input()).memberInvite, false, 'C\'s creator clears it in G')
+})
+
+test('a sealed text forward keeps its flag through buildGroup', (t) => {
+  const w = pworld()
+  const original = w.seal(wX, w.E1, groupPost({ text: 'original', at: AT(6), sealed: true }))
+  const forward = w.seal(wX, w.E1, groupPost({ text: 'encaminhada', fwd: 1, at: AT(7), sealed: true }))
+  const g = buildGroup(w.input(w.reader(wY)))
+  t.is(g.posts.find(p => p.writer === original.writer && p.seq === original.seq).fwd, 0)
+  const post = g.posts.find(p => p.writer === forward.writer && p.seq === forward.seq)
+  t.is(post.text, 'encaminhada')
+  t.is(post.fwd, 1)
+  t.absent(post.media)
 })

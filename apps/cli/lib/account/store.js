@@ -6,15 +6,17 @@
 // (mode 0o600, data dir 0o700):
 //
 // - <dataDir>/directory.json, the snapshot { v, seq, journal, links, bySub,
-//   byUsername, usedNames } (a file without `seq` is seq 0; `journal` only
-//   in v 2), only ever replaced whole through writeJsonAtomic
+//   byUsername, usedNames, pages, pagesByUsername } (a file without `seq` is
+//   seq 0; `journal` only in v 2; `pages` and `pagesByUsername` only once a
+//   page exists), only ever replaced whole through writeJsonAtomic
 //   (packages/core/lib/store.js: O_EXCL temp, fsync, rename, dir fsync).
 // - <dataDir>/directory.journal.<id>, a journal (named so that no `*.log`
 //   rotation pattern matches it): <id> is a random 16-byte hex id, its first
 //   line the header { journal: <id> } and every later line one change since
 //   the snapshot, { seq, op: 'link' | 'email' | 'rename', member, ... }
 //   (link: the link record; email: the new e-mail; rename: username,
-//   usernameRecord, usernameChangedAt and the `previous` name). Written
+//   usernameRecord, usernameChangedAt and the `previous` name), or a page
+//   change (see "Pages"). Written
 //   through one O_APPEND|O_NOFOLLOW fd (fchmod 0o600 at every open): each
 //   change is ONE write followed by fsync, so a sign-up costs the same
 //   whatever the directory size. The fsynced append is the commit point; the
@@ -165,6 +167,28 @@
 // earlier build accepted always replays. Older builds keep the field: their
 // validLink checks only the fields they need and fromJson / applyEntry copy
 // the record whole ({ ...link }), as rename and e-mail lines do here.
+//
+// Pages: a page (a business or project diary whose key the service holds)
+// reserves its @username here, from the same name space as members.
+// state.pages[key] = { username, usernameRecord, usernameChangedAt, cert,
+// createdAt, closed, movedTo, movedFrom } (no sub, e-mail or secret), changed
+// by the journal ops 'page' { key, username, usernameRecord, cert, at },
+// 'page-rename' { key, username, usernameRecord, previous, at }, 'page-close'
+// { key, at } and 'page-move' { from, to, username, usernameRecord, cert, at }
+// (`previous` and `username` name the page's current name, checked on replay
+// as a person's rename checks `previous`). A usedNames holder
+// is a linked member or a page; byUsername stays members only (so the link
+// counts keep their invariants) and pagesByUsername maps a page's current
+// name to it. A closed page keeps its name, so the name is never issued
+// again. A move hands the current name, the names the page used before and
+// the rename cooldown to the new key (`movedFrom`); the old key keeps no name
+// nor record and `movedTo` points on. A page key is never a member key:
+// start() refuses it and status() answers { linked: false, unavailable: true }
+// (not linked: true, which would open the member routes in server.js). Chains stop at MAX_PAGE_MOVES moves.
+// One-way migration: the first page puts a page key in usedNames, which a
+// build without pages refuses (its indexes() accepts only linked holders and
+// its applyEntry no page op), so rolling back past this build once a page
+// exists needs the directory backup from before the first page.
 
 const fs = require('node:fs')
 const path = require('node:path')
@@ -200,10 +224,12 @@ const MAX_PENDING = 1000
 const MAX_UNPROVEN_PER_MEMBER = 3
 const MAX_PER_SUB = 2
 const COOLDOWN_MS = 7 * 24 * 3600 * 1000
+const MAX_PAGE_MOVES = 4
 // Names a member could use to pass for the association or its staff.
 const RESERVED = new Set([
   'admin', 'associacao', 'association', 'ajuda', 'mod', 'moderacao',
-  'root', 'seeder', 'semeador', 'suporte', 'support', 'varanda'
+  'pagina', 'paginas', 'root', 'seeder', 'semeador', 'suporte', 'support',
+  'varanda'
 ])
 
 function fail (code, extra) {
@@ -247,7 +273,7 @@ function restored () {
 }
 
 function emptyState () {
-  return { links: dict(), bySub: dict(), byUsername: dict(), usedNames: dict() }
+  return { links: dict(), bySub: dict(), byUsername: dict(), usedNames: dict(), pages: dict(), pagesByUsername: dict() }
 }
 
 function isJournalId (id) {
@@ -284,6 +310,22 @@ function validLink (link) {
     (link.invite === undefined || isInvite(link.invite))
 }
 
+// The record a page holds for `username` under `key`.
+function pageRecord (record, key, username) {
+  return isPlain(record) && record.member === key && record.username === username
+}
+
+// A whole page entry: a moved page holds no name nor record and points at a
+// later key.
+function validPage (page, key) {
+  return isPlain(page) && (page.username === null || isUsername(page.username)) &&
+    (page.username === null ? page.usernameRecord === null : pageRecord(page.usernameRecord, key, page.username)) &&
+    isDate(page.usernameChangedAt) && isPlain(page.cert) &&
+    isDate(page.createdAt) && (page.closed === null || isDate(page.closed)) &&
+    (page.movedTo === null || isLower(page.movedTo)) && (page.movedFrom === null || isLower(page.movedFrom)) &&
+    (page.username === null) === (page.movedTo !== null)
+}
+
 // Validates a snapshot (v 1 or v 2) -> the state; `seq` is read by snapshotSeq.
 function fromJson (obj) {
   if (!isPlain(obj) || (obj.v !== VERSION && obj.v !== VERSION_JOURNAL)) throw invalid()
@@ -303,15 +345,33 @@ function fromJson (obj) {
 // a used name to another member): bySub maps exactly each link's sub to its
 // member, byUsername exactly each link's current username to its member, and
 // usedNames holds every current username -> member pair plus past names,
-// each held by a linked member (links are never removed). Any disagreement
-// (a damaged or hand-restored snapshot) fails closed; nothing is rebuilt.
+// each held by a linked member (links are never removed) or a page.
+// pagesByUsername maps exactly each named page's username to it, also held
+// in usedNames, and a move points at a page that exists. Any disagreement (a
+// damaged or hand-restored snapshot) fails closed; nothing is rebuilt.
 function indexes (obj, links) {
-  for (const key of ['bySub', 'byUsername', 'usedNames']) {
+  for (const key of ['bySub', 'byUsername', 'usedNames', 'pages', 'pagesByUsername']) {
     if (obj[key] !== undefined && !isPlain(obj[key])) throw invalid()
   }
   const bySub = dict(obj.bySub)
   const byUsername = dict(obj.byUsername)
   const usedNames = dict(obj.usedNames)
+  const pagesByUsername = dict(obj.pagesByUsername)
+  const pages = dict()
+  for (const [key, page] of Object.entries(obj.pages || {})) {
+    if (!isLower(key) || has(links, key) || !validPage(page, key)) throw invalid()
+    pages[key] = { ...page }
+  }
+  let named = 0
+  for (const [key, page] of Object.entries(pages)) {
+    if (page.movedTo !== null && (page.movedTo === key || !has(pages, page.movedTo))) throw invalid()
+    if (page.movedFrom !== null && !has(pages, page.movedFrom)) throw invalid()
+    if (page.username === null) continue
+    named++
+    if (!has(pagesByUsername, page.username) || pagesByUsername[page.username] !== key) throw invalid()
+    if (!has(usedNames, page.username) || usedNames[page.username] !== key) throw invalid()
+  }
+  if (Object.keys(pagesByUsername).length !== named) throw invalid()
   const members = Object.keys(links)
   if (Object.keys(bySub).length !== members.length || Object.keys(byUsername).length !== members.length) throw invalid()
   for (const member of members) {
@@ -321,9 +381,9 @@ function indexes (obj, links) {
     if (!has(usedNames, username) || usedNames[username] !== member) throw invalid()
   }
   for (const holder of Object.values(usedNames)) {
-    if (typeof holder !== 'string' || !has(links, holder)) throw invalid()
+    if (typeof holder !== 'string' || !(has(links, holder) || has(pages, holder))) throw invalid()
   }
-  return { bySub, byUsername, usedNames }
+  return { bySub, byUsername, usedNames, pages, pagesByUsername }
 }
 
 function snapshotSeq (obj) {
@@ -495,10 +555,97 @@ function isLower (member) {
   return isHex(member, 32) && member === member.toLowerCase()
 }
 
-// True when `username` is held now, or was ever held, by another member.
+// True when `username` is held now, or was ever held, by another member or
+// page.
 function heldByOther (s, username, member) {
   return (has(s.byUsername, username) && s.byUsername[username] !== member) ||
+    (has(s.pagesByUsername, username) && s.pagesByUsername[username] !== member) ||
     (has(s.usedNames, username) && s.usedNames[username] !== member)
+}
+
+// The moves behind a page, counted through movedFrom (bounded, so a damaged
+// chain cannot loop).
+function moveDepth (s, key) {
+  let depth = 0
+  let page = s.pages[key]
+  while (page.movedFrom !== null && depth <= MAX_PAGE_MOVES) {
+    depth++
+    page = s.pages[page.movedFrom]
+  }
+  return depth
+}
+
+// A page that can still change: neither closed nor moved.
+function livePage (s, key) {
+  return isLower(key) && has(s.pages, key) && s.pages[key].closed === null && s.pages[key].movedTo === null
+}
+
+function freshKey (s, key) {
+  return isLower(key) && !has(s.links, key) && !has(s.pages, key)
+}
+
+const PAGE_OPS = new Set(['page', 'page-rename', 'page-close', 'page-move'])
+
+function applyPageEntry (s, e, dry) {
+  if (e.op === 'page') {
+    if (!freshKey(s, e.key) || !isUsername(e.username) || !pageRecord(e.usernameRecord, e.key, e.username) || !isPlain(e.cert) ||
+      !isDate(e.at) || heldByOther(s, e.username, e.key)) {
+      throw invalid()
+    }
+    if (dry) return
+    s.pages[e.key] = {
+      username: e.username,
+      usernameRecord: e.usernameRecord,
+      usernameChangedAt: e.at,
+      cert: e.cert,
+      createdAt: e.at,
+      closed: null,
+      movedTo: null,
+      movedFrom: null
+    }
+    s.pagesByUsername[e.username] = e.key
+    s.usedNames[e.username] = e.key
+  } else if (e.op === 'page-rename') {
+    if (!livePage(s, e.key) || s.pages[e.key].username !== e.previous || !isUsername(e.username) ||
+      !pageRecord(e.usernameRecord, e.key, e.username) || !isDate(e.at) || heldByOther(s, e.username, e.key)) {
+      throw invalid()
+    }
+    if (dry) return
+    const page = s.pages[e.key]
+    // The old name leaves pagesByUsername but stays in usedNames for this page.
+    delete s.pagesByUsername[page.username]
+    s.pagesByUsername[e.username] = e.key
+    s.usedNames[e.username] = e.key
+    s.pages[e.key] = { ...page, username: e.username, usernameRecord: e.usernameRecord, usernameChangedAt: e.at }
+  } else if (e.op === 'page-close') {
+    if (!livePage(s, e.key) || !isDate(e.at)) throw invalid()
+    if (dry) return
+    s.pages[e.key] = { ...s.pages[e.key], closed: e.at }
+  } else {
+    const { from, to } = e
+    if (!livePage(s, from) || !freshKey(s, to) || s.pages[from].username !== e.username ||
+      !pageRecord(e.usernameRecord, to, e.username) || !isPlain(e.cert) ||
+      !isDate(e.at) || moveDepth(s, from) >= MAX_PAGE_MOVES) {
+      throw invalid()
+    }
+    if (dry) return
+    const page = s.pages[from]
+    s.pages[to] = {
+      username: page.username,
+      usernameRecord: e.usernameRecord,
+      usernameChangedAt: page.usernameChangedAt,
+      cert: e.cert,
+      createdAt: page.createdAt,
+      closed: null,
+      movedTo: null,
+      movedFrom: from
+    }
+    s.pages[from] = { ...page, username: null, usernameRecord: null, movedTo: to }
+    s.pagesByUsername[page.username] = to
+    for (const name of Object.keys(s.usedNames)) {
+      if (s.usedNames[name] === from) s.usedNames[name] = to
+    }
+  }
 }
 
 // Applies one journal entry to `s` in place, or with `dry` only checks it.
@@ -507,12 +654,14 @@ function heldByOther (s, username, member) {
 // record that is not whole is refused before anything changes (usedNames
 // only ever grows).
 function applyEntry (s, e, dry = false) {
-  if (!isPlain(e) || !isLower(e.member)) throw invalid()
+  if (!isPlain(e)) throw invalid()
+  if (PAGE_OPS.has(e.op)) return applyPageEntry(s, e, dry)
+  if (!isLower(e.member)) throw invalid()
   const member = e.member
   if (e.op === 'link') {
     const link = e.link
     if (!validLink(link)) throw invalid()
-    if (has(s.links, member) || has(s.bySub, link.sub) || heldByOther(s, link.username, member)) throw invalid()
+    if (has(s.links, member) || has(s.pages, member) || has(s.bySub, link.sub) || heldByOther(s, link.username, member)) throw invalid()
     if (dry) return
     s.links[member] = { ...link }
     s.bySub[link.sub] = member
@@ -997,7 +1146,11 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
   function snapshot (v, id) {
     const out = { v, seq }
     if (v === VERSION_JOURNAL) out.journal = id
-    return Object.assign(out, { links: state.links, bySub: state.bySub, byUsername: state.byUsername, usedNames: state.usedNames })
+    Object.assign(out, { links: state.links, bySub: state.bySub, byUsername: state.byUsername, usedNames: state.usedNames })
+    // Absent until the first page, so a directory without pages stays the
+    // file older builds read.
+    if (Object.keys(state.pages).length > 0) Object.assign(out, { pages: state.pages, pagesByUsername: state.pagesByUsername })
+    return out
   }
 
   // Replaces the snapshot (v 2 naming `id`, or v 1) under the fence. A
@@ -1274,7 +1427,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     member = normalizeMember(member)
     if (invite !== null && !isInvite(invite)) throw new TypeError('invite must be 64 lowercase hex characters')
     if (!validName(username)) throw fail('nome-invalido')
-    if (has(state.links, member)) throw fail('conta-vinculada')
+    if (has(state.links, member) || has(state.pages, member)) throw fail('conta-vinculada')
     // Sweep before the cap check: while the cap is full this is the only
     // call that keeps expiring rows abandoned before it filled.
     sweep()
@@ -1420,7 +1573,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
         pending.delete(id)
         return linkResult(state.links[member])
       }
-      if (has(state.bySub, sub) || has(state.links, member)) throw fail('conta-vinculada')
+      if (has(state.bySub, sub) || has(state.links, member) || has(state.pages, member)) throw fail('conta-vinculada')
       // The cap filled while this row was at Google: drop the row (it holds
       // the sub, the e-mail and claims the name) and sign nothing.
       if (full()) {
@@ -1485,7 +1638,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
   function status (member) {
     if (!isHex(member, 32)) return { linked: false }
     const link = state.links[member.toLowerCase()]
-    if (link === undefined) return { linked: false }
+    if (link === undefined) return has(state.pages, member.toLowerCase()) ? { linked: false, unavailable: true } : { linked: false }
     return {
       linked: true,
       username: link.username,
@@ -1495,11 +1648,136 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     }
   }
 
-  // Current holder only: a released name answers null.
+  // Current holder only: a released name answers null. A page's name
+  // answers its current key (the latest after a move) with kind 'page', and
+  // closed: true once closed (the name stays held).
   function lookup (username) {
-    if (typeof username !== 'string' || !has(state.byUsername, username)) return null
+    if (typeof username !== 'string') return null
+    if (has(state.pagesByUsername, username)) {
+      const key = state.pagesByUsername[username]
+      const page = state.pages[key]
+      const out = { member: key, usernameRecord: page.usernameRecord, kind: 'page' }
+      if (page.closed !== null) out.closed = true
+      return out
+    }
+    if (!has(state.byUsername, username)) return null
     const member = state.byUsername[username]
     return { member, usernameRecord: state.links[member].usernameRecord }
+  }
+
+  function pageResult (page) {
+    return { cert: page.cert, usernameRecord: page.usernameRecord, nextChangeAt: nextChangeAt(page) }
+  }
+
+  function pageKey (key) {
+    if (!isHex(key, 32)) throw new TypeError('key must be 64 hex characters')
+    return key.toLowerCase()
+  }
+
+  function checkRecord (record, key, username) {
+    if (!pageRecord(record, key, username)) {
+      throw new TypeError('usernameRecord must name this page key and username')
+    }
+  }
+
+  // The caller (the issuer, for the page key) signs the records; the
+  // directory only reserves the name. -> { cert, usernameRecord, nextChangeAt }
+  function reservePage ({ key, username, usernameRecord, cert } = {}) {
+    return enqueue(() => {
+      mutable()
+      key = pageKey(key)
+      if (!validName(username)) throw fail('nome-invalido')
+      checkRecord(usernameRecord, key, username)
+      if (!isPlain(cert)) throw new TypeError('cert must be an object')
+      if (!freshKey(state, key)) throw fail('pedido-invalido')
+      if (nameTaken(state, username, key)) throw fail('nome-em-uso')
+      commit({ op: 'page', key, username, usernameRecord, cert, at: iso(now()) })
+      return pageResult(state.pages[key])
+    })
+  }
+
+  // -> { record, nextChangeAt }, as rename(). Same name: the current record.
+  function renamePage ({ key, username, usernameRecord } = {}) {
+    return enqueue(() => {
+      mutable()
+      key = pageKey(key)
+      if (!has(state.pages, key)) throw fail('nao-encontrado')
+      if (!livePage(state, key)) throw fail('pedido-invalido')
+      if (!validName(username)) throw fail('nome-invalido')
+      const page = state.pages[key]
+      if (page.username === username) return { record: page.usernameRecord, nextChangeAt: nextChangeAt(page) }
+      checkRecord(usernameRecord, key, username)
+      const t = now()
+      if (t < Date.parse(page.usernameChangedAt) + COOLDOWN_MS) {
+        throw fail('troca-bloqueada', { nextChangeAt: nextChangeAt(page) })
+      }
+      if (nameTaken(state, username, key)) throw fail('nome-em-uso')
+      commit({ op: 'page-rename', key, username, usernameRecord, previous: page.username, at: iso(t) })
+      return { record: usernameRecord, nextChangeAt: nextChangeAt(state.pages[key]) }
+    })
+  }
+
+  // The name stays held by the closed page. -> { closed }
+  function closePage ({ key } = {}) {
+    return enqueue(() => {
+      mutable()
+      key = pageKey(key)
+      if (!has(state.pages, key)) throw fail('nao-encontrado')
+      if (!livePage(state, key)) throw fail('pedido-invalido')
+      commit({ op: 'page-close', key, at: iso(now()) })
+      return { closed: state.pages[key].closed }
+    })
+  }
+
+  // At service start: a page reserved here whose creation never reached the
+  // writer or the ACL (the process died in between) is closed, so lookup
+  // stops answering it as live. `known(key)` is true for a page the writer
+  // or the ACL holds; a throw keeps the page. The name stays held, as with
+  // every close. -> the number closed.
+  function closeOrphanPages (known) {
+    if (typeof known !== 'function') throw new TypeError('known must be a function')
+    return enqueue(() => {
+      mutable()
+      let closed = 0
+      for (const key of Object.keys(state.pages)) {
+        if (!livePage(state, key)) continue
+        let keep = true
+        try {
+          keep = known(key) !== false
+        } catch {}
+        if (keep) continue
+        commit({ op: 'page-close', key, at: iso(now()) })
+        closed++
+      }
+      return closed
+    })
+  }
+
+  // -> { cert, usernameRecord, nextChangeAt } of `to`.
+  function movePage ({ from, to, usernameRecord, cert } = {}) {
+    return enqueue(() => {
+      mutable()
+      from = pageKey(from)
+      to = pageKey(to)
+      if (!has(state.pages, from)) throw fail('nao-encontrado')
+      if (!livePage(state, from) || !freshKey(state, to) || moveDepth(state, from) >= MAX_PAGE_MOVES) {
+        throw fail('pedido-invalido')
+      }
+      const username = state.pages[from].username
+      checkRecord(usernameRecord, to, username)
+      if (!isPlain(cert)) throw new TypeError('cert must be an object')
+      commit({ op: 'page-move', from, to, username, usernameRecord, cert, at: iso(now()) })
+      return pageResult(state.pages[to])
+    })
+  }
+
+  // -> the page's directory entry plus nextChangeAt, or null.
+  function pageStatus (key) {
+    if (!isHex(key, 32)) return null
+    const k = key.toLowerCase()
+    if (!has(state.pages, k)) return null
+    const page = state.pages[k]
+    return { ...page, nextChangeAt: nextChangeAt(page) }
   }
 
   // For the operator (LGPD access requests): no signature, cert or secret.
@@ -1512,7 +1790,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
 
   // For the moderation panel's stats tab (apps/cli/lib/account/usage-stats.js):
   // counts only -> { members, maxMembers, byDay }. members is exact because a
-  // link is never removed (applyEntry knows only link, email and rename);
+  // link is never removed (no applyEntry op removes one; pages are not links);
   // maxMembers is the cap or null. byDay is [day, count] pairs, ascending, with
   // day = dayOf(ms of linkedAt) (UTC by default; the caller passes its own,
   // e.g. the Brasília day). linkedAt is the `date` finish() puts in the
@@ -1532,6 +1810,24 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     }
     const byDay = [...counts].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
     return { members: linkCount(), maxMembers, byDay }
+  }
+
+  // For the invite drop roster (apps/cli/lib/account/invite-drops.js): the
+  // link date only, the same date finish() puts in the member's public
+  // certificate, so it discloses nothing a peer cannot read in block 0.
+  // Pages are not links and answer null. In-memory state only, so a readOnly
+  // or failed store answers too.
+  function linkedAt (member) {
+    if (!isHex(member, 32)) return null
+    const key = member.toLowerCase()
+    if (!has(state.links, key)) return null
+    return state.links[key].linkedAt
+  }
+
+  // Keys and link dates only, sorted by key: never sub, e-mail or username
+  // (those stay on exportLinks, for the operator).
+  function linkRoster () {
+    return Object.keys(state.links).sort().map((member) => ({ member, linkedAt: state.links[member].linkedAt }))
   }
 
   // For the moderation desk (apps/cli/lib/account/mod-routes.js and
@@ -1598,7 +1894,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     })
   }
 
-  return { start, reserve, putGoogle, markAnswered, get, isFull, inviteUsed, dropPending, finish, rename, status, lookup, exportLinks, linkStats, contact, memberForSub, close, fail: markFailed, restored: isRestored }
+  return { start, reserve, putGoogle, markAnswered, get, isFull, inviteUsed, dropPending, finish, rename, status, lookup, reservePage, renamePage, closePage, closeOrphanPages, movePage, pageStatus, exportLinks, linkStats, linkedAt, linkRoster, contact, memberForSub, close, fail: markFailed, restored: isRestored }
 }
 
 module.exports = {
@@ -1610,6 +1906,7 @@ module.exports = {
   COMPACT_BYTES,
   ORPHAN_GRACE_MS,
   COOLDOWN_MS,
+  MAX_PAGE_MOVES,
   PENDING_TTL_MS,
   MAX_PENDING,
   MAX_UNPROVEN_PER_MEMBER,

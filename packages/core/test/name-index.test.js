@@ -6,6 +6,11 @@
 // RESULTS_MAX bound with `more`, the author cap, remove/clear, totality and
 // a speed bound.
 const test = require('brittle')
+const b4a = require('b4a')
+const crypto = require('hypercore-crypto')
+const certLib = require('../lib/cert')
+const page = require('../lib/page')
+const lc = require('../lib/page-lifecycle')
 const { DEFAULT_MAX_AUTHORS, createNameIndex } = require('../lib/name-index')
 
 const ISSUER = 'ee'.repeat(32)
@@ -447,4 +452,197 @@ test('replaying a forgotten profile seq never takes an author slot', (t) => {
   t.ok(idx.note(b, 2, profile('Bia')))
   t.is(idx.search(['bia'], ...ALL).members.length, 1)
   t.ok(idx.note(a, 1, profile('Apagada')), 'a full index still answers true for the forgotten seq')
+})
+
+function pageBase (page) {
+  return {
+    page,
+    gen: 2,
+    at: AT,
+    nonce: 'n'.repeat(43),
+    association: 'cd'.repeat(32),
+    issuer: ISSUER,
+    issuerDate: AT,
+    issuerSignature: 'ef'.repeat(64),
+    signature: 'ab'.repeat(64),
+    countersignature: '12'.repeat(64)
+  }
+}
+
+function roster (page) {
+  return { type: 'page-roster', ...pageBase(page), gen: 1, owner: hex(900), admins: [], prev: null }
+}
+
+function closeRecord (page) {
+  return { type: 'page-close', ...pageBase(page), actor: hex(900) }
+}
+
+function movedRecord (page, to = hex(77)) {
+  return { type: 'page-moved', ...pageBase(page), to, actor: hex(900) }
+}
+
+test('page hint: a verified roster of the author sets page, a person and a foreign roster do not', (t) => {
+  const a = hex(1)
+  const b = hex(2)
+  const idx = createNameIndex({ verifyUsername: yes, verifyPage: yes })
+  idx.note(a, 1, profile('Loja Ana'))
+  idx.note(b, 1, profile('Loja Bia'))
+  t.ok(idx.note(a, 2, roster(a)))
+  t.ok(idx.note(b, 2, roster(hex(3))), 'a roster naming another page is ignored')
+  t.ok(idx.note(b, 3, { ...roster(b), admins: 'x' }), 'a malformed roster is ignored')
+  const rows = idx.search(['loja'], ...ALL).members
+  t.alike(rows.map((r) => [r.author, r.page, r.closed, r.moved]), [[a, true, false, false], [b, undefined, undefined, undefined]])
+  t.alike(idx.hint(a), { page: true, closed: false, moved: false })
+  t.alike(idx.hint(b), {})
+  t.alike(idx.hint(hex(9)), {})
+})
+
+test('page hint: bounded by the author cap, cleared with the author', (t) => {
+  const a = hex(1)
+  const idx = createNameIndex({ maxAuthors: 1, verifyPage: yes })
+  t.ok(idx.note(a, 1, roster(a)))
+  t.is(idx.note(hex(2), 1, roster(hex(2))), false, 'a new page author at the cap is refused')
+  t.alike(idx.stats(), { authors: 1, maxAuthors: 1 })
+  t.ok(idx.remove(a))
+  t.alike(idx.hint(a), {})
+  idx.note(a, 1, roster(a))
+  idx.clear()
+  t.alike(idx.hint(a), {})
+})
+
+test('page close and move forget the name and the @nome but keep the hint; a person is unchanged', (t) => {
+  const a = hex(1)
+  const b = hex(2)
+  const c = hex(3)
+  const idx = createNameIndex({ verifyUsername: yes, verifyPage: yes })
+  for (const k of [a, b, c]) {
+    idx.note(k, 1, profile('Loja Nova'))
+    idx.note(k, 2, username(k, 'lojanova' + k.slice(-1)))
+    idx.note(k, 3, roster(k))
+    idx.settle(k)
+  }
+  t.is(idx.search(['loja'], ...ALL).members.length, 3)
+  t.ok(idx.note(a, 4, closeRecord(a)))
+  t.ok(idx.note(b, 4, movedRecord(b)))
+  t.ok(idx.note(c, 4, closeRecord(hex(5))), 'a close naming another page does nothing')
+  const rows = idx.search(['loja'], ...ALL).members
+  t.alike(rows.map((r) => r.author), [c], 'only the untouched page still searches')
+  t.is(idx.search(['lojanova1'], ...ALL).members.length, 0, 'the closed @nome stops matching')
+  t.is(idx.search(['lojanova2'], ...ALL).members.length, 0, 'the moved @nome stops matching')
+  t.alike(idx.hint(a), { page: true, closed: true, moved: false })
+  t.alike(idx.hint(b), { page: true, closed: false, moved: true })
+  t.alike(idx.hint(c), { page: true, closed: false, moved: false })
+  // A later name record on a closed key never brings the name back.
+  idx.note(a, 5, profile('Loja Nova'))
+  idx.note(a, 6, username(a, 'lojanova1'))
+  idx.settle(a)
+  t.is(idx.search(['loja'], ...ALL).members.length, 1)
+})
+
+test('page hint: the first close or move wins; a close during a username verify ends the name', (t) => {
+  const a = hex(1)
+  const b = hex(2)
+  const idx = createNameIndex({ verifyUsername: yes, verifyPage: yes })
+  idx.note(a, 1, movedRecord(a))
+  idx.note(a, 2, closeRecord(a))
+  t.alike(idx.hint(a), { page: true, closed: false, moved: true }, 'a later close does not relabel a moved page')
+  const c = hex(3)
+  const racing = createNameIndex({
+    verifyUsername: (author) => {
+      racing.note(author, 3, closeRecord(author))
+      return true
+    },
+    verifyPage: yes
+  })
+  racing.note(c, 1, roster(c))
+  racing.note(c, 2, username(c, 'lojaracing'))
+  racing.settle(c)
+  t.is(racing.search(['lojaracing'], ...ALL).members.length, 0, 'the @nome does not come back after the close')
+  t.ok(b)
+})
+
+test('page close of a key the index never saw takes a slot like any author', (t) => {
+  const a = hex(1)
+  const idx = createNameIndex({ maxAuthors: 1, verifyPage: yes })
+  t.ok(idx.note(a, 1, closeRecord(a)))
+  t.alike(idx.hint(a), { page: true, closed: true, moved: false })
+  t.is(idx.note(hex(2), 1, closeRecord(hex(2))), false)
+})
+
+// The seeder's wiring (lib/seeder.js _createNameIndex): the countersigned
+// check of the author's log, revocation included.
+function realVerifyPage (association, revokedIssuers = new Set()) {
+  return (author, record) => {
+    const verify = record.type === 'page-roster' ? page.verifyRoster : record.type === 'page-close' ? lc.verifyClose : lc.verifyMoved
+    return verify(record, author, association, { revokedIssuers }).ok === true
+  }
+}
+
+function signedPage () {
+  const assocKp = crypto.keyPair()
+  const issuerKp = crypto.keyPair()
+  const issuerCert = certLib.createIssuerCert({ issuer: b4a.toString(issuerKp.publicKey, 'hex'), date: AT }, assocKp)
+  const ownerKp = crypto.keyPair()
+  const owner = b4a.toString(ownerKp.publicKey, 'hex')
+  const P = b4a.toString(crypto.keyPair().publicKey, 'hex')
+  const fields = { type: 'page-roster', page: P, gen: 1, owner, admins: [], prev: null, at: AT, nonce: 'r'.repeat(43), association: issuerCert.association }
+  const rosterRec = page.issuerCountersign({ ...fields, signature: page.signRoster(fields, ownerKp) }, issuerKp, issuerCert)
+  const cfields = { type: 'page-close', page: P, gen: 2, at: AT, nonce: 'c'.repeat(43), actor: owner, association: issuerCert.association }
+  const closeRec = page.issuerCountersign({ ...cfields, signature: lc.signClose(cfields, ownerKp) }, issuerKp, issuerCert)
+  return { P, association: issuerCert.association, issuer: issuerCert.issuer, rosterRec, closeRec }
+}
+
+test('page hint: only a record that verifies for the author sets it', (t) => {
+  const s = signedPage()
+  const person = hex(1)
+  const idx = createNameIndex({ verifyUsername: yes, verifyPage: realVerifyPage(s.association) })
+  const zero = { ...s.rosterRec, page: person, signature: '00'.repeat(64), countersignature: '00'.repeat(64) }
+  t.ok(idx.note(person, 2, zero))
+  t.ok(idx.note(person, 3, { ...closeRecord(person) }))
+  t.ok(idx.note(person, 4, { ...movedRecord(person) }))
+  t.alike(idx.hint(person), {}, 'an unsigned roster, close or move of a person sets no hint')
+  t.ok(idx.note(person, 5, s.rosterRec), 'a genuine roster of another page')
+  t.alike(idx.hint(person), {}, 'a genuine roster naming another key sets nothing')
+  t.ok(idx.note(s.P, 2, s.rosterRec))
+  t.alike(idx.hint(s.P), { page: true, closed: false, moved: false }, 'a countersigned roster sets the hint')
+  t.ok(idx.note(s.P, 3, s.closeRec))
+  t.alike(idx.hint(s.P), { page: true, closed: true, moved: false }, 'a countersigned close ends it')
+
+  const revoked = createNameIndex({ verifyPage: realVerifyPage(s.association, new Set([s.issuer])) })
+  revoked.note(s.P, 2, s.rosterRec)
+  t.alike(revoked.hint(s.P), {}, 'a revoked issuer sets no hint')
+  const none = createNameIndex()
+  none.note(s.P, 2, s.rosterRec)
+  t.alike(none.hint(s.P), {}, 'without verifyPage no hint is set')
+})
+
+test('page end seq: the lowest verified close or move wins; an unverified one sets none', (t) => {
+  const a = hex(1)
+  const idx = createNameIndex({ verifyPage: yes })
+  t.is(idx.endSeq(a), null, 'unknown author')
+  idx.note(a, 2, roster(a))
+  t.is(idx.endSeq(a), null, 'an open page has no end')
+  idx.note(a, 9, closeRecord(a))
+  t.is(idx.endSeq(a), 9)
+  idx.note(a, 12, movedRecord(a))
+  t.is(idx.endSeq(a), 9, 'a later move changes nothing')
+  t.alike(idx.hint(a), { page: true, closed: true, moved: false })
+  idx.note(a, 5, movedRecord(a))
+  t.is(idx.endSeq(a), 5, 'a lower seq noted later wins')
+  t.alike(idx.hint(a), { page: true, closed: false, moved: true }, 'and its type')
+  t.is(idx.endSeq(42), null)
+
+  const s = signedPage()
+  const real = createNameIndex({ verifyPage: realVerifyPage(s.association) })
+  real.note(s.P, 2, s.rosterRec)
+  real.note(s.P, 3, { ...closeRecord(s.P) })
+  t.is(real.endSeq(s.P), null, 'an unsigned close sets no seq')
+  real.note(s.P, 4, s.closeRec)
+  t.is(real.endSeq(s.P), 4, 'a countersigned close sets its seq')
+  const revoked = createNameIndex({ verifyPage: realVerifyPage(s.association, new Set([s.issuer])) })
+  revoked.note(s.P, 4, s.closeRec)
+  t.is(revoked.endSeq(s.P), null, 'a revoked issuer sets no seq')
+  const none = createNameIndex()
+  none.note(s.P, 4, s.closeRec)
+  t.is(none.endSeq(s.P), null, 'without verifyPage no seq is set')
 })

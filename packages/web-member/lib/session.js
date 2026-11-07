@@ -14,13 +14,14 @@
 // - Every member operation opens the own diary, and a running sync holds it
 //   open. Two Hypercore instances on the same storage would corrupt it, so
 //   a core is never opened twice: a read that opens cores (feed.read,
-//   log.read, profile.read, engagement.read, the notices own-diary read) is
-//   served from the live run's cores while a run exists (withCores, web
-//   only; the run keeps going, same runId), and opens and closes the storage
-//   itself when none does. Only writes, and reads the run cannot serve,
-//   preempt: a running sync is aborted and awaited first; a continuous run
-//   is restarted afterwards with a new runId (sync.stopped 'preempted',
-//   then sync.started).
+//   log.read, profile.read, engagement.read, the community.* and group.*
+//   reads, the notices own-diary read, the upkeep's plan) is served from
+//   the live run's cores while a run exists (withCores, web only; the run
+//   keeps going, same runId), and opens and closes the storage itself when
+//   none does. Only writes, and reads the run cannot serve, preempt: a
+//   running sync is aborted and awaited first; a continuous run is
+//   restarted afterwards with a new runId (sync.stopped 'preempted', then
+//   sync.started).
 // - Configuration (association, seeder address) is fixed here and checked
 //   before anything touches the storage or the network. There is no DHT, so
 //   node.info reports publicDht false.
@@ -37,7 +38,7 @@
 // clearKeyPair(), reset() and close(). Reads work locked; a write without
 // the key is USAGE 'identidade bloqueada: entre com a passkey'. The only
 // signatures the session makes outside the diary are account.sign,
-// report.sign, appeal.sign, terms.sign, invite.sign, push.sign, age.sign and wallet.sign: the
+// report.sign, appeal.sign, terms.sign, invite.sign, push.sign and age.sign: the
 // domain-separated account-link statement (@varanda/core lib/account-link.js,
 // prefix 'varanda-account-link-v1'), report statement (@varanda/core
 // lib/report.js, prefix 'varanda-report-v1'), appeal statement (@varanda/core
@@ -45,9 +46,8 @@
 // (@varanda/core lib/terms.js, prefix 'varanda-terms-v1'), signup-invite
 // request (@varanda/core lib/invite.js, prefix 'varanda-invite-v1'),
 // push-subscription statement (@varanda/core lib/push-proof.js, prefix
-// 'varanda-push-v1'), age-verification request (@varanda/core
-// lib/age.js, prefix 'varanda-age-v1') and wallet statement (@varanda/core
-// lib/wallet-proof.js, prefix 'varanda-wallet-v1'), whose member and association the
+// 'varanda-push-v1') and age-verification request (@varanda/core
+// lib/age.js, prefix 'varanda-age-v1'), whose member and association the
 // session fills in
 // itself, so a caller can never get
 // arbitrary bytes, a certificate or a block signed. Each returns the
@@ -124,6 +124,48 @@
 // event (this device's media core confirmed at the seeder) makes no line;
 // the lease below learns the confirmation from the 'settled' report that
 // follows it.
+//
+// The device upkeep (docs/rpc.md 5.61 and 5.63): a device of an account
+// takes part by itself in the communities and groups its diary binds
+// (member-ops deviceUpkeepPlan / deviceUpkeep: a CW and the Geral writer
+// here, epoch keys handed by the creator's device to the account's new
+// writers). ONE serial pass at a time, never inside onEvent. A pass plans
+// in full on the live run's cores (withCores: the run lends its own group
+// cores and the foreign ones it keeps; a core it does not lend reruns the
+// plan under withStore), so an empty plan never stops the run. One
+// exception skips the full plan: the echo of a write made on this device (an own
+// length equal to its last write: a post, a like, a follow), after the
+// session's first full plan, with no failure, transient skip or unarmed
+// 'group-writer' since, and a full plan younger than upkeepFullMaxAgeMs,
+// first asks on the borrowed diary (withCores) whether a root lacks a
+// bound writer of this device, and ends there without stopping the run.
+// Any other trigger arriving before that pass makes it plan in full. That
+// is safe: a write here that creates share work (an admit, a role change)
+// lands in a group core and arrives as 'groups-changed', which plans in
+// full, and a diary join is enrol work the precheck sees.
+// Only a non-empty plan writes, through the write gate, then pushes,
+// like a diary write. It is armed by a NEW own length on a user's
+// continuous run (another device appended, or a write here landed; the
+// pass's own write does not re-arm it, unless the write gate brought blocks
+// of another device; an unlock arms from the live run's last own length, a
+// reload or a new connection from the next own-synced), and once per
+// arming by a 'settled' report after the passes ran out; a failed pass or
+// a failed root queues another within the bound; a 'group-writer' (a writer
+// core stored for the first time, once per key and at most
+// MAX_UPKEEP_WRITERS keys per session) arms afresh, so the distributor
+// plans after the new device's writer arrived; while armed, a
+// 'groups-changed' (the root or writer a skipped root waited for) queues
+// another pass. A timer (upkeepDelayMs) coalesces a burst into one pass, at
+// most MAX_UPKEEP_PASSES per arming, so a plan the run's cores cannot serve
+// stops its continuous run a bounded number of times per new own length;
+// progress earns fresh passes for what the write unblocked, and a pass
+// that leaves nothing waiting (no failure, no skip a sync can resolve) and
+// saw no newer arming disarms. A step that threw after writing still sends
+// groups.changed and pushes. It defers while a user's once run
+// is alive (as the drain), is silent while locked, and a failure is the
+// warning 'aviso: participação automática neste aparelho não concluída',
+// never an RPC error: nothing is resent, the next pass plans again from
+// storage.
 //
 // The lease (web only, docs/rpc.md 6.1; off unless leaseHoldMs > 0, which
 // no shipped entry sets today, the browser entry keeps it off): a seeder link that has nothing left to do
@@ -216,9 +258,20 @@
 // while the diary length is unchanged (noticeCtxCache, forgotten on lock,
 // reset, setKeyPair and close). The link itself still opens no storage core, and a v1 read
 // never reads the own diary.
+//
+// Direct messages (web only, docs/rpc.md 5.73 to 5.81): ./dm.js holds the
+// box key pair and the local store key, derived at setKeyPair from the PRF
+// and zeroed with the identity (lock, reset, close). dm.enable publishes the
+// dm-key through the write gate; dm.send and dm.set put over a fresh
+// anonymous link (./dm-link.js), never the sync socket; dm.pull runs off the
+// chain (one at a time); dm.lookup reads local data on the chain and
+// otherwise a bounded newest-first diary.peek scan off it. A continuous run
+// ticks a pull every DM_PULL_EVERY_MS and a wallet check (top-ups over the
+// separate stamp link, at most one per 10 minutes, and once after an
+// unlock with a dm-key). reset() removes the local store and the dm kv.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, FEED_INCOMPLETE_MAX } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 const {
   validRecordCopy,
   validateRecord,
@@ -226,31 +279,44 @@ const {
   MEDIA_BLOCK_BYTES,
   MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES,
-  MAX_MEDIA_DIMENSION
+  MAX_MEDIA_DIMENSION,
+  AUDIO_MIME,
+  MAX_AUDIO_MS,
+  MAX_AUDIO_BYTES
 } = require('@varanda/core/lib/records')
 const { formatEvent, key8 } = require('@varanda/core/lib/sync-format')
 const { safe } = require('@varanda/core/lib/safe')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
-const { signReport } = require('@varanda/core/lib/report')
+const { signReport, signDmReport } = require('@varanda/core/lib/report')
 const { signAppeal } = require('@varanda/core/lib/appeal')
 const { signTerms } = require('@varanda/core/lib/terms')
+const { signRecovery, blobHashOf } = require('@varanda/core/lib/recovery-proof')
 const { signInvite } = require('@varanda/core/lib/invite')
 const { signAge } = require('@varanda/core/lib/age')
-const { signWallet, opHash } = require('@varanda/core/lib/wallet-proof')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
+const { verifyAgeVerified, verifyAgeSince } = require('@varanda/core/lib/age-proof')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const member = require('./member-ops')
 const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
 const { createPeeker } = require('./peek')
 const { createNoticer } = require('./notices')
+const { createPageFeeder } = require('./page-feed')
+const { signPage, canonicalOp, opHash: pageOpHash, ACTIONS: PAGE_STATEMENTS } = require('@varanda/core/lib/page-proof')
+const { signRoster, signAccept, signOffer, signOrigin, signClose, signMoved, pageState, PAGE_ROSTER_REFRESH_BLOCKS } = require('@varanda/core/lib/page')
+const { pageLifecycle, cutEntries, originOf } = require('@varanda/core/lib/page-lifecycle')
+const { deletedSeqs, applyDeletes } = require('@varanda/core/lib/deletion')
+const { followSet } = require('@varanda/core/lib/media')
+const { sealMedia, openMedia, validPrivateItem, PRIVATE_ITEM_KEYS, MAX_SEALED_MEDIA_PLAIN_BYTES } = require('@varanda/core/lib/group-media')
 const { signNoticeProof } = require('@varanda/core/lib/notices')
 const store = require('./node-store')
 const { groupKeyPairFromPrf } = require('./passkey')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
+const { createDmEngine } = require('./dm')
+const { createSeenSync, groupApplier } = require('./seen-sync')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
 const LOCKED_MESSAGE = 'diretório de dados em uso'
@@ -258,20 +324,48 @@ const CLOSED_MESSAGE = 'sessão encerrada'
 const INTERNAL_MESSAGE = 'erro interno'
 const NOT_SYNCED_MESSAGE = 'sincronize com o semeador antes de publicar'
 const BAD_USERNAME_RECORD = 'registro de nome inválido'
+const BAD_AGE_PROOF = 'comprovante de idade inválido'
 const OLD_USERNAME_RECORD = 'registro de nome antigo'
 const SELF_REPORT = 'não é possível denunciar a própria chave'
 const BAD_REPORT = 'denúncia inválida'
 const BAD_APPEAL = 'recurso inválido'
 const BAD_PUSH = 'inscrição de notificação inválida'
-const BAD_WALLET = 'operação de pagamento inválida'
 const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
+const UPKEEP_WARNING = 'aviso: participação automática neste aparelho não concluída'
 const BAD_MEDIA_ARGS = 'mídia inválida'
+const GROUP_MEDIA_UNAVAILABLE = 'mídia indisponível'
 const NO_SEEDER = 'sem conexão com o semeador'
 const PEEK_BUSY = 'espiadinha já em andamento'
+const SEEN_CHANGED_MS = 5000
 const NOTICES_BUSY = 'avisos já em andamento'
 const DIARY_PEEK_BUSY = 'ocupado'
+const BAD_PAGE = 'operação de página inválida'
+const PAGE_FEED_BUSY = 'feed de página já em andamento'
+const PAGE_REGISTER_CORE_ONLY = 'registro de página disponível só no nó core'
+const NO_LOCAL_DATA = 'sem dados locais para este diário'
+// page.read (docs/rpc.md 5.85): the bounded read of a page diary this node
+// does not hold peeks blocks 1..3 and this many windows of PEEK_WINDOW seqs,
+// newest first (288 >= PAGE_ROSTER_REFRESH_BLOCKS, so the roster the
+// service refreshes every 256 blocks is always inside). The result's lists
+// are capped as PAGE_READ_FOLLOWS_MAX / PAGE_READ_LINKS_MAX of @varanda/rpc.
+const PAGE_READ_WINDOWS = 8
+const PAGE_READ_HEAD = 3
+const PAGE_READ_FOLLOWS_MAX = 64
+const PAGE_READ_LINKS_MAX = 16 + 1
+// A window is first asked for under this share of the peek deadline: a
+// block the seeder cleared (its tombstone in the same window) never
+// arrives, so only what the answer's tombstones leave missing is asked for
+// again under the whole deadline.
+const PAGE_READ_PROBE_SHARE = 8
+// Direct messages (see the header): the sync loop pulls at most this often
+// and checks the wallet on this tick; a dm-key lookup by peek reads at most
+// this many windows of PEEK_WINDOW seqs, newest first.
+const DM_PULL_EVERY_MS = 120000
+const DM_TICK_MS = 60000
+const DM_LOOKUP_WINDOWS = 8
+const PEEK_WINDOW = 36
 // diary.peek requests in flight at once.
 const MAX_DIARY_PEEKS = 2
 // One deadline for the internal catch-up and push runs.
@@ -282,6 +376,16 @@ const READER_WAIT_MS = 3000
 const NOT_READY = Symbol('not ready')
 // Failed drains retried from own-synced without a new follow change.
 const MAX_DRAIN_RETRIES = 3
+// The device upkeep (see the header): passes per arming, and the delay that
+// coalesces a burst of triggers into one pass.
+const MAX_UPKEEP_PASSES = 3
+const UPKEEP_DELAY_MS = 1500
+// Per arming, whatever progress or a 'settled' report granted since.
+const MAX_UPKEEP_TOTAL = 3 * MAX_UPKEEP_PASSES
+// Writer keys whose 'group-writer' armed the upkeep, per session.
+const MAX_UPKEEP_WRITERS = 512
+// The longest the upkeep trusts the precheck before planning in full again.
+const UPKEEP_FULL_MAX_AGE_MS = 10 * 60 * 1000
 // The lease (see the header): the gap after an idle end, how long a run
 // waits for an unconfirmed media core, and the longest a borrow holds it.
 const LEASE_GAP_MS = 45000
@@ -377,6 +481,149 @@ function rpcError (code, message) {
   return err
 }
 
+// Plain kv values (string lists, group marks) compared by content.
+function sameJson (a, b) {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+// ---- pages (docs/rpc.md 5.84 and 5.85) ----
+
+function hasOwn (o, k) {
+  return Object.prototype.hasOwnProperty.call(o, k)
+}
+
+// Exactly `keys` as own keys of a plain object, else TypeError.
+function exactOp (o, keys) {
+  if (o === null || typeof o !== 'object' || Array.isArray(o)) throw new TypeError('invalid page op')
+  const own = Object.keys(o)
+  if (own.length !== keys.length || !keys.every((k) => hasOwn(o, k))) throw new TypeError('invalid page op')
+  return o
+}
+
+function copyList (v) {
+  return Array.isArray(v) ? [...v] : v
+}
+
+// The association is the node's own (cfg.association): an op that names one
+// at any depth is refused, as the RPC layer does for callers that skip it.
+function namesAssociation (v) {
+  if (Array.isArray(v)) return v.some(namesAssociation)
+  if (v === null || typeof v !== 'object') return false
+  return Object.keys(v).some((k) => k === 'association' || namesAssociation(v[k]))
+}
+
+// page.sign's result for the own key `own` (the pair's public key). The
+// record builders (lib/page.js) check every field the signer covers and
+// that the pair is the record's signer (owner or actor), so a roster for
+// another owner or a malformed field is a TypeError, never a signature.
+function pageSignResult ({ action, nonce, page, op }, own, keyPair, association) {
+  if (namesAssociation(JSON.parse(canonicalOp(op)))) throw new TypeError('invalid page op')
+  const statement = (o) => signPage({ action, nonce, member: own, page, association, opHash: pageOpHash(o) }, keyPair)
+  const roster = (f) => ({ type: 'page-roster', ...f, signature: signRoster(f, keyPair) })
+  switch (action) {
+    case 'accept': {
+      exactOp(op, ['gen', 'rosterSignature', 'at', 'nonce'])
+      const f = { page, gen: op.gen, rosterSignature: op.rosterSignature, at: op.at, nonce: op.nonce, actor: own }
+      return { record: { type: 'page-accept', ...f, signature: signAccept(f, keyPair) } }
+    }
+    case 'remove':
+    case 'transfer-accept':
+      exactOp(op, ['gen', 'owner', 'admins', 'prev', 'at', 'nonce'])
+      return { record: roster({ page, gen: op.gen, owner: op.owner, admins: copyList(op.admins), prev: op.prev, at: op.at, nonce: op.nonce, association }) }
+    case 'offer': {
+      exactOp(op, ['to', 'exp', 'gen', 'at', 'nonce'])
+      const f = { page, to: op.to, exp: op.exp, gen: op.gen, at: op.at, nonce: op.nonce, actor: own }
+      return { record: { type: 'page-offer', ...f, signature: signOffer(f, keyPair) } }
+    }
+    case 'close': {
+      exactOp(op, ['gen', 'at', 'nonce'])
+      const f = { page, gen: op.gen, at: op.at, nonce: op.nonce, actor: own, association }
+      return { record: { type: 'page-close', ...f, signature: signClose(f, keyPair) } }
+    }
+    case 'move': {
+      exactOp(op, ['to', 'gen', 'fromSeq', 'owner', 'admins', 'at', 'nonce'])
+      if (op.to === page) throw new TypeError('invalid page op')
+      const moved = { page, to: op.to, gen: op.gen, at: op.at, nonce: op.nonce, actor: own, association }
+      const origin = { page: op.to, from: page, fromSeq: op.fromSeq, gen: op.gen, owner: op.owner, admins: copyList(op.admins), at: op.at, nonce: op.nonce, actor: own, association }
+      return {
+        record: { type: 'page-moved', ...moved, signature: signMoved(moved, keyPair) },
+        origin: { type: 'page-origin', ...origin, signature: signOrigin(origin, keyPair) },
+        roster: roster({ page: op.to, gen: 1, owner: op.owner, admins: copyList(op.admins), prev: null, at: op.at, nonce: op.nonce, association })
+      }
+    }
+    case 'create': {
+      exactOp(op, ['username', 'name', 'bio', 'roster'])
+      const r = exactOp(op.roster, ['gen', 'admins', 'prev', 'at', 'nonce'])
+      if (r.gen !== 1 || r.prev !== null || !Array.isArray(r.admins) || r.admins.length !== 0) throw new TypeError('invalid page op')
+      const record = roster({ page, gen: 1, owner: own, admins: [], prev: null, at: r.at, nonce: r.nonce, association })
+      return { signature: statement(op), record }
+    }
+    case 'invite': {
+      exactOp(op, ['member', 'gen', 'rosterSignature', 'roster'])
+      const r = exactOp(op.roster, ['owner', 'admins', 'prev', 'at', 'nonce'])
+      if (typeof op.rosterSignature !== 'string') throw new TypeError('invalid page op')
+      const record = roster({ page, gen: op.gen, owner: r.owner, admins: copyList(r.admins), prev: r.prev, at: r.at, nonce: r.nonce, association })
+      return { signature: statement({ ...op, rosterSignature: record.signature }), record }
+    }
+    default:
+      if (!PAGE_STATEMENTS.includes(action)) throw new TypeError('invalid page action')
+      return { signature: statement(op) }
+  }
+}
+
+// The winning follow record's seq for each key of `follows`, newest first
+// (@varanda/core lib/member.js pageFollows).
+function pageFollows (entries, follows) {
+  const wanted = new Set(follows)
+  const winning = new Map()
+  for (const entry of entries) {
+    const copy = entry.record == null ? null : validRecordCopy(entry.record, entry.seq)
+    if (copy === null || copy.type !== 'follow' || !wanted.has(copy.key)) continue
+    const prev = winning.get(copy.key)
+    if (prev === undefined || entry.seq > prev) winning.set(copy.key, entry.seq)
+  }
+  return [...winning].map(([key, seq]) => ({ key, seq })).sort((a, b) => (b.seq - a.seq) || (a.key < b.key ? -1 : 1))
+}
+
+// page.read's answer over RAW entries (never after applyDeletes, so a
+// tombstone cannot undo a close, a move or a roster): the lifecycle first,
+// then the roster over the blocks up to a close or a move. Follows are no
+// page-* records, so their tombstones apply. The shape of the core node's
+// (@varanda/core lib/member.js pageRead).
+function pageReadResult ({ pageHex, entries, own, association, revokedIssuers, full, complete }) {
+  const opts = { revokedIssuers }
+  const lifecycle = pageLifecycle(entries, pageHex, association, opts)
+  const cut = cutEntries(entries, lifecycle)
+  const state = pageState(cut, pageHex, association, { revokedIssuers, full })
+  // A page-origin after a terminal close or move does not count (as core).
+  const origin = originOf(cut, pageHex, association, opts)
+  const live = applyDeletes(cut)
+  const follows = pageFollows(live, followSet(live, pageHex))
+  const roster = state.page ? [state.owner, ...state.admins] : []
+  const links = new Map()
+  for (const link of lifecycle.links) {
+    if (roster.includes(link.actor)) links.set(link.actor, link)
+  }
+  return {
+    page: pageHex,
+    owner: state.owner,
+    admins: state.admins,
+    gen: state.page ? state.gen : null,
+    seq: state.seq,
+    isOwner: state.page && state.owner === own,
+    isAdmin: state.page && state.admins.includes(own),
+    complete: complete(state),
+    follows: follows.slice(0, PAGE_READ_FOLLOWS_MAX),
+    followsCount: follows.length,
+    followsTruncated: follows.length > PAGE_READ_FOLLOWS_MAX,
+    closed: lifecycle.closed !== null,
+    movedTo: lifecycle.movedTo === null ? null : { to: lifecycle.movedTo.to, seq: lifecycle.movedTo.seq },
+    movedFrom: origin === null ? null : { from: origin.from, fromSeq: origin.fromSeq },
+    links: [...links.values()].sort((a, b) => b.seq - a.seq).slice(0, PAGE_READ_LINKS_MAX)
+      .map((l) => ({ actor: l.actor, diary: l.diary, seq: l.seq }))
+  }
+}
+
 // ---- configuration ----
 
 function checkConfig ({ storage, association, seederUrl, createSocket }) {
@@ -451,6 +698,8 @@ function readyWithin (ready, ms) {
 // leaseHoldMs: the lease (header); 0 = off. leaseGapMs, leaseMediaMaxMs:
 // its gap and its media wait. noClear: keep the bytes of deleted blocks
 // (the browser's VARANDA_NO_CLEAR kill switch; tombstones still hide them).
+// upkeepDelayMs: the device upkeep's coalescing delay (tests).
+// upkeepFullMaxAgeMs: the age after which it plans in full again (tests).
 function createBrowserSession ({
   storage,
   association,
@@ -466,7 +715,10 @@ function createBrowserSession ({
   leaseHoldMs = 0,
   leaseGapMs = LEASE_GAP_MS,
   leaseMediaMaxMs = LEASE_MEDIA_MAX_MS,
-  noClear = false
+  noClear = false,
+  upkeepDelayMs = UPKEEP_DELAY_MS,
+  upkeepFullMaxAgeMs = UPKEEP_FULL_MAX_AGE_MS,
+  fetchMedia = (...args) => globalThis.fetch(...args)
 } = {}) {
   const cfg = checkConfig({ storage, association, seederUrl, createSocket })
   const reportInternal = (err) => {
@@ -507,9 +759,33 @@ function createBrowserSession ({
   let borrows = 0
   let borrowedSince = null
   // Own identity, cached once known (the key never changes; block 0 is
-  // append-only, so only `memberCert: true` is cached).
+  // append-only, so only `memberCert: true` is cached). certDate is the
+  // verified certificate's date; null while certKnown came from a path that
+  // did not see the certificate (own-recovered), so identity() reads once.
   let ownKey = null
   let certKnown = false
+  let certDate = null
+  // The cached certificate's issuer (null for a v1 certificate): node.info
+  // checks it against the current revoked issuers on every call.
+  let certIssuer = null
+  // The stored age attestations (kv ageVerified / ageSince), re-verified
+  // from storage once per identity (kv is device-owner writable) and then
+  // cached like certDate: the age-verified date for the own key and the
+  // age-since `since` and `date`, each null when absent or not verifying.
+  // The age-since vouches only for certificates dated in [since, date] and
+  // signed by its own issuer, so its issuer is cached beside them.
+  let ageVerifiedDate = null
+  let ageSinceDate = null
+  let ageSinceUntil = null
+  let ageSinceIssuer = null
+  let ageChecked = false
+  // The revoked issuers both attestations are checked against (as member
+  // certificates and username records are), cached per stored blocklist
+  // snapshot: a snapshot a sync run adopted after the first read drops the
+  // age cache too, so a revoked issuer's attestation reads as null on the
+  // next node.info.
+  let ageSnapshotKey = null
+  let ageRevoked = new Set()
   // Identity changes (reset, setKeyPair, clearKeyPair) called and not yet
   // settled: counted synchronously on the call, before they queue, so a
   // peek.read / notices.list arriving while one waits on the chain (ownKey
@@ -538,6 +814,29 @@ function createBrowserSession ({
   let drainQueued = false
   let drainWanted = false
   let drainRetries = 0
+  // The device upkeep (header): a pass queued on the chain, one deferred by
+  // a user's once run, armed, the own length it was armed for, passes since
+  // the arming, whether a 'settled' report re-armed it already, the passes
+  // since the arming that nothing resets (the absolute bound), and the
+  // coalescing timer.
+  let upkeepQueued = false
+  let upkeepWanted = false
+  let upkeepArmed = false
+  let upkeepLength = null
+  let upkeepPasses = 0
+  let upkeepRearmed = false
+  let upkeepTotal = 0
+  let upkeepTimer = null
+  const upkeepWriters = new Set()
+  // Bumped by every arming: a pass disarms only the arming it ran for.
+  let upkeepArming = 0
+  // Whether a full plan (withStore) ran in this session, whether the next
+  // pass must plan in full anyway (header), when the last full plan ran,
+  // and whether the next pass is only the echo of a write made here.
+  let shareChecked = false
+  let upkeepFull = false
+  let upkeepFullAt = 0
+  let upkeepQuick = false
   // The own length of the last fold the continuous run was restarted for.
   let lastFoldLength = null
   // Last own-sync verdict of a run: the own diary held what the verified
@@ -574,6 +873,8 @@ function createBrowserSession ({
   // The one notices.list in flight (its own slot, same rules as `peeking`;
   // its promise joins `unwinding` too).
   let noticing = null
+  // The one page.feed in flight (same rules as `peeking`).
+  let pageFeeding = null
   // The own context of the last v2 notices read (member-ops
   // ownNoticeContext), reused while the own diary's length is unchanged.
   let noticeCtxCache = null
@@ -600,6 +901,16 @@ function createBrowserSession ({
     ownKey: cachedOwnKey,
     log: (text) => warning(safe(text)),
     limits: syncOptions.peek
+  })
+
+  // page.feed (docs/rpc.md 5.86): its own short-lived link, like the peeker.
+  const pageFeeder = createPageFeeder({
+    storage,
+    association: cfg.association,
+    seederUrl: cfg.seederUrl,
+    createSocket,
+    log: (text) => warning(safe(text)),
+    limits: syncOptions.pageFeed
   })
 
   // The proof signer of the notices link: synchronous, with the in-memory
@@ -634,6 +945,67 @@ function createBrowserSession ({
     limits: syncOptions.notices
   })
 
+  const dmEngine = createDmEngine({
+    storage,
+    association: cfg.association,
+    seederUrl: cfg.seederUrl,
+    createSocket,
+    log: (text) => warning(safe(text)),
+    emit: (event, data) => send(event, data),
+    fetch: fetchMedia,
+    limits: syncOptions.dm
+  })
+  // The seen-sync engine (docs/rpc.md 5.95, 5.96). Remote group marks go
+  // through the group.seen path on the cores a run lends.
+  const seenSync = createSeenSync({
+    storage,
+    association: cfg.association,
+    log: (text) => warning(safe(text)),
+    currentOwn: () => (keyPair === null ? null : b4a.toString(keyPair.publicKey, 'hex')),
+    applyGroups: groupApplier({ storage, withCores: (fn) => withCores(fn) })
+  })
+  // 'seen.changed' at most once per SEEN_CHANGED_MS: a burst of marks (a
+  // scroll through a group) asks the app for one sync, not one per mark.
+  let seenChangedAt = 0
+  let seenChangedTimer = null
+  function seenChanged () {
+    if (closed || seenChangedTimer !== null) return
+    const wait = seenChangedAt + SEEN_CHANGED_MS - Date.now()
+    if (wait <= 0) {
+      seenChangedAt = Date.now()
+      send('seen.changed', {})
+      return
+    }
+    seenChangedTimer = setTimeout(() => {
+      seenChangedTimer = null
+      if (closed) return
+      seenChangedAt = Date.now()
+      send('seen.changed', {})
+    }, wait)
+  }
+
+  let dmLastPull = 0
+  let dmRecheck = false
+  let dmRecheckTries = 0
+  const DM_RECHECK_TRIES = 3
+
+  // The sync loop's direct message tick: while a continuous run lives and
+  // the identity is unlocked with a published dm-key, a pull every
+  // DM_PULL_EVERY_MS and a wallet check (the engine limits top-ups to one
+  // per 10 minutes). Off the chain: it opens no storage core. Never throws.
+  async function dmTick () {
+    try {
+      if (closed || keyPair === null || ownKey === null || !dmEngine.unlocked()) return
+      if ((await store.readDmKey(storage)) === null) return
+      const own = ownKey
+      if (Date.now() - dmLastPull >= DM_PULL_EVERY_MS && !dmEngine.pulling) {
+        dmLastPull = Date.now()
+        await dmEngine.pull(own).catch(noop)
+      }
+      if (keyPair !== null) await dmEngine.topUp(keyPair)
+    } catch {}
+  }
+
   // ---- sync runs ----
 
   // internal: a gate or push run of the session itself (its line names it;
@@ -657,6 +1029,7 @@ function createBrowserSession ({
       clear () { publish(null) }
     }
     run = r
+    if (!once && !internal) r.dmTimer = setInterval(() => { dmTick() }, DM_TICK_MS)
     send('sync.started', { runId, once }, epoch)
     if (label !== null) send('sync.event', { runId, line: line(label) }, epoch)
     const event = (text) => send('sync.event', { runId, line: line(text) }, epoch)
@@ -675,6 +1048,7 @@ function createBrowserSession ({
           timeoutMs: once ? timeoutMs : undefined,
           peeker: diaryPeeker,
           reader,
+          followPage: syncOptions.followPage !== undefined ? syncOptions.followPage : followMovedPage,
           log: (text) => {
             const [clean, redacted] = redactLogLine(text)
             if (redacted) reportInternal(new Error(String(text)))
@@ -692,11 +1066,52 @@ function createBrowserSession ({
                 if (!r.ownSynced) {
                   r.ownSynced = true
                   try { onOwnSynced(r) } catch {}
+                  if (!once && !internal) {
+                    dmTick()
+                    if (dmRecheck) {
+                      dmRecheck = false
+                      dmRefresh({ recheck: true }).catch(noop)
+                    }
+                  }
                   if (!once && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
                 }
+                if (!once && !internal && Number.isSafeInteger(ev.length)) {
+                  // Kept while locked too: the link reports each length once,
+                  // so the unlock arms from it (setKeyPair).
+                  r.ownLength = ev.length
+                  if (ev.length !== upkeepLength) {
+                    // The echo of a write made here may take the precheck,
+                    // unless another trigger already queued a pass.
+                    const pending = upkeepTimer !== null || upkeepQueued
+                    armUpkeep(ev.length)
+                    if (!pending && localLength !== null && ev.length === localLength) upkeepQuick = true
+                  }
+                }
+                return
+              case 'group-skipped':
+                // The legacy sweep at sync start (protocol v1 cores purged).
+                if (ev.reason === 'legacy') warning('aviso: grupo ' + key8(ev.key) + ' ignorado (legacy)', epoch)
                 return
               case 'groups-changed':
                 if (typeof ev.group === 'string' && HEX64.test(ev.group)) send('groups.changed', { group: ev.group }, epoch)
+                // What a skipped root waited for may have arrived. A group
+                // change can create share work the precheck cannot see, so
+                // even the next echo of a local write plans in full.
+                if (!once && !internal) upkeepFull = true
+                if (!once && !internal && upkeepRoom()) scheduleUpkeep()
+                return
+              case 'group-writer':
+                // A writer stored after the pass that planned on the own
+                // length its join made (or another diary's entitled
+                // writer): a fresh arming, once per writer key.
+                if (!once && !internal && keyPair !== null && groupPrf !== null && typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer) && upkeepWriters.size < MAX_UPKEEP_WRITERS) {
+                  upkeepWriters.add(ev.writer)
+                  armUpkeep(upkeepLength)
+                } else if (typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer)) {
+                  // Not armed for (a once or internal run, the key cap,
+                  // locked): a later echo still plans the shares in full.
+                  upkeepFull = true
+                }
                 return
               case 'group-synced':
                 if (!Number.isSafeInteger(ev.length) || ev.length < 0) return
@@ -729,6 +1144,16 @@ function createBrowserSession ({
               case 'settled':
                 // The run's readiness report (header, "The lease").
                 if (r.leased) noteSettled(r, ev)
+                // A run whose goals are met holds the roots a pass waited
+                // for: one more arming, once per run and per arming.
+                if (!once && !internal && ev.settled === true && !r.upkeepSettled) {
+                  r.upkeepSettled = true
+                  if (upkeepArmed && upkeepPasses >= MAX_UPKEEP_PASSES && !upkeepRearmed) {
+                    upkeepRearmed = true
+                    upkeepPasses = 0
+                    scheduleUpkeep()
+                  }
+                }
                 return
               case 'own-behind':
                 synced = false
@@ -764,9 +1189,11 @@ function createBrowserSession ({
         error = err
       }
       if (run === r) run = null
+      if (r.dmTimer) clearInterval(r.dmTimer)
       clearLease(r)
       // A drain deferred by this user's once run is due now.
       if (once && !internal && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
+      if (once && !internal && upkeepWanted) scheduleUpkeep()
       if (error !== null) {
         if (!internal) syncIntent = null
         if (r.leased) leaseSettledSince = leaseMediaSince = null
@@ -948,13 +1375,31 @@ function createBrowserSession ({
       return withStore(fn)
     }
     try {
-      return await fn({ ...ctx(), cores: { diary: api.diary, replica: api.replica } })
+      return await fn({ ...ctx(), cores: { diary: api.diary, replica: api.replica, group: api.group } })
     } catch (err) {
       if (!member.isNeedsExclusive(err)) throw err
     } finally {
       api.release()
     }
     return withStore(fn)
+  }
+
+  // Whether the stored replica of `key` is forked, on the run's core when
+  // c lends it (a read just served there), else on the storage's. A
+  // borrowed read never opens it: the run may have stopped lending a core
+  // it has not closed yet, and a second instance would corrupt it, so that
+  // read reruns on the exclusive path.
+  async function replicaForked (c, key) {
+    const lent = c.cores ? c.cores.replica(key) : null
+    if (lent !== null) return lent.fork !== 0
+    if (!(await store.replicaExists(c.storage, key))) return false
+    if (c.cores) throw member.needsExclusive()
+    const core = await store.openReplica(c.storage, key)
+    try {
+      return core.fork !== 0
+    } finally {
+      await core.close()
+    }
   }
 
   // ---- the write gate and the push ----
@@ -1170,15 +1615,20 @@ function createBrowserSession ({
   // The peek holds the lease (borrow) from its wait to its answer, so the
   // hold cannot end the run under it.
   function diaryPeek (params) {
-    if (closed) return Promise.reject(rpcError('LOCKED', CLOSED_MESSAGE))
-    if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) return Promise.reject(rpcError('USAGE', DIARY_PEEK_BUSY))
-    return borrow(() => diaryPeekWith(params))
+    return diaryPeekWithin(params, peekTimeoutMs)
   }
 
-  async function diaryPeekWith ({ author, seqs, profileSeq, usernameSeq }) {
+  // diary.peek under its own deadline (page.read's probe).
+  function diaryPeekWithin (params, timeoutMs) {
+    if (closed) return Promise.reject(rpcError('LOCKED', CLOSED_MESSAGE))
+    if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) return Promise.reject(rpcError('USAGE', DIARY_PEEK_BUSY))
+    return borrow(() => diaryPeekWith(params, timeoutMs))
+  }
+
+  async function diaryPeekWith ({ author, seqs, profileSeq, usernameSeq }, timeoutMs) {
     diaryPeeksInFlight++
     try {
-      const deadline = Date.now() + peekTimeoutMs
+      const deadline = Date.now() + timeoutMs
       const key = author.toLowerCase()
       let dropped = null
       // Two attempts: a run that stops under the first (preempted by a
@@ -1225,10 +1675,17 @@ function createBrowserSession ({
   // ---- identity ----
 
   async function identity () {
-    if (ownKey !== null && certKnown) return { publicKey: ownKey, memberCert: true }
-    const r = await withStore((c) => member.identityState(c))
+    if (ownKey !== null && certKnown && certDate !== null) return { publicKey: ownKey, memberCert: true, memberCertDate: certDate, memberCertIssuer: certIssuer }
+    // Only the date is missing (own-recovered saw no certificate): a read on
+    // the live run's cores, so node.info never stops a sync for it.
+    const read = ownKey !== null && certKnown ? withCores : withStore
+    const r = await read((c) => member.identityState(c))
     if (r.publicKey !== null) ownKey = r.publicKey
-    if (r.memberCert) certKnown = true
+    if (r.memberCert) {
+      certKnown = true
+      certDate = r.memberCertDate
+      certIssuer = r.memberCertIssuer
+    }
     return r
   }
 
@@ -1267,6 +1724,60 @@ function createBrowserSession ({
       noticing = null
     }
     return p().finally(() => { identityPending-- })
+  }
+
+  // -> { ageVerifiedDate, ageSince, ageSinceUntil } for the own key `own`
+  // (null: no identity, nothing cached). Kv reads only: never opens a store,
+  // so it never preempts a sync. An object that does not verify reads as null.
+  async function ageState (own) {
+    if (own === null) return { ageVerifiedDate: null, ageSince: null, ageSinceUntil: null }
+    const revokedIssuers = await ageRevokedIssuers()
+    if (!ageChecked) {
+      const verified = await store.readAgeVerified(storage)
+      const since = await store.readAgeSince(storage)
+      ageVerifiedDate = verified !== null && verifyAgeVerified(verified, own, cfg.association, { revokedIssuers }).ok ? verified.date : null
+      const sinceOk = since !== null && verifyAgeSince(since, cfg.association, { revokedIssuers }).ok
+      ageSinceDate = sinceOk ? since.since : null
+      ageSinceUntil = sinceOk ? since.date : null
+      ageSinceIssuer = sinceOk ? since.issuer.toLowerCase() : null
+      ageChecked = true
+    }
+    // An issuer vouches only for its own certificates: the age-since counts
+    // for the cached block-0 v2 certificate of the same issuer, never for one
+    // of another issuer or a v1 certificate (certIssuer null).
+    const bound = ageSinceIssuer !== null && certKnown && typeof certIssuer === 'string' && certIssuer.toLowerCase() === ageSinceIssuer
+    return { ageVerifiedDate, ageSince: bound ? ageSinceDate : null, ageSinceUntil: bound ? ageSinceUntil : null }
+  }
+
+  // -> the stored snapshot's revoked issuers (empty when none verifies). The
+  // cache key is the snapshot's identity (moderator, moderatorDate, seq and
+  // signature: every adopted snapshot differs in one of them), so a large
+  // snapshot is neither serialized nor verified on every read; a change
+  // re-verifies the attestations on the next read.
+  async function ageRevokedIssuers () {
+    const data = await store.readBlocklist(storage)
+    const sn = data === null ? null : data.snapshot
+    const key = sn === null ? '' : [sn.moderator, sn.moderatorDate, sn.seq, sn.signature].map(String).join('|')
+    if (key !== ageSnapshotKey) {
+      ageRevoked = (await member.moderation(storage, cfg.association)).revokedIssuers
+      ageSnapshotKey = key
+      ageChecked = false
+    }
+    return ageRevoked
+  }
+
+  // The own key of a seen request (push.sign's lookup), unlocked and matching.
+  async function seenOwn () {
+    let own
+    if (ownKey !== null) own = ownKey
+    else if (diaryInfo !== null) own = diaryInfo.publicKey
+    else {
+      own = await requireOwnKey()
+      restartWhenIdle(1)
+    }
+    if (keyPair === null) throw new UsageError(store.LOCKED)
+    if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+    return own
   }
 
   async function requireOwnKey () {
@@ -1329,34 +1840,67 @@ function createBrowserSession ({
   const GROUP_ROOTS = (params) => [params.group]
   const GROUP_CHANGED = async (c, result, params) => [result.group || params.group]
 
+  // A community write that changes who belongs or acts in C: C and every
+  // local group whose header names C re-read (rpc.md section 6). It may
+  // also append to the device's writers in those groups (a group-leave, or
+  // key blocks of a rotation in a private group), so the gate waits for
+  // them and their new lengths are pushed. Read under withStore: the group
+  // roots are never opened beside a run's instance.
+  const COMMUNITY_WIDE = {
+    roots: async (params) => [params.community, ...await withStore((c) => member.communityGroups(c, { community: params.community }))],
+    changed: async (c, result, params) => [params.community, ...await member.communityGroups(c, { community: params.community })]
+  }
+
+  // The community a group's held root header names, or null. Read under
+  // withStore: the core is never opened beside a run's instance.
+  function communityOfGroup (group) {
+    return withStore((c) => member.groupCommunityOf(c, group))
+  }
+
+  // Moderation a community admin or creator may write through its
+  // community writer (CW): the gate waits for that CW too, and its new
+  // length is pushed.
+  const GROUP_AND_COMMUNITY = {
+    roots: async (params) => {
+      const community = await communityOfGroup(params.group)
+      return community === null ? [params.group] : [params.group, community]
+    }
+  }
+
+  // Inside withStore, after a group write: the own cores of `roots` are due
+  // a push at their new lengths. A join can create a writer after the
+  // previous run took its snapshot; the next run opens every own writer
+  // from the updated kv list.
+  async function noteWrittenRoots (roots) {
+    for (const group of new Set(roots.filter((k) => typeof k === 'string'))) {
+      for (const key of await ownGroupKeys(group)) {
+        if (await refusedWriter(key)) continue
+        const core = await store.openGroupCoreReadOnly(storage, key)
+        if (core === null) continue
+        try {
+          groupUnpushed.set(key, core.length)
+          groupLengths.set(key, core.length)
+        } finally { await core.close() }
+      }
+    }
+  }
+
   function groupWrite (operation, { roots = GROUP_ROOTS, changed = GROUP_CHANGED } = {}) {
     return serial(async (params, epoch, generation) => {
       checkGroupOperation(epoch, generation)
       await requireUnlocked()
       groupWriting = true
       try {
+        const rootKeys = await roots(params)
         const keys = []
-        for (const root of roots(params)) keys.push(...await ownGroupKeys(root))
+        for (const root of rootKeys) keys.push(...await ownGroupKeys(root))
         checkGroupOperation(epoch, generation)
         await ensureCaughtUp(epoch, [...new Set(keys)], generation)
         const result = await withStore(async (c) => {
           checkGroupOperation(epoch, generation)
           const result = await operation(c, params)
           const groups = [...new Set(await changed(c, result, params))]
-          // A join can create a writer after the previous run took its snapshot.
-          // The next run opens every own writer from the updated kv list.
-          const written = new Set([...roots(params), result.group, result.community].filter((k) => typeof k === 'string'))
-          for (const group of written) {
-            for (const key of await ownGroupKeys(group)) {
-              if (await refusedWriter(key)) continue
-              const core = await store.openGroupCoreReadOnly(storage, key)
-              if (core === null) continue
-              try {
-                groupUnpushed.set(key, core.length)
-                groupLengths.set(key, core.length)
-              } finally { await core.close() }
-            }
-          }
+          await noteWrittenRoots([...rootKeys, result.group, result.community])
           await member.withIdentity(c, async ({ diary }) => { wrote(diary.length - 1) })
           for (const group of groups) send('groups.changed', { group }, epoch)
           return result
@@ -1373,6 +1917,206 @@ function createBrowserSession ({
     })
   }
 
+  // ---- the device upkeep (see the header) ----
+
+  // A new own length on a user's continuous run: fresh passes. While locked
+  // nothing is armed; the unlock arms from the live run's last length
+  // (setKeyPair), as does the next own-synced after a reload.
+  function armUpkeep (length) {
+    if (closed || keyPair === null || groupPrf === null) return
+    upkeepArmed = true
+    upkeepArming++
+    upkeepLength = length
+    upkeepPasses = 0
+    upkeepTotal = 0
+    upkeepRearmed = false
+    scheduleUpkeep()
+  }
+
+  // Whether this arming may still run a pass.
+  function upkeepRoom () {
+    return upkeepArmed && upkeepPasses < MAX_UPKEEP_PASSES && upkeepTotal < MAX_UPKEEP_TOTAL
+  }
+
+  // Inside withStore: the length of each own core of `roots`.
+  async function ownCoreLengths (roots) {
+    const out = new Map()
+    for (const group of new Set(roots)) {
+      for (const key of await ownGroupKeys(group)) {
+        const core = await store.openGroupCoreReadOnly(storage, key)
+        if (core === null) continue
+        try { out.set(key, core.length) } finally { await core.close() }
+      }
+    }
+    return out
+  }
+
+  // One pass per timer: the delay turns a burst of triggers into one stop of
+  // the continuous run.
+  function scheduleUpkeep () {
+    // Every trigger but an own write's echo (which sets it after) plans in full.
+    upkeepQuick = false
+    if (upkeepQueued || upkeepTimer !== null || closed || keyPair === null || groupPrf === null) return
+    upkeepTimer = setTimeout(() => {
+      upkeepTimer = null
+      if (closed || upkeepQueued) return
+      upkeepQueued = true
+      upkeep({}).catch(noop)
+    }, upkeepDelayMs)
+  }
+
+  function resetUpkeep () {
+    if (upkeepTimer !== null) clearTimeout(upkeepTimer)
+    upkeepTimer = null
+    upkeepArmed = false
+    upkeepLength = null
+    upkeepPasses = 0
+    upkeepTotal = 0
+    upkeepRearmed = false
+    upkeepWanted = false
+    upkeepWriters.clear()
+    shareChecked = false
+    upkeepFull = false
+    upkeepFullAt = 0
+    upkeepQuick = false
+  }
+
+  // The pass never calls another serial handler and never runs inside
+  // onEvent: it stops a run only through withStore / ensureCaughtUp, like
+  // every write, and the chain's restartWhenIdle restarts it. It never
+  // throws to anyone: a failure is a warning, and nothing is retried here
+  // (a later pass of the same bounded arming plans again from storage, so
+  // nothing is resent).
+  const upkeep = serial(async (_, epoch, generation) => {
+    upkeepQueued = false
+    if (!upkeepRoom()) return
+    try { checkGroupOperation(epoch, generation) } catch { return }
+    if (!(await store.diaryExists(storage))) return
+    // The app's recovery run must not be preempted; its end queues the pass.
+    if (run !== null && run.once) {
+      upkeepWanted = true
+      return
+    }
+    upkeepWanted = false
+    const arming = upkeepArming
+    // The echo of a write made here, with every bound root served by a
+    // writer of this device, has nothing a full plan would find: the run is
+    // not stopped for it. A precheck that throws plans in full, which
+    // reports the failure.
+    const quick = upkeepQuick && shareChecked && !upkeepFull && Date.now() - upkeepFullAt < upkeepFullMaxAgeMs
+    upkeepQuick = false
+    if (!quick) {
+      upkeepFull = false
+    } else {
+      let needed = true
+      try { needed = await withCores((c) => member.deviceUpkeepNeeded(c)) } catch {}
+      if (!needed) {
+        // A full-plan trigger that arrived during the await keeps the arming
+        // so its scheduled pass still runs.
+        if (arming === upkeepArming && !upkeepFull) upkeepArmed = false
+        return
+      }
+      try { checkGroupOperation(epoch, generation) } catch { return }
+    }
+    upkeepPasses++
+    upkeepTotal++
+    groupWriting = true
+    const ownLength = (c) => member.withIdentity(c, async ({ diary }) => diary.length)
+    const stale = () => closed || epoch !== connection || generation !== groupEpoch || keyPair === null
+    try {
+      const { plan, planLength } = await withCores(async (c) => ({ plan: await member.deviceUpkeepPlan(c), planLength: await ownLength(c) }))
+      shareChecked = true
+      upkeepFullAt = Date.now()
+      // Only what a later sync can bring keeps the arming: a root skipped
+      // for good (reserve, full, orphan, status) does not.
+      let waiting = plan.skipped.filter((x) => x.transient === true).map((x) => x.root)
+      // A transient skip may be a share (its root lists here, so the
+      // precheck passes it): even an echo plans in full until it resolves.
+      if (waiting.length > 0) upkeepFull = true
+      let arrived = false
+      let failed = 0
+      if (plan.enrol.length > 0 || plan.share.length > 0) {
+        const keys = [...new Set(plan.share.map((s) => s.writer))]
+        const planned = [...plan.enrol.map((x) => x.root), ...plan.share.map((x) => x.group)]
+        checkGroupOperation(epoch, generation)
+        await ensureCaughtUp(epoch, keys, generation)
+        let before = null
+        let after = null
+        let grew = false
+        let failure = null
+        let result = null
+        try {
+          result = await withStore(async (c) => {
+            checkGroupOperation(epoch, generation)
+            before = await ownLength(c)
+            const lengths = await ownCoreLengths(planned)
+            let r = null
+            try {
+              r = await member.deviceUpkeep(c, { enrol: plan.enrol, share: plan.share })
+            } finally {
+              // A step that threw may have written first: its roots are
+              // pushed too, from the plan when the result is lost.
+              after = await ownLength(c)
+              if (after > before) wrote(after - 1)
+              const now = await ownCoreLengths(planned)
+              grew = after > before || [...now].some(([key, length]) => lengths.get(key) !== length)
+              await noteWrittenRoots(r === null ? planned : [...r.changed, ...r.failed.map((f) => f.root)])
+            }
+            return r
+          })
+        } catch (err) {
+          failure = err
+        }
+        const sent = result === null ? (grew ? planned : []) : result.changed
+        for (const group of new Set(sent)) send('groups.changed', { group }, epoch)
+        // The gate brought blocks of another device: roots this pass did
+        // not plan may be bound now, so that length is no echo and the
+        // arming stays.
+        arrived = before !== null && before > planLength
+        // The own-synced that echoes this write is no new length.
+        if (!arrived && after !== null && after > before) upkeepLength = after
+        if (failure !== null) {
+          // What the step wrote before it threw is pushed all the same.
+          if (grew && !stale()) {
+            try { await pushAfterWrite() } catch {}
+          }
+          throw failure
+        }
+        // Each progress is a write, so fresh passes cannot loop: they serve
+        // what it unblocked (a group after its community's writer), and
+        // upkeepTotal bounds them.
+        if (result.enrolled.length > 0 || result.shared.length > 0) upkeepPasses = 0
+        const changed = new Set(result.changed)
+        failed = result.failed.length
+        waiting = waiting.filter((root) => !changed.has(root)).concat(result.failed.map((f) => f.root))
+        if (failed > 0) {
+          // A failed share is invisible to the precheck: even an echo
+          // plans in full until a pass succeeds.
+          upkeepFull = true
+          warning(UPKEEP_WARNING, epoch)
+        }
+        checkGroupOperation(epoch, generation)
+        await pushAfterWrite()
+      }
+      if (arrived) scheduleUpkeep()
+      else if (failed > 0) {
+        // A root that failed is tried again within the bound.
+        if (upkeepRoom()) scheduleUpkeep()
+      } else if (waiting.length === 0 && arming === upkeepArming) upkeepArmed = false
+    } catch (err) {
+      upkeepFull = true
+      if (!stale()) {
+        warning(UPKEEP_WARNING, epoch)
+        // Still armed: another pass of this bounded arming tries again.
+        if (upkeepRoom()) scheduleUpkeep()
+      }
+    } finally {
+      groupWriting = false
+      for (const pair of groupPairs) zeroPair(pair)
+      groupPairs.clear()
+    }
+  })
+
   // post.delete / profile.delete: the post.reply path around member-ops'
   // tombstone writer (a target already deleted writes nothing).
   async function recordDelete (remove, { to }, epoch) {
@@ -1386,15 +2130,105 @@ function createBrowserSession ({
     return { seq: r.seq, ref: r.ref, changed: r.changed, deleted: r.deleted }
   }
 
+  // ---- direct messages (docs/rpc.md 5.73 to 5.81) ----
+
+  // The identity unlocked AND the dm keys derived (setKeyPair with a prf).
+  async function requireDm () {
+    const own = await requireUnlocked()
+    if (!dmEngine.unlocked()) throw new UsageError(store.LOCKED)
+    return own
+  }
+
+  // The newest dm-key of `member` -> { box, gen } (both null when none).
+  // Local data on the chain; else a bounded newest-first scan through the
+  // diary.peek path OFF the chain (a peek waits for the run, which the chain
+  // would hold back). Never logs the key.
+  async function dmLookupOf (memberKey) {
+    const key = memberKey.toLowerCase()
+    const localHit = await serial(() => withCores((c) => member.dmLookup(c, key)))({})
+    if (localHit !== null) return localHit
+    const first = await diaryPeek({ author: key, seqs: [1] })
+    const found = first.entries.slice()
+    let best = member.newestDmKey(found)
+    let hi = first.length - 1
+    for (let w = 0; best === null && hi > 1 && w < DM_LOOKUP_WINDOWS; w++) {
+      const lo = Math.max(2, hi - PEEK_WINDOW + 1)
+      const seqs = []
+      for (let q = lo; q <= hi; q++) seqs.push(q)
+      const r = await diaryPeek({ author: key, seqs })
+      best = member.newestDmKey(r.entries)
+      hi = lo - 1
+    }
+    return best === null ? { box: null, gen: null } : { box: best.box, gen: best.gen }
+  }
+
+  // Read the live run's cores so a current dm-key costs no write gate or
+  // preemption. An append still goes through the gate; a check before
+  // catch-up is confirmed once the continuous run first catches up.
+  async function dmEnable (epoch) {
+    await requireDm()
+    const { box, gen } = dmEngine.boxHex()
+    const state = await withCores(async (c) => {
+      const length = await member.withIdentity(c, ({ diary }) => diary.length)
+      if (length === 0) return 'empty'
+      return await member.dmKeyStale(c, { box, gen }) ? 'stale' : 'current'
+    })
+    if (state === 'current') {
+      if (!trackingOwn()) dmRecheck = true
+      if ((await store.readDmKey(storage)) === null) await store.writeDmKey(storage, gen)
+      // Only a write made in this session can still be waiting for its push
+      // (an earlier dm.enable whose push failed); a fresh start pushes nothing.
+      if (localLength !== null) await pushAfterWrite()
+      return { box, gen, seq: null }
+    }
+    await ensureCaughtUp(epoch)
+    const r = await withStore((c) => member.dmKeyEnsure(c, { box, gen }))
+    if (r.seq !== null) wrote(r.seq)
+    await store.writeDmKey(storage, gen)
+    await pushAfterWrite()
+    return r
+  }
+
+  // Read the live run's cores after unlock, and after the next catch-up
+  // when dm.enable checked an unsynced diary, so a current key keeps the
+  // run alive. A stale key still appends through dm.enable's write gate.
+  // A failure is a warning; a failed check that came from a catch-up is armed
+  // again for the next catch-up, at most DM_RECHECK_TRIES times per identity,
+  // so a dropped link cannot leave the key outside readers' scan window.
+  const dmRefresh = serial(async (params, epoch) => {
+    const recheck = params !== null && typeof params === 'object' && params.recheck === true
+    try {
+      if (keyPair === null || !dmEngine.unlocked()) return
+      const { box, gen } = dmEngine.boxHex()
+      if (!(await withCores((c) => member.dmKeyStale(c, { box, gen })))) {
+        // Judged on a diary that may be behind: confirm after the next catch-up.
+        if (!trackingOwn()) dmRecheck = true
+        return
+      }
+      await dmEnable(epoch)
+    } catch {
+      if (recheck && dmRecheckTries < DM_RECHECK_TRIES) {
+        dmRecheckTries++
+        dmRecheck = true
+      }
+      warning('aviso: chave de mensagens não renovada')
+    }
+  })
+
   // ---- handlers (docs/rpc.md section 5; params arrive validated) ----
 
   const handlers = {
     'node.info': serial(async () => {
-      const { publicKey, memberCert } = await identity()
+      const { publicKey, memberCert, memberCertDate, memberCertIssuer } = await identity()
       restartWhenIdle(1)
+      // The date vouches for the age policy, so a certificate whose issuer
+      // was revoked after it was cached answers null (memberCert unchanged).
+      const revoked = memberCertDate !== null && memberCertIssuer !== null && (await ageRevokedIssuers()).has(memberCertIssuer.toLowerCase())
       return {
         publicKey,
         memberCert,
+        memberCertDate: revoked ? null : memberCertDate,
+        ...(await ageState(publicKey)),
         followCount: (await store.readFollows(storage)).length,
         sync: syncState(),
         publicDht: false,
@@ -1425,6 +2259,9 @@ function createBrowserSession ({
       await ensureCaughtUp(epoch)
       const r = await withStore((c) => member.certAdd(c, cert))
       certKnown = true
+      // certAdd verified this certificate and block 0 now equals it.
+      certDate = cert.date
+      certIssuer = typeof cert.issuer === 'string' ? cert.issuer : null
       if (r.appended) wrote(r.seq)
       await pushAfterWrite()
       // Block 0 exists now: follows queued before it can reach the diary.
@@ -1461,7 +2298,9 @@ function createBrowserSession ({
     // exactly like account.sign: not a diary write, no append, no network,
     // and the result never carries the payload or a key. The session fills
     // in member and association; text and quote enter the payload hashed.
-    'report.sign': serial(async ({ nonce, target, seq, reason, text, quote, writer, group }) => {
+    // An `anexo` (a group message only) is the attachment's hex SHA-256: it
+    // switches the statement to report v3, and the bytes never reach here.
+    'report.sign': serial(async ({ nonce, target, seq, reason, text, quote, writer, group, anexo }) => {
       let own
       if (ownKey !== null) own = ownKey
       else if (diaryInfo !== null) own = diaryInfo.publicKey
@@ -1475,6 +2314,7 @@ function createBrowserSession ({
       const fields = { nonce, member: own, association: cfg.association, target, seq: seq === undefined ? null : seq, reason, text, quote }
       if (writer !== undefined) fields.writer = writer
       if (group !== undefined) fields.group = group
+      if (anexo !== undefined) fields.anexo = anexo
       let signature
       try {
         signature = signReport(fields, keyPair)
@@ -1487,7 +2327,7 @@ function createBrowserSession ({
       return { signature }
     }),
 
-    // Signs the appeal statement with the in-memory key (docs/rpc.md 5.63),
+    // Signs the appeal statement with the in-memory key (docs/rpc.md 5.98),
     // exactly like terms.sign: not a diary write, no append, no network. The
     // session fills in member and association; the text enters the payload
     // hashed.
@@ -1531,6 +2371,38 @@ function createBrowserSession ({
       return { signature }
     }),
 
+    // Signs a recovery-entry request with the in-memory key (docs/rpc.md
+    // 5.90), exactly like terms.sign: not a diary write, no append, no
+    // network, and the result never carries the payload, the blob or a key.
+    // The session fills in member and association and hashes the blob
+    // itself, so the caller can never sign a hash of something else. It uses
+    // only the diary key pair, never the group PRF, which native installs do
+    // not hold.
+    'recovery.sign': serial(async ({ action, nonce, kind, lookupId, blob }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      const put = action === 'put'
+      const list = action === 'list'
+      const fields = {
+        action,
+        nonce,
+        member: own,
+        association: cfg.association,
+        kind: list ? '' : kind,
+        lookupId: list ? '' : lookupId,
+        blobHash: put ? blobHashOf({ kind, lookupId, blob }) : ''
+      }
+      const signature = signRecovery(fields, keyPair)
+      return { signature }
+    }),
+
     // Signs the signup-invite request with the in-memory key (docs/rpc.md
     // 5.30), exactly like terms.sign. The session fills in member and
     // association.
@@ -1565,11 +2437,44 @@ function createBrowserSession ({
       return { signature }
     }),
 
-    // Signs the wallet statement with the in-memory key (docs/rpc.md 5.35),
-    // exactly like age.sign. The session fills in member, association and
-    // the operation hash, so the caller never hands in bytes to sign, and
-    // the operation itself never leaves this call.
-    'wallet.sign': serial(async ({ action, nonce, op }) => {
+    // Stores the account service's signed age attestations (docs/rpc.md
+    // 5.83) after verifying them against the own key and the association.
+    // Nothing is signed, so no unlock and no certificate (the age step runs
+    // before the link). Both objects are verified before anything is
+    // written, so a bad pair stores nothing.
+    'age.proof': serial(async ({ verified, since }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      const revokedIssuers = await ageRevokedIssuers()
+      if (verified !== undefined && !verifyAgeVerified(verified, own, cfg.association, { revokedIssuers }).ok) throw new UsageError(BAD_AGE_PROOF)
+      if (since !== undefined && since !== null) {
+        if (!verifyAgeSince(since, cfg.association, { revokedIssuers }).ok) throw new UsageError(BAD_AGE_PROOF)
+        // Monotonic: a replayed older age-since never replaces a newer one
+        // that still verifies, or certificates issued while the check was
+        // off would vouch again.
+        const stored = await store.readAgeSince(storage)
+        if (stored !== null && verifyAgeSince(stored, cfg.association, { revokedIssuers }).ok && Date.parse(since.date) < Date.parse(stored.date)) throw new UsageError(BAD_AGE_PROOF)
+      }
+      // Dropped first (a failed write leaves no stale cache), then re-read
+      // and re-verified against the snapshot stored now, which a sync may
+      // have replaced since the check above.
+      ageChecked = false
+      if (verified !== undefined) await store.writeAgeVerified(storage, verified)
+      if (since !== undefined) await store.writeAgeSince(storage, since)
+      return await ageState(own)
+    }),
+
+    // Signs a page statement or a page record (docs/rpc.md 5.84) with the
+    // in-memory key, exactly like age.sign: no append, no network, no
+    // core opened while the key is known. The session fills in member,
+    // actor (or owner) and association; the result never carries a key,
+    // the payload or the operation hash.
+    'page.sign': serial(async ({ action, nonce, page, op }) => {
       let own
       if (ownKey !== null) own = ownKey
       else if (diaryInfo !== null) own = diaryInfo.publicKey
@@ -1579,16 +2484,135 @@ function createBrowserSession ({
       }
       if (keyPair === null) throw new UsageError(store.LOCKED)
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
-      let signature
       try {
-        signature = signWallet({ action, nonce, member: own, association: cfg.association, opHash: opHash(op) }, keyPair)
+        return pageSignResult({ action, nonce, page, op }, own, keyPair, cfg.association)
       } catch (err) {
-        // The RPC layer checks the same operation rules, but the session
-        // also runs behind callers that skip it.
-        if (err instanceof TypeError) throw new UsageError(BAD_WALLET)
+        if (err instanceof TypeError || err instanceof SyntaxError) throw new UsageError(BAD_PAGE)
         throw err
       }
-      return { signature }
+    }),
+
+    // A page's roster and lifecycle (docs/rpc.md 5.85), works locked. NOT
+    // serial as a whole: a page diary this node holds is read on the chain
+    // (withCores, served on a live run's cores); otherwise a bounded
+    // newest-first diary.peek scan runs off it, as dm.lookup's does (a peek
+    // waits for the run, which the chain would hold back).
+    'page.read': async ({ key, full }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const pageHex = key.toLowerCase()
+      const local = await serial(async () => {
+        const own = await requireOwnKey()
+        const mod = await member.moderation(storage, cfg.association)
+        let held = null
+        try {
+          held = await withCores(async (c) => {
+            const read = await member.logReadRaw(c, { author: pageHex })
+            return { ...read, forked: pageHex !== own && await replicaForked(c, pageHex) }
+          })
+        } catch (err) {
+          if (messageOf(err) !== NO_LOCAL_DATA) throw err
+        }
+        return { own, revokedIssuers: mod.revokedIssuers, held }
+      })({})
+      const base = { pageHex, own: local.own, association: cfg.association, revokedIssuers: local.revokedIssuers }
+      // The bounded rule: the service refreshes the roster every
+      // PAGE_ROSTER_REFRESH_BLOCKS blocks, so a verifying roster that new is
+      // the current one; an older one may have been superseded unseen.
+      const fresh = (length) => (state) => state.page && state.seq >= length - PAGE_ROSTER_REFRESH_BLOCKS
+      // A held diary is read RAW: a tombstone a leaked page key appends
+      // cannot reopen a close nor undo a move or a roster. Every stored block
+      // counts (a followed diary downloads newest-first, its tail past a
+      // gap); only a diary held whole is walked as a chain.
+      if (local.held !== null) {
+        // A forked replica answers as the core node's pageRead: no page.
+        if (local.held.forked) throw rpcError('NOT_FOUND', NO_LOCAL_DATA)
+        const { entries, length } = local.held
+        if (entries.length === length) return pageReadResult({ ...base, entries, full: true, complete: () => true })
+        return pageReadResult({ ...base, entries, full: false, complete: fresh(length) })
+      }
+      try {
+        const first = await diaryPeek({ author: pageHex, seqs: [1, 2, 3] })
+        const length = first.length
+        const entries = first.entries.slice()
+        const missing = first.missing.filter((s) => s < length)
+        let skipped = false
+        let hi = length - 1
+        // The seqs of [lo, hi] no tombstone read so far deletes.
+        const notGone = (lo, hi) => {
+          const gone = deletedSeqs(entries.slice().sort((a, b) => a.seq - b.seq))
+          const seqs = []
+          for (let q = lo; q <= hi; q++) {
+            if (gone.has(q)) skipped = true
+            else seqs.push(q)
+          }
+          return seqs
+        }
+        for (let w = 0; hi > PAGE_READ_HEAD && w < PAGE_READ_WINDOWS; w++) {
+          const lo = Math.max(PAGE_READ_HEAD + 1, hi - PEEK_WINDOW + 1)
+          // A tombstone comes after its target, so the newer windows already
+          // read hold it: the seeder clears the target, and asking for it
+          // would only stall the window until the peek deadline.
+          const seqs = notGone(lo, hi)
+          hi = lo - 1
+          if (seqs.length === 0) continue
+          // Its tombstone may sit in this same window: the probe's answer
+          // names it, and only the blocks still missing after it are waited
+          // for. A probe that fails is the plain read.
+          let probe = null
+          try {
+            probe = await diaryPeekWithin({ author: pageHex, seqs }, Math.max(1, Math.floor(peekTimeoutMs / PAGE_READ_PROBE_SHARE)))
+          } catch {}
+          let again = seqs
+          if (probe !== null) {
+            entries.push(...probe.entries)
+            const gone = deletedSeqs(entries.slice().sort((a, b) => a.seq - b.seq))
+            again = probe.missing.filter((q) => {
+              if (!gone.has(q)) return true
+              skipped = true
+              return false
+            })
+          }
+          if (again.length === 0) continue
+          const r = await diaryPeek({ author: pageHex, seqs: again })
+          entries.push(...r.entries)
+          missing.push(...r.missing)
+        }
+        // A skipped block is not read, so the chain walk (full) is off.
+        const whole = hi <= PAGE_READ_HEAD && missing.length === 0 && !skipped
+        const bounded = fresh(length)
+        return pageReadResult({
+          ...base,
+          entries,
+          full: full === true && whole,
+          complete: (state) => whole || bounded(state)
+        })
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    },
+
+    // The newest rows of a page's follows (docs/rpc.md 5.86), works locked.
+    // Shaped like peek.read: not serial, its own slot and its own link
+    // (./page-feed.js); nothing is written anywhere.
+    'page.feed': async ({ keys, limit }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      if (pageFeeding !== null) throw rpcError('USAGE', PAGE_FEED_BUSY)
+      const p = pageFeeder.read({ keys, limit })
+      pageFeeding = p
+      unwinding.add(p)
+      p.then(() => unwinding.delete(p), () => unwinding.delete(p))
+      try {
+        return await p
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      } finally {
+        if (pageFeeding === p) pageFeeding = null
+      }
+    },
+
+    // A browser identity is an Ed25519 key already: no delegate to register.
+    'page.register': serial(async () => {
+      throw new UsageError(PAGE_REGISTER_CORE_ONLY)
     }),
 
     // Signs the push-subscription statement with the in-memory key
@@ -1615,6 +2639,21 @@ function createBrowserSession ({
         throw err
       }
       return { signature }
+    }),
+
+    // The seen statement and the seen document (docs/rpc.md 5.95, 5.96):
+    // own key as push.sign, no diary core opened; the engine fills member,
+    // association and the hashes, so the caller never hands in bytes to sign.
+    'seen.sign': serial(async ({ nonce, action }) => {
+      const own = await seenOwn()
+      return seenSync.sign({ nonce, action }, keyPair, own)
+    }),
+
+    'seen.merge': serial(async ({ blob, avisos, unchanged }) => {
+      const own = await seenOwn()
+      const r = await seenSync.merge({ blob, avisos, unchanged }, keyPair, own)
+      if (r.dmChanged || r.groupChanged) seenChanged()
+      return r
     }),
 
     'profile.set': serial(async ({ name, bio, avatar }, epoch) => {
@@ -1823,7 +2862,7 @@ function createBrowserSession ({
     // Notices (docs/rpc.md 5.28), works only unlocked (the link's proof is
     // signed by the identity key). Shaped like peek.read: not serial as a
     // whole, its own slot; only the own-key lookup (lookupOwnKey's rule)
-    // and, on a v2 read, the own-diary read run on the chain.
+    // and, on a v2 or v3 read, the own-diary read run on the chain.
     'notices.list': async (params) => {
       const epoch = connection
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
@@ -1839,7 +2878,7 @@ function createBrowserSession ({
       if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
       if (keyPair === null) throw rpcError('USAGE', store.LOCKED)
       if (noticing !== null) throw rpcError('USAGE', NOTICES_BUSY)
-      // Called by the noticer only on a v2 read: the own diary is read on
+      // Called by the noticer only on a v2 or v3 read: the own diary is read on
       // the chain (withCores alone does not exclude a write; serial does).
       const ownContext = () => serial(async () => {
         if (keyPair === null) throw new UsageError(store.LOCKED)
@@ -1859,34 +2898,148 @@ function createBrowserSession ({
       }
     },
 
-    'group.create': groupWrite(member.groupCreate),
+    'group.create': groupWrite(member.groupCreate, {
+      roots: (params) => [params.community],
+      changed: async (c, result, params) => [result.group, params.community]
+    }),
     'group.join': groupWrite(member.groupJoin),
     'group.leave': groupWrite(member.groupLeave),
     'group.post': groupWrite(member.groupPost),
-    'group.read': serial((params) => withStore((c) => member.groupRead(c, params))),
-    'group.list': serial((params) => withStore((c) => member.groupList(c, params))),
-    'group.info': serial((params) => withStore((c) => member.groupInfo(c, params))),
-    'group.members': serial((params) => withStore((c) => member.groupMembers(c, params))),
-    'group.requests': serial((params) => withStore((c) => member.groupRequests(c, params))),
-    'group.admit': groupWrite(member.groupAdmit),
-    'group.ban': groupWrite(member.groupBan),
+    'group.read': serial((params) => withCores((c) => member.groupRead(c, params))),
+    'group.seen': serial(async (params) => {
+      const before = await store.readGroupSeen(storage)
+      const r = await withCores((c) => member.groupSeen(c, params))
+      if (!sameJson(before, await store.readGroupSeen(storage))) seenChanged()
+      return r
+    }),
+    'group.list': serial((params) => withCores((c) => member.groupList(c, params))),
+    'group.info': serial((params) => withCores((c) => member.groupInfo(c, params))),
+    'group.members': serial((params) => withCores((c) => member.groupMembers(c, params))),
+    'group.requests': serial((params) => withCores((c) => member.groupRequests(c, params))),
+    'group.admit': groupWrite(member.groupAdmit, GROUP_AND_COMMUNITY),
+    'group.ban': groupWrite(member.groupBan, GROUP_AND_COMMUNITY),
     'group.admin': groupWrite(member.groupAdmin),
-    'group.hide': groupWrite(member.groupHide),
+    'group.hide': groupWrite(member.groupHide, GROUP_AND_COMMUNITY),
     'group.meta': groupWrite(member.groupMeta),
+    // Through the caller's CW when it acts for the community, as group.admit.
+    'group.invitePolicy': groupWrite(member.groupInvitePolicy, GROUP_AND_COMMUNITY),
     'group.rekey': groupWrite(member.groupRekey),
     'community.create': groupWrite(member.communityCreate, {
-      roots: () => [],
-      changed: async (c, result) => [result.community]
-    }),
-    'community.link': groupWrite(member.communityLink, {
-      roots: (params) => [params.community, params.group],
+      // A resume (kv communityCreate) appends to the roots it already made.
+      roots: async () => {
+        const plan = await store.readCommunityCreate(storage)
+        return plan === null ? [] : [plan.community, plan.group]
+      },
       changed: async (c, result) => [result.community, result.group]
     }),
-    'community.info': serial((params) => withStore((c) => member.communityInfo(c, params))),
-    'community.list': serial(() => withStore((c) => member.communityList(c))),
-    'community.admin': groupWrite(member.communityAdmin, {
+    'community.join': groupWrite(member.communityJoin, {
       roots: (params) => [params.community],
-      changed: async (c, result) => [result.community, ...await member.communityGroups(c, { community: result.community })]
+      changed: async (c, result, params) => [params.community, ...(result.group ? [result.group] : [])]
+    }),
+    'community.leave': groupWrite(member.communityLeave, COMMUNITY_WIDE),
+    'community.admit': groupWrite(member.communityAdmit, COMMUNITY_WIDE),
+    'community.ban': groupWrite(member.communityBan, COMMUNITY_WIDE),
+    'community.admin': groupWrite(member.communitySetAdmin, COMMUNITY_WIDE),
+    'community.meta': groupWrite(member.communityMeta, {
+      roots: (params) => [params.community],
+      changed: async (c, result, params) => [params.community]
+    }),
+    'community.invitePolicy': groupWrite(member.communityInvitePolicy, {
+      roots: (params) => [params.community],
+      changed: async (c, result, params) => [params.community]
+    }),
+    'community.removeGroup': groupWrite(member.communityRemoveGroup, {
+      roots: (params) => [params.community],
+      changed: async (c, result, params) => [params.community, String(params.group).toLowerCase()]
+    }),
+    'community.members': serial((params) => withCores((c) => member.communityMembers(c, params))),
+    'community.requests': serial((params) => withCores((c) => member.communityRequests(c, params))),
+    'community.info': serial((params) => withCores((c) => member.communityInfo(c, params))),
+    'community.list': serial(() => withCores((c) => member.communityList(c))),
+
+    'dm.enable': serial(async (_, epoch) => {
+      const r = await dmEnable(epoch)
+      if (keyPair !== null) dmEngine.topUp(keyPair).catch(noop)
+      return r
+    }),
+
+    // Reads public records only; works locked.
+    'dm.lookup': async ({ member: memberKey }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      try {
+        return await dmLookupOf(memberKey)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    },
+
+    // The recipient's key is looked up first (off the chain), then the send
+    // runs on the chain. A send for an identity without a published dm-key
+    // runs dm.enable first.
+    'dm.send': async ({ to, text, replyTo, media, fwd }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      // Self and a blocked peer are refused before any lookup.
+      await serial(async () => dmEngine.checkSend(await requireDm(), to))({})
+      let recipient
+      try {
+        recipient = to === ownKey ? { box: null } : await dmLookupOf(to)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        const own = await requireDm()
+        if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
+        return dmEngine.send(own, keyPair, { to, text, fwd, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media }, recipient.box)
+      })({})
+    },
+
+    // Not on the chain: it reads the pool over its own link and writes only
+    // kv and the local store (one pull at a time, in the engine).
+    'dm.pull': async () => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const own = await serial(() => requireDm())({})
+      try {
+        dmLastPull = Date.now()
+        return await dmEngine.pull(own)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    },
+
+    'dm.list': serial(async (params) => dmEngine.list(await requireDm(), params)),
+    'dm.thread': serial(async (params) => dmEngine.thread(await requireDm(), params)),
+    'dm.set': serial(async ({ peer, state }) => dmEngine.set(await requireDm(), keyPair, { peer, state })),
+    'dm.seen': serial(async ({ peer }) => {
+      const own = await requireDm()
+      const before = await store.readDmSeen(storage)
+      const r = await dmEngine.seen(own, peer)
+      if (!sameJson(before, await store.readDmSeen(storage))) seenChanged()
+      return r
+    }),
+
+    // As report.sign: no diary opened, nothing appended, no network. The
+    // `anexo` digest line (dm report v2) is added only when one was given.
+    'dm.reportSign': serial(async ({ nonce, target, reason, text, quote, anexo }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      if (target === own) throw new UsageError(SELF_REPORT)
+      const fields = { nonce, member: own, association: cfg.association, target, reason, text: text === undefined ? '' : text, quote }
+      if (anexo !== undefined) fields.anexo = anexo
+      let signature
+      try {
+        signature = signDmReport(fields, keyPair)
+      } catch (err) {
+        if (err instanceof TypeError) throw new UsageError(BAD_REPORT)
+        throw err
+      }
+      return { signature }
     }),
 
     'sync.start': serial(async ({ once, timeoutMs }, epoch) => {
@@ -1956,14 +3109,33 @@ function createBrowserSession ({
     if (groupPrf !== null) groupPrf.fill(0)
     groupPrf = null
     boxKeys.lock()
+    dmEngine.lock()
+    seenSync.forget()
+    dmRecheck = false
+    dmRecheckTries = 0
     for (const pair of groupPairs) zeroPair(pair)
     groupPairs.clear()
+    // The next own-synced after an unlock (or a reload) arms afresh.
+    resetUpkeep()
   }
 
   // A follow change happened: a drain is due, retries start afresh.
   function followChanged () {
     drainRetries = 0
     scheduleDrain()
+  }
+
+  // The running sync's follow of a moved page's new key: the signed kv
+  // queue only (a follow.add would preempt the run that waits for it), and
+  // the drain appends it after. Read at call time: a lock or another
+  // identity since the run started counts as locked.
+  async function followMovedPage (pageKey, runOwnHex) {
+    if (keyPair === null || ownKey === null || (runOwnHex !== undefined && runOwnHex !== ownKey)) {
+      throw new Error(store.LOCKED)
+    }
+    const r = await member.queueFollowChange(storage, ownKey, keyPair, pageKey, true)
+    if (r.changed) followChanged()
+    return r
   }
 
   // Unlocks the identity with the pair derived from the passkey, and this
@@ -2002,6 +3174,13 @@ function createBrowserSession ({
       synced = false
       ownKey = null
       certKnown = false
+      certDate = null
+      certIssuer = null
+      ageVerifiedDate = null
+      ageSinceDate = null
+      ageSinceUntil = null
+      ageSinceIssuer = null
+      ageChecked = false
       if (prfCopy !== null) {
         // Without the box pair private groups read as locked; the identity
         // itself is unlocked either way.
@@ -2010,8 +3189,22 @@ function createBrowserSession ({
         } catch (err) {
           if (!(err instanceof UsageError)) reportInternal(err)
         }
+        // The dm box pair and the local store key (docs/rpc.md 5.73); the
+        // wallet is checked once after an unlock that has a dm-key.
+        try {
+          await dmEngine.unlock(prfCopy)
+          if ((await store.readDmKey(storage)) !== null) {
+            dmEngine.topUp(copy).catch(noop)
+            dmRefresh({}).catch(noop)
+          }
+        } catch (err) {
+          reportInternal(err)
+        }
       }
       followChanged()
+      // A live continuous run reported its own length while locked and will
+      // not report it again.
+      if (run !== null && !run.once && !run.internal && Number.isSafeInteger(run.ownLength)) armUpkeep(run.ownLength)
     })(), { abort: true }).catch((err) => {
       zeroPair(copy)
       zeroPair(mediaCopy)
@@ -2033,10 +3226,24 @@ function createBrowserSession ({
   // stored (mediaCommit, inside withStore). onProgress (optional) hears
   // 0.25 hashed, 0.75 stored, 1 done; errors reach the caller as RPC
   // errors ({ code, message }). Nothing about the bytes is logged.
-  function mediaUpload ({ bytes, mime, width, height, onProgress } = {}) {
-    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > MAX_MEDIA_ITEM_BYTES) throw new TypeError(BAD_MEDIA_ARGS)
+  // `sealed: true` (a private group's photo, docs/rpc.md 5.56) seals the
+  // image under a fresh key (group-media sealMedia), stores only the
+  // ciphertext and returns the private item, the one place its key leaves
+  // the node.
+  // A voice note (group chats only) is { bytes, mime: 'audio/mp4', width: 0,
+  // height: 0, ms, kind: 'voice', sealed? }: its bytes must pass audioBounds
+  // (audio only, no video track) and the result is an audio descriptor, or
+  // a private item with plainMime 'audio/mp4' when sealed.
+  function mediaUpload ({ bytes, mime, width, height, ms, kind, sealed = false, onProgress } = {}) {
+    if (sealed !== true && sealed !== false) throw new TypeError(BAD_MEDIA_ARGS)
+    if (kind !== undefined || mime === AUDIO_MIME) return voiceUpload({ bytes, mime, width, height, ms, kind, sealed, onProgress })
+    const maxBytes = sealed ? MAX_SEALED_MEDIA_PLAIN_BYTES : MAX_MEDIA_ITEM_BYTES
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > maxBytes) throw new TypeError(BAD_MEDIA_ARGS)
     if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
     if (!isIntIn(width, 1, MAX_MEDIA_DIMENSION) || !isIntIn(height, 1, MAX_MEDIA_DIMENSION)) throw new TypeError(BAD_MEDIA_ARGS)
+    // Nobody but a member can look inside a sealed photo, so the node
+    // checks it is the image it claims before sealing (readers check again).
+    if (sealed && mediaBounds(bytes, mime) === null) throw new TypeError(BAD_MEDIA_ARGS)
     const copy = new Uint8Array(bytes.byteLength)
     copy.set(bytes)
     const progress = typeof onProgress === 'function' ? (fraction) => { try { onProgress(fraction) } catch {} } : noop
@@ -2046,6 +3253,7 @@ function createBrowserSession ({
       // The declaration needs block 0: checked before any byte is stored, so
       // a diary without its certificate gets no orphan media core.
       if (!(await identity()).memberCert) throw new Error(member.GENESIS_REQUIRED)
+      if (sealed) return sealedUpload(copy, { mime, width, height, epoch, progress })
       const subtle = globalThis.crypto && globalThis.crypto.subtle
       if (!subtle) throw new Error('WebCrypto indisponível')
       const sha256 = b4a.toString(new Uint8Array(await subtle.digest('SHA-256', copy)), 'hex')
@@ -2071,11 +3279,243 @@ function createBrowserSession ({
     })({})
   }
 
-  // Locks the identity: the pair is zero-filled. After close() it already is.
+  // -> the voice note's container duration in ms, or null. The caller's ms
+  // must be within AUDIO_MS_TOLERANCE of it; what gets stored is the
+  // container's, so a file never claims another length. The bytes are the
+  // sender's own recording, still with its udta and meta (stripAudioMetadata
+  // removes them next), so only here is metadata tolerated.
+  function voiceArgsMs ({ bytes, mime, width, height, ms, kind }) {
+    if (!(kind === 'voice' && mime === AUDIO_MIME && width === 0 && height === 0 && isIntIn(ms, 1, MAX_AUDIO_MS) &&
+      bytes instanceof Uint8Array && bytes.byteLength >= 1 && bytes.byteLength <= MAX_AUDIO_BYTES)) return null
+    const audio = audioBounds(bytes, { metadata: true })
+    return audio !== null && Math.abs(ms - audio.ms) <= AUDIO_MS_TOLERANCE ? audio.ms : null
+  }
+
+  // mediaUpload's voice note path, on the same chain and gate. What is
+  // hashed, sealed and stored is the stripped copy: no recording time, no
+  // device tags.
+  function voiceUpload ({ bytes, mime, width, height, ms: given, kind, sealed, onProgress }) {
+    const ms = voiceArgsMs({ bytes, mime, width, height, ms: given, kind })
+    const copy = ms === null ? null : stripAudioMetadata(bytes)
+    if (copy === null) throw new TypeError(BAD_MEDIA_ARGS)
+    const progress = typeof onProgress === 'function' ? (fraction) => { try { onProgress(fraction) } catch {} } : noop
+    return serial(async (_, epoch) => {
+      await requireUnlocked()
+      if (mediaKeyPair === null) throw new UsageError(store.LOCKED)
+      if (!(await identity()).memberCert) throw new Error(member.GENESIS_REQUIRED)
+      if (sealed) return sealedUpload(copy, { mime, width: 0, height: 0, ms, epoch, progress })
+      const subtle = globalThis.crypto && globalThis.crypto.subtle
+      if (!subtle) throw new Error('WebCrypto indisponível')
+      const sha256 = b4a.toString(new Uint8Array(await subtle.digest('SHA-256', copy)), 'hex')
+      progress(0.25)
+      const blocks = []
+      for (let at = 0; at < copy.byteLength; at += MEDIA_BLOCK_BYTES) {
+        blocks.push(copy.subarray(at, Math.min(copy.byteLength, at + MEDIA_BLOCK_BYTES)))
+      }
+      const { core, declared } = await withStore((c) => member.mediaPrepare(c))
+      if (!declared) {
+        await ensureCaughtUp(epoch)
+        const { seq } = await withStore((c) => member.declareMediaCore(c, core))
+        wrote(seq)
+        await pushAfterWrite()
+      }
+      const descriptor = await withStore((c) => member.mediaCommitAudio(c, { blocks, sha256, ms }))
+      progress(0.75)
+      progress(1)
+      return descriptor
+    })({})
+  }
+
+  // On mediaUpload's chain: the plaintext copy is wiped once sealed.
+  async function sealedUpload (copy, { mime, width, height, ms = 0, epoch, progress }) {
+    let sealedItem
+    try {
+      sealedItem = sealMedia(copy, { plainMime: mime, w: width, h: height, ms })
+    } finally {
+      copy.fill(0)
+    }
+    progress(0.25)
+    const { core, declared } = await withStore((c) => member.mediaPrepare(c))
+    if (!declared) {
+      await ensureCaughtUp(epoch)
+      const { seq } = await withStore((c) => member.declareMediaCore(c, core))
+      wrote(seq)
+      await pushAfterWrite()
+    }
+    const item = await withStore((c) => member.mediaCommitSealed(c, sealedItem))
+    progress(0.75)
+    progress(1)
+    return item
+  }
+
+  // A chat photo for dm.send (docs/rpc.md 5.88): validated and copied
+  // synchronously (TypeError), then off the chain, as dm.pull (it opens no
+  // storage core): sealed and put on the anonymous blob channel by the dm
+  // engine -> the media item. The native IPC dm.putMedia reads its cache
+  // file and calls this same function. Nothing about the bytes is logged.
+  // A voice note is { bytes, mime: 'audio/mp4', width: 0, height: 0, ms,
+  // kind: 'voice' }, checked with audioBounds. `to`, the destination's diary
+  // key, is required: it keeps the same photo for two conversations in two
+  // blobs, and dm.send refuses the item for any other destination (5.97).
+  function dmPutMedia ({ bytes, mime, width, height, ms, kind, to } = {}) {
+    if (typeof to !== 'string' || !/^[0-9a-f]{64}$/.test(to)) throw new TypeError(BAD_MEDIA_ARGS)
+    const voice = kind !== undefined || mime === AUDIO_MIME
+    const dest = { to }
+    let copy
+    if (voice) {
+      ms = voiceArgsMs({ bytes, mime, width, height, ms, kind })
+      // The note is sealed without its recording time or device tags.
+      copy = ms === null ? null : stripAudioMetadata(bytes)
+      if (copy === null) throw new TypeError(BAD_MEDIA_ARGS)
+    } else {
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > MAX_MEDIA_ITEM_BYTES) throw new TypeError(BAD_MEDIA_ARGS)
+      if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
+      if (!isIntIn(width, 1, MAX_MEDIA_DIMENSION) || !isIntIn(height, 1, MAX_MEDIA_DIMENSION)) throw new TypeError(BAD_MEDIA_ARGS)
+      copy = new Uint8Array(bytes.byteLength)
+      copy.set(bytes)
+    }
+    return (async () => {
+      try {
+        if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+        const own = await serial(() => requireDm())({})
+        const pair = keyPair
+        if (pair === null) throw new UsageError(store.LOCKED)
+        return await dmEngine.putMedia(own, pair, voice ? { bytes: copy, mime, width: 0, height: 0, ms, ...dest } : { bytes: copy, mime, width, height, ...dest })
+      } catch (err) {
+        copy.fill(0)
+        throw toRpcError(err, reportInternal)
+      }
+    })()
+  }
+
+  // The plaintext of item `index` of a kept message -> { bytes, mime }, for
+  // the page only (never over RPC: a photo is far above MAX_MESSAGE).
+  function dmReadMedia ({ from, id, index } = {}) {
+    return (async () => {
+      try {
+        if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+        const own = await serial(() => requireDm())({})
+        return await dmEngine.readMedia(own, { from, id, index })
+      } catch (err) {
+        if (err instanceof TypeError) throw err
+        throw toRpcError(err, reportInternal)
+      }
+    })()
+  }
+
+  // The image of a private group item -> { bytes, mime, w, h }, for the page
+  // only. The ciphertext comes from this node's own seeder (its media route
+  // on the HTTP origin of seederUrl, never another host) and must open under
+  // the item's key; any failure is the same USAGE 'mídia indisponível', so
+  // the answer never says why.
+  function groupReadMedia ({ diary, item } = {}) {
+    if (typeof diary !== 'string' || !HEX64.test(diary) || !validPrivateItem(item)) throw new TypeError(BAD_MEDIA_ARGS)
+    const it = {}
+    for (const k of PRIVATE_ITEM_KEYS) it[k] = item[k]
+    const url = seederMediaUrl(diary.toLowerCase(), it)
+    return (async () => {
+      try {
+        if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+        const pair = await serial(async () => {
+          await requireUnlocked()
+          return keyPair
+        })({})
+        if (url === null) throw new UsageError(GROUP_MEDIA_UNAVAILABLE)
+        let cipher = null
+        try {
+          const res = await fetchMedia(url, { cache: 'no-store', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer' })
+          cipher = await readExact(res, it.bytes)
+        } catch {}
+        // A lock (or a lock and a new unlock) while the download ran: the
+        // image is never opened for the session that asked.
+        if (closed || pair === null || keyPair !== pair) throw new UsageError(store.LOCKED)
+        const plain = cipher !== null ? openMedia(cipher, it) : null
+        if (plain === null) throw new UsageError(GROUP_MEDIA_UNAVAILABLE)
+        // The bytes decide, not the item: a member could seal anything under
+        // an image label, and the page decodes what it gets.
+        const voice = it.plainMime === AUDIO_MIME
+        const audio = voice && plain.byteLength <= MAX_AUDIO_BYTES ? audioBounds(plain) : null
+        if (voice ? audio === null : mediaBounds(plain, it.plainMime) === null) {
+          plain.fill(0)
+          throw new UsageError(GROUP_MEDIA_UNAVAILABLE)
+        }
+        return voice ? { bytes: plain, mime: it.plainMime, w: 0, h: 0, ms: audio.ms } : { bytes: plain, mime: it.plainMime, w: it.w, h: it.h }
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    })()
+  }
+
+  // The media route of this node's own seeder, or null: plain http only for
+  // a loopback seeder (the hosted lab), as the blob channel allows.
+  function seederMediaUrl (diary, it) {
+    let ws
+    try {
+      ws = new URL(cfg.seederUrl)
+    } catch {
+      return null
+    }
+    const loopback = ws.hostname === '127.0.0.1' || ws.hostname === 'localhost' || ws.hostname === '[::1]'
+    if (ws.protocol !== 'wss:' && !(ws.protocol === 'ws:' && loopback)) return null
+    const origin = (ws.protocol === 'wss:' ? 'https://' : 'http://') + ws.host
+    return origin + '/media/' + diary + '/' + it.core + '/' + it.start + '/' + it.blocks
+  }
+
+  // Exactly `size` bytes of a 200 answer, never buffering more: a declared
+  // length other than `size` is refused before reading, a stream is cut off
+  // past it, and a body without a stream is read only under that length.
+  // Anything else (a non-200, a redirect, a short body) is null, and an
+  // unread body is cancelled so it does not hold the seeder's slot.
+  async function readExact (res, size) {
+    const drop = () => { try { if (res && res.body && typeof res.body.cancel === 'function') res.body.cancel().catch(noop) } catch {} }
+    if (!res || res.status !== 200 || res.redirected === true) {
+      drop()
+      return null
+    }
+    const declared = res.headers && typeof res.headers.get === 'function' ? res.headers.get('content-length') : null
+    if (declared !== null && declared !== String(size)) {
+      drop()
+      return null
+    }
+    const stream = res.body
+    if (stream && typeof stream.getReader === 'function') {
+      const reader = stream.getReader()
+      const out = new Uint8Array(size)
+      let n = 0
+      for (;;) {
+        const step = await reader.read()
+        if (step.done) break
+        const v = step.value
+        if (!(v instanceof Uint8Array) || n + v.byteLength > size) {
+          try { reader.cancel().catch(noop) } catch {}
+          return null
+        }
+        out.set(v, n)
+        n += v.byteLength
+      }
+      return n === size ? out : null
+    }
+    if (declared === null) return null
+    const body = new Uint8Array(await res.arrayBuffer())
+    return body.byteLength === size ? body : null
+  }
+
+  // Locks the identity: the pair is zero-filled and the chat media cache
+  // deleted (lock and 'Sair' both come here). After close() it already is.
   function clearKeyPair () {
     if (closing !== null) return closing.then(noop)
     cancelGroups()
-    return identityChange(() => serial(async () => { zeroKeyPair() })())
+    return identityChange(() => serial(async () => {
+      zeroKeyPair()
+      // The identity is locked already; a storage failure while wiping the
+      // media cache must not turn the lock into an error (the next unlock
+      // under another key wipes it again).
+      try {
+        await dmEngine.wipeMedia()
+      } catch {
+        warning('aviso: cache de mídia não apagado')
+      }
+    })())
   }
 
   // The follows kept from before `follow` records existed (member-ops
@@ -2132,6 +3572,16 @@ function createBrowserSession ({
     syncIntent = null
     kickLease()
     await stopRun('stopped')
+    // Dropped before any delete, so a failed reset never serves a cached
+    // certificate date or age attestation for data it deleted.
+    certKnown = false
+    certDate = null
+    certIssuer = null
+    ageVerifiedDate = null
+    ageSinceDate = null
+    ageSinceUntil = null
+    ageSinceIssuer = null
+    ageChecked = false
     await storage.deleteCore(store.DIARY)
     store.forgetLegacy(storage)
     await store.deleteMediaCores(storage)
@@ -2139,8 +3589,12 @@ function createBrowserSession ({
     await store.writeFollowsPending(storage, [])
     await store.clearFollowsMigrated(storage)
     zeroKeyPair()
+    // A pull, send or top-up still unwinding must not see its store go.
+    await dmEngine.idle()
+    await store.deleteDmData(storage)
+    await dmEngine.wipeMedia()
+    await store.deleteAgeProofs(storage)
     ownKey = null
-    certKnown = false
     diaryInfo = null
     synced = false
     unpushed = true
@@ -2168,9 +3622,13 @@ function createBrowserSession ({
     peeking = null
     noticer.abort()
     noticing = null
+    pageFeeder.abort()
+    pageFeeding = null
     connection++
     emitter = null
     syncIntent = null
+    // The next connection's first own-synced arms afresh.
+    resetUpkeep()
     return stopRun('stopped').then(noop)
   }
 
@@ -2185,10 +3643,15 @@ function createBrowserSession ({
     if (closing !== null) return closing
     closed = true
     syncIntent = null
+    resetUpkeep()
+    if (seenChangedTimer !== null) clearTimeout(seenChangedTimer)
+    seenChangedTimer = null
     peeker.abort()
     peeking = null
     noticer.abort()
     noticing = null
+    pageFeeder.abort()
+    pageFeeding = null
     closing = (async () => {
       await stopRun('stopped')
       await chain
@@ -2198,8 +3661,10 @@ function createBrowserSession ({
       await stopRun('stopped')
       peeker.close()
       noticer.close()
+      pageFeeder.close()
       zeroKeyPair()
       boxKeys.close()
+      await dmEngine.close()
     })()
     return closing
   }
@@ -2212,6 +3677,9 @@ function createBrowserSession ({
     setKeyPair,
     clearKeyPair,
     mediaUpload,
+    dmPutMedia,
+    dmReadMedia,
+    groupReadMedia,
     borrow,
     legacyFollows: () => legacyFollows({}),
     confirmLegacyFollows,

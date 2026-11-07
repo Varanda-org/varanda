@@ -11,34 +11,28 @@
 // the counts and offers curtir, republicar and citar; a reply names its
 // parent, a quote shows the quoted post and a repost the original, each
 // read and verified by the node.
-// Hosted web only, a field "pesquisar por assunto" above the short note and help: on
-// submit (never per keystroke) the Busca screen replaces the rounds with the
-// posts of any diary the seeder indexed that contain the words; 'limpar'
-// brings the rounds back from memory, unchanged.
+// Word search in posts is the Busca tab's (screens/Busca.js).
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { StyleSheet, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, PEEK_LIMIT_DEFAULT, PEEK_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { shouldReloadOnShow } from '../paging'
 import { HELP } from '../help'
 import {
-  PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WEB_ONLY_MESSAGE,
+  PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WARM_QUIET_MS, PEEK_WEB_ONLY_MESSAGE,
   isExpiredPeekError, isLastPeekPage, isWebOnlyError, mergePage, pageNeeds, peekKey, peekNotice,
-  recordFollow, skippedText, withoutFollowed
+  recordFollow, shouldWarmPeek, skippedText, withoutFollowed
 } from '../peek'
 import { whoOf } from '../who'
-import { SEARCH_BUTTON, SEARCH_CLEAR, SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_LABEL, SEARCH_PLACEHOLDER, SEARCH_TRUNCATED, searchPath } from '../topics'
-import Busca from './Busca'
 import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useSocial } from './ARua'
-import { Btn, Field, Soft, colors, errorText, useBottomPad, useNow } from '../ui'
+import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
 import { HelpNote } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { Pill } from '../ui/Pill'
-import { type } from '../ui/theme'
 
 // follow.list returns at most FOLLOW_LIMIT_MAX keys. An account follows at
 // most 4095 diaries, so nine pages is the whole list and a hard stop.
@@ -75,10 +69,22 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     following: new Set()
   })
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, expired, loadedAt, meta, unsupported, following } = state
-  // The typed text and the active search ({ tokens, path } or null).
-  const [draft, setDraft] = useState('')
-  const [query, setQuery] = useState(null)
   const stateRef = useRef(state)
+  // Read after a wait: the warm decides from the latest tab and refresh, not
+  // the render that armed the timer.
+  const activeRef = useRef(active)
+  activeRef.current = active
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
+  // The epoch whose hidden first page was already requested.
+  const warmedEpochRef = useRef(null)
+  // pageNeeds held back until the tab is shown.
+  const pendingIngestRef = useRef(null)
+  // A warm first page kept off screen until the first show: thirty hidden
+  // rows with photos would compete with A Rua for a phone's main thread.
+  const heldRef = useRef(null)
+  // A refresh bump that landed while a peek.read was already in flight.
+  const reloadAfterRef = useRef(false)
   // Only the latest read may commit; the ref also blocks duplicate end reaches.
   const seqRef = useRef(0)
   const commit = useCallback((patch) => {
@@ -149,8 +155,11 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     commit({ items: unfollowed(stateRef.current.items) })
   }, [request, commit, unfollowed, markFollowed])
 
-  const loadFirst = useCallback(async () => {
+  const loadFirst = useCallback(async (opts) => {
     if (!hosted || stateRef.current.unsupported) return
+    // Pills pass the press event and pull-to-refresh passes nothing. Only the
+    // hidden warm sets quiet.
+    const quiet = !!(opts && opts.quiet === true)
     const mine = ++seqRef.current
     const before = new Map(followedHereRef.current)
     commit({
@@ -170,7 +179,22 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         if (followedHereRef.current.get(a) === stamp) followedHereRef.current.delete(a)
       }
       const rows = unfollowed(page.items)
+      // A hidden warm renders nothing and reads nothing more (no follow.list,
+      // engagement.read, counts or diary peeks): the first show commits it.
+      if (quiet && !activeRef.current) {
+        heldRef.current = {
+          rows,
+          next: page.next,
+          atEnd: isLastPeekPage(page),
+          meta: { diaries: page.diaries, skipped: page.skipped, incomplete: page.incomplete === true },
+          at: Date.now()
+        }
+        commit({ loading: false, refreshing: false })
+        return
+      }
       ingest({ ...pageNeeds(rows), reset: true })
+      pendingIngestRef.current = null
+      heldRef.current = null
       commit({
         items: mergePage([], rows).items,
         next: page.next,
@@ -184,15 +208,28 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       // Signals that arrived while loadedAt was null share this one pass.
       // Clear the flag as it starts. Nothing cleans this pass up: it has to
       // finish so the rows just committed lose those authors.
-      if (followsPending.current) {
+      if (followsPending.current && activeRef.current) {
         followsPending.current = false
         reconcileFollows(() => true)
       }
     } catch (err) {
       if (mine !== seqRef.current) return
       // An old node bundle or a native / serve node: never asked again.
+      // A quiet miss while hidden sets no error: the first real show loads.
       if (isWebOnlyError(err)) commit({ unsupported: true, loading: false, refreshing: false })
+      else if (quiet && !activeRef.current) commit({ loading: false, refreshing: false })
       else commit({ loading: false, refreshing: false, loadError: errorText(err) })
+      // A failed refresh keeps the warm rows on screen: their held needs
+      // still load.
+      if (activeRef.current && pendingIngestRef.current !== null) {
+        ingest({ ...pendingIngestRef.current, reset: true })
+        pendingIngestRef.current = null
+      }
+      // Follows held while the tab was hidden still drop their rows.
+      if (activeRef.current && followsPending.current && stateRef.current.loadedAt !== null) {
+        followsPending.current = false
+        reconcileFollows(() => true)
+      }
     }
   }, [hosted, peek, commit, ingest, unfollowed, reconcileFollows])
 
@@ -230,22 +267,101 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   }, [active, hosted, peek, commit, ingest, unfollowed])
 
   // Reload rules as A Rua: first show, a reselect after 60 s, a refresh bump.
+  // The warm page's quotes, counts and hearts start on the first show. A read
+  // already in flight is not joined by another: a refresh bump waits for it,
+  // a show or a reselect just waits.
   const previous = useRef({ active: false, refresh, scrollToTop })
+  const seederVerified = !!(node.signals && node.signals.seederVerified)
+  const syncReady = !!(node.signals && node.signals.ready)
+  // Warm the first page while this tab is hidden, once the seeder link is
+  // verified, so opening it finds the rows already there. The refresh stored
+  // on `previous` is consumed: this read is newer than a bump that arrived
+  // before it.
+  useEffect(() => {
+    if (!shouldWarmPeek({
+      hosted,
+      online: node.online,
+      phase: node.phase,
+      seederVerified,
+      syncReady,
+      visible: node.visible,
+      active,
+      loadedAt: state.loadedAt,
+      loading: state.loading,
+      refreshing: state.refreshing,
+      unsupported: state.unsupported,
+      attempted: warmedEpochRef.current === node.epoch
+    })) return
+    // Only once the app has been quiet: the boot reads come first.
+    const wait = node.whenIdle(PEEK_WARM_QUIET_MS)
+    wait.promise.then(() => {
+      const current = stateRef.current
+      // The tab may have opened, or a read started, during the wait.
+      if (current.loadedAt !== null || current.loading || current.refreshing || activeRef.current || heldRef.current !== null) return
+      warmedEpochRef.current = node.epoch
+      previous.current = { ...previous.current, refresh: refreshRef.current }
+      loadFirst({ quiet: true })
+    })
+    return () => wait.cancel()
+  }, [hosted, node.online, node.phase, seederVerified, syncReady, node.visible, node.epoch, node.whenIdle, active, state.loadedAt, state.loading, state.refreshing, state.unsupported, loadFirst])
+
   useEffect(() => {
     const prev = previous.current
     const shown = active && !prev.active
     const reselected = scrollToTop !== prev.scrollToTop
     const changed = refresh !== prev.refresh
-    // While a search is shown, Busca handles its own reloads: the refresh value
-    // is NOT advanced, so a bump during the search (a follow) is still seen as
-    // `changed` once the query is cleared and the rounds reload.
-    const searching = query !== null
-    previous.current = { active, refresh: active && !searching ? refresh : prev.refresh, scrollToTop }
-    if (!active || searching) return
+    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop }
+    if (!active) return
+    // The warm page goes on screen now; its needs load below, or with the
+    // reload when it is already old.
+    const held = heldRef.current
+    if (held !== null && stateRef.current.loadedAt === null) {
+      heldRef.current = null
+      const rows = unfollowed(held.rows)
+      commit({ items: mergePage([], rows).items, next: held.next, atEnd: held.atEnd, expired: false, loadedAt: held.at, meta: held.meta })
+      pendingIngestRef.current = pageNeeds(rows)
+    }
     const current = stateRef.current
+    if (current.loading || current.refreshing) {
+      if (changed) reloadAfterRef.current = true
+      return
+    }
     const stale = shouldReloadOnShow({ loadedAt: current.loadedAt, now: Date.now(), fresh: false })
-    if (changed || ((shown || reselected) && stale && !current.loading && !current.refreshing)) loadFirst()
-  }, [active, refresh, scrollToTop, loadFirst, query])
+    if (changed || ((shown || reselected) && stale)) {
+      // This load ingests its own page on success (and the warm page's held
+      // needs on failure); a deferred refresh is covered by it.
+      reloadAfterRef.current = false
+      loadFirst()
+      return
+    }
+    if (pendingIngestRef.current !== null) {
+      ingest({ ...pendingIngestRef.current, reset: true })
+      pendingIngestRef.current = null
+    }
+    if (followsPending.current && current.loadedAt !== null) {
+      followsPending.current = false
+      reconcileFollows(() => true)
+    }
+  }, [active, refresh, scrollToTop, loadFirst, ingest, reconcileFollows, commit, unfollowed])
+
+  // A warm page nobody has seen is dropped with its node session: its cursor
+  // lived in that session's snapshot. The next epoch warms again.
+  const shownOnceRef = useRef(false)
+  if (active) shownOnceRef.current = true
+  useEffect(() => {
+    if (shownOnceRef.current) return
+    if (heldRef.current === null && !stateRef.current.loading) return
+    seqRef.current += 1
+    heldRef.current = null
+    pendingIngestRef.current = null
+    commit({ loading: false, refreshing: false })
+  }, [node.epoch, commit])
+
+  useEffect(() => {
+    if (!active || state.loading || state.refreshing || !reloadAfterRef.current) return
+    reloadAfterRef.current = false
+    loadFirst()
+  }, [active, state.loading, state.refreshing, loadFirst])
 
   // A follow made elsewhere (Membro, Seguindo, A Rua, another device): drop
   // the followed authors' rows without reloading, so the pages and the
@@ -261,7 +377,8 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     if (!hosted) return
     // The page in flight was read with the old follow set. Keep the signal
     // until that page commits, or that author's rows stay until a refresh.
-    if (stateRef.current.loadedAt === null) {
+    // A hidden list keeps it for the next show.
+    if (stateRef.current.loadedAt === null || !activeRef.current) {
       followsPending.current = true
       return
     }
@@ -304,60 +421,8 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
 
   const notice = peekNotice({ supported: !unsupported, hosted, online: node.online, loadedAt })
 
-  // Submit only: the seeder allows a few /index requests per client per 10 s.
-  const submit = () => {
-    const r = searchPath(draft)
-    if (r === null) {
-      if (typeof onToast === 'function') onToast(SEARCH_INVALID)
-      return
-    }
-    if (r.truncated && typeof onToast === 'function') onToast(SEARCH_TRUNCATED)
-    setQuery({ tokens: r.tokens, path: r.path })
-  }
-  // Set when Busca toggled a like or repost: the rounds' cache is then stale.
-  const socialDirtyRef = useRef(false)
-  const clear = () => {
-    if (socialDirtyRef.current) {
-      // Re-read counts and own state of the kept rounds; no peek.read reload.
-      socialDirtyRef.current = false
-      ingest({ ...pageNeeds(stateRef.current.items), reset: true })
-    }
-    setQuery(null)
-    setDraft('')
-  }
-
-  const searchBox = (
-    <View>
-      {hosted && notice === null
-        ? (
-          <View style={styles.searchBox}>
-            <Field
-              label={SEARCH_LABEL}
-              placeholder={SEARCH_PLACEHOLDER}
-              value={draft}
-              onChangeText={setDraft}
-              maxLength={SEARCH_INPUT_MAX}
-              returnKeyType='search'
-              onSubmitEditing={submit}
-              mono
-            />
-            <Btn label={SEARCH_BUTTON} onPress={submit} disabled={draft.trim() === ''} secondary />
-            {query !== null
-              ? (
-                <Pressable accessibilityRole='button' accessibilityLabel={SEARCH_CLEAR} onPress={clear} hitSlop={6}>
-                  <Text style={styles.toggle}>{SEARCH_CLEAR}</Text>
-                </Pressable>
-                )
-              : null}
-          </View>
-          )
-        : null}
-    </View>
-  )
-
   const header = (
     <View style={styles.header}>
-      {searchBox}
       <Soft>{PEEK_SHORT_TEXT}</Soft>
       <CountsNote social={social} />
     </View>
@@ -467,33 +532,6 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   const renderItem = ({ item }) => rowOf(item)
 
   const shownItems = notice === null ? items : []
-  // The rounds stay mounted (state and social cache) under the search. Only
-  // 'web-only' hides it: the rounds' 'offline' notice (no round loaded yet)
-  // must not unmount a search that loaded, which has its own offline state.
-  if (query !== null && hosted && notice !== 'web-only') {
-    return (
-      <Busca
-        query={query}
-        avatarOf={profileOf}
-        header={<View style={styles.searchTop}>{searchBox}</View>}
-        ownKey={ownKey}
-        active={active}
-        scrollToTop={scrollToTop}
-        refresh={refresh}
-        onReply={onReply}
-        onReport={onReport}
-        onQuote={onQuote}
-        onOpenThread={onOpenThread}
-        onOpenMember={onOpenMember}
-        onOpenMention={onOpenMention}
-        onOpenEngagers={onOpenEngagers}
-        onFollowsChanged={onFollowsChanged}
-        onFollowed={dropFollowed}
-        onSocialChanged={() => { socialDirtyRef.current = true }}
-        onToast={onToast}
-      />
-    )
-  }
   return (
     <RefreshableList
       data={shownItems}
@@ -516,9 +554,6 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
 }
 
 const styles = StyleSheet.create({
-  toggle: { ...type.counter, color: colors.accent },
   header: { padding: 16, gap: 8 },
-  searchTop: { padding: 16 },
-  searchBox: { gap: 8 },
   footer: { padding: 16, gap: 8 }
 })

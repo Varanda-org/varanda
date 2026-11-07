@@ -34,6 +34,14 @@
 // Events never hold a signature, a reporter, an e-mail other than the
 // moderator's own `by`, a note or a secret. Errors carry only a token in
 // `code`.
+//
+// A report with an anexo (an image the reporter attached; report statements
+// 'varanda-dm-report-v2' and 'varanda-report-v3') keeps its bytes in
+// <dataDir>/report-media/<report id> (mode 0o600, dir 0o700), written
+// before the row and re-hashed on every read; the row gains `anexo`:
+// { sha256, mime, size }. Rows without an anexo have no such key, so a file
+// written before it existed reads unchanged. The bytes are the reporter's
+// word, like the quote: nothing here fetches or checks them elsewhere.
 
 const fs = require('node:fs')
 const path = require('node:path')
@@ -44,7 +52,34 @@ const { verifySnapshot, acceptSnapshot, blockedSet, MAX_BLOCKED } = require('@va
 const { isUnsafe } = require('@varanda/core/lib/safe')
 const { MAX_TEXT, MAX_LOG_BLOCKS } = require('@varanda/core/lib/records')
 
+// Makes a just-renamed entry durable, as @varanda/core lib/store.js does:
+// platforms that cannot fsync a directory fail with EISDIR, EPERM or EINVAL.
+const FSYNC_DIR_IGNORED = new Set(['EISDIR', 'EPERM', 'EINVAL'])
+function fsyncDir (dir) {
+  let fd
+  try {
+    fd = fs.openSync(dir, fs.constants.O_RDONLY)
+    fs.fsyncSync(fd)
+  } catch (err) {
+    if (!FSYNC_DIR_IGNORED.has(err.code)) throw err
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd) } catch {}
+    }
+  }
+}
+
 const FILE = 'moderation.json'
+const MEDIA_DIR = 'report-media'
+// An anexo: one image of at most 1 MiB, in the formats a DM carries minus
+// PNG (packages/rpc limits.js MEDIA_MIMES).
+const ANEXO_MAX_BYTES = 1048576
+// A voice note report carries its audio (mod-routes.js decodeAnexo accepts it
+// only when audioBounds finds a sound-only MPEG-4 container).
+const ANEXO_MIMES = Object.freeze(['image/jpeg', 'image/webp', 'image/gif', 'audio/mp4'])
+// Disk bound for stored anexos (decided reports keep theirs, as evidence):
+// at most this many, so at most ~2 GiB.
+const MAX_STORED_ANEXOS = 2000
 // v2 rows add `writer` and `group` (a report of a group message,
 // packages/core/lib/report.js 'varanda-report-v2'); a v1 file is read with
 // both null and rewritten as v2 by the next mutation. v3 adds `appeals`; a
@@ -141,7 +176,7 @@ function validBy (by) {
 }
 
 function copyReport (r) {
-  return { ...r }
+  return has(r, 'anexo') ? { ...r, anexo: { ...r.anexo } } : { ...r }
 }
 
 function copyChange (c) {
@@ -174,7 +209,32 @@ const REPORT_KEYS_V2_EARLY = [...REPORT_KEYS_V1, 'writer', 'group']
 // null otherwise and for rows written before the field existed (those only
 // ever blocked the diary).
 const REPORT_KEYS = [...REPORT_KEYS_V2_EARLY, 'blocked']
+// A private message (kind 'dm'): it sits on no diary, so there is no seq,
+// writer or group. `target` is the sender the reporter names; the quote is
+// the reporter's word only.
+const REPORT_KEYS_DM = ['id', 'at', 'kind', 'reporter', 'target', 'reason', 'text', 'quote', 'nonce', 'signature', 'status', 'decidedBy', 'decidedAt', 'note', 'blocked']
 const CHANGE_KEYS = ['id', 'op', 'member', 'by', 'at', 'reportIds', 'claimedAt']
+const ANEXO_KEYS = ['sha256', 'mime', 'size']
+
+function validAnexo (a) {
+  return isPlainObject(a) &&
+    exactKeys(a, ANEXO_KEYS) &&
+    isLowerHex(a.sha256, 32) &&
+    ANEXO_MIMES.includes(a.mime) &&
+    Number.isInteger(a.size) && a.size >= 1 && a.size <= ANEXO_MAX_BYTES
+}
+
+// { bytes, mime, sha256 } from the route -> the row's { sha256, mime, size }
+// plus the bytes, after hashing them here again: the digest stored is the
+// digest of the bytes stored, whatever the caller claimed. null = invalid.
+function anexoInput (anexo) {
+  if (!isPlainObject(anexo) || !(anexo.bytes instanceof Uint8Array)) return null
+  const bytes = Buffer.from(anexo.bytes)
+  if (bytes.length < 1 || bytes.length > ANEXO_MAX_BYTES || !ANEXO_MIMES.includes(anexo.mime)) return null
+  const sha256 = crypto.createHash('sha256').update(bytes).digest('hex')
+  if (anexo.sha256 !== sha256) return null
+  return { row: { sha256, mime: anexo.mime, size: bytes.length }, bytes }
+}
 
 function exactKeys (obj, keys) {
   return Object.keys(obj).length === keys.length && keys.every((k) => has(obj, k))
@@ -187,23 +247,39 @@ function validId (id) {
 // Every field add() and decide() write, with the shapes they enforce: a row
 // missing any piece of evidence (signature, nonce, seq, reason...) is not a
 // row this module wrote and must never be carried into a rewrite.
-function validReportRow (id, r) {
-  if (!isPlainObject(r) || !exactKeys(r, REPORT_KEYS)) return false
-  if (r.writer === null) {
-    if (r.group !== null) return false
-  } else if (!isLowerHex(r.writer, 32) || !isLowerHex(r.group, 32) || r.seq === null) {
-    return false
+function validReportRow (id, row) {
+  if (!isPlainObject(row)) return false
+  // An anexo rides on a private or a group message only.
+  let r = row
+  let withAnexo = false
+  if (has(row, 'anexo')) {
+    if (!validAnexo(row.anexo)) return false
+    if (row.kind !== 'dm' && (row.writer === null || row.writer === undefined)) return false
+    r = { ...row }
+    delete r.anexo
+    withAnexo = true
+  }
+  if (r.kind === 'dm') {
+    // A media-only message quotes nothing: the anexo is the evidence.
+    if (!exactKeys(r, REPORT_KEYS_DM) || (r.quote === '' && !withAnexo)) return false
+  } else {
+    if (!exactKeys(r, REPORT_KEYS)) return false
+    if (r.writer === null) {
+      if (r.group !== null) return false
+    } else if (!isLowerHex(r.writer, 32) || !isLowerHex(r.group, 32) || r.seq === null) {
+      return false
+    }
+    if (r.seq === null) {
+      if (r.kind !== 'account' || r.quote !== '') return false
+    } else if (r.kind !== 'post' || !Number.isInteger(r.seq) || r.seq < 1 || r.seq > SEQ_MAX) {
+      return false
+    }
   }
   if (r.id !== id || !validId(id) || !isCanonicalIso(r.at)) return false
   if (!isLowerHex(r.target, 32) || !isLowerHex(r.reporter, 32) || r.reporter === r.target) return false
-  if (r.seq === null) {
-    if (r.kind !== 'account' || r.quote !== '') return false
-  } else if (r.kind !== 'post' || !Number.isInteger(r.seq) || r.seq < 1 || r.seq > SEQ_MAX) {
-    return false
-  }
   if (r.blocked !== null) {
     if (r.status !== 'bloquear' || !BLOCK_TARGETS.includes(r.blocked)) return false
-    if (r.blocked === 'grupo' && r.group === null) return false
+    if (r.blocked === 'grupo' && (r.kind === 'dm' || r.group === null)) return false
   }
   if (!REASONS.includes(r.reason)) return false
   if (!boundedText(r.text, TEXT_MAX, false) || !boundedText(r.quote, QUOTE_MAX, true)) return false
@@ -277,7 +353,7 @@ function fromJson (obj, association) {
       row = { ...r, blocked: null }
     }
     if (!validReportRow(id, row)) throw bad()
-    reports[id] = { ...row }
+    reports[id] = copyReport(row)
   }
   const appeals = dict()
   if (obj.v === VERSION) {
@@ -377,6 +453,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     state = emptyState()
     writeJsonAtomic(file, state, 0o600)
   }
+  const mediaDir = path.join(dataDir, MEDIA_DIR)
   let tail = Promise.resolve()
 
   // One in-process queue for every disk mutation, so two decisions never
@@ -459,7 +536,63 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     return { change, kind: 'novo' }
   }
 
-  function add ({ reporter, target, seq = null, writer = null, group = null, reason, text = '', quote = '', signature, nonce } = {}) {
+  // Writes the anexo bytes for report `id` (O_EXCL temp, fsync, rename, so a
+  // crash leaves either no file or the whole one), before its row lands.
+  function writeAnexo (id, bytes) {
+    refuseSymlinkDir(mediaDir)
+    const created = !fs.existsSync(mediaDir)
+    fs.mkdirSync(mediaDir, { recursive: true, mode: 0o700 })
+    fs.chmodSync(mediaDir, 0o700)
+    if (created) fsyncDir(path.dirname(mediaDir))
+    const dest = path.join(mediaDir, id)
+    const tmp = dest + '.' + crypto.randomBytes(6).toString('hex') + '.tmp'
+    const fd = fs.openSync(tmp, 'wx', 0o600)
+    try {
+      // writeSync may write less than asked: loop until every byte landed.
+      let off = 0
+      while (off < bytes.length) off += fs.writeSync(fd, bytes, off, bytes.length - off)
+      fs.fsyncSync(fd)
+    } catch (err) {
+      fs.closeSync(fd)
+      try { fs.unlinkSync(tmp) } catch {}
+      throw err
+    }
+    fs.closeSync(fd)
+    fs.renameSync(tmp, dest)
+    // The rename is durable only once the directory is: the row that lands
+    // next must never point at a file a power cut took back. A failed sync
+    // takes the file back, so no orphan escapes the cap.
+    try {
+      fsyncDir(mediaDir)
+    } catch (err) {
+      try { fs.unlinkSync(dest) } catch {}
+      throw err
+    }
+  }
+
+  // Persists `next` holding `report`; when the write failed and the reloaded
+  // file does not hold the row, the anexo written for it goes too.
+  function persistWithAnexo (next, report) {
+    try {
+      persist(next)
+    } catch (err) {
+      // Only a reload that worked can say the row is not on disk; when it
+      // failed, keep the file (a stray file is better than lost evidence).
+      if (!failed && !has(state.reports, report.id)) {
+        try { fs.unlinkSync(path.join(mediaDir, report.id)) } catch {}
+      }
+      throw err
+    }
+  }
+
+  function anexoCount (rows) {
+    let n = 0
+    for (const r of rows) if (has(r, 'anexo')) n++
+    return n
+  }
+
+  // `anexo` (a group message only): { bytes, mime, sha256 }.
+  function add ({ reporter, target, seq = null, writer = null, group = null, reason, text = '', quote = '', signature, nonce, anexo = null } = {}) {
     return enqueue(() => {
       usable()
       if (!isLowerHex(reporter, 32) || !isLowerHex(target, 32) || reporter === target) throw fail('pedido-invalido')
@@ -475,27 +608,26 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       if (seq === null && quote !== '') throw fail('pedido-invalido')
       if (!isLowerHex(signature, 64)) throw fail('pedido-invalido')
       if (typeof nonce !== 'string' || !NONCE_RE.test(nonce)) throw fail('pedido-invalido')
+      const media = anexo === null ? null : anexoInput(anexo)
+      if (anexo !== null && (media === null || writer === null)) throw fail('pedido-invalido')
 
       // A retry of an add that already landed answers the same row, even
       // when the store is full or the reporter is at its daily cap. The
       // writer is part of the key: a diary post and a group message share
       // seq numbers, and so do two writer cores.
+      // The anexo digest is part of the key, as for a dm: the same message
+      // reported again with an image (the only evidence of a media-only
+      // message) is a new report, not a duplicate of one without it.
       const rows = Object.values(state.reports)
+      const sha = media === null ? null : media.row.sha256
       for (const r of rows) {
-        if (r.status === 'aberta' && r.reporter === reporter && r.target === target && r.writer === writer && r.seq === seq) {
+        if (r.status === 'aberta' && r.kind !== 'dm' && r.reporter === reporter && r.target === target && r.writer === writer && r.seq === seq &&
+          (has(r, 'anexo') ? r.anexo.sha256 : null) === sha) {
           return { report: copyReport(r), duplicate: true }
         }
       }
-      // Evidence is never evicted: retention belongs to issue #38.
-      let open = 0
-      for (const r of rows) if (r.status === 'aberta') open++
-      if (open >= MAX_REPORTS || rows.length >= MAX_STORED_REPORTS) throw fail('limite')
-      const t = now()
-      let today = 0
-      for (const r of rows) {
-        if (r.reporter === reporter && Date.parse(r.at) >= t - DAY_MS) today++
-      }
-      if (today >= MAX_PER_REPORTER_DAY) throw fail('limite-denuncias')
+      const t = checkBudget(rows, reporter)
+      if (media !== null && anexoCount(rows) >= MAX_STORED_ANEXOS) throw fail('limite')
 
       const report = {
         id: newId(),
@@ -517,11 +649,103 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
         group,
         blocked: null
       }
+      if (media !== null) {
+        report.anexo = media.row
+        writeAnexo(report.id, media.bytes)
+      }
       const next = cloneState(state)
       next.reports[report.id] = report
-      persist(next)
+      persistWithAnexo(next, report)
       return { report: copyReport(report), duplicate: false }
     })
+  }
+
+  // Evidence is never evicted: retention belongs to issue #38. One daily
+  // budget per reporter covers every kind of report. -> now
+  function checkBudget (rows, reporter) {
+    let open = 0
+    for (const r of rows) if (r.status === 'aberta') open++
+    if (open >= MAX_REPORTS || rows.length >= MAX_STORED_REPORTS) throw fail('limite')
+    const t = now()
+    let today = 0
+    for (const r of rows) {
+      if (r.reporter === reporter && Date.parse(r.at) >= t - DAY_MS) today++
+    }
+    if (today >= MAX_PER_REPORTER_DAY) throw fail('limite-denuncias')
+    return t
+  }
+
+  // A private message report (kind 'dm'). The quote is required unless an
+  // anexo ({ bytes, mime, sha256 }) is: one of them is the only evidence,
+  // since the message is on no diary.
+  function addDm ({ reporter, target, reason, text = '', quote, signature, nonce, anexo = null } = {}) {
+    return enqueue(() => {
+      usable()
+      if (!isLowerHex(reporter, 32) || !isLowerHex(target, 32) || reporter === target) throw fail('pedido-invalido')
+      if (!REASONS.includes(reason)) throw fail('pedido-invalido')
+      if (!boundedText(text, TEXT_MAX, false)) throw fail('pedido-invalido')
+      const media = anexo === null ? null : anexoInput(anexo)
+      if (anexo !== null && media === null) throw fail('pedido-invalido')
+      if (!boundedText(quote, QUOTE_MAX, true) || (quote === '' && media === null)) throw fail('pedido-invalido')
+      if (!isLowerHex(signature, 64)) throw fail('pedido-invalido')
+      if (typeof nonce !== 'string' || !NONCE_RE.test(nonce)) throw fail('pedido-invalido')
+      const rows = Object.values(state.reports)
+      const sha = media === null ? null : media.row.sha256
+      for (const r of rows) {
+        if (r.status === 'aberta' && r.kind === 'dm' && r.reporter === reporter && r.target === target && r.quote === quote &&
+          (has(r, 'anexo') ? r.anexo.sha256 : null) === sha) {
+          return { report: copyReport(r), duplicate: true }
+        }
+      }
+      const t = checkBudget(rows, reporter)
+      if (media !== null && anexoCount(rows) >= MAX_STORED_ANEXOS) throw fail('limite')
+      const report = {
+        id: newId(),
+        at: iso(t),
+        kind: 'dm',
+        reporter,
+        target,
+        reason,
+        text,
+        quote,
+        nonce,
+        signature,
+        status: 'aberta',
+        decidedBy: null,
+        decidedAt: null,
+        note: '',
+        blocked: null
+      }
+      if (media !== null) {
+        report.anexo = media.row
+        writeAnexo(report.id, media.bytes)
+      }
+      const next = cloneState(state)
+      next.reports[report.id] = report
+      persistWithAnexo(next, report)
+      return { report: copyReport(report), duplicate: false }
+    })
+  }
+
+  // The anexo of report `id` as stored -> { bytes, mime }, or null when the
+  // row has none or the file is missing, not a plain file, or no longer
+  // hashes to the digest the reporter signed. Local disk only.
+  function anexoOf (id) {
+    usable()
+    if (typeof id !== 'string' || !validId(id) || !has(state.reports, id)) return null
+    const r = state.reports[id]
+    if (!has(r, 'anexo')) return null
+    try {
+      const file = path.join(mediaDir, id)
+      const st = fs.lstatSync(file)
+      if (!st.isFile() || st.size !== r.anexo.size) return null
+      const bytes = fs.readFileSync(file)
+      if (bytes.length !== r.anexo.size) return null
+      if (crypto.createHash('sha256').update(bytes).digest('hex') !== r.anexo.sha256) return null
+      return { bytes, mime: r.anexo.mime }
+    } catch {
+      return null
+    }
   }
 
   // 'aberta': oldest first (legal deadlines run from the oldest report,
@@ -687,7 +911,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       if (!DECISIONS.includes(decision) || !validBy(by)) throw fail('pedido-invalido')
       if (!boundedText(note, NOTE_MAX, true)) throw fail('pedido-invalido')
       if (!BLOCK_TARGETS.includes(block)) throw fail('pedido-invalido')
-      if (block === 'grupo' && state.reports[id].group === null) throw fail('pedido-invalido')
+      if (block === 'grupo' && (state.reports[id].kind === 'dm' || state.reports[id].group === null)) throw fail('pedido-invalido')
       const blockKey = block === 'grupo' ? state.reports[id].group : state.reports[id].target
       const before = netBlockedCount(state)
       const next = cloneState(state)
@@ -977,7 +1201,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     return false
   }
 
-  return { add, list, get, addAppeal, listAppeals, getAppeal, blockedBy, decideAppeal, decide, unblock, cancel, pending, pull, ack, newestModeratorDate, blocked, groupKeys, stats, exportRows, humanReversed }
+  return { add, addDm, anexoOf, list, get, addAppeal, listAppeals, getAppeal, blockedBy, decideAppeal, decide, unblock, cancel, pending, pull, ack, newestModeratorDate, blocked, groupKeys, stats, exportRows, humanReversed }
 }
 
 module.exports = {
@@ -991,6 +1215,9 @@ module.exports = {
   MAX_BLOCKED,
   NOTE_MAX,
   AI_ACTOR,
+  ANEXO_MAX_BYTES,
+  ANEXO_MIMES,
+  MAX_STORED_ANEXOS,
   isCleanText,
   openModerationStore
 }

@@ -11,6 +11,7 @@
 // caller supplies `load`/`save` to createBlocklistState.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
+const { verify } = require('./verified')
 const cert = require('./cert')
 
 const LF = '\n'
@@ -149,7 +150,7 @@ function verifySnapshot (snapshot, associationHex) {
     if (!verdict.ok) {
       return { ok: false, reason: verdict.reason === 'bad-signature' ? 'bad-moderator-signature' : verdict.reason }
     }
-    if (!crypto.verify(snapshotPayload(s), b4a.from(s.signature, 'hex'), b4a.from(s.moderator, 'hex'))) {
+    if (!verify(snapshotPayload(s), b4a.from(s.signature, 'hex'), b4a.from(s.moderator, 'hex'))) {
       return { ok: false, reason: 'bad-signature' }
     }
     return { ok: true }

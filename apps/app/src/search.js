@@ -305,7 +305,13 @@ export function confirmedHits (qTokens, members, peeked, ownKey) {
       const avatar = profile !== null && name !== null ? avatarOf(profile.avatar) : null
       const rank = searchRank(qTokens, foldTokens(name || ''), username)
       if (rank >= 0) {
-        ranked.push({ rank, i, hit: { author, name, username, avatar } })
+        const hit = { author, name, username, avatar }
+        // The seeder's page hint only drives a badge; absent on old seeders.
+        const m = list.find((x) => memberAuthor(x) === author)
+        for (const k of ['page', 'closed', 'moved']) {
+          if (isPlainObject(m) && typeof m[k] === 'boolean') hit[k] = m[k]
+        }
+        ranked.push({ rank, i, hit })
       } else {
         out.dropped++
       }

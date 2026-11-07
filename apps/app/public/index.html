@@ -7,6 +7,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no, viewport-fit=cover" />
     <title>%WEB_TITLE%</title>
     <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1c2622" />
     <meta name="theme-color" content="#fbf8f3" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <meta name="mobile-web-app-capable" content="yes" />
@@ -53,14 +55,38 @@
       #varanda-pre-splash p { margin: 0; }
       #varanda-pre-splash .word { display: flex; font: 800 22px/26px ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; letter-spacing: -0.2px; color: #1d6b4f; }
       #varanda-pre-splash .word span { display: inline-block; }
-      #varanda-pre-splash .hint { margin-top: -4px; font: 14px/20px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #4a554e; }
+      /* the app sets --varanda-progress (0..1) from real boot steps (src/ui/Splash.js) */
+      #varanda-pre-splash .bar { margin-top: -4px; width: 120px; height: 4px; border-radius: 2px; overflow: hidden; background: rgba(31,42,36,0.10); }
+      #varanda-pre-splash .bar span { display: block; height: 100%; border-radius: 2px; background: #1d6b4f; width: calc(var(--varanda-progress, 0.1) * 100%); }
+      @media (prefers-color-scheme: dark) {
+        html,
+        body,
+        #varanda-pre-splash { background: #1c2622; }
+        #varanda-pre-splash .word { color: #5dcaa0; }
+        #varanda-pre-splash .bar { background: rgba(244,240,230,0.14); }
+        #varanda-pre-splash .bar span { background: #5dcaa0; }
+        /* the chair art has an ink frame that vanishes on dark, so it keeps a cream pad */
+        #varanda-pre-splash .chair { background: #fbf8f3; border-radius: 28px; padding: 8px; }
+      }
+      /* once the bundle runs, html carries the scheme chosen in Ajustes, which can differ from the system's */
+      html[data-scheme=light] #varanda-pre-splash { background: #fbf8f3; }
+      html[data-scheme=light] #varanda-pre-splash .word { color: #1d6b4f; }
+      html[data-scheme=light] #varanda-pre-splash .bar { background: rgba(31,42,36,0.10); }
+      html[data-scheme=light] #varanda-pre-splash .bar span { background: #1d6b4f; }
+      html[data-scheme=light] #varanda-pre-splash .chair { background: none; padding: 0; }
+      html[data-scheme=dark] #varanda-pre-splash { background: #1c2622; }
+      html[data-scheme=dark] #varanda-pre-splash .word { color: #5dcaa0; }
+      html[data-scheme=dark] #varanda-pre-splash .bar { background: rgba(244,240,230,0.14); }
+      html[data-scheme=dark] #varanda-pre-splash .bar span { background: #5dcaa0; }
+      html[data-scheme=dark] #varanda-pre-splash .chair { background: #fbf8f3; border-radius: 28px; padding: 8px; }
       @media (prefers-reduced-motion: no-preference) {
         /* keep in sync with apps/app/src/ui/splashMotion.js */
         #varanda-pre-splash .chair { animation: vps-chair 700ms cubic-bezier(0.22, 1, 0.36, 1) both; }
         @keyframes vps-chair { from { opacity: 0; transform: translateY(16px) rotate(-6deg) scale(0.92); } to { opacity: 1; transform: none; } }
         #varanda-pre-splash .word span { animation: vps-rise 280ms ease-out both; animation-delay: calc(420ms + var(--i) * 40ms); }
         @keyframes vps-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-        #varanda-pre-splash .hint { animation: vps-fade 320ms ease-out 860ms both, vps-pulse 1200ms ease-in-out 1180ms infinite alternate; }
+        #varanda-pre-splash .bar { animation: vps-fade 320ms ease-out 860ms both, vps-pulse 1200ms ease-in-out 1180ms infinite alternate; }
+        #varanda-pre-splash .bar span { transition: width 400ms ease-out; }
         @keyframes vps-fade { from { opacity: 0; } to { opacity: 1; } }
         @keyframes vps-pulse { from { opacity: 1; } to { opacity: 0.6; } }
       }
@@ -75,7 +101,7 @@
     <noscript><style>#varanda-pre-splash { display: none; }</style></noscript>
     <!-- The root element for your Expo app. -->
     <div id="root"></div>
-    <div id="varanda-pre-splash" role="status" aria-label="Varanda, conectando">
+    <div id="varanda-pre-splash" role="status" aria-label="Varanda, carregando">
       <svg class="chair" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="96" height="96">
         <path d="M195.4 190Q202.7 195.2 200.6 202.2Q198.5 209.2 188.1 215.8Q177.7 222.4 159.5 225.3Q141.2 228.2 124.1 227.6Q107 227.1 94.3 222Q81.5 216.9 77.6 210.7Q73.6 204.4 78.6 198.1Q83.6 191.7 96.1 186.1Q108.7 180.6 121.8 178.7Q134.9 176.8 150.9 177.2Q166.9 177.6 177.5 181.3Q188 184.9 195.4 190Z" fill="#1f2a24" fill-opacity="0.13"/>
         <path d="M201.4 193.3Q197.8 186.8 194.5 180Q191.2 173.2 186.8 167.1Q182.4 161 178.4 154.7Q174.4 148.4 170.3 142Q166.3 135.7 164 128.7Q161.6 121.8 159.2 115.2Q156.8 108.7 154.7 101.6Q152.6 94.5 151.2 87.1Q149.8 79.7 148.4 72.3Q147.1 65 146 57.5Q145 50.1 142.5 42.9Q140 35.8 139.5 31.1Q138.9 26.5 138.9 25.3Q138.9 24 137 23.5Q135.1 22.9 133.6 24.2Q132.1 25.4 131.4 26.8Q130.7 28.1 131.7 32.7Q132.8 37.2 135.5 44.3Q138.2 51.4 139.5 58.8Q140.7 66.2 141.9 73.6Q143.2 81 143.5 88.6Q143.9 96.2 146.4 103.4Q148.9 110.7 151.2 118Q153.5 125.3 157 132.3Q160.4 139.2 164.6 145.4Q168.8 151.6 172.6 158.1Q176.4 164.6 180.7 170.7Q185 176.9 187.3 184.2Q189.7 191.5 193.9 197.7Q198.1 204 199.3 204.6Q200.5 205.3 202.4 205.2Q204.2 205.1 205.2 203.5Q206.2 201.9 205.6 200.9Q205.1 199.9 201.4 193.3ZM161.6 175.6Q167.8 171.3 172.8 165.6Q177.8 159.9 183.5 155Q189.1 150.1 194.9 144.9Q200.6 139.6 204.3 133Q208.1 126.4 208.4 118.4Q208.7 110.4 207.2 102.2Q205.8 94 198.8 90.7Q191.9 87.3 184.8 84.3Q177.7 81.2 170.4 79.5Q163.1 77.8 155.6 76.6Q148.2 75.5 147.6 75.4Q147 75.3 146 75.4Q144.9 75.5 143.9 76.7Q142.9 77.9 143.2 79.4Q143.6 80.9 144.5 81.3Q145.3 81.8 145.9 82Q146.5 82.2 153.7 84.3Q160.9 86.5 168.2 88.2Q175.5 89.9 182.3 92.5Q189.1 95.1 193.9 96.8Q198.7 98.4 200.2 104.6Q201.8 110.9 202 118Q202.2 125.1 198.5 129.9Q194.7 134.6 189 139Q183.3 143.4 177.7 148.4Q172.2 153.5 167.1 159.1Q162 164.7 156.1 169.3Q150.1 173.8 149.4 174.8Q148.8 175.8 149.2 177.6Q149.6 179.4 151.4 180.1Q153.1 180.7 154.2 180.3Q155.4 179.9 161.6 175.6Z" fill="#1f2a24"/>
@@ -100,7 +126,7 @@
         <path d="M123.9 219.4Q119.9 213 115.7 206.8Q111.4 200.5 108.2 193.7Q105.1 186.9 102.6 179.8Q100.2 172.6 96.4 166.1Q92.6 159.6 89 153Q85.5 146.4 81.3 140.4Q77.2 134.4 76.2 127.1Q75.3 119.9 74.7 112.3Q74.1 104.7 71.6 97.6Q69 90.5 67.4 83.2Q65.9 75.8 63.4 68.7Q60.9 61.6 60.3 54Q59.7 46.5 58.5 39.1Q57.3 31.6 57.2 31.3Q57.1 31 55.7 29.7Q54.3 28.5 51.9 27.9Q49.6 27.3 47.8 28.8Q45.9 30.4 46.4 31.8Q46.9 33.3 47 33.6Q47 33.9 47.1 41.6Q47.2 49.3 49.5 56.4Q51.9 63.6 54.2 70.8Q56.6 77.9 58.2 85.2Q59.8 92.6 61 100Q62.1 107.4 63.2 114.9Q64.4 122.3 66.3 129.9Q68.3 137.5 72.9 144Q77.4 150.5 80.4 157.5Q83.3 164.4 86.1 171.4Q89 178.4 92.6 184.9Q96.2 191.5 99.5 198.2Q102.9 205 107.6 211Q112.3 217 114.6 224.2Q116.9 231.5 117.9 232.9Q119 234.4 121.8 234.4Q124.7 234.4 126.3 232.1Q128 229.7 127.9 227.8Q127.8 225.8 123.9 219.4ZM86.1 195.9Q90.3 189.7 95.4 184.2Q100.6 178.7 106.2 173.7Q111.9 168.7 117.5 162.2Q123.1 155.8 122.1 147.4Q121.1 139 121.1 131.3Q121.1 123.6 120.5 114.4Q120 105.2 111.7 101.4Q103.5 97.6 95.7 96.7Q87.9 95.9 81.4 91.9Q74.8 88 70.4 85.7Q66 83.4 64.1 83.9Q62.1 84.4 60.1 86.2Q58.2 88 58.5 90.7Q58.9 93.3 60.5 93.8Q62.1 94.3 66.4 96.8Q70.7 99.3 77.9 101.5Q85.1 103.7 92.2 105.8Q99.4 107.9 105 109.9Q110.7 111.9 109.7 118.5Q108.8 125.1 110.7 132.2Q112.6 139.3 113 145.5Q113.5 151.7 108.4 156.4Q103.4 161.1 97.3 165.7Q91.3 170.4 87.3 176.9Q83.4 183.4 79 189.6Q74.7 195.8 73.5 196.6Q72.3 197.3 73.1 199.4Q73.8 201.5 76 202Q78.1 202.6 80 202.4Q81.8 202.2 86.1 195.9Z" fill="#1f2a24"/>
       </svg>
       <p class="word" aria-hidden="true"><span style="--i:0">V</span><span style="--i:1">a</span><span style="--i:2">r</span><span style="--i:3">a</span><span style="--i:4">n</span><span style="--i:5">d</span><span style="--i:6">a</span></p>
-      <p class="hint" aria-hidden="true">conectando…</p>
+      <div class="bar" aria-hidden="true"><span></span></div>
     </div>
   </body>
 </html>

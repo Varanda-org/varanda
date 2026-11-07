@@ -3,7 +3,6 @@ const fs = require('node:fs')
 const path = require('node:path')
 const vm = require('node:vm')
 const { spawnSync } = require('node:child_process')
-const { testnet } = require('./helpers/net')
 const { parseArgs, HELP, UsageError } = require('../lib/cli')
 
 const root = path.resolve(__dirname, '..')
@@ -31,7 +30,7 @@ Comandos:
   seed key|cert add          chave do semeador e seu certificado (--cert-file)
   seed list|status           diários admitidos e estado do semeador
   seed drop <chave>          apaga um diário do semeador parado
-  account                    serviço de vínculo de conta Google (--account-port, --account-host)
+  account                    serviço de vínculo de conta Google (--account-port, --account-host); páginas com VARANDA_PAGE_KEYS e VARANDA_SEEDER_WS, busca de GIF com VARANDA_GIF_API_URL e VARANDA_GIF_API_KEY (desligadas por padrão)
   account key                chave do emissor do serviço de conta (imprime só a pública)
   account cert add           grava o certificado do emissor (--cert-file <f>)
   account push-key           chave dos avisos push da versão web (imprime só a pública)
@@ -45,8 +44,8 @@ Comandos:
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
   mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
-  group create               cria um grupo (--name, --join open|approval, --private cifrado)
-  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele
+  group create               cria um grupo numa comunidade (--community, --name, --join open|approval, --private cifrado)
+  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele (--community se o grupo ainda não chegou)
   group post <chave>         publica no grupo (--text)
   group read <chave>         lê o grupo, das mais novas (--limit, --before <at>,<escritor>,<seq>)
   group list                 grupos dos quais você participa
@@ -55,10 +54,25 @@ Comandos:
   group hide <chave>         oculta uma mensagem (--to <escritor>:<seq>, --undo)
   group meta <chave>         muda nome ou entrada do grupo (--name, --join)
   group rekey <chave>        gera uma nova chave do grupo privado
-  community create           cria uma comunidade de grupos (--name)
-  community link <comunidade> <grupo>  vincula um grupo à comunidade (--undo desfaz)
-  community admin <comunidade>         nomeia um administrador da comunidade (--member, --undo)
-  community info <chave>     dados da comunidade e seus grupos
+  community create           cria uma comunidade com o grupo Geral (--name, --join open|approval)
+  community join|leave <chave>         entra na comunidade (e no Geral) e sai dela
+  community leave <chave> --force      quem criou sai sem esperar os grupos que ainda não chegaram
+  community info|list        dados da comunidade e seus grupos; suas comunidades
+  community members|requests <chave>   membros e pedidos de entrada da comunidade
+  community admit|ban|admin <chave>    modera um membro da comunidade (--member, --undo)
+  community meta <chave>     muda nome ou entrada da comunidade (--name, --join)
+  community remove-group <chave> <grupo>  tira um grupo da lista da comunidade (quem criou, de volta após sair; --undo devolve)
+  page register              registra o delegado de página deste nó (imprime só a chave pública)
+  page terms                 aceita os Termos para o delegado no serviço de conta
+  page create                cria uma página (--username, --name, --bio)
+  page list                  páginas que você tem ou administra, convites e ofertas
+  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 4)
+  page photo                 foto da página (--page, --file, --name, --bio)
+  page follow|unfollow       a página segue ou deixa de seguir uma chave (--page, --key)
+  page notices               avisos da página (--page, --limit)
+  page close|move            encerra a página ou muda a sua chave (--page)
+  page join|leave            a página entra ou sai (--page, --community ou --group)
+  page group-post            a página publica num grupo (--page, --group, --text)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -66,12 +80,14 @@ Opções globais:
   --bootstrap <host:porta>   repetível (ou VARANDA_BOOTSTRAP, separado por vírgula)
   --dht-host <ip>            endereço local da DHT (ou VARANDA_DHT_HOST)
   --json                     saída JSON na última linha
+  page: VARANDA_ACCOUNT_ORIGIN, origem https do serviço de conta
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private
-  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.`
+  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes
+  --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
+  --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).`
 
 function parse (argv = [], env = {}) {
   return parseArgs(argv, env, root)
@@ -93,7 +109,7 @@ function spawn (argv, extraEnv = {}) {
   const env = { ...process.env }
   delete env.VARANDA_PUSH_TOKEN
   delete env.VARANDA_ACCOUNT_HTTP
-  for (const name of ['VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN', 'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST', 'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST']) delete env[name]
+  for (const name of ['VARANDA_PAGE_KEYS', 'VARANDA_SEEDER_WS', 'VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN', 'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST', 'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST']) delete env[name]
   return spawnSync(process.execPath, [bin, ...argv], {
     cwd: root,
     env: { ...env, ...extraEnv },
@@ -166,9 +182,23 @@ test('CLI push settings are environment only and validate without echoing values
   usage(t, ['--account-http', 'http://127.0.0.1:8790'], 'opção desconhecida --account-http')
 })
 
+test('CLI page flags: keys checked, --file repeatable, the account origin raw', (t) => {
+  const k = 'ab'.repeat(32)
+  const f = parse(['page', 'post', '--page', k.toUpperCase(), '--key', k, '--group', k, '--username', 'cafe', '--file', 'a.jpg', '--file', '/tmp/b.png'])
+  t.is(f.page, k)
+  t.is(f.key, k)
+  t.is(f.group, k)
+  t.is(f.username, 'cafe')
+  t.alike(f.files, [path.join(root, 'a.jpg'), '/tmp/b.png'])
+  usage(t, ['--page', 'xyz'], 'chave da página inválida')
+  usage(t, ['--group', 'xyz'], 'chave do grupo inválida')
+  usage(t, ['--key', 'xyz'], 'chave inválida')
+  t.is(parse([], { VARANDA_ACCOUNT_ORIGIN: 'https://varanda.test' }).accountOrigin, 'https://varanda.test')
+  t.is(parse([], { VARANDA_ACCOUNT_ORIGIN: 'http://example.com' }).accountOrigin, 'http://example.com', 'checked by the page commands only')
+})
+
 test('CLI parser, R5 help and command router', async (t) => {
   t.timeout(60000)
-  await testnet(t)
 
   t.is(HELP, expectedHelp)
   t.alike(parse(), {
@@ -178,18 +208,28 @@ test('CLI parser, R5 help and command router', async (t) => {
     json: false,
     once: false,
     noPublish: false,
+    noDm: false,
+    blobBytes: null,
     newList: false,
     yes: false,
     undo: false,
     private: false,
+    force: false,
     dataDir: path.join(root, 'data'),
     association: null,
     bootstrap: undefined,
     timeoutMs: null,
     member: null,
+    community: null,
     seeder: null,
     issuer: null,
     moderator: null,
+    page: null,
+    key: null,
+    group: null,
+    username: null,
+    files: [],
+    accountOrigin: null,
     dhtHost: null,
     healthPort: null,
     healthHost: null,
@@ -231,6 +271,14 @@ test('CLI parser, R5 help and command router', async (t) => {
   for (const flag of ['--help', '-h']) t.is(parse([flag]).help, true)
   t.is(parse(['--json', '--json']).json, true)
   t.is(parse(['--once']).once, true)
+  t.is(parse(['seed', '--no-dm']).noDm, true)
+  t.is(parse(['seed']).noDm, false)
+  t.is(parse(['seed']).blobBytes, null, 'no --blob-bytes keeps the seeder default')
+  t.is(parse(['seed', '--blob-bytes', '32768']).blobBytes, 32768, 'one chunk is the minimum')
+  usage(t, ['seed', '--blob-bytes', '32767'], 'blob-bytes inválido')
+  usage(t, ['seed', '--blob-bytes', '065536'], 'blob-bytes inválido')
+  usage(t, ['seed', '--blob-bytes', '0'], 'blob-bytes inválido')
+  usage(t, ['seed', '--blob-bytes', '1099511627777'], 'blob-bytes acima do máximo de 1099511627776')
   t.is(parse(['mod', 'block', upperKey, '--no-publish']).noPublish, true)
   t.alike(parse(['mod', 'block', upperKey, '--no-publish']).positionals, ['block', upperKey])
   t.is(parse(['mod', 'block', upperKey, '--new-list']).newList, true)
@@ -241,6 +289,8 @@ test('CLI parser, R5 help and command router', async (t) => {
   t.is(parse(['mod', 'apply', '--yes']).yes, true)
   t.alike(parse(['mod', 'apply', '--yes']).positionals, ['apply'])
   usage(t, ['--yes=true'], 'opção desconhecida --yes=true')
+  t.is(parse(['community', 'leave', upperKey, '--force']).force, true)
+  usage(t, ['--force=true'], 'opção desconhecida --force=true')
   usage(t, ['--new-list=true'], 'opção desconhecida --new-list=true')
   usage(t, ['--no-publish=true'], 'opção desconhecida --no-publish=true')
   usage(t, ['--reason', 'spam'], 'opção desconhecida --reason')
@@ -250,6 +300,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     association: [upperKey, 'association', lowerKey],
     'timeout-ms': ['12', 'timeoutMs', 12],
     member: [upperKey, 'member', lowerKey],
+    community: [upperKey, 'community', lowerKey],
     seeder: [upperKey, 'seeder', lowerKey],
     issuer: [upperKey, 'issuer', lowerKey],
     moderator: [upperKey, 'moderator', lowerKey],
@@ -271,7 +322,8 @@ test('CLI parser, R5 help and command router', async (t) => {
     'ws-host': ['0.0.0.0', 'wsHost', '0.0.0.0'],
     'account-port': ['8790', 'accountPort', 8790],
     'account-host': ['127.0.0.1', 'accountHost', '127.0.0.1'],
-    server: ['https://varanda.example', 'server', 'https://varanda.example']
+    server: ['https://varanda.example', 'server', 'https://varanda.example'],
+    'blob-bytes': ['65536', 'blobBytes', 65536]
   }
   for (const [name, [value, property, expected]] of Object.entries(strings)) {
     const flag = '--' + name
@@ -304,7 +356,7 @@ test('CLI parser, R5 help and command router', async (t) => {
   t.is(parse(['--association', upperKey], { VARANDA_ASSOCIATION: 'invalid' }).association, lowerKey)
   usage(t, [], 'chave da associação inválida', { VARANDA_ASSOCIATION: 'invalid' })
   for (const invalid of ['', 'g'.repeat(64), 'a'.repeat(63), 'a'.repeat(65), upperKey + '\n']) {
-    for (const name of ['member', 'author', 'seeder', 'moderator']) usage(t, ['--' + name, invalid], 'chave inválida')
+    for (const name of ['member', 'community', 'author', 'seeder', 'moderator']) usage(t, ['--' + name, invalid], 'chave inválida')
     if (invalid) usage(t, ['--association', invalid], 'chave da associação inválida')
   }
 
@@ -498,4 +550,17 @@ test('README and protocol help blocks match the root CLI byte for byte', (t) => 
   const flags = parse(['delete', '--to', upperKey + ':42'])
   t.is(flags.command, 'delete')
   t.alike(flags.to, { author: lowerKey, seq: 42 })
+})
+
+test('account refuses a malformed page key or seeder socket without echoing it', (t) => {
+  const badKey = spawn(['account'], { VARANDA_PAGE_KEYS: upperKey })
+  t.is(badKey.status, 2)
+  t.is(badKey.stderr, 'uso: VARANDA_PAGE_KEYS inválida: use 64 caracteres hexadecimais minúsculos\n')
+  t.is(badKey.stdout, '')
+  t.absent(badKey.stderr.includes(upperKey), 'the page key is never printed')
+
+  const badSocket = spawn(['account'], { VARANDA_PAGE_KEYS: lowerKey, VARANDA_SEEDER_WS: 'wss://127.0.0.1:8789' })
+  t.is(badSocket.status, 2)
+  t.is(badSocket.stderr, 'uso: VARANDA_SEEDER_WS inválido\n')
+  t.is(badSocket.stdout, '')
 })

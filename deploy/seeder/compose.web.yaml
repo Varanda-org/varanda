@@ -141,6 +141,10 @@ services:
       # mudar. Com a rede vazia ninguém entra: a primeira pessoa precisa se
       # vincular com a variável vazia.
       VARANDA_INVITES_PER_WEEK: "${VARANDA_INVITES_PER_WEEK:-}"
+      # Convites de surpresa. Vazio = desligado; 1 = os convites da semana
+      # abrem um a um em horários sorteados, com um aviso no aparelho. Exige
+      # VARANDA_INVITES_PER_WEEK.
+      VARANDA_INVITE_DROPS: "${VARANDA_INVITE_DROPS:-}"
       # Verificação de idade (Didit), opcional. Os dois vazios mantêm a
       # checagem desligada; os dois definidos a ligam para todo membro
       # hospedado, inclusive quem já está vinculado. Só o account recebe estas
@@ -149,29 +153,7 @@ services:
       VARANDA_DIDIT_API_KEY: "${VARANDA_DIDIT_API_KEY:-}"
       VARANDA_DIDIT_WORKFLOW_ID: "${VARANDA_DIDIT_WORKFLOW_ID:-}"
       VARANDA_DIDIT_DAILY_LIMIT: "${VARANDA_DIDIT_DAILY_LIMIT:-}"
-      # Conta de pagamentos (Hodle), opcional. A chave vazia mantém o recurso
-      # desligado. O modo vazio é cadastro (só subconta e verificação); mudar
-      # a imagem nunca liga movimento de dinheiro. Só o account recebe estas
-      # variáveis. Os vazios mantêm os padrões do serviço.
-      VARANDA_HODLE_API_KEY: "${VARANDA_HODLE_API_KEY:-}"
-      VARANDA_HODLE_NETWORK: "${VARANDA_HODLE_NETWORK:-}"
-      VARANDA_HODLE_MODE: "${VARANDA_HODLE_MODE:-}"
-      VARANDA_HODLE_DAILY_LIMIT: "${VARANDA_HODLE_DAILY_LIMIT:-}"
-      # Pix e taxa da Varanda (modo pix), opcionais. Vazios
-      # mantêm os padrões: teto por operação de R$ 3.000, sem webhook, taxa
-      # zero. Qualquer taxa exige VARANDA_FEE_TREASURY.
-      VARANDA_HODLE_MAX_CENTS: "${VARANDA_HODLE_MAX_CENTS:-}"
-      VARANDA_HODLE_WEBHOOK_SECRETS: "${VARANDA_HODLE_WEBHOOK_SECRETS:-}"
-      VARANDA_FEE_TRANSFER_CENTS: "${VARANDA_FEE_TRANSFER_CENTS:-}"
-      VARANDA_FEE_TRANSFER_BPS: "${VARANDA_FEE_TRANSFER_BPS:-}"
-      VARANDA_FEE_PAYOUT_CENTS: "${VARANDA_FEE_PAYOUT_CENTS:-}"
-      VARANDA_FEE_PAYOUT_BPS: "${VARANDA_FEE_PAYOUT_BPS:-}"
-      VARANDA_FEE_CRYPTO_CENTS: "${VARANDA_FEE_CRYPTO_CENTS:-}"
-      VARANDA_FEE_CRYPTO_BPS: "${VARANDA_FEE_CRYPTO_BPS:-}"
-      VARANDA_FEE_DEPOSIT_CENTS: "${VARANDA_FEE_DEPOSIT_CENTS:-}"
-      VARANDA_FEE_DEPOSIT_BPS: "${VARANDA_FEE_DEPOSIT_BPS:-}"
-      VARANDA_FEE_SWAP_BPS: "${VARANDA_FEE_SWAP_BPS:-}"
-      VARANDA_FEE_TREASURY: "${VARANDA_FEE_TREASURY:-}"
+      VARANDA_AGE_SINCE: "${VARANDA_AGE_SINCE:-}"
       # Limites do serviço account. Vazios mantêm os padrões do serviço.
       VARANDA_ACCOUNT_MAX_CONNECTIONS: "${VARANDA_ACCOUNT_MAX_CONNECTIONS:-}"
       VARANDA_ACCOUNT_RATE: "${VARANDA_ACCOUNT_RATE:-}"
@@ -192,6 +174,17 @@ services:
       # O mesmo segredo do serviço seeder para os avisos push; vazio desliga
       # os avisos. A chave VAPID fica em push-vapid.json, em account-data.
       VARANDA_PUSH_TOKEN: "${VARANDA_PUSH_TOKEN:-}"
+      # Páginas: a chave que sela page-keys.json (64 hex); vazio desliga as
+      # páginas. A conta grava os diários delas e os entrega ao semeador pelo
+      # WebSocket dele em 127.0.0.1:8789. Só loopback.
+      VARANDA_PAGE_KEYS: "${VARANDA_PAGE_KEYS:-}"
+      VARANDA_SEEDER_WS: "${VARANDA_SEEDER_WS:-ws://127.0.0.1:8789}"
+      # Busca de GIF: as duas primeiras juntas, ou nenhuma (desligada). A
+      # chave é segredo e nunca é impressa; a busca sai do endereço do serviço,
+      # nunca do aparelho de quem busca.
+      VARANDA_GIF_API_URL: "${VARANDA_GIF_API_URL:-}"
+      VARANDA_GIF_API_KEY: "${VARANDA_GIF_API_KEY:-}"
+      VARANDA_GIF_MEDIA_HOSTS: "${VARANDA_GIF_MEDIA_HOSTS:-}"
       # Pesos do modelo, dentro de account-data; baixados uma vez pelo
       # operador (scripts/fetch-ai-model.js), nunca em tempo de execução.
       VARANDA_AI_MODEL_DIR: "/data/ai-model"

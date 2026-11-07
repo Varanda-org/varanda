@@ -1,13 +1,57 @@
 // Web: one module-level store shared by the shell's note and Ajustes, so a tap
 // on either already holds the registration read earlier.
-/* global localStorage */
+/* global localStorage, navigator */
 
 import { useSyncExternalStore } from 'react'
 import { pushCheck, pushKey } from './account'
 import { disablePush, enablePush, getPushState, pushSupportNow } from './pushClient'
 import { createPushStore } from './push-offer'
+import { requestDmOpen, requestDmWake } from './dm-open'
+import { vitrineEnabled } from './vitrine/enabled'
+
+/* global __DEV__ */
+const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
 
 const store = createPushStore({ getPushState, pushKey, pushCheck, enablePush, disablePush, pushSupportNow, storage: () => localStorage })
+
+function isDmOpen (d) {
+  return d !== null && typeof d === 'object' && !Array.isArray(d) && Object.keys(d).length === 1 && d.type === 'varanda-dm-open'
+}
+
+function inFront () {
+  try {
+    return document.visibilityState === 'visible' && document.hasFocus() === true
+  } catch {
+    return false
+  }
+}
+
+function isDmWake (d) {
+  if (d === null || typeof d !== 'object') return false
+  const proto = Object.getPrototypeOf(d)
+  return (proto === Object.prototype || proto === null) && Reflect.ownKeys(d).length === 1 && d.type === 'varanda-dm-wake'
+}
+
+// A click on the DM wake notice (scripts/sw.js) opens Conversas. Only this
+// origin's worker posts to navigator.serviceWorker.
+try {
+  const sw = typeof navigator === 'object' && navigator !== null ? navigator.serviceWorker : null
+  if (sw) {
+    sw.addEventListener('message', (e) => {
+      try {
+        if (isDmOpen(e && e.data)) requestDmOpen()
+        if (isDmWake(e && e.data)) {
+          // The worker hides the notice only once the app says it took the
+          // wake: not before App.js is listening, and not once the person
+          // has left this window (any other answer makes it show at once).
+          const taken = requestDmWake()
+          const port = e.ports && e.ports[0]
+          if (port) port.postMessage({ type: taken && inFront() ? 'varanda-dm-wake-ok' : 'varanda-dm-wake-no' })
+        }
+      } catch {}
+    })
+  }
+} catch {}
 
 export function getPush () {
   return store.getSnapshot()
@@ -30,6 +74,9 @@ export function togglePush (arg) {
 }
 
 export function turnOffPush (arg) {
+  // Ajustes turns push off before Sair and Recomeçar, which the Vitrine
+  // refuses: it must not drop a real subscription this origin already holds.
+  if (VITRINE) return Promise.resolve()
   return store.offHere(arg)
 }
 

@@ -38,9 +38,11 @@ import { freshKeys, hasFresh, syncLengths } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
-import { applyToggle, countsAfter, emptyState, mergeCounts, secondPassRefs } from '../engagement'
-import { DeletePrompt, isBusy, isDiaryGone, isSeederDown, useDelete } from './Conversa'
+import { applyToggle, countsAfter, diaryPeekSlots, emptyState, mergeCounts, poolMap, secondPassRefs } from '../engagement'
+import { DeletePrompt, actingPageKey, isBusy, isDiaryGone, isSeederDown, memberKeyOf, pageEngagement, readEngagement, setEngagement, useActing, useDelete } from './Conversa'
 import { canDelete } from '../deletion'
+import { label as actingLabel } from '../actingAs'
+import { pagesFeedKeys, pagesFollows } from '../pages'
 import { revokeDeletedMedia } from '../media/cache'
 import { HELP } from '../help'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
@@ -49,7 +51,10 @@ import { Icon } from '../ui/Icon'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
-import { colors, type } from '../ui/theme'
+import { noteLocalWrite } from '../localWrites'
+import { FEED_FIRST_ROWS, feedDetailsReady } from '../splashGate'
+import { layout, type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 // Feed skip reasons that come from the association's signed blocklist.
 const MODERATION_REASONS = ['blocked', 'revoked-issuer']
@@ -58,7 +63,9 @@ const TOAST_MS = 4000
 const LOG_WINDOW = 36
 const FALLBACK_WINDOWS = 4
 // Transient peek errors: 'semeador indisponível' is retried once after 2 s,
-// 'ocupado' up to 3 times with a growing pause (like Conversa's peekAll); if
+// 'ocupado' (diaryPeekSlots keeps the app within the node's limit; a
+// page.read probe can still take a slot) up to 3 times with a growing pause
+// (like Conversa's peekAll); if
 // it persists, the refs stay undefined (a later pass retries them).
 const SEEDER_RETRY_MS = 2000
 const BUSY_RETRY_MS = 600
@@ -102,6 +109,12 @@ function chunks (list, size) {
   return out
 }
 
+// A page like/repost sent with an unknown outcome, by page|kind|ref ->
+// { retry, on }: the next tap resends those signed bytes and never signs a
+// new statement. Module scope, so leaving the screen keeps it.
+const pageRetries = new Map()
+const UNCERTAIN_TOGGLE = 'Não sabemos se deu certo. Toque de novo para reenviar o mesmo pedido.'
+
 const seqOfRef = (ref) => Number(ref.slice(ref.indexOf(':') + 1))
 const authorOfRef = (ref) => ref.slice(0, ref.indexOf(':'))
 
@@ -126,6 +139,10 @@ export function useSocial ({ ownKey, onToast }) {
   const node = useNode()
   const names = useNames()
   const { request, hosted } = node
+  // Read at call time: the page statements go through the node (a core node
+  // sends them to its account origin) while the callbacks keep their deps.
+  const nodeRef = useRef(node)
+  nodeRef.current = node
   const online = node.online !== false
   const { learnMany, resolveMany } = names
   // flags: the index's `indexing` / `complete` of the counts shown.
@@ -166,6 +183,16 @@ export function useSocial ({ ownKey, onToast }) {
   // toggle started or ended after that read started.
   const clockRef = useRef(0)
   const touchedRef = useRef(new Map())
+  // The refs whose own like/repost state was read, to read it again for
+  // another acting identity.
+  const shownRef = useRef(new Set())
+  // The page whose own likes and reposts are unknown (its status read failed,
+  // or it was just switched to): its hearts stay neutral, the next ingest
+  // reads its status fresh, and a tap reads it before deciding anything.
+  const unknownPageRef = useRef(null)
+  // page|kind|ref of the uncertain toggles whose optimistic count shift is
+  // still on screen.
+  const shiftedRef = useRef(new Set())
   useEffect(() => {
     mountedRef.current = true
     return () => {
@@ -178,10 +205,21 @@ export function useSocial ({ ownKey, onToast }) {
   const [toast, setToast] = useState('')
   const toastTimer = useRef(null)
   useEffect(() => () => clearTimeout(toastTimer.current), [])
-  const showToast = useCallback((text) => {
-    if (typeof onToast === 'function') return onToast(text)
+  const showToast = useCallback((input) => {
+    if (typeof onToast === 'function') return onToast(input)
     clearTimeout(toastTimer.current)
-    setToast(text)
+    const t = typeof input === 'string' ? { text: input } : input
+    const withAction = t && typeof t.onAction === 'function' && t.actionLabel
+    setToast(withAction
+      ? {
+          ...t,
+          onAction: () => {
+            clearTimeout(toastTimer.current)
+            setToast('')
+            t.onAction()
+          }
+        }
+      : (t && t.text) || '')
     toastTimer.current = setTimeout(() => setToast(''), TOAST_MS)
   }, [onToast])
 
@@ -231,7 +269,8 @@ export function useSocial ({ ownKey, onToast }) {
       let failure = null
       for (;;) {
         try {
-          peek = await request('diary.peek', chunk)
+          // A screen gone while its peek waited for a slot frees it at once.
+          peek = await diaryPeekSlots.run(() => mountedRef.current ? request('diary.peek', chunk) : Promise.reject(new Error('unmounted')))
           break
         } catch (err) {
           if (isSeederDown(err) && !seederRetried) {
@@ -343,29 +382,38 @@ export function useSocial ({ ownKey, onToast }) {
     if ([...byAuthor.keys()].some((a) => !isKnown(a))) await loadFollows()
     const found = new Map()
     const missed = []
-    for (const [author, refs] of byAuthor) {
+    await poolMap([...byAuthor], 2, async ([author, refs]) => {
+      // A screen gone or a dropped pass reads no further authors.
+      if (!mountedRef.current || epoch !== epochRef.current) return
       let got
       try {
         got = await readAuthor(author, refs)
       } catch {
         got = new Map()
       }
-      if (!mountedRef.current) return []
+      if (!mountedRef.current) return
+      if (epoch !== epochRef.current) return
+      const part = new Map()
       const later = got.transient || new Set()
-      for (const ref of refs) found.set(ref, got.get(ref) || (later.has(ref) ? TRANSIENT : null))
+      for (const ref of refs) {
+        const item = got.get(ref) || (later.has(ref) ? TRANSIENT : null)
+        part.set(ref, item)
+        found.set(ref, item)
+      }
       if (got.memberMiss && got.memberMiss.ok === false) missed.push({ refs, retryAfterMs: got.memberMiss.retryAfterMs })
-    }
+      change((prev) => {
+        const originals = new Map(prev.originals)
+        for (const [ref, item] of part) {
+          const cur = originals.get(ref)
+          if (!cur || cur === TRANSIENT) originals.set(ref, item)
+          else if (replaceNameless && !hasName(cur) && hasName(item)) originals.set(ref, item)
+        }
+        return { originals }
+      })
+    })
+    if (!mountedRef.current) return []
     // The originals were dropped while reading: these results are stale.
     if (epoch !== epochRef.current) return []
-    change((prev) => {
-      const originals = new Map(prev.originals)
-      for (const [ref, item] of found) {
-        const cur = originals.get(ref)
-        if (!cur || cur === TRANSIENT) originals.set(ref, item)
-        else if (replaceNameless && !hasName(cur) && hasName(item)) originals.set(ref, item)
-      }
-      return { originals }
-    })
     // Failed member lookup, and the original came back with no name: one
     // later re-read of exactly those refs. Not on the replace path (that
     // re-read is the one try; another failure must not schedule a loop).
@@ -394,10 +442,46 @@ export function useSocial ({ ownKey, onToast }) {
       knownRef.current = new Set()
       followsLoadedRef.current = false
       epochRef.current++
+      shownRef.current = new Set()
       seenRef.current = { need: new Set(), local: new Map() }
       dropNameRetries()
     }
     for (const a of authors) if (typeof a === 'string') knownRef.current.add(a.toLowerCase())
+    const refs = [...new Set(shown.filter((r) => typeof r === 'string'))]
+    if (reset) change(() => ({ flags: { indexing: false, complete: true } }))
+    // The chunks answer in any order: indexing is on when any of this
+    // ingest's answers says so, never switched off by a slower one.
+    let indexing = false
+    const countsDone = hosted && online && refs.length > 0
+      ? Promise.all(chunks(refs, COUNTS_MAX).map(async (chunk) => {
+        const started = ++clockRef.current
+        const r = await fetchCounts(chunk)
+        if (!mountedRef.current) return
+        if (!r.ok) {
+          // This chunk's numbers never arrived. indexing stays as it is; an
+          // incomplete index is what CountsNote already explains.
+          change((prev) => ({ flags: { indexing: prev.flags.indexing, complete: false } }))
+          return
+        }
+        indexing = indexing || r.value.indexing === true
+        change((prev) => {
+          const fetched = {}
+          for (const ref of Object.keys(r.value.counts)) {
+            if (prev.pending.has(ref)) continue
+            // A toggle that settled while this read was in flight already
+            // moved the number on screen; an answer read before it would
+            // undo that. With no number yet there is nothing to keep.
+            const touched = Math.max(touchedRef.current.get('liked|' + ref) || 0, touchedRef.current.get('reposted|' + ref) || 0)
+            if (touched > started && prev.counts.has(ref)) continue
+            fetched[ref] = r.value.counts[ref]
+          }
+          // Keep the index flags: indexing hides the counts, an incomplete
+          // index gets a note.
+          const flags = { indexing, complete: prev.flags.complete && r.value.complete !== false }
+          return { counts: mergeCounts(prev.counts, fetched), flags }
+        })
+      })).catch(() => {})
+      : Promise.resolve()
     if (reset) await loadFollows()
     // Reply parents: only those of strangers are read (verified, with the
     // name and @nome); own and followed parent authors come from profile.read.
@@ -420,21 +504,40 @@ export function useSocial ({ ownKey, onToast }) {
       // association has blocked since.
       const originals = reset ? new Map() : new Map(prev.originals)
       for (const [ref, item] of local) originals.set(ref, item)
-      return { originals, ...(reset ? { flags: { indexing: false, complete: true } } : {}) }
+      return { originals }
     })
-    const refs = [...new Set(shown.filter((r) => typeof r === 'string'))]
+    // A reload (or a page whose state is unknown) reads the page's status
+    // fresh. When that fails the hearts stay unknown, not 'all off', and the
+    // next refresh tries again.
+    const asNow = actingPageKey()
+    let ownKnown = true
+    if (asNow !== null && refs.length > 0 && (reset || unknownPageRef.current === asNow)) {
+      try {
+        await pageEngagement(nodeRef.current, asNow, { fresh: true })
+        if (unknownPageRef.current === asNow) unknownPageRef.current = null
+      } catch {
+        if (asNow === actingPageKey()) unknownPageRef.current = asNow
+        ownKnown = false
+      }
+      if (!mountedRef.current) return
+    }
+    if (!ownKnown) shownRef.current = new Set([...shownRef.current, ...refs])
     // engagement.read first: a native read preempts the sync; the browser
     // node serves it from the live run's cores. Batching the chunks still
     // saves requests and native preemptions.
-    for (const chunk of chunks(refs, ENGAGEMENT_LIMIT_MAX)) {
+    for (const chunk of ownKnown ? chunks(refs, ENGAGEMENT_LIMIT_MAX) : []) {
       const started = ++clockRef.current
+      const as = actingPageKey()
       try {
-        const r = await request('engagement.read', { refs: chunk })
+        shownRef.current = new Set([...shownRef.current, ...chunk])
+        const r = await readEngagement(nodeRef.current, chunk, as)
         const liked = new Set(Array.isArray(r.liked) ? r.liked : [])
         const reposted = new Set(Array.isArray(r.reposted) ? r.reposted : [])
         // A read never overrides a ref with a pending toggle or a toggle that
-        // started or ended after this read started.
-        const fresh = (field, ref) => !socialRef.current.pending.has(ref) && !((touchedRef.current.get(field + '|' + ref) || 0) > started)
+        // started or ended after this read started, and a read made for
+        // another identity than the one acted as now changes nothing.
+        const same = as === actingPageKey()
+        const fresh = (field, ref) => same && !socialRef.current.pending.has(ref) && !((touchedRef.current.get(field + '|' + ref) || 0) > started)
         change((prev) => {
           let eng = prev.eng
           for (const ref of chunk) {
@@ -443,28 +546,10 @@ export function useSocial ({ ownKey, onToast }) {
           }
           return { eng }
         })
-      } catch {}
-      if (!mountedRef.current) return
-    }
-    if (hosted && online) {
-      for (const chunk of chunks(refs, COUNTS_MAX)) {
-        const r = await fetchCounts(chunk)
-        if (!mountedRef.current) return
-        if (!r.ok) {
-          // This chunk's numbers never arrived. indexing stays as it is; an
-          // incomplete index is what CountsNote already explains.
-          change((prev) => ({ flags: { indexing: prev.flags.indexing, complete: false } }))
-          continue
-        }
-        change((prev) => {
-          const fetched = {}
-          for (const ref of Object.keys(r.value.counts)) if (!prev.pending.has(ref)) fetched[ref] = r.value.counts[ref]
-          // Keep the index flags: indexing hides the counts, an incomplete
-          // index gets a note.
-          const flags = { indexing: r.value.indexing === true, complete: prev.flags.complete && r.value.complete !== false }
-          return { counts: mergeCounts(prev.counts, fetched), flags }
-        })
+      } catch {
+        if (as !== null && as === actingPageKey()) unknownPageRef.current = as
       }
+      if (!mountedRef.current) return
     }
     // Originals, then (one level) what those originals quote or reply to,
     // then the page's stranger reply parents in a pass of their own: a slow
@@ -482,6 +567,7 @@ export function useSocial ({ ownKey, onToast }) {
     const second = secondPassRefs(firstRefs.map(at).filter(Boolean))
     if (second.length > 0 && mountedRef.current) await resolve(second)
     if (strangers.length > 0 && mountedRef.current) await resolve([...new Set(strangers)])
+    await countsDone
   }, [request, hosted, online, change, resolve, loadFollows, isKnown, dropNameRetries])
 
   // Stable identity (the screens' load callbacks depend on it): the queued
@@ -494,14 +580,22 @@ export function useSocial ({ ownKey, onToast }) {
     return run
   }, [])
 
-  const toggle = useCallback(async (kind, ref) => {
-    if ((kind !== 'like' && kind !== 'repost') || typeof ref !== 'string' || socialRef.current.pending.has(ref)) return
+  const toggle = useCallback(async (kind, ref, requestedOn) => {
+    if ((kind !== 'like' && kind !== 'repost') || typeof ref !== 'string') return
+    if (socialRef.current.pending.has(ref)) {
+      if (requestedOn === false) showToast('Aguarde um instante e tente de novo.')
+      return
+    }
     const field = kind === 'like' ? 'liked' : 'reposted'
-    const was = socialRef.current.eng[field].has(ref)
-    const on = !was
-    const delta = on ? 1 : -1
+    // The identity this toggle is for: its answer is that identity's state.
+    const as = actingPageKey()
+    // The member is part of the key: a held retry resends that member's
+    // signed statement, never another member's after a sign-out on this device.
+    const key = (own || '') + '|' + (as || '') + '|' + kind + '|' + ref
+    // An uncertain page toggle of this ref: this tap resends it, unchanged.
+    const held = as !== null ? pageRetries.get(key) || null : null
     const shift = (prev, d) => {
-      if (!prev.counts.has(ref)) return prev.counts
+      if (d === 0 || !prev.counts.has(ref)) return prev.counts
       const counts = new Map(prev.counts)
       counts.set(ref, countsAfter(prev.counts.get(ref), kind, d))
       return counts
@@ -512,26 +606,87 @@ export function useSocial ({ ownKey, onToast }) {
       else pending.delete(ref)
       return pending
     }
+    // The page's own state is unknown: read it before deciding on/off. When
+    // it is not what the heart showed, the tap only shows the real state.
+    if (held === null && as !== null && unknownPageRef.current === as) {
+      const before = socialRef.current.eng[field].has(ref)
+      change((prev) => ({ pending: pendingWith(prev, true) }))
+      let entry
+      try {
+        entry = await pageEngagement(nodeRef.current, as, { fresh: true })
+      } catch (err) {
+        if (!mountedRef.current) return
+        change((prev) => ({ pending: pendingWith(prev, false) }))
+        showToast(errorText(err))
+        return
+      }
+      if (!mountedRef.current) return
+      if (unknownPageRef.current === as) unknownPageRef.current = null
+      const same = as === actingPageKey()
+      touchedRef.current.set(field + '|' + ref, ++clockRef.current)
+      change((prev) => ({ eng: same ? applyToggle(prev.eng, kind, ref, entry[field].has(ref)) : prev.eng, pending: pendingWith(prev, false) }))
+      if (!same) return
+      if (shownRef.current.size > 0) ingest({ shown: [...shownRef.current] })
+      if (entry[field].has(ref) !== before) return
+    }
+    const shown = socialRef.current.eng[field].has(ref)
+    // The undo always sends off: idempotent on the diary, and it still lands
+    // when a refresh has cleared the local state (then the count is left alone).
+    const on = held !== null ? held.on : requestedOn === false ? false : !shown
+    const delta = shown === on ? 0 : on ? 1 : -1
+    // Whether the count on screen carries this statement's optimistic step.
+    const counted = delta !== 0 || (held !== null && shiftedRef.current.has(key))
+    const undo = on ? -1 : 1
     touchedRef.current.set(field + '|' + ref, ++clockRef.current)
     change((prev) => ({ eng: applyToggle(prev.eng, kind, ref, on), counts: shift(prev, delta), pending: pendingWith(prev, true) }))
     try {
-      const r = await request(kind === 'like' ? 'like.set' : 'repost.set', { to: ref, on })
+      const r = await (held !== null ? held.retry() : setEngagement(nodeRef.current, kind, ref, on, as))
+      if (pageRetries.get(key) === held) pageRetries.delete(key)
+      shiftedRef.current.delete(key)
+      noteLocalWrite()
       if (!mountedRef.current) return
       touchedRef.current.set(field + '|' + ref, ++clockRef.current)
       const final = r && typeof r.on === 'boolean' ? r.on : on
+      const moved = as !== actingPageKey()
       change((prev) => ({
-        eng: applyToggle(prev.eng, kind, ref, final),
+        eng: moved ? prev.eng : applyToggle(prev.eng, kind, ref, final),
         // Already in that state: the index had counted it before this tap.
-        counts: r && r.changed === false ? shift(prev, -delta) : prev.counts,
+        counts: r && r.changed === false && counted ? shift(prev, undo) : prev.counts,
         pending: pendingWith(prev, false)
       }))
+      // Acted as someone else meanwhile: the row shows that identity's state.
+      if (moved) ingest({ shown: [ref] })
+      // The undo is a second signed write, so it waits until pending cleared,
+      // and it only undoes as the identity that reposted.
+      if (kind === 'repost' && on && final && !moved && !(r && r.changed === false)) {
+        showToast({ text: 'Republicado', actionLabel: 'Desfazer', onAction: () => { if (actingPageKey() === as) toggle('repost', ref, false) } })
+      }
     } catch (err) {
+      const retry = as !== null && err && err.uncertain === true && typeof err.retry === 'function' ? err.retry : null
+      if (retry !== null) {
+        // Unknown outcome: the optimistic state stays and the next tap
+        // resends the same signed bytes.
+        pageRetries.set(key, { retry, on })
+        if (counted) shiftedRef.current.add(key)
+        if (!mountedRef.current) return
+        touchedRef.current.set(field + '|' + ref, ++clockRef.current)
+        change((prev) => ({ pending: pendingWith(prev, false) }))
+        showToast(UNCERTAIN_TOGGLE)
+        return
+      }
+      if (pageRetries.get(key) === held) pageRetries.delete(key)
+      shiftedRef.current.delete(key)
       if (!mountedRef.current) return
       touchedRef.current.set(field + '|' + ref, ++clockRef.current)
-      change((prev) => ({ eng: applyToggle(prev.eng, kind, ref, was), counts: shift(prev, -delta), pending: pendingWith(prev, false) }))
+      const moved = as !== actingPageKey()
+      // Back to the state before the tap: an undo of a row already shown off
+      // stays off; a held retry goes back to before its first tap.
+      const restore = held !== null ? !on : shown
+      change((prev) => ({ eng: moved ? prev.eng : applyToggle(prev.eng, kind, ref, restore), counts: counted ? shift(prev, undo) : prev.counts, pending: pendingWith(prev, false) }))
+      if (moved) ingest({ shown: [ref] })
       showToast(errorText(err))
     }
-  }, [request, change, showToast])
+  }, [request, change, showToast, ingest, own])
 
   // The follows changed (and the node's moderation may have): drop the cache
   // and resolve what was asked for again. The known set is rebuilt from
@@ -551,6 +706,22 @@ export function useSocial ({ ownKey, onToast }) {
     if (need.size > 0) ingest({ need: [...need], local })
   }, [followsVersion, change, ingest, dropNameRetries])
 
+  // Acting as another identity: the likes and reposts shown were that
+  // identity's, so they are read again (the page's from a fresh status).
+  const acting = useActing()
+  const actingKey = acting.kind === 'page' ? acting.key : null
+  const seenActing = useRef(actingKey)
+  useEffect(() => {
+    if (seenActing.current === actingKey) return
+    seenActing.current = actingKey
+    const refs = [...shownRef.current]
+    change(() => ({ eng: emptyState() }))
+    // A page's state stays unknown until its fresh status read answers (the
+    // ingest below reads it; a failure leaves it for the next refresh).
+    unknownPageRef.current = actingKey
+    if (refs.length > 0) ingest({ shown: refs })
+  }, [actingKey, change, ingest])
+
   const original = useCallback((ref) => {
     if (typeof ref !== 'string') return null
     const item = social.originals.get(ref)
@@ -566,7 +737,7 @@ export function useSocial ({ ownKey, onToast }) {
   }, [ingest])
   const persistOf = useCallback((author) => typeof author === 'string' && isKnown(author.toLowerCase()), [isKnown])
 
-  return { social, ingest, toggle, original, transient, pending, retry, persistOf, toast, deleteOriginal }
+  return { social, ingest, toggle, original, transient, pending, retry, persistOf, toast, deleteOriginal, notify: showToast }
 }
 
 // The PostRow props of `post` (a post item) whose actions target `ref`.
@@ -644,11 +815,12 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     onQuote: typeof h.onQuote === 'function' ? () => h.onQuote({ ref, name, username, text: post.text }) : undefined,
     onOpenLikes: typeof h.onOpenEngagers === 'function' ? () => h.onOpenEngagers({ ref, kind: 'likes' }) : undefined,
     onOpenReposts: typeof h.onOpenEngagers === 'function' ? () => h.onOpenEngagers({ ref, kind: 'reposts' }) : undefined,
+    onNotice: typeof social.notify === 'function' ? social.notify : undefined,
     onLike: () => social.toggle('like', ref),
     onRepost: () => social.toggle('repost', ref),
     // Until the own key is known, no post can safely offer a report action.
     // Only the own post itself, never the original of a repost by someone else.
-    onDelete: typeof h.onDelete === 'function' && canDelete(post, own) && repostedBy === null
+    onDelete: typeof h.onDelete === 'function' && canDelete(post, own, actingPageKey()) && repostedBy === null
       ? () => h.onDelete({ ref, seq: post.seq })
       : undefined,
     onReport: typeof h.onReport === 'function' && own !== null && post.author !== own
@@ -660,9 +832,11 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
 // 'Alguns números podem estar incompletos.' once at the top of a list (only
 // when counts were read from the index, i.e. on the hosted web).
 export function CountsNote ({ social }) {
+  const styles = useStyles(makeStyles)
   const f = social.social.flags
   if (f.indexing || f.complete !== false) return null
-  return <View style={styles.footer}><Soft>{INCOMPLETE_NOTE}</Soft></View>
+  // A footnote, not a row: the feed's first line stays a post.
+  return <Text style={styles.footnote}>{INCOMPLETE_NOTE}</Text>
 }
 
 // A repost whose original is loading (`missing` false) or unavailable.
@@ -670,6 +844,8 @@ export function CountsNote ({ social }) {
 // `onFollowReposter` (optional, with `followPending`): a small 'seguir' on
 // the reposter's line. A Rua and Diário pass neither.
 export function RepostPlaceholder ({ repostedBy, missing, transient, onRetry, onOpenReposter, onFollowReposter, followPending }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const who = displayText(whoOf({ name: repostedBy.name, username: repostedBy.username }).title)
   const followReposter = typeof onFollowReposter === 'function' ? onFollowReposter : null
   return (
@@ -713,10 +889,23 @@ export function RepostPlaceholder ({ repostedBy, missing, transient, onRetry, on
 
 // The transient error line of a failed toggle (when the shell gives no toast).
 export function SocialToast ({ text }) {
-  if (!text) return null
+  const styles = useStyles(makeStyles)
+  const t = typeof text === 'string' ? { text } : text
+  if (!t || !t.text) return null
   return (
-    <View style={styles.toast} pointerEvents='none'>
-      <Text style={styles.toastText} accessibilityRole='alert'>{text}</Text>
+    <View style={styles.toast} pointerEvents='box-none'>
+      <View style={styles.toastPill} pointerEvents='box-none'>
+        <View pointerEvents='none'>
+          <Text style={styles.toastText} accessibilityRole='alert'>{t.text}</Text>
+        </View>
+        {t.onAction
+          ? (
+            <Pressable onPress={() => t.onAction()} accessibilityRole='button' accessibilityLabel={t.actionLabel} hitSlop={8} style={styles.toastAction}>
+              <Text style={styles.toastActionText}>{t.actionLabel}</Text>
+            </Pressable>
+            )
+          : null}
+      </View>
     </View>
   )
 }
@@ -761,11 +950,225 @@ function pageNeeds (pageItems) {
   return { local, shown, need, parents: [...parents], authors }
 }
 
-export default function ARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost }) {
+// The page.feed load in flight on the node ({ page, promise, again }), or
+// null. Module scope: it outlives the screen that started it.
+let pageFeedFlight = null
+
+function startPageFeed (node, page) {
+  const flight = { page, again: false, promise: null }
+  flight.promise = (async () => {
+    const member = await memberKeyOf(node.request, node)
+    const keys = pagesFeedKeys(await pagesFollows(node, { member, page }))
+    return keys.length > 0 ? await node.request('page.feed', { page, keys }) : { items: [], incomplete: false }
+  })()
+  // Registered first, so every awaiting load sees the slot free again.
+  const clear = () => { if (pageFeedFlight === flight) pageFeedFlight = null }
+  flight.promise.then(clear, clear)
+  pageFeedFlight = flight
+  return flight
+}
+
+// A Rua of a page: what its newest follows posted, read on demand (page.feed:
+// no cursor, no sync signals), so it is one list with a pull to refresh.
+function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
-  const bottomPad = useBottomPad()
+  // The floating publish button sits over the list's end: clear it too.
+  const bottomPad = useBottomPad() + layout.fabSize
+  const social = useSocial({ ownKey, onToast })
+  const { ingest } = social
+  const { request } = node
+  const nodeRef = useRef(node)
+  nodeRef.current = node
+  const { learnMany, resolveMany } = names
+  const [view, setView] = useState({ items: [], loadedAt: null, loading: false, error: '', incomplete: false })
+  const viewRef = useRef(view)
+  const listRef = useRef(null)
+  const commit = useCallback((patch) => {
+    viewRef.current = { ...viewRef.current, ...patch }
+    setView(viewRef.current)
+  }, [])
+  const page = acting.key
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  // page.feed is single flight on the node: one load at a time, kept in
+  // module scope (pageFeedFlight) so leaving and re-entering joins the load
+  // in flight instead of starting a second one. A refresh, a new page or a
+  // tab show meanwhile asks for one more load after it, and the result in
+  // flight still counts while it is for the page acted as.
+  const appliedRef = useRef(null)
+  const loadRef = useRef(null)
+  const load = useCallback(async () => {
+    const current = () => mountedRef.current && actingPageKey() === page
+    commit({ loading: true, error: '' })
+    let flight = pageFeedFlight
+    // Another page's load runs on the node: this one starts after it.
+    while (flight !== null && flight.page !== page) {
+      await flight.promise.catch(() => {})
+      if (!current()) return
+      flight = pageFeedFlight
+    }
+    if (flight !== null) flight.again = true
+    else flight = startPageFeed(nodeRef.current, page)
+    let read = null
+    let failure = null
+    try {
+      read = await flight.promise
+    } catch (err) {
+      failure = err
+    }
+    if (!mountedRef.current) return
+    let applied = appliedRef.current === flight
+    if (!applied && current()) {
+      applied = true
+      appliedRef.current = flight
+      if (failure !== null) {
+        // No row of an earlier read stays actionable under a failed one.
+        commit({ items: [], loading: false, error: errorText(failure), incomplete: false })
+      } else {
+        const items = Array.isArray(read.items) ? read.items : []
+        commit({ items: resetWith(items), loadedAt: Date.now(), loading: false, incomplete: read.incomplete === true })
+        learnMany(items.map((i) => [i.author, { name: i.name, username: i.username }]))
+        resolveMany(items.map((i) => i.author))
+        // The page's follows are not the member's: their photos are kept
+        // only for authors the member follows (persistOf).
+        ingest({ ...pageNeeds(items), authors: [], reset: true })
+      }
+    }
+    if (flight.again && current()) {
+      flight.again = false
+      loadRef.current()
+    } else if (!applied) {
+      commit({ loading: false })
+    }
+  }, [request, page, commit, learnMany, resolveMany, ingest])
+  loadRef.current = load
+
+  // Another page: the rows of the previous one go before anything loads.
+  const shownPage = useRef(page)
+  useEffect(() => {
+    if (shownPage.current !== page) {
+      shownPage.current = page
+      commit({ items: [], loadedAt: null, error: '', incomplete: false })
+    }
+    if (active) load()
+  }, [active, page, refresh, load, commit])
+
+  const del = useDelete({
+    request,
+    node,
+    onToast,
+    recheck: load,
+    onDeleted: async (t) => {
+      social.deleteOriginal(t.ref)
+      commit({ items: viewRef.current.items.filter((i) => (i.kind === 'repost' ? refOf(i.to) : feedKey(i)) !== t.ref) })
+      if (typeof onDeletedPost === 'function') onDeletedPost()
+      await revokeDeletedMedia(request, [t.seq])
+    }
+  })
+  const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered: del.offered }), [names.profileOf, now, social.social, del.offered])
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined }
+  const renderItem = ({ item }) => {
+    if (item.kind === 'repost') {
+      const ref = refOf(item.to)
+      const repostedBy = { author: item.author, name: item.name, username: item.username }
+      const post = social.original(ref)
+      if (!post) {
+        return (
+          <RepostPlaceholder
+            repostedBy={repostedBy}
+            missing={post === null}
+            transient={social.transient(ref)}
+            onRetry={() => social.retry(ref)}
+            onOpenReposter={typeof onOpenMember === 'function' ? () => onOpenMember(item.author, { name: item.name, username: item.username }) : undefined}
+          />
+        )
+      }
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers })} />
+    }
+    // persistOf: own or followed by the MEMBER, never the page's follows.
+    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: social.persistOf(item.author) })} />
+  }
+
+  const { items, loadedAt, loading, error, incomplete } = view
+  let empty
+  if (error) empty = <ErrorState message={error} onRetry={load} pending={loading} />
+  else if (loadedAt === null) empty = <Skeleton />
+  else {
+    empty = (
+      <EmptyState
+        icon='gente'
+        title='A Rua da página está vazia'
+        body='Siga pessoas como página para ver as publicações delas aqui.'
+        actionLabel='Seguir alguém'
+        onAction={onFollowSomeone}
+      />
+    )
+  }
+
+  return (
+    <View style={styles.flex}>
+      <DeletePrompt del={del} />
+      <RefreshableList
+        listRef={listRef}
+        data={items}
+        keyExtractor={feedKey}
+        renderItem={renderItem}
+        extraData={extra}
+        ListHeaderComponent={(
+          <View style={styles.footer}>
+            <Text style={styles.pageTitle} accessibilityRole='header'>{'A Rua de ' + actingLabel()}</Text>
+            {items.length > 0 && error ? <ErrorState message={error} onRetry={load} pending={loading} /> : null}
+            {incomplete ? <Soft>incompleto: algumas publicações podem não ter chegado.</Soft> : null}
+            <CountsNote social={social} />
+          </View>
+        )}
+        ListEmptyComponent={empty}
+        contentContainerStyle={{ paddingBottom: bottomPad }}
+        onRefresh={load}
+        refreshing={loading && loadedAt !== null}
+        scrollToTopSignal={scrollToTop}
+        atEnd
+      />
+      <SocialToast text={social.toast} />
+    </View>
+  )
+}
+
+// The A Rua tab acts as the page when one is chosen in Publicar como.
+export default function ARua (props) {
+  const styles = useStyles(makeStyles)
+  const acting = useActing()
+  const node = useNode()
+  // Acting as a page there is no member feed for the boot cover to wait on.
+  const pageActing = acting.kind === 'page'
+  const { onBoot } = props
+  useEffect(() => {
+    if (!pageActing || typeof onBoot !== 'function') return
+    onBoot('page')
+    onBoot('details')
+  }, [pageActing, onBoot])
+  if (acting.kind === 'page') {
+    // The core session refuses page.feed, so there is nothing to read here.
+    if (node.hosted !== true) return <View style={styles.footer}><Soft>A Rua da página só no app hospedado</Soft></View>
+    return <PageARua {...props} acting={acting} />
+  }
+  return <MemberARua {...props} />
+}
+
+function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onBoot }) {
+  const styles = useStyles(makeStyles)
+  const node = useNode()
+  const names = useNames()
+  const now = useNow(60000)
+  // The floating publish button sits over the list's end: clear it too.
+  const bottomPad = useBottomPad() + layout.fabSize
   const social = useSocial({ ownKey, onToast })
   const { ingest } = social
   const [feed, setFeed] = useState({
@@ -923,6 +1326,40 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
       if (mine === seqRef.current) commit({ loading: false, refreshing: false, loadError: errorText(err) })
     }
   }, [request, ackFresh, commit, learnPage, ingest])
+
+  // The boot cover (App.js) waits for these, once each: the first page in,
+  // then the names and counts of its first rows. A failed first read ends
+  // both: there is nothing more to wait for.
+  const bootRef = useRef({ page: false, details: false })
+  const socialState = social.social
+  useEffect(() => {
+    if (typeof onBoot !== 'function') return
+    const b = bootRef.current
+    if (b.details) return
+    const failed = feed.loadError !== ''
+    if (feed.loadedAt === null && !failed) return
+    if (!b.page) {
+      b.page = true
+      onBoot('page')
+    }
+    const rows = feed.items.slice(0, FEED_FIRST_ROWS)
+    const first = pageNeeds(rows)
+    const flags = socialState.flags
+    const ready = failed || feedDetailsReady({
+      authors: first.authors,
+      shown: first.shown,
+      profileOf: names.profileOf,
+      // A repost row shows its original: wait for its answer (any outcome,
+      // a transient one included), never for a retry.
+      originals: rows.filter((i) => i.kind === 'repost').map((i) => refOf(i.to)).filter((r) => r !== null),
+      hasOriginal: (ref) => socialState.originals.has(ref),
+      hasCount: (ref) => socialState.counts.has(ref),
+      countsSkipped: node.hosted !== true || node.online === false || flags.indexing === true || flags.complete === false
+    })
+    if (!ready) return
+    b.details = true
+    onBoot('details')
+  }, [onBoot, feed.loadedAt, feed.loadError, feed.items, names.profileOf, socialState, node.hosted, node.online])
 
   const loadOlder = useCallback(async ({ fromSync = false } = {}) => {
     const current = feedRef.current
@@ -1117,6 +1554,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
 
   const del = useDelete({
     request,
+    node,
     onToast,
     recheck: loadNewest,
     onDeleted: async (t) => {
@@ -1181,7 +1619,7 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
         loadMoreError={!!moreError}
         atEnd={atEnd}
         scrollToTopSignal={scrollToTop}
-        newItems={{ label: 'ver novidades', visible: fresh && loadedAt !== null, onPress: showNewItems }}
+        newItems={{ label: 'ver novidades', visible: fresh && loadedAt !== null && items.length > 0, onPress: showNewItems }}
         keepVisiblePosition
       />
       <SocialToast text={social.toast} />
@@ -1189,9 +1627,11 @@ export default function ARua ({ active, refresh, onReply, onReport, ownKey, foll
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
   footer: { padding: 16, gap: 8 },
+  footnote: { ...type.replyMark, fontSize: 12, lineHeight: 16, color: colors.soft, paddingHorizontal: 16, paddingTop: 6, paddingBottom: 2 },
+  pageTitle: { ...type.counter, color: colors.ink, fontWeight: '700' },
   placeholder: {
     paddingVertical: 12,
     paddingHorizontal: 16,
@@ -1212,13 +1652,15 @@ const styles = StyleSheet.create({
     right: 16,
     alignItems: 'center'
   },
-  toastText: {
-    ...type.counter,
-    color: '#ffffff',
-    backgroundColor: colors.ink,
+  toastPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.toastBg,
     borderRadius: 18,
     paddingVertical: 8,
-    paddingHorizontal: 14,
-    overflow: 'hidden'
-  }
+    paddingHorizontal: 14
+  },
+  toastText: { ...type.counter, color: colors.toastInk },
+  toastAction: { marginLeft: 8 },
+  toastActionText: { ...type.counter, color: colors.toastInk, fontWeight: '800' }
 })

@@ -803,7 +803,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -827,6 +827,71 @@ test('group-join records', async (t) => {
   const hostile = { type: 'group-join', group: K1, on: true, at: AT }
   Object.defineProperty(hostile, 'writer', { enumerable: true, get () { throw new Error('boom') } })
   t.is(validateRecord(hostile, 1), 'malformed')
+})
+
+test('group-join records with a rejoin', async (t) => {
+  await testnet(t)
+  const { groupJoinRecord } = records
+  const gj = { type: 'group-join', group: K1, writer: K2, on: true, rejoin: { writer: K1, seq: 2 }, at: AT }
+  t.is(validateRecord(gj, 1), null)
+  t.is(validateRecord({ ...gj, rejoin: null }, 1), null, 'a null rejoin')
+  t.is(validateRecord({ ...gj, on: false }, 1), null)
+  for (const rejoin of [{ writer: K1, seq: 0 }, { writer: K1, seq: 1.5 }, { writer: K1, seq: '2' }, { writer: 'A'.repeat(64), seq: 2 }, { writer: K1 }, { writer: K1, seq: 2, extra: 1 }, [K1, 2], 'x', 1, undefined]) {
+    t.is(validateRecord({ ...gj, rejoin }, 1), 'malformed', 'rejoin ' + JSON.stringify(rejoin))
+  }
+  t.is(validateRecord({ ...gj, extra: 1 }, 1), 'malformed', 'exact keys')
+  const noAt = { ...gj }
+  delete noAt.at
+  t.is(validateRecord(noAt, 1), 'malformed')
+  t.is(validateRecord({ ...gj, at: '2026-01-01' }, 1), 'date-invalid')
+  t.alike(groupJoinRecord({ group: K1, writer: K2, on: true, rejoin: { writer: K1, seq: 2 }, at: AT }), gj)
+  t.alike(Object.keys(groupJoinRecord({ group: K1, writer: K2, on: true, rejoin: null })), ['type', 'group', 'writer', 'on', 'rejoin', 'at'])
+  t.alike(Object.keys(groupJoinRecord({ group: K1, writer: K2, on: true })), ['type', 'group', 'writer', 'on', 'at'], 'without rejoin as before')
+  await t.exception.all(async () => groupJoinRecord({ group: K1, writer: K2, on: true, rejoin: { writer: K1, seq: 0 }, at: AT }), /malformed/)
+})
+
+test('group-confirm records', async (t) => {
+  await testnet(t)
+  const { groupConfirmRecord } = records
+  const D = 'd'.repeat(64)
+  const gc = { type: 'group-confirm', group: K1, writer: K2, seq: 3, digest: D, at: AT }
+  t.is(validateRecord(gc, 1), null)
+  t.is(validateRecord(gc, 0), 'genesis-required', 'diary seq >= 1')
+  for (const seq of [0, -1, 1.5, '3', null, undefined]) t.is(validateRecord({ ...gc, seq }, 1), 'malformed', 'seq ' + seq)
+  for (const digest of ['D'.repeat(64), 'd'.repeat(63), 'g'.repeat(64), null, 1]) t.is(validateRecord({ ...gc, digest }, 1), 'malformed', 'digest ' + digest)
+  for (const k of ['A'.repeat(64), K1.slice(1), null]) {
+    t.is(validateRecord({ ...gc, group: k }, 1), 'malformed', 'group ' + k)
+    t.is(validateRecord({ ...gc, writer: k }, 1), 'malformed', 'writer ' + k)
+  }
+  t.is(validateRecord({ ...gc, extra: 1 }, 1), 'malformed', 'exact keys')
+  t.is(validateRecord({ ...gc, at: '2026-01-01' }, 1), 'date-invalid')
+  t.alike(groupConfirmRecord({ group: K1, writer: K2, seq: 3, digest: D, at: AT }), gc)
+  t.alike(Object.keys(groupConfirmRecord({ group: K1, writer: K2, seq: 3, digest: D })), ['type', 'group', 'writer', 'seq', 'digest', 'at'])
+  await t.exception.all(async () => groupConfirmRecord({ group: K1, writer: K2, seq: 0, digest: D, at: AT }), /malformed/)
+})
+
+test('group-cut records', async (t) => {
+  await testnet(t)
+  const { groupCutRecord } = records
+  const gc = { type: 'group-cut', group: K1, writer: K1, cut: 5, at: AT }
+  t.is(validateRecord(gc, 1), null)
+  t.is(validateRecord({ ...gc, cut: 0 }, 1), null, 'cut 0')
+  t.is(validateRecord({ ...gc, writer: K2 }, 4), null, 'any writer of the group')
+  t.is(validateRecord(gc, 0), 'genesis-required', 'seq >= 1')
+  for (const cut of [-1, 1.5, '5', null, undefined, Number.MAX_SAFE_INTEGER + 1]) t.is(validateRecord({ ...gc, cut }, 1), 'malformed', 'cut ' + cut)
+  for (const k of ['A'.repeat(64), K1.slice(1), 1, null]) {
+    t.is(validateRecord({ ...gc, group: k }, 1), 'malformed', 'group ' + k)
+    t.is(validateRecord({ ...gc, writer: k }, 1), 'malformed', 'writer ' + k)
+  }
+  t.is(validateRecord({ ...gc, extra: 1 }, 1), 'malformed', 'exact keys')
+  t.is(validateRecord({ ...gc, on: false }, 1), 'malformed', 'not a group-join variant')
+  const noCut = { ...gc }
+  delete noCut.cut
+  t.is(validateRecord(noCut, 1), 'malformed')
+  t.is(validateRecord({ ...gc, at: '2026-01-01' }, 1), 'date-invalid')
+  t.alike(groupCutRecord({ group: K1, writer: K1, cut: 5, at: AT }), gc)
+  t.alike(Object.keys(groupCutRecord({ group: K1, writer: K1, cut: 0 })), ['type', 'group', 'writer', 'cut', 'at'])
+  await t.exception.all(async () => groupCutRecord({ group: K1, writer: K1, cut: -1, at: AT }), /malformed/)
 })
 
 const AVATAR = { core: K2, mime: 'image/webp', start: 3, blocks: 2, bytes: 40000, sha256: 'e'.repeat(64), width: 512, height: 512 }
@@ -1042,4 +1107,147 @@ test('validateRecord: delete records', async (t) => {
   t.is(validateRecord(trap, 7), 'malformed')
   t.is(records.validRecordCopy(hostileSeq, 7), null)
   t.alike(records.validRecordCopy(del, 7), del)
+})
+
+test('validateRecord: dm-key', (t) => {
+  const { DM_KEY_KEYS, validRecordCopy } = records
+  const { pushCandidate } = require('../lib/push-events')
+  t.alike(DM_KEY_KEYS, ['type', 'box', 'gen', 'at'])
+  const box = '9'.repeat(64)
+  const dmKey = (over = {}) => ({ type: 'dm-key', box, gen: 1, at: AT, ...over })
+  t.is(validateRecord(dmKey(), 3), null)
+  t.alike(validRecordCopy(dmKey({ gen: 2 }), 3), dmKey({ gen: 2 }), 'round trip')
+  t.alike(decodeBlock(b4a.from(JSON.stringify(dmKey()))), dmKey())
+  t.is(validateRecord({ ...dmKey(), extra: 1 }, 3), 'malformed', 'extra key')
+  t.is(validateRecord({ type: 'dm-key', box, at: AT }, 3), 'malformed', 'missing gen')
+  t.is(validateRecord(dmKey({ box: 'A'.repeat(64) }), 3), 'malformed', 'uppercase hex')
+  t.is(validateRecord(dmKey({ box: 'a'.repeat(63) }), 3), 'malformed', 'short hex')
+  t.is(validateRecord(dmKey({ box: '0'.repeat(64) }), 3), 'malformed', 'weak box key')
+  t.is(validateRecord(dmKey({ box: 'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' }), 3), 'malformed', 'weak box key, high bit set')
+  t.is(validateRecord(dmKey({ gen: 0 }), 3), 'malformed', 'gen 0')
+  t.is(validateRecord(dmKey({ gen: 4294967295 }), 3), null, 'gen 2^32 - 1')
+  t.is(validateRecord(dmKey({ gen: 4294967296 }), 3), 'malformed', 'gen above uint32')
+  t.is(validateRecord(dmKey({ gen: 1.5 }), 3), 'malformed', 'gen not an integer')
+  t.is(validateRecord(dmKey({ gen: '1' }), 3), 'malformed', 'gen string')
+  t.is(validateRecord(dmKey({ at: 'nope' }), 3), 'date-invalid', 'bad date')
+  t.is(validateRecord(dmKey(), 0), 'genesis-required', 'seq 0')
+
+  const NOW = Date.parse(AT) + 60000
+  const args = { author: K1, seq: 3, isMember: () => true, isBlocked: () => false, now: NOW }
+  t.is(pushCandidate({ ...args, record: dmKey() }), null, 'no push candidate')
+  t.is(pushCandidate({ ...args, record: dmKey({ box: K2 }) }), null, 'box key never read as a target')
+})
+
+test('dm-key: no notice row', (t) => {
+  const { createNoticeIndex } = require('../lib/notices')
+  const { createPostNoticeIndex } = require('../lib/post-notices')
+  const author = 'c'.repeat(64)
+  const followRec = { type: 'follow', key: K1, on: true, at: AT }
+  const postRec = { type: 'post', text: 'oi', at: AT, replyTo: { author: K1, seq: 1 } }
+  const dmRec = { type: 'dm-key', box: K1, gen: 1, at: AT }
+
+  const notices = createNoticeIndex()
+  notices.foldFollow(author, 1, followRec)
+  notices.foldFollow(author, 2, postRec)
+  notices.foldFollow(author, 3, dmRec)
+  notices.commit(author)
+  const rows = notices.page({ target: K1, isBlocked: () => false }).items
+  t.is(rows.length, 1, 'only the follow row')
+  t.is(rows[0].seq, 1)
+
+  const posts = createPostNoticeIndex({ verifyUsername: () => true })
+  posts.foldPost(author, 1, followRec)
+  posts.foldPost(author, 2, postRec)
+  posts.foldPost(author, 3, dmRec)
+  posts.settle(author)
+  const page = posts.pageV2({ target: K1, issuerUsable: () => true, now: Date.parse(AT) + 60000 })
+  t.is(page.items.length, 1, 'only the reply row')
+  t.is(page.items[0].seq, 2)
+})
+
+// Pages (lib/page.js): shapes only, the signatures are checked by the reader.
+test('validateRecord: page records', (t) => {
+  const { PAGE_KEYS, validRecordCopy } = records
+  const P = '1'.repeat(64)
+  const O = '2'.repeat(64)
+  const A1 = '3'.repeat(64)
+  const A2 = '4'.repeat(64)
+  const N = 'n'.repeat(43)
+  const SIG = 'c'.repeat(128)
+  const trio = { association: K2, issuer: '5'.repeat(64), issuerDate: AT, issuerSignature: SIG }
+  const valid = {
+    'page-roster': { type: 'page-roster', page: P, gen: 1, owner: O, admins: [A1, A2], prev: null, at: AT, nonce: N, ...trio, signature: SIG, countersignature: SIG },
+    'page-origin': { type: 'page-origin', page: P, from: K1, fromSeq: 4, gen: 3, owner: O, admins: [], at: AT, nonce: N, actor: O, ...trio, signature: SIG, countersignature: SIG },
+    'page-close': { type: 'page-close', page: P, gen: 2, at: AT, nonce: N, actor: O, ...trio, signature: SIG, countersignature: SIG },
+    'page-moved': { type: 'page-moved', page: P, to: K1, gen: 1, at: AT, nonce: N, actor: O, ...trio, signature: SIG, countersignature: SIG },
+    'page-accept': { type: 'page-accept', page: P, gen: 2, rosterSignature: SIG, at: AT, nonce: N, actor: A1, signature: SIG },
+    'page-offer': { type: 'page-offer', page: P, to: A1, exp: AT, gen: 1, at: AT, nonce: N, actor: O, signature: SIG },
+    'page-link': { type: 'page-link', page: P, diary: K1, actor: A1, at: AT, nonce: N, ...trio, signature: SIG },
+    'page-delegate': { type: 'page-delegate', actor: A1, at: AT }
+  }
+  for (const [type, r] of Object.entries(valid)) {
+    t.alike(Object.keys(r).sort(), [...PAGE_KEYS[type]].sort(), type + ' keys')
+    t.is(validateRecord(r, 3), null, type + ' valid')
+    t.alike(validRecordCopy(r, 3), r, type + ' copy')
+    t.is(validateRecord({ ...r, extra: 1 }, 3), 'malformed', type + ' extra key')
+    for (const k of Object.keys(r)) {
+      const missing = { ...r }
+      delete missing[k]
+      t.is(validateRecord(missing, 3), 'malformed', type + ' without ' + k)
+    }
+    t.is(validateRecord(r, 0), 'genesis-required', type + ' at seq 0')
+  }
+  const bad = (type, over, why) => t.is(validateRecord({ ...valid[type], ...over }, 3), 'malformed', type + ': ' + why)
+
+  bad('page-roster', { gen: 0 }, 'gen 0')
+  bad('page-roster', { gen: 4294967296 }, 'gen above uint32')
+  t.is(validateRecord({ ...valid['page-roster'], gen: 4294967295, prev: 9 }, 3), null, 'gen 2^32 - 1')
+  bad('page-roster', { gen: '1' }, 'gen string')
+  bad('page-roster', { prev: 0 }, 'prev 0')
+  bad('page-roster', { prev: 1.5 }, 'prev not an integer')
+  bad('page-roster', { admins: [A2, A1] }, 'admins unsorted')
+  bad('page-roster', { admins: [A1, A1] }, 'admins repeated')
+  bad('page-roster', { admins: [O] }, 'owner among admins')
+  bad('page-roster', { admins: ['A'.repeat(64)] }, 'uppercase admin')
+  bad('page-roster', { admins: 'x' }, 'admins not an array')
+  bad('page-roster', { admins: new Array(1) }, 'sparse admins')
+  const many = Array.from({ length: 17 }, (_, i) => (i + 16).toString(16).padStart(64, '0'))
+  t.is(validateRecord({ ...valid['page-roster'], admins: many.slice(0, 16) }, 3), null, '16 admins')
+  bad('page-roster', { admins: many }, '17 admins')
+  bad('page-roster', { nonce: 'n'.repeat(42) }, 'short nonce')
+  bad('page-roster', { nonce: 'n'.repeat(42) + '=' }, 'nonce charset')
+  bad('page-roster', { at: 'nope' }, 'bad date')
+  bad('page-roster', { page: 'A'.repeat(64) }, 'uppercase page')
+  bad('page-roster', { issuer: K2 }, 'issuer equals the association')
+  bad('page-roster', { countersignature: 'c'.repeat(127) }, 'short countersignature')
+  bad('page-origin', { from: P }, 'from equals page')
+  bad('page-origin', { fromSeq: 0 }, 'fromSeq 0')
+  bad('page-origin', { actor: A1 }, 'actor is not the owner')
+  bad('page-origin', { admins: [O] }, 'owner among admins')
+  bad('page-close', { gen: 1 }, 'gen 1')
+  bad('page-moved', { to: P }, 'moved to itself')
+  bad('page-accept', { gen: 1 }, 'gen 1')
+  bad('page-accept', { rosterSignature: 'x' }, 'bad rosterSignature')
+  t.is(validateRecord({ ...valid['page-offer'], to: null, exp: null }, 3), null, 'offer cancel')
+  bad('page-offer', { to: null }, 'to null with exp')
+  bad('page-offer', { exp: null }, 'exp null with to')
+  bad('page-offer', { exp: 'nope' }, 'bad exp')
+  bad('page-link', { diary: P }, 'diary equals page')
+  bad('page-link', { actor: K1 }, 'actor equals diary')
+  bad('page-link', { actor: P }, 'actor equals page')
+  bad('page-delegate', { actor: 'x' }, 'bad actor')
+
+  const noAssoc = (type) => {
+    const r = { ...valid[type] }
+    delete r.association
+    return r
+  }
+  t.is(validateRecord(noAssoc('page-link'), 3), 'malformed', 'page-link without association')
+  t.is(validateRecord(noAssoc('page-close'), 3), 'malformed', 'page-close without association')
+  t.is(validateRecord({ type: 'page-invite', page: P, at: AT }, 3), 'malformed', 'no page-invite record')
+
+  const hostile = { ...valid['page-roster'] }
+  Object.defineProperty(hostile, 'admins', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(hostile, 3), 'malformed')
+  t.is(validRecordCopy(hostile, 3), null)
 })

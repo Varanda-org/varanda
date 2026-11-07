@@ -341,3 +341,46 @@ test('keyCommit: BLAKE2b-256 commitment of one key to its group and kid (pinned 
   t.exception.all(() => keyCommit(key, 'A'.repeat(64), kid))
   t.exception.all(() => keyCommit(key, 'a'.repeat(64), { writer: 'b'.repeat(64) }))
 })
+
+test('MAX_SEALED_INNER_BYTES holds the worst post with four private media items', (t) => {
+  const { groupPost, groupSealed, sealedInner, validateGroupRecord } = require('../lib/group')
+  const { MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_ITEM_BLOCKS, MAX_MEDIA_DIMENSION } = require('../lib/records')
+  t.is(MAX_SEALED_INNER_BYTES, 12000)
+  const top = Number.MAX_SAFE_INTEGER
+  const ref = { writer: 'f'.repeat(64), seq: top }
+  // Every field at its longest: four-digit starts, the largest item, the
+  // longest image type and dimensions.
+  const item = (i) => ({
+    core: 'e'.repeat(64),
+    mime: 'application/octet-stream',
+    start: MAX_MEDIA_BLOCKS - MAX_MEDIA_ITEM_BLOCKS - i,
+    blocks: MAX_MEDIA_ITEM_BLOCKS,
+    bytes: MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES,
+    sha256: 'd'.repeat(64),
+    key: 'c'.repeat(64),
+    nonce: 'b'.repeat(48),
+    plainMime: 'image/jpeg',
+    plainSha256: 'a'.repeat(64),
+    w: MAX_MEDIA_DIMENSION,
+    h: MAX_MEDIA_DIMENSION,
+    ms: 0
+  })
+  // A lone surrogate is one code point serialized as six bytes (\udXXX).
+  const text = '\ud800'.repeat(1000)
+  t.is(b4a.byteLength(JSON.stringify(text)), 6002)
+  const at = '2026-01-01T00:00:00.000Z'
+  const post = groupPost({ text, replyTo: ref, seen: ref, media: [0, 1, 2, 3].map(item), at, sealed: true })
+  const inner = sealedInner(post, { writer: 'f'.repeat(64), group: 'f'.repeat(64), kid: ref })
+  const innerBytes = b4a.byteLength(JSON.stringify(inner))
+  t.comment('worst inner: ' + innerBytes + ' bytes of ' + MAX_SEALED_INNER_BYTES)
+  t.ok(innerBytes <= MAX_SEALED_INNER_BYTES, 'the inner fits')
+  const { nonce, box } = sealRecord(inner, newEpochKey())
+  const env = groupSealed({ kid: ref, nonce, box, at })
+  const blockBytes = b4a.byteLength(JSON.stringify(env))
+  t.comment('its group-sealed block: ' + blockBytes + ' bytes of ' + MAX_BLOCK_BYTES)
+  t.ok(blockBytes <= MAX_BLOCK_BYTES, 'the envelope block fits')
+  t.is(validateGroupRecord(env, 1, { private: true }), null)
+  // The largest inner the cap allows still makes a block that fits.
+  const capBox = b4a.toString(b4a.alloc(MAX_SEALED_INNER_BYTES + 16), 'base64')
+  t.ok(b4a.byteLength(JSON.stringify({ ...env, box: capBox })) <= MAX_BLOCK_BYTES, 'a box at the cap fits')
+})

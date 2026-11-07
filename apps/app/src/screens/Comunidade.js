@@ -1,102 +1,225 @@
-// Comunidade: one community (community.info, docs/rpc.md 5.59): its name,
-// the groups linked two-way (each opens its group) and how many admins it
-// has. The community creator also adds an admin (community.admin, 5.60) and
-// links a group (community.link, 5.58). Hosted web only, like the Cadeiras
-// tab. A mutation that comes back uncertain is never resent: the screen
-// re-reads and only then lets the person try again.
-// Props: community (hex64 root key), onBack(), onOpenGroup(group),
-// onOpenMember(diary).
+// Comunidade: one community (community.info, docs/rpc.md 5.59) as a list of
+// its groups, Geral first, each with its newest message, the time and the
+// unread count, opening the group on a tap. Someone who is not a member gets
+// an invite card with one Entrar or Pedir entrada button (also from the
+// seeder index; a link is never consent, only the tap joins). The creator
+// also sees Novo grupo and, on repair, Tirar da lista and Devolver à lista.
+// A second device has the diary role but no writer here, so it gets a
+// Participar neste aparelho card above the groups instead.
+// The header (its name or the info icon) opens Informações da comunidade, where sharing,
+// leaving, inviting and the management panels live. A mutation that comes
+// back uncertain is never resent: the screen re-reads and only then lets the
+// person try again.
+// Props: community (hex64 root key), afterGroup (a group to open once the
+// person joined, from a /g/ link), isTop (this screen is the visible one),
+// seenTick (bumped when a group was marked seen), onBack(),
+// onOpenGroup(group), onOpenInfo(community). The screen runs wherever the
+// node is hosted (site and installed app with an installation), like the
+// Comunidades tab.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native'
-import rpc, { isKey } from '@varanda/rpc'
+import rpc from '@varanda/rpc'
 import { useNode } from '../node'
-import { isUsername, lookupUsername, usernameMatches } from '../account'
-import { classifyFollowInput, PARTIAL_KEY_TEXT } from '../followInput'
-import { communityLink } from '../groupLink'
-import { canShare, copyText, shareUrl } from '../share'
-import { shareNav } from '../shareNav'
+import { shareCommunity } from '../communityShare'
 import { fetchCommunity } from '../indexClient'
-import { useMemberSearch } from '../useMemberSearch'
-import { whoOf } from '../who'
-import { shortKey } from '../format'
-import { PRIVATE_LABEL, parseJoinLink, reconcile } from '../groups'
-import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, colors, errorText, useAction, useBottomPad } from '../ui'
-import { Avatar } from '../ui/Avatar'
+import { relativeTime } from '../format'
+import {
+  AS_PAGE_LABEL, COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, OWN_LABEL, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PRIVATE_LABEL,
+  can, communityReserveReached, lastIsOwn, needsReserveConfirm, lastLine, membersLabel, needsDeviceJoin, pageCommunities, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, showNewGroup, unreadLabel, visibilityLabel
+} from '../groups'
+import { pagesOn } from '../pageGate'
+import { actAs, pagesGroup } from '../pages'
+import { memberKeyOf, useActing } from './Conversa'
+import { Body, Btn, Card, ErrorText, SectionHeader, Soft, Title, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
+import { ChatHeader } from '../ui/ChatHeader'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { TopBar } from '../ui/TopBar'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
-import { type } from '../ui/theme'
-import { WEB_ONLY_MESSAGE } from './Cadeiras'
+import { radius, space, type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
+import { shouldOpenQueued } from '../groupRedirect'
+import { NovoGrupo } from './NovoGrupo'
+import { WEB_ONLY_MESSAGE } from './Comunidades'
 
 const { displayText } = rpc
 const HEX64 = /^[0-9a-f]{64}$/
-const NOT_FOUND = '@nome não encontrado.'
+const JOIN_OPEN_TEXT = 'Entre para conversar nos grupos desta comunidade.'
+const JOIN_APPROVAL_TEXT = 'Peça entrada: um administrador aprova antes de você participar.'
+const JOIN_PUBLIC_TEXT = 'Participar é público: sua entrada fica registrada no seu diário.'
+const JOIN_PENDING_TEXT = 'Enviado. Aguardando a comunidade chegar a este aparelho.'
+const JOIN_OFFLINE_TEXT = 'Sem internet: conecte-se para entrar.'
+// community.info `repair`: the creator, back after its root's powers ended, takes a group off the list.
+const DROP_GROUP_TEXT = 'Tirar este grupo da lista da comunidade? Ele deixa de aparecer aqui e ninguém mais escreve nele.'
+// community.info `dropped`: with `repair`, the creator puts a group it took off back.
+const UNDROP_GROUP_TEXT = 'Devolver este grupo à lista da comunidade?'
+const DROPPED_LABEL = 'Grupo tirado da lista'
+const INFO_LABEL = 'informações da comunidade'
 
-function origin () {
-  return typeof window !== 'undefined' && window.location && typeof window.location.origin === 'string' ? window.location.origin : ''
-}
-
-function keyOf (text) {
-  const fromLink = parseJoinLink(text)
-  if (fromLink) return fromLink
-  const t = typeof text === 'string' ? text.trim().toLowerCase() : ''
-  return HEX64.test(t) ? t : null
-}
+const inside = (role) => role === 'creator' || role === 'admin' || role === 'member' || role === 'requested'
 
 function adminsLabel (n) {
   if (!Number.isSafeInteger(n) || n < 0) return ''
   return n === 1 ? '1 administrador' : n + ' administradores'
 }
 
-function GroupRow ({ title, detail, onPress }) {
+// The invite card of someone outside the community: one button, and only the
+// tap joins.
+function JoinCard ({ title, header, join, showJoin, onJoin, pending, offline, error, note }) {
+  const styles = useStyles(makeStyles)
+  const approval = join === 'approval'
+  return (
+    <View style={styles.block}>
+      <Card>
+        <Title>{title}</Title>
+        {header ? <Soft>{header}</Soft> : null}
+        <Body>{approval ? JOIN_APPROVAL_TEXT : JOIN_OPEN_TEXT}</Body>
+        {showJoin ? <Btn label={approval ? 'Pedir entrada' : 'Entrar'} onPress={onJoin} pending={pending} disabled={offline} /> : null}
+        <Soft>{JOIN_PUBLIC_TEXT}</Soft>
+        {offline && showJoin ? <Soft>{JOIN_OFFLINE_TEXT}</Soft> : null}
+        <ErrorText>{error}</ErrorText>
+        {note ? <Soft>{note}</Soft> : null}
+      </Card>
+    </View>
+  )
+}
+
+function GroupRow ({ title, detail, own, time, unread, onPress }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
       accessibilityRole='button'
-      accessibilityLabel={title}
+      accessibilityLabel={unread ? title + ', ' + unread + ' não lidas' : title}
       accessibilityHint='abre o grupo'
       onPress={onPress}
     >
       <View style={styles.icon}><Icon name='cadeira' size={24} color={colors.ink} /></View>
       <View style={styles.hitText}>
-        <Text style={styles.name} numberOfLines={1}>{title}</Text>
-        {detail ? <Text style={styles.handle} numberOfLines={1}>{detail}</Text> : null}
+        <View style={styles.line}>
+          <Text style={styles.name} numberOfLines={1}>{title}</Text>
+          {time ? <Text style={styles.time}>{time}</Text> : null}
+        </View>
+        {detail || unread
+          ? (
+            <View style={styles.line}>
+              <Text style={[styles.handle, styles.grow]} numberOfLines={1}>
+                {own ? <Text style={styles.own}>{OWN_LABEL + ': '}</Text> : null}
+                {detail}
+              </Text>
+              {unread ? <View style={styles.badge}><Text style={styles.badgeText}>{unread}</Text></View> : null}
+            </View>
+            )
+          : null}
       </View>
     </Pressable>
   )
 }
 
-export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
+// Join or leave as the page acted as. The signed statement goes out once: an
+// uncertain outcome keeps err.retry, which resends the same bytes, and the
+// screen never signs again on its own. The personal controls stay hidden.
+function PagePanel ({ node, community, page }) {
+  const styles = useStyles(makeStyles)
+  const [role, setRole] = useState(null)
+  const [error, setError] = useState('')
+  const [retry, setRetry] = useState(null)
+  const [pending, setPending] = useState(false)
+  const { request } = node
+  // Read at call time, so the status read keeps depending on `request` only.
+  const nodeRef = useRef(node)
+  nodeRef.current = node
+
+  useEffect(() => {
+    let live = true
+    setRole(null)
+    ;(async () => {
+      try {
+        const member = await memberKeyOf(request, nodeRef.current)
+        const status = await actAs(nodeRef.current, { member, action: 'status', page })
+        const mine = pageCommunities(status).find((c) => c.community === community)
+        if (live && mine) setRole(pageRoleOf(mine))
+      } catch {}
+    })()
+    return () => { live = false }
+  }, [request, community, page])
+
+  const settle = (answer) => {
+    setRetry(null)
+    setError('')
+    setRole(pageRoleOf(answer))
+  }
+  const fail = (err) => {
+    if (err && err.uncertain === true && typeof err.retry === 'function') {
+      setRetry(() => async () => {
+        setPending(true)
+        try { settle(await err.retry()) } catch (e) { fail(e) } finally { setPending(false) }
+      })
+      setError('Não deu para confirmar. Confira antes de tentar de novo.')
+      return
+    }
+    setError(pageErrorText(err))
+  }
+  const run = async (action) => {
+    setPending(true)
+    setError('')
+    setRetry(null)
+    try {
+      const member = await memberKeyOf(request, node)
+      settle(await pagesGroup(node, { member, page, action, op: { community } }))
+    } catch (err) {
+      fail(err)
+    } finally {
+      setPending(false)
+    }
+  }
+  const inside = role === 'member' || role === 'requested'
+  return (
+    <View style={styles.block}>
+      <Soft>{AS_PAGE_LABEL}{pageRoleLabel(role) ? ' · ' + pageRoleLabel(role) : ''}</Soft>
+      {retry
+        ? <Btn label='Conferir de novo' secondary pending={pending} onPress={retry} />
+        : inside
+          ? <Btn label={PAGE_LEAVE_LABEL} danger secondary pending={pending} disabled={node.online === false} onPress={() => run('community-leave')} />
+          : <Btn label={PAGE_JOIN_LABEL} pending={pending} disabled={node.online === false} onPress={() => run('community-join')} />}
+      <ErrorText>{error}</ErrorText>
+    </View>
+  )
+}
+
+export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, onOpenGroup, onOpenInfo }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const hosted = node.hosted === true
+  const acting = useActing()
+  const asPage = pageMode({ acting, on: pagesOn({ hosted, accountOrigin: node.accountOrigin }) })
   const bottomPad = useBottomPad()
+  const now = useNow(60000)
   const [info, setInfo] = useState(null)
   const [loadError, setLoadError] = useState('')
   const [loading, setLoading] = useState(false)
-  const [ownKey, setOwnKey] = useState(null)
-  const [adminInput, setAdminInput] = useState('')
-  const [adminNote, setAdminNote] = useState('')
-  // Who the typed key or @nome resolved to, shown before the grant.
-  const [candidate, setCandidate] = useState(null)
-  const [resolving, setResolving] = useState(false)
-  const [localError, setLocalError] = useState('')
   const [shareNote, setShareNote] = useState('')
+  const [joinNote, setJoinNote] = useState('')
   // The seeder index's view, for someone whose node holds nothing of this
-  // community yet: { status, name, groups, partial, error }.
-  const [idx, setIdx] = useState({ status: 'idle', name: '', groups: [], partial: false, error: '' })
+  // community yet: { status, name, groups, partial, join, members, error }.
+  const [idx, setIdx] = useState({ status: 'idle', name: '', groups: [], partial: false, join: null, members: null, error: '' })
   const idxGen = useRef(0)
-  const [granting, setGranting] = useState(null)
-  const [adminUncertain, setAdminUncertain] = useState(false)
-  const [linkInput, setLinkInput] = useState('')
-  const [linkNote, setLinkNote] = useState('')
-  // An uncertain link: { group, verdict } until reconciled.
-  const [linkCheck, setLinkCheck] = useState(null)
-  const admin = useAction()
-  const resolveGen = useRef(0)
-  const link = useAction()
+  const [confirm, setConfirm] = useState(null)
+  const [check, setCheck] = useState(null)
+  const [newGroup, setNewGroup] = useState(false)
+  // Set once a device join was sent (answered or not): a second tap could bind another writer.
+  const [deviceJoinSent, setDeviceJoinSent] = useState(false)
+  const [reserveConfirm, setReserveConfirm] = useState(false)
+  const [droppedNames, setDroppedNames] = useState({})
+  const act = useAction()
+  const join = useAction()
   const gen = useRef(0)
+  const queued = useRef(afterGroup || null)
+  // The role the first answer showed: a queued group opens only after a join.
+  const firstRole = useRef(null)
   const requestRef = useRef(node.request)
   requestRef.current = node.request
 
@@ -116,8 +239,6 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
     }
   }, [community])
 
-  const search = useMemberSearch({ request: node.request, hosted, online: node.online !== false, ownKey })
-
   const needIndex = hosted && ((info !== null && info.state === 'pending') || (info === null && loadError !== ''))
   const loadIndex = useCallback(async () => {
     const mine = ++idxGen.current
@@ -125,11 +246,11 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
     const res = await fetchCommunity(community)
     if (mine !== idxGen.current) return
     if (!res || !res.ok) {
-      setIdx({ status: 'error', name: '', groups: [], partial: false, error: res && res.reason === 'not-found' ? 'O servidor ainda não conhece esta comunidade.' : 'Não foi possível consultar o índice agora.' })
+      setIdx({ status: 'error', name: '', groups: [], partial: false, join: null, members: null, error: res && res.reason === 'not-found' ? 'O servidor ainda não conhece esta comunidade.' : 'Não foi possível consultar o índice agora.' })
       return
     }
     const v = res.value
-    setIdx({ status: 'done', name: v.name, groups: v.groups, partial: v.indexing === true || v.complete === false, error: '' })
+    setIdx({ status: 'done', name: v.name, groups: v.groups, partial: v.indexing === true || v.complete === false, join: v.join, members: v.members, error: '' })
   }, [community])
   useEffect(() => {
     if (!needIndex) {
@@ -142,9 +263,6 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
   useEffect(() => {
     if (!hosted) return
     load()
-    requestRef.current('node.info', {}).then((i) => {
-      setOwnKey(i && typeof i.publicKey === 'string' ? i.publicKey : null)
-    }).catch(() => {})
   }, [hosted, load])
 
   // groups.changed also names communities: a pending or incomplete answer
@@ -157,6 +275,148 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
     load()
   }, [hosted, version, load])
 
+  const groups = info && Array.isArray(info.groups) ? info.groups : []
+  const ordered = groups.filter((g) => g.general === true).concat(groups.filter((g) => g.general !== true))
+
+  // A new post emits groups.changed for its group only, not the community:
+  // the newest line and the unread count need a re-read. The list may change
+  // in the same render and its answer may predate the post, so any change of
+  // the pairs re-reads (the gen counter drops a stale answer).
+  const groupVersions = ordered.map((g) => g.group + ':' + node.getGroupVersion(g.group)).join(',')
+  const lastGroupVersions = useRef(groupVersions)
+  useEffect(() => {
+    if (lastGroupVersions.current === groupVersions) return
+    lastGroupVersions.current = groupVersions
+    if (hosted) load()
+  }, [hosted, groupVersions, load])
+
+  // group.seen emits nothing: coming back from a group re-reads the counts,
+  // and so does the mark landing after the person already came back.
+  const wasTop = useRef(isTop)
+  useEffect(() => {
+    const was = wasTop.current
+    wasTop.current = isTop
+    if (hosted && was === false && isTop === true) load()
+  }, [hosted, isTop, load])
+  const lastSeen = useRef(seenTick)
+  useEffect(() => {
+    if (seenTick === lastSeen.current) return
+    lastSeen.current = seenTick
+    if (hosted) load()
+  }, [hosted, seenTick, load])
+
+  const role = !asPage.page && info && typeof info.role === 'string' ? info.role : null
+  const isMember = role === 'creator' || role === 'admin' || role === 'member'
+  const staff = isMember && (role === 'creator' || role === 'admin')
+  const deviceJoin = !asPage.page && needsDeviceJoin(info)
+  const writerNow = info ? info.writerHere : undefined
+  useEffect(() => { if (writerNow === true) setDeviceJoinSent(false) }, [writerNow])
+  useEffect(() => { setDeviceJoinSent(false); setReserveConfirm(false) }, [community])
+  const canCreate = isMember && can('create', role) && showNewGroup(info)
+  const dropped = !asPage.page && info && info.repair === true && Array.isArray(info.dropped) ? info.dropped.filter((g) => typeof g === 'string' && HEX64.test(g)) : []
+  const droppedKey = dropped.join(',')
+
+  // A join note from earlier in this visit would sit next to the card's
+  // Entrar after leaving on the info screen.
+  const lastRole = useRef(role)
+  useEffect(() => {
+    if (inside(lastRole.current) && role !== null && !inside(role)) setJoinNote('')
+    if (role !== null) lastRole.current = role
+  }, [role])
+
+  // community.info rows no longer name a dropped group: group.info does
+  // when its root is held here.
+  useEffect(() => {
+    if (droppedKey === '') return
+    let live = true
+    for (const g of droppedKey.split(',')) {
+      requestRef.current('group.info', { group: g }).then((r) => {
+        if (live && r && typeof r.name === 'string' && r.name !== '') setDroppedNames((m) => ({ ...m, [g]: r.name }))
+      }).catch(() => {})
+    }
+    return () => { live = false }
+  }, [droppedKey])
+
+  // After a /g/ link: the queued group opens once, and only when this screen
+  // saw the person outside and then inside the community.
+  useEffect(() => {
+    if (role !== null && firstRole.current === null) firstRole.current = role
+    if (queued.current === null || typeof onOpenGroup !== 'function') return
+    if (!shouldOpenQueued({ queued: queued.current, firstRole: firstRole.current, role })) return
+    const group = queued.current
+    queued.current = null
+    onOpenGroup(group)
+  }, [role, onOpenGroup])
+
+  const mutate = async (method, params) => {
+    setCheck(null)
+    setConfirm(null)
+    const res = await act.run(() => requestRef.current(method, params))
+    if (res.ok) {
+      load()
+      return res
+    }
+    if (res.uncertain) {
+      // The change may or may not have landed: re-read and let the person decide.
+      setCheck(true)
+      load()
+    }
+    return res
+  }
+
+  const doJoin = async () => {
+    setJoinNote('')
+    setCheck(null)
+    const res = await join.run(() => requestRef.current('community.join', { community }))
+    if (res.ok) {
+      const v = res.value || {}
+      if (v.group) setJoinNote('Você entrou no Geral.')
+      else if (v.state === 'requested') setJoinNote('Pedido enviado: aguardando aprovação.')
+      else if (v.state === 'pending') setJoinNote(JOIN_PENDING_TEXT)
+      load()
+      return
+    }
+    if (res.uncertain) {
+      try {
+        const view = await requestRef.current('community.info', { community })
+        setInfo(view)
+        if (reconcile({ action: 'community-join' }, { role: view && view.role }) !== 'landed') setCheck(true)
+      } catch {
+        setCheck(true)
+      }
+    }
+  }
+
+  // The role is already 'member' before a second device joins, so reconcile
+  // would always read landed: an uncertain answer just re-reads, then the card
+  // may come back and the person decides to tap again.
+  const doDeviceJoin = async () => {
+    setJoinNote('')
+    setCheck(null)
+    // At the reserve the first tap only shows the warning: the slot it would
+    // spend (community or Geral) never comes back. The counts are read fresh:
+    // the rendered ones may predate a writer that just landed.
+    let fresh = info
+    if (!reserveConfirm) {
+      try {
+        fresh = await requestRef.current('community.info', { community })
+      } catch {}
+    }
+    if (needsReserveConfirm([fresh && fresh.writersBound, fresh && fresh.generalWritersBound], reserveConfirm)) {
+      setReserveConfirm(true)
+      return
+    }
+    const res = await join.run(() => requestRef.current('community.join', { community }))
+    if (res.ok) {
+      setDeviceJoinSent(true)
+      load()
+    } else if (res.uncertain) {
+      setDeviceJoinSent(true)
+      await load()
+      setDeviceJoinSent(false)
+    }
+  }
+
   if (!hosted) {
     return (
       <View style={styles.root}>
@@ -167,168 +427,73 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
   }
 
   const offline = node.online === false
-  const creator = info !== null && typeof ownKey === 'string' && info.creator === ownKey
   const pending = info !== null && info.state === 'pending'
+  const indexName = idx.status === 'done' && needIndex && typeof idx.name === 'string' && idx.name !== '' ? displayText(idx.name) : ''
   const title = info && typeof info.name === 'string' && info.name !== ''
     ? displayText(info.name)
-    : (idx.status === 'done' && needIndex && idx.name !== '' ? displayText(idx.name) : 'Comunidade')
-  const groups = info && Array.isArray(info.groups) ? info.groups : []
+    : (indexName || 'Comunidade')
 
-  const cls = classifyFollowInput(adminInput)
-  const searchable = cls.kind === 'name' || cls.kind === 'handle'
-  const hits = search.hits.filter((h) => h.author !== ownKey)
-
-  const typeAdmin = (t) => {
-    setAdminInput(t)
-    setAdminUncertain(false)
-    setAdminNote('')
-    setCandidate(null)
-    setLocalError('')
-    resolveGen.current++
-    setResolving(false)
-    admin.clearError()
-    const c = classifyFollowInput(t)
-    search.setQuery(c.kind === 'name' || c.kind === 'handle' ? t : '')
-  }
-
-  // A key or @nome becomes a candidate first; the grant waits for a tap.
-  const findPerson = async () => {
-    setLocalError('')
-    setAdminNote('')
-    if (cls.kind === 'key') return setCandidate({ member: cls.key, label: shortKey(cls.key) })
-    if (cls.kind !== 'handle') return
-    const name = isUsername(cls.handle)
-    if (name === null) return setLocalError('@nome inválido')
-    const mine = ++resolveGen.current
-    setResolving(true)
-    try {
-      const found = await lookupUsername(name)
-      if (mine !== resolveGen.current) return
-      // Same-origin data, not a signature check: only a consistent answer.
-      if (found === null || !isKey(found.member) || !usernameMatches(found.usernameRecord, found.member, name)) {
-        setLocalError(NOT_FOUND)
-      } else {
-        setCandidate({ member: found.member, label: '@' + displayText(name) })
-      }
-    } catch (err) {
-      if (mine === resolveGen.current) setLocalError(errorText(err))
-    } finally {
-      if (mine === resolveGen.current) setResolving(false)
-    }
-  }
-
-  const grant = async (member, label) => {
-    if (!HEX64.test(member) || offline || adminUncertain) return
-    setAdminNote('')
-    setGranting(member)
-    try {
-      const res = await admin.run(() => node.request('community.admin', { community, member, on: true }))
-      if (res.ok) {
-        setAdminInput('')
-        setCandidate(null)
-        search.clear()
-        setAdminNote(label + ' agora é administrador.')
-        load()
-        return
-      }
-      if (res.uncertain) {
-        // The count alone cannot tell whether this grant landed: re-read and
-        // leave a new attempt to the person.
-        setAdminUncertain(true)
-        load()
-      }
-    } finally {
-      setGranting(null)
-    }
-  }
-
-  // The system share sheet when there is one, else a copy. The link is never
-  // shown as text.
-  const shareCommunity = async () => {
-    const path = communityLink(community)
-    if (path === null) return
-    const url = origin() + path
-    const nav = shareNav()
+  const share = async () => {
     setShareNote('')
-    if (canShare(nav) && (await shareUrl(nav, { url, title: title === 'Comunidade' ? 'Varanda' : title })) !== 'failed') return
-    setShareNote((await copyText(nav, url)) ? 'Link copiado.' : 'Não foi possível copiar o link.')
+    setShareNote(await shareCommunity({ community, title }))
   }
 
-  const linkKey = keyOf(linkInput)
-  const recheckLink = async (group) => {
-    try {
-      const view = await node.request('group.info', { group })
-      const verdict = reconcile({ action: 'link', community, on: true }, { info: view })
-      setLinkCheck(verdict === 'landed' ? null : { group, verdict })
-      if (verdict === 'landed') {
-        setLinkInput('')
-        setLinkNote('Grupo vinculado.')
-      }
-    } catch {
-      setLinkCheck({ group, verdict: 'unknown' })
-    }
-    load()
-  }
+  const openGroup = (g) => { if (typeof onOpenGroup === 'function') onOpenGroup(g) }
+  // Informações holds the personal controls (leave, invite, members): a page
+  // never reaches them.
+  const canInfo = !asPage.page && info !== null && typeof onOpenInfo === 'function'
+  const openInfo = () => onOpenInfo(community)
 
-  const doLink = async () => {
-    const group = linkKey
-    if (!group || offline) return
-    setLinkNote('')
-    setLinkCheck(null)
-    const res = await link.run(() => node.request('community.link', { community, group, on: true }))
-    if (res.ok) {
-      const sides = res.value && Array.isArray(res.value.sides) ? res.value.sides : []
-      setLinkInput('')
-      setLinkNote(sides.includes('group')
-        ? 'Grupo vinculado.'
-        : 'Vínculo pedido. O grupo aparece aqui quando quem o criou também vincular esta comunidade.')
-      load()
-      return
-    }
-    if (res.uncertain) await recheckLink(group)
-  }
-
-  let linkStatus = null
-  if (linkCheck && linkCheck.verdict === 'not-landed') {
-    linkStatus = (
-      <View style={styles.inline}>
-        <ErrorText>O vínculo não foi registrado.</ErrorText>
-        <Btn label='tentar de novo' onPress={doLink} pending={link.pending} disabled={offline} secondary />
+  const confirmBox = confirm
+    ? (
+      <View style={styles.block}>
+        <Soft>{confirm.text}</Soft>
+        <View style={styles.inline}>
+          <Btn label={confirm.label} danger onPress={() => confirm.run()} pending={act.pending} />
+          <Btn label='Cancelar' secondary onPress={() => setConfirm(null)} />
+        </View>
       </View>
-    )
-  } else if (linkCheck) {
-    linkStatus = (
-      <View style={styles.inline}>
+      )
+    : null
+
+  const checkBox = check
+    ? (
+      <View style={styles.block}>
         <ErrorText>{UNCERTAIN}</ErrorText>
-        <Btn label='conferir' onPress={() => recheckLink(linkCheck.group)} secondary />
+        <Pill label='conferir' onPress={() => { setCheck(null); load() }} />
       </View>
-    )
-  } else if (link.error) {
-    linkStatus = <ErrorText>{link.error}</ErrorText>
-  }
+      )
+    : null
 
   let body
   const fromIndex = needIndex && idx.status === 'done'
   if (fromIndex) {
     body = (
       <View>
+        <JoinCard
+          title={title}
+          header={[COMMUNITY_JOIN_LABELS[idx.join] || '', membersLabel(idx.members)].filter(Boolean).join(' · ')}
+          join={idx.join}
+          showJoin={joinNote === ''}
+          onJoin={doJoin}
+          pending={join.pending}
+          offline={offline}
+          error={join.error}
+          note={joinNote}
+        />
+        {checkBox}
         <View style={styles.block}>
-          <Soft>Pelo índice do servidor; abra um grupo para entrar.</Soft>
           {idx.partial ? <Soft>O índice ainda está sendo atualizado; a lista pode estar incompleta.</Soft> : null}
-          <View style={styles.inline}>
-            <Btn label='Compartilhar' onPress={shareCommunity} secondary />
-          </View>
-          {shareNote ? <Soft>{shareNote}</Soft> : null}
         </View>
         <SectionHeader>Grupos</SectionHeader>
         {idx.groups.length === 0
-          ? <View style={styles.block}><Soft>Nenhum grupo vinculado ainda.</Soft></View>
+          ? <View style={styles.block}><Soft>Nenhum grupo ainda.</Soft></View>
           : idx.groups.map((g) => (
             <GroupRow
               key={g.group}
               title={typeof g.name === 'string' ? displayText(g.name) : PRIVATE_LABEL}
-              detail={Number.isSafeInteger(g.writerCount) ? (g.writerCount === 1 ? '1 membro' : g.writerCount + ' membros') : 'grupo privado'}
-              onPress={() => { if (typeof onOpenGroup === 'function') onOpenGroup(g.group) }}
+              detail={membersLabel(g.writerCount) || 'grupo privado'}
+              onPress={() => openGroup(g.group)}
             />
           ))}
       </View>
@@ -340,138 +505,162 @@ export function Comunidade ({ community, onBack, onOpenGroup, onOpenMember }) {
   } else if (info === null) {
     body = <Skeleton />
   } else {
+    // Role 'pending' on a held root: the account is in by another device and
+    // its writers are still arriving here, so no newcomer join is offered.
+    const joinable = !asPage.page && !isMember && role !== 'banned' && role !== 'requested' && role !== 'pending' && !pending && info.leavePending !== true
     body = (
       <View>
+        {asPage.page ? <PagePanel node={node} community={community} page={asPage.key} /> : null}
+        {joinable
+          ? (
+            <JoinCard
+              title={title}
+              header={[COMMUNITY_JOIN_LABELS[info.join] || '', membersLabel(info.members), adminsLabel(info.admins)].filter(Boolean).join(' · ')}
+              join={info.join}
+              showJoin={joinNote === ''}
+              onJoin={doJoin}
+              pending={join.pending}
+              offline={offline}
+              error={join.error}
+              note={joinNote}
+            />
+            )
+          : null}
         <View style={styles.block}>
-          {info.admins > 0 ? <Soft>{adminsLabel(info.admins)}</Soft> : null}
-          <View style={styles.inline}>
-            <Btn label='Compartilhar' onPress={shareCommunity} secondary />
-          </View>
-          {shareNote ? <Soft>{shareNote}</Soft> : null}
+          {joinable || deviceJoin ? null : <ErrorText>{join.error}</ErrorText>}
+          <ErrorText>{act.error}</ErrorText>
+          {joinNote && !joinable ? <Soft>{joinNote}</Soft> : null}
+          {role === 'requested' ? <Soft>Pedido enviado: aguardando aprovação de um administrador.</Soft> : null}
           {pending ? <Soft>Aguardando a sincronização desta comunidade.</Soft> : null}
           {!pending && info.incomplete === true ? <Soft>Alguns grupos ainda não chegaram a este aparelho; a lista pode estar incompleta.</Soft> : null}
           {loadError ? <ErrorText>{loadError}</ErrorText> : null}
         </View>
-        <SectionHeader>Grupos</SectionHeader>
-        {groups.length === 0
-          ? <View style={styles.block}><Soft>Nenhum grupo vinculado ainda.</Soft></View>
-          : groups.map((g) => (
-            <GroupRow
-              key={g.group}
-              title={typeof g.name === 'string' && g.name !== '' ? displayText(g.name) : PRIVATE_LABEL}
-              onPress={() => { if (typeof onOpenGroup === 'function') onOpenGroup(g.group) }}
-            />
-          ))}
-        {creator
+        {checkBox}
+        {confirmBox}
+        {deviceJoin && deviceJoinSent ? <View style={styles.block}><Soft>{DEVICE_WAIT_TEXT}</Soft></View> : null}
+        {deviceJoin && !deviceJoinSent
           ? (
-            <View>
-              <SectionHeader>Administração</SectionHeader>
-              <View style={styles.block}>
-                <Field
-                  label='Vincular um grupo'
-                  value={linkInput}
-                  onChangeText={(t) => { setLinkInput(t); setLinkCheck(null); setLinkNote(''); link.clearError() }}
-                  placeholder='/g/…'
-                  mono
-                />
-                <Soft>O vínculo vale quando os dois lados aceitam: a comunidade e o grupo.</Soft>
-                {linkStatus}
-                {linkNote ? <Soft>{linkNote}</Soft> : null}
-                <Btn label='Vincular' onPress={doLink} disabled={!linkKey || offline || linkCheck !== null} pending={link.pending} />
-              </View>
-              <View style={styles.block}>
-                <Field
-                  label='Adicionar administrador'
-                  placeholder='nome, @nome ou código'
-                  value={adminInput}
-                  onChangeText={typeAdmin}
-                  maxLength={80}
-                  mono
-                />
-                <Soft>Administradores da comunidade podem banir, admitir e ocultar nos grupos vinculados.</Soft>
-                {cls.kind === 'partial-key' ? <Soft>{PARTIAL_KEY_TEXT}</Soft> : null}
-                {cls.kind === 'key' || cls.kind === 'handle'
-                  ? <Btn label={cls.kind === 'key' ? 'Conferir pessoa' : 'Procurar @nome'} onPress={findPerson} pending={resolving} disabled={offline || adminUncertain} secondary />
-                  : null}
-                {candidate
-                  ? (
-                    <View style={styles.inline}>
-                      <Text style={styles.name} numberOfLines={1}>{candidate.label}</Text>
-                      <Btn label='Tornar administrador' onPress={() => grant(candidate.member, candidate.label)} pending={admin.pending && granting === candidate.member} disabled={offline || adminUncertain} />
-                    </View>
-                    )
-                  : null}
-                {localError ? <ErrorText>{localError}</ErrorText> : null}
-                {searchable && (offline || search.phase === 'offline') ? <Soft>A busca precisa de internet.</Soft> : null}
-                {searchable && search.phase === 'short' ? <Soft>Digite pelo menos 2 letras.</Soft> : null}
-                {searchable && search.phase === 'error' ? <ErrorText>{search.error}</ErrorText> : null}
-                {search.phase === 'loading' && hits.length === 0 ? <Skeleton rows={2} /> : null}
-                {hits.map((hit) => {
-                  const who = whoOf({ name: hit.name, username: hit.username })
-                  const label = displayText(who.title)
-                  return (
-                    <View key={hit.author} style={styles.hit}>
-                      <Pressable
-                        style={({ pressed }) => [styles.hitWho, pressed && styles.pressed]}
-                        accessibilityRole='link'
-                        accessibilityLabel={'ver o perfil de ' + label}
-                        disabled={typeof onOpenMember !== 'function'}
-                        onPress={() => onOpenMember(hit.author, { name: hit.name, username: hit.username })}
-                      >
-                        <Avatar name={who.avatarName} publicKey={hit.author} size={44} />
-                        <View style={styles.hitText}>
-                          <Text style={styles.name} numberOfLines={1}>{label}</Text>
-                          {who.subtitle ? <Text style={styles.handle} numberOfLines={1}>{displayText(who.subtitle)}</Text> : null}
-                        </View>
-                      </Pressable>
-                      <Pill label='Tornar administrador' onPress={() => grant(hit.author, label)} pending={admin.pending && granting === hit.author} disabled={offline || adminUncertain || admin.pending} />
-                    </View>
-                  )
-                })}
-                {search.phase === 'ready' && hits.length === 0 && search.unchecked === 0 ? <Soft>Ninguém encontrado com esse nome.</Soft> : null}
-                {adminUncertain ? <ErrorText>{UNCERTAIN}</ErrorText> : <ErrorText>{admin.error}</ErrorText>}
-                {adminNote ? <Soft>{adminNote}</Soft> : null}
-              </View>
-              {offline ? <View style={styles.block}><Soft>Sem internet: conecte-se para alterar a comunidade.</Soft></View> : null}
+            <View style={styles.block}>
+              <Soft>{DEVICE_JOIN_TEXT}</Soft>
+              {reserveConfirm || communityReserveReached(info) ? <Soft>{DEVICE_RESERVE_TEXT}</Soft> : null}
+              <Btn label={DEVICE_JOIN_LABEL} onPress={doDeviceJoin} pending={join.pending} disabled={offline} />
+              <ErrorText>{join.error}</ErrorText>
             </View>
             )
           : null}
+        <SectionHeader>Grupos</SectionHeader>
+        {ordered.length === 0
+          ? <View style={styles.block}><Soft>Nenhum grupo ainda.</Soft></View>
+          : ordered.map((g) => {
+            const name = typeof g.name === 'string' && g.name !== '' ? displayText(g.name) : (g.general === true ? GENERAL_LABEL : PRIVATE_LABEL)
+            // As the page: no personal role, last line or unread count.
+            if (asPage.page) return <GroupRow key={g.group} title={name} detail={[g.general === true ? 'grupo principal' : '', visibilityLabel(g.visibility)].filter(Boolean).join(' · ')} onPress={() => openGroup(g.group)} />
+            const last = g.last && typeof g.last === 'object' ? g.last : null
+            const line = lastLine(last)
+            const own = line !== '' && lastIsOwn(last)
+            const detail = line !== '' ? line : [g.general === true ? 'grupo principal' : '', visibilityLabel(g.visibility), g.role ? roleLabel(g.role) : 'Entrar'].filter(Boolean).join(' · ')
+            const time = last !== null && typeof last.at === 'string' ? relativeTime(last.at, now) : ''
+            const unread = unreadLabel(g.unread)
+            if (info.repair !== true || g.general === true) return <GroupRow key={g.group} title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
+            return (
+              <View key={g.group}>
+                <GroupRow title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
+                <View style={[styles.block, styles.inline]}>
+                  <Pill label='Tirar da lista' danger pending={act.pending} disabled={offline} onPress={() => setConfirm({ text: DROP_GROUP_TEXT, label: 'Tirar da lista', run: () => mutate('community.removeGroup', { community, group: g.group }) })} />
+                </View>
+              </View>
+            )
+          })}
+        {dropped.length > 0
+          ? (
+            <View>
+              <SectionHeader>Tirados da lista</SectionHeader>
+              {dropped.map((g) => (
+                <View key={g}>
+                  <GroupRow title={typeof droppedNames[g] === 'string' ? displayText(droppedNames[g]) : DROPPED_LABEL} onPress={() => openGroup(g)} />
+                  <View style={[styles.block, styles.inline]}>
+                    <Pill label='Devolver à lista' pending={act.pending} disabled={offline} onPress={() => setConfirm({ text: UNDROP_GROUP_TEXT, label: 'Devolver à lista', run: () => mutate('community.removeGroup', { community, group: g, undo: true }) })} />
+                  </View>
+                </View>
+              ))}
+            </View>
+            )
+          : null}
+        {canCreate
+          ? (
+            <View style={styles.block}>
+              <Btn label='Novo grupo' onPress={() => setNewGroup(true)} disabled={offline} />
+            </View>
+            )
+          : null}
+        {staff && offline ? <View style={styles.block}><Soft>Sem internet: conecte-se para alterar a comunidade.</Soft></View> : null}
       </View>
     )
   }
 
+  const subtitle = pending
+    ? 'Aguardando a sincronização'
+    : (info !== null && Number.isSafeInteger(info.members) ? membersLabel(info.members) : '') || 'Comunidade'
+
   return (
     <View style={styles.root}>
-      <TopBar title={title} subtitle='Comunidade' onBack={onBack} />
+      <ChatHeader
+        group
+        title={pending ? (indexName || 'Comunidade ainda chegando') : title}
+        subtitle={subtitle}
+        publicKey={community}
+        onBack={onBack}
+        onPress={canInfo ? openInfo : undefined}
+        pressLabel={INFO_LABEL}
+        right={[
+          { icon: 'compartilhar', label: 'Compartilhar', onPress: share },
+          canInfo ? { icon: 'info', label: INFO_LABEL, onPress: openInfo } : null
+        ]}
+      />
+      {shareNote ? <View style={styles.block}><Soft>{shareNote}</Soft></View> : null}
       <ScrollView
         contentContainerStyle={{ paddingBottom: bottomPad }}
         keyboardShouldPersistTaps='handled'
-        refreshControl={<RefreshControl refreshing={loading && info !== null} onRefresh={load} tintColor={colors.accent} colors={[colors.accent]} />}
+        refreshControl={<RefreshControl refreshing={loading && info !== null} onRefresh={load} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
       >
         {body}
       </ScrollView>
+      <NovoGrupo
+        community={community}
+        visible={newGroup}
+        onClose={() => { setNewGroup(false); load() }}
+        onCreated={(group) => {
+          setNewGroup(false)
+          load()
+          if (typeof group === 'string') openGroup(group)
+        }}
+      />
     </View>
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  block: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
-  inline: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  block: { paddingHorizontal: space.lg, paddingVertical: space.md, gap: space.sm },
+  inline: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flexWrap: 'wrap' },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
+    gap: space.md,
+    paddingVertical: space.md,
+    paddingHorizontal: space.lg,
     borderBottomWidth: 1,
     borderBottomColor: colors.line
   },
   pressed: { opacity: 0.6 },
-  icon: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.line, alignItems: 'center', justifyContent: 'center' },
+  icon: { width: 44, height: 44, borderRadius: radius.pill, backgroundColor: colors.line, alignItems: 'center', justifyContent: 'center' },
+  line: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   name: { ...type.postName, color: colors.ink, flex: 1 },
   handle: { ...type.postMeta, color: colors.soft },
-  hit: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  hitWho: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
+  own: { color: colors.accent, fontWeight: '600' },
+  time: { fontSize: 12, color: colors.soft },
+  grow: { flex: 1 },
+  badge: { minWidth: 22, height: 22, borderRadius: radius.pill, paddingHorizontal: space.sm, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+  badgeText: { fontSize: 12, fontWeight: '600', color: colors.accentInk },
   hitText: { flex: 1 }
 })

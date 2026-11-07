@@ -86,6 +86,26 @@
 // the blocklist snapshot, a fork or the quota.
 // Group keys never travel on the admission channel; members learn writer
 // sets over 'varanda/groups/1' (lib/groups-net.js) and the /index routes.
+//
+// Direct messages (docs/protocol.md section 11), only with the `dm` option:
+// the pool of sealed drops (lib/dm-pool.js) under <dataDir>/dm-pool/, the
+// anonymous 'varanda/dm/1' channel and the 'varanda/dm-stamp/1' channel on
+// every peer. The postage key is asked of dm.postage.get() only when a peer
+// opens the stamp channel or puts a drop, never in start(), so a seeder that
+// nobody writes to never makes one. Stamps are issued under the current key
+// only; a drop is accepted under the current or the previous one. The daily
+// stamp budget per diary is kept in <dataDir>/dm-stamps.json for the current
+// and the previous Brasília day only, so the file is no activity log.
+// Blob stamps (media chunks) are issued on the same stamp channel when
+// dm.blobPostage is given: a SEPARATE key pair with its own kid and rotation
+// list (one key for both would let a blob request mint a DM stamp), and a
+// separate daily budget per diary in <dataDir>/blob-stamps.json, so blob
+// issuance never spends the DM allowance.
+// With dm.blobPostage the seeder also keeps the blob pool (lib/blob-pool.js)
+// under <dataDir>/blobs/, at most dm.blobBytes bytes, answers the anonymous
+// 'varanda/blob/1' channel (lib/blob-net.js) on every peer and hands
+// complete blobs' chunks to the HTTP /blob route through blobChunk(). The
+// pool is swept on the DM tick and closed with the seeder.
 const fs = require('#fs')
 const path = require('#path')
 const process = require('#process')
@@ -135,7 +155,15 @@ const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./bl
 const { attachBlocklist } = require('./blocklist-net')
 const { createNoticeIndex } = require('./notices')
 const { noteGrowth, countActive } = require('./activity')
-const { attachNotices, attachNoticesV2 } = require('./notices-net')
+const { DM_STAMPS_PER_DAY, DM_STAMP_PROTOCOL } = require('./dm')
+const { createDmPool } = require('./dm-pool')
+const { attachDm } = require('./dm-net')
+const { attachDmStamp } = require('./dm-stamp-net')
+const dmPostage = require('./dm-postage')
+const { createBlobPool } = require('./blob-pool')
+const { attachBlob } = require('./blob-net')
+const { BLOB_CHUNK_BYTES, BLOB_POOL_BYTES } = require('./blob')
+const { attachNotices, attachNoticesV2, attachNoticesV3 } = require('./notices-net')
 const { createPostNoticeIndex } = require('./post-notices')
 const { pushCandidate, pushName } = require('./push-events')
 const {
@@ -149,15 +177,18 @@ const {
   MAX_MEDIA_CORES,
   MAX_GROUP_WRITERS,
   MAX_GROUPS_PER_DIARY,
-  MAX_GROUP_WRITERS_PER_DIARY
+  MAX_GROUP_WRITERS_PER_DIARY,
+  PAGE_KEYS
 } = require('./records')
 const { validateMediaHeader, latestMediaCores } = require('./media')
 const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins } = require('./group')
 const { createGroupIndex } = require('./group-index')
 const { attachGroups } = require('./groups-net')
-const { presentState, presentLength, clearDeleted, downloadExcept, deletedRanges } = require('./deletion')
+const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges } = require('./deletion')
 const { createEngagementIndex } = require('./engagement-index')
 const { createNameIndex } = require('./name-index')
+const { verifyRoster } = require('./page')
+const { verifyClose, verifyMoved } = require('./page-lifecycle')
 const { parseQuery } = require('./search-text')
 const { createTopicIndex, QUERY_RE } = require('./topic-index')
 const { UsageError } = require('./errors')
@@ -188,6 +219,12 @@ const SCAN_RETRIES_MAX = 8
 // one diary into memory): at start every surviving diary is served
 // together, and unbounded the peak heap is the sum of all of them.
 const PREPARE_CONCURRENCY = 2
+
+// A delete whose target is a page-* record has no effect (lib/deletion.js
+// fold, docs/protocol.md §12): the seeder's own bookkeeping follows it.
+function isPageType (type) {
+  return typeof type === 'string' && Object.prototype.hasOwnProperty.call(PAGE_KEYS, type)
+}
 // Tombstones queued for an incremental irregular media memo update; more
 // before the memo is next used rebuild it (bounds the queue of a regular
 // diary, which never uses it).
@@ -195,6 +232,14 @@ const TOMB_NEW_MAX = 1024
 const KEY_FILE = 'seeder-key.json'
 const CERT_FILE = 'seeder-cert.json'
 const ADMITTED_FILE = 'admitted.json'
+const DM_STAMPS_FILE = 'dm-stamps.json'
+const BLOB_STAMPS_FILE = 'blob-stamps.json'
+const DM_SWEEP_MS = 60000
+const DM_STAMP_ROWS_MAX = 100000
+const DM_STAMP_ROW_DAYS = 3
+const DM_STAMP_KEEP_DAYS = 7
+const DM_DAY = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/
+const DECIMAL = /^[1-9][0-9]*$/
 // Per-peer announce limits (H3): a token bucket (ANNOUNCE_RATE per second,
 // ANNOUNCE_BURST tokens) checked before any signature is verified, and a cap
 // on announces whose certificate fails (MAX_BAD_ANNOUNCES).
@@ -204,7 +249,7 @@ const MAX_BAD_ANNOUNCES = 16
 
 const HEX64 = /^[0-9a-f]{64}$/
 // Record types the engagement index reads from a diary's blocks.
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -529,7 +574,7 @@ function hexMap (value) {
 // private root keeps no name.
 function headerRecord (header) {
   const name = header.visibility === 'public' && typeof header.name === 'string' ? header.name : null
-  return { kind: header.kind, visibility: header.visibility, join: header.join, name }
+  return { kind: header.kind, visibility: header.visibility, join: header.join, name, community: header.community, member: header.member }
 }
 
 // groupHeaders as read from admitted.json: only well-formed records, at most
@@ -543,7 +588,10 @@ function headerRecordMap (value) {
     if ((v.kind !== 'group' && v.kind !== 'community') || (v.join !== 'open' && v.join !== 'approval')) continue
     if (v.visibility !== 'public' && v.visibility !== 'private') continue
     if (v.name !== null && (v.visibility !== 'public' || typeof v.name !== 'string' || v.name.length > 1024)) continue
-    out.set(k, { kind: v.kind, visibility: v.visibility, join: v.join, name: v.name })
+    // A record without its parent was kept for a version 1 root, which the
+    // startup re-gate purges.
+    if (v.kind === 'group' ? !(HEX64.test(v.community) && HEX64.test(v.member)) : (v.community !== null || v.member !== null)) continue
+    out.set(k, { kind: v.kind, visibility: v.visibility, join: v.join, name: v.name, community: v.community, member: v.member })
   }
   return out
 }
@@ -623,7 +671,9 @@ async function localMediaVerdict (core, diaryHex) {
 // root creator (a fresh root admission learns it from the header).
 // `visibility` is the root's verified visibility when known (else null): a
 // writer's `box` must match it, hex64 in a private group and null in a
-// public one, else 'header-invalid' as in the fold and member sync.
+// public one, else 'header-invalid' as in the fold and member sync. A
+// version 1 header (the validators' 'legacy') is 'header-invalid' too: no
+// wire reason of its own, and the startup re-gate purges it.
 function groupVerdict (raw, key, group, diary, visibility = null) {
   try {
     const header = decodeBlock(raw)
@@ -752,6 +802,99 @@ function checkSeederCert (cert, keyPair, associationHex) {
   if (!r.ok) throw new Error('certificado do semeador inválido (' + r.reason + ')')
 }
 
+function dmOptions (dm) {
+  if (dm === null || dm === undefined) return null
+  if (typeof dm !== 'object' || dm.postage === null || typeof dm.postage !== 'object' || typeof dm.postage.get !== 'function') {
+    throw new TypeError('dm.postage.get must be a function')
+  }
+  const { postage, stampsPerDay = DM_STAMPS_PER_DAY, onDrop = noop } = dm
+  const { blobPostage = null, blobStampsPerDay = dmPostage.BLOB_STAMPS_PER_DAY, blobBytes = BLOB_POOL_BYTES } = dm
+  if (!Number.isSafeInteger(stampsPerDay) || stampsPerDay < 1) throw new TypeError('invalid dm.stampsPerDay')
+  if (typeof onDrop !== 'function') throw new TypeError('dm.onDrop must be a function')
+  if (blobPostage !== null && (typeof blobPostage !== 'object' || typeof blobPostage.get !== 'function')) {
+    throw new TypeError('dm.blobPostage.get must be a function')
+  }
+  if (blobPostage !== null && blobPostage === postage) throw new TypeError('dm.blobPostage must not be dm.postage')
+  if (!Number.isSafeInteger(blobStampsPerDay) || blobStampsPerDay < 1) throw new TypeError('invalid dm.blobStampsPerDay')
+  if (!Number.isSafeInteger(blobBytes) || blobBytes < BLOB_CHUNK_BYTES) throw new TypeError('invalid dm.blobBytes')
+  return { postage, stampsPerDay, onDrop, blobPostage, blobStampsPerDay, blobBytes }
+}
+
+// The postage keys usable by the seeder, newest first, at most two (the
+// current one and the previous one), each { pub, n, d }; throws on anything
+// that is not a key, so a broken key file never issues or accepts a stamp.
+// label names the key file in the error ('dm-postage' or 'blob-postage').
+function dmPostageKeys (got, label = 'dm-postage') {
+  const invalid = () => new Error(label + ' inválido')
+  const list = got !== null && typeof got === 'object' && Array.isArray(got.keys) ? got.keys : [got]
+  const keys = []
+  for (const k of list.slice(0, 2)) {
+    if (k === null || typeof k !== 'object') throw invalid()
+    const pub = { v: 1, kid: k.kid, n: k.n, e: k.e }
+    const parsed = dmPostage.parsePublicKey(pub)
+    if (parsed === null || typeof k.d !== 'string' || !DECIMAL.test(k.d)) throw invalid()
+    const d = BigInt(k.d)
+    if (d >= parsed.n) throw invalid()
+    keys.push({ pub, n: parsed.n, d })
+  }
+  if (keys.length === 0) throw invalid()
+  return keys
+}
+
+function sharesKid (keys, others) {
+  return keys.some((k) => others.some((o) => o.pub.kid === k.pub.kid))
+}
+
+function daysBefore (day, n) {
+  return new Date(Date.parse(day + 'T00:00:00.000Z') - n * 86400000).toISOString().slice(0, 10)
+}
+
+// A diary's row: { 'YYYY-MM-DD': count } with its DM_STAMP_ROW_DAYS most
+// recent days only.
+function trimStampRow (row) {
+  const out = {}
+  for (const d of Object.keys(row).sort().reverse().slice(0, DM_STAMP_ROW_DAYS)) out[d] = row[d]
+  return out
+}
+
+function isCount (n) {
+  return Number.isSafeInteger(n) && n >= 0
+}
+
+// dm-stamps.json as a Map diary -> row; an unreadable file counts as empty
+// (the budget restarts, which costs at most one day of stamps). A v1 file
+// ({ diary: { day, count } }) is read as one day per diary. blob-stamps.json
+// has the same v2 shape.
+function readDmStamps (dataDir, log, name = DM_STAMPS_FILE, reason = 'dm-stamps-unreadable') {
+  const out = new Map()
+  let file = null
+  try {
+    file = readJson(path.join(dataDir, name), null)
+  } catch {
+    log({ event: 'warning', reason })
+    return out
+  }
+  if (file === null) return out
+  if (typeof file !== 'object' || (file.v !== 1 && file.v !== 2) || file.days === null || typeof file.days !== 'object') {
+    log({ event: 'warning', reason })
+    return out
+  }
+  for (const [key, e] of Object.entries(file.days)) {
+    if (out.size >= DM_STAMP_ROWS_MAX) break
+    if (!HEX64.test(key) || e === null || typeof e !== 'object') continue
+    const row = {}
+    if (file.v === 1) {
+      if (typeof e.day === 'string' && DM_DAY.test(e.day) && isCount(e.count)) row[e.day] = e.count
+    } else {
+      for (const [d, n] of Object.entries(e)) {
+        if (DM_DAY.test(d) && isCount(n)) row[d] = n
+      }
+    }
+    if (Object.keys(row).length > 0) out.set(key, trimStampRow(row))
+  }
+  return out
+}
+
 class Seeder {
   // purgeHook(core), gateHook(key), admitHook(key, step) ('persist' |
   // 'open', awaited right before that admission step; a throw simulates the
@@ -785,6 +928,16 @@ class Seeder {
   // onPush(event) is not a test hook: called synchronously, never awaited,
   // once per follow, reply, like or repost appended to a served diary past
   // its push cursor (push-events.js shapes the event; a throw is ignored).
+  // dm (header comment) is not a test hook either: { postage: { get() },
+  // stampsPerDay = DM_STAMPS_PER_DAY, onDrop }. postage.get() resolves to
+  // the postage keys, { kid, n, e, d } (decimal strings) or { keys: [...] }
+  // newest first; only the first two count. onDrop() is called with no
+  // arguments after each new drop is stored (a throw is ignored). null
+  // leaves both direct message channels unanswered. blobPostage ({ get() },
+  // same shape, a DIFFERENT key file) turns on blob stamps, with
+  // blobStampsPerDay = BLOB_STAMPS_PER_DAY, and the blob pool and channel,
+  // with blobBytes = BLOB_POOL_BYTES; without it blob requests on the stamp
+  // channel are bad messages and no blob channel is opened.
   // noClear (default: VARANDA_NO_CLEAR=1, the rollout kill switch) keeps
   // the bytes of deleted diary blocks and media ranges: they are only
   // hidden, as before byte deletion.
@@ -800,6 +953,7 @@ class Seeder {
     regateHook = null,
     storeHook = null,
     onPush = null,
+    dm = null,
     noClear = null,
     maxLogBlocks = MAX_LOG_BLOCKS,
     maxLogBytes = MAX_LOG_BYTES,
@@ -861,6 +1015,18 @@ class Seeder {
     this.storeHook = storeHook
     if (onPush !== null && typeof onPush !== 'function') throw new TypeError('onPush must be a function or null')
     this.onPush = onPush
+    this._dmOpts = dmOptions(dm)
+    this._dm = null
+    this._blob = null
+    this._dmTimer = null
+    this._dmKeys = []
+    this._dmKeysFrom = null
+    this._dmStamps = new Map() // diary key -> { day, count }
+    this._blobKeys = []
+    this._blobKeysFrom = null
+    this._blobStamps = new Map() // diary key -> { day: count }, apart from _dmStamps
+    this._dmHandles = new Set()
+    this._dmStampChannels = new Map() // seeder stamp handle -> { kid, blobKid, socket, release }
     this.noClear = noClear === null ? (process.env || {}).VARANDA_NO_CLEAR === '1' : noClear === true
     this.maxLogBlocks = maxLogBlocks
     this.maxLogBytes = maxLogBytes
@@ -1005,7 +1171,10 @@ class Seeder {
     // Post notices (post-notices.js: replies, quotes, @nome mentions) follow
     // the same lifecycle in their own index, so a mention spammer never
     // touches the follow index's budget; both are paged on
-    // varanda/notices/2, and _noticeHandles holds the v1 and v2 channels.
+    // varanda/notices/2. varanda/notices/3 adds likes and reposts read from
+    // the engagement index (noticeRows), on its own channel because an old
+    // client rejects a whole v2 page on an unknown kind; _noticeHandles holds
+    // the v1, v2 and v3 channels.
     this._notices = createNoticeIndex({ isMember: (k) => this._admitted.has(k) || this._served.has(k) })
     this._postNotices = this._createPostNoticeIndex()
     this._noticeHandles = new Set()
@@ -1231,6 +1400,7 @@ class Seeder {
     try {
       this._guardReplication()
       if (this.storeHook) await this.storeHook()
+      if (this._dmOpts !== null && !this._closing) this._openDm()
       const file = readAdmittedFile(this.dataDir)
       for (const [key, cert] of Object.entries(file.admitted)) {
         if (HEX64.test(key)) this._admitted.set(key, cert)
@@ -1882,9 +2052,12 @@ class Seeder {
       // follow (countShown, tombstoneIrregular: mediaRead then refuses all
       // of this diary's media until a re-serve), `mediaRecounts` how many
       // recounts this serve ran and `mediaRecounting` one is running.
+      // `pageSeqs` the tombstone targets read as page-* records: never in
+      // `deleted` nor `effective` (a delete of one has no effect).
       deleted: new Set(),
       tombstones: new Map(),
       effective: null,
+      pageSeqs: new Set(),
       media: new Map(),
       mediaRefs: new Map(),
       mediaTombs: new Set(),
@@ -2034,7 +2207,18 @@ class Seeder {
       state = null
     }
     for (const seq of this._effectiveDeleted(entry)) entry.excluded.add(seq)
+    // A page diary keeps an unheld tombstone target in the download until
+    // it is read once (lib/deletion.js downloadExceptPages, docs/protocol.md
+    // §12). The held targets are read before the clear below, so a cleared
+    // one is not fetched back.
+    const pageGuard = pageTargets(core)
     if (!this.noClear) {
+      try {
+        // The roster probe settles later (the download is told): it must not
+        // hold a PREPARE_CONCURRENCY slot.
+        await pageGuard.excludable(entry.excluded, { wait: false })
+      } catch {}
+      if (stale()) return
       try {
         await clearDeleted(core, entry.excluded)
       } catch {}
@@ -2045,7 +2229,7 @@ class Seeder {
     } catch {}
     if (stale()) return
     entry.present = Math.max(entry.present, present)
-    entry.download = this._downloader(core, entry.excluded)
+    entry.download = this._downloader(core, entry.excluded, pageGuard)
     // Growth is measured on the present length (has() only: no block is
     // read here, the scan reads each one). A block arriving above the scan
     // cursor queues a pass, which applies a tombstone among such blocks
@@ -2076,6 +2260,9 @@ class Seeder {
     const onDownload = (index) => {
       if (index >= entry.scanned) entry.arrived.add(index)
       if (index > entry.scanned) above = true
+      // A tombstone target the scan skipped as a hole: a page-* one leaves
+      // the deleted bookkeeping and reaches the name index.
+      if (index < entry.scanned && entry.gone.has(index)) this._pageArrived(key, entry, index).catch(noop)
       check()
     }
     core.on('append', onAppend)
@@ -2083,6 +2270,7 @@ class Seeder {
     entry.stopGrow = () => {
       core.off('append', onAppend)
       core.off('download', onDownload)
+      pageGuard.destroy()
     }
     // A replica opened for re-gating may already hold block 0.
     if (regate && entry.present >= 1) this._onGrow(key, entry, entry.present)
@@ -2092,8 +2280,8 @@ class Seeder {
   // The live download of a diary or media core minus `deleted`
   // (lib/deletion.js downloadExcept: update() clears and re-ranges). With
   // noClear every block is downloaded and kept, as before byte deletion.
-  _downloader (core, deleted) {
-    if (!this.noClear) return downloadExcept(core, deleted)
+  _downloader (core, deleted, pageGuard = null) {
+    if (!this.noClear) return pageGuard !== null ? downloadExceptPages(core, deleted, { guard: pageGuard }) : downloadExcept(core, deleted)
     const range = core.download({ start: 0, end: -1 })
     return { update: async () => [], destroy: () => range.destroy(), idle: async () => {} }
   }
@@ -2370,6 +2558,11 @@ class Seeder {
       // apply keeps failing reads fine every pass and would never hit the cap.
       entry.scanRetries = 0
       if (block === null) continue
+      if (entry.gone.has(i) && isPageType(block.type)) {
+        const r = validRecordCopy(block, i)
+        if (r !== null) this._notePage(key, entry, i, r)
+        continue
+      }
       if (block.type === 'follow') {
         const r = validRecordCopy(block, i)
         if (r !== null) this._notices.foldFollow(key, i, r)
@@ -2740,6 +2933,15 @@ class Seeder {
     if (entry.dropped || this._closing || this._served.get(key) !== entry) return true
     const block = raw === null ? null : decodeBlock(raw)
     if (block !== null && (block.type === 'follow' || block.type === 'media-core')) return true
+    // A page-* target: the delete has no effect. One not held yet is
+    // taken back out of `deleted` when it arrives (_notePage).
+    if (block !== null && isPageType(block.type)) {
+      const copy = validRecordCopy(block, target)
+      if (copy !== null) {
+        this._notePage(key, entry, target, copy)
+        return true
+      }
+    }
     entry.deleted.add(target)
     if (media) countTombstone(entry, seq, record, block)
     this._index.removeRecord(key, target)
@@ -2816,11 +3018,40 @@ class Seeder {
       const out = new Set()
       const seqs = Array.from(entry.tombstones.keys()).sort((a, b) => a - b)
       for (let n = seqs.length - 1; n >= 0; n--) {
-        if (!out.has(seqs[n])) out.add(entry.tombstones.get(seqs[n]))
+        const target = entry.tombstones.get(seqs[n])
+        if (!out.has(seqs[n]) && !entry.pageSeqs.has(target)) out.add(target)
       }
       entry.effective = out
     }
     return entry.effective
+  }
+
+  // A tombstone target read as a valid page-* record: the delete has no
+  // effect. It leaves `deleted` (the index cursors read it again) and the
+  // readers' fold; a cursor that already skipped it as deleted hands it to
+  // the name index here (a retry of a noted seq is a no-op there).
+  _notePage (key, entry, seq, record) {
+    if (entry.pageSeqs.has(seq)) return
+    entry.pageSeqs.add(seq)
+    entry.effective = null
+    const skipped = entry.deleted.delete(seq)
+    if (!entry.gated || entry.dropped || this._closing || this._served.get(key) !== entry) return
+    if (skipped || seq < entry.indexed) this._names.note(key, seq, record)
+  }
+
+  // A tombstone target below the scan cursor arrived (the scan passed it
+  // as a hole): read it once to learn whether it is a page-* record.
+  async _pageArrived (key, entry, seq) {
+    if (entry.pageSeqs.has(seq)) return
+    let raw = null
+    try {
+      raw = await entry.core.get(seq, { wait: false, raw: true })
+    } catch {}
+    if (raw === null || entry.dropped || this._closing || this._served.get(key) !== entry) return
+    const block = decodeBlock(raw)
+    if (block === null || !isPageType(block.type)) return
+    const r = validRecordCopy(block, seq)
+    if (r !== null) this._notePage(key, entry, seq, r)
   }
 
   // Diary D's first group scan since start ended (or gave up, or D left):
@@ -3963,23 +4194,31 @@ class Seeder {
     })
   }
 
-  // Folds the link records of a served root into the group index, each block
-  // once, in log order, up to the contiguous prefix (docs/protocol.md section
-  // 10, "Communities"): community-link in a group root, group-link and
-  // group-meta in a community root. Only after the header verified locally,
-  // so the root's kind is known. One pass at a time per root; growth during
-  // a pass runs another. Never recursive: one root's records never make the
-  // seeder read another root.
+  // Folds the catalogue records of a served community root into the group
+  // index, each block once, in log order, up to the contiguous prefix
+  // (docs/protocol.md section 10, "Protocol v2 admission and scan"):
+  // group-meta and group-create (only the community's creator creates
+  // groups, so no other core is read). Only after the header verified
+  // locally, so the root's kind is known; a group root is not scanned. One
+  // pass at a time per root; growth during a pass runs another.
   _scanRoot (key, entry) {
     if (key !== entry.group || !entry.headerOk || entry.rootScanning || entry.dropped || this._closing) return
     const header = this._groupIndex.header(key)
-    if (header === null || (header.kind !== 'group' && header.kind !== 'community')) return
-    const community = header.kind === 'community'
-    const stale = () => entry.dropped || this._closing || this._groupServed.get(key) !== entry
+    if (header === null || header.kind !== 'community') return
     if (entry.rootScanned === 0) {
       this._groupIndex.resetRoot(key)
       entry.rootScanned = 1
     }
+    this._scanGroupCore(key, entry, (block, i) => {
+      const t = block.type
+      if (t !== 'group-meta' && t !== 'group-create') return
+      if (validateGroupRecord(block, i, { root: true, community: true }) !== null) return
+      this._groupIndex.foldRoot(key, block)
+    })
+  }
+
+  _scanGroupCore (key, entry, fold) {
+    const stale = () => entry.dropped || this._closing || this._groupServed.get(key) !== entry
     entry.rootScanning = true
     let failed = false
     const run = async () => {
@@ -4003,10 +4242,7 @@ class Seeder {
           block = decodeBlock(raw)
         } catch {}
         if (block === null || typeof block !== 'object') continue
-        const t = block.type
-        if (t !== 'community-link' && t !== 'group-link' && t !== 'group-meta') continue
-        if (validateGroupRecord(block, i, { root: true, community }) !== null) continue
-        this._groupIndex.foldRoot(key, block)
+        fold(block, i)
       }
     }
     run().catch(noop).then(() => {
@@ -4017,8 +4253,8 @@ class Seeder {
     })
   }
 
-  // As _retryIndex: one timer per served root, backoff 2/10/30/60 s; the
-  // root's answers stay incomplete meanwhile (_rootScanBehind).
+  // As _retryIndex: one timer per served core, backoff 2/10/30/60 s; the
+  // answers stay incomplete meanwhile (_rootScanBehind).
   _retryRootScan (key, entry) {
     if (entry.rootRetry || entry.dropped || this._closing || this._groupServed.get(key) !== entry) return
     entry.rootReadFailures = Math.min(entry.rootReadFailures + 1, 4)
@@ -4086,7 +4322,8 @@ class Seeder {
     if (this._isBlocked(group) || header === null) return
     const rec = headerRecord(header)
     const prev = this._groupHeaders.get(group)
-    if (prev !== undefined && prev.kind === rec.kind && prev.visibility === rec.visibility && prev.join === rec.join && prev.name === rec.name) return
+    if (prev !== undefined && prev.kind === rec.kind && prev.visibility === rec.visibility && prev.join === rec.join && prev.name === rec.name &&
+      prev.community === rec.community && prev.member === rec.member) return
     const max = this.maxGroupCores + this.maxGroupInflight
     if (prev === undefined && this._groupHeaders.size >= max) {
       for (const k of [...this._groupHeaders.keys()]) this._pruneGroupHeader(k)
@@ -4420,16 +4657,20 @@ class Seeder {
           this._retryIndex(key, entry)
           return
         }
-        const block = raw === null || entry.deleted?.has(i) ? null : decodeBlock(raw)
+        let block = raw === null ? null : decodeBlock(raw)
+        // A page-* block is never deleted (_notePage takes it back out).
+        if (block !== null && entry.deleted?.has(i) && !isPageType(block.type)) block = null
         if (block !== null && INDEX_TYPES.has(block.type)) {
           const record = validRecordCopy(block, i)
           // The name index refuses only a new author at its cap: pause like
           // an engagement cap (a retry of the same seq is a no-op there).
-          if (record !== null && (record.type === 'profile' || record.type === 'username') && !this._names.note(key, i, record)) {
+          const isPage = record !== null && record.type.startsWith('page-')
+          if (record !== null && (isPage || record.type === 'profile' || record.type === 'username') && !this._names.note(key, i, record)) {
             entry.indexPaused = true
             return
           }
-          if (record !== null && !this._index.add(key, i, record)) {
+          // Page records only feed the name index's hint.
+          if (record !== null && !isPage && !this._index.add(key, i, record)) {
             entry.indexPaused = true
             return
           }
@@ -4472,6 +4713,17 @@ class Seeder {
       verifyUsername: (author, record) => {
         try {
           return cert.verifyUsernameRecord(record, author, this.association).ok === true
+        } catch {
+          return false
+        }
+      },
+      // The page hint needs the record verified for the author's log, so a
+      // shape-valid unsigned copy never labels a person "Página".
+      verifyPage: (author, record) => {
+        try {
+          const verify = record.type === 'page-roster' ? verifyRoster : record.type === 'page-close' ? verifyClose : record.type === 'page-moved' ? verifyMoved : null
+          if (verify === null) return false
+          return verify(record, author, this.association, this._certOpts()).ok === true
         } catch {
           return false
         }
@@ -4816,6 +5068,75 @@ class Seeder {
     }
   }
 
+  // The follow edges are public: who follows an author and whom it follows,
+  // under the same read gate as indexEngagers. A held author answers null; a
+  // held person is left out and the answer says complete false.
+  _followsVisible () {
+    const state = { held: false }
+    state.visible = (hex) => {
+      if (!this._indexVisible(hex)) return false
+      if (this._searchHeld(hex)) {
+        state.held = true
+        return false
+      }
+      return true
+    }
+    return state
+  }
+
+  // GET /index/follows/<author>: both counts, or null for an author the
+  // index may not show.
+  indexFollowCounts (authorHex) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      const v = this._followsVisible()
+      const counts = this._notices.followCounts(authorHex, v.visible)
+      const flags = this._indexFlags()
+      return { seguindo: counts.seguindo, seguidores: counts.seguidores, indexing: flags.indexing, complete: flags.complete && !v.held && !counts.incomplete }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/follows/<author>/<kind>[/<atMs>.<key>]: one page of
+  // followers or followed accounts, newest first, with a hint per listed
+  // key; null for an unknown kind, an author not shown or a malformed cursor.
+  // The cursor stays in integer milliseconds (no Date round trip).
+  indexFollows (authorHex, kind, cursor = null) {
+    try {
+      if (kind !== 'seguindo' && kind !== 'seguidores') return null
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      let after = null
+      if (cursor !== null) {
+        if (typeof cursor !== 'string') return null
+        const m = /^(\d{1,16})\.([0-9a-f]{64})$/.exec(cursor)
+        if (m === null) return null
+        const t = Number(m[1])
+        if (!Number.isSafeInteger(t) || t < 0) return null
+        after = { t, key: m[2] }
+      }
+      const v = this._followsVisible()
+      const page = this._notices.followsPage({ author: authorHex, kind, after, limit: 20, visible: v.visible })
+      const authors = {}
+      for (const item of page.items) {
+        if (!(item.key in authors)) authors[item.key] = this._index.hints(item.key)
+      }
+      const flags = this._indexFlags()
+      return {
+        author: authorHex,
+        kind,
+        items: page.items.map((it) => ({ key: it.key, seq: it.seq, at: it.at })),
+        next: page.next,
+        total: page.total,
+        authors,
+        indexing: flags.indexing,
+        complete: flags.complete && !v.held && !page.incomplete
+      }
+    } catch {
+      return null
+    }
+  }
+
   // GET /index/counts/<ref,...>: counts for the refs that are indexed (an
   // unknown ref, or one of an author not visible, is omitted).
   indexCounts (refs) {
@@ -4837,7 +5158,20 @@ class Seeder {
       if (before !== null && (!Number.isSafeInteger(before) || before < 1)) return null
       const page = this._index.member(authorHex, before) || { profileSeq: null, usernameSeq: null, posts: [], postsTotal: 0 }
       const entry = this._served.get(authorHex)
-      return { length: entry.present, ...page, ...this._indexFlags() }
+      return { length: entry.present, ...page, ...this._names.hint(authorHex), ...this._indexFlags() }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/page-end/<author>: the seq of the author's first verified
+  // page-close or page-moved the name index noted (null when none); null
+  // when not visible. A pointer only: page.feed fetches that block and
+  // verifies it itself (docs/protocol.md §12).
+  indexPageEnd (authorHex) {
+    try {
+      if (!this._indexVisible(authorHex)) return null
+      return { endSeq: this._names.endSeq(authorHex) }
     } catch {
       return null
     }
@@ -5020,14 +5354,12 @@ class Seeder {
     return false
   }
 
+  // A community's page lists its root and its community writers (CWs):
+  // members read them to gate every group of the community.
   _groupPage (group, after, limit) {
     if (typeof group !== 'string' || !HEX64.test(group) || this._isBlocked(group)) return null
-    // A community has no writers but its root: a writer core naming C in a
-    // join is never paged (members read any other item as a bad hint).
-    const header = this._groupIndex.header(group)
-    const rootOnly = header !== null && header.kind === 'community'
     return this._groupIndex.page(group, after, limit, {
-      visible: (diary, key) => (!rootOnly || key === group) && (this._indexVisible(diary) || this._keptRootRow(diary, key)) && this._groupCoreVisible(key),
+      visible: (diary, key) => (this._indexVisible(diary) || this._keptRootRow(diary, key)) && this._groupCoreVisible(key),
       lengthOf: (key) => this._groupServed.get(key).core.contiguousLength,
       // A writer's withheld block must not hold its group's pages
       // incomplete forever: the signed length is reported, never awaited.
@@ -5052,12 +5384,14 @@ class Seeder {
 
   // GET /index/group/<G>[/<after>]: the root header fields the seeder holds
   // (`name` null for a private root), `rootServed` whether the root core
-  // itself is served, and a page of writers, each with `left`; null for a
-  // malformed or blocked group. Hints only. A root this seeder verified
-  // keeps its header fields while writers of G stay served after the root
-  // was purged or refused (_groupHeaders): the account service needs `kind`
-  // to confirm a report against the group. With no header at all while a
-  // writer of G is served the page is never complete.
+  // itself is served, the parent community the header names (`community`,
+  // null for a community root) and whether that community's catalogue hints
+  // attach G (`attached`), and a page of writers (a community's CWs), each
+  // with `left`; null for a malformed or blocked group. Hints only. A root
+  // this seeder verified keeps its header fields while writers of G stay
+  // served after the root was purged or refused (_groupHeaders): the account
+  // service needs `kind` to confirm a report against the group. With no
+  // header at all while a writer of G is served the page is never complete.
   indexGroup (group, after = null) {
     try {
       const page = this._groupPage(group, after, 64)
@@ -5075,33 +5409,48 @@ class Seeder {
       }
       if (header === null && writerServed && this._groupHeaders.has(group)) header = { ...this._groupHeaders.get(group), diary: null }
       let incomplete = this._groupIncomplete(group) || (header === null && writerServed) || this._rootScanBehind(group)
-      // `community` reads the other root too: the one G's community-link
-      // names must be settled here before the answer is.
-      const links = rootServed ? this._groupIndex.rootLinks(group) : null
-      if (links !== null && links.community !== null && this._linkedRootPending(links.community)) incomplete = true
-      const community = rootServed ? this._groupIndex.communityOf(group, (c) => this._communityVisible(c)) : null
-      return { header, rootServed, community, writers: page.items, next: page.next, indexing: !this._ready, complete: !incomplete }
+      const community = header !== null && header.kind === 'group' && typeof header.community === 'string' ? header.community : null
+      // `attached` reads the parent's catalogue: it must be settled here
+      // before the answer is.
+      if (community !== null && this._communityPending(community)) incomplete = true
+      const attached = rootServed && this._groupIndex.communityOf(group, (c) => this._communityVisible(c)) !== null
+      return { header, rootServed, community, attached, writers: page.items, next: page.next, indexing: !this._ready, complete: !incomplete }
     } catch {
       return null
     }
   }
 
-  // Whether a served root still has link records to fold (_scanRoot).
+  // Whether a served community root still has catalogue records to fold
+  // (_scanRoot).
   _rootScanBehind (key) {
     const e = this._groupServed.get(key)
     if (!e || e.dropped || e.group !== key || !e.headerOk) return false
+    // A group root is never scanned: its cursor stays at 0.
+    const header = this._groupIndex.header(key)
+    if (header === null || header.kind !== 'community') return false
     return e.rootScanning || e.rootScanned < e.core.contiguousLength
   }
 
-  // Whether root `key`, named by a link of another root, may still change
-  // what that link means here: being admitted, its header not verified, its
-  // links not folded yet, or writers of it in admission. A root this seeder
-  // neither serves nor admits (or blocks) settles nothing more.
-  _linkedRootPending (key) {
-    if (this._isBlocked(key)) return false
-    if (this._groupIncomplete(key)) return true
-    if (!this._groupServed.has(key) && !this._groupReserved.has(key)) return false
-    return !this._groupCoreVisible(key) || this._rootScanBehind(key)
+  // Whether community C, the parent a group header names, may still change
+  // what its catalogue says here: being admitted, its header not verified,
+  // its root not scanned yet, or cores of it in admission. A
+  // community this seeder neither serves nor admits (or blocks) settles
+  // nothing more.
+  _communityPending (C) {
+    if (this._isBlocked(C)) return false
+    if (this._groupIncomplete(C)) return true
+    if (!this._groupServed.has(C) && !this._groupReserved.has(C)) return false
+    return !this._groupCoreVisible(C) || this._rootScanBehind(C)
+  }
+
+  // Whether group root G, named by a create in a community's catalogue, may
+  // still change whether it is listed: in admission or its header not
+  // verified yet.
+  _catalogueRootPending (G) {
+    if (this._isBlocked(G)) return false
+    if (this._groupIncomplete(G)) return true
+    if (!this._groupServed.has(G) && !this._groupReserved.has(G)) return false
+    return !this._groupCoreVisible(G)
   }
 
   // Whether community root C may be answered: unblocked, served with its
@@ -5115,32 +5464,63 @@ class Seeder {
     return this._rootBound(C, header.diary) || this._keptRootRow(header.diary, C)
   }
 
-  // GET /index/community/<C>: the community's display name and the groups
-  // linked from both sides whose roots are served here, each with its public
-  // name and live member count, at most MAX_GROUPS_PER_COMMUNITY; null for a
-  // malformed or blocked key, or one that is no community root here once
-  // nothing about it is pending (while its root is being admitted the answer
-  // is an empty, incomplete one). An unbound community root lists no groups
-  // and is never complete. Hints only: nodes verify with buildCommunity.
+  // One page of community C's answer: its display name, join, creator, live
+  // members and the groups its catalogue hints attach whose roots are served
+  // here, after the exclusive cursor `after`, at most
+  // MAX_GROUPS_PER_COMMUNITY, `next` the last listed key when more follow;
+  // null for a malformed or blocked key, or one that is no community root
+  // here once nothing about it is pending (while its root is being admitted
+  // the answer is an empty, incomplete one). An unbound community root lists
+  // no groups and is never complete. Hints only: nodes verify with
+  // buildCommunity and buildGroup.
+  _communityAnswer (C, after) {
+    if (typeof C !== 'string' || !HEX64.test(C) || this._isBlocked(C)) return null
+    if (after !== null && (typeof after !== 'string' || !HEX64.test(after))) return null
+    const header = this._groupCoreVisible(C) ? this._groupIndex.header(C) : null
+    if (header !== null && header.kind !== 'community') return null
+    if (header === null) {
+      if (!this._groupIncomplete(C) && !this._groupHasCore(C)) return null
+      return { name: null, join: null, creator: null, members: 0, groups: [], next: null, indexing: !this._ready, complete: false }
+    }
+    const bound = this._communityVisible(C)
+    const visible = (g) => bound && !this._isBlocked(g) && this._groupCoreVisible(g)
+    const members = (diary, key) => (this._indexVisible(diary) || this._keptRootRow(diary, key)) && this._groupCoreVisible(key)
+    const c = this._groupIndex.community(C, visible, { after, members })
+    if (c === null) return null
+    let incomplete = !bound || this._groupIncomplete(C) || this._rootScanBehind(C)
+    // Every group a create of C names (listed or not) that is served or
+    // being admitted here must be settled, writers in admission too.
+    for (const G of this._groupIndex.createdIn(C)) {
+      if (incomplete) break
+      if (this._catalogueRootPending(G)) incomplete = true
+    }
+    return {
+      name: c.name,
+      join: c.join,
+      creator: bound ? c.creator : null,
+      members: c.members,
+      groups: c.groups,
+      next: c.next,
+      indexing: !this._ready,
+      complete: !incomplete
+    }
+  }
+
+  // GET /index/community/<C>: the first page of _communityAnswer.
   indexCommunity (C) {
     try {
-      if (typeof C !== 'string' || !HEX64.test(C) || this._isBlocked(C)) return null
-      const header = this._groupCoreVisible(C) ? this._groupIndex.header(C) : null
-      if (header !== null && header.kind !== 'community') return null
-      if (header === null) {
-        if (!this._groupIncomplete(C) && !this._groupHasCore(C)) return null
-        return { name: null, groups: [], indexing: !this._ready, complete: false }
-      }
-      const bound = this._communityVisible(C)
-      const visible = (g) => bound && !this._isBlocked(g) && this._groupCoreVisible(g)
-      const c = this._groupIndex.community(C, visible)
-      if (c === null) return null
-      let incomplete = !bound || this._groupIncomplete(C) || this._rootScanBehind(C)
-      // Every group C links (listed or not folded back yet) that is served
-      // or being admitted here must be settled, writers in admission too.
-      const links = this._groupIndex.rootLinks(C)
-      for (const G of links === null ? [] : links.groups) if (this._linkedRootPending(G)) incomplete = true
-      return { name: c.name, groups: c.groups, indexing: !this._ready, complete: !incomplete }
+      return this._communityAnswer(C, null)
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/community/<C>/groups/<cursor>: the groups after `cursor`.
+  indexCommunityGroups (C, cursor) {
+    try {
+      if (typeof cursor !== 'string' || !HEX64.test(cursor)) return null
+      const a = this._communityAnswer(C, cursor)
+      return a === null ? null : { groups: a.groups, next: a.next, indexing: a.indexing, complete: a.complete }
     } catch {
       return null
     }
@@ -5668,6 +6048,92 @@ class Seeder {
     }
     this._noticeHandles.add(noticesV2)
     release.push(() => this._noticeHandles.delete(noticesV2))
+    // v2 plus likes and reposts of the target's posts. Engagers go through
+    // the likers list's visibility (indexEngagers) before noticeRows' caps,
+    // so a hidden or blocked engager never takes a newer row's place.
+    let noticesV3 = null
+    try {
+      noticesV3 = attachNoticesV3(socket, {
+        role: 'seeder',
+        page: ({ target, after, limit }) => {
+          if (this._isBlocked(target)) return { items: [], next: null, incomplete: false }
+          const isBlocked = (k) => this._isBlocked(k)
+          const f = this._notices.rowsFor(target, isBlocked)
+          const opts = this._certOpts()
+          const revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
+          let held = false
+          const visible = (hex) => {
+            if (!this._indexVisible(hex) || isBlocked(hex)) return false
+            if (this._searchHeld(hex)) {
+              held = true
+              return false
+            }
+            return true
+          }
+          const engagementRows = this._index.noticeRows(target, Date.now(), visible)
+          const result = this._postNotices.pageV3({
+            target,
+            followRows: f.rows,
+            followIncomplete: f.incomplete,
+            engagementRows,
+            // Not stats().saturated: it turns true at the cap before anything
+            // is refused and stays on; a refused block pauses that diary's
+            // cursor, which _indexFlags already reports (as indexEngagers).
+            engagementIncomplete: held || !this._indexFlags().complete,
+            isBlocked,
+            issuerUsable: (i) => !revoked.has(i),
+            after,
+            limit,
+            now: Date.now()
+          })
+          const e = this._served.get(target)
+          if (this._closing || !e || !e.gated) result.incomplete = true
+          return result
+        },
+        log: (ev) => this.log(ev)
+      })
+    } catch {
+      socket.destroy()
+      return
+    }
+    this._noticeHandles.add(noticesV3)
+    release.push(() => this._noticeHandles.delete(noticesV3))
+    // Direct messages: the anonymous drop channel now, the stamp channel
+    // once the peer opens it (the postage key is loaded then, never before).
+    // A peer from before them never opens either and stays connected.
+    if (this._dm !== null) {
+      let dm = null
+      try {
+        dm = attachDm(socket, {
+          role: 'seeder',
+          put: (bytes) => this._dmPut(bytes),
+          page: (q) => this._dm.page(q),
+          log: (ev) => this.log(ev)
+        })
+        const mux = socket.noiseStream.userData
+        mux.pair({ protocol: DM_STAMP_PROTOCOL }, () => this._attachDmStamp(socket, release))
+      } catch {
+        socket.destroy()
+        return
+      }
+      this._dmHandles.add(dm)
+      release.push(() => this._dmHandles.delete(dm))
+      if (this._blob !== null) {
+        let blob = null
+        try {
+          blob = attachBlob(socket, {
+            role: 'seeder',
+            put: (bytes) => this._blobPut(bytes),
+            log: (ev) => this.log(ev)
+          })
+        } catch {
+          socket.destroy()
+          return
+        }
+        this._dmHandles.add(blob)
+        release.push(() => this._dmHandles.delete(blob))
+      }
+    }
     // Groups channel: writer pages from the group index, before the hello
     // like the notices channel (groups-net.js).
     let groups = null
@@ -5714,6 +6180,330 @@ class Seeder {
       this.log({ event: 'peer', role: peer.remoteRole, peerKey: peer.peerKey })
       this._retryGroupTimeouts()
     }, noop)
+  }
+
+  // ---- Direct messages (header comment) -------------------------------
+
+  _openDm () {
+    const { onDrop } = this._dmOpts
+    this._dmStamps = readDmStamps(this.dataDir, (ev) => this.log(ev))
+    if (this._dmOpts.blobPostage !== null) {
+      this._blobStamps = readDmStamps(this.dataDir, (ev) => this.log(ev), BLOB_STAMPS_FILE, 'blob-stamps-unreadable')
+    }
+    this._dm = createDmPool({
+      dir: this.dataDir,
+      verifyStamp: (kid, token, sig) => this._verifyStamp(kid, token, sig),
+      isKidAccepted: (kid) => this._dmKidAccepted(kid),
+      onStored: () => {
+        try { onDrop() } catch {}
+      },
+      log: (ev) => this.log(ev)
+    })
+    if (this._dmOpts.blobPostage !== null) {
+      this._blob = createBlobPool({
+        dir: this.dataDir,
+        maxBytes: this._dmOpts.blobBytes,
+        verifyStamp: (kid, token, sig) => this._verifyBlobStamp(kid, token, sig),
+        isKidAccepted: (kid) => this._blobKidAccepted(kid),
+        // Swept on the DM tick, after the keys its token retention reads.
+        sweepMs: 0,
+        log: (ev) => this.log(ev)
+      })
+    }
+    this._dmTimer = setInterval(() => { this._dmTick().catch(noop) }, DM_SWEEP_MS)
+    if (typeof this._dmTimer.unref === 'function') this._dmTimer.unref()
+  }
+
+  // Asks postage.get() every time: the key file rotates on its own clock.
+  async _dmPostageKeys () {
+    const got = await this._dmOpts.postage.get()
+    if (got !== this._dmKeysFrom) {
+      this._dmKeys = dmPostageKeys(got)
+      this._dmKeysFrom = got
+    }
+    return this._dmKeys
+  }
+
+  // The blob keys, as _dmPostageKeys. A blob key that is also a DM key is
+  // refused: it would let a blob request mint a DM stamp.
+  async _blobPostageKeys () {
+    const { blobPostage } = this._dmOpts
+    if (blobPostage === null) throw new Error('blob-postage inválido')
+    const got = await blobPostage.get()
+    const keys = got === this._blobKeysFrom ? this._blobKeys : dmPostageKeys(got, 'blob-postage')
+    if (sharesKid(keys, this._dmKeys)) throw new Error('blob-postage inválido')
+    this._blobKeys = keys
+    this._blobKeysFrom = got
+    return this._blobKeys
+  }
+
+  // Current or previous kid only: older stamps are refused, and the pool
+  // remembers spent tokens longer than this window (dm-pool.js). A kid that
+  // is also a blob key never pays for a drop.
+  _verifyStamp (kid, token, sig) {
+    if (this._blobKeys.some((k) => k.pub.kid === kid)) return false
+    for (const k of this._dmKeys) {
+      if (k.pub.kid === kid) return dmPostage.verify(token, sig, k.pub, 'dm')
+    }
+    return false
+  }
+
+  // The blob side of _verifyStamp, for the blob pool: blob keys and the blob
+  // domain only, so a DM stamp never pays for a chunk.
+  _verifyBlobStamp (kid, token, sig) {
+    if (this._dmKeys.some((k) => k.pub.kid === kid)) return false
+    for (const k of this._blobKeys) {
+      if (k.pub.kid === kid) return dmPostage.verify(token, sig, k.pub, 'blob')
+    }
+    return false
+  }
+
+  // As _dmKidAccepted, for the blob keys.
+  _blobKidAccepted (kid) {
+    if (!Array.isArray(this._blobKeys) || this._blobKeys.length === 0) return true
+    return this._blobKeys.some((k) => k.pub.kid === kid)
+  }
+
+  // Whether a spent token's kid can still verify a stamp. Before the keys are
+  // loaded nothing is known, so every hash is kept: forgetting one early would
+  // let its stamp be spent twice.
+  _dmKidAccepted (kid) {
+    if (!Array.isArray(this._dmKeys) || this._dmKeys.length === 0) return true
+    return this._dmKeys.some((k) => k.pub.kid === kid)
+  }
+
+  // A failure of our own (the key file, the disk) throws: dm-net then closes
+  // the channel without an ack and the member's put stays uncertain. Only a
+  // drop that is itself bad is answered 'invalido', which is final.
+  async _dmPut (bytes) {
+    try {
+      await this._dmPostageKeys()
+    } catch (err) {
+      this.log({ event: 'dm', reason: 'postage' })
+      throw err
+    }
+    const result = this._dm.submit(bytes)
+    const reason = result === 'cheio' ? 'cheio' : result !== null && typeof result === 'object' ? 'guardada' : 'invalido'
+    this.log({ event: 'dm', reason })
+    return result
+  }
+
+  // As _dmPut. The DM keys load first: a blob key file holding a DM key is
+  // refused against them, so the put throws and stays uncertain. Only the
+  // outcome is logged, never the id, the index or the peer.
+  async _blobPut (bytes) {
+    try {
+      await this._dmPostageKeys()
+      await this._blobPostageKeys()
+    } catch (err) {
+      this.log({ event: 'blob', reason: 'postage' })
+      throw err
+    }
+    const result = this._blob.submit(bytes)
+    if (result === 'cheio' || result === null) this.log({ event: 'blob', reason: result === null ? 'invalido' : 'cheio' })
+    else if (result.complete && result.repeated !== true) this.log({ event: 'blob', reason: 'completo' })
+    return result
+  }
+
+  // The stored frame of chunk `index` of a complete blob, exactly as stored,
+  // or null (no pool, an unknown or incomplete blob, an index out of range, a
+  // broken blob, a closed pool). Backs the HTTP /blob route.
+  blobChunk (idHex, index) {
+    if (this._blob === null || this._closing) return null
+    if (typeof idHex !== 'string' || !/^[0-9a-f]{64}$/.test(idHex) || !Number.isSafeInteger(index) || index < 0) return null
+    try {
+      return this._blob.read(idHex, index)
+    } catch {
+      return null
+    }
+  }
+
+  // protomux awaits this pairing call: the stamp channel opens only after
+  // the key is known, and a failure leaves the peer's open rejected.
+  async _attachDmStamp (socket, release) {
+    if (this._closing || socket.destroyed || socket._varandaDmStamp) return
+    let key = null
+    try {
+      key = (await this._dmPostageKeys())[0]
+    } catch {
+      this.log({ event: 'dm-stamp', reason: 'postage' })
+      return
+    }
+    if (this._closing || socket.destroyed || socket._varandaDmStamp) return
+    // A broken blob key file leaves DM stamps working: the channel then has
+    // no blob kind, and the tick reopens it once a blob key loads.
+    let blobKey = null
+    if (this._dmOpts.blobPostage !== null) {
+      try {
+        blobKey = (await this._blobPostageKeys())[0]
+      } catch {
+        this.log({ event: 'dm-stamp', reason: 'blob-postage' })
+      }
+      if (this._closing || socket.destroyed || socket._varandaDmStamp) return
+    }
+    // attachDmStamp keeps the key it was given for the channel's life, so a
+    // channel whose key is no longer current signs nothing ('ruim', no
+    // allowance spent) and is closed by the next key refresh (_dmTick); the
+    // peer's next open on this socket gets the current key.
+    let handle = null
+    try {
+      handle = attachDmStamp(socket, {
+        role: 'seeder',
+        postage: {
+          publicKey: key.pub,
+          sign: (blinded) => {
+            const current = this._dmKeys[0]
+            if (current === undefined || current.pub.kid !== key.pub.kid) return null
+            return dmPostage.sign(blinded, key.n, key.d)
+          }
+        },
+        budget: {
+          check: (diary, day) => this._checkStamp(diary, day),
+          take: (diary, day) => this._takeStamp(diary, day)
+        },
+        blobPostage: blobKey === null
+          ? undefined
+          : {
+              publicKey: blobKey.pub,
+              sign: (blinded) => {
+                const current = this._blobKeys[0]
+                if (current === undefined || current.pub.kid !== blobKey.pub.kid) return null
+                if (sharesKid([blobKey], this._dmKeys)) return null
+                return dmPostage.sign(blinded, blobKey.n, blobKey.d)
+              }
+            },
+        blobBudget: blobKey === null
+          ? undefined
+          : {
+              check: (diary, day) => this._checkStamp(diary, day, 'blob'),
+              take: (diary, day) => this._takeStamp(diary, day, 'blob')
+            },
+        log: (ev) => this.log(ev)
+      })
+    } catch {
+      socket.destroy()
+      return
+    }
+    this._dmHandles.add(handle)
+    this._dmStampChannels.set(handle, { kid: key.pub.kid, blobKid: blobKey === null ? null : blobKey.pub.kid, socket, release })
+    release.push(() => {
+      this._dmHandles.delete(handle)
+      this._dmStampChannels.delete(handle)
+    })
+  }
+
+  // The 60 s tick: the current postage keys first (a rotation closes the
+  // stamp channels of an older key), then the pool sweep, whose token
+  // retention reads those keys. Keys are refreshed only once a DM peer has
+  // loaded them: a seeder no member has used creates no key file. Blob keys
+  // are retried on every tick once DM keys are in use, even when their first
+  // load failed: a repaired blob key file then reaches the open stamp
+  // channels below (a channel without a blob kid is stale once one loads).
+  async _dmTick () {
+    if (this._dmKeysFrom !== null) {
+      try {
+        await this._dmPostageKeys()
+      } catch {
+        this.log({ event: 'dm-stamp', reason: 'postage' })
+      }
+    }
+    if (this._dmOpts.blobPostage !== null && (this._blobKeysFrom !== null || this._dmKeysFrom !== null)) {
+      try {
+        await this._blobPostageKeys()
+      } catch {
+        this.log({ event: 'dm-stamp', reason: 'blob-postage' })
+      }
+    }
+    if (this._closing || this._dm === null) return
+    const current = this._dmKeys.length > 0 ? this._dmKeys[0].pub.kid : null
+    const currentBlob = this._blobKeys.length > 0 ? this._blobKeys[0].pub.kid : null
+    for (const [handle, ch] of [...this._dmStampChannels]) {
+      const dmFresh = current === null || ch.kid === current
+      const blobFresh = currentBlob === null || ch.blobKid === currentBlob
+      if (dmFresh && blobFresh) continue
+      this._dmStampChannels.delete(handle)
+      this._dmHandles.delete(handle)
+      try { handle.close() } catch {}
+      if (!ch.socket.destroyed) {
+        ch.socket.noiseStream.userData.pair({ protocol: DM_STAMP_PROTOCOL }, () => this._attachDmStamp(ch.socket, ch.release))
+      }
+    }
+    try {
+      this._dm.sweep()
+    } catch {
+      this.log({ event: 'warning', reason: 'dm-sweep-failed' })
+    }
+    if (this._blob !== null) {
+      try {
+        this._blob.sweep()
+      } catch {
+        this.log({ event: 'warning', reason: 'blob-sweep-failed' })
+      }
+    }
+  }
+
+  // A write failure throws: the stamp is then not issued and not counted.
+  // Stamps go only to a member diary this seeder admits or serves and that is
+  // not blocked; anyone else gets 'teto' and adds no row. Each diary keeps a
+  // count per Brasília day for its DM_STAMP_ROW_DAYS most recent days, so a
+  // clock stepped forward and back finds the earlier day still charged. Days
+  // older than DM_STAMP_KEEP_DAYS before the current one are dropped (the
+  // file is no activity log); a clock jump past that window can restore an
+  // allowance. Rows are capped: past the cap no new diary gets a row (nor a
+  // stamp) until old rows are dropped. kind 'blob' runs the same rules on
+  // its own counter, file and daily allowance: neither kind spends the
+  // other's.
+  _takeStamp (diary, day, kind = 'dm') {
+    const blob = kind === 'blob'
+    const stampsPerDay = blob ? this._dmOpts.blobStampsPerDay : this._dmOpts.stampsPerDay
+    const rows = blob ? this._blobStamps : this._dmStamps
+    if (this._isBlocked(diary) || !(this._admitted.has(diary) || this._served.has(diary))) return false
+    const known = rows.get(diary)
+    const count = known !== undefined && isCount(known[day]) ? known[day] : 0
+    if (count >= stampsPerDay) return false
+    const keepFrom = daysBefore(day, DM_STAMP_KEEP_DAYS)
+    const next = new Map()
+    for (const [k, row] of rows) {
+      const kept = {}
+      for (const d of Object.keys(row)) {
+        if (d >= keepFrom) kept[d] = row[d]
+      }
+      if (Object.keys(kept).length > 0) next.set(k, kept)
+    }
+    if (!next.has(diary) && next.size >= this._dmStampRowsMax()) return false
+    next.set(diary, trimStampRow({ ...(next.get(diary) || {}), [day]: count + 1 }))
+    writeJsonAtomic(path.join(this.dataDir, blob ? BLOB_STAMPS_FILE : DM_STAMPS_FILE), { v: 2, days: Object.fromEntries(next) }, 0o600)
+    if (blob) this._blobStamps = next
+    else this._dmStamps = next
+    return true
+  }
+
+  // Whether _takeStamp would allow a stamp now, by the same rules, without
+  // writing anything: dm-stamp-net asks this before the costly blind
+  // signature.
+  _checkStamp (diary, day, kind = 'dm') {
+    const blob = kind === 'blob'
+    const stampsPerDay = blob ? this._dmOpts.blobStampsPerDay : this._dmOpts.stampsPerDay
+    const table = blob ? this._blobStamps : this._dmStamps
+    if (this._isBlocked(diary) || !(this._admitted.has(diary) || this._served.has(diary))) return false
+    const known = table.get(diary)
+    const count = known !== undefined && isCount(known[day]) ? known[day] : 0
+    if (count >= stampsPerDay) return false
+    const keepFrom = daysBefore(day, DM_STAMP_KEEP_DAYS)
+    let rows = 0
+    let hasRow = false
+    for (const [k, row] of table) {
+      if (!Object.keys(row).some((d) => d >= keepFrom)) continue
+      rows++
+      if (k === diary) hasRow = true
+    }
+    return hasRow || rows < this._dmStampRowsMax()
+  }
+
+  // Room for every diary the seeder may serve, twice over (diaries dropped
+  // within the kept days still hold their rows).
+  _dmStampRowsMax () {
+    return Math.min(DM_STAMP_ROWS_MAX, 2 * this.maxServed)
   }
 
   _onMessage (msg, peer) {
@@ -5790,6 +6580,17 @@ class Seeder {
         removeQuarantine(this.dataDir)
       }
       await Promise.allSettled([...this._drops.values()])
+      // The pool is closed before the store releases the data-dir lock.
+      if (this._dmTimer !== null) {
+        clearInterval(this._dmTimer)
+        this._dmTimer = null
+      }
+      if (this._dm !== null) {
+        try { this._dm.close() } catch {}
+      }
+      if (this._blob !== null) {
+        try { this._blob.close() } catch {}
+      }
       if (this.store) {
         try { await this.store.close() } catch {}
       }
@@ -5803,6 +6604,10 @@ class Seeder {
         try { handle.close() } catch {}
       }
       this._groupHandles.clear()
+      for (const handle of this._dmHandles) {
+        try { handle.close() } catch {}
+      }
+      this._dmHandles.clear()
       this._resolveClosed()
     })()
     return this._closing

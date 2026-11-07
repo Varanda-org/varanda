@@ -13,6 +13,7 @@ const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const test = require('brittle')
 const { patchAppDelegate, patchBuildGradle, patchGradleProperties } = require('../plugins/hardening-patches')
+const { patchInfoPlist, patchAndroidManifest, MICROPHONE_USAGE } = require('../plugins/with-hardening')
 
 const root = path.join(__dirname, '..')
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8')
@@ -22,6 +23,25 @@ const APP_DELEGATE = 'ios/Varanda/AppDelegate.swift'
 const BUILD_GRADLE = 'android/app/build.gradle'
 const GRADLE_PROPERTIES = 'android/gradle.properties'
 const PRIVACY_MANIFEST = 'ios/Varanda/PrivacyInfo.xcprivacy'
+const INFO_PLIST = 'ios/Varanda/Info.plist'
+const ENTITLEMENTS = 'ios/Varanda/Varanda.entitlements'
+const PBXPROJ = 'ios/Varanda.xcodeproj/project.pbxproj'
+const ANDROID_MANIFEST = 'android/app/src/main/AndroidManifest.xml'
+const WELL_KNOWN = '../../deploy/seeder/well-known.sh'
+const MIC_PLIST = '<key>NSMicrophoneUsageDescription</key><string>' + MICROPHONE_USAGE + '</string>'
+const WEB_CREDENTIALS_PLIST = '<key>VarandaWebCredentials</key><true/>'
+const RECORD_AUDIO_LINE = '<uses-permission android:name="android.permission.RECORD_AUDIO"/>'
+const CAMERA_REMOVED = '<uses-permission android:name="android.permission.CAMERA" tools:node="remove"/>'
+
+// The keys and the associated domains of an entitlements plist, comments dropped.
+function entitlements (xml) {
+  const body = compact(xml.replace(/<!--[\s\S]*?-->/g, ''))
+  const list = body.match(/<key>com\.apple\.developer\.associated-domains<\/key><array>([\s\S]*?)<\/array>/)
+  return {
+    keys: [...body.matchAll(/<key>([^<]*)<\/key>/g)].map((m) => m[1]),
+    domains: list ? [...list[1].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]) : []
+  }
+}
 
 test('the patches change nothing in the committed files', (t) => {
   t.is(patchAppDelegate(read(APP_DELEGATE)), read(APP_DELEGATE))
@@ -62,6 +82,82 @@ test('a changed template fails instead of dropping an edit', (t) => {
   t.exception(() => patchGradleProperties([]), /ABI list/)
 })
 
+test('the microphone is declared the same way everywhere, the camera stays removed', (t) => {
+  const app = JSON.parse(read('app.json')).expo
+  t.is(app.ios.infoPlist.NSMicrophoneUsageDescription, MICROPHONE_USAGE)
+  t.ok(app.android.permissions.includes('android.permission.RECORD_AUDIO'))
+  t.absent(app.android.permissions.includes('android.permission.CAMERA'))
+  t.ok(compact(read(INFO_PLIST)).includes(MIC_PLIST), INFO_PLIST)
+  t.ok(read(ANDROID_MANIFEST).includes(RECORD_AUDIO_LINE), ANDROID_MANIFEST)
+  t.ok(read(ANDROID_MANIFEST).includes(CAMERA_REMOVED), ANDROID_MANIFEST)
+})
+
+test('the plugin restores the microphone and the camera removal', (t) => {
+  t.alike(patchInfoPlist({ CFBundleName: 'Varanda' }), { CFBundleName: 'Varanda', NSMicrophoneUsageDescription: MICROPHONE_USAGE, VarandaWebCredentials: false })
+  t.is(patchInfoPlist({}, ['webcredentials:bora.varanda.app']).VarandaWebCredentials, true, 'webcredentials turns the passkey modules on')
+  t.is(patchInfoPlist({ VarandaWebCredentials: true }, ['applinks:bora.varanda.app']).VarandaWebCredentials, false, 'applinks alone does not')
+  const once = patchAndroidManifest({
+    manifest: {
+      $: { 'xmlns:android': 'http://schemas.android.com/apk/res/android' },
+      'uses-permission': [
+        { $: { 'android:name': 'android.permission.INTERNET' } },
+        { $: { 'android:name': 'android.permission.CAMERA' } },
+        { $: { 'android:name': 'android.permission.RECORD_AUDIO', 'tools:node': 'remove' } }
+      ]
+    }
+  })
+  const perms = once.manifest['uses-permission'].map((item) => item.$)
+  t.is(once.manifest.$['xmlns:tools'], 'http://schemas.android.com/tools')
+  t.alike(perms, [
+    { 'android:name': 'android.permission.INTERNET' },
+    { 'android:name': 'android.permission.CAMERA', 'tools:node': 'remove' },
+    { 'android:name': 'android.permission.RECORD_AUDIO' }
+  ])
+  const twice = patchAndroidManifest(JSON.parse(JSON.stringify(once)))
+  t.alike(twice, once, 'idempotent')
+  const empty = patchAndroidManifest({ manifest: {} })
+  t.is(empty.manifest['uses-permission'].length, 2)
+})
+
+// iOS offers the installation's passkeys, and hands the https return of the
+// Google step, only to the app named by the apple-app-site-association that
+// deploy/seeder/well-known.sh writes from VARANDA_IOS_APP_ID (TEAMID.app.varanda).
+// applinks would also need an applinks section there, which the deploy does
+// not write.
+test('the iOS entitlement, the passkey flag and the deploy name the same app and host', (t) => {
+  const app = JSON.parse(read('app.json')).expo
+  const committed = entitlements(read(ENTITLEMENTS))
+  t.alike(committed.keys, ['com.apple.developer.associated-domains'], 'only Associated Domains for EAS to sync')
+  t.alike(committed.domains, ['webcredentials:bora.varanda.app'], ENTITLEMENTS)
+  t.alike(app.ios.associatedDomains, committed.domains, 'app.json repeats the entitlement for prebuild')
+  t.ok(compact(read(INFO_PLIST)).includes(WEB_CREDENTIALS_PLIST), INFO_PLIST + ' turns the passkey modules on')
+
+  const hosts = [...new Set((read(ANDROID_MANIFEST).match(/android:host="[^"]*"/g) || []).map((h) => h.slice(14, -1)))]
+  t.alike(committed.domains, hosts.map((h) => 'webcredentials:' + h), 'the host of the Android App Links')
+
+  const pbxproj = read(PBXPROJ)
+  t.alike(pbxproj.match(/CODE_SIGN_ENTITLEMENTS = [^;]*;/g), Array(2).fill('CODE_SIGN_ENTITLEMENTS = Varanda/Varanda.entitlements;'), 'Debug and Release sign with it')
+  t.alike([...new Set(pbxproj.match(/PRODUCT_BUNDLE_IDENTIFIER = [^;]*;/g))], ['PRODUCT_BUNDLE_IDENTIFIER = ' + app.ios.bundleIdentifier + ';'])
+
+  const wellKnown = read(WELL_KNOWN)
+  const appId = app.ios.bundleIdentifier.replace(/\./g, '\\.')
+  t.ok(wellKnown.includes('[[ $ios_app_id =~ ^[A-Z0-9]{10}\\.' + appId + '$ ]]'), 'the deploy accepts only TEAMID.' + app.ios.bundleIdentifier)
+  t.ok(wellKnown.includes('printf \'{"webcredentials":{"apps":["%s"]}}\\n\' "$ios_app_id"'), 'and lists it under webcredentials')
+})
+
+// The Vitrine (src/vitrine/enabled.js) swaps the node for fixtures. A release
+// bundle has __DEV__ false, and no build config may set the opt-in either.
+test('a release build cannot turn on the Vitrine', async (t) => {
+  const { vitrineEnabled } = await import('../src/vitrine/enabled.js')
+  t.is(vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: '1' }, false), false)
+  for (const file of ['app.json', 'eas.json', 'metro.config.js', 'index.js', 'App.js']) {
+    t.absent(read(file).includes('EXPO_PUBLIC_VARANDA_VITRINE'), file)
+  }
+  for (const file of ['src/node.js', 'src/account.js']) {
+    t.ok(read(file).includes("typeof __DEV__ !== 'undefined' && __DEV__)"), file + ' passes __DEV__')
+  }
+})
+
 test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
   t.timeout(120000)
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-prebuild-'))
@@ -80,4 +176,11 @@ test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
     t.is(fs.readFileSync(path.join(dir, file), 'utf8'), read(file), file)
   }
   t.is(compact(fs.readFileSync(path.join(dir, PRIVACY_MANIFEST), 'utf8')), compact(read(PRIVACY_MANIFEST)), PRIVACY_MANIFEST)
+  const plist = compact(fs.readFileSync(path.join(dir, INFO_PLIST), 'utf8'))
+  t.ok(plist.includes(MIC_PLIST), INFO_PLIST + ' declares the microphone')
+  t.ok(plist.includes(WEB_CREDENTIALS_PLIST), INFO_PLIST + ' turns the passkey modules on')
+  t.alike(entitlements(fs.readFileSync(path.join(dir, ENTITLEMENTS), 'utf8')), entitlements(read(ENTITLEMENTS)), ENTITLEMENTS)
+  const manifest = fs.readFileSync(path.join(dir, ANDROID_MANIFEST), 'utf8')
+  t.ok(manifest.includes(RECORD_AUDIO_LINE), ANDROID_MANIFEST + ' asks for RECORD_AUDIO')
+  t.ok(manifest.includes(CAMERA_REMOVED), ANDROID_MANIFEST + ' removes CAMERA')
 })

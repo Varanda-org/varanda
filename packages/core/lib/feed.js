@@ -9,6 +9,7 @@ const { validRecordCopy, latestProfile, formatRef, parseRef } = require('./recor
 const { latestUsername } = require('./username')
 const { engagementState } = require('./engagement')
 const { applyDeletes, deletedSeqs } = require('./deletion')
+const { pageLifecycle, cutEntries } = require('./page-lifecycle')
 
 const MAX_FUTURE_MS = 86400000
 
@@ -31,6 +32,41 @@ function feedCursor (before) {
   return { t, author, seq }
 }
 
+// A page's first verified page-close or page-moved ends the log at its seq:
+// no later block (post, repost, tombstone, profile) counts, so a leaked page
+// key cannot keep feeding readers. The fold reads the raw entries, before
+// applyDeletes, so a tombstone naming the terminal record cannot undo the
+// cut. Blocks past the cut are dropped silently: `future` is the clock-skew
+// channel and they never become items.
+function movedCut (raw, key, association, revokedIssuers) {
+  if (!raw.some((e) => e.record !== null && (e.record.type === 'page-moved' || e.record.type === 'page-close'))) return raw
+  const lifecycle = pageLifecycle(raw, key, association, { revokedIssuers })
+  if (lifecycle.movedTo === null && lifecycle.closed === null) return raw
+  return cutEntries(raw, lifecycle)
+}
+
+// With raw blocks: a cut log is folded again from its raw blocks below the
+// cut, so a tombstone past the cut (already applied by the caller's fold)
+// deletes nothing; only the seqs `entries` shows stay. Without a cut the
+// caller's fold stands.
+function heldFold (raw, held, key, association, revokedIssuers) {
+  const cut = movedCut(held, key, association, revokedIssuers)
+  if (cut === held) return applyDeletes(raw)
+  const shown = new Set(raw.map((e) => e.seq))
+  return applyDeletes(cut).filter((e) => shown.has(e.seq))
+}
+
+// Validated copies of a log's optional raw blocks, or null.
+function heldCopies (held) {
+  if (!Array.isArray(held)) return null
+  const out = []
+  for (const e of held) {
+    if (e === null || typeof e !== 'object' || !Number.isSafeInteger(e.seq)) continue
+    out.push({ seq: e.seq, record: validRecordCopy(e.record, e.seq) })
+  }
+  return out
+}
+
 // Pure: no I/O, inputs are not mutated. `revokedIssuers` (a Set of issuer
 // keys, blocklist.js revokedIssuerSet, or null) makes a username record from a
 // revoked issuer invalid (username.js), so a stolen issuer key cannot keep
@@ -41,6 +77,9 @@ function feedCursor (before) {
 // Every item has `kind`: 'post' ({ ..., text, replyTo, quote, media }, never
 // both replyTo and quote) or 'repost' ({ ..., to, text: null, replyTo: null,
 // quote: null, media: null }, seq/at of the latest `on` record for `to`).
+// A log may carry `raw` (its blocks, tombstones not applied, holes as
+// { seq, record: null }): the page cut is then read and folded from it
+// (heldFold), so it never depends on a fold the caller already ran.
 function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null }) {
   if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1)) throw new TypeError('limit inválido')
   const cursor = before === null ? null : feedCursor(before)
@@ -52,15 +91,20 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
   // readAll, because the web node and tests pass partial entries.
   const deletedRefs = new Set()
   const prepared = []
-  for (const { key, entries } of logs) {
-    const snapshot = entries.map(({ seq, record }) => ({ seq, record: validRecordCopy(record, seq) }))
-    const copied = applyDeletes(snapshot)
+  for (const { key, entries, raw: rawBlocks } of logs) {
+    const raw = entries.map(({ seq, record }) => ({ seq, record: validRecordCopy(record, seq) }))
+    const held = heldCopies(rawBlocks)
+    const copied = held === null ? applyDeletes(movedCut(raw, key, association, revokedIssuers)) : heldFold(raw, held, key, association, revokedIssuers)
     for (const seq of deletedSeqs(copied)) deletedRefs.add(formatRef({ author: key, seq }))
     prepared.push({ key, copied })
   }
-  for (const { key, copied } of prepared) {
+  // A log's username is only worked out for the items returned (it verifies
+  // a signature): item -> its log, filled in after the page is cut.
+  const logOf = new Map()
+  for (const log of prepared) {
+    const { key, copied } = log
     const name = (latestProfile(copied) || {}).name || null
-    const username = latestUsername(copied, key, association, usernameOpts)
+    const from = items.length
     for (const { seq, record: post } of copied) {
       if (post === null || post.type !== 'post') continue
       if (Date.parse(post.at) - now > MAX_FUTURE_MS) {
@@ -70,7 +114,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // `media`: a copy of the post's descriptors, or null when it has none.
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      items.push({ kind: 'post', author: key, name, username, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media })
+      items.push({ kind: 'post', author: key, name, username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media })
     }
     for (const [ref, { seq, at }] of engagementState(copied).reposted) {
       if (Date.parse(at) - now > MAX_FUTURE_MS) {
@@ -81,8 +125,9 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // this call did not receive stays. A reply or a quote is its own post.
       if (deletedRefs.has(ref)) continue
       const to = parseRef(ref)
-      items.push({ kind: 'repost', author: key, name, username, seq, at, to, text: null, replyTo: null, quote: null, media: null })
+      items.push({ kind: 'repost', author: key, name, username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null })
     }
+    for (let i = from; i < items.length; i++) logOf.set(items[i], log)
   }
   // Numeric time order: string order breaks for negative-year ISO dates.
   items.sort((a, b) => (Date.parse(a.at) - Date.parse(b.at)) || cmp(a.author, b.author) || a.seq - b.seq)
@@ -90,8 +135,14 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
   const kept = cursor === null
     ? items
     : items.filter((it) => ((Date.parse(it.at) - cursor.t) || cmp(it.author, cursor.author) || it.seq - cursor.seq) < 0)
+  const page = limit === Infinity ? kept : kept.slice(Math.max(0, kept.length - limit))
+  for (const item of page) {
+    const log = logOf.get(item)
+    if (log.username === undefined) log.username = latestUsername(log.copied, log.key, association, usernameOpts)
+    item.username = log.username
+  }
   return {
-    items: limit === Infinity ? kept : kept.slice(Math.max(0, kept.length - limit)),
+    items: page,
     future: future.map(formatRef)
   }
 }

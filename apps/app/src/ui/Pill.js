@@ -1,9 +1,11 @@
 // A pill-shaped button: filled (accent) or outlined (ink or danger).
 
 import { Pressable, StyleSheet, Text } from 'react-native'
-import { colors, type } from './theme'
+import { useStyles } from './ThemeProvider'
+import { type } from './theme'
 
 export function Pill ({ label, onPress, filled, danger, disabled, pending, accessibilityLabel }) {
+  const styles = useStyles(makeStyles)
   const off = disabled === true || pending === true
   return (
     <Pressable
@@ -13,11 +15,12 @@ export function Pill ({ label, onPress, filled, danger, disabled, pending, acces
       disabled={off}
       onPress={onPress}
       hitSlop={4}
-      style={[
+      style={({ pressed }) => [
         styles.pill,
         filled ? styles.filled : styles.outline,
         !filled && danger && styles.outlineDanger,
-        off && styles.off
+        off && styles.off,
+        pressed && styles.pressed
       ]}
     >
       <Text style={[styles.text, filled ? styles.textFilled : danger ? styles.textDanger : styles.textInk]}>
@@ -27,12 +30,13 @@ export function Pill ({ label, onPress, filled, danger, disabled, pending, acces
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   pill: { borderRadius: 999, alignItems: 'center', justifyContent: 'center' },
   filled: { backgroundColor: colors.accent, paddingVertical: 9, paddingHorizontal: 17 },
   outline: { borderWidth: 1.5, borderColor: colors.outline, paddingVertical: 8, paddingHorizontal: 15 },
   outlineDanger: { borderColor: colors.danger },
   off: { opacity: 0.45 },
+  pressed: { opacity: 0.65 },
   text: { ...type.pill },
   textFilled: { color: colors.accentInk },
   textInk: { color: colors.ink },

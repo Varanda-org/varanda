@@ -254,12 +254,21 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     'publicar_associacoes',
     // The helper is sourced only after its owner was checked (root runs it).
     '"$root/deploy/seeder/well-known.sh" "$root/.git"',
+    // The build gets the validated commit, and root rewrites version.json in
+    // www from it; the probe compares with the www copy, so a rollback passes.
+    'EXPO_PUBLIC_VARANDA_COMMIT="$target"',
+    'gravar_versao "$www" "$target"',
+    'servido_igual version.json version.json',
+    '[ ! -f "$www/version.json" ]',
     // The optional seeder limits are validated by shape before anything changes.
     ...SEEDER_LIMITS
   ]
   for (const s of required) t.ok(shCode.includes(s), 'contains ' + s)
   const nonEmpty = shLines.filter((l) => l.trim() !== '')
   t.is(nonEmpty[nonEmpty.length - 1], 'main "$@"', 'last line is main "$@"')
+  const wait = fs.readFileSync(SCRIPT, 'utf8').match(/^aguardar_web\(\) \{\n[\s\S]*?^\}\n/m)
+  t.ok(wait, 'aguardar_web located')
+  t.absent(wait && wait[0].includes('$target'), 'aguardar_web never compares with $target (a rollback must pass)')
 })
 
 test('deploy.sh: forbidden constructs are absent', (t) => {
@@ -437,7 +446,7 @@ test('compose.web.yaml and env examples: web push variables are optional and sco
   t.is(line(seeder, 'VARANDA_PUSH_TOKEN').trim(), 'VARANDA_PUSH_TOKEN: "$' + '{VARANDA_PUSH_TOKEN:-}"', 'seeder token optional (:-)')
   t.is(line(account, 'VARANDA_PUSH_TOKEN').trim(), 'VARANDA_PUSH_TOKEN: "$' + '{VARANDA_PUSH_TOKEN:-}"', 'account token optional (:-)')
 
-  for (const name of ['VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_HODLE_API_KEY']) {
+  for (const name of ['VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID']) {
     t.is(keyCount(account, name), 1, name + ' exactly once under account')
     t.is(keyCount(seeder, name), 0, name + ' not on seeder')
     t.is(keyCount(web, name), 0, name + ' not on web')
@@ -467,7 +476,7 @@ test('compose.web.yaml and env examples: web push variables are optional and sco
   }
 })
 
-for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING', 'VARANDA_INVITES_PER_WEEK', 'VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_DIDIT_DAILY_LIMIT', 'VARANDA_HODLE_API_KEY', 'VARANDA_HODLE_NETWORK', 'VARANDA_HODLE_MODE', 'VARANDA_HODLE_DAILY_LIMIT', 'VARANDA_HODLE_MAX_CENTS', 'VARANDA_HODLE_WEBHOOK_SECRETS', 'VARANDA_FEE_TRANSFER_CENTS', 'VARANDA_FEE_TRANSFER_BPS', 'VARANDA_FEE_PAYOUT_CENTS', 'VARANDA_FEE_PAYOUT_BPS', 'VARANDA_FEE_CRYPTO_CENTS', 'VARANDA_FEE_CRYPTO_BPS', 'VARANDA_FEE_DEPOSIT_CENTS', 'VARANDA_FEE_DEPOSIT_BPS', 'VARANDA_FEE_SWAP_BPS', 'VARANDA_FEE_TREASURY']) {
+for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING', 'VARANDA_INVITES_PER_WEEK', 'VARANDA_INVITE_DROPS', 'VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_DIDIT_DAILY_LIMIT', 'VARANDA_AGE_SINCE']) {
   test('compose.web.yaml: ' + name + ' is optional and only on the account service', (t) => {
     const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
     const hits = webLines.map((l, i) => [l, i]).filter(([l]) => l.includes(name))
@@ -825,12 +834,17 @@ test('build-web.sh: writes the association files and refuses malformed values', 
   const www = path.join(dir, 'deploy/seeder/www')
   const wk = path.join(www, '.well-known')
   const envFile = path.join(dir, 'deploy/seeder/.env')
-  const run = (env) => {
+  // build-web.sh reads the arg-mode owner with GNU stat; the stub answers
+  // the same on macOS (BSD stat) and Linux.
+  fs.writeFileSync(path.join(bin, 'stat'), '#!/bin/sh\necho ' + process.getuid() + ':' + process.getgid() + '\n', { mode: 0o755 })
+  const baseEnv = { ...process.env, PATH: bin + path.delimiter + process.env.PATH }
+  delete baseEnv.EXPO_PUBLIC_VARANDA_COMMIT
+  const run = (env, extraEnv = {}, args = []) => {
     fs.rmSync(marker, { force: true })
     fs.writeFileSync(envFile, env)
-    return spawnSync('bash', [path.join(dir, 'deploy/seeder/build-web.sh')], {
+    return spawnSync('bash', [path.join(dir, 'deploy/seeder/build-web.sh'), ...args], {
       encoding: 'utf8',
-      env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH }
+      env: { ...baseEnv, ...extraEnv }
     })
   }
   const both = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
@@ -849,6 +863,93 @@ test('build-web.sh: writes the association files and refuses malformed values', 
     t.absent(fs.existsSync(marker), 'refused before the build')
   }
   t.is(fs.readFileSync(path.join(www, 'index.html'), 'utf8'), 'previous', 'www untouched by a refused run')
+
+  // version.json: written by the host from the validated commit, never from
+  // what the container left in dist.
+  const version = path.join(www, 'version.json')
+  const COMMIT = 'ab'.repeat(20)
+  const bytes = '{"v":1,"commit":"' + COMMIT + '"}\n'
+  t.is(run('').status, 0, 'no commit and no .git still publishes')
+  t.absent(fs.existsSync(version), 'no version.json without a commit')
+  const badCommit = run('', { EXPO_PUBLIC_VARANDA_COMMIT: 'xyz' })
+  t.not(badCommit.status, 0, 'a malformed commit is refused')
+  t.ok(badCommit.stderr.includes('EXPO_PUBLIC_VARANDA_COMMIT inválido'), 'says which variable')
+  t.absent(badCommit.stderr.includes('xyz'), 'never prints the value')
+  t.absent(fs.existsSync(marker), 'refused before the build')
+  fs.writeFileSync(path.join(dist, 'version.json'), '{"v":1,"commit":"planted"}\n')
+  const good = run('', { EXPO_PUBLIC_VARANDA_COMMIT: COMMIT })
+  t.is(good.status, 0, 'a valid commit publishes: ' + good.stderr)
+  t.is(fs.readFileSync(version, 'utf8'), bytes, 'www/version.json has the exact bytes')
+  t.is(run('').status, 0, 'a later run without a commit publishes')
+  t.absent(fs.existsSync(version), 'and drops version.json')
+
+  // Arg mode (deploy.sh): the stage dist gets the file, www is not touched.
+  const stage = path.join(dir, 'stage')
+  const stageDist = path.join(stage, 'apps/app/dist')
+  fs.mkdirSync(stageDist, { recursive: true })
+  for (const f of ['index.html', 'varanda-node.js', 'sw.js']) fs.writeFileSync(path.join(stageDist, f), f)
+  fs.writeFileSync(path.join(stageDist, 'version.json'), '{"v":1,"commit":"planted"}\n')
+  const wwwBefore = fs.readdirSync(www).sort()
+  const arg = run('', { EXPO_PUBLIC_VARANDA_COMMIT: COMMIT }, [stage])
+  t.is(arg.status, 0, 'arg mode with a valid commit exits 0: ' + arg.stderr)
+  t.ok(fs.existsSync(marker), 'arg mode runs the build')
+  t.is(fs.readFileSync(path.join(stageDist, 'version.json'), 'utf8'), bytes, 'stage dist/version.json rewritten by the host')
+  t.alike(fs.readdirSync(www).sort(), wwwBefore, 'www untouched in arg mode')
+  t.absent(fs.existsSync(version), 'no version.json published in arg mode')
+  fs.rmSync(path.join(stageDist, 'version.json'))
+  fs.mkdirSync(path.join(stageDist, 'version.json'))
+  const blocked = run('', { EXPO_PUBLIC_VARANDA_COMMIT: COMMIT }, [stage])
+  t.not(blocked.status, 0, 'a directory at dist/version.json fails the build')
+  t.ok(fs.statSync(path.join(stageDist, 'version.json')).isDirectory(), 'nothing written through it')
+})
+
+test('well-known.sh: gravar_versao refuses malformed commits and links', (t) => {
+  if (!hasBash(t)) return
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-version-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const www = path.join(dir, 'www')
+  fs.mkdirSync(www)
+  const version = path.join(www, 'version.json')
+  const COMMIT = '0123456789abcdef'.repeat(3).slice(0, 40)
+  const run = (target, commit) => spawnSync('bash', ['-c',
+    'set -Eeuo pipefail\nlog() { printf "%s\\n" "$*" >&2; }\n' + SOURCE_WELL_KNOWN +
+    'gravar_versao ' + JSON.stringify(target) + ' ' + JSON.stringify(commit) + '\n'], { encoding: 'utf8' })
+  const ok = run(www, COMMIT)
+  t.is(ok.status, 0, 'a valid commit is written: ' + ok.stderr)
+  t.is(fs.readFileSync(version, 'utf8'), '{"v":1,"commit":"' + COMMIT + '"}\n', 'exact bytes')
+  t.absent(fs.existsSync(version + '.tmp'), 'no temporary file left')
+  for (const [label, bad] of [['uppercase', COMMIT.toUpperCase()], ['39 characters', COMMIT.slice(0, 39)]]) {
+    const r = run(www, bad)
+    t.is(r.status, 1, label + ' is refused')
+    t.ok(r.stderr.includes('commit inválido para version.json'), label + ': says why')
+    t.absent(r.stderr.includes(bad), label + ': never prints the value')
+    t.is(fs.readFileSync(version, 'utf8'), '{"v":1,"commit":"' + COMMIT + '"}\n', label + ': file untouched')
+  }
+  const empty = run(www, '')
+  t.is(empty.status, 0, 'an empty commit passes')
+  t.absent(fs.existsSync(version), 'and removes the file')
+  const outside = path.join(dir, 'outside')
+  fs.writeFileSync(outside, 'secret')
+  fs.symlinkSync(outside, version)
+  const link = run(www, COMMIT)
+  t.is(link.status, 1, 'a symlink at the destination is refused')
+  t.is(fs.readFileSync(outside, 'utf8'), 'secret', 'the link target is untouched')
+  fs.rmSync(version)
+  const linkedDir = path.join(dir, 'linked')
+  fs.symlinkSync(www, linkedDir)
+  t.is(run(linkedDir, COMMIT).status, 1, 'a symlinked directory is refused')
+  t.absent(fs.existsSync(version), 'nothing written through it')
+  fs.writeFileSync(version, 'kept')
+  t.is(run(linkedDir, '').status, 1, 'an empty commit through a symlinked directory is refused too')
+  t.is(fs.readFileSync(version, 'utf8'), 'kept', 'and nothing is removed through it')
+  fs.rmSync(version)
+  // A .tmp the build left (mode 000, as uid 65534 could) must not lend its mode
+  // to the published file.
+  fs.writeFileSync(version + '.tmp', 'stale', { mode: 0o000 })
+  const stale = run(www, COMMIT)
+  t.is(stale.status, 0, 'a leftover regular .tmp is replaced: ' + stale.stderr)
+  t.is(fs.statSync(version).mode & 0o777, 0o644, 'the published file is 0644')
+  t.is(fs.readFileSync(version, 'utf8'), '{"v":1,"commit":"' + COMMIT + '"}\n', 'with the exact bytes')
 })
 
 test('.env.example: native app association variables are documented and empty', (t) => {
@@ -880,7 +981,8 @@ test('Caddyfile: no handle /mod, and the CSP is unchanged', (t) => {
   const csp = caddy.split('\n').filter((l) => /^\s*Content-Security-Policy /.test(l))
   t.is(csp.length, 1, 'one CSP line')
   // Byte-identical to the B2 tree (Caddyfile:20): the panel is written for it.
-  t.is(csp[0].trim(), 'Content-Security-Policy "default-src \'self\'; script-src \'self\' \'wasm-unsafe-eval\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; font-src \'self\' data:; connect-src \'self\' wss://{$VARANDA_DOMAIN} https://uploads.hodle.com.br; manifest-src \'self\'; worker-src \'self\'; frame-ancestors \'none\'; base-uri \'none\'; form-action \'none\'; object-src \'none\'"', 'CSP line unchanged')
+  t.is(csp[0].trim(), 'Content-Security-Policy "default-src \'self\'; script-src \'self\' \'wasm-unsafe-eval\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; media-src \'self\' blob:; font-src \'self\' data:; connect-src \'self\' wss://{$VARANDA_DOMAIN}; manifest-src \'self\'; worker-src \'self\'; frame-ancestors \'none\'; base-uri \'none\'; form-action \'none\'; object-src \'none\'"', 'CSP line unchanged')
+  t.is(caddy.split('\n').filter((l) => !/^\s*#/.test(l) && l.includes('camera=()')).length, 1, 'camera=() once')
 })
 
 test('Caddyfile: /account/* drops the client address headers', (t) => {
@@ -1010,6 +1112,15 @@ test('deploy.sh: conferir_antes rejects a bad VARANDA_MAX_MEMBERS and accepts an
   const commented = run('VARANDA_MAX_MEMBERS=300 # vagas\n')
   t.is(commented.status, 0, 'an unquoted value with a trailing comment passes: ' + commented.stderr)
   t.is(run('VARANDA_MAX_MEMBERS = 4097\n').status, 1, 'spaces around = do not hide an out-of-range value')
+  // Surprise invites without the weekly number would stop the service at start.
+  for (const extra of ['VARANDA_INVITE_DROPS=1\n', 'VARANDA_INVITE_DROPS=1\nVARANDA_INVITES_PER_WEEK=\n']) {
+    const res = run(extra)
+    t.is(res.status, 1, 'VARANDA_INVITE_DROPS without VARANDA_INVITES_PER_WEEK exits 1')
+    t.ok(res.stderr.includes('VARANDA_INVITE_DROPS exige VARANDA_INVITES_PER_WEEK em deploy/seeder/.env'), 'says what is missing')
+  }
+  const drops = run('VARANDA_INVITES_PER_WEEK=1\nVARANDA_INVITE_DROPS=1\n')
+  t.is(drops.status, 0, 'both set passes: ' + drops.stderr)
+  t.is(run('VARANDA_INVITE_DROPS=2\nVARANDA_INVITES_PER_WEEK=1\n').status, 1, 'VARANDA_INVITE_DROPS only takes 1')
 })
 
 test('deploy.sh: limites_conta matches the ranges in account.js LIMIT_ENV', (t) => {
@@ -1027,7 +1138,7 @@ test('deploy.sh: limites_conta matches the ranges in account.js LIMIT_ENV', (t) 
     const [name, min, max] = entry.split(':')
     fromSh[name] = [Number(min), Number(max)]
   }
-  t.is(Object.keys(fromJs).length, 6, 'six limits in account.js')
+  t.is(Object.keys(fromJs).length, 7, 'seven limits in account.js')
   t.alike(fromSh, fromJs, 'same names and ranges')
   // The shape check allows at most 8 digits, so every max must fit in it.
   for (const [name, [, max]] of Object.entries(fromSh)) t.ok(max < 1e8, name + ' max fits limite_re')

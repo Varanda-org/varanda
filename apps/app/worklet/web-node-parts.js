@@ -2,11 +2,12 @@
 // The pure parts of worklet/web-node.js, apart so the Node tests reach them
 // (web-node.js itself loads bare-fs, bare-crypto and bare-ws).
 
-const { RpcError } = require('@varanda/rpc')
+const { RpcError, mediaBounds, audioBounds } = require('@varanda/rpc')
 
 const CLOSED_MESSAGE = 'sessão encerrada'
 const BAD_MEDIA = 'mídia inválida'
 const BAD_MEDIA_FILE = 'arquivo de mídia inválido'
+const MEDIA_UNAVAILABLE = 'mídia indisponível'
 // The only file names media.uploadFile accepts (docs/rpc.md 5.56): what the
 // host generates in its cache directory, so no separator, dot segment or
 // link target can be named.
@@ -130,16 +131,15 @@ function createLifecycle ({ session, storage, locking = Promise.resolve() }) {
   }
 }
 
-// media.uploadFile after the read: read() -> { file, bytes }; the
-// bytes go to session.mediaUpload only while the node is not closing, are
-// zeroed once the session copied them, and the file is unlinked only after
-// a successful upload.
-async function uploadMedia ({ read, session, unlink, isClosing }, { mime, width, height }) {
+// Sends the bytes of a cache file read() -> { file, bytes } to put(bytes)
+// only while the node is not closing; the bytes are zeroed once put copied
+// them and the file is unlinked only after a successful put.
+async function sendFile ({ read, put, unlink, isClosing }) {
   const { file, bytes } = await read()
-  let uploading
+  let putting
   try {
     if (isClosing()) throw closedError()
-    uploading = session.mediaUpload({ bytes, mime, width, height })
+    putting = put(bytes)
   } catch (err) {
     if (err instanceof RpcError) throw err
     // Synchronous validation (lib/session.js TypeError 'mídia inválida').
@@ -147,9 +147,137 @@ async function uploadMedia ({ read, session, unlink, isClosing }, { mime, width,
   } finally {
     bytes.fill(0)
   }
-  const descriptor = await uploading
+  const result = await putting
   await Promise.resolve().then(() => unlink(file)).catch(() => {})
-  return descriptor
+  return result
 }
 
-module.exports = { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, CLOSED_MESSAGE }
+// media.uploadFile after the read. `sealed` must reach the session: dropping
+// it would store a private group's photo in the clear (docs/rpc.md 5.56).
+function uploadMedia ({ read, session, unlink, isClosing }, { mime, width, height, sealed, ms, kind }) {
+  return sendFile({
+    read,
+    unlink,
+    isClosing,
+    put: (bytes) => session.mediaUpload({ bytes, mime, width, height, ...voiceOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) })
+  })
+}
+
+// A voice note's duration and kind reach the session only for a voice note
+// (an image keeps its exact keys).
+function voiceOf ({ ms, kind }) {
+  return kind === 'voice' ? { ms, kind } : {}
+}
+
+// dm.putMedia after the read (docs/rpc.md 5.88): the same file rules, the
+// photo sealed and put on the blob channel by the session. `to`, the
+// destination, is required and the session refuses it missing (5.97).
+function putDmMedia ({ read, session, unlink, isClosing }, { mime, width, height, ms, kind, to }) {
+  return sendFile({ read, unlink, isClosing, put: (bytes) => session.dmPutMedia({ bytes, mime, width, height, ...voiceOf({ ms, kind }), to }) })
+}
+
+// Removes every read file (a media name) directly under `dir` and makes
+// sure the directory exists. Never throws: a file left here holds an opened
+// image, so the next clear tries again.
+async function clearReadDir ({ fs, join, dir }) {
+  try { await fs.mkdir(dir, { recursive: true, mode: 0o700 }) } catch {}
+  let names = []
+  try { names = await fs.readdir(dir) } catch {}
+  for (const name of names) {
+    if (typeof name === 'string' && isMediaName(name)) await fs.unlink(join(dir, name)).catch(() => {})
+  }
+}
+
+// Writes `bytes` to a fresh file under `dir` with mode 0600 (`flags`:
+// O_CREAT | O_WRONLY, plus O_EXCL where the fs has it; bare-fs 4.8 exports
+// none). Nothing that already exists is written through: the name must be
+// absent (lstat) and the opened descriptor an empty regular file. -> the
+// file name. A failed write leaves no file of ours.
+async function writeReadFile ({ fs, join, dir, name, bytes, flags }) {
+  if (!isMediaName(name)) throw new RpcError('INTERNAL', 'erro interno')
+  const file = join(dir, name)
+  let handle = null
+  let created = false
+  try {
+    const existing = await fs.lstat(file).then(() => true, (err) => err === null || typeof err !== 'object' || err.code !== 'ENOENT')
+    if (existing) throw new Error('exists')
+    handle = await fs.open(file, flags, 0o600)
+    created = true
+    const st = await handle.stat()
+    if (!st.isFile() || st.size !== 0) {
+      created = false
+      throw new Error('not a fresh file')
+    }
+    let at = 0
+    while (at < bytes.byteLength) {
+      const { bytesWritten } = await handle.write(bytes, at, bytes.byteLength - at, at)
+      if (!Number.isSafeInteger(bytesWritten) || bytesWritten <= 0) throw new Error('short write')
+      at += bytesWritten
+    }
+    await handle.close()
+    handle = null
+    return name
+  } catch {
+    if (handle !== null) await handle.close().catch(() => {})
+    if (created) await Promise.resolve().then(() => fs.unlink(file)).catch(() => {})
+    throw new RpcError('INTERNAL', 'erro interno')
+  }
+}
+
+// media.readFile (docs/rpc.md 5.89): opens the chat item through the session
+// and writes the plaintext with write(bytes) -> name. `generation()` changes
+// on every lock: an image opened before a lock never stays on disk after it.
+// -> { name, mime, w, h } (w, h measured from the bytes), plus ms for a voice
+// note (the container's duration, not the item's claim). The plaintext copy
+// is zeroed once written, or refused (USAGE 'mídia indisponível').
+async function readMediaToFile ({ session, write, unlink, generation, isClosing }, params) {
+  const at = generation()
+  let opened
+  try {
+    if (isClosing()) throw closedError()
+    opened = params.kind === 'dm'
+      ? session.dmReadMedia({ from: params.from, id: params.id, index: params.index })
+      : session.groupReadMedia({ diary: params.diary, item: params.item })
+  } catch (err) {
+    if (err instanceof RpcError) throw err
+    throw new RpcError('USAGE', BAD_MEDIA)
+  }
+  const got = await opened
+  const bytes = got.bytes
+  let name
+  let w
+  let h
+  let ms
+  try {
+    // The bytes decide, never the item's claimed size: an image past the
+    // canvas or frame limits, or not the mime it says, is never written for
+    // a native decoder to open.
+    // A voice note is checked as audio (an MPEG-4 container with only a sound
+    // track, docs/protocol.md section 2), never decoded as an image.
+    if (got.mime === 'audio/mp4') {
+      let a = null
+      try { a = audioBounds(bytes) } catch {}
+      if (a === null) throw new RpcError('USAGE', MEDIA_UNAVAILABLE)
+      w = 0
+      h = 0
+      ms = a.ms
+    } else {
+      let b = null
+      try { b = mediaBounds(bytes, got.mime) } catch {}
+      if (b === null) throw new RpcError('USAGE', MEDIA_UNAVAILABLE)
+      w = b.width
+      h = b.height
+    }
+    if (isClosing() || generation() !== at) throw closedError()
+    name = await write(bytes)
+  } finally {
+    bytes.fill(0)
+  }
+  if (isClosing() || generation() !== at) {
+    await Promise.resolve().then(() => unlink(name)).catch(() => {})
+    throw closedError()
+  }
+  return ms === undefined ? { name, mime: got.mime, w, h } : { name, mime: got.mime, w, h, ms }
+}
+
+module.exports = { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, clearReadDir, writeReadFile, readMediaToFile, CLOSED_MESSAGE }

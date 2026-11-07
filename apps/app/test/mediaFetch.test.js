@@ -326,3 +326,61 @@ test('mediaUrl is absolute on the installation when one is set', async (t) => {
   setInstallation(null)
   t.is(mediaUrl(AUTHOR, d), '/media/' + AUTHOR + '/' + d.core + '/1/2')
 })
+
+// A minimal MPEG-4 audio file (ftyp, moov with mvhd and one trak per
+// handler, mdat): enough for audioBounds.
+function m4a ({ ms = 3000, handlers = ['soun'], pad = 0 } = {}) {
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (s) => Array.from(s, (c) => c.charCodeAt(0))
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  // A real sound track: mdhd timescale 1000, a self-contained data reference,
+  // one mp4a sample entry and a sample table as long as `ms`.
+  const trak = (h) => box('trak', box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(h), be32(0), be32(0), be32(0), [0]), box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(1), be32(ms)), box('stsz', [0, 0, 0, 0], be32(1), be32(1)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(1), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))))
+  return new Uint8Array([
+    ...box('ftyp', ascii('M4A '), be32(0), ascii('isom')),
+    ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(ms), new Array(80).fill(0)), ...handlers.map(trak)),
+    ...box('mdat', new Array(pad).fill(9))
+  ])
+}
+
+function audioDescriptor (bytes, over = {}) {
+  return { ...descriptor(bytes), mime: 'audio/mp4', width: 0, height: 0, ms: 3000, ...over }
+}
+
+test('validAudioDescriptor: the records.js voice note rules', async (t) => {
+  const { validAudioDescriptor, validDescriptor, MAX_AUDIO_BYTES } = await load()
+  const d = audioDescriptor(m4a())
+  t.ok(validAudioDescriptor(d))
+  t.absent(validDescriptor(d), 'never a diary post descriptor')
+  t.absent(validAudioDescriptor(descriptor(m4a())), 'an image descriptor is not a voice note')
+  const blocks = Math.ceil((MAX_AUDIO_BYTES + 1) / 32768)
+  const bad = {
+    'video mime': { mime: 'video/mp4' },
+    'other audio mime': { mime: 'audio/mpeg' },
+    'with sides': { width: 1 },
+    'ms 0': { ms: 0 },
+    'ms over': { ms: 120001 },
+    'ms float': { ms: 1.5 },
+    'over the byte cap': { blocks, bytes: MAX_AUDIO_BYTES + 1 }
+  }
+  for (const [name, over] of Object.entries(bad)) t.absent(validAudioDescriptor({ ...d, ...over }), name)
+  const { ms, ...noMs } = d
+  t.absent(validAudioDescriptor(noMs), 'ms required')
+  t.absent(validAudioDescriptor({ ...d, extra: 1 }), 'extra key')
+  t.absent(validAudioDescriptor(null))
+})
+
+test('fetchMedia: a voice note only for chat items, checked by its bytes', async (t) => {
+  const { fetchMedia, mediaUrl } = await load()
+  const bytes = m4a({ pad: 100 })
+  const d = audioDescriptor(bytes)
+  t.is(mediaUrl(AUTHOR, d), null, 'a diary post never names audio')
+  t.ok(mediaUrl(AUTHOR, d, { chat: true }).startsWith('/media/'))
+  await t.exception(() => fetchMedia(AUTHOR, d, { fetch: async () => response([bytes]), subtle: webcrypto.subtle }), /inválida/, 'not a chat item')
+  const got = await fetchMedia(AUTHOR, d, { chat: true, fetch: async () => response([bytes]), subtle: webcrypto.subtle })
+  t.alike(got, bytes)
+  const video = m4a({ handlers: ['soun', 'vide'], pad: 100 })
+  await t.exception(() => fetchMedia(AUTHOR, audioDescriptor(video), { chat: true, fetch: async () => response([video]), subtle: webcrypto.subtle }), /não confere/, 'a video track is refused even when the hash matches')
+  const img = new Uint8Array(200).fill(3)
+  t.is((await fetchMedia(AUTHOR, descriptor(img), { chat: true, fetch: async () => response([img]), subtle: webcrypto.subtle })).byteLength, 200, 'chat photos still pass')
+})

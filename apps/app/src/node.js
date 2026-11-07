@@ -1,4 +1,4 @@
-/* global navigator */
+/* global navigator, __DEV__ */
 
 // The node connection of the app: starts or connects, keeps the phase, the
 // sync state (fed by the node's events, so no event is lost while another tab
@@ -20,6 +20,14 @@
 // kept session, without a ceremony. A resume is an unlock without a click: no
 // recovery runs for it unless the diary still lacks its member certificate
 // (then the same recovery as after a ceremony, under recoveryPolicy.js).
+// Recovery entries (docs/rpc.md 5.90 to 5.94): an unlock, complete() or
+// unlockWithCode(code) that opens only a recovery entry is finished here
+// (resolveWrapped: the account service's sealed root, then unlockWrapped), so
+// the caller sees an install result, { needsPasskey: true } (a code: the
+// screen then calls finishRecovery() in a press) or a fixed pt-BR error.
+// addPasskey(), bindPasskey({ credentialId, userId }), makeRecoveryCode() and
+// cancelRecovery() pass through and re-read the status; addPasskey and
+// finishRecovery run a ceremony, so they are called synchronously too.
 // `recovering` is true from an unlock until the once sync that follows it
 // (recover()) has ended: one shared flag, so no screen sends a member request
 // meanwhile (it would preempt that run, docs/rpc.md 6.1). A run preempted
@@ -32,7 +40,9 @@
 // reads while a once run is active).
 //
 // `online` (web) is the browser's network hint (online.web.js; always true on
-// native). `visible` is the page visibility (always true on native).
+// native). `visible` is the page visibility on web; on native it follows
+// AppState only while the node is hosted (the web kind), and is always true
+// otherwise, because the core kind's worklet suspends its session in Bare.
 // `hostedSource` is where the hosted configuration came from: 'live'
 // (the installation answered), 'remembered' (the installation did not answer
 // and the last valid configuration of this origin is used) or null.
@@ -47,8 +57,11 @@
 // and bumps `followsVersion`.
 // `media` (browser node only, while unlocked; null otherwise): `{ upload(args)
 // }`, a pass-through to the handle's media.upload({ bytes, mime, width,
-// height, onProgress }) -> Promise<descriptor>; the caller shows its errors
-// (errorText).
+// height, sealed?, onProgress }) -> Promise<descriptor or private item>; the
+// caller shows its errors (errorText). When the handle has them, also the
+// chat media calls (client/webnode.native.js, client/browser.js mediaOf):
+// putDm(args), read(ref), forgetReadFile(name), clearReadFiles(); a missing
+// one means that capability is absent.
 //
 // `followsVersion` is bumped once per `follows.changed` event (the follows
 // of the own diary changed, possibly on another device) and `followCount` is
@@ -88,12 +101,12 @@
 // `signals` folds the sync events into UI hints (syncSignals.js).
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { displayText } from '@varanda/rpc'
+import { displayText, isMutating } from '@varanda/rpc'
 import { connectNode } from './client/connect'
 import * as configStore from './configStore'
 import { installationOrigin } from './installation'
 import { isOnline, subscribeOnline } from './online'
-import { isVisible, subscribeVisible } from './visibility'
+import { effectiveVisible, isVisible, subscribeVisible } from './visibility'
 import { askPersist } from './persist'
 import { startPwa } from './pwa'
 import { blockingRecovery } from './recoveryPolicy'
@@ -101,16 +114,61 @@ import { EMPTY_GROUP_VERSIONS, bumpGroupVersion, clearGroupVersions, readGroupVe
 import { EMPTY_SIGNALS, endIdle, foldSignal, waitForCatchUp, ackFresh as ackFreshSignals } from './syncSignals'
 import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, effectiveBackoff, graceExpired, nextBackoff, reconcileIdle, refreshPlan, shouldStopForHidden, startFailure, visibilityChange, wantsStart } from './autoSyncPolicy'
 import { errorText } from './ui'
+import { accountOriginOf } from './pageGate'
+import { slowRequestLine } from './slowRequest'
+import { createIdleTracker } from './idle'
+import { noteOwnDmDrop } from './dmWakeMute'
+import { setDmDropObserver } from './pages'
+import { vitrineEnabled } from './vitrine/enabled'
+import { recoveryFetch } from './account'
+import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 
 const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
+// At import, not in an effect: a page DM send can then never run before the
+// worker is told about its drops.
+setDmDropObserver(noteOwnDmDrop)
 // Native only (configStore.native.js): reads the saved or build-time
 // installation and sets installationOrigin().
 const loadInstallation = typeof configStore.loadInstallation === 'function' ? configStore.loadInstallation : null
 
 const MAX_SYNC_LINES = 200
+// Identity operations that take their argument through (docs/rpc.md 5.91 to
+// 5.94 and the handles' recovery methods).
+const ARG_OPS = new Set(['unlock', 'unlockWrapped', 'unlockWithCode', 'bindPasskey', 'addPasskey', 'finishRecovery'])
+// Operations that may install (or drop) the unlocked identity: a result that
+// installed nothing ({ pending }, { wrapped }, { needsPasskey }) keeps the
+// epoch and the generation. The rest (addPasskey, makeRecoveryCode,
+// cancelRecovery, bindPasskey) never change who is unlocked.
+const IDENTITY_OPS = new Set(['unlock', 'complete', 'unlockWrapped', 'finishRecovery', 'lock', 'signOut', 'reset'])
+const UNLOCK_OPS = new Set(['unlock', 'complete', 'unlockWrapped', 'finishRecovery'])
+
+function installedNothing (result) {
+  return !!result && (result.pending === true || result.wrapped === true || result.needsPasskey === true)
+}
+
+// A complete() that only finished an added passkey: its wrapped root for the
+// app to register, no install fields.
+function addedOnly (result) {
+  return !!result && typeof result.lookupId === 'string' && result.blob !== undefined &&
+    result.publicKey === undefined && result.created === undefined
+}
+
+function recoveryError (message, code) {
+  const err = new Error(message)
+  err.code = code
+  return err
+}
 const RECOVERY_TIMEOUT_MS = 30000
 
+function appendLine (prev, line) {
+  const lines = prev.lines.concat([line])
+  return { ...prev, lines: lines.length > MAX_SYNC_LINES ? lines.slice(lines.length - MAX_SYNC_LINES) : lines }
+}
+
 const NodeContext = createContext(null)
+
+// The chat media calls a handle may offer besides upload (see the header).
+const CHAT_MEDIA_CALLS = ['putDm', 'read', 'forgetReadFile', 'clearReadFiles']
 
 export function useNode () {
   return useContext(NodeContext)
@@ -138,7 +196,126 @@ export function useNotice (context = null) {
 
 const noConnection = () => Promise.reject(Object.assign(new Error('sem conexão com o nó'), { code: 'CLOSED' }))
 
+// The Vitrine (src/vitrine/enabled.js): development bundles only, behind an
+// opt-in env var. The literal member access is what Expo inlines.
+const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
+let vitrine = null
+if (VITRINE) {
+  const { fixtures } = require('./vitrine/fixtures')
+  const { createVitrineRequest } = require('./vitrine/request')
+  const { saveTermsRecord } = require('./termsStore')
+  const { withMember, withSynced } = require('./terms')
+  const { LEGAL_VERSION } = require('./legal')
+  // Saved before the shell mounts and loads the record (both stores write
+  // synchronously up to here), so the terms gate opens for the fixture key;
+  // synced, so nothing is sent to an account service. Under the Vitrine the
+  // stores use their own key and file, so the device's real record is untouched.
+  saveTermsRecord(withSynced(withMember(null, LEGAL_VERSION, fixtures.own, new Date().toISOString()), fixtures.own)).catch(() => {})
+  vitrine = {
+    fixtures,
+    createVitrineRequest,
+    status: { exists: true, publicKey: fixtures.own, legacy: false, unlocked: true, synced: true, resumed: false, passkeyKnown: false, credentialId: null, rpId: null, signedOut: false }
+  }
+}
+
 export function NodeProvider ({ children }) {
+  return VITRINE ? <VitrineNodeProvider>{children}</VitrineNodeProvider> : <LiveNodeProvider>{children}</LiveNodeProvider>
+}
+
+// What the shell reads to show the hosted, unlocked, member-certified
+// screens over the fixtures: no connection, no sync, no passkey ceremony.
+function VitrineNodeProvider ({ children }) {
+  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures))
+  const [dmVersion, setDmVersion] = useState(0)
+  const bumpDm = useCallback(() => setDmVersion((n) => n + 1), [])
+  const [autoWanted, setAutoWanted] = useState(false)
+  const setAutoSync = useCallback((wanted) => setAutoWanted(wanted === true), [])
+  // The live node bumps these from its events; the fixtures have none, so a
+  // change made here bumps them itself, or lists that reload on a version
+  // change (Comunidades, A Rua, Pessoas) would keep their first read.
+  const [groupVersions, setGroupVersions] = useState(EMPTY_GROUP_VERSIONS)
+  const [followsVersion, setFollowsVersion] = useState(0)
+  const vitrineRequest = useCallback((method, params) => fixtureRequest(method, params).then((result) => {
+    if (/^(group|community)\./.test(method) && isMutating(method)) {
+      setGroupVersions((prev) => {
+        const group = params && typeof params.group === 'string' ? params.group : null
+        return group !== null ? bumpGroupVersion(prev, group) : { ...prev }
+      })
+    }
+    if (method === 'follow.add' || method === 'follow.remove') setFollowsVersion((n) => n + 1)
+    return result
+  }), [fixtureRequest])
+  const getGroupVersion = useCallback((group) => readGroupVersion(groupVersions, group), [groupVersions])
+  const value = useMemo(() => {
+    const done = () => Promise.resolve({})
+    // Anything that would change the identity or the connection refuses, so
+    // callers stop before their own side effects and show the message.
+    const unavailable = () => Promise.reject(Object.assign(new Error('indisponível no modo vitrine'), { code: 'USAGE' }))
+    const status = vitrine.status
+    return {
+      phase: 'ready',
+      config: null,
+      error: '',
+      hosted: true,
+      accountOrigin: 'http://localhost:8080',
+      hostedSource: 'live',
+      online: true,
+      visible: true,
+      sync: { active: null, lines: [], stopped: null, starting: false },
+      epoch: 1,
+      request: vitrineRequest,
+      restart: unavailable,
+      reconnect: done,
+      connect: unavailable,
+      // Hides Ajustes › Conexão: saving an installation address would write
+      // the real configuration before forgetConfig refuses.
+      canConfigure: false,
+      retryDiscovery: done,
+      forgetConfig: unavailable,
+      passkey: {
+        status,
+        error: '',
+        generation: 1,
+        refresh: () => Promise.resolve(status),
+        unlock: unavailable,
+        complete: unavailable,
+        lock: unavailable,
+        signOut: unavailable,
+        reset: unavailable,
+        unlockWithCode: unavailable,
+        finishRecovery: unavailable,
+        addPasskey: unavailable,
+        bindPasskey: unavailable,
+        makeRecoveryCode: unavailable,
+        cancelRecovery: unavailable,
+        recovering: false,
+        beginRecovery: () => {},
+        endRecovery: () => {},
+        recover: () => Promise.resolve(false)
+      },
+      // Dev-only fixture photos (src/vitrine/media.js), never the network.
+      media: fixtureRequest.media || null,
+      legacyFollows: null,
+      followsVersion,
+      followCount: null,
+      groupVersions,
+      getGroupVersion,
+      dmVersion,
+      bumpDm,
+      seenVersion: 0,
+      // Never syncing, so always idle: background name reads wait for that
+      // (autoSyncPolicy.js namesQuiet).
+      autoSync: { wanted: autoWanted, backoffUntil: 0, failureUntil: 0, reconciling: false, idleSince: 1 },
+      signals: EMPTY_SIGNALS,
+      ackFresh: () => {},
+      setAutoSync,
+      syncNow: () => Promise.resolve()
+    }
+  }, [vitrineRequest, groupVersions, followsVersion, getGroupVersion, dmVersion, bumpDm, autoWanted, setAutoSync])
+  return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
+}
+
+function LiveNodeProvider ({ children }) {
   // loading | config (the Conectar form) | config-error (hosted page, no
   // configuration found: retry) | connecting | ready | error
   const [phase, setPhase] = useState('loading')
@@ -147,12 +324,24 @@ export function NodeProvider ({ children }) {
   // true when the live configuration came from the installation's
   // /varanda.json (discovered, never saved).
   const [hosted, setHosted] = useState(false)
+  // The https account origin a core node was configured with, or the one its
+  // node.info answers (varanda-serve --account-origin, docs/rpc.md 5.2), else
+  // undefined (src/pageGate.js decides whether Páginas show).
+  const [infoOrigin, setInfoOrigin] = useState(undefined)
+  const accountOrigin = useMemo(() => accountOriginOf(config && config.accountOrigin) || infoOrigin, [config, infoOrigin])
+  const accountOriginRef = useRef(accountOrigin)
+  accountOriginRef.current = accountOrigin
   // 'live' | 'remembered' | null (see the header).
   const [hostedSource, setHostedSource] = useState(null)
   const [online, setOnline] = useState(() => isOnline())
   const onlineRef = useRef(online)
   onlineRef.current = online
-  const [visible, setVisible] = useState(() => isVisible())
+  // Raw visibility, and whether the node is hosted (both read by applyVisible).
+  const rawVisibleRef = useRef(null)
+  if (rawVisibleRef.current === null) rawVisibleRef.current = isVisible()
+  const hostedRef = useRef(false)
+  // Effective: what every stop and start decision reads (see the header).
+  const [visible, setVisible] = useState(() => effectiveVisible(rawVisibleRef.current, false))
   const visibleRef = useRef(visible)
   // Replaced on visibility transitions, never by a late stop response.
   const hiddenStopRef = useRef({ attempts: 0, retry: false })
@@ -168,6 +357,9 @@ export function NodeProvider ({ children }) {
   // sync.start requests in flight: a lookup sent before the sync.started event
   // would preempt a once-run and end it for good (docs/rpc.md 6.1).
   const startingRef = useRef(0)
+  // Requests in flight, for whenIdle (optional work waits for a quiet app).
+  const idleRef = useRef(null)
+  if (idleRef.current === null) idleRef.current = createIdleTracker()
   const [starting, setStarting] = useState(false)
   // Passkey identity of the browser node (see the header).
   const [hasPasskey, setHasPasskey] = useState(false)
@@ -176,12 +368,22 @@ export function NodeProvider ({ children }) {
   const [pkGeneration, setPkGeneration] = useState(0)
   // The handle has media.upload (browser node).
   const [hasMedia, setHasMedia] = useState(false)
+  // Which chat media calls the handle has (putDm, read, forgetReadFile,
+  // clearReadFiles); decided once per connection like hasMedia.
+  const [mediaCaps, setMediaCaps] = useState('')
   // The handle has follows.legacy / confirmLegacy (browser node).
   const [hasLegacy, setHasLegacy] = useState(false)
   // follows.changed (see the header): the version never goes back.
   const [follows, setFollows] = useState({ version: 0, count: null })
   const [groupVersions, setGroupVersions] = useState(EMPTY_GROUP_VERSIONS)
   const getGroupVersion = useCallback((group) => readGroupVersion(groupVersions, group), [groupVersions])
+  // Bumped per dm.changed: a hint to re-read dm.list / dm.thread, never data.
+  // The screens bump it too (bumpDm) after dm.set, dm.seen and every dm.pull
+  // attempt, so the list, the open thread and the tab dot all read again.
+  const [dmVersion, setDmVersion] = useState(0)
+  const bumpDm = useCallback(() => setDmVersion((n) => n + 1), [])
+  // Bumped per seen.changed: a hint for the seen pass (seenSync.js), never data.
+  const [seenVersion, setSeenVersion] = useState(0)
   // null, or { runId: null (not started yet) | integer, restarted }
   const [recovery, setRecovery] = useState(null)
   const recoveryRef = useRef(null)
@@ -203,6 +405,13 @@ export function NodeProvider ({ children }) {
   // (bumpEpoch, bumpGeneration): an awaited continuation compares them.
   const epochRef = useRef(0)
   const pkGenRef = useRef(0)
+  // Which op left the handle's pending creation ({ conn, kind }): complete()
+  // of an 'add' wraps the unlocked root for a new passkey and installs
+  // nothing, while the web 'recover' result has the same shape and installs.
+  const pendingKindRef = useRef(null)
+  // Bumped by every unlock, unlockWithCode or complete that resolved
+  // { wrapped }: a recovery fetch outlived by a newer one does nothing.
+  const wrappedAttemptRef = useRef(0)
 
   // Auto-sync (see the header). Every value has a ref for the callbacks.
   const [signals, setSignals] = useState(EMPTY_SIGNALS)
@@ -317,19 +526,50 @@ export function NodeProvider ({ children }) {
   }, [])
 
   useEffect(() => subscribeOnline(setOnline), [])
-  useEffect(() => subscribeVisible((next) => {
+  const applyVisible = useCallback(() => {
+    const next = effectiveVisible(rawVisibleRef.current, hostedRef.current)
     const change = visibilityChange({ wasVisible: visibleRef.current, visible: next })
     if (change.newPeriod) hiddenStopRef.current = { attempts: 0, retry: false }
     if (change.clearIdle && idleUntilRef.current !== 0) setBackoff({ idle: 0 })
     visibleRef.current = next
     setVisible(next)
-  }), [setBackoff])
+  }, [setBackoff])
+  useEffect(() => {
+    const unsubscribe = subscribeVisible((next) => {
+      rawVisibleRef.current = next
+      applyVisible()
+    })
+    // A change between the first render and this subscription fires no event.
+    rawVisibleRef.current = isVisible()
+    applyVisible()
+    return unsubscribe
+  }, [applyVisible])
+  // Declared before the stop and start effects so they read the recomputed
+  // ref in the same commit: a stale hidden state never stops a core-kind
+  // run, and a backgrounded web-kind node is hidden as soon as it is hosted.
+  useEffect(() => {
+    hostedRef.current = hosted
+    applyVisible()
+  }, [hosted, applyVisible])
   // The service worker (hosted browser-node page only); never awaited.
   useEffect(() => { startPwa().catch(() => {}) }, [])
 
   const onEvent = useCallback((name, data) => {
+    if (name === 'dm.sending') {
+      noteOwnDmDrop()
+      return
+    }
+    // Carries nothing and is no sync line.
+    if (name === 'seen.changed') {
+      setSeenVersion((n) => n + 1)
+      return
+    }
     if (name === 'groups.changed') {
       setGroupVersions((versions) => bumpGroupVersion(versions, data && data.group))
+      return
+    }
+    if (name === 'dm.changed') {
+      setDmVersion((n) => n + 1)
       return
     }
     if (name === 'follows.changed') {
@@ -377,8 +617,7 @@ export function NodeProvider ({ children }) {
         return { ...prev, active, stopped }
       }
       const line = name === 'warning' ? 'aviso: ' + data.line : '#' + data.runId + ' ' + data.line
-      const lines = prev.lines.concat([line])
-      return { ...prev, lines: lines.length > MAX_SYNC_LINES ? lines.slice(lines.length - MAX_SYNC_LINES) : lines }
+      return appendLine(prev, line)
     })
   }, [setWait, setBackoff, resetSignals])
 
@@ -410,6 +649,7 @@ export function NodeProvider ({ children }) {
       })
       holder.conn = conn
       connRef.current = conn
+      setInfoOrigin(undefined)
       if (save && cfg) {
         try { await saveConfig(cfg) } catch { setError('a configuração não pôde ser guardada neste aparelho') }
       }
@@ -428,6 +668,7 @@ export function NodeProvider ({ children }) {
       }
       setHasPasskey(identity !== null)
       setHasMedia(identity !== null && conn.media != null && typeof conn.media.upload === 'function')
+      setMediaCaps(identity !== null && conn.media != null ? CHAT_MEDIA_CALLS.filter((k) => typeof conn.media[k] === 'function').join(',') : '')
       setHasLegacy(identity !== null && conn.follows != null && typeof conn.follows.legacy === 'function' && typeof conn.follows.confirmLegacy === 'function')
       setPkStatus(pk)
       setPkError(pkErr)
@@ -566,8 +807,17 @@ export function NodeProvider ({ children }) {
     if (!conn) return noConnection()
     const waiting = awaitingRef.current !== 0
     if (waiting) extendWait()
+    const startedAt = Date.now()
+    const idle = idleRef.current
+    idle.begin()
+    const done = () => {
+      const line = slowRequestLine(method, startedAt, Date.now())
+      idle.end()
+      if (line !== null && connRef.current === conn) setSync((prev) => appendLine(prev, 'aviso: ' + line))
+    }
     if (method !== 'sync.start') {
       const pending = conn.request(method, params)
+      pending.then(done, done)
       if (waiting) pending.then(extendWait, extendWait)
       return pending
     }
@@ -579,9 +829,12 @@ export function NodeProvider ({ children }) {
       if (waiting) extendWait()
     }
     const pending = conn.request(method, params)
+    pending.then(done, done)
     pending.then(settled, settled)
     return pending
   }, [extendWait])
+
+  const whenIdle = useCallback((quietMs) => idleRef.current.whenIdle(quietMs), [])
 
   // Re-reads identity.status() of `conn` (the current connection by
   // default); a result for a connection that is no longer current is dropped.
@@ -615,13 +868,23 @@ export function NodeProvider ({ children }) {
     try {
       // A node script without signOut (an older build) locks instead.
       const op = name === 'signOut' && typeof conn.identity.signOut !== 'function' ? 'lock' : name
-      pending = op === 'unlock' ? conn.identity.unlock(arg) : conn.identity[op]()
+      if (typeof conn.identity[op] !== 'function') throw recoveryError('este aparelho ainda não tem essa função; atualize o Varanda', 'UNSUPPORTED')
+      pending = ARG_OPS.has(op) ? conn.identity[op](arg) : conn.identity[op]()
     } catch (err) {
       pending = Promise.reject(err)
     }
     return Promise.resolve(pending).then(
       async (result) => {
-        const changed = !(result && result.pending === true)
+        const pendingKind = pendingKindRef.current !== null && pendingKindRef.current.conn === conn ? pendingKindRef.current.kind : null
+        if (result && result.pending === true && (name === 'unlock' || name === 'addPasskey' || name === 'finishRecovery')) {
+          pendingKindRef.current = { conn, kind: name === 'addPasskey' ? 'add' : name === 'finishRecovery' ? 'recover' : 'unlock' }
+        } else if (name === 'complete') {
+          pendingKindRef.current = null
+        }
+        // Bumping for an add would reset the shell's setup state and
+        // navigation although the account did not change.
+        const added = name === 'complete' && pendingKind === 'add' && addedOnly(result)
+        const changed = IDENTITY_OPS.has(name) && !installedNothing(result) && !added
         // Locked at once: a failed re-read below keeps this, never the
         // previous unlocked status.
         if ((name === 'lock' || name === 'signOut' || name === 'reset') && connRef.current === conn) {
@@ -632,7 +895,7 @@ export function NodeProvider ({ children }) {
         }
         await readPasskey(conn, changed)
         if (changed) bumpEpoch()
-        if (changed && (name === 'unlock' || name === 'complete')) {
+        if (changed && UNLOCK_OPS.has(name)) {
           // Right after the person's own click; a denial changes nothing.
           askPersist(typeof navigator === 'object' && navigator !== null ? navigator.storage : null).catch(() => {})
         }
@@ -645,8 +908,45 @@ export function NodeProvider ({ children }) {
     )
   }, [readPasskey, bumpEpoch])
 
-  const pkUnlock = useCallback((opts = {}) => passkeyOp('unlock', opts), [passkeyOp])
-  const pkComplete = useCallback(() => passkeyOp('complete'), [passkeyOp])
+  // A passkey or a code that opened only a recovery entry ({ wrapped,
+  // lookupId }): the account service holds the sealed root under that lookup
+  // id. Only its marked 404 (recovery: true) means no entry, and then the
+  // passkey or code opens nothing here (it is never installed directly).
+  // Any other failure is "could not ask", never "not registered". The fetch
+  // runs after the ceremony, so no WebAuthn call waits on it.
+  const resolveWrapped = useCallback(async (r) => {
+    if (!r || r.wrapped !== true) return r
+    const attempt = ++wrappedAttemptRef.current
+    // The newer attempt owns the held entry: the stale one must not cancel
+    // or open it.
+    const superseded = () => recoveryError('outra tentativa de entrar começou; esta foi deixada de lado', 'SUPERSEDED')
+    const cancel = () => passkeyOp('cancelRecovery').catch(() => {})
+    let entry
+    try {
+      entry = await recoveryFetch(r.lookupId, { origin: hostedRef.current ? undefined : accountOriginRef.current })
+    } catch {
+      if (wrappedAttemptRef.current !== attempt) throw superseded()
+      await cancel()
+      throw recoveryError(SERVICE_DOWN_TEXT, 'RECOVERY_SERVICE')
+    }
+    if (wrappedAttemptRef.current !== attempt) throw superseded()
+    if (entry === null) {
+      await cancel()
+      throw recoveryError(NOT_FOUND_TEXT, 'RECOVERY_NOT_FOUND')
+    }
+    return passkeyOp('unlockWrapped', { blob: entry.blob, member: entry.member })
+  }, [passkeyOp])
+
+  const pkUnlock = useCallback((opts = {}) => passkeyOp('unlock', opts).then(resolveWrapped), [passkeyOp, resolveWrapped])
+  const pkComplete = useCallback(() => passkeyOp('complete').then(resolveWrapped), [passkeyOp, resolveWrapped])
+  // No ceremony: the code is checked in the node, then the same fetch.
+  const pkUnlockWithCode = useCallback((code) => passkeyOp('unlockWithCode', { code }).then(resolveWrapped), [passkeyOp, resolveWrapped])
+  // Synchronous in the press (WebAuthn): never await before these.
+  const pkFinishRecovery = useCallback((opts = {}) => passkeyOp('finishRecovery', opts), [passkeyOp])
+  const pkAddPasskey = useCallback((opts = {}) => passkeyOp('addPasskey', opts), [passkeyOp])
+  const pkBindPasskey = useCallback(({ credentialId, userId }) => passkeyOp('bindPasskey', { credentialId, userId }), [passkeyOp])
+  const pkMakeRecoveryCode = useCallback(() => passkeyOp('makeRecoveryCode'), [passkeyOp])
+  const pkCancelRecovery = useCallback(() => passkeyOp('cancelRecovery'), [passkeyOp])
   const pkLock = useCallback(() => passkeyOp('lock'), [passkeyOp])
   const pkSignOut = useCallback(() => passkeyOp('signOut'), [passkeyOp])
   const pkReset = useCallback(() => passkeyOp('reset'), [passkeyOp])
@@ -785,6 +1085,20 @@ export function NodeProvider ({ children }) {
     setRecovery(null)
     readPasskey()
   }, [recovery, sync.stopped, sync.active, request, readPasskey, startRecoveryRun])
+
+  // One node.info read per connection of a node that is not hosted: its
+  // accountOrigin, if any, turns the Páginas on (a failed read leaves them
+  // off until the next connection).
+  const infoConnRef = useRef(null)
+  useEffect(() => {
+    if (phase !== 'ready' || hosted) return
+    const conn = connRef.current
+    if (!conn || infoConnRef.current === conn) return
+    infoConnRef.current = conn
+    request('node.info', {}).then((info) => {
+      if (connRef.current === conn) setInfoOrigin(accountOriginOf(info && info.accountOrigin))
+    }, () => {})
+  }, [phase, hosted, request])
 
   // An awaited continuation of `conn` in the epoch/generation it began in.
   const stillCurrent = useCallback((conn, ep, gen) => (
@@ -1008,8 +1322,8 @@ export function NodeProvider ({ children }) {
 
   const recovering = recovery !== null
   const passkey = useMemo(() => (hasPasskey
-    ? { status: pkStatus, error: pkError, generation: pkGeneration, refresh: pkRefresh, unlock: pkUnlock, complete: pkComplete, lock: pkLock, signOut: pkSignOut, reset: pkReset, recovering, beginRecovery, endRecovery, recover }
-    : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkSignOut, pkReset, recovering, beginRecovery, endRecovery, recover])
+    ? { status: pkStatus, error: pkError, generation: pkGeneration, refresh: pkRefresh, unlock: pkUnlock, complete: pkComplete, lock: pkLock, signOut: pkSignOut, reset: pkReset, unlockWithCode: pkUnlockWithCode, finishRecovery: pkFinishRecovery, addPasskey: pkAddPasskey, bindPasskey: pkBindPasskey, makeRecoveryCode: pkMakeRecoveryCode, cancelRecovery: pkCancelRecovery, recovering, beginRecovery, endRecovery, recover }
+    : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkSignOut, pkReset, pkUnlockWithCode, pkFinishRecovery, pkAddPasskey, pkBindPasskey, pkMakeRecoveryCode, pkCancelRecovery, recovering, beginRecovery, endRecovery, recover])
 
   // Thin pass-through to the handle (see the header).
   const mediaUpload = useCallback((args) => {
@@ -1018,7 +1332,18 @@ export function NodeProvider ({ children }) {
     return conn.media.upload(args)
   }, [])
   const unlocked = pkStatus !== null && pkStatus.unlocked === true
-  const media = useMemo(() => (hasPasskey && hasMedia && unlocked ? { upload: mediaUpload } : null), [hasPasskey, hasMedia, unlocked, mediaUpload])
+  const media = useMemo(() => {
+    if (!(hasPasskey && hasMedia && unlocked)) return null
+    const out = { upload: mediaUpload }
+    for (const k of mediaCaps === '' ? [] : mediaCaps.split(',')) {
+      out[k] = (args) => {
+        const conn = connRef.current
+        if (!conn || !conn.media || typeof conn.media[k] !== 'function') return noConnection()
+        return conn.media[k](args)
+      }
+    }
+    return out
+  }, [hasPasskey, hasMedia, unlocked, mediaUpload, mediaCaps])
 
   const [legacyKeys, setLegacyKeys] = useState(null)
   const legacyCheckedRef = useRef(null)
@@ -1050,8 +1375,8 @@ export function NodeProvider ({ children }) {
   const legacyFollows = useMemo(() => (hasPasskey && hasLegacy && unlocked ? { keys: legacyKeys, confirm: legacyConfirm } : null), [hasPasskey, hasLegacy, unlocked, legacyKeys, legacyConfirm])
 
   const value = useMemo(() => ({
-    phase, config, error, hosted, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, autoSync, signals, ackFresh, setAutoSync, syncNow
-  }), [phase, config, error, hosted, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, autoSync, signals, ackFresh, setAutoSync, syncNow])
+    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals, ackFresh, setAutoSync, syncNow, whenIdle
+  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals, ackFresh, setAutoSync, syncNow, whenIdle])
 
   return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
 }

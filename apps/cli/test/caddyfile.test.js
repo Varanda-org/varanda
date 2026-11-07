@@ -11,7 +11,7 @@ const lines = fs.readFileSync(CADDYFILE, 'utf8').split('\n').filter((l) => !/^\s
 const code = lines.join('\n')
 
 const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
-  "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN} https://uploads.hodle.com.br; " +
+  "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; " +
   "manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; " +
   "object-src 'none'"
 
@@ -36,6 +36,18 @@ test('Caddyfile: CSP unchanged, scripts only from self', (t) => {
   const scriptSrc = CSP.split(';').map((d) => d.trim()).find((d) => d.startsWith('script-src'))
   t.ok(CSP.includes("script-src 'self' 'wasm-unsafe-eval'"), 'script-src self and wasm only')
   t.absent(scriptSrc.includes("'unsafe-inline'"), "no 'unsafe-inline' for scripts")
+  const directive = (name) => CSP.split(';').map((d) => d.trim()).find((d) => d.startsWith(name + ' '))
+  t.ok(directive('img-src').split(/\s+/).includes('blob:'), 'img-src allows blob: (decrypted chat photos)')
+  t.is(directive('media-src'), "media-src 'self' blob:", 'media-src: self and blob: only (voice playback from local copies)')
+})
+
+test('Caddyfile: camera off, microphone only for self', (t) => {
+  t.is(count('camera=()'), 1, 'camera=() exactly once')
+  t.is(count('camera=('), 1, 'no other camera allowlist')
+  const pp = lines.filter((l) => /^\s*Permissions-Policy\s/.test(l))
+  t.is(count('microphone=('), 1, 'one microphone allowlist')
+  t.is(pp.length, 1, 'one Permissions-Policy line')
+  t.is(pp[0].trim(), 'Permissions-Policy "camera=(), microphone=(self), geolocation=()"', 'Permissions-Policy string')
 })
 
 test('Caddyfile: existing blocks kept', (t) => {
@@ -78,8 +90,8 @@ test('Caddyfile: cache headers', (t) => {
   t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel is no-cache')
   const mutavel = block('@mutavel {').filter((l) => /^\s*not path\s/.test(l))
   t.is(mutavel.length, 1, 'one not path line in @mutavel')
-  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/index/*', '/media/*', '/seeder', '/varanda.json'],
-    '@mutavel excludes exactly /varanda.json, /.well-known/*, /seeder, /account/*, /media/* and /index/*')
+  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/index/*', '/media/*', '/seeder', '/varanda.json'],
+    '@mutavel excludes exactly /varanda.json, /.well-known/*, /seeder, /account/*, /media/*, /blob/* and /index/*')
 
   // Every 404 is no-store: a missing file with an extension, or a missing
   // index.html behind an app route.
@@ -92,12 +104,14 @@ test('Caddyfile: cache headers', (t) => {
     '@ausenteApp leaves /account/* alone')
   t.ok(app.some((l) => /^\s*not path\s/.test(l) && l.trim().split(/\s+/).includes('/media/*')),
     '@ausenteApp leaves /media/* alone')
+  t.ok(app.some((l) => /^\s*not path\s/.test(l) && l.trim().split(/\s+/).includes('/blob/*')),
+    '@ausenteApp leaves /blob/* alone')
   t.ok(app.some((l) => /^\s*not path\s/.test(l) && l.trim().split(/\s+/).includes('/index/*')),
     '@ausenteApp leaves /index/* alone')
   const appPaths = app.filter((l) => /^\s*not path\s/.test(l) && !l.includes('*.*'))
   t.is(appPaths.length, 1, 'one not path list of routes in @ausenteApp')
-  t.alike(appPaths[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/index/*', '/media/*', '/seeder'],
-    '@ausenteApp excludes exactly /.well-known/*, /seeder, /account/*, /media/* and /index/*')
+  t.alike(appPaths[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/index/*', '/media/*', '/seeder'],
+    '@ausenteApp excludes exactly /.well-known/*, /seeder, /account/*, /media/*, /blob/* and /index/*')
   t.ok(app.some((l) => l.trim() === 'not file /index.html {'), '@ausenteApp is a missing index.html')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteArquivo Cache-Control "no-store"'), 'missing file -> no-store')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteApp Cache-Control "no-store"'), 'missing index.html -> no-store')
@@ -142,6 +156,29 @@ test('Caddyfile: /media/* goes to the seeder, before the SPA handle', (t) => {
   t.ok(start !== -1 && spa > start, 'handle /media/* comes before the catch-all handle')
 })
 
+// Chat attachment chunks are served by the seeder on the WebSocket port exactly
+// like /media/*: before the SPA catch-all, without the client address, with
+// Cache-Control (and the query-string 404) from upstream.
+test('Caddyfile: /blob/* goes to the seeder like /media/*, before the SPA handle', (t) => {
+  const blob = block('handle /blob/* {')
+  t.ok(blob.length > 0, 'handle /blob/*')
+  t.is(count('handle /blob/* {'), 1, 'exactly one /blob/* handle')
+  const media = block('handle /media/* {')
+  const body = (b) => b.slice(1).map((l) => l.trim()).filter((l) => !/^(zone|events)\s/.test(l))
+  t.alike(body(blob), body(media), 'same body as /media/* apart from the zone name and its rate')
+  t.ok(blob.some((l) => l.trim() === 'events 300'), 'one full attachment (257 chunk requests) fits the window')
+  t.ok(blob.some((l) => l.trim() === 'reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {'),
+    'reverse proxy to VARANDA_WS_PORT on loopback')
+  t.ok(blob.some((l) => l.trim() === 'header_up Host {upstream_hostport}'), 'Host rewritten to the upstream')
+  t.ok(blob.some((l) => l.trim() === 'header_up -X-Forwarded-For'), 'X-Forwarded-For stripped')
+  t.ok(blob.some((l) => l.trim() === 'header_up -X-Real-Ip'), 'X-Real-Ip stripped')
+  t.absent(blob.some((l) => /Cache-Control/.test(l)), 'no Cache-Control set by Caddy for /blob/*')
+  t.absent(blob.some((l) => /moderation/.test(l)), 'no moderation path inside')
+  const start = lines.findIndex((l) => l.trim() === 'handle /blob/* {')
+  const spa = lines.findIndex((l) => l.trim() === 'handle {')
+  t.ok(start !== -1 && spa > start, 'handle /blob/* comes before the catch-all handle')
+})
+
 // The engagement index is served by the seeder on the WebSocket port, before
 // the SPA catch-all, without the client address; Cache-Control (no-store)
 // comes from upstream and the CSP is unchanged (same-origin fetch).
@@ -161,15 +198,15 @@ test('Caddyfile: /index/* goes to the seeder, before the SPA handle', (t) => {
 })
 
 // Per-client rate limit (caddy-ratelimit, built by Dockerfile.caddy) on the
-// two public seeder routes, keyed on the client address, which lives only in
+// three public seeder routes, keyed on the client address, which lives only in
 // Caddy's memory: never logged, never sent upstream.
-test('Caddyfile: /index/* and /media/* have a per-client rate limit', (t) => {
+test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (t) => {
   t.ok(lines.some((l) => l.trim() === 'order rate_limit before reverse_proxy'), 'order rate_limit before reverse_proxy')
   t.is(count('rate_limit {'), 3, 'exactly three rate_limit blocks')
   const limits = {
     'handle /index/* {': ['index', '20'],
     'handle /media/* {': ['media', '120'],
-    'handle /account/wallet/webhook/* {': ['webhook', '20']
+    'handle /blob/* {': ['blob', '300']
   }
   for (const [head, [zone, events]] of Object.entries(limits)) {
     const b = block(head)
@@ -186,26 +223,6 @@ test('Caddyfile: /index/* and /media/* have a per-client rate limit', (t) => {
     t.ok(text.includes('header_up -X-Forwarded-For') && text.includes('header_up -X-Real-Ip'), head + ' still strips client address headers')
   }
   t.absent(lines.some((l) => /^\s*log_key\b/.test(l)), 'log_key is never enabled')
-})
-
-// The Hodle webhook path reaches the account service through its own handle,
-// matched before /account/*, so unsigned bodies are capped per client address
-// in Caddy (the service never sees the address).
-test('Caddyfile: the wallet webhook path has its own per-client limit, before /account/*', (t) => {
-  const head = 'handle /account/wallet/webhook/* {'
-  t.is(count(head), 1, 'exactly one webhook handle')
-  const hook = block(head).map((l) => l.trim())
-  const account = block('handle /account/* {').map((l) => l.trim())
-  const start = lines.findIndex((l) => l.trim() === head)
-  const acc = lines.findIndex((l) => l.trim() === 'handle /account/* {')
-  t.ok(start !== -1 && acc > start, 'the webhook handle comes before handle /account/*')
-  t.ok(hook.includes('zone webhook {'), 'zone webhook')
-  t.ok(hook.includes('key {remote_host}'), 'keyed exactly on {remote_host}')
-  t.ok(hook.includes('events 20'), 'events 20')
-  t.ok(hook.includes('window 10s'), 'window 10s')
-  const proxy = (b) => b.slice(b.findIndex((l) => l.startsWith('reverse_proxy ')))
-  t.alike(proxy(hook), proxy(account), 'the same reverse_proxy block as /account/*')
-  t.ok(hook.includes('header_up -X-Forwarded-For') && hook.includes('header_up -X-Real-Ip'), 'client address headers stripped')
 })
 
 // No access log. The only log block is the global one that EXCLUDES the

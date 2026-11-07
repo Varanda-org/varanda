@@ -1,5 +1,5 @@
 // Diário: the person's own profile header (sunset band, avatar, name and
-// @nome from profile.read, bio, follow count) over the own log (log.read), newest first, paged backwards with
+// @nome from profile.read, bio, counts) over the own log (log.read), newest first, paged backwards with
 // infinite scroll and pull to refresh. On the hosted web, 'Compartilhar'
 // under the profile data opens a sheet with the link (copiar link /
 // compartilhar; the /m/<key> form is never printed). Only publications are
@@ -15,6 +15,9 @@
 // own reposts still on show the original under 'Você republicou' (only the
 // newest repost record per target counts; likes are not listed). Originals,
 // counts and the own state come from A Rua's useSocial.
+// The own 'seguindo' count comes from the local node; 'seguidores' comes
+// from the seeder (hosted only, useFollowCounts) and can be lower than
+// reality, hence the note under the counts.
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -28,12 +31,12 @@ import { UNCERTAIN_MESSAGE } from '../outbox'
 import { deletePostRows } from '../deletion'
 import { revokeDeletedMedia } from '../media/cache'
 import { relativeTime } from '../format'
-import { isLastLogPage, logRows, mergeOlderRows, oldestSeq } from '../paging'
+import { isLastLogPage, logRows, mergeOlderRows, oldestSeq, shouldReloadDiario } from '../paging'
+import { lastLocalWrite } from '../localWrites'
 import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
-import { ErrorText, SectionHeader, Soft, colors, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
-import { Avatar } from '../ui/Avatar'
+import { ErrorText, SectionHeader, Soft, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { PostRow } from '../ui/PostRow'
@@ -41,10 +44,15 @@ import { RefreshableList } from '../ui/RefreshableList'
 import { ShareProfile } from '../ui/ShareProfile'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
-import { SunsetBand } from '../ui/SunsetBand'
+import { ProfileHeader } from '../ui/ProfileHeader'
+import { BAR, ProfileBar, useProfileBar } from '../ui/ProfileBar'
+import { BellButton } from '../ui/TopActions'
 import { HelpButton } from '../ui/Help'
 import { HELP } from '../help'
-import { fonts, type } from '../ui/theme'
+import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
+import { useFollowCounts } from '../useFollowCounts'
+import { type } from '../ui/theme'
+import { useStyles } from '../ui/ThemeProvider'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, refOf, socialRowProps, useSocial } from './ARua'
 import { DeletePrompt, useDelete } from './Conversa'
@@ -130,7 +138,8 @@ function postOf (author, seq, record) {
   }
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, ownKey, scrollToTop, onDeletedPost }) {
+export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
   const outbox = useOutbox()
@@ -144,6 +153,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const [olderError, setOlderError] = useState('')
   const [editing, setEditing] = useState(false)
   const [sharing, setSharing] = useState(false)
+  const [pulls, setPulls] = useState(0)
   const pull = useAction()
   const seqRef = useRef(0)
   const olderBusy = useRef(false)
@@ -151,6 +161,8 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   // cursor from the rows that page is about to replace.
   const newestBusy = useRef(false)
   const lastRefresh = useRef(refresh)
+  // When the rows on screen were read; null when not fresh (never, failed, or a new node epoch).
+  const loadedAtRef = useRef(null)
   const dataRef = useRef(null)
   dataRef.current = data
 
@@ -158,10 +170,14 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const { request, ackFresh } = node
   const ownPublicKey = typeof ownKey === 'string' ? ownKey : (data && typeof data.info.publicKey === 'string' ? data.info.publicKey : null)
   const social = useSocial({ ownKey: ownPublicKey, onToast })
+  const followCounts = useFollowCounts(ownPublicKey, String(refresh) + ':' + pulls)
   const { ingest } = social
   // Replaces the rows with the newest page (a refresh).
   const loadNewest = useCallback(async (refreshProfile = false) => {
     const mine = ++seqRef.current
+    // The rows are as fresh as the start of the read: a write that lands
+    // while it runs may be missing, so it must still count as newer.
+    const startedAt = Date.now()
     newestBusy.current = true
     setLoadingMore(false)
     setOlderError('')
@@ -178,6 +194,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       if (mine !== seqRef.current) return
       const rows = logRows(log)
       setData({ info, rows, atEnd: isLastLogPage(log) })
+      loadedAtRef.current = startedAt
       setLoadError('')
       setOlderError('')
       setLoadingMore(false)
@@ -190,7 +207,10 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       }
       if (typeof info.publicKey === 'string') ingest({ ...rowNeeds(rows, info.publicKey), reset: true })
     } catch (err) {
-      if (mine === seqRef.current) setLoadError(errorText(err))
+      if (mine === seqRef.current) {
+        loadedAtRef.current = null
+        setLoadError(errorText(err))
+      }
     } finally {
       if (mine === seqRef.current) newestBusy.current = false
     }
@@ -234,15 +254,21 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const ownGrew = !!(node.signals && node.signals.fresh && typeof node.signals.fresh.own === 'number')
   const ownGrewRef = useRef(ownGrew)
   ownGrewRef.current = ownGrew
+  // Declared before the activation effect: it runs first when the epoch moves.
+  useEffect(() => { loadedAtRef.current = null }, [node.epoch])
   useEffect(() => {
     if (!active) return
     // A refresh bump while hidden is consumed on the next activation.
-    const refreshProfile = refresh !== lastRefresh.current || ownGrewRef.current
+    const forced = refresh !== lastRefresh.current || ownGrewRef.current
+    if (!shouldReloadDiario({ hosted: node.hosted, loadedAt: loadedAtRef.current, now: Date.now(), forced, wroteAt: lastLocalWrite() })) return
     lastRefresh.current = refresh
-    loadNewest(refreshProfile)
-  }, [active, loadNewest, refresh])
+    loadNewest(forced)
+  }, [active, loadNewest, refresh, node.hosted])
 
-  const reload = () => pull.run(() => loadNewest(true))
+  const reload = () => {
+    setPulls((n) => n + 1)
+    return pull.run(() => loadNewest(true))
+  }
 
   // Pages with no publication (only technical records) are paged through by
   // RefreshableList's infinite scroll, which pauses after a few dry pages.
@@ -262,6 +288,24 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const profileUrl = node.hosted === true && publicKey ? buildProfileUrl({ origin: installationOrigin() || globalThis.location?.origin || null, username: profile ? profile.username : null, publicKey }) : null
 
   const bandHeight = insets.top + BAND
+  const hasBell = typeof onAvisos === 'function'
+  const bar = useProfileBar(bandHeight, { controlsBottom: bandHeight - 12 })
+  // The band's controls, drawn in the header and again in the pinned bar.
+  const bandControls = (inBar) => (
+    <>
+      <HelpButton doc={HELP.diario} color='#ffffff' style={inBar ? styles.barButton : (hasBell ? styles.infoShifted : styles.info)} />
+      <Pressable
+        accessibilityRole='button'
+        accessibilityLabel='ajustes'
+        hitSlop={8}
+        onPress={() => onSettings('lista')}
+        style={inBar ? styles.barButton : (hasBell ? styles.gearShifted : styles.gear)}
+      >
+        <Icon name='engrenagem' size={20} color='#ffffff' />
+      </Pressable>
+      {hasBell ? <BellButton color='#ffffff' badged={avisosNew === true} onPress={onAvisos} style={inBar ? styles.barButton : styles.bell} /> : null}
+    </>
+  )
 
   // Only this identity's items for this association.
   const pending = info && node.config ? outbox.itemsFor(info.publicKey, node.config.association) : []
@@ -328,38 +372,29 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       )
     : (
       <View>
-        <SunsetBand height={bandHeight}>
-          <HelpButton doc={HELP.diario} color='#ffffff' style={styles.info} />
-          <Pressable
-            accessibilityRole='button'
-            accessibilityLabel='ajustes'
-            hitSlop={8}
-            onPress={() => onSettings('lista')}
-            style={styles.gear}
-          >
-            <Icon name='engrenagem' size={20} color='#ffffff' />
-          </Pressable>
-        </SunsetBand>
-        {/* The row rises into the band (marginTop -44) and is drawn after it,
-            so its empty space would take the gear's touches: only the avatar
-            takes touches. */}
-        <View style={styles.headRow} pointerEvents='box-none'>
-          <Avatar name={who.avatarName} publicKey={info.publicKey} size={88} picture={profile && profile.avatar} persist ring />
-        </View>
-        <View style={styles.data}>
-          <Text style={styles.name}>{displayText(who.title)}</Text>
-          {who.subtitle ? <Text style={styles.keyText}>{displayText(who.subtitle)}</Text> : null}
-          {bio
-            ? <Text style={styles.bio}>{displayText(bio, { multiline: true })}</Text>
-            : null}
-          <Text style={styles.counts}>
-            <Text style={styles.countsNum}>{displayText(String(info.followCount))}</Text> seguindo
-          </Text>
-          <View style={styles.actions}>
-            <View style={styles.action}><Pill label='Editar perfil' onPress={() => setEditing(true)} /></View>
-            {profileUrl !== null ? <View style={styles.action}><Pill label='Compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /></View> : null}
-          </View>
-        </View>
+        <ProfileHeader
+          bandHeight={bandHeight}
+          topInset={insets.top}
+          bandButtons={bar.interactive ? null : bandControls(false)}
+          avatar={{ name: who.avatarName, publicKey: info.publicKey, picture: profile && profile.avatar, persist: true }}
+          title={displayText(who.title)}
+          subtitle={who.subtitle ? displayText(who.subtitle) : null}
+          bio={bio || null}
+          counts={[{
+            label: 'seguindo',
+            value: info.followCount === undefined || info.followCount === null ? null : displayText(String(info.followCount)),
+            onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguindo') : undefined
+          }, {
+            label: 'seguidores',
+            value: followCounts.seguidores === null ? null : displayText(String(followCounts.seguidores)),
+            onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguidores') : undefined
+          }]}
+          note={followCounts.incomplete && followCounts.seguidores !== null ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
+          actions={[
+            <Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} />,
+            profileUrl !== null ? <Pill key='share' label='Compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /> : null
+          ]}
+        />
         {outboxList}
         <SectionHeader>Publicações</SectionHeader>
         <CountsNote social={social} />
@@ -403,6 +438,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
 
   const del = useDelete({
     request,
+    node,
     onToast,
     recheck: () => loadNewest(false),
     // The slot stays (as the node reports it) so the paging cursor holds.
@@ -461,12 +497,21 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         loadMoreError={!!olderError}
         atEnd={data === null ? true : data.atEnd}
         scrollToTopSignal={scrollToTop}
+        onScrollFrame={bar.handleScrollFrame}
+        newItemsTop={info !== null && bar.interactive ? insets.top + BAR + 8 : undefined}
         newItems={{
           label: 'ver novidades',
           visible: !!(node.signals && node.signals.fresh && node.signals.fresh.own),
           onPress: reload
         }}
       />
+      {info !== null
+        ? (
+          <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)}>
+            {bandControls(true)}
+          </ProfileBar>
+          )
+        : null}
       <Perfil
         open={editing}
         ownKey={info ? info.publicKey : null}
@@ -496,47 +541,28 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   )
 }
 
-const styles = StyleSheet.create({
+const bandButton = (colors) => ({
+  position: 'absolute',
+  bottom: 12,
+  width: 34,
+  height: 34,
+  borderRadius: 17,
+  backgroundColor: colors.dim,
+  alignItems: 'center',
+  justifyContent: 'center'
+})
+
+const makeStyles = (colors) => StyleSheet.create({
   list: { flex: 1, backgroundColor: colors.bg },
+  barButton: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.dim, alignItems: 'center', justifyContent: 'center' },
   plainBand: { backgroundColor: colors.bg },
-  gear: {
-    position: 'absolute',
-    right: 16,
-    bottom: 12,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: colors.dim,
-    alignItems: 'center',
-    justifyContent: 'center'
-  },
-  info: {
-    position: 'absolute',
-    right: 58,
-    bottom: 12,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: colors.dim,
-    alignItems: 'center',
-    justifyContent: 'center'
-  },
-  headRow: {
-    marginTop: -44,
-    paddingHorizontal: 16,
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    justifyContent: 'space-between'
-  },
-  data: { paddingTop: 10, paddingHorizontal: 16, paddingBottom: 12, gap: 2 },
-  name: { ...type.profileName, fontFamily: fonts.title, color: colors.ink },
-  keyText: { ...type.postMeta, color: colors.soft },
-  bio: { ...type.postText, color: colors.ink, marginTop: 8 },
-  counts: { fontSize: 15, color: colors.soft, marginTop: 8 },
-  countsNum: { color: colors.ink, fontWeight: '700' },
-  // Pill sets no width, so the column has to stretch it.
-  actions: { flexDirection: 'row', gap: 8, marginTop: 12 },
-  action: { flex: 1, alignItems: 'stretch' },
+  // The band buttons, right to left: bell (when there is one), gear, help.
+  bell: { ...bandButton(colors), right: 16 },
+  gear: { ...bandButton(colors), right: 16 },
+  gearShifted: { ...bandButton(colors), right: 58 },
+  countsNote: { marginTop: 4 },
+  info: { ...bandButton(colors), right: 58 },
+  infoShifted: { ...bandButton(colors), right: 100 },
   shareBody: { padding: 16, gap: 12 },
   pending: {
     paddingVertical: 10,

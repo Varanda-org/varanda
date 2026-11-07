@@ -12,7 +12,16 @@ const c = require('compact-encoding')
 const hcrypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
-const { PROTOCOL, MESSAGE_BURST, MESSAGE_RATE, attachNotices } = require('../lib/notices-net')
+const {
+  PROTOCOL,
+  NOTICES_V3_PROTOCOL,
+  MAX_BAD_NOTICES,
+  MESSAGE_BURST,
+  MESSAGE_RATE,
+  attachNotices,
+  attachNoticesV2,
+  attachNoticesV3
+} = require('../lib/notices-net')
 const { NOTICES_PROTOCOL, noticePayload, signNoticeProof } = require('../lib/notices')
 const blocklistNet = require('../lib/blocklist-net')
 const { until } = require('./helpers/net')
@@ -50,9 +59,9 @@ function fakePage () {
 }
 
 // A hand-driven peer on the notices protocol.
-function rawPeer (noise) {
+function rawPeer (noise, protocol = PROTOCOL) {
   const received = []
-  const ch = noise.userData.createChannel({ protocol: PROTOCOL })
+  const ch = noise.userData.createChannel({ protocol })
   const m = ch.addMessage({
     encoding: c.buffer,
     onmessage: (buf) => received.push(JSON.parse(b4a.toString(buf, 'utf8')))
@@ -365,6 +374,126 @@ test('seeder: a peer that reopens the channel starts clean (fresh challenge, no 
   t.is(fp.calls.length, 2)
   t.absent(a.destroyed)
   t.absent(b.destroyed)
+})
+
+// One page() for all three channels: a like row is valid only on v3, so v2
+// answers it as an invalid page and v1 strips the kind.
+function likePage () {
+  const calls = []
+  return {
+    calls,
+    page: ({ target, after, limit }) => {
+      calls.push({ target, after, limit })
+      return {
+        items: [{ key: 'ab'.repeat(32), seq: 3, at: D1, kind: 'like' }],
+        next: null,
+        incomplete: false
+      }
+    }
+  }
+}
+
+test('v1, v2 and v3 on one socket keep separate slots', async (t) => {
+  const { a, b } = streams(t)
+  const fp = likePage()
+  const m = member()
+  const hs1 = attachNotices(a, { role: 'seeder', page: fp.page })
+  const hs2 = attachNoticesV2(a, { role: 'seeder', page: fp.page })
+  const hs3 = attachNoticesV3(a, { role: 'seeder', page: fp.page })
+  t.is(a._varandaNotices, hs1)
+  t.is(a._varandaNoticesV2, hs2)
+  t.is(a._varandaNoticesV3, hs3)
+  t.not(hs2, hs3)
+  t.is(attachNoticesV3(a, { role: 'seeder', page: fp.page }), hs3, 'cached per slot')
+
+  const hm1 = attachNotices(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  const hm2 = attachNoticesV2(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  const hm3 = attachNoticesV3(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  t.is(await hm1.proved, true)
+  t.is(await hm2.proved, true)
+  t.is(await hm3.proved, true)
+
+  t.alike((await hm1.requestPage({})).items, [{ key: 'ab'.repeat(32), seq: 3, at: D1 }])
+  t.alike(await hm2.requestPage({}), { items: [], next: null, incomplete: true }, 'a like is not a v2 kind')
+  t.alike(await hm3.requestPage({}), { items: [{ key: 'ab'.repeat(32), seq: 3, at: D1, kind: 'like' }], next: null, incomplete: false })
+
+  hm3.close()
+  t.absent(b._varandaNoticesV3)
+  t.is(b._varandaNotices, hm1)
+  t.is(b._varandaNoticesV2, hm2)
+  t.alike((await hm1.requestPage({})).items, [{ key: 'ab'.repeat(32), seq: 3, at: D1 }])
+  t.is(hs1.badMessages + hs2.badMessages + hs3.badMessages + hm1.badMessages + hm2.badMessages + hm3.badMessages, 0)
+  t.absent(a.destroyed)
+  t.absent(b.destroyed)
+})
+
+test('v1, v2 and v3 share one close listener, and a socket close still ends each', async (t) => {
+  const { a, b } = streams(t)
+  const fp = likePage()
+  const m = member()
+  const before = a.listenerCount('close')
+  attachNotices(a, { role: 'seeder', page: fp.page })
+  attachNoticesV2(a, { role: 'seeder', page: fp.page })
+  attachNoticesV3(a, { role: 'seeder', page: fp.page })
+  t.is(a.listenerCount('close') - before, 1, 'one listener for three versions')
+
+  const memberBefore = b.listenerCount('close')
+  const hm1 = attachNotices(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  const hm2 = attachNoticesV2(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  const hm3 = attachNoticesV3(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  t.is(b.listenerCount('close') - memberBefore, 1)
+  t.is(await hm3.proved, true)
+
+  hm2.close()
+  t.absent(b._varandaNoticesV2)
+  b.destroy()
+  await until(() => b.destroyed)
+  await until(() => b._varandaNotices === undefined && b._varandaNoticesV3 === undefined)
+  await t.exception(hm1.requestPage({}), /notices channel closed/)
+  await t.exception(hm3.requestPage({}), /notices channel closed/)
+})
+
+test('a bad v3 message does not count against v2', async (t) => {
+  const { a, b } = streams(t)
+  const fp = likePage()
+  const m = member()
+  const hs2 = attachNoticesV2(a, { role: 'seeder', page: fp.page })
+  const hs3 = attachNoticesV3(a, { role: 'seeder', page: fp.page })
+  const hm2 = attachNoticesV2(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  t.is(await hm2.proved, true)
+  const raw = rawPeer(b, NOTICES_V3_PROTOCOL)
+  await raw.opened
+  await until(() => raw.received.length === 1, { name: 'v3 challenge' })
+  raw.sendJson({ type: 'page', after: null, limit: 5 })
+  await until(() => hs3.badMessages === 1, { name: 'page before proof is bad on v3' })
+  t.is(hs2.badMessages, 0)
+  t.alike(await hm2.requestPage({}), { items: [], next: null, incomplete: true })
+  t.is(hs2.badMessages, 0)
+  t.absent(a.destroyed)
+})
+
+test('more than MAX_BAD_NOTICES bad v3 messages drops the peer with reason notices-v3 only', async (t) => {
+  const { a, b } = streams(t)
+  const fp = likePage()
+  const logged = []
+  const log = (e) => logged.push(e)
+  const hs1 = attachNotices(a, { role: 'seeder', page: fp.page, log })
+  const hs2 = attachNoticesV2(a, { role: 'seeder', page: fp.page, log })
+  const hs3 = attachNoticesV3(a, { role: 'seeder', page: fp.page, log })
+  const raw = rawPeer(b, NOTICES_V3_PROTOCOL)
+  await raw.opened
+  await until(() => raw.received.length === 1, { name: 'challenge' })
+  for (let i = 0; i < MAX_BAD_NOTICES; i++) raw.sendJson({ type: 'page', after: null, limit: 5 })
+  await until(() => hs3.badMessages === MAX_BAD_NOTICES, { name: 'five bad messages' })
+  await delay(50)
+  t.absent(a.destroyed)
+  raw.sendJson({ type: 'page', after: null, limit: 5 })
+  await until(() => a.destroyed, { name: 'socket destroyed' })
+  t.is(hs3.badMessages, MAX_BAD_NOTICES + 1)
+  t.is(hs1.badMessages, 0, 'v1 counted nothing')
+  t.is(hs2.badMessages, 0, 'v2 counted nothing')
+  t.alike(logged, [{ event: 'peer-dropped', peerKey: hs3.peerKey, reason: 'notices-v3' }])
+  t.is(fp.calls.length, 0)
 })
 
 test('notices modules load without node-only modules, hypercore or crypto', (t) => {

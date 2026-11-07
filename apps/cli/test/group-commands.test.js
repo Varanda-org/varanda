@@ -3,8 +3,10 @@
 const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
+const vm = require('node:vm')
+const { parseArgs } = require('../lib/cli')
 const { spawnSync } = require('node:child_process')
-const { testnet, tmpDir } = require('./helpers/net')
+const { tmpDir } = require('./helpers/net')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 const HEX64 = /^[0-9a-f]{64}$/
@@ -24,7 +26,6 @@ function lastJson (r) {
 
 test('group commands end to end', async (t) => {
   t.timeout(120000)
-  await testnet(t)
   const assocDir = tmpDir(t)
   const dir = tmpDir(t)
   const files = tmpDir(t)
@@ -34,15 +35,21 @@ test('group commands end to end', async (t) => {
   const cert = path.join(files, 'a.json')
   t.is(varanda(assocDir, ['assoc', 'certify', '--member', A, '--out', cert]).code, 0)
 
+  const C = 'c'.repeat(64)
+
+  const missingCommunity = varanda(dir, ['group', 'create', '--name', 'x', '--join', 'open'])
+  t.is(missingCommunity.code, 2)
+  t.ok(missingCommunity.stderr.includes('informe --community <chave>'))
+
   // refusals that need no identity
   t.is(varanda(dir, ['group']).code, 2, 'no subcommand')
   t.is(varanda(dir, ['group', 'bogus']).code, 2, 'unknown subcommand')
-  t.is(varanda(dir, ['group', 'create', '--join', 'open']).code, 2, 'create needs --name')
-  t.is(varanda(dir, ['group', 'create', '--name', 'x']).code, 2, 'create needs --join')
-  const priv = varanda(dir, ['group', 'create', '--name', 'x', '--join', 'private'])
+  t.is(varanda(dir, ['group', 'create', '--community', C, '--join', 'open']).code, 2, 'create needs --name')
+  t.is(varanda(dir, ['group', 'create', '--community', C, '--name', 'x']).code, 2, 'create needs --join')
+  const priv = varanda(dir, ['group', 'create', '--community', C, '--name', 'x', '--join', 'private'])
   t.is(priv.code, 2, '--join private refused')
   t.ok(priv.stderr.includes('para um grupo privado use --private'), 'points to --private')
-  const openPriv = varanda(dir, ['group', 'create', '--name', 'x', '--join', 'open', '--private'])
+  const openPriv = varanda(dir, ['group', 'create', '--community', C, '--name', 'x', '--join', 'open', '--private'])
   t.is(openPriv.code, 2, 'a private group is never open')
   t.ok(openPriv.stderr.includes('sempre por aprovação'), 'says why')
   t.is(varanda(dir, ['group', 'rekey']).code, 2, 'rekey needs a key')
@@ -52,12 +59,15 @@ test('group commands end to end', async (t) => {
   t.is(varanda(dir, ['cert', 'add', '--cert-file', cert]).code, 0)
   t.is(varanda(dir, ['profile', 'set', '--name', 'Ana']).code, 0)
 
-  const created = varanda(dir, ['group', 'create', '--name', 'Cozinha', '--join', 'open', '--json'])
+  const community = lastJson(varanda(dir, ['community', 'create', '--name', 'Bairro', '--join', 'open', '--json'])).community
+  const created = varanda(dir, ['group', 'create', '--community', community, '--name', 'Cozinha', '--join', 'open', '--json'])
   t.is(created.code, 0, created.stderr)
   const G = lastJson(created).group
   t.ok(HEX64.test(G), 'root key')
 
   t.ok(varanda(dir, ['group', 'list']).stdout.includes(G + ' Cozinha (aberto'), 'list shows the group')
+  t.ok(varanda(dir, ['group', 'list']).stdout.includes(' [comunidade ' + community.slice(0, 8) + ']'), 'list names the parent')
+  t.is(lastJson(varanda(dir, ['group', 'info', G, '--json'])).community, community)
   t.is(lastJson(varanda(dir, ['group', 'info', G, '--json'])).creator, A, 'creator is the caller')
   t.ok(varanda(dir, ['group', 'members', G]).stdout.includes(A + ' Ana (admin)'), 'members line')
 
@@ -98,13 +108,18 @@ test('group commands end to end', async (t) => {
   t.is(varanda(dir, ['group', 'admit', G]).code, 2, 'admit needs --member')
 
   // a group whose root has not arrived yet: the join is recorded as pending
-  const pending = varanda(dir, ['group', 'join', 'a'.repeat(64)])
+  const noHint = varanda(dir, ['group', 'join', 'a'.repeat(64)])
+  t.is(noHint.code, 2, 'unknown group needs a community hint')
+  t.ok(noHint.stderr.includes('informe a comunidade do grupo'), noHint.stderr)
+  const pending = varanda(dir, ['group', 'join', 'a'.repeat(64), '--community', community.toUpperCase()])
   t.is(pending.code, 0, pending.stderr)
   t.is(pending.stdout.trim(), 'entrada registrada: o grupo chega na próxima sincronização')
   const listed = varanda(dir, ['group', 'list'])
   t.ok(listed.stdout.includes('a'.repeat(64) + ' (aguardando a sincronização)'), 'listed as pending')
 
   const info = varanda(dir, ['group', 'info', G])
+  t.ok(info.stdout.includes('\ncomunidade: ' + community + '\n'), 'info names the parent')
+  t.ok(varanda(dir, ['group', 'info', 'a'.repeat(64)]).stdout.includes('comunidade: desconhecida até a sincronização'))
   t.ok(info.stdout.includes('\nvisibilidade: público\n'), 'info shows a public group')
   t.is(lastJson(varanda(dir, ['group', 'info', G, '--json'])).visibility, 'public')
   const publicRekey = varanda(dir, ['group', 'rekey', G])
@@ -118,7 +133,7 @@ test('group commands end to end', async (t) => {
     outputs.push(r.stdout, r.stderr)
     return r
   }
-  const privCreated = run(['group', 'create', '--private', '--name', 'Segredo'])
+  const privCreated = run(['group', 'create', '--community', community, '--private', '--name', 'Segredo'])
   t.is(privCreated.code, 0, privCreated.stderr)
   t.ok(privCreated.stdout.startsWith('grupo privado criado: '), 'pt-BR create line')
   const P = privCreated.stdout.trim().slice('grupo privado criado: '.length)
@@ -177,4 +192,84 @@ test('members and requests read every page, not only the first', async (t) => {
   const groups = Array.from({ length: 64 }, (_, i) => ({ group: String(i) }))
   const listed = await allPages(async ({ offset, limit }) => ({ groups: groups.slice(offset, offset + limit), total: 64 }), 'groups', 31)
   t.is(listed.groups.length, 64, 'group list reads past the first 31')
+})
+
+test('group info distinguishes unknown parents and orphans', async (t) => {
+  const filename = path.join(__dirname, '../lib/commands/group.js')
+  const module = { exports: {} }
+  const G = 'a'.repeat(64)
+  const C = 'c'.repeat(64)
+  let output = ''
+  let result
+  vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+    module,
+    require: name => name === '@varanda/core/lib/member' ? { groupInfo: async () => result } : require(name),
+    process: { stdout: { write: text => { output += text } } }
+  }, { filename })
+  for (const [community, orphan, expected] of [
+    [C, false, 'comunidade: ' + C],
+    [null, false, 'comunidade: desconhecida até a sincronização'],
+    [C, true, 'grupo sem comunidade']
+  ]) {
+    result = { group: G, name: 'Horta', join: 'open', role: 'member', members: 1, visibility: 'public', creator: G, state: 'ready', community, orphan }
+    output = ''
+    await module.exports.commands.group.run(parseArgs(['group', 'info', G], {}))
+    t.ok(output.endsWith(expected + '\n'))
+    output = ''
+    await module.exports.commands.group.run(parseArgs(['group', 'info', G, '--json'], {}))
+    t.alike(JSON.parse(output), result)
+  }
+})
+
+test('group read renders safe media markers and preserves descriptors in JSON', async (t) => {
+  const filename = path.join(__dirname, '../lib/commands/group.js')
+  const module = { exports: {} }
+  const G = 'a'.repeat(64)
+  const at = '2026-01-01T00:00:00.000Z'
+  const base = { writer: G, diary: G, at, replyTo: null, hidden: false, name: 'Ana', username: null }
+  const photo = { core: G, mime: 'image/png', start: 1, blocks: 1, bytes: 1, sha256: G, width: 1, height: 1 }
+  const privatePhoto = { core: G, start: 1, ...require('@varanda/core/lib/group-media').sealMedia(Buffer.from('fixture'), { plainMime: 'image/gif', w: 1, h: 1 }).item }
+  const result = {
+    items: [
+      { ...base, seq: 5, text: 'álbum\u001b[31m\n\u202e', media: [photo, { ...photo, start: 2, mime: 'image/gif' }] },
+      { ...base, seq: 4, text: '', media: [privatePhoto, { ...privatePhoto, start: 2, plainMime: 'image/webp' }] },
+      { ...base, seq: 3, text: 'oculto', hidden: true, media: [photo] },
+      { ...base, seq: 2, text: 'texto v1' },
+      { ...base, seq: 1, text: 'texto', media: null }
+    ],
+    next: null,
+    hidden: 1,
+    incomplete: false,
+    sealed: 0,
+    epoch: null,
+    state: 'ok'
+  }
+  let output = ''
+  vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+    module,
+    require: name => {
+      if (name === '@varanda/core/lib/member') return { groupRead: async () => result }
+      const mod = require(name)
+      if (name !== '@varanda/rpc') return mod
+      return { ...mod, validateParams: (method, params) => mod.validateParams(method, JSON.parse(JSON.stringify(params))) }
+    },
+    process: { stdout: { write: text => { output += text } }, stderr: { write: () => t.fail('unexpected warning') } }
+  }, { filename })
+  await module.exports.commands.group.run(parseArgs(['group', 'read', G], {}))
+  t.is(output, [
+    at + ' Ana: álbum\\u{1b}[31m\\u{a}\\u{202e} [foto] [gif]',
+    at + ' Ana:  [gif] [foto]',
+    at + ' Ana: (mensagem oculta)',
+    at + ' Ana: texto v1',
+    at + ' Ana: texto',
+    ''
+  ].join('\n'))
+  output = ''
+  await module.exports.commands.group.run(parseArgs(['group', 'read', G, '--json'], {}))
+  t.alike(JSON.parse(output), {
+    ...result,
+    items: result.items.map(item => ({ ...item, media: !item.hidden && item.media ? item.media.map(({ key, nonce, ...d }) => d) : null }))
+  }, 'JSON retains media rather than the display markers')
+  t.absent(output.includes(privatePhoto.key) || output.includes(privatePhoto.nonce), 'no command prints a private item key or nonce')
+  t.is(output.trim().split('\n').length, 1, 'JSON stays on one terminal line')
 })

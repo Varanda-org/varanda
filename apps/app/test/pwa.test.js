@@ -23,6 +23,12 @@ test('manifest has the members an installable app needs', (t) => {
   t.is(manifest.display, 'standalone')
   t.ok(manifest.background_color)
   t.ok(manifest.theme_color)
+  // The installed app's system navigation bar takes this one colour; on the
+  // web the tab bar above it is the same opaque dark bg in both schemes.
+  t.is(manifest.theme_color, '#1c2622', 'theme_color is the dark bg')
+  const tabBar = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'TabBar.js'), 'utf8')
+  t.ok(tabBar.includes("const alwaysDark = Platform.OS === 'web'"), 'the tab bar is always dark on the web')
+  t.ok(tabBar.includes('makeStyles({ ...DARK, tabBar: DARK.bg })'), 'the web tab bar is opaque dark bg, not the translucent tabBar')
   const icon = (size, purpose) => manifest.icons.find((i) => i.sizes === size && i.purpose === purpose)
   t.ok(icon('192x192', 'any'), '192 any icon')
   t.ok(icon('512x512', 'any'), '512 any icon')
@@ -71,7 +77,7 @@ test('index.html carries the install metas in pt-BR', (t) => {
 })
 
 test('index.html paints the brand before the bundle runs', (t) => {
-  t.ok(/<div id="root"><\/div>\s*<div id="varanda-pre-splash" role="status" aria-label="Varanda, conectando">/.test(html), 'splash follows the empty root')
+  t.ok(/<div id="root"><\/div>\s*<div id="varanda-pre-splash" role="status" aria-label="Varanda, carregando">/.test(html), 'splash follows the empty root')
   const start = html.indexOf('<div id="varanda-pre-splash"')
   const block = html.slice(start, html.indexOf('</div>', start))
   t.ok(block.includes('<svg'), 'chair svg')
@@ -81,10 +87,24 @@ test('index.html paints the brand before the bundle runs', (t) => {
   }
   t.is((block.match(/<path/g) || []).length, 21, '21 chair paths')
   t.absent(/href|<text|<filter|<img|<iframe|<object|<embed|<script/i.test(block), 'no external or forbidden markup in the splash')
-  t.ok(block.includes('conectando…'), 'hint ellipsis')
+  t.absent(block.includes('conectando'), 'no connecting text')
+  t.ok(html.includes('<div class="bar" aria-hidden="true"><span></span></div>\n    </div>'), 'progress bar, last in the splash')
+  t.ok(html.includes('width: calc(var(--varanda-progress, 0.1) * 100%)'), 'the bar fill follows the app')
   const letters = ['V', 'a', 'r', 'a', 'n', 'd', 'a']
   const spans = letters.map((letter, i) => '<span style="--i:' + i + '">' + letter + '</span>').join('')
   t.ok(block.includes(spans), 'Varanda letter spans in order')
+  t.ok(html.includes('<meta name="color-scheme" content="light dark" />'), 'color-scheme meta')
+  t.ok(html.includes('<meta name="theme-color" content="#fbf8f3" />'), 'light theme-color meta')
+  t.ok(html.includes('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1c2622" />'), 'dark theme-color meta')
+  // Browsers take the first matching theme-color: the unscoped light one
+  // would always win if it came first.
+  t.ok(html.indexOf('media="(prefers-color-scheme: dark)" content="#1c2622"') < html.indexOf('<meta name="theme-color" content="#fbf8f3" />'), 'dark theme-color comes first')
+  t.ok(html.includes('html[data-scheme=light] #varanda-pre-splash { background: #fbf8f3; }'), 'manual Claro repaints the overlay')
+  t.ok(html.includes('html[data-scheme=dark] #varanda-pre-splash { background: #1c2622; }'), 'manual Escuro repaints the overlay')
+  const dark = /@media \(prefers-color-scheme: dark\) \{([\s\S]*?)\n {6}\}/.exec(html)
+  t.ok(dark, 'dark media query exists')
+  t.ok(dark && dark[1].includes('#varanda-pre-splash { background: #1c2622; }'), 'dark pre-splash background')
+  t.ok(dark && /\.chair \{[^}]*background: #fbf8f3/.test(dark[1]), 'chair keeps a cream pad in dark')
   t.ok(html.includes('prefers-reduced-motion: no-preference'), 'motion lives in the no-preference query')
   t.ok(html.includes('pointer-events: none'), 'splash does not eat taps')
   t.ok(html.includes('visibility: hidden'), 'expiry keyframe')
@@ -103,9 +123,13 @@ test('the service worker is a template outside public/', (t) => {
   for (const s of ['skipWaiting', 'clients.claim', 'cache.addAll', 'importScripts', 'eval(', 'RUNTIME_PREFIXES']) {
     t.absent(sw.includes(s), 'no ' + s)
   }
-  t.is(sw.split('cache.put(').length - 1, 1, 'a single cache.put, inside precache (no runtime caching)')
+  // Besides the shell, the only cache entry is the DM wake mute record: a
+  // value the worker writes itself, never a network response, never served.
+  t.is(sw.split('cache.put(').length - 1, 2, 'two cache.put: precache and the DM mute record (no runtime caching)')
+  t.is(sw.split('cache.put(DM_STATE_KEY, ').length - 1, 1, 'the second writes only the DM mute record')
   t.ok(sw.includes('async function verifiedMatch ('), 'cached responses are re-verified')
-  t.is(sw.split('.match(').length - 1, 1, 'a single cache read, inside verifiedMatch')
+  t.is(sw.split('.match(').length - 1, 2, 'two cache reads: verifiedMatch and the DM mute record')
+  t.is(sw.split('cache.match(DM_STATE_KEY)').length - 1, 1, 'the second reads only the DM mute record')
   t.ok(sw.includes("new Response(buf, { status: 200, statusText: 'OK', headers })"), 'a cache hit is rebuilt, never returned as stored')
   t.absent(/<script/i.test(html), 'index.html still has no script tag')
 })

@@ -19,6 +19,24 @@
 // quote to the association's account service. It does NOT prove that the
 // reported diary contains the quote; the moderator checks that separately.
 //
+// A report of a private message (Conversas) signs 'varanda-dm-report-v1':
+// the quote is the plaintext the reporter chose and `target` is the sender's
+// diary key, so moderators can block the account. The signature proves that
+// the reporter attested this quote about this target; it does NOT prove that
+// the target sent it. No sender signature, message id or conversation is
+// bound, so the quote is unverifiable and the panel labels it 'não conferida'
+// (docs/protocol.md section 11).
+//
+// A report that carries an anexo (an image the reporter attaches, sent to
+// the account service next to the report) adds ONE line to its statement:
+// the lowercase hex SHA-256 of the attachment bytes. A private message
+// signs 'varanda-dm-report-v2' and a group message 'varanda-report-v3';
+// without an anexo the older statement is signed unchanged, so every old
+// signature still verifies and a v1 signature can never pass as v2/v3 (or
+// back). Under v2 the quote may be empty (a media-only message). The digest
+// binds the reporter to the exact bytes, not to the sender: like the quote,
+// the image is the reporter's word only ('não conferida').
+//
 // Pure: b4a, hypercore-crypto, ./safe and ./records only (loaded by the
 // browser bundle and the account service alike; no '#fs', no network).
 const b4a = require('b4a')
@@ -28,6 +46,9 @@ const { MAX_TEXT, MAX_LOG_BLOCKS } = require('./records')
 
 const PREFIX = 'varanda-report-v1'
 const PREFIX_V2 = 'varanda-report-v2'
+const PREFIX_V3 = 'varanda-report-v3'
+const PREFIX_DM = 'varanda-dm-report-v1'
+const PREFIX_DM_V2 = 'varanda-dm-report-v2'
 const REASONS = Object.freeze(['spam', 'assedio', 'ilegal', 'outro'])
 const REASON_LABELS = Object.freeze({ spam: 'spam', assedio: 'assédio', ilegal: 'conteúdo ilegal', outro: 'outro' })
 // Code points (Array.from length), as packages/rpc text.js charLength.
@@ -40,6 +61,10 @@ const SEQ_MAX = MAX_LOG_BLOCKS - 1
 const NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
 const HEX64 = /^[0-9a-f]{64}$/
 const HEX128 = /^[0-9a-f]{128}$/
+// An allow-list, so a field naming a message or conversation (seq, writer,
+// group, peer) can never ride along unsigned.
+const DM_KEYS = Object.freeze(['nonce', 'member', 'association', 'target', 'reason', 'text', 'quote'])
+const DM_KEYS_V2 = Object.freeze([...DM_KEYS, 'anexo'])
 
 function isPlainObject (o) {
   if (o === null || typeof o !== 'object') return false
@@ -103,9 +128,13 @@ function checkFields (fields) {
   if (!validText(text, TEXT_MAX, false)) return 'text'
   if (!validText(quote, QUOTE_MAX, true)) return 'quote'
   if (seq === null && quote !== '') return 'quote'
-  const { writer, group } = fields
+  const { writer, group, anexo } = fields
+  const hasAnexo = anexo !== undefined && anexo !== null
+  if (hasAnexo && (typeof anexo !== 'string' || !HEX64.test(anexo))) return 'anexo'
   if (writer === undefined || writer === null) {
     if (group !== undefined && group !== null) return 'group'
+    // A diary post is on the seeder: the moderator reads it there.
+    if (hasAnexo) return 'anexo'
     return null
   }
   if (typeof writer !== 'string' || !HEX64.test(writer)) return 'writer'
@@ -124,15 +153,22 @@ function isGroupReport (fields) {
 // canonical decimal for a post report and '' for an account report (null).
 // With `writer` (and `group`), the bytes of PREFIX_V2, nonce, member,
 // association, target, group, writer, seq, reason, digest(text),
-// digest(quote) instead. Throws TypeError on a bad shape.
+// digest(quote) instead; with `anexo` too, PREFIX_V3 in place of PREFIX_V2
+// and the anexo (hex SHA-256) as one last line. Throws TypeError on a bad
+// shape.
 function reportPayload (fields) {
   const reason = checkFields(fields)
   if (reason !== null) throw new TypeError('invalid report ' + reason)
-  const { nonce, member, association, target, seq, text, quote } = fields
+  const { nonce, member, association, target, seq, text, quote, anexo } = fields
   const seqField = seq === null ? '' : String(seq)
-  const lines = isGroupReport(fields)
-    ? [PREFIX_V2, nonce, member, association, target, fields.group, fields.writer, seqField, fields.reason, digest(text), digest(quote)]
-    : [PREFIX, nonce, member, association, target, seqField, fields.reason, digest(text), digest(quote)]
+  let lines
+  if (!isGroupReport(fields)) {
+    lines = [PREFIX, nonce, member, association, target, seqField, fields.reason, digest(text), digest(quote)]
+  } else if (anexo === undefined || anexo === null) {
+    lines = [PREFIX_V2, nonce, member, association, target, fields.group, fields.writer, seqField, fields.reason, digest(text), digest(quote)]
+  } else {
+    lines = [PREFIX_V3, nonce, member, association, target, fields.group, fields.writer, seqField, fields.reason, digest(text), digest(quote), anexo]
+  }
   return b4a.from(lines.join('\n'), 'utf8')
 }
 
@@ -159,9 +195,87 @@ function verifyReport (fields, signatureHex) {
   }
 }
 
+// Exactly the DM keys (v1, or v1 plus `anexo` for v2) as own data
+// properties, copied once (as push-proof.js): no getter runs, nothing is
+// inherited, and no hidden extra key rides along, so the values checked are
+// the values signed. -> the copy, or null.
+function dmSnapshot (fields) {
+  if (!isPlainObject(fields)) return null
+  const keys = Object.prototype.hasOwnProperty.call(fields, 'anexo') ? DM_KEYS_V2 : DM_KEYS
+  if (Reflect.ownKeys(fields).length !== keys.length) return null
+  const copy = {}
+  for (const key of keys) {
+    const d = Object.getOwnPropertyDescriptor(fields, key)
+    if (d === undefined || !('value' in d)) return null
+    copy[key] = d.value
+  }
+  return copy
+}
+
+function checkDmFields (fields) {
+  if (fields === null) return 'fields'
+  const { nonce, member, association, target, reason, text, quote } = fields
+  if (typeof nonce !== 'string' || !NONCE_RE.test(nonce)) return 'nonce'
+  if (typeof member !== 'string' || !HEX64.test(member)) return 'member'
+  if (typeof association !== 'string' || !HEX64.test(association)) return 'association'
+  if (typeof target !== 'string' || !HEX64.test(target)) return 'target'
+  if (member === target) return 'target'
+  if (typeof reason !== 'string' || !REASONS.includes(reason)) return 'reason'
+  if (!validText(text, TEXT_MAX, false)) return 'text'
+  const v2 = Object.prototype.hasOwnProperty.call(fields, 'anexo')
+  if (v2 && (typeof fields.anexo !== 'string' || !HEX64.test(fields.anexo))) return 'anexo'
+  // Only v2 may quote nothing: the image is then the evidence.
+  if (!validText(quote, QUOTE_MAX, true) || (quote === '' && !v2)) return 'quote'
+  return null
+}
+
+// { nonce, member, association, target, reason, text, quote } -> the UTF-8
+// bytes of PREFIX_DM, nonce, member, association, target, reason,
+// digest(text), digest(quote) joined by LF (no trailing LF). With `anexo`,
+// PREFIX_DM_V2 in place of PREFIX_DM and the anexo (hex SHA-256) as a ninth
+// line. Throws TypeError on a bad shape or on any other key.
+function dmReportPayload (fields) {
+  return dmPayloadOf(dmSnapshot(fields))
+}
+
+function dmPayloadOf (snap) {
+  const bad = checkDmFields(snap)
+  if (bad !== null) throw new TypeError('invalid dm report ' + bad)
+  const { nonce, member, association, target, reason, text, quote } = snap
+  const lines = Object.prototype.hasOwnProperty.call(snap, 'anexo')
+    ? [PREFIX_DM_V2, nonce, member, association, target, reason, digest(text), digest(quote), snap.anexo]
+    : [PREFIX_DM, nonce, member, association, target, reason, digest(text), digest(quote)]
+  return b4a.from(lines.join('\n'), 'utf8')
+}
+
+// -> lowercase hex128 Ed25519 signature by keyPair.secretKey.
+function signDmReport (fields, keyPair) {
+  const payload = dmReportPayload(fields)
+  if (keyPair === null || typeof keyPair !== 'object' || !(keyPair.secretKey instanceof Uint8Array) || keyPair.secretKey.byteLength !== 64) {
+    throw new TypeError('invalid key pair')
+  }
+  return b4a.toString(crypto.sign(payload, keyPair.secretKey), 'hex')
+}
+
+// As verifyReport, against `member`. Never throws.
+function verifyDmReport (fields, signatureHex) {
+  try {
+    const snap = dmSnapshot(fields)
+    if (checkDmFields(snap) !== null) return { ok: false, reason: 'malformed' }
+    if (typeof signatureHex !== 'string' || !HEX128.test(signatureHex)) return { ok: false, reason: 'malformed' }
+    const ok = crypto.verify(dmPayloadOf(snap), b4a.from(signatureHex, 'hex'), b4a.from(snap.member, 'hex'))
+    return ok ? { ok: true } : { ok: false, reason: 'bad-signature' }
+  } catch {
+    return { ok: false, reason: 'malformed' }
+  }
+}
+
 module.exports = {
   PREFIX,
   PREFIX_V2,
+  PREFIX_V3,
+  PREFIX_DM,
+  PREFIX_DM_V2,
   REASONS,
   REASON_LABELS,
   TEXT_MAX,
@@ -174,5 +288,8 @@ module.exports = {
   isGroupReport,
   reportPayload,
   signReport,
-  verifyReport
+  verifyReport,
+  dmReportPayload,
+  signDmReport,
+  verifyDmReport
 }

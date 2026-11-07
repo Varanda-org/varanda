@@ -1,10 +1,11 @@
-// The Avisos tab's building blocks: lines for a follow, a reply, a quote and
-// a mention, seen ids (the node's opaque `seen` tokens, never follower keys),
-// page merging, the notice shown in place of the list and the fixed texts.
+// The Avisos tab's building blocks: lines for a follow, a reply, a quote, a
+// mention, a like and a repost, a one-line snippet of the post, seen ids
+// (the node's opaque `seen` tokens, never follower keys), page merging, the
+// notice shown in place of the list and the fixed texts.
 // Pure: no imports and no globals, so Node tests load it directly.
 
 export const EMPTY_TITLE = 'Ninguém novo por aqui'
-export const EMPTY_TEXT = 'Quando alguém começar a seguir você, responder, citar ou mencionar você, aparece aqui.'
+export const EMPTY_TEXT = 'Quando alguém começar a seguir você, responder, citar, mencionar você, curtir ou republicar uma publicação sua, aparece aqui.'
 export const NOTICES_WEB_ONLY_MESSAGE = 'Nesta versão, os Avisos só funcionam na versão web no site da associação.'
 export const NOTICES_OFFLINE_MESSAGE = 'Confira sua internet.'
 export const NOTICES_UNSUPPORTED_MESSAGE = 'Os Avisos ainda não estão disponíveis nesta associação.'
@@ -14,6 +15,9 @@ export const NOTICES_INCOMPLETE_TEXT = 'Alguns avisos ainda podem chegar.'
 export const SEEN_STORAGE_KEY = 'varanda-notices-seen'
 // Five minutes between polls while the tab is on screen.
 export const NOTICES_POLL_MS = 300000
+// Quiet time before the hidden first read: after the boot reads and after
+// Espiadinha's warm read, so short seeder sockets rarely overlap.
+export const NOTICES_FIRST_READ_QUIET_MS = 4000
 export const SEEN_MAX = 2048
 // Pages read on their own after a short one with a cursor, per user action.
 export const NOTICES_AUTO_PAGES = 4
@@ -23,31 +27,87 @@ const UNNAMED_TITLE = 'sem nome'
 
 const WEB_ONLY_MESSAGES = ['método desconhecido', 'avisos disponíveis só no navegador']
 
-// A row from an older node has no kind. Anything else is not one of the four
+// A row from an older node has no kind. Anything else is not one of the six
 // notices this tab shows, so it reads as a follow too.
 export function noticeKind (item) {
   const kind = item && item.kind
-  if (kind === 'follow' || kind === 'reply' || kind === 'quote' || kind === 'mention') return kind
+  if (kind === 'follow' || kind === 'reply' || kind === 'quote' || kind === 'mention' || kind === 'like' || kind === 'repost') return kind
   return 'follow'
 }
 
-// "Bia começou a seguir você" (respondeu, citou, mencionou for the other
-// kinds), or "Alguém" when the title is "sem nome" or not a non-empty
-// string. The title is the only text used. kind defaults to follow.
-export function noticeLine (who, kind = 'follow') {
+// The bold name and the regular rest of a notice line. name + rest is always
+// noticeLine(who, kind). "Alguém" when the title is "sem nome" or not a
+// non-empty string. The title is the only text used. kind defaults to follow,
+// and any other kind reads as a follow too.
+export function noticeParts (who, kind = 'follow') {
   const title = who.title
   const name = typeof title !== 'string' || title.length === 0 || title === UNNAMED_TITLE ? 'Alguém' : title
-  if (kind === 'reply') return name + ' respondeu à sua publicação'
-  if (kind === 'quote') return name + ' citou sua publicação'
-  if (kind === 'mention') return name + ' mencionou você'
-  return name + ' começou a seguir você'
+  if (kind === 'reply') return { name, rest: ' respondeu à sua publicação' }
+  if (kind === 'quote') return { name, rest: ' citou sua publicação' }
+  if (kind === 'mention') return { name, rest: ' mencionou você' }
+  if (kind === 'like') return { name, rest: ' curtiu sua publicação' }
+  if (kind === 'repost') return { name, rest: ' republicou sua publicação' }
+  return { name, rest: ' começou a seguir você' }
+}
+
+// "Bia começou a seguir você" (respondeu, citou, mencionou, curtiu,
+// republicou for the other kinds).
+export function noticeLine (who, kind = 'follow') {
+  const { name, rest } = noticeParts(who, kind)
+  return name + rest
+}
+
+// The avatar glyph for a known kind. Unknown is null, so the row draws no
+// badge. mention is 'at-sign', a Feather name: Icon uses it when the name is
+// not in its own table.
+export function noticeIcon (kind) {
+  if (kind === 'follow') return 'seguir'
+  if (kind === 'reply') return 'resposta'
+  if (kind === 'quote') return 'citar'
+  if (kind === 'mention') return 'at-sign'
+  if (kind === 'like') return 'coracao'
+  if (kind === 'repost') return 'republicar'
+  return null
+}
+
+// Mirrors isRef in nav.js (this file has no imports): lowercase hex64 and a
+// canonical seq that is a safe integer. A like or repost that fails this
+// must not open a conversa.
+const POST_REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
+
+function callerPost (post) {
+  if (typeof post !== 'string') return null
+  const m = POST_REF.exec(post)
+  if (!m) return null
+  const seq = Number(m[2])
+  if (!Number.isSafeInteger(seq) || String(seq) !== m[2]) return null
+  return post
 }
 
 // A follow opens no post. A reply, quote or mention points at the signed
-// block, in the '<key>:<seq>' form a conversa screen uses (nav.js).
+// block, in the '<key>:<seq>' form a conversa screen uses (nav.js). A like
+// or repost points at `post`, the caller's own post: this row's key:seq is
+// the other person's like or repost block, so it is never the ref.
 export function noticeRef (item) {
-  if (noticeKind(item) === 'follow') return null
-  return item.key + ':' + item.seq
+  const kind = noticeKind(item)
+  if (kind === 'reply' || kind === 'quote' || kind === 'mention') return item.key + ':' + item.seq
+  if (kind === 'like' || kind === 'repost') return callerPost(item.post)
+  return null
+}
+
+// A follow opens no post, so there is nothing to quote. The screen still
+// runs displayText: a break would show as U+FFFD on that one line, and the
+// cut is in code points so a preview never splits a character. Nothing is
+// appended. An unknown kind reads as a follow and quotes nothing either.
+const SNIPPET_MAX = 90
+
+export function snippetOf (notice, postText) {
+  if (noticeKind(notice) === 'follow') return ''
+  if (typeof postText !== 'string') return ''
+  const flat = postText.replace(/[\r\n\u2028\u2029]+/g, ' ')
+  const chars = Array.from(flat)
+  if (chars.length <= SNIPPET_MAX) return flat
+  return chars.slice(0, SNIPPET_MAX).join('')
 }
 
 // Newest first by Date.parse(at): string order breaks for negative-year ISO
@@ -90,6 +150,23 @@ export function hasNew (items, seenIds) {
     if (id !== null && !seen.has(id)) return true
   }
   return false
+}
+
+// Loaded rows are newest first. Only their tokens can be distinguished
+// from the random padding, so only these may leave local storage.
+export function seenOnScreen (items, storedIds, max = 256) {
+  const stored = new Set(storedIds)
+  const ids = new Set()
+  for (const item of items) {
+    const id = seenOf(item)
+    if (id !== null && stored.has(id)) ids.add(id)
+  }
+  return [...ids].slice(0, max)
+}
+
+// The badge also needs remote tokens whose rows have not been loaded yet.
+export function seenUnion (storedIds, remoteIds) {
+  return [...new Set([...storedIds, ...remoteIds].filter(isHex32))]
 }
 
 // 32 lowercase hex from 16 bytes of randomBytes(n) => Uint8Array, injected
@@ -196,6 +273,31 @@ export function markSeenPadded (stored, items, randomBytes, size = SEEN_MAX) {
   return { ids, changed: true }
 }
 
+export function mergeRemoteSeen (stored, remoteIds, loadedItems, randomBytes) {
+  const remote = new Set(remoteIds)
+  const local = new Set(stored)
+  // Keep locally seen rows protected too; unloaded remote tokens stay in
+  // the node's canonical document until their rows arrive.
+  const items = loadedItems.filter((row) => {
+    const id = seenOf(row)
+    return id !== null && (remote.has(id) || local.has(id))
+  })
+  return markSeenPadded(stored, items, randomBytes)
+}
+
+// A fold of another device's marks protects the rows on screen and the
+// latest polled page, and settles only the latest list: marked with the tab
+// open when it is the one on screen, dot only when a hidden poll read it.
+// Both lists belong to the current namespace (the screen drops them when it
+// changes), so `null` means there is nothing of this namespace to settle.
+export function remoteFoldPlan (shown, last) {
+  const onScreen = Array.isArray(shown) ? shown : []
+  const latest = last && Array.isArray(last.list) ? last.list : null
+  const rows = latest === null || latest === shown ? onScreen : onScreen.concat(latest)
+  if (latest === null) return { rows, settle: null }
+  return { rows, settle: { list: latest, shown: last.shown === true } }
+}
+
 // The ids from { v: 3, own, ids } when own is this key and ids holds 0 to
 // SEEN_MAX entries, each 32 lowercase hex. Anything else, including a v1
 // entry (raw follower keys), a v2 entry (salted digests a reader of the
@@ -266,7 +368,7 @@ export function isLastNoticesPage (page) {
 // or says true: an older node has no activity field and only sends follows.
 // A page with supported false is returned as is.
 // request: (method, params) => Promise.
-export async function readNotices (request, { limit, after = null, maxContinuations = NOTICES_AUTO_PAGES, live = () => true }) {
+export async function readNotices (request, { limit, after = null, maxContinuations = NOTICES_AUTO_PAGES, live = () => true, onPage }) {
   let notices = []
   let cursor = after
   let incomplete = false
@@ -285,6 +387,7 @@ export async function readNotices (request, { limit, after = null, maxContinuati
     const stuck = nextPage !== null && cursor !== null &&
       nextPage.at === cursor.at && nextPage.key === cursor.key && nextPage.seq === cursor.seq
     const next = stuck ? null : nextPage
+    if (onPage) onPage({ notices, next, incomplete, activity })
     if (next === null || notices.length >= limit || reads >= maxContinuations || !live()) {
       return { notices, next, incomplete, supported: true, activity }
     }
@@ -292,12 +395,135 @@ export async function readNotices (request, { limit, after = null, maxContinuati
   }
 }
 
-// Following back clears that diary's follow notice. A reply, quote or
-// mention from the same key is about a post and stays in the list.
+// Following back clears that diary's follow notice. A reply, quote, mention,
+// like or repost from the same key is about a post and stays in the list.
 export function withoutAuthor (items, key) {
   return items.filter((item) => item.key !== key || noticeKind(item) !== 'follow')
 }
 
 export function isWebOnlyError (err) {
   return Boolean(err && err.code === 'USAGE' && WEB_ONLY_MESSAGES.includes(err.message))
+}
+
+// A page key is 64 hex, the same shape as a member key. Seen tokens for a
+// page live in the same stored document, but under `page:<key>`, which can
+// never equal `own`. Otherwise marking one list seen would mark the other,
+// including when the page key and the member key are the same hex.
+const KEY64 = /^[0-9a-f]{64}$/
+const PAGE_SEEN_PREFIX = 'page:'
+
+export const PAGE_EMPTY_TITLE = 'Nenhum aviso da página ainda'
+export const PAGE_EMPTY_TEXT = 'Quando alguém seguir a página, responder, citar ou mencionar o @nome dela, aparece aqui.'
+export const PAGE_NOTICES_UNAVAILABLE_TITLE = 'Avisos da página ainda não disponíveis'
+export const PAGE_SEEN_MAX = 8
+
+// The service has no notices route yet: it answers pedido-invalido or 404.
+export function isPageNoticesUnavailable (err) {
+  return Boolean(err && (err.code === 'pedido-invalido' || err.code === 'nao-encontrado'))
+}
+
+export const PAGE_NOTICES_READ_LINE = 'A associação lê estes avisos para a página'
+
+export function pageSeenNamespace (pageKey) {
+  if (typeof pageKey !== 'string') return null
+  const key = pageKey.toLowerCase()
+  if (!KEY64.test(key)) return null
+  return PAGE_SEEN_PREFIX + key
+}
+
+export function isPageSeenNamespace (namespace) {
+  if (typeof namespace !== 'string' || !namespace.startsWith(PAGE_SEEN_PREFIX)) return false
+  return KEY64.test(namespace.slice(PAGE_SEEN_PREFIX.length))
+}
+
+// One line for the list header. A raw key is not a name.
+export function pageNoticesHeader (name) {
+  const title = oneLineName(name)
+  const bare = title.startsWith('@') ? title.slice(1) : title
+  if (title === '' || KEY64.test(bare.toLowerCase())) return 'Avisos da página'
+  return 'Avisos da página ' + title
+}
+
+function oneLineName (name) {
+  if (typeof name !== 'string') return ''
+  let out = ''
+  for (const ch of name) {
+    const cp = ch.codePointAt(0)
+    out += cp < 32 || cp === 127 ? ' ' : ch
+  }
+  return out.replace(/ +/g, ' ').trim()
+}
+
+function validSeenIds (ids) {
+  if (!Array.isArray(ids) || ids.length > SEEN_MAX) return false
+  for (const id of ids) {
+    if (!isHex32(id)) return false
+  }
+  return true
+}
+
+// Page lists only. A bare member key in `pages` is ignored, so it cannot
+// be read back as a page namespace.
+function pageMap (parsed) {
+  const pages = parsed && parsed.pages
+  if (!pages || typeof pages !== 'object' || Array.isArray(pages)) return {}
+  const out = {}
+  for (const key of Object.keys(pages)) {
+    if (!isPageSeenNamespace(key) || !validSeenIds(pages[key])) continue
+    out[key] = pages[key]
+  }
+  return out
+}
+
+// Personal ids only when they would pass parseSeen. Anything else (a v1
+// list of follower keys, a v2 digest list) is dropped rather than copied
+// forward into the shared document.
+function personalIds (parsed) {
+  if (!parsed || parsed.v !== 3 || !validSeenIds(parsed.ids)) return []
+  return parsed.ids
+}
+
+// The id list for one namespace. A 64-hex namespace is the person
+// (parseSeen). A page namespace reads `pages` and never the person's ids.
+export function parseSeenNamespace (text, namespace) {
+  if (isPageSeenNamespace(namespace)) {
+    try {
+      const ids = pageMap(JSON.parse(text))[namespace]
+      return ids || []
+    } catch {
+      return []
+    }
+  }
+  return parseSeen(text, namespace)
+}
+
+// Writes one namespace and keeps the others. A page write never sets `own`
+// to the page namespace and never puts page tokens in `ids`.
+export function writeSeenNamespace (text, namespace, ids) {
+  let parsed = null
+  try { parsed = JSON.parse(text) } catch {}
+  let pages = pageMap(parsed)
+  if (isPageSeenNamespace(namespace)) {
+    // Re-inserting moves the key last, so the first keys are the least
+    // recently written.
+    delete pages[namespace]
+    pages[namespace] = ids
+    const keys = Object.keys(pages)
+    for (const key of keys.slice(0, Math.max(0, keys.length - PAGE_SEEN_MAX))) delete pages[key]
+    const own = parsed && typeof parsed.own === 'string' ? parsed.own : ''
+    return JSON.stringify({ v: 3, own, ids: personalIds(parsed), pages })
+  }
+  // Another identity: its page lists go with its personal list.
+  if (!parsed || parsed.own !== namespace) pages = {}
+  const body = { v: 3, own: namespace, ids }
+  if (Object.keys(pages).length > 0) body.pages = pages
+  return JSON.stringify(body)
+}
+
+export function hasPageSeenNamespaces (text) {
+  try {
+    return Object.keys(pageMap(JSON.parse(text))).length > 0
+  } catch {
+    return false
+  }
 }

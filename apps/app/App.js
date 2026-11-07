@@ -6,8 +6,9 @@
 // then the first connection, the onboarding (src/onboarding.js
 // decides the step: on the web's browser node 'Entrar' with the passkey, the
 // account link; natively identity and member certificate; then the own name)
-// and then five tabs (A Rua, Espiadinha, Seguindo, Avisos, Diário) with the top bar (an info button
-// that opens the screen's 'Como funciona' sheet), the
+// and then the tabs (src/tabs.js) with the top bar (an info button
+// that opens the screen's 'Como funciona' sheet and, on a hosted node, the
+// bell that opens Avisos, a screen kept outside the tab bar), the
 // 'Sem internet' note under it (only while offline), the 'Instalar o Varanda'
 // note under it too (hosted web, phones and iPad; below 'Sem internet' when
 // both show; its close is remembered for 30 days), then the 'Receber avisos
@@ -25,57 +26,76 @@
 // Back: the browser Back button (src/history.web.js; an in-app back calls
 // history.back() so the history and the stack never drift), Escape on the
 // web, the Android Back button (BackHandler); an open sheet closes first.
-// A profile link (/@ana, /m/<key>; hosted web only, src/profileLink.js) is
-// captured at load: Entrar shows the invite, a passkey ceremony from that card
-// records consent, and once the tabs show the inviter is followed when that
-// consent was given in this page load; after a reload (the Google return) the
+// A profile link (/@ana, /m/<key>; a hosted node, src/profileLink.js) is
+// captured at load on the site and through Linking in the app: Entrar shows
+// the invite, a passkey ceremony from that card records consent, and once the
+// tabs show the inviter is followed when that consent was given in this page
+// load; after a reload (the Google return) the
 // profile opens for one tap on Seguir, and a visitor already signed in only
 // gets the profile opened.
 // A notification click (hosted web, src/pushClient.web.js) arrives as
 // /?aviso=... at load or as a worker message: held in memory only, it opens
-// Avisos (a follow) or Conversa (a reply, like or repost) once the tabs show
-// for the key it names; nothing is written, followed or retried.
+// Avisos (a follow) or Conversa (a reply, like or repost) for the key it
+// names, or Convidar pessoas (a convite, which names nobody) once the tabs
+// show; nothing is written, followed or retried.
+// A group or community link (/g/<key>, /c/<key>) is announced on Entrar and
+// opens the screen once the tabs show; it is never consent to join.
 // A splash holds a short minimum while the app loads and, on the web, covers
 // the node's connection; the intro cards (src/intro.js) follow once per device,
 // before the Termos.
-// The age gate (hosted web only, src/age.js) holds every member, linked or
+// The age gate (a hosted node, on the site or in the app on an installation;
+// src/age.js) holds every member, linked or
 // not, at 'Confirme sua idade' until the account service answers
-// 'verificado'; it fails closed while the policy or the result is unknown,
-// and nothing about it is stored on the device.
+// 'verificado'; it fails closed while the policy or the result is unknown.
+// A pass is proved by what the node reports from two issuer-signed
+// attestations it checks on every read (the member's age-verified
+// attestation, or the member certificate dated on or after the signed
+// since); the device keeps only refusals (src/ageMemory.js, never the band).
+// The service is still asked in the background and its answer wins.
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
-import { BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, useNode } from './src/node'
 import { hostedPage } from './src/configStore'
+import { pagesOn, setCoreReach } from './src/pageGate'
+import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin } from './src/installation'
 import { NamesProvider, useNames } from './src/names'
-import { agePolicy as readAgePolicy, ageResult, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, termsFinish, termsStart } from './src/account'
-import { ageBlocking, ageErrorText, ageGate, parseReturnAge } from './src/age'
+import { agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
+import { NOTICES_POLL_MS } from './src/notices'
+import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotBefore } from './src/seenSync'
+import { ageBlocking, ageErrorText, ageGate, ageReadAllowed, parseReturnAge } from './src/age'
+import { ageAnswerOutcome, ageStateShown, nodeVouches } from './src/ageMemory.js'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
-import { captureCommunityLink, captureGroupLink } from './src/groupLink'
-import { tabsFor } from './src/tabs'
+import { captureEntryLink, dropEntryLink } from './src/groupLinkStore'
+import { ENTRY_LINK_LABELS, ENTRY_OPEN_TEXT, entryCardText, entryPath } from './src/groupLink'
+import { showPostButton, tabsFor } from './src/tabs'
 import { captureSignupInvite, dropSignupInvite, loadSignupInvite } from './src/signupInviteStore'
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { LEGAL_VERSION } from './src/legal'
 import { shouldSyncTerms, termsDecision, termsSyncAttempted, termsSyncStep } from './src/terms'
 import { useTerms } from './src/useTerms'
+import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
-import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, coverConnecting, holdSplash } from './src/splashGate'
-import { Btn, ErrorText, Soft, Spinner, colors, errorText } from './src/ui'
+import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, holdBootCover, holdSplash } from './src/splashGate'
+import { Btn, ErrorText, Soft, Spinner, errorText } from './src/ui'
+import { ThemeProvider, useStyles, useTheme } from './src/ui/ThemeProvider'
 import { Fab } from './src/ui/Fab'
 import { Splash } from './src/ui/Splash'
 import { OfflineNote } from './src/ui/OfflineNote'
 import { InstallNote } from './src/ui/InstallNote'
 import { InstallCard } from './src/ui/InstallCard'
 import { PushNote } from './src/ui/PushNote'
+import { InviteDropNote } from './src/ui/InviteDropNote'
+import { useInviteDrop } from './src/useInviteDrop'
 import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
 import { readPush, usePush } from './src/usePush'
@@ -85,13 +105,24 @@ import { nextLaunch } from './src/push-state'
 import { loadIcons } from './src/ui/Icon'
 import { TabBar } from './src/ui/TabBar'
 import { TopBar } from './src/ui/TopBar'
+import { TopActions } from './src/ui/TopActions'
+import { StackLayer, stackBusy, useStackMotion } from './src/ui/StackLayer'
+import { stackEntries } from './src/stackEntries'
 import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
 import { HELP } from './src/help'
 import { layout, type } from './src/ui/theme'
+import { paletteFor, statusBarStyle } from './src/appearance.js'
+import { applyBandMeta } from './src/appearanceStore'
 import Avisos from './src/screens/Avisos'
-import { Cadeira } from './src/screens/Cadeira'
-import { Cadeiras } from './src/screens/Cadeiras'
+import BuscaGlobal from './src/screens/BuscaGlobal'
+import { Grupo } from './src/screens/Grupo'
+import { Conversas } from './src/screens/Conversas'
+import { Mensagens } from './src/screens/Mensagens'
+import { Comunidades } from './src/screens/Comunidades'
+import { Mensagem } from './src/screens/Mensagem'
+import { onDmOpen, onDmWake, requestDmOpen } from './src/dm-open'
 import { Comunidade } from './src/screens/Comunidade'
+import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
 import ARua from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
@@ -103,19 +134,30 @@ import Espiadinha from './src/screens/Espiadinha'
 import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
-import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppReturn } from './src/linkReturn'
+import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, linkReturnTaker, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro from './src/screens/Membro'
 import Perfil from './src/screens/Perfil'
+import Pessoas from './src/screens/Pessoas'
+import Paginas from './src/screens/Paginas'
+import NovaPagina from './src/screens/NovaPagina'
+import PaginaAjustes from './src/screens/PaginaAjustes'
+import * as actingAs from './src/actingAs'
 import Publicar from './src/screens/Publicar'
 import Seguindo from './src/screens/Seguindo'
 import Termos from './src/screens/Termos'
+import { clearChatMedia, onAppStateChange, stopPlayback } from './src/media/chatMedia'
+import { sweepVoiceCache } from './src/media/audio'
 
 // Inlined by Expo at build time; set only for the iOS worklet gate
 // (docs/ios-gate.md).
 const GATE_URL = process.env.EXPO_PUBLIC_VARANDA_GATE_URL
 
 const TOAST_MS = 2500
-const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', seguindo: 'Seguindo', avisos: 'Avisos', cadeiras: 'Comunidades' }
+const TOAST_ACTION_MS = 4000
+// The native splash stays cream in both schemes (Splash.js), and so does what
+// wraps it: the side insets around it would otherwise show the dark bg.
+const SPLASH_WRAP = Platform.OS === 'web' ? null : { backgroundColor: paletteFor('light').bg }
+const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', comunidades: 'Conversas', busca: 'Busca', avisos: 'Avisos' }
 // 'Um instante' offers 'Continuar mesmo assim' after this long.
 const SLOW_LOOKUP_MS = 10000
 // While the own profile is still unknown, it is asked again this often (the
@@ -128,6 +170,8 @@ const TERMS_REARM_MAX = 5
 // A failed age policy read is tried again after 5 s, 15 s, then every 60 s
 // (and when the connection comes back); the member stays blocked meanwhile.
 const agePolicyDelay = (n) => (n === 0 ? 5000 : n === 1 ? 15000 : 60000)
+// The node.info read for the certificate proof on the age step, same idea.
+const ageInfoDelay = (n) => (n === 0 ? 2000 : n === 1 ? 5000 : n === 2 ? 15000 : 30000)
 const AGE_REDIRECT_TEXT = 'Vamos abrir a verificação e, na volta, pedir sua passkey de novo.'
 
 // The steps the setup branch (Identidade, Idade) renders; the others belong
@@ -176,19 +220,16 @@ const CAPTURED_INVITE = captureInvite()
 // Tab storage refused the write (private mode, sandboxed frame): the invite
 // then lives only in this page's memory, which still opens the profile now.
 const INVITE_IN_MEMORY = CAPTURED_INVITE !== null && loadInvite() === null
-// A group link (/g/<hex>) is read and cleaned the same way, once, before any
-// render; it only lives in memory and opens the group on the hosted web.
-const CAPTURED_GROUP = hostedPage === true && Platform.OS === 'web'
-  ? captureGroupLink({ location: globalThis.location, history: globalThis.history })
-  : null
-// A community link (/c/<hex>) works the same way and opens the community.
-const CAPTURED_COMMUNITY = hostedPage === true && Platform.OS === 'web'
-  ? captureCommunityLink({ location: globalThis.location, history: globalThis.history })
-  : null
+// A group or community link (/g/<hex>, /c/<hex>) is read and cleaned the
+// same way, once, before any render. On the hosted page it is kept in tab
+// storage for 1 h so it survives the Google step's reload, and it is dropped
+// once opened. The native app has no page load: its links come through Linking.
+const CAPTURED_ENTRY = captureEntryLink()
 // The native app reads Linking's initial URL once per process: it stays the
 // same for the whole run, and Member may mount again.
 let initialUrlTaken = false
 const NATIVE_APP = Platform.OS !== 'web'
+setCoreReach(CROSS_ORIGIN_PAGES)
 const NO_VERSIONS = Object.freeze({})
 // Lookup retries for a profile link while the account service does not
 // answer (offline, 429, 5xx, timeout): 15 s, 30 s, then every 60 s, 10 times.
@@ -207,6 +248,8 @@ function setupComplete (info) {
 }
 
 function Member () {
+  const styles = useStyles(makeStyles)
+  const { scheme, colors } = useTheme()
   const node = useNode()
   const names = useNames()
   const insets = useSafeAreaInsets()
@@ -216,6 +259,20 @@ function Member () {
   const bootAt = useRef(Date.now()).current
   const connectingAt = useRef(null)
   const released = useRef(false)
+  // Latched once the first real screen (A Rua, Entrar, Idade with its answer,
+  // Vinculo, Perfil) has shown in this page load, or once the patience ran
+  // out, like released and reachedTabs: a later lock, unlock, generation
+  // change or cleared cache never brings the splash back. released stays
+  // apart: it only ends the connect cover, and a slow native connection
+  // (Conexão after 10 s) still needs the cover over the age read afterwards.
+  const bootCoverAt = useRef(null)
+  const bootStepRef = useRef(null)
+  const bootSettled = useRef(false)
+  // A Rua's first page and the names and counts of its first rows: the
+  // splash covers 'pronto' until both are in (at most CONTENT_PATIENCE_MS).
+  const [feedBoot, setFeedBoot] = useState({ page: false, details: false })
+  const onFeedBoot = useCallback((stage) => setFeedBoot((b) => (b[stage] ? b : { ...b, [stage]: true })), [])
+  const barRef = useRef(0)
   const [, bumpSplash] = useState(0)
   // A timer can fire a few ms before Date.now() reaches the threshold; the
   // slack makes the re-render see it passed, since nothing re-arms the timer.
@@ -237,8 +294,16 @@ function Member () {
   useEffect(() => { if (ready) setSeen(true) }, [ready])
 
   const [tab, setTab] = useState('rua')
+  const tabRef = useRef(tab)
+  tabRef.current = tab
+  // Avisos is reached from the bell, not the tab bar: its back returns here.
+  const [returnTab, setReturnTab] = useState('rua')
+  const returnTabRef = useRef(returnTab)
+  returnTabRef.current = returnTab
   // Per tab, bumped when its tab is selected again: the screen scrolls to top.
   const [scrollSignal, setScrollSignal] = useState({})
+  // Bumped to make Busca show its Contas pane.
+  const [buscaPane, setBuscaPane] = useState(0)
   // reply and quote are mutually exclusive.
   const [composer, setComposer] = useState({ open: false, reply: null, quote: null })
   // The screens pushed above the tabs (src/nav.js), oldest first.
@@ -266,14 +331,14 @@ function Member () {
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
   }, [])
-  // Avisos has something unseen: a plain dot on its tab, never a number.
+  // Avisos has something unseen: a plain dot on the bell, never a number.
   const [avisosNew, setAvisosNew] = useState(false)
   const [info, setInfo] = useState(null)
   const [infoError, setInfoError] = useState('')
   // Latched once node.info confirmed the identity and the certificate: a
   // later failed or slow read never hides the tabs again.
   const [setupDone, setSetupDone] = useState(false)
-  const [toast, setToast] = useState('')
+  const [toast, setToast] = useState(null)
   const toastTimer = useRef(null)
   // The pending profile invite (src/profileLink.js): the record in tab
   // storage, re-read before every step that acts on it.
@@ -355,6 +420,24 @@ function Member () {
   // A lock, unlock or reset discards the report sheet (and with it any
   // signature still held in its memory).
   useEffect(() => setReport(null), [generation, locked])
+  // Sair, Recomeçar and a lock move one of these: every chat photo URL and
+  // node plaintext file of the old session is released, a playing voice note
+  // stops (the chat screen may stay mounted) and a leftover recording file
+  // is swept.
+  useEffect(() => {
+    stopPlayback()
+    clearChatMedia()
+    sweepVoiceCache()
+  }, [generation, locked])
+  const canClearReads = node != null && node.media != null && typeof node.media.clearReadFiles === 'function'
+  useEffect(() => {
+    if (!canClearReads) return
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'background') stopPlayback()
+      onAppStateChange(state, { canClear: true })
+    })
+    return () => sub.remove()
+  }, [canClearReads])
   // A lock ends this account's session in the tab: nothing it opened or
   // quoted (the composer's reply or quote, an open Ajustes screen) reaches the
   // next account.
@@ -415,21 +498,39 @@ function Member () {
   const recovering = passkey !== null && passkey.recovering === true
   const onceSync = !!(node.sync.active && node.sync.active.once) || node.sync.starting === true
 
-  // --- the age gate (src/age.js; hosted web only) ---
+  // --- the age gate (src/age.js; a hosted node) ---
   // The policy is read once the node is ready; a failed read (null) keeps
   // everyone blocked and is tried again with a backoff and when the
   // connection comes back.
-  const [agePolicy, setAgePolicy] = useState(undefined)
+  // The setup footer can switch installation, and each installation has its
+  // own policy: one read on another installation counts as not read here
+  // (undefined), so the gate stays closed until this installation answers.
+  // On the hosted website installationOrigin() is null and the page is the
+  // installation.
+  const ageOrigin = installationOrigin() || globalThis.location?.origin || ''
+  const [agePolicyEntry, setAgePolicyEntry] = useState(null)
+  const agePolicy = agePolicyEntry !== null && agePolicyEntry.origin === ageOrigin ? agePolicyEntry.policy : undefined
   const [agePolicyTick, setAgePolicyTick] = useState(0)
   const agePolicyTries = useRef(0)
+  const agePolicyTriesOrigin = useRef(ageOrigin)
   const agePolicyKnown = agePolicy !== undefined && agePolicy !== null
   useEffect(() => {
+    // A new installation starts its own backoff.
+    if (agePolicyTriesOrigin.current !== ageOrigin) {
+      agePolicyTriesOrigin.current = ageOrigin
+      agePolicyTries.current = 0
+    }
     if (!ageHosted || !ready || agePolicyKnown) return
+    // The answer is labelled with the installation it was asked of. Should the
+    // installation have changed since this render, the next render runs this
+    // again with the new origin, so nothing is asked under a stale label.
+    const origin = ageOrigin
+    if (origin !== (installationOrigin() || globalThis.location?.origin || '')) return
     let cancelled = false
     let timer = null
     readAgePolicy().then((p) => {
       if (cancelled) return
-      setAgePolicy(p)
+      setAgePolicyEntry({ origin, policy: p })
       if (p !== null) return
       timer = setTimeout(() => setAgePolicyTick((n) => n + 1), agePolicyDelay(agePolicyTries.current))
       agePolicyTries.current += 1
@@ -438,7 +539,7 @@ function Member () {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [ageHosted, ready, agePolicyKnown, agePolicyTick])
+  }, [ageHosted, ready, agePolicyKnown, agePolicyTick, ageOrigin])
   const agePolicyOnlineRef = useRef(node.online)
   useEffect(() => {
     const was = agePolicyOnlineRef.current
@@ -447,10 +548,46 @@ function Member () {
     setAgePolicyTick((n) => n + 1)
   }, [node.online, agePolicyKnown])
 
+  // Owner decision 2026-11-04: the check is remembered per account,
+  // independent of the device, so a member who passed it opens A Rua after
+  // the splash instead of waiting on the service. Two proofs, never the band,
+  // both signed by the account service's issuer and checked by the node on
+  // every read: the member's age-verified attestation (node.info
+  // ageVerifiedDate), and the member certificate dated on or after the
+  // installation's signed since and no later than its signing date
+  // (ageSince <= memberCertDate <= ageSinceUntil; the service issues no
+  // certificate to a key without a recorded band). Nothing the
+  // device stores can open the gate: it keeps only refusals. The service is
+  // still asked in the background, and its answer wins.
+  const ageMemory = useAgeMemory()
+  // node.info as read for this member only: it is cleared on every lock,
+  // unlock and reset, and a read from an older generation is dropped.
+  const ageInfo = info !== null && member !== null && info.publicKey === member ? info : null
+  // Only once the refusals are loaded (a denial on record must not flash the
+  // gate open), and a refusal on record or in this run wins over both proofs,
+  // offline too (openNow).
+  const ageRemembered = member !== null && ageMemory.loaded &&
+    ageMemory.open(member, ageOrigin, nodeVouches({ ageVerifiedDate: ageInfo?.ageVerifiedDate, memberCertDate: ageInfo?.memberCertDate, ageSince: ageInfo?.ageSince, ageSinceUntil: ageInfo?.ageSinceUntil }))
+  // node.info after the node stored a proof. Not while a recovery or once
+  // sync runs (node.info may open the store and preempt it): held, and read
+  // when that run is over.
+  const ageInfoFreeRef = useRef(false)
+  ageInfoFreeRef.current = !recovering && !onceSync
+  const ageInfoHeld = useRef(false)
+  const ageInfoAfterProof = () => {
+    if (ageInfoFreeRef.current) return readInfo()
+    ageInfoHeld.current = true
+  }
+  useEffect(() => {
+    if (recovering || onceSync || !ageInfoHeld.current) return
+    ageInfoHeld.current = false
+    readInfo()
+  }, [recovering, onceSync, readInfo])
+
   // The member's result, asked of the account service (never taken from the
-  // URL or from storage): once per generation and member, and again on
-  // 'Conferir de novo'. Not while the recovery after an unlock or a once sync
-  // runs: age.sign is a member request and would preempt that run.
+  // URL or from storage): once per generation, member and installation, and
+  // again on 'Conferir de novo'. It runs even when the gate is already open
+  // from memory, so a later refusal closes it again.
   const [ageState, setAgeState] = useState(undefined)
   const [ageBusy, setAgeBusy] = useState(false)
   const [ageError, setAgeError] = useState('')
@@ -460,6 +597,12 @@ function Member () {
   // answer that arrives under another number is dropped.
   const ageSeq = useRef(0)
   const ageRan = useRef(null)
+  // The key of the last background read that finished (see ageReadPending).
+  const [ageReadDone, setAgeReadDone] = useState(null)
+  // The key the screen is waiting on now, set on every render.
+  const ageReadKeyRef = useRef(null)
+  const ageOriginRef = useRef(ageOrigin)
+  ageOriginRef.current = ageOrigin
   useEffect(() => {
     ageSeq.current += 1
     ageRan.current = null
@@ -467,22 +610,53 @@ function Member () {
     setAgeBusy(false)
     setAgeError('')
     setAgeNote('')
-  }, [generation, locked])
+  }, [generation, locked, ageOrigin])
   // termsOk: reading the result records the band and closes the partner's
   // session, which must not happen before the current terms are accepted.
   // Only once the service said the check is required: an unknown policy keeps
   // the member blocked (ageGate) and is retried, without calling the age routes.
-  const ageReadNow = ageHosted && ready && termsOk && !locked && member !== null && !recovering && !onceSync &&
-    agePolicyKnown && agePolicy.required === true
+  // Not held back by the recovery after an unlock or a once sync: once the own
+  // key is known age.sign signs in memory and never opens the store
+  // (packages/web-member/lib/session.js), and the rest is HTTP, so a new
+  // device without a certificate can have its answer ready when 'recuperando'
+  // ends.
+  const ageReadNow = ageReadAllowed({
+    hosted: ageHosted,
+    ready,
+    termsOk,
+    locked,
+    member,
+    policyKnown: agePolicyKnown,
+    policyRequired: agePolicyKnown ? agePolicy.required : undefined
+  })
+  // The only writer of the refusals and the only sender of an age-verified
+  // attestation: an answer of the service, for the member and installation
+  // the request started with. The URL return, app links and peers never
+  // reach it. A failed store changes nothing: the live answer already opened
+  // this run, and the node verifies whatever it is handed.
+  const answerAge = (state, who, origin, proof) => {
+    setAgeState(state)
+    const outcome = ageAnswerOutcome(state)
+    if (outcome === 'deny') ageMemory.deny(who, origin)
+    else if (outcome === 'clear') {
+      ageMemory.clearDenial(who, origin)
+      if (proof !== null && typeof proof === 'object') {
+        node.request('age.proof', { verified: proof }).then(ageInfoAfterProof).catch(() => {})
+      }
+    }
+  }
   const ageRequest = (work) => {
     const seq = ++ageSeq.current
     const gen = generationRef.current
     const who = memberRef.current
-    const stale = () => seq !== ageSeq.current || gen !== generationRef.current || who !== memberRef.current
+    const origin = ageOriginRef.current
+    // An answer that started under another installation is dropped too.
+    const stale = () => seq !== ageSeq.current || gen !== generationRef.current || who !== memberRef.current ||
+      origin !== ageOriginRef.current
     setAgeBusy(true)
     setAgeError('')
     setAgeNote('')
-    work(stale).catch((err) => {
+    work(stale, who, origin).catch((err) => {
       if (stale()) return
       // The app drops a refused code so the paste field shows again; the web
       // keeps its stored code as it always did.
@@ -523,32 +697,48 @@ function Member () {
   }
   useEffect(() => {
     if (!ageReadNow) return
-    const key = generation + '#' + member + '#' + ageCheckTick
+    const key = generation + '#' + member + '#' + ageOrigin + '#' + ageCheckTick
     if (ageRan.current === key) return
     ageRan.current = key
-    ageRequest(async (stale) => {
-      const { nonce } = await ageStart({ member })
-      if (stale()) return
-      const { signature } = await node.request('age.sign', { action: 'result', nonce })
-      if (stale()) return
-      const { state } = await ageResult({ member, nonce, signature })
-      if (!stale()) setAgeState(state)
+    ageRequest(async (stale, who, origin) => {
+      try {
+        const { nonce } = await ageStart({ member })
+        if (stale()) return
+        const { signature } = await node.request('age.sign', { action: 'result', nonce })
+        if (stale()) return
+        const { state, proof } = await ageResult({ member, nonce, signature })
+        if (!stale()) answerAge(state, who, origin, proof)
+      } finally {
+        // Only the current key: an older read that ends after a newer one
+        // must not overwrite its mark and leave "Conferindo" with nothing in
+        // flight. Not held back by stale(), which a later start would make
+        // true for good.
+        if (key === ageReadKeyRef.current) setAgeReadDone(key)
+      }
     })
-  }, [ageReadNow, generation, member, ageCheckTick])
+  }, [ageReadNow, generation, member, ageOrigin, ageCheckTick])
+  // True only while the background read for the current key has not finished:
+  // with the error cleared and no verdict (an invite pasted, the browser left
+  // without a return) the screen must not stay on "Conferindo" with nothing
+  // in flight. An unknown policy counts as pending: its read is retried with a
+  // backoff, and the age routes cannot be used before it answers.
+  const ageReadKey = generation + '#' + member + '#' + ageOrigin + '#' + ageCheckTick
+  ageReadKeyRef.current = ageReadKey
+  const ageReadPending = (ageReadNow && ageReadDone !== ageReadKey) || (ageHosted && !agePolicyKnown)
   const checkAge = () => setAgeCheckTick((n) => n + 1)
   // A new verification session: the service answers 'verificado' when the
   // band is already recorded, otherwise the provider's page, opened as a full
   // page navigation (it comes back with ?idade=volta).
   const startAge = () => {
     if (member === null || ageBusy) return
-    ageRequest(async (stale) => {
+    ageRequest(async (stale, who, origin) => {
       const { nonce } = await ageStart({ member })
       if (stale()) return
       const { signature } = await node.request('age.sign', { action: 'session', nonce })
       if (stale()) return
       const r = await ageSession({ member, nonce, signature, invite: loadSignupInvite()?.code })
       if (stale()) return
-      if (r.state === 'verificado') return setAgeState('verificado')
+      if (r.state === 'verificado') return answerAge('verificado', who, origin, r.proof)
       if (typeof r.url !== 'string' || !r.url.startsWith('https://')) throw new Error('serviço indisponível')
       // The app opens the provider in the system browser, which comes back
       // through varanda://idade?volta=1 (the Linking effect below).
@@ -561,8 +751,114 @@ function Member () {
       globalThis.location.assign(r.url)
     })
   }
-  const ageNeeded = ageGate({ hosted: ageHosted, policy: agePolicy, state: ageState })
+  const ageShown = ageStateShown({ answered: ageState, remembered: ageRemembered })
+  const ageNeeded = ageGate({ hosted: ageHosted, policy: agePolicy, state: ageShown })
   const ageClear = !ageBlocking(ageNeeded)
+  // On the hosted setup only Identidade reads node.info, and the age step
+  // replaces it: node.info is read here so the node's proofs can open the
+  // gate. Held back like Identidade while a recovery or once sync runs
+  // (node.info may open the store and preempt it).
+  const ageInfoNow = ageHosted && ready && !locked && member !== null && !recovering && !onceSync &&
+    !ageClear && info === null
+  // A failed read is tried again after 2 s, 5 s, 15 s, then every 30 s while
+  // the step still needs it (a read, so the retry is allowed), and at once
+  // when the connection comes back.
+  const [ageInfoTick, setAgeInfoTick] = useState(0)
+  const ageInfoTries = useRef(0)
+  useEffect(() => { ageInfoTries.current = 0 }, [generation])
+  useEffect(() => {
+    if (!ageInfoNow) return
+    let cancelled = false
+    let timer = null
+    readInfo().then(() => {
+      if (cancelled) return
+      timer = setTimeout(() => setAgeInfoTick((n) => n + 1), ageInfoDelay(ageInfoTries.current))
+      ageInfoTries.current += 1
+    })
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [ageInfoNow, generation, readInfo, ageInfoTick])
+  const ageInfoOnlineRef = useRef(node.online)
+  useEffect(() => {
+    const was = ageInfoOnlineRef.current
+    ageInfoOnlineRef.current = node.online
+    if (was !== false || node.online !== true || !ageInfoNow) return
+    setAgeInfoTick((n) => n + 1)
+  }, [node.online, ageInfoNow])
+  // A sync run that ended may have brought the member certificate (a new
+  // device): while the step still has neither proof from the node, read
+  // node.info again (as Identidade does for the setup). A run that ended
+  // during a recovery or once sync is read when that ends: the recovery may be
+  // what brought the certificate, and nothing else would re-run this. The
+  // deps re-run it mid-recovery too: return then, so node.info never preempts
+  // the store (ageInfoHeld stays for when the run ends).
+  const ageNoProofRef = useRef(false)
+  ageNoProofRef.current = ageHosted && !ageClear && !locked && !recovering && !onceSync && ageInfo !== null &&
+    ageInfo.memberCertDate == null && ageInfo.ageVerifiedDate == null
+  const ageStopped = node.sync.stopped
+  useEffect(() => {
+    if (ageStopped === null || ageStopped === undefined) return
+    if (recovering || onceSync) return
+    if (!ageNoProofRef.current && !ageInfoHeld.current) return
+    ageInfoHeld.current = false
+    readInfo()
+  }, [ageStopped, readInfo, recovering, onceSync])
+
+  // The installation's signed since, handed to the node, which verifies it
+  // and keeps it (age.proof): the app never compares against a since of its
+  // own. Asked once per installation and generation (a reset clears the
+  // node's copy); a failed read (undefined) or store is tried again after
+  // 5 s, 15 s, then every 60 s, and at once when the connection comes back.
+  // Only the latest request is applied. A live null clears a stale stored
+  // since. Not held back by a recovery or once sync: age.proof is a kv write;
+  // only while neither the own key nor the diary info is known yet does it
+  // resolve the key as age.sign does, which may read the store once.
+  const ageSinceNow = ageHosted && ready && !locked && member !== null && ageOrigin !== ''
+  const ageSinceSeq = useRef(0)
+  const ageSinceDone = useRef(null)
+  const ageSinceTries = useRef(0)
+  const [ageSinceTick, setAgeSinceTick] = useState(0)
+  useEffect(() => {
+    if (!ageSinceNow) return
+    const origin = ageOrigin
+    if (origin !== (installationOrigin() || globalThis.location?.origin || '')) return
+    const key = generation + '#' + origin
+    if (ageSinceDone.current === key) return
+    const seq = ++ageSinceSeq.current
+    const latest = () => seq === ageSinceSeq.current && generation === generationRef.current &&
+      origin === ageOriginRef.current
+    let cancelled = false
+    let timer = null
+    const retry = () => {
+      if (cancelled || !latest()) return
+      timer = setTimeout(() => setAgeSinceTick((n) => n + 1), agePolicyDelay(ageSinceTries.current))
+      ageSinceTries.current += 1
+    }
+    readAgeSince().then((since) => {
+      if (cancelled || !latest()) return
+      if (since === undefined) return retry()
+      return node.request('age.proof', { since }).then(() => {
+        if (!latest()) return
+        ageSinceDone.current = key
+        ageSinceTries.current = 0
+        return ageInfoAfterProof()
+      }, retry)
+    }).catch(() => {})
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [ageSinceNow, generation, ageOrigin, ageSinceTick, node.request])
+  const ageSinceOnlineRef = useRef(node.online)
+  useEffect(() => {
+    const was = ageSinceOnlineRef.current
+    ageSinceOnlineRef.current = node.online
+    if (was !== false || node.online !== true || !ageSinceNow) return
+    if (ageSinceDone.current === generation + '#' + ageOrigin) return
+    setAgeSinceTick((n) => n + 1)
+  }, [node.online, ageSinceNow, generation, ageOrigin])
 
   // The gates: `confirmed` can latch setupDone for a member already linked,
   // so setupDone alone never opens the tabs, autosync, the outbox, the terms
@@ -716,27 +1012,30 @@ function Member () {
     setAutoSync(ready && !locked && setupDone && !recovering && termsOk && ageClear)
   }, [ready, locked, setupDone, recovering, termsOk, ageClear, setAutoSync])
 
-  // Back from the Google step with a certificate already held: the tabs show
-  // after the unlock, so open Ajustes → Conta once, where the account card offers
-  // 'confirmar vínculo'. While the setup step shows, its embedded Identidade
-  // handles the return.
+  // Back from the Google step, the return is decided by linkReturnTaker next to
+  // the signup signal below (it needs step and certMissing, computed there).
+  // The setup's LinkCard also drops it when it lands the certificate (onLinked),
+  // since during the recovery the shell may not have seen info without one.
   const linkReturnRef = useRef(LINK_RETURN)
+  const dropLinkReturn = useCallback(() => { linkReturnRef.current = false }, [])
   // Native has no ?conta= load: an auth session's result lands in the
   // Identidade card that opened it, which is still mounted (the native
   // install card is always 'none', so the signup offer needs no signal).
   const linkReturned = LINK_RETURN
-  useEffect(() => {
-    if (!termsOk || setupStep || !linkReturnRef.current) return
-    linkReturnRef.current = false
-    setAjustes('conta')
-  }, [setupStep, termsOk])
 
   // Native: the URLs the app is opened with (Linking's initial URL and its
   // 'url' events), all untrusted. varanda://idade feeds the same path as the
   // web's ?idade= load, and the outcome is always asked of the service again;
   // invite and profile links go to their stores. varanda://conta is not a
   // return (the Google step comes back only through the auth session). A
-  // link is never consent to follow.
+  // link is never consent to follow or to join.
+  // A state, not a ref: a group or community link that arrives while the tabs
+  // already show must run the effect that opens it. It carries the
+  // installation it arrived on: a key never opens on another installation.
+  const [pendingLink, setPendingLink] = useState(() => CAPTURED_ENTRY !== null
+    ? { kind: CAPTURED_ENTRY.kind, key: CAPTURED_ENTRY.key, origin: ageOrigin }
+    : null)
+  const heldUrlRef = useRef(null)
   const appUrlRef = useRef(null)
   appUrlRef.current = (url) => {
     if (typeof url !== 'string') return
@@ -746,7 +1045,8 @@ function Member () {
       checkAge()
       return
     }
-    if (captureSignupInvite(url) !== null) {
+    const signup = captureSignupInvite(url)
+    if (signup !== null) {
       setAgeInviteRefused(false)
       setAgeInviteTick((n) => n + 1)
     }
@@ -762,7 +1062,27 @@ function Member () {
       setAcceptedHere(false)
       setInviteTick((n) => n + 1)
     }
+    const link = parseAppLink(url)
+    if (link !== null && (link.kind === 'grupo' || link.kind === 'comunidade')) {
+      setPendingLink({ kind: link.kind, key: link.key, origin: ageOrigin })
+      return
+    }
+    if (signup === null && rec === null && link === null && waitsForInstallation(url)) {
+      heldUrlRef.current = url
+    }
   }
+  // A cold start from an App Link can arrive before the installation loads,
+  // when no https link can be told apart from another host's. Once one is
+  // known the held URL is parsed again: the replay also reaches the profile
+  // and convite captures, and a URL of another host is dropped (parseAppLink
+  // returns null then). It cannot be held twice: waitsForInstallation is
+  // false once an installation is known.
+  useEffect(() => {
+    if (ageOrigin === '' || heldUrlRef.current === null) return
+    const url = heldUrlRef.current
+    heldUrlRef.current = null
+    try { appUrlRef.current(url) } catch {}
+  }, [ageOrigin])
   useEffect(() => {
     if (Platform.OS === 'web') return
     const take = (url) => { try { appUrlRef.current(url) } catch {} }
@@ -834,11 +1154,20 @@ function Member () {
   // also covers an existing member linking Google from Ajustes > Conta, so the
   // signup signal is 'vinculo' with a node.info that has been read and holds no
   // certificate: while info is still null the step machine shows 'vinculo' for
-  // that member too. Dismissing also quiets the top-bar note for 30 days. The
-  // Ajustes > Conta sheet the linkReturnRef effect may open on this load can
-  // cover the card for a moment.
+  // that member too. Dismissing also quiets the top-bar note for 30 days.
   const signupRef = useRef(false)
   const certMissing = info !== null && info.memberCert !== true
+  // A newcomer's return is finished by the setup's LinkCard, so it is dropped
+  // on the commit the signup signal fires, before setupStep turns false, and
+  // the tabs come up on A Rua with no sheet. Only a member who already held a
+  // certificate (linking from Ajustes > Conta) gets that sheet, once, after
+  // the unlock.
+  useEffect(() => {
+    const taker = linkReturnTaker({ held: linkReturnRef.current, termsOk, setupStep, step, certMissing })
+    if (taker === 'none' || taker === 'wait') return
+    linkReturnRef.current = false
+    if (taker === 'conta') setAjustes('conta')
+  }, [termsOk, setupStep, step, certMissing])
   useEffect(() => { if (linkReturned && step === 'vinculo' && certMissing) signupRef.current = true }, [linkReturned, step, certMissing])
   const [installCardOpen, setInstallCardOpen] = useState(false)
   useEffect(() => {
@@ -868,10 +1197,15 @@ function Member () {
 
   useEffect(() => () => clearTimeout(toastTimer.current), [])
 
-  const showToast = (text) => {
+  // A string, or { text, actionLabel, onAction }. A new toast replaces the
+  // previous one together with its action.
+  const showToast = (input) => {
     clearTimeout(toastTimer.current)
-    setToast(text)
-    toastTimer.current = setTimeout(() => setToast(''), TOAST_MS)
+    const t = typeof input === 'string' ? { text: input } : input
+    if (!t || !t.text) return setToast(null)
+    const withAction = typeof t.onAction === 'function' && t.actionLabel
+    setToast(withAction ? t : { text: t.text })
+    toastTimer.current = setTimeout(() => setToast(null), withAction ? TOAST_ACTION_MS : TOAST_MS)
   }
 
   // The outbox (browser node) is sent only while a publish could go out
@@ -917,6 +1251,7 @@ function Member () {
 
   // --- the screen stack ---
   const historyRef = useRef(null)
+  const stackMotion = useStackMotion(stack)
   const commitStack = useCallback((next) => {
     stackRef.current = next
     setStack(next)
@@ -982,6 +1317,7 @@ function Member () {
   // the popstate handler pops and both stay in step; otherwise directly.
   const goBack = useCallback(() => {
     if (nav.depth(stackRef.current) === 0) return
+    if (stackBusy()) return
     const h = historyInStep()
     if (h) h.back()
     else commitStack(nav.pop(stackRef.current))
@@ -1003,11 +1339,18 @@ function Member () {
     pushScreen({ screen: 'curtidas', key: ref, params: { kind: kind === 'reposts' ? 'reposts' : 'likes' } })
   }, [pushScreen])
   const openGroup = useCallback((group) => {
-    pushScreen({ screen: 'cadeira', key: typeof group === 'string' ? group.toLowerCase() : group, params: {} })
+    pushScreen({ screen: 'grupo', key: typeof group === 'string' ? group.toLowerCase() : group, params: {} })
   }, [pushScreen])
-  const openCommunity = useCallback((community) => {
-    pushScreen({ screen: 'comunidade', key: typeof community === 'string' ? community.toLowerCase() : community, params: {} })
+  const openCommunity = useCallback((community, opts) => {
+    pushScreen({ screen: 'comunidade', key: typeof community === 'string' ? community.toLowerCase() : community, params: opts && typeof opts.group === 'string' ? { group: opts.group.toLowerCase() } : {} })
   }, [pushScreen])
+  const openCommunityInfo = useCallback((community) => {
+    pushScreen({ screen: 'comunidade-info', key: typeof community === 'string' ? community.toLowerCase() : community, params: {} })
+  }, [pushScreen])
+  // group.seen emits no event: Grupo reports the mark so the community list
+  // under it re-reads its unread counts.
+  const [seenTick, setSeenTick] = useState(0)
+  const bumpSeen = useCallback(() => setSeenTick((n) => n + 1), [])
   const openMember = useCallback((author, seed) => {
     const key = typeof author === 'string' ? author.toLowerCase() : author
     if (typeof ownKey === 'string' && key === ownKey.toLowerCase()) {
@@ -1017,8 +1360,29 @@ function Member () {
     }
     pushScreen({ screen: 'membro', key, params: { seed: seed || null } })
   }, [pushScreen, clearStack, ownKey])
+  const openPeople = useCallback((key, kind) => {
+    if ((kind !== 'seguindo' && kind !== 'seguidores') || typeof key !== 'string') return
+    pushScreen({ screen: kind, key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
+  const enterAvisos = useCallback(() => {
+    if (tabRef.current !== 'avisos') setReturnTab(tabRef.current)
+    setTab('avisos')
+  }, [])
+  // Back from Avisos lands on the tab it was opened from, or A Rua when that
+  // tab is not in this mode's bar.
+  const closeAvisos = useCallback(() => {
+    const back = returnTabRef.current
+    setTab(tabsFor(mode).some((t) => t.id === back) ? back : 'rua')
+  }, [mode])
   // A lock, unlock or reset closes the pushed screens too.
   useEffect(() => clearStack(), [generation, locked, clearStack])
+  // The seed of a page answer: Membro tells a page from a person with it.
+  const pageSeed = (found) => {
+    const seed = { page: true }
+    if (found.closed === true) seed.closed = true
+    if (typeof found.movedTo === 'string') seed.movedTo = found.movedTo
+    return seed
+  }
   // A tap on @nome in a post. The row author's own verified name opens with
   // no request; any other name goes through the account lookup (current
   // holder only). No seed: Membro re-verifies and a seed would flash.
@@ -1036,10 +1400,11 @@ function Member () {
       return
     }
     const gen = generationRef.current
-    const r = await resolveInvite({ username }, lookupUsername)
+    let found = null
+    const r = await resolveInvite({ username }, async (name) => { found = await lookupUsername(name); return found })
     // A newer tap, a lock or an identity change meanwhile drops this answer.
     if (tap !== mentionSeq.current || gen !== generationRef.current || lockedRef.current) return
-    if (r.status === 'ready') openMember(r.key)
+    if (r.status === 'ready') openMember(r.key, found && found.kind === 'page' ? pageSeed(found) : undefined)
     else showToast(r.status === 'not-found' ? NOT_FOUND_TEXT : 'Não foi possível abrir o @nome agora.')
   }, [openMember, node.online])
   const mentionHandler = node.hosted === true ? openMention : undefined
@@ -1056,23 +1421,30 @@ function Member () {
   const stackDepth = nav.depth(stack)
   useEffect(() => { closeHelp() }, [stackDepth, sheetOpen])
 
-  // --- Comunidades (hosted web only) ---
+  // --- Comunidades (a hosted node: the site or the app on an installation) ---
   // Versions restart at 0 with every epoch, so what was seen is kept with its
   // epoch and compared with !==. The dot shows when a group the node follows
   // moved since the Comunidades tab (or that group) was last on screen.
   const nodeEpoch = node.epoch
+  // A lock, a sign-out or another identity ends Publicar como. A socket
+  // reconnect also bumps the epoch, but the same unlocked identity keeps
+  // acting as its page (and the page screens keep their drafts).
+  const actingIdentity = locked ? 'locked' : (typeof ownKey === 'string' ? ownKey : 'none')
+  useEffect(() => { actingAs.reset() }, [actingIdentity])
   const [groupSeen, setGroupSeen] = useState({ epoch: nodeEpoch, map: {} })
   const seenMap = groupSeen.epoch === nodeEpoch ? groupSeen.map : {}
   const topEntry = nav.top(stack)
-  const groupsOnScreen = mode === 'hosted' && ready && (tab === 'cadeiras' || (topEntry !== null && topEntry.screen === 'cadeira'))
+  // The Conversas tab lists the groups beside the private conversations.
+  const groupsTab = tab === 'comunidades'
+  const groupsOnScreen = mode === 'hosted' && ready && (groupsTab || (topEntry !== null && topEntry.screen === 'grupo'))
   const groupVersions = node.groupVersions || NO_VERSIONS
   useEffect(() => {
-    const open = topEntry !== null && topEntry.screen === 'cadeira' ? topEntry.key : null
+    const open = topEntry !== null && topEntry.screen === 'grupo' ? topEntry.key : null
     setGroupSeen((cur) => {
       const base = cur.epoch === nodeEpoch ? cur.map : {}
       let map = base
       if (groupsOnScreen) {
-        const all = tab === 'cadeiras' && topEntry === null
+        const all = groupsTab && topEntry === null
         for (const g of Object.keys(groupVersions)) {
           if ((all || g === open) && base[g] !== groupVersions[g]) {
             if (map === base) map = { ...base }
@@ -1082,34 +1454,251 @@ function Member () {
       }
       return map === base && cur.epoch === nodeEpoch ? cur : { epoch: nodeEpoch, map }
     })
-  }, [nodeEpoch, groupsOnScreen, tab, topEntry, groupVersions])
+  }, [nodeEpoch, groupsOnScreen, groupsTab, topEntry, groupVersions])
   const groupsBadge = mode === 'hosted' && !groupsOnScreen &&
     Object.keys(groupVersions).some((g) => groupVersions[g] !== (seenMap[g] || 0))
+
+  // --- Conversas: the tab dot, the foreground pull and the push opener ---
+  // dm.changed is only a hint: the dot is re-read from dm.list after every
+  // dm.pull attempt (node.bumpDm), on dm.changed and when a pushed screen
+  // closes. inboxUnread and requests cover every page (docs/rpc.md 5.77).
+  const [dmOpenCount, setDmOpenCount] = useState(0)
+  const [dmDot, setDmDot] = useState(false)
+  const dmReady = mode === 'hosted' && ready && !locked
+  const dmRequest = node.request
+  const bumpDm = node.bumpDm
+  const dmDotGen = useRef(0)
+  const readDmDot = useCallback(async () => {
+    const gen = ++dmDotGen.current
+    try {
+      const r = await dmRequest('dm.list', { folder: 'inbox', limit: 1 })
+      if (gen !== dmDotGen.current) return
+      setDmDot(r.inboxUnread === true || r.requests === true)
+    } catch {}
+  }, [dmRequest])
+  useEffect(() => {
+    if (dmReady) readDmDot()
+    else {
+      dmDotGen.current++
+      setDmDot(false)
+    }
+  }, [dmReady, readDmDot, node.dmVersion, stackDepth])
+  // --- Visto em todos os aparelhos (src/seenSync.js) ---
+  // The same passkey on another device marked notices, conversations or
+  // groups as seen: a pass reads the encrypted seen document from the account
+  // service, merges it in the browser node and writes back newer local marks.
+  // Local dots paint first; a pass only clears them afterwards. Hosted only
+  // and behind the same terms gate as the push opt-in: nothing runs on a
+  // manual configuration, varanda-serve or the core node.
+  const seenMember = mode === 'hosted' && ready && !locked && termsOk && pkStatus !== null && typeof pkStatus.publicKey === 'string'
+    ? pkStatus.publicKey.toLowerCase()
+    : null
+  const seenMemberRef = useRef(seenMember)
+  seenMemberRef.current = seenMember
+  const seenOnlineRef = useRef(node.online)
+  seenOnlineRef.current = node.online
+  const seenRequestRef = useRef(node.request)
+  seenRequestRef.current = node.request
+  const groupVersionsRef = useRef(groupVersions)
+  groupVersionsRef.current = groupVersions
+  const nodeEpochRef = useRef(nodeEpoch)
+  nodeEpochRef.current = nodeEpoch
+  // Filled by Avisos: the seen tokens of rows it has loaded, per namespace.
+  const avisosSeenRef = useRef({ own: [], pages: {} })
+  const [remoteSeen, setRemoteSeen] = useState(null)
+  const seenSchedulerRef = useRef(null)
+  // The node's avisos from the last merge answer: rows it already holds are
+  // not sent again and wake nothing.
+  const avisosMergedRef = useRef(null)
+  // Tokens a merge already received this session: never offered again.
+  const avisosDeliveredRef = useRef(new Set())
+  const onAvisosSeen = useCallback((namespace, tokens) => {
+    if (typeof namespace !== 'string' || !Array.isArray(tokens)) return
+    const { pending, fresh } = reportAvisosSeen(avisosSeenRef.current, avisosMergedRef.current, namespace, tokens, ownKey, avisosDeliveredRef.current)
+    avisosSeenRef.current = pending
+    // A row seen here for the first time is a local mark: the pass runs
+    // within the debounce, not only at the next poll.
+    if (fresh && seenSchedulerRef.current) seenSchedulerRef.current.wake('changed')
+  }, [ownKey])
+  useEffect(() => {
+    avisosSeenRef.current = { own: [], pages: {} }
+    avisosMergedRef.current = null
+    avisosDeliveredRef.current = new Set()
+    setRemoteSeen(null)
+  }, [seenMember])
+  useEffect(() => {
+    if (seenMember === null) return
+    const member = seenMember
+    const run = async () => {
+      // caughtUp describes the groups as the merge saw them: only the
+      // versions known when the first merge went out are acknowledged, so a
+      // post that arrives after it keeps its dot. Versions restart per node
+      // epoch, so the epoch is taken with them.
+      const { request, snap } = snapshotBefore(seenRequestRef.current, 'seen.merge', () => ({
+        versions: groupVersionsRef.current,
+        epoch: nodeEpochRef.current
+      }))
+      const sent = cleanAvisos(avisosSeenRef.current)
+      const result = await runSeenPass({
+        member,
+        request,
+        http: { seenStart, seenFinish },
+        avisos: sent
+      })
+      if (seenMemberRef.current !== member) return
+      if (result.avisos) {
+        // The first merge stored what was sent in the node's document.
+        avisosSeenRef.current = dropSent(avisosSeenRef.current, sent)
+        rememberSent(avisosDeliveredRef.current, sent)
+        avisosMergedRef.current = result.avisos
+        setRemoteSeen(result.avisos)
+      }
+      if (result.dmChanged) bumpDm()
+      if (result.groupChanged) {
+        bumpSeen()
+        const taken = snap.value
+        setGroupSeen((cur) => ackCaughtUp(cur, result.caughtUp, taken))
+      }
+    }
+    const scheduler = createSeenScheduler({
+      run,
+      canRun: () => seenMemberRef.current === member && seenOnlineRef.current !== false,
+      now: () => Date.now(),
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (t) => clearTimeout(t)
+    })
+    seenSchedulerRef.current = scheduler
+    return () => {
+      scheduler.stop()
+      if (seenSchedulerRef.current === scheduler) seenSchedulerRef.current = null
+    }
+  }, [seenMember, bumpDm, bumpSeen])
+  const seenGeneration = passkey !== null ? passkey.generation : 0
+  useEffect(() => {
+    if (seenMember !== null && seenSchedulerRef.current) seenSchedulerRef.current.wake('unlock')
+  }, [seenMember, seenGeneration])
+  // The connection came back: marks made offline go out once the minimum
+  // interval allows.
+  const seenWasOnlineRef = useRef(node.online)
+  useEffect(() => {
+    const was = seenWasOnlineRef.current
+    seenWasOnlineRef.current = node.online
+    if (was === false && node.online !== false && seenSchedulerRef.current) seenSchedulerRef.current.wake('online')
+  }, [node.online])
+  const seenVisibleRef = useRef(node.visible)
+  useEffect(() => {
+    const was = seenVisibleRef.current
+    seenVisibleRef.current = node.visible
+    if (!was && node.visible && seenSchedulerRef.current) seenSchedulerRef.current.wake('visible')
+  }, [node.visible])
+  useEffect(() => {
+    if (seenMember === null || !node.visible) return
+    const t = setInterval(() => {
+      if (seenSchedulerRef.current) seenSchedulerRef.current.wake('poll')
+    }, NOTICES_POLL_MS)
+    return () => clearInterval(t)
+  }, [seenMember, node.visible])
+  const seenVersionRef = useRef(node.seenVersion)
+  useEffect(() => {
+    if (seenVersionRef.current === node.seenVersion) return
+    seenVersionRef.current = node.seenVersion
+    if (seenSchedulerRef.current) seenSchedulerRef.current.wake('changed')
+  }, [node.seenVersion])
+
+  // Anyone may write to anyone (owner decision 2026-11-03), so every hosted
+  // member publishes its message key once per unlocked session, without first
+  // opening Conversas; dm.enable appends nothing when the key is already
+  // there. One call, never repeated on failure: the next session tries again.
+  const dmEnabled = useRef(false)
+  useEffect(() => {
+    if (!dmReady) {
+      dmEnabled.current = false
+      return
+    }
+    if (dmEnabled.current) return
+    dmEnabled.current = true
+    dmRequest('dm.enable', {}).catch(() => {})
+  }, [dmReady, dmRequest])
+  const dmWasVisible = useRef(true)
+  useEffect(() => {
+    const visibleNow = node.visible !== false
+    if (dmReady && visibleNow && !dmWasVisible.current) {
+      dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
+    }
+    dmWasVisible.current = visibleNow
+  }, [dmReady, node.visible, dmRequest, bumpDm])
+  // A window that was already visible gets no visibility change, so the
+  // pull the wake is for runs here too.
+  useEffect(() => onDmOpen(() => {
+    clearStack()
+    setConvCompose(false)
+    setTab('comunidades')
+    setDmOpenCount((n) => n + 1)
+    if (dmReady) dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
+  }), [clearStack, dmReady, dmRequest, bumpDm])
+  // The worker shows no notice while this window is focused, so a wake that
+  // arrives while locked is kept and pulled once the identity unlocks.
+  const dmWakePending = useRef(false)
+  useEffect(() => onDmWake(() => {
+    if (!dmReady) {
+      dmWakePending.current = true
+      return
+    }
+    dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
+  }), [dmReady, dmRequest, bumpDm])
+  useEffect(() => {
+    if (!dmReady || !dmWakePending.current) return
+    dmWakePending.current = false
+    dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
+  }, [dmReady, dmRequest, bumpDm])
+  const openMessage = useCallback((peer) => {
+    pushScreen({ screen: 'mensagem', key: typeof peer === 'string' ? peer.toLowerCase() : peer, params: {} })
+  }, [pushScreen])
+  const openCommunities = useCallback(() => {
+    pushScreen({ screen: 'comunidades' })
+  }, [pushScreen])
+  const openRequests = useCallback(() => {
+    pushScreen({ screen: 'pedidos' })
+  }, [pushScreen])
+  // The Conversas top bar: the "+" opens the NovaConversa sheet (the search
+  // field lives in the list). A lock, unlock or reset closes it.
+  const [convCompose, setConvCompose] = useState(false)
+  useEffect(() => {
+    setConvCompose(false)
+  }, [generation, locked])
 
   // --- the profile invite (src/profileLink.js) ---
   // The tabs are on screen and nothing hides them, so the follow toast (it
   // renders only in the tabs branch) and Membro are seen. !sheetOpen: on a
-  // ?conta= load the shell opens Ajustes → Conta once setupStep turns false
-  // (for a newcomer, right after the account link), and that sheet would
-  // cover both. The once-sync clauses mirror the outbox gate above: a member
-  // request now would preempt the recovery run.
+  // ?conta= load the shell opens Ajustes → Conta only for a member who already
+  // held a certificate (never for a newcomer: the setup takes that return),
+  // and that sheet would cover both. The once-sync clauses mirror the outbox
+  // gate above: a member request now would preempt the recovery run.
   const atTabs = ready && setupDone && !setupStep && step === 'pronto' && !recovering && !sheetOpen && !helpOpen &&
     nav.isAuthorKey(ownKey) && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true
-  // A /g/<hex> link opens its group once the tabs are on screen.
-  const pendingGroup = useRef(CAPTURED_GROUP)
+  // A group or community link opens once the tabs are on screen and the node
+  // is hosted (only a hosted node has Comunidades). It waits through a
+  // reconnect, when the native node is briefly not hosted (on the hosted web
+  // it is also in tab storage, src/groupLinkStore). A switch
+  // to another installation drops it. On a cold start the link can arrive
+  // before the saved installation loads: it then belongs to the first one
+  // that does, and while no installation is known it waits.
   useEffect(() => {
-    if (pendingGroup.current === null || mode !== 'hosted' || !atTabs) return
-    const key = pendingGroup.current
-    pendingGroup.current = null
-    pushScreen({ screen: 'cadeira', key, params: {} })
-  }, [mode, atTabs, pushScreen])
-  const pendingCommunity = useRef(CAPTURED_COMMUNITY)
-  useEffect(() => {
-    if (pendingCommunity.current === null || mode !== 'hosted' || !atTabs) return
-    const key = pendingCommunity.current
-    pendingCommunity.current = null
-    pushScreen({ screen: 'comunidade', key, params: {} })
-  }, [mode, atTabs, pushScreen])
+    if (pendingLink === null || ageOrigin === '') return
+    if (pendingLink.origin === '') {
+      setPendingLink({ ...pendingLink, origin: ageOrigin })
+      return
+    }
+    if (pendingLink.origin !== ageOrigin) {
+      dropEntryLink()
+      setPendingLink(null)
+      return
+    }
+    if (!atTabs || mode !== 'hosted') return
+    dropEntryLink()
+    pushScreen({ screen: pendingLink.kind === 'grupo' ? 'grupo' : 'comunidade', key: pendingLink.key, params: {} })
+    setPendingLink(null)
+  }, [pendingLink, mode, atTabs, pushScreen, ageOrigin])
   const action = inviteAction({
     invite,
     hosted: mode === 'hosted',
@@ -1135,9 +1724,21 @@ function Member () {
   const launchRef = useRef(CAPTURED_LAUNCH)
   const [launchSeq, setLaunchSeq] = useState(0)
   // The screen a click opens reloads even when it is already showing:
-  // Avisos through its refresh prop, the top Conversa by a remount.
+  // Avisos through its refresh prop, the top Conversa by a remount, and
+  // Convidar pessoas through inviteNudge.
   const [avisosReload, setAvisosReload] = useState(0)
   const [threadReload, setThreadReload] = useState({ ref: null, n: 0 })
+  const [inviteNudge, setInviteNudge] = useState(0)
+  const inviteDrop = useInviteDrop({
+    enabled: node.hosted === true && node.visible !== false && ready && !locked && pkStatus?.unlocked === true,
+    member,
+    request: node.request
+  })
+  const handleInviteShown = inviteDrop.markSeen
+  const openInvites = useCallback(() => {
+    setAjustes('convites')
+    setInviteNudge((n) => n + 1)
+  }, [])
   useEffect(() => listenLaunch((intent) => {
     launchRef.current = nextLaunch({ held: launchRef.current, intent })
     setLaunchSeq((n) => n + 1)
@@ -1150,12 +1751,25 @@ function Member () {
   const launchKey = !locked && pkStatus ? pkStatus.publicKey : null
   useEffect(() => {
     const intent = launchRef.current
-    if (intent === null || !atTabs || typeof launchKey !== 'string') return
+    if (intent === null || typeof launchKey !== 'string') return
+    // Ajustes is a sheet, so atTabs is false while it is open: a convite must
+    // still refresh an open Convites now, or a lock before closing drops it.
+    if (!atTabs && !(intent.kind === 'convite' && ajustes !== null)) return
     launchRef.current = null
+    // A DM wake names nobody: Conversas opens for whoever is unlocked.
+    if (intent.kind === 'dm') {
+      requestDmOpen()
+      return
+    }
+    // A convite names nobody: Convidar pessoas opens for whoever is unlocked.
+    if (intent.kind === 'convite') {
+      openInvites()
+      return
+    }
     if (intent.recipient !== launchKey.toLowerCase()) return
     if (intent.kind === 'follow') {
       clearStack()
-      setTab('avisos')
+      enterAvisos()
       setAvisosReload((n) => n + 1)
     } else {
       const shownNow = nav.top(stackRef.current)
@@ -1165,7 +1779,7 @@ function Member () {
         openThread({ ref: intent.ref })
       }
     }
-  }, [launchSeq, atTabs, launchKey, clearStack, openThread])
+  }, [launchSeq, atTabs, ajustes, launchKey, clearStack, openThread, enterAvisos, openInvites])
   // The record is untrusted and may have changed in another render: every
   // step re-reads it (from tab storage, or memory when storage refused it).
   // The memory copy keeps the stored record's 1 h limit (readInvite applies
@@ -1303,7 +1917,13 @@ function Member () {
   useEffect(() => {
     if (Platform.OS === 'android') {
       const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-        if (helpOpenRef.current || sheetOpenRef.current || nav.depth(stackRef.current) === 0) return false
+        if (helpOpenRef.current || sheetOpenRef.current) return false
+        if (nav.depth(stackRef.current) === 0) {
+          if (tabRef.current !== 'avisos') return false
+          closeAvisos()
+          return true
+        }
+        if (stackBusy()) return true
         commitStack(nav.pop(stackRef.current))
         return true
       })
@@ -1311,20 +1931,28 @@ function Member () {
     }
     if (Platform.OS !== 'web' || typeof globalThis.addEventListener !== 'function') return
     const onKey = (event) => {
-      if (event.key !== 'Escape' || event.defaultPrevented || helpOpenRef.current || sheetOpenRef.current || nav.depth(stackRef.current) === 0) return
-      goBack()
+      if (event.key !== 'Escape' || event.defaultPrevented || helpOpenRef.current || sheetOpenRef.current) return
+      if (nav.depth(stackRef.current) > 0) goBack()
+      else if (tabRef.current === 'avisos') closeAvisos()
     }
     globalThis.addEventListener('keydown', onKey)
     return () => globalThis.removeEventListener('keydown', onKey)
-  }, [commitStack, goBack])
+  }, [commitStack, goBack, closeAvisos])
   const openComposer = () => setComposer((c) => ({ ...c, open: true }))
   const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
+  const openAvisos = () => {
+    if (tab === 'avisos') reselectTab('avisos')
+    else enterAvisos()
+  }
   // Side insets (landscape notch/cutout): the larger one on both sides, so
   // centred content stays centred when only one side has a cutout.
   const sidePad = Math.max(insets.left, insets.right)
   const sideEdges = { top: 'additive', bottom: 'additive', left: 'off', right: 'off' }
 
-  const splash = <Splash sidePad={sidePad} edges={sideEdges} />
+  // Only grows: a later step or reconnect never moves the bar back.
+  const bootBar = Math.max(barRef.current, bootProgress({ phase: node.phase, step, page: feedBoot.page, details: feedBoot.details }))
+  barRef.current = bootBar
+  const splash = <Splash edges={sideEdges} progress={bootBar} />
   // The intro cards come first, once per device (src/intro.js): presentation
   // only, so autosync, the outbox and the invite keep waiting for termsOk. A
   // Google return skips them for that page load without marking them seen.
@@ -1347,14 +1975,58 @@ function Member () {
     const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
     return () => clearTimeout(t)
   }, [coveringConnect, node.canConfigure])
-  if (decision === 'loading' || introState === 'loading') return splash
-  if (holdSplash({ phase: node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })) return splash
-  if (introState === 'show' && !LINK_RETURN && !AGE_RETURN) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
-  if (decision === 'needed' || decision === 'updated' || decision === 'account') {
+  const loadingGate = decision === 'loading' || introState === 'loading'
+  const holding = holdSplash({ phase: node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })
+  const showIntro = introState === 'show' && !LINK_RETURN && !AGE_RETURN
+  const showTerms = decision === 'needed' || decision === 'updated' || decision === 'account'
+  const connectingSplash = !ready && !seen && coverConnecting({ phase: node.phase, canConfigure: node.canConfigure, elapsedMs: connectingAt.current === null ? 0 : Date.now() - connectingAt.current, released: released.current })
+  const showConexao = !ready && !seen && !connectingSplash
+  const atShell = !loadingGate && !holding && !showIntro && !showTerms && !connectingSplash && !showConexao
+  // The boot patience is per step and counts only while the shell is what is
+  // on screen, like the connect patience: time on the intro, the terms or
+  // Conexão must not spend it. SLOW_LOOKUP_MS equals the patience, so
+  // 'carregando' needs this clock of its own to reach "Continuar mesmo assim".
+  // Render-time ref writes, as with released.current = true.
+  // Only A Rua as the first screen waits for its rows; a stacked screen (a
+  // link opened at boot) or another tab shows at once.
+  const feedReady = feedBoot.details || tab !== 'rua' || topEntry !== null
+  const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, infoKnown: info !== null || infoError !== '', profileSlow: slow, feedReady })
+  if (atShell && cover && !bootSettled.current && bootStepRef.current !== step) {
+    bootStepRef.current = step
+    bootCoverAt.current = Date.now()
+  }
+  const bootElapsed = atShell && bootCoverAt.current !== null ? Date.now() - bootCoverAt.current : 0
+  const coveringBoot = atShell && holdBootCover({ cover, elapsedMs: bootElapsed, settled: bootSettled.current, step })
+  useEffect(() => {
+    if (!coveringBoot) return
+    const remaining = Math.max(0, bootPatienceMs(step) - (Date.now() - bootCoverAt.current))
+    const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
+    return () => clearTimeout(t)
+  }, [coveringBoot, step])
+  // Light over the Diário band (dark over the offline note above it) and over
+  // Membro's band, which stays on top while offline (its note sits below the
+  // band and the stack layer covers the shell's). The sheets leave the status
+  // bar over the (dimmed) screen behind, so they keep it light there too.
+  const light = step === 'pronto' && (
+    (topEntry !== null && topEntry.screen === 'membro') ||
+    (topEntry === null && tab === 'diario' && node.online !== false)
+  )
+  // Only the final return shows the band; the gates below never do.
+  const bandShown = light && !loadingGate && !holding && !showIntro && !showTerms && (ready || seen)
+  // Runs after ThemeProvider's layout effect, so the band colour wins and a
+  // band that goes away gives back the current scheme's bg.
+  useEffect(() => { applyBandMeta(bandShown, colors.bg) }, [bandShown, colors.bg])
+  // The same root View with the Splash at child 0 is what React preserves
+  // across these returns and the final one, so the chair animation does not
+  // replay and, on the web, the Splash unmount that removes
+  // #varanda-pre-splash happens only when the real screen is ready.
+  if (loadingGate || holding) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
+  if (showIntro) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
+  if (showTerms) {
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
         <Termos gate reason={decision} version={LEGAL_VERSION} onAccept={() => terms.accept(member)} />
-        <StatusBar style='dark' />
+        <StatusBar style={statusBarStyle(scheme)} />
       </SafeAreaView>
     )
   }
@@ -1363,12 +2035,12 @@ function Member () {
     // The splash covers loading and connecting, also on the hosted page.
     // A failure or 10 s connecting on a configurable node reveals Conectar;
     // later retries stay there so its local state survives.
-    if (coverConnecting({ phase: node.phase, canConfigure: node.canConfigure, elapsedMs: connectingAt.current === null ? 0 : Date.now() - connectingAt.current, released: released.current })) return splash
+    if (connectingSplash) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
     released.current = true
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
         <Conexao />
-        <StatusBar style='dark' />
+        <StatusBar style={statusBarStyle(scheme)} />
       </SafeAreaView>
     )
   }
@@ -1397,12 +2069,13 @@ function Member () {
     // tabs never render before a successful node.info confirms both.
     let body
     if (step === 'idade') {
-      // Unknown and not failed yet counts as busy: an already verified member
-      // sees the spinner, not the start button, while the result is read.
+      // The first wait for the result stays under the splash (coverBoot); the
+      // busy spinner remains for a recheck, or for a patience reveal, on an
+      // Idade already on screen.
       body = (
         <Idade
-          state={ageState}
-          busy={ageBusy || (ageState === undefined && !ageError)}
+          state={ageShown}
+          busy={ageBusy || (ageShown === undefined && !ageError && ageReadPending)}
           error={ageError}
           note={ageNote}
           offline={node.online === false}
@@ -1424,7 +2097,19 @@ function Member () {
             onDismiss: forgetInvite
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} invite={inviteProp} />
+      // A group or community link waiting for the sign-in: announced only,
+      // never joined. A pending profile invite wins even while its card waits
+      // (passkey status unknown, ceremony running), so the two never flash.
+      const entryProp = invite === null && pendingLink !== null && (pendingLink.origin === '' || pendingLink.origin === ageOrigin)
+        ? {
+            text: entryCardText(pendingLink.kind),
+            openText: ENTRY_OPEN_TEXT,
+            labels: ENTRY_LINK_LABELS,
+            link: ageOrigin !== '' && entryPath(pendingLink) !== null ? ageOrigin + entryPath(pendingLink) : null,
+            onDismiss: () => { dropEntryLink(); setPendingLink(null) }
+          }
+        : null
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={dropLinkReturn} invite={inviteProp || entryProp} />
     } else if (infoError) {
       body = (
         <View style={styles.setupBody}>
@@ -1482,12 +2167,30 @@ function Member () {
       </View>
     )
   } else {
-    // The five tabs stay mounted (drafts and scroll survive a tab change);
+    // The tabs stay mounted (drafts and scroll survive a tab change);
     // `active` makes a screen reload its data when it is shown, and again
     // when the connection comes back.
     const on = (id) => tab === id && ready
     const shown = (id) => (tab === id ? styles.flex : styles.hidden)
     const stacked = nav.depth(stack) > 0
+    const tabActions = <TopActions key={tab} help={HELP[tab === 'comunidades' ? 'conversas' : tab]} onAvisos={mode === 'hosted' ? openAvisos : undefined} avisosNew={avisosNew} avisosActive={tab === 'avisos'} />
+    // Conversas puts its "+" before help and the bell (the WhatsApp header);
+    // its search is a field above the chips, not a header action.
+    const topRight = stacked
+      ? null
+      : tab === 'comunidades'
+        ? [
+            { icon: 'plus', label: 'nova conversa', onPress: () => setConvCompose(true) },
+            tabActions
+          ]
+        : tabActions
+    // The invite note sits above the other notes, so it takes the top inset on
+    // Diário and the note under it does not.
+    const inviteNoteShown = !!(inviteDrop.note && atTabs && ajustes !== 'convites' && !stacked)
+    // The Diário tab's avatar: from the profiles cache, like the composer's.
+    const tabMe = typeof ownKey === 'string'
+      ? { name: ownProfile ? (ownProfile.name || ownProfile.username || null) : null, publicKey: ownKey, picture: ownProfile ? ownProfile.avatar : undefined }
+      : null
     const screenProps = {
       ownKey,
       onBack: goBack,
@@ -1500,24 +2203,133 @@ function Member () {
       onOpenMention: mentionHandler,
       onToast: showToast,
       onFollowsChanged: followsChanged,
-      onDeletedPost: deletedPost
+      onMessage: openMessage,
+      onDeletedPost: deletedPost,
+      onOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
+      onOpenPeople: openPeople
+    }
+    // Pushed screens, plus the one sliding out after a pop under its old index
+    // (and key), so it stays mounted until StackLayer says it has left. Both
+    // go through one stackEntries list: a separate sibling would remount it.
+    const renderStackEntry = (entry, i) => {
+      if (entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') {
+        // Keyed by the node epoch: a lock, unlock or identity change
+        // remounts the screen, so late answers from before are dropped.
+        return (
+          <StackLayer key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            {entry.screen === 'grupo'
+              ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onSeen={bumpSeen} />
+              : entry.screen === 'comunidade-info'
+                ? <ComunidadeInfo community={entry.key} onBack={goBack} onOpenMember={openMember} />
+                : <Comunidade community={entry.key} afterGroup={entry.params.group || null} isTop={i === stack.length - 1} seenTick={seenTick} onBack={goBack} onOpenGroup={openGroup} onOpenInfo={openCommunityInfo} />}
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'comunidades') {
+        return (
+          <StackLayer key={i + ':comunidades:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Comunidades onBack={goBack} onOpenGroup={openGroup} onOpenCommunity={openCommunity} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'pedidos') {
+        return (
+          <StackLayer key={i + ':pedidos:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Mensagens onBack={goBack} onOpenThread={openMessage} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'mensagem') {
+        return (
+          <StackLayer key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Mensagem peer={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} />
+          </StackLayer>
+        )
+      }
+      // The own following list keeps unfollow and the legacy local
+      // follows card; every other list is the public read-only one.
+      if (entry.screen === 'seguindo' && entry.key === ownKey) {
+        return (
+          <StackLayer key={i + ':seguindo:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Seguindo
+              active={ready}
+              entry={entry}
+              ownKey={ownKey}
+              onBack={goBack}
+              onReport={setReport}
+              onFollowsChanged={followsChanged}
+              onOpenMember={openMember}
+              onToast={showToast}
+              followsTick={version}
+              isTop={i === stack.length - 1}
+            />
+          </StackLayer>
+        )
+      }
+      // No pagesOn guard: a reconnect clears accountOrigin until
+      // node.info answers, and a page screen must never fall through
+      // to Membro. Each renders its own 'Disponível em breve.'.
+      if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'paginaajustes') {
+        const top = i === stack.length - 1
+        return (
+          <StackLayer key={i + ':' + entry.screen + ':' + (entry.key || '') + ':' + actingIdentity} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            {entry.screen === 'paginas'
+              ? <Paginas active={top} onBack={goBack} onNewPage={() => pushScreen({ screen: 'novapagina' })} onOpenPage={(key, row) => openMember(key, { page: true, closed: !!(row && row.closed), movedTo: row && typeof row.movedTo === 'string' ? row.movedTo : null })} onChanged={followsChanged} />
+              : entry.screen === 'novapagina'
+                ? <NovaPagina onBack={goBack} onCreated={(pageKey) => openMember(pageKey, { page: true })} />
+                : <PaginaAjustes entry={entry} onBack={goBack} onChanged={followsChanged} onOpenMember={openMember} />}
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'seguindo' || entry.screen === 'seguidores') {
+        return (
+          <StackLayer key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Pessoas
+              entry={entry}
+              ownKey={ownKey}
+              isTop={i === stack.length - 1}
+              active={ready}
+              onBack={goBack}
+              onOpenMember={openMember}
+              onFollowsChanged={followsChanged}
+              onToast={showToast}
+            />
+          </StackLayer>
+        )
+      }
+      const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
+      return (
+        <StackLayer key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+          <Screen entry={entry} {...screenProps} />
+        </StackLayer>
+      )
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
         {tab !== 'diario'
-          ? <TopBar title={TAB_TITLES[tab]} right={stacked ? null : <HelpButton key={tab} doc={HELP[tab]} />} />
+          ? (
+            <TopBar
+              title={TAB_TITLES[tab]}
+              onBack={tab === 'avisos' && !stacked ? closeAvisos : undefined}
+              right={topRight}
+            />
+            )
           : null}
         <OfflineNote inset={tab === 'diario'} />
+        {inviteNoteShown
+          ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false} />
+          : null}
         {updateReady && !updateDismissed
-          ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false} />
+          ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
           : installCardOpen && install.card !== 'none'
-            ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
+            ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
             : install.note !== 'none'
-              ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false} />
-              : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false} /> : null}
+              ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
+              : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} /> : null}
         <View style={styles.flex}>
           <View style={shown('rua')}>
             <ARua
+              onBoot={onFeedBoot}
               onDeletedPost={deletedPost}
               active={on('rua')}
               refresh={version}
@@ -1532,7 +2344,10 @@ function Member () {
               ownKey={ownKey}
               scrollToTop={scrollSignal.rua}
               followCount={followCount}
-              onFollowSomeone={() => setTab('seguindo')}
+              onFollowSomeone={() => {
+                setTab('busca')
+                setBuscaPane((n) => n + 1)
+              }}
             />
           </View>
           <View style={shown('espiadinha')}>
@@ -1554,19 +2369,25 @@ function Member () {
               onToast={showToast}
             />
           </View>
-          <View style={shown('seguindo')}>
-            <Seguindo
-              active={on('seguindo')}
-              onReport={setReport}
-              onOpenThread={openThread}
-              onOpenMember={openMember}
-              onQuote={startQuote}
-              scrollToTop={scrollSignal.seguindo}
-              onFollowsChanged={followsChanged}
+          <View style={shown('busca')}>
+            <BuscaGlobal
+              active={on('busca')}
+              refresh={version}
+              paneRequest={buscaPane}
               ownKey={ownKey}
-              followsTick={version}
+              scrollToTop={scrollSignal.busca}
+              onOpenMember={openMember}
+              onFollowsChanged={followsChanged}
+              onToast={showToast}
+              onReply={startReply}
+              onReport={setReport}
+              onQuote={startQuote}
+              onOpenThread={openThread}
+              onOpenMention={mentionHandler}
+              onOpenEngagers={openEngagers}
             />
           </View>
+          {/* Not a tab: kept mounted so its poll lights the bell's dot. */}
           <View style={shown('avisos')}>
             <Avisos
               active={on('avisos')}
@@ -1578,12 +2399,26 @@ function Member () {
               onFollowsChanged={followsChanged}
               onToast={showToast}
               onBadge={setAvisosNew}
+              onSeenState={onAvisosSeen}
+              remoteSeen={remoteSeen}
             />
           </View>
           {mode === 'hosted'
             ? (
-              <View style={shown('cadeiras')}>
-                <Cadeiras key={'g' + nodeEpoch} onOpenGroup={openGroup} onOpenCommunity={openCommunity} />
+              <View style={shown('comunidades')}>
+                <Conversas
+                  key={'g' + nodeEpoch}
+                  active={on('comunidades') && !stacked}
+                  onOpenGroup={openGroup}
+                  onOpenCommunity={openCommunity}
+                  onOpenThread={openMessage}
+                  onOpenCommunities={openCommunities}
+                  onOpenRequests={openRequests}
+                  showInbox={dmOpenCount}
+                  seenTick={seenTick}
+                  composing={convCompose}
+                  onComposing={setConvCompose}
+                />
               </View>
               )
             : null}
@@ -1603,43 +2438,46 @@ function Member () {
               onQuote={startQuote}
               ownKey={ownKey}
               scrollToTop={scrollSignal.diario}
+              onAvisos={mode === 'hosted' ? openAvisos : undefined}
+              avisosNew={avisosNew}
+              onOpenPeople={openPeople}
             />
           </View>
         </View>
-        {stacked
+        {stacked || stackMotion.leaving
           ? (
-            <View style={styles.layer}>
-              {stack.map((entry, i) => {
-                if (entry.screen === 'cadeira' || entry.screen === 'comunidade') {
-                  // Keyed by the node epoch: a lock, unlock or identity change
-                  // remounts the screen, so late answers from before are dropped.
-                  return (
-                    <View key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
-                      {entry.screen === 'cadeira'
-                        ? <Cadeira group={entry.key} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onReport={setReport} />
-                        : <Comunidade community={entry.key} onBack={goBack} onOpenGroup={openGroup} onOpenMember={openMember} />}
-                    </View>
-                  )
-                }
-                const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
-                return (
-                  <View key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} style={i === stack.length - 1 ? styles.flex : styles.hidden}>
-                    <Screen entry={entry} {...screenProps} />
-                  </View>
-                )
-              })}
+            <View style={styles.layer} pointerEvents='box-none'>
+              {stackEntries(stack, stackMotion.leaving).map(({ entry, index }) => renderStackEntry(entry, index))}
             </View>
             )
           : null}
         {toast
           ? (
-            <View style={[styles.toast, { bottom: (stacked ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='none'>
-              <Text style={styles.toastText} accessibilityRole='alert'>{toast}</Text>
+            <View style={[styles.toast, { bottom: (stacked ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='box-none'>
+              {/* Only the action takes touches: under box-none the label would
+                  otherwise swallow taps meant for the screen below. */}
+              <View pointerEvents='none'>
+                <Text style={styles.toastText} accessibilityRole='alert'>{toast.text}</Text>
+              </View>
+              {toast.onAction
+                ? (
+                  <Pressable
+                    onPress={() => { clearTimeout(toastTimer.current); setToast(null); toast.onAction() }}
+                    accessibilityRole='button'
+                    accessibilityLabel={toast.actionLabel}
+                    hitSlop={8}
+                    style={styles.toastAction}
+                  >
+                    <Text style={styles.toastActionText}>{toast.actionLabel}</Text>
+                  </Pressable>
+                  )
+                : null}
             </View>
             )
           : null}
-        <Fab onPress={openComposer} />
-        {stacked ? null : <TabBar current={tab} onSelect={setTab} onReselect={reselectTab} badges={{ avisos: avisosNew, cadeiras: groupsBadge }} tabs={tabsFor(mode)} />}
+        {showPostButton({ tab, screen: stacked ? nav.top(stack).screen : null }) ? <Fab onPress={openComposer} /> : null}
+        {/* Avisos is not a tab: the bar keeps the tab it was opened from, and that tab's icon closes it. */}
+        {stacked ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot }} tabs={tabsFor(mode)} me={tabMe} />}
       </View>
     )
   }
@@ -1652,16 +2490,17 @@ function Member () {
     username: ownProfile ? (ownProfile.username || null) : null,
     avatar: ownProfile ? ownProfile.avatar : undefined
   }
-  // Light over the Diário band (dark over the offline note above it). The
-  // sheets leave the status bar over the (dimmed) screen behind, so they keep
-  // it light there too.
-  const light = tab === 'diario' && step === 'pronto' && node.online !== false && nav.depth(stack) === 0
 
+  // Set only past the early returns, so the intro, the terms and Conexão do
+  // not count as the first screen; a patience expiry latches too.
+  if (!coveringBoot) bootSettled.current = true
   // Side insets are applied once here (sidePad); top and bottom by each bar;
-  // Modal content (sheets, photo viewer) pads itself.
+  // Modal content (sheets, photo viewer) pads itself. The wrapper is
+  // permanent: a conditional one would remount Identidade at the reveal.
   return (
-    <View style={[styles.root, { paddingHorizontal: sidePad }]}>
-      {content}
+    <View style={[styles.root, coveringBoot && SPLASH_WRAP, { paddingHorizontal: sidePad }]}>
+      {coveringBoot ? splash : null}
+      <View style={coveringBoot ? styles.hidden : styles.flex}>{content}</View>
       {/* The terms gate used to unmount these sheets on a hosted lock as a
           side effect, and a current terms record no longer brings it up. So
           Publicar is not mounted while locked (its draft and photo go) and
@@ -1703,8 +2542,10 @@ function Member () {
           showToast(text)
         }}
       />
-      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} />
-      <StatusBar style={light ? 'light' : 'dark'} />
+      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} inviteNudge={inviteNudge} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} />
+      {/* Mounted after the splash, so it wins: while the boot cover shows it
+          follows the splash, which stays cream on native (Splash.js). */}
+      <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light })} />
     </View>
   )
 }
@@ -1721,28 +2562,34 @@ export default function App () {
     const GateScreen = require('./src/gate/GateScreen').default
     return (
       <SafeAreaProvider>
-        <GateScreen url={GATE_URL} />
+        <ThemeProvider>
+          <GateScreen url={GATE_URL} />
+        </ThemeProvider>
       </SafeAreaProvider>
     )
   }
   return (
     <SafeAreaProvider>
-      <NodeProvider>
-        <NamesProvider>
-          <OutboxProvider>
-            <Member />
-          </OutboxProvider>
-        </NamesProvider>
-      </NodeProvider>
+      <ThemeProvider>
+        <NodeProvider>
+          <NamesProvider>
+            <OutboxProvider>
+              <Member />
+            </OutboxProvider>
+          </NamesProvider>
+        </NodeProvider>
+      </ThemeProvider>
     </SafeAreaProvider>
   )
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1, backgroundColor: colors.bg },
   hidden: { display: 'none' },
-  layer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: colors.bg },
+  // Clear: each StackLayer paints its own background, so a slide shows the
+  // screen (or tab) under it.
+  layer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
   center: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', gap: 8 },
   shell: { flex: 1, width: '100%', maxWidth: layout.column, alignSelf: 'center', backgroundColor: colors.bg },
   shellWide: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: colors.line },
@@ -1752,10 +2599,14 @@ const styles = StyleSheet.create({
   toast: {
     position: 'absolute',
     alignSelf: 'center',
-    backgroundColor: colors.ink,
+    backgroundColor: colors.toastBg,
     borderRadius: 999,
     paddingVertical: 8,
-    paddingHorizontal: 14
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center'
   },
-  toastText: { ...type.counter, color: '#ffffff' }
+  toastText: { ...type.counter, color: colors.toastInk },
+  toastAction: { marginLeft: 8 },
+  toastActionText: { ...type.counter, color: colors.toastInk, fontWeight: '800' }
 })

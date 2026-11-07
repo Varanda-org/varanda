@@ -48,9 +48,10 @@ const {
   MAX_MEDIA_BYTES
 } = require('@varanda/core/lib/records')
 const { mediaHeader } = require('@varanda/core/lib/media')
-const { validateGroupRecord, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS } = require('@varanda/core/lib/group')
+const { validateGroupRecord, validateGroupHeader, validateWriterHeader, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS } = require('@varanda/core/lib/group')
 const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
+const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { DIARY_OPTIONS } = require('./diary-options')
 
@@ -358,7 +359,9 @@ async function readAll (core) {
 // run needs block 0 (moderation reads it) and is never read past
 // MAX_LOG_BLOCKS. A tombstone comes after its target, so every tombstone
 // that can delete a block of the run lies inside the run: stored, and
-// applied to the whole result by the same fold.
+// applied to the whole result by the same fold. raw: the same blocks as
+// entries, tombstones not applied, for the page cut of buildFeed (a
+// tombstone naming a page-close or page-moved never moves it).
 async function readVisible (core) {
   assertOpen(core)
   const length = core.length
@@ -376,8 +379,9 @@ async function readVisible (core) {
   }
   const { raw, entries, deleted, present } = await presentState(view)
   const prefix = entries.slice(0, present)
+  const rawPrefix = raw.slice(0, present)
   if (present < 1 || present >= length || length > MAX_LOG_BLOCKS || raw.length < length) {
-    return { entries: prefix, present, tail: length }
+    return { entries: prefix, raw: rawPrefix, present, tail: length }
   }
   let tail = length
   while (tail > present) {
@@ -394,11 +398,14 @@ async function readVisible (core) {
   }
   // Only a block that arrived after presentState can close the gap: the
   // next read shows it.
-  if (tail <= present) return { entries: prefix, present, tail: length }
+  if (tail <= present) return { entries: prefix, raw: rawPrefix, present, tail: length }
   for (let seq = tail; seq < length; seq++) {
-    if (stored.has(seq)) prefix.push(entries[seq])
+    if (stored.has(seq)) {
+      prefix.push(entries[seq])
+      rawPrefix.push(raw[seq])
+    }
   }
-  return { entries: prefix, present, tail }
+  return { entries: prefix, raw: rawPrefix, present, tail }
 }
 
 // Every block as decoded up to the same end, tombstones not applied (the
@@ -408,6 +415,40 @@ async function readRaw (core) {
   assertOpen(core)
   const { raw, present } = await presentState(core)
   return raw.slice(0, present)
+}
+
+// EVERY stored block as decoded, in seq order, holes skipped (not only the
+// present prefix: a followed diary downloads newest-first, so its tail can
+// be stored past a gap), tombstones not applied. length: the core's, so the
+// caller can tell whether every block of [0, length) was read.
+async function readHeld (core) {
+  assertOpen(core)
+  const length = core.length
+  const limit = Math.min(length, MAX_LOG_BLOCKS)
+  const entries = []
+  for (let i = 0; i < limit; i++) {
+    if (!(await core.has(i))) continue
+    const block = await core.get(i, { wait: false, raw: true })
+    if (block === null) continue
+    entries.push({ seq: i, record: decodeBlock(block) })
+  }
+  return { entries, length }
+}
+
+// As @varanda/core readBlocks: a group core's blocks, decoded, tombstones
+// not applied (deletion is a diary feature, groups hide with their own
+// records), up to the first block not held locally.
+async function readBlocks (core) {
+  assertOpen(core)
+  const limit = Math.min(core.length, MAX_LOG_BLOCKS)
+  const out = []
+  for (let i = 0; i < limit; i++) {
+    if (!(await core.has(i))) break
+    const block = await core.get(i, { wait: false, raw: true })
+    if (block === null) break
+    out.push({ seq: i, record: decodeBlock(block) })
+  }
+  return out
 }
 
 function assertOpen (core) {
@@ -445,10 +486,10 @@ function appendRecord (core, record, limits) {
 }
 
 // The same queue and limits for a group core: block 0 is its header, the
-// root (`root: true`) alone may hold root-only records, and a community root
-// (`community: true`) only its own set of them.
+// root (`root: true`) alone may hold root-only records, and a community core
+// (`community: true`: its root or a community writer) only its own set.
 function appendGroupRecord (core, record, { root = false, community = false, private: priv = false, limits } = {}) {
-  const validate = (plain, seq) => validateGroupRecord(plain, seq, { root: root === true, community: root === true && community === true, private: priv === true })
+  const validate = (plain, seq) => validateGroupRecord(plain, seq, { root: root === true, community: community === true, private: priv === true })
   return enqueueAppend(core, record, validate, limits, GROUP_FULL)
 }
 
@@ -990,6 +1031,100 @@ async function removeGroupReplica (storage, hex) {
   return keys
 }
 
+// kv communityCreate = { v: 1, community, communityNonce, group, groupNonce,
+// name, join, at }: a community.create planned here and not finished (its two
+// own cores and nonces, the Geral group), so a repeated call resumes it with
+// the same keys. null when none.
+async function readCommunityCreate (storage) {
+  const d = await readKv(storage, 'communityCreate')
+  if (!isVersioned(d) || ![d.community, d.communityNonce, d.group, d.groupNonce].every(isHex64) ||
+      typeof d.name !== 'string' || (d.join !== 'open' && d.join !== 'approval') || !isCanonicalIso(d.at)) return null
+  return {
+    v: 1,
+    community: d.community.toLowerCase(),
+    communityNonce: d.communityNonce.toLowerCase(),
+    group: d.group.toLowerCase(),
+    groupNonce: d.groupNonce.toLowerCase(),
+    name: d.name,
+    join: d.join,
+    at: d.at
+  }
+}
+
+function writeCommunityCreate (storage, record) {
+  return storage.writeJson('communityCreate', record === null ? null : { ...record, v: 1 })
+}
+
+// kv communityLeave = { v: 1, notes: [{ community, writer, seq, hash }] }: per
+// community, the group-leave this device appended as its creator (the CW,
+// the block's seq and the hex blake2b of its bytes) until the diary confirms
+// it. Only a leave matching its note is confirmed later.
+async function readLeaveNotes (storage) {
+  const d = await readKv(storage, 'communityLeave')
+  // v 1 notes named a block hash, not the leave's digest: never finished.
+  if (d === null || typeof d !== 'object' || d.v !== 2 || !Array.isArray(d.notes)) return []
+  const root = (r) => r !== null && typeof r === 'object' && isHex64(r.group) && Number.isSafeInteger(r.cut) && r.cut >= 1
+  return d.notes.filter((n) => n !== null && typeof n === 'object' && [n.community, n.writer, n.digest].every(isHex64) &&
+    Number.isSafeInteger(n.seq) && n.seq >= 1 && Array.isArray(n.roots) && n.roots.every(root))
+    .map((n) => ({
+      community: n.community.toLowerCase(),
+      writer: n.writer.toLowerCase(),
+      seq: n.seq,
+      digest: n.digest.toLowerCase(),
+      roots: n.roots.map((r) => ({ group: r.group.toLowerCase(), cut: r.cut }))
+    }))
+}
+
+// { community, writer, seq, digest, roots: [{ group, cut }] }: the C leave
+// this creator device appends at `seq` on its CW (its leaveDigest), and the
+// length of each group root of C it held at leave time.
+function writeLeaveNotes (storage, notes) {
+  return storage.writeJson('communityLeave', notes.length === 0 ? null : { v: 2, notes })
+}
+
+// Protocol v1 group cores (a group-header or group-writer block 0 with
+// v: 1) among those kv groupWriters, groupReplicas and groupCores name:
+// each is purged and dropped from the lists, a created entry included, since
+// no seeder or fold of protocol v2 takes it -> [{ event: 'group-skipped',
+// key, reason: 'legacy' }], one per purged core.
+async function purgeLegacyGroupCores (storage) {
+  const writers = await readGroupWriters(storage)
+  const keys = new Set([...await readGroupReplicas(storage), ...await readGroupCoreKeys(storage)])
+  for (const e of writers) {
+    keys.add(e.key)
+    if (e.rootNonce !== null) keys.add(e.group)
+  }
+  const legacy = new Set()
+  for (const key of [...keys].sort()) {
+    const core = await openGroupCoreReadOnly(storage, key)
+    if (core === null) continue
+    let h = null
+    try {
+      if (core.contiguousLength > 0) h = decodeBlock(await core.get(0, { wait: false, raw: true }))
+    } catch {
+    } finally {
+      await core.close()
+    }
+    if (h === null || typeof h !== 'object') continue
+    const reason = h.type === 'group-header' ? validateGroupHeader(h) : h.type === 'group-writer' ? validateWriterHeader(h) : null
+    if (reason === 'legacy') legacy.add(key)
+  }
+  if (legacy.size === 0) return []
+  for (const e of writers) {
+    if (!legacy.has(e.key) && !legacy.has(e.group)) continue
+    await removeGroupWriter(storage, e.group)
+    // The own writer of a legacy group goes with it.
+    legacy.add(e.key)
+  }
+  const events = []
+  for (const key of [...legacy].sort()) {
+    await purgeGroupCore(storage, key)
+    await removeGroupReplica(storage, key)
+    events.push({ event: 'group-skipped', key, reason: 'legacy' })
+  }
+  return events
+}
+
 // The binding diaries of accepted foreign group writers, stored as replicas
 // (replicaName) for the join evidence and the names of their authors and
 // never listed in kv follows: kv 'groupDiaries' { v: 1, keys }, at most
@@ -1066,6 +1201,9 @@ async function deleteGroupData (storage) {
   }
   await storage.writeJson('groupWriters', null)
   await storage.writeJson('groupReplicas', null)
+  await storage.writeJson('groupSeen', null)
+  await storage.writeJson('communityCreate', null)
+  await storage.writeJson('communityLeave', null)
   // A new identity on this storage derives a new box key pair: the old
   // nonce would only tie it to the cores just deleted.
   await withGroupBoxLock(storage, () => storage.writeJson('groupBoxDevice', null))
@@ -1177,7 +1315,351 @@ function writeFoldedFollows (storage, derived, ownHex) {
   })
 }
 
+// ---- direct messages (docs/protocol.md section 11) ----
+
+// 'dm-local': this identity's message store, local only (./dm-store.js). It
+// is never replicated, never named in an inventory, a hello or a kv list: the
+// sync opens cores from kv lists only, so this name never reaches it. Compat
+// mode with a key pair derived from the local store key, created with the
+// public key only; the pair is set in memory, as the diary's.
+const DM_LOCAL = 'dm-local'
+
+async function openDmLocal (storage, keyPair) {
+  checkKeyPair(keyPair)
+  const options = { ...DIARY_OPTIONS, valueEncoding: 'json' }
+  if (!(await storage.hasCore(DM_LOCAL))) options.keyPair = { publicKey: keyPair.publicKey }
+  const { core } = await openShared(storage, DM_LOCAL, 'json', async () => {
+    const core = new Hypercore(storage.core(DM_LOCAL), options)
+    await core.ready()
+    return core
+  })
+  if (!b4a.equals(core.key, keyPair.publicKey)) {
+    await core.close()
+    return null
+  }
+  core.setKeyPair({ publicKey: keyPair.publicKey, secretKey: keyPair.secretKey })
+  return core
+}
+
+function deleteDmLocal (storage) {
+  return storage.deleteCore(DM_LOCAL)
+}
+
+const SEEN_TOKEN_RE = /^[0-9a-f]{32}$/
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/
+const HEX16_RE = /^[0-9a-f]{16}$/
+const MAX_DM_SEEN = 5000
+const MAX_DM_STAMPS = 64
+
+// kv dmKey = { v: 1, gen }: the box key generation in use. No key in kv.
+async function readDmKey (storage) {
+  const data = await readKv(storage, 'dmKey')
+  return isVersioned(data) && Number.isSafeInteger(data.gen) && data.gen >= 1 && data.gen <= 0xffffffff ? { v: 1, gen: data.gen } : null
+}
+
+function writeDmKey (storage, gen) {
+  if (!Number.isSafeInteger(gen) || gen < 1 || gen > 0xffffffff) throw new TypeError('gen inválido')
+  return storage.writeJson('dmKey', { v: 1, gen })
+}
+
+// kv dmCursor = { v: 1, after }: the exclusive pool seq cursor.
+async function readDmCursor (storage) {
+  const data = await readKv(storage, 'dmCursor')
+  return isVersioned(data) && Number.isSafeInteger(data.after) && data.after >= 0 ? data.after : 0
+}
+
+function writeDmCursor (storage, after) {
+  if (!Number.isSafeInteger(after) || after < 0) throw new TypeError('cursor inválido')
+  return storage.writeJson('dmCursor', { v: 1, after })
+}
+
+// kv dmSeen = { v: 1, ids: [hex32] }: for each message marked seen here, a
+// token keyed by the local store key over its seen key (@varanda/core
+// lib/dm-fold.js seenKey, which names the sender), so kv holds no peer key;
+// newest last, at most MAX_DM_SEEN. A bare id of an earlier form matches no
+// token and is dropped in effect (its dot may show once more).
+async function readDmSeen (storage) {
+  const data = await readKv(storage, 'dmSeen')
+  if (!isVersioned(data) || !Array.isArray(data.ids)) return []
+  return data.ids.filter((id) => typeof id === 'string' && SEEN_TOKEN_RE.test(id))
+}
+
+function writeDmSeen (storage, ids) {
+  const list = [...new Set(ids.filter((id) => typeof id === 'string' && SEEN_TOKEN_RE.test(id)))]
+  return storage.writeJson('dmSeen', { v: 1, ids: list.slice(-MAX_DM_SEEN) })
+}
+
+// kv groupSeen = { v: 1, marks: [{ group, at, writer, seq }] }: per group the
+// newest post marked seen on this device (rpc.md 5.82), newest last, at most
+// MAX_GROUP_SEEN (the least recently marked dropped first). Plain, like kv
+// groupWriters: it holds only group and writer keys, a time and a seq.
+const MAX_GROUP_SEEN = 512
+
+function validSeenMark (m) {
+  return m !== null && typeof m === 'object' && isHex64(m.group) && isHex64(m.writer) &&
+    isCanonicalIso(m.at) && Number.isSafeInteger(m.seq) && m.seq >= 1
+}
+
+// One mark per group, the last one written kept (at its own place). Walked
+// from the end so a hand-edited kv value of any length costs one pass.
+function seenMarks (marks) {
+  const out = []
+  const taken = new Set()
+  for (let i = marks.length - 1; i >= 0 && out.length < MAX_GROUP_SEEN; i--) {
+    const m = marks[i]
+    if (!validSeenMark(m) || taken.has(m.group)) continue
+    taken.add(m.group)
+    out.push({ group: m.group, at: m.at, writer: m.writer, seq: m.seq })
+  }
+  return out.reverse()
+}
+
+async function readGroupSeen (storage) {
+  const data = await readKv(storage, 'groupSeen')
+  if (!isVersioned(data) || !Array.isArray(data.marks)) return []
+  return seenMarks(data.marks)
+}
+
+function writeGroupSeen (storage, marks) {
+  return storage.writeJson('groupSeen', { v: 1, marks: seenMarks(marks) })
+}
+
+// kv seenLocal = { v: 1, own: hex64, blob }: the node's full view of what the
+// account service's seen blob should hold (the canonical document of the
+// last merge or write plus Avisos tokens added here since), sealed under the
+// seen key (@varanda/core lib/seen-blob.js seal). Always exactly
+// SEEN_BLOB_BYTES, so kv shows a constant length and a reader without the
+// passkey learns nothing. kv dmSeen and groupSeen stay this device's source
+// of truth; this copy only feeds the sync. Bound to the own key: a value left
+// by another identity reads as absent.
+function isSeenBlob (b64) {
+  return typeof b64 === 'string' && b64.length === SEEN_BLOB_B64 && BASE64_RE.test(b64) &&
+    b4a.byteLength(b64, 'base64') === SEEN_BLOB_BYTES
+}
+
+function sameOwn (data, own) {
+  return isHex64(own) && data.own === own
+}
+
+async function readSeenLocal (storage, own) {
+  const data = await readKv(storage, 'seenLocal')
+  if (!isVersioned(data) || !sameOwn(data, own) || !isSeenBlob(data.blob)) return null
+  return data.blob
+}
+
+function writeSeenLocal (storage, own, b64) {
+  if (!isHex64(own)) throw new TypeError('chave inválida')
+  if (!isSeenBlob(b64)) throw new TypeError('visto inválido')
+  return storage.writeJson('seenLocal', { v: 1, own, blob: b64 })
+}
+
+// kv seenRemote = { v: 1, own: hex64, blob }: the sealed blob exactly as the
+// service holds it at the seenSync cursor (its hash is the cursor), so an
+// unchanged read can still tell which local marks the service lacks. Bound
+// to the own key like seenLocal.
+async function readSeenRemote (storage, own) {
+  const data = await readKv(storage, 'seenRemote')
+  if (!isVersioned(data) || !sameOwn(data, own) || !isSeenBlob(data.blob)) return null
+  return data.blob
+}
+
+function writeSeenRemote (storage, own, b64) {
+  if (!isHex64(own)) throw new TypeError('chave inválida')
+  if (!isSeenBlob(b64)) throw new TypeError('visto inválido')
+  return storage.writeJson('seenRemote', { v: 1, own, blob: b64 })
+}
+
+// kv seenSync = { v: 1, own: hex64, hash: hex64 | null, gen }: the hash of the
+// remote blob last merged (the prevHash of the next compare-and-swap write,
+// null before any) and the local generation.
+function validSeenSync (hash, gen) {
+  return (hash === null || isHex64(hash)) && Number.isSafeInteger(gen) && gen >= 0
+}
+
+async function readSeenSync (storage, own) {
+  const data = await readKv(storage, 'seenSync')
+  if (!isVersioned(data) || !sameOwn(data, own) || !validSeenSync(data.hash, data.gen)) return { hash: null, gen: 0 }
+  return { hash: data.hash, gen: data.gen }
+}
+
+function writeSeenSync (storage, own, { hash = null, gen = 0 } = {}) {
+  if (!isHex64(own)) throw new TypeError('chave inválida')
+  if (!validSeenSync(hash, gen)) throw new TypeError('sincronização inválida')
+  return storage.writeJson('seenSync', { v: 1, own, hash, gen })
+}
+
+// A secretbox under the local dm key (./dm-store.js seal): { nonce, box }.
+// Stamps and queued drops are bearer values (anyone holding one can spend
+// it), so kv holds them only sealed; plaintext entries of the earlier v1
+// form are dropped on read (a top-up refills the wallet).
+const NONCE48_RE = /^[0-9a-f]{48}$/
+const MAX_SEALED_B64 = 16384
+
+function validBox (b) {
+  return b !== null && typeof b === 'object' && typeof b.nonce === 'string' && NONCE48_RE.test(b.nonce) &&
+    typeof b.box === 'string' && b.box.length <= MAX_SEALED_B64 && BASE64_RE.test(b.box)
+}
+
+function isV2 (data) {
+  return data !== null && typeof data === 'object' && !Array.isArray(data) && data.v === 2 && Array.isArray(data.items)
+}
+
+function validKids (kids) {
+  return Array.isArray(kids) ? kids.filter((k) => typeof k === 'string' && HEX16_RE.test(k)).slice(0, 2) : []
+}
+
+// kv dmStamps = { v: 2, items: [{ kid, nonce, box }], kids }: the unspent
+// wallet, each stamp's { token, sig } sealed, and the last two postage kids
+// seen (newest first). The kid alone spends nothing.
+async function readDmStamps (storage) {
+  const data = await readKv(storage, 'dmStamps')
+  if (!isV2(data)) return { items: [], kids: [] }
+  return {
+    items: data.items.filter((s) => validBox(s) && typeof s.kid === 'string' && HEX16_RE.test(s.kid)).map((s) => ({ kid: s.kid, nonce: s.nonce, box: s.box })),
+    kids: validKids(data.kids)
+  }
+}
+
+function writeDmStamps (storage, { items, kids }) {
+  return storage.writeJson('dmStamps', {
+    v: 2,
+    items: items.filter((s) => validBox(s) && typeof s.kid === 'string' && HEX16_RE.test(s.kid)).slice(0, MAX_DM_STAMPS).map((s) => ({ kid: s.kid, nonce: s.nonce, box: s.box })),
+    kids: validKids(kids)
+  })
+}
+
+// kv blobStamps: the blob stamp wallet (./blob.js), the same shape and
+// rules as kv dmStamps under its own key, holding at most MAX_BLOB_STAMPS
+// (a little over BLOB_STAMP_WALLET).
+const MAX_BLOB_STAMPS = 320
+
+async function readBlobStamps (storage) {
+  const data = await readKv(storage, 'blobStamps')
+  if (!isV2(data)) return { items: [], kids: [] }
+  return {
+    items: data.items.filter((s) => validBox(s) && typeof s.kid === 'string' && HEX16_RE.test(s.kid)).slice(0, MAX_BLOB_STAMPS).map((s) => ({ kid: s.kid, nonce: s.nonce, box: s.box })),
+    kids: validKids(data.kids)
+  }
+}
+
+function writeBlobStamps (storage, { items, kids }) {
+  return storage.writeJson('blobStamps', {
+    v: 2,
+    items: items.filter((s) => validBox(s) && typeof s.kid === 'string' && HEX16_RE.test(s.kid)).slice(0, MAX_BLOB_STAMPS).map((s) => ({ kid: s.kid, nonce: s.nonce, box: s.box })),
+    kids: validKids(kids)
+  })
+}
+
+// kv dmCtlQueue = { v: 2, items: [{ nonce, box }] }: ctls to the own box not
+// put yet, oldest first, at most MAX_DM_CTL_QUEUE, each sealed. Inside, a
+// sealed envelope still waiting for a stamp or, once stamped, the exact
+// encoded drop (dropId and stamp inside), so a later put repeats the same
+// bytes.
+const MAX_DM_CTL_QUEUE = 32
+
+async function readDmCtlQueue (storage) {
+  const data = await readKv(storage, 'dmCtlQueue')
+  if (!isV2(data)) return []
+  return data.items.filter(validBox).slice(-MAX_DM_CTL_QUEUE).map((b) => ({ nonce: b.nonce, box: b.box }))
+}
+
+function writeDmCtlQueue (storage, items) {
+  return storage.writeJson('dmCtlQueue', { v: 2, items: items.filter(validBox).slice(-MAX_DM_CTL_QUEUE).map((b) => ({ nonce: b.nonce, box: b.box })) })
+}
+
+// Appends one sealed item -> how many old ones were dropped to fit.
+async function pushDmCtlQueue (storage, item) {
+  const items = [...await readDmCtlQueue(storage), item]
+  const dropped = Math.max(0, items.length - MAX_DM_CTL_QUEUE)
+  await writeDmCtlQueue(storage, items)
+  return dropped
+}
+
+// Every dm kv entry and the local store (reset).
+async function deleteDmData (storage) {
+  await storage.deleteCore(DM_LOCAL)
+  // seenSync before seenRemote and seenLocal: an interrupted reset must
+  // never leave the compare-and-swap cursor without the documents it was
+  // taken from.
+  for (const key of ['seenSync', 'seenRemote', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue', 'seenLocal']) await storage.writeJson(key, null)
+}
+
+// kv ageVerified / ageSince = { v: 1, proof }: the account service's signed
+// age attestations (@varanda/core lib/age-proof.js). Shape and size only:
+// kv is device-owner writable, so the session re-verifies every read
+// against the own key and the association.
+const MAX_AGE_PROOF_BYTES = 1024
+
+function isAgeProof (proof) {
+  return proof !== null && typeof proof === 'object' && !Array.isArray(proof) &&
+    b4a.byteLength(JSON.stringify(proof)) <= MAX_AGE_PROOF_BYTES
+}
+
+async function readAgeProof (storage, key) {
+  const data = await readKv(storage, key)
+  return isVersioned(data) && isAgeProof(data.proof) ? data.proof : null
+}
+
+function writeAgeProof (storage, key, proof) {
+  if (!isAgeProof(proof)) throw new TypeError('comprovante de idade inválido')
+  return storage.writeJson(key, { v: 1, proof })
+}
+
+function readAgeVerified (storage) {
+  return readAgeProof(storage, 'ageVerified')
+}
+
+function writeAgeVerified (storage, proof) {
+  return writeAgeProof(storage, 'ageVerified', proof)
+}
+
+function readAgeSince (storage) {
+  return readAgeProof(storage, 'ageSince')
+}
+
+function writeAgeSince (storage, proof) {
+  if (proof === null) return storage.writeJson('ageSince', null)
+  return writeAgeProof(storage, 'ageSince', proof)
+}
+
+async function deleteAgeProofs (storage) {
+  for (const key of ['ageVerified', 'ageSince']) await storage.writeJson(key, null)
+}
+
 module.exports = {
+  readAgeVerified,
+  writeAgeVerified,
+  readAgeSince,
+  writeAgeSince,
+  deleteAgeProofs,
+  DM_LOCAL,
+  openDmLocal,
+  deleteDmLocal,
+  readDmKey,
+  writeDmKey,
+  readDmCursor,
+  writeDmCursor,
+  readDmSeen,
+  writeDmSeen,
+  readGroupSeen,
+  writeGroupSeen,
+  MAX_GROUP_SEEN,
+  readSeenLocal,
+  writeSeenLocal,
+  readSeenSync,
+  writeSeenSync,
+  readSeenRemote,
+  writeSeenRemote,
+  readDmStamps,
+  writeDmStamps,
+  readBlobStamps,
+  writeBlobStamps,
+  MAX_BLOB_STAMPS,
+  deleteDmData,
+  readDmCtlQueue,
+  writeDmCtlQueue,
+  pushDmCtlQueue,
+  MAX_DM_CTL_QUEUE,
   DIARY,
   LOCKED,
   MISMATCH,
@@ -1201,6 +1683,8 @@ module.exports = {
   readAll,
   readVisible,
   readRaw,
+  readHeld,
+  readBlocks,
   readBlock0,
   appendRecord,
   appendRecords,
@@ -1240,6 +1724,11 @@ module.exports = {
   addGroupDiary,
   removeGroupDiary,
   deleteGroupData,
+  readCommunityCreate,
+  writeCommunityCreate,
+  readLeaveNotes,
+  writeLeaveNotes,
+  purgeLegacyGroupCores,
   readGroupCoreKeys,
   readGroupCerts,
   putGroupCert,

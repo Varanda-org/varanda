@@ -1,0 +1,76 @@
+# Sends a new iOS build to TestFlight through EAS on every push to main that
+# touches the app (or a manual run on main). EAS builds the production profile
+# of apps/app/eas.json on its own macOS machines and submits it to App Store
+# Connect with the submit profile of the same name. Sending a version to App
+# Store review stays a manual step in App Store Connect.
+#
+# Skipped until the repository variable VARANDA_IOS_RELEASE is exactly "true".
+#
+# This runner only queues the build and its submission (--no-wait): the result
+# shows on expo.dev and in App Store Connect, not here. EAS raises the build
+# number on every build (appVersionSource remote, autoIncrement).
+#
+# One-time user steps (see docs/development.md, "Envio para a App Store (EAS)"):
+#   - From apps/app: eas credentials -p ios (distribution certificate,
+#     provisioning profile and the App Store Connect API key for EAS Submit)
+#   - An Expo access token for the varanda-org account
+#   - Settings > Environments > app-store: deployment branches main only;
+#     secret EXPO_TOKEN
+#   - Settings > Secrets and variables > Actions > Variables:
+#     VARANDA_IOS_RELEASE = true (any other value pauses releases)
+#
+# apps/cli/test/ios-release.test.js pins the shape of this file.
+name: ios-release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/app/**'
+      - 'packages/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.easignore'
+      - '.github/workflows/ios-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel: a cancelled run may already have queued a build on EAS.
+concurrency:
+  group: ios-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  testflight:
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_IOS_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: app-store
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      # eas reads app.json and its config plugins from node_modules.
+      # --ignore-scripts: no dependency install script runs in CI (supply chain).
+      - run: npm ci --ignore-scripts
+      # The eas-cli the production profile was first built and submitted with.
+      - run: npm install --global --ignore-scripts eas-cli@27.2.0
+      - name: Queue the build and its TestFlight submission
+        working-directory: apps/app
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          DISABLE_EAS_ANALYTICS: '1'
+          EXPO_NO_TELEMETRY: '1'
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "::error::EXPO_TOKEN ausente: veja docs/development.md, seção Envio para a App Store (EAS)"
+            exit 1
+          fi
+          eas build --platform ios --profile production --auto-submit --non-interactive --no-wait

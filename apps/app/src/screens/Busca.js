@@ -1,6 +1,5 @@
-// Busca: the result screen of the Espiadinha's "pesquisar por assunto". It
-// renders in place of the rounds while a query is active; the Espiadinha keeps
-// its own state mounted, so 'limpar' brings the rounds back without a reload.
+// Busca: the Publicações result list of the Busca tab, rendered under the
+// Busca field. `header` is what the Busca tab renders above the list.
 //
 // Trust model: the seeder's /index/topic answer is only a hint of where to
 // look (refs). Every post is read and verified with diary.peek (the entry
@@ -8,12 +7,13 @@
 // again for the words (assembleSearch); a ref whose post is missing, is not a
 // post or lacks the words counts as "unavailable" and is never shown. Names
 // come only from verified peek fields, never from the index or from a key.
+// The short note is HelpNote HELP.busca.
 //
 // Cost: one /index/topic plus one /index/counts per <= 31 refs per page
 // (useSocial), well within Caddy's 20 /index requests per 10 s per client;
 // the peeks run one at a time (peekAll) as the node allows two in flight.
-// Nothing is requested while typing: the Espiadinha only starts a query on
-// submit.
+// A query starts when BuscaGlobal hands one over: on submit, or after the
+// typing pause of its debouncePlan (src/buscaGlobal.js), never per keystroke.
 //
 // Order: date order of the seeder's index, newest first; no ranking, no
 // hidden weights. Followed and own authors are included (the search is over
@@ -22,9 +22,9 @@
 // budget): only a null cursor (or a repeated one) ends the list, and an empty
 // page offers 'continuar busca' instead of continuing automatically.
 //
-// Hosted web only (the Espiadinha renders no field elsewhere). Everything is
-// in memory; nothing is persisted. Strangers' photos stay no-store through
-// socialRowProps (ARua.js) as in the Espiadinha.
+// Hosted nodes only (the hosted web app and the native app on an
+// installation): `node.hosted === true`. Everything is in memory; nothing is persisted. Strangers'
+// photos stay no-store through socialRowProps (ARua.js) as in the Espiadinha.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, View } from 'react-native'
@@ -228,8 +228,9 @@ export default function Busca ({ query, header, ownKey, avatarOf, active, scroll
   }, [])
 
   // 'seguir': unlike the rounds, the author's rows stay (search results are
-  // not "people you do not follow"); the Espiadinha is told so its hidden
-  // rounds drop the author. An uncertain failure is reported, never retried.
+  // not "people you do not follow"). `onFollowed(author)` is an optional hook
+  // for a caller that keeps another list of strangers. An uncertain failure
+  // is reported, never retried.
   const follow = async (author, name, username) => {
     if (stateRef.current.following.has(author)) return
     commit({ following: new Set(stateRef.current.following).add(author) })
@@ -304,8 +305,8 @@ export default function Busca ({ query, header, ownKey, avatarOf, active, scroll
   const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
   const renderItem = ({ item }) => {
     const row = socialRowProps({ post: item, ref: itemKey(item), social, profileOf: noProfile, avatarOf, now, ownKey, h: handlers })
-    // A like or repost toggled here may also be in the hidden rounds, whose
-    // social cache is then stale: tell the Espiadinha.
+    // `onSocialChanged` (optional): a like or repost toggled here may also be
+    // in another list the caller keeps, whose social cache is then stale.
     const changed = () => { if (typeof onSocialChanged === 'function') onSocialChanged() }
     const wrap = (fn) => typeof fn === 'function' ? () => { fn(); changed() } : fn
     return (

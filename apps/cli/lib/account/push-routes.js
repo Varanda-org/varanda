@@ -4,9 +4,10 @@ const nodeCrypto = require('node:crypto')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { endpointHash, verifyPush } = require('@varanda/core/lib/push-proof')
 const { validatePushEvent } = require('@varanda/core/lib/push-events')
-const { isAllowedEndpoint, sendPush } = require('./web-push')
+const { validateDmWake, DM_WAKE_COOLDOWN_MS } = require('@varanda/core/lib/dm-wake')
+const { isAllowedEndpoint, sendPush, PUSH_TTL_S, TOPIC_RE } = require('./web-push')
 const { validEndpoint, validP256dh, validAuth } = require('./push-store')
-const { pushBody } = require('./push-text')
+const { pushBody, dmWakePayload, inviteDropPayload } = require('./push-text')
 
 // Web Push for the hosted PWA (mounted by ./server.js):
 //
@@ -25,11 +26,22 @@ const { pushBody } = require('./push-text')
 //     (VARANDA_PUSH_TOKEN) still gates it because loopback is not trusted
 //     (the /moderation-post rule of apps/cli/lib/seed-ws.js). Every valid
 //     event is answered 202 before any delivery, so the answer never says
-//     whether the recipient has a subscription.
+//     whether the recipient has a subscription. The seeder's DM wake
+//     ({ v: 1, kind: 'dm-wake' }, packages/core/lib/dm-wake.js) names nobody
+//     and becomes one identical notice to every stored subscription, at most
+//     once per DM_WAKE_COOLDOWN_MS per process: who got a message is never
+//     known here, so everyone with push on is told there may be one.
+//   - notifyInvite, called in process by the account service: an invite
+//     drop ({ v: 1, kind: 'invite-drop' }) to every device of one member.
+//     No social window is charged (the weekly allowance bounds it), and its
+//     jobs take at most INVITE_QUEUE_MAX of the queue so member notices
+//     keep their room. Each job carries an absolute deadline: past it the
+//     job is dropped unsent, before it the TTL is the seconds left.
 //
 // An endpoint is a capability URL: it is never echoed, counted in an answer
 // or logged, and neither are keys, nonces, signatures, tokens, names or the
-// notice text. Logs carry only { event, reason } tokens.
+// notice text. Logs carry only { event, reason } tokens, plus a number
+// (count) when a DM wake fan-out hits the queue cap.
 
 const MAX_BODY = 4096
 const RELAY_BODY_MAX = 1024
@@ -46,6 +58,7 @@ const ACTIONS = ['on', 'off']
 // its ciphertext length tells the push service neither the kind nor the
 // length of the actor's name. The account payload JSON is far below it.
 const PUSH_PAD_TO = 1024
+const INVITE_QUEUE_MAX = Math.floor(MAX_QUEUE / 4)
 
 const sha256 = (value) => nodeCrypto.createHash('sha256').update(value).digest()
 
@@ -91,6 +104,12 @@ function createPushRoutes ({
   const queue = []
   let inFlight = 0
   let dropped = 0
+  // Invite jobs still waiting in the queue, against INVITE_QUEUE_MAX.
+  let invitesQueued = 0
+  // Start of the current DM wake window; one fan-out per window. The
+  // offset rotates which subscriptions a capped fan-out reaches first.
+  let wakeAt = null
+  let wakeAfter = null
 
   function storeUsable () {
     return pushStore !== null && pushStore.available()
@@ -276,6 +295,15 @@ function createPushRoutes ({
     if (!relayAuthorized(req)) return hidden(req, res)
     checkPost(req, { requireOrigin: false })
     const event = await readJsonBody(req, RELAY_BODY_MAX)
+    if (validateDmWake(event)) {
+      reply(res, 202, {})
+      try {
+        wake()
+      } catch {
+        log({ event: 'push', reason: 'falhou' })
+      }
+      return
+    }
     if (!validatePushEvent(event)) throw refuse('pedido-invalido')
     reply(res, 202, {})
     try {
@@ -301,6 +329,11 @@ function createPushRoutes ({
     if (vapid === null || !storeUsable()) return
     const subs = pushStore.list(recipient)
     if (subs.length === 0) return
+    // A full queue drops the notice before any budget is charged for it.
+    if (queue.length >= MAX_QUEUE) {
+      dropped += subs.length
+      return log({ event: 'push', reason: 'descartado' })
+    }
     // Budgets are charged only for a push that will be queued, and one actor
     // cannot spend the whole of a recipient's.
     if (!limits.pair(actor + ' ' + recipient)) return log({ event: 'push', reason: 'teto' })
@@ -320,9 +353,87 @@ function createPushRoutes ({
     pump()
   }
 
+  // One global event: no per-actor window or cooldown applies, and a wake
+  // inside the window is accepted and dropped. The window starts only once
+  // a job is queued, so a member who turns push on right after a wake that
+  // reached nobody still hears of the next one.
+  //
+  // A fan-out shares the MAX_QUEUE jobs with member notices, which is enough
+  // at pilot scale but not for every subscription of a large service. Past
+  // the cap the rest of this window's wake is dropped and counted, and the
+  // next wake starts where this one stopped, so the same tail is never the
+  // one always skipped. Each job keeps its row's member only to check and
+  // remove the row; the payload names nobody.
+  function wake () {
+    const t = now()
+    if (wakeAt !== null && t - wakeAt < DM_WAKE_COOLDOWN_MS) return log({ event: 'push', reason: 'descartado' })
+    if (vapid === null || !storeUsable()) return
+    const subs = pushStore.all()
+    if (subs.length === 0) return
+    // Any member with stamps decides when a wake fires, so a wake takes at
+    // most half the queue: member notices always keep the other half.
+    const take = Math.min(subs.length, Math.max(0, Math.floor(MAX_QUEUE / 2) - queue.length))
+    const skipped = subs.length - take
+    if (skipped > 0) {
+      dropped += skipped
+      log({ event: 'push', reason: 'teto', count: skipped })
+    }
+    if (take === 0) return
+    // Resume after the last endpoint served, found again by value: a removed
+    // row shifts every later index, so a numeric offset would skip rows.
+    const after = wakeAfter === null ? -1 : subs.findIndex((s) => s.endpoint === wakeAfter)
+    const start = (after + 1) % subs.length
+    wakeAfter = subs[(start + take - 1) % subs.length].endpoint
+    wakeAt = t
+    const payload = dmWakePayload()
+    const topic = nodeCrypto.createHmac('sha256', topicKey).update('dm-wake ' + t).digest('hex').slice(0, 32)
+    for (let i = 0; i < take; i++) {
+      const { member, endpoint, p256dh, auth } = subs[(start + i) % subs.length]
+      queue.push({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic })
+    }
+    pump()
+  }
+
+  // Invites only enter while the queue is under half full: a DM wake may hold
+  // the other half (wake), so member notices always keep room of their own.
+  // No transport means no room: the loop then claims nothing, so the week's
+  // slots are still sent once push comes back.
+  function room () {
+    if (vapid === null || !storeUsable()) return 0
+    return Math.max(0, Math.min(INVITE_QUEUE_MAX - invitesQueued, Math.floor(MAX_QUEUE / 2) - queue.length))
+  }
+
+  // 'none' tells the caller that no transport or no device exists, so the
+  // slot is marked once and never retried; 'dropped' that devices exist but
+  // the queue had no room for all of them. A member gets every device or
+  // none: the caller marks the slot either way, so a partial send would
+  // leave the newest devices without the notice for good.
+  function notifyInvite ({ member, topic, deadline } = {}) {
+    if (typeof member !== 'string' || !HEX64_RE.test(member)) throw new TypeError('member inválido')
+    if (typeof topic !== 'string' || !TOPIC_RE.test(topic)) throw new TypeError('topic inválido')
+    if (!Number.isSafeInteger(deadline)) throw new TypeError('deadline inválido')
+    if (vapid === null || !storeUsable()) return 'none'
+    const subs = pushStore.list(member)
+    if (subs.length === 0) return 'none'
+    if (room() < subs.length) {
+      dropped += subs.length
+      log({ event: 'push', reason: 'descartado' })
+      return 'dropped'
+    }
+    const payload = inviteDropPayload()
+    for (let i = 0; i < subs.length; i++) {
+      const { endpoint, p256dh, auth } = subs[i]
+      queue.push({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic, deadline })
+      invitesQueued++
+    }
+    pump()
+    return 'queued'
+  }
+
   function pump () {
     while (inFlight < MAX_IN_FLIGHT && queue.length > 0) {
       const job = queue.shift()
+      if (job.deadline !== undefined) invitesQueued--
       inFlight++
       deliverOne(job).finally(() => {
         inFlight--
@@ -343,15 +454,24 @@ function createPushRoutes ({
     }
   }
 
-  async function deliverOne ({ recipient, subscription: queued, payload, topic }) {
+  async function deliverOne ({ recipient, subscription: queued, payload, topic, deadline }) {
     const subscription = current(recipient, queued)
     if (subscription === null) {
       dropped++
       return log({ event: 'push', reason: 'descartado' })
     }
+    const opts = { subscription, payload, vapid, topic, padTo: PUSH_PAD_TO }
+    if (deadline !== undefined) {
+      const left = deadline - now()
+      if (left <= 0) {
+        dropped++
+        return log({ event: 'push', reason: 'descartado' })
+      }
+      opts.ttlS = Math.min(PUSH_TTL_S, Math.max(1, Math.ceil(left / 1000)))
+    }
     let outcome
     try {
-      outcome = await send({ subscription, payload, vapid, topic, padTo: PUSH_PAD_TO })
+      outcome = await send(opts)
     } catch {
       outcome = 'dropped'
     }
@@ -373,7 +493,7 @@ function createPushRoutes ({
     return { nonces: nonces.size, seen: seen.size, queued: queue.length, inFlight, dropped }
   }
 
-  return { owns, handle, handleRelay, stats }
+  return { owns, handle, handleRelay, stats, notifyInvite, room }
 }
 
 module.exports = {
@@ -381,5 +501,6 @@ module.exports = {
   MAX_QUEUE,
   MAX_IN_FLIGHT,
   PUSH_PAD_TO,
+  INVITE_QUEUE_MAX,
   createPushRoutes
 }

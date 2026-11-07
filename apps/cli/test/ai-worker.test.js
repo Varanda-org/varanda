@@ -608,6 +608,34 @@ test('a group message report is never read, triaged or learned while a diary rep
   cleanLogs(t, env.logs)
 })
 
+test('a dm report is never read nor embedded: marked dm for a human, logged without its quote', async (t) => {
+  const env = setup(t, { mode: 'auto' })
+  env.warm()
+  const DM_QUOTE = 'mensagem privada ' + SPAM
+  const dm = env.moderation.addReport({ kind: 'dm', quote: DM_QUOTE })
+  delete env.moderation.rows.get(dm.id).seq
+  env.worker.onReport(dm)
+  await env.worker.idle()
+  await env.worker.runOnce()
+  await env.worker.idle()
+  env.c.t += RETRY_ABSTAIN_MS + 1
+  await env.worker.runOnce()
+  await env.worker.idle()
+  t.is(env.readPost.calls.length, 0, 'no read')
+  t.is(env.embed.calls.length, 0, 'no embed')
+  t.is(env.ledger.get(dm.id).code, 'dm')
+  t.is(env.ledger.get(dm.id).suggestion, null)
+  t.is(env.moderation.decideCalls.length, 0, 'never decided')
+  t.is(env.moderation.get(dm.id).status, 'aberta')
+  t.is(env.logs.filter((l) => l.reason === 'dm').length, 1, 'one dm log line, not one per scan')
+  t.absent(JSON.stringify(env.logs).includes('mensagem privada'), 'the quote never reaches a log')
+  const before = env.exemplars.size()
+  env.worker.onHumanDecision(env.moderation.human(dm.id, 'bloquear'))
+  await env.worker.idle()
+  t.is(env.exemplars.size(), before, 'nothing learned')
+  cleanLogs(t, env.logs)
+})
+
 test('the appeal set is rebuilt after a restart from exportRows, and ja-decidida stops a report decided meanwhile', async (t) => {
   const env = setup(t, { mode: 'auto' })
   const old = env.moderation.addReport({ status: 'bloquear', decidedBy: AI_ACTOR, decidedAt: iso(T0 - 48 * 3600 * 1000), note: NOTE_BLOCK })

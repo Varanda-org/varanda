@@ -30,6 +30,13 @@ const AVATAR_SIDE = 512
 const MAX_AVATAR_BLOCKS = 8
 const MAX_AVATAR_BYTES = 262144
 const AVATAR_MIMES = Object.freeze(['image/jpeg', 'image/webp'])
+// DM media items: blob descriptors of packages/core/lib/blob.js
+// (BLOB_CHUNK_BYTES, BLOB_MAX_CHUNKS, BLOB_MAC_BYTES; not imported: zero deps)
+// plus mime, w, h and ms (docs/protocol.md section 11).
+const MAX_DM_MEDIA = 4
+const DM_MEDIA_CHUNK_BYTES = 32768
+const DM_MEDIA_MAX_CHUNKS = 257
+const DM_MEDIA_MAC_BYTES = 16
 
 const LOG_LIMIT_DEFAULT = 20
 // Page maxima: the largest pages whose worst case (every post with
@@ -57,13 +64,20 @@ const NOTICES_LIMIT_MAX = 64
 const PROFILE_LIMIT_MAX = 100
 const ENGAGEMENT_LIMIT_MAX = 62
 const PEEK_SEQS_MAX = 36
-// Group items carry no media, so FEED_LIMIT_MAX is a safe page maximum
-// (docs/rpc.md section 2, test/sizes.test.js).
-const GROUP_LIMIT_DEFAULT = 30
-const GROUP_LIMIT_MAX = 31
+// The largest page whose worst case includes four private media items per
+// post and still fits MAX_MESSAGE (docs/rpc.md section 2, test/sizes.test.js).
+const GROUP_LIMIT_DEFAULT = 29
+const GROUP_LIMIT_MAX = 29
 const GROUP_MEMBERS_LIMIT_MAX = 100
 const MAX_GROUP_NAME = 80 // same value as records.js
 const MAX_GROUP_CUTS = 16
+const MAX_GROUPS_PER_COMMUNITY = 32
+const COMMUNITY_LIST_MAX = 64
+// dm.thread: the largest page whose worst case (MAX_TEXT 4-byte characters
+// and MAX_DM_MEDIA maximal media items in every message) fits MAX_MESSAGE
+// (docs/rpc.md 5.78, test/sizes.test.js).
+const DM_THREAD_LIMIT_DEFAULT = 30
+const DM_THREAD_LIMIT_MAX = 46
 const PEEK_TIMEOUT_MS = 8000
 const FOLLOW_LIMIT_DEFAULT = 100
 const FOLLOW_LIMIT_MAX = 500
@@ -164,6 +178,10 @@ module.exports = {
   MAX_AVATAR_BLOCKS,
   MAX_AVATAR_BYTES,
   AVATAR_MIMES,
+  MAX_DM_MEDIA,
+  DM_MEDIA_CHUNK_BYTES,
+  DM_MEDIA_MAX_CHUNKS,
+  DM_MEDIA_MAC_BYTES,
   LOG_LIMIT_DEFAULT,
   LOG_LIMIT_MAX,
   FEED_LIMIT_DEFAULT,
@@ -181,6 +199,10 @@ module.exports = {
   GROUP_MEMBERS_LIMIT_MAX,
   MAX_GROUP_NAME,
   MAX_GROUP_CUTS,
+  MAX_GROUPS_PER_COMMUNITY,
+  COMMUNITY_LIST_MAX,
+  DM_THREAD_LIMIT_DEFAULT,
+  DM_THREAD_LIMIT_MAX,
   PEEK_TIMEOUT_MS,
   FOLLOW_LIMIT_DEFAULT,
   FOLLOW_LIMIT_MAX,

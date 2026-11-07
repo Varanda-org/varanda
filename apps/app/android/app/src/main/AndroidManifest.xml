@@ -1,5 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
   <uses-permission android:name="android.permission.INTERNET"/>
+  <uses-permission android:name="android.permission.RECORD_AUDIO"/>
   <uses-permission android:name="android.permission.VIBRATE"/>
   <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove"/>
   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" tools:node="remove"/>
@@ -25,6 +26,14 @@
         <category android:name="android.intent.category.DEFAULT"/>
         <category android:name="android.intent.category.BROWSABLE"/>
         <data android:scheme="varanda"/>
+      </intent-filter>
+      <!-- Only community and group links of the production installation open the app; every other site path (/@, /convite/, /account/*) stays in the browser. Verified by the existing assetlinks.json (handle_all_urls, app.varanda, release cert), so app.varanda.debug opens them only after manual approval. -->
+      <intent-filter android:autoVerify="true">
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <category android:name="android.intent.category.BROWSABLE"/>
+        <data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/c/"/>
+        <data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/g/"/>
       </intent-filter>
     </activity>
   </application>
