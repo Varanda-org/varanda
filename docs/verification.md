@@ -5856,3 +5856,52 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi executada nesta documentação.
 - O serviço de conta não muda: não recebe nem guarda o cartão.
 - Links nativos (`varanda://`) continuam com no máximo 400 caracteres, como os de web.
+
+## 126. Cartão de convite regional (PR feat/invite-card-app)
+
+Quem convida pode mandar, junto do link de entrada, um cartão com o nome de quem recebe, uma mensagem curta e um de 13 desenhos regionais. Quem abre o link vê o cartão antes da introdução e, depois de entrar, pode seguir ou mandar um oi para quem escreveu. Esta seção descreve o que o código faz; o contrato e a assinatura estão na seção 125.
+
+Regras que os passos conferem:
+
+- O cartão viaja só no fragmento do link (`#c1.<corpo>`), mais o `?c=<desenho>` público e opcional. Nenhum servidor recebe o fragmento: o app o lê e o tira da barra de endereço na mesma passada em que guarda o código do convite (`captureSignupInvite`), antes de qualquer tela.
+- O cartão é assinado e preso ao código do convite: a assinatura cobre o código, e `inviteCard.verify` roda no nó antes de qualquer tela mostrar o cartão. Um fragmento forjado, trocado de código ou com assinatura ruim não vira cartão, e o convite segue valendo como link comum.
+- O link inteiro tem no máximo 400 caracteres. Por isso um app já instalado, que só conhece o caminho `/convite/<código>`, continua lendo o código e ignora o cartão.
+- Guarda: na web, o registro fica no `sessionStorage` da aba, na chave `varanda-signup-invite-card`, por 24 horas; no app instalado, só na memória do processo. É lido como não confiável a cada uso (reconstruído campo a campo e conferido de novo) e some quando o convite é trocado ou expira.
+- Prévia fora: um link `/convite/...` nunca vira prévia. `apps/app/src/preview.js` não monta cartão para ele e `apps/cli/lib/account/preview-routes.js` recusa o endereço em qualquer host, para o nome e a mensagem não irem ao serviço de prévia.
+- Nada segue ninguém sozinho. Abrir o cartão não cria vínculo; Seguir e Mandar um oi são toques da pessoa, cada um conferido de novo (identidade, registro do cartão e associação) antes de escrever, sem repetição automática.
+- Privacidade, em termos exatos: não há nenhum registro novo de quem convidou quem e nenhum aviso de cadastro. O diretório do serviço de conta já guarda o hash do convite usado no vínculo do novo membro (`apps/cli/lib/account/store.js`, `docs/design.md`, "Vínculo com a conta Google"), como antes do cartão. Tocar em Seguir manda o aviso comum de seguir (`packages/core/lib/notices.js`), como qualquer outro seguir.
+- Os 13 desenhos são desenhados no código, com `View`, e inspirados em tradições regionais (Marajoara, Encontro das águas, Vitória-régia, Cordel, Bandeirinhas, Chita, Ipê-amarelo, Pantanal, Azulejo, Copacabana, Minas, Araucária, Chimarrão). Nenhum copia obra de artista nem padrão protegido.
+
+O fluxo no app:
+
+- Quem convida: em Convites, o botão "Mandar com um cartão" abre nome, região, desenho e mensagem (já vem uma sugestão por desenho). O contador mostra os bytes usados e os que cabem (`messageRoom`); se o nome ou a mensagem não servem, uma linha explica (nome vazio ou longo, mensagem vazia, com símbolos que não aparecem ou longa demais). O botão vira "Criar link com cartão" e "Assinando cartão" durante a assinatura. Se a assinatura falhar, o convite criado vale como link comum e o app avisa que o cartão não entrou.
+- Quem abre, antes da introdução: o cartão aparece antes das telas de introdução, com Entrar, Como funciona (mostra a introdução e volta ao cartão) e Agora não (esconde só nesta abertura). A tela espera o nó ficar pronto por até 6 s (`OPEN_WAIT_MS`); passado esse tempo segue a introdução e, se a conferência terminar depois, o cartão assume o lugar das telas de introdução. Uma assinatura ruim, um cartão vencido, um membro sem vínculo ou uma retomada do Google/idade não mostram o cartão. Sem rede, a pertença do membro fica "desconhecida" e nada é oferecido.
+- Quem chegou: o cartão de chegada aparece no app só para quem passou pela configuração neste aparelho segurando o cartão, nunca para um membro que já estava com a conta aberta. Mostra "Você chegou com o cartão de @nome", com Seguir, Mandar um oi (texto fixo "Oi! Cheguei.", nunca a mensagem do cartão; sem Conversas do outro lado, avisa) e Agora não.
+- Movimento: o cartão entra com um fade e um crescimento curtos, uma vez; com movimento reduzido, já aparece no estado final. O desenho e os textos seguem o tema claro e escuro.
+
+Passos (marcar só depois de executar e guardar o registro):
+
+- [ ] Android (build de debug, emulador ou aparelho): criar um convite com cartão em Convites, abrir o link e conferir o cartão antes da introdução; Agora não; link comum (sem cartão); fragmento forjado; cartão de chegada com Seguir e Mandar um oi; sem rede (status offline); tema claro e escuro; movimento reduzido; os 13 desenhos.
+- [ ] Simulador iOS: o mesmo roteiro do Android.
+- [ ] Web e PWA: o mesmo roteiro, mais as duas barras de endereço (o fragmento e o `?c` somem), o nó lento (a espera de 6 s e a troca tardia pelo cartão) e um viewport de 390 px.
+- [ ] Medir a carga a frio: em cada plataforma, anotar quanto o nó leva para ficar pronto depois de abrir o link com o cache limpo e comparar com os 6 s de `OPEN_WAIT_MS`. Registrar os tempos aqui; se passarem de 6 s com frequência, a espera precisa ser revista. Nenhuma medida foi feita nesta documentação.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/app/test/preview.test.js` e `node apps/cli/test/preview-routes.test.js`.
+- `node apps/app/test/inviteCardCopy.test.js`, `node apps/app/test/inviteCardArt.test.js`, `node apps/app/test/inviteCardMotion.test.js` e `node apps/app/test/inviteCardFrame.test.js`.
+- `node apps/app/test/signupInvite.test.js` e `node apps/app/test/linkReturn.test.js`.
+- `node apps/app/test/inviteCardFlow.test.js` e `node apps/app/test/inviteCardCompose.test.js`.
+- `node apps/app/test/help.test.js`.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- Alguns mensageiros tiram o fragmento do link: o link comum continua funcionando e o convite vale sem cartão.
+- A mensagem é um bilhete curto, de cerca de 134 bytes no endereço bora.varanda.app, dividido com o nome (o contador do app mostra o espaço exato).
+- Não há nota de voz, foto, desenho por estado, compartilhar como imagem, Open Graph por convite nem arte encomendada.
+- Um app já instalado não mostra o cartão e ainda assim troca o código pelo convite.
+- Quem usa uma configuração salva de outra associação não vê cartão (a conferência falha fechada), e o código continua valendo.
+- Quem tem o link lê o cartão: nome, mensagem e desenho não são cifrados.
+- Para mostrar o @nome de quem escreveu, o aparelho de quem abre o link consulta o status público da conta pela chave de quem convidou, antes do cadastro (o serviço não registra essa consulta; nome e mensagem não saem do aparelho). Um cartão vencido não faz consulta nenhuma.
+- O histórico do próprio navegador pode guardar o endereço como foi aberto, com o fragmento, mesmo depois que o app o tira da barra.
