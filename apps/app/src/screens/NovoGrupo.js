@@ -14,6 +14,7 @@ import { reconcile } from '../groups'
 import { Btn, ErrorText, Field, Label, Soft, UNCERTAIN, useAction } from '../ui'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
+import { useEscapeLayer } from '../ui/escapeLayer'
 import { useNode } from '../node'
 import { type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
@@ -25,21 +26,10 @@ export function nameLength (text) {
   return Array.from(text).length
 }
 
-// App's web Escape handler pops the stack unless the event was handled:
-// while a sheet is open, capture Escape first so it only closes the sheet.
+// Escape closes only this sheet: the shared Escape layers (src/ui/escapeLayer.js)
+// keep App's Escape from also popping the screen underneath.
 export function useEscapeClose (visible, onClose) {
-  const closeRef = useRef(onClose)
-  closeRef.current = onClose
-  useEffect(() => {
-    if (!visible || typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
-    const onKey = (event) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      if (typeof closeRef.current === 'function') closeRef.current()
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [visible])
+  useEscapeLayer(!!visible, onClose, 'sheet')
 }
 
 export function Choice ({ label, options, value, onChange, disabled }) {

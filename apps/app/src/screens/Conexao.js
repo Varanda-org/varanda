@@ -135,7 +135,7 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
               {node.hostedSource === 'remembered'
                 ? <Soft>sem resposta da instalação: usando a configuração guardada da última visita</Soft>
                 : null}
-              <Btn label={configError ? 'configurar manualmente' : 'usar outra configuração'} onPress={() => setManual(true)} secondary />
+              <Btn label={configError ? 'Configurar manualmente' : 'Usar outra configuração'} onPress={() => setManual(true)} secondary />
               <Notice>Limpar os dados deste site apaga os diários guardados; a identidade volta com a mesma passkey.</Notice>
             </Card>
             )
@@ -152,8 +152,8 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
         {embedded ? null : <Title>Conectar</Title>}
         <Card>
           <ErrorText>{node.error}</ErrorText>
-          <Btn label='tentar de novo' onPress={() => apply.run(() => node.retryDiscovery())} pending={apply.pending} />
-          <Btn label='configurar manualmente' onPress={() => setManual(true)} secondary />
+          <Btn label='Tentar de novo' onPress={() => apply.run(() => node.retryDiscovery())} pending={apply.pending} />
+          <Btn label='Configurar manualmente' onPress={() => setManual(true)} secondary />
         </Card>
       </Page>
     )
@@ -185,8 +185,8 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
           {node.hostedSource === 'remembered'
             ? <Soft>sem resposta da instalação: usando a configuração guardada da última visita</Soft>
             : null}
-          {ready ? null : <Btn label='tentar de novo' onPress={() => apply.run(() => node.reconnect())} pending={busy} />}
-          <Btn label='usar outra configuração' onPress={() => setManual(true)} secondary />
+          {ready ? null : <Btn label='Tentar de novo' onPress={() => apply.run(() => node.reconnect())} pending={busy} />}
+          <Btn label='Usar outra configuração' onPress={() => setManual(true)} secondary />
         </Card>
         <Notice>Limpar os dados deste site apaga os diários guardados; a identidade volta com a mesma passkey.</Notice>
       </Page>
@@ -231,12 +231,12 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
           placeholder='wss://semeador.exemplo/seeder'
         />
         <ErrorText>{localError}</ErrorText>
-        <Btn label={ready ? 'aplicar e reconectar' : 'conectar'} onPress={submit} pending={busy} />
+        <Btn label={ready ? 'Aplicar e reconectar' : 'Conectar'} onPress={submit} pending={busy} />
         {confirmBack
           ? <Notice>O diário deste navegador foi criado com a associação desta configuração. Se a instalação usa outra associação, ele deixa de funcionar aqui.</Notice>
           : null}
         {manual || hostedPage
-          ? <Btn label={confirmBack ? 'voltar mesmo assim' : 'voltar à configuração detectada'} onPress={backToHosted} disabled={busy} secondary />
+          ? <Btn label={confirmBack ? 'Voltar mesmo assim' : 'Voltar à configuração detectada'} onPress={backToHosted} disabled={busy} secondary />
           : null}
       </Card>
       <Notice>Limpar os dados deste site apaga os diários guardados; a identidade volta com a mesma passkey.</Notice>
@@ -294,7 +294,7 @@ function ConexaoNo ({ active = true, embedded = false }) {
           {ready && info !== null ? <Soft>{info.publicDht ? 'o nó usa a DHT pública' : 'o nó usa a rede privada (bootstrap)'}</Soft> : null}
           <ErrorText>{node.error || infoError}</ErrorText>
           {node.phase === 'error' ? <Soft>Para conectar, abra o endereço impresso pelo varanda-serve.</Soft> : null}
-          {node.phase === 'ready' || node.phase === 'error' ? <Btn label='reconectar' onPress={() => node.reconnect()} secondary /> : null}
+          {node.phase === 'ready' || node.phase === 'error' ? <Btn label='Reconectar' onPress={() => node.reconnect()} secondary /> : null}
         </Card>
         <Soft>Na web, a associação, o bootstrap e a DHT são as opções do varanda-serve.</Soft>
       </Page>
@@ -345,8 +345,8 @@ function ConexaoNo ({ active = true, embedded = false }) {
             onSubmitEditing={submitInstallation}
           />
           <ErrorText>{addressError}</ErrorText>
-          <Btn label={ready ? 'aplicar e reconectar' : 'conectar'} onPress={submitInstallation} pending={busy} />
-          {configError ? <Btn label='tentar de novo' onPress={() => apply.run(() => node.retryDiscovery())} pending={busy} secondary /> : null}
+          <Btn label={ready ? 'Aplicar e reconectar' : 'Conectar'} onPress={submitInstallation} pending={busy} />
+          {configError ? <Btn label='Tentar de novo' onPress={() => apply.run(() => node.retryDiscovery())} pending={busy} secondary /> : null}
           {node.hosted && node.config
             ? (
               <View style={{ gap: 4 }}>
@@ -397,9 +397,9 @@ function ConexaoNo ({ active = true, embedded = false }) {
         {form.publicDht ? <Notice>O nó vai usar a DHT pública da internet para achar pares.</Notice> : null}
         <Field label='endereço local da DHT (opcional)' value={form.dhtHost} onChangeText={set('dhtHost')} mono />
         <ErrorText>{localError}</ErrorText>
-        <Btn label={ready ? 'aplicar e reiniciar o nó' : 'conectar'} onPress={submit} pending={busy} />
+        <Btn label={ready ? 'Aplicar e reiniciar o nó' : 'Conectar'} onPress={submit} pending={busy} />
         {NATIVE_INSTALLATION
-          ? <Btn label='usar o endereço da instalação' onPress={() => setAdvanced(false)} disabled={busy} secondary />
+          ? <Btn label='Usar o endereço da instalação' onPress={() => setAdvanced(false)} disabled={busy} secondary />
           : null}
       </Card>
     </Page>

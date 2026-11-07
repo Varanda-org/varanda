@@ -76,13 +76,19 @@ export function ConversationRow ({ item, now, onPress }) {
           <Text style={[styles.title, unread && styles.titleUnread]} numberOfLines={1}>{title}</Text>
           {time ? <Text style={[styles.time, unread && styles.timeUnread]}>{time}</Text> : null}
         </View>
-        <View style={styles.line}>
-          <Text style={styles.preview} numberOfLines={1}>
-            {own ? <Text style={styles.own}>{OWN_LABEL + ': '}</Text> : null}
-            {preview}
-          </Text>
-          {unread ? <View style={[styles.badge, dot && styles.dot]}>{!dot ? <Text style={styles.badgeText}>{badge}</Text> : null}</View> : null}
-        </View>
+        {/* No preview and nothing unread: no empty second line, so the title
+            centres against the avatar. */}
+        {preview !== '' || unread
+          ? (
+            <View style={styles.line}>
+              <Text style={styles.preview} numberOfLines={1}>
+                {own ? <Text style={styles.own}>{OWN_LABEL + ': '}</Text> : null}
+                {preview}
+              </Text>
+              {unread ? <View style={[styles.badge, dot && styles.dot]}>{!dot ? <Text style={styles.badgeText} maxFontSizeMultiplier={1.5}>{badge}</Text> : null}</View> : null}
+            </View>
+            )
+          : null}
       </View>
     </Pressable>
   )
@@ -107,14 +113,15 @@ const makeStyles = (colors) => StyleSheet.create({
   preview: { ...type.postMeta, fontSize: 14, lineHeight: 19, flex: 1, minWidth: 0, color: colors.soft },
   own: { color: colors.accent, fontWeight: '600' },
   badge: {
+    // minHeight: with large text a fixed 20 pt cut the digits.
     minWidth: 20,
-    height: 20,
+    minHeight: 20,
     paddingHorizontal: 6,
     borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: colors.accent
   },
-  dot: { minWidth: 12, width: 12, height: 12, paddingHorizontal: 0 },
+  dot: { minWidth: 12, width: 12, minHeight: 12, height: 12, paddingHorizontal: 0 },
   badgeText: { ...type.chip, color: colors.accentInk }
 })

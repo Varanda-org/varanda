@@ -437,7 +437,7 @@ export function Conversas ({
   const renderItem = ({ item }) => {
     if (item.kind === 'requests') {
       return (
-        <PinnedRow icon='conversas' title={item.title} dot={item.unread === true} onPress={() => { if (typeof onOpenRequests === 'function') onOpenRequests() }} />
+        <PinnedRow icon='conversas' title={item.title} dot={item.unread === true} chevron onPress={() => { if (typeof onOpenRequests === 'function') onOpenRequests() }} />
       )
     }
     if (item.kind === 'communities') {
@@ -516,14 +516,15 @@ const makeStyles = (colors) => StyleSheet.create({
     marginHorizontal: space.lg,
     marginVertical: space.sm,
     paddingHorizontal: space.md,
-    height: layout.hit,
+    // minHeight: large system text grows the field instead of squeezing it.
+    minHeight: layout.hit,
     borderRadius: radius.md,
     borderWidth: 1.5,
     borderColor: 'transparent',
     backgroundColor: colors.inputOff
   },
   searchFocused: { borderColor: colors.accent, backgroundColor: colors.card },
-  input: { ...type.postText, flex: 1, minWidth: 0, height: layout.hit - 3, paddingVertical: 0, color: colors.ink },
+  input: { ...type.postText, flex: 1, minWidth: 0, minHeight: layout.hit - 3, paddingVertical: 0, color: colors.ink },
   clear: { minWidth: space.xl, minHeight: space.xl, alignItems: 'center', justifyContent: 'center' },
   pressed: { backgroundColor: colors.line },
   pinnedRow: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: PINNED_HEIGHT, paddingHorizontal: space.lg },

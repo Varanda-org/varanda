@@ -3,6 +3,27 @@
 // The avatar crop math (src/media/crop.js). It is an ES module bundled by
 // Metro; import() loads it here through Node's module syntax detection.
 const test = require('brittle')
+const fs = require('fs')
+const path = require('path')
+
+test('avatar movement uses two rows of accessible icon actions', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/AvatarEditor.js'), 'utf8')
+  const start = src.indexOf('<View style={styles.moveControls}>')
+  const controls = start < 0 ? '' : src.slice(start, src.indexOf('</View>', start))
+  const rows = [...controls.matchAll(/<Row>([\s\S]*?)<\/Row>/g)]
+  t.alike(rows.map((m) => (m[1].match(/<IconAction /g) || []).length), [2, 2], 'a two by two control')
+  for (const [icon, label, direction] of [
+    ['esquerda', 'mover para a esquerda', 'left'],
+    ['direita', 'mover para a direita', 'right'],
+    ['seta_cima', 'mover para cima', 'up'],
+    ['baixo', 'mover para baixo', 'down']
+  ]) {
+    t.ok(controls.includes("<IconAction icon='" + icon + "' label='" + label + "' onPress={() => move('" + direction + "')} disabled={off || !limits." + direction + '} />'), direction + ' keeps the spoken label, movement and limit')
+  }
+  t.ok(/<Row>\s*<Pill label='Aproximar'[^\n]+\s*<Pill label='Afastar'[^\n]+\s*<Pill label='Centralizar'[^\n]+\s*<\/Row>/.test(src), 'zoom and centering stay together as text')
+  t.ok(src.includes("<Pill label='Cancelar' onPress={onCancel} disabled={off} />") && src.includes("<Pill label='Usar foto' filled pending={off} onPress={() => onConfirm(cropRect(crop, source))} />"), 'cancel and confirm remain textual')
+  t.ok(src.includes("{'Zoom de ' + percent + '%'}"), 'the zoom line starts with a capital')
+})
 
 const load = () => import('../src/media/crop.js')
 
@@ -227,4 +248,14 @@ test('invalid input never throws', async (t) => {
   t.alike(m.clampCrop({ zoom: 2 }, null), m.initialCrop())
   t.alike(m.clampCrop({ zoom: 9, cx: 2, cy: -1 }, SOURCES.square), { zoom: 4, cx: 0.875, cy: 0.125 })
   t.alike(m.displayRect(m.initialCrop(), SOURCES.square, 0), { left: 0, top: 0, width: 0, height: 0 })
+})
+
+test('Escape in the photo editor cancels only the crop', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ui', 'AvatarEditor.js'), 'utf8')
+  t.ok(src.includes("useEscapeLayer(true, () => { if (!off && onCancel) onCancel() }, 'editor')"), 'the editor is the top Escape layer over its sheet')
+})
+
+test('the photo editor panel is not a focus stop of its own', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ui', 'AvatarEditor.js'), 'utf8')
+  t.ok(src.includes('const webPanel = WEB ? { onKeyDown, onKeyUp } : null'), 'Shift+Tab reaches Cancelar and Usar foto')
 })

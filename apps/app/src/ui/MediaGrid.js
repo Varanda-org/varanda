@@ -12,6 +12,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { useEscapeLayer } from './escapeLayer'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_MEDIA_PER_POST, gridLayout } from '../media/plan'
 import { Icon } from './Icon'
@@ -40,18 +41,13 @@ function Viewer ({ author, media, index, onIndex, onClose, persist }) {
   const closeRef = useRef(onClose)
   closeRef.current = onClose
 
+  // Escape closes only the viewer, even over a sheet (src/ui/escapeLayer.js).
+  useEscapeLayer(!!open, () => closeRef.current(), 'viewer')
   useEffect(() => {
     if (!open || Platform.OS !== 'web' || typeof document === 'undefined') return
     const onKey = (event) => {
       if (event.key === 'ArrowLeft') goRef.current(-1)
       else if (event.key === 'ArrowRight') goRef.current(1)
-      else if (event.key === 'Escape') {
-        // Handled here: the app's own Escape (closing a pushed screen) must
-        // not also run.
-        event.preventDefault()
-        event.stopPropagation()
-        closeRef.current()
-      }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)

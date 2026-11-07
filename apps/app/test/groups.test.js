@@ -162,8 +162,8 @@ test('labels in pt-BR', async (t) => {
   t.is(visibilityLabel('public'), 'grupo público')
   t.is(joinLabel('approval'), 'entrada com aprovação')
   t.is(joinLabel('x'), '')
-  t.is(membersLabel(1), '1 membro')
-  t.is(membersLabel(0), '0 membros')
+  t.is(membersLabel(1), '1\u00a0membro')
+  t.is(membersLabel(0), '0\u00a0membros')
   t.is(membersLabel(null), '')
 })
 

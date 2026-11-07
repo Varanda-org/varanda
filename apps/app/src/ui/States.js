@@ -51,7 +51,7 @@ export function EmptyState ({ icon, title, body, actionLabel, onAction }) {
     <View style={styles.empty}>
       {icon ? <Icon name={icon} size={40} color={colors.soft} /> : null}
       <Text style={styles.emptyTitle} accessibilityRole='header'>{title}</Text>
-      {body ? <Soft>{body}</Soft> : null}
+      {body ? <Soft style={styles.emptyBody}>{body}</Soft> : null}
       {actionLabel && onAction ? <Pill label={actionLabel} onPress={onAction} filled /> : null}
     </View>
   )
@@ -62,7 +62,7 @@ export function ErrorState ({ message, onRetry, pending }) {
   return (
     <View style={styles.empty}>
       <ErrorText>{message}</ErrorText>
-      {onRetry ? <Pill label='tentar de novo' onPress={onRetry} pending={pending} /> : null}
+      {onRetry ? <Pill label='Tentar de novo' onPress={onRetry} pending={pending} /> : null}
     </View>
   )
 }
@@ -76,7 +76,7 @@ export function ListFooter ({ loading, atEnd, endText = 'Isso é tudo por enquan
     content = (
       <>
         <ErrorText>{error}</ErrorText>
-        {onRetry ? <Pill label='tentar de novo' onPress={onRetry} pending={pending} /> : null}
+        {onRetry ? <Pill label='Tentar de novo' onPress={onRetry} pending={pending} /> : null}
       </>
     )
   } else if (loading) {
@@ -123,6 +123,7 @@ const makeStyles = (colors) => StyleSheet.create({
   skBar: { height: 12, borderRadius: 6, backgroundColor: colors.skeleton },
   empty: { alignItems: 'center', gap: 12, paddingVertical: 32, paddingHorizontal: 16 },
   emptyTitle: { ...type.emptyTitle, color: colors.ink, textAlign: 'center' },
+  emptyBody: { textAlign: 'center' },
   footer: { minHeight: 56, alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 8, paddingHorizontal: 16 },
   newWrap: { position: 'absolute', alignSelf: 'center', zIndex: 2 },
   newPill: {

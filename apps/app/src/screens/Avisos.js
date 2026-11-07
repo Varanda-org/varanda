@@ -271,7 +271,8 @@ function NoticeRow ({ item, now, unread, postText, onOpenMember, onOpenThread })
   const whoBlock = (
     <>
       <View style={styles.who}>
-        <Text style={styles.name} numberOfLines={1}>
+        {/* Two lines, so the action ("começou a seguir você") is read whole. */}
+        <Text style={styles.name} numberOfLines={2}>
           <Text style={styles.nameBold}>{displayText(parts.name)}</Text>
           <Text style={styles.nameRest}>{displayText(parts.rest)}</Text>
         </Text>
@@ -982,10 +983,11 @@ const makeStyles = (colors) => StyleSheet.create({
     borderBottomColor: colors.line
   },
   avatar: { width: 44, height: 44, position: 'relative' },
+  // Off the avatar's corner, so it never covers the initials.
   kindBadge: {
     position: 'absolute',
-    right: 0,
-    bottom: 0,
+    right: -4,
+    bottom: -4,
     width: 20,
     height: 20,
     borderRadius: 10,

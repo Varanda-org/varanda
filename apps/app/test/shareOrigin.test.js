@@ -1,8 +1,8 @@
 'use strict'
 
 // GrupoAjustes is JSX, so this reads the files as text.
-// window.location is absent on the phone. window.addEventListener (the
-// sheet's Escape handler) is a different use and must stay.
+// window.location is absent on the phone. The sheet's Escape now comes from
+// the shared Escape layers of its Sheet (src/ui/escapeLayer.js).
 const fs = require('node:fs')
 const path = require('node:path')
 const test = require('brittle')
@@ -41,5 +41,5 @@ test('group and community share links use the installation origin', (t) => {
     t.ok(guard !== -1 && share !== -1 && guard < share, name + ' refuses an empty origin before sharing')
     t.ok(body.includes('Não foi possível copiar o link.'), name)
   }
-  t.ok(read('GrupoAjustes.js').includes('window.addEventListener'))
+  t.ok(read('GrupoAjustes.js').includes('<Sheet'), 'Escape is handled by its Sheet layer')
 })

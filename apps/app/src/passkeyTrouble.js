@@ -11,6 +11,10 @@ export const PHONE_SIGNIN_HINT = 'Sua passkey está no celular? Toque em Entrar 
 export const PHONE_LABEL = 'criar com o celular'
 // The same phone button when it opens an existing account instead.
 export const PHONE_SIGNIN_LABEL = 'entrar com o celular'
+// Capitalised forms for the buttons; the lower-case ones read inside sentences.
+export const RETRY_BUTTON = 'Tentar de novo'
+export const PHONE_BUTTON = 'Criar com o celular'
+export const PHONE_SIGNIN_BUTTON = 'Entrar com o celular'
 export const NOT_SYNCED_TITLE = 'Essa passkey não serve para o Varanda.'
 export const NONE_TEXT = 'Nenhuma passkey do Varanda neste aparelho. Crie uma aqui ou entre no site com a passkey que já tem.'
 export const KNOWN_LOST_TEXT = 'A passkey que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar em outro gerenciador: tente entrar com outra passkey ou crie uma nova conta.'
@@ -20,7 +24,7 @@ export const NONE_FULL_TEXT = 'Nenhuma passkey do Varanda neste aparelho. Entre 
 export const KNOWN_LOST_FULL_TEXT = 'A passkey que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar em outro gerenciador: tente entrar com outra passkey.'
 // After one sign-in that did not finish (closed sheet or missing passkey).
 export const MISSED_TEXT = 'A passkey não apareceu? Tente entrar de novo ou toque em entrar com outra passkey para escolher outra.'
-export const OTHER_PASSKEY_LABEL = 'entrar com outra passkey'
+export const OTHER_PASSKEY_LABEL = 'Entrar com outra passkey'
 
 const CLEANED_STEP = 'O app já pediu ao gerenciador para retirar a passkey que não serviu.'
 

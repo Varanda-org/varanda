@@ -15,6 +15,10 @@ import { fonts, layout, space, type } from './theme'
 
 const mark = require('../../assets/cadeira.png')
 
+// One line that shrinks to fit (native) or ends in an ellipsis (web): two
+// lines split a one-word title like "Conversas" inside the word at large text.
+const TITLE_FIT = { numberOfLines: 1, adjustsFontSizeToFit: true, minimumFontScale: 0.6, maxFontSizeMultiplier: 1.3 }
+
 function isAction (item) {
   return !!item && typeof item === 'object' && !isValidElement(item) && typeof item.icon === 'string'
 }
@@ -66,13 +70,13 @@ export function TopBar ({ title, subtitle, right, onBack, leading, onTitlePress,
             onPress={onTitlePress}
             style={({ pressed }) => [styles.titles, pressed && styles.pressed]}
           >
-            <Text style={styles.title} numberOfLines={2} accessibilityRole='header'>{title}</Text>
+            <Text style={styles.title} {...TITLE_FIT} accessibilityRole='header'>{title}</Text>
             {subtitle ? <Text style={styles.subtitle} numberOfLines={1}>{subtitle}</Text> : null}
           </Pressable>
           )
         : (
           <View style={styles.titles}>
-            <Text style={styles.title} numberOfLines={2} accessibilityRole='header'>{title}</Text>
+            <Text style={styles.title} {...TITLE_FIT} accessibilityRole='header'>{title}</Text>
             {subtitle ? <Text style={styles.subtitle} numberOfLines={1}>{subtitle}</Text> : null}
           </View>
           )}

@@ -330,7 +330,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         {heldIds.length > 0
           ? (
             <View style={styles.pendingAll}>
-              <Pill label='enviar tudo' onPress={() => outbox.release(held)} />
+              <Pill label='Enviar tudo' onPress={() => outbox.release(held)} />
             </View>
             )
           : null}
@@ -349,12 +349,12 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
               ? (
                 <View style={styles.pendingActions}>
                   {heldIds.includes(item.id)
-                    ? <Pill label='enviar' onPress={() => outbox.release([item])} />
+                    ? <Pill label='Enviar' onPress={() => outbox.release([item])} />
                     : null}
-                  {item.state === 'uncertain' || item.state === 'failed'
-                    ? <Pill label='tentar de novo' onPress={() => outbox.retry(item)} />
+                  {!heldIds.includes(item.id) && (item.state === 'uncertain' || item.state === 'failed')
+                    ? <Pill label='Tentar de novo' onPress={() => outbox.retry(item)} />
                     : null}
-                  <Pill label='apagar' onPress={() => outbox.discard(item.id)} />
+                  <Pill icon='lixeira' accessibilityLabel='apagar' onPress={() => outbox.discard(item.id)} />
                 </View>
                 )
               : null}
@@ -385,14 +385,14 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
             value: info.followCount === undefined || info.followCount === null ? null : displayText(String(info.followCount)),
             onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguindo') : undefined
           }, {
-            label: 'seguidores',
+            label: followCounts.seguidores === 1 ? 'seguidor' : 'seguidores',
             value: followCounts.seguidores === null ? null : displayText(String(followCounts.seguidores)),
             onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguidores') : undefined
           }]}
           note={followCounts.incomplete && followCounts.seguidores !== null ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
           actions={[
             <Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} />,
-            profileUrl !== null ? <Pill key='share' label='Compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /> : null
+            profileUrl !== null ? <Pill key='share' icon='compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /> : null
           ]}
         />
         {outboxList}

@@ -821,6 +821,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   if (view.parentGone) notes.push(PARENT_GONE_NOTE)
   if (meta && meta.indexing) notes.push('Ainda montando a conversa completa…')
   else if (meta && meta.complete === false) notes.push('Algumas respostas podem faltar.')
+  const hasReplies = (meta ? meta.repliesTotal : 0) > 0 || replies.length > 0
   if (unavailable > 0) notes.push(unavailable === 1 ? '1 resposta indisponível' : String(unavailable) + ' respostas indisponíveis')
 
   const header = (
@@ -850,12 +851,17 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       {phase === 'error'
         ? <ErrorState message={displayText(error)} onRetry={() => load(false)} />
         : null}
-      {phase === 'ready'
+      {/* No "0 respostas" header over an empty thread; the notes still show. */}
+      {phase === 'ready' && (hasReplies || notes.length > 0)
         ? (
           <View style={styles.repliesHead}>
-            <Text style={styles.repliesTitle} accessibilityRole='header'>
-              {meta && meta.repliesTotal === 1 ? '1 resposta' : String(meta ? meta.repliesTotal : 0) + ' respostas'}
-            </Text>
+            {hasReplies
+              ? (
+                <Text style={styles.repliesTitle} accessibilityRole='header'>
+                  {meta && meta.repliesTotal === 1 ? '1 resposta' : String(meta ? meta.repliesTotal : 0) + ' respostas'}
+                </Text>
+                )
+              : null}
             {notes.map((n) => <Soft key={n}>{n}</Soft>)}
           </View>
           )

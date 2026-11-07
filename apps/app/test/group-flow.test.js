@@ -412,7 +412,7 @@ test('a non-member sees an invite card with one join button, from the index too'
   const held = src.slice(src.indexOf('const joinable ='))
   t.ok(held.includes('<JoinCard'), 'the held path keeps the invite card')
   const info = screen('ComunidadeInfo.js')
-  t.ok(info.includes("label='Compartilhar'") && !info.includes('<JoinCard'), 'Compartilhar moved to the info screen, which never joins')
+  t.ok(info.includes("accessibilityLabel='Compartilhar'") && !info.includes('<JoinCard'), 'Compartilhar moved to the info screen, which never joins')
   t.absent(held.includes('joinWord') || held.includes("label='Entrar'") || held.includes("'Pedir entrada'"), 'no second join button beside the card')
 })
 
@@ -478,7 +478,7 @@ test('the community list opens the info screen and shows the newest line and unr
   t.ok(src.includes("title={pending ? (indexName || 'Comunidade ainda chegando') : title}"), 'a pending community shows the index name when known')
   t.ok(src.includes("const indexName = idx.status === 'done' && needIndex && typeof idx.name === 'string' && idx.name !== ''"), 'the index name only from a finished index read, never a null name')
   t.ok(src.includes('unreadLabel(g.unread)'), 'the unread count')
-  t.ok(src.includes("' não lidas'"), 'the row reads the count aloud')
+  t.ok(src.includes("' mensagens novas'"), 'the row reads the count aloud, worded as in Conversas')
   t.absent(src.includes('Sair mesmo assim'), 'leaving lives on the info screen')
   for (const gone of ['<InviteByName', "'community.admin'", "'community.leave'", "'community.invitePolicy'", "'community.members'"]) t.absent(src.includes(gone), gone)
   t.ok(src.includes('const lastSeen = useRef(seenTick)') && src.includes('was === false && isTop === true'), 'returning from a group re-reads the counts')
@@ -661,7 +661,7 @@ test('Grupo reconciles an uncertain photo post and binds its retry to the acting
   t.ok(src.includes("if (await mediaLanded(held) === 'landed')"), 'the retry checks first')
   t.ok(src.includes('if (held.acting !== actingIdRef.current)'), 'a retry as another identity is refused')
   t.ok(/useEffect\(\(\) => \{\n {4}if \(sendTokenRef\.current\) sendTokenRef\.current\.live = false[\s\S]{0,200}setMediaHold\(null\)[\s\S]{0,200}\}, \[actingId\]\)/.test(src), 'switching identity drops the held post')
-  t.ok(src.includes("{mediaHold.checking ? null : <Pill label='tentar de novo'"), 'no retry while checking')
+  t.ok(src.includes("{mediaHold.checking ? null : <Pill label='Tentar de novo'"), 'no retry while checking')
 })
 
 test('a stale pick is dropped and a long press on a photo opens the bubble actions', (t) => {
@@ -747,4 +747,47 @@ test('Grupo offers Encaminhar as the person and shows Encaminhada for fwd 1', (t
   t.ok(src.includes("visibility: isPrivate ? 'private' : 'public'"), 'the source carries the group visibility')
   t.ok(src.includes('<ForwardSheet'), 'the sheet')
   t.ok(src.includes('forwarded={!row.hidden && !!rawRow && rawRow.fwd === 1}'), 'fwd 1 from group.read shows the line')
+})
+
+test('round 6: community info panels, labels and sheet icons', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = (f) => fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', f), 'utf8')
+  const info = src('ComunidadeInfo.js')
+  t.ok(info.indexOf("<PanelRow label='Membros'") < info.indexOf("{panel === 'members'\n") && info.indexOf("{panel === 'members'\n") < info.indexOf("<PanelRow label='Pedidos'"), 'members list sits right after its row')
+  t.ok(info.indexOf("<PanelRow label='Pedidos'") < info.indexOf("{panel === 'requests'\n"), 'requests sit after the Pedidos row')
+  t.ok(info.includes("accessibilityLabel={'Aprovar ' + personName(r)}") && info.includes("accessibilityLabel={'Recusar ' + personName(r)}"), 'icon-only approve and decline name the person')
+  t.ok(info.includes("label='Mais membros'") && info.includes("label='Mais pedidos'"), 'pagination pills are capitalised')
+  t.ok(info.indexOf("label='Mais membros'") < info.indexOf("<PanelRow label='Pedidos'"), 'Mais membros and its rule stay inside the Membros panel')
+  t.ok(info.includes('\\u00a0administradores'), 'no break between number and noun')
+  t.ok(src('GrupoAjustes.js').includes('<SectionHeader>Convite</SectionHeader>'), 'Convite is a section header')
+  t.ok(src('Membro.js').includes("{ icon: 'bandeira', label: 'Denunciar a conta'"), 'report row has the flag icon')
+})
+
+test('ComunidadeInfo closes an open panel with a hairline', (t) => {
+  const src = screen('ComunidadeInfo.js')
+  t.ok(src.includes('panelEnd: { borderBottomWidth: 1, borderBottomColor: colors.line }'))
+  t.ok(src.includes("{panel === 'members' ? <View style={styles.panelEnd} /> : null}") && src.includes("{panel === 'requests' ? <View style={styles.panelEnd} /> : null}"), 'members and requests each close with their own rule')
+  t.ok(src.includes("{section === 'policy' ? <View style={styles.panelEnd} /> : null}"), 'invite policy')
+})
+
+test('round 8: unread label singular, accent date, one list open, no 0 respostas header', (t) => {
+  const { readFileSync } = require('fs')
+  const { join } = require('path')
+  const read = (f) => readFileSync(join(__dirname, '../src/screens', f), 'utf8')
+  const comunidade = read('Comunidade.js')
+  t.ok(comunidade.includes("unread === '1' ? '1 mensagem nova'"), 'singular label')
+  t.ok(comunidade.includes('[styles.time, unread && styles.timeUnread]'), 'unread date takes the accent')
+  const info = read('ComunidadeInfo.js')
+  const openPanel = info.slice(info.indexOf('const openPanel'), info.indexOf('const openSection'))
+  t.ok(openPanel.includes('setSection(null)'), 'a panel closes the section')
+  const openSection = info.slice(info.indexOf('const openSection'), info.indexOf('const openSection') + 200)
+  t.ok(openSection.includes('setPanel(null)'), 'a section closes the panel')
+  const conversa = read('Conversa.js')
+  t.ok(conversa.includes("phase === 'ready' && (hasReplies || notes.length > 0)"), 'no header over an empty thread')
+})
+
+test('a banned or departed person still sees their state on the community info', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'ComunidadeInfo.js'), 'utf8')
+  t.ok(src.includes("(role === 'banned' || role === 'left') && roleLabel(role)"))
 })

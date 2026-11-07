@@ -45,6 +45,11 @@ import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
+import { MoreButton } from '../ui/MoreButton'
+import { Sheet } from '../ui/Sheet'
+import { ShareProfile } from '../ui/ShareProfile'
+import { buildProfileUrl } from '../profileLink'
+import { installationOrigin } from '../installation'
 import { ProfileHeader } from '../ui/ProfileHeader'
 import { ProfileBar, useProfileBar } from '../ui/ProfileBar'
 import { LABELS } from '../dm'
@@ -193,6 +198,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const followsRef = useRef(Promise.resolve(new Set()))
   const genRef = useRef(0)
   const [following, setFollowing] = useState(false)
+  const [sharing, setSharing] = useState(false)
   const [pageRead, setPageRead] = useState(null)
   // The index's page/closed/moved fields (a hint until page.read answers),
   // and whether page.read said "not a page" (it overrides every hint).
@@ -597,88 +603,90 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     : null
   const countsNote = c.incomplete && (c.seguindo !== null || c.seguidores !== null) ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null
 
+  const profileUrl = node.hosted === true && author ? buildProfileUrl({ origin: installationOrigin() || globalThis.location?.origin || null, username: header.verified === true ? header.username || null : null, publicKey: author }) : null
+  const asPageFollowing = pageFollows !== null && pageFollows.has(author)
+  const moreActions = [
+    canAct
+      ? { label: actingHere ? 'Deixar de agir como a página' : 'Agir como esta página', onPress: () => (actingHere ? actingAs.me() : actingAs.asPage({ key: author, name: header.name, username: header.username, closed: pageRead.closed })) }
+      : null,
+    !canAct && actingHere ? { label: 'Deixar de agir como a página', onPress: () => actingAs.me() } : null,
+    canAct && typeof onOpenPageSettings === 'function' ? { label: 'Ajustes da página', onPress: () => onOpenPageSettings(author) } : null,
+    !own && asPageMode && !closedPage
+      ? { label: asPageFollowing ? 'Deixar de seguir como a página' : 'Seguir como a página', pending: following, disabled: pageFollows === null, onPress: togglePageFollow }
+      : null,
+    profileUrl !== null ? { label: 'Compartilhar perfil', onPress: () => setSharing(true) } : null,
+    canReport ? { icon: 'bandeira', label: 'Denunciar a conta', danger: true, onPress: () => onReport({ author, name: header.name, username: header.username }) } : null
+  ].filter(Boolean)
+  const noDmNote = !own && isPage && !closedPage && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })
+    ? <View style={styles.countsNote}><Soft>{PAGE_NO_DM}</Soft></View>
+    : null
+
   const insets = useSafeAreaInsets()
   const bar = useProfileBar(insets.top + BAND, { controlsBottom: insets.top + 42 })
   const head = (
-    <ProfileHeader
-      bandHeight={insets.top + BAND}
-      topInset={insets.top}
-      onBack={full && bar.interactive ? undefined : onBack}
-      bandButtons={null}
-      avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
-      title={displayText(who.title)}
-      subtitle={who.subtitle ? displayText(who.subtitle) : null}
-      bio={header.bio || null}
-      counts={[
-        {
-          label: 'seguindo',
-          value: c.seguindo === null ? null : displayText(String(c.seguindo)),
-          onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(author, 'seguindo') : undefined
-        },
-        {
-          label: 'seguidores',
-          value: c.seguidores === null ? null : displayText(String(c.seguidores)),
-          onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(author, 'seguidores') : undefined
-        }
-      ]}
-      note={pageNote !== null ? <View>{pageNote}{countsNote}</View> : countsNote}
-      actions={[
-        canAct
-          ? (
-            <Pill
-              label={actingHere ? 'Deixar de agir como a página' : 'Agir como esta página'}
-              onPress={() => (actingHere
-                ? actingAs.me()
-                : actingAs.asPage({ key: author, name: header.name, username: header.username, closed: pageRead.closed }))}
-            />
-            )
-          : null,
-        !canAct && actingHere
-          ? <Pill label='Deixar de agir como a página' onPress={() => actingAs.me()} />
-          : null,
-        canAct && typeof onOpenPageSettings === 'function'
-          ? <Pill label='Ajustes da página' onPress={() => onOpenPageSettings(author)} />
-          : null,
-        !own && asPageMode && !closedPage
-          ? (
-            <Pill
-              label={pageFollowsFailed ? 'Tentar de novo' : pageFollows !== null && pageFollows.has(author) ? 'Deixar de seguir como a página' : 'Seguir como a página'}
-              filled={!pageFollowsFailed && !(pageFollows !== null && pageFollows.has(author))}
-              pending={following}
-              disabled={pageFollows === null && !pageFollowsFailed}
-              onPress={pageFollowsFailed ? loadPageFollows : togglePageFollow}
-            />
-            )
-          : null,
-        !own && !asPageMode && !closedPage
-          ? (
-            <FollowPill
-              following={follows === null ? null : isFollowed}
-              title={displayText(who.title)}
-              pending={following}
-              disabled={false}
-              onFollow={toggleFollow}
-              onUnfollow={toggleFollow}
-            />
-            )
-          : null,
-        !own && isPage && !closedPage && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })
-          ? <Pill label={PAGE_NO_DM} disabled />
-          : null,
-        !own && !isPage && node.hosted === true && typeof onMessage === 'function'
-          ? <Pill label={LABELS.message} onPress={() => onMessage(author)} />
-          : null,
-        canReport
-          ? (
-            <Pill
-              label='denunciar a conta'
-              danger
-              onPress={() => onReport({ author, name: header.name, username: header.username })}
-            />
-            )
-          : null
-      ]}
-    />
+    <>
+      <ProfileHeader
+        bandHeight={insets.top + BAND}
+        topInset={insets.top}
+        onBack={full && bar.interactive ? undefined : onBack}
+        bandButtons={null}
+        avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
+        title={displayText(who.title)}
+        subtitle={who.subtitle ? displayText(who.subtitle) : null}
+        bio={header.bio || null}
+        counts={[
+          {
+            label: 'seguindo',
+            value: c.seguindo === null ? null : displayText(String(c.seguindo)),
+            onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(author, 'seguindo') : undefined
+          },
+          {
+            label: c.seguidores === 1 ? 'seguidor' : 'seguidores',
+            value: c.seguidores === null ? null : displayText(String(c.seguidores)),
+            onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(author, 'seguidores') : undefined
+          }
+        ]}
+        note={noDmNote !== null || pageNote !== null || countsNote !== null ? <View>{pageNote}{countsNote}{noDmNote}</View> : null}
+        actions={[
+          !own && asPageMode && !closedPage
+            ? (
+              <Pill
+                label={pageFollowsFailed ? 'Tentar de novo' : pageFollows !== null && pageFollows.has(author) ? 'Seguindo' : 'Seguir'}
+                filled={!pageFollowsFailed && !(pageFollows !== null && pageFollows.has(author))}
+                pending={following}
+                disabled={pageFollows === null && !pageFollowsFailed}
+                onPress={pageFollowsFailed ? loadPageFollows : togglePageFollow}
+              />
+              )
+            : null,
+          !own && !asPageMode && !closedPage
+            ? (
+              <FollowPill
+                following={follows === null ? null : isFollowed}
+                title={displayText(who.title)}
+                pending={following}
+                disabled={false}
+                onFollow={toggleFollow}
+                onUnfollow={toggleFollow}
+              />
+              )
+            : null,
+          !own && !isPage && node.hosted === true && typeof onMessage === 'function'
+            ? <Pill icon='mensagem' label={LABELS.message} onPress={() => onMessage(author)} />
+            : null
+        ].filter(Boolean).slice(0, 2)}
+        more={<MoreButton title={displayText(who.title)} actions={moreActions} />}
+      />
+      {profileUrl !== null
+        ? (
+          <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil'>
+            <View style={styles.shareBody}>
+              <ShareProfile url={profileUrl} />
+            </View>
+          </Sheet>
+          )
+        : null}
+    </>
   )
 
   if (!full) {
@@ -778,5 +786,6 @@ const makeStyles = (colors) => StyleSheet.create({
   rosterName: { ...type.postName, color: colors.ink },
   rosterSoft: { ...type.postMeta, color: colors.soft },
   pressed: { opacity: 0.6 },
-  countsNote: { marginTop: 4 }
+  countsNote: { marginTop: 4 },
+  shareBody: { padding: 16, gap: 12 }
 })

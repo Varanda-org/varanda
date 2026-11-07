@@ -30,7 +30,7 @@ import { recoveryList, recoveryPut, recoveryRemove, recoveryStart } from '../acc
 import { CHANGE_TEXT, CODE_ONCE_TEXT, LOSS_TEXT, listEntries, registerEntry, removeEntry } from '../recovery'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
-import { Body, Btn, Card, ErrorText, Label, Mono, Notice, Page, Row, Soft, Title, UNCERTAIN, errorText } from '../ui'
+import { Body, Btn, Card, ConfirmStack, ErrorText, Label, Mono, Notice, Page, Soft, Title, UNCERTAIN, errorText } from '../ui'
 import { Icon } from '../ui/Icon'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
@@ -43,7 +43,7 @@ export const ADDED_TEXT = 'Passkey adicionada: ela também abre esta conta.'
 export const CHANGED_TEXT = 'Pronto: este aparelho passou a usar a passkey nova. Confira que ela entra na conta e só depois apague a antiga no gerenciador de senhas.'
 export const NOT_REGISTERED_TEXT = 'A passkey foi criada no gerenciador de senhas, mas não foi cadastrada na conta, então ainda não abre a conta. Toque em registrar de novo. Se desistir, apague essa passkey no gerenciador de senhas.'
 export const CREATED_LEFT_TEXT = 'A passkey foi criada no gerenciador de senhas, mas não foi cadastrada na conta, então não abre a conta. Se desistir, apague essa passkey no gerenciador de senhas.'
-export const BIND_FAILED_TEXT = 'A passkey nova foi cadastrada, mas este aparelho continua usando a antiga. Toque em usar a passkey nova neste aparelho.'
+export const BIND_FAILED_TEXT = 'A passkey nova foi cadastrada, mas este aparelho continua usando a antiga. Toque em Usar a passkey nova.'
 export const NEW_CODE_TEXT = 'Um código novo substitui o anterior no serviço de conta: o anterior deixa de entrar num aparelho que ainda não o usou. Quem já entrou com o código anterior continua com acesso, porque a chave da conta não pode ser trocada. Se o código pode ter vazado, o caminho seguro é criar uma conta nova.'
 export const CODE_ACK_LABEL = 'Anotei o código'
 export const PENDING_TEXT = 'A passkey foi criada. Toque abaixo para concluir.'
@@ -88,8 +88,8 @@ function setHeldCode (value) {
 let pendingAdd = null
 
 // A registered replacement ('Trocar') this device could not bind yet:
-// { member, credentialId, userId }. Kept here so 'usar a passkey nova neste
-// aparelho' survives leaving Ajustes. Memory only.
+// { member, credentialId, userId }. Kept here so 'Usar a passkey nova'
+// survives leaving Ajustes. Memory only.
 let pendingBind = null
 function setPendingBind (value) {
   pendingBind = value
@@ -471,7 +471,7 @@ export default function Passkeys ({ active, embedded = false }) {
         <Card>
           <Label>Código de recuperação</Label>
           <Mono>{shownCode}</Mono>
-          <Btn label='copiar o código' secondary onPress={onCopy} />
+          <Btn label='Copiar o código' secondary onPress={onCopy} />
           {copyNote ? <Soft>{copyNote}</Soft> : null}
           <Notice>{CODE_ONCE_TEXT}</Notice>
           {codeUnknown !== null
@@ -479,13 +479,13 @@ export default function Passkeys ({ active, embedded = false }) {
               <>
                 <Notice>{UNCERTAIN}</Notice>
                 <Notice>{CODE_UNKNOWN_TEXT}</Notice>
-                <Btn label='conferir' secondary onPress={onCheckCode} pending={busy} />
+                <Btn label='Conferir' secondary onPress={onCheckCode} pending={busy} />
                 <ErrorText>{listError}</ErrorText>
               </>
               )
             : null}
           <Check checked={codeAck} label={CODE_ACK_LABEL} onPress={() => setCodeAck((v) => !v)} />
-          <Btn label='pronto' onPress={onCodeDone} disabled={!codeAck} />
+          <Btn label='Pronto' onPress={onCodeDone} disabled={!codeAck} />
         </Card>
       </Page>
     )
@@ -499,7 +499,7 @@ export default function Passkeys ({ active, embedded = false }) {
       <Card>
         {entries === null && !listError ? <Soft>carregando…</Soft> : null}
         <ErrorText>{listError}</ErrorText>
-        {listError ? <Btn label='tentar de novo' secondary onPress={() => load()} disabled={busy} /> : null}
+        {listError ? <Btn label='Tentar de novo' secondary onPress={() => load()} disabled={busy} block /> : null}
         {entries !== null && entries.length === 0 ? <Soft>{EMPTY_TEXT}</Soft> : null}
         {(entries || []).map((e) => (
           <View key={e.lookupId} style={styles.entry}>
@@ -509,15 +509,15 @@ export default function Passkeys ({ active, embedded = false }) {
             </View>
             {confirmRemove === e.lookupId
               ? null
-              : <Btn label='remover' secondary onPress={() => setConfirmRemove(e.lookupId)} disabled={busy} />}
+              : <Btn label='Remover' secondary onPress={() => setConfirmRemove(e.lookupId)} disabled={busy} />}
             {confirmRemove === e.lookupId
               ? (
                 <View style={styles.confirm}>
                   <Soft>{e.kind === 'code' ? REMOVE_CODE_TEXT : REMOVE_PASSKEY_TEXT}</Soft>
-                  <Row>
-                    <Btn label='remover' danger onPress={() => onRemove(e)} pending={busy} />
-                    <Btn label='cancelar' secondary onPress={() => setConfirmRemove(null)} disabled={busy} />
-                  </Row>
+                  <ConfirmStack
+                    confirm={<Btn label='Remover' danger onPress={() => onRemove(e)} pending={busy} />}
+                    cancel={<Btn label='Cancelar' secondary onPress={() => setConfirmRemove(null)} disabled={busy} />}
+                  />
                 </View>
                 )
               : null}
@@ -530,7 +530,7 @@ export default function Passkeys ({ active, embedded = false }) {
         ? (
           <>
             <Notice>{UNCERTAIN}</Notice>
-            <Btn label='conferir' secondary onPress={onCheck} pending={busy} />
+            <Btn label='Conferir' secondary onPress={onCheck} pending={busy} block />
           </>
           )
         : null}
@@ -538,7 +538,7 @@ export default function Passkeys ({ active, embedded = false }) {
         ? (
           <>
             <Notice>{NOT_REGISTERED_TEXT}</Notice>
-            <Btn label='registrar de novo' onPress={onRetry} pending={busy} />
+            <Btn label='Registrar de novo' onPress={onRetry} pending={busy} block />
           </>
           )
         : null}
@@ -546,7 +546,8 @@ export default function Passkeys ({ active, embedded = false }) {
         ? (
           <>
             <Notice>{BIND_FAILED_TEXT}</Notice>
-            <Btn label='usar a passkey nova neste aparelho' onPress={onBind} pending={busy} />
+            <Btn label='Usar a passkey nova' onPress={onBind} pending={busy} block />
+            <Soft>Este aparelho passará a usar a passkey nova.</Soft>
           </>
           )
         : null}
@@ -554,34 +555,35 @@ export default function Passkeys ({ active, embedded = false }) {
         ? (
           <>
             <Body>{PENDING_TEXT}</Body>
-            <Btn label='concluir a criação da passkey' onPress={onComplete} pending={busy} />
+            <Btn label='Concluir a criação da passkey' onPress={onComplete} pending={busy} block />
           </>
           )
         : null}
 
-      <Btn label='Adicionar passkey' onPress={() => onAdd(false)} disabled={busy || held !== null} />
+      {/* While the change confirmation is open, its own button adds the passkey. */}
+      {confirmChange ? null : <Btn label='Adicionar passkey' onPress={() => onAdd(false)} disabled={busy || held !== null} block />}
       {confirmChange
         ? (
           <Card>
             <Notice>{CHANGE_TEXT}</Notice>
-            <Row>
-              <Btn label='adicionar a nova passkey' onPress={() => onAdd(true)} disabled={busy} />
-              <Btn label='cancelar' secondary onPress={() => setConfirmChange(false)} disabled={busy} />
-            </Row>
+            <ConfirmStack
+              confirm={<Btn label='Adicionar a nova passkey' onPress={() => onAdd(true)} disabled={busy} />}
+              cancel={<Btn label='Cancelar' secondary onPress={() => setConfirmChange(false)} disabled={busy} />}
+            />
           </Card>
           )
-        : <Btn label='Trocar a passkey deste aparelho' secondary onPress={() => setConfirmChange(true)} disabled={busy || held !== null} />}
+        : <Btn label='Trocar passkey' secondary onPress={() => setConfirmChange(true)} disabled={busy || held !== null} block />}
       {confirmNewCode
         ? (
           <Card>
             <Notice>{NEW_CODE_TEXT}</Notice>
-            <Row>
-              <Btn label='criar código novo' onPress={onCode} disabled={busy} />
-              <Btn label='cancelar' secondary onPress={() => setConfirmNewCode(false)} disabled={busy} />
-            </Row>
+            <ConfirmStack
+              confirm={<Btn label='Criar código novo' onPress={onCode} disabled={busy} />}
+              cancel={<Btn label='Cancelar' secondary onPress={() => setConfirmNewCode(false)} disabled={busy} />}
+            />
           </Card>
           )
-        : <Btn label='Criar código de recuperação' secondary onPress={onCode} disabled={busy || entries === null || codeInFlight} />}
+        : <Btn label='Criar código de recuperação' secondary onPress={onCode} disabled={busy || entries === null || codeInFlight} block />}
       <ErrorText>{error}</ErrorText>
       <Notice>{note}</Notice>
     </Page>

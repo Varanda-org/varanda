@@ -15,7 +15,7 @@
 // `quote.preview`, a stored link card of the quoted post (never with photos),
 // is drawn by ./LinkCard from that stored data only.
 
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { relativeTime } from '../format'
 import { whoOf } from '../who'
@@ -23,8 +23,21 @@ import { Avatar } from './Avatar'
 import { MediaGrid } from './MediaGrid'
 import { LinkCard } from './LinkCard'
 import { hasMention, MentionText } from './MentionText'
-import { type } from './theme'
+import { LARGE_TEXT, type } from './theme'
 import { useStyles } from './ThemeProvider'
+
+// The @nome truncates first; the time keeps its own Text and never shrinks.
+// Spacing matches PostRow: 6 after the name, and a no-break space before the
+// "·" (web drops a plain leading space under numberOfLines).
+function Meta ({ handle, time, styles }) {
+  if (!handle && !time) return null
+  return (
+    <>
+      {handle ? <Text style={styles.meta} numberOfLines={1}>{handle}</Text> : null}
+      {time ? <Text style={styles.time} numberOfLines={1}>{(handle ? '\u00a0· ' : '· ') + time}</Text> : null}
+    </>
+  )
+}
 
 export function QuoteCard ({ quote, now }) {
   const styles = useStyles(makeStyles)
@@ -40,7 +53,9 @@ export function QuoteCard ({ quote, now }) {
   const who = whoOf({ name: q.name, username: q.username })
   const title = displayText(who.title)
   const time = typeof q.at === 'string' ? (relativeTime(q.at, now) ?? displayText(q.at)) : null
-  const meta = [who.subtitle ? displayText(who.subtitle) : null, time].filter(Boolean).join(' · ')
+  // At large text the @nome is left out, as in PostRow.
+  const { fontScale } = useWindowDimensions()
+  const handle = who.subtitle && !(fontScale >= LARGE_TEXT) ? displayText(who.subtitle) : null
   const openMention = typeof q.onOpenMention === 'function' ? q.onOpenMention : undefined
   const label = missing ? 'Publicação indisponível' : 'publicação citada de ' + title
   if (!missing && openMention && hasText && hasMention(q.text)) {
@@ -53,9 +68,9 @@ export function QuoteCard ({ quote, now }) {
           onPress={open}
           style={({ pressed }) => [styles.head, pressed && open && styles.pressed]}
         >
-          {typeof q.author === 'string' ? <Avatar name={who.avatarName} publicKey={q.author} size={20} picture={q.avatar} persist={q.persist === true} /> : null}
+          {typeof q.author === 'string' ? <View style={styles.avatarBox}><Avatar name={who.avatarName} publicKey={q.author} size={20} picture={q.avatar} persist={q.persist === true} /></View> : null}
           <Text style={styles.name} numberOfLines={1}>{title}</Text>
-          {meta ? <Text style={styles.meta} numberOfLines={1}>{meta}</Text> : null}
+          <Meta handle={handle} time={time} styles={styles} />
         </Pressable>
         <MentionText text={q.text} onOpenMention={openMention} onOpenPlain={open} style={styles.text} numberOfLines={6} />
         {preview}
@@ -85,9 +100,9 @@ export function QuoteCard ({ quote, now }) {
         : (
           <>
             <View style={styles.head}>
-              {typeof q.author === 'string' ? <Avatar name={who.avatarName} publicKey={q.author} size={20} picture={q.avatar} persist={q.persist === true} /> : null}
+              {typeof q.author === 'string' ? <View style={styles.avatarBox}><Avatar name={who.avatarName} publicKey={q.author} size={20} picture={q.avatar} persist={q.persist === true} /></View> : null}
               <Text style={styles.name} numberOfLines={1}>{title}</Text>
-              {meta ? <Text style={styles.meta} numberOfLines={1}>{meta}</Text> : null}
+              <Meta handle={handle} time={time} styles={styles} />
             </View>
             {loading ? <View style={styles.skeleton} accessible={false} /> : null}
             {hasText
@@ -114,9 +129,12 @@ const makeStyles = (colors) => StyleSheet.create({
     borderRadius: 12,
     gap: 4
   },
-  head: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  name: { ...type.postName, fontSize: 14, color: colors.ink, flexShrink: 1 },
-  meta: { ...type.postMeta, fontSize: 14, color: colors.soft, flexShrink: 1 },
+  head: { flexDirection: 'row', alignItems: 'center' },
+  avatarBox: { marginRight: 6 },
+  // As in PostRow: the handle gives way first and stops at 32, then the name.
+  name: { ...type.postName, fontSize: 14, color: colors.ink, flexShrink: 1, marginRight: 6 },
+  meta: { ...type.postMeta, fontSize: 14, color: colors.soft, flexShrink: 10000, minWidth: 32 },
+  time: { ...type.postMeta, fontSize: 14, color: colors.soft, flexShrink: 0 },
   text: { ...type.postText, fontSize: 14.5, lineHeight: 20, color: colors.ink },
   media: { marginTop: 2 },
   soft: { ...type.replyMark, color: colors.soft },

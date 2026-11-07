@@ -39,7 +39,7 @@ import { shareNav } from '../shareNav'
 import { MAX_ADMINS, cancelOfferOp, closeOp, inviteOp, moveOp, offerOp, removeOp, rosterRows } from '../pageRoster'
 import { pagesOn } from '../pageGate'
 import * as actingAs from '../actingAs'
-import { Btn, ErrorText, Field, Notice, Page, Row, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { Btn, ConfirmStack, ErrorText, Field, Notice, Page, Row, SectionHeader, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { AvatarEditor } from '../ui/AvatarEditor'
 import { Pill } from '../ui/Pill'
@@ -573,10 +573,10 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
           ? (
             <View style={styles.confirm}>
               <Soft>{'Remover ' + displayText(whoOf(profileOf(confirm.key)).title) + ' da administração da página?'}</Soft>
-              <Row>
-                <Btn label='Remover' danger onPress={() => remove(confirm.key)} pending={removeAct.pending} />
-                <Btn label='Cancelar' secondary onPress={() => setConfirm(null)} disabled={removeAct.pending} />
-              </Row>
+              <ConfirmStack
+                confirm={<Btn label='Remover' danger onPress={() => remove(confirm.key)} pending={removeAct.pending} />}
+                cancel={<Btn label='Cancelar' secondary onPress={() => setConfirm(null)} disabled={removeAct.pending} />}
+              />
             </View>
             )
           : null}
@@ -612,10 +612,10 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
                         ? (
                           <View style={styles.confirm}>
                             <Soft>Oferecer a página a essa pessoa?</Soft>
-                            <Row>
-                              <Btn label='Transferir' danger onPress={transfer} pending={transferAct.pending} />
-                              <Btn label='Cancelar' secondary onPress={() => setConfirm(null)} disabled={transferAct.pending} />
-                            </Row>
+                            <ConfirmStack
+                              confirm={<Btn label='Transferir' danger onPress={transfer} pending={transferAct.pending} />}
+                              cancel={<Btn label='Cancelar' secondary onPress={() => setConfirm(null)} disabled={transferAct.pending} />}
+                            />
                           </View>
                           )
                         : <Btn label='Transferir' secondary onPress={() => setConfirm({ kind: 'transfer' })} disabled={transferHandle.trim() === '' || read.closed === true} />}
@@ -664,10 +664,10 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
                       ? (
                         <View style={styles.confirm}>
                           <Soft>Mudar a página para uma chave nova? A chave atual deixa de valer para publicar.</Soft>
-                          <Row>
-                            <Btn label='Mudar a chave' danger onPress={movePage} pending={lifeAct.pending} />
-                            <Btn label='Cancelar' secondary onPress={() => setLife(null)} disabled={lifeAct.pending} />
-                          </Row>
+                          <ConfirmStack
+                            confirm={<Btn label='Mudar a chave' danger onPress={movePage} pending={lifeAct.pending} />}
+                            cancel={<Btn label='Cancelar' secondary onPress={() => setLife(null)} disabled={lifeAct.pending} />}
+                          />
                         </View>
                         )
                       : <Btn label='Mudar a chave' secondary onPress={() => setLife({ kind: 'move', step: 1 })} disabled={busy || !rosterKnown || fromSeq === null} />}
@@ -677,12 +677,12 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
                       ? (
                         <View style={styles.confirm}>
                           <Soft>{life.step === 1 ? closeWarning(who.subtitle ? displayText(who.subtitle) : '') : closeFinal(who.subtitle ? displayText(who.subtitle) : '')}</Soft>
-                          <Row>
-                            {life.step === 1
+                          <ConfirmStack
+                            confirm={life.step === 1
                               ? <Btn label='Continuar' danger onPress={() => setLife({ kind: 'close', step: 2 })} />
                               : <Btn label='Encerrar de vez' danger onPress={closePage} pending={lifeAct.pending} />}
-                            <Btn label='Cancelar' secondary onPress={() => setLife(null)} disabled={lifeAct.pending} />
-                          </Row>
+                            cancel={<Btn label='Cancelar' secondary onPress={() => setLife(null)} disabled={lifeAct.pending} />}
+                          />
                         </View>
                         )
                       : <Btn label='Encerrar página' danger onPress={() => setLife({ kind: 'close', step: 1 })} disabled={busy || !rosterKnown} />}

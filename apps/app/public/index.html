@@ -25,7 +25,9 @@
         /* The app's background, so the page matches the app before the first paint and behind modals */
         background-color: #fbf8f3;
       }
-      /* These styles disable body scrolling if you are using <ScrollView> */
+      /* These styles disable body scrolling if you are using <ScrollView>; html
+         too, so the layout viewport cannot pan after a screen push */
+      html,
       body {
         overflow: hidden;
       }
@@ -39,7 +41,7 @@
          app's lists refresh themselves) */
       html,
       body {
-        overscroll-behavior-y: none;
+        overscroll-behavior: none;
       }
       [data-pull=y] {
         overscroll-behavior-y: contain;
