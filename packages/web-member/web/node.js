@@ -224,6 +224,12 @@ function codedError (code, message) {
   return err
 }
 
+// node.identityStatus() of a stored diary of another key, or of a legacy
+// store: the pair is refused (MISMATCH).
+function otherDiary (status, publicKey) {
+  return status.exists && (status.publicKey !== publicKey || status.legacy)
+}
+
 function lockedError () {
   return codedError('LOCKED', 'outra aba já usa o Varanda neste navegador')
 }
@@ -583,6 +589,28 @@ function createIdentity (node, storage, sessionStore, idb) {
       media = await passkey.mediaKeyPairFromPrf(prf, nonce)
       if (stale(gen, rec)) throw cancelled()
       const publicKey = b4a.toString(kp.publicKey, 'hex')
+      const mismatch = (status) => {
+        const err = codedError('MISMATCH', 'passkey não corresponde ao diário guardado')
+        err.legacy = status.legacy === true
+        // A wrapping (recovery) passkey is never chosen: its own PRF output
+        // must never install, and the next discoverable 'entrar' carries the
+        // handle that routes it to the wrapped path.
+        if (!fromSession) chosen = wrapped === true ? null : credentialId
+        return err
+      }
+      // A diary of another key is refused before the pairs and the PRF go
+      // in, and the node is locked, as a refusal after them leaves it. With
+      // the PRF the session opens the direct message store under this
+      // passkey's key, and a store of another key is replaced by an empty
+      // one (lib/dm-store.js unlock): a wrong passkey must not erase the
+      // stored identity's messages.
+      const before = await node.identityStatus()
+      if (stale(gen, rec)) throw cancelled()
+      if (otherDiary(before, publicKey)) {
+        dropRoot()
+        await node.clearKeyPair().catch(() => {})
+        throw mismatch(before)
+      }
       // setKeyPair copies both pairs and the PRF (group writer keys derive
       // from it) synchronously: the local copies are zeroed below.
       const setting = node.setKeyPair(kp, { media, prf })
@@ -592,15 +620,7 @@ function createIdentity (node, storage, sessionStore, idb) {
       await setting
       const status = await node.identityStatus()
       if (stale(gen, rec)) throw cancelled()
-      if (status.exists && (status.publicKey !== publicKey || status.legacy)) {
-        const err = codedError('MISMATCH', 'passkey não corresponde ao diário guardado')
-        err.legacy = status.legacy === true
-        // A wrapping (recovery) passkey is never chosen: its own PRF output
-        // must never install, and the next discoverable 'entrar' carries the
-        // handle that routes it to the wrapped path.
-        if (!fromSession) chosen = wrapped === true ? null : credentialId
-        throw err
-      }
+      if (otherDiary(status, publicKey)) throw mismatch(status)
       if (stale(gen, rec)) throw cancelled()
       if (!fromSession) {
         const record = { v: 1, credentialId, rpId, userId }
