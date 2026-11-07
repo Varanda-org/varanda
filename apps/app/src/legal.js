@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 24
+export const LEGAL_VERSION = 25
 export const LEGAL_DATE = '06/11/2026'
-export const REVIEW_NOTE = 'Versão 24, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 25, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -61,6 +61,7 @@ export const TERMS = {
         'A triagem automática só roda quando o operador a liga. Ela vem desligada por padrão. Há também um modo de observação, em que ela apenas mostra sugestões aos moderadores. Quando ligada para decidir, ela compara o texto verificado da publicação com casos já decididos por pessoas e só age em casos quase idênticos, sem nenhum caso divergente parecido. Ela pode pedir bloqueio por spam e descartar denúncias de spam ou outro. Nos demais casos, a decisão fica para uma pessoa.',
         'Denúncias por conteúdo ilegal sempre são decididas por uma pessoa. Assédio, denúncias de conta e publicações com fotos também ficam para pessoas. A IA não vê imagens. Um descarte feito pela IA vale na hora. Um bloqueio pedido pela IA só chega à lista depois que o operador o revisa e confirma num terminal. A IA não assina a lista nem desbloqueia contas.',
         'Os nós atualizados que obedecem à lista apagam e recusam o diário bloqueado. A lista não alcança aparelhos que a ignoram nem nós antigos que não a aplicam. Apps modificados podem trocar o diário diretamente entre si. O app da própria pessoa bloqueada mantém o diário local e pode servi-lo a quem já conhece a chave pública desse diário.',
+        'Se a sua conta foi bloqueada, você pode pedir uma revisão, o recurso, na versão web hospedada, com a conta Google vinculada. Em regra, outra pessoa da moderação, que não decidiu o bloqueio, lê o pedido e pode aceitar ou negar. Aceitar pede o desbloqueio, que só vale quando o operador aplica e assina a lista. Negado o recurso, só dá para recorrer de novo depois de 30 dias.',
         'Na web instalada, sem rede, vale a lista que está guardada no aparelho. Uma lista mais nova chega pelo semeador. A lista contém chaves públicas, sequência e datas, sem motivo, nome, e-mail ou conta Google. Ordens judiciais de bloqueio são cumpridas pela mesma lista.'
       ]
     },
@@ -165,6 +166,7 @@ export const PRIVACY = {
       paragraphs: [
         'O serviço de conta, no Brasil, guarda as denúncias. Cada denúncia inclui a chave pública de quem denuncia, a chave pública denunciada, o número da publicação quando há, o motivo, a observação opcional, um trecho da publicação, a data e a assinatura. O trecho é o que quem denunciou enviou, e a moderação não o confere.',
         'O registro de decisões guarda a decisão, a data e o e-mail do moderador. Os e-mails dos moderadores também ficam na configuração do servidor. Uma decisão automática é identificada como feita pela IA.',
+        'Quando uma conta bloqueada recorre, o serviço de conta guarda o recurso: a chave pública da conta, o texto opcional que a pessoa escreveu, a assinatura, a data, o estado do recurso, a decisão com a data e a observação de quem julgou. O e-mail do moderador que julgou fica no registro de decisões. O texto é o que a pessoa enviou, e a moderação não o confere. No painel, o recurso não aparece para a própria pessoa nem para quem decidiu a denúncia que bloqueou a conta. Um bloqueio feito fora do painel ou pela triagem automática pode ser revisto por qualquer moderador, e a operação do servidor tem acesso a esse registro. O recurso não vai para o diário nem para a lista de bloqueio.',
         'O e-mail do vínculo Google de quem denuncia e de quem é denunciado não aparece no painel nem no registro de decisões. A operação do servidor pode obtê-lo para atender um pedido legal. A pessoa denunciada não tem acesso à denúncia por tela ou rota do serviço.',
         'Ao denunciar uma mensagem direta ou uma mensagem de grupo privado com foto, a primeira imagem vai junto com a denúncia, aberta, numa cópia reduzida em JPEG de até 700 KB que quem denuncia vê antes de enviar. A denúncia de uma mensagem de grupo público aponta para a mensagem, sem imagem anexada. O serviço de conta guarda essa imagem junto com a denúncia, com acesso restrito, inclusive depois da decisão, como prova. A moderação a vê marcada como não conferida, e uma denúncia com imagem sempre é decidida por uma pessoa.',
         'Ao denunciar uma mensagem direta ou uma mensagem de grupo privado com mensagem de voz, o áudio vai junto com a denúncia, aberto, como foi gravado, se tiver até 700 KB; quem denuncia pode ouvi-lo antes de enviar. O serviço de conta guarda esse áudio como guarda a imagem de uma denúncia, com acesso restrito, inclusive depois da decisão. A moderação o ouve marcado como não conferido, e uma denúncia com áudio sempre é decidida por uma pessoa.'
@@ -185,14 +187,14 @@ export const PRIVACY = {
         'Para publicações, perfil, seguidos, fotos (inclusive as das mensagens diretas e dos grupos), mensagens de voz, a busca de GIFs, as prévias de links e o vínculo Google que dá o certificado e o @nome, a proposta é execução de contrato, Art. 7º, V.',
         'Registro do aceite: a finalidade é registrar qual versão cada conta aceitou. A base legal é uma proposta, ainda sem parecer jurídico.',
         'Faixa de idade: a finalidade é cumprir a regra de idade mínima. A base legal proposta é obrigação legal (ECA Digital), a confirmar em parecer jurídico.',
-        'Denúncias, decisões e dados de triagem servem à moderação e ao atendimento de pedidos legais. A base legal para esse tratamento ainda precisa de parecer jurídico.',
+        'Denúncias, recursos, decisões e dados de triagem servem à moderação e ao atendimento de pedidos legais. A base legal para esse tratamento ainda precisa de parecer jurídico.',
         'Registros de acesso, com IP, data e hora, ficam nos semeadores e serviços, se aplicável. A proposta é obrigação legal caso o Art. 15 do Marco Civil se aplique.'
       ]
     },
     {
       heading: 'Por quanto tempo',
       paragraphs: [
-        'A retenção está em aberto (issue #38). Isso inclui os dados do vínculo Google, as denúncias, as decisões e os precedentes de triagem. Denúncias e decisões não são apagadas automaticamente. Não há um prazo de retenção definido aqui para os registros de aceite.',
+        'A retenção está em aberto (issue #38). Isso inclui os dados do vínculo Google, as denúncias, os recursos, as decisões e os precedentes de triagem. Denúncias, recursos e decisões não são apagados automaticamente. Não há um prazo de retenção definido aqui para os registros de aceite.',
         'Ao excluir a conta, o serviço de conta apaga o vínculo com o Google, o registro de idade, os aceites dos Termos, as inscrições de aviso no aparelho, o bloco cifrado das marcações de visto, os convites que você criou, as marcas dos convites de surpresa, as entradas de recuperação (de cada entrada fica por 30 dias só a chave pública e a data da remoção) e a chave pública da passkey com o pedido agendado, se houver (fica por 30 dias só a chave pública da conta e a data). Isso acontece na hora do pedido confirmado com a passkey registrada, ou na data de um pedido agendado; até essa data, tudo continua guardado como antes, e cancelar o pedido apaga só a data. Ficam a chave pública, a data da exclusão e os @nomes já usados; as denúncias feitas por você ou contra você e as decisões dos moderadores, para moderação e pedidos legais, sem prazo definido ainda (issue #38); e os registros de acesso, se o Marco Civil se aplicar. O diário sai dos semeadores da associação em até 7 dias.',
         'O desenho propõe guardar publicações, perfil, seguidos e fotos até a pessoa apagar. Apagar publicações e versões do perfil já está disponível: as cópias oficiais atualizadas deixam de mostrá-las e descartam os bytes, mas cópias antigas, apps modificados, caches de imagem e as citações guardadas pelo serviço de conta podem guardar o conteúdo. A retenção das cópias também depende dos limites da rede P2P. Tirar a foto do perfil só deixa de mostrá-la; a foto já enviada continua gravada na rede.',
         'As cópias da Espiadinha e o índice de nomes têm os limites de memória descritos acima. Esses limites não apagam as réplicas normais dos diários no semeador. Para registros de acesso, o prazo proposto é de 6 meses, se aplicável.',

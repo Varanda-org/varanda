@@ -3,6 +3,7 @@
 // The hosted lab: a whole hosted installation on this machine, for checking
 // the web app signed in, in Chrome, without Google, a domain or a phone:
 //   node scripts/hosted-lab.js [--host 127.0.0.1] [--port 8080] [--ui <dist dir> | --expo <http://127.0.0.1:8081>]
+//                              [--dataset <semente> [--dataset-size 60x150] [--rajada]]
 // It starts a loopback hyperdht testnet (or uses VARANDA_BOOTSTRAP, which must
 // be loopback, e.g. from scripts/local-dht.js), an association, a certified
 // seeder with its WebSocket listener (as `seed --ws-port`), and the account
@@ -13,6 +14,10 @@
 // One origin, http://localhost:<port>, carries what Caddy carries in a
 // deployment: /varanda.json, /seeder, /media/*, /index/*, /account/*, and
 // everything else goes to the Expo web dev server or to an exported dist.
+// --dataset fills the lab with other members' diaries once it is up
+// (./lab-dataset.js, from the plan of ../lib/lab-dataset-plan.js) and
+// writes reader-setup.js, which the signed-in dev page runs to follow them;
+// --rajada then keeps posting on a few of them, one post a second.
 // Binds loopback only and never prints a key.
 
 const fs = require('node:fs')
@@ -20,10 +25,12 @@ const os = require('node:os')
 const net = require('node:net')
 const path = require('node:path')
 const http = require('node:http')
+const { parseDatasetSize } = require('../lib/lab-dataset-plan')
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost'])
 const DEFAULT_PORT = 8080
 const DEFAULT_EXPO = 'http://127.0.0.1:8081'
+const DEFAULT_DATASET_SIZE = { members: 60, blocksPerMember: 150 }
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -42,6 +49,15 @@ const TYPES = {
   '.wasm': 'application/wasm',
   '.txt': 'text/plain; charset=utf-8'
 }
+
+const USAGE = [
+  'uso: node scripts/hosted-lab.js [--host 127.0.0.1] [--port 8080] [--ui <dist> | --expo <http://127.0.0.1:8081>]',
+  '                                [--dataset <semente> [--dataset-size <membros>x<blocos>] [--rajada]]',
+  '  --dataset <semente>      cria diários de outros membros (fotos, respostas, citações, curtidas,',
+  '                           repostagens e duas comunidades) e escreve reader-setup.js',
+  '  --dataset-size 60x150    quantos membros e quantos blocos por diário (padrão 60x150)',
+  '  --rajada                 depois do conjunto, um post novo por segundo em 5 membros até o Ctrl-C'
+].join('\n')
 
 class LabUsageError extends Error {}
 
@@ -66,7 +82,8 @@ function allowedHost (host, port) {
 }
 
 function parseArgs (argv) {
-  const opts = { host: '127.0.0.1', port: DEFAULT_PORT, ui: null, expo: DEFAULT_EXPO }
+  const opts = { host: '127.0.0.1', port: DEFAULT_PORT, ui: null, expo: DEFAULT_EXPO, dataset: null, datasetSize: DEFAULT_DATASET_SIZE, rajada: false }
+  let sizeGiven = false
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     const value = () => {
@@ -78,8 +95,17 @@ function parseArgs (argv) {
     else if (a === '--port') opts.port = Number(value())
     else if (a === '--ui') opts.ui = path.resolve(value())
     else if (a === '--expo') opts.expo = value()
+    else if (a === '--dataset') opts.dataset = value()
+    else if (a === '--dataset-size') {
+      sizeGiven = true
+      opts.datasetSize = parseDatasetSize(value())
+      if (opts.datasetSize === null) throw new LabUsageError('--dataset-size deve ser <membros>x<blocos>, por exemplo 60x150')
+    } else if (a === '--rajada') opts.rajada = true
+    else if (a === '--help' || a === '-h') opts.help = true
     else throw new LabUsageError('opção desconhecida: ' + a)
   }
+  if (opts.dataset !== null && !/^[A-Za-z0-9_-]{1,64}$/.test(opts.dataset)) throw new LabUsageError('--dataset deve ser uma semente de letras, números, - ou _')
+  if (opts.dataset === null && (sizeGiven || opts.rajada)) throw new LabUsageError('--dataset-size e --rajada exigem --dataset')
   if (!loopbackHost(opts.host)) throw new LabUsageError('--host deve ser 127.0.0.1 ou localhost')
   if (!Number.isInteger(opts.port) || opts.port < 1 || opts.port > 65535) throw new LabUsageError('--port inválida')
   let expo
@@ -294,6 +320,40 @@ function steps (origin, opts) {
   ].join('\n')
 }
 
+// The dataset after the lab is up: progress in the log, then how to point
+// the signed-in page at it. Errors are logged; the lab keeps running.
+async function fillDataset ({ opts, root, origin, association, issuer, seeder, seederWsUrl, cleanups }) {
+  const { planDataset } = require('../lib/lab-dataset-plan')
+  const { runDataset } = require('./lab-dataset')
+  const { members, blocksPerMember } = opts.datasetSize
+  const plan = planDataset({ seed: opts.dataset, members, blocksPerMember })
+  log('conjunto de dados "' + opts.dataset + '": ' + members + ' membros, ' + plan.totals.blocks + ' blocos, ' + plan.totals.photos + ' fotos; criando...')
+  // The seeder's own copy is what the app reads, so "pronto" waits for it;
+  // contiguous, since a core's length grows before its blocks arrive.
+  const heldLength = (key) => {
+    const served = seeder._served.get(key)
+    return served && served.core ? served.core.contiguousLength : 0
+  }
+  const result = await runDataset({ seederWsUrl, origin, association, issuer, plan, root: path.join(root, 'dataset'), log, heldLength, keep: opts.rajada ? 5 : 0 })
+  cleanups.push(() => result.close())
+  log('conjunto de dados pronto em ' + (result.ms / 1000).toFixed(1) + ' s: ' + result.members.length + ' diários no semeador, ' + result.communities.length + ' comunidades')
+  console.log([
+    '',
+    'Para o leitor seguir o conjunto: ' + result.setupFile,
+    '  Abra o app com o build de desenvolvimento (EXPO_PUBLIC_VARANDA_PERF=1 npm run web -w apps/app),',
+    '  entre com a conta, abra o console do DevTools e cole o conteúdo desse arquivo.',
+    '  As chaves públicas seguidas também estão em ' + result.followsFile + '.',
+    ''
+  ].join('\n'))
+  if (opts.rajada) {
+    const stop = await result.startRajada({
+      onPost: ({ n, username }) => { if (n % 10 === 0) log('rajada: ' + n + ' posts (último de @' + username + ')') }
+    })
+    cleanups.push(async () => log('rajada encerrada com ' + await stop() + ' posts'))
+    log('rajada no ar: um post por segundo em ' + Math.min(5, members) + ' membros até o Ctrl-C')
+  }
+}
+
 async function main () {
   let opts
   let envBootstrap
@@ -302,8 +362,12 @@ async function main () {
     envBootstrap = bootstrapFromEnv(process.env.VARANDA_BOOTSTRAP)
   } catch (err) {
     if (!(err instanceof LabUsageError)) throw err
-    process.stderr.write('erro: ' + err.message + '\n')
+    process.stderr.write('erro: ' + err.message + '\n' + USAGE + '\n')
     process.exitCode = 2
+    return
+  }
+  if (opts.help) {
+    console.log(USAGE)
     return
   }
 
@@ -420,6 +484,10 @@ async function main () {
     console.log(steps(origin, opts))
 
     starting = false
+    if (opts.dataset !== null) {
+      fillDataset({ opts, root, origin, association, issuer, seeder, seederWsUrl: 'ws://127.0.0.1:' + ws.port + '/seeder', cleanups })
+        .catch((err) => log('conjunto de dados falhou: ' + (err && err.message ? err.message : String(err))))
+    }
     await stopped
   } finally {
     process.off('SIGINT', onSignal)

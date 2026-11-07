@@ -1059,3 +1059,168 @@ test('trackPresent: destroy also drops the page guard\'s peer-add listener', asy
   tracker.destroy()
   t.is(replica.listenerCount('peer-add'), before, 'the listener is gone after destroy')
 })
+
+// node-store turns Hypercore's block cache on for the diary, replica and
+// group cores; a cleared block must never be served from it.
+async function cachedThenCleared (t, reader, clearer, seq, label) {
+  t.ok(await reader.get(seq), label + ': fixture: the block reads')
+  t.ok(reader.cache.get(seq), label + ': fixture: the block is cached')
+  await clearer.clear(seq)
+  await goneFromCache(t, [...new Set([reader, clearer])], seq, label)
+}
+
+async function goneFromCache (t, cores, seq, label) {
+  for (const core of cores) {
+    t.absent(await core.has(seq), label + ': has is false')
+    t.is(await core.get(seq, { wait: false }).catch((err) => err), null, label + ': get without waiting is null')
+    t.absent(core.cache.get(seq), label + ': nothing cached')
+  }
+}
+
+async function ownDiaryWith (t, posts) {
+  const m = await member()
+  const writer = await store.openDiary(m.storage, m.keyPair)
+  t.teardown(() => writer.close(), { force: true })
+  for (let i = 0; i < posts; i++) await writer.append(postRecord({ text: 'p' + i }))
+  return { m, writer }
+}
+
+async function replicaOf (t, storage, blocks) {
+  const source = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
+  await source.ready()
+  t.teardown(() => source.close(), { force: true })
+  for (let i = 0; i < blocks; i++) await source.append(postRecord({ text: 'r' + i }))
+  const replica = await store.openReplica(storage, hex(source.key))
+  const a = source.replicate(true)
+  const b = replica.replicate(false)
+  a.pipe(b).pipe(a)
+  await replica.download({ start: 0, end: blocks }).done()
+  a.destroy()
+  b.destroy()
+  return { source, replica }
+}
+
+test('the block cache never serves a cleared diary block, through the same handle or a shared session', async (t) => {
+  const { m, writer } = await ownDiaryWith(t, 3)
+  const shared = await store.openDiary(m.storage)
+  t.teardown(() => shared.close(), { force: true })
+  t.ok(writer.cache, 'fixture: the diary has a block cache')
+  t.is(shared.cache, writer.cache, 'fixture: the shared session uses the same cache')
+  const n = writer.length
+  await cachedThenCleared(t, writer, writer, n - 1, 'same handle')
+  await cachedThenCleared(t, writer, shared, n - 2, 'cleared through the shared session')
+  await cachedThenCleared(t, shared, writer, n - 3, 'read through the shared session')
+  const later = writer.session()
+  t.teardown(() => later.close(), { force: true })
+  await cachedThenCleared(t, writer, later, n - 4, 'cleared through a later session')
+})
+
+test('a clear racing an in-flight read leaves nothing stale in the block cache', async (t) => {
+  const { writer } = await ownDiaryWith(t, 2)
+  const n = writer.length
+  const readFirst = writer.get(n - 1)
+  await writer.clear(n - 1)
+  await readFirst.catch(() => null)
+  await goneFromCache(t, [writer], n - 1, 'read started before the clear')
+  const clearing = writer.clear(n - 2)
+  const readDuring = writer.get(n - 2).catch(() => null)
+  await clearing
+  await readDuring
+  await goneFromCache(t, [writer], n - 2, 'read started during the clear')
+})
+
+test('the block cache never serves a cleared block of a replica or a group core', async (t) => {
+  const storage = memoryNodeStorage()
+  const { replica } = await replicaOf(t, storage, 3)
+  t.teardown(() => replica.close(), { force: true })
+  await cachedThenCleared(t, replica, replica, 1, 'replica')
+  const groupKp = crypto.keyPair()
+  const writer = await store.openGroupWriter(storage, groupKp)
+  for (let i = 0; i < 3; i++) await writer.append({ n: i })
+  await cachedThenCleared(t, writer, writer, 0, 'own group core')
+  await writer.close()
+  const group = await store.openGroupReplica(storage, hex(groupKp.publicKey))
+  t.teardown(() => group.close(), { force: true })
+  await cachedThenCleared(t, group, group, 2, 'group replica')
+})
+
+test('a purged replica reopens with an empty block cache; a truncate drops cached blocks', async (t) => {
+  const storage = memoryNodeStorage()
+  const { source, replica } = await replicaOf(t, storage, 3)
+  for (let i = 0; i < 3; i++) t.ok(await replica.get(i), 'fixture: block read')
+  t.ok(replica.cache.size > 0, 'fixture: blocks cached')
+  await replica.close()
+  await store.purgeReplica(storage, hex(source.key))
+  const reopened = await store.openReplica(storage, hex(source.key))
+  t.teardown(() => reopened.close(), { force: true })
+  t.is(reopened.cache.size, 0, 'the reopened replica starts with an empty cache')
+  t.is(reopened.length, 0, 'nothing stored')
+  t.is(await reopened.get(1, { wait: false }), null, 'nothing served')
+
+  const { writer } = await ownDiaryWith(t, 2)
+  const last = writer.length - 1
+  t.ok(await writer.get(last), 'fixture: the last block reads')
+  t.ok(writer.cache.get(last), 'fixture: the last block is cached')
+  await writer.truncate(last)
+  t.is(await writer.get(last, { wait: false }), null, 'the truncated block is not served')
+  t.absent(writer.cache.get(last), 'nothing cached after the truncate')
+})
+
+test('a get pending on a block not held yet never caches it when its storage read settles after a clear', async (t) => {
+  const { writer } = await ownDiaryWith(t, 1)
+  const seq = writer.length
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const blocks = writer.core.blocks
+  const read = blocks.get
+  let delayed = 0
+  blocks.get = async function (...args) {
+    if (args[0] === seq) delayed++
+    const block = await read.apply(this, args)
+    if (args[0] === seq) await gate
+    return block
+  }
+  t.teardown(() => { blocks.get = read })
+  const pending = writer.get(seq).catch((err) => err)
+  t.absent(writer.cache.get(seq), 'fixture: nothing cached while the block is missing')
+  await writer.append(postRecord({ text: 'late' }))
+  t.is(delayed, 1, 'fixture: the pending get is answered by a delayed storage read')
+  await writer.clear(seq)
+  release()
+  const answer = await pending
+  t.ok(answer !== null && !(answer instanceof Error), 'fixture: the pending get got the block it started before the clear')
+  await goneFromCache(t, [writer], seq, 'read settled after the clear')
+})
+
+test('a cached block reads as absent as soon as the bitfield drops it, before any eviction', async (t) => {
+  const { writer } = await ownDiaryWith(t, 2)
+  const seq = writer.length - 1
+  t.ok(await writer.get(seq), 'fixture: the block reads')
+  t.ok(writer.cache.get(seq), 'fixture: the block is cached')
+  const bitfield = writer.core.bitfield
+  bitfield.set(seq, false)
+  t.teardown(() => bitfield.set(seq, true))
+  t.absent(writer.cache.get(seq), 'the cache answers nothing for a block the core no longer holds')
+  t.absent(writer.cache.has(seq), 'and has() agrees')
+  t.is(await writer.get(seq, { wait: false }), null, 'get without waiting is null')
+})
+
+test('a storage read that fails once is not kept in the block cache, so the next read retries storage', async (t) => {
+  const { writer } = await ownDiaryWith(t, 2)
+  const seq = writer.length - 1
+  const blocks = writer.core.blocks
+  const read = blocks.get
+  let attempts = 0
+  blocks.get = async function (...args) {
+    if (args[0] === seq && ++attempts === 1) throw new Error('falha de leitura simulada')
+    return read.apply(this, args)
+  }
+  t.teardown(() => { blocks.get = read })
+  writer.cache.delete(seq)
+  const first = await writer.get(seq).catch((err) => err)
+  t.ok(first instanceof Error, 'fixture: the first read fails')
+  await new Promise((resolve) => setImmediate(resolve))
+  t.absent(writer.cache.get(seq), 'the failed read is not cached')
+  t.ok(await writer.get(seq), 'the next read goes to storage again and succeeds')
+  t.is(attempts, 2, 'storage was read twice')
+})

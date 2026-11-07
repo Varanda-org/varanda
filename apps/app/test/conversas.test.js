@@ -416,3 +416,26 @@ test('a peer named like the own label never reads as own in a quote', (t) => {
   t.ok(screen.includes('handle: quoteMine(item) ? undefined : quoteHandle'), 'a peer quote carries the verified @nome')
   t.ok(screen.includes('senderKey: quoteMine(item) ? undefined : peer'), 'a peer quote gets the peer color, not the own accent')
 })
+
+test('conversasReadsAllowed holds hidden-tab reads until the first show', async (t) => {
+  const { conversasReadsAllowed } = await import('../src/conversas.js')
+  t.is(conversasReadsAllowed({ active: false, shownOnce: false }), false)
+  t.is(conversasReadsAllowed({ active: true, shownOnce: false }), true)
+  t.is(conversasReadsAllowed({ active: false, shownOnce: true }), true)
+  t.is(conversasReadsAllowed(), false)
+})
+
+test('Conversas reads and the shell dot wait out the boot', (t) => {
+  const conversas = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
+  t.ok(conversas.includes('conversasReadsAllowed({ active, shownOnce: shownOnce.current })'))
+  t.ok(conversas.includes('useInbox({ ready: ready && allowed,'))
+  t.ok(conversas.includes('enabled: hosted && allowed && pageKey === null'))
+  t.ok(app.includes('nodeWhenIdle(4000)') && app.includes('if (dmReady && dmDotGate) readDmDot()'))
+  // The mailbox pull finds waiting messages for the dot, so it waits only for
+  // a quiet node, never for the tab to be opened.
+  t.ok(conversas.includes('const pulls = allowed || quiet'), 'pulls start on the first show or once the node is quiet')
+  t.ok(conversas.includes('if (!ready || !pulls) return'), 'the first pull is gated on pulls, not allowed')
+  t.ok(conversas.includes('if (!ready || !pulls || !visible) return'), 'the periodic pull is gated on pulls, not allowed')
+  t.ok(conversas.includes('const wait = nodeWhenIdle(4000)') && conversas.includes('wait.cancel()'), 'the quiet wait uses whenIdle and is cancelled')
+})

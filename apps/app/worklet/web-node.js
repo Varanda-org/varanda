@@ -16,7 +16,8 @@
 // request with LOCKED and the storage is never touched. Building the
 // session opens nothing (lib/session.js only checks its configuration).
 //
-// The web session has no suspend/resume: its lease redials when needed.
+// The web session has no suspend/resume: the run redials on its own backoff
+// while the app is in front, and the app stops the sync when it is hidden.
 const fs = require('bare-fs')
 const path = require('bare-path')
 const crypto = require('bare-crypto')
@@ -32,8 +33,11 @@ const { createBareFetch } = require('./bare-fetch')
 const { readMediaFile, createLifecycle, uploadMedia, putDmMedia, clearReadDir, writeReadFile, readMediaToFile } = require('./web-node-parts')
 
 const MAX_MEDIA_ITEM_BYTES = MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES
-// The browser entry's lease values (packages/web-member/web/node.js).
-const LEASE_HOLD_MS = 8000
+// The lease stays off, as in the browser entry: the visible app keeps its
+// seeder link (each foreground app holds one external seeder slot), and the
+// app's own visibility handling stops the sync in the background. The gap
+// is kept for the escape hatch, where the lease is turned on for seeder
+// capacity (docs/rpc.md 6.1).
 const LEASE_GAP_MS = 45000
 const DATA_DIR_IN_USE = 'diretório de dados em uso'
 const LOCK_UNAVAILABLE = 'trava do diretório indisponível'
@@ -79,7 +83,7 @@ function createWebNode (args, { onInternalError } = {}) {
     association: args.association,
     seederUrl: args.seederUrl,
     createSocket: (url) => duplexSocket(new Socket(url)),
-    leaseHoldMs: LEASE_HOLD_MS,
+    leaseHoldMs: 0,
     leaseGapMs: LEASE_GAP_MS,
     // Bare has no globalThis.fetch: group and DM media download through this.
     fetchMedia: createBareFetch({ http: require('bare-http1'), https: require('bare-https') }),
