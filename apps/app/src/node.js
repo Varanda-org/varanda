@@ -126,7 +126,8 @@ import { slowRequestLine } from './slowRequest'
 import { createIdleTracker } from './idle'
 import { noteOwnDmDrop } from './dmWakeMute'
 import { setDmDropObserver } from './pages'
-import { vitrineEnabled } from './vitrine/enabled'
+import { vitrineEnabled, vitrineLarge } from './vitrine/enabled'
+import { createMarks, devHookRequest, perfEnabled } from './perfMarks'
 import { recoveryFetch } from './account'
 import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 
@@ -208,6 +209,15 @@ const noConnection = () => Promise.reject(Object.assign(new Error('sem conexão 
 // The Vitrine (src/vitrine/enabled.js): development bundles only, behind an
 // opt-in env var. The literal member access is what Expo inlines.
 const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
+// 200 extra feed rows for timing native list rendering (docs/performance.md).
+const VITRINE_LARGE = vitrineLarge({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE, EXPO_PUBLIC_VARANDA_VITRINE_LARGE: process.env.EXPO_PUBLIC_VARANDA_VITRINE_LARGE }, typeof __DEV__ !== 'undefined' && __DEV__)
+
+// Dev-only timing marks (src/perfMarks.js): off unless a development bundle
+// sets the env var. Kept out of the NodeContext value and the sync lines,
+// whose changes re-render the shell: that is the cost being measured.
+const PERF = perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: process.env.EXPO_PUBLIC_VARANDA_PERF }, typeof __DEV__ !== 'undefined' && __DEV__)
+const marks = createMarks({ enabled: PERF })
+export function perfMarks () { return marks }
 let vitrine = null
 if (VITRINE) {
   const { fixtures } = require('./vitrine/fixtures')
@@ -234,7 +244,7 @@ export function NodeProvider ({ children }) {
 // What the shell reads to show the hosted, unlocked, member-certified
 // screens over the fixtures: no connection, no sync, no passkey ceremony.
 function VitrineNodeProvider ({ children }) {
-  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures))
+  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures, { large: VITRINE_LARGE }))
   const [dmVersion, setDmVersion] = useState(0)
   const bumpDm = useCallback(() => setDmVersion((n) => n + 1), [])
   const [autoWanted, setAutoWanted] = useState(false)
@@ -666,6 +676,7 @@ function LiveNodeProvider ({ children }) {
         try { await saveConfig(cfg) } catch { setError('a configuração não pôde ser guardada neste aparelho') }
       }
       const status = await conn.request('sync.status')
+      marks.mark('sync.status')
       if (status.state === 'running') {
         setSync((prev) => (prev.active ? prev : { ...prev, active: { runId: status.runId, once: status.once } }))
         adoptSignals(status.runId, status.once)
@@ -678,6 +689,7 @@ function LiveNodeProvider ({ children }) {
       if (identity !== null) {
         try { pk = await identity.status() } catch (err) { pkErr = errorText(err) }
       }
+      marks.mark('identity.status')
       setHasPasskey(identity !== null)
       setHasMedia(identity !== null && conn.media != null && typeof conn.media.upload === 'function')
       setMediaCaps(identity !== null && conn.media != null ? CHAT_MEDIA_CALLS.filter((k) => typeof conn.media[k] === 'function').join(',') : '')
@@ -688,6 +700,7 @@ function LiveNodeProvider ({ children }) {
       setConfig(cfg)
       if (nativeHosted) setHosted(true)
       setPhase('ready')
+      marks.mark('ready')
     } catch (err) {
       connRef.current = null
       if (holder.conn) { try { await holder.conn.close() } catch {} }
@@ -703,6 +716,7 @@ function LiveNodeProvider ({ children }) {
   const connect = useCallback((cfg, opts) => {
     if (busyRef.current) return inflightRef.current
     busyRef.current = true
+    marks.mark('config')
     const run = connectNow(cfg, opts)
     inflightRef.current = run
     run.then(() => { if (inflightRef.current === run) inflightRef.current = null })
@@ -824,6 +838,7 @@ function LiveNodeProvider ({ children }) {
     idle.begin()
     const done = () => {
       const line = slowRequestLine(method, startedAt, Date.now())
+      marks.span('req:' + method, startedAt, Date.now())
       idle.end()
       if (line !== null && connRef.current === conn) setSync((prev) => appendLine(prev, 'aviso: ' + line))
     }
@@ -847,6 +862,14 @@ function LiveNodeProvider ({ children }) {
   }, [extendWait])
 
   const whenIdle = useCallback((quietMs) => idleRef.current.whenIdle(quietMs), [])
+
+  // Lets a lab driver act as the signed-in user in a development build; the
+  // same PERF check keeps it out of release bundles and off by default.
+  useEffect(() => {
+    if (!PERF || phase !== 'ready') return
+    globalThis.__varandaDev = Object.freeze({ request: devHookRequest(request), report: () => marks.report() })
+    return () => { delete globalThis.__varandaDev }
+  }, [phase, request])
 
   // Re-reads identity.status() of `conn` (the current connection by
   // default); a result for a connection that is no longer current is dropped.

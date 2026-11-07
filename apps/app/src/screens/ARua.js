@@ -30,7 +30,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { ENGAGEMENT_LIMIT_MAX, FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX, FOLLOW_LIMIT_MAX, LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
-import { useNode } from '../node'
+import { perfMarks, useNode } from '../node'
 import { useNames } from '../names'
 import { pickAvatar } from '../media/avatar'
 import { FEED_SYNCING_END, cursorOf, feedKey, feedSyncing, isLastFeedPage, mergeRange, olderPagePatch, planSyncRead, quietNewestPlan, rangeEnd, rangePageCap, rangeStart, rangeStep, rearmTimer, resetWith, sequenceBase, shouldReloadOnShow, syncBaseline, syncTruncated } from '../paging'
@@ -1342,6 +1342,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     if (feed.loadedAt === null && !failed) return
     if (!b.page) {
       b.page = true
+      perfMarks().mark('first-rows')
       onBoot('page')
     }
     const rows = feed.items.slice(0, FEED_FIRST_ROWS)
@@ -1360,6 +1361,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     })
     if (!ready) return
     b.details = true
+    perfMarks().mark('details')
     onBoot('details')
   }, [onBoot, feed.loadedAt, feed.loadError, feed.items, names.profileOf, socialState, node.hosted, node.online])
 
