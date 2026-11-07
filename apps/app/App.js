@@ -79,7 +79,9 @@ import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profile
 import { captureEntryLink, dropEntryLink } from './src/groupLinkStore'
 import { ENTRY_LINK_LABELS, ENTRY_OPEN_TEXT, entryCardText, entryPath } from './src/groupLink'
 import { showPostButton, tabsFor } from './src/tabs'
-import { captureSignupInvite, dropSignupInvite, loadSignupInvite } from './src/signupInviteStore'
+import { captureSignupInvite, dropSignupInvite, dropSignupInviteCard, loadSignupInvite, loadSignupInviteCard } from './src/signupInviteStore'
+import { CARD_RECORD_TTL_MS, canAttribute, cardRecordId, resolveInviteCard } from './src/inviteCardFlow'
+import { OPEN_WAIT_MS, arrivalGate, expiryLine, openingGate } from './src/inviteCardCopy'
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { LEGAL_VERSION } from './src/legal'
@@ -99,6 +101,8 @@ import { InstallCard } from './src/ui/InstallCard'
 import { PushNote } from './src/ui/PushNote'
 import { DeletionNote } from './src/ui/DeletionNote'
 import { InviteDropNote } from './src/ui/InviteDropNote'
+import { InviteArrival } from './src/ui/InviteArrival'
+import { InviteCardOpen } from './src/ui/InviteCardOpen'
 import { useInviteDrop } from './src/useInviteDrop'
 import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
@@ -263,6 +267,16 @@ const sameTarget = (a, b) => !!a && !!b && a.username === b.username && a.key ==
 const CAPTURED_LAUNCH = captureLaunch()
 
 // True when node.info confirms an identity and a member certificate.
+// resolveInviteCard counts a card expired once the whole second after its
+// signed expires (seconds) has passed.
+function cardExpiredAt (expires) {
+  return (expires + 1) * 1000
+}
+
+function cardPastExpires (card, now) {
+  return !!card && typeof card.expires === 'number' && now >= cardExpiredAt(card.expires)
+}
+
 function setupComplete (info) {
   return info !== null && info.publicKey !== null && info.memberCert === true
 }
@@ -484,6 +498,14 @@ function Member () {
   const terms = useTerms(LEGAL_VERSION)
   const intro = useIntro()
   const introState = introDecision({ status: intro.status, record: intro.record, version: INTRO_VERSION })
+  // The signup invite card (src/inviteCardFlow.js) kept beside the code by
+  // the captures (the web load above, appUrlRef, the paste fields). Read
+  // again on every capture, drop, focus and expiry: the store re-checks its
+  // 24 h on each read and clears an expired record, and the rendered card
+  // follows. tick also re-runs the resolve for the same record (a retry).
+  const [cardState, setCardState] = useState(() => ({ record: loadSignupInviteCard(), tick: 0 }))
+  const reloadCard = useCallback(() => setCardState((c) => ({ record: loadSignupInviteCard(), tick: c.tick + 1 })), [])
+  const cardKey = cardRecordId(cardState.record)
   const member = passkey !== null
     ? ((!locked && pkStatus && pkStatus.publicKey) || null)
     : ((info && info.publicKey) || null)
@@ -720,7 +742,11 @@ function Member () {
       }
       // The app drops a refused code so the paste field shows again; the web
       // keeps its stored code as it always did.
-      if (dropsHeldInvite(err, NATIVE_APP)) dropSignupInvite()
+      if (dropsHeldInvite(err, NATIVE_APP)) {
+        dropSignupInvite()
+        dropSignupInviteCard()
+        reloadCard()
+      }
       if (NATIVE_APP && isInviteRefusal(err)) setAgeInviteRefused(true)
       setAgeError(ageErrorText(err) || errorText(err))
     }).finally(() => {
@@ -757,6 +783,7 @@ function Member () {
     setAgeInviteRefused(false)
     setAgeError('')
     setAgeInviteTick((n) => n + 1)
+    reloadCard()
   }
   useEffect(() => {
     if (!ageReadNow) return
@@ -1128,6 +1155,7 @@ function Member () {
     if (signup !== null) {
       setAgeInviteRefused(false)
       setAgeInviteTick((n) => n + 1)
+      reloadCard()
     }
     const rec = captureInvite(url)
     if (rec !== null) {
@@ -1231,6 +1259,133 @@ function Member () {
     index = total
   }
   useEffect(() => { if (!setupStep && step === 'pronto') setReachedTabs(true) }, [setupStep, step])
+
+  // The invite card is resolved from scratch for the screen that may show
+  // it: the opening card (before the intro cards, bound to the held code)
+  // or the arrival card (at 'pronto', once the code was used, bound to the
+  // record's own code). Nothing is resolved for the steps in between.
+  const cardStage = !setupStep && step === 'pronto' ? 'arrival' : 'open'
+  // The arrival card is for someone joining with this card: it needs the
+  // node to have said, on this page load and while this very card was held,
+  // that the identity is not a member yet (info loaded, no member
+  // certificate). A setup step alone is not that signal: it also holds while
+  // info is still loading for a member. A member who was already signed in
+  // when opening a card link never sees it, a replaced card starts
+  // ineligible, and a load that never saw the signal fails closed: no card.
+  // The signal is bound to the identity that gave it: signing into another
+  // account in the same tab never inherits a newcomer's arrival card.
+  const eligibleCardRef = useRef(null)
+  const ownPublicKey = info !== null && typeof info.publicKey === 'string' ? info.publicKey : null
+  if (cardKey !== null && ownPublicKey !== null && info.memberCert !== true) eligibleCardRef.current = { card: cardKey, key: ownPublicKey }
+  const arrivalEligible = cardKey !== null && eligibleCardRef.current !== null &&
+    eligibleCardRef.current.card === cardKey && eligibleCardRef.current.key === ownPublicKey
+  const cardWanted = cardKey !== null && ((cardStage === 'arrival' && arrivalEligible) || (introState === 'show' && !LINK_RETURN && !AGE_RETURN))
+  const [cardView, setCardView] = useState(null)
+  const cardSeq = useRef(0)
+  const resolveCard = useCallback((stage) => {
+    const record = loadSignupInviteCard()
+    return resolveInviteCard({
+      record,
+      heldCode: stage === 'arrival' ? (record !== null ? record.code : undefined) : loadSignupInvite()?.code,
+      request: node.request,
+      accountStatus: (who) => accountStatus(who, { origin: ageOrigin }),
+      nodeReady: node.phase === 'ready',
+      now: Date.now()
+    })
+  }, [node.request, node.phase, ageOrigin])
+  useEffect(() => {
+    const seq = ++cardSeq.current
+    if (!cardWanted) {
+      setCardView(null)
+      return
+    }
+    resolveCard(cardStage).then((result) => {
+      if (seq !== cardSeq.current) return
+      // The store moved since the last read (a drop elsewhere, the 24 h):
+      // read it again; the next resolve is for that record.
+      if (result.recordId !== cardKey) return reloadCard()
+      // A node that went back to connecting keeps the card already verified.
+      // A card past its signed expires is not kept: the expired answer, or
+      // none, takes its place.
+      setCardView((v) => result.signature === 'wait' && v !== null && v.id === result.recordId && v.stage === cardStage && v.result.signature === 'ok' &&
+        !cardPastExpires(v.result.card, Date.now())
+        ? v
+        : { id: result.recordId, stage: cardStage, result })
+    }, () => {})
+  }, [cardWanted, cardKey, cardStage, cardState.tick, resolveCard, generation, node.online])
+  const cardRetry = cardView !== null && (cardView.result.signature === 'wait' || cardView.result.membership === 'unknown')
+  const cardRetryRef = useRef(cardRetry)
+  cardRetryRef.current = cardRetry
+  const cardKeyRef = useRef(cardKey)
+  cardKeyRef.current = cardKey
+  const shownCard = cardView !== null && cardView.id === cardKey && cardView.result.card ? cardView.result.card : null
+  const cardCardRef = useRef(shownCard)
+  cardCardRef.current = shownCard
+  // Back in the foreground: resolve again when the last answer has to be
+  // retried, and read the store again when the record moved (expired,
+  // replaced) so the rendered card follows it.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return
+      if (cardRetryRef.current || cardRecordId(loadSignupInviteCard()) !== cardKeyRef.current ||
+        (cardCardRef.current !== null && cardPastExpires(cardCardRef.current, Date.now()))) reloadCard()
+    })
+    return () => sub.remove()
+  }, [reloadCard])
+  // The record's 24 h or the card's signed expires, whichever comes first,
+  // ends while the app stays open: resolve again so the card is marked
+  // expired and canAttribute hides it.
+  const shownExpires = shownCard !== null ? shownCard.expires : null
+  useEffect(() => {
+    const record = cardState.record
+    if (record === null) return
+    let end = record.at + CARD_RECORD_TTL_MS
+    if (typeof shownExpires === 'number') end = Math.min(end, cardExpiredAt(shownExpires))
+    const fire = () => {
+      // A card past its signed expires is spent: drop it, or the store read
+      // would hand back the same record and this timer would fire again.
+      if (typeof shownExpires === 'number' && Date.now() >= cardExpiredAt(shownExpires)) dropSignupInviteCard()
+      reloadCard()
+    }
+    const t = setTimeout(fire, Math.max(0, end - Date.now()) + 50)
+    return () => clearTimeout(t)
+  }, [cardState.record, shownExpires, reloadCard])
+  const cardViewFor = (stage) => cardView !== null && cardView.id === cardKey && cardView.stage === stage ? cardView.result : null
+  // Agora não on the opening card: hidden for this load, code and card kept.
+  const [openLater, setOpenLater] = useState(false)
+  const [openHow, setOpenHow] = useState(false)
+  const openResult = cardViewFor('open')
+  // An offline membership ('unknown') or a node not ready yet is still
+  // pending; an unlinked key, a bad signature or an expired card is not a card.
+  const openVerified = cardKey === null
+    ? false
+    : openResult === null || openResult.signature === 'wait' || (openResult.signature === 'ok' && openResult.membership === 'unknown')
+      ? null
+      : canAttribute(openResult)
+  // The record the arrival card closed (Agora não, or both taps done):
+  // dismissed even when the store refused the drop.
+  const [arrivalClosed, setArrivalClosed] = useState(null)
+  const arrivalResult = cardViewFor('arrival')
+  const showArrival = arrivalEligible && arrivalResult !== null && typeof arrivalResult.username === 'string' && arrivalGate({
+    step,
+    verified: canAttribute(arrivalResult),
+    linked: arrivalResult.membership === 'linked',
+    dismissed: arrivalClosed === arrivalResult.recordId,
+    ownKey,
+    member: arrivalResult.member
+  })
+  const closeArrival = useCallback(() => {
+    setArrivalClosed(cardKeyRef.current)
+    dropSignupInviteCard()
+    reloadCard()
+  }, [reloadCard])
+  const resolveArrival = useCallback(() => resolveCard('arrival'), [resolveCard])
+  // Bound when the arrival card renders: true only while this identity and
+  // this record are current, asked before each write.
+  const arrivalGen = generation
+  const arrivalId = arrivalResult !== null ? arrivalResult.recordId : null
+  const arrivalGuard = useCallback(() => arrivalGen === generationRef.current && arrivalId !== null &&
+    cardRecordId(loadSignupInviteCard()) === arrivalId, [arrivalGen, arrivalId])
 
   // Only the unlocked passkey key, behind the terms, age and setup gates: the
   // browser registration is read here so the note's first tap already holds
@@ -2189,12 +2344,55 @@ function Member () {
   // Runs after ThemeProvider's layout effect, so the band colour wins and a
   // band that goes away gives back the current scheme's bg.
   useEffect(() => { applyBandMeta(bandShown, colors.bg) }, [bandShown, colors.bg])
+  // The opening invite card (inviteCardCopy.js openingGate) waits under the
+  // splash for at most OPEN_WAIT_MS, counted from when the intro cards would
+  // show. Once the intro cards have shown the splash never comes back for
+  // it, and a card verified later takes their place.
+  const openWaitAt = useRef(null)
+  const introRendered = useRef(false)
+  const introDue = showIntro && !loadingGate && !holding
+  if (introDue && openWaitAt.current === null) openWaitAt.current = Date.now()
+  let opening = openingGate({
+    introShow: introDue,
+    linkReturn: LINK_RETURN,
+    ageReturn: AGE_RETURN,
+    card: cardKey !== null,
+    verified: openVerified,
+    waitedMs: openWaitAt.current === null ? 0 : Date.now() - openWaitAt.current,
+    dismissed: openLater
+  })
+  if (opening === 'wait' && introRendered.current) opening = 'none'
+  useEffect(() => {
+    if (opening !== 'wait') return
+    const t = setTimeout(() => bumpSplash((n) => n + 1), Math.max(0, OPEN_WAIT_MS - (Date.now() - openWaitAt.current)) + 50)
+    return () => clearTimeout(t)
+  }, [opening])
   // The same root View with the Splash at child 0 is what React preserves
   // across these returns and the final one, so the chair animation does not
   // replay and, on the web, the Splash unmount that removes
   // #varanda-pre-splash happens only when the real screen is ready.
-  if (loadingGate || holding) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
-  if (showIntro) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
+  if (loadingGate || holding || opening === 'wait') return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
+  if (opening === 'card' && openResult !== null) {
+    // Como funciona: the intro cards, then back to the card; only Entrar
+    // marks them seen.
+    if (openHow) return <Introducao key='how' onDone={() => setOpenHow(false)} sidePad={sidePad} edges={sideEdges} />
+    return (
+      <InviteCardOpen
+        card={openResult.card}
+        username={openResult.username}
+        expiryText={expiryLine(openResult.card.expires, Date.now())}
+        onEnter={() => intro.markSeen()}
+        onHow={() => setOpenHow(true)}
+        onLater={() => setOpenLater(true)}
+        sidePad={sidePad}
+        edges={sideEdges}
+      />
+    )
+  }
+  if (showIntro) {
+    introRendered.current = true
+    return <Introducao key='intro' onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
+  }
   if (deletedState !== null && member !== null && passkey !== null) {
     const erase = async () => {
       const key = member
@@ -2298,7 +2496,7 @@ function Member () {
             onDismiss: () => { dropEntryLink(); setPendingLink(null) }
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={dropLinkReturn} invite={inviteProp || entryProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={dropLinkReturn} onInviteChanged={reloadCard} invite={inviteProp || entryProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
         <View style={styles.setupBody}>
@@ -2552,6 +2750,21 @@ function Member () {
             )
           : null}
         <OfflineNote inset={tab === 'diario'} />
+        {showArrival
+          ? (
+            <InviteArrival
+              key={arrivalResult.recordId + ':' + generation}
+              result={arrivalResult}
+              request={node.request}
+              resolve={resolveArrival}
+              guard={arrivalGuard}
+              onStale={reloadCard}
+              onFollowed={followsChanged}
+              onLater={closeArrival}
+              onDone={closeArrival}
+            />
+            )
+          : null}
         {scheduledDeletion !== null
           ? <DeletionNote scheduled={scheduledDeletion} onOpen={() => setAjustes('excluir')} inset={tab === 'diario' && node.online !== false} />
           : null}

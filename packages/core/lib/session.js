@@ -31,6 +31,7 @@ const { certForKey } = require('./cert')
 const { formatEvent, key8 } = require('./sync-format')
 const { safe } = require('./safe')
 const { UsageError } = require('./errors')
+const { verifyInviteCard, isInviteCardExpired } = require('./invite-card')
 const { validBootstrap, isLoopbackAddress, isLoopbackBootstrap } = require('./config')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
@@ -568,6 +569,24 @@ function createSession ({
     // And for the signup-invite request (docs/rpc.md 5.30).
     'invite.sign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')
+    }),
+
+    // And for the invite card (docs/rpc.md 5.101): signed only in the browser.
+    'inviteCard.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
+    // docs/rpc.md 5.102: pure, no identity needed. Still serial, so a closed
+    // or errored session answers LOCKED like every other request.
+    'inviteCard.verify': serial(async (params) => {
+      try {
+        const { signature, ...fields } = params
+        const result = verifyInviteCard({ ...fields, association: cfg.association }, signature)
+        if (result.ok && isInviteCardExpired(fields.expires, Math.floor(Date.now() / 1000))) return { ok: false, reason: 'expired' }
+        return result
+      } catch {
+        return { ok: false, reason: 'malformed' }
+      }
     }),
 
     // And for the push-subscription statement (docs/rpc.md 5.31).

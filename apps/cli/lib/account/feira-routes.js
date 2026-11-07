@@ -30,6 +30,15 @@
 // Logs carry { event: 'feira', reason } only: never a code, a key or a seq.
 
 const HEX64_RE = /^[0-9a-f]{64}$/
+const POLICY_PATH = '/account/feira/policy'
+const START_PATH = '/account/feira/start'
+
+// The request target's path exactly as sent, before any URL normalisation.
+function rawPath (req) {
+  const target = typeof req.url === 'string' ? req.url : ''
+  const q = target.indexOf('?')
+  return q === -1 ? target : target.slice(0, q)
+}
 
 function createFeiraRoutes ({ enabled = false, invites = null, reader = null, store, pagesStore = null, log = () => {}, now = Date.now, http }) {
   const { send, readJsonBody, checkPost, refuse, fromStore } = http
@@ -95,9 +104,13 @@ function createFeiraRoutes ({ enabled = false, invites = null, reader = null, st
 
   async function handle (req, res, url) {
     const pathname = url.pathname
-    if (req.method === 'GET' && pathname === '/account/feira/policy') return send(res, 200, { enabled: on })
+    // The edge limits these routes by path, and Caddy cleans a path (decoding
+    // %2F first) differently from URL here: a target that only normalises to
+    // one of them is an unknown route, before the body is read.
+    if ((pathname === POLICY_PATH || pathname === START_PATH) && rawPath(req) !== pathname) throw notFound()
+    if (req.method === 'GET' && pathname === POLICY_PATH) return send(res, 200, { enabled: on })
     if (!on) throw notFound()
-    if (req.method === 'POST' && pathname === '/account/feira/start') {
+    if (req.method === 'POST' && pathname === START_PATH) {
       checkPost(req)
       return start(res, await readJsonBody(req))
     }

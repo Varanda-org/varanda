@@ -237,6 +237,18 @@ test('a version.json in dist is not precached and does not change the release id
   t.ok(sw1.equals(fs.readFileSync(path.join(dist, 'sw.js'))), 'second run byte-identical')
 })
 
+test('the messenger preview images under /og/ are not precached', (t) => {
+  const plain = makeDist()
+  quiet(() => finishWeb(plain))
+  const dist = makeDist()
+  fs.mkdirSync(path.join(dist, 'og'))
+  fs.writeFileSync(path.join(dist, 'og', 'convite.png'), 'png')
+  quiet(() => finishWeb(dist))
+  const { version, precache } = readWorker(dist)
+  t.absent(precache.some((e) => e.url.startsWith('/og/')), 'not precached')
+  t.is(version, readWorker(plain).version, 'same release id as without them')
+})
+
 test('finishWeb refuses an incomplete export', (t) => {
   for (const missing of ['index.html', 'varanda-node.js', 'manifest.webmanifest', BUNDLE.slice(1)]) {
     const dist = makeDist()

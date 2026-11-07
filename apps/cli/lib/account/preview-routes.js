@@ -80,7 +80,8 @@ function sniffImage (buf) {
 // dotted hostname (no IP literal), port 443, no user or password, at most
 // MAX_URL characters before and after normalizing, and a normalized form
 // core's link card accepts (cardUrlHost of @varanda/rpc: no brace, pipe or
-// other character outside the canonical set; the fragment is kept).
+// other character outside the canonical set; the fragment is kept), and
+// never a /convite path.
 function linkParam (v) {
   if (typeof v !== 'string' || v.length < 1 || v.length > MAX_URL || CONTROL_RE.test(v) || v.trim() !== v) return null
   let url
@@ -92,6 +93,9 @@ function linkParam (v) {
   if (url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.port !== '') return null
   const host = url.hostname.toLowerCase()
   if (!isHostname(host) || !host.includes('.')) return null
+  // A signup invite link on any host: its fragment can carry the card's
+  // name, message and code, so it is refused like any other bad link.
+  if (url.pathname === '/convite' || url.pathname.startsWith('/convite/')) return null
   if (url.href.length > MAX_URL || cardUrlHost(url.href) !== host) return null
   return url
 }
