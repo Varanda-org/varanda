@@ -38,6 +38,7 @@ const resultKeys = {
   'seen.sign': ['signature', 'prevHash'],
   'seen.merge': ['avisos', 'pending', 'dmChanged', 'groupChanged', 'caughtUp'],
   'report.sign': ['signature'],
+  'appeal.sign': ['signature'],
   'dm.reportSign': ['signature'],
   'terms.sign': ['signature'],
   'recovery.sign': ['signature'],
@@ -564,6 +565,7 @@ function samples (f) {
     'seen.sign': { nonce, action: 'read' },
     'seen.merge': { blob: null, avisos: { own: [] }, unchanged: false },
     'report.sign': { nonce, target: member, reason: 'outro' },
+    'appeal.sign': { nonce, text: 'Foi um engano.' },
     'dm.reportSign': { nonce, target: member, reason: 'outro', quote: 'Uma mensagem de exemplo.' },
     'terms.sign': { nonce, version: 1 },
     'recovery.sign': { action: 'list', nonce },
@@ -913,7 +915,7 @@ test('page signing covers every documented result variant with fake signatures',
   const cancelled = await answer(t, request, 'page.sign', { action: 'offer', nonce, page, op: { ...base, to: null, exp: null } })
   t.is(cancelled.record.to, null)
   t.is(cancelled.record.exp, null)
-  for (const method of ['account.sign', 'age.sign', 'invite.sign', 'push.sign', 'report.sign', 'dm.reportSign', 'terms.sign', 'recovery.sign']) {
+  for (const method of ['account.sign', 'age.sign', 'invite.sign', 'push.sign', 'report.sign', 'appeal.sign', 'dm.reportSign', 'terms.sign', 'recovery.sign']) {
     t.is((await answer(t, request, method, samples(f)[method])).signature, signature)
   }
 })
