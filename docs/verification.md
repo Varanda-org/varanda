@@ -5866,3 +5866,53 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi executada nesta documentação.
 - O semeador guarda só as 16 últimas edições e os 16 últimos status de cada anúncio: com a janela estourada e todos apagados, o anúncio fica sem status conhecido, sai da busca e do mapa do site, e o cartão público responde 404 se a edição atual for desconhecida, até um novo status ou edição.
 - Com duas avaliações da mesma pessoa para o mesmo anúncio, o índice guarda a mais nova; se ela for apagada, a antiga só volta ao índice depois que o semeador varrer o diário de novo (reinício ou reconstrução).
+
+## 126. Feira: página pública, entrada por link, anúncio de página e denúncia (PR feat/feira-service)
+
+Caminhada do serviço da Feira: as rotas públicas do semeador (`/index/feira/*`, `/f/*`), o Caddy, a entrada por link de anúncio, os anúncios de uma página, o cartão guardado na caixa da página e a denúncia de anúncio no painel. O protocolo está em [protocol.md](protocol.md) (seção 15, "The seeder's Feira routes and public pages" e "Feira entry"; seção 12, "Anúncios como página"; seção 3, "Reports").
+
+Regras que os passos conferem:
+
+- As rotas existem só quando o semeador tem `VARANDA_PUBLIC_ORIGIN` (no compose, `VARANDA_FEIRA_ORIGIN`). Sem ela, o padrão, `/f/*` e `/index/feira/*` respondem 404. A origem da conta é outra variável e não muda.
+- A página pública escapa todo texto do diário, não tem script nem recurso externo, e responde `no-store`, `nosniff` e `no-referrer`. `index,follow` só para `disponivel` e `reservado`; `vendido` e status desconhecido saem `noindex,follow`, e só `vendido` leva também `X-Robots-Tag: noindex`. Uma publicação, um anúncio apagado, um diário bloqueado ou uma edição desconhecida dão a mesma página 404.
+- As fotos (`/f/<diário>/<seq>/foto/1..4` e `capa`) só saem com tamanho, sha256 e bytes iguais ao descritor. O `sitemap.xml` lista só endereços de anúncios que não estão `vendido`. O Caddy serve o `/robots.txt` (permite só `/f/`) e limita `/f/*` a 30 pedidos por 10 s por endereço; o service worker não intercepta `/f/*`.
+- A entrada: `GET /account/feira/policy` responde só `{ enabled }`; `POST /account/feira/start` devolve um código de 1 hora cobrado do dono do anúncio e lê o anúncio sem olhar o status (um anúncio vendido ainda abre a porta). A ordem: o corpo exato; depois o dono da cota (membro vinculado ou dono da página aberta), e sem dono responde `nao-encontrado` sem ler nada no semeador; depois a conferência do anúncio no semeador; por fim o código. Não há limite por chave de dono (qualquer um trancaria os anúncios de alguém). Exige `VARANDA_FEIRA_INVITES_PER_WEEK`, `VARANDA_INVITES_PER_WEEK` e `VARANDA_TRIAGE_TOKEN`.
+- A conferência do anúncio usa a rota própria do semeador `GET /feira-listing/<diário>/<seq>` (com o token, nunca pelo Caddy), que responde só `{ ok: true }` e tem orçamento próprio (2 ao mesmo tempo, 4 por segundo, rajada 8): inundar essa rota nunca faz `/moderation-post` responder 503. O painel continua com `/moderation-listing`.
+- O Caddy limita `/account/feira/*` na zona `feira-entrada`: 5 pedidos a cada 60 s por endereço, antes do handle genérico de `/account/*`. O endereço fica só na memória do Caddy durante a janela.
+- Sessões pagas de idade com código da Feira: no máximo 1 por código por dia e 50 por dia para todos os códigos da Feira juntos, sem teto por dono, sempre com `limite-idade`. Elas não contam no teto diário dos outros cadastros, e um convite comum funciona como antes. Resíduo aceito: um único endereço consegue gastar os 50 do dia em cerca de 10 minutos e parar os cadastros pela Feira naquele dia (com o custo de até 50 sessões pagas), nunca os cadastros comuns. Um código da Feira emitido numa semana anterior é recusado depois de segunda 00:00, para não escapar das duas contagens semanais.
+- O teto semanal conta os códigos usados ou presos por um link do diretório, pela data de criação (um código emitido no domingo à noite e usado na segunda conta na semana em que saiu). Resíduo aceito: cadastros em andamento ao mesmo tempo podem passar do teto semanal de um dono pelo número de cadastros em andamento, cada um ainda com código de uso único. Um `feira-invites.json` quebrado desliga só os códigos da Feira.
+- `feira-invites.json` guarda a chave de quem é cobrado, o resumo do código, a data e se foi usado; nunca quem se cadastra, o anúncio, o endereço nem o código.
+- Uma página anuncia com `listing`, `listing-edit`, `listing-status` e `listing-consent` (admin ou dono). A edição responde a posição do bloco da edição, a edição velha dá `conflito`, o 31º anúncio dá `limite`, e `listing-consent` sem uma proposta recebida de quem avalia dá `oferta-ausente`. A página responde uma proposta em texto, com o link de aceite ou de recusa.
+- A caixa da página guarda o cartão de link que um membro mandou (a foto do cartão só para dono e administradores); o serviço nunca busca o link nem a imagem.
+- A denúncia de anúncio (`kind: 'listing'`) é sempre decidida por uma pessoa: a IA marca `anuncio` e nunca lê o texto. O painel tem o filtro "Anúncios", o link da página pública e "Ver anúncio" (versão atual lida no semeador, só como texto); `descartar` ou `bloquear`, e bloquear atinge o diário inteiro.
+- Uma caixa só é marcada depois que o passo foi executado e o resultado conferido.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node apps/cli/test/feira-page.test.js`, `node apps/cli/test/seeder-feira-http.test.js` e `node apps/cli/test/seed-ws.test.js`.
+- `node apps/cli/test/feira-read.test.js`, `node apps/cli/test/feira-routes.test.js`, `node apps/cli/test/invites-pair.test.js` e `node apps/cli/test/account-age.test.js`.
+- `node apps/cli/test/pages-listing.test.js`, `node apps/cli/test/pages-dm-card.test.js` e `node packages/core/test/page-proof.test.js`.
+- `node apps/cli/test/ai-worker.test.js`, `node apps/cli/test/account-mod.test.js`, `node apps/cli/test/moderation-store.test.js` e `node apps/cli/test/panel.test.js`.
+- `node apps/cli/test/caddyfile.test.js`, `node apps/cli/test/deploy.test.js` e `node apps/app/test/sw.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada com um semeador, um serviço de conta e dois membros de teste (DHT local):
+
+- [ ] Sem `VARANDA_PUBLIC_ORIGIN`, `GET /f/<diário>/<seq>` e `GET /index/feira/...` respondem 404. Com a origem, a página de um anúncio vivo abre com título, preço, cidade e fotos.
+- [ ] Um anúncio marcado "vendido" mantém a página, com `noindex`, e sai do `sitemap.xml`. Um anúncio apagado dá a página 404.
+- [ ] Abrir `/f/<diário>/<seq>/capa` entrega a primeira foto; depois de editar o anúncio com outra foto, o mesmo endereço entrega a nova.
+- [ ] `GET /robots.txt` no domínio permite só `/f/` e aponta o sitemap.
+- [ ] Com a entrada ligada, `GET /account/feira/policy` responde `{ enabled: true }`; `POST /account/feira/start` de um anúncio de membro devolve um código; um anúncio de um diário que não é de membro responde `nao-encontrado`. Pelo Caddy, o 6º pedido a `/account/feira/*` do mesmo endereço em 60 s responde 429.
+- [ ] Com um código da Feira, a primeira sessão de idade abre e a segunda do mesmo código no mesmo dia responde `limite-idade`; um convite comum continua abrindo sessão.
+- [ ] Usar o código no cadastro conta no teto semanal do dono; chegado o teto, o código seguinte é recusado como convite inválido. Quebrar o `feira-invites.json` (de propósito, numa cópia) desliga só os códigos da Feira.
+- [ ] Como página: criar, editar (com o `expectedRevision` certo e com um velho), mudar o status e apagar um anúncio; o 31º vivo responde `limite`.
+- [ ] Receber uma proposta na caixa da página; o administrador vê o cartão e a foto, pede `listing-consent` e responde em texto com o link de aceite.
+- [ ] Denunciar um anúncio; no painel ele aparece com "Anúncios", o link da página e "Ver anúncio"; a IA marca `anuncio`; descartar fecha, bloquear avisa que atinge o diário inteiro.
+- [ ] Verificação manual de prévia de link, pendente para o operador: colar o endereço `/f/<diário>/<seq>` de um anúncio de teste em um aplicativo de mensagens e num teste de rich results do buscador, com a Feira ligada num domínio real, e conferir título, descrição e imagem de capa.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação; a prévia de link fica pendente para o operador.
+- Ligue `VARANDA_FEIRA_ORIGIN` só depois que o app e os Termos da Feira estiverem no ar.
+- O `robots.txt` é servido pelo Caddy mesmo com a Feira desligada: o mapa do site que ele indica responde 404 até `VARANDA_FEIRA_ORIGIN` ser definido.
+- Com `feira-invites.json` corrompido, os códigos da Feira param e a limpeza de convites de cada conta excluída fica pendente (`purga-pendente` no log) até o operador consertar o arquivo; os outros dados da conta são apagados normalmente.

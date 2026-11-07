@@ -301,6 +301,61 @@ test('dedupe key holds the writer: a diary post and group messages at one seq ar
   t.is(again.report.id, first.report.id)
 })
 
+test('a listing report round-trips after a restart with the diary report keys', async (t) => {
+  const { store, open } = setup(t)
+  const target = key()
+  const { report: r, duplicate } = await store.add(report(target, key(), { kind: 'listing', seq: 4, quote: 'bicicleta' }))
+  t.is(duplicate, false)
+  t.is(r.kind, 'listing')
+  t.alike(Object.keys(r).sort(), ['at', 'blocked', 'decidedAt', 'decidedBy', 'group', 'id', 'kind', 'nonce', 'note', 'quote', 'reason', 'reporter', 'seq', 'signature', 'status', 'target', 'text', 'writer'])
+  const reopened = open().get(r.id)
+  t.is(reopened.kind, 'listing')
+  t.is(reopened.seq, 4)
+  t.is(reopened.writer, null)
+  t.is(reopened.group, null)
+  t.is(reopened.quote, 'bicicleta')
+  await rejects(t, store.add(report(target, key(), { kind: 'listing', seq: null, quote: '' })), 'pedido-invalido', 'listing without seq')
+  await rejects(t, store.add(report(target, key(), { kind: 'listing', writer: key(), group: key() })), 'pedido-invalido', 'listing with writer')
+  await rejects(t, store.add(report(target, key(), { kind: 'post' })), 'pedido-invalido', 'an explicit kind other than listing')
+})
+
+test('dedupe key holds the kind: a post and a listing at one seq are distinct reports', async (t) => {
+  const { store } = setup(t)
+  const target = key()
+  const reporter = key()
+  const post = await store.add(report(target, reporter, { seq: 1 }))
+  const listing = await store.add(report(target, reporter, { seq: 1, kind: 'listing' }))
+  t.is(listing.duplicate, false)
+  t.not(listing.report.id, post.report.id)
+  const again = await store.add(report(target, reporter, { seq: 1, kind: 'listing' }))
+  t.is(again.duplicate, true)
+  t.is(again.report.id, listing.report.id)
+  const postAgain = await store.add(report(target, reporter, { seq: 1 }))
+  t.is(postAgain.report.id, post.report.id)
+})
+
+test('a listing row on disk loads; one with a writer, an anexo or no seq is refused and the file kept', async (t) => {
+  const mutations = [
+    (r) => ({ ...r, seq: null, quote: '' }),
+    (r) => ({ ...r, writer: key(), group: key() }),
+    (r) => ({ ...r, anexo: { mime: 'image/png', size: 1, sha256: 'ab'.repeat(32) } }),
+    (r) => ({ ...r, kind: 'anuncio' })
+  ]
+  for (const mutate of mutations) {
+    const { dir, store, open } = setup(t)
+    const { report: r } = await store.add(report(key(), key(), { kind: 'listing' }))
+    t.is(open().get(r.id).kind, 'listing', 'the written file loads')
+    const disk = onDisk(dir)
+    disk.reports[r.id] = mutate(disk.reports[r.id])
+    const bytes = JSON.stringify(disk)
+    fs.writeFileSync(path.join(dir, FILE), bytes)
+    const bad = open()
+    throwsCode(t, () => bad.list(), 'indisponivel', 'store refuses the row')
+    await rejects(t, bad.add(report(key())), 'indisponivel', 'add refused')
+    t.is(fs.readFileSync(path.join(dir, FILE), 'utf8'), bytes, 'never rewritten')
+  }
+})
+
 test('decide with block grupo puts the group root key in the pending change', async (t) => {
   const { store } = setup(t)
   const target = key()

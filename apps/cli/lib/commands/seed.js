@@ -76,7 +76,8 @@ async function listenWs (flags, seeder) {
       sockets: flags.maxSockets ?? null,
       media: setKeys(flags.media),
       index: setKeys(flags.index),
-      triageToken: flags.triageToken
+      triageToken: flags.triageToken,
+      publicOrigin: flags.publicOrigin ?? null
     })
   } catch (err) {
     if (err.code === 'EADDRINUSE') throw new Error('porta em uso')

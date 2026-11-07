@@ -1482,3 +1482,343 @@ test('a voice note report plays in an audio control the panel CSP allows', (t) =
   const store = require('../lib/account/moderation-store')
   t.ok(store.ANEXO_MIMES === undefined || store.ANEXO_MIMES.includes('audio/mp4'), 'the store accepts audio/mp4 anexos')
 })
+
+// Feira listing reports: the panel row and the api/reports/<id>/anuncio view.
+const LISTING_ID = 'l1abcdefghijklmnopqrst'
+const LISTING_URL = 'https://varanda.test/f/' + A + '/4'
+
+function listingReport (fields = {}) {
+  return report({ id: LISTING_ID, kind: 'listing', quote: 'bicicleta', anuncioUrl: LISTING_URL, ...fields })
+}
+
+test('a listing report keeps its kind, links its public page and reads the listing only on Ver anúncio', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([listingReport({ ia: { sugestao: 'bloquear', semelhanca: 0.99, motivo: 'anuncio' } }), report()])
+  let reads = 0
+  const title = '<img src=x>' + RLO + 'olleh'
+  routes['GET /account/mod/api/reports/' + LISTING_ID + '/anuncio'] = () => {
+    reads++
+    return [200, { title, text: 'à venda', priceLabel: 'R$ 100', city: 'Recife', uf: 'PE', kind: 'venda', status: null }]
+  }
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  const text = () => doc.main.textContent
+  t.ok(text().includes('anúncio nº 4'), 'labelled as a listing, never publicação')
+  t.ok(text().includes('publicação nº 4'), 'the post row stays a publication')
+  const link = walk(doc.main).find((n) => n.tagName === 'A')
+  t.is(link.getAttribute('href'), LISTING_URL)
+  t.is(link.getAttribute('rel'), 'noopener noreferrer')
+  t.ok(text().includes(panel.AI_REASONS.anuncio), 'the anuncio ledger code has its own label')
+  t.absent(text().includes('Sugestão da IA'), 'no AI suggestion on a listing row')
+  t.ok(text().includes('Bloquear atinge o diário inteiro'), 'blocking removes the whole diary')
+  t.is(reads, 0, 'nothing read before the moderator asks')
+  buttons(doc, 'Ver anúncio')[0].click()
+  await p.settled()
+  t.is(reads, 1)
+  t.ok(text().includes('versão atual; o anúncio pode ter mudado'))
+  const node = walk(doc.main).find((n) => n._text === 'título: ' + title)
+  t.ok(node, 'the title is one textContent value')
+  t.is(node.className, 'untrusted')
+  t.absent(doc.created.some((n) => n.tagName === 'IMG'), 'no element from the title')
+  t.ok(text().includes('Recife / PE'))
+  t.ok(text().includes('bicicleta'), 'the reporter quote stays')
+  t.is(buttons(doc, 'Ver anúncio').length, 0)
+})
+
+test('a listing link that is not the documented shape is not shown; ausente and erro have fixed lines', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([listingReport({ anuncioUrl: 'javascript:alert(1)' }), listingReport({ id: 'l2abcdefghijklmnopqrst', anuncioUrl: undefined })])
+  routes['GET /account/mod/api/reports/' + LISTING_ID + '/anuncio'] = () => [200, { ausente: true }]
+  routes['GET /account/mod/api/reports/l2abcdefghijklmnopqrst/anuncio'] = () => [200, { erro: 'timeout' }]
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  t.absent(walk(doc.main).some((n) => n.tagName === 'A'), 'no link')
+  for (const b of buttons(doc, 'Ver anúncio')) b.click()
+  await p.settled()
+  t.ok(doc.main.textContent.includes(panel.TEXT.listingGone))
+  t.ok(doc.main.textContent.includes(panel.TEXT.listingFailed))
+  t.absent(doc.main.textContent.includes('timeout'), 'the token is never echoed')
+  t.alike(panel.anuncioOf({ ausente: true }), { ausente: true })
+  t.alike(panel.anuncioOf(null), { failed: true })
+  t.is(panel.anuncioOf({ title: 3, text: 'x' }).title, null)
+})
+
+test('the Anúncios chip filters the open list; history labels a listing decision as anúncio', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([listingReport(), report()])
+  routes['GET /account/mod/api/reports?estado=decidida'] = () => [200, { reports: [listingReport({ status: 'bloquear', decidedAt: '2026-10-22T12:00:00.000Z', actor: 'pessoa' })], truncated: false }]
+  routes['GET /account/mod/api/reports?estado=aberta&kind=listing'] = () => [200, { reports: [listingReport()], truncated: false }]
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  const chip = buttons(doc, 'Anúncios')[0]
+  t.ok(chip, 'the chip is there')
+  t.is(chip.getAttribute('aria-pressed'), 'false')
+  chip.click()
+  await p.settled()
+  t.absent(doc.main.textContent.includes('publicação nº 4'), 'only listings')
+  t.ok(doc.main.textContent.includes('anúncio nº 4'))
+  t.is(buttons(doc, 'Anúncios')[0].getAttribute('aria-pressed'), 'true')
+  buttons(doc, 'Histórico')[0].click()
+  t.ok(doc.main.textContent.includes('· anúncio · por uma pessoa'))
+  t.absent(doc.main.textContent.includes('publicação'))
+})
+
+test('the panel source has the Anúncios chip and no delete-listing control', (t) => {
+  const src = fs.readFileSync(APP, 'utf8')
+  t.ok(src.includes("listingChip: 'Anúncios'"))
+  t.absent(/(apagar|excluir|remover) (o |este )?anúncio/i.test(src), 'no delete copy')
+  t.absent(/\/anuncio\/(delete|apagar|excluir)|decision: 'apagar'|'remover'/.test(src), 'no delete call')
+  const css = fs.readFileSync(path.join(DIR, 'app.css'), 'utf8')
+  t.ok(/\.chips button\.chip/.test(css))
+  t.ok(/\.badge-listing/.test(css))
+})
+
+// The account service end to end for the anuncio route: a fake Google on
+// 127.0.0.1 and a fake listingReader (no seeder).
+const http = require('node:http')
+const b4a = require('b4a')
+const hcrypto = require('hypercore-crypto')
+const { createIssuerCert } = require('@varanda/core/lib/cert')
+const { signListingReport } = require('@varanda/core/lib/report')
+const { createGoogle } = require('../lib/account/google')
+const { openAccountStore } = require('../lib/account/store')
+const { openModerationStore } = require('../lib/account/moderation-store')
+const { createAccountServer } = require('../lib/account/server')
+const { SESSION_COOKIE, LOGIN_COOKIE } = require('../lib/account/mod-routes')
+const { tmpDir } = require('./helpers/net')
+
+const S_ORIGIN = 'https://varanda.test'
+const S_CLIENT = 'client-123.apps.googleusercontent.com'
+const S_MOD = 'mod@example.test'
+
+function sKeys () {
+  const kp = hcrypto.keyPair()
+  return { kp, hex: b4a.toString(kp.publicKey, 'hex') }
+}
+
+async function sFakeGoogle (t, sub) {
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url')
+  const send = (res, obj) => {
+    const body = JSON.stringify(obj)
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) })
+    res.end(body)
+  }
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      const p = new URL(req.url, 'http://127.0.0.1').pathname
+      if (p === '/token') return send(res, { access_token: 'ya29.teste', token_type: 'Bearer', expires_in: 3599, id_token: b64({ alg: 'RS256' }) + '.' + b64({ iss: 'https://accounts.google.com', aud: S_CLIENT, sub, exp: Math.floor(Date.now() / 1000) + 3600 }) + '.c2ln' })
+      if (p === '/userinfo') return send(res, { sub, email: S_MOD, email_verified: true })
+      res.writeHead(404).end()
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.teardown(() => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve()) }), { force: true })
+  const base = 'http://127.0.0.1:' + server.address().port
+  return { authUrl: base + '/auth', tokenUrl: base + '/token', userinfoUrl: base + '/userinfo' }
+}
+
+async function serviceSetup (t, listingReader) {
+  const root = tmpDir(t)
+  const dir = path.join(root, 'account')
+  const assoc = hcrypto.keyPair()
+  const ikp = hcrypto.keyPair()
+  const cert = createIssuerCert({ issuer: b4a.toString(ikp.publicKey, 'hex') }, assoc)
+  const SUB = '3333333333333333333333'
+  const endpoints = await sFakeGoogle(t, SUB)
+  const accounts = openAccountStore(dir)
+  const moderation = openModerationStore(dir, { association: cert.association })
+  const ana = sKeys()
+  const bia = sKeys()
+  const carol = sKeys()
+  const link = async (m, username, sub, email) => {
+    const row = accounts.start({ member: m.hex, username })
+    accounts.reserve(row.id)
+    accounts.putGoogle(row.id, { sub, email })
+    await accounts.finish(row.id, { signature: 'a'.repeat(128) }, ikp, cert, cert.association)
+  }
+  await link(ana, 'ana', '1111111111111111111111', 'ana@example.test')
+  await link(bia, 'bia', '2222222222222222222222', 'bia@example.test')
+  await link(carol, 'carol', SUB, S_MOD)
+  const google = (uri) => createGoogle({ clientId: S_CLIENT, clientSecret: 's', redirectUri: S_ORIGIN + uri, endpoints, fetch: globalThis.fetch })
+  const panelDir = path.join(root, 'panel')
+  fs.mkdirSync(panelDir)
+  const served = new Set([ana.hex, bia.hex, carol.hex])
+  const logs = []
+  const server = createAccountServer({
+    association: cert.association,
+    origin: S_ORIGIN,
+    google: google('/account/callback'),
+    store: accounts,
+    issuer: null,
+    log: (e) => logs.push(JSON.stringify(e)),
+    moderation,
+    googleMod: google('/account/mod/callback'),
+    modEmails: [S_MOD],
+    groupCheck: { check: async () => ({ ok: false, code: 'config' }), checkDiary: async ({ diary }) => served.has(diary) ? { ok: true } : { ok: false, code: 'ausente' } },
+    listingReader,
+    panelDir
+  })
+  const listener = await server.listen({ host: '127.0.0.1', port: 0 })
+  t.teardown(() => listener.close(), { force: true })
+  const base = 'http://127.0.0.1:' + listener.port
+  async function api (method, pathname, { body, cookie } = {}) {
+    const init = { method, redirect: 'manual', headers: {} }
+    if (cookie) init.headers.cookie = cookie
+    if (body !== undefined) {
+      init.headers.origin = S_ORIGIN
+      init.headers['content-type'] = 'application/json'
+      init.body = JSON.stringify(body)
+    }
+    const res = await fetch(base + pathname, init)
+    const text = await res.text()
+    let parsed = null
+    try { parsed = JSON.parse(text) } catch {}
+    return { status: res.status, headers: res.headers, body: parsed, text }
+  }
+  function cookieOf (res, name) {
+    for (const line of res.headers.getSetCookie()) {
+      const m = new RegExp('^' + name + '=([^;]*);').exec(line)
+      if (m) return m[1]
+    }
+    return null
+  }
+  async function signIn () {
+    const login = await api('GET', '/account/mod/login')
+    const state = new URL(login.headers.get('location')).searchParams.get('state')
+    const cb = await api('GET', '/account/mod/callback?state=' + state + '&code=c1', { cookie: LOGIN_COOKIE + '=' + cookieOf(login, LOGIN_COOKIE) })
+    return SESSION_COOKIE + '=' + cookieOf(cb, SESSION_COOKIE)
+  }
+  async function sendListing (reporter, target, seq) {
+    const started = await api('POST', '/account/report/start', { body: { member: reporter.hex } })
+    const nonce = started.body.nonce
+    const fields = { nonce, member: reporter.hex, association: cert.association, target, seq, reason: 'spam', text: 'golpe', quote: 'bicicleta' }
+    return api('POST', '/account/report', { body: { member: reporter.hex, nonce, target, kind: 'listing', seq, reason: 'spam', text: 'golpe', quote: 'bicicleta', signature: signListingReport(fields, reporter.kp) } })
+  }
+  return { api, signIn, sendListing, moderation, logs, ana, bia }
+}
+
+test('service: a listing row projects its public url; the anuncio route needs a session and answers safe strings', async (t) => {
+  const asked = []
+  let answer = null
+  const reader = { readCurrent: async (author, seq) => { asked.push([author, seq]); return answer }, readListing: async () => 'config' }
+  const s = await serviceSetup(t, reader)
+  const sent = await s.sendListing(s.ana, s.bia.hex, 3)
+  t.is(sent.status, 200, sent.text)
+  const id = sent.body.id
+  const route = '/account/mod/api/reports/' + id + '/anuncio'
+
+  const anon = await s.api('GET', route)
+  t.is(anon.status, 401, 'no session, no read')
+  t.is(asked.length, 0)
+
+  const cookie = await s.signIn()
+  const list = await s.api('GET', '/account/mod/api/reports', { cookie })
+  const row = list.body.reports.find((r) => r.id === id)
+  t.is(row.kind, 'listing')
+  t.is(row.anuncioUrl, S_ORIGIN + '/f/' + s.bia.hex + '/3')
+
+  answer = { title: 'bike' + RLO + '\u0007', text: 'linha\nnova', priceLabel: null, city: 'Recife', uf: 'PE', kind: 'venda', status: 'vendido' }
+  const got = await s.api('GET', route, { cookie })
+  t.is(got.status, 200, got.text)
+  t.is(got.headers.get('cache-control'), 'no-store')
+  t.alike(got.body, { title: 'bike\\u{202e}\\u{7}', text: 'linha\\u{a}nova', priceLabel: null, city: 'Recife', uf: 'PE', kind: 'venda', status: 'vendido' })
+  t.alike(asked, [[s.bia.hex, 3]], 'the listing of the report, through the injected reader')
+
+  answer = 'ausente'
+  t.alike((await s.api('GET', route, { cookie })).body, { ausente: true }, 'a deleted listing')
+  answer = 'timeout'
+  t.alike((await s.api('GET', route, { cookie })).body, { erro: 'timeout' })
+
+  const post = await s.api('GET', '/account/mod/api/reports/nao-existe/anuncio', { cookie })
+  t.is(post.status, 404)
+  t.absent(s.logs.join('\n').includes('bike'), 'no listing text in the logs')
+})
+
+test('service: bloquear on a listing report blocks the diary and queues no delete', async (t) => {
+  const s = await serviceSetup(t, { readCurrent: async () => 'ausente', readListing: async () => 'config' })
+  const sent = await s.sendListing(s.ana, s.bia.hex, 2)
+  const cookie = await s.signIn()
+  const decided = await s.api('POST', '/account/mod/api/reports/' + sent.body.id + '/decide', { cookie, body: { decision: 'bloquear' } })
+  t.is(decided.status, 200, decided.text)
+  const changes = s.moderation.pending().changes
+  t.is(changes.length, 1)
+  t.is(changes[0].op, 'block')
+  t.is(changes[0].member, s.bia.hex, 'the whole diary')
+  t.absent(changes.some((c) => c.op !== 'block'), 'no delete change')
+  const refused = await s.api('POST', '/account/mod/api/reports/' + sent.body.id + '/decide', { cookie, body: { decision: 'apagar' } })
+  t.not(refused.status, 200, 'no per-listing delete decision')
+})
+
+test('service: without a listingReader the anuncio route answers erro config', async (t) => {
+  const s = await serviceSetup(t, null)
+  const sent = await s.sendListing(s.ana, s.bia.hex, 2)
+  const cookie = await s.signIn()
+  const got = await s.api('GET', '/account/mod/api/reports/' + sent.body.id + '/anuncio', { cookie })
+  t.alike(got.body, { erro: 'config' })
+})
+
+test('a 429 on Ver anúncio says to wait, not that the seeder failed', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([listingReport()])
+  routes['GET /account/mod/api/reports/' + LISTING_ID + '/anuncio'] = () => [429, { error: 'pedido-invalido' }]
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  buttons(doc, 'Ver anúncio')[0].click()
+  await p.settled()
+  t.ok(doc.main.textContent.includes('Muitos pedidos agora; tente de novo em instantes'))
+  t.absent(doc.main.textContent.includes(panel.TEXT.listingFailed))
+  t.is(buttons(doc, 'Ver anúncio').length, 1, 'it can be asked again')
+})
+
+test('the Anúncios chip asks the server for kind=listing and keeps its truncation warning', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([report()])
+  routes['GET /account/mod/api/reports?estado=aberta&kind=listing'] = () => [200, { reports: [listingReport()], truncated: true }]
+  const { fetch, calls } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  t.absent(doc.main.textContent.includes('anúncio nº 4'), 'not in the first page')
+  buttons(doc, 'Anúncios')[0].click()
+  await p.settled()
+  t.ok(calls.some((c) => c.url === '/account/mod/api/reports?estado=aberta&kind=listing'), 'filtered on the server')
+  t.ok(doc.main.textContent.includes('anúncio nº 4'))
+  t.absent(doc.main.textContent.includes('publicação nº 4'))
+  t.ok(doc.main.textContent.includes(panel.TEXT.moreOpen), 'the filtered list is itself capped')
+  buttons(doc, 'Anúncios')[0].click()
+  await p.settled()
+  t.ok(doc.main.textContent.includes('publicação nº 4'), 'back to every kind')
+})
+
+test('service: kind=listing filters open reports before the page cap; another kind is refused', async (t) => {
+  const s = await serviceSetup(t, { readCurrent: async () => 'ausente', readListing: async () => 'config' })
+  const listing = await s.sendListing(s.ana, s.bia.hex, 2)
+  const cookie = await s.signIn()
+  const got = await s.api('GET', '/account/mod/api/reports?estado=aberta&kind=listing', { cookie })
+  t.is(got.status, 200, got.text)
+  t.alike(got.body.reports.map((r) => r.id), [listing.body.id])
+  t.is(got.body.truncated, false)
+  for (const bad of ['post', 'LISTING', '']) {
+    const r = await s.api('GET', '/account/mod/api/reports?estado=aberta&kind=' + bad, { cookie })
+    t.is(r.status, 400, 'kind ' + JSON.stringify(bad))
+  }
+})
+
+test('service: the anuncio route has its own per-session window, apart from the lookups', async (t) => {
+  const s = await serviceSetup(t, { readCurrent: async () => 'ausente', readListing: async () => 'config' })
+  const sent = await s.sendListing(s.ana, s.bia.hex, 2)
+  const cookie = await s.signIn()
+  // Spend the lookup window (/alvo) first.
+  for (let i = 0; i < 30; i++) await s.api('GET', '/account/mod/api/reports/' + sent.body.id + '/alvo', { cookie })
+  t.is((await s.api('GET', '/account/mod/api/reports/' + sent.body.id + '/alvo', { cookie })).status, 429, 'the lookup window is spent')
+  const route = '/account/mod/api/reports/' + sent.body.id + '/anuncio'
+  for (let i = 0; i < 30; i++) {
+    const r = await s.api('GET', route, { cookie })
+    if (r.status !== 200) return t.fail('anuncio refused at ' + i + ': ' + r.status)
+  }
+  t.is((await s.api('GET', route, { cookie })).status, 429, 'its own window ends at 30')
+})

@@ -90,8 +90,8 @@ test('Caddyfile: cache headers', (t) => {
   t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel is no-cache')
   const mutavel = block('@mutavel {').filter((l) => /^\s*not path\s/.test(l))
   t.is(mutavel.length, 1, 'one not path line in @mutavel')
-  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/index/*', '/media/*', '/seeder', '/varanda.json'],
-    '@mutavel excludes exactly /varanda.json, /.well-known/*, /seeder, /account/*, /media/*, /blob/* and /index/*')
+  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/f/*', '/index/*', '/media/*', '/seeder', '/varanda.json'],
+    '@mutavel excludes exactly /varanda.json, /.well-known/*, /seeder, /account/*, /media/*, /blob/*, /index/* and /f/*')
 
   // Every 404 is no-store: a missing file with an extension, or a missing
   // index.html behind an app route.
@@ -110,8 +110,8 @@ test('Caddyfile: cache headers', (t) => {
     '@ausenteApp leaves /index/* alone')
   const appPaths = app.filter((l) => /^\s*not path\s/.test(l) && !l.includes('*.*'))
   t.is(appPaths.length, 1, 'one not path list of routes in @ausenteApp')
-  t.alike(appPaths[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/index/*', '/media/*', '/seeder'],
-    '@ausenteApp excludes exactly /.well-known/*, /seeder, /account/*, /media/*, /blob/* and /index/*')
+  t.alike(appPaths[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/f/*', '/index/*', '/media/*', '/seeder'],
+    '@ausenteApp excludes exactly /.well-known/*, /seeder, /account/*, /media/*, /blob/*, /index/* and /f/*')
   t.ok(app.some((l) => l.trim() === 'not file /index.html {'), '@ausenteApp is a missing index.html')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteArquivo Cache-Control "no-store"'), 'missing file -> no-store')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteApp Cache-Control "no-store"'), 'missing index.html -> no-store')
@@ -202,21 +202,29 @@ test('Caddyfile: /index/* goes to the seeder, before the SPA handle', (t) => {
 // Caddy's memory: never logged, never sent upstream.
 test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (t) => {
   t.ok(lines.some((l) => l.trim() === 'order rate_limit before reverse_proxy'), 'order rate_limit before reverse_proxy')
-  t.is(count('rate_limit {'), 3, 'exactly three rate_limit blocks')
+  t.is(count('rate_limit {'), 5, 'exactly five rate_limit blocks')
   const limits = {
-    'handle /index/* {': ['index', '20'],
-    'handle /media/* {': ['media', '120'],
-    'handle /blob/* {': ['blob', '300']
+    'handle /index/* {': ['index', '20', '10s'],
+    'handle /media/* {': ['media', '120', '10s'],
+    'handle /blob/* {': ['blob', '300', '10s'],
+    'handle /f/* {': ['feira', '30', '10s'],
+    'handle /account/feira/* {': ['feira-entrada', '5', '60s']
   }
-  for (const [head, [zone, events]] of Object.entries(limits)) {
+  {
+    const text = block('handle /account/feira/* {').map((l) => l.trim())
+    t.ok(text.includes('zone feira-entrada-total {') && text.includes('key static') && text.includes('events 60'), 'the Feira entry also has a global ceiling')
+  }
+  for (const [head, [zone, events, window]] of Object.entries(limits)) {
     const b = block(head)
     const text = b.map((l) => l.trim())
     t.ok(text.includes('rate_limit {'), head + ' has rate_limit')
     t.ok(text.includes('zone ' + zone + ' {'), head + ' zone ' + zone)
     t.ok(text.includes('key {remote_host}'), head + ' keyed exactly on {remote_host}')
     t.ok(text.includes('events ' + events), head + ' events ' + events)
-    t.ok(text.includes('window 10s'), head + ' window 10s')
-    t.absent(text.some((l) => /^key\s/.test(l) && l !== 'key {remote_host}'), head + ' has no other key')
+    t.ok(text.includes('window ' + window), head + ' window ' + window)
+    // The Feira entry adds one global zone (key static) for IPv6 rotation.
+    const allowed = head === 'handle /account/feira/* {' ? ['key {remote_host}', 'key static'] : ['key {remote_host}']
+    t.absent(text.some((l) => /^key\s/.test(l) && !allowed.includes(l)), head + ' has no other key')
     const rl = text.indexOf('rate_limit {')
     const rp = text.findIndex((l) => l.startsWith('reverse_proxy '))
     t.ok(rl !== -1 && rp > rl, head + ' rate_limit comes before reverse_proxy')
@@ -225,9 +233,45 @@ test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (
   t.absent(lines.some((l) => /^\s*log_key\b/.test(l)), 'log_key is never enabled')
 })
 
+// The Feira entry needs no account, so its per-client limit sits at the edge,
+// before the generic /account/* handle, with the same upstream.
+test('Caddyfile: /account/feira/* has its own handle before /account/*, to the account service', (t) => {
+  t.is(count('handle /account/feira/* {'), 1, 'exactly one /account/feira/* handle')
+  const feira = lines.findIndex((l) => l.trim() === 'handle /account/feira/* {')
+  const account = lines.findIndex((l) => l.trim() === 'handle /account/* {')
+  t.ok(feira !== -1 && account > feira, 'before the generic /account/* handle')
+  const text = block('handle /account/feira/* {').map((l) => l.trim())
+  t.ok(text.includes('reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {'), 'to the account service')
+  t.ok(text.includes('header_up Host {upstream_hostport}'), 'Host of the upstream')
+})
+
 // No access log. The only log block is the global one that EXCLUDES the
 // rate_limit logger (it prints remote_ip on every 429); it must not set an
 // output or any other option, and no site block has a log directive.
+// The Feira public pages and robots.txt, both before the SPA catch-all.
+test('Caddyfile: /f/* goes to the seeder and /robots.txt allows only /f/, before the SPA handle', (t) => {
+  const feira = block('handle /f/* {').map((l) => l.trim())
+  t.ok(feira.length > 0, 'handle /f/*')
+  t.is(count('handle /f/* {'), 1, 'exactly one /f/* handle')
+  t.ok(feira.includes('reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {'), 'proxied to the seeder WebSocket port')
+  t.ok(feira.includes('header_up Host {upstream_hostport}'), 'Host rewritten to the upstream')
+  t.ok(feira.includes('header_up -X-Forwarded-For') && feira.includes('header_up -X-Real-Ip'), 'client address headers stripped')
+  t.absent(feira.some((l) => /Cache-Control/.test(l)), 'no Cache-Control set by Caddy for /f/*')
+  const spa = lines.findIndex((l) => l === '\thandle {')
+  const robots = block('handle /robots.txt {')
+  t.ok(robots.length > 0, 'handle /robots.txt')
+  t.is(count('handle /robots.txt {'), 1, 'exactly one /robots.txt handle')
+  const start = lines.findIndex((l) => l.trim() === 'handle /f/* {')
+  const rstart = lines.findIndex((l) => l.trim() === 'handle /robots.txt {')
+  t.ok(start !== -1 && spa > start && rstart !== -1 && spa > rstart, 'both come before the catch-all handle')
+  t.alike(robots.map((l) => l.trim()).slice(robots.findIndex((l) => l.trim() === 'body <<ROBOTS') + 1, -2),
+    ['User-agent: *', 'Allow: /f/', 'Disallow: /', 'Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml', 'ROBOTS'], 'robots body'
+  )
+  t.ok(robots.some((l) => l.trim() === 'header Content-Type "text/plain; charset=utf-8"'), 'robots is text/plain')
+  t.absent(lines.some((l) => /^\s*handle\s+\/moderation-listing/.test(l)), 'no handle /moderation-listing')
+  t.is(count('moderation-listing'), 0, 'moderation-listing never mentioned outside comments')
+})
+
 test('Caddyfile: no access log, and the rate_limit logger (client IP) is excluded', (t) => {
   const logLines = lines.map((l, i) => [l, i]).filter(([l]) => /^\s*log(\s|$)/.test(l))
   t.is(logLines.length, 1, 'exactly one log block in the file')

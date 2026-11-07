@@ -50,7 +50,8 @@ test('constants', (t) => {
     'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
     'avatar', 'rename', 'invite', 'dm-list', 'dm-thread', 'dm-send', 'dm-set',
     'dm-seen', 'follow', 'follows', 'media', 'notices', 'terms', 'community-join',
-    'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read'
+    'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'listing',
+    'listing-edit', 'listing-status', 'listing-consent'
   ])
   t.ok(Object.isFrozen(ACTIONS))
   t.is(NONCE_RE.source, accountLink.NONCE_RE.source, 'same nonce rule as account-link')
@@ -337,5 +338,26 @@ test('the module is pure: no fs, no network, no cert.js', (t) => {
   }
   for (const frag of ['/lib/cert.js', '/lib/node/fs.js', '/hyperswarm/', '/hyperdht/', '/node_modules/hypercore/']) {
     t.absent(cached.some((p) => p.includes(frag)), 'not loaded: ' + frag)
+  }
+})
+
+// The three lists differ by design (record actions, rpc-only names), so only
+// membership of the Feira actions is pinned, read from each file's source.
+test('the Feira actions are in ACTIONS, PAGE_ACTIONS and STATEMENTS', (t) => {
+  const fs = require('node:fs')
+  const FEIRA = ['listing', 'listing-edit', 'listing-status', 'listing-consent']
+  const literal = (file, name) => {
+    const src = fs.readFileSync(path.join(coreRoot, '..', '..', file), 'utf8')
+    const start = src.indexOf('const ' + name + ' = [')
+    t.ok(start !== -1, name + ' in ' + file)
+    const body = src.slice(start, src.indexOf(']', start))
+    return [...body.matchAll(/'([a-z-]+)'/g)].map((m) => m[1])
+  }
+  const pageActions = literal('packages/rpc/lib/methods.js', 'PAGE_ACTIONS')
+  const statements = literal('apps/cli/lib/account/pages-routes.js', 'STATEMENTS')
+  for (const name of FEIRA) {
+    t.ok(ACTIONS.includes(name), 'ACTIONS has ' + name)
+    t.ok(pageActions.includes(name), 'PAGE_ACTIONS has ' + name)
+    t.ok(statements.includes(name), 'STATEMENTS has ' + name)
   }
 })

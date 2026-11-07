@@ -491,6 +491,22 @@ test('/index/* is never intercepted', async (t) => {
   t.ok((await dispatch(w, ORIGIN + '/index', { mode: 'navigate' })).responded, '/index (no slash) is an app route')
 })
 
+// The Feira's public pages come from the seeder (no-store, real 404s): never
+// intercepted. /anuncio/... is an app route and keeps the shell.
+test('/f/* is never intercepted, /anuncio/* keeps the shell', async (t) => {
+  const { w } = await installed()
+  w.server = offline
+  const A = 'a'.repeat(64)
+  for (const p of ['/f/' + A + '/7', '/f/' + A + '/7/foto/1', '/f/sitemap.xml', '/f']) {
+    t.absent((await dispatch(w, ORIGIN + p)).responded, p)
+    t.absent((await dispatch(w, ORIGIN + p, { method: 'HEAD' })).responded, 'HEAD ' + p)
+    t.absent((await dispatch(w, ORIGIN + p, { mode: 'navigate' })).responded, 'navigate ' + p)
+  }
+  t.is(w.calls.length, 0, 'the worker fetched nothing')
+  t.ok((await dispatch(w, ORIGIN + '/anuncio/' + A + '/7', { mode: 'navigate' })).responded, '/anuncio/<hex>/<seq> keeps the shell')
+  t.ok((await dispatch(w, ORIGIN + '/fa', { mode: 'navigate' })).responded, '/fa is an app route')
+})
+
 test('nothing cached and offline: 503 sem conexão', async (t) => {
   const dist = makeDist()
   quiet(() => finishWeb(dist))

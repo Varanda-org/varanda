@@ -21,6 +21,8 @@ const { signInvite } = require('@varanda/core/lib/invite')
 const { openAccountStore } = require('../lib/account/store')
 const { openAgeStore } = require('../lib/account/age-store')
 const { openInvitesStore, inviteId } = require('../lib/account/invites-store')
+const { pairInvites } = require('../lib/account/invites-pair')
+const { FEIRA_AGE_DAILY } = require('../lib/account/age-routes')
 const { createDidit } = require('../lib/account/didit')
 const { createAccountServer, COOKIE } = require('../lib/account/server')
 const { createAgeRoutes } = require('../lib/account/age-routes')
@@ -87,7 +89,10 @@ async function waitFor (fn, ms = 3000) {
 // `age: false` leaves didit and ages null. `inviting` opens an invites
 // sidecar; `maxMembers` caps the directory. `c.guardOk = false` makes every
 // age.json write fail. `withIssuer: false` builds a service with no issuer.
-async function setup (t, { age = true, inviting = false, maxMembers = null, dailyLimit, diditTimeoutMs, burst, since, withIssuer = true, ageCheck, floor } = {}) {
+// `feira: { perWeek, named = true }` pairs a Feira store (feira-invites.json)
+// with the member invites; the store names the owner through inviterOf
+// (`named: false` removes it).
+async function setup (t, { age = true, inviting = false, maxMembers = null, dailyLimit, diditTimeoutMs, burst, since, withIssuer = true, ageCheck, floor, feira = null } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = { offset: 0, guardOk: true }
   c.now = () => Date.now() + c.offset
@@ -99,7 +104,15 @@ async function setup (t, { age = true, inviting = false, maxMembers = null, dail
   t.teardown(() => fake.close(), { force: true })
   const didit = age ? createDidit({ apiKey: API_KEY, workflowId: WORKFLOW, endpoints: { base: fake.base }, fetch: loopbackFetch(fake.base), ...(diditTimeoutMs ? { timeoutMs: diditTimeoutMs } : {}) }) : null
   const ages = age ? openAgeStore(dir, { now: c.now, guard: () => c.guardOk }) : null
-  const invites = inviting ? openInvitesStore(dir, { now: c.now, perWeek: 5, isUsed: (id) => store.inviteUsed(id) }) : null
+  const primary = inviting ? openInvitesStore(dir, { now: c.now, perWeek: 5, isUsed: (id) => store.inviteUsed(id) }) : null
+  let feiraStore = null
+  if (feira !== null) {
+    const real = openInvitesStore(dir, { file: 'feira-invites.json', ttlMs: 3600 * 1000, capOn: 'use', maxRows: 20000, pruneUnused: true, now: c.now, perWeek: feira.perWeek, isUsed: (id) => store.inviteUsed(id) })
+    // The real store names the owner (inviterOf); `named: false` removes it
+    // to prove the pair fails closed.
+    feiraStore = feira.named === false ? { ...real, inviterOf: undefined } : real
+  }
+  const invites = primary !== null && feiraStore !== null ? pairInvites(primary, feiraStore) : primary
   const google = googleStub()
   const logs = []
   const texts = []
@@ -165,7 +178,7 @@ async function setup (t, { age = true, inviting = false, maxMembers = null, dail
   const decisions = () => fake.seen.filter((r) => r.method === 'GET')
   const lastSession = () => [...fake.sessions.keys()].pop()
 
-  return { dir, c, iss, store, ages, invites, fake, google, linked, logs, texts, api, post, signFor, start, step, creates, deletes, decisions, lastSession }
+  return { dir, c, iss, store, ages, invites, feiraStore, fake, google, linked, logs, texts, api, post, signFor, start, step, creates, deletes, decisions, lastSession }
 }
 
 // Opens a session for `who` and scripts its Didit decision.
@@ -965,6 +978,72 @@ test('age eligibility: a full directory and a missing or bad invite are refused 
   t.is(capped.status, 429)
   t.alike(capped.body, { error: 'limite-idade' })
   t.is(s.creates().length, 3, 'no fourth create for the same code')
+})
+
+test('age, Feira codes: one paid session per code per day', async (t) => {
+  const s = await setup(t, { inviting: true, feira: { perWeek: 5 } })
+  const owner = member().hex
+  const { code } = await s.feiraStore.issue(owner)
+  t.is(s.invites.feiraOwner(inviteId(code)), owner, 'the pair names the owner')
+  const first = await s.step(member(), 'session', { invite: code })
+  t.is(first.status, 200, first.text)
+  const second = await s.step(member(), 'session', { invite: code })
+  t.is(second.status, 429)
+  t.alike(second.body, { error: 'limite-idade' })
+  t.is(s.creates().length, 1, 'no second create for the same Feira code')
+  s.c.offset += 30 * 60 * 1000
+  t.is((await s.step(member(), 'session', { invite: code })).status, 429, 'later in the code lifetime too')
+  t.absent(s.logs.join('\n').includes(code), 'no code in a log line')
+})
+
+test('age, Feira codes: no window keyed by the owner, so minted codes cannot lock an owner out', async (t) => {
+  const s = await setup(t, { inviting: true, feira: { perWeek: 2 } })
+  const owner = member().hex
+  const codes = []
+  for (let i = 0; i < 4; i++) codes.push((await s.feiraStore.issue(owner)).code)
+  for (const code of codes) t.is((await s.step(member(), 'session', { invite: code })).status, 200, 'more sessions than the weekly cap are not refused per owner')
+  t.is(s.creates().length, 4)
+  const again = await s.step(member(), 'session', { invite: codes[0] })
+  t.is(again.status, 429, 'one paid session per Feira code per day')
+  t.alike(again.body, { error: 'limite-idade' })
+})
+
+test('age, Feira codes: their own daily ceiling, never the ordinary one', async (t) => {
+  t.timeout(120000)
+  const s = await setup(t, { inviting: true, dailyLimit: 1, burst: 2000, feira: { perWeek: 100 } })
+  const owner = member().hex
+  for (let i = 0; i < FEIRA_AGE_DAILY; i++) {
+    const { code } = await s.feiraStore.issue(owner)
+    const r = await s.step(member(), 'session', { invite: code })
+    t.is(r.status, 200, 'Feira session ' + (i + 1) + ': ' + r.text)
+  }
+  const { code } = await s.feiraStore.issue(owner)
+  const over = await s.step(member(), 'session', { invite: code })
+  t.is(over.status, 429, 'past the Feira ceiling')
+  t.alike(over.body, { error: 'limite-idade' })
+  t.ok(s.logs.some((l) => JSON.parse(l).reason === 'teto-diario-feira'), 'the Feira ceiling is logged')
+  t.is(s.creates().length, FEIRA_AGE_DAILY)
+
+  // Ordinary invites keep the whole ordinary ceiling (1 here).
+  await s.ages.record({ member: s.linked.hex, band: '18+', method: 'didit' })
+  const st = await s.post('/account/invites/start', { member: s.linked.hex })
+  const issued = await s.post('/account/invites/finish', {
+    member: s.linked.hex,
+    nonce: st.body.nonce,
+    signature: signInvite({ action: 'issue', nonce: st.body.nonce, member: s.linked.hex, association: s.iss.association }, s.linked.kp)
+  })
+  t.is(issued.status, 200, issued.text)
+  t.is(s.invites.feiraOwner(inviteId(issued.body.code)), null, 'an ordinary code has no Feira owner')
+  const ordinary = await s.step(member(), 'session', { invite: issued.body.code })
+  t.is(ordinary.status, 200, 'an ordinary invite still gets its session: ' + ordinary.text)
+})
+
+test('age, Feira codes: a code whose owner cannot be named fails closed', async (t) => {
+  const s = await setup(t, { inviting: true, feira: { perWeek: 5, named: false } })
+  const { code } = await s.feiraStore.issue(member().hex)
+  const r = await s.step(member(), 'session', { invite: code })
+  t.alike(r.body, { error: 'indisponivel' })
+  t.is(s.creates().length, 0, 'no paid session')
 })
 
 test('age: attempts refused by a narrower window never fill the shared daily ceiling', async (t) => {

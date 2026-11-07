@@ -253,6 +253,16 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
   const pushToken = env.VARANDA_PUSH_TOKEN === undefined || env.VARANDA_PUSH_TOKEN === '' ? null : env.VARANDA_PUSH_TOKEN
   if (pushToken !== null && !/^[0-9a-f]{64}$/.test(pushToken)) throw new UsageError('VARANDA_PUSH_TOKEN inválido')
 
+  // The https origin of the Feira's public pages (/f/*, /index/feira/*) on the
+  // seeder. Environment only, optional: unset or empty leaves those routes off.
+  // Only `seed` reads it, so only `seed` refuses a bad value: the account
+  // service reads its own VARANDA_PUBLIC_ORIGIN under its own rule.
+  let publicOrigin = env.VARANDA_PUBLIC_ORIGIN === undefined || env.VARANDA_PUBLIC_ORIGIN === '' ? null : env.VARANDA_PUBLIC_ORIGIN
+  if (publicOrigin !== null && !/^https:\/\/[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[1-9][0-9]{0,4})?$/.test(publicOrigin)) {
+    if (positionals[0] === 'seed') throw new UsageError('VARANDA_PUBLIC_ORIGIN inválido')
+    publicOrigin = null
+  }
+
   const accountHttp = env.VARANDA_ACCOUNT_HTTP === undefined || env.VARANDA_ACCOUNT_HTTP === '' ? 'http://127.0.0.1:8790' : env.VARANDA_ACCOUNT_HTTP
   const accountHttpMatch = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})\/?$/.exec(accountHttp)
   if (!accountHttpMatch || Number(accountHttpMatch[2]) < 1 || Number(accountHttpMatch[2]) > 65535) throw new UsageError('VARANDA_ACCOUNT_HTTP inválido')
@@ -295,6 +305,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     wsOrigins: wsOrigins.length ? wsOrigins : null,
     triageToken,
     pushToken,
+    publicOrigin,
     accountHttp: accountHttp.replace(/\/$/, ''),
     accountPort: port(get('account-port') ?? env.VARANDA_ACCOUNT_PORT ?? null, 'account-port'),
     accountHost,

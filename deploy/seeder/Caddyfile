@@ -54,9 +54,9 @@
 	# /.well-known/* têm o seu próprio no-store, /seeder fica como está,
 	# /account/* vem do serviço de conta com o no-store dele, /media/* vem do
 	# semeador com o cache longo dele, /blob/* vem do semeador com o cache
-	# privado dele e /index/* vem do semeador com o no-store dele.
+	# privado dele e /index/* e /f/* vem do semeador com o no-store dele.
 	@mutavel {
-		not path /varanda.json /.well-known/* /seeder /account/* /media/* /blob/* /index/*
+		not path /varanda.json /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/*
 	}
 	header @mutavel Cache-Control "no-cache"
 
@@ -73,7 +73,7 @@
 	}
 	@ausenteApp {
 		not path *.*
-		not path /.well-known/* /seeder /account/* /media/* /blob/* /index/*
+		not path /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/*
 		not file /index.html {
 			root /srv/web
 		}
@@ -138,6 +138,36 @@
 	# fetch na mesma origem e navega (página inteira) para o Google;
 	# form-action 'none' só vale para envio de formulários. O service worker
 	# também deixa /account/* passar direto para a rede (apps/app/scripts/sw.js).
+	# A entrada da Feira (POST /account/feira/start, sem conta: quem abre o
+	# link de um anúncio recebe um código pago pela cota de quem anunciou, e
+	# GET /account/feira/policy) tem limite por cliente: 5 requisições a cada
+	# 60 s por endereço, antes do handle genérico de /account/* abaixo. O
+	# serviço de contas não lê endereço nenhum e não limita por chave de
+	# quem anuncia (qualquer um trancaria os anúncios dessa pessoa), então o
+	# teto por origem fica aqui. O endereço fica só na memória do Caddy,
+	# durante a janela, nunca em registro nem enviado ao serviço. Mesmo
+	# destino e mesmos cabeçalhos do handle de /account/*.
+	handle /account/feira/* {
+		rate_limit {
+			zone feira-entrada {
+				key {remote_host}
+				events 5
+				window 60s
+			}
+			# Teto global: com IPv6 cada endereço de um /64 seria uma chave nova.
+			zone feira-entrada-total {
+				key static
+				events 60
+				window 60s
+			}
+		}
+		reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+			header_up Host {upstream_hostport}
+			header_up -X-Forwarded-For
+			header_up -X-Real-Ip
+		}
+	}
+
 	# Antes do handle abaixo: sem este, /account/* cairia no index.html.
 	handle /account/* {
 		reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
@@ -252,6 +282,48 @@
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip
+		}
+	}
+
+	# As páginas públicas da Feira (anúncios e fotos, indexáveis):
+	# GET|HEAD /f/<diário>/<seq>, /f/<diário>/<seq>/foto/<n> e /f/sitemap.xml,
+	# servidas pelo semeador na porta do WebSocket, em 127.0.0.1, e só quando
+	# ele tem VARANDA_PUBLIC_ORIGIN (sem isso respondem 404). Como /index/*:
+	# só o Host do destino, os cabeçalhos com o endereço do cliente saem, e o
+	# Cache-Control (no-store) e os cabeçalhos próprios vêm do semeador, por
+	# isso /f/* fica fora de @mutavel e de @ausenteApp. O CSP não muda. O
+	# service worker também deixa /f/* passar direto para a rede. As rotas
+	# /moderation-listing e /moderation-post do semeador nunca passam por aqui.
+	# Limite por cliente: 30 requisições a cada 10 s; o endereço fica só na
+	# memória do Caddy, durante a janela. Antes do handle do app: sem este,
+	# /f/* cairia no index.html.
+	handle /f/* {
+		rate_limit {
+			zone feira {
+				key {remote_host}
+				events 30
+				window 10s
+			}
+		}
+		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
+			header_up Host {upstream_hostport}
+			header_up -X-Forwarded-For
+			header_up -X-Real-Ip
+		}
+	}
+
+	# Só as páginas da Feira são para buscadores; o app e o resto ficam de
+	# fora. Antes do handle do app: sem este, /robots.txt viria do www.
+	handle /robots.txt {
+		header Content-Type "text/plain; charset=utf-8"
+		# Heredoc: o Caddyfile não interpreta \n dentro de aspas.
+		respond 200 {
+			body <<ROBOTS
+				User-agent: *
+				Allow: /f/
+				Disallow: /
+				Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml
+				ROBOTS
 		}
 	}
 
