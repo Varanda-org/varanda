@@ -5693,3 +5693,63 @@ Limites:
 - As passkeys extras e a troca de passkey não registram chave; quem só tem uma delas espera os 7 dias.
 - A origem do iOS e o objeto de atestado no iOS dependem do aparelho (passo acima).
 - Nenhuma caixa acima foi executada nesta documentação.
+
+## 117. Prévias de links e passada visual completa (PR feat/link-previews)
+
+Caminhada da prévia de links nas conversas, nos grupos e nas publicações do diário, seguida da passada visual completa desta rodada de redesenho. As telas estão em [app.md](app.md) ("Conversa", "Prévias de links"); a linha LGPD está em [design.md](design.md). Os Termos de Uso e a Política de Privacidade sobem para a versão 24.
+
+Regras que os passos conferem:
+
+- A prévia é montada uma só vez, por quem envia: no app nativo pelo próprio aparelho; na web hospedada pelo serviço de conta da associação (`/account/preview`), que lê a página do próprio endereço, nunca com o IP nem a identidade do membro, e não guarda nem registra o link, o título nem a imagem. A sessão da prévia exige o aceite dos Termos atuais, como a busca de GIFs, e cada membro pede até 60 prévias por dia.
+- O cartão (título, descrição e uma imagem de até 32 KB) vai dentro da mensagem direta, da mensagem de grupo ou da publicação do diário, com a proteção dela. Quem recebe vê só os dados guardados na mensagem e nunca busca nada no site; tocar no cartão abre o link, só por escolha de quem lê.
+- No rascunho, o cartão tem um X para descartar; anexar uma foto tira o cartão; se a página falha, a mensagem segue só com o texto.
+- A chave "Prévia de links" em Ajustes, desligada, faz o app não pedir prévia nenhuma; os cartões que outras pessoas enviam continuam aparecendo.
+- Com `VARANDA_PREVIEW=0` no serviço de conta, `GET /account/preview/policy` responde `{ enabled: false }`, as demais rotas respondem 404 `feature-off`, e a web hospedada não monta prévias.
+- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/feat/link-previews/<plataforma>/`, gravadas por `apps/app/scripts/review-shots.sh`.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node packages/rpc/test/link-card.test.js`, `node packages/core/test/link-card.test.js`, `node apps/cli/test/preview-routes.test.js`, `node apps/app/test/preview.test.js`, `node apps/app/test/previewPref.test.js` e `node apps/app/test/legal.test.js`.
+- `npm run lint`, que tem de passar.
+
+Prévia de links, primeiro no Android (build de debug, emulador ou aparelho, feito depois de `npm run prepare:native -w apps/app`), depois no simulador iOS, depois na web e no PWA:
+
+- [ ] Android: colar um link `https://` numa mensagem direta; o cartão aparece no rascunho com título, imagem e endereço; enviar. No aparelho de quem recebe, o cartão aparece igual, e tocar nele abre o link.
+- [ ] Android: o mesmo num grupo público, num grupo privado e numa publicação do diário (Publicar). No grupo privado, o semeador guarda só o cifrado.
+- [ ] Android: tocar no X do cartão no rascunho; a mensagem sai só com o texto e o link.
+- [ ] Android: com o cartão no rascunho, anexar uma foto; o cartão some e a mensagem sai com a foto.
+- [ ] Android: um link para um endereço que não responde, ou para uma página sem título; a mensagem sai só com o texto, sem erro na tela.
+- [ ] Android: Ajustes, desligar "Prévia de links"; colar um link não monta cartão e o aparelho não faz pedido ao site (conferir no registro de rede do emulador ou do proxy); um cartão enviado por outra pessoa continua aparecendo.
+- [ ] iOS (simulador): repetir a mensagem direta, o grupo privado, a publicação do diário, o X, a foto e a chave desligada.
+- [ ] Web (Chrome, conta hospedada): colar um link numa mensagem direta; na aba Rede de quem envia, o único pedido da prévia vai para `/account/preview` da instalação, nunca para o site do link.
+- [ ] Web, quem recebe: com a aba Rede aberta, abrir a conversa com o cartão; nenhum pedido sai além da origem da instalação (nada para o site do link, nem para a imagem do cartão).
+- [ ] Web, quem recebe, com o serviço de prévia parado (serviço de conta com `VARANDA_PREVIEW=0` ou fora do ar): os cartões já enviados continuam aparecendo iguais, e a aba Rede segue sem pedido para fora da origem.
+- [ ] Web: o mesmo cartão num grupo público, num grupo privado e numa publicação do diário.
+- [ ] Web: Ajustes, desligar "Prévia de links"; colar um link não faz pedido a `/account/preview` (aba Rede); os cartões recebidos continuam aparecendo.
+- [ ] Web: com o cartão no rascunho, anexar uma foto; o cartão some.
+- [ ] Web: com `VARANDA_PREVIEW=0` no serviço de conta, `GET /account/preview/policy` responde `{ enabled: false }`, colar um link não monta cartão e não sai pedido a `/account/preview`.
+- [ ] Celular: um link encurtado (que redireciona, por exemplo um bit.ly) não monta cartão e a mensagem sai como texto simples; na web o mesmo link monta o cartão com o endereço final (o serviço segue até 3 redirecionamentos conferidos).
+- [ ] PWA instalado: repetir a mensagem direta com cartão e a conferência da aba Rede de quem recebe.
+
+Passada visual completa desta rodada, pelo ciclo de [design-review.md](design-review.md):
+
+- [ ] Android (AVD `varanda-api36`): a Vitrine sobe com `EXPO_PUBLIC_VARANDA_VITRINE=1`, e as telas do ciclo (A Rua, Conversa, Membro, Diário, Conversas e filtros, Mensagem, Comunidade, Grupo, ComunidadeInfo, Avisos, Busca, Publicar, Ajustes e Introdução) abrem com dados de exemplo, em tema claro e escuro, com texto grande e com movimento reduzido. Nenhum texto cortado, sobreposto ou escondido, nenhum alvo de toque menor que 44 pt.
+- [ ] iOS (simulador iPhone 16e): as mesmas telas, nos dois temas, com texto grande e movimento reduzido.
+- [ ] Chrome em 390 px e em 1280 px: as mesmas telas, nos dois temas, com texto grande e movimento reduzido.
+- [ ] Laboratório hospedado no Chrome com duas sessões (Pessoa 1 e Pessoa 2), numa mensagem direta: foto, GIF, mensagem de voz, resposta, menção a uma Página, cartão de link e encaminhar; as duas telas mostram o que foi enviado.
+- [ ] O mesmo num grupo público.
+- [ ] O mesmo num grupo privado.
+- [ ] Avisos, Busca, Publicar e o menu "Mais" (overflow) nas duas sessões, nos dois temas.
+- [ ] Nenhuma tela mostra confirmação de leitura, indicador de digitação nem presença (online, visto por último), em nenhuma das duas sessões.
+
+Entrada nativa real (caixa separada: não é parte da revisão visual):
+
+- [ ] entrada nativa real: entrar com passkey e conta no app instalado, no Android e no iOS, e repetir a prévia de links numa mensagem direta. Pré-requisitos que ainda faltam:
+  - iOS: o domínio associado da conta Apple Developer, sem o qual a passkey não entra.
+  - Android: o `assetlinks.json` da instalação precisa associar o build de debug (`app.varanda.debug`), o que a instalação de produção não faz e não deve fazer com a chave pública de debug. Até lá, o login com conta no Android usa o APK de preview do EAS (ver a seção Android de [development.md](development.md)).
+  - A configuração hospedada do app nativo exige `https`.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- No app nativo, quem monta a prévia é o aparelho de quem envia, que fala direto com o site do link e expõe a ele o próprio endereço de rede; a Política (versão 24) diz isso.

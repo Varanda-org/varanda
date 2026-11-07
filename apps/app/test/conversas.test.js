@@ -399,7 +399,7 @@ test('a quote of an unloaded message names no author yet', (t) => {
 test('private chat: quote author, personal retry and one character counter', (t) => {
   const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(screen.includes('if (held === undefined || String(r.from) < String(held.from)) rowById.set(r.id, r)'), 'a shared id resolves like threadOf')
-  t.ok(screen.includes("onPress={typeof hold.retry === 'function' ? retryHeld : () => send(hold.text, hold.quoteId)}"), 'Tentar de novo resends on a personal account')
+  t.ok(screen.includes("onPress={typeof hold.retry === 'function' ? retryHeld : () => send(hold.text, hold.quoteId, hold.card || null)}"), 'Tentar de novo resends on a personal account')
   t.ok(screen.includes("{typeof hold.retry === 'function' || pageKey === null"), 'a page never signs a second message from this button')
   t.absent(screen.includes('caracteres restantes'), 'the composer draws the counter once')
 })

@@ -1394,6 +1394,37 @@ test('readJson refuses an answer over the cap without buffering it whole', async
   t.alike(await readJson(ok, 100), { a: 1 }, 'a small streamed body still parses')
 })
 
+test('previewFetch: a null or empty desc is a card with desc \'\'; exact keys, host and title checked', async (t) => {
+  const a = await load()
+  a.forgetPreviewSession()
+  let answer = null
+  gifStub(t, {
+    '/account/preview/session/start': json(200, { nonce: GIF_NONCE }),
+    '/account/preview/session/finish': json(200, { token: GIF_TOKEN, expiresAt: GIF_LATER }),
+    '/account/preview': () => json(200, answer)
+  })
+  const opts = { member: M, request: signer([]) }
+  const base = { url: 'https://site.example/p', host: 'site.example', title: 'Título', desc: '', image: null }
+  answer = base
+  t.alike(await a.previewFetch(base.url, opts), { url: base.url, host: 'site.example', title: 'Título', desc: '', imageBytes: null, imageMime: null }, "desc ''")
+  answer = { ...base, desc: null }
+  t.is((await a.previewFetch(base.url, opts)).desc, '', 'an older service answering null')
+  answer = { ...base, desc: 'Uma descrição' }
+  t.is((await a.previewFetch(base.url, opts)).desc, 'Uma descrição')
+  for (const [bad, why] of [
+    [{ ...base, title: '' }, 'no title'],
+    [{ ...base, title: null }, 'a null title'],
+    [{ ...base, desc: 7 }, 'a non-string desc'],
+    [{ ...base, extra: 1 }, 'an extra key'],
+    [{ url: base.url, host: base.host, title: base.title, image: null }, 'a missing key'],
+    [{ ...base, host: 'other.example' }, 'a host that is not the URL\'s'],
+    [{ ...base, url: 'http://site.example/p' }, 'not https']
+  ]) {
+    answer = bad
+    try { await a.previewFetch(base.url, opts); t.fail(why) } catch (e) { t.is(e.code, 'indisponivel', why) }
+  }
+})
+
 test('deleteStart/deleteFinish: exact shapes, route tokens in pt-BR, a 5xx finish is uncertain', async (t) => {
   const a = await load()
   const started = { nonce: 'n'.repeat(43), username: 'ana', passkeys: ['Q1JFRA'], scheduled: null }

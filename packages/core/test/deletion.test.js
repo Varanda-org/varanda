@@ -9,6 +9,7 @@ const {
   applyDeletes,
   deletedRanges,
   liveMediaRefs,
+  shownMedia,
   overlaps,
   presentState,
   presentLength,
@@ -275,6 +276,26 @@ test('liveMediaRefs: surviving posts and profiles only', (t) => {
   ])
   t.alike(liveMediaRefs(entries, [2]), [{ core: K2, start: 1, blocks: 2 }], 'exceptSeqs as an array')
   t.alike(liveMediaRefs(entries, new Set([1, 2])), [], 'exceptSeqs as a Set')
+})
+
+const card = (image) => ({ url: 'https://example.com/a', host: 'example.com', title: 'Título', desc: '', image })
+
+test('liveMediaRefs: a surviving post keeps its link preview thumbnail live', (t) => {
+  const thumb = desc(K2, 7, 1, 'image/jpeg')
+  const entries = [genesis, post(1, { preview: card(thumb) }), post(2, { preview: card(null) })]
+  t.is(validateRecord(entries[1].record, 1), null, 'the fixture is a valid post')
+  t.alike(liveMediaRefs(entries), [{ core: K2, start: 7, blocks: 1 }])
+  t.alike(liveMediaRefs(entries, [1]), [], 'not once its post is excepted')
+  t.alike(shownMedia(entries[1].record), [thumb])
+  t.alike(shownMedia(entries[2].record), [], 'a card with no image shows nothing')
+  t.alike(shownMedia(null), [])
+})
+
+test('deletedRanges: a tombstone never frees a live preview thumbnail', (t) => {
+  const range = { core: K2, start: 7, blocks: 1 }
+  const entries = [genesis, post(1, { preview: card(desc(K2, 7, 1, 'image/jpeg')) }), post(2, { media: [desc(K2, 7, 1)] }), del(3, 2, [range])]
+  t.alike(deletedRanges(entries, [K2]), [], 'post 1 still shows the block')
+  t.alike(deletedRanges([...entries, del(4, 1, [range])], [K2]), [range, range], 'freed once the preview post is deleted too')
 })
 
 test('overlaps: same core interval test', (t) => {

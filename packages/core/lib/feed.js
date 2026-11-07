@@ -4,6 +4,7 @@
 // included) and repost items (one per target its author still reposts,
 // lib/engagement.js), in (at, author, seq) order, plus the CLI text format.
 
+const { copyLinkCard } = require('./link-card')
 const { safe, cpWidth, displayWidth } = require('./safe')
 const { validRecordCopy, latestProfile, formatRef, parseRef } = require('./records')
 const { latestUsername } = require('./username')
@@ -76,7 +77,7 @@ function heldCopies (held) {
 // `limit` newest of those are returned. `future` is never paged.
 // Every item has `kind`: 'post' ({ ..., text, replyTo, quote, media }, never
 // both replyTo and quote) or 'repost' ({ ..., to, text: null, replyTo: null,
-// quote: null, media: null }, seq/at of the latest `on` record for `to`).
+// quote: null, media: null, preview: null }, seq/at of the latest `on` record for `to`).
 // A log may carry `raw` (its blocks, tombstones not applied, holes as
 // { seq, record: null }): the page cut is then read and folded from it
 // (heldFold), so it never depends on a fold the caller already ran.
@@ -114,7 +115,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // `media`: a copy of the post's descriptors, or null when it has none.
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      items.push({ kind: 'post', author: key, name, username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media })
+      items.push({ kind: 'post', author: key, name, username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null })
     }
     for (const [ref, { seq, at }] of engagementState(copied).reposted) {
       if (Date.parse(at) - now > MAX_FUTURE_MS) {
@@ -125,7 +126,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // this call did not receive stays. A reply or a quote is its own post.
       if (deletedRefs.has(ref)) continue
       const to = parseRef(ref)
-      items.push({ kind: 'repost', author: key, name, username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null })
+      items.push({ kind: 'repost', author: key, name, username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null })
     }
     for (let i = from; i < items.length; i++) logOf.set(items[i], log)
   }

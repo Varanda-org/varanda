@@ -53,12 +53,13 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { mergeMessages, newestOf, pageDmRequest, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
 import { pagesDm } from '../pages'
 import { pagesOn } from '../pageGate'
-import { composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
+import { cardFits, composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
+import { cardForSend, withCardFallback } from '../linkCard'
 import { chatMediaRefs, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { Btn, ErrorText, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
-import { ChatComposer } from '../ui/ChatComposer'
+import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
 import { ChatHeader } from '../ui/ChatHeader'
@@ -131,6 +132,8 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
   const post = useAction()
   const act = useAction()
   const attachments = useChatAttachments()
+  // The draft link card (not as a page: its sends are signed statements).
+  const linkDraft = useLinkDraft({ text: draft, enabled: pageKey === null, photos: attachments.items.length > 0, member: ownKey })
   // { phase, progress } of a photo send; mediaHold { op } after an uncertain
   // one (the exact dm.send it made); sendTokenRef is the running send, which
   // Cancelar marks dead before its request starts.
@@ -251,12 +254,27 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     if (state === 'deleted') onBack()
   }
 
-  const send = async (text, quoteId) => {
+  // heldCard: the card frozen into a held send (null: none). A fresh send
+  // (undefined) takes the draft card, uploads its thumbnail once and keeps
+  // the result with the hold, so an explicit retry never builds or uploads
+  // again. A card the rules refuse goes without its image, then not at all.
+  const send = async (text, quoteId, heldCard) => {
     setAskNew(false)
     lastErr.current = null
+    const snapshot = heldCard === undefined && pageKey === null ? linkDraft.take(text) : null
+    let card = heldCard === undefined ? null : heldCard
     const r = await post.run(async () => {
       try {
-        return await dm('dm.send', { to: peer, text, ...(quoteId ? { replyTo: quoteId } : {}) })
+        const plain = { to: peer, text, ...(quoteId ? { replyTo: quoteId } : {}) }
+        const target = { kind: 'dm', to: peer, ...(quoteId ? { replyTo: quoteId } : {}) }
+        if (snapshot !== null) {
+          // `to` keeps the thumbnail's blob to this conversation (rpc 5.97).
+          const upload = mediaApi !== null ? (t) => mediaApi.putDm({ bytes: t.bytes, mime: t.mime, width: t.width, height: t.height, to: peer }) : null
+          card = await cardForSend(snapshot, { upload, fits: (c) => cardFits({ text, target, card: c }) })
+        }
+        const built = withCardFallback((c) => (c ? composePlan({ text, target, card: c }).send().params : plain), card)
+        card = built.card
+        return await dm('dm.send', built.op)
       } catch (err) {
         lastErr.current = err
         throw err
@@ -270,7 +288,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
       setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))
       setHold(null)
     } else if (r.uncertain || (err && err.message === UNSURE_SEND)) {
-      setHold({ text, quoteId, retry: pageKey !== null && err && typeof err.retry === 'function' ? err.retry : null })
+      setHold({ text, quoteId, card, retry: pageKey !== null && err && typeof err.retry === 'function' ? err.retry : null })
     } else if (err && err.message === BLOCKED_SEND) {
       setBlocked(true)
     }
@@ -414,7 +432,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     const quoteId = replyTo ? replyTo.id : null
     const plan = sendPlan(hold, draft, quoteId)
     if (plan === 'confirm') setAskNew(true)
-    else if (plan === 'retry') send(hold.text, hold.quoteId)
+    else if (plan === 'retry') send(hold.text, hold.quoteId, hold.card || null)
     else send(draft, quoteId)
   }
 
@@ -509,6 +527,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     (staged ? attachments.ready && !sendingMedia : draft.trim() !== '')
   const mediaOf = new Map(raw.map((m) => [messageKey(m), m.media]))
   const fwdOf = new Map(raw.map((m) => [messageKey(m), m.fwd]))
+  const cardOf = new Map(raw.map((m) => [messageKey(m), m.card]))
   // Forwarding writes as the person, never as a page.
   const canForward = pageKey === null && unlocked
 
@@ -572,7 +591,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
               {/* A page re-puts only its signed bytes (hold.retry) and never signs
                   a second message; a personal account sends the same text again. */}
               {typeof hold.retry === 'function' || pageKey === null
-                ? <Pill label='Tentar de novo' onPress={typeof hold.retry === 'function' ? retryHeld : () => send(hold.text, hold.quoteId)} pending={post.pending} />
+                ? <Pill label='Tentar de novo' onPress={typeof hold.retry === 'function' ? retryHeld : () => send(hold.text, hold.quoteId, hold.card || null)} pending={post.pending} />
                 : null}
               <Pill label='descartar' onPress={() => { setHold(null); setAskNew(false) }} />
             </View>
@@ -607,6 +626,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
         onCancelReply={() => setReplyTo(null)}
         notice={notice}
         ownKey={ownKey}
+        linkDraft={linkDraft}
       />
     )
   }
@@ -658,8 +678,9 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
           return (
             <Bubble
               media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
-              item={{ key: item.key, text: item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark }}
+              item={{ key: item.key, text: item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: !item.deleted && cardOf.get(item.key) ? cardOf.get(item.key) : null }}
               mine={mine}
+              cardThumb={item.deleted ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
               shape={bubbleShape(rows, index)}
               forwarded={!item.deleted && fwdOf.get(item.key) === 1}
               quote={quoted}

@@ -4,7 +4,7 @@
 'use strict'
 
 const test = require('brittle')
-const { validateParams } = require('@varanda/rpc')
+const { validateParams, PEEK_SEQS_MAX: RPC_PEEK_SEQS_MAX } = require('@varanda/rpc')
 const load = () => import('../src/thread.js')
 
 const A = 'aa'.repeat(32)
@@ -17,9 +17,9 @@ const AV = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, byt
 
 const peek = (key, entries, extra = {}) => ({ key, length: 100, entries, invalid: [], missing: [], profile: null, username: null, ...extra })
 
-test('planPeeks groups by author, sorts, chunks at 36 with hints first', async (t) => {
+test('planPeeks groups by author, sorts, chunks at the rpc seqs maximum with hints first', async (t) => {
   const { planPeeks, PEEK_SEQS_MAX } = await load()
-  t.is(PEEK_SEQS_MAX, 36)
+  t.is(PEEK_SEQS_MAX, RPC_PEEK_SEQS_MAX, 'the same cap diary.peek enforces')
   const refs = [A + ':5', B + ':2', A + ':1', A + ':5', 'bad', A.toUpperCase() + ':3']
   for (let i = 100; i < 140; i++) refs.push(C + ':' + i)
   const plan = planPeeks({
@@ -29,17 +29,31 @@ test('planPeeks groups by author, sorts, chunks at 36 with hints first', async (
   t.alike(plan[0], { author: A, seqs: [1, 5], profileSeq: 1, usernameSeq: 2 })
   t.alike(plan[1], { author: B, seqs: [2] }, 'no hints known: keys omitted')
   t.is(plan[2].author, C)
-  t.is(plan[2].seqs.length, 36)
+  t.is(plan[2].seqs.length, PEEK_SEQS_MAX)
   t.is(plan[2].seqs[0], 100)
   t.is(plan[2].profileSeq, 3)
   t.absent('usernameSeq' in plan[2], 'null hint omitted')
-  t.alike(plan[3], { author: C, seqs: [136, 137, 138, 139] }, 'hints only on the first chunk')
+  const rest = []
+  for (let i = 100 + PEEK_SEQS_MAX; i < 140; i++) rest.push(i)
+  t.alike(plan[3], { author: C, seqs: rest }, 'hints only on the first chunk')
   t.is(plan.length, 4)
   for (const chunk of plan) {
     const v = validateParams('diary.peek', chunk)
     t.ok(v.ok, 'valid diary.peek params: ' + chunk.author.slice(0, 4) + ' ' + (v.message || ''))
   }
   t.alike(planPeeks({}), [])
+})
+
+test('assembleThread: a post keeps its stored link card, null without one', async (t) => {
+  const { assembleThread } = await load()
+  const card = { url: 'https://example.com/a', host: 'example.com', title: 'Título', desc: '', image: null }
+  const peeked = new Map([[A, peek(A, [
+    { seq: 5, record: { ...post('com cartão'), preview: card } },
+    { seq: 6, record: post('sem cartão', { author: A, seq: 5 }) }
+  ])]])
+  const out = assembleThread({ focal: A + ':5', index: { ref: A + ':5', parent: null, replies: [A + ':6'] }, peeked })
+  t.alike(out.post.preview, card)
+  t.is(out.replies[0].preview, null)
 })
 
 test('assembleThread: parent only when linked, replies only to the focal post', async (t) => {

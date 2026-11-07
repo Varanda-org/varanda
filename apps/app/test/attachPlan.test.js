@@ -245,3 +245,19 @@ test('fwd 1 rides in the request and counts in the DM budget', async (t) => {
   const plain = composePlan({ text: 'a', target: { ...group, fwd: 0 } })
   t.absent('fwd' in plain.send().params, 'only fwd 1 is sent')
 })
+
+const CARD = { url: 'https://example.com/a', host: 'example.com', title: 'Título', desc: '', image: null }
+
+test('a link card rides with text only, checked and counted in the DM budget', async (t) => {
+  const { composePlan, cardFits, withPreview } = await load()
+  t.alike(composePlan({ text: 'veja https://example.com/a', target: dm, card: CARD }).send().params.card, CARD)
+  t.alike(composePlan({ text: 'oi', target: group, card: CARD }).send().params.card, CARD)
+  t.exception(() => composePlan({ text: 'x', attachments: [attachment()], target: dm, card: CARD }), /prévia de link vai só com texto/)
+  t.exception(() => composePlan({ text: 'x', target: dm, card: { ...CARD, host: 'evil.example' } }))
+  t.ok(cardFits({ text: 'curto', target: dm, card: CARD }))
+  t.absent(cardFits({ text: '😀'.repeat(1000), target: dm, card: { ...CARD, title: '😀'.repeat(80), desc: '😀'.repeat(160) } }), 'the card counts in the budget')
+  t.ok(cardFits({ text: '😀'.repeat(1000), target: group, card: CARD }), 'groups count code points')
+  t.alike(withPreview('post.create', { text: 'oi' }, CARD), { text: 'oi', preview: CARD })
+  t.alike(withPreview('post.create', { text: 'oi' }, null), { text: 'oi' })
+  t.exception(() => withPreview('post.create', { text: 'oi', media: [publicMedia()] }, CARD))
+})

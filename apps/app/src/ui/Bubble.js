@@ -32,6 +32,10 @@
 //   forwarded: true for a message sent with fwd 1 (forward.js): a small
 //     "Encaminhada" line with the encaminhar icon at the top. Nothing ever
 //     names who wrote the original.
+//   item.card: a stored link card (dm.thread / group.read `card`), drawn by
+//     ./LinkCard under the text from that data only; cardThumb says where
+//     its thumbnail is read ({ kind: 'group', diary, identity }, or
+//     { kind: 'dm', from, id, identity }, read as index 'card').
 
 import { cloneElement, isValidElement, useState } from 'react'
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
@@ -41,6 +45,7 @@ import { FORWARDED_LABEL } from '../forward'
 import { ActionsSheet, usableActions } from './ActionsSheet'
 import { chatMediaBlock } from './ChatMedia'
 import { Icon } from './Icon'
+import { LinkCard } from './LinkCard'
 import { MentionText } from './MentionText'
 import { ReplyPreview, senderColor } from './ReplyPreview'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -73,7 +78,7 @@ export function bubbleMeta ({ at, mine, status }) {
 // The photos sit this close to the bubble's edge.
 const MEDIA_INSET = 4
 
-export function Bubble ({ item, mine = false, shape = 'single', name, handle, senderKey, avatar, quote, status, actions, actionsTitle, onOpenMention, below, media, forwarded }) {
+export function Bubble ({ item, mine = false, shape = 'single', name, handle, senderKey, avatar, quote, status, actions, actionsTitle, onOpenMention, below, media, forwarded, cardThumb }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
   const { width: screen } = useWindowDimensions()
@@ -104,6 +109,7 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
   // caption wraps under the photos.
   const block = withMedia && isValidElement(media) ? chatMediaBlock(media.props.refs, screen) : null
   const hug = block ? { width: block.width + 2 * MEDIA_INSET + (mine ? 0 : 2 * StyleSheet.hairlineWidth) } : null
+  const card = !muted && item.card && typeof item.card === 'object' ? item.card : null
   const empty = rich ? item.rawText === '' : typeof item.text !== 'string' || item.text === ''
   const body = withMedia && empty
     ? null
@@ -171,8 +177,15 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
                   color on a nested Text and would draw the time twice. */}
               <Text style={styles.text}>
                 {body}
-                {meta ? <Text style={[styles.metaSpace, { color: fill }]}>{'   ' + meta}</Text> : null}
+                {meta && !card ? <Text style={[styles.metaSpace, { color: fill }]}>{'   ' + meta}</Text> : null}
               </Text>
+              {card
+                ? (
+                  <View style={[styles.cardBox, meta && styles.cardWithMeta]}>
+                    <LinkCard card={card} thumb={cardThumb} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} />
+                  </View>
+                  )
+                : null}
               {meta
                 ? <Text style={styles.meta} accessibilityElementsHidden importantForAccessibility='no'>{meta}</Text>
                 : null}
@@ -252,6 +265,9 @@ const makeStyles = (colors) => StyleSheet.create({
   media: { marginHorizontal: -(space.md - MEDIA_INSET), marginTop: -3 },
   text: { fontSize: 16, lineHeight: 22, color: colors.ink },
   muted: { color: colors.soft, fontStyle: 'italic' },
+  // The card ends the bubble, so the time gets its own line under it.
+  cardBox: { width: 260, maxWidth: '100%' },
+  cardWithMeta: { paddingBottom: 16 },
   metaSpace: { fontSize: 11, lineHeight: 22, color: 'transparent' },
   meta: { position: 'absolute', right: space.md - 2, bottom: 5, fontSize: 11, lineHeight: 14, color: colors.soft },
   // Two stacked triangles on the card side: a line-coloured one 1 pt larger

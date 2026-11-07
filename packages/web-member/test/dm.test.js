@@ -135,7 +135,8 @@ test('request, accept, block, second device, ctl privacy, no plaintext at rest',
   t.alike(await B.web.request('dm.lookup', { member: A.key }), { box: hex(boxA.publicKey), gen: 1 })
 
   t.is((await errorOf(B.web.request('dm.send', { to: B.key, text: 'eu' }))).message, 'não é possível enviar para si')
-  const sent = await B.web.request('dm.send', { to: A.key, text: SECRET, fwd: 1 })
+  const card = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: '', image: null }
+  const sent = await B.web.request('dm.send', { to: A.key, text: SECRET, fwd: 1, card })
   t.ok(/^[0-9a-f]{32}$/.test(sent.id))
   t.is(seeder.puts.length, 2, 'recipient drop and self copy')
 
@@ -157,6 +158,7 @@ test('request, accept, block, second device, ctl privacy, no plaintext at rest',
   t.is(thread.messages.length, 1)
   t.is(thread.messages[0].text, SECRET)
   t.is(thread.messages[0].fwd, 1, 'received forward')
+  t.alike(thread.messages[0].card, card)
   t.is((await B.web.request('dm.thread', { peer: A.key })).messages[0].fwd, 1, 'locally filed forward')
   t.is(thread.next, null)
   await A.web.request('dm.seen', { peer: B.key })
@@ -620,7 +622,7 @@ function engineWithDmLink (link) {
   }
 }
 
-async function sendingEngine (t, { stamps = 2, failPut = false } = {}) {
+async function sendingEngine (t, { stamps = 2, failPut = false, options = {} } = {}) {
   const calls = []
   const link = {
     failPut,
@@ -640,7 +642,8 @@ async function sendingEngine (t, { stamps = 2, failPut = false } = {}) {
   const engine = engineWithDmLink(link)({
     storage,
     association: hex(assoc.publicKey),
-    emit: (name, data) => calls.push([name, data])
+    emit: (name, data) => calls.push([name, data]),
+    ...options
   })
   t.teardown(() => engine.close(), { force: true })
   await certify(storage, kp, assoc)
@@ -661,6 +664,11 @@ async function sendingEngine (t, { stamps = 2, failPut = false } = {}) {
     prf,
     calls,
     link,
+    own,
+    association: hex(assoc.publicKey),
+    kp,
+    peer,
+    recipientBox,
     send: () => engine.send(own, kp, { to: peer, text: 'oi' }, recipientBox),
     set: () => engine.set(own, kp, { peer, state: 'accepted' })
   }
@@ -1207,4 +1215,70 @@ test('chat forwards: browser group writes and reads keep flags in public and pri
       await core.close()
     }
   }
+})
+
+test('DM cards bind their thumbnail to the recipient and survive ingestion, reopen and reads', async (t) => {
+  const blob = require('@varanda/core/lib/blob')
+  const blobPath = require.resolve('../lib/blob')
+  const realBlob = require(blobPath)
+  const frames = new Map()
+  const gets = []
+  const options = {
+    mediaOrigin: 'http://127.0.0.1',
+    fetch: async (url) => {
+      gets.push(url)
+      return new Response(frames.get(url), { status: frames.has(url) ? 200 : 404 })
+    }
+  }
+  require.cache[blobPath].exports = {
+    ...realBlob,
+    createBlobClient: () => ({
+      async send (sealed) {
+        for (let i = 0; i < sealed.descriptor.chunks; i++) {
+          const frame = blob.encodeChunk({ id: sealed.id, index: i, count: sealed.descriptor.chunks, kid: b4a.alloc(8), sig: b4a.alloc(dmCore.DROP.SIG_BYTES), token: b4a.alloc(32), bytes: sealed.cipher.subarray(i * blob.BLOB_CHUNK_BYTES, (i + 1) * blob.BLOB_CHUNK_BYTES) })
+          frames.set('http://127.0.0.1/blob/' + sealed.descriptor.id + '/' + i, frame)
+        }
+        sealed.acked.fill(true)
+      },
+      walletSize: async () => 1000,
+      topUp: async () => 0
+    })
+  }
+  let s
+  try { s = await sendingEngine(t, { stamps: 4, options }) } finally { require.cache[blobPath].exports = realBlob }
+  const drops = []
+  s.link.put = async (bytes) => { drops.push(new Uint8Array(bytes)); return { ok: true, reason: null } }
+  s.link.page = async () => ({ items: drops.map((bytes, i) => ({ bytes, seq: i + 1 })), next: null })
+  const bytes = new Uint8Array([255, 216, 255, 192, 0, 17, 8, 0, 48, 0, 64, 3, 1, 17, 0, 2, 17, 1, 3, 17, 1, 255, 218, 0, 2, 255, 217])
+  const image = await s.engine.putMedia(s.own, s.kp, { bytes: new Uint8Array(bytes), mime: 'image/jpeg', width: 64, height: 48, to: s.peer })
+  const card = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: '', image }
+  const wrong = await errorOf(s.engine.send(s.own, s.kp, { to: hex(crypto.keyPair().publicKey), text: 'link', card }, s.recipientBox))
+  t.is(wrong && wrong.message, 'prepare a mídia de novo')
+  t.is(drops.length, 0)
+  const sent = await s.engine.send(s.own, s.kp, { to: s.peer, text: 'link', card }, s.recipientBox)
+  t.alike((await s.engine.thread(s.own, { peer: s.peer })).messages[0].card, card)
+  t.ok(b4a.equals((await s.engine.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' })).bytes, bytes))
+  t.is(gets.length, 0, 'the sender reads its cached plaintext')
+  const numeric = await errorOf(s.engine.readMedia(s.own, { from: s.own, id: sent.id, index: 0 }))
+  t.is(numeric && numeric.message, 'mídia indisponível', 'numeric indices name media only')
+
+  const storage = memoryNodeStorage()
+  const create = engineWithDmLink(s.link)
+  const other = create({ storage, association: s.association, ...options })
+  t.teardown(() => other.close(), { force: true })
+  await other.unlock(s.prf)
+  t.is((await other.pull(s.own)).added, 1, 'the self copy is ingested by another device')
+  t.alike((await other.thread(s.own, { peer: s.peer })).messages[0].card, card)
+  const opened = await other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' })
+  t.alike(opened, { bytes, mime: 'image/jpeg' })
+  t.is(gets.length, 1, 'the thumbnail was fetched and verified')
+  other.lock()
+  await other.unlock(s.prf)
+  t.alike((await other.thread(s.own, { peer: s.peer })).messages[0].card, card)
+  t.ok(b4a.equals((await other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' })).bytes, bytes))
+  t.is(gets.length, 1, 'the reopened cache supplies the thumbnail')
+  await s.engine.set(s.own, s.kp, { peer: s.peer, state: 'deleted' })
+  t.is((await errorOf(s.engine.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' }))).message, 'mídia indisponível')
+  other.lock()
+  t.is((await errorOf(other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' }))).message, LOCKED)
 })

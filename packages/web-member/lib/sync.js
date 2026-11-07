@@ -781,7 +781,7 @@ const TOMB_RETRY_MS = 250
 const TOMB_RETRY_MAX = 5
 
 // Newest-first download of a followed diary (trackPresent `newest`): the
-// window is one A Rua page (FEED_LIMIT_MAX is 31), the head also asks for
+// window is about one A Rua page (FEED_LIMIT_MAX), the head also asks for
 // blocks 0..HEAD_LOW-1 (block 0 and where the first profile usually is,
 // the Espiadinha's window), and a window that brings no block for
 // HEAD_STALL_MS gives way to the history.

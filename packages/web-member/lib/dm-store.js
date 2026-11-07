@@ -39,7 +39,8 @@
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const gc = require('@varanda/core/lib/group-crypto')
-const { DM_OPS, DM_AUDIO_MIME, DM_AUDIO_MAX_MS, DM_AUDIO_MAX_BYTES } = require('@varanda/core/lib/dm')
+const { copyLinkCard } = require('@varanda/core/lib/link-card')
+const { validDmCard, DM_OPS, DM_AUDIO_MIME, DM_AUDIO_MAX_MS, DM_AUDIO_MAX_BYTES } = require('@varanda/core/lib/dm')
 const sodium = require('./sodium-browser')
 const store = require('./node-store')
 
@@ -98,12 +99,13 @@ function validRow (r) {
   return HEX32.test(r.id) && HEX64.test(r.from) && typeof r.text === 'string' &&
     (r.replyTo === null || HEX32.test(r.replyTo)) && typeof r.mine === 'boolean' &&
     (r.fwd === undefined || r.fwd === 0 || r.fwd === 1) &&
-    validMedia(r.media === undefined ? null : r.media)
+    validMedia(r.media === undefined ? null : r.media) &&
+    (r.card === undefined || r.card === null || (r.media == null && validDmCard(r.card)))
 }
 
 function plainRow (r) {
   if (r.t === 'ctl') return { t: 'ctl', id: r.id, op: r.op, peer: r.peer, at: r.at, filedAt: r.filedAt }
-  return { t: 'msg', id: r.id, peer: r.peer, from: r.from, text: r.text, replyTo: r.replyTo, fwd: r.fwd === 1 ? 1 : 0, media: plainMedia(r.media), at: r.at, mine: r.mine, filedAt: r.filedAt }
+  return { t: 'msg', id: r.id, peer: r.peer, from: r.from, text: r.text, replyTo: r.replyTo, fwd: r.fwd === 1 ? 1 : 0, media: plainMedia(r.media), card: r.card == null ? null : copyLinkCard(r.card, (d) => plainMedia([d])[0]), at: r.at, mine: r.mine, filedAt: r.filedAt }
 }
 
 // The row with `pad` last, its JSON rounded up to a ROW_BUCKET multiple.

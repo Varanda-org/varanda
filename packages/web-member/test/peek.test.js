@@ -8,6 +8,7 @@
 // advertise forks, short lengths, hostile certificates and a hello whose
 // count exceeds its entries.
 const test = require('brittle')
+const { PEEK_LIMIT_MAX, PEEK_LIMIT_DEFAULT } = require('@varanda/rpc')
 const fs = require('node:fs')
 const path = require('node:path')
 const b4a = require('b4a')
@@ -349,8 +350,8 @@ test('(2)(16) one slot per diary per round, the tail window extends past likes, 
   const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [big, s1, s2] })
   const { web, internal } = await webNode(t, assoc, seeder.url)
 
-  // PEEK_LIMIT_MAX (31): the page has room for every round of every diary.
-  const page = await web.request('peek.read', { limit: 31 })
+  // PEEK_LIMIT_MAX: the page has room for every round of every diary.
+  const page = await web.request('peek.read', { limit: PEEK_LIMIT_MAX })
   t.alike(internal, [])
   t.is(page.diaries, 3)
   t.is(page.skipped, 0)
@@ -666,14 +667,14 @@ test('a page over 50 seeded diaries completes well within the page deadline', as
   const elapsed = Date.now() - started
   t.comment('50 diários em ' + elapsed + ' ms')
   t.ok(elapsed < 25000, 'under the page deadline')
-  t.is(page.items.length, 30, 'the default limit')
+  t.is(page.items.length, PEEK_LIMIT_DEFAULT, 'the default limit')
   t.is(page.diaries, 50)
   t.is(page.skipped, 0)
   t.is(page.incomplete, false)
   t.ok(page.next !== null)
-  t.alike(page.items.map((i) => i.author), cores.slice(0, 30).map((core) => hex(core.key)), 'by at desc')
+  t.alike(page.items.map((i) => i.author), cores.slice(0, PEEK_LIMIT_DEFAULT).map((core) => hex(core.key)), 'by at desc')
   const rest = await web.request('peek.read', { after: page.next })
-  t.is(rest.items.length, 20)
+  t.is(rest.items.length, 50 - PEEK_LIMIT_DEFAULT)
   t.is(rest.next, null)
   t.alike(internal, [])
 })

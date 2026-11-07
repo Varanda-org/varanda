@@ -5,6 +5,7 @@
 // association and its signed length fits the quota; an endpoint whose seeder
 // certificate does not verify gets nothing.
 const test = require('brittle')
+const { FEED_LIMIT_MAX } = require('@varanda/rpc')
 const b4a = require('b4a')
 const c = require('compact-encoding')
 const Hypercore = require('hypercore')
@@ -263,7 +264,7 @@ test('a followed diary downloads block 0, then its newest window, then the rest 
   t.alike([...rest].sort((a, b) => a - b), range(3, 268), 'then the history')
   // Requests in flight complete out of order, so only the window is checked.
   t.ok(rest.slice(0, 32).every((i) => i < 64), 'the history starts at block 3')
-  t.is((await web.request('feed.read', { limit: 31 })).items.length, 31)
+  t.is((await web.request('feed.read', { limit: FEED_LIMIT_MAX })).items.length, FEED_LIMIT_MAX)
 
   await node.close()
   const replica = new Hypercore(storage.core('replica/' + hex(served.key)), served.key, { valueEncoding: 'json' })
@@ -305,15 +306,15 @@ function postsOf (feed, key) {
   return feed.items.filter((i) => i.author === key).map((i) => i.text)
 }
 
-// Every page of feed.read (at most 31 items each) -> { items, incomplete }
+// Every page of feed.read (at most FEED_LIMIT_MAX items each) -> { items, incomplete }
 // of the last page.
 async function wholeFeed (web) {
   const items = []
   let before = null
   for (;;) {
-    const page = await web.request('feed.read', before === null ? { limit: 31 } : { limit: 31, before })
+    const page = await web.request('feed.read', before === null ? { limit: FEED_LIMIT_MAX } : { limit: FEED_LIMIT_MAX, before })
     items.unshift(...page.items)
-    if (page.items.length < 31) return { items, incomplete: page.incomplete }
+    if (page.items.length < FEED_LIMIT_MAX) return { items, incomplete: page.incomplete }
     before = { at: page.items[0].at, author: page.items[0].author, seq: page.items[0].seq }
   }
 }

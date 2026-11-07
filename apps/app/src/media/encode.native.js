@@ -11,8 +11,10 @@
 // -> { bytes: Uint8Array, mime, width, height }; throws an Error with a
 // message for the person.
 
+import rpc from '@varanda/rpc'
 import { File } from 'expo-file-system'
 import { SaveFormat, manipulateAsync } from 'expo-image-manipulator'
+import { revokeUrl, urlFromBytes } from './display'
 import { gifSize } from './gif.js'
 import { acceptedSource, canHaveAlpha, gifOverCap } from './source.js'
 import { MAX_GIF_BYTES, MAX_IMAGE_SIDE, MAX_MEDIA_DIMENSION, checkFile, fitWithin } from './plan.js'
@@ -102,4 +104,48 @@ export async function encodeFile (asset) {
     if (mime === 'image/gif') throw fail('formato não aceito')
   }
   return encodePhoto(asset)
+}
+
+// A link card's thumbnail (../linkCard.js): the page image re-encoded as a
+// JPEG at most `side` px on the long side and `maxBytes` bytes, with a lower
+// quality, then a smaller size, until it fits. -> { bytes, mime, width,
+// height } or null when it never fits; the temporary files are deleted.
+const THUMB_QUALITIES = [0.7, 0.5, 0.35]
+const THUMB_SCALES = [1, 0.75, 0.5]
+
+export async function encodeThumbnail (bytes, mime, { side = 320, maxBytes = 32752 } = {}) {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) return null
+  // The page chose the image: its header must declare a size within the
+  // photo bounds before anything decodes it (a decompression bomb), and that
+  // size is what the first resize starts from (no full-size probe decode).
+  const bounds = rpc.mediaBounds(bytes, mime)
+  if (bounds === null || !(bounds.width >= 1 && bounds.height >= 1)) return null
+  let uri
+  try {
+    uri = urlFromBytes(bytes, mime)
+  } catch {
+    return null
+  }
+  try {
+    for (const scale of THUMB_SCALES) {
+      const fit = fitWithin(bounds.width, bounds.height, Math.max(1, Math.round(side * scale)))
+      for (const q of THUMB_QUALITIES) {
+        const out = await manipulateAsync(uri, [{ resize: { width: fit.width, height: fit.height } }], { compress: q, format: SaveFormat.JPEG })
+        const file = new File(out.uri)
+        try {
+          const b = await file.bytes()
+          if (b.byteLength <= maxBytes && out.width <= side && out.height <= side) {
+            return { bytes: b, mime: 'image/jpeg', width: out.width, height: out.height }
+          }
+        } finally {
+          discard(file)
+        }
+      }
+    }
+    return null
+  } catch {
+    return null
+  } finally {
+    revokeUrl(uri)
+  }
 }

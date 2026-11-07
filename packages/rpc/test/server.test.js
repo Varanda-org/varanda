@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { createServerDispatcher, MAX_PENDING, MAX_MESSAGE } = require('..')
+const { createServerDispatcher, MAX_PENDING, MAX_MESSAGE, FEED_LIMIT_DEFAULT } = require('..')
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 5))
 
@@ -121,7 +121,7 @@ test('handlers get normalized params', async (t) => {
   s.call('session.open')
   s.call('feed.read', {})
   await flush()
-  t.alike(got, { limit: 30 })
+  t.alike(got, { limit: FEED_LIMIT_DEFAULT })
 })
 
 test('error mapping', async (t) => {

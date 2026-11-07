@@ -10,6 +10,7 @@
 // `replyTo`. Older readers skip these as invalid; the diary stays valid.
 
 const b4a = require('b4a')
+const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
 
 const MAX_NAME = 80
 const MAX_BIO = 280
@@ -54,6 +55,10 @@ const POST_KEYS = ['type', 'text', 'at', 'replyTo']
 const POST_MEDIA_KEYS = ['type', 'text', 'at', 'replyTo', 'media']
 const QUOTE_KEYS = ['type', 'text', 'at', 'replyTo', 'quote']
 const QUOTE_MEDIA_KEYS = ['type', 'text', 'at', 'replyTo', 'quote', 'media']
+// A link card (lib/link-card.js) instead of media, never both: two more
+// exact sets that older readers skip as malformed, as they skip media.
+const POST_PREVIEW_KEYS = ['type', 'text', 'at', 'replyTo', 'preview']
+const QUOTE_PREVIEW_KEYS = ['type', 'text', 'at', 'replyTo', 'quote', 'preview']
 const ENGAGEMENT_KEYS = ['type', 'to', 'on', 'at']
 const TARGET_KEYS = ['author', 'seq']
 const DESCRIPTOR_KEYS = Object.freeze(['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
@@ -285,6 +290,20 @@ function validAvatar (d) {
   }
 }
 
+// A post preview's thumbnail: a still JPEG descriptor of one media block.
+// Never throws.
+function validPreviewImage (d) {
+  try {
+    return validDescriptor(d) && d.mime === CARD_IMAGE_MIME && validCardImageBytes(d.bytes)
+  } catch {
+    return false
+  }
+}
+
+function validPreview (card) {
+  return validLinkCard(card, validPreviewImage)
+}
+
 // By index, never every(): a hole in a sparse array is undefined and invalid.
 function validMediaList (media) {
   if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) return false
@@ -437,10 +456,12 @@ function check (record, seq) {
     if (!hasExactKeys(record, ENGAGEMENT_KEYS) || !validTarget(record.to) || typeof record.on !== 'boolean') return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
-  const isQuote = hasExactKeys(record, QUOTE_KEYS) || hasExactKeys(record, QUOTE_MEDIA_KEYS)
+  const withPreview = hasExactKeys(record, POST_PREVIEW_KEYS) || hasExactKeys(record, QUOTE_PREVIEW_KEYS)
+  const isQuote = hasExactKeys(record, QUOTE_KEYS) || hasExactKeys(record, QUOTE_MEDIA_KEYS) || hasExactKeys(record, QUOTE_PREVIEW_KEYS)
   const withMedia = hasExactKeys(record, POST_MEDIA_KEYS) || hasExactKeys(record, QUOTE_MEDIA_KEYS)
-  if (!isQuote && !withMedia && !hasExactKeys(record, POST_KEYS)) return 'malformed'
+  if (!isQuote && !withMedia && !withPreview && !hasExactKeys(record, POST_KEYS)) return 'malformed'
   if (withMedia && !validMediaList(record.media)) return 'media-invalid'
+  if (withPreview && !validPreview(record.preview)) return 'preview-invalid'
   const { text, at, replyTo } = record
   // A post with media may have an empty text (a photo-only post); a quote
   // always has text, with or without media.
@@ -506,11 +527,13 @@ function copyTarget (r) {
   return { author: r.author, seq: r.seq }
 }
 
-// `quote` and `media` are added only when given.
-function postRecord ({ text, replyTo = null, at = nowIso(), media, quote } = {}) {
+// `quote`, `media` and `preview` are added only when given (a null preview
+// is no preview). Media and a preview together match no key set.
+function postRecord ({ text, replyTo = null, at = nowIso(), media, quote, preview } = {}) {
   const record = { type: 'post', text, at, replyTo }
   if (quote !== undefined) record.quote = copyTarget(quote)
   if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyDescriptor) : media
+  if (preview !== undefined && preview !== null) record.preview = copyLinkCard(preview, copyDescriptor)
   return build(record, 1)
 }
 
@@ -693,6 +716,8 @@ module.exports = {
   MAX_AVATAR_BYTES,
   AVATAR_MIMES,
   PROFILE_AVATAR_KEYS,
+  POST_PREVIEW_KEYS,
+  QUOTE_PREVIEW_KEYS,
   DELETE_RANGE_KEYS,
   nowIso,
   isPlainObject,
@@ -719,6 +744,8 @@ module.exports = {
   validDescriptor,
   validAudioDescriptor,
   validAvatar,
+  validPreview,
+  validPreviewImage,
   validateRecord,
   validRecordCopy,
   parseRef,

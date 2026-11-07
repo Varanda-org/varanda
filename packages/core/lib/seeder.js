@@ -184,7 +184,7 @@ const { validateMediaHeader, latestMediaCores } = require('./media')
 const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins } = require('./group')
 const { createGroupIndex } = require('./group-index')
 const { attachGroups } = require('./groups-net')
-const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges } = require('./deletion')
+const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges, shownMedia } = require('./deletion')
 const { createEngagementIndex } = require('./engagement-index')
 const { createNameIndex } = require('./name-index')
 const { verifyRoster } = require('./page')
@@ -322,7 +322,7 @@ function countDeclaration (counts, declared, key, seq, pinned = null) {
 // honest writers declare a core before using it, and the counters would
 // miss it while readers' deletedRanges count every declared core.
 function countShown (counts, declared, seq, r) {
-  const refs = r === null ? [] : r.type === 'post' ? (r.media || []) : (r.avatar ? [r.avatar] : [])
+  const refs = shownMedia(r)
   const counted = []
   for (const { core, start, blocks } of refs) {
     if (!declared.has(core)) counts.mediaIrregular = true

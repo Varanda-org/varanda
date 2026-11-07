@@ -152,6 +152,20 @@ function covered (index, r) {
   return lo > 0 && list[lo - 1][1] > r.start
 }
 
+// The media descriptors a valid record copy shows: a post's photos or its
+// link preview thumbnail (`preview.image`, a block in a media core like a
+// photo), a profile's avatar; [] otherwise.
+function shownMedia (copy) {
+  if (copy === null || typeof copy !== 'object') return []
+  if (copy.type === 'post') {
+    if (Array.isArray(copy.media)) return copy.media
+    const image = copy.preview !== undefined && copy.preview !== null ? copy.preview.image : null
+    return image !== null && typeof image === 'object' ? [image] : []
+  }
+  if (copy.type === 'profile' && copy.avatar !== undefined) return [copy.avatar]
+  return []
+}
+
 // Media still referenced by a surviving post or profile, other than the
 // blocks in exceptSeqs.
 function liveMediaRefs (entries, exceptSeqs) {
@@ -167,10 +181,7 @@ function liveMediaRefs (entries, exceptSeqs) {
       if (!Number.isSafeInteger(seq) || deleted.has(seq) || except.has(seq)) continue
       const copy = validRecordCopy(entry.record, seq)
       if (copy === null) continue
-      let descriptors = []
-      if (copy.type === 'post' && Array.isArray(copy.media)) descriptors = copy.media
-      else if (copy.type === 'profile' && copy.avatar !== undefined) descriptors = [copy.avatar]
-      for (const d of descriptors) out.push({ core: d.core, start: d.start, blocks: d.blocks })
+      for (const d of shownMedia(copy)) out.push({ core: d.core, start: d.start, blocks: d.blocks })
     } catch {}
   }
   return out
@@ -824,6 +835,7 @@ module.exports = {
   applyDeletes,
   deletedRanges,
   liveMediaRefs,
+  shownMedia,
   overlaps,
   presentState,
   presentLength,

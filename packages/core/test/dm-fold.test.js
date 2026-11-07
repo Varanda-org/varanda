@@ -290,3 +290,12 @@ test('thread rows keep forwards and default v1 bodies to 0', (t) => {
   t.alike(rows.map(m => m.fwd), [0, 1, 1])
   t.is(rows[1].media, null)
 })
+
+test('fold preserves cards and gives old messages a null card', (t) => {
+  const card = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
+  const a = { ...from(ANA, 1), card }
+  const r = run({ messages: [a, from(ANA, 2)], follows: [ANA] })
+  t.alike(r.inbox[0].messages[0].card, card)
+  t.not(r.inbox[0].messages[0].card, card)
+  t.is(r.inbox[0].messages[1].card, null)
+})

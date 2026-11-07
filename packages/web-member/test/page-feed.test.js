@@ -2,6 +2,7 @@
 // newest rows of a page's follows read over a short-lived link of a real
 // in-process Seeder into memory cores. Loopback only (local DHT).
 const test = require('brittle')
+const { FEED_LIMIT_MAX } = require('@varanda/rpc')
 const fs = require('node:fs')
 const http = require('node:http')
 const path = require('node:path')
@@ -146,7 +147,7 @@ test('page.feed: newest rows of the follows, blocked and deleted excluded, moved
   const before = await web.request('log.read', {})
   const page = hex(crypto.keyPair().publicKey)
 
-  const r = await web.request('page.feed', { page, keys: [A.key, B.key, X.key, M.key], limit: 30 })
+  const r = await web.request('page.feed', { page, keys: [A.key, B.key, X.key, M.key], limit: FEED_LIMIT_MAX })
   t.alike(r.items.map((i) => i.text), ['a1', 'a3', 'b1', 'b2', 'm antes'], 'feed order, deleted, blocked and post-move rows excluded')
   t.ok(r.items.every((i) => i.kind === 'post' && typeof i.author === 'string' && 'username' in i), 'feed.read rows')
   t.is(r.incomplete, false)
@@ -154,7 +155,7 @@ test('page.feed: newest rows of the follows, blocked and deleted excluded, moved
   const newest = await web.request('page.feed', { page, keys: [A.key, B.key], limit: 2 })
   t.alike(newest.items.map((i) => i.text), ['b1', 'b2'], 'the newest rows are kept')
 
-  const unserved = await web.request('page.feed', { page, keys: [B.key, hex(crypto.keyPair().publicKey)], limit: 30 })
+  const unserved = await web.request('page.feed', { page, keys: [B.key, hex(crypto.keyPair().publicKey)], limit: FEED_LIMIT_MAX })
   t.alike(unserved.items.map((i) => i.text), ['b1', 'b2'])
   t.is(unserved.incomplete, true, 'a key the seeder does not serve')
 
@@ -209,10 +210,10 @@ test('page.feed: a block-0 issuer the final snapshot revokes drops the key', asy
   const page = hex(crypto.keyPair().publicKey)
 
   armed = true
-  const r = await web.request('page.feed', { page, keys: [R.key, B.key], limit: 30 })
+  const r = await web.request('page.feed', { page, keys: [R.key, B.key], limit: FEED_LIMIT_MAX })
   t.absent(armed, 'the snapshot changed during the read')
   t.alike(r.items.map((i) => i.text), ['b1'], 'the revoked-issuer diary is dropped by the final snapshot')
-  const again = await web.request('page.feed', { page, keys: [R.key, B.key], limit: 30 })
+  const again = await web.request('page.feed', { page, keys: [R.key, B.key], limit: FEED_LIMIT_MAX })
   t.alike(again.items.map((i) => i.text), ['b1'], 'and by the first one')
 })
 
@@ -274,7 +275,7 @@ test('page.feed: past a gap between the head and the tail only the tail run give
   await node.setKeyPair(crypto.keyPair())
   const web = await connectClient(node, { timeoutMs: 60000 })
   const page = hex(crypto.keyPair().publicKey)
-  const r = await web.request('page.feed', { page, keys: [D.key, F.key], limit: 30 })
+  const r = await web.request('page.feed', { page, keys: [D.key, F.key], limit: FEED_LIMIT_MAX })
   const of = (key) => r.items.filter((i) => i.author === key)
   t.alike(of(D.key).map((i) => i.text), ['d8', 'd9', 'd10', 'd11', 'd12', 'd13', 'd14'], 'the deleted head post is not shown')
   t.ok(of(D.key).every((i) => i.name === 'Nova'), 'the tail profile names the rows')
@@ -324,7 +325,7 @@ test('page.feed: a tombstone over the page-close does not lift the cut (the targ
   const web = await connectClient(node, { timeoutMs: 60000 })
   const page = hex(crypto.keyPair().publicKey)
 
-  const r = await web.request('page.feed', { page, keys: [P.key], limit: 30 })
+  const r = await web.request('page.feed', { page, keys: [P.key], limit: FEED_LIMIT_MAX })
   t.alike(r.items.map((i) => i.text), ['p1'], 'the cut stays at the close: nothing above it shows')
   t.is(r.incomplete, false)
 })
@@ -387,7 +388,7 @@ test('page.feed: a close outside the window is fetched from the seeder pointer a
   await node.setKeyPair(crypto.keyPair())
   const web = await connectClient(node, { timeoutMs: 60000 })
   const page = hex(crypto.keyPair().publicKey)
-  const r = await web.request('page.feed', { page, keys: [P.key], limit: 30 })
+  const r = await web.request('page.feed', { page, keys: [P.key], limit: FEED_LIMIT_MAX })
   t.alike(r.items.map((i) => i.text), [], 'nothing above the close shows')
   t.is(r.incomplete, false, 'the close verified')
   t.alike(stack.requests, [P.key])
@@ -410,21 +411,21 @@ test('page.feed: a pointer whose block is not a verified close leaves the page i
 
   // A leaked post (seq 5, outside the window) named as the end: unverifiable.
   answer = { endSeq: 5 }
-  const lie = await web.request('page.feed', { page, keys: [P.key, B.key], limit: 30 })
+  const lie = await web.request('page.feed', { page, keys: [P.key, B.key], limit: FEED_LIMIT_MAX })
   t.alike(of(lie, P.key), [], 'no tail row of the page')
   t.alike(of(lie, B.key), ['b1', 'b2', 'b3'], 'the other diary is unaffected')
   t.is(lie.incomplete, true)
 
   // A pointer past the log is no pointer: as without an answer.
   answer = { endSeq: 99 }
-  const past = await web.request('page.feed', { page, keys: [P.key], limit: 30 })
+  const past = await web.request('page.feed', { page, keys: [P.key], limit: FEED_LIMIT_MAX })
   t.alike(of(past, P.key).length, 8, 'an out-of-range seq is ignored')
   t.is(past.incomplete, false)
 
   // The seeder withholds the pointer: as before this fix (accepted residual,
   // docs/protocol.md §12), the window alone decides.
   answer = null
-  const withheld = await web.request('page.feed', { page, keys: [P.key], limit: 30 })
+  const withheld = await web.request('page.feed', { page, keys: [P.key], limit: FEED_LIMIT_MAX })
   t.alike(of(withheld, P.key).length, 8, 'withholding changes nothing compared with no pointer')
   t.is(withheld.incomplete, false)
   t.ok(stack.requests.every((k) => k === P.key), 'only the page diary was asked for its end')
@@ -442,7 +443,7 @@ test('page.feed: a personal diary asks the seeder for no end pointer', async (t)
   await node.setKeyPair(crypto.keyPair())
   const web = await connectClient(node, { timeoutMs: 60000 })
   const page = hex(crypto.keyPair().publicKey)
-  const r = await web.request('page.feed', { page, keys: [A.key], limit: 30 })
+  const r = await web.request('page.feed', { page, keys: [A.key], limit: FEED_LIMIT_MAX })
   t.alike(r.items.map((i) => i.text), ['a7', 'a8', 'a9', 'a10', 'a11', 'a12', 'a13', 'a14'])
   t.is(r.incomplete, false)
   t.alike(stack.requests, [], 'no request to the index')
@@ -464,7 +465,7 @@ test('page.feed: a person whose block 2 was deleted never shows it, even when a 
   await node.setKeyPair(crypto.keyPair())
   const web = await connectClient(node, { timeoutMs: 60000 })
   const page = hex(crypto.keyPair().publicKey)
-  const r = await web.request('page.feed', { page, keys: [A.key], limit: 30 })
+  const r = await web.request('page.feed', { page, keys: [A.key], limit: FEED_LIMIT_MAX })
   t.absent(r.items.some((i) => i.text === 'a2 apagado'), 'the deleted post never shows')
   t.is(r.incomplete, true, 'an unverified pointer fails closed: the tail is hidden, never the deleted post shown')
   t.alike(stack.requests, [A.key], 'the pointer may be asked: block 2 is unread')
@@ -493,7 +494,7 @@ test('page.feed: a person whose block 2 was deleted and a pointer at another del
   await node.setKeyPair(crypto.keyPair())
   const web = await connectClient(node, { timeoutMs: 60000 })
   const page = hex(crypto.keyPair().publicKey)
-  const r = await web.request('page.feed', { page, keys: [A.key], limit: 30 })
+  const r = await web.request('page.feed', { page, keys: [A.key], limit: FEED_LIMIT_MAX })
   t.absent(r.items.some((i) => /apagado/.test(i.text)), 'no deleted post shows')
   t.is(r.incomplete, true)
 })
@@ -530,7 +531,7 @@ test('page.feed: a leaked key deleting the roster and the close cannot lift the 
   await node.setKeyPair(crypto.keyPair())
   const web = await connectClient(node, { timeoutMs: 60000 })
   const page = hex(crypto.keyPair().publicKey)
-  const r = await web.request('page.feed', { page, keys: [P.key], limit: 30 })
+  const r = await web.request('page.feed', { page, keys: [P.key], limit: FEED_LIMIT_MAX })
   t.absent(r.items.some((i) => /vazado/.test(i.text)), 'nothing after the close shows')
   t.is(r.incomplete, false, 'the pointed close verified')
   t.alike(stack.requests, [P.key])

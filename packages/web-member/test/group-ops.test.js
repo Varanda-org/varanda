@@ -340,7 +340,7 @@ test('media posts: own declared descriptors round trip, the list row says Foto o
   await ops.groupPost(a.ctx, { group, text: 'só texto' })
   const page = await ops.groupRead(a.ctx, { group })
   t.alike(page.items.map((p) => p.media), [null, [d]], 'media per item, null for a text post')
-  t.alike(Object.keys(page.items[1]).slice(0, 9), ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'fwd', 'media', 'hidden'])
+  t.alike(Object.keys(page.items[1]).slice(0, 10), ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'fwd', 'media', 'card', 'hidden'])
 
   const community = groupCommunity.get(group)
   const row = async () => (await ops.communityInfo(a.ctx, { community })).groups.find((g) => g.group === group).last.preview
@@ -1479,4 +1479,16 @@ test('invitePolicy: a private group creator writes a plaintext group-invites; an
   t.alike([rec.type, rec.on], ['group-invites', true], 'on the admin\'s own writer')
   await shareGroupCore(b, a, w)
   t.is((await ops.groupInfo(a.ctx, { group })).memberInvite, true, 'the creator folds the admin\'s setting')
+})
+
+test('group reads preserve cards and hide them with their post', async (t) => {
+  const a = await member(generateAssociationKeyPair(), 'Ana')
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Links', join: 'open' })
+  const card = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: '', image: null }
+  const sent = await ops.groupPost(a.ctx, { group, text: 'link', card })
+  t.alike((await ops.groupRead(a.ctx, { group })).items[0].card, card)
+  await ops.groupPost(a.ctx, { group, text: 'plain' })
+  t.is((await ops.groupRead(a.ctx, { group })).items[0].card, null)
+  await ops.groupHide(a.ctx, { group, target: { writer: group, seq: sent.seq }, on: true })
+  t.is((await ops.groupRead(a.ctx, { group })).items.find(p => p.seq === sent.seq).card, null)
 })
