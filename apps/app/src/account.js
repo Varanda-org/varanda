@@ -49,6 +49,9 @@ const ERROR_MESSAGES = {
   'convite-aguardando': 'Seu convite desta semana ainda não chegou. Ele aparece de surpresa, com um aviso.',
   'idade-pendente': 'Confirme sua idade antes de continuar.',
   'limite-idade': 'Muitas tentativas de verificação. Tente de novo amanhã.',
+  // A Feira code sent to the ordinary age route: never shown if the app picks
+  // the route right, so it only asks to try again.
+  'use-a-rota-da-feira': 'Não deu para abrir a verificação agora. Tente de novo daqui a pouco.',
   'limite-gif': 'Limite de buscas de GIF por hoje',
   'nao-autorizado': 'a sessão de busca de GIF expirou',
   'limite-previa': 'Limite de prévias de links por hoje',
@@ -224,7 +227,9 @@ export function buildRequest (method, path, body, extra) {
 // hosted web app passes none and keeps the relative path.
 // `errorBody`: a refusal also carries the parsed JSON body as err.body, for a
 // caller that validates it (seenFinish's conflict), so it never fetches again.
-async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, errorBody = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin, sessionToken, signal, messages } = {}) {
+// `bareStatus` ({ status: token }) names a refusal that comes without the
+// service's JSON token (the edge's own 429, say).
+async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, errorBody = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin, sessionToken, signal, messages, bareStatus } = {}) {
   // The Vitrine has no account service: every call is a definite refusal,
   // before any request leaves the page.
   if (VITRINE) throw toError('indisponivel')
@@ -274,7 +279,8 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
   // allow404 'route': only a route the service does not have is null; a
   // refusal that happens to be a 404 (an expired nonce) stays an error.
   if (allow404 && res.status === 404 && !(allow404 === 'route' && data && data.error === 'expirado')) return null
-  const code = data && typeof data.error === 'string' ? data.error : ''
+  let code = data && typeof data.error === 'string' ? data.error : ''
+  if (code === '' && bareStatus && Object.hasOwn(bareStatus, res.status)) code = bareStatus[res.status]
   // `definite`: the route answers a 5xx with an error token only before it
   // changed anything, so that answer is a refusal, not an unknown outcome. A
   // 5xx without a known token (a proxy page, a crash) stays uncertain.
@@ -581,10 +587,14 @@ function isVerificationUrl (v) {
 // uncertain; the service's own 503 'indisponivel' is not unknown (it answers
 // it only before creating anything). The invite goes in only when well
 // formed: the service checks it before sending anyone to the provider.
-export const ageSession = async ({ member, nonce, signature, invite }) => {
+// `feira`: the invite is the Feira code, whose paid session opens only at
+// /account/feira/idade (same body and answers); the edge limits that route
+// per address and answers its 429 without a token, read as 'limite-idade'.
+export const ageSession = async ({ member, nonce, signature, invite }, { feira = false } = {}) => {
   const body = { member, nonce, signature }
   if (typeof invite === 'string' && INVITE_CODE_RE.test(invite)) body.invite = invite
-  const data = await call('POST', '/account/age/session', body, { uncertain: true, definite: true })
+  const path = feira === true ? '/account/feira/idade' : '/account/age/session'
+  const data = await call('POST', path, body, { uncertain: true, definite: true, bareStatus: feira === true ? { 429: 'limite-idade' } : undefined })
   if (isVerificationUrl(data.url)) return { url: data.url }
   if (data.state === 'verificado') return verifiedAnswer(data)
   const err = toError('indisponivel')

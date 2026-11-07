@@ -147,7 +147,7 @@ import Membro from './src/screens/Membro'
 import Feira from './src/screens/Feira'
 import Anuncio from './src/screens/Anuncio'
 import Anunciar from './src/screens/Anunciar'
-import { createFeiraEntry, decideEntry } from './src/feiraEntry'
+import { createFeiraEntry, decideEntry, heldIsFeira } from './src/feiraEntry'
 import { useFeiraEntryStart } from './src/useFeiraEntryStart'
 import { captureListing, dropListing, entryStorage, holdFeiraCode } from './src/feiraEntryStore'
 import { feiraLocation } from './src/feiraPlaceStore'
@@ -826,7 +826,10 @@ function Member () {
       if (stale()) return
       const { signature } = await node.request('age.sign', { action: 'session', nonce })
       if (stale()) return
-      const r = await ageSession({ member, nonce, signature, invite: loadSignupInvite()?.code })
+      // The Feira code's paid session has its own route (src/account.js).
+      const held = loadSignupInvite()
+      const feira = heldIsFeira(FEIRA_ENTRY.load(feiraOrigin), held)
+      const r = await ageSession({ member, nonce, signature, invite: held?.code }, { feira })
       if (stale()) return
       if (r.state === 'verificado') return answerAge('verificado', who, origin, r.proof)
       if (typeof r.url !== 'string' || !r.url.startsWith('https://')) throw new Error('serviço indisponível')

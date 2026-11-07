@@ -109,7 +109,11 @@ export function createFeiraEntry ({ getStorage, now = () => Date.now() } = {}) {
       const t = now()
       const prev = read()
       if (prev !== null && prev.author === author && prev.seq === seq && prev.origin === origin) return prev
-      const rec = decodeEntry({ v: 1, author, seq, origin, at: t, code: null }, t)
+      // A newer listing replaces the listing, not the Feira code already
+      // asked for on this installation: that code is still held, and only
+      // its route (/account/feira/idade) can open the age step with it.
+      const code = prev !== null && prev.origin === origin ? prev.code : null
+      const rec = decodeEntry({ v: 1, author, seq, origin, at: t, code }, t)
       save(rec)
       return rec
     },
@@ -148,6 +152,11 @@ export function createFeiraEntry ({ getStorage, now = () => Date.now() } = {}) {
   }
 }
 
+// True when the held signup code is the Feira code this entry asked for.
+export function heldIsFeira (entry, held) {
+  return !!entry && typeof entry.code === 'string' && !!held && typeof held.code === 'string' && held.code === entry.code
+}
+
 // What to do with a held entry:
 // - 'none': no entry;
 // - 'open': a member (signed in, node ready) opens the listing;
@@ -164,7 +173,7 @@ export function decideEntry ({ entry, signedIn = false, ready = false, held = nu
   if (!entry) return { action: 'none' }
   if (signedIn === true) return ready === true ? { action: 'open', author: entry.author, seq: entry.seq } : { action: 'wait' }
   if (held && typeof held.code === 'string') {
-    return { action: 'invite', feira: entry.code !== null && held.code === entry.code }
+    return { action: 'invite', feira: heldIsFeira(entry, held) }
   }
   if (policy && policy.enabled === true) {
     const body = startBody({ author: entry.author, seq: entry.seq })
