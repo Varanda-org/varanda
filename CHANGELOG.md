@@ -195,6 +195,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
   Detalhes em `docs/verification.md`, seção 81.
 
 - Perfil, Avisos, Mensagens e Publicar no app: barra fixa com nome e botões ao rolar o Diário e um perfil, selo de tipo nos Avisos, marcadores de dia e grupos de bolhas nas Mensagens, autor e anel com contagem restante na Publicar, alça na folha e vibrações no app nativo. Detalhes em `docs/app.md` ("Perfil fixo, Avisos, Mensagens e Publicar") e `docs/verification.md` §91.
+- varanda.app mostra quatro telas do app (A Rua, Diário, Conversas e uma conversa), capturadas no simulador do iPhone com dados de exemplo da Vitrine; no celular elas rolam de lado e, no computador, ficam lado a lado. A pergunta sobre as Conversas agora diz que as mensagens têm texto, fotos e áudios.
 
 ### Alterado
 

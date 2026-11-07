@@ -4,7 +4,9 @@ O visual que o app vai ganhar, definido primeiro na página (varanda.app) e depo
 
 **Referência: X e Threads, só no visual.** Mesmas funções de hoje ([docs/app.md](../../docs/app.md)), nenhuma mudança de protocolo. Quente e brasileiro, não uma cópia: creme em vez de branco gelado, verde em vez de azul, a cadeira no topo.
 
-**A referência visual é a própria página:** as classes `.app`, `.post`, `.avatar`, `.app__abas`, `.app__fab`, `.folha` e `.perfil` em [public/styles.css](../public/styles.css), com o HTML em [public/index.html](../public/index.html). Lá, 1 pt = `100cqw / 402` (a tela tem 402 pt de largura, como o iPhone 17 Pro).
+A página agora mostra quatro capturas reais do app (veja [screens.md](screens.md)), não uma prévia em HTML; este arquivo documenta o desenho.
+
+**A referência visual era a própria página:** as classes `.app`, `.post`, `.avatar`, `.app__abas`, `.app__fab`, `.folha` e `.perfil` em [public/styles.css](../public/styles.css), com o HTML em [public/index.html](../public/index.html). Lá, 1 pt = `100cqw / 402` (a tela tem 402 pt de largura, como o iPhone 17 Pro).
 
 ## Cores
 
