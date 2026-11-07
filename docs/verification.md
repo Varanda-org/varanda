@@ -5753,3 +5753,37 @@ Limites desta caminhada:
 
 - Nenhuma caixa acima foi executada nesta documentação.
 - No app nativo, quem monta a prévia é o aparelho de quem envia, que fala direto com o site do link e expõe a ele o próprio endereço de rede; a Política (versão 24) diz isso.
+
+## 118. Mensagens diretas e grupos privados no app instalado (PR fix/native-dm-unlock)
+
+Caminhada da issue #347. O app instalado com a instalação (tipo `web`) passa o resultado PRF da passkey ao nó (`identity.install`, [rpc.md](rpc.md) 5.50), e o nó deriva as chaves de mensagens diretas, a chave de caixa dos grupos privados e as chaves de escrita dos grupos com o HKDF do worklet, porque o WebCrypto do Bare não tem HKDF. Antes, com a conta aberta, Conversas mostrava "Algumas conversas ainda não carregaram." e "Entre com sua passkey para continuar." e nenhuma conversa privada.
+
+Regras que os passos conferem:
+
+- Depois de entrar com a passkey, ou de abrir o app com a sessão guardada, Conversas lista as conversas privadas e "Pedidos de mensagem" sem o aviso "Entre com sua passkey para continuar.".
+- O app publica a chave de mensagens (`dm.enable`) quando a conta ainda não tem uma, e uma conversa de ponta a ponta funciona entre o app e a web, nos dois sentidos, com texto, foto e mensagem de voz.
+- Um aparelho que entra agora recebe só o que o semeador ainda guarda (7 dias, protocol seção 11) e o que chegar depois: o histórico mais antigo, guardado em outro aparelho, não é copiado. Nesse aparelho, uma conversa vai para a caixa de entrada quando a pessoa segue o outro membro, quando há uma mensagem própria enviada ou quando o aceite está entre as mensagens guardadas; senão aparece em "Pedidos de mensagem".
+- Um grupo privado criado no app recebe e entrega chaves de época; outro aparelho da mesma passkey participa sozinho e recebe as chaves (manutenção de aparelho).
+- Uma passkey de outra conta é recusada com "passkey não corresponde ao diário guardado" antes de o PRF entrar no nó: o app fica bloqueado e, ao entrar de novo com a passkey certa, as conversas guardadas no aparelho continuam lá.
+
+Passos (marcar só depois de executar e guardar o registro), primeiro no Android (build de debug, emulador ou aparelho, feito depois de `npm run prepare:native -w apps/app`), depois no simulador iOS, depois na web e no PWA. O build de debug não entra com passkey numa instalação de produção (veja `docs/development.md`): os passos que pedem passkey real usam o APK de preview do EAS e, no iOS, um build com o domínio associado (TestFlight).
+
+- [ ] Conta com conversas privadas na web: entrar no app com a mesma passkey. Conversas mostra as conversas dos últimos 7 dias, sem "Entre com sua passkey para continuar.".
+- [ ] Fechar e abrir o app (sessão guardada): as conversas aparecem de novo sem pedir a passkey.
+- [ ] Conta nova criada no app: a primeira abertura de Conversas publica a chave de mensagens; da web, outra conta encontra a do app em "Nova conversa" e envia uma mensagem, que chega ao app como pedido; aceitar e responder com texto, foto e voz; tudo chega à web.
+- [ ] Mesmo par, mensagem enviada da web pela conta do app (mesma passkey nos dois): aparece no app como mensagem própria.
+- [ ] Grupo privado criado no app: convidar uma conta da web, que entra e lê as mensagens; uma mensagem da web aparece no app.
+- [ ] Segundo aparelho com a mesma passkey (outro telefone ou a web): entra no grupo privado sozinho e lê as mensagens novas.
+- [ ] Entrar no app com a passkey de outra conta (Ajustes, Sair, depois "entrar com outra passkey"): aparece "passkey não corresponde ao diário guardado"; entrar de novo com a passkey certa mostra as mesmas conversas de antes.
+- [ ] iOS (TestFlight) no mesmo aparelho que tem o PWA instalado: os mesmos passos de conversa e de grupo privado.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/app/test/identityInstall.test.js`, `node apps/app/test/identityRecoveryNative.test.js` e `node apps/app/test/dm.test.js`.
+- `node packages/web-member/test/session-hkdf.test.js`, `node packages/web-member/test/passkey.test.js`, `node packages/web-member/test/group-keys.test.js`, `node packages/web-member/test/dm-store.test.js` e `node packages/web-member/test/dm.test.js`.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- O histórico de mensagens de um aparelho não passa para outro: um aparelho novo só recebe o que o semeador guarda (7 dias).
+- Uma passkey de outra conta ainda tranca o app e apaga o cache de mídia aberta, como todo bloqueio; as mensagens guardadas não são apagadas.

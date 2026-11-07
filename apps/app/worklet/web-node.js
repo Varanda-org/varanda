@@ -83,6 +83,9 @@ function createWebNode (args, { onInternalError } = {}) {
     leaseGapMs: LEASE_GAP_MS,
     // Bare has no globalThis.fetch: group and DM media download through this.
     fetchMedia: createBareFetch({ http: require('bare-http1'), https: require('bare-https') }),
+    // Bare's WebCrypto has no HKDF: the PRF-derived group and direct message
+    // keys use this one, as the identity pairs do.
+    hkdf,
     onInternalError
   })
   const identity = createIdentityHost({ session, storage, hkdf, randomBytes })

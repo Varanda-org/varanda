@@ -11,6 +11,9 @@ const { memoryNodeStorage } = require('@varanda/web-member/lib/node-storage')
 const { hkdfSha256 } = require('@varanda/web-member/lib/hkdf')
 const passkey = require('@varanda/web-member/lib/passkey')
 const recovery = require('@varanda/web-member/lib/recovery')
+const { createBrowserSession } = require('@varanda/web-member/lib/session')
+const { createDmStore } = require('@varanda/web-member/lib/dm-store')
+const { generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { createIdentityHost, RECOVERY_PENDING_MS } = require('../worklet/identity-install')
 const fs = require('node:fs')
 const os = require('node:os')
@@ -30,17 +33,24 @@ function fakeSession ({ diaryKey = null, legacy = false } = {}) {
   const s = {
     keyPair: null,
     media: null,
+    prf: null,
     resets: 0,
     received: [],
-    setKeyPair (kp, { media } = {}) {
+    receivedPrf: [],
+    setKeyPair (kp, { media, prf } = {}) {
       s.received.push(kp, media)
+      if (prf) s.receivedPrf.push(prf)
       s.keyPair = { publicKey: new Uint8Array(kp.publicKey), secretKey: new Uint8Array(kp.secretKey) }
       s.media = media ? { publicKey: new Uint8Array(media.publicKey), secretKey: new Uint8Array(media.secretKey) } : null
+      if (s.prf !== null) s.prf.fill(0)
+      s.prf = prf ? new Uint8Array(prf) : null
       return Promise.resolve()
     },
     async clearKeyPair () {
       s.keyPair = null
       s.media = null
+      if (s.prf !== null) s.prf.fill(0)
+      s.prf = null
     },
     async identityStatus () {
       return {
@@ -146,6 +156,70 @@ test('a legacy store is a mismatch too', async (t) => {
   t.is(session.keyPair, null)
 })
 
+// With the PRF the session opens the direct message store under the
+// passkey's key, and a store of another key is replaced by an empty one: a
+// passkey of another identity must never reach the session.
+test('a mismatch is refused before any pair or the prf reaches the session', async (t) => {
+  const cases = [
+    { diaryKey: await expectedPublicKey(OTHER_PRF) },
+    { diaryKey: await expectedPublicKey(PRF), legacy: true }
+  ]
+  for (const opts of cases) {
+    const { session, host } = setup(opts)
+    let cleared = 0
+    const clear = session.clearKeyPair
+    session.clearKeyPair = function () {
+      cleared++
+      return clear.call(session)
+    }
+    await t.exception(host.install(params()), /passkey não corresponde ao diário guardado/)
+    t.is(session.received.length, 0, 'no pair handed over')
+    t.is(session.receivedPrf.length, 0, 'no prf handed over')
+    t.is(cleared, 1, 'the node is locked')
+  }
+})
+
+// The real session, as the worklet runs it (lib/node-store.js keeps the
+// message store in the 'dm-local' core).
+test('a passkey of another identity keeps the stored message store', async (t) => {
+  const storage = memoryNodeStorage()
+  const internal = []
+  const session = createBrowserSession({
+    storage,
+    association: b4a.toString(generateAssociationKeyPair().publicKey, 'hex'),
+    seederUrl: 'ws://127.0.0.1:9/seeder',
+    createSocket: () => null,
+    writeGate: false,
+    hkdf,
+    onInternalError: (err) => internal.push(err)
+  })
+  const events = []
+  session.attach((event, data) => events.push({ event, data }))
+  t.teardown(() => session.close())
+  const host = createIdentityHost({ session, storage, hkdf, randomBytes })
+  const out = [await host.install(params())]
+  out.push(await session.handlers['identity.create']({}))
+  // One stored row: a folder op is filed locally before anything is sent.
+  const peer = 'ef'.repeat(32)
+  await session.handlers['dm.set']({ peer, state: 'accepted' }).catch(() => {})
+  const refused = await host.install(params({ prf: OTHER_PRF })).catch((err) => err)
+  t.is(refused.message, 'passkey não corresponde ao diário guardado')
+  t.is((await session.identityStatus()).unlocked, false, 'locked')
+  const reader = createDmStore({ storage })
+  const localKey = await passkey.dmLocalKeyFromPrf(new Uint8Array(b4a.from(PRF, 'hex')), { hkdf })
+  await reader.unlock(localKey)
+  localKey.fill(0)
+  t.alike(reader.snapshot().ops.map((r) => [r.op, r.peer]), [['accepted', peer]], 'the refused passkey left the stored rows in place')
+  reader.lock()
+  out.push(await host.install(params()))
+  const list = await session.handlers['dm.list']({ folder: 'inbox' })
+  t.alike(list.conversations, [], 'it opens again with the right passkey')
+  out.push(list, await host.status())
+  // docs/rpc.md 5.50: the PRF reaches no result, event, error or log.
+  const seen = JSON.stringify({ out, events, refused: [refused.message, refused.stack], internal: internal.map((err) => String(err && err.stack)) })
+  for (const hex of [PRF, OTHER_PRF]) t.absent(seen.includes(hex), 'no prf in any output')
+})
+
 test('the prf buffer and both pairs are zeroed after the call', async (t) => {
   const { session, keys, host } = setup()
   await host.install(params())
@@ -154,6 +228,8 @@ test('the prf buffer and both pairs are zeroed after the call', async (t) => {
   for (const kp of session.received) {
     t.ok(allZero(kp.secretKey) && allZero(kp.publicKey), 'pair handed to the session zeroed')
   }
+  t.is(session.receivedPrf.length, 1)
+  for (const prf of session.receivedPrf) t.ok(allZero(prf), 'prf handed to the session zeroed by the worklet')
 
   const failing = setup({ diaryKey: await expectedPublicKey(OTHER_PRF) })
   await failing.host.install(params()).catch(() => {})
@@ -666,18 +742,23 @@ test('the root, the secret and the pending key are zeroed', async (t) => {
   t.ok(fills.every((f) => allZero(f.buf)))
 })
 
-test('setKeyPair still receives { media } only', async (t) => {
+// Without the PRF the session never unlocks the direct message store or the
+// private group box keys: the in-app node showed no conversations.
+test('setKeyPair receives the media pair and the prf, as the browser entry', async (t) => {
   const session = fakeSession()
   const storage = memoryNodeStorage()
   const calls = []
   const orig = session.setKeyPair
   session.setKeyPair = function (kp, opts) {
-    calls.push(Object.keys(opts).sort())
+    calls.push({ keys: Object.keys(opts).sort(), prf: opts.prf ? b4a.toString(b4a.from(opts.prf), 'hex') : null })
     return orig.call(session, kp, opts)
   }
   const host = createIdentityHost({ session, storage, hkdf, randomBytes })
   await host.install(params())
-  t.alike(calls, [['media']])
+  t.alike(calls, [{ keys: ['media', 'prf'], prf: PRF }])
+  t.is(b4a.toString(b4a.from(session.prf), 'hex'), PRF, 'the session keeps its own copy')
+  await host.clear()
+  t.is(session.prf, null, 'clear drops the session copy')
 })
 
 test('recoveryBind rebinds the passkey record and status reports userId', async (t) => {
