@@ -27,6 +27,19 @@ const cert = require('./cert')
 // makes a record from a revoked issuer invalid like any other failing
 // record: a newest candidate signed by a revoked issuer yields null.
 function latestUsernameRecord (entries, memberHex, associationHex, opts) {
+  return pickUsername(entries, memberHex, associationHex, opts, validRecordCopy)
+}
+
+// latestUsername over entries whose records are already validRecordCopy
+// output for that same entry's seq (or null), as lib/feed.js makes once per
+// call. The chosen candidate is still verified. Never pass a caller's
+// records: they would not be copied or shape-checked.
+function latestUsernameOfCopies (copies, memberHex, associationHex, opts) {
+  const record = pickUsername(copies, memberHex, associationHex, opts, (r) => r)
+  return record === null ? null : record.username
+}
+
+function pickUsername (entries, memberHex, associationHex, opts, copyOf) {
   try {
     const member = cert.normalizeHex(memberHex)
     if (member === null) return null
@@ -34,7 +47,7 @@ function latestUsernameRecord (entries, memberHex, associationHex, opts) {
     let bestSeq = -1
     for (const { seq, record } of entries) {
       if (!Number.isSafeInteger(seq) || seq <= bestSeq) continue
-      const copy = validRecordCopy(record, seq)
+      const copy = copyOf(record, seq)
       if (copy === null || copy.type !== 'username' || copy.member !== member) continue
       best = copy
       bestSeq = seq
@@ -98,5 +111,6 @@ module.exports = {
   MAX_HELD_USERNAMES,
   latestUsernameRecord,
   latestUsername,
+  latestUsernameOfCopies,
   heldUsernames
 }

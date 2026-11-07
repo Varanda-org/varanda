@@ -18,6 +18,9 @@
 // clears the list. The personal poll is untouched while you act as
 // yourself. A page has no push opt-in. One line says the association
 // reads the page's notices, once per session.
+// The node's row avatar covers only the blocks it read for the row, so a
+// missing photo is completed from the names cache or one hinted diary.peek of
+// the author's profile block, in memory only, bytes still verified by Avatar.
 // Names come from the item, never from a key. Rules: docs/app.md.
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
@@ -26,11 +29,14 @@ import { NOTICES_LIMIT_DEFAULT, displayText } from '@varanda/rpc'
 import { get as actingGet, subscribe as actingSubscribe } from '../actingAs'
 import { relativeTime } from '../format'
 import { useNode } from '../node'
+import { useNames } from '../names'
+import { fetchMember, invalidateMember } from '../indexClient'
+import { avatarOf, pickAvatar } from '../media/avatar'
 import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_QUIET_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
   NOTICES_UNSUPPORTED_MESSAGE, NOTICES_WEB_ONLY_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
   compareNotices, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
-  padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, seenOnScreen, seenUnion, shouldPoll, snippetOf, writeSeenNamespace
+  needsAvatar, padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, resolveRowAvatars, rowAvatarSource, seenOnScreen, seenUnion, shouldPoll, snippetOf, writeSeenNamespace
 } from '../notices'
 import { isRef } from '../nav'
 import { pagesNotices } from '../pages'
@@ -175,6 +181,74 @@ function snippetRef (item) {
   return isRef(ref) ? ref : null
 }
 
+const AVATAR_BATCH = 10
+
+// The node's row avatar covers only the blocks it read for the row, so a
+// profile with a photo written in between is missed; one diary.peek of the
+// profile block the seeder index names fills it, in memory only, AVATAR_BATCH
+// authors at a time (the index pacer allows 18 starts per 10 s). A batch
+// stays frozen while in flight, so a names-cache commit for one of its
+// authors cannot restart it; a new cycle (once per loadFirst, never per
+// partial page) restarts it and asks every author again, so a photo set or
+// removed later shows after a reload. A row whose node answer has a photo
+// always wins (rowAvatarSource).
+function useRowAvatars (items, cachedOf, request, enabled, cycle) {
+  const [avatars, setAvatars] = useState({})
+  const triedRef = useRef(new Set())
+  const batchRef = useRef(null)
+  const [, setRound] = useState(0)
+  useEffect(() => {
+    if (triedRef.current.size === 0) return
+    // A reload asks the index again too (as Membro's refresh), so a photo
+    // changed within the member cache's 5 minutes is not read from a stale hint.
+    for (const k of triedRef.current) invalidateMember(k)
+    triedRef.current.clear()
+    setRound((n) => n + 1)
+  }, [cycle])
+  let wantedKey = ''
+  if (enabled && batchRef.current !== null) {
+    wantedKey = batchRef.current
+  } else if (enabled) {
+    const wanted = []
+    for (const item of items) {
+      const k = item.key
+      if (triedRef.current.has(k) || wanted.includes(k)) continue
+      if (!needsAvatar(item, cachedOf(k))) continue
+      wanted.push(k)
+      if (wanted.length === AVATAR_BATCH) break
+    }
+    wantedKey = wanted.join(',')
+  }
+  useEffect(() => {
+    if (wantedKey === '' || typeof request !== 'function') return
+    let alive = true
+    batchRef.current = wantedKey
+    const list = wantedKey.split(',')
+    ;(async () => {
+      // A fresh Map per chunk: peekAll's mergePeek keeps the first profile it saw.
+      const peekChunk = async (chunk) => (await peekAll(request, [chunk], new Map(), () => alive)).get(chunk.author)
+      let found = {}
+      try {
+        found = await resolveRowAvatars(list, { fetchMember, peekChunk, alive: () => alive })
+      } catch {}
+      if (!alive) return
+      batchRef.current = null
+      const next = {}
+      for (const k of list) {
+        triedRef.current.add(k)
+        if (found[k] !== undefined) next[k] = avatarOf(found[k])
+      }
+      if (Object.keys(next).length > 0) setAvatars((a) => ({ ...a, ...next }))
+      setRound((n) => n + 1)
+    })()
+    return () => {
+      alive = false
+      if (batchRef.current === wantedKey) batchRef.current = null
+    }
+  }, [wantedKey, request, cycle])
+  return avatars
+}
+
 const SNIPPET_BATCH = 24
 
 // Whether a diary.peek chunk ({ author, seqs }) asked for this canonical ref.
@@ -254,7 +328,7 @@ function useSnippets (items, request, enabled, retryKey) {
   return texts
 }
 
-function NoticeRow ({ item, now, unread, postText, onOpenMember, onOpenThread }) {
+function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpenThread }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const who = whoOf({ name: item.name, username: item.username })
@@ -290,7 +364,7 @@ function NoticeRow ({ item, now, unread, postText, onOpenMember, onOpenThread })
   // not its own control. No badge when the kind has no glyph.
   const face = (
     <View style={styles.avatar}>
-      <Avatar name={who.avatarName} publicKey={item.key} size={44} picture={item.avatar} persist={false} />
+      <Avatar name={who.avatarName} publicKey={item.key} size={44} picture={picture} persist={false} />
       {icon === null
         ? null
         : (
@@ -323,7 +397,7 @@ function NoticeRow ({ item, now, unread, postText, onOpenMember, onOpenThread })
     )
   }
   const open = typeof onOpenMember === 'function'
-    ? () => onOpenMember(item.key, { name: item.name, username: item.username, avatar: item.avatar || null })
+    ? () => onOpenMember(item.key, { name: item.name, username: item.username, avatar: picture || null })
     : undefined
   return (
     <Pressable
@@ -354,7 +428,9 @@ function remoteFor (remoteSeen, namespace) {
 export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollowsChanged, onToast, onBadge, onSeenState, remoteSeen, onOpenThread, onOpenMember }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
+  const { profileOf, resolveMany } = useNames()
   const now = useNow(60000)
+  const [avatarCycle, setAvatarCycle] = useState(0)
   const bottomPad = useBottomPad()
   const acting = useActing()
   const pageKey = acting.kind === 'page' ? acting.key : null
@@ -553,6 +629,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     const current = stateRef.current
     if (!hosted || current.unsupported || current.locked) return
     if (pageKeyRef.current && typeof ownKeyRef.current !== 'string') return
+    setAvatarCycle((n) => n + 1)
     const mine = ++seqRef.current
     commit({
       loading: current.loadedAt === null,
@@ -900,16 +977,20 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       : <EmptyState icon='sino' title={EMPTY_TITLE} body={EMPTY_TEXT} />
   }
 
-  const renderItem = ({ item }) => (
-    <NoticeRow
-      item={item}
-      now={now}
-      unread={unread.has(item.seen)}
-      postText={snippets[snippetRef(item)]}
-      onOpenMember={onOpenMember}
-      onOpenThread={onOpenThread}
-    />
-  )
+  const renderItem = ({ item }) => {
+    const picture = pickAvatar(profileOf(item.key), rowAvatarSource(item, avatars[item.key]))
+    return (
+      <NoticeRow
+        item={item}
+        now={now}
+        unread={unread.has(item.seen)}
+        postText={snippets[snippetRef(item)]}
+        picture={picture}
+        onOpenMember={onOpenMember}
+        onOpenThread={onOpenThread}
+      />
+    )
+  }
 
   // activity false: this seeder still only sends follows. The rows stay; the
   // line says the rest are not available here. Web-only, unsupported and
@@ -949,13 +1030,18 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   }
 
   const shownItems = notice === null ? items : []
+  const shownKeys = shownItems.map((i) => i.key).join(',')
+  useEffect(() => {
+    if (active && hosted && shownKeys !== '') resolveMany(shownKeys.split(','))
+  }, [active, hosted, shownKeys, resolveMany])
+  const avatars = useRowAvatars(shownItems, profileOf, node.request, active && hosted && notice === null, avatarCycle)
   const snippets = useSnippets(shownItems, node.request, active && hosted && notice === null, loadedAt)
   return (
     <RefreshableList
       data={shownItems}
       keyExtractor={noticeId}
       renderItem={renderItem}
-      extraData={{ now, onOpenMember, onOpenThread, unread, snippets }}
+      extraData={{ now, onOpenMember, onOpenThread, unread, snippets, avatars, profileOf }}
       ListHeaderComponent={header}
       ListEmptyComponent={empty}
       ListFooterComponent={notice === null ? footer : null}

@@ -73,6 +73,82 @@ const MAX_GROUP_REPLICAS = MAX_GROUPS_PER_DIARY * MAX_GROUP_WRITERS
 // writable from its stored header).
 const UNLOCKED = Symbol('varanda.unlocked')
 
+// Every read scans each diary, replica and group core in full, so without
+// Hypercore's block cache each read fetches every block from IndexedDB or
+// flash again. Records are small (MAX_BLOCK_BYTES, a log capped by
+// MAX_LOG_BYTES), so the default bound (2 x 65536 blocks per core) keeps a
+// realistic core whole; media cores (32 KiB blocks, read once) stay uncached.
+const BLOCK_CACHE = true
+const EVICTS = Symbol('varanda.evictsOnClear')
+
+// Hypercore 10's clear never evicts the block cache, so a cleared (deleted)
+// block would still be served from memory, also by get({ wait: false }).
+// The wrap sits on the per-files state (core.core), not on one handle: every
+// session of the core, including those openShared hands out and any made
+// later with core.session(), clears through it and is in its session list
+// (Core.sessions, the array every session of these files shares).
+// Evicting before and after the clear also drops an entry that a read
+// started while the clear waited on the oplog put back.
+// Evictions alone are not enough: a get pending on a block not held yet is
+// answered by a storage read (an append or upgrade resolving it locally, or
+// a peer's block) that can settle after the clear, and Hypercore then caches
+// it (_cacheOnResolve). So the cache refuses any set for a block the
+// bitfield does not hold at that moment; it is installed on the root right
+// after ready, before any session exists, and sessions inherit it.
+function evictOnClear (core) {
+  const state = core.core
+  if (state === null || state === undefined || state[EVICTS] === true) return core
+  const clear = state.clear
+  const sessions = state.sessions || core.sessions
+  state.clear = async function (start, end, cleared) {
+    evictRange(sessions, start, end)
+    try {
+      return await clear.call(this, start, end, cleared)
+    } finally {
+      evictRange(sessions, start, end)
+    }
+  }
+  if (core.cache) core.cache = heldOnlyCache(core.cache, state)
+  state[EVICTS] = true
+  return core
+}
+
+function heldOnlyCache (inner, state) {
+  return {
+    get size () { return inner.size },
+    keys () { return inner.keys() },
+    // Also gated on the bitfield: between Core.clear dropping the bit and
+    // the eviction that follows it, an entry cached a moment before the
+    // clear must already read as absent.
+    has (index) { return state.bitfield.get(index) && inner.has(index) },
+    get (index) { return state.bitfield.get(index) ? inner.get(index) : undefined },
+    set (index, value) {
+      if (!state.bitfield.get(index)) return this
+      inner.set(index, value)
+      // Hypercore caches the read's promise before it settles: a transient
+      // storage failure must not stay cached and fail every later read.
+      if (value !== null && typeof value === 'object' && typeof value.then === 'function') {
+        value.then(null, () => { if (inner.get(index) === value) inner.delete(index) })
+      }
+      return this
+    },
+    delete (index) { return inner.delete(index) },
+    clear () { inner.clear() }
+  }
+}
+
+function evictRange (sessions, start, end) {
+  for (const s of sessions) {
+    const cache = s.cache
+    if (!cache) continue
+    if (end - start <= cache.size) {
+      for (let i = start; i < end; i++) cache.delete(i)
+    } else {
+      for (const i of [...cache.keys()]) if (i >= start && i < end) cache.delete(i)
+    }
+  }
+}
+
 function replicaName (hex) {
   return 'replica/' + hex.toLowerCase()
 }
@@ -270,13 +346,14 @@ async function openDiary (storage, keyPair = null) {
   if (keyPair !== null) checkKeyPair(keyPair)
   const exists = await storage.hasCore(DIARY)
   if (!exists && keyPair === null) throw new Error('identidade não encontrada')
-  const options = { ...DIARY_OPTIONS, valueEncoding: 'json' }
+  const options = { ...DIARY_OPTIONS, valueEncoding: 'json', cache: BLOCK_CACHE }
   if (!exists) options.keyPair = { publicKey: keyPair.publicKey }
   // The legacy scrub writes the oplog file directly: only on a first open,
   // never beside a live core.
   const { core } = await openShared(storage, DIARY, 'json', async () => {
     const core = new Hypercore(storage.core(DIARY), options)
     await core.ready()
+    evictOnClear(core)
     try {
       if (await scrubLegacySecret(core)) legacySeen.add(storage)
     } catch (err) {
@@ -318,8 +395,9 @@ async function diaryStatus (storage) {
 // Replicas are read-only: opened by key, so the storage never holds a secret.
 async function openReplica (storage, hex) {
   if (typeof hex !== 'string' || !HEX64.test(hex)) throw new Error('chave inválida')
-  const core = new Hypercore(storage.core(replicaName(hex)), b4a.from(hex.toLowerCase(), 'hex'), { valueEncoding: 'binary' })
+  const core = new Hypercore(storage.core(replicaName(hex)), b4a.from(hex.toLowerCase(), 'hex'), { valueEncoding: 'binary', cache: BLOCK_CACHE })
   await core.ready()
+  evictOnClear(core)
   if (core.writable) {
     await core.close()
     throw new Error('chave do próprio diário')
@@ -863,13 +941,14 @@ async function openGroupWriter (storage, keyPair) {
   const unlock = keyPair.secretKey !== undefined && keyPair.secretKey !== null
   if (unlock) checkKeyPair(keyPair)
   const name = groupName(b4a.toString(keyPair.publicKey, 'hex'))
-  const options = { ...DIARY_OPTIONS, valueEncoding: 'json' }
+  const options = { ...DIARY_OPTIONS, valueEncoding: 'json', cache: BLOCK_CACHE }
   if (!(await storage.hasCore(name))) {
     options.keyPair = { publicKey: keyPair.publicKey }
     await registerGroupCore(storage, b4a.toString(keyPair.publicKey, 'hex'))
   }
   const core = new Hypercore(storage.core(name, GROUP_STORAGE), options)
   await core.ready()
+  evictOnClear(core)
   if (!b4a.equals(core.key, keyPair.publicKey)) {
     await core.close()
     throw new Error('núcleo de grupo de outra chave')
@@ -886,8 +965,9 @@ async function openGroupWriter (storage, keyPair) {
 async function openGroupReplica (storage, hex) {
   if (typeof hex !== 'string' || !HEX64.test(hex)) throw new Error('chave inválida')
   if (!(await groupCoreExists(storage, hex))) await registerGroupCore(storage, hex)
-  const core = new Hypercore(storage.core(groupName(hex), GROUP_STORAGE), b4a.from(hex.toLowerCase(), 'hex'), { valueEncoding: 'binary' })
+  const core = new Hypercore(storage.core(groupName(hex), GROUP_STORAGE), b4a.from(hex.toLowerCase(), 'hex'), { valueEncoding: 'binary', cache: BLOCK_CACHE })
   await core.ready()
+  evictOnClear(core)
   return core
 }
 

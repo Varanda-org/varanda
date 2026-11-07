@@ -21,7 +21,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useNode } from '../node'
 import { useNames } from '../names'
-import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, communitiesRow, mergeRows, requestsRow } from '../conversas'
+import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, conversasReadsAllowed, communitiesRow, mergeRows, requestsRow } from '../conversas'
 import { ErrorText, Soft, errorText, useBottomPad, useNow } from '../ui'
 import { ConversationRow, personTitle } from '../ui/ConversationRow'
 import { FilterChips } from '../ui/FilterChips'
@@ -225,8 +225,14 @@ export function Conversas ({
   const [creating, setCreating] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
 
-  const inbox = useInbox({ ready, dm, dmVersion: node.dmVersion, pageKey })
-  const groups = useGroupRows({ enabled: hosted && pageKey === null, request: node.request, versions: node.groupVersions, seenTick })
+  // Set while rendering: the effects below must see the first show in the
+  // same pass that makes the tab active.
+  const shownOnce = useRef(false)
+  if (active) shownOnce.current = true
+  const allowed = conversasReadsAllowed({ active, shownOnce: shownOnce.current })
+
+  const inbox = useInbox({ ready: ready && allowed, dm, dmVersion: node.dmVersion, pageKey })
+  const groups = useGroupRows({ enabled: hosted && allowed && pageKey === null, request: node.request, versions: node.groupVersions, seenTick })
 
   // A pull that failed may still have filed messages: read again either way.
   const pull = useCallback(async () => {
@@ -237,9 +243,26 @@ export function Conversas ({
   const pullRef = useRef(pull)
   pullRef.current = pull
 
+  // The pull is how waiting messages are found (the shell's dot reads the
+  // local inbox), so it must not wait for the tab to be opened: it waits only
+  // for the boot to go quiet, then runs as before.
+  const [quiet, setQuiet] = useState(false)
+  const nodeWhenIdle = node.whenIdle
+  useEffect(() => {
+    if (!ready || quiet || allowed || typeof nodeWhenIdle !== 'function') return
+    let alive = true
+    const wait = nodeWhenIdle(4000)
+    wait.promise.then(() => { if (alive) setQuiet(true) }, () => {})
+    return () => {
+      alive = false
+      wait.cancel()
+    }
+  }, [ready, quiet, allowed, nodeWhenIdle])
+  const pulls = allowed || quiet
+
   const enabled = useRef(false)
   useEffect(() => {
-    if (!ready) return
+    if (!ready || !pulls) return
     let alive = true
     const start = async () => {
       if (!enabled.current) {
@@ -251,28 +274,35 @@ export function Conversas ({
     }
     start()
     return () => { alive = false }
-  }, [ready, dm, node.epoch])
+  }, [ready, pulls, dm, node.epoch])
 
   // Runs only while the app is visible; hiding it clears the timer.
   const visible = node.visible !== false
   const visibleRef = useRef(visible)
   visibleRef.current = visible
   useEffect(() => {
-    if (!ready || !visible) return
+    if (!ready || !pulls || !visible) return
     const timer = setInterval(() => {
       if (visibleRef.current) pullRef.current()
     }, PULL_EVERY_MS)
     return () => clearInterval(timer)
-  }, [ready, visible])
+  }, [ready, pulls, visible])
 
   // Back on screen (the tab chosen, or a pushed thread closed): read again.
   const wasActive = useRef(active)
+  // The first show is read by the gated effects above (allowed flips with
+  // it); reading here too would send every list twice.
+  const shownBefore = useRef(active)
   const groupsLoad = groups.load
   const inboxList = inbox.list
   useEffect(() => {
     const back = active && !wasActive.current
     wasActive.current = active
     if (!back) return
+    if (!shownBefore.current) {
+      shownBefore.current = true
+      return
+    }
     if (ready) inboxList()
     if (hosted && pageKey === null) groupsLoad()
   }, [active, ready, hosted, pageKey, inboxList, groupsLoad])
