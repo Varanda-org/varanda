@@ -154,7 +154,8 @@ function covered (index, r) {
 
 // The media descriptors a valid record copy shows: a post's photos or its
 // link preview thumbnail (`preview.image`, a block in a media core like a
-// photo), a profile's avatar; [] otherwise.
+// photo), a profile's avatar, a listing's or listing edit's photos; []
+// otherwise.
 function shownMedia (copy) {
   if (copy === null || typeof copy !== 'object') return []
   if (copy.type === 'post') {
@@ -163,11 +164,16 @@ function shownMedia (copy) {
     return image !== null && typeof image === 'object' ? [image] : []
   }
   if (copy.type === 'profile' && copy.avatar !== undefined) return [copy.avatar]
+  // Each listing and edit counts on its own, so a root's photos stay live
+  // while the root does, even after an edit replaced them on screen: the
+  // root is the fallback when the edit is deleted. A status or a rating
+  // shows no media.
+  if (copy.type === 'listing' || copy.type === 'listing-edit') return Array.isArray(copy.media) ? copy.media : []
   return []
 }
 
-// Media still referenced by a surviving post or profile, other than the
-// blocks in exceptSeqs.
+// Media still referenced by a surviving post, profile, listing or edit of a
+// surviving listing, other than the blocks in exceptSeqs.
 function liveMediaRefs (entries, exceptSeqs) {
   const except = toSet(exceptSeqs)
   const out = []
@@ -181,6 +187,8 @@ function liveMediaRefs (entries, exceptSeqs) {
       if (!Number.isSafeInteger(seq) || deleted.has(seq) || except.has(seq)) continue
       const copy = validRecordCopy(entry.record, seq)
       if (copy === null) continue
+      // An edit of a deleted listing shows nothing, so it keeps nothing live.
+      if (copy.type === 'listing-edit' && deleted.has(copy.seq)) continue
       for (const d of shownMedia(copy)) out.push({ core: d.core, start: d.start, blocks: d.blocks })
     } catch {}
   }

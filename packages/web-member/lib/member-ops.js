@@ -55,6 +55,9 @@ const {
   likeRecord,
   repostRecord,
   deleteRecord,
+  listingRecord,
+  listingStatusRecord,
+  listingRateRecord,
   validAvatar,
   validateRecord,
   validRecordCopy,
@@ -80,7 +83,8 @@ const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS } = require('@varanda/core/lib/group-media')
-const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, COMMUNITY_LIST_MAX } = require('@varanda/rpc')
+const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, COMMUNITY_LIST_MAX, feira } = require('@varanda/rpc')
+const listing = require('@varanda/core/lib/listing')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const store = require('./node-store')
 
@@ -415,12 +419,277 @@ async function postQuote (ctx, { to, text, media, preview }) {
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media, preview } : { text, quote: to, preview })))
 }
 
+// ---- feira (docs/protocol.md, "Feira") ----
+
+const NOT_LISTING = 'o registro não é um anúncio'
+const LISTING_LIMIT = 'limite'
+const LISTING_CONFLICT = 'conflito'
+const PROCURA_RESERVED = 'uma procura não fica reservada'
+const BAD_CONSENT = 'consentimento inválido'
+const BAD_REF = 'referência inválida'
+const RATE_SENT = 'avaliação já enviada para esta oferta'
+
+function appendAll (ctx, diary, records) {
+  return records.length === 1 ? appendOwn(ctx, diary, records[0]) : store.appendRecords(diary, records, ctx.limits)
+}
+
+// The folded own listing `seq` of the own diary of `length` blocks, as the
+// core node answers: BAD_REF for another author's ref or a seq out of
+// range, NOT_LISTING for an own seq that is no live listing root.
+function ownListing (raw, ownHex, to, length) {
+  if (to.author !== ownHex || !Number.isSafeInteger(to.seq) || to.seq < 1 || to.seq >= length) throw new UsageError(BAD_REF)
+  const item = listing.foldListings(raw).bySeq.get(to.seq)
+  if (item === undefined) throw new UsageError(NOT_LISTING)
+  return item
+}
+
+// Tombstone ranges only in media cores the diary declared, as recordDelete
+// keeps them for a post.
+function declaredOnly (raw, ownHex, records) {
+  const declared = new Set(latestMediaCores(applyDeletes(raw), ownHex, Number.MAX_SAFE_INTEGER).map((c) => c.key))
+  return records.map((r) => {
+    if (r.type !== 'delete' || !Array.isArray(r.media)) return r
+    const media = r.media.filter((m) => declared.has(m.core))
+    if (media.length === r.media.length) return r
+    return buildRecord(() => deleteRecord(media.length > 0 ? { seq: r.seq, at: r.at, media } : { seq: r.seq, at: r.at }))
+  })
+}
+
+// -> { seq, ref }. The cap counts live roots after the catch-up, inside the
+// write.
+async function listingCreate (ctx, { kind, title, text, price, unit, cat, place, media }) {
+  if (hasMedia(media)) await verifyMedia(ctx, media)
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (listing.countLive(await store.readRaw(diary)) >= feira.MAX_LISTINGS) throw new UsageError(LISTING_LIMIT)
+    const record = buildRecord(() => listingRecord({ kind, title, text, price, unit, cat, place, media: hasMedia(media) ? media : undefined }))
+    const seq = await appendOwn(ctx, diary, record)
+    return { seq, ref: formatRef({ author: ownHex, seq }) }
+  })
+}
+
+// A full snapshot for listing `to` -> { seq (the edit's), ref (the root's,
+// which never changes) }. A descriptor the listing already shows is kept
+// unverified (it may live in another device's media core); every other one
+// is verified as for a post. expectedRevision is the live edit's seq (0 for
+// none), checked after the catch-up inside the write: a stale one appends
+// nothing. The edit and the tombstone of the edit it replaces are one
+// append.
+async function listingEdit (ctx, { to, expectedRevision, title, text, price, unit, cat, place, media }) {
+  const current = await withIdentity(ctx, async ({ diary, ownHex }) => ownListing(await store.readRaw(diary), ownHex, to, diary.length))
+  const shown = Array.isArray(current.record.media) ? current.record.media : []
+  const fresh = hasMedia(media) ? media.filter((d) => !shown.some((s) => deepEqual(s, d))) : []
+  if (fresh.length > 0) await verifyMedia(ctx, fresh)
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const raw = await store.readRaw(diary)
+    const item = ownListing(raw, ownHex, to, diary.length)
+    if ((item.editSeq === null ? 0 : item.editSeq) !== expectedRevision) throw new UsageError(LISTING_CONFLICT)
+    const live = Array.isArray(item.record.media) ? item.record.media : []
+    // Kept before the write but no longer shown: only the revision check
+    // above lets this happen, so refuse rather than publish it unverified.
+    if (hasMedia(media) && media.some((d) => !fresh.includes(d) && !live.some((s) => deepEqual(s, d)))) throw new UsageError(LISTING_CONFLICT)
+    let plan
+    try {
+      plan = listing.editPlan(raw, to.seq, { title, text, price, unit, cat, place, media: hasMedia(media) ? media : null })
+    } catch (err) {
+      if (err instanceof TypeError && err.message === 'not-found') throw new UsageError(NOT_LISTING)
+      if (err instanceof TypeError && err.message === 'unit-invalid') throw new UsageError('parâmetro inválido: unit')
+      throw new Error('registro inválido: ' + err.message)
+    }
+    const records = declaredOnly(raw, ownHex, plan.records)
+    const last = await appendAll(ctx, diary, records)
+    const seq = last - records.length + 1
+    if (records.length > 1) {
+      const tomb = records[1]
+      await clearAfterDelete(ctx, diary, ownHex, [tomb.seq], [tomb])
+    }
+    return { seq, last, ref: formatRef(to) }
+  })
+}
+
+// Throws unless `to` is a live listing of the own diary (ownListing's
+// errors). Local data only.
+async function listingLive (ctx, to) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    ownListing(await store.readRaw(diary), ownHex, to, diary.length)
+    return true
+  })
+}
+
+// -> { seq, ref (the root's) }.
+async function listingStatus (ctx, { to, status }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const item = ownListing(await store.readRaw(diary), ownHex, to, diary.length)
+    if (item.record.kind === 'procura' && status === 'reservado') throw new UsageError(PROCURA_RESERVED)
+    return { seq: await appendOwn(ctx, diary, buildRecord(() => listingStatusRecord({ seq: to.seq, status }))), ref: formatRef(to) }
+  })
+}
+
+function listingDelete (ctx, params) {
+  return recordDelete(ctx, 'listing', params)
+}
+
+// The rating of listing `to` (another member's) under its author's consent
+// -> { seq, ref }. The consent must verify with the own key as the rater.
+// One rating per offer, never rewritten: a listing-rate for that offer
+// already in the own diary (tombstoned or not) refuses.
+async function listingRate (ctx, { to, offer, consent, stars, text }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (!listing.verifyConsent({ listingAuthor: to.author, listingSeq: to.seq, rater: ownHex, offerId: offer, consent })) throw new UsageError(BAD_CONSENT)
+    if (rateSent(await store.readRaw(diary), offer)) throw new UsageError(RATE_SENT)
+    const seq = await appendOwn(ctx, diary, buildRecord(() => listingRateRecord({ to, offer, consent, stars, text })))
+    return { seq, ref: formatRef({ author: ownHex, seq }) }
+  })
+}
+
+// Whether a listing-rate for `offer` is in the raw blocks, deletes not
+// applied (a tombstoned rating still holds its offer).
+function rateSent (raw, offer) {
+  return raw.some(({ seq, record }) => {
+    if (record === null || typeof record !== 'object' || record.type !== 'listing-rate') return false
+    const copy = validRecordCopy(record, seq)
+    return copy !== null && copy.offer === offer
+  })
+}
+
+function mineItem (item) {
+  const r = item.record
+  return {
+    seq: item.seq,
+    editSeq: item.editSeq,
+    statusSeq: item.statusSeq,
+    kind: r.kind,
+    status: item.status,
+    title: r.title,
+    text: r.text,
+    price: r.price,
+    unit: r.unit,
+    cat: r.cat,
+    place: r.place,
+    media: Array.isArray(r.media) ? r.media : [],
+    at: r.at,
+    editedAt: item.editedAt
+  }
+}
+
+// The own listings, newest first -> { items, next } (next: the `before` of
+// the following page, or null). Local data only, works locked.
+async function listingMine (ctx, { before = null, limit = 20 } = {}) {
+  return withIdentity(ctx, async ({ diary }) => {
+    const all = listing.foldListings(await store.readRaw(diary)).items
+      .filter((item) => before === null || item.seq < before)
+    const page = all.slice(0, limit)
+    return { items: page.map(mineItem), next: all.length > page.length ? page[page.length - 1].seq : null }
+  })
+}
+
+// Whether `messages` (a DM thread as dm.thread lists it) holds the inbound
+// proposta `offer` from `rater` for the own listing `seq`: its card URL or
+// its text must parse as an offer on exactly that listing.
+function offerReceived (messages, { own, seq, rater, offer }) {
+  if (!Array.isArray(messages)) return false
+  return messages.some((m) => {
+    if (m === null || typeof m !== 'object' || m.mine === true || m.from !== rater || m.id !== offer) return false
+    for (const url of [m.card && m.card.url, m.text]) {
+      const ref = feira.parseOfferRef(url)
+      if (ref !== null && ref.author === own && ref.seq === seq && ref.aceite === null && !ref.recusada) return true
+    }
+    return false
+  })
+}
+
+// The deal consent of the own listing `seq` for `rater` and `offer`,
+// signed with the identity key -> hex128.
+function signConsent (keyPair, { own, seq, rater, offer }) {
+  const payload = feira.dealPayload({ listingAuthor: own, listingSeq: seq, rater, offerId: offer })
+  return b4a.toString(crypto.sign(b4a.from(payload), keyPair.secretKey), 'hex')
+}
+
+// Verified ratings of listing `author`:`seq` from peeked rater diaries.
+// peeks, one per rater: { rater, entries: [{ seq, record }], invalid,
+// missing, certDate } as the diary.peek path answers (certDate: the rater's
+// block-0 certificate date, null when unread), or { rater, hidden: true }
+// for a diary the gate refuses, or { rater, failed: true } for a read that
+// did not finish. A rating counts when it is a valid listing-rate at the
+// hinted seq, about exactly this listing, signed by `author` for this rater,
+// from a membership seven days old or more, and not a self-rating. Per
+// rater the first block of an offer is the only one (a later block naming
+// an offer an earlier read block of that rater holds is dropped: one
+// rating per offer, protocol section 15), and per rater and listing the
+// newest such block wins. Everything from a peer is untrusted. `seq` null
+// (the request named no listing) keeps every listing of `author`.
+// -> { items: [{ rater, seq, listingSeq, stars, text, at }], dropped,
+// incomplete }: dropped counts the hinted refs read and found invalid;
+// a ref not read (a transient failure, a missing block) is not dropped but
+// makes the answer incomplete.
+function ratingsOf ({ author, seq = null, refs, peeks, nowMs = Date.now() }) {
+  const byRater = new Map()
+  for (const p of Array.isArray(peeks) ? peeks : []) {
+    if (p !== null && typeof p === 'object' && typeof p.rater === 'string') byRater.set(p.rater, p)
+  }
+  // Per rater, offer -> the lowest seq of a listing-rate read for it.
+  const firstOffer = new Map()
+  for (const p of byRater.values()) {
+    const offers = new Map()
+    for (const e of Array.isArray(p.entries) ? p.entries : []) {
+      if (e === null || typeof e !== 'object' || !Number.isSafeInteger(e.seq)) continue
+      const r = validRecordCopy(e.record, e.seq)
+      if (r === null || r.type !== 'listing-rate') continue
+      const prev = offers.get(r.offer)
+      if (prev === undefined || e.seq < prev) offers.set(r.offer, e.seq)
+    }
+    firstOffer.set(p.rater, offers)
+  }
+  const best = new Map()
+  let dropped = 0
+  let incomplete = false
+  for (const ref of refs) {
+    if (ref.rater === author) {
+      dropped++
+      continue
+    }
+    const p = byRater.get(ref.rater)
+    if (p === undefined || p.failed === true) {
+      incomplete = true
+      continue
+    }
+    if (p.hidden === true || (Array.isArray(p.invalid) && p.invalid.includes(ref.seq))) {
+      dropped++
+      continue
+    }
+    const entry = (Array.isArray(p.entries) ? p.entries : []).find((e) => e !== null && typeof e === 'object' && e.seq === ref.seq)
+    if (entry === undefined || p.certDate === null || p.certDate === undefined) {
+      incomplete = true
+      continue
+    }
+    const r = validRecordCopy(entry.record, entry.seq)
+    if (!listing.certOldEnough(p.certDate, nowMs) || r === null || r.type !== 'listing-rate' || r.to.author !== author ||
+        (seq !== null && r.to.seq !== seq) ||
+        !listing.verifyConsent({ listingAuthor: author, listingSeq: r.to.seq, rater: ref.rater, offerId: r.offer, consent: r.consent }) ||
+        firstOffer.get(ref.rater).get(r.offer) !== entry.seq) {
+      dropped++
+      continue
+    }
+    const k = ref.rater + ':' + r.to.seq
+    const prev = best.get(k)
+    if (prev === undefined || entry.seq > prev.seq) best.set(k, { rater: ref.rater, seq: entry.seq, listingSeq: r.to.seq, stars: r.stars, text: r.text, at: r.at })
+  }
+  const items = [...best.values()].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
+  return { items, dropped, incomplete }
+}
+
 // ---- delete ----
 
 const NOT_DELETABLE = 'não é possível apagar este registro'
+// other: the record type refused with `wrong`; null refuses every other
+// type with it.
 const DELETE_KINDS = {
   post: { other: 'profile', wrong: 'o registro não é uma publicação' },
-  profile: { other: 'post', wrong: 'o registro não é um perfil' }
+  profile: { other: 'post', wrong: 'o registro não é um perfil' },
+  listing: { other: null, wrong: NOT_LISTING }
 }
 
 // The compat pair profileRecords writes: a plain profile immediately
@@ -532,8 +801,18 @@ async function recordDelete (ctx, kind, { to }) {
     }
     const target = recordAt(raw, to.seq)
     if (target === null) throw new UsageError('referência inválida')
-    if (target.type === rules.other) throw new UsageError(rules.wrong)
+    if (target.type === rules.other || (rules.other === null && target.type !== kind)) throw new UsageError(rules.wrong)
     if (target.type !== kind) throw new UsageError(NOT_DELETABLE)
+    if (kind === 'listing') {
+      // Already tombstoned while its block is still readable (a local clear
+      // that failed, or another device's tombstone replicated first).
+      const gone = deletedSeqs(raw)
+      if (gone.has(to.seq)) {
+        const seq = existingTombstone(raw, gone, [to.seq])
+        return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: [to.seq] }
+      }
+      return listingTombstones(ctx, diary, ownHex, raw, to.seq)
+    }
     let targets = [to.seq]
     if (kind === 'profile') {
       if (target.avatar === undefined && compatPair(target, recordAt(raw, to.seq + 1))) targets = [to.seq, to.seq + 1]
@@ -561,6 +840,24 @@ async function recordDelete (ctx, kind, { to }) {
     await clearAfterDelete(ctx, diary, ownHex, pending, records)
     return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: targets }
   })
+}
+
+// A listing goes with its live edits in one append (core listing.js
+// deletePlan): each tombstone frees only the photos no surviving record
+// shows.
+async function listingTombstones (ctx, diary, ownHex, raw, seq) {
+  let records
+  try {
+    records = listing.deletePlan(raw, seq, nowIso())
+  } catch (err) {
+    if (err instanceof TypeError && err.message === 'not-found') throw new UsageError(NOT_LISTING)
+    throw new Error('registro inválido: ' + err.message)
+  }
+  records = declaredOnly(raw, ownHex, records)
+  const targets = records.filter((r) => r.type === 'delete').map((r) => r.seq)
+  const last = await appendAll(ctx, diary, records)
+  await clearAfterDelete(ctx, diary, ownHex, targets, records)
+  return { seq: last, ref: formatRef({ author: ownHex, seq: last }), changed: true, deleted: targets }
 }
 
 function postDelete (ctx, params) {
@@ -4266,6 +4563,16 @@ module.exports = {
   postReply,
   postQuote,
   postDelete,
+  listingCreate,
+  listingEdit,
+  listingStatus,
+  listingDelete,
+  listingRate,
+  listingMine,
+  listingLive,
+  offerReceived,
+  signConsent,
+  ratingsOf,
   profileDelete,
   likeSet,
   repostSet,

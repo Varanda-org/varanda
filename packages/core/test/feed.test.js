@@ -829,3 +829,18 @@ test('feed copies link previews on posts, replies and quotes', (t) => {
   }
   t.is(items[3].preview, null)
 })
+
+test('feira records yield no feed items', (t) => {
+  const place = { uf: 'SP', city: 'Recife', bairro: 'Boa Vista' }
+  const at = iso(NOW - HOUR)
+  const entries = [
+    { seq: 0, record: cert(KA) },
+    { seq: 1, record: { type: 'listing', kind: 'produto', title: 'Mesa', text: '', price: 100, unit: null, cat: 'moveis', place, at } },
+    { seq: 2, record: { type: 'listing-edit', seq: 1, title: 'Mesa', text: 'nova', price: 90, unit: null, cat: 'moveis', place, at } },
+    { seq: 3, record: { type: 'listing-status', seq: 1, status: 'reservado', at } },
+    { seq: 4, record: { type: 'listing-rate', to: { author: KB, seq: 1 }, offer: 'f'.repeat(32), consent: 'c'.repeat(128), stars: 4, text: '', at } }
+  ]
+  t.is(buildFeed({ logs: [{ key: KA, entries }], now: NOW }).items.length, 0)
+  entries.push({ seq: 5, record: post('oi', at) })
+  t.alike(buildFeed({ logs: [{ key: KA, entries }], now: NOW }).items.map((i) => i.text), ['oi'])
+})

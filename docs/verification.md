@@ -5824,3 +5824,45 @@ Limites:
 - Uma vaga pode acabar entre a leitura e o vínculo; o serviço recusa nesse caso.
 - A leitura é um pedido só, não uma reserva.
 - Uma configuração digitada à mão na página hospedada não recebe o aviso antecipado.
+
+## 125. Feira: anúncios, edição, apagamento, avaliações e índice do semeador (PR feat/feira-records)
+
+Caminhada da base da Feira: os quatro registros (`listing`, `listing-edit`, `listing-status`, `listing-rate`), a dobra, os métodos `listing.*` do RPC (5.99 a 5.106), a denúncia de anúncio e o índice do semeador. O protocolo está em [protocol.md](protocol.md) (seção 2, "Feira records", seção 3, "Listing report", e a seção 15); o RPC em [rpc.md](rpc.md). Nesta rodada não há tela: as telas e as rotas HTTP vêm em PRs seguintes.
+
+Regras que os passos conferem:
+
+- Um anúncio mora no diário de quem anuncia. A edição é um retrato completo do conteúdo, e o `expectedRevision` (a posição do bloco da edição viva, ou 0) recusa com `conflito` a edição feita sobre uma versão velha, sem gravar nada.
+- Editar grava, num só append, a edição nova e o apagamento da edição anterior com as fotos que só ela mostrava. A raiz fica no diário até o anúncio ser apagado: a primeira versão e as fotos continuam no registro.
+- Apagar um anúncio grava, num só append, o apagamento da raiz e o da edição viva. O limite é de 30 anúncios vivos por diário (`limite`). Uma procura não fica reservada, e "vendido" nela aparece como "Encontrado".
+- Uma avaliação só vale com o consentimento do autor do anúncio (assinatura sobre `varanda-feira-deal-v1`), de uma pessoa diferente, com cadastro de 7 dias ou mais na hora da leitura; vale uma por pessoa por anúncio, a mais nova. O semeador só guarda indícios; quem mostra estrelas é o app, pela verificação própria (`listing.ratings`).
+- A proposta é um link do anúncio com `#oferta=<centavos>`; a resposta acrescenta `&aceite=<consentimento>` ou `&resposta=recusada`. Quem fez a proposta é o remetente autenticado da mensagem direta, e `listing.consent` só assina uma proposta recebida desse remetente e desse anúncio.
+- O índice do semeador é só dica: o STATE por diário (status e edição atual) é atualizado antes de qualquer admissão na busca, e a varredura da Feira nunca pausa num teto. O cartão público (`listingPublic`) nunca publica a raiz antiga como atual, e uma página encerrada ou movida sai da Feira.
+- Ordem de lançamento: semeadores, depois o pacote web, depois o app. Leitores antigos pulam os quatro tipos como desconhecidos.
+- Uma caixa só é marcada depois que o passo foi executado e o registro guardado.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node packages/rpc/test/feira.test.js`, `node packages/rpc/test/methods.test.js` e `node packages/rpc/test/sizes.test.js`.
+- `node packages/core/test/records.test.js`, `node packages/core/test/listing.test.js`, `node packages/core/test/deletion.test.js`, `node packages/core/test/feed.test.js`, `node packages/core/test/report.test.js` e `node packages/core/test/listing-session.test.js`.
+- `node packages/core/test/feira-index.test.js` e `node packages/core/test/seeder-feira.test.js`.
+- `node packages/web-member/test/listing-write.test.js` e `node packages/web-member/test/listing-report.test.js` (exigem Node 20.19 ou mais novo).
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada com dois nós (um semeador e dois membros de teste, na DHT local), a partir da CLI de teste ou dos testes acima:
+
+- [ ] Criar um anúncio de produto com preço e outro "A combinar"; `listing.mine` lista os dois, o mais novo primeiro, com `editSeq` nulo.
+- [ ] Editar o primeiro com o `expectedRevision` certo: sai `{ seq, ref }` com o mesmo `ref`; repetir com o valor velho responde `conflito` e o diário não cresce.
+- [ ] Mudar o status para "reservado" e depois "vendido"; num anúncio de procura, "reservado" é recusado com "uma procura não fica reservada".
+- [ ] Criar 30 anúncios vivos; o 31º responde `limite`. Apagar um libera uma vaga.
+- [ ] Apagar um anúncio editado: o diário ganha dois apagamentos num só append e `listing.mine` não o lista mais.
+- [ ] No semeador, a busca por cidade e categoria acha o anúncio e deixa de achar depois de "vendido" e depois de apagado; a lista do autor mantém o "vendido".
+- [ ] O autor aceita uma proposta recebida (`listing.consent`); quem propôs avalia com `listing.rate`; uma avaliação com consentimento de outro anúncio responde `consentimento inválido`.
+- [ ] `listing.ratings` mostra a avaliação só quando o cadastro de quem avaliou tem 7 dias ou mais; antes disso ela entra em `dropped`.
+- [ ] Denunciar um anúncio com `report.sign` e `kind: 'listing'`; a assinatura não confere como denúncia de publicação.
+- [ ] Com o semeador de uma versão anterior à Feira, os quatro tipos são ignorados e o diário não é rejeitado.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- O semeador guarda só as 16 últimas edições e os 16 últimos status de cada anúncio: com a janela estourada e todos apagados, o anúncio fica sem status conhecido, sai da busca e do mapa do site, e o cartão público responde 404 se a edição atual for desconhecida, até um novo status ou edição.
+- Com duas avaliações da mesma pessoa para o mesmo anúncio, o índice guarda a mais nova; se ela for apagada, a antiga só volta ao índice depois que o semeador varrer o diário de novo (reinício ou reconstrução).
