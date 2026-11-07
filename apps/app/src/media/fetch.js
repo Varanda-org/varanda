@@ -1,4 +1,4 @@
-/* global fetch, crypto, URL, AbortController */
+/* global fetch, crypto, URL, AbortController, __DEV__ */
 
 // Verified media fetch for the hosted web app. A photo is fetched from the
 // installation that served the page (same origin: GET
@@ -35,7 +35,14 @@ import rpc from '@varanda/rpc'
 import { sha256 as nobleSha256 } from '@noble/hashes/sha2.js'
 import { isAppClient } from '../appClient.js'
 import { installationOrigin, resolveUrl } from '../installation.js'
+import { vitrineEnabled } from '../vitrine/enabled.js'
 import { MAX_MEDIA_DIMENSION, MAX_MEDIA_ITEM_BLOCKS, MEDIA_BLOCK_BYTES, MEDIA_MIMES, toHex } from './plan.js'
+
+const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
+let vitrineGet
+if (VITRINE) {
+  vitrineGet = require('../vitrine/publicMedia').vitrineMediaResponse
+}
 
 // Same value as packages/core/lib/records.js.
 export const MAX_MEDIA_BLOCKS = 8192
@@ -219,7 +226,7 @@ export async function fetchMedia (author, d, deps) {
   const url = mediaUrl(author, d, { chat: deps && deps.chat })
   if (url === null) throw fail('foto inválida')
   const hashing = defaults(deps)
-  const get = hashing.fetch
+  const get = VITRINE ? vitrineGet : hashing.fetch
   const transient = deps && deps.persist === false
   const init = { method: 'GET', credentials: 'omit', redirect: 'error' }
   let stop = () => {}

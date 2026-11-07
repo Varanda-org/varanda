@@ -5883,3 +5883,46 @@ Limites desta caminhada:
 
 - Na Vitrine, Passkeys responde "serviço indisponível": a lista de passkeys com itens e a remoção se conferem no laboratório hospedado.
 - Compartilhar perfil só aparece com a origem da instalação, que a Vitrine nativa não tem.
+
+## 120. Mural de fotos no perfil (PR feat/profile-mural)
+
+Caminhada do Mural: as abas Publicações e Mural no Diário e no perfil de outra pessoa (Membro). A tela está em [app.md](app.md) ("Mural") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Abas do perfil", "Mural").
+
+Regras que os passos conferem:
+
+- O Mural é uma projeção das publicações que a tela já leu (`src/mural.js`): no Diário, as linhas do `log.read`; em Membro, os itens montados das páginas do índice, com o corte de página movida (`applyCut`). Entram só publicações (`post`) com foto, sem `replyTo` e sem citação; respostas, republicações e citações nunca viram quadrado. Uma publicação com data mais de 24 h no futuro fica escondida, como no feed.
+- Uma lista só por tela (`RefreshableList`): o Mural troca as linhas, não a lista, então puxar para atualizar, a barra fixa do perfil e a rolagem continuam; a aba escolhida e a rolagem voltam iguais depois de abrir uma foto.
+- Faltando foto, a tela lê páginas mais antigas sozinha até 6 páginas (`fillState`); depois, só a pílula "Ver mais" lê mais uma, nunca a rolagem. Uma página só conta quando a leitura começa de fato, a contagem zera quando a lista é recarregada, e uma atualização que falha não deixa a pílula presa.
+- "Nenhuma foto ainda" só aparece quando a fonte acabou de verdade; antes disso, "Ver mais". "Algumas fotos podem faltar" quando o índice diz que está incompleto.
+- Tocar numa foto abre a conversa da publicação com a publicação já carregada como semente (sem internet, a conversa ainda mostra a publicação e as fotos).
+- Fotos de quem a pessoa não segue são buscadas sem guardar cópia no aparelho (`persist` falso), como no resto do app.
+- Membro sem internet, ou fora do nó hospedado: o aviso de sempre, sem a aba Mural e sem leitura remota.
+- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/feat/profile-mural/<plataforma>/` (rodadas r1 em diante, Android, simulador iOS e Chrome).
+
+Como verificar, a partir de `apps/app` (um arquivo por vez):
+
+- `node test/mural.test.js`, `node test/muralGrid.test.js`, `node test/muralScreen.test.js`, `node test/vitrine.test.js`, `node test/vitrineIndex.test.js`, `node test/vitrineGuard.test.js`, `node test/mediaFetch.test.js`.
+- `npm run lint`, a partir da raiz, que tem de passar.
+
+Primeiro no Android (build de debug, emulador `varanda-api36`, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome:
+
+- [ ] Android: Diário › Mural; quadrados com 2 pt entre colunas e fileiras, selo de várias fotos no canto, "Fim do Mural" no fim, a barra de abas não cobre a última fileira.
+- [ ] Android: tocar numa foto abre a conversa com as fotos; voltar mantém a aba Mural e a rolagem.
+- [ ] Android: puxar para atualizar na aba Mural; a barra fixa do perfil aparece ao rolar.
+- [ ] Android: Membro de João (seguido) e de Bia (não seguida) › Mural; a última fileira curta fica com células vazias; Cecília e a página Biblioteca da Praça mostram o estado vazio.
+- [ ] iOS (simulador, build de debug ligado ao Metro): as mesmas telas.
+- [ ] Chrome em 375 px, 1280 px e 320 px, nos temas claro e escuro: as mesmas telas; Tab passa pelas abas e pelos quadrados; a aba escolhida tem `aria-selected`.
+- [ ] Texto grande (Android `font_scale` 1.3, iOS `accessibility-large`): 2 colunas, rótulos das abas inteiros.
+- [ ] Laboratório hospedado com duas identidades: publicar uma foto na primeira, ver no Mural dela no aparelho da segunda, apagar a publicação e ver o quadrado sumir depois de atualizar.
+
+Ainda falta a um humano, em aparelho real:
+
+- [ ] celulares Android e iPhone físicos: as telas acima, com fotos de verdade.
+- [ ] TalkBack e VoiceOver: as abas leem nome e estado; cada quadrado lê "foto" ou "N fotos" e a data.
+- [ ] um diário longo de verdade, com mais de 6 páginas sem foto entre as fotos: a pílula "Ver mais" aparece e não diz "vazio".
+
+Limites desta caminhada:
+
+- A Vitrine responde as fotos das publicações por um responder local de `/media` (`src/vitrine/publicMedia.js`, só no bundle de desenvolvimento); o caminho real (semeador, tamanho e SHA-256 conferidos) é o mesmo código, e a única coisa trocada é o transporte.
+- Na Vitrine, nenhuma pessoa tem foto suficiente para mostrar "Ver mais".
+

@@ -72,6 +72,14 @@ export function createVitrineRequest (fixtures) {
     ].sort((a, b) => a.seq - b.seq))
   }
 
+  // The own likes and reposts the fixtures already wrote, so the buttons,
+  // engagement.read and a later toggle agree with the log and the counts.
+  for (const { seq, record } of logs.get(data.own) || []) {
+    if ((record.type === 'like' || record.type === 'repost') && record.to) {
+      reactions[record.type].set(`${record.to.author}:${record.to.seq}`, { seq, on: record.on === true })
+    }
+  }
+
   function append (record) {
     const entries = logs.get(data.own)
     const seq = entries[entries.length - 1].seq + 1

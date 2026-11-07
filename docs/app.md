@@ -510,9 +510,15 @@ Esta parte muda como as telas se comportam ao rolar e como as linhas aparecem. N
 - No app nativo, uma vibração de sucesso marca a publicação enviada de fato, não a que vai para a fila de saída. Uma vibração de aviso marca a nota de limite de caracteres.
 - A folha tem uma alça no topo no Android, no iOS e na web. O campo não ganha anel de foco.
 
-### Publicações e Respostas: fora desta etapa
+### Mural
 
-As abas Publicações e Respostas do perfil não entram nesta etapa. Uma resposta do Diário é o campo `record.replyTo` de um registro dentro do `log.read` paginado, e não há leitura só de respostas. Uma aba de respostas exigiria essa leitura nova, que fica para outra etapa.
+O perfil (o seu Diário e o de outra pessoa) tem as abas Publicações e Mural. O Mural é uma visão das publicações públicas com foto que a pessoa já fez: não há cópia, nenhuma publicação nova e nenhum prazo de expiração. Cada foto abre a conversa da publicação. Respostas e republicações nunca aparecem no Mural, nem citações.
+
+- As fotos vêm das páginas que a tela já leu: o Mural não faz leitura própria. Se faltar foto, ele lê as páginas mais antigas, até um limite. Depois disso, mais fotos só chegam pelo botão "Ver mais".
+- Sem internet, ou fora do nó hospedado, o perfil de outra pessoa mostra o aviso de sempre e não tem a aba Mural.
+- No seu Diário, o Mural vazio diz que as fotos publicadas aparecem ali. Publicar continua no botão de escrever de sempre, sem um segundo botão.
+- Uma foto com várias imagens tem um selo no canto. As células que completam a última fileira ficam vazias.
+- A aba Respostas continua fora desta etapa. Uma resposta do Diário é o campo `record.replyTo` de um registro dentro do `log.read` paginado, e não há leitura só de respostas.
 
 ## Fora do piloto
 

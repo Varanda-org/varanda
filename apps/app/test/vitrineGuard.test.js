@@ -10,7 +10,7 @@ const path = require('path')
 const APP = path.join(__dirname, '..')
 const SRC = path.join(APP, 'src')
 const VITRINE_DIR = path.join(SRC, 'vitrine')
-const ALLOWED = ['src/node.js', 'src/account.js', 'src/termsStore.web.js', 'src/termsStore.native.js', 'src/usePush.web.js', 'src/indexClient.js']
+const ALLOWED = ['src/node.js', 'src/account.js', 'src/termsStore.web.js', 'src/termsStore.native.js', 'src/usePush.web.js', 'src/indexClient.js', 'src/media/fetch.js']
 const TERMS_STORES = ['src/termsStore.web.js', 'src/termsStore.native.js']
 const IMPORT_RE = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)(['"])([^'"]*vitrine\/[^'"]*)\1/g
 const GUARD_RE = /const VITRINE = vitrineEnabled\(\{ EXPO_PUBLIC_VARANDA_VITRINE: process\.env\.EXPO_PUBLIC_VARANDA_VITRINE \}, typeof __DEV__ !== 'undefined' && __DEV__\)/

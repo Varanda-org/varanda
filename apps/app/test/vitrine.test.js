@@ -158,7 +158,7 @@ test('vitrine fixtures cover the assessment scenarios deterministically', async 
   t.is(new Set(f.conversations.map((c) => c.peer)).size, 8)
   t.is(f.communities.length, 3)
   t.is(f.groups.length, 5)
-  t.is(f.feed.length, 20)
+  t.is(f.feed.length, 36)
   t.is(f.notices.length, 10)
   for (const p of [...f.members, ...f.pages]) {
     t.ok(/^[0-9a-f]{64}$/.test(p.author))
@@ -178,7 +178,7 @@ test('vitrine fixtures cover the assessment scenarios deterministically', async 
   t.is(f.groups.filter((g) => g.items.length === 0).length, 1)
   t.ok(f.groups.some((g) => g.items.some((item) => item.replyTo)))
   t.is(f.feed.filter((p) => p.quote).length, 1)
-  t.is(f.feed.filter((p) => p.media).length, 1)
+  t.is(f.feed.filter((p) => p.media).length, 20)
   t.ok(f.feed.some((p) => p.text.includes('@')))
   t.ok(f.feed.some((p) => p.text.includes('https://')))
   for (const post of f.feed) t.ok(validateParams('post.create', { text: post.text, ...(post.media ? { media: post.media } : {}) }).ok)
@@ -251,7 +251,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
   const peek = await answer(t, request, 'diary.peek', { author: f.own, seqs: [3], profileSeq: 1, usernameSeq: 2 })
   for (const entry of peek.entries) {
     keys(t, entry, ['seq', 'record'])
-    keys(t, entry.record, ['type', 'text', 'at', 'replyTo'])
+    keys(t, entry.record, ['type', 'text', 'at', 'replyTo', 'media'])
   }
   keys(t, peek.profile, ['name', 'bio', 'avatar'])
   t.is(peek.username, f.members[0].username)
@@ -368,10 +368,17 @@ test('local mutations update previews and marks without leaking across requests'
 
 test('feed, notices, profiles and diary peeks preserve paging and references', async (t) => {
   const { fixtures: f, request } = await load()
-  const first = await answer(t, request, 'feed.read', { limit: 10 })
-  const { at, author, seq } = first.items[0]
-  const older = await answer(t, request, 'feed.read', { limit: 10, before: { at, author, seq } })
-  t.alike([...older.items, ...first.items], f.feed)
+  const pages = []
+  let before
+  for (;;) {
+    const page = await answer(t, request, 'feed.read', { limit: 10, ...(before ? { before } : {}) })
+    if (page.items.length === 0) break
+    pages.unshift(...page.items)
+    const { at, author, seq } = page.items[0]
+    before = { at, author, seq }
+  }
+  t.alike(pages.filter((item) => item.author === f.own || f.follows.includes(item.author)), pages)
+  t.alike(pages, f.feed.filter((item) => item.author === f.own || f.follows.includes(item.author)))
   t.is((await answer(t, request, 'feed.read', { before: { at: f.feed[0].at, author: f.feed[0].author, seq: f.feed[0].seq } })).items.length, 0)
   const notices = []
   let after
@@ -499,7 +506,8 @@ test('unknown methods and bad params refuse before any local write', async (t) =
 test('vitrine sources stay pure and omit forbidden status words', (t) => {
   const forbidden = new RegExp('(?<!\\p{L})(' + ['li' + 'da', 'entre' + 'gue', 'digi' + 'tando'].join('|') + ')(?!\\p{L})', 'iu')
   const expectedImports = {
-    'fixtures.js': [],
+    'fixtures.js': ["import { pictures } from './pictures.js'", "import { sha256 } from '@noble/hashes/sha2.js'"],
+    'publicMedia.js': ["import { fixtures, postPictureBytes } from './fixtures.js'"],
     'pictures.js': [],
     'media.js': ["import { pictures } from './pictures.js'", "import { PICTURE_BASE } from './fixtures.js'"],
     'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'"],
@@ -641,12 +649,29 @@ test('every quoted RPC method used by the app has a documented vitrine answer', 
   }
 })
 
+test('the own likes and reposts in the fixtures start active and toggle off', async (t) => {
+  const { fixtures: f, request } = await load()
+  const call = (method, params) => answer(t, request, method, params)
+  const seeded = f.diaryRecords.filter((e) => e.author === f.own && (e.record.type === 'like' || e.record.type === 'repost') && e.record.on)
+  t.ok(seeded.some((e) => e.record.type === 'like') && seeded.some((e) => e.record.type === 'repost'))
+  for (const { seq, record } of seeded) {
+    const ref = `${record.to.author}:${record.to.seq}`
+    const key = record.type === 'like' ? 'liked' : 'reposted'
+    t.alike((await call('engagement.read', { refs: [ref] }))[key], [ref], ref + ' starts active')
+    t.alike(await call(record.type + '.set', { to: ref, on: true }), { seq, on: true, changed: false })
+    const off = await call(record.type + '.set', { to: ref, on: false })
+    t.is(off.changed, true)
+    t.alike((await call('engagement.read', { refs: [ref] }))[key], [])
+  }
+})
+
 test('diary writes, tombstones, reactions, follows and profile changes are visible locally', async (t) => {
   const { fixtures: f, request, createVitrineRequest } = await load()
   const call = (method, params) => answer(t, request, method, params)
   const log = await call('log.read')
   t.is(log.key, f.own)
-  t.alike(log.entries.filter((e) => e.record.type === 'post').map((e) => e.record.text), f.feed.filter((p) => p.author === f.own).map((p) => p.text))
+  const olderLog = await call('log.read', { before: log.entries[0].seq })
+  t.alike([...olderLog.entries, ...log.entries].filter((e) => e.record.type === 'post').map((e) => e.record.text), f.feed.filter((p) => p.author === f.own).map((p) => p.text))
   const original = clone(f)
   const uploaded = await call('media.uploadFile', samples(f)['media.uploadFile'])
   const uploadedNext = await call('media.uploadFile', samples(f)['media.uploadFile'])
@@ -1028,4 +1053,88 @@ test('fixture chat photos validate, open through the Vitrine media handle and st
     const source = readFileSync(join(__dirname, '../src/vitrine', file), 'utf8')
     t.absent(/https?:\/\//.test(source), file + ' has no network address')
   }
+})
+
+test('the Mural has photo posts to show: own, followed and not followed', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { tilesFromLog, tilesFromItems } = await import('../src/mural.js')
+  const rows = []
+  let before
+  const pages = []
+  for (;;) {
+    const page = await answer(t, request, 'log.read', { limit: 32, ...(before !== undefined ? { before } : {}) })
+    if (page.entries.length === 0) break
+    pages.push(page.entries)
+    rows.push(...page.entries.map((entry) => ({ seq: entry.seq, entry })))
+    before = page.entries[0].seq
+    if (before === 0) break
+  }
+  t.ok(pages.length >= 2, 'the own log needs more than one page')
+  const tiles = tilesFromLog(f.own, rows)
+  t.ok(tiles.length >= 8, 'at least 8 own tiles')
+  t.ok(pages.every((entries) => tilesFromLog(f.own, entries.map((entry) => ({ seq: entry.seq, entry }))).length > 0), 'every log page holds tiles')
+  for (const tile of tiles) t.ok(tile.media.length >= 1 && tile.media.length <= 4)
+  t.ok(tiles.some((tile) => tile.media.length === 1) && tiles.some((tile) => tile.media.length === 4))
+  const ownPosts = f.feed.filter((p) => p.author === f.own)
+  t.ok(ownPosts.some((p) => p.media && p.text === ''), 'some photo-only posts')
+  const reply = ownPosts.find((p) => p.replyTo && p.media)
+  t.ok(reply, 'a reply with media')
+  t.absent(tiles.some((tile) => tile.seq === reply.seq), 'the reply is no tile')
+  const repost = rows.find((row) => row.entry.record.type === 'repost')
+  t.ok(repost, 'a repost in the own log')
+  t.absent(tiles.some((tile) => tile.seq === repost.seq), 'the repost is no tile')
+  const followed = f.members[1]
+  const stranger = f.members[4]
+  t.ok(f.follows.includes(followed.author))
+  t.absent(f.follows.includes(stranger.author))
+  for (const member of [followed, stranger]) {
+    t.ok(tilesFromItems(f.feed.filter((p) => p.author === member.author)).length >= 4, member.username + ' has tiles')
+  }
+})
+
+test('public post photos are valid descriptors that name a real drawing', async (t) => {
+  const { fixtures: f } = await load()
+  const { postPictureBytes } = await import('../src/vitrine/fixtures.js')
+  const { validDescriptor } = await import('../src/media/fetch.js')
+  const { sha256 } = await import('@noble/hashes/sha2.js')
+  const seen = new Set()
+  const media = f.feed.flatMap((p) => (p.media || []).map((d) => ({ p, d })))
+  t.ok(media.length >= 20)
+  for (const { p, d } of media) {
+    t.ok(validDescriptor(d), 'descriptor is valid')
+    const bytes = postPictureBytes(d.sha256)
+    t.ok(bytes, 'names a drawing')
+    t.is(bytes.byteLength, d.bytes)
+    t.is(Array.from(sha256(bytes), (b) => b.toString(16).padStart(2, '0')).join(''), d.sha256)
+    const id = [p.author, d.core, d.start].join(':')
+    t.absent(seen.has(id), 'one drawing per author, core and start')
+    seen.add(id)
+  }
+})
+
+test('the media client reads a fixture post photo through the Vitrine responder', async (t) => {
+  const { fixtures: f } = await load()
+  const { fetchMedia } = await import('../src/media/fetch.js')
+  const { vitrineMediaResponse } = await import('../src/vitrine/publicMedia.js')
+  const { postPictureBytes } = await import('../src/vitrine/fixtures.js')
+  const post = f.feed.find((p) => p.author === f.own && p.media)
+  const d = post.media[0]
+  const bytes = await fetchMedia(post.author, d, { fetch: vitrineMediaResponse })
+  t.alike(Array.from(bytes), Array.from(postPictureBytes(d.sha256)))
+  const url = '/media/' + post.author + '/' + d.core + '/' + d.start + '/' + d.blocks
+  const first = await vitrineMediaResponse(url)
+  t.is(first.status, 200)
+  t.is(first.url, '')
+  t.is(first.redirected, false)
+  const one = new Uint8Array(await first.arrayBuffer())
+  one[0] = 0
+  t.is(new Uint8Array(await (await vitrineMediaResponse(url)).arrayBuffer())[0], 0xff, 'fresh copy each call')
+  for (const bad of [
+    '/media/' + post.author + '/' + d.core + '/' + (d.start + 500) + '/1',
+    '/media/' + 'f'.repeat(64) + '/' + d.core + '/' + d.start + '/1',
+    '/media/' + post.author + '/' + d.core + '/' + d.start,
+    '/media/' + post.author + '/' + d.core + '/' + d.start + '/1/x',
+    '/media/__proto__/constructor/1/1',
+    '/other/' + post.author + '/' + d.core + '/' + d.start + '/1'
+  ]) t.is((await vitrineMediaResponse(bad)).status, 404, bad)
 })
