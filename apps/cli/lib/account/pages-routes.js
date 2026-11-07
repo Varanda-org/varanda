@@ -99,7 +99,10 @@ const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
 // Same names as store.js RESERVED (not exported): a page never takes them.
 const RESERVED = new Set(['admin', 'associacao', 'association', 'ajuda', 'mod', 'moderacao',
-  'pagina', 'paginas', 'root', 'seeder', 'semeador', 'suporte', 'support', 'varanda'])
+  'pagina', 'paginas', 'root', 'seeder', 'semeador', 'suporte', 'support', 'varanda',
+  // The Vitrine handles shown in the varanda.app screenshots (see store.js).
+  'andre_costa', 'bia_araujo', 'biblioteca_praca', 'cecilia_ramos',
+  'horta_do_bairro', 'joao_nascimento', 'lia_oliveira', 'tomas_ferreira'])
 
 // Conversas as the page (./pages-dm.js, docs/rpc.md 5.77 to 5.80 shapes).
 const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen']

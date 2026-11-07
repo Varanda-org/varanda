@@ -94,6 +94,18 @@ test('pagina and paginas are reserved', async (t) => {
   throwsCode(t, () => store.start({ member: newKey(), username: 'paginas' }), 'nome-invalido', 'a person')
 })
 
+test('the Vitrine handles shown on varanda.app are reserved for pages and people', async (t) => {
+  const { store, iss, c } = setup(t)
+  const page = newKey()
+  t.is((await reserve(store, iss, c, page, 'padaria')).usernameRecord.username, 'padaria')
+  c.t += COOLDOWN_MS
+  for (const username of ['biblioteca_praca', 'horta_do_bairro', 'lia_oliveira', 'bia_araujo']) {
+    await rejects(t, reserve(store, iss, c, newKey(), username), 'nome-invalido', username + ': a new page')
+    await rejects(t, rename(store, iss, c, page, username), 'nome-invalido', username + ': a page rename')
+    throwsCode(t, () => store.start({ member: newKey(), username }), 'nome-invalido', username + ': a person')
+  }
+})
+
 test('a page name is not given to a person, and a person name is not given to a page', async (t) => {
   const { store, iss, c } = setup(t)
   const page = newKey()

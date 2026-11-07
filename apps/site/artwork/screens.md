@@ -45,6 +45,8 @@ Community: Horta Comunitária. Groups: Passeios de bicicleta, Organização do c
 
 Before using a capture, check that every name on screen is in this list.
 
+The account service reserves the @handles of the people and pages above (`RESERVED` in `apps/cli/lib/account/store.js` and `apps/cli/lib/account/pages-routes.js`), so no member can take one and seem endorsed by the site. A new or renamed handle in a capture goes into both lists too.
+
 ## Recipe
 
 1. Install the dependencies and build the Debug app for the simulator:

@@ -423,6 +423,19 @@ test('start: wrong member, taken, 6-hex and reserved names, one member per sub a
   t.is(fresh.finish.status, 200, 'a new sub links ("bia" is still held by the refused row)')
 })
 
+test('start: the Vitrine handles shown on varanda.app are reserved', async (t) => {
+  const s = await setup(t)
+  const handles = ['lia_oliveira', 'joao_nascimento', 'cecilia_ramos', 'andre_costa', 'bia_araujo',
+    'tomas_ferreira', 'biblioteca_praca', 'horta_do_bairro']
+  for (const username of handles) {
+    const res = await s.api('POST', '/account/start', { body: { member: member().hex, username } })
+    t.alike([res.status, res.body], [400, { error: 'nome-invalido' }], username)
+    t.is(cookieOf(res), null, username + ': no cookie')
+  }
+  const near = await s.api('POST', '/account/start', { body: { member: member().hex, username: 'lia_oliveira2' } })
+  t.is(near.status, 200, 'only the exact handle is reserved')
+})
+
 test('a name is held once Google answered (not by the key proof) and released after 600 s', async (t) => {
   const s = await setup(t)
   const m = member()

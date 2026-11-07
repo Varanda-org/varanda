@@ -238,7 +238,12 @@ const MAX_PAGE_MOVES = 4
 const RESERVED = new Set([
   'admin', 'associacao', 'association', 'ajuda', 'mod', 'moderacao',
   'pagina', 'paginas', 'root', 'seeder', 'semeador', 'suporte', 'support',
-  'varanda'
+  'varanda',
+  // The Vitrine's fictional people and pages (apps/app/src/vitrine/fixtures.js),
+  // shown in the varanda.app screenshots: whoever held one would seem
+  // endorsed by the official site.
+  'andre_costa', 'bia_araujo', 'biblioteca_praca', 'cecilia_ramos',
+  'horta_do_bairro', 'joao_nascimento', 'lia_oliveira', 'tomas_ferreira'
 ])
 
 function fail (code, extra) {
