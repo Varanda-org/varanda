@@ -48,6 +48,8 @@ import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
 import { admission, authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, passkeyAdd, passkeyStart, readPending, recoveryPut, recoveryStart, renameFinish, renameStart, startLink, toError } from '../account'
 import { enrolWith } from '../passkeyEnrol'
+import { ENTRY_TEXT, ENTRY_TITLE } from '../feiraEntry'
+import { useFeiraEntryStart } from '../useFeiraEntryStart'
 import { registerEntry } from '../recovery'
 import { isAppClient } from '../appClient'
 import { acceptableAuthorizeUrl } from '../authorizeUrl'
@@ -317,7 +319,7 @@ function accepted (key, record) {
   noteDate(key, record.date)
 }
 
-function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChanged, onLinked }) {
+function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChanged, onLinked, feira = null }) {
   const node = useNode()
   const now = useNow(60000)
   // { key, status, pending } of the last load for this key.
@@ -359,6 +361,27 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     )
   }, [active])
 
+  // A visitor from a Feira listing link (src/useFeiraEntryStart.js): with the
+  // Feira on, invites required and no code held, the card offers "Pedir
+  // entrada"; only that press asks the service for a code, and the code then
+  // goes through the ordinary flow below.
+  const {
+    decision: feiraDecision,
+    offer: feiraOffer,
+    busy: feiraBusy,
+    tried: feiraTried,
+    press: pressFeiraStart,
+    limit: feiraLimit,
+    limitRef: feiraLimitRef
+  } = useFeiraEntryStart({
+    feira,
+    active,
+    required: policy === undefined ? undefined : policy !== null,
+    blocked: !!memberCert,
+    onNote: setInviteNote,
+    takeReturnInvite
+  })
+
   const load = useCallback(async () => {
     const mine = ++seqRef.current
     try {
@@ -383,6 +406,9 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       setReturned(returnNotice)
       setWaitlist(returnWaitlist)
       setInviteNote(returnInvite)
+      // The app keeps its held code across the return: a refused Feira code
+      // reads as the seller's limit, as on the web page load.
+      if (returnInvite !== '') feiraLimitRef.current({ code: 'convite-invalido' })
       setConfirmFailed(false)
       setNote('')
       if (appExpired) {
@@ -535,6 +561,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
           return
         }
         setWaitlist('')
+        if (feiraLimit(err)) return
         if (err && INVITE_REFUSALS.has(err.code)) {
           // The web keeps its stored code: start answers 'convite-invalido'
           // for a code held by another pending link too, and that one may
@@ -615,6 +642,10 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       // The account or the name belongs to another key, or the row expired:
       // this row can never be confirmed, so offer another account.
       setWaitlist('')
+      if (feiraLimit(err)) {
+        setConfirmFailed(true)
+        return
+      }
       if (err && err.code === 'convite-invalido') dropSignupInvite()
       if (err && RESTARTABLE.has(err.code)) setConfirmFailed(true)
       throw err
@@ -729,12 +760,13 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         : required && hasInvite ? <Soft>{INVITE_READY_TEXT}</Soft> : null
     const inviteNeeded = (
       <>
-        <Body>{inviteNote || INVITE_NEEDED_TEXT}</Body>
-        {NATIVE ? <InvitePaste onPasted={usePasted} disabled={busy} /> : null}
+        <Body>{inviteNote || (feiraDecision !== null && feiraDecision.action === 'needs-invite' ? feiraDecision.text : feiraOffer ? ENTRY_TEXT : INVITE_NEEDED_TEXT)}</Body>
+        {feiraOffer ? <Btn label={feiraTried && !feiraBusy ? 'Tentar de novo' : 'Pedir entrada'} onPress={pressFeiraStart} pending={feiraBusy} /> : null}
+        {NATIVE ? <InvitePaste onPasted={usePasted} disabled={busy || feiraBusy} /> : null}
       </>
     )
     // Until the policy answers, the button waits rather than racing it.
-    const linkDisabled = name.trim() === '' || policy === undefined
+    const linkDisabled = name.trim() === '' || policy === undefined || feiraBusy
     body = (
       <>
         {foreign ? <ErrorText>{LINK_FAILED}</ErrorText> : null}
@@ -809,7 +841,9 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
 // `step` (src/onboarding.js) at `index` of `total`.
 // onLinked (setup only): called once a certificate from the account link
 // lands in this diary, so the shell knows the setup took the Google return.
-export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, onLinked, invite = null }) {
+// feira (App.js): a Feira listing entry, { holder, origin, hold } from
+// src/feiraEntry.js and the signup invite holder's writer; null otherwise.
+export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, onLinked, invite = null, feira = null }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const outbox = useOutbox()
@@ -1245,6 +1279,8 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   // elsewhere and can copy it; a group or community link is never drawn as
   // text. Hosted page only.
   const inviteHere = node.hosted === true && invite !== null
+  // A Feira listing link: the visitor is told why to enter. Nothing is sent.
+  const feiraHere = feira !== null && !!feira.holder && feira.holder.load(feira.origin) !== null
   const blockedInvite = inviteHere
     ? (
       <>
@@ -1356,6 +1392,14 @@ export default function Identidade ({ active, embedded = false, setup = false, v
               <>
                 <Notice>{displayText(invite.text)}</Notice>
                 <Btn label='agora não' secondary onPress={() => invite.onDismiss()} disabled={pkPending} />
+              </>
+              )
+            : null}
+          {feiraHere
+            ? (
+              <>
+                <Label>{ENTRY_TITLE}</Label>
+                <Notice>{ENTRY_TEXT}</Notice>
               </>
               )
             : null}
@@ -1513,6 +1557,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             setup={setup}
             onChanged={refresh}
             onLinked={setup ? onLinked : undefined}
+            feira={feira}
           />
           )
         : null}

@@ -8,6 +8,7 @@
 import { useState } from 'react'
 import { Platform } from 'react-native'
 import { AGE_TEXTS } from '../age'
+import { ENTRY_TEXT, ENTRY_TITLE } from '../feiraEntry'
 import { INVITE_NEEDED_TEXT } from '../signupInvite'
 import { captureSignupInvite } from '../signupInviteStore'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
@@ -65,7 +66,13 @@ export function InvitePaste ({ onPasted, disabled = false }) {
 const STARTABLE = new Set(['nenhum', 'inconclusivo', 'expirado', 'recusado'])
 
 // invitePaste: show the paste field (src/linkReturn.js invitePasteShown).
-export default function Idade ({ state, busy = false, error = '', note = '', offline = false, onStart, onCheck, index = 1, total = 3, invitePaste = false, onInvitePasted }) {
+// feiraEntry: a visitor from a Feira listing link (src/useFeiraEntryStart.js),
+// { offer, busy, tried, onPress, note } or null. While the offer stands the
+// age start waits: the service refuses it without a code, and the press is
+// what asks for one.
+export default function Idade ({ state, busy = false, error = '', note = '', offline = false, onStart, onCheck, index = 1, total = 3, invitePaste = false, onInvitePasted, feiraEntry = null }) {
+  const feiraOffer = !!feiraEntry && feiraEntry.offer === true
+  const onFeiraPress = feiraOffer ? feiraEntry.onPress : undefined
   const known = typeof state === 'string' && Object.hasOwn(AGE_TEXTS, state)
   const stateText = known && state !== 'nenhum' ? AGE_TEXTS[state] : ''
   const showStart = state === undefined || STARTABLE.has(state)
@@ -85,17 +92,28 @@ export default function Idade ({ state, busy = false, error = '', note = '', off
           {showResume ? <Soft>{RESUME_TEXT}</Soft> : null}
           {checking ? <Soft>{AGE_CHECKING_TEXT}</Soft> : null}
           {busy ? <Spinner /> : null}
+          {feiraOffer
+            ? (
+              <>
+                <Body>{ENTRY_TITLE}</Body>
+                <Soft>{ENTRY_TEXT}</Soft>
+                <Btn label={feiraEntry.tried && !feiraEntry.busy ? 'Tentar de novo' : 'Pedir entrada'} onPress={onFeiraPress} pending={!!feiraEntry.busy} />
+              </>
+              )
+            : null}
+          {/* Also after the offer ends: a refusal or the seller's limit. */}
+          {feiraEntry && feiraEntry.note ? <Notice>{feiraEntry.note}</Notice> : null}
           {/* No code held: the service would refuse the start, so the field comes first. */}
           {invitePaste
             ? (
               <>
-                {error ? null : <Body>{INVITE_NEEDED_TEXT}</Body>}
+                {error || feiraOffer ? null : <Body>{INVITE_NEEDED_TEXT}</Body>}
                 <InvitePaste onPasted={onInvitePasted} disabled={busy} />
               </>
               )
             : null}
           <Row>
-            {showStart && !invitePaste
+            {showStart && !invitePaste && !feiraOffer
               ? <Btn label={state === 'inconclusivo' ? DOCUMENT_LABEL : START_LABEL} onPress={onStart} disabled={busy || offline} />
               : null}
             {showResume

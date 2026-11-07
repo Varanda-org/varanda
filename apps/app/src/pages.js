@@ -248,8 +248,9 @@ const PAGELESS = ['create', 'list', 'terms']
 const RECORD_ACTIONS = ['accept', 'remove', 'offer', 'transfer-accept', 'close']
 const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read']
 const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen']
+const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-consent']
 const STATEMENT_ACTIONS = ['list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename',
-  'follow', 'follows', 'notices', 'terms', ...GROUP_ACTIONS, ...DM_ACTIONS]
+  'follow', 'follows', 'notices', 'terms', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
 const ACTIONS = [...STATEMENT_ACTIONS, ...RECORD_ACTIONS, 'create', 'invite', 'move']
 
 const signer = (node) => {
@@ -259,7 +260,9 @@ const signer = (node) => {
 }
 
 function checkMedia (action, op) {
-  if (!['post', 'reply', 'quote'].includes(action) || !isObject(op) || op.media === undefined) return true
+  if (!['post', 'reply', 'quote', 'listing', 'listing-edit'].includes(action) || !isObject(op) || op.media === undefined) return true
+  // listing.edit takes media null to drop every photo (docs/rpc.md 5.103).
+  if (action === 'listing-edit' && op.media === null) return true
   return Array.isArray(op.media) && op.media.length >= 1 && op.media.length <= MAX_MEDIA_PER_POST
 }
 

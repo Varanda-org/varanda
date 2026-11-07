@@ -50,11 +50,15 @@ import { shareNav } from '../shareNav'
 import { countChars } from '../format'
 import { LABELS, UNSURE_SEND } from '../dm'
 import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
+import { listingLinkOf } from '../feiraChat'
+import { quickReplies } from '../feira'
 import { mergeMessages, newestOf, pageDmRequest, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
 import { pagesDm } from '../pages'
 import { pagesOn } from '../pageGate'
 import { cardFits, composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
-import { cardForSend, withCardFallback } from '../linkCard'
+import { cardForSend, draftView, freezeSnapshot, linkDraftIdle, linkDraftStep, withCardFallback } from '../linkCard'
+import { previewTarget } from '../preview'
+import { revokeUrl, urlFromBytes } from '../media/display'
 import { chatMediaRefs, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { Btn, ErrorText, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
@@ -76,7 +80,49 @@ import { memberKeyOf, useActing } from './Conversa'
 const BLOCKED_SEND = 'você bloqueou esta pessoa'
 const unsureSend = (err) => !!(err && (err.uncertain === true || err.message === UNSURE_SEND))
 
-export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite }) {
+export function initialMessage (initial) {
+  const draft = typeof initial?.draft === 'string' ? displayText(initial.draft, { multiline: true }) : ''
+  let card = linkDraftIdle()
+  if (initial?.card && previewTarget(draft) === initial.card.url) {
+    card = linkDraftStep(card, { type: 'target', url: initial.card.url })
+    card = linkDraftStep(card, { type: 'built', url: initial.card.url, data: initial.card })
+  }
+  return { draft, card }
+}
+
+export function listingLinkForRow (row, origin) {
+  if (!row || row.deleted === true) return null
+  return listingLinkOf(row.rawText, origin) || listingLinkOf(row.card, origin)
+}
+
+// The quick replies are a buyer's questions: they show while the newest
+// listing link in the thread names someone else's listing (the buyer sent
+// the seller's card, or the seller sent one of theirs). `me` is the identity
+// in use: the member, or the page acted as.
+export function showListingReplies (rows, me) {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const link = rows[i].listingLink
+    if (link !== null && link !== undefined) return typeof me === 'string' && link.author !== me
+  }
+  return false
+}
+
+export function messageEntry (previous, identity, initial) {
+  if (!previous) return { identity, initial }
+  return previous.identity === identity ? previous : { identity, initial: null }
+}
+
+export function Mensagem ({ initial, ...props }) {
+  const node = useNode()
+  const acting = useActing()
+  const identity = (node.passkey?.status?.publicKey || '') + ':' + (acting.kind === 'page' ? acting.key : '')
+  const entry = useRef(null)
+  entry.current = messageEntry(entry.current, identity + ':' + props.peer, initial)
+  // Remounting discards every draft, held send and attachment on a switch.
+  return <MensagemThread key={identity + ':' + props.peer} {...props} initial={entry.current.initial} />
+}
+
+function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing }) {
   const styles = useStyles(makeStyles)
   const origin = installationOrigin() || globalThis.location?.origin || ''
   const node = useNode()
@@ -122,7 +168,8 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
   const [newest, setNewest] = useState('')
   const [blocked, setBlocked] = useState(false)
   const [askNew, setAskNew] = useState(false)
-  const [draft, setDraft] = useState('')
+  const [draft, setDraft] = useState(() => initialMessage(initial).draft)
+  const [initialCard, setInitialCard] = useState(() => initialMessage(initial).card)
   const [replyTo, setReplyTo] = useState(null)
   const [hold, setHold] = useState(null)
   const [menu, setMenu] = useState(false)
@@ -133,7 +180,36 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
   const act = useAction()
   const attachments = useChatAttachments()
   // The draft link card (not as a page: its sends are signed statements).
-  const linkDraft = useLinkDraft({ text: draft, enabled: pageKey === null, photos: attachments.items.length > 0, member: ownKey })
+  const initialTarget = initialCard.url !== null && previewTarget(draft) === initialCard.url
+  const automaticDraft = useLinkDraft({ text: draft, enabled: pageKey === null && !initialTarget, photos: attachments.items.length > 0, member: ownKey })
+  useEffect(() => {
+    if (attachments.items.length > 0) setInitialCard((s) => linkDraftStep(s, { type: 'photo' }))
+  }, [attachments.items.length])
+  const snapshot = pageKey === null && attachments.items.length === 0 ? freezeSnapshot(initialCard, draft) : null
+  const [initialImage, setInitialImage] = useState(null)
+  const thumb = snapshot?.thumb || null
+  const thumbBytes = thumb?.bytes
+  useEffect(() => {
+    let uri = null
+    if (thumbBytes) {
+      try { uri = urlFromBytes(thumbBytes, thumb.mime) } catch {}
+    }
+    setInitialImage(uri)
+    return () => { if (uri !== null) revokeUrl(uri) }
+  }, [thumbBytes])
+  const linkDraft = initialTarget
+    ? {
+        view: snapshot ? draftView(initialCard) : null,
+        imageUri: snapshot ? initialImage : null,
+        dismiss: () => setInitialCard((s) => linkDraftStep(s, { type: 'dismiss' })),
+        take: (text) => attachments.items.length === 0 ? freezeSnapshot(initialCard, text) : null
+      }
+    : automaticDraft
+  const live = useRef(true)
+  useEffect(() => {
+    live.current = true
+    return () => { live.current = false }
+  }, [])
   // { phase, progress } of a photo send; mediaHold { op } after an uncertain
   // one (the exact dm.send it made); sendTokenRef is the running send, which
   // Cancelar marks dead before its request starts.
@@ -272,6 +348,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
           const upload = mediaApi !== null ? (t) => mediaApi.putDm({ bytes: t.bytes, mime: t.mime, width: t.width, height: t.height, to: peer }) : null
           card = await cardForSend(snapshot, { upload, fits: (c) => cardFits({ text, target, card: c }) })
         }
+        if (!live.current) return null
         const built = withCardFallback((c) => (c ? composePlan({ text, target, card: c }).send().params : plain), card)
         card = built.card
         return await dm('dm.send', built.op)
@@ -280,6 +357,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
         throw err
       }
     })
+    if (!live.current) return
     const err = lastErr.current
     if (r.ok) {
       // A retry of a held message can land while a newer draft is being
@@ -485,11 +563,13 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     )
   }
 
+  const cardOf = new Map(raw.map((m) => [messageKey(m), m.card]))
   const rows = withDayMarks(threadRows(raw), now)
   for (const row of rows) {
     row.inviteLink = row.deleted === true || typeof onOpenInvite !== 'function'
       ? null
       : inviteLinkOf(row.rawText, origin)
+    row.listingLink = listingLinkForRow({ ...row, card: cardOf.get(row.key) }, origin)
   }
 
   // The author of a quoted message: the row it points to, found through the
@@ -527,7 +607,6 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     (staged ? attachments.ready && !sendingMedia : draft.trim() !== '')
   const mediaOf = new Map(raw.map((m) => [messageKey(m), m.media]))
   const fwdOf = new Map(raw.map((m) => [messageKey(m), m.fwd]))
-  const cardOf = new Map(raw.map((m) => [messageKey(m), m.card]))
   // Forwarding writes as the person, never as a page.
   const canForward = pageKey === null && unlocked
 
@@ -574,6 +653,13 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
   } else {
     const notice = (
       <View style={styles.notice}>
+        {showListingReplies(rows, pageKey !== null ? pageKey : ownKey) && !hold && !mediaHold && !sendingMedia && !post.pending
+          ? (
+            <View style={styles.inline}>
+              {quickReplies().map((text) => <Pill key={text} label={text} onPress={() => { setDraft((d) => d.trim() ? d + '\n' + text : text); setAskNew(false) }} />)}
+            </View>
+            )
+          : null}
         {mediaHold
           ? (
             <View style={styles.inline}>
@@ -658,6 +744,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
         renderItem={({ item, index }) => {
           const mine = item.mine === true
           const link = item.inviteLink || null
+          const listing = item.listingLink
           const actions = []
           const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media: mediaOf.get(item.key) })
           if (!item.deleted) {
@@ -680,13 +767,20 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
               media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
               item={{ key: item.key, text: item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: !item.deleted && cardOf.get(item.key) ? cardOf.get(item.key) : null }}
               mine={mine}
-              cardThumb={item.deleted ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
+              cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
               shape={bubbleShape(rows, index)}
               forwarded={!item.deleted && fwdOf.get(item.key) === 1}
               quote={quoted}
               actions={actions}
               onOpenMention={mentionTap}
-              below={link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
+              below={link !== null || (listing !== null && typeof onOpenListing === 'function')
+                ? (
+                  <View style={styles.inline}>
+                    {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
+                    {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
+                  </View>
+                  )
+                : null}
             />
           )
         }}

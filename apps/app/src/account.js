@@ -462,6 +462,38 @@ export const admission = async () => {
     return null
   }
 }
+// Feira entry (apps/cli/lib/account/feira-routes.js). The policy is a hint:
+// null (an older service, any failure, a bad shape) falls back to the
+// ordinary invite flow, and the service stays the authority at start. The
+// Vitrine has no Feira entry yet.
+export const feiraPolicy = async () => {
+  if (VITRINE) return { enabled: false }
+  try {
+    const data = await call('GET', '/account/feira/policy', undefined, { allow404: true })
+    return exactKeys(data, ['enabled']) && typeof data.enabled === 'boolean' ? { enabled: data.enabled } : null
+  } catch {
+    return null
+  }
+}
+const FEIRA_MESSAGES = {
+  'nao-encontrado': 'Este anúncio não abre uma entrada agora: ele saiu do ar ou a Feira está desligada.'
+}
+const LISTING_AUTHOR_RE = /^[0-9a-f]{64}$/
+// Issues a signup code on the service, so an unknown outcome is uncertain and
+// nothing here asks again. A 429 from the proxy carries no token: it is the
+// generic 'indisponivel', a definite refusal like every 4xx.
+export const feiraStart = async ({ author, seq } = {}) => {
+  if (typeof author !== 'string' || !LISTING_AUTHOR_RE.test(author) || !Number.isSafeInteger(seq) || seq < 1) {
+    throw toError('pedido-invalido')
+  }
+  const data = await call('POST', '/account/feira/start', { author, seq }, { uncertain: true, definite: true, messages: FEIRA_MESSAGES })
+  if (!exactKeys(data, ['code']) || typeof data.code !== 'string' || !INVITE_CODE_RE.test(data.code)) {
+    const err = toError('indisponivel')
+    err.uncertain = true
+    throw err
+  }
+  return { code: data.code }
+}
 export const invitesStart = async ({ member }) => {
   const data = await call('POST', '/account/invites/start', { member })
   if (typeof data.nonce !== 'string') throw toError('indisponivel')

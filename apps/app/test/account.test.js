@@ -367,6 +367,71 @@ test('admission: the exact shape, request and unknown answers fail open', async 
   }
 })
 
+test('feiraPolicy: { enabled } or null on 404, any failure or shape', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { enabled: true }))
+  t.alike(await a.feiraPolicy(), { enabled: true })
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'GET /account/feira/policy')
+  t.is(calls[0].init.body, undefined)
+  stub(t, json(200, { enabled: false }))
+  t.alike(await a.feiraPolicy(), { enabled: false })
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.feiraPolicy(), null, 'older service')
+  stub(t, () => { throw new Error('rede') })
+  t.is(await a.feiraPolicy(), null, 'transport')
+  stub(t, json(500, {}))
+  t.is(await a.feiraPolicy(), null, '5xx')
+  for (const body of [{ enabled: 'true' }, { enabled: 1 }, { enabled: true, x: 1 }, {}, []]) {
+    stub(t, json(200, body))
+    t.is(await a.feiraPolicy(), null, JSON.stringify(body))
+  }
+})
+
+test('feiraStart: the exact body, the code, refusals, never retried', async (t) => {
+  const a = await load()
+  const A = 'cd'.repeat(32)
+  const code = 'x'.repeat(43)
+  const calls = stub(t, json(200, { code }))
+  t.alike(await a.feiraStart({ author: A, seq: 7 }), { code })
+  t.is(calls.length, 1)
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/feira/start')
+  t.alike(JSON.parse(calls[0].init.body), { author: A, seq: 7 })
+  t.alike(Object.keys(JSON.parse(calls[0].init.body)), ['author', 'seq'])
+
+  for (const bad of [{ author: A.toUpperCase(), seq: 1 }, { author: A, seq: 0 }, { author: A, seq: 1.5 }, { author: 'ab', seq: 1 }, {}]) {
+    const none = stub(t, json(200, { code }))
+    await t.exception(() => a.feiraStart(bad), /pedido inválido/)
+    t.is(none.length, 0, 'nothing sent for ' + JSON.stringify(bad))
+  }
+
+  const refusals = [
+    [json(404, { error: 'nao-encontrado' }), 'nao-encontrado', false],
+    [json(400, { error: 'pedido-invalido' }), 'pedido-invalido', false],
+    [json(503, { error: 'indisponivel' }), 'indisponivel', false],
+    [json(429, 'muitos pedidos', 'text/plain'), 'indisponivel', false],
+    [json(502, 'bad gateway', 'text/html'), 'indisponivel', true],
+    [json(200, { code: 'curto' }), 'indisponivel', true],
+    [json(200, { code, extra: 1 }), 'indisponivel', true]
+  ]
+  for (const [res, token, uncertain] of refusals) {
+    const once = stub(t, res)
+    try {
+      await a.feiraStart({ author: A, seq: 2 })
+      t.fail('accepted ' + token)
+    } catch (err) {
+      t.is(err.code, token)
+      t.is(err.uncertain === true, uncertain, token + ' uncertain')
+    }
+    t.is(once.length, 1, 'one request, no retry')
+  }
+  const lost = stub(t, () => { throw new Error('rede') })
+  try { await a.feiraStart({ author: A, seq: 2 }); t.fail('no answer') } catch (err) {
+    t.is(err.code, 'indisponivel')
+    t.is(err.uncertain, true)
+  }
+  t.is(lost.length, 1, 'a lost answer is not asked again')
+})
+
 test('invitesSummary: the exact shape, request and older service fallback', async (t) => {
   const a = await load()
   const args = { member: M, nonce: 'n1', signature: 'ff' }
