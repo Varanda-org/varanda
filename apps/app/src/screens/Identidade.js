@@ -46,7 +46,7 @@ import { Platform, StyleSheet, Text, TextInput } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { parseCertificateText } from '../config'
 import { useNode, useNotice } from '../node'
-import { authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, passkeyAdd, passkeyStart, readPending, recoveryPut, recoveryStart, renameFinish, renameStart, startLink, toError } from '../account'
+import { admission, authorizeLink, accountStatus, finishLink, formatNextChange, invitePolicy, isUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, passkeyAdd, passkeyStart, readPending, recoveryPut, recoveryStart, renameFinish, renameStart, startLink, toError } from '../account'
 import { enrolWith } from '../passkeyEnrol'
 import { registerEntry } from '../recovery'
 import { isAppClient } from '../appClient'
@@ -55,10 +55,11 @@ import { deviceRandomBytes, newLinkSecret } from '../appLinkSecret'
 import { HELP, SHORT } from '../help'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
-import { BROWSER_TEXT, KNOWN_LOST_TEXT, MISSED_TEXT, NONE_TEXT, NOT_SYNCED_TITLE, OTHER_PASSKEY_LABEL, PHONE_HINT, PHONE_LABEL, PHONE_SIGNIN_HINT, PHONE_SIGNIN_LABEL, RETRY_LABEL, SYNC_ADVICE, UNUSABLE_TITLE, notSyncedSteps, unusableSteps } from '../passkeyTrouble'
+import { BROWSER_TEXT, KNOWN_LOST_FULL_TEXT, KNOWN_LOST_TEXT, MISSED_TEXT, NONE_FULL_TEXT, NONE_TEXT, NOT_SYNCED_TITLE, OTHER_PASSKEY_LABEL, PHONE_HINT, PHONE_LABEL, PHONE_SIGNIN_HINT, PHONE_SIGNIN_LABEL, RETRY_LABEL, SYNC_ADVICE, UNUSABLE_TITLE, notSyncedSteps, unusableSteps } from '../passkeyTrouble'
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
 import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
+import { FULL_TEXT, admissionFor, admissionOffer } from '../signupAdmission'
 import { hostOf, installationOrigin } from '../installation'
 import { dropsHeldInvite, parseSessionReturn } from '../linkReturn'
 import * as AuthSession from '../authSession'
@@ -931,6 +932,34 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     if (passkeyRef.current !== null) passkeyRef.current.refresh()
   }, [stopped, refresh])
 
+  // Whether a new member can join (hosted only), asked before any creation is
+  // offered: the ceremony runs synchronously in the click, so the press cannot
+  // await it. A failed read (null) never blocks, because the account service
+  // still refuses later. The answer belongs to one installation (origin).
+  const [admissionEntry, setAdmissionEntry] = useState(null)
+  const [admissionPending, setAdmissionPending] = useState(false)
+  const admissionSeq = useRef(0)
+  const admissionOrigin = installationOrigin() ?? globalThis.location?.origin ?? ''
+  const admissionState = admissionFor(admissionEntry, admissionOrigin)
+  const readAdmission = useCallback(() => {
+    const mine = ++admissionSeq.current
+    const origin = admissionOrigin
+    setAdmissionPending(true)
+    admission().then((answer) => {
+      if (mine !== admissionSeq.current) return
+      setAdmissionEntry({ origin, answer })
+      setAdmissionPending(false)
+    })
+  }, [admissionOrigin])
+  // A boolean, not the passkey object: that object changes on every status
+  // refresh, which would drop the answer in flight and ask again.
+  const admissionAsks = passkey !== null
+  useEffect(() => {
+    if (!active || !locked || node.hosted !== true || !admissionAsks || admissionState !== undefined) return
+    readAdmission()
+  }, [active, locked, node.hosted, admissionAsks, admissionState, readAdmission])
+  useEffect(() => () => { admissionSeq.current++ }, [])
+
   const doCreate = async () => {
     const r = await create.run(() => node.request('identity.create', {}))
     if (r.ok) refresh()
@@ -1120,12 +1149,18 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   // Hybrid transport (the phone QR) is a browser capability. Native has no
   // such sheet: the button is not offered, and no phone ceremony is started.
   const phoneOk = !NATIVE && pkStatus !== null && pkStatus.hybrid !== 'no'
+  const offer = admissionOffer({ hosted: node.hosted === true, admission: admissionState, createFirst, phoneOk })
+  // A hidden EXISTS confirm must not keep the phone and code buttons disabled.
+  useEffect(() => {
+    if (!offer.create && confirmCreate !== false) setConfirmCreate(false)
+  }, [offer.create, confirmCreate])
   // Offer creation advice only when creation is available, including when
   // a known passkey is lost and Criar is offered again.
-  const showPhoneHint = phoneOk && createFirst && (pkStatus.platform !== 'yes' || knownLost)
+  const showPhoneHint = phoneOk && offer.create && (pkStatus.platform !== 'yes' || knownLost)
 
   const doUnlock = () => ceremony(() => passkey.unlock({}), false, false, 'plain')
   const doRegister = (phone = false) => {
+    if (!offer.create) return
     // The press event is truthy and is not a phone choice. The flag set when
     // the EXISTS confirm opened is what the second click has to forward.
     const usePhone = phone === true || (typeof confirmCreate === 'object' && confirmCreate !== null && confirmCreate.phone === true)
@@ -1134,6 +1169,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   const doComplete = () => ceremony(() => passkey.complete(), true, true)
 
   const onCreatePress = (phone = false) => {
+    if (!offer.create) return
     const usePhone = phone === true
     if (pkStatus !== null && pkStatus.exists && !confirmCreate) {
       setConfirmCreate(usePhone ? { phone: true } : true)
@@ -1146,11 +1182,11 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     if (!phoneOk) return
     // A new account on top of an existing diary still needs the EXISTS
     // confirm. The ceremony itself stays in that later click (doRegister).
-    if (createFirst && pkStatus !== null && pkStatus.exists && !confirmCreate) {
+    if (offer.phoneCreate && pkStatus !== null && pkStatus.exists && !confirmCreate) {
       onCreatePress(true)
       return
     }
-    ceremony(() => passkey.unlock(createFirst ? { register: true, phone: true } : { phone: true }), createFirst)
+    ceremony(() => passkey.unlock(offer.phoneCreate ? { register: true, phone: true } : { phone: true }), offer.phoneCreate)
   }
 
   const onOtherPasskey = () => ceremony(() => passkey.unlock({ any: true }), false, false, 'other')
@@ -1293,7 +1329,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       const entrarBtn = (
         <Btn
           label='Entrar com a passkey'
-          secondary={showComplete || createFirst}
+          secondary={showComplete || offer.create}
           onPress={doUnlock}
           pending={pkPending && !showComplete}
           disabled={pkPending}
@@ -1325,9 +1361,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             : null}
           <Body>{WELCOME_TEXT}</Body>
           <Soft>{SHORT.passkeyLoss}</Soft>
-          {createFirst ? <Soft>{SYNC_ADVICE}</Soft> : null}
-          {knownLost ? <Notice>{KNOWN_LOST_TEXT}</Notice> : null}
-          {noCredential ? <Notice>{NONE_TEXT}</Notice> : null}
+          {offer.create ? <Soft>{SYNC_ADVICE}</Soft> : null}
+          {knownLost ? <Notice>{offer.full || offer.waiting ? KNOWN_LOST_FULL_TEXT : KNOWN_LOST_TEXT}</Notice> : null}
+          {noCredential ? <Notice>{offer.full || offer.waiting ? NONE_FULL_TEXT : NONE_TEXT}</Notice> : null}
           {shownMismatch
             ? (
               <>
@@ -1354,11 +1390,19 @@ export default function Identidade ({ active, embedded = false, setup = false, v
               </>
               )
             : null}
-          {createFirst ? criarBtn : null}
+          {offer.create ? criarBtn : null}
+          {offer.full
+            ? (
+              <>
+                <Body>{FULL_TEXT}</Body>
+                <Btn label={RETRY_LABEL} secondary onPress={readAdmission} disabled={pkPending || admissionPending} />
+              </>
+              )
+            : null}
           {missedOnce && !knownLost ? <Soft>{MISSED_TEXT}</Soft> : null}
           {knownLost || missedOnce || pkStatus.passkeyKnown === true ? <Btn label={OTHER_PASSKEY_LABEL} secondary onPress={onOtherPasskey} disabled={pkPending} /> : null}
           {entrarBtn}
-          {phoneOk ? <Btn label={createFirst ? PHONE_LABEL : PHONE_SIGNIN_LABEL} secondary onPress={onPhonePress} disabled={pkPending || confirmCreate !== false} /> : null}
+          {phoneOk ? <Btn label={offer.phoneCreate ? PHONE_LABEL : PHONE_SIGNIN_LABEL} secondary onPress={onPhonePress} disabled={pkPending || confirmCreate !== false} /> : null}
           {showPhoneHint ? <Soft>{PHONE_HINT}</Soft> : null}
           {phoneOk ? <Soft>{PHONE_SIGNIN_HINT}</Soft> : null}
           {showComplete

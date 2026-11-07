@@ -5787,3 +5787,40 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi executada nesta documentação.
 - O histórico de mensagens de um aparelho não passa para outro: um aparelho novo só recebe o que o semeador guarda (7 dias).
 - Uma passkey de outra conta ainda tranca o app e apaga o cache de mídia aberta, como todo bloqueio; as mensagens guardadas não são apagadas.
+
+## 124. Aviso de rede cheia antes da passkey (PR feat/signup-seats-before-passkey)
+
+Caminhada do aviso de rede cheia na tela Entrar. O serviço de conta responde `GET /account/admission` com exatamente `{ "open": true }` ou `{ "open": false }` (público, sem autenticação, mesmo limite de consultas de `GET /account/invites/policy`; `false` só enquanto `VARANDA_MAX_MEMBERS` está batido, nunca uma contagem). O app hospedado (web, e o app instalado ligado a uma instalação hospedada) pergunta antes de "Criar passkey". Telas em [app.md](app.md) ("Rede cheia"); contrato em [README.md](../README.md) ("Vínculo de conta Google e @nome").
+
+O que muda:
+
+- Com `open: false`, a tela Entrar mostra "A Varanda está cheia por enquanto..." com o botão "tentar de novo" e não oferece "Criar passkey", "criar mesmo assim" nem "criar com o celular".
+- "Entrar com a passkey", "entrar com o celular", outra passkey, o código de recuperação, "concluir a criação da passkey" e "Criar passkey nova" depois de um código de recuperação seguem funcionando.
+- Se a leitura falha (rede, serviço antigo que responde 404, outro corpo), o app não bloqueia.
+
+O que não muda:
+
+- A leitura não reserva vaga, e um convite não abre vaga. `required: false` na política de convites continua não significando que há vaga.
+- As recusas "lista-de-espera" seguem em `POST /account/start`, na volta do Google (redireciona para `/?conta=lista-de-espera`), em `POST /account/finish` e em `POST /account/age/session`.
+- A configuração manual, uma configuração digitada à mão na página hospedada e o `varanda-serve` não perguntam e mantêm o comportamento de antes.
+
+Como verificar, a partir da raiz (um arquivo por vez):
+
+- `node apps/cli/test/account.test.js`, `node apps/app/test/account.test.js`, `node apps/app/test/signupAdmission.test.js`, `node apps/app/test/passkeysScreen.test.js`, `node apps/app/test/passkeyTrouble.test.js`, `node apps/app/test/platformGate.test.js` e `node apps/site/test/site.test.js`.
+
+Com `VARANDA_MAX_MEMBERS` igual ao número de contas vinculadas, primeiro no Android (build de debug), depois no simulador iOS, depois na web e no PWA:
+
+- [ ] Android: com o teto cheio, a tela Entrar mostra a frase de rede cheia e "tentar de novo", e nenhum "Criar passkey".
+- [ ] Android: "Entrar com a passkey" ainda abre uma conta existente.
+- [ ] Android: com o serviço de conta parado, "Criar passkey" aparece.
+- [ ] Android: depois de abrir uma vaga (subir o teto e reiniciar o serviço), "tentar de novo" mostra "Criar passkey".
+- [ ] Android: trocar de instalação pergunta de novo.
+- [ ] iOS (simulador): os mesmos cinco passos.
+- [ ] Web: os mesmos cinco passos; na aba Rede aparece um único `GET /account/admission` por tentativa, e uma configuração digitada à mão não o faz.
+- [ ] PWA instalado: os mesmos cinco passos.
+
+Limites:
+
+- Uma vaga pode acabar entre a leitura e o vínculo; o serviço recusa nesse caso.
+- A leitura é um pedido só, não uma reserva.
+- Uma configuração digitada à mão na página hospedada não recebe o aviso antecipado.

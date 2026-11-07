@@ -451,6 +451,17 @@ export const invitePolicy = async () => {
   }
   throw toError('indisponivel')
 }
+// Unlike agePolicy, where null keeps the check required, null here fails open:
+// the account service remains the authority at start, the Google callback,
+// finish and the age session.
+export const admission = async () => {
+  try {
+    const data = await call('GET', '/account/admission', undefined, { allow404: true })
+    return exactKeys(data, ['open']) && typeof data.open === 'boolean' ? { open: data.open } : null
+  } catch {
+    return null
+  }
+}
 export const invitesStart = async ({ member }) => {
   const data = await call('POST', '/account/invites/start', { member })
   if (typeof data.nonce !== 'string') throw toError('indisponivel')

@@ -225,6 +225,44 @@ test('Identidade: recovery sign-in paths', (t) => {
   t.ok(src.includes('REGISTER_FAILED_TEXT') && src.includes('registrar de novo'))
 })
 
+test('Identidade: the full network is said before a passkey is created', (t) => {
+  const src = read('screens', 'Identidade.js')
+  t.ok(src.includes('admission().then('), 'the account service is asked')
+  t.ok(src.includes('admissionFor(admissionEntry, admissionOrigin)'), 'the answer belongs to one installation')
+  t.ok(src.includes('setAdmissionEntry({ origin, answer })'), 'stored under the origin that asked')
+  t.ok(src.includes('admissionOffer({ hosted: node.hosted === true, admission: admissionState, createFirst, phoneOk })'))
+  t.ok(src.includes('node.hosted !== true || !admissionAsks || admissionState !== undefined) return'), 'hosted only, and asked once per origin')
+  t.ok(src.includes('}, [active, locked, node.hosted, admissionAsks, admissionState, readAdmission])'), 'a passkey status refresh does not ask again')
+  t.ok(src.includes('{offer.create ? criarBtn : null}'))
+  t.ok(src.includes('<Body>{FULL_TEXT}</Body>'), 'the welcome card has its own sentence')
+  t.absent(src.includes("{toError('lista-de-espera').message}"), 'not the refusal after an attempt')
+  t.ok(src.includes('offer.full || offer.waiting ? KNOWN_LOST_FULL_TEXT : KNOWN_LOST_TEXT'))
+  t.ok(src.includes('offer.full || offer.waiting ? NONE_FULL_TEXT : NONE_TEXT'))
+  t.ok(src.includes('<Btn label={RETRY_LABEL} secondary onPress={readAdmission}'), "'tentar de novo' asks again")
+  t.ok(src.includes('secondary={showComplete || offer.create}'), 'Entrar leads while creation is withheld')
+  t.ok(src.includes('offer.phoneCreate ? PHONE_LABEL : PHONE_SIGNIN_LABEL'))
+  t.ok(src.includes('passkey.unlock(offer.phoneCreate ? { register: true, phone: true } : { phone: true }), offer.phoneCreate)'), 'a phone sign-in is not a creation')
+  t.absent(src.includes('createFirst ? { register: true, phone: true }'))
+  t.absent(src.includes(': { phone: true }), createFirst)'))
+  for (const head of ['const onCreatePress = (', 'const doRegister = (']) {
+    const b = body(src, head)
+    const guard = b.indexOf('if (!offer.create) return')
+    t.ok(guard > 0, head + ' is guarded')
+    for (const call of ['ceremony(', 'setConfirmCreate(', 'doRegister(']) {
+      const at = b.indexOf(call, b.indexOf('=>'))
+      if (at !== -1) t.ok(guard < at, head + ' returns before ' + call)
+    }
+  }
+  const welcomeStart = src.lastIndexOf('} else {', src.indexOf('const entrarBtn'))
+  const welcome = src.slice(welcomeStart, src.indexOf('</Card>', welcomeStart))
+  for (const kept of ["label='Entrar com a passkey'", 'OTHER_PASSKEY_LABEL', 'CODE_LABEL', 'concluir a criação da passkey']) {
+    t.ok(welcome.includes(kept), kept + ' stays')
+  }
+  const needsStart = src.indexOf('} else if (needsPasskey) {')
+  t.absent(src.slice(needsStart, src.indexOf('} else {', needsStart)).includes('offer.'), 'the recovery card is not gated')
+  t.absent(src.slice(src.indexOf('const [admissionEntry'), src.indexOf('const offer =')).includes('Platform.OS'))
+})
+
 test('node: argument ops and the recovery fetch', (t) => {
   const node = read('node.js')
   t.ok(node.includes("const ARG_OPS = new Set(['unlock', 'unlockWrapped', 'unlockWithCode', 'bindPasskey', 'addPasskey', 'finishRecovery'])"))
