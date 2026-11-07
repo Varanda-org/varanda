@@ -1462,10 +1462,43 @@ test('identity: a creation that returns a device-bound refusal again is refused,
 // A get answer with authenticator data whose flags byte is `flags` (0x05:
 // UP and UV) and, as the module always returns, a PRF output.
 function verifiedAssertion (id = CRED, flags = 0x05) {
-  return credResponse(id, { results: { first: PRF_B64 } }, { authenticatorData: Buffer.from(authData(flags)).toString('base64url') })
+  return credResponse(id, { results: { first: PRF_B64 } }, { authenticatorData: Buffer.from(authData(flags)).toString('base64url'), clientDataJSON: 'e30', signature: 'AQID' })
 }
 
 const UNLOCKED = { exists: true, publicKey: PK, unlocked: true, passkeyKnown: true, credentialId: CRED, rpId: RP }
+
+test('identity: a created identity keeps its attestation object for the enrolment; a pending one binds it at concluir', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const att = attestationObject(authData(BE_SET))
+  // Direct: the PRF came with the creation.
+  fakePasskey({ create: () => credResponse(CRED, { enabled: true, results: { first: PRF_B64 } }, { attestationObject: att }) })
+  const client = fakeClient({ status: UNLOCKED })
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local: memoryLocal(), random: deterministicRandom })
+  await id.unlock({ register: true })
+  t.alike(await id.enrolment(), { credentialId: CRED, attestationObject: att })
+  const other = createNativeIdentity({ request: fakeClient({ status: { ...UNLOCKED, publicKey: 'cd'.repeat(32) } }).request, rpId: () => RP, store: memoryStore(), local: memoryLocal(), random: deterministicRandom })
+  t.is(await other.enrolment(), null, 'another identity never sees it')
+  const locked = createNativeIdentity({ request: fakeClient().request, rpId: () => RP, store: memoryStore(), local: memoryLocal(), random: deterministicRandom })
+  t.is(await locked.enrolment(), null, 'nothing while locked')
+  await id.dropEnrolment()
+  t.is(await id.enrolment(), null, 'gone once the service stored it')
+
+  // Pending: kept without a diary key until 'concluir' installs it.
+  resetStubs()
+  fakePasskey({
+    create: () => credResponse(CRED, { enabled: true }, { attestationObject: att }),
+    get: () => prfResponse({ results: { first: PRF_B64 } })
+  })
+  const pendingClient = fakeClient({ status: UNLOCKED })
+  const p = createNativeIdentity({ request: pendingClient.request, rpId: () => RP, store: memoryStore(), local: memoryLocal(), random: deterministicRandom })
+  t.alike(await p.unlock({ register: true }), { pending: true })
+  t.is(await p.enrolment(), null, 'no diary key named yet')
+  await p.complete()
+  t.alike(await p.enrolment(), { credentialId: CRED, attestationObject: att })
+  await p.reset().catch(() => {})
+  t.is(await p.enrolment(), null, 'recomeçar forgets it')
+})
 
 test('identity: confirm checks the bound passkey with user verification and changes nothing', async (t) => {
   resetStubs()
@@ -1477,7 +1510,10 @@ test('identity: confirm checks the bound passkey with user verification and chan
   const id = createNativeIdentity({ request: client.request, rpId: () => RP, store, local, random: deterministicRandom })
   const before = await id.status()
   client.calls.length = 0
-  t.alike(await id.confirm(), { ok: true })
+  const nonce = Buffer.alloc(32, 0x42).toString('base64url')
+  const confirmed = await id.confirm({ challenge: nonce })
+  t.alike(confirmed, { ok: true, assertion: { credentialId: CRED, clientDataJSON: 'e30', authenticatorData: Buffer.from(authData(0x05)).toString('base64url'), signature: 'AQID' } }, 'the assertion the account service verifies, no extension results')
+  t.is(seen[0].options.challenge, nonce, 'the account service nonce is the challenge')
   t.is(seen.length, 1)
   t.is(seen[0].kind, 'get')
   t.is(seen[0].options.rpId, RP)
@@ -1487,7 +1523,9 @@ test('identity: confirm checks the bound passkey with user verification and chan
   t.is(store.log.length, 0, 'no session save or clear')
   t.is(local.byRp.size, 0, 'no attempts record written')
   t.alike(await id.status(), before, 'the status is unchanged')
-  t.alike(await id.confirm(), { ok: true }, 'a second check runs once the first settled')
+  t.is((await id.confirm()).ok, true, 'a second check runs once the first settled')
+  t.is((await id.confirm({ challenge: 'abc' }).catch((e) => e)).code, 'USAGE', 'a bad challenge')
+  t.is(seen.length, 2, 'runs no ceremony')
 
   // No bound record: refused, never a discoverable get any passkey could answer.
   const unbound = fakeClient({ status: { ...UNLOCKED, credentialId: null, rpId: null } })
@@ -1561,7 +1599,7 @@ test('identity: confirm is one ceremony at a time; lock and signOut cancel it', 
   t.is(second.message, 'outra entrada com a passkey em andamento')
   t.is((await id.unlock({}).catch((e) => e)).code, 'LOCKED', 'so does an unlock')
   hold.resolve()
-  t.alike(await first, { ok: true })
+  t.is((await first).ok, true)
 
   hold = deferred()
   const unlocking = id.unlock({}).catch((e) => e)

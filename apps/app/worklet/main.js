@@ -14,6 +14,9 @@
 // Packed by scripts/pack-worklet.sh (bare-pack --linked); its native addons
 // are linked into the app by scripts/link-addons.sh (bare-link).
 
+const { createRejectionLogger } = require('./unhandled')
+Bare.on('unhandledRejection', createRejectionLogger((line) => console.error(line)))
+
 const { createSession } = require('@varanda/core/lib/session')
 const { encodeFrame, createFrameDecoder, createServerDispatcher, MAX_REQUEST, MAX_MESSAGE } = require('@varanda/rpc')
 // Same module instance the session's '#fs' resolves to under Bare: read only

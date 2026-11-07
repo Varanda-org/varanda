@@ -5,7 +5,11 @@
 // single-use nonce) to the member, the requested @username, the association
 // and, at 'finish', the Google subject. At 'delete' (Excluir conta) the
 // username is the member's current @nome, typed by the person to confirm, so
-// the signature names the account it deletes. The bytes start with
+// the signature names the account it deletes. At 'passkey' (the passkey
+// enrolment right after the link) `sub` is the lowercase hex SHA-256 of the
+// creation's attestation object bytes, so the signature names the passkey it
+// enrols; at 'cancel' (cancelling a deletion that waits for its date) the
+// username is the current @nome and `sub` is ''. The bytes start with
 // 'varanda-account-link-v1', so a signature over them can never be a member
 // certificate (varanda-cert-v1), an issuer delegation (varanda-issuer-v1) or
 // a Hypercore block signature, and vice versa.
@@ -16,7 +20,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 
 const PREFIX = 'varanda-account-link-v1'
-const PHASES = Object.freeze(['reserve', 'finish', 'rename', 'delete'])
+const PHASES = Object.freeze(['reserve', 'finish', 'rename', 'delete', 'passkey', 'cancel'])
 // A base64url nonce of at least 32 bytes of entropy.
 const NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
 // Printable ASCII without space: a subject can never contain the LF that
@@ -51,6 +55,8 @@ function checkFields (fields) {
   if (typeof association !== 'string' || !HEX64.test(association)) return 'association'
   if (phase === 'finish') {
     if (typeof sub !== 'string' || !SUB_RE.test(sub)) return 'sub'
+  } else if (phase === 'passkey') {
+    if (typeof sub !== 'string' || !HEX64.test(sub)) return 'sub'
   } else if (sub !== '') {
     return 'sub'
   }
@@ -59,8 +65,8 @@ function checkFields (fields) {
 
 // { phase, nonce, member, username, association, sub } -> the UTF-8 bytes of
 // PREFIX, phase, nonce, member, username, association, sub joined by LF (no
-// trailing LF). `sub` is '' for 'reserve', 'rename' and 'delete'. Throws TypeError on
-// a bad shape.
+// trailing LF). `sub` is '' for 'reserve', 'rename', 'delete' and 'cancel',
+// and a hex64 attestation hash for 'passkey'. Throws TypeError on a bad shape.
 function accountLinkPayload (fields) {
   const reason = checkFields(fields)
   if (reason !== null) throw new TypeError('invalid account-link ' + reason)

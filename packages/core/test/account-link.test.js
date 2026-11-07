@@ -39,7 +39,7 @@ const FINISH = {
 }
 
 test('constants', (t) => {
-  t.alike([...PHASES], ['reserve', 'finish', 'rename', 'delete'])
+  t.alike([...PHASES], ['reserve', 'finish', 'rename', 'delete', 'passkey', 'cancel'])
   t.ok(Object.isFrozen(PHASES))
   t.is(PREFIX, 'varanda-account-link-v1')
   t.ok(NONCE_RE.test('A-_9'.repeat(32)))
@@ -118,7 +118,7 @@ test('certificate and issuer payloads signed by the member key are not account l
   for (const [label, bytes] of [['v1 cert', v1], ['issuer', issuer]]) {
     const signature = b4a.toString(crypto.sign(bytes, MEMBER_KP.secretKey), 'hex')
     for (const phase of PHASES) {
-      const fields = { ...FINISH, phase, sub: phase === 'finish' ? FINISH.sub : '' }
+      const fields = { ...FINISH, phase, sub: phase === 'finish' ? FINISH.sub : phase === 'passkey' ? 'ab'.repeat(32) : '' }
       t.alike(verifyAccountLink(fields, signature), { ok: false, reason: 'bad-signature' }, label + ' as ' + phase)
     }
   }
@@ -200,4 +200,21 @@ test('a delete proof is bound to its phase and the typed @nome', (t) => {
   t.alike(verifyAccountLink(del, rename), { ok: false, reason: 'bad-signature' }, 'a rename is no delete')
   t.alike(verifyAccountLink({ ...del, sub: FINISH.sub }, sig), { ok: false, reason: 'malformed' }, 'no Google subject')
   t.ok(b4a.toString(accountLinkPayload(del)).startsWith('varanda-account-link-v1\ndelete\n'))
+})
+
+test('a passkey proof names its attestation hash; a cancel proof is no delete', (t) => {
+  const hash = 'ab'.repeat(32)
+  const pk = { ...FINISH, phase: 'passkey', sub: hash }
+  const sig = signAccountLink(pk, MEMBER_KP)
+  t.alike(verifyAccountLink(pk, sig), { ok: true })
+  t.alike(verifyAccountLink({ ...pk, sub: 'cd'.repeat(32) }, sig), { ok: false, reason: 'bad-signature' }, 'another passkey')
+  for (const sub of ['', FINISH.sub, 'AB'.repeat(32), 'ab'.repeat(31)]) {
+    t.alike(verifyAccountLink({ ...pk, sub }, sig), { ok: false, reason: 'malformed' }, 'sub ' + JSON.stringify(sub))
+  }
+  const cancel = { ...FINISH, phase: 'cancel', sub: '' }
+  const csig = signAccountLink(cancel, MEMBER_KP)
+  t.alike(verifyAccountLink(cancel, csig), { ok: true })
+  t.alike(verifyAccountLink({ ...cancel, phase: 'delete' }, csig), { ok: false, reason: 'bad-signature' }, 'a cancel is no delete')
+  t.alike(verifyAccountLink(cancel, signAccountLink({ ...cancel, phase: 'delete' }, MEMBER_KP)), { ok: false, reason: 'bad-signature' }, 'a delete is no cancel')
+  t.alike(verifyAccountLink({ ...cancel, sub: hash }, csig), { ok: false, reason: 'malformed' })
 })

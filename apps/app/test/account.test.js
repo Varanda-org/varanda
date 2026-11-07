@@ -1427,12 +1427,15 @@ test('previewFetch: a null or empty desc is a card with desc \'\'; exact keys, h
 
 test('deleteStart/deleteFinish: exact shapes, route tokens in pt-BR, a 5xx finish is uncertain', async (t) => {
   const a = await load()
-  let calls = stub(t, json(200, { nonce: 'n'.repeat(43), username: 'ana' }))
-  t.alike(await a.deleteStart({ member: M }), { nonce: 'n'.repeat(43), username: 'ana' })
+  const started = { nonce: 'n'.repeat(43), username: 'ana', passkeys: ['Q1JFRA'], scheduled: null }
+  let calls = stub(t, json(200, started))
+  t.alike(await a.deleteStart({ member: M }), started)
   t.ok(calls[0].url.endsWith('/account/delete/start'))
   t.alike(JSON.parse(calls[0].init.body), { member: M })
-  stub(t, json(200, { nonce: 'n'.repeat(43), username: 'ana', extra: 1 }))
-  await t.exception(a.deleteStart({ member: M }), /serviço indisponível/, 'an unexpected shape')
+  for (const bad of [{ ...started, extra: 1 }, { nonce: 'n'.repeat(43), username: 'ana' }, { ...started, passkeys: ['a b'] }, { ...started, scheduled: 'amanhã' }]) {
+    stub(t, json(200, bad))
+    await t.exception(a.deleteStart({ member: M }), /serviço indisponível/, 'an unexpected shape')
+  }
   stub(t, json(409, { error: 'paginas-ativas' }))
   try {
     await a.deleteStart({ member: M })
@@ -1441,9 +1444,22 @@ test('deleteStart/deleteFinish: exact shapes, route tokens in pt-BR, a 5xx finis
     t.is(err.code, 'paginas-ativas')
     t.ok(/encerre ou transfira/.test(err.message))
   }
+  const assertion = { credentialId: 'Q1JFRA', clientDataJSON: 'e30', authenticatorData: 'AAAA', signature: 'AQID' }
   calls = stub(t, json(200, { deleted: 'pendente' }))
-  t.alike(await a.deleteFinish({ member: M, nonce: 'n'.repeat(43), signature: 'f'.repeat(128) }), { deleted: 'pendente' })
-  t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: 'n'.repeat(43), signature: 'f'.repeat(128) })
+  t.alike(await a.deleteFinish({ member: M, nonce: 'n'.repeat(43), signature: 'f'.repeat(128), assertion }), { deleted: 'pendente' })
+  t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: 'n'.repeat(43), signature: 'f'.repeat(128), assertion })
+  calls = stub(t, json(200, { scheduled: '2026-11-13T12:00:00.000Z' }))
+  t.alike(await a.deleteFinish({ member: M, nonce: 'n'.repeat(43), signature: 'f'.repeat(128), wait: true }), { scheduled: '2026-11-13T12:00:00.000Z' })
+  t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: 'n'.repeat(43), signature: 'f'.repeat(128), wait: true })
+  stub(t, json(403, { error: 'passkey-invalida' }))
+  try {
+    await a.deleteFinish({ member: M, nonce: 'n'.repeat(43), signature: 'f'.repeat(128), assertion })
+    t.fail('resolved')
+  } catch (err) {
+    t.is(err.code, 'passkey-invalida')
+    t.ok(/passkey/.test(err.message))
+    t.absent(err.uncertain === true, 'refused before any write')
+  }
   stub(t, json(503, { error: 'resultado-incerto' }))
   try {
     await a.deleteFinish({ member: M, nonce: 'n'.repeat(43), signature: 'f'.repeat(128) })
@@ -1465,5 +1481,33 @@ test('deleteStart/deleteFinish: exact shapes, route tokens in pt-BR, a 5xx finis
   } catch (err) {
     t.is(err.code, 'assinatura-invalida')
     t.absent(err.uncertain === true)
+  }
+})
+
+test('deleteCancelStart/Finish and passkeyStart/Add: exact shapes', async (t) => {
+  const a = await load()
+  let calls = stub(t, json(200, { nonce: 'c'.repeat(43), username: 'ana', scheduled: '2026-11-13T12:00:00.000Z' }))
+  t.alike(await a.deleteCancelStart({ member: M }), { nonce: 'c'.repeat(43), username: 'ana', scheduled: '2026-11-13T12:00:00.000Z' })
+  t.ok(calls[0].url.endsWith('/account/delete/cancel/start'))
+  stub(t, json(200, { nonce: 'c'.repeat(43), scheduled: null }))
+  await t.exception(a.deleteCancelStart({ member: M }), /serviço indisponível/)
+  calls = stub(t, json(200, { cancelled: true }))
+  t.alike(await a.deleteCancelFinish({ member: M, nonce: 'c'.repeat(43), signature: 'e'.repeat(128) }), { cancelled: true })
+  t.ok(calls[0].url.endsWith('/account/delete/cancel/finish'))
+  stub(t, json(200, { cancelled: 'yes' }))
+  await t.exception(a.deleteCancelFinish({ member: M, nonce: 'c'.repeat(43), signature: 'e'.repeat(128) }), /serviço indisponível/)
+
+  calls = stub(t, json(200, { nonce: 'p'.repeat(43) }))
+  t.alike(await a.passkeyStart({ member: M }), { nonce: 'p'.repeat(43) })
+  t.ok(calls[0].url.endsWith('/account/passkey/start'))
+  calls = stub(t, json(200, { added: true }))
+  t.alike(await a.passkeyAdd({ member: M, nonce: 'p'.repeat(43), signature: 'e'.repeat(128), credentialId: 'Q1JFRA', attestationObject: 'oA' }), { added: true })
+  t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: 'p'.repeat(43), signature: 'e'.repeat(128), credentialId: 'Q1JFRA', attestationObject: 'oA' })
+  stub(t, json(409, { error: 'vinculo-antigo' }))
+  try {
+    await a.passkeyAdd({ member: M, nonce: 'p'.repeat(43), signature: 'e'.repeat(128), credentialId: 'Q1JFRA', attestationObject: 'oA' })
+    t.fail('resolved')
+  } catch (err) {
+    t.is(err.code, 'vinculo-antigo')
   }
 })

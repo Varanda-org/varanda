@@ -17,6 +17,20 @@ const b4a = require('b4a')
 
 const FILES = ['oplog', 'tree', 'bitfield', 'data', 'header']
 
+// random-access-file 4.1.2 answers a zero-byte read with the global
+// process.nextTick, which Bare does not have: the ReferenceError is thrown
+// inside a bare-fs callback (an async function there), so it becomes an
+// unhandled rejection and the worklet's read never completes.
+class CoreFile extends RandomAccessFile {
+  _read (req) {
+    if (req.size === 0) {
+      queueMicrotask(() => req.callback(null, b4a.alloc(0)))
+      return
+    }
+    super._read(req)
+  }
+}
+
 function hexName (name) {
   if (typeof name !== 'string' || name.length === 0) throw new Error('storage name must be a non-empty string')
   return b4a.toString(b4a.from(name, 'utf8'), 'hex')
@@ -114,7 +128,7 @@ function fileNodeStorage (dir) {
       // Every call to the factory opens a fresh file on the same path, so a
       // factory used again after close() works (the rule of lib/storage.js).
       return (file) => {
-        const raf = new RandomAccessFile(path.join(base, file))
+        const raf = new CoreFile(path.join(base, file))
         // Cores are closed and reopened all session long: a closed file
         // leaves the set so it is not kept until close().
         const open = files

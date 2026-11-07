@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 23)
+  t.is(LEGAL_VERSION, 24)
   t.is(LEGAL_DATE, '06/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 23, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 24, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: complete documents with plain, visible text and project URLs', async (t) => {
@@ -56,7 +56,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '3939a7a02e2d4684cdfbd95fbe2510b10ebc5b466cc45b72393000b680fb359e', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'd5b887d2fccd9299061effbeb08bd842ffaed41509a480fe1cb3352e362b6dd3', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
@@ -164,7 +164,17 @@ test('legal: version 22 describes Excluir conta, what goes, what stays and the 7
   t.ok(text(PRIVACY).includes('A mesma conta Google pode criar uma conta nova'))
 })
 
-test('legal: version 23 describes link previews built once and never fetched by readers', async (t) => {
+test('legal: version 23 describes the passkey key the service keeps and the 7-day wait without it', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('a exclusão fica agendada por 7 dias'))
+  t.ok(text(TERMS).includes('você pode cancelar de qualquer um deles'))
+  t.ok(text(PRIVACY).includes('o serviço de conta guarda o identificador, a chave pública, um contador do autenticador e a data'))
+  t.ok(text(PRIVACY).includes('não guarda nenhum segredo da passkey'))
+  t.ok(text(PRIVACY).includes('cancelar o pedido apaga só a data'))
+})
+
+test('legal: version 24 describes link previews built once and never fetched by readers', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(TERMS).includes('No app nativo, quem monta a prévia é o aparelho de quem envia'))

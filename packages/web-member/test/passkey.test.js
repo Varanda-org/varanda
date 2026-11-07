@@ -317,7 +317,9 @@ test('register: BE clear -> NOT_SYNCED with the ids, no prf; BE set -> normal', 
 
   const objectSynced = fakeCredential({ prf: { enabled: true, results: { first: new Uint8Array(32).fill(5) } } })
   objectSynced.response.attestationObject = noneAttestation(authDataWith(0x0d)).buffer
-  t.ok((await fakeContainer({ create: objectSynced }).run((c) => register(c, { rpId: RP_ID, userId }))).prf, 'attestationObject with BE set')
+  const withObject = await fakeContainer({ create: objectSynced }).run((c) => register(c, { rpId: RP_ID, userId }))
+  t.ok(withObject.prf, 'attestationObject with BE set')
+  t.is(withObject.attestationObject, toBase64Url(new Uint8Array(objectSynced.response.attestationObject)), 'kept for the enrolment at the account service')
 
   const throwingGetter = fakeCredential({ prf: { enabled: true, results: { first: new Uint8Array(32).fill(5) } } })
   throwingGetter.response.getAuthenticatorData = () => { throw new Error('x') }
@@ -383,7 +385,7 @@ test('register: enabled without results -> pending, no get(); completeRegistrati
   })
   const userId = new Uint8Array(32).fill(0x22)
   const res = await box.run((c) => register(c, { rpId: RP_ID, userId, excludeCredentialIds: [toBase64Url(new Uint8Array([1]))] }))
-  t.alike(res, { credentialId: toBase64Url(rawId), userId: '22'.repeat(32), pending: true })
+  t.alike(res, { credentialId: toBase64Url(rawId), userId: '22'.repeat(32), pending: true, attestationObject: null })
   t.is(box.calls.get.length, 0, 'zero get() calls')
   t.ok(box.calls.create[0].options.publicKey.excludeCredentials[0].id instanceof Uint8Array, 'exclude id is bytes')
 
@@ -466,14 +468,17 @@ test('signIn: discoverable, userHandle, errors', async (t) => {
 test('verify: no PRF asked, a PRF handed back is wiped, UV required, errors mapped', async (t) => {
   const { verify } = passkey
   const uv = (flags) => { const d = new Uint8Array(37); d[32] = flags; return d.buffer }
-  const verified = (extra = {}) => ({ ...fakeCredential(extra), response: { userHandle: null, authenticatorData: uv(0x05) } })
+  const clientData = new Uint8Array([123, 125])
+  const sig = new Uint8Array([7, 8, 9])
+  const verified = (extra = {}) => ({ ...fakeCredential(extra), response: { userHandle: null, authenticatorData: uv(0x05), clientDataJSON: clientData.slice().buffer, signature: sig.slice().buffer } })
   const id = toBase64Url(new Uint8Array([1, 2, 3, 4]))
+  const answer = { credentialId: id, assertion: { credentialId: id, clientDataJSON: toBase64Url(clientData), authenticatorData: toBase64Url(new Uint8Array(uv(0x05))), signature: toBase64Url(sig) } }
 
   t.absent('extensions' in getOptions({ rpId: RP_ID, prf: false }), 'prf: false leaves the extension out')
   t.ok('extensions' in getOptions({ rpId: RP_ID }), 'the default still asks for it')
 
   const box = fakeContainer({ get: verified() })
-  t.alike(await box.run((c) => verify(c, { rpId: RP_ID, allowCredentialIds: [id] })), { credentialId: id })
+  t.alike(await box.run((c) => verify(c, { rpId: RP_ID, allowCredentialIds: [id] })), answer, 'the assertion goes to the account service')
   const call = box.calls.get[0]
   t.ok(call.synchronous, 'get() called before the caller awaited')
   t.absent('extensions' in call.options.publicKey, 'no PRF requested')
@@ -486,13 +491,24 @@ test('verify: no PRF asked, a PRF handed back is wiped, UV required, errors mapp
 
   const first = new Uint8Array(32).fill(9)
   const withPrf = fakeContainer({ get: verified({ prf: { results: { first } } }) })
-  t.alike(await withPrf.run((c) => verify(c, { rpId: RP_ID })), { credentialId: id })
+  t.alike(await withPrf.run((c) => verify(c, { rpId: RP_ID })), answer)
   t.ok(first.every((x) => x === 0), 'a PRF output handed back anyway is wiped')
 
   const noUv = fakeContainer({ get: { ...fakeCredential(), response: { authenticatorData: uv(0x01) } } })
   t.is(await codeOf(noUv.run((c) => verify(c, { rpId: RP_ID }))), 'WEBAUTHN', 'UV clear -> WEBAUTHN')
   const noData = fakeContainer({ get: fakeCredential() })
   t.is(await codeOf(noData.run((c) => verify(c, { rpId: RP_ID }))), 'WEBAUTHN', 'no authenticator data -> WEBAUTHN')
+  const noSig = fakeContainer({ get: { ...fakeCredential(), response: { authenticatorData: uv(0x05), clientDataJSON: clientData.slice().buffer } } })
+  t.is(await codeOf(noSig.run((c) => verify(c, { rpId: RP_ID }))), 'WEBAUTHN', 'no signature -> WEBAUTHN')
+
+  // The account service's nonce is the challenge, as given.
+  const nonce = new Uint8Array(32).fill(0x5a)
+  const bound = fakeContainer({ get: verified() })
+  await bound.run((c) => verify(c, { rpId: RP_ID, allowCredentialIds: [id], challenge: nonce }))
+  t.alike(Array.from(bound.calls.get[0].options.publicKey.challenge), Array.from(nonce))
+  t.ok(bound.calls.get[0].synchronous, 'still before any await')
+  t.exception.all(() => getOptions({ rpId: RP_ID, challenge: new Uint8Array(31) }), /desafio/)
+  t.not(toBase64Url(getOptions({ rpId: RP_ID }).challenge), toBase64Url(getOptions({ rpId: RP_ID }).challenge), 'random without one')
   t.is(await codeOf(fakeContainer({ get: null }).run((c) => verify(c, { rpId: RP_ID }))), 'WEBAUTHN', 'no credential -> WEBAUTHN')
   t.is(await codeOf(fakeContainer({ get: domError('NotAllowedError') }).run((c) => verify(c, { rpId: RP_ID }))), 'CANCELLED')
   t.is(await codeOf(fakeContainer({ get: domError('SecurityError') }).run((c) => verify(c, { rpId: RP_ID }))), 'UNSUPPORTED')

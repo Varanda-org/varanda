@@ -139,7 +139,7 @@ function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailin
   )
 }
 
-export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, onOpenPaginas, inviteNudge = 0 }) {
+export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, scheduledDeletion = null, onDeletionChanged, onOpenPaginas, inviteNudge = 0 }) {
   const styles = useStyles(makeStyles)
   const { colors, mode, setMode } = useTheme()
   const node = useNode()
@@ -529,6 +529,8 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 member={member}
                 onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function' ? openPaginas : undefined}
                 onTermsReset={onTermsReset}
+                scheduledDeletion={scheduledDeletion}
+                onDeletionChanged={onDeletionChanged}
                 onDone={onClose}
               />
             </View>

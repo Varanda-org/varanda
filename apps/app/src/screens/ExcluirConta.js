@@ -4,21 +4,25 @@
 // the node (hosted, unlocked) and the account service, never from
 // Platform.OS. The request sequence and texts are in src/accountDeletion.js.
 //
-// The screen asks the account service for a nonce and the current @nome when
-// it opens (a member who still owns a live page learns it here), then the
-// person types the @nome and taps Excluir conta: the fresh passkey check
-// (node.passkey.confirm) runs first, inside the tap; push is switched off
-// while the key can still sign; account.sign signs the 'delete' statement;
-// the service deletes. Only then the device keeps the receipt (public key
-// and date) and is wiped as Recomeçar does.
+// The screen asks the account service for a nonce, the current @nome and
+// the passkeys it holds when it opens (a member who still owns a live page
+// learns it here), then the person types the @nome and taps Excluir conta:
+// the fresh passkey check (node.passkey.confirm, over the nonce) runs first,
+// inside the tap; account.sign signs the 'delete' statement. With a passkey
+// the service holds, push is switched off while the key can still sign, the
+// service verifies the assertion and deletes, and only then the device keeps
+// the receipt (public key and date) and is wiped as Recomeçar does. Without
+// one (an account from before that registration, or another passkey) the
+// deletion is scheduled WAIT_DAYS ahead: nothing is wiped, every device shows
+// the date (CancelarExclusao) and any of them can cancel.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { View } from 'react-native'
 import { useNode } from '../node'
 import { useOutbox } from '../outboxProvider'
 import { usePush } from '../usePush'
-import { accountStatus, deleteFinish, deleteStart, formatNextChange } from '../account'
-import { DELETE_DAYS, DELETED_TEXT, DONE_TEXT, PASSKEY_TEXT, PENDING_TEXT, deletedOf, newReceipt, requestDeletion, typedMatches } from '../accountDeletion'
+import { accountStatus, deleteCancelFinish, deleteCancelStart, deleteFinish, deleteStart, formatNextChange } from '../account'
+import { DELETE_DAYS, DELETED_TEXT, DONE_TEXT, PASSKEY_TEXT, PENDING_TEXT, WAIT_TEXT, cancelDeletion, deletedOf, deletionMode, newReceipt, requestDeletion, scheduledText, typedMatches } from '../accountDeletion'
 import { clearDeletionReceipt, loadDeletionReceipt, saveDeletionReceipt } from '../deletionReceiptStore'
 import { Body, Btn, ErrorText, Field, Page, Row, Soft, errorText, useAction } from '../ui'
 
@@ -31,7 +35,9 @@ const PAGES_TEXT = 'Você ainda é dono de uma página. Encerre ou transfira sua
 
 // Ajustes > Excluir conta. `active`: the sub-screen is on screen and the node
 // is ready; `member`: the unlocked key; onDone closes the sheet.
-export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsReset, onDone }) {
+// `scheduledDeletion`: the date the shell read from /account/status, so the
+// cancel stays reachable even when start refuses (a page owned meanwhile).
+export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsReset, scheduledDeletion = null, onDeletionChanged, onDone }) {
   const node = useNode()
   const outbox = useOutbox()
   const pushStore = usePush()
@@ -40,6 +46,8 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
   const [loading, setLoading] = useState(false)
   const [typed, setTyped] = useState('')
   const [wipeFailed, setWipeFailed] = useState(false)
+  // The date of a deletion this screen just scheduled.
+  const [scheduled, setScheduled] = useState(null)
   const action = useAction()
   const turn = useRef(0)
 
@@ -66,6 +74,7 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
       ++turn.current
       setTyped('')
       setPrepared(null)
+      setScheduled(null)
       setProblem(null)
       action.clearError()
       return
@@ -82,20 +91,27 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
   const submit = () => {
     setWipeFailed(false)
     action.run(async () => {
+      let result
       try {
-        await requestDeletion({
+        result = await requestDeletion({
           prepared,
           typed,
-          confirm: () => node.passkey.confirm(),
+          confirm: (args) => node.passkey.confirm(args),
           sign: ({ nonce, username }) => node.request('account.sign', { phase: 'delete', nonce, username, sub: '' }),
-          finish: ({ nonce, signature }) => deleteFinish({ member, nonce, signature }),
+          finish: (args) => deleteFinish({ member, ...args }),
           status: () => accountStatus(member),
           beforeFinish: () => pushStore.turnOffPush({ node, member })
         })
       } catch (err) {
         // A spent or expired nonce: the next tap gets a new one.
-        if (err && (err.code === 'expirado' || err.code === 'assinatura-invalida')) prepare()
+        if (err && (err.code === 'expirado' || err.code === 'assinatura-invalida' || err.code === 'passkey-invalida')) prepare()
         throw err
+      }
+      if (result && typeof result.scheduled === 'string') {
+        setTyped('')
+        setScheduled(result.scheduled)
+        if (typeof onDeletionChanged === 'function') onDeletionChanged()
+        return
       }
       await saveDeletionReceipt(newReceipt(member, Date.now()))
       try {
@@ -127,9 +143,16 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
     )
   }
 
+  const cancelled = () => {
+    setScheduled(null)
+    prepare()
+    if (typeof onDeletionChanged === 'function') onDeletionChanged()
+  }
+
   if (problem !== null && problem.code === 'paginas-ativas') {
     return (
       <Page>
+        {scheduledDeletion !== null ? <CancelarExclusao member={member} scheduled={scheduledDeletion} onCancelled={cancelled} /> : null}
         <Body>{PAGES_TEXT}</Body>
         {typeof onOpenPaginas === 'function' ? <Btn label='Abrir Páginas' onPress={onOpenPaginas} /> : null}
       </Page>
@@ -138,13 +161,23 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
 
   const username = prepared !== null ? prepared.username : null
   const matches = username !== null && typedMatches(typed, username)
+  const mode = deletionMode(prepared)
+  const waiting = scheduled !== null ? scheduled : (prepared !== null ? prepared.scheduled : null)
+  if (waiting !== null && mode === 'agendada') {
+    return (
+      <Page>
+        <CancelarExclusao member={member} scheduled={waiting} onCancelled={cancelled} />
+      </Page>
+    )
+  }
   return (
     <Page>
+      {waiting !== null ? <CancelarExclusao member={member} scheduled={waiting} onCancelled={cancelled} /> : null}
       <Body>{WHAT_GOES}</Body>
       <Soft>{DIARY}</Soft>
       <Soft>{GROUPS}</Soft>
       <Soft>{KEPT}</Soft>
-      <Soft>{DEVICE}</Soft>
+      {mode === 'agendada' ? <Soft>{WAIT_TEXT}</Soft> : <Soft>{DEVICE}</Soft>}
       <Soft>{PASSKEY_TEXT}</Soft>
       {loading ? <Soft>carregando…</Soft> : null}
       {problem !== null
@@ -161,13 +194,40 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
             <Field label={'Para confirmar, digite @' + username} value={typed} onChangeText={setTyped} mono maxLength={24} placeholder={'@' + username} />
             <Soft>Depois, confirme com a sua passkey.</Soft>
             <Row>
-              <Btn label='Excluir conta' danger onPress={submit} disabled={!matches} pending={action.pending} />
+              <Btn label={mode === 'agendada' ? 'Agendar exclusão' : 'Excluir conta'} danger onPress={submit} disabled={!matches} pending={action.pending} />
             </Row>
           </>
           )
         : null}
       <ErrorText>{action.error}</ErrorText>
     </Page>
+  )
+}
+
+// A deletion waiting for its date (asked without a passkey the account
+// service could verify): the date and the way to cancel it, on this screen
+// and on every signed-in device (Ajustes). Cancelling needs the diary key's
+// 'cancel' statement, nothing more: whoever holds the account may keep it.
+export function CancelarExclusao ({ member, scheduled, onCancelled }) {
+  const node = useNode()
+  const action = useAction()
+  const cancel = () => action.run(async () => {
+    await cancelDeletion({
+      start: () => deleteCancelStart({ member }),
+      sign: ({ nonce, username }) => node.request('account.sign', { phase: 'cancel', nonce, username, sub: '' }),
+      finish: ({ nonce, signature }) => deleteCancelFinish({ member, nonce, signature })
+    })
+    if (typeof onCancelled === 'function') onCancelled()
+  })
+  return (
+    <View>
+      <Body>{scheduledText(scheduled)}</Body>
+      <Soft>Se não foi você que pediu, cancele agora.</Soft>
+      <Row>
+        <Btn label='Cancelar exclusão' onPress={cancel} pending={action.pending} />
+      </Row>
+      <ErrorText>{action.error}</ErrorText>
+    </View>
   )
 }
 

@@ -27,17 +27,28 @@
 // finishRecovery() creates a marked passkey for the root. No HTTP here: the
 // app (src/node.js) talks to the account service.
 //
-// confirm(), as the browser handle's: a fresh user verification with the
-// bound passkey while unlocked, before a step the stored session alone must
-// not authorize; it never installs, saves or changes anything.
+// confirm({ challenge }), as the browser handle's: a fresh user verification
+// with the bound passkey while unlocked, over the account service's nonce,
+// before a step the stored session alone must not authorize; it answers the
+// assertion the service verifies and never installs, saves or changes
+// anything.
+//
+// The passkey enrolment (src/passkeyEnrol.js): a creation that becomes the
+// identity keeps its attestation object in src/passkeyEnrolStore.native.js
+// (with publicKey null while it waits for 'concluir'); enrolment() answers it
+// for the unlocked identity only, and dropEnrolment() and reset() forget it.
 
 import * as PasskeyPrf from '../modules/passkey-prf'
 import { keychainEpoch, sessionStore } from './sessionStore'
 import { capRefused, isBound, passkeyLocal } from './passkeyLocal'
 import { parseAuthData, syncStateOf } from './authenticatorData'
+// Explicit file: identity.native.js only ever runs on the native app.
+import { passkeyEnrolStore } from './passkeyEnrolStore.native.js'
 import {
   CHALLENGE_BYTES,
   USER_ID_BYTES,
+  assertionOf,
+  attestationOf,
   buildCreateOptions,
   buildGetOptions,
   credentialIdOf,
@@ -152,7 +163,7 @@ function validId (id) {
 // installed) and rejects CANCELLED. signOut and reset wait for the
 // post-ceremony part in flight (`finishing`) before they delete the stored
 // session, so a save racing 'Sair' is deleted after it.
-export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = PasskeyPrf, store = sessionStore, epoch = keychainEpoch, local = passkeyLocal, random = randomBytes, now = Date.now } = {}) {
+export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = PasskeyPrf, store = sessionStore, epoch = keychainEpoch, local = passkeyLocal, enrolStore = passkeyEnrolStore, random = randomBytes, now = Date.now } = {}) {
   if (typeof request !== 'function') throw new TypeError('request required')
   if (typeof rpIdOf !== 'function') throw new TypeError('rpId required')
 
@@ -613,6 +624,8 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     // A handed-back excluded id was not made by this request (it may be an
     // account): recorded and reported as not created here, so never named.
     const madeNow = !exclude.has(credentialId) || (pendingReg !== null && pendingReg.credentialId === credentialId)
+    // A new identity's public key, for the enrolment at the account service.
+    const attestation = mode === 'unlock' ? attestationOf(response) : null
     if (syncStateOf(response, fromBase64Url) === 'bound') {
       addRefused(credentialId, userId, 'NOT_SYNCED', madeNow)
       if (pendingReg !== null && pendingReg.credentialId === credentialId) pendingReg = null
@@ -644,6 +657,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       // complete() needs the root as long as the creation is pending: it
       // stays pinned (finishRecovery).
       await persist(rpId)
+      if (attestation !== null) await enrolStore.save({ v: 1, rpId, credentialId, attestationObject: attestation, publicKey: null })
       return { pending: true }
     }
     if (gen !== generation) {
@@ -667,7 +681,37 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     }
     supersede(credentialId)
     await settleInstalled(rpId, credentialId)
+    if (attestation !== null && out && typeof out.publicKey === 'string') {
+      await enrolStore.save({ v: 1, rpId, credentialId, attestationObject: attestation, publicKey: out.publicKey })
+    }
     return out
+  }
+
+  // A pending creation that 'concluir' just installed: its kept attestation
+  // now names the diary key it derived. Best effort.
+  async function bindEnrolment (rpId, credentialId, publicKey) {
+    const rec = await enrolStore.load()
+    if (rec === null || rec.rpId !== rpId || rec.credentialId !== credentialId || rec.publicKey !== null) return
+    await enrolStore.save({ ...rec, publicKey })
+  }
+
+  async function enrolment () {
+    await resuming
+    const rpId = rpIdOf()
+    let st = null
+    try {
+      st = await request('identity.status')
+    } catch {
+      return null
+    }
+    if (!(st && st.unlocked === true) || typeof st.publicKey !== 'string') return null
+    const rec = await enrolStore.load()
+    if (rec === null || rec.rpId !== rpId || rec.publicKey !== st.publicKey) return null
+    return { credentialId: rec.credentialId, attestationObject: rec.attestationObject }
+  }
+
+  async function dropEnrolment () {
+    await enrolStore.clear()
   }
 
   // As the web's signIn: a passkey already bound to this diary is the only
@@ -893,10 +937,23 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   // authorize (deleting the account). A check only: identity.status is its
   // one request, nothing is installed, saved or refused and the generation
   // does not move; a lock, signOut or reset meanwhile makes it CANCELLED.
+  // `challenge` is the account service's nonce (base64url of 32 bytes, USAGE
+  // otherwise; random when absent) and the answer carries the assertion
+  // (clientDataJSON, authenticatorData, signature) the service verifies with
+  // the public key it keeps; the extension results never leave here.
   // The module always asks for the PRF output (the iOS request needs its
   // input): that output is never decoded, and being a JS string it cannot be
   // zero-filled, only dropped with the response.
-  async function confirm () {
+  async function confirm ({ challenge } = {}) {
+    let bytes = null
+    if (challenge !== undefined) {
+      try {
+        bytes = fromBase64Url(challenge)
+      } catch {
+        bytes = null
+      }
+      if (bytes === null || bytes.byteLength !== CHALLENGE_BYTES) throw codedError('USAGE', 'desafio inválido')
+    }
     await resuming
     if (busy) throw codedError('LOCKED', BUSY_TEXT)
     const rpId = rpIdOf()
@@ -911,12 +968,12 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       // accept any Varanda passkey the holder of the device has.
       const bound = validId(st.credentialId) && st.rpId === rpId ? st.credentialId : null
       if (bound === null) throw codedError('NONE', NO_BOUND_TEXT)
-      const response = await ceremony('get', buildGetOptions({ rpId, challenge: random(CHALLENGE_BYTES), allowCredentialIds: [bound] }))
+      const response = await ceremony('get', buildGetOptions({ rpId, challenge: bytes !== null ? bytes : random(CHALLENGE_BYTES), allowCredentialIds: [bound] }))
       if (gen !== generation) throw cancelled()
       const credentialId = credentialIdOf(response)
       if (!userVerifiedOf(response)) throw passkeyError('WEBAUTHN')
       if (credentialId !== bound) throw codedError('MISMATCH', MISMATCH_TEXT)
-      return { ok: true }
+      return { ok: true, assertion: assertionOf(response) }
     } catch (err) {
       if (gen !== generation) throw cancelled()
       throw err
@@ -950,7 +1007,9 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
           throw codedError('RECOVERY_BAD', SIGN_IN_FIRST_TEXT)
         }
       }
-      return await signIn(gen, rpId, [target.credentialId], true, target.userId)
+      const out = await signIn(gen, rpId, [target.credentialId], true, target.userId)
+      if (!isWrapUserId(target.userId) && out && typeof out.publicKey === 'string') await bindEnrolment(rpId, target.credentialId, out.publicKey)
+      return out
     } catch (err) {
       // A reset (or sign-out, lock) while the ceremony was open owns the
       // record now: a late failure must not write the old passkey back.
@@ -1063,6 +1122,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     installedCred = null
     pendingReg = null
     refused = kept
+    await enrolStore.clear()
     await resuming
     await finishing
     await loading
@@ -1174,6 +1234,8 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     addPasskey,
     bindPasskey,
     makeRecoveryCode,
-    confirm
+    confirm,
+    enrolment,
+    dropEnrolment
   }
 }

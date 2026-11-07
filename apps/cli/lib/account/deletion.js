@@ -12,9 +12,12 @@
 // push subscriptions (push.json), the recovery entries (recovery.json, each
 // leaving the store's usual 30-day tombstone with the public key), the
 // invites the member issued (invites.json), the surprise-invite marks
-// (invite-drops.json) and the encrypted seen blob (seen/<member>, removed
+// (invite-drops.json), the encrypted seen blob (seen/<member>, removed
 // with the compare-and-swap of ./seen-store.js: a conflict waits for the
-// next sweep). What stays is decided elsewhere: the deleted row and
+// next sweep) and the passkey public keys with any waiting deletion
+// (passkeys.json, leaving a 30-day tombstone). Each sweep first runs the
+// deletions whose date came (`scheduled`, ./delete-routes.js runScheduled),
+// so they are purged in the same pass. What stays is decided elsewhere: the deleted row and
 // the burned names in the directory, the reports and decisions in
 // moderation.json (issue #38), and the pending block (./moderation-store.js).
 //
@@ -27,9 +30,10 @@ function usable (s) {
 }
 
 // createDeletionSweep({ accounts, terms, ages, pushStore, recovery, invites,
-// drops, seen, log }) -> { purge(member), sweep(), start() -> stop }. Every
-// store but `accounts` may be null (the feature is off: no file to purge).
-function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, recovery = null, invites = null, drops = null, seen = null, log = () => {} }) {
+// drops, seen, passkeys, scheduled, log }) -> { purge(member), sweep(),
+// start() -> stop }. Every store but `accounts` may be null (the feature is
+// off: no file to purge). `scheduled` is an async function that never throws.
+function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, recovery = null, invites = null, drops = null, seen = null, passkeys = null, scheduled = null, log = () => {} }) {
   // [name, store, holds(member), forget(member)] for each store that exists.
   const steps = [
     ['terms', terms, (m) => terms.holds(m), (m) => terms.forget(m)],
@@ -38,7 +42,8 @@ function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore =
     ['recuperacao', recovery, (m) => recovery.list(m).length > 0, (m) => recovery.removeMember(m)],
     ['convites', invites, (m) => invites.holds(m), (m) => invites.forget(m)],
     ['sorteio', drops, (m) => drops.holds(m), (m) => drops.forget(m)],
-    ['vistos', seen, (m) => seen.get(m) !== null, forgetSeen]
+    ['vistos', seen, (m) => seen.get(m) !== null, forgetSeen],
+    ['passkeys', passkeys, (m) => passkeys.holds(m), (m) => passkeys.forget(m)]
   ].filter(([, store]) => store !== null && store !== undefined)
 
   async function forgetSeen (member) {
@@ -76,6 +81,11 @@ function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore =
   function sweep () {
     if (running !== null) return running
     running = (async () => {
+      if (scheduled !== null) {
+        try {
+          await scheduled()
+        } catch {}
+      }
       let pending = 0
       let members = []
       try {

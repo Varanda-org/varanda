@@ -83,6 +83,7 @@ const NONCE_BYTES = 32
 const USER_ID_BYTES = 32
 const CHALLENGE_BYTES = 32
 const TIMEOUT_MS = 120000
+const MAX_ATTESTATION_BYTES = 2048
 const RP_NAME = 'Varanda'
 
 const MESSAGES = {
@@ -398,11 +399,14 @@ function createOptions ({ rpId, userId, excludeCredentialIds = [], hints = DEFAU
 // Varanda passkey for this rp.id. hints only when given: sign-in must reach
 // every existing passkey, whatever holds it. prf: false (verify) leaves the
 // extension out, so the authenticator computes no member root at all.
-function getOptions ({ rpId, allowCredentialIds = [], hints, prf = true } = {}) {
+// challenge: 32 bytes the caller must have signed (verify: the account
+// service's nonce), else random.
+function getOptions ({ rpId, allowCredentialIds = [], hints, prf = true, challenge } = {}) {
   if (typeof rpId !== 'string' || rpId === '') throw argumentError('rp.id inválido')
+  if (challenge !== undefined && (!(challenge instanceof Uint8Array) || challenge.byteLength !== CHALLENGE_BYTES)) throw argumentError('desafio inválido')
   const options = {
     rpId,
-    challenge: randomBytes(CHALLENGE_BYTES),
+    challenge: challenge === undefined ? randomBytes(CHALLENGE_BYTES) : new Uint8Array(challenge),
     userVerification: 'required',
     timeout: TIMEOUT_MS
   }
@@ -460,18 +464,32 @@ function wipeExtensionPrf (cred) {
   } catch {}
 }
 
+// The creation's attestation object as base64url, kept for the passkey
+// enrolment at the account service (docs/protocol.md "Account deletion"):
+// public data, the credential id and public key. null when the browser gives
+// none or it is larger than the service accepts.
+function attestationOf (response) {
+  try {
+    const bytes = copyBytes(response.attestationObject)
+    return bytes !== null && bytes.byteLength > 0 && bytes.byteLength <= MAX_ATTESTATION_BYTES ? toBase64Url(bytes) : null
+  } catch {
+    return null
+  }
+}
+
 function credentialIdOf (cred) {
   const raw = copyBytes(cred.rawId)
   if (raw === null || raw.byteLength === 0) throw passkeyError('WEBAUTHN')
   return toBase64Url(raw)
 }
 
-// Creates the passkey. -> { credentialId, userId, prf } when the PRF output
-// came with the creation, or { credentialId, userId, pending: true } when the
-// authenticator only said PRF is enabled (results on create are optional in
-// WebAuthn L3): the caller then asks for a second click and calls
-// completeRegistration(). userId is hex. userId may be omitted: 32 random
-// bytes are drawn.
+// Creates the passkey. -> { credentialId, userId, prf, attestationObject }
+// when the PRF output came with the creation, or { credentialId, userId,
+// pending: true, attestationObject } when the authenticator only said PRF is
+// enabled (results on create are optional in WebAuthn L3): the caller then
+// asks for a second click and calls completeRegistration(). userId is hex.
+// userId may be omitted: 32 random bytes are drawn. attestationObject is
+// base64url or null (attestationOf).
 // A passkey whose authenticator data says it is not backup eligible is
 // refused with NOT_SYNCED (credentialId and userId attached); one that says
 // nothing is accepted.
@@ -493,9 +511,10 @@ async function register (credentials, { rpId, userId = randomBytes(USER_ID_BYTES
     }
     const ext = extensionResults(cred)
     const prf = prfFirst(ext)
-    if (prf !== null) return { credentialId, userId: userIdHex, prf }
+    const attestationObject = attestationOf(cred.response)
+    if (prf !== null) return { credentialId, userId: userIdHex, prf, attestationObject }
     if (!ext || ext.enabled !== true) throw passkeyError('NO_PRF')
-    return { credentialId, userId: userIdHex, pending: true }
+    return { credentialId, userId: userIdHex, pending: true, attestationObject }
   } catch (err) {
     const mapped = mapError(err, 'create')
     // The passkey already exists in the manager even though it is unusable:
@@ -561,14 +580,17 @@ function userVerified (response) {
 
 // A fresh user verification (biometrics or device PIN) with an existing
 // passkey, for a step a stored session alone must not authorize. No PRF is
-// asked for; an output handed back anyway is wiped unread. -> { credentialId }.
-// The signature is not checked: nothing here holds the passkey's public key,
-// and the gate is the authenticator's own user verification, which its UV
-// flag must report (WEBAUTHN otherwise).
-async function verify (credentials, { rpId, allowCredentialIds = [], hints } = {}) {
+// asked for; an output handed back anyway is wiped unread. `challenge` (32
+// bytes) is the account service's nonce. -> { credentialId, assertion:
+// { credentialId, clientDataJSON, authenticatorData, signature } } (base64url).
+// The signature is not checked here: the account service verifies it with
+// the passkey's public key it keeps (apps/cli/lib/account/webauthn.js). The
+// UV flag must still be set (WEBAUTHN otherwise), so a device without that
+// key on the service still asks for biometrics or the PIN.
+async function verify (credentials, { rpId, allowCredentialIds = [], hints, challenge } = {}) {
   let cred
   try {
-    cred = await credentials.get({ publicKey: getOptions({ rpId, allowCredentialIds, hints, prf: false }) })
+    cred = await credentials.get({ publicKey: getOptions({ rpId, allowCredentialIds, hints, prf: false, challenge }) })
   } catch (err) {
     throw mapError(err, 'get')
   }
@@ -577,7 +599,20 @@ async function verify (credentials, { rpId, allowCredentialIds = [], hints } = {
     wipeExtensionPrf(cred)
     const credentialId = credentialIdOf(cred)
     if (!userVerified(cred.response)) throw passkeyError('WEBAUTHN')
-    return { credentialId }
+    const r = cred.response
+    const clientDataJSON = copyBytes(r.clientDataJSON)
+    const authenticatorData = copyBytes(r.authenticatorData)
+    const signature = copyBytes(r.signature)
+    if (clientDataJSON === null || authenticatorData === null || signature === null) throw passkeyError('WEBAUTHN')
+    return {
+      credentialId,
+      assertion: {
+        credentialId,
+        clientDataJSON: toBase64Url(clientDataJSON),
+        authenticatorData: toBase64Url(authenticatorData),
+        signature: toBase64Url(signature)
+      }
+    }
   } catch (err) {
     throw mapError(err, 'get')
   }

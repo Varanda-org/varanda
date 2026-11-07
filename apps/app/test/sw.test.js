@@ -995,6 +995,20 @@ test('push: an invite drop shows its own title and fixed sentence; anything more
   t.is((await push(w, pushData(valid()))).title, 'Varanda')
 })
 
+test('push: a scheduled deletion shows its own title and fixed sentence; anything more is the fallback', async (t) => {
+  const w = renderedWorker()
+  const shown = await push(w, pushData({ v: 1, kind: 'delete-scheduled' }))
+  t.is(shown.title, 'Pedido de exclusão da sua conta')
+  t.is(shown.options.body, 'Se não foi você, abra a Varanda e cancele em Ajustes.')
+  t.is(shown.options.tag, 'varanda-delete-scheduled')
+  t.alike(plain(shown.options.data), { kind: 'delete-scheduled' })
+  for (const bad of [{ v: 1, kind: 'delete-scheduled', body: 'x' }, { v: 2, kind: 'delete-scheduled' }, { kind: 'delete-scheduled' }]) {
+    const fallback = await push(w, pushData(bad))
+    t.is(fallback.title, 'Varanda', JSON.stringify(bad))
+    t.is(fallback.options.body, FALLBACK, JSON.stringify(bad))
+  }
+})
+
 test('notificationclick: an invite drop focuses the app and posts varanda-invite-open', async (t) => {
   const w = renderedWorker()
   const mine = fakeWindow(ORIGIN + '/')

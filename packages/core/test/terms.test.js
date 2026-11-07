@@ -39,7 +39,7 @@ const FIELDS = {
 
 test('constants', (t) => {
   t.is(PREFIX, 'varanda-terms-v1')
-  t.is(TERMS_VERSION, 23)
+  t.is(TERMS_VERSION, 24)
   t.is(VERSION_MAX, 9999)
   t.is(NONCE_RE.source, accountLink.NONCE_RE.source, 'same nonce rule as account-link')
   t.ok(NONCE_RE.test('A-_9'.repeat(32)))
@@ -108,7 +108,7 @@ test('account-link and report signatures by the member key are not terms accepta
       member: MEMBER,
       username: 'ana_1',
       association: ASSOCIATION,
-      sub: phase === 'finish' ? '109876543210987654321' : ''
+      sub: phase === 'finish' ? '109876543210987654321' : phase === 'passkey' ? 'ab'.repeat(32) : ''
     }
     const sigLink = accountLink.signAccountLink(link, MEMBER_KP)
     t.alike(verifyTerms(FIELDS, sigLink), { ok: false, reason: 'bad-signature' }, 'account-link ' + phase + ' as terms')

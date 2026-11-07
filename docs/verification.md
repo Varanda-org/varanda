@@ -5655,9 +5655,48 @@ Como verificar, a partir da raiz (só os arquivos desta área):
 - Sem passkey e sem código de recuperação ainda não há como pedir a exclusão pelo app; a página com o Google é um próximo passo.
 - Nenhuma caixa acima foi executada nesta documentação.
 
-## 116. Prévias de links e passada visual completa (PR feat/link-previews)
+## 116. Excluir conta confere a passkey no serviço de conta (PR feat/deletion-passkey-assertion)
 
-Caminhada da prévia de links nas conversas, nos grupos e nas publicações do diário, seguida da passada visual completa desta rodada de redesenho. As telas estão em [app.md](app.md) ("Conversa", "Prévias de links"); a linha LGPD está em [design.md](design.md). Os Termos de Uso e a Política de Privacidade sobem para a versão 23.
+Continua a seção 115. Antes, a confirmação com a passkey antes de excluir a conta era só uma checagem no aparelho (o sinal UV e o identificador da credencial), e um autenticador forjado numa sessão aberta passava por ela; o resíduo foi aceito em 06/11/2026 com esta continuação. Agora o serviço de conta guarda a chave pública da passkey que criou a conta e confere uma asserção nova sobre o nonce do pedido. O protocolo está em [protocol.md](protocol.md) ("Account deletion"); a operação, no `README.md` ("Excluir conta"). Os Termos de Uso e a Política de Privacidade passam à versão 23, então quem aceitou a 22 aceita de novo.
+
+Regras que os passos conferem:
+
+- Logo depois do vínculo Google, o app manda o objeto de atestado da criação da passkey (`POST /account/passkey/start` e `/add`, `account.sign` na fase `passkey` com o SHA-256 do objeto). O serviço aceita só na primeira hora depois do vínculo e só se a conta ainda não tem chave guardada (409 `vinculo-antigo` e `passkey-registrada` fora disso). Nada disso aparece na tela.
+- Com chave guardada, "Excluir conta" pede a passkey com o nonce do pedido como desafio, e o serviço confere a assinatura com a chave guardada, a origem (o endereço público, ou `android:apk-key-hash:` do certificado de `VARANDA_ANDROID_CERT_SHA256` no app Android), o rpId, os sinais UP e UV e o contador. Uma asserção de outra passkey com o mesmo identificador, de outro desafio, de outra origem ou sem UV responde 403 `passkey-invalida` e não exclui nada.
+- Sem chave guardada (toda conta vinculada antes, outra passkey, uma criação no iOS sem objeto de atestado), a tela explica a espera e o botão diz "Agendar exclusão". O pedido fica agendado por 7 dias: `GET /account/status` tem `scheduledDeletion`, todos os aparelhos com a conta aberta mostram "Exclusão da conta agendada para <data>" no topo, um aviso push "Pedido de exclusão da sua conta" chega se ligado, e "Cancelar exclusão" (em Ajustes > Excluir conta) cancela de qualquer aparelho. Pedir de novo mantém a data.
+- Na data, a varredura de hora em hora exclui como antes (bloqueio `titular`, vínculo, sidecars, `passkeys.json`). Quem passou a ser dono de uma página fica de fora até encerrá-la.
+
+Passos (marcar só depois de executar e guardar o registro), primeiro no Android (build de debug, emulador ou aparelho, feito depois de `npm run prepare:native -w apps/app`), depois no simulador iOS, depois na web e no PWA. O build de debug não entra com passkey numa instalação de produção (veja `docs/development.md`): use a instalação de teste ou o APK de preview do EAS para os passos que precisam de conta.
+
+- [ ] Abertura depois da atualização: o aceite dos Termos aparece com a versão 23; aceitar e seguir.
+- [ ] Conta nova (passkey criada agora, vínculo Google em seguida): `passkeys.json` no servidor passa a ter a chave da conta com `alg` -7 (ou -257), e os registros mostram `passkey` com `registrada`, sem chave nem identificador.
+- [ ] Nessa conta, Ajustes > Excluir conta: o texto diz que os dados do aparelho são apagados logo depois do pedido; confirmar a passkey exclui na hora (`{"linked":false,"deleted":"pendente"}`), como na seção 115.
+- [ ] iOS (simulador ou aparelho): conferir se a criação devolve o objeto de atestado (a conta nova ganha chave em `passkeys.json`) e se a exclusão na hora passa (a origem do iOS é `https://<rpId>`). Se não passar, anotar o motivo do registro (`passkey-origem`, por exemplo) e a exclusão cai na espera.
+- [ ] Android pelo app instalado (APK de preview, com `VARANDA_ANDROID_CERT_SHA256` no serviço `account`): a exclusão na hora passa. Sem a variável, a mesma tentativa responde `passkey-invalida` com `passkey-origem` no registro; anotar.
+- [ ] Conta antiga (vinculada antes desta versão): Ajustes > Excluir conta mostra o texto da espera e "Agendar exclusão"; confirmar a passkey agenda. O topo do app mostra "Exclusão da conta agendada para <data>" e "Ver"; um segundo aparelho com a mesma conta mostra o mesmo ao abrir; com push ligado, chega "Pedido de exclusão da sua conta".
+- [ ] "Ver" abre Ajustes > Excluir conta com a data e "Cancelar exclusão"; cancelar some com o aviso em todos os aparelhos (`scheduledDeletion` some de `GET /account/status`).
+- [ ] Agendar de novo e, no servidor, adiantar a data (ou esperar 7 dias numa instalação de teste): a varredura exclui, o registro mostra `agendada-executada`, e os aparelhos passam a mostrar "Esta conta foi excluída".
+- [ ] Autenticador forjado: no Chrome da web hospedada, com a sessão aberta numa conta nova, ligar o autenticador virtual do DevTools (WebAuthn) e tentar excluir. Sem a passkey verdadeira, o pedido responde `passkey-invalida` (com chave guardada) ou é só agendado; nada é excluído na hora.
+- [ ] Registros do serviço depois de tudo: só linhas `exclusao` e `passkey` com tokens; procurar a chave, o identificador da credencial, o e-mail e o sub não encontra nada.
+- [ ] Em todas as plataformas: os Termos e a Política em Ajustes mostram "Versão 23" e descrevem a chave pública da passkey guardada e a espera de 7 dias.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/cli/test/webauthn.test.js`, `node apps/cli/test/passkey-store.test.js`, `node apps/cli/test/account-passkey.test.js` e `node apps/cli/test/account-delete.test.js`.
+- `node packages/core/test/account-link.test.js`, `node packages/core/test/terms.test.js`, `node packages/rpc/test/methods.test.js`, `node packages/web-member/test/passkey.test.js`, `node packages/web-member/test/web-node-recovery.test.js` e `node packages/web-member/test/resume.test.js`.
+- `node apps/app/test/accountDeletion.test.js`, `node apps/app/test/account.test.js`, `node apps/app/test/passkeyEnrol.test.js`, `node apps/app/test/sessionStoreNative.test.js`, `node apps/app/test/sw.test.js`, `node apps/app/test/legal.test.js` e `node apps/site/test/legal.test.js`.
+
+Limites:
+
+- A chave é confiada no primeiro uso, no cadastro: quem controlar o aparelho da pessoa na hora seguinte ao vínculo pode registrar um autenticador forjado no lugar.
+- Uma sessão aberta guarda a chave do diário e pode agendar uma exclusão; a pessoa vê o pedido em todos os aparelhos e pode cancelar por 7 dias, mas quem não abrir nenhum aparelho nesse prazo perde a conta.
+- As passkeys extras e a troca de passkey não registram chave; quem só tem uma delas espera os 7 dias.
+- A origem do iOS e o objeto de atestado no iOS dependem do aparelho (passo acima).
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 117. Prévias de links e passada visual completa (PR feat/link-previews)
+
+Caminhada da prévia de links nas conversas, nos grupos e nas publicações do diário, seguida da passada visual completa desta rodada de redesenho. As telas estão em [app.md](app.md) ("Conversa", "Prévias de links"); a linha LGPD está em [design.md](design.md). Os Termos de Uso e a Política de Privacidade sobem para a versão 24.
 
 Regras que os passos conferem:
 
@@ -5713,4 +5752,4 @@ Entrada nativa real (caixa separada: não é parte da revisão visual):
 Limites desta caminhada:
 
 - Nenhuma caixa acima foi executada nesta documentação.
-- No app nativo, quem monta a prévia é o aparelho de quem envia, que fala direto com o site do link e expõe a ele o próprio endereço de rede; a Política (versão 23) diz isso.
+- No app nativo, quem monta a prévia é o aparelho de quem envia, que fala direto com o site do link e expõe a ele o próprio endereço de rede; a Política (versão 24) diz isso.

@@ -68,7 +68,18 @@ const DELETE_MESSAGES = {
   'nao-vinculado': 'esta conta não está vinculada ao serviço',
   expirado: 'o pedido expirou: tente de novo',
   'assinatura-invalida': 'o @nome digitado não confere com a conta',
-  lotado: 'o serviço não conseguiu registrar o pedido agora: tente de novo mais tarde'
+  lotado: 'o serviço não conseguiu registrar o pedido agora: tente de novo mais tarde',
+  'passkey-invalida': 'o serviço de conta não aceitou a confirmação da passkey: tente de novo'
+}
+// The passkey enrolment after the link (src/passkeyEnrol.js reads the
+// tokens; nothing shows these sentences on a screen today).
+const PASSKEY_MESSAGES = {
+  'passkey-invalida': 'o serviço de conta não aceitou esta passkey',
+  'passkey-registrada': 'o serviço de conta já tem a passkey desta conta',
+  'vinculo-antigo': 'o prazo para registrar a passkey desta conta passou',
+  'conta-excluida': 'esta conta já foi excluída',
+  'nao-vinculado': 'esta conta não está vinculada ao serviço',
+  expirado: 'o pedido expirou: tente de novo'
 }
 const FALLBACK_MESSAGE = 'serviço indisponível'
 
@@ -899,24 +910,58 @@ export const recoveryFetch = async (lookupId, { origin } = {}) => {
   return { member: data.member, kind: data.kind, blob: { v: 1, kind: data.blob.kind, nonce: data.blob.nonce, ciphertext: data.blob.ciphertext } }
 }
 
-// Excluir conta: start names the current @nome the person must type; finish
-// is the signed request. The route answers 'indisponivel' only before it
-// changed anything (`definite`); after its first write it answers
-// 'resultado-incerto', and any other 5xx is unknown too: the caller then
-// re-reads accountStatus instead of repeating it.
-// -> { deleted: 'pendente' | 'concluida' }
+// Excluir conta: start names the current @nome the person must type, the
+// credential ids of the passkeys whose keys the service holds and the date
+// of a deletion already waiting (or null); finish is the signed request,
+// with the passkey's assertion over the nonce (the deletion runs now) or
+// wait: true (it runs in 7 days unless cancelled). The route answers
+// 'indisponivel' only before it changed anything (`definite`); after its
+// first write it answers 'resultado-incerto', and any other 5xx is unknown
+// too: the caller then re-reads accountStatus instead of repeating it.
+// -> { deleted: 'pendente' | 'concluida' } or { scheduled: ISO date }
 const DELETE_STATES = ['pendente', 'concluida']
+const CREDENTIAL_RE = /^[A-Za-z0-9_-]{1,1364}$/
 export const deleteStart = async ({ member }) => {
   const data = await call('POST', '/account/delete/start', { member }, { messages: DELETE_MESSAGES })
-  if (!exactKeys(data, ['nonce', 'username']) || typeof data.nonce !== 'string' || !isUsername(data.username)) throw toError('indisponivel')
-  return { nonce: data.nonce, username: data.username }
+  if (!exactKeys(data, ['nonce', 'username', 'passkeys', 'scheduled']) || typeof data.nonce !== 'string' || !isUsername(data.username) ||
+    !Array.isArray(data.passkeys) || data.passkeys.length > 8 || !data.passkeys.every((id) => typeof id === 'string' && CREDENTIAL_RE.test(id)) ||
+    (data.scheduled !== null && !isIso(data.scheduled))) throw toError('indisponivel')
+  return { nonce: data.nonce, username: data.username, passkeys: data.passkeys.slice(), scheduled: data.scheduled }
 }
-export const deleteFinish = async ({ member, nonce, signature }) => {
-  const data = await call('POST', '/account/delete/finish', { member, nonce, signature }, { messages: DELETE_MESSAGES, uncertain: true, definite: true })
+export const deleteFinish = async ({ member, nonce, signature, assertion, wait }) => {
+  const body = { member, nonce, signature }
+  if (assertion !== undefined && assertion !== null) body.assertion = assertion
+  if (wait === true) body.wait = true
+  const data = await call('POST', '/account/delete/finish', body, { messages: DELETE_MESSAGES, uncertain: true, definite: true })
+  if (exactKeys(data, ['scheduled']) && isIso(data.scheduled)) return { scheduled: data.scheduled }
   if (!exactKeys(data, ['deleted']) || !DELETE_STATES.includes(data.deleted)) {
     const err = toError('indisponivel')
     err.uncertain = true
     throw err
   }
   return { deleted: data.deleted }
+}
+// Cancelling a deletion that waits for its date, with the diary-key proof
+// at account-link phase 'cancel'. -> { cancelled }
+export const deleteCancelStart = async ({ member }) => {
+  const data = await call('POST', '/account/delete/cancel/start', { member }, { messages: DELETE_MESSAGES })
+  if (!exactKeys(data, ['nonce', 'username', 'scheduled']) || typeof data.nonce !== 'string' || !isUsername(data.username) || (data.scheduled !== null && !isIso(data.scheduled))) throw toError('indisponivel')
+  return { nonce: data.nonce, username: data.username, scheduled: data.scheduled }
+}
+export const deleteCancelFinish = async ({ member, nonce, signature }) => {
+  const data = await call('POST', '/account/delete/cancel/finish', { member, nonce, signature }, { messages: DELETE_MESSAGES })
+  if (!exactKeys(data, ['cancelled']) || typeof data.cancelled !== 'boolean') throw toError('indisponivel')
+  return { cancelled: data.cancelled }
+}
+// The passkey enrolment right after the link (src/passkeyEnrol.js): the
+// creation's attestation object, signed at account-link phase 'passkey'.
+export const passkeyStart = async ({ member }) => {
+  const data = await call('POST', '/account/passkey/start', { member }, { messages: PASSKEY_MESSAGES })
+  if (!exactKeys(data, ['nonce']) || typeof data.nonce !== 'string') throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+export const passkeyAdd = async ({ member, nonce, signature, credentialId, attestationObject }) => {
+  const data = await call('POST', '/account/passkey/add', { member, nonce, signature, credentialId, attestationObject }, { messages: PASSKEY_MESSAGES })
+  if (!exactKeys(data, ['added']) || typeof data.added !== 'boolean') throw toError('indisponivel')
+  return { added: data.added }
 }

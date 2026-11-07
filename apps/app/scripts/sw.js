@@ -308,6 +308,10 @@ const DM_WAKE_TEXT = 'Pode haver uma mensagem nova na Varanda'
 // never put words of its own on the lock screen.
 const INVITE_DROP_TITLE = 'Chegou um convite pra sua varanda'
 const INVITE_DROP_TEXT = 'Escolha com carinho quem você quer chamar: alguém próximo, que faz falta na conversa.'
+// Excluir conta scheduled without a verified passkey: no text and no date
+// in the payload either.
+const DELETE_SCHEDULED_TITLE = 'Pedido de exclusão da sua conta'
+const DELETE_SCHEDULED_TEXT = 'Se não foi você, abra a Varanda e cancele em Ajustes.'
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):[1-9][0-9]{0,14}$/
 
@@ -356,11 +360,15 @@ function isInviteDrop (p) {
   return isPlainObject(p) && Object.keys(p).length === 2 && p.v === 1 && p.kind === 'invite-drop'
 }
 
+function isDeleteScheduled (p) {
+  return isPlainObject(p) && Object.keys(p).length === 2 && p.v === 1 && p.kind === 'delete-scheduled'
+}
+
 function readPush (data) {
   if (!data) return null
   try {
     const p = data.json()
-    return validPush(p) || isDmWake(p) || isInviteDrop(p) ? p : null
+    return validPush(p) || isDmWake(p) || isInviteDrop(p) || isDeleteScheduled(p) ? p : null
   } catch {
     return null
   }
@@ -507,6 +515,9 @@ async function showPush (data) {
   if (p && isInviteDrop(p)) {
     title = INVITE_DROP_TITLE
     options = { body: INVITE_DROP_TEXT, icon: '/icon-192.png', tag: 'varanda-invite-drop', renotify: false, data: { kind: 'invite-drop' } }
+  } else if (p && isDeleteScheduled(p)) {
+    title = DELETE_SCHEDULED_TITLE
+    options = { body: DELETE_SCHEDULED_TEXT, icon: '/icon-192.png', tag: 'varanda-delete-scheduled', renotify: false, data: { kind: 'delete-scheduled' } }
   } else if (p && isDmWake(p)) {
     if ((await wakeFocusedWindow()) || (await dmWakesMuted())) {
       await showQuietlyAndClose()
