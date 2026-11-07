@@ -124,6 +124,7 @@ import { errorText } from './ui'
 import { accountOriginOf } from './pageGate'
 import { slowRequestLine } from './slowRequest'
 import { createIdleTracker } from './idle'
+import { createRequestQueue } from './requestQueue'
 import { noteOwnDmDrop } from './dmWakeMute'
 import { setDmDropObserver } from './pages'
 import { vitrineEnabled, vitrineLarge } from './vitrine/enabled'
@@ -371,6 +372,15 @@ function LiveNodeProvider ({ children }) {
   // Bumped when a connection starts and when one ends (useNotice).
   const [epoch, setEpoch] = useState(0)
   const connRef = useRef(null)
+  const requestQueueRef = useRef(null)
+  const setConnection = useCallback((conn) => {
+    if (connRef.current === conn) return
+    if (requestQueueRef.current) {
+      requestQueueRef.current.clear(Object.assign(new Error('sem conexão com o nó'), { code: 'CLOSED' }))
+    }
+    requestQueueRef.current = conn ? createRequestQueue() : null
+    connRef.current = conn
+  }, [])
   const startedRef = useRef(false)
   const installationLoadedRef = useRef(false)
   const busyRef = useRef(false)
@@ -660,7 +670,7 @@ function LiveNodeProvider ({ children }) {
         onEvent,
         onClose: ({ code }) => {
           if (connRef.current !== holder.conn) return
-          connRef.current = null
+          setConnection(null)
           setRecovery(null)
           setSync({ active: null, lines: [], stopped: null })
           resetSignals()
@@ -670,7 +680,7 @@ function LiveNodeProvider ({ children }) {
         }
       })
       holder.conn = conn
-      connRef.current = conn
+      setConnection(conn)
       setInfoOrigin(undefined)
       if (save && cfg) {
         try { await saveConfig(cfg) } catch { setError('a configuração não pôde ser guardada neste aparelho') }
@@ -702,7 +712,7 @@ function LiveNodeProvider ({ children }) {
       setPhase('ready')
       marks.mark('ready')
     } catch (err) {
-      connRef.current = null
+      setConnection(null)
       if (holder.conn) { try { await holder.conn.close() } catch {} }
       if (cfg) setConfig(cfg) // the form keeps what was tried
       setError(errorText(err))
@@ -710,7 +720,7 @@ function LiveNodeProvider ({ children }) {
     } finally {
       busyRef.current = false
     }
-  }, [onEvent, resetSignals, bumpEpoch, bumpGeneration, adoptSignals])
+  }, [onEvent, resetSignals, bumpEpoch, bumpGeneration, adoptSignals, setConnection])
 
   // One connect at a time: a call while one is in flight returns that one.
   const connect = useCallback((cfg, opts) => {
@@ -789,7 +799,7 @@ function LiveNodeProvider ({ children }) {
     // first; its connection is then closed below.
     while (inflightRef.current !== null) await inflightRef.current
     const conn = connRef.current
-    connRef.current = null
+    setConnection(null)
     if (conn) {
       setPhase('connecting')
       try { await conn.close() } catch {}
@@ -797,14 +807,14 @@ function LiveNodeProvider ({ children }) {
     await clearConfig()
     setHostedSource(null)
     await begin()
-  }, [begin])
+  }, [begin, setConnection])
 
   // Native: apply a new configuration (bootstrap, DHT): stop the node
   // (node.close, then terminate) and start it again. The client module
   // handles recover.
   const restart = useCallback(async (cfg) => {
     const conn = connRef.current
-    connRef.current = null
+    setConnection(null)
     if (conn) {
       setPhase('connecting')
       try { await conn.close() } catch {}
@@ -812,14 +822,14 @@ function LiveNodeProvider ({ children }) {
     setHosted(false)
     setHostedSource(null)
     await connect(cfg, { save: true })
-  }, [connect])
+  }, [connect, setConnection])
 
   const reconnect = useCallback(async () => {
     const conn = connRef.current
-    connRef.current = null
+    setConnection(null)
     if (conn) { try { await conn.close() } catch {} }
     await connect(config)
-  }, [connect, config])
+  }, [connect, config, setConnection])
 
   // While the node should restart a preempted continuous run, every request
   // sent may queue behind (or preempt) it again: the node restarts after the
@@ -831,34 +841,36 @@ function LiveNodeProvider ({ children }) {
   const request = useCallback((method, params) => {
     const conn = connRef.current
     if (!conn) return noConnection()
-    const waiting = awaitingRef.current !== 0
-    if (waiting) extendWait()
-    const startedAt = Date.now()
-    const idle = idleRef.current
-    idle.begin()
-    const done = () => {
-      const line = slowRequestLine(method, startedAt, Date.now())
-      marks.span('req:' + method, startedAt, Date.now())
-      idle.end()
-      if (line !== null && connRef.current === conn) setSync((prev) => appendLine(prev, 'aviso: ' + line))
-    }
-    if (method !== 'sync.start') {
+    return requestQueueRef.current.run(method, params, (method, params) => {
+      const waiting = awaitingRef.current !== 0
+      if (waiting) extendWait()
+      const startedAt = Date.now()
+      const idle = idleRef.current
+      idle.begin()
+      const done = () => {
+        const line = slowRequestLine(method, startedAt, Date.now())
+        marks.span('req:' + method, startedAt, Date.now())
+        idle.end()
+        if (line !== null && connRef.current === conn) setSync((prev) => appendLine(prev, 'aviso: ' + line))
+      }
+      if (method !== 'sync.start') {
+        const pending = conn.request(method, params)
+        pending.then(done, done)
+        if (waiting) pending.then(extendWait, extendWait)
+        return pending
+      }
+      startingRef.current += 1
+      setStarting(true)
+      const settled = () => {
+        startingRef.current -= 1
+        if (startingRef.current === 0) setStarting(false)
+        if (waiting) extendWait()
+      }
       const pending = conn.request(method, params)
       pending.then(done, done)
-      if (waiting) pending.then(extendWait, extendWait)
+      pending.then(settled, settled)
       return pending
-    }
-    startingRef.current += 1
-    setStarting(true)
-    const settled = () => {
-      startingRef.current -= 1
-      if (startingRef.current === 0) setStarting(false)
-      if (waiting) extendWait()
-    }
-    const pending = conn.request(method, params)
-    pending.then(done, done)
-    pending.then(settled, settled)
-    return pending
+    })
   }, [extendWait])
 
   const whenIdle = useCallback((quietMs) => idleRef.current.whenIdle(quietMs), [])
@@ -899,6 +911,14 @@ function LiveNodeProvider ({ children }) {
   const passkeyOp = useCallback((name, arg) => {
     const conn = connRef.current
     if (!conn || !conn.identity) return noConnection()
+    // A request still waiting in the app-side queue was asked for under the
+    // identity that is about to change; sent after the operation, the node
+    // would sign it with the next identity's key. Dropped here, before the
+    // operation is dispatched, it is never sent. Requests already in flight
+    // reached the node first, and its serial chain runs them before it.
+    if (IDENTITY_OPS.has(name) && requestQueueRef.current) {
+      requestQueueRef.current.clear(Object.assign(new Error('a identidade mudou antes do envio'), { code: 'CLOSED' }))
+    }
     let pending
     try {
       // A node script without signOut (an older build) locks instead.
