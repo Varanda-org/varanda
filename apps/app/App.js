@@ -1513,13 +1513,36 @@ function Member () {
       setDmDot(r.inboxUnread === true || r.requests === true)
     } catch {}
   }, [dmRequest])
+  // The first read waits for A Rua's first rows (or a quiet node, for a start
+  // elsewhere): the dot is not worth a place in the boot chain.
+  const [dmDotGate, setDmDotGate] = useState(false)
+  const nodeWhenIdle = node.whenIdle
   useEffect(() => {
-    if (dmReady) readDmDot()
+    if (!dmReady) {
+      setDmDotGate(false)
+      return
+    }
+    if (feedBoot.details) {
+      setDmDotGate(true)
+      return
+    }
+    if (typeof nodeWhenIdle !== 'function') return
+    let alive = true
+    // whenIdle answers { promise, cancel } (src/idle.js), not a promise.
+    const wait = nodeWhenIdle(4000)
+    wait.promise.then(() => { if (alive) setDmDotGate(true) }, () => {})
+    return () => {
+      alive = false
+      wait.cancel()
+    }
+  }, [dmReady, feedBoot.details, nodeWhenIdle])
+  useEffect(() => {
+    if (dmReady && dmDotGate) readDmDot()
     else {
       dmDotGen.current++
       setDmDot(false)
     }
-  }, [dmReady, readDmDot, node.dmVersion, stackDepth])
+  }, [dmReady, dmDotGate, readDmDot, node.dmVersion, stackDepth])
   // --- Visto em todos os aparelhos (src/seenSync.js) ---
   // The same passkey on another device marked notices, conversations or
   // groups as seen: a pass reads the encrypted seen document from the account
