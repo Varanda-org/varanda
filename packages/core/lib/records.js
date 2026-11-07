@@ -661,9 +661,21 @@ function plainCopy (value) {
 }
 
 function latestProfile (entries) {
+  return pickProfile(entries, validRecordCopy)
+}
+
+// latestProfile over entries whose records are already validRecordCopy
+// output for that same entry's seq (or null): lib/feed.js copies each entry
+// once per call and hands the copies to every walker. Never pass a caller's
+// records here, they would skip both the copy and the validation.
+function latestProfileOfCopies (copies) {
+  return pickProfile(copies, (record) => record)
+}
+
+function pickProfile (entries, copyOf) {
   let best = null
   for (const { seq, record } of entries) {
-    const copy = validRecordCopy(record, seq)
+    const copy = copyOf(record, seq)
     if (copy === null || copy.type !== 'profile') continue
     if (best === null || seq > best.seq) best = { seq, name: copy.name, bio: copy.bio, avatar: copy.avatar }
   }
@@ -751,5 +763,6 @@ module.exports = {
   parseRef,
   formatRef,
   latestProfile,
+  latestProfileOfCopies,
   genesisCert
 }
