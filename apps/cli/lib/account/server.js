@@ -161,6 +161,9 @@ const ERROR_STATUS = Object.freeze({
   // invite for a key whose age band is not on record.
   'idade-pendente': 403,
   'limite-idade': 429,
+  // A Feira code on POST /account/age/session: its paid session opens only
+  // through POST /account/feira/idade, which the edge limits per address.
+  'use-a-rota-da-feira': 409,
   // The age routes could not tell whether something was applied (the provider
   // timed out after maybe creating a session, a write that may have landed):
   // unlike 'indisponivel', the app must not read this as a plain refusal.

@@ -148,7 +148,29 @@ async function setup (t, { feira = true, reader = true, perWeek = 3 } = {}) {
     return { status: res.status, headers: res.headers, body: parsed, text }
   }
 
-  return { dir, iss, fake, store, primary, feiraStore, invites, listings, reads, pages, logs, texts, api }
+  // A request whose target is sent byte for byte (fetch would normalise it).
+  function raw (method, target, body, headers = {}) {
+    return new Promise((resolve, reject) => {
+      const data = body === undefined ? null : JSON.stringify(body)
+      const h = { ...headers }
+      if (data !== null) Object.assign(h, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) })
+      if (data !== null && h.origin === undefined && h['x-varanda-client'] === undefined) h.origin = ORIGIN
+      const req = http.request({ host: '127.0.0.1', port: listener.port, method, path: target, headers: h }, (res) => {
+        let text = ''
+        res.setEncoding('utf8')
+        res.on('data', (c) => { text += c })
+        res.on('end', () => {
+          let parsed = null
+          try { parsed = JSON.parse(text) } catch {}
+          resolve({ status: res.statusCode, body: parsed, text })
+        })
+      })
+      req.on('error', reject)
+      req.end(data)
+    })
+  }
+
+  return { dir, iss, fake, store, primary, feiraStore, invites, listings, reads, pages, logs, texts, api, raw }
 }
 
 function listingOf (author, seq) {
@@ -279,6 +301,40 @@ test('start: a person and a page listing, both charged to the owner; 404 for a p
   for (const line of s.logs) t.alike(Object.keys(JSON.parse(line)).sort(), ['event', 'reason'], 'event and reason only')
   t.absent(all.includes(person.body.code), 'no code in the logs')
   t.absent(all.includes(seller.hex) || all.includes(page) || all.includes(owner.hex), 'no key in the logs')
+})
+
+// Caddy limits these routes by their cleaned path, which can differ from the
+// URL parser's: only the exact raw target is served.
+test('start and policy: a raw target that only normalises to the route is 404, before any read or code', async (t) => {
+  const s = await setup(t)
+  const seller = member()
+  await linkDirect(s, seller, 'ana')
+  s.listings.set(seller.hex + '/3', listingOf(seller.hex, 3))
+  const variants = (route) => [
+    '/account/feira/../feira/' + route,
+    '/account/./feira/' + route,
+    '/account/feira/./' + route,
+    '/account/x%2Fy/../feira/' + route,
+    '/account/x%2fy/../feira/' + route,
+    '/account/feira/%2E%2E/feira/' + route,
+    '/account/feira/%2e%2e/feira/' + route,
+    '/account/feira//' + route,
+    '/account/feira/' + route + '/'
+  ]
+  for (const target of variants('start')) {
+    const r = await s.raw('POST', target, { author: seller.hex, seq: 3 })
+    t.is(r.status, 404, target)
+  }
+  for (const target of variants('policy')) {
+    const r = await s.raw('GET', target)
+    t.is(r.status, 404, target)
+  }
+  t.is(s.reads.length, 0, 'no seeder read')
+  t.is(s.feiraStore.count().total, 0, 'no code minted')
+  const ok = await s.raw('POST', '/account/feira/start?x=1', { author: seller.hex, seq: 3 })
+  t.is(ok.status, 200, 'the canonical path (a query is fine): ' + ok.text)
+  t.alike((await s.raw('GET', '/account/feira/policy')).body, { enabled: true })
+  t.is(s.feiraStore.count().total, 1)
 })
 
 test('start: the owner is resolved before the seeder read, and no window is keyed by the owner', async (t) => {

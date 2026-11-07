@@ -8,6 +8,7 @@
 // exchange is never reached.
 
 const test = require('brittle')
+const http = require('node:http')
 const fs = require('node:fs')
 const path = require('node:path')
 const b4a = require('b4a')
@@ -22,7 +23,7 @@ const { openAccountStore } = require('../lib/account/store')
 const { openAgeStore } = require('../lib/account/age-store')
 const { openInvitesStore, inviteId } = require('../lib/account/invites-store')
 const { pairInvites } = require('../lib/account/invites-pair')
-const { FEIRA_AGE_DAILY } = require('../lib/account/age-routes')
+const { FEIRA_AGE_DAILY, FEIRA_AGE_PATH } = require('../lib/account/age-routes')
 const { createDidit } = require('../lib/account/didit')
 const { createAccountServer, COOKIE } = require('../lib/account/server')
 const { createAgeRoutes } = require('../lib/account/age-routes')
@@ -173,12 +174,42 @@ async function setup (t, { age = true, inviting = false, maxMembers = null, dail
     return post('/account/age/' + action, { member: who.hex, nonce, signature: signFor(who, action, nonce), ...extra })
   }
 
+  // The Feira paid session: same body and signed action, its own route.
+  async function feiraStep (who, extra = {}) {
+    const started = await start(who)
+    if (started.status !== 200) return started
+    const nonce = started.body.nonce
+    return post(FEIRA_AGE_PATH, { member: who.hex, nonce, signature: signFor(who, 'session', nonce), ...extra })
+  }
+
+  // A request whose target is sent byte for byte (fetch would normalise it).
+  function raw (method, target, body, headers = {}) {
+    return new Promise((resolve, reject) => {
+      const data = body === undefined ? null : JSON.stringify(body)
+      const h = { ...headers }
+      if (data !== null) Object.assign(h, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) })
+      if (data !== null && h.origin === undefined && h['x-varanda-client'] === undefined) h.origin = ORIGIN
+      const req = http.request({ host: '127.0.0.1', port: listener.port, method, path: target, headers: h }, (res) => {
+        let text = ''
+        res.setEncoding('utf8')
+        res.on('data', (c) => { text += c })
+        res.on('end', () => {
+          let parsed = null
+          try { parsed = JSON.parse(text) } catch {}
+          resolve({ status: res.statusCode, body: parsed, text })
+        })
+      })
+      req.on('error', reject)
+      req.end(data)
+    })
+  }
+
   const creates = () => fake.seen.filter((r) => r.method === 'POST' && r.path === '/v3/session/')
   const deletes = () => fake.seen.filter((r) => r.method === 'DELETE')
   const decisions = () => fake.seen.filter((r) => r.method === 'GET')
   const lastSession = () => [...fake.sessions.keys()].pop()
 
-  return { dir, c, iss, store, ages, invites, feiraStore, fake, google, linked, logs, texts, api, post, signFor, start, step, creates, deletes, decisions, lastSession }
+  return { dir, c, iss, store, ages, invites, feiraStore, fake, google, linked, logs, texts, api, post, signFor, start, step, feiraStep, raw, creates, deletes, decisions, lastSession }
 }
 
 // Opens a session for `who` and scripts its Didit decision.
@@ -985,14 +1016,14 @@ test('age, Feira codes: one paid session per code per day', async (t) => {
   const owner = member().hex
   const { code } = await s.feiraStore.issue(owner)
   t.is(s.invites.feiraOwner(inviteId(code)), owner, 'the pair names the owner')
-  const first = await s.step(member(), 'session', { invite: code })
+  const first = await s.feiraStep(member(), { invite: code })
   t.is(first.status, 200, first.text)
-  const second = await s.step(member(), 'session', { invite: code })
+  const second = await s.feiraStep(member(), { invite: code })
   t.is(second.status, 429)
   t.alike(second.body, { error: 'limite-idade' })
   t.is(s.creates().length, 1, 'no second create for the same Feira code')
   s.c.offset += 30 * 60 * 1000
-  t.is((await s.step(member(), 'session', { invite: code })).status, 429, 'later in the code lifetime too')
+  t.is((await s.feiraStep(member(), { invite: code })).status, 429, 'later in the code lifetime too')
   t.absent(s.logs.join('\n').includes(code), 'no code in a log line')
 })
 
@@ -1001,9 +1032,9 @@ test('age, Feira codes: no window keyed by the owner, so minted codes cannot loc
   const owner = member().hex
   const codes = []
   for (let i = 0; i < 4; i++) codes.push((await s.feiraStore.issue(owner)).code)
-  for (const code of codes) t.is((await s.step(member(), 'session', { invite: code })).status, 200, 'more sessions than the weekly cap are not refused per owner')
+  for (const code of codes) t.is((await s.feiraStep(member(), { invite: code })).status, 200, 'more sessions than the weekly cap are not refused per owner')
   t.is(s.creates().length, 4)
-  const again = await s.step(member(), 'session', { invite: codes[0] })
+  const again = await s.feiraStep(member(), { invite: codes[0] })
   t.is(again.status, 429, 'one paid session per Feira code per day')
   t.alike(again.body, { error: 'limite-idade' })
 })
@@ -1014,11 +1045,11 @@ test('age, Feira codes: their own daily ceiling, never the ordinary one', async 
   const owner = member().hex
   for (let i = 0; i < FEIRA_AGE_DAILY; i++) {
     const { code } = await s.feiraStore.issue(owner)
-    const r = await s.step(member(), 'session', { invite: code })
+    const r = await s.feiraStep(member(), { invite: code })
     t.is(r.status, 200, 'Feira session ' + (i + 1) + ': ' + r.text)
   }
   const { code } = await s.feiraStore.issue(owner)
-  const over = await s.step(member(), 'session', { invite: code })
+  const over = await s.feiraStep(member(), { invite: code })
   t.is(over.status, 429, 'past the Feira ceiling')
   t.alike(over.body, { error: 'limite-idade' })
   t.ok(s.logs.some((l) => JSON.parse(l).reason === 'teto-diario-feira'), 'the Feira ceiling is logged')
@@ -1041,9 +1072,87 @@ test('age, Feira codes: their own daily ceiling, never the ordinary one', async 
 test('age, Feira codes: a code whose owner cannot be named fails closed', async (t) => {
   const s = await setup(t, { inviting: true, feira: { perWeek: 5, named: false } })
   const { code } = await s.feiraStore.issue(member().hex)
-  const r = await s.step(member(), 'session', { invite: code })
+  const r = await s.feiraStep(member(), { invite: code })
   t.alike(r.body, { error: 'indisponivel' })
   t.is(s.creates().length, 0, 'no paid session')
+})
+
+test('age, Feira codes: /account/age/session refuses them before any window, pointing to the Feira route', async (t) => {
+  const s = await setup(t, { inviting: true, feira: { perWeek: 5 } })
+  const { code } = await s.feiraStore.issue(member().hex)
+  const m = member()
+  const wrong = await s.step(m, 'session', { invite: code })
+  t.is(wrong.status, 409)
+  t.alike(wrong.body, { error: 'use-a-rota-da-feira' })
+  t.is(s.creates().length, 0, 'no paid session on the ordinary route')
+  const right = await s.feiraStep(m, { invite: code })
+  t.is(right.status, 200, 'the refusal charged neither the code nor the member: ' + right.text)
+  t.ok(typeof right.body.url === 'string')
+  t.is(s.creates().length, 1)
+  t.absent(s.logs.join('\n').includes(code), 'no code in a log line')
+})
+
+// Caddy limits the Feira route by its cleaned path, which can differ from the
+// URL parser's: only the exact raw target opens a paid session.
+test('age, Feira route: a raw target that only normalises to it is 404, before the nonce is spent', async (t) => {
+  const s = await setup(t, { inviting: true, feira: { perWeek: 5 } })
+  const { code } = await s.feiraStore.issue(member().hex)
+  const m = member()
+  const started = await s.start(m)
+  const nonce = started.body.nonce
+  const body = { member: m.hex, nonce, signature: s.signFor(m, 'session', nonce), invite: code }
+  const targets = [
+    '/account/feira/../feira/idade',
+    '/account/./feira/idade',
+    '/account/feira/./idade',
+    '/account/age/../feira/idade',
+    '/account/x%2Fy/../feira/idade',
+    '/account/x%2fy/../feira/idade',
+    '/account/feira/%2E%2E/feira/idade',
+    '/account/feira/%2e%2e/feira/idade',
+    '/account/feira//idade',
+    '/account/feira/idade/'
+  ]
+  for (const target of targets) {
+    const r = await s.raw('POST', target, body)
+    t.is(r.status, 404, target)
+  }
+  t.is(s.creates().length, 0, 'no paid session')
+  const ok = await s.raw('POST', FEIRA_AGE_PATH, body)
+  t.is(ok.status, 200, 'the same nonce still works on the canonical path: ' + ok.text)
+  t.is(s.creates().length, 1)
+})
+
+test('age, Feira route: an ordinary code, no code or a linked member is refused', async (t) => {
+  const s = await setup(t, { inviting: true, feira: { perWeek: 5 } })
+  await s.ages.record({ member: s.linked.hex, band: '18+', method: 'didit' })
+  const st = await s.post('/account/invites/start', { member: s.linked.hex })
+  const issued = await s.post('/account/invites/finish', {
+    member: s.linked.hex,
+    nonce: st.body.nonce,
+    signature: signInvite({ action: 'issue', nonce: st.body.nonce, member: s.linked.hex, association: s.iss.association }, s.linked.kp)
+  })
+  t.is(issued.status, 200, issued.text)
+  const m = member()
+  const ordinary = await s.feiraStep(m, { invite: issued.body.code })
+  t.is(ordinary.status, 400)
+  t.alike(ordinary.body, { error: 'pedido-invalido' })
+  const none = await s.feiraStep(member())
+  t.alike(none.body, { error: 'convite-obrigatorio' }, 'the same invite checks as the ordinary route')
+  t.is(s.creates().length, 0, 'no paid session')
+  const same = await s.step(m, 'session', { invite: issued.body.code })
+  t.is(same.status, 200, 'the ordinary route still serves it, its windows uncharged: ' + same.text)
+  t.is(s.creates().length, 1)
+})
+
+test('age, Feira route: refused for a non-Feira request when the Feira is off', async (t) => {
+  const s = await setup(t, {})
+  const r = await s.feiraStep(member())
+  t.is(r.status, 400)
+  t.alike(r.body, { error: 'pedido-invalido' })
+  t.is(s.creates().length, 0)
+  t.is((await s.step(member(), 'session')).status, 200, 'the ordinary flow is unchanged')
+  t.is(FEIRA_AGE_PATH, '/account/feira/idade')
 })
 
 test('age: attempts refused by a narrower window never fill the shared daily ceiling', async (t) => {

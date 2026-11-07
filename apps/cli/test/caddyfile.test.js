@@ -202,7 +202,7 @@ test('Caddyfile: /index/* goes to the seeder, before the SPA handle', (t) => {
 // Caddy's memory: never logged, never sent upstream.
 test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (t) => {
   t.ok(lines.some((l) => l.trim() === 'order rate_limit before reverse_proxy'), 'order rate_limit before reverse_proxy')
-  t.is(count('rate_limit {'), 5, 'exactly five rate_limit blocks')
+  t.is(count('rate_limit {'), 8, 'exactly eight rate_limit blocks (each Feira handle has two)')
   const limits = {
     'handle /index/* {': ['index', '20', '10s'],
     'handle /media/* {': ['media', '120', '10s'],
@@ -243,6 +243,57 @@ test('Caddyfile: /account/feira/* has its own handle before /account/*, to the a
   const text = block('handle /account/feira/* {').map((l) => l.trim())
   t.ok(text.includes('reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {'), 'to the account service')
   t.ok(text.includes('header_up Host {upstream_hostport}'), 'Host of the upstream')
+})
+
+// The paid Feira age session (POST /account/feira/idade) has its own, stricter
+// zones: the account service never reads an address, so the per-address limit
+// lives here; the rest of /account/feira/* keeps feira-entrada.
+test('Caddyfile: /account/feira/idade has its own per-address zone and global ceiling', (t) => {
+  const outer = block('handle /account/feira/* {').map((l) => l.trim())
+  // Only a JSON POST reaches the age zones: a cross-site page cannot send that
+  // type without a CORS preflight, so it cannot spend a victim's allowance.
+  t.alike(block('@feiraIdade {').map((l) => l.trim()), ['@feiraIdade {', 'path /account/feira/idade', 'method POST', 'header Content-Type application/json*', '}'], 'matcher: the path, POST and a JSON Content-Type')
+  t.alike(block('@feiraIdadeOutro {').map((l) => l.trim()), ['@feiraIdadeOutro {', 'path /account/feira/idade', 'not {', 'method POST', 'header Content-Type application/json*', '}', '}'], 'every other request to the path')
+  const outro = block('handle @feiraIdadeOutro {').map((l) => l.trim())
+  t.alike(outro, ['handle @feiraIdadeOutro {', 'respond 405', '}'], 'answered at the edge: no rate_limit, no reverse_proxy')
+  t.is(count('handle @feiraIdadeOutro {'), 1)
+  t.ok(outer.indexOf('handle @feiraIdadeOutro {') < outer.indexOf('handle @feiraEntrada {'), 'before the entry handle')
+  t.ok(outer.includes('@feiraEntrada not path /account/feira/idade'), 'every other Feira path')
+  const idade = block('handle @feiraIdade {').map((l) => l.trim())
+  const entrada = block('handle @feiraEntrada {').map((l) => l.trim())
+  t.is(count('handle @feiraIdade {'), 1, 'one Feira age handle')
+  t.is(count('handle @feiraEntrada {'), 1, 'one Feira entry handle')
+  t.ok(idade.length > 0 && entrada.length > 0, 'both inside /account/feira/*')
+  const zone = (b, name) => {
+    const i = b.indexOf('zone ' + name + ' {')
+    return i === -1 ? [] : b.slice(i, b.indexOf('}', i) + 1)
+  }
+  t.alike(zone(idade, 'feira-idade'), ['zone feira-idade {', 'key {remote_host}', 'events 2', 'window 1h', '}'], 'feira-idade: 2 per hour per address')
+  t.alike(zone(idade, 'feira-idade-total'), ['zone feira-idade-total {', 'key static', 'events 50', 'window 1h', '}'], 'feira-idade-total: 50 per hour in all')
+  t.absent(idade.includes('zone feira-entrada {'), 'the age route is not in the entry zone')
+  t.alike(zone(entrada, 'feira-entrada'), ['zone feira-entrada {', 'key {remote_host}', 'events 5', 'window 60s', '}'])
+  t.alike(zone(entrada, 'feira-entrada-total'), ['zone feira-entrada-total {', 'key static', 'events 60', 'window 60s', '}'])
+  t.absent(entrada.includes('zone feira-idade {'), 'the entry is not in the age zone')
+  // Each ceiling is its own rate_limit directive, in order, inside a route:
+  // the plugin reserves every zone of one directive without rollback, so a
+  // request refused per address must never reach the global zone.
+  for (const [name, b, total] of [['feira-idade', idade, 'feira-idade-total'], ['feira-entrada', entrada, 'feira-entrada-total']]) {
+    t.is(b[1], 'route {', name + ': the handle holds a route block')
+    const route = b.slice(1)
+    const directives = route.map((l, i) => [l, i]).filter(([l]) => l === 'rate_limit {').map(([, i]) => i)
+    t.is(directives.length, 2, name + ': two rate_limit directives')
+    const addr = route.indexOf('zone ' + name + ' {')
+    const glob = route.indexOf('zone ' + total + ' {')
+    const rp = route.indexOf('reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {')
+    t.ok(directives[0] < addr && addr < directives[1], name + ': the per-address zone alone in the first directive')
+    t.ok(directives[1] < glob && glob < rp, name + ': the global zone alone in the second, before the proxy')
+    t.ok(b.includes('header_up Host {upstream_hostport}'), name + ': Host of the upstream')
+    t.ok(b.includes('header_up -X-Forwarded-For'), name + ': X-Forwarded-For stripped')
+    t.ok(b.includes('header_up -X-Real-Ip'), name + ': X-Real-Ip stripped')
+  }
+  for (const z of ['feira-idade', 'feira-idade-total']) t.is(code.split('zone ' + z + ' {').length - 1, 1, z + ' only in the POST route')
+  t.ok(idade.includes('zone feira-idade {') && idade.includes('zone feira-idade-total {'), 'both age zones in the POST handle')
+  t.is(outer.filter((l) => l.startsWith('reverse_proxy ')).length, 2, 'no proxy outside the two inner handles')
 })
 
 // No access log. The only log block is the global one that EXCLUDES the
