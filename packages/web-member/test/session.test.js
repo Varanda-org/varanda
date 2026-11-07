@@ -28,6 +28,7 @@ const { verifyReport } = require('@varanda/core/lib/report')
 const { verifyTerms } = require('@varanda/core/lib/terms')
 const { verifyRecovery, blobHashOf } = require('@varanda/core/lib/recovery-proof')
 const { verifyInvite } = require('@varanda/core/lib/invite')
+const { signInviteCard, verifyInviteCard } = require('@varanda/core/lib/invite-card')
 const { verifyAge } = require('@varanda/core/lib/age')
 const { verifyPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { createBrowserNode } = require('../lib/node')
@@ -689,6 +690,90 @@ test('invite.sign: the unlocked key signs the signup-invite request, locked and 
   const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
   const mismatch = await errorOf(other.web.request('invite.sign', params))
   t.is(mismatch && mismatch.message, MISMATCH, 'a pair that does not match the stored diary signs nothing')
+})
+
+test('inviteCard.sign: the unlocked key signs the card, locked, mismatched and out-of-window refuse', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const now = Math.floor(Date.now() / 1000)
+  const params = { code: 'A-_9'.repeat(10) + 'abc', design: 'cordel', name: 'Ana Maria', message: 'Vem pra Varanda!\nTe espero.', expires: now + 7 * 86400 }
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('inviteCard.sign', params))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await certified(t, { storage, assoc, keyPair })
+  const before = await s.web.request('log.read', {})
+  const r = await s.web.request('inviteCard.sign', params)
+  t.alike(Object.keys(r), ['signature'], 'only the signature')
+  t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+  const fields = { ...params, member: s.key, association: assoc.hex }
+  t.alike(verifyInviteCard(fields, r.signature), { ok: true }, 'verifies against the diary key')
+  t.alike(verifyInviteCard({ ...fields, code: 'B'.repeat(43) }, r.signature), { ok: false, reason: 'bad-signature' }, 'bound to the code')
+
+  for (const k of ['member', 'association', 'signature']) {
+    const extra = await errorOf(s.web.request('inviteCard.sign', { ...params, [k]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot choose the ' + k)
+  }
+  for (const expires of [now - 86400 - 120, now + 8 * 86400 + 120]) {
+    const window = await errorOf(s.web.request('inviteCard.sign', { ...params, expires }))
+    t.is(window && window.code, 'USAGE', 'expires ' + (expires - now) + ' s from now refused')
+  }
+  const past = await s.web.request('inviteCard.sign', { ...params, expires: now - 3600 })
+  t.alike(verifyInviteCard({ ...fields, expires: now - 3600 }, past.signature), { ok: true }, 'an hour behind is inside the window')
+
+  const after = await s.web.request('log.read', {})
+  t.alike(after, before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('inviteCard.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(s.internal, [], 'no internal error')
+  await s.node.close()
+
+  const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
+  const mismatch = await errorOf(other.web.request('inviteCard.sign', params))
+  t.is(mismatch && mismatch.message, MISMATCH, 'a pair that does not match the stored diary signs nothing')
+})
+
+test('inviteCard.verify: answers before unlock and with no identity, refuses a tampered card', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const signer = crypto.keyPair()
+  const card = { code: 'A'.repeat(43), design: 'ipe', name: 'Bia', message: 'Chega mais', expires: Math.floor(Date.now() / 1000) + 86400 }
+  const member = hex(signer.publicKey)
+  const signature = signInviteCard({ ...card, member, association: assoc.hex }, signer)
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc, keyPair: null })
+  t.alike(await none.web.request('inviteCard.verify', { ...card, member, signature }), { ok: true }, 'no identity, no key')
+  t.alike(await none.web.request('inviteCard.verify', { ...card, message: 'Outra', member, signature }), { ok: false, reason: 'bad-signature' }, 'tampered message')
+  t.alike(await none.web.request('node.info').then((i) => i.publicKey), null, 'no identity created')
+  // A genuine card past its expiry plus a day of skew is refused by the node.
+  const nowSec = Math.floor(Date.now() / 1000)
+  const stale = { ...card, expires: nowSec - 86400 - 120 }
+  const staleSig = signInviteCard({ ...stale, member, association: assoc.hex }, signer)
+  t.alike(await none.web.request('inviteCard.verify', { ...stale, member, signature: staleSig }), { ok: false, reason: 'expired' }, 'expired card')
+  const recent = { ...card, expires: nowSec - 3600 }
+  const recentSig = signInviteCard({ ...recent, member, association: assoc.hex }, signer)
+  t.alike(await none.web.request('inviteCard.verify', { ...recent, member, signature: recentSig }), { ok: true }, 'an hour past expiry is inside the skew')
+
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const s = await certified(t, { storage, assoc })
+  await s.node.clearKeyPair()
+  const before = await s.web.request('log.read', {})
+  t.alike(await s.web.request('inviteCard.verify', { ...card, member, signature }), { ok: true }, 'locked')
+  const other = association()
+  const elsewhere = await setup(t, { storage: memoryNodeStorage(), assoc: other, keyPair: null })
+  t.alike(await elsewhere.web.request('inviteCard.verify', { ...card, member, signature }), { ok: false, reason: 'bad-signature' }, 'bound to the association')
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written')
+  t.alike(s.internal, [], 'no internal error')
+  t.alike(none.internal, [], 'no internal error')
 })
 
 test('recovery.sign: the unlocked key signs put, remove and list, locked and mismatched refuse', async (t) => {

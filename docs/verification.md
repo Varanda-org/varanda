@@ -5824,3 +5824,35 @@ Limites:
 - Uma vaga pode acabar entre a leitura e o vínculo; o serviço recusa nesse caso.
 - A leitura é um pedido só, não uma reserva.
 - Uma configuração digitada à mão na página hospedada não recebe o aviso antecipado.
+
+## 125. Cartão de convite assinado (PR feat/invite-card-sign)
+
+Um membro assina, com a chave do diário, o cartão que acompanha um convite de cadastro: desenho regional, nome, mensagem e validade. O cartão viaja só no fragmento do link e é conferido por quem abre. Esta etapa traz só o contrato, a assinatura e a conferência; ainda não há tela.
+
+Regras que os passos conferem:
+
+- O link tem a forma `origem/convite/<código>?c=<índice do desenho>#c1.<corpo>`. O `?c` é público e só serve à prévia do mensageiro: é opcional ao ler e, quando presente, tem de ser igual ao índice assinado. O fragmento nunca vai a um servidor.
+- A assinatura cobre oito linhas (`varanda-invite-card-v1`, código, desenho, validade, resumo do nome, resumo da mensagem, membro, associação). Nome e mensagem entram por resumo BLAKE2b-256 calculado sempre pelo assinante, e o prefixo impede que a assinatura valha como outro pedido do protocolo.
+- `inviteCard.sign` só existe no navegador (o nó do Node responde `assinatura disponível só no navegador`), exige a identidade aberta e aceita validade de 1 dia atrás a 8 dias à frente.
+- `inviteCard.verify` roda nos dois nós, não precisa de identidade e funciona com a identidade bloqueada. No navegador a chave do membro passa antes por uma conferência estrita (ponto de ordem pequena ou fora da forma canônica é recusado como `malformed`). Um cartão com assinatura boa cuja validade passou há mais de um dia pelo relógio do nó volta `expired`.
+- O link leva no fragmento o nome de quem recebe e a mensagem: o app que abrir o link precisa tirar o cartão da barra de endereço na mesma passada em que o guarda (fica para o PR do app).
+- O link inteiro tem no máximo 400 caracteres.
+
+Passos (marcar só depois de executar e guardar o registro). Ainda não há tela para criar nem abrir o cartão, então cada plataforma só confirma que nada mudou:
+
+- [ ] Android (build de debug, emulador ou aparelho): o app abre e usa convites como antes; não há tela do cartão ainda.
+- [ ] Simulador iOS: o app abre e usa convites como antes; não há tela do cartão ainda.
+- [ ] Web e PWA: o cadastro por convite funciona como antes; não há tela do cartão ainda.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node packages/rpc/test/invite-card.test.js` e `node packages/rpc/test/methods.test.js`.
+- `node packages/core/test/invite-card.test.js`, `node packages/core/test/page-proof.test.js` e `node packages/core/test/session.test.js`.
+- `node packages/web-member/test/invite-card.test.js` e `node packages/web-member/test/session.test.js`.
+- `node apps/app/test/vitrine.test.js`.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- O serviço de conta não muda: não recebe nem guarda o cartão.
+- Links nativos (`varanda://`) continuam com no máximo 400 caracteres, como os de web.

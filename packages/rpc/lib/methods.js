@@ -5,6 +5,7 @@ const L = require('./limits')
 const { DM_MEDIA_KEYS, DM_CARD_KEYS } = require('./dm-budget')
 const { cardUrlHost, cardTextLength, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMAGE_BYTES } = require('./link-card')
 const { MAX_AUDIO_MS } = require('./audio-bounds')
+const IC = require('./invite-card')
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):(0|[1-9][0-9]*)$/
@@ -299,6 +300,23 @@ const isReason = (v) => typeof v === 'string' && REPORT_REASONS.includes(v)
 // terms.sign (docs/rpc.md 5.29). Duplicated from @varanda/core lib/terms.js
 // (VERSION_MAX), which this package cannot import.
 const TERMS_VERSION_MAX = 9999
+
+// inviteCard.sign / inviteCard.verify: a value is valid only when already
+// canonical, so the signed bytes are exactly what the caller sent.
+const HEX128 = /^[0-9a-f]{128}$/
+const isInviteCardDesign = (v) => IC.designIndex(v) >= 0
+const isInviteCardName = (v) => typeof v === 'string' && IC.canonicalInviteCardText(v, IC.NAME_MAX) === v
+const isInviteCardMessage = (v) => typeof v === 'string' &&
+  IC.canonicalInviteCardText(v, IC.MESSAGE_MAX_BYTES, { multiline: true }) === v &&
+  utf8ByteLength(v) <= IC.MESSAGE_MAX_BYTES
+const isSignature = (v) => typeof v === 'string' && HEX128.test(v)
+const INVITE_CARD_FIELDS = {
+  code: req(IC.isInviteCode),
+  design: req(isInviteCardDesign),
+  name: req(isInviteCardName),
+  message: req(isInviteCardMessage),
+  expires: req(IC.isInviteCardExpires)
+}
 
 // invite.sign (docs/rpc.md 5.30). Duplicated from @varanda/core
 // lib/invite.js (ACTIONS), which this package cannot import.
@@ -754,6 +772,18 @@ const SPECS = {
     fields: {
       action: req(isInviteAction),
       nonce: req(isNonce)
+    }
+  },
+  // Signs a signup invite card with the identity key; the node fills in the
+  // member itself, so a caller never chooses who signs. Not mutating: it
+  // only signs.
+  'inviteCard.sign': { fields: { ...INVITE_CARD_FIELDS } },
+  // Checks a card's signature against the member key it names. Pure.
+  'inviteCard.verify': {
+    fields: {
+      ...INVITE_CARD_FIELDS,
+      member: req(isKey),
+      signature: req(isSignature)
     }
   },
   // Signs the age-verification request with the identity key; the node fills

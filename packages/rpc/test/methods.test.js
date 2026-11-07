@@ -22,7 +22,7 @@ test('method list and mutating set', (t) => {
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
-    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.readFile', 'media.uploadFile', 'node.close', 'node.info', 'notices.list',
+    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'log.read', 'media.readFile', 'media.uploadFile', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
@@ -230,6 +230,51 @@ test('invite.sign', (t) => {
   for (const action of ['revoke', 'read', 'SUMMARY', 'ISSUE', '', null, 1]) bad(t, 'invite.sign', { ...base, action }, 'action ' + action)
   for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
     bad(t, 'invite.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
+})
+
+test('inviteCard.sign and inviteCard.verify', (t) => {
+  const base = { code: 'A-_9'.repeat(10) + 'abc', design: 'cordel', name: 'Ana Souza', message: 'Vem pra Varanda!\nTe espero lá.', expires: 1800000000 }
+  const full = { ...base, member: KEY, signature: 'cd'.repeat(64) }
+  t.absent(isMutating('inviteCard.sign'))
+  t.absent(isMutating('inviteCard.verify'))
+  ok(t, 'inviteCard.sign', base, base)
+  ok(t, 'inviteCard.verify', full, full)
+  ok(t, 'inviteCard.sign', { ...base, design: 'chimarrao', name: 'a'.repeat(40), message: 'é'.repeat(100), expires: 2 ** 32 - 1 })
+  ok(t, 'inviteCard.sign', { ...base, message: 'x' })
+  for (const [method, p0] of [['inviteCard.sign', base], ['inviteCard.verify', full]]) {
+    bad(t, method, {})
+    for (const k of Object.keys(p0)) {
+      const p = { ...p0 }
+      delete p[k]
+      bad(t, method, p, 'missing ' + k)
+    }
+    for (const design of ['Cordel', 'nope', '', 0, 3, null]) bad(t, method, { ...p0, design }, 'design ' + design)
+    for (const name of ['a'.repeat(41), '', ' Ana', 'Ana ', 'A\u0000na', 'A\nna', 'A\u202ena', 'Jose\u0301', 1, null]) {
+      bad(t, method, { ...p0, name }, 'name ' + JSON.stringify(name))
+    }
+    for (const message of ['', ' oi', 'oi\n', 'o\u0007i', 'o\ri', 'o\u202ei', 'a'.repeat(201), 'é'.repeat(101), null]) {
+      bad(t, method, { ...p0, message }, 'message ' + JSON.stringify(message).slice(0, 20))
+    }
+    for (const expires of [0, -1, 2 ** 32, 1.5, '1800000000', null]) bad(t, method, { ...p0, expires }, 'expires ' + expires)
+    for (const code of ['a'.repeat(42), 'a'.repeat(44), 'a'.repeat(42) + '=', 'a'.repeat(42) + '+', 1]) {
+      bad(t, method, { ...p0, code }, 'code ' + code)
+    }
+    for (const k of ['digest', 'payload', 'bytes', 'url', 'origin']) bad(t, method, { ...p0, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  // The caller never chooses the member or the association on sign.
+  for (const k of ['member', 'association', 'signature']) {
+    bad(t, 'inviteCard.sign', { ...base, [k]: k === 'signature' ? 'cd'.repeat(64) : KEY }, 'sign extra ' + k)
+  }
+  bad(t, 'inviteCard.verify', { ...full, association: KEY }, 'verify extra association')
+  for (const member of ['AB'.repeat(32), 'ab'.repeat(31), 'ab'.repeat(33), '', 1]) bad(t, 'inviteCard.verify', { ...full, member }, 'member ' + member)
+  for (const signature of ['CD'.repeat(64), 'cd'.repeat(63), 'cd'.repeat(65), KEY, 1]) {
+    bad(t, 'inviteCard.verify', { ...full, signature }, 'signature ' + String(signature).slice(0, 8))
+  }
+  // invite.sign keeps exactly action and nonce.
+  ok(t, 'invite.sign', { action: 'issue', nonce: 'n'.repeat(43) })
+  for (const k of Object.keys(base)) {
+    bad(t, 'invite.sign', { action: 'issue', nonce: 'n'.repeat(43), [k]: base[k] }, 'invite.sign extra ' + k)
   }
 })
 

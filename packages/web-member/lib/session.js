@@ -38,12 +38,14 @@
 // clearKeyPair(), reset() and close(). Reads work locked; a write without
 // the key is USAGE 'identidade bloqueada: entre com a passkey'. The only
 // signatures the session makes outside the diary are account.sign,
-// report.sign, terms.sign, invite.sign, push.sign and age.sign: the
-// domain-separated account-link statement (@varanda/core lib/account-link.js,
-// prefix 'varanda-account-link-v1'), report statement (@varanda/core
-// lib/report.js, prefix 'varanda-report-v1'), terms-acceptance statement
-// (@varanda/core lib/terms.js, prefix 'varanda-terms-v1'), signup-invite
-// request (@varanda/core lib/invite.js, prefix 'varanda-invite-v1'),
+// report.sign, terms.sign, invite.sign, inviteCard.sign, push.sign and
+// age.sign: the domain-separated account-link statement (@varanda/core
+// lib/account-link.js, prefix 'varanda-account-link-v1'), report statement
+// (@varanda/core lib/report.js, prefix 'varanda-report-v1'), terms-acceptance
+// statement (@varanda/core lib/terms.js, prefix 'varanda-terms-v1'),
+// signup-invite request (@varanda/core lib/invite.js, prefix
+// 'varanda-invite-v1'), signup-invite card (@varanda/core
+// lib/invite-card.js, prefix 'varanda-invite-card-v1'),
 // push-subscription statement (@varanda/core lib/push-proof.js, prefix
 // 'varanda-push-v1') and age-verification request (@varanda/core
 // lib/age.js, prefix 'varanda-age-v1'), whose member and association the
@@ -291,6 +293,8 @@ const { signReport, signDmReport } = require('@varanda/core/lib/report')
 const { signTerms } = require('@varanda/core/lib/terms')
 const { signRecovery, blobHashOf } = require('@varanda/core/lib/recovery-proof')
 const { signInvite } = require('@varanda/core/lib/invite')
+const { signInviteCard, isInviteCardExpired } = require('@varanda/core/lib/invite-card')
+const { strictVerifyInviteCard } = require('./invite-card')
 const { signAge } = require('@varanda/core/lib/age')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
@@ -327,6 +331,12 @@ const OLD_USERNAME_RECORD = 'registro de nome antigo'
 const SELF_REPORT = 'não é possível denunciar a própria chave'
 const BAD_REPORT = 'denúncia inválida'
 const BAD_PUSH = 'inscrição de notificação inválida'
+const BAD_INVITE_CARD = 'cartão de convite inválido'
+const INVITE_CARD_EXPIRES = 'validade do cartão de convite fora do prazo'
+// inviteCard.sign: expires may lag the clock by a day and lead it by eight
+// (a signup invite lasts a week, plus a day of clock skew).
+const INVITE_CARD_PAST = 24 * 60 * 60
+const INVITE_CARD_AHEAD = 8 * 24 * 60 * 60
 const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
@@ -2395,6 +2405,42 @@ function createBrowserSession ({
       const signature = signInvite({ action, nonce, member: own, association: cfg.association }, keyPair)
       return { signature }
     }),
+
+    // Signs a signup-invite card with the in-memory key, exactly like
+    // invite.sign. The session fills in member and association; name and
+    // message enter the statement hashed.
+    'inviteCard.sign': serial(async ({ code, design, name, message, expires }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      const now = Math.floor(Date.now() / 1000)
+      if (expires < now - INVITE_CARD_PAST || expires > now + INVITE_CARD_AHEAD) throw new UsageError(INVITE_CARD_EXPIRES)
+      let signature
+      try {
+        signature = signInviteCard({ code, design, name, message, expires, member: own, association: cfg.association }, keyPair)
+      } catch (err) {
+        if (err instanceof TypeError) throw new UsageError(BAD_INVITE_CARD)
+        throw err
+      }
+      return { signature }
+    }),
+
+    // Checks a card someone else signed. Pure: works locked and with no
+    // identity, and never touches the diary, the storage or the network.
+    'inviteCard.verify': async ({ signature, ...fields }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const result = strictVerifyInviteCard({ ...fields, association: cfg.association }, signature)
+      // A genuine card past its expiry (plus a day of skew) is refused here,
+      // so no screen has to carry the clock check (docs/rpc.md 5.102).
+      if (result.ok && isInviteCardExpired(fields.expires, Math.floor(Date.now() / 1000))) return { ok: false, reason: 'expired' }
+      return result
+    },
 
     // Signs the age-verification request with the in-memory key (docs/rpc.md
     // 5.32), exactly like invite.sign. It needs no member certificate: the
