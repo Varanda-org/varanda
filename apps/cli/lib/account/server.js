@@ -23,6 +23,7 @@ const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, p
 const { createPagesRoutes } = require('./pages-routes')
 const { createGifRoutes } = require('./gif-routes')
 const { createPreviewRoutes } = require('./preview-routes')
+const { createOgRoutes } = require('./og-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -945,6 +946,16 @@ function createAccountServer ({
     http: { send, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, keyedWindow }
   })
 
+  // Messenger link previews of signup invite links (./og-routes.js).
+  const ogRoutes = createOgRoutes({
+    origin,
+    store,
+    invites,
+    limits: { lookup: limits.lookup },
+    log,
+    http: { RouteError, refuse }
+  })
+
   // With age verification on, no key without a band on record gets a Google
   // sign-in, a certificate, a rename or an invite. Off, it never refuses.
   function ageChecked (member) {
@@ -1699,6 +1710,7 @@ function createAccountServer ({
     if (pagesRoutes.owns(pathname)) return pagesRoutes.handle(req, res, url)
     if (gifRoutes.owns(pathname)) return gifRoutes.handle(req, res, url)
     if (previewRoutes.owns(pathname)) return previewRoutes.handle(req, res, url)
+    if (ogRoutes.owns(pathname)) return ogRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === APP_RETURN_PATH) return appReturn(res)

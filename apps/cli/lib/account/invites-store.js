@@ -450,6 +450,13 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
     return null
   }
 
+  // Read-only: the inviter's key of a row that check(id) would accept, else
+  // null. For the link preview, which names the inviter of a live invite.
+  function inviterOf (id) {
+    if (check(id) !== null) return null
+    return byId.get(id).inviter
+  }
+
   // Idempotent: the link commit in the directory is the single-use authority
   // and already happened, so this only drops the hash and marks the row.
   function consume (id) {
@@ -518,6 +525,7 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
     forget,
     holds,
     check,
+    inviterOf,
     consume,
     heal,
     summary,

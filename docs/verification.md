@@ -5899,9 +5899,45 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi executada nesta documentação.
 - Alguns mensageiros tiram o fragmento do link: o link comum continua funcionando e o convite vale sem cartão.
 - A mensagem é um bilhete curto, de cerca de 134 bytes no endereço bora.varanda.app, dividido com o nome (o contador do app mostra o espaço exato).
-- Não há nota de voz, foto, desenho por estado, compartilhar como imagem, Open Graph por convite nem arte encomendada.
+- Não há nota de voz, foto, desenho por estado, compartilhar como imagem nem arte encomendada; a prévia nos mensageiros vem na seção 127.
 - Um app já instalado não mostra o cartão e ainda assim troca o código pelo convite.
 - Quem usa uma configuração salva de outra associação não vê cartão (a conferência falha fechada), e o código continua valendo.
 - Quem tem o link lê o cartão: nome, mensagem e desenho não são cifrados.
 - Para mostrar o @nome de quem escreveu, o aparelho de quem abre o link consulta o status público da conta pela chave de quem convidou, antes do cadastro (o serviço não registra essa consulta; nome e mensagem não saem do aparelho). Um cartão vencido não faz consulta nenhuma.
 - O histórico do próprio navegador pode guardar o endereço como foi aberto, com o fragmento, mesmo depois que o app o tira da barra.
+
+## 127. Prévia do cartão de convite nos mensageiros (PR feat/invite-card-preview)
+
+Quando alguém cola um link de convite no WhatsApp, no Telegram ou no iMessage, o robô do mensageiro lê uma página curta do serviço de conta e mostra o desenho escolhido e, se o convite estiver vivo, "@nome te mandou um convite pra Varanda". Robôs não veem o fragmento (`#c1...`), então o desenho viaja no `?c=N` público; o nome e a mensagem do cartão nunca chegam ao servidor.
+
+Regras que os passos conferem:
+
+- `GET` e `HEAD /account/og/convite/<código>?c=N` (`apps/cli/lib/account/og-routes.js`) respondem sempre 200 com uma página de metadados Open Graph. O título pessoal só sai para um convite vivo, com `c` válido (0 a 999, e que seja um dos 13 desenhos) e quem convidou com conta vinculada e @nome (`inviterOf` em `invites-store.js`, mais o status da conta). Um convite morto (usado, vencido ou desconhecido) com `c` válido ainda recebe a imagem daquele desenho, mas com o título genérico "Você recebeu um convite pra Varanda". Sem `c` válido, a imagem é `convite.png`.
+- Um código malformado nunca é repetido na página: o `og:url` vira a raiz. O `og:url` de um código bem formado mantém o `?c`.
+- Os endereços absolutos (imagem e `og:url`) partem da origem configurada, nunca do cabeçalho `Host`. Todo valor interpolado é escapado.
+- A resposta leva `Cache-Control: no-store`, `X-Robots-Tag: noindex`, `nosniff`, `Referrer-Policy: no-referrer` e uma CSP fechada. O registro guarda só contagens (`{ event: 'og', reason: 'pessoal' | 'generico' }`), nunca o código, a chave de quem convidou ou o @nome. A rota passa pelo limite global de consultas do serviço.
+- As 14 imagens (`apps/app/public/og/convite-<desenho>.png`, 13 desenhos, e `convite.png`) são 1200 x 630, renderizadas por `apps/app/scripts/render-og.js` a partir de `apps/app/src/inviteCardArt.js`: cada uma é a moldura regional com uma cadeira de balanço de varanda no centro, gerada pelo script e commitada; as imagens ficam fora do cache do PWA, porque só os robôs de prévia as buscam. `node apps/app/scripts/render-og.js --check` compara os pixels com os arquivos.
+- `deploy/seeder/Caddyfile`: `@previaConvite` casa `path /convite/*` mais uma lista de `User-Agent` (facebookexternalhit, facebot, whatsapp, telegrambot, twitterbot, slackbot, discordbot, linkedinbot, skypeuripreview, applebot) e reescreve para `/account/og{path}`, seguindo para o serviço de conta. O par é excluído de `@mutavel` (não leva `no-cache`) e de `@ausenteApp`. Uma pessoa em `/convite/*` continua recebendo o `index.html` do app, como antes.
+
+Como verificar, a partir da raiz (um arquivo por vez):
+
+- `node apps/app/test/renderOg.test.js`
+- `node apps/cli/test/og-routes.test.js`
+- `node apps/cli/test/invites-store.test.js`
+- `node apps/cli/test/caddyfile.test.js`
+
+Depois que o operador reimplantar o Caddy e o serviço de conta (o `Caddyfile` mudou, então só `up -d` do Caddy não basta sem recarregar a configuração):
+
+- [ ] Colar um link de cartão (`/convite/<código>?c=3`) no WhatsApp, no Telegram e no iMessage e ver a imagem do desenho e "@nome te mandou um convite pra Varanda".
+- [ ] Um link comum (sem `?c`) e um convite já usado ou vencido mostram a prévia genérica ("Você recebeu um convite pra Varanda", imagem `convite.png` ou a do desenho, conforme o caso).
+- [ ] `curl -sA WhatsApp 'https://<domínio>/convite/<código>?c=3'` devolve `og:image` com `convite-cordel.png`. Isso prova que o `?c` sobrevive à reescrita do Caddy, o que não pôde ser testado sem o binário do Caddy.
+- [ ] `curl -s 'https://<domínio>/convite/<código>'` com um `User-Agent` de navegador continua devolvendo o `index.html` do app, e uma pessoa num navegador abre o app normalmente.
+- [ ] Com o serviço de conta parado, abrir o link com `curl -sA WhatsApp` e ver se o log de erro do Caddy registra o caminho `/convite/<código>`. Anotar aqui o resultado: ______.
+
+Limites:
+
+- Só os robôs conhecidos, pelo `User-Agent`, recebem a prévia pessoal; qualquer outro vê o título e a descrição de hoje.
+- Quem tem um código vivo pode descobrir o @nome de quem convidou pela prévia (o cartão já o mostra).
+- Um link comum postado em público com `?c` acrescentado revelaria quem o emitiu.
+- As imagens são geometria gerada, não arte encomendada.
+- O `User-Agent` é declarado pelo cliente: quem quiser pode se passar por um robô e ver a página de prévia, que não traz nada além do que está acima.
