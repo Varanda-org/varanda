@@ -72,6 +72,7 @@ import Convites from './Convites'
 import Identidade from './Identidade'
 import Passkeys from './Passkeys'
 import Perfil from './Perfil'
+import Recurso from './Recurso'
 import Sincronizar from './Sincronizar'
 import Termos from './Termos'
 
@@ -94,6 +95,7 @@ const TITLES = {
   sincronizar: 'Sincronização',
   identidade: 'Identidade técnica',
   convites: 'Convidar pessoas',
+  recurso: 'Recorrer de um bloqueio',
   excluir: 'Excluir conta'
 }
 
@@ -390,6 +392,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
               {account && unlocked ? <Item icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}
+              {account ? <Item icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
               {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
               {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function'
                 ? <Item icon='gente' label='Páginas' onPress={openPaginas} />
@@ -525,6 +528,13 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           ? (
             <View style={shown('passkeys')}>
               <Passkeys active={ready && screen === 'passkeys'} embedded />
+            </View>
+            )
+          : null}
+        {account
+          ? (
+            <View style={shown('recurso')}>
+              <Recurso open={screen === 'recurso'} active={ready && screen === 'recurso'} />
             </View>
             )
           : null}

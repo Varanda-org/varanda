@@ -23,7 +23,8 @@ const sha256hex = (bytes) => crypto.createHash('sha256').update(bytes).digest('h
 // except Expo's metadata.json, the worker itself and source maps. A
 // version.json left in dist by build-web.sh is neither precached nor part of
 // the release hash, so the same source yields the same release id whatever
-// commit is stamped there.
+// commit is stamped there. The messenger preview images under /og/ are only
+// fetched by link-preview crawlers, so no install downloads them.
 function listAssets (distDir) {
   const out = []
   const walk = (dir, rel) => {
@@ -31,7 +32,7 @@ function listAssets (distDir) {
       const relPath = rel + '/' + ent.name
       if (ent.isDirectory()) {
         walk(path.join(dir, ent.name), relPath)
-      } else if (ent.isFile() && !EXCLUDED.has(relPath) && !ent.name.endsWith('.map')) {
+      } else if (ent.isFile() && !EXCLUDED.has(relPath) && !ent.name.endsWith('.map') && !relPath.startsWith('/og/')) {
         out.push(relPath)
       }
     }

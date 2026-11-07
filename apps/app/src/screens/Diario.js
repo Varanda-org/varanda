@@ -176,6 +176,11 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const loadedAtRef = useRef(null)
   const dataRef = useRef(null)
   dataRef.current = data
+  // The identity (epoch and passkey generation, both live at the render) the
+  // rows' own key was read under; the key is reused only while it still holds.
+  const identityRef = useRef(null)
+  identityRef.current = { epoch: node.epoch, generation: node.passkey ? node.passkey.generation : undefined, hosted: node.hosted === true }
+  const infoIdentityRef = useRef(null)
 
   const { learn, resolve, invalidate, profileOf } = names
   const { request, ackFresh } = node
@@ -196,15 +201,30 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     olderBusy.current = false
     const knownKey = dataRef.current && dataRef.current.info.publicKey
     if (refreshProfile && typeof knownKey === 'string') invalidate([knownKey])
+    const identity = identityRef.current
+    // Hosted reads borrow the live sync run instead of preempting it, so
+    // node.info (a round trip that changes nothing) is skipped when the key
+    // was read under this same identity. A new epoch (connect, lock, unlock,
+    // sign out) or passkey generation (the identity may have changed) forces
+    // the read again, so a key of another identity never reads this diary.
+    const reuseInfo = !refreshProfile && identity.hosted && dataRef.current !== null &&
+      infoIdentityRef.current !== null && identity.generation !== undefined &&
+      infoIdentityRef.current.epoch === identity.epoch &&
+      infoIdentityRef.current.generation === identity.generation
     try {
-      // One read after the other: each read preempts a running sync.
-      const info = await request('node.info', {})
+      // Core nodes: one read after the other, since each read preempts a running sync.
+      let info = reuseInfo ? dataRef.current.info : await request('node.info', {})
       if (refreshProfile && mine === seqRef.current && typeof info.publicKey === 'string' && info.publicKey !== knownKey) {
         invalidate([info.publicKey])
       }
       const log = await request('log.read', { limit: LOG_LIMIT_MAX })
+      // The node can switch identity a round trip before the epoch moves
+      // (passkeyOp re-reads the status first): log.read names the diary it
+      // read, so a reused key that is not that diary's is read again.
+      if (reuseInfo && log.key !== info.publicKey) info = await request('node.info', {})
       if (mine !== seqRef.current) return
       const rows = logRows(log)
+      if (!reuseInfo) infoIdentityRef.current = identity
       // The older pages are gone with the replaced rows: the Mural fill
       // budget starts over with them.
       muralPages.current = 0

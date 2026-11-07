@@ -34,10 +34,13 @@ const resultKeys = {
   'account.sign': ['signature'],
   'age.sign': ['signature'],
   'invite.sign': ['signature'],
+  'inviteCard.sign': ['signature'],
+  'inviteCard.verify': ['ok', 'reason'],
   'push.sign': ['signature'],
   'seen.sign': ['signature', 'prevHash'],
   'seen.merge': ['avisos', 'pending', 'dmChanged', 'groupChanged', 'caughtUp'],
   'report.sign': ['signature'],
+  'appeal.sign': ['signature'],
   'dm.reportSign': ['signature'],
   'terms.sign': ['signature'],
   'recovery.sign': ['signature'],
@@ -510,7 +513,8 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
     'publicMedia.js': ["import { fixtures, postPictureBytes } from './fixtures.js'"],
     'pictures.js': [],
     'media.js': ["import { pictures } from './pictures.js'", "import { PICTURE_BASE } from './fixtures.js'"],
-    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'"],
+    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { largeFeed } from './large.js'"],
+    'large.js': [],
     'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { fixtures } from './fixtures.js'"]
   }
   for (const file of Object.keys(expectedImports)) {
@@ -532,6 +536,7 @@ function samples (f) {
   const member = f.members[2].author
   const to = `${f.own}:3`
   const nonce = 'v'.repeat(43)
+  const card = { code: nonce, design: 'cordel', name: 'Ana', message: 'Vem pra praça.', expires: 1800000000 }
   const params = {
     'session.open': {},
     'node.info': {},
@@ -568,10 +573,13 @@ function samples (f) {
     'age.sign': { action: 'result', nonce },
     'age.proof': { verified: { date: f.now }, since: null },
     'invite.sign': { action: 'issue', nonce },
+    'inviteCard.sign': card,
+    'inviteCard.verify': { ...card, member: 'ab'.repeat(32), signature: '0'.repeat(128) },
     'push.sign': { action: 'on', nonce, endpoint: 'https://push.example.org/vitrine', p256dh: 'vitrine', auth: 'vitrine' },
     'seen.sign': { nonce, action: 'read' },
     'seen.merge': { blob: null, avisos: { own: [] }, unchanged: false },
     'report.sign': { nonce, target: member, reason: 'outro' },
+    'appeal.sign': { nonce, text: 'Foi um engano.' },
     'dm.reportSign': { nonce, target: member, reason: 'outro', quote: 'Uma mensagem de exemplo.' },
     'terms.sign': { nonce, version: 1 },
     'recovery.sign': { action: 'list', nonce },
@@ -938,9 +946,11 @@ test('page signing covers every documented result variant with fake signatures',
   const cancelled = await answer(t, request, 'page.sign', { action: 'offer', nonce, page, op: { ...base, to: null, exp: null } })
   t.is(cancelled.record.to, null)
   t.is(cancelled.record.exp, null)
-  for (const method of ['account.sign', 'age.sign', 'invite.sign', 'push.sign', 'report.sign', 'dm.reportSign', 'terms.sign', 'recovery.sign']) {
+  for (const method of ['account.sign', 'age.sign', 'invite.sign', 'inviteCard.sign', 'push.sign', 'report.sign', 'appeal.sign', 'dm.reportSign', 'terms.sign', 'recovery.sign']) {
     t.is((await answer(t, request, method, samples(f)[method])).signature, signature)
   }
+  // The development build never vouches for a card.
+  t.alike(await answer(t, request, 'inviteCard.verify', samples(f)['inviteCard.verify']), { ok: false, reason: 'bad-signature' })
 })
 
 test('review shots retries collisions but stops on permanent failures and the retry cap', (t) => {

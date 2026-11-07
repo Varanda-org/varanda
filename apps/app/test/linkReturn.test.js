@@ -152,6 +152,26 @@ test('parseInviteInput: bare code or a full invite link', async (t) => {
   }
 })
 
+test('parseInviteInput: a 400-char card link still yields the code', async (t) => {
+  const { parseInviteInput } = await load()
+  await withOrigin(t, 'https://varanda.example')
+  for (const prefix of ['varanda:///convite/' + CODE + '?c=3#c1.', 'https://varanda.example/convite/' + CODE + '?c=3#c1.']) {
+    const url = prefix + 'A'.repeat(400 - prefix.length)
+    t.is(url.length, 400)
+    t.is(parseInviteInput(url), CODE, prefix.slice(0, 12))
+  }
+})
+
+test('parseInviteInput: a 401-char card link yields nothing', async (t) => {
+  const { parseInviteInput } = await load()
+  await withOrigin(t, 'https://varanda.example')
+  for (const prefix of ['varanda:///convite/' + CODE + '?c=3#c1.', 'https://varanda.example/convite/' + CODE + '?c=3#c1.']) {
+    const url = prefix + 'A'.repeat(401 - prefix.length)
+    t.is(url.length, 401)
+    t.is(parseInviteInput(url), null, prefix.slice(0, 12))
+  }
+})
+
 test('invite refusals and the native drop', async (t) => {
   const { isInviteRefusal, dropsHeldInvite } = await load()
   t.ok(isInviteRefusal({ code: 'convite-obrigatorio' }))

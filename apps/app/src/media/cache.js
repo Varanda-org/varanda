@@ -32,11 +32,21 @@ const noopRevoke = (url) => {
 export const RETRY_DELAYS_MS = Object.freeze([2000, 5000, 15000])
 
 // The delay before automatic retry number `done` + 1, or null to stop.
-export function retryDelay (err, done, delays = RETRY_DELAYS_MS) {
+// A busy seeder answer (err.retryAfterMs) is global to the installation, so
+// many tiles retrying on the same tick would hit the bound again: every retry
+// waits at least what the seeder asked for (the first ones exactly that, the
+// last one never less than its ladder step) plus a random 500-1500 ms spread
+// added on top, so tiles that failed together do not retry together.
+export function retryDelay (err, done, delays = RETRY_DELAYS_MS, random = Math.random) {
   if (!err || err.retryable !== true) return null
   if (!Number.isInteger(done) || done < 0 || done >= delays.length) return null
+  if (Number.isFinite(err.retryAfterMs)) {
+    const base = done < BUSY_RETRIES ? err.retryAfterMs : Math.max(err.retryAfterMs, delays[done])
+    return base + 500 + Math.floor(random() * 1000)
+  }
   return delays[done]
 }
+const BUSY_RETRIES = 2
 
 export function mediaKey (d) {
   return d.core + ':' + d.start + ':' + d.blocks + ':' + d.sha256

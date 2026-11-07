@@ -10,6 +10,17 @@ const { validRecordCopy, formatRef } = require('./records')
 // `entries`: [{ seq, record }]. Returns { liked: Set<ref>, reposted:
 // Map<ref, { seq, at }> } where seq/at are those of the effective `on` record.
 function engagementState (entries) {
+  return replay(entries, validRecordCopy)
+}
+
+// engagementState over entries whose records are already validRecordCopy
+// output for that same entry's seq (or null), as lib/feed.js makes once per
+// call. Never pass a caller's records: they would not be copied or checked.
+function engagementOfCopies (copies) {
+  return replay(copies, (record) => record)
+}
+
+function replay (entries, copyOf) {
   const liked = new Set()
   const reposted = new Map()
   try {
@@ -21,7 +32,7 @@ function engagementState (entries) {
         if (entry === null || typeof entry !== 'object') continue
         const seq = entry.seq
         if (!Number.isSafeInteger(seq) || seq < 1) continue
-        const copy = validRecordCopy(entry.record, seq)
+        const copy = copyOf(entry.record, seq)
         if (copy !== null && (copy.type === 'like' || copy.type === 'repost')) list.push({ seq, record: copy })
       } catch {}
     }
@@ -61,4 +72,4 @@ function isReposted (state, ref) {
   }
 }
 
-module.exports = { engagementState, isLiked, isReposted }
+module.exports = { engagementState, engagementOfCopies, isLiked, isReposted }

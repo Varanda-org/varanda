@@ -201,6 +201,19 @@ function retryable (message) {
   return err
 }
 
+// Retry-After as milliseconds when it is a whole number of seconds from 1 to
+// 30; anything else (dates, huge values, junk) is ignored.
+function retryAfterMs (res) {
+  try {
+    const h = res.headers && typeof res.headers.get === 'function' ? res.headers.get('retry-after') : null
+    if (typeof h !== 'string' || !/^[0-9]{1,2}$/.test(h.trim())) return null
+    const n = Number(h.trim())
+    return n >= 1 && n <= 30 ? n * 1000 : null
+  } catch {
+    return null
+  }
+}
+
 // -> Uint8Array of the verified bytes; throws on any failed check.
 // deps.fresh: revalidate with the server instead of reusing the HTTP cache
 // (used by retries, so a stored 404 is not served again).
@@ -250,6 +263,14 @@ export async function fetchMedia (author, d, deps) {
     cancelBody(res)
     stop()
     if (res && res.status === 404 && !leftOrigin(res, url)) throw retryable('indisponível')
+    // The seeder bounds /media globally (in flight and per second, never per
+    // client), so a busy 503 from our own origin is "try again in a moment".
+    if (res && res.status === 503 && !leftOrigin(res, url)) {
+      const err = retryable('indisponível')
+      const ms = retryAfterMs(res)
+      if (ms !== null) err.retryAfterMs = ms
+      throw err
+    }
     throw fail('indisponível')
   }
   if (tooLong(res, d.bytes)) {
