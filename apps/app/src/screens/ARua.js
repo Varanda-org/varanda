@@ -741,7 +741,7 @@ export function useSocial ({ ownKey, onToast }) {
 }
 
 // The PostRow props of `post` (a post item) whose actions target `ref`.
-// `h`: { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete } (each
+// `h`: { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete, onMessage } (each
 // optional; onOpenMention(username, { author, username }) gets the row author's verified
 // name so a tap on it needs no lookup). A repost passes the ORIGINAL as `post` and `repostedBy`.
 export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist }) {
@@ -827,6 +827,11 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       : undefined,
     onReport: typeof h.onReport === 'function' && own !== null && post.author !== own
       ? () => h.onReport({ author: post.author, name, username, seq: post.seq, text: post.text })
+      : undefined,
+    // Someone else's post, not a page's: PostRow adds the hosted check.
+    seq: post.seq,
+    onMessage: typeof h.onMessage === 'function' && own !== null && String(post.author).toLowerCase() !== own && !(prof && prof.page === true)
+      ? h.onMessage
       : undefined
   }
 }
@@ -1164,7 +1169,7 @@ export default function ARua (props) {
   return <MemberARua {...props} />
 }
 
-function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onBoot }) {
+function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onBoot, onMessage }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -1572,7 +1577,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // Originals, counts, the own state and whether deleting is offered re-render
   // the rows too.
   const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered: del.offered }), [names.profileOf, now, social.social, del.offered])
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
   // A repost row is the ORIGINAL post (every action targets it), under the
   // reposter's line; its own text (null) is never shown.
   const renderItem = ({ item }) => {

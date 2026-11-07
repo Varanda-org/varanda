@@ -60,6 +60,8 @@ import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
 import { MuralFooter, MuralRow, muralGridRows } from '../ui/MuralGrid'
 import { Segmented } from '../ui/Segmented'
+import { CommunitiesBox } from '../ui/CommunitiesBox'
+import { commonCommunities, communitiesOf, MAX_COMMON_LOOKUPS } from '../communitiesBox'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { LARGE_TEXT, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
@@ -83,6 +85,29 @@ export function pageBadgeLabel (info) {
   if (info.closed === true) return 'Página · encerrada'
   if (info.moved === true || (info.movedTo !== undefined && info.movedTo !== null)) return 'Página · mudou de chave'
   return 'Página'
+}
+
+// One community.members read (docs/rpc.md 5.65) of at most this many rows.
+const MEMBERS_PAGE = 100
+// Past this many pages a community counts as not in common (fail closed).
+const MEMBERS_PAGES_MAX = 10
+// Same pause as the Diário's list and Comunidades: one read for a burst of
+// group events.
+const COMMON_DELAY_MS = 800
+
+// One page of a community's members, listed in key order: the person's rows
+// on it, and the offset of the next page to read, or null when the person is
+// found or cannot be on a later page (the last key sorts after theirs, or the
+// list ends).
+export function membersPageStep (res, person, offset) {
+  const members = res && typeof res === 'object' && Array.isArray(res.members) ? res.members : []
+  const hits = members.filter((row) => row !== null && typeof row === 'object' && row.member === person)
+  if (hits.length > 0 || members.length === 0 || typeof person !== 'string') return { hits, next: null }
+  const last = members[members.length - 1]
+  if (last && typeof last.member === 'string' && last.member.toLowerCase() > person.toLowerCase()) return { hits, next: null }
+  const next = offset + members.length
+  const total = res && Number.isSafeInteger(res.total) ? res.total : 0
+  return { hits, next: next < total ? next : null }
 }
 
 // Whether a page.read answer is about a page (a person's diary has no roster).
@@ -175,7 +200,7 @@ const INITIAL_POSTS = {
   refreshing: false
 }
 
-export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onToast }) {
+export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onOpenCommunity, onToast }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -228,6 +253,10 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   nodeRef.current = node
   const [tick, setTick] = useState(0)
   const c = useFollowCounts(author, tick)
+  // Only the communities both people are admitted to, never this person's
+  // own list (their interests are sensitive data).
+  const [common, setCommon] = useState([])
+  const commonGenRef = useRef(0)
 
   const commitHeader = useCallback((h) => {
     headerRef.current = h
@@ -454,6 +483,53 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     load(false)
     return () => { genRef.current += 1 }
   }, [load])
+
+  const ownProfile = typeof ownKey === 'string' && author === ownKey
+  const postsReady = posts.phase === 'ready'
+  // Joining or leaving a community anywhere bumps the node's group versions:
+  // the box is read again (after a short pause for a burst), keeping what it
+  // shows until the new answer, and cleared only for another profile.
+  const groupVersions = node.groupVersions
+  const commonVersions = useRef(groupVersions)
+  const commonFor = useRef(author)
+  useEffect(() => {
+    const mine = ++commonGenRef.current
+    const alive = () => mine === commonGenRef.current
+    const delay = groupVersions !== commonVersions.current ? COMMON_DELAY_MS : 0
+    commonVersions.current = groupVersions
+    if (commonFor.current !== author) {
+      commonFor.current = author
+      setCommon([])
+    }
+    if (node.hosted !== true || ownProfile || !postsReady) {
+      setCommon([])
+      return
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const own = communitiesOf(await request('community.list', {}))
+        const byCommunity = new Map()
+        // One after the other: the browser node serialises requests anyway.
+        for (const item of own.slice(0, MAX_COMMON_LOOKUPS)) {
+          const rows = []
+          let offset = 0
+          for (let page = 0; page < MEMBERS_PAGES_MAX && offset !== null; page++) {
+            if (!alive()) return
+            const res = await request('community.members', { community: item.community, offset, limit: MEMBERS_PAGE })
+            const step = membersPageStep(res, author, offset)
+            rows.push(...step.hits)
+            offset = step.next
+          }
+          byCommunity.set(item.community, rows)
+        }
+        if (alive()) setCommon(commonCommunities(own, byCommunity, author).items)
+      } catch {}
+    }, delay)
+    return () => {
+      commonGenRef.current += 1
+      clearTimeout(timer)
+    }
+  }, [node.hosted, ownProfile, postsReady, request, author, tick, groupVersions])
 
   const isPage = !notPage && ((seed && seed.page === true) || (idxHint !== null && idxHint.page === true) || pageRead !== null)
   const roster = isPage && pageRead !== null ? rosterRows(pageRead) : null
@@ -709,7 +785,14 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
             : null
         ].filter(Boolean).slice(0, 2)}
         more={<MoreButton title={displayText(who.title)} actions={moreActions} />}
-        tabs={full ? <Segmented options={TABS} selected={tab} onSelect={setTab} /> : null}
+        tabs={full
+          ? (
+            <View>
+              <CommunitiesBox items={common} title='Comunidades em comum' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
+              <Segmented options={TABS} selected={tab} onSelect={setTab} />
+            </View>
+            )
+          : null}
       />
       {profileUrl !== null
         ? (
@@ -794,7 +877,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
         />
         )
 
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onMessage }
   const memberWho = { author, name: header.name, username: header.username }
   const renderItem = ({ item }) => {
     const peeked = peekedRef.current

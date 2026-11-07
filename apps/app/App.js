@@ -63,6 +63,7 @@ import { hostedPage } from './src/configStore'
 import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin } from './src/installation'
+import { makeIntent, validIntent } from './src/privateReply'
 import { NamesProvider, useNames } from './src/names'
 import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
@@ -1688,9 +1689,33 @@ function Member () {
     dmWakePending.current = false
     dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
   }, [dmReady, dmRequest, bumpDm])
-  const openMessage = useCallback((peer) => {
-    pushScreen({ screen: 'mensagem', key: typeof peer === 'string' ? peer.toLowerCase() : peer, params: {} })
-  }, [pushScreen])
+  // A post the person came from rides beside the stack, keyed by peer: nav.push
+  // drops a push equal to the top, so the tick re-renders a DM already shown
+  // and Mensagem reads the new intent as a prop. Mensagem uses one only once,
+  // and only the conversation on top of the stack is handed it.
+  const intentsRef = useRef(new Map())
+  // A lock, an unlock or another identity drops every pending context.
+  useEffect(() => { intentsRef.current.clear() }, [ownKey, nodeEpoch])
+  const intentCount = useRef(0)
+  const [, setIntentTick] = useState(0)
+  const openMessage = useCallback((peer, options) => {
+    const key = typeof peer === 'string' ? peer.toLowerCase() : peer
+    if (options && options.context && typeof key === 'string') {
+      intentCount.current += 1
+      const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
+      const intent = makeIntent({ id: intentCount.current + ':' + Date.now(), peer: key, from: own, context: options.context })
+      if (validIntent(intent, own)) {
+        intentsRef.current.set(key, intent)
+        setIntentTick((n) => n + 1)
+      }
+    }
+    pushScreen({ screen: 'mensagem', key, params: {} })
+  }, [pushScreen, ownKey])
+  const intentUsed = useCallback((id) => {
+    for (const [key, intent] of intentsRef.current) {
+      if (intent.id === id) intentsRef.current.delete(key)
+    }
+  }, [])
   const openCommunities = useCallback(() => {
     pushScreen({ screen: 'comunidades' })
   }, [pushScreen])
@@ -2257,6 +2282,7 @@ function Member () {
       onToast: showToast,
       onFollowsChanged: followsChanged,
       onMessage: openMessage,
+      onOpenCommunity: openCommunity,
       onDeletedPost: deletedPost,
       onOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
       onOpenPeople: openPeople
@@ -2271,9 +2297,9 @@ function Member () {
         return (
           <StackLayer key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             {entry.screen === 'grupo'
-              ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onSeen={bumpSeen} />
+              ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onSeen={bumpSeen} onMessage={openMessage} />
               : entry.screen === 'comunidade-info'
-                ? <ComunidadeInfo community={entry.key} onBack={goBack} onOpenMember={openMember} />
+                ? <ComunidadeInfo community={entry.key} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} />
                 : <Comunidade community={entry.key} afterGroup={entry.params.group || null} isTop={i === stack.length - 1} seenTick={seenTick} onBack={goBack} onOpenGroup={openGroup} onOpenInfo={openCommunityInfo} />}
           </StackLayer>
         )
@@ -2295,7 +2321,7 @@ function Member () {
       if (entry.screen === 'mensagem') {
         return (
           <StackLayer key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-            <Mensagem peer={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} />
+            <Mensagem peer={entry.key} intent={i === stack.length - 1 ? intentsRef.current.get(entry.key) : undefined} onIntentUsed={intentUsed} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} />
           </StackLayer>
         )
       }
@@ -2397,6 +2423,7 @@ function Member () {
               onOpenMember={openMember}
               onOpenMention={mentionHandler}
               onQuote={startQuote}
+              onMessage={openMessage}
               ownKey={ownKey}
               scrollToTop={scrollSignal.rua}
               followCount={followCount}
@@ -2487,11 +2514,13 @@ function Member () {
               onToast={showToast}
               onReply={startReply}
               onPublish={openComposer}
+              onMessage={openMessage}
               onOpenThread={openThread}
               onOpenEngagers={openEngagers}
               onOpenMember={openMember}
               onOpenMention={mentionHandler}
               onQuote={startQuote}
+              onOpenCommunity={openCommunity}
               ownKey={ownKey}
               scrollToTop={scrollSignal.diario}
               onAvisos={mode === 'hosted' ? openAvisos : undefined}

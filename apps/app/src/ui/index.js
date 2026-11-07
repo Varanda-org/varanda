@@ -243,10 +243,11 @@ export function ConfirmStack ({ confirm, cancel }) {
 
 // Key, JSON and host fields are `mono`: no capitalisation or correction.
 // Free text (name, bio) keeps the platform defaults.
-export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4, onSubmitEditing, returnKeyType }) {
+export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4, onSubmitEditing, returnKeyType, plain }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
-  const raw = mono ? { autoCapitalize: 'none', autoCorrect: false, spellCheck: false } : {}
+  // plain: a search, typed as is (no capitals, no autocorrect) in the normal font.
+  const raw = mono || plain ? { autoCapitalize: 'none', autoCorrect: false, spellCheck: false } : {}
   // Forwarded only when passed: existing callers are unchanged.
   const submit = {}
   if (onSubmitEditing !== undefined) submit.onSubmitEditing = onSubmitEditing

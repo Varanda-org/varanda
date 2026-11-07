@@ -9,7 +9,10 @@
 // change nothing), and controls this device cannot sign for give way to one
 // note. A mutation that comes back uncertain is never resent: the screen
 // re-reads and only then lets the person try again.
-// Props: community (hex64 root key), onBack(), onOpenMember(diary).
+// Props: community (hex64 root key), onBack(), onOpenMember(diary),
+// onMessage(diary): opens a private chat with a member; the member menu
+// (the 'mais' button or a long press) offers 'Conversar em particular' only
+// when it is a function, the member is not this person, and node.hosted.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native'
@@ -97,7 +100,7 @@ function PanelRow ({ label, open, onPress }) {
   )
 }
 
-export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
+export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -107,6 +110,11 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
   const [loadError, setLoadError] = useState('')
   const [loading, setLoading] = useState(false)
   const [ownKey, setOwnKey] = useState(null)
+  // The long-press sheet: the member stays set while the sheet closes, because
+  // ActionsSheet runs the chosen action only after its close animation and
+  // drops it if it unmounts first.
+  const [menuMember, setMenuMember] = useState(null)
+  const [menuOpen, setMenuOpen] = useState(false)
   const [adminInput, setAdminInput] = useState('')
   const [adminNote, setAdminNote] = useState('')
   // Who the typed key or @nome resolved to, shown before the grant.
@@ -288,6 +296,24 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
 
   const offline = node.online === false
   const pending = info !== null && info.state === 'pending'
+  // Conversar em particular copies nothing from the community: it only hands
+  // the member's diary key to the private chat.
+  const memberActions = (m) => {
+    const list = []
+    if (typeof onMessage === 'function' && hosted && m.member !== ownKey) {
+      list.push({ icon: 'mensagem', label: 'Conversar em particular', onPress: () => onMessage(m.member) })
+    }
+    if (typeof onOpenMember === 'function') {
+      list.push({ icon: 'pessoa', label: 'Ver perfil', onPress: () => onOpenMember(m.member) })
+    }
+    if (m.member !== info.creator && m.member !== ownKey && !m.admin) {
+      list.push(m.banned
+        ? { icon: 'ok', label: 'Desbanir', pending: act.pending, onPress: () => mutate('community.ban', { community, member: m.member, on: false }) }
+        : { icon: 'slash', label: 'Banir', danger: true, pending: act.pending, onPress: () => setConfirm({ text: 'Banir ' + personName(m) + ' desta comunidade?', label: 'Banir', run: () => mutate('community.ban', { community, member: m.member, on: true }) }) })
+    }
+    return list
+  }
+
   const title = info && typeof info.name === 'string' && info.name !== '' ? displayText(info.name) : 'Comunidade'
 
   const cls = classifyFollowInput(adminInput)
@@ -406,9 +432,10 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
   } else if (info === null) {
     body = <Skeleton />
   } else {
+    // A wrap breaks before a dot, never leaves it alone at a line end.
     // A pending answer knows only the key: its zero counts and 'pending' role
     // are placeholders, not meta. Compartilhar still works from the key.
-    const header = pending ? '' : [COMMUNITY_JOIN_LABELS[info.join] || '', membersLabel(info.members), adminsLabel(info.admins)].filter(Boolean).join(' · ')
+    const header = pending ? '' : [COMMUNITY_JOIN_LABELS[info.join] || '', membersLabel(info.members), adminsLabel(info.admins)].filter(Boolean).join(' ·\u00a0')
     const canInvite = node.hosted && can('invite', role, { memberInvite: info.memberInvite === true })
     body = (
       <View>
@@ -479,6 +506,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
                       accessibilityLabel={personName(m) + ', ver perfil'}
                       disabled={typeof onOpenMember !== 'function'}
                       onPress={() => onOpenMember(m.member)}
+                      onLongPress={memberActions(m).length > 0 ? () => { setMenuMember(m); setMenuOpen(true) } : undefined}
                     >
                       <Avatar name={personName(m)} publicKey={m.member} size={40} />
                       <View style={styles.hitText}>
@@ -488,19 +516,12 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
                           : null}
                       </View>
                     </Pressable>
-                    {m.member !== info.creator && m.member !== ownKey && !m.admin
-                      ? (
-                        <MoreButton
-                          label={'ações de ' + personName(m)}
-                          title={personName(m)}
-                          actions={[m.banned
-                            ? { icon: 'ok', label: 'Desbanir', pending: act.pending, onPress: () => mutate('community.ban', { community, member: m.member, on: false }) }
-                            : { icon: 'slash', label: 'Banir', danger: true, pending: act.pending, onPress: () => setConfirm({ text: 'Banir ' + personName(m) + ' desta comunidade?', label: 'Banir', run: () => mutate('community.ban', { community, member: m.member, on: true }) }) }]}
-                        />
-                        )
-                      : null}
+                    <MoreButton label={'ações de ' + personName(m)} title={personName(m)} actions={memberActions(m)} />
                   </View>
                 ))
+                : null}
+              {panel === 'members' && menuMember
+                ? <ActionsSheet open={menuOpen} onClose={() => setMenuOpen(false)} title={personName(menuMember)} actions={memberActions(menuMember)} />
                 : null}
               {panel === 'members' && people.rows.length < people.total
                 ? <View style={styles.block}><Pill label='Mais membros' onPress={() => loadPeople('members', people.rows.length)} pending={people.loading} /></View>
@@ -684,6 +705,7 @@ const makeStyles = (colors) => StyleSheet.create({
   memberName: { ...type.postName, color: colors.ink },
   handle: { ...type.postMeta, color: colors.soft },
   hit: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingHorizontal: space.lg, paddingVertical: space.sm, minHeight: 56 },
-  hitWho: { flexDirection: 'row', alignItems: 'center', gap: space.md, flex: 1 },
+  // The whole row height is the target (long-press and Ver perfil), 44 pt at least.
+  hitWho: { flexDirection: 'row', alignItems: 'center', gap: space.md, flex: 1, alignSelf: 'stretch', minHeight: 44 },
   hitText: { flex: 1 }
 })
