@@ -17,7 +17,7 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.proof', 'age.sign', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
+    'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
     'dm.enable', 'dm.list', 'dm.lookup', 'dm.pull', 'dm.putMedia', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seen',
@@ -185,6 +185,25 @@ test('account.sign', (t) => {
   // An attestation hash only at passkey: lowercase hex64, always there.
   for (const sub of ['', 'AB'.repeat(32), 'ab'.repeat(31), 'ab'.repeat(33), '1234567890', null]) {
     bad(t, 'account.sign', { ...base, phase: 'passkey', sub }, 'passkey sub ' + JSON.stringify(sub))
+  }
+})
+
+test('appeal.sign', (t) => {
+  const base = { nonce: 'n'.repeat(43) }
+  t.absent(isMutating('appeal.sign'))
+  ok(t, 'appeal.sign', base, { ...base, text: '' })
+  ok(t, 'appeal.sign', { ...base, text: 'foi um engano' })
+  ok(t, 'appeal.sign', { ...base, text: 'a'.repeat(1000) })
+  ok(t, 'appeal.sign', { nonce: 'A-_9'.repeat(32) }, { nonce: 'A-_9'.repeat(32), text: '' })
+  bad(t, 'appeal.sign', {})
+  bad(t, 'appeal.sign', { text: 'x' }, 'missing nonce')
+  // The caller never chooses the member, the association or the bytes.
+  for (const k of ['member', 'association', 'payload', 'bytes', 'key', 'target', 'reason']) {
+    bad(t, 'appeal.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const text of ['a'.repeat(1001), 1, null]) bad(t, 'appeal.sign', { ...base, text }, 'text ' + String(text).slice(0, 8))
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
+    bad(t, 'appeal.sign', { ...base, nonce: n }, 'nonce ' + n)
   }
 })
 

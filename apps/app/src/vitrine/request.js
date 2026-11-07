@@ -267,6 +267,7 @@ export function createVitrineRequest (fixtures, options) {
     'seen.sign': () => ({ signature, prevHash: '0'.repeat(64) }),
     'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, caughtUp: [] }),
     'report.sign': signed,
+    'appeal.sign': signed,
     'dm.reportSign': signed,
     'terms.sign': signed,
     'recovery.sign': signed,
