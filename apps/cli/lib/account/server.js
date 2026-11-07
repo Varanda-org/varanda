@@ -1480,6 +1480,14 @@ function createAccountServer ({
     send(res, 200, inviting ? { required: true, perWeek: invites.perWeek } : { required: false })
   }
 
+  // The hosted app asks this before creating a passkey. The read reserves
+  // nothing, and a failed read must not block anyone: the service still
+  // refuses at start, the callback, finish and the age session.
+  async function admission (req, res) {
+    if (!limits.lookup()) throw over()
+    send(res, 200, { open: !store.isFull() })
+  }
+
   async function username (req, res, name) {
     if (!limits.lookup()) throw over()
     if (!isUsername(name)) throw refuse('nao-encontrado')
@@ -1697,6 +1705,7 @@ function createAccountServer ({
       if (pathname === '/account/pending') return pending(req, res)
       if (pathname === '/account/status') return status(req, res, url)
       if (pathname === '/account/invites/policy') return invitesPolicy(req, res)
+      if (pathname === '/account/admission') return admission(req, res)
       if (pathname.startsWith('/account/username/')) return username(req, res, pathname.slice('/account/username/'.length))
       throw refuse('nao-encontrado')
     }

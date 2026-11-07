@@ -347,6 +347,26 @@ test('invitePolicy: the two shapes, null on 404, anything else refused', async (
   }
 })
 
+test('admission: the exact shape, request and unknown answers fail open', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { open: true }))
+  t.alike(await a.admission(), { open: true })
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'GET /account/admission')
+  t.is(calls[0].init.body, undefined)
+  stub(t, json(200, { open: false }))
+  t.alike(await a.admission(), { open: false })
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.admission(), null, 'older service')
+  stub(t, () => { throw new Error('rede') })
+  t.is(await a.admission(), null, 'transport')
+  stub(t, json(500, {}))
+  t.is(await a.admission(), null, '5xx')
+  for (const body of [{ open: 'false' }, { open: 0 }, { open: false, x: 1 }, {}, []]) {
+    stub(t, json(200, body))
+    t.is(await a.admission(), null, JSON.stringify(body))
+  }
+})
+
 test('invitesSummary: the exact shape, request and older service fallback', async (t) => {
   const a = await load()
   const args = { member: M, nonce: 'n1', signature: 'ff' }

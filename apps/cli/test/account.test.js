@@ -1394,6 +1394,45 @@ test('member cap: a callback for a key linked meanwhile is not refused by the ca
   t.is(p2.status, 200, 'its pending row stays for finish()')
 })
 
+test('admission: with no member cap the service answers exactly { open: true }', async (t) => {
+  const s = await setup(t)
+  const r = await s.api('GET', '/account/admission')
+  t.is(r.status, 200)
+  t.alike(r.body, { open: true }, 'the whole body')
+})
+
+test('admission: follows the member cap, sets no cookie, is not cached and changes no later refusal', async (t) => {
+  const s = await setup(t, { storeOpts: { maxMembers: 1 } })
+  const before = await s.api('GET', '/account/admission')
+  t.alike([before.status, before.body], [200, { open: true }], 'nobody linked yet')
+  t.is((await link(s, member(), 'ana')).finish.status, 200)
+
+  const full = await s.api('GET', '/account/admission')
+  t.alike([full.status, full.body], [200, { open: false }], 'the cap is full')
+  t.is(full.headers.get('set-cookie'), null, 'no cookie')
+  t.ok((full.headers.get('cache-control') || '').includes('no-store'), 'never cached')
+  const query = await s.api('GET', '/account/admission?invite=x')
+  t.alike([query.status, query.body], [200, { open: false }], 'the query string changes nothing')
+
+  const started = await s.api('POST', '/account/start', { body: { member: member().hex, username: 'bia' } })
+  t.alike([started.status, started.body], [503, { error: 'lista-de-espera' }], 'start still refuses')
+  const policy = await s.api('GET', '/account/invites/policy')
+  t.alike([policy.status, policy.body], [200, { required: false }], 'the invites policy body is unchanged')
+})
+
+test('admission: the read holds no seat, so a following start still answers 200', async (t) => {
+  const s = await setup(t, { storeOpts: { maxMembers: 1 } })
+  t.alike((await s.api('GET', '/account/admission')).body, { open: true })
+  const started = await s.api('POST', '/account/start', { body: { member: member().hex, username: 'ana' } })
+  t.is(started.status, 200)
+})
+
+test('admission: POST is not a route', async (t) => {
+  const s = await setup(t)
+  const r = await s.api('POST', '/account/admission', { body: {} })
+  t.alike([r.status, r.body], [404, { error: 'nao-encontrado' }])
+})
+
 test('global bucket: ratePerSecond 1, burst 1 answers 429 on the second immediate request', async (t) => {
   const s = await setup(t, { serverOpts: { ratePerSecond: 1, burst: 1 } })
   s.c.frozen = Date.now()
