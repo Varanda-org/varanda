@@ -465,3 +465,26 @@ test('forward flags survive storage and legacy rows default to 0', async (t) => 
   t.alike(again.snapshot().messages.map(m => m.fwd), [0, 1])
   await again.close()
 })
+
+test('cards survive storage and reopen, legacy rows read null and malformed cards fail', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await s.unlock(key(7))
+  const card = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
+  card.image = { id: PEER, key: OWN, nonce: 'ef'.repeat(24), chunks: 1, bytes: 100, sha256: PEER, mime: 'image/jpeg', w: 4, h: 4, ms: 0 }
+  const row = { ...msg(s.nextFiled()), card }
+  await s.append([row, { ...msg(s.nextFiled()), id: '34'.repeat(16) }])
+  t.alike(s.snapshot().messages[0].card, card)
+  s.snapshot().messages[0].card.image.w = 9
+  t.is(s.snapshot().messages[0].card.image.w, 4, 'snapshots own their thumbnail')
+  for (const bad of [{ ...card, host: 'wrong.org' }, { ...card, image: { ...card.image, mime: 'image/png' } }]) {
+    await t.exception.all(s.append([{ ...row, card: bad }]), /linha inválida/)
+  }
+  await t.exception.all(s.append([{ ...row, media: [card.image] }]), /linha inválida/)
+  await s.close()
+  const reopened = createDmStore({ storage })
+  await reopened.unlock(key(7))
+  t.alike(reopened.snapshot().messages[0].card, card)
+  t.is(reopened.snapshot().messages[1].card, null)
+  await reopened.close()
+})

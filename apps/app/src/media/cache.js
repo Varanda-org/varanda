@@ -46,7 +46,7 @@ const HEX64 = /^[0-9a-f]{64}$/
 
 // log.read's largest page (docs/rpc.md LOG_LIMIT_MAX). Callers pass the
 // constant; the default keeps this module off the rpc package.
-const LOG_PAGE = 36
+const LOG_PAGE = 32
 
 // How many newest pages to walk looking for an older tombstone. The one a
 // delete just wrote is on the first page; past this the photo stays cached

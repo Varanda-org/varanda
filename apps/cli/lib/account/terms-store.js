@@ -327,6 +327,38 @@ function openTermsStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     })
   }
 
+  // Excluir conta: drops every acceptance of `member`. A failed write keeps
+  // them in memory (as every write here), and the deletion sweep
+  // (./deletion.js) asks again. -> { changed }
+  function forget (member) {
+    return enqueue(() => {
+      if (!validMember(member)) throw new TypeError('member must be 64 lowercase hex characters')
+      usable()
+      if (readOnly || !guard()) throw fail('indisponivel')
+      let disk
+      try {
+        disk = readState(file)
+      } catch {
+        failed = true
+        throw fail('indisponivel')
+      }
+      const next = merge(state, disk)
+      if (!has(next.members, member)) {
+        if (dirty || canonical(next) !== canonical(disk || emptyState())) persist(next)
+        else state = next
+        return { changed: false }
+      }
+      delete next.members[member]
+      persist(next)
+      return { changed: true }
+    })
+  }
+
+  // In memory: true while `member` has an acceptance here.
+  function holds (member) {
+    return validMember(member) && has(state.members, member)
+  }
+
   // Writes the merge of the file and memory back when the file lacks
   // anything this holder knows (a stale writer's rename may have dropped
   // acknowledged entries) or a previous write failed. True when it wrote.
@@ -376,6 +408,8 @@ function openTermsStore (dataDir, { now = Date.now, readOnly = false, guard = ()
 
   return {
     accept,
+    forget,
+    holds,
     heal,
     list,
     count,

@@ -151,7 +151,7 @@ test('terms, account-link and certificate signatures by the member key are not r
       member: MEMBER,
       username: 'ana_1',
       association: ASSOCIATION,
-      sub: phase === 'finish' ? '109876543210987654321' : ''
+      sub: phase === 'finish' ? '109876543210987654321' : phase === 'passkey' ? 'ab'.repeat(32) : ''
     }
     const sigLink = accountLink.signAccountLink(link, MEMBER_KP)
     t.alike(verifyRecovery(PUT, sigLink), { ok: false, reason: 'bad-signature' }, 'account-link ' + phase + ' as recovery')

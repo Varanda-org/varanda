@@ -11,7 +11,8 @@
 //    public origin, the association, the moderator, the nonce, the op and
 //    the body bytes (packages/core/lib/mod-request.js). The answer is
 //    exactly { changes: [{ id, op, member, at, actor }], published:
-//    { snapshot } }, actor 'ia' (the AI triage decided) or 'pessoa'.
+//    { snapshot } }, actor 'ia' (the AI triage decided), 'titular' (the
+//    member asked to delete their own account, Excluir conta) or 'pessoa'.
 // 2. reconcile: the local blocklist.json must not be behind the published
 //    snapshot (a restored old backup would otherwise sign a seq peers ignore
 //    as stale, or undo newer blocks); the changes are walked in `at` order
@@ -20,7 +21,9 @@
 //    each member is printed ('bloquear <k>' / 'desbloquear <k>', an unblock
 //    of a key whose block was not made in the panel marked ' (bloqueada pela
 //    operação)', a block every block change of which the AI made marked
-//    ' (ia)'; the AI never queues an unblock). At a terminal the operator
+//    ' (ia)', a block the member asked for marked ' (exclusão pedida pela
+//    pessoa)', which is a human block that --yes signs; the AI never queues
+//    an unblock). At a terminal the operator
 //    confirms (and confirms those marked unblocks a second time); without
 //    one only --yes runs, and it applies human blocks only (at most
 //    MAX_UNATTENDED_BLOCKS of them): every member whose net effect is an
@@ -72,6 +75,8 @@ const OPERATOR_MARK = ' (bloqueada pela operação)'
 const AI_MARK = ' (ia)'
 // Appended under --yes to an AI block it holds for a terminal.
 const AI_HELD = ' — aguarda revisão no terminal'
+// A block with a change the member asked for (actor 'titular').
+const OWNER_MARK = ' (exclusão pedida pela pessoa)'
 const CONFIRM = 'Assinar e publicar estas mudanças? [s/N] '
 const CONFIRM_OPERATOR = 'Desbloquear também as chaves bloqueadas pela operação? [s/N] '
 const NO_LIST_NET = 'há decisões pendentes que se anulam e este diretório não tem lista; rode mod apply uma vez com --new-list para assinar a primeira lista e confirmá-las'
@@ -213,7 +218,7 @@ function sign (ctx, nonce, op, body) {
 
 function validChange (c) {
   return exactKeys(c, ['id', 'op', 'member', 'at', 'actor']) &&
-    (c.actor === 'ia' || c.actor === 'pessoa') &&
+    (c.actor === 'ia' || c.actor === 'pessoa' || c.actor === 'titular') &&
     typeof c.id === 'string' && CHANGE_ID_RE.test(c.id) &&
     (c.op === 'block' || c.op === 'unblock') &&
     typeof c.member === 'string' && HEX64_RE.test(c.member) &&
@@ -336,11 +341,12 @@ async function apply ({
   for (const c of ordered) {
     let entry = members.get(c.member)
     if (!entry) {
-      entry = { blocked: base.has(c.member), ids: [], ai: true }
+      entry = { blocked: base.has(c.member), ids: [], ai: true, owner: false }
       members.set(c.member, entry)
     }
     entry.blocked = c.op === 'block'
     if (c.op === 'block' && c.actor !== 'ia') entry.ai = false
+    if (c.op === 'block' && c.actor === 'titular') entry.owner = true
     entry.ids.push(c.id)
   }
   const blocks = []
@@ -358,7 +364,7 @@ async function apply ({
   for (const [member, entry] of members) {
     if (entry.blocked) {
       if (base.has(member)) say('já estava bloqueada ' + member)
-      else say('bloquear ' + member + (entry.ai ? AI_MARK : '') + (aiBlocks.includes(member) ? AI_HELD : ''))
+      else say('bloquear ' + member + (entry.owner ? OWNER_MARK : '') + (entry.ai ? AI_MARK : '') + (aiBlocks.includes(member) ? AI_HELD : ''))
     } else if (base.has(member)) say('desbloquear ' + member + (byOperator.includes(member) ? OPERATOR_MARK : ''))
     else say('não estava bloqueada ' + member)
   }

@@ -202,11 +202,11 @@ test('every SVG under public/ is inert', (t) => {
   }
 })
 
-// Budgets (bytes). Measured on 2026-10-22, each set about 25% above:
-//   index.html 22256 + styles.css 23381 = 45637  -> 57000
-//   all of public/ = 278493 with og-varanda.jpg    -> 348000
-const BUDGET_PAGE = 57000
-const BUDGET_TOTAL = 348000
+// Budgets (bytes). Measured on 2026-11-07 (after the four app screens), each set about 25% above:
+//   index.html 21843 + styles.css 14704 = 36547  -> 46000
+//   all of public/ = 669117 with og-varanda.jpg and assets/screens/ -> 837000
+const BUDGET_PAGE = 46000
+const BUDGET_TOTAL = 837000
 const BUDGET_OG = 200 * 1024
 
 test('size budgets', (t) => {
@@ -254,10 +254,59 @@ test('every role="img" element has a label and contains nothing interactive', (t
   }
 })
 
-test('the page references no assets/screens/ file', (t) => {
-  t.absent(/assets\/screens\//.test(html), 'index.html')
-  t.absent(/assets\/screens\//.test(css), 'styles.css')
-  t.absent(fs.existsSync(path.join(PUBLIC, 'assets', 'screens')), 'no public/assets/screens/ directory')
+test('app screens: exact inventory, budgets and markup', (t) => {
+  const dir = path.join(PUBLIC, 'assets', 'screens')
+  const stems = ['a-rua', 'diario', 'conversas', 'conversa']
+  const expected = []
+  for (const s of stems) expected.push(s + '-402.webp', s + '-804.webp')
+  t.alike(fs.readdirSync(dir).sort(), expected.slice().sort(), 'exactly the eight screen files')
+  for (const f of expected) {
+    const buf = fs.readFileSync(path.join(dir, f))
+    const cap = f.endsWith('-402.webp') ? 45 * 1024 : 120 * 1024
+    t.ok(buf.length <= cap, f + ' ' + buf.length + ' <= ' + cap)
+    t.is(buf.toString('latin1', 0, 4), 'RIFF', f + ' RIFF header')
+    t.is(buf.toString('latin1', 8, 12), 'WEBP', f + ' WEBP header')
+    // simple lossy WebP: no VP8X header, so no room for EXIF or XMP chunks
+    t.is(buf.toString('latin1', 12, 16), 'VP8 ', f + ' lossy VP8 without metadata chunks')
+    const vp8 = buf.readUInt32LE(16)
+    t.is(buf.readUInt32LE(4), buf.length - 8, f + ' RIFF size matches the file')
+    t.is(20 + vp8 + (vp8 % 2), buf.length, f + ' one VP8 chunk fills the file')
+    const w = buf.readUInt16LE(26) & 0x3fff
+    const h = buf.readUInt16LE(28) & 0x3fff
+    t.alike([w, h], f.endsWith('-402.webp') ? [402, 874] : [804, 1748], f + ' pixel size')
+  }
+
+  const imgs = (html.match(/<img\b[^>]*>/gi) || []).map(attrs).filter((a) => (a.src || '').startsWith('assets/screens/'))
+  t.is(imgs.length, 4, 'four screen images')
+  stems.forEach((s, i) => {
+    const a = imgs[i] || {}
+    t.is(a.src, 'assets/screens/' + s + '-402.webp', s + ' src')
+    t.ok((a.srcset || '').includes('assets/screens/' + s + '-402.webp 402w'), s + ' srcset 402w')
+    t.ok((a.srcset || '').includes('assets/screens/' + s + '-804.webp 804w'), s + ' srcset 804w')
+    t.ok((a.sizes || '').length > 0, s + ' sizes')
+    t.is(a.width, '402', s + ' width')
+    t.is(a.height, '874', s + ' height')
+    t.is(a.loading, 'lazy', s + ' loading')
+    t.ok(/exemplo/i.test(a.alt || ''), s + ' alt says exemplo')
+  })
+
+  const captions = (html.match(/<figcaption>([^<]*)<\/figcaption>/g) || []).map((c) => c.replace(/<\/?figcaption>/g, ''))
+  t.alike(captions, [
+    'A Rua: as publicações de quem você segue, em ordem de chegada.',
+    'Seu Diário: o seu perfil e as suas publicações.',
+    'As Conversas: mensagens privadas e comunidades, numa lista só.',
+    'Uma conversa: fotos e recados só entre duas pessoas, cifrados de ponta a ponta.'
+  ], 'figcaptions in order')
+
+  const strip = (html.match(/<div\b[^>]*>/gi) || []).map((tag) => ({ tag, a: attrs(tag) })).find((x) => /(^|\s)telas(\s|$)/.test(x.a.class || ''))
+  t.ok(strip, 'strip element found')
+  if (strip) {
+    t.is(strip.a.role, 'region', 'strip role')
+    t.ok((strip.a['aria-label'] || '').length > 0, 'strip aria-label')
+    t.is(strip.a.tabindex, '0', 'strip focusable')
+  }
+  t.ok(css.includes('.telas') && css.includes('scroll-snap-type'), 'styles.css keeps the .telas scroll-snap carousel')
+  t.ok(html.includes('As pessoas e as publicações destas telas são de exemplo.'), 'intro says the content is example')
 })
 
 test('robots.txt exists and there is no CNAME in public/', (t) => {

@@ -20,7 +20,8 @@ const {
   NOTE_MAX,
   AI_ACTOR,
   MAX_APPEALS,
-  APPEAL_WINDOW_MS
+  APPEAL_WINDOW_MS,
+  OWNER_ACTOR
 } = require('../lib/account/moderation-store')
 const { tmpDir } = require('./helpers/net')
 
@@ -1228,4 +1229,92 @@ test('a failed sync of the media directory takes the anexo file back', async (t)
   }
   const left = fs.existsSync(mediaDir) ? fs.readdirSync(mediaDir) : []
   t.alike(left, [], 'no orphan file outside the cap')
+})
+
+test('requestDeletion queues a titular block the panel cannot cancel; pull marks it titular', async (t) => {
+  const { store } = setup(t)
+  const ana = key()
+  const r = await store.requestDeletion(ana)
+  t.is(r.kind, 'novo')
+  t.is(r.change.op, 'block')
+  t.is(r.change.by, OWNER_ACTOR)
+  t.alike(r.change.reportIds, [])
+  const again = await store.requestDeletion(ana)
+  t.alike(again, { change: null, kind: 'igual' }, 'already pending: nothing new')
+  try {
+    await store.cancel(r.change.id, { by: MOD })
+    t.fail('cancelled')
+  } catch (err) {
+    t.is(err.code, 'conta-excluida', 'the panel cannot cancel a deletion')
+  }
+  const pulled = await store.pull()
+  t.alike(pulled.changes, [{ id: r.change.id, op: 'block', member: ana, at: r.change.at, actor: 'titular' }])
+  try {
+    await store.cancel(r.change.id, { by: MOD })
+    t.fail('compensated')
+  } catch (err) {
+    t.is(err.code, 'conta-excluida', 'nor compensate it once claimed')
+  }
+  t.is(store.pending().changes.length, 1)
+})
+
+test('requestDeletion over a moderator block still pending pins its own titular block', async (t) => {
+  const { store } = setup(t)
+  const target = key()
+  const { report: row } = await store.add(report(target))
+  await store.decide(row.id, { decision: 'bloquear', by: MOD })
+  const r = await store.requestDeletion(target)
+  t.is(r.kind, 'novo')
+  t.is(r.change.by, OWNER_ACTOR, 'the owner block joins the pending one')
+  const changes = store.pending().changes
+  t.is(changes.length, 2)
+  t.alike(await store.requestDeletion(target), { change: null, kind: 'igual' }, 'idempotent')
+  // A moderator cancelling the earlier block leaves the owner's.
+  const earlier = changes.find((c) => c.by === MOD)
+  await store.cancel(earlier.id, { by: MOD })
+  t.alike(store.pending().changes.map((c) => c.by), [OWNER_ACTOR])
+  try {
+    await store.unblock(target, { by: MOD })
+    t.fail('unblocked')
+  } catch (err) {
+    t.is(err.code, 'conta-excluida', 'unblock cannot drop the owner block')
+  }
+  const pulled = await store.pull()
+  t.alike(pulled.changes.map((c) => c.actor), ['titular'], 'mod apply --yes sees a person-requested block')
+})
+
+test('requestDeletion over an AI block pins a titular block, so mod apply --yes signs it', async (t) => {
+  const { store } = setup(t)
+  const target = key()
+  const { report: row } = await store.add(report(target))
+  await store.decide(row.id, { decision: 'bloquear', by: AI_ACTOR })
+  await store.requestDeletion(target)
+  const pulled = await store.pull()
+  t.alike(pulled.changes.map((c) => c.actor), ['ia', 'titular'])
+})
+
+test('requestDeletion of a key already in the published list adds nothing', async (t) => {
+  const { store, m } = setup(t)
+  const target = key()
+  const { report: row } = await store.add(report(target))
+  const { change } = await store.decide(row.id, { decision: 'bloquear', by: MOD })
+  await store.pull()
+  await store.ack({ changeIds: [change.id], snapshot: m.snap(1, [target]), moderatorCert: m.cert })
+  t.alike(await store.requestDeletion(target), { change: null, kind: 'igual' })
+  t.is(store.pending().changes.length, 0)
+})
+
+test('appeal: an Excluir conta block pending is not appealable and an open appeal cannot undo it', async (t) => {
+  const { store } = setup(t)
+  const target = await blockedMember(store)
+  const a = await store.addAppeal(appeal(target))
+  await store.requestDeletion(target)
+  await rejects(t, store.decideAppeal(a.appeal.id, { decision: 'aceitar', by: 'outra@example.test' }), 'conta-excluida', 'accepting would drop the deletion')
+  t.is(store.getAppeal(a.appeal.id).status, 'aberta', 'still open')
+  const denied = await store.decideAppeal(a.appeal.id, { decision: 'negar', by: 'outra@example.test' })
+  t.is(denied.appeal.status, 'negado', 'denying touches no change')
+  t.ok(store.pending().changes.some((c) => c.member === target && c.by === OWNER_ACTOR))
+  const other = key()
+  await store.requestDeletion(other)
+  await rejects(t, store.addAppeal(appeal(other)), 'conta-excluida', 'no appeal over the owner own request')
 })

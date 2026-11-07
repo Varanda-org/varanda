@@ -211,9 +211,15 @@ test('creation advice explains synced recovery without offering another passkey 
 })
 
 test('sign-in texts distinguish missing, known lost and unsuitable passkeys', async (t) => {
-  const { NONE_TEXT, KNOWN_LOST_TEXT, OTHER_PASSKEY_LABEL, NOT_SYNCED_TITLE } = await load()
+  const { NONE_TEXT, KNOWN_LOST_TEXT, NONE_FULL_TEXT, KNOWN_LOST_FULL_TEXT, OTHER_PASSKEY_LABEL, NOT_SYNCED_TITLE } = await load()
   t.is(NONE_TEXT, 'Nenhuma passkey do Varanda neste aparelho. Crie uma aqui ou entre no site com a passkey que já tem.')
   t.is(KNOWN_LOST_TEXT, 'A passkey que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar em outro gerenciador: tente entrar com outra passkey ou crie uma nova conta.')
+  t.is(NONE_FULL_TEXT, 'Nenhuma passkey do Varanda neste aparelho. Entre no site com a passkey que já tem.')
+  t.is(KNOWN_LOST_FULL_TEXT, 'A passkey que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar em outro gerenciador: tente entrar com outra passkey.')
+  for (const text of [NONE_FULL_TEXT, KNOWN_LOST_FULL_TEXT]) {
+    t.absent(/Crie|crie|criar/.test(text), 'no creation offered while full')
+    t.absent(/\u2014/.test(text), 'no em dash')
+  }
   t.is(OTHER_PASSKEY_LABEL, 'entrar com outra passkey')
   t.is(NOT_SYNCED_TITLE, 'Essa passkey não serve para o Varanda.')
 })

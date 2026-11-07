@@ -380,6 +380,43 @@ h2::after {
 }
 .cartao p { margin-top: 10px; }
 
+/* Telas do app */
+.telas {
+  margin-top: 32px;
+  padding: 8px 8px 20px;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  overscroll-behavior-x: contain;
+  border-radius: 22px;
+}
+.telas__lista {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  gap: 16px;
+}
+.tela {
+  flex: 0 0 auto;
+  width: min(72vw, 280px);
+  scroll-snap-align: center;
+}
+.tela figure { margin: 0; }
+.tela img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 28px;
+  border: 6px solid var(--tinta);
+  background: var(--creme);
+  box-shadow: 0 1px 0 rgba(31, 42, 36, 0.04), 0 14px 30px -22px rgba(138, 78, 122, 0.45);
+}
+.tela figcaption {
+  margin-top: 12px;
+  font-size: 1rem;
+  color: var(--texto-suave);
+}
+
 /* Nomes de casa */
 .nomes {
   margin-top: 36px;
@@ -554,6 +591,9 @@ h2::after {
 }
 
 @media (min-width: 900px) {
+  .telas { overflow: visible; }
+  .telas__lista { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; }
+  .tela { width: auto; min-width: 0; }
   .topo__dentro { padding: 24px 32px; }
   .topo__logo img { width: 168px; }
   .menu { display: block; }

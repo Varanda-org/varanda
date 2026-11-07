@@ -99,7 +99,10 @@ const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
 // Same names as store.js RESERVED (not exported): a page never takes them.
 const RESERVED = new Set(['admin', 'associacao', 'association', 'ajuda', 'mod', 'moderacao',
-  'pagina', 'paginas', 'root', 'seeder', 'semeador', 'suporte', 'support', 'varanda'])
+  'pagina', 'paginas', 'root', 'seeder', 'semeador', 'suporte', 'support', 'varanda',
+  // The Vitrine handles shown in the varanda.app screenshots (see store.js).
+  'andre_costa', 'bia_araujo', 'biblioteca_praca', 'cecilia_ramos',
+  'horta_do_bairro', 'joao_nascimento', 'lia_oliveira', 'tomas_ferreira'])
 
 // Conversas as the page (./pages-dm.js, docs/rpc.md 5.77 to 5.80 shapes).
 const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen']
@@ -425,6 +428,8 @@ function createPagesRoutes ({
     // A linked person's diary never takes a delegate: that would be a second
     // actor identity, with caps of its own.
     if (isLinked(diary)) throw refuse('pedido-invalido')
+    // Nor a deleted one (Excluir conta), before the blocklist reaches it.
+    if (typeof store.deletedAt === 'function' && store.deletedAt(diary) !== null) throw refuse('nao-vinculado')
     if (needTerms && (row === null || row.diary !== diary || row.termsVersion !== TERMS_VERSION)) throw refuse('termos-pendentes')
     if (blocked(actor) || blocked(diary)) throw refuse('sem-permissao')
     let v

@@ -38,7 +38,7 @@ const identity = `
 const box = globalThis.__identity = globalThis.__identity || { calls: [] }
 export function createNativeIdentity () {
   const call = (name) => async () => { box.calls.push(name) }
-  return { resume () {}, status: call('status'), unlock: call('unlock'), complete: call('complete'), lock: call('lock'), signOut: call('signOut'), reset: call('reset') }
+  return { resume () {}, status: call('status'), unlock: call('unlock'), complete: call('complete'), lock: call('lock'), signOut: call('signOut'), reset: call('reset'), confirm: async () => { box.calls.push('confirm'); return { ok: true } } }
 }
 `
 const native = `
@@ -180,6 +180,19 @@ test('read names a read-dir file and the handle releases it', async (t) => {
   mod.clearReadFiles()
   t.absent(box().files.has(READS + names[4]), 'the cache can clear them all')
   t.alike(globalThis.__identity.calls.filter((c) => c !== 'status'), ['lock', 'signOut', 'reset'])
+})
+
+test('identity.confirm passes through and keeps the read files', async (t) => {
+  const mod = await load()
+  const { request } = mockRequest((method) => method === 'media.readFile' ? { name: 'f'.repeat(32) + '.bin', mime: 'image/jpeg', w: 1, h: 1 } : {})
+  const { media, identity } = mod.webNodeHandle(request)
+  box().files.set(READS + 'f'.repeat(32) + '.bin', new Uint8Array([7]))
+  await media.read({ kind: 'dm', from: 'ab'.repeat(32), id: 'cd'.repeat(16), index: 0 })
+  globalThis.__identity.calls.length = 0
+  t.alike(await identity.confirm(), { ok: true })
+  t.alike(globalThis.__identity.calls, ['confirm'])
+  t.ok(box().files.has(READS + 'f'.repeat(32) + '.bin'), 'a check is not a lock: open photos stay')
+  mod.clearReadFiles()
 })
 
 test('creating the handle sweeps leftover read files, nothing else', async (t) => {

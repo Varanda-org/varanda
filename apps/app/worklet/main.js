@@ -14,6 +14,9 @@
 // Packed by scripts/pack-worklet.sh (bare-pack --linked); its native addons
 // are linked into the app by scripts/link-addons.sh (bare-link).
 
+const { createRejectionLogger } = require('./unhandled')
+Bare.on('unhandledRejection', createRejectionLogger((line) => console.error(line)))
+
 const { createSession } = require('@varanda/core/lib/session')
 const { encodeFrame, createFrameDecoder, createServerDispatcher, MAX_REQUEST, MAX_MESSAGE } = require('@varanda/rpc')
 // Same module instance the session's '#fs' resolves to under Bare: read only
@@ -157,6 +160,10 @@ function mainWeb (args) {
   // WebCrypto (subtle.digest) for web-member's session and member-ops,
   // before any of them loads.
   require('bare-crypto/global')
+  // Bare has no TextEncoder/TextDecoder. web-member's sodium-browser loads
+  // @noble/curves, whose ed25519 module calls TextEncoder while it loads:
+  // without these the web session never starts and the app stays on Conectar.
+  require('bare-encoding/global')
   const { createWebNode } = require('./web-node')
   try {
     session = createWebNode(args, {

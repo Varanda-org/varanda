@@ -2,7 +2,8 @@
 
 const { utf8ByteLength, charLength } = require('./text')
 const L = require('./limits')
-const { DM_MEDIA_KEYS } = require('./dm-budget')
+const { DM_MEDIA_KEYS, DM_CARD_KEYS } = require('./dm-budget')
+const { cardUrlHost, cardTextLength, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMAGE_BYTES } = require('./link-card')
 const { MAX_AUDIO_MS } = require('./audio-bounds')
 
 const HEX64 = /^[0-9a-f]{64}$/
@@ -240,15 +241,42 @@ function isGroupMediaList (v) {
   return true
 }
 
+function isLinkCard (card, validImage) {
+  if (!isPlainObject(card) || Object.keys(card).length !== DM_CARD_KEYS.length ||
+    !DM_CARD_KEYS.every((key) => hasOwn(card, key))) return false
+  const host = cardUrlHost(card.url)
+  if (host === null || card.host !== host) return false
+  const title = cardTextLength(card.title)
+  const desc = cardTextLength(card.desc)
+  if (title < 0 || title > MAX_CARD_TITLE || desc < 0 || desc > MAX_CARD_DESC) return false
+  return card.image === null || (validImage(card.image) && card.image.bytes <= MAX_CARD_IMAGE_BYTES)
+}
+
+function isPublicCard (card) {
+  return isLinkCard(card, (image) => isDescriptor(image) && image.mime === 'image/jpeg')
+}
+
+function isGroupCard (card, sealed) {
+  return sealed
+    ? isLinkCard(card, (image) => isPrivateGroupMediaItem(image) && image.plainMime === 'image/jpeg')
+    : isPublicCard(card)
+}
+
+function isDmCard (card) {
+  return isLinkCard(card, (image) => isDmMediaItem(image) && image.mime === 'image/jpeg' && image.ms === 0)
+}
+
 // With media the text may be empty (a photo-only post); without, 1..MAX_TEXT.
 function postCross (given, value) {
+  if (hasOwn(value, 'media') && (hasOwn(value, 'preview') || hasOwn(value, 'card'))) return 'parâmetro inválido: media'
   if (!hasOwn(value, 'media') && charLength(value.text) < 1) return 'parâmetro inválido: text'
   return null
 }
 
 // account.sign (docs/rpc.md 5.18). Duplicated from
 // @varanda/core lib/account-link.js, which this package cannot import.
-const ACCOUNT_PHASES = ['reserve', 'finish', 'rename']
+const ACCOUNT_PHASES = ['reserve', 'finish', 'rename', 'delete', 'passkey', 'cancel']
+const HEX64_SUB_RE = /^[0-9a-f]{64}$/
 const NONCE_RE = /^[A-Za-z0-9_-]{43,128}$/
 const SUB_RE = /^[\x21-\x7e]{1,255}$/
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
@@ -644,7 +672,9 @@ const SPECS = {
       sub: req(isSub)
     },
     cross (given, value) {
-      // A Google subject only at 'finish', and always there.
+      // A Google subject only at 'finish', an attestation hash (hex64) only
+      // at 'passkey', and always there; '' everywhere else.
+      if (value.phase === 'passkey') return HEX64_SUB_RE.test(value.sub) ? null : 'parâmetro inválido: sub'
       if ((value.phase === 'finish') !== (value.sub !== '')) return 'parâmetro inválido: sub'
       return null
     }
@@ -780,18 +810,19 @@ const SPECS = {
   // it belongs to (docs/rpc.md 5.34).
   'profile.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   'post.create': {
-    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isMediaList) },
+    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isMediaList), preview: opt(isPublicCard) },
     mutating: true,
     cross: postCross
   },
   'post.reply': {
-    fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)), media: opt(isMediaList) },
+    fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)), media: opt(isMediaList), preview: opt(isPublicCard) },
     mutating: true,
     cross: postCross
   },
   'post.quote': {
-    fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)), media: opt(isMediaList) },
-    mutating: true
+    fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)), media: opt(isMediaList), preview: opt(isPublicCard) },
+    mutating: true,
+    cross: postCross
   },
   // Tombstones the caller's own publication (docs/rpc.md 5.33).
   'post.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
@@ -886,11 +917,12 @@ const SPECS = {
   'group.join': { fields: { group: req(isKey), community: opt(isKey) }, mutating: true },
   'group.leave': { fields: { group: req(isKey) }, mutating: true },
   'group.post': {
-    fields: { group: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), fwd: opt(int(0, 1), 0), media: opt(isGroupMediaList), sealed: opt(isBool) },
+    fields: { group: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), fwd: opt(int(0, 1), 0), media: opt(isGroupMediaList), card: opt((v) => isGroupCard(v, false) || isGroupCard(v, true)), sealed: opt(isBool) },
     mutating: true,
     cross: (given, value) => {
-      if (value.sealed === true && !hasOwn(value, 'media')) return 'parâmetro inválido: sealed'
+      if (value.sealed === true && !hasOwn(value, 'media') && !hasOwn(value, 'card')) return 'parâmetro inválido: sealed'
       if (value.media && !value.media.every((item) => (item.mime === 'application/octet-stream') === (value.sealed === true))) return 'parâmetro inválido: media'
+      if (value.card && !isGroupCard(value.card, value.sealed === true)) return 'parâmetro inválido: card'
       return postCross(given, value)
     }
   },
@@ -1002,7 +1034,7 @@ const SPECS = {
   // With media the text may be empty, as postCross; the sealed frame's own
   // budget (buildInner, 'mensagem longa demais') is the node's check.
   'dm.send': {
-    fields: { to: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isDmId), fwd: opt(int(0, 1), 0), media: opt(isDmMediaList) },
+    fields: { to: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isDmId), fwd: opt(int(0, 1), 0), media: opt(isDmMediaList), card: opt(isDmCard) },
     mutating: true,
     cross: postCross
   },
@@ -1207,7 +1239,7 @@ const SPECS = {
       kind: req((v) => v === 'dm' || v === 'group'),
       from: opt(isKey),
       id: opt(isDmId),
-      index: opt(int(0, L.MAX_DM_MEDIA - 1)),
+      index: opt((v) => v === 'card' || int(0, L.MAX_DM_MEDIA - 1)(v)),
       diary: opt(isKey),
       item: opt(isPrivateGroupMediaItem)
     },

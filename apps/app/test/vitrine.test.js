@@ -5,7 +5,7 @@ const { readFileSync, readdirSync, mkdtempSync, rmSync, writeFileSync, mkdirSync
 const { tmpdir } = require('node:os')
 const { spawnSync } = require('node:child_process')
 const { join } = require('node:path')
-const { METHODS, validateResponse, validateParams } = require('@varanda/rpc')
+const { METHODS, validateResponse, validateParams, FEED_LIMIT_MAX } = require('@varanda/rpc')
 
 const clone = (value) => JSON.parse(JSON.stringify(value))
 const unknown = 'f'.repeat(64)
@@ -406,7 +406,7 @@ test('notices resolve to real posts and follows match the feed', async (t) => {
   const info = await answer(t, request, 'node.info')
   t.is(info.followCount, f.follows.length)
   t.absent(f.follows.includes(f.own))
-  const feed = await answer(t, request, 'feed.read', { limit: 30 })
+  const feed = await answer(t, request, 'feed.read', { limit: FEED_LIMIT_MAX })
   const allowed = new Set([...f.follows, f.own])
   t.ok(feed.items.length > 0)
   t.ok(feed.items.every((item) => allowed.has(item.author)), 'feed shows only followed diaries and the own one')

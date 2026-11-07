@@ -102,3 +102,19 @@ test('dm-budget: stand-ins have the length of the real values', (t) => {
   t.ok(rpc.dmTextBudget() > 4 * dm.DM_MAX_TEXT, 'a text-only message always fits')
   t.ok(rpc.dmTextBudget(null) > 4 * dm.DM_MAX_TEXT)
 })
+
+test('dm-budget: a link card counts, in its canonical order', (t) => {
+  const { CARD_KEYS } = require('@varanda/core/lib/link-card')
+  t.alike(budget.DM_CARD_KEYS, CARD_KEYS)
+  t.ok(Object.isFrozen(budget.DM_CARD_KEYS))
+  const card = { url: 'https://example.com/' + '%'.repeat(280), host: 'example.com', title: '\u{1F600}'.repeat(80), desc: '\u{1F600}'.repeat(160), image: item(9, { chunks: 1, bytes: 32768, mime: 'image/jpeg' }) }
+  const shuffled = Object.fromEntries(Object.entries({ ...card, image: Object.fromEntries(Object.entries(card.image).reverse()) }).reverse())
+  const fields = { kind: 'msg', to: bia.hex, at: AT, cert: issued.cert, replyTo: 'c'.repeat(32), card, fwd: 1 }
+  const free = rpc.dmTextBudget(fields)
+  t.is(rpc.dmTextBudget({ ...fields, card: shuffled }), free, 'card key order does not matter')
+  t.ok(free < rpc.dmTextBudget({ ...fields, card: null }), 'the card takes room')
+  const inner = dm.buildInner({ ...fields, text: 'x' }, issued)
+  t.is(dm.DM_INNER_BYTES - 66 - innerLength(inner), free - 1, 'same size as the signed inner')
+  t.ok(dm.buildInner({ ...fields, text: textOfBytes(free) }, issued), 'text at the budget fits')
+  t.exception.all(() => dm.buildInner({ ...fields, text: textOfBytes(free + 1) }, issued), /mensagem longa demais/, 'one byte more throws')
+})

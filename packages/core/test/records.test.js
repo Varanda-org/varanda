@@ -655,6 +655,80 @@ test('postRecord with media', async (t) => {
   await t.exception.all(async () => postRecord({ text: 'x', at: AT, media: null }), /media-invalid/)
 })
 
+const THUMB = { core: K2, mime: 'image/jpeg', start: 3, blocks: 1, bytes: 32768, sha256: 'e'.repeat(64), width: 400, height: 210 }
+const CARD = { url: 'https://example.com/a', host: 'example.com', title: 'Título', desc: 'Descrição', image: THUMB }
+
+test('validateRecord: posts with a link preview', (t) => {
+  t.alike(records.POST_PREVIEW_KEYS, ['type', 'text', 'at', 'replyTo', 'preview'])
+  t.alike(records.QUOTE_PREVIEW_KEYS, ['type', 'text', 'at', 'replyTo', 'quote', 'preview'])
+  const post = (over) => ({ type: 'post', text: 'olha https://example.com/a', at: AT, replyTo: null, preview: CARD, ...over })
+  const quote = { author: K1, seq: 3 }
+  t.is(validateRecord(post(), 1), null)
+  t.is(validateRecord(post({ preview: { ...CARD, image: null } }), 1), null, 'no thumbnail')
+  t.is(validateRecord(post({ replyTo: { author: K1, seq: 2 } }), 1), null, 'a reply with a preview')
+  t.is(validateRecord(post({ quote }), 1), null, 'a quote with a preview')
+  t.is(validateRecord(post({ quote, replyTo: { author: K1, seq: 2 } }), 1), 'quote-with-reply')
+  t.is(validateRecord(post({ text: '' }), 1), 'text-length', 'a preview is not a caption-free photo')
+  t.is(validateRecord(post({ text: 'a‮b' }), 1), 'control-chars')
+  t.is(validateRecord(post({ media: [DESC] }), 1), 'malformed', 'media and a preview together')
+  t.is(validateRecord(post({ quote, media: [DESC] }), 1), 'malformed', 'a quote with media and a preview')
+  t.is(validateRecord(post({ extra: 1 }), 1), 'malformed')
+  t.is(validateRecord(post({ preview: null }), 1), 'preview-invalid', 'a null preview is no preview: the 4-key form')
+  const bad = {
+    http: { ...CARD, url: 'http://example.com/a' },
+    javascript: { ...CARD, url: 'javascript:alert(1)' },
+    data: { ...CARD, url: 'data:text/html,x' },
+    ftp: { ...CARD, url: 'ftp://example.com/a' },
+    credentials: { ...CARD, url: 'https://u:p@example.com/a' },
+    'host mismatch': { ...CARD, host: 'evil.com' },
+    'long title': { ...CARD, title: 'x'.repeat(81) },
+    'long desc': { ...CARD, desc: 'x'.repeat(161) },
+    'control in title': { ...CARD, title: 'a\u0007' },
+    'bidi in desc': { ...CARD, desc: 'a‮' },
+    'image over 32768': { ...CARD, image: { ...THUMB, blocks: 2, bytes: 32769 } },
+    'image not jpeg': { ...CARD, image: { ...THUMB, mime: 'image/png' } },
+    'image a dm blob': { ...CARD, image: { id: 'a'.repeat(64), key: 'b'.repeat(64), nonce: 'c'.repeat(48), chunks: 1, bytes: 100, sha256: 'd'.repeat(64), mime: 'image/jpeg', w: 1, h: 1, ms: 0 } },
+    'image a url': { ...CARD, image: 'https://example.com/x.jpg' },
+    'extra key': { ...CARD, extra: 1 },
+    'not an object': 'https://example.com/a'
+  }
+  for (const [name, preview] of Object.entries(bad)) t.is(validateRecord(post({ preview }), 1), 'preview-invalid', name)
+  const hostile = { ...CARD }
+  Object.defineProperty(hostile, 'title', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(post({ preview: hostile }), 1), 'preview-invalid')
+})
+
+test('postRecord with a link preview round-trips', async (t) => {
+  const rec = postRecord({ text: 'olha', at: AT, preview: { ...CARD, extra: 1, image: { ...THUMB, extra: 1 } } })
+  t.alike(Object.keys(rec), ['type', 'text', 'at', 'replyTo', 'preview'])
+  t.alike(rec.preview, CARD, 'only the card and descriptor keys are copied')
+  const decoded = decodeBlock(Buffer.from(JSON.stringify(rec)))
+  t.is(validateRecord(decoded, 1), null)
+  t.alike(records.validRecordCopy(decoded, 1).preview, CARD)
+  t.alike(Object.keys(postRecord({ text: 'oi', at: AT, preview: null })), ['type', 'text', 'at', 'replyTo'], 'null preview adds no key')
+  const q = postRecord({ text: 'oi', at: AT, quote: { author: K1, seq: 1 }, preview: CARD })
+  t.alike(Object.keys(q), ['type', 'text', 'at', 'replyTo', 'quote', 'preview'])
+  await t.exception.all(async () => postRecord({ text: 'x', at: AT, media: [DESC], preview: CARD }), /malformed/)
+  await t.exception.all(async () => postRecord({ text: 'x', at: AT, preview: { ...CARD, url: 'http://example.com/a' } }), /preview-invalid/)
+  // Posts without a preview still open as before.
+  t.is(validateRecord({ type: 'post', text: 'oi', at: AT, replyTo: null }, 1), null)
+  t.is(validateRecord({ type: 'post', text: '', at: AT, replyTo: null, media: [DESC] }, 1), null)
+  // The worst preview post still fits one block.
+  const worst = postRecord({
+    text: '\u{1F600}'.repeat(MAX_TEXT),
+    at: AT,
+    quote: { author: K1, seq: Number.MAX_SAFE_INTEGER },
+    preview: {
+      url: 'https://example.com/' + '%'.repeat(280),
+      host: 'example.com',
+      title: '\u{1F600}'.repeat(80),
+      desc: '\u{1F600}'.repeat(160),
+      image: { ...THUMB, start: 8191, width: 16384, height: 16384 }
+    }
+  })
+  t.ok(Buffer.byteLength(JSON.stringify(worst)) < MAX_BLOCK_BYTES, 'worst preview post ' + Buffer.byteLength(JSON.stringify(worst)) + ' bytes')
+})
+
 test('media-core and follow records', async (t) => {
   await testnet(t)
   const mc = { type: 'media-core', key: K2, at: AT }

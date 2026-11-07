@@ -29,7 +29,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
-import { ENGAGEMENT_LIMIT_MAX, FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX, FOLLOW_LIMIT_MAX, displayText } from '@varanda/rpc'
+import { ENGAGEMENT_LIMIT_MAX, FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX, FOLLOW_LIMIT_MAX, LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { pickAvatar } from '../media/avatar'
@@ -60,7 +60,7 @@ import { useStyles, useTheme } from '../ui/ThemeProvider'
 const MODERATION_REASONS = ['blocked', 'revoked-issuer']
 const TOAST_MS = 4000
 // log.read page maximum (the fallback read of a node without diary.peek).
-const LOG_WINDOW = 36
+const LOG_WINDOW = LOG_LIMIT_MAX
 const FALLBACK_WINDOWS = 4
 // Transient peek errors: 'semeador indisponível' is retried once after 2 s,
 // 'ocupado' (diaryPeekSlots keeps the app within the node's limit; a
@@ -761,6 +761,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       at: q ? q.at : null,
       text: q ? q.text : null,
       media: q ? q.media : null,
+      preview: q ? q.preview || null : null,
       // A transient failure is shown as unavailable; tapping retries it.
       missing: q === null || (q === undefined && social.transient(quoteRef)),
       persist: social.persistOf(post.quote.author),
@@ -793,6 +794,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     at: post.at,
     text: post.text,
     media: post.media || null,
+    preview: post.preview || null,
     replyToName,
     // Feed posts pass persist: true (own or followed by construction).
     persistMedia: persist === true ? true : social.persistOf(post.author),

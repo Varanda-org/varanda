@@ -249,7 +249,7 @@ test('buildPeekPage: one slot per diary per round, numerical date then author or
   t.alike(page.needs, [])
   t.is(page.next, null)
   t.is(JSON.stringify(diaries), before)
-  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'avatar', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', 'round'])
+  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'avatar', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', 'preview', 'round'])
   t.is(page.items[0].kind, 'post')
   t.is(page.items[0].avatar, null)
   t.is(page.items[0].replyTo, null)
@@ -571,7 +571,7 @@ test('quotes and reposts in effect are publications; likes and undone reposts ar
   t.not(result.posts[1].quote, quote, 'a copy')
   const page = buildPeekPage({ diaries: [{ key: A, name: result.name, username: result.username, posts: result.posts, exhausted: true }], limit: 35 })
   t.alike(page.items.map((i) => [i.kind, i.seq, i.round]), [['repost', 5, 0], ['post', 3, 1]])
-  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'avatar', 'username', 'seq', 'at', 'to', 'text', 'replyTo', 'quote', 'media', 'round'])
+  t.alike(Object.keys(page.items[0]), ['kind', 'author', 'name', 'avatar', 'username', 'seq', 'at', 'to', 'text', 'replyTo', 'quote', 'media', 'preview', 'round'])
   t.alike(page.items[0].to, quote)
   t.is(page.items[0].text, null)
   t.alike(page.items[1].quote, quote)
@@ -831,4 +831,19 @@ test('avatar: profiles outside the head and tail preserve the older retained val
       t.alike(item.avatar, older)
     }
   }
+})
+
+test('diary peek and peek pages copy preview thumbnails', (t) => {
+  const f = fixture()
+  const preview = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
+  preview.image = { ...MEDIA[0], mime: 'image/jpeg' }
+  f.entries.push({ seq: 3, record: { ...post('link'), preview } })
+  f.length = 4
+  f.fetched.add(3)
+  const d = diaryPeek(f)
+  t.alike(d.posts[0].preview, preview)
+  const page = buildPeekPage({ diaries: [{ key: A, ...d }], limit: 3 })
+  t.alike(page.items[0].preview, preview)
+  t.not(page.items[0].preview.image, d.posts[0].preview.image)
+  t.is(buildPeekPage({ diaries: [diary(B, 1)], limit: 1 }).items[0].preview, null)
 })

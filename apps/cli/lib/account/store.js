@@ -8,14 +8,14 @@
 // - <dataDir>/directory.json, the snapshot { v, seq, journal, links, bySub,
 //   byUsername, usedNames, pages, pagesByUsername } (a file without `seq` is
 //   seq 0; `journal` only in v 2; `pages` and `pagesByUsername` only once a
-//   page exists), only ever replaced whole through writeJsonAtomic
+//   page exists; `deleted` only once a member deleted the account), only ever replaced whole through writeJsonAtomic
 //   (packages/core/lib/store.js: O_EXCL temp, fsync, rename, dir fsync).
 // - <dataDir>/directory.journal.<id>, a journal (named so that no `*.log`
 //   rotation pattern matches it): <id> is a random 16-byte hex id, its first
 //   line the header { journal: <id> } and every later line one change since
-//   the snapshot, { seq, op: 'link' | 'email' | 'rename', member, ... }
-//   (link: the link record; email: the new e-mail; rename: username,
-//   usernameRecord, usernameChangedAt and the `previous` name), or a page
+//   the snapshot, { seq, op: 'link' | 'email' | 'rename' | 'delete', member,
+//   ... } (link: the link record; email: the new e-mail; rename: username,
+//   usernameRecord, usernameChangedAt and the `previous` name; delete: `at`), or a page
 //   change (see "Pages"). Written
 //   through one O_APPEND|O_NOFOLLOW fd (fchmod 0o600 at every open): each
 //   change is ONE write followed by fsync, so a sign-up costs the same
@@ -185,6 +185,15 @@
 // nor record and `movedTo` points on. A page key is never a member key:
 // start() refuses it and status() answers { linked: false, unavailable: true }
 // (not linked: true, which would open the member routes in server.js). Chains stop at MAX_PAGE_MOVES moves.
+// Excluir conta: the journal op 'delete' { member, at } removes the link
+// (sub, e-mail, certificate, records and invite id) and adds
+// state.deleted[member] = { at }. The names the member held stay in
+// usedNames under the deleted key, so they are never issued again; the sub
+// leaves bySub, so the same Google account may link a NEW key later; the
+// deleted key can never link, be reserved or become a page. The mark counts
+// links plus deleted rows, so a deletion never looks like a restored copy.
+// `deleted` is in the snapshot only once a deletion exists. Also one-way:
+// a build without it refuses a usedNames holder that is not a link or page.
 // One-way migration: the first page puts a page key in usedNames, which a
 // build without pages refuses (its indexes() accepts only linked holders and
 // its applyEntry no page op), so rolling back past this build once a page
@@ -229,7 +238,12 @@ const MAX_PAGE_MOVES = 4
 const RESERVED = new Set([
   'admin', 'associacao', 'association', 'ajuda', 'mod', 'moderacao',
   'pagina', 'paginas', 'root', 'seeder', 'semeador', 'suporte', 'support',
-  'varanda'
+  'varanda',
+  // The Vitrine's fictional people and pages (apps/app/src/vitrine/fixtures.js),
+  // shown in the varanda.app screenshots: whoever held one would seem
+  // endorsed by the official site.
+  'andre_costa', 'bia_araujo', 'biblioteca_praca', 'cecilia_ramos',
+  'horta_do_bairro', 'joao_nascimento', 'lia_oliveira', 'tomas_ferreira'
 ])
 
 function fail (code, extra) {
@@ -273,7 +287,7 @@ function restored () {
 }
 
 function emptyState () {
-  return { links: dict(), bySub: dict(), byUsername: dict(), usedNames: dict(), pages: dict(), pagesByUsername: dict() }
+  return { links: dict(), bySub: dict(), byUsername: dict(), usedNames: dict(), pages: dict(), pagesByUsername: dict(), deleted: dict() }
 }
 
 function isJournalId (id) {
@@ -308,6 +322,11 @@ function validLink (link) {
     typeof link.email === 'string' && isDate(link.usernameChangedAt) && isDate(link.linkedAt) &&
     isPlain(link.cert) && isPlain(link.usernameRecord) &&
     (link.invite === undefined || isInvite(link.invite))
+}
+
+// A deleted member's row: only the date, never the sub, e-mail or record.
+function validDeleted (row) {
+  return isPlain(row) && Object.keys(row).length === 1 && isDate(row.at)
 }
 
 // The record a page holds for `username` under `key`.
@@ -345,13 +364,20 @@ function fromJson (obj) {
 // a used name to another member): bySub maps exactly each link's sub to its
 // member, byUsername exactly each link's current username to its member, and
 // usedNames holds every current username -> member pair plus past names,
-// each held by a linked member (links are never removed) or a page.
+// each held by a linked member, a deleted member (Excluir conta keeps the
+// names burned) or a page. `deleted` maps a member key to { at } and is
+// never a link or a page.
 // pagesByUsername maps exactly each named page's username to it, also held
 // in usedNames, and a move points at a page that exists. Any disagreement (a
 // damaged or hand-restored snapshot) fails closed; nothing is rebuilt.
 function indexes (obj, links) {
-  for (const key of ['bySub', 'byUsername', 'usedNames', 'pages', 'pagesByUsername']) {
+  for (const key of ['bySub', 'byUsername', 'usedNames', 'pages', 'pagesByUsername', 'deleted']) {
     if (obj[key] !== undefined && !isPlain(obj[key])) throw invalid()
+  }
+  const deleted = dict()
+  for (const [key, row] of Object.entries(obj.deleted || {})) {
+    if (!isLower(key) || has(links, key) || !validDeleted(row)) throw invalid()
+    deleted[key] = { at: row.at }
   }
   const bySub = dict(obj.bySub)
   const byUsername = dict(obj.byUsername)
@@ -359,7 +385,7 @@ function indexes (obj, links) {
   const pagesByUsername = dict(obj.pagesByUsername)
   const pages = dict()
   for (const [key, page] of Object.entries(obj.pages || {})) {
-    if (!isLower(key) || has(links, key) || !validPage(page, key)) throw invalid()
+    if (!isLower(key) || has(links, key) || has(deleted, key) || !validPage(page, key)) throw invalid()
     pages[key] = { ...page }
   }
   let named = 0
@@ -381,9 +407,9 @@ function indexes (obj, links) {
     if (!has(usedNames, username) || usedNames[username] !== member) throw invalid()
   }
   for (const holder of Object.values(usedNames)) {
-    if (typeof holder !== 'string' || !(has(links, holder) || has(pages, holder))) throw invalid()
+    if (typeof holder !== 'string' || !(has(links, holder) || has(pages, holder) || has(deleted, holder))) throw invalid()
   }
-  return { bySub, byUsername, usedNames, pages, pagesByUsername }
+  return { bySub, byUsername, usedNames, pages, pagesByUsername, deleted }
 }
 
 function snapshotSeq (obj) {
@@ -531,6 +557,12 @@ function readHwm (hwmFile) {
   return { seq: obj.seq, journal: obj.journal, links: obj.links || 0, names: obj.names || 0 }
 }
 
+// The link count of the high-water mark: a deletion turns a link into a
+// deleted row, so the mark never goes down because of it.
+function markedLinks (s) {
+  return Object.keys(s.links).length + Object.keys(s.deleted).length
+}
+
 function isCount (n) {
   return Number.isSafeInteger(n) && n >= 0
 }
@@ -581,7 +613,7 @@ function livePage (s, key) {
 }
 
 function freshKey (s, key) {
-  return isLower(key) && !has(s.links, key) && !has(s.pages, key)
+  return isLower(key) && !has(s.links, key) && !has(s.pages, key) && !has(s.deleted, key)
 }
 
 const PAGE_OPS = new Set(['page', 'page-rename', 'page-close', 'page-move'])
@@ -661,7 +693,7 @@ function applyEntry (s, e, dry = false) {
   if (e.op === 'link') {
     const link = e.link
     if (!validLink(link)) throw invalid()
-    if (has(s.links, member) || has(s.pages, member) || has(s.bySub, link.sub) || heldByOther(s, link.username, member)) throw invalid()
+    if (has(s.links, member) || has(s.pages, member) || has(s.deleted, member) || has(s.bySub, link.sub) || heldByOther(s, link.username, member)) throw invalid()
     if (dry) return
     s.links[member] = { ...link }
     s.bySub[link.sub] = member
@@ -684,6 +716,17 @@ function applyEntry (s, e, dry = false) {
     s.byUsername[e.username] = member
     s.usedNames[e.username] = member
     s.links[member] = { ...link, username: e.username, usernameRecord: e.usernameRecord, usernameChangedAt: e.usernameChangedAt }
+  } else if (e.op === 'delete') {
+    // Excluir conta: the link (sub, e-mail, certificate, records, invite)
+    // goes; every name the member held stays in usedNames, now held by the
+    // deleted row, so it is never issued to anyone. The sub is free again.
+    if (!has(s.links, member) || !isDate(e.at)) throw invalid()
+    if (dry) return
+    const link = s.links[member]
+    delete s.bySub[link.sub]
+    if (s.byUsername[link.username] === member) delete s.byUsername[link.username]
+    delete s.links[member]
+    s.deleted[member] = { at: e.at }
   } else {
     throw invalid()
   }
@@ -747,7 +790,7 @@ function readDirectory (dataDir) {
         state: snap.state,
         seq,
         seqless: snap.seqless,
-        links: Object.keys(snap.state.links).length,
+        links: markedLinks(snap.state),
         names: Object.keys(snap.state.usedNames).length,
         v: snap.v,
         id: journal.id,
@@ -1150,6 +1193,8 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     // Absent until the first page, so a directory without pages stays the
     // file older builds read.
     if (Object.keys(state.pages).length > 0) Object.assign(out, { pages: state.pages, pagesByUsername: state.pagesByUsername })
+    // Absent until the first deletion, for the same reason.
+    if (Object.keys(state.deleted).length > 0) out.deleted = state.deleted
     return out
   }
 
@@ -1196,7 +1241,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
   // unavailable instead (a stale writer, or files changed behind it).
   function writeHwm () {
     fence()
-    const mark = { seq, journal: journalId, links: linkCount(), names: Object.keys(state.usedNames).length }
+    const mark = { seq, journal: journalId, links: markedLinks(state), names: Object.keys(state.usedNames).length }
     let current
     try {
       current = readHwm(hwmFile)
@@ -1428,6 +1473,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     if (invite !== null && !isInvite(invite)) throw new TypeError('invite must be 64 lowercase hex characters')
     if (!validName(username)) throw fail('nome-invalido')
     if (has(state.links, member) || has(state.pages, member)) throw fail('conta-vinculada')
+    if (has(state.deleted, member)) throw fail('conta-excluida')
     // Sweep before the cap check: while the cap is full this is the only
     // call that keeps expiring rows abandoned before it filled.
     sweep()
@@ -1574,6 +1620,10 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
         return linkResult(state.links[member])
       }
       if (has(state.bySub, sub) || has(state.links, member) || has(state.pages, member)) throw fail('conta-vinculada')
+      if (has(state.deleted, member)) {
+        pending.delete(id)
+        throw fail('conta-excluida')
+      }
       // The cap filled while this row was at Google: drop the row (it holds
       // the sub, the e-mail and claims the name) and sign nothing.
       if (full()) {
@@ -1635,10 +1685,40 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     })
   }
 
+  // Excluir conta (README "Excluir conta"): one journal line. -> { at,
+  // already } where `already` is true for a member deleted before (the
+  // request is idempotent, the first date stands).
+  function deleteMember (member) {
+    return enqueue(() => {
+      mutable()
+      member = normalizeMember(member)
+      if (has(state.deleted, member)) return { at: state.deleted[member].at, already: true }
+      if (!has(state.links, member)) throw fail('nao-encontrado')
+      const at = iso(now())
+      commit({ op: 'delete', member, at })
+      return { at, already: false }
+    })
+  }
+
+  // The date of a deletion, or null. In-memory state only.
+  function deletedAt (member) {
+    if (!isHex(member, 32)) return null
+    const key = member.toLowerCase()
+    return has(state.deleted, key) ? state.deleted[key].at : null
+  }
+
+  // Every deleted key, sorted, for the sweep that purges the other stores.
+  function deletedMembers () {
+    return Object.keys(state.deleted).sort()
+  }
+
   function status (member) {
     if (!isHex(member, 32)) return { linked: false }
     const link = state.links[member.toLowerCase()]
-    if (link === undefined) return has(state.pages, member.toLowerCase()) ? { linked: false, unavailable: true } : { linked: false }
+    if (link === undefined) {
+      if (has(state.deleted, member.toLowerCase())) return { linked: false, deletedAt: state.deleted[member.toLowerCase()].at }
+      return has(state.pages, member.toLowerCase()) ? { linked: false, unavailable: true } : { linked: false }
+    }
     return {
       linked: true,
       username: link.username,
@@ -1789,8 +1869,8 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
   }
 
   // For the moderation panel's stats tab (apps/cli/lib/account/usage-stats.js):
-  // counts only -> { members, maxMembers, byDay }. members is exact because a
-  // link is never removed (no applyEntry op removes one; pages are not links);
+  // counts only -> { members, maxMembers, byDay }. members counts the current
+  // links (a deleted member leaves the count and its day; pages are not links);
   // maxMembers is the cap or null. byDay is [day, count] pairs, ascending, with
   // day = dayOf(ms of linkedAt) (UTC by default; the caller passes its own,
   // e.g. the Brasília day). linkedAt is the `date` finish() puts in the
@@ -1894,7 +1974,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     })
   }
 
-  return { start, reserve, putGoogle, markAnswered, get, isFull, inviteUsed, dropPending, finish, rename, status, lookup, reservePage, renamePage, closePage, closeOrphanPages, movePage, pageStatus, exportLinks, linkStats, linkedAt, linkRoster, contact, memberForSub, close, fail: markFailed, restored: isRestored }
+  return { start, reserve, putGoogle, markAnswered, get, isFull, inviteUsed, dropPending, finish, rename, deleteMember, deletedAt, deletedMembers, status, lookup, reservePage, renamePage, closePage, closeOrphanPages, movePage, pageStatus, exportLinks, linkStats, linkedAt, linkRoster, contact, memberForSub, close, fail: markFailed, restored: isRestored }
 }
 
 module.exports = {

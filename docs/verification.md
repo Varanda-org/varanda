@@ -5611,13 +5611,225 @@ Como verificar, a partir da raiz (só os arquivos desta área):
 
 Limites desta caminhada:
 
+## 115. Excluir conta pelo app (PR feat/account-deletion)
+
+Caminhada da exclusão da conta pelo próprio app, exigida pela diretriz 5.1.1(v) da App Store. O protocolo está em [protocol.md](protocol.md) ("Account deletion"); a operação, no `README.md` ("Excluir conta"). Os Termos de Uso e a Política de Privacidade passam à versão 22 para descrever isso, então quem já aceitou a 21 aceita de novo.
+
+Regras que os passos conferem:
+
+- A linha "Excluir conta" aparece em Ajustes, abaixo de "Sair", só com a passkey aberta numa instalação hospedada (app ou web). A tela explica o que sai na hora, o que sai em até 7 dias, o que fica e que as comunidades e os grupos criados pela pessoa deixam de existir para todos.
+- O botão "Excluir conta" só fica ativo com o @nome digitado (com ou sem "@", qualquer caixa). Tocar nele pede a passkey de novo (Face ID, digital ou PIN do aparelho) antes de qualquer pedido; cancelar a passkey não manda nada ao serviço.
+- O pedido assinado é `account.sign` na fase `delete` sobre o nonce e o @nome atual. Uma assinatura de outra fase, de outra chave ou com outro @nome responde 400 `assinatura-invalida`; um nonce já usado ou vencido, 404 `expirado`.
+- Quem é dono de uma página que não foi encerrada nem transferida vê "Você ainda é dono de uma página" e o botão "Abrir Páginas" (409 `paginas-ativas`).
+- Depois do pedido, o serviço de conta: enfileira no painel um bloqueio marcado "exclusão da conta pedida pela própria pessoa (não pode ser cancelada aqui)", sem botão de cancelar; responde 409 `conta-excluida` a cancelar ou desbloquear essa chave pelo painel; apaga o vínculo Google, os aceites, a faixa etária, as inscrições de push, as entradas de recuperação, os convites, as marcas de convites de surpresa e o bloco cifrado de vistos da pessoa; guarda só a chave pública, a data e os @nomes já usados.
+- `GET /account/status?member=<chave>` responde `{"linked":false,"deleted":"pendente"}` até `mod apply` publicar a lista com a chave, e `"concluida"` depois. Nenhuma resposta ou registro leva e-mail, sub ou a chave; o registro do serviço tem só `exclusao` com `pedido`, `diretorio-incerto` ou `purga-pendente`.
+- O app apaga a conta do aparelho na hora (como "Recomeçar") e volta para "Entrar", onde mostra "Conta excluída em <data>", o que já saiu, o prazo de 7 dias e como apagar a passkey. Quando o status vira `concluida`, mostra "Exclusão concluída" uma vez, com "Entendi".
+- Entrar de novo com a mesma passkey, ou abrir outro aparelho que continuava com a sessão, mostra "Esta conta foi excluída" e só o botão "Apagar deste aparelho". A mesma chave não volta a se vincular, e os @nomes da conta não vão para outra pessoa. A mesma conta Google consegue criar uma conta nova com outra passkey.
+- `mod apply` mostra `bloquear <chave> (exclusão pedida pela pessoa)`, e `mod apply --yes` assina e publica; o semeador derruba o diário.
+
+Passos (marcar só depois de executar e guardar o registro), primeiro no Android (build de debug, emulador ou aparelho, feito depois de `npm run prepare:native -w apps/app`), depois no simulador iOS, depois na web e no PWA. O build de debug não entra com passkey numa instalação de produção (veja `docs/development.md`): use a instalação de teste ou o APK de preview do EAS para os passos que precisam de conta.
+
+- [ ] Abertura depois da atualização: o aceite dos Termos aparece com a versão 22; aceitar e seguir.
+- [ ] Conta de teste vinculada ao Google, com push ligado, uma passkey extra e um convite criado: Ajustes mostra "Excluir conta" abaixo de "Sair"; a tela abre com o texto e o campo "Para confirmar, digite @<nome>".
+- [ ] Botão desativado com o campo vazio e com outro nome; ativo com "@Nome" em maiúsculas.
+- [ ] Tocar em "Excluir conta" e cancelar a passkey: aparece "entrada com a passkey cancelada" e nada muda (`GET /account/status` continua `linked: true`, o painel não tem bloqueio pendente).
+- [ ] Repetir e confirmar a passkey: o app volta para "Entrar" com "Conta excluída em <data>" e as instruções para apagar a passkey. `GET /account/status?member=<chave>` responde `{"linked":false,"deleted":"pendente"}`. No servidor, `terms.json`, `age.json`, `push.json` e `invites.json` não têm mais a chave, `seen/<chave>` não existe mais, e `recovery.json` tem só a marca de remoção.
+- [ ] Painel de moderação: a mudança aparece com "exclusão da conta pedida pela própria pessoa" e sem "cancelar"; um `curl` de `api/pending/<id>/cancel` e de `api/unblock` com a sessão do painel respondem 409 `conta-excluida`.
+- [ ] Na máquina do operador: `mod apply --yes` mostra `bloquear <chave> (exclusão pedida pela pessoa)`, publica, e `seed status` mostra a lista nova; o diário some de `/index` e da Espiadinha.
+- [ ] De volta ao app em "Entrar": ao abrir de novo, aparece "Exclusão concluída: o diário saiu dos semeadores da associação." e, depois de "Entendi", não aparece mais.
+- [ ] Entrar com a mesma passkey: aparece "Esta conta foi excluída" e "Apagar deste aparelho"; tocar apaga e volta para "Entrar".
+- [ ] Dois aparelhos com a mesma passkey: excluir no primeiro; abrir o segundo mostra "Esta conta foi excluída" antes dos Termos e de A Rua.
+- [ ] Bloqueio já pendente: decidir "bloquear" uma denúncia contra uma conta de teste (sem rodar `mod apply`) e então excluir essa conta pelo app. O painel mostra o bloqueio do moderador e o da pessoa; "cancelar" no do moderador (por `curl` com a sessão do painel) responde 409 `conta-excluida`; `mod apply --yes` assina os dois.
+- [ ] Dono de página (`VARANDA_PAGES` ligado): a tela mostra "Você ainda é dono de uma página" e "Abrir Páginas"; depois de encerrar a página, a exclusão segue.
+- [ ] Criar uma conta nova com a mesma conta Google e outra passkey: o vínculo funciona; escolher o @nome da conta excluída responde "esse nome já está em uso".
+- [ ] Registros do serviço depois de tudo: só linhas `exclusao` com `pedido` (e `purga-pendente` só se algum arquivo estava indisponível); procurar o e-mail, o sub e a chave não encontra nada.
+- [ ] iOS (simulador), Safari e Chrome na web hospedada e o PWA instalado: repetir os passos de exclusão, a passkey pedida de novo e o recibo em "Entrar".
+- [ ] Em todas as plataformas: a Política e os Termos abertos em Ajustes mostram "Versão 22", dizem onde excluir a conta, o que fica e o prazo de 7 dias, e não dizem mais que o app não permite excluir a conta.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/cli/test/account-delete.test.js`, `node apps/cli/test/account-store.test.js`, `node apps/cli/test/moderation-store.test.js`, `node apps/cli/test/account-mod.test.js`, `node apps/cli/test/mod-apply.test.js`, `node apps/cli/test/account-age.test.js` e `node apps/cli/test/invite-drops.test.js`.
+- `node packages/core/test/account-link.test.js`, `node packages/rpc/test/methods.test.js`, `node packages/web-member/test/passkey.test.js` e `node packages/web-member/test/web-node-recovery.test.js`.
+- `node apps/app/test/accountDeletion.test.js`, `node apps/app/test/account.test.js`, `node apps/app/test/sessionStoreNative.test.js`, `node apps/app/test/legal.test.js`, `node apps/app/test/terms-version.test.js`, `node packages/core/test/terms.test.js` e `node apps/site/test/legal.test.js`.
+
+- Sem passkey e sem código de recuperação ainda não há como pedir a exclusão pelo app; a página com o Google é um próximo passo.
 - Nenhuma caixa acima foi executada nesta documentação.
 
-## 115. Recurso de quem foi bloqueado (PR feat/moderation-appeal, 2026-10-30)
+## 116. Excluir conta confere a passkey no serviço de conta (PR feat/deletion-passkey-assertion)
+
+Continua a seção 115. Antes, a confirmação com a passkey antes de excluir a conta era só uma checagem no aparelho (o sinal UV e o identificador da credencial), e um autenticador forjado numa sessão aberta passava por ela; o resíduo foi aceito em 06/11/2026 com esta continuação. Agora o serviço de conta guarda a chave pública da passkey que criou a conta e confere uma asserção nova sobre o nonce do pedido. O protocolo está em [protocol.md](protocol.md) ("Account deletion"); a operação, no `README.md` ("Excluir conta"). Os Termos de Uso e a Política de Privacidade passam à versão 23, então quem aceitou a 22 aceita de novo.
+
+Regras que os passos conferem:
+
+- Logo depois do vínculo Google, o app manda o objeto de atestado da criação da passkey (`POST /account/passkey/start` e `/add`, `account.sign` na fase `passkey` com o SHA-256 do objeto). O serviço aceita só na primeira hora depois do vínculo e só se a conta ainda não tem chave guardada (409 `vinculo-antigo` e `passkey-registrada` fora disso). Nada disso aparece na tela.
+- Com chave guardada, "Excluir conta" pede a passkey com o nonce do pedido como desafio, e o serviço confere a assinatura com a chave guardada, a origem (o endereço público, ou `android:apk-key-hash:` do certificado de `VARANDA_ANDROID_CERT_SHA256` no app Android), o rpId, os sinais UP e UV e o contador. Uma asserção de outra passkey com o mesmo identificador, de outro desafio, de outra origem ou sem UV responde 403 `passkey-invalida` e não exclui nada.
+- Sem chave guardada (toda conta vinculada antes, outra passkey, uma criação no iOS sem objeto de atestado), a tela explica a espera e o botão diz "Agendar exclusão". O pedido fica agendado por 7 dias: `GET /account/status` tem `scheduledDeletion`, todos os aparelhos com a conta aberta mostram "Exclusão da conta agendada para <data>" no topo, um aviso push "Pedido de exclusão da sua conta" chega se ligado, e "Cancelar exclusão" (em Ajustes > Excluir conta) cancela de qualquer aparelho. Pedir de novo mantém a data.
+- Na data, a varredura de hora em hora exclui como antes (bloqueio `titular`, vínculo, sidecars, `passkeys.json`). Quem passou a ser dono de uma página fica de fora até encerrá-la.
+
+Passos (marcar só depois de executar e guardar o registro), primeiro no Android (build de debug, emulador ou aparelho, feito depois de `npm run prepare:native -w apps/app`), depois no simulador iOS, depois na web e no PWA. O build de debug não entra com passkey numa instalação de produção (veja `docs/development.md`): use a instalação de teste ou o APK de preview do EAS para os passos que precisam de conta.
+
+- [ ] Abertura depois da atualização: o aceite dos Termos aparece com a versão 23; aceitar e seguir.
+- [ ] Conta nova (passkey criada agora, vínculo Google em seguida): `passkeys.json` no servidor passa a ter a chave da conta com `alg` -7 (ou -257), e os registros mostram `passkey` com `registrada`, sem chave nem identificador.
+- [ ] Nessa conta, Ajustes > Excluir conta: o texto diz que os dados do aparelho são apagados logo depois do pedido; confirmar a passkey exclui na hora (`{"linked":false,"deleted":"pendente"}`), como na seção 115.
+- [ ] iOS (simulador ou aparelho): conferir se a criação devolve o objeto de atestado (a conta nova ganha chave em `passkeys.json`) e se a exclusão na hora passa (a origem do iOS é `https://<rpId>`). Se não passar, anotar o motivo do registro (`passkey-origem`, por exemplo) e a exclusão cai na espera.
+- [ ] Android pelo app instalado (APK de preview, com `VARANDA_ANDROID_CERT_SHA256` no serviço `account`): a exclusão na hora passa. Sem a variável, a mesma tentativa responde `passkey-invalida` com `passkey-origem` no registro; anotar.
+- [ ] Conta antiga (vinculada antes desta versão): Ajustes > Excluir conta mostra o texto da espera e "Agendar exclusão"; confirmar a passkey agenda. O topo do app mostra "Exclusão da conta agendada para <data>" e "Ver"; um segundo aparelho com a mesma conta mostra o mesmo ao abrir; com push ligado, chega "Pedido de exclusão da sua conta".
+- [ ] "Ver" abre Ajustes > Excluir conta com a data e "Cancelar exclusão"; cancelar some com o aviso em todos os aparelhos (`scheduledDeletion` some de `GET /account/status`).
+- [ ] Agendar de novo e, no servidor, adiantar a data (ou esperar 7 dias numa instalação de teste): a varredura exclui, o registro mostra `agendada-executada`, e os aparelhos passam a mostrar "Esta conta foi excluída".
+- [ ] Autenticador forjado: no Chrome da web hospedada, com a sessão aberta numa conta nova, ligar o autenticador virtual do DevTools (WebAuthn) e tentar excluir. Sem a passkey verdadeira, o pedido responde `passkey-invalida` (com chave guardada) ou é só agendado; nada é excluído na hora.
+- [ ] Registros do serviço depois de tudo: só linhas `exclusao` e `passkey` com tokens; procurar a chave, o identificador da credencial, o e-mail e o sub não encontra nada.
+- [ ] Em todas as plataformas: os Termos e a Política em Ajustes mostram "Versão 23" e descrevem a chave pública da passkey guardada e a espera de 7 dias.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/cli/test/webauthn.test.js`, `node apps/cli/test/passkey-store.test.js`, `node apps/cli/test/account-passkey.test.js` e `node apps/cli/test/account-delete.test.js`.
+- `node packages/core/test/account-link.test.js`, `node packages/core/test/terms.test.js`, `node packages/rpc/test/methods.test.js`, `node packages/web-member/test/passkey.test.js`, `node packages/web-member/test/web-node-recovery.test.js` e `node packages/web-member/test/resume.test.js`.
+- `node apps/app/test/accountDeletion.test.js`, `node apps/app/test/account.test.js`, `node apps/app/test/passkeyEnrol.test.js`, `node apps/app/test/sessionStoreNative.test.js`, `node apps/app/test/sw.test.js`, `node apps/app/test/legal.test.js` e `node apps/site/test/legal.test.js`.
+
+Limites:
+
+- A chave é confiada no primeiro uso, no cadastro: quem controlar o aparelho da pessoa na hora seguinte ao vínculo pode registrar um autenticador forjado no lugar.
+- Uma sessão aberta guarda a chave do diário e pode agendar uma exclusão; a pessoa vê o pedido em todos os aparelhos e pode cancelar por 7 dias, mas quem não abrir nenhum aparelho nesse prazo perde a conta.
+- As passkeys extras e a troca de passkey não registram chave; quem só tem uma delas espera os 7 dias.
+- A origem do iOS e o objeto de atestado no iOS dependem do aparelho (passo acima).
+- Nenhuma caixa acima foi executada nesta documentação.
+
+## 117. Prévias de links e passada visual completa (PR feat/link-previews)
+
+Caminhada da prévia de links nas conversas, nos grupos e nas publicações do diário, seguida da passada visual completa desta rodada de redesenho. As telas estão em [app.md](app.md) ("Conversa", "Prévias de links"); a linha LGPD está em [design.md](design.md). Os Termos de Uso e a Política de Privacidade sobem para a versão 24.
+
+Regras que os passos conferem:
+
+- A prévia é montada uma só vez, por quem envia: no app nativo pelo próprio aparelho; na web hospedada pelo serviço de conta da associação (`/account/preview`), que lê a página do próprio endereço, nunca com o IP nem a identidade do membro, e não guarda nem registra o link, o título nem a imagem. A sessão da prévia exige o aceite dos Termos atuais, como a busca de GIFs, e cada membro pede até 60 prévias por dia.
+- O cartão (título, descrição e uma imagem de até 32 KB) vai dentro da mensagem direta, da mensagem de grupo ou da publicação do diário, com a proteção dela. Quem recebe vê só os dados guardados na mensagem e nunca busca nada no site; tocar no cartão abre o link, só por escolha de quem lê.
+- No rascunho, o cartão tem um X para descartar; anexar uma foto tira o cartão; se a página falha, a mensagem segue só com o texto.
+- A chave "Prévia de links" em Ajustes, desligada, faz o app não pedir prévia nenhuma; os cartões que outras pessoas enviam continuam aparecendo.
+- Com `VARANDA_PREVIEW=0` no serviço de conta, `GET /account/preview/policy` responde `{ enabled: false }`, as demais rotas respondem 404 `feature-off`, e a web hospedada não monta prévias.
+- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/feat/link-previews/<plataforma>/`, gravadas por `apps/app/scripts/review-shots.sh`.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node packages/rpc/test/link-card.test.js`, `node packages/core/test/link-card.test.js`, `node apps/cli/test/preview-routes.test.js`, `node apps/app/test/preview.test.js`, `node apps/app/test/previewPref.test.js` e `node apps/app/test/legal.test.js`.
+- `npm run lint`, que tem de passar.
+
+Prévia de links, primeiro no Android (build de debug, emulador ou aparelho, feito depois de `npm run prepare:native -w apps/app`), depois no simulador iOS, depois na web e no PWA:
+
+- [ ] Android: colar um link `https://` numa mensagem direta; o cartão aparece no rascunho com título, imagem e endereço; enviar. No aparelho de quem recebe, o cartão aparece igual, e tocar nele abre o link.
+- [ ] Android: o mesmo num grupo público, num grupo privado e numa publicação do diário (Publicar). No grupo privado, o semeador guarda só o cifrado.
+- [ ] Android: tocar no X do cartão no rascunho; a mensagem sai só com o texto e o link.
+- [ ] Android: com o cartão no rascunho, anexar uma foto; o cartão some e a mensagem sai com a foto.
+- [ ] Android: um link para um endereço que não responde, ou para uma página sem título; a mensagem sai só com o texto, sem erro na tela.
+- [ ] Android: Ajustes, desligar "Prévia de links"; colar um link não monta cartão e o aparelho não faz pedido ao site (conferir no registro de rede do emulador ou do proxy); um cartão enviado por outra pessoa continua aparecendo.
+- [ ] iOS (simulador): repetir a mensagem direta, o grupo privado, a publicação do diário, o X, a foto e a chave desligada.
+- [ ] Web (Chrome, conta hospedada): colar um link numa mensagem direta; na aba Rede de quem envia, o único pedido da prévia vai para `/account/preview` da instalação, nunca para o site do link.
+- [ ] Web, quem recebe: com a aba Rede aberta, abrir a conversa com o cartão; nenhum pedido sai além da origem da instalação (nada para o site do link, nem para a imagem do cartão).
+- [ ] Web, quem recebe, com o serviço de prévia parado (serviço de conta com `VARANDA_PREVIEW=0` ou fora do ar): os cartões já enviados continuam aparecendo iguais, e a aba Rede segue sem pedido para fora da origem.
+- [ ] Web: o mesmo cartão num grupo público, num grupo privado e numa publicação do diário.
+- [ ] Web: Ajustes, desligar "Prévia de links"; colar um link não faz pedido a `/account/preview` (aba Rede); os cartões recebidos continuam aparecendo.
+- [ ] Web: com o cartão no rascunho, anexar uma foto; o cartão some.
+- [ ] Web: com `VARANDA_PREVIEW=0` no serviço de conta, `GET /account/preview/policy` responde `{ enabled: false }`, colar um link não monta cartão e não sai pedido a `/account/preview`.
+- [ ] Celular: um link encurtado (que redireciona, por exemplo um bit.ly) não monta cartão e a mensagem sai como texto simples; na web o mesmo link monta o cartão com o endereço final (o serviço segue até 3 redirecionamentos conferidos).
+- [ ] PWA instalado: repetir a mensagem direta com cartão e a conferência da aba Rede de quem recebe.
+
+Passada visual completa desta rodada, pelo ciclo de [design-review.md](design-review.md):
+
+- [ ] Android (AVD `varanda-api36`): a Vitrine sobe com `EXPO_PUBLIC_VARANDA_VITRINE=1`, e as telas do ciclo (A Rua, Conversa, Membro, Diário, Conversas e filtros, Mensagem, Comunidade, Grupo, ComunidadeInfo, Avisos, Busca, Publicar, Ajustes e Introdução) abrem com dados de exemplo, em tema claro e escuro, com texto grande e com movimento reduzido. Nenhum texto cortado, sobreposto ou escondido, nenhum alvo de toque menor que 44 pt.
+- [ ] iOS (simulador iPhone 16e): as mesmas telas, nos dois temas, com texto grande e movimento reduzido.
+- [ ] Chrome em 390 px e em 1280 px: as mesmas telas, nos dois temas, com texto grande e movimento reduzido.
+- [ ] Laboratório hospedado no Chrome com duas sessões (Pessoa 1 e Pessoa 2), numa mensagem direta: foto, GIF, mensagem de voz, resposta, menção a uma Página, cartão de link e encaminhar; as duas telas mostram o que foi enviado.
+- [ ] O mesmo num grupo público.
+- [ ] O mesmo num grupo privado.
+- [ ] Avisos, Busca, Publicar e o menu "Mais" (overflow) nas duas sessões, nos dois temas.
+- [ ] Nenhuma tela mostra confirmação de leitura, indicador de digitação nem presença (online, visto por último), em nenhuma das duas sessões.
+
+Entrada nativa real (caixa separada: não é parte da revisão visual):
+
+- [ ] entrada nativa real: entrar com passkey e conta no app instalado, no Android e no iOS, e repetir a prévia de links numa mensagem direta. Pré-requisitos que ainda faltam:
+  - iOS: o domínio associado da conta Apple Developer, sem o qual a passkey não entra.
+  - Android: o `assetlinks.json` da instalação precisa associar o build de debug (`app.varanda.debug`), o que a instalação de produção não faz e não deve fazer com a chave pública de debug. Até lá, o login com conta no Android usa o APK de preview do EAS (ver a seção Android de [development.md](development.md)).
+  - A configuração hospedada do app nativo exige `https`.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- No app nativo, quem monta a prévia é o aparelho de quem envia, que fala direto com o site do link e expõe a ele o próprio endereço de rede; a Política (versão 24) diz isso.
+
+## 118. Mensagens diretas e grupos privados no app instalado (PR fix/native-dm-unlock)
+
+Caminhada da issue #347. O app instalado com a instalação (tipo `web`) passa o resultado PRF da passkey ao nó (`identity.install`, [rpc.md](rpc.md) 5.50), e o nó deriva as chaves de mensagens diretas, a chave de caixa dos grupos privados e as chaves de escrita dos grupos com o HKDF do worklet, porque o WebCrypto do Bare não tem HKDF. Antes, com a conta aberta, Conversas mostrava "Algumas conversas ainda não carregaram." e "Entre com sua passkey para continuar." e nenhuma conversa privada.
+
+Regras que os passos conferem:
+
+- Depois de entrar com a passkey, ou de abrir o app com a sessão guardada, Conversas lista as conversas privadas e "Pedidos de mensagem" sem o aviso "Entre com sua passkey para continuar.".
+- O app publica a chave de mensagens (`dm.enable`) quando a conta ainda não tem uma, e uma conversa de ponta a ponta funciona entre o app e a web, nos dois sentidos, com texto, foto e mensagem de voz.
+- Um aparelho que entra agora recebe só o que o semeador ainda guarda (7 dias, protocol seção 11) e o que chegar depois: o histórico mais antigo, guardado em outro aparelho, não é copiado. Nesse aparelho, uma conversa vai para a caixa de entrada quando a pessoa segue o outro membro, quando há uma mensagem própria enviada ou quando o aceite está entre as mensagens guardadas; senão aparece em "Pedidos de mensagem".
+- Um grupo privado criado no app recebe e entrega chaves de época; outro aparelho da mesma passkey participa sozinho e recebe as chaves (manutenção de aparelho).
+- Uma passkey de outra conta é recusada com "passkey não corresponde ao diário guardado" antes de o PRF entrar no nó: o app fica bloqueado e, ao entrar de novo com a passkey certa, as conversas guardadas no aparelho continuam lá.
+
+Passos (marcar só depois de executar e guardar o registro), primeiro no Android (build de debug, emulador ou aparelho, feito depois de `npm run prepare:native -w apps/app`), depois no simulador iOS, depois na web e no PWA. O build de debug não entra com passkey numa instalação de produção (veja `docs/development.md`): os passos que pedem passkey real usam o APK de preview do EAS e, no iOS, um build com o domínio associado (TestFlight).
+
+- [ ] Conta com conversas privadas na web: entrar no app com a mesma passkey. Conversas mostra as conversas dos últimos 7 dias, sem "Entre com sua passkey para continuar.".
+- [ ] Fechar e abrir o app (sessão guardada): as conversas aparecem de novo sem pedir a passkey.
+- [ ] Conta nova criada no app: a primeira abertura de Conversas publica a chave de mensagens; da web, outra conta encontra a do app em "Nova conversa" e envia uma mensagem, que chega ao app como pedido; aceitar e responder com texto, foto e voz; tudo chega à web.
+- [ ] Mesmo par, mensagem enviada da web pela conta do app (mesma passkey nos dois): aparece no app como mensagem própria.
+- [ ] Grupo privado criado no app: convidar uma conta da web, que entra e lê as mensagens; uma mensagem da web aparece no app.
+- [ ] Segundo aparelho com a mesma passkey (outro telefone ou a web): entra no grupo privado sozinho e lê as mensagens novas.
+- [ ] Entrar no app com a passkey de outra conta (Ajustes, Sair, depois "entrar com outra passkey"): aparece "passkey não corresponde ao diário guardado"; entrar de novo com a passkey certa mostra as mesmas conversas de antes.
+- [ ] iOS (TestFlight) no mesmo aparelho que tem o PWA instalado: os mesmos passos de conversa e de grupo privado.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/app/test/identityInstall.test.js`, `node apps/app/test/identityRecoveryNative.test.js` e `node apps/app/test/dm.test.js`.
+- `node packages/web-member/test/session-hkdf.test.js`, `node packages/web-member/test/passkey.test.js`, `node packages/web-member/test/group-keys.test.js`, `node packages/web-member/test/dm-store.test.js` e `node packages/web-member/test/dm.test.js`.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- O histórico de mensagens de um aparelho não passa para outro: um aparelho novo só recebe o que o semeador guarda (7 dias).
+- Uma passkey de outra conta ainda tranca o app e apaga o cache de mídia aberta, como todo bloqueio; as mensagens guardadas não são apagadas.
+
+## 124. Aviso de rede cheia antes da passkey (PR feat/signup-seats-before-passkey)
+
+Caminhada do aviso de rede cheia na tela Entrar. O serviço de conta responde `GET /account/admission` com exatamente `{ "open": true }` ou `{ "open": false }` (público, sem autenticação, mesmo limite de consultas de `GET /account/invites/policy`; `false` só enquanto `VARANDA_MAX_MEMBERS` está batido, nunca uma contagem). O app hospedado (web, e o app instalado ligado a uma instalação hospedada) pergunta antes de "Criar passkey". Telas em [app.md](app.md) ("Rede cheia"); contrato em [README.md](../README.md) ("Vínculo de conta Google e @nome").
+
+O que muda:
+
+- Com `open: false`, a tela Entrar mostra "A Varanda está cheia por enquanto..." com o botão "tentar de novo" e não oferece "Criar passkey", "criar mesmo assim" nem "criar com o celular".
+- "Entrar com a passkey", "entrar com o celular", outra passkey, o código de recuperação, "concluir a criação da passkey" e "Criar passkey nova" depois de um código de recuperação seguem funcionando.
+- Se a leitura falha (rede, serviço antigo que responde 404, outro corpo), o app não bloqueia.
+
+O que não muda:
+
+- A leitura não reserva vaga, e um convite não abre vaga. `required: false` na política de convites continua não significando que há vaga.
+- As recusas "lista-de-espera" seguem em `POST /account/start`, na volta do Google (redireciona para `/?conta=lista-de-espera`), em `POST /account/finish` e em `POST /account/age/session`.
+- A configuração manual, uma configuração digitada à mão na página hospedada e o `varanda-serve` não perguntam e mantêm o comportamento de antes.
+
+Como verificar, a partir da raiz (um arquivo por vez):
+
+- `node apps/cli/test/account.test.js`, `node apps/app/test/account.test.js`, `node apps/app/test/signupAdmission.test.js`, `node apps/app/test/passkeysScreen.test.js`, `node apps/app/test/passkeyTrouble.test.js`, `node apps/app/test/platformGate.test.js` e `node apps/site/test/site.test.js`.
+
+Com `VARANDA_MAX_MEMBERS` igual ao número de contas vinculadas, primeiro no Android (build de debug), depois no simulador iOS, depois na web e no PWA:
+
+- [ ] Android: com o teto cheio, a tela Entrar mostra a frase de rede cheia e "tentar de novo", e nenhum "Criar passkey".
+- [ ] Android: "Entrar com a passkey" ainda abre uma conta existente.
+- [ ] Android: com o serviço de conta parado, "Criar passkey" aparece.
+- [ ] Android: depois de abrir uma vaga (subir o teto e reiniciar o serviço), "tentar de novo" mostra "Criar passkey".
+- [ ] Android: trocar de instalação pergunta de novo.
+- [ ] iOS (simulador): os mesmos cinco passos.
+- [ ] Web: os mesmos cinco passos; na aba Rede aparece um único `GET /account/admission` por tentativa, e uma configuração digitada à mão não o faz.
+- [ ] PWA instalado: os mesmos cinco passos.
+
+Limites:
+
+- Uma vaga pode acabar entre a leitura e o vínculo; o serviço recusa nesse caso.
+- A leitura é um pedido só, não uma reserva.
+- Uma configuração digitada à mão na página hospedada não recebe o aviso antecipado.
+
+## 125. Recurso de quem foi bloqueado (PR feat/moderation-appeal, 2026-10-30)
 
 ### O que mudou
 
-- `packages/core/lib/appeal.js`: declaração `varanda-appeal-v1` (nonce, membro, associação e `digest(texto)`), assinada pela chave do diário. Sem alvo: o recurso é sempre sobre a própria chave. Método RPC `appeal.sign` (`docs/rpc.md` 5.98) só no nó do navegador; o nó core, o `varanda-serve` e a CLI respondem `USAGE` `'assinatura disponível só no navegador'`.
+- `packages/core/lib/appeal.js`: declaração `varanda-appeal-v1` (nonce, membro, associação e `digest(texto)`), assinada pela chave do diário. Sem alvo: o recurso é sempre sobre a própria chave. Método RPC `appeal.sign` (`docs/rpc.md` 5.99) só no nó do navegador; o nó core, o `varanda-serve` e a CLI respondem `USAGE` `'assinatura disponível só no navegador'`.
 - Serviço de conta (`apps/cli/lib/account/mod-routes.js`): `POST /account/appeal/start` (só membro com conta Google vinculada; nonce sem estado, domínio `varanda-appeal-nonce`, 600 s) e `POST /account/appeal` (confere o nonce, a assinatura e grava; o nonce só é gasto depois de a assinatura valer). Respostas `{ id, duplicate }`; `nao-bloqueado` (403) se a chave não está na lista publicada nem tem bloqueio pendente; `limite-recursos` (429) para um novo recurso em 30 dias depois de um recurso negado; `limite` (503) com 2000 abertos ou 20000 guardados.
 - `moderation.json` passa a `v: 3` com `appeals` (linha: `id`, `at`, `member`, `text`, `nonce`, `signature`, `status` `aberta`/`aceito`/`negado`/`encerrado`, `decidedBy`, `decidedAt`, `note`). Um `v: 1` ou `v: 2` é lido sem recursos e regravado como `v: 3`. Linha malformada deixa o armazém `indisponivel`, como as denúncias. Eventos novos: `recurso-aceito`, `recurso-negado` e `recurso-encerrado` (a chave deixou de estar bloqueada com o recurso aberto: desbloqueio, bloqueio cancelado ou lista publicada sem ela), com `appealId`; nunca o texto, a assinatura, o nonce nem a nota.
 - Painel: `GET api/appeals?estado=aberta|decidida` (a decidida aceita `antes=<id>`, como `api/reports`, e a aba tem "mostrar mais") e `POST api/appeals/<id>/decide { decision: 'aceitar'|'negar', note }`. O recurso fica fora da lista e responde `nao-encontrado` para a própria pessoa recorrente e para quem decidiu (por e-mail) uma denúncia `bloquear` daquela chave; a IA não conta como pessoa. `api/me` ganha `appeals` (abertos que a pessoa pode julgar). Aceitar acrescenta uma mudança `unblock` como o botão Desbloquear (se havia um bloqueio pendente ainda não enviado, as duas se anulam), e conta como reversão humana para a triagem por IA; negar não mexe em Pendentes.
@@ -5630,7 +5842,7 @@ Limites desta caminhada:
 - `packages/rpc/test/methods.test.js`, `packages/core/test/session.test.js`, `packages/web-member/test/session.test.js`: validação do método, recusa no nó core e assinatura no navegador (bloqueado, sem identidade, sem chave).
 - `apps/cli/test/moderation-store.test.js`: só chave bloqueada recorre, repetição devolve a mesma linha, janela de 30 dias só depois de recurso negado, recurso encerrado quando a chave é desbloqueada, teto de 2000, aceitar e negar, listagem com exclusões, trilha sem dado privado, leitura de `v: 2` e de linha malformada.
 - `apps/cli/test/account-mod.test.js`: rotas do membro (não vinculado, não bloqueado, nonce de denúncia recusado, assinatura de outra chave, texto adulterado, Origin, repetição), painel (quem decidiu o bloqueio e a própria pessoa não veem nem decidem, aceitar vira desbloqueio pendente, negar mantém o bloqueio, limite de 30 dias).
-- `apps/cli/test/panel.test.js`: aba Recursos (texto de par como texto, confirmação, corpo enviado, painel que ainda carrega contra serviço antigo, 401 vai ao login). `apps/app/test/appeal.test.js`: limites, erros fixos e pedidos. `apps/app/test/legal.test.js`: o recurso nos Termos e na Política, versão 22 e o digest do texto.
+- `apps/cli/test/panel.test.js`: aba Recursos (texto de par como texto, confirmação, corpo enviado, painel que ainda carrega contra serviço antigo, 401 vai ao login). `apps/app/test/appeal.test.js`: limites, erros fixos e pedidos. `apps/app/test/legal.test.js`: o recurso nos Termos e na Política, versão 25 e o digest do texto.
 
 ### Verificação humana
 

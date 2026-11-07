@@ -37,7 +37,8 @@ const {
   MAX_LOG_BYTES
 } = require('./records')
 const { followSet, latestMediaCores } = require('./media')
-const { deletedSeqs, applyDeletes, liveMediaRefs, overlaps, presentState, clearDeleted, tombstoneAt } = require('./deletion')
+const { copyLinkCard } = require('./link-card')
+const { deletedSeqs, applyDeletes, shownMedia, liveMediaRefs, overlaps, presentState, clearDeleted, tombstoneAt } = require('./deletion')
 const { MAX_INVENTORY } = require('./net')
 // Called as storeLib.openStore so the store opening has a single seam.
 const storeLib = require('./store')
@@ -343,21 +344,24 @@ async function profileSet (ctx, { name, bio, avatar }) {
   return { seq }
 }
 
-async function postCreate (ctx, { text }) {
-  return publish(ctx, buildRecord(() => postRecord({ text })))
+async function postCreate (ctx, { text, preview }) {
+  if (preview && preview.image !== null) throw new UsageError(MEDIA_WEB_ONLY)
+  return publish(ctx, buildRecord(() => postRecord({ text, preview })))
 }
 
 // to is the parsed { author, seq } reference.
-async function postReply (ctx, { to, text }) {
+async function postReply (ctx, { to, text, preview }) {
+  if (preview && preview.image !== null) throw new UsageError(MEDIA_WEB_ONLY)
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
-  return publish(ctx, buildRecord(() => postRecord({ text, replyTo: to })))
+  return publish(ctx, buildRecord(() => postRecord({ text, replyTo: to, preview })))
 }
 
 // to is the parsed { author, seq } reference of the quoted post (text only:
 // the caller refuses media before anything opens).
-async function postQuote (ctx, { to, text }) {
+async function postQuote (ctx, { to, text, preview }) {
+  if (preview && preview.image !== null) throw new UsageError(MEDIA_WEB_ONLY)
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
-  return publish(ctx, buildRecord(() => postRecord({ text, quote: to })))
+  return publish(ctx, buildRecord(() => postRecord({ text, quote: to, preview })))
 }
 
 // ---- delete ----
@@ -429,7 +433,7 @@ function tombstoneOf (raw, deleted, seqs) {
 // Media ranges a tombstone of `copy` may carry: only in a core this diary
 // declared, and only where no surviving own post or profile overlaps.
 function freedRanges (copy, cores, live) {
-  const descriptors = copy.type === 'post' ? (copy.media || []) : (copy.avatar === undefined ? [] : [copy.avatar])
+  const descriptors = shownMedia(copy)
   const out = []
   for (const d of descriptors) {
     const r = { core: d.core, start: d.start, blocks: d.blocks }
@@ -2285,14 +2289,15 @@ async function groupLeave (ctx, { group }) {
   })
 }
 
-async function groupPost (ctx, { group, text, replyTo = null, fwd = 0 }) {
+async function groupPost (ctx, { group, text, replyTo = null, fwd = 0, card = null }) {
+  if (card && card.image !== null) throw new UsageError(MEDIA_WEB_ONLY)
   return withGroup(ctx, group, async (loaded, identity) => {
     requireParent(loaded)
     const own = liveOwnWriter(loaded, identity.ownHex)
     if (!own || loaded.view.members.get(identity.ownHex) !== 'member') throw groupPermission()
     requireCounted(loaded, own.writer)
     const writer = await ownGroupWriter(loaded, identity)
-    const record = buildRecord(() => groups.groupPost({ text, replyTo, fwd, seen: loaded.view.last }))
+    const record = buildRecord(() => groups.groupPost({ text, replyTo, fwd, card, seen: loaded.view.last }))
     return { seq: await appendGroupRecord(writer, group, groupRecordFor(loaded, writer, record), loaded.private) }
   }, { secrets: true })
 }
@@ -2528,6 +2533,7 @@ async function groupRead (ctx, { group, limit = 30, before = null }) {
       ...p,
       text: p.hidden ? '' : p.text,
       media: !p.hidden && Array.isArray(media) ? media.map((d) => ({ ...d })) : null,
+      card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
       ...loaded.profiles.get(p.diary)
     }))
     const last = items[items.length - 1]

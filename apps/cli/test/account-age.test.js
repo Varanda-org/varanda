@@ -1195,3 +1195,20 @@ test('age app clients: concurrent web and app requests do not share one in-fligh
   t.not(web.body.url, app.body.url)
   t.alike(s.creates().map((r) => r.body.callback).sort(), [ORIGIN + '/?idade=volta', ORIGIN + '/account/age/app-return'].sort())
 })
+
+test('Excluir conta: a deleted key opens no Didit session, and an open one is closed instead of recording a band', async (t) => {
+  const s = await setup(t)
+  const r = await opened(s, s.linked, { status: 'Approved', age: 30 })
+  t.is(r.status, 200, r.text)
+  const createsBefore = s.creates().length
+  await s.store.deleteMember(s.linked.hex)
+  const res = await s.step(s.linked, 'result')
+  t.is(res.status, 409, res.text)
+  t.alike(res.body, { error: 'conta-excluida' })
+  t.is(s.ages.get(s.linked.hex), null, 'no band recorded for a deleted key')
+  t.ok(await waitFor(() => s.deletes().length >= 1), 'the open session is deleted at the provider')
+  const again = await s.step(s.linked, 'session')
+  t.is(again.status, 409)
+  t.alike(again.body, { error: 'conta-excluida' })
+  t.is(s.creates().length, createsBefore, 'no new paid session')
+})

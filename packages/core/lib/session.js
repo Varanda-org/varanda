@@ -550,7 +550,7 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
-    // And for the appeal statement (docs/rpc.md 5.98).
+    // And for the appeal statement (docs/rpc.md 5.99).
     'appeal.sign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')
     }),
@@ -663,25 +663,25 @@ function createSession ({
 
     // Photos live in media cores only the browser node writes: a post with
     // `media` is refused before anything is opened (like account.sign).
-    'post.create': serial(async ({ text, media }) => {
-      if (media !== undefined) throw new UsageError(MEDIA_WEB_ONLY)
-      const r = await withStore((c) => member.postCreate(c, { text }))
+    'post.create': serial(async ({ text, media, preview }) => {
+      if (media !== undefined || (preview && preview.image !== null)) throw new UsageError(MEDIA_WEB_ONLY)
+      const r = await withStore((c) => member.postCreate(c, { text, preview }))
       return { seq: r.seq, ref: r.ref }
     }),
 
-    'post.reply': serial(async ({ to, text, media }) => {
-      if (media !== undefined) throw new UsageError(MEDIA_WEB_ONLY)
+    'post.reply': serial(async ({ to, text, media, preview }) => {
+      if (media !== undefined || (preview && preview.image !== null)) throw new UsageError(MEDIA_WEB_ONLY)
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
-      const r = await withStore((c) => member.postReply(c, { to: ref, text }))
+      const r = await withStore((c) => member.postReply(c, { to: ref, text, preview }))
       return { seq: r.seq, ref: r.ref }
     }),
 
-    'post.quote': serial(async ({ to, text, media }) => {
-      if (media !== undefined) throw new UsageError(MEDIA_WEB_ONLY)
+    'post.quote': serial(async ({ to, text, media, preview }) => {
+      if (media !== undefined || (preview && preview.image !== null)) throw new UsageError(MEDIA_WEB_ONLY)
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
-      const r = await withStore((c) => member.postQuote(c, { to: ref, text }))
+      const r = await withStore((c) => member.postQuote(c, { to: ref, text, preview }))
       return { seq: r.seq }
     }),
 
@@ -806,7 +806,9 @@ function createSession ({
     }),
 
     'group.post': serial(async (params, epoch) => {
-      if (params.media !== undefined || params.sealed === true) throw new UsageError(MEDIA_WEB_ONLY)
+      // The core node seals nothing itself: `sealed` (media or a card
+      // thumbnail, rpc.md 5.98) is refused here even beside a text card.
+      if (params.media !== undefined || params.sealed === true || (params.card && params.card.image !== null)) throw new UsageError(MEDIA_WEB_ONLY)
       const r = await withStore((c) => member.groupPost(c, params))
       send('groups.changed', { group: params.group }, epoch)
       return r

@@ -18,6 +18,9 @@
       "associatedDomains": [
         "webcredentials:bora.varanda.app"
       ],
+      "config": {
+        "usesNonExemptEncryption": false
+      },
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Para gravar mensagens de voz nas Conversas."
       },

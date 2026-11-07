@@ -3,7 +3,7 @@
 // it and Node's import() loads it in tests. Same flow and same-origin account
 // service as ./report.js (whose request builder and JSON reader it shares);
 // the statement itself is signed by the browser node (RPC appeal.sign,
-// docs/rpc.md 5.98, @varanda/core lib/appeal.js).
+// docs/rpc.md 5.99, @varanda/core lib/appeal.js).
 
 import { buildPost, readJson, wellFormed } from './report.js'
 
@@ -19,6 +19,7 @@ export const NOT_LINKED_MESSAGE = 'Para recorrer, primeiro vincule sua conta Goo
 const ERROR_MESSAGES = {
   'nao-vinculado': NOT_LINKED_MESSAGE,
   'nao-bloqueado': 'esta conta não está bloqueada',
+  'conta-excluida': 'esta conta já foi excluída',
   'limite-recursos': 'você já recorreu nos últimos 30 dias',
   limite: 'a moderação não pode receber recursos agora',
   'assinatura-invalida': 'não foi possível provar a chave',

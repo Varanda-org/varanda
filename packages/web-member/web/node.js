@@ -26,6 +26,12 @@
 //                       -> Promise<{ credentialId, userId, lookupId, blob, sessionSaved? } | { pending: true }>
 //   identity.bindPasskey({ credentialId, userId }) -> Promise<{ sessionSaved? }>
 //   identity.makeRecoveryCode() -> Promise<{ code, lookupId, blob }>
+//   identity.confirm({ challenge })
+//                       -> Promise<{ ok: true, assertion }>  (a fresh user
+//                          verification with the bound passkey while unlocked,
+//                          over the account service's nonce; changes nothing)
+//   identity.enrolment() -> Promise<{ credentialId, attestationObject } | null>
+//   identity.dropEnrolment() -> Promise  (the passkey enrolment of Excluir conta)
 //   identity.lock()     -> Promise   (the keys are zero-filled; reads still
 //                                     work; the stored session SURVIVES it)
 //   identity.signOut()  -> Promise   ('Sair': lock AND forget the stored
@@ -100,6 +106,31 @@
 // fails, the old pending stays and the new id is refused INSTALL_FAILED.
 // reset() drops it; signOut() keeps it.
 //
+// confirm() is the gate before a step the stored session alone must not
+// authorize (deleting the account): someone holding an unlocked device must
+// still pass the passkey's biometrics or PIN. Only while unlocked (LOCKED
+// otherwise), it runs a get with userVerification 'required' and no PRF,
+// restricted to the bound passkey (NONE when no record is known),
+// navigator.credentials.get before any await. `challenge` is the account
+// service's nonce (base64url of 32 bytes, USAGE otherwise; random when
+// absent), and the answer carries the assertion the service verifies with
+// the public key it keeps (docs/protocol.md "Account deletion"). The answer
+// must carry the UV flag (WEBAUTHN otherwise) and be the bound passkey
+// (MISMATCH otherwise). A PRF output handed back anyway is wiped unread;
+// nothing is installed, bound, saved or refused, and the session stays as
+// it was. It counts as a ceremony for LOCKED, and lock/signOut/reset/close
+// cancel it (CANCELLED).
+//
+// The passkey enrolment: a passkey created here that becomes the identity
+// leaves its creation's attestation object (public: the credential id and
+// the public key) in kv 'passkeyEnrol' = { v: 1, rpId, credentialId,
+// publicKey, attestationObject }, publicKey being the diary key it derived.
+// The app sends it to the account service right after the link
+// (/account/passkey/add) and then calls dropEnrolment(). enrolment() answers
+// it only while unlocked with that same diary key; a pending creation keeps
+// its attestation object with it in kv 'passkeyAttempts' until 'concluir'.
+// reset() drops it.
+//
 // Member recovery (../lib/recovery.js; the app talks to the account
 // service, this file never fetches): while unlocked a copy of the installed
 // root (the PRF output the diary key derives from) stays in memory, zeroed
@@ -172,11 +203,14 @@ const DB_NAME = 'varanda-node'
 const LOCK_NAME = 'varanda-node'
 const PASSKEY_KEY = 'passkey'
 const PASSKEY_ATTEMPTS_KEY = 'passkeyAttempts'
+const PASSKEY_ENROL_KEY = 'passkeyEnrol'
+const ATTESTATION_RE = /^[A-Za-z0-9_-]{1,2731}$/
 const REFUSED_MAX = 32
 const PHONE_HINTS = ['hybrid']
 const NONCE_BYTES = 32
 const SIGNED_OUT_KEY = 'signedOut'
 const SESSION_DB = 'varanda-session'
+const NO_BOUND_MESSAGE = 'nenhuma passkey ligada a esta sessão: entre de novo com a passkey'
 const RECOVERY_TTL_MS = 120000
 const LOCKED_MESSAGE = 'identidade bloqueada: entre com a passkey'
 
@@ -188,6 +222,12 @@ function codedError (code, message) {
   const err = new Error(message)
   err.code = code
   return err
+}
+
+// node.identityStatus() of a stored diary of another key, or of a legacy
+// store: the pair is refused (MISMATCH).
+function otherDiary (status, publicKey) {
+  return status.exists && (status.publicKey !== publicKey || status.legacy)
 }
 
 function lockedError () {
@@ -265,7 +305,7 @@ function attemptsRecord (value, rpId) {
   let pending = null
   const p = value.pending
   if (p !== null && typeof p === 'object' && credentialIdOk(p.credentialId)) {
-    pending = { credentialId: p.credentialId, userId: typeof p.userId === 'string' ? p.userId : null, phone: p.phone === true }
+    pending = { credentialId: p.credentialId, userId: typeof p.userId === 'string' ? p.userId : null, phone: p.phone === true, attestationObject: attestationOk(p.attestationObject) ? p.attestationObject : null }
   }
   const refused = []
   if (Array.isArray(value.refused)) {
@@ -276,6 +316,10 @@ function attemptsRecord (value, rpId) {
     }
   }
   return { pending, refused: capRefused(refused) }
+}
+
+function attestationOk (value) {
+  return typeof value === 'string' && ATTESTATION_RE.test(value)
 }
 
 function credentialsContainer () {
@@ -529,7 +573,7 @@ function createIdentity (node, storage, sessionStore, idb) {
   // failure leaves the node locked. Zeroes prf. A recovery install (`recovery`,
   // the recovery epoch it started at) cancelled by cancelRecovery, or
   // stopped by a generation change, after the bind or the save undoes both.
-  async function install (gen, prf, { credentialId, userId, created, resumed: fromSession, wrapped, recovery: rec }) {
+  async function install (gen, prf, { credentialId, userId, created, resumed: fromSession, wrapped, recovery: rec, attestationObject }) {
     let kp = null
     let media = null
     let nonce = null
@@ -545,6 +589,28 @@ function createIdentity (node, storage, sessionStore, idb) {
       media = await passkey.mediaKeyPairFromPrf(prf, nonce)
       if (stale(gen, rec)) throw cancelled()
       const publicKey = b4a.toString(kp.publicKey, 'hex')
+      const mismatch = (status) => {
+        const err = codedError('MISMATCH', 'passkey não corresponde ao diário guardado')
+        err.legacy = status.legacy === true
+        // A wrapping (recovery) passkey is never chosen: its own PRF output
+        // must never install, and the next discoverable 'entrar' carries the
+        // handle that routes it to the wrapped path.
+        if (!fromSession) chosen = wrapped === true ? null : credentialId
+        return err
+      }
+      // A diary of another key is refused before the pairs and the PRF go
+      // in, and the node is locked, as a refusal after them leaves it. With
+      // the PRF the session opens the direct message store under this
+      // passkey's key, and a store of another key is replaced by an empty
+      // one (lib/dm-store.js unlock): a wrong passkey must not erase the
+      // stored identity's messages.
+      const before = await node.identityStatus()
+      if (stale(gen, rec)) throw cancelled()
+      if (otherDiary(before, publicKey)) {
+        dropRoot()
+        await node.clearKeyPair().catch(() => {})
+        throw mismatch(before)
+      }
       // setKeyPair copies both pairs and the PRF (group writer keys derive
       // from it) synchronously: the local copies are zeroed below.
       const setting = node.setKeyPair(kp, { media, prf })
@@ -554,15 +620,7 @@ function createIdentity (node, storage, sessionStore, idb) {
       await setting
       const status = await node.identityStatus()
       if (stale(gen, rec)) throw cancelled()
-      if (status.exists && (status.publicKey !== publicKey || status.legacy)) {
-        const err = codedError('MISMATCH', 'passkey não corresponde ao diário guardado')
-        err.legacy = status.legacy === true
-        // A wrapping (recovery) passkey is never chosen: its own PRF output
-        // must never install, and the next discoverable 'entrar' carries the
-        // handle that routes it to the wrapped path.
-        if (!fromSession) chosen = wrapped === true ? null : credentialId
-        throw err
-      }
+      if (otherDiary(status, publicKey)) throw mismatch(status)
       if (stale(gen, rec)) throw cancelled()
       if (!fromSession) {
         const record = { v: 1, credentialId, rpId, userId }
@@ -584,6 +642,12 @@ function createIdentity (node, storage, sessionStore, idb) {
       // A lock/signOut/reset during the save: still locked (signOut and
       // reset wait for this to settle before they clear the stored session).
       if (stale(gen, rec)) throw cancelled()
+      // A new identity keeps its creation's public key for the enrolment
+      // at the account service. Best effort: without it the account has no
+      // stored key, and a deletion waits its 7 days.
+      if (created === true && !fromSession && wrapped !== true && attestationOk(attestationObject)) {
+        await storage.writeJson(PASSKEY_ENROL_KEY, { v: 1, rpId, credentialId, publicKey, attestationObject }).catch(() => {})
+      }
       resumed = fromSession === true
       zero(root)
       root = new Uint8Array(prf)
@@ -775,18 +839,18 @@ function createIdentity (node, storage, sessionStore, idb) {
           const supersede = () => addRefused({ credentialId: old.credentialId, userId: old.userId, code: 'SUPERSEDED', cleaned: false, created: true })
           if (result.pending === true) {
             if (old !== null) supersede()
-            pending = { credentialId: result.credentialId, userId: result.userId, phone: phone === true }
+            pending = { credentialId: result.credentialId, userId: result.userId, phone: phone === true, attestationObject: attestationOk(result.attestationObject) ? result.attestationObject : null }
             await persist()
             // A lock/signOut/reset during the write: the caller must not be
             // told to 'concluir' (reset already dropped this pending).
             if (gen !== generation) throw cancelled()
             return { pending: true }
           }
-          if (old === null) return finish(gen, result.prf, { credentialId: result.credentialId, userId: result.userId, created: true })
+          if (old === null) return finish(gen, result.prf, { credentialId: result.credentialId, userId: result.userId, created: true, attestationObject: result.attestationObject })
           // The old pending is replaced only once the new passkey is bound:
           // until then 'concluir' must still reach it.
           try {
-            const out = await finish(gen, result.prf, { credentialId: result.credentialId, userId: result.userId, created: true })
+            const out = await finish(gen, result.prf, { credentialId: result.credentialId, userId: result.userId, created: true, attestationObject: result.attestationObject })
             supersede()
             await persist()
             return out
@@ -874,7 +938,7 @@ function createIdentity (node, storage, sessionStore, idb) {
       (credentials) => passkey.completeRegistration(credentials, { rpId, credentialId: target.credentialId, hints }),
       (gen, result) => recovery.isWrapUserId(target.userId)
         ? hold(gen, result.prf, { kind: 'passkey', credentialId: result.credentialId, userId: target.userId, rec })
-        : finish(gen, result.prf, { credentialId: result.credentialId, userId: target.userId, created: true }),
+        : finish(gen, result.prf, { credentialId: result.credentialId, userId: target.userId, created: true, attestationObject: target.attestationObject }),
       // Never dropped from the manager: between creation and 'concluir' the
       // synced passkey may already have become the account on another device.
       (err) => noteUnusable(err, target.credentialId, target.userId, false, true, epoch))
@@ -1209,6 +1273,70 @@ function createIdentity (node, storage, sessionStore, idb) {
     })
   }
 
+  // A fresh user verification with the bound passkey (the record read at
+  // start), over the account service's nonce, for a step the stored session
+  // alone must not authorize. It is a check only: nothing is derived,
+  // installed, bound, saved or refused, and `finishing` is left alone. A
+  // lock, signOut, reset or close meanwhile turns any answer into CANCELLED.
+  function confirm ({ challenge } = {}) {
+    if (root === null) return Promise.reject(codedError('LOCKED', LOCKED_MESSAGE))
+    let bytes
+    if (challenge !== undefined) {
+      try {
+        bytes = passkey.fromBase64Url(challenge)
+      } catch {
+        bytes = null
+      }
+      if (bytes === null || bytes.byteLength !== NONCE_BYTES) return Promise.reject(codedError('USAGE', 'desafio inválido'))
+    }
+    const err = precheck()
+    if (err !== null) return Promise.reject(err)
+    // Strict: only the bound passkey passes. Without a record a discoverable
+    // get would accept any Varanda passkey the holder of the device has.
+    if (known === null) return Promise.reject(codedError('NONE', NO_BOUND_MESSAGE))
+    const expected = known.credentialId
+    const gen = generation
+    busy = true
+    let checking
+    try {
+      checking = passkey.verify(credentialsContainer(), { rpId, allowCredentialIds: [expected], challenge: bytes })
+    } catch (failure) {
+      checking = Promise.reject(failure)
+    }
+    return checking.then((result) => {
+      if (gen !== generation) throw cancelled()
+      if (result.credentialId !== expected) {
+        throw codedError('MISMATCH', 'passkey não corresponde ao diário guardado')
+      }
+      return { ok: true, assertion: result.assertion }
+    }, (failure) => {
+      throw gen !== generation ? cancelled() : failure
+    }).finally(() => {
+      busy = false
+    })
+  }
+
+  // The creation's attestation object kept for the passkey enrolment, for
+  // the unlocked identity only (another identity's entry reads as none).
+  async function enrolment () {
+    if (root === null || rootMember === null) return null
+    const member = rootMember
+    let value
+    try {
+      value = await storage.readJson(PASSKEY_ENROL_KEY)
+    } catch {
+      return null
+    }
+    if (value === null || typeof value !== 'object' || value.v !== 1 || value.rpId !== rpId || value.publicKey !== member) return null
+    if (!credentialIdOk(value.credentialId) || !attestationOk(value.attestationObject)) return null
+    return { credentialId: value.credentialId, attestationObject: value.attestationObject }
+  }
+
+  // The account service stored the key, or refused it for good.
+  function dropEnrolment () {
+    return storage.writeJson(PASSKEY_ENROL_KEY, null)
+  }
+
   // -> { code, lookupId, blob }: the code string exists only in this value.
   function makeRecoveryCode () {
     if (root === null) return Promise.reject(codedError('USAGE', LOCKED_MESSAGE))
@@ -1316,6 +1444,7 @@ function createIdentity (node, storage, sessionStore, idb) {
     await node.reset()
     // readJson parses the stored 'null' back to null: no record.
     await storage.writeJson(PASSKEY_KEY, null)
+    await storage.writeJson(PASSKEY_ENROL_KEY, null).catch(() => {})
     // Only the kept device-bound refusals remain (null when none).
     await persist()
     if (!forgotten) throw incomplete()
@@ -1350,7 +1479,10 @@ function createIdentity (node, storage, sessionStore, idb) {
       finishRecovery,
       addPasskey,
       bindPasskey,
-      makeRecoveryCode
+      makeRecoveryCode,
+      confirm,
+      enrolment,
+      dropEnrolment
     })
   }
 }

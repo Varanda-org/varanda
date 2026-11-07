@@ -530,6 +530,22 @@ test('account pages: off answers 404 and the policy says unavailable', async (t)
   t.is((await s.api('POST', '/account/pages/post', { member: m.hex })).status, 404)
 })
 
+test('account pages: the Vitrine handles shown on varanda.app are refused as page names', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx, api } = s
+  const owner = await s.newMember('dona')
+  const handles = ['biblioteca_praca', 'horta_do_bairro', 'lia_oliveira', 'joao_nascimento', 'cecilia_ramos',
+    'andre_costa', 'bia_araujo', 'tomas_ferreira']
+  for (const username of handles) {
+    const r = await s.create(owner, username)
+    t.alike([r.status, r.body], [400, { error: 'nome-invalido' }], username)
+    t.is(ctx.pagesStore.get(r.page), null, username + ': no ACL row')
+    t.is((await api('GET', '/account/username/' + username)).status, 404, username + ': no name reserved for it')
+  }
+  t.is(ctx.pagesStore.listFor(owner.hex).owned.length, 0)
+})
+
 test('account pages: an offer to a non-admin of a page with 16 admins is limite', async (t) => {
   t.timeout(300000)
   const s = await setup(t)

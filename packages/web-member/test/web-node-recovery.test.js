@@ -45,10 +45,11 @@ function random32 () {
   return globalThis.crypto.getRandomValues(new Uint8Array(32))
 }
 
-// 37 bytes of authenticator data: rpIdHash, flags (UP, UV, BE, BS), signCount.
-function authData () {
+// 37 bytes of authenticator data: rpIdHash, flags (UP, UV, BE, BS by
+// default), signCount.
+function authData (flags = 0x1d) {
   const bytes = new Uint8Array(37)
-  bytes[32] = 0x1d
+  bytes[32] = flags
   return arrayBufferOf(bytes)
 }
 
@@ -56,7 +57,8 @@ function authData () {
 // allowCredentials answers only for one of those ids; a discoverable get
 // answers with `next` (else the newest). `pendingCreate`: creations report
 // PRF enabled without its output (a second click completes them). `omitHandle` drops the user handle
-// from get answers; `hold` makes the next get wait for release().
+// from get answers; `hold` makes the next get wait for release(); `flags`
+// is the flags byte of the get answers' authenticator data.
 function authenticator () {
   const fake = {
     creds: [],
@@ -64,6 +66,7 @@ function authenticator () {
     next: null,
     omitHandle: false,
     hold: null,
+    flags: 0x1d,
     pendingCreate: false,
     create ({ publicKey }) {
       fake.calls.push({ kind: 'create', publicKey })
@@ -100,7 +103,15 @@ function authenticator () {
         type: 'public-key',
         rawId: arrayBufferOf(cred.rawId),
         id: toBase64Url(cred.rawId),
-        response: { userHandle, getAuthenticatorData: () => authData() },
+        response: {
+          userHandle,
+          authenticatorData: authData(fake.flags),
+          getAuthenticatorData: () => authData(),
+          // Opaque here: the account service, not this node, checks them.
+          clientDataJSON: arrayBufferOf(new TextEncoder().encode('{}')),
+          signature: arrayBufferOf(new Uint8Array([1, 2, 3])),
+          attestationObject: arrayBufferOf(new Uint8Array([0xa0, ...cred.rawId]))
+        },
         getClientExtensionResults: () => ext
       }
     }
@@ -929,4 +940,192 @@ test('recovery: a lock after finishRecovery bound the new passkey undoes the bin
   status = await h.identity.status()
   t.is(status.resumed, false, 'no session survives')
   t.is(status.unlocked, false)
+})
+
+// Every kv write of the node's storage and every session save or clear, for
+// the handles started after this call (setup requires web/node.js fresh).
+function spyWrites (t) {
+  const storageLib = require('../lib/node-storage')
+  const sessionLib = require('../lib/session-store')
+  const idbNodeStorage = storageLib.idbNodeStorage
+  const createSessionStore = sessionLib.createSessionStore
+  const log = []
+  storageLib.idbNodeStorage = async (...args) => {
+    const storage = await idbNodeStorage(...args)
+    const writeJson = storage.writeJson
+    storage.writeJson = (key, value) => {
+      log.push('kv:' + key)
+      return writeJson.call(storage, key, value)
+    }
+    return storage
+  }
+  sessionLib.createSessionStore = (opts) => {
+    const inner = createSessionStore(opts)
+    return {
+      ...inner,
+      save: (...args) => { log.push('session:save'); return inner.save(...args) },
+      clear: (...args) => { log.push('session:clear'); return inner.clear(...args) }
+    }
+  }
+  t.teardown(() => {
+    storageLib.idbNodeStorage = idbNodeStorage
+    sessionLib.createSessionStore = createSessionStore
+  })
+  return log
+}
+
+function gate () {
+  let release
+  const promise = new Promise((resolve) => { release = resolve })
+  return { promise, release }
+}
+
+const kvState = async () => [await kvValue('passkey'), await kvValue('passkeyAttempts'), await kvValue('signedOut')]
+
+test('confirm: a fresh user check with the bound passkey, nothing changes', async (t) => {
+  t.timeout(60000)
+  const writes = spyWrites(t)
+  const { fake, start } = await setup(t)
+  const h = await start()
+
+  const locked = await errorOf(h.identity.confirm())
+  t.is(locked.code, 'LOCKED', 'refused while locked')
+  t.is(locked.message, 'identidade bloqueada: entre com a passkey')
+  t.is(fake.calls.length, 0, 'no ceremony while locked')
+
+  await h.identity.unlock({ register: true })
+  const bound = toBase64Url(fake.creds[0].rawId)
+  await createDiary(h)
+  const before = await h.identity.status()
+  t.is(before.unlocked, true)
+  t.ok(writes.includes('kv:passkey') && writes.includes('session:save'), 'the spy sees the unlock bind and save')
+  const kvBefore = await kvState()
+  const logged = writes.length
+
+  const realGet = fake.get
+  let answered = null
+  fake.get = (o) => realGet(o).then((cred) => {
+    answered = cred.getClientExtensionResults().prf.results.first
+    return cred
+  })
+  const calls = fake.calls.length
+  const confirming = h.identity.confirm()
+  t.is(fake.calls.length, calls + 1, 'navigator.credentials.get runs in the call, before any await')
+  const confirmed = await confirming
+  t.is(confirmed.ok, true)
+  t.is(confirmed.assertion.credentialId, bound, 'the assertion of the bound passkey goes to the account service')
+  t.alike(Object.keys(confirmed.assertion).sort(), ['authenticatorData', 'clientDataJSON', 'credentialId', 'signature'])
+  const call = fake.calls[fake.calls.length - 1]
+  t.is(call.kind, 'get')
+  t.alike(allowOf(call), [bound], 'restricted to the bound passkey')
+  t.is(call.publicKey.userVerification, 'required')
+  t.absent('extensions' in call.publicKey, 'no PRF asked for')
+  t.ok(answered !== null && new Uint8Array(answered).every((b) => b === 0), 'a PRF output handed back anyway is wiped')
+  fake.get = realGet
+
+  const nonce = toBase64Url(new Uint8Array(32).fill(0x42))
+  t.is((await h.identity.confirm({ challenge: nonce })).ok, true, 'a second check runs once the first settled')
+  t.is(toBase64Url(new Uint8Array(fake.calls[fake.calls.length - 1].publicKey.challenge)), nonce, 'the account service nonce is the challenge')
+  const n = fake.calls.length
+  t.is((await errorOf(h.identity.confirm({ challenge: 'abc' }))).code, 'USAGE', 'a bad challenge is refused')
+  t.is(fake.calls.length, n, 'and runs no ceremony')
+  t.alike(await h.identity.status(), before, 'the status is unchanged')
+  t.alike(writes.slice(logged), [], 'no kv write, no session save or clear')
+  t.alike(await kvState(), kvBefore, 'the passkey record, attempts and sign-out marker are unchanged')
+})
+
+test('confirm: CANCELLED, MISMATCH, no UV, one ceremony at a time, lock and Sair cancel it', async (t) => {
+  t.timeout(60000)
+  const writes = spyWrites(t)
+  const { fake, start } = await setup(t)
+  const h = await start()
+  await h.identity.unlock({ register: true })
+  await createDiary(h)
+  const before = await h.identity.status()
+  const kvBefore = await kvState()
+  const logged = writes.length
+  const realGet = fake.get
+
+  fake.get = (o) => {
+    fake.calls.push({ kind: 'get', publicKey: o.publicKey })
+    return Promise.reject(Object.assign(new Error('browser text'), { name: 'NotAllowedError' }))
+  }
+  const cancelled = await errorOf(h.identity.confirm())
+  t.is(cancelled.code, 'CANCELLED', 'the person dismissed the prompt')
+  t.is(cancelled.message, passkeyLib.MESSAGES.CANCELLED)
+
+  // An authenticator that ignores allowCredentials and answers with another passkey.
+  const other = fake.add(random32())
+  fake.get = (o) => Promise.resolve(fake.credentialOf(other, { prf: { results: { first: arrayBufferOf(other.prf) } } }))
+  const mismatch = await errorOf(h.identity.confirm())
+  t.is(mismatch.code, 'MISMATCH', 'another passkey is refused')
+  t.is(mismatch.message, 'passkey não corresponde ao diário guardado')
+  fake.get = realGet
+
+  fake.flags = 0x19
+  const unverified = await errorOf(h.identity.confirm())
+  t.is(unverified.code, 'WEBAUTHN', 'an answer without the UV flag is refused')
+  t.is(unverified.message, passkeyLib.MESSAGES.WEBAUTHN)
+  fake.flags = 0x1d
+
+  t.alike(await h.identity.status(), before, 'still unlocked, unchanged')
+  t.alike(writes.slice(logged), [], 'a failed check writes nothing either')
+  t.alike(await kvState(), kvBefore)
+
+  // One ceremony at a time, both ways.
+  let held = gate()
+  fake.hold = held.promise
+  const first = h.identity.confirm()
+  const second = await errorOf(h.identity.confirm())
+  t.is(second.code, 'LOCKED', 'a second confirm waits its turn')
+  t.is(second.message, 'outra entrada com a passkey em andamento')
+  t.is((await errorOf(h.identity.unlock())).code, 'LOCKED', 'so does an unlock')
+  held.release()
+  t.is((await first).ok, true)
+
+  held = gate()
+  fake.hold = held.promise
+  const unlocking = h.identity.unlock()
+  t.is((await errorOf(h.identity.confirm())).code, 'LOCKED', 'an unlock in flight refuses a confirm')
+  held.release()
+  t.is((await unlocking).publicKey, before.publicKey)
+
+  // lock() during the ceremony: CANCELLED, and the node is locked.
+  held = gate()
+  fake.hold = held.promise
+  const locking = h.identity.confirm()
+  await h.identity.lock()
+  held.release()
+  t.is((await errorOf(locking)).code, 'CANCELLED', 'a lock cancels it')
+  t.is((await h.identity.status()).unlocked, false)
+  t.is((await errorOf(h.identity.confirm())).code, 'LOCKED')
+
+  // signOut() during the ceremony: CANCELLED too.
+  await h.identity.unlock()
+  held = gate()
+  fake.hold = held.promise
+  const leaving = h.identity.confirm()
+  await h.identity.signOut()
+  held.release()
+  t.is((await errorOf(leaving)).code, 'CANCELLED', 'Sair cancels it')
+  t.is((await h.identity.status()).unlocked, false)
+})
+
+test('enrolment: a passkey created here keeps its attestation object for the account service until dropped', async (t) => {
+  t.timeout(60000)
+  const { fake, start } = await setup(t)
+  const h = await start()
+  t.is(await h.identity.enrolment(), null, 'nothing while locked')
+  await h.identity.unlock({ register: true })
+  const id = toBase64Url(fake.creds[0].rawId)
+  const enrol = await h.identity.enrolment()
+  t.is(enrol.credentialId, id)
+  t.is(enrol.attestationObject, toBase64Url(new Uint8Array([0xa0, ...fake.creds[0].rawId])))
+  await h.identity.lock()
+  t.is(await h.identity.enrolment(), null, 'answered only while unlocked')
+  await h.identity.unlock()
+  t.is((await h.identity.enrolment()).credentialId, id, 'a sign-in with the same passkey still has it')
+  await h.identity.dropEnrolment()
+  t.is(await h.identity.enrolment(), null, 'gone once the service stored it')
+  t.is(await kvValue('passkeyEnrol'), null)
 })

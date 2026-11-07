@@ -365,6 +365,7 @@ const PAGE_READ_PROBE_SHARE = 8
 const DM_PULL_EVERY_MS = 120000
 const DM_TICK_MS = 60000
 const DM_LOOKUP_WINDOWS = 8
+// An internal wire window of the node's own peeks, not an rpc page cap.
 const PEEK_WINDOW = 36
 // diary.peek requests in flight at once.
 const MAX_DIARY_PEEKS = 2
@@ -700,6 +701,9 @@ function readyWithin (ready, ms) {
 // (the browser's VARANDA_NO_CLEAR kill switch; tombstones still hide them).
 // upkeepDelayMs: the device upkeep's coalescing delay (tests).
 // upkeepFullMaxAgeMs: the age after which it plans in full again (tests).
+// hkdf: the HKDF of passkey.js for every key derived from the PRF of
+// setKeyPair (group box, group writer and direct message keys); absent, it
+// is WebCrypto's. The Bare worklet passes its own: its WebCrypto has none.
 function createBrowserSession ({
   storage,
   association,
@@ -718,7 +722,8 @@ function createBrowserSession ({
   noClear = false,
   upkeepDelayMs = UPKEEP_DELAY_MS,
   upkeepFullMaxAgeMs = UPKEEP_FULL_MAX_AGE_MS,
-  fetchMedia = (...args) => globalThis.fetch(...args)
+  fetchMedia = (...args) => globalThis.fetch(...args),
+  hkdf
 } = {}) {
   const cfg = checkConfig({ storage, association, seederUrl, createSocket })
   const reportInternal = (err) => {
@@ -800,7 +805,7 @@ function createBrowserSession ({
   // The private-group box key pair and the epoch keys opened this session,
   // in memory only (./group-keys.js): locked with every identity change,
   // closed with the session.
-  const boxKeys = createGroupKeys()
+  const boxKeys = createGroupKeys({ hkdf })
   let groupEpoch = 0
   let groupWriting = false
   const groupPairs = new Set()
@@ -953,7 +958,8 @@ function createBrowserSession ({
     log: (text) => warning(safe(text)),
     emit: (event, data) => send(event, data),
     fetch: fetchMedia,
-    limits: syncOptions.dm
+    limits: syncOptions.dm,
+    hkdf
   })
   // The seen-sync engine (docs/rpc.md 5.95, 5.96). Remote group marks go
   // through the group.seen path on the cores a run lends.
@@ -1817,7 +1823,7 @@ function createBrowserSession ({
 
   async function deriveGroupKeyPair (nonce, epoch, generation) {
     checkGroupOperation(epoch, generation)
-    const pair = await groupKeyPairFromPrf(groupPrf, nonce)
+    const pair = await groupKeyPairFromPrf(groupPrf, nonce, { hkdf })
     try {
       checkGroupOperation(epoch, generation)
     } catch (err) {
@@ -2327,7 +2333,7 @@ function createBrowserSession ({
       return { signature }
     }),
 
-    // Signs the appeal statement with the in-memory key (docs/rpc.md 5.98),
+    // Signs the appeal statement with the in-memory key (docs/rpc.md 5.99),
     // exactly like terms.sign: not a diary write, no append, no network. The
     // session fills in member and association; the text enters the payload
     // hashed.
@@ -2694,33 +2700,33 @@ function createBrowserSession ({
 
     // `media` (optional): descriptors from mediaUpload, verified by
     // member-ops against the own declared media cores before the append.
-    'post.create': serial(async ({ text, media }, epoch) => {
+    'post.create': serial(async ({ text, media, preview }, epoch) => {
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postCreate(c, { text, media }))
+      const r = await withStore((c) => member.postCreate(c, { text, media, preview }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
     }),
 
-    'post.reply': serial(async ({ to, text, media }, epoch) => {
+    'post.reply': serial(async ({ to, text, media, preview }, epoch) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postReply(c, { to: ref, text, media }))
+      const r = await withStore((c) => member.postReply(c, { to: ref, text, media, preview }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
     }),
 
     // A quote: the post.reply path with a `quote` target.
-    'post.quote': serial(async ({ to, text, media }, epoch) => {
+    'post.quote': serial(async ({ to, text, media, preview }, epoch) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postQuote(c, { to: ref, text, media }))
+      const r = await withStore((c) => member.postQuote(c, { to: ref, text, media, preview }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq }
@@ -2976,7 +2982,7 @@ function createBrowserSession ({
     // The recipient's key is looked up first (off the chain), then the send
     // runs on the chain. A send for an identity without a published dm-key
     // runs dm.enable first.
-    'dm.send': async ({ to, text, replyTo, media, fwd }) => {
+    'dm.send': async ({ to, text, replyTo, media, card, fwd }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       // Self and a blocked peer are refused before any lookup.
       await serial(async () => dmEngine.checkSend(await requireDm(), to))({})
@@ -2989,7 +2995,7 @@ function createBrowserSession ({
       return serial(async (_, epoch) => {
         const own = await requireDm()
         if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
-        return dmEngine.send(own, keyPair, { to, text, fwd, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media }, recipient.box)
+        return dmEngine.send(own, keyPair, { to, text, fwd, card, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media }, recipient.box)
       })({})
     },
 

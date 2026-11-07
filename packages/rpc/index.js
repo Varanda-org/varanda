@@ -13,6 +13,8 @@ const mentions = require('./lib/mentions')
 const mediaBounds = require('./lib/media-bounds')
 const audioBounds = require('./lib/audio-bounds')
 const dmBudget = require('./lib/dm-budget')
+const linkCard = require('./lib/link-card')
+const ogParse = require('./lib/og-parse')
 const { tokensEqual } = require('./lib/token')
 const { createServerDispatcher } = require('./lib/server')
 const { createClient } = require('./lib/client')
@@ -56,11 +58,24 @@ module.exports = {
   DM_INNER_KEYS: dmBudget.DM_INNER_KEYS,
   DM_INNER_KEYS_V2: dmBudget.DM_INNER_KEYS_V2,
   DM_MEDIA_KEYS: dmBudget.DM_MEDIA_KEYS,
+  DM_CARD_KEYS: dmBudget.DM_CARD_KEYS,
   dmInnerVersion: dmBudget.innerVersion,
   canonicalDmInnerJson: dmBudget.canonicalInnerJson,
   dmTextBytes: dmBudget.dmTextBytes,
   dmTextBudget: dmBudget.dmTextBudget,
   MEMBER_CERT_STANDIN: dmBudget.MEMBER_CERT_STANDIN,
+  MAX_CARD_URL: linkCard.MAX_CARD_URL,
+  MAX_CARD_TITLE: linkCard.MAX_CARD_TITLE,
+  MAX_CARD_DESC: linkCard.MAX_CARD_DESC,
+  MAX_CARD_IMAGE_BYTES: linkCard.MAX_CARD_IMAGE_BYTES,
+  isCardForbiddenChar: linkCard.isCardForbiddenChar,
+  cardTextLength: linkCard.cardTextLength,
+  cardText: linkCard.cardText,
+  cardUrlHost: linkCard.cardUrlHost,
+  MAX_OG_HTML: ogParse.MAX_OG_HTML,
+  parseOg: ogParse.parseOg,
+  ogText: ogParse.ogText,
+  ogImageUrl: ogParse.ogImageUrl,
   tokensEqual,
   createServerDispatcher,
   createClient

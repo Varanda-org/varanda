@@ -21,6 +21,7 @@
 // 4. Moderation: a blocklist that blocks B (offered by a moderator's
 //    browser node) removes B from /index and from V's peeks.
 const test = require('brittle')
+const { FEED_LIMIT_MAX } = require('@varanda/rpc')
 const fs = require('node:fs')
 const http = require('node:http')
 const path = require('node:path')
@@ -410,7 +411,7 @@ test('social: threads, likes, reposts, quotes and profiles across the browser no
   t.comment('thread: ' + REPLIES + ' replies in ' + pages.length + ' pages (' + pagesMs + ' ms), ' + plan.length + ' peeks in ' + peekMs + ' ms')
 
   // ---- scenario 2: feed and engagement ----
-  const feed = await web.request('feed.read', { limit: 30 })
+  const feed = await web.request('feed.read', { limit: FEED_LIMIT_MAX })
   const repostItem = feed.items.find((i) => i.kind === 'repost')
   t.ok(repostItem, 'C\'s repost in V\'s feed')
   t.alike([repostItem.author, repostItem.seq, repostItem.to, repostItem.text], [C.key, cRepost, P, null])

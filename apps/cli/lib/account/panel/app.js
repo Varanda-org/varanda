@@ -126,6 +126,7 @@ const TEXT = {
   aiSuggest: 'Sugestão da IA:',
   aiAbstain: 'A IA não sugeriu nada:',
   byAi: 'pedido pela IA',
+  byOwner: 'exclusão da conta pedida pela própria pessoa (não pode ser cancelada aqui)',
   commentLabel: 'Comentário de quem denunciou',
   noteLabel: 'motivo da decisão (opcional)',
   blockWarning: 'O bloqueio vale para a conta inteira, incluindo suas publicações.',
@@ -546,6 +547,7 @@ function buildState ({ me, open, decided, blocked, appeals, appealsDecided, appe
       at: str(c.at),
       claimed: has(c, 'claimedAt') && typeof c.claimedAt === 'string' && c.claimedAt !== '',
       byAi: has(c, 'byAi') && c.byAi === true,
+      byOwner: has(c, 'byOwner') && c.byOwner === true,
       kind: keyKind(c.kind)
     })
   }
@@ -1207,16 +1209,19 @@ function createPanel (env) {
       const effect = n.blocked === n.listed
         ? 'efeito: nenhum (volta ao estado da lista publicada)'
         : n.blocked ? 'efeito: fica bloqueada' : 'efeito: fica desbloqueada'
+      // An Excluir conta block cannot be cancelled here (the server refuses it).
+      const cancelButton = (c) => button('cancelar', () => mutate(
+        c.claimed ? 'Cancelar? ' + TEXT.cancelClaimed + '.' : 'Cancelar esta mudança?',
+        API + 'pending/' + encodeURIComponent(c.id) + '/cancel',
+        {},
+        c.claimed ? 'Cancelamento registrado: ' + TEXT.cancelClaimed + '.' : 'Mudança cancelada.'
+      ), { disabled: busy })
       const changes = n.changes.map((c) => h('div', { className: 'change' },
         h('p', { text: (c.op === 'block' ? 'bloquear' : 'desbloquear') + ' · ' + formatDate(c.at) }),
         c.byAi ? h('p', { className: 'ai', text: TEXT.byAi }) : null,
+        c.byOwner ? h('p', { className: 'ai', text: TEXT.byOwner }) : null,
         c.claimed ? h('p', { className: 'waiting', text: TEXT.claimed }) : null,
-        button('cancelar', () => mutate(
-          c.claimed ? 'Cancelar? ' + TEXT.cancelClaimed + '.' : 'Cancelar esta mudança?',
-          API + 'pending/' + encodeURIComponent(c.id) + '/cancel',
-          {},
-          c.claimed ? 'Cancelamento registrado: ' + TEXT.cancelClaimed + '.' : 'Mudança cancelada.'
-        ), { disabled: busy })
+        c.byOwner ? null : cancelButton(c)
       ))
       cards.push(h('div', { className: 'card' },
         h('h2', { text: who(n.member, n.username) + ' · ' + n.kind }),

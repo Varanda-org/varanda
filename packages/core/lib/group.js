@@ -26,10 +26,11 @@ const {
   MAX_TEXT, MAX_BLOCK_BYTES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY,
   MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY,
   nowIso, isHex64, isCanonicalIso, isPlainObject, hasExactKeys, hasControlChars,
-  charLength, plainCopy, validRecordCopy
+  charLength, plainCopy, validRecordCopy, validDescriptor
 } = require('./records')
 const { openRecord, wipe, keyTag, keyCommit, MAX_KEY_RECIPIENTS, MAX_SEALED_INNER_BYTES } = require('./group-crypto')
-const { validGroupMedia, copyGroupMedia } = require('./group-media')
+const { validGroupMedia, copyGroupMedia, copyGroupItem, validPrivateItem } = require('./group-media')
+const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
 
 // Same rule as lib/feed.js (not imported, to keep this module pure).
 const MAX_FUTURE_MS = 86400000
@@ -51,10 +52,10 @@ const RECORD_KEYS = {
   'group-sealed': ['type', 'kid', 'nonce', 'box', 'at'],
   'group-invites': ['type', 'on', 'seen', 'at']
 }
-// A post with media, or a forwarded text post (docs/protocol.md section 10):
-// the one other key set of group-post. `card` stays null. `fwd` is only 0
-// or 1, so a plain text post stays the v1 bytes and every post has one
-// encoding; readers from before v2 skip the whole post.
+// A post with media, a link card or a forward (docs/protocol.md section 10):
+// the one other key set of group-post. A card goes with text only (media
+// null). `fwd` is only 0 or 1, so a plain text post stays the v1 bytes and
+// every post has one encoding; readers from before v2 skip the whole post.
 const GROUP_POST_V2_KEYS = ['type', 'text', 'replyTo', 'media', 'card', 'fwd', 'seen', 'at']
 const GROUP_TYPES = Object.freeze(Object.keys(RECORD_KEYS))
 // A first `group-key` block (kid null) also commits to its key.
@@ -220,6 +221,22 @@ function checkWriterHeader (h) {
   return isCanonicalIso(h.at) ? null : 'date-invalid'
 }
 
+// A link card's thumbnail in a group post: a still JPEG of one media block,
+// a public descriptor in a plain post and a private item inside a sealed
+// inner, never mixed and never an address on the web. Never throws.
+function validGroupCardImage (d, sealed) {
+  try {
+    if (sealed === true) return validPrivateItem(d) && d.plainMime === CARD_IMAGE_MIME && validCardImageBytes(d.bytes)
+    return validDescriptor(d) && d.mime === CARD_IMAGE_MIME && validCardImageBytes(d.bytes)
+  } catch {
+    return false
+  }
+}
+
+function validGroupCard (card, sealed) {
+  return validLinkCard(card, (d) => validGroupCardImage(d, sealed))
+}
+
 function checkRecord (record, seq, root, community, priv, sealed) {
   if (!Number.isSafeInteger(seq) || seq < 0) return 'malformed'
   if (seq === 0) return root ? checkHeader(record) : checkWriterHeader(record)
@@ -259,9 +276,10 @@ function checkRecord (record, seq, root, community, priv, sealed) {
     // sealed inner and public everywhere else, never mixed.
     const v2 = keys === GROUP_POST_V2_KEYS
     // A boolean is another JSON type, so it must not count as forwarded.
-    if (v2 && (record.card !== null || (record.fwd !== 0 && record.fwd !== 1))) return 'malformed'
-    // Null media is the text forward. fwd 0 with no media is a second encoding of v1.
-    if (v2 && !(record.media === null && record.fwd === 1) && !validGroupMedia(record.media, sealed)) return 'media-invalid'
+    if (v2 && record.fwd !== 0 && record.fwd !== 1) return 'malformed'
+    if (v2 && record.card !== null && (record.media !== null || !validGroupCard(record.card, sealed))) return 'card-invalid'
+    // Null media is a card or the text forward. With neither it is a second encoding of v1.
+    if (v2 && !(record.media === null && (record.fwd === 1 || record.card !== null)) && !validGroupMedia(record.media, sealed)) return 'media-invalid'
     // Empty text is a photo with no caption, not a text-only forward.
     const minText = v2 && record.media !== null ? 0 : 1
     if (typeof text !== 'string' || charLength(text) < minText || charLength(text) > MAX_TEXT) return 'text-length'
@@ -365,11 +383,12 @@ function writerHeader ({ group, diary, member = null, box = null, rejoin = null,
   return build({ type: 'group-writer', v: 2, group, diary, member, box, rejoin: copyRef(rejoin), at }, 0, false)
 }
 
-// No media and no forward mark: the v1 record, byte for byte, so older
-// readers still open a plain text post. `fwd` defaults to 0. `sealed`
-// builds the inner record of an envelope, whose media items are private.
-function groupPost ({ text, replyTo = null, media = null, fwd = 0, seen = null, at = nowIso(), sealed = false } = {}) {
-  if ((media === null || media === undefined) && fwd === 0) {
+// No media, no card and no forward mark: the v1 record, byte for byte, so
+// older readers still open a plain text post. `fwd` defaults to 0. `sealed`
+// builds the inner record of an envelope, whose media items and card image
+// are private.
+function groupPost ({ text, replyTo = null, media = null, card = null, fwd = 0, seen = null, at = nowIso(), sealed = false } = {}) {
+  if ((media === null || media === undefined) && (card === null || card === undefined) && fwd === 0) {
     return build({ type: 'group-post', text, replyTo: copyRef(replyTo), seen: copyRef(seen), at }, 1, false)
   }
   const record = {
@@ -377,7 +396,7 @@ function groupPost ({ text, replyTo = null, media = null, fwd = 0, seen = null, 
     text,
     replyTo: copyRef(replyTo),
     media: media === undefined ? null : copyGroupMedia(media, sealed),
-    card: null,
+    card: card === undefined || card === null ? null : copyLinkCard(card, (d) => copyGroupItem(d, sealed)),
     fwd,
     seen: copyRef(seen),
     at
@@ -2197,6 +2216,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       fwd: r.fwd === 1 ? 1 : 0,
       replyTo: r.replyTo === null ? null : { writer: r.replyTo.writer, seq: r.replyTo.seq },
       ...(Array.isArray(r.media) ? { media: copyGroupMedia(r.media, typeof r.media[0].key === 'string') } : {}),
+      ...(isPlainObject(r.card) ? { card: copyLinkCard(r.card, (d) => copyGroupItem(d, typeof d.key === 'string')) } : {}),
       hidden
     })
   }
@@ -3082,6 +3102,7 @@ module.exports = {
   MAX_KEY_BASIS,
   MAX_SEALED_INNER_BYTES,
   GROUP_POST_V2_KEYS,
+  validGroupCard,
   isWeakBoxKey,
   validateGroupHeader,
   validateWriterHeader,

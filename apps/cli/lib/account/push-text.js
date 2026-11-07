@@ -25,6 +25,12 @@ function inviteDropPayload () {
   return JSON.stringify({ v: 1, kind: 'invite-drop' })
 }
 
+// Excluir conta: a deletion was scheduled without a verified passkey. No
+// text and no date either: the worker owns the sentence.
+function deletionPayload () {
+  return JSON.stringify({ v: 1, kind: 'delete-scheduled' })
+}
+
 const ACTIONS = {
   follow: ' começou a seguir você',
   reply: ' respondeu ao seu post',
@@ -64,5 +70,6 @@ module.exports = {
   DM_WAKE_BODY,
   dmWakePayload,
   inviteDropPayload,
+  deletionPayload,
   pushBody
 }

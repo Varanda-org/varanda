@@ -9,6 +9,8 @@
 //   with photos may have no text). `media` (descriptors or null) goes to
 //   ./MediaGrid with `persist={persistMedia}` (false for authors this device
 //   does not follow: their photos are never kept).
+// - preview: null | a stored link card (the post's `preview`), drawn by
+//   ./LinkCard from that data only, its thumbnail read like a post photo.
 // - quote: null | { author, name, username, at, text, media, missing, onOpen }
 //   rendered by ./QuoteCard (one level only).
 // - repostedBy: null | { author, name, username }: a top line 'Nome
@@ -50,6 +52,7 @@ import { whoOf } from '../who'
 import { ActionsSheet } from './ActionsSheet'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
+import { LinkCard } from './LinkCard'
 import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
@@ -122,7 +125,7 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
 }
 
 export function PostRow ({
-  author, name, username, avatar, at, text, replyToName, media, persistMedia = true, now,
+  author, name, username, avatar, at, text, replyToName, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
   onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onDelete, link, onNotice
@@ -321,6 +324,10 @@ export function PostRow ({
     : null
   const mediaNode = hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null
   const quoteNode = quoteOn ? <QuoteCard quote={quoteProp} now={now} /> : null
+  // Outside the row's open area: a tap on the card opens the link, never the conversation.
+  const previewNode = !hasMedia && preview && typeof preview === 'object'
+    ? <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
+    : null
   return (
     <View style={styles.row} onTouchStart={Platform.OS !== 'web' ? startTouch : undefined}>
       {reposter
@@ -433,6 +440,7 @@ export function PostRow ({
               </Pressable>
               )
             : null}
+          {previewNode}
           {quoteOut ? quoteNode : null}
           {bar
             ? (

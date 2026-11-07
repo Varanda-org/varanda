@@ -7,7 +7,7 @@ const { validatePushEvent } = require('@varanda/core/lib/push-events')
 const { validateDmWake, DM_WAKE_COOLDOWN_MS } = require('@varanda/core/lib/dm-wake')
 const { isAllowedEndpoint, sendPush, PUSH_TTL_S, TOPIC_RE } = require('./web-push')
 const { validEndpoint, validP256dh, validAuth } = require('./push-store')
-const { pushBody, dmWakePayload, inviteDropPayload } = require('./push-text')
+const { pushBody, dmWakePayload, inviteDropPayload, deletionPayload } = require('./push-text')
 
 // Web Push for the hosted PWA (mounted by ./server.js):
 //
@@ -37,6 +37,11 @@ const { pushBody, dmWakePayload, inviteDropPayload } = require('./push-text')
 //     jobs take at most INVITE_QUEUE_MAX of the queue so member notices
 //     keep their room. Each job carries an absolute deadline: past it the
 //     job is dropped unsent, before it the TTL is the seconds left.
+//   - notifyDeletion, called in process by Excluir conta (./delete-routes.js)
+//     when a deletion is scheduled without a verified passkey: a notice
+//     ({ v: 1, kind: 'delete-scheduled' }) to every device of the member, so
+//     a person who did not ask sees it and can cancel. Best effort: a full
+//     queue drops it (the app still shows the schedule from /account/status).
 //
 // An endpoint is a capability URL: it is never echoed, counted in an answer
 // or logged, and neither are keys, nonces, signatures, tokens, names or the
@@ -430,6 +435,25 @@ function createPushRoutes ({
     return 'queued'
   }
 
+  function notifyDeletion ({ member } = {}) {
+    if (typeof member !== 'string' || !HEX64_RE.test(member)) throw new TypeError('member inválido')
+    if (vapid === null || !storeUsable()) return 'none'
+    const subs = pushStore.list(member)
+    if (subs.length === 0) return 'none'
+    if (queue.length + subs.length > MAX_QUEUE) {
+      dropped += subs.length
+      log({ event: 'push', reason: 'descartado' })
+      return 'dropped'
+    }
+    const payload = deletionPayload()
+    const topic = nodeCrypto.createHmac('sha256', topicKey).update('delete-scheduled ' + member).digest('hex').slice(0, 32)
+    for (const { endpoint, p256dh, auth } of subs) {
+      queue.push({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic })
+    }
+    pump()
+    return 'queued'
+  }
+
   function pump () {
     while (inFlight < MAX_IN_FLIGHT && queue.length > 0) {
       const job = queue.shift()
@@ -493,7 +517,7 @@ function createPushRoutes ({
     return { nonces: nonces.size, seen: seen.size, queued: queue.length, inFlight, dropped }
   }
 
-  return { owns, handle, handleRelay, stats, notifyInvite, room }
+  return { owns, handle, handleRelay, stats, notifyInvite, notifyDeletion, room }
 }
 
 module.exports = {

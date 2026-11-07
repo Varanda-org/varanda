@@ -56,7 +56,7 @@
         <p class="heroi__lead">Um lugar para encontrar pessoas, trocar ideias e acompanhar as conversas de quem você escolhe.</p>
         <p class="heroi__lead">A Varanda é uma rede social brasileira e descentralizada, criada para dar mais autonomia às pessoas e às suas conversas.</p>
         <p class="acoes"><a class="botao botao--cheio" id="cta-inicio" href="https://bora.varanda.app/" rel="noopener" aria-describedby="vagas-inicio">Conheça a Varanda</a> <a class="botao botao--linha" href="#como-e-usar">Como funciona</a></p>
-        <p class="vagas" id="vagas-inicio">Vagas limitadas nesta abertura. Se a Varanda já estiver cheia, o app avisa durante a entrada e você pode tentar de novo daqui a alguns dias.</p>
+        <p class="vagas" id="vagas-inicio">Vagas limitadas nesta abertura. Se a Varanda já estiver cheia, o app avisa antes de criar a passkey e você pode tentar de novo daqui a alguns dias.</p>
         <p class="vagas vagas--nota">Abriu pelo Instagram? Se a entrada não funcionar, abra o link no Chrome ou no Safari.</p>
       </div>
       <div class="heroi__cena">
@@ -106,6 +106,35 @@
   <section class="secao" id="como-e-usar" aria-labelledby="t-como">
     <div class="dentro">
       <h2 id="t-como">Chegue, puxe uma cadeira e participe.</h2>
+      <p class="secao__intro">Assim a Varanda aparece no celular. As pessoas e as publicações destas telas são de exemplo.</p>
+      <div class="telas" role="region" aria-label="Telas do app" tabindex="0">
+        <ol class="telas__lista">
+          <li class="tela">
+            <figure>
+              <img src="assets/screens/a-rua-402.webp" srcset="assets/screens/a-rua-402.webp 402w, assets/screens/a-rua-804.webp 804w" sizes="(min-width: 900px) 260px, min(72vw, 280px)" width="402" height="874" loading="lazy" decoding="async" alt="Tela A Rua do app, com publicações de exemplo de João Nascimento, Lia Oliveira, Horta do Bairro, Biblioteca da Praça e André Costa, cada uma com os botões de responder, republicar e curtir.">
+              <figcaption>A Rua: as publicações de quem você segue, em ordem de chegada.</figcaption>
+            </figure>
+          </li>
+          <li class="tela">
+            <figure>
+              <img src="assets/screens/diario-402.webp" srcset="assets/screens/diario-402.webp 402w, assets/screens/diario-804.webp 804w" sizes="(min-width: 900px) 260px, min(72vw, 280px)" width="402" height="874" loading="lazy" decoding="async" alt="Tela do Diário de Lia Oliveira, um perfil de exemplo: as iniciais no lugar da foto, a frase Café, livros e encontros na praça, 5 seguindo, 2 seguidores e as publicações dela.">
+              <figcaption>Seu Diário: o seu perfil e as suas publicações.</figcaption>
+            </figure>
+          </li>
+          <li class="tela">
+            <figure>
+              <img src="assets/screens/conversas-402.webp" srcset="assets/screens/conversas-402.webp 402w, assets/screens/conversas-804.webp 804w" sizes="(min-width: 900px) 260px, min(72vw, 280px)" width="402" height="874" loading="lazy" decoding="async" alt="Tela Conversas do app, com a busca, os filtros Todas, Não lidas e Grupos, os Pedidos de mensagem, as Comunidades e conversas de exemplo com Bia Araújo, André Costa e grupos do bairro.">
+              <figcaption>As Conversas: mensagens privadas e comunidades, numa lista só.</figcaption>
+            </figure>
+          </li>
+          <li class="tela">
+            <figure>
+              <img src="assets/screens/conversa-402.webp" srcset="assets/screens/conversa-402.webp 402w, assets/screens/conversa-804.webp 804w" sizes="(min-width: 900px) 260px, min(72vw, 280px)" width="402" height="874" loading="lazy" decoding="async" alt="Tela de uma conversa de exemplo com Bia Araújo, com recados sobre o livro do clube e duas fotos do encontro de domingo.">
+              <figcaption>Uma conversa: fotos e recados só entre duas pessoas, cifrados de ponta a ponta.</figcaption>
+            </figure>
+          </li>
+        </ol>
+      </div>
       <ul class="cartoes">
         <li class="cartao">
           <h3>A Rua</h3>
@@ -157,7 +186,7 @@
       <h2 id="t-gente">Toda boa conversa começa com alguém chegando.</h2>
       <p class="convite__texto">A Varanda está abrindo para um número limitado de pessoas. A ideia é construí-la com quem acredita numa internet com mais autonomia, mais diversidade e mais espaço para conversar.</p>
       <p class="acoes"><a class="botao botao--cheio" id="cta-gente" href="https://bora.varanda.app/" rel="noopener" aria-describedby="vagas-gente">Quero conhecer a Varanda</a></p>
-      <p class="vagas" id="vagas-gente">Vagas limitadas nesta abertura. Se a Varanda já estiver cheia, o app avisa durante a entrada e você pode tentar de novo daqui a alguns dias. Não há lista de espera, e quem já entrou continua usando a rede normalmente.</p>
+      <p class="vagas" id="vagas-gente">Vagas limitadas nesta abertura. Se a Varanda já estiver cheia, o app avisa antes de criar a passkey e você pode tentar de novo daqui a alguns dias. Não há lista de espera, e quem já entrou continua usando a rede normalmente.</p>
       <p class="fecho">Puxe sua cadeira. A conversa merece uma varanda.</p>
     </div>
   </section>
@@ -171,11 +200,11 @@
       <details class="faq"><summary>Como minhas publicações circulam?</summary><p>Você publica no seu Diário, assinado no seu aparelho. Quem acompanha você recebe e guarda uma cópia. Os semeadores guardam e entregam cópias quando alguém precisa.</p></details>
       <details class="faq"><summary>O que é a Rua?</summary><p>A tela onde aparecem as publicações de quem você segue, em ordem de chegada, das mais recentes para as mais antigas.</p></details>
       <details class="faq"><summary>O que é o Diário?</summary><p>O seu espaço: o seu perfil e o que você publica, com até 1000 caracteres e até 4 fotos por publicação. Serve para compartilhar o que você vive e o que te toca, sem precisar se exibir. O Diário é público: quem visita o seu perfil vê o que você publica.</p></details>
-      <details class="faq"><summary>O que são as Conversas?</summary><p>É onde ficam as Mensagens e as Comunidades. As Mensagens são só de texto, entre duas pessoas, e cifradas de ponta a ponta. Quem você ainda não segue chega em Pedidos de mensagem, e você decide se aceita. Nas Comunidades, cada grupo é público ou privado, e a entrada pode ser aberta ou com aprovação. No privado, um administrador sempre aprova quem entra e o que se escreve é cifrado de ponta a ponta. Quem modera a comunidade também recebe a chave e, se uma Página participar do grupo, o serviço de conta da associação também. Participar de uma comunidade é público: a entrada fica registrada no seu diário.</p></details>
+      <details class="faq"><summary>O que são as Conversas?</summary><p>É onde ficam as Mensagens e as Comunidades. As Mensagens, com texto, fotos e áudios, são entre duas pessoas e cifradas de ponta a ponta. Quem você ainda não segue chega em Pedidos de mensagem, e você decide se aceita. Nas Comunidades, cada grupo é público ou privado, e a entrada pode ser aberta ou com aprovação. No privado, um administrador sempre aprova quem entra e o que se escreve é cifrado de ponta a ponta. Quem modera a comunidade também recebe a chave e, se uma Página participar do grupo, o serviço de conta da associação também. Participar de uma comunidade é público: a entrada fica registrada no seu diário.</p></details>
       <details class="faq"><summary>A Varanda usa algoritmos?</summary><p>A Rua não usa algoritmo de engajamento: as publicações de quem você segue aparecem em ordem de chegada. A Espiadinha mostra a publicação mais recente de cada diário que você não segue, depois a segunda e a terceira de cada um, sem curtidas, sem sugestões e sem pesos escondidos.</p></details>
       <details class="faq"><summary>Quem pode participar?</summary><p>Pessoas com 16 anos ou mais. A entrada é pelo navegador, em bora.varanda.app: você cria uma chave de acesso (passkey) no próprio aparelho, confirma a idade com um serviço parceiro e escolhe um @nome, que é liberado ao vincular uma conta Google. Nesta abertura as vagas são limitadas.</p></details>
       <details class="faq"><summary>Como funciona a segurança e a moderação?</summary><p>As mensagens privadas entre duas pessoas são cifradas de ponta a ponta. Dá para denunciar uma publicação ou uma conta, e a associação analisa as denúncias. O perfil, o @nome, as publicações do Diário e quem você segue são públicos: a Varanda não é uma rede anônima.</p></details>
-      <details class="faq"><summary>Quando a Varanda estará disponível?</summary><p>Já está aberta para um número limitado de pessoas, em bora.varanda.app. Quando as vagas acabam, a entrada fecha até abrirmos mais: o app avisa durante a entrada, na confirmação de idade ou no vínculo da conta, e a tentativa recusada não vira conta nem fila. Não há lista de espera nem aviso depois; se estiver cheia, tente de novo daqui a alguns dias. Ainda não está nas lojas de aplicativos: no celular, o app se instala a partir do navegador.</p></details>
+      <details class="faq"><summary>Quando a Varanda estará disponível?</summary><p>Já está aberta para um número limitado de pessoas, em bora.varanda.app. Quando as vagas acabam, a entrada fecha até abrirmos mais: o app avisa antes de criar a passkey; se a vaga acabar no meio da entrada, a confirmação de idade ou o vínculo da conta também recusam, e a tentativa recusada não vira conta nem fila. Não há lista de espera nem aviso depois; se estiver cheia, tente de novo daqui a alguns dias. Ainda não está nas lojas de aplicativos: no celular, o app se instala a partir do navegador.</p></details>
       <details class="faq"><summary>Como posso ajudar no projeto?</summary><p>Puxe sua cadeira, chame pessoas de quem você gosta e acompanhe @varanda_org no Instagram. Quem programa encontra o repositório em Para desenvolvedores.</p></details>
     </div>
   </section>

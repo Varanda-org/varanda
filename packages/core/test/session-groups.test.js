@@ -181,6 +181,7 @@ test('group posts serialize, page with cursors and retain hidden items', async (
       fwd: 0,
       replyTo: index === 1 ? replyTo : null,
       media: null,
+      card: null,
       hidden: false,
       name: 'Ana',
       username: null
@@ -191,7 +192,7 @@ test('group posts serialize, page with cursors and retain hidden items', async (
   t.is(page.incomplete, false)
   const older = await m.call('group.read', { group, limit: 2, before: page.next })
   t.alike(older, {
-    items: [{ writer: group, diary: m.publicKey, seq: 1, at: older.items[0].at, text: 'um', fwd: 0, replyTo: null, media: null, hidden: false, name: 'Ana', username: null }],
+    items: [{ writer: group, diary: m.publicKey, seq: 1, at: older.items[0].at, text: 'um', fwd: 0, replyTo: null, media: null, card: null, hidden: false, name: 'Ana', username: null }],
     next: null,
     hidden: 0,
     incomplete: false,
@@ -240,7 +241,7 @@ test('group requests, admission, administration, bans, metadata and leave throug
   const writer = store.readGroups(b.dataDir).find((g) => g.group === group).writer
   const read = await a.call('group.read', { group })
   t.alike(read, {
-    items: [{ writer, diary: b.publicKey, seq, at: read.items[0].at, text: 'olá', fwd: 0, replyTo: null, media: null, hidden: false, name: 'Bia', username: null }],
+    items: [{ writer, diary: b.publicKey, seq, at: read.items[0].at, text: 'olá', fwd: 0, replyTo: null, media: null, card: null, hidden: false, name: 'Bia', username: null }],
     next: null,
     hidden: 0,
     incomplete: false,
@@ -490,4 +491,18 @@ test('group.read copies v2 public and opened private media, and clears hidden me
     t.alike((await m.call('group.read', { group, limit: 1 })).items[0].media, media)
   }
   t.alike(m.session.internal, [])
+})
+
+test('core group sessions keep text cards and reject image cards', async (t) => {
+  const m = await person(t)
+  const community = await communityOf(m)
+  const card = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
+  for (const visibility of ['public', 'private']) {
+    const { group } = await m.call('group.create', { name: 'Links', join: 'approval', visibility, community })
+    const image = { core: OTHER, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: OTHER, width: 4, height: 4 }
+    t.alike(await failure(m.call('group.post', { group, text: 'link', card: { ...card, image } })), { code: 'USAGE', message: 'mídia disponível só na versão web' })
+    t.alike(await failure(m.call('group.post', { group, text: 'link', card, sealed: true })), { code: 'USAGE', message: 'mídia disponível só na versão web' }, 'sealed is refused beside a text card')
+    await m.call('group.post', { group, text: 'link', card })
+    t.alike((await m.call('group.read', { group })).items[0].card, card)
+  }
 })

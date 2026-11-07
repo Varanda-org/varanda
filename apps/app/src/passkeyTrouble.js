@@ -14,6 +14,10 @@ export const PHONE_SIGNIN_LABEL = 'entrar com o celular'
 export const NOT_SYNCED_TITLE = 'Essa passkey não serve para o Varanda.'
 export const NONE_TEXT = 'Nenhuma passkey do Varanda neste aparelho. Crie uma aqui ou entre no site com a passkey que já tem.'
 export const KNOWN_LOST_TEXT = 'A passkey que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar em outro gerenciador: tente entrar com outra passkey ou crie uma nova conta.'
+// Variants shown while creation is withheld: the network is full, or its
+// answer has not arrived yet.
+export const NONE_FULL_TEXT = 'Nenhuma passkey do Varanda neste aparelho. Entre no site com a passkey que já tem.'
+export const KNOWN_LOST_FULL_TEXT = 'A passkey que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar em outro gerenciador: tente entrar com outra passkey.'
 // After one sign-in that did not finish (closed sheet or missing passkey).
 export const MISSED_TEXT = 'A passkey não apareceu? Tente entrar de novo ou toque em entrar com outra passkey para escolher outra.'
 export const OTHER_PASSKEY_LABEL = 'entrar com outra passkey'

@@ -15,9 +15,14 @@ const { createPushRoutes } = require('./push-routes')
 const { createSeenRoutes } = require('./seen-routes')
 const { createAgeRoutes } = require('./age-routes')
 const { createRecoveryRoutes } = require('./recovery-routes')
+const { createDeleteRoutes } = require('./delete-routes')
+const { createDeletionSweep } = require('./deletion')
+const { createPasskeyRoutes } = require('./passkey-routes')
+const { passkeyOrigins } = require('./webauthn')
 const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, mintRedeem, redeemMatches, accountReturnUrl, appReturnPage, header } = require('./app-return')
 const { createPagesRoutes } = require('./pages-routes')
 const { createGifRoutes } = require('./gif-routes')
+const { createPreviewRoutes } = require('./preview-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -128,6 +133,16 @@ const ERROR_STATUS = Object.freeze({
   // confirm as a served diary (it could be a group root).
   'alvo-nao-confirmado': 409,
   'ja-revertido': 409,
+  // Excluir conta (./delete-routes.js): the key deleted its account, and a
+  // person who still owns a live page is asked to close or hand it over first.
+  'conta-excluida': 409,
+  'paginas-ativas': 409,
+  // Passkeys for Excluir conta (./passkey-routes.js, ./delete-routes.js): an
+  // attestation or assertion that does not verify, a member who already has
+  // a stored key, and an enrolment after the sign-up window.
+  'passkey-invalida': 403,
+  'passkey-registrada': 409,
+  'vinculo-antigo': 409,
   // Sign-up invites (./invites-store.js): one public token for an unknown,
   // used, expired or held code.
   'convite-obrigatorio': 403,
@@ -159,7 +174,9 @@ const ERROR_STATUS = Object.freeze({
   // GIF search (./gif-routes.js): the operator left it off, or the member
   // spent its daily searches or images.
   'feature-off': 404,
-  'limite-gif': 429
+  'limite-gif': 429,
+  // Link previews (./preview-routes.js): the member spent its daily previews.
+  'limite-previa': 429
 })
 
 const BASE_HEADERS = Object.freeze({
@@ -651,9 +668,21 @@ function checkRawPost (req, origin) {
 // /account/gif/* route 404 'feature-off') is a parseGifConfig result of
 // ./gif-routes.js; `gifTransport` ({ request, lookup, allowAddress }) is for
 // tests only, to reach a loopback fake provider.
+// `preview` (default true: link previews need no third-party key) turns the
+// /account/preview/* routes of ./preview-routes.js on; false answers the
+// policy { enabled: false } and 404 'feature-off' elsewhere.
+// `previewTransport` ({ request, lookup, allowAddress, deadlineMs }) is for
+// tests only, to reach a loopback fixture.
 // `recovery` is an openRecoveryStore (./recovery-store.js), or null: the
 // recovery routes (./recovery-routes.js) then answer 503 'indisponivel' and
 // everything else stays up.
+// `drops` is the surprise-invite ledger (./invite-drops.js) or null, only so
+// Excluir conta (./delete-routes.js, ./deletion.js) can purge its marks.
+// `passkeys` is an openPasskeyStore (./passkey-store.js) or null: Excluir
+// conta and the passkey enrolment then answer 503 'indisponivel'.
+// `androidCertSha256` (VARANDA_ANDROID_CERT_SHA256, '' for none) adds the
+// Android app's origin to the ones a passkey assertion may report
+// (./webauthn.js passkeyOrigins).
 function createAccountServer ({
   association,
   origin,
@@ -684,7 +713,12 @@ function createAccountServer ({
   pages = null,
   gif = null,
   gifTransport = {},
+  preview = true,
+  previewTransport = {},
   recovery = null,
+  drops = null,
+  passkeys = null,
+  androidCertSha256 = '',
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
   burst = DEFAULT_BURST
@@ -696,6 +730,7 @@ function createAccountServer ({
   if (issuer !== null && checkIssuerCert(issuer.cert, issuer.keyPair, association) !== null) {
     throw new TypeError('issuer certificate is for another association or key')
   }
+  const webauthn = passkeyOrigins({ origin, androidCertSha256 })
   for (const [name, value] of [['maxConnections', maxConnections], ['ratePerSecond', ratePerSecond], ['burst', burst]]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(name + ' must be a positive integer')
   }
@@ -779,6 +814,70 @@ function createAccountServer ({
     http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
   })
 
+  // Excluir conta: always mounted. The sweep purges the other stores for
+  // every deleted key; serve() runs it at start and then periodically.
+  const deletion = createDeletionSweep({
+    accounts: store,
+    terms,
+    ages,
+    pushStore: push !== null && push.pushStore ? push.pushStore : null,
+    recovery,
+    invites,
+    drops,
+    seen,
+    passkeys,
+    // Bound late: deleteRoutes is created below with this sweep's purge.
+    scheduled: () => deleteRoutes.runScheduled(),
+    log
+  })
+  const publishedList = moderationBlocklist(moderation)
+  function inPublishedList (key) {
+    try {
+      return publishedList !== null && publishedList.has(key)
+    } catch {
+      return false
+    }
+  }
+  const deleteRoutes = createDeleteRoutes({
+    accounts: store,
+    moderation,
+    pagesStore: pages !== null && pages.pagesStore ? pages.pagesStore : null,
+    passkeys,
+    purge: deletion.purge,
+    isBlocked: inPublishedList,
+    notify: (member) => { if (pushRoutes !== null) pushRoutes.notifyDeletion({ member }) },
+    rpId: webauthn.rpId,
+    origins: webauthn.origins,
+    association,
+    now,
+    log,
+    memberLimit: keyedWindow(5, 600 * 1000, now),
+    send,
+    refuse,
+    fromStore,
+    checkPost: (req, opts) => checkPost(req, origin, opts),
+    readJsonBody,
+    over
+  })
+
+  // Always mounted, so a missing or corrupt passkeys.json refuses only these
+  // routes and Excluir conta. add is charged per member after the proof.
+  const passkeyRoutes = createPasskeyRoutes({
+    store: passkeys,
+    accounts: store,
+    rpId: webauthn.rpId,
+    association,
+    now,
+    log,
+    memberLimit: keyedWindow(5, 600 * 1000, now),
+    send,
+    refuse,
+    fromStore,
+    checkPost: (req, opts) => checkPost(req, origin, opts),
+    readJsonBody,
+    over
+  })
+
   // Always mounted, so a missing or corrupt recovery.json refuses only these
   // routes. fetch shares the public-read window; put, remove and list are
   // charged per member after the proof.
@@ -827,6 +926,19 @@ function createAccountServer ({
   const gifRoutes = createGifRoutes({
     ...gifTransport,
     config: gif,
+    store,
+    terms,
+    blocklist: pages && pages.blocklist ? pages.blocklist : moderationBlocklist(moderation),
+    association,
+    log,
+    now,
+    http: { send, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, keyedWindow }
+  })
+
+  // Always mounted, so /account/preview/policy answers even when previews are off.
+  const previewRoutes = createPreviewRoutes({
+    ...previewTransport,
+    enabled: preview === true,
     store,
     terms,
     blocklist: pages && pages.blocklist ? pages.blocklist : moderationBlocklist(moderation),
@@ -1354,7 +1466,14 @@ function createAccountServer ({
     const member = memberParam(url.searchParams.get('member'))
     // Member keys are public: the weekly invite counts reach a member only
     // in the signed /account/invites/finish answer, never here.
-    send(res, 200, store.status(member))
+    const st = store.status(member)
+    // A deleted key (Excluir conta): whether the published blocklist holds
+    // it yet, never the date.
+    if (typeof st.deletedAt === 'string') return send(res, 200, { linked: false, deleted: inPublishedList(member) ? 'concluida' : 'pendente' })
+    // A deletion waiting for its date (asked without a verified passkey):
+    // every signed-in device shows it and offers to cancel.
+    const waiting = st.linked === true ? deleteRoutes.scheduled(member) : null
+    send(res, 200, waiting === null ? st : { ...st, scheduledDeletion: waiting })
   }
 
   // Exact keys: the app decides from `required` alone whether start needs a
@@ -1362,6 +1481,14 @@ function createAccountServer ({
   async function invitesPolicy (req, res) {
     if (!limits.lookup()) throw over()
     send(res, 200, inviting ? { required: true, perWeek: invites.perWeek } : { required: false })
+  }
+
+  // The hosted app asks this before creating a passkey. The read reserves
+  // nothing, and a failed read must not block anyone: the service still
+  // refuses at start, the callback, finish and the age session.
+  async function admission (req, res) {
+    if (!limits.lookup()) throw over()
+    send(res, 200, { open: !store.isFull() })
   }
 
   async function username (req, res, name) {
@@ -1418,8 +1545,8 @@ function createAccountServer ({
 
   // The terms routes need no issuer (an unconfigured service still records
   // acceptances) and never the member cap: only an already linked member
-  // can accept, and it is a member already. Links are never removed (the
-  // store has no unlink op), so a link checked at start still holds.
+  // can accept, and it is a member already. Excluir conta can remove the
+  // link between start and finish, so finish checks it again.
   function termsAvailable () {
     if (terms === null || !terms.available()) throw refuse('indisponivel')
   }
@@ -1570,14 +1697,18 @@ function createAccountServer ({
     if (seenRoutes.owns(pathname)) return seenRoutes.handle(req, res, url)
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
     if (recoveryRoutes.owns(pathname)) return recoveryRoutes.handle(req, res, url)
+    if (deleteRoutes.owns(pathname)) return deleteRoutes.handle(req, res, url)
+    if (passkeyRoutes.owns(pathname)) return passkeyRoutes.handle(req, res, url)
     if (pagesRoutes.owns(pathname)) return pagesRoutes.handle(req, res, url)
     if (gifRoutes.owns(pathname)) return gifRoutes.handle(req, res, url)
+    if (previewRoutes.owns(pathname)) return previewRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === APP_RETURN_PATH) return appReturn(res)
       if (pathname === '/account/pending') return pending(req, res)
       if (pathname === '/account/status') return status(req, res, url)
       if (pathname === '/account/invites/policy') return invitesPolicy(req, res)
+      if (pathname === '/account/admission') return admission(req, res)
       if (pathname.startsWith('/account/username/')) return username(req, res, pathname.slice('/account/username/'.length))
       throw refuse('nao-encontrado')
     }
@@ -1665,7 +1796,7 @@ function createAccountServer ({
     return pushRoutes === null ? 0 : pushRoutes.room()
   }
 
-  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), pagesStats: () => pagesRoutes.stats(), gifStats: () => gifRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {

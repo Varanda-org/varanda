@@ -395,7 +395,7 @@ test('mediaRead refuses a range listed by a tombstone unless a surviving post sh
       mediaCoreRecord({ key: K, at: at(0) }),
       postRecord({ text: 'foto', media: [descriptor(K, 1, 2)], at: at(1) }),
       postRecord({ text: 'outra foto', media: [descriptor(K, 3, 1)], at: at(2) }),
-      postRecord({ text: 'mais uma', media: [descriptor(K, 4, 1)], at: at(3) })
+      postRecord({ text: 'link', preview: { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: '', image: descriptor(K, 4, 1) }, at: at(3) })
     ]
   })
   const K = A.mediaKey
@@ -1292,4 +1292,29 @@ test('a leaked-key tombstone of a held page-close never enters the deleted bookk
   await settleIndexQueue(seeder)
   t.is(seeder._names.endSeq(PAGE_KEY), 2)
   t.ok(await seeder.postBlock(PAGE_KEY, 2), 'postBlock serves the close')
+})
+
+test('seeder recount keeps a preview thumbnail live until the last reference is deleted', async (t) => {
+  const key = 'aa'.repeat(32)
+  const K = 'bb'.repeat(32)
+  const image = descriptor(K, 1, 1)
+  const preview = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: '', image }
+  const blocks = [null, mediaCoreRecord({ key: K }), postRecord({ text: 'link', preview }), postRecord({ text: 'same image', preview })]
+  const entry = { dropped: false, scanned: blocks.length, latest: [{ key: K }], mediaRecounts: 0, gone: new Set(), tombstones: new Map(), mediaIrregular: false, core: { get: async i => blocks[i] === null ? null : b4a.from(JSON.stringify(blocks[i])) } }
+  const seeder = Object.create(Seeder.prototype)
+  seeder._served = new Map([[key, entry]])
+  seeder._closing = false
+  await seeder._recountMedia(key, entry)
+  t.is(entry.media.get(K).live.get(1), 2)
+  t.alike(entry.mediaRefs.get(2), [{ core: K, start: 1, blocks: 1 }])
+  blocks.push(deleteRecord({ seq: 2, media: [{ core: K, start: 1, blocks: 1 }] }))
+  entry.scanned = blocks.length
+  await seeder._recountMedia(key, entry)
+  t.is(entry.media.get(K).live.get(1), 1)
+  t.is(entry.media.get(K).dead, 0, 'another preview still shows the thumbnail')
+  blocks.push(deleteRecord({ seq: 3, media: [{ core: K, start: 1, blocks: 1 }] }))
+  entry.scanned = blocks.length
+  await seeder._recountMedia(key, entry)
+  t.absent(entry.media.get(K).live.has(1))
+  t.is(entry.media.get(K).dead, 1)
 })

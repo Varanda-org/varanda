@@ -61,6 +61,9 @@ import { Avatar } from '../ui/Avatar'
 import { EmojiPicker } from '../ui/EmojiPicker'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
+import { LinkDraftCard, useLinkDraft } from '../ui/ChatComposer'
+import { cardForSend, withCardFallback } from '../linkCard'
+import { withPreview } from '../attach-plan'
 import { Sheet } from '../ui/Sheet'
 import { tap } from '../ui/haptics'
 import { type } from '../ui/theme'
@@ -319,6 +322,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   // Quotes are never queued: offline they wait for the network.
   const offlineQueue = canQueue && asPage === null && node.online === false && !quote
   const quoteOffline = !!quote && node.online === false
+  // The draft link card (not as a page: its posts are signed statements).
+  // cardRef keeps the card a Publicar already built from a snapshot, so a
+  // new press after a failure never uploads its thumbnail again.
+  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null, photos: hasMedia, member: self.publicKey })
+  const cardRef = useRef(null)
   // A page never queues: it needs the service.
   const pageOffline = asPage !== null && node.online === false
   // Media is never queued: offline, a post with photos waits for the network.
@@ -648,14 +656,41 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     }
     // The node stamps `at` from the same clock: a match must be this send's.
     const startedAt = Date.now()
-    const params = sentMedia !== null ? { text: sent, media: sentMedia } : { text: sent }
+    const base = sentMedia !== null ? { text: sent, media: sentMedia } : { text: sent }
+    const method = sentQuote ? 'post.quote' : sentReply ? 'post.reply' : 'post.create'
+    const to = sentQuote ? { to: sentQuote.ref } : sentReply ? { to: sentReply.ref } : {}
+    // A link card goes with text only; its thumbnail joins the public media
+    // core like a post photo, uploaded once per snapshot.
+    let card = null
+    const snapshot = sentMedia === null ? linkDraft.take(sent) : null
+    if (snapshot !== null) {
+      const prev = cardRef.current
+      if (prev && prev.url === snapshot.url && prev.thumb === (snapshot.thumb ? snapshot.thumb.bytes : null)) {
+        card = prev.card
+      } else {
+        const upload = media !== null
+          ? async (t) => {
+            const d = await media.upload({ bytes: t.bytes, mime: t.mime, width: t.width, height: t.height })
+            if (!validDescriptor(d) || d.mime !== t.mime) throw new Error('resposta inválida')
+            return d
+          }
+          : null
+        uploadingRef.current = true
+        setUploading(true)
+        try {
+          card = await cardForSend(snapshot, { upload })
+        } finally {
+          uploadingRef.current = false
+          setUploading(false)
+        }
+        cardRef.current = { url: snapshot.url, thumb: snapshot.thumb ? snapshot.thumb.bytes : null, card }
+      }
+    }
+    const built = withCardFallback((c) => (c ? withPreview(method, { ...to, ...base }, c) : { ...to, ...base }), card)
+    const params = built.op
     // The draft is kept on any failure; a request is never resent.
     let raw = null
-    const call = () => {
-      if (sentQuote) return node.request('post.quote', { to: sentQuote.ref, ...params })
-      if (sentReply) return node.request('post.reply', { to: sentReply.ref, ...params })
-      return node.request('post.create', params)
-    }
+    const call = () => node.request(method, params)
     const r = await action.run(() => call().catch((err) => {
       raw = err
       throw err
@@ -844,7 +879,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
                 ))}
               </View>
               )
-            : null}
+            : <LinkDraftCard draft={linkDraft} />}
           <MentionSuggest rows={frozen ? [] : suggestions} loading={!frozen && mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
           <View style={styles.counterRow}>
             <View style={styles.tools}>

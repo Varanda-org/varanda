@@ -2267,7 +2267,7 @@ test('group-post v2: one exact key set, with media or a forward', (t) => {
   t.is(validateGroupRecord({ ...p, media: [1, 2, 3, 4, 5].map((i) => PHOTO(i * 3)) }, 1), 'media-invalid', 'five items')
   t.is(validateGroupRecord({ ...p, media: [PHOTO(1), PHOTO(1)] }, 1), 'media-invalid', 'one place twice')
   t.is(validateGroupRecord({ ...p, media: [{ ...PHOTO(1), mime: 'image/svg+xml' }] }, 1), 'media-invalid')
-  t.is(validateGroupRecord({ ...p, card: {} }, 1), 'malformed', 'card is reserved')
+  t.is(validateGroupRecord({ ...p, card: {} }, 1), 'card-invalid', 'a card is never next to media')
   t.is(validateGroupRecord({ ...p, fwd: 1 }, 1), null, 'fwd 1 with media')
   t.is(groupPost({ text: 'legenda', media: [PHOTO(1)], fwd: 1, at: AT(2) }).fwd, 1)
   const textFwd = groupPost({ text: 'encaminhada', fwd: 1, at: AT(2) })
@@ -2342,4 +2342,111 @@ test('group-post v2: a private group reads private media only from the envelope'
   t.alike(out.posts.map((p) => p.text), ['foto', 'só texto'], 'the envelope with a public item stays unread')
   t.alike(out.posts[0].media, [priv], 'the key travels to the reader inside the sealed post')
   t.absent('media' in out.posts[1])
+})
+
+const THUMB = (start, core = K(0xe0)) => ({ core, mime: 'image/jpeg', start, blocks: 1, bytes: 32768, sha256: 'c'.repeat(64), width: 400, height: 210 })
+const sealedThumb = (start, core = K(0xe0), n = 500) => {
+  const { item } = sealMedia(b4a.alloc(n, 7), { plainMime: 'image/jpeg', w: 400, h: 210 })
+  return { core, start, ...item }
+}
+const CARD = (image) => ({ url: 'https://example.com/a', host: 'example.com', title: 'Título', desc: 'Descrição', image })
+
+test('group-post v2: a link card', (t) => {
+  const p = groupPost({ text: 'olha https://example.com/a', card: CARD(THUMB(7)), at: AT(2) })
+  t.alike(Object.keys(p), [...GROUP_POST_V2_KEYS], 'a card with no media and fwd 0 is v2')
+  t.is(p.media, null)
+  t.is(p.fwd, 0)
+  t.alike(p.card, CARD(THUMB(7)))
+  t.is(validateGroupRecord(p, 1), null)
+  t.is(validateGroupRecord({ ...p, card: CARD(null) }, 1), null, 'no thumbnail')
+  t.is(validateGroupRecord({ ...p, fwd: 1 }, 1), null, 'a forwarded card')
+  t.is(validateGroupRecord({ ...p, text: '' }, 1), 'text-length', 'a card is not a caption-free photo')
+  t.alike(groupPost({ text: 'oi', card: null, at: AT(1) }), groupPost({ text: 'oi', at: AT(1) }), 'card null is still v1')
+  t.alike(groupPost({ text: 'oi', card: { ...CARD({ ...THUMB(7), extra: 1 }), extra: 1 }, at: AT(2) }).card, CARD(THUMB(7)), 'only the card and descriptor keys are copied')
+
+  t.is(validateGroupRecord({ ...p, media: [PHOTO(1)] }, 1), 'card-invalid', 'a card next to media')
+  t.exception.all(() => groupPost({ text: 'oi', media: [PHOTO(1)], card: CARD(null), at: AT(2) }), /card-invalid/)
+  const bad = {
+    http: { ...CARD(null), url: 'http://example.com/a' },
+    javascript: { ...CARD(null), url: 'javascript:alert(1)' },
+    data: { ...CARD(null), url: 'data:text/html,x' },
+    ftp: { ...CARD(null), url: 'ftp://example.com/a' },
+    credentials: { ...CARD(null), url: 'https://u:p@example.com/a' },
+    'host mismatch': { ...CARD(null), host: 'evil.com' },
+    'long title': { ...CARD(null), title: 'x'.repeat(81) },
+    'long desc': { ...CARD(null), desc: 'x'.repeat(161) },
+    'control in title': { ...CARD(null), title: 'a\u0000' },
+    'bidi in desc': { ...CARD(null), desc: 'a‭' },
+    'image over 32768': CARD({ ...THUMB(7), blocks: 2, bytes: 32769 }),
+    'image not jpeg': CARD({ ...THUMB(7), mime: 'image/webp' }),
+    'image a url': CARD('https://example.com/x.jpg'),
+    'image a private item in a plain post': CARD(sealedThumb(7)),
+    'extra key': { ...CARD(null), extra: 1 }
+  }
+  for (const [name, card] of Object.entries(bad)) {
+    t.is(validateGroupRecord({ ...p, card }, 1), 'card-invalid', name)
+    // The builder copies the card keys only, so an extra key never reaches it.
+    if (name !== 'extra key') t.exception.all(() => groupPost({ text: 'oi', card, at: AT(2) }), /card-invalid/, name + ' refused by the builder')
+  }
+
+  // Inside a sealed inner the thumbnail is a private item, one block.
+  const inner = groupPost({ text: 'olha', card: CARD(sealedThumb(7)), at: AT(2), sealed: true })
+  t.is(validateGroupRecord(inner, 1, { sealed: true }), null)
+  t.is(inner.card.image.bytes, 32768)
+  t.is(validateGroupRecord({ ...inner, card: CARD(THUMB(7)) }, 1, { sealed: true }), 'card-invalid', 'a sealed inner refuses a public thumbnail')
+  t.is(validateGroupRecord({ ...inner, card: CARD(sealedThumb(7, K(0xe0), 40000)) }, 1, { sealed: true }), 'card-invalid', 'a private thumbnail over one block')
+  t.is(validateGroupRecord({ ...inner, card: CARD({ ...sealedThumb(7), plainMime: 'image/png' }) }, 1, { sealed: true }), 'card-invalid', 'a private thumbnail not jpeg')
+  t.is(validateGroupRecord(p, 1, { private: true }), 'sealed-only')
+  t.ok(validateGroupRecord({ ...p, card: {} }, 1) !== null)
+})
+
+test('group-post v2: the fold carries the card', (t) => {
+  const w = world().add(X, wX)
+  post(w, wX, 1)
+  w.push(wX, groupPost({ text: 'olha', card: CARD(THUMB(7)), at: AT(2) }))
+  w.push(wX, groupPost({ text: 'privado', card: CARD(sealedThumb(8)), at: AT(3), sealed: true }))
+  const g = buildGroup(w.input())
+  t.alike(visible(g), [wX + ':1', wX + ':2'], 'a private thumbnail in a plain post is skipped')
+  t.absent('card' in g.posts[0], 'a v1 post has no card')
+  t.alike(g.posts[1].card, CARD(THUMB(7)))
+
+  const parent = communityOf({ key: CMG, creator: C, creates: [{ by: C, group: G }] })
+  const box = newBoxKeyPair()
+  const pg = groupIn(parent, { key: G, diary: C, join: 'approval', visibility: 'private', box: b4a.toString(box.publicKey, 'hex') })
+  const kid = { writer: G, seq: 1 }
+  const key = newEpochKey()
+  const sealed = b4a.toString(sealEpochKey(key, G, kid, box.publicKey), 'base64')
+  pg.push(G, groupKey({ kid: null, basis: [], keys: [{ writer: G, sealed }], commit: b4a.toString(keyCommit(key, G, kid), 'hex'), at: AT(1) }))
+  const priv = sealedThumb(8)
+  const { nonce, box: sbox } = sealRecord(sealedInner(groupPost({ text: 'privado', card: CARD(priv), at: AT(2), sealed: true }), { writer: G, group: G, kid }), key)
+  pg.push(G, groupSealed({ kid, nonce, box: sbox, at: AT(2) }))
+  const out = buildGroup({ ...pg.input(), keys: { writers: new Set([G]), unseal: (s) => openFrom(b4a.from(s, 'base64'), box) } })
+  t.alike(out.posts.map((p) => p.text), ['privado'])
+  t.alike(out.posts[0].card, CARD(priv), 'the thumbnail key travels inside the sealed post')
+})
+
+test('group-post v2: the worst card fits the sealed inner', (t) => {
+  const { MAX_SEALED_INNER_BYTES } = require('../lib/group-crypto')
+  const worstCard = (image) => ({
+    url: 'https://example.com/' + '%'.repeat(280),
+    host: 'example.com',
+    title: '\u{1F600}'.repeat(80),
+    desc: '\u{1F600}'.repeat(160),
+    image
+  })
+  const big = 9007199254740991
+  const ref = { writer: K(0xfff), seq: big }
+  const image = { ...sealedThumb(8191, K(0xfff)), w: 16384, h: 16384 }
+  // The widest text JSON can carry: a lone surrogate is one code point and six escaped bytes.
+  const text = '\ud800'.repeat(1000)
+  const inner = sealedInner(groupPost({ text, replyTo: ref, card: worstCard(image), fwd: 1, seen: ref, at: AT(2), sealed: true }), { writer: K(0xfff), group: K(0xffe), kid: ref })
+  t.is(validateGroupRecord(groupPost({ text, replyTo: ref, card: worstCard(image), fwd: 1, seen: ref, at: AT(2), sealed: true }), 1, { sealed: true }), null)
+  const bytes = b4a.byteLength(JSON.stringify(inner))
+  t.comment('worst sealed group card inner: ' + bytes + ' of ' + MAX_SEALED_INNER_BYTES + ' bytes')
+  t.ok(bytes <= MAX_SEALED_INNER_BYTES, 'fits MAX_SEALED_INNER_BYTES')
+  const { box: sbox } = sealRecord(inner, newEpochKey())
+  t.ok(validateGroupRecord(groupSealed({ kid: ref, nonce: '0'.repeat(48), box: sbox, at: AT(2) }), 1, { private: true }) === null, 'the envelope is valid')
+  const pub = groupPost({ text, replyTo: ref, card: worstCard({ ...THUMB(8191, K(0xfff)), width: 16384, height: 16384 }), fwd: 1, seen: ref, at: AT(2) })
+  t.comment('worst public group card post: ' + b4a.byteLength(JSON.stringify(pub)) + ' bytes')
+  t.ok(b4a.byteLength(JSON.stringify(pub)) <= 16384, 'a public card post fits one block')
 })

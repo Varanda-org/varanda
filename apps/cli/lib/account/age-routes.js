@@ -374,9 +374,16 @@ function createAgeRoutes ({
     send(res, 200, { nonce })
   }
 
+  // A key that deleted its account (Excluir conta) never links again, so it
+  // never pays for, nor shows anything to, the provider, and gets no band.
+  function notDeleted (member) {
+    if (typeof store.deletedAt === 'function' && store.deletedAt(member) !== null) throw refuse('conta-excluida')
+  }
+
   async function session (req, res, body) {
     available()
     const member = prove(body, 'session')
+    notDeleted(member)
     if (verified(member)) return sendVerified(res, member)
     const app = isAppRequest(req)
     const slot = slotOf(member, app)
@@ -464,6 +471,11 @@ function createAgeRoutes ({
   async function result (req, res, body) {
     available()
     const member = prove(body, 'result')
+    if (typeof store.deletedAt === 'function' && store.deletedAt(member) !== null) {
+      // A session opened before the deletion is closed at the provider now.
+      finalizeAll(member)
+      throw refuse('conta-excluida')
+    }
     if (!limits.result(member)) throw refuse('limite-idade')
     if (verified(member)) {
       // A session left open after the approval (a race with a replacement)

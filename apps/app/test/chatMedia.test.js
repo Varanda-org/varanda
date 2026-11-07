@@ -113,6 +113,18 @@ test('web DM: bytes become a blob: URL after bounds, then the plaintext is wiped
   t.ok(handed.every((b) => b === 0), 'the handed-over plaintext is zero-filled')
 })
 
+test('DM card thumbnail: index \'card\' keys apart from the photos and reaches the node as is', async (t) => {
+  const { chatMediaKey, createChatMedia } = await load()
+  t.is(chatMediaKey(ME, dmRef(1, 'card')), ME + '|dm|' + FROM + '|' + id(1) + '|card')
+  t.not(chatMediaKey(ME, dmRef(1, 'card')), chatMediaKey(ME, dmRef(1, 0)), 'a card never answers for photo 0')
+  for (const bad of ['0', 'cards', 4, -1, 1.5, null]) t.is(chatMediaKey(ME, dmRef(1, bad)), null, 'index ' + String(bad) + ' refused')
+  const media = createChatMedia()
+  const node = webNode()
+  const out = await media.sourceFor(dmRef(1, 'card'), { node, identity: ME, display: display() })
+  t.is(out.uri, 'blob:test/1')
+  t.alike(node.reads, [{ kind: 'dm', from: FROM, id: id(1), index: 'card' }], 'the node gets index card')
+})
+
 test('cache hit: the same ref is read once', async (t) => {
   const { createChatMedia } = await load()
   const media = createChatMedia()

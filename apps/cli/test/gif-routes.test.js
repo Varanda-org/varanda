@@ -597,3 +597,67 @@ test('gif: a session needs the current terms (v20 describes the provider)', asyn
   t.is(finish.status, 409)
   t.alike(finish.json, { error: 'termos-pendentes' })
 })
+
+// Finish order (member-session.js): a replayed or refused finish never
+// spends the member's finish window.
+async function gifSigned (call, member, memberHex, association) {
+  const nonce = (await call('POST', '/account/gif/session/start', { body: { member: memberHex } })).json.nonce
+  return { member: memberHex, nonce, signature: signInvite({ action: 'summary', nonce, member: memberHex, association }, member) }
+}
+
+test('gif: replaying a spent finish never charges the finish limit', async (t) => {
+  const { call, member, memberHex, association } = await setup(t)
+  const body = await gifSigned(call, member, memberHex, association)
+  t.is((await call('POST', '/account/gif/session/finish', { body })).status, 200)
+  for (let i = 0; i < FINISH_LIMIT * 2; i++) {
+    const again = await call('POST', '/account/gif/session/finish', { body })
+    if (again.status !== 404) return t.fail('replay ' + i + ' answered ' + again.status)
+  }
+  for (let i = 1; i < FINISH_LIMIT; i++) {
+    const res = await call('POST', '/account/gif/session/finish', { body: await gifSigned(call, member, memberHex, association) })
+    if (res.status !== 200) return t.fail('fresh finish ' + i + ' answered ' + res.status)
+  }
+  const over = await call('POST', '/account/gif/session/finish', { body: await gifSigned(call, member, memberHex, association) })
+  t.is(over.status, 429, 'only the issued sessions counted')
+})
+
+test('gif: finishes refused for terms or standing never charge the finish limit', async (t) => {
+  const { call, member, memberHex, association, terms, blocked } = await setup(t, { accepted: false })
+  for (let i = 0; i < FINISH_LIMIT + 2; i++) {
+    const res = await call('POST', '/account/gif/session/finish', { body: await gifSigned(call, member, memberHex, association) })
+    if (res.status !== 409) return t.fail('pending terms ' + i + ' answered ' + res.status)
+  }
+  terms.accept({ member: memberHex, version: TERMS_VERSION, nonce: 'n'.repeat(43), signature: 'b'.repeat(128) })
+  const held = []
+  for (let i = 0; i < FINISH_LIMIT + 2; i++) held.push(await gifSigned(call, member, memberHex, association))
+  blocked.add(memberHex)
+  for (const body of held) {
+    const res = await call('POST', '/account/gif/session/finish', { body })
+    if (res.status !== 403) return t.fail('blocked finish answered ' + res.status)
+  }
+  blocked.delete(memberHex)
+  const ok = await call('POST', '/account/gif/session/finish', { body: held[0] })
+  t.is(ok.status, 200, 'the window is untouched and a refused nonce stays usable')
+})
+
+test('gif: a clock stepped back never revives a spent nonce', async (t) => {
+  const { call, member, memberHex, association, clock } = await setup(t)
+  const body = await gifSigned(call, member, memberHex, association)
+  t.is((await call('POST', '/account/gif/session/finish', { body })).status, 200)
+  // Past the nonce's expiry, another finish sweeps the spent table.
+  clock.offset += 601 * 1000
+  t.is((await call('POST', '/account/gif/session/finish', { body: await gifSigned(call, member, memberHex, association) })).status, 200)
+  clock.offset -= 601 * 1000
+  const replay = await call('POST', '/account/gif/session/finish', { body })
+  t.is(replay.status, 404, 'the spent entry outlived the sweep')
+  t.alike(replay.json, { error: 'expirado' })
+})
+
+test('gif: a session is re-checked at once when the clock reads earlier than the last check', async (t) => {
+  const { login, search, blocked, clock, memberHex } = await setup(t)
+  const { token } = await login()
+  t.is((await search(token, { q: 'gato' })).status, 200)
+  blocked.add(memberHex)
+  clock.offset -= 120 * 1000
+  t.is((await search(token, { q: 'gato' })).status, 401, 'a clock behind the last check re-checks')
+})

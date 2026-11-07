@@ -216,6 +216,44 @@ export function credentialIdOf (response) {
   return id.replace(/=+$/, '')
 }
 
+// A base64url field of the module's JSON, unpadded, or null (missing, not
+// base64url, or longer than max characters).
+function b64Field (value, max) {
+  if (typeof value !== 'string' || value === '' || value.length > max + 2 || !/^[A-Za-z0-9_-]+=*$/.test(value)) return null
+  const bare = value.replace(/=+$/, '')
+  return bare.length > 0 && bare.length <= max && bare.length % 4 !== 1 ? bare : null
+}
+
+// The assertion of a get response, for the account service to verify
+// (Excluir conta, apps/cli/lib/account/webauthn.js): { credentialId,
+// clientDataJSON, authenticatorData, signature }, base64url. Throws WEBAUTHN
+// when a field is missing.
+export function assertionOf (response) {
+  const r = responseObject(response)
+  const inner = r.response !== null && typeof r.response === 'object' ? r.response : {}
+  const out = {
+    credentialId: credentialIdOf(response),
+    clientDataJSON: b64Field(inner.clientDataJSON, 1366),
+    authenticatorData: b64Field(inner.authenticatorData, 1366),
+    signature: b64Field(inner.signature, 683)
+  }
+  if (out.clientDataJSON === null || out.authenticatorData === null || out.signature === null) throw passkeyError('WEBAUTHN')
+  return out
+}
+
+// A create response's attestation object (base64url, unpadded) for the
+// passkey enrolment at the account service, or null when the platform gave
+// none (iOS may omit it) or it is larger than the service accepts.
+export function attestationOf (response) {
+  try {
+    const r = responseObject(response)
+    const inner = r.response !== null && typeof r.response === 'object' ? r.response : {}
+    return b64Field(inner.attestationObject, 2731)
+  } catch {
+    return null
+  }
+}
+
 // The hex of the passkey's user handle when the authenticator returned it,
 // else ''.
 export function userHandleOf (response) {

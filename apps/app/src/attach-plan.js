@@ -89,7 +89,10 @@ function checked (method, params) {
 // Attachments are staged { name, mime, width, height } files. Uploads run
 // in order; send(uploadResults) builds the final request without doing I/O.
 // Real upload descriptors are needed to measure the sealed DM text budget.
-export function composePlan ({ text = '', attachments = [], target }) {
+// card: a link card (linkCard.js cardForSend, its image already uploaded)
+// for a text-only message: never with media, counted in the DM text budget
+// and checked by the rpc rules with the request.
+export function composePlan ({ text = '', attachments = [], target, card = null }) {
   if (!Array.isArray(attachments)) throw new Error('anexos inválidos')
   if (attachments.length > MAX_MEDIA_PER_POST) throw new Error('no máximo quatro imagens')
   if (!target || !['dm', 'group'].includes(target.kind)) throw new Error('destino inválido')
@@ -100,6 +103,10 @@ export function composePlan ({ text = '', attachments = [], target }) {
   const base = dm ? { to: target.to, text } : { group: target.group, text }
   if (target.replyTo != null) base.replyTo = dm ? target.replyTo : { ...target.replyTo }
   if (target.fwd === 1) base.fwd = 1
+  if (card !== null && card !== undefined) {
+    if (attachments.length > 0) throw new Error('prévia de link vai só com texto')
+    base.card = cardCopy(card)
+  }
   // Without its own certificate the app measures with the largest one a msg
   // can carry, so the node never refuses as too long what fit here.
   const cert = target.cert == null ? MEMBER_CERT_STANDIN : JSON.parse(JSON.stringify(target.cert))
@@ -124,6 +131,7 @@ export function composePlan ({ text = '', attachments = [], target }) {
     if (!Array.isArray(media) || media.length !== count) throw new Error('anexos pendentes')
     const params = { ...base }
     if (base.replyTo && !dm) params.replyTo = { ...base.replyTo }
+    if (base.card) params.card = cardCopy(base.card)
     if (count > 0) {
       params.media = media.map(item => ({ ...item }))
       if (sealed) params.sealed = true
@@ -138,6 +146,40 @@ export function composePlan ({ text = '', attachments = [], target }) {
   // checked once their uploads supply the actual descriptors.
   if (count === 0) send()
   return { uploads, send, preview: attachmentPreview(text, attachments) }
+}
+
+function cardCopy (card) {
+  if (!card || typeof card !== 'object' || Array.isArray(card)) throw new Error('prévia inválida')
+  const { url, host, title, desc, image } = card
+  return { url, host, title, desc, image: image && typeof image === 'object' ? { ...image } : image }
+}
+
+// Whether a DM text still fits next to this card (linkCard.js cardForSend
+// asks with a stand-in image, before any upload). Group and post texts are
+// counted in code points, which a card does not change: always true there.
+export function cardFits ({ text = '', target, card }) {
+  try {
+    if (!target || target.kind !== 'dm') return true
+    const fields = { to: target.to, text, card: cardCopy(card) }
+    if (target.replyTo != null) fields.replyTo = target.replyTo
+    if (target.fwd === 1) fields.fwd = 1
+    const cert = target.cert == null ? MEMBER_CERT_STANDIN : target.cert
+    return dmTextBytes(text) <= textBudget({ ...fields, cert })
+  } catch {
+    return false
+  }
+}
+
+// A diary post's link card (`preview` of post.create, post.reply and
+// post.quote): the params with it, checked by the rpc rules. -> the checked
+// params; throws when they refuse it (the caller then posts plain text).
+export function withPreview (method, params, preview) {
+  if (!['post.create', 'post.reply', 'post.quote'].includes(method)) throw new Error('pedido inválido')
+  if (preview === null || preview === undefined) return params
+  if (Array.isArray(params.media) && params.media.length > 0) throw new Error('prévia de link vai só com texto')
+  const result = validateParams(method, { ...params, preview: cardCopy(preview) })
+  if (!result.ok) throw new Error(result.message)
+  return { ...params, preview: cardCopy(preview) }
 }
 
 // The node checks the recorded bytes (audioBounds) when it uploads them; here

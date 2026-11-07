@@ -684,3 +684,90 @@ test('text forward budgets include the v2 keys without media', (t) => {
   const len = (inner[0] << 8) | inner[1]
   t.is(budget - 2, DM_INNER_BYTES - len - 66, 'the budget matches the signed inner')
 })
+
+function dmThumb (over = {}) {
+  return blobItem(9, { chunks: 1, bytes: 32768, w: 400, h: 210, ...over })
+}
+
+function dmCard (over = {}) {
+  return { url: 'https://example.com/a', host: 'example.com', title: 'Título', desc: 'Descrição', image: dmThumb(), ...over }
+}
+
+test('inner v2: a link card', (t) => {
+  const inner = msg({ text: 'olha https://example.com/a', card: dmCard() })
+  const body = openInner(inner, bia.hex, O)
+  t.is(body.v, 2, 'a card with no media and fwd 0 is v2')
+  t.alike(body.card, dmCard())
+  t.is(body.media, null)
+  t.is(body.fwd, 0)
+  t.alike(openInner(msg({ text: 'oi', card: dmCard({ image: null }) }), bia.hex, O).card, dmCard({ image: null }), 'no thumbnail')
+  t.is(openInner(msg({ text: 'oi', card: dmCard(), fwd: 1 }), bia.hex, O).fwd, 1, 'a forwarded card')
+  t.is(openInner(msg({ text: 'oi', card: null }), bia.hex, O).v, 1, 'plain text stays v1')
+
+  // Built in any key order, written in the canonical one; a reordered card refused on open.
+  const shuffled = Object.fromEntries(Object.entries(dmCard({ image: Object.fromEntries(Object.entries(dmThumb()).reverse()) })).reverse())
+  const len = (x) => (x[0] << 8) | x[1]
+  const canon = msg({ text: 'oi', card: shuffled })
+  const parsed = JSON.parse(b4a.toString(canon.subarray(2, 2 + len(canon))))
+  t.alike(Object.keys(parsed.card), ['url', 'host', 'title', 'desc', 'image'])
+  t.alike(Object.keys(parsed.card.image), dm.DM_MEDIA_KEYS)
+  t.is(openInner(forge(v2Body({ media: null, card: shuffled }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'card key order')
+
+  const bad = {
+    'with media': v2Body({ card: dmCard() }),
+    'empty text': v2Body({ media: null, text: '', card: dmCard() }),
+    http: v2Body({ media: null, card: dmCard({ url: 'http://example.com/a' }) }),
+    javascript: v2Body({ media: null, card: dmCard({ url: 'javascript:alert(1)' }) }),
+    data: v2Body({ media: null, card: dmCard({ url: 'data:text/html,x' }) }),
+    ftp: v2Body({ media: null, card: dmCard({ url: 'ftp://example.com/a' }) }),
+    credentials: v2Body({ media: null, card: dmCard({ url: 'https://u:p@example.com/a' }) }),
+    'host mismatch': v2Body({ media: null, card: dmCard({ host: 'evil.com' }) }),
+    'long title': v2Body({ media: null, card: dmCard({ title: 'x'.repeat(81) }) }),
+    'long desc': v2Body({ media: null, card: dmCard({ desc: 'x'.repeat(161) }) }),
+    'control in title': v2Body({ media: null, card: dmCard({ title: 'a\u001b[2J' }) }),
+    'bidi in desc': v2Body({ media: null, card: dmCard({ desc: 'a⁦' }) }),
+    'image over 32768': v2Body({ media: null, card: dmCard({ image: dmThumb({ chunks: 2, bytes: 32769 }) }) }),
+    'image not jpeg': v2Body({ media: null, card: dmCard({ image: dmThumb({ mime: 'image/png' }) }) }),
+    'image a voice note': v2Body({ media: null, card: dmCard({ image: voiceItem(1, { chunks: 1, bytes: 1000 }) }) }),
+    'image a public descriptor': v2Body({ media: null, card: dmCard({ image: { core: 'a'.repeat(64), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'd'.repeat(64), width: 1, height: 1 } }) }),
+    'image a url': v2Body({ media: null, card: dmCard({ image: 'https://example.com/x.jpg' }) }),
+    'card extra key': v2Body({ media: null, card: { ...dmCard(), extra: 1 } })
+  }
+  for (const [name, body] of Object.entries(bad)) {
+    t.is(openInner(forge(body, ana, DM_SIG_PREFIX_V2), bia.hex, O), null, name + ' refused on open')
+    t.exception.all(() => msg({ text: body.text, media: body.media, card: body.card }), /mensagem inválida/, name + ' refused on build')
+  }
+  t.ok(dm.validDmCard(dmCard()))
+  t.absent(dm.validDmCard(dmCard({ image: dmThumb({ bytes: 32769, chunks: 2 }) })))
+})
+
+test('inner v2: legacy v1 bodies still open next to cards', (t) => {
+  const v1Body = { v: 1, kind: 'msg', id: 'b'.repeat(32), from: ana.hex, to: bia.hex, replyTo: null, text: 'oi', op: null, peer: null, at: AT, cert: ana.cert }
+  const body = openInner(forge(v1Body, ana), bia.hex, O)
+  t.is(body.v, 1)
+  t.alike(Object.keys(body), [...dm.INNER_KEYS, 'mine'])
+  t.is(openInner(forge({ ...v1Body, card: dmCard() }, ana), bia.hex, O), null, 'v1 plus a card')
+})
+
+test('inner v2: the worst card fits the DM frame with the largest certificate', (t) => {
+  const who = largestV2Sender()
+  const worst = dmCard({
+    url: 'https://example.com/' + '%'.repeat(280),
+    title: '\u{1F600}'.repeat(80),
+    desc: '\u{1F600}'.repeat(160),
+    image: dmThumb({ id: 'f'.repeat(64), w: 16384, h: 16384 })
+  })
+  t.is(worst.url.length, 300)
+  const fields = { kind: 'msg', to: bia.hex, at: AT, replyTo: 'a'.repeat(32), cert: who.cert, card: worst, fwd: 1 }
+  const budget = textBudget(fields)
+  t.is(budget, dmTextBudget(fields), 'rpc and core agree')
+  t.ok(budget >= 4 * 100, 'room for at least 100 four-byte characters next to the worst card (' + budget + ' text bytes)')
+  const inner = buildInner({ ...fields, text: textOfBytes(budget) }, who)
+  t.alike(openInner(inner, bia.hex, O).card, worst, 'the worst card at the full budget opens')
+  t.exception.all(() => buildInner({ ...fields, text: textOfBytes(budget) + 'x' }, who), /mensagem longa demais/, 'one byte more throws')
+  const one = buildInner({ ...fields, text: 'x' }, who)
+  const used = ((one[0] << 8) | one[1]) + 66 - 1
+  t.comment('worst DM card inner without text: ' + used + ' of ' + DM_INNER_BYTES + ' bytes; text budget ' + budget)
+  t.is(used + budget, DM_INNER_BYTES, 'the budget is exactly what is left')
+  t.is(sealInner(one, boxPair().hex).byteLength, DM_SEALED_BYTES, 'the sealed frame keeps its size')
+})

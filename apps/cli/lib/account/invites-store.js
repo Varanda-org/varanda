@@ -332,6 +332,29 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
     }
   }
 
+  // Excluir conta: drops every row the member issued, used or not (a used
+  // row holds no hash, and the directory alone answers whether an id was
+  // used). The only removal besides the age pruning. -> { changed }
+  function forget (member) {
+    return enqueue(() => {
+      if (!isLowerHex(member, 32)) throw new TypeError('member must be 64 lowercase hex characters')
+      writable()
+      const { next, stale } = reread()
+      const kept = next.invites.filter((r) => r.inviter !== member)
+      if (kept.length === next.invites.length) {
+        settle(next, stale)
+        return { changed: false }
+      }
+      persist({ ...next, invites: kept })
+      return { changed: true }
+    })
+  }
+
+  // In memory: true while `member` has a row here.
+  function holds (member) {
+    return state.invites.some((r) => r.inviter === member)
+  }
+
   function weekCount (invites, member, nowMs) {
     const from = weekStart(nowMs)
     const to = from + WEEK_MS
@@ -492,6 +515,8 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
 
   const store = {
     issue,
+    forget,
+    holds,
     check,
     consume,
     heal,

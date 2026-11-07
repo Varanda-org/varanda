@@ -542,7 +542,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     const q = peeked ? postAt(peeked, qref) : null
     if (q) {
       const qwho = identityOf(names, q.author, q)
-      quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => onOpenThread({ ref: qref, seed: q }), onOpenMention: typeof onOpenMention === 'function' ? (u) => onOpenMention(u, { author: q.author, username: qwho.username }) : undefined }
+      quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, preview: q.preview || null, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => onOpenThread({ ref: qref, seed: q }), onOpenMention: typeof onOpenMention === 'function' ? (u) => onOpenMention(u, { author: q.author, username: qwho.username }) : undefined }
     } else {
       quote = { author: item.quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, persist: false, missing: true, onOpen: () => onOpenThread({ ref: qref }) }
     }
@@ -558,6 +558,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     text: item.text,
     replyToName: parentRef ? replyNameOf(names.profileOf(item.replyTo.author)) : null,
     media: item.media || null,
+    preview: item.preview || null,
     persistMedia: item.author === ownKey || (follows !== null && follows.has(item.author)),
     now,
     quote,
@@ -599,6 +600,7 @@ export function seedItem (seed, ref) {
     replyTo: seed.replyTo || null,
     quote: seed.quote || null,
     media: Array.isArray(seed.media) && seed.media.length > 0 ? seed.media : null,
+    preview: seed.preview && typeof seed.preview === 'object' ? seed.preview : null,
     name: typeof seed.name === 'string' ? seed.name : null,
     username: typeof seed.username === 'string' ? seed.username : null,
     avatar: avatarOf(seed.avatar)

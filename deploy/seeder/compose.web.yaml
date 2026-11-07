@@ -185,6 +185,10 @@ services:
       VARANDA_GIF_API_URL: "${VARANDA_GIF_API_URL:-}"
       VARANDA_GIF_API_KEY: "${VARANDA_GIF_API_KEY:-}"
       VARANDA_GIF_MEDIA_HOSTS: "${VARANDA_GIF_MEDIA_HOSTS:-}"
+      # Excluir conta: o mesmo certificado do assetlinks.json; a conta aceita
+      # a passkey do app Android (origem android:apk-key-hash). Vazio: só a
+      # origem pública, e a exclusão pelo app Android espera os 7 dias.
+      VARANDA_ANDROID_CERT_SHA256: "${VARANDA_ANDROID_CERT_SHA256:-}"
       # Pesos do modelo, dentro de account-data; baixados uma vez pelo
       # operador (scripts/fetch-ai-model.js), nunca em tempo de execução.
       VARANDA_AI_MODEL_DIR: "/data/ai-model"

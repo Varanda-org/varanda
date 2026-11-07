@@ -558,8 +558,8 @@ test('every item has a kind; post items carry quote', async (t) => {
   ]
   const { items } = buildFeed({ logs, now: NOW })
   t.alike(items.map((i) => i.kind), ['post', 'post', 'post'])
-  t.alike(items[0], { kind: 'post', author: KB, name: null, username: null, seq: 1, at: T1, text: 'b1', replyTo: null, quote: null, media: null })
-  t.alike(items[1], { kind: 'post', author: KA, name: 'Ana', username: null, seq: 2, at: T2, text: 'olha', replyTo: null, quote: { author: KB, seq: 1 }, media: null })
+  t.alike(items[0], { kind: 'post', author: KB, name: null, username: null, seq: 1, at: T1, text: 'b1', replyTo: null, quote: null, media: null, preview: null })
+  t.alike(items[1], { kind: 'post', author: KA, name: 'Ana', username: null, seq: 2, at: T2, text: 'olha', replyTo: null, quote: { author: KB, seq: 1 }, media: null, preview: null })
   t.ok(items[1].quote !== q.quote, 'quote is a copy')
   t.alike(items[2].replyTo, { author: KB, seq: 1 })
   t.is(items[2].quote, null)
@@ -574,7 +574,7 @@ test('repost items appear and disappear with on/off', async (t) => {
   const base = [{ seq: 0, record: cert(KA) }, { seq: 1, record: profile('Ana') }]
   const feed = (entries) => buildFeed({ logs: [{ key: KA, entries: base.concat(entries) }], now: NOW }).items
   t.alike(feed([{ seq: 2, record: repost(KB, 4, true, T2) }]), [
-    { kind: 'repost', author: KA, name: 'Ana', username: null, seq: 2, at: T2, to: { author: KB, seq: 4 }, text: null, replyTo: null, quote: null, media: null }
+    { kind: 'repost', author: KA, name: 'Ana', username: null, seq: 2, at: T2, to: { author: KB, seq: 4 }, text: null, replyTo: null, quote: null, media: null, preview: null }
   ])
   t.alike(feed([{ seq: 2, record: repost(KB, 4, true, T2) }, { seq: 3, record: repost(KB, 4, false, T3) }]), [], 'off removes it')
   const again = feed([{ seq: 2, record: repost(KB, 4, true, T1) }, { seq: 3, record: repost(KB, 4, false, T2) }, { seq: 4, record: repost(KB, 4, true, T3) }])
@@ -608,10 +608,10 @@ test('repost items share ordering, before, limit and the future rule', async (t)
 
 test('formatFeedItem: repost one-liner and quote marker', async (t) => {
   await testnet(t)
-  const r = { kind: 'repost', author: KA, name: 'Ana\u001b[2J', username: null, seq: 5, at: T2, to: { author: KB, seq: 4 }, text: null, replyTo: null, quote: null, media: null }
+  const r = { kind: 'repost', author: KA, name: 'Ana\u001b[2J', username: null, seq: 5, at: T2, to: { author: KB, seq: 4 }, text: null, replyTo: null, quote: null, media: null, preview: null }
   t.is(formatFeedItem(r), '[' + T2 + '] Ana\\u{1b}[2J (aaaaaaaa) #5 republicou bbbbbbbb#4')
   t.is(formatFeedItem(r, { width: 80 }).split('\n').length, 1)
-  const q = { kind: 'post', author: KA, name: 'Ana', username: null, seq: 6, at: T2, text: 'olha', replyTo: null, quote: { author: KB, seq: 4 }, media: null }
+  const q = { kind: 'post', author: KA, name: 'Ana', username: null, seq: 6, at: T2, text: 'olha', replyTo: null, quote: { author: KB, seq: 4 }, media: null, preview: null }
   t.is(formatFeedItem(q), '[' + T2 + '] Ana (aaaaaaaa) #6 cita bbbbbbbb#4\n  olha')
 })
 
@@ -636,7 +636,7 @@ test('a deleted post, reply and quote vanish from the feed', (t) => {
   t.is(JSON.stringify(logs), before, 'inputs unchanged')
   t.alike(future, [])
   t.is(items.length, 1)
-  t.alike(items[0], { kind: 'post', author: KA, name: 'Ana', username: null, seq: 5, at: T3, text: 'fica', replyTo: null, quote: null, media: null })
+  t.alike(items[0], { kind: 'post', author: KA, name: 'Ana', username: null, seq: 5, at: T3, text: 'fica', replyTo: null, quote: null, media: null, preview: null })
   // Partial, unordered entries: the tombstone still hides its target.
   const partial = [
     { seq: 8, record: tombstone(4) },
@@ -697,10 +697,10 @@ test('a repost of a deleted target vanishes only when that log was supplied', (t
   const { items } = buildFeed({ logs: [{ key: KA, entries: author }, { key: KB, entries: other }], now: NOW })
   const label = (i) => i.kind === 'repost' ? 'r' : i.text
   t.alike(items.map(label), ['vivo', 'resposta', 'r', 'citação'])
-  t.alike(items[0], { kind: 'post', author: KA, name: null, username: null, seq: 2, at: T2, text: 'vivo', replyTo: null, quote: null, media: null })
+  t.alike(items[0], { kind: 'post', author: KA, name: null, username: null, seq: 2, at: T2, text: 'vivo', replyTo: null, quote: null, media: null, preview: null })
   t.is(items[1].text, 'resposta')
   t.alike(items[1].replyTo, { author: KA, seq: 1 })
-  t.alike(items[2], { kind: 'repost', author: KB, name: null, username: null, seq: 2, at: T3, to: { author: KC, seq: 4 }, text: null, replyTo: null, quote: null, media: null })
+  t.alike(items[2], { kind: 'repost', author: KB, name: null, username: null, seq: 2, at: T3, to: { author: KC, seq: 4 }, text: null, replyTo: null, quote: null, media: null, preview: null })
   t.is(items[3].text, 'citação')
   t.alike(items[3].quote, { author: KA, seq: 1 })
   t.not(items[3].quote, quote.quote)
@@ -814,4 +814,18 @@ test('a verified page-moved hides the log after its seq', (t) => {
     const viaRaw = buildFeed({ logs: [{ key: P, entries: stripped, raw: entries(m) }], association: assoc, now: NOW })
     t.alike(viaRaw.items.map(label), ['before', 'r1'], 'raw blocks decide the cut at the ' + what)
   }
+})
+
+test('feed copies link previews on posts, replies and quotes', (t) => {
+  const preview = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
+  preview.image = { core: KB, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: KA, width: 4, height: 4 }
+  const entries = [{ seq: 0, record: cert(KA) }, ...[{}, { replyTo: { author: KB, seq: 1 } }, { quote: { author: KB, seq: 1 } }].map((extra, i) => ({ seq: i + 1, record: { ...post('link', AT), ...extra, preview } })), { seq: 4, record: post('plain', AT) }]
+  const { items } = buildFeed({ logs: [{ key: KA, entries }], now: NOW })
+  t.is(items.length, 4)
+  for (const item of items.slice(0, 3)) {
+    t.alike(item.preview, preview)
+    t.not(item.preview, preview)
+    t.not(item.preview.image, preview.image)
+  }
+  t.is(items[3].preview, null)
 })

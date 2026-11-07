@@ -2367,3 +2367,82 @@ test('invite: a journal where two links carry the same invite still opens and th
   await rw.close()
   t.is(Object.values(readSnapshotFile(dir).links).filter((l) => l.invite === INVITE).length, 2)
 })
+
+test('deleteMember: the link goes, the names stay burned, the sub is free and the key never links again', async (t) => {
+  const { store, iss, c, open, dir } = setup(t)
+  const ana = memberKey()
+  await link(store, iss, ana, 'ana', 'sub-ana', 'ana@example.test')
+  c.t += COOLDOWN_MS
+  await store.rename(ana, 'ana_2', iss.kp, iss.cert)
+  c.t += HOUR
+  const r = await store.deleteMember(ana)
+  t.alike(r, { at: new Date(c.t).toISOString(), already: false })
+  t.alike(store.status(ana), { linked: false, deletedAt: r.at })
+  t.is(store.deletedAt(ana), r.at)
+  t.alike(store.deletedMembers(), [ana])
+  t.is(store.lookup('ana_2'), null, 'the current name answers no one')
+  t.is(store.exportLinks().length, 0, 'no sub or e-mail left for the operator export')
+  t.is(store.linkStats().members, 0)
+  t.alike(journalLines(dir).at(-1), { seq: 3, op: 'delete', member: ana, at: r.at })
+
+  const again = await store.deleteMember(ana)
+  t.alike(again, { at: r.at, already: true }, 'idempotent, the first date stands')
+  t.is(journalLines(dir).length, 3, 'no second line')
+
+  throwsCode(t, () => store.start({ member: ana, username: 'ana_3' }), 'conta-excluida', 'the deleted key never links again')
+  const bia = memberKey()
+  throwsCode(t, () => store.start({ member: bia, username: 'ana' }), 'nome-em-uso', 'an old name stays burned')
+  throwsCode(t, () => store.start({ member: bia, username: 'ana_2' }), 'nome-em-uso', 'the last name stays burned')
+  await link(store, iss, bia, 'bia', 'sub-ana', 'ana@example.test')
+  t.is(store.status(bia).linked, true, 'the same Google account may link a new key')
+
+  await rejects(t, store.deleteMember(memberKey()), 'nao-encontrado', 'an unknown key')
+  await store.close()
+  const back = open()
+  t.alike(back.status(ana), { linked: false, deletedAt: r.at }, 'survives a clean close')
+  throwsCode(t, () => back.start({ member: memberKey(), username: 'ana_2' }), 'nome-em-uso', 'still burned after reopen')
+  t.alike(readSnapshotFile(dir).deleted, { [ana]: { at: r.at } })
+  t.absent('sub' in readSnapshotFile(dir).deleted[ana])
+  await back.close()
+})
+
+test('deleteMember: the high-water mark counts deleted rows, so compaction and reopen keep working', async (t) => {
+  const { store, iss, open, dir } = setup(t)
+  const keys = []
+  for (let i = 0; i < 3; i++) {
+    keys.push(memberKey())
+    await link(store, iss, keys[i], 'nome_' + i)
+  }
+  await store.close()
+  const s2 = open()
+  t.is(readHwmFile(dir).links, 3)
+  await s2.deleteMember(keys[0])
+  await s2.deleteMember(keys[1])
+  await s2.close()
+  t.is(readHwmFile(dir).links, 3, 'links plus deleted rows')
+  const s3 = open()
+  t.is(s3.restored, false)
+  t.is(s3.linkStats().members, 1)
+  t.alike(s3.deletedMembers(), [keys[0], keys[1]].sort())
+  await s3.close()
+})
+
+test('a snapshot whose deleted row is also a link, or holds more than the date, is refused', async (t) => {
+  const { store, iss, open, dir } = setup(t)
+  const ana = memberKey()
+  await link(store, iss, ana, 'ana')
+  await store.deleteMember(ana)
+  await store.close()
+  const good = readSnapshotFile(dir)
+  const write = (obj) => fs.writeFileSync(path.join(dir, FILE), JSON.stringify(obj))
+  write({ ...good, deleted: { [ana]: { at: good.deleted[ana].at, sub: 'x' } } })
+  t.exception(() => open(), /inválido/, 'extra field')
+  const noDeleted = { ...good }
+  delete noDeleted.deleted
+  write(noDeleted)
+  t.exception(() => open(), /inválido/, 'a burned name without its deleted holder')
+  write(good)
+  const ok = open()
+  t.is(ok.deletedAt(ana), good.deleted[ana].at)
+  await ok.close()
+})
