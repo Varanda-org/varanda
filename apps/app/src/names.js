@@ -29,9 +29,9 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
-import { useNode } from './node'
+import { useNode, useSyncSignals } from './node'
 import { namesQuiet } from './autoSyncPolicy'
-import { applySeed, authoritative, fieldsOf, viewOf } from './namesCache'
+import { applySeed, authoritative, fieldsOf, stableView } from './namesCache'
 
 // The seeder's page hint rides with the name (only a hint: Membro verifies
 // with page.read). profile.read never says it, so it is carried over.
@@ -58,7 +58,9 @@ export function useNames () {
 
 export function NamesProvider ({ children }) {
   const node = useNode()
-  const { phase, sync, request, epoch, signals } = node
+  const { phase, sync, request, epoch } = node
+  // Every fresh key, not only the own one useNode().signals keeps.
+  const signals = useSyncSignals()
   const autoSync = node.autoSync || { wanted: false, reconciling: false }
   const generation = node.passkey ? node.passkey.generation : 0
   const ownKey = node.passkey && node.passkey.status && typeof node.passkey.status.publicKey === 'string'
@@ -360,13 +362,19 @@ export function NamesProvider ({ children }) {
     }, FRESH_DEBOUNCE_MS)
   }, [fresh, commit, queueBack])
 
+  // The views handed out, per key: the same object while the entry says the
+  // same thing, so memoized rows skip a re-render when another key changed.
+  const viewsRef = useRef(new Map())
   const profileOf = useCallback((key) => {
     if (typeof key !== 'string') return undefined
-    const entry = cache.get(key.toLowerCase())
+    const k = key.toLowerCase()
+    const entry = cache.get(k)
     if (entry === undefined) return unsupported ? null : undefined
     if (entry === null) return null
-    const view = viewOf(entry)
-    return entry.page === true ? { ...view, page: true, closed: entry.closed === true, moved: entry.moved === true } : view
+    const prev = viewsRef.current.get(k)
+    const view = stableView(entry, prev)
+    if (view !== prev) viewsRef.current.set(k, view)
+    return view
   }, [cache, unsupported])
 
   // Compat: string | null (looked up, no name) | undefined (unknown).

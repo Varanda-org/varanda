@@ -21,7 +21,17 @@ export const EMPTY_SIGNALS = Object.freeze({
   idleSince: null
 })
 
+// The previous object comes back when an event changes nothing, so the
+// provider's setState bails out and no consumer re-renders on that line.
 export function foldSignal (state, name, data, now) {
+  const next = foldNext(state, name, data, now)
+  for (const key of Object.keys(next)) {
+    if (next[key] !== state[key]) return next
+  }
+  return state
+}
+
+function foldNext (state, name, data, now) {
   const next = { ...state }
   if (name === 'sync.started') {
     return {
@@ -60,10 +70,8 @@ export function foldSignal (state, name, data, now) {
     const downloaded = data.result && data.result.downloaded
     if (downloaded && typeof downloaded === 'object') {
       // A stopped run provides baselines, not evidence of new growth.
-      next.lengths = {
-        ...state.lengths,
-        ...Object.fromEntries(Object.entries(downloaded).map(([key, n]) => [key, Math.max(state.lengths[key] ?? n, n)]))
-      }
+      const grown = Object.entries(downloaded).filter(([key, n]) => state.lengths[key] === undefined || n > state.lengths[key])
+      if (grown.length > 0) next.lengths = { ...state.lengths, ...Object.fromEntries(grown) }
     }
     return next
   }
@@ -89,8 +97,8 @@ export function foldSignal (state, name, data, now) {
     if (known === undefined || n > known) {
       next.fresh = { ...state.fresh, [key]: n }
       next.lastDownloadAt = now
+      next.lengths = { ...state.lengths, [key]: n }
     }
-    next.lengths = { ...state.lengths, [key]: Math.max(known ?? n, n) }
   }
   // The newest posts of a followed diary arrived. Its own map: `lengths` is
   // the present length, which a later history download must still grow.
@@ -102,8 +110,8 @@ export function foldSignal (state, name, data, now) {
     if (known === undefined || n > known) {
       next.fresh = { ...state.fresh, [key]: n }
       next.lastDownloadAt = now
+      next.newest = { ...state.newest, [key]: n }
     }
-    next.newest = { ...state.newest, [key]: Math.max(known ?? n, n) }
   }
   const own = /^diário próprio sincronizado \((0|[1-9][0-9]*)\)$/.exec(line)
   if (own) {
