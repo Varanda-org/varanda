@@ -107,18 +107,22 @@ test('largeFeed returns 200 fixture-shaped rows with unique keys', async (t) => 
 
 test('createVitrineRequest keeps the fixture feed unless large is on', async (t) => {
   const { fixtures, largeFeed, createVitrineRequest } = await load()
+  // feed.read lists only followed diaries and the own one: the fixtures also
+  // hold photo posts of a person the own member does not follow (her Mural).
+  const visible = fixtures.feed.filter((p) => p.author === fixtures.own || fixtures.follows.includes(p.author)).length
+  t.ok(visible > 0 && visible < fixtures.feed.length, 'some fixture posts are by someone not followed')
   const plain = await pageFeed(createVitrineRequest(fixtures))
-  t.is(plain.length, fixtures.feed.length)
+  t.is(plain.length, visible)
   const off = await pageFeed(createVitrineRequest(fixtures, {}))
-  t.is(off.length, fixtures.feed.length)
+  t.is(off.length, visible)
   const notQuite = await pageFeed(createVitrineRequest(fixtures, { large: 1 }))
-  t.is(notQuite.length, fixtures.feed.length)
+  t.is(notQuite.length, visible)
   const n = fixtures.feed.length
   const generated = largeFeed(fixtures)
   const paged = await pageFeed(createVitrineRequest(fixtures, { large: true }))
   t.is(fixtures.feed.length, n, 'the caller fixtures stay the design-review set')
   t.ok(paged.length > 200)
-  t.is(paged.length, n + generated.length)
+  t.is(paged.length, visible + generated.length)
   const seen = new Set(paged.map(keyOf))
   t.is(seen.size, paged.length)
   t.ok(generated.every((item) => seen.has(keyOf(item))))
