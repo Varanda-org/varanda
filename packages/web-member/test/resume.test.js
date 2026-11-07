@@ -22,7 +22,8 @@ const ws = require('ws')
 const b4a = require('b4a')
 const { testnet, tmpDir, localSwarmOptions } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
-const { keyPairFromPrf, mediaKeyPairFromPrf, toBase64Url } = require('../lib/passkey')
+const { keyPairFromPrf, mediaKeyPairFromPrf, dmLocalKeyFromPrf, toBase64Url } = require('../lib/passkey')
+const { createDmStore } = require('../lib/dm-store')
 const { createSessionStore, STORE, RECORD_KEY } = require('../lib/session-store')
 const nodeModule = require('../lib/node')
 const { Seeder } = require('@varanda/core/lib/seeder')
@@ -161,9 +162,11 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
   // once, the caller zeroes it right after) and a stub mediaUpload.
   const pairs = []
   const uploads = []
+  let nodeStorage = null
   const realCreate = nodeModule.createBrowserNode
   nodeModule.createBrowserNode = (options) => {
     t.is(options.leaseHoldMs, 0, 'the hosted page keeps its seeder link while visible (lease off)')
+    nodeStorage = options.storage
     const node = realCreate(options)
     const setKeyPair = node.setKeyPair
     node.setKeyPair = (pair, extra) => {
@@ -185,6 +188,19 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
   })
   require('../web/node.js')
   const api = globalThis.VarandaWebNode
+
+  // The ops of the node's message store, read with the right passkey's key.
+  const storedOps = async () => {
+    const reader = createDmStore({ storage: nodeStorage })
+    const localKey = await dmLocalKeyFromPrf(new Uint8Array(FIXED32))
+    try {
+      await reader.unlock(localKey)
+      return reader.snapshot().ops.map((r) => [r.op, r.peer])
+    } finally {
+      localKey.fill(0)
+      reader.lock()
+    }
+  }
 
   const expected = await keyPairFromPrf(new Uint8Array(FIXED32))
   const key = hex(expected.publicKey)
@@ -237,6 +253,10 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
   t.alike(pairs[pairs.length - 1], { identity: key, media, mediaSecret: 64 }, 'the same media key on resume')
   web = await connectClient(h, { timeoutMs: 60000 })
   t.alike(await web.request('post.create', { text: 'depois de recarregar' }), { seq: 1, ref: key + ':1' }, 'a write after the resume')
+  // One stored message row: a folder op is filed locally before anything is sent.
+  const peer = 'ef'.repeat(32)
+  await web.request('dm.set', { peer, state: 'accepted' }).catch(() => {})
+  t.alike(await storedOps(), [['accepted', peer]], 'the row is filed')
 
   // handle.media.upload delegates and keeps the errors' code and message.
   const bytes = new Uint8Array([1, 2, 3])
@@ -281,11 +301,16 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
   t.is(fake.calls.length, 0)
 
   // A MISMATCH saves nothing; the right passkey unlocks and saves again.
+  // The other passkey never reaches setKeyPair: with its PRF the session
+  // would open the message store under its key and replace the stored one.
+  const other = hex((await keyPairFromPrf(new Uint8Array(OTHER32))).publicKey)
   fake.prf = OTHER32
   const mismatch = await errorOf(h.identity.unlock())
   t.is(mismatch && mismatch.code, 'MISMATCH')
   t.is((await h.identity.status()).unlocked, false)
   t.is(await sessionRecord(), undefined, 'a MISMATCH saves no session')
+  t.absent(pairs.some((p) => p.identity === other), 'the other passkey never reached setKeyPair')
+  t.alike(await storedOps(), [['accepted', peer]], 'the stored message rows survive the other passkey')
   fake.prf = FIXED32
   t.alike(await h.identity.unlock(), { publicKey: key, created: false })
   t.is((await h.identity.status()).resumed, false)
