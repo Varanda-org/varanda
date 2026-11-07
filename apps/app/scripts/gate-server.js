@@ -2,7 +2,7 @@
 
 // The worklet gate driver (docs/ios-gate.md), run on the host of the iOS
 // simulator or the Android emulator:
-//   node scripts/gate-server.js [--platform ios|android] [--host <ip>] [--port 8790] [--device booted] [--bundle-id app.varanda] [--no-launch]
+//   node scripts/gate-server.js [--platform ios|android] [--host <ip>] [--port 8790] [--device booted] [--bundle-id app.varanda] [--no-launch] [--reload]
 // Starts a loopback hyperdht testnet, an association, a certified seeder and
 // a CLI-equivalent member peer (the same core session the CLI and
 // varanda-serve use) with one post, then serves the app's gate harness
@@ -50,6 +50,8 @@ const { createSession } = require('@varanda/core/lib/session')
 const { createServerDispatcher, createClient, EVENTS } = require('@varanda/rpc')
 
 const STEPS = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']
+// --reload adds step j, after i: a full JS reload with a continuous sync.
+const RELOAD_STEP = 'j'
 const STEP_NAMES = {
   a: 'structuredClone and the fs O_NOFOLLOW facade in the worklet',
   b: 'identity.create',
@@ -59,14 +61,15 @@ const STEP_NAMES = {
   f: 'sync once both ways with the CLI peer through the seeder',
   g: 'background/resume: node.info answers',
   h: 'second worklet without recover refused with LOCKED, stopped cleanly',
-  i: 'terminateNode (node.close) then startNode without recover'
+  i: 'terminateNode (node.close) then startNode without recover',
+  j: 'dev reload with a continuous sync: the new worklet opens and the previous one is gone'
 }
 const APP_POST = 'post do app (gate)'
 const PEER_POST = 'post do par CLI (gate)'
 const TOTAL_TIMEOUT_MS = 15 * 60 * 1000
 
 function parseArgs (argv) {
-  const opts = { platform: 'ios', host: null, port: 8790, device: 'booted', bundleId: null, launch: true }
+  const opts = { platform: 'ios', host: null, port: 8790, device: 'booted', bundleId: null, launch: true, reload: false }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--platform') opts.platform = argv[++i]
@@ -75,6 +78,7 @@ function parseArgs (argv) {
     else if (a === '--device') opts.device = argv[++i]
     else if (a === '--bundle-id') opts.bundleId = argv[++i]
     else if (a === '--no-launch') opts.launch = false
+    else if (a === '--reload') opts.reload = true
     else throw new Error('unknown argument: ' + a)
   }
   if (opts.platform !== 'ios' && opts.platform !== 'android') throw new Error('invalid --platform')
@@ -124,6 +128,8 @@ function iosDevice ({ device, bundleId }) {
     terminate: () => simctl('terminate', device, bundleId),
     background: () => simctl('launch', device, 'com.apple.Preferences'),
     foreground: () => simctl('openurl', device, 'varanda://'),
+    // Not measured on iOS: the live worklets cannot be counted from the host.
+    workletCount: () => null,
     lock (runId) {
       const dir = attempt(() => simctl('get_app_container', device, bundleId, 'data'))
       if (dir === null) return null
@@ -145,6 +151,14 @@ function androidDevice ({ device, bundleId, port }) {
     terminate: () => adb('shell', 'am', 'force-stop', bundleId),
     background: () => adb('shell', 'input', 'keyevent', 'KEYCODE_HOME'),
     foreground: () => adb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', 'varanda://', bundleId),
+    // Every Bare worklet runs on one thread named bare-worklet in the app's
+    // process, so the count is the number of live worklets.
+    workletCount () {
+      const pid = attempt(() => adb('shell', 'pidof', bundleId))
+      if (!pid) return null
+      const threads = attempt(() => adb('shell', 'ps', '-T', '-p', pid.split(/\s+/)[0]))
+      return threads === null ? null : threads.split('\n').filter((l) => /\bbare-worklet\s*$/.test(l)).length
+    },
     lock (runId) {
       const file = 'files/varanda-gate-' + runId + '/.varanda-lock'
       return { file, held: () => attempt(() => adb('shell', 'run-as', bundleId, 'test', '-e', file)) !== null }
@@ -218,6 +232,8 @@ async function main () {
   const cleanups = []
   const device = (opts.platform === 'android' ? androidDevice : iosDevice)(opts)
   const results = new Map()
+  const steps = opts.reload ? [...STEPS, RELOAD_STEP] : STEPS
+  let reloadBefore = null
   let phase = 'fresh'
   let appKey = null
   let finished = false
@@ -264,7 +280,7 @@ async function main () {
   const done = new Promise((resolve) => { resolveDone = resolve })
 
   function record (step, ok, detail) {
-    if (STEPS.includes(step) && !results.has(step)) results.set(step, { ok, detail })
+    if (steps.includes(step) && !results.has(step)) results.set(step, { ok, detail })
     log((ok ? 'PASS ' : 'FAIL ') + step + (STEP_NAMES[step] ? ' (' + STEP_NAMES[step] + ')' : '') + ': ' + detail)
     if (!ok) resolveDone()
   }
@@ -294,7 +310,24 @@ async function main () {
       )
       return
     }
-    if (STEPS.includes(step)) return record(step, ok, detail)
+    if (step === RELOAD_STEP && opts.reload) {
+      if (!ok) return record(step, false, detail)
+      // The previous worklet is terminated by the native registry when the
+      // new one starts under the same id, so it may still be on its way out
+      // when the app reports.
+      const before = reloadBefore
+      let after = device.workletCount()
+      if (before !== null) {
+        for (let i = 0; i < 25 && after !== before; i++) {
+          await sleep(200)
+          after = device.workletCount()
+        }
+      }
+      if (before === null || after === null) return record(step, true, 'app: ' + detail + ' | live worklets not measured on ' + device.name)
+      if (after !== before) return record(step, false, 'app: ' + detail + ' | live worklets before the reload ' + before + ', after ' + after)
+      return record(step, true, 'app: ' + detail + ' | live worklets (bare-worklet threads) before the reload ' + before + ', after ' + after)
+    }
+    if (steps.includes(step)) return record(step, ok, detail)
     log('app: ' + step + ' ' + (ok ? 'ok' : 'failed') + ': ' + detail)
     if (!ok) return record(step, false, detail)
     if (step === 'ready:kill') {
@@ -315,6 +348,10 @@ async function main () {
       await sleep(5000)
       device.foreground()
       log('app brought back to the foreground (varanda:// URL)')
+    } else if (step === 'ready:reload') {
+      reloadBefore = device.workletCount()
+      phase = 'reloaded'
+      log('app reloads its JS context (live worklets before: ' + reloadBefore + ')')
     } else if (step === 'done') {
       phase = 'done'
       resolveDone()
@@ -329,7 +366,7 @@ async function main () {
     ;(async () => {
       if (req.method === 'GET' && req.url === '/config') {
         log('app: GET /config (phase ' + phase + ')')
-        return reply(200, { runId, association, bootstrap, peerKey, peerPost: PEER_POST, phase })
+        return reply(200, { runId, association, bootstrap, peerKey, peerPost: PEER_POST, phase, reload: opts.reload })
       }
       if (req.method === 'POST' && req.url === '/certify') {
         const body = await readBody(req)
@@ -370,7 +407,7 @@ async function main () {
   finished = true
 
   let failed = null
-  for (const s of STEPS) {
+  for (const s of steps) {
     const r = results.get(s)
     if (!r) {
       failed = { step: s, detail: 'not reached' }
@@ -389,7 +426,7 @@ async function main () {
   try { fs.rmSync(root, { recursive: true, force: true }) } catch {}
 
   console.log('')
-  for (const s of STEPS) {
+  for (const s of steps) {
     const r = results.get(s)
     console.log('  ' + s + ' ' + (r ? (r.ok ? 'PASS' : 'FAIL') : '----') + '  ' + STEP_NAMES[s])
   }
