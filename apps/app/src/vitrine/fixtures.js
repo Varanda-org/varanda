@@ -17,6 +17,9 @@ const dmPhoto = (n, p) => ({ id: key(710 + n), key: key(720 + n), nonce: '0'.rep
 const publicPhoto = (n, p) => ({ core: key(730), mime: 'image/jpeg', start: 1 + n, blocks: 1, bytes: PICTURE_BYTES[p], sha256: key(PICTURE_BASE + p), width: PICTURE_SIZE[p][0], height: PICTURE_SIZE[p][1] })
 const privatePhoto = (n, p) => ({ core: key(740), mime: 'application/octet-stream', start: 1 + n, blocks: 1, bytes: 32768, sha256: key(750 + n), key: key(760 + n), nonce: '0'.repeat(46) + (n % 100).toString().padStart(2, '0'), plainMime: 'image/jpeg', plainSha256: key(PICTURE_BASE + p), w: PICTURE_SIZE[p][0], h: PICTURE_SIZE[p][1], ms: 0 })
 
+// The member and page handles appear in the varanda.app screenshots, so the
+// account service reserves them (RESERVED in apps/cli/lib/account/store.js and
+// pages-routes.js). A renamed or new handle goes there too.
 export const members = [
   ['Lia Oliveira', 'lia_oliveira', 'Café, livros e encontros na praça.'],
   ['João Nascimento', 'joao_nascimento', 'Pedalando pelo bairro.'],
