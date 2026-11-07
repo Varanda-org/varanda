@@ -59,7 +59,7 @@ import { BROWSER_TEXT, KNOWN_LOST_FULL_TEXT, KNOWN_LOST_TEXT, MISSED_TEXT, NONE_
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
 import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
-import { admissionFor, admissionOffer } from '../signupAdmission'
+import { FULL_TEXT, admissionFor, admissionOffer } from '../signupAdmission'
 import { hostOf, installationOrigin } from '../installation'
 import { dropsHeldInvite, parseSessionReturn } from '../linkReturn'
 import * as AuthSession from '../authSession'
@@ -1394,7 +1394,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           {offer.full
             ? (
               <>
-                <Body>{toError('lista-de-espera').message}</Body>
+                <Body>{FULL_TEXT}</Body>
                 <Btn label={RETRY_LABEL} secondary onPress={readAdmission} disabled={pkPending || admissionPending} />
               </>
               )
