@@ -85,6 +85,8 @@ test('invite help keeps the validity, renewal and privacy facts', async (t) => {
   }
   t.ok(text.includes('Quando a associação liga os convites de surpresa, cada convite chega num dia e hora ao acaso, com um aviso. Escolha com carinho quem você quer chamar.'))
   t.ok(HELP.vinculo.paragraphs.join(' ').includes('Se a rede estiver por convite,'))
+  t.is(HELP.convites.paragraphs.length, 5)
+  t.is(HELP.convites.paragraphs[4], 'Se você escrever um cartão, ele vai dentro do próprio link, e o app de quem recebe confere que foi você quem escreveu. A associação não recebe o nome nem a mensagem.')
 })
 
 test('missing diaries help covers all eight skip reasons', async (t) => {

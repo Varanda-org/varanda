@@ -19,7 +19,7 @@ const holder = createSignupInviteHolder({ getStorage: tabStorage })
 export function captureSignupInvite () {
   if (hostedPage !== true) return null
   try {
-    return holder.capture({ location, history })
+    return holder.capture({ location, history, origin: location.origin })
   } catch {
     return null
   }
@@ -31,4 +31,12 @@ export function loadSignupInvite () {
 
 export function dropSignupInvite () {
   try { return holder.drop() } catch { return false }
+}
+
+export function loadSignupInviteCard () {
+  try { return holder.loadCard() } catch { return null }
+}
+
+export function dropSignupInviteCard () {
+  try { return holder.dropCard() } catch { return false }
 }

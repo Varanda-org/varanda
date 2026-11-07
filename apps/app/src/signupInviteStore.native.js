@@ -6,8 +6,11 @@
 // session, like the web's tab storage; it goes only to the account service.
 // No react-native import: the tests load this module with import().
 
+import rpc from '@varanda/rpc'
 import { createSignupInviteHolder } from './signupInvite.js'
 import { parseAppLink, parseInviteInput } from './linkReturn.js'
+
+const { parseInviteCardUrl, FRAGMENT_MARK } = rpc
 
 function memoryStorage () {
   const map = new Map()
@@ -29,15 +32,28 @@ function keep (code) {
 // With no argument (App.js at import): the record held, if any. With a URL
 // the app was opened with: a valid invite link replaces the held code (a
 // newer link wins); any other URL changes nothing. With paste: true, the
-// text may also be the bare code.
+// text may also be the bare code. A '#c1.' card on the same link is kept
+// beside the code (keep() has already dropped any older card).
 export function captureSignupInvite (url, { paste = false } = {}) {
   try {
     if (url === undefined) return holder.load()
     const code = paste ? parseInviteInput(url) : inviteCode(url)
-    return code === null ? null : keep(code)
+    if (code === null) return null
+    const rec = keep(code)
+    keepCard(url, code)
+    return rec
   } catch {
     return null
   }
+}
+
+function keepCard (url, code) {
+  try {
+    const link = url.trim()
+    const card = parseInviteCardUrl(link)
+    if (card === null || card.code !== code) return
+    holder.keepCard(code, link.slice(link.indexOf(FRAGMENT_MARK) + FRAGMENT_MARK.length))
+  } catch {}
 }
 
 function inviteCode (url) {
@@ -51,4 +67,12 @@ export function loadSignupInvite () {
 
 export function dropSignupInvite () {
   try { return holder.drop() } catch { return false }
+}
+
+export function loadSignupInviteCard () {
+  try { return holder.loadCard() } catch { return null }
+}
+
+export function dropSignupInviteCard () {
+  try { return holder.dropCard() } catch { return false }
 }
