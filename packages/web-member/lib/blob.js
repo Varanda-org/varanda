@@ -568,12 +568,14 @@ function seederOrigin (origin) {
     throw new UsageError(BAD_ORIGIN)
   }
   const plain = u.protocol === 'http:' && LOOPBACK.has(u.hostname)
+  // Built from its parts: Bare's URL (the app worklet) has no origin getter.
+  const out = u.protocol + '//' + u.host
   if ((u.protocol !== 'https:' && !plain) || u.username !== '' || u.password !== '' ||
       (u.pathname !== '/' && u.pathname !== '') || u.search !== '' || u.hash !== '' ||
-      String(origin).replace(/\/$/, '') !== u.origin) {
+      String(origin).replace(/\/$/, '') !== out) {
     throw new UsageError(BAD_ORIGIN)
   }
-  return u.origin
+  return out
 }
 
 function header (res, name) {
