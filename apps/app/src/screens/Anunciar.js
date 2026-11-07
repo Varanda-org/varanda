@@ -291,7 +291,7 @@ export default function Anunciar ({ initialPlace = null, onBack, onPublished }) 
         <Label>Fotos</Label>
         <View style={styles.photos}>
           {photos.map((p) => (
-            <Pressable key={p.id} accessibilityRole='button' accessibilityLabel='Tirar foto' disabled={locked} onPress={() => removePhoto(p.id)} style={styles.photo}>
+            <Pressable key={p.id} accessibilityRole='button' accessibilityLabel='Remover foto' disabled={locked} onPress={() => removePhoto(p.id)} style={styles.photo}>
               {p.thumb ? <Image source={{ uri: p.thumb }} style={styles.photoImg} /> : null}
               {!locked ? <View style={styles.photoX}><Icon name='fechar' size={14} color={colors.ink} /></View> : null}
             </Pressable>

@@ -344,3 +344,82 @@ test('feiraCompose: an unknown creation outcome holds the form even without a re
   t.absent(c.holdsPublication(await c.submitListing({ form: form(), ack: true, dest: { kind: 'personal' }, photos: [] }, refused)), 'a refusal frees the press')
   t.absent(c.holdsPublication({ ok: false, uncertain: true, cancelled: true, stage: 'send' }))
 })
+
+test('feiraCompose: submitEdit keeps kind and seq, sends expectedRevision, replaces photos', async (t) => {
+  const c = await load()
+  const mine = { seq: 5, editSeq: 8, kind: 'produto', title: 'Mesa', text: '', price: 2500, unit: null, cat: 'moveis', place: { uf: 'SP', city: 'Santos', bairro: 'Gonzaga' }, media: [descriptor(1), descriptor(2)] }
+  const model = c.editModel(mine, { author: ME })
+  t.absent(c.firstEdit(model), 'an edited listing is not on its first edit')
+  t.ok(c.firstEdit(c.editModel({ ...mine, editSeq: undefined }, { author: ME })))
+  const kept = c.keptPhotos(model, 'me')
+  t.is(kept.length, 2)
+  t.ok(kept.every((p) => p.kept && p.descriptor && p.identity === 'me'))
+
+  const d = deps({ send: () => ({ seq: 11, ref: ME + ':5' }) })
+  const r = await c.submitEdit({ model, form: { ...model.form, title: 'Mesa de jantar' }, dest: { kind: 'personal' }, photos: [kept[1], photo()] }, d)
+  t.ok(r.ok)
+  t.is(d.calls.uploads, 1, 'only the new photo is uploaded')
+  t.is(d.calls.sends.length, 1)
+  const sent = d.calls.sends[0]
+  t.is(sent.method, 'listing.edit')
+  t.is(sent.params.to, ME + ':5', 'the seq is kept')
+  t.is(sent.params.expectedRevision, 8)
+  t.is(sent.params.kind, undefined, 'an edit carries no kind')
+  t.is(sent.params.title, 'Mesa de jantar')
+  t.alike(sent.params.media, [descriptor(2), descriptor(1)], 'kept then new, in order')
+  t.ok(validateParams('listing.edit', sent.params).ok)
+  t.is(r.model.expectedRevision, 11, 'the answer is the next revision')
+  t.is(r.model.kind, 'produto')
+
+  const drop = deps()
+  const r2 = await c.submitEdit({ model, form: model.form, dest: { kind: 'personal' }, photos: [] }, drop)
+  t.ok(r2.ok)
+  t.is(drop.calls.sends[0].params.media, null, 'no photos drops them all')
+
+  const page = deps({ identity: 'page:' + PAGE })
+  const pm = c.editModel(mine, { author: PAGE })
+  const r3 = await c.submitEdit({ model: pm, form: pm.form, dest: { kind: 'page', page: PAGE }, photos: c.keptPhotos(pm, 'page:' + PAGE) }, page)
+  t.ok(r3.ok)
+  t.is(page.calls.sends[0].action, 'listing-edit')
+  t.is(page.calls.sends[0].op.expectedRevision, 8)
+
+  const kind = deps()
+  const r4 = await c.submitEdit({ model, form: { ...model.form, kind: 'servico' }, dest: { kind: 'personal' }, photos: [photo()] }, kind)
+  t.absent(r4.ok)
+  t.is(r4.field, 'kind')
+  t.is(kind.calls.uploads, 0, 'a refusal uploads nothing')
+  t.is(kind.calls.sends.length, 0)
+})
+
+test('feiraCompose: submitEdit conflito keeps the form; uncertain is never resent', async (t) => {
+  const c = await load()
+  const model = c.editModel({ seq: 5, editSeq: 8, kind: 'produto', title: 'Mesa', text: '', price: null, unit: null, cat: 'moveis', place: { uf: 'SP', city: 'Santos', bairro: null }, media: [] }, { author: ME })
+  const typed = { ...model.form, title: 'Mesa nova' }
+  // The node's own shape: USAGE with the message 'conflito'.
+  const conflict = deps({ send: () => { throw Object.assign(new Error('conflito'), { code: 'USAGE' }) } })
+  const photos = [photo()]
+  const r = await c.submitEdit({ model, form: typed, dest: { kind: 'personal' }, photos }, conflict)
+  t.absent(r.ok)
+  t.ok(r.conflict)
+  t.is(r.error, c.EDIT_CONFLICT)
+  t.is(conflict.calls.sends.length, 1, 'sent once')
+  t.is(typed.title, 'Mesa nova', 'the typed form is untouched')
+  t.ok(r.photos[0].encoded && r.photos[0].descriptor, 'the photo bytes and descriptor stay')
+  t.absent(c.holdsPublication(r), 'a conflict is a known answer')
+  const pageConflict = deps({ send: () => { throw Object.assign(new Error('conflito'), { code: 'conflito' }) } })
+  t.ok((await c.submitEdit({ model, form: typed, dest: { kind: 'personal' }, photos: [] }, pageConflict)).conflict, "a page's service answers the token as the code")
+
+  let resent = 0
+  const err = Object.assign(new Error('x'), { uncertain: true, retry: async () => { resent++; return { seq: 12 } } })
+  const unknown = deps({ send: () => { throw err } })
+  const u = await c.submitEdit({ model, form: typed, dest: { kind: 'personal' }, photos: [] }, unknown)
+  t.ok(u.uncertain)
+  t.is(unknown.calls.sends.length, 1)
+  t.is(resent, 0, 'the retry is only for a press')
+  t.is(u.retry, err.retry)
+  t.ok(c.holdsPublication(u), 'the form locks')
+  const timeout = deps({ send: () => { throw Object.assign(new Error('t'), { uncertain: true }) } })
+  const u2 = await c.submitEdit({ model, form: typed, dest: { kind: 'personal' }, photos: [] }, timeout)
+  t.ok(c.holdsPublication(u2))
+  t.is(u2.retry, null)
+})

@@ -6,7 +6,9 @@
 // seq), Salvar (on this device), Denunciar (the shell opens the report
 // sheet with the listing target). The owner, as the member or as the page
 // acted as, gets the status buttons and Apagar. Editar and Avaliar are slots
-// the shell fills in PR4 (onEditar, onAvaliar).
+// the shell fills (onEditar, onAvaliar). On the hosted app the listing's
+// verified ratings (../feiraReview collectRatings over the seeder's hints
+// and listing.ratings) show as a count, an average and the newest rows.
 //
 // Props: listing (a verified ../feiraClient row) or author + seq to load it
 // through the author route; me (own key); actingPage (page key or null);
@@ -24,7 +26,7 @@ import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { actAs } from '../pages'
 import { memberKeyOf } from './Conversa'
-import { byAuthor } from '../feiraClient'
+import { byAuthor, ratingRefs, ratings } from '../feiraClient'
 import { trustLines } from '../feira'
 import { draftText, listingCard } from '../feiraChat'
 import { shareUrlOf } from '../feiraLink'
@@ -32,6 +34,7 @@ import { isSaved, toggleSaved } from '../feiraSavedStore'
 import { SAVED_FULL_TEXT } from '../feiraSaved'
 import { detailActions, deleteRequest, ownerDest, pickListing, reportTarget, statusBadge, statusRequest } from '../feiraCompose'
 import { mineView } from '../feiraScreen'
+import { RATINGS_NOTE, collectRatings, reviewModel, starsLabel, summaryLabel } from '../feiraReview'
 import { installationOrigin } from '../installation'
 import { PAGE_DM_NOTICE, notePageNotice, pageNoticeSeen } from '../pageNotice'
 import { pageNoticeStore } from '../pageNoticeStore'
@@ -52,6 +55,8 @@ import { useStyles } from '../ui/ThemeProvider'
 // The author route is paged; a listing further back than this is not
 // searched for (the shell normally hands the row it showed).
 const MAX_LOAD_PAGES = 5
+// Newest verified ratings shown under the listing.
+const SHOWN_RATINGS = 5
 // Own listing or the page acted as, not in the index yet: it is on its way.
 const ARRIVING_TEXT = 'O anúncio ainda está chegando à Feira. Tente de novo em instantes.'
 
@@ -87,7 +92,7 @@ async function ownStatus (request, seq) {
 
 export default function Anuncio ({
   listing: given = null, author = null, seq = null, me = null, actingPage = null, trust = null, name = '',
-  onBack, onConversar, onDenunciar, onOpenAuthor, onDeleted, onEditar, onAvaliar
+  refresh = 0, onBack, onConversar, onDenunciar, onOpenAuthor, onDeleted, onEditar, onAvaliar
 }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
@@ -101,6 +106,7 @@ export default function Anuncio ({
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [loadTick, setLoadTick] = useState(0)
   const [pageNotice, setPageNotice] = useState(false)
+  const [rated, setRated] = useState(null)
   const alive = useRef(true)
   useEffect(() => {
     alive.current = true
@@ -123,6 +129,13 @@ export default function Anuncio ({
       setLoadError('')
       let cursor = null
       try {
+        // Right after the owner's own edit the index may not have it yet:
+        // the diary (listing.mine, local) already does.
+        if (refresh > 0 && typeof me === 'string' && author === me) {
+          const own = await ownListing(nodeRef.current.request, author, seq)
+          if (!live) return
+          if (own) { setListing(own); return }
+        }
         for (let i = 0; i < MAX_LOAD_PAGES; i++) {
           const r = await byAuthor(nodeRef.current.request, author, cursor)
           if (!live) return
@@ -147,7 +160,7 @@ export default function Anuncio ({
     }
     load()
     return () => { live = false }
-  }, [given, author, seq, loadTick, me, actingPage])
+  }, [given, author, seq, loadTick, me, actingPage, refresh])
 
   const owner = ownerDest(listing, { me, actingPage })
 
@@ -167,6 +180,19 @@ export default function Anuncio ({
     isSaved(origin, { author: key, seq: atSeq }).then((v) => { if (live) setSaved(v === true) }, () => {})
     return () => { live = false }
   }, [origin, key, atSeq])
+
+  // Read once per listing; a failure only hides the block.
+  const hosted = node.hosted === true
+  useEffect(() => {
+    setRated(null)
+    if (!hosted || typeof key !== 'string' || !Number.isSafeInteger(atSeq)) return undefined
+    let live = true
+    collectRatings({ author: key, seqs: [atSeq] }, {
+      refsPage: (cursor) => ratingRefs(key, cursor),
+      verify: (q) => ratings(nodeRef.current.request, q)
+    }).then((r) => { if (live) setRated(r) }, () => {})
+    return () => { live = false }
+  }, [hosted, key, atSeq])
 
   if (!listing) {
     return (
@@ -272,6 +298,21 @@ export default function Anuncio ({
           {lines.map((l) => <Soft key={l.key}>{l.text}</Soft>)}
         </Pressable>
 
+        {rated && rated.summary.count > 0
+          ? (
+            <View style={styles.ratings}>
+              <Text style={styles.sellerName}>{summaryLabel(rated.summary)}</Text>
+              <Soft>{RATINGS_NOTE}</Soft>
+              {rated.rows.slice(0, SHOWN_RATINGS).map(reviewModel).filter(Boolean).map((r) => (
+                <View key={r.key} style={styles.rating}>
+                  <Text style={styles.stars} accessibilityLabel={r.stars === 1 ? '1 estrela' : r.stars + ' estrelas'}>{starsLabel(r.stars)}</Text>
+                  {r.text !== '' ? <Text style={styles.text}>{r.text}</Text> : null}
+                </View>
+              ))}
+            </View>
+            )
+          : null}
+
         <View style={styles.actions}>
           {acts.conversar && typeof onConversar === 'function'
             ? <Btn label='Conversar' onPress={conversar} pending={action.pending} />
@@ -333,5 +374,8 @@ const makeStyles = (colors) => StyleSheet.create({
   seller: { paddingVertical: 10, gap: 2 },
   sellerName: { ...type.postName, color: colors.ink },
   actions: { gap: 10 },
+  ratings: { gap: 6, paddingVertical: 6 },
+  rating: { gap: 2 },
+  stars: { ...type.postName, color: colors.accent },
   pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }
 })

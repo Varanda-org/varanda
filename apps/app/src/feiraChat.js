@@ -68,6 +68,14 @@ export async function listingCard ({ origin, listing, photo = null, encodeThumbn
   return Object.freeze({ ...fields, thumb: thumb ? Object.freeze(thumb) : null })
 }
 
+// The seller's title on one line, at most `max` characters, or '' when it
+// holds a link: text this app writes from listing fields (a draft, an offer)
+// never carries, nor previews, an address the seller chose.
+export function sellerTitle (listing, max) {
+  const raw = cardText(listing && listing.title, max)
+  return findLinks(raw).length > 0 ? '' : raw
+}
+
 // The message a Mensagem starts with; the person can edit it before sending.
 // The URL is never cut, the title is (one line, at most MAX_LISTING_TITLE).
 // The title is the seller's text: one holding a link is left out, so the
@@ -76,8 +84,7 @@ export async function listingCard ({ origin, listing, photo = null, encodeThumbn
 export function draftText (listing, url) {
   if (typeof url !== 'string' || !url.startsWith('https://')) return ''
   const kind = listing && listing.kind
-  const raw = cardText(listing && listing.title, feira.MAX_LISTING_TITLE)
-  const title = findLinks(raw).length > 0 ? '' : raw
+  const title = sellerTitle(listing, feira.MAX_LISTING_TITLE)
   const named = title === '' ? '' : ' "' + title + '"'
   let text
   if (kind === 'procura') text = 'Olá! Vi sua procura' + (named === '' ? '' : ' por' + named) + ' na Feira e posso ajudar: ' + url

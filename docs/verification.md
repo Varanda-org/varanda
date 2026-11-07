@@ -5957,3 +5957,47 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi executada nesta documentação.
 - Numa conversa da Página, o cartão do anúncio aparece sem miniatura (o app não lê as fotos da caixa da Página).
 - Uma linha velha do índice mostra "Situação desconhecida" até o semeador reler o diário.
+
+## 128. Feira: ofertas, avaliações, edição, buscas salvas e links no app (PR feat/feira-extras)
+
+Caminhada das partes da Feira que a seção 127 deixou de fora: ofertas na conversa, avaliações, editar anúncio, buscas salvas com o ponto na aba, os links `/anuncio/` que abrem o app instalado, "Já tem o app? Abrir no app" na página pública e a Feira da Vitrine. O comportamento está em [app.md](app.md), seção "Feira"; o formato, em [protocol.md](protocol.md), seção 15.
+
+Regras que os passos conferem:
+
+- Uma oferta, um aceite, uma recusa, uma avaliação ou uma edição só são enviados por um toque; sem resposta, só "Tentar de novo" reenvia o mesmo pedido.
+- O estado das ofertas é lido da conversa; nada sobre ofertas fica guardado em outro lugar.
+- Só aparecem avaliações que o nó conferiu, com o consentimento assinado por quem anunciou.
+- As buscas salvas e as contagens ficam só no aparelho; não há aviso push nem busca em segundo plano.
+- Uma caixa só é marcada depois que o passo foi executado e o resultado conferido.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node apps/app/test/platformGate.test.js`, `node apps/app/test/themeUsage.test.js`, `node apps/app/test/tabBar.test.js`, `node apps/app/test/nav.test.js` e `node apps/app/test/vitrineGuard.test.js`.
+- `node apps/app/test/feiraOffer.test.js`, `node apps/app/test/feiraReview.test.js`, `node apps/app/test/feiraAlerts.test.js`, `node apps/app/test/feiraChat.test.js`, `node apps/app/test/feiraCompose.test.js` e `node apps/app/test/feiraScreen.test.js`.
+- `node apps/app/test/vitrine.test.js`, `node apps/app/test/vitrineIndex.test.js` e `node apps/app/test/vitrineFeira.test.js`.
+- `node apps/cli/test/feira-page.test.js` e `node apps/cli/test/deploy.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada com a Feira ligada numa instalação de teste e dois membros de teste em aparelhos diferentes, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Ofertas: o comprador abre a conversa de um anúncio (Conversar), toca em "Fazer oferta", digita o "Valor (R$)" e toca em "Enviar oferta": a mensagem "Ofereço … pelo seu anúncio … na Feira" chega com o link.
+- [ ] No segundo aparelho, quem anunciou vê "Aceitar" e "Recusar"; "Aceitar" abre "Aceitar oferta" com o valor e a nota "Ao aceitar, você assina um consentimento que deixa esta pessoa publicar uma avaliação do seu anúncio. Você não escolhe as estrelas, e isso não é um pagamento."; "Aceitar e assinar" envia "Aceitei sua oferta de …. Agora você pode avaliar o anúncio" e o consentimento fica na conversa.
+- [ ] Recusa: numa outra oferta, "Recusar" envia "Recusei sua oferta de …" e o comprador não vê "Avaliar" para ela.
+- [ ] Avaliação: o comprador vê "Avaliar" na oferta aceita, escolhe as estrelas, escreve no "Comentário (opcional)" e toca em "Avaliar": a tela volta e a avaliação aparece na tela Anúncio e no perfil de quem anunciou, com "avaliações confirmadas pelo anunciante".
+- [ ] Um aceite enviado por uma terceira pessoa (que não é dona do anúncio) não libera "Avaliar".
+- [ ] Uma avaliação sem consentimento válido (por exemplo, a da Vitrine com o texto "Consentimento de demonstração inválido.") não aparece no anúncio nem no perfil.
+- [ ] Página: agindo como Página, fazer uma oferta num anúncio de um membro; a oferta vai como texto com o link, o membro a aceita e a Página não publica avaliação (se "Avaliar" aparecer, a tela mostra "Uma página não avalia anúncios por enquanto. Para avaliar, use o seu perfil.").
+- [ ] Editar: quem anunciou toca em "Editar", vê "A primeira versão (título, texto e fotos) continua no seu diário até você apagar o anúncio. A página pública mostra a versão nova.", muda o título e toca em "Salvar": a tela volta para o anúncio com o título novo. O link `/f/<diário>/<seq>` continua o mesmo, e colá-lo num aplicativo de mensagens mostra a prévia nova (a prévia de um link já colado pode ficar em cache no aplicativo).
+- [ ] Conflito: com o mesmo anúncio aberto em "Editar" em dois aparelhos, salvar num e depois no outro mostra "Este anúncio mudou em outro aparelho. Recarregue para editar a versão atual." e "Recarregar" traz a versão atual.
+- [ ] Buscas salvas: na aba Feira, fazer uma busca e tocar em "Salvar busca" ("Busca salva neste aparelho."); outra pessoa publica um anúncio que a busca acha; depois de 15 minutos, abrir a Feira mostra a busca em "Buscas" com "1 novo"; ao sair da aba Feira, a aba ganha o ponto, e abrir a busca zera a contagem e tira o ponto.
+- [ ] Com 10 buscas salvas, "Salvar busca" mostra "Você já tem 10 buscas salvas. Remova uma para salvar outra.".
+- [ ] App Links (pendente: precisa de um aparelho Android de teste com o build de produção `app.varanda`, porque o `app.varanda.debug` só abre depois de aprovação manual): tocar num link `https://bora.varanda.app/anuncio/<diário>/<seq>` fora do app abre a tela Anúncio no app; um link `/f/…` abre no navegador.
+- [ ] Links universais no iOS (pendente: precisa da implantação republicar o `apple-app-site-association` com `applinks` e de um build assinado com o direito `applinks:bora.varanda.app`): tocar num link `/anuncio/…` no Notas ou no Mensagens abre a tela Anúncio no app.
+- [ ] Na página pública `/f/<diário>/<seq>`, com o app instalado, "Já tem o app? Abrir no app" abre a tela Anúncio no app (Android e iOS).
+- [ ] Vitrine: com `EXPO_PUBLIC_VARANDA_VITRINE=1`, a aba Feira mostra os anúncios de exemplo, um deles com a avaliação de 5 estrelas, e a conversa de exemplo mostra a oferta aceita.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- O ponto da aba Feira reflete o que a última abertura da Feira contou; ele não é atualizado em segundo plano.
+- As contagens olham só a primeira página de cada busca.

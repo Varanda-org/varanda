@@ -132,18 +132,17 @@ test('the plugin restores the microphone and the camera removal', (t) => {
 // iOS offers the installation's passkeys, and hands the https return of the
 // Google step, only to the app named by the apple-app-site-association that
 // deploy/seeder/well-known.sh writes from VARANDA_IOS_APP_ID (TEAMID.app.varanda).
-// applinks would also need an applinks section there, which the deploy does
-// not write.
+// applinks lists only /anuncio/ there, so the public /f/ page stays in the browser.
 test('the iOS entitlement, the passkey flag and the deploy name the same app and host', (t) => {
   const app = JSON.parse(read('app.json')).expo
   const committed = entitlements(read(ENTITLEMENTS))
   t.alike(committed.keys, ['com.apple.developer.associated-domains'], 'only Associated Domains for EAS to sync')
-  t.alike(committed.domains, ['webcredentials:bora.varanda.app'], ENTITLEMENTS)
+  t.alike(committed.domains, ['webcredentials:bora.varanda.app', 'applinks:bora.varanda.app'], ENTITLEMENTS)
   t.alike(app.ios.associatedDomains, committed.domains, 'app.json repeats the entitlement for prebuild')
   t.ok(compact(read(INFO_PLIST)).includes(WEB_CREDENTIALS_PLIST), INFO_PLIST + ' turns the passkey modules on')
 
   const hosts = [...new Set((read(ANDROID_MANIFEST).match(/android:host="[^"]*"/g) || []).map((h) => h.slice(14, -1)))]
-  t.alike(committed.domains, hosts.map((h) => 'webcredentials:' + h), 'the host of the Android App Links')
+  t.alike(committed.domains, hosts.flatMap((h) => ['webcredentials:' + h, 'applinks:' + h]), 'the host of the Android App Links')
 
   const pbxproj = read(PBXPROJ)
   t.alike(pbxproj.match(/CODE_SIGN_ENTITLEMENTS = [^;]*;/g), Array(2).fill('CODE_SIGN_ENTITLEMENTS = Varanda/Varanda.entitlements;'), 'Debug and Release sign with it')
@@ -152,7 +151,7 @@ test('the iOS entitlement, the passkey flag and the deploy name the same app and
   const wellKnown = read(WELL_KNOWN)
   const appId = app.ios.bundleIdentifier.replace(/\./g, '\\.')
   t.ok(wellKnown.includes('[[ $ios_app_id =~ ^[A-Z0-9]{10}\\.' + appId + '$ ]]'), 'the deploy accepts only TEAMID.' + app.ios.bundleIdentifier)
-  t.ok(wellKnown.includes('printf \'{"webcredentials":{"apps":["%s"]}}\\n\' "$ios_app_id"'), 'and lists it under webcredentials')
+  t.ok(wellKnown.includes('printf \'{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"}]}]}}\\n\' "$ios_app_id" "$ios_app_id"'), 'and lists it under webcredentials and applinks (/anuncio/ only)')
 })
 
 // The Vitrine (src/vitrine/enabled.js) swaps the node for fixtures. A release

@@ -34,7 +34,7 @@ import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { avatarOf } from '../media/avatar'
-import { fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
+import { fetchFeiraAuthor, fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { whoOf } from '../who'
 import * as actingAs from '../actingAs'
@@ -59,6 +59,8 @@ import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
+import { ratingRefs, ratings } from '../feiraClient'
+import { MAX_RATED_LISTINGS, RATINGS_NOTE, collectRatings, summaryLabel } from '../feiraReview'
 import { isSeederDown, knownAuthors, memberKeyOf, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet } from './Conversa'
 
 const NOT_HOSTED_NOTE = 'Publicações completas disponíveis na versão web, com internet.'
@@ -538,6 +540,30 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     }
   }
 
+  // The seller's verified ratings over the newest listings (hosted only),
+  // read once per opened key; a failure only hides the row.
+  const [rated, setRated] = useState(null)
+  const ratingsHosted = node.hosted === true
+  useEffect(() => {
+    setRated(null)
+    if (!ratingsHosted || typeof author !== 'string') return undefined
+    let live = true
+    const read = async () => {
+      // The index's hints are enough here: listing.ratings proves each row
+      // against the listing itself, so no listing needs a diary read.
+      const first = await fetchFeiraAuthor(author)
+      if (!live || !first || first.ok !== true) return
+      const seqs = first.value.items.map((i) => Number(String(i.ref).slice(author.length + 1))).slice(0, MAX_RATED_LISTINGS)
+      const r = await collectRatings({ author, seqs }, {
+        refsPage: (cursor) => ratingRefs(author, cursor),
+        verify: (q) => ratings(request, q)
+      })
+      if (live) setRated(r)
+    }
+    read().catch(() => {})
+    return () => { live = false }
+  }, [ratingsHosted, author, request])
+
   const who = whoOf({ name: header.name, username: header.username })
   const own = typeof ownKey === 'string' && author === ownKey
   const canReport = full && !own && typeof onReport === 'function' && typeof ownKey === 'string'
@@ -596,6 +622,15 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       <Pressable accessibilityRole='button' accessibilityLabel='Anúncios' onPress={() => onOpenListings(author)} style={({ pressed }) => [styles.listings, pressed && styles.pressed]}>
         <Text style={styles.rosterName}>Anúncios</Text>
       </Pressable>
+      )
+    : null
+  const ratingsRow = ratingsHosted && !(isPage && lifecycle.moved) && rated && rated.summary.count > 0
+    ? (
+      <View accessibilityLabel='Avaliações' style={styles.listings}>
+        <Text style={styles.rosterName}>Avaliações</Text>
+        <Soft>{summaryLabel(rated.summary)}</Soft>
+        <Soft>{RATINGS_NOTE}</Soft>
+      </View>
       )
     : null
   const newKey = movedView !== null ? movedView.key : null
@@ -736,6 +771,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
         <View style={styles.flex}>
           {head}
           {listingsRow}
+          {ratingsRow}
           {pageNoticeSheet}
           <OfflineNote />
           <View style={styles.note}><Soft>{node.hosted ? OFFLINE_NOTE : NOT_HOSTED_NOTE}</Soft></View>
@@ -757,6 +793,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     <View>
       {head}
       {listingsRow}
+      {ratingsRow}
       <OfflineNote />
       {notes.length > 0 ? <View style={styles.note}>{notes.map((n) => <Soft key={n}>{n}</Soft>)}</View> : null}
     </View>

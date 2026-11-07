@@ -334,3 +334,58 @@ export function pickListing (items, seq) {
   if (!Array.isArray(items)) return null
   return items.find((i) => i && i.seq === seq) || null
 }
+
+export const FIRST_EDIT_NOTE = 'A primeira versão (título, texto e fotos) continua no seu diário até você apagar o anúncio. A página pública mostra a versão nova.'
+export const EDIT_CONFLICT = 'Este anúncio mudou em outro aparelho. Recarregue para editar a versão atual.'
+export const UNKNOWN_EDIT = 'Não sabemos se a edição foi gravada. Recarregue o anúncio antes de editar de novo.'
+
+// Whether this edit would be the listing's first: the root stays readable in
+// the diary, which the person is told before pressing.
+export function firstEdit (model) {
+  return !!(model && model.expectedRevision === 0)
+}
+
+// The listing's current photos as composer photos, tied to the identity
+// that owns the listing: they are sent again as they are, never uploaded.
+export function keptPhotos (model, identity) {
+  if (!model || !Array.isArray(model.media)) return []
+  return model.media.slice(0, MAX_PHOTOS).map((d, i) => ({ id: 'kept:' + i, kept: true, encoded: null, descriptor: d, identity, retry: null }))
+}
+
+// The whole Salvar press of an edit: check, upload the new photos, send
+// listing.edit (or the page's 'listing-edit') with expectedRevision. Never
+// retries. A 'conflito' (someone else edited first) leaves the form and the
+// photos as they are and asks for a reload. -> { ok: true, answer, model,
+// photos } with model at the next revision | { ok: false, error, field?,
+// photos, conflict?, uncertain?, retry?, cancelled?, stage?, identity? }.
+export async function submitEdit ({ model, form, dest, photos = [] }, deps) {
+  const to = dest && dest.kind === 'page' ? dest : { kind: 'personal' }
+  const check = editRequest(model, form, [], to)
+  if (!check.ok) return { ...check, photos }
+  if (photos.length > MAX_PHOTOS) return { ok: false, field: 'photos', error: PHOTOS_NOTE, photos }
+  const identity = identityOf(to)
+  if (deps.currentIdentity() !== identity) return { ok: false, cancelled: true, error: IDENTITY_CHANGED, photos }
+  const up = await uploadPhotos(photos, to, identity, deps)
+  if (!up.ok) return up
+  if (deps.currentIdentity() !== identity) return { ok: false, cancelled: true, error: IDENTITY_CHANGED, photos: photosFor(up.photos, deps.currentIdentity()) }
+  const plan = editRequest(model, form, up.media, to)
+  if (!plan.ok) return { ...plan, photos: up.photos }
+  try {
+    const answer = await deps.send(plan.request)
+    return { ok: true, answer, model: nextRevision(model, answer), photos: up.photos }
+  } catch (err) {
+    const uncertain = !!(err && err.uncertain === true)
+    // The node answers USAGE with the message 'conflito' (listing.edit); a
+    // page's service answers the token 'conflito' as the code.
+    if (!uncertain && err && (err.code === 'conflito' || (err.code === 'USAGE' && err.message === 'conflito'))) return { ok: false, conflict: true, error: EDIT_CONFLICT, stage: 'send', identity, photos: up.photos }
+    return {
+      ok: false,
+      error: err,
+      uncertain,
+      retry: uncertain && typeof err.retry === 'function' ? err.retry : null,
+      stage: 'send',
+      identity,
+      photos: up.photos
+    }
+  }
+}

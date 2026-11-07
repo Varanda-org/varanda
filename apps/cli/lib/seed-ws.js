@@ -979,7 +979,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       name: card.name,
       photoUrls: photosOf(r).map((_, i) => base + '/foto/' + (i + 1)),
       pageUrl: origin + base,
-      enterUrl: origin + '/anuncio/' + hex + '/' + seq
+      enterUrl: origin + '/anuncio/' + hex + '/' + seq,
+      appUrl: 'varanda:///anuncio/' + hex + '/' + seq
     }
   }
 

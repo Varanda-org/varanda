@@ -16,7 +16,8 @@
       "supportsTablet": true,
       "bundleIdentifier": "app.varanda",
       "associatedDomains": [
-        "webcredentials:bora.varanda.app"
+        "webcredentials:bora.varanda.app",
+        "applinks:bora.varanda.app"
       ],
       "config": {
         "usesNonExemptEncryption": false
