@@ -210,7 +210,7 @@ node apps/cli/scripts/hosted-lab.js --port 8090 --expo http://127.0.0.1:8081
 node apps/cli/scripts/hosted-lab.js --ui apps/app/dist       # um export já feito
 ```
 
-`--port` (padrão 8080), `--host` (só `127.0.0.1` ou `localhost`), `--ui <dist>` ou `--expo <http://127.0.0.1:porta>` (padrão `http://127.0.0.1:8081`). Ctrl-C encerra e apaga os dados do laboratório. O script nunca imprime chave secreta.
+`--port` (padrão 8080), `--host` (só `127.0.0.1` ou `localhost`), `--ui <dist>` ou `--expo <http://127.0.0.1:porta>` (padrão `http://127.0.0.1:8081`). Ctrl-C encerra e apaga os dados do laboratório. O script nunca imprime chave secreta. Para medir o carregamento com dezenas de diários seguidos, `--dataset <semente>` (com `--dataset-size` e `--rajada`) cria um conjunto de dados: veja [performance.md](performance.md).
 
 O que ele sobe, no mesmo processo:
 
