@@ -317,6 +317,19 @@ test('preview: a URL core would refuse as a card is refused before any fetch', a
   t.is(frag.json.url, SITE + '/page#topo', 'the fragment is kept, as core keeps it')
 })
 
+test('preview: a signup invite link on any host is refused before any fetch', async (t) => {
+  const { login, fetchPreview, site } = await setup(t)
+  const { token } = await login()
+  const code = 'A'.repeat(43)
+  for (const url of [SITE + '/convite', SITE + '/convite/' + code, SITE + '/convite/' + code + '#c1.' + 'b'.repeat(40), 'https://bora.varanda.app/convite/' + code]) {
+    const res = await fetchPreview(token, { url })
+    t.is(res.status, 400, url)
+    t.is(res.json.error, 'pedido-invalido')
+  }
+  t.is(site.seen.length, 0, 'nothing refused reached the site')
+  t.is((await fetchPreview(token, { url: SITE + '/page' })).status, 200, 'an ordinary page still works')
+})
+
 test('preview: every answer for a hostile page passes core validLinkCard', async (t) => {
   const { login, fetchPreview } = await setup(t)
   const { token } = await login()

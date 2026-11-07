@@ -18,6 +18,7 @@ const { initAssociation, issueCertificate, issueIssuerCertificate } = require('.
 const { createCert, createUsernameRecord } = require('../lib/cert')
 const { Seeder } = require('../lib/seeder')
 const { UsageError } = require('../lib/errors')
+const { signInviteCard } = require('../lib/invite-card')
 const { postRecord, profileRecord, profileRecords, validateRecord, memberCertRecord, followRecord, deleteRecord } = require('../lib/records')
 const pageLib = require('../lib/page')
 const pageProof = require('../lib/page-proof')
@@ -351,6 +352,18 @@ test('report.sign is refused by the node session (USAGE, not INTERNAL)', async (
   t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
 })
 
+test('appeal.sign is refused by the node session (USAGE, not INTERNAL)', async (t) => {
+  const NO = { code: 'USAGE', message: 'assinatura disponível só no navegador' }
+  const params = { nonce: 'n'.repeat(43), text: 'foi um engano' }
+  const fresh = await member(t)
+  t.alike(await failure(fresh.call('appeal.sign', params)), NO, 'before an identity')
+  const m = await member(t, { cert: true })
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('appeal.sign', params)), NO, 'after identity.create')
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
 test('terms.sign is refused by the node session (USAGE, not INTERNAL)', async (t) => {
   const NO = { code: 'USAGE', message: 'assinatura disponível só no navegador' }
   const params = { nonce: 'n'.repeat(43), version: 1 }
@@ -373,6 +386,42 @@ test('invite.sign is refused by the node session (USAGE, not INTERNAL)', async (
   t.alike(await failure(m.call('invite.sign', params)), NO, 'after identity.create')
   t.alike(await m.call('log.read'), before, 'nothing written')
   t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
+test('inviteCard.sign is refused by the node session (USAGE, not INTERNAL)', async (t) => {
+  const NO = { code: 'USAGE', message: 'assinatura disponível só no navegador' }
+  const params = { code: 'a'.repeat(43), design: 'cordel', name: 'Ana', message: 'Vem pra varanda!', expires: 1900000000 }
+  const fresh = await member(t)
+  t.alike(await failure(fresh.call('inviteCard.sign', params)), NO, 'before an identity')
+  const m = await member(t, { cert: true })
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('inviteCard.sign', params)), NO, 'after identity.create')
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
+test('inviteCard.verify checks the card and session association without an identity', async (t) => {
+  const m = await member(t)
+  const keyPair = crypto.keyPair()
+  const params = { code: 'a'.repeat(43), design: 'cordel', name: 'Ana', message: 'Vem pra varanda!', expires: 1900000000, member: b4a.toString(keyPair.publicKey, 'hex') }
+  const signature = signInviteCard({ ...params, association: m.assoc.hex }, keyPair)
+  t.alike(await m.call('inviteCard.verify', { ...params, signature }), { ok: true }, 'before an identity')
+  t.alike(await m.call('inviteCard.verify', { ...params, signature, code: 'b'.repeat(43) }), { ok: false, reason: 'bad-signature' }, 'swapped code')
+  const otherSignature = signInviteCard({ ...params, association: randomKey() }, keyPair)
+  t.alike(await m.call('inviteCard.verify', { ...params, signature: otherSignature }), { ok: false, reason: 'bad-signature' }, 'another association')
+  t.alike(await m.session.handlers['inviteCard.verify']({ ...params, signature, association: randomKey() }), { ok: true }, 'configured association overrides input')
+  t.alike(await m.session.handlers['inviteCard.verify'](null), { ok: false, reason: 'malformed' }, 'malformed input does not throw')
+  t.is(store.storeExists(m.dataDir), false, 'no identity created')
+  t.alike(m.session.internal, [], 'no internal error')
+  const nowSec = Math.floor(Date.now() / 1000)
+  const stale = { ...params, expires: nowSec - 86400 - 120 }
+  const staleSig = signInviteCard({ ...stale, association: m.assoc.hex }, keyPair)
+  t.alike(await m.call('inviteCard.verify', { ...stale, signature: staleSig }), { ok: false, reason: 'expired' }, 'expired card')
+  const recent = { ...params, expires: nowSec - 3600 }
+  const recentSig = signInviteCard({ ...recent, association: m.assoc.hex }, keyPair)
+  t.alike(await m.call('inviteCard.verify', { ...recent, signature: recentSig }), { ok: true }, 'an hour past expiry is inside the skew')
+  await m.session.close()
+  t.alike(await failure(m.call('inviteCard.verify', { ...params, signature })), { code: 'LOCKED', message: 'sessão encerrada' }, 'closed session answers LOCKED')
 })
 
 test('push.sign is refused by the node session (USAGE, not INTERNAL)', async (t) => {

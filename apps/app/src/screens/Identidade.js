@@ -58,7 +58,7 @@ import { useOutbox } from '../outboxProvider'
 import { BROWSER_TEXT, KNOWN_LOST_FULL_TEXT, KNOWN_LOST_TEXT, MISSED_TEXT, NONE_FULL_TEXT, NONE_TEXT, NOT_SYNCED_TITLE, OTHER_PASSKEY_LABEL, PHONE_BUTTON, PHONE_HINT, PHONE_SIGNIN_BUTTON, PHONE_SIGNIN_HINT, RETRY_BUTTON, SYNC_ADVICE, UNUSABLE_TITLE, notSyncedSteps, unusableSteps } from '../passkeyTrouble'
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
-import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
+import { dropSignupInvite, dropSignupInviteCard, loadSignupInvite } from '../signupInviteStore'
 import { FULL_TEXT, admissionFor, admissionOffer } from '../signupAdmission'
 import { hostOf, installationOrigin } from '../installation'
 import { dropsHeldInvite, parseSessionReturn } from '../linkReturn'
@@ -235,7 +235,10 @@ function takeReturnNotice () {
     returnNotice = parseReturn(loc.search)
     returnWaitlist = parseReturnWaitlist(loc.search)
     returnInvite = parseReturnInvite(loc.search)
-    if (returnInvite !== '') dropSignupInvite()
+    if (returnInvite !== '') {
+      dropSignupInvite()
+      dropSignupInviteCard()
+    }
     if (new URLSearchParams(loc.search).has('conta')) hist.replaceState(hist.state, '', loc.pathname + loc.hash)
   } catch {}
   return returnNotice
@@ -317,7 +320,7 @@ function accepted (key, record) {
   noteDate(key, record.date)
 }
 
-function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChanged, onLinked }) {
+function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChanged, onLinked, onInviteChanged }) {
   const node = useNode()
   const now = useNow(60000)
   // { key, status, pending } of the last load for this key.
@@ -540,7 +543,11 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
           // for a code held by another pending link too, and that one may
           // free up. The app drops it, so its paste field shows again for
           // another link instead of resending a dead code.
-          if (dropsHeldInvite(err, NATIVE)) dropSignupInvite()
+          if (dropsHeldInvite(err, NATIVE)) {
+            dropSignupInvite()
+            dropSignupInviteCard()
+            if (onInviteChanged) onInviteChanged()
+          }
           setInviteNote(err.message)
           return
         }
@@ -615,7 +622,11 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       // The account or the name belongs to another key, or the row expired:
       // this row can never be confirmed, so offer another account.
       setWaitlist('')
-      if (err && err.code === 'convite-invalido') dropSignupInvite()
+      if (err && err.code === 'convite-invalido') {
+        dropSignupInvite()
+        dropSignupInviteCard()
+        if (onInviteChanged) onInviteChanged()
+      }
       if (err && RESTARTABLE.has(err.code)) setConfirmFailed(true)
       throw err
     } finally {
@@ -654,6 +665,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     setError('')
     setInviteNote('')
     setPasteTick((n) => n + 1)
+    if (onInviteChanged) onInviteChanged()
   }
 
   const restartLink = () => {
@@ -809,7 +821,9 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
 // `step` (src/onboarding.js) at `index` of `total`.
 // onLinked (setup only): called once a certificate from the account link
 // lands in this diary, so the shell knows the setup took the Google return.
-export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, onLinked, invite = null }) {
+// onInviteChanged: the held signup code or its card changed here (a paste,
+// a drop), so the shell reads the card again.
+export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, onLinked, onInviteChanged, invite = null }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const outbox = useOutbox()
@@ -1513,6 +1527,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             setup={setup}
             onChanged={refresh}
             onLinked={setup ? onLinked : undefined}
+            onInviteChanged={onInviteChanged}
           />
           )
         : null}

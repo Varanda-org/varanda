@@ -7,12 +7,14 @@
 // counts are what compare.
 //
 //   node scripts/startup-bench.js [--follows N] [--blocks M] [--own K]
-//                                 [--idb] [--issued] [--js-verify] [--reads]
+//                                 [--idb | --file] [--issued] [--js-verify]
+//                                 [--reads] [--reads-twice] [--log] [--lease-gap]
 //                                 [--runs R] [--json]
 //
 // N followed diaries of M blocks each are stored as replicas, the own diary
 // has K blocks (its certificate, N follow records, posts). Storage is in
-// memory, or fake-indexeddb with --idb. The run dials a closed loopback
+// memory, fake-indexeddb with --idb, or a fresh temporary directory per run
+// with --file (the native worklet's storage). The run dials a closed loopback
 // port, so only the startup is measured. --issued: v2 certificates from an
 // issuer and a username record in every diary, as the account service
 // makes them. --js-verify: signatures are checked with sodium-javascript,
@@ -21,8 +23,13 @@
 // lent cores (feed.read limit 20, profile.read of every author,
 // engagement.read), timed one after the other as the node's chain runs
 // them. Every run starts with an empty signature memo, as a page load does.
+// --reads-twice repeats the trio on the same cores; --log reads pages 1 and
+// 8 of the own diary. --lease-gap reads the feed exclusively after shutdown.
 
 const net = require('node:net')
+const fs = require('node:fs/promises')
+const os = require('node:os')
+const path = require('node:path')
 const b4a = require('b4a')
 const Hypercore = require('hypercore')
 const crypto = require('hypercore-crypto')
@@ -39,14 +46,18 @@ function hex (buf) {
 }
 
 function parseArgs (argv) {
-  const opts = { follows: 50, blocks: 20, own: 200, idb: false, issued: false, jsVerify: false, reads: false, runs: 3, json: false }
+  const opts = { follows: 50, blocks: 20, own: 200, idb: false, file: false, issued: false, jsVerify: false, reads: false, readsTwice: false, log: false, leaseGap: false, runs: 3, json: false }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--idb') opts.idb = true
+    else if (a === '--file') opts.file = true
     else if (a === '--json') opts.json = true
     else if (a === '--issued') opts.issued = true
     else if (a === '--js-verify') opts.jsVerify = true
     else if (a === '--reads') opts.reads = true
+    else if (a === '--reads-twice') opts.readsTwice = true
+    else if (a === '--log') opts.log = true
+    else if (a === '--lease-gap') opts.leaseGap = true
     else if (a === '--follows' || a === '--blocks' || a === '--own' || a === '--runs') {
       const n = Number(argv[++i])
       if (!Number.isSafeInteger(n) || n < 0) throw new Error('valor inválido para ' + a)
@@ -56,6 +67,8 @@ function parseArgs (argv) {
     }
   }
   if (opts.runs < 1) opts.runs = 1
+  if (opts.idb && opts.file) throw new Error('escolha --idb ou --file')
+  if (opts.readsTwice) opts.reads = true
   return opts
 }
 
@@ -95,15 +108,16 @@ async function storeFollow (storage, assocKp, blocks, issuer, i) {
   return key
 }
 
-async function fixture ({ follows, blocks, own, idb, issued }) {
-  let storage
-  if (idb) {
-    require('fake-indexeddb/auto')
-    const { idbNodeStorage } = require('../lib/node-storage')
-    storage = await idbNodeStorage('varanda-startup-bench-' + process.pid)
-  } else {
-    const { memoryNodeStorage } = require('../lib/node-storage')
-    storage = memoryNodeStorage()
+async function fixture ({ follows, blocks, own, idb, issued }, storage = null) {
+  if (storage === null) {
+    if (idb) {
+      require('fake-indexeddb/auto')
+      const { idbNodeStorage } = require('../lib/node-storage')
+      storage = await idbNodeStorage('varanda-startup-bench-' + process.pid)
+    } else {
+      const { memoryNodeStorage } = require('../lib/node-storage')
+      storage = memoryNodeStorage()
+    }
   }
   const assocKp = generateAssociationKeyPair()
   let issuer = null
@@ -131,12 +145,56 @@ async function fixture ({ follows, blocks, own, idb, issued }) {
   return { storage, association: ctx.association, ownHex, keys }
 }
 
-// Counters over node-store while a run is measured: the counts cover the
-// whole run (after the abort only the startup's own work finishes, the
-// follow fold included), the time ends at the reader.
+function counts (c) {
+  return { ownReads: c.ownReads, existence: c.existence, opens: c.opens, storageGets: c.storageGets, storageHas: c.storageHas, storageReads: c.storageReads, storageStats: c.storageStats }
+}
+
+// Separate core get/has from adapter reads/probes so cache hits do not look
+// like I/O. Adapter counts are calls, not OS syscalls or IDB transactions.
+function instrumentStorage (storage, c) {
+  const seen = new WeakSet()
+  function wrap (target) {
+    if (seen.has(target)) return target
+    seen.add(target)
+    for (const [counter, methods] of [
+      ['storageReads', ['get', 'read', 'readJson']],
+      ['storageStats', ['has', 'hasCore', 'stat', 'exists']]
+    ]) {
+      for (const name of methods) {
+        const original = target[name]
+        if (typeof original !== 'function') continue
+        target[name] = function (...args) {
+          if (c.measuring) c[counter]++
+          return original.apply(this, args)
+        }
+      }
+    }
+    return target
+  }
+  const core = storage.core
+  storage.core = function (...args) {
+    const factory = core.apply(this, args)
+    return (...args) => wrap(factory(...args))
+  }
+  return wrap(storage)
+}
+
 function instrument ({ jsVerify }) {
   const original = { replicaExists: store.replicaExists, openReplica: store.openReplica, openDiary: store.openDiary }
-  const c = { existence: 0, opens: 0, inflight: 0, peak: 0, ownReads: 0, verifies: 0, verifyMs: 0, measuring: false }
+  const c = { existence: 0, opens: 0, inflight: 0, peak: 0, ownReads: 0, storageGets: 0, storageHas: 0, storageReads: 0, storageStats: 0, verifies: 0, verifyMs: 0, measuring: false }
+  function wrapCore (core, own = false) {
+    for (const name of ['get', 'has']) {
+      const original = core[name]
+      core[name] = function (...args) {
+        if (c.measuring) {
+          c[name === 'get' ? 'storageGets' : 'storageHas']++
+          if (own && name === 'get' && args[0] >= 1) c.ownReads++
+        }
+        return original.apply(this, args)
+      }
+    }
+    return core
+  }
   // The copy @varanda/core lib/verified.js checks signatures with.
   const sigCrypto = require(require.resolve('hypercore-crypto', { paths: [require('node:path').dirname(require.resolve('@varanda/core/lib/verified'))] }))
   const nativeVerify = sigCrypto.verify
@@ -160,7 +218,7 @@ function instrument ({ jsVerify }) {
     c.opens++
     c.peak = Math.max(c.peak, ++c.inflight)
     try {
-      return await original.openReplica.apply(this, args)
+      return wrapCore(await original.openReplica.apply(this, args))
     } finally {
       c.inflight--
     }
@@ -168,12 +226,7 @@ function instrument ({ jsVerify }) {
   store.openDiary = async function (...args) {
     const core = await original.openDiary.apply(this, args)
     if (!c.measuring) return core
-    const get = core.get.bind(core)
-    core.get = (index, opts) => {
-      if (c.measuring && index >= 1) c.ownReads++
-      return get(index, opts)
-    }
-    return core
+    return wrapCore(core, true)
   }
   return {
     counters: c,
@@ -185,33 +238,67 @@ function instrument ({ jsVerify }) {
 }
 
 // The app's first reads on the cores the run lends, one after the other.
-async function firstReads (api, { storage, association, ownHex, keys }) {
+async function firstReads (api, { storage, association, ownHex, keys }, opts, c, phases) {
   const ctx = { storage, association, cores: { diary: api.diary, replica: api.replica, group: api.group } }
-  const timed = async (read) => {
+  const timed = async (phase, read) => {
     if (!api.hold()) throw new Error('a sincronização não emprestou os núcleos')
+    const before = counts(c)
     const start = process.hrtime.bigint()
     try {
       await read()
     } finally {
       api.release()
+      const after = counts(c)
+      phases[phase] = Object.fromEntries(Object.keys(before).map((key) => [key, after[key] - before[key]]))
     }
     return Number(process.hrtime.bigint() - start) / 1e6
   }
-  return {
-    feed: await timed(() => ops.feedRead(ctx, { limit: 20 })),
-    profile: await timed(() => ops.profileRead(ctx, { authors: [ownHex, ...keys] })),
-    engagement: await timed(() => ops.engagementRead(ctx, { refs: keys.slice(0, 20).map((k) => k + ':2') }))
+  // The run keeps working after it publishes the reader (connect, the
+  // follow fold); without this wait that tail lands in the first phase's
+  // counts. It is reported apart as phases.startupTail.
+  const tailBefore = counts(c)
+  let last = JSON.stringify(tailBefore)
+  for (let waited = 0; waited < 5000; waited += 300) {
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const now = JSON.stringify(counts(c))
+    if (now === last) break
+    last = now
   }
+  const tailAfter = counts(c)
+  phases.startupTail = Object.fromEntries(Object.keys(tailBefore).map((key) => [key, tailAfter[key] - tailBefore[key]]))
+  const timings = {}
+  if (opts.reads) {
+    for (const suffix of opts.readsTwice ? ['', '2'] : ['']) {
+      timings['feed' + suffix + 'Ms'] = await timed('feed' + suffix, () => ops.feedRead(ctx, { limit: 20 }))
+      timings['profile' + suffix + 'Ms'] = await timed('profile' + suffix, () => ops.profileRead(ctx, { authors: [ownHex, ...keys] }))
+      timings['engagement' + suffix + 'Ms'] = await timed('engagement' + suffix, () => ops.engagementRead(ctx, { refs: keys.slice(0, 20).map((k) => k + ':2') }))
+    }
+  }
+  if (opts.log) {
+    const logPage = async (before) => {
+      const { entries } = await ops.logRead(ctx)
+      let end = entries.length
+      if (before !== undefined) {
+        while (end > 0 && entries[end - 1].seq >= before) end--
+      }
+      return entries.slice(Math.max(0, end - 32), end)
+    }
+    timings.logPage1Ms = await timed('log1', () => logPage())
+    timings.logPage8Ms = await timed('log8', () => logPage(api.diary.length - 7 * 32))
+  }
+  return timings
 }
 
-async function measure (f, url, c, reads) {
+async function measure (f, url, c, opts) {
   const { runSync } = require('../lib/sync')
   const storage = f.storage
   clearMemo()
-  Object.assign(c, { existence: 0, opens: 0, inflight: 0, peak: 0, ownReads: 0, verifies: 0, verifyMs: 0, measuring: true })
+  Object.assign(c, { existence: 0, opens: 0, inflight: 0, peak: 0, ownReads: 0, storageGets: 0, storageHas: 0, storageReads: 0, storageStats: 0, verifies: 0, verifyMs: 0, measuring: true })
   const ac = new AbortController()
   let published = null
   let timings = null
+  let startup = null
+  const phases = {}
   let readError = null
   const start = process.hrtime.bigint()
   const run = runSync({
@@ -230,8 +317,9 @@ async function measure (f, url, c, reads) {
       set (api) {
         if (published !== null) return
         published = Number(process.hrtime.bigint() - start) / 1e6
-        if (!reads) return ac.abort()
-        firstReads(api, f).then((t) => { timings = t }, (err) => { readError = err }).finally(() => ac.abort())
+        startup = counts(c)
+        if (!opts.reads && !opts.log) return ac.abort()
+        firstReads(api, f, opts, c, phases).then((t) => { timings = t }, (err) => { readError = err }).finally(() => ac.abort())
       },
       clear () {}
     }
@@ -240,23 +328,59 @@ async function measure (f, url, c, reads) {
   c.measuring = false
   if (published === null) throw new Error('a sincronização terminou sem publicar o leitor: ' + JSON.stringify(result.errors))
   if (readError !== null) throw readError
-  const out = { ms: published, existence: c.existence, opens: c.opens, peakOpens: c.peak, ownReads: c.ownReads, verifies: c.verifies, verifyMs: c.verifyMs }
-  if (timings !== null) Object.assign(out, { feedMs: timings.feed, profileMs: timings.profile, engagementMs: timings.engagement })
+  const out = { ms: published, existence: c.existence, opens: c.opens, peakOpens: c.peak, ownReads: c.ownReads, verifies: c.verifies, verifyMs: c.verifyMs, storageGets: c.storageGets, storageHas: c.storageHas, storageReads: c.storageReads, storageStats: c.storageStats, startup, phases }
+  if (timings !== null) Object.assign(out, timings)
+  if (opts.leaseGap) {
+    // Keep the historical totals scoped to the live run, including teardown.
+    c.measuring = true
+    const start = process.hrtime.bigint()
+    try {
+      await ops.feedRead({ storage, association: f.association }, { limit: 20 })
+      out.leaseGapReadMs = Number(process.hrtime.bigint() - start) / 1e6
+    } finally {
+      c.measuring = false
+    }
+  }
   return out
 }
 
 async function main () {
   const opts = parseArgs(process.argv.slice(2))
-  const f = await fixture(opts)
-  const storage = f.storage
   const url = 'ws://127.0.0.1:' + (await deadPort()) + '/seeder'
   const probe = instrument(opts)
   const runs = []
+  let f = null
   try {
-    for (let i = 0; i < opts.runs; i++) runs.push(await measure(f, url, probe.counters, opts.reads))
+    if (!opts.file) {
+      f = await fixture(opts)
+      instrumentStorage(f.storage, probe.counters)
+    }
+    for (let i = 0; i < opts.runs; i++) {
+      if (!opts.file) {
+        runs.push(await measure(f, url, probe.counters, opts))
+        continue
+      }
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'varanda-startup-bench-'))
+      let storage = null
+      try {
+        const { fileNodeStorage } = require('../lib/file-storage')
+        storage = fileNodeStorage(dir)
+        const f = await fixture(opts, storage)
+        instrumentStorage(storage, probe.counters)
+        runs.push(await measure(f, url, probe.counters, opts))
+      } finally {
+        probe.counters.measuring = false
+        try {
+          if (storage !== null) await storage.close()
+        } finally {
+          await fs.rm(dir, { recursive: true, force: true })
+        }
+      }
+    }
   } finally {
+    probe.counters.measuring = false
     probe.restore()
-    if (typeof storage.close === 'function') await storage.close()
+    if (f !== null && typeof f.storage.close === 'function') await f.storage.close()
   }
   const median = (pick) => {
     const v = runs.map(pick).sort((a, b) => a - b)
@@ -267,7 +391,7 @@ async function main () {
     follows: opts.follows,
     blocks: opts.blocks,
     own: opts.own,
-    storage: opts.idb ? 'fake-indexeddb' : 'memória',
+    storage: opts.file ? 'arquivo' : opts.idb ? 'fake-indexeddb' : 'memória',
     runs: runs.length,
     medianMs: Math.round(times[Math.floor(times.length / 2)] * 10) / 10,
     minMs: Math.round(times[0] * 10) / 10,
@@ -275,12 +399,21 @@ async function main () {
     opens: runs[runs.length - 1].opens,
     peakOpens: runs[runs.length - 1].peakOpens,
     ownReads: runs[runs.length - 1].ownReads,
+    storageGets: runs[runs.length - 1].storageGets,
+    storageHas: runs[runs.length - 1].storageHas,
+    storageReads: runs[runs.length - 1].storageReads,
+    storageStats: runs[runs.length - 1].storageStats,
+    startup: runs[runs.length - 1].startup,
+    phases: runs[runs.length - 1].phases,
     certs: opts.issued ? 'v2 + nome de usuário' : 'v1',
     verify: opts.jsVerify ? 'sodium-javascript' : 'nativa',
     verifies: runs[runs.length - 1].verifies,
     verifyMs: median((r) => r.verifyMs)
   }
   if (opts.reads) Object.assign(summary, { feedMs: median((r) => r.feedMs), profileMs: median((r) => r.profileMs), engagementMs: median((r) => r.engagementMs) })
+  if (opts.readsTwice) Object.assign(summary, { feed2Ms: median((r) => r.feed2Ms), profile2Ms: median((r) => r.profile2Ms), engagement2Ms: median((r) => r.engagement2Ms) })
+  if (opts.log) Object.assign(summary, { logPage1Ms: median((r) => r.logPage1Ms), logPage8Ms: median((r) => r.logPage8Ms) })
+  if (opts.leaseGap) summary.leaseGapReadMs = median((r) => r.leaseGapReadMs)
   if (opts.json) {
     process.stdout.write(JSON.stringify({ ...summary, each: runs }) + '\n')
     return
@@ -294,6 +427,13 @@ async function main () {
     'assinaturas verificadas: ' + summary.verifies + ' (mediana ' + summary.verifyMs + ' ms)'
   ]
   if (opts.reads) lines.push('primeiras leituras (medianas): feed.read ' + summary.feedMs + ' ms, profile.read ' + summary.profileMs + ' ms, engagement.read ' + summary.engagementMs + ' ms')
+  if (opts.readsTwice) lines.push('segundas leituras (medianas): feed.read ' + summary.feed2Ms + ' ms, profile.read ' + summary.profile2Ms + ' ms, engagement.read ' + summary.engagement2Ms + ' ms')
+  if (opts.log) lines.push('diário (medianas): página 1 ' + summary.logPage1Ms + ' ms, página 8 ' + summary.logPage8Ms + ' ms')
+  if (opts.leaseGap) lines.push('feed após encerrar a sincronização (mediana): ' + summary.leaseGapReadMs + ' ms')
+  lines.push('operações de armazenamento: get ' + summary.storageGets + ', has ' + summary.storageHas + ', leituras ' + summary.storageReads + ', consultas ' + summary.storageStats)
+  for (const [name, c] of [['partida', summary.startup], ...Object.entries(summary.phases)]) {
+    lines.push(name + ': diário ' + c.ownReads + ', existência ' + c.existence + ', aberturas ' + c.opens + ', get ' + c.storageGets + ', has ' + c.storageHas + ', leituras ' + c.storageReads + ', consultas ' + c.storageStats)
+  }
   process.stdout.write(lines.join('\n') + '\n')
 }
 

@@ -251,7 +251,7 @@ test('the same fields under another statement prefix are not a page statement', 
   // The same bytes after the prefix line: only the prefix tells them apart.
   const pageFields = { ...FIELDS, action: 'status' }
   const rest = b4a.toString(pagePayload(pageFields)).split('\n').slice(1).join('\n')
-  for (const prefix of ['varanda-account-link-v1', 'varanda-age-v1', 'varanda-invite-v1', 'varanda-push-v1', 'varanda-terms-v1']) {
+  for (const prefix of ['varanda-account-link-v1', 'varanda-age-v1', 'varanda-invite-v1', 'varanda-invite-card-v1', 'varanda-push-v1', 'varanda-terms-v1']) {
     const forged = b4a.toString(crypto.sign(b4a.from(prefix + '\n' + rest), MEMBER_KP.secretKey), 'hex')
     t.alike(verifyPage(pageFields, forged), { ok: false, reason: 'bad-signature' }, prefix)
   }

@@ -124,9 +124,11 @@ import { errorText } from './ui'
 import { accountOriginOf } from './pageGate'
 import { slowRequestLine } from './slowRequest'
 import { createIdleTracker } from './idle'
+import { createRequestQueue } from './requestQueue'
 import { noteOwnDmDrop } from './dmWakeMute'
 import { setDmDropObserver } from './pages'
-import { vitrineEnabled } from './vitrine/enabled'
+import { vitrineEnabled, vitrineLarge } from './vitrine/enabled'
+import { createMarks, devHookRequest, perfEnabled } from './perfMarks'
 import { recoveryFetch } from './account'
 import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 
@@ -208,6 +210,15 @@ const noConnection = () => Promise.reject(Object.assign(new Error('sem conexão 
 // The Vitrine (src/vitrine/enabled.js): development bundles only, behind an
 // opt-in env var. The literal member access is what Expo inlines.
 const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
+// 200 extra feed rows for timing native list rendering (docs/performance.md).
+const VITRINE_LARGE = vitrineLarge({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE, EXPO_PUBLIC_VARANDA_VITRINE_LARGE: process.env.EXPO_PUBLIC_VARANDA_VITRINE_LARGE }, typeof __DEV__ !== 'undefined' && __DEV__)
+
+// Dev-only timing marks (src/perfMarks.js): off unless a development bundle
+// sets the env var. Kept out of the NodeContext value and the sync lines,
+// whose changes re-render the shell: that is the cost being measured.
+const PERF = perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: process.env.EXPO_PUBLIC_VARANDA_PERF }, typeof __DEV__ !== 'undefined' && __DEV__)
+const marks = createMarks({ enabled: PERF })
+export function perfMarks () { return marks }
 let vitrine = null
 if (VITRINE) {
   const { fixtures } = require('./vitrine/fixtures')
@@ -234,7 +245,7 @@ export function NodeProvider ({ children }) {
 // What the shell reads to show the hosted, unlocked, member-certified
 // screens over the fixtures: no connection, no sync, no passkey ceremony.
 function VitrineNodeProvider ({ children }) {
-  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures))
+  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures, { large: VITRINE_LARGE }))
   const [dmVersion, setDmVersion] = useState(0)
   const bumpDm = useCallback(() => setDmVersion((n) => n + 1), [])
   const [autoWanted, setAutoWanted] = useState(false)
@@ -361,6 +372,15 @@ function LiveNodeProvider ({ children }) {
   // Bumped when a connection starts and when one ends (useNotice).
   const [epoch, setEpoch] = useState(0)
   const connRef = useRef(null)
+  const requestQueueRef = useRef(null)
+  const setConnection = useCallback((conn) => {
+    if (connRef.current === conn) return
+    if (requestQueueRef.current) {
+      requestQueueRef.current.clear(Object.assign(new Error('sem conexão com o nó'), { code: 'CLOSED' }))
+    }
+    requestQueueRef.current = conn ? createRequestQueue() : null
+    connRef.current = conn
+  }, [])
   const startedRef = useRef(false)
   const installationLoadedRef = useRef(false)
   const busyRef = useRef(false)
@@ -650,7 +670,7 @@ function LiveNodeProvider ({ children }) {
         onEvent,
         onClose: ({ code }) => {
           if (connRef.current !== holder.conn) return
-          connRef.current = null
+          setConnection(null)
           setRecovery(null)
           setSync({ active: null, lines: [], stopped: null })
           resetSignals()
@@ -660,12 +680,13 @@ function LiveNodeProvider ({ children }) {
         }
       })
       holder.conn = conn
-      connRef.current = conn
+      setConnection(conn)
       setInfoOrigin(undefined)
       if (save && cfg) {
         try { await saveConfig(cfg) } catch { setError('a configuração não pôde ser guardada neste aparelho') }
       }
       const status = await conn.request('sync.status')
+      marks.mark('sync.status')
       if (status.state === 'running') {
         setSync((prev) => (prev.active ? prev : { ...prev, active: { runId: status.runId, once: status.once } }))
         adoptSignals(status.runId, status.once)
@@ -678,6 +699,7 @@ function LiveNodeProvider ({ children }) {
       if (identity !== null) {
         try { pk = await identity.status() } catch (err) { pkErr = errorText(err) }
       }
+      marks.mark('identity.status')
       setHasPasskey(identity !== null)
       setHasMedia(identity !== null && conn.media != null && typeof conn.media.upload === 'function')
       setMediaCaps(identity !== null && conn.media != null ? CHAT_MEDIA_CALLS.filter((k) => typeof conn.media[k] === 'function').join(',') : '')
@@ -688,8 +710,9 @@ function LiveNodeProvider ({ children }) {
       setConfig(cfg)
       if (nativeHosted) setHosted(true)
       setPhase('ready')
+      marks.mark('ready')
     } catch (err) {
-      connRef.current = null
+      setConnection(null)
       if (holder.conn) { try { await holder.conn.close() } catch {} }
       if (cfg) setConfig(cfg) // the form keeps what was tried
       setError(errorText(err))
@@ -697,12 +720,13 @@ function LiveNodeProvider ({ children }) {
     } finally {
       busyRef.current = false
     }
-  }, [onEvent, resetSignals, bumpEpoch, bumpGeneration, adoptSignals])
+  }, [onEvent, resetSignals, bumpEpoch, bumpGeneration, adoptSignals, setConnection])
 
   // One connect at a time: a call while one is in flight returns that one.
   const connect = useCallback((cfg, opts) => {
     if (busyRef.current) return inflightRef.current
     busyRef.current = true
+    marks.mark('config')
     const run = connectNow(cfg, opts)
     inflightRef.current = run
     run.then(() => { if (inflightRef.current === run) inflightRef.current = null })
@@ -775,7 +799,7 @@ function LiveNodeProvider ({ children }) {
     // first; its connection is then closed below.
     while (inflightRef.current !== null) await inflightRef.current
     const conn = connRef.current
-    connRef.current = null
+    setConnection(null)
     if (conn) {
       setPhase('connecting')
       try { await conn.close() } catch {}
@@ -783,14 +807,14 @@ function LiveNodeProvider ({ children }) {
     await clearConfig()
     setHostedSource(null)
     await begin()
-  }, [begin])
+  }, [begin, setConnection])
 
   // Native: apply a new configuration (bootstrap, DHT): stop the node
   // (node.close, then terminate) and start it again. The client module
   // handles recover.
   const restart = useCallback(async (cfg) => {
     const conn = connRef.current
-    connRef.current = null
+    setConnection(null)
     if (conn) {
       setPhase('connecting')
       try { await conn.close() } catch {}
@@ -798,14 +822,14 @@ function LiveNodeProvider ({ children }) {
     setHosted(false)
     setHostedSource(null)
     await connect(cfg, { save: true })
-  }, [connect])
+  }, [connect, setConnection])
 
   const reconnect = useCallback(async () => {
     const conn = connRef.current
-    connRef.current = null
+    setConnection(null)
     if (conn) { try { await conn.close() } catch {} }
     await connect(config)
-  }, [connect, config])
+  }, [connect, config, setConnection])
 
   // While the node should restart a preempted continuous run, every request
   // sent may queue behind (or preempt) it again: the node restarts after the
@@ -817,36 +841,47 @@ function LiveNodeProvider ({ children }) {
   const request = useCallback((method, params) => {
     const conn = connRef.current
     if (!conn) return noConnection()
-    const waiting = awaitingRef.current !== 0
-    if (waiting) extendWait()
-    const startedAt = Date.now()
-    const idle = idleRef.current
-    idle.begin()
-    const done = () => {
-      const line = slowRequestLine(method, startedAt, Date.now())
-      idle.end()
-      if (line !== null && connRef.current === conn) setSync((prev) => appendLine(prev, 'aviso: ' + line))
-    }
-    if (method !== 'sync.start') {
+    return requestQueueRef.current.run(method, params, (method, params) => {
+      const waiting = awaitingRef.current !== 0
+      if (waiting) extendWait()
+      const startedAt = Date.now()
+      const idle = idleRef.current
+      idle.begin()
+      const done = () => {
+        const line = slowRequestLine(method, startedAt, Date.now())
+        marks.span('req:' + method, startedAt, Date.now())
+        idle.end()
+        if (line !== null && connRef.current === conn) setSync((prev) => appendLine(prev, 'aviso: ' + line))
+      }
+      if (method !== 'sync.start') {
+        const pending = conn.request(method, params)
+        pending.then(done, done)
+        if (waiting) pending.then(extendWait, extendWait)
+        return pending
+      }
+      startingRef.current += 1
+      setStarting(true)
+      const settled = () => {
+        startingRef.current -= 1
+        if (startingRef.current === 0) setStarting(false)
+        if (waiting) extendWait()
+      }
       const pending = conn.request(method, params)
       pending.then(done, done)
-      if (waiting) pending.then(extendWait, extendWait)
+      pending.then(settled, settled)
       return pending
-    }
-    startingRef.current += 1
-    setStarting(true)
-    const settled = () => {
-      startingRef.current -= 1
-      if (startingRef.current === 0) setStarting(false)
-      if (waiting) extendWait()
-    }
-    const pending = conn.request(method, params)
-    pending.then(done, done)
-    pending.then(settled, settled)
-    return pending
+    })
   }, [extendWait])
 
   const whenIdle = useCallback((quietMs) => idleRef.current.whenIdle(quietMs), [])
+
+  // Lets a lab driver act as the signed-in user in a development build; the
+  // same PERF check keeps it out of release bundles and off by default.
+  useEffect(() => {
+    if (!PERF || phase !== 'ready') return
+    globalThis.__varandaDev = Object.freeze({ request: devHookRequest(request), report: () => marks.report() })
+    return () => { delete globalThis.__varandaDev }
+  }, [phase, request])
 
   // Re-reads identity.status() of `conn` (the current connection by
   // default); a result for a connection that is no longer current is dropped.
@@ -876,6 +911,14 @@ function LiveNodeProvider ({ children }) {
   const passkeyOp = useCallback((name, arg) => {
     const conn = connRef.current
     if (!conn || !conn.identity) return noConnection()
+    // A request still waiting in the app-side queue was asked for under the
+    // identity that is about to change; sent after the operation, the node
+    // would sign it with the next identity's key. Dropped here, before the
+    // operation is dispatched, it is never sent. Requests already in flight
+    // reached the node first, and its serial chain runs them before it.
+    if (IDENTITY_OPS.has(name) && requestQueueRef.current) {
+      requestQueueRef.current.clear(Object.assign(new Error('a identidade mudou antes do envio'), { code: 'CLOSED' }))
+    }
     let pending
     try {
       // A node script without signOut (an older build) locks instead.
