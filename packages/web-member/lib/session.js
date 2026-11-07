@@ -38,14 +38,15 @@
 // clearKeyPair(), reset() and close(). Reads work locked; a write without
 // the key is USAGE 'identidade bloqueada: entre com a passkey'. The only
 // signatures the session makes outside the diary are account.sign,
-// report.sign, terms.sign, invite.sign, inviteCard.sign, push.sign and
-// age.sign: the domain-separated account-link statement (@varanda/core
-// lib/account-link.js, prefix 'varanda-account-link-v1'), report statement
-// (@varanda/core lib/report.js, prefix 'varanda-report-v1'), terms-acceptance
-// statement (@varanda/core lib/terms.js, prefix 'varanda-terms-v1'),
-// signup-invite request (@varanda/core lib/invite.js, prefix
-// 'varanda-invite-v1'), signup-invite card (@varanda/core
-// lib/invite-card.js, prefix 'varanda-invite-card-v1'),
+// report.sign, appeal.sign, terms.sign, invite.sign, inviteCard.sign,
+// push.sign and age.sign: the domain-separated account-link statement
+// (@varanda/core lib/account-link.js, prefix 'varanda-account-link-v1'),
+// report statement (@varanda/core lib/report.js, prefix
+// 'varanda-report-v1'), appeal statement (@varanda/core lib/appeal.js,
+// prefix 'varanda-appeal-v1'), terms-acceptance statement (@varanda/core
+// lib/terms.js, prefix 'varanda-terms-v1'), signup-invite request
+// (@varanda/core lib/invite.js, prefix 'varanda-invite-v1'), signup-invite
+// card (@varanda/core lib/invite-card.js, prefix 'varanda-invite-card-v1'),
 // push-subscription statement (@varanda/core lib/push-proof.js, prefix
 // 'varanda-push-v1') and age-verification request (@varanda/core
 // lib/age.js, prefix 'varanda-age-v1'), whose member and association the
@@ -290,6 +291,7 @@ const { safe } = require('@varanda/core/lib/safe')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { signReport, signDmReport } = require('@varanda/core/lib/report')
+const { signAppeal } = require('@varanda/core/lib/appeal')
 const { signTerms } = require('@varanda/core/lib/terms')
 const { signRecovery, blobHashOf } = require('@varanda/core/lib/recovery-proof')
 const { signInvite } = require('@varanda/core/lib/invite')
@@ -330,6 +332,7 @@ const BAD_AGE_PROOF = 'comprovante de idade inválido'
 const OLD_USERNAME_RECORD = 'registro de nome antigo'
 const SELF_REPORT = 'não é possível denunciar a própria chave'
 const BAD_REPORT = 'denúncia inválida'
+const BAD_APPEAL = 'recurso inválido'
 const BAD_PUSH = 'inscrição de notificação inválida'
 const BAD_INVITE_CARD = 'cartão de convite inválido'
 const INVITE_CARD_EXPIRES = 'validade do cartão de convite fora do prazo'
@@ -429,6 +432,7 @@ const USAGE_MESSAGES = new Set([
   OLD_USERNAME_RECORD,
   SELF_REPORT,
   BAD_REPORT,
+  BAD_APPEAL,
   BAD_PUSH,
   NO_SEEDER,
   PEEK_BUSY,
@@ -2334,6 +2338,32 @@ function createBrowserSession ({
         // A shape the RPC layer lets through but the statement refuses (a
         // control character or a lone surrogate in text or quote).
         if (err instanceof TypeError) throw new UsageError(BAD_REPORT)
+        throw err
+      }
+      return { signature }
+    }),
+
+    // Signs the appeal statement with the in-memory key (docs/rpc.md 5.99),
+    // exactly like terms.sign: not a diary write, no append, no network. The
+    // session fills in member and association; the text enters the payload
+    // hashed.
+    'appeal.sign': serial(async ({ nonce, text }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      let signature
+      try {
+        signature = signAppeal({ nonce, member: own, association: cfg.association, text }, keyPair)
+      } catch (err) {
+        // A text the RPC layer lets through but the statement refuses (a
+        // control character or a lone surrogate).
+        if (err instanceof TypeError) throw new UsageError(BAD_APPEAL)
         throw err
       }
       return { signature }
