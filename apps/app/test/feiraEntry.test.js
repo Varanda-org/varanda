@@ -175,7 +175,11 @@ test('repeat return: the same link keeps the code and asks nothing again', async
   t.is(d.action, 'invite')
   t.is(calls.length, 1)
   const other = holder.capture({ author: A, seq: 5, origin: ORIGIN })
-  t.is(other.code, null, 'a newer listing link replaces the entry')
+  t.is(other.seq, 5, 'a newer listing link replaces the listing')
+  t.is(other.code, CODE, 'but keeps the Feira code already held, so the age step still takes its route')
+  t.ok(f.heldIsFeira(other, inv.readSignupInvite(storage, T0)))
+  const elsewhere = holder.capture({ author: A, seq: 6, origin: 'https://outra.example' })
+  t.is(elsewhere.code, null, 'another installation starts with no code')
 })
 
 test('expiry: an entry older than the TTL is dropped', async (t) => {
@@ -287,4 +291,20 @@ test('entryOffer: "Pedir entrada" only for a start that may be pressed', async (
   t.is(entryOffer({ action: 'start', tried: true }), false)
   t.is(entryOffer({ action: 'start', tried: true, retry: true }), true)
   t.is(entryOffer(), false)
+})
+
+// App.js sends the age request to the Feira route exactly when this is true.
+test('heldIsFeira: only the held code this entry asked for', async (t) => {
+  const f = await load()
+  const { holder } = setup(f)
+  holder.capture({ author: A, seq: 4, origin: ORIGIN })
+  const noCode = holder.load(ORIGIN)
+  t.is(f.heldIsFeira(noCode, { code: CODE }), false, 'the entry has no Feira code yet')
+  const entry = holder.noteCode(CODE)
+  t.is(f.heldIsFeira(entry, { code: CODE }), true)
+  t.is(f.heldIsFeira(entry, { code: PERSONAL }), false, 'a personal invite')
+  t.is(f.heldIsFeira(entry, null), false, 'nothing held')
+  t.is(f.heldIsFeira(entry, {}), false)
+  t.is(f.heldIsFeira(null, { code: CODE }), false, 'no entry')
+  t.is(f.heldIsFeira(holder.load('https://outra.example'), { code: CODE }), false, 'another installation drops the entry')
 })

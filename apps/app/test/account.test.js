@@ -978,6 +978,56 @@ test('ageSession: invite only when well formed; no answer is uncertain, refusals
   }
 })
 
+test('ageSession { feira }: the same body to /account/feira/idade, once; its refusals read calmly', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff', invite: CODE }
+  const url = 'https://verify.example.test/session/abc'
+  const calls = stub(t, json(200, { url }))
+  t.alike(await a.ageSession(args, { feira: true }), { url })
+  t.is(calls.length, 1)
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/feira/idade', 'the exact path, no trailing slash')
+  t.alike(JSON.parse(calls[0].init.body), args, 'the body is unchanged')
+  t.is(calls[0].init.headers['content-type'], 'application/json', 'the JSON type the edge matcher needs')
+  const ordinary = stub(t, json(200, { url }))
+  await a.ageSession(args)
+  await a.ageSession(args, { feira: false })
+  t.is(ordinary[0].url, '/account/age/session', 'without the option, the ordinary route')
+  t.is(ordinary[1].url, '/account/age/session')
+  t.alike(JSON.parse(ordinary[0].init.body), args)
+
+  const wrong = stub(t, json(409, { error: 'use-a-rota-da-feira' }))
+  try { await a.ageSession(args); t.fail() } catch (e) {
+    t.is(e.code, 'use-a-rota-da-feira')
+    t.is(e.message, 'Não deu para abrir a verificação agora. Tente de novo daqui a pouco.')
+    t.absent(e.uncertain)
+  }
+  t.is(wrong.length, 1, 'never retried')
+
+  // The edge's own 429 has no JSON token: on the Feira route it is the age limit.
+  const edge = stub(t, json(429, null, 'text/plain'))
+  try { await a.ageSession(args, { feira: true }); t.fail() } catch (e) {
+    t.is(e.code, 'limite-idade')
+    t.is(e.message, 'Muitas tentativas de verificação. Tente de novo amanhã.')
+    t.absent(e.uncertain)
+  }
+  t.is(edge.length, 1, 'never retried')
+  stub(t, json(429, null, 'text/plain'))
+  try { await a.ageSession(args); t.fail() } catch (e) {
+    t.is(e.code, 'indisponivel', 'the ordinary route keeps its old reading')
+  }
+  stub(t, json(400, { error: 'pedido-invalido' }))
+  try { await a.ageSession(args, { feira: true }); t.fail() } catch (e) {
+    t.is(e.code, 'pedido-invalido')
+    t.absent(e.uncertain)
+  }
+  const lost = stub(t, () => { throw new Error('rede') })
+  try { await a.ageSession(args, { feira: true }); t.fail() } catch (e) {
+    t.is(e.code, 'indisponivel')
+    t.is(e.uncertain, true, 'no answer is uncertain, as on the ordinary route')
+  }
+  t.is(lost.length, 1, 'never retried')
+})
+
 test('age calls: the service\'s own 503 token is a definite refusal; a 5xx without one stays uncertain', async (t) => {
   const a = await load()
   const args = { member: M, nonce: 'n1', signature: 'ff' }

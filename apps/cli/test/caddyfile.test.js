@@ -202,7 +202,7 @@ test('Caddyfile: /index/* goes to the seeder, before the SPA handle', (t) => {
 // Caddy's memory: never logged, never sent upstream.
 test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (t) => {
   t.ok(lines.some((l) => l.trim() === 'order rate_limit before reverse_proxy'), 'order rate_limit before reverse_proxy')
-  t.is(count('rate_limit {'), 5, 'exactly five rate_limit blocks')
+  t.is(count('rate_limit {'), 8, 'exactly eight rate_limit blocks (each Feira handle has two)')
   const limits = {
     'handle /index/* {': ['index', '20', '10s'],
     'handle /media/* {': ['media', '120', '10s'],
@@ -243,6 +243,57 @@ test('Caddyfile: /account/feira/* has its own handle before /account/*, to the a
   const text = block('handle /account/feira/* {').map((l) => l.trim())
   t.ok(text.includes('reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {'), 'to the account service')
   t.ok(text.includes('header_up Host {upstream_hostport}'), 'Host of the upstream')
+})
+
+// The paid Feira age session (POST /account/feira/idade) has its own, stricter
+// zones: the account service never reads an address, so the per-address limit
+// lives here; the rest of /account/feira/* keeps feira-entrada.
+test('Caddyfile: /account/feira/idade has its own per-address zone and global ceiling', (t) => {
+  const outer = block('handle /account/feira/* {').map((l) => l.trim())
+  // Only a JSON POST reaches the age zones: a cross-site page cannot send that
+  // type without a CORS preflight, so it cannot spend a victim's allowance.
+  t.alike(block('@feiraIdade {').map((l) => l.trim()), ['@feiraIdade {', 'path /account/feira/idade', 'method POST', 'header Content-Type application/json*', '}'], 'matcher: the path, POST and a JSON Content-Type')
+  t.alike(block('@feiraIdadeOutro {').map((l) => l.trim()), ['@feiraIdadeOutro {', 'path /account/feira/idade', 'not {', 'method POST', 'header Content-Type application/json*', '}', '}'], 'every other request to the path')
+  const outro = block('handle @feiraIdadeOutro {').map((l) => l.trim())
+  t.alike(outro, ['handle @feiraIdadeOutro {', 'respond 405', '}'], 'answered at the edge: no rate_limit, no reverse_proxy')
+  t.is(count('handle @feiraIdadeOutro {'), 1)
+  t.ok(outer.indexOf('handle @feiraIdadeOutro {') < outer.indexOf('handle @feiraEntrada {'), 'before the entry handle')
+  t.ok(outer.includes('@feiraEntrada not path /account/feira/idade'), 'every other Feira path')
+  const idade = block('handle @feiraIdade {').map((l) => l.trim())
+  const entrada = block('handle @feiraEntrada {').map((l) => l.trim())
+  t.is(count('handle @feiraIdade {'), 1, 'one Feira age handle')
+  t.is(count('handle @feiraEntrada {'), 1, 'one Feira entry handle')
+  t.ok(idade.length > 0 && entrada.length > 0, 'both inside /account/feira/*')
+  const zone = (b, name) => {
+    const i = b.indexOf('zone ' + name + ' {')
+    return i === -1 ? [] : b.slice(i, b.indexOf('}', i) + 1)
+  }
+  t.alike(zone(idade, 'feira-idade'), ['zone feira-idade {', 'key {remote_host}', 'events 2', 'window 1h', '}'], 'feira-idade: 2 per hour per address')
+  t.alike(zone(idade, 'feira-idade-total'), ['zone feira-idade-total {', 'key static', 'events 50', 'window 1h', '}'], 'feira-idade-total: 50 per hour in all')
+  t.absent(idade.includes('zone feira-entrada {'), 'the age route is not in the entry zone')
+  t.alike(zone(entrada, 'feira-entrada'), ['zone feira-entrada {', 'key {remote_host}', 'events 5', 'window 60s', '}'])
+  t.alike(zone(entrada, 'feira-entrada-total'), ['zone feira-entrada-total {', 'key static', 'events 60', 'window 60s', '}'])
+  t.absent(entrada.includes('zone feira-idade {'), 'the entry is not in the age zone')
+  // Each ceiling is its own rate_limit directive, in order, inside a route:
+  // the plugin reserves every zone of one directive without rollback, so a
+  // request refused per address must never reach the global zone.
+  for (const [name, b, total] of [['feira-idade', idade, 'feira-idade-total'], ['feira-entrada', entrada, 'feira-entrada-total']]) {
+    t.is(b[1], 'route {', name + ': the handle holds a route block')
+    const route = b.slice(1)
+    const directives = route.map((l, i) => [l, i]).filter(([l]) => l === 'rate_limit {').map(([, i]) => i)
+    t.is(directives.length, 2, name + ': two rate_limit directives')
+    const addr = route.indexOf('zone ' + name + ' {')
+    const glob = route.indexOf('zone ' + total + ' {')
+    const rp = route.indexOf('reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {')
+    t.ok(directives[0] < addr && addr < directives[1], name + ': the per-address zone alone in the first directive')
+    t.ok(directives[1] < glob && glob < rp, name + ': the global zone alone in the second, before the proxy')
+    t.ok(b.includes('header_up Host {upstream_hostport}'), name + ': Host of the upstream')
+    t.ok(b.includes('header_up -X-Forwarded-For'), name + ': X-Forwarded-For stripped')
+    t.ok(b.includes('header_up -X-Real-Ip'), name + ': X-Real-Ip stripped')
+  }
+  for (const z of ['feira-idade', 'feira-idade-total']) t.is(code.split('zone ' + z + ' {').length - 1, 1, z + ' only in the POST route')
+  t.ok(idade.includes('zone feira-idade {') && idade.includes('zone feira-idade-total {'), 'both age zones in the POST handle')
+  t.is(outer.filter((l) => l.startsWith('reverse_proxy ')).length, 2, 'no proxy outside the two inner handles')
 })
 
 // No access log. The only log block is the global one that EXCLUDES the
@@ -314,4 +365,58 @@ test('Caddyfile: /.well-known/* is served as JSON, no-store, before the SPA hand
   t.ok(json !== -1 && start > json, 'next to the /varanda.json handle')
   t.ok(lines.filter((l) => /^\s*Strict-Transport-Security\s/.test(l)).length === 1, 'security headers kept')
   t.ok(lines.some((l) => l.trim() === 'X-Content-Type-Options "nosniff"'), 'nosniff kept')
+})
+
+// Link-preview crawlers on /convite/<code> get the account service's og page
+// (GET|HEAD /account/og/convite/<code>?c=N); everyone else keeps index.html.
+// The pair (path, User-Agent) is the same in the matcher and in the two
+// exclusions, so a crawler response carries only the service's no-store.
+const PREVIEW_PATH = 'path /convite/*'
+const PREVIEW_UA = 'header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)'
+
+test('Caddyfile: invite link previews go to the account service, only for crawlers on /convite/*', (t) => {
+  const matcher = block('@previaConvite {')
+  t.ok(matcher.length > 0, '@previaConvite matcher')
+  t.is(lines.filter((l) => l.trim() === '@previaConvite {').length, 1, 'exactly one @previaConvite matcher')
+  t.alike(matcher.slice(1, -1).map((l) => l.trim()), [PREVIEW_PATH, PREVIEW_UA], 'matches only /convite/* with a known crawler User-Agent')
+  for (const bot of ['facebookexternalhit', 'facebot', 'whatsapp', 'telegrambot', 'twitterbot', 'slackbot', 'discordbot', 'linkedinbot', 'skypeuripreview', 'applebot']) {
+    t.ok(PREVIEW_UA.includes(bot), bot + ' listed')
+  }
+  const re = new RegExp(PREVIEW_UA.split(' ').pop().replace('(?i)', ''), 'i')
+  t.ok(re.test('WhatsApp/2.23.20.0 A'), 'case-insensitive: WhatsApp')
+  t.ok(re.test('facebookexternalhit/1.1'), 'facebookexternalhit')
+  t.absent(re.test('Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36'), 'a browser is not a crawler')
+
+  const handle = block('handle @previaConvite {')
+  t.ok(handle.length > 0, 'handle @previaConvite')
+  t.is(count('handle @previaConvite {'), 1, 'exactly one handle @previaConvite')
+  const text = handle.map((l) => l.trim())
+  t.ok(text.includes('rewrite * /account/og{path}'), 'rewrite to /account/og + path, no ? so the query (c=N) is kept')
+  t.absent(text.some((l) => l.startsWith('rewrite') && l.includes('?')), 'rewrite never replaces the query')
+  const rw = text.findIndex((l) => l.startsWith('rewrite '))
+  const rp = text.findIndex((l) => l.startsWith('reverse_proxy '))
+  t.ok(rw !== -1 && rp > rw, 'rewrite before reverse_proxy')
+  const proxy = (b) => b.map((l) => l.trim()).filter((l) => l.startsWith('reverse_proxy ') || l.startsWith('header_up '))
+  t.alike(proxy(handle), proxy(block('handle /account/* {')), 'same proxy target and header_up lines as /account/*')
+  t.ok(text.includes('reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {'), 'account service on loopback')
+  t.absent(text.some((l) => /Cache-Control|file_server|^root\s/.test(l)), 'no Cache-Control, no web root: the service answers')
+
+  const m = lines.findIndex((l) => l.trim() === '@previaConvite {')
+  const h = lines.findIndex((l) => l.trim() === 'handle @previaConvite {')
+  const spa = lines.findIndex((l) => l.trim() === 'handle {')
+  t.ok(m !== -1 && h > m && spa > h, 'matcher and handle come before the catch-all handle')
+  t.is(count('/convite/'), 3, '/convite/ appears only in the matcher and its two exclusions')
+})
+
+test('Caddyfile: the crawler case gets no no-cache, humans on /convite/* keep it', (t) => {
+  for (const head of ['@mutavel {', '@ausenteApp {']) {
+    const b = block(head).map((l) => l.trim())
+    const start = b.indexOf('not {')
+    t.ok(start !== -1, head + ' has a not block')
+    t.alike(b.slice(start + 1, start + 3), [PREVIEW_PATH, PREVIEW_UA], head + ' excludes exactly the crawler pair')
+    t.is(b[start + 3], '}', head + ' not block holds only the pair (AND), so humans on /convite/* still match')
+    t.absent(b.some((l) => /^not path\s/.test(l) && l.includes('/convite')), head + ' never excludes /convite/* by path alone')
+  }
+  t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel still stamps no-cache')
+  t.ok(block('handle {').some((l) => l.trim() === 'rewrite @semExtensao /index.html'), 'humans still get index.html')
 })

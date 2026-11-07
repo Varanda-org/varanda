@@ -5868,9 +5868,126 @@ Execução de 2026-11-01 (itens 1, 2, 3, 5 e 6), num ambiente local montado só 
 - Não há aviso à pessoa quando o recurso é decidido: ela só vê o resultado pela própria conta (desbloqueada ou não) ou ao tentar de novo.
 - Retenção das linhas de recurso é a mesma pendência das denúncias (issue #38).
 
-## 126. Feira: anúncios, edição, apagamento, avaliações e índice do semeador (PR feat/feira-records)
+## 126. Cartão de convite assinado (PR feat/invite-card-sign)
 
-Caminhada da base da Feira: os quatro registros (`listing`, `listing-edit`, `listing-status`, `listing-rate`), a dobra, os métodos `listing.*` do RPC (5.100 a 5.107), a denúncia de anúncio e o índice do semeador. O protocolo está em [protocol.md](protocol.md) (seção 2, "Feira records", seção 3, "Listing report", e a seção 15); o RPC em [rpc.md](rpc.md). Nesta rodada não há tela: as telas e as rotas HTTP vêm em PRs seguintes.
+Um membro assina, com a chave do diário, o cartão que acompanha um convite de cadastro: desenho regional, nome, mensagem e validade. O cartão viaja só no fragmento do link e é conferido por quem abre. Esta etapa traz só o contrato, a assinatura e a conferência; ainda não há tela.
+
+Regras que os passos conferem:
+
+- O link tem a forma `origem/convite/<código>?c=<índice do desenho>#c1.<corpo>`. O `?c` é público e só serve à prévia do mensageiro: é opcional ao ler e, quando presente, tem de ser igual ao índice assinado. O fragmento nunca vai a um servidor.
+- A assinatura cobre oito linhas (`varanda-invite-card-v1`, código, desenho, validade, resumo do nome, resumo da mensagem, membro, associação). Nome e mensagem entram por resumo BLAKE2b-256 calculado sempre pelo assinante, e o prefixo impede que a assinatura valha como outro pedido do protocolo.
+- `inviteCard.sign` só existe no navegador (o nó do Node responde `assinatura disponível só no navegador`), exige a identidade aberta e aceita validade de 1 dia atrás a 8 dias à frente.
+- `inviteCard.verify` roda nos dois nós, não precisa de identidade e funciona com a identidade bloqueada. No navegador a chave do membro passa antes por uma conferência estrita (ponto de ordem pequena ou fora da forma canônica é recusado como `malformed`). Um cartão com assinatura boa cuja validade passou há mais de um dia pelo relógio do nó volta `expired`.
+- O link leva no fragmento o nome de quem recebe e a mensagem: o app que abrir o link precisa tirar o cartão da barra de endereço na mesma passada em que o guarda (fica para o PR do app).
+- O link inteiro tem no máximo 400 caracteres.
+
+Passos (marcar só depois de executar e guardar o registro). Ainda não há tela para criar nem abrir o cartão, então cada plataforma só confirma que nada mudou:
+
+- [ ] Android (build de debug, emulador ou aparelho): o app abre e usa convites como antes; não há tela do cartão ainda.
+- [ ] Simulador iOS: o app abre e usa convites como antes; não há tela do cartão ainda.
+- [ ] Web e PWA: o cadastro por convite funciona como antes; não há tela do cartão ainda.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node packages/rpc/test/invite-card.test.js` e `node packages/rpc/test/methods.test.js`.
+- `node packages/core/test/invite-card.test.js`, `node packages/core/test/page-proof.test.js` e `node packages/core/test/session.test.js`.
+- `node packages/web-member/test/invite-card.test.js` e `node packages/web-member/test/session.test.js`.
+- `node apps/app/test/vitrine.test.js`.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- O serviço de conta não muda: não recebe nem guarda o cartão.
+- Links nativos (`varanda://`) continuam com no máximo 400 caracteres, como os de web.
+
+## 127. Cartão de convite regional (PR feat/invite-card-app)
+
+Quem convida pode mandar, junto do link de entrada, um cartão com o nome de quem recebe, uma mensagem curta e um de 13 desenhos regionais. Quem abre o link vê o cartão antes da introdução e, depois de entrar, pode seguir ou mandar um oi para quem escreveu. Esta seção descreve o que o código faz; o contrato e a assinatura estão na seção 126.
+
+Regras que os passos conferem:
+
+- O cartão viaja só no fragmento do link (`#c1.<corpo>`), mais o `?c=<desenho>` público e opcional. Nenhum servidor recebe o fragmento: o app o lê e o tira da barra de endereço na mesma passada em que guarda o código do convite (`captureSignupInvite`), antes de qualquer tela.
+- O cartão é assinado e preso ao código do convite: a assinatura cobre o código, e `inviteCard.verify` roda no nó antes de qualquer tela mostrar o cartão. Um fragmento forjado, trocado de código ou com assinatura ruim não vira cartão, e o convite segue valendo como link comum.
+- O link inteiro tem no máximo 400 caracteres. Por isso um app já instalado, que só conhece o caminho `/convite/<código>`, continua lendo o código e ignora o cartão.
+- Guarda: na web, o registro fica no `sessionStorage` da aba, na chave `varanda-signup-invite-card`, por 24 horas; no app instalado, só na memória do processo. É lido como não confiável a cada uso (reconstruído campo a campo e conferido de novo) e some quando o convite é trocado ou expira.
+- Prévia fora: um link `/convite/...` nunca vira prévia. `apps/app/src/preview.js` não monta cartão para ele e `apps/cli/lib/account/preview-routes.js` recusa o endereço em qualquer host, para o nome e a mensagem não irem ao serviço de prévia.
+- Nada segue ninguém sozinho. Abrir o cartão não cria vínculo; Seguir e Mandar um oi são toques da pessoa, cada um conferido de novo (identidade, registro do cartão e associação) antes de escrever, sem repetição automática.
+- Privacidade, em termos exatos: não há nenhum registro novo de quem convidou quem e nenhum aviso de cadastro. O diretório do serviço de conta já guarda o hash do convite usado no vínculo do novo membro (`apps/cli/lib/account/store.js`, `docs/design.md`, "Vínculo com a conta Google"), como antes do cartão. Tocar em Seguir manda o aviso comum de seguir (`packages/core/lib/notices.js`), como qualquer outro seguir.
+- Os 13 desenhos são desenhados no código, com `View`, e inspirados em tradições regionais (Marajoara, Encontro das águas, Vitória-régia, Cordel, Bandeirinhas, Chita, Ipê-amarelo, Pantanal, Azulejo, Copacabana, Minas, Araucária, Chimarrão). Nenhum copia obra de artista nem padrão protegido.
+
+O fluxo no app:
+
+- Quem convida: em Convites, o botão "Mandar com um cartão" abre nome, região, desenho e mensagem (já vem uma sugestão por desenho). O contador mostra os bytes usados e os que cabem (`messageRoom`); se o nome ou a mensagem não servem, uma linha explica (nome vazio ou longo, mensagem vazia, com símbolos que não aparecem ou longa demais). O botão vira "Criar link com cartão" e "Assinando cartão" durante a assinatura. Se a assinatura falhar, o convite criado vale como link comum e o app avisa que o cartão não entrou.
+- Quem abre, antes da introdução: o cartão aparece antes das telas de introdução, com Entrar, Como funciona (mostra a introdução e volta ao cartão) e Agora não (esconde só nesta abertura). A tela espera o nó ficar pronto por até 6 s (`OPEN_WAIT_MS`); passado esse tempo segue a introdução e, se a conferência terminar depois, o cartão assume o lugar das telas de introdução. Uma assinatura ruim, um cartão vencido, um membro sem vínculo ou uma retomada do Google/idade não mostram o cartão. Sem rede, a pertença do membro fica "desconhecida" e nada é oferecido.
+- Quem chegou: o cartão de chegada aparece no app só para quem passou pela configuração neste aparelho segurando o cartão, nunca para um membro que já estava com a conta aberta. Mostra "Você chegou com o cartão de @nome", com Seguir, Mandar um oi (texto fixo "Oi! Cheguei.", nunca a mensagem do cartão; sem Conversas do outro lado, avisa) e Agora não.
+- Movimento: o cartão entra com um fade e um crescimento curtos, uma vez; com movimento reduzido, já aparece no estado final. O desenho e os textos seguem o tema claro e escuro.
+
+Passos (marcar só depois de executar e guardar o registro):
+
+- [ ] Android (build de debug, emulador ou aparelho): criar um convite com cartão em Convites, abrir o link e conferir o cartão antes da introdução; Agora não; link comum (sem cartão); fragmento forjado; cartão de chegada com Seguir e Mandar um oi; sem rede (status offline); tema claro e escuro; movimento reduzido; os 13 desenhos.
+- [ ] Simulador iOS: o mesmo roteiro do Android.
+- [ ] Web e PWA: o mesmo roteiro, mais as duas barras de endereço (o fragmento e o `?c` somem), o nó lento (a espera de 6 s e a troca tardia pelo cartão) e um viewport de 390 px.
+- [ ] Medir a carga a frio: em cada plataforma, anotar quanto o nó leva para ficar pronto depois de abrir o link com o cache limpo e comparar com os 6 s de `OPEN_WAIT_MS`. Registrar os tempos aqui; se passarem de 6 s com frequência, a espera precisa ser revista. Nenhuma medida foi feita nesta documentação.
+
+Como verificar, a partir da raiz (só os arquivos desta área):
+
+- `node apps/app/test/preview.test.js` e `node apps/cli/test/preview-routes.test.js`.
+- `node apps/app/test/inviteCardCopy.test.js`, `node apps/app/test/inviteCardArt.test.js`, `node apps/app/test/inviteCardMotion.test.js` e `node apps/app/test/inviteCardFrame.test.js`.
+- `node apps/app/test/signupInvite.test.js` e `node apps/app/test/linkReturn.test.js`.
+- `node apps/app/test/inviteCardFlow.test.js` e `node apps/app/test/inviteCardCompose.test.js`.
+- `node apps/app/test/help.test.js`.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- Alguns mensageiros tiram o fragmento do link: o link comum continua funcionando e o convite vale sem cartão.
+- A mensagem é um bilhete curto, de cerca de 134 bytes no endereço bora.varanda.app, dividido com o nome (o contador do app mostra o espaço exato).
+- Não há nota de voz, foto, desenho por estado, compartilhar como imagem nem arte encomendada; a prévia nos mensageiros vem na seção 128.
+- Um app já instalado não mostra o cartão e ainda assim troca o código pelo convite.
+- Quem usa uma configuração salva de outra associação não vê cartão (a conferência falha fechada), e o código continua valendo.
+- Quem tem o link lê o cartão: nome, mensagem e desenho não são cifrados.
+- Para mostrar o @nome de quem escreveu, o aparelho de quem abre o link consulta o status público da conta pela chave de quem convidou, antes do cadastro (o serviço não registra essa consulta; nome e mensagem não saem do aparelho). Um cartão vencido não faz consulta nenhuma.
+- O histórico do próprio navegador pode guardar o endereço como foi aberto, com o fragmento, mesmo depois que o app o tira da barra.
+
+## 128. Prévia do cartão de convite nos mensageiros (PR feat/invite-card-preview)
+
+Quando alguém cola um link de convite no WhatsApp, no Telegram ou no iMessage, o robô do mensageiro lê uma página curta do serviço de conta e mostra o desenho escolhido e, se o convite estiver vivo, "@nome te mandou um convite pra Varanda". Robôs não veem o fragmento (`#c1...`), então o desenho viaja no `?c=N` público; o nome e a mensagem do cartão nunca chegam ao servidor.
+
+Regras que os passos conferem:
+
+- `GET` e `HEAD /account/og/convite/<código>?c=N` (`apps/cli/lib/account/og-routes.js`) respondem sempre 200 com uma página de metadados Open Graph. O título pessoal só sai para um convite vivo, com `c` válido (0 a 999, e que seja um dos 13 desenhos) e quem convidou com conta vinculada e @nome (`inviterOf` em `invites-store.js`, mais o status da conta). Um convite morto (usado, vencido ou desconhecido) com `c` válido ainda recebe a imagem daquele desenho, mas com o título genérico "Você recebeu um convite pra Varanda". Sem `c` válido, a imagem é `convite.png`.
+- Um código malformado nunca é repetido na página: o `og:url` vira a raiz. O `og:url` de um código bem formado mantém o `?c`.
+- Os endereços absolutos (imagem e `og:url`) partem da origem configurada, nunca do cabeçalho `Host`. Todo valor interpolado é escapado.
+- A resposta leva `Cache-Control: no-store`, `X-Robots-Tag: noindex`, `nosniff`, `Referrer-Policy: no-referrer` e uma CSP fechada. O registro guarda só contagens (`{ event: 'og', reason: 'pessoal' | 'generico' }`), nunca o código, a chave de quem convidou ou o @nome. A rota passa pelo limite global de consultas do serviço.
+- As 14 imagens (`apps/app/public/og/convite-<desenho>.png`, 13 desenhos, e `convite.png`) são 1200 x 630, renderizadas por `apps/app/scripts/render-og.js` a partir de `apps/app/src/inviteCardArt.js`: cada uma é a moldura regional com uma cadeira de balanço de varanda no centro, gerada pelo script e commitada; as imagens ficam fora do cache do PWA, porque só os robôs de prévia as buscam. `node apps/app/scripts/render-og.js --check` compara os pixels com os arquivos.
+- `deploy/seeder/Caddyfile`: `@previaConvite` casa `path /convite/*` mais uma lista de `User-Agent` (facebookexternalhit, facebot, whatsapp, telegrambot, twitterbot, slackbot, discordbot, linkedinbot, skypeuripreview, applebot) e reescreve para `/account/og{path}`, seguindo para o serviço de conta. O par é excluído de `@mutavel` (não leva `no-cache`) e de `@ausenteApp`. Uma pessoa em `/convite/*` continua recebendo o `index.html` do app, como antes.
+
+Como verificar, a partir da raiz (um arquivo por vez):
+
+- `node apps/app/test/renderOg.test.js`
+- `node apps/cli/test/og-routes.test.js`
+- `node apps/cli/test/invites-store.test.js`
+- `node apps/cli/test/caddyfile.test.js`
+
+Depois que o operador reimplantar o Caddy e o serviço de conta (o `Caddyfile` mudou, então só `up -d` do Caddy não basta sem recarregar a configuração):
+
+- [ ] Colar um link de cartão (`/convite/<código>?c=3`) no WhatsApp, no Telegram e no iMessage e ver a imagem do desenho e "@nome te mandou um convite pra Varanda".
+- [ ] Um link comum (sem `?c`) e um convite já usado ou vencido mostram a prévia genérica ("Você recebeu um convite pra Varanda", imagem `convite.png` ou a do desenho, conforme o caso).
+- [ ] `curl -sA WhatsApp 'https://<domínio>/convite/<código>?c=3'` devolve `og:image` com `convite-cordel.png`. Isso prova que o `?c` sobrevive à reescrita do Caddy, o que não pôde ser testado sem o binário do Caddy.
+- [ ] `curl -s 'https://<domínio>/convite/<código>'` com um `User-Agent` de navegador continua devolvendo o `index.html` do app, e uma pessoa num navegador abre o app normalmente.
+- [ ] Com o serviço de conta parado, abrir o link com `curl -sA WhatsApp` e ver se o log de erro do Caddy registra o caminho `/convite/<código>`. Anotar aqui o resultado: ______.
+
+Limites:
+
+- Só os robôs conhecidos, pelo `User-Agent`, recebem a prévia pessoal; qualquer outro vê o título e a descrição de hoje.
+- Quem tem um código vivo pode descobrir o @nome de quem convidou pela prévia (o cartão já o mostra).
+- Um link comum postado em público com `?c` acrescentado revelaria quem o emitiu.
+- As imagens são geometria gerada, não arte encomendada.
+- O `User-Agent` é declarado pelo cliente: quem quiser pode se passar por um robô e ver a página de prévia, que não traz nada além do que está acima.
+
+## 129. Feira: anúncios, edição, apagamento, avaliações e índice do semeador (PR feat/feira-records)
+
+Caminhada da base da Feira: os quatro registros (`listing`, `listing-edit`, `listing-status`, `listing-rate`), a dobra, os métodos `listing.*` do RPC (5.103 a 5.110), a denúncia de anúncio e o índice do semeador. O protocolo está em [protocol.md](protocol.md) (seção 2, "Feira records", seção 3, "Listing report", e a seção 15); o RPC em [rpc.md](rpc.md). Nesta rodada não há tela: as telas e as rotas HTTP vêm em PRs seguintes.
 
 Regras que os passos conferem:
 
@@ -5910,7 +6027,7 @@ Limites desta caminhada:
 - O semeador guarda só as 16 últimas edições e os 16 últimos status de cada anúncio: com a janela estourada e todos apagados, o anúncio fica sem status conhecido, sai da busca e do mapa do site, e o cartão público responde 404 se a edição atual for desconhecida, até um novo status ou edição.
 - Com duas avaliações da mesma pessoa para o mesmo anúncio, o índice guarda a mais nova; se ela for apagada, a antiga só volta ao índice depois que o semeador varrer o diário de novo (reinício ou reconstrução).
 
-## 127. Feira: página pública, entrada por link, anúncio de página e denúncia (PR feat/feira-service)
+## 130. Feira: página pública, entrada por link, anúncio de página e denúncia (PR feat/feira-service)
 
 Caminhada do serviço da Feira: as rotas públicas do semeador (`/index/feira/*`, `/f/*`), o Caddy, a entrada por link de anúncio, os anúncios de uma página, o cartão guardado na caixa da página e a denúncia de anúncio no painel. O protocolo está em [protocol.md](protocol.md) (seção 15, "The seeder's Feira routes and public pages" e "Feira entry"; seção 12, "Anúncios como página"; seção 3, "Reports").
 
@@ -5921,8 +6038,8 @@ Regras que os passos conferem:
 - As fotos (`/f/<diário>/<seq>/foto/1..4` e `capa`) só saem com tamanho, sha256 e bytes iguais ao descritor. O `sitemap.xml` lista só endereços de anúncios que não estão `vendido`. O Caddy serve o `/robots.txt` (permite só `/f/`) e limita `/f/*` a 30 pedidos por 10 s por endereço; o service worker não intercepta `/f/*`.
 - A entrada: `GET /account/feira/policy` responde só `{ enabled }`; `POST /account/feira/start` devolve um código de 1 hora cobrado do dono do anúncio e lê o anúncio sem olhar o status (um anúncio vendido ainda abre a porta). A ordem: o corpo exato; depois o dono da cota (membro vinculado ou dono da página aberta), e sem dono responde `nao-encontrado` sem ler nada no semeador; depois a conferência do anúncio no semeador; por fim o código. Não há limite por chave de dono (qualquer um trancaria os anúncios de alguém). Exige `VARANDA_FEIRA_INVITES_PER_WEEK`, `VARANDA_INVITES_PER_WEEK` e `VARANDA_TRIAGE_TOKEN`.
 - A conferência do anúncio usa a rota própria do semeador `GET /feira-listing/<diário>/<seq>` (com o token, nunca pelo Caddy), que responde só `{ ok: true }` e tem orçamento próprio (2 ao mesmo tempo, 4 por segundo, rajada 8): inundar essa rota nunca faz `/moderation-post` responder 503. O painel continua com `/moderation-listing`.
-- O Caddy limita `/account/feira/*` na zona `feira-entrada`: 5 pedidos a cada 60 s por endereço, antes do handle genérico de `/account/*`. O endereço fica só na memória do Caddy durante a janela.
-- Sessões pagas de idade com código da Feira: no máximo 1 por código por dia e 50 por dia para todos os códigos da Feira juntos, sem teto por dono, sempre com `limite-idade`. Elas não contam no teto diário dos outros cadastros, e um convite comum funciona como antes. Resíduo aceito: um único endereço consegue gastar os 50 do dia em cerca de 10 minutos e parar os cadastros pela Feira naquele dia (com o custo de até 50 sessões pagas), nunca os cadastros comuns. Um código da Feira emitido numa semana anterior é recusado depois de segunda 00:00, para não escapar das duas contagens semanais.
+- O Caddy limita `/account/feira/*` na zona `feira-entrada`: 5 pedidos a cada 60 s por endereço, antes do handle genérico de `/account/*`. `POST /account/feira/idade` tem zonas próprias: `feira-idade`, 2 pedidos por hora por endereço, e `feira-idade-total`, 50 por hora no total. Cada teto é uma diretiva `rate_limit` separada, em ordem, dentro de um `route` (por endereço primeiro, global depois), para que um pedido recusado por endereço não gaste o teto global. Só um `POST` com `Content-Type: application/json` entra nas zonas da idade; qualquer outro pedido a `/account/feira/idade` recebe 405 do Caddy sem passar por zona nenhuma. O endereço fica só na memória do Caddy durante a janela, e os dois handles tiram `X-Forwarded-For` e `X-Real-Ip`. O serviço só atende `/account/feira/idade`, `/account/feira/start` e `/account/feira/policy` quando o caminho cru do pedido é exatamente esse (`/../`, `/./`, `%2F` ou `%2E%2E` dão 404), porque o Caddy e o serviço normalizam caminhos de jeitos diferentes.
+- Sessões pagas de idade com código da Feira: no máximo 1 por código por dia e 50 por dia para todos os códigos da Feira juntos, sem teto por dono, sempre com `limite-idade`. Elas não contam no teto diário dos outros cadastros, e um convite comum funciona como antes. A sessão paga de um código da Feira só abre por `POST /account/feira/idade` (mesmo corpo de `/account/age/session`); um código da Feira em `/account/age/session` responde `use-a-rota-da-feira`, e um código comum na rota da Feira responde `pedido-invalido`, os dois antes de gastar qualquer janela. Resíduo aceito: quem troca de endereço IPv6 dentro de um /64 (ou usa muitas máquinas) chega só aos tetos globais (os 50 do dia e a zona `feira-idade-total`) e ainda pode parar os cadastros pela Feira naquele dia (com o custo de até 50 sessões pagas), nunca os cadastros comuns. Atrás de CGNAT, quem divide um endereço pode receber 429 do Caddy (2 por hora bastam para uma pessoa). Um código da Feira emitido numa semana anterior é recusado depois de segunda 00:00, para não escapar das duas contagens semanais.
 - O teto semanal conta os códigos usados ou presos por um link do diretório, pela data de criação (um código emitido no domingo à noite e usado na segunda conta na semana em que saiu). Resíduo aceito: cadastros em andamento ao mesmo tempo podem passar do teto semanal de um dono pelo número de cadastros em andamento, cada um ainda com código de uso único. Um `feira-invites.json` quebrado desliga só os códigos da Feira.
 - `feira-invites.json` guarda a chave de quem é cobrado, o resumo do código, a data e se foi usado; nunca quem se cadastra, o anúncio, o endereço nem o código.
 - Uma página anuncia com `listing`, `listing-edit`, `listing-status` e `listing-consent` (admin ou dono). A edição responde a posição do bloco da edição, a edição velha dá `conflito`, o 31º anúncio dá `limite`, e `listing-consent` sem uma proposta recebida de quem avalia dá `oferta-ausente`. A página responde uma proposta em texto, com o link de aceite ou de recusa.
@@ -5947,6 +6064,7 @@ Caminhada com um semeador, um serviço de conta e dois membros de teste (DHT loc
 - [ ] `GET /robots.txt` no domínio permite só `/f/` e aponta o sitemap.
 - [ ] Com a entrada ligada, `GET /account/feira/policy` responde `{ enabled: true }`; `POST /account/feira/start` de um anúncio de membro devolve um código; um anúncio de um diário que não é de membro responde `nao-encontrado`. Pelo Caddy, o 6º pedido a `/account/feira/*` do mesmo endereço em 60 s responde 429.
 - [ ] Com um código da Feira, a primeira sessão de idade abre e a segunda do mesmo código no mesmo dia responde `limite-idade`; um convite comum continua abrindo sessão.
+- [ ] Pelo Caddy, com códigos da Feira novos: dois `POST /account/feira/idade` do mesmo endereço na mesma hora chegam ao serviço e o 3º responde 429 do Caddy; de outro endereço, o pedido seguinte ainda passa. Antes disso, vários `GET /account/feira/idade` do mesmo endereço respondem 405 e não gastam o limite. O mesmo código da Feira em `POST /account/age/session` responde `use-a-rota-da-feira` e não abre sessão paga.
 - [ ] Usar o código no cadastro conta no teto semanal do dono; chegado o teto, o código seguinte é recusado como convite inválido. Quebrar o `feira-invites.json` (de propósito, numa cópia) desliga só os códigos da Feira.
 - [ ] Como página: criar, editar (com o `expectedRevision` certo e com um velho), mudar o status e apagar um anúncio; o 31º vivo responde `limite`.
 - [ ] Receber uma proposta na caixa da página; o administrador vê o cartão e a foto, pede `listing-consent` e responde em texto com o link de aceite.
@@ -5960,9 +6078,9 @@ Limites desta caminhada:
 - O `robots.txt` é servido pelo Caddy mesmo com a Feira desligada: o mapa do site que ele indica responde 404 até `VARANDA_FEIRA_ORIGIN` ser definido.
 - Com `feira-invites.json` corrompido, os códigos da Feira param e a limpeza de convites de cada conta excluída fica pendente (`purga-pendente` no log) até o operador consertar o arquivo; os outros dados da conta são apagados normalmente.
 
-## 128. Feira no app: aba, anúncio, links e entrada por anúncio (PR feat/feira-app)
+## 131. Feira no app: aba, anúncio, links e entrada por anúncio (PR feat/feira-app)
 
-Caminhada da Feira no app: a aba Feira, as telas Anúncio e Anunciar, Conversar com o rascunho e o cartão, os links `/f/` e `/anuncio/`, a entrada de quem chega por um anúncio, os anúncios de Página e a denúncia de anúncio. O comportamento está em [app.md](app.md), seção "Feira"; o formato, em [protocol.md](protocol.md), seção 15. Editar anúncio, propostas, avaliações, alertas de busca salva e os links no app nativo ficam na seção 129.
+Caminhada da Feira no app: a aba Feira, as telas Anúncio e Anunciar, Conversar com o rascunho e o cartão, os links `/f/` e `/anuncio/`, a entrada de quem chega por um anúncio, os anúncios de Página e a denúncia de anúncio. O comportamento está em [app.md](app.md), seção "Feira"; o formato, em [protocol.md](protocol.md), seção 15. Editar anúncio, propostas, avaliações, alertas de busca salva e os links no app nativo ficam na seção 132.
 
 Regras que os passos conferem:
 
@@ -6001,9 +6119,9 @@ Limites desta caminhada:
 - Numa conversa da Página, o cartão do anúncio aparece sem miniatura (o app não lê as fotos da caixa da Página).
 - Uma linha velha do índice mostra "Situação desconhecida" até o semeador reler o diário.
 
-## 129. Feira: ofertas, avaliações, edição, buscas salvas e links no app (PR feat/feira-extras)
+## 132. Feira: ofertas, avaliações, edição, buscas salvas e links no app (PR feat/feira-extras)
 
-Caminhada das partes da Feira que a seção 128 deixou de fora: ofertas na conversa, avaliações, editar anúncio, buscas salvas com o ponto na aba, os links `/anuncio/` que abrem o app instalado, "Já tem o app? Abrir no app" na página pública e a Feira da Vitrine. O comportamento está em [app.md](app.md), seção "Feira"; o formato, em [protocol.md](protocol.md), seção 15.
+Caminhada das partes da Feira que a seção 131 deixou de fora: ofertas na conversa, avaliações, editar anúncio, buscas salvas com o ponto na aba, os links `/anuncio/` que abrem o app instalado, "Já tem o app? Abrir no app" na página pública e a Feira da Vitrine. O comportamento está em [app.md](app.md), seção "Feira"; o formato, em [protocol.md](protocol.md), seção 15.
 
 Regras que os passos conferem:
 

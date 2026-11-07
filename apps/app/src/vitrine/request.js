@@ -391,6 +391,9 @@ export function createVitrineRequest (fixtures, options) {
     'account.sign': signed,
     'age.sign': signed,
     'invite.sign': signed,
+    'inviteCard.sign': signed,
+    // The development build never attributes an arbitrary card.
+    'inviteCard.verify': () => ({ ok: false, reason: 'bad-signature' }),
     'push.sign': signed,
     // No seen sync offline: a signature the account call never uses, and a
     // merge that changes nothing.

@@ -60,7 +60,7 @@ import { useOutbox } from '../outboxProvider'
 import { BROWSER_TEXT, KNOWN_LOST_FULL_TEXT, KNOWN_LOST_TEXT, MISSED_TEXT, NONE_FULL_TEXT, NONE_TEXT, NOT_SYNCED_TITLE, OTHER_PASSKEY_LABEL, PHONE_HINT, PHONE_LABEL, PHONE_SIGNIN_HINT, PHONE_SIGNIN_LABEL, RETRY_LABEL, SYNC_ADVICE, UNUSABLE_TITLE, notSyncedSteps, unusableSteps } from '../passkeyTrouble'
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
-import { dropSignupInvite, loadSignupInvite } from '../signupInviteStore'
+import { dropSignupInvite, dropSignupInviteCard, loadSignupInvite } from '../signupInviteStore'
 import { FULL_TEXT, admissionFor, admissionOffer } from '../signupAdmission'
 import { hostOf, installationOrigin } from '../installation'
 import { dropsHeldInvite, parseSessionReturn } from '../linkReturn'
@@ -237,7 +237,10 @@ function takeReturnNotice () {
     returnNotice = parseReturn(loc.search)
     returnWaitlist = parseReturnWaitlist(loc.search)
     returnInvite = parseReturnInvite(loc.search)
-    if (returnInvite !== '') dropSignupInvite()
+    if (returnInvite !== '') {
+      dropSignupInvite()
+      dropSignupInviteCard()
+    }
     if (new URLSearchParams(loc.search).has('conta')) hist.replaceState(hist.state, '', loc.pathname + loc.hash)
   } catch {}
   return returnNotice
@@ -319,7 +322,7 @@ function accepted (key, record) {
   noteDate(key, record.date)
 }
 
-function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChanged, onLinked, feira = null }) {
+function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChanged, onLinked, onInviteChanged, feira = null }) {
   const node = useNode()
   const now = useNow(60000)
   // { key, status, pending } of the last load for this key.
@@ -567,7 +570,11 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
           // for a code held by another pending link too, and that one may
           // free up. The app drops it, so its paste field shows again for
           // another link instead of resending a dead code.
-          if (dropsHeldInvite(err, NATIVE)) dropSignupInvite()
+          if (dropsHeldInvite(err, NATIVE)) {
+            dropSignupInvite()
+            dropSignupInviteCard()
+            if (onInviteChanged) onInviteChanged()
+          }
           setInviteNote(err.message)
           return
         }
@@ -646,7 +653,11 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         setConfirmFailed(true)
         return
       }
-      if (err && err.code === 'convite-invalido') dropSignupInvite()
+      if (err && err.code === 'convite-invalido') {
+        dropSignupInvite()
+        dropSignupInviteCard()
+        if (onInviteChanged) onInviteChanged()
+      }
       if (err && RESTARTABLE.has(err.code)) setConfirmFailed(true)
       throw err
     } finally {
@@ -685,6 +696,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     setError('')
     setInviteNote('')
     setPasteTick((n) => n + 1)
+    if (onInviteChanged) onInviteChanged()
   }
 
   const restartLink = () => {
@@ -843,7 +855,9 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
 // lands in this diary, so the shell knows the setup took the Google return.
 // feira (App.js): a Feira listing entry, { holder, origin, hold } from
 // src/feiraEntry.js and the signup invite holder's writer; null otherwise.
-export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, onLinked, invite = null, feira = null }) {
+// onInviteChanged: the held signup code or its card changed here (a paste,
+// a drop), so the shell reads the card again.
+export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, onLinked, onInviteChanged, invite = null, feira = null }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const outbox = useOutbox()
@@ -1558,6 +1572,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             onChanged={refresh}
             onLinked={setup ? onLinked : undefined}
             feira={feira}
+            onInviteChanged={onInviteChanged}
           />
           )
         : null}

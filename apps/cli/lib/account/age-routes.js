@@ -52,8 +52,16 @@ const { isAppRequest, ageReturnUrl } = require('./app-return')
 //     (never a window keyed by the owner, which anonymous minters could
 //     spend to lock that owner out), which
 //     do not count against the daily ceiling of the other unlinked keys.
-//     Each answers 'limite-idade'. Residual: a distributed attacker can
-//     spend the Feira ceiling and stop Feira sign-ups for the day, never
+//     Each answers 'limite-idade'. That session opens only through POST
+//     /account/feira/idade (same body, signed action 'session', same
+//     answers), where the edge (deploy/seeder/Caddyfile, zones feira-idade
+//     and feira-idade-total) limits each address, since this service never
+//     reads one; a Feira code on /account/age/session answers
+//     'use-a-rota-da-feira' and an ordinary code (or none) on the Feira route
+//     'pedido-invalido', both before any window is charged. Residual: an
+//     attacker rotating IPv6 addresses inside a /64 (or many hosts) reaches
+//     only the global ceilings (FEIRA_AGE_DAILY here, feira-idade-total at
+//     the edge) and can still stop Feira sign-ups for the day, never
 //     ordinary ones. result reads the decision and records only the age
 //     band in age.json (./age-store.js), then asks Didit to delete the
 //     session. A 'verificado' answer from either carries `proof`, an
@@ -80,6 +88,15 @@ const MAX_SESSIONS = 10000
 const DAY_MS = 24 * 3600 * 1000
 const SINCE_RESIGN_MS = 60 * 1000
 const FEIRA_AGE_DAILY = 50
+// The paid session for a Feira code, under the /account/feira/* edge handle.
+const FEIRA_AGE_PATH = '/account/feira/idade'
+
+// The request target's path exactly as sent, before any URL normalisation.
+function rawPath (req) {
+  const target = typeof req.url === 'string' ? req.url : ''
+  const q = target.indexOf('?')
+  return q === -1 ? target : target.slice(0, q)
+}
 const HEX64_RE = /^[0-9a-f]{64}$/
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const LOG_TOKEN_RE = /^[a-z0-9_-]{1,48}$/
@@ -404,7 +421,9 @@ function createAgeRoutes ({
     if (typeof store.deletedAt === 'function' && store.deletedAt(member) !== null) throw refuse('conta-excluida')
   }
 
-  async function session (req, res, body) {
+  // `feira`: the request came through POST /account/feira/idade, the only
+  // route that opens a paid session for a Feira code (see the header).
+  async function session (req, res, body, { feira = false } = {}) {
     available()
     const member = prove(body, 'session')
     notDeleted(member)
@@ -437,6 +456,9 @@ function createAgeRoutes ({
         feiraOwner = feiraOwnerOf(body.invite)
       }
     }
+    // Before any window is charged, so a request on the wrong route spends nothing.
+    if (feiraOwner !== null && !feira) throw refuse('use-a-rota-da-feira')
+    if (feiraOwner === null && feira) throw refuse('pedido-invalido')
     // The shared ceiling is only peeked here, so a day at the ceiling does not
     // burn the member's own attempts; it is charged last, once the narrower
     // windows let the request through.
@@ -564,15 +586,20 @@ function createAgeRoutes ({
   const POST = {
     '/account/age/start': start,
     '/account/age/session': session,
-    '/account/age/result': result
+    '/account/age/result': result,
+    [FEIRA_AGE_PATH]: (req, res, body) => session(req, res, body, { feira: true })
   }
 
   function owns (pathname) {
-    return pathname === '/account/age' || pathname.startsWith('/account/age/')
+    return pathname === '/account/age' || pathname.startsWith('/account/age/') || pathname === FEIRA_AGE_PATH
   }
 
   async function handle (req, res, url) {
     const p = url.pathname
+    // The edge limits the Feira route by its path, and Caddy cleans a path
+    // (decoding %2F first) differently from URL here: only the exact raw
+    // target reaches the paid session, before the body or a nonce is read.
+    if (p === FEIRA_AGE_PATH && rawPath(req) !== FEIRA_AGE_PATH) throw refuse('nao-encontrado')
     if (req.method === 'GET' && p === '/account/age/policy') return policy(req, res)
     if (req.method === 'GET' && p === '/account/age/since') return sinceRoute(req, res)
     if (req.method === 'GET' && p === '/account/age/app-return') return appReturn(req, res)
@@ -594,5 +621,6 @@ function createAgeRoutes ({
 
 module.exports = {
   FEIRA_AGE_DAILY,
+  FEIRA_AGE_PATH,
   createAgeRoutes
 }

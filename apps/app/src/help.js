@@ -165,7 +165,8 @@ export const HELP = Object.freeze({
       'Quem já está na Varanda pode criar alguns links de convite por semana e mandar como quiser.',
       'Cada link serve para uma pessoa só e vale 7 dias. Os convites renovam toda segunda-feira, no horário de Brasília, e os que sobram não acumulam.',
       'A associação guarda só quem criou o convite e se ele foi usado; nunca o nome, o e-mail ou a conta de quem recebeu o link.',
-      'Quando a associação liga os convites de surpresa, cada convite chega num dia e hora ao acaso, com um aviso. Escolha com carinho quem você quer chamar.'
+      'Quando a associação liga os convites de surpresa, cada convite chega num dia e hora ao acaso, com um aviso. Escolha com carinho quem você quer chamar.',
+      'Se você escrever um cartão, ele vai dentro do próprio link, e o app de quem recebe confere que foi você quem escreveu. A associação não recebe o nome nem a mensagem.'
     ])
   }),
   termosAparelho: Object.freeze({

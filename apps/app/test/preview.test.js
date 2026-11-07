@@ -154,6 +154,23 @@ test('previewTarget uses the first HTTPS result from fail-closed findLinks', asy
   t.is(previewTarget('https://bad.example.com\u200b https://good.example.com'), 'https://good.example.com')
 })
 
+test('a signup invite link is never previewed, with or without a card fragment', async (t) => {
+  const { previewTarget, extractPreview } = await load()
+  const invite = 'https://bora.varanda.app/convite/' + 'A'.repeat(43)
+  const short = invite + '#c1.' + 'b'.repeat(40)
+  const long = invite + '#c1.' + 'b'.repeat(400 - invite.length - 4)
+  t.ok(short.length < 300)
+  t.is(long.length, 400)
+  const page = '<meta property=og:title content=Convite>'
+  for (const link of [invite, short, long]) {
+    t.is(previewTarget('Vem: ' + link), null, link.length + ' chars')
+    t.is(extractPreview(page, link), null, link.length + ' chars')
+  }
+  t.is(previewTarget('https://example.com/convite'), null)
+  t.is(previewTarget(short + ' e https://example.com/x'), 'https://example.com/x')
+  t.is(extractPreview(page, 'https://example.com/convites').title, 'Convite', 'only the /convite path itself')
+})
+
 test('every card from a hostile page passes core validLinkCard', async (t) => {
   const { extractPreview } = await load()
   const { validLinkCard } = require('@varanda/core/lib/link-card')
