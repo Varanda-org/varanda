@@ -6222,7 +6222,7 @@ Caminhada com dois membros de teste, A e B, que se seguem e têm publicações, 
 
 - [ ] Em A Rua, no menu **Mais** de uma publicação de B, aparecem **Denunciar** e **Bloquear**; numa publicação de A, nenhum dos dois.
 - [ ] **Bloquear** abre "Bloquear B?" com a nota de que a pessoa não é avisada e de que ainda pode ver o que você publica. **Cancelar** não muda nada.
-- [ ] Confirmar mostra "Pessoa bloqueada. Para desfazer, abra Ajustes e depois Pessoas bloqueadas." e as publicações de B somem de A Rua na hora, sem puxar para atualizar.
+- [ ] Confirmar mostra "Pessoa bloqueada. Desfaça em Ajustes." e as publicações de B somem de A Rua na hora, sem puxar para atualizar. O botão de publicar não cobre o aviso.
 - [ ] Em Seguindo, B não aparece mais. Depois de sincronizar, um terceiro membro vê A sem seguir B, e nada no diário de A diz que houve bloqueio.
 - [ ] Uma republicação de uma publicação de B por um terceiro membro some de A Rua; uma citação de B por um terceiro mostra "Publicação indisponível"; a publicação do terceiro continua.
 - [ ] Espiadinha: as publicações de B não aparecem, e a nota "N diários não aparecem" não conta B.
@@ -6240,7 +6240,7 @@ Caminhada com dois membros de teste, A e B, que se seguem e têm publicações, 
 
 Limites desta caminhada:
 
-- Nenhuma caixa acima foi executada nesta documentação.
+- Nenhuma caixa acima foi executada nesta documentação. Uma conferência prévia com a Vitrine, sem membros reais, passou no simulador iOS: bloquear pelo menu da publicação e pelo perfil, a lista em Ajustes e desbloquear. Android, a caminhada com dois membros e os avisos push em navegador real seguem por fazer.
 - A lista entre aparelhos está na seção 135.
 - Grupos, comunidades e Feira não são filtrados.
 
