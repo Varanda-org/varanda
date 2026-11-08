@@ -5985,7 +5985,44 @@ Limites:
 - As imagens são geometria gerada, não arte encomendada.
 - O `User-Agent` é declarado pelo cliente: quem quiser pode se passar por um robô e ver a página de prévia, que não traz nada além do que está acima.
 
-## 129. Feira: anúncios, edição, apagamento, avaliações e índice do semeador (PR feat/feira-records)
+## 129. Carregamento mais rápido de A Rua, Diário e perfis (PRs chore/perf-harness até perf/app-render)
+
+Caminhada da pilha de desempenho: medição, leituras do nó, partida, concessão do app instalado e renderização. Ciclo de medição, metas e números em [performance.md](performance.md).
+
+O que muda:
+
+- Medição: `startup-bench.js` ganha `--file`, `--reads-twice`, `--log`, `--lease-gap` e contadores por fase; o laboratório hospedado ganha `--dataset`, `--dataset-size` e `--rajada`; o app de desenvolvimento ganha marcas de tempo no console e um gancho que só aceita `follow.add`, `community.join` e `post.create`, as duas coisas só com `__DEV__` e `EXPO_PUBLIC_VARANDA_PERF=1`; a Vitrine ganha 200 linhas extras com `EXPO_PUBLIC_VARANDA_VITRINE_LARGE=1`.
+- Nó: os núcleos de diário, réplica e grupo guardam os blocos em memória (um bloco apagado sai do cache antes e depois de cada limpeza, e o cache recusa guardar um bloco que o núcleo não tem); o feed valida cada registro uma vez por leitura.
+- Partida: Conversas só lê a caixa e os grupos quando a aba é aberta (a coleta de mensagens espera a partida ficar quieta, para o ponto de não lidas continuar aparecendo); o ponto da aba espera as primeiras linhas de A Rua; os pedidos ao nó entram numa fila de 7 em andamento em vez de falhar no nono, e a fila descarta o que esperava antes de qualquer troca de identidade; a página baixa o nó do navegador enquanto busca `/varanda.json`; o Diário não repete `node.info` para a mesma identidade.
+- Fotos: uma resposta 503 do semeador (ocupado) é tentada de novo, depois do `Retry-After` e com uma espera aleatória, no máximo três vezes.
+- App instalado: a sincronização fica ligada enquanto o app está aberto, como no PWA (antes caía 8 s depois de terminar e cada leitura reabria todos os núcleos do armazenamento do aparelho).
+- Renderização: as linhas do registro de sincronização e as dicas de download saem do contexto principal do app, e cada publicação só é desenhada de novo quando os dados dela mudam.
+
+Como verificar, a partir da raiz (um arquivo por vez):
+
+- `node packages/web-member/test/delete-purge.test.js`, `node packages/core/test/feed.test.js`.
+- `node apps/app/test/requestQueue.test.js`, `node apps/app/test/conversas.test.js`, `node apps/app/test/mediaFetch.test.js`, `node apps/app/test/mediaCache.test.js`, `node apps/app/test/workletLease.test.js`, `node apps/app/test/syncSignals.test.js`, `node apps/app/test/feedRender.test.js`, `node apps/app/test/perfMarks.test.js`, `node apps/app/test/vitrineLarge.test.js`, `node apps/app/test/hardening.test.js`.
+- `node apps/cli/test/lab-dataset-plan.test.js`, `node apps/cli/test/hosted-lab.test.js`.
+- Números: os comandos de [performance.md](performance.md) ("Ferramentas e comandos").
+
+Com uma conta de verdade, primeiro no Android, depois no iOS, depois na web e no PWA:
+
+- [ ] Android (APK de preview): abrir o app frio mostra as primeiras linhas de A Rua mais cedo que a versão anterior; o registro de Sincronização não mostra parada "idle" com o app aberto nem "leitura sem esperar a partida".
+- [ ] Android: com o app em segundo plano por um minuto, a sincronização para; ao voltar, ela recomeça.
+- [ ] Android: Conversas mostra o ponto de não lidas quando chega uma mensagem com o app aberto em A Rua, sem abrir a aba.
+- [ ] Android: rolar A Rua com fotos não engasga; uma curtida muda só a publicação curtida.
+- [ ] iOS (TestFlight): os mesmos quatro passos.
+- [ ] Web e PWA: A Rua aparece mais cedo; trocar de conta com publicações na fila de envio não publica nada da conta anterior na nova.
+- [ ] Web: com o semeador sob carga (`VARANDA_MEDIA_MAX_IN_FLIGHT` baixo), as fotos que recebem 503 aparecem depois de alguns segundos em vez de ficarem com erro.
+
+Limites:
+
+- O caminho crítico que sobra é a partida do nó: ela verifica cerca de 122 assinaturas de certificados em JavaScript puro antes de responder à primeira leitura. Encurtar isso pede uma decisão (Ed25519 do WebCrypto no navegador, ou lembrar verificações entre aberturas).
+- Cada app instalado aberto em primeiro plano segura uma conexão do semeador, como uma aba visível: `VARANDA_MAX_EXTERNAL` precisa contar os dois.
+- O semeador limita `/media` de forma global (16 em andamento, 64 por segundo por padrão): com muita gente ao mesmo tempo, as fotos esperam; as variáveis `VARANDA_MEDIA_*` aumentam esses limites.
+- Os números de celular só valem depois de publicar; simulador e emulador não substituem um aparelho.
+
+## 130. Feira: anúncios, edição, apagamento, avaliações e índice do semeador (PR feat/feira-records)
 
 Caminhada da base da Feira: os quatro registros (`listing`, `listing-edit`, `listing-status`, `listing-rate`), a dobra, os métodos `listing.*` do RPC (5.103 a 5.110), a denúncia de anúncio e o índice do semeador. O protocolo está em [protocol.md](protocol.md) (seção 2, "Feira records", seção 3, "Listing report", e a seção 15); o RPC em [rpc.md](rpc.md). Nesta rodada não há tela: as telas e as rotas HTTP vêm em PRs seguintes.
 
@@ -6027,7 +6064,7 @@ Limites desta caminhada:
 - O semeador guarda só as 16 últimas edições e os 16 últimos status de cada anúncio: com a janela estourada e todos apagados, o anúncio fica sem status conhecido, sai da busca e do mapa do site, e o cartão público responde 404 se a edição atual for desconhecida, até um novo status ou edição.
 - Com duas avaliações da mesma pessoa para o mesmo anúncio, o índice guarda a mais nova; se ela for apagada, a antiga só volta ao índice depois que o semeador varrer o diário de novo (reinício ou reconstrução).
 
-## 130. Feira: página pública, entrada por link, anúncio de página e denúncia (PR feat/feira-service)
+## 131. Feira: página pública, entrada por link, anúncio de página e denúncia (PR feat/feira-service)
 
 Caminhada do serviço da Feira: as rotas públicas do semeador (`/index/feira/*`, `/f/*`), o Caddy, a entrada por link de anúncio, os anúncios de uma página, o cartão guardado na caixa da página e a denúncia de anúncio no painel. O protocolo está em [protocol.md](protocol.md) (seção 15, "The seeder's Feira routes and public pages" e "Feira entry"; seção 12, "Anúncios como página"; seção 3, "Reports").
 
@@ -6078,9 +6115,9 @@ Limites desta caminhada:
 - O `robots.txt` é servido pelo Caddy mesmo com a Feira desligada: o mapa do site que ele indica responde 404 até `VARANDA_FEIRA_ORIGIN` ser definido.
 - Com `feira-invites.json` corrompido, os códigos da Feira param e a limpeza de convites de cada conta excluída fica pendente (`purga-pendente` no log) até o operador consertar o arquivo; os outros dados da conta são apagados normalmente.
 
-## 131. Feira no app: aba, anúncio, links e entrada por anúncio (PR feat/feira-app)
+## 132. Feira no app: aba, anúncio, links e entrada por anúncio (PR feat/feira-app)
 
-Caminhada da Feira no app: a aba Feira, as telas Anúncio e Anunciar, Conversar com o rascunho e o cartão, os links `/f/` e `/anuncio/`, a entrada de quem chega por um anúncio, os anúncios de Página e a denúncia de anúncio. O comportamento está em [app.md](app.md), seção "Feira"; o formato, em [protocol.md](protocol.md), seção 15. Editar anúncio, propostas, avaliações, alertas de busca salva e os links no app nativo ficam na seção 132.
+Caminhada da Feira no app: a aba Feira, as telas Anúncio e Anunciar, Conversar com o rascunho e o cartão, os links `/f/` e `/anuncio/`, a entrada de quem chega por um anúncio, os anúncios de Página e a denúncia de anúncio. O comportamento está em [app.md](app.md), seção "Feira"; o formato, em [protocol.md](protocol.md), seção 15. Editar anúncio, propostas, avaliações, alertas de busca salva e os links no app nativo ficam na seção 133.
 
 Regras que os passos conferem:
 
@@ -6119,9 +6156,9 @@ Limites desta caminhada:
 - Numa conversa da Página, o cartão do anúncio aparece sem miniatura (o app não lê as fotos da caixa da Página).
 - Uma linha velha do índice mostra "Situação desconhecida" até o semeador reler o diário.
 
-## 132. Feira: ofertas, avaliações, edição, buscas salvas e links no app (PR feat/feira-extras)
+## 133. Feira: ofertas, avaliações, edição, buscas salvas e links no app (PR feat/feira-extras)
 
-Caminhada das partes da Feira que a seção 131 deixou de fora: ofertas na conversa, avaliações, editar anúncio, buscas salvas com o ponto na aba, os links `/anuncio/` que abrem o app instalado, "Já tem o app? Abrir no app" na página pública e a Feira da Vitrine. O comportamento está em [app.md](app.md), seção "Feira"; o formato, em [protocol.md](protocol.md), seção 15.
+Caminhada das partes da Feira que a seção 132 deixou de fora: ofertas na conversa, avaliações, editar anúncio, buscas salvas com o ponto na aba, os links `/anuncio/` que abrem o app instalado, "Já tem o app? Abrir no app" na página pública e a Feira da Vitrine. O comportamento está em [app.md](app.md), seção "Feira"; o formato, em [protocol.md](protocol.md), seção 15.
 
 Regras que os passos conferem:
 

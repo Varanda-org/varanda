@@ -601,7 +601,7 @@ No perfil de um membro ou de uma Página (nó hospedado), a linha "Anúncios" ab
 
 - Numa conversa da Página (agindo como Página), o cartão de um anúncio aparece sem a miniatura: o app ainda não lê as fotos da caixa da Página.
 - Uma linha velha do índice mostra "Situação desconhecida" até o semeador reler o diário.
-- Editar anúncio, propostas, avaliações, alertas de busca salva e os links no app nativo são conferidos em `docs/verification.md` seção 132; os passos desta etapa estão na seção 131.
+- Editar anúncio, propostas, avaliações, alertas de busca salva e os links no app nativo são conferidos em `docs/verification.md` seção 133; os passos desta etapa estão na seção 132.
 
 ## Fora do piloto
 
