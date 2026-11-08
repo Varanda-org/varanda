@@ -17,6 +17,14 @@
 //     null is the owner's cancel, appended like any offer). Then the
 //     directory link, the
 //     current terms and the blocklist; then the ACL of ./pages-store.js.
+//   - listing, listing-edit and listing-status append Feira records by the
+//     node writers' rules (docs/rpc.md 5.103 to 5.107): at most 30 live
+//     listings, an edit only with the live edit's seq as expectedRevision
+//     ('conflito' otherwise) and written with the tombstone of the edit it
+//     replaces, no reservado on a procura. listing-consent appends nothing:
+//     the page key signs the deal of an offer that a member sent the page
+//     in Conversas (docs/rpc.md 5.109), and the admin's app puts that
+//     signature in the aceite URL of its text answer (dm-send stays text).
 //   - media and avatar take the raw image as the body and the statement in
 //     x-varanda-page-* headers.
 //   - close and move are the owner's record actions (docs/protocol.md §12,
@@ -67,9 +75,11 @@ const { refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { issuerSignLink, verifyClose, verifyMoved, pageLifecycle } = require('@varanda/core/lib/page-lifecycle')
 const { applyDeletes } = require('@varanda/core/lib/deletion')
 const groupLib = require('@varanda/core/lib/group')
+const { foldListings, countLive, liveEditOf, editPlan, deletePlan } = require('@varanda/core/lib/listing')
+const { feira } = require('@varanda/rpc')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const {
-  postRecord, likeRecord, repostRecord, deleteRecord, profileRecords, followRecord,
+  postRecord, likeRecord, repostRecord, deleteRecord, profileRecords, followRecord, listingRecord, listingStatusRecord,
   parseRef, validDescriptor, isCanonicalIso, charLength, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, MAX_AVATAR_BYTES, AVATAR_MIMES
 } = require('@varanda/core/lib/records')
 
@@ -94,7 +104,7 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const SUCCESSOR = PREFIX + 'successor/'
 // What a close tombstones: everything the page still shows, never a page-*
 // record (pages-writer.js DELETABLE).
-const CLOSE_DELETES = ['post', 'like', 'repost', 'profile']
+const CLOSE_DELETES = ['post', 'like', 'repost', 'profile', 'listing', 'listing-edit']
 const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
 // Same names as store.js RESERVED (not exported): a page never takes them.
@@ -111,8 +121,14 @@ const DM_STATES = ['accepted', 'declined', 'blocked', 'unblocked', 'deleted']
 // Communities and groups as the page (./pages-groups.js).
 const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read']
 const GROUP_READ_LIMIT = 32
+// Feira listings as the page (docs/rpc.md 5.103 to 5.109).
+const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status']
+// listing-consent: the newest pages of the offerer's thread it reads.
+const CONSENT_PAGES = 20
+const CONSENT_PAGE_LIMIT = 50
 const STATEMENTS = ['create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
-  'avatar', 'rename', 'invite', 'follow', 'follows', 'media', 'notices', 'terms', ...DM_ACTIONS, ...GROUP_ACTIONS]
+  'avatar', 'rename', 'invite', 'follow', 'follows', 'media', 'notices', 'terms', ...DM_ACTIONS, ...GROUP_ACTIONS,
+  'listing', 'listing-edit', 'listing-status', 'listing-consent']
 const RECORDS = ['accept', 'remove', 'offer', 'transfer-accept', 'close', 'move']
 const START_ACTIONS = [...STATEMENTS, ...RECORDS]
 const READS = ['list', 'status', 'follows']
@@ -123,7 +139,8 @@ const MAX_SUCCESSORS = 1000
 // Actions whose whole effect is the writer's append: its nonce record is the
 // answer. For the others the ACL step after the append is the effect, so a
 // record without a spent nonce is only known to be partial.
-const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename', 'follow', 'media', 'avatar']
+const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename', 'follow', 'media', 'avatar',
+  ...LISTING_ACTIONS]
 
 const WRITER_TOKENS = Object.freeze({
   pausada: 'pausada',
@@ -145,7 +162,7 @@ const TERMINAL = ['movida', 'encerrada']
 const TOKENS = new Set(['nao-vinculado', 'sem-permissao', 'limite', 'nome-em-uso', 'nome-invalido', 'expirado',
   'assinatura-invalida', 'pedido-invalido', 'pausada', 'encerrada', 'midia-invalida', 'indisponivel', 'termos-pendentes',
   'troca-bloqueada', 'nao-encontrado', 'para-si', 'bloqueou', 'sem-caixa', 'sem-selos', 'resposta-invalida', 'longa-demais',
-  'fora-da-comunidade', 'aguardando-chave'])
+  'fora-da-comunidade', 'aguardando-chave', 'conflito', 'oferta-ausente'])
 
 function noop () {}
 
@@ -483,7 +500,10 @@ function createPagesRoutes ({
       } else {
         const a = rec.append || rec.follow
         if (a !== null) {
-          const out = { seq: a.seq, length: a.length, pushed: false, replay: true }
+          // A listing edit answers its edit block, the first of its append.
+          const first = action === 'listing-edit' ? writer.nonceFirst(page, member, nonce) : null
+          const seq = first === null ? a.seq : first
+          const out = { seq, length: a.length, pushed: false, replay: true }
           if (action === 'create') out.page = page
           if (action === 'avatar') {
             if (rec.media === null) throw new Uncertain()
@@ -921,6 +941,12 @@ function createPagesRoutes ({
     return t
   }
 
+  function ownListingRef (page, ref) {
+    const t = target(ref)
+    if (t.author !== page || t.seq < 1) throw refuse('pedido-invalido')
+    return t
+  }
+
   async function recordsFor (action, page, op) {
     try {
       if (action === 'post') {
@@ -946,11 +972,43 @@ function createPagesRoutes ({
         if (t.author !== page) throw refuse('pedido-invalido')
         const entries = await writer.readEntries(page)
         const e = entries.find((x) => x.seq === t.seq)
+        // A listing goes with its live edits, in one append.
+        if (e && isPlainObject(e.record) && e.record.type === 'listing') {
+          if (!foldListings(entries).bySeq.has(t.seq)) throw refuse('pedido-invalido')
+          return deletePlan(entries, t.seq)
+        }
         // Never a tombstone over a page record: a delete must not undo a
         // roster, an accept or an offer.
         if (!e || !isPlainObject(e.record) || !['post', 'like', 'repost'].includes(e.record.type)) throw refuse('pedido-invalido')
         const media = Array.isArray(e.record.media) ? e.record.media.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
         return [deleteRecord({ seq: t.seq, media })]
+      }
+      if (action === 'listing') {
+        if (!exactKeys(op, ['kind', 'title', 'text', 'price', 'unit', 'cat', 'place'], ['media'])) throw refuse('pedido-invalido')
+        const record = listingRecord({ kind: op.kind, title: op.title, text: op.text, price: op.price, unit: op.unit, cat: op.cat, place: op.place, media: mediaOf(page, op.media) })
+        if (countLive(await writer.readEntries(page)) >= feira.MAX_LISTINGS) throw refuse('limite')
+        return [record]
+      }
+      if (action === 'listing-edit') {
+        if (!exactKeys(op, ['to', 'expectedRevision', 'title', 'text', 'price', 'unit', 'cat', 'place', 'media'])) throw refuse('pedido-invalido')
+        if (!Number.isSafeInteger(op.expectedRevision) || op.expectedRevision < 0) throw refuse('pedido-invalido')
+        const t = ownListingRef(page, op.to)
+        const media = op.media === null ? null : mediaOf(page, op.media)
+        const entries = await writer.readEntries(page)
+        if (!foldListings(entries).bySeq.has(t.seq)) throw refuse('pedido-invalido')
+        const live = liveEditOf(entries, t.seq)
+        if (op.expectedRevision !== (live === null ? 0 : live.seq)) throw refuse('conflito')
+        // Throws 'unit-invalid' for a unit the root's kind refuses.
+        return editPlan(entries, t.seq, { title: op.title, text: op.text, price: op.price, unit: op.unit, cat: op.cat, place: op.place, media }).records
+      }
+      if (action === 'listing-status') {
+        if (!exactKeys(op, ['to', 'status'])) throw refuse('pedido-invalido')
+        const t = ownListingRef(page, op.to)
+        const record = listingStatusRecord({ seq: t.seq, status: op.status })
+        const item = foldListings(await writer.readEntries(page)).bySeq.get(t.seq)
+        if (item === undefined) throw refuse('pedido-invalido')
+        if (item.record.kind === 'procura' && op.status === 'reservado') throw refuse('pedido-invalido')
+        return [record]
       }
       if (action === 'profile') {
         if (!exactKeys(op, ['name', 'bio'], ['avatar'])) throw refuse('pedido-invalido')
@@ -975,12 +1033,18 @@ function createPagesRoutes ({
       need(row, member, 'admin')
       chargeOps(page)
       const records = await recordsFor(action, page, op)
+      // A listing's checks read the diary: the role is read again after.
+      if (LISTING_ACTIONS.includes(action)) need(writableRow(page), member, 'admin')
       await refreshRoster(page)
+      if (LISTING_ACTIONS.includes(action)) need(writableRow(page), member, 'admin')
       const res = await append(page, records, { member, nonce })
-      await after(() => pagesStore.expectLength(page, res.length, { spend: spendOf(member, nonce, res.seq) }))
-      const result = { seq: res.seq, length: res.length, pushed: res.pushed }
+      // A listing edit answers its edit block (the next expectedRevision),
+      // not the tombstone appended after it, as the nodes do.
+      const seq = action === 'listing-edit' ? res.seq - (records.length - 1) : res.seq
+      await after(() => pagesStore.expectLength(page, res.length, { spend: spendOf(member, nonce, seq) }))
+      const result = { seq, length: res.length, pushed: res.pushed }
       settle(member, nonce, result)
-      keep(page, action, member, res.seq)
+      keep(page, action, member, seq)
       return result
     }))
   }
@@ -1057,6 +1121,73 @@ function createPagesRoutes ({
       const result = { seq: res.seq, length: res.length, pushed: res.pushed }
       settle(member, nonce, result)
       keep(page, 'follow', member, res.seq)
+      return result
+    }))
+  }
+
+  // ---- Feira consent ---------------------------------------------------------
+
+  // Whether the page's thread with `rater` holds an inbound message `offer`
+  // whose card URL or text is an offer naming exactly listing page:seq, with
+  // no answer in it (the browser node's rule, docs/rpc.md 5.109).
+  async function inboundOffer (page, rater, offer, seq) {
+    let before = null
+    for (let i = 0; i < CONSENT_PAGES; i++) {
+      let res
+      try {
+        res = await pagesDm.thread(page, { peer: rater, before, limit: CONSENT_PAGE_LIMIT })
+      } catch (err) {
+        throw tokenOf(err)
+      }
+      const messages = res && Array.isArray(res.messages) ? res.messages : []
+      for (const m of messages) {
+        if (!isPlainObject(m) || m.mine === true || m.from !== rater || m.id !== offer) continue
+        for (const url of [isPlainObject(m.card) ? m.card.url : null, m.text]) {
+          const ref = feira.parseOfferRef(url)
+          if (ref !== null && ref.author === page && ref.seq === seq && ref.aceite === null && !ref.recusada) return true
+        }
+      }
+      if (!res || typeof res.next !== 'string') return false
+      before = res.next
+    }
+    return false
+  }
+
+  // The page's signature over one deal; appends nothing. A resend of the
+  // same use answers the stored signature (Ed25519 is deterministic, so a
+  // run after a restart signs the same bytes again).
+  async function consent (body) {
+    const { member, page, nonce, op, hash } = await statement(body, 'listing-consent', false)
+    if (!exactKeys(op, ['to', 'rater', 'offer'])) throw refuse('pedido-invalido')
+    const t = ownListingRef(page, op.to)
+    const rater = keyParam(op.rater)
+    if (rater === page || typeof op.offer !== 'string' || !HEX32_RE.test(op.offer)) throw refuse('pedido-invalido')
+    const prior = claim(member, nonce, hash, false, page, 'listing-consent')
+    if (prior !== null) return prior
+    return once(member, nonce, () => withLock(page, async () => {
+      need(writableRow(page), member, 'admin')
+      chargeOps(page)
+      let entries
+      try {
+        entries = await writer.readEntries(page)
+      } catch (err) {
+        throw tokenOf(err)
+      }
+      if (!foldListings(entries).bySeq.has(t.seq)) throw refuse('pedido-invalido')
+      need(writableRow(page), member, 'admin')
+      if (pagesDm === null || !(await inboundOffer(page, rater, op.offer, t.seq))) throw refuse('oferta-ausente')
+      need(writableRow(page), member, 'admin')
+      let signature
+      try {
+        signature = await writer.signDeal(page, { listingSeq: t.seq, rater, offerId: op.offer })
+      } catch (err) {
+        throw tokenOf(err)
+      }
+      // A removed admin gets nothing of a signature that was in flight.
+      need(writableRow(page), member, 'admin')
+      const result = { consent: signature }
+      settle(member, nonce, result)
+      keep(page, 'listing-consent', member, 0)
       return result
     }))
   }
@@ -2040,7 +2171,8 @@ function createPagesRoutes ({
     const body = await readJsonBody(req, MAX_BODY)
     if (action === 'start') return start(body)
     if (action === 'create') return create(body)
-    if (['post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile'].includes(action)) return write(action, body)
+    if (['post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', ...LISTING_ACTIONS].includes(action)) return write(action, body)
+    if (action === 'listing-consent') return consent(body)
     if (READS.includes(action)) return read(action, body)
     if (DM_ACTIONS.includes(action)) return dm(action, body)
     if (GROUP_ACTIONS.includes(action)) return groupAction(action, body)

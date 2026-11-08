@@ -18,7 +18,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createIssuerCert, createModeratorCert } = require('@varanda/core/lib/cert')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
-const { signReport } = require('@varanda/core/lib/report')
+const { signReport, signListingReport } = require('@varanda/core/lib/report')
 const { signAppeal } = require('@varanda/core/lib/appeal')
 const { signModRequest, canonicalBody } = require('@varanda/core/lib/mod-request')
 const { createGoogle } = require('../lib/account/google')
@@ -447,6 +447,76 @@ test('reports: a group message report is stored with writer and group, listed, n
   const decided = await s.api('POST', '/account/mod/api/reports/' + r.body.id + '/decide', { cookie, body: { decision: 'bloquear', block: 'grupo' } })
   t.is(decided.status, 200, decided.text)
   t.is(decided.body.change.member, group, 'the pending change blocks the group root key')
+  noLeak(t, s)
+})
+
+// start + a signed Feira listing report; -> { res, body }.
+async function sendListing (s, reporter, target, { seq = 2, reason = 'spam', text = 'golpe na feira', quote = 'bicicleta', sign = signListingReport, extra = {} } = {}) {
+  const started = await s.api('POST', '/account/report/start', { body: { member: reporter.hex } })
+  const nonce = started.body.nonce
+  const fields = { nonce, member: reporter.hex, association: s.iss.association, target, seq, reason, text, quote }
+  const body = { member: reporter.hex, nonce, target, kind: 'listing', seq, reason, text, quote, signature: sign(fields, reporter.kp), ...extra }
+  return { res: await s.api('POST', '/account/report', { body }), body }
+}
+
+test('reports: a listing report is stored as kind listing, apart from a post at the same seq, and can block the diary', async (t) => {
+  const calls = []
+  const triage = {
+    onReport: (r) => calls.push(['onReport', r.id, r.kind]),
+    onHumanDecision: () => {},
+    onCancel: () => {},
+    onUnblock: () => {},
+    suggestionOf: () => null,
+    verifiedOf: () => null
+  }
+  const s = await setup(t, { triage })
+
+  const { res: ok, body } = await sendListing(s, s.ana, s.bia.hex)
+  t.is(ok.status, 200, ok.text)
+  t.is(ok.body.duplicate, false)
+  const row = s.moderation.get(ok.body.id)
+  t.is(row.kind, 'listing')
+  t.is(row.seq, 2)
+  t.is(row.writer, null)
+  t.is(row.group, null)
+  t.is(row.quote, 'bicicleta')
+
+  const replay = await s.api('POST', '/account/report', { body })
+  t.alike(replay.body, { error: 'expirado' }, 'the nonce is single use')
+
+  // The same statement under the post prefix never passes as a listing.
+  const asPost = await sendListing(s, s.ana, s.bia.hex, { sign: signReport })
+  t.alike(asPost.res.body, { error: 'assinatura-invalida' })
+
+  const noSeq = await sendListing(s, s.ana, s.bia.hex, { sign: () => 'ab'.repeat(64), extra: { seq: null } })
+  t.alike(noSeq.res.body, { error: 'pedido-invalido' }, 'seq null refused')
+  const withWriter = await sendListing(s, s.ana, s.bia.hex, { extra: { writer: keys().hex } })
+  t.alike(withWriter.res.body, { error: 'pedido-invalido' }, 'writer refused')
+  const withGroup = await sendListing(s, s.ana, s.bia.hex, { extra: { group: keys().hex } })
+  t.alike(withGroup.res.body, { error: 'pedido-invalido' }, 'group refused')
+
+  // A post at the same seq is another row.
+  const post = await sendReport(s, s.ana, s.bia.hex, { seq: 2, quote: 'bicicleta' })
+  t.is(post.body.duplicate, false)
+  t.not(post.body.id, ok.body.id)
+  t.is(s.moderation.get(post.body.id).kind, 'post')
+  // A second listing report of the same seq is the same row.
+  const again = await sendListing(s, s.ana, s.bia.hex)
+  t.is(again.res.body.id, ok.body.id)
+  t.is(again.res.body.duplicate, true)
+
+  for (let i = 0; i < 100 && calls.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10))
+  t.alike(calls, [['onReport', ok.body.id, 'listing'], ['onReport', post.body.id, 'post']], 'the triage gets the listing row')
+
+  const { session } = await signIn(s)
+  const cookie = sessionCookie(session)
+  const list = await s.api('GET', '/account/mod/api/reports', { cookie })
+  t.is(list.body.reports.find((r) => r.id === ok.body.id).kind, 'listing', 'the panel sees the kind')
+  const decided = await s.api('POST', '/account/mod/api/reports/' + ok.body.id + '/decide', { cookie, body: { decision: 'bloquear' } })
+  t.is(decided.status, 200, decided.text)
+  t.is(decided.body.report.status, 'bloquear')
+  t.is(decided.body.change.op, 'block')
+  t.is(s.moderation.pending().changes[0].member, s.bia.hex, 'the diary block is queued')
   noLeak(t, s)
 })
 

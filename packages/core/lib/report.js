@@ -37,6 +37,14 @@
 // binds the reporter to the exact bytes, not to the sender: like the quote,
 // the image is the reporter's word only ('não conferida').
 //
+// A report of a Feira listing (docs/rpc.md report.sign, kind 'listing')
+// signs 'varanda-listing-report-v1' with the v1 line layout: `target` is the
+// seller's diary key and `seq` the listing record, always present (a listing
+// is one record, never a whole account). It carries no writer, group or
+// anexo: the listing is on the seeder, where the moderator reads it. The
+// distinct prefix keeps a diary post report from ever verifying as a listing
+// report and back, so the account service can route the two apart.
+//
 // Pure: b4a, hypercore-crypto, ./safe and ./records only (loaded by the
 // browser bundle and the account service alike; no '#fs', no network).
 const b4a = require('b4a')
@@ -49,6 +57,7 @@ const PREFIX_V2 = 'varanda-report-v2'
 const PREFIX_V3 = 'varanda-report-v3'
 const PREFIX_DM = 'varanda-dm-report-v1'
 const PREFIX_DM_V2 = 'varanda-dm-report-v2'
+const PREFIX_LISTING = 'varanda-listing-report-v1'
 const REASONS = Object.freeze(['spam', 'assedio', 'ilegal', 'outro'])
 const REASON_LABELS = Object.freeze({ spam: 'spam', assedio: 'assédio', ilegal: 'conteúdo ilegal', outro: 'outro' })
 // Code points (Array.from length), as packages/rpc text.js charLength.
@@ -65,6 +74,8 @@ const HEX128 = /^[0-9a-f]{128}$/
 // group, peer) can never ride along unsigned.
 const DM_KEYS = Object.freeze(['nonce', 'member', 'association', 'target', 'reason', 'text', 'quote'])
 const DM_KEYS_V2 = Object.freeze([...DM_KEYS, 'anexo'])
+const LISTING_KEYS = Object.freeze(['nonce', 'member', 'association', 'target', 'seq', 'reason', 'text', 'quote'])
+const LISTING_FORBIDDEN = Object.freeze(['writer', 'group', 'anexo'])
 
 function isPlainObject (o) {
   if (o === null || typeof o !== 'object') return false
@@ -270,12 +281,92 @@ function verifyDmReport (fields, signatureHex) {
   }
 }
 
+// The listing keys as own data properties, copied once (as dmSnapshot), so
+// no getter can shift a value between the check and the signature. Extra
+// keys are ignored, except writer, group and anexo: a listing report that
+// names one is refused rather than signed without it. -> the copy, or null.
+function listingSnapshot (fields) {
+  if (!isPlainObject(fields)) return null
+  for (const key of LISTING_FORBIDDEN) {
+    if (Object.prototype.hasOwnProperty.call(fields, key)) return null
+  }
+  const copy = {}
+  for (const key of LISTING_KEYS) {
+    const d = Object.getOwnPropertyDescriptor(fields, key)
+    if (d === undefined || !('value' in d)) return null
+    copy[key] = d.value
+  }
+  return copy
+}
+
+// -> null when the fields are a valid listing report, else a short reason.
+function checkListingFields (fields) {
+  if (isPlainObject(fields)) {
+    for (const key of LISTING_FORBIDDEN) {
+      if (Object.prototype.hasOwnProperty.call(fields, key)) return key
+    }
+  }
+  const snap = listingSnapshot(fields)
+  if (snap === null) return 'fields'
+  return checkListingSnap(snap)
+}
+
+function checkListingSnap (snap) {
+  const { nonce, member, association, target, seq, reason, text, quote } = snap
+  if (typeof nonce !== 'string' || !NONCE_RE.test(nonce)) return 'nonce'
+  if (typeof member !== 'string' || !HEX64.test(member)) return 'member'
+  if (typeof association !== 'string' || !HEX64.test(association)) return 'association'
+  if (typeof target !== 'string' || !HEX64.test(target)) return 'target'
+  if (member === target) return 'target'
+  if (!(Number.isSafeInteger(seq) && seq >= 1 && seq <= SEQ_MAX)) return 'seq'
+  if (typeof reason !== 'string' || !REASONS.includes(reason)) return 'reason'
+  if (!validText(text, TEXT_MAX, false)) return 'text'
+  if (!validText(quote, QUOTE_MAX, true)) return 'quote'
+  return null
+}
+
+// The v1 lines under PREFIX_LISTING. Throws TypeError on a bad shape.
+function listingPayloadOf (snap) {
+  const bad = snap === null ? 'fields' : checkListingSnap(snap)
+  if (bad !== null) throw new TypeError('invalid listing report ' + bad)
+  const { nonce, member, association, target, seq, reason, text, quote } = snap
+  const lines = [PREFIX_LISTING, nonce, member, association, target, String(seq), reason, digest(text), digest(quote)]
+  return b4a.from(lines.join('\n'), 'utf8')
+}
+
+// -> lowercase hex128 Ed25519 signature by keyPair.secretKey.
+function signListingReport (fields, keyPair) {
+  // One snapshot is checked and signed, so no second read can differ.
+  const snap = listingSnapshot(fields)
+  const bad = snap === null ? checkListingFields(fields) : checkListingSnap(snap)
+  if (bad !== null) throw new TypeError('invalid listing report ' + bad)
+  const payload = listingPayloadOf(snap)
+  if (keyPair === null || typeof keyPair !== 'object' || !(keyPair.secretKey instanceof Uint8Array) || keyPair.secretKey.byteLength !== 64) {
+    throw new TypeError('invalid key pair')
+  }
+  return b4a.toString(crypto.sign(payload, keyPair.secretKey), 'hex')
+}
+
+// As verifyReport, against `member`. Never throws.
+function verifyListingReport (fields, signatureHex) {
+  try {
+    const snap = listingSnapshot(fields)
+    if (snap === null || checkListingSnap(snap) !== null) return { ok: false, reason: 'malformed' }
+    if (typeof signatureHex !== 'string' || !HEX128.test(signatureHex)) return { ok: false, reason: 'malformed' }
+    const ok = crypto.verify(listingPayloadOf(snap), b4a.from(signatureHex, 'hex'), b4a.from(snap.member, 'hex'))
+    return ok ? { ok: true } : { ok: false, reason: 'bad-signature' }
+  } catch {
+    return { ok: false, reason: 'malformed' }
+  }
+}
+
 module.exports = {
   PREFIX,
   PREFIX_V2,
   PREFIX_V3,
   PREFIX_DM,
   PREFIX_DM_V2,
+  PREFIX_LISTING,
   REASONS,
   REASON_LABELS,
   TEXT_MAX,
@@ -291,5 +382,8 @@ module.exports = {
   verifyReport,
   dmReportPayload,
   signDmReport,
-  verifyDmReport
+  verifyDmReport,
+  checkListingFields,
+  signListingReport,
+  verifyListingReport
 }

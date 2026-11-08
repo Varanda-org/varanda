@@ -228,7 +228,7 @@ Limites: não há aviso do sistema (push, APNs/FCM, issues #30 e #47), nem publi
 
 Os nomes estão fixos; os detalhes visuais ainda mudam. O desenho (cores, tamanhos, componentes) está em [app-design.md](../apps/site/artwork/app-design.md); as funções e o protocolo são os mesmos de antes.
 
-A barra de baixo mostra só ícones, sem palavras (os leitores de tela continuam lendo os nomes), com a altura de sempre, 49 pt. Há cinco abas onde o nó é hospedado (o site e o app instalado com a instalação), nesta ordem: **A Rua** (uma estrada até o horizonte, com a faixa tracejada no centro: quem está na varanda vendo a rua passar), **Espiadinha**, **Conversas** (ícone de mensagem, `conversas`; o id interno continua `comunidades`), **Busca** (lupa) e **Diário** (a foto da própria pessoa ou as iniciais, com um anel verde quando está selecionada; abre em A Rua). Na configuração manual e no `varanda-serve` ficam quatro, sem Conversas. **Avisos** não é aba: abre pelo sino no canto direito da barra do topo de A Rua, Espiadinha, Conversas e Busca, e por um sino branco no canto da faixa do Diário. **Seguindo** também não é aba: é uma lista aberta por "N seguindo" no Diário. Um botão verde, "publicar", abre a folha de Publicar por cima de qualquer aba. Os ajustes ficam numa folha aberta pela engrenagem do cabeçalho do Diário. No app nativo e na web com o nó no navegador, a primeira configuração acontece antes das abas (veja "Primeira configuração"); na web hospedada, é só Entrar.
+A barra de baixo mostra só ícones, sem palavras (os leitores de tela continuam lendo os nomes), com a altura de sempre, 49 pt. Há seis abas onde o nó é hospedado (o site e o app instalado com a instalação), nesta ordem: **A Rua** (uma estrada até o horizonte, com a faixa tracejada no centro: quem está na varanda vendo a rua passar), **Espiadinha**, **Conversas** (ícone de mensagem, `conversas`; o id interno continua `comunidades`), **Feira** (ícone `feira`; veja "Feira"), **Busca** (lupa) e **Diário** (a foto da própria pessoa ou as iniciais, com um anel verde quando está selecionada; abre em A Rua). Na configuração manual e no `varanda-serve` ficam quatro, sem Conversas nem Feira. **Avisos** não é aba: abre pelo sino no canto direito da barra do topo de A Rua, Espiadinha, Conversas e Busca, e por um sino branco no canto da faixa do Diário. **Seguindo** também não é aba: é uma lista aberta por "N seguindo" no Diário. Um botão verde, "publicar", abre a folha de Publicar por cima das abas; ele some em Conversas, na Feira e nas telas delas. Os ajustes ficam numa folha aberta pela engrenagem do cabeçalho do Diário. No app nativo e na web com o nó no navegador, a primeira configuração acontece antes das abas (veja "Primeira configuração"); na web hospedada, é só Entrar.
 
 - **Barra do topo (A Rua, Espiadinha, Conversas, Busca, Seguindo e Avisos).** O título e, à direita, o sino de Avisos (em A Rua, Espiadinha, Conversas e Busca, só na versão hospedada; um ponto quando há novidade, nunca um número) e um botão de ajuda (o círculo com o "i") que abre a folha "Como funciona A Rua", "Como funciona a Espiadinha", "Como funciona Seguindo" ou "Como funcionam os Avisos"; a folha tem "Fechar" e o título como cabeçalho. O botão de informação é o único gatilho de ajuda: não há link de texto para ajuda; as linhas curtas que explicam algo terminam com um pequeno botão de informação que abre a mesma folha. O mesmo botão aparece nos passos da primeira configuração. Não há chip de sincronização. Quando o aparelho está sem rede (a dica de rede do navegador; o app com configuração manual conta sempre como com rede), uma nota calma de uma linha, "Sem internet", aparece embaixo da barra (no Diário, embaixo da área segura), no fluxo da tela, nunca por cima do conteúdo; com rede nenhuma nota de conexão aparece, nem "conectado" nem "sincronizando". A nota "Instalar o Varanda" não é de conexão: fica no fluxo, embaixo da barra, sob "Sem internet" quando as duas aparecem e embaixo da área segura no Diário. O estado detalhado da sincronização (o texto do antigo chip) fica em Ajustes › Avançado › Sincronização. Sem rede, A Rua, Seguindo e Diário continuam mostrando o que está no aparelho; a Espiadinha mantém só a lista já carregada nesta visita, se houver.
 - **A Rua.** O feed, da mais nova para a mais antiga, numa linha do tempo contínua. Cada publicação tem avatar (iniciais do nome ou do @nome; sem nome, um glifo de pessoa; a cor vem da chave, módulo 5: azul, laranja, amarelo, vermelho, verde), o nome em negrito (o nome livre do perfil, sem `@` no começo; sem nome, o @nome escrito como nome, `ana`; sem os dois, "sem nome"), o @nome verificado em texto suave quando existe, o tempo relativo ("agora", "5 min", "1 h", "ontem", "12 out"), as fotos da publicação (veja "Fotos e GIFs") e a barra de ações (veja "Linha de publicação"). Uma resposta mostra "respondendo a Nome"; quando quem foi respondido não é seguido, a publicação respondida é lida com `diary.peek` e o nome vem dela, conferido pelo nó (na web hospedada e no app instalado; no app com configuração manual e no `varanda-serve` fica "sem nome"). O Diário faz o mesmo com as respostas da própria pessoa. Uma republicação aparece como a publicação ORIGINAL com a linha "Nome republicou" em cima, e toda ação nela vale para a original; uma citação mostra a publicação citada num cartão. As originais e as citadas são lidas com `diary.peek` (no app com configuração manual e no `varanda-serve`, só as de diários guardados no aparelho). Na web hospedada, as contagens vêm do índice do semeador (`/index/counts`, 31 por pedido) e o estado próprio de curtida e republicação de `engagement.read`. Nenhuma chave aparece como texto. A lista abre com 30 publicações e, ao chegar ao fim, pede páginas de 31 (`FEED_LIMIT_MAX`, em [rpc.md](rpc.md)) com `feed.read { before }`, uma por vez, até "Isso é tudo por enquanto." (que não aparece sobre os estados vazios). A rolagem é infinita, como em todas as listas do app (Diário, Espiadinha, Avisos, Seguindo, perfis, Conversa, Curtidas): perto do fim a próxima página vem sozinha, também numa lista mais curta que a tela, que não rola, e numa lista vazia com mais páginas. Não há botão no estado normal. Uma página que falha não é repetida sozinha: só "tentar de novo" pede de novo. Depois de três páginas seguidas que a lista pediu e que não mostraram nada novo (um Diário cheio de curtidas, por exemplo), ela para e mostra "Nada novo nas últimas páginas." com o botão "carregar mais"; sair da região do fim e voltar também retoma. Enquanto os seguidos sincronizam, A Rua lê de novo sozinha quando o comprimento de qualquer diário seguido cresce depois da última leitura (linhas `downloaded` e `newest`), também numa visita de volta em que a réplica guardada ainda não sabe que há mais. Uma lista curta relê a página mais nova. Uma lista longa ou cheia relê o trecho que já mostra, de baixo da primeira linha até a última, em páginas de 31 (no máximo 10 por leitura; uma leitura cortada continua na próxima): as publicações que chegam no meio desse trecho entram no lugar certo (no app nativo, a publicação que a pessoa lê fica parada na tela), nada do que está na tela sai, e as mais novas que a primeira linha esperam a pílula "ver novidades". Só quando essa releitura chega ao fim da lista com uma página cheia a próxima leitura automática procura abaixo da última mostrada. Enquanto um diário ainda cresce depois da última leitura, ou há leitura automática pendente, o rodapé diz "Ainda sincronizando quem você segue." em vez de "Isso é tudo por enquanto.". Puxar para baixo atualiza em todas as plataformas: no app nativo com o `RefreshControl`, na web com o gesto de puxar (limiar de 72 px) e, no computador, com a roda do mouse ou o trackpad no topo da lista (puxar além de 120 px; atualiza uma vez quando a roda para por 250 ms). Não há barra "Atualizar" visível: na web, um botão "Atualizar" escondido e focável aparece quando recebe o foco do teclado. A lista não recarrega sozinha quando a sincronização termina nem quando chega um diário: aparece a pílula "ver novidades", e só quando a pessoa toca nela a lista vai ao topo e recarrega; a posição de leitura nunca muda sozinha. A pílula é só uma dica a partir das linhas `downloaded` e nunca uma contagem; pode, raramente, aparecer sem publicações novas. Tocar de novo a aba A Rua leva ao topo e recarrega se os dados têm mais de 60 s (ou há novidades); trocar de aba dentro de 60 s não recarrega. Depois de publicar, e quando os seguidos mudam (aqui ou em outro aparelho), a lista recarrega. No rodapé, só os diários bloqueados pela associação ganham uma frase ("Uma pessoa que você segue não aparece aqui."); diários com dados inválidos e publicações com data futura não são mostrados às pessoas. Sem seguidos, o estado vazio é "A Rua está vazia" com a ação "Seguir alguém"; com seguidos e sem nada, "Ainda não chegou nada" ("Quando as pessoas que você segue publicarem, aparece aqui."); uma falha de leitura mostra o erro com "tentar de novo". O aviso "Alguns números podem estar incompletos." é uma nota pequena e suave, e não uma linha da lista. A lista deixa espaço para o botão de publicar não cobrir as ações da última publicação, e a pílula "ver novidades" nunca aparece sobre o estado vazio. A Rua continua mostrando os diários seguidos; quem a pessoa não segue aparece na Espiadinha.
@@ -282,6 +282,7 @@ Onde ficam as telas, incluindo a Espiadinha:
 | A Rua | aba A Rua |
 | Espiadinha | aba Espiadinha |
 | Conversas | aba Conversas (id interno `comunidades`, ícone de mensagem `conversas`; no nó hospedado: site e app instalado). Lista única; Pedidos de mensagem e Comunidades são telas empilhadas, e Nova conversa é uma folha. Mensagem, Grupo, Novo grupo, administração e Comunidade abrem por cima das abas |
+| Feira | aba Feira (no nó hospedado: site e app instalado). Anúncio e Anunciar abrem por cima das abas |
 | Seguindo | lista aberta por "N seguindo" no Diário |
 | Avisos | o sino no canto direito da barra do topo (e na faixa do Diário), com um ponto quando há novidade |
 | Busca | aba Busca (lupa): Contas e Publicações |
@@ -363,7 +364,7 @@ Tela empilhada: entra deslizando e volta pela borda ou pelo Voltar. Tem linhas c
 
 ### Limites
 
-- Só no nó hospedado. Na configuração manual e no `varanda-serve` a barra tem cinco abas, sem Conversas. Os métodos `dm.*` respondem "mensagens diretas disponíveis só no navegador", e `dm.reportSign` responde "assinatura disponível só no navegador".
+- Só no nó hospedado. Na configuração manual e no `varanda-serve` a barra tem quatro abas, sem Conversas nem Feira. Os métodos `dm.*` respondem "mensagens diretas disponíveis só no navegador", e `dm.reportSign` responde "assinatura disponível só no navegador".
 - O conjunto do semeador dura sete dias (`DM_RETENTION_MS`). Um aparelho offline por mais tempo perde o que a varredura já tirou.
 - O nó acha o `dm-key` da outra pessoa na réplica local ou, sem réplica, varrendo a parte mais nova do diário (`dm.lookup`: no máximo `DM_LOOKUP_WINDOWS` = 8 janelas de `PEEK_WINDOW` = 36 blocos, da mais nova para a mais antiga, além do bloco 1). Um `dm-key` muito antigo, num diário longo, pode ficar de fora até essa pessoa abrir o app de novo. O app publica o `dm-key` de cada membro uma vez por sessão destravada, sem precisar abrir Conversas. Enquanto a outra pessoa não tem chave, a conversa mostra "Esta pessoa ainda não recebe mensagens" e um botão "verificar de novo", em vez do campo de escrever.
 - Há uma chave de caixa por identidade. A troca de geração publica um `dm-key` com `gen` maior. Envelopes ainda no conjunto, lacrados para a geração antiga, não são abertos.
@@ -441,7 +442,7 @@ Cada comunidade tem um link `/c/<chave>` e cada grupo, um link `/g/<chave>`, com
 
 ### Limites
 
-- Só no nó hospedado (site e app instalado). O app com configuração manual e o `varanda-serve` mantêm as cinco abas, sem Conversas; onde uma tela de Comunidades aparecer, ela mostra "Só na versão web", como Avisos.
+- Só no nó hospedado (site e app instalado). O app com configuração manual e o `varanda-serve` mantêm as quatro abas, sem Conversas nem Feira; onde uma tela de Comunidades aparecer, ela mostra "Só na versão web", como Avisos.
 - Só texto: sem fotos nem GIFs.
 - Uma comunidade é sempre pública (só os grupos podem ser privados). Os grupos e comunidades do protocolo v1 foram descartados na atualização.
 - As não lidas são por aparelho, no máximo 512 grupos marcados; a aba Comunidades mostra só o ponto, sem número.
@@ -513,6 +514,94 @@ Esta parte muda como as telas se comportam ao rolar e como as linhas aparecem. N
 ### Publicações e Respostas: fora desta etapa
 
 As abas Publicações e Respostas do perfil não entram nesta etapa. Uma resposta do Diário é o campo `record.replyTo` de um registro dentro do `log.read` paginado, e não há leitura só de respostas. Uma aba de respostas exigiria essa leitura nova, que fica para outra etapa.
+
+## Feira
+
+A Feira é o lugar de anúncios da rede: produtos, serviços e procuras ("Procura-se") de quem mora perto. Cada anúncio é um registro assinado no diário de quem anuncia (ou da Página), como uma publicação; o semeador só monta o índice de busca, em memória, e a página pública. O formato está em [protocol.md](protocol.md), seção 15. Só existe no nó hospedado (site e app instalado com a instalação), e só quando a instalação liga a Feira; senão a aba diz "A Feira não está aberta nesta instalação".
+
+### A aba Feira
+
+- No topo, quatro segmentos: **Na cidade** (a busca), **Meus** (os próprios anúncios, ou os da Página quando a pessoa age como Página), **Salvos** (os anúncios salvos neste aparelho) e **Buscas** (as buscas salvas, veja "Buscas salvas").
+- Na cidade: "Escolher estado" (UF), **Cidade**, **Palavras (opcional)** e **Buscar**; filtros de tipo (**Todos**, **Produtos**, **Serviços**, **Procura-se**) e de categoria ("Todas as categorias" e as categorias da Feira). Sem estado e cidade, a tela pede "Escolha o estado e escreva a cidade.". O estado e a cidade ficam guardados só neste aparelho (no navegador, no `localStorage` com a chave `varanda-feira-location`; no app, no arquivo `varanda-feira-location.json` na pasta de documentos) e nunca vão para a conta; se não der para guardar, a nota é "Não foi possível lembrar a cidade neste aparelho.".
+- O botão **Anunciar** abre o formulário por cima das abas, já com o estado e a cidade lembrados. O formulário pede a confirmação "Público na web e em buscadores" antes de publicar. Publicado, o anúncio abre no lugar do formulário (Voltar não volta para o formulário enviado). Se o envio não teve resposta, a tela diz "Não sabemos se o anúncio foi publicado. Confira em Meus anúncios antes de anunciar de novo." e nada é reenviado sozinho.
+- As linhas vêm do índice do semeador e são só uma dica: a tela **Anúncio** relê o anúncio do diário de quem anunciou. Uma linha velha do índice, que o semeador ainda não atualizou, mostra "Situação desconhecida" no lugar do status.
+- Sem rede: "Conecte-se para consultar a Feira.". Índice incompleto: "Alguns anúncios podem faltar. Puxe para atualizar.".
+
+### A tela Anúncio
+
+Fotos, título, preço, cidade, o status ("Reservado", "Vendido" ou "Encontrado" numa procura; disponível não mostra selo) e o bloco "Quem anunciou", com o nome e o @nome. Tocar em quem anunciou abre o perfil. As linhas de confiança ("Na Varanda desde …", "Nome verificado: …", "Seguido por …") já existem na tela, mas o app ainda não lê esses dados de outro membro, então por enquanto não aparecem. Ações:
+
+- **Conversar** abre a conversa direta com quem anunciou (ou com a Página) com um rascunho pronto, por exemplo "Olá! Tenho interesse no seu anúncio "…" na Feira: <link>", e o cartão do link. Nada é enviado até a pessoa tocar em enviar. Na conversa, um cartão de anúncio tem o botão "Ver anúncio", que abre a tela Anúncio.
+- **Compartilhar** copia ou compartilha o link público do anúncio ("Link copiado.").
+- **Salvar** / **Salvo**: guarda só neste aparelho.
+- **Denunciar** abre a folha de denúncia com o anúncio (veja "Denúncias de anúncio").
+- Para quem anunciou (ou administra a Página que anunciou), com rede: os botões de status ("Reservado", "Vendido", "Encontrei" numa procura, e a volta para disponível) e **Apagar**, que pede "Confirmar: apagar". Apagar tira o anúncio do índice e a página pública passa a responder "Anúncio não encontrado". Com rede, o mesmo dono vê também **Editar** (veja "Editar anúncio").
+- Abaixo do anúncio, as avaliações, com a nota "avaliações confirmadas pelo anunciante" (veja "Avaliações").
+
+### Editar anúncio
+
+**Editar** abre "Editar anúncio" ("Editar anúncio da página" quando a pessoa age como Página): o mesmo formulário de Anunciar, sem trocar o tipo. Título, descrição, valor, unidade, categoria, lugar e fotos mudam; as fotos atuais ficam, saem ou ganham novas, que só sobem no **Salvar**. Antes da primeira edição a tela avisa: "A primeira versão (título, texto e fotos) continua no seu diário até você apagar o anúncio. A página pública mostra a versão nova.". O link público `/f/<diário>/<seq>` não muda; a prévia passa a mostrar a versão nova.
+
+- Salvo, a tela volta para o anúncio, que é lido de novo.
+- Se outro aparelho editou antes: "Este anúncio mudou em outro aparelho. Recarregue para editar a versão atual.", com **Recarregar** ("Recarregar traz a versão atual e descarta o que você mudou aqui.").
+- Sem resposta, nada é reenviado sozinho: o formulário fica travado com **Tentar de novo** (o mesmo pedido) e **Descartar**.
+- Só o dono edita: "Só quem publicou este anúncio pode editá-lo.".
+
+### Ofertas na conversa
+
+Numa conversa que tem o link de um anúncio da outra pessoa, aparece **Fazer oferta**. A folha "Fazer oferta" pede o **Valor (R$)** e **Enviar oferta** manda o link da oferta com o texto (por exemplo "Ofereço …"). Uma Página manda a oferta só como texto com o link, e uma Página responde em texto com o link.
+
+- Quem anunciou vê **Aceitar** e **Recusar** na oferta aberta mais recente. **Aceitar** abre "Aceitar oferta", com o valor e a nota "Ao aceitar, você assina um consentimento que deixa esta pessoa publicar uma avaliação do seu anúncio. Você não escolhe as estrelas, e isso não é um pagamento.", e o botão **Aceitar e assinar**. A assinatura vai na resposta ("Aceitei sua oferta de …"); **Recusar** responde "Recusei sua oferta de …".
+- A oferta não é um pagamento: o pagamento é combinado entre as pessoas, fora do aplicativo.
+- As ofertas existem só na conversa: o estado é lido das mensagens cada vez, e nada fica guardado em outro lugar. Uma oferta, um aceite ou uma recusa sem resposta só é reenviado por **Tentar de novo**. Um aceite de quem não é o dono do anúncio é ignorado.
+
+### Avaliações
+
+Depois de um aceite com a assinatura, só quem fez a oferta vê **Avaliar** na conversa. A tela Avaliar pede de 1 a 5 estrelas e um "Comentário (opcional)", com a nota "A avaliação fica pública no anúncio. Ela não é prova de pagamento.". Sem resposta, nada é reenviado sozinho ("Não sabemos se a avaliação foi publicada. Confira o anúncio antes de avaliar de novo.", com **Tentar de novo** e **Descartar**).
+
+- Uma Página não avalia por enquanto: "Uma página não avalia anúncios por enquanto. Para avaliar, use o seu perfil.".
+- Na tela Anúncio e no perfil (Membro), as avaliações vêm com "avaliações confirmadas pelo anunciante" e só aparecem as que o nó conferiu, uma por pessoa e anúncio (a mais nova vale). Uma avaliação sem o consentimento assinado não aparece, nem a de quem entrou na rede há menos de 7 dias (conta a data do certificado de quem avalia, no relógio de quem lê).
+
+### Buscas salvas
+
+Na cidade, com uma busca feita, **Salvar busca** guarda a busca neste aparelho ("Busca salva neste aparelho."), até 10 ("Você já tem 10 buscas salvas. Remova uma para salvar outra."). O segmento **Buscas** lista as buscas salvas, cada uma com "N novos" (anúncios novos desde a última vez que a busca foi aberta); sem nenhuma: "Você ainda não tem buscas salvas neste aparelho.".
+
+- As contagens são feitas ao abrir a Feira ou voltar ao aplicativo, no máximo a cada 15 minutos, olhando a primeira página de cada busca, e ficam só no aparelho; offline, ficam as últimas contagens. Não há aviso push nem busca em segundo plano.
+- Com alguma busca com anúncios novos, a aba Feira ganha um ponto, que reflete o que a última abertura da Feira viu.
+
+### Links: `/f/` e `/anuncio/`
+
+- `/f/<diário>/<seq>` é a **página pública** do anúncio, servida pelo semeador: abre no navegador, sem conta, com título, preço, cidade e fotos, e com as etiquetas OpenGraph, então um aplicativo de mensagens mostra a prévia. É indexada por buscadores enquanto o anúncio está disponível ou reservado; um anúncio vendido mantém a página, com `noindex`, e sai do `sitemap.xml`. O botão da página é "Entrar para conversar" ("Entrar para oferecer" numa procura).
+- `/anuncio/<diário>/<seq>` é o mesmo anúncio **dentro do app**: é para onde aquele botão leva. Na web hospedada, o app lê `/anuncio/…` (e também `/f/…`, quando chega até ele) uma vez ao carregar, limpa a barra de endereço para `/` e guarda o anúncio na aba (`sessionStorage`, chave `varanda-feira-listing`, no máximo 1 h), para ele sobreviver ao Google, aos Termos e à configuração. Com as abas na tela, a tela Anúncio abre uma vez; nada é enviado nem seguido sozinho.
+- No app instalado, `varanda:///anuncio/<diário>/<seq>` e os links https `/anuncio/…` e `/f/…` da própria instalação abrem a tela Anúncio quando as abas aparecem. Um link de outro domínio é descartado.
+- Com o app instalado, um link `/anuncio/…` da instalação abre direto no app: no Android pelos App Links (verificados pelo `assetlinks.json`), no iOS pelos links universais, depois que a instalação publica o `apple-app-site-association` com `applinks`. A página pública `/f/…` continua no navegador, para manter a prévia; ela mostra também "Já tem o app? Abrir no app", que leva a `varanda:///anuncio/<diário>/<seq>`, porque o iOS mantém no Safari um toque num link do mesmo site.
+- O link que Compartilhar usa é sempre o público, `<origem da instalação>/f/<diário>/<seq>`, com o número do anúncio original: uma edição troca o conteúdo, o link continua o mesmo.
+
+### Entrar a partir de um anúncio
+
+Quem chega por um link de anúncio sem conta vê no Entrar o cartão "Anúncio da Feira" com "Entre para falar com quem anunciou.". Quando a instalação liga as entradas da Feira e a rede é por convite, o cartão mostra o botão **Pedir entrada**: só esse toque pede ao serviço de conta um código de entrada (nunca sozinho, nunca repetido; uma falha passageira mostra **Tentar de novo**), cobrado das entradas semanais de quem anunciou só quando o código é usado, e o cadastro segue como sempre; numa rede aberta nenhum código é pedido. Com a verificação de idade ligada, **Pedir entrada** aparece primeiro no passo da idade, porque a verificação já pede o código; com o código da Feira, o app abre a verificação pela rota própria da Feira (`POST /account/feira/idade`, o mesmo pedido, com limite por endereço na borda), e um limite dessa rota mostra "Muitas tentativas de verificação. Tente de novo amanhã.". O anúncio só abre no fim, quando as abas aparecem. Se as entradas de quem anunciou acabaram: "Quem anunciou não tem mais entradas nesta semana. Peça um convite a alguém da rede ou tente na próxima semana.". Com as entradas da Feira desligadas e a rede por convite: "Entre para falar com quem anunciou. Por enquanto, entrar pede um convite: peça um link a alguém da rede.". Um anúncio apagado ou com a Feira desligada: "Este anúncio não abre uma entrada agora: ele saiu do ar ou a Feira está desligada.".
+
+### Anúncios de Página
+
+Quem age como Página (o seletor de Publicar) anuncia em nome dela, e "Meus" mostra os anúncios da Página. Conversar com um anúncio de Página abre a conversa com a Página; na primeira vez neste aparelho para aquela Página, vem antes a mesma folha do perfil dela, "Conversar com a página", com "O serviço de conta pode ler as mensagens desta conversa" e os botões "Continuar" e "Cancelar". A conversa da Página tem a nota "A associação pode ler as mensagens desta página", porque o serviço de conta guarda a chave de mensagens da Página (veja "Páginas"). A caixa da Página guarda o cartão do anúncio que o membro mandou.
+
+### Denúncias de anúncio
+
+"Denunciar" na tela Anúncio abre a mesma folha das outras denúncias, com o título do anúncio; a denúncia vai sempre para uma pessoa da moderação (a IA não decide anúncios). No painel de moderação ela aparece como "anúncio", com o filtro "Anúncios", o link da página pública e "Ver anúncio".
+
+### Vitrine
+
+Com a Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`, veja [development.md](development.md)), a aba Feira aparece com anúncios de exemplo (produtos, um serviço, uma procura e um anúncio de Página, um deles editado), uma conversa com uma oferta aceita e avaliações (uma delas com um consentimento inválido, que não aparece), para capturas de tela, sem conta. Os dados estão em `apps/app/src/vitrine/fixtures.js`.
+
+### Anúncios de uma pessoa
+
+No perfil de um membro ou de uma Página (nó hospedado), a linha "Anúncios" abre a lista dos anúncios daquela pessoa ou Página, na mesma Feira, sem abas, filtros nem o botão Anunciar. Anúncio vendido ou velho continua na lista com o selo; autores bloqueados não aparecem. Sem anúncios, a tela diz "Nenhum anúncio por aqui.".
+
+### Limites
+
+- Numa conversa da Página (agindo como Página), o cartão de um anúncio aparece sem a miniatura: o app ainda não lê as fotos da caixa da Página.
+- Uma linha velha do índice mostra "Situação desconhecida" até o semeador reler o diário.
+- Editar anúncio, propostas, avaliações, alertas de busca salva e os links no app nativo são conferidos em `docs/verification.md` seção 133; os passos desta etapa estão na seção 132.
 
 ## Fora do piloto
 

@@ -9,7 +9,8 @@
 //     return (any app can claim or forge it): the one-time code R arrives
 //     only in the result of the auth session the app opened,
 //     https://<installation>/account/app/conta (parseSessionReturn);
-//   - invite, profile, group (/g/<hex64>) and community (/c/<hex64>) links,
+//   - invite, profile, group (/g/<hex64>), community (/c/<hex64>) and listing
+//     (/anuncio/<hex64>/<seq> or /f/<hex64>/<seq>) links,
 //     either varanda:///<path> (empty host, so the path is the web path) or
 //     an https link of this installation.
 // A link is never consent to follow or to join: the profile store records
@@ -23,6 +24,7 @@ import { installationOrigin } from './installation.js'
 import { parseSignupInvitePath, CODE_RE } from './signupInvite.js'
 import { parseProfilePath } from './profileLink.js'
 import { parseGroupPath, parseCommunityPath } from './groupLink.js'
+import { parseListingPath } from './feiraLink.js'
 
 const MAX_URL = 400
 const AGE_PREFIX = 'varanda://idade?'
@@ -125,11 +127,15 @@ function linkPath (url) {
 
 // -> { kind: 'convite', code } | { kind: 'perfil', username } |
 // { kind: 'perfil', key } | { kind: 'grupo', key } |
-// { kind: 'comunidade', key } | null. The paths go through the web parsers.
+// { kind: 'comunidade', key } | { kind: 'anuncio', author, seq } | null.
 export function parseAppLink (url) {
   if (!clean(url)) return null
   const path = linkPath(url)
   if (path === null || path.startsWith('//')) return null
+  if (path.startsWith('/anuncio/') || path.startsWith('/f/')) {
+    const listing = parseListingPath(path)
+    return listing !== null ? { kind: 'anuncio', author: listing.author, seq: listing.seq } : null
+  }
   const code = parseSignupInvitePath(path)
   if (code !== null) return { kind: 'convite', code }
   const target = parseProfilePath(path)

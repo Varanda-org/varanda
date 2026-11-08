@@ -34,17 +34,20 @@ import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { avatarOf } from '../media/avatar'
-import { fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
+import { fetchFeiraAuthor, fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { whoOf } from '../who'
 import * as actingAs from '../actingAs'
 import { TEXTS, pagesFollow, pagesFollows, pagesSuccessor } from '../pages'
 import { MAX_HOPS, moveOf, pageMoveView, resolveChain, shownUnderCut, successorOf } from '../pageMove'
 import { rosterRows } from '../pageRoster'
-import { Soft, errorText, useBottomPad, useNow } from '../ui'
+import { Btn, Soft, errorText, useBottomPad, useNow } from '../ui'
 import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
+import { Sheet } from '../ui/Sheet'
+import { pageNoticeStore } from '../pageNoticeStore'
+import { PAGE_DM_NOTICE, pageNoticeKey } from '../pageNotice'
 import { ProfileHeader } from '../ui/ProfileHeader'
 import { ProfileBar, useProfileBar } from '../ui/ProfileBar'
 import { LABELS } from '../dm'
@@ -56,6 +59,8 @@ import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
+import { ratingRefs, ratings } from '../feiraClient'
+import { MAX_RATED_LISTINGS, RATINGS_NOTE, collectRatings, summaryLabel } from '../feiraReview'
 import { isSeederDown, knownAuthors, memberKeyOf, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet } from './Conversa'
 
 const NOT_HOSTED_NOTE = 'Publicações completas disponíveis na versão web, com internet.'
@@ -63,9 +68,12 @@ const OFFLINE_NOTE = 'Sem internet: as publicações completas aparecem quando a
 
 const BAND = 96
 
-const PAGE_NO_DM = 'Esta página ainda não recebe mensagens'
 const ROSTER_UNAVAILABLE = 'lista de administradores indisponível'
 const PAGE_UNCERTAIN = 'Não sabemos se a mudança foi feita. Confira antes de tentar de novo.'
+
+export function canConverseWithPage ({ page, closed, moved, hosted, enabled }) {
+  return page === true && closed !== true && moved !== true && hosted === true && enabled === true
+}
 
 // The 'Página' badge text from an index hint, a seed or a page.read answer:
 // null for a person. Closed and moved pages say so.
@@ -166,7 +174,7 @@ const INITIAL_POSTS = {
   refreshing: false
 }
 
-export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onToast }) {
+export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onOpenListings, onToast }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -194,6 +202,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const genRef = useRef(0)
   const [following, setFollowing] = useState(false)
   const [pageRead, setPageRead] = useState(null)
+  const [pageNotice, setPageNotice] = useState(null)
   // The index's page/closed/moved fields (a hint until page.read answers),
   // and whether page.read said "not a page" (it overrides every hint).
   const [idxHint, setIdxHint] = useState(null)
@@ -531,6 +540,30 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     }
   }
 
+  // The seller's verified ratings over the newest listings (hosted only),
+  // read once per opened key; a failure only hides the row.
+  const [rated, setRated] = useState(null)
+  const ratingsHosted = node.hosted === true
+  useEffect(() => {
+    setRated(null)
+    if (!ratingsHosted || typeof author !== 'string') return undefined
+    let live = true
+    const read = async () => {
+      // The index's hints are enough here: listing.ratings proves each row
+      // against the listing itself, so no listing needs a diary read.
+      const first = await fetchFeiraAuthor(author)
+      if (!live || !first || first.ok !== true) return
+      const seqs = first.value.items.map((i) => Number(String(i.ref).slice(author.length + 1))).slice(0, MAX_RATED_LISTINGS)
+      const r = await collectRatings({ author, seqs }, {
+        refsPage: (cursor) => ratingRefs(author, cursor),
+        verify: (q) => ratings(request, q)
+      })
+      if (live) setRated(r)
+    }
+    read().catch(() => {})
+    return () => { live = false }
+  }, [ratingsHosted, author, request])
+
   const who = whoOf({ name: header.name, username: header.username })
   const own = typeof ownKey === 'string' && author === ownKey
   const canReport = full && !own && typeof onReport === 'function' && typeof ownKey === 'string'
@@ -549,6 +582,57 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       : { closed: !!seed && seed.closed === true, moved: !!seed && (seed.moved === true || (seed.movedTo !== undefined && seed.movedTo !== null)) }
   const badge = pageBadgeLabel({ page: isPage, closed: lifecycle.closed, moved: lifecycle.moved })
   const closedPage = isPage && lifecycle.closed === true
+  const canConverse = !own && typeof onMessage === 'function' && canConverseWithPage({
+    page: isPage,
+    closed: lifecycle.closed,
+    moved: lifecycle.moved,
+    hosted: node.hosted,
+    enabled: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })
+  })
+  const openPageConversation = () => {
+    const key = pageNoticeKey(author)
+    if (!canConverse || key === null) return
+    try {
+      if (pageNoticeStore().getItem(key) === '1') {
+        onMessage(author)
+        return
+      }
+    } catch {}
+    setPageNotice(author)
+  }
+  const pageNoticeSheet = (
+    <Sheet open={pageNotice === author && canConverse} onClose={() => setPageNotice(null)} title='Conversar com a página'>
+      <View style={styles.note}>
+        <Soft>{PAGE_DM_NOTICE}</Soft>
+        <Btn
+          label='Continuar'
+          onPress={() => {
+            if (!canConverse || pageNotice !== author) return
+            try { pageNoticeStore().setItem(pageNoticeKey(author), '1') } catch {}
+            setPageNotice(null)
+            onMessage(author)
+          }}
+        />
+        <Btn label='Cancelar' secondary onPress={() => setPageNotice(null)} />
+      </View>
+    </Sheet>
+  )
+  const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'
+    ? (
+      <Pressable accessibilityRole='button' accessibilityLabel='Anúncios' onPress={() => onOpenListings(author)} style={({ pressed }) => [styles.listings, pressed && styles.pressed]}>
+        <Text style={styles.rosterName}>Anúncios</Text>
+      </Pressable>
+      )
+    : null
+  const ratingsRow = ratingsHosted && !(isPage && lifecycle.moved) && rated && rated.summary.count > 0
+    ? (
+      <View accessibilityLabel='Avaliações' style={styles.listings}>
+        <Text style={styles.rosterName}>Avaliações</Text>
+        <Soft>{summaryLabel(rated.summary)}</Soft>
+        <Soft>{RATINGS_NOTE}</Soft>
+      </View>
+      )
+    : null
   const newKey = movedView !== null ? movedView.key : null
   const canFollowNew = newKey !== null && movedView.follow && !own && !asPageMode && follows !== null && !follows.has(newKey) && newKey !== ownKey
 
@@ -662,8 +746,8 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
             />
             )
           : null,
-        !own && isPage && !closedPage && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })
-          ? <Pill label={PAGE_NO_DM} disabled />
+        canConverse
+          ? <Pill label='Conversar' onPress={openPageConversation} />
           : null,
         !own && !isPage && node.hosted === true && typeof onMessage === 'function'
           ? <Pill label={LABELS.message} onPress={() => onMessage(author)} />
@@ -686,6 +770,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       <View style={styles.flex}>
         <View style={styles.flex}>
           {head}
+          {listingsRow}
+          {ratingsRow}
+          {pageNoticeSheet}
           <OfflineNote />
           <View style={styles.note}><Soft>{node.hosted ? OFFLINE_NOTE : NOT_HOSTED_NOTE}</Soft></View>
         </View>
@@ -705,6 +792,8 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const listHeader = (
     <View>
       {head}
+      {listingsRow}
+      {ratingsRow}
       <OfflineNote />
       {notes.length > 0 ? <View style={styles.note}>{notes.map((n) => <Soft key={n}>{n}</Soft>)}</View> : null}
     </View>
@@ -759,6 +848,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
           onScrollFrame={bar.handleScrollFrame}
         />
         <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)} onBack={onBack} />
+        {pageNoticeSheet}
       </View>
     </View>
   )
@@ -767,6 +857,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   note: { paddingHorizontal: 16, paddingVertical: 12, gap: 4 },
+  listings: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.line },
   pageNote: { marginTop: 8, gap: 8 },
   badge: { ...type.postMeta, color: colors.ink, fontWeight: '700' },
   banner: { ...type.postName, color: colors.ink },
