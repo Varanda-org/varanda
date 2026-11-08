@@ -386,6 +386,13 @@ test('Mensagem offers Encaminhar and marks forwarded messages without the origin
   t.ok(bubble.includes("<Icon name='encaminhar'") && bubble.includes('FORWARDED_LABEL'), 'Encaminhada with the encaminhar icon')
 })
 
+test('Bubble keeps a quote clear of the hover chevron only when there are actions', (t) => {
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes('quoteWithChevron'), 'the quote style for the chevron exists')
+  t.ok(/style=\{\[styles\.quote, rows\.length > 0 && styles\.quoteWithChevron\]\}/.test(bubble), 'the quote View takes it only under rows.length > 0')
+  t.ok(bubble.includes("accessibilityLabel='ações da mensagem'"), 'the chevron keeps its label')
+})
+
 test('Mensagem shows a removable post context chip and sends it only as composed text', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(src.includes("<IconAction icon='fechar' label='remover contexto' onPress={() => setContext(null)} />"), 'the chip is removable')

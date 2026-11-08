@@ -273,6 +273,9 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Corrigido
 
+- A conversa abre na mensagem mais nova e acompanha a lista enquanto ela desenha mais linhas; qualquer gesto, uma rolagem para cima, **Mensagens anteriores** ou o salto até uma citação num grupo soltam o fim, e uma mensagem nova fixa de novo.
+- A seta que aparece ao passar o mouse numa mensagem não cobre mais a citação dentro do balão.
+- A correção automática do teclado do iOS que muda a última palavra no instante do **Enviar** não deixa mais o texto no campo, o que convidava a enviar de novo.
 - Mensagem em particular numa publicação de Página: antes abria a conversa da página com o chip da publicação e sem o aviso de que o serviço de conta pode ler as mensagens. Agora, ao tocar, o app confere se o autor é uma Página (índice de membros e `page.read`), mostra o aviso "Conversar com a página" uma vez por aparelho, abre a conversa sem o chip e, para uma página encerrada ou que mudou de chave confirmada pelo nó, mostra "Esta página não recebe mensagens.". Só uma página confirmada pelo nó é recusada e guardada como página; uma página conhecida só pela dica do semeador recebe o aviso e abre sem o chip. Detalhes em `docs/verification.md` seção 139.
 - O app instalado não derruba mais a sincronização 8 s depois de terminar: enquanto está aberto, mantém a conexão com o semeador, como o PWA, e em segundo plano para. Nota para quem opera: cada app aberto em primeiro plano passa a contar em `VARANDA_MAX_EXTERNAL`, como uma aba visível.
 - Uma foto que o semeador recusa por estar ocupado (503) é tentada de novo, depois do `Retry-After` e com uma espera aleatória, em vez de ficar com erro.

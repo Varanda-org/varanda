@@ -149,6 +149,22 @@ export function newestOf (page) {
   return list.length > 0 ? messageKey(list[list.length - 1]) : ''
 }
 
+// A measured end can still grow as FlatList renders its remaining batches.
+// Animated scrollToEnd frames move down and must not release the pin.
+export function pinToEnd (state, event) {
+  const next = { ...state }
+  if (event.kind === 'newest' && event.newest !== state.newest) {
+    next.pinned = true
+    next.newest = event.newest
+  } else if (event.kind === 'user') {
+    next.pinned = false
+  } else if (event.kind === 'frame') {
+    if (state.lastY !== null && event.y < state.lastY - 48) next.pinned = false
+    next.lastY = event.y
+  }
+  return next
+}
+
 // One line for a conversation preview: a line break would show as U+FFFD.
 export function previewLine (value) {
   return typeof value === 'string' ? value.replace(/\r?\n/g, ' ') : ''
