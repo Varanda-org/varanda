@@ -118,3 +118,20 @@ test('dm-budget: a link card counts, in its canonical order', (t) => {
   t.ok(dm.buildInner({ ...fields, text: textOfBytes(free) }, issued), 'text at the budget fits')
   t.exception.all(() => dm.buildInner({ ...fields, text: textOfBytes(free + 1) }, issued), /mensagem longa demais/, 'one byte more throws')
 })
+
+test('dm-budget: v3 writes the v2 keys and matches core innerDigest', (t) => {
+  t.is(budget.DM_INNER_KEYS_V3, budget.DM_INNER_KEYS_V2)
+  const body = { v: 3, kind: 'msg', id: 'a'.repeat(32), from: bia.hex, to: plain.hex, replyTo: null, text: 'oi', media: null, card: null, fwd: 0, op: null, peer: null, at: AT, cert: null }
+  const json = budget.canonicalInnerJson(Object.fromEntries(Object.entries(body).reverse()))
+  t.alike(Object.keys(JSON.parse(json)), budget.DM_INNER_KEYS_V2)
+  t.is(json, b4a.toString(dm.innerDigest(body).json))
+  t.is(rpc.dmInnerVersion({ media: null, card: null, fwd: 0 }), 1, 'innerVersion never answers 3')
+
+  for (const media of [undefined, [item(1)]]) {
+    const fields = { kind: 'msg', from: issued.hex, to: bia.hex, at: AT, cert: issued.cert, media }
+    const free = rpc.dmTextBudget({ ...fields, v: 3 })
+    const { json } = dm.innerDigest({ ...fields, text: 'x' })
+    t.is(dm.DM_INNER_BYTES - 66 - json.byteLength, free - 1, 'same size as the v3 inner')
+    t.ok(free <= rpc.dmTextBudget(fields), 'v3 never has more room than v1 or v2')
+  }
+})

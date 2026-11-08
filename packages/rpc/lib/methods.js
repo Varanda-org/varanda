@@ -505,6 +505,28 @@ const DM_LIST_LIMIT_MAX = 50
 const isDmId = (v) => typeof v === 'string' && DM_ID_RE.test(v)
 const isDmState = (v) => typeof v === 'string' && DM_STATES.includes(v)
 const isDmFolder = (v) => v === 'inbox' || v === 'request'
+const PAGE_RECIPIENTS_MAX = 17
+// The page-secrets header carries gen as uint32be.
+const PAGE_GEN_MAX = 0xffffffff
+const PAGE_SEALED_MAX = 1024
+const PAGE_IMPORT_ROWS_MAX = 200
+const isPageRecipients = (v) => Array.isArray(v) && v.length <= PAGE_RECIPIENTS_MAX &&
+  v.every((r) => isPlainObject(r) && Object.keys(r).length === 2 && isKey(r.member) && isKey(r.box))
+const isPageLegacy = (v) => isPlainObject(v) && Object.keys(v).length === 2 &&
+  Number.isSafeInteger(v.gen) && v.gen >= 1 && str(1, PAGE_SEALED_MAX)(v.sealed)
+const isPageDraftKind = (v) => v === 'msg' || v === 'ctl'
+// Exactly { id, from, to, text, at, replyTo, media, card }; the whole request
+// stays under MAX_REQUEST, so the app batches by serialized size. These rows
+// come from the service, not from a signed inner, so they get the same bounds
+// as dm.send here and the node checks them again before filing.
+const PAGE_IMPORT_ROW_KEYS = ['id', 'from', 'to', 'text', 'at', 'replyTo', 'media', 'card']
+const isPageImportRow = (r) => isPlainObject(r) && Object.keys(r).length === PAGE_IMPORT_ROW_KEYS.length &&
+  PAGE_IMPORT_ROW_KEYS.every((k) => hasOwn(r, k)) &&
+  isDmId(r.id) && isKey(r.from) && isKey(r.to) && r.from !== r.to && str(0, L.MAX_TEXT)(r.text) && isCanonicalIso(r.at) &&
+  (r.replyTo === null || isDmId(r.replyTo)) &&
+  (r.media === null || isDmMediaList(r.media)) && (r.card === null || isDmCard(r.card)) &&
+  (r.media === null || r.card === null)
+const isPageImportRows = (v) => Array.isArray(v) && v.length <= PAGE_IMPORT_ROWS_MAX && v.every(isPageImportRow)
 
 // dm.send `media` (docs/rpc.md 5.75): 1..MAX_DM_MEDIA items, each a blob
 // descriptor (the validateBlobDescriptor rules of @varanda/core lib/blob.js,
@@ -563,7 +585,7 @@ function isDmListCursor (v) {
 // diary through the signed cancel offer ({ to: null, exp: null }).
 const PAGE_ACTIONS = [
   'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar',
-  'rename', 'invite', 'dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen', 'follow',
+  'rename', 'invite', 'dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'group-seal', 'group-rebox', 'follow',
   'follows', 'media', 'notices', 'terms', 'community-join', 'community-leave', 'group-join', 'group-leave',
   'group-post', 'group-read', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
   'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
@@ -1066,10 +1088,16 @@ const SPECS = {
   'group.read': {
     fields: {
       group: req(isKey),
+      page: opt(isKey),
       limit: opt(int(1, L.GROUP_LIMIT_MAX), L.GROUP_LIMIT_DEFAULT),
       // Exclusive group-order cursor; absent = the newest page.
       before: opt(isGroupCursor)
     }
+  },
+  // A private-group post sealed for a page (docs/rpc.md 5.114); writes
+  // nothing, the owner or admin signs and sends it through 'group-seal'.
+  'group.seal': {
+    fields: { group: req(isKey), page: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), fwd: opt(int(0, 1), 0) }
   },
   // Idempotent local mark like dm.seen. Result { ok: true }: writes no diary,
   // never goes to peers; the client re-reads community.info. upTo is optional,
@@ -1178,14 +1206,49 @@ const SPECS = {
   'dm.pull': { fields: none },
   'dm.list': {
     fields: {
+      page: opt(isKey),
       folder: opt(isDmFolder, 'inbox'),
       limit: opt(int(1, DM_LIST_LIMIT_MAX), DM_LIST_LIMIT_DEFAULT),
       before: opt(isDmListCursor)
     }
   },
-  'dm.thread': { fields: { peer: req(isKey), before: opt(isDmId), limit: opt(int(1, L.DM_THREAD_LIMIT_MAX), L.DM_THREAD_LIMIT_DEFAULT) } },
-  'dm.set': { fields: { peer: req(isKey), state: req(isDmState) }, mutating: true },
-  'dm.seen': { fields: { peer: req(isKey) } },
+  'dm.thread': { fields: { page: opt(isKey), peer: req(isKey), before: opt(isDmId), limit: opt(int(1, L.DM_THREAD_LIMIT_MAX), L.DM_THREAD_LIMIT_DEFAULT) } },
+  'dm.set': { fields: { page: opt(isKey), peer: req(isKey), state: req(isDmState) }, mutating: true },
+  'dm.seen': { fields: { page: opt(isKey), peer: req(isKey) } },
+  // Páginas de ponta a ponta no nó (docs/rpc.md 5.114), browser node only.
+  // dm.pageGenerate and dm.pageShare write nothing remote, so they are not
+  // mutating; dm.pageDraft only holds a draft in memory.
+  'dm.pageGenerate': { fields: { page: req(isKey), gen: req(int(1, PAGE_GEN_MAX)), recipients: req(isPageRecipients) } },
+  'dm.pageShare': { fields: { page: req(isKey), member: req(isKey), box: req(isKey) } },
+  'dm.pageSecrets': {
+    fields: {
+      page: req(isKey),
+      gen: req(int(1, PAGE_GEN_MAX)),
+      sealed: req(str(1, PAGE_SEALED_MAX)),
+      by: req(isKey),
+      sig: req(isSignature),
+      box: req(isKey),
+      groupBox: req(isKey),
+      cert: req(isCert),
+      legacy: opt(isPageLegacy)
+    },
+    mutating: true
+  },
+  'dm.pageDraft': {
+    fields: {
+      page: req(isKey),
+      kind: req(isPageDraftKind),
+      to: opt(isKey),
+      text: opt(str(0, L.MAX_TEXT)),
+      replyTo: opt(isDmId),
+      fwd: opt(int(0, 1), 0),
+      op: opt(isDmState),
+      peer: opt(isKey)
+    }
+  },
+  'dm.pageSend': { fields: { page: req(isKey), id: req(isDmId), signature: req(isSignature) }, mutating: true },
+  'dm.pageImport': { fields: { page: req(isKey), rows: req(isPageImportRows) }, mutating: true },
+  'dm.pageForget': { fields: { page: req(isKey) }, mutating: true },
   // The node fills in member and association and hashes text and quote; the
   // quote is the chosen message as this device decrypted it, which no one
   // can verify. target is the sender's diary key, never its signature.
@@ -1467,6 +1530,7 @@ module.exports = {
   isId,
   isKey,
   isRef,
+  PAGE_ACTIONS,
   PAGE_READ_FOLLOWS_MAX,
   PAGE_READ_LINKS_MAX
 }

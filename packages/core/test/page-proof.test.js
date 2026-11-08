@@ -49,7 +49,7 @@ test('constants', (t) => {
   t.alike(ACTIONS, [
     'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
     'avatar', 'rename', 'invite', 'dm-list', 'dm-thread', 'dm-send', 'dm-set',
-    'dm-seen', 'follow', 'follows', 'media', 'notices', 'terms', 'community-join',
+    'dm-seen', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'group-seal', 'group-rebox', 'follow', 'follows', 'media', 'notices', 'terms', 'community-join',
     'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'listing',
     'listing-edit', 'listing-status', 'listing-consent'
   ])

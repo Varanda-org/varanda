@@ -289,6 +289,7 @@ const {
 const { formatEvent, key8 } = require('@varanda/core/lib/sync-format')
 const { safe } = require('@varanda/core/lib/safe')
 const { UsageError } = require('@varanda/core/lib/errors')
+
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { signReport, signDmReport, signListingReport } = require('@varanda/core/lib/report')
 const { signAppeal } = require('@varanda/core/lib/appeal')
@@ -494,6 +495,13 @@ const NOT_FOUND_MESSAGES = new Set([
   MOMENT_PHOTO_GONE
 ])
 
+// A page inbox lives only where the page secrets are held; until this node
+// holds them a page read or write must never fall through to the own inbox
+// or the own groups.
+function noPageInbox (params) {
+  if (params && params.page !== undefined) throw new UsageError('sem chave da página')
+}
+
 function messageOf (err) {
   try {
     return err !== null && typeof err === 'object' && typeof err.message === 'string' ? err.message : null
@@ -613,9 +621,13 @@ function pageSignResult ({ action, nonce, page, op }, own, keyPair, association)
       return { signature: statement(op), record }
     }
     case 'invite': {
-      exactOp(op, ['member', 'gen', 'rosterSignature', 'roster'])
+      exactOp(op, hasOwn(op, 'share') ? ['member', 'gen', 'rosterSignature', 'roster', 'share'] : ['member', 'gen', 'rosterSignature', 'roster'])
       const r = exactOp(op.roster, ['owner', 'admins', 'prev', 'at', 'nonce'])
       if (typeof op.rosterSignature !== 'string') throw new TypeError('invalid page op')
+      if (hasOwn(op, 'share')) {
+        const s = exactOp(op.share, ['sealed', 'sig'])
+        if (typeof s.sealed !== 'string' || typeof s.sig !== 'string' || !/^[0-9a-f]{128}$/.test(s.sig)) throw new TypeError('invalid page op')
+      }
       const record = roster({ page, gen: op.gen, owner: r.owner, admins: copyList(r.admins), prev: r.prev, at: r.at, nonce: r.nonce, association })
       return { signature: statement({ ...op, rosterSignature: record.signature }), record }
     }
@@ -3425,7 +3437,10 @@ function createBrowserSession ({
     'group.join': groupWrite(member.groupJoin),
     'group.leave': groupWrite(member.groupLeave),
     'group.post': groupWrite(member.groupPost),
-    'group.read': serial((params) => withCores((c) => member.groupRead(c, params))),
+    'group.read': serial((params) => {
+      noPageInbox(params)
+      return withCores((c) => member.groupRead(c, params))
+    }),
     'group.seen': serial(async (params) => {
       const before = await store.readGroupSeen(storage)
       const r = await withCores((c) => member.groupSeen(c, params))
@@ -3529,13 +3544,21 @@ function createBrowserSession ({
       }
     },
 
-    'dm.list': serial(async (params) => dmEngine.list(await requireDm(), params)),
+    'dm.list': serial(async (params) => {
+      noPageInbox(params)
+      return dmEngine.list(await requireDm(), params)
+    }),
     'dm.thread': serial(async (params) => {
+      noPageInbox(params)
       const r = await dmEngine.thread(await requireDm(), params)
       return (await member.memberBlocks(storage)).has(params.peer) ? { ...r, blocked: true } : r
     }),
-    'dm.set': serial(async ({ peer, state }) => dmEngine.set(await requireDm(), keyPair, { peer, state })),
-    'dm.seen': serial(async ({ peer }) => {
+    'dm.set': serial(async ({ peer, state, page }) => {
+      noPageInbox({ page })
+      return dmEngine.set(await requireDm(), keyPair, { peer, state })
+    }),
+    'dm.seen': serial(async ({ peer, page }) => {
+      noPageInbox({ page })
       const own = await requireDm()
       const before = await store.readDmSeen(storage)
       const r = await dmEngine.seen(own, peer)
@@ -4271,4 +4294,4 @@ function createBrowserSession ({
   }
 }
 
-module.exports = { createBrowserSession, toRpcError, checkConfig, redactLogLine }
+module.exports = { pageSignResult, createBrowserSession, toRpcError, checkConfig, redactLogLine }

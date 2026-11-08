@@ -771,3 +771,115 @@ test('inner v2: the worst card fits the DM frame with the largest certificate', 
   t.is(used + budget, DM_INNER_BYTES, 'the budget is exactly what is left')
   t.is(sealInner(one, boxPair().hex).byteLength, DM_SEALED_BYTES, 'the sealed frame keeps its size')
 })
+
+// A Página's inner (v3): built on a device, its digest signed by the key holder.
+const page = signPair()
+page.cert = createCert({ member: page.hex, date: AT }, assoc)
+
+function pageInner (fields, signer = page) {
+  const { json, digest, body } = dm.innerDigest({ from: page.hex, ...fields })
+  return { inner: dm.assembleInner(json, dm.signDigest(digest, signer.secretKey)), json, digest, body }
+}
+
+test('inner v3: constants and the digest signature', (t) => {
+  t.is(dm.DM_V3_PREFIX, 'varanda-dm-v3\n')
+  t.alike(dm.INNER_KEYS_V3, dm.INNER_KEYS_V2)
+  const { inner, json, digest, body } = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert })
+  t.is(inner.byteLength, DM_INNER_BYTES)
+  t.is(body.v, 3)
+  t.alike(Object.keys(body), dm.INNER_KEYS_V2)
+  t.is(json.byteLength, (inner[0] << 8) | inner[1])
+  t.alike(b4a.from(inner.subarray(2, 2 + json.byteLength)), json)
+  const d = b4a.alloc(32)
+  sodium.crypto_hash_sha256(d, json)
+  t.is(digest, b4a.toString(d, 'hex'))
+  const sig = inner.subarray(2 + json.byteLength, 2 + json.byteLength + 64)
+  t.ok(hcrypto.verify(b4a.concat([b4a.from('varanda-dm-v3\n'), d]), sig, page.publicKey), 'prefix || sha256(json)')
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(DM_SIG_PREFIX_V2), json]), sig, page.publicKey))
+  for (let i = 2 + json.byteLength + 64; i < DM_INNER_BYTES; i++) {
+    if (inner[i] !== 0) { t.fail('padding'); break }
+  }
+})
+
+test('inner v3: a text-only msg round trip, recipient and self copy', (t) => {
+  const { inner } = pageInner({ kind: 'msg', to: bia.hex, text: 'olá da página', at: AT, cert: page.cert })
+  const theirs = openInner(b4a.from(inner), bia.hex, O)
+  t.is(theirs.v, 3)
+  t.is(theirs.text, 'olá da página')
+  t.is(theirs.media, null)
+  t.is(theirs.card, null)
+  t.is(theirs.fwd, 0)
+  t.is(theirs.mine, false)
+  t.is(openInner(b4a.from(inner), page.hex, O).mine, true)
+  t.is(openInner(b4a.from(inner), caio.hex, O), null, 'not for a third member')
+  t.is(openInner(b4a.from(inner), bia.hex), null, 'a msg still needs the association')
+  const noCert = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT }).inner
+  t.is(openInner(noCert, bia.hex, O), null, 'a msg still needs a certificate')
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: '', at: AT }), /mensagem inválida/, 'empty text without media')
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: 'x'.repeat(DM_MAX_TEXT + 1), at: AT }), /mensagem inválida/)
+})
+
+test('inner v3: every v2 combination', (t) => {
+  const withMedia = pageInner({ kind: 'msg', to: bia.hex, text: '', media: [blobItem(1)], at: AT, cert: page.cert }).inner
+  t.alike(openInner(withMedia, bia.hex, O).media, [blobItem(1)], 'media with no caption')
+  const withCard = pageInner({ kind: 'msg', to: bia.hex, text: 'olha', card: dmCard(), at: AT, cert: page.cert }).inner
+  t.alike(openInner(withCard, bia.hex, O).card, dmCard())
+  const forwarded = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', fwd: 1, at: AT, cert: page.cert }).inner
+  t.is(openInner(forwarded, bia.hex, O).fwd, 1)
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: 'oi', fwd: true, at: AT }), /mensagem inválida/)
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: 'oi', media: [blobItem(1)], card: dmCard(), at: AT }), /mensagem inválida/)
+})
+
+test('inner v3: ctl round trip', (t) => {
+  const { inner, body } = pageInner({ kind: 'ctl', op: 'blocked', peer: bia.hex, at: AT })
+  t.is(body.to, page.hex)
+  t.is(body.media, null)
+  t.is(body.card, null)
+  t.is(body.fwd, 0)
+  const opened = openInner(b4a.from(inner), page.hex)
+  t.is(opened.v, 3)
+  t.is(opened.op, 'blocked')
+  t.is(opened.mine, true)
+  t.is(openInner(b4a.from(inner), bia.hex, O), null, 'a ctl never opens for the peer')
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'ctl', op: 'blocked', peer: bia.hex, to: bia.hex, at: AT }), /mensagem inválida/)
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'ctl', op: 'blocked', peer: bia.hex, fwd: 1, at: AT }), /mensagem inválida/)
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'ctl', op: 'blocked', peer: bia.hex, media: [blobItem(1)], at: AT }), /mensagem inválida/)
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'ctl', op: 'blocked', peer: bia.hex, text: 'x', at: AT }), /mensagem inválida/)
+})
+
+test('inner v3: tampering, wrong signer and old prefixes are refused', (t) => {
+  const fields = { kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert }
+  const { inner, json, digest } = pageInner(fields)
+  const tampered = b4a.from(inner)
+  // "oi" becomes "oj": still canonical JSON, so only the signature can refuse it.
+  tampered[2 + b4a.toString(json).indexOf('"oi"') + 2] = 'j'.charCodeAt(0)
+  t.is(openInner(tampered, bia.hex, O), null, 'tampered json')
+  t.is(openInner(pageInner(fields, caio).inner, bia.hex, O), null, 'wrong signer')
+  const v1sig = hcrypto.sign(b4a.concat([b4a.from(DM_SIG_PREFIX), json]), page.secretKey)
+  const v2sig = hcrypto.sign(b4a.concat([b4a.from(DM_SIG_PREFIX_V2), json]), page.secretKey)
+  const rawDigest = hcrypto.sign(b4a.from(digest, 'hex'), page.secretKey)
+  for (const sig of [v1sig, v2sig, rawDigest]) {
+    t.is(openInner(dm.assembleInner(json, b4a.toString(sig, 'hex')), bia.hex, O), null)
+  }
+  const ctl = pageInner({ kind: 'ctl', op: 'accepted', peer: bia.hex, at: AT }, caio).inner
+  t.is(openInner(ctl, page.hex), null, 'a ctl signed by another key')
+})
+
+test('inner v3: the API refuses bad input and long bodies', (t) => {
+  t.exception.all(() => dm.innerDigest({ kind: 'msg', to: bia.hex, text: 'oi', at: AT }), /mensagem inválida/, 'from required')
+  t.exception.all(() => dm.innerDigest(null), /mensagem inválida/)
+  t.exception.all(() => dm.signDigest('ab', page.secretKey), /resumo inválido/)
+  t.exception.all(() => dm.signDigest('A'.repeat(64), page.secretKey), /resumo inválido/)
+  t.exception.all(() => dm.signDigest('a'.repeat(64), b4a.alloc(32)), /chave de assinatura inválida/)
+  t.exception.all(() => dm.assembleInner(b4a.from('{}'), 'zz'), /assinatura inválida/)
+  t.exception.all(() => dm.assembleInner(b4a.alloc(DM_INNER_BYTES - 65), 'a'.repeat(128)), /mensagem inválida/)
+  const media = [blobItem(1), blobItem(2), blobItem(3), blobItem(4)]
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: '\u{1F600}'.repeat(DM_MAX_TEXT), media, replyTo: 'c'.repeat(32), at: AT, cert: page.cert }), /mensagem longa demais/)
+})
+
+test('inner v3: buildInner never writes v3, and v1/v2 vectors are unchanged', (t) => {
+  t.is(openInner(msg(), bia.hex, O).v, 1)
+  t.is(openInner(msg({ fwd: 1 }), bia.hex, O).v, 2)
+  t.is(openInner(buildInner({ kind: 'ctl', op: 'blocked', peer: bia.hex, at: AT }, ana), ana.hex).v, 1)
+  t.is(openInner(buildInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: ana.cert, v: 3 }, ana), bia.hex, O).v, 1, 'a v field is ignored')
+})
