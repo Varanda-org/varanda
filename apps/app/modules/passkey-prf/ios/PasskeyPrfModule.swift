@@ -3,17 +3,16 @@ import CryptoKit
 import ExpoModulesCore
 import UIKit
 
-// WebAuthn through AuthenticationServices with the PRF extension (iOS 18 and
-// later). Takes the WebAuthn JSON that src/passkeyOptions.js builds and
-// answers the registration or assertion response JSON (base64url fields,
-// clientExtensionResults.prf), so JS reads both platforms alike. Below iOS 18
-// there is no PRF API: isAvailable is false and every ceremony is
-// UNSUPPORTED. Without the associated domain (webcredentials:<host>, see
-// ios/Varanda/Varanda.entitlements) the system refuses the rp.id, and its error
-// text is localized, so the build says it outright: Info.plist
-// VarandaWebCredentials is true only in a build that carries the entitlement,
-// and while it is false the module reports itself unavailable. Native error
-// text never reaches JS.
+// WebAuthn through AuthenticationServices with the PRF extension, which iOS
+// offers from 18.0: sign-in needs it, so that is the app's minimum. Takes the
+// WebAuthn JSON that src/passkeyOptions.js builds and answers the registration
+// or assertion response JSON (base64url fields, clientExtensionResults.prf), so
+// JS reads both platforms alike. Without the associated domain
+// (webcredentials:<host>, see ios/Varanda/Varanda.entitlements) the system
+// refuses the rp.id, and its error text is localized, so the build says it
+// outright: Info.plist VarandaWebCredentials is true only in a build that
+// carries the entitlement, and while it is false the module reports itself
+// unavailable. Native error text never reaches JS.
 public class PasskeyPrfModule: Module {
   private var ceremony: AnyObject?
 
@@ -25,14 +24,11 @@ public class PasskeyPrfModule: Module {
     Name("PasskeyPrf")
 
     Function("isAvailable") { () -> Bool in
-      if #available(iOS 18.0, *) {
-        return PasskeyPrfModule.webCredentials
-      }
-      return false
+      return PasskeyPrfModule.webCredentials
     }
 
     AsyncFunction("create") { (requestJson: String, promise: Promise) in
-      guard #available(iOS 18.0, *), PasskeyPrfModule.webCredentials else {
+      guard PasskeyPrfModule.webCredentials else {
         promise.reject("UNSUPPORTED", "unsupported")
         return
       }
@@ -40,7 +36,7 @@ public class PasskeyPrfModule: Module {
     }.runOnQueue(.main)
 
     AsyncFunction("get") { (requestJson: String, promise: Promise) in
-      guard #available(iOS 18.0, *), PasskeyPrfModule.webCredentials else {
+      guard PasskeyPrfModule.webCredentials else {
         promise.reject("UNSUPPORTED", "unsupported")
         return
       }
@@ -48,7 +44,6 @@ public class PasskeyPrfModule: Module {
     }.runOnQueue(.main)
   }
 
-  @available(iOS 18.0, *)
   private func run(_ promise: Promise, build: () throws -> ASAuthorizationRequest) {
     if ceremony != nil {
       promise.reject("WEBAUTHN", "busy")
@@ -73,7 +68,6 @@ enum PasskeyRequestError: Error {
   case invalid
 }
 
-@available(iOS 18.0, *)
 enum PasskeyRequests {
   static func object(_ json: String) throws -> [String: Any] {
     guard let data = json.data(using: .utf8),
@@ -146,7 +140,6 @@ enum PasskeyRequests {
   }
 }
 
-@available(iOS 18.0, *)
 final class PasskeyCeremony: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
   private let promise: Promise
   private let done: () -> Void

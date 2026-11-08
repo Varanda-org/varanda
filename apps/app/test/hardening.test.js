@@ -26,6 +26,9 @@ const PRIVACY_MANIFEST = 'ios/Varanda/PrivacyInfo.xcprivacy'
 const INFO_PLIST = 'ios/Varanda/Info.plist'
 const ENTITLEMENTS = 'ios/Varanda/Varanda.entitlements'
 const PBXPROJ = 'ios/Varanda.xcodeproj/project.pbxproj'
+const PODFILE_PROPERTIES = 'ios/Podfile.properties.json'
+const IOS_MINIMUM = '18.0'
+const DEPLOYMENT_TARGET_LINE = 'IPHONEOS_DEPLOYMENT_TARGET = ' + IOS_MINIMUM + ';'
 const ANDROID_MANIFEST = 'android/app/src/main/AndroidManifest.xml'
 const WELL_KNOWN = '../../deploy/seeder/well-known.sh'
 const MIC_PLIST = '<key>NSMicrophoneUsageDescription</key><string>' + MICROPHONE_USAGE + '</string>'
@@ -154,6 +157,21 @@ test('the iOS entitlement, the passkey flag and the deploy name the same app and
   t.ok(wellKnown.includes('printf \'{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"}]}]}}\\n\' "$ios_app_id" "$ios_app_id"'), 'and lists it under webcredentials and applinks (/anuncio/ only)')
 })
 
+// Sign-in needs the passkey PRF, which iOS offers from 18.0, so an older iPhone
+// must not be able to install the app and dead-end at Entrar. Nothing fails
+// when these drift apart: the build just takes whichever value it reads.
+test('the iOS minimum is 18.0 everywhere it is set', (t) => {
+  const plugins = JSON.parse(read('app.json')).expo.plugins
+  const buildProperties = plugins.find((plugin) => plugin[0] === 'expo-build-properties')[1]
+  t.is(buildProperties.ios.deploymentTarget, IOS_MINIMUM, 'app.json repeats it for prebuild')
+  t.is(JSON.parse(read(PODFILE_PROPERTIES))['ios.deploymentTarget'], IOS_MINIMUM, PODFILE_PROPERTIES)
+  t.ok(read('ios/Podfile').includes("podfile_properties['ios.deploymentTarget'] || '" + IOS_MINIMUM + "'"), 'the Podfile fallback')
+  t.alike(read(PBXPROJ).match(/IPHONEOS_DEPLOYMENT_TARGET = [^;]*;/g), Array(4).fill(DEPLOYMENT_TARGET_LINE), 'project and app, Debug and Release')
+  for (const file of ['modules/passkey-prf/ios/PasskeyPrf.podspec', 'modules/auth-session/ios/AuthSession.podspec']) {
+    t.ok(read(file).includes(":ios => '" + IOS_MINIMUM + "'"), file + ' can drop its availability checks')
+  }
+})
+
 // The Vitrine (src/vitrine/enabled.js) swaps the node for fixtures. A release
 // bundle has __DEV__ false, and no build config may set the opt-in either.
 test('a release build cannot turn on the Vitrine', async (t) => {
@@ -202,6 +220,10 @@ test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
   t.ok(plist.includes(WEB_CREDENTIALS_PLIST), INFO_PLIST + ' turns the passkey modules on')
   t.ok(plist.includes(EXPORT_COMPLIANCE_PLIST), INFO_PLIST + ' declares the export compliance answer')
   t.alike(entitlements(fs.readFileSync(path.join(dir, ENTITLEMENTS), 'utf8')), entitlements(read(ENTITLEMENTS)), ENTITLEMENTS)
+  t.is(JSON.parse(fs.readFileSync(path.join(dir, PODFILE_PROPERTIES), 'utf8'))['ios.deploymentTarget'], IOS_MINIMUM, PODFILE_PROPERTIES)
+  // The plugin sets the app target only, which overrides the project's value.
+  const generatedTargets = fs.readFileSync(path.join(dir, PBXPROJ), 'utf8').match(/IPHONEOS_DEPLOYMENT_TARGET = [^;]*;/g)
+  t.is(generatedTargets.filter((line) => line === DEPLOYMENT_TARGET_LINE).length, 2, PBXPROJ + ' app target, Debug and Release')
   const manifest = fs.readFileSync(path.join(dir, ANDROID_MANIFEST), 'utf8')
   t.ok(manifest.includes(RECORD_AUDIO_LINE), ANDROID_MANIFEST + ' asks for RECORD_AUDIO')
   t.ok(manifest.includes(CAMERA_REMOVED), ANDROID_MANIFEST + ' removes CAMERA')
