@@ -97,7 +97,7 @@ const {
 } = require('@varanda/core/lib/peek')
 const { memoryStorage } = require('./storage')
 const { guardedWsStream } = require('./ws-stream')
-const { moderation } = require('./member-ops')
+const { readerModeration } = require('./member-ops')
 const store = require('./node-store')
 
 // Retained records (UTF-8 JSON) one snapshot may hold.
@@ -380,6 +380,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
   // issuers and clock.
   function refresh (diary, { follows, mod, now }) {
     if (follows.has(diary.key)) diary.reason = 'followed'
+    else if (mod.hidden.has(diary.key)) diary.reason = 'hidden'
     else if (mod.blocked.has(diary.key)) diary.reason = 'blocked'
     else if (diary.fail !== null) diary.reason = diary.fail
     else if (diary.length === null) diary.reason = null
@@ -391,6 +392,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
         fetched: diary.seqs,
         association,
         revokedIssuers: mod.revokedIssuers,
+        hidden: mod.hidden,
         now
       })
       diary.reason = r.reason
@@ -615,7 +617,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
       const key = typeof raw === 'string' ? raw.toLowerCase() : ''
       if (HEX64.test(key)) follows.add(key)
     }
-    const mod = await moderation(storage, association)
+    const mod = await readerModeration(storage, association)
     checkAborted(run)
     if (cursor !== null && (snapshot === null || Date.now() - snapshot.at > L.snapshotTtlMs)) {
       throw new UsageError('A lista expirou; atualize para continuar.')
@@ -696,10 +698,10 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     // Skipped = left out by a problem the person should know about (block 0
     // or certificate, blocklist, revoked issuer, unavailable, fork, quota,
     // oversized block) or a scan that ended before finding any post. A diary
-    // with nothing to show (only a profile or likes, too short) and one
-    // followed after this snapshot was built are not problems.
+    // with nothing to show (only a profile or likes, too short), one followed
+    // after this snapshot was built and one the member blocked are not problems.
     const skipped = shown.filter((d) =>
-      (d.reason !== null && d.reason !== 'followed' && d.reason !== 'short') ||
+      (d.reason !== null && d.reason !== 'followed' && d.reason !== 'short' && d.reason !== 'hidden') ||
       (d.reason === null && d.posts.length === 0 && (d.capped || d.failed))).length
     return { items: page.items, next: page.next, diaries: shown.length, skipped, incomplete }
   }

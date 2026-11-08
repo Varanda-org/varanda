@@ -17,7 +17,7 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
+    'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
     'dm.enable', 'dm.list', 'dm.lookup', 'dm.pull', 'dm.putMedia', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seen',
@@ -28,7 +28,7 @@ test('method list and mutating set', (t) => {
     'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
-    'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
+    'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
@@ -758,7 +758,24 @@ test('diary.peek requires an author and dense strictly ascending seqs', (t) => {
     }
   }
   ok(t, 'diary.peek', { ...base, profileSeq: 1, usernameSeq: 2 })
+  ok(t, 'diary.peek', { ...base, profileOnly: true }, { ...base, profileOnly: true })
+  t.absent('profileOnly' in validateParams('diary.peek', base).value, 'absent stays absent')
+  for (const v of [null, 'true', 1]) t.is(validateParams('diary.peek', { ...base, profileOnly: v }).message, 'parâmetro inválido: profileOnly')
   t.is(validateParams('diary.peek', { ...base, extra: true }).message, 'parâmetro desconhecido')
+})
+
+test('block.*', (t) => {
+  t.ok(isMutating('block.set'))
+  t.absent(isMutating('block.list'))
+  ok(t, 'block.set', { key: KEY, on: true }, { key: KEY, on: true })
+  ok(t, 'block.set', { key: KEY, on: false }, { key: KEY, on: false })
+  bad(t, 'block.set', { key: KEY })
+  bad(t, 'block.set', { on: true })
+  bad(t, 'block.set', { key: KEY.toUpperCase(), on: true })
+  bad(t, 'block.set', { key: KEY, on: 'true' })
+  bad(t, 'block.set', { key: KEY, on: true, name: 'x' })
+  ok(t, 'block.list', {}, {})
+  bad(t, 'block.list', { key: KEY })
 })
 
 test('follow.*', (t) => {

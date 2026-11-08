@@ -2,8 +2,9 @@
 
 // The member's "seen" document synced between devices through the account
 // service: which Avisos, page notices, DM messages and group posts were
-// already seen. The service stores an opaque blob of a fixed size, so it
-// learns neither what was seen nor how much.
+// already seen, and whom the member blocked (lib/member-block.js). The service
+// stores an opaque blob of a fixed size, so it learns neither what was seen nor
+// how much, nor who was blocked.
 //
 // Key: seenKeyFromSeed() hashes a domain string, the identity seed
 // (keyPair.secretKey.subarray(0, 32)) and the association and member keys.
@@ -18,22 +19,27 @@
 // It never goes through group-crypto sealRecord, whose input cap is far
 // below SEEN_PLAIN_BYTES.
 //
-// Plaintext (SEEN_PLAIN_BYTES, little-endian):
-//   u8 version = 1, u8 flags = 0, u32 gen, member 32, association 32,
-//   u16 nAvisos, u8 nPages, u16 nDm, u8 nGroups              (76 bytes)
+// Plaintext (SEEN_PLAIN_BYTES, little-endian), version 2:
+//   u8 version = 2, u8 flags = 0, u32 gen, member 32, association 32,
+//   u16 nAvisos, u8 nPages, u16 nDm, u8 nGroups, u8 nBlocks   (77 bytes)
 //   nAvisos x token entry
 //   nPages x (page key 32, u8 n, n x token entry)
 //   nDm x token entry
 //   nGroups x (group 32, writer 32, at i64 ms, seq u32)       (76 bytes each)
+//   nBlocks x (key 32, u8 on, u32 t)                          (37 bytes each)
 //   random pad up to SEEN_PLAIN_BYTES
 // A token entry is the 16 raw token bytes and u32 t (unix seconds, the time
 // the mark was made). Lists are stored oldest first.
+//
+// Version 1 has no nBlocks and no block entries, a 76-byte header and room for
+// more dm tokens. It is still read, and written only as version 2 afterwards.
 //
 // Document in JS:
 //   { gen, member, association,
 //     avisos: { own: [{ token, t }], pages: { 'page:<hex64>': [{ token, t }] } },
 //     dm: [{ token, t }],
-//     groups: [{ group, at, writer, seq }] }
+//     groups: [{ group, at, writer, seq }],
+//     blocks: [{ key, on, t }] }
 //
 // Dm tokens are one per incoming message, so the blob is a recency window
 // of the newest marks, not a full copy of the local state.
@@ -43,15 +49,17 @@
 // ahead by compareOrder(orderKey()). The causal position of a post (the
 // rule group.seen applies when the post is listed) needs the group core, so
 // this module cannot use it; a device never moves its own mark backwards
-// when applying the merged one.
+// when applying the merged one. A block entry keeps the newer time per key.
 
 const sodium = require('sodium-universal')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { orderKey, compareOrder } = require('./group')
 const { isCanonicalIso } = require('./records')
+const { normalizeBlocks, mergeBlocks } = require('./member-block')
 
-const SEEN_VERSION = 1
+const SEEN_VERSION = 2
+const SEEN_VERSION_1 = 1
 const SEEN_PLAIN_BYTES = 32768
 const SEEN_NONCE_BYTES = 24
 const SEEN_MAC_BYTES = 16
@@ -62,16 +70,19 @@ const SEEN_KEY_BYTES = 32
 const SYNC_AVISOS_MAX = 256
 const SYNC_PAGES_MAX = 4
 const SYNC_PAGE_TOKENS_MAX = 32
-const SYNC_DM_MAX = 736
+const SYNC_DM_MAX = 520
+const SYNC_DM_MAX_V1 = 736
 const SYNC_GROUPS_MAX = 128
+const SYNC_BLOCKS_MAX = 128
 const MERGE_AVISOS_MAX = 256
 const MERGE_PAGE_TOKENS_MAX = 32
 
-const HEADER_BYTES = 76
+const HEADER_BYTES = 77
 const TOKEN_BYTES = 16
 const TOKEN_ENTRY_BYTES = TOKEN_BYTES + 4
 const PAGE_HEAD_BYTES = 33
 const GROUP_ENTRY_BYTES = 76
+const BLOCK_ENTRY_BYTES = 37
 const U32_MAX = 4294967295
 const MAX_DATE_MS = 8.64e15
 const TWO_32 = 4294967296
@@ -214,14 +225,29 @@ function cutPages (map) {
   return pages
 }
 
-function canonical (gen, member, association, own, pagesByKey, dm, groups) {
+// A document without blocks reads as an empty list. A block too old for the
+// window stays only in the device's own list, as a mark the blob cannot hold
+// does, so it is never read as an unblock.
+function normBlocks (list) {
+  if (list === undefined) return []
+  if (!Array.isArray(list)) throw new TypeError('blocks must be an array')
+  for (const e of list) {
+    if (e === null || typeof e !== 'object' || !isHex64(e.key) || typeof e.on !== 'boolean' || !isU32(e.t)) {
+      throw new TypeError('block entries must be { key: hex64, on: boolean, t: u32 }')
+    }
+  }
+  return normalizeBlocks(list)
+}
+
+function canonical (gen, member, association, own, pagesByKey, dm, groups, blocks) {
   return {
     gen,
     member,
     association,
     avisos: { own: cutTokens(own, SYNC_AVISOS_MAX), pages: cutPages(pagesByKey) },
     dm: cutTokens(dm, SYNC_DM_MAX),
-    groups: groups.length > SYNC_GROUPS_MAX ? groups.slice(groups.length - SYNC_GROUPS_MAX) : groups
+    groups: groups.length > SYNC_GROUPS_MAX ? groups.slice(groups.length - SYNC_GROUPS_MAX) : groups,
+    blocks: blocks.length > SYNC_BLOCKS_MAX ? blocks.slice(blocks.length - SYNC_BLOCKS_MAX) : blocks
   }
 }
 
@@ -239,12 +265,13 @@ function normalize (doc) {
     own: normTokens(avisos.own, 'avisos.own'),
     pages: normPages(avisos.pages),
     dm: normTokens(doc.dm, 'dm'),
-    groups: normGroups(doc.groups)
+    groups: normGroups(doc.groups),
+    blocks: normBlocks(doc.blocks)
   }
 }
 
 function capped (n) {
-  return canonical(n.gen, n.member, n.association, n.own, n.pages, n.dm, n.groups)
+  return canonical(n.gen, n.member, n.association, n.own, n.pages, n.dm, n.groups, n.blocks)
 }
 
 // Validates and puts a document in canonical form within every cap,
@@ -278,6 +305,7 @@ function encode (doc) {
   out[off++] = pageKeys.length
   view.setUint16(off, d.dm.length, true); off += 2
   out[off++] = d.groups.length
+  out[off++] = d.blocks.length
 
   const putTokens = (list) => {
     for (const e of list) {
@@ -300,6 +328,11 @@ function encode (doc) {
     writeI64(view, off, Date.parse(m.at)); off += 8
     view.setUint32(off, m.seq, true); off += 4
   }
+  for (const e of d.blocks) {
+    out.set(b4a.from(e.key, 'hex'), off); off += 32
+    out[off++] = e.on ? 1 : 0
+    view.setUint32(off, e.t, true); off += 4
+  }
   if (off < SEEN_PLAIN_BYTES) sodium.randombytes_buf(out.subarray(off))
   return out
 }
@@ -311,7 +344,8 @@ function decode (bytes, expect) {
   try {
     if (!(bytes instanceof Uint8Array) || bytes.byteLength !== SEEN_PLAIN_BYTES) return null
     if (!expect || !isHex64(expect.member) || !isHex64(expect.association)) return null
-    if (bytes[0] !== SEEN_VERSION) return { unsupported: true }
+    const version = bytes[0]
+    if (version !== SEEN_VERSION && version !== SEEN_VERSION_1) return { unsupported: true }
     if (bytes[1] !== 0) return null
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     const hex = (a, n) => b4a.toString(bytes.subarray(a, a + n), 'hex')
@@ -324,7 +358,9 @@ function decode (bytes, expect) {
     const nPages = bytes[off++]
     const nDm = view.getUint16(off, true); off += 2
     const nGroups = bytes[off++]
-    if (nAvisos > SYNC_AVISOS_MAX || nPages > SYNC_PAGES_MAX || nDm > SYNC_DM_MAX || nGroups > SYNC_GROUPS_MAX) return null
+    const nBlocks = version === SEEN_VERSION ? bytes[off++] : 0
+    const dmMax = version === SEEN_VERSION ? SYNC_DM_MAX : SYNC_DM_MAX_V1
+    if (nAvisos > SYNC_AVISOS_MAX || nPages > SYNC_PAGES_MAX || nDm > dmMax || nGroups > SYNC_GROUPS_MAX || nBlocks > SYNC_BLOCKS_MAX) return null
 
     const need = (n) => {
       if (off + n > SEEN_PLAIN_BYTES) throw new RangeError('short')
@@ -366,7 +402,16 @@ function decode (bytes, expect) {
       const prev = groups.get(group)
       groups.set(group, prev === undefined ? mark : groupAhead(prev, mark))
     }
-    return canonical(gen, member, association, own, pages, dm, sortGroups(groups))
+    need(nBlocks * BLOCK_ENTRY_BYTES)
+    const blocks = []
+    for (let i = 0; i < nBlocks; i++) {
+      const key = hex(off, 32); off += 32
+      const on = bytes[off++]
+      const t = view.getUint32(off, true); off += 4
+      if (on !== 0 && on !== 1) return null
+      blocks.push({ key, on: on === 1, t })
+    }
+    return canonical(gen, member, association, own, pages, dm, sortGroups(groups), normalizeBlocks(blocks))
   } catch {
     return null
   }
@@ -403,7 +448,7 @@ function open (blob, key, expect) {
 }
 
 function contentKey (d) {
-  return JSON.stringify([d.avisos.own, d.avisos.pages, d.dm, d.groups])
+  return JSON.stringify([d.avisos.own, d.avisos.pages, d.dm, d.groups, d.blocks])
 }
 
 // Compares the trimmed contents; gen is a write counter, not content.
@@ -428,7 +473,8 @@ function merge (local, remote) {
     unionTokens(l.own, r.own),
     pages,
     unionTokens(l.dm, r.dm),
-    unionGroups(l.groups, r.groups)
+    unionGroups(l.groups, r.groups),
+    mergeBlocks(l.blocks, r.blocks)
   )
   return { doc, localOnly: contentKey(doc) !== contentKey(capped(r)) }
 }
@@ -446,12 +492,14 @@ module.exports = {
   SYNC_PAGE_TOKENS_MAX,
   SYNC_DM_MAX,
   SYNC_GROUPS_MAX,
+  SYNC_BLOCKS_MAX,
   MERGE_AVISOS_MAX,
   MERGE_PAGE_TOKENS_MAX,
   HEADER_BYTES,
   TOKEN_ENTRY_BYTES,
   PAGE_HEAD_BYTES,
   GROUP_ENTRY_BYTES,
+  BLOCK_ENTRY_BYTES,
   seenKeyFromSeed,
   trim,
   encode,

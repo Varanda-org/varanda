@@ -6,6 +6,7 @@
 // seeder index.
 
 import rpc from '@varanda/rpc'
+import { refusalOf } from './wordCheck.js'
 
 const { feira, displayText, isCardForbiddenChar, MAX_TEXT } = rpc
 
@@ -126,6 +127,10 @@ export function validateListingForm (form) {
   if (bairro !== null && !feira.isPlaceText(bairro)) return fail('bairro', 'O bairro precisa ter de ' + feira.MIN_PLACE + ' a ' + feira.MAX_PLACE + ' caracteres.')
   const place = { uf: form.uf, city, bairro }
   if (!feira.isPlace(place)) return fail('city', 'Confira a cidade e o bairro.')
+  // No field: a field's message sits far above the button of this long form,
+  // and this one names the term, so the person can find it from the button.
+  const refused = refusalOf(title, text, city, bairro)
+  if (refused !== '') return fail('', refused)
   return { ok: true, value: { kind, title, text, price, unit, cat: form.cat, place } }
 }
 

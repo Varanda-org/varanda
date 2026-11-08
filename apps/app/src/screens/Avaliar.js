@@ -22,6 +22,7 @@ import { offerState } from '../feiraOffer'
 import { NOT_PAYMENT, canRate, rateParams, starsLabel } from '../feiraReview'
 import { installationOrigin } from '../installation'
 import { Btn, ErrorText, Field, Soft, Spinner, errorText } from '../ui'
+import { refusalOf } from '../wordCheck'
 import { TopBar } from '../ui/TopBar'
 import { type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
@@ -127,6 +128,11 @@ export default function Avaliar ({ author, seq, offer: offerId, me = null, actin
 
   const send = async () => {
     if (sendingRef.current || pending !== null) return
+    const refused = refusalOf(text)
+    if (refused !== '') {
+      setError(refused)
+      return
+    }
     const params = rateParams({ offer, listing, me, stars, text })
     if (params === null) {
       setError(feira.isStars(stars) ? 'Confira o texto da avaliação.' : 'Escolha de 1 a 5 estrelas.')

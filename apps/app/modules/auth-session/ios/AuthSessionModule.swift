@@ -21,10 +21,7 @@ public class AuthSessionModule: Module {
     Name("AuthSession")
 
     Function("isAvailable") { () -> Bool in
-      if #available(iOS 17.4, *) {
-        return AuthSessionModule.webCredentials
-      }
-      return false
+      return AuthSessionModule.webCredentials
     }
 
     AsyncFunction("open") { (url: String, host: String, path: String, promise: Promise) in
@@ -32,7 +29,7 @@ public class AuthSessionModule: Module {
         promise.reject("INVALID", "invalid")
         return
       }
-      guard #available(iOS 17.4, *), AuthSessionModule.webCredentials else {
+      guard AuthSessionModule.webCredentials else {
         promise.reject("UNSUPPORTED", "unsupported")
         return
       }
@@ -55,7 +52,6 @@ public class AuthSessionModule: Module {
   }
 }
 
-@available(iOS 17.4, *)
 final class AuthSessionRun: NSObject, ASWebAuthenticationPresentationContextProviding {
   private let promise: Promise
   private let host: String

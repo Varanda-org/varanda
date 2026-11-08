@@ -40,6 +40,7 @@ import { MAX_ADMINS, cancelOfferOp, closeOp, inviteOp, moveOp, offerOp, removeOp
 import { pagesOn } from '../pageGate'
 import * as actingAs from '../actingAs'
 import { Btn, ConfirmStack, ErrorText, Field, Notice, Page, Row, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { refusalOf } from '../wordCheck'
 import { Avatar } from '../ui/Avatar'
 import { AvatarEditor } from '../ui/AvatarEditor'
 import { Pill } from '../ui/Pill'
@@ -326,7 +327,8 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
 
   const nameLen = form ? countChars(form.name) : 0
   const bioLen = form ? countChars(form.bio) : 0
-  const formValid = form !== null && nameLen >= 1 && nameLen <= MAX_NAME && form.name.trim() !== '' && bioLen <= MAX_BIO
+  const profileRefused = form ? refusalOf(form.name, form.bio) : ''
+  const formValid = form !== null && nameLen >= 1 && nameLen <= MAX_NAME && form.name.trim() !== '' && bioLen <= MAX_BIO && profileRefused === ''
   const photoDraft = !!draft && typeof draft === 'object'
   const dirty = form !== null && base !== null && (form.name !== base.name || form.bio !== base.bio || draft !== undefined)
 
@@ -396,6 +398,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     return actAs(node, { member, action: 'offer', page, op: ({ nonce }) => cancelOfferOp(read, { nonce }) })
   }, () => { changed(); return 'Oferta cancelada.' })
 
+  const renameRefused = refusalOf(isUsername(renameHandle))
   const rename = () => run(renameAct, async () => {
     const username = isUsername(renameHandle)
     if (username === null) throw new Error(NAME_RULE)
@@ -540,6 +543,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
               {photo}
               <Field label={'nome (' + nameLen + '/' + MAX_NAME + ')'} value={form.name} onChangeText={(v) => setForm({ ...form, name: v })} editable={!busy} />
               <Field label={'bio (' + bioLen + '/' + MAX_BIO + ')'} value={form.bio} onChangeText={(v) => setForm({ ...form, bio: v })} editable={!busy} multiline lines={3} />
+              <ErrorText>{profileRefused}</ErrorText>
               <ErrorText>{profileAct.error}</ErrorText>
               <Btn label='Salvar' onPress={save} disabled={!formValid || !dirty || read.closed === true} pending={profileAct.pending} />
             </>
@@ -628,8 +632,9 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
               <Soft>{who.subtitle ? 'Agora: ' + displayText(who.subtitle) : 'Sem @nome ainda.'}</Soft>
               <Field label='Novo @nome' value={renameHandle} onChangeText={setRenameHandle} editable={!busy} placeholder='@nome' />
               <Soft>{RENAME_RULE}</Soft>
+              <ErrorText>{renameRefused}</ErrorText>
               <ErrorText>{renameAct.error}</ErrorText>
-              <Btn label='Trocar @nome' secondary onPress={rename} disabled={renameHandle.trim() === '' || read.closed === true} pending={renameAct.pending} />
+              <Btn label='Trocar @nome' secondary onPress={rename} disabled={renameHandle.trim() === '' || renameRefused !== '' || read.closed === true} pending={renameAct.pending} />
 
               {movedKey !== null
                 ? (

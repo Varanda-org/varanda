@@ -26,6 +26,9 @@ const PRIVACY_MANIFEST = 'ios/Varanda/PrivacyInfo.xcprivacy'
 const INFO_PLIST = 'ios/Varanda/Info.plist'
 const ENTITLEMENTS = 'ios/Varanda/Varanda.entitlements'
 const PBXPROJ = 'ios/Varanda.xcodeproj/project.pbxproj'
+const PODFILE_PROPERTIES = 'ios/Podfile.properties.json'
+const IOS_MINIMUM = '18.0'
+const DEPLOYMENT_TARGET_LINE = 'IPHONEOS_DEPLOYMENT_TARGET = ' + IOS_MINIMUM + ';'
 const ANDROID_MANIFEST = 'android/app/src/main/AndroidManifest.xml'
 const WELL_KNOWN = '../../deploy/seeder/well-known.sh'
 const MIC_PLIST = '<key>NSMicrophoneUsageDescription</key><string>' + MICROPHONE_USAGE + '</string>'
@@ -34,6 +37,19 @@ const WEB_CREDENTIALS_PLIST = '<key>VarandaWebCredentials</key><true/>'
 // (standard algorithms, not distributed in France): without it every build
 // waits on "Missing Compliance". docs/development.md has the conditions.
 const EXPORT_COMPLIANCE_PLIST = '<key>ITSAppUsesNonExemptEncryption</key><false/>'
+// The App Privacy answers for App Store Connect, confirmed on 2026-11-08: the
+// form, app.json and the manifest change together. docs/development.md.
+const collected = (name, linked = true, purposes = ['AppFunctionality']) => ({
+  NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataType' + name,
+  NSPrivacyCollectedDataTypeLinked: linked,
+  NSPrivacyCollectedDataTypeTracking: false,
+  NSPrivacyCollectedDataTypePurposes: purposes.map((purpose) => 'NSPrivacyCollectedDataTypePurpose' + purpose)
+})
+const COLLECTED_DATA_TYPES = [
+  ...['EmailAddress', 'UserID', 'Name', 'PhotosorVideos', 'AudioData', 'OtherUserContent', 'EmailsOrTextMessages', 'OtherDataTypes', 'SensitiveInfo', 'Contacts', 'CoarseLocation'].map((name) => collected(name)),
+  collected('SearchHistory', false),
+  collected('ProductInteraction', true, ['AppFunctionality', 'Analytics'])
+]
 const RECORD_AUDIO_LINE = '<uses-permission android:name="android.permission.RECORD_AUDIO"/>'
 const CAMERA_REMOVED = '<uses-permission android:name="android.permission.CAMERA" tools:node="remove"/>'
 
@@ -102,6 +118,21 @@ test('the export compliance answer is declared the same way in app.json and Info
   t.ok(compact(read(INFO_PLIST)).includes(EXPORT_COMPLIANCE_PLIST), INFO_PLIST)
 })
 
+test('the App Privacy answers are declared the same way in app.json and the privacy manifest', (t) => {
+  const manifests = JSON.parse(read('app.json')).expo.ios.privacyManifests
+  t.is(manifests.NSPrivacyTracking, false, 'no tracking')
+  t.alike(manifests.NSPrivacyCollectedDataTypes, COLLECTED_DATA_TYPES, 'app.json')
+  const manifest = compact(read(PRIVACY_MANIFEST))
+  for (const item of COLLECTED_DATA_TYPES) {
+    t.ok(manifest.includes('<key>NSPrivacyCollectedDataType</key><string>' + item.NSPrivacyCollectedDataType + '</string>' +
+      '<key>NSPrivacyCollectedDataTypeLinked</key><' + item.NSPrivacyCollectedDataTypeLinked + '/>' +
+      '<key>NSPrivacyCollectedDataTypeTracking</key><false/>' +
+      '<key>NSPrivacyCollectedDataTypePurposes</key><array>' +
+      item.NSPrivacyCollectedDataTypePurposes.map((purpose) => '<string>' + purpose + '</string>').join('') +
+      '</array>'), PRIVACY_MANIFEST + ': ' + item.NSPrivacyCollectedDataType)
+  }
+})
+
 test('the plugin restores the microphone and the camera removal', (t) => {
   t.alike(patchInfoPlist({ CFBundleName: 'Varanda' }), { CFBundleName: 'Varanda', NSMicrophoneUsageDescription: MICROPHONE_USAGE, VarandaWebCredentials: false })
   t.is(patchInfoPlist({}, ['webcredentials:bora.varanda.app']).VarandaWebCredentials, true, 'webcredentials turns the passkey modules on')
@@ -154,6 +185,21 @@ test('the iOS entitlement, the passkey flag and the deploy name the same app and
   t.ok(wellKnown.includes('printf \'{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"}]}]}}\\n\' "$ios_app_id" "$ios_app_id"'), 'and lists it under webcredentials and applinks (/anuncio/ only)')
 })
 
+// Sign-in needs the passkey PRF, which iOS offers from 18.0, so an older iPhone
+// must not be able to install the app and dead-end at Entrar. Nothing fails
+// when these drift apart: the build just takes whichever value it reads.
+test('the iOS minimum is 18.0 everywhere it is set', (t) => {
+  const plugins = JSON.parse(read('app.json')).expo.plugins
+  const buildProperties = plugins.find((plugin) => plugin[0] === 'expo-build-properties')[1]
+  t.is(buildProperties.ios.deploymentTarget, IOS_MINIMUM, 'app.json repeats it for prebuild')
+  t.is(JSON.parse(read(PODFILE_PROPERTIES))['ios.deploymentTarget'], IOS_MINIMUM, PODFILE_PROPERTIES)
+  t.ok(read('ios/Podfile').includes("podfile_properties['ios.deploymentTarget'] || '" + IOS_MINIMUM + "'"), 'the Podfile fallback')
+  t.alike(read(PBXPROJ).match(/IPHONEOS_DEPLOYMENT_TARGET = [^;]*;/g), Array(4).fill(DEPLOYMENT_TARGET_LINE), 'project and app, Debug and Release')
+  for (const file of ['modules/passkey-prf/ios/PasskeyPrf.podspec', 'modules/auth-session/ios/AuthSession.podspec']) {
+    t.ok(read(file).includes(":ios => '" + IOS_MINIMUM + "'"), file + ' can drop its availability checks')
+  }
+})
+
 // The Vitrine (src/vitrine/enabled.js) swaps the node for fixtures. A release
 // bundle has __DEV__ false, and no build config may set the opt-in either.
 test('a release build cannot turn on the Vitrine', async (t) => {
@@ -202,6 +248,10 @@ test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
   t.ok(plist.includes(WEB_CREDENTIALS_PLIST), INFO_PLIST + ' turns the passkey modules on')
   t.ok(plist.includes(EXPORT_COMPLIANCE_PLIST), INFO_PLIST + ' declares the export compliance answer')
   t.alike(entitlements(fs.readFileSync(path.join(dir, ENTITLEMENTS), 'utf8')), entitlements(read(ENTITLEMENTS)), ENTITLEMENTS)
+  t.is(JSON.parse(fs.readFileSync(path.join(dir, PODFILE_PROPERTIES), 'utf8'))['ios.deploymentTarget'], IOS_MINIMUM, PODFILE_PROPERTIES)
+  // The plugin sets the app target only, which overrides the project's value.
+  const generatedTargets = fs.readFileSync(path.join(dir, PBXPROJ), 'utf8').match(/IPHONEOS_DEPLOYMENT_TARGET = [^;]*;/g)
+  t.is(generatedTargets.filter((line) => line === DEPLOYMENT_TARGET_LINE).length, 2, PBXPROJ + ' app target, Debug and Release')
   const manifest = fs.readFileSync(path.join(dir, ANDROID_MANIFEST), 'utf8')
   t.ok(manifest.includes(RECORD_AUDIO_LINE), ANDROID_MANIFEST + ' asks for RECORD_AUDIO')
   t.ok(manifest.includes(CAMERA_REMOVED), ANDROID_MANIFEST + ' removes CAMERA')

@@ -64,6 +64,8 @@ import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin } from './src/installation'
 import { NamesProvider, useNames } from './src/names'
+import { BlocksProvider, useBlocks } from './src/blocksProvider'
+import { BlockSheet } from './src/ui/BlockSheet'
 import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
 import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotBefore } from './src/seenSync'
@@ -371,6 +373,13 @@ function Member () {
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
   }, [])
+  // A block or an unblock changes what A Rua and the Espiadinha may read.
+  const { changed: blocksChanged, refresh: refreshBlocks } = useBlocks()
+  useEffect(() => {
+    if (blocksChanged === 0) return
+    setVersion((v) => v + 1)
+    setPeekVersion((v) => v + 1)
+  }, [blocksChanged])
   // Avisos has something unseen: a plain dot on the bell, never a number.
   const [avisosNew, setAvisosNew] = useState(false)
   const [info, setInfo] = useState(null)
@@ -1851,6 +1860,8 @@ function Member () {
         setRemoteSeen(result.avisos)
       }
       if (result.dmChanged) bumpDm()
+      // Another device of the passkey blocked or unblocked someone.
+      if (result.blocksChanged) refreshBlocks().catch(() => {})
       if (result.groupChanged) {
         bumpSeen()
         const taken = snap.value
@@ -3055,6 +3066,7 @@ function Member () {
           }}
         />
       )}
+      <BlockSheet onToast={showToast} />
       <Denunciar
         open={report !== null}
         target={report}
@@ -3095,9 +3107,11 @@ export default function App () {
       <ThemeProvider>
         <NodeProvider>
           <NamesProvider>
-            <OutboxProvider>
-              <Member />
-            </OutboxProvider>
+            <BlocksProvider>
+              <OutboxProvider>
+                <Member />
+              </OutboxProvider>
+            </BlocksProvider>
           </NamesProvider>
         </NodeProvider>
       </ThemeProvider>
