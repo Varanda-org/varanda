@@ -35,7 +35,11 @@ export function pushNoteKind ({ state = null, fresh = null, dismissedAt = null, 
   return ui.visible && !ui.on && !ui.disabled && ui.note === null ? 'offer' : 'none'
 }
 
-export function createPushStore ({ getPushState, pushKey, pushCheck, enablePush, disablePush, pushSupportNow, storage, now: clock } = {}) {
+// How long Sair waits for a turn-on still in flight (a permission prompt left
+// open) before it turns push off anyway.
+export const LEAVE_WAIT_MS = 3000
+
+export function createPushStore ({ getPushState, pushKey, pushCheck, enablePush, disablePush, pushSupportNow, storage, now: clock, leaveWaitMs = LEAVE_WAIT_MS } = {}) {
   const now = () => {
     try {
       const value = typeof clock === 'function' ? clock() : Date.now()
@@ -57,6 +61,8 @@ export function createPushStore ({ getPushState, pushKey, pushCheck, enablePush,
   let seq = 0
   let gen = 0
   let busy = false
+  // Sair or Recomeçar is turning push off: the switch refuses new steps.
+  let leaving = 0
   let snapshot
   const listeners = new Set()
 
@@ -213,27 +219,45 @@ export function createPushStore ({ getPushState, pushKey, pushCheck, enablePush,
   }
 
   function toggle ({ node, member: who } = {}) {
-    if (busy || state === null || who == null || who !== member) return false
+    if (busy || leaving > 0 || state === null || who == null || who !== member) return false
     return run(state.subscribed === true && state.registered === true, node, who)
   }
 
   function activate ({ node, member: who } = {}) {
-    if (busy || state === null || who == null || who !== member) return false
+    if (busy || leaving > 0 || state === null || who == null || who !== member) return false
     if (getSnapshot().note !== 'offer') return false
     if (state.subscribed === true && state.registered === true) return false
     return run(false, node, who)
   }
 
-  // Before Sair or Recomeçar, while push.sign still works. It does not wait
-  // for an operation in flight (a documented limit) and never blocks them.
+  // Before Sair or Recomeçar, while push.sign still works. It never blocks
+  // them. A turn-on in flight gets leaveWaitMs to land first; one still open
+  // after that (a prompt nobody answered) is turned off again when it ends, so
+  // a late "Permitir" cannot leave this browser subscribed after the exit.
   async function offHere ({ node, member: who } = {}) {
+    leaving += 1
     try {
       if (who == null || pushSupportNow() !== 'ok') return
+      const flying = op
+      let landed = null
+      let settled = true
+      if (flying !== null) {
+        settled = false
+        landed = flying.promise.then(() => {}, () => {})
+        landed.then(() => { settled = true })
+        let timer = null
+        await Promise.race([landed, new Promise((resolve) => { timer = setTimeout(resolve, leaveWaitMs) })])
+        clearTimeout(timer)
+      }
       // No subscription handed over: the held one may be stale (another window
       // replaced it), and disablePush reads the current one itself. Sair needs
       // no user activation, so that await costs nothing.
-      await disablePush({ node, member: who, registration: state ? state.registration : null, subscription: null })
-    } catch {}
+      const off = () => disablePush({ node, member: who, registration: state ? state.registration : null, subscription: null })
+      try { await off() } catch {}
+      if (!settled) landed.then(off).catch(() => {})
+    } catch {} finally {
+      leaving -= 1
+    }
   }
 
   function dismiss () {

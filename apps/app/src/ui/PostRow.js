@@ -46,7 +46,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
-import { pendingOpen, tapKind } from '../doubleTap'
+import { doubleTapPlan, pendingOpen, tapKind } from '../doubleTap'
 import { relativeTime } from '../format'
 import { hasLink } from '../links'
 import { moreActions, repostActions, shareLink } from '../postActions'
@@ -273,8 +273,9 @@ function PostRowView ({
         }
         if (kind === 'double') {
           // Never unlikes, and never doubles a like already on its way.
-          if (!liked) pressLike()
-          burst()
+          const plan = doubleTapPlan({ liked, pending })
+          if (plan.like) pressLike()
+          if (plan.burst) burst()
           return
         }
         pendingOpen.arm(open, rowId, now)

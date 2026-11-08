@@ -301,6 +301,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
         const title = displayText(whoOf({ name: hit.name, username: hit.username }).title)
         notify(r.value.changed ? 'Agora você segue ' + title + '.' : 'Você já segue esta pessoa.')
         if (r.value.changed && typeof onFollowsChanged === 'function') onFollowsChanged()
+        else loadFollows()
       } else {
         // A failed or uncertain answer: the set says what really happened.
         loadFollows()
