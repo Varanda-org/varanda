@@ -37,6 +37,19 @@ const WEB_CREDENTIALS_PLIST = '<key>VarandaWebCredentials</key><true/>'
 // (standard algorithms, not distributed in France): without it every build
 // waits on "Missing Compliance". docs/development.md has the conditions.
 const EXPORT_COMPLIANCE_PLIST = '<key>ITSAppUsesNonExemptEncryption</key><false/>'
+// The App Privacy answers for App Store Connect, confirmed on 2026-11-08: the
+// form, app.json and the manifest change together. docs/development.md.
+const collected = (name, linked = true, purposes = ['AppFunctionality']) => ({
+  NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataType' + name,
+  NSPrivacyCollectedDataTypeLinked: linked,
+  NSPrivacyCollectedDataTypeTracking: false,
+  NSPrivacyCollectedDataTypePurposes: purposes.map((purpose) => 'NSPrivacyCollectedDataTypePurpose' + purpose)
+})
+const COLLECTED_DATA_TYPES = [
+  ...['EmailAddress', 'UserID', 'Name', 'PhotosorVideos', 'AudioData', 'OtherUserContent', 'EmailsOrTextMessages', 'OtherDataTypes', 'SensitiveInfo', 'Contacts', 'CoarseLocation'].map((name) => collected(name)),
+  collected('SearchHistory', false),
+  collected('ProductInteraction', true, ['AppFunctionality', 'Analytics'])
+]
 const RECORD_AUDIO_LINE = '<uses-permission android:name="android.permission.RECORD_AUDIO"/>'
 const CAMERA_REMOVED = '<uses-permission android:name="android.permission.CAMERA" tools:node="remove"/>'
 
@@ -103,6 +116,21 @@ test('the export compliance answer is declared the same way in app.json and Info
   const app = JSON.parse(read('app.json')).expo
   t.is(app.ios.config.usesNonExemptEncryption, false, 'app.json')
   t.ok(compact(read(INFO_PLIST)).includes(EXPORT_COMPLIANCE_PLIST), INFO_PLIST)
+})
+
+test('the App Privacy answers are declared the same way in app.json and the privacy manifest', (t) => {
+  const manifests = JSON.parse(read('app.json')).expo.ios.privacyManifests
+  t.is(manifests.NSPrivacyTracking, false, 'no tracking')
+  t.alike(manifests.NSPrivacyCollectedDataTypes, COLLECTED_DATA_TYPES, 'app.json')
+  const manifest = compact(read(PRIVACY_MANIFEST))
+  for (const item of COLLECTED_DATA_TYPES) {
+    t.ok(manifest.includes('<key>NSPrivacyCollectedDataType</key><string>' + item.NSPrivacyCollectedDataType + '</string>' +
+      '<key>NSPrivacyCollectedDataTypeLinked</key><' + item.NSPrivacyCollectedDataTypeLinked + '/>' +
+      '<key>NSPrivacyCollectedDataTypeTracking</key><false/>' +
+      '<key>NSPrivacyCollectedDataTypePurposes</key><array>' +
+      item.NSPrivacyCollectedDataTypePurposes.map((purpose) => '<string>' + purpose + '</string>').join('') +
+      '</array>'), PRIVACY_MANIFEST + ': ' + item.NSPrivacyCollectedDataType)
+  }
 })
 
 test('the plugin restores the microphone and the camera removal', (t) => {
