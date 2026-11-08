@@ -29,6 +29,8 @@ import { NOTICES_LIMIT_DEFAULT, displayText } from '@varanda/rpc'
 import { get as actingGet, subscribe as actingSubscribe } from '../actingAs'
 import { relativeTime } from '../format'
 import { useNode } from '../node'
+import { useBlocks } from '../blocksProvider'
+import { withoutBlockedKeys } from '../memberBlocks'
 import { useNames } from '../names'
 import { fetchMember, invalidateMember } from '../indexClient'
 import { avatarOf, pickAvatar } from '../media/avatar'
@@ -429,6 +431,7 @@ function remoteFor (remoteSeen, namespace) {
 export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollowsChanged, onToast, onBadge, onSeenState, remoteSeen, onOpenThread, onOpenMember }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
+  const blocks = useBlocks()
   const { profileOf, resolveMany } = useNames()
   const now = useNow(60000)
   const [avatarCycle, setAvatarCycle] = useState(0)
@@ -1030,7 +1033,9 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     header = banner
   }
 
-  const shownItems = notice === null ? items : []
+  // The node leaves a blocked person out of each read; this clears the rows
+  // already held, and the page notices, which the account service answers.
+  const shownItems = notice === null ? withoutBlockedKeys(items, blocks.has) : []
   const shownKeys = shownItems.map((i) => i.key).join(',')
   useEffect(() => {
     if (active && hosted && shownKeys !== '') resolveMany(shownKeys.split(','))

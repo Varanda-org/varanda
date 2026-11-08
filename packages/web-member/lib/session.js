@@ -320,7 +320,8 @@ const store = require('./node-store')
 const { groupKeyPairFromPrf } = require('./passkey')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
-const { createDmEngine, MOMENT_PHOTO_GONE } = require('./dm')
+const { createDmEngine, MOMENT_PHOTO_GONE, BLOCKED: DM_BLOCKED } = require('./dm')
+const { applyBlock, blockedKeys } = require('@varanda/core/lib/member-block')
 const { createSeenSync, groupApplier } = require('./seen-sync')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
@@ -382,6 +383,7 @@ const PEEK_BUSY = 'espiadinha já em andamento'
 const SEEN_CHANGED_MS = 5000
 const NOTICES_BUSY = 'avisos já em andamento'
 const DIARY_PEEK_BUSY = 'ocupado'
+const DIARY_HIDDEN = 'diário indisponível'
 const NO_OFFER = 'oferta-ausente'
 // listing.consent pages the rater's thread at most this far back.
 const OFFER_PAGES = 20
@@ -3176,7 +3178,7 @@ function createBrowserSession ({
       return { seq: r.seq, deleted: r.deleted }
     }),
 
-    // Momentos (docs/rpc.md 5.111): the item must be one this node's
+    // Momentos (docs/rpc.md 5.113): the item must be one this node's
     // momentPutMedia answered in this unlock; published like post.create.
     // A published item is never offered for a second moment.
     'moment.create': serial(async ({ text, media }, epoch) => {
@@ -3210,7 +3212,57 @@ function createBrowserSession ({
       return { liked: r.liked, reposted: r.reposted }
     }),
 
-    'diary.peek': diaryPeek,
+    // A key the member blocked reads as any unavailable diary, so every screen
+    // built on this read (Busca, threads, quotes, profiles) drops it the same
+    // way. profileOnly answers the name and @nome alone, for that key too: the
+    // block can only be undone by a person the list can name.
+    'diary.peek': async ({ profileOnly, ...params }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      let hidden
+      try {
+        hidden = (await member.memberBlocks(storage)).has(params.author.toLowerCase())
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      if (hidden && profileOnly !== true) throw rpcError('NOT_FOUND', DIARY_HIDDEN)
+      const r = await diaryPeek(params)
+      return profileOnly === true ? { ...r, entries: [], invalid: [], missing: [] } : r
+    },
+
+    // The member's own block list (docs/rpc.md 5.111). The list is written
+    // first, so the block holds even when the follow or the conversation step
+    // fails: each only warns. Unlocked only, as follow.add. Nothing reaches the
+    // other person: the unfollow is an ordinary follow record, and the
+    // conversation op is sealed to the own box.
+    'block.set': serial(async ({ key, on }, epoch) => {
+      const own = await requireUnlocked()
+      if (key === own) throw new UsageError('não é possível bloquear a própria chave')
+      const r = applyBlock(await store.readMemberBlocks(storage), key, on, Math.floor(Date.now() / 1000))
+      if (r.full) throw new UsageError('limite de bloqueios atingido')
+      if (r.changed) {
+        await store.writeMemberBlocks(storage, r.entries)
+        seenChanged()
+      }
+      if (on && (await store.readFollows(storage)).includes(key)) {
+        try {
+          const f = await withStore((c) => member.followChange(c, key, false))
+          if (f.changed) followChanged()
+        } catch {
+          warning('aviso: não deu para deixar de seguir quem você bloqueou', epoch)
+        }
+      }
+      if (r.changed && dmEngine.unlocked()) {
+        try {
+          await dmEngine.set(own, keyPair, { peer: key, state: on ? 'blocked' : 'unblocked' })
+        } catch {
+          warning('aviso: bloqueio das mensagens ainda não enviado aos outros aparelhos', epoch)
+        }
+      }
+      return { changed: r.changed, total: blockedKeys(r.entries).size }
+    }),
+
+    // kv only, works locked: the screens hide these keys at once.
+    'block.list': serial(async () => ({ keys: [...await member.memberBlocks(storage)] })),
 
     // Local-first, unlocked only (a change queued while signed out would be
     // signed into the diary at the next sign-in by whoever had the browser);
@@ -3218,6 +3270,7 @@ function createBrowserSession ({
     // never fails this request.
     'follow.add': serial(async ({ key }) => {
       await requireUnlocked()
+      if ((await member.memberBlocks(storage)).has(key)) throw new UsageError(DM_BLOCKED)
       const r = await withStore((c) => member.followChange(c, key, true))
       if (r.changed) followChanged()
       return { changed: r.changed, followCount: r.follows.length }
@@ -3446,7 +3499,10 @@ function createBrowserSession ({
     'dm.send': async ({ to, text, replyTo, media, card, fwd }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       // Self and a blocked peer are refused before any lookup.
-      await serial(async () => dmEngine.checkSend(await requireDm(), to))({})
+      await serial(async () => {
+        dmEngine.checkSend(await requireDm(), to)
+        if ((await member.memberBlocks(storage)).has(to)) throw new UsageError(DM_BLOCKED)
+      })({})
       let recipient
       try {
         recipient = to === ownKey ? { box: null } : await dmLookupOf(to)
@@ -3474,7 +3530,10 @@ function createBrowserSession ({
     },
 
     'dm.list': serial(async (params) => dmEngine.list(await requireDm(), params)),
-    'dm.thread': serial(async (params) => dmEngine.thread(await requireDm(), params)),
+    'dm.thread': serial(async (params) => {
+      const r = await dmEngine.thread(await requireDm(), params)
+      return (await member.memberBlocks(storage)).has(params.peer) ? { ...r, blocked: true } : r
+    }),
     'dm.set': serial(async ({ peer, state }) => dmEngine.set(await requireDm(), keyPair, { peer, state })),
     'dm.seen': serial(async ({ peer }) => {
       const own = await requireDm()
@@ -3855,7 +3914,7 @@ function createBrowserSession ({
     })()
   }
 
-  // A momento's photo (docs/rpc.md 5.111): validated and copied
+  // A momento's photo (docs/rpc.md 5.113): validated and copied
   // synchronously (TypeError), the caller's buffer wiped, then sealed into a
   // FRESH blob and put on the anonymous blob channel by the dm engine (the
   // stamps need the DM key) -> the moment media item. The native IPC
@@ -4102,6 +4161,7 @@ function createBrowserSession ({
     await store.deleteGroupData(storage)
     await store.writeFollowsPending(storage, [])
     await store.clearFollowsMigrated(storage)
+    await store.writeMemberBlocks(storage, [])
     zeroKeyPair()
     // A pull, send or top-up still unwinding must not see its store go.
     await dmEngine.idle()

@@ -251,7 +251,7 @@ test('an uncertain write never leaves Enviar live for a duplicate', (t) => {
   t.ok(screen.includes('uncertain = !!err && err.uncertain === true'), 'the sheet notes an uncertain failure')
   t.ok(/\} else if \(uncertain\) \{[\s\S]{0,160}onUncertain\(\)[\s\S]{0,40}onClose\(\)/.test(screen), 'and closes, telling the profile')
   const membro = read('screens/Membro.js')
-  t.ok(membro.includes('const canWriteTestimonial = canTestimonial && !testimonialUncertain'), 'Membro gates the write')
+  t.ok(membro.includes('const canWriteTestimonial = canTestimonial && !testimonialUncertain && !blockedHere'), 'Membro gates the write')
   t.ok(membro.includes("canWriteTestimonial && myTestimonial === null ? { icon: 'lapis', label: 'Escrever depoimento'"), 'no second Escrever depoimento')
   t.ok(membro.includes('setTestimonialUncertain(true)') && membro.includes('onToast(WRITE_UNCERTAIN)'), 'the toast says to check Enviados')
   t.ok(/Enviados/.test(screen.match(/WRITE_UNCERTAIN = '([^']*)'/)[1]), 'the text points to Enviados')

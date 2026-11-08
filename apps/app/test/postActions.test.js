@@ -191,3 +191,13 @@ test('Mensagem em particular sits in the mais sheet only on a hosted node, for s
   t.ok(rua.includes('message: fnOf(h.onMessage) && own !== null && String(post.author).toLowerCase() !== own && !(prof && prof.page === true)'), 'socialRowProps: not own, not a page')
   t.ok(rua.includes('onMessage: offers.message ? (author, options) => live.h.onMessage(author, options) : undefined'), 'a cached row reads the newest handler from its live box')
 })
+
+test('more: Bloquear sits after Denunciar, only with a handler, never on the own post', async (t) => {
+  const { moreActions } = await load()
+  const item = { author: THEM, seq: 4 }
+  t.alike(ids(moreActions(item, { onReport: true, onBlock: true })), ['report', 'block'])
+  t.alike(moreActions(item, { onBlock: () => {} }), [{ id: 'block', icon: 'bloquear', label: 'Bloquear' }])
+  t.alike(ids(moreActions(item, { onReport: true })), ['report'], 'no handler, no row')
+  t.alike(ids(moreActions({ author: ME, seq: 4 }, { ownKey: ME, onBlock: true })), ['delete'], 'never the own post')
+  t.alike(ids(moreActions({ author: PAGE, seq: 4 }, { ownKey: ME, page: PAGE, onBlock: true })), ['delete'], 'never the page acted as')
+})

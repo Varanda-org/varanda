@@ -434,7 +434,7 @@ export const offerThread = [
 ]
 conversations[0].messages.push(...offerThread)
 
-// Momentos (docs/rpc.md 5.111). A photo is one blob item, like a chat photo,
+// Momentos (docs/rpc.md 5.113). A photo is one blob item, like a chat photo,
 // that names its drawing through the sha256 (./media.js reads it back). The
 // dates follow the demo clock `now`: the followed diaries and Lia have
 // moments inside the 24 h, and Lia's two older ones are past, so the Diário

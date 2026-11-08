@@ -64,8 +64,8 @@ function sealB64 (id, doc) {
   return b4a.toString(seenBlob.seal(doc, keyOf(id)), 'base64')
 }
 
-function docOf (id, { dm = [], own = [], pages = {}, groups = [], gen = 1 } = {}) {
-  return { gen, member: id.own, association: id.association, avisos: { own, pages }, dm, groups }
+function docOf (id, { dm = [], own = [], pages = {}, groups = [], blocks = [], gen = 1 } = {}) {
+  return { gen, member: id.own, association: id.association, avisos: { own, pages }, dm, groups, blocks }
 }
 
 // Every kv write of `storage` from now on.
@@ -245,7 +245,7 @@ test('an unsupported version leaves the state untouched and pending false', asyn
   await store.writeDmSeen(d.storage, [tok(1)])
   await d.merge({ avisos: { own: [tok(5)] } })
   const plain = seenBlob.encode(docOf(id, { dm: [{ token: tok(7), t: 9 }] }))
-  plain[0] = 2
+  plain[0] = seenBlob.SEEN_VERSION + 1
   const out = b4a.alloc(seenBlob.SEEN_BLOB_BYTES)
   const nonce = out.subarray(0, seenBlob.SEEN_NONCE_BYTES)
   sodium.randombytes_buf(nonce)
@@ -505,7 +505,7 @@ test('a blob the key cannot open answers pending false and keeps the cursor', as
 
 function unsupportedB64 (id, doc) {
   const plain = seenBlob.encode(doc)
-  plain[0] = 2
+  plain[0] = seenBlob.SEEN_VERSION + 1
   const out = b4a.alloc(seenBlob.SEEN_BLOB_BYTES)
   const nonce = out.subarray(0, seenBlob.SEEN_NONCE_BYTES)
   sodium.randombytes_buf(nonce)
@@ -758,7 +758,7 @@ test('session: seen.sign and seen.merge open no diary core; locked refuses and w
 
   const remote = sealB64(s.id, docOf(s.id, { dm: [{ token: tok(1), t: 10 }] }))
   const r = await s.web.request('seen.merge', { blob: remote, avisos: { own: [tok(2)] }, unchanged: false })
-  t.alike(Object.keys(r).sort(), ['avisos', 'caughtUp', 'dmChanged', 'groupChanged', 'pending'])
+  t.alike(Object.keys(r).sort(), ['avisos', 'blocksChanged', 'caughtUp', 'dmChanged', 'groupChanged', 'pending'])
   t.is(r.dmChanged, true)
   t.alike(r.avisos, { own: [tok(2)], pages: {} })
   const w = await s.web.request('seen.sign', { nonce: NONCE, action: 'write' })
@@ -854,4 +854,104 @@ test('session: seen.changed after a dm.seen that marks a message', async (t) => 
   await A.web.request('dm.seen', { peer: B.key })
   await new Promise((resolve) => setTimeout(resolve, 5500))
   t.is(changedCount(A.web), before + 1, 'a repeat marks nothing and emits nothing')
+})
+
+const blockKey = (i) => i.toString(16).padStart(64, '0')
+
+test('blocks: a block on one device reaches the other through the document, and an unblock too', async (t) => {
+  const id = identity()
+  const a = device(id)
+  const b = device(id)
+  const X = blockKey(1)
+
+  await store.writeMemberBlocks(a.storage, [{ key: X, on: true, t: 100 }])
+  let r = await a.merge({})
+  t.is(r.pending, true, 'not on the service yet')
+  t.is(r.blocksChanged, false, 'nothing new for this device')
+  const written = (await a.sign('write')).blob
+  t.alike(openB64(id, written).blocks, [{ key: X, on: true, t: 100 }], 'sealed in the document')
+  r = await a.merge({ blob: written })
+  t.is(r.pending, false)
+
+  r = await b.merge({ blob: written })
+  t.is(r.blocksChanged, true)
+  t.alike(await store.readMemberBlocks(b.storage), [{ key: X, on: true, t: 100 }])
+  t.is(r.pending, false, 'nothing to send back')
+  r = await b.merge({ unchanged: true })
+  t.is(r.blocksChanged, false, 'reported once')
+
+  await store.writeMemberBlocks(b.storage, [{ key: X, on: false, t: 200 }])
+  r = await b.merge({ unchanged: true })
+  t.is(r.pending, true)
+  const undone = (await b.sign('write')).blob
+  r = await a.merge({ blob: undone })
+  t.is(r.blocksChanged, true)
+  t.alike(await store.readMemberBlocks(a.storage), [{ key: X, on: false, t: 200 }], 'the unblock is newer and wins')
+  t.is(r.pending, false)
+})
+
+test('blocks: an old remote entry does not undo a newer local one', async (t) => {
+  const id = identity()
+  const d = device(id)
+  const X = blockKey(1)
+  await store.writeMemberBlocks(d.storage, [{ key: X, on: false, t: 500 }])
+  const r = await d.merge({ blob: sealB64(id, docOf(id, { blocks: [{ key: X, on: true, t: 100 }] })) })
+  t.is(r.blocksChanged, false)
+  t.is(r.pending, true, 'the newer unblock goes up')
+  t.alike(await store.readMemberBlocks(d.storage), [{ key: X, on: false, t: 500 }])
+})
+
+test('blocks: an entry too old for the window stays here and never keeps a pass pending', async (t) => {
+  const id = identity()
+  const d = device(id)
+  const list = []
+  for (let i = 0; i < seenBlob.SYNC_BLOCKS_MAX + 3; i++) list.push({ key: blockKey(i + 1), on: true, t: 100 + i })
+  await store.writeMemberBlocks(d.storage, list)
+  await d.merge({})
+  const written = (await d.sign('write')).blob
+  t.is(openB64(id, written).blocks.length, seenBlob.SYNC_BLOCKS_MAX)
+  const r = await d.merge({ blob: written })
+  t.is(r.pending, false, 'the window matches: no write loop')
+  t.is(r.blocksChanged, false)
+  t.is((await store.readMemberBlocks(d.storage)).length, seenBlob.SYNC_BLOCKS_MAX + 3, 'the local list keeps every entry')
+})
+
+test('blocks: a document from before blocks reads as none and does not clear the local list', async (t) => {
+  const id = identity()
+  const d = device(id)
+  const X = blockKey(1)
+  await store.writeMemberBlocks(d.storage, [{ key: X, on: true, t: 100 }])
+  const old = seenBlob.encode(docOf(id))
+  // Version 1 has a 76-byte header: an empty document differs only in byte 0
+  // and in where the pad starts, and its nBlocks byte is pad, set to zero here.
+  old[0] = 1
+  old[76] = 0
+  const out = b4a.alloc(seenBlob.SEEN_BLOB_BYTES)
+  const nonce = out.subarray(0, seenBlob.SEEN_NONCE_BYTES)
+  sodium.randombytes_buf(nonce)
+  sodium.crypto_secretbox_easy(out.subarray(seenBlob.SEEN_NONCE_BYTES), old, nonce, keyOf(id))
+  const r = await d.merge({ blob: b4a.toString(out, 'base64') })
+  t.is(r.blocksChanged, false)
+  t.is(r.pending, true, 'the list goes up in the new format')
+  t.alike(await store.readMemberBlocks(d.storage), [{ key: X, on: true, t: 100 }])
+  t.is(b4a.from((await d.sign('write')).blob, 'base64').byteLength, seenBlob.SEEN_BLOB_BYTES, 'the same size for the service')
+})
+
+test('session: block.set wakes a seen pass, and a reset device gets the list back from the document', async (t) => {
+  t.timeout(60000)
+  const s = await sessionNode(t)
+  const X = blockKey(1)
+  await s.web.request('block.set', { key: X, on: true })
+  await until(() => s.web.events.some((e) => e.name === 'seen.changed'), 10000)
+  t.ok(s.web.events.some((e) => e.name === 'seen.changed'), 'the pass is woken')
+  const signed = await s.web.request('seen.sign', { nonce: NONCE, action: 'write' })
+  t.alike(openB64(s.id, signed.blob).blocks.map((e) => [e.key, e.on]), [[X, true]])
+
+  await s.node.reset()
+  t.alike((await s.web.request('block.list')).keys, [])
+  await s.node.setKeyPair(s.id.keyPair, { prf: s.prf })
+  await s.web.request('identity.create')
+  const r = await s.web.request('seen.merge', { blob: signed.blob, avisos: { own: [] }, unchanged: false })
+  t.is(r.blocksChanged, true)
+  t.alike((await s.web.request('block.list')).keys, [X])
 })

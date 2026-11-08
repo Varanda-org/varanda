@@ -30,7 +30,7 @@
 // 5 verified members under the compose box; tapping one replaces the token
 // with '@nome ' (../mentions). No strip on native, offline or non-hosted. The
 // text is sent exactly as typed: names are never resolved at send time.
-// Momento (docs/rpc.md 5.111, hosted only, when the node offers
+// Momento (docs/rpc.md 5.113, hosted only, when the node offers
 // media.putMoment and nothing is being replied to, quoted or posted as a
 // page): a Segmented 'Publicação | Momento' at the top. A momento is exactly
 // one photo (the chat photo path, ../ui/AttachSheet useChatAttachments) and
@@ -77,6 +77,7 @@ import { Pill } from '../ui/Pill'
 import { LinkDraftCard, useLinkDraft } from '../ui/ChatComposer'
 import { cardForSend, withCardFallback } from '../linkCard'
 import { withPreview } from '../attach-plan'
+import { refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { tap } from '../ui/haptics'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
@@ -505,6 +506,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // True while the own diary is re-read after an uncertain publish.
   const [checking, setChecking] = useState(false)
   const [checkError, setCheckError] = useState('')
+  // A message about the text ends when the text changes.
+  useEffect(() => { setCheckError('') }, [text])
   const action = useAction()
   // Highest own seq this composer confirmed in this session (a successful
   // publish, or a reconciliation that found it), or null.
@@ -1007,6 +1010,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const send = async () => {
     if (busy || uploadingRef.current) return
     setCheckError('')
+    // Before every path below (photos, the outbox, a page's signature). The
+    // draft is kept, so the person can edit it. A signed post waiting for its
+    // retry passed this when it was first sent.
+    const refused = pageRetryRef.current === null ? refusalOf(text) : ''
+    if (refused !== '') {
+      setCheckError(refused)
+      return
+    }
     // Never a new signature while a signed post waits for its retry.
     if (pageRetryRef.current !== null || asPage !== null) return sendAsPage()
     const sent = text

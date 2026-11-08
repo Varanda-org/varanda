@@ -38,6 +38,7 @@ function refuse (code, message) {
 // Each instance owns its state, so reopening a lab scenario resets it.
 export function createVitrineRequest (fixtures, options) {
   const data = copy(fixtures)
+  const blockedKeys = new Set()
   const profiles = [...data.members, ...data.pages, ...data.applicants]
   const extraFeed = data.noticePosts.filter((p) => !data.follows.includes(p.author))
   let tick = 0
@@ -121,7 +122,7 @@ export function createVitrineRequest (fixtures, options) {
   // eslint-disable-next-line no-control-regex
   const badText = (text) => /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/.test(text) || /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(text)
 
-  // Momentos (5.111), on the demo clock: a moment shows while
+  // Momentos (5.113), on the demo clock: a moment shows while
   // at - MOMENT_SKEW_MS <= now < at + MOMENT_TTL_MS (packages/core/lib/moments.js)
   // and is past once its 24 h are over. The app hides a moment by the
   // device clock, so options.clock (a function answering milliseconds), when
@@ -453,7 +454,7 @@ export function createVitrineRequest (fixtures, options) {
     // No seen sync offline: a signature the account call never uses, and a
     // merge that changes nothing.
     'seen.sign': () => ({ signature, prevHash: '0'.repeat(64) }),
-    'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, caughtUp: [] }),
+    'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, caughtUp: [] }),
     'report.sign': signed,
     'appeal.sign': signed,
     'dm.reportSign': signed,
@@ -518,6 +519,17 @@ export function createVitrineRequest (fixtures, options) {
     'like.set': (params) => toggle('like', params),
     'repost.set': (params) => toggle('repost', params),
     'engagement.read': ({ refs }) => ({ liked: refs.filter((ref) => reactions.like.get(ref)?.on), reposted: refs.filter((ref) => reactions.repost.get(ref)?.on) }),
+    'block.set': ({ key, on }) => {
+      const changed = on !== blockedKeys.has(key)
+      if (on) {
+        blockedKeys.add(key)
+        changeFollow(key, false)
+      } else {
+        blockedKeys.delete(key)
+      }
+      return { changed, total: blockedKeys.size }
+    },
+    'block.list': () => ({ keys: [...blockedKeys] }),
     'follow.add': ({ key }) => changeFollow(key, true),
     'follow.remove': ({ key }) => changeFollow(key, false),
     'follow.list': ({ offset, limit }) => ({ follows: data.follows.slice(offset, offset + limit), total: data.follows.length }),

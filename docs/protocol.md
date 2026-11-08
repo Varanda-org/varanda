@@ -154,7 +154,7 @@ Every node trusts exactly ONE association public key, persisted in `config.json`
 - Momentos (`packages/core/lib/records.js`, `packages/core/lib/moments.js`; seq >= 1, else `genesis-required`). A momento is one photo and a short text that readers show for 24 hours after `at` and then hide; the record itself stays in the diary until its author deletes it.
   - `{ "type": "moment", "text": <string 0..200 chars>, "at": <ISO>, "media": MomentMedia }` (`MOMENT_KEYS`, builder `momentRecord({ text, media, at })`). Exact key set, else `malformed`. `text` is 0..`MAX_MOMENT_TEXT` = 200 characters counted like post text (`charLength`, code points), with the forbidden characters of the Rules below (LF allowed) and no lone UTF-16 surrogate (`validMomentText`), else `text-length`. A non-canonical `at` is `date-invalid`.
   - MomentMedia (`validMomentMedia`, else `media-invalid`) is exactly ONE image item in the DM media item shape (`isDmMediaItem` in `packages/rpc/lib/methods.js`), a plain object with exactly the keys `id, key, nonce, chunks, bytes, sha256, mime, w, h, ms` (`MOMENT_MEDIA_KEYS`): the first six are a blob descriptor of section 13 that `validateBlobDescriptor` (`packages/core/lib/blob.js`) accepts (`id`, `key`, `sha256` lowercase hex64, `nonce` lowercase hex48, `bytes` the ciphertext size, 17..`257 * 32768`, `chunks === ceil(bytes / 32768)`); `mime` is one of `MEDIA_MIMES` (`image/jpeg`, `image/png`, `image/webp`, `image/gif`; never audio); `w` and `h` are integers 1..`MAX_MEDIA_DIMENSION` = 16384; `ms === 0`. The photo is not in a media core: it is a blob of the anonymous blob pool (section 13), and its `key` and `nonce` are PUBLIC in the record on purpose, so anyone who reads the diary can fetch the blob by `id` and decrypt it. The reader's `fetchBlob` checks the ciphertext size and `sha256` against the descriptor, opens it with the public key and nonce, and checks the image bounds for the `mime` before showing it; any failure, like a swept blob, shows as "foto indisponível".
-  - Reader rule (`foldMoments`, `ownPast` in `packages/core/lib/moments.js`, pure): a live (not tombstoned) moment shows while `Date.parse(at) + MOMENT_TTL_MS > now` (`MOMENT_TTL_MS = 86400000`, 24 h) and is hidden once `at + 24 h <= now`; one dated more than `MOMENT_SKEW_MS` (10 minutes, a clock tolerance) ahead is hidden until its time comes, so no date buys more than 24 h plus that tolerance on screen (posts allow `MAX_FUTURE_MS`, 24 h, which would let a forward-dated moment show for almost 48 h). This is a reader rule only: nothing in the record expires, and a reader that ignores it can keep showing the moment. Per author newest first, at most `MAX_MOMENTS_PER_AUTHOR` = 4; authors by their newest moment, at most `MAX_MOMENT_AUTHORS` = 32. The author's own expired, live moments are listed newest first, at most `MAX_PAST_MOMENTS` = 16, so they can still be deleted. These caps keep the worst-case `moments.read` answer under `MAX_MESSAGE` (docs/rpc.md 5.111). The feed's page cut applies to moments too (`liveLogCopies` in `packages/core/lib/feed.js`): a verified `page-close` or `page-moved` ends a page's moments, and their photos, exactly as it ends its posts.
+  - Reader rule (`foldMoments`, `ownPast` in `packages/core/lib/moments.js`, pure): a live (not tombstoned) moment shows while `Date.parse(at) + MOMENT_TTL_MS > now` (`MOMENT_TTL_MS = 86400000`, 24 h) and is hidden once `at + 24 h <= now`; one dated more than `MOMENT_SKEW_MS` (10 minutes, a clock tolerance) ahead is hidden until its time comes, so no date buys more than 24 h plus that tolerance on screen (posts allow `MAX_FUTURE_MS`, 24 h, which would let a forward-dated moment show for almost 48 h). This is a reader rule only: nothing in the record expires, and a reader that ignores it can keep showing the moment. Per author newest first, at most `MAX_MOMENTS_PER_AUTHOR` = 4; authors by their newest moment, at most `MAX_MOMENT_AUTHORS` = 32. The author's own expired, live moments are listed newest first, at most `MAX_PAST_MOMENTS` = 16, so they can still be deleted. These caps keep the worst-case `moments.read` answer under `MAX_MESSAGE` (docs/rpc.md 5.113). The feed's page cut applies to moments too (`liveLogCopies` in `packages/core/lib/feed.js`): a verified `page-close` or `page-moved` ends a page's moments, and their photos, exactly as it ends its posts.
   - Retention: seeders drop the blob bytes within 7 days of the upload (`BLOB_RETENTION_MS`, section 13), never renewed, so the photo of an old moment becomes unavailable (NOT_FOUND `foto indisponível`) even before a tombstone. The `moment` record (text, descriptor, key and nonce included) stays in the diary until the author deletes it with a `delete` tombstone; deletion clears the record bytes like any deleted block, and the blob is not cleared on demand (it expires by itself). Copies other people made (a saved photo, a screenshot, a replica that ignores the reader rule) cannot be recalled: hiding is not deleting.
   - Old readers: to apps, CLIs and seeders from before momentos, `moment` is an unknown type, skipped as invalid (`malformed`) and never renumbered; the diary is never rejected for it.
 - A quote is a `post` with a fifth key `"quote": { "author": "<hex64>", "seq": <integer >= 1> }` (the quoted post; the same `validTarget` shape, never `null`), optionally with `media` as a sixth key. A quote's `replyTo` MUST be `null` (else reason `quote-with-reply`), a `quote` value that is not a valid target is `quote-invalid`, and its text is always `1..1000` chars, with or without `media`. A plain post never carries `quote`. `postRecord({ text, replyTo, at, media, quote })` adds `quote` (copied as `{ author, seq }`) only when given.
@@ -2289,7 +2289,7 @@ A mídia de uma mensagem direta (section 11) vai para o semeador em pedaços de 
 
 ## 14. Estado de vistos sincronizado entre aparelhos (`packages/core/lib/seen-blob.js`, `seen-proof.js`, `apps/cli/lib/account/seen-store.js`, `seen-routes.js`)
 
-Só o nó do navegador grava e lê este bloco. Ele guarda o que cada aparelho da mesma passkey já viu em Avisos, nas Conversas (mensagens diretas e páginas) e nos grupos, para que a marca feita num aparelho valha nos outros. O serviço de conta guarda um bloco cifrado por membro, em `<dados>/seen/<membro hex64>`, criado na primeira vez que um aparelho grava as suas marcas. Nenhum semeador, nenhum par e nenhum outro membro recebe o bloco. Os textos do que a pessoa vê e a base legal estão na Política de Privacidade (`apps/app/src/legal.js`) e em `docs/design.md` (LGPD).
+Só o nó do navegador grava e lê este bloco. Ele guarda o que cada aparelho da mesma passkey já viu em Avisos, nas Conversas (mensagens diretas e páginas) e nos grupos, para que a marca feita num aparelho valha nos outros, e quem o membro bloqueou (rpc.md 5.111), para que o bloqueio também valha. O serviço de conta guarda um bloco cifrado por membro, em `<dados>/seen/<membro hex64>`, criado na primeira vez que um aparelho grava as suas marcas. Nenhum semeador, nenhum par e nenhum outro membro recebe o bloco. Os textos do que a pessoa vê e a base legal estão na Política de Privacidade (`apps/app/src/legal.js`) e em `docs/design.md` (LGPD).
 
 ### Chave
 
@@ -2305,11 +2305,12 @@ chave = BLAKE2b-256( "varanda/member-seen/secretbox/v1\n" || seed || association
 
 O bloco tem `SEEN_BLOB_BYTES` = 32808 bytes: nonce de 24 bytes aleatórios (um por gravação, nunca contador, porque dois aparelhos podem gravar ao mesmo tempo), 16 bytes de MAC e o texto de `SEEN_PLAIN_BYTES` = 32768 bytes, cifrado com `crypto_secretbox_easy`. Em base64 canônico, o campo `blob` de um pedido tem 43744 caracteres. O texto, em little-endian, tem nesta ordem:
 
-- cabeçalho de 76 bytes: `u8` versão = 1, `u8` flags = 0, `u32` gen (contador de gravações, não é conteúdo), membro (32), associação (32), `u16` nAvisos, `u8` nPáginas, `u16` nDm, `u8` nGrupos;
+- cabeçalho de 77 bytes: `u8` versão = 2, `u8` flags = 0, `u32` gen (contador de gravações, não é conteúdo), membro (32), associação (32), `u16` nAvisos, `u8` nPáginas, `u16` nDm, `u8` nGrupos, `u8` nBloqueios;
 - nAvisos entradas de token, as marcas de Avisos do próprio membro;
 - nPáginas blocos de página: chave da página (32), `u8` n e n entradas de token;
 - nDm entradas de token, uma por mensagem direta recebida marcada;
 - nGrupos entradas de grupo de 76 bytes: grupo (32), autor da marca (32), `i64` ms (a hora do post marcado), `u32` seq;
+- nBloqueios entradas de bloqueio de 37 bytes (`packages/core/lib/member-block.js`, rpc.md 5.111): a chave bloqueada (32), `u8` on (1 bloqueada, 0 desbloqueada) e `u32` t, em segundos Unix, a hora da última mudança;
 - preenchimento aleatório até 32768 bytes.
 
 Uma entrada de token tem 20 bytes: os 16 bytes do token e `u32` t, em segundos Unix, a hora em que a marca foi feita. As listas vão da mais antiga para a mais nova.
@@ -2320,10 +2321,11 @@ Limites, aplicados antes de cifrar:
 | --- | --- |
 | Avisos (tokens próprios) | 256 |
 | Páginas | 4, com até 32 tokens cada |
-| Mensagens diretas | 736 |
+| Mensagens diretas | 520 |
 | Grupos | 128 |
+| Bloqueios | 128 |
 
-No limite, o texto ocupa 32336 bytes e sobra preenchimento. O corte é determinístico: sai primeiro a marca mais antiga (menor t, e entre iguais, o token em ordem); as páginas são ordenadas pela marca mais nova de cada uma e ficam só as 4 mais recentes; os grupos ficam os 128 de hora mais recente. Por isso o bloco guarda as marcas mais recentes, não todo o histórico: quando ele enche, um aviso antigo pode voltar a aparecer como novo em outro aparelho.
+No limite, o texto ocupa 32753 bytes e sobra preenchimento. O corte é determinístico: sai primeiro a marca mais antiga (menor t, e entre iguais, o token em ordem); as páginas são ordenadas pela marca mais nova de cada uma e ficam só as 4 mais recentes; os grupos ficam os 128 de hora mais recente; os bloqueios ficam os 128 de maior t (entre iguais, a chave em ordem). Por isso o bloco guarda as marcas mais recentes, não todo o histórico: quando ele enche, um aviso antigo pode voltar a aparecer como novo em outro aparelho.
 
 A decodificação não lança exceção. Um bloco malformado, de outro membro ou com MAC inválido vira "sem bloco" para o aparelho, nunca dado parcial; uma versão que este código não conhece é recusada à parte (`unsupported`), e o aparelho não a usa.
 
@@ -2332,6 +2334,7 @@ A decodificação não lança exceção. Um bloco malformado, de outro membro ou
 `merge(local, remoto)` é uma união de conjuntos e não depende da ordem:
 
 - tokens: o mesmo token fica com o maior t;
+- bloqueios: uma entrada por chave, a de maior t; com t igual, vence o bloqueio. Um desbloqueio fica como entrada com on = 0, para a fusão não trazer o bloqueio de volta;
 - grupos: uma marca por grupo, a que está à frente pela ordem do grupo (`compareOrder` sobre `orderKey(at, autor, seq)`, a mesma de `packages/core/lib/group.js`);
 - o corte por limite vem depois da união, para não derrubar uma página ou uma marca à frente que o outro lado ainda tem.
 
@@ -2340,6 +2343,12 @@ Como a fusão só soma marcas, ela é comutativa e idempotente: aparelhos que co
 Limite de relógio: a marca de um grupo leva a hora do post marcado, e o autor de um post pode datá-lo até 24 h à frente (`MAX_FUTURE_MS`, a mesma regra dos demais feeds). Uma marca copiada de um post desses, vinda de outro aparelho, fica à frente da ordem local: os posts do grupo que vêm antes dela na ordem ficam como lidos, e um post depois dela pode ficar escondido, até o post marcado aparecer na lista local. Esse efeito já existia com a marca local (regra de `postsAfter` em `packages/web-member/lib/member-ops.js`); o bloco só o leva a outros aparelhos da mesma passkey. Relógio do aparelho: cada marca de Avisos e de Conversas leva a hora do aparelho que a marcou, e o corte de uma lista cheia mantém as mais novas. Um aparelho com o relógio muito adiantado faz as marcas dele parecerem as mais novas; com a lista cheia, marcas recentes de outro aparelho saem do bloco e o ponto pode voltar nesse outro aparelho. Nenhum item fica escondido por isso.
 
 Limite aceito, relógio do autor: a marca de um grupo num post que o autor datou antes do post que ele segue (o relógio do autor voltou) é mais nova na ordem do grupo neste aparelho, mas mais antiga pela hora. O documento compartilhado fica com a marca de hora mais recente, então a marca mais nova não é compartilhada até um post seguinte mover a marca de novo. A marca do próprio aparelho fica certa (a regra de avanço de `group.seen`).
+
+Uma entrada de bloqueio que não cabe na janela fica só no aparelho: a lista local (kv `memberBlocks`, até `BLOCK_MAX` chaves) recebe a união com todas as entradas remotas, e nunca lê a falta de uma entrada como desbloqueio.
+
+### Versão 1
+
+Blocos gravados antes dos bloqueios têm versão 1: cabeçalho de 76 bytes, sem nBloqueios, sem entradas de bloqueio e até 736 tokens de mensagens diretas. Este código ainda os lê, como lista vazia de bloqueios e com os tokens cortados para 520, e grava sempre a versão 2. O tamanho do bloco não muda, e o serviço não percebe a troca. Um aparelho com código anterior lê a versão 2 como `unsupported`: não usa o bloco e não grava por cima, e o visto entre aparelhos fica parado nele até a atualização.
 
 ### Leitura, escrita e apagamento (`seen-routes.js`)
 

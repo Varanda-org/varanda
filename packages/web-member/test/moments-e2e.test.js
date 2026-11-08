@@ -1,6 +1,6 @@
 'use strict'
 
-// Momentos end to end (docs/rpc.md 5.111): the real Seeder with the dm and
+// Momentos end to end (docs/rpc.md 5.113): the real Seeder with the dm and
 // blob options behind a WebSocket server (GET /blob/<id>/<index> on the same
 // port), and real browser nodes (lib/node.js over in-memory storage) with
 // fixed PRFs. moment.putMedia seals a fresh public blob, moment.create

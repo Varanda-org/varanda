@@ -12,6 +12,7 @@ import { StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
 import { reconcile } from '../groups'
 import { Btn, ErrorText, Field, Label, Soft, UNCERTAIN, useAction } from '../ui'
+import { publicGroupRefusal } from '../wordCheck'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
 import { useEscapeLayer } from '../ui/escapeLayer'
@@ -91,7 +92,8 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
   const trimmed = name.trim()
   const tooLong = nameLength(trimmed) > NAME_MAX
   const offline = node.online === false
-  const ready = trimmed.length > 0 && !tooLong && !offline && uncertain === null && typeof community === 'string'
+  const refused = publicGroupRefusal(visibility, trimmed)
+  const ready = trimmed.length > 0 && !tooLong && refused === '' && !offline && uncertain === null && typeof community === 'string'
 
   const create = async () => {
     if (!ready) return
@@ -139,6 +141,7 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
           placeholder='Nome do grupo'
         />
         {tooLong ? <ErrorText>{'O nome pode ter até ' + NAME_MAX + ' caracteres.'}</ErrorText> : null}
+        <ErrorText>{refused}</ErrorText>
         <Choice
           label='Visibilidade'
           value={visibility}

@@ -1,4 +1,4 @@
-// Momentos (docs/rpc.md 5.111): the full-screen viewer, pushed above the tabs
+// Momentos (docs/rpc.md 5.113): the full-screen viewer, pushed above the tabs
 // (App.js stack entry { screen: 'momentos', key: author }). It starts at that
 // author's ring and plays the rings in ringOrder (own first, then unseen,
 // then seen), each author's items oldest first, starting at the first one

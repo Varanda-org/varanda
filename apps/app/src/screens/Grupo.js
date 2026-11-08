@@ -59,7 +59,7 @@ import { shareNav } from '../shareNav'
 import {
   AS_PAGE_LABEL, DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT,
   EMPTY_PAGES, OWN_LABEL, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PRIVATE_LABEL, REKEY_PENDING_LABEL,
-  applyPage, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, membersLabel, needsDeviceJoin, pageCan, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
+  applyPage, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
 } from '../groups'
 import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -85,6 +85,7 @@ import { memberKeyOf, useActing } from './Conversa'
 import { shouldRedirectToCommunity } from '../groupRedirect'
 import { GrupoAjustes } from './GrupoAjustes'
 import { composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
+import { publicGroupRefusal } from '../wordCheck'
 import { chatMediaRefs, mediaPostLanded, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
@@ -181,6 +182,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const [mediaSend, setMediaSend] = useState(null)
   const [mediaHold, setMediaHold] = useState(null)
   const [mediaError, setMediaError] = useState('')
+  const [draftRefusal, setDraftRefusal] = useState('')
+  useEffect(() => { setDraftRefusal('') }, [draft])
   const sendTokenRef = useRef(null)
   useEffect(() => () => { if (sendTokenRef.current) sendTokenRef.current.live = false }, [])
   const seqRef = useRef(0)
@@ -656,6 +659,11 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
 
   const sendDraft = () => {
     if (mediaHold) return retryMedia()
+    // Before every path below (a caption, a page's statement, plain text). The
+    // draft is kept, so the person can edit it.
+    const refused = publicGroupRefusal(knownVisibility({ page: asPage.page, info, epoch: meta.epoch }), draft)
+    setDraftRefusal(refused)
+    if (refused !== '') return
     if (attachments.items.length > 0 && !asPage.page) {
       const k = replyKey !== null ? /^([0-9a-f]{64}):([1-9][0-9]*)$/.exec(replyKey) : null
       return sendMedia(draft, k ? { writer: k[1], seq: Number(k[2]) } : null)
@@ -1148,13 +1156,14 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       </View>
     )
   } else if (asPage.page ? pageRole === 'member' : reader) {
-    const notes = waitToWrite || orphan || !node.online || post.error || mediaHold || mediaError || attachments.note
+    const notes = waitToWrite || orphan || !node.online || post.error || draftRefusal || mediaHold || mediaError || attachments.note
       ? (
         <View style={styles.composeNotes}>
           {waitToWrite ? <Soft>{awaitingKey ? REKEY_PENDING_LABEL : (communityJoin === 'approval' && !isPrivate ? DEVICE_APPROVAL_TEXT : DEVICE_WAIT_TEXT)}</Soft> : null}
           {orphan ? <Soft>{ORPHAN_TEXT}</Soft> : null}
           {!node.online ? <Soft>{OFFLINE_POST_TEXT}</Soft> : null}
           <ErrorText>{post.error}</ErrorText>
+          <ErrorText>{draftRefusal}</ErrorText>
           {mediaError || attachments.note ? <ErrorText>{mediaError || attachments.note}</ErrorText> : null}
           {mediaHold
             ? (

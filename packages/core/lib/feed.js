@@ -109,7 +109,9 @@ function liveLogCopies ({ key, entries, raw: rawBlocks }, { association, revoked
 // A log may carry `raw` (its blocks, tombstones not applied, holes as
 // { seq, record: null }): the page cut is then read and folded from it
 // (heldFold), so it never depends on a fold the caller already ran.
-function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null }) {
+// `hidden` (a Set of keys, or null): the member's own blocks, so a repost of a
+// blocked author's post leaves the feed before the page is cut.
+function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null, hidden = null }) {
   if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1)) throw new TypeError('limit inválido')
   const cursor = before === null ? null : feedCursor(before)
   // Rows of { t, item, log }: `at` is parsed once per item, and the log is
@@ -156,6 +158,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // this call did not receive stays. A reply or a quote is its own post.
       if (deletedRefs.has(ref)) continue
       const to = parseRef(ref)
+      if (hidden !== null && hidden.has(to.author)) continue
       rows.push({ t, log, item: { kind: 'repost', author: key, name, username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null } })
     }
   }
