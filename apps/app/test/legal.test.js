@@ -7,9 +7,32 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 29)
-  t.is(LEGAL_DATE, '07/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 29, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 30)
+  t.is(LEGAL_DATE, '08/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 30, sujeita a revisão jurídica. Não é parecer jurídico.')
+})
+
+test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('não tolera conteúdo censurável nem abuso contra outras pessoas'))
+  t.absent(text(TERMS).includes('obrigações de conduta'), 'no clause denying conduct rules')
+  t.absent(text(TERMS).includes('protótipo'), 'not described as a prototype')
+  t.ok(text(TERMS).includes('recusam, no próprio aparelho e antes de publicar ou enviar, publicações, mensagens de grupo público, nomes, bios e @nomes de pessoas e de páginas, anúncios e avaliações da Feira, cartões de convite e nomes de grupo público ou de comunidade'), 'on-device word check, with what it covers')
+  t.ok(text(TERMS).includes('Você pode bloquear outra pessoa'), 'member blocking')
+  t.ok(text(PRIVACY).includes('Esse mesmo bloco guarda as pessoas que você bloqueou'), 'block list in the seen block')
+  t.ok(TERMS.sections.some(({ heading }) => heading === 'Seu conteúdo'), 'content license section')
+  t.ok(text(TERMS).includes('As denúncias funcionam na versão web hospedada e no app ligado à instalação da associação'))
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(text(doc).includes('contato@varanda.app'), doc.title + ': contact address')
+    t.absent(text(doc).includes('provisório'), doc.title + ': contact is not provisional')
+    t.ok(text(doc).includes('no app ligado à instalação da associação, antes de a conta ser liberada, a idade é confirmada'), doc.title + ': age check on the app')
+    t.ok(text(doc).includes('No app com configuração manual'), doc.title + ': the case without the check')
+    t.absent(text(doc).includes('ainda não é feita'), doc.title + ': no claim that the app skips the check')
+  }
+  t.absent(text(PRIVACY).includes('sem fluxo por conta própria'), 'account deletion exists')
+  t.ok(text(PRIVACY).includes('o registro de erros do servidor web pode guardar o endereço pedido'), 'search text in the error log')
+  t.ok(text(PRIVACY).includes('Quando o operador liga as estatísticas de uso'), 'usage statistics')
 })
 
 test('legal: complete documents with plain, visible text and project URLs', async (t) => {
@@ -28,7 +51,8 @@ test('legal: complete documents with plain, visible text and project URLs', asyn
   for (const value of strings) {
     t.ok(typeof value === 'string' && value.trim().length > 0, 'non-empty string')
     t.absent(/[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u.test(value), 'no control, bidi or invisible characters')
-    t.absent(/\b(?:TODO|XXX|lorem)\b|\[/i.test(value), 'no placeholders')
+    // Case-sensitive: "todo" is an ordinary Portuguese word.
+    t.absent(/\b(?:TODO|XXX|[Ll]orem)\b|\[/.test(value), 'no placeholders')
     t.absent(/[<>`*]/.test(value), 'no markup')
     for (const match of value.matchAll(/https:\/\/\S+/g)) {
       t.ok(match[0].startsWith('https://github.com/Varanda-org/varanda/'), 'project URL: ' + match[0])
@@ -66,7 +90,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '1aab7b3f619e5d74e250ae7b61e5103aaa38449e1d23a9d801d2f0ac8d76e146', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '28ced1e3b11bf659ac9ffd117c5a77fe15f4b79de8d052c7420e39e1a927d6b6', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {

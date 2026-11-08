@@ -957,9 +957,16 @@ const SPECS = {
       author: req(isKey),
       seqs: req(isPeekSeqs),
       profileSeq: opt(int(1, Number.MAX_SAFE_INTEGER)),
-      usernameSeq: opt(int(1, Number.MAX_SAFE_INTEGER))
+      usernameSeq: opt(int(1, Number.MAX_SAFE_INTEGER)),
+      // Name and @nome only, no entries (docs/rpc.md 5.27): the one read a
+      // blocked author still answers, so the block can be undone by name.
+      profileOnly: opt(isBool)
     }
   },
+  // The member's own block list, browser node only (docs/rpc.md 5.111 and
+  // 5.112). Filters what this member reads; nothing reaches the other person.
+  'block.set': { fields: { key: req(isKey), on: req(isBool) }, mutating: true },
+  'block.list': { fields: none },
   'follow.add': { fields: { key: req(isKey) }, mutating: true },
   'follow.remove': { fields: { key: req(isKey) }, mutating: true },
   'follow.list': {

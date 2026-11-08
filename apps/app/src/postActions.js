@@ -145,14 +145,22 @@ function reportSet (caps) {
   return value === true || typeof value === 'function'
 }
 
-// Copiar link, then Denunciar, then Apagar. Share itself is the primary
-// action, so Compartilhar is not a row here. The screen attaches onPress
-// and the delete confirmation.
+// onBlock follows the same rule: nobody blocks their own post.
+function blockSet (caps) {
+  if (!caps || typeof caps !== 'object') return false
+  const value = caps.onBlock
+  return value === true || typeof value === 'function'
+}
+
+// Copiar link, then Denunciar, then Bloquear, then Apagar. Share itself is the
+// primary action, so Compartilhar is not a row here. The screen attaches onPress
+// and the delete and block confirmations.
 export function moreActions (item, caps) {
   const rows = []
   const href = shareLink(item, caps)
   if (href !== null) rows.push({ ...action('copy', 'link', 'Copiar link'), href })
   if (reportSet(caps) && !ownsAuthor(item, caps)) rows.push(action('report', 'bandeira', 'Denunciar'))
+  if (blockSet(caps) && !ownsAuthor(item, caps)) rows.push(action('block', 'bloquear', 'Bloquear'))
   if (canApagar(item, caps)) {
     const row = action('delete', 'lixeira', 'Apagar')
     row.danger = true

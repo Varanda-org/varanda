@@ -23,6 +23,7 @@ const GLYPHS = {
   seta: 'chevron-right',
   fechar: 'x',
   bandeira: 'flag',
+  bloquear: 'slash',
   seta_cima: 'arrow-up',
   copiar: 'copy',
   chave: 'key',

@@ -64,6 +64,7 @@ import { Pill } from '../ui/Pill'
 import { LinkDraftCard, useLinkDraft } from '../ui/ChatComposer'
 import { cardForSend, withCardFallback } from '../linkCard'
 import { withPreview } from '../attach-plan'
+import { refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { tap } from '../ui/haptics'
 import { type } from '../ui/theme'
@@ -166,6 +167,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   // True while the own diary is re-read after an uncertain publish.
   const [checking, setChecking] = useState(false)
   const [checkError, setCheckError] = useState('')
+  // A message about the text ends when the text changes.
+  useEffect(() => { setCheckError('') }, [text])
   const action = useAction()
   // Highest own seq this composer confirmed in this session (a successful
   // publish, or a reconciliation that found it), or null.
@@ -631,6 +634,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   const send = async () => {
     if (busy || uploadingRef.current) return
     setCheckError('')
+    // Before every path below (photos, the outbox, a page's signature). The
+    // draft is kept, so the person can edit it. A signed post waiting for its
+    // retry passed this when it was first sent.
+    const refused = pageRetryRef.current === null ? refusalOf(text) : ''
+    if (refused !== '') {
+      setCheckError(refused)
+      return
+    }
     // Never a new signature while a signed post waits for its retry.
     if (pageRetryRef.current !== null || asPage !== null) return sendAsPage()
     const sent = text

@@ -83,6 +83,7 @@ const { buildFeed } = require('@varanda/core/lib/feed')
 const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
+const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
@@ -255,6 +256,21 @@ async function moderation (storage, association) {
     return { blocked: new Set(), revokedIssuers: new Set() }
   }
   return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
+}
+
+// The keys this member blocked (kv memberBlocks).
+async function memberBlocks (storage) {
+  return blockedKeys(await store.readMemberBlocks(storage))
+}
+
+// moderation() for what this member reads: `blocked` also holds the member's
+// own blocks, and `hidden` holds them alone. Only for reads of posts and
+// notices. A group fold keeps plain moderation(): one member's block must not
+// change who is in a group, or its roles, on that member's devices.
+async function readerModeration (storage, association) {
+  const mod = await moderation(storage, association)
+  const hidden = await memberBlocks(storage)
+  return { blocked: new Set([...mod.blocked, ...hidden]), revokedIssuers: mod.revokedIssuers, hidden }
 }
 
 // ---- id ----
@@ -1642,6 +1658,7 @@ function skipReason (core, entries, key, association, mod = {}) {
 async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
   const association = await trustRoot(ctx)
   const mod = await moderation(ctx.storage, association)
+  const hidden = await memberBlocks(ctx.storage)
   const own = await withIdentity(ctx, async ({ diary, ownHex }) => ({ key: ownHex, entries: await store.readAll(diary) }))
   // One slot per followed key, in follow order: a fixed reason, or what was
   // read, judged only once every read is done.
@@ -1652,6 +1669,9 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
     const key = raw.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
+    // Followed on another device after this member blocked them: no slot, as
+    // this is the member's choice and not a problem to report in `skipped`.
+    if (hidden.has(key)) continue
     // Hidden before any read, whether or not its purge already ran.
     if (mod.blocked.has(key)) {
       slots.push({ key, reason: 'blocked' })
@@ -1682,7 +1702,7 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
     if (reason === null) kept.push({ key, entries: read.entries, raw: read.raw })
     else skipped.push({ key, reason })
   }
-  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before })
+  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before, hidden })
   return { items: built.items, skipped, future: built.future, incomplete }
 }
 
@@ -4731,6 +4751,8 @@ module.exports = {
   trustRoot,
   withIdentity,
   moderation,
+  memberBlocks,
+  readerModeration,
   idCreate,
   idShow,
   identityState,
