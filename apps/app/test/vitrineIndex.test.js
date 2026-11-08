@@ -473,3 +473,33 @@ test('Feira probe sees the offline demo index as enabled and malformed routes re
     '/index/feira/avaliacoes/' + f.own + '/invalid'
   ]) t.exception(() => vitrineIndex(path, request), /not-found/)
 })
+
+test('live likes and reposts move the counts and the member repost index', async (t) => {
+  const { fixtures: f, vitrineIndex: respond, request } = await load()
+  const { createVitrineRequest } = await import('../src/vitrine/request.js')
+  const other = createVitrineRequest(f)
+  const mine = (type) => new Set(f.diaryRecords.filter((e) => e.author === f.own && e.record.type === type).map((e) => refOf(e.record.to)))
+  const post = f.feed.find((p) => p.author !== f.own && !mine('like').has(refOf(p)) && !mine('repost').has(refOf(p)))
+  const ref = refOf(post)
+  const countsOf = (req, url = `/index/counts/${ref}`) => respond(url, req).counts[ref]
+  const base = countsOf(request)
+  const memberSeqs = (req) => respond(`/index/member/${f.own}`, req).posts
+
+  await request('like.set', { to: ref, on: true })
+  t.is(countsOf(request).likes, base.likes + 1, 'like adds one')
+  await request('like.set', { to: ref, on: true })
+  t.is(countsOf(request).likes, base.likes + 1, 'repeated like does not inflate')
+  t.is(countsOf(other).likes, base.likes, 'a second instance keeps its baseline')
+  await request('like.set', { to: ref, on: false })
+  t.is(countsOf(request).likes, base.likes, 'unlike returns to the baseline')
+
+  const before = memberSeqs(request)
+  const { seq } = await request('repost.set', { to: ref, on: true })
+  t.is(countsOf(request).reposts, base.reposts + 1, 'repost adds one')
+  t.ok(memberSeqs(request).includes(seq), 'member index lists the repost')
+  t.is(countsOf(other).reposts, base.reposts, 'other instance repost count unchanged')
+  t.absent(memberSeqs(other).includes(seq), 'other instance member index unchanged')
+  await request('repost.set', { to: ref, on: false })
+  t.is(countsOf(request).reposts, base.reposts, 'unrepost returns to the baseline')
+  t.alike(memberSeqs(request), before, 'member index returns to the baseline')
+})
