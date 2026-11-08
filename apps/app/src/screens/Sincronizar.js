@@ -6,8 +6,8 @@
 // warning lines.
 
 import { displayText } from '@varanda/rpc'
-import { useNode } from '../node'
-import { chipState, EMPTY_SIGNALS } from '../syncSignals'
+import { useNode, useSyncLines, useSyncSignals } from '../node'
+import { chipState } from '../syncSignals'
 import { Body, Btn, Card, Mono, Page, Soft, Title, useNow } from '../ui'
 
 const REASONS = {
@@ -43,6 +43,9 @@ function stateLine (active, recovering) {
 export default function Sincronizar ({ embedded = false, onOpenConnection }) {
   const node = useNode()
   const { sync, autoSync } = node
+  const lines = useSyncLines()
+  // lastDownloadAt drives the chip's 'sincronizando…'.
+  const signals = useSyncSignals()
   // Ticks each second while a retry is waited for (the countdown).
   const now = useNow(1000)
   const running = sync.active !== null
@@ -52,7 +55,7 @@ export default function Sincronizar ({ embedded = false, onOpenConnection }) {
     connected: node.phase === 'ready' && node.online !== false,
     active: sync.active || null,
     wanted: Boolean(autoSync && autoSync.wanted),
-    signals: node.signals || EMPTY_SIGNALS,
+    signals,
     now,
     recovering: Boolean(node.passkey && node.passkey.recovering)
   })
@@ -71,9 +74,9 @@ export default function Sincronizar ({ embedded = false, onOpenConnection }) {
         <Soft>Atualiza sozinho enquanto o app está aberto e com rede.</Soft>
       </Card>
       <Card>
-        <Soft>{'linhas (as últimas ' + String(sync.lines.length) + ')'}</Soft>
-        {sync.lines.length === 0 ? <Soft>Nenhuma linha ainda.</Soft> : null}
-        {sync.lines.map((line, i) => <Mono key={i}>{displayText(line)}</Mono>)}
+        <Soft>{'linhas (as últimas ' + String(lines.length) + ')'}</Soft>
+        {lines.length === 0 ? <Soft>Nenhuma linha ainda.</Soft> : null}
+        {lines.map((line, i) => <Mono key={i}>{displayText(line)}</Mono>)}
       </Card>
     </Page>
   )

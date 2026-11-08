@@ -5984,3 +5984,40 @@ Limites:
 - Um link comum postado em público com `?c` acrescentado revelaria quem o emitiu.
 - As imagens são geometria gerada, não arte encomendada.
 - O `User-Agent` é declarado pelo cliente: quem quiser pode se passar por um robô e ver a página de prévia, que não traz nada além do que está acima.
+
+## 129. Carregamento mais rápido de A Rua, Diário e perfis (PRs chore/perf-harness até perf/app-render)
+
+Caminhada da pilha de desempenho: medição, leituras do nó, partida, concessão do app instalado e renderização. Ciclo de medição, metas e números em [performance.md](performance.md).
+
+O que muda:
+
+- Medição: `startup-bench.js` ganha `--file`, `--reads-twice`, `--log`, `--lease-gap` e contadores por fase; o laboratório hospedado ganha `--dataset`, `--dataset-size` e `--rajada`; o app de desenvolvimento ganha marcas de tempo no console e um gancho que só aceita `follow.add`, `community.join` e `post.create`, as duas coisas só com `__DEV__` e `EXPO_PUBLIC_VARANDA_PERF=1`; a Vitrine ganha 200 linhas extras com `EXPO_PUBLIC_VARANDA_VITRINE_LARGE=1`.
+- Nó: os núcleos de diário, réplica e grupo guardam os blocos em memória (um bloco apagado sai do cache antes e depois de cada limpeza, e o cache recusa guardar um bloco que o núcleo não tem); o feed valida cada registro uma vez por leitura.
+- Partida: Conversas só lê a caixa e os grupos quando a aba é aberta (a coleta de mensagens espera a partida ficar quieta, para o ponto de não lidas continuar aparecendo); o ponto da aba espera as primeiras linhas de A Rua; os pedidos ao nó entram numa fila de 7 em andamento em vez de falhar no nono, e a fila descarta o que esperava antes de qualquer troca de identidade; a página baixa o nó do navegador enquanto busca `/varanda.json`; o Diário não repete `node.info` para a mesma identidade.
+- Fotos: uma resposta 503 do semeador (ocupado) é tentada de novo, depois do `Retry-After` e com uma espera aleatória, no máximo três vezes.
+- App instalado: a sincronização fica ligada enquanto o app está aberto, como no PWA (antes caía 8 s depois de terminar e cada leitura reabria todos os núcleos do armazenamento do aparelho).
+- Renderização: as linhas do registro de sincronização e as dicas de download saem do contexto principal do app, e cada publicação só é desenhada de novo quando os dados dela mudam.
+
+Como verificar, a partir da raiz (um arquivo por vez):
+
+- `node packages/web-member/test/delete-purge.test.js`, `node packages/core/test/feed.test.js`.
+- `node apps/app/test/requestQueue.test.js`, `node apps/app/test/conversas.test.js`, `node apps/app/test/mediaFetch.test.js`, `node apps/app/test/mediaCache.test.js`, `node apps/app/test/workletLease.test.js`, `node apps/app/test/syncSignals.test.js`, `node apps/app/test/feedRender.test.js`, `node apps/app/test/perfMarks.test.js`, `node apps/app/test/vitrineLarge.test.js`, `node apps/app/test/hardening.test.js`.
+- `node apps/cli/test/lab-dataset-plan.test.js`, `node apps/cli/test/hosted-lab.test.js`.
+- Números: os comandos de [performance.md](performance.md) ("Ferramentas e comandos").
+
+Com uma conta de verdade, primeiro no Android, depois no iOS, depois na web e no PWA:
+
+- [ ] Android (APK de preview): abrir o app frio mostra as primeiras linhas de A Rua mais cedo que a versão anterior; o registro de Sincronização não mostra parada "idle" com o app aberto nem "leitura sem esperar a partida".
+- [ ] Android: com o app em segundo plano por um minuto, a sincronização para; ao voltar, ela recomeça.
+- [ ] Android: Conversas mostra o ponto de não lidas quando chega uma mensagem com o app aberto em A Rua, sem abrir a aba.
+- [ ] Android: rolar A Rua com fotos não engasga; uma curtida muda só a publicação curtida.
+- [ ] iOS (TestFlight): os mesmos quatro passos.
+- [ ] Web e PWA: A Rua aparece mais cedo; trocar de conta com publicações na fila de envio não publica nada da conta anterior na nova.
+- [ ] Web: com o semeador sob carga (`VARANDA_MEDIA_MAX_IN_FLIGHT` baixo), as fotos que recebem 503 aparecem depois de alguns segundos em vez de ficarem com erro.
+
+Limites:
+
+- O caminho crítico que sobra é a partida do nó: ela verifica cerca de 122 assinaturas de certificados em JavaScript puro antes de responder à primeira leitura. Encurtar isso pede uma decisão (Ed25519 do WebCrypto no navegador, ou lembrar verificações entre aberturas).
+- Cada app instalado aberto em primeiro plano segura uma conexão do semeador, como uma aba visível: `VARANDA_MAX_EXTERNAL` precisa contar os dois.
+- O semeador limita `/media` de forma global (16 em andamento, 64 por segundo por padrão): com muita gente ao mesmo tempo, as fotos esperam; as variáveis `VARANDA_MEDIA_*` aumentam esses limites.
+- Os números de celular só valem depois de publicar; simulador e emulador não substituem um aparelho.

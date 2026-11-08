@@ -39,7 +39,7 @@
 //   browser or the profile, never the conversation. A quote is lifted out only
 //   for a handled mention; its web links stay plain (./QuoteCard).
 
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { pendingOpen, tapKind } from '../doubleTap'
@@ -89,6 +89,14 @@ if (Platform.OS !== 'web') {
   } catch {}
 }
 
+// Read once for the module, not per row mount: a feed mounts many rows and
+// each query is a bridge call. The listener keeps a changed setting current.
+let reduceMotionOn = false
+try {
+  Promise.resolve(AccessibilityInfo.isReduceMotionEnabled()).then((reduce) => { reduceMotionOn = reduce === true }, () => {})
+  AccessibilityInfo.addEventListener('reduceMotionChanged', (reduce) => { reduceMotionOn = reduce === true })
+} catch {}
+
 // The pop when a toggle turns on: the scale is owned by the row, so the icon
 // keeps it when the bar swaps between its split and plain layouts (the first
 // like gives the count that brings the split in).
@@ -124,7 +132,7 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
   )
 }
 
-export function PostRow ({
+function PostRowView ({
   author, name, username, avatar, at, text, replyToName, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
   onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
@@ -136,6 +144,8 @@ export function PostRow ({
   const reposts = countOf(counts, 'reposts')
   const hasMedia = Array.isArray(media) && media.length > 0
   const hasText = typeof text === 'string' && text !== ''
+  // The body label, the plain text and the label without the text all use it.
+  const shownText = useMemo(() => (hasText ? displayText(text, { multiline: true }) : null), [hasText, text])
   const time = relativeTime(at, now) ?? displayText(at)
   const who = whoOf({ name, username })
   const title = displayText(who.title)
@@ -148,21 +158,9 @@ export function PostRow ({
   const burstOpacity = useRef(new Animated.Value(0)).current
   const [burstOn, setBurstOn] = useState(false)
   const [sheet, setSheet] = useState(null)
-  const reduceMotion = useRef(false)
   const rowId = useRef({}).current
   const previousTap = useRef(null)
-  useEffect(() => {
-    let live = true
-    try {
-      Promise.resolve(AccessibilityInfo.isReduceMotionEnabled()).then((reduce) => {
-        if (live) reduceMotion.current = reduce === true
-      }, () => {})
-    } catch {}
-    return () => {
-      live = false
-      pendingOpen.cancelOwn(rowId)
-    }
-  }, [])
+  useEffect(() => () => pendingOpen.cancelOwn(rowId), [])
   const cancelPendingOpen = () => {
     pendingOpen.cancel()
     previousTap.current = null
@@ -180,7 +178,7 @@ export function PostRow ({
   }
   const feedback = (scale) => {
     tap('light')
-    if (!reduceMotion.current) pop(scale)
+    if (!reduceMotionOn) pop(scale)
   }
   const pressLike = otherPress(like && (() => {
     if (pending === 'like') return
@@ -232,7 +230,7 @@ export function PostRow ({
   }))
   const hasMore = moreSheet.length > 0
   const burst = () => {
-    if (reduceMotion.current) return
+    if (reduceMotionOn) return
     burstScale.setValue(0.6)
     burstOpacity.setValue(0)
     setBurstOn(true)
@@ -295,7 +293,7 @@ export function PostRow ({
   const bodyParts = [
     title,
     replyToName !== null ? ('respondendo a ' + displayText(replyToName)) : null,
-    hasText ? displayText(text, { multiline: true }) : null,
+    shownText,
     time
   ].filter(Boolean)
   const bodyLabel = bodyParts.join('. ')
@@ -306,7 +304,7 @@ export function PostRow ({
   const quoteMention = (quoteOn && otherPress(quote.onOpenMention)) || openMention
   const quoteOut = quoteOn && typeof quote.text === 'string' && !!quoteMention && hasMention(quote.text)
   const quoteProp = quoteOn ? { ...quote, onOpen: otherPress(quote.onOpen), onOpenMention: quoteMention } : quote
-  const label = textOut ? bodyParts.filter((part) => part !== displayText(text, { multiline: true })).join('. ') : bodyLabel
+  const label = textOut ? bodyParts.filter((part) => part !== shownText).join('. ') : bodyLabel
   const textNode = hasText
     ? textOut
       ? <MentionText text={text} onOpenMention={openMention} onOpenPlain={openTap} style={styles.text} />
@@ -318,7 +316,7 @@ export function PostRow ({
           onPress={openTap}
           {...a11yOpen}
         >
-          <Text style={styles.text}>{displayText(text, { multiline: true })}</Text>
+          <Text style={styles.text}>{shownText}</Text>
         </Pressable>
         )
     : null
@@ -578,6 +576,10 @@ export function PostRow ({
     </View>
   )
 }
+
+// Default shallow comparison: the screens keep each row's props stable while
+// what it shows did not change (socialRowProps with a row cache).
+export const PostRow = memo(PostRowView)
 
 const makeStyles = (colors) => StyleSheet.create({
   row: {

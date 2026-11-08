@@ -85,6 +85,12 @@ function renderSlot (slot) {
 // react-native-web 0.21 drops the prop, so the web gets only what the
 // browser's own scroll anchoring does.
 const KEEP_VISIBLE = Object.freeze({ minIndexForVisible: 0, autoscrollToTopThreshold: 24 })
+// Fewer rows per pass than FlatList's defaults (10 first, 10 per batch, 21
+// screens): the first rows paint sooner on a slow phone, and 7 screens still
+// keep a fast fling inside rendered content.
+const FIRST_ROWS = 8
+const ROWS_PER_BATCH = 8
+const WINDOW_SCREENS = 7
 
 export function RefreshableList ({
   data,
@@ -555,6 +561,9 @@ export function RefreshableList ({
         renderItem={renderItem}
         keyExtractor={keyExtractor}
         extraData={extraData}
+        initialNumToRender={FIRST_ROWS}
+        maxToRenderPerBatch={ROWS_PER_BATCH}
+        windowSize={WINDOW_SCREENS}
         ListHeaderComponent={ListHeaderComponent}
         ListFooterComponent={footer}
         ListEmptyComponent={ListEmptyComponent}
