@@ -2,6 +2,8 @@
 
 const test = require('brittle')
 const rpc = require('@varanda/rpc')
+const { readFileSync } = require('node:fs')
+const { join } = require('node:path')
 const load = () => import('../src/feiraScreen.js')
 const A = 'ab'.repeat(32)
 const P = 'cd'.repeat(32)
@@ -338,4 +340,15 @@ test('saved-search segment probes availability without a city query; runner boun
   let calls = 0
   await runFeiraAlerts({ node, enabled: true, store, isActive: () => true }, { search: async () => { calls++; return page() } })
   t.is(calls, 10)
+})
+
+test('Feira source pins: large-text Anunciar, chip padding and keyboard dismissed on search', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Feira.js'), 'utf8')
+  const chips = readFileSync(join(__dirname, '../src/ui/FilterChips.js'), 'utf8')
+  t.ok(screen.includes("import { TEXT_CAP } from '../ui/Sheet'"), 'the Anunciar label uses the shared text cap')
+  t.ok(screen.includes('<Text style={styles.fabText} maxFontSizeMultiplier={TEXT_CAP}>Anunciar</Text>'), 'the Anunciar label is capped at large text')
+  const body = screen.slice(screen.indexOf('function applyFilters'), screen.indexOf('async function saveSearch'))
+  t.ok(body.startsWith('function applyFilters (next = filters) {\n    Keyboard.dismiss()\n'), 'applyFilters closes the keyboard first')
+  t.ok(/import \{[^}]*\bKeyboard\b[^}]*\} from 'react-native'/.test(screen), 'Keyboard comes from react-native')
+  t.ok(/row: \{[^}]*paddingVertical: space\.sm/.test(chips), 'filter chips have vertical padding')
 })

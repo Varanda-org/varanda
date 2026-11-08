@@ -395,6 +395,9 @@ function Member () {
   // later failed or slow read never hides the tabs again.
   const [setupDone, setSetupDone] = useState(false)
   const [toast, setToast] = useState(null)
+  // The selected tab of each profile on screen (Diário, Membro entries), for the publish button.
+  const [profileTabs, setProfileTabs] = useState({})
+  const reportProfileTab = useCallback((key, id) => setProfileTabs((prev) => prev[key] === id ? prev : { ...prev, [key]: id }), [])
   const toastTimer = useRef(null)
   // The pending profile invite (src/profileLink.js): the record in tab
   // storage, re-read before every step that acts on it.
@@ -1638,6 +1641,8 @@ function Member () {
   // strip and the Diário rows that call it render only there).
   const openMomentos = useCallback((key) => {
     if (typeof key !== 'string') return
+    // The publication toast must not outlive the viewer it covered.
+    clearTimeout(toastTimer.current); setToast(null)
     pushScreen({ screen: 'momentos', key: key.toLowerCase(), params: {} })
   }, [pushScreen])
   const openTestimonials = useCallback((key) => {
@@ -2743,7 +2748,11 @@ function Member () {
     const leavingEntry = stackMotion.leaving && stackMotion.leaving.entry && stackMotion.leaving.index >= nav.depth(stack) ? stackMotion.leaving.entry : null
     const viewerLeaving = leavingEntry !== null && leavingEntry.screen === 'momentos'
     const barsHidden = stacked || viewerLeaving
-    const fabShown = !viewerLeaving && showPostButton({ tab, screen: stacked ? nav.top(stack).screen : null })
+    const topProfile = stacked ? nav.top(stack) : null
+    const profileTab = stacked
+      ? (topProfile.screen === 'membro' ? profileTabs[(stack.length - 1) + ':' + topProfile.key] : undefined)
+      : (tab === 'diario' ? profileTabs.diario : undefined)
+    const fabShown = !viewerLeaving && showPostButton({ tab, screen: stacked ? topProfile.screen : null, profileTab })
     const tabActions = <TopActions key={tab} help={HELP[tab === 'comunidades' ? 'conversas' : tab]} onAvisos={mode === 'hosted' ? openAvisos : undefined} avisosNew={avisosNew} avisosActive={tab === 'avisos'} />
     // Conversas puts its "+" before help and the bell (the WhatsApp header);
     // its search is a field above the chips, not a header action.
@@ -2949,7 +2958,7 @@ function Member () {
       const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
       return (
         <StackLayer key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-          <Screen entry={entry} {...screenProps} />
+          <Screen entry={entry} {...screenProps} onTabChange={entry.screen === 'membro' ? (id) => reportProfileTab(i + ':' + entry.key, id) : undefined} />
         </StackLayer>
       )
     }
@@ -3110,6 +3119,7 @@ function Member () {
             : null}
           <View style={shown('diario')}>
             <Diario
+              onTabChange={(id) => reportProfileTab('diario', id)}
               onDeletedPost={deletedPost}
               active={on('diario')}
               refresh={version}
@@ -3145,7 +3155,7 @@ function Member () {
         {fabShown ? <Fab onPress={openComposer} /> : null}
         {/* After the Fab, and above it when it shows: a long toast wraps
             upward and must never sit under the button. */}
-        {toast
+        {toast && !(viewerOnTop || viewerLeaving)
           ? (
             <View style={[styles.toast, { bottom: fabShown ? insets.bottom + layout.tabBar + layout.fabAboveTabs + layout.fabSize + 12 : (barsHidden ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='box-none'>
               {/* Only the action takes touches: under box-none the label would

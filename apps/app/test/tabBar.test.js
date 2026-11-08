@@ -51,6 +51,15 @@ test('showPostButton: no "publicar" on Feira nor on its screens', async (t) => {
   }
 })
 
+test('showPostButton: hidden on a profile Depoimentos tab', async (t) => {
+  const { showPostButton } = await load()
+  t.absent(showPostButton({ tab: 'diario', screen: null, profileTab: 'depoimentos' }))
+  t.absent(showPostButton({ tab: 'rua', screen: 'membro', profileTab: 'depoimentos' }))
+  t.ok(showPostButton({ tab: 'diario', screen: null, profileTab: 'posts' }))
+  t.ok(showPostButton({ tab: 'rua', screen: 'membro', profileTab: 'mural' }))
+  t.ok(showPostButton({ tab: 'rua', screen: 'membro' }))
+})
+
 test('tabsFor: manual and other modes show the default tabs without Conversas', async (t) => {
   const { TABS, tabsFor } = await load()
   t.alike(tabsFor('manual'), TABS)

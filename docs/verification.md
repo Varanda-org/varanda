@@ -6766,3 +6766,40 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi marcada nesta documentação.
 - Os testes por leitura do código não substituem a conferência das telas no aparelho ou no simulador.
 - A lista continua local ao app; um app modificado, um build antigo ou a CLI podem publicar sem essa conferência. Fotos e áudio não são analisados.
+
+## 144. Momentos, Feira e botão de publicar nos depoimentos: ajustes visuais (PR fix/momentos-feira-polish)
+
+Ajustes de tela que sobravam de revisões anteriores. Não muda protocolo, semeador, RPC nem Termos.
+
+Regras que os passos conferem:
+
+- A faixa de aviso (toast) não aparece por cima do visualizador de momentos. Ela fica escondida enquanto o visualizador está aberto ou fechando, e abrir o visualizador descarta um aviso pendente. Assim, "A foto sai dos servidores em até 7 dias" não é coberto e não reaparece ao fechar.
+- No compositor de momento, escolher uma foto rola a tela até o campo de texto e o contador, sem focar o campo. O teclado não abre sozinho.
+- O botão flutuante de publicar fica escondido enquanto a aba Depoimentos do perfil está aberta, no Diário e no perfil de um membro ou de uma Página. Assim ele não cobre a seta "Enviados" nem a aba vazia de uma Página. Voltar para Publicações ou Mural o mostra de novo.
+- Na Feira, o botão "Anunciar" tem o texto limitado a 1,3 de escala de fonte, para não cobrir "Salvar busca" com texto grande no iOS.
+- Na Feira, as pílulas de filtro (tipo e categoria) têm espaço vertical e não encostam nas linhas divisórias.
+- Na Feira, "Buscar" e Enter nos campos de cidade e palavras fecham o teclado antes de aplicar a busca, para o resultado aparecer sem ele por cima.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/feiraScreen.test.js`, `node apps/app/test/feira.test.js`, `node apps/app/test/feiraAlerts.test.js`, `node apps/app/test/feiraSaved.test.js`, `node apps/app/test/conversasList.test.js` e `node apps/app/test/platformGate.test.js`. O primeiro confere por leitura do código o botão "Anunciar", o fechamento do teclado em `applyFilters` e o espaçamento das pílulas.
+- `node apps/app/test/momentosScreen.test.js`, `node apps/app/test/depoimentos.test.js` e `node apps/app/test/tabBar.test.js`, que cobrem o aviso sobre o visualizador, o compositor e o botão de publicar.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Momentos: com a barra de aviso ativa, abrir um momento. O aviso não aparece por cima do visualizador, e não reaparece ao fechá-lo.
+- [ ] Momentos: no compositor, com o campo de texto no fim da tela, escolher uma foto. A tela rola até o campo e o contador, e o teclado não abre.
+- [ ] Diário, aba Depoimentos: o botão de publicar some, e a seta "Enviados" fica livre. Voltar para Publicações ou Mural mostra o botão de novo.
+- [ ] Perfil de uma Página sem depoimentos, aba Depoimentos: a aba vazia não tem o botão por cima.
+- [ ] Perfil de um membro, aba Depoimentos: o botão some e volta ao trocar de aba.
+- [ ] Feira com texto grande no iOS: "Anunciar" cabe no botão e não cobre "Salvar busca".
+- [ ] Feira: as pílulas de tipo e de categoria têm respiro acima e abaixo e não encostam nas linhas.
+- [ ] Feira: tocar em "Buscar", ou Enter na cidade ou nas palavras, fecha o teclado e mostra o resultado.
+- [ ] Web e PWA: repetir as conferências acima na largura de celular.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Os testes conferem o código-fonte por leitura de arquivo, não a tela. A posição do botão, o respiro das pílulas e o comportamento do teclado só se confirmam no aparelho ou no simulador.
+- O fechamento do teclado em "Buscar" vale para todas as plataformas, porque a regra fica na função compartilhada; a conferência no Android é a que importa para o teclado.

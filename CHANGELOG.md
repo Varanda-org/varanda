@@ -273,6 +273,10 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Corrigido
 
+- Momentos: o aviso da barra (por exemplo, "A foto sai dos servidores em até 7 dias") não aparece mais por cima do visualizador de momentos. Ele fica escondido enquanto o visualizador está aberto ou fechando, e abrir o visualizador descarta um aviso pendente, então ele não reaparece ao fechar. Detalhes em `docs/verification.md` seção 144.
+- Momentos: ao escolher uma foto no compositor, a tela rola até o campo de texto e o contador, sem abrir o teclado. Detalhes em `docs/verification.md` seção 144.
+- Depoimentos no perfil: o botão de publicar some enquanto a aba Depoimentos está aberta (Diário e perfil de membro ou Página). Antes ele cobria a seta "Enviados" e a aba vazia de uma Página. Detalhes em `docs/verification.md` seção 144.
+- Feira: o botão "Anunciar" passa a respeitar o limite de texto grande (1,3), para não cobrir "Salvar busca" no iOS. As pílulas de filtro ganham espaço vertical e não encostam mais nas linhas divisórias. "Buscar" e Enter nos campos fecham o teclado, para o resultado aparecer sem ele por cima. Detalhes em `docs/verification.md` seção 144.
 - Perfil de membro ou Página: a linha "Anúncios" fica acima das abas, como link com ícone e seta (e a linha "Avaliações" junto), em vez de abaixo delas.
 - Menu "mais" de uma Página: Agir como a página, Deixar de agir, Ajustes da página, Seguir como a página e Compartilhar perfil ganham ícone.
 - Texto grande: com as pílulas empilhadas no perfil, o botão "mais" fica na linha da última pílula, e não sozinho numa terceira linha. Detalhes em `docs/verification.md` seção 142.
