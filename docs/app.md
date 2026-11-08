@@ -449,6 +449,24 @@ Cada comunidade tem um link `/c/<chave>` e cada grupo, um link `/g/<chave>`, com
 - Sem resposta a uma mensagem específica e sem remover administrador da comunidade nas telas.
 - Salas de áudio ao vivo ficam fora (veja "Fora do piloto").
 
+## Bloquear uma pessoa
+
+Qualquer membro pode bloquear outro pelo menu **Mais** de uma publicação ou pelo perfil da pessoa. Só no nó hospedado (`node.hosted`): o app nativo com a instalação e a web. Um toque abre uma confirmação que diz o que o bloqueio faz e o que não faz: a pessoa não é avisada e, como os diários são públicos, ainda pode ver o que você publica.
+
+- **O que some.** Publicações, respostas e citações da pessoa, e o que ela republica, em A Rua, Espiadinha, Busca, conversas de publicações, perfis e Avisos. Uma citação dela numa publicação de outra pessoa aparece como "Publicação indisponível". O nó aplica a regra ao ler (`docs/rpc.md` 5.111); `PostRow` e Avisos só limpam na hora o que já está na tela (`src/memberBlocks.js`).
+- **Mensagens.** O bloqueio inclui o **Bloquear mensagens** das Conversas. A conversa que já existe fica na lista, sem mensagens novas. Nela, o botão vira **Desbloquear** e desfaz o bloqueio inteiro.
+- **Seguir.** Bloquear deixa de seguir a pessoa, com um registro público comum que não diz que houve bloqueio. Desbloquear não volta a seguir.
+- **Avisos push (web).** O serviço de conta não sabe quem foi bloqueado, então quem filtra é o service worker (`scripts/sw.js`), com a lista que a página informa (`src/pushBlocks.web.js`): o aviso aparece em silêncio e fecha na hora, porque o WebKit revoga a assinatura de um push que não mostra nada. No app nativo não há Web Push.
+- **Desfazer.** Em Ajustes, **Pessoas bloqueadas**, ou no perfil da pessoa, que mostra "Você bloqueou esta pessoa" e **Desbloquear**. A lista lê só o nome e o @nome (`diary.peek` com `profileOnly`).
+- **Busca de contas.** A pessoa ainda aparece em Contas: é um dos caminhos para abrir o perfil e desfazer.
+- **Listas.** Quem curtiu, quem republicou, Seguidores e Seguindo deixam a pessoa de fora antes de conferir as linhas. Na Busca de publicações e na conversa de uma publicação, uma linha dela conta como indisponível, como qualquer diário que o nó não lê.
+
+### Limites
+
+- A lista fica só neste aparelho. O bloqueio de mensagens chega aos outros aparelhos da mesma passkey pelo `ctl`, mas as publicações e os Avisos dessa pessoa continuam lá.
+- Não entram: mensagens de grupos e comunidades, e anúncios da Feira. A dobra de um grupo não obedece à lista de propósito: o bloqueio de um membro não pode mudar quem está no grupo.
+- A lista vale para a pessoa, também ao agir como uma Página.
+
 ## Interações da Rua
 
 - **Toque duplo para curtir.** Só no app nativo (iOS e Android); na web, o duplo clique continua selecionando texto. O toque duplo curte e nunca descurte, com um coração de 64 pt sobre a publicação. Um toque simples abre a conversa depois de 280 ms; um toque em outra publicação ou em outro botão cancela essa abertura. Leitores de tela abrem a conversa na hora e nunca curtem. Limite aceito: um arrasto que começa fora de qualquer publicação, dentro desses 280 ms, não cancela a abertura.

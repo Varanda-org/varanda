@@ -52,6 +52,7 @@ const { validateGroupRecord, validateGroupHeader, validateWriterHeader, MAX_GROU
 const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
+const { normalizeBlocks } = require('@varanda/core/lib/member-block')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { DIARY_OPTIONS } = require('./diary-options')
 
@@ -677,6 +678,17 @@ async function readBlocklist (storage) {
 
 function writeBlocklist (storage, snapshot) {
   return storage.writeJson('blocklist', { v: 1, snapshot })
+}
+
+// kv memberBlocks = { v: 1, entries }: the member's own block list
+// (@varanda/core lib/member-block.js). Identity state: reset() deletes it.
+async function readMemberBlocks (storage) {
+  const data = await readKv(storage, 'memberBlocks')
+  return data && typeof data === 'object' && data.v === 1 ? normalizeBlocks(data.entries) : []
+}
+
+function writeMemberBlocks (storage, entries) {
+  return storage.writeJson('memberBlocks', entries.length === 0 ? null : { v: 1, entries })
 }
 
 // ---- media cores ----
@@ -1774,6 +1786,8 @@ module.exports = {
   writeFollows,
   readBlocklist,
   writeBlocklist,
+  readMemberBlocks,
+  writeMemberBlocks,
   openMediaCore,
   openMediaCoreReadOnly,
   writeMediaHeader,

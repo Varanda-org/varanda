@@ -22,6 +22,8 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Bloquear uma pessoa, pelo menu da publicação e pelo perfil, com a lista em Ajustes, Pessoas bloqueadas (continua a issue #46; regra 1.2 da App Store). Publicações, respostas, citações, republicações e Avisos dela somem em A Rua, Espiadinha, Busca e Avisos, os avisos push dela ficam em silêncio na web, as mensagens seguem o bloqueio que já existia, e a pessoa deixa de ser seguida. Quem filtra é o nó, ao ler (`block.set`, `block.list`, docs/rpc.md 5.111 e 5.112).
+  Limite que sobra: como os diários são públicos, a pessoa bloqueada ainda pode ver o que você publica, seguir e responder, e não é avisada; quem bloqueia só deixa de ver. Mensagens de grupos e anúncios da Feira não são filtrados.
 - Feira, ofertas na conversa: numa conversa com o link de um anúncio, "Fazer oferta" manda o valor com o link; quem anunciou responde com "Aceitar" (a folha "Aceitar oferta" diz que a assinatura só deixa a pessoa avaliar, não escolhe as estrelas e não é um pagamento) ou "Recusar". O estado é lido da conversa e nada é reenviado sozinho. Verificação na seção 133 de `docs/verification.md`.
 - Feira, avaliações: só quem teve a oferta aceita e assinada avalia (1 a 5 estrelas e comentário), pela tela Avaliar aberta da conversa; a tela Anúncio e o perfil mostram só avaliações conferidas, com "avaliações confirmadas pelo anunciante". Uma Página não avalia por enquanto.
 - Feira, editar anúncio: "Editar" na tela Anúncio, para o dono ou a Página; a primeira versão continua no diário até o anúncio ser apagado, a página pública `/f/` mantém o link e mostra a versão nova, e uma edição feita antes em outro aparelho pede "Recarregar".
