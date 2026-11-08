@@ -386,6 +386,73 @@ test('Mensagem offers Encaminhar and marks forwarded messages without the origin
   t.ok(bubble.includes("<Icon name='encaminhar'") && bubble.includes('FORWARDED_LABEL'), 'Encaminhada with the encaminhar icon')
 })
 
+test('Mensagem shows a removable post context chip and sends it only as composed text', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("<IconAction icon='fechar' label='remover contexto' onPress={() => setContext(null)} />"), 'the chip is removable')
+  t.ok(src.includes('const [context, setContext] = useState(null)') && src.includes('const [draft, setDraft] = useState(() => initialMessage(initial).draft)'), 'the chip is apart from the draft')
+  t.ok(src.includes('usedIntents.current.has(intent.id)') && src.includes('onIntentUsed(intent.id)'), 'an intent is used once')
+  t.ok(src.includes('const outgoing = context !== null ? composeText(context, draft) : draft'), 'composeText on Enviar')
+  t.ok(src.includes("if (context !== null && draft.trim() === '') return undefined"), 'never without the typed text')
+  // contextExcerpt runs displayText after flattening the text and dropping links.
+  t.ok(src.includes('{contextExcerpt(context.text)}'), 'the preview is the safe excerpt that is sent')
+  t.absent(/replyTo:\s*(intent|context)/.test(src), 'replyTo never comes from the intent')
+  t.absent(src.includes('intent.context.seq') || src.includes('context.seq'), 'the post reference never reaches dm.send')
+})
+
+test('Mensagem takes an intent only on top of the stack', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("if (!isTop || !intent || typeof intent.id !== 'string' || usedIntents.current.has(intent.id)) return"), 'a buried conversation neither shows nor uses an intent')
+  t.ok(src.includes('}, [isTop, intent, peer, onIntentUsed])'), 'the intent is read again when the screen comes on top')
+  const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
+  t.ok(app.includes('<Mensagem peer={entry.key} intent={i === stack.length - 1 ? intentsRef.current.get(entry.key) : undefined}'), 'App hands the intent to the top Mensagem only')
+  t.absent(app.includes('intent={intentsRef.current.get(entry.key)}'), 'never to every mounted Mensagem')
+})
+
+test('Mensagem names the post by an absolute date and retries the held text', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('{contextLabel(context, now)}'), 'the chip title is the absolute date')
+  t.absent(src.includes('relativeTime(context.at'), 'never a relative time on the chip')
+  t.ok(src.includes('const attempt = sendAttempt(hold, draft, context, outgoing)') && src.includes('sendPlan(hold, attempt, quoteId)'), 'an unchanged draft retries the held text')
+})
+
+test('Mensagem gives the composer the budget left after the chip prefix', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("const budget = MAX_TEXT - (context !== null ? countChars(composeText(context, '.')) - 1 : 0)"), 'the budget subtracts the prefix')
+  t.ok(src.includes('const left = budget - countChars(draft)'), 'Enviar uses the same budget')
+  t.ok(src.includes('max={budget}'), 'the counter uses the same budget')
+  const composer = readFileSync(join(__dirname, '../src/ui/ChatComposer.js'), 'utf8')
+  t.ok(composer.includes('max = MAX_TEXT,') && composer.includes('const left = max - countChars(text)'), 'the composer counts from max, MAX_TEXT by default')
+})
+
+test('the context chip keeps its date with large text and blocks voice notes', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  // The date tells two photos apart: the title may wrap, never be cut to one line.
+  if (!src.includes('<Text style={styles.chipTitle} numberOfLines={2}>')) throw new Error('chip title must wrap to two lines')
+  // A voice note would go without the context and leave the chip behind.
+  if (!src.includes('attachments.items.length === 0 && context === null ? sendVoice : null')) throw new Error('no voice note while a context chip waits')
+})
+
+test('the chip shows the excerpt the message will carry, never the raw post text', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  if (src.includes('displayText(context.text)')) throw new Error('raw post text in the chip (newlines become U+FFFD, links differ from the sent text)')
+  if (!src.includes('{contextExcerpt(context.text)}</Text>')) throw new Error('the chip must show contextExcerpt')
+})
+
+test('a held send that lands later keeps a draft whose chip changed', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  if (!src.includes("if (typed !== text && contextRef.current === ctx) setDraft((d) => (d === typed ? '' : d))")) throw new Error('the typed draft is cleared only while its chip is unchanged')
+})
+
+test('a photo send that lands later keeps a draft whose chip changed', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  if (!src.includes("if (contextRef.current === ctx) setDraft((d) => (d === typed ? '' : d))")) throw new Error('the photo path clears the typed draft only while its chip is unchanged')
+})
+
+test('a page retry keeps a draft whose chip was removed', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  if (!src.includes("if (contextRef.current === (hold.ctx || null)) setDraft('')")) throw new Error('the page retry clears the draft only while its chip is unchanged')
+})
+
 // The owned screen exports these pure rules; extracting them avoids loading React Native.
 function screenHelper (file, name, deps = {}) {
   const source = readFileSync(join(__dirname, '../src/screens/' + file + '.js'), 'utf8')

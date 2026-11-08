@@ -6086,6 +6086,47 @@ Limites desta caminhada:
 - A Vitrine responde as fotos das publicações por um responder local de `/media` (`src/vitrine/publicMedia.js`, só no bundle de desenvolvimento); o caminho real (semeador, tamanho e SHA-256 conferidos) é o mesmo código, e a única coisa trocada é o transporte.
 - Na Vitrine, nenhuma pessoa tem foto suficiente para mostrar "Ver mais".
 
+## 121. Ponte de comunidades para a conversa privada (PR feat/community-bridge)
+
+Caminhada da ponte entre comunidades, publicações e conversa privada: o menu de pessoa na comunidade e no grupo, "Mensagem em particular" nas publicações, a faixa de comunidades nos perfis e a busca de comunidades mais clara. As telas estão em [app.md](app.md) ("Conversar em particular", "Comunidades no perfil") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Menu de pessoa", "Contexto na conversa", "Faixa de comunidades").
+
+Regras que os passos conferem:
+
+- **Menu de pessoa.** Na lista de Membros da comunidade (criador e administradores), o botão de mais e o toque longo de cada pessoa abrem a mesma folha: Conversar em particular, Ver perfil e as ações de administração. Escolher uma linha do toque longo executa a ação (a folha fica montada até fechar). No grupo, as ações da mensagem de outra pessoa têm Conversar em particular, que usa o diário conferido da mensagem, nunca o escritor, e não leva nada do grupo.
+- **Mensagem em particular.** Aparece nas ações de uma publicação de outra pessoa no nó hospedado, nunca na própria nem na de uma página. Abre a conversa com o autor e mostra um chip de contexto acima do campo. Só a conversa no topo da pilha consome o pedido; uma conversa por baixo não muda.
+- **Envio com contexto.** Só envia com texto escrito pela pessoa: a mensagem é `Sobre a sua publicação "<trecho de até 60 caracteres>" (<data>): <texto>`, ou "Sobre a sua foto" sem texto, com a data absoluta (nunca "5 min"). O total cabe em 1000 caracteres e o contador do campo já desconta o prefixo. Uma nova tentativa depois de um envio incerto manda exatamente o mesmo texto. O contexto nunca vira `replyTo`.
+- **Faixa de comunidades.** No seu Diário, Suas comunidades (as que você criou, administra ou é membro, de `community.list`); no perfil de outra pessoa, só Comunidades em comum: no máximo 8 das suas comunidades, conferidas uma de cada vez na lista de membros (`community.members`, em ordem de chave, até 10 páginas por comunidade, sem banidos). A lista completa de outra pessoa nunca aparece. O Diário relê a lista ao voltar à aba e quando um grupo muda.
+- **Comunidades.** Minhas comunidades e Descobrir em seções; a busca mostra a comunidade de cada grupo e os estados de carregando, erro com Tentar de novo, resultado parcial e busca indisponível.
+- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/feat/community-bridge/<plataforma>/`.
+
+Como verificar, a partir de `apps/app` (um arquivo por vez):
+
+- `node test/privateReply.test.js`, `node test/communitiesBox.test.js`, `node test/communitiesBoxScreen.test.js`, `node test/groupScreen.test.js`, `node test/dm.test.js`, `node test/postActions.test.js`, `node test/conversasList.test.js`, `node test/conversas.test.js`.
+- `npm run lint`, a partir da raiz, que tem de passar.
+
+Primeiro no Android (build de debug, emulador `varanda-api36`, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome:
+
+- [ ] Android: A Rua › uma publicação de João › mais › Mensagem em particular; a conversa abre com o chip; Enviar só com texto; a mensagem enviada começa com o prefixo e o chip some; o X tira o chip sem enviar.
+- [ ] Android: com o teclado aberto, o chip e o campo ficam acima do teclado.
+- [ ] Android: perfil de João › Comunidades em comum acima das abas; tocar numa comunidade a abre; o seu Diário mostra Suas comunidades.
+- [ ] Android: Comunidades › Minhas comunidades e Descobrir; buscar "horta".
+- [ ] Android: uma comunidade › Informações › Membros; o mais e o toque longo de uma pessoa abrem a folha; Ver perfil abre o perfil.
+- [ ] iOS (simulador, build de debug ligado ao Metro): as mesmas telas.
+- [ ] Chrome em 375 px e 1280 px, temas claro e escuro: as mesmas telas; o X do chip tem nome e entra na ordem do Tab.
+- [ ] Texto grande (Android `font_scale` 1.3, iOS `accessibility-large`): chip, faixa e folhas sem corte.
+- [ ] Laboratório hospedado com duas identidades na mesma comunidade pública: a segunda vê Comunidades em comum no perfil da primeira; Mensagem em particular a partir de uma publicação chega à primeira só depois de Enviar, com o prefixo.
+
+Ainda falta a um humano, em aparelho real:
+
+- [ ] celulares Android e iPhone físicos: as telas acima.
+- [ ] TalkBack e VoiceOver: a folha de pessoa, o chip (com o X "remover contexto") e a faixa de comunidades.
+- [ ] uma comunidade grande de verdade, com mais de 100 membros: a outra pessoa numa página depois da primeira ainda aparece em comum.
+
+Limites desta caminhada:
+
+- Na Vitrine, as comunidades e os membros são fictícios e sempre respondem; o tempo das leituras em série de `community.members` num nó real fica para o laboratório.
+- A lista de Membros continua só para criador e administradores; quem não administra chega à conversa privada pelo grupo e pelas publicações.
+
 ## 129. Carregamento mais rápido de A Rua, Diário e perfis (PRs chore/perf-harness até perf/app-render)
 
 Caminhada da pilha de desempenho: medição, leituras do nó, partida, concessão do app instalado e renderização. Ciclo de medição, metas e números em [performance.md](performance.md).

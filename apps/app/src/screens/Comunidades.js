@@ -11,7 +11,7 @@
 // hex64 root key. onOpenCommunity also opens a community just made.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { Keyboard, Pressable, StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
 import { useNode } from '../node'
 import { fetchCommunity, fetchGroup, fetchGroupSearch } from '../indexClient'
@@ -28,6 +28,7 @@ import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import { Choice, NAME_MAX, nameLength, useEscapeClose } from './NovoGrupo'
+import { KeyboardForm } from './Perfil'
 import { Sheet } from '../ui/Sheet'
 import { TopBar } from '../ui/TopBar'
 
@@ -46,10 +47,11 @@ function communityTitle (row) {
 }
 
 function communitySubtitle (row) {
-  return [roleLabel(row.role), COMMUNITY_JOIN_LABELS[row.join] || ''].filter(Boolean).join(' · ')
+  // A wrap breaks before the dot, never leaves it at a line end.
+  return [roleLabel(row.role), COMMUNITY_JOIN_LABELS[row.join] || ''].filter(Boolean).join(' ·\u00a0')
 }
 
-function Row ({ title, subtitle, dot, hint, seed, avatarName, onPress }) {
+function Row ({ title, subtitle, dot, hint, seed, avatarName, onPress, metaLines = 1 }) {
   const styles = useStyles(makeStyles)
   return (
     <Pressable
@@ -62,7 +64,7 @@ function Row ({ title, subtitle, dot, hint, seed, avatarName, onPress }) {
       <Avatar name={avatarName} publicKey={seed} size={44} shape='square' />
       <View style={styles.texts}>
         <Text style={styles.name} numberOfLines={1}>{title}</Text>
-        {subtitle ? <Text style={styles.meta} numberOfLines={1}>{subtitle}</Text> : null}
+        {subtitle ? <Text style={styles.meta} numberOfLines={metaLines}>{subtitle}</Text> : null}
       </View>
       {dot ? <View style={styles.dot} /> : null}
     </Pressable>
@@ -70,13 +72,15 @@ function Row ({ title, subtitle, dot, hint, seed, avatarName, onPress }) {
 }
 
 function useGroupSearch (text) {
-  const [state, setState] = useState({ status: 'idle', groups: [], more: false, indexing: false, error: '' })
+  const [state, setState] = useState({ status: 'idle', groups: [], more: false, indexing: false, partial: false, unavailable: false, error: '' })
+  const [attempt, setAttempt] = useState(0)
   const gen = useRef(0)
   const path = queryPath(text)
+  const retry = useCallback(() => setAttempt((n) => n + 1), [])
   useEffect(() => {
     const mine = ++gen.current
     if (path === null) {
-      setState({ status: 'idle', groups: [], more: false, indexing: false, error: '' })
+      setState({ status: 'idle', groups: [], more: false, indexing: false, partial: false, unavailable: false, error: '' })
       return
     }
     setState((s) => ({ ...s, status: 'loading', error: '' }))
@@ -84,16 +88,17 @@ function useGroupSearch (text) {
       const res = await fetchGroupSearch(path)
       if (mine !== gen.current) return
       if (!res || !res.ok) {
-        const error = res && res.reason === 'not-found' ? 'A busca ainda não está disponível.' : 'Não foi possível buscar agora.'
-        setState({ status: 'error', groups: [], more: false, indexing: false, error })
+        const unavailable = !!res && res.reason === 'not-found'
+        const error = unavailable ? 'A busca ainda não está disponível.' : 'Não foi possível buscar agora.'
+        setState({ status: 'error', groups: [], more: false, indexing: false, partial: false, unavailable, error })
         return
       }
       const v = res.value
-      setState({ status: 'done', groups: v.groups, more: v.more === true, indexing: v.indexing === true || v.complete === false, error: '' })
+      setState({ status: 'done', groups: v.groups, more: v.more === true, indexing: v.indexing === true, partial: v.complete === false, unavailable: false, error: '' })
     }, SEARCH_DELAY_MS)
     return () => clearTimeout(timer)
-  }, [path])
-  return { ...state, path }
+  }, [path, attempt])
+  return { ...state, path, retry }
 }
 
 // The community name of each search row: /index/group/<G> names the
@@ -258,12 +263,17 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
     }
   }, [list.rows, getVersion])
 
+  // The list keeps taps while the search keyboard is up, so opening a
+  // screen from it closes the keyboard first: otherwise it covers the next
+  // screen and what is typed goes to the hidden search field.
   const openCommunity = useCallback((community) => {
+    Keyboard.dismiss()
     seenRef.current.set(community, getVersion(community))
     if (typeof onOpenCommunity === 'function') onOpenCommunity(community)
   }, [getVersion, onOpenCommunity])
 
   const openGroup = useCallback((group) => {
+    Keyboard.dismiss()
     if (typeof onOpenGroup === 'function') onOpenGroup(group)
   }, [onOpenGroup])
 
@@ -283,8 +293,10 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
       <Row
         key={'s' + h.group}
         title={typeof h.name === 'string' && h.name !== '' ? displayText(h.name) : PUBLIC_LABEL}
-        subtitle={[community ? 'na comunidade ' + community : '', membersLabel(h.writerCount)].filter(Boolean).join(' · ')}
+        subtitle={[community ? 'na comunidade ' + community : '', membersLabel(h.writerCount)].filter(Boolean).join(' ·\u00a0')}
         hint='abre o grupo'
+        // The community name and the count both matter: up to three lines.
+        metaLines={3}
         seed={h.group}
         avatarName={typeof h.name === 'string' ? h.name : null}
         onPress={() => openGroup(h.group)}
@@ -292,8 +304,25 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
     )
   })
 
-  const header = (
+  // Search first, like other apps: a field under a long list ends up under
+  // the keyboard. Then the person's own communities.
+  const createButton = pageKey === null
+    ? (
+      <View style={styles.block}>
+        <Btn label='Nova comunidade' onPress={() => setCreating(true)} />
+      </View>
+      )
+    : null
+  const mineSection = (
     <View>
+      <SectionHeader>Minhas comunidades</SectionHeader>
+      {list.error && list.rows.length > 0 ? <ErrorState message={list.error} onRetry={load} pending={list.loading} /> : null}
+    </View>
+  )
+
+  const discover = (
+    <View>
+      <SectionHeader>Descobrir</SectionHeader>
       <View style={styles.block}>
         <Field
           label='Buscar grupos públicos'
@@ -301,23 +330,26 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
           onChangeText={setQuery}
           placeholder='Nome do grupo'
           returnKeyType='search'
+          plain
         />
+        <Soft>O resultado abre um grupo da comunidade</Soft>
         {search.status === 'loading' ? <Soft>Buscando…</Soft> : null}
         {search.status === 'error' ? <ErrorText>{search.error}</ErrorText> : null}
+        {search.status === 'error' && !search.unavailable ? <Btn label='Tentar de novo' onPress={() => search.retry()} /> : null}
         {search.status === 'done' && search.groups.length === 0 ? <Soft>Nenhum grupo público encontrado.</Soft> : null}
+        {search.status === 'done' && search.partial ? <Soft>Alguns grupos podem faltar</Soft> : null}
         {search.status === 'done' && search.indexing ? <Soft>A busca ainda está sendo atualizada; tente de novo depois.</Soft> : null}
       </View>
       {hits.length > 0 ? <View>{hits}</View> : null}
       {search.status === 'done' && search.more ? <View style={styles.block}><Soft>Há mais resultados: refine a busca.</Soft></View> : null}
-      {pageKey === null
-        ? (
-          <View style={styles.block}>
-            <Btn label='Nova comunidade' onPress={() => setCreating(true)} />
-          </View>
-          )
-        : null}
-      <SectionHeader>Minhas comunidades</SectionHeader>
-      {list.error && list.rows.length > 0 ? <ErrorState message={list.error} onRetry={load} pending={list.loading} /> : null}
+    </View>
+  )
+
+  const header = (
+    <View>
+      {createButton}
+      {discover}
+      {mineSection}
     </View>
   )
 
@@ -336,6 +368,7 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
       <Row
         title={communityTitle(item)}
         subtitle={communitySubtitle(item)}
+        metaLines={3}
         dot={getVersion(item.community) !== seen}
         hint='abre a comunidade'
         seed={item.community}
@@ -348,18 +381,23 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   return (
     <View style={styles.root}>
       {bar}
-      <RefreshableList
-        data={list.rows}
-        keyExtractor={(c) => c.community}
-        renderItem={renderItem}
-        extraData={{ versions, getVersion }}
-        ListHeaderComponent={header}
-        ListEmptyComponent={empty}
-        contentContainerStyle={{ paddingBottom: bottomPad }}
-        onRefresh={load}
-        refreshing={list.loading && list.loaded}
-        atEnd
-      />
+      {/* The search sits under the list: with the keyboard open (Android
+          draws edge to edge) the list must shrink so a result scrolls into
+          view above it. */}
+      <KeyboardForm>
+        <RefreshableList
+          data={list.rows}
+          keyExtractor={(c) => c.community}
+          renderItem={renderItem}
+          extraData={{ versions, getVersion }}
+          ListHeaderComponent={header}
+          ListEmptyComponent={empty}
+          contentContainerStyle={{ paddingBottom: bottomPad }}
+          onRefresh={load}
+          refreshing={list.loading && list.loaded}
+          atEnd
+        />
+      </KeyboardForm>
       <NovaComunidade
         visible={creating}
         onClose={() => { setCreating(false); load() }}

@@ -29,6 +29,10 @@
 //   The bar is reply, repost, like, share and 'mais'. The repost button opens
 //   a small sheet (Republicar, and Citar with onQuote); report and delete live
 //   in the 'mais' sheet next to Copiar link, each only with its handler.
+// - onMessage(author, { context }), with the post's `seq`: 'Mensagem em
+//   particular' in the 'mais' sheet, only on a hosted node. The caller passes
+//   it only for someone else's post that is not a page (rowProps,
+//   socialRowProps); the context is the post as shown, never sent by itself.
 // - link: a public http(s) URL of the post (postActions.shareLink decides);
 //   without one there is no Compartilhar. onNotice(text) shows the toast of
 //   a copy to the clipboard.
@@ -58,6 +62,7 @@ import { LinkCard } from './LinkCard'
 import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
+import { useNode } from '../node'
 import { QuoteCard } from './QuoteCard'
 import { LARGE_TEXT, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -138,7 +143,8 @@ function PostRowView ({
   author, name, username, avatar, at, text, replyToName, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
   onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
-  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice
+  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
+  seq, onMessage
 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -214,7 +220,10 @@ function PostRowView ({
     const ok = await copyText(nav, href)
     if (fn(onNotice)) onNotice(ok ? 'Link copiado' : 'Não foi possível copiar o link')
   }))
+  const node = useNode()
+  const messageable = fn(onMessage) && node !== null && node.hosted === true && Number.isSafeInteger(seq) && seq > 0
   const moreRows = [
+    ...(messageable ? [{ id: 'message', icon: 'mensagem', label: 'Mensagem em particular' }] : []),
     ...moreActions(null, { link, onReport: fn(onReport) ? true : null, onBlock: fn(onBlock) ? true : null }),
     ...(fn(onDelete) ? [{ id: 'delete', icon: 'lixeira', label: 'Apagar', danger: true }] : [])
   ]
@@ -225,6 +234,7 @@ function PostRowView ({
         if (fn(onNotice)) onNotice(ok ? 'Link copiado' : 'Não foi possível copiar o link')
       }
     }
+    if (row.id === 'message') return () => onMessage(author, { context: { author, seq, at, text, hasMedia } })
     if (row.id === 'report') return onReport
     if (row.id === 'block') return onBlock
     if (row.id === 'delete') return onDelete

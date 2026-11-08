@@ -1,13 +1,15 @@
 // Grupo: one group's conversation, pushed above the tabs (nav.js screen
 // 'grupo', keyed by the group root). Props: { group, onBack,
-// onOpenCommunity(community, { group }?), onOpenMember(diary), onOpenMention(username),
+// onOpenCommunity(community, { group }?), onOpenMember(diary), onMessage(diary), onOpenMention(username),
 // onReport(target), onSeen(group), isTop }, with `target` in Denunciar's shape
 // { author, name, username, seq, text, group, writer, private }; onSeen runs
 // after every group.seen attempt, answered or not. Only what the person sees
 // is marked seen, up to the newest painted row: the app visible, this screen
 // on top (isTop false: buried under another screen) and the latest read
 // painted. Renders GrupoAjustes itself as a sheet, opened by the header's
-// settings icon or a tap on its titles. The header shows the group's name
+// settings icon or a tap on its titles. onMessage(diary) adds 'Conversar em
+// particular' to another person's message menu (hosted only, never for the
+// own diary); it passes the verified diary key and nothing from the group. The header shows the group's name
 // and member count; the community is a small line under it that opens it.
 // Messages are bubbles (group-screen.js groupRows, ui/Bubble): a long press
 // offers Responder, Copiar, Encaminhar (ui/ForwardSheet, forward.js),
@@ -107,7 +109,7 @@ const CHECK_NOT_LANDED = 'Não foi aplicado. Você pode tentar de novo.'
 const READERS = ['creator', 'admin', 'member']
 const JOINABLE = [null, 'left', 'pending']
 
-export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMention, onReport, onSeen, isTop = true }) {
+export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage, onOpenMention, onReport, onSeen, isTop = true }) {
   const styles = useStyles(makeStyles)
   const avoidKeyboard = useKeyboardAvoidEnabled()
   const { colors } = useTheme()
@@ -1080,6 +1082,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
       if (source.text !== '' || media.length > 0) {
         list.push({ icon: 'encaminhar', label: 'Encaminhar', onPress: () => setForwarding({ source, refs }) })
       }
+    }
+    if (typeof onMessage === 'function' && hosted && !mine && typeof row.diary === 'string' && row.diary !== '' && row.diary !== ownKey) {
+      list.push({ icon: 'mensagem', label: 'Conversar em particular', onPress: () => onMessage(row.diary) })
     }
     if (!asPage.page && can('hide', role, { own: mine })) {
       list.push({ icon: row.hidden ? 'olho' : 'olho_fechado', label: row.hidden ? 'Mostrar' : 'Esconder', onPress: () => hide(row, !row.hidden) })

@@ -768,7 +768,7 @@ export function useSocial ({ ownKey, onToast }) {
 }
 
 // The PostRow props of `post` (a post item) whose actions target `ref`.
-// `h`: { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete } (each
+// `h`: { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete, onMessage } (each
 // optional; onOpenMention(username, { author, username }) gets the row author's verified
 // name so a tap on it needs no lookup). A repost passes the ORIGINAL as `post` and `repostedBy`.
 // With `cache` (a Map, see rowPropsCache) and `rowKey`, the same props object
@@ -810,7 +810,9 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     // Until the own key is known, no post can safely offer a report action.
     // Only the own post itself, never the original of a repost by someone else.
     delete: fnOf(h.onDelete) && canDelete(post, own, actingPageKey()) && repostedBy === null,
-    report: fnOf(h.onReport) && own !== null && post.author !== own
+    report: fnOf(h.onReport) && own !== null && post.author !== own,
+    // Someone else's post, not a page's: PostRow adds the hosted check.
+    message: fnOf(h.onMessage) && own !== null && String(post.author).toLowerCase() !== own && !(prof && prof.page === true)
   }
   const build = (live) => {
     const name = post.name || (prof ? prof.name : null) || null
@@ -870,7 +872,9 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       onLike: live.like,
       onRepost: live.repost,
       onDelete: offers.delete ? () => live.h.onDelete({ ref, seq: post.seq }) : undefined,
-      onReport: offers.report ? () => live.h.onReport({ author: post.author, name, username, seq: post.seq, text: post.text }) : undefined
+      onReport: offers.report ? () => live.h.onReport({ author: post.author, name, username, seq: post.seq, text: post.text }) : undefined,
+      seq: post.seq,
+      onMessage: offers.message ? (author, options) => live.h.onMessage(author, options) : undefined
     }
   }
   const latest = { h, social, ref }
@@ -1274,7 +1278,7 @@ export default function ARua (props) {
   return <MemberARua {...props} />
 }
 
-function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onBoot }) {
+function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onBoot, onMessage }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   // The full hints (per-diary lengths, fresh keys): useNode() keeps only the
@@ -1686,7 +1690,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // Reply names re-render when the cache changes; relative dates on each tick.
   // Originals, counts, the own state and whether deleting is offered re-render
   // the rows too.
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
   // Which handlers exist adds or removes buttons: a change re-renders the rows.
   const offered = Object.keys(handlers).filter((k) => typeof handlers[k] === 'function').join()
   const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered, ownKey }), [names.profileOf, now, social.social, offered, ownKey])

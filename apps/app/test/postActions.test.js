@@ -178,6 +178,20 @@ test('sources have no em dash', (t) => {
   t.absent(testSrc.includes('\u2014'))
 })
 
+test('Mensagem em particular sits in the mais sheet only on a hosted node, for someone else and not a page', (t) => {
+  const read = (file) => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')
+  const row = read('ui/PostRow.js')
+  t.ok(row.includes('const messageable = fn(onMessage) && node !== null && node.hosted === true && Number.isSafeInteger(seq) && seq > 0'), 'hosted, with a handler and a post seq')
+  t.ok(row.includes("...(messageable ? [{ id: 'message', icon: 'mensagem', label: 'Mensagem em particular' }] : []),"), 'the row only when messageable')
+  t.ok(row.includes("if (row.id === 'message') return () => onMessage(author, { context: { author, seq, at, text, hasMedia } })"), 'the post goes as context, never sent')
+  const conversa = read('screens/Conversa.js')
+  t.ok(conversa.includes('String(item.author).toLowerCase() !== ownKey.toLowerCase() && !(authorProfile && authorProfile.page === true)'), 'rowProps: not own, not a page')
+  t.ok(conversa.includes('onMessage: messageable ? onMessage : undefined,'), 'rowProps hands the handler only then')
+  const rua = read('screens/ARua.js')
+  t.ok(rua.includes('message: fnOf(h.onMessage) && own !== null && String(post.author).toLowerCase() !== own && !(prof && prof.page === true)'), 'socialRowProps: not own, not a page')
+  t.ok(rua.includes('onMessage: offers.message ? (author, options) => live.h.onMessage(author, options) : undefined'), 'a cached row reads the newest handler from its live box')
+})
+
 test('more: Bloquear sits after Denunciar, only with a handler, never on the own post', async (t) => {
   const { moreActions } = await load()
   const item = { author: THEM, seq: 4 }

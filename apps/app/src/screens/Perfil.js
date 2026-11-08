@@ -81,7 +81,7 @@ const VERSION_PAGES = 10
 // unchanged until it is checked on a device.
 const formStyles = StyleSheet.create({ fill: { flex: 1 } })
 
-function KeyboardForm ({ children }) {
+export function KeyboardForm ({ children }) {
   const ref = useRef(null)
   const avoidKeyboard = useKeyboardAvoidEnabled()
   const [top, setTop] = useState(0)

@@ -48,6 +48,8 @@ import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { ProfileHeader } from '../ui/ProfileHeader'
 import { MuralFooter, MuralRow, muralGridRows } from '../ui/MuralGrid'
 import { Segmented } from '../ui/Segmented'
+import { CommunitiesBox } from '../ui/CommunitiesBox'
+import { communitiesOf } from '../communitiesBox'
 import { BAR, ProfileBar, useProfileBar } from '../ui/ProfileBar'
 import { BellButton } from '../ui/TopActions'
 import { HelpButton } from '../ui/Help'
@@ -62,6 +64,8 @@ import { DeletePrompt, useDelete } from './Conversa'
 
 const BAND = 96
 const TABS = [{ id: 'posts', label: 'Publicações' }, { id: 'mural', label: 'Mural' }]
+// Same coalescing window as the Comunidades list.
+const COMMUNITIES_DELAY_MS = 800
 
 // The state line of an outbox item. `held`: queued, but not sent
 // automatically (found in storage from an earlier visit).
@@ -142,7 +146,7 @@ function postOf (author, seq, record) {
   }
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople }) {
+export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onMessage }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -188,6 +192,30 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const social = useSocial({ ownKey: ownPublicKey, onToast })
   const followCounts = useFollowCounts(ownPublicKey, String(refresh) + ':' + pulls)
   const { ingest } = social
+  // The own admitted communities (community.list), read on every activation,
+  // refresh and pull, and again when a group changes: the tab stays mounted
+  // while the person joins, creates or leaves a community elsewhere.
+  const [communities, setCommunities] = useState([])
+  const groupVersions = node.groupVersions
+  const communitiesVersions = useRef(groupVersions)
+  useEffect(() => {
+    let alive = true
+    if (node.hosted !== true) {
+      setCommunities([])
+      return
+    }
+    if (!active) return
+    // A burst of groups.changed events costs one read.
+    const delay = groupVersions !== communitiesVersions.current ? COMMUNITIES_DELAY_MS : 0
+    communitiesVersions.current = groupVersions
+    const timer = setTimeout(() => {
+      request('community.list', {}).then((res) => { if (alive) setCommunities(communitiesOf(res)) }, () => {})
+    }, delay)
+    return () => {
+      alive = false
+      clearTimeout(timer)
+    }
+  }, [node.hosted, request, refresh, pulls, active, groupVersions])
   // Replaces the rows with the newest page (a refresh).
   const loadNewest = useCallback(async (refreshProfile = false) => {
     const mine = ++seqRef.current
@@ -452,7 +480,12 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
             <Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} />,
             profileUrl !== null ? <Pill key='share' icon='compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /> : null
           ]}
-          tabs={<Segmented options={TABS} selected={tab} onSelect={setTab} />}
+          tabs={
+            <View>
+              <CommunitiesBox items={communities} title='Suas comunidades' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
+              <Segmented options={TABS} selected={tab} onSelect={setTab} />
+            </View>
+          }
         />
         {outboxList}
         <CountsNote social={social} />
@@ -530,7 +563,8 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       }
     }
   })
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onDelete: del.offered ? del.ask : undefined }
+  // onMessage reaches only reposts of other people's posts: socialRowProps drops it for own posts.
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onMessage, onDelete: del.offered ? del.ask : undefined }
   // An own repost is the ORIGINAL post under 'Você republicou' (every action
   // targets the original); an own post (or quote) targets itself.
   const renderItem = ({ item: row }) => {

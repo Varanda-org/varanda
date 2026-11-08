@@ -443,6 +443,11 @@ A tela de um grupo mostra, sob o cabeçalho, a linha da comunidade, a conversa, 
 
 Cada comunidade tem um link `/c/<chave>` e cada grupo, um link `/g/<chave>`, com a chave em hexadecimal. Abrir o link leva à comunidade (ou ao grupo) na web hospedada e, como `varanda:///c/<chave>` ou `varanda:///g/<chave>`, no app instalado, com as mesmas regras de entrada. Na web hospedada, o link `/c/` ou `/g/` tocado fica guardado na aba (`sessionStorage`, chave `varanda-entry-link`, por no máximo 1 h) para sobreviver à recarga do passo do Google. Enquanto a pessoa não entrou, a tela Entrar avisa "Você recebeu um convite para uma comunidade. Entre para ver e participar." (ou "...para um grupo...") com **agora não**, que descarta o link; num navegador embutido, avisa "Para participar, abra este link no Chrome ou no Safari." com copiar e compartilhar, sem desenhar o link como texto. O link é descartado logo antes de a tela abrir e quando a instalação muda, e recarregar depois de aberto não o reabre. Um cartão de convite de perfil pendente tem prioridade sobre ele. Os links só se compartilham pelo botão **Compartilhar**; o celular compartilha um link https absoluto da própria instalação. Grupos privados nunca aparecem na busca.
 
+### Conversar em particular
+
+- **Menu da pessoa.** Na lista de Membros da comunidade (que só criador e administradores veem), cada pessoa tem um menu (o botão de mais ou um toque longo) com **Conversar em particular**, **Ver perfil** e as ações de administração. No grupo, as ações de uma mensagem de outra pessoa também têm **Conversar em particular**. A conversa privada abre com ela e nada da comunidade vai junto: nem texto, nem nome, nem foto de um grupo privado.
+- **Mensagem em particular a partir de uma publicação.** Uma publicação de outra pessoa, na Rua, numa conversa ou num perfil, tem **Mensagem em particular** nas ações (só no nó hospedado, nunca na própria publicação nem na de uma página). A conversa privada abre com um chip acima do campo: "Sobre a sua publicação de 5 nov", o começo do texto e o ícone de foto quando há. A pessoa precisa escrever algo; ao enviar, a mensagem começa com `Sobre a sua publicação "<até 60 caracteres>" (5 nov):` (ou "Sobre a sua foto", para uma foto sem texto), seguida do que ela escreveu, e o chip some. O X do chip tira o contexto sem enviar nada. Enquanto o chip está ali, o microfone some: uma mensagem de voz iria sem o contexto. O contexto nunca vira resposta a uma mensagem da conversa, e só a tela da conversa que está no topo usa o chip.
+
 ### Limites
 
 - Só no nó hospedado (site e app instalado). O app com configuração manual e o `varanda-serve` mantêm as quatro abas, sem Conversas nem Feira; onde uma tela de Comunidades aparecer, ela mostra "Só na versão web", como Avisos.
@@ -531,6 +536,13 @@ Esta parte muda como as telas se comportam ao rolar e como as linhas aparecem. N
 - O anel de progresso muda de tom: verde até 90 % do limite, âmbar a partir de 90 % e vermelho acima do limite. A partir de 90 %, o contador mostra quantos caracteres faltam, negativo quando passa do limite.
 - No app nativo, uma vibração de sucesso marca a publicação enviada de fato, não a que vai para a fila de saída. Uma vibração de aviso marca a nota de limite de caracteres.
 - A folha tem uma alça no topo no Android, no iOS e na web. O campo não ganha anel de foco.
+
+### Comunidades no perfil
+
+No nó hospedado, o perfil mostra uma faixa de comunidades acima das abas, abaixo das ações, com até 8 comunidades (ícone e nome); com mais de 8, **Ver todas (N)** abre a lista inteira. Tocar numa comunidade a abre. Sem comunidades, a faixa não aparece.
+
+- **No seu Diário:** **Suas comunidades**, as comunidades em que você foi admitido (criou, administra ou é membro); pedidos pendentes não entram.
+- **No perfil de outra pessoa:** só **Comunidades em comum**, as comunidades em que vocês dois foram admitidos, conferidas na lista de membros que você já pode abrir, sem quem foi banido. A lista completa das comunidades da outra pessoa nunca aparece, porque participar de uma comunidade pode revelar interesses sensíveis. O app confere no máximo 8 das suas comunidades, uma de cada vez.
 
 ### Mural
 

@@ -135,3 +135,26 @@ test('groupRows takes the clock, so a day change relabels hoje as ontem', async 
   t.is(sameDay[0].dayMark, 'hoje')
   t.is(nextDay[0].dayMark, 'ontem')
 })
+
+test('person menus offer Conversar em particular, hosted and not for the own key', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const read = (f) => fs.readFileSync(path.join(__dirname, '../src/screens', f), 'utf8')
+  const info = read('ComunidadeInfo.js')
+  const grupo = read('Grupo.js')
+  for (const src of [info, grupo]) {
+    t.ok(src.includes('onMessage') && src.includes("label: 'Conversar em particular'"), 'accepts onMessage and has the row')
+    t.ok(src.includes("typeof onMessage === 'function' &&"), 'gated on the prop')
+    t.ok(/hosted && .*(!== ownKey)/.test(src), 'gated on hosted and the own key')
+  }
+  t.ok(grupo.includes('onMessage(row.diary)') && !grupo.includes('onMessage(row.writer)'), 'passes the verified diary, never the writer')
+  t.ok(info.includes('onMessage(m.member)') && info.includes('onLongPress'), 'member rows open the menu on long press')
+})
+
+test('the community long-press sheet stays mounted while it closes', (t) => {
+  // ActionsSheet runs the chosen action after its close animation and drops it
+  // on unmount: closing must flip `open`, never unmount the sheet.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'ComunidadeInfo.js'), 'utf8')
+  t.ok(src.includes('<ActionsSheet open={menuOpen} onClose={() => setMenuOpen(false)}'), 'closing flips open')
+  t.absent(src.includes('setMenuMember(null)'), 'the member is not cleared on close')
+})

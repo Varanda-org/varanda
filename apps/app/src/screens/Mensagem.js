@@ -46,7 +46,7 @@
 // and an uncertain offer, aceite or recusa is resent only by "Tentar de novo".
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Keyboard, KeyboardAvoidingView, StyleSheet, View } from 'react-native'
+import { Keyboard, KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
@@ -58,6 +58,7 @@ import { OWN_LABEL } from '../groups'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import { countChars } from '../format'
+import { composeText, contextExcerpt, contextLabel, sendAttempt } from '../privateReply'
 import { LABELS, UNSURE_SEND } from '../dm'
 import { useBlocks } from '../blocksProvider'
 import { BLOCK_TEXTS } from '../memberBlocks'
@@ -82,6 +83,8 @@ import { useChatAttachments } from '../ui/AttachSheet'
 import { ChatHeader } from '../ui/ChatHeader'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
+import { Icon } from '../ui/Icon'
+import { IconAction } from '../ui/TopActions'
 import { RefreshableList } from '../ui/RefreshableList'
 import { ActionsSheet } from '../ui/ActionsSheet'
 import { Sheet } from '../ui/Sheet'
@@ -136,7 +139,7 @@ export function Mensagem ({ initial, ...props }) {
   return <MensagemThread key={identity + ':' + props.peer} {...props} initial={entry.current.initial} />
 }
 
-function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing, onAvaliar }) {
+function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing, onAvaliar, intent, onIntentUsed }) {
   const styles = useStyles(makeStyles)
   const avoidKeyboard = useKeyboardAvoidEnabled()
   const insets = useSafeAreaInsets()
@@ -189,6 +192,21 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const [draft, setDraft] = useState(() => initialMessage(initial).draft)
   const [initialCard, setInitialCard] = useState(() => initialMessage(initial).card)
   const [replyTo, setReplyTo] = useState(null)
+  // A post the person came from (privateReply.js): a chip apart from the
+  // draft, turned into text only by composeText when Enviar is pressed.
+  const [context, setContext] = useState(null)
+  // The chip as it is now, for a send that lands later.
+  const contextRef = useRef(null)
+  contextRef.current = context
+  const usedIntents = useRef(new Set())
+  // Only the conversation on top takes an intent: one buried under another
+  // screen never shows nor uses it, and keeps its own chip and draft.
+  useEffect(() => {
+    if (!isTop || !intent || typeof intent.id !== 'string' || usedIntents.current.has(intent.id)) return
+    usedIntents.current.add(intent.id)
+    if (String(intent.peer).toLowerCase() === String(peer).toLowerCase() && intent.context) setContext(intent.context)
+    if (typeof onIntentUsed === 'function') onIntentUsed(intent.id)
+  }, [isTop, intent, peer, onIntentUsed])
   const [hold, setHold] = useState(null)
   const [menu, setMenu] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -401,7 +419,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   // (undefined) takes the draft card, uploads its thumbnail once and keeps
   // the result with the hold, so an explicit retry never builds or uploads
   // again. A card the rules refuse goes without its image, then not at all.
-  const send = async (text, quoteId, heldCard) => {
+  // typed: the person's own text in the composer; ctx: the chip it went with
+  // (a held send keeps both).
+  const send = async (text, quoteId, heldCard, typed = (heldCard !== undefined && hold && hold.typed) || text, ctx = (heldCard !== undefined && hold && hold.ctx) || null) => {
     setAskNew(false)
     lastErr.current = null
     const snapshot = heldCard === undefined && pageKey === null ? linkDraft.take(text) : null
@@ -430,10 +450,14 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       // A retry of a held message can land while a newer draft is being
       // written: only the composer that still holds this text is cleared.
       setDraft((d) => (d === text ? '' : d))
+      // The typed text alone is the same message only while its chip is too:
+      // a draft whose chip was removed (or changed) is a new message, kept.
+      if (typed !== text && contextRef.current === ctx) setDraft((d) => (d === typed ? '' : d))
       setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))
+      if (ctx !== null) setContext((c) => (c === ctx ? null : c))
       setHold(null)
     } else if (r.uncertain || (err && err.message === UNSURE_SEND)) {
-      setHold({ text, quoteId, card, retry: pageKey !== null && err && typeof err.retry === 'function' ? err.retry : null })
+      setHold({ text, quoteId, card, typed, ctx, retry: pageKey !== null && err && typeof err.retry === 'function' ? err.retry : null })
     } else if (err && err.message === BLOCKED_SEND) {
       setBlocked(true)
     }
@@ -454,8 +478,10 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     })
     const err = lastErr.current
     if (r.ok) {
-      setDraft('')
+      // As the other paths: a draft whose chip was removed meanwhile is kept.
+      if (contextRef.current === (hold.ctx || null)) setDraft('')
       setReplyTo(null)
+      if (hold.ctx) setContext((c) => (c === hold.ctx ? null : c))
       setHold(null)
     } else if (r.uncertain && err && typeof err.retry === 'function') {
       setHold({ ...hold, retry: err.retry })
@@ -467,15 +493,17 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const canAttach = mediaApi !== null && pageKey === null && node.online !== false
   const sendingMedia = mediaSend !== null && (mediaSend.phase === 'uploading' || mediaSend.phase === 'sending')
 
-  const mediaDone = (r, text, quoteId) => {
+  const mediaDone = (r, text, quoteId, typed = text, ctx = null) => {
     setMediaSend(null)
     if (r.phase === 'done') {
-      setDraft((d) => (d === text ? '' : d))
+      // As the text path: a draft whose chip was removed meanwhile is a new message.
+      if (contextRef.current === ctx) setDraft((d) => (d === typed ? '' : d))
       setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))
+      if (ctx !== null) setContext((c) => (c === ctx ? null : c))
       setMediaHold(null)
       attachments.clear()
     } else if (r.phase === 'uncertain') {
-      setMediaHold({ op: r.op, text, quoteId })
+      setMediaHold({ op: r.op, text, quoteId, typed, ctx })
     } else if (r.phase === 'failed') {
       setMediaHold(null)
       if (r.error && r.error.message === BLOCKED_SEND) setBlocked(true)
@@ -484,7 +512,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     if (r.phase === 'done' || r.phase === 'uncertain' || (r.phase === 'failed' && r.op)) reread()
   }
 
-  const sendMedia = async (text, quoteId) => {
+  const sendMedia = async (text, quoteId, typed = text, ctx = null) => {
     if (mediaApi === null || sendingMedia || !attachments.ready) return
     setMediaError('')
     setAskNew(false)
@@ -510,7 +538,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     })
     if (sendTokenRef.current === token) sendTokenRef.current = null
     if (r.phase === 'cancelled') return
-    mediaDone(r, text, quoteId)
+    mediaDone(r, text, quoteId, typed, ctx)
   }
 
   // A recorded voice note: one upload, then one dm.send, under the same
@@ -556,7 +584,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     const held = mediaHold
     setMediaError('')
     const r = await retryChatSend({ op: held.op, request: dm, onPhase: setMediaSend, uncertain: unsureSend })
-    mediaDone(r, held.text, held.quoteId)
+    mediaDone(r, held.text, held.quoteId, held.typed, held.ctx)
   }
 
   // Before the request starts, Cancelar drops the photos and nothing is sent.
@@ -569,6 +597,13 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     setMediaError('')
     attachments.clear()
   }
+
+  // With the chip, the text sent is composeText(context, typed): the post
+  // stays text, never dm.send replyTo, and nothing goes without the typed text.
+  const outgoing = context !== null ? composeText(context, draft) : draft
+  // A held send keeps the text composed for that attempt: the same draft and
+  // chip are a retry of exactly those bytes, never a newly composed message.
+  const attempt = sendAttempt(hold, draft, context, outgoing)
 
   // One offer step's dm.send. `op` is kept with an uncertain answer and only
   // "Tentar de novo" sends it again (a page re-puts its signed bytes).
@@ -654,13 +689,14 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
 
   const onSend = () => {
     if (mediaHold) return retryMedia()
-    if (attachments.items.length > 0) return sendMedia(draft, replyTo ? replyTo.id : null)
+    if (context !== null && draft.trim() === '') return undefined
+    if (attachments.items.length > 0) return sendMedia(outgoing, replyTo ? replyTo.id : null, draft, context)
     if (hold && pageKey !== null) return retryHeld()
     const quoteId = replyTo ? replyTo.id : null
-    const plan = sendPlan(hold, draft, quoteId)
+    const plan = sendPlan(hold, attempt, quoteId)
     if (plan === 'confirm') setAskNew(true)
     else if (plan === 'retry') send(hold.text, hold.quoteId, hold.card || null)
-    else send(draft, quoteId)
+    else send(outgoing, quoteId, undefined, draft, context)
   }
 
   const refreshAll = async () => {
@@ -776,10 +812,13 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   else if (peer === ownKey || peer === pageKey) blockNote = LABELS.selfSend
   else if (lookup === null) blockNote = LABELS.noBox
 
-  const left = MAX_TEXT - countChars(draft)
+  // The chip's prefix counts against the limit: composeText never cuts the typed
+  // text short, and the composer counts down from the same budget.
+  const budget = MAX_TEXT - (context !== null ? countChars(composeText(context, '.')) - 1 : 0)
+  const left = budget - countChars(draft)
   const staged = attachments.items.length > 0
   const canSend = blockNote === null && node.online !== false && left >= 0 &&
-    (staged ? attachments.ready && !sendingMedia : draft.trim() !== '')
+    (context !== null && draft.trim() === '' ? false : staged ? attachments.ready && !sendingMedia : draft.trim() !== '')
   const mediaOf = new Map(raw.map((m) => [messageKey(m), m.media]))
   const fwdOf = new Map(raw.map((m) => [messageKey(m), m.fwd]))
   // Forwarding writes as the person, never as a page.
@@ -881,8 +920,35 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           ? (
             <View style={styles.inline}>
               <Soft>A mensagem anterior pode já ter chegado. Enviar este novo texto também?</Soft>
-              <Pill label='Enviar o novo' filled onPress={() => send(draft, replyTo ? replyTo.id : null)} pending={post.pending} />
+              <Pill label='Enviar o novo' filled onPress={() => send(outgoing, replyTo ? replyTo.id : null, undefined, draft, context)} pending={post.pending} />
               <Pill label='cancelar' onPress={() => setAskNew(false)} />
+            </View>
+            )
+          : null}
+        {context !== null
+          ? (
+            <View style={styles.chip}>
+              <Icon name='mensagem' size={18} />
+              <View style={styles.chipBody}>
+                {/* Two lines: with large text the date, the one thing that tells
+                    two photos apart, must not be cut. A photo with no text
+                    keeps its image icon on the title line. */}
+                <View style={styles.chipRow}>
+                  {context.hasMedia && contextExcerpt(context.text) === '' ? <Icon name='imagem' size={16} /> : null}
+                  <Text style={styles.chipTitle} numberOfLines={2}>{contextLabel(context, now)}</Text>
+                </View>
+                {/* The same excerpt the message will carry: one line of text,
+                    links out, already made safe to show. */}
+                {contextExcerpt(context.text) !== ''
+                  ? (
+                    <View style={styles.chipRow}>
+                      {context.hasMedia ? <Icon name='imagem' size={16} /> : null}
+                      <Text style={styles.chipText} numberOfLines={2}>{contextExcerpt(context.text)}</Text>
+                    </View>
+                    )
+                  : null}
+              </View>
+              <IconAction icon='fechar' label='remover contexto' onPress={() => setContext(null)} />
             </View>
             )
           : null}
@@ -897,7 +963,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         sendDisabled={!canSend}
         editable={!(hold && pageKey !== null) && mediaHold === null && !sendingMedia}
         onAttach={canAttach && !hold ? (kind, file) => attachments.pick(file) : null}
-        onVoice={isTop && canAttach && !hold && mediaHold === null && attachments.items.length === 0 ? sendVoice : null}
+        onVoice={isTop && canAttach && !hold && mediaHold === null && attachments.items.length === 0 && context === null ? sendVoice : null}
         attachments={staged ? attachments.items : null}
         onRemoveAttachment={mediaHold === null ? attachments.remove : undefined}
         onCancelAttachments={mediaHold === null && !(mediaSend && mediaSend.phase === 'sending') ? cancelMedia : undefined}
@@ -907,6 +973,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         notice={notice}
         ownKey={ownKey}
         linkDraft={linkDraft}
+        max={budget}
       />
     )
   }
@@ -1060,6 +1127,12 @@ const makeStyles = (colors) => StyleSheet.create({
   decide: { flexDirection: 'row', gap: 8 },
   decideItem: { flex: 1, alignItems: 'stretch' },
   notice: { gap: 6, paddingHorizontal: 12, paddingTop: 6 },
+  chip: { flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingLeft: 10, backgroundColor: colors.card },
+  chipBody: { flex: 1, gap: 2, paddingVertical: 6 },
+  // Never wraps the icon away from its text: the text wraps beside it.
+  chipRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  chipTitle: { color: colors.soft, fontSize: 13, flex: 1 },
+  chipText: { color: colors.ink, fontSize: 14, flex: 1 },
   composer: {
     borderTopWidth: 1,
     borderTopColor: colors.line,
