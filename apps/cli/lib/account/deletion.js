@@ -11,7 +11,10 @@
 // What goes: terms acceptances (terms.json), the age band (age.json), the
 // push subscriptions (push.json), the recovery entries (recovery.json, each
 // leaving the store's usual 30-day tombstone with the public key), the
-// invites the member issued (invites.json), the surprise-invite marks
+// invites the member issued (invites.json, and with the Feira on the codes
+// charged to the member in feira-invites.json: `invites` is then the
+// ./invites-pair.js facade, whose holds and forget cover both files), the
+// surprise-invite marks
 // (invite-drops.json), the encrypted seen blob (seen/<member>, removed
 // with the compare-and-swap of ./seen-store.js: a conflict waits for the
 // next sweep) and the passkey public keys with any waiting deletion

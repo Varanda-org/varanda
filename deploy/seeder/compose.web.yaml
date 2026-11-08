@@ -28,6 +28,9 @@ services:
       VARANDA_MEDIA_MAX_IN_FLIGHT: "${VARANDA_MEDIA_MAX_IN_FLIGHT:-}"
       VARANDA_MEDIA_RATE: "${VARANDA_MEDIA_RATE:-}"
       VARANDA_MEDIA_BURST: "${VARANDA_MEDIA_BURST:-}"
+      # Origem https das páginas públicas da Feira (/f/*, /index/feira/*).
+      # Vazio (padrão) = rotas desligadas, respondem 404.
+      VARANDA_PUBLIC_ORIGIN: "${VARANDA_FEIRA_ORIGIN:-}"
       VARANDA_INDEX_MAX_IN_FLIGHT: "${VARANDA_INDEX_MAX_IN_FLIGHT:-}"
       VARANDA_INDEX_RATE: "${VARANDA_INDEX_RATE:-}"
       VARANDA_INDEX_BURST: "${VARANDA_INDEX_BURST:-}"
@@ -145,6 +148,10 @@ services:
       # abrem um a um em horários sorteados, com um aviso no aparelho. Exige
       # VARANDA_INVITES_PER_WEEK.
       VARANDA_INVITE_DROPS: "${VARANDA_INVITE_DROPS:-}"
+      # Convites da Feira: de 1 a 100 cadastros por semana de cada dono pelo
+      # link de um anúncio. Vazio = desligado. Exige VARANDA_INVITES_PER_WEEK
+      # e VARANDA_TRIAGE_TOKEN.
+      VARANDA_FEIRA_INVITES_PER_WEEK: "${VARANDA_FEIRA_INVITES_PER_WEEK:-}"
       # Verificação de idade (Didit), opcional. Os dois vazios mantêm a
       # checagem desligada; os dois definidos a ligam para todo membro
       # hospedado, inclusive quem já está vinculado. Só o account recebe estas

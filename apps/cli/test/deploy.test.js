@@ -246,6 +246,8 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     'VARANDA_ACCOUNT_BURST',
     'VARANDA_ACCOUNT_MAX_PENDING',
     'VARANDA_INVITES_PER_WEEK',
+    'VARANDA_FEIRA_INVITES_PER_WEEK',
+    'VARANDA_FEIRA_ORIGIN',
     '/account/mod/api/me',
     // The optional native app associations (rules in well-known.sh) are
     // validated before anything changes and written into www after the copy.
@@ -476,7 +478,7 @@ test('compose.web.yaml and env examples: web push variables are optional and sco
   }
 })
 
-for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING', 'VARANDA_INVITES_PER_WEEK', 'VARANDA_INVITE_DROPS', 'VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_DIDIT_DAILY_LIMIT', 'VARANDA_AGE_SINCE']) {
+for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING', 'VARANDA_INVITES_PER_WEEK', 'VARANDA_INVITE_DROPS', 'VARANDA_FEIRA_INVITES_PER_WEEK', 'VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_DIDIT_DAILY_LIMIT', 'VARANDA_AGE_SINCE']) {
   test('compose.web.yaml: ' + name + ' is optional and only on the account service', (t) => {
     const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
     const hits = webLines.map((l, i) => [l, i]).filter(([l]) => l.includes(name))
@@ -1072,6 +1074,7 @@ test('deploy.sh: conferir_antes rejects a bad VARANDA_MAX_MEMBERS and accepts an
       "assoc_re='^[0-9a-fA-F]{64}$'",
       "moderator_re='^[^[:space:],@]+@[^[:space:],@]+$'",
       "limite_re='^[1-9][0-9]{0,7}$'",
+      shText.match(/^origem_re='[^'\n]*'$/m)[0],
       shText.match(/^limites_conta='[^'\n]*'$/m)[0],
       'root=' + JSON.stringify(dir),
       SOURCE_WELL_KNOWN,
@@ -1118,9 +1121,52 @@ test('deploy.sh: conferir_antes rejects a bad VARANDA_MAX_MEMBERS and accepts an
     t.is(res.status, 1, 'VARANDA_INVITE_DROPS without VARANDA_INVITES_PER_WEEK exits 1')
     t.ok(res.stderr.includes('VARANDA_INVITE_DROPS exige VARANDA_INVITES_PER_WEEK em deploy/seeder/.env'), 'says what is missing')
   }
+  // The Feira weekly count needs the ordinary invites and the triage token.
+  const token = 'ab'.repeat(32)
+  for (const extra of ['VARANDA_FEIRA_INVITES_PER_WEEK=10\nVARANDA_TRIAGE_TOKEN=' + token + '\n',
+    'VARANDA_FEIRA_INVITES_PER_WEEK=10\nVARANDA_INVITES_PER_WEEK=\nVARANDA_TRIAGE_TOKEN=' + token + '\n']) {
+    const res = run(extra)
+    t.is(res.status, 1, 'VARANDA_FEIRA_INVITES_PER_WEEK without VARANDA_INVITES_PER_WEEK exits 1')
+    t.ok(res.stderr.includes('VARANDA_FEIRA_INVITES_PER_WEEK exige VARANDA_INVITES_PER_WEEK em deploy/seeder/.env'), 'says what is missing')
+    t.absent(res.stderr.includes(token), 'the token is not echoed')
+  }
+  const noToken = run('VARANDA_FEIRA_INVITES_PER_WEEK=10\nVARANDA_INVITES_PER_WEEK=1\n')
+  t.is(noToken.status, 1, 'VARANDA_FEIRA_INVITES_PER_WEEK without the triage token exits 1')
+  t.ok(noToken.stderr.includes('VARANDA_FEIRA_INVITES_PER_WEEK exige VARANDA_TRIAGE_TOKEN em deploy/seeder/.env'), 'says the token is missing')
+  const feira = run('VARANDA_FEIRA_INVITES_PER_WEEK=100\nVARANDA_INVITES_PER_WEEK=1\nVARANDA_TRIAGE_TOKEN=' + token + '\n')
+  t.is(feira.status, 0, 'the pair and the knob pass: ' + feira.stderr)
+  for (const bad of ['0', '101', 'abc']) {
+    const res = run('VARANDA_FEIRA_INVITES_PER_WEEK=' + bad + '\nVARANDA_INVITES_PER_WEEK=1\nVARANDA_TRIAGE_TOKEN=' + token + '\n')
+    t.is(res.status, 1, 'VARANDA_FEIRA_INVITES_PER_WEEK=' + bad + ' exits 1')
+    t.ok(res.stderr.includes('VARANDA_FEIRA_INVITES_PER_WEEK inválido em deploy/seeder/.env'), 'says the value is invalid')
+  }
+  // The Feira origin is one lower-case https origin, or empty (routes off).
+  for (const ok of ['', 'https://varanda.example', 'https://varanda.example:8443']) {
+    t.is(run('VARANDA_FEIRA_ORIGIN=' + ok + '\n').status, 0, 'VARANDA_FEIRA_ORIGIN=' + ok + ' passes')
+  }
+  for (const bad of ['http://varanda.example', 'https://Varanda.example', 'https://varanda.example/', 'varanda.example', 'https://varanda.example/f']) {
+    const res = run('VARANDA_FEIRA_ORIGIN=' + bad + '\n')
+    t.is(res.status, 1, 'VARANDA_FEIRA_ORIGIN=' + bad + ' exits 1')
+    t.ok(res.stderr.includes('VARANDA_FEIRA_ORIGIN inválido em deploy/seeder/.env'), 'says the origin is invalid')
+  }
   const drops = run('VARANDA_INVITES_PER_WEEK=1\nVARANDA_INVITE_DROPS=1\n')
   t.is(drops.status, 0, 'both set passes: ' + drops.stderr)
   t.is(run('VARANDA_INVITE_DROPS=2\nVARANDA_INVITES_PER_WEEK=1\n').status, 1, 'VARANDA_INVITE_DROPS only takes 1')
+})
+
+test('compose.web.yaml: the seeder origin is VARANDA_FEIRA_ORIGIN, empty by default; the account origin is unchanged', (t) => {
+  const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  const hits = webLines.map((l, i) => [l.trim(), i]).filter(([l]) => l.startsWith('VARANDA_PUBLIC_ORIGIN:'))
+  t.is(hits.length, 2, 'two services set VARANDA_PUBLIC_ORIGIN')
+  const seederAt = webLines.findIndex((l) => /^ {2}seeder:\s*$/.test(l))
+  const accountAt = webLines.findIndex((l) => /^ {2}account:\s*$/.test(l))
+  const seederLine = hits.find(([, i]) => i > seederAt && (accountAt < seederAt || i < accountAt))
+  t.ok(seederLine, 'one sits under the seeder service')
+  t.is(seederLine[0], 'VARANDA_PUBLIC_ORIGIN: "${VARANDA_FEIRA_ORIGIN:-}"', 'seeder origin: empty unless VARANDA_FEIRA_ORIGIN') // eslint-disable-line no-template-curly-in-string
+  t.ok(hits.some(([l]) => l === 'VARANDA_PUBLIC_ORIGIN: "https://${VARANDA_DOMAIN:?defina VARANDA_DOMAIN em deploy/seeder/.env}"'), 'account origin unchanged') // eslint-disable-line no-template-curly-in-string
+  const example = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/seeder.env.example'), 'utf8').split('\n')
+  t.ok(example.some((l) => /^#VARANDA_FEIRA_ORIGIN=/.test(l)), 'seeder.env.example documents VARANDA_FEIRA_ORIGIN')
+  t.ok(example.some((l) => /^#VARANDA_FEIRA_INVITES_PER_WEEK=10$/.test(l)), 'seeder.env.example documents VARANDA_FEIRA_INVITES_PER_WEEK')
 })
 
 test('deploy.sh: limites_conta matches the ranges in account.js LIMIT_ENV', (t) => {
@@ -1138,7 +1184,7 @@ test('deploy.sh: limites_conta matches the ranges in account.js LIMIT_ENV', (t) 
     const [name, min, max] = entry.split(':')
     fromSh[name] = [Number(min), Number(max)]
   }
-  t.is(Object.keys(fromJs).length, 7, 'seven limits in account.js')
+  t.is(Object.keys(fromJs).length, 8, 'eight limits in account.js')
   t.alike(fromSh, fromJs, 'same names and ranges')
   // The shape check allows at most 8 digits, so every max must fit in it.
   for (const [name, [, max]] of Object.entries(fromSh)) t.ok(max < 1e8, name + ' max fits limite_re')

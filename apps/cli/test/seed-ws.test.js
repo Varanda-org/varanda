@@ -26,7 +26,8 @@ function makeGroupHeader (opts) {
 }
 const {
   startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
-  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE
+  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE,
+  INDEX_FEIRA_RE, INDEX_FEIRA_AUTHOR_RE, INDEX_FEIRA_RATINGS_RE, FEIRA_PAGE_RE, FEIRA_FOTO_RE, FEIRA_CAPA_RE, FEIRA_SITEMAP_RE, LISTING_MOD_RE, FEIRA_LISTING_RE
 } = require('../lib/seed-ws')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
@@ -2676,4 +2677,218 @@ test('startSeedWs /media with the real Seeder: a deleted range and every overlap
   t.is(live.status, 200, 'the adjacent live photo is served')
   t.alike(live.body, b4a.alloc(MEDIA_BLOCK_BYTES, 3))
   t.is((await mediaRequest(server.port, url(3, 1), { method: 'HEAD' })).status, 200)
+})
+
+// ---- Feira routes (stub seeder; the live seeder is in seeder-feira-http.test.js)
+
+const FEIRA_ORIGIN = 'https://varanda.test'
+const FA = 'a'.repeat(64)
+const FEIRA_CURSOR = '1700000000000.' + 'b'.repeat(64) + '.3'
+
+function feiraSeeder () {
+  const stub = stubSeeder()
+  stub.calls = []
+  const page = (name) => (...args) => {
+    stub.calls.push([name, ...args])
+    return { items: [{ ref: FA + ':1', status: 'disponivel', statusSeq: null, editSeq: null }], next: null, authors: {}, indexing: false, complete: true }
+  }
+  stub.indexFeira = page('indexFeira')
+  stub.indexFeiraAuthor = page('indexFeiraAuthor')
+  stub.indexFeiraRatings = page('indexFeiraRatings')
+  stub.feiraRecent = () => [FA + ':1']
+  stub.listingPublic = async (hex, seq) => {
+    stub.calls.push(['listingPublic', hex, seq])
+    if (hex !== FA || seq !== 1) return null
+    return {
+      record: { type: 'listing', kind: 'produto', title: 'Bicicleta', text: 'Pouco usada.', price: 35000, unit: null, cat: 'esporte', place: { uf: 'SP', city: 'São Paulo', bairro: null }, at: '2026-11-07T12:00:00.000Z' },
+      editSeq: null,
+      status: 'disponivel',
+      statusSeq: null,
+      name: 'Ana',
+      username: null,
+      page: false
+    }
+  }
+  return stub
+}
+
+test('Feira regexes: path only, canonical segments', (t) => {
+  const base = '/index/feira/sp/sao-paulo/todos/todas'
+  t.ok(INDEX_FEIRA_RE.test(base))
+  t.ok(INDEX_FEIRA_RE.test('/index/feira/sp/sao-paulo/procura/casa'), 'procura')
+  t.ok(INDEX_FEIRA_RE.test('/index/feira/sp/a-b-c-d-e-f-g/todos/todas'), 'a 7-part key')
+  t.ok(INDEX_FEIRA_RE.test(base + '/bicicleta+aro/' + FEIRA_CURSOR), 'words and cursor')
+  t.ok(INDEX_FEIRA_RE.test(base + '/' + FEIRA_CURSOR), 'cursor alone')
+  t.absent(INDEX_FEIRA_RE.test(base + '?x=1'), 'a query string')
+  t.absent(INDEX_FEIRA_RE.test(base + '?'), 'an empty query string')
+  t.absent(INDEX_FEIRA_RE.test('/index/feira/SP/sao-paulo/todos/todas'), 'upper-case uf')
+  t.absent(INDEX_FEIRA_RE.test('/index/feira/s/sao-paulo/todos/todas'), 'one-letter uf')
+  t.absent(INDEX_FEIRA_RE.test('/index/feira/sp/sao--paulo/todos/todas'), 'double dash')
+  t.absent(INDEX_FEIRA_RE.test('/index/feira/sp/sao-paulo/venda/todas'), 'unknown kind')
+  t.ok(INDEX_FEIRA_AUTHOR_RE.test('/index/feira/autor/' + FA))
+  t.ok(INDEX_FEIRA_AUTHOR_RE.test('/index/feira/autor/' + FA + '/' + FEIRA_CURSOR))
+  t.absent(INDEX_FEIRA_AUTHOR_RE.test('/index/feira/autor/' + 'A'.repeat(64)), 'upper-case hex')
+  t.ok(INDEX_FEIRA_RATINGS_RE.test('/index/feira/avaliacoes/' + FA))
+  t.absent(INDEX_FEIRA_RATINGS_RE.test('/index/feira/avaliacoes/' + FA + '?'))
+  t.ok(FEIRA_PAGE_RE.test('/f/' + FA + '/1'))
+  t.absent(FEIRA_PAGE_RE.test('/f/' + 'A'.repeat(64) + '/1'), 'upper-case hex')
+  t.absent(FEIRA_PAGE_RE.test('/f/' + FA + '/0'))
+  t.absent(FEIRA_PAGE_RE.test('/f/' + FA + '/1?utm=x'), 'a query string')
+  t.ok(FEIRA_FOTO_RE.test('/f/' + FA + '/1/foto/4'))
+  t.absent(FEIRA_FOTO_RE.test('/f/' + FA + '/1/foto/5'), 'foto 5')
+  t.absent(FEIRA_FOTO_RE.test('/f/' + FA + '/1/foto/0'))
+  t.ok(FEIRA_CAPA_RE.test('/f/' + FA + '/1/capa'))
+  t.ok(FEIRA_SITEMAP_RE.test('/f/sitemap.xml'))
+  t.absent(FEIRA_SITEMAP_RE.test('/f/sitemap.xml?x'))
+  t.ok(LISTING_MOD_RE.test('/moderation-listing/' + FA + '/1'))
+  t.absent(LISTING_MOD_RE.test('/moderation-listing/' + FA + '/1?'))
+  t.ok(FEIRA_LISTING_RE.test('/feira-listing/' + FA + '/1'))
+  t.absent(FEIRA_LISTING_RE.test('/feira-listing/' + FA + '/0'))
+})
+
+test('startSeedWs Feira: publicOrigin is validated', (t) => {
+  for (const publicOrigin of ['http://varanda.test', 'https://varanda.test/', 'https://Varanda.test', 7]) {
+    let error = null
+    try {
+      startSeedWs({ port: 0, seeder: feiraSeeder(), publicOrigin })
+    } catch (err) {
+      error = err
+    }
+    t.ok(error instanceof TypeError && /publicOrigin/.test(error.message), String(publicOrigin))
+  }
+})
+
+test('startSeedWs Feira: without publicOrigin every route is the generic 404', async (t) => {
+  t.timeout(20000)
+  const seeder = feiraSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  for (const url of ['/f/' + FA + '/1', '/f/sitemap.xml', '/f/' + FA + '/1/capa', '/index/feira/sp/sao-paulo/todos/todas', '/index/feira/autor/' + FA, '/index/feira/avaliacoes/' + FA]) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, url.slice(0, 16))
+    t.is(got.body.toString(), 'não encontrado\n')
+  }
+  t.alike(seeder.calls, [], 'the seeder is never asked')
+})
+
+test('startSeedWs Feira: index routes pass the parsed arguments; bad uf or key length are 404', async (t) => {
+  t.timeout(20000)
+  const seeder = feiraSeeder()
+  const server = await startSeedWs({ port: 0, seeder, publicOrigin: FEIRA_ORIGIN })
+  t.teardown(() => server.close(), { force: true })
+  const got = await mediaRequest(server.port, '/index/feira/sp/sao-paulo/procura/casa/bicicleta+aro/' + FEIRA_CURSOR)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.alike(seeder.calls.pop(), ['indexFeira', 'SP', 'sao-paulo', 'procura', 'casa', 'bicicleta+aro', FEIRA_CURSOR])
+  t.is((await mediaRequest(server.port, '/index/feira/sp/sao-paulo/todos/todas')).status, 200)
+  t.alike(seeder.calls.pop(), ['indexFeira', 'SP', 'sao-paulo', 'todos', 'todas', null, null])
+  t.is((await mediaRequest(server.port, '/index/feira/sp/sao-paulo/todos/todas', { method: 'HEAD' })).status, 200, 'HEAD works')
+  seeder.calls.length = 0
+  t.is((await mediaRequest(server.port, '/index/feira/xx/sao-paulo/todos/todas')).status, 404, 'not a uf')
+  t.is((await mediaRequest(server.port, '/index/feira/sp/a/todos/todas')).status, 404, 'a 1-char key')
+  t.is((await mediaRequest(server.port, '/index/feira/sp/' + 'a'.repeat(49) + '/todos/todas')).status, 404, 'a 49-char key')
+  t.is((await mediaRequest(server.port, '/index/feira/sp/' + 'a'.repeat(48) + '/todos/todas')).status, 200, 'a 48-char key')
+  seeder.calls.pop()
+  t.is((await mediaRequest(server.port, '/index/feira/sp/sao-paulo/todos/todas?x=1')).status, 404, 'a query string')
+  t.alike(seeder.calls, [], 'malformed paths never reach the seeder')
+
+  t.is((await mediaRequest(server.port, '/index/feira/autor/' + FA)).status, 200)
+  t.alike(seeder.calls.pop(), ['indexFeiraAuthor', FA, null])
+  const rated = await mediaRequest(server.port, '/index/feira/avaliacoes/' + FA + '/' + FEIRA_CURSOR)
+  t.is(rated.status, 200)
+  t.alike(seeder.calls.pop(), ['indexFeiraRatings', FA, FEIRA_CURSOR])
+  t.alike(JSON.parse(rated.body.toString()).items, [{ ref: FA + ':1' }], 'ratings answer refs only')
+})
+
+test('startSeedWs Feira: /f/ is GET|HEAD only (405 on POST), HEAD works, unknown listing is the 404 page', async (t) => {
+  t.timeout(20000)
+  const seeder = feiraSeeder()
+  const server = await startSeedWs({ port: 0, seeder, publicOrigin: FEIRA_ORIGIN })
+  t.teardown(() => server.close(), { force: true })
+  const post = await mediaRequest(server.port, '/f/' + FA + '/1', { method: 'POST' })
+  t.is(post.status, 405)
+  t.is(post.headers.allow, 'GET, HEAD')
+  t.is((await mediaRequest(server.port, '/f/sitemap.xml', { method: 'POST' })).status, 405)
+  const page = await mediaRequest(server.port, '/f/' + FA + '/1')
+  t.is(page.status, 200)
+  t.is(page.headers['content-type'], 'text/html; charset=utf-8')
+  t.is(page.headers['cache-control'], 'no-store')
+  t.is(page.headers['referrer-policy'], 'no-referrer')
+  t.is(page.headers['x-robots-tag'], undefined)
+  t.ok(page.body.toString().includes('<link rel="canonical" href="' + FEIRA_ORIGIN + '/f/' + FA + '/1">'))
+  t.ok(page.body.toString().includes('R$ 350,00'))
+  const head = await mediaRequest(server.port, '/f/' + FA + '/1', { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.body.byteLength, 0)
+  t.is(head.headers['content-length'], page.headers['content-length'])
+  const missing = await mediaRequest(server.port, '/f/' + FA + '/2')
+  t.is(missing.status, 404)
+  t.is(missing.headers['content-type'], 'text/html; charset=utf-8')
+  t.is((await mediaRequest(server.port, '/f/' + FA + '/1?x')).status, 404, 'a query string')
+  t.is((await mediaRequest(server.port, '/f/' + FA + '/1/foto/5')).status, 404, 'foto 5')
+  t.is((await mediaRequest(server.port, '/f/' + FA + '/1/foto/1')).status, 404, 'a listing without photos')
+  const map = await mediaRequest(server.port, '/f/sitemap.xml')
+  t.is(map.status, 200)
+  t.is(map.headers['content-type'], 'application/xml; charset=utf-8')
+  t.is(map.headers['cache-control'], 'public, max-age=600')
+  t.ok(map.body.toString().includes('<loc>' + FEIRA_ORIGIN + '/f/' + FA + '/1</loc>'))
+  t.is((await mediaRequest(server.port, '/f/sitemap.xml', { host: 'evil.test' })).status, 421, 'Host first')
+})
+
+test('GET /moderation-listing: the folded listing with the token, the generic 404 otherwise', async (t) => {
+  t.timeout(20000)
+  const seeder = feiraSeeder()
+  const plain = await startSeedWs({ port: 0, seeder, publicOrigin: FEIRA_ORIGIN })
+  t.teardown(() => plain.close(), { force: true })
+  t.is((await groupPostRequest(plain.port, '/moderation-listing/' + FA + '/1')).status, 404, 'no token configured')
+  const server = await startSeedWs({ port: 0, seeder, triageToken: GP_TOKEN })
+  t.teardown(() => server.close(), { force: true })
+  t.is((await groupPostRequest(server.port, '/moderation-listing/' + FA + '/1', { token: null })).status, 404, 'without a token')
+  t.is((await groupPostRequest(server.port, '/moderation-listing/' + FA + '/1', { token: 'ab'.repeat(32) })).status, 404, 'a wrong token')
+  const got = await groupPostRequest(server.port, '/moderation-listing/' + FA + '/1')
+  t.is(got.status, 200)
+  t.alike(JSON.parse(got.body), { title: 'Bicicleta', text: 'Pouco usada.', priceLabel: 'R$ 350,00', city: 'São Paulo', uf: 'SP', kind: 'produto', status: 'disponivel' })
+  t.is((await groupPostRequest(server.port, '/moderation-listing/' + FA + '/2')).status, 404, 'not a live listing')
+  t.is((await groupPostRequest(server.port, '/moderation-listing/' + FA + '/1', { method: 'HEAD' })).status, 405)
+})
+
+test('GET /feira-listing: { ok: true } for a live listing with the token, the generic 404 otherwise', async (t) => {
+  t.timeout(20000)
+  const seeder = feiraSeeder()
+  const plain = await startSeedWs({ port: 0, seeder, publicOrigin: FEIRA_ORIGIN })
+  t.teardown(() => plain.close(), { force: true })
+  t.is((await groupPostRequest(plain.port, '/feira-listing/' + FA + '/1')).status, 404, 'no token configured')
+  const server = await startSeedWs({ port: 0, seeder, triageToken: GP_TOKEN })
+  t.teardown(() => server.close(), { force: true })
+  t.is((await groupPostRequest(server.port, '/feira-listing/' + FA + '/1', { token: null })).status, 404, 'without a token')
+  t.is((await groupPostRequest(server.port, '/feira-listing/' + FA + '/1', { token: 'ab'.repeat(32) })).status, 404, 'a wrong token')
+  const got = await groupPostRequest(server.port, '/feira-listing/' + FA + '/1')
+  t.is(got.status, 200)
+  t.alike(JSON.parse(got.body), { ok: true }, 'nothing but ok')
+  t.is(got.headers['cache-control'], 'no-store')
+  t.is((await groupPostRequest(server.port, '/feira-listing/' + FA + '/2')).status, 404, 'not a live listing')
+  t.is((await groupPostRequest(server.port, '/feira-listing/' + FA + '/1?x')).status, 404, 'a query string')
+  t.is((await groupPostRequest(server.port, '/feira-listing/' + FA + '/1', { method: 'HEAD' })).status, 405)
+})
+
+test('GET /feira-listing: its own budget, so a flood never makes /moderation-post answer 503', async (t) => {
+  t.timeout(20000)
+  const seeder = feiraSeeder()
+  seeder.postBlock = async () => null
+  const server = await startSeedWs({ port: 0, seeder, triageToken: GP_TOKEN, feiraLimits: { listingRate: 0.001, listingBurst: 2 } })
+  t.teardown(() => server.close(), { force: true })
+  const statuses = []
+  for (let i = 0; i < 6; i++) statuses.push((await groupPostRequest(server.port, '/feira-listing/' + FA + '/1')).status)
+  t.alike(statuses.slice(0, 2), [200, 200], 'within its burst')
+  t.ok(statuses.slice(2).every((s) => s === 503), 'beyond its burst, 503')
+  for (let i = 0; i < 3; i++) {
+    t.is((await groupPostRequest(server.port, '/moderation-post/' + FA + '/1')).status, 404, '/moderation-post keeps its own budget')
+  }
+
+  const defaults = await startSeedWs({ port: 0, seeder, triageToken: GP_TOKEN })
+  t.teardown(() => defaults.close(), { force: true })
+  const flood = await Promise.all(Array.from({ length: 24 }, () => groupPostRequest(defaults.port, '/feira-listing/' + FA + '/1')))
+  t.ok(flood.some((r) => r.status === 503), 'the default Feira budget runs out')
+  const mod = await groupPostRequest(defaults.port, '/moderation-post/' + FA + '/1')
+  t.is(mod.status, 404, 'the moderation route still answers, never 503')
 })
