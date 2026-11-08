@@ -181,6 +181,8 @@ function useMomentDraft ({ node, open, active }) {
   const valid = !held && unlocked && node.online !== false && momentValid({ files: photo.files, ready: photo.ready, text })
   const send = async () => {
     if (busyRef.current || !valid) return false
+    const refused = refusalOf(text)
+    if (refused !== '') { setError(refused); return false }
     const file = photo.files[0]
     const gen = genRef.current
     busyRef.current = true

@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 31)
+  t.is(LEGAL_VERSION, 32)
   t.is(LEGAL_DATE, '08/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 31, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 32, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
@@ -18,7 +18,7 @@ test('legal: version 29 has no tolerance for abuse, a real contact, a content li
   t.ok(text(TERMS).includes('não tolera conteúdo censurável nem abuso contra outras pessoas'))
   t.absent(text(TERMS).includes('obrigações de conduta'), 'no clause denying conduct rules')
   t.absent(text(TERMS).includes('protótipo'), 'not described as a prototype')
-  t.ok(text(TERMS).includes('recusam, no próprio aparelho e antes de publicar ou enviar, publicações, mensagens de grupo público, nomes, bios e @nomes de pessoas e de páginas, anúncios e avaliações da Feira, cartões de convite e nomes de grupo público ou de comunidade'), 'on-device word check, with what it covers')
+  t.ok(text(TERMS).includes('recusam, no próprio aparelho e antes de publicar ou enviar, publicações, momentos, mensagens de grupo público, nomes, bios e @nomes de pessoas e de páginas, anúncios e avaliações da Feira, cartões de convite, nomes de grupo público ou de comunidade e depoimentos (também ao mostrar no perfil um depoimento recebido)'), 'on-device word check, with what it covers')
   t.ok(text(TERMS).includes('Você pode bloquear outra pessoa'), 'member blocking')
   t.ok(text(PRIVACY).includes('Esse mesmo bloco guarda as pessoas que você bloqueou'), 'block list in the seen block')
   t.ok(TERMS.sections.some(({ heading }) => heading === 'Seu conteúdo'), 'content license section')
@@ -90,7 +90,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'ab415f6d7a0434f6c06898e65fd6723ae6b29abbb5786a2596414c76b44313cc', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '358228724e3e4c2260c97bb962f4886bc6e8e06754ec020153e68b2da05bd879', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {

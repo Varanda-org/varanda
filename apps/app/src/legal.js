@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 31
+export const LEGAL_VERSION = 32
 export const LEGAL_DATE = '08/11/2026'
-export const REVIEW_NOTE = 'Versão 31, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 32, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -58,7 +58,7 @@ export const TERMS = {
     {
       heading: 'Convivência e denúncias',
       paragraphs: [
-        'O Varanda não tolera conteúdo censurável nem abuso contra outras pessoas. É proibido publicar ou enviar: conteúdo ilegal; exploração ou sexualização de crianças e adolescentes; imagens íntimas de alguém sem o consentimento dessa pessoa; pornografia; ameaças, assédio ou intimidação; discurso de ódio; incentivo à violência ou à automutilação; e spam. Quem descumprir essa regra pode ter a conta bloqueada pela moderação, como descrito em Como funciona a moderação. O app e a versão web recusam, no próprio aparelho e antes de publicar ou enviar, publicações, mensagens de grupo público, nomes, bios e @nomes de pessoas e de páginas, anúncios e avaliações da Feira, cartões de convite e nomes de grupo público ou de comunidade que contêm termos de uma lista curta e pública; nada dessa conferência sai do aparelho nem fica registrado, e mensagens diretas e grupos privados não passam por ela.',
+        'O Varanda não tolera conteúdo censurável nem abuso contra outras pessoas. É proibido publicar ou enviar: conteúdo ilegal; exploração ou sexualização de crianças e adolescentes; imagens íntimas de alguém sem o consentimento dessa pessoa; pornografia; ameaças, assédio ou intimidação; discurso de ódio; incentivo à violência ou à automutilação; e spam. Quem descumprir essa regra pode ter a conta bloqueada pela moderação, como descrito em Como funciona a moderação. O app e a versão web recusam, no próprio aparelho e antes de publicar ou enviar, publicações, momentos, mensagens de grupo público, nomes, bios e @nomes de pessoas e de páginas, anúncios e avaliações da Feira, cartões de convite, nomes de grupo público ou de comunidade e depoimentos (também ao mostrar no perfil um depoimento recebido) que contêm termos de uma lista curta e pública; nada dessa conferência sai do aparelho nem fica registrado, e mensagens diretas e grupos privados não passam por ela.',
         'Você pode denunciar uma publicação, uma mensagem, um anúncio ou uma conta por um destes motivos: spam, assédio, conteúdo ilegal ou outro. O motivo outro serve para o que esta regra proíbe e não se encaixa nos demais.',
         'As denúncias funcionam na versão web hospedada e no app ligado à instalação da associação, com a passkey desbloqueada e a conta Google vinculada. A denúncia é assinada com a chave pública de quem denuncia. Você pode incluir uma observação. A denúncia também leva um trecho da publicação, do jeito que você o enviou. A moderação não confere esse trecho.',
         'A pessoa denunciada não tem tela nem rota para ver a denúncia contra ela.',
