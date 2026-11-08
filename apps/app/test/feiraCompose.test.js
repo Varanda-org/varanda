@@ -423,3 +423,32 @@ test('feiraCompose: submitEdit conflito keeps the form; uncertain is never resen
   t.ok(c.holdsPublication(u2))
   t.is(u2.retry, null)
 })
+
+test('feiraCompose: a listed term refuses the listing before any upload or send', async (t) => {
+  const c = await load()
+  const { BLOCKED_TERMS } = await import('../src/blockedTerms.js')
+  const { refusalText } = await import('../src/wordCheck.js')
+  const term = BLOCKED_TERMS[0]
+  const fields = [{ title: term }, { text: 'Pouco uso, ' + term + '.' }, { city: term + ' do Sul' }, { bairro: term }]
+  const dests = [{ kind: 'personal' }, { kind: 'page', page: PAGE }]
+  for (const extra of fields) {
+    for (const dest of dests) {
+      const d = deps({ identity: dest.kind === 'page' ? 'page:' + PAGE : 'me' })
+      const r = await c.submitListing({ form: form(extra), ack: true, dest, photos: [photo()] }, d)
+      t.absent(r.ok, Object.keys(extra)[0] + ': refused for ' + dest.kind)
+      t.is(r.field, '', 'no field: shown above the button')
+      t.is(r.error, refusalText(term))
+      t.is(d.calls.uploads, 0, 'nothing uploaded')
+      t.is(d.calls.sends.length, 0, 'nothing sent')
+    }
+  }
+
+  const mine = { seq: 5, editSeq: 8, kind: 'produto', title: 'Mesa', text: '', price: 2500, unit: null, cat: 'moveis', place: { uf: 'SP', city: 'Santos', bairro: 'Gonzaga' }, media: [] }
+  const model = c.editModel(mine, { author: ME })
+  const d = deps()
+  const edit = await c.submitEdit({ model, form: { ...model.form, title: term }, dest: { kind: 'personal' }, photos: [photo()] }, d)
+  t.absent(edit.ok, 'an edit is refused too')
+  t.is(edit.error, refusalText(term))
+  t.is(d.calls.uploads, 0, 'nothing uploaded')
+  t.is(d.calls.sends.length, 0, 'nothing sent')
+})

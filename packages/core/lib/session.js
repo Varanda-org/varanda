@@ -45,6 +45,7 @@ const MEDIA_WEB_ONLY = 'mídia disponível só na versão web'
 const PEEK_WEB_ONLY = 'leitura sob demanda só na versão web'
 const DM_WEB_ONLY = 'mensagens diretas disponíveis só no navegador'
 const SEEN_WEB_ONLY = 'estado de vistos sincronizado só no navegador'
+const BLOCK_WEB_ONLY = 'bloqueio de membros disponível só no navegador'
 // How long downloads in a group are gathered into one groups.changed.
 const GROUPS_CHANGED_MS = 50
 
@@ -643,6 +644,11 @@ function createSession ({
     // and group.seen keeps writing group-seen.json only.
     'seen.sign': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
     'seen.merge': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
+
+    // The browser node's own block list (docs/rpc.md 5.111, 5.112): the reads
+    // it filters (peek.read, notices.list, dm.*) exist only there.
+    'block.set': serial(async () => { throw new UsageError(BLOCK_WEB_ONLY) }),
+    'block.list': serial(async () => { throw new UsageError(BLOCK_WEB_ONLY) }),
 
     // Conversas seal to an X25519 box key derived from the Ed25519 identity
     // key and talk to the seeder over the browser node's link, so only the

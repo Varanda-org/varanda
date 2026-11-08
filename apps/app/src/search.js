@@ -4,9 +4,10 @@
 // Pure ES module: no React, no Node built-ins and only pure app imports, so
 // Metro bundles it and Node's import() loads it in tests.
 //
-// The search text part (TOKEN_MAX .. searchRank) is a verbatim local copy of
+// The search text part (TOKEN_MAX .. searchRank) is a local copy of
 // @varanda/core lib/search-text.js (Metro cannot reach packages/core), pinned
-// by a parity test (test/search.test.js); change both together.
+// by a parity test (test/search.test.js); change both together. It differs
+// only in sharing its folding with wholeTokens, which core does not have.
 //
 // The seeder's search answer is UNTRUSTED: it only says where to look. A row
 // exists only after diary.peek confirms it: the name comes from the peeked
@@ -90,36 +91,50 @@ function bounded (text) {
   return out
 }
 
+function foldedTokens (text, max) {
+  let s = text
+  if (typeof String.prototype.normalize === 'function') {
+    try {
+      s = s.normalize('NFKD')
+    } catch {}
+  }
+  const tokens = []
+  let cur = ''
+  for (const ch of s) {
+    const cp = ch.codePointAt(0)
+    if ((cp >= 0x61 && cp <= 0x7a) || (cp >= 0x30 && cp <= 0x39)) {
+      cur += ch
+    } else if (cp >= 0x41 && cp <= 0x5a) {
+      cur += String.fromCharCode(cp + 0x20)
+    } else if (Object.prototype.hasOwnProperty.call(FOLD, cp)) {
+      cur += FOLD[cp]
+    } else if (dropped(cp)) {
+      // dropped without separating
+    } else if (cur !== '') {
+      tokens.push(cur.slice(0, max))
+      cur = ''
+    }
+  }
+  if (cur !== '') tokens.push(cur.slice(0, max))
+  return tokens
+}
+
 // Every token of `text` in order, each cut to TOKEN_MAX; no dedupe and no
 // count cap. A non-string gives [].
 export function splitTokens (text) {
   try {
     if (typeof text !== 'string') return []
-    let s = bounded(text)
-    if (typeof String.prototype.normalize === 'function') {
-      try {
-        s = s.normalize('NFKD')
-      } catch {}
-    }
-    const tokens = []
-    let cur = ''
-    for (const ch of s) {
-      const cp = ch.codePointAt(0)
-      if ((cp >= 0x61 && cp <= 0x7a) || (cp >= 0x30 && cp <= 0x39)) {
-        cur += ch
-      } else if (cp >= 0x41 && cp <= 0x5a) {
-        cur += String.fromCharCode(cp + 0x20)
-      } else if (Object.prototype.hasOwnProperty.call(FOLD, cp)) {
-        cur += FOLD[cp]
-      } else if (dropped(cp)) {
-        // dropped without separating
-      } else if (cur !== '') {
-        tokens.push(cur.slice(0, TOKEN_MAX))
-        cur = ''
-      }
-    }
-    if (cur !== '') tokens.push(cur.slice(0, TOKEN_MAX))
-    return tokens
+    return foldedTokens(bounded(text), TOKEN_MAX)
+  } catch {
+    return []
+  }
+}
+
+// App only (wordCheck.js): every token of the whole `text`, with the same
+// folding but no input bound and no cut, so nothing can hide past either one.
+export function wholeTokens (text) {
+  try {
+    return typeof text === 'string' ? foldedTokens(text, Infinity) : []
   } catch {
     return []
   }

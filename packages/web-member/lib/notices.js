@@ -73,7 +73,7 @@ const { MAX_FUTURE_MS } = require('@varanda/core/lib/feed')
 const { mentionTokens } = require('@varanda/rpc')
 const { memoryStorage } = require('./storage')
 const { guardedWsStream } = require('./ws-stream')
-const { moderation } = require('./member-ops')
+const { readerModeration } = require('./member-ops')
 const { PEEK_CORE_PAGE_SIZE, PEEK_MAX_FRAME, SEEDER_BUSY } = require('./peek')
 const store = require('./node-store')
 
@@ -610,7 +610,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       const key = typeof raw === 'string' ? raw.toLowerCase() : ''
       if (HEX64.test(key)) follows.add(key)
     }
-    const mod = await moderation(storage, association)
+    const mod = await readerModeration(storage, association)
     checkAborted(run)
     // activity is false only on a read that used v1 because the seeder took
     // neither v3 nor v2: every other result says nothing about the seeder's

@@ -46,6 +46,8 @@ import { pendingOpen, tapKind } from '../doubleTap'
 import { relativeTime } from '../format'
 import { hasLink } from '../links'
 import { moreActions, repostActions, shareLink } from '../postActions'
+import { useBlocks } from '../blocksProvider'
+import { blockedRowView } from '../memberBlocks'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
 import { whoOf } from '../who'
@@ -136,7 +138,7 @@ function PostRowView ({
   author, name, username, avatar, at, text, replyToName, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
   onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
-  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onDelete, link, onNotice
+  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice
 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -213,7 +215,7 @@ function PostRowView ({
     if (fn(onNotice)) onNotice(ok ? 'Link copiado' : 'Não foi possível copiar o link')
   }))
   const moreRows = [
-    ...moreActions(null, { link, onReport: fn(onReport) ? true : null }),
+    ...moreActions(null, { link, onReport: fn(onReport) ? true : null, onBlock: fn(onBlock) ? true : null }),
     ...(fn(onDelete) ? [{ id: 'delete', icon: 'lixeira', label: 'Apagar', danger: true }] : [])
   ]
   const runMore = (row) => {
@@ -224,6 +226,7 @@ function PostRowView ({
       }
     }
     if (row.id === 'report') return onReport
+    if (row.id === 'block') return onBlock
     if (row.id === 'delete') return onDelete
     return undefined
   }
@@ -597,7 +600,21 @@ function PostRowView ({
 
 // Default shallow comparison: the screens keep each row's props stable while
 // what it shows did not change (socialRowProps with a row cache).
-export const PostRow = memo(PostRowView)
+// The block gate in front of every timeline: the node already leaves a blocked
+// author out of each read, and this clears rows that are already on screen.
+// Bloquear goes where Denunciar goes, so a row that can be reported can be
+// blocked and the two rules stay one.
+function BlockGate (props) {
+  const blocks = useBlocks()
+  const view = blockedRowView(props, blocks.has)
+  if (view === null) return null
+  const onBlock = blocks.available && typeof props.onReport === 'function'
+    ? () => blocks.ask({ author: props.author, name: props.name, username: props.username })
+    : undefined
+  return <PostRowView {...props} quote={view.quote} onBlock={onBlock} />
+}
+
+export const PostRow = memo(BlockGate)
 
 const makeStyles = (colors) => StyleSheet.create({
   row: {

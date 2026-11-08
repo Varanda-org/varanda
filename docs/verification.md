@@ -6257,3 +6257,161 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi executada nesta documentação.
 - O ponto da aba Feira reflete o que a última abertura da Feira contou; ele não é atualizado em segundo plano.
 - As contagens olham só a primeira página de cada busca.
+
+## 134. Bloquear uma pessoa (PR feat/member-block)
+
+Caminhada do bloqueio pessoal: o menu da publicação, o perfil, a lista em Ajustes e cada leitura que tem de obedecer a ele. A lista fica no aparelho (`docs/rpc.md` 5.111 e 5.112) e cobre o que a regra 1.2 da App Store pede.
+
+Regras que os passos conferem:
+
+- Quem filtra é o nó ao ler, não uma tela. A tela só limpa na hora o que já mostrava.
+- A pessoa bloqueada não recebe nada: nenhum aviso, nenhum registro que diga que houve bloqueio. O deixar de seguir é um registro público comum.
+- Como os diários são públicos, ela ainda pode ver o que você publica, seguir e responder. Só quem bloqueou deixa de ver.
+- A dobra de um grupo não obedece à lista.
+- Uma caixa só é marcada depois que o passo foi executado e o resultado conferido.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node packages/core/test/member-block.test.js`, `node packages/web-member/test/member-block.test.js` e `node packages/rpc/test/methods.test.js`.
+- `node apps/app/test/memberBlocks.test.js`, `node apps/app/test/postActions.test.js`, `node apps/app/test/sw.test.js`, `node apps/app/test/vitrine.test.js` e `node apps/app/test/platformGate.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada com dois membros de teste, A e B, que se seguem e têm publicações, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Em A Rua, no menu **Mais** de uma publicação de B, aparecem **Denunciar** e **Bloquear**; numa publicação de A, nenhum dos dois.
+- [ ] **Bloquear** abre "Bloquear B?" com a nota de que a pessoa não é avisada e de que ainda pode ver o que você publica. **Cancelar** não muda nada.
+- [ ] Confirmar mostra "Pessoa bloqueada. Desfaça em Ajustes." e as publicações de B somem de A Rua na hora, sem puxar para atualizar. O botão de publicar não cobre o aviso.
+- [ ] Em Seguindo, B não aparece mais. Depois de sincronizar, um terceiro membro vê A sem seguir B, e nada no diário de A diz que houve bloqueio.
+- [ ] Uma republicação de uma publicação de B por um terceiro membro some de A Rua; uma citação de B por um terceiro mostra "Publicação indisponível"; a publicação do terceiro continua.
+- [ ] Espiadinha: as publicações de B não aparecem, e a nota "N diários não aparecem" não conta B.
+- [ ] Busca: uma palavra que só B publicou não traz a publicação de B. Em Contas, B ainda aparece, e tocar abre o perfil.
+- [ ] Conversa de uma publicação com respostas de B: as respostas de B não aparecem; as dos outros, sim.
+- [ ] Avisos: curtida, resposta, citação ou menção de B depois do bloqueio não geram linha. As linhas antigas de B somem.
+- [ ] Perfil de B: mostra "Você bloqueou esta pessoa" e **Desbloquear**, sem publicações, sem Seguir e sem Mensagem.
+- [ ] Conversas: uma mensagem de B enviada depois do bloqueio não aparece; a conversa antiga fica, com "Você bloqueou esta pessoa" e **Desbloquear**. Tentar enviar é recusado.
+- [ ] Ajustes, **Pessoas bloqueadas**: B aparece com o nome ou o @nome. **Desbloquear** tira B da lista, e as publicações de B voltam a aparecer na Busca e na Espiadinha. B não volta a ser seguido.
+- [ ] Reabrir o app depois de bloquear: B continua bloqueado, também sem internet.
+- [ ] Sair e entrar com outra conta no mesmo aparelho: a lista da conta anterior não vale para a nova (**Apagar** a conta deste aparelho limpa a lista).
+- [ ] Sem internet, **Bloquear** funciona, e o aviso de que o bloqueio de mensagens ainda não chegou aos outros aparelhos não impede o bloqueio.
+- [ ] Web e PWA, com avisos push ligados e o app fechado: uma curtida de B depois do bloqueio não mostra notificação; a de outra pessoa mostra. Depois de **Desbloquear** e de abrir o app uma vez, a de B volta a aparecer. No Safari do iPhone, conferir que a assinatura de push continua válida depois de um push silenciado.
+- [ ] Vitrine: com `EXPO_PUBLIC_VARANDA_VITRINE=1`, **Bloquear** num post de exemplo tira o post da tela, e a pessoa aparece em Pessoas bloqueadas.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação. Uma conferência prévia com a Vitrine, sem membros reais, passou no simulador iOS: bloquear pelo menu da publicação e pelo perfil, a lista em Ajustes e desbloquear. Android, a caminhada com dois membros e os avisos push em navegador real seguem por fazer.
+- A lista entre aparelhos está na seção 135.
+- Grupos, comunidades e Feira não são filtrados.
+
+## 135. Lista de bloqueio em todos os aparelhos da passkey (PR feat/member-block-sync)
+
+Caminhada da lista de pessoas bloqueadas entre os aparelhos da mesma passkey, pelo bloco cifrado de vistos (`docs/protocol.md`, seção 14, versão 2).
+
+Regras que os passos conferem:
+
+- O serviço de conta guarda um bloco do mesmo tamanho de antes e não consegue ler a lista.
+- Em cada chave vale a mudança mais nova: um desbloqueio não é desfeito por um bloqueio mais antigo.
+- A falta de uma entrada no bloco nunca conta como desbloqueio.
+- Um aparelho com a versão anterior não usa o bloco novo nem grava por cima dele.
+- Uma caixa só é marcada depois que o passo foi executado e o resultado conferido.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node packages/core/test/seen-blob.test.js`, `node packages/core/test/member-block.test.js` e `node packages/web-member/test/seen-sync.test.js`.
+- `node apps/app/test/seenSync.test.js`, `node apps/app/test/vitrine.test.js` e `node apps/cli/test/account-seen.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada com a mesma passkey em dois aparelhos, A e B, com o terceiro membro C publicando, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Em A, bloquear C. Em até dois minutos, com B aberto, as publicações de C somem de A Rua e da Espiadinha em B, e C aparece em Ajustes, Pessoas bloqueadas, em B.
+- [ ] Em B, desbloquear C. Em até dois minutos, C sai da lista em A, e as publicações de C voltam na Busca em A.
+- [ ] Com B sem internet, bloquear C em A e desbloquear D em A. Ao voltar a internet em B, as duas mudanças chegam.
+- [ ] Bloquear C em A e, com A sem internet, bloquear E em B. Com os dois de volta, os dois aparelhos ficam com C e E.
+- [ ] Em A, **Apagar** a conta deste aparelho e entrar de novo com a mesma passkey: a lista volta depois da primeira passada de vistos.
+- [ ] Um aparelho novo da mesma passkey recebe a lista.
+- [ ] Marcas de visto seguem valendo: um aviso visto em A não aparece como novo em B.
+- [ ] Um aparelho com a versão anterior do app ao lado de um com esta: nada quebra no anterior, ele para de receber vistos e, depois de atualizar, volta a receber, com a lista.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- Passa o limite de 128 mudanças, a mais antiga fica só no aparelho onde já estava; um aparelho novo não a recebe.
+
+## 137. Termos 29 e manifesto de privacidade para a revisão da App Store (PR fix/terms-privacy-manifest-store)
+
+As seções anteriores não mudam. Esta seção documenta os textos e o manifesto preparados para a primeira revisão da App Store (issue #46).
+
+### O que mudou
+
+- Termos e Política na versão 29 (`apps/app/src/legal.js`, `TERMS_VERSION` em `packages/core/lib/terms.js`), com novo aceite: tolerância zero com conteúdo censurável e abuso, a conferência de termos no aparelho antes de publicar, o bloqueio de outra pessoa, seção "Seu conteúdo", contato por e-mail, Instituto Varanda em constituição e conta individual nas lojas, sem a menção a protótipo.
+- A verificação de idade, as denúncias, o recurso, a passkey, o vínculo Google e as fotos passam a constar como válidos também no app ligado à instalação da associação, como o código já fazia (`apps/app/App.js`, `Denunciar.js`, `Recurso.js`). A verificação de idade segue sem rodar no app com configuração manual.
+- A Política deixa de dizer que a exclusão da conta não tem fluxo próprio, e passa a citar o registro de erros do servidor web, que pode guardar o texto de uma busca, e as estatísticas de uso.
+- `NSPrivacyCollectedDataTypes` preenchido com os 13 tipos do formulário App Privacy (`docs/development.md`) em `apps/app/ios/Varanda/PrivacyInfo.xcprivacy` e em `ios.privacyManifests` do `apps/app/app.json`. Identificadores conferidos na documentação da Apple em 2026-11-08.
+
+### Testes automatizados
+
+- `node apps/app/test/legal.test.js`: versão, data, resumo do texto e as frases da versão 29.
+- `node apps/app/test/terms-version.test.js` e `node packages/core/test/terms.test.js`: as duas constantes de versão.
+- `node apps/site/test/legal.test.js`: as páginas `termos/` e `privacidade/` geradas de `legal.js`.
+- `node apps/app/test/hardening.test.js`: a lista de dados no `app.json` e no manifesto, e o `expo prebuild --clean` numa cópia temporária reproduzindo o manifesto.
+
+### Checagens humanas (a fazer)
+
+- [ ] A conferência de termos no aparelho e o bloqueio de outra pessoa, com a lista guardada no bloco cifrado, já estão no ar antes de a versão 29 ir ao ar, porque os documentos os descrevem como existentes. Eles vêm em outros PRs.
+- [ ] A caixa `contato@varanda.app` existe e recebe e-mail antes de a versão 29 ir ao ar. Em 2026-11-08, `varanda.app` não tinha registro MX.
+- [ ] App Store Connect, App Privacy: as respostas publicadas (Publish) são as do manifesto (`docs/development.md`).
+- [ ] App Store Connect, direitos de conteúdo: resposta dada com base na seção "Seu conteúdo".
+- [ ] O nome em "O que é o Varanda" é o mesmo que a App Store mostra como vendedor.
+- [ ] Revisão jurídica do texto novo: associação em constituição e conta individual, autorização de uso do conteúdo, lista do que é proibido, canal para pedidos sobre dados.
+- [ ] `pod install` mantém `NSPrivacyCollectedDataTypes` e muda só a indentação do manifesto.
+- [ ] Android e simulador iOS, com a instalação: o portão pede o novo aceite, e Ajustes › Termos e privacidade mostra a versão 29 com a seção "Seu conteúdo".
+
+### Limites
+
+- `supportUrl` em `apps/app/store.config.json` e a seção Contato do site continuam sem o e-mail.
+- O texto promete "não tolera" sem prazo de resposta: os Termos não fixam em quantas horas uma denúncia é analisada.
+- A autorização de uso vai do membro para a associação. A licença de uso comercial dentro da rede, do rascunho do estatuto, não entrou nesta versão.
+
+## 138. Conferência de palavras no aparelho (PR feat/on-device-word-check)
+
+O app recusa, antes de publicar, texto público com um termo de `apps/app/src/blockedTerms.js`. É o item "método para filtrar" da diretriz 1.2 da App Store. Não muda protocolo, semeador nem RPC.
+
+Regras que os passos conferem:
+
+- A comparação é por palavra inteira, depois de dobrar acentos e maiúsculas, e lê o texto todo.
+- A recusa é definitiva: o rascunho fica para editar, e não há como publicar mesmo assim.
+- Mensagens diretas, grupos privados, denúncias e recursos não passam pela conferência.
+- Nada sai do aparelho: nenhum pedido, contador, log ou registro de recusa.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/wordCheck.test.js`, `node apps/app/test/search.test.js`, `node apps/app/test/feiraCompose.test.js`, `node apps/app/test/forward.test.js` e `node apps/app/test/groups.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA. Com `EXPO_PUBLIC_VARANDA_VITRINE=1` as telas abrem sem conta. Use `vou te matar` como termo de teste, ou outro da lista:
+
+- [ ] Publicar: escrever `Bom dia, Vou te MATAR amanhã` e tocar em Publicar. Aparece `Não dá para publicar: "vou te matar" é um termo que o Varanda não permite em conteúdo público. Edite o texto e tente de novo.`, o rascunho continua na caixa e nada entra na fila nem em A Rua. Editar o texto e publicar funciona.
+- [ ] Sem conexão: a mesma recusa, e nada entra na fila de envio.
+- [ ] Responder e citar: a mesma recusa nas duas folhas.
+- [ ] Agindo como Página: a mesma recusa, antes de assinar.
+- [ ] Palavra maior: `a cultura do bairro` e `o macaco fugiu` publicam normalmente.
+- [ ] Grupo público: a recusa aparece acima da caixa ao enviar, inclusive com foto e legenda.
+- [ ] Grupo privado e mensagem direta: o mesmo texto é enviado.
+- [ ] Encaminhar: uma mensagem com o termo é recusada para um grupo público e encaminhada para uma conversa ou um grupo privado.
+- [ ] Editar perfil, e o passo do perfil na entrada: o termo no nome ou na bio mostra a recusa enquanto se digita e desliga Salvar ou Continuar.
+- [ ] Feira: em Anunciar e em Editar, o termo no título, na descrição, na cidade ou no bairro mostra a recusa logo acima do botão, e nenhuma foto é enviada.
+- [ ] Nome de grupo público e de comunidade, ao criar e ao renomear: a recusa aparece enquanto se digita e desliga o botão. Com a visibilidade "Privado" em Novo grupo, a recusa some.
+- [ ] @nome: ao vincular a conta e em "trocar @nome", `vou_te_matar` mostra a recusa ao tocar no botão, e nada vai ao serviço de conta.
+- [ ] Página: em Nova página, o termo no @nome, no nome ou na bio mostra a recusa enquanto se digita e desliga "Criar página". Nos ajustes da Página, o mesmo no nome e na bio (Salvar) e em "Novo @nome" (Trocar @nome).
+- [ ] Avaliar, na Feira: o termo no comentário mostra a recusa ao tocar em Avaliar, e nada é publicado.
+- [ ] Cartão de convite: o termo em "Pra quem?" ou em "Sua mensagem" mostra a recusa e desliga "Criar link com cartão". "Mandar sem cartão" continua funcionando.
+- [ ] Denunciar: o termo na observação é enviado.
+- [ ] Rede: com o inspetor de rede aberto na web, uma recusa não gera nenhum pedido.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- A conferência não cobre o título e a descrição de uma prévia de link, que vêm do site.
+- O serviço de conta não conhece a lista, então um @nome só é recusado no app.
+- Um @nome com letras e números colados (`termo123`) conta como uma palavra só e passa.
+- Um app modificado, um build antigo ou a CLI publicam sem passar por ela. Isso se confere lendo `apps/app/src/wordCheck.js`: o protocolo e o semeador não têm a lista.
+- Ela não lê fotos nem áudio, e grafias diferentes passam.
