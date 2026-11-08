@@ -2,7 +2,7 @@
 
 import rpc from '@varanda/rpc'
 import { fixtures } from './fixtures.js'
-import { createVitrineRequest, vitrineFeiraState } from './request.js'
+import { createVitrineRequest, vitrineFeiraState, vitrineLiveRecords } from './request.js'
 import { testimonialPointers, testimonialSource } from './testimonialIndex.js'
 
 const { isKey, isRef } = rpc
@@ -47,18 +47,20 @@ function requirePost (ref) {
   return post
 }
 
-function edges (ref, kind) {
+const diaryRows = (request) => [...fixtures.diaryRecords, ...vitrineLiveRecords(request)]
+
+function edges (ref, kind, request) {
   if (kind === 'replies' || kind === 'quotes') {
     const field = kind === 'replies' ? 'replyTo' : 'quote'
     return posts.filter((p) => p[field] && refOf(p[field]) === ref)
   }
   const type = kind.slice(0, -1)
-  return lastWrites(fixtures.diaryRecords.filter((e) => e.record.type === type && refOf(e.record.to) === ref), (r) => refOf(r.to))
+  return lastWrites(diaryRows(request).filter((e) => e.record.type === type && refOf(e.record.to) === ref), (r) => refOf(r.to))
     .map((e) => ({ author: e.author, seq: e.seq, at: e.record.at }))
 }
 
-function counts (ref) {
-  return Object.fromEntries(['replies', 'reposts', 'likes', 'quotes'].map((kind) => [kind, edges(ref, kind).length]))
+function counts (ref, request) {
+  return Object.fromEntries(['replies', 'reposts', 'likes', 'quotes'].map((kind) => [kind, edges(ref, kind, request).length]))
 }
 
 function edgePage (rows, cursor, limit, order = oldestFirst) {
@@ -92,9 +94,9 @@ function writersOf (group) {
 
 const diaryCount = (group) => new Set(writersOf(group).map((w) => w.diary)).size
 
-function activeReposts (author) {
+function activeReposts (author, request) {
   const latest = new Map()
-  for (const e of fixtures.diaryRecords) {
+  for (const e of diaryRows(request)) {
     if (e.author !== author || e.record.type !== 'repost') continue
     const target = refOf(e.record.to)
     const previous = latest.get(target)
@@ -160,27 +162,27 @@ export function vitrineIndex (url, request) {
     if (!isRef(ref)) notFound()
     const post = requirePost(ref)
     if (route !== 'post') {
-      const rows = edges(ref, route)
+      const rows = edges(ref, route, request)
       const page = edgePage(rows, cursor, 20, route === 'quotes' ? quotesOrder : newestFirst)
       return { ...flags, ref, kind: route, ...page, total: rows.length, authors: authorsOf(page.items.map((r) => r.split(':')[0])) }
     }
-    const page = edgePage(edges(ref, 'replies'), cursor, 50)
-    const quotes = edgePage(edges(ref, 'quotes'), undefined, 50, quotesOrder).items
+    const page = edgePage(edges(ref, 'replies', request), cursor, 50)
+    const quotes = edgePage(edges(ref, 'quotes', request), undefined, 50, quotesOrder).items
     const parent = post.replyTo ? refOf(post.replyTo) : null
-    const c = counts(ref)
+    const c = counts(ref, request)
     return { ...flags, ref, parent, replies: page.items, next: page.next, quotes, likes: c.likes, reposts: c.reposts, repliesTotal: c.replies, quotesTotal: c.quotes, authors: authorsOf([ref, parent, ...page.items, ...quotes].filter(Boolean).map((r) => r.split(':')[0])) }
   }
 
   if (route === 'counts' && part === undefined) {
     const refs = key.split(',')
     if (refs.length > 31 || !refs.every((ref) => isRef(ref))) notFound()
-    return { ...flags, counts: Object.fromEntries(refs.filter((ref) => posts.some((p) => refOf(p) === ref)).map((ref) => [ref, counts(ref)])) }
+    return { ...flags, counts: Object.fromEntries(refs.filter((ref) => posts.some((p) => refOf(p) === ref)).map((ref) => [ref, counts(ref, request)])) }
   }
 
   if (route === 'member' && cursor === undefined) {
     requireProfile(key)
     if (part !== undefined && !/^[1-9][0-9]*$/.test(part)) notFound()
-    const seqs = [...new Set([...posts.filter((p) => p.author === key).map((p) => p.seq), ...activeReposts(key)])].sort((a, b) => b - a)
+    const seqs = [...new Set([...posts.filter((p) => p.author === key).map((p) => p.seq), ...activeReposts(key, request)])].sort((a, b) => b - a)
     const records = [...fixtures.diaryRecords, ...fixtures.listings, ...fixtures.rates].filter((e) => e.author === key)
     return { ...flags, ...hint(), ...pageHint(key), length: Math.max(2, ...seqs, ...records.map((e) => e.seq)) + 1, posts: seqs.filter((seq) => part === undefined || seq < Number(part)).slice(0, 100), postsTotal: seqs.length }
   }

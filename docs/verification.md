@@ -6803,3 +6803,33 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi marcada nesta documentação.
 - Os testes conferem o código-fonte por leitura de arquivo, não a tela. A posição do botão, o respiro das pílulas e o comportamento do teclado só se confirmam no aparelho ou no simulador.
 - O fechamento do teclado em "Buscar" vale para todas as plataformas, porque a regra fica na função compartilhada; a conferência no Android é a que importa para o teclado.
+
+## 145. Vitrine: fotos de anúncios, origem de demonstração, contagens ao vivo (PR chore/vitrine-demo-data)
+
+Ajustes só do modo Vitrine (demonstração, `EXPO_PUBLIC_VARANDA_VITRINE=1`). Não mudam nada no uso real: protocolo, RPC, semeador e o nó de verdade ficam como estão.
+
+O que mudou:
+
+- As fotos dos anúncios da Feira carregam na demonstração. A mídia do anúncio é montada com bytes de fotos de verdade e o `publicMedia` a encontra.
+- A origem de instalação da demonstração é `https://vitrine.invalid`. Com isso as buscas salvas da Feira persistem e os controles de oferta (Aceitar, Recusar, Fazer oferta e as respostas rápidas) aparecem na conversa de demonstração. Eles nunca apareciam na demonstração e por isso nunca foram revistos.
+- As contagens de curtidas e de compartilhamentos seguem os toques ao vivo. Curtir ou compartilhar uma publicação e sair de A Rua e voltar mantém a contagem, e desfazer a leva de volta ao valor de antes. Cada instância da demonstração tem a sua lista, e os dados de exemplo não mudam.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/vitrineIndex.test.js`, `node apps/app/test/vitrine.test.js`, `node apps/app/test/vitrineGuard.test.js`, `node apps/app/test/vitrineFeira.test.js`, `node apps/app/test/vitrineLarge.test.js` e `node apps/app/test/engagement.test.js`. O teste "live likes and reposts move the counts" falha sem a junção dos registros ao vivo.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA, com `EXPO_PUBLIC_VARANDA_VITRINE=1`:
+
+- [ ] Feira: os anúncios mostram foto, na lista e na página do anúncio.
+- [ ] Feira: salvar uma busca, sair da tela e voltar. A busca continua salva.
+- [ ] Conversa de demonstração com um anúncio: aparecem Aceitar e Recusar numa oferta recebida, Fazer oferta e as respostas rápidas. Percorrer cada controle: aceitar, recusar, fazer uma oferta e tocar numa resposta rápida, conferindo o texto, o estado depois do toque e que nada quebra.
+- [ ] A Rua: curtir uma publicação e compartilhar outra. Ir para outra aba e voltar: as contagens e os ícones continuam. Desfazer volta ao número de antes.
+- [ ] Diário: um compartilhamento feito na demonstração aparece na lista do próprio Diário e some ao desfazer.
+- [ ] Web e PWA: repetir as conferências acima na largura de celular.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Os testes conferem as respostas da demonstração, não a tela. Fotos, controles de oferta e posição só se confirmam no aparelho ou no simulador.
+- Os controles de oferta nunca foram revistos na demonstração antes desta mudança: a caminhada acima é a primeira revisão deles.

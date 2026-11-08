@@ -50,6 +50,8 @@ const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0'
 const POST_BYTES = pictures.map((picture) => hexBytes(picture.hex))
 const POST_SHA = POST_BYTES.map((bytes) => hexOf(sha256(bytes)))
 export const postPhoto = (n, p) => ({ core: key(300), mime: 'image/jpeg', start: 1 + n, blocks: 1, bytes: POST_BYTES[p].byteLength, sha256: POST_SHA[p], width: PICTURE_SIZE[p][0], height: PICTURE_SIZE[p][1] })
+// Which drawing a post photo's SHA-256 names, or -1.
+export const postPictureIndex = (sha) => POST_SHA.indexOf(sha)
 // A fresh copy of the drawing a post photo names, or null.
 export const postPictureBytes = (sha) => {
   const i = POST_SHA.indexOf(sha)
@@ -396,13 +398,13 @@ const listing = (author, seq, kind, title, price, unit, cat, media) => ({
 })
 
 export const listings = [
-  listing(own, 40, 'produto', 'Bicicleta azul', 25000, null, 'esporte', [publicPhoto(10, 3), publicPhoto(11, 0)]),
+  listing(own, 40, 'produto', 'Bicicleta azul', 25000, null, 'esporte', [postPhoto(40, 3), postPhoto(41, 0)]),
   listing(own, 41, 'procura', 'Procuro estante pequena', 18000, null, 'moveis'),
   listing(own, 42, 'produto', 'Livros de receitas', 3500, null, 'casa'),
   listing(members[1].author, 40, 'servico', 'Aulas de bicicleta', 6000, 'hora', 'aulas'),
   listing(members[1].author, 41, 'produto', 'Capacete de ciclismo', 8000, null, 'esporte'),
   listing(pages[0].author, 40, 'produto', 'Livros da biblioteca', 1500, null, 'outros'),
-  { author: own, seq: 44, record: { type: 'listing-edit', seq: 40, title: 'Bicicleta azul revisada', text: 'Revisada e pronta para passear.', price: 25000, unit: null, cat: 'esporte', place, media: [publicPhoto(10, 3), publicPhoto(11, 0)], at: at(5, 12) } },
+  { author: own, seq: 44, record: { type: 'listing-edit', seq: 40, title: 'Bicicleta azul revisada', text: 'Revisada e pronta para passear.', price: 25000, unit: null, cat: 'esporte', place, media: [postPhoto(40, 3), postPhoto(41, 0)], at: at(5, 12) } },
   { author: own, seq: 45, record: { type: 'listing-status', seq: 42, status: 'vendido', at: at(5, 12, 10) } },
   { author: members[1].author, seq: 42, record: { type: 'listing-status', seq: 41, status: 'reservado', at: at(5, 12, 20) } }
 ]

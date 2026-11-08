@@ -207,6 +207,24 @@ test('the Vitrine node refuses identity and connection changes', (t) => {
   }
 })
 
+test('the Vitrine sets its installation origin only inside the guard in node.js', (t) => {
+  const literal = "setInstallation('https://vitrine.invalid')"
+  // The offer controls appear only when the fixture links share this origin.
+  const fixtureSrc = fs.readFileSync(path.join(SRC, 'vitrine', 'fixtures.js'), 'utf8')
+  t.ok(fixtureSrc.includes('const offerUrl = (author, seq, cents) => `https://vitrine.invalid/f/'), 'fixture offer links use the same origin')
+  const code = withoutComments(fs.readFileSync(path.join(SRC, 'node.js'), 'utf8'))
+  const blocks = guardedBlocks(code)
+  const at = code.indexOf(literal)
+  const guard = code.indexOf('if (VITRINE) {')
+  const provider = code.indexOf('export function NodeProvider')
+  t.ok(at > guard && at < provider, 'the call sits between if (VITRINE) { and export function NodeProvider')
+  t.ok(blocks.some(([start, end]) => at > start && at < end), 'the call sits inside the if (VITRINE) block')
+  for (const file of sources(SRC)) {
+    if (rel(file) === 'src/node.js') continue
+    t.absent(fs.readFileSync(file, 'utf8').includes(literal), rel(file) + ' does not set the Vitrine origin')
+  }
+})
+
 test('no screen mentions EXPO_PUBLIC_VARANDA_VITRINE', (t) => {
   for (const file of appSources()) {
     if (ALLOWED.includes(rel(file))) continue
