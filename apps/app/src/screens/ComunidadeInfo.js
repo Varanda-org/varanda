@@ -28,6 +28,7 @@ import {
   authorityHere, can, communityReserveReached, deviceStaffNote, membersLabel, rootAdminHere, roleLabel, writerOnDevice
 } from '../groups'
 import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
+import { refusalOf } from '../wordCheck'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { InviteByName } from '../ui/InviteByName'
@@ -285,7 +286,8 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
   const searchable = cls.kind === 'name' || cls.kind === 'handle'
   const hits = search.hits.filter((h) => h.author !== ownKey)
   const newName = nameDraft.trim()
-  const nameOk = newName !== '' && nameLength(newName) <= NAME_MAX && (!info || newName !== info.name)
+  const nameRefused = refusalOf(newName)
+  const nameOk = newName !== '' && nameLength(newName) <= NAME_MAX && nameRefused === '' && (!info || newName !== info.name)
 
   const typeAdmin = (t) => {
     setAdminInput(t)
@@ -518,6 +520,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
                   <View>
                     <View style={styles.block}>
                       <Field label='Novo nome' value={nameDraft} onChangeText={setNameDraft} maxLength={NAME_MAX * 2} placeholder={typeof info.name === 'string' ? displayText(info.name) : ''} />
+                      <ErrorText>{nameRefused}</ErrorText>
                       <Btn label='Renomear' onPress={rename} disabled={!nameOk || offline} pending={act.pending} />
                       <View style={styles.inline}>
                         <Pill label='Aberta' filled={info.join === 'open'} onPress={() => setJoinMode('open')} disabled={offline || info.join === 'open'} />

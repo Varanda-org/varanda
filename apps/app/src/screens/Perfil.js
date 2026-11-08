@@ -30,6 +30,7 @@ import { revokeDeletedMedia } from '../media/cache'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { confirmSaved, planSave } from '../profileSave'
 import { Btn, ErrorText, Field, Page, Row, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { refusalOf } from '../wordCheck'
 import { Avatar, primeAvatar } from '../ui/Avatar'
 import { AvatarEditor } from '../ui/AvatarEditor'
 import { Pill } from '../ui/Pill'
@@ -297,7 +298,8 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
 
   const nameLen = countChars(name)
   const bioLen = countChars(bio)
-  const valid = nameLen >= 1 && nameLen <= MAX_NAME && name.trim() !== '' && bioLen <= MAX_BIO
+  const refused = refusalOf(name, bio)
+  const valid = nameLen >= 1 && nameLen <= MAX_NAME && name.trim() !== '' && bioLen <= MAX_BIO && refused === ''
   // While a save, its upload or its uncertain re-read runs, or the crop
   // editor is open, the fields are locked: a success closes the sheet and the
   // next open restarts from the saved profile.
@@ -527,6 +529,7 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
         {photo}
         <Field label={'nome (' + nameLen + '/' + MAX_NAME + ')'} value={name} onChangeText={setName} editable={!locked} />
         <Field label={'bio (' + bioLen + '/' + MAX_BIO + ')'} value={bio} onChangeText={setBio} editable={!locked} multiline lines={3} />
+        <ErrorText>{refused}</ErrorText>
         <ErrorText>{action.error}</ErrorText>
       </>
       )

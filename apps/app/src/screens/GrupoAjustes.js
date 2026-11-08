@@ -21,6 +21,7 @@ import { installationOrigin } from '../installation'
 import { inviteText } from '../inviteMessage'
 import { InviteByName } from '../ui/InviteByName'
 import { Btn, ErrorText, Field, Label, Notice, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { publicGroupRefusal } from '../wordCheck'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
 import { Skeleton } from '../ui/States'
@@ -275,7 +276,8 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     setShareNote((await copyText(nav, url)) ? 'Link copiado.' : 'Não foi possível copiar o link.')
   }
   const newName = nameDraft.trim()
-  const nameOk = newName !== '' && countChars(newName) <= MAX_GROUP_NAME && newName !== info?.name
+  const nameRefused = publicGroupRefusal(info?.visibility, newName)
+  const nameOk = newName !== '' && countChars(newName) <= MAX_GROUP_NAME && nameRefused === '' && newName !== info?.name
 
   // On the web the sheet's Modal is a portal that would stay over the
   // destination: close it before navigating.
@@ -357,6 +359,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
               <View style={styles.box}>
                 <Field label='Novo nome' value={nameDraft} onChangeText={setNameDraft} maxLength={MAX_GROUP_NAME * 2} placeholder={typeof info.name === 'string' ? displayText(info.name) : ''} />
                 {countChars(newName) > MAX_GROUP_NAME ? <Soft>{'No máximo ' + MAX_GROUP_NAME + ' caracteres.'}</Soft> : null}
+                <ErrorText>{nameRefused}</ErrorText>
                 <Btn label='Renomear' onPress={() => rename(newName)} disabled={!nameOk || !node.online} pending={act.pending} />
               </View>
             </View>

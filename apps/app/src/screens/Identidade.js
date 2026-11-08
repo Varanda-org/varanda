@@ -68,6 +68,7 @@ import * as AuthSession from '../authSession'
 import { InvitePaste } from './Idade'
 import { holdUnregistered, releaseUnregistered } from './Passkeys'
 import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
+import { refusalOf } from '../wordCheck'
 import { HelpNote } from '../ui/Help'
 import { ShareProfile } from '../ui/ShareProfile'
 import { Stepper } from '../ui/Stepper'
@@ -527,6 +528,8 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
   const doLink = () => {
     const username = isUsername(name)
     if (username === null) return setError(NAME_RULE)
+    const refused = refusalOf(username)
+    if (refused !== '') return setError(refused)
     run(async () => {
       try {
         // The app: a fresh V per start, whose hash names the new row; a V
@@ -671,6 +674,8 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
   const doRename = () => {
     const username = isUsername(newName)
     if (username === null) return setError(NAME_RULE)
+    const refused = refusalOf(username)
+    if (refused !== '') return setError(refused)
     run(async () => {
       try {
         const { nonce } = await renameStart({ member: publicKey, username })
