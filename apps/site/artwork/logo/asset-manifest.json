@@ -409,6 +409,22 @@
       "height": 180,
       "bytes": 11162,
       "sha256": "20a121a866065ce0b38d4329baa25f76a4eede9825fc4c86f2ee24336ad1c821"
+    },
+    {
+      "path": "apps/site/artwork/play/feature-graphic-1024x500.png",
+      "source": "apps/site/artwork/logo/feature-graphic.svg",
+      "width": 1024,
+      "height": 500,
+      "bytes": 39229,
+      "sha256": "bc18e68291149bcf847921dbf19eaab4dbc321f29428e249c3d9bc6ca7d28cb7"
+    },
+    {
+      "path": "apps/site/artwork/play/icon-512.png",
+      "source": "apps/site/artwork/logo/icon-ios.svg",
+      "width": 512,
+      "height": 512,
+      "bytes": 36518,
+      "sha256": "cd711388368a44174e0f9c8b0b2b115e27d45f4d0f47c59cc00aaa73adb1374c"
     }
   ]
 }

@@ -31,6 +31,7 @@ const IOS = APP + '/ios/Varanda/Images.xcassets'
 const RES = APP + '/android/app/src/main/res'
 const PUB = 'apps/site/public'
 const WEB = APP + '/public'
+const PLAY = 'apps/site/artwork/play'
 const DENSITIES = [['mdpi', 1], ['hdpi', 1.5], ['xhdpi', 2], ['xxhdpi', 3], ['xxxhdpi', 4]]
 
 function targets () {
@@ -73,7 +74,12 @@ function targets () {
     { out: WEB + '/icon-192.png', src: 'icon-ios.svg', size: 192, opaque: true },
     { out: WEB + '/icon-512.png', src: 'icon-ios.svg', size: 512, opaque: true },
     { out: WEB + '/icon-maskable-512.png', src: 'icon-android-foreground.svg', size: 512, opaque: true },
-    { out: WEB + '/apple-touch-icon.png', src: 'icon-ios.svg', size: 180, opaque: true }
+    { out: WEB + '/apple-touch-icon.png', src: 'icon-ios.svg', size: 180, opaque: true },
+    // Google Play listing art. Kept outside apps/app (a change there queues an
+    // EAS store build) and outside apps/site/public (it is not deployed).
+    // The feature graphic must have no alpha; the 512 icon must be 32-bit.
+    { out: PLAY + '/feature-graphic-1024x500.png', src: 'feature-graphic.svg', width: 1024, height: 500, opaque: true },
+    { out: PLAY + '/icon-512.png', src: 'icon-ios.svg', size: 512 }
   )
   return t
 }
@@ -108,10 +114,11 @@ function render (t) {
     const buf = fs.readFileSync(src)
     return { buf, ...svgSize(buf) }
   }
-  const n = String(t.size)
-  const raw = execFileSync('rsvg-convert', ['-w', n, '-h', n, src], { maxBuffer: 256 * 1024 * 1024 })
+  const w = t.width || t.size
+  const h = t.height || t.size
+  const raw = execFileSync('rsvg-convert', ['-w', String(w), '-h', String(h), src], { maxBuffer: 256 * 1024 * 1024 })
   const png = PNG.sync.read(raw)
-  if (png.width !== t.size || png.height !== t.size) throw new Error(t.out + ': rsvg-convert gave ' + png.width + 'x' + png.height)
+  if (png.width !== w || png.height !== h) throw new Error(t.out + ': rsvg-convert gave ' + png.width + 'x' + png.height)
   const opts = { colorType: t.opaque ? 2 : 6, inputColorType: 6, inputHasAlpha: true, bitDepth: 8, deflateLevel: 9, deflateStrategy: 3, filterType: -1 }
   if (t.opaque) opts.bgColor = { ...CREAM }
   const buf = PNG.sync.write({ width: png.width, height: png.height, data: png.data }, opts)

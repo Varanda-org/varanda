@@ -148,3 +148,74 @@ The account service reserves the @handles of the people and pages above (`RESERV
 - Simulator: a dedicated "Varanda Vitrine" iPhone 17 Pro, iOS 26.2 (UDID `92F47855-662C-4707-AD55-9769AB60E735`), light appearance.
 - Network: none needed. The Vitrine answers every request from fixtures.
 - Captured on 2026-11-07. The fixtures date everything 4 and 5 November 2026; only the status bar clock was overridden.
+
+## Google Play phone screenshots (Android)
+
+The four screens above are also captured on Android for the Google Play listing, in `apps/site/artwork/play/screens/` (`a-rua.png`, `diario.png`, `conversas.png`, `conversa.png`). Play wants JPEG or 24-bit PNG without alpha, 320 to 3840 px, long side at most twice the short side. They are 1080x1920, colour type 2, each under 8 MB. The Android Vitrine shows the same fictional people (the lists above apply), but the feed order and the posts differ a little from iOS: A Rua opens on text posts, and the Diário shows Lia Oliveira's text post and her quote of Cecília Ramos.
+
+Recipe, from the repository root, light theme, with `JAVA_HOME` set to JDK 17 and `ANDROID_HOME` and `platform-tools` on the `PATH` (see "Android" in `docs/development.md`):
+
+1. Read the AVD's ABI (`avdmanager list avd`; `varanda-api36` is `google_apis/arm64-v8a`), then build and install the Debug app:
+
+   ```sh
+   npm run prepare:native -w apps/app -- android
+   (cd apps/app/android && ./gradlew assembleDebug)
+   adb install -r apps/app/android/app/build/outputs/apk/debug/app-debug.apk
+   ```
+
+   An already installed `app.varanda.debug` works too: the Vitrine is JavaScript served by Metro.
+
+2. Start Metro with the Vitrine from `apps/app`, never in `app.json`, `eas.json` or a build config (`apps/app/test/hardening.test.js`). If port 8081 is taken by another session, use 8082 and leave that session's Metro and `adb reverse` alone:
+
+   ```sh
+   EXPO_PUBLIC_VARANDA_VITRINE=1 CI=1 npx expo start --localhost --port 8081
+   adb reverse tcp:8081 tcp:8081
+   ```
+
+   On 8082, run `adb reverse tcp:8082 tcp:8082` and give the Debug app that address through the `debug_http_host` preference of `app.varanda.debug` (`run-as`), then remove it after the capture.
+
+3. Set the screen to 1080x1920 and clean the status bar (no notification icons, 9:41, full wifi and battery), then open the app. Dismiss the "Open debugger to view warnings" toast (its X) so no developer banner shows:
+
+   ```sh
+   adb shell wm size 1080x1920
+   adb shell settings put global sysui_demo_allowed 1
+   adb shell am broadcast -a com.android.systemui.demo -e command enter
+   adb shell am broadcast -a com.android.systemui.demo -e command clock -e hhmm 0941
+   adb shell am broadcast -a com.android.systemui.demo -e command network -e wifi show -e level 4 -e fully true
+   adb shell am broadcast -a com.android.systemui.demo -e command network -e mobile hide
+   adb shell am broadcast -a com.android.systemui.demo -e command battery -e level 100 -e plugged false
+   adb shell am broadcast -a com.android.systemui.demo -e command notifications -e visible false
+   ```
+
+4. Capture each screen into a folder outside the repository, tapping the tab bar between captures (A Rua, then the profile tab for the Diário, then Conversas, then the conversation with Bia Araújo):
+
+   ```sh
+   bash apps/app/scripts/review-shots.sh android <scratch> play
+   ```
+
+5. Flatten each capture. `screencap` gives RGBA, so `apps/site/scripts/flatten-png.js` composites any transparency onto opaque white and writes colour type 2 with `deflateLevel 9`, then prints the dimensions:
+
+   ```sh
+   node apps/site/scripts/flatten-png.js <scratch>/play-android-<n>.png apps/site/artwork/play/screens/<stem>.png
+   ```
+
+6. Put the device back and stop what you started:
+
+   ```sh
+   adb shell am broadcast -a com.android.systemui.demo -e command exit
+   adb shell settings put global sysui_demo_allowed 0
+   adb shell wm size reset
+   ```
+
+   Then run `node apps/site/test/play-screens.test.js`.
+
+Checksums (sha256) of the captures, captured on 2026-11-08 on `varanda-api36` (Android 16, 1080x2400 reset to 1080x1920 for the capture):
+
+| File | Bytes | sha256 |
+|---|---|---|
+| `a-rua.png` | 307 503 | `dc4727e2e44c30eb909ea255af1c8e0d39107f0cdb833ba263edabf17b437ccb` |
+| `diario.png` | 310 315 | `541e7dbd0e799a8e74423d712f44b0cc84720413adf3c1a6cb686a52067c282f` |
+| `conversas.png` | 213 752 | `e8850dfbec666324545f52cdcf258292001c7637f770f60619e0ca7fe301da95` |
+| `conversa.png` | 231 884 | `5534afd7d2e2b181f9aebe67774cb6b1f52620638d63fef5199bc8c5b1e99f52` |
+
+Conversas ends in a conversation row under the tab bar, and A Rua in a post under it, the way a list looks while you scroll.
