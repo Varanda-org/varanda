@@ -26,7 +26,7 @@ test('every index route and cursor returns a deterministic validated fixture bod
   const cases = [
     [c.postUrl(ref), (b) => c.validPostIndex(b, ref)],
     [c.postUrl(ref, cursor), (b) => c.validPostIndex(b, ref)],
-    [c.countsUrl(f.feed.map(refOf)), (b) => c.validCounts(b, f.feed.map(refOf))],
+    [c.countsUrl(f.feed.slice(0, 31).map(refOf)), (b) => c.validCounts(b, f.feed.slice(0, 31).map(refOf))],
     [c.memberUrl(f.own), c.validMemberIndex],
     [c.memberUrl(f.own, 5), (b) => c.validMemberIndex(b, 5)],
     [c.memberUrl(f.pages[0].author), c.validMemberIndex],
@@ -76,7 +76,9 @@ test('post, member, search, engagement and follow references resolve through dia
     return (await peek(author, [Number(seq)])).entries[0].record
   }
   const posts = [...f.feed, ...f.noticePosts]
-  const counts = respond(c.countsUrl(posts.map(refOf))).counts
+  // The counts route takes at most 31 refs a call.
+  const counts = {}
+  for (let i = 0; i < posts.length; i += 31) Object.assign(counts, respond(c.countsUrl(posts.slice(i, i + 31).map(refOf))).counts)
   for (const post of posts) {
     const ref = refOf(post)
     const body = respond(c.postUrl(ref))

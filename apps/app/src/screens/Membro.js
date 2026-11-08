@@ -27,8 +27,8 @@
 // way to follow K2. The node also follows K2 by itself, once, after it
 // verified the move (Terms 15). K1's posts past the move are not shown.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -39,6 +39,7 @@ import { avatarOf } from '../media/avatar'
 import { fetchFeiraAuthor, fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { whoOf } from '../who'
+import { applyCut, fillState, hideFuture, tilesFromItems } from '../mural'
 import * as actingAs from '../actingAs'
 import { TEXTS, pagesFollow, pagesFollows, pagesSuccessor } from '../pages'
 import { MAX_HOPS, moveOf, pageMoveView, resolveChain, shownUnderCut, successorOf } from '../pageMove'
@@ -61,14 +62,17 @@ import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
 import { useFollowCounts } from '../useFollowCounts'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
+import { MuralFooter, MuralRow, muralGridRows } from '../ui/MuralGrid'
+import { Segmented } from '../ui/Segmented'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
-import { type } from '../ui/theme'
+import { LARGE_TEXT, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
 import { ratingRefs, ratings } from '../feiraClient'
 import { MAX_RATED_LISTINGS, RATINGS_NOTE, collectRatings, summaryLabel } from '../feiraReview'
 import { isSeederDown, knownAuthors, memberKeyOf, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet } from './Conversa'
 
+const TABS = [{ id: 'posts', label: 'Publicações' }, { id: 'mural', label: 'Mural' }]
 const NOT_HOSTED_NOTE = 'Publicações completas disponíveis na versão web, com internet.'
 const OFFLINE_NOTE = 'Sem internet: as publicações completas aparecem quando a conexão voltar.'
 
@@ -207,6 +211,10 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const followsRef = useRef(Promise.resolve(new Set()))
   const genRef = useRef(0)
   const [following, setFollowing] = useState(false)
+  // 'posts' | 'mural'. The state lives here, so it survives a visit to a thread.
+  const [tab, setTab] = useState('posts')
+  const muralPages = useRef(0)
+  const { fontScale, height: windowHeight } = useWindowDimensions()
   const [sharing, setSharing] = useState(false)
   const [pageRead, setPageRead] = useState(null)
   const [pageNotice, setPageNotice] = useState(null)
@@ -415,6 +423,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       const page = await readPage(null, alive, !held)
       if (!alive() || page === null) return
       const { items, unavailable, index } = page
+      // The first page replaces every older one: the Mural fill budget starts
+      // over with it.
+      muralPages.current = 0
       commit({
         phase: 'ready',
         error: '',
@@ -731,6 +742,28 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       : null
   ].filter(Boolean)
 
+  // The Mural reads the same assembled pages as the posts: never a read of
+  // its own, and none at all when the screen is not full (hosted and online).
+  const mural = tab === 'mural' && full
+  const muralTiles = useMemo(() => {
+    if (!mural || posts.phase !== 'ready') return []
+    const shown = hideFuture(tilesFromItems(posts.items), now)
+    return applyCut(shown, movedView !== null ? movedView.cut : null)
+  }, [mural, posts.phase, posts.items, now, movedView])
+  const muralFill = fillState({ tiles: muralTiles, atEnd: posts.atEnd, pages: muralPages.current })
+  // Bounded automatic fill: the next index page is read while the Mural is
+  // short of photos, up to the cap. After that only 'Ver mais' reads one.
+  useEffect(() => {
+    if (!mural) { muralPages.current = 0; return }
+    if (posts.phase !== 'ready' || posts.loadingMore || posts.refreshing || posts.moreError) return
+    if (muralFill !== 'more') return
+    // A page counts only when a read really starts (loadMore skips otherwise).
+    const current = postsRef.current
+    if (current.atEnd || current.before === null) return
+    muralPages.current += 1
+    loadMore()
+  }, [mural, posts.phase, posts.items, posts.loadingMore, posts.refreshing, posts.moreError, muralFill, loadMore])
+
   const insets = useSafeAreaInsets()
   const bar = useProfileBar(insets.top + BAND, { controlsBottom: insets.top + 42 })
   const head = (
@@ -789,6 +822,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
             : null
         ].filter(Boolean).slice(0, 2)}
         more={<MoreButton title={displayText(who.title)} actions={moreActions} />}
+        tabs={full ? <Segmented options={TABS} selected={tab} onSelect={setTab} /> : null}
       />
       {profileUrl !== null
         ? (
@@ -842,6 +876,43 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   else if (phase === 'error') empty = <ErrorState message={displayText(error)} onRetry={() => { setTick((n) => n + 1); load(false) }} pending={refreshing} />
   else if (unavailable === 0) empty = <EmptyState icon='lapis' title='Nenhuma publicação ainda' />
 
+  const muralCols = fontScale >= LARGE_TEXT ? 2 : 3
+  const muralRows = muralGridRows(muralTiles, muralCols)
+  // A failed page shows only the error row with its retry, not Ver mais too.
+  const muralState = atEnd ? 'end' : (loadingMore || posts.refreshing || (muralFill === 'more' && !moreError && posts.before !== null)) ? 'loading' : moreError ? 'error' : 'capped'
+  // The post a tile came from, seeded as a Publicações row seeds it, so the
+  // thread shows it even when the network cannot be read.
+  const muralSeed = (tile) => {
+    const item = items.find((i) => i.kind === 'post' && i.author === tile.author && i.seq === tile.seq)
+    return item ? { ...item, name: item.name || header.name, username: item.username || header.username } : null
+  }
+  const renderMural = ({ item }) => (
+    <MuralRow item={item} columns={muralCols} persist={own || isFollowed} onOpen={(tile) => onOpenThread({ ref: tile.ref, seed: muralSeed(tile) })} />
+  )
+
+  const listFooter = phase !== 'ready'
+    ? null
+    : mural
+      ? (
+        <MuralFooter
+          count={muralTiles.length}
+          state={muralState}
+          complete={!indexing && complete !== false}
+          onMore={loadMore}
+          footer={moreError ? <ListFooter error={moreError} onRetry={loadMore} pending={loadingMore} /> : null}
+        />
+        )
+      : (
+        <ListFooter
+          loading={loadingMore}
+          atEnd={atEnd && shownItems.length > 0}
+          endText='Isso é tudo por enquanto.'
+          error={moreError}
+          onRetry={loadMore}
+          pending={loadingMore}
+        />
+        )
+
   const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
   const memberWho = { author, name: header.name, username: header.username }
   const renderItem = ({ item }) => {
@@ -858,31 +929,24 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     <View style={styles.flex}>
       <View style={styles.flex}>
         <RefreshableList
-          data={phase === 'ready' ? shownItems : []}
-          keyExtractor={(i) => i.kind + ':' + i.seq}
-          renderItem={renderItem}
+          data={phase === 'ready' ? (mural ? muralRows : shownItems) : []}
+          keyExtractor={mural ? (row) => 'm' + row.key : (i) => i.kind + ':' + i.seq}
+          renderItem={mural ? renderMural : renderItem}
           extraData={{ eng, follows, now, header, profileOf: names.profileOf }}
           ListHeaderComponent={listHeader}
-          ListEmptyComponent={empty}
-          ListFooterComponent={phase === 'ready'
-            ? (
-              <ListFooter
-                loading={loadingMore}
-                atEnd={atEnd && shownItems.length > 0}
-                endText='Isso é tudo por enquanto.'
-                error={moreError}
-                onRetry={loadMore}
-                pending={loadingMore}
-              />
-              )
-            : null}
-          contentContainerStyle={{ paddingBottom: bottomPad }}
+          ListEmptyComponent={mural && phase === 'ready' ? null : empty}
+          ListFooterComponent={listFooter}
+          // Always tall enough to scroll the band away: a short list (a small
+          // Mural, a tab switch) would otherwise rest with the bar half faded.
+          // The 8 pt more tuck the avatar ring, which hangs 48 pt below the
+          // band, fully under the 44 pt bar when there is no top inset.
+          contentContainerStyle={{ paddingBottom: bottomPad, minHeight: windowHeight + insets.top + BAND + 8 }}
           onRefresh={() => { setTick((n) => n + 1); load(true) }}
           refreshing={refreshing}
-          onLoadMore={phase === 'ready' && !atEnd && !moreError ? loadMore : undefined}
+          onLoadMore={phase === 'ready' && !mural && !atEnd && !moreError ? loadMore : undefined}
           loadingMore={loadingMore}
           loadMoreError={!!moreError}
-          atEnd={atEnd}
+          atEnd={atEnd || mural}
           onScrollFrame={bar.handleScrollFrame}
         />
         <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)} onBack={onBack} />

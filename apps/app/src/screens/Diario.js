@@ -21,7 +21,7 @@
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -36,6 +36,7 @@ import { lastLocalWrite } from '../localWrites'
 import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
+import { fillState, hideFuture, tilesFromLog } from '../mural'
 import { ErrorText, SectionHeader, Soft, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
@@ -45,19 +46,22 @@ import { ShareProfile } from '../ui/ShareProfile'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { ProfileHeader } from '../ui/ProfileHeader'
+import { MuralFooter, MuralRow, muralGridRows } from '../ui/MuralGrid'
+import { Segmented } from '../ui/Segmented'
 import { BAR, ProfileBar, useProfileBar } from '../ui/ProfileBar'
 import { BellButton } from '../ui/TopActions'
 import { HelpButton } from '../ui/Help'
 import { HELP } from '../help'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
 import { useFollowCounts } from '../useFollowCounts'
-import { type } from '../ui/theme'
+import { LARGE_TEXT, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, refOf, socialRowProps, useSocial } from './ARua'
 import { DeletePrompt, useDelete } from './Conversa'
 
 const BAND = 96
+const TABS = [{ id: 'posts', label: 'Publicações' }, { id: 'mural', label: 'Mural' }]
 
 // The state line of an outbox item. `held`: queued, but not sent
 // automatically (found in storage from an earlier visit).
@@ -151,9 +155,16 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const [loadError, setLoadError] = useState('')
   const [loadingMore, setLoadingMore] = useState(false)
   const [olderError, setOlderError] = useState('')
+  // True while the newest page is read: the Mural fill waits for it, then
+  // runs again whether the read worked or failed.
+  const [newestLoading, setNewestLoading] = useState(false)
   const [editing, setEditing] = useState(false)
   const [sharing, setSharing] = useState(false)
   const [pulls, setPulls] = useState(0)
+  // 'posts' | 'mural'. The state lives here, so it survives a visit to a thread.
+  const [tab, setTab] = useState('posts')
+  const muralPages = useRef(0)
+  const { fontScale, height: windowHeight } = useWindowDimensions()
   const pull = useAction()
   const seqRef = useRef(0)
   const olderBusy = useRef(false)
@@ -184,6 +195,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     // while it runs may be missing, so it must still count as newer.
     const startedAt = Date.now()
     newestBusy.current = true
+    setNewestLoading(true)
     setLoadingMore(false)
     setOlderError('')
     olderBusy.current = false
@@ -213,6 +225,9 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       if (mine !== seqRef.current) return
       const rows = logRows(log)
       if (!reuseInfo) infoIdentityRef.current = identity
+      // The older pages are gone with the replaced rows: the Mural fill
+      // budget starts over with them.
+      muralPages.current = 0
       setData({ info, rows, atEnd: isLastLogPage(log) })
       loadedAtRef.current = startedAt
       setLoadError('')
@@ -232,7 +247,10 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         setLoadError(errorText(err))
       }
     } finally {
-      if (mine === seqRef.current) newestBusy.current = false
+      if (mine === seqRef.current) {
+        newestBusy.current = false
+        setNewestLoading(false)
+      }
     }
   }, [request, ackFresh, resolve, invalidate, ingest])
 
@@ -301,8 +319,28 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
 
   const info = data === null ? null : data.info
   const posts = shownRows
+  const mural = tab === 'mural'
   const publicKey = info && typeof info.publicKey === 'string' ? info.publicKey : null
   const profile = publicKey ? profileOf(publicKey) : undefined
+  // Only the rows log.read already loaded: no extra read for the Mural.
+  const muralTiles = useMemo(() => {
+    if (!mural || data === null || publicKey === null) return []
+    return hideFuture(tilesFromLog(publicKey, data.rows), now)
+  }, [mural, data, publicKey, now])
+  const muralFill = data === null ? 'end' : fillState({ tiles: muralTiles, atEnd: data.atEnd, pages: muralPages.current })
+  // Bounded automatic fill: older pages are read while the Mural is short of
+  // photos, up to the cap. After that only 'Ver mais' reads one.
+  // A page counts only when a read really starts (loadOlder skips while a
+  // refresh or another page runs).
+  useEffect(() => {
+    if (!mural) { muralPages.current = 0; return }
+    if (data === null || loadingMore || newestLoading || olderError) return
+    if (muralFill !== 'more') return
+    const current = dataRef.current
+    if (current === null || current.atEnd || olderBusy.current || newestBusy.current) return
+    muralPages.current += 1
+    loadOlder()
+  }, [mural, data, loadingMore, newestLoading, olderError, muralFill, loadOlder])
   const who = whoOf(profile || undefined)
   const bio = profile && profile.bio ? profile.bio : ''
   const profileUrl = node.hosted === true && publicKey ? buildProfileUrl({ origin: installationOrigin() || globalThis.location?.origin || null, username: profile ? profile.username : null, publicKey }) : null
@@ -414,13 +452,27 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
             <Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} />,
             profileUrl !== null ? <Pill key='share' icon='compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /> : null
           ]}
+          tabs={<Segmented options={TABS} selected={tab} onSelect={setTab} />}
         />
         {outboxList}
-        <SectionHeader>Publicações</SectionHeader>
         <CountsNote social={social} />
         <ErrorText>{loadError}</ErrorText>
       </View>
       )
+
+  // A failed page shows only the error row with its retry, not Ver mais too.
+  const muralState = data === null ? 'loading' : data.atEnd ? 'end' : (loadingMore || newestLoading || (muralFill === 'more' && !olderError)) ? 'loading' : olderError ? 'error' : 'capped'
+  const muralFooter = data !== null
+    ? (
+      <MuralFooter
+        count={muralTiles.length}
+        state={muralState}
+        onMore={loadOlder}
+        emptyBody='As fotos que você publicar aparecem aqui.'
+        footer={olderError ? <ListFooter error={olderError} onRetry={loadOlder} pending={loadingMore} /> : null}
+      />
+      )
+    : null
 
   const footer = data !== null && posts.length > 0
     ? (
@@ -494,6 +546,18 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     return <PostRow {...socialRowProps({ post, ref: info.publicKey + ':' + row.seq, social, profileOf, now, ownKey: info.publicKey, h: handlers })} />
   }
 
+  const muralCols = fontScale >= LARGE_TEXT ? 2 : 3
+  const muralRows = useMemo(() => muralGridRows(muralTiles, muralCols), [muralTiles, muralCols])
+  // The post a tile came from, seeded as a Publicações row seeds it, so the
+  // thread shows it even when the network cannot be read.
+  const muralSeed = (tile) => {
+    const row = data === null ? null : data.rows.find((r) => r.seq === tile.seq && r.entry && r.entry.record)
+    return row ? postOf(tile.author, tile.seq, row.entry.record) : null
+  }
+  const renderMural = ({ item }) => (
+    <MuralRow item={item} columns={muralCols} persist onOpen={(tile) => onOpenThread({ ref: tile.ref, seed: muralSeed(tile) })} />
+  )
+
   // Rows re-render when a name is learned, the clock ticks or the originals,
   // counts or own state change.
   const extra = useMemo(() => ({ profileOf, now, profile, social: social.social, offered: del.offered }), [profileOf, now, profile, social.social, del.offered])
@@ -502,20 +566,24 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     <View style={styles.list}>
       <DeletePrompt del={del} />
       <RefreshableList
-        data={posts}
-        keyExtractor={(row) => (row.invalid ? 'i' : 'e') + row.seq}
-        renderItem={renderItem}
+        data={mural ? muralRows : posts}
+        keyExtractor={mural ? (row) => 'm' + row.key : (row) => (row.invalid ? 'i' : 'e') + row.seq}
+        renderItem={mural ? renderMural : renderItem}
         extraData={extra}
         ListHeaderComponent={header}
-        ListFooterComponent={footer}
-        ListEmptyComponent={empty}
-        contentContainerStyle={{ paddingBottom: bottomPad }}
+        ListFooterComponent={mural ? muralFooter : footer}
+        ListEmptyComponent={mural && data !== null ? null : empty}
+        // Always tall enough to scroll the band away: a short list (a small
+        // Mural, a tab switch) would otherwise rest with the bar half faded.
+        // The 8 pt more tuck the avatar ring, which hangs 48 pt below the
+        // band, fully under the 44 pt bar when there is no top inset.
+        contentContainerStyle={{ paddingBottom: bottomPad, minHeight: windowHeight + bandHeight + 8 }}
         onRefresh={reload}
         refreshing={pull.pending}
-        onLoadMore={loadOlder}
+        onLoadMore={mural ? undefined : loadOlder}
         loadingMore={loadingMore}
         loadMoreError={!!olderError}
-        atEnd={data === null ? true : data.atEnd}
+        atEnd={data === null || mural ? true : data.atEnd}
         scrollToTopSignal={scrollToTop}
         onScrollFrame={bar.handleScrollFrame}
         newItemsTop={info !== null && bar.interactive ? insets.top + BAR + 8 : undefined}

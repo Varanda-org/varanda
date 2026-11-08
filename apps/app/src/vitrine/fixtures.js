@@ -1,3 +1,5 @@
+import { pictures } from './pictures.js'
+import { sha256 } from '@noble/hashes/sha2.js'
 import rpc from '@varanda/rpc'
 import { ed25519 } from '@noble/curves/ed25519.js'
 
@@ -40,6 +42,19 @@ const PICTURE_BYTES = [1405, 1291, 1391, 1605]
 const PICTURE_SIZE = [[1280, 960], [768, 1024], [1024, 1024], [1344, 896]]
 const dmPhoto = (n, p) => ({ id: key(710 + n), key: key(720 + n), nonce: '0'.repeat(46) + (n % 100).toString().padStart(2, '0'), chunks: 1, bytes: PICTURE_BYTES[p] + 16, sha256: key(PICTURE_BASE + p), mime: 'image/jpeg', w: PICTURE_SIZE[p][0], h: PICTURE_SIZE[p][1], ms: 0 })
 const publicPhoto = (n, p) => ({ core: key(730), mime: 'image/jpeg', start: 1 + n, blocks: 1, bytes: PICTURE_BYTES[p], sha256: key(PICTURE_BASE + p), width: PICTURE_SIZE[p][0], height: PICTURE_SIZE[p][1] })
+
+// Public post photos carry the real length and SHA-256 of the drawing, so the
+// verified media client accepts them (./publicMedia.js answers their route).
+const hexBytes = (hex) => Uint8Array.from(hex.match(/../g).map((b) => parseInt(b, 16)))
+const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+const POST_BYTES = pictures.map((picture) => hexBytes(picture.hex))
+const POST_SHA = POST_BYTES.map((bytes) => hexOf(sha256(bytes)))
+export const postPhoto = (n, p) => ({ core: key(300), mime: 'image/jpeg', start: 1 + n, blocks: 1, bytes: POST_BYTES[p].byteLength, sha256: POST_SHA[p], width: PICTURE_SIZE[p][0], height: PICTURE_SIZE[p][1] })
+// A fresh copy of the drawing a post photo names, or null.
+export const postPictureBytes = (sha) => {
+  const i = POST_SHA.indexOf(sha)
+  return i < 0 ? null : new Uint8Array(POST_BYTES[i])
+}
 const privatePhoto = (n, p) => ({ core: key(740), mime: 'application/octet-stream', start: 1 + n, blocks: 1, bytes: 32768, sha256: key(750 + n), key: key(760 + n), nonce: '0'.repeat(46) + (n % 100).toString().padStart(2, '0'), plainMime: 'image/jpeg', plainSha256: key(PICTURE_BASE + p), w: PICTURE_SIZE[p][0], h: PICTURE_SIZE[p][1], ms: 0 })
 
 // The member and page handles appear in the varanda.app screenshots, so the
@@ -203,7 +218,10 @@ export const follows = [members[1].author, members[2].author, members[3].author,
 
 const feedAuthors = [members[0], members[1], members[2], members[3], pages[0], pages[1]]
 
-export const feed = postTexts.map((text, i) => {
+// Photos of the Mural: a few of the first posts carry one.
+const feedPhotos = { 0: [postPhoto(0, 0)], 6: [postPhoto(1, 2)], 11: [postPhoto(2, 3)], 18: [postPhoto(3, 1)] }
+
+const baseFeed = postTexts.map((text, i) => {
   const author = feedAuthors[i % feedAuthors.length]
   return {
     kind: 'post',
@@ -215,9 +233,35 @@ export const feed = postTexts.map((text, i) => {
     text,
     replyTo: null,
     quote: i === 12 ? { author: members[2].author, seq: 3 } : null,
-    media: i === 11 ? [{ core: key(300), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 2048, sha256: key(301), width: 1200, height: 800 }] : null
+    media: feedPhotos[i] || null
   }
 })
+
+const photoPost = (member, seq, when, text, media, replyTo = null) => ({ kind: 'post', author: member.author, name: member.name, username: member.username, seq, at: when, text, replyTo, quote: null, media })
+
+// Later photo posts, in time order after the posts above. The own diary gets
+// six more tiles plus a reply with a photo (never a tile), a followed member
+// and one who is not followed get a few each.
+const photoPosts = [
+  photoPost(members[0], 12, at(5, 10, 0), 'Primeiras fotos da exposição no bairro.', [postPhoto(4, 0)]),
+  photoPost(members[0], 13, at(5, 10, 10), '', [postPhoto(5, 1), postPhoto(6, 2)]),
+  photoPost(members[0], 14, at(5, 10, 20), 'Mutirão da horta: antes e depois.', [postPhoto(7, 3), postPhoto(8, 0)]),
+  photoPost(members[0], 15, at(5, 10, 30), '', [postPhoto(9, 2)]),
+  photoPost(members[0], 16, at(5, 10, 40), 'Passeio de bicicleta no fim da tarde 🚲', [postPhoto(10, 3), postPhoto(11, 1), postPhoto(12, 0), postPhoto(13, 2)]),
+  photoPost(members[0], 17, at(5, 10, 50), '', [postPhoto(14, 1), postPhoto(15, 0)]),
+  photoPost(members[0], 18, at(5, 10, 55), 'Que foto bonita da praça!', [postPhoto(16, 2)], { author: members[1].author, seq: 3 }),
+  photoPost(members[1], 50, at(5, 11, 0), 'Pedal de domingo pelo parque.', [postPhoto(17, 3)]),
+  photoPost(members[1], 51, at(5, 11, 10), '', [postPhoto(18, 0), postPhoto(19, 1)]),
+  photoPost(members[1], 52, at(5, 11, 20), 'Parada para um café no caminho.', [postPhoto(20, 2)]),
+  photoPost(members[1], 53, at(5, 11, 30), '', [postPhoto(21, 3)]),
+  photoPost(members[4], 40, at(5, 12, 0), 'Meu canto de leitura hoje.', [postPhoto(22, 1)]),
+  photoPost(members[4], 41, at(5, 12, 10), '', [postPhoto(23, 0)]),
+  photoPost(members[4], 42, at(5, 12, 20), 'Livros novos para o clube.', [postPhoto(24, 2), postPhoto(25, 3)]),
+  photoPost(members[4], 43, at(5, 12, 30), '', [postPhoto(26, 1), postPhoto(27, 0), postPhoto(28, 2)]),
+  photoPost(members[4], 44, at(5, 12, 40), 'A biblioteca da praça em uma tarde de chuva.', [postPhoto(29, 3)])
+]
+
+export const feed = [...baseFeed, ...photoPosts]
 
 const ownPost = (n) => feed.filter((post) => post.author === own)[n]
 
@@ -285,6 +329,10 @@ export const diaryRecords = [
       : { type: n.kind, to: { author: own, seq: Number(n.post.split(':')[1]) }, on: true, at: n.at }
   })),
   ...follows.map((key, i) => ({ author: own, seq: 7 + i, record: { type: 'follow', key, on: true, at: now } })),
+  // A repost is no tile, and the likes make the own log longer than one
+  // log.read page (32 blocks), so older photos sit on a second page.
+  { author: own, seq: 19, record: { type: 'repost', to: { author: members[2].author, seq: 3 }, on: true, at: at(5, 11, 0) } },
+  ...baseFeed.filter((post) => post.author !== own && post.quote === null).slice(0, 16).map((post, i) => ({ author: own, seq: 20 + i, record: { type: 'like', to: { author: post.author, seq: post.seq }, on: true, at: at(5, 13, i) } })),
   ...pages.flatMap((p) => members.filter((m) => m.author !== own).map((m, i) => ({ author: p.author, seq: 30 + i, record: { type: 'follow', key: m.author, on: true, at: now } })))
 ]
 

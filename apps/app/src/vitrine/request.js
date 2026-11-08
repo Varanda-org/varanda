@@ -81,6 +81,14 @@ export function createVitrineRequest (fixtures, options) {
     ].sort((a, b) => a.seq - b.seq))
   }
 
+  // The own likes and reposts the fixtures already wrote, so the buttons,
+  // engagement.read and a later toggle agree with the log and the counts.
+  for (const { seq, record } of logs.get(data.own) || []) {
+    if ((record.type === 'like' || record.type === 'repost') && record.to) {
+      reactions[record.type].set(`${record.to.author}:${record.to.seq}`, { seq, on: record.on === true })
+    }
+  }
+
   // Timing rows are registered in the author logs so open, peek and delete
   // behave like a fixture post. Reposts have no diary post record.
   if (options && options.large === true) {

@@ -15,7 +15,7 @@ import { useStyles } from './ThemeProvider'
 
 const STACK_SCALE = 1.3
 
-export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more }) {
+export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, tabs }) {
   const styles = useStyles(makeStyles)
   const shownCounts = Array.isArray(counts) ? counts.filter((c) => c && c.value !== null && c.value !== undefined) : []
   const shownActions = Array.isArray(actions) ? actions.filter(Boolean) : []
@@ -85,6 +85,7 @@ export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, 
             )
           : null}
       </View>
+      {tabs || null}
     </View>
   )
 }
