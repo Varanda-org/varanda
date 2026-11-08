@@ -2257,7 +2257,7 @@ A mídia de uma mensagem direta (section 11) vai para o semeador em pedaços de 
 
 ## 14. Estado de vistos sincronizado entre aparelhos (`packages/core/lib/seen-blob.js`, `seen-proof.js`, `apps/cli/lib/account/seen-store.js`, `seen-routes.js`)
 
-Só o nó do navegador grava e lê este bloco. Ele guarda o que cada aparelho da mesma passkey já viu em Avisos, nas Conversas (mensagens diretas e páginas) e nos grupos, para que a marca feita num aparelho valha nos outros. O serviço de conta guarda um bloco cifrado por membro, em `<dados>/seen/<membro hex64>`, criado na primeira vez que um aparelho grava as suas marcas. Nenhum semeador, nenhum par e nenhum outro membro recebe o bloco. Os textos do que a pessoa vê e a base legal estão na Política de Privacidade (`apps/app/src/legal.js`) e em `docs/design.md` (LGPD).
+Só o nó do navegador grava e lê este bloco. Ele guarda o que cada aparelho da mesma passkey já viu em Avisos, nas Conversas (mensagens diretas e páginas) e nos grupos, para que a marca feita num aparelho valha nos outros, e quem o membro bloqueou (rpc.md 5.111), para que o bloqueio também valha. O serviço de conta guarda um bloco cifrado por membro, em `<dados>/seen/<membro hex64>`, criado na primeira vez que um aparelho grava as suas marcas. Nenhum semeador, nenhum par e nenhum outro membro recebe o bloco. Os textos do que a pessoa vê e a base legal estão na Política de Privacidade (`apps/app/src/legal.js`) e em `docs/design.md` (LGPD).
 
 ### Chave
 
@@ -2273,11 +2273,12 @@ chave = BLAKE2b-256( "varanda/member-seen/secretbox/v1\n" || seed || association
 
 O bloco tem `SEEN_BLOB_BYTES` = 32808 bytes: nonce de 24 bytes aleatórios (um por gravação, nunca contador, porque dois aparelhos podem gravar ao mesmo tempo), 16 bytes de MAC e o texto de `SEEN_PLAIN_BYTES` = 32768 bytes, cifrado com `crypto_secretbox_easy`. Em base64 canônico, o campo `blob` de um pedido tem 43744 caracteres. O texto, em little-endian, tem nesta ordem:
 
-- cabeçalho de 76 bytes: `u8` versão = 1, `u8` flags = 0, `u32` gen (contador de gravações, não é conteúdo), membro (32), associação (32), `u16` nAvisos, `u8` nPáginas, `u16` nDm, `u8` nGrupos;
+- cabeçalho de 77 bytes: `u8` versão = 2, `u8` flags = 0, `u32` gen (contador de gravações, não é conteúdo), membro (32), associação (32), `u16` nAvisos, `u8` nPáginas, `u16` nDm, `u8` nGrupos, `u8` nBloqueios;
 - nAvisos entradas de token, as marcas de Avisos do próprio membro;
 - nPáginas blocos de página: chave da página (32), `u8` n e n entradas de token;
 - nDm entradas de token, uma por mensagem direta recebida marcada;
 - nGrupos entradas de grupo de 76 bytes: grupo (32), autor da marca (32), `i64` ms (a hora do post marcado), `u32` seq;
+- nBloqueios entradas de bloqueio de 37 bytes (`packages/core/lib/member-block.js`, rpc.md 5.111): a chave bloqueada (32), `u8` on (1 bloqueada, 0 desbloqueada) e `u32` t, em segundos Unix, a hora da última mudança;
 - preenchimento aleatório até 32768 bytes.
 
 Uma entrada de token tem 20 bytes: os 16 bytes do token e `u32` t, em segundos Unix, a hora em que a marca foi feita. As listas vão da mais antiga para a mais nova.
@@ -2288,10 +2289,11 @@ Limites, aplicados antes de cifrar:
 | --- | --- |
 | Avisos (tokens próprios) | 256 |
 | Páginas | 4, com até 32 tokens cada |
-| Mensagens diretas | 736 |
+| Mensagens diretas | 520 |
 | Grupos | 128 |
+| Bloqueios | 128 |
 
-No limite, o texto ocupa 32336 bytes e sobra preenchimento. O corte é determinístico: sai primeiro a marca mais antiga (menor t, e entre iguais, o token em ordem); as páginas são ordenadas pela marca mais nova de cada uma e ficam só as 4 mais recentes; os grupos ficam os 128 de hora mais recente. Por isso o bloco guarda as marcas mais recentes, não todo o histórico: quando ele enche, um aviso antigo pode voltar a aparecer como novo em outro aparelho.
+No limite, o texto ocupa 32753 bytes e sobra preenchimento. O corte é determinístico: sai primeiro a marca mais antiga (menor t, e entre iguais, o token em ordem); as páginas são ordenadas pela marca mais nova de cada uma e ficam só as 4 mais recentes; os grupos ficam os 128 de hora mais recente; os bloqueios ficam os 128 de maior t (entre iguais, a chave em ordem). Por isso o bloco guarda as marcas mais recentes, não todo o histórico: quando ele enche, um aviso antigo pode voltar a aparecer como novo em outro aparelho.
 
 A decodificação não lança exceção. Um bloco malformado, de outro membro ou com MAC inválido vira "sem bloco" para o aparelho, nunca dado parcial; uma versão que este código não conhece é recusada à parte (`unsupported`), e o aparelho não a usa.
 
@@ -2300,6 +2302,7 @@ A decodificação não lança exceção. Um bloco malformado, de outro membro ou
 `merge(local, remoto)` é uma união de conjuntos e não depende da ordem:
 
 - tokens: o mesmo token fica com o maior t;
+- bloqueios: uma entrada por chave, a de maior t; com t igual, vence o bloqueio. Um desbloqueio fica como entrada com on = 0, para a fusão não trazer o bloqueio de volta;
 - grupos: uma marca por grupo, a que está à frente pela ordem do grupo (`compareOrder` sobre `orderKey(at, autor, seq)`, a mesma de `packages/core/lib/group.js`);
 - o corte por limite vem depois da união, para não derrubar uma página ou uma marca à frente que o outro lado ainda tem.
 
@@ -2308,6 +2311,12 @@ Como a fusão só soma marcas, ela é comutativa e idempotente: aparelhos que co
 Limite de relógio: a marca de um grupo leva a hora do post marcado, e o autor de um post pode datá-lo até 24 h à frente (`MAX_FUTURE_MS`, a mesma regra dos demais feeds). Uma marca copiada de um post desses, vinda de outro aparelho, fica à frente da ordem local: os posts do grupo que vêm antes dela na ordem ficam como lidos, e um post depois dela pode ficar escondido, até o post marcado aparecer na lista local. Esse efeito já existia com a marca local (regra de `postsAfter` em `packages/web-member/lib/member-ops.js`); o bloco só o leva a outros aparelhos da mesma passkey. Relógio do aparelho: cada marca de Avisos e de Conversas leva a hora do aparelho que a marcou, e o corte de uma lista cheia mantém as mais novas. Um aparelho com o relógio muito adiantado faz as marcas dele parecerem as mais novas; com a lista cheia, marcas recentes de outro aparelho saem do bloco e o ponto pode voltar nesse outro aparelho. Nenhum item fica escondido por isso.
 
 Limite aceito, relógio do autor: a marca de um grupo num post que o autor datou antes do post que ele segue (o relógio do autor voltou) é mais nova na ordem do grupo neste aparelho, mas mais antiga pela hora. O documento compartilhado fica com a marca de hora mais recente, então a marca mais nova não é compartilhada até um post seguinte mover a marca de novo. A marca do próprio aparelho fica certa (a regra de avanço de `group.seen`).
+
+Uma entrada de bloqueio que não cabe na janela fica só no aparelho: a lista local (kv `memberBlocks`, até `BLOCK_MAX` chaves) recebe a união com todas as entradas remotas, e nunca lê a falta de uma entrada como desbloqueio.
+
+### Versão 1
+
+Blocos gravados antes dos bloqueios têm versão 1: cabeçalho de 76 bytes, sem nBloqueios, sem entradas de bloqueio e até 736 tokens de mensagens diretas. Este código ainda os lê, como lista vazia de bloqueios e com os tokens cortados para 520, e grava sempre a versão 2. O tamanho do bloco não muda, e o serviço não percebe a troca. Um aparelho com código anterior lê a versão 2 como `unsupported`: não usa o bloco e não grava por cima, e o visto entre aparelhos fica parado nele até a atualização.
 
 ### Leitura, escrita e apagamento (`seen-routes.js`)
 

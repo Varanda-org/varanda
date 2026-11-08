@@ -791,6 +791,48 @@ test('push: a valid payload shows its body, tag and data', async (t) => {
   t.is(long.options.body, '😀'.repeat(120), '120 code points are allowed')
 })
 
+test('push: a blocked actor stays quiet, the shown notice is closed at once, others still show', async (t) => {
+  const w = renderedWorker()
+  const page = fakeWindow(ORIGIN + '/')
+  await message(w, { type: 'varanda-blocks', keys: [ACTOR] }, page)
+  const reply = await push(w, pushData(valid()))
+  t.is(reply.options.tag, 'varanda-dm-wake-quiet', 'WebKit: a push always shows something')
+  t.is(reply.options.silent, true)
+
+  const other = 'c'.repeat(64)
+  const shown = await push(w, pushData(valid({ actor: other })))
+  t.is(shown.options.body, 'Ana respondeu ao seu post')
+  t.is(shown.options.data.actor, other)
+
+  await message(w, { type: 'varanda-blocks', keys: [] }, page)
+  const undone = await push(w, pushData(valid()))
+  t.is(undone.options.body, 'Ana respondeu ao seu post', 'an empty list undoes it')
+})
+
+test('push: the list outlives a worker restart', async (t) => {
+  const dist = makeDist()
+  quiet(() => finishWeb(dist))
+  const { code } = readWorker(dist)
+  const first = loadWorker(code, serveDist(dist))
+  await message(first, { type: 'varanda-blocks', keys: [ACTOR] }, fakeWindow(ORIGIN + '/'))
+  const again = loadWorker(code, serveDist(dist), { caches: first.caches })
+  const reply = await push(again, pushData(valid()))
+  t.is(reply.options.tag, 'varanda-dm-wake-quiet')
+})
+
+test('push: a report that is not from an app window, or not a clean list, changes nothing', async (t) => {
+  const w = renderedWorker()
+  const page = fakeWindow(ORIGIN + '/')
+  await message(w, { type: 'varanda-blocks', keys: [ACTOR] }, { ...fakeWindow(ORIGIN + '/'), type: 'worker' })
+  await message(w, { type: 'varanda-blocks', keys: [ACTOR] }, null)
+  await message(w, { type: 'varanda-blocks', keys: [ACTOR.toUpperCase()] }, page)
+  await message(w, { type: 'varanda-blocks', keys: ACTOR }, page)
+  await message(w, { type: 'varanda-blocks', keys: new Array(501).fill(ACTOR) }, page)
+  await message(w, { type: 'varanda-blocks', keys: [ACTOR], extra: 1 }, page)
+  const reply = await push(w, pushData(valid()))
+  t.is(reply.options.body, 'Ana respondeu ao seu post')
+})
+
 test('push: missing or invalid data shows only the fallback sentence', async (t) => {
   const w = renderedWorker()
   const extra = valid()

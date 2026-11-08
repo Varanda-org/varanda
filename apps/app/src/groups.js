@@ -277,6 +277,14 @@ export function roleLabel (role) {
   return isRole(role) ? ROLE_LABELS[role] : ''
 }
 
+// The visibility of the group being written in, or null while it is not known.
+// A page's read names no visibility, but it can only write in a private group
+// with an epoch key (rpc 5.40), so no epoch means public or nothing to send.
+export function knownVisibility ({ page, info, epoch }) {
+  if (page) return epoch ? 'private' : 'public'
+  return info && typeof info.visibility === 'string' ? info.visibility : null
+}
+
 export function visibilityLabel (visibility) {
   return visibility === 'private' ? PRIVATE_LABEL : PUBLIC_LABEL
 }

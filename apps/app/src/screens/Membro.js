@@ -33,6 +33,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
+import { readBlockedPeek, useBlocks } from '../blocksProvider'
+import { BLOCK_TEXTS } from '../memberBlocks'
 import { avatarOf } from '../media/avatar'
 import { fetchFeiraAuthor, fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
@@ -261,6 +263,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   nodeRef.current = node
   const [tick, setTick] = useState(0)
   const c = useFollowCounts(author, tick)
+  const blocks = useBlocks()
+  const blockedHere = blocks.has(author)
+  const [unblocking, setUnblocking] = useState(false)
   // Only the communities both people are admitted to, never this person's
   // own list (their interests are sensitive data).
   const [common, setCommon] = useState([])
@@ -417,6 +422,16 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     commitHeader({ ...headerRef.current, verified: false })
     const held = await readProfile()
     if (!alive()) return
+    if (blockedHere) {
+      // The name alone, so the block can be undone by a person the screen
+      // names. The node refuses this author's posts anyway.
+      if (!held) {
+        try { headerFromPeek(await readBlockedPeek(request, author)) } catch {}
+        if (!alive()) return
+      }
+      commit({ ...INITIAL_POSTS, phase: 'ready', atEnd: true })
+      return
+    }
     followsRef.current = loadFollows()
     if (pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })) {
       readPageInfo(alive)
@@ -458,7 +473,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       if (!alive()) return
       commit({ phase: 'error', refreshing: false, error: isSeederDown(err) ? 'Sem conexão com o servidor agora.' : (err && err.reason ? err.message : errorText(err)) })
     }
-  }, [commit, commitHeader, readProfile, loadFollows, full, reset, readPage, afterPage, readPageInfo, node.hosted, node.accountOrigin])
+  }, [commit, commitHeader, readProfile, loadFollows, full, reset, readPage, afterPage, readPageInfo, node.hosted, node.accountOrigin, blockedHere, headerFromPeek, request, author])
 
   const loadMore = useCallback(async () => {
     const current = postsRef.current
@@ -659,6 +674,18 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const who = whoOf({ name: header.name, username: header.username })
   const own = typeof ownKey === 'string' && author === ownKey
   const canReport = full && !own && typeof onReport === 'function' && typeof ownKey === 'string'
+  const canBlock = canReport && blocks.available
+  const unblock = async () => {
+    setUnblocking(true)
+    try {
+      await blocks.setBlock(author, false)
+      if (typeof onToast === 'function') onToast(BLOCK_TEXTS.undone)
+    } catch (err) {
+      if (typeof onToast === 'function') onToast(errorText(err))
+    } finally {
+      setUnblocking(false)
+    }
+  }
 
   const moveView = pageRead !== null ? pageMoveView(pageRead, moveInfo || {}) : null
   const movedView = moveView !== null && moveView.moved ? moveView : null
@@ -781,11 +808,14 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       : null,
     !canAct && actingHere ? { label: 'Deixar de agir como a página', onPress: () => actingAs.me() } : null,
     canAct && typeof onOpenPageSettings === 'function' ? { label: 'Ajustes da página', onPress: () => onOpenPageSettings(author) } : null,
-    !own && asPageMode && !closedPage
+    !own && asPageMode && !closedPage && !blockedHere
       ? { label: asPageFollowing ? 'Deixar de seguir como a página' : 'Seguir como a página', pending: following, disabled: pageFollows === null, onPress: togglePageFollow }
       : null,
     profileUrl !== null ? { label: 'Compartilhar perfil', onPress: () => setSharing(true) } : null,
-    canReport ? { icon: 'bandeira', label: 'Denunciar a conta', danger: true, onPress: () => onReport({ author, name: header.name, username: header.username }) } : null
+    canReport ? { icon: 'bandeira', label: 'Denunciar a conta', danger: true, onPress: () => onReport({ author, name: header.name, username: header.username }) } : null,
+    canBlock
+      ? { icon: 'slash', label: blockedHere ? BLOCK_TEXTS.unblock : BLOCK_TEXTS.block, danger: !blockedHere, pending: unblocking, onPress: blockedHere ? unblock : () => blocks.ask({ author, name: header.name, username: header.username }) }
+      : null
   ].filter(Boolean)
 
   // The Mural reads the same assembled pages as the posts: never a read of
@@ -837,7 +867,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
         ]}
         note={pageNote !== null ? <View>{pageNote}{countsNote}</View> : countsNote}
         actions={[
-          !own && asPageMode && !closedPage
+          !own && asPageMode && !closedPage && !blockedHere
             ? (
               <Pill
                 label={pageFollowsFailed ? 'Tentar de novo' : pageFollows !== null && pageFollows.has(author) ? 'Seguindo' : 'Seguir'}
@@ -848,7 +878,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
               />
               )
             : null,
-          !own && !asPageMode && !closedPage
+          !own && !asPageMode && !closedPage && !blockedHere
             ? (
               <FollowPill
                 following={follows === null ? null : isFollowed}
@@ -860,10 +890,10 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
               />
               )
             : null,
-          canConverse
+          canConverse && !blockedHere
             ? <Pill icon='mensagem' label='Conversar' onPress={openPageConversation} />
             : null,
-          !own && !isPage && node.hosted === true && typeof onMessage === 'function'
+          !own && !isPage && node.hosted === true && typeof onMessage === 'function' && !blockedHere
             ? <Pill icon='mensagem' label={LABELS.message} onPress={() => onMessage(author)} />
             : null
         ].filter(Boolean).slice(0, 2)}
@@ -916,15 +946,16 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const listHeader = (
     <View>
       {head}
-      {listingsRow}
-      {ratingsRow}
+      {blockedHere ? null : listingsRow}
+      {blockedHere ? null : ratingsRow}
       <OfflineNote />
       {notes.length > 0 ? <View style={styles.note}>{notes.map((n) => <Soft key={n}>{n}</Soft>)}</View> : null}
     </View>
   )
 
   let empty = null
-  if (phase === 'loading') empty = <Skeleton />
+  if (blockedHere && phase !== 'loading') empty = <EmptyState icon='bloquear' title={BLOCK_TEXTS.profileTitle} body={BLOCK_TEXTS.profileBody} />
+  else if (phase === 'loading') empty = <Skeleton />
   else if (phase === 'error') empty = <ErrorState message={displayText(error)} onRetry={() => { setTick((n) => n + 1); load(false) }} pending={refreshing} />
   else if (unavailable === 0) empty = <EmptyState icon='lapis' title='Nenhuma publicação ainda' />
 
