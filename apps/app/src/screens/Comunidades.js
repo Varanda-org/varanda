@@ -21,6 +21,7 @@ import { pagesOn } from '../pageGate'
 import { actAs } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
+import { refusalOf } from '../wordCheck'
 import { Avatar } from '../ui/Avatar'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
@@ -146,7 +147,8 @@ export function NovaComunidade ({ visible, onClose, onCreated, onUncertain }) {
   const trimmed = name.trim()
   const tooLong = nameLength(trimmed) > NAME_MAX
   const offline = node.online === false
-  const ready = trimmed.length > 0 && !tooLong && !offline && !uncertain
+  const refused = refusalOf(trimmed)
+  const ready = trimmed.length > 0 && !tooLong && refused === '' && !offline && !uncertain
 
   const create = async () => {
     if (!ready) return
@@ -172,6 +174,7 @@ export function NovaComunidade ({ visible, onClose, onCreated, onUncertain }) {
           placeholder='Nome da comunidade'
         />
         {tooLong ? <ErrorText>{'O nome pode ter até ' + NAME_MAX + ' caracteres.'}</ErrorText> : null}
+        <ErrorText>{refused}</ErrorText>
         <Choice
           label='Entrada'
           value={join}

@@ -353,6 +353,15 @@ Numa rede P2P não dá para apagar uma cópia de todos os aparelhos, então a mo
 
 4. **Efeito:** a lista bloqueia o diário por chave pública (não por publicação). Semeadores, membros da CLI e a versão web trocam a lista entre si no canal `varanda/blocklist/1`, guardam a mais nova que confere, apagam o que tinham desse diário e se recusam a buscá-lo, guardá-lo, anunciá-lo ou servi-lo de novo. Os semeadores também recusam a admissão de uma chave bloqueada.
 
+**Conferência de palavras no aparelho**
+
+Os quatro passos acima agem depois da publicação. Antes dela, o app oficial (`apps/app/src/wordCheck.js`) recusa texto público com um termo de uma lista curta de termos graves (`apps/app/src/blockedTerms.js`): ofensas contra grupos, conteúdo sexual com crianças e adolescentes, ameaças explícitas. Não é uma lista de palavrões. Compara palavras inteiras depois de dobrar acentos e maiúsculas, então um termo nunca casa dentro de uma palavra maior. A recusa é definitiva: o rascunho fica para a pessoa editar, e não há botão de publicar mesmo assim. O repositório é público e o app leva a lista, então ela é pública.
+
+- **Onde vale:** publicação, resposta e citação; mensagem e encaminhamento em grupo público; nome, bio e @nome, de membro e de Página; anúncio e avaliação da Feira; cartão de convite; nome de grupo público e de comunidade. Vale também agindo como Página.
+- **Onde não vale:** mensagens diretas e grupos privados, porque uma conferência dentro da conversa cifrada pareceria leitura de mensagens privadas, mesmo sem nada sair do aparelho. Nem em denúncias e recursos, que precisam poder citar o termo. Nem em fotos e áudio, e nem no título e na descrição de uma prévia de link, que vêm do site: o texto que a pessoa escreve é tudo o que ela lê.
+- **Dados:** nada sai do aparelho e nenhuma recusa é contada ou registrada, então a associação não trata dado novo. Se uma recusa local conta como decisão automatizada no sentido do art. 20 da LGPD é pergunta para o parecer jurídico.
+- **Limite:** é uma barreira do app oficial, não uma garantia. Um app modificado, um build antigo ou a CLI publicam sem passar por ela, e o protocolo e os semeadores não sabem da lista. Para esses casos valem a denúncia e a lista assinada. Também é fácil de contornar com grafias diferentes.
+
 **Grupos públicos (Comunidades)**
 
 Cada aparelho de quem participa escreve o próprio núcleo; o grupo é a soma deles, dobrada por quem lê (`docs/protocol.md` seção 10). Por isso a moderação do grupo é feita por registros nos núcleos, e a lista assinada continua sendo o único mecanismo que tira algo da rede inteira.
