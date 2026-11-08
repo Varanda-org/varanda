@@ -664,7 +664,7 @@ Com a Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`, veja [development.md](developmen
 
 ### Anúncios de uma pessoa
 
-No perfil de um membro ou de uma Página (nó hospedado), a linha "Anúncios" abre a lista dos anúncios daquela pessoa ou Página, na mesma Feira, sem abas, filtros nem o botão Anunciar. Anúncio vendido ou velho continua na lista com o selo; autores bloqueados não aparecem. Sem anúncios, a tela diz "Nenhum anúncio por aqui.".
+No perfil de um membro ou de uma Página (nó hospedado), a linha "Anúncios" (com ícone e seta, acima das abas) abre a lista dos anúncios daquela pessoa ou Página, na mesma Feira, sem abas, filtros nem o botão Anunciar. Anúncio vendido ou velho continua na lista com o selo; autores bloqueados não aparecem. Sem anúncios, a tela diz "Nenhum anúncio por aqui.".
 
 ### Limites
 
