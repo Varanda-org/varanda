@@ -273,6 +273,10 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Corrigido
 
+- Perfil de membro ou Página: a linha "Anúncios" fica acima das abas, como link com ícone e seta (e a linha "Avaliações" junto), em vez de abaixo delas.
+- Menu "mais" de uma Página: Agir como a página, Deixar de agir, Ajustes da página, Seguir como a página e Compartilhar perfil ganham ícone.
+- Texto grande: com as pílulas empilhadas no perfil, o botão "mais" fica na linha da última pílula, e não sozinho numa terceira linha. Detalhes em `docs/verification.md` seção 142.
+
 - Web: tocar numa foto aberta no visualizador não abre mais a publicação que estava por trás dele.
 - Botões de ação e de contagem das publicações (curtir, republicar, responder, mais) com 44 pt de altura, sem mudar a altura da linha. Os pares divididos de curtir e republicar mantêm a largura estreita, para a barra caber em 320 pt.
 - O botão de ajuda de A Rua tem 44 pt.

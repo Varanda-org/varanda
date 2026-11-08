@@ -6701,3 +6701,31 @@ Limites desta caminhada:
 
 - Nenhuma caixa acima foi marcada nesta documentação.
 - Os testes conferem o código-fonte dos estilos e a ausência de botões aninhados por leitura de arquivo, não o toque real. A área de 44 pt e a opacidade do iOS só se confirmam no aparelho ou no simulador.
+
+## 142. Perfil: linha Anúncios, ícones do menu mais e pílulas com texto grande (PR fix/profile-polish)
+
+Correções de acabamento do perfil. Não muda protocolo, semeador nem RPC.
+
+Regras que os passos conferem:
+
+- No perfil de um membro ou de uma Página (nó hospedado), a linha "Anúncios" é um link com ícone da Feira à esquerda e seta à direita, e fica acima das abas, junto com a linha "Avaliações". Perfil bloqueado não mostra as duas.
+- No menu "mais" de uma Página, "Agir como esta página", "Deixar de agir como a página", "Ajustes da página", "Seguir como a página" (e "Deixar de seguir") e "Compartilhar perfil" têm ícone.
+- Com texto grande (escala de fonte acima de 1,3), as pílulas empilham em largura total e o botão "mais" fica na mesma linha da última pílula. No tamanho normal o layout não muda.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/profileActions.test.js`, `node apps/app/test/dm.test.js`, `node apps/app/test/muralScreen.test.js`, `node apps/app/test/profileBar.test.js`, `node apps/app/test/pageProfile.test.js` e `node apps/app/test/platformGate.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Perfil de uma Página com anúncios: "Anúncios" aparece logo acima das abas, com o ícone e a seta, e tocar abre a lista.
+- [ ] Perfil sem anúncios ou com perfil bloqueado: a linha não aparece.
+- [ ] Menu "mais" de uma Página que você administra: cada item mostra o ícone certo.
+- [ ] Texto do sistema no maior tamanho: as pílulas ficam empilhadas e o botão "mais" fica ao lado da última, sem terceira linha.
+- [ ] Web e PWA: repetir as conferências acima na largura de celular.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Os testes conferem o código-fonte por leitura de arquivo, não a tela. A posição da linha e o layout com texto grande só se confirmam no aparelho ou no simulador.
