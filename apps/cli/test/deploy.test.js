@@ -631,6 +631,7 @@ test('deploy.sh: conferir_antes checks VARANDA_STATS_EMAILS against the moderato
 // Native passkeys: the OS only offers the domain's passkey to the app the
 // domain declares under /.well-known. Values are fake on purpose.
 const FAKE_CERT = Array(32).fill('0A').join(':')
+const FAKE_CERT_2 = Array(32).fill('0B').join(':')
 const FAKE_IOS = 'ABCDE12345.app.varanda'
 
 function hasBash (t) {
@@ -650,6 +651,15 @@ const ASSOC_BAD = [
   ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT.slice(3)],
   ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT.replace(/:/g, '')],
   ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + '"],"x":["'],
+  ['VARANDA_ANDROID_CERT_SHA256', ',' + FAKE_CERT],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ','],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ',,' + FAKE_CERT_2],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ', ' + FAKE_CERT_2],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ',' + FAKE_CERT_2.toLowerCase()],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ',' + FAKE_CERT_2 + ',' + FAKE_CERT],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ',' + FAKE_CERT],
+  ['VARANDA_ANDROID_CERT_SHA256', ['0A', '0B', '0C', '0D', '0E'].map((b) => Array(32).fill(b).join(':')).join(',')],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ',' + FAKE_CERT_2 + '"],"x":["'],
   ['VARANDA_IOS_APP_ID', 'abcde12345.app.varanda'],
   ['VARANDA_IOS_APP_ID', 'ABCDE1234.app.varanda'],
   ['VARANDA_IOS_APP_ID', 'ABCDE12345.app.varanda.debug'],
@@ -666,6 +676,13 @@ function checkAssocShapes (t, wk) {
       webcredentials: { apps: [FAKE_IOS] },
       applinks: { apps: [], details: [{ appIDs: [FAKE_IOS], components: [{ '/': '/anuncio/*' }] }] }
     }, 'apple-app-site-association shape (applinks for /anuncio/ only)')
+}
+
+// Written exactly so a single certificate keeps the bytes an installation
+// already serves.
+function assetlinksBytes (...certs) {
+  return '[{"relation":["delegate_permission/common.get_login_creds","delegate_permission/common.handle_all_urls"],' +
+    '"target":{"namespace":"android_app","package_name":"app.varanda","sha256_cert_fingerprints":["' + certs.join('","') + '"]}}]\n'
 }
 
 // A temporary root with deploy/seeder/.env and a www holding the SPA.
@@ -707,8 +724,19 @@ test('deploy.sh: native app associations are validated and rendered into www', (
   const both = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
   t.is(both.status, 0, 'well-formed values pass: ' + both.stderr)
   checkAssocShapes(t, wk)
+  t.is(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8'), assetlinksBytes(FAKE_CERT), 'one certificate: the bytes do not change')
   t.absent(both.stderr.includes('aviso'), 'no warning with both set')
   t.alike(fs.readdirSync(wk).sort(), ['apple-app-site-association', 'assetlinks.json'], 'no temporary file left')
+
+  // Play's app signing certificate and the EAS keystore's, at the same time.
+  const two = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + ',' + FAKE_CERT_2 + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
+  t.is(two.status, 0, 'two certificates pass: ' + two.stderr)
+  t.alike(JSON.parse(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8'))[0].target.sha256_cert_fingerprints, [FAKE_CERT, FAKE_CERT_2], 'both, in order')
+  t.is(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8'), assetlinksBytes(FAKE_CERT, FAKE_CERT_2), 'two certificates: exact bytes')
+  const four = ['0A', '0B', '0C', '0D'].map((b) => Array(32).fill(b).join(':'))
+  const max = run('VARANDA_ANDROID_CERT_SHA256=' + four.join(',') + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
+  t.is(max.status, 0, 'four certificates pass: ' + max.stderr)
+  t.alike(JSON.parse(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8'))[0].target.sha256_cert_fingerprints, four, 'all four, in order')
 
   // A file left by an earlier deploy goes away when its variable is emptied.
   const androidOnly = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=\n')
@@ -723,6 +751,7 @@ test('deploy.sh: native app associations are validated and rendered into www', (
     const r = run(name + '=' + value + '\n')
     t.is(r.status, 1, name + ' malformed is refused: ' + value)
     t.ok(r.stderr.includes(name + ' inválido em deploy/seeder/.env'), 'says which variable')
+    t.absent(r.stderr.includes(value) || r.stderr.includes('0A:0A') || r.stderr.includes('0a:0a'), 'the value is not printed')
   }
 })
 

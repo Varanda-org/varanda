@@ -14,6 +14,7 @@ const { openAccountStore } = require('../account/store')
 const { openTermsStore } = require('../account/terms-store')
 const { openRecoveryStore } = require('../account/recovery-store')
 const { openPasskeyStore } = require('../account/passkey-store')
+const { parseAndroidCerts } = require('../account/webauthn')
 const { openInvitesStore } = require('../account/invites-store')
 const { pairInvites } = require('../account/invites-pair')
 const { createListingReader } = require('../account/feira-read')
@@ -538,17 +539,22 @@ function readEnv (env, dataDir) {
   return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), gif: readGifEnv(env), preview: readPreviewEnv(env), androidCertSha256: readAndroidCertEnv(env) }
 }
 
-// VARANDA_ANDROID_CERT_SHA256: the Android app's signing certificate, the
-// same value deploy/seeder/well-known.sh publishes in assetlinks.json. Here
-// it adds the app's 'android:apk-key-hash:' origin to the ones a passkey
-// assertion may report at Excluir conta (../account/webauthn.js). Unset or
-// '' leaves only the public origin (a deletion from the Android app then
-// waits its 7 days). Never echoed.
-const ANDROID_CERT_RE = /^[0-9A-F]{2}(:[0-9A-F]{2}){31}$/
+// VARANDA_ANDROID_CERT_SHA256: the Android app's signing certificates, 1 to 4
+// separated by a comma, the same value deploy/seeder/well-known.sh publishes
+// in assetlinks.json: Play's app signing certificate (Play Console) and, while
+// preview APK checks continue, the EAS keystore's. The public debug key never
+// goes in. Here each one adds an 'android:apk-key-hash:' origin to the ones a
+// passkey assertion may report at Excluir conta (../account/webauthn.js).
+// Unset or '' leaves only the public origin (a deletion from the Android app
+// then waits its 7 days). Never echoed.
 function readAndroidCertEnv (env) {
   const raw = env.VARANDA_ANDROID_CERT_SHA256
   if (raw === undefined || raw === '') return ''
-  if (typeof raw !== 'string' || !ANDROID_CERT_RE.test(raw)) throw new UsageError('VARANDA_ANDROID_CERT_SHA256 inválido')
+  try {
+    parseAndroidCerts(raw)
+  } catch {
+    throw new UsageError('VARANDA_ANDROID_CERT_SHA256 inválido')
+  }
   return raw
 }
 

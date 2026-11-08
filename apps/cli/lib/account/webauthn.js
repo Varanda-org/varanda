@@ -42,6 +42,7 @@ const ED = 0x80
 const B64URL_RE = /^[A-Za-z0-9_-]+={0,2}$/
 const HEX_RE = /^[0-9a-f]+$/
 const ANDROID_CERT_RE = /^[0-9A-F]{2}(:[0-9A-F]{2}){31}$/
+const MAX_ANDROID_CERTS = 4
 
 // A canonical base64url string (trailing '=' tolerated: some platforms pad)
 // -> Buffer, or null. At most maxBytes once decoded.
@@ -282,10 +283,24 @@ function verifyAssertion ({ assertion, key, challenge, rpId, origins } = {}) {
   return { ok: true, signCount: parsed.signCount }
 }
 
+// VARANDA_ANDROID_CERT_SHA256 -> its fingerprints, in order ('' -> none). The
+// same rules deploy/seeder/well-known.sh applies before publishing the list in
+// assetlinks.json. Throws TypeError, naming no value, on a bad entry, a
+// duplicate, an empty element or more than MAX_ANDROID_CERTS.
+function parseAndroidCerts (value) {
+  const invalid = () => new TypeError('invalid android certificate fingerprint')
+  if (typeof value !== 'string') throw invalid()
+  if (value === '') return []
+  const certs = value.split(',')
+  if (certs.length > MAX_ANDROID_CERTS || new Set(certs).size !== certs.length) throw invalid()
+  if (!certs.every((cert) => ANDROID_CERT_RE.test(cert))) throw invalid()
+  return certs
+}
+
 // The rpId and the clientData origins a passkey of this installation may
 // report: the public origin (the web, the PWA and the iOS app, which reports
-// https://<rpId>), and the Android app's 'android:apk-key-hash:' origin when
-// the signing certificate's SHA-256 is configured (the same
+// https://<rpId>), and one 'android:apk-key-hash:' origin for each configured
+// signing certificate of the Android app, in order (the same
 // VARANDA_ANDROID_CERT_SHA256 deploy/seeder/well-known.sh publishes in
 // assetlinks.json). -> { rpId, origins }; throws TypeError on a bad value.
 function passkeyOrigins ({ origin, androidCertSha256 = '' } = {}) {
@@ -297,8 +312,9 @@ function passkeyOrigins ({ origin, androidCertSha256 = '' } = {}) {
   }
   const origins = [url.origin]
   if (androidCertSha256 !== '' && androidCertSha256 !== undefined && androidCertSha256 !== null) {
-    if (typeof androidCertSha256 !== 'string' || !ANDROID_CERT_RE.test(androidCertSha256)) throw new TypeError('invalid android certificate fingerprint')
-    origins.push('android:apk-key-hash:' + Buffer.from(androidCertSha256.replace(/:/g, ''), 'hex').toString('base64url'))
+    for (const cert of parseAndroidCerts(androidCertSha256)) {
+      origins.push('android:apk-key-hash:' + Buffer.from(cert.replace(/:/g, ''), 'hex').toString('base64url'))
+    }
   }
   return { rpId: url.hostname, origins }
 }
@@ -317,5 +333,6 @@ module.exports = {
   keyFromAttestation,
   attestationHash,
   verifyAssertion,
+  parseAndroidCerts,
   passkeyOrigins
 }
