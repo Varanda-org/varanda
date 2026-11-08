@@ -43,6 +43,9 @@ sha_re='^[0-9a-f]{40}$'
 # Minúsculas e sem ponto final: o semeador exige que https://<domínio> seja
 # exatamente uma origem (originList em apps/cli/lib/cli.js) e não subiria.
 domain_re='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+# A origem da Feira: https, minúsculas, sem caminho (PUBLIC_ORIGIN_RE em
+# apps/cli/lib/seed-ws.js).
+origem_re='^https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[1-9][0-9]{0,4})?$'
 # A chave pública da associação, servida pelo Caddy em /varanda.json. Qualquer
 # caixa, como na CLI e no app (que normalizam para minúsculas); a sonda compara
 # o corpo com o valor exato do .env, que é o que o Caddy serve.
@@ -56,7 +59,7 @@ moderator_re='^[^[:space:],@]+@[^[:space:],@]+$'
 # LIMIT_ENV em apps/cli/lib/commands/account.js (um teste compara as duas):
 # um valor fora dela derrubaria o serviço só depois de trocar o contêiner.
 limite_re='^[1-9][0-9]{0,7}$'
-limites_conta='VARANDA_MAX_MEMBERS:1:4096 VARANDA_ACCOUNT_MAX_CONNECTIONS:1:4096 VARANDA_ACCOUNT_RATE:1:10000 VARANDA_ACCOUNT_BURST:1:100000 VARANDA_ACCOUNT_MAX_PENDING:1:100000 VARANDA_INVITES_PER_WEEK:1:100 VARANDA_INVITE_DROPS:1:1'
+limites_conta='VARANDA_MAX_MEMBERS:1:4096 VARANDA_ACCOUNT_MAX_CONNECTIONS:1:4096 VARANDA_ACCOUNT_RATE:1:10000 VARANDA_ACCOUNT_BURST:1:100000 VARANDA_ACCOUNT_MAX_PENDING:1:100000 VARANDA_INVITES_PER_WEEK:1:100 VARANDA_INVITE_DROPS:1:1 VARANDA_FEIRA_INVITES_PER_WEEK:1:100'
 
 root=''
 www=''
@@ -235,7 +238,7 @@ escolher_alvo() {
 }
 
 conferir_antes() {
-  local env_file="$root/deploy/seeder/.env" google_id google_secret moderators item itens=0 nome limite entrada min max faixa minimo maximo valor stats mods_lc stats_itens=0 saude saude_re
+  local env_file="$root/deploy/seeder/.env" triagem origem_feira google_id google_secret moderators item itens=0 nome limite entrada min max faixa minimo maximo valor stats mods_lc stats_itens=0 saude saude_re
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     log "alterações locais em $root: guarde ou descarte"
     exit 1
@@ -355,12 +358,36 @@ conferir_antes() {
     case $nome in
       VARANDA_INVITES_PER_WEEK) por_semana=$limite ;;
       VARANDA_INVITE_DROPS) sorteio=$limite ;;
+      VARANDA_FEIRA_INVITES_PER_WEEK) feira_semana=$limite ;;
     esac
   done
   # Os convites de surpresa sem o número semanal derrubariam o serviço na
   # partida (readEnv em apps/cli/lib/commands/account.js).
   if [ -n "${sorteio:-}" ] && [ -z "${por_semana:-}" ]; then
     log "VARANDA_INVITE_DROPS exige VARANDA_INVITES_PER_WEEK em deploy/seeder/.env"
+    exit 1
+  fi
+  # Os convites da Feira exigem os convites comuns e o segredo de triagem
+  # (readEnv em apps/cli/lib/commands/account.js); sem eles o serviço cairia
+  # na partida. O segredo só é lido aqui, nunca impresso.
+  if [ -n "${feira_semana:-}" ]; then
+    if [ -z "${por_semana:-}" ]; then
+      log "VARANDA_FEIRA_INVITES_PER_WEEK exige VARANDA_INVITES_PER_WEEK em deploy/seeder/.env"
+      exit 1
+    fi
+    triagem=$(sed -n 's/^[[:space:]]*VARANDA_TRIAGE_TOKEN[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+      sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    if [ -z "$triagem" ]; then
+      log "VARANDA_FEIRA_INVITES_PER_WEEK exige VARANDA_TRIAGE_TOKEN em deploy/seeder/.env"
+      exit 1
+    fi
+  fi
+  # A origem https das páginas públicas da Feira no semeador: opcional (vazio
+  # desliga as rotas /f/*), e exatamente uma origem como VARANDA_DOMAIN.
+  origem_feira=$(sed -n 's/^[[:space:]]*VARANDA_FEIRA_ORIGIN[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+    sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -n "$origem_feira" ] && ! [[ $origem_feira =~ $origem_re ]]; then
+    log "VARANDA_FEIRA_ORIGIN inválido em deploy/seeder/.env"
     exit 1
   fi
   # Limites do semeador web: opcionais (ausente ou vazio usa o padrão do

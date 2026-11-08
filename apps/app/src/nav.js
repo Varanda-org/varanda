@@ -10,6 +10,11 @@
 // hex64 root key. 'conversa' stays the post thread.
 // 'paginas' (the member's pages) and 'novapagina' (create one) take no key;
 // 'paginaajustes' (one page's settings) is keyed by the page's hex64 key.
+// 'anuncio', 'editar-anuncio' and 'avaliar' use a listing ref; 'avaliar'
+// also requires params.offer (hex32). 'anunciar' takes no key and
+// optionally params.page (hex64) to publish as a page.
+// 'anuncios' (one author's listings, from the profile) is keyed by the
+// author's lowercase hex64 key and takes no params.
 // 'comunidades' (browse and create communities, stacked over the Conversas
 // inbox) and 'pedidos' (the message request folder) take no key either. The
 // stack is an immutable (frozen) array, oldest first. Invalid entries are
@@ -18,8 +23,9 @@
 // MAX_DEPTH the oldest entry is dropped.
 
 export const MAX_DEPTH = 20
-export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos'])
+export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios'])
 
+const HEX32 = /^[0-9a-f]{32}$/
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
 
@@ -40,9 +46,21 @@ export function isAuthorKey (s) {
 
 export function validEntry (entry) {
   if (!entry || typeof entry !== 'object') return false
-  if (entry.screen === 'conversa') return isRef(entry.key)
+  if (entry.screen === 'conversa' || entry.screen === 'anuncio' || entry.screen === 'editar-anuncio') return isRef(entry.key)
+  if (entry.screen === 'anunciar') {
+    if (entry.key !== undefined && entry.key !== null && entry.key !== '') return false
+    const params = entry.params
+    if (params === undefined) return true
+    if (!params || typeof params !== 'object' || Array.isArray(params)) return false
+    return params.page === undefined || isAuthorKey(params.page)
+  }
+  if (entry.screen === 'avaliar') {
+    const params = entry.params
+    if (!params || typeof params !== 'object' || Array.isArray(params)) return false
+    return isRef(entry.key) && typeof params.offer === 'string' && HEX32.test(params.offer)
+  }
   if (entry.screen === 'membro' || entry.screen === 'mensagem' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
-  if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes') return isAuthorKey(entry.key)
+  if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes' || entry.screen === 'anuncios') return isAuthorKey(entry.key)
   if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'pedidos') return entry.key === undefined || entry.key === null || entry.key === ''
   if (entry.screen === 'curtidas') {
     const params = entry.params

@@ -91,6 +91,9 @@ const RETRY_ABSTAIN_MS = 60 * 60 * 1000
 const BACKOFF_MS = Object.freeze([5 * 60 * 1000, 60 * 60 * 1000, 6 * 60 * 60 * 1000, 24 * 60 * 60 * 1000])
 // Failure codes that follow the exponential backoff (never rerun early on a
 // bank change): failed reads, and an embedder failure ('falha-ia').
+const LISTING_CODE = 'anuncio'
+const NOT_A_POST = 'nao-e-publicacao'
+const TERMINAL_CODES = Object.freeze([LISTING_CODE, NOT_A_POST])
 const READ_FAIL_CODES = Object.freeze(['timeout', 'ausente', 'recusado', 'certificado', 'config', 'erro', 'falha-ia'])
 const TOKEN_RE = /^[a-z0-9-]{1,32}$/
 // Reasons whose verified text is embedded and learned from.
@@ -273,6 +276,11 @@ function createWorker ({
     })
   }
 
+  // A human-only mark: no retry time, and due() skips it for good.
+  function markTerminal (id, code) {
+    ledger.mark(id, { code: token(code), retryAt: null, suggestion: null, nearest: null })
+  }
+
   function markFailed (id, code) {
     const prev = ledger.get(id)
     const attempts = (prev ? prev.attempts : 0) + 1
@@ -341,7 +349,9 @@ function createWorker ({
     }
     if (stopped) throw aborted()
     if (!r || r.ok !== true) {
-      markFailed(row.id, r && READ_FAIL_CODES.includes(r.code) ? r.code : 'erro')
+      // A target that is not a post is final: a retry would read the same.
+      if (r && r.code === NOT_A_POST) markTerminal(row.id, NOT_A_POST)
+      else markFailed(row.id, r && READ_FAIL_CODES.includes(r.code) ? r.code : 'erro')
       return null
     }
     // The ledger refuses text it cannot store (a reader bug); mark and back
@@ -408,6 +418,11 @@ function createWorker ({
     if (row.kind === 'dm') {
       emit('dm')
       return markAbstain(id, 'dm')
+    }
+    // A marketplace listing is no diary post: a human decides, nothing is read.
+    if (row.kind === 'listing') {
+      emit(LISTING_CODE)
+      return markTerminal(id, LISTING_CODE)
     }
     if (isGroupRow(row)) return
     if (row.kind !== 'post') return markAbstain(id, 'conta')
@@ -631,6 +646,7 @@ function createWorker ({
   // abstentions also rerun when the bank changed since they were marked.
   function due (id, size, nowIso) {
     const m = ledger.get(id)
+    if (m !== null && TERMINAL_CODES.includes(m.code)) return false
     if (m === null || m.retryAt === null || m.retryAt <= nowIso) return true
     if (READ_FAIL_CODES.includes(m.code)) return false
     return m.exemplars !== size

@@ -5,6 +5,9 @@ const nodeCrypto = require('node:crypto')
 const path = require('node:path')
 const { WebSocketServer, createWebSocketStream } = require('ws')
 const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
+const { MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
+const { feira } = require('@varanda/rpc')
+const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-page')
 
 // WebSocket entry of `seed --ws-port` (docs/protocol.md section 7): a phase 0
 // spike that lets a browser-held member replicate through the seeder. Each
@@ -192,6 +195,58 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 // diary, group, seq } and nothing else.
 // Same token check, budget, deadline, 404 and silence as /moderation-post,
 // and likewise never proxied by Caddy.
+//
+// With the same token, GET /moderation-listing/<D>/<seq> answers the
+// current folded content of a Feira listing (Seeder#listingPublic, the root
+// with its live edit) as JSON { title, text, priceLabel, city, uf, kind,
+// status } (status null when unknown), so a listing report is judged on
+// what the author signed. Anything that is not a live listing is the same
+// 404; same token check, budget, deadline and silence as /moderation-post,
+// never proxied.
+//
+// With the same token, GET /feira-listing/<D>/<seq> answers the account
+// service's Feira entry (apps/cli/lib/account/feira-read.js): exactly
+// { ok: true } when block <seq> is the root of a live listing of an
+// admitted, served, visible diary (Seeder#listingPublic answers a card),
+// else the same 404. Same token check, deadline and silence as
+// /moderation-post, never proxied, absent without the token, but with its
+// OWN budget (FEIRA_LISTING_MAX_IN_FLIGHT answers at once and
+// FEIRA_LISTING_RATE per second, burst FEIRA_LISTING_BURST, else 503): the
+// Feira entry is reached by people who are not members yet, so it must
+// never spend the report triage's /moderation-post slots or tokens.
+//
+// The Feira (docs/protocol.md "Feira") exists on this listener only when
+// startSeedWs is given a `publicOrigin` (the https origin the public pages
+// are served under); without one every route below is the generic 404.
+// - /index/feira/<uf>/<city>/<kind>/<cat>[/<words>][/<cursor>] ->
+//   Seeder#indexFeira (uf lower case on the wire, asked upper case; city a
+//   key of 2..48 chars, checked after the match; kind todos, produto,
+//   servico or procura; cat todas or a category; words as in /index/topic;
+//   cursor `<atMs>.<author>.<seq>`). /index/feira/autor/<D>[/<cursor>] ->
+//   indexFeiraAuthor and /index/feira/avaliacoes/<D>[/<cursor>] ->
+//   indexFeiraRatings (items carry the rating block's ref only). Same
+//   bucket, in-flight cap, deadline, 64 KiB cap and no-store as /index; the
+//   words reach the seeder and are never logged or echoed.
+// - GET|HEAD /f/<D>/<seq>: the public page of a listing
+//   (apps/cli/lib/feira-page.js escapes every peer string), text/html,
+//   no-store, nosniff, Referrer-Policy no-referrer, and X-Robots-Tag
+//   noindex for a vendido listing; anything that is no live listing of a
+//   visible diary (a post seq, a deleted root, a blocked diary) is the
+//   not-found page with 404. Budget of /index.
+// - GET|HEAD /f/<D>/<seq>/foto/<1..4> and /f/<D>/<seq>/capa (= foto 1): the
+//   photo of the CURRENT content, assembled through Seeder#mediaRead and
+//   served only when its size, sha256 and magic bytes match the descriptor
+//   (the declared mime is the Content-Type, exact Content-Length), else
+//   404. An edit changes what the same URL serves, so it is no-store. Own
+//   in-flight cap FEIRA_PHOTO_MAX_IN_FLIGHT and deadline
+//   FEIRA_PHOTO_DEADLINE_MS, sharing the /media token bucket; the slot is
+//   held until the response closes and the read settled.
+// - GET|HEAD /f/sitemap.xml: the newest live, non-vendido listings of
+//   visible diaries (Seeder#feiraRecent, at most FEIRA_SITEMAP_LIMIT) as
+//   absolute URLs, application/xml, Cache-Control public, max-age=600,
+//   in-flight FEIRA_SITEMAP_MAX_IN_FLIGHT, /index bucket.
+// Other methods are 405 with Allow, a query string is 404, Host first
+// (421). Nothing is logged: no path, key, word or title.
 const DEFAULT_HOST = '127.0.0.1'
 const PATH = '/seeder'
 const MAX_SOCKETS = 128
@@ -249,6 +304,13 @@ const INDEX_COMMUNITY_GROUPS_RE = /^\/index\/community\/([0-9a-f]{64})\/groups\/
 const INDEX_ENGAGERS_RE = /^\/index\/(likes|reposts)\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const INDEX_FOLLOW_COUNTS_RE = /^\/index\/follows\/([0-9a-f]{64})$/
 const INDEX_FOLLOWS_RE = /^\/index\/follows\/([0-9a-f]{64})\/(seguindo|seguidores)(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
+// Feira: uf (lower case on the wire), city key, kind, category, then optional
+// title words as in INDEX_TOPIC_RE and an optional cursor as in INDEX_POST_RE.
+const INDEX_FEIRA_RE = /^\/index\/feira\/([a-z]{2})\/([a-z0-9]+(?:-[a-z0-9]+)*)\/(todos|produto|servico|procura)\/(todas|[a-z]{2,16})(?:\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7}))?(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+const INDEX_FEIRA_AUTHOR_RE = /^\/index\/feira\/autor\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+const INDEX_FEIRA_RATINGS_RE = /^\/index\/feira\/avaliacoes\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+const FEIRA_CITY_MIN = 2
+const FEIRA_CITY_MAX = 48
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
 const INDEX_BURST = 64
@@ -271,6 +333,52 @@ const GROUP_POST_PREFIX = '/moderation-group-post'
 const HEX64_RE = /^[0-9a-f]{64}$/
 const GROUP_POST_RE = /^\/moderation-group-post\/([0-9a-f]{64})\/([1-9][0-9]{0,14})$/
 const TRIAGE_TOKEN_RE = /^[0-9a-f]{64}$/
+const LISTING_MOD_PREFIX = '/moderation-listing'
+const LISTING_MOD_RE = /^\/moderation-listing\/([0-9a-f]{64})\/([1-9][0-9]{0,14})$/
+const FEIRA_LISTING_PREFIX = '/feira-listing'
+const FEIRA_LISTING_RE = /^\/feira-listing\/([0-9a-f]{64})\/([1-9][0-9]{0,14})$/
+const FEIRA_LISTING_MAX_IN_FLIGHT = 2
+const FEIRA_LISTING_RATE = 4
+const FEIRA_LISTING_BURST = 8
+
+const FEIRA_PREFIX = '/f'
+const FEIRA_PAGE_RE = /^\/f\/([0-9a-f]{64})\/([1-9][0-9]{0,14})$/
+const FEIRA_FOTO_RE = /^\/f\/([0-9a-f]{64})\/([1-9][0-9]{0,14})\/foto\/([1-4])$/
+const FEIRA_CAPA_RE = /^\/f\/([0-9a-f]{64})\/([1-9][0-9]{0,14})\/capa$/
+const FEIRA_SITEMAP_RE = /^\/f\/sitemap\.xml$/
+const FEIRA_PAGE_MAX_BODY = 65536
+const FEIRA_PHOTO_MAX_IN_FLIGHT = 8
+const FEIRA_PHOTO_DEADLINE_MS = 10000
+const FEIRA_SITEMAP_MAX_IN_FLIGHT = 2
+const FEIRA_SITEMAP_LIMIT = 5000
+const PUBLIC_ORIGIN_RE = /^https:\/\/[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[1-9][0-9]{0,4})?$/
+const FEIRA_CAT_LABELS = {
+  casa: 'Casa',
+  roupa: 'Roupas',
+  eletronicos: 'Eletrônicos',
+  moveis: 'Móveis',
+  infantil: 'Infantil',
+  esporte: 'Esporte',
+  veiculos: 'Veículos',
+  comida: 'Comida',
+  aulas: 'Aulas',
+  beleza: 'Beleza',
+  reparos: 'Reparos',
+  outros: 'Outros'
+}
+// The declared mime must match the bytes: a peer chose both.
+const IMAGE_MAGIC = {
+  'image/jpeg': (b) => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  'image/png': (b) => b.length >= 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+  'image/webp': (b) => b.length >= 12 && b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP',
+  'image/gif': (b) => b.length >= 6 && (b.toString('latin1', 0, 6) === 'GIF87a' || b.toString('latin1', 0, 6) === 'GIF89a')
+}
+const FEIRA_PAGE_HEADERS = {
+  'Content-Type': 'text/html; charset=utf-8',
+  'X-Content-Type-Options': 'nosniff',
+  'Cache-Control': 'no-store',
+  'Referrer-Policy': 'no-referrer'
+}
 
 const sha256 = (value) => nodeCrypto.createHash('sha256').update(value).digest()
 
@@ -483,19 +591,33 @@ function refuse (socket, code, reason) {
 // '' leaves it a 404; any other value throws), backed by the seeder's
 // postBlock(diaryHex, seq) -> null | { fork, length, block0, block }; post:
 // overrides of its limits ({ maxInFlight, rate, burst, deadlineMs }), for
-// tests.
+// tests. publicOrigin: null or an https origin that enables the Feira
+// routes, backed by indexFeira, indexFeiraAuthor, indexFeiraRatings,
+// listingPublic(hex, seq), mediaRead and feiraRecent(limit); feiraLimits:
+// overrides ({ photoMaxInFlight, photoDeadlineMs, sitemapMaxInFlight,
+// listingMaxInFlight, listingRate, listingBurst }), for tests.
 // The listener's socket cap: `sockets` when it is an integer >= 1
 // (VARANDA_MAX_SOCKETS), else room for every external WebSocket, every
 // /media and /index response in flight and 64 more for keep-alives and
 // requests being refused (32 + 16 + 16 + 64 = MAX_SOCKETS by default), never
 // below MAX_SOCKETS, so lowering one cap never shrinks the listener. The
-// POST_MAX_IN_FLIGHT /moderation-post answers fit in those 64.
+// POST_MAX_IN_FLIGHT /moderation-post answers and the Feira photo and
+// sitemap slots fit in those 64.
 function socketCap ({ maxExternal, mediaInFlight, indexInFlight, sockets = null }) {
   if (Number.isInteger(sockets) && sockets >= 1) return sockets
   return Math.max(MAX_SOCKETS, maxExternal + mediaInFlight + indexInFlight + 64)
 }
 
-function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {} }) {
+function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {}, publicOrigin = null, feiraLimits = {} }) {
+  if (publicOrigin !== null && publicOrigin !== undefined && (typeof publicOrigin !== 'string' || !PUBLIC_ORIGIN_RE.test(publicOrigin))) {
+    throw new TypeError('publicOrigin inválido')
+  }
+  const origin = publicOrigin || null
+  const photoMaxInFlight = feiraLimits.photoMaxInFlight ?? FEIRA_PHOTO_MAX_IN_FLIGHT
+  const photoDeadlineMs = feiraLimits.photoDeadlineMs ?? FEIRA_PHOTO_DEADLINE_MS
+  const sitemapMaxInFlight = feiraLimits.sitemapMaxInFlight ?? FEIRA_SITEMAP_MAX_IN_FLIGHT
+  let photoInFlight = 0
+  let sitemapInFlight = 0
   if (triageToken !== null && triageToken !== undefined && triageToken !== '' &&
     (typeof triageToken !== 'string' || !TRIAGE_TOKEN_RE.test(triageToken))) {
     throw new TypeError('triageToken inválido') // never echoes the value
@@ -506,6 +628,9 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   const postDeadlineMs = post.deadlineMs ?? POST_DEADLINE_MS
   const takePostToken = tokenBucket(post.rate ?? POST_RATE, post.burst ?? POST_BURST)
   let postInFlight = 0
+  const feiraListingMaxInFlight = feiraLimits.listingMaxInFlight ?? FEIRA_LISTING_MAX_IN_FLIGHT
+  const takeFeiraListingToken = tokenBucket(feiraLimits.listingRate ?? FEIRA_LISTING_RATE, feiraLimits.listingBurst ?? FEIRA_LISTING_BURST)
+  let feiraListingInFlight = 0
   const allowList = origins ? new Set(origins.map(normalizeOrigin)) : null
   const maxInFlight = media.maxInFlight ?? MEDIA_MAX_IN_FLIGHT
   const deadlineMs = media.deadlineMs ?? MEDIA_DEADLINE_MS
@@ -548,7 +673,23 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexFollowCounts', [m[1]]]
     m = INDEX_FOLLOWS_RE.exec(url)
     if (m) return ['indexFollows', [m[1], m[2], m[3] === undefined ? null : m[3]]]
+    // Without a public origin the Feira has no public surface at all.
+    if (origin === null) return null
+    m = INDEX_FEIRA_AUTHOR_RE.exec(url)
+    if (m) return ['indexFeiraAuthor', [m[1], m[2] === undefined ? null : m[2]]]
+    m = INDEX_FEIRA_RATINGS_RE.exec(url)
+    if (m) return ['indexFeiraRatings', [m[1], m[2] === undefined ? null : m[2]], ratingsBody]
+    m = INDEX_FEIRA_RE.exec(url)
+    if (m && m[2].length >= FEIRA_CITY_MIN && m[2].length <= FEIRA_CITY_MAX && feira.isUf(m[1].toUpperCase())) {
+      return ['indexFeira', [m[1].toUpperCase(), m[2], m[3], m[4], m[5] === undefined ? null : m[5], m[6] === undefined ? null : m[6]]]
+    }
     return null
+  }
+
+  // A rating row names only the rater's block; the reader fetches and
+  // verifies it.
+  function ratingsBody ({ items, next, authors, indexing, complete }) {
+    return { items: items.map(({ ref }) => ({ ref })), next, authors, indexing, complete }
   }
 
   // The seeder's group answers flattened into the wire shape. The root
@@ -739,18 +880,25 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   // is held until the response is closed AND postBlock has settled, as for
   // /index; a response still open after postDeadlineMs is destroyed.
   // `method` names the seeder call (postBlock or groupPostBlock), `toBody`
-  // shapes its answer; both routes share the token, the budget and the 404.
-  async function servePost (req, res, method, match, toBody) {
+  // shapes its answer; the routes share the token and the 404, and all but
+  // /feira-listing (`feiraBudget` true, its own bucket and cap) the budget.
+  async function servePost (req, res, method, match, toBody, feiraBudget = false) {
     if (!triageAuthorized(req)) return send(res, 404, NOT_FOUND)
-    if (!takePostToken() || postInFlight >= postMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
-    postInFlight++
+    if (feiraBudget) {
+      if (!takeFeiraListingToken() || feiraListingInFlight >= feiraListingMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+      feiraListingInFlight++
+    } else {
+      if (!takePostToken() || postInFlight >= postMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+      postInFlight++
+    }
     let resClosed = false
     let pending = true
     let released = false
     const release = () => {
       if (released || !resClosed || pending) return
       released = true
-      postInFlight--
+      if (feiraBudget) feiraListingInFlight--
+      else postInFlight--
     }
     const timer = setTimeout(() => res.destroy(), postDeadlineMs)
     timer.unref()
@@ -781,6 +929,209 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (body === null) return send(res, 404, NOT_FOUND)
     res.writeHead(200, { ...INDEX_HEADERS, 'Content-Length': Buffer.byteLength(body) })
     res.end(body)
+  }
+
+  // The current folded listing for the account service's report triage, so
+  // a listing report is judged on what the author signed, not on the quote.
+  function listingModBody (answer) {
+    if (answer === null || typeof answer !== 'object' || answer.record === null || typeof answer.record !== 'object') return null
+    const r = answer.record
+    const place = r.place && typeof r.place === 'object' ? r.place : {}
+    const text = JSON.stringify({
+      title: typeof r.title === 'string' ? r.title : '',
+      text: typeof r.text === 'string' ? r.text : '',
+      priceLabel: feira.priceLabel(r.price, r.unit, r.kind),
+      city: typeof place.city === 'string' ? place.city : '',
+      uf: typeof place.uf === 'string' ? place.uf : '',
+      kind: feira.isKind(r.kind) ? r.kind : null,
+      status: feira.isStatus(answer.status) ? answer.status : null
+    }) + '\n'
+    return Buffer.byteLength(text) <= POST_MAX_BODY ? text : null
+  }
+
+  // The Feira entry's listing check: only whether listingPublic has a card.
+  function feiraListingBody (answer) {
+    if (answer === null || typeof answer !== 'object' || answer.record === null || typeof answer.record !== 'object') return null
+    return '{"ok":true}\n'
+  }
+
+  // The listing's photo descriptors, at most four.
+  function photosOf (record) {
+    return Array.isArray(record.media) ? record.media.slice(0, 4) : []
+  }
+
+  function listingView (hex, seq, card) {
+    const r = card.record
+    const place = r.place && typeof r.place === 'object' ? r.place : {}
+    const base = '/f/' + hex + '/' + seq
+    return {
+      title: r.title,
+      text: r.text,
+      priceLabel: feira.priceLabel(r.price, r.unit, r.kind),
+      city: place.city,
+      uf: place.uf,
+      bairro: place.bairro,
+      kind: r.kind,
+      catLabel: Object.prototype.hasOwnProperty.call(FEIRA_CAT_LABELS, r.cat) ? FEIRA_CAT_LABELS[r.cat] : '',
+      status: card.status,
+      statusLabel: feira.statusLabel(card.status, r.kind),
+      username: card.username,
+      name: card.name,
+      photoUrls: photosOf(r).map((_, i) => base + '/foto/' + (i + 1)),
+      pageUrl: origin + base,
+      enterUrl: origin + '/anuncio/' + hex + '/' + seq,
+      appUrl: 'varanda:///anuncio/' + hex + '/' + seq
+    }
+  }
+
+  // Runs `work` (which gets an isClosed probe) under a budget slot that is
+  // released only once the response is closed AND the work has settled, as
+  // for /index; a response still open after `deadline` is destroyed. The
+  // answer is null when the response closed first.
+  function slotted (res, deadline, onRelease, work) {
+    let resClosed = false
+    let pending = true
+    let released = false
+    const release = () => {
+      if (released || !resClosed || pending) return
+      released = true
+      onRelease()
+    }
+    const timer = setTimeout(() => res.destroy(), deadline)
+    timer.unref()
+    const closed = new Promise((resolve) => res.once('close', () => {
+      resClosed = true
+      clearTimeout(timer)
+      release()
+      resolve(CLOSED)
+    }))
+    const settled = () => {
+      pending = false
+      release()
+    }
+    const job = Promise.resolve().then(() => work(() => resClosed))
+    job.then(settled, settled)
+    return Promise.race([job.catch(() => null), closed]).then((answer) => {
+      if (answer === CLOSED || resClosed || res.destroyed || res.writableEnded) return CLOSED
+      return answer
+    })
+  }
+
+  function feiraNotFound (res, head) {
+    const body = renderNotFound()
+    res.writeHead(404, { ...FEIRA_PAGE_HEADERS, 'Content-Length': Buffer.byteLength(body) })
+    res.end(head ? undefined : body)
+  }
+
+  async function serveFeiraPage (req, res, match) {
+    if (!takeIndexToken() || indexInFlight >= indexMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+    indexInFlight++
+    const hex = match[1]
+    const seq = Number(match[2])
+    const answer = await slotted(res, indexDeadlineMs, () => { indexInFlight-- }, async () => {
+      if (typeof seeder.listingPublic !== 'function') return null
+      const card = await seeder.listingPublic(hex, seq)
+      if (card === null || typeof card !== 'object' || card.record === null || typeof card.record !== 'object') return null
+      const html = renderListingPage(listingView(hex, seq, card))
+      if (typeof html !== 'string' || Buffer.byteLength(html) > FEIRA_PAGE_MAX_BODY) return null
+      return { html, vendido: card.status === 'vendido' }
+    })
+    if (answer === CLOSED) return
+    const head = req.method === 'HEAD'
+    if (answer === null) return feiraNotFound(res, head)
+    const extra = answer.vendido ? { 'X-Robots-Tag': 'noindex' } : {}
+    res.writeHead(200, { ...FEIRA_PAGE_HEADERS, ...extra, 'Content-Length': Buffer.byteLength(answer.html) })
+    res.end(head ? undefined : answer.html)
+  }
+
+  // The bytes of photo n of the CURRENT listing content, assembled from the
+  // media core and checked against the descriptor (size, sha256) and the
+  // declared mime (magic bytes), or null.
+  async function photoBytes (hex, seq, n, isClosed) {
+    if (typeof seeder.listingPublic !== 'function' || typeof seeder.mediaRead !== 'function') return null
+    const card = await seeder.listingPublic(hex, seq)
+    if (card === null || typeof card !== 'object' || card.record === null || typeof card.record !== 'object') return null
+    const d = photosOf(card.record)[n - 1]
+    if (!d || typeof d !== 'object' || !Object.prototype.hasOwnProperty.call(IMAGE_MAGIC, d.mime)) return null
+    if (!Number.isSafeInteger(d.bytes) || d.bytes < 1 || d.bytes > MEDIA_MAX_BLOCKS * MEDIA_BLOCK_BYTES) return null
+    if (typeof d.sha256 !== 'string' || !HEX64_RE.test(d.sha256)) return null
+    const read = await seeder.mediaRead(hex, d.core, d.start, d.blocks)
+    if (!read || read.bytes !== d.bytes || !read.blocks || typeof read.blocks[Symbol.asyncIterator] !== 'function') return null
+    const parts = []
+    let total = 0
+    const it = read.blocks[Symbol.asyncIterator]()
+    try {
+      while (true) {
+        if (isClosed()) return null
+        const step = await it.next()
+        if (step.done) break
+        if (!(step.value instanceof Uint8Array)) return null
+        total += step.value.byteLength
+        if (total > d.bytes) return null
+        parts.push(step.value)
+      }
+    } finally {
+      try {
+        if (typeof it.return === 'function') it.return().catch(() => {})
+      } catch {}
+    }
+    if (total !== d.bytes) return null
+    const bytes = Buffer.concat(parts, total)
+    if (sha256(bytes).toString('hex') !== d.sha256 || !IMAGE_MAGIC[d.mime](bytes)) return null
+    return { bytes, mime: d.mime }
+  }
+
+  async function serveFeiraPhoto (req, res, match, n) {
+    if (!takeToken() || photoInFlight >= photoMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+    photoInFlight++
+    const answer = await slotted(res, photoDeadlineMs, () => { photoInFlight-- },
+      (isClosed) => photoBytes(match[1], Number(match[2]), n, isClosed))
+    if (answer === CLOSED) return
+    if (answer === null) return send(res, 404, NOT_FOUND)
+    res.writeHead(200, {
+      'Content-Type': answer.mime,
+      'Content-Length': answer.bytes.byteLength,
+      ...BASE_HEADERS,
+      'Referrer-Policy': 'no-referrer'
+    })
+    res.end(req.method === 'HEAD' ? undefined : answer.bytes)
+  }
+
+  async function serveFeiraSitemap (req, res) {
+    if (!takeIndexToken() || sitemapInFlight >= sitemapMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+    sitemapInFlight++
+    const answer = await slotted(res, indexDeadlineMs, () => { sitemapInFlight-- }, () => {
+      const refs = typeof seeder.feiraRecent === 'function' ? seeder.feiraRecent(FEIRA_SITEMAP_LIMIT) : []
+      const urls = []
+      for (const ref of Array.isArray(refs) ? refs : []) {
+        const m = typeof ref === 'string' ? /^([0-9a-f]{64}):([1-9][0-9]{0,14})$/.exec(ref) : null
+        if (m) urls.push(origin + '/f/' + m[1] + '/' + m[2])
+      }
+      return renderSitemap(urls)
+    })
+    if (answer === CLOSED) return
+    if (typeof answer !== 'string') return send(res, 404, NOT_FOUND)
+    res.writeHead(200, {
+      'Content-Type': 'application/xml; charset=utf-8',
+      'Content-Length': Buffer.byteLength(answer),
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'public, max-age=600'
+    })
+    res.end(req.method === 'HEAD' ? undefined : answer)
+  }
+
+  // GET|HEAD only, no query string; anything unmatched is the generic 404.
+  function serveFeira (req, res) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
+    const url = req.url
+    if (FEIRA_SITEMAP_RE.test(url)) return serveFeiraSitemap(req, res)
+    let m = FEIRA_PAGE_RE.exec(url)
+    if (m) return serveFeiraPage(req, res, m)
+    m = FEIRA_FOTO_RE.exec(url)
+    if (m) return serveFeiraPhoto(req, res, m, Number(m[3]))
+    m = FEIRA_CAPA_RE.exec(url)
+    if (m) return serveFeiraPhoto(req, res, m, 1)
+    return send(res, 404, NOT_FOUND)
   }
 
   async function serveMedia (req, res, match) {
@@ -913,6 +1264,22 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       if (!match) return send(res, 404, NOT_FOUND)
       return servePost(req, res, 'groupPostBlock', match, groupPostBody).catch(() => res.destroy())
     }
+    if (tokenHash !== null && (pathname === LISTING_MOD_PREFIX || pathname.startsWith(LISTING_MOD_PREFIX + '/'))) {
+      if (req.method !== 'GET') return send(res, 405, 'método não permitido\n', { Allow: 'GET' })
+      const match = LISTING_MOD_RE.exec(req.url)
+      if (!match) return send(res, 404, NOT_FOUND)
+      return servePost(req, res, 'listingPublic', match, listingModBody).catch(() => res.destroy())
+    }
+    if (tokenHash !== null && (pathname === FEIRA_LISTING_PREFIX || pathname.startsWith(FEIRA_LISTING_PREFIX + '/'))) {
+      if (req.method !== 'GET') return send(res, 405, 'método não permitido\n', { Allow: 'GET' })
+      const match = FEIRA_LISTING_RE.exec(req.url)
+      if (!match) return send(res, 404, NOT_FOUND)
+      return servePost(req, res, 'listingPublic', match, feiraListingBody, true).catch(() => res.destroy())
+    }
+    // Without a public origin the Feira pages do not exist.
+    if (origin !== null && pathname.startsWith(FEIRA_PREFIX + '/')) {
+      return Promise.resolve().then(() => serveFeira(req, res)).catch(() => res.destroy())
+    }
     send(res, 404, NOT_FOUND)
   })
   const maxExternal = Number.isInteger(seeder.maxExternal) && seeder.maxExternal >= 1 ? seeder.maxExternal : 32
@@ -1030,6 +1397,21 @@ module.exports = {
   INDEX_ENGAGERS_RE,
   INDEX_FOLLOW_COUNTS_RE,
   INDEX_FOLLOWS_RE,
+  INDEX_FEIRA_RE,
+  INDEX_FEIRA_AUTHOR_RE,
+  INDEX_FEIRA_RATINGS_RE,
+  FEIRA_PAGE_RE,
+  FEIRA_FOTO_RE,
+  FEIRA_CAPA_RE,
+  FEIRA_SITEMAP_RE,
+  FEIRA_PHOTO_MAX_IN_FLIGHT,
+  FEIRA_PHOTO_DEADLINE_MS,
+  FEIRA_SITEMAP_MAX_IN_FLIGHT,
+  LISTING_MOD_RE,
+  FEIRA_LISTING_RE,
+  FEIRA_LISTING_MAX_IN_FLIGHT,
+  FEIRA_LISTING_RATE,
+  FEIRA_LISTING_BURST,
   INDEX_MAX_REFS,
   INDEX_MAX_IN_FLIGHT,
   INDEX_RATE,

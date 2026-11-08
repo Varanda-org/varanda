@@ -90,6 +90,9 @@ const MAX_STORED_ANEXOS = 2000
 // packages/core/lib/report.js 'varanda-report-v2'); a v1 file is read with
 // both null and rewritten as v2 by the next mutation. v3 adds `appeals`; a
 // v1 or v2 file is read with none and rewritten as v3 the same way.
+// A Feira listing report (kind 'listing') rides on the report rows unchanged,
+// so it adds no version: an older binary fails closed on the first file
+// holding one ('indisponivel' at load) and never rewrites it.
 const VERSION = 3
 // Open reports waiting for a moderator. Decided ones are kept (retention is
 // issue #38) and do not count here, so deciding junk frees intake; they are
@@ -278,9 +281,11 @@ function validReportRow (id, row) {
     }
     if (r.seq === null) {
       if (r.kind !== 'account' || r.quote !== '') return false
-    } else if (r.kind !== 'post' || !Number.isInteger(r.seq) || r.seq < 1 || r.seq > SEQ_MAX) {
+    } else if ((r.kind !== 'post' && r.kind !== 'listing') || !Number.isInteger(r.seq) || r.seq < 1 || r.seq > SEQ_MAX) {
       return false
     }
+    // A listing sits on the diary, never in a group, and carries no anexo.
+    if (r.kind === 'listing' && (r.writer !== null || withAnexo)) return false
   }
   if (r.id !== id || !validId(id) || !isCanonicalIso(r.at)) return false
   if (!isLowerHex(r.target, 32) || !isLowerHex(r.reporter, 32) || r.reporter === r.target) return false
@@ -598,10 +603,14 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     return n
   }
 
-  // `anexo` (a group message only): { bytes, mime, sha256 }.
-  function add ({ reporter, target, seq = null, writer = null, group = null, reason, text = '', quote = '', signature, nonce, anexo = null } = {}) {
+  // `anexo` (a group message only): { bytes, mime, sha256 }. `kind`
+  // 'listing' (a Feira listing at `seq` on the target's diary) needs a seq
+  // and takes no writer, group or anexo; left out, it is 'account' or 'post'.
+  function add ({ reporter, target, seq = null, writer = null, group = null, reason, text = '', quote = '', signature, nonce, anexo = null, kind } = {}) {
     return enqueue(() => {
       usable()
+      if (kind !== undefined && kind !== 'listing') throw fail('pedido-invalido')
+      if (kind === 'listing' && (seq === null || writer !== null || group !== null || anexo !== null)) throw fail('pedido-invalido')
       if (!isLowerHex(reporter, 32) || !isLowerHex(target, 32) || reporter === target) throw fail('pedido-invalido')
       if (seq !== null && !(Number.isInteger(seq) && seq >= 1 && seq <= SEQ_MAX)) throw fail('pedido-invalido')
       if (writer === null) {
@@ -625,10 +634,12 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       // The anexo digest is part of the key, as for a dm: the same message
       // reported again with an image (the only evidence of a media-only
       // message) is a new report, not a duplicate of one without it.
+      // The kind is part of it too: a post and a listing share seq numbers.
+      const rowKind = kind === 'listing' ? 'listing' : seq === null ? 'account' : 'post'
       const rows = Object.values(state.reports)
       const sha = media === null ? null : media.row.sha256
       for (const r of rows) {
-        if (r.status === 'aberta' && r.kind !== 'dm' && r.reporter === reporter && r.target === target && r.writer === writer && r.seq === seq &&
+        if (r.status === 'aberta' && r.kind === rowKind && r.reporter === reporter && r.target === target && r.writer === writer && r.seq === seq &&
           (has(r, 'anexo') ? r.anexo.sha256 : null) === sha) {
           return { report: copyReport(r), duplicate: true }
         }
@@ -639,7 +650,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       const report = {
         id: newId(),
         at: iso(t),
-        kind: seq === null ? 'account' : 'post',
+        kind: rowKind,
         target,
         seq,
         quote,

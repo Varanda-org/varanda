@@ -15,6 +15,8 @@ const { openTermsStore } = require('../account/terms-store')
 const { openRecoveryStore } = require('../account/recovery-store')
 const { openPasskeyStore } = require('../account/passkey-store')
 const { openInvitesStore } = require('../account/invites-store')
+const { pairInvites } = require('../account/invites-pair')
+const { createListingReader } = require('../account/feira-read')
 const { openInviteDrops, startInviteDropLoop } = require('../account/invite-drops')
 const { openPushStore } = require('../account/push-store')
 const { openSeenStore } = require('../account/seen-store')
@@ -108,8 +110,13 @@ const LIMIT_ENV = Object.freeze({
   VARANDA_INVITES_PER_WEEK: ['invitesPerWeek', 1, 100],
   // Surprise drops: unset or blank is off, '1' spreads the weekly invites
   // over drawn minutes instead of opening them all on Monday.
-  VARANDA_INVITE_DROPS: ['inviteDrops', 1, 1]
+  VARANDA_INVITE_DROPS: ['inviteDrops', 1, 1],
+  // The Feira entry: each owner's weekly count of sign-ups through a shared
+  // listing link. Needs the member invites and the seeder token.
+  VARANDA_FEIRA_INVITES_PER_WEEK: ['feiraInvitesPerWeek', 1, 100]
 })
+// The Feira's one-hour sign-up codes (../account/invites-store.js options).
+const FEIRA_INVITES = Object.freeze({ file: 'feira-invites.json', ttlMs: 3600 * 1000, capOn: 'use', maxRows: 20000, pruneUnused: true })
 const CANONICAL_INT_RE = /^[1-9][0-9]{0,8}$/
 const DIDIT_KEY_RE = /^[\x21-\x7e]+$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -524,6 +531,10 @@ function readEnv (env, dataDir) {
   if (limits.inviteDrops !== undefined && limits.invitesPerWeek === undefined) {
     throw new UsageError('VARANDA_INVITE_DROPS exige VARANDA_INVITES_PER_WEEK')
   }
+  if (limits.feiraInvitesPerWeek !== undefined) {
+    if (limits.invitesPerWeek === undefined) throw new UsageError('VARANDA_FEIRA_INVITES_PER_WEEK exige VARANDA_INVITES_PER_WEEK')
+    if (groupToken === null) throw new UsageError('VARANDA_FEIRA_INVITES_PER_WEEK exige VARANDA_TRIAGE_TOKEN')
+  }
   return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), gif: readGifEnv(env), preview: readPreviewEnv(env), androidCertSha256: readAndroidCertEnv(env) }
 }
 
@@ -707,7 +718,7 @@ async function serve (flags, env) {
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
   const pagesConfig = readPagesEnv(env)
   const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, gif, preview, androidCertSha256 } = readEnv(env, flags.dataDir)
-  const { maxMembers = null, invitesPerWeek = null, inviteDrops = null, maxPending, maxConnections, ratePerSecond, burst } = limits
+  const { maxMembers = null, invitesPerWeek = null, inviteDrops = null, feiraInvitesPerWeek = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
     process.stdout.write((flags.json ? jsonLine(event) : eventLine(event)) + '\n')
@@ -736,6 +747,7 @@ async function serve (flags, env) {
   let passkeys = null
   let stopPasskeysHeal = null
   let invites = null
+  let feiraInvites = null
   let pushStore = null
   let seenStore = null
   let stopHeal = null
@@ -821,8 +833,18 @@ async function serve (flags, env) {
         stopDropsHeal = startHeal(drops, 'sorteio', log)
         opened = (member, nowMs) => drops.opened(member, store.linkedAt(member), nowMs)
       }
-      invites = openInvitesStore(flags.dataDir, { guard: () => lock.owned(), perWeek: invitesPerWeek, isUsed: (id) => store.inviteUsed(id), opened })
-      if (!invites.available()) log({ event: 'invites', reason: 'indisponivel' })
+      const primary = openInvitesStore(flags.dataDir, { guard: () => lock.owned(), perWeek: invitesPerWeek, isUsed: (id) => store.inviteUsed(id), opened })
+      if (!primary.available()) log({ event: 'invites', reason: 'indisponivel' })
+      // The Feira codes (feira-invites.json), only with
+      // VARANDA_FEIRA_INVITES_PER_WEEK set (readEnv already required the
+      // member invites and the seeder token). From here on `invites` is the
+      // pair: sign-up, the heal loop, a lost lock and Excluir conta reach
+      // both files.
+      if (feiraInvitesPerWeek !== null) {
+        feiraInvites = openInvitesStore(flags.dataDir, { ...FEIRA_INVITES, perWeek: feiraInvitesPerWeek, guard: () => lock.owned(), isUsed: (id) => store.inviteUsed(id) })
+        log({ event: 'feira', reason: feiraInvites.available() ? 'ligada' : 'indisponivel' })
+      }
+      invites = pairInvites(primary, feiraInvites)
       stopInvitesHeal = startHeal(invites, 'invites', log)
     }
     // Web Push: on only with a valid push-vapid.json. A malformed one is
@@ -920,7 +942,12 @@ async function serve (flags, env) {
     // or start the worker; go straight to the cleanup below.
     if (!stopRequested) {
       const groupCheck = createGroupCheck({ baseUrl: seederHttp, token: groupToken })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      // ONE loopback listing reader for the Feira entry and the moderation
+      // panel, on the same token as the group check.
+      const listingReader = groupToken === null
+        ? null
+        : createListingReader({ baseUrl: seederHttp, token: groupToken, association, revokedIssuers: () => revokedIssuerSet(moderation.pending().published.snapshot) })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {

@@ -5,7 +5,7 @@
      https return of the auth-session module to this app only. It works once
      https://bora.varanda.app/.well-known/apple-app-site-association lists
      <TeamID>.app.varanda (VARANDA_IOS_APP_ID in deploy/seeder/.env) and the
-     provisioning profile carries Associated Domains. Info.plist
+     provisioning profile carries Associated Domains. applinks opens only /anuncio/ in the app (the AASA components list it). Info.plist
      VarandaWebCredentials says the build has this entry; app.json
      ios.associatedDomains repeats it for prebuild. -->
 <plist version="1.0">
@@ -13,6 +13,7 @@
     <key>com.apple.developer.associated-domains</key>
     <array>
       <string>webcredentials:bora.varanda.app</string>
+      <string>applinks:bora.varanda.app</string>
     </array>
   </dict>
 </plist>

@@ -6127,3 +6127,217 @@ Limites desta caminhada:
 - Na Vitrine, as comunidades e os membros são fictícios e sempre respondem; o tempo das leituras em série de `community.members` num nó real fica para o laboratório.
 - A lista de Membros continua só para criador e administradores; quem não administra chega à conversa privada pelo grupo e pelas publicações.
 
+## 129. Carregamento mais rápido de A Rua, Diário e perfis (PRs chore/perf-harness até perf/app-render)
+
+Caminhada da pilha de desempenho: medição, leituras do nó, partida, concessão do app instalado e renderização. Ciclo de medição, metas e números em [performance.md](performance.md).
+
+O que muda:
+
+- Medição: `startup-bench.js` ganha `--file`, `--reads-twice`, `--log`, `--lease-gap` e contadores por fase; o laboratório hospedado ganha `--dataset`, `--dataset-size` e `--rajada`; o app de desenvolvimento ganha marcas de tempo no console e um gancho que só aceita `follow.add`, `community.join` e `post.create`, as duas coisas só com `__DEV__` e `EXPO_PUBLIC_VARANDA_PERF=1`; a Vitrine ganha 200 linhas extras com `EXPO_PUBLIC_VARANDA_VITRINE_LARGE=1`.
+- Nó: os núcleos de diário, réplica e grupo guardam os blocos em memória (um bloco apagado sai do cache antes e depois de cada limpeza, e o cache recusa guardar um bloco que o núcleo não tem); o feed valida cada registro uma vez por leitura.
+- Partida: Conversas só lê a caixa e os grupos quando a aba é aberta (a coleta de mensagens espera a partida ficar quieta, para o ponto de não lidas continuar aparecendo); o ponto da aba espera as primeiras linhas de A Rua; os pedidos ao nó entram numa fila de 7 em andamento em vez de falhar no nono, e a fila descarta o que esperava antes de qualquer troca de identidade; a página baixa o nó do navegador enquanto busca `/varanda.json`; o Diário não repete `node.info` para a mesma identidade.
+- Fotos: uma resposta 503 do semeador (ocupado) é tentada de novo, depois do `Retry-After` e com uma espera aleatória, no máximo três vezes.
+- App instalado: a sincronização fica ligada enquanto o app está aberto, como no PWA (antes caía 8 s depois de terminar e cada leitura reabria todos os núcleos do armazenamento do aparelho).
+- Renderização: as linhas do registro de sincronização e as dicas de download saem do contexto principal do app, e cada publicação só é desenhada de novo quando os dados dela mudam.
+
+Como verificar, a partir da raiz (um arquivo por vez):
+
+- `node packages/web-member/test/delete-purge.test.js`, `node packages/core/test/feed.test.js`.
+- `node apps/app/test/requestQueue.test.js`, `node apps/app/test/conversas.test.js`, `node apps/app/test/mediaFetch.test.js`, `node apps/app/test/mediaCache.test.js`, `node apps/app/test/workletLease.test.js`, `node apps/app/test/syncSignals.test.js`, `node apps/app/test/feedRender.test.js`, `node apps/app/test/perfMarks.test.js`, `node apps/app/test/vitrineLarge.test.js`, `node apps/app/test/hardening.test.js`.
+- `node apps/cli/test/lab-dataset-plan.test.js`, `node apps/cli/test/hosted-lab.test.js`.
+- Números: os comandos de [performance.md](performance.md) ("Ferramentas e comandos").
+
+Com uma conta de verdade, primeiro no Android, depois no iOS, depois na web e no PWA:
+
+- [ ] Android (APK de preview): abrir o app frio mostra as primeiras linhas de A Rua mais cedo que a versão anterior; o registro de Sincronização não mostra parada "idle" com o app aberto nem "leitura sem esperar a partida".
+- [ ] Android: com o app em segundo plano por um minuto, a sincronização para; ao voltar, ela recomeça.
+- [ ] Android: Conversas mostra o ponto de não lidas quando chega uma mensagem com o app aberto em A Rua, sem abrir a aba.
+- [ ] Android: rolar A Rua com fotos não engasga; uma curtida muda só a publicação curtida.
+- [ ] iOS (TestFlight): os mesmos quatro passos.
+- [ ] Web e PWA: A Rua aparece mais cedo; trocar de conta com publicações na fila de envio não publica nada da conta anterior na nova.
+- [ ] Web: com o semeador sob carga (`VARANDA_MEDIA_MAX_IN_FLIGHT` baixo), as fotos que recebem 503 aparecem depois de alguns segundos em vez de ficarem com erro.
+
+Limites:
+
+- O caminho crítico que sobra é a partida do nó: ela verifica cerca de 122 assinaturas de certificados em JavaScript puro antes de responder à primeira leitura. Encurtar isso pede uma decisão (Ed25519 do WebCrypto no navegador, ou lembrar verificações entre aberturas).
+- Cada app instalado aberto em primeiro plano segura uma conexão do semeador, como uma aba visível: `VARANDA_MAX_EXTERNAL` precisa contar os dois.
+- O semeador limita `/media` de forma global (16 em andamento, 64 por segundo por padrão): com muita gente ao mesmo tempo, as fotos esperam; as variáveis `VARANDA_MEDIA_*` aumentam esses limites.
+- Os números de celular só valem depois de publicar; simulador e emulador não substituem um aparelho.
+
+## 130. Feira: anúncios, edição, apagamento, avaliações e índice do semeador (PR feat/feira-records)
+
+Caminhada da base da Feira: os quatro registros (`listing`, `listing-edit`, `listing-status`, `listing-rate`), a dobra, os métodos `listing.*` do RPC (5.103 a 5.110), a denúncia de anúncio e o índice do semeador. O protocolo está em [protocol.md](protocol.md) (seção 2, "Feira records", seção 3, "Listing report", e a seção 15); o RPC em [rpc.md](rpc.md). Nesta rodada não há tela: as telas e as rotas HTTP vêm em PRs seguintes.
+
+Regras que os passos conferem:
+
+- Um anúncio mora no diário de quem anuncia. A edição é um retrato completo do conteúdo, e o `expectedRevision` (a posição do bloco da edição viva, ou 0) recusa com `conflito` a edição feita sobre uma versão velha, sem gravar nada.
+- Editar grava, num só append, a edição nova e o apagamento da edição anterior com as fotos que só ela mostrava. A raiz fica no diário até o anúncio ser apagado: a primeira versão e as fotos continuam no registro.
+- Apagar um anúncio grava, num só append, o apagamento da raiz e o da edição viva. O limite é de 30 anúncios vivos por diário (`limite`). Uma procura não fica reservada, e "vendido" nela aparece como "Encontrado".
+- Uma avaliação só vale com o consentimento do autor do anúncio (assinatura sobre `varanda-feira-deal-v1`), de uma pessoa diferente, com cadastro de 7 dias ou mais na hora da leitura; vale uma por pessoa por anúncio, a mais nova. O semeador só guarda indícios; quem mostra estrelas é o app, pela verificação própria (`listing.ratings`).
+- A proposta é um link do anúncio com `#oferta=<centavos>`; a resposta acrescenta `&aceite=<consentimento>` ou `&resposta=recusada`. Quem fez a proposta é o remetente autenticado da mensagem direta, e `listing.consent` só assina uma proposta recebida desse remetente e desse anúncio.
+- O índice do semeador é só dica: o STATE por diário (status e edição atual) é atualizado antes de qualquer admissão na busca, e a varredura da Feira nunca pausa num teto. O cartão público (`listingPublic`) nunca publica a raiz antiga como atual, e uma página encerrada ou movida sai da Feira.
+- Ordem de lançamento: semeadores, depois o pacote web, depois o app. Leitores antigos pulam os quatro tipos como desconhecidos.
+- Uma caixa só é marcada depois que o passo foi executado e o registro guardado.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node packages/rpc/test/feira.test.js`, `node packages/rpc/test/methods.test.js` e `node packages/rpc/test/sizes.test.js`.
+- `node packages/core/test/records.test.js`, `node packages/core/test/listing.test.js`, `node packages/core/test/deletion.test.js`, `node packages/core/test/feed.test.js`, `node packages/core/test/report.test.js` e `node packages/core/test/listing-session.test.js`.
+- `node packages/core/test/feira-index.test.js` e `node packages/core/test/seeder-feira.test.js`.
+- `node packages/web-member/test/listing-write.test.js` e `node packages/web-member/test/listing-report.test.js` (exigem Node 20.19 ou mais novo).
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada com dois nós (um semeador e dois membros de teste, na DHT local), a partir da CLI de teste ou dos testes acima:
+
+- [ ] Criar um anúncio de produto com preço e outro "A combinar"; `listing.mine` lista os dois, o mais novo primeiro, com `editSeq` nulo.
+- [ ] Editar o primeiro com o `expectedRevision` certo: sai `{ seq, ref }` com o mesmo `ref`; repetir com o valor velho responde `conflito` e o diário não cresce.
+- [ ] Mudar o status para "reservado" e depois "vendido"; num anúncio de procura, "reservado" é recusado com "uma procura não fica reservada".
+- [ ] Criar 30 anúncios vivos; o 31º responde `limite`. Apagar um libera uma vaga.
+- [ ] Apagar um anúncio editado: o diário ganha dois apagamentos num só append e `listing.mine` não o lista mais.
+- [ ] No semeador, a busca por cidade e categoria acha o anúncio e deixa de achar depois de "vendido" e depois de apagado; a lista do autor mantém o "vendido".
+- [ ] O autor aceita uma proposta recebida (`listing.consent`); quem propôs avalia com `listing.rate`; uma avaliação com consentimento de outro anúncio responde `consentimento inválido`.
+- [ ] `listing.ratings` mostra a avaliação só quando o cadastro de quem avaliou tem 7 dias ou mais; antes disso ela entra em `dropped`.
+- [ ] Denunciar um anúncio com `report.sign` e `kind: 'listing'`; a assinatura não confere como denúncia de publicação.
+- [ ] Com o semeador de uma versão anterior à Feira, os quatro tipos são ignorados e o diário não é rejeitado.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- O semeador guarda só as 16 últimas edições e os 16 últimos status de cada anúncio: com a janela estourada e todos apagados, o anúncio fica sem status conhecido, sai da busca e do mapa do site, e o cartão público responde 404 se a edição atual for desconhecida, até um novo status ou edição.
+- Com duas avaliações da mesma pessoa para o mesmo anúncio, o índice guarda a mais nova; se ela for apagada, a antiga só volta ao índice depois que o semeador varrer o diário de novo (reinício ou reconstrução).
+
+## 131. Feira: página pública, entrada por link, anúncio de página e denúncia (PR feat/feira-service)
+
+Caminhada do serviço da Feira: as rotas públicas do semeador (`/index/feira/*`, `/f/*`), o Caddy, a entrada por link de anúncio, os anúncios de uma página, o cartão guardado na caixa da página e a denúncia de anúncio no painel. O protocolo está em [protocol.md](protocol.md) (seção 15, "The seeder's Feira routes and public pages" e "Feira entry"; seção 12, "Anúncios como página"; seção 3, "Reports").
+
+Regras que os passos conferem:
+
+- As rotas existem só quando o semeador tem `VARANDA_PUBLIC_ORIGIN` (no compose, `VARANDA_FEIRA_ORIGIN`). Sem ela, o padrão, `/f/*` e `/index/feira/*` respondem 404. A origem da conta é outra variável e não muda.
+- A página pública escapa todo texto do diário, não tem script nem recurso externo, e responde `no-store`, `nosniff` e `no-referrer`. `index,follow` só para `disponivel` e `reservado`; `vendido` e status desconhecido saem `noindex,follow`, e só `vendido` leva também `X-Robots-Tag: noindex`. Uma publicação, um anúncio apagado, um diário bloqueado ou uma edição desconhecida dão a mesma página 404.
+- As fotos (`/f/<diário>/<seq>/foto/1..4` e `capa`) só saem com tamanho, sha256 e bytes iguais ao descritor. O `sitemap.xml` lista só endereços de anúncios que não estão `vendido`. O Caddy serve o `/robots.txt` (permite só `/f/`) e limita `/f/*` a 30 pedidos por 10 s por endereço; o service worker não intercepta `/f/*`.
+- A entrada: `GET /account/feira/policy` responde só `{ enabled }`; `POST /account/feira/start` devolve um código de 1 hora cobrado do dono do anúncio e lê o anúncio sem olhar o status (um anúncio vendido ainda abre a porta). A ordem: o corpo exato; depois o dono da cota (membro vinculado ou dono da página aberta), e sem dono responde `nao-encontrado` sem ler nada no semeador; depois a conferência do anúncio no semeador; por fim o código. Não há limite por chave de dono (qualquer um trancaria os anúncios de alguém). Exige `VARANDA_FEIRA_INVITES_PER_WEEK`, `VARANDA_INVITES_PER_WEEK` e `VARANDA_TRIAGE_TOKEN`.
+- A conferência do anúncio usa a rota própria do semeador `GET /feira-listing/<diário>/<seq>` (com o token, nunca pelo Caddy), que responde só `{ ok: true }` e tem orçamento próprio (2 ao mesmo tempo, 4 por segundo, rajada 8): inundar essa rota nunca faz `/moderation-post` responder 503. O painel continua com `/moderation-listing`.
+- O Caddy limita `/account/feira/*` na zona `feira-entrada`: 5 pedidos a cada 60 s por endereço, antes do handle genérico de `/account/*`. `POST /account/feira/idade` tem zonas próprias: `feira-idade`, 2 pedidos por hora por endereço, e `feira-idade-total`, 50 por hora no total. Cada teto é uma diretiva `rate_limit` separada, em ordem, dentro de um `route` (por endereço primeiro, global depois), para que um pedido recusado por endereço não gaste o teto global. Só um `POST` com `Content-Type: application/json` entra nas zonas da idade; qualquer outro pedido a `/account/feira/idade` recebe 405 do Caddy sem passar por zona nenhuma. O endereço fica só na memória do Caddy durante a janela, e os dois handles tiram `X-Forwarded-For` e `X-Real-Ip`. O serviço só atende `/account/feira/idade`, `/account/feira/start` e `/account/feira/policy` quando o caminho cru do pedido é exatamente esse (`/../`, `/./`, `%2F` ou `%2E%2E` dão 404), porque o Caddy e o serviço normalizam caminhos de jeitos diferentes.
+- Sessões pagas de idade com código da Feira: no máximo 1 por código por dia e 50 por dia para todos os códigos da Feira juntos, sem teto por dono, sempre com `limite-idade`. Elas não contam no teto diário dos outros cadastros, e um convite comum funciona como antes. A sessão paga de um código da Feira só abre por `POST /account/feira/idade` (mesmo corpo de `/account/age/session`); um código da Feira em `/account/age/session` responde `use-a-rota-da-feira`, e um código comum na rota da Feira responde `pedido-invalido`, os dois antes de gastar qualquer janela. Resíduo aceito: quem troca de endereço IPv6 dentro de um /64 (ou usa muitas máquinas) chega só aos tetos globais (os 50 do dia e a zona `feira-idade-total`) e ainda pode parar os cadastros pela Feira naquele dia (com o custo de até 50 sessões pagas), nunca os cadastros comuns. Atrás de CGNAT, quem divide um endereço pode receber 429 do Caddy (2 por hora bastam para uma pessoa). Um código da Feira emitido numa semana anterior é recusado depois de segunda 00:00, para não escapar das duas contagens semanais.
+- O teto semanal conta os códigos usados ou presos por um link do diretório, pela data de criação (um código emitido no domingo à noite e usado na segunda conta na semana em que saiu). Resíduo aceito: cadastros em andamento ao mesmo tempo podem passar do teto semanal de um dono pelo número de cadastros em andamento, cada um ainda com código de uso único. Um `feira-invites.json` quebrado desliga só os códigos da Feira.
+- `feira-invites.json` guarda a chave de quem é cobrado, o resumo do código, a data e se foi usado; nunca quem se cadastra, o anúncio, o endereço nem o código.
+- Uma página anuncia com `listing`, `listing-edit`, `listing-status` e `listing-consent` (admin ou dono). A edição responde a posição do bloco da edição, a edição velha dá `conflito`, o 31º anúncio dá `limite`, e `listing-consent` sem uma proposta recebida de quem avalia dá `oferta-ausente`. A página responde uma proposta em texto, com o link de aceite ou de recusa.
+- A caixa da página guarda o cartão de link que um membro mandou (a foto do cartão só para dono e administradores); o serviço nunca busca o link nem a imagem.
+- A denúncia de anúncio (`kind: 'listing'`) é sempre decidida por uma pessoa: a IA marca `anuncio` e nunca lê o texto. O painel tem o filtro "Anúncios", o link da página pública e "Ver anúncio" (versão atual lida no semeador, só como texto); `descartar` ou `bloquear`, e bloquear atinge o diário inteiro.
+- Uma caixa só é marcada depois que o passo foi executado e o resultado conferido.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node apps/cli/test/feira-page.test.js`, `node apps/cli/test/seeder-feira-http.test.js` e `node apps/cli/test/seed-ws.test.js`.
+- `node apps/cli/test/feira-read.test.js`, `node apps/cli/test/feira-routes.test.js`, `node apps/cli/test/invites-pair.test.js` e `node apps/cli/test/account-age.test.js`.
+- `node apps/cli/test/pages-listing.test.js`, `node apps/cli/test/pages-dm-card.test.js` e `node packages/core/test/page-proof.test.js`.
+- `node apps/cli/test/ai-worker.test.js`, `node apps/cli/test/account-mod.test.js`, `node apps/cli/test/moderation-store.test.js` e `node apps/cli/test/panel.test.js`.
+- `node apps/cli/test/caddyfile.test.js`, `node apps/cli/test/deploy.test.js` e `node apps/app/test/sw.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada com um semeador, um serviço de conta e dois membros de teste (DHT local):
+
+- [ ] Sem `VARANDA_PUBLIC_ORIGIN`, `GET /f/<diário>/<seq>` e `GET /index/feira/...` respondem 404. Com a origem, a página de um anúncio vivo abre com título, preço, cidade e fotos.
+- [ ] Um anúncio marcado "vendido" mantém a página, com `noindex`, e sai do `sitemap.xml`. Um anúncio apagado dá a página 404.
+- [ ] Abrir `/f/<diário>/<seq>/capa` entrega a primeira foto; depois de editar o anúncio com outra foto, o mesmo endereço entrega a nova.
+- [ ] `GET /robots.txt` no domínio permite só `/f/` e aponta o sitemap.
+- [ ] Com a entrada ligada, `GET /account/feira/policy` responde `{ enabled: true }`; `POST /account/feira/start` de um anúncio de membro devolve um código; um anúncio de um diário que não é de membro responde `nao-encontrado`. Pelo Caddy, o 6º pedido a `/account/feira/*` do mesmo endereço em 60 s responde 429.
+- [ ] Com um código da Feira, a primeira sessão de idade abre e a segunda do mesmo código no mesmo dia responde `limite-idade`; um convite comum continua abrindo sessão.
+- [ ] Pelo Caddy, com códigos da Feira novos: dois `POST /account/feira/idade` do mesmo endereço na mesma hora chegam ao serviço e o 3º responde 429 do Caddy; de outro endereço, o pedido seguinte ainda passa. Antes disso, vários `GET /account/feira/idade` do mesmo endereço respondem 405 e não gastam o limite. O mesmo código da Feira em `POST /account/age/session` responde `use-a-rota-da-feira` e não abre sessão paga.
+- [ ] Usar o código no cadastro conta no teto semanal do dono; chegado o teto, o código seguinte é recusado como convite inválido. Quebrar o `feira-invites.json` (de propósito, numa cópia) desliga só os códigos da Feira.
+- [ ] Como página: criar, editar (com o `expectedRevision` certo e com um velho), mudar o status e apagar um anúncio; o 31º vivo responde `limite`.
+- [ ] Receber uma proposta na caixa da página; o administrador vê o cartão e a foto, pede `listing-consent` e responde em texto com o link de aceite.
+- [ ] Denunciar um anúncio; no painel ele aparece com "Anúncios", o link da página e "Ver anúncio"; a IA marca `anuncio`; descartar fecha, bloquear avisa que atinge o diário inteiro.
+- [ ] Verificação manual de prévia de link, pendente para o operador: colar o endereço `/f/<diário>/<seq>` de um anúncio de teste em um aplicativo de mensagens e num teste de rich results do buscador, com a Feira ligada num domínio real, e conferir título, descrição e imagem de capa.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação; a prévia de link fica pendente para o operador.
+- Ligue `VARANDA_FEIRA_ORIGIN` só depois que o app e os Termos da Feira estiverem no ar.
+- O `robots.txt` é servido pelo Caddy mesmo com a Feira desligada: o mapa do site que ele indica responde 404 até `VARANDA_FEIRA_ORIGIN` ser definido.
+- Com `feira-invites.json` corrompido, os códigos da Feira param e a limpeza de convites de cada conta excluída fica pendente (`purga-pendente` no log) até o operador consertar o arquivo; os outros dados da conta são apagados normalmente.
+
+## 132. Feira no app: aba, anúncio, links e entrada por anúncio (PR feat/feira-app)
+
+Caminhada da Feira no app: a aba Feira, as telas Anúncio e Anunciar, Conversar com o rascunho e o cartão, os links `/f/` e `/anuncio/`, a entrada de quem chega por um anúncio, os anúncios de Página e a denúncia de anúncio. O comportamento está em [app.md](app.md), seção "Feira"; o formato, em [protocol.md](protocol.md), seção 15. Editar anúncio, propostas, avaliações, alertas de busca salva e os links no app nativo ficam na seção 133.
+
+Regras que os passos conferem:
+
+- A aba Feira existe só no nó hospedado (a barra tem seis abas: A Rua, Espiadinha, Conversas, Feira, Busca, Diário); a configuração manual e o `varanda-serve` ficam com quatro. O botão "publicar" some na Feira e nas telas dela.
+- Abrir um link nunca age sozinho: a tela Anúncio só mostra o anúncio. Conversar só preenche o rascunho; nada é enviado sem o toque em enviar.
+- O link de anúncio é lido e limpo da barra de endereço uma vez ao carregar e fica na aba no máximo 1 h; o anúncio abre uma vez, quando as abas aparecem.
+- O estado e a cidade da Feira ficam só no aparelho.
+- Uma caixa só é marcada depois que o passo foi executado e o resultado conferido.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node apps/app/test/platformGate.test.js`, `node apps/app/test/themeUsage.test.js`, `node apps/app/test/tabBar.test.js` e `node apps/app/test/nav.test.js`.
+- `node apps/app/test/linkReturn.test.js`, `node apps/app/test/feiraLink.test.js`, `node apps/app/test/feiraEntry.test.js` e `node apps/app/test/feiraScreen.test.js`.
+- `node apps/app/test/feira.test.js`, `node apps/app/test/feiraCompose.test.js`, `node apps/app/test/feiraChat.test.js` e `node apps/app/test/feiraSaved.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+- Num nó hospedado com a Feira desligada, a aba Feira mostra "A Feira não está aberta nesta instalação".
+
+Caminhada com a Feira ligada numa instalação de teste (semeador com `VARANDA_PUBLIC_ORIGIN`, entradas da Feira ligadas) e dois membros de teste, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Na aba Feira, "Na cidade" sem estado pede "Escolha o estado e escreva a cidade."; com estado, cidade e "Buscar", a lista aparece. Fechar e abrir o app mantém o estado e a cidade.
+- [ ] "Anunciar", preencher, marcar "Público na web e em buscadores" e publicar: a tela Anúncio do novo anúncio abre no lugar do formulário, e Voltar leva à aba Feira. O anúncio aparece em "Meus".
+- [ ] Prévia de link: em "Compartilhar", o aviso é "Link copiado." (ou a folha do sistema); colar o link `/f/<diário>/<seq>` num aplicativo de mensagens mostra título, descrição e foto de capa.
+- [ ] Uma pessoa nova abre o link `/f/…` no navegador, toca em "Entrar para conversar", vê no Entrar o cartão "Anúncio da Feira" com "Entre para falar com quem anunciou.", toca em "Pedir entrada" (antes do toque nenhum código é pedido; na rede aberta o botão não aparece), faz o cadastro e, quando as abas aparecem, a tela Anúncio abre sozinha, uma vez. A barra de endereço fica em `/`.
+- [ ] Com convites e verificação de idade ligados, uma pessoa nova que abre o link de um anúncio vê "Pedir entrada" já no passo da idade (sem "Verificar minha idade" antes do toque); depois do toque faz a verificação de idade e então o Google, sem convite pessoal.
+- [ ] Com as entradas semanais de quem anunciou esgotadas, o cadastro pelo anúncio mostra "Quem anunciou não tem mais entradas nesta semana. Peça um convite a alguém da rede ou tente na próxima semana.".
+- [ ] "Conversar" abre a conversa com o rascunho "Olá! Tenho interesse no seu anúncio "…" na Feira: <link>" e o cartão do link, sem enviar nada. Depois de enviar, o cartão na conversa tem "Ver anúncio", que abre a tela Anúncio.
+- [ ] Quem anunciou toca em "Reservado"; uma segunda pessoa, ao abrir o anúncio (ou puxar para atualizar a lista), vê o selo "Reservado".
+- [ ] Quem anunciou toca em "Apagar" e em "Confirmar: apagar": o anúncio sai de "Meus" e da busca, e a página pública `/f/<diário>/<seq>` responde "Anúncio não encontrado".
+- [ ] Agindo como Página, anunciar: o anúncio aparece em "Meus" da Página. Outro membro toca em "Conversar": a conversa é com a Página, e a Página, na caixa dela, vê a mensagem com o cartão do anúncio e a nota "A associação pode ler as mensagens desta página"; a resposta da Página chega ao membro na mesma conversa, com o cartão mantido.
+- [ ] "Denunciar" no anúncio de outra pessoa abre a folha de denúncia com o título do anúncio; enviada, ela aparece no painel de moderação como "anúncio", no filtro "Anúncios", com "Ver anúncio".
+- [ ] No perfil de um membro (e de uma Página) com anúncios, a linha "Anúncios" abre a lista só daquela pessoa, sem abas, filtros nem "Anunciar"; puxar para atualizar funciona e quem não tem anúncios vê "Nenhum anúncio por aqui.".
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- Numa conversa da Página, o cartão do anúncio aparece sem miniatura (o app não lê as fotos da caixa da Página).
+- Uma linha velha do índice mostra "Situação desconhecida" até o semeador reler o diário.
+
+## 133. Feira: ofertas, avaliações, edição, buscas salvas e links no app (PR feat/feira-extras)
+
+Caminhada das partes da Feira que a seção 132 deixou de fora: ofertas na conversa, avaliações, editar anúncio, buscas salvas com o ponto na aba, os links `/anuncio/` que abrem o app instalado, "Já tem o app? Abrir no app" na página pública e a Feira da Vitrine. O comportamento está em [app.md](app.md), seção "Feira"; o formato, em [protocol.md](protocol.md), seção 15.
+
+Regras que os passos conferem:
+
+- Uma oferta, um aceite, uma recusa, uma avaliação ou uma edição só são enviados por um toque; sem resposta, só "Tentar de novo" reenvia o mesmo pedido.
+- O estado das ofertas é lido da conversa; nada sobre ofertas fica guardado em outro lugar.
+- Só aparecem avaliações que o nó conferiu, com o consentimento assinado por quem anunciou.
+- As buscas salvas e as contagens ficam só no aparelho; não há aviso push nem busca em segundo plano.
+- Uma caixa só é marcada depois que o passo foi executado e o resultado conferido.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node apps/app/test/platformGate.test.js`, `node apps/app/test/themeUsage.test.js`, `node apps/app/test/tabBar.test.js`, `node apps/app/test/nav.test.js` e `node apps/app/test/vitrineGuard.test.js`.
+- `node apps/app/test/feiraOffer.test.js`, `node apps/app/test/feiraReview.test.js`, `node apps/app/test/feiraAlerts.test.js`, `node apps/app/test/feiraChat.test.js`, `node apps/app/test/feiraCompose.test.js` e `node apps/app/test/feiraScreen.test.js`.
+- `node apps/app/test/vitrine.test.js`, `node apps/app/test/vitrineIndex.test.js` e `node apps/app/test/vitrineFeira.test.js`.
+- `node apps/cli/test/feira-page.test.js` e `node apps/cli/test/deploy.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada com a Feira ligada numa instalação de teste e dois membros de teste em aparelhos diferentes, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Ofertas: o comprador abre a conversa de um anúncio (Conversar), toca em "Fazer oferta", digita o "Valor (R$)" e toca em "Enviar oferta": a mensagem "Ofereço … pelo seu anúncio … na Feira" chega com o link.
+- [ ] No segundo aparelho, quem anunciou vê "Aceitar" e "Recusar"; "Aceitar" abre "Aceitar oferta" com o valor e a nota "Ao aceitar, você assina um consentimento que deixa esta pessoa publicar uma avaliação do seu anúncio. Você não escolhe as estrelas, e isso não é um pagamento."; "Aceitar e assinar" envia "Aceitei sua oferta de …. Agora você pode avaliar o anúncio" e o consentimento fica na conversa.
+- [ ] Recusa: numa outra oferta, "Recusar" envia "Recusei sua oferta de …" e o comprador não vê "Avaliar" para ela.
+- [ ] Avaliação: o comprador vê "Avaliar" na oferta aceita, escolhe as estrelas, escreve no "Comentário (opcional)" e toca em "Avaliar": a tela volta e a avaliação aparece na tela Anúncio e no perfil de quem anunciou, com "avaliações confirmadas pelo anunciante".
+- [ ] Um aceite enviado por uma terceira pessoa (que não é dona do anúncio) não libera "Avaliar".
+- [ ] Uma avaliação sem consentimento válido (por exemplo, a da Vitrine com o texto "Consentimento de demonstração inválido.") não aparece no anúncio nem no perfil.
+- [ ] Página: agindo como Página, fazer uma oferta num anúncio de um membro; a oferta vai como texto com o link, o membro a aceita e a Página não publica avaliação (se "Avaliar" aparecer, a tela mostra "Uma página não avalia anúncios por enquanto. Para avaliar, use o seu perfil.").
+- [ ] Editar: quem anunciou toca em "Editar", vê "A primeira versão (título, texto e fotos) continua no seu diário até você apagar o anúncio. A página pública mostra a versão nova.", muda o título e toca em "Salvar": a tela volta para o anúncio com o título novo. O link `/f/<diário>/<seq>` continua o mesmo, e colá-lo num aplicativo de mensagens mostra a prévia nova (a prévia de um link já colado pode ficar em cache no aplicativo).
+- [ ] Conflito: com o mesmo anúncio aberto em "Editar" em dois aparelhos, salvar num e depois no outro mostra "Este anúncio mudou em outro aparelho. Recarregue para editar a versão atual." e "Recarregar" traz a versão atual.
+- [ ] Buscas salvas: na aba Feira, fazer uma busca e tocar em "Salvar busca" ("Busca salva neste aparelho."); outra pessoa publica um anúncio que a busca acha; depois de 15 minutos, abrir a Feira mostra a busca em "Buscas" com "1 novo"; ao sair da aba Feira, a aba ganha o ponto, e abrir a busca zera a contagem e tira o ponto.
+- [ ] Com 10 buscas salvas, "Salvar busca" mostra "Você já tem 10 buscas salvas. Remova uma para salvar outra.".
+- [ ] App Links (pendente: precisa de um aparelho Android de teste com o build de produção `app.varanda`, porque o `app.varanda.debug` só abre depois de aprovação manual): tocar num link `https://bora.varanda.app/anuncio/<diário>/<seq>` fora do app abre a tela Anúncio no app; um link `/f/…` abre no navegador.
+- [ ] Links universais no iOS (pendente: precisa da implantação republicar o `apple-app-site-association` com `applinks` e de um build assinado com o direito `applinks:bora.varanda.app`): tocar num link `/anuncio/…` no Notas ou no Mensagens abre a tela Anúncio no app.
+- [ ] Na página pública `/f/<diário>/<seq>`, com o app instalado, "Já tem o app? Abrir no app" abre a tela Anúncio no app (Android e iOS).
+- [ ] Vitrine: com `EXPO_PUBLIC_VARANDA_VITRINE=1`, a aba Feira mostra os anúncios de exemplo, um deles com a avaliação de 5 estrelas, e a conversa de exemplo mostra a oferta aceita.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- O ponto da aba Feira reflete o que a última abertura da Feira contou; ele não é atualizado em segundo plano.
+- As contagens olham só a primeira página de cada busca.
