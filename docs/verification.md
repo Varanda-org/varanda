@@ -6241,5 +6241,39 @@ Caminhada com dois membros de teste, A e B, que se seguem e têm publicações, 
 Limites desta caminhada:
 
 - Nenhuma caixa acima foi executada nesta documentação. Uma conferência prévia com a Vitrine, sem membros reais, passou no simulador iOS: bloquear pelo menu da publicação e pelo perfil, a lista em Ajustes e desbloquear. Android, a caminhada com dois membros e os avisos push em navegador real seguem por fazer.
-- A lista não acompanha a passkey nesta seção: bloquear no celular não muda o que a web mostra, salvo as mensagens.
+- A lista entre aparelhos está na seção 135.
 - Grupos, comunidades e Feira não são filtrados.
+
+## 135. Lista de bloqueio em todos os aparelhos da passkey (PR feat/member-block-sync)
+
+Caminhada da lista de pessoas bloqueadas entre os aparelhos da mesma passkey, pelo bloco cifrado de vistos (`docs/protocol.md`, seção 14, versão 2).
+
+Regras que os passos conferem:
+
+- O serviço de conta guarda um bloco do mesmo tamanho de antes e não consegue ler a lista.
+- Em cada chave vale a mudança mais nova: um desbloqueio não é desfeito por um bloqueio mais antigo.
+- A falta de uma entrada no bloco nunca conta como desbloqueio.
+- Um aparelho com a versão anterior não usa o bloco novo nem grava por cima dele.
+- Uma caixa só é marcada depois que o passo foi executado e o resultado conferido.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node packages/core/test/seen-blob.test.js`, `node packages/core/test/member-block.test.js` e `node packages/web-member/test/seen-sync.test.js`.
+- `node apps/app/test/seenSync.test.js`, `node apps/app/test/vitrine.test.js` e `node apps/cli/test/account-seen.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada com a mesma passkey em dois aparelhos, A e B, com o terceiro membro C publicando, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Em A, bloquear C. Em até dois minutos, com B aberto, as publicações de C somem de A Rua e da Espiadinha em B, e C aparece em Ajustes, Pessoas bloqueadas, em B.
+- [ ] Em B, desbloquear C. Em até dois minutos, C sai da lista em A, e as publicações de C voltam na Busca em A.
+- [ ] Com B sem internet, bloquear C em A e desbloquear D em A. Ao voltar a internet em B, as duas mudanças chegam.
+- [ ] Bloquear C em A e, com A sem internet, bloquear E em B. Com os dois de volta, os dois aparelhos ficam com C e E.
+- [ ] Em A, **Apagar** a conta deste aparelho e entrar de novo com a mesma passkey: a lista volta depois da primeira passada de vistos.
+- [ ] Um aparelho novo da mesma passkey recebe a lista.
+- [ ] Marcas de visto seguem valendo: um aviso visto em A não aparece como novo em B.
+- [ ] Um aparelho com a versão anterior do app ao lado de um com esta: nada quebra no anterior, ele para de receber vistos e, depois de atualizar, volta a receber, com a lista.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- Passa o limite de 128 mudanças, a mais antiga fica só no aparelho onde já estava; um aparelho novo não a recebe.

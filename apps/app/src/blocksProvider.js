@@ -2,7 +2,8 @@
 // holds it and filters every read; this keeps a copy so screens can clear rows
 // at once and offer Desbloquear. Hosted nodes only: the core node has no list.
 //
-// `changed` counts the changes made here, so the shell reloads A Rua once per
+// `changed` counts the changes made here or brought by another device of the
+// passkey (`refresh`, after a seen pass), so the shell reloads A Rua once per
 // change. The confirmation is a separate context: opening it must not redraw
 // every post row.
 
@@ -22,7 +23,8 @@ const FALLBACK = {
   changed: 0,
   has: () => false,
   ask: noop,
-  setBlock: async () => { throw new Error('bloqueio indisponível') }
+  setBlock: async () => { throw new Error('bloqueio indisponível') },
+  refresh: async () => {}
 }
 
 const BlocksContext = createContext(FALLBACK)
@@ -83,14 +85,20 @@ export function BlocksProvider ({ children }) {
     }
   }, [commit, reload])
 
+  const refresh = useCallback(async () => {
+    await reload()
+    setChanged((n) => n + 1)
+  }, [reload])
+
   const value = useMemo(() => ({
     available,
     keys,
     changed,
     has: (key) => typeof key === 'string' && keys.has(key),
     ask: setAsking,
-    setBlock
-  }), [available, keys, changed, setBlock])
+    setBlock,
+    refresh
+  }), [available, keys, changed, setBlock, refresh])
   const askValue = useMemo(() => ({ asking, close: () => setAsking(null) }), [asking])
 
   return (

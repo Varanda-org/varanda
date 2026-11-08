@@ -4,7 +4,7 @@
 // rules that read it.
 const test = require('brittle')
 const { BLOCK_MAX } = require('@varanda/rpc')
-const { UNBLOCKS_MAX, normalizeBlocks, blockedKeys, applyBlock } = require('../lib/member-block')
+const { UNBLOCKS_MAX, normalizeBlocks, blockedKeys, applyBlock, mergeBlocks } = require('../lib/member-block')
 const { buildFeed } = require('../lib/feed')
 const { diaryPeek } = require('../lib/peek')
 const { memberCertRecord } = require('../lib/records')
@@ -73,6 +73,15 @@ test('stored data: invalid entries are dropped, one entry per key, the newest wi
   t.alike(normalizeBlocks(null), [])
   t.alike(normalizeBlocks('x'), [])
   t.is(blockedKeys(undefined).size, 0)
+})
+
+test('mergeBlocks: per key the newer entry wins, and it does not depend on the order', (t) => {
+  const a = [{ key: A, on: true, t: 5 }, { key: B, on: true, t: 1 }]
+  const b = [{ key: A, on: false, t: 6 }]
+  t.alike(mergeBlocks(a, b), [{ key: B, on: true, t: 1 }, { key: A, on: false, t: 6 }])
+  t.alike(mergeBlocks(b, a), mergeBlocks(a, b))
+  t.alike(mergeBlocks(mergeBlocks(a, b), b), mergeBlocks(a, b), 'repeats to the same result')
+  t.alike(mergeBlocks(null, undefined), [])
 })
 
 test('at equal times the block wins, whatever the order', (t) => {

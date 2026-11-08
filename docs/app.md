@@ -463,7 +463,7 @@ Qualquer membro pode bloquear outro pelo menu **Mais** de uma publicação ou pe
 
 ### Limites
 
-- A lista fica só neste aparelho. O bloqueio de mensagens chega aos outros aparelhos da mesma passkey pelo `ctl`, mas as publicações e os Avisos dessa pessoa continuam lá.
+- A lista acompanha a passkey pelo bloco cifrado de vistos (`docs/protocol.md`, seção 14): bloquear num aparelho vale nos outros na passada seguinte de vistos, sem mudança no servidor. Um aparelho com a versão anterior do app não recebe a lista e fica sem o visto entre aparelhos até atualizar. Passa o limite das 128 mudanças mais recentes, a mudança mais antiga fica só no aparelho onde já estava.
 - Não entram: mensagens de grupos e comunidades, e anúncios da Feira. A dobra de um grupo não obedece à lista de propósito: o bloqueio de um membro não pode mudar quem está no grupo.
 - A lista vale para a pessoa, também ao agir como uma Página.
 

@@ -38,7 +38,7 @@ const resultKeys = {
   'inviteCard.verify': ['ok', 'reason'],
   'push.sign': ['signature'],
   'seen.sign': ['signature', 'prevHash'],
-  'seen.merge': ['avisos', 'pending', 'dmChanged', 'groupChanged', 'caughtUp'],
+  'seen.merge': ['avisos', 'pending', 'dmChanged', 'groupChanged', 'blocksChanged', 'caughtUp'],
   'report.sign': ['signature'],
   'appeal.sign': ['signature'],
   'dm.reportSign': ['signature'],

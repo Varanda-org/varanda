@@ -70,4 +70,10 @@ function applyBlock (list, key, on, nowSec) {
   return { entries: normalizeBlocks(next), changed: true, full: false }
 }
 
-module.exports = { UNBLOCKS_MAX, normalizeBlocks, blockedKeys, applyBlock }
+// Two devices' lists as one: per key the newer entry wins, whatever the order,
+// so devices that keep merging converge and an unblock is not undone.
+function mergeBlocks (a, b) {
+  return normalizeBlocks([...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])])
+}
+
+module.exports = { UNBLOCKS_MAX, normalizeBlocks, blockedKeys, applyBlock, mergeBlocks }
