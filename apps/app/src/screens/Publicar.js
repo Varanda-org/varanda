@@ -30,10 +30,23 @@
 // 5 verified members under the compose box; tapping one replaces the token
 // with '@nome ' (../mentions). No strip on native, offline or non-hosted. The
 // text is sent exactly as typed: names are never resolved at send time.
+// Momento (docs/rpc.md 5.113, hosted only, when the node offers
+// media.putMoment and nothing is being replied to, quoted or posted as a
+// page): a Segmented 'Publicação | Momento' at the top. A momento is exactly
+// one photo (the chat photo path, ../ui/AttachSheet useChatAttachments) and
+// 0..200 code points of text. The post draft stays as it is while Momento is
+// shown and comes back on 'Publicação'. Publicar puts the photo
+// (media.putMoment, a fresh anonymous blob; it wipes the buffer it is given,
+// so it gets a copy and the staged bytes stay for a new try) and then
+// publishes moment.create { text, media }. A locked message key answers
+// LOCKED: the person is asked to unlock with the passkey. 'prepare a mídia
+// de novo' drops the item, so the next press (the person's) puts the photo
+// again. An uncertain moment.create holds the draft until the person checks
+// in the Diário and discards it: never sent again.
 // Design: apps/site/artwork/app-design.md.
 
-import { useEffect, useRef, useState } from 'react'
-import { Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT, activeMention, displayText } from '@varanda/rpc'
 import { MENTION_MIN_QUERY, insertMention } from '../mentions'
 import { mergeSuggestions } from '../mentionTargets'
@@ -46,7 +59,7 @@ import * as actingStore from '../actingAs'
 import { actAs, pagesMedia, pagesOrigin, pagesStart } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { useOutbox } from '../outboxProvider'
-import { GATE_MESSAGE, isQuoteRecord } from '../outbox'
+import { GATE_MESSAGE, LOCKED_MESSAGE, isQuoteRecord } from '../outbox'
 import { countChars } from '../format'
 import { whoOf } from '../who'
 import { ringState } from '../composeRing'
@@ -67,9 +80,335 @@ import { withPreview } from '../attach-plan'
 import { refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { tap } from '../ui/haptics'
+import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
+import { Segmented } from '../ui/Segmented'
+import { useChatAttachments } from '../ui/AttachSheet'
+import { canPublishMoment } from '../momentSeen'
+import { momentsChanged } from './Momentos'
+
+export const MOMENT_TEXT_MAX = 200
+// maxLength counts UTF-16 units on the web: 200 code points of emoji take 400.
+export const MOMENT_FIELD_MAX = 2 * MOMENT_TEXT_MAX
+export const MOMENT_COUNTER_WARN = 180
+export const MODES = [{ id: 'post', label: 'Publicação' }, { id: 'moment', label: 'Momento' }]
+export const MOMENT_LOCKED = 'Desbloqueie com a passkey para publicar um momento.'
+export const MOMENT_STALE = 'A foto precisa ser preparada de novo. Toque em Publicar para enviar.'
+export const MOMENT_UNCERTAIN = 'Não sabemos se o momento saiu. Confira em Seus momentos, no seu Diário, antes de tentar de novo.'
+export const MOMENT_ONE_PHOTO = 'Um momento leva uma foto só.'
+export const DRAFT_KEPT = 'Seu rascunho da publicação continua guardado.'
+const MEDIA_STALE = 'prepare a mídia de novo'
+
+const momentLength = (text) => (typeof text === 'string' ? [...text].length : 0)
+const isLocked = (err) => !!err && (err.code === 'LOCKED' || err.message === LOCKED_MESSAGE)
+
+// A momento is valid with exactly one ready photo and at most 200 code points.
+export function momentValid ({ files, ready, text }) {
+  return ready === true && Array.isArray(files) && files.length === 1 && momentLength(text) <= MOMENT_TEXT_MAX
+}
+
+// The Momento draft: one staged photo, the text, the put item kept for a new
+// press after a failure, and the uncertain hold. send() is one explicit
+// attempt; nothing here ever repeats a request.
+function useMomentDraft ({ node, open, active }) {
+  const photo = useChatAttachments()
+  const [text, setText] = useState('')
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const [held, setHeld] = useState(false)
+  const itemRef = useRef(null)
+  const busyRef = useRef(false)
+  const { items, remove, pick: pickPhoto, clear: clearPhoto } = photo
+  // Exactly one photo. 'Trocar foto' keeps the staged one until a new one is
+  // really picked (a cancelled picker leaves it): replacingRef holds the ids
+  // staged before the pick, dropped only once a new id shows up. A pick of
+  // several keeps the first new one.
+  const [note, setNote] = useState('')
+  const replacingRef = useRef(null)
+  useEffect(() => {
+    const before = replacingRef.current
+    const fresh = before === null ? items.slice(1) : items.filter((it) => !before.includes(it.id))
+    if (before !== null && fresh.length > 0) {
+      replacingRef.current = null
+      itemRef.current = null
+      for (const old of items.filter((it) => before.includes(it.id))) remove(old.id)
+      for (const extra of fresh.slice(1)) remove(extra.id)
+      if (fresh.length > 1) setNote(MOMENT_ONE_PHOTO)
+      return
+    }
+    if (before === null && items.length > 1) {
+      for (const extra of items.slice(1)) remove(extra.id)
+      setNote(MOMENT_ONE_PHOTO)
+    }
+  }, [items, remove])
+  const pick = useCallback(async () => {
+    if (busyRef.current || held) return
+    setNote('')
+    setError('')
+    replacingRef.current = items.length > 0 ? items.map((it) => it.id) : null
+    await pickPhoto()
+  }, [held, items, pickPhoto])
+  const reset = useCallback(() => {
+    itemRef.current = null
+    clearPhoto()
+    setText('')
+    setError('')
+    setNote('')
+    setHeld(false)
+  }, [clearPhoto])
+  useEffect(() => { if (!open) setError('') }, [open])
+  // A published moment empties the form on the next opening, not at once:
+  // the sheet keeps its photo and text while it slides away.
+  const publishedRef = useRef(false)
+  const wasOpenRef = useRef(open)
+  useEffect(() => {
+    if (open && !wasOpenRef.current && publishedRef.current) {
+      publishedRef.current = false
+      reset()
+    }
+    wasOpenRef.current = open
+  }, [open, reset])
+  // A close or a switch to Publicação during the upload cancels that send:
+  // the generation moves on and moment.create is never called for it. The
+  // item already put is kept for the person's next explicit press.
+  const genRef = useRef(0)
+  useEffect(() => {
+    if (!active) genRef.current++
+  }, [active])
+  const unlocked = !!(node.passkey && node.passkey.status && node.passkey.status.unlocked === true)
+  const valid = !held && unlocked && node.online !== false && momentValid({ files: photo.files, ready: photo.ready, text })
+  const send = async () => {
+    if (busyRef.current || !valid) return false
+    const file = photo.files[0]
+    const gen = genRef.current
+    busyRef.current = true
+    setPending(true)
+    setError('')
+    try {
+      if (itemRef.current === null) {
+        // putMoment wipes the buffer it gets: the staged bytes stay for a retry.
+        itemRef.current = await node.media.putMoment({ bytes: file.bytes.slice(), mime: file.mime, width: file.width, height: file.height })
+      }
+      if (gen !== genRef.current) return false
+      await node.request('moment.create', { text, media: itemRef.current })
+      itemRef.current = null
+      momentsChanged()
+      publishedRef.current = true
+      // Published, but the person closed Momento meanwhile (maybe for another
+      // composer): no onPublished, which would close what is open now.
+      return gen === genRef.current
+    } catch (err) {
+      if (isLocked(err)) setError(MOMENT_LOCKED)
+      else if (err && err.uncertain === true) {
+        // The moment may be published: hold the draft, never resend.
+        if (itemRef.current !== null) {
+          setHeld(true)
+          setError(MOMENT_UNCERTAIN)
+          momentsChanged()
+        } else {
+          setError(errorText(err))
+        }
+      } else if (err && typeof err.message === 'string' && err.message.includes(MEDIA_STALE)) {
+        itemRef.current = null
+        setError(MOMENT_STALE)
+      } else {
+        setError(errorText(err))
+      }
+      return false
+    } finally {
+      busyRef.current = false
+      setPending(false)
+    }
+  }
+  return { photo, text, setText, pending, error, note, held, valid, unlocked, pick, send, reset }
+}
+
+// The Momento text box: about five lines before its text scrolls inside it,
+// six at most (type.compose lineHeight 24 plus the 10 pt padding and the 1 pt
+// border each side, so six lines fit without an inner scroll), as the
+// depoimento write sheet does.
+export const MOMENT_MIN_HEIGHT = 5 * 24 + 20 + 2
+export const MOMENT_MAX_HEIGHT = 6 * 24 + 20 + 2
+
+// The Momento box height for a content height (onContentSizeChange): the
+// content plus its 1 pt border each side, within the five to six lines.
+export function momentFieldHeight (contentHeight) {
+  if (!Number.isFinite(contentHeight)) return MOMENT_MIN_HEIGHT
+  return Math.min(MOMENT_MAX_HEIGHT, Math.max(MOMENT_MIN_HEIGHT, Math.ceil(contentHeight) + 2))
+}
+// react-native-web keeps a multiline field at its first height (its first
+// line then shows half cut past five lines): there the height follows the
+// content. iOS and Android grow the field themselves.
+const GROW_BY_CONTENT = Platform.OS === 'web'
+
+// requestAnimationFrame is a global on iOS, Android and the web alike.
+const nextFrame = (fn) => (typeof globalThis.requestAnimationFrame === 'function' ? globalThis.requestAnimationFrame(fn) : setTimeout(fn, 16))
+
+// Where a composer body scrolls to keep its focused field in view: the end
+// (the counter and what follows it) when everything from the field's top
+// fits; else the field pinned KEEP_GAP under the top, so its first line (the
+// caret line after a paste) and the counter right under it show; null when
+// the field alone is taller than the view, where the native caret tracking
+// keeps the caret, unless the caret is at the end of the text (`atEnd`):
+// then the end, so the caret line sits just above the toolbar and counter
+// (a reopened long draft). With the caret at the end and the field fitting
+// but not the row under it (`tailBottom`, the toolbar and N/1000 row's
+// bottom): scrolled so that row shows, never past the caret line at the
+// field's bottom (photos between them). Unmeasured: the end, as before.
+// -> 'end' | y | null
+export const KEEP_GAP = 8
+const CARET_LINE = 32
+export function keepInView ({ fieldY, fieldHeight, contentHeight, viewHeight, atEnd = false, tailBottom = NaN }) {
+  if (![fieldY, fieldHeight, contentHeight, viewHeight].every(Number.isFinite) || viewHeight <= 0) return 'end'
+  const top = Math.max(0, fieldY - KEEP_GAP)
+  if (contentHeight - top <= viewHeight) return 'end'
+  if (fieldY + fieldHeight - top > viewHeight) return atEnd ? 'end' : null
+  if (atEnd && Number.isFinite(tailBottom)) {
+    return Math.max(top, Math.min(tailBottom - viewHeight, fieldY + fieldHeight - CARET_LINE))
+  }
+  return top
+}
+
+const layoutOf = (e) => (e && e.nativeEvent && e.nativeEvent.layout) || null
+const keyboardHeight = (e) => {
+  const h = e && e.endCoordinates ? e.endCoordinates.height : 0
+  return Number.isFinite(h) ? h : 0
+}
+
+// iOS: inside the page sheet measureInWindow starts at the sheet's own top,
+// so the measured padding came out about 45 pt short. There the composer
+// ScrollViews inset themselves for the keyboard instead
+// (automaticallyAdjustKeyboardInsets, an iOS ScrollView API) and nothing
+// pads. Android keeps the measured padding below.
+const IOS_SCROLL_INSETS = Platform.OS === 'ios'
+// Both composer ScrollViews: the keyboard insets on iOS, taps that reach the
+// fields and pills with the keyboard open, a drag that lowers the keyboard.
+export const COMPOSER_SCROLL = {
+  keyboardShouldPersistTaps: 'handled',
+  keyboardDismissMode: 'interactive',
+  ...(IOS_SCROLL_INSETS ? { automaticallyAdjustKeyboardInsets: true } : {})
+}
+
+// Both composers avoid the keyboard on iOS and Android with padding (Android
+// draws edge to edge, so nothing resizes for it there). KeyboardAvoidingView
+// compares its parent-relative frame with the keyboard's screen position, so
+// inside a sheet it padded too little by the sheet's own top (and on iOS by
+// the page sheet's top and header, about 100 pt): the measured window top goes
+// back in as keyboardVerticalOffset. Measured again when the keyboard opens,
+// as the iOS page sheet may still be sliding in at the first layout.
+// The web only (a native getScrollableNode answers a number, so null there):
+// react-native-web reports onLayout on size changes alone, so a photo tile
+// that moves the field without resizing it leaves the measured y stale. Read
+// the positions from the page when scrolling instead.
+export function livePositions (view, fieldNode, tailNode) {
+  const scroll = view && typeof view.getScrollableNode === 'function' ? view.getScrollableNode() : null
+  if (!scroll || typeof scroll.getBoundingClientRect !== 'function') return null
+  if (!fieldNode || typeof fieldNode.getBoundingClientRect !== 'function') return null
+  const origin = scroll.getBoundingClientRect().top - scroll.scrollTop
+  const field = fieldNode.getBoundingClientRect()
+  const tail = tailNode && typeof tailNode.getBoundingClientRect === 'function' ? tailNode.getBoundingClientRect() : null
+  return { fieldY: field.top - origin, fieldHeight: field.height, tailBottom: tail ? tail.bottom - origin : NaN }
+}
+
+// One composer body kept in view (keepInView) while its field has focus:
+// deferred a frame after the keyboard inset or padding applied, on the
+// keyboard opening and on every keystroke; directly on the body's layout and
+// content size. The field's y in the body sums the onLayout y of each
+// wrapper down to the field (at(key)). On iOS the ScrollView insets itself
+// by the keyboard, so the keyboard's height leaves the visible part.
+function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
+  const scrollRef = useRef(null)
+  const ownFieldRef = useRef(null)
+  const fieldRef = givenFieldRef || ownFieldRef
+  const tailRef = useRef(null)
+  const focusRef = useRef(false)
+  const m = useRef({ parts: {}, fieldHeight: NaN, content: NaN, view: NaN, keyboard: 0, tailBottom: NaN })
+  const keep = useCallback(() => {
+    const view = scrollRef.current
+    if (!focusRef.current || !view) return
+    // Each mode keeps its own ScrollView (key): react-native-web binds the
+    // ref once, so a reused one kept the other mode's unmounted node. Still,
+    // never scroll a view whose node is gone.
+    if (typeof view.getScrollableNode === 'function' && !view.getScrollableNode()) return
+    const s = m.current
+    const live = livePositions(view, fieldRef.current, tailRef.current)
+    const fieldY = live ? live.fieldY : Object.keys(s.parts).reduce((sum, k) => sum + s.parts[k], 0)
+    const fieldHeight = live ? live.fieldHeight : s.fieldHeight
+    const tailBottom = live ? live.tailBottom : s.tailBottom
+    const atEnd = typeof caretAtEnd === 'function' && caretAtEnd() === true
+    const to = keepInView({ fieldY, fieldHeight, contentHeight: s.content, viewHeight: s.view - s.keyboard, atEnd, tailBottom })
+    if (to === 'end') {
+      if (typeof view.scrollToEnd === 'function') view.scrollToEnd({ animated: true })
+    } else if (to !== null && typeof view.scrollTo === 'function') {
+      view.scrollTo({ y: to, animated: true })
+    }
+  }, [caretAtEnd, fieldRef])
+  const defer = useCallback(() => {
+    if (!focusRef.current) return
+    nextFrame(() => keep())
+  }, [keep])
+  useEffect(() => {
+    if (!on) return undefined
+    const show = Keyboard.addListener('keyboardDidShow', (e) => {
+      m.current.keyboard = IOS_SCROLL_INSETS ? keyboardHeight(e) : 0
+      defer()
+    })
+    const hide = Keyboard.addListener('keyboardDidHide', () => { m.current.keyboard = 0 })
+    return () => {
+      for (const sub of [show, hide]) if (sub && typeof sub.remove === 'function') sub.remove()
+    }
+  }, [on, defer])
+  const at = useCallback((key) => (e) => {
+    const l = layoutOf(e)
+    if (!l) return
+    m.current.parts[key] = l.y
+    if (key === 'field') m.current.fieldHeight = l.height
+  }, [])
+  // The row under the field (toolbar and counter), a direct child of the
+  // ScrollView content: its bottom in content coordinates.
+  const handleTailLayout = useCallback((e) => {
+    const l = layoutOf(e)
+    if (l) m.current.tailBottom = l.y + l.height
+  }, [])
+  const handleLayout = useCallback((e) => {
+    const l = layoutOf(e)
+    if (l) m.current.view = l.height
+    keep()
+  }, [keep])
+  const handleContentSizeChange = useCallback((_w, h) => {
+    if (Number.isFinite(h)) m.current.content = h
+    keep()
+  }, [keep])
+  const handleFocus = useCallback(() => { focusRef.current = true }, [])
+  const handleBlur = useCallback(() => { focusRef.current = false }, [])
+  return { scrollRef, fieldRef, tailRef, defer, at, handleTailLayout, handleLayout, handleContentSizeChange, handleFocus, handleBlur }
+}
+
+export function SheetKeyboard ({ children }) {
+  const styles = useStyles(makeStyles)
+  const ref = useRef(null)
+  const avoidKeyboard = useKeyboardAvoidEnabled()
+  const [top, setTop] = useState(0)
+  const measure = useCallback(() => {
+    const view = ref.current
+    if (!view || typeof view.measureInWindow !== 'function') return
+    view.measureInWindow((x, y) => { if (Number.isFinite(y)) setTop((was) => (was === y ? was : y)) })
+  }, [])
+  useEffect(() => {
+    const sub = Keyboard.addListener('keyboardDidShow', measure)
+    return () => { if (sub && typeof sub.remove === 'function') sub.remove() }
+  }, [measure])
+  if (IOS_SCROLL_INSETS) return <View style={styles.flex}>{children}</View>
+  return (
+    <View ref={ref} style={styles.flex} onLayout={measure} collapsable={false}>
+      <KeyboardAvoidingView style={styles.flex} behavior='padding' keyboardVerticalOffset={top} enabled={avoidKeyboard}>
+        {children}
+      </KeyboardAvoidingView>
+    </View>
+  )
+}
 
 // Clock slack when an uncertain send is matched by its `at` timestamp. The
 // node stamps `at` while it handles the request, from the same clock as the
@@ -157,7 +496,7 @@ function Ring ({ progress, tone }) {
 // `quote` takes precedence over `reply` (the shell keeps them exclusive);
 // `onClearQuote` (optional) adds 'cancelar citação'. onPublished(kind, ref)
 // with kind 'post' | 'reply' | 'quote' | 'queued-post' | 'queued-reply'.
-export default function Publicar ({ open, reply: replyProp, quote = null, me, onClose, onClearReply, onClearQuote, onPublished }) {
+export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const reply = quote ? null : replyProp
@@ -228,6 +567,39 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   const names = useNames()
   const acting = useActing()
   const asPage = pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && acting.kind === 'page' ? acting.key : null
+  // Momento mode: hosted, with media.putMoment, and a plain post (no reply,
+  // quote or page). The post draft is untouched while it shows.
+  const momentOn = canPublishMoment(node) && !replyProp && !quote && asPage === null
+  const [mode, setMode] = useState('post')
+  const momentMode = momentOn && mode === 'moment'
+  const moment = useMomentDraft({ node, open, active: open === true && momentMode })
+  // Only an increase is a request: the shell resets the counter to 0 when a
+  // post is published, and that must not reopen the composer in Momento.
+  const lastMomentRequest = useRef(momentRequest)
+  const momentAskedRef = useRef(false)
+  useEffect(() => {
+    const was = lastMomentRequest.current
+    lastMomentRequest.current = momentRequest
+    if (momentRequest > was) {
+      momentAskedRef.current = true
+      setMode('moment')
+    }
+  }, [momentRequest])
+  // Each opening starts in Publicação (the publish button opens a post)
+  // unless a moment request came with it. Reset on the opening, not on the
+  // close: the sheet keeps its content while it slides away, so a reset there
+  // flipped the closing sheet to the post composer.
+  const wasOpenRef = useRef(open)
+  useEffect(() => {
+    if (open && !wasOpenRef.current) {
+      if (!momentAskedRef.current) setMode('post')
+      momentAskedRef.current = false
+    }
+    wasOpenRef.current = open
+  }, [open])
+  // Set by a momento publish, which closes the sheet: that close keeps the
+  // post draft and its photos, as the Momento screen promised (DRAFT_KEPT).
+  const keepPostOnCloseRef = useRef(false)
   const [roster, setRoster] = useState([])
   const [rosterFailed, setRosterFailed] = useState(false)
   // A sent-but-unknown page post ({ retry, page, sent, reply, quote, ids }):
@@ -363,6 +735,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     if (open) return
     setEmojiOpen(false)
     setNote('')
+    if (keepPostOnCloseRef.current) {
+      keepPostOnCloseRef.current = false
+      return
+    }
     if (pageRetryRef.current !== null || pageSendingRef.current) return
     genRef.current++
     removeItems(Array.from(liveRef.current))
@@ -763,6 +1139,150 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   let pillLabel = offlineQueue && !hasMedia ? 'Guardar' : 'Publicar'
   if (locked) pillLabel = 'Tentar de novo'
 
+  const sendMoment = async () => {
+    if (await moment.send()) {
+      tap('success')
+      // The mode goes back to Publicação once the sheet has closed (the
+      // close effect), so the sliding sheet never flips to the post composer.
+      keepPostOnCloseRef.current = true
+      onPublished('moment', null)
+    }
+  }
+  const handlePickMoment = moment.pick
+  const handleMomentText = moment.setText
+  const handleDiscardMoment = moment.reset
+  const postDraft = text !== '' || items.length > 0
+  const momentCount = momentLength(moment.text)
+  // While a text box has focus it stays in view with its counter (see
+  // keepInView): every keystroke, also at the six-line maximum where the
+  // body's content size no longer changes, and the keyboard opening.
+  const momentView = useKeepInView(momentMode)
+  // The post caret at the end of its text (a reopened long draft): the body
+  // scrolls to its end so the caret line sits above the toolbar and counter.
+  const postTextRef = useRef(text)
+  postTextRef.current = text
+  const postCaretAtEnd = useCallback(() => {
+    // The web's own field is current; its selection event lags a keystroke.
+    const node = inputRef.current
+    if (node && typeof node.selectionStart === 'number' && typeof node.value === 'string') return node.selectionStart >= node.value.length
+    const sel = selRef.current
+    return !sel || sel.start >= postTextRef.current.length
+  }, [])
+  const postView = useKeepInView(open && !momentMode, postCaretAtEnd, inputRef)
+  // The web only (a textarea has selectionStart): each mode mounts its own
+  // field, and a new textarea with a saved draft puts the caret at the start,
+  // so typing would land before the old text. It starts at the end instead,
+  // as the phones' autofocus does.
+  const postShown = open === true && !momentMode
+  const postShownRef = useRef(false)
+  useEffect(() => {
+    if (postShown && !postShownRef.current) {
+      const node = inputRef.current
+      const end = postTextRef.current.length
+      if (end > 0 && node && typeof node.selectionStart === 'number') {
+        selRef.current = { start: end, end }
+        setForcedSel({ start: end, end })
+        // A long draft: show the caret line, not the top of the text.
+        node.scrollTop = node.scrollHeight
+      }
+    }
+    postShownRef.current = postShown
+  }, [postShown])
+  const typeMoment = (value) => {
+    handleMomentText(value)
+    momentView.defer()
+  }
+  const typePost = (value) => {
+    setText(value)
+    postView.defer()
+  }
+  const [momentHeight, setMomentHeight] = useState(MOMENT_MIN_HEIGHT)
+  useEffect(() => { if (moment.text === '') setMomentHeight(MOMENT_MIN_HEIGHT) }, [moment.text])
+  const growMoment = GROW_BY_CONTENT
+    ? (e) => {
+        const size = e && e.nativeEvent && e.nativeEvent.contentSize
+        if (size) setMomentHeight(momentFieldHeight(size.height))
+      }
+    : undefined
+  const modeSwitch = momentOn
+    ? <Segmented options={MODES} selected={momentMode ? 'moment' : 'post'} onSelect={(id) => { if (!busy && !moment.pending) setMode(id) }} />
+    : null
+
+  if (momentMode) {
+    const staged = moment.photo.items[0] || null
+    return (
+      <Sheet
+        open={open}
+        onClose={onClose}
+        grabber
+        right={<Pill label='Publicar' filled onPress={sendMoment} pending={moment.pending} disabled={!moment.valid} maxFontSizeMultiplier={TEXT_CAP} />}
+      >
+        <SheetKeyboard>
+          <ScrollView
+            key='moment'
+            ref={momentView.scrollRef}
+            style={styles.flex}
+            {...COMPOSER_SCROLL}
+            onLayout={momentView.handleLayout}
+            onContentSizeChange={momentView.handleContentSizeChange}
+          >
+            {modeSwitch}
+            <View style={styles.momentBody} onLayout={momentView.at('body')}>
+              {staged
+                ? (
+                  <View style={styles.momentPhoto} accessible accessibilityRole='image' accessibilityLabel='foto do momento'>
+                    {staged.thumb
+                      ? <Image source={{ uri: staged.thumb }} style={styles.thumbImg} resizeMode='cover' />
+                      : <View style={[styles.thumbImg, styles.thumbEmpty]}><Icon name='image' size={24} color={colors.soft} /></View>}
+                  </View>
+                  )
+                : null}
+              {/* Under the tile, never clipped by its rounded corner. */}
+              {staged && staged.status === 'invalid' ? <ErrorText>{staged.error || 'não foi possível abrir a foto'}</ErrorText> : null}
+              <Pill label={staged ? 'Trocar foto' : 'Escolher foto'} icon='imagem' onPress={handlePickMoment} disabled={moment.pending || moment.held} />
+              <TextInput
+                ref={momentView.fieldRef}
+                style={[styles.momentInput, GROW_BY_CONTENT && { height: momentHeight }]}
+                value={moment.text}
+                onChangeText={typeMoment}
+                onLayout={momentView.at('field')}
+                onContentSizeChange={growMoment}
+                editable={!moment.pending && !moment.held}
+                multiline
+                maxLength={MOMENT_FIELD_MAX}
+                placeholder='Uma frase sobre o momento (opcional)'
+                placeholderTextColor={colors.placeholder}
+                textAlignVertical='top'
+                onFocus={momentView.handleFocus}
+                onBlur={momentView.handleBlur}
+                accessibilityLabel='texto do momento'
+              />
+              <Text
+                style={[styles.counter, styles.momentCounter, momentCount >= MOMENT_COUNTER_WARN && styles.counterWarn, momentCount > MOMENT_TEXT_MAX && styles.counterFull]}
+                accessibilityLabel={momentCount + ' de ' + MOMENT_TEXT_MAX + ' caracteres'}
+              >
+                {momentCount + '/' + MOMENT_TEXT_MAX}
+              </Text>
+              <Soft>Fica 24 horas para quem segue você. Responder abre uma conversa privada.</Soft>
+              {!moment.unlocked ? <Soft>{MOMENT_LOCKED}</Soft> : null}
+              {node.online === false ? <Soft>Momentos precisam de internet</Soft> : null}
+              {moment.photo.note || moment.note ? <Soft>{moment.note || moment.photo.note}</Soft> : null}
+              {postDraft ? <Soft>{DRAFT_KEPT}</Soft> : null}
+              <ErrorText>{moment.error}</ErrorText>
+              {moment.held
+                ? (
+                  <View style={styles.retryRow}>
+                    <Btn label='Descartar' secondary onPress={handleDiscardMoment} />
+                  </View>
+                  )
+                : null}
+            </View>
+          </ScrollView>
+        </SheetKeyboard>
+      </Sheet>
+    )
+  }
+
   return (
     <Sheet
       open={open}
@@ -770,8 +1290,16 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
       grabber
       right={<Pill label={pillLabel} filled onPress={send} pending={busy} disabled={!valid} maxFontSizeMultiplier={TEXT_CAP} />}
     >
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <ScrollView style={styles.flex} keyboardShouldPersistTaps='handled'>
+      <SheetKeyboard>
+        <ScrollView
+          key='post'
+          ref={postView.scrollRef}
+          style={styles.flex}
+          {...COMPOSER_SCROLL}
+          onLayout={postView.handleLayout}
+          onContentSizeChange={postView.handleContentSizeChange}
+        >
+          {modeSwitch}
           {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && roster.length > 0
             ? (
               <View style={styles.asRow} accessibilityRole='radiogroup'>
@@ -845,9 +1373,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
               </>
               )
             : null}
-          <View style={styles.compose}>
+          <View style={styles.compose} onLayout={postView.at('compose')}>
             <Avatar name={self.name || self.username || null} publicKey={self.publicKey || ''} size={40} picture={self.avatar} persist />
-            <View style={styles.composeBody}>
+            <View style={styles.composeBody} onLayout={postView.at('composeBody')}>
               <Text style={styles.author} numberOfLines={1}>
                 <Text style={styles.authorName}>{displayText(selfWho.title)}</Text>
                 {selfWho.subtitle ? <Text style={styles.authorMeta}>{'  ' + displayText(selfWho.subtitle)}</Text> : null}
@@ -856,7 +1384,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
                 ref={inputRef}
                 style={styles.input}
                 value={text}
-                onChangeText={setText}
+                onChangeText={typePost}
+                onLayout={postView.at('field')}
+                onFocus={postView.handleFocus}
+                onBlur={postView.handleBlur}
                 editable={!frozen}
                 selection={forcedSel || undefined}
                 onSelectionChange={(event) => {
@@ -892,7 +1423,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
               )
             : <LinkDraftCard draft={linkDraft} />}
           <MentionSuggest rows={frozen ? [] : suggestions} loading={!frozen && mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
-          <View style={styles.counterRow}>
+          <View ref={postView.tailRef} style={styles.counterRow} onLayout={postView.handleTailLayout}>
             <View style={styles.tools}>
               <Pressable
                 accessibilityRole='button'
@@ -963,7 +1494,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
             <ErrorText>{checkError}</ErrorText>
           </View>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </SheetKeyboard>
     </Sheet>
   )
 }
@@ -1060,6 +1591,10 @@ const makeStyles = (colors) => StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.6)'
   },
   thumbError: { fontSize: 12, lineHeight: 15, color: colors.danger },
+  momentBody: { gap: 12, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 16, alignItems: 'flex-start' },
+  momentPhoto: { width: 160, height: 200, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
+  momentInput: { ...type.compose, alignSelf: 'stretch', color: colors.ink, minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: colors.card },
+  momentCounter: { alignSelf: 'flex-end', marginTop: -4 },
   tools: { flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 },
   tool: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 44, minWidth: 44, paddingHorizontal: 8, borderRadius: 22, justifyContent: 'center' },
   toolOff: { opacity: 0.45 },

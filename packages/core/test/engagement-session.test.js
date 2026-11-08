@@ -165,3 +165,18 @@ test('the dispatcher rejects unknown params on the new methods', async (t) => {
   t.alike(await failure(m.call('engagement.read', { refs: [OTHER + ':1'], extra: 1 })), UNKNOWN)
   t.alike(await failure(m.call('diary.peek', { author: OTHER, seqs: [1], extra: 1 })), UNKNOWN)
 })
+
+test('the momento methods are refused on the node session, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'mídia disponível só na versão web' }
+  const m = await member(t)
+  const before = await m.call('log.read')
+  const media = { id: 'a1'.repeat(32), key: 'b2'.repeat(32), nonce: 'c3'.repeat(24), chunks: 1, bytes: 100, sha256: 'd4'.repeat(32), mime: 'image/jpeg', w: 10, h: 10, ms: 0 }
+  t.alike(await failure(m.call('moment.create', { text: 'agora', media })), NO)
+  t.alike(await failure(m.call('moments.read', {})), NO)
+  t.alike(await failure(m.call('moment.delete', { to: m.publicKey + ':1' })), NO)
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike(m.session.internal, [])
+  const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
+  t.alike(await failure(m.call('moments.read', { extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('moment.create', { text: 'x'.repeat(201), media })), { code: 'USAGE', message: 'parâmetro inválido: text' })
+})

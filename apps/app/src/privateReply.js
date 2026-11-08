@@ -6,6 +6,9 @@ export const MAX_TEXT = 1000
 const EXCERPT = 60
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+// A context is a post unless it says it is a moment (moments.js replyContext).
+const MOMENT = 'moment'
+const isMoment = (context) => isObject(context) && context.kind === MOMENT
 const isKey = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 
 // The caller supplies context only after verifying the public post.
@@ -21,7 +24,8 @@ export function makeIntent ({ id, peer, from, context = null } = {}) {
           seq: context.seq,
           at: context.at,
           text: Array.from(typeof context.text === 'string' ? context.text : '').slice(0, 140).join(''),
-          hasMedia: Boolean(context.hasMedia)
+          hasMedia: Boolean(context.hasMedia),
+          ...(context.kind === MOMENT ? { kind: MOMENT } : {})
         }
   }
 }
@@ -29,7 +33,8 @@ export function makeIntent ({ id, peer, from, context = null } = {}) {
 export function validIntent (intent, ownKey) {
   if (!isObject(intent) || !intent.id || !isKey(intent.peer) || intent.peer === ownKey) return false
   const context = intent.context
-  return context === null || (isObject(context) && isKey(context.author) && Number.isSafeInteger(context.seq) && context.seq > 0)
+  return context === null || (isObject(context) && isKey(context.author) && Number.isSafeInteger(context.seq) && context.seq > 0 &&
+    (context.kind === undefined || context.kind === MOMENT))
 }
 
 // An absolute short date ('5 nov', '5 nov 2025'), never 'agora' or 'ontem':
@@ -69,7 +74,9 @@ export function contextExcerpt (text) {
 // The chip title: the same absolute date as the text sent.
 export function contextLabel (context, now = Date.now()) {
   if (!isObject(context)) return ''
-  const what = contextExcerpt(context.text) === '' && context.hasMedia ? 'Sobre a sua foto' : 'Sobre a sua publicação'
+  const what = isMoment(context)
+    ? 'Sobre o seu momento'
+    : contextExcerpt(context.text) === '' && context.hasMedia ? 'Sobre a sua foto' : 'Sobre a sua publicação'
   const date = contextDate(context.at, now)
   return date === null ? what : what + ' de ' + date
 }
@@ -78,6 +85,7 @@ function contextPrefix (context, now) {
   const excerpt = contextExcerpt(context.text)
   const date = contextDate(context.at, now)
   const when = date === null ? '' : ' (' + date + ')'
+  if (isMoment(context)) return 'Sobre o seu momento' + (excerpt !== '' ? ' "' + excerpt + '"' : '') + when + ': '
   if (excerpt !== '') return 'Sobre a sua publicação "' + excerpt + '"' + when + ': '
   if (context.hasMedia) return 'Sobre a sua foto' + when + ': '
   return 'Sobre a sua publicação' + when + ': '

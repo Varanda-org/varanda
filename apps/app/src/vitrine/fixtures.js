@@ -434,4 +434,24 @@ export const offerThread = [
 ]
 conversations[0].messages.push(...offerThread)
 
-export const fixtures = { now, own, association, members, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords], sealed, listings, rates }
+// Momentos (docs/rpc.md 5.113). A photo is one blob item, like a chat photo,
+// that names its drawing through the sha256 (./media.js reads it back). The
+// dates follow the demo clock `now`: the followed diaries and Lia have
+// moments inside the 24 h, and Lia's two older ones are past, so the Diário
+// lists them under "Momentos anteriores". Which ones were seen is the app's
+// own state on the device, never fixture data.
+const momentPhoto = (n, p) => ({ ...dmPhoto(40 + n, p), id: key(770 + n), key: key(780 + n) })
+// [diary, seq, text, at, picture]
+const momentRows = [
+  [members[1].author, 70, 'Saindo para pedalar até o parque 🚲', at(5, 13, 20), 3],
+  [members[1].author, 71, 'Parada para um café no meio do caminho.', at(5, 14, 10), 2],
+  [members[2].author, 70, 'As mudas de manjericão estão prontas para troca 🌱', at(5, 11, 30), 1],
+  [members[3].author, 70, 'Luz de fim de tarde na praça.', at(4, 18, 45), 0],
+  [own, 48, 'Café na varanda antes do clube de leitura ☕', at(5, 12, 0), 0],
+  [own, 47, 'Mutirão da horta, primeira hora.', at(3, 9, 30), 3],
+  [own, 46, 'Livros novos na biblioteca da praça.', at(2, 16, 0), 2]
+]
+
+export const momentRecords = momentRows.map(([author, seq, text, when, p], i) => ({ author, seq, record: { type: 'moment', text, at: when, media: momentPhoto(i, p) } }))
+
+export const fixtures = { now, own, association, members, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords], sealed, listings, rates }

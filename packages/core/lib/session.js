@@ -814,6 +814,18 @@ function createSession ({
       throw new UsageError(PEEK_WEB_ONLY)
     }),
 
+    // A momento's photo lives in the browser node's anonymous blob pool
+    // (docs/rpc.md 5.113): refused the same way, nothing opened.
+    'moment.create': serial(async () => {
+      throw new UsageError(MEDIA_WEB_ONLY)
+    }),
+    'moments.read': serial(async () => {
+      throw new UsageError(MEDIA_WEB_ONLY)
+    }),
+    'moment.delete': serial(async () => {
+      throw new UsageError(MEDIA_WEB_ONLY)
+    }),
+
     'follow.add': serial(async ({ key }) => {
       const r = await withStore((c) => member.followAdd(c, key))
       return { changed: r.changed, followCount: r.follows.length }

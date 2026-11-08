@@ -127,7 +127,11 @@ const resultKeys = {
   'testimonial.write': ['seq', 'ref'],
   'testimonial.pending': ['items', 'incomplete'],
   'testimonial.show': ['seq', 'ref'],
-  'testimonial.delete': ['seq', 'deleted']
+  'testimonial.delete': ['seq', 'deleted'],
+  'moment.putMedia': ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'],
+  'moment.create': ['seq', 'ref'],
+  'moments.read': ['authors', 'own', 'past'],
+  'moment.delete': ['seq', 'deleted']
 }
 
 function keys (t, obj, expected, label) {
@@ -590,6 +594,10 @@ function samples (f) {
     'testimonial.pending': {},
     'testimonial.show': { from: f.members[4].author, seq: 60 },
     'testimonial.delete': { to: `${f.own}:38` },
+    'moment.putMedia': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
+    'moment.create': { text: 'Bom dia, praça!', media: f.diaryRecords.find((e) => e.record.type === 'moment').record.media },
+    'moments.read': {},
+    'moment.delete': { to: `${f.own}:48` },
     'account.sign': { phase: 'reserve', nonce, username: 'lia_praca', sub: '' },
     'age.sign': { action: 'result', nonce },
     'age.proof': { verified: { date: f.now }, since: null },
@@ -681,8 +689,10 @@ test('every quoted RPC method used by the app has a documented vitrine answer', 
     t.ok(Object.hasOwn(params, method), method + ' has valid example params')
     t.ok(validateParams(method, params[method]).ok, method + ' params match the contract')
     const request = createVitrineRequest(f)
-    if (destructive.includes(method)) await refused(t, request, method, params[method], 'USAGE', 'indisponível no modo vitrine')
-    else await answer(t, request, method, params[method])
+    // moment.create takes only an item the media handle just prepared.
+    const given = method === 'moment.create' ? { ...params[method], media: await request.media.putMoment({ bytes: Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]), mime: 'image/jpeg', width: 640, height: 480 }) } : params[method]
+    if (destructive.includes(method)) await refused(t, request, method, given, 'USAGE', 'indisponível no modo vitrine')
+    else await answer(t, request, method, given)
   }
 })
 
@@ -1237,4 +1247,112 @@ test('depoimentos: fixtures validate, pending is shown, removed and revoked', as
   t.alike(joaoPeek.entries, [])
   await refused(t, request, 'testimonial.delete', { to: `${f.own}:3` }, 'USAGE', 'referência inválida')
   await refused(t, request, 'testimonial.delete', { to: `${joao}:61` }, 'USAGE', 'referência inválida')
+})
+
+test('momentos: fixtures validate, moments.read follows the 24 h rule and the caps', async (t) => {
+  const { fixtures: f, request, createVitrineRequest } = await load()
+  const { validateRecord } = require('@varanda/core/lib/records')
+  const call = (method, params) => answer(t, request, method, params)
+  const [joao, cecilia, andre] = [f.members[1].author, f.members[2].author, f.members[3].author]
+  const records = f.diaryRecords.filter((e) => e.record.type === 'moment')
+  t.is(records.length, 7)
+  for (const e of records) {
+    t.is(validateRecord(e.record, e.seq), null, 'moment ' + e.author.slice(0, 4) + ':' + e.seq + ' validates')
+    t.ok(validateParams('moment.create', { text: e.record.text, media: e.record.media }).ok, 'its media item matches the contract')
+    t.ok([...e.record.text].length <= 200 && !e.record.text.includes(String.fromCharCode(0x2014)), 'text fits and has no em dash')
+    t.ok(e.author === f.own || f.follows.includes(e.author), 'only followed diaries and Lia have moments')
+  }
+  t.is(new Set(records.map((e) => e.record.media.id)).size, records.length, 'every moment has its own blob')
+
+  const read = await call('moments.read', {})
+  t.alike(read.authors.map((a) => [a.author, a.items.map((i) => i.seq)]), [[joao, [71, 70]], [cecilia, [70]], [andre, [70]]], 'authors by newest moment, items newest first')
+  for (const a of read.authors) {
+    keys(t, a, ['author', 'items'])
+    for (const item of a.items) {
+      keys(t, item, ['seq', 'ref', 'text', 'at', 'media'])
+      t.is(item.ref, a.author + ':' + item.seq)
+      const age = Date.parse(f.now) - Date.parse(item.at)
+      t.ok(age >= 0 && age < 86400000, 'inside the 24 h of the demo clock')
+    }
+  }
+  t.alike(read.own.map((i) => i.seq), [48])
+  t.alike(read.past.map((i) => i.seq), [47, 46], 'past moments newest first')
+  for (const item of read.past) keys(t, item, ['seq', 'ref', 'text', 'at'])
+  t.absent(read.authors.some((a) => a.author === f.own), 'the own key is never among the authors')
+
+  await call('follow.remove', { key: cecilia })
+  t.alike((await call('moments.read', {})).authors.map((a) => a.author), [joao, andre], 'an unfollowed diary leaves the strip')
+
+  // The app hides moments by the device clock: options.clock moves every
+  // date by the same distance, so the ages stay those of the demo clock.
+  const later = Date.parse(f.now) + 3 * 86400000
+  const moved = await answer(t, createVitrineRequest(f, { clock: () => later }), 'moments.read', {})
+  t.alike(moved.authors.map((a) => a.items.map((i) => Date.parse(i.at) - 3 * 86400000)), read.authors.map((a) => a.items.map((i) => Date.parse(i.at))))
+  t.is(Date.parse(moved.past[0].at), Date.parse(read.past[0].at) + 3 * 86400000)
+  t.alike(moved.authors.map((a) => a.items.map((i) => i.seq)), read.authors.map((a) => a.items.map((i) => i.seq)), 'the same moments show')
+})
+
+test('momentos: putMoment, moment.create, the photo read and moment.delete', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { mediaBounds } = require('@varanda/rpc')
+  const call = (method, params) => answer(t, request, method, params)
+  const media = request.media
+  const joao = f.members[1].author
+
+  const got = await media.read({ kind: 'moment', author: joao, seq: 71 })
+  t.is(got.mime, 'image/jpeg')
+  t.is(mediaBounds(got.bytes, got.mime).width, got.w)
+  const gone = async (ref, label) => {
+    try {
+      await media.read(ref)
+      t.fail(label + ' must reject')
+    } catch (err) {
+      t.is(err.code, 'NOT_FOUND', label)
+      t.is(err.message, 'foto indisponível')
+    }
+  }
+  await gone({ kind: 'moment', author: f.own, seq: 46 }, 'a past moment')
+  await gone({ kind: 'moment', author: joao, seq: 3 }, 'a post is no moment')
+  await gone({ kind: 'moment', author: unknown, seq: 1 }, 'an unknown diary')
+
+  const bytes = Uint8Array.from([0xff, 0xd8, 0xff, 0xd9])
+  const given = new Uint8Array(bytes)
+  const item = await media.putMoment({ bytes: given, mime: 'image/jpeg', width: 640, height: 480 })
+  t.ok(given.every((b) => b === 0), 'putMoment wipes the bytes it was given')
+  t.ok(validateParams('moment.create', { text: '', media: item }).ok, 'the item matches the contract')
+  // A photo past one 32 KiB chunk still makes a valid item.
+  const big = await media.putMoment({ bytes: new Uint8Array(100000).fill(1), mime: 'image/jpeg', width: 1080, height: 1350 })
+  t.is(big.chunks, Math.ceil((100000 + 16) / 32768), 'chunks follow the ciphertext size')
+  t.ok(validateParams('moment.create', { text: '', media: big }).ok, 'a large photo matches the contract too')
+  const other = await media.putMoment({ bytes: new Uint8Array(bytes), mime: 'image/png', width: 10, height: 10 })
+  t.not(other.id, item.id, 'every photo is a fresh blob')
+  await t.exception(() => media.putMoment({ bytes: new Uint8Array(0), mime: 'image/jpeg', width: 1, height: 1 }))
+  await t.exception(() => media.putMoment({ bytes, mime: 'audio/mp4', width: 1, height: 1 }))
+
+  await refused(t, request, 'moment.create', { text: 'Oi', media: f.diaryRecords.find((e) => e.record.type === 'moment').record.media }, 'USAGE', 'prepare a mídia de novo')
+  const created = await call('moment.create', { text: 'Na praça agora.', media: item })
+  t.is(created.ref, f.own + ':' + created.seq)
+  await refused(t, request, 'moment.create', { text: 'De novo', media: item }, 'USAGE', 'prepare a mídia de novo')
+  const peek = await call('diary.peek', { author: f.own, seqs: [created.seq] })
+  t.alike(Object.keys(peek.entries[0].record).sort(), ['at', 'media', 'text', 'type'])
+  t.alike((await call('moments.read', {})).own.map((i) => i.seq), [created.seq, 48], 'the new moment shows first')
+  t.alike((await media.read({ kind: 'moment', author: f.own, seq: created.seq })).bytes, bytes, 'its photo opens again')
+
+  for (let i = 0; i < 4; i++) await call('moment.create', { text: 'Mais um ' + i, media: await media.putMoment({ bytes: new Uint8Array(bytes), mime: 'image/jpeg', width: 8, height: 8 }) })
+  const full = await call('moments.read', {})
+  t.is(full.own.length, 4, 'at most four own moments')
+
+  await refused(t, request, 'moment.delete', { to: joao + ':70' }, 'USAGE', 'referência inválida')
+  await refused(t, request, 'moment.delete', { to: f.own + ':3' }, 'USAGE', 'referência inválida')
+  await refused(t, request, 'moment.delete', { to: f.own + ':999' }, 'USAGE', 'referência inválida')
+  const removed = await call('moment.delete', { to: f.own + ':48' })
+  t.alike(removed.deleted, [48])
+  t.alike(await call('moment.delete', { to: f.own + ':48' }), removed, 'a deleted moment answers its tombstone')
+  await gone({ kind: 'moment', author: f.own, seq: 48 }, 'a deleted moment')
+  const pastRemoved = await call('moment.delete', { to: f.own + ':47' })
+  t.alike(pastRemoved.deleted, [47])
+  const after = await call('moments.read', {})
+  t.absent(after.own.some((i) => i.seq === 48))
+  t.alike(after.past.map((i) => i.seq), [46], 'a past moment can be deleted too')
+  t.alike((await call('diary.peek', { author: f.own, seqs: [48] })).missing, [48])
 })

@@ -122,6 +122,33 @@ export function createVitrineRequest (fixtures, options) {
   // eslint-disable-next-line no-control-regex
   const badText = (text) => /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/.test(text) || /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(text)
 
+  // Momentos (5.113), on the demo clock: a moment shows while
+  // at - MOMENT_SKEW_MS <= now < at + MOMENT_TTL_MS (packages/core/lib/moments.js)
+  // and is past once its 24 h are over. The app hides a moment by the
+  // device clock, so options.clock (a function answering milliseconds), when
+  // given, moves every answered date by the same distance: the ages stay
+  // those of the demo clock.
+  const MOMENT_TTL_MS = 86400000
+  const MOMENT_SKEW_MS = 600000
+  const demoNow = () => Date.parse(data.now) + tick * 1000
+  const clock = options && typeof options.clock === 'function' ? options.clock : null
+  const shown = (at) => {
+    const offset = clock === null ? 0 : clock() - demoNow()
+    return Number.isFinite(offset) ? new Date(Date.parse(at) + offset).toISOString() : at
+  }
+  const newestFirst = (a, b) => Date.parse(b.record.at) - Date.parse(a.record.at) || b.seq - a.seq
+  const momentsOf = (author) => (logs.get(author) || []).filter((e) => e.record.type === 'moment' && !deleted.has(`${author}:${e.seq}`)).sort(newestFirst)
+  const showing = (record) => {
+    const t = Date.parse(record.at)
+    const now = demoNow()
+    return t - now <= MOMENT_SKEW_MS && t + MOMENT_TTL_MS > now
+  }
+  const momentRow = (author, { seq, record }) => ({ seq, ref: `${author}:${seq}`, text: record.text, at: shown(record.at), media: record.media })
+  data.momentMedia = (author, seq) => {
+    const entry = typeof author === 'string' && Number.isSafeInteger(seq) ? momentsOf(author).find((e) => e.seq === seq) : null
+    return entry && showing(entry.record) ? entry.record.media : null
+  }
+
   function append (record) {
     const entries = logs.get(data.own)
     const seq = entries[entries.length - 1].seq + 1
@@ -811,6 +838,41 @@ export function createVitrineRequest (fixtures, options) {
         deleted.set(`${data.own}:${seq}`, last)
       }
       return { seq: last.seq, deleted: seqs }
+    },
+    'moment.putMedia': ({ mime, width, height }) => {
+      const n = mediaStart++
+      return { id: keyOf(0xe80 + n), key: keyOf(0xf80 + n), nonce: '0'.repeat(46) + (n % 100).toString().padStart(2, '0'), chunks: 1, bytes: 2048, sha256: keyOf(0x880 + n), mime, w: width, h: height, ms: 0 }
+    },
+    // Only an item the Vitrine media handle's putMoment answered and no
+    // moment published yet, as the web node's entry check.
+    'moment.create': ({ text, media }) => {
+      const prepared = data.momentUploads ? data.momentUploads.get(media.id) : null
+      if (!prepared || JSON.stringify(prepared) !== JSON.stringify(media)) refuse('USAGE', 'prepare a mídia de novo')
+      if (badText(text)) refuse('USAGE', 'registro inválido: malformed')
+      data.momentUploads.delete(media.id)
+      return append({ type: 'moment', text, at: stamp(), media })
+    },
+    'moments.read': () => {
+      const authors = data.follows.filter((author) => author !== data.own).flatMap((author) => {
+        const items = momentsOf(author).filter((e) => showing(e.record)).slice(0, 4)
+        return items.length > 0 ? [{ author, newest: Date.parse(items[0].record.at), items: items.map((e) => momentRow(author, e)) }] : []
+      }).sort((a, b) => b.newest - a.newest || compareText(a.author, b.author)).slice(0, 32).map(({ author, items }) => ({ author, items }))
+      const ownMoments = momentsOf(data.own)
+      return {
+        authors,
+        own: ownMoments.filter((e) => showing(e.record)).slice(0, 4).map((e) => momentRow(data.own, e)),
+        past: ownMoments.filter((e) => Date.parse(e.record.at) + MOMENT_TTL_MS <= demoNow()).slice(0, 16).map((e) => ({ seq: e.seq, ref: `${data.own}:${e.seq}`, text: e.record.text, at: shown(e.record.at) }))
+      }
+    },
+    'moment.delete': ({ to }) => {
+      const target = targetOf(to)
+      if (target.author !== data.own) refuse('USAGE', 'referência inválida')
+      if (deleted.has(to)) return { seq: deleted.get(to).seq, deleted: [target.seq] }
+      const entry = liveEntry(data.own, target.seq)
+      if (!entry || entry.record.type !== 'moment') refuse('USAGE', 'referência inválida')
+      const tombstone = append({ type: 'delete', seq: target.seq, at: stamp() })
+      deleted.set(to, tombstone)
+      return { seq: tombstone.seq, deleted: [target.seq] }
     },
     'diary.peek': ({ author, seqs, profileSeq, usernameSeq }) => {
       const p = profileOf(author)

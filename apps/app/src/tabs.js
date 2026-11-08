@@ -26,8 +26,9 @@ export function tabsFor (mode) {
 const CONVERSAS_SCREENS = new Set(['mensagem', 'grupo', 'comunidade', 'comunidade-info', 'comunidades', 'pedidos'])
 const FEIRA_SCREENS = new Set(['anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios'])
 
-// Screens with nothing to publish on: the Depoimentos management screen.
-const NO_POST_SCREENS = new Set(['depoimentos'])
+// Screens with nothing to publish on: the Depoimentos management screen and
+// the full-screen Momentos viewer.
+const NO_POST_SCREENS = new Set(['depoimentos', 'momentos'])
 
 // The floating "publicar" button belongs to posts: it is hidden on the
 // Conversas and Feira tabs, on their screens and on NO_POST_SCREENS. `screen`

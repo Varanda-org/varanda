@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 30)
+  t.is(LEGAL_VERSION, 31)
   t.is(LEGAL_DATE, '08/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 30, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 31, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
@@ -90,7 +90,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '28ced1e3b11bf659ac9ffd117c5a77fe15f4b79de8d052c7420e39e1a927d6b6', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'ab415f6d7a0434f6c06898e65fd6723ae6b29abbb5786a2596414c76b44313cc', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
@@ -259,5 +259,21 @@ test('legal: version 28 describes sealed depoimentos shown only by the recipient
   t.ok(text(PRIVACY).includes('Se não escolhe, nada é publicado no diário dela'))
   t.ok(text(PRIVACY).includes('quem recebeu pode tirá-lo do perfil apagando o registro dela'))
   t.ok(text(PRIVACY).includes('As duas pessoas podem denunciar a conta da outra'))
-  t.ok(text(PRIVACY).includes('perfil, seguidos, depoimentos, fotos'))
+  t.ok(text(PRIVACY).includes('perfil, seguidos, depoimentos, momentos, fotos'))
+})
+
+test('legal: version 29 describes momentos that disappear but are not erased', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('uma foto e até 200 caracteres de texto, que quem segue você vê por 24 horas'))
+  t.ok(text(TERMS).includes('Depois de 24 horas, o momento deixa de aparecer no app'))
+  t.ok(text(TERMS).includes('A foto é removida dos servidores da Varanda em até 7 dias'))
+  t.ok(text(TERMS).includes('O texto fica no seu diário até você apagar o momento'))
+  t.ok(text(TERMS).includes('Sumir não é apagar: cópias que outras pessoas fizeram'))
+  t.ok(text(TERMS).includes('não podem ser recolhidas'))
+  t.ok(text(PRIVACY).includes('a chave para abri-la fica no próprio registro, de propósito'))
+  t.ok(text(PRIVACY).includes('A foto é removida dos servidores da Varanda em até 7 dias'))
+  t.ok(text(PRIVACY).includes('sumir não é apagar'))
+  t.ok(text(PRIVACY).includes('A foto de um momento fica no semeador por até 7 dias, sem renovação'))
+  t.ok(text(PRIVACY).includes('perfil, seguidos, depoimentos, momentos, fotos'))
 })

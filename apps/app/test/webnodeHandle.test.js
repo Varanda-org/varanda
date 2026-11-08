@@ -138,6 +138,30 @@ test('putDm goes through dm.putMedia; a failure deletes the file here', async (t
   await t.exception.all(media.putDm({ bytes: new Uint8Array(0), mime: 'image/webp', width: 2, height: 2, to }), /mídia inválida/)
 })
 
+test('putMoment goes through moment.putMedia with only the image fields', async (t) => {
+  const { webNodeHandle } = await load()
+  const item = { id: 'ab'.repeat(32) }
+  let fail = false
+  const { request, calls } = mockRequest((method) => {
+    if (method === 'moment.putMedia' && fail) throw Object.assign(new Error('x'), { code: 'USAGE' })
+    return item
+  })
+  const { media } = webNodeHandle(request)
+  t.is(await media.putMoment({ bytes: new Uint8Array([5]), mime: 'image/jpeg', width: 3, height: 4, to: 'ef'.repeat(32), ms: 9, kind: 'voice' }), item)
+  const put = calls.find((c) => c.method === 'moment.putMedia')
+  t.ok(NAME_RE.test(put.params.name), 'only a generated name crosses the IPC')
+  t.alike(put.params, { name: put.params.name, mime: 'image/jpeg', width: 3, height: 4 }, 'no destination, no voice fields')
+  t.alike(put.file, new Uint8Array([5]))
+
+  fail = true
+  await t.exception(media.putMoment({ bytes: new Uint8Array([5]), mime: 'image/jpeg', width: 3, height: 4 }))
+  const failed = calls.filter((c) => c.method === 'moment.putMedia')[1]
+  t.absent(box().files.has(UPLOAD + failed.params.name), 'a failed put leaves no upload file')
+  await t.exception.all(media.putMoment({ bytes: new Uint8Array(0), mime: 'image/jpeg', width: 3, height: 4 }), /mídia inválida/)
+  await t.exception.all(media.putMoment(), /mídia inválida/)
+  t.is(calls.filter((c) => c.method === 'moment.putMedia').length, 2, 'no bytes never reaches the worklet')
+})
+
 test('read names a read-dir file and the handle releases it', async (t) => {
   const mod = await load()
   const names = []
@@ -160,6 +184,12 @@ test('read names a read-dir file and the handle releases it', async (t) => {
   const b = await media.read({ kind: 'group', diary: 'ef'.repeat(32), item })
   t.alike(calls.at(-1).params, { kind: 'group', diary: 'ef'.repeat(32), item })
   t.is(b.uri, READS + names[1])
+
+  const m = await media.read({ kind: 'moment', author: 'ef'.repeat(32), seq: 7, diary: 'dropped', item })
+  t.alike(calls.at(-1).params, { kind: 'moment', author: 'ef'.repeat(32), seq: 7 }, 'only the moment fields cross')
+  t.alike(m, { uri: READS + names[2], mime: 'image/jpeg', w: 10, h: 20 })
+  media.forgetReadFile(names[2])
+  names.splice(2, 1)
 
   media.forgetReadFile(names[0])
   t.absent(box().files.has(READS + names[0]), 'eviction deletes the file')
@@ -238,7 +268,9 @@ test('web: mediaOf gives the facade the same shape, bytes in the page', async (t
     upload: async (args) => { calls.push(['upload', args]); return { core: 'd' } },
     putDm: async (args) => { calls.push(['putDm', args]); return { id: 'i' } },
     readDm: async (args) => { calls.push(['readDm', args]); return { bytes: gif, mime: 'image/gif' } },
-    readGroup: async (args) => { calls.push(['readGroup', args]); return { bytes: new Uint8Array([1]), mime: 'image/png', w: 8, h: 9 } }
+    readGroup: async (args) => { calls.push(['readGroup', args]); return { bytes: new Uint8Array([1]), mime: 'image/png', w: 8, h: 9 } },
+    putMoment: async (args) => { calls.push(['putMoment', args]); return { id: 'm' } },
+    readMoment: async (args) => { calls.push(['readMoment', args]); return { bytes: gif, mime: 'image/gif', w: 3, h: 5 } }
   }
   const media = mediaOf(facade)
   const bytes = new Uint8Array([1])
@@ -254,11 +286,22 @@ test('web: mediaOf gives the facade the same shape, bytes in the page', async (t
   const g = await media.read({ kind: 'group', diary: 'd', item: { x: 1 } })
   t.alike(calls.at(-1), ['readGroup', { diary: 'd', item: { x: 1 } }])
   t.alike({ w: g.w, h: g.h }, { w: 8, h: 9 })
+  t.alike(await media.putMoment({ bytes, mime: 'image/png', width: 1, height: 1 }), { id: 'm' })
+  t.alike(calls.at(-1), ['putMoment', { bytes, mime: 'image/png', width: 1, height: 1 }])
+  const mo = await media.read({ kind: 'moment', author: 'k', seq: 3, diary: 'x' })
+  t.alike(calls.at(-1), ['readMoment', { author: 'k', seq: 3 }], 'only the moment fields reach the node')
+  t.alike(mo, { bytes: gif, mime: 'image/gif', w: 3, h: 5 }, 'the same { bytes, mime, w, h } answer')
 
   const uploadOnly = mediaOf({ upload: facade.upload })
   t.alike(Object.keys(uploadOnly), ['upload'], 'a missing facade method is an absent capability')
   const dmOnly = mediaOf({ readDm: facade.readDm })
   await t.exception.all(dmOnly.read({ kind: 'group', diary: 'd', item: {} }), /mídia inválida/)
+  await t.exception.all(dmOnly.read({ kind: 'moment', author: 'k', seq: 1 }), /mídia inválida/, 'no readMoment, no moment read')
+  t.absent('putMoment' in dmOnly)
+  const momentOnly = mediaOf({ readMoment: facade.readMoment })
+  await t.exception.all(momentOnly.read(null), /mídia inválida/)
+  await t.exception.all(momentOnly.read({ kind: 'dm', from: 'a', id: 'b', index: 0 }), /mídia inválida/)
+  t.alike((await momentOnly.read({ kind: 'moment', author: 'k', seq: 1 })).mime, 'image/gif')
 })
 
 test('a voice note keeps its duration and kind across the IPC; an image request keeps its exact keys', async (t) => {

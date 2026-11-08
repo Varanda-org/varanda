@@ -6174,6 +6174,57 @@ Limites desta caminhada:
 - A Vitrine não cifra nada: a caixa dos fixtures é preenchimento do tamanho de uma caixa selada real, e o texto é aberto por uma tabela local. O hash é o SHA-256 real, então o compromisso, a conferência do `testimonial-show` e o `invalid` de um bloco retirado são os mesmos do nó da web.
 - Na Vitrine, o índice `/index/testimonials/<dono>` responde do estado local da Vitrine aberta; a conferência no semeador real fica para o laboratório hospedado.
 
+## 123. Momentos (PR feat/momentos)
+
+Caminhada dos Momentos: publicar uma foto com texto curto que aparece por 24 horas para quem segue, ver os momentos de quem você segue, responder em particular e apagar o seu. As telas estão em [app.md](app.md) ("Momentos") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Faixa de momentos", "Visualizador de momento", "Publicar em Momento", "Momentos no Diário"). O contrato está em [rpc.md](rpc.md) 5.113 e o formato do registro `moment` em [protocol.md](protocol.md).
+
+Regras que os passos conferem:
+
+- **Só no nó web (navegador ou worklet nativo).** A faixa, o modo Momento de Publicar e as linhas do Diário dependem de `node.hosted === true`; o nó core responde `USAGE` para `moment.create`, `moments.read` e `moment.delete`.
+- **24 horas, do lado de quem lê.** Um momento some da faixa, do visualizador e de "Seus momentos (24 h)" quando passam 24 h do `at`. Um momento datado mais de 10 minutos à frente do relógio de quem lê espera a hora chegar. Esconder não é apagar: o registro fica no diário, e os seus aparecem em "Momentos anteriores" até você apagar.
+- **A foto tem vida curta.** Ela vai para o depósito anônimo de blobs (um blob novo por momento, com a chave e o nonce públicos no registro), e os semeadores a apagam em até 7 dias. Depois disso o visualizador mostra "Foto indisponível", nunca um erro.
+- **Sem curtidas, sem contagem de visualizações, sem resposta pública.** "Responder" abre a conversa privada com quem publicou, com o chip de contexto. O visto do anel fica só no aparelho e não grava registro.
+- **Apagar.** Só o seu momento, no ar ou anterior: `moment.delete` de outra pessoa ou de outro tipo de registro responde "referência inválida". A confirmação diz que cópias feitas por outras pessoas não voltam, e o momento no ar traz a nota "A foto sai dos servidores em até 7 dias.".
+- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/feat/momentos/<plataforma>/`.
+
+Como verificar, a partir de `apps/app` (um arquivo por vez):
+
+- `node test/moments.test.js`, `node test/momentosScreen.test.js`, `node test/legal.test.js`, `node test/vitrine.test.js`, `node test/vitrineIndex.test.js`, `node test/vitrineGuard.test.js`, `node test/vitrineLarge.test.js`.
+- A partir da raiz: `node packages/core/test/moments.test.js`, `node packages/core/test/records.test.js`, `node packages/rpc/test/methods.test.js`, `node packages/web-member/test/moments-e2e.test.js` (Node 20.19 ou mais novo).
+- `npm run lint`, a partir da raiz, que tem de passar.
+
+Primeiro no Android (build de debug, emulador `varanda-api36` ou aparelho, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome e no PWA, cada um nos temas claro e escuro e com texto normal e grande (Android `font_scale` 1.3, iOS `accessibility-large`). Na Vitrine, Lia segue João (dois momentos), Cecília e André (um cada), tem um momento seu no ar e dois anteriores; as datas seguem o relógio da demonstração, deslocado para a hora do aparelho, então os momentos estão sempre dentro das 24 h:
+
+- [ ] Android: A Rua começa com a faixa de momentos; o anel "Você" vem primeiro, depois João, Cecília e André; todos com o anel verde de não visto; nomes numa linha, sem corte.
+- [ ] Android: abrir João; a barra mostra dois segmentos; tocar à direita passa para o segundo, à esquerda volta; segurar pausa a barra; sem tocar, o momento passa sozinho em 5 s e, depois do último, vem a próxima pessoa da faixa; deslizar para baixo fecha.
+- [ ] Android: depois de ver João, o anel dele fica com a cor de linha e vai para depois dos não vistos; reabrir o app no mesmo aparelho mantém isso.
+- [ ] Android: com "Remover animações" (Reduzir movimento) ligado, o momento não passa sozinho; tocar à direita ainda avança.
+- [ ] Android: no momento de João, "Responder" abre a conversa privada com João e o chip de contexto do momento acima do campo; o chip sai com o X.
+- [ ] Android: em nenhum momento aparece curtida, coração, contagem de visualizações ou campo de resposta pública.
+- [ ] Android: o seu momento mostra a nota "A foto sai dos servidores em até 7 dias." e "Novo momento"; o botão de mais tem Apagar; a folha "Apagar momento?" apaga e o anel "Você" volta a ter o "+".
+- [ ] Android: tocar no anel "Você" com o "+" abre Publicar já em "Publicação | Momento", em Momento. Escolher foto, depois Trocar foto: fica uma foto só; tentar mais de uma diz "Um momento leva uma foto só."; o contador vai até 200 (200 emojis contam 200) e Publicar desliga acima disso; o momento aparece primeiro na faixa.
+- [ ] Android: com um rascunho em Publicação, trocar para Momento: aparece "Seu rascunho da publicação continua guardado."; voltar para Publicação traz o rascunho e as fotos dele. Com o envio de um momento sem confirmação (rede cortada no meio), o rascunho do momento fica parado com "Descartar" e o aviso para conferir em Seus momentos; nada é enviado de novo sozinho.
+- [ ] Android: Diário de Lia mostra, abaixo do topo do perfil e fora das abas, "Seus momentos (24 h)" (abre o visualizador) e "Momentos anteriores (2)", recolhida; abrir mostra os dois com data e começo do texto; Apagar num deles deixa "Momentos anteriores (1)".
+- [ ] Android: num momento cuja foto já saiu do servidor (laboratório, com o relógio do semeador adiantado 8 dias, ou um blob apagado à mão), o visualizador mostra "Foto indisponível" no lugar da foto, sem banner de erro, e o texto continua.
+- [ ] iOS (simulador, build de debug ligado ao Metro): os mesmos passos; deslizar para baixo fecha sem abrir a central de notificações; com "Reduzir movimento" ligado, nada passa sozinho.
+- [ ] Chrome em 375 px, 1280 px e 320 px, e o PWA instalado: os mesmos passos; Tab chega aos anéis, ao botão de fechar, ao de mais e a "Responder"; Escape fecha o visualizador.
+- [ ] Texto grande: nomes da faixa numa linha (encolhem um pouco e só um nome longo termina em "…"); a nota, "Responder", "Novo momento", as linhas do Diário e a escolha "Publicação | Momento" sem corte.
+- [ ] Com um nó que não é hospedado (`node.hosted` diferente de `true`): sem faixa em A Rua, sem "Publicação | Momento" em Publicar e sem linhas de momentos no Diário.
+- [ ] A regra das 24 horas, no laboratório hospedado: um momento publicado some da faixa e do visualizador de quem segue depois de 24 h (relógio do aparelho adiantado 24 h) e passa para "Momentos anteriores" de quem publicou; um registro `moment` datado 1 h à frente (escrito à mão no laboratório) só aparece quando a hora chega.
+- [ ] Termos de Uso e Política de Privacidade na versão 31 apresentados para novo aceite numa instalação já aceita na versão 28; o texto diz que o momento deixa de aparecer depois de 24 horas, que a foto sai dos servidores da Varanda em até 7 dias, que o texto fica no diário até a pessoa apagar e que cópias feitas por outras pessoas não voltam.
+- [ ] Laboratório hospedado com duas identidades (`apps/cli/scripts/hosted-lab.js`, dois perfis do navegador, ou um aparelho e um perfil): A publica um momento; B segue A e vê o anel de A na faixa, abre e vê a foto e o texto; B toca "Responder" e manda uma mensagem, que chega a A com o contexto; A apaga o momento; em B, depois de atualizar, o anel de A some e o momento não abre mais.
+
+Ainda falta a um humano, em aparelho real:
+
+- [ ] celulares Android e iPhone físicos: as telas acima, com uma foto da câmera.
+- [ ] TalkBack e VoiceOver: cada anel lê "momentos de <nome>" ("seu momento" no seu); o visualizador lê "momento N de M", o nome, a hora e o texto; os botões fechar, mais ações, Responder, Novo momento e Apagar têm nome.
+- [ ] Publicar um momento com a chave de mensagens bloqueada pede para desbloquear com a passkey ("Desbloqueie com a passkey para publicar um momento.").
+
+Limites desta caminhada:
+
+- A Vitrine não sobe nada: a foto de um momento é um dos desenhos locais da Vitrine (ou a foto escolhida, guardada só na memória da página), e o blob, a chave e o nonce são de mentira. A busca no semeador, a decifração e a conferência do tamanho e do SHA-256 ficam para o laboratório hospedado.
+- Na Vitrine, as datas dos momentos são as do relógio da demonstração (5 nov, 15 h), deslocadas para a hora do aparelho; os momentos anteriores são os que já passaram das 24 h nesse relógio.
+
 ## 129. Carregamento mais rápido de A Rua, Diário e perfis (PRs chore/perf-harness até perf/app-render)
 
 Caminhada da pilha de desempenho: medição, leituras do nó, partida, concessão do app instalado e renderização. Ciclo de medição, metas e números em [performance.md](performance.md).

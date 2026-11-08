@@ -94,6 +94,13 @@ const DELETE_RANGE_KEYS = ['core', 'start', 'blocks']
 const TESTIMONIAL_KEYS = ['type', 'to', 'gen', 'hash', 'box', 'at']
 const TESTIMONIAL_SHOW_KEYS = ['type', 'from', 'seq', 'text', 'nonce', 'at']
 const MAX_TESTIMONIAL = 400
+// Momentos (docs/protocol.md): one photo in the anonymous blob pool, its key
+// and nonce public in the record, shown by readers for 24 hours. The media
+// item has the DM media item shape (packages/rpc isDmMediaItem), images only.
+const MOMENT_KEYS = ['type', 'text', 'at', 'media']
+const MOMENT_MEDIA_KEYS = ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms']
+const MOMENT_BLOB_KEYS = ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256']
+const MAX_MOMENT_TEXT = 200
 const TESTIMONIAL_SEAL_BYTES = 48 // crypto_box_SEALBYTES
 // The sealed plaintext is canonical JSON {"text":...,"nonce":...}. A valid
 // text has no lone surrogates and no control characters but LF, so no
@@ -202,6 +209,21 @@ function validTestimonialText (text) {
   if (typeof text !== 'string') return false
   const len = charLength(text)
   return len >= 1 && len <= MAX_TESTIMONIAL && !hasControlChars(text, true) && !hasLoneSurrogate(text)
+}
+
+function validMomentText (text) {
+  if (typeof text !== 'string') return false
+  return charLength(text) <= MAX_MOMENT_TEXT && !hasControlChars(text, true) && !hasLoneSurrogate(text)
+}
+
+// Required lazily: lib/blob.js requires this module at load time.
+function validMomentMedia (m) {
+  if (!isPlainObject(m) || !hasExactKeys(m, MOMENT_MEDIA_KEYS)) return false
+  const blob = {}
+  for (const k of MOMENT_BLOB_KEYS) blob[k] = m[k]
+  if (!require('./blob').validateBlobDescriptor(blob)) return false
+  return MEDIA_MIMES.includes(m.mime) && isIntIn(m.w, 1, MAX_MEDIA_DIMENSION) &&
+    isIntIn(m.h, 1, MAX_MEDIA_DIMENSION) && m.ms === 0
 }
 
 // Canonical base64 (padded, the exact re-encoding) of a sealed testimonial.
@@ -431,7 +453,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -494,6 +516,12 @@ function check (record, seq) {
     if (!hasExactKeys(record, TESTIMONIAL_SHOW_KEYS) || !isHex64(record.from) || !isHex64(record.nonce)) return 'malformed'
     if (!Number.isSafeInteger(record.seq) || record.seq < 1) return 'malformed'
     if (!validTestimonialText(record.text)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'moment') {
+    if (!hasExactKeys(record, MOMENT_KEYS)) return 'malformed'
+    if (!validMomentText(record.text)) return 'text-length'
+    if (!validMomentMedia(record.media)) return 'media-invalid'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   // The creator binds the group root itself: writer may equal group.
@@ -630,6 +658,17 @@ function testimonialRecord ({ to, gen, hash, box, at = nowIso() } = {}) {
 
 function testimonialShowRecord ({ from, seq, text, nonce, at = nowIso() } = {}) {
   return build({ type: 'testimonial-show', from, seq, text, nonce, at }, 1)
+}
+
+// `media` is copied with exactly the item keys (anything else is passed
+// through for validation to reject).
+function momentRecord ({ text = '', media, at = nowIso() } = {}) {
+  let item = media
+  if (isPlainObject(media)) {
+    item = {}
+    for (const k of MOMENT_MEDIA_KEYS) item[k] = media[k]
+  }
+  return build({ type: 'moment', text, at, media: item }, 1)
 }
 
 function mediaCoreRecord ({ key, at = nowIso() } = {}) {
@@ -850,6 +889,9 @@ module.exports = {
   MAX_TESTIMONIAL_PLAIN,
   MAX_TESTIMONIAL_SEALED,
   MAX_TESTIMONIAL_BOX,
+  MOMENT_KEYS,
+  MOMENT_MEDIA_KEYS,
+  MAX_MOMENT_TEXT,
   AVATAR_SIDE,
   MAX_AVATAR_BLOCKS,
   MAX_AVATAR_BYTES,
@@ -870,6 +912,8 @@ module.exports = {
   hasControlChars,
   charLength,
   validTestimonialText,
+  validMomentText,
+  validMomentMedia,
   plainCopy,
   isHex64,
   isHex128,
@@ -888,6 +932,7 @@ module.exports = {
   repostRecord,
   testimonialRecord,
   testimonialShowRecord,
+  momentRecord,
   deleteRecord,
   listingRecord,
   listingEditRecord,

@@ -148,6 +148,7 @@ import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, linkReturnTaker, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro from './src/screens/Membro'
 import Depoimentos from './src/screens/Depoimentos'
+import Momentos from './src/screens/Momentos'
 import Feira from './src/screens/Feira'
 import Anuncio from './src/screens/Anuncio'
 import Anunciar from './src/screens/Anunciar'
@@ -1629,6 +1630,12 @@ function Member () {
     if ((kind !== 'seguindo' && kind !== 'seguidores') || typeof key !== 'string') return
     pushScreen({ screen: kind, key: key.toLowerCase(), params: {} })
   }, [pushScreen])
+  // The Momentos viewer, starting at one author's ring (hosted only: the
+  // strip and the Diário rows that call it render only there).
+  const openMomentos = useCallback((key) => {
+    if (typeof key !== 'string') return
+    pushScreen({ screen: 'momentos', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
   const openTestimonials = useCallback((key) => {
     if (typeof key !== 'string') return
     pushScreen({ screen: 'depoimentos', key: key.toLowerCase(), params: {} })
@@ -2327,6 +2334,15 @@ function Member () {
     return () => globalThis.removeEventListener('keydown', onKey)
   }, [commitStack, goBack, closeAvisos])
   const openComposer = () => setComposer((c) => ({ ...c, open: true }))
+  // The composer in Momento mode (the strip's own ring, 'Novo momento' in the
+  // own viewer): `moment` is a counter, so every request switches it again.
+  // A momento is the person's own: a page chosen in Publicar como is set
+  // back to the person for this open, or Publicar would not offer Momento.
+  const openMomentComposer = () => {
+    clearStack()
+    actingAs.me()
+    setComposer((c) => ({ ...c, open: true, reply: null, quote: null, moment: (c.moment || 0) + 1 }))
+  }
   const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
   const openAvisos = () => {
     if (tab === 'avisos') reselectTab('avisos')
@@ -2418,6 +2434,9 @@ function Member () {
     (topEntry !== null && topEntry.screen === 'membro') ||
     (topEntry === null && tab === 'diario' && node.online !== false)
   )
+  // The Momentos viewer is black in both themes: light icons while it is on
+  // top, the scheme's again once it closes. Status bar only, no band colour.
+  const viewerOnTop = step === 'pronto' && topEntry !== null && topEntry.screen === 'momentos'
   // Only the final return shows the band; the gates below never do.
   const bandShown = light && !loadingGate && !holding && !showIntro && !showTerms && (ready || seen)
   // Runs after ThemeProvider's layout effect, so the band colour wins and a
@@ -2640,7 +2659,13 @@ function Member () {
     const on = (id) => tab === id && ready
     const shown = (id) => (tab === id ? styles.flex : styles.hidden)
     const stacked = nav.depth(stack) > 0
-    const fabShown = showPostButton({ tab, screen: stacked ? nav.top(stack).screen : null })
+    // The black Momentos viewer slides out over the tabs on close: the tab bar
+    // and the publish button wait for the end of its pop, or they show over
+    // the black for the whole slide.
+    const leavingEntry = stackMotion.leaving && stackMotion.leaving.entry && stackMotion.leaving.index >= nav.depth(stack) ? stackMotion.leaving.entry : null
+    const viewerLeaving = leavingEntry !== null && leavingEntry.screen === 'momentos'
+    const barsHidden = stacked || viewerLeaving
+    const fabShown = !viewerLeaving && showPostButton({ tab, screen: stacked ? nav.top(stack).screen : null })
     const tabActions = <TopActions key={tab} help={HELP[tab === 'comunidades' ? 'conversas' : tab]} onAvisos={mode === 'hosted' ? openAvisos : undefined} avisosNew={avisosNew} avisosActive={tab === 'avisos'} />
     // Conversas puts its "+" before help and the bell (the WhatsApp header);
     // its search is a field above the chips, not a header action.
@@ -2707,6 +2732,13 @@ function Member () {
         return (
           <StackLayer key={i + ':depoimentos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Depoimentos entry={entry} ownKey={ownKey} onBack={goBack} onOpenMember={openMember} onReport={setReport} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'momentos') {
+        return (
+          <StackLayer key={i + ':momentos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} onCreate={openMomentComposer} />
           </StackLayer>
         )
       }
@@ -2899,6 +2931,8 @@ function Member () {
               onOpenMention={mentionHandler}
               onQuote={startQuote}
               onMessage={openMessage}
+              onOpenMomentos={openMomentos}
+              onCreateMoment={openMomentComposer}
               ownKey={ownKey}
               scrollToTop={scrollSignal.rua}
               followCount={followCount}
@@ -3019,6 +3053,7 @@ function Member () {
               avisosNew={avisosNew}
               onOpenPeople={openPeople}
               onOpenTestimonials={openTestimonials}
+              onOpenMomentos={openMomentos}
             />
           </View>
         </View>
@@ -3034,7 +3069,7 @@ function Member () {
             upward and must never sit under the button. */}
         {toast
           ? (
-            <View style={[styles.toast, { bottom: fabShown ? insets.bottom + layout.tabBar + layout.fabAboveTabs + layout.fabSize + 12 : (stacked ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='box-none'>
+            <View style={[styles.toast, { bottom: fabShown ? insets.bottom + layout.tabBar + layout.fabAboveTabs + layout.fabSize + 12 : (barsHidden ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='box-none'>
               {/* Only the action takes touches: under box-none the label would
                   otherwise swallow taps meant for the screen below. */}
               <View pointerEvents='none' style={styles.toastLabel}>
@@ -3057,7 +3092,7 @@ function Member () {
             )
           : null}
         {/* Avisos is not a tab: the bar keeps the tab it was opened from, and that tab's icon closes it. */}
-        {stacked ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot, feira: feiraBadge }} tabs={tabsFor(mode)} me={tabMe} />}
+        {barsHidden ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot, feira: feiraBadge }} tabs={tabsFor(mode)} me={tabMe} />}
       </View>
     )
   }
@@ -3093,11 +3128,18 @@ function Member () {
           open={composer.open}
           reply={composer.reply}
           quote={composer.quote}
+          momentRequest={composer.moment || 0}
           me={me}
           onClose={() => setComposer((c) => ({ ...c, open: false }))}
           onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
           onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}
           onPublished={(kind, sentRef) => {
+            // A momento touches no post state: Publicar already told the
+            // Momentos readers (momentsChanged).
+            if (kind === 'moment') {
+              setComposer((c) => ({ ...c, open: false }))
+              return showToast('momento publicado')
+            }
             // The reply context is dropped only if it is still the one sent; a
             // sent quote always drops the quote context.
             setComposer((c) => ({
@@ -3126,7 +3168,7 @@ function Member () {
       <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} />
       {/* Mounted after the splash, so it wins: while the boot cover shows it
           follows the splash, which stays cream on native (Splash.js). */}
-      <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light })} />
+      <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />
     </View>
   )
 }
