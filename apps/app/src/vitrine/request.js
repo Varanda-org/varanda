@@ -2,7 +2,7 @@ import rpc from '@varanda/rpc'
 import { createVitrineMedia } from './media.js'
 import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'
 import { largeFeed } from './large.js'
-import { testimonialPointers, useTestimonialSource } from './indexResponder.js'
+import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'
 
 const { validateParams, RpcError, feira } = rpc
 let currentFeira = null

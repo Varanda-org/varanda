@@ -525,9 +525,10 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
     'publicMedia.js': ["import { fixtures, postPictureBytes } from './fixtures.js'"],
     'pictures.js': [],
     'media.js': ["import { pictures } from './pictures.js'", "import { PICTURE_BASE } from './fixtures.js'"],
-    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'", "import { largeFeed } from './large.js'", "import { testimonialPointers, useTestimonialSource } from './indexResponder.js'"],
+    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'", "import { largeFeed } from './large.js'", "import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'"],
     'large.js': [],
-    'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { fixtures, testimonialHash } from './fixtures.js'", "import { createVitrineRequest, vitrineFeiraState } from './request.js'"]
+    'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { fixtures } from './fixtures.js'", "import { createVitrineRequest, vitrineFeiraState } from './request.js'", "import { testimonialPointers, testimonialSource } from './testimonialIndex.js'"],
+    'testimonialIndex.js': ["import { fixtures, testimonialHash } from './fixtures.js'"]
   }
   for (const file of Object.keys(expectedImports)) {
     const source = readFileSync(join(__dirname, '../src/vitrine', file), 'utf8')
