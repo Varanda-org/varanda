@@ -273,6 +273,12 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Corrigido
 
+- Web: tocar numa foto aberta no visualizador não abre mais a publicação que estava por trás dele.
+- Botões de ação e de contagem das publicações (curtir, republicar, responder, mais) com 44 pt de altura, sem mudar a altura da linha. Os pares divididos de curtir e republicar mantêm a largura estreita, para a barra caber em 320 pt.
+- O botão de ajuda de A Rua tem 44 pt.
+- Abas da barra inferior com 48 pt de altura dentro da barra de 49 pt, e a barra do aplicativo (iOS e Android) é opaca: o conteúdo não aparece mais por baixo dela.
+- Miniatura de link (LinkCard) não é mais um botão aninhado dentro de outro botão; a miniatura passiva deixa a publicação tocar como antes.
+- A foto de um anúncio da Feira que falha não vira mais um botão de nova tentativa dentro do cartão (`tapRetry={false}`); tocar abre o anúncio, e as tentativas automáticas continuam.
 - A conversa abre na mensagem mais nova e acompanha a lista enquanto ela desenha mais linhas; qualquer gesto, uma rolagem para cima, **Mensagens anteriores** ou o salto até uma citação num grupo soltam o fim, e uma mensagem nova fixa de novo.
 - A seta que aparece ao passar o mouse numa mensagem não cobre mais a citação dentro do balão.
 - A correção automática do teclado do iOS que muda a última palavra no instante do **Enviar** não deixa mais o texto no campo, o que convidava a enviar de novo.
