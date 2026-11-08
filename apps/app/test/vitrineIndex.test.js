@@ -379,3 +379,97 @@ test('the testimonials route reads the Vitrine instance used last', async (t) =>
   const after = vitrineIndex('/index/testimonials/' + fixtures.own)
   t.absent(after.pending.some((p) => p.from === from && p.seq === seq), 'the instance that showed it is the one the route reads')
 })
+
+test('Feira city, author and rating routes validate and hydrate their fixture refs', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex, request } = await load()
+  const respond = (url) => vitrineIndex(url, request)
+  const { hydrate, ratingRefs, ratings } = await import('../src/feiraClient.js')
+  const cityUrl = c.feiraUrl({ uf: 'SP', cityKey: 'sao-paulo' })
+  const body = respond(cityUrl)
+  t.ok(c.validFeira(body))
+  const city = await hydrate(request, body)
+  t.is(city.dropped, 0)
+  t.is(city.unavailable, 0)
+  t.ok(city.items.length > 0)
+  t.absent(city.items.some((i) => i.status === 'vendido' || i.kind === 'procura'))
+  t.ok(city.items.some((i) => i.status === 'reservado'))
+  t.ok(city.items.some((i) => i.page))
+  t.ok(city.items.some((i) => i.kind === 'servico' && i.unit === 'hora'))
+  const author = respond(c.feiraAuthorUrl(f.own))
+  t.ok(c.validFeira(author, { author: f.own }))
+  const own = await hydrate(request, author)
+  t.ok(own.items.some((i) => i.status === 'vendido'))
+  t.ok(own.items.some((i) => i.kind === 'procura'))
+  const wanted = respond(c.feiraUrl({ uf: 'SP', cityKey: 'sao-paulo', kind: 'procura' }))
+  t.is(wanted.items.length, 1)
+  const filtered = respond(c.feiraUrl({ uf: 'SP', cityKey: 'sao-paulo', kind: 'produto', cat: 'esporte', tokens: 'azul+revisada' }))
+  t.alike(filtered.items.map((i) => i.ref), [`${f.own}:40`])
+  t.alike(respond(c.feiraUrl({ uf: 'RJ', cityKey: 'rio-de-janeiro' })).items, [])
+  const rateBody = respond(c.feiraRatingsUrl(f.own))
+  t.ok(c.validFeira(rateBody, { ratings: true }))
+  t.alike(rateBody.items.map((i) => i.ref).sort(), f.rates.map(refOf).sort())
+  for (const item of rateBody.items) t.alike(Object.keys(item), ['ref'])
+  const refs = await ratingRefs(f.own, null, { fetchFeiraRatings: async () => ({ ok: true, value: rateBody }) })
+  const verified = await ratings(request, { author: f.own, seq: 40, refs: refs.refs })
+  t.is(verified.items.length, 1)
+  body.items[0].status = 'vendido'
+  t.absent(respond(cityUrl).items.some((i) => i.status === 'vendido'), 'responses cannot mutate the instance')
+})
+
+test('Feira cursors are exclusive across authors and live edits and statuses refresh index hints', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex, request } = await load()
+  const sample = f.listings.find((e) => e.author === f.own && e.seq === 40).record
+  const { type, at, ...fields } = sample
+  for (let i = 0; i < 27; i++) await request('listing.create', fields)
+  const query = { uf: 'SP', cityKey: 'sao-paulo' }
+  const first = vitrineIndex(c.feiraUrl(query), request)
+  t.is(first.items.length, 30)
+  t.ok(first.next)
+  t.ok(c.validFeira(first))
+  const second = vitrineIndex(c.feiraUrl({ ...query, cursor: first.next }), request)
+  t.is(second.items.length, 1)
+  t.is(second.next, null)
+  t.ok(c.validFeira(second))
+  t.is(new Set([...first.items, ...second.items].map((i) => i.ref)).size, 31)
+  const searched = vitrineIndex(c.feiraUrl({ ...query, tokens: 'bicicleta' }), request)
+  t.ok(c.validFeira(searched))
+  const cursor = `${Date.parse(sample.at)}.${f.own}.40`
+  t.ok(c.validFeira(vitrineIndex(c.feiraUrl({ ...query, tokens: 'bicicleta', cursor }), request)))
+  t.ok(c.validFeira(vitrineIndex(c.feiraAuthorUrl(f.own, cursor), request), { author: f.own }))
+  const rating = f.rates[1]
+  const rateCursor = `${Date.parse(rating.record.at)}.${rating.author}.${rating.seq}`
+  const ratings = vitrineIndex(c.feiraRatingsUrl(f.own, rateCursor), request)
+  t.is(ratings.items.length, 1)
+  t.ok(c.validFeira(ratings, { ratings: true }))
+  const to = `${f.own}:40`
+  const { kind, ...snapshot } = fields
+  const edited = await request('listing.edit', { to, expectedRevision: 44, ...snapshot, title: 'Bicicleta amarela' })
+  const status = await request('listing.status', { to, status: 'reservado' })
+  const refreshed = vitrineIndex(c.feiraUrl({ ...query, tokens: 'amarela' }), request)
+  t.alike(refreshed.items, [{ ref: to, editSeq: edited.seq, status: 'reservado', statusSeq: status.seq }])
+})
+
+test('Feira probe sees the offline demo index as enabled and malformed routes refuse', async (t) => {
+  const { fixtures: f, vitrineIndex, request } = await load()
+  const { search, byAuthor } = await import('../src/feiraClient.js')
+  const { createFeiraProbe } = await import('../src/feiraScreen.js')
+  const probe = createFeiraProbe((request, author) => byAuthor(request, author, null, {
+    fetchFeiraAuthor: async () => ({ ok: true, value: vitrineIndex('/index/feira/autor/' + author, request) })
+  }))
+  t.alike(await probe(request, f.own), { enabled: true })
+  const result = await search(request, { uf: 'SP', cityKey: 'sao-paulo' }, {
+    fetchFeira: async () => ({ ok: true, value: vitrineIndex('/index/feira/sp/sao-paulo/todos/todas', request) })
+  })
+  t.is(result.ok, true)
+  t.absent(result.off)
+  for (const path of [
+    '/index/feira',
+    '/index/feira/sp',
+    '/index/feira/xx/sao-paulo/todos/todas',
+    '/index/feira/sp/sao-paulo/todos/inexistente',
+    '/index/feira/sp/sao-paulo/todos/todas/a',
+    '/index/feira/sp/sao-paulo/todos/todas/a/b/c',
+    '/index/feira/autor/nope',
+    '/index/feira/avaliacoes/' + f.own + '/invalid'
+  ]) t.exception(() => vitrineIndex(path, request), /not-found/)
+})

@@ -99,6 +99,14 @@ const resultKeys = {
   'node.info': ['publicKey', 'memberCert', 'memberCertDate', 'ageVerifiedDate', 'ageSince', 'ageSinceUntil', 'followCount', 'sync', 'publicDht', 'groups'],
   'identity.status': ['exists', 'publicKey', 'legacy', 'unlocked', 'synced', 'resumed', 'passkeyKnown', 'credentialId', 'rpId', 'signedOut'],
   'dm.list': ['conversations', 'next', 'requests', 'inboxUnread'],
+  'listing.create': ['seq', 'ref'],
+  'listing.edit': ['seq', 'ref'],
+  'listing.status': ['seq', 'ref'],
+  'listing.delete': ['seq', 'ref', 'changed', 'deleted'],
+  'listing.consent': ['consent'],
+  'listing.rate': ['seq', 'ref'],
+  'listing.mine': ['items', 'next'],
+  'listing.ratings': ['items', 'dropped', 'incomplete'],
   'dm.thread': ['messages', 'next', 'folder', 'blocked'],
   'dm.seen': ['ok'],
   'dm.send': ['id', 'at'],
@@ -214,7 +222,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
     t.is(typeof row.unread, 'boolean')
   }
   const thread = await answer(t, request, 'dm.thread', { peer })
-  for (const row of thread.messages) keys(t, row, ['id', 'from', 'text', 'replyTo', 'at', 'mine', 'media'])
+  for (const row of thread.messages) keys(t, row, ['id', 'from', 'text', 'replyTo', 'at', 'mine', 'media', ...(row.card ? ['card'] : [])])
   t.alike(await answer(t, request, 'dm.seen', { peer }), { ok: true })
   const sent = await answer(t, request, 'dm.send', { to: peer, text: 'Combinado!' })
   t.ok(/^[0-9a-f]{32}$/.test(sent.id))
@@ -268,7 +276,7 @@ test('DM pagination is exclusive and lists preserve folder and global dots', asy
   const { fixtures: f, request, createVitrineRequest } = await load()
   const peer = f.conversations[0].peer
   const first = await answer(t, request, 'dm.thread', { peer, limit: 2 })
-  const second = await answer(t, request, 'dm.thread', { peer, limit: 2, before: first.next })
+  const second = await answer(t, request, 'dm.thread', { peer, before: first.next })
   t.alike([...second.messages, ...first.messages], f.conversations[0].messages)
   t.is(second.next, null)
   t.alike(await answer(t, request, 'dm.thread', { peer, limit: 2, before: 'f'.repeat(32) }), first, 'unknown cursor returns the newest page')
@@ -513,13 +521,13 @@ test('unknown methods and bad params refuse before any local write', async (t) =
 test('vitrine sources stay pure and omit forbidden status words', (t) => {
   const forbidden = new RegExp('(?<!\\p{L})(' + ['li' + 'da', 'entre' + 'gue', 'digi' + 'tando'].join('|') + ')(?!\\p{L})', 'iu')
   const expectedImports = {
-    'fixtures.js': ["import { pictures } from './pictures.js'", "import { sha256 } from '@noble/hashes/sha2.js'"],
+    'fixtures.js': ["import { pictures } from './pictures.js'", "import { sha256 } from '@noble/hashes/sha2.js'", "import rpc from '@varanda/rpc'", "import { ed25519 } from '@noble/curves/ed25519.js'"],
     'publicMedia.js': ["import { fixtures, postPictureBytes } from './fixtures.js'"],
     'pictures.js': [],
     'media.js': ["import { pictures } from './pictures.js'", "import { PICTURE_BASE } from './fixtures.js'"],
-    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { largeFeed } from './large.js'", "import { sealedTestimonial, testimonialHash } from './fixtures.js'", "import { testimonialPointers, useTestimonialSource } from './indexResponder.js'"],
+    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'", "import { largeFeed } from './large.js'", "import { testimonialPointers, useTestimonialSource } from './indexResponder.js'"],
     'large.js': [],
-    'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { fixtures, testimonialHash } from './fixtures.js'"]
+    'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { fixtures, testimonialHash } from './fixtures.js'", "import { createVitrineRequest, vitrineFeiraState } from './request.js'"]
   }
   for (const file of Object.keys(expectedImports)) {
     const source = readFileSync(join(__dirname, '../src/vitrine', file), 'utf8')
@@ -627,6 +635,14 @@ function samples (f) {
     'community.join': { community },
     'community.leave': { community },
     'community.removeGroup': { community, group },
+    'listing.create': { kind: 'produto', title: 'Bicicleta aro 26', text: 'Pouco uso.', price: 25000, unit: null, cat: 'esporte', place: { uf: 'SP', city: 'São Paulo', bairro: null } },
+    'listing.edit': { to: `${f.own}:40`, expectedRevision: 44, title: 'Bicicleta aro 26', text: 'Pouco uso.', price: 24000, unit: null, cat: 'esporte', place: { uf: 'SP', city: 'São Paulo', bairro: null }, media: null },
+    'listing.status': { to: `${f.own}:40`, status: 'reservado' },
+    'listing.delete': { to: `${f.own}:40` },
+    'listing.mine': {},
+    'listing.ratings': { author: member, seq: 3, refs: [{ rater: f.own, seq: 4 }] },
+    'listing.consent': { to: `${f.own}:40`, rater: f.members[1].author, offer: f.conversations[0].messages.find((m) => m.card?.title === 'Proposta').id },
+    'listing.rate': { to: `${f.members[1].author}:40`, offer: f.conversations[0].messages.at(-1).replyTo, consent: f.conversations[0].messages.at(-1).card.url.split('&aceite=')[1], stars: 5, text: 'Tudo certo.' },
     'sync.start': { once: true },
     'sync.stop': {},
     'sync.status': {}
@@ -686,8 +702,13 @@ test('diary writes, tombstones, reactions, follows and profile changes are visib
   const call = (method, params) => answer(t, request, method, params)
   const log = await call('log.read')
   t.is(log.key, f.own)
-  const olderLog = await call('log.read', { before: log.entries[0].seq })
-  t.alike([...olderLog.entries, ...log.entries].filter((e) => e.record.type === 'post').map((e) => e.record.text), f.feed.filter((p) => p.author === f.own).map((p) => p.text))
+  // The fixture diary spans several pages: read back to its first block.
+  const everyEntry = [...log.entries]
+  for (let page = log; page.entriesTruncated > 0;) {
+    page = await call('log.read', { before: page.entries[0].seq })
+    everyEntry.unshift(...page.entries)
+  }
+  t.alike(everyEntry.filter((e) => e.record.type === 'post').map((e) => e.record.text), f.feed.filter((p) => p.author === f.own).map((p) => p.text))
   const original = clone(f)
   const uploaded = await call('media.uploadFile', samples(f)['media.uploadFile'])
   const uploadedNext = await call('media.uploadFile', samples(f)['media.uploadFile'])
@@ -746,7 +767,7 @@ test('diary writes, tombstones, reactions, follows and profile changes are visib
   t.ok((await call('feed.read')).items.some((p) => p.author === key))
   await call('follow.remove', { key })
   t.absent((await call('feed.read')).items.some((p) => p.author === key))
-  t.alike((await call('follow.list', { offset: 1, limit: 2 })).follows, f.follows.slice(1, 3))
+  t.alike((await call('follow.list', { offset: 1, limit: 2 })).follows, [...f.follows].sort().slice(1, 3))
   t.alike(await answer(t, createVitrineRequest(f), 'log.read'), log, 'another request has the original diary')
   t.alike(f, original)
 })

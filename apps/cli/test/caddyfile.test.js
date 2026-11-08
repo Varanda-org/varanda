@@ -90,8 +90,8 @@ test('Caddyfile: cache headers', (t) => {
   t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel is no-cache')
   const mutavel = block('@mutavel {').filter((l) => /^\s*not path\s/.test(l))
   t.is(mutavel.length, 1, 'one not path line in @mutavel')
-  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/index/*', '/media/*', '/seeder', '/varanda.json'],
-    '@mutavel excludes exactly /varanda.json, /.well-known/*, /seeder, /account/*, /media/*, /blob/* and /index/*')
+  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/f/*', '/index/*', '/media/*', '/seeder', '/varanda.json'],
+    '@mutavel excludes exactly /varanda.json, /.well-known/*, /seeder, /account/*, /media/*, /blob/*, /index/* and /f/*')
 
   // Every 404 is no-store: a missing file with an extension, or a missing
   // index.html behind an app route.
@@ -110,8 +110,8 @@ test('Caddyfile: cache headers', (t) => {
     '@ausenteApp leaves /index/* alone')
   const appPaths = app.filter((l) => /^\s*not path\s/.test(l) && !l.includes('*.*'))
   t.is(appPaths.length, 1, 'one not path list of routes in @ausenteApp')
-  t.alike(appPaths[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/index/*', '/media/*', '/seeder'],
-    '@ausenteApp excludes exactly /.well-known/*, /seeder, /account/*, /media/*, /blob/* and /index/*')
+  t.alike(appPaths[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/f/*', '/index/*', '/media/*', '/seeder'],
+    '@ausenteApp excludes exactly /.well-known/*, /seeder, /account/*, /media/*, /blob/*, /index/* and /f/*')
   t.ok(app.some((l) => l.trim() === 'not file /index.html {'), '@ausenteApp is a missing index.html')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteArquivo Cache-Control "no-store"'), 'missing file -> no-store')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteApp Cache-Control "no-store"'), 'missing index.html -> no-store')
@@ -202,21 +202,29 @@ test('Caddyfile: /index/* goes to the seeder, before the SPA handle', (t) => {
 // Caddy's memory: never logged, never sent upstream.
 test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (t) => {
   t.ok(lines.some((l) => l.trim() === 'order rate_limit before reverse_proxy'), 'order rate_limit before reverse_proxy')
-  t.is(count('rate_limit {'), 3, 'exactly three rate_limit blocks')
+  t.is(count('rate_limit {'), 8, 'exactly eight rate_limit blocks (each Feira handle has two)')
   const limits = {
-    'handle /index/* {': ['index', '20'],
-    'handle /media/* {': ['media', '120'],
-    'handle /blob/* {': ['blob', '300']
+    'handle /index/* {': ['index', '20', '10s'],
+    'handle /media/* {': ['media', '120', '10s'],
+    'handle /blob/* {': ['blob', '300', '10s'],
+    'handle /f/* {': ['feira', '30', '10s'],
+    'handle /account/feira/* {': ['feira-entrada', '5', '60s']
   }
-  for (const [head, [zone, events]] of Object.entries(limits)) {
+  {
+    const text = block('handle /account/feira/* {').map((l) => l.trim())
+    t.ok(text.includes('zone feira-entrada-total {') && text.includes('key static') && text.includes('events 60'), 'the Feira entry also has a global ceiling')
+  }
+  for (const [head, [zone, events, window]] of Object.entries(limits)) {
     const b = block(head)
     const text = b.map((l) => l.trim())
     t.ok(text.includes('rate_limit {'), head + ' has rate_limit')
     t.ok(text.includes('zone ' + zone + ' {'), head + ' zone ' + zone)
     t.ok(text.includes('key {remote_host}'), head + ' keyed exactly on {remote_host}')
     t.ok(text.includes('events ' + events), head + ' events ' + events)
-    t.ok(text.includes('window 10s'), head + ' window 10s')
-    t.absent(text.some((l) => /^key\s/.test(l) && l !== 'key {remote_host}'), head + ' has no other key')
+    t.ok(text.includes('window ' + window), head + ' window ' + window)
+    // The Feira entry adds one global zone (key static) for IPv6 rotation.
+    const allowed = head === 'handle /account/feira/* {' ? ['key {remote_host}', 'key static'] : ['key {remote_host}']
+    t.absent(text.some((l) => /^key\s/.test(l) && !allowed.includes(l)), head + ' has no other key')
     const rl = text.indexOf('rate_limit {')
     const rp = text.findIndex((l) => l.startsWith('reverse_proxy '))
     t.ok(rl !== -1 && rp > rl, head + ' rate_limit comes before reverse_proxy')
@@ -225,9 +233,96 @@ test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (
   t.absent(lines.some((l) => /^\s*log_key\b/.test(l)), 'log_key is never enabled')
 })
 
+// The Feira entry needs no account, so its per-client limit sits at the edge,
+// before the generic /account/* handle, with the same upstream.
+test('Caddyfile: /account/feira/* has its own handle before /account/*, to the account service', (t) => {
+  t.is(count('handle /account/feira/* {'), 1, 'exactly one /account/feira/* handle')
+  const feira = lines.findIndex((l) => l.trim() === 'handle /account/feira/* {')
+  const account = lines.findIndex((l) => l.trim() === 'handle /account/* {')
+  t.ok(feira !== -1 && account > feira, 'before the generic /account/* handle')
+  const text = block('handle /account/feira/* {').map((l) => l.trim())
+  t.ok(text.includes('reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {'), 'to the account service')
+  t.ok(text.includes('header_up Host {upstream_hostport}'), 'Host of the upstream')
+})
+
+// The paid Feira age session (POST /account/feira/idade) has its own, stricter
+// zones: the account service never reads an address, so the per-address limit
+// lives here; the rest of /account/feira/* keeps feira-entrada.
+test('Caddyfile: /account/feira/idade has its own per-address zone and global ceiling', (t) => {
+  const outer = block('handle /account/feira/* {').map((l) => l.trim())
+  // Only a JSON POST reaches the age zones: a cross-site page cannot send that
+  // type without a CORS preflight, so it cannot spend a victim's allowance.
+  t.alike(block('@feiraIdade {').map((l) => l.trim()), ['@feiraIdade {', 'path /account/feira/idade', 'method POST', 'header Content-Type application/json*', '}'], 'matcher: the path, POST and a JSON Content-Type')
+  t.alike(block('@feiraIdadeOutro {').map((l) => l.trim()), ['@feiraIdadeOutro {', 'path /account/feira/idade', 'not {', 'method POST', 'header Content-Type application/json*', '}', '}'], 'every other request to the path')
+  const outro = block('handle @feiraIdadeOutro {').map((l) => l.trim())
+  t.alike(outro, ['handle @feiraIdadeOutro {', 'respond 405', '}'], 'answered at the edge: no rate_limit, no reverse_proxy')
+  t.is(count('handle @feiraIdadeOutro {'), 1)
+  t.ok(outer.indexOf('handle @feiraIdadeOutro {') < outer.indexOf('handle @feiraEntrada {'), 'before the entry handle')
+  t.ok(outer.includes('@feiraEntrada not path /account/feira/idade'), 'every other Feira path')
+  const idade = block('handle @feiraIdade {').map((l) => l.trim())
+  const entrada = block('handle @feiraEntrada {').map((l) => l.trim())
+  t.is(count('handle @feiraIdade {'), 1, 'one Feira age handle')
+  t.is(count('handle @feiraEntrada {'), 1, 'one Feira entry handle')
+  t.ok(idade.length > 0 && entrada.length > 0, 'both inside /account/feira/*')
+  const zone = (b, name) => {
+    const i = b.indexOf('zone ' + name + ' {')
+    return i === -1 ? [] : b.slice(i, b.indexOf('}', i) + 1)
+  }
+  t.alike(zone(idade, 'feira-idade'), ['zone feira-idade {', 'key {remote_host}', 'events 2', 'window 1h', '}'], 'feira-idade: 2 per hour per address')
+  t.alike(zone(idade, 'feira-idade-total'), ['zone feira-idade-total {', 'key static', 'events 50', 'window 1h', '}'], 'feira-idade-total: 50 per hour in all')
+  t.absent(idade.includes('zone feira-entrada {'), 'the age route is not in the entry zone')
+  t.alike(zone(entrada, 'feira-entrada'), ['zone feira-entrada {', 'key {remote_host}', 'events 5', 'window 60s', '}'])
+  t.alike(zone(entrada, 'feira-entrada-total'), ['zone feira-entrada-total {', 'key static', 'events 60', 'window 60s', '}'])
+  t.absent(entrada.includes('zone feira-idade {'), 'the entry is not in the age zone')
+  // Each ceiling is its own rate_limit directive, in order, inside a route:
+  // the plugin reserves every zone of one directive without rollback, so a
+  // request refused per address must never reach the global zone.
+  for (const [name, b, total] of [['feira-idade', idade, 'feira-idade-total'], ['feira-entrada', entrada, 'feira-entrada-total']]) {
+    t.is(b[1], 'route {', name + ': the handle holds a route block')
+    const route = b.slice(1)
+    const directives = route.map((l, i) => [l, i]).filter(([l]) => l === 'rate_limit {').map(([, i]) => i)
+    t.is(directives.length, 2, name + ': two rate_limit directives')
+    const addr = route.indexOf('zone ' + name + ' {')
+    const glob = route.indexOf('zone ' + total + ' {')
+    const rp = route.indexOf('reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {')
+    t.ok(directives[0] < addr && addr < directives[1], name + ': the per-address zone alone in the first directive')
+    t.ok(directives[1] < glob && glob < rp, name + ': the global zone alone in the second, before the proxy')
+    t.ok(b.includes('header_up Host {upstream_hostport}'), name + ': Host of the upstream')
+    t.ok(b.includes('header_up -X-Forwarded-For'), name + ': X-Forwarded-For stripped')
+    t.ok(b.includes('header_up -X-Real-Ip'), name + ': X-Real-Ip stripped')
+  }
+  for (const z of ['feira-idade', 'feira-idade-total']) t.is(code.split('zone ' + z + ' {').length - 1, 1, z + ' only in the POST route')
+  t.ok(idade.includes('zone feira-idade {') && idade.includes('zone feira-idade-total {'), 'both age zones in the POST handle')
+  t.is(outer.filter((l) => l.startsWith('reverse_proxy ')).length, 2, 'no proxy outside the two inner handles')
+})
+
 // No access log. The only log block is the global one that EXCLUDES the
 // rate_limit logger (it prints remote_ip on every 429); it must not set an
 // output or any other option, and no site block has a log directive.
+// The Feira public pages and robots.txt, both before the SPA catch-all.
+test('Caddyfile: /f/* goes to the seeder and /robots.txt allows only /f/, before the SPA handle', (t) => {
+  const feira = block('handle /f/* {').map((l) => l.trim())
+  t.ok(feira.length > 0, 'handle /f/*')
+  t.is(count('handle /f/* {'), 1, 'exactly one /f/* handle')
+  t.ok(feira.includes('reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {'), 'proxied to the seeder WebSocket port')
+  t.ok(feira.includes('header_up Host {upstream_hostport}'), 'Host rewritten to the upstream')
+  t.ok(feira.includes('header_up -X-Forwarded-For') && feira.includes('header_up -X-Real-Ip'), 'client address headers stripped')
+  t.absent(feira.some((l) => /Cache-Control/.test(l)), 'no Cache-Control set by Caddy for /f/*')
+  const spa = lines.findIndex((l) => l === '\thandle {')
+  const robots = block('handle /robots.txt {')
+  t.ok(robots.length > 0, 'handle /robots.txt')
+  t.is(count('handle /robots.txt {'), 1, 'exactly one /robots.txt handle')
+  const start = lines.findIndex((l) => l.trim() === 'handle /f/* {')
+  const rstart = lines.findIndex((l) => l.trim() === 'handle /robots.txt {')
+  t.ok(start !== -1 && spa > start && rstart !== -1 && spa > rstart, 'both come before the catch-all handle')
+  t.alike(robots.map((l) => l.trim()).slice(robots.findIndex((l) => l.trim() === 'body <<ROBOTS') + 1, -2),
+    ['User-agent: *', 'Allow: /f/', 'Disallow: /', 'Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml', 'ROBOTS'], 'robots body'
+  )
+  t.ok(robots.some((l) => l.trim() === 'header Content-Type "text/plain; charset=utf-8"'), 'robots is text/plain')
+  t.absent(lines.some((l) => /^\s*handle\s+\/moderation-listing/.test(l)), 'no handle /moderation-listing')
+  t.is(count('moderation-listing'), 0, 'moderation-listing never mentioned outside comments')
+})
+
 test('Caddyfile: no access log, and the rate_limit logger (client IP) is excluded', (t) => {
   const logLines = lines.map((l, i) => [l, i]).filter(([l]) => /^\s*log(\s|$)/.test(l))
   t.is(logLines.length, 1, 'exactly one log block in the file')

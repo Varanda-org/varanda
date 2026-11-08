@@ -15,6 +15,7 @@ const {
   PREFIX_V3,
   PREFIX_DM,
   PREFIX_DM_V2,
+  PREFIX_LISTING,
   REASONS,
   REASON_LABELS,
   TEXT_MAX,
@@ -29,7 +30,10 @@ const {
   verifyReport,
   dmReportPayload,
   signDmReport,
-  verifyDmReport
+  verifyDmReport,
+  checkListingFields,
+  signListingReport,
+  verifyListingReport
 } = require('../lib/report')
 const { MAX_TEXT, MAX_LOG_BLOCKS } = require('../lib/records')
 const { signAccountLink } = require('../lib/account-link')
@@ -557,6 +561,89 @@ test('group report v3 (anexo): exact bytes, v2 still verifies, never crosses', (
 // a pure-JS sodium. So the module's OWN requires are pinned, and no network
 // module, 'node:fs' or '#fs' is required by anything it pulls in (the rule of
 // test/browser-safe.test.js).
+test('golden vector: a listing report, exact bytes and signature', (t) => {
+  t.is(PREFIX_LISTING, 'varanda-listing-report-v1')
+  const expected = b4a.from([
+    'varanda-listing-report-v1',
+    NONCE,
+    MEMBER,
+    ASSOCIATION,
+    TARGET,
+    '7',
+    'assedio',
+    digest('ofensivo'),
+    digest('linha 1\nlinha 2')
+  ].join('\n'), 'utf8')
+  const signature = signListingReport(POST, MEMBER_KP)
+  t.is(signature, '843ad104a1786ad32b2ae6f229e84a6f97da8b0f324f819a5dc65a27170e2bd8aba9bc936861a07a50fe512c70365a27d0cc43a46623697f604398733d2be70c')
+  t.is(signature, b4a.toString(crypto.sign(expected, MEMBER_KP.secretKey), 'hex'), 'the v1 lines under the listing prefix')
+  t.alike(verifyListingReport(POST, signature), { ok: true })
+  t.is(checkListingFields(POST), null)
+
+  const kp = crypto.keyPair()
+  const fields = { ...POST, member: b4a.toString(kp.publicKey, 'hex') }
+  t.alike(verifyListingReport(fields, signListingReport(fields, kp)), { ok: true }, 'a generated key')
+})
+
+test('listing and v1 report signatures never cross', (t) => {
+  const v1 = signReport(POST, MEMBER_KP)
+  const listing = signListingReport(POST, MEMBER_KP)
+  t.not(v1, listing)
+  t.alike(verifyListingReport(POST, v1), { ok: false, reason: 'bad-signature' })
+  t.alike(verifyReport(POST, listing), { ok: false, reason: 'bad-signature' })
+  t.alike(verifyDmReport(DM, listing), { ok: false, reason: 'bad-signature' })
+})
+
+test('listing report: every field is bound by the signature', (t) => {
+  const signature = signListingReport(POST, MEMBER_KP)
+  const changes = { nonce: 'S'.repeat(43), association: 'ce'.repeat(32), target: 'ee'.repeat(32), seq: 8, reason: 'spam', text: 'outro texto', quote: 'linha 1\nlinha 3' }
+  for (const [key, value] of Object.entries(changes)) {
+    t.alike(verifyListingReport({ ...POST, [key]: value }, signature), { ok: false, reason: 'bad-signature' }, key)
+  }
+  const other = b4a.toString(crypto.keyPair(b4a.alloc(32, 0x22)).publicKey, 'hex')
+  t.alike(verifyListingReport({ ...POST, member: other }, signature), { ok: false, reason: 'bad-signature' }, 'member')
+})
+
+test('listing report shape: sign throws TypeError, verify answers malformed', (t) => {
+  const signature = signListingReport(POST, MEMBER_KP)
+  const bad = [
+    [{ ...POST, seq: null }, 'seq'],
+    [{ ...POST, seq: 0 }, 'seq'],
+    [{ ...POST, seq: SEQ_MAX + 1 }, 'seq'],
+    [{ ...POST, seq: '7' }, 'seq'],
+    [{ ...POST, writer: WRITER }, 'writer'],
+    [{ ...POST, writer: null }, 'writer'],
+    [{ ...POST, group: GROUP }, 'group'],
+    [{ ...POST, anexo: 'ab'.repeat(32) }, 'anexo'],
+    [{ ...POST, reason: 'fraude' }, 'reason'],
+    [{ ...POST, reason: 'toString' }, 'reason'],
+    [{ ...POST, target: MEMBER }, 'target'],
+    [{ ...POST, nonce: 'short' }, 'nonce'],
+    [{ ...POST, text: 'a\nb' }, 'text'],
+    [{ ...POST, text: 'x'.repeat(TEXT_MAX + 1) }, 'text'],
+    [{ ...POST, text: 'a' + RLO }, 'text'],
+    [{ ...POST, quote: 'a' + LRI }, 'quote'],
+    [{ ...POST, quote: '\ud800' }, 'quote'],
+    [{ ...POST, quote: 'x'.repeat(QUOTE_MAX + 1) }, 'quote']
+  ]
+  for (const [fields, reason] of bad) {
+    t.is(checkListingFields(fields), reason, reason)
+    t.exception.all(() => signListingReport(fields, MEMBER_KP), TypeError)
+    t.alike(verifyListingReport(fields, signature), { ok: false, reason: 'malformed' })
+  }
+  const { quote, ...noQuote } = POST
+  t.is(checkListingFields(noQuote), 'fields')
+  t.is(checkListingFields(null), 'fields')
+  t.is(checkListingFields(Object.create({ ...POST })), 'fields', 'inherited fields')
+  const getter = { ...POST }
+  Object.defineProperty(getter, 'seq', { get: () => 7, enumerable: true })
+  t.is(checkListingFields(getter), 'fields', 'a getter never runs')
+  t.alike(verifyListingReport(POST, 'zz'), { ok: false, reason: 'malformed' })
+  t.alike(verifyListingReport(undefined, signature), { ok: false, reason: 'malformed' })
+  t.exception.all(() => signListingReport(POST, null), TypeError)
+  t.is(checkListingFields({ ...POST, quote: '' }), null, 'an empty quote, as v1')
+})
+
 test('the module is pure: no fs, no network, no cert.js', (t) => {
   const code = [
     "const Module = require('node:module')",

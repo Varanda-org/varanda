@@ -570,3 +570,16 @@ test('used may exceed a lower opened without a negative remaining', async (t) =>
   t.is(lowWeek.summary(m).remaining, 0)
   await rejects(t, lowWeek.issue(m), 'limite-convites', 'perWeek wins first')
 })
+
+test('inviterOf names the owner of a live unused code, null otherwise', async (t) => {
+  const dir = tmpDir(t)
+  const store = openInvitesStore(dir, { perWeek: 3 })
+  const owner = 'a'.repeat(64)
+  const { code } = await store.issue(owner)
+  const id = inviteId(code)
+  t.is(store.inviterOf(id), owner)
+  t.is(store.inviterOf('b'.repeat(64)), null, 'unknown id')
+  t.exception.all(() => store.inviterOf('not hex'), TypeError, 'malformed id throws like check')
+  await store.consume(id)
+  t.is(store.inviterOf(id), null, 'a used code names nobody')
+})

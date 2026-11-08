@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1 }
+const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -1529,4 +1529,141 @@ test('fetchTestimonials: request options, contract and transport', async (t) => 
   const limited = await fetchTestimonials(A, { fetch: async () => response(text, { status: 429 }) })
   t.is(limited.reason, 'rate-limited')
   t.ok(Number.isFinite(limited.retryAfterMs), 'with the cooldown left')
+})
+
+// --- Feira ---
+
+function feiraBody (over = {}) {
+  return {
+    items: [
+      { ref: A + ':5', status: 'disponivel', statusSeq: null, editSeq: 8 },
+      { ref: B + ':2', status: 'reservado', statusSeq: 4, editSeq: null }
+    ],
+    next: CURSOR,
+    authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: null, usernameSeq: 3, page: true, closed: false, moved: false } },
+    indexing: false,
+    complete: true,
+    ...over
+  }
+}
+
+test('feiraUrl: the search route grammar, nothing coerced', async (t) => {
+  const { feiraUrl } = await load()
+  t.is(feiraUrl({ uf: 'SP', cityKey: 'sao-paulo' }), '/index/feira/sp/sao-paulo/todos/todas', 'uf sent lower case')
+  t.is(feiraUrl({ uf: 'RJ', cityKey: 'rio-de-janeiro', kind: 'servico', cat: 'reparos' }), '/index/feira/rj/rio-de-janeiro/servico/reparos')
+  t.is(feiraUrl({ uf: 'MG', cityKey: 'bh', kind: 'procura', cat: 'todas', tokens: 'bicicleta+aro' }), '/index/feira/mg/bh/procura/todas/bicicleta+aro', 'literal plus')
+  t.is(feiraUrl({ uf: 'MG', cityKey: 'bh', tokens: 'sofa', cursor: CURSOR }), '/index/feira/mg/bh/todos/todas/sofa/' + CURSOR)
+  t.is(feiraUrl({ uf: 'MG', cityKey: 'bh', cursor: CURSOR }), '/index/feira/mg/bh/todos/todas/' + CURSOR)
+  const bad = [
+    {},
+    { uf: 'sp', cityKey: 'bh' },
+    { uf: 'XX', cityKey: 'bh' },
+    { uf: 'SP', cityKey: 'b' },
+    { uf: 'SP', cityKey: 'x'.repeat(49) },
+    { uf: 'SP', cityKey: 'São Paulo' },
+    { uf: 'SP', cityKey: 'sao/paulo' },
+    { uf: 'SP', cityKey: '-bh' },
+    { uf: 'SP', cityKey: 'bh', kind: 'Produto' },
+    { uf: 'SP', cityKey: 'bh', kind: 'todas' },
+    { uf: 'SP', cityKey: 'bh', cat: 'todos' },
+    { uf: 'SP', cityKey: 'bh', cat: 'carros' },
+    { uf: 'SP', cityKey: 'bh', tokens: 'Sofá' },
+    { uf: 'SP', cityKey: 'bh', tokens: 'a' },
+    { uf: 'SP', cityKey: 'bh', tokens: 'ab%2Bcd' },
+    { uf: 'SP', cityKey: 'bh', cursor: 'x' },
+    { uf: 'SP', cityKey: 'bh', cursor: '1.' + A + '.0' }
+  ]
+  for (const q of bad) t.is(feiraUrl(q), null, JSON.stringify(q))
+  t.is(feiraUrl(), null)
+})
+
+test('feiraAuthorUrl and feiraRatingsUrl: hex64 lowercased, optional cursor', async (t) => {
+  const { feiraAuthorUrl, feiraRatingsUrl } = await load()
+  t.is(feiraAuthorUrl(A), '/index/feira/autor/' + A)
+  t.is(feiraAuthorUrl(A.toUpperCase(), CURSOR), '/index/feira/autor/' + A + '/' + CURSOR)
+  t.is(feiraRatingsUrl(A), '/index/feira/avaliacoes/' + A)
+  t.is(feiraRatingsUrl(A, CURSOR), '/index/feira/avaliacoes/' + A + '/' + CURSOR)
+  for (const fn of [feiraAuthorUrl, feiraRatingsUrl]) {
+    t.is(fn('ab'), null)
+    t.is(fn(A + ':1'), null)
+    t.is(fn(null), null)
+    t.is(fn(A, 'bad'), null)
+  }
+})
+
+test('validFeira: exact keys, hints after the root, one author hint per item author', async (t) => {
+  const { validFeira } = await load()
+  t.alike(validFeira(feiraBody()), feiraBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: null, usernameSeq: 3, page: true, closed: false, moved: false } } }))
+  t.alike(validFeira(feiraBody({ items: [], next: CURSOR, authors: {} })).items, [], 'an empty page with next')
+  t.alike(validFeira(feiraBody({ items: [{ ref: A + ':5', status: null, statusSeq: null, editSeq: null }], authors: { [A]: { profileSeq: null, usernameSeq: null } } })).items[0].status, null, 'stale on the author route')
+  const item = feiraBody().items[0]
+  const bad = [
+    feiraBody({ extra: 1 }),
+    feiraBody({ items: [{ ...item, extra: 1 }] }),
+    feiraBody({ items: [{ ref: item.ref }] }),
+    feiraBody({ items: [item, item] }),
+    feiraBody({ items: [{ ...item, status: 'perdido' }] }),
+    feiraBody({ items: [{ ...item, status: null, statusSeq: 9 }], authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
+    feiraBody({ items: [{ ...item, editSeq: 5 }], authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
+    feiraBody({ items: [{ ...item, statusSeq: 3 }], authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
+    feiraBody({ items: [{ ...item, editSeq: '8' }], authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
+    feiraBody({ items: Array.from({ length: 31 }, (_, i) => ({ ref: A + ':' + (i + 1), status: 'disponivel', statusSeq: null, editSeq: null })), authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
+    feiraBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null } } }),
+    feiraBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: null, usernameSeq: 3 }, [C]: { profileSeq: 1, usernameSeq: 1 } } }),
+    feiraBody({ authors: { [A]: { profileSeq: 1 }, [B]: { profileSeq: null, usernameSeq: 3 } } }),
+    feiraBody({ authors: { [A]: { profileSeq: 1, usernameSeq: null, page: 'yes' }, [B]: { profileSeq: null, usernameSeq: 3 } } }),
+    feiraBody({ next: 'x' }),
+    feiraBody({ indexing: 1 }),
+    null,
+    []
+  ]
+  for (const body of bad) t.is(validFeira(body), null, JSON.stringify(body).slice(0, 80))
+  t.is(validFeira(feiraBody(), { author: A }), null, 'author route: another author is refused')
+  const ratings = { items: [{ ref: C + ':40' }], next: null, authors: { [C]: { profileSeq: null, usernameSeq: null } }, indexing: false, complete: true }
+  t.alike(validFeira(ratings, { ratings: true }).items, [{ ref: C + ':40' }])
+  t.is(validFeira(ratings), null, 'a rating row is no listing row')
+  t.is(validFeira(feiraBody(), { ratings: true }), null, 'a listing row is no rating row')
+})
+
+test('fetchFeira, fetchFeiraAuthor, fetchFeiraRatings: transport, contract, 404 and the scheduler', async (t) => {
+  const m = await load()
+  const calls = []
+  const fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    if (url.includes('/avaliacoes/')) return response(JSON.stringify({ items: [{ ref: C + ':40' }], next: null, authors: { [C]: { profileSeq: null, usernameSeq: null } }, indexing: false, complete: true }))
+    if (url.includes('/autor/')) return response(JSON.stringify(feiraBody({ items: [feiraBody().items[0]], authors: { [A]: { profileSeq: 1, usernameSeq: null } } })))
+    return response(JSON.stringify(feiraBody()))
+  }
+  const res = await m.fetchFeira({ uf: 'SP', cityKey: 'campinas', kind: 'produto', cat: 'esporte' }, { fetch })
+  t.is(res.ok, true)
+  t.is(res.value.items.length, 2)
+  t.is(calls[0].url, '/index/feira/sp/campinas/produto/esporte')
+  t.is(calls[0].opts.credentials, 'omit')
+  t.is(calls[0].opts.redirect, 'error')
+  t.is((await m.fetchFeiraAuthor(A, null, { fetch })).ok, true)
+  t.is(calls[1].url, '/index/feira/autor/' + A)
+  t.alike((await m.fetchFeiraRatings(A, CURSOR, { fetch })).value.items, [{ ref: C + ':40' }])
+  t.is(calls[2].url, '/index/feira/avaliacoes/' + A + '/' + CURSOR)
+  t.is((await m.fetchFeiraAuthor(B, null, { fetch })).reason, 'malformed', 'a row of another author')
+  let called = false
+  t.alike(await m.fetchFeira({ uf: 'SP', cityKey: 'São Paulo' }, { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
+  t.absent(called, 'no request for bad input')
+  t.is((await m.fetchFeira({ uf: 'SP', cityKey: 'bh' }, { fetch: async () => response('{}', { status: 404 }) })).reason, 'not-found', 'Feira off')
+
+  // Through the shared pacer: a burst of Feira requests stays within 2 in flight.
+  const m2 = await load()
+  let out = 0
+  let maxOut = 0
+  const burst = async () => {
+    out++
+    maxOut = Math.max(maxOut, out)
+    await m2.clock.later(100)
+    out--
+    return response(JSON.stringify(feiraBody()))
+  }
+  const deps = { ...m2.clock.deps, fetch: burst }
+  const all = Array.from({ length: 6 }, () => m2.fetchFeira({ uf: 'SP', cityKey: 'bh' }, deps))
+  const results = await m2.clock.run(Promise.all(all))
+  t.ok(results.every((r) => r.ok), 'all settle ok')
+  t.ok(maxOut <= 2, 'at most 2 in flight: ' + maxOut)
 })

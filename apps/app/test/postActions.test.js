@@ -188,5 +188,6 @@ test('Mensagem em particular sits in the mais sheet only on a hosted node, for s
   t.ok(conversa.includes('String(item.author).toLowerCase() !== ownKey.toLowerCase() && !(authorProfile && authorProfile.page === true)'), 'rowProps: not own, not a page')
   t.ok(conversa.includes('onMessage: messageable ? onMessage : undefined,'), 'rowProps hands the handler only then')
   const rua = read('screens/ARua.js')
-  t.ok(rua.includes("onMessage: typeof h.onMessage === 'function' && own !== null && String(post.author).toLowerCase() !== own && !(prof && prof.page === true)"), 'socialRowProps: not own, not a page')
+  t.ok(rua.includes('message: fnOf(h.onMessage) && own !== null && String(post.author).toLowerCase() !== own && !(prof && prof.page === true)'), 'socialRowProps: not own, not a page')
+  t.ok(rua.includes('onMessage: offers.message ? (author, options) => live.h.onMessage(author, options) : undefined'), 'a cached row reads the newest handler from its live box')
 })

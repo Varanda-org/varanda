@@ -13,6 +13,7 @@ const GLYPHS = {
   pessoa: 'user',
   resposta: 'message-circle',
   conversas: 'message-square',
+  feira: 'shopping-bag',
   lapis: 'edit-2',
   engrenagem: 'settings',
   sinc: 'refresh-cw',

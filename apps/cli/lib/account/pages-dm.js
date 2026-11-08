@@ -48,6 +48,11 @@
 // descriptors, section 13) are kept in the sealed rows and handed to the
 // admin device in dm-thread. The service never fetches a blob.
 //
+// Cards: a member's link card (a listing or an offer, say) is kept as it
+// arrived, its image a DM media item checked like any other, and handed to
+// the owner and admins in dm-thread. The service never fetches the card's
+// URL nor its image; the list preview stays the text.
+//
 // Logs carry { event: 'page-dm', reason } only: never a text, key or peer.
 
 const fs = require('node:fs')
@@ -67,6 +72,7 @@ const { attachDmStamp } = require('@varanda/core/lib/dm-stamp-net')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { seederCertForKey, certForKey, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { decodeBlock, validateRecord, MAX_BLOCK_BYTES } = require('@varanda/core/lib/records')
+const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { isWeakBoxKey } = require('@varanda/core/lib/group')
 const { writeJsonAtomic } = require('@varanda/core/lib/store')
 const { parseSeederWs } = require('./pages-writer')
@@ -134,6 +140,17 @@ function preview (text) {
 // openInner already checked every item of a v2 body; a v1 body or row has none.
 function mediaOf (m) {
   return Array.isArray(m.media) && m.media.length > 0 ? m.media : null
+}
+
+// A stored card is checked again on load, as rows outlive code versions: a
+// bad image drops only the image, any other fault the whole card.
+function cardOf (card) {
+  if (!isPlainObject(card)) return null
+  const c = copyLinkCard(card, (d) => ({ ...d }))
+  if (dm.validDmCard(c)) return c
+  if (c.image === null) return null
+  const bare = { ...c, image: null }
+  return dm.validDmCard(bare) ? bare : null
 }
 
 function emptyState () {
@@ -317,6 +334,9 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
       let mtime = Date.now()
       try { mtime = fs.lstatSync(fileOf(page)).mtimeMs } catch {}
       migrateFiled(s, mtime)
+      for (const m of s.messages) {
+        if (isPlainObject(m) && Object.hasOwn(m, 'card')) m.card = cardOf(m.card)
+      }
     }
     states.set(page, s)
     return s
@@ -929,7 +949,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
       followSet: followKeys(page),
       seen: s.seen,
       ops: s.ops,
-      messages: s.messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : page, text: m.text, replyTo: m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media: mediaOf(m), at: m.at, filedAt: m.filedAt }))
+      messages: s.messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : page, text: m.text, replyTo: m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media: mediaOf(m), card: m.card === undefined ? null : m.card, at: m.at, filedAt: m.filedAt }))
     })
   }
 
@@ -987,7 +1007,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
       const startAt = Math.max(0, end - limit)
       const rows = c.messages.slice(startAt, end)
       return {
-        messages: rows.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media: mediaOf(m), at: m.at, mine: m.mine })),
+        messages: rows.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media: mediaOf(m), card: m.card === undefined || m.card === null ? null : m.card, at: m.at, mine: m.mine })),
         next: startAt > 0 && rows.length > 0 ? rows[0].id : null,
         ...state
       }
@@ -1355,6 +1375,8 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
         const row = { id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, fwd: body.fwd === 1 ? 1 : 0, at: body.at, mine: body.mine, filedAt: nextFiled(s) }
         const media = mediaOf(body)
         if (media !== null) row.media = media
+        // openInner already checked a v2 card; a v1 body has none.
+        else if (isPlainObject(body.card)) row.card = cardOf(body.card)
         s.messages.push(row)
         n++
       }

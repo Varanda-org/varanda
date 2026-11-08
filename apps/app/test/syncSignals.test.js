@@ -18,10 +18,11 @@ test('download hints survive preemption without repeating known growth', async (
   const { EMPTY_SIGNALS, foldSignal, ackFresh, hasFresh, freshKeys } = await load()
   t.ok(Object.isFrozen(EMPTY_SIGNALS))
   let state = freeze(EMPTY_SIGNALS)
-  const fold = (name, data, now) => {
+  const fold = (name, data, now, changes = true) => {
     const before = state
     state = foldSignal(freeze(state), name, freeze(data), now)
-    t.not(state, before, 'fold returns a new state')
+    if (changes) t.not(state, before, 'fold returns a new state')
+    else t.is(state, before, 'a no-op fold returns the same state')
   }
   fold('sync.started', { runId: 1, once: false }, 0)
   t.is(state.startedAt, 0)
@@ -50,14 +51,14 @@ test('download hints survive preemption without repeating known growth', async (
   t.is(state.reconnecting, false)
   fold('sync.started', { runId: 2, once: false }, 5)
   t.is(state.startedAt, 5)
-  fold('sync.event', { runId: 2, line: 'downloaded ' + K + ' 5' }, 6)
-  fold('sync.event', { runId: 2, line: 'downloaded ' + OTHER + ' 8' }, 7)
+  fold('sync.event', { runId: 2, line: 'downloaded ' + K + ' 5' }, 6, false)
+  fold('sync.event', { runId: 2, line: 'downloaded ' + OTHER + ' 8' }, 7, false)
   t.alike(state.fresh, {})
   t.is(state.lastDownloadAt, 3)
   fold('sync.event', { runId: 2, line: 'downloaded ' + K + ' 7' }, 8)
   t.alike(state.fresh, { [K]: 7 })
   t.is(state.lastDownloadAt, 8)
-  fold('sync.event', { runId: 2, line: 'downloaded ' + K + ' 6' }, 9)
+  fold('sync.event', { runId: 2, line: 'downloaded ' + K + ' 6' }, 9, false)
   t.is(state.lengths[K], 7)
   t.is(state.fresh[K], 7)
   t.is(state.lastDownloadAt, 8)
@@ -487,4 +488,34 @@ test('refresh: a newest line pushes the quiet window out like a download', async
   t.is(finished, false, 'the newest window of a followed diary is still arriving')
   await sleep(50)
   t.is(finished, true)
+})
+
+test('foldSignal keeps the same reference for a no-op event and a new one for a real change', async (t) => {
+  const { EMPTY_SIGNALS, foldSignal } = await load()
+  let state = freeze(foldSignal(EMPTY_SIGNALS, 'sync.started', { runId: 1, once: false }, 0))
+  state = freeze(foldSignal(state, 'sync.event', { runId: 1, line: 'peer seeder abcdef01' }, 1))
+  state = freeze(foldSignal(state, 'sync.event', { runId: 1, line: 'downloaded ' + K + ' 3' }, 2))
+  state = freeze(foldSignal(state, 'sync.event', { runId: 1, line: 'newest ' + OTHER + ' 4' }, 3))
+  state = freeze(foldSignal(state, 'sync.event', { runId: 1, line: 'diário próprio sincronizado (2)' }, 4))
+  for (const [name, data] of [
+    ['sync.event', { runId: 1, line: 'peer seeder abcdef01' }],
+    ['sync.event', { runId: 1, line: 'peer member 01234567' }],
+    ['sync.event', { runId: 1, line: 'downloaded ' + K + ' 3' }],
+    ['sync.event', { runId: 1, line: 'downloaded ' + K + ' 2' }],
+    ['sync.event', { runId: 1, line: 'newest ' + OTHER + ' 4' }],
+    ['sync.event', { runId: 1, line: 'diário próprio sincronizado (2)' }],
+    ['sync.event', { runId: 1, line: 'some other line' }],
+    ['sync.event', { runId: 9, line: 'downloaded ' + K + ' 50' }],
+    ['sync.stopped', { runId: 9, reason: 'done' }],
+    ['warning', { line: 'aviso: something unrelated' }],
+    ['other.event', { runId: 1 }]
+  ]) {
+    t.is(foldSignal(state, name, data, 10), state, name + ' ' + (data.line || data.reason || '') + ' is a no-op')
+  }
+  t.not(foldSignal(state, 'sync.event', { runId: 1, line: 'downloaded ' + K + ' 4' }, 10), state, 'growth is a change')
+  t.not(foldSignal(state, 'sync.event', { runId: 1, line: 'sync ready' }, 10), state, 'ready is a change')
+  t.not(foldSignal(state, 'sync.event', { runId: 1, line: 'diário próprio sincronizado (3)' }, 10), state, 'own growth is a change')
+  const stopped = foldSignal(state, 'sync.stopped', { runId: 1, reason: 'done', result: { downloaded: { [K]: 3 } } }, 10)
+  t.not(stopped, state, 'a stop of the run is a change')
+  t.is(stopped.lengths, state.lengths, 'a stop that grows no baseline keeps the lengths map')
 })

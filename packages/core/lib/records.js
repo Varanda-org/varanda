@@ -11,6 +11,7 @@
 
 const b4a = require('b4a')
 const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
+const { feira } = require('@varanda/rpc')
 
 const MAX_NAME = 80
 const MAX_BIO = 280
@@ -430,7 +431,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'testimonial', 'testimonial-show'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -513,6 +514,25 @@ function check (record, seq) {
   }
   if (type === 'like' || type === 'repost') {
     if (!hasExactKeys(record, ENGAGEMENT_KEYS) || !validTarget(record.to) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  // Feira (docs/protocol.md, "Feira"): an older reader skips these types as
+  // unknown and the diary is not rejected. Whether an edit or a status
+  // targets a live listing of this diary, and whether a rating is a
+  // self-rating, is the fold's check (lib/listing.js): this module sees one
+  // record, not the diary.
+  if (type === 'listing' || type === 'listing-edit') {
+    const reason = type === 'listing' ? feira.checkListingShape(record) : feira.checkEditShape(record, seq)
+    if (reason !== null) return reason
+    if (Object.prototype.hasOwnProperty.call(record, 'media') && !validMediaList(record.media)) return 'media-invalid'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'listing-status') return feira.checkStatusShape(record, seq)
+  if (type === 'listing-rate') {
+    const reason = feira.checkRateShape(record)
+    if (reason !== null) return reason
+    if (!validTarget(record.to)) return 'target-invalid'
+    if (!/^[0-9a-f]{32}$/.test(record.offer) || !isHex128(record.consent)) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   const withPreview = hasExactKeys(record, POST_PREVIEW_KEYS) || hasExactKeys(record, QUOTE_PREVIEW_KEYS)
@@ -648,6 +668,39 @@ function deleteRecord ({ seq, at = nowIso(), media } = {}) {
   const record = { type: 'delete', seq, at }
   if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyRange) : media
   return build(record, Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
+function copyPlace (p) {
+  if (!isPlainObject(p)) return p
+  return { uf: p.uf, city: p.city, bairro: p.bairro }
+}
+
+function listingFields (record, { title, text = '', price, unit = null, cat, place, media, at = nowIso() }) {
+  Object.assign(record, { title, text, price, unit, cat, place: copyPlace(place), at })
+  // Null or [] is "no photos" (listing.edit sends null to drop them): the
+  // record then has no media key, the only form a reader accepts.
+  if (media === undefined || media === null || (Array.isArray(media) && media.length === 0)) return record
+  record.media = Array.isArray(media) ? media.map(copyDescriptor) : media
+  return record
+}
+
+// `media` is added only when it holds photos, here and in an edit.
+function listingRecord ({ kind, ...fields } = {}) {
+  return build(listingFields({ type: 'listing', kind }, fields), 1)
+}
+
+// The whole new content of listing `seq`; its kind stays the root's.
+// Validated as if appended right after its target, like deleteRecord.
+function listingEditRecord ({ seq, ...fields } = {}) {
+  return build(listingFields({ type: 'listing-edit', seq }, fields), Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
+function listingStatusRecord ({ seq, status, at = nowIso() } = {}) {
+  return build({ type: 'listing-status', seq, status, at }, Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
+function listingRateRecord ({ to, offer, consent, stars, text = '', at = nowIso() } = {}) {
+  return build({ type: 'listing-rate', to: copyTarget(to), offer, consent, stars, text, at }, 1)
 }
 
 function parseRef (str) {
@@ -805,6 +858,12 @@ module.exports = {
   POST_PREVIEW_KEYS,
   QUOTE_PREVIEW_KEYS,
   DELETE_RANGE_KEYS,
+  LISTING_KEYS: feira.LISTING_KEYS,
+  LISTING_MEDIA_KEYS: feira.LISTING_MEDIA_KEYS,
+  LISTING_EDIT_KEYS: feira.EDIT_KEYS,
+  LISTING_EDIT_MEDIA_KEYS: feira.EDIT_MEDIA_KEYS,
+  LISTING_STATUS_KEYS: feira.STATUS_KEYS,
+  LISTING_RATE_KEYS: feira.RATE_KEYS,
   nowIso,
   isPlainObject,
   hasExactKeys,
@@ -830,6 +889,10 @@ module.exports = {
   testimonialRecord,
   testimonialShowRecord,
   deleteRecord,
+  listingRecord,
+  listingEditRecord,
+  listingStatusRecord,
+  listingRateRecord,
   validDescriptor,
   validAudioDescriptor,
   validAvatar,

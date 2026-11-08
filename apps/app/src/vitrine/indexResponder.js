@@ -2,6 +2,7 @@
 
 import rpc from '@varanda/rpc'
 import { fixtures, testimonialHash } from './fixtures.js'
+import { createVitrineRequest, vitrineFeiraState } from './request.js'
 
 const { isKey, isRef } = rpc
 const flags = { indexing: false, complete: true }
@@ -107,6 +108,43 @@ function communityRows (community, after) {
     .map((g) => ({ group: g.group, join: g.join, visibility: g.visibility, name: g.visibility === 'private' ? null : g.name, writerCount: g.visibility === 'private' ? null : diaryCount(g) }))
 }
 
+function feiraIndex (segments, request) {
+  let state = vitrineFeiraState(request)
+  if (state === null) state = vitrineFeiraState(createVitrineRequest(fixtures))
+  let rows, cursor
+  const [route, key, kind, cat, ...tail] = segments
+  const ratings = route === 'avaliacoes'
+  if (route === 'autor' || ratings) {
+    if (!isKey(key) || segments.length > 3) notFound()
+    cursor = kind
+    rows = ratings
+      ? state.rates.filter((e) => e.record.to.author === key).map((e) => ({ ...e, at: e.record.at }))
+      : state.listings.filter((e) => e.author === key).map((e) => ({ ...e, at: e.record.at }))
+  } else {
+    if (!rpc.feira.isUf(route?.toUpperCase()) || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(key) ||
+        !['todos', ...rpc.feira.KINDS].includes(kind) || !['todas', ...rpc.feira.CATS].includes(cat) || tail.length > 2) notFound()
+    let tokens = null
+    if (tail[0]?.includes('.')) cursor = tail[0]
+    else { tokens = tail[0]; cursor = tail[1] }
+    if ((tail.length === 2 && tokens === null) || (tokens !== undefined && tokens !== null && !/^[a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7}$/.test(tokens))) notFound()
+    rows = state.listings.filter((e) => {
+      const r = e.record
+      const words = fold(r.title + ' ' + r.text).split(/[^a-z0-9]+/)
+      return e.status !== 'vendido' && r.place.uf.toLowerCase() === route && rpc.feira.cityKey(r.place.city) === key &&
+        (kind === 'todos' ? r.kind !== 'procura' : r.kind === kind) && (cat === 'todas' || r.cat === cat) &&
+        (!tokens || tokens.split('+').every((token) => words.includes(token)))
+    }).map((e) => ({ ...e, at: e.record.at }))
+  }
+  const page = edgePage(rows, cursor, 30, newestFirst)
+  const items = page.items.map((ref) => {
+    if (ratings) return { ref }
+    const { status, statusSeq, editSeq } = rows.find((e) => refOf(e) === ref)
+    return { ref, status, statusSeq, editSeq }
+  })
+  const authors = Object.fromEntries([...new Set(items.map((i) => i.ref.split(':')[0]))].map((author) => [author, { ...hint(), ...pageHint(author) }]))
+  return { ...flags, items, next: page.next, authors }
+}
+
 // Only fixture references are returned: screens verify them through diary.peek.
 // The seeder's testimonial index (packages/core/lib/engagement-index.js),
 // over { author, seq, record } entries and the tombstoned 'author:seq' refs:
@@ -151,10 +189,12 @@ export function useTestimonialSource (source) {
   testimonialSource = source
 }
 
-export function vitrineIndex (url) {
+export function vitrineIndex (url, request) {
   let path
   try { path = new URL(url, 'https://vitrine.invalid').pathname } catch { notFound() }
-  const [, index, route, key, part, cursor, ...extra] = path.split('/')
+  const segments = path.split('/')
+  if (segments[1] === 'index' && segments[2] === 'feira') return feiraIndex(segments.slice(3), request)
+  const [, index, route, key, part, cursor, ...extra] = segments
   if (index !== 'index' || !key || extra.length) notFound()
 
   if (['post', 'likes', 'reposts', 'quotes'].includes(route) && part !== undefined) {
@@ -183,7 +223,7 @@ export function vitrineIndex (url) {
     requireProfile(key)
     if (part !== undefined && !/^[1-9][0-9]*$/.test(part)) notFound()
     const seqs = [...new Set([...posts.filter((p) => p.author === key).map((p) => p.seq), ...activeReposts(key)])].sort((a, b) => b - a)
-    const records = fixtures.diaryRecords.filter((e) => e.author === key)
+    const records = [...fixtures.diaryRecords, ...fixtures.listings, ...fixtures.rates].filter((e) => e.author === key)
     return { ...flags, ...hint(), ...pageHint(key), length: Math.max(2, ...seqs, ...records.map((e) => e.seq)) + 1, posts: seqs.filter((seq) => part === undefined || seq < Number(part)).slice(0, 100), postsTotal: seqs.length }
   }
 

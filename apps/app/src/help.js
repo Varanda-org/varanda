@@ -21,6 +21,17 @@ export const HELP = Object.freeze({
       'A Espiadinha funciona no site da associação e no app ligado à instalação da associação. Não funciona com uma configuração manual.'
     ])
   }),
+  feira: Object.freeze({
+    title: 'Como funciona a Feira',
+    paragraphs: Object.freeze([
+      'Os anúncios da Feira são públicos na web e podem aparecer em buscadores. Qualquer pessoa pode abrir o link, mesmo sem conta na Varanda.',
+      'A primeira versão do anúncio fica no diário até você apagar o anúncio, mesmo depois de editar. Quem já copiou pode ter guardado.',
+      'O pagamento é combinado e feito fora do app. Fazer ou aceitar uma oferta não é pagar nem comprovar pagamento.',
+      'Os estados Reservado, Vendido e Encontrado ficam visíveis para todo mundo.',
+      'Avaliações precisam do consentimento de quem anuncia e não são prova de pagamento.',
+      'Nas conversas com uma Página, a associação pode ler as mensagens.'
+    ])
+  }),
   seguindo: Object.freeze({
     title: 'Como funciona Seguindo',
     paragraphs: Object.freeze([

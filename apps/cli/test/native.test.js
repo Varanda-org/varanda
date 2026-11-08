@@ -98,6 +98,8 @@ test('native.yml: the builds the job names promise', (t) => {
   const js = job('js-bundles')
   t.ok(/expo export --platform android/.test(js), 'android export')
   t.ok(/expo export --platform ios/.test(js), 'ios export')
+  t.ok(/npm run export:web -w apps\/app/.test(js), 'the web export the deploy runs')
+  for (const file of ['index.html', 'varanda-node.js', 'sw.js']) t.ok(js.includes('test -f apps/app/dist/' + file), 'the web app has ' + file)
 
   const android = job('android-build')
   t.ok(/"ndk;27\.1\.12297006"/.test(android), 'the NDK React Native 0.83 builds with')

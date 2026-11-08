@@ -238,6 +238,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     wsOrigins: null,
     triageToken: null,
     pushToken: null,
+    publicOrigin: null,
     accountHttp: 'http://127.0.0.1:8790',
     accountPort: null,
     accountHost: null,
@@ -441,6 +442,12 @@ test('CLI parser, R5 help and command router', async (t) => {
     usage(t, [], 'VARANDA_TRIAGE_TOKEN inválido', { VARANDA_TRIAGE_TOKEN: value })
   }
   usage(t, ['--triage-token', triageToken], 'opção desconhecida --triage-token')
+  t.is(parse([], { VARANDA_PUBLIC_ORIGIN: 'https://varanda.test' }).publicOrigin, 'https://varanda.test')
+  t.is(parse([], { VARANDA_PUBLIC_ORIGIN: '' }).publicOrigin, null, 'empty means the Feira public routes are off')
+  for (const value of ['http://varanda.test', 'https://varanda.test/', 'https://Varanda.test', 'https://varanda.test/x', ' https://varanda.test']) {
+    usage(t, ['seed'], 'VARANDA_PUBLIC_ORIGIN inválido', { VARANDA_PUBLIC_ORIGIN: value })
+    t.is(parse(['account', 'serve'], { VARANDA_PUBLIC_ORIGIN: value }).publicOrigin, null, 'another command ignores a value only seed reads')
+  }
   for (const name of ['timeout-ms', 'limit']) {
     for (const value of ['0', '-1', '1.5', 'abc', '', 'Infinity', '1e3', '0x10']) usage(t, ['--' + name, value])
   }
