@@ -190,6 +190,7 @@ test('Mensagem em particular sits in the mais sheet only on a hosted node, for s
   const rua = read('screens/ARua.js')
   t.ok(rua.includes('message: fnOf(h.onMessage) && own !== null && String(post.author).toLowerCase() !== own && !(prof && prof.page === true)'), 'socialRowProps: not own, not a page')
   t.ok(rua.includes('onMessage: offers.message ? (author, options) => live.h.onMessage(author, options) : undefined'), 'a cached row reads the newest handler from its live box')
+  t.ok(fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8').includes('<PageNoticeSheet'), 'App.js shows the page notice for a post of a page')
 })
 
 test('more: Bloquear sits after Denunciar, only with a handler, never on the own post', async (t) => {

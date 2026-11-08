@@ -6597,3 +6597,39 @@ Limites desta caminhada:
 - Um @nome com letras e números colados (`termo123`) conta como uma palavra só e passa.
 - Um app modificado, um build antigo ou a CLI publicam sem passar por ela. Isso se confere lendo `apps/app/src/wordCheck.js`: o protocolo e o semeador não têm a lista.
 - Ela não lê fotos nem áudio, e grafias diferentes passam.
+
+## 139. Mensagem em particular numa publicação de Página (PR fix/page-dm-from-posts)
+
+Os itens do feed não dizem se o autor é uma Página, então **Mensagem em particular** aparece numa publicação de Página até o app aprender isso. Antes, o toque abria a conversa da página com o chip da publicação e sem o aviso único de "Conversar com a página". Agora o toque confere o autor antes de abrir. Não muda protocolo, semeador nem RPC.
+
+Regras que os passos conferem:
+
+- Ao tocar, o app pergunta, em paralelo, ao índice de membros do semeador (dica de Página, guardada por 5 min) e ao nó (`page.read`). Um autor que o app já conhece como Página não gera pedido.
+- Uma Página aberta passa pelo aviso "Conversar com a página" (uma vez por aparelho e por página, o mesmo do perfil e da Feira) e abre a conversa da página sem o chip de contexto.
+- Uma Página encerrada ou que mudou de chave, confirmada pelo nó (`page.read`), mostra "Esta página não recebe mensagens." e não abre nada.
+- Uma Página conhecida só pela dica do semeador nunca é recusada: recebe o aviso e abre sem o chip. A dica não é confiável e não pode calar a mensagem de uma pessoa.
+- Uma pessoa abre a conversa com o chip, como antes.
+- Um segundo toque enquanto a conferência não respondeu é ignorado, e uma resposta que chega depois de bloquear, desbloquear ou trocar de conta é descartada.
+- Depois do toque, o app guarda que o autor é uma Página só quando o nó confirmou, e então a ação some das publicações dele. A dica do semeador sozinha não fica guardada.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/dm.test.js`, `node apps/app/test/postActions.test.js`, `node apps/app/test/privateReply.test.js`, `node apps/app/test/platformGate.test.js` e `node apps/app/test/feedRender.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA, com uma conta que segue uma Página aberta, uma Página encerrada e uma pessoa:
+
+- [ ] A Rua, publicação da Página aberta, num aparelho que nunca conversou com ela: ⋯ e **Mensagem em particular** abrem o aviso "Conversar com a página". Continuar abre a conversa da página, sem chip acima do campo. Cancelar não abre nada.
+- [ ] De novo, noutra publicação da mesma Página (se a ação ainda aparecer): a conversa abre direto, sem o aviso.
+- [ ] Depois do primeiro toque, voltar à Rua: as publicações da Página não têm mais **Mensagem em particular**.
+- [ ] Publicação da Página encerrada, com o diário dela já no nó: o toque mostra "Esta página não recebe mensagens." e nada abre.
+- [ ] Publicação de uma pessoa: a conversa abre com o chip "Sobre a sua publicação de ...", como antes.
+- [ ] Toque duplo rápido numa publicação de Página: só um aviso aparece.
+- [ ] Sem internet: o toque numa publicação de pessoa ainda abre a conversa com o chip.
+- [ ] O mesmo numa conversa (Conversa) e num perfil.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Quando o semeador não manda a dica de Página (um semeador antigo, `pageHintOf` em `apps/app/src/indexClient.js`) e o `page.read` responde `NOT_FOUND` (o diário está noutro lugar), o autor é tratado como pessoa e a conversa abre como antes, com o chip. É o padrão decidido: falhar aberto, para uma pessoa nunca ficar sem mensagem quando o semeador demora.
+- Um autor desconhecido sem nome nem @nome não fica guardado como Página (`namesCache.js`), então a ação pode continuar aparecendo até o nome chegar. A conferência no toque continua valendo.
