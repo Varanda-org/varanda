@@ -2,6 +2,7 @@ import rpc from '@varanda/rpc'
 import { WIDEST_DM_ITEM, WIDEST_DM_VOICE, composePlan, stagedVoice, voiceUploadError } from './attach-plan.js'
 import { retryChatSend, runChatSend } from './chatSend.js'
 import { mergeRows } from './conversas.js'
+import { refusalOf } from './wordCheck.js'
 
 const { validateParams, MAX_TEXT, dmTextBudget, dmTextBytes, MEMBER_CERT_STANDIN } = rpc
 
@@ -142,6 +143,8 @@ function plan (source, target) {
   const toDm = target.kind === 'dm'
   const toPublic = target.kind === 'group' && target.visibility === 'public'
   const sealed = target.kind === 'group' && target.visibility === 'private'
+  const refused = toPublic ? refusalOf(source.text) : ''
+  if (refused !== '') return fail(refused)
 
   const uploads = []
   let dropped = false

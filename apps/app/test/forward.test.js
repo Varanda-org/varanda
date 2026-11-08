@@ -376,3 +376,18 @@ test('forward.js imports only pure modules and has no em dash', async (t) => {
   t.absent(src.includes(dash))
   t.absent(readFileSync(__filename, 'utf8').includes(dash))
 })
+
+test('forwardPlan: a listed term is refused only on its way into a public group', async (t) => {
+  const { forwardPlan } = await load()
+  const { BLOCKED_TERMS } = await import('../src/blockedTerms.js')
+  const { refusalText } = await import('../src/wordCheck.js')
+  const term = BLOCKED_TERMS[0]
+  for (const source of [dmSource({ text: term }), publicSource({ text: term }), postSource({ text: term })]) {
+    const plan = forwardPlan(source, toPublic)
+    t.absent(plan.ok, source.kind + ' into a public group')
+    t.is(plan.error, refusalText(term))
+  }
+  t.ok(forwardPlan(dmSource({ text: term }), toDm).ok, 'into a direct message')
+  t.ok(forwardPlan(privateSource({ text: term }), toPrivate).ok, 'into a private group')
+  t.ok(forwardPlan(dmSource({ text: 'um texto comum' }), toPublic).ok, 'ordinary text into a public group')
+})

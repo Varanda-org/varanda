@@ -6199,3 +6199,48 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi executada nesta documentação.
 - O ponto da aba Feira reflete o que a última abertura da Feira contou; ele não é atualizado em segundo plano.
 - As contagens olham só a primeira página de cada busca.
+
+## 138. Conferência de palavras no aparelho (PR feat/on-device-word-check)
+
+O app recusa, antes de publicar, texto público com um termo de `apps/app/src/blockedTerms.js`. É o item "método para filtrar" da diretriz 1.2 da App Store. Não muda protocolo, semeador nem RPC.
+
+Regras que os passos conferem:
+
+- A comparação é por palavra inteira, depois de dobrar acentos e maiúsculas, e lê o texto todo.
+- A recusa é definitiva: o rascunho fica para editar, e não há como publicar mesmo assim.
+- Mensagens diretas, grupos privados, denúncias e recursos não passam pela conferência.
+- Nada sai do aparelho: nenhum pedido, contador, log ou registro de recusa.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/wordCheck.test.js`, `node apps/app/test/search.test.js`, `node apps/app/test/feiraCompose.test.js`, `node apps/app/test/forward.test.js` e `node apps/app/test/groups.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA. Com `EXPO_PUBLIC_VARANDA_VITRINE=1` as telas abrem sem conta. Use `vou te matar` como termo de teste, ou outro da lista:
+
+- [ ] Publicar: escrever `Bom dia, Vou te MATAR amanhã` e tocar em Publicar. Aparece `Não dá para publicar: "vou te matar" é um termo que o Varanda não permite em conteúdo público. Edite o texto e tente de novo.`, o rascunho continua na caixa e nada entra na fila nem em A Rua. Editar o texto e publicar funciona.
+- [ ] Sem conexão: a mesma recusa, e nada entra na fila de envio.
+- [ ] Responder e citar: a mesma recusa nas duas folhas.
+- [ ] Agindo como Página: a mesma recusa, antes de assinar.
+- [ ] Palavra maior: `a cultura do bairro` e `o macaco fugiu` publicam normalmente.
+- [ ] Grupo público: a recusa aparece acima da caixa ao enviar, inclusive com foto e legenda.
+- [ ] Grupo privado e mensagem direta: o mesmo texto é enviado.
+- [ ] Encaminhar: uma mensagem com o termo é recusada para um grupo público e encaminhada para uma conversa ou um grupo privado.
+- [ ] Editar perfil, e o passo do perfil na entrada: o termo no nome ou na bio mostra a recusa enquanto se digita e desliga Salvar ou Continuar.
+- [ ] Feira: em Anunciar e em Editar, o termo no título, na descrição, na cidade ou no bairro mostra a recusa logo acima do botão, e nenhuma foto é enviada.
+- [ ] Nome de grupo público e de comunidade, ao criar e ao renomear: a recusa aparece enquanto se digita e desliga o botão. Com a visibilidade "Privado" em Novo grupo, a recusa some.
+- [ ] @nome: ao vincular a conta e em "trocar @nome", `vou_te_matar` mostra a recusa ao tocar no botão, e nada vai ao serviço de conta.
+- [ ] Página: em Nova página, o termo no @nome, no nome ou na bio mostra a recusa enquanto se digita e desliga "Criar página". Nos ajustes da Página, o mesmo no nome e na bio (Salvar) e em "Novo @nome" (Trocar @nome).
+- [ ] Avaliar, na Feira: o termo no comentário mostra a recusa ao tocar em Avaliar, e nada é publicado.
+- [ ] Cartão de convite: o termo em "Pra quem?" ou em "Sua mensagem" mostra a recusa e desliga "Criar link com cartão". "Mandar sem cartão" continua funcionando.
+- [ ] Denunciar: o termo na observação é enviado.
+- [ ] Rede: com o inspetor de rede aberto na web, uma recusa não gera nenhum pedido.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- A conferência não cobre o título e a descrição de uma prévia de link, que vêm do site.
+- O serviço de conta não conhece a lista, então um @nome só é recusado no app.
+- Um @nome com letras e números colados (`termo123`) conta como uma palavra só e passa.
+- Um app modificado, um build antigo ou a CLI publicam sem passar por ela. Isso se confere lendo `apps/app/src/wordCheck.js`: o protocolo e o semeador não têm a lista.
+- Ela não lê fotos nem áudio, e grafias diferentes passam.

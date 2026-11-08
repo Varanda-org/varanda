@@ -210,6 +210,22 @@ test('problem names what keeps the card back', async (t) => {
   for (const key of ['nome', 'nome-longo', 'mensagem-vazia', 'mensagem-simbolos', 'mensagem-longa']) t.ok(PROBLEM_TEXT[key])
 })
 
+test('a listed term in the name or the message keeps the card from being signed', async (t) => {
+  const { cardFields, cardRefusal, initialCompose } = await load()
+  const { BLOCKED_TERMS } = await import('../src/blockedTerms.js')
+  const { refusalText } = await import('../src/wordCheck.js')
+  const term = BLOCKED_TERMS[0]
+  const base = { ...initialCompose(), enabled: true, name: 'Ana', message: 'Vem!' }
+  t.is(cardRefusal(base), '')
+  t.ok(cardFields(base, ORIGIN), 'an ordinary card is signed')
+  for (const state of [{ ...base, name: term }, { ...base, message: 'Vem, ' + term + '!' }]) {
+    t.is(cardRefusal(state), refusalText(term))
+    t.is(cardFields(state, ORIGIN), null, 'no fields, so nothing to sign and the button waits')
+  }
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Convites.js'), 'utf8')
+  t.ok(src.includes('<ErrorText>{cardRefused}</ErrorText>'), 'Convites shows the refusal')
+})
+
 test('the counter has room before the name is typed', async (t) => {
   const { counterText, room } = await load()
   const fields = { origin: ORIGIN, name: '', design: 'minas', message: 'oi' }
@@ -227,7 +243,7 @@ test('an incomplete card keeps its label and waits; the plain flow is unchanged'
   const src = fs.readFileSync(path.join(__dirname, '../src/screens/Convites.js'), 'utf8')
   t.ok(src.includes('const cardMissing = draft.enabled && cardFields(draft, origin) === null'))
   t.ok(src.includes('disabled={busy || limitHit || awaitingDrop || noLeft || cardMissing}'))
-  t.ok(src.includes('{cardMissing ? <Soft>{PROBLEM_TEXT[problem(draft, origin)]}</Soft> : null}'))
+  t.ok(src.includes("{cardMissing && cardRefused === '' ? <Soft>{PROBLEM_TEXT[problem(draft, origin)]}</Soft> : null}"))
   const off = initialCompose()
   t.is(createLabel(off, ORIGIN), 'Criar link de convite')
   const { output, calls } = await screenCreate({ draft: { enabled: false, name: '' } })

@@ -327,3 +327,15 @@ test('confirmedHits carries only boolean page hints and leaves old hits unchange
   t.absent('moved' in r.hits[0])
   t.alike(Object.keys(r.hits[1]).sort(), ['author', 'avatar', 'name', 'username'])
 })
+
+test('wholeTokens folds like splitTokens, with no input bound and no cut', async (t) => {
+  const { splitTokens, wholeTokens } = await load()
+  for (const text of ['João da Silva', 'Straße', 'ＪＯＡＯ', 'Ma\u200bria', 'Łukasz Øster', '', ' ']) {
+    t.alike(wholeTokens(text), splitTokens(text), text)
+  }
+  t.is(wholeTokens('um '.repeat(200)).length, 200, 'past the input bound')
+  t.is(wholeTokens('a'.repeat(25))[0].length, 25, 'past the token cut')
+  t.is(splitTokens('a'.repeat(25))[0].length, 20, 'search keeps its cut')
+  t.alike(wholeTokens(null), [])
+  t.alike(wholeTokens(7), [])
+})
