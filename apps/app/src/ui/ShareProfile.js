@@ -10,9 +10,9 @@ import { useStyles } from './ThemeProvider'
 
 const PROFILE_LABELS = Object.freeze({
   field: 'link do perfil',
-  copy: 'copiar link',
+  copy: 'Copiar link',
   copyLabel: 'copiar link do perfil',
-  share: 'compartilhar',
+  share: 'Compartilhar',
   shareLabel: 'compartilhar perfil'
 })
 

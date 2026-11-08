@@ -40,7 +40,7 @@
 //   for a handled mention; its web links stay plain (./QuoteCard).
 
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
-import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { pendingOpen, tapKind } from '../doubleTap'
 import { relativeTime } from '../format'
@@ -59,7 +59,7 @@ import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
 import { QuoteCard } from './QuoteCard'
-import { type } from './theme'
+import { LARGE_TEXT, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
 const ICON = 18
@@ -151,7 +151,12 @@ function PostRowView ({
   const time = relativeTime(at, now) ?? displayText(at)
   const who = whoOf({ name, username })
   const title = displayText(who.title)
-  const meta = who.subtitle ? displayText(who.subtitle) + ' · ' + time : time
+  // At large text there is no room for the @nome beside the name and the
+  // date: iOS shrank it to a clipped sliver ("( · 5 nov"), so it is left out.
+  // Android's 1.3 step arrives as 1.2999999523 (a 32-bit float), so the
+  // threshold sits just under it.
+  const { fontScale } = useWindowDimensions()
+  const handle = who.subtitle && !(fontScale >= LARGE_TEXT) ? displayText(who.subtitle) : null
   const open = fn(onOpen)
   const like = fn(onLike)
   const heartScale = useRef(new Animated.Value(1)).current
@@ -394,10 +399,23 @@ function PostRowView ({
                   accessibilityLabel={'ver o perfil de ' + title}
                   disabled={!openAuthor}
                   onPress={openAuthor}
-                  style={({ pressed }) => [styles.nameBox, pressed && openAuthor && styles.pressed]}
+                  style={({ pressed }) => [styles.nameBox, handle && styles.nameBeside, pressed && openAuthor && styles.pressed]}
                 >
                   <Text style={styles.name} numberOfLines={1}>{title}</Text>
                 </Pressable>
+                {handle
+                  ? (
+                    <Pressable
+                      accessible={false}
+                      disabled={!open}
+                      onPress={openTap}
+                      hitSlop={4}
+                      style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
+                    >
+                      <Text style={styles.handle} numberOfLines={1}>{handle}</Text>
+                    </Pressable>
+                    )
+                  : null}
                 <Pressable
                   accessibilityRole={open ? 'link' : 'text'}
                   accessibilityLabel={open ? 'abrir conversa' : undefined}
@@ -405,9 +423,9 @@ function PostRowView ({
                   onPress={openTap}
                   {...a11yOpen}
                   hitSlop={4}
-                  style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
+                  style={({ pressed }) => [styles.timeBox, pressed && open && styles.pressed]}
                 >
-                  <Text style={styles.meta} numberOfLines={1}>{meta}</Text>
+                  <Text style={styles.time} numberOfLines={1}>{(handle ? '\u00a0· ' : '· ') + time}</Text>
                 </Pressable>
               </View>
               {replyToName
@@ -556,7 +574,7 @@ function PostRowView ({
                       <Icon name='mais' size={ICON} color={colors.soft} />
                     </Action>
                     )
-                  : null}
+                  : <View style={styles.slot} />}
               </View>
               )
             : null}
@@ -614,16 +632,36 @@ const makeStyles = (colors) => StyleSheet.create({
   repostedFollowText: { ...type.counter, color: colors.accent },
   main: { flexDirection: 'row', gap: 12 },
   body: { flex: 1, minWidth: 0 },
-  head: { flexDirection: 'row', alignItems: 'baseline', gap: 6 },
-  nameBox: { flexShrink: 1 },
+  // No gap: the name keeps 6 pt on its right and the time starts with a
+  // no-break space (web drops a plain leading space under numberOfLines), so
+  // the "·" has one space on each side.
+  head: { flexDirection: 'row', alignItems: 'baseline' },
+  // The @nome gives way first and the date never does (as on X): one Text for
+  // both cut the date to "· 5…", or dropped it at large text.
+  nameBox: { flexShrink: 1, marginRight: 6 },
+  // Shrink weights: Yoga and CSS share an overflow by basis x flexShrink. The
+  // handle (10000 against the name's 1) takes all but a thousandth of a pixel,
+  // so a name that fits is never cut. The name keeps flexShrink 1: CSS shares
+  // only part of the overflow when the factors left sum to less than 1, so a
+  // smaller one would push the date out once the handle is at its floor. The handle stops at 32 pt ("@jo…", never a clipped sliver);
+  // past that the name gives way, so the date always fits, even a 320 pt
+  // screen with "· 31 dez 2025".
+  nameBeside: { flexShrink: 1 },
   name: { ...type.postName, color: colors.ink },
-  metaBox: { flexShrink: 1 },
-  meta: { ...type.postMeta, color: colors.soft },
+  // The time sits outside the shrinking box: a box that shrinks can go below
+  // a child's width in Yoga, so a non-shrinking time inside it still clipped.
+  metaBox: { flexShrink: 10000, minWidth: 32 },
+  timeBox: { flexShrink: 0 },
+  handle: { ...type.postMeta, color: colors.soft, flexShrink: 1 },
+  time: { ...type.postMeta, color: colors.soft, flexShrink: 0 },
   reply: { ...type.replyMark, color: colors.soft, marginTop: 1 },
   replyName: { color: colors.accent, fontWeight: '600' },
   text: { ...type.postText, color: colors.ink, marginTop: 3 },
   bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, marginLeft: -8, maxWidth: 360 },
   action: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 36, minWidth: 44, paddingHorizontal: 8 },
+  // An empty column where "mais" would be, so a row without it keeps its icons
+  // in the same columns as the rows around it (the bar spreads them apart).
+  slot: { minWidth: 44 },
   // A split pair is as wide as the combined button (8 + icon + gap + digits +
   // 8), so the bar still fits a 320 pt screen.
   actionSplit: { gap: 0, minWidth: 0, paddingRight: 2 },

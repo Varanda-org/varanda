@@ -3,7 +3,7 @@
 // is the 44 pt icon button a screen's TopBar draws for each { icon, label,
 // onPress, badge } it passes as `right`.
 
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native'
 import { HelpButton } from './Help'
 import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -33,24 +33,26 @@ export function BellButton ({ onPress, badged, active, color, style }) {
 
 // `badge`: true draws a dot, a positive number a count (99+ past that). The
 // label says the same, since a screen reader never sees the dot.
-export function IconAction ({ icon, label, onPress, badge, color, disabled }) {
+export function IconAction ({ icon, label, onPress, badge, color, disabled, pending, danger }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const count = Number.isSafeInteger(badge) && badge > 0 ? badge : 0
   const dot = badge === true
   const countText = count > 99 ? '99+' : String(count)
+  const off = disabled === true || pending === true
+  const tint = color !== undefined ? color : danger ? colors.danger : colors.ink
   const spoken = typeof label === 'string' ? label + (count > 0 ? ', ' + countText : dot ? ', novidades' : '') : undefined
   return (
     <Pressable
       accessibilityRole='button'
       accessibilityLabel={spoken}
-      accessibilityState={disabled ? { disabled: true } : undefined}
-      disabled={disabled === true}
+      accessibilityState={off ? { disabled: true, busy: pending === true } : undefined}
+      disabled={off}
       onPress={onPress}
       style={({ pressed }) => [styles.hit, pressed && styles.pressed, disabled && styles.disabled]}
     >
       <View style={styles.iconWrap}>
-        <Icon name={icon} size={24} color={color === undefined ? colors.ink : color} />
+        {pending === true ? <ActivityIndicator size='small' color={tint} /> : <Icon name={icon} size={24} color={tint} />}
         {count > 0
           ? <View style={styles.count}><Text style={styles.countText} numberOfLines={1}>{countText}</Text></View>
           : dot ? <View style={styles.dot} /> : null}

@@ -46,7 +46,9 @@
 // and an uncertain offer, aceite or recusa is resent only by "Tentar de novo".
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { KeyboardAvoidingView, Platform, StyleSheet, View } from 'react-native'
+import { Keyboard, KeyboardAvoidingView, StyleSheet, View } from 'react-native'
+import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
@@ -81,6 +83,7 @@ import { ChatHeader } from '../ui/ChatHeader'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
+import { ActionsSheet } from '../ui/ActionsSheet'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, Skeleton } from '../ui/States'
 import { ForwardSheet } from '../ui/ForwardSheet'
@@ -135,6 +138,8 @@ export function Mensagem ({ initial, ...props }) {
 
 function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing, onAvaliar }) {
   const styles = useStyles(makeStyles)
+  const avoidKeyboard = useKeyboardAvoidEnabled()
+  const insets = useSafeAreaInsets()
   const origin = installationOrigin() || globalThis.location?.origin || ''
   const node = useNode()
   const now = useNow(60000)
@@ -344,6 +349,41 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     }, 50)
     return () => clearTimeout(t)
   }, [loaded, newest])
+
+  // The keyboard shrinks the list: when the person was reading the newest
+  // line, keep it above the composer instead of behind it.
+  // Only a scroll leaves the bottom: a frame where just the list or its
+  // content changed size (the keyboard, a sheet closing, a new line) keeps
+  // the state, or the newest line stayed behind the composer afterwards.
+  const atBottom = useRef(true)
+  const lastY = useRef(null)
+  const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
+    const bottom = y + layoutHeight >= contentHeight - 48
+    const resized = lastY.current !== null && y === lastY.current
+    lastY.current = y
+    if (resized && !bottom) return
+    atBottom.current = bottom
+  }, [])
+  useEffect(() => {
+    let timers = []
+    const clear = () => { timers.forEach(clearTimeout); timers = [] }
+    const sub = Keyboard.addListener('keyboardDidShow', () => {
+      if (!atBottom.current) return
+      clear()
+      const toEnd = () => {
+        const list = listRef.current
+        if (list && typeof list.scrollToEnd === 'function') list.scrollToEnd({ animated: true })
+      }
+      // Twice: on Android the keyboard padding turns on with a re-render
+      // (src/ui/keyboardAvoid.js), so the list shrinks after this event and
+      // the first scroll can land before it (the newest message stayed under the composer).
+      timers = [setTimeout(toEnd, 50), setTimeout(toEnd, 300)]
+    })
+    return () => {
+      clear()
+      sub.remove()
+    }
+  }, [])
 
   const decide = async (state) => {
     // A person blocked outright, not only their messages: the whole block goes.
@@ -653,7 +693,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   }
 
   const open = onOpenMember ? () => onOpenMember(peer) : undefined
-  const topRight = { icon: 'mais', label: 'opções da conversa', onPress: () => setMenu(true) }
+  // The keyboard is put away first: it came back by itself after the sheets
+  // and covered the newest line.
+  const topRight = { icon: 'mais', label: 'opções da conversa', onPress: () => { Keyboard.dismiss(); setMenu(true) } }
   // The peer's own username is known without a lookup, so that mention opens
   // the profile directly; any other @nome goes to the app's resolver.
   const mentionTap = onOpenMember || typeof onOpenMention === 'function'
@@ -743,16 +785,18 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   // Forwarding writes as the person, never as a page.
   const canForward = pageKey === null && unlocked
 
+  // Footers without a field sit on the gesture bar: keep their buttons above it.
+  const footer = [styles.composer, { paddingBottom: Math.max(8, insets.bottom) }]
   let composer
   if (folder === null) {
     composer = (
-      <View style={styles.composer}>
+      <View style={footer}>
         {loadError ? <ErrorText>{loadError}</ErrorText> : <Skeleton rows={1} />}
       </View>
     )
   } else if (blocked) {
     composer = (
-      <View style={styles.composer}>
+      <View style={footer}>
         <Soft>{LABELS.blockedSend}</Soft>
         <ErrorText>{act.error}</ErrorText>
         <View style={styles.inline}>
@@ -762,13 +806,12 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     )
   } else if (folder === 'request') {
     composer = (
-      <View style={styles.composer}>
+      <View style={footer}>
         <Soft>{LABELS.requestNote}</Soft>
         <ErrorText>{act.error}</ErrorText>
-        <View style={styles.inline}>
-          <Pill label={LABELS.accept} filled onPress={() => decide('accepted')} pending={act.pending} />
-          <Pill label={LABELS.decline} onPress={() => decide('declined')} pending={act.pending} />
-          <Pill label={LABELS.block} danger onPress={() => decide('blocked')} pending={act.pending} />
+        <View style={styles.decide}>
+          <View style={styles.decideItem}><Pill label={LABELS.accept} filled onPress={() => decide('accepted')} pending={act.pending} /></View>
+          <View style={styles.decideItem}><Pill label={LABELS.decline} onPress={() => decide('declined')} pending={act.pending} /></View>
         </View>
       </View>
     )
@@ -776,8 +819,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     // No field that takes no typing: say why, and for a missing key let the
     // person check again (the other side publishes it when it opens the app).
     composer = (
-      <View style={styles.composer}>
+      <View style={footer}>
         <Soft>{blockNote}</Soft>
+        <ErrorText>{act.error}</ErrorText>
         {lookup === null
           ? <View style={styles.inline}><Pill label='verificar de novo' onPress={readLookup} /></View>
           : null}
@@ -786,6 +830,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   } else {
     const notice = (
       <View style={styles.notice}>
+        {/* The conversation menu closes before its action runs: a failed
+            block or delete says so here. */}
+        <ErrorText>{act.error}</ErrorText>
         {showListingReplies(rows, pageKey !== null ? pageKey : ownKey) && !hold && !mediaHold && !sendingMedia && !post.pending
           ? (
             <View style={styles.inline}>
@@ -869,10 +916,11 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   else if (loadError) empty = <View style={styles.pad}><ErrorText>{loadError}</ErrorText></View>
   else empty = <EmptyState icon='conversas' title='Nenhuma mensagem' body='Escreva a primeira.' />
 
-  // On iOS the keyboard opens over the bottom composer unless the screen
-  // shrinks for it (Android resizes the window itself: adjustResize).
+  // The keyboard opens over the bottom composer unless the screen shrinks for
+  // it: iOS never resizes, and Android runs edge to edge (targetSdk 36), where
+  // adjustResize no longer resizes the window either. On the web it is a View.
   return (
-    <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView style={styles.root} behavior='padding' enabled={avoidKeyboard}>
       <ChatHeader
         title={nameText}
         subtitle={peerWho.subtitle || undefined}
@@ -947,6 +995,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         onRefresh={refreshAll}
         refreshing={refreshing}
         keepVisiblePosition
+        onScrollFrame={trackBottom}
       />
       {composer}
       <ForwardSheet
@@ -975,23 +1024,30 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           <Btn label='Cancelar' secondary onPress={() => setConfirming(null)} disabled={offerAct.pending} />
         </View>
       </Sheet>
-      <Sheet open={menu} onClose={() => setMenu(false)} title='Conversa'>
-        <View style={styles.sheet}>
-          <ErrorText>{act.error}</ErrorText>
-          {blocked
-            ? <Btn label={unblockLabel} onPress={() => decide('unblocked')} pending={act.pending} secondary />
-            : <Btn label={LABELS.block} onPress={() => decide('blocked')} pending={act.pending} secondary />}
-          {confirmDelete
-            ? (
-              <View style={styles.sheet}>
-                <Soft>Apagar esta conversa só neste aparelho? A outra pessoa continua com a cópia dela.</Soft>
-                <Btn label='Apagar' danger onPress={() => decide('deleted')} pending={act.pending} />
-                <Btn label='Cancelar' secondary onPress={() => setConfirmDelete(false)} />
-              </View>
-              )
-            : <Btn label={LABELS.delete} danger onPress={() => setConfirmDelete(true)} />}
-        </View>
-      </Sheet>
+      {/* Two actions: the compact menu, and the delete confirmation as its own
+          compact step with one Cancelar. */}
+      <ActionsSheet
+        open={menu}
+        onClose={() => setMenu(false)}
+        title='Conversa'
+        actions={[
+          blocked
+            ? { icon: 'ok', label: unblockLabel, onPress: () => decide('unblocked'), pending: act.pending }
+            : { icon: 'slash', label: LABELS.block, onPress: () => decide('blocked'), pending: act.pending },
+          { icon: 'lixeira', label: LABELS.delete, danger: true, onPress: () => setConfirmDelete(true) }
+        ]}
+      />
+      <ActionsSheet
+        open={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+        title='Apagar esta conversa?'
+        // Cancelar first: on the web the sheet's focus lands on its first row,
+        // so a second Enter after "Apagar conversa" never deletes by accident.
+        actions={[
+          { icon: 'fechar', label: 'Cancelar', onPress: () => {} },
+          { icon: 'lixeira', label: 'Apagar', danger: true, description: 'Só neste aparelho. A outra pessoa continua com a cópia dela.', pending: act.pending, onPress: () => decide('deleted') }
+        ]}
+      />
     </KeyboardAvoidingView>
   )
 }
@@ -999,14 +1055,16 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   pad: { padding: 12, alignItems: 'center', gap: 6 },
-  sheet: { padding: 16, gap: 12 },
   inline: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
+  // Accept and decline split the row evenly, like the request bars of other messengers.
+  decide: { flexDirection: 'row', gap: 8 },
+  decideItem: { flex: 1, alignItems: 'stretch' },
   notice: { gap: 6, paddingHorizontal: 12, paddingTop: 6 },
   composer: {
     borderTopWidth: 1,
     borderTopColor: colors.line,
     backgroundColor: colors.card,
-    paddingHorizontal: 12,
+    paddingHorizontal: 16,
     paddingVertical: 8,
     gap: 6
   }

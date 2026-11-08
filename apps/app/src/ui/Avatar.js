@@ -108,6 +108,10 @@ function initialsFromName (name) {
   return ''
 }
 
+export function initialsSize (size) {
+  return Math.max(8, Math.round(size * 0.36))
+}
+
 export function Avatar ({ name, publicKey, size = 44, ring = false, picture, persist = false, localUri, shape = 'circle' }) {
   const { colors } = useTheme()
   const fetched = useAvatarUrl(publicKey, picture, persist !== false)
@@ -119,7 +123,10 @@ export function Avatar ({ name, publicKey, size = 44, ring = false, picture, per
   const photo = uri !== null && uri !== broken ? uri : null
   const corner = shape === 'square' ? Math.round(size * 0.3) : size / 2
   const stripe = stripes[avatarColorOf(publicKey)]
-  const fontSize = size >= 80 ? 30 : size <= 40 ? 15 : 16
+  // Sized to the circle and never scaled with the system text size: two
+  // letters at 15 pt did not fit a 20 pt quote avatar, and Dynamic Type turned
+  // every avatar into "J…".
+  const fontSize = initialsSize(size)
   const initials = initialsFromName(name)
   const circle = (
     <View
@@ -129,7 +136,7 @@ export function Avatar ({ name, publicKey, size = 44, ring = false, picture, per
     >
       {initials === ''
         ? <Icon name='pessoa' size={size * 0.5} color={stripe.ink} />
-        : <Text style={[styles.initials, { color: stripe.ink, fontSize }]} numberOfLines={1}>{displayText(initials)}</Text>}
+        : <Text style={[styles.initials, { color: stripe.ink, fontSize }]} numberOfLines={1} allowFontScaling={false}>{displayText(initials)}</Text>}
       {photo !== null && (
         <Image
           source={{ uri: photo }}

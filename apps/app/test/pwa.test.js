@@ -136,3 +136,8 @@ test('the service worker is a template outside public/', (t) => {
   t.ok(sw.includes("new Response(buf, { status: 200, statusText: 'OK', headers })"), 'a cache hit is rebuilt, never returned as stored')
   t.absent(/<script/i.test(html), 'index.html still has no script tag')
 })
+
+test('round 8: html and body never pan or bounce after a screen push', (t) => {
+  t.ok(/html,\s*body \{\s*overflow: hidden;/.test(html), 'html is clipped too')
+  t.ok(/html,\s*body \{\s*overscroll-behavior: none;/.test(html), 'no overscroll on either axis')
+})

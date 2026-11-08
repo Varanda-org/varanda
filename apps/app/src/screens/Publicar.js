@@ -65,7 +65,7 @@ import { LinkDraftCard, useLinkDraft } from '../ui/ChatComposer'
 import { cardForSend, withCardFallback } from '../linkCard'
 import { withPreview } from '../attach-plan'
 import { refusalOf } from '../wordCheck'
-import { Sheet } from '../ui/Sheet'
+import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { tap } from '../ui/haptics'
 import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -768,7 +768,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
       open={open}
       onClose={onClose}
       grabber
-      right={<Pill label={pillLabel} filled onPress={send} pending={busy} disabled={!valid} />}
+      right={<Pill label={pillLabel} filled onPress={send} pending={busy} disabled={!valid} maxFontSizeMultiplier={TEXT_CAP} />}
     >
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView style={styles.flex} keyboardShouldPersistTaps='handled'>
@@ -920,7 +920,6 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
                     style={({ pressed }) => [styles.tool, attachOff && styles.toolOff, pressed && styles.toolPressed]}
                   >
                     <Icon name='image' size={21} color={colors.soft} />
-                    <Text style={styles.toolText}>Foto</Text>
                   </Pressable>
                   )
                 : null}
@@ -1065,7 +1064,6 @@ const makeStyles = (colors) => StyleSheet.create({
   tool: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 44, minWidth: 44, paddingHorizontal: 8, borderRadius: 22, justifyContent: 'center' },
   toolOff: { opacity: 0.45 },
   toolPressed: { backgroundColor: colors.accentSoft },
-  toolText: { fontSize: 14, lineHeight: 18, fontWeight: '600', color: colors.soft },
   count: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   retryRow: { flexDirection: 'row', marginTop: 8 },
   asRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingTop: 8 },
@@ -1120,7 +1118,9 @@ const makeStyles = (colors) => StyleSheet.create({
     alignItems: 'center',
     gap: 7,
     paddingVertical: 8,
-    paddingHorizontal: 12
+    // The tools pad their own 8, so icons and counter both sit 16 from the edges.
+    paddingLeft: 8,
+    paddingRight: 16
   },
   counter: { ...type.counter, color: colors.soft },
   counterWarn: { color: colors.warn },

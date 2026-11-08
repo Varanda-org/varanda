@@ -52,7 +52,8 @@ import { usePush } from '../usePush'
 import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
-import { Sheet } from '../ui/Sheet'
+import { Sheet, TEXT_CAP } from '../ui/Sheet'
+import { useEscapeLayer } from '../ui/escapeLayer'
 import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MODES, MODE_LABELS } from '../appearance'
@@ -334,13 +335,19 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     }
   }
 
+  // Escape on a sub-page goes back to the list, as the back chevron does,
+  // instead of closing the whole sheet and dropping a draft (src/ui/escapeLayer.js).
+  useEscapeLayer(screen !== null && screen !== 'lista', () => onNavigate('lista'), 'sheet')
+
   const left = screen === 'lista'
     ? (
-      <Pressable accessibilityRole='button' accessibilityLabel='Fechar' onPress={onClose} hitSlop={8}>
-        <Text style={styles.cancel}>Fechar</Text>
+      <Pressable accessibilityRole='button' accessibilityLabel='Fechar' onPress={onClose} hitSlop={8} style={styles.closeHit}>
+        <Text style={styles.cancel} maxFontSizeMultiplier={TEXT_CAP}>Fechar</Text>
       </Pressable>
       )
     : (
+      // Icon only: a worded "‹ Ajustes" took the title's room (the title is
+      // padded by the wider side), cutting "Passkeys e recupe…" at large text.
       <Pressable
         style={styles.back}
         accessibilityRole='button'
@@ -348,8 +355,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         onPress={() => onNavigate('lista')}
         hitSlop={8}
       >
-        <Icon name='voltar' size={22} color={colors.ink} />
-        <Text style={styles.cancel}>Ajustes</Text>
+        <Icon name='voltar' size={24} color={colors.ink} />
       </Pressable>
       )
 
@@ -397,7 +403,6 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 : null}
               <Item icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
               <Item icon='sun' label='Aparência' trailingText={MODE_LABELS[mode]} onPress={() => onNavigate('aparencia')} />
-              <Item icon='link' label={PREVIEW_PREF_LABEL} toggle checked={previews} trailingText={previews ? 'Ligada' : 'Desligada'} onPress={togglePreviews} />
               {pushRow
                 ? (
                   <Item
@@ -415,6 +420,8 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 ? <Item icon='download' label='Guardar dados neste aparelho' trailing={null} pending={persistPending} onPress={doPersist} />
                 : null}
               {hasPasskey && Platform.OS === 'web' ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
+              {/* Last, so the note right under the group describes this row. */}
+              <Item icon='link' label={PREVIEW_PREF_LABEL} toggle checked={previews} trailingText={previews ? 'Ligada' : 'Desligada'} onPress={togglePreviews} />
             </View>
             <Soft>{PREVIEW_PREF_NOTE}</Soft>
             {pushRow && pushUi.note && pushUi.note !== pushError ? <Soft>{pushUi.note}</Soft> : null}
@@ -626,7 +633,9 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
       )
 
   return (
-    <Sheet open={screen !== null} onClose={onClose} title={TITLES[screen]} left={left} background={colors.bg}>
+    // Android back on a sub-page goes back to the list, as the chevron and
+    // Escape do, instead of closing Ajustes and dropping a draft.
+    <Sheet open={screen !== null} onClose={onClose} onBack={screen !== null && screen !== 'lista' ? () => onNavigate('lista') : undefined} title={TITLES[screen]} left={left} background={colors.bg}>
       {body}
     </Sheet>
   )
@@ -636,7 +645,8 @@ const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
   hidden: { display: 'none' },
   cancel: { ...type.cancel, color: colors.ink },
-  back: { flexDirection: 'row', alignItems: 'center', marginLeft: -6 },
+  closeHit: { minHeight: 44, justifyContent: 'center' },
+  back: { minWidth: 40, minHeight: 40, justifyContent: 'center', marginLeft: -8 },
   group: {
     backgroundColor: colors.card,
     borderRadius: 14,

@@ -5985,6 +5985,64 @@ Limites:
 - As imagens são geometria gerada, não arte encomendada.
 - O `User-Agent` é declarado pelo cliente: quem quiser pode se passar por um robô e ver a página de prévia, que não traz nada além do que está acima.
 
+## 119. Ações em linha única e folhas de mais ações (PR fix/mobile-action-hierarchy)
+
+Caminhada da hierarquia de ações no celular: uma ação principal por tela, fileiras que não quebram e ações raras atrás do botão de mais. As telas estão em [app.md](app.md) ("Telas", "Conversas", "Comunidades") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Componentes").
+
+Regras que os passos conferem:
+
+- Uma ação principal por linha, as raras atrás do botão de mais (`MoreButton`, que abre o `ActionsSheet`) em toda tela: Membro mostra no máximo duas pílulas (Seguir ou Seguindo, Mensagem) e o botão de mais; Agir como a página, Ajustes da página, Seguir como a página, Compartilhar perfil e Denunciar a conta ficam na folha de ações. O botão de mais só aparece com ao menos uma ação usável.
+- O pedido de mensagem mostra só Aceitar e Recusar, em partes iguais, acima da barra de gestos; Bloquear e Apagar ficam no menu da conversa. O menu de mais da Mensagem é compacto e o campo diz "Mensagem".
+- Toda confirmação que não se desfaz (Banir, Sair, Remover, Apagar versão) é uma `ConfirmStack`: a ação em cima, Cancelar embaixo, as duas em largura total. Apagar uma conversa confirma numa folha de ações compacta, com Apagar e Cancelar em largura total.
+- `Pill` e `Btn` aceitam ícone, têm 40 pt de altura e nunca cortam o rótulo (no Android, "Trocar passkey" aparecia como "Trocar"). Sem rótulo, a pílula é um círculo de 40 pt com nome falado e alvo de 44 pt.
+- Linha do perfil: duas pílulas em partes iguais e o botão de mais; com texto grande a linha empilha em vez de cortar. No Diário, Editar perfil ocupa a linha.
+- Cabeçalho de publicação e de citação: o @nome cede primeiro e some a partir da escala de fonte 1,29 (o 1,3 do Android chega como 1,2999999); a data nunca é cortada e o nome fica com o resto. "1 seguidor" no singular.
+- Título da `Sheet` com folga lateral e limite de escala de fonte; menus longos limitados a 85% da tela, com rolagem por dentro.
+- Escape na web (`src/ui/escapeLayer.js`): uma pilha compartilhada por folhas, menus, visualizador de foto e editor de foto; só a camada do topo fecha, e a tela de baixo não volta junto. Numa subpágina de Ajustes, Escape volta para a lista. O Android volta da subpágina de Ajustes para a lista com o botão voltar.
+- Na web, o `Backdrop` não é parada de foco e o guarda de `src/ui/scrollerFocus.web.js` impede que o foco caia num corpo que rola (sem anel em volta da folha inteira). `html` e `body` ficam com `overflow: hidden` (sem pan da viewport).
+- No Android, a área do teclado só entra no cálculo com o teclado aberto (`src/ui/keyboardAvoid.js`): sem isso a barra de escrita ficava sobre uma faixa vazia depois de fechar o teclado (Mensagem, Grupo, Perfil).
+- Na Informação da comunidade, Sair fica no botão de mais da tela; na comunidade e nos Ajustes do grupo, Banir fica no botão de mais de cada pessoa (no grupo, também Tornar e Tirar admin), e nos Ajustes do grupo Sair do grupo segue como botão no fim e Desbanir e Tirar admin seguem como pílulas nas suas seções; Aprovar e Recusar são ícones; Quem pode convidar e Entrada são pílulas com chevron que abrem uma folha com a escolha atual marcada com um visto; painéis e divisor alinhados. Linhas de pessoa (membros e pedidos) têm avatar à esquerda.
+- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/fix/mobile-action-hierarchy/<plataforma>/` (rodadas r1 a r15, Android, simulador iOS e Chrome), gravadas por `apps/app/scripts/review-shots.sh`, e o registro das rodadas em `~/Workspace/evidencias/fix/mobile-action-hierarchy/rounds.md`.
+
+Como verificar, a partir de `apps/app` (um arquivo por vez):
+
+- `node test/uiKit.test.js`, `node test/profileActions.test.js`, `node test/chatActions.test.js`, `node test/postOverflow.test.js`, `node test/escapeLayer.test.js`, `node test/scrollerFocus.test.js`, `node test/passkeysScreen.test.js`, `node test/group-flow.test.js`, `node test/groups.test.js`, `node test/conversas.test.js`, `node test/profileSave.test.js`, `node test/mediaCrop.test.js`, `node test/pwa.test.js`.
+- `npm run lint`, a partir da raiz, que tem de passar.
+
+Primeiro no Android (build de debug, emulador `varanda-api36`, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome:
+
+- [ ] Android: Membro de outra pessoa; Seguindo e Mensagem numa linha, com o botão de mais; a folha abre com Denunciar a conta em vermelho.
+- [ ] Android: Diário; Editar perfil ocupa a linha, sem quebra.
+- [ ] Android: Conversas › Pedidos de mensagem › um pedido; Aceitar e Recusar em partes iguais, acima da barra de gestos.
+- [ ] Android: no mesmo pedido, menu da conversa › Apagar conversa neste aparelho; a confirmação é uma folha de ações com Apagar (com a frase) e Cancelar, em largura total.
+- [ ] Android: Comunidade › Informações; dados e ações centralizados; Membros e Pedidos com avatar; o botão de mais de uma pessoa abre Banir; Quem pode convidar abre a folha com a escolha atual.
+- [ ] Android: Grupo › Ajustes; o mesmo seletor de Quem pode convidar, pedidos com Aprovar e Recusar, linhas com avatar, o botão de mais de uma pessoa.
+- [ ] Android: Editar perfil; a versão do perfil com a lixeira ao lado; tocar abre a pilha Apagar versão/Cancelar. Escolher foto abre o editor com as setas e o zoom sem corte.
+- [ ] Android: Ajustes › Passkeys e recuperação; Adicionar passkey, Trocar passkey (inteiro, sem corte) e Criar código de recuperação; Trocar passkey abre a pilha Adicionar a nova passkey/Cancelar.
+- [ ] iOS (simulador iPhone 16e, build de debug ligado ao Metro): as mesmas telas.
+- [ ] Chrome em 390 px e em 1280 px, nos temas claro e escuro: as mesmas telas; na web, Escape fecha só a camada de cima (folha, menu, visualizador ou editor de foto) e, numa subpágina de Ajustes, volta para a lista.
+- [ ] Android: abrir o teclado em Mensagem, Grupo e Perfil e fechá-lo; a barra de escrita volta ao rodapé sem faixa vazia. Em Ajustes, entrar numa subpágina e usar o botão voltar do sistema: volta para a lista.
+- [ ] Texto grande (Android `font_scale` 1.3, iOS `accessibility-large`) e movimento reduzido: as mesmas telas sem rótulo cortado nem fileira quebrada; o @nome some dos cabeçalhos de publicação e citação e a data fica inteira; a linha do perfil empilha.
+
+Ainda falta a um humano, em aparelho real (nenhuma caixa acima foi executada nesta documentação):
+
+- [ ] celulares Android e iPhone físicos, não só emulador e simulador: as telas acima, o teclado e o texto grande.
+- [ ] TalkBack e VoiceOver: o botão de mais, a lixeira, o círculo Compartilhar e os seletores com chevron leem o nome certo; a folha de ações lê as linhas e o foco volta ao botão que a abriu.
+- [ ] iOS: as rodadas visuais 8 a 12 não rodaram no simulador (a ferramenta esperava aprovação por aparelho); as rodadas 6, 7 e 13 a 15 rodaram, e as duas últimas saíram limpas. Falta o iPhone físico.
+- [ ] Android: a revisão final do teclado e do botão voltar em Ajustes (única checagem pendente no Android).
+
+Pontos conhecidos, deixados como estão (P3):
+
+- Cabeçalho de publicação e de citação com texto de acessibilidade extra-grande, tela de 320 pt e data de ano anterior: o nome fica com cerca de 80 pt na publicação e 40 pt no cartão de citação; não chega a zero, mas rever se um aparelho mostrar o contrário.
+- Visualizador de foto da conversa: ícones da barra de status escuros sobre o fundo preto no Android (já era assim; a correção pede definir a barra antes de abrir o Modal ou trocar o Modal por uma sobreposição).
+- Texto: "Fechar" e "Cancelar" ainda variam entre telas; "serviço indisponível" e "foto indisponível" em minúscula; marcador monoespaçado do convite; barra de abas translúcida; Perfil como folha no Diário e como página nos Ajustes; iniciais do cabeçalho de pedido contra o ícone da lista; o rótulo Denunciar na publicação e no perfil tem tintas diferentes (fixado pelos testes de `postActions`).
+- Web: anel de foco do Fechar sem folga; seta de voltar de 40 x 40; foco depois de Escape volta ao topo em vez de à lista; campo da Busca 4 pt abaixo do de Conversas; abas da Busca sem `aria-selected`; foco depois de fechar a Publicar com Escape; o rascunho do Perfil zera ao voltar para a lista de Ajustes (igual com a seta; já era assim).
+- Compartilhar sem origem da instalação mostra "Não foi possível copiar o link." (`communityShare.js`, fora desta PR).
+
+Limites desta caminhada:
+
+- Na Vitrine, Passkeys responde "serviço indisponível": a lista de passkeys com itens e a remoção se conferem no laboratório hospedado.
+- Compartilhar perfil só aparece com a origem da instalação, que a Vitrine nativa não tem.
 ## 129. Carregamento mais rápido de A Rua, Diário e perfis (PRs chore/perf-harness até perf/app-render)
 
 Caminhada da pilha de desempenho: medição, leituras do nó, partida, concessão do app instalado e renderização. Ciclo de medição, metas e números em [performance.md](performance.md).

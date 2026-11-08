@@ -45,7 +45,7 @@ test('Conversas is one list with three chips, a pinned Pedidos dot and nav pushe
   const src = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
   t.ok(src.includes('<FilterChips options={FILTERS.map((id) => ({ id, label: FILTER_LABELS[id] }))} selected={filter} onSelect={setFilter} />'), 'the three chips')
   t.ok(src.includes('applyFilter([requestsRow({ requests: inbox.requests }), communitiesRow(), ...rows], filter)'), 'Pedidos and Comunidades pinned above the merged rows')
-  t.ok(src.includes("<PinnedRow icon='conversas' title={item.title} dot={item.unread === true} onPress={() => { if (typeof onOpenRequests === 'function') onOpenRequests() }} />"), 'Pedidos shows a dot and pushes the request folder')
+  t.ok(src.includes("<PinnedRow icon='conversas' title={item.title} dot={item.unread === true} chevron onPress={() => { if (typeof onOpenRequests === 'function') onOpenRequests() }} />"), 'Pedidos shows a dot and pushes the request folder')
   t.ok(src.includes("<PinnedRow icon='gente' title={item.title} chevron onPress={() => { if (typeof onOpenCommunities === 'function') onOpenCommunities() }} />"), 'Comunidades is a compact pinned row with a chevron')
   t.ok(src.includes('{dot ? <View style={styles.dot} /> : null}'), 'a dot, never a count')
   t.ok(src.includes('<Icon name={icon} size={24} color={colors.accent} />') && src.includes('const PINNED_HEIGHT = 56'), 'a 24 pt accent glyph in a 56 pt row')
@@ -415,6 +415,28 @@ test('a peer named like the own label never reads as own in a quote', (t) => {
   t.ok(screen.includes("const quoteName = readsAs(nameText, OWN_LABEL) ? (peerWho.subtitle || 'Pessoa') : nameText"))
   t.ok(screen.includes('handle: quoteMine(item) ? undefined : quoteHandle'), 'a peer quote carries the verified @nome')
   t.ok(screen.includes('senderKey: quoteMine(item) ? undefined : peer'), 'a peer quote gets the peer color, not the own accent')
+})
+
+test('large text grows the Conversas search field and the Avisos rows instead of cutting them', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  const search = screen.slice(screen.indexOf('  search: {'), screen.indexOf('  searchFocused:'))
+  t.ok(search.includes('minHeight: layout.hit') && !/\bheight: layout\.hit/.test(search.replace('minHeight', '')), 'the field has a minimum, not a fixed height')
+  t.ok(screen.includes('minHeight: layout.hit - 3, paddingVertical: 0'), 'so has its input')
+  const avisos = readFileSync(join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  t.ok(avisos.includes('<Text style={styles.name} numberOfLines={2}>'), 'the action line takes two lines')
+  const badge = avisos.slice(avisos.indexOf('  kindBadge: {'))
+  t.ok(badge.includes('right: -4,') && badge.includes('bottom: -4,'), 'the type badge sits off the initials')
+})
+
+test('the Pedidos de mensagem row has the same chevron as Comunidades', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  t.ok(src.includes("<PinnedRow icon='conversas' title={item.title} dot={item.unread === true} chevron "))
+  t.ok(src.includes("<PinnedRow icon='gente' title={item.title} chevron "))
+})
+
+test('round 8: a row without a preview has no empty second line', (t) => {
+  const row = readFileSync(join(__dirname, '../src/ui/ConversationRow.js'), 'utf8')
+  t.ok(row.includes("{preview !== '' || unread"), 'second line only with a preview or unread')
 })
 
 test('conversasReadsAllowed holds hidden-tab reads until the first show', async (t) => {

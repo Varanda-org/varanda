@@ -57,7 +57,7 @@ import { deviceRandomBytes, newLinkSecret } from '../appLinkSecret'
 import { HELP, SHORT } from '../help'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { useOutbox } from '../outboxProvider'
-import { BROWSER_TEXT, KNOWN_LOST_FULL_TEXT, KNOWN_LOST_TEXT, MISSED_TEXT, NONE_FULL_TEXT, NONE_TEXT, NOT_SYNCED_TITLE, OTHER_PASSKEY_LABEL, PHONE_HINT, PHONE_LABEL, PHONE_SIGNIN_HINT, PHONE_SIGNIN_LABEL, RETRY_LABEL, SYNC_ADVICE, UNUSABLE_TITLE, notSyncedSteps, unusableSteps } from '../passkeyTrouble'
+import { BROWSER_TEXT, KNOWN_LOST_FULL_TEXT, KNOWN_LOST_TEXT, MISSED_TEXT, NONE_FULL_TEXT, NONE_TEXT, NOT_SYNCED_TITLE, OTHER_PASSKEY_LABEL, PHONE_BUTTON, PHONE_HINT, PHONE_SIGNIN_BUTTON, PHONE_SIGNIN_HINT, RETRY_BUTTON, SYNC_ADVICE, UNUSABLE_TITLE, notSyncedSteps, unusableSteps } from '../passkeyTrouble'
 import { OPEN_IN_BROWSER_TEXT } from '../profileLink'
 import { INVITE_NEEDED_TEXT, INVITE_READY_TEXT } from '../signupInvite'
 import { dropSignupInvite, dropSignupInviteCard, loadSignupInvite } from '../signupInviteStore'
@@ -67,7 +67,7 @@ import { dropsHeldInvite, parseSessionReturn } from '../linkReturn'
 import * as AuthSession from '../authSession'
 import { InvitePaste } from './Idade'
 import { holdUnregistered, releaseUnregistered } from './Passkeys'
-import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
+import { Body, Btn, Card, ConfirmStack, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
 import { refusalOf } from '../wordCheck'
 import { HelpNote } from '../ui/Help'
 import { ShareProfile } from '../ui/ShareProfile'
@@ -85,7 +85,7 @@ const NO_NAME = 'ainda sem @nome'
 const PLAIN_CODE_LABEL = 'Código para enviar à associação'
 const PLAIN_SEND_TEXT = 'Envie este código à associação. Cole abaixo o que ela devolver.'
 const PLAIN_CERT_LABEL = 'O que a associação devolveu'
-const PLAIN_SUBMIT = 'gravar e continuar'
+const PLAIN_SUBMIT = 'Gravar e continuar'
 // Replaces parseCertificateText's JSON wording in the setup only.
 const PLAIN_PARSE_ERROR = 'Não foi possível ler esse texto. Cole tudo o que a associação devolveu.'
 // The in-app web node (native web kind) has the same passkey cards; only the
@@ -182,15 +182,15 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
           )
         : null}
       <Row>
-        <Btn label={plain ? 'copiar código' : 'copiar chave'} secondary onPress={copy} />
-        {canShare ? <Btn label='compartilhar' secondary onPress={share} /> : null}
+        <Btn label={plain ? 'Copiar código' : 'Copiar chave'} secondary onPress={copy} />
+        {canShare ? <Btn label='Compartilhar' secondary onPress={share} /> : null}
       </Row>
       {copyNote ? <Soft>{copyNote}</Soft> : null}
       <Body>{plain ? PLAIN_SEND_TEXT : 'Envie esta chave à associação; ela emite o certificado de membro (JSON), que você cola abaixo.'}</Body>
       <Label>{plain ? PLAIN_CERT_LABEL : 'certificado de membro (JSON emitido pela associação)'}</Label>
       <Field value={certText} onChangeText={onCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
       <ErrorText>{error}</ErrorText>
-      <Btn label={plain ? PLAIN_SUBMIT : 'gravar certificado'} onPress={onSubmit} pending={pending} disabled={certText.trim() === ''} />
+      <Btn label={plain ? PLAIN_SUBMIT : 'Gravar certificado'} onPress={onSubmit} pending={pending} disabled={certText.trim() === ''} />
     </Card>
   )
 }
@@ -724,15 +724,15 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         <Label>seu @nome</Label>
         <Body>{displayText(atName(status.username) || NO_NAME)}</Body>
         {/* After the one automatic try (certTried), whatever else cleared the error. */}
-        {!memberCert && status.cert && certTried.current.has(JSON.stringify(status.cert)) && !busy ? <Btn label='tentar de novo' onPress={receive} /> : null}
-        {memberCert && nameFailed && !busy ? <Btn label='tentar enviar o @nome de novo' onPress={retryName} /> : null}
+        {!memberCert && status.cert && certTried.current.has(JSON.stringify(status.cert)) && !busy ? <Btn label='Tentar de novo' onPress={receive} /> : null}
+        {memberCert && nameFailed && !busy ? <Btn label='Tentar enviar o @nome de novo' onPress={retryName} /> : null}
         {!renameOpen
-          ? <Btn label='trocar @nome' secondary onPress={() => { setError(''); setNote(''); setRenameOpen(true) }} disabled={busy} />
+          ? <Btn label='Trocar @nome' secondary onPress={() => { setError(''); setNote(''); setRenameOpen(true) }} disabled={busy} />
           : blocked
             ? (
               <>
                 <Body>{'Você poderá trocar o @nome de novo em ' + formatNextChange(status.nextChangeAt) + '.'}</Body>
-                <Btn label='fechar' secondary onPress={() => setRenameOpen(false)} />
+                <Btn label='Fechar' secondary onPress={() => setRenameOpen(false)} />
               </>
               )
             : (
@@ -740,8 +740,8 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
                 <Field label='novo @nome' placeholder='@nome' value={newName} onChangeText={setNewName} mono />
                 <Body>{RENAME_RULE}</Body>
                 <Row>
-                  <Btn label={'trocar para @' + displayText(typed || newName.trim().replace(/^@/, ''))} onPress={doRename} pending={busy} disabled={typed === null} />
-                  <Btn label='cancelar' secondary onPress={() => setRenameOpen(false)} disabled={busy} />
+                  <Btn label={'Trocar para @' + displayText(typed || newName.trim().replace(/^@/, ''))} onPress={doRename} pending={busy} disabled={typed === null} />
+                  <Btn label='Cancelar' secondary onPress={() => setRenameOpen(false)} disabled={busy} />
                 </Row>
               </>
               )}
@@ -766,7 +766,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       ? (
         <>
           <Body>{waitlist}</Body>
-          <Btn label='tentar de novo' onPress={doLink} disabled={busy || isUsername(name) === null} />
+          <Btn label='Tentar de novo' onPress={doLink} disabled={busy || isUsername(name) === null} />
         </>
         )
       : null
@@ -797,11 +797,11 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
               </Body>
               {confirmFailed
                 // The mapped message is the card's error line below.
-                ? <Btn label='usar outra conta Google' onPress={restartLink} disabled={busy} />
+                ? <Btn label='Usar outra conta Google' onPress={restartLink} disabled={busy} />
                 : (
                   <>
-                    <Btn label='confirmar vínculo' onPress={doConfirm} pending={busy} />
-                    <Btn label='começar de novo' secondary onPress={restartLink} disabled={busy} />
+                    <Btn label='Confirmar vínculo' onPress={doConfirm} pending={busy} />
+                    <Btn label='Começar de novo' secondary onPress={restartLink} disabled={busy} />
                   </>
                   )}
             </>
@@ -829,14 +829,14 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
                 : (
                   <>
                     <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
-                    {waitlistNote || <Btn label='vincular conta Google' onPress={doLink} pending={busy} disabled={linkDisabled} />}
+                    {waitlistNote || <Btn label='Vincular conta Google' onPress={doLink} pending={busy} disabled={linkDisabled} />}
                   </>
                   )}
             </>
             )
           : null}
         {!confirmable && !showForm
-          ? <Btn label='vincular conta Google' secondary onPress={() => { setError(''); setFormOpen(true) }} />
+          ? <Btn label='Vincular conta Google' secondary onPress={() => { setError(''); setFormOpen(true) }} />
           : null}
       </>
     )
@@ -849,7 +849,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
       {body}
       <ErrorText>{acctError || error}</ErrorText>
       <Notice>{note}</Notice>
-      {acctError ? <Btn label='tentar de novo' secondary onPress={load} /> : null}
+      {acctError ? <Btn label='Tentar de novo' secondary onPress={load} /> : null}
     </Card>
   )
 }
@@ -1321,7 +1321,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
         ? (
           <Card>
             <ErrorText>{passkey.error}</ErrorText>
-            <Btn label='tentar de novo' onPress={() => passkey.refresh()} />
+            <Btn label='Tentar de novo' onPress={() => passkey.refresh()} />
           </Card>
           )
         : <Soft>carregando…</Soft>
@@ -1353,7 +1353,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
         <Card>
           <Notice>{noPrf.notSynced === true ? NOT_SYNCED_TITLE : UNUSABLE_TITLE}</Notice>
           {steps.map((step) => <Body key={step}>{step}</Body>)}
-          <Btn label={RETRY_LABEL} onPress={() => setNoPrf(null)} disabled={pkPending} />
+          <Btn label={RETRY_BUTTON} onPress={() => setNoPrf(null)} disabled={pkPending} />
           {blockedInvite}
         </Card>
       )
@@ -1367,11 +1367,11 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             ? (
               <>
                 <Body>{PENDING_TEXT}</Body>
-                <Btn label='concluir a criação da passkey' onPress={onFinishComplete} pending={pkPending} />
+                <Btn label='Concluir a criação da passkey' onPress={onFinishComplete} pending={pkPending} />
               </>
               )
             : <Btn label='Criar passkey nova' onPress={onFinishRecovery} pending={pkPending} />}
-          <Btn label='cancelar' secondary onPress={onCancelRecovery} disabled={pkPending} />
+          <Btn label='Cancelar' secondary onPress={onCancelRecovery} disabled={pkPending} />
           <ErrorText>{pkError}</ErrorText>
         </Card>
       )
@@ -1397,8 +1397,8 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             <>
               <Notice>{EXISTS_TEXT}</Notice>
               <Row>
-                <Btn label='criar mesmo assim' secondary onPress={doRegister} disabled={pkPending} />
-                <Btn label='cancelar' secondary onPress={() => setConfirmCreate(false)} disabled={pkPending} />
+                <Btn label='Criar mesmo assim' secondary onPress={doRegister} disabled={pkPending} />
+                <Btn label='Cancelar' secondary onPress={() => setConfirmCreate(false)} disabled={pkPending} />
               </Row>
             </>
             )
@@ -1410,7 +1410,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             ? (
               <>
                 <Notice>{displayText(invite.text)}</Notice>
-                <Btn label='agora não' secondary onPress={() => invite.onDismiss()} disabled={pkPending} />
+                <Btn label='Agora não' secondary onPress={() => invite.onDismiss()} disabled={pkPending} />
               </>
               )
             : null}
@@ -1435,13 +1435,13 @@ export default function Identidade ({ active, embedded = false, setup = false, v
                   ? (
                     <>
                       <Notice>{RESET_TEXT}</Notice>
-                      <Row>
-                        <Btn label='apagar e recomeçar' danger onPress={doReset} pending={pkPending} />
-                        <Btn label='cancelar' secondary onPress={() => setConfirmReset(false)} disabled={pkPending} />
-                      </Row>
+                      <ConfirmStack
+                        confirm={<Btn label='Apagar e recomeçar' danger onPress={doReset} pending={pkPending} />}
+                        cancel={<Btn label='Cancelar' secondary onPress={() => setConfirmReset(false)} disabled={pkPending} />}
+                      />
                     </>
                     )
-                  : <Btn label='recomeçar com esta passkey' danger onPress={() => setConfirmReset(true)} disabled={pkPending} />}
+                  : <Btn label='Recomeçar com esta passkey' danger onPress={() => setConfirmReset(true)} disabled={pkPending} />}
               </>
               )
             : null}
@@ -1449,7 +1449,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             ? (
               <>
                 <Body>{PENDING_TEXT}</Body>
-                <Btn label='concluir a criação da passkey' onPress={doComplete} pending={pkPending} />
+                <Btn label='Concluir a criação da passkey' onPress={doComplete} pending={pkPending} />
               </>
               )
             : null}
@@ -1458,14 +1458,14 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             ? (
               <>
                 <Body>{FULL_TEXT}</Body>
-                <Btn label={RETRY_LABEL} secondary onPress={readAdmission} disabled={pkPending || admissionPending} />
+                <Btn label={RETRY_BUTTON} secondary onPress={readAdmission} disabled={pkPending || admissionPending} />
               </>
               )
             : null}
           {missedOnce && !knownLost ? <Soft>{MISSED_TEXT}</Soft> : null}
           {knownLost || missedOnce || pkStatus.passkeyKnown === true ? <Btn label={OTHER_PASSKEY_LABEL} secondary onPress={onOtherPasskey} disabled={pkPending} /> : null}
           {entrarBtn}
-          {phoneOk ? <Btn label={offer.phoneCreate ? PHONE_LABEL : PHONE_SIGNIN_LABEL} secondary onPress={onPhonePress} disabled={pkPending || confirmCreate !== false} /> : null}
+          {phoneOk ? <Btn label={offer.phoneCreate ? PHONE_BUTTON : PHONE_SIGNIN_BUTTON} secondary onPress={onPhonePress} disabled={pkPending || confirmCreate !== false} /> : null}
           {showPhoneHint ? <Soft>{PHONE_HINT}</Soft> : null}
           {phoneOk ? <Soft>{PHONE_SIGNIN_HINT}</Soft> : null}
           {showComplete
@@ -1488,8 +1488,8 @@ export default function Identidade ({ active, embedded = false, setup = false, v
                   />
                   <Soft>{CODE_HINT}</Soft>
                   <Row>
-                    <Btn label='entrar com o código' onPress={onCodeSubmit} pending={pkPending} disabled={pkPending || codeText.trim() === ''} />
-                    <Btn label='cancelar' secondary onPress={onCodeCancel} disabled={pkPending} />
+                    <Btn label='Entrar com o código' onPress={onCodeSubmit} pending={pkPending} disabled={pkPending || codeText.trim() === ''} />
+                    <Btn label='Cancelar' secondary onPress={onCodeCancel} disabled={pkPending} />
                   </Row>
                 </>
                 )
@@ -1545,7 +1545,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           <Card>
             <Body>Você ainda não tem uma conta neste aparelho. Crie uma para começar.</Body>
             <ErrorText>{create.error}</ErrorText>
-            <Btn label='criar conta' onPress={doCreate} pending={create.pending} />
+            <Btn label='Criar conta' onPress={doCreate} pending={create.pending} />
           </Card>
           )
         : null}
@@ -1556,7 +1556,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           <Card>
             <Label>chave pública</Label>
             {showKey ? <Mono>{displayText(info.publicKey)}</Mono> : null}
-            <Btn label={showKey ? 'esconder chave' : 'mostrar chave'} secondary onPress={() => setShowKey((v) => !v)} />
+            <Btn label={showKey ? 'Esconder chave' : 'Mostrar chave'} secondary onPress={() => setShowKey((v) => !v)} />
             {identity ? <Label>associação</Label> : null}
             {identity ? <Mono>{displayText(identity.association)}</Mono> : null}
             <Body>{'certificado de membro: ' + (info.memberCert ? 'válido' : 'ausente')}</Body>
@@ -1604,7 +1604,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             <Label>{setup ? PLAIN_CERT_LABEL : 'certificado de membro (JSON emitido pela associação)'}</Label>
             <Field value={certText} onChangeText={setCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
             <ErrorText>{certError || add.error}</ErrorText>
-            <Btn label={setup ? PLAIN_SUBMIT : 'gravar certificado'} onPress={doCert} pending={add.pending} disabled={certText.trim() === ''} />
+            <Btn label={setup ? PLAIN_SUBMIT : 'Gravar certificado'} onPress={doCert} pending={add.pending} disabled={certText.trim() === ''} />
           </Card>
           )
         : null}

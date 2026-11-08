@@ -164,9 +164,9 @@ test('Identidade: the code recovery card is exclusive and owns its pending creat
   const start = src.indexOf('} else if (needsPasskey) {')
   t.ok(start > 0, 'the recovery card is its own branch')
   const card = src.slice(start, src.indexOf('} else {', start))
-  t.ok(card.includes("<Btn label='concluir a criação da passkey' onPress={onFinishComplete}"), 'its own concluir')
+  t.ok(card.includes("<Btn label='Concluir a criação da passkey' onPress={onFinishComplete}"), 'its own concluir')
   t.ok(card.includes("<Btn label='Criar passkey nova' onPress={onFinishRecovery}"))
-  t.ok(card.includes("<Btn label='cancelar' secondary onPress={onCancelRecovery}"))
+  t.ok(card.includes("<Btn label='Cancelar' secondary onPress={onCancelRecovery}"))
   for (const other of ['Entrar com a passkey', 'doComplete', 'onPhonePress', 'CODE_LABEL', 'TextInput', 'onOtherPasskey']) {
     t.absent(card.includes(other), 'no ' + other + ' on the recovery card')
   }
@@ -220,7 +220,7 @@ test('sign-in texts distinguish missing, known lost and unsuitable passkeys', as
     t.absent(/Crie|crie|criar/.test(text), 'no creation offered while full')
     t.absent(/\u2014/.test(text), 'no em dash')
   }
-  t.is(OTHER_PASSKEY_LABEL, 'entrar com outra passkey')
+  t.is(OTHER_PASSKEY_LABEL, 'Entrar com outra passkey')
   t.is(NOT_SYNCED_TITLE, 'Essa passkey não serve para o Varanda.')
 })
 

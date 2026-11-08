@@ -28,9 +28,9 @@ const MAYBE_CREATED_TEXT = 'Se o convite foi criado, ele já conta nesta semana.
 const SUMMARY_REFRESH_MS = 15 * 60 * 1000
 const LABELS = Object.freeze({
   field: 'link do convite',
-  copy: 'copiar link do convite',
+  copy: 'Copiar link do convite',
   copyLabel: 'copiar link do convite',
-  share: 'compartilhar convite',
+  share: 'Compartilhar convite',
   shareLabel: 'compartilhar convite'
 })
 

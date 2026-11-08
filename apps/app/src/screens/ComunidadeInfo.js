@@ -27,11 +27,13 @@ import {
   COMMUNITY_JOIN_LABELS, DEVICE_PENDING_JOIN_TEXT, DEVICE_RESERVE_JOIN_TEXT, DEVICE_ROOT_TEXT, DEVICE_STAFF_TEXT,
   authorityHere, can, communityReserveReached, deviceStaffNote, membersLabel, rootAdminHere, roleLabel, writerOnDevice
 } from '../groups'
-import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
+import { Btn, ConfirmStack, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
 import { refusalOf } from '../wordCheck'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { InviteByName } from '../ui/InviteByName'
+import { ActionsSheet } from '../ui/ActionsSheet'
+import { MoreButton } from '../ui/MoreButton'
 import { Pill } from '../ui/Pill'
 import { ChatHeader } from '../ui/ChatHeader'
 import { TopBar } from '../ui/TopBar'
@@ -68,7 +70,7 @@ const leaveWaitOf = (err) => {
 
 function adminsLabel (n) {
   if (!Number.isSafeInteger(n) || n < 0) return ''
-  return n === 1 ? '1 administrador' : n + ' administradores'
+  return n === 1 ? '1\u00a0administrador' : n + '\u00a0administradores'
 }
 
 function personName (row) {
@@ -116,6 +118,8 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
   const [granting, setGranting] = useState(null)
   const [adminUncertain, setAdminUncertain] = useState(false)
   const [confirm, setConfirm] = useState(null)
+  const [policyOpen, setPolicyOpen] = useState(false)
+  const [joinOpen, setJoinOpen] = useState(false)
   const [check, setCheck] = useState(null)
   const [inviting, setInviting] = useState(false)
   // 'policy' or 'settings': the open panel that needs no list.
@@ -201,11 +205,16 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
       return
     }
     setPanel(kind)
+    setSection(null)
     setPeople({ rows: [], total: 0, loading: true, error: '' })
     loadPeople(kind)
   }
 
-  const openSection = (kind) => setSection((s) => (s === kind ? null : kind))
+  // Only one list is open at a time: opening a section closes a panel too.
+  const openSection = (kind) => {
+    if (section !== kind) setPanel(null)
+    setSection((s) => (s === kind ? null : kind))
+  }
 
   // Whether `member` is a live member of the community: pages through
   // community.members, so a large community is not misjudged.
@@ -376,10 +385,10 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
     ? (
       <View style={styles.block}>
         <Soft>{confirm.text}</Soft>
-        <View style={styles.inline}>
-          <Btn label={confirm.label} danger onPress={() => confirm.run()} pending={act.pending} />
-          <Btn label='Cancelar' secondary onPress={() => setConfirm(null)} />
-        </View>
+        <ConfirmStack
+          confirm={{ label: confirm.label, danger: true, onPress: () => confirm.run(), pending: act.pending }}
+          cancel={{ onPress: () => setConfirm(null) }}
+        />
       </View>
       )
     : null
@@ -388,7 +397,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
     ? (
       <View style={styles.block}>
         <ErrorText>{UNCERTAIN}</ErrorText>
-        <Pill label='conferir' onPress={() => { setCheck(null); load() }} />
+        <Pill label='Conferir' onPress={() => { setCheck(null); load() }} />
       </View>
       )
     : null
@@ -401,25 +410,33 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
   } else {
     // A pending answer knows only the key: its zero counts and 'pending' role
     // are placeholders, not meta. Compartilhar still works from the key.
-    const header = pending ? '' : [COMMUNITY_JOIN_LABELS[info.join] || '', membersLabel(info.members), adminsLabel(info.admins), roleLabel(role)].filter(Boolean).join(' · ')
+    const header = pending ? '' : [COMMUNITY_JOIN_LABELS[info.join] || '', membersLabel(info.members), adminsLabel(info.admins)].filter(Boolean).join(' · ')
     const canInvite = node.hosted && can('invite', role, { memberInvite: info.memberInvite === true })
     body = (
       <View>
         <View style={styles.head}>
           <Avatar name={title} publicKey={community} size={96} />
           <Text style={styles.title} accessibilityRole='header'>{pending ? 'Comunidade ainda chegando' : title}</Text>
-          {header ? <Soft>{header}</Soft> : null}
+          {header ? <Text style={styles.meta}>{header}</Text> : null}
+          {!pending && (role === 'creator' || role === 'admin' || role === 'member') ? <Text style={styles.meta}>{'você é ' + roleLabel(role)}</Text> : null}
+          {/* A banned or departed person still sees their state here (requested has its own note below). */}
+          {!pending && (role === 'banned' || role === 'left') && roleLabel(role) ? <Text style={styles.meta}>{roleLabel(role)}</Text> : null}
         </View>
         <View style={styles.block}>
-          <View style={styles.inline}>
-            <Btn label='Compartilhar' onPress={share} secondary />
-            {(isMember || role === 'requested') && writerOnDevice(info)
-              ? <Btn label={isMember ? 'Sair da comunidade' : 'Desistir do pedido'} danger secondary pending={act.pending} onPress={() => setConfirm({ text: isMember ? (owner ? CREATOR_LEAVE_TEXT : LEAVE_TEXT) : WITHDRAW_TEXT, label: isMember ? 'Sair' : 'Desistir', run: leave })} />
-              : null}
-            {info.leavePending === true
-              ? <Btn label='Concluir saída' danger secondary pending={act.pending} onPress={() => setConfirm({ text: FINISH_LEAVE_TEXT, label: 'Concluir saída', run: () => mutate('community.leave', { community }) })} />
-              : null}
-            {canInvite ? <Btn label='Convidar' onPress={() => setInviting((v) => !v)} secondary /> : null}
+          <View style={styles.headActions}>
+            {canInvite ? <Pill label='Convidar' onPress={() => setInviting((v) => !v)} /> : null}
+            <Pill icon='compartilhar' accessibilityLabel='Compartilhar' onPress={share} />
+            <MoreButton
+              title='Comunidade'
+              actions={[
+                (isMember || role === 'requested') && writerOnDevice(info)
+                  ? { icon: 'sair', label: isMember ? 'Sair da comunidade' : 'Desistir do pedido', danger: true, pending: act.pending, onPress: () => setConfirm({ text: isMember ? (owner ? CREATOR_LEAVE_TEXT : LEAVE_TEXT) : WITHDRAW_TEXT, label: isMember ? 'Sair' : 'Desistir', run: leave }) }
+                  : null,
+                info.leavePending === true
+                  ? { icon: 'sair', label: 'Concluir saída', danger: true, pending: act.pending, onPress: () => setConfirm({ text: FINISH_LEAVE_TEXT, label: 'Concluir saída', run: () => mutate('community.leave', { community }) }) }
+                  : null
+              ]}
+            />
           </View>
           <ErrorText>{act.error}</ErrorText>
           {role === 'requested' ? <Soft>Pedido enviado: aguardando aprovação de um administrador.</Soft> : null}
@@ -454,42 +471,62 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
             <View>
               <SectionHeader>Administração</SectionHeader>
               <PanelRow label='Membros' open={panel === 'members'} onPress={() => openPanel('members')} />
-              <PanelRow label='Pedidos' open={panel === 'requests'} onPress={() => openPanel('requests')} />
-              {panel ? <ErrorText>{people.error}</ErrorText> : null}
-              {panel === 'requests' && !people.loading && people.rows.length === 0 ? <View style={styles.block}><Soft>Nenhum pedido agora.</Soft></View> : null}
-              {panel === 'requests'
-                ? people.rows.map((r) => (
-                  <View key={r.member} style={styles.hit}>
-                    <Text style={[styles.name, styles.hitText]} numberOfLines={1}>{personName(r)}</Text>
-                    <Pill label='aprovar' filled onPress={() => mutate('community.admit', { community, member: r.member, on: true })} pending={act.pending} />
-                    <Pill label='recusar' onPress={() => mutate('community.admit', { community, member: r.member, on: false })} pending={act.pending} />
-                  </View>
-                ))
-                : null}
+              {panel === 'members' ? <ErrorText>{people.error}</ErrorText> : null}
               {panel === 'members'
                 ? people.rows.map((m) => (
                   <View key={m.member} style={styles.hit}>
                     <Pressable
-                      style={styles.hitText}
+                      style={styles.hitWho}
                       accessibilityRole='link'
                       accessibilityLabel={personName(m) + ', ver perfil'}
                       disabled={typeof onOpenMember !== 'function'}
                       onPress={() => onOpenMember(m.member)}
                     >
-                      <Text style={styles.name} numberOfLines={1}>{personName(m)}</Text>
-                      <Text style={styles.handle}>{m.banned ? 'banido' : (m.member === info.creator ? 'criador' : (m.admin ? 'administrador' : ''))}</Text>
+                      <Avatar name={personName(m)} publicKey={m.member} size={40} />
+                      <View style={styles.hitText}>
+                        <Text style={styles.memberName} numberOfLines={1}>{personName(m)}</Text>
+                        {m.banned || m.member === info.creator || m.admin
+                          ? <Text style={styles.handle}>{m.banned ? 'banido' : (m.member === info.creator ? 'criador' : 'administrador')}</Text>
+                          : null}
+                      </View>
                     </Pressable>
                     {m.member !== info.creator && m.member !== ownKey && !m.admin
-                      ? (m.banned
-                          ? <Pill label='desbanir' onPress={() => mutate('community.ban', { community, member: m.member, on: false })} pending={act.pending} />
-                          : <Pill label='banir' danger pending={act.pending} onPress={() => setConfirm({ text: 'Banir ' + personName(m) + ' desta comunidade?', label: 'Banir', run: () => mutate('community.ban', { community, member: m.member, on: true }) })} />)
+                      ? (
+                        <MoreButton
+                          label={'ações de ' + personName(m)}
+                          title={personName(m)}
+                          actions={[m.banned
+                            ? { icon: 'ok', label: 'Desbanir', pending: act.pending, onPress: () => mutate('community.ban', { community, member: m.member, on: false }) }
+                            : { icon: 'slash', label: 'Banir', danger: true, pending: act.pending, onPress: () => setConfirm({ text: 'Banir ' + personName(m) + ' desta comunidade?', label: 'Banir', run: () => mutate('community.ban', { community, member: m.member, on: true }) }) }]}
+                        />
+                        )
                       : null}
                   </View>
                 ))
                 : null}
-              {panel && people.rows.length < people.total
-                ? <View style={styles.block}><Pill label={panel === 'members' ? 'mais membros' : 'mais pedidos'} onPress={() => loadPeople(panel, people.rows.length)} pending={people.loading} /></View>
+              {panel === 'members' && people.rows.length < people.total
+                ? <View style={styles.block}><Pill label='Mais membros' onPress={() => loadPeople('members', people.rows.length)} pending={people.loading} /></View>
                 : null}
+              {panel === 'members' ? <View style={styles.panelEnd} /> : null}
+              <PanelRow label='Pedidos' open={panel === 'requests'} onPress={() => openPanel('requests')} />
+              {panel === 'requests' ? <ErrorText>{people.error}</ErrorText> : null}
+              {panel === 'requests' && !people.loading && people.rows.length === 0 ? <View style={styles.block}><Soft>Nenhum pedido agora.</Soft></View> : null}
+              {panel === 'requests'
+                ? people.rows.map((r) => (
+                  <View key={r.member} style={styles.hit}>
+                    <View style={styles.hitWho}>
+                      <Avatar name={personName(r)} publicKey={r.member} size={40} />
+                      <Text style={[styles.name, styles.hitText]} numberOfLines={1}>{personName(r)}</Text>
+                    </View>
+                    <Pill icon='ok' accessibilityLabel={'Aprovar ' + personName(r)} filled onPress={() => mutate('community.admit', { community, member: r.member, on: true })} pending={act.pending} />
+                    <Pill icon='fechar' accessibilityLabel={'Recusar ' + personName(r)} onPress={() => mutate('community.admit', { community, member: r.member, on: false })} pending={act.pending} />
+                  </View>
+                ))
+                : null}
+              {panel === 'requests' && people.rows.length < people.total
+                ? <View style={styles.block}><Pill label='Mais pedidos' onPress={() => loadPeople('requests', people.rows.length)} pending={people.loading} /></View>
+                : null}
+              {panel === 'requests' ? <View style={styles.panelEnd} /> : null}
             </View>
             )
           : null}
@@ -501,13 +538,22 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
                 ? (
                   <View style={styles.block}>
                     <View style={styles.inline}>
-                      <Pill label='Só administradores' filled={info.memberInvite !== true} onPress={() => setInvitePolicy(false)} disabled={offline || info.memberInvite !== true} />
-                      <Pill label='Membros podem convidar' filled={info.memberInvite === true} onPress={() => setInvitePolicy(true)} disabled={offline || info.memberInvite === true} />
+                      <Pill label={info.memberInvite === true ? 'Membros podem convidar' : 'Só administradores'} iconEnd='escolher' onPress={() => setPolicyOpen(true)} disabled={offline} />
                     </View>
+                    <ActionsSheet
+                      open={policyOpen}
+                      onClose={() => setPolicyOpen(false)}
+                      title='Quem pode convidar'
+                      actions={[
+                        { label: 'Só administradores', selected: info.memberInvite !== true, disabled: offline || info.memberInvite !== true, onPress: () => setInvitePolicy(false) },
+                        { label: 'Membros podem convidar', selected: info.memberInvite === true, disabled: offline || info.memberInvite === true, onPress: () => setInvitePolicy(true) }
+                      ]}
+                    />
                     <Soft>Um convite só avisa a pessoa. Quem recebe escolhe se entra.</Soft>
                   </View>
                   )
                 : null}
+              {section === 'policy' ? <View style={styles.panelEnd} /> : null}
             </View>
             )
           : null}
@@ -523,9 +569,17 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
                       <ErrorText>{nameRefused}</ErrorText>
                       <Btn label='Renomear' onPress={rename} disabled={!nameOk || offline} pending={act.pending} />
                       <View style={styles.inline}>
-                        <Pill label='Aberta' filled={info.join === 'open'} onPress={() => setJoinMode('open')} disabled={offline || info.join === 'open'} />
-                        <Pill label='Com aprovação' filled={info.join === 'approval'} onPress={() => setJoinMode('approval')} disabled={offline || info.join === 'approval'} />
+                        <Pill label={info.join === 'open' ? 'Aberta' : 'Com aprovação'} iconEnd='escolher' onPress={() => setJoinOpen(true)} disabled={offline} />
                       </View>
+                      <ActionsSheet
+                        open={joinOpen}
+                        onClose={() => setJoinOpen(false)}
+                        title='Entrada na comunidade'
+                        actions={[
+                          { label: 'Aberta', selected: info.join === 'open', disabled: offline || info.join === 'open', onPress: () => setJoinMode('open') },
+                          { label: 'Com aprovação', selected: info.join === 'approval', disabled: offline || info.join === 'approval', onPress: () => setJoinMode('approval') }
+                        ]}
+                      />
                     </View>
                     <View style={styles.block}>
                       <Field
@@ -583,6 +637,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember }) {
                   </View>
                   )
                 : null}
+              {section === 'settings' ? <View style={styles.panelEnd} /> : null}
             </View>
             )
           : null}
@@ -609,6 +664,9 @@ const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   head: { alignItems: 'center', gap: space.sm, paddingHorizontal: space.lg, paddingTop: space.xl, paddingBottom: space.sm },
   title: { ...type.barTitle, color: colors.ink, textAlign: 'center' },
+  // The head is centred, so its meta and actions follow the avatar and name.
+  meta: { fontSize: 14, lineHeight: 20, color: colors.soft, textAlign: 'center' },
+  headActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: space.sm, flexWrap: 'wrap' },
   block: { paddingHorizontal: space.lg, paddingVertical: space.md, gap: space.sm },
   inline: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flexWrap: 'wrap' },
   row: {
@@ -621,10 +679,14 @@ const makeStyles = (colors) => StyleSheet.create({
     borderBottomColor: colors.line
   },
   chevronOpen: { transform: [{ rotate: '90deg' }] },
+  // Closes an open panel, so the next row does not read as part of its list.
+  panelEnd: { borderBottomWidth: 1, borderBottomColor: colors.line },
   pressed: { opacity: 0.6 },
   name: { ...type.postName, color: colors.ink, flex: 1 },
+  // No flex: in a name-over-role column, a flex name would fill the height and sit at the top.
+  memberName: { ...type.postName, color: colors.ink },
   handle: { ...type.postMeta, color: colors.soft },
-  hit: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingHorizontal: space.lg, paddingVertical: space.sm },
+  hit: { flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingHorizontal: space.lg, paddingVertical: space.sm, minHeight: 56 },
   hitWho: { flexDirection: 'row', alignItems: 'center', gap: space.md, flex: 1 },
   hitText: { flex: 1 }
 })

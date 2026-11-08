@@ -3,6 +3,26 @@
 'use strict'
 
 const test = require('brittle')
+const fs = require('fs')
+const path = require('path')
+
+test('page settings stack every confirmation above cancellation', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
+  const stacks = [...src.matchAll(/<ConfirmStack\s+confirm=\{([\s\S]*?)\s+cancel=\{(<Btn[^\n]+)\n\s+\/>/g)]
+  t.is(stacks.length, 4, 'remove, transfer, move and close each have a stack')
+  for (const [label, action, pending] of [
+    ['Remover', '() => remove(confirm.key)', 'removeAct.pending'],
+    ['Transferir', 'transfer', 'transferAct.pending'],
+    ['Mudar a chave', 'movePage', 'lifeAct.pending'],
+    ['Encerrar de vez', 'closePage', 'lifeAct.pending']
+  ]) {
+    const stack = stacks.find((m) => m[1].includes("label='" + label + "'"))
+    t.ok(stack && stack[1].includes('onPress={' + action + '} pending={' + pending + '}'), label + ' retains its action and pending state')
+    t.ok(stack && stack[2].includes("label='Cancelar' secondary") && stack[2].includes('disabled={' + pending + '}'), label + ' keeps cancellation below and disabled while pending')
+  }
+  const close = stacks.find((m) => m[1].includes("label='Encerrar de vez'"))
+  t.ok(close && close[1].includes("life.step === 1\n                              ? <Btn label='Continuar'"), 'closing still asks twice in the same stack')
+})
 
 const load = () => import('../src/pages.js')
 const loadAccount = () => import('../src/account.js')

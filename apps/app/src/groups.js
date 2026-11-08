@@ -304,7 +304,7 @@ export function stateLabel (state) {
 
 export function membersLabel (n) {
   if (!Number.isSafeInteger(n) || n < 0) return ''
-  return n === 1 ? '1 membro' : n + ' membros'
+  return n === 1 ? '1\u00a0membro' : n + '\u00a0membros'
 }
 
 // --- join links ---

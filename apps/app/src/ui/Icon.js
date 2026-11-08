@@ -50,7 +50,14 @@ const GLYPHS = {
   pausar: 'pause',
   parar: 'square',
   sorriso: 'smile',
-  clipe: 'paperclip'
+  clipe: 'paperclip',
+  mensagem: 'mail',
+  esquerda: 'arrow-left',
+  direita: 'arrow-right',
+  baixo: 'arrow-down',
+  escolher: 'chevron-down',
+  info: 'info',
+  sair: 'log-out'
 }
 
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the

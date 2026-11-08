@@ -503,7 +503,7 @@ test('Conversar is offered only for an open page on a hosted node with pages ena
   t.ok(src.includes('{PAGE_DM_NOTICE}'), 'the profile shows the shared page notice')
   const anuncio = readFileSync(join(__dirname, '../src/screens/Anuncio.js'), 'utf8')
   t.ok(anuncio.includes('listing.page === true && !pageNoticeSeen(pageNoticeStore(), listing.author)'), 'Conversar on a page listing shows the same notice first')
-  t.ok(src.includes("<Pill label='Conversar' onPress={openPageConversation}"))
+  t.ok(src.includes("<Pill icon='mensagem' label='Conversar' onPress={openPageConversation}"))
   t.ok(src.includes('onPress={() => onOpenListings(author)}'))
   t.ok(src.includes("const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'"), 'listings require a hosted node and stay hidden on a moved page')
 })

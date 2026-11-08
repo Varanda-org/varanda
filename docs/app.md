@@ -257,7 +257,9 @@ A barra de baixo mostra só ícones, sem palavras (os leitores de tela continuam
   - **Avançado › Identidade técnica.** A chave pública (atrás de "mostrar chave"), a associação e o estado do certificado de membro; aceita colar o JSON do certificado emitido pela associação.
   - **Avançado › Recomeçar** (sempre que há uma passkey, inclusive no app instalado), com confirmação "Apagar e recomeçar".
 
-Na web, as folhas fecham com Escape.
+Na web, as folhas fecham com Escape. Escape (e, no Android, o botão voltar) fecha só a camada de cima: folha, menu, visualizador ou editor de foto; a tela de baixo só volta quando não há camada aberta, e numa subpágina de Ajustes volta para a lista.
+
+Uma ação principal por fileira. Cada fileira tem no máximo uma pílula cheia (Seguir, Aceitar, Publicar, Salvar); as demais ações visíveis são pílulas de contorno ou ícones, e as raras ficam no botão de mais (três pontos), que abre uma folha de ações. Uma fileira de ações nunca quebra em duas linhas nem espreme um rótulo: no perfil são duas pílulas e o botão de mais; numa confirmação, a ação e Cancelar ficam empilhadas em largura total. O desenho de cada peça está em [app-design.md](../apps/site/artwork/app-design.md) ("Componentes").
 
 ### Nomes
 

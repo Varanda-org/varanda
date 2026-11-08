@@ -29,12 +29,12 @@ import { isUsername, lookupUsername, usernameMatches } from '../account'
 import { whoOf } from '../who'
 import { HELP, SHORT } from '../help'
 import { PARTIAL_KEY_TEXT } from '../followInput'
-import { SEARCH_BUTTON, SEARCH_CLEAR, SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_TRUNCATED } from '../topics'
+import { SEARCH_CLEAR, SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_TRUNCATED } from '../topics'
 import {
   BUSCA_EMPTY, BUSCA_EMPTY_CODE, BUSCA_LABEL, BUSCA_NOT_HOSTED, BUSCA_NOT_HOSTED_TITLE, BUSCA_PLACEHOLDER, CATEGORIES, CATEGORY_LABEL,
   CODE_FIELD_LABEL, buscaNotice, debouncePlan, plan, staleGuard
 } from '../buscaGlobal'
-import { Btn, ErrorText, Notice, Soft, useAction, useBottomPad } from '../ui'
+import { ErrorText, Notice, Soft, useAction, useBottomPad } from '../ui'
 import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { MemberRow } from '../ui/MemberRow'
@@ -263,7 +263,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
         : null}
       {cls.kind === 'partial-key' ? <Soft>{PARTIAL_KEY_TEXT}</Soft> : null}
       {handle !== null && !hits.some((h) => typeof h.username === 'string' && h.username.toLowerCase() === handle)
-        ? <View style={styles.addRow}><Pill label={'Seguir @' + handle} filled onPress={doAdd} pending={add.pending} disabled={changing || offline || !followsReady} /></View>
+        ? <View style={styles.addRow}><Pill label='Seguir' accessibilityLabel={'seguir @' + handle} filled onPress={doAdd} pending={add.pending} disabled={changing || offline || !followsReady} /></View>
         : null}
       {searchable && (offline || search.phase === 'offline') ? <Soft>A busca precisa de internet.</Soft> : null}
       {searchable && search.phase === 'short' ? <Soft>Digite pelo menos 2 letras.</Soft> : null}
@@ -271,7 +271,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
         ? (
           <>
             <ErrorText>{search.error}</ErrorText>
-            <View style={styles.addRow}><Pill label='tentar de novo' onPress={handleRetry} /></View>
+            <View style={styles.addRow}><Pill label='Tentar de novo' onPress={handleRetry} /></View>
           </>
           )
         : null}
@@ -301,7 +301,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
         ? (
           <>
             <Soft>Não deu para conferir todo mundo agora.</Soft>
-            <View style={styles.addRow}><Pill label='tentar de novo' onPress={handleRetry} /></View>
+            <View style={styles.addRow}><Pill label='Tentar de novo' onPress={handleRetry} /></View>
           </>
           )
         : null}
@@ -480,13 +480,6 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
             />
             )
           : null}
-        {category === 'publicacoes' && postsGate === null
-          ? (
-            <View style={styles.postActions}>
-              <Btn label={SEARCH_BUTTON} onPress={submit} disabled={draft.trim() === ''} secondary />
-            </View>
-            )
-          : null}
       </View>
       <View style={styles.tabs} accessibilityRole='tablist'>
         {CATEGORIES.map((k) => {
@@ -514,20 +507,19 @@ const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   hidden: { display: 'none' },
   top: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, gap: 8 },
-  postActions: { gap: 8 },
   search: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: space.sm,
     paddingHorizontal: space.md,
-    height: layout.hit,
+    minHeight: layout.hit,
     borderRadius: radius.md,
     borderWidth: 1.5,
     borderColor: 'transparent',
     backgroundColor: colors.inputOff
   },
   searchFocused: { borderColor: colors.accent, backgroundColor: colors.card },
-  input: { ...type.postText, flex: 1, minWidth: 0, height: layout.hit - 3, paddingVertical: 0, color: colors.ink },
+  input: { ...type.postText, flex: 1, minWidth: 0, minHeight: layout.hit - 3, paddingVertical: 0, color: colors.ink },
   clear: { minWidth: space.xl, minHeight: space.xl, alignItems: 'center', justifyContent: 'center' },
   pane: { paddingVertical: 12, paddingHorizontal: 16, gap: 8 },
   bleed: { marginHorizontal: -16 },

@@ -45,7 +45,8 @@
 // it (VoiceBubble).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Keyboard, KeyboardAvoidingView, Pressable, StyleSheet, Text, View } from 'react-native'
+import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars } from '../format'
@@ -58,7 +59,7 @@ import {
   EMPTY_PAGES, OWN_LABEL, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PRIVATE_LABEL, REKEY_PENDING_LABEL,
   applyPage, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
 } from '../groups'
-import { Btn, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
+import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
 import { Bubble } from '../ui/Bubble'
@@ -66,6 +67,7 @@ import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
 import { cardForSend, withCardFallback } from '../linkCard'
 import { ChatHeader } from '../ui/ChatHeader'
 import { Icon } from '../ui/Icon'
+import { MoreButton } from '../ui/MoreButton'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -107,6 +109,7 @@ const JOINABLE = [null, 'left', 'pending']
 
 export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMention, onReport, onSeen, isTop = true }) {
   const styles = useStyles(makeStyles)
+  const avoidKeyboard = useKeyboardAvoidEnabled()
   const { colors } = useTheme()
   const node = useNode()
   const hosted = node.hosted === true
@@ -780,6 +783,41 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
     if (lastId !== null) scrollToEnd()
   }, [lastId])
 
+  // The keyboard shrinks the list: when the person was reading the newest
+  // line, keep it above the composer instead of behind it (as in Mensagem).
+  // Only a scroll leaves the bottom: a frame where just the list or its
+  // content changed size (the keyboard, a sheet closing, a new line) keeps
+  // the state, or the newest line stayed behind the composer afterwards.
+  const atBottom = useRef(true)
+  const lastY = useRef(null)
+  const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
+    const bottom = y + layoutHeight >= contentHeight - 48
+    const resized = lastY.current !== null && y === lastY.current
+    lastY.current = y
+    if (resized && !bottom) return
+    atBottom.current = bottom
+  }, [])
+  useEffect(() => {
+    let timers = []
+    const clear = () => { timers.forEach(clearTimeout); timers = [] }
+    const sub = Keyboard.addListener('keyboardDidShow', () => {
+      if (!atBottom.current) return
+      clear()
+      const toEnd = () => {
+        const list = listRef.current
+        if (list && typeof list.scrollToEnd === 'function') list.scrollToEnd({ animated: true })
+      }
+      // Twice: on Android the keyboard padding turns on with a re-render
+      // (src/ui/keyboardAvoid.js), so the list shrinks after this event and
+      // the first scroll can land before it (the newest message stayed under the composer).
+      timers = [setTimeout(toEnd, 50), setTimeout(toEnd, 300)]
+    })
+    return () => {
+      clear()
+      sub.remove()
+    }
+  }, [])
+
   // A buried screen keeps re-reading but never marks; a failed or unfinished
   // read marks nothing. Keyed on the newest message on screen, so any paint
   // marks it; uncovering the screen or bringing the app back marks what
@@ -936,9 +974,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
         {check.change.action === 'post' && check.verdict !== 'not-landed' ? <Soft>Confira se a mensagem já apareceu antes de enviar de novo.</Soft> : null}
         <View style={styles.inline}>
           {check.verdict === 'not-landed'
-            ? <Pill label='tentar de novo' onPress={() => { setCheck(null); check.retry() }} />
-            : <Pill label='conferir' onPress={() => settle(check.change, check.retry)} />}
-          <Pill label='dispensar' onPress={() => setCheck(null)} />
+            ? <Pill label='Tentar de novo' filled onPress={() => { setCheck(null); check.retry() }} />
+            : <Pill label='Conferir' filled onPress={() => settle(check.change, check.retry)} />}
+          <Pill label='Dispensar' onPress={() => setCheck(null)} />
         </View>
       </View>
       )
@@ -948,10 +986,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
     ? (
       <View style={styles.note}>
         <Soft>Banir {displayText(whoOf(profileFor(banTarget)).title)} deste grupo? A pessoa não poderá mais escrever aqui.</Soft>
-        <View style={styles.inline}>
-          <Pill label='banir' danger onPress={() => ban(banTarget)} pending={act.pending} />
-          <Pill label='cancelar' onPress={() => setBanTarget(null)} />
-        </View>
+        <ConfirmStack
+          confirm={{ label: 'Banir', danger: true, onPress: () => ban(banTarget), pending: act.pending }}
+          cancel={{ onPress: () => setBanTarget(null) }}
+        />
       </View>
       )
     : null
@@ -986,7 +1024,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
         {store.next
           ? (
             <View style={styles.older}>
-              <Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} />
+              <Pill label='Mensagens anteriores' onPress={loadOlder} pending={loadingMore} />
               <ErrorText>{moreError}</ErrorText>
             </View>
             )
@@ -995,7 +1033,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
           ? (
             <View style={styles.note}>
               <ErrorText>{infoError}</ErrorText>
-              <Pill label='tentar de novo' onPress={() => load()} pending={loading || refreshing} />
+              <Pill label='Tentar de novo' onPress={() => load()} pending={loading || refreshing} />
             </View>
             )
           : null}
@@ -1047,7 +1085,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
       list.push({ icon: row.hidden ? 'olho' : 'olho_fechado', label: row.hidden ? 'Mostrar' : 'Esconder', onPress: () => hide(row, !row.hidden) })
     }
     if (!asPage.page && can('ban', role) && !!row.diary && !mine) {
-      list.push({ icon: 'fechar', label: 'Banir', danger: true, onPress: () => setBanTarget(row) })
+      list.push({ icon: 'slash', label: 'Banir', danger: true, onPress: () => setBanTarget(row) })
     }
     if (typeof onReport === 'function' && !!row.diary && !mine && !row.hidden) {
       list.push({ icon: 'bandeira', label: 'Denunciar', danger: true, onPress: () => report(row) })
@@ -1126,8 +1164,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
             ? (
               <View style={styles.mediaHold}>
                 <Soft>{CHECK_UNKNOWN}</Soft>
-                {mediaHold.checking ? null : <Pill label='tentar de novo' onPress={retryMedia} pending={sendingMedia} />}
-                <Pill label='descartar' onPress={cancelMedia} />
+                {mediaHold.checking ? null : <Pill label='Tentar de novo' onPress={retryMedia} pending={sendingMedia} />}
+                <Pill label='Descartar' onPress={cancelMedia} />
               </View>
               )
             : null}
@@ -1150,7 +1188,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
         onRemoveAttachment={mediaHold === null ? attachments.remove : undefined}
         onCancelAttachments={mediaHold === null && !(mediaSend && mediaSend.phase === 'sending') ? cancelMedia : undefined}
         progress={sendingMedia ? mediaSend.progress : null}
-        placeholder={meta.state === 'rekey-pending' || awaitingKey ? REKEY_PENDING_LABEL : 'Escreva uma mensagem'}
+        placeholder={meta.state === 'rekey-pending' || awaitingKey ? REKEY_PENDING_LABEL : 'Mensagem'}
         accessibilityLabel='mensagem para o grupo'
         reply={replyBar ? { name: replyBar.name, text: replyBar.text, senderKey: replyBar.senderKey, mine: replyBar.mine } : null}
         onCancelReply={() => setReplyKey(null)}
@@ -1161,10 +1199,11 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
     )
   }
 
-  // On iOS the keyboard opens over the bottom composer unless the screen
-  // shrinks for it (Android resizes the window itself: adjustResize).
+  // The keyboard opens over the bottom composer unless the screen shrinks for
+  // it: iOS never resizes, and Android runs edge to edge (targetSdk 36), where
+  // adjustResize no longer resizes the window either. On the web it is a View.
   return (
-    <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView style={styles.root} behavior='padding' enabled={avoidKeyboard}>
       <ChatHeader
         title={nameText}
         subtitle={subtitle}
@@ -1183,9 +1222,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
             {pageRoleLabel(pageRole) ? null : <Soft>{AS_PAGE_LABEL}</Soft>}
             <View style={styles.inline}>
               {pageRole === 'member' || pageRole === 'requested'
-                ? <Pill label={PAGE_LEAVE_LABEL} onPress={() => pageMembership(pageStatement('group-leave', { group }))} pending={pagePending} />
+                ? <MoreButton title={AS_PAGE_LABEL} actions={[{ icon: 'sair', label: PAGE_LEAVE_LABEL, danger: true, pending: pagePending, onPress: () => pageMembership(pageStatement('group-leave', { group })) }]} />
                 : <Btn label={PAGE_JOIN_LABEL} onPress={enter} pending={pagePending} disabled={!node.online} />}
-              {pageRetry ? <Pill label='conferir de novo' onPress={pageRetry} pending={pagePending} /> : null}
+              {pageRetry ? <Pill label='Conferir de novo' onPress={pageRetry} pending={pagePending} /> : null}
             </View>
             <ErrorText>{pageError}</ErrorText>
           </View>
@@ -1205,6 +1244,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onOpenMen
         onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
         refreshing={refreshing}
         keepVisiblePosition
+        onScrollFrame={trackBottom}
       />
       {composer}
       {!asPage.page

@@ -39,6 +39,7 @@ import { isAppClient } from '../appClient'
 import { chatMediaKey, isVoiceItem, onChatMediaReturn, pinChatMedia, shouldLoad, sourceFor } from '../media/chatMedia'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { chatMediaLayout, itemSize } from '../chatSend'
+import { useEscapeLayer } from './escapeLayer'
 import { Icon } from './Icon'
 import { MediaView } from './MediaView'
 import { VOICE_HEIGHT, VOICE_WIDTH, VoiceBubble } from './VoiceBubble'
@@ -157,6 +158,8 @@ function Viewer ({ uri, onClose }) {
   const styles = useStyles(makeStyles)
   const insets = useSafeAreaInsets()
   usePinned(uri)
+  // Escape closes only the photo, never the conversation behind it.
+  useEscapeLayer(uri !== null, onClose, 'viewer')
   return (
     <Modal visible={uri !== null} transparent animationType='fade' statusBarTranslucent onRequestClose={onClose}>
       <View style={styles.viewer}>

@@ -4,8 +4,25 @@
 // for a real change, one upload for a new photo, the plain first profile
 // before an upload, and the uncertain re-read check.
 const test = require('brittle')
+const fs = require('fs')
+const path = require('path')
 
 const load = () => import('../src/profileSave.js')
+
+test('Perfil stacks version deletion above cancellation', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Perfil.js'), 'utf8')
+  t.ok(/<ConfirmStack\s+confirm=\{<Btn label='Apagar versão' danger onPress=\{\(\) => remove\(v\)\} pending=\{action.pending\} \/>\}\s+cancel=\{<Btn label='Cancelar' secondary onPress=\{\(\) => \{ action.clearError\(\); setConfirm\(null\) \}\} disabled=\{action.pending\} \/>\}/.test(src), 'the original deletion and cancel actions use ConfirmStack')
+})
+
+test('Perfil: Salvar waits for the photo editor, flush versions header, capitalised labels', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Perfil.js'), 'utf8')
+  const embedded = src.slice(src.indexOf('if (embedded) {'), src.indexOf('if (page) {'))
+  const gate = embedded.indexOf('{editor === null')
+  t.ok(gate > 0 && embedded.indexOf("<Pill label='Salvar'") > gate, 'Salvar only with the editor closed')
+  t.is(src.split('<SectionHeader flush>Versões do perfil</SectionHeader>').length - 1, 2, 'the header lines up with the page')
+  t.ok(src.includes('i > 0 && styles.versionRule'), 'no double rule under the header')
+  t.ok(src.includes("label={'Nome ('") && src.includes("label={'Bio ('"))
+})
 
 const desc = (fill) => ({
   core: fill.repeat(64),
@@ -111,4 +128,16 @@ test('planSave: a replaced photo uploads once and only then sends the new key', 
   // Name and bio edited with the photo kept: no avatar key, no upload.
   const kept = planSave({ name: 'Bia', bio: 'x', draft: undefined, current })
   t.alike(kept, { firstPlain: false, needsUpload: false, params: { name: 'Bia', bio: 'x' } })
+})
+
+test('the photo editor owns the sheet header while it is open', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Perfil.js'), 'utf8')
+  t.ok(src.includes("right={editor !== null ? null : <Pill label='Salvar'"), 'no header Salvar while editing the photo')
+  t.ok(src.includes("accessibilityLabel='voltar ao perfil' onPress={closeEditor}"), 'the header back closes only the editor, never the draft')
+})
+
+test('Android: the profile form pads only while the keyboard is open, and back closes only the photo editor', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Perfil.js'), 'utf8')
+  t.ok(src.includes('keyboardVerticalOffset={top} enabled={avoidKeyboard}') && src.includes('useKeyboardAvoidEnabled()'), 'no blank band after the keyboard closes')
+  t.ok(src.includes('onBack={editor !== null ? closeEditor : undefined}'), 'back in the editor keeps the sheet and its draft')
 })
