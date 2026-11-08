@@ -239,8 +239,9 @@ test('peek.read: the blocked diary and the reposts of it leave the Espiadinha, a
   const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [X, Y] })
   const { web, internal } = await webNode(t, assoc, seeder.url)
 
+  // Diary keys are random, so both sides sort the same way.
   const rows = (r) => r.items.map((i) => [i.kind, i.author, i.seq]).sort()
-  t.alike(rows(await web.request('peek.read', {})), [['post', x, 2], ['post', y, 2], ['repost', y, 3]])
+  t.alike(rows(await web.request('peek.read', {})), [['post', x, 2], ['post', y, 2], ['repost', y, 3]].sort())
 
   await web.request('block.set', { key: x, on: true })
   const after = await web.request('peek.read', {})
