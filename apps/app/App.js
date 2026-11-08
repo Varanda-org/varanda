@@ -374,7 +374,7 @@ function Member () {
     setPeekVersion((v) => v + 1)
   }, [])
   // A block or an unblock changes what A Rua and the Espiadinha may read.
-  const { changed: blocksChanged } = useBlocks()
+  const { changed: blocksChanged, refresh: refreshBlocks } = useBlocks()
   useEffect(() => {
     if (blocksChanged === 0) return
     setVersion((v) => v + 1)
@@ -1860,6 +1860,8 @@ function Member () {
         setRemoteSeen(result.avisos)
       }
       if (result.dmChanged) bumpDm()
+      // Another device of the passkey blocked or unblocked someone.
+      if (result.blocksChanged) refreshBlocks().catch(() => {})
       if (result.groupChanged) {
         bumpSeen()
         const taken = snap.value

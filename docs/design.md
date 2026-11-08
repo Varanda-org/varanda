@@ -339,7 +339,7 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 
 ## Moderação e obrigações legais
 
-O bloqueio pessoal é outra coisa: cada membro decide o que não quer ver, e nada sai do aparelho dele (`docs/app.md`, "Bloquear uma pessoa"). Ele filtra só as leituras de quem bloqueou. Como os diários são públicos e replicados, não impede a outra pessoa de ler, seguir ou responder, e ela não é avisada. O que segue trata da moderação da associação.
+O bloqueio pessoal é outra coisa: cada membro decide o que não quer ver (`docs/app.md`, "Bloquear uma pessoa"). Os aparelhos da mesma passkey compartilham a lista pelo bloco cifrado de vistos, que o serviço de conta não consegue ler. Ele filtra só as leituras de quem bloqueou. Como os diários são públicos e replicados, não impede a outra pessoa de ler, seguir ou responder, e ela não é avisada. O que segue trata da moderação da associação.
 
 Numa rede P2P não dá para apagar uma cópia de todos os aparelhos, então a moderação funciona por uma lista assinada que os nós honestos obedecem. A lista existe desde a PR B2 (`docs/protocol.md` seção 3), e as denúncias de dentro do app e o painel da equipe, desde a PR B3 (`docs/verification.md` seção 14).
 

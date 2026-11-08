@@ -2982,7 +2982,10 @@ function createBrowserSession ({
       if (key === own) throw new UsageError('não é possível bloquear a própria chave')
       const r = applyBlock(await store.readMemberBlocks(storage), key, on, Math.floor(Date.now() / 1000))
       if (r.full) throw new UsageError('limite de bloqueios atingido')
-      if (r.changed) await store.writeMemberBlocks(storage, r.entries)
+      if (r.changed) {
+        await store.writeMemberBlocks(storage, r.entries)
+        seenChanged()
+      }
       if (on && (await store.readFollows(storage)).includes(key)) {
         try {
           const f = await withStore((c) => member.followChange(c, key, false))

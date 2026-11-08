@@ -585,3 +585,15 @@ test('rememberSent keeps the newest tokens up to its cap', async (t) => {
   rememberSent(set, { own: [h(1), h(4)], pages: {} }, 3)
   t.alike([...set], [h(3), h(1), h(4)], 'resent tokens move to the newest end; the oldest leaves')
 })
+
+test('blocksChanged: any merge of the pass that brought a change reports it', async (t) => {
+  const { runSeenPass } = await load()
+  const quiet = harness({ read: { hash: null, blob: null }, finish: [], merges: [res(false)] })
+  t.is((await runSeenPass({ member: MEMBER, request: quiet.request, http: quiet.http, avisos: AVISOS })).blocksChanged, false)
+  const h = harness({
+    read: { hash: null, blob: null },
+    finish: [{ ok: true, hash: 'hh' }],
+    merges: [res(true, { blocksChanged: true }), res(false)]
+  })
+  t.is((await runSeenPass({ member: MEMBER, request: h.request, http: h.http, avisos: AVISOS })).blocksChanged, true)
+})
