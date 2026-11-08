@@ -13,6 +13,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
+import { useBlocks } from '../blocksProvider'
+import { withoutBlockedRefs } from '../memberBlocks'
 import { useNames } from '../names'
 import { fetchEngagers } from '../indexClient'
 import { planPeeks } from '../thread'
@@ -81,6 +83,7 @@ function EngagerRow ({ row, onOpen }) {
 export default function Curtidas ({ entry, onBack, onOpenMember }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
+  const blocks = useBlocks()
   const names = useNames()
   const bottomPad = useBottomPad()
   const focal = entry.key
@@ -112,9 +115,10 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
     if (!alive()) return null
     if (!res.ok) return { error: errorFor(res.reason), down: false }
     const value = res.value
+    const items = withoutBlockedRefs(value.items, blocks.has)
     const peeked = new Map()
     try {
-      await peekAll(request, planPeeks({ refs: value.items, authors: value.authors }), peeked, alive)
+      await peekAll(request, planPeeks({ refs: items, authors: value.authors }), peeked, alive)
     } catch (err) {
       if (!alive()) return null
       if (isUnsupported(err)) return { unsupported: true }
@@ -122,9 +126,9 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
       return { error: down ? SEEDER_DOWN : errorText(err), down }
     }
     if (!alive()) return null
-    const { rows, unconfirmed } = confirmEngagers({ kind: k, focal, items: value.items, peeked })
+    const { rows, unconfirmed } = confirmEngagers({ kind: k, focal, items, peeked })
     return { value, rows, unconfirmed, peeked }
-  }, [focal, request])
+  }, [focal, request, blocks.has])
 
   const load = useCallback(async (k, refreshing) => {
     if (!hosted) return

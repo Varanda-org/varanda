@@ -190,6 +190,9 @@
           "android": {
             "minSdkVersion": 31,
             "useLegacyPackaging": true
+          },
+          "ios": {
+            "deploymentTarget": "18.0"
           }
         }
       ]

@@ -55,13 +55,14 @@ function badReply (code) {
 }
 
 export async function runSeenPass ({ member, request, http, avisos }) {
-  const out = { avisos: null, pushed: false, dmChanged: false, groupChanged: false, caughtUp: [], error: null }
+  const out = { avisos: null, pushed: false, dmChanged: false, groupChanged: false, blocksChanged: false, caughtUp: [], error: null }
 
   const merge = async (params) => {
     const res = await request('seen.merge', params)
     if (!res || typeof res !== 'object') throw badReply('indisponivel')
     if (res.dmChanged === true) out.dmChanged = true
     if (res.groupChanged === true) out.groupChanged = true
+    if (res.blocksChanged === true) out.blocksChanged = true
     if (Array.isArray(res.caughtUp)) {
       for (const k of res.caughtUp) {
         if (out.caughtUp.length >= CAUGHT_UP_MAX) break

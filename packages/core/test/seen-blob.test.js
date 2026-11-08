@@ -20,6 +20,9 @@ const {
   TOKEN_ENTRY_BYTES,
   PAGE_HEAD_BYTES,
   GROUP_ENTRY_BYTES,
+  BLOCK_ENTRY_BYTES,
+  SYNC_BLOCKS_MAX,
+  SEEN_VERSION,
   seenKeyFromSeed,
   trim,
   encode,
@@ -75,15 +78,16 @@ test('sizes and caps', (t) => {
   t.is(SEEN_BLOB_BYTES, 32808)
   t.is(SEEN_BLOB_B64, 43744)
   t.is(b4a.toString(b4a.alloc(SEEN_BLOB_BYTES), 'base64').length, SEEN_BLOB_B64)
-  t.is(HEADER_BYTES, 76)
+  t.is(HEADER_BYTES, 77)
   t.is(MERGE_AVISOS_MAX, 256)
   t.is(MERGE_PAGE_TOKENS_MAX, 32)
   const atCaps = HEADER_BYTES +
     SYNC_AVISOS_MAX * TOKEN_ENTRY_BYTES +
     SYNC_PAGES_MAX * (PAGE_HEAD_BYTES + SYNC_PAGE_TOKENS_MAX * TOKEN_ENTRY_BYTES) +
     SYNC_DM_MAX * TOKEN_ENTRY_BYTES +
-    SYNC_GROUPS_MAX * GROUP_ENTRY_BYTES
-  t.is(atCaps, 32336)
+    SYNC_GROUPS_MAX * GROUP_ENTRY_BYTES +
+    SYNC_BLOCKS_MAX * BLOCK_ENTRY_BYTES
+  t.is(atCaps, 32753)
   t.ok(atCaps <= SEEN_PLAIN_BYTES)
 })
 
@@ -149,7 +153,7 @@ test('wrong member or association header opens null', (t) => {
 test('unknown version is unsupported, bad fields are null', (t) => {
   const bytes = encode(emptyDoc())
   const v2 = b4a.from(bytes)
-  v2[0] = 2
+  v2[0] = SEEN_VERSION + 1
   t.alike(decode(v2, EXPECT), { unsupported: true })
   const key = seenKeyFromSeed(crypto.randomBytes(32), ASSOC, MEMBER)
   const nonce = crypto.randomBytes(SEEN_NONCE_BYTES)
@@ -384,4 +388,95 @@ test('derived key differs across association, member and domain', (t) => {
   t.unlike(otherDomain, k)
   t.exception.all(() => seenKeyFromSeed(seed.subarray(0, 31), ASSOC, MEMBER))
   t.exception.all(() => seenKeyFromSeed(seed, 'x', MEMBER))
+})
+
+const keyOfBlock = (i) => i.toString(16).padStart(64, '0')
+const blockEntry = (i, on, t) => ({ key: keyOfBlock(i), on, t })
+
+test('blocks: round trip, a document without them, a bad on byte, a count past the cap', (t) => {
+  const blocks = [blockEntry(1, true, 10), blockEntry(2, false, 20)]
+  const doc = { ...emptyDoc(), blocks }
+  t.alike(decode(encode(doc), EXPECT).blocks, blocks)
+  t.alike(decode(encode(emptyDoc()), EXPECT).blocks, [], 'none reads as an empty list')
+
+  const bytes = encode(doc)
+  const badOn = b4a.from(bytes)
+  badOn[HEADER_BYTES + 32] = 2
+  t.is(decode(badOn, EXPECT), null, 'on is 0 or 1')
+  const tooMany = b4a.from(bytes)
+  tooMany[HEADER_BYTES - 1] = SYNC_BLOCKS_MAX + 1
+  t.is(decode(tooMany, EXPECT), null)
+  t.exception.all(() => encode({ ...emptyDoc(), blocks: [{ key: 'x', on: true, t: 1 }] }), /block entries/)
+  t.exception.all(() => encode({ ...emptyDoc(), blocks: 'x' }), /blocks must be/)
+})
+
+test('blocks: the window keeps the newest entries', (t) => {
+  const list = []
+  for (let i = 0; i < SYNC_BLOCKS_MAX + 4; i++) list.push(blockEntry(i + 1, true, 100 + i))
+  const back = decode(encode({ ...emptyDoc(), blocks: list }), EXPECT).blocks
+  t.is(back.length, SYNC_BLOCKS_MAX)
+  t.is(back[0].t, 104, 'the oldest went first')
+})
+
+test('blocks: at every cap the document still fits', (t) => {
+  const blocks = []
+  for (let i = 0; i < SYNC_BLOCKS_MAX; i++) blocks.push(blockEntry(i + 1, i % 2 === 0, 100 + i))
+  const doc = { ...fullDoc(), blocks }
+  const back = decode(encode(doc), EXPECT)
+  t.is(back.blocks.length, SYNC_BLOCKS_MAX)
+  t.is(back.dm.length, SYNC_DM_MAX)
+  t.is(back.groups.length, SYNC_GROUPS_MAX)
+})
+
+test('blocks: the merge keeps the newer entry per key, in any order, and repeats to the same result', (t) => {
+  const key = keyOfBlock(1)
+  const a = { ...emptyDoc(), blocks: [{ key, on: true, t: 10 }, blockEntry(2, true, 5)] }
+  const b = { ...emptyDoc(), blocks: [{ key, on: false, t: 20 }, blockEntry(3, true, 7)] }
+  const ab = merge(a, b).doc
+  const ba = merge(b, a).doc
+  t.alike(ab.blocks, ba.blocks, 'commutative')
+  t.alike(ab.blocks, [blockEntry(2, true, 5), blockEntry(3, true, 7), { key, on: false, t: 20 }], 'the unblock is newer and stays')
+  t.alike(merge(ab, b).doc.blocks, ab.blocks, 'idempotent')
+
+  const on = { ...emptyDoc(), blocks: [{ key, on: true, t: 9 }] }
+  const off = { ...emptyDoc(), blocks: [{ key, on: false, t: 9 }] }
+  t.alike(merge(on, off).doc.blocks, [{ key, on: true, t: 9 }], 'at equal times the block wins')
+  t.alike(merge(off, on).doc.blocks, [{ key, on: true, t: 9 }])
+})
+
+test('blocks: a change makes the merge localOnly, the same list does not', (t) => {
+  const key = keyOfBlock(1)
+  const remote = { ...emptyDoc(), blocks: [{ key, on: true, t: 9 }] }
+  t.is(merge({ ...emptyDoc(), blocks: [{ key, on: false, t: 10 }] }, remote).localOnly, true)
+  t.is(merge({ ...emptyDoc(), blocks: [{ key, on: true, t: 9 }] }, remote).localOnly, false)
+  t.is(sameContent({ ...emptyDoc(), blocks: [] }, { ...emptyDoc(), blocks: [{ key, on: true, t: 9 }] }), false)
+})
+
+test('version 1 is still read: no blocks, more dm tokens, cut to the new window, and written back as version 2', (t) => {
+  // A version 1 plaintext written by hand: its 76-byte header has no nBlocks.
+  const n = SYNC_DM_MAX + 40
+  const bytes = b4a.alloc(SEEN_PLAIN_BYTES)
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  bytes[0] = 1
+  view.setUint32(2, 3, true)
+  bytes.set(b4a.from(MEMBER, 'hex'), 6)
+  bytes.set(b4a.from(ASSOC, 'hex'), 38)
+  view.setUint16(70, 0, true)
+  bytes[72] = 0
+  view.setUint16(73, n, true)
+  bytes[75] = 0
+  let off = 76
+  for (let i = 0; i < n; i++) {
+    bytes.set(b4a.from(i.toString(16).padStart(32, '0'), 'hex'), off); off += 16
+    view.setUint32(off, 1000 + i, true); off += 4
+  }
+  const doc = decode(bytes, EXPECT)
+  t.is(doc.gen, 3)
+  t.alike(doc.blocks, [])
+  t.is(doc.dm.length, SYNC_DM_MAX, 'the newest stay')
+  t.is(doc.dm[doc.dm.length - 1].t, 1000 + n - 1)
+  const again = encode({ ...doc, blocks: [blockEntry(1, true, 5)] })
+  t.is(again[0], SEEN_VERSION)
+  t.is(SEEN_VERSION, 2)
+  t.alike(decode(again, EXPECT).blocks, [blockEntry(1, true, 5)])
 })

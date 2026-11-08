@@ -17,6 +17,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
+import { useBlocks } from '../blocksProvider'
+import { withoutBlockedKeys } from '../memberBlocks'
 import { useNames } from '../names'
 import { fetchFollows } from '../indexClient'
 import { planPeeks } from '../thread'
@@ -135,6 +137,7 @@ function OwnRow ({ row, profile, onOpen }) {
 export default function Pessoas ({ entry, ownKey, isTop = true, active = true, onBack, onOpenMember, onFollowsChanged, onToast }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
+  const blocks = useBlocks()
   const names = useNames()
   const bottomPad = useBottomPad()
   const kind = entry && entry.screen === 'seguidores' ? 'seguidores' : 'seguindo'
@@ -169,7 +172,8 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
     if (!alive()) return null
     if (!res.ok) return { error: errorFor(res.reason), down: false }
     const value = res.value
-    const refs = value.items.map((item) => refOf(kind, author, item)).filter((r) => r !== null)
+    const items = withoutBlockedKeys(value.items, blocks.has)
+    const refs = items.map((item) => refOf(kind, author, item)).filter((r) => r !== null)
     const peeked = new Map()
     // One diary at a time: a diary that throws only leaves its own rows
     // unconfirmed (counted as unavailable); the page fails only when no
@@ -191,7 +195,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
       const down = isSeederDown(failure)
       return { error: down ? SEEDER_DOWN : errorText(failure), down }
     }
-    const { rows, unavailable } = confirmFollows({ kind, author, items: value.items, peeked })
+    const { rows, unavailable } = confirmFollows({ kind, author, items, peeked })
     // Names only, after the proofs: a failed one leaves the row to the names
     // cache and never fails the page.
     for (const chunk of namePeeks(kind, author, own, rows, value.authors)) {
@@ -201,7 +205,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
       if (!alive()) return null
     }
     return { value, rows: decorate(rows, peeked), unavailable, peeked }
-  }, [author, kind, own, request])
+  }, [author, kind, own, request, blocks.has])
 
   const load = useCallback(async (refreshing) => {
     if (!hosted || author === null) return
