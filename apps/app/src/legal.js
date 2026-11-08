@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 27
+export const LEGAL_VERSION = 28
 export const LEGAL_DATE = '07/11/2026'
-export const REVIEW_NOTE = 'Versão 27, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 28, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -93,6 +93,16 @@ export const TERMS = {
       ]
     },
     {
+      heading: 'Feira',
+      paragraphs: [
+        'A Feira é o lugar para anunciar e procurar produtos e serviços. Um anúncio (fotos, título, texto, preço e unidade, cidade, bairro opcional, categoria, status, @nome e nome) é público na web, no endereço da instalação, para quem não tem conta. Ele aparece em prévias de links e pode ser indexado por buscadores. Um "Procura-se" é público como qualquer anúncio.',
+        'Editar um anúncio mantém o mesmo endereço. A primeira versão, com texto e fotos, continua no diário até o anúncio ser apagado. Anúncios vendidos ou encontrados saem do índice dos buscadores (noindex), mas cópias, prévias e caches de buscadores fora da instalação podem continuar depois da remoção.',
+        'Não há pagamento no app e o Varanda não é parte de nenhuma venda. A associação nunca cobra nem move dinheiro. Uma oferta enviada numa conversa é uma mensagem, não uma cobrança, não é contrato, e aceitá-la não reserva o anúncio. O status e a remoção do anúncio são de quem anuncia.',
+        'Cada oferta pode receber uma avaliação, dada por quem fez a oferta, só depois de quem anuncia ter aceitado a oferta. Ao aceitar, quem anuncia assina um consentimento que não escolhe estrelas nem preço. A avaliação é a declaração de quem a escreveu, não prova de pagamento, e aparece só dentro do app. A avaliação de um membro novo fica oculta por 7 dias.',
+        'Entrar pelo link de um anúncio segue as regras de convite e conta no limite semanal de convites da Feira de quem é responsável. Ao conversar com uma Página, a associação pode ler essa conversa. Uma denúncia de anúncio chega sempre a uma pessoa, nunca só à automação. Anúncios e buscas salvos ficam no seu aparelho.'
+      ]
+    },
+    {
       heading: 'Limites da exclusão',
       paragraphs: [
         'Você pode apagar uma publicação (resposta e citação incluídas) e uma versão do perfil. Os semeadores e apps oficiais e atualizados deixam de mostrar o item e descartam os bytes dele nas suas cópias, inclusive as imagens que só ele usava. Isso não é um apagamento garantido em qualquer lugar: um aparelho que acabou de seguir você pode guardar o conteúdo por pouco tempo, até receber a exclusão. Apps e semeadores antigos ou modificados não obedecem, e cópias que já chegaram a outros aparelhos, fotos já baixadas, capturas de tela, imagens guardadas em cache e as citações guardadas pelo serviço de conta numa denúncia podem manter o conteúdo. Um diário que já atingiu o limite de blocos não aceita mais nem o registro de exclusão. Limpar os dados do site só apaga os dados locais; não apaga as cópias que já chegaram a outros aparelhos ou semeadores.',
@@ -152,6 +162,16 @@ export const PRIVACY = {
         'As mensagens enviadas para uma página e as enviadas por ela podem ser lidas pelo serviço de conta, porque a chave de mensagens da página fica com ele; o serviço guarda as mensagens da página cifradas, e quem administra a página as lê por ele. Esse desenho ainda depende de parecer jurídico.',
         'O serviço de conta guarda as chaves que a página usa em comunidades e grupos (a caixa dos grupos privados e as chaves de escrita) e pode ler as publicações da página em grupos privados. Ele lê os avisos enviados para a página em nome de quem a administra. Num nó core, a chave de quem administra fica guardada no próprio aparelho, e o serviço guarda só o ponto até onde já leu as mensagens da página.',
         'Encerrar uma página é definitivo: os dados que o serviço guarda dela são apagados, o @nome fica queimado, e as cópias que já estão em outros aparelhos e semeadores continuam existindo.'
+      ]
+    },
+    {
+      heading: 'Anúncios da Feira',
+      paragraphs: [
+        'Os anúncios da Feira são públicos. O semeador entrega o texto, as fotos, o preço, a cidade, o bairro, a categoria, o status, o @nome e o nome de quem anunciou a qualquer pessoa que abra o endereço, inclusive a robôs de busca e de prévia de links. Há também um mapa do site (sitemap) que lista só endereços.',
+        'O índice de busca do semeador guarda palavras do título para a busca e não guarda o texto do anúncio. Não há CEP nem GPS: o anúncio traz só a cidade e, se você quiser, o bairro. O semeador não registra nada por visualização nem por busca.',
+        'O arquivo feira-invites.json guarda só a chave de quem é responsável pelo convite e o hash do código, nunca o código em si.',
+        'Os anúncios salvos e as buscas salvas ficam só no seu aparelho, e a pesquisa repetida não é guardada. Os valores de uma oferta viajam apenas dentro da conversa selada. Ao conversar com uma Página, a associação pode ler essa conversa.',
+        'Cópias, prévias e caches de buscadores fora desta instalação podem continuar existindo depois que um anúncio é removido. A associação nunca cobra nem move dinheiro.'
       ]
     },
     {

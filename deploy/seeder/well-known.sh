@@ -48,10 +48,11 @@ ler_associacoes() {
 # handle_all_urls existe porque o Auth Tab do Chrome só entrega ao app o
 # retorno https /account/app/conta depois de conferir esta declaração do
 # Digital Asset Links; o app declara App Links (autoVerify) só para /c/ e
-# /g/ de bora.varanda.app: só esses links abrem no app instalado; o resto
-# do site continua no navegador. No iOS basta webcredentials: a Apple
-# exige que o host do retorno https do ASWebAuthenticationSession esteja
-# associado ao app pelos domínios de webcredentials.
+# /g/ e /anuncio/ de bora.varanda.app: só esses links abrem no app
+# instalado; o resto do site (inclusive a página pública /f/) continua no
+# navegador. No iOS, webcredentials associa o host do retorno https do
+# ASWebAuthenticationSession ao app, e applinks abre só /anuncio/ no app;
+# o app id vem de VARANDA_IOS_APP_ID, nenhum team id fica no código.
 gravar_associacoes() {
   local dir="$1/.well-known"
   local android="$dir/assetlinks.json" ios="$dir/apple-app-site-association"
@@ -60,7 +61,7 @@ gravar_associacoes() {
     return 1
   fi
   if { [ -n "$android_cert" ] && ! printf '[{"relation":["delegate_permission/common.get_login_creds","delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"app.varanda","sha256_cert_fingerprints":["%s"]}}]\n' "$android_cert" >"$android.tmp"; } \
-    || { [ -n "$ios_app_id" ] && ! printf '{"webcredentials":{"apps":["%s"]}}\n' "$ios_app_id" >"$ios.tmp"; }; then
+    || { [ -n "$ios_app_id" ] && ! printf '{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"}]}]}}\n' "$ios_app_id" "$ios_app_id" >"$ios.tmp"; }; then
     rm -f "$android.tmp" "$ios.tmp" 2>/dev/null || true
     rmdir "$dir" 2>/dev/null || true
     log 'falha ao gravar as associações do app nativo; as anteriores ficaram como estavam'
