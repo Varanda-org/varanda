@@ -6561,6 +6561,7 @@ Regras que os passos conferem:
 
 - A comparação é por palavra inteira, depois de dobrar acentos e maiúsculas, e lê o texto todo.
 - A recusa é definitiva: o rascunho fica para editar, e não há como publicar mesmo assim.
+- Momentos e depoimentos também passam pela conferência, inclusive ao tocar em "Mostrar no perfil" para um depoimento recebido (seção 143).
 - Mensagens diretas, grupos privados, denúncias e recursos não passam pela conferência.
 - Nada sai do aparelho: nenhum pedido, contador, log ou registro de recusa.
 
@@ -6729,3 +6730,39 @@ Limites desta caminhada:
 
 - Nenhuma caixa acima foi marcada nesta documentação.
 - Os testes conferem o código-fonte por leitura de arquivo, não a tela. A posição da linha e o layout com texto grande só se confirmam no aparelho ou no simulador.
+
+## 143. Conferência de palavras em momentos e depoimentos, Termos 32 (PR feat/word-check-moments-testimonials)
+
+A conferência de palavras no aparelho passa a cobrir momentos e depoimentos, inclusive a exibição de um depoimento recebido no perfil. Os Termos descrevem essas superfícies na versão 32, com novo aceite dos Termos e da Política de Privacidade. A data continua 08/11/2026. Não muda protocolo, semeador nem RPC.
+
+Regras que os passos conferem:
+
+- Um momento com termo da lista é recusado antes de `putMoment`, sem enviar texto nem mídia. O rascunho fica para editar.
+- Um depoimento com termo da lista é recusado antes de `testimonial.write`, com o texto preservado para edição.
+- "Mostrar no perfil" confere o texto do depoimento recebido e recusa antes de `testimonial.show` se houver termo da lista, inclusive quando ele veio de um app antigo ou modificado.
+- Texto permitido continua funcionando nas três ações. A comparação por palavra inteira e as exclusões da seção 138 continuam valendo.
+- Nada dessa conferência sai do aparelho nem fica registrado.
+- `LEGAL_VERSION` e `TERMS_VERSION` são 32, a nota de revisão acompanha a versão e o digest SHA-256 fixa o novo texto. Os Termos e a Política não contêm termos da lista.
+- As páginas de Termos e Privacidade do site são regeneradas por `node apps/site/scripts/render-legal.js` e correspondem ao texto do app.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/wordCheck.test.js`, `node apps/app/test/momentosScreen.test.js` e `node apps/app/test/depoimentos.test.js`.
+- `node apps/app/test/legal.test.js`, `node apps/app/test/terms-version.test.js`, `node apps/app/test/terms.test.js` e `node packages/core/test/terms.test.js`.
+- `node apps/site/scripts/render-legal.js --check`, que deve sair com código 0, e `node apps/site/test/legal.test.js`, `node apps/site/test/site.test.js` e `node apps/site/test/brand.test.js`.
+- `npx standard apps/app/src/legal.js packages/core/lib/terms.js packages/core/test/terms.test.js apps/app/test/legal.test.js apps/app/src/screens/Publicar.js apps/app/src/screens/Depoimentos.js apps/app/test/wordCheck.test.js apps/app/test/momentosScreen.test.js apps/app/test/depoimentos.test.js`.
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA. Use um termo da lista de `apps/app/src/blockedTerms.js`:
+
+- [ ] Momento: escrever o termo, anexar uma foto e tentar publicar. A recusa aparece, o rascunho permanece e nada é enviado. Editar para texto permitido e publicar funciona.
+- [ ] Escrever depoimento: inserir o termo e tentar enviar. A recusa aparece e o texto continua disponível para editar. Corrigir e enviar funciona.
+- [ ] Depoimento recebido por um app antigo ou modificado: tocar em "Mostrar no perfil" com um termo no texto. A recusa aparece e o depoimento não é mostrado. Um depoimento permitido pode ser mostrado normalmente.
+- [ ] Sem conexão: repetir as recusas e confirmar que nenhuma ação entra na fila de envio.
+- [ ] Novo aceite: entrar com aceite anterior e conferir a apresentação da versão 32. Em Ajustes e nas páginas do site, conferir a mesma versão, data e redação sobre momentos e depoimentos.
+- [ ] Web e PWA: repetir as conferências acima; uma recusa não gera pedido no inspetor de rede.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Os testes por leitura do código não substituem a conferência das telas no aparelho ou no simulador.
+- A lista continua local ao app; um app modificado, um build antigo ou a CLI podem publicar sem essa conferência. Fotos e áudio não são analisados.

@@ -95,6 +95,7 @@ test('Publicar: Momento mode is one photo, putMoment then moment.create', (t) =>
   const put = send.indexOf('node.media.putMoment(')
   const create = send.indexOf("node.request('moment.create', { text, media: itemRef.current })")
   t.ok(put > 0 && create > put, 'putMoment then moment.create')
+  t.ok(send.includes('refusalOf(text)') && send.indexOf('refusalOf(text)') < put, 'the word check runs before putMoment')
   t.ok(send.includes('bytes: file.bytes.slice()'), 'putMoment gets a copy (it wipes its buffer)')
   t.is((send.match(/moment\.create/g) || []).length, 1, 'one create per press')
   t.ok(send.includes('setHeld(true)') && send.includes('MOMENT_UNCERTAIN'), 'uncertain holds the draft')

@@ -155,10 +155,24 @@ test('the check stays on the device and leaves no trace', (t) => {
 
 test('the composers check before they send', (t) => {
   const publicar = screen('Publicar.js')
-  const send = publicar.slice(publicar.indexOf('const send = async () => {'), publicar.indexOf('return sendAsPage()'))
+  const send = publicar.slice(publicar.lastIndexOf('const send = async () => {'), publicar.indexOf('return sendAsPage()'))
   t.ok(send.includes('refusalOf(text)'), 'Publicar: the draft is checked before any send path')
   t.ok(send.includes('setCheckError(refused)'), 'Publicar: the refusal is shown')
   t.ok(/if \(refused !== ''\) \{\s*setCheckError\(refused\)\s*return/.test(send), 'Publicar: a refusal stops the send')
+
+  const momentStart = publicar.indexOf('const send = async () => {')
+  const moment = publicar.slice(momentStart, publicar.indexOf('putMoment(', momentStart))
+  t.ok(/const refused = refusalOf\(text\)\s*if \(refused !== ''\) \{ setError\(refused\); return false \}/.test(moment), 'Momento: a refusal stops the send before the upload')
+
+  const depo = screen('Depoimentos.js')
+  const sheetAt = depo.indexOf('export function WriteTestimonialSheet')
+  const writeStart = depo.indexOf('const send = async () => {', sheetAt)
+  const write = depo.slice(writeStart, depo.indexOf("request('testimonial.write'", writeStart))
+  t.ok(/const refused = refusalOf\(body\)\s*if \(refused !== ''\) \{ setError\(refused\); return \}/.test(write), 'Depoimentos: a refusal stops the write')
+  t.ok(write.indexOf('refusalOf(body)') < write.indexOf('action.run('), 'Depoimentos: checked before the action runs')
+  const showStart = depo.indexOf('const show = useCallback(')
+  const shown = depo.slice(showStart, depo.indexOf("request('testimonial.show'", showStart))
+  t.ok(shown.includes('refusalOf(row.text)') && shown.includes('setShowError(refused)'), 'Depoimentos: another person\'s text is checked before it goes on the profile')
 
   const grupo = screen('Grupo.js')
   const draft = grupo.slice(grupo.indexOf('const sendDraft = () => {'), grupo.indexOf('sendMedia(draft'))
