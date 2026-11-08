@@ -57,6 +57,7 @@ import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MODES, MODE_LABELS } from '../appearance'
 import { Btn, ErrorText, Notice, Page, Row, Soft, useAction } from '../ui'
+import { BLOCK_TEXTS } from '../memberBlocks'
 import { pagesOn } from '../pageGate'
 import { PREVIEW_PREF_LABEL, previewsEnabled, setPreviewsEnabled } from '../previewPref'
 import { previewPrefStore } from '../previewBuild'
@@ -72,6 +73,7 @@ import Identidade from './Identidade'
 import Passkeys from './Passkeys'
 import Perfil from './Perfil'
 import Recurso from './Recurso'
+import Bloqueados from './Bloqueados'
 import Sincronizar from './Sincronizar'
 import Termos from './Termos'
 
@@ -95,6 +97,7 @@ const TITLES = {
   identidade: 'Identidade técnica',
   convites: 'Convidar pessoas',
   recurso: 'Recorrer de um bloqueio',
+  bloqueados: BLOCK_TEXTS.listTitle,
   excluir: 'Excluir conta'
 }
 
@@ -387,6 +390,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
               {account && unlocked ? <Item icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}
               {account ? <Item icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
+              {hosted ? <Item icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
               {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
               {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function'
                 ? <Item icon='gente' label='Páginas' onPress={openPaginas} />
@@ -528,6 +532,13 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           ? (
             <View style={shown('recurso')}>
               <Recurso open={screen === 'recurso'} active={ready && screen === 'recurso'} />
+            </View>
+            )
+          : null}
+        {hosted
+          ? (
+            <View style={shown('bloqueados')}>
+              <Bloqueados active={ready && screen === 'bloqueados'} />
             </View>
             )
           : null}

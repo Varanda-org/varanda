@@ -57,6 +57,8 @@ import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import { countChars } from '../format'
 import { LABELS, UNSURE_SEND } from '../dm'
+import { useBlocks } from '../blocksProvider'
+import { BLOCK_TEXTS } from '../memberBlocks'
 import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
@@ -176,6 +178,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const [folder, setFolder] = useState(null)
   const [newest, setNewest] = useState('')
   const [blocked, setBlocked] = useState(false)
+  const blocks = useBlocks()
+  const unblockLabel = blocks.has(peer) ? BLOCK_TEXTS.unblock : LABELS.unblock
   const [askNew, setAskNew] = useState(false)
   const [draft, setDraft] = useState(() => initialMessage(initial).draft)
   const [initialCard, setInitialCard] = useState(() => initialMessage(initial).card)
@@ -342,7 +346,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   }, [loaded, newest])
 
   const decide = async (state) => {
-    const r = await act.run(() => dm('dm.set', { peer, state }))
+    // A person blocked outright, not only their messages: the whole block goes.
+    const whole = state === 'unblocked' && blocks.has(peer)
+    const r = await act.run(() => whole ? blocks.setBlock(peer, false) : dm('dm.set', { peer, state }))
     reread()
     if (!r.ok) return
     setMenu(false)
@@ -750,7 +756,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         <Soft>{LABELS.blockedSend}</Soft>
         <ErrorText>{act.error}</ErrorText>
         <View style={styles.inline}>
-          <Pill label={LABELS.unblock} onPress={() => decide('unblocked')} pending={act.pending} />
+          <Pill label={unblockLabel} onPress={() => decide('unblocked')} pending={act.pending} />
         </View>
       </View>
     )
@@ -973,7 +979,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         <View style={styles.sheet}>
           <ErrorText>{act.error}</ErrorText>
           {blocked
-            ? <Btn label={LABELS.unblock} onPress={() => decide('unblocked')} pending={act.pending} secondary />
+            ? <Btn label={unblockLabel} onPress={() => decide('unblocked')} pending={act.pending} secondary />
             : <Btn label={LABELS.block} onPress={() => decide('blocked')} pending={act.pending} secondary />}
           {confirmDelete
             ? (

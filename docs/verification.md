@@ -6199,3 +6199,47 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi executada nesta documentação.
 - O ponto da aba Feira reflete o que a última abertura da Feira contou; ele não é atualizado em segundo plano.
 - As contagens olham só a primeira página de cada busca.
+
+## 134. Bloquear uma pessoa (PR feat/member-block)
+
+Caminhada do bloqueio pessoal: o menu da publicação, o perfil, a lista em Ajustes e cada leitura que tem de obedecer a ele. A lista fica no aparelho (`docs/rpc.md` 5.111 e 5.112) e cobre o que a regra 1.2 da App Store pede.
+
+Regras que os passos conferem:
+
+- Quem filtra é o nó ao ler, não uma tela. A tela só limpa na hora o que já mostrava.
+- A pessoa bloqueada não recebe nada: nenhum aviso, nenhum registro que diga que houve bloqueio. O deixar de seguir é um registro público comum.
+- Como os diários são públicos, ela ainda pode ver o que você publica, seguir e responder. Só quem bloqueou deixa de ver.
+- A dobra de um grupo não obedece à lista.
+- Uma caixa só é marcada depois que o passo foi executado e o resultado conferido.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node packages/core/test/member-block.test.js`, `node packages/web-member/test/member-block.test.js` e `node packages/rpc/test/methods.test.js`.
+- `node apps/app/test/memberBlocks.test.js`, `node apps/app/test/postActions.test.js`, `node apps/app/test/sw.test.js`, `node apps/app/test/vitrine.test.js` e `node apps/app/test/platformGate.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada com dois membros de teste, A e B, que se seguem e têm publicações, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Em A Rua, no menu **Mais** de uma publicação de B, aparecem **Denunciar** e **Bloquear**; numa publicação de A, nenhum dos dois.
+- [ ] **Bloquear** abre "Bloquear B?" com a nota de que a pessoa não é avisada e de que ainda pode ver o que você publica. **Cancelar** não muda nada.
+- [ ] Confirmar mostra "Pessoa bloqueada. Desfaça em Ajustes." e as publicações de B somem de A Rua na hora, sem puxar para atualizar. O botão de publicar não cobre o aviso.
+- [ ] Em Seguindo, B não aparece mais. Depois de sincronizar, um terceiro membro vê A sem seguir B, e nada no diário de A diz que houve bloqueio.
+- [ ] Uma republicação de uma publicação de B por um terceiro membro some de A Rua; uma citação de B por um terceiro mostra "Publicação indisponível"; a publicação do terceiro continua.
+- [ ] Espiadinha: as publicações de B não aparecem, e a nota "N diários não aparecem" não conta B.
+- [ ] Busca: uma palavra que só B publicou não traz a publicação de B. Em Contas, B ainda aparece, e tocar abre o perfil.
+- [ ] Conversa de uma publicação com respostas de B: as respostas de B não aparecem; as dos outros, sim.
+- [ ] Avisos: curtida, resposta, citação ou menção de B depois do bloqueio não geram linha. As linhas antigas de B somem.
+- [ ] Perfil de B: mostra "Você bloqueou esta pessoa" e **Desbloquear**, sem publicações, sem Seguir e sem Mensagem.
+- [ ] Conversas: uma mensagem de B enviada depois do bloqueio não aparece; a conversa antiga fica, com "Você bloqueou esta pessoa" e **Desbloquear**. Tentar enviar é recusado.
+- [ ] Ajustes, **Pessoas bloqueadas**: B aparece com o nome ou o @nome. **Desbloquear** tira B da lista, e as publicações de B voltam a aparecer na Busca e na Espiadinha. B não volta a ser seguido.
+- [ ] Reabrir o app depois de bloquear: B continua bloqueado, também sem internet.
+- [ ] Sair e entrar com outra conta no mesmo aparelho: a lista da conta anterior não vale para a nova (**Apagar** a conta deste aparelho limpa a lista).
+- [ ] Sem internet, **Bloquear** funciona, e o aviso de que o bloqueio de mensagens ainda não chegou aos outros aparelhos não impede o bloqueio.
+- [ ] Web e PWA, com avisos push ligados e o app fechado: uma curtida de B depois do bloqueio não mostra notificação; a de outra pessoa mostra. Depois de **Desbloquear** e de abrir o app uma vez, a de B volta a aparecer. No Safari do iPhone, conferir que a assinatura de push continua válida depois de um push silenciado.
+- [ ] Vitrine: com `EXPO_PUBLIC_VARANDA_VITRINE=1`, **Bloquear** num post de exemplo tira o post da tela, e a pessoa aparece em Pessoas bloqueadas.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação. Uma conferência prévia com a Vitrine, sem membros reais, passou no simulador iOS: bloquear pelo menu da publicação e pelo perfil, a lista em Ajustes e desbloquear. Android, a caminhada com dois membros e os avisos push em navegador real seguem por fazer.
+- A lista não acompanha a passkey nesta seção: bloquear no celular não muda o que a web mostra, salvo as mensagens.
+- Grupos, comunidades e Feira não são filtrados.

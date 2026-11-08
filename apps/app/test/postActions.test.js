@@ -177,3 +177,13 @@ test('sources have no em dash', (t) => {
   t.absent(src.includes('\u2014'))
   t.absent(testSrc.includes('\u2014'))
 })
+
+test('more: Bloquear sits after Denunciar, only with a handler, never on the own post', async (t) => {
+  const { moreActions } = await load()
+  const item = { author: THEM, seq: 4 }
+  t.alike(ids(moreActions(item, { onReport: true, onBlock: true })), ['report', 'block'])
+  t.alike(moreActions(item, { onBlock: () => {} }), [{ id: 'block', icon: 'bloquear', label: 'Bloquear' }])
+  t.alike(ids(moreActions(item, { onReport: true })), ['report'], 'no handler, no row')
+  t.alike(ids(moreActions({ author: ME, seq: 4 }, { ownKey: ME, onBlock: true })), ['delete'], 'never the own post')
+  t.alike(ids(moreActions({ author: PAGE, seq: 4 }, { ownKey: ME, page: PAGE, onBlock: true })), ['delete'], 'never the page acted as')
+})

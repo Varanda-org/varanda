@@ -77,6 +77,11 @@ const BAD_TYPES = new Set(['opaque', 'opaqueredirect', 'error'])
 const DM_WAKE_MUTE_MS = 120000
 const DM_STATE_CACHE = 'varanda-dm-state'
 const DM_STATE_KEY = self.location.origin + '/__varanda-dm-state'
+// The member's own block list, which the page reports (src/pushBlocks.web.js):
+// a push from one of these keys stays quiet. Same cache rules as above.
+const BLOCK_STATE_CACHE = 'varanda-block-state'
+const BLOCK_STATE_KEY = self.location.origin + '/__varanda-blocks'
+const BLOCKS_MAX = 500
 
 const abs = (p) => new URL(p, self.location.origin).href
 const RELEASE_META = '<meta name="varanda-release" content="' + VERSION + '">'
@@ -440,6 +445,41 @@ async function dmWakesMuted () {
   return (await mutedInCache()) || mutedInMemory()
 }
 
+let blockStateWrite = Promise.resolve()
+// null until read from the cache: the worker may have just started for a push.
+let blockedActors = null
+
+function validBlockKeys (keys) {
+  return Array.isArray(keys) && keys.length <= BLOCKS_MAX && keys.every((k) => typeof k === 'string' && HEX64.test(k))
+}
+
+function rememberBlocks (keys) {
+  blockedActors = new Set(keys)
+  blockStateWrite = blockStateWrite.then(async () => {
+    const cache = await caches.open(BLOCK_STATE_CACHE)
+    await cache.put(BLOCK_STATE_KEY, new Response(JSON.stringify({ v: 1, keys }), { headers: { 'content-type': 'application/json' } }))
+  }).catch(() => {})
+  return blockStateWrite
+}
+
+// A read that fails shows the push: losing a notice would be worse.
+async function actorBlocked (actor) {
+  if (blockedActors === null) {
+    try {
+      await blockStateWrite
+      const cache = await caches.open(BLOCK_STATE_CACHE)
+      const res = await cache.match(BLOCK_STATE_KEY)
+      const r = res ? JSON.parse(await res.text()) : null
+      const keys = isPlainObject(r) && r.v === 1 && validBlockKeys(r.keys) ? r.keys : []
+      // A list reported while the cache was being read is newer.
+      if (blockedActors === null) blockedActors = new Set(keys)
+    } catch {
+      return false
+    }
+  }
+  return blockedActors.has(actor)
+}
+
 // True when the wake was handed to a visible, focused app window instead.
 const DM_WAKE_ACK_MS = 1000
 
@@ -531,6 +571,10 @@ async function showPush (data) {
     }
     options = { body: DM_WAKE_TEXT, icon: '/icon-192.png', tag: 'varanda-dm-wake', renotify: false, data: { kind: 'dm-wake' } }
   } else if (p) {
+    if (await actorBlocked(p.actor)) {
+      await showQuietlyAndClose()
+      return
+    }
     options = {
       body: p.body,
       icon: '/icon-192.png',
@@ -602,7 +646,16 @@ self.addEventListener('notificationclick', (event) => {
 self.addEventListener('message', (event) => {
   try {
     const d = event.data
-    if (!isPlainObject(d) || Object.keys(d).length !== 1) return
+    if (!isPlainObject(d)) return
+    if (d.type === 'varanda-blocks') {
+      const from = event.source
+      if (Object.keys(d).length !== 2 || !validBlockKeys(d.keys)) return
+      if (!from || from.type !== 'window' || !isAppWindow(from)) return
+      const kept = rememberBlocks(d.keys.slice())
+      if (typeof event.waitUntil === 'function') event.waitUntil(kept)
+      return
+    }
+    if (Object.keys(d).length !== 1) return
     if (d.type === 'varanda-push-ping') {
       const port = event.ports && event.ports[0]
       if (port) port.postMessage({ source: 'varanda-sw', push: 1 })
