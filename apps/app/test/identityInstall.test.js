@@ -18,7 +18,7 @@ const { createIdentityHost, RECOVERY_PENDING_MS } = require('../worklet/identity
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, clearReadDir, writeReadFile, readMediaToFile } = require('../worklet/web-node-parts')
+const { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, putMomentMedia, clearReadDir, writeReadFile, readMediaToFile } = require('../worklet/web-node-parts')
 
 const hmac = (key, data) => new Uint8Array(crypto.createHmac('sha256', key).update(data).digest())
 const hkdf = (ikm, salt, info, length) => hkdfSha256(ikm, salt, info, length, { hmac })
@@ -856,6 +856,27 @@ test('putDmMedia hands the photo to dmPutMedia, zeroes it and unlinks after succ
   t.is(closing.code, 'LOCKED')
 })
 
+test('putMomentMedia hands the photo to momentPutMedia with only the image fields', async (t) => {
+  const seen = []
+  const unlinked = []
+  const bytes = new Uint8Array([1, 2, 3])
+  const session = { momentPutMedia: (args) => { seen.push({ ...args, copy: new Uint8Array(args.bytes) }); return Promise.resolve({ id: 'm' }) } }
+  const io = { read: async () => ({ file: '/cache/m.bin', bytes }), session, unlink: (f) => unlinked.push(f), isClosing: () => false }
+  t.alike(await putMomentMedia(io, { mime: 'image/jpeg', width: 2, height: 3, to: 'ef'.repeat(32), ms: 5, kind: 'voice', sealed: true }), { id: 'm' })
+  t.alike(Object.keys(seen[0]), ['bytes', 'mime', 'width', 'height', 'copy'], 'no destination, voice or sealed fields')
+  t.alike(seen[0].copy, new Uint8Array([1, 2, 3]))
+  t.ok(bytes.every((b) => b === 0), 'the bytes are zeroed')
+  t.alike(unlinked, ['/cache/m.bin'])
+
+  const failing = { ...io, read: async () => ({ file: '/cache/n.bin', bytes: new Uint8Array(1) }), session: { momentPutMedia: () => { throw new TypeError('mídia inválida') } } }
+  const err = await putMomentMedia(failing, { mime: 'image/jpeg', width: 1, height: 1 }).catch((e) => e)
+  t.is(err.code, 'USAGE')
+  t.is(err.message, 'mídia inválida')
+  t.alike(unlinked, ['/cache/m.bin'], 'a refused file is not unlinked')
+  const closing = await putMomentMedia({ ...io, isClosing: () => true }, { mime: 'image/jpeg', width: 1, height: 1 }).catch((e) => e)
+  t.is(closing.code, 'LOCKED')
+})
+
 test('writeReadFile creates the file exclusively with mode 0600; clearReadDir removes read files only', async (t) => {
   const { root } = mediaDirs(t)
   const dir = path.join(root, 'media-read')
@@ -911,6 +932,19 @@ test('readMediaToFile opens a DM or group item through the session and writes it
   t.alike(g, { name: MEDIA_NAME, mime: 'image/png', w: 3, h: 2 }, 'the size comes from the bytes, not the item')
   t.alike(await readMediaToFile(io, { kind: 'dm', from: 'a', id: 'b', index: 'card' }), dm)
   t.alike(calls[2], ['dm', { from: 'a', id: 'b', index: 'card' }])
+
+  const momentSession = {
+    momentReadMedia: async (args) => { calls.push(['moment', args]); return { bytes: new Uint8Array(png), mime: 'image/png', w: 9, h: 9 } }
+  }
+  const m = await readMediaToFile({ ...io, session: momentSession }, { kind: 'moment', author: 'k', seq: 4 })
+  t.alike(calls[3], ['moment', { author: 'k', seq: 4 }], 'only the moment fields reach the session')
+  t.alike(m, { name: MEDIA_NAME, mime: 'image/png', w: 3, h: 2 }, 'the size comes from the bytes')
+  const badMoment = await readMediaToFile({ ...io, session: { momentReadMedia: () => { throw new TypeError('x') } } }, { kind: 'moment' }).catch((e) => e)
+  t.is(badMoment.code, 'USAGE')
+  t.is(badMoment.message, 'mídia inválida')
+  const gone = Object.assign(new Error('foto indisponível'), { code: 'NOT_FOUND' })
+  const missing = await readMediaToFile({ ...io, session: { momentReadMedia: async () => { throw gone } } }, { kind: 'moment', author: 'k', seq: 4 }).catch((e) => e)
+  t.is(missing, gone, 'a gone blob keeps the session error')
 
   const unlinked = []
   const racing = {

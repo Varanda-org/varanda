@@ -197,6 +197,24 @@ test('contextLabel matches the absolute date of the text sent', async (t) => {
   t.is(contextDate(undefined, NOW), null)
 })
 
+test('a moment context keeps its kind and says momento, posts keep their wording', async (t) => {
+  const { makeIntent, validIntent, contextLabel, composeText } = await load()
+  const moment = context({ kind: 'moment', text: 'Pôr do sol', hasMedia: true })
+  const kept = makeIntent(intent({ context: moment }))
+  t.is(kept.context.kind, 'moment', 'makeIntent keeps kind moment')
+  t.ok(validIntent(kept, OWN), 'a moment intent is valid')
+  t.absent('kind' in makeIntent(intent({ context: context() })).context, 'a post context has no kind')
+  t.absent('kind' in makeIntent(intent({ context: context({ kind: 'other' }) })).context, 'an unknown kind is dropped')
+  t.absent(validIntent(intent({ context: context({ kind: 'other' }) }), OWN), 'an unknown kind is not valid')
+  t.is(contextLabel(kept.context, NOW), 'Sobre o seu momento de 15 jan 2020')
+  t.is(contextLabel({ ...kept.context, at: 'x' }, NOW), 'Sobre o seu momento')
+  t.is(composeText(kept.context, 'Lindo!', NOW), 'Sobre o seu momento "Pôr do sol" (15 jan 2020): Lindo!')
+  t.is(composeText({ ...kept.context, text: '' }, 'Oi', NOW), 'Sobre o seu momento (15 jan 2020): Oi')
+  t.is(composeText({ ...kept.context, text: '', at: 'x' }, 'Oi', NOW), 'Sobre o seu momento: Oi')
+  t.is(contextLabel(context({ text: '', hasMedia: true }), NOW), 'Sobre a sua foto de 15 jan 2020', 'posts unchanged')
+  t.is(composeText(context(), 'Oi', NOW), 'Sobre a sua publicação "Uma publicação" (15 jan 2020): Oi', 'posts unchanged')
+})
+
 test('MAX_TEXT is the 1000 code point DM text limit', async (t) => {
   const { MAX_TEXT } = await load()
   t.is(MAX_TEXT, 1000)

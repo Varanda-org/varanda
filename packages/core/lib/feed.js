@@ -85,6 +85,17 @@ function heldCopies (held, copyOf) {
   return out
 }
 
+// One log's validated, live copies exactly as the feed folds them: the page
+// cut (a verified page-close or page-moved ends the log), then tombstones.
+// For other folds over the same diaries (Momentos), so a closed or migrated
+// page cannot keep publishing to readers through them either.
+function liveLogCopies ({ key, entries, raw: rawBlocks }, { association, revokedIssuers = null } = {}) {
+  const copyOf = entryCopier()
+  const raw = (Array.isArray(entries) ? entries : []).map(({ seq, record }) => ({ seq, record: copyOf(record, seq) }))
+  const held = heldCopies(rawBlocks, copyOf)
+  return held === null ? applyDeletesOfCopies(movedCut(raw, key, association, revokedIssuers)) : heldFold(raw, held, key, association, revokedIssuers)
+}
+
 // Pure: no I/O, inputs are not mutated. `revokedIssuers` (a Set of issuer
 // keys, blocklist.js revokedIssuerSet, or null) makes a username record from a
 // revoked issuer invalid (username.js), so a stolen issuer key cannot keep
@@ -243,4 +254,4 @@ function formatFeedItem (item, { width } = {}) {
   return rows.join('\n')
 }
 
-module.exports = { MAX_FUTURE_MS, buildFeed, shortKey, formatFeedItem }
+module.exports = { MAX_FUTURE_MS, buildFeed, liveLogCopies, shortKey, formatFeedItem }

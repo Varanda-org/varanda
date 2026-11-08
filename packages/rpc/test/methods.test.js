@@ -23,7 +23,8 @@ test('method list and mutating set', (t) => {
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
-    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'log.read', 'media.readFile', 'media.uploadFile', 'node.close', 'node.info', 'notices.list',
+    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'log.read', 'media.readFile', 'media.uploadFile',
+    'moment.create', 'moment.delete', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
@@ -31,7 +32,8 @@ test('method list and mutating set', (t) => {
   t.alike([...MUTATING].sort(), [
     'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
-    'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile', 'node.close', 'page.register', 'post.create', 'post.delete',
+    'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile',
+    'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
     'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
@@ -145,6 +147,166 @@ test('testimonial results survive RPC response validation', async (t) => {
       dispatcher.close()
     }
   }
+})
+
+const MOMENT_MEDIA = {
+  id: KEY,
+  key: 'cd'.repeat(32),
+  nonce: 'ef'.repeat(24),
+  chunks: 1,
+  bytes: 17,
+  sha256: '01'.repeat(32),
+  mime: 'image/jpeg',
+  w: 1,
+  h: 1,
+  ms: 0
+}
+const MOMENT_UPLOAD = { name: 'ab'.repeat(16) + '.bin', mime: 'image/jpeg', width: 1, height: 1 }
+const MOMENT_PARAMS = [
+  ['moment.putMedia', MOMENT_UPLOAD, true],
+  ['moment.create', { text: '', media: MOMENT_MEDIA }, true],
+  ['moments.read', {}, false],
+  ['moment.delete', { to: KEY + ':1' }, true]
+]
+
+for (const [method, params, mutating] of MOMENT_PARAMS) {
+  test(method + ': required fields and exact params', (t) => {
+    t.is(isMutating(method), mutating)
+    ok(t, method, params, params)
+    for (const field of Object.keys(params)) {
+      const missing = { ...params }
+      delete missing[field]
+      bad(t, method, missing, 'missing ' + field)
+    }
+    for (const extra of ['extra', 'at', 'type', 'author', 'bytes']) {
+      bad(t, method, { ...params, [extra]: KEY }, 'extra ' + extra)
+    }
+    for (const invalid of [null, [], 'params', 1, Object.create(params)]) {
+      bad(t, method, invalid, 'invalid params object')
+    }
+  })
+}
+
+test('moment.putMedia: image upload bounds and cache name', (t) => {
+  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
+    ok(t, 'moment.putMedia', { ...MOMENT_UPLOAD, mime, width: 16384, height: 16384 })
+  }
+  for (const mime of ['audio/mp4', 'video/mp4', 'image/svg+xml', '', null]) {
+    bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, mime })
+  }
+  for (const field of ['width', 'height']) {
+    for (const value of [0, -1, 16385, 1.5, '1', null]) {
+      bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, [field]: value })
+    }
+  }
+  for (const name of ['', '../' + MOMENT_UPLOAD.name, 'AB'.repeat(16) + '.bin', 'ab'.repeat(15) + '.bin', null]) {
+    bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, name })
+  }
+  for (const [field, value] of [['kind', 'voice'], ['ms', 0], ['to', KEY], ['sealed', true]]) {
+    bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, [field]: value })
+  }
+  bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 1000 })
+})
+
+test('moment.create: text is 0..200 code points and media is one image item', (t) => {
+  for (const text of ['', 'a'.repeat(200), '😀'.repeat(200)]) {
+    ok(t, 'moment.create', { text, media: MOMENT_MEDIA })
+  }
+  for (const text of ['a'.repeat(201), '😀'.repeat(201), null, 1, [], {}]) {
+    bad(t, 'moment.create', { text, media: MOMENT_MEDIA })
+  }
+  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
+    ok(t, 'moment.create', { text: '', media: { ...MOMENT_MEDIA, mime, w: 16384, h: 16384, chunks: 257, bytes: 257 * 32768 } })
+  }
+  for (const field of Object.keys(MOMENT_MEDIA)) {
+    const media = { ...MOMENT_MEDIA }
+    delete media[field]
+    bad(t, 'moment.create', { text: '', media }, 'missing media ' + field)
+  }
+  for (const media of [
+    null, [], [MOMENT_MEDIA], {},
+    { ...MOMENT_MEDIA, extra: true },
+    { ...MOMENT_MEDIA, mime: 'audio/mp4', w: 0, h: 0, ms: 1000 },
+    { ...MOMENT_MEDIA, mime: 'audio/mp4' },
+    { ...MOMENT_MEDIA, mime: 'image/svg+xml' },
+    ...[1, -1, '0', null].map((ms) => ({ ...MOMENT_MEDIA, ms })),
+    ...['id', 'key', 'sha256'].map((field) => ({ ...MOMENT_MEDIA, [field]: KEY.toUpperCase() })),
+    { ...MOMENT_MEDIA, nonce: 'ef'.repeat(23) },
+    { ...MOMENT_MEDIA, chunks: 0 },
+    { ...MOMENT_MEDIA, chunks: 2 },
+    { ...MOMENT_MEDIA, chunks: 258, bytes: 258 * 32768 },
+    { ...MOMENT_MEDIA, bytes: 16 },
+    { ...MOMENT_MEDIA, bytes: 17.5 },
+    ...['w', 'h'].flatMap((field) => [0, 16385, 1.5].map((value) => ({ ...MOMENT_MEDIA, [field]: value })))
+  ]) bad(t, 'moment.create', { text: '', media })
+})
+
+test('moment.delete: canonical ref with positive safe integer seq', (t) => {
+  ok(t, 'moment.delete', { to: KEY + ':' + Number.MAX_SAFE_INTEGER })
+  for (const to of [
+    KEY, KEY + ':0', KEY + ':-1', KEY + ':01', KEY + ':1.5',
+    KEY + ':' + (Number.MAX_SAFE_INTEGER + 1), KEY.toUpperCase() + ':1',
+    KEY + ':1\n', '', null, 1, {}, []
+  ]) bad(t, 'moment.delete', { to })
+})
+
+test('moment results survive RPC response validation', async (t) => {
+  const seq = Number.MAX_SAFE_INTEGER
+  const ref = KEY + ':' + seq
+  const past = { seq, ref, text: '😀'.repeat(200), at: '+275760-09-13T00:00:00.000Z' }
+  const row = { ...past, media: MOMENT_MEDIA }
+  const results = {
+    'moment.putMedia': MOMENT_MEDIA,
+    'moment.create': { seq, ref },
+    'moments.read': { authors: [{ author: 'cd'.repeat(32), items: [{ ...row, ref: 'cd'.repeat(32) + ':' + seq }] }], own: [row], past: [past] },
+    'moment.delete': { seq, deleted: [1] }
+  }
+  for (const [method, params] of MOMENT_PARAMS) {
+    let receive
+    const response = new Promise((resolve) => { receive = resolve })
+    const dispatcher = createServerDispatcher({
+      handlers: { [method]: () => results[method] },
+      send: (message, json) => { if (message.id === MAX_ID) receive(JSON.parse(json)) }
+    })
+    dispatcher.receive({ v: 1, id: 1, method: 'session.open', params: {} })
+    dispatcher.receive({ v: 1, id: MAX_ID, method, params })
+    const message = await response
+    t.ok(validateResponse(message).ok, method + ' response accepted')
+    t.is(message.ok, true, method + ' succeeded')
+    t.alike(message.result, results[method], method + ' result preserved')
+    dispatcher.close()
+  }
+})
+
+test('moments.read: the worst case under the caps fits MAX_MESSAGE', async (t) => {
+  // 32 authors x 4 items, 4 own items and 16 past records (docs/rpc.md 5.103),
+  // every field at its longest.
+  const seq = Number.MAX_SAFE_INTEGER
+  const past = { seq, ref: KEY + ':' + seq, text: '😀'.repeat(200), at: '+275760-09-13T00:00:00.000Z' }
+  const media = { ...MOMENT_MEDIA, chunks: 257, bytes: 257 * 32768, w: 16384, h: 16384 }
+  const live = (author, j) => ({ ...past, seq: seq - j, ref: author + ':' + (seq - j), media })
+  const result = {
+    authors: Array.from({ length: 32 }, (_, i) => {
+      const author = (i + 1).toString(16).padStart(64, '0')
+      return { author, items: Array.from({ length: 4 }, (_, j) => live(author, j)) }
+    }),
+    own: Array.from({ length: 4 }, (_, j) => live(KEY, j)),
+    past: Array.from({ length: 16 }, (_, i) => ({ ...past, seq: seq - i, ref: KEY + ':' + (seq - i) }))
+  }
+  const bytes = utf8ByteLength(JSON.stringify({ v: 1, id: MAX_ID, ok: true, result }))
+  t.ok(bytes <= MAX_MESSAGE, 'maximal texts, descriptors, refs, seqs, dates and envelope fit (' + bytes + ' bytes)')
+  let receive
+  const response = new Promise((resolve) => { receive = resolve })
+  const dispatcher = createServerDispatcher({
+    handlers: { 'moments.read': () => result },
+    send: (message, json) => { if (message.id === MAX_ID) receive(JSON.parse(json)) }
+  })
+  dispatcher.receive({ v: 1, id: 1, method: 'session.open', params: {} })
+  dispatcher.receive({ v: 1, id: MAX_ID, method: 'moments.read', params: {} })
+  const message = await response
+  t.ok(validateResponse(message).ok, 'a valid response')
+  t.is(message.ok, true, 'the worst case is answered')
+  dispatcher.close()
 })
 
 test('seen.sign', (t) => {
@@ -1591,6 +1753,28 @@ test('media.readFile', (t) => {
   bad(t, 'media.readFile', { ...group, diary: 'x' }, 'bad diary')
   bad(t, 'media.readFile', { ...dm, diary: KEY }, 'dm with a group field')
   bad(t, 'media.readFile', { ...group, index: 0 }, 'group with a dm field')
+  const moment = { kind: 'moment', author: KEY, seq: 1 }
+  ok(t, 'media.readFile', moment, moment)
+  ok(t, 'media.readFile', { ...moment, seq: Number.MAX_SAFE_INTEGER })
+  for (const k of ['author', 'seq']) {
+    const p = { ...moment }
+    delete p[k]
+    bad(t, 'media.readFile', p, 'moment missing ' + k)
+    t.is(validateParams('media.readFile', p).message, 'parâmetro obrigatório: ' + k)
+    for (const other of [dm, group]) {
+      bad(t, 'media.readFile', { ...other, [k]: moment[k] }, other.kind + ' with a moment field')
+    }
+  }
+  for (const author of [KEY.toUpperCase(), KEY.slice(1), '', null, 1]) {
+    bad(t, 'media.readFile', { ...moment, author })
+  }
+  for (const seq of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, '1', null]) {
+    bad(t, 'media.readFile', { ...moment, seq })
+  }
+  for (const [k, value] of Object.entries({ from: KEY, id: ID, index: 0, diary: KEY, item, extra: true })) {
+    bad(t, 'media.readFile', { ...moment, [k]: value }, 'moment with ' + k)
+  }
+  bad(t, 'media.readFile', { ...dm, kind: 'moment' }, 'moment with only dm fields')
   for (const kind of ['', 'DM', 'blob', null, undefined]) bad(t, 'media.readFile', { ...dm, kind }, 'bad kind')
   const { kind, ...noKind } = dm
   bad(t, 'media.readFile', noKind, 'missing kind')

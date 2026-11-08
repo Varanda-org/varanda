@@ -57,6 +57,7 @@ const {
   deleteRecord,
   testimonialRecord,
   testimonialShowRecord,
+  momentRecord,
   MAX_TESTIMONIAL,
   charLength,
   validTestimonialText,
@@ -77,6 +78,7 @@ const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, ha
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
+const { foldMoments, ownPast, showingMoment } = require('@varanda/core/lib/moments')
 const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
@@ -421,6 +423,67 @@ async function postQuote (ctx, { to, text, media, preview }) {
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media, preview } : { text, quote: to, preview })))
 }
 
+// ---- momentos (docs/rpc.md 5.103) ----
+
+const MOMENT_MEDIA_STALE = 'prepare a mídia de novo'
+
+// owned(item): whether the dm engine's putPublicMedia answered exactly this
+// item in this unlock; anything else (an item from another unlock, another
+// node or a DM) is refused before a record is built.
+async function momentCreate (ctx, { text, media, owned }) {
+  if (typeof owned !== 'function' || owned(media) !== true) throw new UsageError(MOMENT_MEDIA_STALE)
+  return publish(ctx, buildRecord(() => momentRecord({ text, media })))
+}
+
+// Tombstones the caller's own moment `to` (parsed ref) -> recordDelete's
+// result. Any other type, another author's ref or a block that is not there
+// answers 'referência inválida'; one already deleted answers its tombstone.
+async function momentDelete (ctx, { to }) {
+  await withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (to.author !== ownHex || !(to.seq >= 1) || to.seq >= diary.length) throw new UsageError('referência inválida')
+    const raw = await store.readRaw(diary)
+    if (to.seq < raw.length && raw[to.seq].record === null && deletedSeqs(raw).has(to.seq)) return
+    const target = recordAt(raw, to.seq)
+    if (target === null || target.type !== 'moment') throw new UsageError('referência inválida')
+  })
+  return recordDelete(ctx, 'moment', { to })
+}
+
+// The showing moments of the followed diaries (feedRead's admission, local
+// replicas only) and of the own diary, plus the own expired ones ->
+// { authors, own, past } (docs/rpc.md 5.103).
+async function momentsRead (ctx, { now = Date.now() } = {}) {
+  const { association, final, own, kept } = await gatherLogs(ctx)
+  // The feed's page cut applies: a closed or migrated page shows no moment.
+  const others = kept.filter((l) => l.key !== own.key).map((l) => ({ key: l.key, entries: l.entries, raw: l.raw }))
+  const mine = foldMoments({ logs: [{ key: own.key, entries: own.entries }], now }).authors
+  return {
+    authors: foldMoments({ logs: others, now, association, revokedIssuers: final.revokedIssuers }).authors,
+    own: mine.length > 0 ? mine[0].items : [],
+    past: ownPast({ key: own.key, entries: own.entries }, now)
+  }
+}
+
+// The media item of the showing moment author:seq from local data (the own
+// diary or a stored replica, logRead's admission), or null.
+async function momentMedia (ctx, { author, seq, now = Date.now() }) {
+  const key = String(author).toLowerCase()
+  if (!HEX64.test(key) || !Number.isSafeInteger(seq) || seq < 1) return null
+  let log
+  try {
+    log = await logRead(ctx, { author: key })
+  } catch (err) {
+    if (err && err.message === 'sem dados locais para este diário') return null
+    throw err
+  }
+  // The record itself, not the capped list: an older moment still in its
+  // 24 h keeps its photo after newer ones fill the strip.
+  const association = await trustRoot(ctx)
+  const { revokedIssuers } = await moderation(ctx.storage, association)
+  return showingMoment({ key, entries: log.entries }, seq, now, { association, revokedIssuers })
+}
+
 // ---- delete ----
 
 const NOT_DELETABLE = 'não é possível apagar este registro'
@@ -431,7 +494,10 @@ const DELETE_KINDS = {
   profile: { other: 'post', wrong: 'o registro não é um perfil' },
   // testimonialDelete picks the kind from the target, so `other` never applies.
   testimonial: { other: null, wrong: null },
-  'testimonial-show': { other: null, wrong: null }
+  'testimonial-show': { other: null, wrong: null },
+  // momentDelete checks the target first; the blob expires by itself, so no
+  // media core is cleared (shownMedia names none for a moment).
+  moment: { other: null, wrong: null }
 }
 
 // The compat pair profileRecords writes: a plain profile immediately
@@ -1342,7 +1408,10 @@ function skipReason (core, entries, key, association, mod = {}) {
   return r.ok ? null : r.reason
 }
 
-async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
+// The own log and the followed logs feedRead admits, from local data only
+// -> { association, final, own, kept, skipped, incomplete }; kept starts
+// with own.
+async function gatherLogs (ctx) {
   const association = await trustRoot(ctx)
   const mod = await moderation(ctx.storage, association)
   const own = await withIdentity(ctx, async ({ diary, ownHex }) => ({ key: ownHex, entries: await store.readAll(diary) }))
@@ -1385,6 +1454,11 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
     if (reason === null) kept.push({ key, entries: read.entries, raw: read.raw })
     else skipped.push({ key, reason })
   }
+  return { association, final, own, kept, skipped, incomplete }
+}
+
+async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
+  const { association, final, kept, skipped, incomplete } = await gatherLogs(ctx)
   const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before })
   return { items: built.items, skipped, future: built.future, incomplete }
 }
@@ -4452,6 +4526,10 @@ module.exports = {
   testimonialPendingRows,
   testimonialShow,
   testimonialDelete,
+  momentCreate,
+  momentDelete,
+  momentsRead,
+  momentMedia,
   usernameAdd,
   ownEntries,
   ownNoticeContext,

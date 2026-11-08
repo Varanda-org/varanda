@@ -67,8 +67,8 @@
 // height, sealed?, onProgress }) -> Promise<descriptor or private item>; the
 // caller shows its errors (errorText). When the handle has them, also the
 // chat media calls (client/webnode.native.js, client/browser.js mediaOf):
-// putDm(args), read(ref), forgetReadFile(name), clearReadFiles(); a missing
-// one means that capability is absent.
+// putDm(args), putMoment(args), read(ref), forgetReadFile(name),
+// clearReadFiles(); a missing one means that capability is absent.
 //
 // `followsVersion` is bumped once per `follows.changed` event (the follows
 // of the own diary changed, possibly on another device) and `followCount` is
@@ -179,7 +179,7 @@ function appendLine (prev, line) {
 const NodeContext = createContext(null)
 
 // The chat media calls a handle may offer besides upload (see the header).
-const CHAT_MEDIA_CALLS = ['putDm', 'read', 'forgetReadFile', 'clearReadFiles']
+const CHAT_MEDIA_CALLS = ['putDm', 'putMoment', 'read', 'forgetReadFile', 'clearReadFiles']
 
 export function useNode () {
   return useContext(NodeContext)
@@ -245,7 +245,9 @@ export function NodeProvider ({ children }) {
 // What the shell reads to show the hosted, unlocked, member-certified
 // screens over the fixtures: no connection, no sync, no passkey ceremony.
 function VitrineNodeProvider ({ children }) {
-  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures, { large: VITRINE_LARGE }))
+  // The device clock (vitrine sources never read it): Momentos keep their
+  // demo-clock ages, so the 24 h rule on the device still shows them.
+  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures, { large: VITRINE_LARGE, clock: Date.now }))
   const [dmVersion, setDmVersion] = useState(0)
   const bumpDm = useCallback(() => setDmVersion((n) => n + 1), [])
   const [autoWanted, setAutoWanted] = useState(false)
@@ -266,6 +268,14 @@ function VitrineNodeProvider ({ children }) {
     return result
   }), [fixtureRequest])
   const getGroupVersion = useCallback((group) => readGroupVersion(groupVersions, group), [groupVersions])
+  // The real visibility, as the live node reads it: screens that pause while
+  // the app is hidden (the Momentos viewer) behave the same in the demo.
+  const [visible, setVisible] = useState(() => isVisible())
+  useEffect(() => {
+    const unsubscribe = subscribeVisible(setVisible)
+    setVisible(isVisible())
+    return unsubscribe
+  }, [])
   const value = useMemo(() => {
     const done = () => Promise.resolve({})
     // Anything that would change the identity or the connection refuses, so
@@ -280,7 +290,7 @@ function VitrineNodeProvider ({ children }) {
       accountOrigin: 'http://localhost:8080',
       hostedSource: 'live',
       online: true,
-      visible: true,
+      visible,
       sync: { active: null, lines: [], stopped: null, starting: false },
       epoch: 1,
       request: vitrineRequest,
@@ -334,7 +344,7 @@ function VitrineNodeProvider ({ children }) {
       setAutoSync,
       syncNow: () => Promise.resolve()
     }
-  }, [vitrineRequest, groupVersions, followsVersion, getGroupVersion, dmVersion, bumpDm, autoWanted, setAutoSync])
+  }, [vitrineRequest, groupVersions, followsVersion, getGroupVersion, dmVersion, bumpDm, autoWanted, setAutoSync, visible])
   return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
 }
 
@@ -400,8 +410,8 @@ function LiveNodeProvider ({ children }) {
   const [pkGeneration, setPkGeneration] = useState(0)
   // The handle has media.upload (browser node).
   const [hasMedia, setHasMedia] = useState(false)
-  // Which chat media calls the handle has (putDm, read, forgetReadFile,
-  // clearReadFiles); decided once per connection like hasMedia.
+  // Which chat media calls the handle has (putDm, putMoment, read,
+  // forgetReadFile, clearReadFiles); decided once per connection like hasMedia.
   const [mediaCaps, setMediaCaps] = useState('')
   // The handle has follows.legacy / confirmLegacy (browser node).
   const [hasLegacy, setHasLegacy] = useState(false)

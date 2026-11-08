@@ -26,6 +26,9 @@
 // for an unknown author is retried once per ref, so a nameless original can
 // still receive its name. `useSocial`, `socialRowProps` and `RepostPlaceholder`
 // are shared with Diário (and the first two with the Espiadinha).
+// Momentos (hosted only): the list header starts with the rings strip
+// (../ui/MomentosStrip), read with moments.read again when this tab shows, on
+// a refresh and after a moment is created or deleted (momentsChanged).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -55,6 +58,9 @@ import { noteLocalWrite } from '../localWrites'
 import { FEED_FIRST_ROWS, feedDetailsReady } from '../splashGate'
 import { layout, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
+import { MomentosStrip } from '../ui/MomentosStrip'
+import { canPublishMoment } from '../momentSeen'
+import { useMomentSeen, useMoments } from './Momentos'
 
 // Feed skip reasons that come from the association's signed blocklist.
 const MODERATION_REASONS = ['blocked', 'revoked-issuer']
@@ -1169,7 +1175,7 @@ export default function ARua (props) {
   return <MemberARua {...props} />
 }
 
-function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onBoot, onMessage }) {
+function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onBoot, onMessage, onOpenMomentos, onCreateMoment }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -1178,6 +1184,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const bottomPad = useBottomPad() + layout.fabSize
   const social = useSocial({ ownKey, onToast })
   const { ingest } = social
+  const moments = useMoments({ ownKey, active: active !== false, tick: refresh })
+  const momentSeen = useMomentSeen()
   const [feed, setFeed] = useState({
     items: [],
     cursor: null,
@@ -1561,6 +1569,12 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     )
   }
 
+  // A pull refreshes the feed and the Momentos strip together.
+  const reloadMoments = moments.reload
+  const handleRefresh = () => {
+    reloadMoments()
+    return loadNewest()
+  }
   const del = useDelete({
     request,
     node,
@@ -1614,6 +1628,18 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
         extraData={extra}
         ListHeaderComponent={(
           <View>
+            <MomentosStrip
+              hosted={node.hosted === true}
+              data={moments}
+              seen={momentSeen.seen}
+              ownKey={ownKey}
+              me={ownKey ? names.profileOf(ownKey) : null}
+              profileOf={names.profileOf}
+              canPublish={canPublishMoment(node)}
+              now={now}
+              onOpen={typeof onOpenMomentos === 'function' ? onOpenMomentos : () => {}}
+              onCreate={onCreateMoment}
+            />
             {items.length > 0 && loadError ? <ErrorState message={loadError} onRetry={loadNewest} pending={refreshing} /> : null}
             <CountsNote social={social} />
           </View>
@@ -1621,7 +1647,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
         ListEmptyComponent={empty}
         ListFooterComponent={footer}
         contentContainerStyle={{ paddingBottom: bottomPad }}
-        onRefresh={loadNewest}
+        onRefresh={handleRefresh}
         refreshing={refreshing}
         onLoadMore={active && !moreError && !loading && loadedAt !== null && !atEnd && feed.cursor !== null ? loadOlder : undefined}
         loadingMore={loadingMore}

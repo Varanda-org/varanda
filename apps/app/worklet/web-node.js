@@ -5,8 +5,9 @@
 // <dataDir>/web-node, syncing with the installation's seeder over
 // wss://<installation>/seeder (bare-ws). It answers the same handlers as
 // the browser page's node plus the IPC-only host controls of docs/rpc.md
-// 5.50 to 5.56, 5.88 and 5.89 (./identity-install.js, media.uploadFile,
-// dm.putMedia and media.readFile below), and recovery's 5.91 to 5.94
+// 5.50 to 5.56, 5.88, 5.89 and 5.103 (./identity-install.js,
+// media.uploadFile, dm.putMedia, moment.putMedia and media.readFile below),
+// and recovery's 5.91 to 5.94
 // (./identity-install.js).
 //
 // The storage's exclusive LOCK (fileNodeStorage lock(), fs-native-extensions)
@@ -30,7 +31,7 @@ const { hkdfSha256 } = require('@varanda/web-member/lib/hkdf')
 const { MAX_MEDIA_ITEM_BLOCKS, MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
 const { createIdentityHost } = require('./identity-install')
 const { createBareFetch } = require('./bare-fetch')
-const { readMediaFile, createLifecycle, uploadMedia, putDmMedia, clearReadDir, writeReadFile, readMediaToFile } = require('./web-node-parts')
+const { readMediaFile, createLifecycle, uploadMedia, putDmMedia, putMomentMedia, clearReadDir, writeReadFile, readMediaToFile } = require('./web-node-parts')
 
 const MAX_MEDIA_ITEM_BYTES = MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES
 // The lease stays off, as in the browser entry: the visible app keeps its
@@ -123,6 +124,11 @@ function createWebNode (args, { onInternalError } = {}) {
     return putDmMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, ms, kind, to })
   }
 
+  function putMoment ({ name, mime, width, height }) {
+    if (cacheDir === null) throw new RpcError('USAGE', BAD_MEDIA_FILE)
+    return putMomentMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height })
+  }
+
   // Opened chat images on disk: cleared at start, on every lock and at
   // close, so none outlives the unlocked session that opened it. Only once
   // the LOCK is ours: a held lock means another worklet owns that dir.
@@ -195,6 +201,10 @@ function createWebNode (args, { onInternalError } = {}) {
   handlers['dm.putMedia'] = lifecycle.guardUpload(async (params) => {
     await ready()
     return putMedia(params)
+  })
+  handlers['moment.putMedia'] = lifecycle.guardUpload(async (params) => {
+    await ready()
+    return putMoment(params)
   })
   handlers['media.readFile'] = lifecycle.guardUpload(async (params) => {
     await ready()

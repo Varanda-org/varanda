@@ -148,7 +148,8 @@ export function webNodeHandle (request) {
 
   // The answers come the other way through a file too: an opened photo is
   // far above MAX_MESSAGE (docs/rpc.md 5.89). ref: { kind: 'dm', from, id,
-  // index } or { kind: 'group', diary, item } -> { uri, mime, w, h }.
+  // index }, { kind: 'group', diary, item } or { kind: 'moment', author,
+  // seq } (5.103) -> { uri, mime, w, h }.
   const media = {
     // A voice note also carries its duration and kind (docs/rpc.md 5.56, 5.88).
     upload: ({ bytes, mime, width, height, sealed, ms, kind, onProgress } = {}) =>
@@ -159,11 +160,15 @@ export function webNodeHandle (request) {
       if (typeof to !== 'string' || !/^[0-9a-f]{64}$/.test(to)) throw new TypeError('mídia inválida')
       return sendFile(bytes, 'dm.putMedia', { to, mime, width, height, ...voiceOf({ ms, kind }) })
     },
+    // A momento's photo: a fresh blob of its own (5.103), image only.
+    putMoment: ({ bytes, mime, width, height } = {}) =>
+      sendFile(bytes, 'moment.putMedia', { mime, width, height }),
     read: async (ref) => {
       if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
-      const params = ref.kind === 'dm'
-        ? { kind: 'dm', from: ref.from, id: ref.id, index: ref.index }
-        : { kind: 'group', diary: ref.diary, item: ref.item }
+      let params
+      if (ref.kind === 'dm') params = { kind: 'dm', from: ref.from, id: ref.id, index: ref.index }
+      else if (ref.kind === 'moment') params = { kind: 'moment', author: ref.author, seq: ref.seq }
+      else params = { kind: 'group', diary: ref.diary, item: ref.item }
       const got = await request('media.readFile', params)
       const name = got !== null && typeof got === 'object' ? got.name : null
       if (typeof name !== 'string' || !READ_NAME_RE.test(name)) throw new Error('resposta inválida')

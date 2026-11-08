@@ -320,7 +320,7 @@ const store = require('./node-store')
 const { groupKeyPairFromPrf } = require('./passkey')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
-const { createDmEngine } = require('./dm')
+const { createDmEngine, MOMENT_PHOTO_GONE } = require('./dm')
 const { createSeenSync, groupApplier } = require('./seen-sync')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
@@ -479,7 +479,8 @@ const NOT_FOUND_MESSAGES = new Set([
   'grupo não encontrado',
   'comunidade não encontrada',
   SEEDER_UNAVAILABLE,
-  DIARY_UNAVAILABLE
+  DIARY_UNAVAILABLE,
+  MOMENT_PHOTO_GONE
 ])
 
 function messageOf (err) {
@@ -3017,6 +3018,33 @@ function createBrowserSession ({
       return { seq: r.seq, deleted: r.deleted }
     }),
 
+    // Momentos (docs/rpc.md 5.103): the item must be one this node's
+    // momentPutMedia answered in this unlock; published like post.create.
+    // A published item is never offered for a second moment.
+    'moment.create': serial(async ({ text, media }, epoch) => {
+      await requireDm()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.momentCreate(c, { text, media, owned: (item) => dmEngine.isOwnPublicItem(item) }))
+      dmEngine.forgetPublicItem(media)
+      wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    // Local data only, works locked (as feed.read).
+    'moments.read': serial(async () => withCores((c) => member.momentsRead(c, { now: Date.now() }))),
+
+    'moment.delete': serial(async ({ to }, epoch) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.momentDelete(c, { to: ref }))
+      if (r.changed) wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, deleted: r.deleted }
+    }),
+
     // Which of the refs the own diary likes / reposts; local data only,
     // works locked (as profile.read).
     'engagement.read': serial(async ({ refs }) => {
@@ -3669,6 +3697,53 @@ function createBrowserSession ({
     })()
   }
 
+  // A momento's photo (docs/rpc.md 5.103): validated and copied
+  // synchronously (TypeError), the caller's buffer wiped, then sealed into a
+  // FRESH blob and put on the anonymous blob channel by the dm engine (the
+  // stamps need the DM key) -> the moment media item. The native IPC
+  // moment.putMedia reads its cache file and calls this same function.
+  // Nothing about the bytes is logged.
+  function momentPutMedia ({ bytes, mime, width, height } = {}) {
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > MAX_MEDIA_ITEM_BYTES) throw new TypeError(BAD_MEDIA_ARGS)
+    if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
+    if (!isIntIn(width, 1, MAX_MEDIA_DIMENSION) || !isIntIn(height, 1, MAX_MEDIA_DIMENSION)) throw new TypeError(BAD_MEDIA_ARGS)
+    const copy = new Uint8Array(bytes.byteLength)
+    copy.set(bytes)
+    bytes.fill(0)
+    return (async () => {
+      try {
+        if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+        const own = await serial(() => requireDm())({})
+        const pair = keyPair
+        if (pair === null) throw new UsageError(store.LOCKED)
+        return await dmEngine.putPublicMedia(own, pair, { bytes: copy, mime, width, height })
+      } catch (err) {
+        copy.fill(0)
+        throw toRpcError(err, reportInternal)
+      }
+    })()
+  }
+
+  // The photo of the showing moment author:seq -> { bytes, mime, w, h }, for
+  // the page only (never over RPC). The record is read on the chain from
+  // local data; the blob is fetched off it (the public key and nonce of the
+  // record open it, no DM key needed). Gone, expired or not verifying:
+  // NOT_FOUND 'foto indisponível'.
+  function momentReadMedia ({ author, seq } = {}) {
+    if (typeof author !== 'string' || !HEX64.test(author) || !Number.isSafeInteger(seq) || seq < 1) throw new TypeError(BAD_MEDIA_ARGS)
+    const key = author.toLowerCase()
+    return (async () => {
+      try {
+        if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+        const item = await serial(() => withCores((c) => member.momentMedia(c, { author: key, seq, now: Date.now() })))({})
+        if (item === null) throw new Error(MOMENT_PHOTO_GONE)
+        return await dmEngine.readPublicMedia(item)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    })()
+  }
+
   // The plaintext of item `index` of a kept message -> { bytes, mime }, for
   // the page only (never over RPC: a photo is far above MAX_MESSAGE).
   function dmReadMedia ({ from, id, index } = {}) {
@@ -3961,6 +4036,8 @@ function createBrowserSession ({
     dmPutMedia,
     dmReadMedia,
     groupReadMedia,
+    momentPutMedia,
+    momentReadMedia,
     borrow,
     legacyFollows: () => legacyFollows({}),
     confirmLegacyFollows,

@@ -95,6 +95,9 @@ const BAD_MEDIA = 'mídia inválida'
 const MEDIA_GONE = 'mídia indisponível'
 const MEDIA_STALE = 'prepare a mídia de novo'
 const UPLOAD_FAILED = 'não deu para enviar a mídia: tente de novo'
+// A momento's photo that cannot be fetched or does not verify (the same
+// answer for both, so it never says why).
+const MOMENT_PHOTO_GONE = 'foto indisponível'
 // Sealed blobs kept for a send or a retry (each holds its plaintext and
 // ciphertext in memory).
 const BLOBS_MAX = 8
@@ -221,6 +224,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // plaintext key -> entry; entry = { sealed, mime, w, h, ms, plain, hash, lock }.
   const sealedById = new Map()
   const sealedByPlain = new Map()
+  // Momento items putPublicMedia answered in this unlock, by blob id -> item
+  // (no plaintext kept: a retry seals a fresh blob).
+  const publicItems = new Map()
   // Lazy opens queued or in flight, by sender and message id -> { p, job },
   // and messages whose blob is gone (this unlock only).
   const opening = new Map()
@@ -326,6 +332,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     local.lock()
     clearPending()
     forgetAllBlobs()
+    publicItems.clear()
     dropQueued(false, LOCKED)
     opening.clear()
     gone.clear()
@@ -731,6 +738,73 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const want = itemOf(entry)
     if (!DM_MEDIA_KEYS.every((k) => want[k] === item[k])) throw new UsageError(MEDIA_STALE)
     return entry
+  }
+
+  // A momento's photo (docs/rpc.md 5.103). bytes: the caller's copy, wiped
+  // here. Every call seals a FRESH blob, never the putMedia reuse map: the
+  // key and nonce go public in the moment record, so a blob shared with a
+  // DM (or another moment) would open that one for every reader of the
+  // diary. The upload takes stamps as putMedia does. -> the item, ms 0.
+  async function putPublicMedia (own, keyPair, { bytes, mime, width, height }) {
+    requireUnlocked()
+    const gen = generation
+    const ok = bytes instanceof Uint8Array && mime !== dm.DM_AUDIO_MIME && dm.DM_MEDIA_MIMES.includes(mime) &&
+      Number.isInteger(width) && width >= 1 && Number.isInteger(height) && height >= 1 &&
+      mediaBounds(bytes, mime) !== null
+    if (!ok) {
+      if (bytes instanceof Uint8Array) wipe(bytes)
+      throw new UsageError(BAD_MEDIA)
+    }
+    let sealed
+    try {
+      sealed = sealBlob(bytes)
+    } finally {
+      wipe(bytes)
+    }
+    const entry = { sealed, lock: Promise.resolve() }
+    const missing = sealed.frames.filter((f) => f === null).length
+    if (missing > 0 && (await blobs.walletSize()) < missing) await blobs.topUp(keyPair, { force: true })
+    if (gen !== generation) throw new UsageError(LOCKED)
+    await upload(entry, keyPair)
+    if (gen !== generation) throw new UsageError(LOCKED)
+    const item = mediaItem({ ...sealed.descriptor, mime, w: width, h: height, ms: 0 })
+    publicItems.set(item.id, item)
+    while (publicItems.size > BLOBS_MAX) publicItems.delete(publicItems.keys().next().value)
+    return mediaItem(item)
+  }
+
+  // Whether `item` is exactly one putPublicMedia answered in this unlock.
+  function isOwnPublicItem (item) {
+    if (!unlocked() || item === null || typeof item !== 'object') return false
+    const want = publicItems.get(item.id)
+    return want !== undefined && DM_MEDIA_KEYS.every((k) => want[k] === item[k])
+  }
+
+  // A published item is not offered again: the next moment seals its own.
+  function forgetPublicItem (item) {
+    if (item !== null && typeof item === 'object' && isOwnPublicItem(item)) publicItems.delete(item.id)
+  }
+
+  // A momento's photo -> { bytes, mime, w, h } (bytes: a fresh copy the
+  // caller owns). The key and nonce are the record's own (public), so no
+  // unlock is needed: the blob is fetched over plain HTTP GETs from the
+  // seeder's origin. Gone, refused or not verifying (size, sha256, an image
+  // of that mime) all answer MOMENT_PHOTO_GONE.
+  async function readPublicMedia (item) {
+    const d = item
+    if (d === null || typeof d !== 'object' || d.ms !== 0 || d.mime === dm.DM_AUDIO_MIME || !dm.DM_MEDIA_MIMES.includes(d.mime)) {
+      throw new Error(MOMENT_PHOTO_GONE)
+    }
+    if (blobOrigin === null) throw new Error(MOMENT_PHOTO_GONE)
+    let r
+    try {
+      r = await fetchBlob({ id: d.id, key: d.key, nonce: d.nonce, chunks: d.chunks, bytes: d.bytes, sha256: d.sha256 }, blobOrigin, { mime: d.mime, fetch: fetchImpl, limits: L.fetch })
+    } catch (err) {
+      const msg = err && err.message
+      if (msg === MEDIA_GONE || msg === BAD_MEDIA) throw new Error(MOMENT_PHOTO_GONE)
+      throw err
+    }
+    return { bytes: r.bytes, mime: d.mime, w: d.w, h: d.h }
   }
 
   async function seen (own, peer) {
@@ -1222,6 +1296,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     send: tracked(send),
     putMedia: tracked(putMedia),
     readMedia: tracked(readMedia),
+    putPublicMedia: tracked(putPublicMedia),
+    isOwnPublicItem,
+    forgetPublicItem,
+    readPublicMedia,
     wipeMedia,
     set: tracked(set),
     pull: tracked(pull),
@@ -1247,6 +1325,7 @@ module.exports = {
   MEDIA_GONE,
   MEDIA_STALE,
   UPLOAD_FAILED,
+  MOMENT_PHOTO_GONE,
   BLOBS_MAX,
   voiceMs
 }

@@ -497,6 +497,10 @@ function isDmMediaItem (d) {
     isChatMediaKind(mime, w, h, ms)
 }
 
+function isMomentMediaItem (d) {
+  return isDmMediaItem(d) && d.ms === 0 && isMediaMime(d.mime)
+}
+
 // By index, never every(): a hole in a sparse array is undefined and invalid.
 // Distinct blob ids, as the core v2 inner requires (protocol section 11), so
 // a list the node would refuse is refused here as a parameter error.
@@ -743,6 +747,9 @@ const SPECS = {
   'testimonial.pending': { fields: none },
   'testimonial.show': { fields: { from: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
   'testimonial.delete': { fields: { to: req((v) => isRef(v, 1)), about: opt(isKey) }, mutating: true },
+  'moment.create': { fields: { text: req(str(0, 200)), media: req(isMomentMediaItem) }, mutating: true },
+  'moments.read': { fields: none },
+  'moment.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   // Signs the terms-acceptance statement with the identity key; the node
   // fills in member and association itself, so a caller never chooses the
   // bytes.
@@ -1264,25 +1271,41 @@ const SPECS = {
     mutating: true,
     cross: mediaUploadCross
   },
+  // IPC only, in-app web-node worklet (docs/rpc.md 5.103). On the web,
+  // momentPutMedia hands bytes directly to the node, outside RPC.
+  'moment.putMedia': {
+    fields: {
+      name: req(isMediaName),
+      mime: req(isMediaMime),
+      width: req(int(1, MEDIA_SIDE_MAX)),
+      height: req(int(1, MEDIA_SIDE_MAX))
+    },
+    mutating: true,
+    cross: mediaUploadCross
+  },
   // IPC only, in-app web-node worklet (docs/rpc.md 5.89): the opened image
   // of a chat item is written to a file in the worklet's read directory and
   // only its name comes back, since a photo is far above MAX_MESSAGE. A DM
   // item is { kind: 'dm', from, id, index }, a private group item
-  // { kind: 'group', diary, item }. Not mutating: it changes no diary.
+  // { kind: 'group', diary, item }, a moment { kind: 'moment', author, seq }.
+  // Not mutating: it changes no diary.
   'media.readFile': {
     fields: {
-      kind: req((v) => v === 'dm' || v === 'group'),
+      kind: req((v) => v === 'dm' || v === 'group' || v === 'moment'),
       from: opt(isKey),
       id: opt(isDmId),
       index: opt((v) => v === 'card' || int(0, L.MAX_DM_MEDIA - 1)(v)),
       diary: opt(isKey),
-      item: opt(isPrivateGroupMediaItem)
+      item: opt(isPrivateGroupMediaItem),
+      author: opt(isKey),
+      seq: opt(int(1, Number.MAX_SAFE_INTEGER))
     },
     cross (given) {
       const dm = ['from', 'id', 'index']
       const group = ['diary', 'item']
-      const want = given.kind === 'dm' ? dm : group
-      const other = given.kind === 'dm' ? group : dm
+      const moment = ['author', 'seq']
+      const want = given.kind === 'dm' ? dm : given.kind === 'group' ? group : moment
+      const other = [...dm, ...group, ...moment].filter((k) => !want.includes(k))
       for (const k of want) if (!hasOwn(given, k)) return 'parâmetro obrigatório: ' + k
       for (const k of other) if (hasOwn(given, k)) return 'parâmetro desconhecido'
       return null

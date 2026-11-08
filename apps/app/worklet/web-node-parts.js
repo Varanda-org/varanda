@@ -176,6 +176,13 @@ function putDmMedia ({ read, session, unlink, isClosing }, { mime, width, height
   return sendFile({ read, unlink, isClosing, put: (bytes) => session.dmPutMedia({ bytes, mime, width, height, ...voiceOf({ ms, kind }), to }) })
 }
 
+// moment.putMedia after the read (docs/rpc.md 5.103): a momento's photo, a
+// fresh blob sealed and put on the blob channel by the session. Never a
+// voice note, so only the four image fields reach it.
+function putMomentMedia ({ read, session, unlink, isClosing }, { mime, width, height }) {
+  return sendFile({ read, unlink, isClosing, put: (bytes) => session.momentPutMedia({ bytes, mime, width, height }) })
+}
+
 // Removes every read file (a media name) directly under `dir` and makes
 // sure the directory exists. Never throws: a file left here holds an opened
 // image, so the next clear tries again.
@@ -224,7 +231,8 @@ async function writeReadFile ({ fs, join, dir, name, bytes, flags }) {
   }
 }
 
-// media.readFile (docs/rpc.md 5.89): opens the chat item through the session
+// media.readFile (docs/rpc.md 5.89, 5.103): opens the chat item or the
+// momento's photo (kind 'moment', { author, seq }) through the session
 // and writes the plaintext with write(bytes) -> name. The DM index may be
 // 'card', resolved by the session with the same checks as a media item. `generation()` changes
 // on every lock: an image opened before a lock never stays on disk after it.
@@ -236,9 +244,9 @@ async function readMediaToFile ({ session, write, unlink, generation, isClosing 
   let opened
   try {
     if (isClosing()) throw closedError()
-    opened = params.kind === 'dm'
-      ? session.dmReadMedia({ from: params.from, id: params.id, index: params.index })
-      : session.groupReadMedia({ diary: params.diary, item: params.item })
+    if (params.kind === 'dm') opened = session.dmReadMedia({ from: params.from, id: params.id, index: params.index })
+    else if (params.kind === 'moment') opened = session.momentReadMedia({ author: params.author, seq: params.seq })
+    else opened = session.groupReadMedia({ diary: params.diary, item: params.item })
   } catch (err) {
     if (err instanceof RpcError) throw err
     throw new RpcError('USAGE', BAD_MEDIA)
@@ -281,4 +289,4 @@ async function readMediaToFile ({ session, write, unlink, generation, isClosing 
   return ms === undefined ? { name, mime: got.mime, w, h } : { name, mime: got.mime, w, h, ms }
 }
 
-module.exports = { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, clearReadDir, writeReadFile, readMediaToFile, CLOSED_MESSAGE }
+module.exports = { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, putMomentMedia, clearReadDir, writeReadFile, readMediaToFile, CLOSED_MESSAGE }

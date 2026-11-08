@@ -877,7 +877,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'testimonial', 'testimonial-show'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'testimonial', 'testimonial-show', 'moment'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -1398,4 +1398,86 @@ test('testimonial records: old readers skip both as malformed', async (t) => {
   // Neither borrows another type's shape.
   t.is(validateRecord({ type: 'testimonial', to: K2, on: true, at: AT }, 1), 'malformed')
   t.is(validateRecord({ type: 'testimonial-show', text: 'oi', at: AT, replyTo: null }, 1), 'malformed')
+})
+
+function momentMedia (over = {}) {
+  return { id: 'a'.repeat(64), key: 'b'.repeat(64), nonce: 'c'.repeat(48), chunks: 2, bytes: 40000, sha256: 'd'.repeat(64), mime: 'image/jpeg', w: 1080, h: 1350, ms: 0, ...over }
+}
+
+test('moment records: one public blob image and short text', async (t) => {
+  const { momentRecord, MOMENT_KEYS, MOMENT_MEDIA_KEYS, MAX_MOMENT_TEXT, MEDIA_MIMES } = records
+  t.alike(MOMENT_KEYS, ['type', 'text', 'at', 'media'])
+  t.alike(MOMENT_MEDIA_KEYS, ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'])
+  t.is(MAX_MOMENT_TEXT, 200)
+  const mr = { type: 'moment', text: 'Pôr do sol 🌅\nna varanda', at: AT, media: momentMedia() }
+  t.is(validateRecord(mr, 1), null)
+  t.is(validateRecord(mr, 0), 'genesis-required')
+  t.is(validateRecord({ ...mr, text: '' }, 1), null, 'photo only')
+  t.is(validateRecord({ ...mr, text: '😀'.repeat(200) }, 1), null, '200 code points')
+  t.is(validateRecord({ ...mr, text: 'x'.repeat(201) }, 1), 'text-length')
+  t.is(validateRecord({ ...mr, text: '😀'.repeat(201) }, 1), 'text-length')
+  const bads = ['a\u0000b', 'a\rb', 'a\u202eb', 'a\u2028b', 'a\u0085b', 'a\ud800b', 'a\udc00', 7, null]
+  for (let i = 0; i < bads.length; i++) t.is(validateRecord({ ...mr, text: bads[i] }, 1), 'text-length', 'bad text #' + i)
+  t.is(validateRecord({ ...mr, at: '2026-01-01T00:00:00Z' }, 1), 'date-invalid')
+  // Exact record keys.
+  t.is(validateRecord({ ...mr, extra: 1 }, 1), 'malformed')
+  t.is(validateRecord({ type: 'moment', text: 'oi', at: AT }, 1), 'malformed', 'media required')
+  t.is(validateRecord({ type: 'moment', text: 'oi', at: AT, replyTo: null }, 1), 'malformed')
+  // Every chat image mime, never audio.
+  for (const mime of MEDIA_MIMES) t.is(validateRecord({ ...mr, media: momentMedia({ mime }) }, 1), null, mime)
+  const badMedia = [
+    null, [], 'x', [momentMedia()],
+    momentMedia({ extra: 1 }),
+    { ...momentMedia(), ms: undefined },
+    momentMedia({ mime: 'audio/mp4', w: 0, h: 0, ms: 3000 }),
+    momentMedia({ mime: 'audio/mp4' }),
+    momentMedia({ mime: 'image/svg+xml' }),
+    momentMedia({ ms: 1 }),
+    momentMedia({ ms: '0' }),
+    momentMedia({ w: 0 }),
+    momentMedia({ h: 16385 }),
+    momentMedia({ w: 1.5 }),
+    momentMedia({ nonce: 'c'.repeat(64) }),
+    momentMedia({ nonce: 'c'.repeat(47) }),
+    momentMedia({ nonce: 'C'.repeat(48) }),
+    momentMedia({ id: 'a'.repeat(63) }),
+    momentMedia({ key: 'z'.repeat(64) }),
+    momentMedia({ sha256: 7 }),
+    momentMedia({ chunks: 3 }),
+    momentMedia({ chunks: 1 }),
+    momentMedia({ bytes: 16, chunks: 1 }),
+    momentMedia({ bytes: 258 * 32768, chunks: 258 })
+  ]
+  const { ms, ...noMs } = momentMedia()
+  badMedia.push(noMs)
+  for (let i = 0; i < badMedia.length; i++) t.is(validateRecord({ ...mr, media: badMedia[i] }, 1), 'media-invalid', 'bad media #' + i)
+  t.is(validateRecord({ ...mr, media: momentMedia({ bytes: 17, chunks: 1 }) }, 1), null, 'smallest blob')
+  t.is(validateRecord({ ...mr, media: momentMedia({ bytes: 257 * 32768, chunks: 257 }) }, 1), null, 'largest blob')
+  // Builder: exact keys, extra item keys dropped, invalid input throws.
+  t.alike(momentRecord({ text: mr.text, media: mr.media, at: AT }), mr)
+  t.alike(Object.keys(momentRecord({ media: momentMedia() })), ['type', 'text', 'at', 'media'])
+  t.is(momentRecord({ media: momentMedia() }).text, '')
+  t.alike(momentRecord({ text: 'oi', media: momentMedia({ extra: 1 }), at: AT }).media, momentMedia())
+  const media = momentMedia()
+  t.not(momentRecord({ media, at: AT }).media, media, 'the item is copied')
+  await t.exception.all(async () => momentRecord({ text: 'oi', at: AT }), /media-invalid/)
+  await t.exception.all(async () => momentRecord({ text: 'x'.repeat(201), media, at: AT }), /text-length/)
+  await t.exception.all(async () => momentRecord({ media: momentMedia({ mime: 'audio/mp4' }), at: AT }), /media-invalid/)
+  // Hostile getters never throw out of validation.
+  const hostile = { type: 'moment', text: 'oi', at: AT }
+  Object.defineProperty(hostile, 'media', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(hostile, 1), 'malformed')
+})
+
+test('moment records: old readers skip it as malformed', async (t) => {
+  // A copy of TYPES before Momentos: an old reader skips the record as any
+  // unknown type today.
+  const OLD_TYPES = ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'testimonial', 'testimonial-show']
+  const oldReader = (r) => (OLD_TYPES.includes(r.type) ? validateRecord(r, 1) : 'malformed')
+  const mr = { type: 'moment', text: 'oi', at: AT, media: momentMedia() }
+  t.is(oldReader(mr), 'malformed')
+  t.is(validateRecord({ ...mr, type: 'momento' }, 1), 'malformed', 'unknown types stay malformed')
+  // It does not borrow a post shape.
+  t.is(validateRecord({ type: 'moment', text: 'oi', at: AT, replyTo: null }, 1), 'malformed')
+  t.is(validateRecord({ type: 'post', text: 'oi', at: AT, replyTo: null, media: [momentMedia()] }, 1), 'media-invalid', 'not a post media descriptor')
 })

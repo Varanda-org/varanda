@@ -18,6 +18,10 @@
 // The own 'seguindo' count comes from the local node; 'seguidores' comes
 // from the seeder (hosted only, useFollowCounts) and can be lower than
 // reality, hence the note under the counts.
+// Momentos (hosted only): under the profile header, never a tab, the own
+// live moments ('Seus momentos (24 h)', opening the own viewer) and the own
+// expired ones ('Momentos anteriores (N)', collapsed) with Apagar
+// (../ui/MomentosStrip DiarioMoments, moment.delete after a confirmation).
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -62,6 +66,8 @@ import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, refOf, socialRowProps, useSocial } from './ARua'
 import { DeletePrompt, useDelete } from './Conversa'
 import { TESTIMONIALS_TAB, useTestimonialTab, useTestimonials } from './Depoimentos'
+import { ConfirmMomentDelete, useMoments } from './Momentos'
+import { DiarioMoments } from '../ui/MomentosStrip'
 
 const BAND = 96
 const TABS = [{ id: 'posts', label: 'Publicações' }, { id: 'mural', label: 'Mural' }]
@@ -149,7 +155,7 @@ function postOf (author, seq, record) {
   }
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage }) {
+export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -197,6 +203,9 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const followCounts = useFollowCounts(ownPublicKey, String(refresh) + ':' + pulls)
   // Own depoimentos and the ones waiting for approval (hosted only).
   const testimonials = useTestimonials(ownPublicKey, { withPending: true, tick: String(refresh) + ':' + pulls, active: active !== false })
+  // Own live and past moments (hosted only).
+  const moments = useMoments({ ownKey: ownPublicKey, active: active !== false, tick: String(refresh) + ':' + pulls })
+  const [momentDeleting, setMomentDeleting] = useState(null)
   const tabs = node.hosted === true ? TABS_HOSTED : TABS
   // A tab the node no longer offers (not hosted) falls back to Publicações.
   const shownTab = tabs.some((t) => t.id === tab) ? tab : 'posts'
@@ -500,6 +509,13 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           ]}
           tabs={
             <View>
+              <DiarioMoments
+                hosted={node.hosted === true}
+                data={moments}
+                now={now}
+                onOpenOwn={typeof onOpenMomentos === 'function' && ownPublicKey ? () => onOpenMomentos(ownPublicKey) : undefined}
+                onDelete={setMomentDeleting}
+              />
               <CommunitiesBox items={communities} title='Suas comunidades' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
               <Segmented options={tabs} selected={shownTab} onSelect={setTab} />
             </View>
@@ -677,6 +693,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           )
         : null}
       {testimonialTab.sheets}
+      <ConfirmMomentDelete open={momentDeleting !== null} target={momentDeleting} onClose={() => setMomentDeleting(null)} />
       <SocialToast text={social.toast} />
     </View>
   )
