@@ -10,7 +10,7 @@ export const BLOCK_TEXTS = Object.freeze({
   unblock: 'Desbloquear',
   cancel: 'Cancelar',
   confirmNote: 'Você deixa de ver as publicações, as respostas e os avisos dessa pessoa, e as mensagens dela não chegam mais. Você também deixa de seguir essa pessoa. Ela não é avisada. Como os diários são públicos, ela ainda pode ver o que você publica.',
-  done: 'Pessoa bloqueada. Para desfazer, abra Ajustes e depois Pessoas bloqueadas.',
+  done: 'Pessoa bloqueada. Desfaça em Ajustes.',
   undone: 'Pessoa desbloqueada.',
   profileTitle: 'Você bloqueou esta pessoa',
   profileBody: 'As publicações dela não aparecem para você. Ela não foi avisada.',
