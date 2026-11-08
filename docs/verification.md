@@ -6199,3 +6199,38 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi executada nesta documentação.
 - O ponto da aba Feira reflete o que a última abertura da Feira contou; ele não é atualizado em segundo plano.
 - As contagens olham só a primeira página de cada busca.
+
+## 137. Termos 29 e manifesto de privacidade para a revisão da App Store (PR fix/terms-privacy-manifest-store)
+
+As seções anteriores não mudam. Esta seção documenta os textos e o manifesto preparados para a primeira revisão da App Store (issue #46).
+
+### O que mudou
+
+- Termos e Política na versão 29 (`apps/app/src/legal.js`, `TERMS_VERSION` em `packages/core/lib/terms.js`), com novo aceite: tolerância zero com conteúdo censurável e abuso, a conferência de termos no aparelho antes de publicar, o bloqueio de outra pessoa, seção "Seu conteúdo", contato por e-mail, Instituto Varanda em constituição e conta individual nas lojas, sem a menção a protótipo.
+- A verificação de idade, as denúncias, o recurso, a passkey, o vínculo Google e as fotos passam a constar como válidos também no app ligado à instalação da associação, como o código já fazia (`apps/app/App.js`, `Denunciar.js`, `Recurso.js`). A verificação de idade segue sem rodar no app com configuração manual.
+- A Política deixa de dizer que a exclusão da conta não tem fluxo próprio, e passa a citar o registro de erros do servidor web, que pode guardar o texto de uma busca, e as estatísticas de uso.
+- `NSPrivacyCollectedDataTypes` preenchido com os 13 tipos do formulário App Privacy (`docs/development.md`) em `apps/app/ios/Varanda/PrivacyInfo.xcprivacy` e em `ios.privacyManifests` do `apps/app/app.json`. Identificadores conferidos na documentação da Apple em 2026-11-08.
+
+### Testes automatizados
+
+- `node apps/app/test/legal.test.js`: versão, data, resumo do texto e as frases da versão 29.
+- `node apps/app/test/terms-version.test.js` e `node packages/core/test/terms.test.js`: as duas constantes de versão.
+- `node apps/site/test/legal.test.js`: as páginas `termos/` e `privacidade/` geradas de `legal.js`.
+- `node apps/app/test/hardening.test.js`: a lista de dados no `app.json` e no manifesto, e o `expo prebuild --clean` numa cópia temporária reproduzindo o manifesto.
+
+### Checagens humanas (a fazer)
+
+- [ ] A conferência de termos no aparelho e o bloqueio de outra pessoa, com a lista guardada no bloco cifrado, já estão no ar antes de a versão 29 ir ao ar, porque os documentos os descrevem como existentes. Eles vêm em outros PRs.
+- [ ] A caixa `contato@varanda.app` existe e recebe e-mail antes de a versão 29 ir ao ar. Em 2026-11-08, `varanda.app` não tinha registro MX.
+- [ ] App Store Connect, App Privacy: as respostas publicadas (Publish) são as do manifesto (`docs/development.md`).
+- [ ] App Store Connect, direitos de conteúdo: resposta dada com base na seção "Seu conteúdo".
+- [ ] O nome em "O que é o Varanda" é o mesmo que a App Store mostra como vendedor.
+- [ ] Revisão jurídica do texto novo: associação em constituição e conta individual, autorização de uso do conteúdo, lista do que é proibido, canal para pedidos sobre dados.
+- [ ] `pod install` mantém `NSPrivacyCollectedDataTypes` e muda só a indentação do manifesto.
+- [ ] Android e simulador iOS, com a instalação: o portão pede o novo aceite, e Ajustes › Termos e privacidade mostra a versão 29 com a seção "Seu conteúdo".
+
+### Limites
+
+- `supportUrl` em `apps/app/store.config.json` e a seção Contato do site continuam sem o e-mail.
+- O texto promete "não tolera" sem prazo de resposta: os Termos não fixam em quantas horas uma denúncia é analisada.
+- A autorização de uso vai do membro para a associação. A licença de uso comercial dentro da rede, do rascunho do estatuto, não entrou nesta versão.
