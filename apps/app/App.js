@@ -67,6 +67,10 @@ import { makeIntent, validIntent } from './src/privateReply'
 import { NamesProvider, useNames } from './src/names'
 import { BlocksProvider, useBlocks } from './src/blocksProvider'
 import { BlockSheet } from './src/ui/BlockSheet'
+import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
+import { fetchMember } from './src/indexClient'
+import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
+import { pageNoticeStore } from './src/pageNoticeStore'
 import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
 import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotBefore } from './src/seenSync'
@@ -146,7 +150,7 @@ import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, linkReturnTaker, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
-import Membro from './src/screens/Membro'
+import Membro, { canConverseWithPage } from './src/screens/Membro'
 import Depoimentos from './src/screens/Depoimentos'
 import Momentos from './src/screens/Momentos'
 import Feira from './src/screens/Feira'
@@ -1977,26 +1981,100 @@ function Member () {
   // and Mensagem reads the new intent as a prop. Mensagem uses one only once,
   // and only the conversation on top of the stack is handed it.
   const intentsRef = useRef(new Map())
-  // A lock, an unlock or another identity drops every pending context.
-  useEffect(() => { intentsRef.current.clear() }, [ownKey, nodeEpoch])
+  // The page notice asked from a post's "Mensagem em particular" ({ key }).
+  const [pageDmAsk, setPageDmAsk] = useState(null)
+  const pageDmPending = useRef(null)
+  // A lock, an unlock or another identity drops every pending context, and a
+  // page notice left open must not open a conversation under the new identity.
+  useEffect(() => {
+    intentsRef.current.clear()
+    setPageDmAsk(null)
+    pageDmPending.current = null
+  }, [ownKey, nodeEpoch])
   const intentCount = useRef(0)
   const [, setIntentTick] = useState(0)
+  const pageDmGen = useRef(0)
+  const ownKeyRef = useRef(ownKey)
+  ownKeyRef.current = ownKey
   const openMessage = useCallback((peer, options) => {
     const key = typeof peer === 'string' ? peer.toLowerCase() : peer
-    if (options && options.context && typeof key === 'string') {
-      intentCount.current += 1
-      const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
-      const intent = makeIntent({ id: intentCount.current + ':' + Date.now(), peer: key, from: own, context: options.context })
-      if (validIntent(intent, own)) {
-        intentsRef.current.set(key, intent)
-        setIntentTick((n) => n + 1)
+    const open = () => {
+      if (options && options.context && typeof key === 'string') {
+        intentCount.current += 1
+        const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
+        const intent = makeIntent({ id: intentCount.current + ':' + Date.now(), peer: key, from: own, context: options.context })
+        if (validIntent(intent, own)) {
+          intentsRef.current.set(key, intent)
+          setIntentTick((n) => n + 1)
+        }
       }
+      // { draft, card } from a listing's Conversar, shown in the composer only;
+      // nothing is sent until the member presses send.
+      const initial = options && (typeof options.draft === 'string' || options.card) ? { draft: options.draft, card: options.card || null } : null
+      pushScreen({ screen: 'mensagem', key, params: initial ? { initial } : {} })
     }
-    // { draft, card } from a listing's Conversar, shown in the composer only;
-    // nothing is sent until the member presses send.
-    const initial = options && (typeof options.draft === 'string' || options.card) ? { draft: options.draft, card: options.card || null } : null
-    pushScreen({ screen: 'mensagem', key, params: initial ? { initial } : {} })
-  }, [pushScreen, ownKey])
+    if (!(options && options.context && typeof key === 'string')) {
+      pageDmGen.current++
+      pageDmPending.current = null
+      return open()
+    }
+    // A post's row offers the message before the author is known as a Pagina
+    // (feed items carry no page flag): a page gets its one-time notice and no
+    // private context chip, and a closed or moved one gets none at all.
+    const decide = ({ read, hint, closed, moved }) => {
+      const canConverse = canConverseWithPage({
+        page: true,
+        closed,
+        moved,
+        hosted: node.hosted,
+        enabled: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })
+      })
+      const plan = pageDmPlan({ hint, read, seen: pageNoticeSeen(pageNoticeStore(), key), canConverse })
+      if (plan === 'open') return open()
+      if (plan === 'direct') return pushScreen({ screen: 'mensagem', key, params: {} })
+      if (plan === 'notice') return setPageDmAsk({ key })
+      // showToast only touches setToast and toastTimer, both stable.
+      showToast('Esta página não recebe mensagens.')
+    }
+    const prof = names.profileOf(key)
+    if (prof && prof.page === true) {
+      pageDmGen.current++
+      pageDmPending.current = null
+      return decide({ read: 'page', hint: null, closed: prof.closed === true, moved: prof.moved === true })
+    }
+    if (pageDmPending.current === key) return
+    const pressGen = ++pageDmGen.current
+    pageDmPending.current = key
+    const pressOwn = ownKey
+    const pressEpoch = nodeEpoch
+    // Slow page discovery must not hold up a person's conversation.
+    const bounded = (promise) => {
+      let timer
+      return Promise.race([
+        promise,
+        new Promise((resolve) => { timer = setTimeout(() => resolve(null), 2500) })
+      ]).finally(() => clearTimeout(timer))
+    }
+    const hintP = Promise.resolve().then(() => fetchMember(key)).then(
+      (res) => res && res.ok && res.value.page === true ? { page: true, closed: res.value.closed === true, moved: res.value.moved === true } : null
+    ).catch(() => null)
+    const readP = Promise.resolve().then(() => node.request('page.read', { key })).catch(() => null)
+    Promise.all([bounded(hintP), bounded(readP)]).then(([hint, r]) => {
+      if (pageDmGen.current !== pressGen) return
+      if (pageDmPending.current === key) pageDmPending.current = null
+      if (ownKeyRef.current !== pressOwn || nodeEpochRef.current !== pressEpoch) return
+      const read = pageReadKind(r, key)
+      const fromRead = read === 'page'
+      const closed = fromRead ? r.closed === true : !!(hint && hint.closed)
+      const moved = fromRead ? (r.movedTo !== null && r.movedTo !== undefined) : !!(hint && hint.moved)
+      // Only the member's own node may mark a key as a page in the names
+      // cache: the seeder's hint is untrusted and would otherwise stick.
+      if (read === 'page') {
+        names.learnMany([[key, { name: prof ? prof.name : null, username: prof ? prof.username : null, page: true, closed, moved }]])
+      }
+      decide({ read, hint, closed, moved })
+    }).catch(() => { if (pageDmGen.current === pressGen && pageDmPending.current === key) pageDmPending.current = null })
+  }, [pushScreen, ownKey, nodeEpoch, names, node.request, node.hosted, node.accountOrigin])
   const intentUsed = useCallback((id) => {
     for (const [key, intent] of intentsRef.current) {
       if (intent.id === id) intentsRef.current.delete(key)
@@ -3091,6 +3169,16 @@ function Member () {
             </View>
             )
           : null}
+        <PageNoticeSheet
+          open={pageDmAsk !== null}
+          page={pageDmAsk ? pageDmAsk.key : null}
+          onClose={() => setPageDmAsk(null)}
+          onContinue={() => {
+            const k = pageDmAsk.key
+            setPageDmAsk(null)
+            pushScreen({ screen: 'mensagem', key: k, params: {} })
+          }}
+        />
         {/* Avisos is not a tab: the bar keeps the tab it was opened from, and that tab's icon closes it. */}
         {barsHidden ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot, feira: feiraBadge }} tabs={tabsFor(mode)} me={tabMe} />}
       </View>

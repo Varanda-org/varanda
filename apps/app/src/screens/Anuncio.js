@@ -36,7 +36,7 @@ import { detailActions, deleteRequest, ownerDest, pickListing, reportTarget, sta
 import { mineView } from '../feiraScreen'
 import { RATINGS_NOTE, collectRatings, reviewModel, starsLabel, summaryLabel } from '../feiraReview'
 import { installationOrigin } from '../installation'
-import { PAGE_DM_NOTICE, notePageNotice, pageNoticeSeen } from '../pageNotice'
+import { pageNoticeSeen } from '../pageNotice'
 import { pageNoticeStore } from '../pageNoticeStore'
 import { isAppClient } from '../appClient'
 import { fetchMedia, validDescriptor } from '../media/fetch'
@@ -45,7 +45,7 @@ import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
 import { Btn, ErrorText, Soft, Spinner, errorText, useAction } from '../ui'
 import { MediaGrid } from '../ui/MediaGrid'
-import { Sheet } from '../ui/Sheet'
+import { PageNoticeSheet } from '../ui/PageNoticeSheet'
 import { TopBar } from '../ui/TopBar'
 import { Pill } from '../ui/Pill'
 import { ErrorState } from '../ui/States'
@@ -343,20 +343,15 @@ export default function Anuncio ({
           {action.error !== '' ? <ErrorText>{action.error}</ErrorText> : null}
         </View>
       </ScrollView>
-      <Sheet open={pageNotice} onClose={() => setPageNotice(false)} title='Conversar com a página'>
-        <View style={styles.actions}>
-          <Soft>{PAGE_DM_NOTICE}</Soft>
-          <Btn
-            label='Continuar'
-            onPress={() => {
-              notePageNotice(pageNoticeStore(), listing.author)
-              setPageNotice(false)
-              startConversation()
-            }}
-          />
-          <Btn label='Cancelar' secondary onPress={() => setPageNotice(false)} />
-        </View>
-      </Sheet>
+      <PageNoticeSheet
+        open={pageNotice}
+        page={listing.author}
+        onClose={() => setPageNotice(false)}
+        onContinue={() => {
+          setPageNotice(false)
+          startConversation()
+        }}
+      />
     </View>
   )
 }

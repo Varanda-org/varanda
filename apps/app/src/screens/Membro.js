@@ -44,17 +44,18 @@ import * as actingAs from '../actingAs'
 import { TEXTS, pagesFollow, pagesFollows, pagesSuccessor } from '../pages'
 import { MAX_HOPS, moveOf, pageMoveView, resolveChain, shownUnderCut, successorOf } from '../pageMove'
 import { rosterRows } from '../pageRoster'
-import { Btn, Soft, errorText, useBottomPad, useNow } from '../ui'
+import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { MoreButton } from '../ui/MoreButton'
+import { PageNoticeSheet } from '../ui/PageNoticeSheet'
 import { Sheet } from '../ui/Sheet'
 import { ShareProfile } from '../ui/ShareProfile'
 import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
 import { pageNoticeStore } from '../pageNoticeStore'
-import { PAGE_DM_NOTICE, pageNoticeKey } from '../pageNotice'
+import { pageNoticeKey, pageReadKind } from '../pageNotice'
 import { ProfileHeader } from '../ui/ProfileHeader'
 import { ProfileBar, useProfileBar } from '../ui/ProfileBar'
 import { LABELS } from '../dm'
@@ -123,10 +124,7 @@ export function membersPageStep (res, person, offset) {
 }
 
 // Whether a page.read answer is about a page (a person's diary has no roster).
-function isPageRead (r, key) {
-  if (!r || typeof r !== 'object' || r.page !== key) return false
-  return r.gen !== null || r.owner !== null || r.closed === true || (r.movedTo !== null && r.movedTo !== undefined)
-}
+const isPageRead = (r, key) => pageReadKind(r, key) === 'page'
 
 function useActingAs () {
   const [state, setState] = useState(() => actingAs.get())
@@ -735,21 +733,16 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     setPageNotice(author)
   }
   const pageNoticeSheet = (
-    <Sheet open={pageNotice === author && canConverse} onClose={() => setPageNotice(null)} title='Conversar com a página'>
-      <View style={styles.note}>
-        <Soft>{PAGE_DM_NOTICE}</Soft>
-        <Btn
-          label='Continuar'
-          onPress={() => {
-            if (!canConverse || pageNotice !== author) return
-            try { pageNoticeStore().setItem(pageNoticeKey(author), '1') } catch {}
-            setPageNotice(null)
-            onMessage(author)
-          }}
-        />
-        <Btn label='Cancelar' secondary onPress={() => setPageNotice(null)} />
-      </View>
-    </Sheet>
+    <PageNoticeSheet
+      open={pageNotice === author && canConverse}
+      page={author}
+      onClose={() => setPageNotice(null)}
+      onContinue={() => {
+        if (!canConverse || pageNotice !== author) return
+        setPageNotice(null)
+        onMessage(author)
+      }}
+    />
   )
   const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'
     ? (
