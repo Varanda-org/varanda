@@ -18,7 +18,7 @@ test('legal: version 29 has no tolerance for abuse, a real contact, a content li
   t.ok(text(TERMS).includes('não tolera conteúdo censurável nem abuso contra outras pessoas'))
   t.absent(text(TERMS).includes('obrigações de conduta'), 'no clause denying conduct rules')
   t.absent(text(TERMS).includes('protótipo'), 'not described as a prototype')
-  t.ok(text(TERMS).includes('recusam, no próprio aparelho e antes de publicar, publicações, mensagens de grupo público, perfis, anúncios e nomes de grupo ou comunidade'), 'on-device word check, with what it covers')
+  t.ok(text(TERMS).includes('recusam, no próprio aparelho e antes de publicar ou enviar, publicações, mensagens de grupo público, nomes, bios e @nomes de pessoas e de páginas, anúncios e avaliações da Feira, cartões de convite e nomes de grupo público ou de comunidade'), 'on-device word check, with what it covers')
   t.ok(text(TERMS).includes('Você pode bloquear outra pessoa'), 'member blocking')
   t.ok(text(PRIVACY).includes('Esse mesmo bloco guarda as pessoas que você bloqueou'), 'block list in the seen block')
   t.ok(TERMS.sections.some(({ heading }) => heading === 'Seu conteúdo'), 'content license section')
@@ -90,7 +90,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'bff74c37e8758e6a1b1709ac5e1809b5fa1314776ab0bd04f9e3c5b907e9e7b4', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'fadab98396c9e8faacf04c3d68b9677da7af8e7c26b01449fb3d1cbfc53f8036', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
