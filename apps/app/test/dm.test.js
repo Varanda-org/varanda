@@ -385,3 +385,178 @@ test('Mensagem offers Encaminhar and marks forwarded messages without the origin
   const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
   t.ok(bubble.includes("<Icon name='encaminhar'") && bubble.includes('FORWARDED_LABEL'), 'Encaminhada with the encaminhar icon')
 })
+
+// The owned screen exports these pure rules; extracting them avoids loading React Native.
+function screenHelper (file, name, deps = {}) {
+  const source = readFileSync(join(__dirname, '../src/screens/' + file + '.js'), 'utf8')
+  const match = source.match(new RegExp('(?:export )?function ' + name + ' \\([^]*?\\n\\}'))
+  if (!match) throw new Error('missing helper: ' + name)
+  // eslint-disable-next-line no-new-func
+  return new Function(...Object.keys(deps), match[0].replace(/^export /, '') + '\nreturn ' + name)(...Object.values(deps))
+}
+
+test('Mensagem listing pill recognizes text, stored cards and fragments only on this installation', async (t) => {
+  const { listingLinkOf } = await import('../src/feiraChat.js')
+  const listingLinkForRow = screenHelper('Mensagem', 'listingLinkForRow', { listingLinkOf })
+  const origin = 'https://bora.varanda.app'
+  const url = origin + '/f/' + HEX('a') + '/7'
+  const ref = { author: HEX('a'), seq: 7 }
+  t.alike(listingLinkForRow({ rawText: 'Veja: ' + url }, origin), ref)
+  t.alike(listingLinkForRow({ rawText: 'Tenho interesse', card: { url } }, origin), ref)
+  t.alike(listingLinkForRow({ rawText: url + '#oferta=5000' }, origin), ref)
+  t.alike(listingLinkForRow({ card: { url: url + '#oferta=5000&resposta=recusada' } }, origin), ref)
+  const foreign = 'https://outra.example/f/' + HEX('a') + '/7'
+  t.is(listingLinkForRow({ rawText: foreign }, origin), null)
+  t.is(listingLinkForRow({ card: { url: foreign } }, origin), null)
+  t.is(listingLinkForRow({ deleted: true, rawText: url, card: { url } }, origin), null)
+  t.is(listingLinkForRow(null, origin), null)
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("<Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)}"), 'opening is an explicit navigation tap')
+  t.ok(src.includes('row.listingLink = listingLinkForRow({ ...row, card: cardOf.get(row.key) }, origin)'), 'stored card URL reaches the same rule')
+  t.ok(src.includes('showListingReplies(rows, pageKey !== null ? pageKey : ownKey) && !hold'), 'quick replies use the listing author rule')
+  t.ok(src.includes('quickReplies().map((text) => <Pill'), 'chips use the shared replies')
+})
+
+test('Mensagem quick replies show to whoever did not author the newest listing link', (t) => {
+  const showListingReplies = screenHelper('Mensagem', 'showListingReplies')
+  const seller = HEX('a')
+  const buyer = HEX('b')
+  const card = (mine) => ({ listingLink: { author: seller, seq: 7 }, mine })
+  const plain = { listingLink: null, mine: true }
+  t.is(showListingReplies([], buyer), false)
+  t.is(showListingReplies([plain], buyer), false)
+  t.is(showListingReplies([card(true)], buyer), true, 'the buyer sent the seller card: the buyer sees the replies')
+  t.is(showListingReplies([card(false)], seller), false, 'the seller receiving that card does not')
+  t.is(showListingReplies([card(true)], seller), false, 'the seller sharing their own card does not')
+  t.is(showListingReplies([card(false)], buyer), true, 'the buyer receiving the seller card does')
+  t.is(showListingReplies([{ listingLink: { author: buyer, seq: 1 }, mine: true }, card(false), plain], buyer), true, 'the newest link decides')
+  t.is(showListingReplies([card(true)], seller.toUpperCase()), true, 'keys compare as given')
+  t.is(showListingReplies([card(true)]), false, 'no identity: no replies')
+})
+
+test('Mensagem initial snapshot stays editable, sends its DM thumbnail once and drops the card for photos', async (t) => {
+  const linkCard = await import('../src/linkCard.js')
+  const { previewTarget } = await import('../src/preview.js')
+  const { displayText, validateParams } = require('@varanda/rpc')
+  const initialMessage = screenHelper('Mensagem', 'initialMessage', { ...linkCard, previewTarget, displayText })
+  const url = 'https://bora.varanda.app/f/' + HEX('a') + '/7'
+  const initial = {
+    draft: 'Olá! ' + url,
+    card: { url, host: 'bora.varanda.app', title: 'Bicicleta', desc: 'Produto', thumb: { bytes: new Uint8Array([1, 2]), mime: 'image/jpeg', width: 2, height: 1 } }
+  }
+  const state = initialMessage(initial)
+  t.is(state.draft, initial.draft)
+  t.alike(initialMessage(null), { draft: '', card: linkCard.linkDraftIdle() })
+  const edited = 'Tenho uma pergunta: ' + url
+  const snapshot = linkCard.freezeSnapshot(state.card, edited)
+  t.ok(snapshot)
+  t.is(snapshot.thumb.bytes, initial.card.thumb.bytes, 'the shell thumbnail survives without a fetch')
+  t.is(linkCard.freezeSnapshot(state.card, 'Sem link'), null, 'editing away the URL drops the card')
+  const dismissed = linkCard.linkDraftStep(state.card, { type: 'dismiss' })
+  t.is(linkCard.freezeSnapshot(dismissed, state.draft), null)
+  const photo = linkCard.photoDropsCard(state.card, true)
+  t.is(linkCard.freezeSnapshot(photo, state.draft), null)
+  t.is(linkCard.freezeSnapshot(linkCard.photoDropsCard(photo, false), state.draft), null, 'removing the photo does not revive the card')
+  const { composePlan } = await plans()
+  const target = { kind: 'dm', to: HEX('b') }
+  let uploads = 0
+  const card = await linkCard.cardForSend(snapshot, { upload: async () => { uploads++; return dmItem(1) } })
+  const params = composePlan({ text: edited, target, card }).send().params
+  t.is(uploads, 1)
+  t.alike(Object.keys(params.card).sort(), ['desc', 'host', 'image', 'title', 'url'])
+  t.ok(validateParams('dm.send', params).ok, 'the actual RPC validator accepts the stored thumbnail')
+  const { stagedOf } = await chatSend()
+  const attachments = stagedOf([{ bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 1, height: 1 }])
+  t.exception(() => composePlan({ text: edited, target, card, attachments }), 'card and attachments remain mutually exclusive')
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('mediaApi.putDm({ bytes: t.bytes, mime: t.mime, width: t.width, height: t.height, to: peer })'), 'the upload is bound to the destination')
+  t.ok(src.includes('card = await cardForSend(snapshot,'), 'initial snapshots use the existing send path')
+  t.ok(src.includes("linkDraftStep(s, { type: 'photo' })"), 'staging a photo drops the initial snapshot')
+})
+
+test('Mensagem discards initial state across identity changes, including switching back', (t) => {
+  const messageEntry = screenHelper('Mensagem', 'messageEntry')
+  const initial = { draft: 'rascunho', card: { url: 'https://bora.varanda.app' } }
+  const first = messageEntry(null, 'member-a', initial)
+  t.is(first.initial, initial)
+  t.is(messageEntry(first, 'member-a', initial), first)
+  const page = messageEntry(first, 'page-a', initial)
+  t.is(page.initial, null)
+  const member = messageEntry(page, 'member-b', initial)
+  t.is(member.initial, null)
+  t.is(messageEntry(member, 'member-a', initial).initial, null, 'the original snapshot is never restored')
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("key={identity + ':' + props.peer}"), 'identity and peer changes remount the whole composer and its holds')
+  t.ok(src.includes('if (!live.current) return null'), 'an upload finishing after unmount cannot send')
+  t.ok(src.includes('if (!live.current) return\n'), 'a late send answer cannot restore a held message')
+})
+
+test('Conversar is offered only for an open page on a hosted node with pages enabled', (t) => {
+  const canConverse = screenHelper('Membro', 'canConverseWithPage')
+  const open = { page: true, closed: false, moved: false, hosted: true, enabled: true }
+  t.is(canConverse(open), true)
+  for (const flags of [{ page: false }, { closed: true }, { moved: true }, { hosted: false }, { hosted: 1 }, { enabled: false }]) {
+    t.is(canConverse({ ...open, ...flags }), false)
+  }
+  const src = readFileSync(join(__dirname, '../src/screens/Membro.js'), 'utf8')
+  t.absent(src.includes('PAGE_NO_DM'))
+  t.ok(src.includes('{PAGE_DM_NOTICE}'), 'the profile shows the shared page notice')
+  const anuncio = readFileSync(join(__dirname, '../src/screens/Anuncio.js'), 'utf8')
+  t.ok(anuncio.includes('listing.page === true && !pageNoticeSeen(pageNoticeStore(), listing.author)'), 'Conversar on a page listing shows the same notice first')
+  t.ok(src.includes("<Pill label='Conversar' onPress={openPageConversation}"))
+  t.ok(src.includes('onPress={() => onOpenListings(author)}'))
+  t.ok(src.includes("const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'"), 'listings require a hosted node and stay hidden on a moved page')
+})
+
+test('the page conversation notice persists per device and page key on both storage adapters', async (t) => {
+  const { pageNoticeKey, pageNoticeSeen, notePageNotice } = await import('../src/pageNotice.js')
+  const seenStore = new Map()
+  const fake = { getItem: (k) => seenStore.get(k) || null, setItem: (k, v) => seenStore.set(k, v) }
+  t.absent(pageNoticeSeen(fake, HEX('a')))
+  notePageNotice(fake, HEX('a'))
+  t.ok(pageNoticeSeen(fake, HEX('a')), 'shown once per page key')
+  t.absent(pageNoticeSeen(fake, HEX('b')))
+  t.absent(pageNoticeSeen({ getItem: () => { throw new Error('x') } }, HEX('a')), 'a failing store shows the notice again')
+  const a = pageNoticeKey(HEX('a'))
+  const b = pageNoticeKey(HEX('b'))
+  t.not(a, b)
+  t.is(pageNoticeKey('../invalid'), null)
+  for (const platform of ['web', 'native']) {
+    const data = new Map()
+    const store = { getItem: (key) => data.get(key) || null, setItem: (key, value) => data.set(key, value) }
+    class File {
+      constructor (root, name) { this.name = root + '/' + name }
+      get exists () { return data.has(this.name) }
+      create () { data.set(this.name, '') }
+      textSync () { return data.get(this.name) }
+      write (text) { data.set(this.name, text) }
+    }
+    const pageNoticeStore = screenHelper('../pageNoticeStore.' + platform, 'pageNoticeStore', {
+      globalThis: { localStorage: store },
+      File,
+      Paths: { document: '/device' }
+    })
+    t.is(pageNoticeStore().getItem(a), null, platform + ': first visit needs the sheet')
+    pageNoticeStore().setItem(a, '1')
+    t.is(pageNoticeStore().getItem(a), '1', platform + ': a new adapter remembers confirmation')
+    t.is(pageNoticeStore().getItem(b), null, platform + ': another page needs its own sheet')
+    if (platform === 'native') t.is(data.get('/device/' + a + '.json'), '1', 'one file per page key')
+  }
+  const src = readFileSync(join(__dirname, '../src/screens/Membro.js'), 'utf8')
+  t.ok(src.includes("import { pageNoticeStore } from '../pageNoticeStore'"))
+  t.absent(src.includes('Platform.OS'))
+  t.absent(src.includes('expo-file-system'))
+})
+
+test('the web page notice tolerates unavailable storage and denied reads or writes', (t) => {
+  const denied = () => { throw new Error('storage denied') }
+  for (const globalThis of [
+    {},
+    { get localStorage () { return denied() } },
+    { localStorage: { getItem: denied, setItem: denied } }
+  ]) {
+    const pageNoticeStore = screenHelper('../pageNoticeStore.web', 'pageNoticeStore', { globalThis })
+    t.is(pageNoticeStore().getItem('notice'), null)
+    t.execution(() => pageNoticeStore().setItem('notice', '1'))
+  }
+})

@@ -257,6 +257,16 @@ export function createVitrineRequest (fixtures, options) {
     'identity.recoveryWrap': unavailable,
     'identity.recoveryBind': unavailable,
     'profile.delete': unavailable,
+    // The Feira in the demo: reads answer an empty Feira, writes are not
+    // offered (the demo data for listings is a later task).
+    'listing.create': unavailable,
+    'listing.edit': unavailable,
+    'listing.status': unavailable,
+    'listing.delete': unavailable,
+    'listing.consent': unavailable,
+    'listing.rate': unavailable,
+    'listing.mine': () => ({ items: [], next: null }),
+    'listing.ratings': () => ({ items: [], dropped: 0, incomplete: false }),
     'cert.add': () => ({ seq: 0 }),
     'account.sign': signed,
     'age.sign': signed,

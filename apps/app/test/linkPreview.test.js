@@ -99,7 +99,9 @@ test('a DM card thumbnail is read by the node with index card', (t) => {
   t.ok(/thumb\.kind === 'dm'\) return \{ kind: 'dm', from: thumb\.from, id: thumb\.id, index: 'card', item: image \}/.test(card), 'LinkCard builds the DM card ref')
   t.ok(card.includes('sourceFor(ref'), 'read through chatMedia sourceFor')
   const msg = withoutComments(read('screens', 'Mensagem.js'))
-  t.ok(/cardThumb=\{item\.deleted \? undefined : \{ kind: 'dm', from: item\.from \|\| \(mine \? ownKey : null\), id: item\.id, identity: ownKey \}\}/.test(msg), 'Mensagem passes the DM card thumb')
+  // A page thread (acting as a page) has no page-inbox media read, so its
+  // cards show without the thumbnail.
+  t.ok(/cardThumb=\{item\.deleted \|\| pageKey !== null \? undefined : \{ kind: 'dm', from: item\.from \|\| \(mine \? ownKey : null\), id: item\.id, identity: ownKey \}\}/.test(msg), 'Mensagem passes the DM card thumb, never in a page thread')
 })
 
 test('no em dash in the link card files', (t) => {

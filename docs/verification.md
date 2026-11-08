@@ -6077,3 +6077,44 @@ Limites desta caminhada:
 - Ligue `VARANDA_FEIRA_ORIGIN` só depois que o app e os Termos da Feira estiverem no ar.
 - O `robots.txt` é servido pelo Caddy mesmo com a Feira desligada: o mapa do site que ele indica responde 404 até `VARANDA_FEIRA_ORIGIN` ser definido.
 - Com `feira-invites.json` corrompido, os códigos da Feira param e a limpeza de convites de cada conta excluída fica pendente (`purga-pendente` no log) até o operador consertar o arquivo; os outros dados da conta são apagados normalmente.
+
+## 131. Feira no app: aba, anúncio, links e entrada por anúncio (PR feat/feira-app)
+
+Caminhada da Feira no app: a aba Feira, as telas Anúncio e Anunciar, Conversar com o rascunho e o cartão, os links `/f/` e `/anuncio/`, a entrada de quem chega por um anúncio, os anúncios de Página e a denúncia de anúncio. O comportamento está em [app.md](app.md), seção "Feira"; o formato, em [protocol.md](protocol.md), seção 15. Editar anúncio, propostas, avaliações, alertas de busca salva e os links no app nativo ficam na seção 132.
+
+Regras que os passos conferem:
+
+- A aba Feira existe só no nó hospedado (a barra tem seis abas: A Rua, Espiadinha, Conversas, Feira, Busca, Diário); a configuração manual e o `varanda-serve` ficam com quatro. O botão "publicar" some na Feira e nas telas dela.
+- Abrir um link nunca age sozinho: a tela Anúncio só mostra o anúncio. Conversar só preenche o rascunho; nada é enviado sem o toque em enviar.
+- O link de anúncio é lido e limpo da barra de endereço uma vez ao carregar e fica na aba no máximo 1 h; o anúncio abre uma vez, quando as abas aparecem.
+- O estado e a cidade da Feira ficam só no aparelho.
+- Uma caixa só é marcada depois que o passo foi executado e o resultado conferido.
+
+Como verificar, a partir da raiz (só os arquivos desta área, um por vez):
+
+- `node apps/app/test/platformGate.test.js`, `node apps/app/test/themeUsage.test.js`, `node apps/app/test/tabBar.test.js` e `node apps/app/test/nav.test.js`.
+- `node apps/app/test/linkReturn.test.js`, `node apps/app/test/feiraLink.test.js`, `node apps/app/test/feiraEntry.test.js` e `node apps/app/test/feiraScreen.test.js`.
+- `node apps/app/test/feira.test.js`, `node apps/app/test/feiraCompose.test.js`, `node apps/app/test/feiraChat.test.js` e `node apps/app/test/feiraSaved.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+- Num nó hospedado com a Feira desligada, a aba Feira mostra "A Feira não está aberta nesta instalação".
+
+Caminhada com a Feira ligada numa instalação de teste (semeador com `VARANDA_PUBLIC_ORIGIN`, entradas da Feira ligadas) e dois membros de teste, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Na aba Feira, "Na cidade" sem estado pede "Escolha o estado e escreva a cidade."; com estado, cidade e "Buscar", a lista aparece. Fechar e abrir o app mantém o estado e a cidade.
+- [ ] "Anunciar", preencher, marcar "Público na web e em buscadores" e publicar: a tela Anúncio do novo anúncio abre no lugar do formulário, e Voltar leva à aba Feira. O anúncio aparece em "Meus".
+- [ ] Prévia de link: em "Compartilhar", o aviso é "Link copiado." (ou a folha do sistema); colar o link `/f/<diário>/<seq>` num aplicativo de mensagens mostra título, descrição e foto de capa.
+- [ ] Uma pessoa nova abre o link `/f/…` no navegador, toca em "Entrar para conversar", vê no Entrar o cartão "Anúncio da Feira" com "Entre para falar com quem anunciou.", toca em "Pedir entrada" (antes do toque nenhum código é pedido; na rede aberta o botão não aparece), faz o cadastro e, quando as abas aparecem, a tela Anúncio abre sozinha, uma vez. A barra de endereço fica em `/`.
+- [ ] Com convites e verificação de idade ligados, uma pessoa nova que abre o link de um anúncio vê "Pedir entrada" já no passo da idade (sem "Verificar minha idade" antes do toque); depois do toque faz a verificação de idade e então o Google, sem convite pessoal.
+- [ ] Com as entradas semanais de quem anunciou esgotadas, o cadastro pelo anúncio mostra "Quem anunciou não tem mais entradas nesta semana. Peça um convite a alguém da rede ou tente na próxima semana.".
+- [ ] "Conversar" abre a conversa com o rascunho "Olá! Tenho interesse no seu anúncio "…" na Feira: <link>" e o cartão do link, sem enviar nada. Depois de enviar, o cartão na conversa tem "Ver anúncio", que abre a tela Anúncio.
+- [ ] Quem anunciou toca em "Reservado"; uma segunda pessoa, ao abrir o anúncio (ou puxar para atualizar a lista), vê o selo "Reservado".
+- [ ] Quem anunciou toca em "Apagar" e em "Confirmar: apagar": o anúncio sai de "Meus" e da busca, e a página pública `/f/<diário>/<seq>` responde "Anúncio não encontrado".
+- [ ] Agindo como Página, anunciar: o anúncio aparece em "Meus" da Página. Outro membro toca em "Conversar": a conversa é com a Página, e a Página, na caixa dela, vê a mensagem com o cartão do anúncio e a nota "A associação pode ler as mensagens desta página"; a resposta da Página chega ao membro na mesma conversa, com o cartão mantido.
+- [ ] "Denunciar" no anúncio de outra pessoa abre a folha de denúncia com o título do anúncio; enviada, ela aparece no painel de moderação como "anúncio", no filtro "Anúncios", com "Ver anúncio".
+- [ ] No perfil de um membro (e de uma Página) com anúncios, a linha "Anúncios" abre a lista só daquela pessoa, sem abas, filtros nem "Anunciar"; puxar para atualizar funciona e quem não tem anúncios vê "Nenhum anúncio por aqui.".
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi executada nesta documentação.
+- Numa conversa da Página, o cartão do anúncio aparece sem miniatura (o app não lê as fotos da caixa da Página).
+- Uma linha velha do índice mostra "Situação desconhecida" até o semeador reler o diário.

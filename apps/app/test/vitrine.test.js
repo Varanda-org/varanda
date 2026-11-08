@@ -99,6 +99,8 @@ const resultKeys = {
   'node.info': ['publicKey', 'memberCert', 'memberCertDate', 'ageVerifiedDate', 'ageSince', 'ageSinceUntil', 'followCount', 'sync', 'publicDht', 'groups'],
   'identity.status': ['exists', 'publicKey', 'legacy', 'unlocked', 'synced', 'resumed', 'passkeyKnown', 'credentialId', 'rpId', 'signedOut'],
   'dm.list': ['conversations', 'next', 'requests', 'inboxUnread'],
+  'listing.mine': ['items', 'next'],
+  'listing.ratings': ['items', 'dropped', 'incomplete'],
   'dm.thread': ['messages', 'next', 'folder', 'blocked'],
   'dm.seen': ['ok'],
   'dm.send': ['id', 'at'],
@@ -520,7 +522,7 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
   }
 })
 
-const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap', 'identity.recoveryBind', 'profile.delete']
+const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap', 'identity.recoveryBind', 'profile.delete', 'listing.create', 'listing.edit', 'listing.status', 'listing.delete', 'listing.consent', 'listing.rate']
 
 function samples (f) {
   const group = f.groups[3].group
@@ -611,6 +613,14 @@ function samples (f) {
     'community.join': { community },
     'community.leave': { community },
     'community.removeGroup': { community, group },
+    'listing.create': { kind: 'produto', title: 'Bicicleta aro 26', text: 'Pouco uso.', price: 25000, unit: null, cat: 'esporte', place: { uf: 'SP', city: 'São Paulo', bairro: null } },
+    'listing.edit': { to: `${f.own}:3`, expectedRevision: 0, title: 'Bicicleta aro 26', text: 'Pouco uso.', price: 24000, unit: null, cat: 'esporte', place: { uf: 'SP', city: 'São Paulo', bairro: null }, media: null },
+    'listing.status': { to: `${f.own}:3`, status: 'reservado' },
+    'listing.delete': { to: `${f.own}:3` },
+    'listing.mine': {},
+    'listing.ratings': { author: member, seq: 3, refs: [{ rater: f.own, seq: 4 }] },
+    'listing.consent': { to: `${f.own}:3`, rater: member, offer: 'ab'.repeat(16) },
+    'listing.rate': { to: `${member}:3`, offer: 'ab'.repeat(16), consent: 'cd'.repeat(64), stars: 5, text: 'Tudo certo.' },
     'sync.start': { once: true },
     'sync.stop': {},
     'sync.status': {}

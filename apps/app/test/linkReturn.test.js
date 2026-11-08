@@ -132,6 +132,49 @@ test('parseAppLink: no https group link while the installation is a loopback htt
   t.is(parseAppLink('http://127.0.0.1:8790/c/' + KEY), null)
 })
 
+test('parseAppLink: listing links accept both paths and ignore fragments', async (t) => {
+  const { parseAppLink, parseInviteInput } = await load()
+  await withOrigin(t, 'https://varanda.example')
+  for (const prefix of ['https://varanda.example', 'varanda://']) {
+    for (const path of ['/anuncio/', '/f/']) {
+      const url = prefix + path + KEY + '/12'
+      const target = { kind: 'anuncio', author: KEY, seq: 12 }
+      t.alike(parseAppLink(url), target)
+      t.alike(parseAppLink(url + '#fragment'), target)
+      t.alike(parseAppLink(url + '?x=1#fragment'), target)
+      t.is(parseInviteInput(url), null, 'a listing is not an invite')
+    }
+  }
+  const upper = 'AB'.repeat(32)
+  t.alike(parseAppLink('varanda:///anuncio/' + upper + '/3'), { kind: 'anuncio', author: upper.toLowerCase(), seq: 3 }, 'uppercase hex is lowercased, as on the web')
+})
+
+test('parseAppLink: listing links reject malformed paths and foreign origins', async (t) => {
+  const { parseAppLink } = await load()
+  await withOrigin(t, 'https://varanda.example')
+  for (const path of ['/anuncio/', '/f/']) {
+    for (const tail of [KEY.slice(1) + '/1', KEY + '/1/extra', KEY + '/1/', KEY, KEY + '/0', KEY + '/01', KEY + '/-1', KEY + '/1.5', KEY + '/9007199254740992']) {
+      t.is(parseAppLink('https://varanda.example' + path + tail), null, tail)
+    }
+    for (const origin of ['https://foreign.example', 'https://varanda.example.evil', 'https://varanda.example@evil.example', 'https://varanda.example:8443', 'http://varanda.example']) {
+      t.is(parseAppLink(origin + path + KEY + '/1'), null, origin)
+    }
+  }
+})
+
+test('parseAppLink: listing https links wait for the installation', async (t) => {
+  const { parseAppLink, waitsForInstallation } = await load()
+  const { setInstallation } = await import('../src/installation.js')
+  setInstallation(null)
+  t.teardown(() => setInstallation(null))
+  const url = 'https://varanda.example/anuncio/' + KEY + '/1'
+  t.is(parseAppLink(url), null)
+  t.ok(waitsForInstallation(url))
+  t.ok(setInstallation('https://varanda.example'))
+  t.absent(waitsForInstallation(url))
+  t.alike(parseAppLink(url), { kind: 'anuncio', author: KEY, seq: 1 })
+})
+
 test('parseInviteInput: a group or community link is not an invite', async (t) => {
   const { parseInviteInput, parseAppLink } = await load()
   await withOrigin(t, 'https://varanda.example')

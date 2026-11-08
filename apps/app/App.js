@@ -134,7 +134,7 @@ import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
 import ARua from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
-import Conversa from './src/screens/Conversa'
+import Conversa, { useActing } from './src/screens/Conversa'
 import Curtidas from './src/screens/Curtidas'
 import Denunciar from './src/screens/Denunciar'
 import Diario from './src/screens/Diario'
@@ -144,6 +144,13 @@ import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, linkReturnTaker, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro from './src/screens/Membro'
+import Feira from './src/screens/Feira'
+import Anuncio from './src/screens/Anuncio'
+import Anunciar from './src/screens/Anunciar'
+import { createFeiraEntry, decideEntry, heldIsFeira } from './src/feiraEntry'
+import { useFeiraEntryStart } from './src/useFeiraEntryStart'
+import { captureListing, dropListing, entryStorage, holdFeiraCode } from './src/feiraEntryStore'
+import { feiraLocation } from './src/feiraPlaceStore'
 import Perfil from './src/screens/Perfil'
 import Pessoas from './src/screens/Pessoas'
 import Paginas from './src/screens/Paginas'
@@ -166,7 +173,7 @@ const TOAST_ACTION_MS = 4000
 // The native splash stays cream in both schemes (Splash.js), and so does what
 // wraps it: the side insets around it would otherwise show the dark bg.
 const SPLASH_WRAP = Platform.OS === 'web' ? null : { backgroundColor: paletteFor('light').bg }
-const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', comunidades: 'Conversas', busca: 'Busca', avisos: 'Avisos' }
+const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', comunidades: 'Conversas', feira: 'Feira', busca: 'Busca', avisos: 'Avisos' }
 // 'Um instante' offers 'Continuar mesmo assim' after this long.
 const SLOW_LOOKUP_MS = 10000
 // While the own profile is still unknown, it is asked again this often (the
@@ -234,6 +241,14 @@ const INVITE_IN_MEMORY = CAPTURED_INVITE !== null && loadInvite() === null
 // storage for 1 h so it survives the Google step's reload, and it is dropped
 // once opened. The native app has no page load: its links come through Linking.
 const CAPTURED_ENTRY = captureEntryLink()
+// A Feira listing link (/f/<hex>/<seq>, /anuncio/<hex>/<seq>) is read and
+// cleaned the same way, once, after the group link. Its signup entry
+// (src/feiraEntry.js) is kept with the installation it was captured for: ''
+// on the hosted web page (relative requests), so it survives the Google step,
+// the Terms and the setup, and the listing opens once the tabs are up.
+const FEIRA_ENTRY = createFeiraEntry({ getStorage: entryStorage })
+const CAPTURED_LISTING = captureListing()
+if (CAPTURED_LISTING !== null) FEIRA_ENTRY.capture({ author: CAPTURED_LISTING.author, seq: CAPTURED_LISTING.seq, origin: '' })
 // The native app reads Linking's initial URL once per process: it stays the
 // same for the whole run, and Member may mount again.
 let initialUrlTaken = false
@@ -655,6 +670,8 @@ function Member () {
   // Bumped by every age request and by a lock or generation change: an
   // answer that arrives under another number is dropped.
   const ageSeq = useRef(0)
+  // The age-step Feira hook's limit(err) (set below, where it is called).
+  const ageFeiraLimitRef = useRef(() => false)
   const ageRan = useRef(null)
   // The key of the last background read that finished (see ageReadPending).
   const [ageReadDone, setAgeReadDone] = useState(null)
@@ -717,6 +734,12 @@ function Member () {
     setAgeNote('')
     work(stale, who, origin).catch((err) => {
       if (stale()) return
+      // The held Feira code refused: the seller's week ran out. The hook drops
+      // the code and shows LIMIT_TEXT in place of "Pedir entrada".
+      if (ageFeiraLimitRef.current(err)) {
+        if (NATIVE_APP) setAgeInviteRefused(true)
+        return
+      }
       // The app drops a refused code so the paste field shows again; the web
       // keeps its stored code as it always did.
       if (dropsHeldInvite(err, NATIVE_APP)) {
@@ -735,18 +758,21 @@ function Member () {
   // when the network is by invite, and the app has no App Links, so a code
   // can only come in pasted (src/linkReturn.js invitePasteShown). The policy
   // is read once; a failed read leaves the field to a refusal from the service.
+  // The web reads it too for a visitor from a Feira listing link, whose
+  // "Pedir entrada" shows on this step when the network is by invite.
   const [ageInviteRequired, setAgeInviteRequired] = useState(undefined)
   const [ageInviteRefused, setAgeInviteRefused] = useState(false)
   const [, setAgeInviteTick] = useState(0)
+  const ageFeiraHere = FEIRA_ENTRY.load(hostedPage === true ? '' : ageOrigin) !== null
   useEffect(() => {
-    if (!NATIVE_APP || !ageHosted || !ready || ageInviteRequired !== undefined) return
+    if ((!NATIVE_APP && !ageFeiraHere) || !ageHosted || !ready || ageInviteRequired !== undefined) return
     let cancelled = false
     readInvitePolicy().then(
       (p) => { if (!cancelled) setAgeInviteRequired(!!p && p.required === true) },
       () => { if (!cancelled) setAgeInviteRequired(false) }
     )
     return () => { cancelled = true }
-  }, [ageHosted, ready, ageInviteRequired])
+  }, [ageHosted, ready, ageInviteRequired, ageFeiraHere])
   const ageInvitePaste = invitePasteShown({
     native: NATIVE_APP,
     required: ageInviteRequired,
@@ -800,7 +826,10 @@ function Member () {
       if (stale()) return
       const { signature } = await node.request('age.sign', { action: 'session', nonce })
       if (stale()) return
-      const r = await ageSession({ member, nonce, signature, invite: loadSignupInvite()?.code })
+      // The Feira code's paid session has its own route (src/account.js).
+      const held = loadSignupInvite()
+      const feira = heldIsFeira(FEIRA_ENTRY.load(feiraOrigin), held)
+      const r = await ageSession({ member, nonce, signature, invite: held?.code }, { feira })
       if (stale()) return
       if (r.state === 'verificado') return answerAge('verificado', who, origin, r.proof)
       if (typeof r.url !== 'string' || !r.url.startsWith('https://')) throw new Error('serviço indisponível')
@@ -1101,6 +1130,22 @@ function Member () {
     : null)
   const heldUrlRef = useRef(null)
   const appUrlRef = useRef(null)
+  // The installation a Feira listing entry belongs to: '' on the hosted web
+  // page, as captured at load; the installation's origin in the app.
+  const feiraOrigin = hostedPage === true ? '' : ageOrigin
+  // "Pedir entrada" on the age step (src/useFeiraEntryStart.js): with invites
+  // and the age check on, the age session refuses a visitor with no code, so
+  // the Feira code is asked for here first, by a press only. Once held, the
+  // ordinary age start sends it.
+  const [ageFeiraNote, setAgeFeiraNote] = useState('')
+  const ageFeira = useFeiraEntryStart({
+    feira: { holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode },
+    active: ageHosted && ready && !ageClear && ageFeiraHere,
+    required: ageInviteRequired,
+    onNote: setAgeFeiraNote
+  })
+  ageFeiraLimitRef.current = ageFeira.limit
+  const [feiraTick, setFeiraTick] = useState(0)
   appUrlRef.current = (url) => {
     if (typeof url !== 'string') return
     const ret = parseAppReturn(url)
@@ -1130,6 +1175,17 @@ function Member () {
     const link = parseAppLink(url)
     if (link !== null && (link.kind === 'grupo' || link.kind === 'comunidade')) {
       setPendingLink({ kind: link.kind, key: link.key, origin: ageOrigin })
+      return
+    }
+    if (link !== null && link.kind === 'anuncio') {
+      // The entry belongs to an installation: with none known yet, the URL
+      // waits for the first one, like an App Link on a cold start.
+      if (feiraOrigin === '') {
+        heldUrlRef.current = url
+        return
+      }
+      FEIRA_ENTRY.capture({ author: link.author, seq: link.seq, origin: feiraOrigin })
+      setFeiraTick((n) => n + 1)
       return
     }
     if (signup === null && rec === null && link === null && waitsForInstallation(url)) {
@@ -1622,6 +1678,7 @@ function Member () {
   // reconnect also bumps the epoch, but the same unlocked identity keeps
   // acting as its page (and the page screens keep their drafts).
   const actingIdentity = locked ? 'locked' : (typeof ownKey === 'string' ? ownKey : 'none')
+  const acting = useActing()
   useEffect(() => { actingAs.reset() }, [actingIdentity])
   const [groupSeen, setGroupSeen] = useState({ epoch: nodeEpoch, map: {} })
   const seenMap = groupSeen.epoch === nodeEpoch ? groupSeen.map : {}
@@ -1866,9 +1923,37 @@ function Member () {
     dmWakePending.current = false
     dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
   }, [dmReady, dmRequest, bumpDm])
-  const openMessage = useCallback((peer) => {
-    pushScreen({ screen: 'mensagem', key: typeof peer === 'string' ? peer.toLowerCase() : peer, params: {} })
+  // opts: { draft, card } from a listing's Conversar, shown in the composer
+  // only; nothing is sent until the member presses send.
+  const openMessage = useCallback((peer, opts) => {
+    const initial = opts && (typeof opts.draft === 'string' || opts.card) ? { draft: opts.draft, card: opts.card || null } : null
+    pushScreen({ screen: 'mensagem', key: typeof peer === 'string' ? peer.toLowerCase() : peer, params: initial ? { initial } : {} })
   }, [pushScreen])
+  const openListing = useCallback((author, seq) => {
+    if (typeof author !== 'string' || !Number.isSafeInteger(seq)) return
+    pushScreen({ screen: 'anuncio', key: author.toLowerCase() + ':' + seq, params: {} })
+  }, [pushScreen])
+  // Anunciar starts from the city the Feira remembers.
+  const feiraPlaceRef = useRef(null)
+  const openAnnounce = useCallback(() => {
+    feiraLocation.load().then((place) => {
+      feiraPlaceRef.current = place
+      pushScreen({ screen: 'anunciar' })
+    })
+  }, [pushScreen])
+  // A published listing replaces the form on the stack (same depth, so the
+  // web history entries stay in step): Back never returns to a sent form.
+  const showPublished = useCallback(({ answer, dest } = {}) => {
+    const author = dest && dest.kind === 'page' ? dest.page : ownKey
+    const seq = answer && answer.seq
+    if (typeof author !== 'string' || !Number.isSafeInteger(seq)) {
+      goBack()
+      return
+    }
+    const top = nav.top(stackRef.current)
+    if (!top || top.screen !== 'anunciar') return
+    commitStack(nav.push(nav.pop(stackRef.current), { screen: 'anuncio', key: author.toLowerCase() + ':' + seq, params: {} }))
+  }, [commitStack, goBack, ownKey])
   const openCommunities = useCallback(() => {
     pushScreen({ screen: 'comunidades' })
   }, [pushScreen])
@@ -1914,6 +1999,18 @@ function Member () {
     pushScreen({ screen: pendingLink.kind === 'grupo' ? 'grupo' : 'comunidade', key: pendingLink.key, params: {} })
     setPendingLink(null)
   }, [pendingLink, mode, atTabs, pushScreen, ageOrigin])
+  // A Feira listing link opens once the tabs are on screen on a hosted node,
+  // exactly once (consume), and only ever shows the listing. An entry of
+  // another installation is dropped by load().
+  useEffect(() => {
+    if (hostedPage !== true && ageOrigin === '') return
+    const entry = FEIRA_ENTRY.load(feiraOrigin)
+    const decision = decideEntry({ entry, signedIn: atTabs, ready: mode === 'hosted' })
+    if (decision.action !== 'open') return
+    FEIRA_ENTRY.consume(feiraOrigin)
+    dropListing()
+    openListing(decision.author, decision.seq)
+  }, [feiraTick, atTabs, mode, feiraOrigin, ageOrigin, openListing])
   const action = inviteAction({
     invite,
     hosted: mode === 'hosted',
@@ -2375,6 +2472,7 @@ function Member () {
           onCheck={checkAge}
           invitePaste={ageInvitePaste}
           onInvitePasted={ageInvitePasted}
+          feiraEntry={ageFeiraHere ? { offer: ageFeira.offer, busy: ageFeira.busy, tried: ageFeira.tried, onPress: ageFeira.press, note: ageFeiraNote } : null}
           index={index}
           total={total}
         />
@@ -2401,7 +2499,7 @@ function Member () {
             onDismiss: () => { dropEntryLink(); setPendingLink(null) }
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={dropLinkReturn} onInviteChanged={reloadCard} invite={inviteProp || entryProp} />
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={dropLinkReturn} onInviteChanged={reloadCard} invite={inviteProp || entryProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
         <View style={styles.setupBody}>
@@ -2499,7 +2597,8 @@ function Member () {
       onMessage: openMessage,
       onDeletedPost: deletedPost,
       onOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
-      onOpenPeople: openPeople
+      onOpenPeople: openPeople,
+      onOpenListings: node.hosted === true ? (author) => pushScreen({ screen: 'anuncios', key: author }) : undefined
     }
     // Pushed screens, plus the one sliding out after a pop under its old index
     // (and key), so it stays mounted until StackLayer says it has left. Both
@@ -2535,7 +2634,52 @@ function Member () {
       if (entry.screen === 'mensagem') {
         return (
           <StackLayer key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-            <Mensagem peer={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} />
+            <Mensagem peer={entry.key} initial={entry.params.initial || undefined} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} onOpenListing={openListing} />
+          </StackLayer>
+        )
+      }
+      // Feira screens, keyed by who acts: a lock, unlock or a switch to a
+      // Página remounts them, so a late answer never lands on the other one.
+      if (entry.screen === 'anuncio') {
+        const at = entry.key.lastIndexOf(':')
+        const actingPage = pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && acting.kind === 'page' ? acting.key : null
+        return (
+          <StackLayer key={i + ':anuncio:' + entry.key + ':' + actingIdentity + ':' + (actingPage || '') + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Anuncio
+              author={entry.key.slice(0, at)}
+              seq={Number(entry.key.slice(at + 1))}
+              me={ownKey}
+              actingPage={actingPage}
+              onBack={goBack}
+              onConversar={({ peer, draft, card }) => openMessage(peer, { draft, card })}
+              onDenunciar={setReport}
+              onOpenAuthor={openMember}
+              onDeleted={goBack}
+            />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'anuncios') {
+        return (
+          <StackLayer key={i + ':anuncios:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <View style={[styles.shell, wide && styles.shellWide]}>
+              <TopBar title='Anúncios' onBack={goBack} />
+              <Feira
+                author={entry.key}
+                active={i === stack.length - 1}
+                ownKey={ownKey}
+                origin={installationOrigin()}
+                locationStore={feiraLocation}
+                onOpenListing={({ author, seq } = {}) => openListing(author, seq)}
+              />
+            </View>
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'anunciar') {
+        return (
+          <StackLayer key={i + ':anunciar:' + actingIdentity} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Anunciar initialPlace={feiraPlaceRef.current} onBack={goBack} onPublished={showPublished} />
           </StackLayer>
         )
       }
@@ -2729,6 +2873,22 @@ function Member () {
                   seenTick={seenTick}
                   composing={convCompose}
                   onComposing={setConvCompose}
+                />
+              </View>
+              )
+            : null}
+          {mode === 'hosted'
+            ? (
+              <View style={shown('feira')}>
+                <Feira
+                  key={'f' + nodeEpoch}
+                  active={on('feira') && !stacked}
+                  ownKey={ownKey}
+                  origin={installationOrigin()}
+                  locationStore={feiraLocation}
+                  onOpenListing={({ author, seq } = {}) => openListing(author, seq)}
+                  onAnnounce={openAnnounce}
+                  scrollToTop={scrollSignal.feira}
                 />
               </View>
               )

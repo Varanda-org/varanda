@@ -1,5 +1,6 @@
 /* global fetch, AbortController, TextDecoder, __DEV__ */
 
+import rpc from '@varanda/rpc'
 import { isAppClient } from './appClient.js'
 import { resolveUrl } from './installation.js'
 import { vitrineEnabled } from './vitrine/enabled.js'
@@ -70,6 +71,15 @@ if (VITRINE) {
 // target, seq in the author's diary); the node still verifies each one
 // (diary.peek). Never cached: a follow can be undone at any time.
 //
+// Feira (docs/protocol.md section 15, "The seeder's Feira routes"):
+// /index/feira/<uf>/<city>/<kind>/<cat>[/<words>][/<cursor>],
+// /index/feira/autor/<D>[/<cursor>] and /index/feira/avaliacoes/<D>[/<cursor>].
+// The UF is asked upper case and sent lower case (the seeder's route regex);
+// the city key arrives already folded (@varanda/rpc feira.cityKey) and is
+// only checked. Items are hints { ref, status, statusSeq, editSeq } (ratings:
+// { ref }), never cached: a status or an edit can change at any time. A 404
+// also means the installation has the Feira off.
+//
 // Account search, GET /index/search/<segment>: the segment arrives already
 // folded by the caller (1..4 tokens [a-z0-9]{1,20} joined by '-', at least 2
 // characters in all); it is checked here, never folded, lowercased or
@@ -91,6 +101,8 @@ export const GROUPS_MAX = 64
 export const GROUP_SEARCH_MAX = 20
 export const COMMUNITY_GROUPS_MAX = 32
 export const GROUP_NAME_MAX = 80
+// Must equal PAGE in packages/core/lib/feira-index.js.
+export const FEIRA_MAX = 30
 export const MAX_IN_FLIGHT = 2
 export const WINDOW_MS = 10000
 export const MAX_STARTS = 18
@@ -132,6 +144,11 @@ const FOLLOW_COUNTS_KEYS = ['complete', 'indexing', 'seguidores', 'seguindo']
 const FOLLOWS_KEYS = ['author', 'authors', 'complete', 'indexing', 'items', 'kind', 'next', 'total']
 const FOLLOW_ITEM_KEYS = ['at', 'key', 'seq']
 const FOLLOW_CURSOR_KEYS = ['atMs', 'key']
+const FEIRA_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
+const FEIRA_ITEM_KEYS = ['editSeq', 'ref', 'status', 'statusSeq']
+const FEIRA_RATING_KEYS = ['ref']
+// packages/core/lib/feira-index.js CITY, with the 2..48 bound of cityKey.
+const CITY_KEY = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
 // --- strict checks (response values are never lowercased or coerced) ---
 
@@ -326,6 +343,33 @@ export function groupSearchUrl (segment) {
   if (typeof segment !== 'string' || !SEGMENT.test(segment)) return null
   if (segment.replace(/-/g, '').length < 2) return null
   return resolveUrl('/index/group-search/' + segment)
+}
+
+// Feira search. `uf` one of the 27 UFs as @varanda/rpc feira spells them
+// (upper case), `cityKey` already folded, `kind` 'todos' or a kind, `cat`
+// 'todas' or a category, `tokens` null or folded words joined by '+' (as
+// topicUrl). Anything else is null, never dropped or coerced.
+export function feiraUrl ({ uf, cityKey, kind = 'todos', cat = 'todas', tokens = null, cursor = null } = {}) {
+  if (!rpc.feira.isUf(uf)) return null
+  if (typeof cityKey !== 'string' || cityKey.length < 2 || cityKey.length > rpc.feira.MAX_CITY_KEY || !CITY_KEY.test(cityKey)) return null
+  if (kind !== 'todos' && !rpc.feira.isKind(kind)) return null
+  if (cat !== 'todas' && !rpc.feira.isCat(cat)) return null
+  if (tokens !== null && (typeof tokens !== 'string' || !QUERY.test(tokens))) return null
+  if (cursor !== null && !isCursor(cursor)) return null
+  return resolveUrl('/index/feira/' + uf.toLowerCase() + '/' + cityKey + '/' + kind + '/' + cat +
+    (tokens === null ? '' : '/' + tokens) + (cursor === null ? '' : '/' + cursor))
+}
+
+export function feiraAuthorUrl (author, cursor = null) {
+  const a = inputAuthor(author)
+  if (a === null || (cursor !== null && !isCursor(cursor))) return null
+  return resolveUrl('/index/feira/autor/' + a + (cursor === null ? '' : '/' + cursor))
+}
+
+export function feiraRatingsUrl (author, cursor = null) {
+  const a = inputAuthor(author)
+  if (a === null || (cursor !== null && !isCursor(cursor))) return null
+  return resolveUrl('/index/feira/avaliacoes/' + a + (cursor === null ? '' : '/' + cursor))
 }
 
 // --- transport ---
@@ -755,6 +799,49 @@ export function validTopic (body) {
   return { items, next: body.next, authors, indexing: body.indexing, complete: body.complete }
 }
 
+// Feira answers. Items: <= 30 distinct refs; a listing item carries its
+// status (null only when stale, then with no statusSeq) and the seqs of its
+// current status and edit blocks, each after the root. `ratings`: items are
+// { ref } only. `author`: every item must be that author's. Authors: exactly
+// one hint per item author (as validTopic), page flags allowed.
+export function validFeira (body, { ratings = false, author = null } = {}) {
+  if (!hasExactKeys(body, FEIRA_KEYS)) return null
+  if (!Array.isArray(body.items) || body.items.length > FEIRA_MAX) return null
+  if (body.next !== null && !isCursor(body.next)) return null
+  if (typeof body.indexing !== 'boolean' || typeof body.complete !== 'boolean') return null
+  const items = []
+  const seen = new Set()
+  for (const it of body.items) {
+    if (!hasExactKeys(it, ratings ? FEIRA_RATING_KEYS : FEIRA_ITEM_KEYS)) return null
+    if (!isRef(it.ref) || seen.has(it.ref)) return null
+    seen.add(it.ref)
+    const [itemAuthor, seqText] = it.ref.split(':')
+    if (author !== null && itemAuthor !== author) return null
+    if (ratings) {
+      items.push({ ref: it.ref })
+      continue
+    }
+    const seq = Number(seqText)
+    if (it.status !== null && !rpc.feira.isStatus(it.status)) return null
+    if (!isHint(it.statusSeq) || !isHint(it.editSeq)) return null
+    if (it.status === null && it.statusSeq !== null) return null
+    if ((it.statusSeq !== null && it.statusSeq <= seq) || (it.editSeq !== null && it.editSeq <= seq)) return null
+    items.push({ ref: it.ref, status: it.status, statusSeq: it.statusSeq, editSeq: it.editSeq })
+  }
+  if (!isPlain(body.authors)) return null
+  const wanted = new Set(items.map((i) => i.ref.split(':')[0]))
+  const got = Object.keys(body.authors)
+  if (got.length !== wanted.size || !got.every((k) => wanted.has(k))) return null
+  const authors = {}
+  for (const k of got) {
+    const h = body.authors[k]
+    const page = pageHintOf(h, HINT_KEYS)
+    if (page === null || !isHint(h.profileSeq) || !isHint(h.usernameSeq)) return null
+    authors[k] = { profileSeq: h.profileSeq, usernameSeq: h.usernameSeq, ...page }
+  }
+  return { items, next: body.next, authors, indexing: body.indexing, complete: body.complete }
+}
+
 // Items: <= 20 distinct refs, one per engager. Authors: exactly one hint per
 // item author, as in validTopic.
 export function validEngagers (body, ref, kind) {
@@ -1105,4 +1192,19 @@ export function fetchCommunityGroups (community, cursor, deps = {}) {
 
 export function fetchGroupSearch (segment, deps = {}) {
   return run(groupSearchUrl(segment), validGroupSearch, deps)
+}
+
+// Never cached: a status or an edit changes what a listing shows.
+export function fetchFeira (query, deps = {}) {
+  return run(feiraUrl(query), (body) => validFeira(body), deps)
+}
+
+export function fetchFeiraAuthor (author, cursor = null, deps = {}) {
+  const url = feiraAuthorUrl(author, cursor)
+  const a = url === null ? null : inputAuthor(author)
+  return run(url, (body) => validFeira(body, { author: a }), deps)
+}
+
+export function fetchFeiraRatings (author, cursor = null, deps = {}) {
+  return run(feiraRatingsUrl(author, cursor), (body) => validFeira(body, { ratings: true }), deps)
 }
