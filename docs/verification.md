@@ -6666,3 +6666,38 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi marcada nesta documentação.
 - A janela de 400 ms e a regra da última palavra são o que o teste cobre; o comportamento real do teclado do iOS só se confere no aparelho.
 - Digitar mais depois do envio ("oi" para "oi!") ou apagar o fim ("oi" para "o") nunca conta como correção. Uma edição manual dentro da última palavra nos 400 ms seguintes ao **Enviar** (apagar uma letra do meio, por exemplo) não se distingue da correção automática e é limpa quando o envio dá certo: sem um sinal do teclado, o app não tem como separar as duas.
+
+## 141. Toques na web: visualizador de fotos, botões aninhados, alvos de 44 pt e barra de abas opaca (PR fix/web-taps-and-targets)
+
+Conjunto de correções de toque. Não muda protocolo, semeador nem RPC.
+
+Regras que os passos conferem:
+
+- Web: tocar dentro do visualizador de fotos não abre mais a publicação que está por trás dele. O visualizador para a propagação do clique.
+- Ações e contagens da publicação (curtir, republicar, responder, mais) e o botão de informações têm 44 pt de altura. A altura da linha não muda. Os pares divididos de curtir e republicar mantêm a largura estreita, para a barra caber em 320 pt.
+- O botão de ajuda de A Rua tem 44 pt.
+- As abas ficam com 48 pt de altura dentro da barra de 49 pt (a borda de 1 pt fica por cima). Toda a faixa sob o ícone é alvo de toque. A barra não tem mais preenchimento superior.
+- No aplicativo (iOS e Android) a barra de abas é opaca, nos dois esquemas de cor: o conteúdo que passa por baixo não aparece através dela. Na web ela já era opaca.
+- Miniatura de link (cartão de link) não é mais um botão aninhado dentro de outro botão. A nova tentativa de foto de anúncio da Feira também não (`tapRetry={false}`).
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/appearance.test.js`, `node apps/app/test/themeUsage.test.js`, `node apps/app/test/tabBar.test.js`, `node apps/app/test/pwa.test.js`, `node apps/app/test/renderOg.test.js` e `node apps/app/test/momentosScreen.test.js`.
+- `node apps/app/test/postActions.test.js`, `node apps/app/test/help.test.js`, `node apps/app/test/linkPreview.test.js` e `node apps/app/test/muralGrid.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Abas: tocar na faixa de baixo do ícone de cada aba troca de aba. A barra tem a mesma altura de antes, sem espaço vazio em cima dos ícones.
+- [ ] iOS: com uma lista rolando por baixo da barra, o conteúdo não aparece através dela, no modo claro e no escuro.
+- [ ] Publicação: curtir, republicar, responder e o menu de mais têm área de toque de 44 pt. Num aparelho de 320 pt de largura, a barra de curtir e republicar cabe sem cortar nenhum botão.
+- [ ] A Rua: o botão de ajuda abre a folha de ajuda com a área de toque inteira.
+- [ ] Web: abrir uma foto em tela cheia no visualizador e tocar nela (ou nos controles dentro dele) não abre a publicação de trás.
+- [ ] Cartão de link com miniatura: tocar na miniatura faz o mesmo que tocar no cartão, e o app não reclama de botão dentro de botão.
+- [ ] Feira: uma foto de anúncio que falha mostra "foto indisponível" sem botão próprio; tocar nela abre o anúncio, e a foto tenta de novo sozinha (2, 5 e 15 s) enquanto o cartão estiver na tela.
+- [ ] Web e PWA: repetir as conferências de abas e de publicação na largura de celular.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Os testes conferem o código-fonte dos estilos e a ausência de botões aninhados por leitura de arquivo, não o toque real. A área de 44 pt e a opacidade do iOS só se confirmam no aparelho ou no simulador.

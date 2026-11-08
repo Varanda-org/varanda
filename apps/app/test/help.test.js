@@ -176,3 +176,9 @@ test('conversas help states the private-message rules', async (t) => {
     'A linha Comunidades serve para achar e criar comunidades.'
   ])
 })
+
+test('the info button is a 44 pt target with the icon kept in place', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/ui/Help.js'), 'utf8')
+  t.ok(src.includes('width: layout.hit, height: layout.hit'))
+  t.ok(src.includes('style === undefined ? styles.inset : style') && src.includes('inset: { margin: -6 }') && !/button: \{[^}]*margin: -6/.test(src), 'the negative margin applies only without a caller style (the Diário discs keep their place)')
+})

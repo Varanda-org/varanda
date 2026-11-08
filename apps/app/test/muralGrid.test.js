@@ -53,6 +53,13 @@ test('a tile opens its post even when the cover failed', (t) => {
   t.ok(view.includes('const press = failed ? (tapRetry ? retry : undefined) : onPress'), 'MediaView honours tapRetry')
 })
 
+test('a listing card keeps retry off inside its button', (t) => {
+  const listing = read('ListingCard.js')
+  const media = listing.slice(listing.indexOf('<MediaView'), listing.indexOf('/>', listing.indexOf('<MediaView')))
+  t.ok(media.includes('tapRetry={false}'), 'no nested retry button')
+  t.absent(media.includes('onPress'), 'MediaView gets no onPress')
+})
+
 test('a tile is announced once', (t) => {
   t.ok(grid.includes("importantForAccessibility='no-hide-descendants'") && grid.includes('accessibilityElementsHidden') && grid.includes('aria-hidden'), 'inner image hidden from screen readers')
 })

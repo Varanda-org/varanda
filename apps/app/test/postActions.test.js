@@ -202,3 +202,14 @@ test('more: Bloquear sits after Denunciar, only with a handler, never on the own
   t.alike(ids(moreActions({ author: ME, seq: 4 }, { ownKey: ME, onBlock: true })), ['delete'], 'never the own post')
   t.alike(ids(moreActions({ author: PAGE, seq: 4 }, { ownKey: ME, page: PAGE, onBlock: true })), ['delete'], 'never the page acted as')
 })
+
+test('touch targets: the photo viewer stops clicks and post actions are 44 pt', (t) => {
+  const read = (file) => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')
+  const grid = read('ui/MediaGrid.js')
+  const modal = grid.slice(grid.indexOf('<Modal'), grid.indexOf('styles.viewerTop'))
+  t.ok(modal.includes('onClick={stopClick}'), 'viewer root stops clicks bubbling through the portal')
+  t.ok(modal.includes('onStartShouldSetResponder={() => true}'), 'viewer root claims the responder')
+  const row = read('ui/PostRow.js')
+  t.ok(/\n {2}action: \{[^\n]*minHeight: layout\.hit/.test(row), 'action is 44 pt tall')
+  t.ok(/\n {2}countAction: \{[^\n]*minHeight: layout\.hit/.test(row), 'countAction is 44 pt tall')
+})

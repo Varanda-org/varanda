@@ -21,6 +21,8 @@ import { MediaView } from './MediaView'
 const GAP = 2
 const SWIPE_PX = 50
 
+const stopClick = (e) => { if (e && typeof e.stopPropagation === 'function') e.stopPropagation() }
+
 function ratioOf (d) {
   const r = d && d.width > 0 && d.height > 0 ? d.width / d.height : 1
   return Number.isFinite(r) ? Math.max(0.5, Math.min(2, r)) : 1
@@ -57,7 +59,11 @@ function Viewer ({ author, media, index, onIndex, onClose, persist }) {
   const label = 'foto ' + (index + 1) + ' de ' + count
   return (
     <Modal visible animationType='fade' transparent={false} statusBarTranslucent onRequestClose={onClose}>
-      <View style={[styles.viewer, { paddingTop: insets.top, paddingBottom: insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }]}>
+      <View
+        onClick={stopClick}
+        onStartShouldSetResponder={() => true}
+        style={[styles.viewer, { paddingTop: insets.top, paddingBottom: insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }]}
+      >
         <View style={styles.viewerTop}>
           <Pressable accessibilityRole='button' accessibilityLabel='fechar' onPress={onClose} hitSlop={10} style={styles.viewerBtn}>
             <Icon name='x' size={26} color='#ffffff' />

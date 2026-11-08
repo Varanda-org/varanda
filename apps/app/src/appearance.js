@@ -21,7 +21,7 @@ export const light = Object.freeze({
   // dim stays a dark scrim in both schemes: it is drawn behind white icons on
   // the sunset band (ProfileHeader, Diario).
   dim: 'rgba(31,42,36,0.35)',
-  tabBar: 'rgba(251,248,243,0.94)',
+  tabBar: 'rgba(251,248,243,1)',
   danger: '#a3201a',
   warn: '#8a5a00',
   placeholder: '#616c67',
@@ -48,7 +48,7 @@ export const dark = Object.freeze({
   outline: 'rgba(244,240,230,0.30)',
   ring: 'rgba(244,240,230,0.12)',
   dim: 'rgba(16,22,19,0.55)',
-  tabBar: 'rgba(28,38,34,0.94)',
+  tabBar: 'rgba(28,38,34,1)',
   danger: '#ff8f87',
   warn: '#e7c36a',
   placeholder: '#9aaba2',

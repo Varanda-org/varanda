@@ -1,8 +1,16 @@
 'use strict'
 
 const test = require('brittle')
+const { readFileSync } = require('node:fs')
+const { join } = require('node:path')
 
 const load = () => import('../src/tabs.js')
+const tabBarSrc = readFileSync(join(__dirname, '..', 'src', 'ui', 'TabBar.js'), 'utf8')
+
+test('TabBar: each tab is 48 pt tall inside the 49 pt bar, which has no top padding', (t) => {
+  t.ok(tabBarSrc.includes('minHeight: layout.tabBar - 1'), 'the tab fills the bar under its 1 pt border')
+  t.absent(tabBarSrc.includes('paddingTop: 6'), 'the bar does not pad the tabs from above')
+})
 
 test('tabsFor: native and serve show the four tabs', async (t) => {
   const { TABS, tabsFor } = await load()
