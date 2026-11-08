@@ -730,6 +730,57 @@ function createSession ({
       return withStore((c) => member.profileDelete(c, { to: ref }))
     }),
 
+    // Feira listings (docs/rpc.md, listing.*). Photos live in media cores
+    // only the browser node writes: a list is refused before anything opens.
+    'listing.create': serial(async ({ kind, title, text, price, unit, cat, place, media }) => {
+      if (media !== undefined && media !== null) throw new UsageError(MEDIA_WEB_ONLY)
+      const r = await withStore((c) => member.listingCreate(c, { kind, title, text, price, unit, cat, place }))
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.edit': serial(async ({ to, expectedRevision, title, text, price, unit, cat, place, media }) => {
+      if (media !== undefined && media !== null) throw new UsageError(MEDIA_WEB_ONLY)
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      const r = await withStore((c) => member.listingEdit(c, { to: ref, expectedRevision, title, text, price, unit, cat, place }))
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.status': serial(async ({ to, status }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      const r = await withStore((c) => member.listingStatus(c, { to: ref, status }))
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.delete': serial(async ({ to }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      return withStore((c) => member.listingDelete(c, { to: ref }))
+    }),
+
+    'listing.rate': serial(async ({ to, offer, consent, stars, text }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      const r = await withStore((c) => member.listingRate(c, { to: ref, offer, consent, stars, text }))
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.mine': serial(async ({ before, limit }) => {
+      return withStore((c) => member.listingMine(c, { before: before === undefined ? null : before, limit }))
+    }),
+
+    // The deal consent is signed where the offer arrived, in the browser's
+    // DM store; verified ratings need its seeder link. Both are refused
+    // before anything opens.
+    'listing.consent': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
+    'listing.ratings': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
     // Which refs the own diary likes / reposts (docs/rpc.md), local data only.
     'engagement.read': serial(async ({ refs }) => {
       const r = await withStore((c) => member.engagementRead(c, { refs }))
@@ -758,7 +809,7 @@ function createSession ({
     }),
 
     // A momento's photo lives in the browser node's anonymous blob pool
-    // (docs/rpc.md 5.103): refused the same way, nothing opened.
+    // (docs/rpc.md 5.111): refused the same way, nothing opened.
     'moment.create': serial(async () => {
       throw new UsageError(MEDIA_WEB_ONLY)
     }),

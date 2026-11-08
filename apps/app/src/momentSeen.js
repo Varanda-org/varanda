@@ -95,7 +95,7 @@ function cleanItem (item) {
 
 const cleanList = (list) => (Array.isArray(list) ? list.map(cleanItem).filter(Boolean) : [])
 
-// The moments.read answer (docs/rpc.md 5.103) with anything malformed left
+// The moments.read answer (docs/rpc.md 5.111) with anything malformed left
 // out: { authors: [{ author, items }], own, past }. The own key never shows
 // among the authors (own first is the app's job).
 export function momentsOf (answer, ownKey) {

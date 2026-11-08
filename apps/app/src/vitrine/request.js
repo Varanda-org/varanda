@@ -1,10 +1,16 @@
 import rpc from '@varanda/rpc'
 import { createVitrineMedia } from './media.js'
+import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'
 import { largeFeed } from './large.js'
-import { sealedTestimonial, testimonialHash } from './fixtures.js'
 import { testimonialPointers, useTestimonialSource } from './indexResponder.js'
 
-const { validateParams, RpcError } = rpc
+const { validateParams, RpcError, feira } = rpc
+let currentFeira = null
+
+// The index client has no node handle; explicit handles keep lab instances isolated.
+export function vitrineFeiraState (request) {
+  return request ? request.feira() : currentFeira?.() || null
+}
 const copy = (value) => JSON.parse(JSON.stringify(value))
 const compareText = (a, b) => a < b ? -1 : a > b ? 1 : 0
 const comparePosition = (a, b, field) => Date.parse(a.at) - Date.parse(b.at) || compareText(a[field], b[field]) || a.seq - b.seq
@@ -67,11 +73,11 @@ export function createVitrineRequest (fixtures, options) {
 
   for (const p of profiles) {
     logs.set(p.author, [
-      { seq: 0, record: { v: 1, member: p.author, ageBand: '18+', method: 'vitrine', date: data.now, association, signature } },
+      { seq: 0, record: { v: 1, member: p.author, ageBand: '18+', method: 'vitrine', date: new Date(Date.parse(data.now) - 8 * 86400000).toISOString(), association, signature } },
       { seq: 1, record: { type: 'profile', name: p.name, bio: p.bio, at: data.now } },
       { seq: 2, record: usernameRecord(p) },
       ...[...data.feed, ...data.noticePosts].filter((post) => post.author === p.author).map((post) => ({ seq: post.seq, record: postRecord(post) })),
-      ...data.diaryRecords.filter((entry) => entry.author === p.author).map(({ seq, record }) => ({ seq, record }))
+      ...[...(data.listings || []), ...(data.rates || []), ...data.diaryRecords].filter((entry) => entry.author === p.author).map(({ seq, record }) => ({ seq, record }))
     ].sort((a, b) => a.seq - b.seq))
   }
 
@@ -115,7 +121,7 @@ export function createVitrineRequest (fixtures, options) {
   // eslint-disable-next-line no-control-regex
   const badText = (text) => /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/.test(text) || /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(text)
 
-  // Momentos (5.103), on the demo clock: a moment shows while
+  // Momentos (5.111), on the demo clock: a moment shows while
   // at - MOMENT_SKEW_MS <= now < at + MOMENT_TTL_MS (packages/core/lib/moments.js)
   // and is past once its 24 h are over. The app hides a moment by the
   // device clock, so options.clock (a function answering milliseconds), when
@@ -147,6 +153,65 @@ export function createVitrineRequest (fixtures, options) {
     const seq = entries[entries.length - 1].seq + 1
     entries.push({ seq, record })
     return { seq, ref: `${data.own}:${seq}` }
+  }
+
+  function folded (author) {
+    const entries = logs.get(author) || []
+    const gone = new Set(entries.filter((e) => e.record.type === 'delete').map((e) => e.record.seq))
+    const roots = entries.filter((e) => !gone.has(e.seq) && feira.checkListingShape(e.record) === null)
+    return roots.map(({ seq, record: root }) => {
+      let record = root
+      let editSeq = null
+      let editedAt = null
+      let status = 'disponivel'
+      let statusSeq = null
+      for (const e of entries) {
+        const r = e.record
+        if (gone.has(e.seq) || r.seq !== seq) continue
+        if (feira.checkEditShape(r, e.seq) === null && feira.unitAllowed(root.kind, r.price, r.unit)) {
+          const { type, seq: target, at, ...fields } = r
+          record = { type: 'listing', kind: root.kind, ...fields, at: root.at }
+          editSeq = e.seq
+          editedAt = at
+        }
+        if (feira.checkStatusShape(r, e.seq) === null && !(root.kind === 'procura' && r.status === 'reservado')) {
+          status = r.status
+          statusSeq = e.seq
+        }
+      }
+      return { author, seq, record, editSeq, editedAt, status, statusSeq }
+    }).sort((a, b) => b.seq - a.seq)
+  }
+
+  function ownListing (to) {
+    const target = targetOf(to)
+    const item = target.author === data.own && folded(data.own).find((item) => item.seq === target.seq)
+    if (!item) refuse('USAGE', 'o registro não é um anúncio')
+    return item
+  }
+
+  function ratingRows ({ author, seq, refs }) {
+    const best = new Map()
+    let dropped = 0
+    let incomplete = false
+    for (const ref of refs) {
+      if (ref.rater === author) { dropped++; continue }
+      const entries = logs.get(ref.rater)
+      const entry = entries?.find((e) => e.seq === ref.seq)
+      if (!entry) { incomplete = true; continue }
+      const r = entry.record
+      const cert = entries.find((e) => e.seq === 0)?.record
+      const first = entries.find((e) => e.record.type === 'listing-rate' && e.record.offer === r.offer)
+      if (deleted.has(`${ref.rater}:${ref.seq}`) || feira.checkRateShape(r) !== null || r.to.author !== author || r.to.seq !== seq ||
+          !(Date.parse(data.now) - Date.parse(cert?.date) >= feira.RATE_MIN_AGE_MS) || first.seq !== ref.seq ||
+          !verifyVitrineConsent(author, seq, ref.rater, r.offer, r.consent)) {
+        dropped++
+        continue
+      }
+      const previous = best.get(ref.rater)
+      if (!previous || ref.seq > previous.seq) best.set(ref.rater, { rater: ref.rater, seq: ref.seq, listingSeq: seq, stars: r.stars, text: r.text, at: r.at })
+    }
+    return { items: [...best.values()].sort((a, b) => compareText(b.at, a.at)), dropped, incomplete }
   }
 
   function publish (params, kind) {
@@ -313,6 +378,70 @@ export function createVitrineRequest (fixtures, options) {
     'identity.recoveryWrap': unavailable,
     'identity.recoveryBind': unavailable,
     'profile.delete': unavailable,
+    'listing.create': (params) => {
+      if (folded(data.own).length >= feira.MAX_LISTINGS) refuse('USAGE', 'limite')
+      const record = { type: 'listing', ...params, at: stamp() }
+      if (feira.checkListingShape(record) !== null) refuse('USAGE', 'anúncio inválido')
+      return append(record)
+    },
+    'listing.edit': ({ to, expectedRevision, ...fields }) => {
+      const item = ownListing(to)
+      if ((item.editSeq || 0) !== expectedRevision) refuse('USAGE', 'conflito')
+      if (!feira.unitAllowed(item.record.kind, fields.price, fields.unit)) refuse('USAGE', 'parâmetro inválido: unit')
+      if (fields.media === null) delete fields.media
+      const record = { type: 'listing-edit', seq: item.seq, ...fields, at: stamp() }
+      const next = logs.get(data.own).at(-1).seq + 1
+      if (feira.checkEditShape(record, next) !== null) refuse('USAGE', 'anúncio inválido')
+      const result = append(record)
+      if (item.editSeq !== null) {
+        const tomb = append({ type: 'delete', seq: item.editSeq, at: record.at })
+        deleted.set(`${data.own}:${item.editSeq}`, tomb)
+      }
+      return { seq: result.seq, ref: to }
+    },
+    'listing.status': ({ to, status }) => {
+      const item = ownListing(to)
+      if (item.record.kind === 'procura' && status === 'reservado') refuse('USAGE', 'uma procura não fica reservada')
+      return { seq: append({ type: 'listing-status', seq: item.seq, status, at: stamp() }).seq, ref: to }
+    },
+    'listing.delete': ({ to }) => {
+      const target = targetOf(to)
+      const root = logs.get(data.own).find((e) => e.seq === target.seq)
+      if (target.author !== data.own || root?.record.type !== 'listing') refuse('USAGE', 'o registro não é um anúncio')
+      if (deleted.has(to)) return { ...deleted.get(to), changed: false, deleted: [target.seq] }
+      const edits = logs.get(data.own).filter((e) => e.record.type === 'listing-edit' && e.record.seq === target.seq && !deleted.has(`${data.own}:${e.seq}`))
+      const targets = [target.seq, ...edits.map((e) => e.seq)]
+      let result
+      for (const seq of targets) {
+        const tomb = append({ type: 'delete', seq, at: stamp() })
+        deleted.set(`${data.own}:${seq}`, tomb)
+        if (!result) result = tomb
+      }
+      return { ...result, changed: true, deleted: targets }
+    },
+    'listing.consent': ({ to, rater, offer }) => {
+      const item = ownListing(to)
+      const proposal = conversationOf(rater)?.messages.find((m) => m.id === offer && m.from === rater && !m.mine)
+      const found = proposal && [proposal.card?.url, proposal.text].some((url) => {
+        const ref = feira.parseOfferRef(url)
+        return ref && ref.author === data.own && ref.seq === item.seq && !ref.aceite && !ref.recusada
+      })
+      if (!found) refuse('USAGE', 'oferta ausente')
+      return { consent: signVitrineConsent(data.own, item.seq, rater, offer) }
+    },
+    'listing.rate': ({ to, offer, consent, stars, text }) => {
+      const target = targetOf(to)
+      if (!verifyVitrineConsent(target.author, target.seq, data.own, offer, consent)) refuse('USAGE', 'consentimento inválido')
+      if (logs.get(data.own).some((e) => e.record.type === 'listing-rate' && e.record.offer === offer)) refuse('USAGE', 'oferta já avaliada')
+      return append({ type: 'listing-rate', to: target, offer, consent, stars, text, at: stamp() })
+    },
+    'listing.mine': ({ before, limit }) => {
+      const rows = folded(data.own).filter((item) => before === undefined || item.seq < before)
+      const page = rows.slice(0, limit)
+      const items = page.map(({ seq, record: r, editSeq, editedAt, status, statusSeq }) => ({ seq, editSeq, editedAt, status, statusSeq, kind: r.kind, title: r.title, text: r.text, price: r.price, unit: r.unit, cat: r.cat, place: r.place, media: r.media || [], at: r.at }))
+      return { items, next: rows.length > limit ? page.at(-1).seq : null }
+    },
+    'listing.ratings': ratingRows,
     'cert.add': () => ({ seq: 0 }),
     'account.sign': signed,
     'age.sign': signed,
@@ -417,9 +546,10 @@ export function createVitrineRequest (fixtures, options) {
     // IPC-only calls of the in-app web node (docs/rpc.md 5.88, 5.89). The
     // Vitrine screens go through the handle of ./media.js; these answers only
     // keep the documented shapes.
-    'dm.putMedia': ({ mime, width, height }) => {
-      const n = mediaStart++
-      return { id: keyOf(0x900 + n), key: keyOf(0xa00 + n), nonce: '0'.repeat(46) + (n % 100).toString().padStart(2, '0'), chunks: 1, bytes: 2048, sha256: keyOf(0x800 + n), mime, w: width, h: height, ms: 0 }
+    'dm.putMedia': async ({ to, width, height }) => {
+      const item = data.listings.find((e) => e.record.media?.length)?.record.media[0]
+      const photo = await request.media.read({ kind: 'listing', item })
+      return request.media.putDm({ to, bytes: photo.bytes, mime: photo.mime, width, height })
     },
     'media.readFile': () => ({ name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', w: null, h: null }),
     'media.uploadFile': ({ mime, width, height }) => ({ core: keyOf(950), mime, start: mediaStart++, blocks: 1, bytes: 2048, sha256: keyOf(951), width, height }),
@@ -546,7 +676,7 @@ export function createVitrineRequest (fixtures, options) {
       if (c) c.unread = false
       return { ok: true }
     },
-    'dm.send': ({ to, text, replyTo, media }) => {
+    'dm.send': ({ to, text, replyTo, media, card }) => {
       if (to === data.own) refuse('USAGE', 'não é possível enviar para si')
       let c = conversationOf(to)
       if (c && c.blocked) refuse('USAGE', 'você bloqueou esta pessoa')
@@ -558,7 +688,7 @@ export function createVitrineRequest (fixtures, options) {
       }
       const id = (++messageId).toString(16).padStart(32, '0')
       const at = stamp()
-      c.messages.push({ id, from: data.own, text, replyTo: replyTo || null, at, mine: true, media: media || null })
+      c.messages.push({ id, from: data.own, text, replyTo: replyTo || null, at, mine: true, media: media || null, ...(card ? { card } : {}) })
       c.folder = 'inbox'
       return { id, at }
     },
@@ -787,9 +917,14 @@ export function createVitrineRequest (fixtures, options) {
     if (!Object.hasOwn(handlers, method)) refuse('USAGE', 'método desconhecido')
     const checked = validateParams(method, params)
     if (!checked.ok) refuse(checked.code, checked.message)
-    return copy(handlers[method](copy(checked.value)))
+    return copy(await handlers[method](copy(checked.value)))
   }
   // The node handle's chat media calls, over the same live state.
   request.media = createVitrineMedia(data)
+  request.feira = () => copy({
+    listings: [...logs.keys()].flatMap(folded),
+    rates: [...logs].flatMap(([author, entries]) => entries.filter((e) => e.record.type === 'listing-rate' && !deleted.has(`${author}:${e.seq}`)).map((e) => ({ author, ...e })))
+  })
+  currentFeira = request.feira
   return request
 }

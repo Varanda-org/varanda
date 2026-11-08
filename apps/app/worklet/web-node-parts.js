@@ -176,7 +176,7 @@ function putDmMedia ({ read, session, unlink, isClosing }, { mime, width, height
   return sendFile({ read, unlink, isClosing, put: (bytes) => session.dmPutMedia({ bytes, mime, width, height, ...voiceOf({ ms, kind }), to }) })
 }
 
-// moment.putMedia after the read (docs/rpc.md 5.103): a momento's photo, a
+// moment.putMedia after the read (docs/rpc.md 5.111): a momento's photo, a
 // fresh blob sealed and put on the blob channel by the session. Never a
 // voice note, so only the four image fields reach it.
 function putMomentMedia ({ read, session, unlink, isClosing }, { mime, width, height }) {
@@ -231,7 +231,7 @@ async function writeReadFile ({ fs, join, dir, name, bytes, flags }) {
   }
 }
 
-// media.readFile (docs/rpc.md 5.89, 5.103): opens the chat item or the
+// media.readFile (docs/rpc.md 5.89, 5.111): opens the chat item or the
 // momento's photo (kind 'moment', { author, seq }) through the session
 // and writes the plaintext with write(bytes) -> name. The DM index may be
 // 'card', resolved by the session with the same checks as a media item. `generation()` changes

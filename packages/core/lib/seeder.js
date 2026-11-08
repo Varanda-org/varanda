@@ -70,6 +70,16 @@
 // node reads and verifies the post itself (indexTopic backs the
 // /index/topic route of apps/cli/lib/seed-ws.js).
 //
+// Feira index (lib/feira-index.js, docs/protocol.md "Feira"): listings,
+// their edits and statuses, and consented ratings, in memory only, on a
+// cursor and queue of its own (`feiraIndexed`, _feiraQueue). STATE (the
+// status and current edit of every live listing) is folded before any
+// search admission, and a refused search add is skipped rather than
+// paused, so a cap never stops a later status or tombstone from applying.
+// A dropped diary leaves in _drop, a closed or moved page as soon as the
+// name index learns it. Hits are hints `<author>:<seq>`; listingPublic
+// reads the blocks through postBlock's live discipline.
+//
 // Group cores (lib/group.js, docs/protocol.md section 10) ride on the media
 // invariants with the same TWO-WAY binding: a writer core W is kept only
 // once an admitted, gated, non-blocked diary D holds a live `group-join`
@@ -191,7 +201,10 @@ const { createNameIndex } = require('./name-index')
 const { verifyRoster } = require('./page')
 const { verifyClose, verifyMoved } = require('./page-lifecycle')
 const { parseQuery } = require('./search-text')
-const { createTopicIndex, QUERY_RE } = require('./topic-index')
+const { createTopicIndex, QUERY_RE, tokensOf } = require('./topic-index')
+const { createFeiraIndex } = require('./feira-index')
+const { verifyConsent, foldListings } = require('./listing')
+const { feira } = require('@varanda/rpc')
 const { UsageError } = require('./errors')
 const clock = require('./clock')
 const {
@@ -250,6 +263,15 @@ const MAX_BAD_ANNOUNCES = 16
 
 const HEX64 = /^[0-9a-f]{64}$/
 // Record types the engagement index reads from a diary's blocks.
+// Pending verified ratings (_feiraPend): per target listing, per rater
+// (MAX_LISTINGS), per target author, and in total.
+const FEIRA_PENDING_PER_TARGET = 200
+const FEIRA_PENDING_PER_RATER = 30
+const FEIRA_PENDING_PER_AUTHOR = 300
+const FEIRA_PENDING_MAX = 5000
+// Per rater diary, the first listing-rate seq of each offer id (H1).
+const FEIRA_OFFERS_PER_DIARY = 4096
+const FEIRA_TYPES = new Set(['listing', 'listing-edit', 'listing-status', 'listing-rate'])
 const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
@@ -322,7 +344,17 @@ function countDeclaration (counts, declared, key, seq, pinned = null) {
 // A descriptor in a core not declared below seq makes the diary irregular:
 // honest writers declare a core before using it, and the counters would
 // miss it while readers' deletedRanges count every declared core.
+// A listing-edit counts only while its root listing is live, as readers'
+// liveMediaRefs: `listingRoots` root seq -> the edit seqs counted for it,
+// and a tombstone of the root uncounts them all (countTombstone).
 function countShown (counts, declared, seq, r) {
+  if (counts.listingRoots === undefined) counts.listingRoots = new Map()
+  if (r !== null && r.type === 'listing') counts.listingRoots.set(seq, new Set())
+  if (r !== null && r.type === 'listing-edit') {
+    const edits = counts.listingRoots.get(r.seq)
+    if (edits === undefined) return
+    edits.add(seq)
+  }
   const refs = shownMedia(r)
   const counted = []
   for (const { core, start, blocks } of refs) {
@@ -365,9 +397,12 @@ function tombstoneIrregular (declared, tombstones, record) {
 // a tombstone must not count it twice).
 function countTombstone (counts, seq, record, block) {
   const target = record.seq
-  const refs = counts.mediaRefs.get(target)
-  if (refs !== undefined) {
-    counts.mediaRefs.delete(target)
+  const edits = counts.listingRoots?.get(target)
+  counts.listingRoots?.delete(target)
+  for (const shown of [target, ...(edits || [])]) {
+    const refs = counts.mediaRefs.get(shown)
+    if (refs === undefined) continue
+    counts.mediaRefs.delete(shown)
     for (const r of refs) mediaBump(counts.media.get(r.core), r.start, r.blocks, 'live', -1)
   }
   if (counts.mediaTombs.has(target) && block !== null && block.type === 'delete') {
@@ -918,6 +953,9 @@ class Seeder {
   // search index; topicPerAuthorPostingsMax and topicPerAuthorTermsMax are
   // each diary's share of the posting and term budgets, so one diary cannot
   // fill them for everyone (defaults in topic-index.js; no CLI flags).
+  // feiraMaxEntries, feiraPerAuthorMax, feiraMaxTerms, feiraMaxPostings,
+  // feiraMaxRatings and feiraMaxRatingsPerTarget bound the Feira index
+  // (defaults in feira-index.js; no CLI flags).
   // maxGroupCores bounds the group cores (roots and writers; default
   // maxServed) and maxGroupWriters the writers of one group (default
   // MAX_GROUP_WRITERS); maxGroupInflight the group admissions in flight
@@ -988,7 +1026,13 @@ class Seeder {
     topicMaxTerms = undefined,
     topicMaxPostings = undefined,
     topicPerAuthorPostingsMax = undefined,
-    topicPerAuthorTermsMax = undefined
+    topicPerAuthorTermsMax = undefined,
+    feiraMaxEntries = undefined,
+    feiraPerAuthorMax = undefined,
+    feiraMaxTerms = undefined,
+    feiraMaxPostings = undefined,
+    feiraMaxRatings = undefined,
+    feiraMaxRatingsPerTarget = undefined
   } = {}) {
     this.maxServed = maxServed
     this.maxMedia = maxMedia === null ? maxServed : maxMedia
@@ -1150,6 +1194,13 @@ class Seeder {
     this._topics = createTopicIndex({ maxPosts: topicMaxPosts, perAuthorMax: topicPerAuthorMax, maxTerms: topicMaxTerms, maxPostings: topicMaxPostings, perAuthorPostingsMax: topicPerAuthorPostingsMax, perAuthorTermsMax: topicPerAuthorTermsMax, onFreed: () => this._scheduleTopicResume() })
     this._topicQueue = Promise.resolve()
     this._topicStartup = null
+    // Feira index (header comment): its own queue and startup set too.
+    this._feira = createFeiraIndex({ maxEntries: feiraMaxEntries, perAuthorMax: feiraPerAuthorMax, maxTerms: feiraMaxTerms, maxPostings: feiraMaxPostings, maxRatings: feiraMaxRatings, maxRatingsPerTarget: feiraMaxRatingsPerTarget })
+    this._feiraQueue = Promise.resolve()
+    this._feiraStartup = null
+    // Verified ratings whose listing is not in STATE yet (_feiraPend):
+    // 'rater:seq' -> { target, targetSeq, rater, seq, atMs }, oldest first.
+    this._feiraPending = new Map()
     this._pushQueue = Promise.resolve()
     this._topicResumeQueued = false
     this._writeQueue = Promise.resolve()
@@ -1604,6 +1655,7 @@ class Seeder {
       // a pass that pauses at the cap must still count as covered.
       this._indexStartup = new Set(survivors.map(([key]) => key))
       this._topicStartup = new Set(survivors.map(([key]) => key))
+      this._feiraStartup = new Set(survivors.map(([key]) => key))
       if (provisionalRoot) this._groupRootStartup = new Set(survivors.map(([key]) => key))
       // Each diary first clears what its stored tombstones delete (and the
       // ranges they list in its bound media cores), before any download
@@ -1666,6 +1718,7 @@ class Seeder {
       this._scanDiary(key, entry)
       this._indexDiary(key, entry)
       this._topicDiary(key, entry)
+      this._feiraDiary(key, entry)
     }
     return { topic, admitted }
   }
@@ -1715,6 +1768,14 @@ class Seeder {
       topicPosts: this._topics.stats().posts,
       topicSaturated: this._topics.stats().saturated
     }
+  }
+
+  // The Feira counts, kept out of stats(): the /health body and its key
+  // list are a contract (apps/cli/lib/health.js), and adding a field there
+  // is its own change.
+  feiraStats () {
+    const s = this._feira.stats()
+    return { feiraListings: s.stateListings, feiraIndexed: s.entries, feiraRatings: s.ratings }
   }
 
   // (a) The announced certificate is checked synchronously BEFORE anything
@@ -2041,6 +2102,12 @@ class Seeder {
       topicPaused: false,
       topicRetry: null,
       topicReadFailures: 0,
+      feiraIndexed: 1,
+      feiraClosed: false,
+      feiraOffers: new Map(),
+      feiraQueued: false,
+      feiraRetry: null,
+      feiraReadFailures: 0,
       // Deletion state, rebuilt by every scan from block 1 (in memory only):
       // `deleted` every seq a scanned tombstone removed (monotone: the index
       // cursors skip them), `tombstones` tombstone seq -> target seq and
@@ -2048,6 +2115,7 @@ class Seeder {
       // `media` tracked media core -> per-block counters (trackMedia,
       // mediaBump; at most MEDIA_TRACK_MAX cores),
       // `mediaRefs` post/profile seq -> the counted media it shows,
+      // `listingRoots` live listing seq -> its counted edits (countShown),
       // `mediaTombs` the tombstone seqs whose ranges are counted,
       // `mediaIrregular` that the log does something the counters cannot
       // follow (countShown, tombstoneIrregular: mediaRead then refuses all
@@ -2061,6 +2129,7 @@ class Seeder {
       pageSeqs: new Set(),
       media: new Map(),
       mediaRefs: new Map(),
+      listingRoots: new Map(),
       mediaTombs: new Set(),
       mediaIrregular: false,
       mediaRecounts: 0,
@@ -2312,6 +2381,7 @@ class Seeder {
     this._scanDiary(key, entry)
     this._indexDiary(key, entry)
     this._topicDiary(key, entry)
+    this._feiraDiary(key, entry)
     this._pushDiary(key, entry)
   }
 
@@ -2346,6 +2416,7 @@ class Seeder {
       this._scanDiary(key, entry)
       this._indexDiary(key, entry)
       this._topicDiary(key, entry)
+      this._feiraDiary(key, entry)
       // Growth during the gate returned early from _onGrow.
       this._pushDiary(key, entry)
     }).catch(() => {
@@ -2367,6 +2438,8 @@ class Seeder {
     entry.indexRetry = null
     clearTimeout(entry.topicRetry)
     entry.topicRetry = null
+    clearTimeout(entry.feiraRetry)
+    entry.feiraRetry = null
     clearTimeout(entry.pushRetry)
     entry.pushRetry = null
     clearTimeout(entry.rootRetry)
@@ -2420,6 +2493,14 @@ class Seeder {
     // gate, blocklist adoption). No timer.
     this._topics.removeDiary(key)
     if (this._topicStartup !== null) this._topicStartup.delete(key)
+    // Ratings this diary's listings received were verified when added and
+    // their raters are never scanned again: they wait for a re-admission.
+    if (this._feira) {
+      for (const row of this._feira.ratingsFor(key)) this._feiraPend(row.target, row.targetSeq, row.rater, row.seq, row.atMs)
+      this._feira.removeDiary(key)
+      this._feiraForget(key, false)
+    }
+    if (this._feiraStartup) this._feiraStartup.delete(key)
     // A diary's media cores go with it (one side of the binding is gone); a
     // media admission in flight for it rolls itself back (_mediaStillWanted).
     for (const [k, m] of [...this._mediaServed]) {
@@ -2593,7 +2674,9 @@ class Seeder {
         if (r !== null) this._postNotices.foldUsername(key, i, r)
         continue
       }
-      if (block.type === 'post' || block.type === 'profile') {
+      // A listing and its edit show photos too (shownMedia): a tombstone
+      // must never free a range a live listing still shows.
+      if (block.type === 'post' || block.type === 'profile' || block.type === 'listing' || block.type === 'listing-edit') {
         const r = validRecordCopy(block, i)
         if (r !== null && r.type === 'post') this._postNotices.foldPost(key, i, r)
         countShown(entry, entry.decls, i, r)
@@ -2850,7 +2933,7 @@ class Seeder {
     entry.mediaRecounting = true
     try {
       const pinned = new Set(entry.latest.map((b) => b.key))
-      const counts = { media: new Map(), mediaRefs: new Map(), mediaTombs: new Set(), mediaIrregular: false }
+      const counts = { media: new Map(), mediaRefs: new Map(), listingRoots: new Map(), mediaTombs: new Set(), mediaIrregular: false }
       const declared = new Set()
       const end = entry.scanned
       const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
@@ -2878,7 +2961,7 @@ class Seeder {
           const target = targetRaw === null ? null : decodeBlock(targetRaw)
           if (target !== null && (target.type === 'follow' || target.type === 'media-core')) continue
           countTombstone(counts, i, r, target)
-        } else if (block.type === 'post' || block.type === 'profile') {
+        } else if (block.type === 'post' || block.type === 'profile' || block.type === 'listing' || block.type === 'listing-edit') {
           countShown(counts, declared, i, validRecordCopy(block, i))
         } else if (block.type === 'media-core') {
           const record = validRecordCopy(block, i)
@@ -2889,6 +2972,7 @@ class Seeder {
       }
       entry.media = counts.media
       entry.mediaRefs = counts.mediaRefs
+      entry.listingRoots = counts.listingRoots
       entry.mediaTombs = counts.mediaTombs
       if (counts.mediaIrregular) entry.mediaIrregular = true
     } finally {
@@ -4632,8 +4716,33 @@ class Seeder {
         entry.indexed = 1
         this._indexDiary(key, entry)
       }
+      this._resetFeira()
     }
     this._indexQueue = this._indexQueue.then(rebuild, rebuild).catch(noop)
+  }
+
+  // The name index was cleared: the Feira is rebuilt from block 1 too, so
+  // it never keeps a listing of a page the rebuilt name index would close.
+  // Queued on the Feira queue, so no pass is half way through a diary.
+  _resetFeira () {
+    if (this._feira === undefined || this._closing) return
+    const reset = () => {
+      if (this._closing) return
+      for (const key of this._served.keys()) this._feira.removeDiary(key)
+      // Every rater is scanned again, so nothing pending is lost.
+      this._feiraPending.clear()
+      this._feiraStartup = new Set([...this._served].filter(([, entry]) => entry.gated).map(([key]) => key))
+      for (const [key, entry] of this._served) {
+        clearTimeout(entry.feiraRetry)
+        entry.feiraRetry = null
+        entry.feiraReadFailures = 0
+        entry.feiraClosed = false
+        entry.feiraIndexed = 1
+        entry.feiraOffers = new Map()
+        this._feiraDiary(key, entry)
+      }
+    }
+    this._feiraQueue = this._feiraQueue.then(reset, reset).catch(noop)
   }
 
   // Reads from the index cursor to the present length (a hole below it is
@@ -4676,6 +4785,8 @@ class Seeder {
             entry.indexPaused = true
             return
           }
+          // A closed or moved page leaves the Feira at once.
+          if (isPage && this._names.endSeq(key) !== null && this._feira) this._feiraClose(key)
           // Page records only feed the name index's hint.
           if (record !== null && !isPage && !this._index.add(key, i, record, removed ? { removed: true } : null)) {
             entry.indexPaused = true
@@ -4875,6 +4986,348 @@ class Seeder {
       this._topicDiary(key, entry)
     }, delay)
     entry.topicRetry.unref()
+  }
+
+  // ---- Feira index (header comment) ------------------------------------
+
+  // Queues a Feira pass over a gated diary on the Feira queue (one diary at
+  // a time, at most one queued per diary). As the search index, a dropped
+  // diary leaves in _drop and a re-admitted one is scanned from block 1.
+  _feiraDiary (key, entry) {
+    // Scan fixtures built on the prototype carry no Feira index.
+    if (this._feira === undefined) return
+    if (entry.dropped || !entry.gated || this._closing || this._served.get(key) !== entry) return
+    if (entry.feiraQueued || entry.feiraRetry) return
+    entry.feiraQueued = true
+    const run = () => this._runFeira(key, entry)
+    this._feiraQueue = this._feiraQueue.then(run, run).catch(noop)
+  }
+
+  // A twin of _runTopic (its own cursor `feiraIndexed`) with one deliberate
+  // difference: a refused add, update or addRating is SKIPPED and the cursor
+  // moves on. Pausing at a cap, as the topic cursor does, would freeze every
+  // later status, edit and tombstone of the diary, and STATE (updated before
+  // any search admission) must keep folding them.
+  async _runFeira (key, entry) {
+    const core = entry.core
+    const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
+    try {
+      while (!stale() && entry.gated && entry.feiraIndexed < entry.present) {
+        const i = entry.feiraIndexed
+        let raw
+        try {
+          raw = await core.get(i, { wait: false, raw: true })
+        } catch {
+          this._retryFeira(key, entry)
+          return
+        }
+        if (stale()) return
+        if (raw === null && !entry.gone?.has(i) && !(await deletedHole(core, i))) {
+          this._retryFeira(key, entry)
+          return
+        }
+        // A tombstoned rating still claims its offer (H1): on a rescan a later
+        // block of the same offer must not become the canonical one.
+        if (raw !== null && entry.deleted?.has(i)) this._feiraClaimDeleted(key, entry, i, raw)
+        const block = raw === null || entry.deleted?.has(i) ? null : decodeBlock(raw)
+        if (block !== null && (block.type === 'page-close' || block.type === 'page-moved') && !entry.feiraClosed) {
+          const record = validRecordCopy(block, i)
+          if (record !== null && this._feiraPageEnd(key, record)) this._feiraClose(key)
+        }
+        if (block !== null && !entry.feiraClosed && this._names.endSeq(key) === null && (block.type === 'delete' || FEIRA_TYPES.has(block.type))) {
+          const record = validRecordCopy(block, i)
+          if (record !== null && record.type === 'delete') {
+            await this._feiraDelete(key, entry, record)
+            if (stale()) return
+          } else if (record !== null) {
+            this._feiraRecord(key, i, record)
+          }
+        }
+        entry.feiraIndexed = i + 1
+        entry.feiraReadFailures = 0
+      }
+    } finally {
+      entry.feiraQueued = false
+      if (this._feiraStartup !== null && (entry.feiraReadFailures >= 4 || entry.feiraIndexed >= entry.present)) {
+        this._feiraStartup.delete(key)
+      }
+    }
+  }
+
+  _retryFeira (key, entry) {
+    if (entry.feiraRetry || entry.dropped || this._closing || this._served.get(key) !== entry) return
+    entry.feiraReadFailures = Math.min((entry.feiraReadFailures || 0) + 1, 4)
+    const delay = [2000, 10000, 30000, 60000][entry.feiraReadFailures - 1]
+    entry.feiraRetry = setTimeout(() => {
+      entry.feiraRetry = null
+      this._feiraDiary(key, entry)
+    }, delay)
+    entry.feiraRetry.unref()
+  }
+
+  // Keeps a verified rating whose listing is not in STATE yet, for
+  // _feiraReplay. A newer rate of the same rater for the same listing
+  // replaces the older. Bounded per listing (oldest of the others dropped),
+  // per rater and per target author (the new row refused), and in total:
+  // at the global cap the newest row of the rater holding the most rows
+  // goes, so a flood of one rater never pushes out the others' rows.
+  _feiraPend (target, targetSeq, rater, seq, atMs) {
+    let own = 0
+    let oldest = null
+    let ofAuthor = 0
+    const counts = new Map()
+    for (const [id, row] of this._feiraPending) {
+      if (row.target === target && row.targetSeq === targetSeq && row.rater === rater) {
+        if (row.seq >= seq) return
+        this._feiraPending.delete(id)
+        continue
+      }
+      counts.set(row.rater, (counts.get(row.rater) || 0) + 1)
+      if (row.target !== target) continue
+      ofAuthor++
+      if (row.targetSeq !== targetSeq) continue
+      own++
+      if (oldest === null) oldest = id
+    }
+    const ofRater = counts.get(rater) || 0
+    if (ofRater >= FEIRA_PENDING_PER_RATER || ofAuthor >= FEIRA_PENDING_PER_AUTHOR) return
+    if (own >= FEIRA_PENDING_PER_TARGET) {
+      const evicted = this._feiraPending.get(oldest).rater
+      this._feiraPending.delete(oldest)
+      counts.set(evicted, counts.get(evicted) - 1)
+    }
+    if (this._feiraPending.size >= FEIRA_PENDING_MAX) {
+      let top = rater
+      let most = ofRater + 1
+      for (const [other, n] of counts) {
+        if (n > most) {
+          top = other
+          most = n
+        }
+      }
+      if (top === rater) return
+      let newest = null
+      for (const [id, row] of this._feiraPending) if (row.rater === top) newest = id
+      this._feiraPending.delete(newest)
+    }
+    this._feiraPending.set(rater + ':' + seq, { target, targetSeq, rater, seq, atMs })
+  }
+
+  // Whether a rating of target:targetSeq may wait for its listing: the
+  // target is a diary this seeder serves (and its Feira pass has not passed
+  // that seq yet) or has admitted. Never for an unknown key (H2).
+  _feiraPendable (target, targetSeq) {
+    const entry = this._served.get(target)
+    if (entry !== undefined) return !entry.dropped && !entry.feiraClosed && entry.feiraIndexed <= targetSeq
+    return this._admitted.has(target)
+  }
+
+  // A listing entered STATE: its pending ratings are offered again. A row
+  // leaves only once addRating took it; one a cap refused waits on.
+  _feiraReplay (target, targetSeq) {
+    if (this._feiraPending.size === 0) return
+    const rows = []
+    for (const [id, row] of this._feiraPending) {
+      if (row.target === target && row.targetSeq === targetSeq) rows.push([id, row])
+    }
+    rows.sort((a, b) => a[1].seq - b[1].seq)
+    for (const [id, row] of rows) {
+      if (this._feira.addRating(target, targetSeq, row.rater, row.seq, row.atMs)) this._feiraPending.delete(id)
+    }
+  }
+
+  // Per rater diary, the first listing-rate block of an offer id is the
+  // canonical one (H1): a later block with the same offer never counts,
+  // even once the first is tombstoned. Only consented blocks claim an offer,
+  // and a full map refuses new offers instead of dropping old ones: evicting
+  // would let a padded diary rewrite a canonical rating.
+  // A tombstoned listing-rate whose consent verifies keeps its offer
+  // claimed, as when the pass first read it. Never indexed. Never throws.
+  _feiraClaimDeleted (key, entry, seq, raw) {
+    try {
+      const block = decodeBlock(raw)
+      if (block === null || block.type !== 'listing-rate') return
+      const r = validRecordCopy(block, seq)
+      if (r === null || r.to.author === key) return
+      if (!verifyConsent({ listingAuthor: r.to.author, listingSeq: r.to.seq, rater: key, offerId: r.offer, consent: r.consent })) return
+      this._feiraFirstOffer(entry, r.offer, seq)
+    } catch {}
+  }
+
+  _feiraFirstOffer (entry, offer, seq) {
+    if (entry === undefined) return false
+    const first = entry.feiraOffers.get(offer)
+    if (first !== undefined) return first === seq
+    if (entry.feiraOffers.size >= FEIRA_OFFERS_PER_DIARY) return false
+    entry.feiraOffers.set(offer, seq)
+    return true
+  }
+
+  // A diary left: its pending rows as rater go, and with `asTarget` (a
+  // closed page, which never comes back) those it received too.
+  _feiraForget (hex, asTarget) {
+    for (const [id, row] of this._feiraPending) {
+      if (row.rater === hex || (asTarget && row.target === hex)) this._feiraPending.delete(id)
+    }
+  }
+
+  // Pending ratings of one listing, deleted before it entered STATE.
+  _feiraUnpendTarget (target, targetSeq) {
+    for (const [id, row] of this._feiraPending) {
+      if (row.target === target && row.targetSeq === targetSeq) this._feiraPending.delete(id)
+    }
+  }
+
+  // A page closed or moved: it leaves the Feira for good.
+  _feiraClose (key) {
+    this._feira.removeDiary(key)
+    this._feiraForget(key, true)
+    const entry = this._served.get(key)
+    if (entry !== undefined) entry.feiraClosed = true
+  }
+
+  // A verified page-close or page-moved of the diary itself (the name
+  // index's verifyPage rule), read by the Feira pass on its own.
+  _feiraPageEnd (key, record) {
+    try {
+      const verify = record.type === 'page-close' ? verifyClose : record.type === 'page-moved' ? verifyMoved : null
+      return verify !== null && verify(record, key, this.association, this._certOpts()).ok === true
+    } catch {
+      return false
+    }
+  }
+
+  // The search keys of a listing or edit `r`: copied, bounded, never raw
+  // peer text kept past the call (feira-index.js copies them again).
+  _feiraKeys (r) {
+    const cityKey = feira.cityKey(r.place.city)
+    if (cityKey === null) return null
+    return { cat: r.cat, uf: r.place.uf, cityKey, tokens: tokensOf(r.title).slice(0, 32) }
+  }
+
+  // One valid Feira record at seq of diary `key`, as the fold applies it
+  // (lib/listing.js): an edit's unit is checked against the root's kind,
+  // reservado on a procura is ignored and a rating counts only with the
+  // listing author's consent over that deal.
+  _feiraRecord (key, seq, r) {
+    const atMs = Math.max(0, Date.parse(r.at) || 0)
+    if (r.type === 'listing') {
+      if (!this._feira.upsertListing(key, seq, { atMs, kind: r.kind })) return
+      const keys = this._feiraKeys(r)
+      if (keys !== null) this._feira.add(key, seq, { atMs, kind: r.kind, ...keys })
+      this._feiraReplay(key, seq)
+      return
+    }
+    if (r.type === 'listing-rate') {
+      const to = r.to
+      if (to.author === key) return
+      if (!verifyConsent({ listingAuthor: to.author, listingSeq: to.seq, rater: key, offerId: r.offer, consent: r.consent })) return
+      if (!this._feiraFirstOffer(this._served.get(key), r.offer, seq)) return
+      if (this._feira.addRating(to.author, to.seq, key, seq, atMs)) return
+      // Diaries are scanned in no set order: the listing may come later.
+      if (!this._feira.state(to.author).has(to.seq) && this._feiraPendable(to.author, to.seq)) this._feiraPend(to.author, to.seq, key, seq, atMs)
+      return
+    }
+    const root = this._feira.state(key).get(r.seq)
+    if (root === undefined) return
+    if (r.type === 'listing-status') {
+      if (root.kind === 'procura' && r.status === 'reservado') return
+      this._feira.setStatus(key, r.seq, r.status, seq)
+      return
+    }
+    if (r.type !== 'listing-edit' || !feira.unitAllowed(root.kind, r.price, r.unit)) return
+    if (!this._feira.applyEdit(key, r.seq, seq)) return
+    const keys = this._feiraKeys(r)
+    // A seq below the current edit leaves the newer content in place.
+    // A refused update leaves no old search keys behind: STATE keeps the edit.
+    if (this._feira.state(key).get(r.seq)?.editSeq !== seq) return
+    this._feiraSearchKeys(key, r.seq, keys)
+  }
+
+  // New search keys for a listing whose current content changed: update in
+  // place, or (refused, or absent after an earlier refusal) drop the old
+  // entry and add the new one when it fits. Never leaves old keys behind.
+  _feiraSearchKeys (key, seq, keys) {
+    const row = this._feira.state(key).get(seq)
+    if (keys === null || row === undefined) {
+      this._feira.remove(key, seq)
+      return
+    }
+    if (this._feira.update(key, seq, keys)) return
+    this._feira.remove(key, seq)
+    this._feira.add(key, seq, { atMs: row.atMs, kind: row.kind, ...keys })
+  }
+
+  // A tombstone at the Feira cursor. Its target was scanned before it, so
+  // STATE already knows it when it is a Feira record. A target that cannot
+  // be read any more (cleared) is offered to markDeleted and removeRating
+  // as well: both record nothing for a seq they never saw. A deleted edit
+  // hands the listing back its previous content, so the search keys of
+  // every root whose current edit changed are read again.
+  async _feiraDelete (key, entry, record) {
+    const target = record.seq
+    let raw = null
+    try {
+      raw = await entry.core.get(target, { wait: false, raw: true })
+    } catch {}
+    const block = raw === null ? null : decodeBlock(raw)
+    if (block !== null && !FEIRA_TYPES.has(block.type)) return
+    if (block === null || block.type === 'listing-rate') {
+      this._feira.removeRating(key, target)
+      this._feiraPending.delete(key + ':' + target)
+    }
+    if (block !== null && block.type === 'listing-rate') return
+    this._feiraUnpendTarget(key, target)
+    const before = this._feira.state(key)
+    if (!this._feira.markDeleted(key, target)) return
+    for (const [seq, row] of this._feira.state(key)) {
+      const was = before.get(seq)
+      if (was === undefined || was.editSeq === row.editSeq) continue
+      await this._feiraRekey(key, entry, seq, row.editSeq)
+    }
+  }
+
+  // Re-reads the content shown for listing `seq` (its edit, or the root)
+  // and updates its search keys. An unreadable block takes the listing out
+  // of search only; STATE keeps it for its author route and its page.
+  async _feiraRekey (key, entry, seq, editSeq) {
+    const at = editSeq === null ? seq : editSeq
+    let raw = null
+    try {
+      raw = await entry.core.get(at, { wait: false, raw: true })
+    } catch {}
+    if (entry.dropped || this._closing || this._served.get(key) !== entry) return
+    const block = raw === null ? null : decodeBlock(raw)
+    const r = block === null ? null : validRecordCopy(block, at)
+    const keys = r === null ? null : this._feiraKeys(r)
+    this._feiraSearchKeys(key, seq, keys)
+  }
+
+  // Whether `hex` may appear in a Feira answer: the read gate of the other
+  // indexes, and never a page the name index knows as closed or moved.
+  _feiraVisible (hex) {
+    return this._indexVisible(hex) && this._names.endSeq(hex) === null
+  }
+
+  // As _topicFlags, over the Feira cursor (it never pauses).
+  _feiraFlags () {
+    const indexing = !this._ready || this._feiraStartup === null || this._feiraStartup.size > 0
+    let complete = !indexing && !this._closing
+    if (complete) {
+      for (const [key, entry] of this._served) {
+        if (!entry.gated || entry.dropped) continue
+        if (entry.feiraIndexed < entry.present || entry.scanned < entry.present) {
+          complete = false
+          break
+        }
+        // A page the name index has not read to its end may still close.
+        if (this._names.hint(key).page === true && (entry.indexPaused || entry.indexed < entry.present)) {
+          complete = false
+          break
+        }
+      }
+    }
+    return { indexing, complete }
   }
 
   // ---- Web Push (onPush) -----------------------------------------------
@@ -5231,6 +5684,174 @@ class Seeder {
       }
       const flags = this._topicFlags()
       return { items: page.items, next: page.next, authors, indexing: flags.indexing, complete: flags.complete && !held }
+    } catch {
+      return null
+    }
+  }
+
+  // ---- Feira answers (header comment) ------------------------------------
+
+  // The visibility predicate of one Feira answer and whether it held a
+  // diary out (a pending re-gate, as indexTopic).
+  _feiraGate () {
+    const gate = { held: false }
+    gate.visible = (hex) => {
+      if (!this._feiraVisible(hex)) return false
+      if (this._searchHeld(hex)) {
+        gate.held = true
+        return false
+      }
+      return true
+    }
+    return gate
+  }
+
+  // A Feira page with the hints of every listed author and the Feira flags.
+  _feiraAnswer (page, gate) {
+    const authors = {}
+    for (const item of page.items) {
+      const author = item.ref.slice(0, item.ref.indexOf(':'))
+      if (!(author in authors)) authors[author] = { ...this._index.hints(author), ...this._names.hint(author) }
+    }
+    const flags = this._feiraFlags()
+    return { items: page.items, next: page.next, authors, indexing: flags.indexing, complete: flags.complete && !gate.held }
+  }
+
+  // The city (or state) listings of a kind and category, newest first,
+  // optionally with every whole word of `tokensPath` ('a+b') in the title;
+  // a vendido listing and a procura outside kind 'procura' are left out.
+  // Items { ref, status, statusSeq, editSeq } are hints: the reader fetches
+  // and verifies the blocks. null for any malformed argument.
+  indexFeira (uf, cityKey, kind = 'todos', cat = 'todas', tokensPath = null, cursor = null) {
+    try {
+      let tokens = []
+      if (tokensPath !== null && tokensPath !== undefined && tokensPath !== '') {
+        if (typeof tokensPath !== 'string' || !QUERY_RE.test(tokensPath)) return null
+        tokens = [...new Set(tokensPath.split('+'))]
+      }
+      const gate = this._feiraGate()
+      const page = this._feira.query({
+        uf: uf === null ? undefined : uf,
+        cityKey: cityKey === null ? undefined : cityKey,
+        kind,
+        cat,
+        tokens,
+        cursor,
+        visible: gate.visible,
+        now: Date.now()
+      })
+      if (page === null) return null
+      return this._feiraAnswer(page, gate)
+    } catch {
+      return null
+    }
+  }
+
+  // Every live listing of one author, vendido included, newest first.
+  indexFeiraAuthor (authorHex, cursor = null) {
+    try {
+      if (!this._feiraVisible(authorHex) || this._searchHeld(authorHex)) return null
+      const gate = this._feiraGate()
+      const page = this._feira.byAuthor(authorHex, cursor, gate.visible, Date.now())
+      if (page === null) return null
+      return this._feiraAnswer(page, gate)
+    } catch {
+      return null
+    }
+  }
+
+  // The ratings of an author's listings, newest first: refs of the raters'
+  // listing-rate blocks, whose consent the scan already checked.
+  indexFeiraRatings (authorHex, cursor = null) {
+    try {
+      if (!this._feiraVisible(authorHex) || this._searchHeld(authorHex)) return null
+      const gate = this._feiraGate()
+      const page = this._feira.byTarget(authorHex, cursor, gate.visible, Date.now())
+      if (page === null) return null
+      return this._feiraAnswer(page, gate)
+    } catch {
+      return null
+    }
+  }
+
+  // Refs of the newest visible listings, for the sitemap.
+  feiraRecent (limit) {
+    try {
+      const gate = this._feiraGate()
+      return this._feira.recent({ limit, visible: gate.visible, now: Date.now() })
+    } catch {
+      return []
+    }
+  }
+
+  // A served block decoded and validated, through postBlock's live
+  // discipline (scan caught up, not deleted, not blocked), or null.
+  async _liveRecord (hex, seq) {
+    if (!Number.isSafeInteger(seq) || seq < 1) return null
+    const got = await this.postBlock(hex, seq)
+    if (got === null) return null
+    const block = decodeBlock(got.block)
+    return block === null ? null : validRecordCopy(block, seq)
+  }
+
+  // The public card of listing `seq` of `hex`: the root folded with its live
+  // edit (lib/listing.js), its status from STATE, and the author's display
+  // name, verified @nome and page flag. Peer text, returned as stored: the
+  // caller renders it with displayText. null for anything that is not a
+  // live, scanned listing of a visible diary (a post seq, a deleted root, a
+  // blocked diary, a closed or moved page).
+  async listingPublic (hex, seq) {
+    try {
+      if (typeof hex !== 'string' || !HEX64.test(hex) || !Number.isSafeInteger(seq) || seq < 1) return null
+      if (!this._feiraVisible(hex) || this._searchHeld(hex)) return null
+      const row = this._feira.state(hex).get(seq)
+      if (row === undefined) return null
+      const root = await this._liveRecord(hex, seq)
+      if (root === null || root.type !== 'listing') return null
+      const entries = [{ seq, record: root }]
+      // The pre-edit root is never published as current: an edit STATE
+      // holds that cannot be read makes the card unavailable.
+      if (row.editSeq !== null) {
+        const edit = await this._liveRecord(hex, row.editSeq)
+        if (edit === null || edit.type !== 'listing-edit' || edit.seq !== seq) return null
+        entries.push({ seq: row.editSeq, record: edit })
+      }
+      const item = foldListings(entries).bySeq.get(seq)
+      if (item === undefined || item.editSeq !== row.editSeq) return null
+      const hints = this._index.hints(hex)
+      let name = null
+      if (hints.profileSeq !== null) {
+        const profile = await this._liveRecord(hex, hints.profileSeq)
+        if (profile !== null && profile.type === 'profile' && typeof profile.name === 'string') name = profile.name
+      }
+      let username = null
+      if (hints.usernameSeq !== null) {
+        const record = await this._liveRecord(hex, hints.usernameSeq)
+        const opts = this._certOpts()
+        const revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
+        if (record !== null && record.type === 'username' && !revoked.has(record.issuer) &&
+          cert.verifyUsernameRecord(record, hex, this.association).ok === true) username = record.username
+      }
+      // Re-read after the awaits: a drop, a block or a close may have run.
+      const now = this._feira.state(hex).get(seq)
+      if (!this._feiraVisible(hex) || this._searchHeld(hex) || now === undefined || now.editSeq !== row.editSeq) return null
+      // An emptied, overflowed edit window leaves the current content unknown
+      // (feira-index.js): never publish the root text as current.
+      if (now.stale && now.editSeq === null && now.editStale === true) return null
+      const entry = this._served.get(hex)
+      const hidden = this._effectiveDeleted(entry)
+      if (hidden.has(seq) || (row.editSeq !== null && hidden.has(row.editSeq))) return null
+      const page = this._names.hint(hex)
+      // A stale root's status is unknown (feira-index.js): never guessed.
+      return {
+        record: item.record,
+        editSeq: item.editSeq,
+        status: now.stale ? null : now.status,
+        statusSeq: now.stale ? null : now.statusSeq,
+        name,
+        username,
+        page: page.page === true
+      }
     } catch {
       return null
     }

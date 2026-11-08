@@ -29,7 +29,7 @@
 // key, or a crash between the append and the state write): the page is
 // paused for good and nothing more is appended ('pausada'). Only
 // mediaItem() and setFollow() write `media-core` and `follow` records, and a
-// post or profile may only point at items of the page's own item table.
+// post, profile or listing may only point at items of the page's own item table.
 //
 // The link: one WebSocket to the loopback seeder (/seeder), wrapped as a
 // NoiseSecretStream initiator with the persistent pair, the admission
@@ -65,6 +65,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
 const b4a = require('b4a')
+const hcrypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const { WebSocket, createWebSocketStream } = require('ws')
 const { writeJsonAtomic, appendRecords, readAll, readRaw } = require('@varanda/core/lib/store')
@@ -82,6 +83,7 @@ const { engagementState } = require('@varanda/core/lib/engagement')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const { MAX_PAGE_FOLLOWS } = require('@varanda/core/lib/page')
 const { pageLifecycle, verifyClose, verifyMoved } = require('@varanda/core/lib/page-lifecycle')
+const { feira } = require('@varanda/rpc')
 
 // Resolved from @varanda/core, as apps/cli/lib/seed-ws.js does: the
 // secret-stream the seeder itself speaks, with no dependency of our own.
@@ -172,7 +174,7 @@ function copyJson (value) {
   }
 }
 
-const DELETABLE = ['post', 'like', 'repost', 'profile']
+const DELETABLE = ['post', 'like', 'repost', 'profile', 'listing', 'listing-edit']
 
 function validItem (it) {
   return isPlainObject(it) && validDescriptor(it)
@@ -191,7 +193,8 @@ function validNonces (obj) {
   for (const [id, v] of Object.entries(obj)) {
     if (!NONCE_ID_RE.test(id) || !isPlainObject(v) || !Number.isSafeInteger(v.seq) || v.seq < 0 ||
         !Number.isSafeInteger(v.length) || v.length < 0 || !Number.isSafeInteger(v.expiresAt) ||
-        !(v.descriptor === undefined || validItem(v.descriptor))) return false
+        !(v.descriptor === undefined || validItem(v.descriptor)) ||
+        !(v.first === undefined || (Number.isSafeInteger(v.first) && v.first >= 0 && v.first <= v.seq))) return false
   }
   return true
 }
@@ -232,6 +235,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     avatarItem,
     items,
     nonceRecord,
+    nonceFirst,
     follows,
     setFollow,
     engagement,
@@ -239,6 +243,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     unannounce,
     wipe,
     info,
+    signDeal,
     pageKeys: () => [...pages.keys()],
     certOf,
     ensureDmKey,
@@ -607,6 +612,13 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
 
   // -> { append, media, follow }: each the stored { seq, length[, descriptor] }
   // of a write with this member and nonce, or null.
+  // The first seq of the append a use made, or null: a listing edit
+  // answers its edit block, not the tombstone after it.
+  function nonceFirst (key, member, nonce) {
+    const v = recall(pageOf(key), 'append', idempotency({ member, nonce }))
+    return v !== null && Number.isSafeInteger(v.first) ? v.first : null
+  }
+
   function nonceRecord (key, member, nonce) {
     const idem = idempotency({ member, nonce })
     const p = pageOf(key)
@@ -721,7 +733,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       // media cores) stays.
       for (const r of records) if (r.type === 'delete') await checkDeleteTarget(p, r)
       for (const r of records) {
-        if (r.type !== 'post' && r.type !== 'profile') continue
+        if (!['post', 'profile', 'listing', 'listing-edit'].includes(r.type)) continue
         const pointed = []
         if (r.media !== undefined) {
           if (!Array.isArray(r.media)) throw fail('midia-invalida')
@@ -733,7 +745,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
         }
       }
       try {
-        const mark = (s, n) => remember(p, 'append', idem, { seq: s, length: n })
+        const mark = (s, n) => remember(p, 'append', idem, { seq: s, length: n, first: s - records.length + 1 })
         return { seq: await appendBatch(p, records, mark), length: p.core.length, replay: false }
       } catch (err) {
         throw err.code === 'INVALID_RECORD' ? fail('invalido') : err
@@ -741,6 +753,16 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     })
     const pushed = await waitPushed(key, length)
     return replay ? { seq, length, pushed, replay } : { seq, length, pushed }
+  }
+
+  // The page's consent to one deal (docs/protocol.md section 15): only the
+  // deal bytes are ever signed, so this key can sign nothing else here.
+  // Deterministic (Ed25519), so a resend gets the same signature.
+  async function signDeal (key, { listingSeq, rater, offerId }) {
+    const payload = feira.dealPayload({ listingAuthor: key, listingSeq, rater, offerId })
+    return withPage(key, async (p, row) => {
+      return b4a.toString(hcrypto.sign(b4a.from(payload), row.secretKey), 'hex')
+    })
   }
 
   async function checkDeleteTarget (p, r) {

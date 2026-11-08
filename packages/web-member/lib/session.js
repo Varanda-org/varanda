@@ -290,7 +290,7 @@ const { formatEvent, key8 } = require('@varanda/core/lib/sync-format')
 const { safe } = require('@varanda/core/lib/safe')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
-const { signReport, signDmReport } = require('@varanda/core/lib/report')
+const { signReport, signDmReport, signListingReport } = require('@varanda/core/lib/report')
 const { signAppeal } = require('@varanda/core/lib/appeal')
 const { signTerms } = require('@varanda/core/lib/terms')
 const { signRecovery, blobHashOf } = require('@varanda/core/lib/recovery-proof')
@@ -382,6 +382,15 @@ const PEEK_BUSY = 'espiadinha já em andamento'
 const SEEN_CHANGED_MS = 5000
 const NOTICES_BUSY = 'avisos já em andamento'
 const DIARY_PEEK_BUSY = 'ocupado'
+const NO_OFFER = 'oferta-ausente'
+// listing.consent pages the rater's thread at most this far back.
+const OFFER_PAGES = 20
+const OFFER_PAGE = 100
+// listing.ratings: one deadline for all its sequential peeks, under the
+// client's request timeout.
+const RATINGS_TIMEOUT_MS = 20000
+// The race result that says a rater peek ran past the shared deadline.
+const RATINGS_LATE = Symbol('late')
 const BAD_PAGE = 'operação de página inválida'
 const PAGE_FEED_BUSY = 'feed de página já em andamento'
 const PAGE_REGISTER_CORE_ONLY = 'registro de página disponível só no nó core'
@@ -758,6 +767,7 @@ function createBrowserSession ({
   writeGateTimeoutMs = WRITE_GATE_TIMEOUT_MS,
   readerWaitMs = READER_WAIT_MS,
   peekTimeoutMs = PEEK_TIMEOUT_MS,
+  ratingsTimeoutMs = RATINGS_TIMEOUT_MS,
   leaseHoldMs = 0,
   leaseGapMs = LEASE_GAP_MS,
   leaseMediaMaxMs = LEASE_MEDIA_MAX_MS,
@@ -1666,14 +1676,16 @@ function createBrowserSession ({
     return diaryPeekWithin(params, peekTimeoutMs)
   }
 
-  // diary.peek under its own deadline (page.read's probe).
-  function diaryPeekWithin (params, timeoutMs) {
+  // diary.peek under its own deadline (page.read's probe). opts: internal
+  // only (listing.ratings asks for the block-0 certificate date); the
+  // diary.peek method never passes it.
+  function diaryPeekWithin (params, timeoutMs, opts = null) {
     if (closed) return Promise.reject(rpcError('LOCKED', CLOSED_MESSAGE))
     if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) return Promise.reject(rpcError('USAGE', DIARY_PEEK_BUSY))
-    return borrow(() => diaryPeekWith(params, timeoutMs))
+    return borrow(() => diaryPeekWith(params, timeoutMs, opts))
   }
 
-  async function diaryPeekWith ({ author, seqs, profileSeq, usernameSeq }, timeoutMs) {
+  async function diaryPeekWith ({ author, seqs, profileSeq, usernameSeq }, timeoutMs, opts = null) {
     diaryPeeksInFlight++
     try {
       const deadline = Date.now() + timeoutMs
@@ -1685,7 +1697,7 @@ function createBrowserSession ({
         const peek = await awaitPeek(dropped, deadline)
         if (peek === null) throw new Error(SEEDER_UNAVAILABLE)
         try {
-          const r = await peek(key, seqs, profileSeq === undefined ? null : profileSeq, usernameSeq === undefined ? null : usernameSeq, deadline)
+          const r = await peek(key, seqs, profileSeq === undefined ? null : profileSeq, usernameSeq === undefined ? null : usernameSeq, deadline, opts)
           return await checkShows(peek, key, r, deadline)
         } catch (err) {
           if (messageOf(err) !== SEEDER_UNAVAILABLE || Date.now() >= deadline) throw err
@@ -1694,7 +1706,10 @@ function createBrowserSession ({
       }
       throw new Error(SEEDER_UNAVAILABLE)
     } catch (err) {
-      throw toRpcError(err, reportInternal)
+      const out = toRpcError(err, reportInternal)
+      // Internal readers only: the unread-block-0 flag of ./sync.js.
+      if (opts !== null && err !== null && typeof err === 'object' && err.unread === true) out.unread = true
+      throw out
     } finally {
       diaryPeeksInFlight--
     }
@@ -2213,6 +2228,13 @@ function createBrowserSession ({
     }
   })
 
+  // A listing reference -> { author, seq }, else 'referência inválida'.
+  function listingRef (to) {
+    const ref = parseRef(to)
+    if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+    return ref
+  }
+
   // post.delete / profile.delete: the post.reply path around member-ops'
   // tombstone writer (a target already deleted writes nothing).
   async function recordDelete (remove, { to, about }, epoch) {
@@ -2483,7 +2505,7 @@ function createBrowserSession ({
     // in member and association; text and quote enter the payload hashed.
     // An `anexo` (a group message only) is the attachment's hex SHA-256: it
     // switches the statement to report v3, and the bytes never reach here.
-    'report.sign': serial(async ({ nonce, target, seq, reason, text, quote, writer, group, anexo }) => {
+    'report.sign': serial(async ({ nonce, target, seq, reason, text, quote, writer, group, anexo, kind }) => {
       let own
       if (ownKey !== null) own = ownKey
       else if (diaryInfo !== null) own = diaryInfo.publicKey
@@ -2494,6 +2516,16 @@ function createBrowserSession ({
       if (keyPair === null) throw new UsageError(store.LOCKED)
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
       if (target === own) throw new UsageError(SELF_REPORT)
+      // A Feira listing: its own statement (report v1 lines under the listing
+      // prefix), so a moderator never reads it as a post report.
+      if (kind === 'listing') {
+        try {
+          return { signature: signListingReport({ nonce, member: own, association: cfg.association, target, seq, reason, text, quote }, keyPair) }
+        } catch (err) {
+          if (err instanceof TypeError) throw new UsageError(BAD_REPORT)
+          throw err
+        }
+      }
       const fields = { nonce, member: own, association: cfg.association, target, seq: seq === undefined ? null : seq, reason, text, quote }
       if (writer !== undefined) fields.writer = writer
       if (group !== undefined) fields.group = group
@@ -2949,6 +2981,132 @@ function createBrowserSession ({
 
     'profile.delete': serial(async ({ to }, epoch) => recordDelete(member.profileDelete, { to }, epoch)),
 
+    // ---- the Feira (docs/rpc.md, Feira): the post.create path ----
+
+    'listing.create': serial(async ({ kind, title, text, price, unit, cat, place, media }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.listingCreate(c, { kind, title, text, price, unit, cat, place, media }))
+      wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.edit': serial(async ({ to, expectedRevision, title, text, price, unit, cat, place, media }, epoch) => {
+      const ref = listingRef(to)
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.listingEdit(c, { to: ref, expectedRevision, title, text, price, unit, cat, place, media }))
+      wrote(r.last)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.status': serial(async ({ to, status }, epoch) => {
+      const ref = listingRef(to)
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.listingStatus(c, { to: ref, status }))
+      wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.delete': serial(async ({ to }, epoch) => recordDelete(member.listingDelete, { to }, epoch)),
+
+    'listing.rate': serial(async ({ to, offer, consent, stars, text }, epoch) => {
+      const ref = listingRef(to)
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.listingRate(c, { to: ref, offer, consent, stars, text }))
+      wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    // Local data only, works locked.
+    'listing.mine': serial(async ({ before, limit }) => {
+      return withCores((c) => member.listingMine(c, { before: before === undefined ? null : before, limit }))
+    }),
+
+    // Signs the deal consent for an inbound proposta the local DM store
+    // holds; appends nothing. The listing must be an own live root, and the
+    // offer must be a message from `rater` naming exactly that listing.
+    'listing.consent': serial(async ({ to, rater, offer }) => {
+      const ref = listingRef(to)
+      const own = await requireUnlocked()
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      await withCores((c) => member.listingLive(c, ref))
+      const peer = rater.toLowerCase()
+      // Without the DM keys the history cannot be read: locked, as dm.thread.
+      if (!dmEngine.unlocked()) throw new UsageError(store.LOCKED)
+      const want = { own, seq: ref.seq, rater: peer, offer }
+      let before = null
+      let found = false
+      for (let i = 0; i < OFFER_PAGES && !found; i++) {
+        const page = await dmEngine.thread(own, { peer, before, limit: OFFER_PAGE })
+        found = member.offerReceived(page.messages, want)
+        if (page.next === null) break
+        before = page.next
+      }
+      if (!found) throw new UsageError(NO_OFFER)
+      return { consent: member.signConsent(keyPair, want) }
+    }),
+
+    // Verified ratings of one listing (docs/rpc.md, Feira): each rater's
+    // hinted blocks and block-0 certificate through the diary.peek path, one
+    // rater at a time, OFF the chain (as dmLookupOf), under one deadline.
+    // Stores nothing. A diary the gate refuses drops its refs; a read that
+    // does not finish (busy, timeout, no seeder, the deadline) only marks
+    // the answer incomplete with what was verified so far.
+    'listing.ratings': async ({ author, seq, refs }) => {
+      const key = author.toLowerCase()
+      const wanted = refs.map((r) => ({ rater: r.rater.toLowerCase(), seq: r.seq }))
+      const byRater = new Map()
+      for (const r of wanted) {
+        if (!byRater.has(r.rater)) byRater.set(r.rater, new Set())
+        byRater.get(r.rater).add(r.seq)
+      }
+      const deadline = Date.now() + ratingsTimeoutMs
+      const peeks = []
+      for (const [rater, seqs] of byRater) {
+        if (rater === key) continue
+        const left = Math.min(peekTimeoutMs, deadline - Date.now())
+        if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+        if (left <= 0) {
+          peeks.push({ rater, failed: true })
+          continue
+        }
+        try {
+          // A followed rater's in-flight fetch can wait past `left` inside the
+          // peek, so the shared deadline is enforced here too; the late peek
+          // is left to settle on its own (its rejection is swallowed).
+          const peek = diaryPeekWithin({ author: rater, seqs: [...seqs].sort((a, b) => a - b) }, left, { cert: true })
+          let timer = null
+          const late = new Promise((resolve) => { timer = setTimeout(resolve, left, RATINGS_LATE) })
+          let r
+          try {
+            r = await Promise.race([peek, late])
+          } finally {
+            clearTimeout(timer)
+          }
+          if (r === RATINGS_LATE) {
+            peek.catch(() => {})
+            peeks.push({ rater, failed: true })
+            continue
+          }
+          peeks.push({ rater, entries: r.entries, invalid: r.invalid, missing: r.missing, certDate: r.certDate === undefined ? null : r.certDate })
+        } catch (err) {
+          if (closed) throw toRpcError(err, reportInternal)
+          // Only a verified refusal drops the rater; an unread block 0 is a
+          // timeout like any other.
+          const refused = messageOf(err) === DIARY_UNAVAILABLE && err.unread !== true
+          peeks.push(refused ? { rater, hidden: true } : { rater, failed: true })
+        }
+      }
+      return member.ratingsOf({ author: key, seq: seq === undefined ? null : seq, refs: wanted, peeks })
+    },
+
     // Idempotent toggles on the post.reply path: a state already held
     // writes nothing (changed: false) and only pushes an outstanding length.
     'like.set': serial(async ({ to, on }, epoch) => engagementSet(member.likeSet, { to, on }, epoch)),
@@ -3018,7 +3176,7 @@ function createBrowserSession ({
       return { seq: r.seq, deleted: r.deleted }
     }),
 
-    // Momentos (docs/rpc.md 5.103): the item must be one this node's
+    // Momentos (docs/rpc.md 5.111): the item must be one this node's
     // momentPutMedia answered in this unlock; published like post.create.
     // A published item is never offered for a second moment.
     'moment.create': serial(async ({ text, media }, epoch) => {
@@ -3697,7 +3855,7 @@ function createBrowserSession ({
     })()
   }
 
-  // A momento's photo (docs/rpc.md 5.103): validated and copied
+  // A momento's photo (docs/rpc.md 5.111): validated and copied
   // synchronously (TypeError), the caller's buffer wiped, then sealed into a
   // FRESH blob and put on the anonymous blob channel by the dm engine (the
   // stamps need the DM key) -> the moment media item. The native IPC

@@ -688,3 +688,97 @@ test('Denunciar plays a voice note and says it goes open to moderation', async (
   t.ok(/anexo\.status === 'ok' && anexo\.kind === 'audio'/.test(src), 'only once prepared, so a background drop unmounts the player')
   t.ok(/readBytes: readReportAudio/.test(src), 'reads through the platform reader')
 })
+
+// Feira listing reports (kind 'listing', docs/rpc.md 5.20): the diary-post
+// body plus kind, signed under varanda-listing-report-v1.
+
+test('listingTarget keeps the root seq and refuses anything else', async (t) => {
+  const { listingTarget } = await load()
+  t.alike(listingTarget({ kind: 'listing', author: T, seq: 7, editSeq: 12, title: 'Bolo' }), { author: T, seq: 7, title: 'Bolo' }, 'an edit seq is never used')
+  t.alike(listingTarget({ kind: 'listing', author: T, seq: 7 }), { author: T, seq: 7, title: '' })
+  t.is(listingTarget(null), null)
+  t.is(listingTarget({ author: T, seq: 7 }), null, 'a diary post is not a listing')
+  t.is(listingTarget({ kind: 'listing', author: 'xy', seq: 7 }), null)
+  t.is(listingTarget({ kind: 'listing', author: T, seq: 0 }), null)
+  t.is(listingTarget({ kind: 'listing', author: T, seq: '7' }), null)
+  t.is(listingTarget({ kind: 'listing', author: T, seq: null }), null)
+})
+
+test('listing report: report.sign kind listing and the exact POST body, verified as the server checks it', async (t) => {
+  const { submitListingReport } = await load()
+  const calls = flowStub(t)
+  const keyPair = require('hypercore-crypto').keyPair()
+  const member = keyPair.publicKey.toString('hex')
+  const association = '78'.repeat(32)
+  let params = null
+  const out = await submitListingReport({
+    member,
+    target: T,
+    seq: 7,
+    reason: 'ilegal',
+    text: 'nota',
+    quote: 'Bolo ' + LONE,
+    sign: async (p) => {
+      params = p
+      const { kind, ...rest } = p
+      return { signature: core.signListingReport({ ...rest, member, association }, keyPair) }
+    },
+    isStale: () => false
+  })
+  t.alike(out, { id: 'r1', duplicate: false })
+  t.alike(params, { kind: 'listing', nonce: NONCE, target: T, seq: 7, reason: 'ilegal', text: 'nota', quote: 'Bolo ' + FFFD })
+  t.is(calls.length, 2, 'one nonce, one POST')
+  t.alike(JSON.parse(calls[0].init.body), { member })
+  t.ok(calls[1].url.endsWith('/account/report'))
+  t.absent(calls[1].url.endsWith('/anexo'))
+  const body = JSON.parse(calls[1].init.body)
+  t.alike(Object.keys(body).sort(), ['kind', 'member', 'nonce', 'quote', 'reason', 'seq', 'signature', 'target', 'text'])
+  t.alike(body, { kind: 'listing', member, nonce: NONCE, target: T, seq: 7, reason: 'ilegal', text: 'nota', quote: 'Bolo ' + FFFD, signature: body.signature })
+  for (const k of ['writer', 'group', 'anexo', 'peer']) t.absent(Object.hasOwn(body, k), 'no ' + k)
+  const fields = { nonce: body.nonce, member: body.member, association, target: body.target, seq: body.seq, reason: body.reason, text: body.text, quote: body.quote }
+  t.ok(core.verifyListingReport(fields, body.signature).ok, 'the listing statement verifies')
+  t.absent(core.verifyReport(fields, body.signature).ok, 'never as a diary post report')
+})
+
+test('listing report: every existing reason is accepted', async (t) => {
+  const { REASONS, listingReportParams } = await load()
+  for (const [id] of REASONS) {
+    t.is(listingReportParams({ nonce: NONCE, target: T, seq: 1, reason: id, text: '', quote: '' }).reason, id)
+  }
+})
+
+test('listing report: stale stops before signing; a failed POST is not retried', async (t) => {
+  const { submitListingReport } = await load()
+  let signed = 0
+  const sign = async () => { signed++; return { signature: SIG } }
+  const base = { member: M, target: T, seq: 7, reason: 'spam', text: '', quote: 'q' }
+  const a = flowStub(t)
+  t.is(await submitListingReport({ ...base, sign, isStale: () => true }), null)
+  t.is(signed, 0)
+  t.is(a.length, 1)
+  const b = flowStub(t, { failSend: true })
+  await t.exception(submitListingReport({ ...base, sign, isStale: () => false }))
+  t.is(b.length, 2, 'one nonce, one POST')
+})
+
+test('listing reports leave every existing body byte for byte', async (t) => {
+  const { buildReportSend, buildDmReportSend } = await load()
+  const post = { member: M, nonce: NONCE, target: T, seq: 4, reason: 'spam', text: 'x', quote: 'q', signature: SIG }
+  t.is(buildReportSend(post).init.body, JSON.stringify(post))
+  const account = { ...post, seq: null, quote: '' }
+  t.is(buildReportSend(account).init.body, JSON.stringify(account))
+  const group = { member: M, nonce: NONCE, target: T, seq: 4, reason: 'spam', text: 'x', quote: 'q', signature: SIG, writer: W, group: G }
+  t.is(buildReportSend({ ...post, writer: W, group: G }).init.body, JSON.stringify(group))
+  const dm = { kind: 'dm', member: M, nonce: NONCE, target: T, reason: 'spam', text: 'x', quote: 'q', signature: SIG }
+  t.is(buildDmReportSend({ member: M, nonce: NONCE, target: T, reason: 'spam', text: 'x', quote: 'q', signature: SIG }).init.body, JSON.stringify(dm))
+})
+
+test('Denunciar reports a listing through the pure module with a fixed seq', (t) => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/screens/Denunciar.js'), 'utf8')
+  t.ok(/submitListingReport\(\{/.test(src), 'uses the listing submit')
+  t.ok(/setListing\(open \? listingTarget\(target\) : null\)/.test(src), 'the listing is taken from the pure module when the sheet opens')
+  t.ok(/\[open, listingAuthor\]\)/.test(src), 'a new seq for the same listing does not move it')
+  t.ok(/seq: listing\.seq/.test(src), 'the frozen seq is reported')
+  t.ok(/'Denunciar anúncio'/.test(src))
+  t.ok(/displayText\(quote, \{ multiline: true \}\)/.test(src), 'the title shows through displayText')
+})

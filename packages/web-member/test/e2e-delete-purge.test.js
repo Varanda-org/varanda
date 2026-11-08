@@ -151,7 +151,10 @@ test('a deleted photo post is cleared on the seeder and in the browser, stays cl
   const tomb = (await a.web.request('log.read', {})).entries.find((e) => e.seq === 4).record
   t.alike(tomb.media, [{ core: K, start: gone.start, blocks: gone.blocks }], 'the photo range is on the tombstone')
 
-  await until(async () => !(await served().has(2)) && !(await mediaCore().has(gone.start)), { timeoutMs: 60000, name: 'the seeder cleared the post and the photo' })
+  // The seeder clears a deleted range one block at a time: wait for every
+  // photo block, not only the first.
+  const photoCleared = async () => (await heldIn(mediaCore(), gone.start, gone.start + gone.blocks)).every((held) => !held)
+  await until(async () => !(await served().has(2)) && await photoCleared(), { timeoutMs: 60000, name: 'the seeder cleared the post and every photo block' })
   t.alike(await heldIn(mediaCore(), gone.start, gone.start + gone.blocks), [false, false, false], 'every photo block is cleared on the seeder')
   t.ok(await mediaCore().has(0), 'the media header stays')
   t.ok(await mediaCore().has(kept.start), 'the kept photo stays')

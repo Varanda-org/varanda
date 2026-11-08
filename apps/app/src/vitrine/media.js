@@ -24,7 +24,7 @@ function checkFile ({ bytes, mime, width, height }) {
   for (const side of [width, height]) if (!Number.isInteger(side) || side < 1 || side > 16384) throw fail('foto inválida')
 }
 
-// data: the request's live state (conversations and groups), so a photo
+// data: the request's live state, so a photo
 // sent here opens again like a fixture one. data.momentMedia(author, seq),
 // set by ./request.js, answers the photo item of a moment that is showing
 // (live, inside its 24 h) or null; data.momentUploads holds the items
@@ -52,8 +52,9 @@ export function createVitrineMedia (data) {
   }
 
   const itemOf = (ref) => {
-    if (ref.kind === 'group') return ref.item && typeof ref.item === 'object' ? ref.item : null
+    if (ref.kind === 'group' || ref.kind === 'listing') return ref.item && typeof ref.item === 'object' ? ref.item : null
     const message = data.conversations.flatMap((c) => c.messages).find((m) => m.id === ref.id && m.from === ref.from)
+    if (ref.index === 'card') return message?.card?.image || null
     return message && Array.isArray(message.media) ? message.media[ref.index] || null : null
   }
 
@@ -65,7 +66,7 @@ export function createVitrineMedia (data) {
         if (!got) throw gone()
         return got
       }
-      if (ref === null || typeof ref !== 'object' || (ref.kind !== 'dm' && ref.kind !== 'group')) throw new TypeError('mídia inválida')
+      if (ref === null || typeof ref !== 'object' || !['dm', 'group', 'listing'].includes(ref.kind)) throw new TypeError('mídia inválida')
       const item = itemOf(ref)
       const got = item ? bytesOf(item.plainSha256 || item.sha256) : null
       if (!got) throw new Error('indisponível')

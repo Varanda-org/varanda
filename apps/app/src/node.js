@@ -106,6 +106,12 @@
 // resolves at once. Every awaited continuation re-checks the connection,
 // epoch and passkey generation.
 // `signals` folds the sync events into UI hints (syncSignals.js).
+// Contexts: a sync log line or a download hint arrives dozens of times a
+// second while many diaries sync, so neither rides in the useNode() value
+// (which every Avatar, MediaView, LinkCard and screen reads). useSyncLines()
+// carries the log and useSyncSignals() the folded hints; useNode() keeps
+// sync { active, stopped, starting } and `signals` as a run-flags view
+// (see runFlags) that does not change on download lines.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { displayText, isMutating } from '@varanda/rpc'
@@ -177,12 +183,36 @@ function appendLine (prev, line) {
 }
 
 const NodeContext = createContext(null)
+const EMPTY_LINES = Object.freeze([])
+const SyncLinesContext = createContext(EMPTY_LINES)
+const SyncSignalsContext = createContext(EMPTY_SIGNALS)
 
 // The chat media calls a handle may offer besides upload (see the header).
 const CHAT_MEDIA_CALLS = ['putDm', 'putMoment', 'read', 'forgetReadFile', 'clearReadFiles']
 
 export function useNode () {
   return useContext(NodeContext)
+}
+
+// The last sync event and warning lines (at most MAX_SYNC_LINES).
+export function useSyncLines () {
+  return useContext(SyncLinesContext)
+}
+
+// The full folded sync hints (lengths, newest, fresh, lastDownloadAt, ...).
+export function useSyncSignals () {
+  return useContext(SyncSignalsContext)
+}
+
+// What useNode().signals keeps for screens that only need the run flags and
+// the own diary's growth: the per-diary maps and lastDownloadAt change on
+// every download line, so they are left to useSyncSignals().
+function useRunFlags (signals) {
+  const { runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength } = signals
+  const freshOwn = signals.fresh ? signals.fresh.own : undefined
+  return useMemo(() => ({
+    ...EMPTY_SIGNALS, runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, fresh: freshOwn === undefined ? {} : { own: freshOwn }
+  }), [runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, freshOwn])
 }
 
 // A screen notice ('publicado', 'seguindo', ...) describes what the current
@@ -291,7 +321,7 @@ function VitrineNodeProvider ({ children }) {
       hostedSource: 'live',
       online: true,
       visible,
-      sync: { active: null, lines: [], stopped: null, starting: false },
+      sync: { active: null, stopped: null, starting: false },
       epoch: 1,
       request: vitrineRequest,
       restart: unavailable,
@@ -345,7 +375,13 @@ function VitrineNodeProvider ({ children }) {
       syncNow: () => Promise.resolve()
     }
   }, [vitrineRequest, groupVersions, followsVersion, getGroupVersion, dmVersion, bumpDm, autoWanted, setAutoSync, visible])
-  return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
+  return (
+    <NodeContext.Provider value={value}>
+      <SyncSignalsContext.Provider value={EMPTY_SIGNALS}>
+        <SyncLinesContext.Provider value={EMPTY_LINES}>{children}</SyncLinesContext.Provider>
+      </SyncSignalsContext.Provider>
+    </NodeContext.Provider>
+  )
 }
 
 function LiveNodeProvider ({ children }) {
@@ -1465,11 +1501,20 @@ function LiveNodeProvider ({ children }) {
   }, [])
   const legacyFollows = useMemo(() => (hasPasskey && hasLegacy && unlocked ? { keys: legacyKeys, confirm: legacyConfirm } : null), [hasPasskey, hasLegacy, unlocked, legacyKeys, legacyConfirm])
 
+  // Without the lines: a log line replaces `sync` but keeps active and stopped.
+  const syncView = useMemo(() => ({ active: sync.active, stopped: sync.stopped, starting }), [sync.active, sync.stopped, starting])
+  const runFlags = useRunFlags(signals)
   const value = useMemo(() => ({
-    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals, ackFresh, setAutoSync, syncNow, whenIdle
-  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals, ackFresh, setAutoSync, syncNow, whenIdle])
+    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: syncView, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals: runFlags, ackFresh, setAutoSync, syncNow, whenIdle
+  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, syncView, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, runFlags, ackFresh, setAutoSync, syncNow, whenIdle])
 
-  return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
+  return (
+    <NodeContext.Provider value={value}>
+      <SyncSignalsContext.Provider value={signals}>
+        <SyncLinesContext.Provider value={sync.lines}>{children}</SyncLinesContext.Provider>
+      </SyncSignalsContext.Provider>
+    </NodeContext.Provider>
+  )
 }
 
 // 'hh:mm' style time for an ISO instant (peer-derived: falls back to the

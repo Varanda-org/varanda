@@ -522,3 +522,43 @@ test('page.feed: maximal cards fit the shared feed limit', (t) => {
   t.ok(size(result) < size(feedResult(FEED_LIMIT_MAX, '\ud800')))
   t.ok(size(result) <= MAX_MESSAGE)
 })
+
+test('listing.create, listing.edit and listing.mine: maximal sizes fit', (t) => {
+  const { feira } = require('..')
+  const request = (method, params) => utf8ByteLength(JSON.stringify({ v: 1, id: MAX_ID, method, params }))
+  // The city keeps two letters so it still has a city key.
+  const place = { uf: 'SP', city: 'ab' + '\ud800'.repeat(feira.MAX_PLACE - 2), bairro: '\ud800'.repeat(feira.MAX_PLACE) }
+  const fields = {
+    title: '\ud800'.repeat(feira.MAX_LISTING_TITLE),
+    text: '\ud800'.repeat(MAX_TEXT),
+    price: feira.MAX_PRICE_CENTS,
+    unit: 'a-partir',
+    cat: 'eletronicos',
+    place,
+    media: MEDIA
+  }
+  const create = { kind: 'servico', ...fields }
+  const edit = { to: HEX + ':' + SEQ, expectedRevision: SEQ, ...fields }
+  t.ok(validateParams('listing.create', create).ok)
+  t.ok(validateParams('listing.edit', edit).ok)
+  t.ok(request('listing.create', create) <= MAX_REQUEST)
+  t.ok(request('listing.edit', edit) <= MAX_REQUEST)
+  t.ok(request('listing.create', create) <= MAX_MESSAGE)
+  t.ok(request('listing.edit', edit) <= MAX_MESSAGE)
+  // A listing.mine item: the current snapshot of one own listing with its
+  // edit and status sequence numbers and both dates.
+  const item = {
+    seq: SEQ,
+    editSeq: SEQ,
+    statusSeq: SEQ,
+    kind: 'servico',
+    status: 'disponivel',
+    ...fields,
+    at: AT,
+    editedAt: AT
+  }
+  const limit = validateParams('listing.mine', {}).value.limit
+  t.is(limit, 20)
+  const page = { items: Array(limit).fill(item), next: SEQ }
+  t.ok(size(page) <= MAX_MESSAGE, 'listing.mine page ' + size(page))
+})

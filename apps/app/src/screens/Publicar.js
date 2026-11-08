@@ -30,7 +30,7 @@
 // 5 verified members under the compose box; tapping one replaces the token
 // with '@nome ' (../mentions). No strip on native, offline or non-hosted. The
 // text is sent exactly as typed: names are never resolved at send time.
-// Momento (docs/rpc.md 5.103, hosted only, when the node offers
+// Momento (docs/rpc.md 5.111, hosted only, when the node offers
 // media.putMoment and nothing is being replied to, quoted or posted as a
 // page): a Segmented 'Publicação | Momento' at the top. A momento is exactly
 // one photo (the chat photo path, ../ui/AttachSheet useChatAttachments) and

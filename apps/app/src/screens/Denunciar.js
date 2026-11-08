@@ -26,13 +26,17 @@
 // as it is (media/reportAudio.*.js), checked with audioBounds and the same
 // cap, and the sheet plays it (VoiceBubble) before anything is sent. In the
 // background the player is released with the preview.
+// A Feira listing: `target` = { kind: 'listing', author, seq, title } with
+// `seq` the listing's root record. Its title is the quote; the listing is
+// taken as the sheet opened it (report.js listingTarget), so the reported
+// block never moves while the sheet is open.
 
 import { useEffect, useRef, useState } from 'react'
 import { AppState, Image, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { accountStatus } from '../account'
-import { ANEXO_AUDIO_NOTICE, ANEXO_AUDIO_TOO_BIG, ANEXO_AUDIO_UNAVAILABLE, ANEXO_NOTICE, ANEXO_TOO_BIG, ANEXO_UNAVAILABLE, NOT_LINKED_MESSAGE, REASONS, TEXT_MAX, anexoRef, isAudioItem, prepareAnexo, submitDmReport, submitReport, validateReportText, wellFormed } from '../report'
+import { ANEXO_AUDIO_NOTICE, ANEXO_AUDIO_TOO_BIG, ANEXO_AUDIO_UNAVAILABLE, ANEXO_NOTICE, ANEXO_TOO_BIG, ANEXO_UNAVAILABLE, NOT_LINKED_MESSAGE, REASONS, TEXT_MAX, anexoRef, isAudioItem, listingTarget, prepareAnexo, submitDmReport, submitListingReport, submitReport, validateReportText, wellFormed } from '../report'
 import { createChatMedia } from '../media/chatMedia'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { encodeReportImage } from '../media/reportImage'
@@ -79,6 +83,13 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
   // { status: 'none' | 'loading' | 'ok' | 'over' | 'unavailable', ... }
   const [anexo, setAnexo] = useState({ status: 'none' })
   const [preview, setPreview] = useState(null)
+  // Fixed per opening: a target re-rendered with another seq (an edit seen
+  // meanwhile) does not change what is reported.
+  const [listing, setListing] = useState(null)
+  const listingAuthor = target !== null && target.kind === 'listing' ? target.author : null
+  useEffect(() => {
+    setListing(open ? listingTarget(target) : null)
+  }, [open, listingAuthor])
 
   // A new target (or reopening) starts a fresh form and a fresh status read.
   useEffect(() => {
@@ -97,8 +108,9 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
     })
   }, [open, target, hosted, member])
 
-  const isDm = target !== null && target.dm === true && typeof target.author === 'string'
-  const fromPost = !isDm && target !== null && target.seq !== null && target.seq !== undefined
+  const isListing = target !== null && target.kind === 'listing'
+  const isDm = !isListing && target !== null && target.dm === true && typeof target.author === 'string'
+  const fromPost = !isListing && !isDm && target !== null && target.seq !== null && target.seq !== undefined
   const postMode = fromPost && !whole
   const inGroup = fromPost && typeof target.group === 'string' && typeof target.writer === 'string'
   const ref = (isDm || (postMode && inGroup)) && open && hosted ? anexoRef(target) : null
@@ -150,9 +162,11 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
   // The exact text that is signed and sent (lone surrogates normalized, D5).
   // A private message is quoted exactly as the sheet shows it, so the signed
   // quote never carries direction marks the reporter did not see.
-  const quote = isDm
-    ? displayText(wellFormed(target.text), { multiline: true })
-    : postMode ? wellFormed(target.text) : ''
+  const quote = isListing
+    ? (listing === null ? '' : wellFormed(listing.title))
+    : isDm
+      ? displayText(wellFormed(target.text), { multiline: true })
+      : postMode ? wellFormed(target.text) : ''
   const noteText = validateReportText(wellFormed(note))
   const attached = anexo.status === 'ok' ? { bytes: anexo.bytes, digest: anexo.digest } : null
   // dm.reportSign needs a quote or an image: a photo-only message whose
@@ -167,10 +181,23 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
   const submit = async () => {
     if (reason === null || noteText === null || target === null || typeof member !== 'string') return
     if (anexo.status === 'loading' || nothing) return
+    if (isListing && listing === null) return
     // A close, a lock or a new target while this runs makes it stale: a stale
     // run stops before signing and before sending, not only before the toast.
     const mine = seqRef.current
-    const r = await send.run(() => isDm
+    const listingRun = isListing
+      ? () => submitListingReport({
+          member,
+          target: listing.author,
+          seq: listing.seq,
+          reason,
+          text: noteText,
+          quote,
+          sign: (params) => node.request('report.sign', params),
+          isStale: () => mine !== seqRef.current
+        })
+      : null
+    const r = await send.run(listingRun || (() => isDm
       ? submitDmReport({
         member,
         target: target.author,
@@ -194,7 +221,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
         anexo: attached,
         sign: (params) => node.request('report.sign', params),
         isStale: () => mine !== seqRef.current
-      }))
+      })))
     if (r.ok && r.value !== null && mine === seqRef.current) onSent(r.value.duplicate ? 'você já tinha denunciado isso' : 'denúncia enviada')
   }
 
@@ -210,8 +237,8 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
   } else {
     body = (
       <>
-        {isDm
-          ? <Text style={styles.line}>Denunciar esta mensagem privada</Text>
+        {isDm || isListing
+          ? <Text style={styles.line}>{isListing ? 'Denunciar anúncio' : 'Denunciar esta mensagem privada'}</Text>
           : (
             <Text style={styles.line}>
               {'Denunciar ' + (postMode ? 'a publicação de ' : 'a conta de ')}
@@ -226,7 +253,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
             </View>
             )
           : null}
-        {postMode || isDm
+        {postMode || isDm || isListing
           ? (
             <View style={styles.quoteBox}>
               <Label>Texto que será enviado</Label>
@@ -247,7 +274,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
         {nothing ? <ErrorText>{audio ? NOTHING_TO_SEND_AUDIO : NOTHING_TO_SEND}</ErrorText> : null}
         {postMode && inGroup ? <Soft>{target.private === true ? PRIVATE_GROUP_NOTICE : PUBLIC_GROUP_NOTICE}</Soft> : null}
         {isDm ? <Soft>{DM_LABELS.reportNote}</Soft> : null}
-        {!postMode && !isDm ? <Soft>Para denunciar o nome, a bio ou a foto do perfil, escolha a conta toda.</Soft> : null}
+        {!postMode && !isDm && !isListing ? <Soft>Para denunciar o nome, a bio ou a foto do perfil, escolha a conta toda.</Soft> : null}
         <View style={styles.pills}>
           {REASONS.map(([id, label]) => (
             <ChoicePill key={id} label={label} selected={reason === id} onPress={() => setReason(id)} />
@@ -264,7 +291,7 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
           label='enviar denúncia'
           onPress={submit}
           pending={send.pending}
-          disabled={reason === null || noteText === null || anexo.status === 'loading' || nothing}
+          disabled={reason === null || noteText === null || anexo.status === 'loading' || nothing || (isListing && listing === null)}
         />
       </>
     )

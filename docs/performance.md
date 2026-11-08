@@ -140,3 +140,25 @@ Mac M4 Pro, Node 24.22.1, com outras sessões usando a máquina (carga média en
 - Pedidos mais lentos na partida (desenvolvimento, 4x): `profile.read` 2,7 s, `node.info` 3,1 s (4 vezes), `feed.read` até 2,7 s, `dm.enable` 1,6 s, `community.list` 1,6 s, `dm.list` 1,2 s, `engagement.read` 1,1 s.
 - Vitrine grande no simulador iOS (iPhone 17 Pro, iOS 26.2, desenvolvimento): linhas 2,05 s e fim do splash 2,17 s depois de o JavaScript carregar, estável em 3 execuções. Android: não medido nesta rodada (outro emulador ocupava a CPU).
 - O semeador limita `/media` de forma global (64 pedidos por segundo, 16 em andamento); acima disso responde 503 e o app desiste da foto em vez de tentar de novo.
+
+### M1, cache de blocos e validação única (PR perf/read-cost)
+
+- Nó, D1: leituras do armazenamento por `feed.read` de 11000 para 5; `feed.read` de 139 para 41 ms em IndexedDB e de 367 para 48 ms em arquivos; segundo `feed.read` 36 ms e 29 ms.
+- Chrome 4x, build de produção: linhas de A Rua em 3,76 s (eram 5,8 s); primeira foto em 4,1 s.
+
+### M2, partida mais quieta (PR perf/quieter-boot)
+
+- Chrome 4x, desenvolvimento: linhas em 3,8 s (eram 6,5 s); na partida não há mais `dm.list`, `community.list` nem `community.info`; `node.info` caiu de cerca de 3 s para cerca de 95 ms.
+- Chrome 4x, produção: linhas em 3,53 s, primeira foto em 3,94 s.
+- O que sobra: o primeiro `profile.read` espera a partida do nó publicar os núcleos (cerca de 2,2 s com CPU 4x), e a maior parte disso é verificar cerca de 122 assinaturas em JavaScript puro.
+
+### M3, renderização (PR perf/app-render)
+
+- Chrome 4x, produção: linhas em 3,47 s, primeira foto em 3,89 s. A renderização não está no caminho crítico da primeira tela na web; o ganho aparece em menos redesenhos durante a sincronização e a rolagem.
+- Vitrine grande no emulador Android: sem número confiável nesta rodada (a máquina estava com carga entre 11 e 28).
+
+### Tarefas que não entraram
+
+- Pela regra das metas: `log.read` em janela (as páginas já custam o mesmo), releitura de A Rua por sinais (uma leitura por abertura).
+- Sem como medir neste laboratório: hash nativo das fotos, verificação em lote dos bloqueados, histórico de mensagens diretas sob demanda.
+- Medido e deixado de fora: memória do estado preparado por núcleo (segundo `feed.read` de 39 para 28 ms no Mac) não compensa o acoplamento a detalhes internos do Hypercore.

@@ -1,4 +1,4 @@
-// Momentos on A Rua and on the Diário (docs/rpc.md 5.103), hosted only.
+// Momentos on A Rua and on the Diário (docs/rpc.md 5.111), hosted only.
 //
 // MomentosStrip: A Rua's list header. One horizontal row of 56 pt rings: the
 // own one first with a '+' badge (it opens the composer in Momento mode when

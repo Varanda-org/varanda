@@ -54,3 +54,70 @@ export function authoritative (p) {
 export function viewOf (entry) {
   return { name: entry.name, username: entry.username, bio: entry.bio, avatar: entry.avatar }
 }
+
+// What profileOf hands out for an entry (a page diary carries its flags).
+function profileView (entry) {
+  const view = viewOf(entry)
+  return entry.page === true ? { ...view, page: true, closed: entry.closed === true, moved: entry.moved === true } : view
+}
+
+function sameView (a, b) {
+  if (a.name !== b.name || a.username !== b.username || a.bio !== b.bio) return false
+  if (a.page !== b.page || a.closed !== b.closed || a.moved !== b.moved) return false
+  if ((a.avatar === undefined) !== (b.avatar === undefined)) return false
+  return sameAvatar(a.avatar, b.avatar)
+}
+
+// The view of `entry`, reusing `prev` while it says the same thing: memoized
+// rows compare props by identity, and a fresh object per lookup would
+// re-render every row on any change of the cache (a refetch that only flips
+// `loaded` included).
+export function stableView (entry, prev) {
+  const next = profileView(entry)
+  return prev && typeof prev === 'object' && sameView(prev, next) ? prev : next
+}
+
+function sameInputs (a, b) {
+  const keys = Object.keys(a)
+  if (keys.length !== Object.keys(b).length) return false
+  for (const k of keys) if (!Object.is(a[k], b[k])) return false
+  return true
+}
+
+// Per-row props cache of the feed lists (kept here because this module loads
+// without React, so the rule is tested in node). `inputs` is a flat object of
+// what the row's props are derived from; while every value is identical the
+// cached props object comes back, else `build(live)` makes a new one. `live`
+// is the row's box, the same object across rebuilds and refreshed with
+// `latest` on every call, so callbacks inside the props run the newest
+// handlers without the handlers being inputs.
+export function cachedRow (cache, key, inputs, latest, build) {
+  const hit = cache.get(key)
+  const live = hit ? hit.live : {}
+  Object.assign(live, latest)
+  if (hit && sameInputs(hit.inputs, inputs)) return hit.props
+  const props = build(live)
+  cache.set(key, { inputs, props, live })
+  return props
+}
+
+// Drops the rows no longer in the list, so the cache never outgrows it.
+export function pruneRows (cache, keys) {
+  const keep = new Set(keys)
+  for (const key of [...cache.keys()]) if (!keep.has(key)) cache.delete(key)
+}
+
+// The counts index flags after one answer of counts pass `pass` (passes
+// overlap: the next page's counts do not wait for the previous ones).
+// `applied` is the newest pass whose flags were applied: an older pass
+// answering late never brings back its `indexing` (an old `indexing: true`
+// would hide every count), but its `complete: false` still counts, since its
+// page's posts are not the newer page's. Answers of one pass still combine.
+// -> { flags, applied }.
+export function countsFlags ({ prev, applied, pass, indexing, complete }) {
+  if (pass < applied) {
+    if (complete !== false || prev.complete === false) return { flags: prev, applied }
+    return { flags: { indexing: prev.indexing, complete: false }, applied }
+  }
+  return { flags: { indexing: indexing === true, complete: prev.complete !== false && complete !== false }, applied: pass }
+}

@@ -36,6 +36,14 @@
 // Voice notes take the same path: with an empty field the composer records
 // one (where the device can make audio/mp4), it goes to the blob channel as
 // the only item of one dm.send, and the bubble plays it (VoiceBubble).
+// Feira offers (feiraOffer.js): while the thread holds a link to one of the
+// peer's listings, "Fazer oferta" sends the offer link (a card and the text;
+// a page sends text only). The listing author sees Aceitar and Recusar on
+// the latest open offer: Aceitar first shows what the signature means, then
+// signs listing.consent (as a page, the listing-consent action) and replies
+// with the aceite link; the proposer then sees Avaliar (onAvaliar). The
+// offer state is read from the thread every time, nothing else is stored,
+// and an uncertain offer, aceite or recusa is resent only by "Tentar de novo".
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Keyboard, KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
@@ -53,13 +61,18 @@ import { countChars } from '../format'
 import { composeText, contextExcerpt, contextLabel, sendAttempt } from '../privateReply'
 import { LABELS, UNSURE_SEND } from '../dm'
 import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
+import { listingLinkOf } from '../feiraChat'
+import { parsePriceText, quickReplies } from '../feira'
+import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
 import { mergeMessages, newestOf, pageDmRequest, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
-import { pagesDm } from '../pages'
+import { actAs, pagesDm } from '../pages'
 import { pagesOn } from '../pageGate'
 import { cardFits, composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
-import { cardForSend, withCardFallback } from '../linkCard'
+import { cardForSend, draftView, freezeSnapshot, linkDraftIdle, linkDraftStep, withCardFallback } from '../linkCard'
+import { previewTarget } from '../preview'
+import { revokeUrl, urlFromBytes } from '../media/display'
 import { chatMediaRefs, retryChatSend, runChatSend, stagedOf } from '../chatSend'
-import { ErrorText, Soft, errorText, useAction, useNow } from '../ui'
+import { Btn, ErrorText, Field, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
 import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
@@ -72,6 +85,7 @@ import { Icon } from '../ui/Icon'
 import { IconAction } from '../ui/TopActions'
 import { RefreshableList } from '../ui/RefreshableList'
 import { ActionsSheet } from '../ui/ActionsSheet'
+import { Sheet } from '../ui/Sheet'
 import { EmptyState, Skeleton } from '../ui/States'
 import { ForwardSheet } from '../ui/ForwardSheet'
 import { dmForwardSource } from '../forward'
@@ -81,7 +95,49 @@ import { memberKeyOf, useActing } from './Conversa'
 const BLOCKED_SEND = 'você bloqueou esta pessoa'
 const unsureSend = (err) => !!(err && (err.uncertain === true || err.message === UNSURE_SEND))
 
-export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, intent, onIntentUsed }) {
+export function initialMessage (initial) {
+  const draft = typeof initial?.draft === 'string' ? displayText(initial.draft, { multiline: true }) : ''
+  let card = linkDraftIdle()
+  if (initial?.card && previewTarget(draft) === initial.card.url) {
+    card = linkDraftStep(card, { type: 'target', url: initial.card.url })
+    card = linkDraftStep(card, { type: 'built', url: initial.card.url, data: initial.card })
+  }
+  return { draft, card }
+}
+
+export function listingLinkForRow (row, origin) {
+  if (!row || row.deleted === true) return null
+  return listingLinkOf(row.rawText, origin) || listingLinkOf(row.card, origin)
+}
+
+// The quick replies are a buyer's questions: they show while the newest
+// listing link in the thread names someone else's listing (the buyer sent
+// the seller's card, or the seller sent one of theirs). `me` is the identity
+// in use: the member, or the page acted as.
+export function showListingReplies (rows, me) {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const link = rows[i].listingLink
+    if (link !== null && link !== undefined) return typeof me === 'string' && link.author !== me
+  }
+  return false
+}
+
+export function messageEntry (previous, identity, initial) {
+  if (!previous) return { identity, initial }
+  return previous.identity === identity ? previous : { identity, initial: null }
+}
+
+export function Mensagem ({ initial, ...props }) {
+  const node = useNode()
+  const acting = useActing()
+  const identity = (node.passkey?.status?.publicKey || '') + ':' + (acting.kind === 'page' ? acting.key : '')
+  const entry = useRef(null)
+  entry.current = messageEntry(entry.current, identity + ':' + props.peer, initial)
+  // Remounting discards every draft, held send and attachment on a switch.
+  return <MensagemThread key={identity + ':' + props.peer} {...props} initial={entry.current.initial} />
+}
+
+function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing, onAvaliar, intent, onIntentUsed }) {
   const styles = useStyles(makeStyles)
   const avoidKeyboard = useKeyboardAvoidEnabled()
   const insets = useSafeAreaInsets()
@@ -129,7 +185,8 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
   const [newest, setNewest] = useState('')
   const [blocked, setBlocked] = useState(false)
   const [askNew, setAskNew] = useState(false)
-  const [draft, setDraft] = useState('')
+  const [draft, setDraft] = useState(() => initialMessage(initial).draft)
+  const [initialCard, setInitialCard] = useState(() => initialMessage(initial).card)
   const [replyTo, setReplyTo] = useState(null)
   // A post the person came from (privateReply.js): a chip apart from the
   // draft, turned into text only by composeText when Enviar is pressed.
@@ -153,9 +210,47 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
   const [forwarding, setForwarding] = useState(null)
   const post = useAction()
   const act = useAction()
+  // Offers: the "Fazer oferta" sheet and its value, the offer an Aceitar
+  // waits to confirm ({ offer, listing }), and offerHold { op, retry } after
+  // an uncertain offer, aceite or recusa (resent only on a tap).
+  const offerAct = useAction()
+  const [offerOpen, setOfferOpen] = useState(false)
+  const [offerValue, setOfferValue] = useState('')
+  const [offerNote, setOfferNote] = useState('')
+  const [confirming, setConfirming] = useState(null)
+  const [offerHold, setOfferHold] = useState(null)
   const attachments = useChatAttachments()
   // The draft link card (not as a page: its sends are signed statements).
-  const linkDraft = useLinkDraft({ text: draft, enabled: pageKey === null, photos: attachments.items.length > 0, member: ownKey })
+  const initialTarget = initialCard.url !== null && previewTarget(draft) === initialCard.url
+  const automaticDraft = useLinkDraft({ text: draft, enabled: pageKey === null && !initialTarget, photos: attachments.items.length > 0, member: ownKey })
+  useEffect(() => {
+    if (attachments.items.length > 0) setInitialCard((s) => linkDraftStep(s, { type: 'photo' }))
+  }, [attachments.items.length])
+  const snapshot = pageKey === null && attachments.items.length === 0 ? freezeSnapshot(initialCard, draft) : null
+  const [initialImage, setInitialImage] = useState(null)
+  const thumb = snapshot?.thumb || null
+  const thumbBytes = thumb?.bytes
+  useEffect(() => {
+    let uri = null
+    if (thumbBytes) {
+      try { uri = urlFromBytes(thumbBytes, thumb.mime) } catch {}
+    }
+    setInitialImage(uri)
+    return () => { if (uri !== null) revokeUrl(uri) }
+  }, [thumbBytes])
+  const linkDraft = initialTarget
+    ? {
+        view: snapshot ? draftView(initialCard) : null,
+        imageUri: snapshot ? initialImage : null,
+        dismiss: () => setInitialCard((s) => linkDraftStep(s, { type: 'dismiss' })),
+        take: (text) => attachments.items.length === 0 ? freezeSnapshot(initialCard, text) : null
+      }
+    : automaticDraft
+  const live = useRef(true)
+  useEffect(() => {
+    live.current = true
+    return () => { live.current = false }
+  }, [])
   // { phase, progress } of a photo send; mediaHold { op } after an uncertain
   // one (the exact dm.send it made); sendTokenRef is the running send, which
   // Cancelar marks dead before its request starts.
@@ -217,6 +312,9 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     setHold(null)
     setAskNew(false)
     setMediaHold(null)
+    setOfferHold(null)
+    setConfirming(null)
+    setOfferOpen(false)
     attachments.clear()
   }, [pageKey])
 
@@ -331,6 +429,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
           const upload = mediaApi !== null ? (t) => mediaApi.putDm({ bytes: t.bytes, mime: t.mime, width: t.width, height: t.height, to: peer }) : null
           card = await cardForSend(snapshot, { upload, fits: (c) => cardFits({ text, target, card: c }) })
         }
+        if (!live.current) return null
         const built = withCardFallback((c) => (c ? composePlan({ text, target, card: c }).send().params : plain), card)
         card = built.card
         return await dm('dm.send', built.op)
@@ -339,6 +438,7 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
         throw err
       }
     })
+    if (!live.current) return
     const err = lastErr.current
     if (r.ok) {
       // A retry of a held message can land while a newer draft is being
@@ -498,6 +598,89 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
   // A held send keeps the text composed for that attempt: the same draft and
   // chip are a retry of exactly those bytes, never a newly composed message.
   const attempt = sendAttempt(hold, draft, context, outgoing)
+
+  // One offer step's dm.send. `op` is kept with an uncertain answer and only
+  // "Tentar de novo" sends it again (a page re-puts its signed bytes).
+  const offerSend = async (build) => {
+    let lastOffer = null
+    let sent = null
+    const r = await offerAct.run(async () => {
+      try {
+        const step = await build()
+        sent = step
+        return await (step.retry ? step.retry() : dm('dm.send', step.op))
+      } catch (err) {
+        lastOffer = err
+        throw err
+      }
+    })
+    if (!live.current) return
+    if (r.ok) {
+      setOfferHold(null)
+      setOfferOpen(false)
+      setOfferValue('')
+      setConfirming(null)
+    } else if (sent !== null && (r.uncertain || unsureSend(lastOffer))) {
+      const retry = pageKey !== null && lastOffer && typeof lastOffer.retry === 'function' ? lastOffer.retry : null
+      setOfferHold({ op: sent.op, retry })
+      setOfferOpen(false)
+      setConfirming(null)
+    } else if (lastOffer && lastOffer.message === BLOCKED_SEND) {
+      setBlocked(true)
+    }
+    reread()
+  }
+
+  // A personal account sends the link as a card and in the text; a page's
+  // sends are text only (signed statements), so the text always holds it.
+  const offerOp = (text, card, replyId) => {
+    const target = { kind: 'dm', to: peer, ...(replyId ? { replyTo: replyId } : {}) }
+    if (pageKey !== null || card === null) return { to: peer, text, ...(replyId ? { replyTo: replyId } : {}) }
+    return composePlan({ text, target, card }).send().params
+  }
+
+  const sendOffer = (listing) => {
+    setOfferNote('')
+    const cents = parsePriceText(offerValue)
+    if (!validCents(cents)) {
+      setOfferNote('Escreva um valor maior que zero, como 80 ou 12,50.')
+      return
+    }
+    const card = offerCard({ origin, listing, cents })
+    if (card === null) {
+      setOfferNote('Não foi possível montar a oferta.')
+      return
+    }
+    offerSend(async () => ({ op: offerOp(proposalText(listing, cents, card.url, { asPage: pageKey !== null }), card, null) }))
+  }
+
+  const acceptOffer = ({ offer, listing }) => offerSend(async () => {
+    const params = consentParams(listing, offer)
+    if (params === null) throw new Error('oferta não encontrada')
+    let signed
+    if (pageKey !== null) {
+      const n = nodeRef.current
+      signed = await actAs(n, { member: await memberKeyOf(request, n), action: 'listing-consent', page: pageKey, op: params })
+    } else {
+      signed = await request('listing.consent', params)
+    }
+    const card = acceptCard({ origin, listing, cents: offer.cents, consent: signed && signed.consent })
+    if (card === null) throw new Error('Não foi possível montar a resposta.')
+    return { op: offerOp(acceptText(offer.cents, card.url), card, offer.id) }
+  })
+
+  const declineOffer = ({ offer, listing }) => offerSend(async () => {
+    const card = declineCard({ origin, listing, cents: offer.cents })
+    if (card === null) throw new Error('oferta não encontrada')
+    return { op: offerOp(declineText(offer.cents, card.url), card, offer.id) }
+  })
+
+  const retryOffer = () => {
+    if (!offerHold) return
+    const held = offerHold
+    offerSend(async () => ({ op: held.op, retry: held.retry }))
+  }
+
   const onSend = () => {
     if (mediaHold) return retryMedia()
     if (context !== null && draft.trim() === '') return undefined
@@ -561,11 +744,13 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     )
   }
 
+  const cardOf = new Map(raw.map((m) => [messageKey(m), m.card]))
   const rows = withDayMarks(threadRows(raw), now)
   for (const row of rows) {
     row.inviteLink = row.deleted === true || typeof onOpenInvite !== 'function'
       ? null
       : inviteLinkOf(row.rawText, origin)
+    row.listingLink = listingLinkForRow({ ...row, card: cardOf.get(row.key) }, origin)
   }
 
   // The author of a quoted message: the row it points to, found through the
@@ -592,6 +777,30 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     return target.mine === true ? OWN_LABEL : quoteName
   }
 
+  // The thread as offer input: every row with its card, reply id and sender.
+  const me = pageKey !== null ? pageKey : ownKey
+  const offerMsgs = rows.map((r) => ({ id: r.id, from: r.from, mine: r.mine, text: r.rawText, card: cardOf.get(r.key), replyTo: replyIdOf.get(r.key), at: r.at, deleted: r.deleted }))
+  const linkOfMsg = (m) => listingLinkOf(m.text, origin) || listingLinkOf(m.card, origin)
+  const offerListing = peer !== me ? offerTarget(offerMsgs, peer, origin, linkOfMsg) : null
+  const offerStates = new Map()
+  const offerOfRow = (index) => {
+    const m = offerMsgs[index]
+    const ref = offerOfMessage(m, origin)
+    if (ref === null || ref.aceite !== null || ref.recusada) return null
+    const listing = { author: ref.author, seq: ref.seq }
+    const key = ref.author + ':' + ref.seq
+    if (!offerStates.has(key)) offerStates.set(key, offerState(offerMsgs, me, listing, origin))
+    const offer = offerStates.get(key)
+    if (!offer || offer.id !== m.id || offer.from !== (m.mine ? me : m.from)) return null
+    const buttons = buttonState(offer, me, listing)
+    // A page does not rate in v1.
+    const rate = buttons.rate && pageKey === null && node.online !== false && typeof onAvaliar === 'function'
+    return buttons.answer || rate ? { offer, listing, answer: buttons.answer, rate } : null
+  }
+  const offerBusy = offerAct.pending || offerHold !== null
+  // Answers go out only where the composer could send.
+  const canAnswer = folder === 'inbox' && !blocked && node.online !== false && !offerBusy
+
   let blockNote = null
   if (blocked) blockNote = LABELS.blockedSend
   else if (peer === ownKey || peer === pageKey) blockNote = LABELS.selfSend
@@ -606,7 +815,6 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
     (context !== null && draft.trim() === '' ? false : staged ? attachments.ready && !sendingMedia : draft.trim() !== '')
   const mediaOf = new Map(raw.map((m) => [messageKey(m), m.media]))
   const fwdOf = new Map(raw.map((m) => [messageKey(m), m.fwd]))
-  const cardOf = new Map(raw.map((m) => [messageKey(m), m.card]))
   // Forwarding writes as the person, never as a page.
   const canForward = pageKey === null && unlocked
 
@@ -658,6 +866,27 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
         {/* The conversation menu closes before its action runs: a failed
             block or delete says so here. */}
         <ErrorText>{act.error}</ErrorText>
+        {showListingReplies(rows, pageKey !== null ? pageKey : ownKey) && !hold && !mediaHold && !sendingMedia && !post.pending
+          ? (
+            <View style={styles.inline}>
+              {quickReplies().map((text) => <Pill key={text} label={text} onPress={() => { setDraft((d) => d.trim() ? d + '\n' + text : text); setAskNew(false) }} />)}
+            </View>
+            )
+          : null}
+        {offerListing !== null && !hold && !mediaHold && !sendingMedia && !post.pending && !offerBusy
+          ? <View style={styles.inline}><Pill label='Fazer oferta' onPress={() => { setOfferNote(''); offerAct.clearError(); setOfferOpen(true) }} /></View>
+          : null}
+        {offerHold
+          ? (
+            <View style={styles.inline}>
+              <Soft>{LABELS.uncertain}</Soft>
+              {offerHold.retry !== null || pageKey === null
+                ? <Pill label='Tentar de novo' onPress={retryOffer} pending={offerAct.pending} />
+                : null}
+              <Pill label='descartar' onPress={() => setOfferHold(null)} />
+            </View>
+            )
+          : (!offerOpen && confirming === null && offerAct.error ? <ErrorText>{offerAct.error}</ErrorText> : null)}
         {mediaHold
           ? (
             <View style={styles.inline}>
@@ -771,6 +1000,8 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
         renderItem={({ item, index }) => {
           const mine = item.mine === true
           const link = item.inviteLink || null
+          const listing = item.listingLink
+          const offerRow = item.deleted ? null : offerOfRow(index)
           const actions = []
           const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media: mediaOf.get(item.key) })
           if (!item.deleted) {
@@ -793,13 +1024,29 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
               media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
               item={{ key: item.key, text: item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: !item.deleted && cardOf.get(item.key) ? cardOf.get(item.key) : null }}
               mine={mine}
-              cardThumb={item.deleted ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
+              cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
               shape={bubbleShape(rows, index)}
               forwarded={!item.deleted && fwdOf.get(item.key) === 1}
               quote={quoted}
               actions={actions}
               onOpenMention={mentionTap}
-              below={link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
+              below={link !== null || offerRow !== null || (listing !== null && typeof onOpenListing === 'function')
+                ? (
+                  <View style={styles.inline}>
+                    {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
+                    {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
+                    {offerRow !== null && offerRow.answer && canAnswer
+                      ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
+                      : null}
+                    {offerRow !== null && offerRow.answer && canAnswer
+                      ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
+                      : null}
+                    {offerRow !== null && offerRow.rate
+                      ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
+                      : null}
+                  </View>
+                  )
+                : null}
             />
           )
         }}
@@ -819,6 +1066,25 @@ export function Mensagem ({ peer, isTop = true, onBack, onOpenMember, onOpenMent
         refs={forwarding ? forwarding.refs : []}
         identity={ownKey}
       />
+      <Sheet open={offerOpen && offerListing !== null} onClose={() => { if (!offerAct.pending) setOfferOpen(false) }} title='Fazer oferta'>
+        <View style={styles.sheet}>
+          <Soft>{offerListing !== null && offerListing.title !== '' ? displayText(offerListing.title) : 'Anúncio na Feira'}</Soft>
+          <Field label='Valor (R$)' value={offerValue} onChangeText={(t) => { setOfferValue(t); setOfferNote('') }} placeholder='80,00' maxLength={16} editable={!offerAct.pending} />
+          <Soft>A oferta vai como mensagem nesta conversa. Não é um pagamento: vocês combinam o resto por aqui.</Soft>
+          <ErrorText>{offerNote || offerAct.error}</ErrorText>
+          <Btn label='Enviar oferta' onPress={() => sendOffer(offerListing)} pending={offerAct.pending} disabled={node.online === false || offerValue.trim() === ''} />
+          <Btn label='Cancelar' secondary onPress={() => setOfferOpen(false)} disabled={offerAct.pending} />
+        </View>
+      </Sheet>
+      <Sheet open={confirming !== null} onClose={() => { if (!offerAct.pending) setConfirming(null) }} title='Aceitar oferta'>
+        <View style={styles.sheet}>
+          <Soft>{confirming !== null ? 'Oferta de ' + centsLabel(confirming.offer.cents) + '.' : ''}</Soft>
+          <Soft>{CONSENT_NOTE}</Soft>
+          <ErrorText>{offerAct.error}</ErrorText>
+          <Btn label='Aceitar e assinar' onPress={() => acceptOffer(confirming)} pending={offerAct.pending} disabled={node.online === false} />
+          <Btn label='Cancelar' secondary onPress={() => setConfirming(null)} disabled={offerAct.pending} />
+        </View>
+      </Sheet>
       {/* Two actions: the compact menu, and the delete confirmation as its own
           compact step with one Cancelar. */}
       <ActionsSheet

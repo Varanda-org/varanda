@@ -44,7 +44,25 @@ const { isAppRequest, ageReturnUrl } = require('./app-return')
 //     never opens a second one, and
 //     only after the same eligibility checks a link would face (member cap,
 //     invite), so nobody shows a face or a document for a link that would
-//     be refused anyway. result reads the decision and records only the age
+//     be refused anyway. A Feira code (./invites-pair.js feiraOwner, a
+//     one-hour code charged to a listing owner, minted on demand by people
+//     who are not members) has its own paid-session ceilings, so minting
+//     them can never spend the ordinary sign-ups' budget: at most one
+//     session per code per day and FEIRA_AGE_DAILY a day for all Feira codes
+//     (never a window keyed by the owner, which anonymous minters could
+//     spend to lock that owner out), which
+//     do not count against the daily ceiling of the other unlinked keys.
+//     Each answers 'limite-idade'. That session opens only through POST
+//     /account/feira/idade (same body, signed action 'session', same
+//     answers), where the edge (deploy/seeder/Caddyfile, zones feira-idade
+//     and feira-idade-total) limits each address, since this service never
+//     reads one; a Feira code on /account/age/session answers
+//     'use-a-rota-da-feira' and an ordinary code (or none) on the Feira route
+//     'pedido-invalido', both before any window is charged. Residual: an
+//     attacker rotating IPv6 addresses inside a /64 (or many hosts) reaches
+//     only the global ceilings (FEIRA_AGE_DAILY here, feira-idade-total at
+//     the edge) and can still stop Feira sign-ups for the day, never
+//     ordinary ones. result reads the decision and records only the age
 //     band in age.json (./age-store.js), then asks Didit to delete the
 //     session. A 'verificado' answer from either carries `proof`, an
 //     age-verified attestation for the member dated the band's checkedAt
@@ -69,6 +87,16 @@ const SESSION_TTL_MS = 24 * 3600 * 1000
 const MAX_SESSIONS = 10000
 const DAY_MS = 24 * 3600 * 1000
 const SINCE_RESIGN_MS = 60 * 1000
+const FEIRA_AGE_DAILY = 50
+// The paid session for a Feira code, under the /account/feira/* edge handle.
+const FEIRA_AGE_PATH = '/account/feira/idade'
+
+// The request target's path exactly as sent, before any URL normalisation.
+function rawPath (req) {
+  const target = typeof req.url === 'string' ? req.url : ''
+  const q = target.indexOf('?')
+  return q === -1 ? target : target.slice(0, q)
+}
 const HEX64_RE = /^[0-9a-f]{64}$/
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const LOG_TOKEN_RE = /^[a-z0-9_-]{1,48}$/
@@ -150,6 +178,8 @@ function createAgeRoutes ({
     result: keyedWindow(30, 600 * 1000, now),
     dailyNew: ceiling(dailyLimit, DAY_MS, now),
     dailyLinked: ceiling(dailyLimit, DAY_MS, now),
+    feiraCode: keyedWindow(1, DAY_MS, now),
+    dailyFeira: ceiling(FEIRA_AGE_DAILY, DAY_MS, now),
     // The policy answer is a constant the app needs before anything else: its
     // own window, so a flood of other lookups cannot 429 it.
     policy: fixedWindow(6000, 60 * 1000, now),
@@ -251,6 +281,17 @@ function createAgeRoutes ({
       throw refuse('indisponivel')
     }
     return why === null && !store.inviteUsed(id)
+  }
+
+  // The quota owner when `code` (already accepted by inviteOk) is a Feira
+  // code, else null. An owner that cannot be named fails closed.
+  function feiraOwnerOf (code) {
+    if (typeof invites.feiraOwner !== 'function') return null
+    try {
+      return invites.feiraOwner(inviteId(code))
+    } catch {
+      throw refuse('indisponivel')
+    }
   }
 
   // Deletion runs in the background so the answer never waits on it; a
@@ -380,7 +421,9 @@ function createAgeRoutes ({
     if (typeof store.deletedAt === 'function' && store.deletedAt(member) !== null) throw refuse('conta-excluida')
   }
 
-  async function session (req, res, body) {
+  // `feira`: the request came through POST /account/feira/idade, the only
+  // route that opens a paid session for a Feira code (see the header).
+  async function session (req, res, body, { feira = false } = {}) {
     available()
     const member = prove(body, 'session')
     notDeleted(member)
@@ -404,24 +447,42 @@ function createAgeRoutes ({
     // Eligibility before biometrics: a key the link would refuse never pays
     // for, nor shows anything to, the provider.
     const linked = store.status(member).linked
+    let feiraOwner = null
     if (!linked) {
       if (store.isFull()) throw refuse('lista-de-espera')
       if (inviting) {
         if (typeof body.invite !== 'string') throw refuse('convite-obrigatorio')
         if (!inviteOk(body.invite)) throw refuse('convite-invalido')
+        feiraOwner = feiraOwnerOf(body.invite)
       }
     }
+    // Before any window is charged, so a request on the wrong route spends nothing.
+    if (feiraOwner !== null && !feira) throw refuse('use-a-rota-da-feira')
+    if (feiraOwner === null && feira) throw refuse('pedido-invalido')
     // The shared ceiling is only peeked here, so a day at the ceiling does not
     // burn the member's own attempts; it is charged last, once the narrower
     // windows let the request through.
-    const daily = linked ? limits.dailyLinked : limits.dailyNew
-    if (!daily.has()) {
-      log({ event: 'idade', reason: 'teto-diario' })
-      throw refuse('indisponivel')
+    if (feiraOwner !== null) {
+      if (!limits.dailyFeira.has()) {
+        log({ event: 'idade', reason: 'teto-diario-feira' })
+        throw refuse('limite-idade')
+      }
+      if (!limits.session(member)) throw refuse('limite-idade')
+      // No window keyed by the owner: anonymous callers mint the codes, so it
+      // would let them lock an owner out. Cost is bounded by one session per
+      // code and the Feira-only daily ceiling; real sign-ups by the weekly cap.
+      if (!limits.feiraCode(inviteId(body.invite))) throw refuse('limite-idade')
+      limits.dailyFeira.take()
+    } else {
+      const daily = linked ? limits.dailyLinked : limits.dailyNew
+      if (!daily.has()) {
+        log({ event: 'idade', reason: 'teto-diario' })
+        throw refuse('indisponivel')
+      }
+      if (!limits.session(member)) throw refuse('limite-idade')
+      if (!linked && inviting && !limits.invite(inviteId(body.invite))) throw refuse('limite-idade')
+      daily.take()
     }
-    if (!limits.session(member)) throw refuse('limite-idade')
-    if (!linked && inviting && !limits.invite(inviteId(body.invite))) throw refuse('limite-idade')
-    daily.take()
     // Registered before the first await, so no other request for this member
     // can pass the checks above while this one waits on the provider.
     let settle
@@ -525,15 +586,20 @@ function createAgeRoutes ({
   const POST = {
     '/account/age/start': start,
     '/account/age/session': session,
-    '/account/age/result': result
+    '/account/age/result': result,
+    [FEIRA_AGE_PATH]: (req, res, body) => session(req, res, body, { feira: true })
   }
 
   function owns (pathname) {
-    return pathname === '/account/age' || pathname.startsWith('/account/age/')
+    return pathname === '/account/age' || pathname.startsWith('/account/age/') || pathname === FEIRA_AGE_PATH
   }
 
   async function handle (req, res, url) {
     const p = url.pathname
+    // The edge limits the Feira route by its path, and Caddy cleans a path
+    // (decoding %2F first) differently from URL here: only the exact raw
+    // target reaches the paid session, before the body or a nonce is read.
+    if (p === FEIRA_AGE_PATH && rawPath(req) !== FEIRA_AGE_PATH) throw refuse('nao-encontrado')
     if (req.method === 'GET' && p === '/account/age/policy') return policy(req, res)
     if (req.method === 'GET' && p === '/account/age/since') return sinceRoute(req, res)
     if (req.method === 'GET' && p === '/account/age/app-return') return appReturn(req, res)
@@ -554,5 +620,7 @@ function createAgeRoutes ({
 }
 
 module.exports = {
+  FEIRA_AGE_DAILY,
+  FEIRA_AGE_PATH,
   createAgeRoutes
 }

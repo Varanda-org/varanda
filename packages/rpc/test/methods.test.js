@@ -23,8 +23,7 @@ test('method list and mutating set', (t) => {
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
-    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'log.read', 'media.readFile', 'media.uploadFile',
-    'moment.create', 'moment.delete', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
+    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
@@ -32,8 +31,7 @@ test('method list and mutating set', (t) => {
   t.alike([...MUTATING].sort(), [
     'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
-    'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile',
-    'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
+    'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
     'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
@@ -279,7 +277,7 @@ test('moment results survive RPC response validation', async (t) => {
 })
 
 test('moments.read: the worst case under the caps fits MAX_MESSAGE', async (t) => {
-  // 32 authors x 4 items, 4 own items and 16 past records (docs/rpc.md 5.103),
+  // 32 authors x 4 items, 4 own items and 16 past records (docs/rpc.md 5.111),
   // every field at its longest.
   const seq = Number.MAX_SAFE_INTEGER
   const past = { seq, ref: KEY + ':' + seq, text: '😀'.repeat(200), at: '+275760-09-13T00:00:00.000Z' }
@@ -710,6 +708,88 @@ test('report.sign', (t) => {
   t.alike(validateParams('report.sign', { ...account, anexo }), { ok: false, code: 'USAGE', message: 'anexo só com writer' })
   for (const a of ['', anexo.toUpperCase(), anexo.slice(1), anexo + '0', 1, null]) bad(t, 'report.sign', { ...group, anexo: a }, 'anexo ' + a)
   bad(t, 'report.sign', { ...group, anexo, bytes: 'AAAA' }, 'the image bytes never reach the node')
+  // kind listing: a listing of the target's diary, never a group message.
+  const listing = { ...post, kind: 'listing' }
+  ok(t, 'report.sign', listing, listing)
+  for (const kind of ['post', 'Listing', '', null, true]) bad(t, 'report.sign', { ...post, kind }, 'kind ' + kind)
+  t.alike(validateParams('report.sign', { ...account, kind: 'listing' }), { ok: false, code: 'USAGE', message: 'kind listing só com seq' })
+  for (const extra of [{ writer: KEY }, { writer: KEY, group: KEY }, { writer: KEY, group: KEY, anexo }]) {
+    t.alike(validateParams('report.sign', { ...listing, ...extra }), { ok: false, code: 'USAGE', message: 'kind listing sem writer, group ou anexo' })
+  }
+})
+
+test('listing.*', (t) => {
+  const place = { uf: 'SP', city: 'São Paulo', bairro: 'Pinheiros' }
+  const create = { kind: 'produto', title: 'Bicicleta', text: '', price: 50000, unit: null, cat: 'esporte', place }
+  const descriptor = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: KEY, width: 10, height: 10 }
+  for (const m of ['listing.create', 'listing.status', 'listing.delete', 'listing.edit', 'listing.rate']) t.ok(isMutating(m), m)
+  for (const m of ['listing.mine', 'listing.consent', 'listing.ratings']) t.absent(isMutating(m), m)
+
+  ok(t, 'listing.create', create, create)
+  ok(t, 'listing.create', { ...create, media: [descriptor, descriptor, descriptor, descriptor] })
+  ok(t, 'listing.create', { ...create, kind: 'servico', unit: 'hora' })
+  ok(t, 'listing.create', { ...create, price: null })
+  ok(t, 'listing.create', { ...create, price: 0 })
+  bad(t, 'listing.create', { ...create, extra: 1 }, 'unknown key')
+  bad(t, 'listing.create', { ...create, place: { ...place, uf: 'XX' } }, 'bad uf')
+  bad(t, 'listing.create', { ...create, place: { ...place, cep: '01000' } }, 'place extra key')
+  bad(t, 'listing.create', { ...create, price: 1.5 }, 'float price')
+  bad(t, 'listing.create', { ...create, media: [descriptor, descriptor, descriptor, descriptor, descriptor] }, '5th photo')
+  bad(t, 'listing.create', { ...create, unit: 'hora' }, 'produto per hour')
+  bad(t, 'listing.create', { ...create, kind: 'procura', unit: 'a-partir' }, 'procura with a unit')
+  bad(t, 'listing.create', { ...create, kind: 'servico', price: 0, unit: 'hora' }, 'free per hour')
+  bad(t, 'listing.create', { ...create, title: '' }, 'empty title')
+  bad(t, 'listing.create', { ...create, title: 'x'.repeat(81) }, 'long title')
+  bad(t, 'listing.create', { ...create, text: 'x'.repeat(MAX_TEXT + 1) }, 'long text')
+  bad(t, 'listing.create', { ...create, cat: 'carros' }, 'bad cat')
+  const noUnit = { ...create }
+  delete noUnit.unit
+  bad(t, 'listing.create', noUnit, 'unit is required')
+
+  const to = KEY + ':3'
+  ok(t, 'listing.status', { to, status: 'vendido' })
+  bad(t, 'listing.status', { to, status: 'encontrado' }, 'bad status')
+  bad(t, 'listing.status', { to: KEY + ':0', status: 'vendido' }, 'seq 0')
+  ok(t, 'listing.delete', { to })
+  bad(t, 'listing.delete', { to, status: 'vendido' })
+
+  const edit = { to, expectedRevision: 0, title: 'Bicicleta', text: 'x', price: 100, unit: 'hora', cat: 'esporte', place, media: null }
+  ok(t, 'listing.edit', edit, edit)
+  ok(t, 'listing.edit', { ...edit, media: [descriptor] })
+  const noMedia = { ...edit }
+  delete noMedia.media
+  bad(t, 'listing.edit', noMedia, 'media is required')
+  bad(t, 'listing.edit', { ...edit, expectedRevision: -1 })
+  bad(t, 'listing.edit', { ...edit, price: 0 }, 'free with a unit')
+  bad(t, 'listing.edit', { ...edit, kind: 'servico' }, 'kind never changes')
+
+  ok(t, 'listing.mine', {}, { limit: 20 })
+  ok(t, 'listing.mine', { before: 9, limit: 1 })
+  for (const limit of [0, 21, 1.5]) bad(t, 'listing.mine', { limit }, 'limit ' + limit)
+  bad(t, 'listing.mine', { before: 0 })
+
+  const consent = { to, rater: KEY, offer: 'c'.repeat(32) }
+  ok(t, 'listing.consent', consent, consent)
+  bad(t, 'listing.consent', { ...consent, offer: 'c'.repeat(31) })
+  bad(t, 'listing.consent', { ...consent, rater: KEY.toUpperCase() })
+
+  const rate = { to, offer: 'c'.repeat(32), consent: 'd'.repeat(128), stars: 5, text: '' }
+  ok(t, 'listing.rate', rate, rate)
+  ok(t, 'listing.rate', { ...rate, text: '😀'.repeat(280) })
+  bad(t, 'listing.rate', { ...rate, stars: 6 }, 'stars 6')
+  bad(t, 'listing.rate', { ...rate, stars: 0 }, 'stars 0')
+  bad(t, 'listing.rate', { ...rate, consent: 'd'.repeat(127) }, 'consent of 127 chars')
+  bad(t, 'listing.rate', { ...rate, text: 'x'.repeat(281) })
+
+  const refs = Array.from({ length: 32 }, (_, i) => ({ rater: KEY, seq: i + 1 }))
+  ok(t, 'listing.ratings', { author: KEY, seq: 4, refs })
+  bad(t, 'listing.ratings', { author: KEY, refs })
+  bad(t, 'listing.ratings', { author: KEY, seq: 0, refs })
+  bad(t, 'listing.ratings', { author: KEY, seq: 4, refs: [] })
+  bad(t, 'listing.ratings', { author: KEY, seq: 4, refs: [...refs, { rater: KEY, seq: 33 }] })
+  bad(t, 'listing.ratings', { author: KEY, seq: 4, refs: [{ rater: KEY, seq: 0 }] })
+  bad(t, 'listing.ratings', { author: KEY, seq: 4, refs: [{ rater: KEY, seq: 1, x: 1 }] })
+  bad(t, 'listing.ratings', { author: KEY, seq: 4, refs: [{ rater: KEY }] })
 })
 
 test('username.add', (t) => {

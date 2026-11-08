@@ -149,7 +149,7 @@ export function webNodeHandle (request) {
   // The answers come the other way through a file too: an opened photo is
   // far above MAX_MESSAGE (docs/rpc.md 5.89). ref: { kind: 'dm', from, id,
   // index }, { kind: 'group', diary, item } or { kind: 'moment', author,
-  // seq } (5.103) -> { uri, mime, w, h }.
+  // seq } (5.111) -> { uri, mime, w, h }.
   const media = {
     // A voice note also carries its duration and kind (docs/rpc.md 5.56, 5.88).
     upload: ({ bytes, mime, width, height, sealed, ms, kind, onProgress } = {}) =>
@@ -160,7 +160,7 @@ export function webNodeHandle (request) {
       if (typeof to !== 'string' || !/^[0-9a-f]{64}$/.test(to)) throw new TypeError('mídia inválida')
       return sendFile(bytes, 'dm.putMedia', { to, mime, width, height, ...voiceOf({ ms, kind }) })
     },
-    // A momento's photo: a fresh blob of its own (5.103), image only.
+    // A momento's photo: a fresh blob of its own (5.111), image only.
     putMoment: ({ bytes, mime, width, height } = {}) =>
       sendFile(bytes, 'moment.putMedia', { mime, width, height }),
     read: async (ref) => {

@@ -33,8 +33,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { ENGAGEMENT_LIMIT_MAX, FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX, FOLLOW_LIMIT_MAX, LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
-import { perfMarks, useNode } from '../node'
+import { perfMarks, useNode, useSyncSignals } from '../node'
 import { useNames } from '../names'
+import { cachedRow, countsFlags, pruneRows } from '../namesCache'
 import { pickAvatar } from '../media/avatar'
 import { FEED_SYNCING_END, cursorOf, feedKey, feedSyncing, isLastFeedPage, mergeRange, olderPagePatch, planSyncRead, quietNewestPlan, rangeEnd, rangePageCap, rangeStart, rangeStep, rearmTimer, resetWith, sequenceBase, shouldReloadOnShow, syncBaseline, syncTruncated } from '../paging'
 import { freshKeys, hasFresh, syncLengths } from '../syncSignals'
@@ -189,6 +190,11 @@ export function useSocial ({ ownKey, onToast }) {
   // toggle started or ended after that read started.
   const clockRef = useRef(0)
   const touchedRef = useRef(new Map())
+  // Per ref, the start stamp of the counts read whose answer is shown.
+  const countedRef = useRef(new Map())
+  // Counts passes (one per ingest), and the newest whose index flags are shown.
+  const countsPassRef = useRef(0)
+  const flagsPassRef = useRef(0)
   // The refs whose own like/repost state was read, to read it again for
   // another acting identity.
   const shownRef = useRef(new Set())
@@ -458,15 +464,28 @@ export function useSocial ({ ownKey, onToast }) {
     // The chunks answer in any order: indexing is on when any of this
     // ingest's answers says so, never switched off by a slower one.
     let indexing = false
-    const countsDone = hosted && online && refs.length > 0
-      ? Promise.all(chunks(refs, COUNTS_MAX).map(async (chunk) => {
+    // Not awaited: the next page's ingest starts while these answers are on
+    // their way, and each answer is weighed against what landed meanwhile.
+    const epoch = epochRef.current
+    const pass = ++countsPassRef.current
+    if (hosted && online && refs.length > 0) {
+      Promise.all(chunks(refs, COUNTS_MAX).map(async (chunk) => {
         const started = ++clockRef.current
         const r = await fetchCounts(chunk)
         if (!mountedRef.current) return
+        // Flags of an older pass (a refresh reset them since) say nothing
+        // about the counts now shown.
+        const current = epoch === epochRef.current
         if (!r.ok) {
           // This chunk's numbers never arrived. indexing stays as it is; an
           // incomplete index is what CountsNote already explains.
-          change((prev) => ({ flags: { indexing: prev.flags.indexing, complete: false } }))
+          if (current) {
+            change((prev) => {
+              const next = countsFlags({ prev: prev.flags, applied: flagsPassRef.current, pass, indexing: prev.flags.indexing, complete: false })
+              flagsPassRef.current = next.applied
+              return { flags: next.flags }
+            })
+          }
           return
         }
         indexing = indexing || r.value.indexing === true
@@ -474,20 +493,29 @@ export function useSocial ({ ownKey, onToast }) {
           const fetched = {}
           for (const ref of Object.keys(r.value.counts)) {
             if (prev.pending.has(ref)) continue
+            // A read started after this one already answered for this ref:
+            // an older answer never replaces a newer number.
+            if ((countedRef.current.get(ref) || 0) > started) continue
             // A toggle that settled while this read was in flight already
             // moved the number on screen; an answer read before it would
             // undo that. With no number yet there is nothing to keep.
             const touched = Math.max(touchedRef.current.get('liked|' + ref) || 0, touchedRef.current.get('reposted|' + ref) || 0)
             if (touched > started && prev.counts.has(ref)) continue
             fetched[ref] = r.value.counts[ref]
+            countedRef.current.set(ref, started)
           }
           // Keep the index flags: indexing hides the counts, an incomplete
-          // index gets a note.
-          const flags = { indexing, complete: prev.flags.complete && r.value.complete !== false }
+          // index gets a note. Only the newest pass sets them.
+          let flags = prev.flags
+          if (current) {
+            const next = countsFlags({ prev: prev.flags, applied: flagsPassRef.current, pass, indexing, complete: r.value.complete })
+            flagsPassRef.current = next.applied
+            flags = next.flags
+          }
           return { counts: mergeCounts(prev.counts, fetched), flags }
         })
       })).catch(() => {})
-      : Promise.resolve()
+    }
     if (reset) await loadFollows()
     // Reply parents: only those of strangers are read (verified, with the
     // name and @nome); own and followed parent authors come from profile.read.
@@ -573,7 +601,6 @@ export function useSocial ({ ownKey, onToast }) {
     const second = secondPassRefs(firstRefs.map(at).filter(Boolean))
     if (second.length > 0 && mountedRef.current) await resolve(second)
     if (strangers.length > 0 && mountedRef.current) await resolve([...new Set(strangers)])
-    await countsDone
   }, [request, hosted, online, change, resolve, loadFollows, isKnown, dropNameRetries])
 
   // Stable identity (the screens' load callbacks depend on it): the queued
@@ -750,96 +777,171 @@ export function useSocial ({ ownKey, onToast }) {
 // `h`: { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete, onMessage } (each
 // optional; onOpenMention(username, { author, username }) gets the row author's verified
 // name so a tap on it needs no lookup). A repost passes the ORIGINAL as `post` and `repostedBy`.
-export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist }) {
+// With `cache` (a Map, see rowPropsCache) and `rowKey`, the same props object
+// comes back while nothing the row shows changed, so the memoized PostRow
+// skips its render; the callbacks then read the newest handlers from the
+// row's live box.
+export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist, cache, rowKey }) {
   const prof = profileOf(post.author) || null
-  const name = post.name || (prof ? prof.name : null) || null
-  const username = post.username || (prof ? prof.username : null) || null
+  const avatarView = avatarOf(post.author)
   const quoteRef = refOf(post.quote)
-  let quote = null
-  if (quoteRef !== null) {
-    const q = social.original(quoteRef)
-    const qp = profileOf(post.quote.author) || null
-    quote = {
-      author: post.quote.author,
-      name: (q && q.name) || (qp ? qp.name : null) || null,
-      username: (q && q.username) || (qp ? qp.username : null) || null,
-      avatar: pickAvatar(avatarOf(post.quote.author), q || null),
-      at: q ? q.at : null,
-      text: q ? q.text : null,
-      media: q ? q.media : null,
-      preview: q ? q.preview || null : null,
-      // A transient failure is shown as unavailable; tapping retries it.
-      missing: q === null || (q === undefined && social.transient(quoteRef)),
-      persist: social.persistOf(post.quote.author),
-      hasQuote: !!(q && q.quote),
-      onOpen: q === undefined && social.transient(quoteRef)
-        ? () => social.retry(quoteRef)
-        : typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref: quoteRef, seed: q || undefined }) : undefined,
-      onOpenMention: typeof h.onOpenMention === 'function' ? (u) => h.onOpenMention(u, { author: post.quote.author, username: quote.username }) : undefined
-    }
-  }
+  const q = quoteRef !== null ? social.original(quoteRef) : undefined
+  const qp = quoteRef !== null ? profileOf(post.quote.author) || null : null
+  const qAvatarView = quoteRef !== null ? avatarOf(post.quote.author) : undefined
+  const qTransient = quoteRef !== null && q === undefined && social.transient(quoteRef)
   const s = social.social
   const parentRef = refOf(post.replyTo)
   // The reply mark: the names cache, else the parent when it was resolved
   // (verified by the node: A Rua, Diário and the Espiadinha ask for the
   // parents of strangers' replies); '…' while either is on its way.
-  let replyToName = null
-  if (parentRef !== null) {
-    replyToName = replyMarkOf({
+  const replyToName = parentRef === null
+    ? null
+    : replyMarkOf({
       cached: profileOf(post.replyTo.author),
       parent: social.original(parentRef),
       pending: typeof social.pending === 'function' ? social.pending(parentRef) : false
     })
-  }
   const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
-  return {
-    author: post.author,
-    name,
-    username,
-    avatar: pickAvatar(avatarOf(post.author), post),
-    at: post.at,
-    text: post.text,
-    media: post.media || null,
-    preview: post.preview || null,
-    replyToName,
-    // Feed posts pass persist: true (own or followed by construction).
-    persistMedia: persist === true ? true : social.persistOf(post.author),
+  // While the index is still being built a count would be misleadingly small.
+  const counts = s.flags.indexing ? null : (s.counts.get(ref) || null)
+  const fnOf = (f) => typeof f === 'function'
+  const offers = {
+    thread: fnOf(h.onOpenThread),
+    member: fnOf(h.onOpenMember),
+    mention: fnOf(h.onOpenMention),
+    engagers: fnOf(h.onOpenEngagers),
+    reply: fnOf(h.onReply),
+    quote: fnOf(h.onQuote),
+    notify: fnOf(social.notify),
+    // Until the own key is known, no post can safely offer a report action.
+    // Only the own post itself, never the original of a repost by someone else.
+    delete: fnOf(h.onDelete) && canDelete(post, own, actingPageKey()) && repostedBy === null,
+    report: fnOf(h.onReport) && own !== null && post.author !== own,
+    // Someone else's post, not a page's: PostRow adds the hosted check.
+    message: fnOf(h.onMessage) && own !== null && String(post.author).toLowerCase() !== own && !(prof && prof.page === true)
+  }
+  const build = (live) => {
+    const name = post.name || (prof ? prof.name : null) || null
+    const username = post.username || (prof ? prof.username : null) || null
+    let quote = null
+    if (quoteRef !== null) {
+      quote = {
+        author: post.quote.author,
+        name: (q && q.name) || (qp ? qp.name : null) || null,
+        username: (q && q.username) || (qp ? qp.username : null) || null,
+        avatar: pickAvatar(qAvatarView, q || null),
+        at: q ? q.at : null,
+        text: q ? q.text : null,
+        media: q ? q.media : null,
+        preview: q ? q.preview || null : null,
+        // A transient failure is shown as unavailable; tapping retries it.
+        missing: q === null || qTransient,
+        persist: social.persistOf(post.quote.author),
+        hasQuote: !!(q && q.quote),
+        onOpen: qTransient
+          ? () => live.social.retry(quoteRef)
+          : offers.thread ? () => live.h.onOpenThread({ ref: quoteRef, seed: q || undefined }) : undefined,
+        onOpenMention: offers.mention ? (u) => live.h.onOpenMention(u, { author: post.quote.author, username: quote.username }) : undefined
+      }
+    }
+    return {
+      author: post.author,
+      name,
+      username,
+      avatar: pickAvatar(avatarView, post),
+      at: post.at,
+      text: post.text,
+      media: post.media || null,
+      preview: post.preview || null,
+      replyToName,
+      // Feed posts pass persist: true (own or followed by construction).
+      persistMedia: persist === true ? true : social.persistOf(post.author),
+      now,
+      quote,
+      repostedBy,
+      counts,
+      liked: s.eng.liked.has(ref),
+      reposted: s.eng.reposted.has(ref),
+      pending: s.pending.get(ref) || null,
+      onOpen: offers.thread ? () => live.h.onOpenThread({ ref, seed: post }) : undefined,
+      onOpenAuthor: offers.member ? () => live.h.onOpenMember(post.author, { name, username }) : undefined,
+      onOpenMention: offers.mention ? (u) => live.h.onOpenMention(u, { author: post.author, username }) : undefined,
+      onOpenParent: parentRef !== null && offers.thread ? () => live.h.onOpenThread({ ref: parentRef }) : undefined,
+      onOpenReposter: repostedBy && offers.member && repostedBy.author !== own
+        ? () => live.h.onOpenMember(repostedBy.author, { name: repostedBy.name, username: repostedBy.username })
+        : undefined,
+      onReply: offers.reply ? () => live.h.onReply({ ref, name, username, text: post.text }) : undefined,
+      onQuote: offers.quote ? () => live.h.onQuote({ ref, name, username, text: post.text }) : undefined,
+      onOpenLikes: offers.engagers ? () => live.h.onOpenEngagers({ ref, kind: 'likes' }) : undefined,
+      onOpenReposts: offers.engagers ? () => live.h.onOpenEngagers({ ref, kind: 'reposts' }) : undefined,
+      onNotice: offers.notify ? live.notice : undefined,
+      onLike: live.like,
+      onRepost: live.repost,
+      onDelete: offers.delete ? () => live.h.onDelete({ ref, seq: post.seq }) : undefined,
+      onReport: offers.report ? () => live.h.onReport({ author: post.author, name, username, seq: post.seq, text: post.text }) : undefined,
+      seq: post.seq,
+      onMessage: offers.message ? (author, options) => live.h.onMessage(author, options) : undefined
+    }
+  }
+  const latest = { h, social, ref }
+  if (!(cache instanceof Map) || typeof rowKey !== 'string') return build(withActions(latest))
+  // Everything the props are derived from, by identity. Handlers are not
+  // here (the live box carries them); only whether each is offered, since
+  // that adds or removes a button.
+  const inputs = {
+    post,
+    ref,
+    persist: persist === true ? true : social.persistOf(post.author),
     now,
-    quote,
-    repostedBy,
-    // While the index is still being built a count would be misleadingly small.
-    counts: s.flags.indexing ? null : (s.counts.get(ref) || null),
+    prof,
+    avatarView,
+    repostedBy: repostedBy ? repostedBy.author : null,
+    repostedByName: repostedBy ? repostedBy.name : null,
+    repostedByUsername: repostedBy ? repostedBy.username : null,
+    own,
+    quoteOriginal: q,
+    quoteProfile: qp,
+    quoteAvatar: qAvatarView,
+    quoteTransient: qTransient,
+    quotePersist: quoteRef !== null ? social.persistOf(post.quote.author) : null,
+    replyToName,
+    // By value: a refetch answers with new objects for the same numbers.
+    counts: counts !== null && typeof counts === 'object',
+    replies: counts ? counts.replies : null,
+    likes: counts ? counts.likes : null,
+    reposts: counts ? counts.reposts : null,
+    quotes: counts ? counts.quotes : null,
     liked: s.eng.liked.has(ref),
     reposted: s.eng.reposted.has(ref),
     pending: s.pending.get(ref) || null,
-    onOpen: typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref, seed: post }) : undefined,
-    onOpenAuthor: typeof h.onOpenMember === 'function' ? () => h.onOpenMember(post.author, { name, username }) : undefined,
-    onOpenMention: typeof h.onOpenMention === 'function' ? (u) => h.onOpenMention(u, { author: post.author, username }) : undefined,
-    onOpenParent: parentRef !== null && typeof h.onOpenThread === 'function' ? () => h.onOpenThread({ ref: parentRef }) : undefined,
-    onOpenReposter: repostedBy && typeof h.onOpenMember === 'function' && repostedBy.author !== own
-      ? () => h.onOpenMember(repostedBy.author, { name: repostedBy.name, username: repostedBy.username })
-      : undefined,
-    onReply: typeof h.onReply === 'function' ? () => h.onReply({ ref, name, username, text: post.text }) : undefined,
-    onQuote: typeof h.onQuote === 'function' ? () => h.onQuote({ ref, name, username, text: post.text }) : undefined,
-    onOpenLikes: typeof h.onOpenEngagers === 'function' ? () => h.onOpenEngagers({ ref, kind: 'likes' }) : undefined,
-    onOpenReposts: typeof h.onOpenEngagers === 'function' ? () => h.onOpenEngagers({ ref, kind: 'reposts' }) : undefined,
-    onNotice: typeof social.notify === 'function' ? social.notify : undefined,
-    onLike: () => social.toggle('like', ref),
-    onRepost: () => social.toggle('repost', ref),
-    // Until the own key is known, no post can safely offer a report action.
-    // Only the own post itself, never the original of a repost by someone else.
-    onDelete: typeof h.onDelete === 'function' && canDelete(post, own, actingPageKey()) && repostedBy === null
-      ? () => h.onDelete({ ref, seq: post.seq })
-      : undefined,
-    onReport: typeof h.onReport === 'function' && own !== null && post.author !== own
-      ? () => h.onReport({ author: post.author, name, username, seq: post.seq, text: post.text })
-      : undefined,
-    // Someone else's post, not a page's: PostRow adds the hosted check.
-    seq: post.seq,
-    onMessage: typeof h.onMessage === 'function' && own !== null && String(post.author).toLowerCase() !== own && !(prof && prof.page === true)
-      ? h.onMessage
-      : undefined
+    ...Object.fromEntries(Object.entries(offers).map(([k, v]) => ['offers.' + k, v]))
   }
+  return cachedRow(cache, rowKey, inputs, latest, (live) => build(withActions(live)))
+}
+
+// The like, repost and toast callbacks, made once per live box: they read
+// the newest `social` at call time.
+function withActions (live) {
+  if (!live.like) {
+    live.like = () => live.social.toggle('like', live.ref)
+    live.repost = () => live.social.toggle('repost', live.ref)
+    live.notice = (input) => live.social.notify(input)
+  }
+  return live
+}
+
+// A props cache for socialRowProps, owned by one list: rows that left
+// `items` are dropped after each commit. Every render hands `latest`
+// ({ h, social }) to all cached rows, also those FlatList does not render
+// again, so a tap never runs a handler of an older render.
+export function useRowPropsCache (items, keyOf, latest) {
+  const cache = useRef(null)
+  if (cache.current === null) cache.current = new Map()
+  for (const row of cache.current.values()) Object.assign(row.live, latest)
+  useEffect(() => {
+    pruneRows(cache.current, items.map(keyOf))
+  }, [items, keyOf])
+  return cache.current
 }
 
 // 'Alguns números podem estar incompletos.' once at the top of a list (only
@@ -1085,9 +1187,16 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
       await revokeDeletedMedia(request, [t.seq])
     }
   })
-  const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered: del.offered }), [names.profileOf, now, social.social, del.offered])
   const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined }
-  const renderItem = ({ item }) => {
+  // Which handlers exist adds or removes buttons: a change re-renders the rows.
+  const offered = Object.keys(handlers).filter((k) => typeof handlers[k] === 'function').join()
+  const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered, ownKey }), [names.profileOf, now, social.social, offered, ownKey])
+  const rowCache = useRowPropsCache(view.items, feedKey, { h: handlers, social })
+  // One renderItem for the list's life: FlatList re-renders the cells on
+  // extraData, and the rows whose props did not change skip their render.
+  const renderRef = useRef(null)
+  const renderItem = useCallback((info) => renderRef.current(info), [])
+  renderRef.current = ({ item }) => {
     if (item.kind === 'repost') {
       const ref = refOf(item.to)
       const repostedBy = { author: item.author, name: item.name, username: item.username }
@@ -1103,10 +1212,10 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
           />
         )
       }
-      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers })} />
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: feedKey(item) })} />
     }
     // persistOf: own or followed by the MEMBER, never the page's follows.
-    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: social.persistOf(item.author) })} />
+    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: social.persistOf(item.author), cache: rowCache, rowKey: feedKey(item) })} />
   }
 
   const { items, loadedAt, loading, error, incomplete } = view
@@ -1178,6 +1287,9 @@ export default function ARua (props) {
 function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onDeletedPost, onBoot, onMessage, onOpenMomentos, onCreateMoment }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
+  // The full hints (per-diary lengths, fresh keys): useNode() keeps only the
+  // run flags, so the rest of the app does not re-render on every download.
+  const signals = useSyncSignals()
   const names = useNames()
   const now = useNow(60000)
   // The floating publish button sits over the list's end: clear it too.
@@ -1212,8 +1324,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, meta } = feed
   const feedRef = useRef(feed)
   const listRef = useRef(null)
-  const signalsRef = useRef(node.signals)
-  signalsRef.current = node.signals
+  const signalsRef = useRef(signals)
+  signalsRef.current = signals
   const activeRef = useRef(active)
   activeRef.current = active
   const rearmRef = useRef(null)
@@ -1452,12 +1564,12 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // synced length (signals.ownLength, never acknowledged, unlike fresh.own,
   // which Diário clears) with the length it last loaded; the first length
   // seen after a load is the baseline.
-  const ownLength = node.signals && typeof node.signals.ownLength === 'number' ? node.signals.ownLength : null
+  const ownLength = signals && typeof signals.ownLength === 'number' ? signals.ownLength : null
   useEffect(() => {
     if (ownSeenRef.current === null && ownLength !== null) ownSeenRef.current = ownLength
   }, [ownLength])
   const ownNew = ownLength !== null && ownSeenRef.current !== null && ownLength > ownSeenRef.current
-  const fresh = hasFresh(node.signals, { except: ownKey }) || ownNew || feed.newer > 0
+  const fresh = hasFresh(signals, { except: ownKey }) || ownNew || feed.newer > 0
   const previous = useRef({ active: false, refresh, scrollToTop })
   useEffect(() => {
     const prev = previous.current
@@ -1481,8 +1593,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // would debounce it on every lengths change. That batching saves requests
   // and native preemptions. A short list re-reads the newest page; a full or
   // deep list re-reads the range it shows (planSyncRead).
-  const presentLengths = node.signals ? node.signals.lengths : undefined
-  const newestLengths = node.signals ? node.signals.newest : undefined
+  const presentLengths = signals ? signals.lengths : undefined
+  const newestLengths = signals ? signals.newest : undefined
   const lengths = useMemo(() => syncLengths({ lengths: presentLengths, newest: newestLengths }), [presentLengths, newestLengths])
   const loadersRef = useRef(null)
   loadersRef.current = { loadNewest, loadOlder, loadRange }
@@ -1592,11 +1704,18 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // Reply names re-render when the cache changes; relative dates on each tick.
   // Originals, counts, the own state and whether deleting is offered re-render
   // the rows too.
-  const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered: del.offered }), [names.profileOf, now, social.social, del.offered])
   const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
+  // Which handlers exist adds or removes buttons: a change re-renders the rows.
+  const offered = Object.keys(handlers).filter((k) => typeof handlers[k] === 'function').join()
+  const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered, ownKey }), [names.profileOf, now, social.social, offered, ownKey])
+  const rowCache = useRowPropsCache(items, feedKey, { h: handlers, social })
+  // One renderItem for the list's life: FlatList re-renders the cells on
+  // extraData, and the rows whose props did not change skip their render.
+  const renderRef = useRef(null)
+  const renderItem = useCallback((info) => renderRef.current(info), [])
   // A repost row is the ORIGINAL post (every action targets it), under the
   // reposter's line; its own text (null) is never shown.
-  const renderItem = ({ item }) => {
+  renderRef.current = ({ item }) => {
     if (item.kind === 'repost') {
       const ref = refOf(item.to)
       const repostedBy = { author: item.author, name: item.name, username: item.username }
@@ -1612,9 +1731,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
           />
         )
       }
-      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers })} />
+      return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: feedKey(item) })} />
     }
-    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: true })} />
+    return <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social, profileOf: names.profileOf, now, ownKey, h: handlers, persist: true, cache: rowCache, rowKey: feedKey(item) })} />
   }
 
   return (

@@ -5,7 +5,7 @@
 // <dataDir>/web-node, syncing with the installation's seeder over
 // wss://<installation>/seeder (bare-ws). It answers the same handlers as
 // the browser page's node plus the IPC-only host controls of docs/rpc.md
-// 5.50 to 5.56, 5.88, 5.89 and 5.103 (./identity-install.js,
+// 5.50 to 5.56, 5.88, 5.89 and 5.111 (./identity-install.js,
 // media.uploadFile, dm.putMedia, moment.putMedia and media.readFile below),
 // and recovery's 5.91 to 5.94
 // (./identity-install.js).

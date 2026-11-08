@@ -15,6 +15,7 @@ const audioBounds = require('./lib/audio-bounds')
 const dmBudget = require('./lib/dm-budget')
 const linkCard = require('./lib/link-card')
 const ogParse = require('./lib/og-parse')
+const feira = require('./lib/feira')
 const inviteCard = require('./lib/invite-card')
 const { tokensEqual } = require('./lib/token')
 const { createServerDispatcher } = require('./lib/server')
@@ -77,6 +78,7 @@ module.exports = {
   parseOg: ogParse.parseOg,
   ogText: ogParse.ogText,
   ogImageUrl: ogParse.ogImageUrl,
+  feira,
   ...inviteCard,
   tokensEqual,
   createServerDispatcher,

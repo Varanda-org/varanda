@@ -1,5 +1,29 @@
 import { pictures } from './pictures.js'
 import { sha256 } from '@noble/hashes/sha2.js'
+import rpc from '@varanda/rpc'
+import { ed25519 } from '@noble/curves/ed25519.js'
+
+const hex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+const unhex = (text) => Uint8Array.from(text.match(/../g), (b) => parseInt(b, 16))
+// Public demo seeds only: anyone can sign as these keys, so they never
+// belong to real accounts and must never be seeded into a real deployment.
+// Not the node's sodium: Metro keeps packages/web-member out of the app bundle.
+const fixtureKeys = [1, 2].map((n) => {
+  const seed = new Uint8Array(32).fill(n)
+  return { publicKey: hex(ed25519.getPublicKey(seed)), seed }
+})
+
+export function signVitrineConsent (listingAuthor, listingSeq, rater, offerId) {
+  const pair = fixtureKeys.find((pair) => pair.publicKey === listingAuthor)
+  if (!pair) throw new Error('identidade indisponível')
+  return hex(ed25519.sign(rpc.feira.dealPayload({ listingAuthor, listingSeq, rater, offerId }), pair.seed))
+}
+
+export function verifyVitrineConsent (listingAuthor, listingSeq, rater, offerId, consent) {
+  try {
+    return listingAuthor !== rater && /^[0-9a-f]{128}$/.test(consent) && ed25519.verify(unhex(consent), rpc.feira.dealPayload({ listingAuthor, listingSeq, rater, offerId }), unhex(listingAuthor), { zip215: false })
+  } catch { return false }
+}
 
 // The first byte varies so avatar colours (first byte mod 5) vary as on a
 // real network; the rest still encodes n, so keys stay unique.
@@ -43,7 +67,7 @@ export const members = [
   ['André Costa', 'andre_costa', 'Fotografia e memória da cidade.'],
   ['Bia Araújo', 'bia_araujo', 'Sempre com um livro por perto.'],
   ['Tomás Ferreira', 'tomas_ferreira', 'Música para compartilhar.']
-].map(([name, username, bio], i) => ({ author: key(i + 1), name, username, bio, avatar: null }))
+].map(([name, username, bio], i) => ({ author: fixtureKeys[i]?.publicKey || key(i + 1), name, username, bio, avatar: null }))
 
 export const own = members[0].author
 export const association = key(900)
@@ -226,10 +250,10 @@ const photoPosts = [
   photoPost(members[0], 16, at(5, 10, 40), 'Passeio de bicicleta no fim da tarde 🚲', [postPhoto(10, 3), postPhoto(11, 1), postPhoto(12, 0), postPhoto(13, 2)]),
   photoPost(members[0], 17, at(5, 10, 50), '', [postPhoto(14, 1), postPhoto(15, 0)]),
   photoPost(members[0], 18, at(5, 10, 55), 'Que foto bonita da praça!', [postPhoto(16, 2)], { author: members[1].author, seq: 3 }),
-  photoPost(members[1], 40, at(5, 11, 0), 'Pedal de domingo pelo parque.', [postPhoto(17, 3)]),
-  photoPost(members[1], 41, at(5, 11, 10), '', [postPhoto(18, 0), postPhoto(19, 1)]),
-  photoPost(members[1], 42, at(5, 11, 20), 'Parada para um café no caminho.', [postPhoto(20, 2)]),
-  photoPost(members[1], 43, at(5, 11, 30), '', [postPhoto(21, 3)]),
+  photoPost(members[1], 50, at(5, 11, 0), 'Pedal de domingo pelo parque.', [postPhoto(17, 3)]),
+  photoPost(members[1], 51, at(5, 11, 10), '', [postPhoto(18, 0), postPhoto(19, 1)]),
+  photoPost(members[1], 52, at(5, 11, 20), 'Parada para um café no caminho.', [postPhoto(20, 2)]),
+  photoPost(members[1], 53, at(5, 11, 30), '', [postPhoto(21, 3)]),
   photoPost(members[4], 40, at(5, 12, 0), 'Meu canto de leitura hoje.', [postPhoto(22, 1)]),
   photoPost(members[4], 41, at(5, 12, 10), '', [postPhoto(23, 0)]),
   photoPost(members[4], 42, at(5, 12, 20), 'Livros novos para o clube.', [postPhoto(24, 2), postPhoto(25, 3)]),
@@ -364,7 +388,53 @@ export const testimonialRecords = [
   ...showRows.map(([author, seq, i, when]) => ({ author, seq, record: { type: 'testimonial-show', from: sealed[i].author, seq: sealed[i].seq, text: sealed[i].text, nonce: sealed[i].nonce, at: when } }))
 ]
 
-// Momentos (docs/rpc.md 5.103). A photo is one blob item, like a chat photo,
+const place = { uf: 'SP', city: 'São Paulo', bairro: 'Vila Mariana' }
+const listing = (author, seq, kind, title, price, unit, cat, media) => ({
+  author,
+  seq,
+  record: { type: 'listing', kind, title, text: 'Combine os detalhes pela conversa.', price, unit, cat, place, at: at(4, 14, seq - 40), ...(media ? { media } : {}) }
+})
+
+export const listings = [
+  listing(own, 40, 'produto', 'Bicicleta azul', 25000, null, 'esporte', [publicPhoto(10, 3), publicPhoto(11, 0)]),
+  listing(own, 41, 'procura', 'Procuro estante pequena', 18000, null, 'moveis'),
+  listing(own, 42, 'produto', 'Livros de receitas', 3500, null, 'casa'),
+  listing(members[1].author, 40, 'servico', 'Aulas de bicicleta', 6000, 'hora', 'aulas'),
+  listing(members[1].author, 41, 'produto', 'Capacete de ciclismo', 8000, null, 'esporte'),
+  listing(pages[0].author, 40, 'produto', 'Livros da biblioteca', 1500, null, 'outros'),
+  { author: own, seq: 44, record: { type: 'listing-edit', seq: 40, title: 'Bicicleta azul revisada', text: 'Revisada e pronta para passear.', price: 25000, unit: null, cat: 'esporte', place, media: [publicPhoto(10, 3), publicPhoto(11, 0)], at: at(5, 12) } },
+  { author: own, seq: 45, record: { type: 'listing-status', seq: 42, status: 'vendido', at: at(5, 12, 10) } },
+  { author: members[1].author, seq: 42, record: { type: 'listing-status', seq: 41, status: 'reservado', at: at(5, 12, 20) } }
+]
+
+const consent = signVitrineConsent(own, 40, members[1].author, id(600))
+export const rates = [
+  { author: members[1].author, seq: 46, record: { type: 'listing-rate', to: { author: own, seq: 40 }, offer: id(600), consent, stars: 5, text: 'Combinamos tudo pela conversa.', at: at(5, 14) } },
+  { author: members[2].author, seq: 46, record: { type: 'listing-rate', to: { author: own, seq: 40 }, offer: id(610), consent: '0'.repeat(128), stars: 1, text: 'Consentimento de demonstração inválido.', at: at(5, 14, 5) } }
+]
+
+const offerUrl = (author, seq, cents) => `https://vitrine.invalid/f/${author}/${seq}#oferta=${cents}`
+const offerMessage = (n, mine, url, title, replyTo = null, image = null) => ({
+  id: id(n),
+  from: mine ? own : members[1].author,
+  mine,
+  text: title,
+  replyTo,
+  at: at(5, 14, n - 600),
+  media: null,
+  card: { url, host: rpc.cardUrlHost(url), title, desc: '', image }
+})
+export const offerThread = [
+  offerMessage(600, false, offerUrl(own, 40, 24000), 'Proposta', null, dmPhoto(4, 3)),
+  offerMessage(601, true, offerUrl(own, 40, 24000) + '&aceite=' + consent, 'Aceite', id(600)),
+  offerMessage(602, false, offerUrl(own, 40, 20000), 'Proposta'),
+  offerMessage(603, true, offerUrl(own, 40, 20000) + '&resposta=recusada', 'Recusa', id(602)),
+  offerMessage(604, true, offerUrl(members[1].author, 40, 6000), 'Proposta'),
+  offerMessage(605, false, offerUrl(members[1].author, 40, 6000) + '&aceite=' + signVitrineConsent(members[1].author, 40, own, id(604)), 'Aceite', id(604))
+]
+conversations[0].messages.push(...offerThread)
+
+// Momentos (docs/rpc.md 5.111). A photo is one blob item, like a chat photo,
 // that names its drawing through the sha256 (./media.js reads it back). The
 // dates follow the demo clock `now`: the followed diaries and Lia have
 // moments inside the 24 h, and Lia's two older ones are past, so the Diário
@@ -377,11 +447,11 @@ const momentRows = [
   [members[1].author, 71, 'Parada para um café no meio do caminho.', at(5, 14, 10), 2],
   [members[2].author, 70, 'As mudas de manjericão estão prontas para troca 🌱', at(5, 11, 30), 1],
   [members[3].author, 70, 'Luz de fim de tarde na praça.', at(4, 18, 45), 0],
-  [own, 41, 'Café na varanda antes do clube de leitura ☕', at(5, 12, 0), 0],
-  [own, 40, 'Mutirão da horta, primeira hora.', at(3, 9, 30), 3],
-  [own, 39, 'Livros novos na biblioteca da praça.', at(2, 16, 0), 2]
+  [own, 48, 'Café na varanda antes do clube de leitura ☕', at(5, 12, 0), 0],
+  [own, 47, 'Mutirão da horta, primeira hora.', at(3, 9, 30), 3],
+  [own, 46, 'Livros novos na biblioteca da praça.', at(2, 16, 0), 2]
 ]
 
 export const momentRecords = momentRows.map(([author, seq, text, when, p], i) => ({ author, seq, record: { type: 'moment', text, at: when, media: momentPhoto(i, p) } }))
 
-export const fixtures = { now, own, association, members, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords], sealed }
+export const fixtures = { now, own, association, members, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords], sealed, listings, rates }

@@ -81,7 +81,7 @@ test('the main manifest drops the overlay and write storage permissions', (t) =>
 
 // A wider claim would pull /@, /convite/ or the /account/ passkey pages out of
 // the browser for everyone who has the app installed.
-test('the main manifest claims only /c/ and /g/ of the production host as App Links', (t) => {
+test('the main manifest claims only /c/, /g/ and /anuncio/ of the production host as App Links', (t) => {
   const manifest = read('android/app/src/main/AndroidManifest.xml')
   t.is(manifest.split('android:autoVerify="true"').length - 1, 1, 'exactly one autoVerify')
   const filters = manifest.match(/<intent-filter[^>]*>[\s\S]*?<\/intent-filter>/g) || []
@@ -94,14 +94,16 @@ test('the main manifest claims only /c/ and /g/ of the production host as App Li
   const data = appLinks.match(/<data [^>]*\/>/g) || []
   t.alike(data, [
     '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/c/"/>',
-    '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/g/"/>'
+    '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/g/"/>',
+    '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/anuncio/"/>'
   ])
   const hosts = manifest.match(/android:host="[^"]*"/g) || []
   t.ok(hosts.length > 0 && hosts.every((h) => h === 'android:host="bora.varanda.app"'), 'only the production host')
   t.absent(manifest.includes('android:pathPattern'))
   t.absent(manifest.includes('android:path='))
   t.absent(manifest.includes('android:pathAdvancedPattern'))
-  t.alike(manifest.match(/android:pathPrefix="[^"]*"/g), ['android:pathPrefix="/c/"', 'android:pathPrefix="/g/"'])
+  t.alike(manifest.match(/android:pathPrefix="[^"]*"/g), ['android:pathPrefix="/c/"', 'android:pathPrefix="/g/"', 'android:pathPrefix="/anuncio/"'])
+  t.absent(manifest.includes('pathPrefix="/f/"'), 'the public listing page stays in the browser')
   const scheme = filters.filter((f) => f.includes('android:scheme="varanda"'))
   t.is(scheme.length, 1, 'the varanda scheme filter is kept')
   t.absent((scheme[0] || '').includes('autoVerify'))

@@ -740,7 +740,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return entry
   }
 
-  // A momento's photo (docs/rpc.md 5.103). bytes: the caller's copy, wiped
+  // A momento's photo (docs/rpc.md 5.111). bytes: the caller's copy, wiped
   // here. Every call seals a FRESH blob, never the putMedia reuse map: the
   // key and nonce go public in the moment record, so a blob shared with a
   // DM (or another moment) would open that one for every reader of the
