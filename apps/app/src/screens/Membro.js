@@ -211,7 +211,7 @@ const INITIAL_POSTS = {
   refreshing: false
 }
 
-export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onToast }) {
+export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onToast, onTabChange }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -820,6 +820,12 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const tabs = node.hosted === true ? TABS_HOSTED : TABS
   // A tab the node no longer offers (not hosted) falls back to Publicações.
   const shownTab = tabs.some((t) => t.id === tab) ? tab : 'posts'
+  // The tab on screen, not the raw state: a tab the node no longer offers shows
+  // Publicações, and the publish button follows what is shown.
+  useEffect(() => { if (onTabChange) onTabChange(shownTab) }, [shownTab])
+  // A profile left on Depoimentos must not hide the button for a later visit
+  // to the same entry before it reports again.
+  useEffect(() => () => { if (onTabChange) onTabChange(null) }, [])
   const depo = shownTab === 'depoimentos' && full
   const testimonialTab = useTestimonialTab({
     data: testimonials,

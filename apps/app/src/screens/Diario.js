@@ -155,7 +155,7 @@ function postOf (author, seq, record) {
   }
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos }) {
+export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onTabChange }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -209,6 +209,9 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const tabs = node.hosted === true ? TABS_HOSTED : TABS
   // A tab the node no longer offers (not hosted) falls back to Publicações.
   const shownTab = tabs.some((t) => t.id === tab) ? tab : 'posts'
+  // The tab on screen, not the raw state: a tab the node no longer offers shows
+  // Publicações, and the publish button follows what is shown.
+  useEffect(() => { if (onTabChange) onTabChange(shownTab) }, [shownTab])
   const depo = shownTab === 'depoimentos'
   const testimonialTab = useTestimonialTab({
     data: testimonials,
