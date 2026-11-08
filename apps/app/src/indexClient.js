@@ -70,6 +70,12 @@ if (VITRINE) {
 // target, seq in the author's diary); the node still verifies each one
 // (diary.peek). Never cached: a follow can be undone at any time.
 //
+// Testimonials (public pointers only, never text): /index/testimonials/<owner>.
+// A `shown` row names the owner's show block (seq) and the writer's block
+// (from, wseq); a `pending` row a writer block not shown yet. The node still
+// fetches and verifies every block (diary.peek). Never cached: a writer can
+// revoke and the owner can remove at any time.
+//
 // Account search, GET /index/search/<segment>: the segment arrives already
 // folded by the caller (1..4 tokens [a-z0-9]{1,20} joined by '-', at least 2
 // characters in all); it is checked here, never folded, lowercased or
@@ -90,6 +96,7 @@ export const GROUP_WRITERS_MAX = 64
 export const GROUPS_MAX = 64
 export const GROUP_SEARCH_MAX = 20
 export const COMMUNITY_GROUPS_MAX = 32
+export const TESTIMONIALS_MAX = 64
 export const GROUP_NAME_MAX = 80
 export const MAX_IN_FLIGHT = 2
 export const WINDOW_MS = 10000
@@ -132,6 +139,9 @@ const FOLLOW_COUNTS_KEYS = ['complete', 'indexing', 'seguidores', 'seguindo']
 const FOLLOWS_KEYS = ['author', 'authors', 'complete', 'indexing', 'items', 'kind', 'next', 'total']
 const FOLLOW_ITEM_KEYS = ['at', 'key', 'seq']
 const FOLLOW_CURSOR_KEYS = ['atMs', 'key']
+const TESTIMONIALS_KEYS = ['complete', 'indexing', 'pending', 'shown']
+const SHOWN_KEYS = ['from', 'seq', 'wseq']
+const PENDING_KEYS = ['from', 'seq']
 
 // --- strict checks (response values are never lowercased or coerced) ---
 
@@ -275,6 +285,11 @@ export function engagersUrl (kind, ref, cursor = null) {
 export function followCountsUrl (author) {
   const a = inputAuthor(author)
   return a === null ? null : resolveUrl('/index/follows/' + a)
+}
+
+export function testimonialsUrl (owner) {
+  const o = inputAuthor(owner)
+  return o === null ? null : resolveUrl('/index/testimonials/' + o)
 }
 
 // An invalid cursor is null, never dropped: dropping it would silently
@@ -790,6 +805,37 @@ export function validFollowCounts (body) {
   return { seguindo: body.seguindo, seguidores: body.seguidores, indexing: body.indexing, complete: body.complete }
 }
 
+// Pointers only: rows with exact keys, lowercase hex64 writers other than
+// the owner, positive seqs, <= 64 per list, no repeated show seq or writer
+// block, and no writer block both shown and pending.
+export function validTestimonials (body, owner = null) {
+  if (!hasExactKeys(body, TESTIMONIALS_KEYS) || !isFlags(body)) return null
+  if (!Array.isArray(body.shown) || body.shown.length > TESTIMONIALS_MAX) return null
+  if (!Array.isArray(body.pending) || body.pending.length > TESTIMONIALS_MAX) return null
+  const seqs = new Set()
+  const blocks = new Set()
+  const shown = []
+  for (const row of body.shown) {
+    if (!hasExactKeys(row, SHOWN_KEYS) || !isHex64(row.from) || row.from === owner) return null
+    if (!isSeq(row.seq) || !isSeq(row.wseq)) return null
+    const block = row.from + ':' + row.wseq
+    if (seqs.has(row.seq) || blocks.has(block)) return null
+    seqs.add(row.seq)
+    blocks.add(block)
+    shown.push({ seq: row.seq, from: row.from, wseq: row.wseq })
+  }
+  const pending = []
+  for (const row of body.pending) {
+    if (!hasExactKeys(row, PENDING_KEYS) || !isHex64(row.from) || row.from === owner) return null
+    if (!isSeq(row.seq)) return null
+    const block = row.from + ':' + row.seq
+    if (blocks.has(block)) return null
+    blocks.add(block)
+    pending.push({ from: row.from, seq: row.seq })
+  }
+  return { shown, pending, indexing: body.indexing, complete: body.complete }
+}
+
 // The follow index order: the time clamped at 0, newest first, then key.
 function followT (at) {
   const t = Date.parse(at)
@@ -1074,6 +1120,12 @@ export function fetchEngagers (kind, ref, cursor = null, deps = {}) {
 
 export function fetchFollowCounts (author, deps = {}) {
   return run(followCountsUrl(author), validFollowCounts, deps)
+}
+
+export function fetchTestimonials (owner, deps = {}) {
+  const url = testimonialsUrl(owner)
+  const o = url === null ? null : inputAuthor(owner)
+  return run(url, (body) => validTestimonials(body, o), deps)
 }
 
 export function fetchFollows (author, kind, cursor = null, deps = {}) {

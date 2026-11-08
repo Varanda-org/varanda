@@ -2677,3 +2677,92 @@ test('startSeedWs /media with the real Seeder: a deleted range and every overlap
   t.alike(live.body, b4a.alloc(MEDIA_BLOCK_BYTES, 3))
   t.is((await mediaRequest(server.port, url(3, 1), { method: 'HEAD' })).status, 200)
 })
+
+// /index/testimonials/<owner>: pointers only, rebuilt field by field.
+function testimonialsSeeder () {
+  const stub = indexSeeder()
+  stub.indexTestimonials = async (owner) => {
+    stub.calls.push(['indexTestimonials', owner])
+    if (owner !== A) return null
+    return {
+      shown: [{ seq: 3, from: B, wseq: 2, text: 'segredo', nonce: 'e'.repeat(64) }],
+      pending: [{ from: B, seq: 4, box: 'AAAA' }],
+      indexing: false,
+      complete: true,
+      extra: 'x'
+    }
+  }
+  return stub
+}
+
+test('startSeedWs /index/testimonials: pointers only, HEAD the headers only, unknown and malformed are 404, Host 421 and 405', async (t) => {
+  t.timeout(20000)
+  const { INDEX_TESTIMONIALS_RE } = require('../lib/seed-ws')
+  t.ok(INDEX_TESTIMONIALS_RE.test('/index/testimonials/' + A))
+  const seeder = testimonialsSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/testimonials/' + A
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.alike(JSON.parse(got.body.toString()), { shown: [{ seq: 3, from: B, wseq: 2 }], pending: [{ from: B, seq: 4 }], indexing: false, complete: true }, 'no text, nonce, box or extra field leaves')
+  t.alike(seeder.calls[0], ['indexTestimonials', A])
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+  const unknown = await mediaRequest(server.port, '/index/testimonials/' + 'f'.repeat(64))
+  t.is(unknown.status, 404)
+  t.is(unknown.body.toString(), 'não encontrado\n')
+  seeder.calls.length = 0
+  const bad = ['/index/testimonials', '/index/testimonials/', '/index/testimonials/' + 'a'.repeat(63), '/index/testimonials/' + 'A'.repeat(64),
+    '/index/testimonials/' + A + '/', '/index/testimonials/' + A + '/1', '/index/testimonials/' + A + '?x=1', '/index/testimonials/' + 'a'.repeat(65)]
+  for (const u of bad) {
+    const r = await mediaRequest(server.port, u)
+    t.is(r.status, 404, u + ' -> 404')
+    t.is(r.body.toString(), 'não encontrado\n')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    const r = await mediaRequest(server.port, url, { method })
+    t.is(r.status, 405, method + ' -> 405')
+    t.is(r.headers.allow, 'GET, HEAD')
+  }
+  t.is(seeder.calls.length, 0)
+})
+
+test('startSeedWs /index/testimonials: a malformed row, over 64 rows, a throw or a missing method are 404; the worst case fits', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const big = Number.MAX_SAFE_INTEGER
+  const shown = Array.from({ length: 64 }, (_, i) => ({ seq: big, from: hex(i), wseq: big }))
+  const pending = Array.from({ length: 64 }, (_, i) => ({ from: hex(i), seq: big }))
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/testimonials/' + A
+  t.is((await mediaRequest(server.port, url)).status, 404, 'a seeder without the method')
+  seeder.indexTestimonials = async () => ({ shown, pending, indexing: true, complete: false })
+  const worst = await mediaRequest(server.port, url)
+  t.is(worst.status, 200)
+  t.ok(worst.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + worst.body.byteLength + ' bytes')
+  t.alike(JSON.parse(worst.body.toString()), { shown, pending, indexing: true, complete: false })
+  const answers = [
+    { shown: [...shown, shown[0]], pending: [], indexing: false, complete: true },
+    { shown: [], pending: [...pending, pending[0]], indexing: false, complete: true },
+    { shown: [{ seq: 0, from: A, wseq: 1 }], pending: [], indexing: false, complete: true },
+    { shown: [{ seq: 1, from: 'A'.repeat(64), wseq: 1 }], pending: [], indexing: false, complete: true },
+    { shown: [], pending: [{ from: A, seq: 1.5 }], indexing: false, complete: true },
+    { shown: null, pending: [], indexing: false, complete: true }
+  ]
+  for (const answer of answers) {
+    seeder.indexTestimonials = async () => answer
+    t.is((await mediaRequest(server.port, url)).status, 404)
+  }
+  seeder.indexTestimonials = async () => { throw new Error('segredo') }
+  const thrown = await mediaRequest(server.port, url)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('segredo'))
+})

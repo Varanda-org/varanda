@@ -48,7 +48,9 @@ test('every index route and cursor returns a deterministic validated fixture bod
     [c.groupsUrl(f.own), c.validGroups],
     [c.communityUrl(community), c.validCommunity],
     [c.communityGroupsUrl(community, group.group), (b) => c.validCommunityGroups(b, group.group)],
-    [c.groupSearchUrl('bicicleta'), c.validGroupSearch]
+    [c.groupSearchUrl('bicicleta'), c.validGroupSearch],
+    [c.testimonialsUrl(f.own), (b) => c.validTestimonials(b, f.own)],
+    [c.testimonialsUrl(f.members[1].author), (b) => c.validTestimonials(b, f.members[1].author)]
   ]
   for (const [url, validate] of cases) {
     t.ok(url, 'builder accepts the fixture input')
@@ -314,7 +316,8 @@ test('Vitrine fetchers bypass HTTP and the scheduler, and map unknown fixtures t
     () => c.fetchGroups(f.own, deps),
     () => c.fetchCommunity(f.communities[0].community, deps),
     () => c.fetchCommunityGroups(f.communities[0].community, f.groups[0].group, deps),
-    () => c.fetchGroupSearch('geral', deps)
+    () => c.fetchGroupSearch('geral', deps),
+    () => c.fetchTestimonials(f.own, deps)
   ]
   for (let pass = 0; pass < 2; pass++) {
     for (const call of calls) t.is((await call()).ok, true, 'validated result without HTTP or timers')
@@ -329,6 +332,30 @@ test('Vitrine fetchers bypass HTTP and the scheduler, and map unknown fixtures t
   t.is(fetched, 0)
 })
 
+test('the testimonials route answers pointers from the live Vitrine state', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond, request } = await load()
+  const [joao, cecilia, bia] = [f.members[1].author, f.members[2].author, f.members[4].author]
+  const body = () => respond(c.testimonialsUrl(f.own))
+  t.alike(body(), { shown: [{ seq: 37, from: cecilia, wseq: 60 }, { seq: 36, from: joao, wseq: 60 }], pending: [{ from: bia, seq: 60 }], indexing: false, complete: true })
+  t.ok(c.validTestimonials(body(), f.own))
+  t.alike(respond(c.testimonialsUrl(joao)).shown, [{ seq: 61, from: f.own, wseq: 38 }])
+  t.alike(respond(c.testimonialsUrl(f.members[3].author)), { shown: [], pending: [], indexing: false, complete: true })
+  t.exception(() => respond(c.testimonialsUrl('f'.repeat(64))), /not-found/)
+  t.exception(() => respond('/index/testimonials/' + f.own + '/extra'), /not-found/)
+
+  const shown = await request('testimonial.show', { from: bia, seq: 60 })
+  t.alike(body().shown[0], { seq: shown.seq, from: bia, wseq: 60 })
+  t.alike(body().pending, [])
+  t.ok(c.validTestimonials(body(), f.own), 'never one block both shown and pending')
+  await request('testimonial.delete', { to: shown.ref })
+  t.absent(body().shown.some((row) => row.from === bia), 'a removed show leaves the profile')
+  t.alike(body().pending, [], 'and never returns to pending')
+  await request('testimonial.delete', { to: f.own + ':38' })
+  t.alike(respond(c.testimonialsUrl(joao)).shown, [], 'a revoked writer block hides the show')
+  const written = await request('testimonial.write', { to: cecilia, text: 'Obrigada pelas mudas!' })
+  t.alike(respond(c.testimonialsUrl(cecilia)).pending, [{ from: f.own, seq: written.seq }])
+})
+
 test('release bundles and development without the opt-in retain HTTP behavior', async (t) => {
   let fetched = 0
   for (const [dev, flag] of [[false, '1'], [true, '0'], [undefined, '1']]) {
@@ -337,4 +364,18 @@ test('release bundles and development without the opt-in retain HTTP behavior', 
     t.alike(result, { ok: false, reason: 'not-found' })
   }
   t.is(fetched, 3)
+})
+
+test('the testimonials route reads the Vitrine instance used last', async (t) => {
+  const { fixtures } = await import('../src/vitrine/fixtures.js')
+  const { createVitrineRequest } = await import('../src/vitrine/request.js')
+  const { vitrineIndex } = await import('../src/vitrine/indexResponder.js')
+  const a = createVitrineRequest(fixtures)
+  createVitrineRequest(fixtures)
+  const before = vitrineIndex('/index/testimonials/' + fixtures.own)
+  t.ok(before.pending.length > 0, 'a pending depoimento in the fixtures')
+  const { from, seq } = before.pending[0]
+  await a('testimonial.show', { from, seq })
+  const after = vitrineIndex('/index/testimonials/' + fixtures.own)
+  t.absent(after.pending.some((p) => p.from === from && p.seq === seq), 'the instance that showed it is the one the route reads')
 })

@@ -11,14 +11,16 @@
 // 'paginas' (the member's pages) and 'novapagina' (create one) take no key;
 // 'paginaajustes' (one page's settings) is keyed by the page's hex64 key.
 // 'comunidades' (browse and create communities, stacked over the Conversas
-// inbox) and 'pedidos' (the message request folder) take no key either. The
+// inbox) and 'pedidos' (the message request folder) take no key either.
+// 'depoimentos' (a profile's depoimentos; for the own key also the ones
+// waiting for approval and the sent ones) is keyed by the owner's hex64. The
 // stack is an immutable (frozen) array, oldest first. Invalid entries are
 // refused by returning the stack unchanged (never throws); pushing the
 // screen that is already on top is a no-op, whatever its params; past
 // MAX_DEPTH the oldest entry is dropped.
 
 export const MAX_DEPTH = 20
-export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos'])
+export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'depoimentos'])
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
@@ -42,7 +44,7 @@ export function validEntry (entry) {
   if (!entry || typeof entry !== 'object') return false
   if (entry.screen === 'conversa') return isRef(entry.key)
   if (entry.screen === 'membro' || entry.screen === 'mensagem' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
-  if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes') return isAuthorKey(entry.key)
+  if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes' || entry.screen === 'depoimentos') return isAuthorKey(entry.key)
   if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'pedidos') return entry.key === undefined || entry.key === null || entry.key === ''
   if (entry.screen === 'curtidas') {
     const params = entry.params

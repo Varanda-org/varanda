@@ -24,10 +24,13 @@ export function tabsFor (mode) {
 // button is for posts, so it stays hidden on all of them.
 const CONVERSAS_SCREENS = new Set(['mensagem', 'grupo', 'comunidade', 'comunidade-info', 'comunidades', 'pedidos'])
 
+// Screens with nothing to publish on: the Depoimentos management screen.
+const NO_POST_SCREENS = new Set(['depoimentos'])
+
 // The floating "publicar" button belongs to posts: it is hidden on the
-// Conversas tab and on its screens. `screen` is the top of the stack, or
-// null when no screen is open above the tabs.
+// Conversas tab, on its screens and on NO_POST_SCREENS. `screen` is the top
+// of the stack, or null when no screen is open above the tabs.
 export function showPostButton ({ tab, screen }) {
-  if (typeof screen === 'string') return !CONVERSAS_SCREENS.has(screen)
+  if (typeof screen === 'string') return !CONVERSAS_SCREENS.has(screen) && !NO_POST_SCREENS.has(screen)
   return tab !== 'comunidades'
 }

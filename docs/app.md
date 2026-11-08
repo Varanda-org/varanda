@@ -534,6 +534,21 @@ O perfil (o seu Diário e o de outra pessoa) tem as abas Publicações e Mural. 
 - Uma foto com várias imagens tem um selo no canto. As células que completam a última fileira ficam vazias.
 - A aba Respostas continua fora desta etapa. Uma resposta do Diário é o campo `record.replyTo` de um registro dentro do `log.read` paginado, e não há leitura só de respostas.
 
+### Depoimentos
+
+Um depoimento é um texto curto que uma pessoa escreve sobre outra, para aparecer no perfil de quem recebe. Só existe no nó hospedado.
+
+- **Quem escreve:** qualquer membro, para outra pessoa que já recebe mensagens (tem chave de mensagens). Ninguém escreve para si. O texto tem até 400 caracteres.
+- **Selado até a pessoa mostrar:** o texto vai selado para quem recebe. Os outros sabem só que houve um depoimento de uma pessoa para a outra, nunca o texto, até que quem recebeu escolha mostrar.
+- **Aba Depoimentos:** a terceira aba do perfil, ao lado de Publicações e Mural, no seu Diário e no perfil de outra pessoa. Só aparece no nó hospedado; fora dele o perfil fica com as duas abas. A aba mostra todos os depoimentos à mostra, o mais novo primeiro. Sem nenhum, ela diz "Nenhum depoimento ainda"; no perfil de outra pessoa, quando você pode escrever um, também diz "Toque em ⋯ no perfil para escrever um depoimento.". A aba escolhida continua a mesma depois de abrir uma publicação e voltar.
+- **Depoimentos para aprovar:** no seu Diário, a aba Depoimentos começa com a linha fixa "Depoimentos para aprovar (N)", quando há algum, e com a linha "Enviados". As duas abrem a tela Depoimentos. Lá, **Mostrar no perfil** publica o texto no seu diário e **Agora não** esconde a linha só neste aparelho e não grava nada.
+- **Remover do perfil:** tira do seu perfil o depoimento daquela pessoa. Ele não volta para a lista de aprovar; só um depoimento novo da mesma pessoa volta.
+- **Retirar depoimento:** quem escreveu pode retirar o próprio depoimento a qualquer momento, pelo botão de mais da linha ou do perfil. Ele some do perfil de quem recebeu, mesmo que já estivesse à mostra.
+- **Folhas:** o título é curto e fixo (Escrever depoimento, Retirar depoimento?, Remover do perfil?), para não ser cortado no celular. O nome da pessoa fica no corpo: "Para <nome>" no campo de escrever e no texto das confirmações.
+- **Denunciar a conta:** cada depoimento à mostra tem Denunciar a conta, na folha de mais da linha.
+- **Tela Depoimentos:** as linhas "Depoimentos para aprovar" e "Enviados" da aba, no seu Diário, abrem a tela com Para aprovar, No seu perfil e Enviados, os que você escreveu e ainda não retirou.
+- Sem curtidas, sem contagem e sem respostas. O texto vindo de outra pessoa passa por `displayText` antes da tela.
+
 ## Fora do piloto
 
 - **Salas de áudio ao vivo (Comunidades):** pedem transmissão em tempo real entre aparelhos. Os grupos de texto estão na seção Comunidades, no nó hospedado (site e app instalado).

@@ -55,6 +55,11 @@ const {
   likeRecord,
   repostRecord,
   deleteRecord,
+  testimonialRecord,
+  testimonialShowRecord,
+  MAX_TESTIMONIAL,
+  charLength,
+  validTestimonialText,
   validAvatar,
   validateRecord,
   validRecordCopy,
@@ -77,6 +82,7 @@ const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/enga
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
+const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS } = require('@varanda/core/lib/group-media')
@@ -418,9 +424,14 @@ async function postQuote (ctx, { to, text, media, preview }) {
 // ---- delete ----
 
 const NOT_DELETABLE = 'não é possível apagar este registro'
+// Records store.appendRecords takes in one atomic append.
+const APPEND_MAX = 8
 const DELETE_KINDS = {
   post: { other: 'profile', wrong: 'o registro não é uma publicação' },
-  profile: { other: 'post', wrong: 'o registro não é um perfil' }
+  profile: { other: 'post', wrong: 'o registro não é um perfil' },
+  // testimonialDelete picks the kind from the target, so `other` never applies.
+  testimonial: { other: null, wrong: null },
+  'testimonial-show': { other: null, wrong: null }
 }
 
 // The compat pair profileRecords writes: a plain profile immediately
@@ -535,6 +546,9 @@ async function recordDelete (ctx, kind, { to }) {
     if (target.type === rules.other) throw new UsageError(rules.wrong)
     if (target.type !== kind) throw new UsageError(NOT_DELETABLE)
     let targets = [to.seq]
+    // Every live show of that writer goes: shownRows takes the newest live
+    // one, so removing only this one would bring an older one back.
+    if (kind === 'testimonial-show') targets = [...new Set([to.seq, ...liveShowSeqs(raw, target.from)])].sort((a, b) => a - b)
     if (kind === 'profile') {
       if (target.avatar === undefined && compatPair(target, recordAt(raw, to.seq + 1))) targets = [to.seq, to.seq + 1]
       else if (target.avatar !== undefined && compatPair(recordAt(raw, to.seq - 1), target)) targets = [to.seq - 1, to.seq]
@@ -555,9 +569,32 @@ async function recordDelete (ctx, kind, { to }) {
         .map((d) => ({ core: d.core, start: d.start, blocks: d.blocks }))
       return buildRecord(() => deleteRecord(media.length > 0 ? { seq, at, media } : { seq, at }))
     })
-    const seq = records.length === 1
-      ? await appendOwn(ctx, diary, records[0])
-      : await store.appendRecords(diary, records, ctx.limits)
+    let seq
+    if (records.length <= APPEND_MAX) {
+      seq = records.length === 1
+        ? await appendOwn(ctx, diary, records[0])
+        : await store.appendRecords(diary, records, ctx.limits)
+    } else {
+      // Only a writer's many shows get here (a post or a profile pair is at
+      // most 2). One append takes at most APPEND_MAX records, so the
+      // tombstones go in chunks: every other show of that writer first,
+      // newest first, and the targeted show's in the last chunk. A chunk
+      // that fails throws like any failed write and the client never
+      // resends by itself; while any show of that writer remains, the
+      // target is still live (never cleared by sync), so a repeat of the
+      // same ref reads its `from` again and finishes the rest.
+      const order = records.map((r, i) => i).sort((a, b) => {
+        if (pending[a] === to.seq) return 1
+        if (pending[b] === to.seq) return -1
+        return pending[b] - pending[a]
+      })
+      for (let i = 0; i < order.length; i += APPEND_MAX) {
+        const chunk = order.slice(i, i + APPEND_MAX).map((j) => records[j])
+        seq = chunk.length === 1
+          ? await appendOwn(ctx, diary, chunk[0])
+          : await store.appendRecords(diary, chunk, ctx.limits)
+      }
+    }
     await clearAfterDelete(ctx, diary, ownHex, pending, records)
     return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: targets }
   })
@@ -621,6 +658,146 @@ async function engagementRead (ctx, { refs }) {
       reposted: refs.filter((ref) => state.reposted.has(ref.toLowerCase()))
     }
   })
+}
+
+// ---- depoimentos (docs/protocol.md section 2, docs/rpc.md 5.100) ----
+
+const TESTIMONIAL_SELF = 'não pode escrever um depoimento para si'
+const TESTIMONIAL_NO_BOX = 'a pessoa ainda não recebe mensagens'
+const TESTIMONIAL_TOO_LONG = 'texto muito longo'
+const TESTIMONIAL_NOT_FOUND = 'depoimento não encontrado'
+
+// The seqs of the live (not tombstoned) testimonial-show blocks of `from`
+// in the own diary's raw entries, ascending.
+function liveShowSeqs (raw, from) {
+  const deleted = deletedSeqs(raw)
+  const out = []
+  for (const { seq, record } of raw) {
+    if (deleted.has(seq)) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null && copy.type === 'testimonial-show' && copy.from === from) out.push(seq)
+  }
+  return out
+}
+
+// The live shows of the own diary -> Map 'from:seq' (the writer block) ->
+// the show's seq (the newest one when several name the same block).
+function liveShows (raw) {
+  const deleted = deletedSeqs(raw)
+  const out = new Map()
+  for (const { seq, record } of raw) {
+    if (deleted.has(seq)) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null && copy.type === 'testimonial-show') out.set(copy.from + ':' + copy.seq, seq)
+  }
+  return out
+}
+
+// recipient: { box, gen } of the recipient's newest dm-key (the session's DM
+// lookup), box null when there is none. -> { seq, ref }.
+async function testimonialWrite (ctx, { to, text, recipient }) {
+  const key = String(to).toLowerCase()
+  if (typeof text !== 'string' || charLength(text) > MAX_TESTIMONIAL) throw new UsageError(TESTIMONIAL_TOO_LONG)
+  const self = (ownHex) => { if (key === ownHex) throw new UsageError(TESTIMONIAL_SELF) }
+  // Self first: the own key needs no lookup and must not read as "no box".
+  await withIdentity(ctx, async ({ ownHex }) => self(ownHex))
+  if (recipient === null || typeof recipient !== 'object' || recipient.box === null || recipient.box === undefined) {
+    throw new UsageError(TESTIMONIAL_NO_BOX)
+  }
+  if (!validTestimonialText(text)) throw new UsageError('registro inválido: malformed')
+  const ownHex = await withIdentity(ctx, async ({ ownHex }) => ownHex)
+  let sealed
+  try {
+    sealed = sealOffer({ from: ownHex, text, boxPk: recipient.box })
+  } catch {
+    // Only the recipient's key can fail here (the text and own key passed).
+    throw new UsageError(TESTIMONIAL_NO_BOX)
+  }
+  const record = buildRecord(() => testimonialRecord({ to: key, gen: recipient.gen, hash: sealed.hash, box: sealed.box }))
+  // publish re-reads the identity: a sign-out and a sign-in as someone else
+  // in between would seal a commitment to the wrong author.
+  return publish(ctx, record, (now) => { self(now); if (now !== ownHex) throw new UsageError(TESTIMONIAL_NO_BOX) })
+}
+
+// A writer block read from `from`'s diary, opened with `open(box, gen)`
+// (the DM engine's in-memory pair) -> { text, nonce, at } when it is a valid
+// testimonial from someone else to ownHex whose opened text and nonce match
+// its commitment with `from` as the writer, else null: a block copied
+// verbatim into another diary opens but does not match. Never throws.
+function openTestimonialBlock (ownHex, from, seq, record, open) {
+  try {
+    if (from === ownHex) return null
+    const copy = validRecordCopy(record, seq)
+    if (copy === null || copy.type !== 'testimonial' || copy.to !== ownHex) return null
+    const opened = open(copy.box, copy.gen)
+    if (opened === null || typeof opened !== 'object') return null
+    if (!isHex64(from) || commitment(from, opened.nonce, opened.text) !== copy.hash) return null
+    return { text: opened.text, nonce: opened.nonce, at: copy.at }
+  } catch {
+    return null
+  }
+}
+
+// The writer blocks already shown by a live show of the own diary, as
+// 'from:seq' keys. Works locked.
+async function testimonialShownKeys (ctx) {
+  return withIdentity(ctx, async ({ diary }) => new Set(liveShows(await store.readRaw(diary)).keys()))
+}
+
+// blocks: [{ from, seq, record }] the writer blocks read for the seeder's
+// pending pointers (in their order). -> rows { from, seq, text, at }: only
+// those that open, match and are not shown yet, at most `max`, one per block.
+function testimonialPendingRows (ownHex, blocks, shown, open, max) {
+  const rows = []
+  const seen = new Set()
+  for (const b of Array.isArray(blocks) ? blocks : []) {
+    if (rows.length >= max) break
+    if (b === null || typeof b !== 'object' || !isHex64(b.from) || !Number.isSafeInteger(b.seq) || b.seq < 1) continue
+    const id = b.from + ':' + b.seq
+    if (seen.has(id) || shown.has(id)) continue
+    seen.add(id)
+    const opened = openTestimonialBlock(ownHex, b.from, b.seq, b.record, open)
+    if (opened !== null) rows.push({ from: b.from, seq: b.seq, text: opened.text, at: opened.at })
+  }
+  return rows
+}
+
+// record: block `seq` of `from` as read now (null when unavailable). A
+// writer block already shown by a live show answers that show; anything
+// that does not open and match is TESTIMONIAL_NOT_FOUND, never why.
+async function testimonialShow (ctx, { from, seq, record, open }) {
+  const key = String(from).toLowerCase()
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const existing = liveShows(await store.readRaw(diary)).get(key + ':' + seq)
+    if (existing !== undefined) return { seq: existing, ref: formatRef({ author: ownHex, seq: existing }), changed: false }
+    const opened = openTestimonialBlock(ownHex, key, seq, record, open)
+    if (opened === null) throw new UsageError(TESTIMONIAL_NOT_FOUND)
+    const show = buildRecord(() => testimonialShowRecord({ from: key, seq, text: opened.text, nonce: opened.nonce }))
+    const at = await appendOwn(ctx, diary, show)
+    return { seq: at, ref: formatRef({ author: ownHex, seq: at }), changed: true }
+  })
+}
+
+// The kind comes from the target: the own testimonial (revoke) or the own
+// testimonial-show (remove, with every other live show of that writer).
+// `about` (a key): the caller means to revoke its depoimento to that person,
+// a ref it may have taken from an untrusted seeder index, so the live target
+// must be a testimonial addressed to `about`, never a show or one to someone
+// else.
+async function testimonialDelete (ctx, { to, about }) {
+  const kind = await withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (to.author !== ownHex || !(to.seq >= 1) || to.seq >= diary.length) throw new UsageError('referência inválida')
+    const raw = await store.readRaw(diary)
+    // A target already deleted and cleared: recordDelete answers its tombstone.
+    if (to.seq < raw.length && raw[to.seq].record === null && deletedSeqs(raw).has(to.seq)) return 'testimonial'
+    const target = recordAt(raw, to.seq)
+    if (target === null || (target.type !== 'testimonial' && target.type !== 'testimonial-show')) throw new UsageError('referência inválida')
+    if (about !== undefined && (target.type !== 'testimonial' || target.to !== String(about).toLowerCase())) throw new UsageError('referência inválida')
+    return target.type
+  })
+  return recordDelete(ctx, kind, { to })
 }
 
 // ---- media ----
@@ -4270,6 +4447,11 @@ module.exports = {
   likeSet,
   repostSet,
   engagementRead,
+  testimonialWrite,
+  testimonialShownKeys,
+  testimonialPendingRows,
+  testimonialShow,
+  testimonialDelete,
   usernameAdd,
   ownEntries,
   ownNoticeContext,

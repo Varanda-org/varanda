@@ -88,6 +88,23 @@ const GROUP_CONFIRM_KEYS = ['type', 'group', 'writer', 'seq', 'digest', 'at']
 const DELETE_KEYS = ['type', 'seq', 'at']
 const DELETE_MEDIA_KEYS = ['type', 'seq', 'at', 'media']
 const DELETE_RANGE_KEYS = ['core', 'start', 'blocks']
+// Depoimentos (docs/protocol.md): the writer's sealed commitment and the
+// recipient's opt-in copy of the text.
+const TESTIMONIAL_KEYS = ['type', 'to', 'gen', 'hash', 'box', 'at']
+const TESTIMONIAL_SHOW_KEYS = ['type', 'from', 'seq', 'text', 'nonce', 'at']
+const MAX_TESTIMONIAL = 400
+const TESTIMONIAL_SEAL_BYTES = 48 // crypto_box_SEALBYTES
+// The sealed plaintext is canonical JSON {"text":...,"nonce":...}. A valid
+// text has no lone surrogates and no control characters but LF, so no
+// character takes more than 4 bytes in the JSON (a non-BMP character; a
+// quote, a backslash or LF escape to 2).
+const TESTIMONIAL_JSON_FRAME = '{"text":"","nonce":""}'.length + 64
+const MIN_TESTIMONIAL_PLAIN = TESTIMONIAL_JSON_FRAME + 1
+const MAX_TESTIMONIAL_PLAIN = TESTIMONIAL_JSON_FRAME + 4 * MAX_TESTIMONIAL
+const MIN_TESTIMONIAL_SEALED = MIN_TESTIMONIAL_PLAIN + TESTIMONIAL_SEAL_BYTES
+const MAX_TESTIMONIAL_SEALED = MAX_TESTIMONIAL_PLAIN + TESTIMONIAL_SEAL_BYTES
+const MAX_TESTIMONIAL_BOX = Math.ceil(MAX_TESTIMONIAL_SEALED / 3) * 4
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/
 const USERNAME_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 // Same field rules as validateCertShape and validateUsernameRecordShape in
 // lib/cert.js (not imported here); packages/core/test/records.test.js checks parity.
@@ -162,6 +179,36 @@ function hasControlChars (s, allowLf) {
     if (isForbiddenChar(ch.codePointAt(0), allowLf)) return true
   }
   return false
+}
+
+// Lone surrogates would reach the hash as U+FFFD, so two texts could share
+// one commitment.
+function hasLoneSurrogate (s) {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const n = s.charCodeAt(i + 1)
+      if (!(n >= 0xdc00 && n <= 0xdfff)) return true
+      i++
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return true
+    }
+  }
+  return false
+}
+
+function validTestimonialText (text) {
+  if (typeof text !== 'string') return false
+  const len = charLength(text)
+  return len >= 1 && len <= MAX_TESTIMONIAL && !hasControlChars(text, true) && !hasLoneSurrogate(text)
+}
+
+// Canonical base64 (padded, the exact re-encoding) of a sealed testimonial.
+function validTestimonialBox (s) {
+  if (typeof s !== 'string' || s.length === 0 || s.length % 4 !== 0) return false
+  if (s.length > MAX_TESTIMONIAL_BOX || !BASE64_RE.test(s)) return false
+  const buf = b4a.from(s, 'base64')
+  return buf.byteLength >= MIN_TESTIMONIAL_SEALED && buf.byteLength <= MAX_TESTIMONIAL_SEALED && b4a.toString(buf, 'base64') === s
 }
 
 function isUsername (s) {
@@ -383,7 +430,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'testimonial', 'testimonial-show'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -434,6 +481,18 @@ function check (record, seq) {
   if (type === 'dm-key') {
     if (!hasExactKeys(record, DM_KEY_KEYS) || !isHex64(record.box) || weakBoxKey(record.box)) return 'malformed'
     if (!Number.isSafeInteger(record.gen) || record.gen < 1 || record.gen > MAX_DM_KEY_GEN) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'testimonial') {
+    if (!hasExactKeys(record, TESTIMONIAL_KEYS) || !isHex64(record.to) || !isHex64(record.hash)) return 'malformed'
+    if (!Number.isSafeInteger(record.gen) || record.gen < 1 || record.gen > MAX_DM_KEY_GEN) return 'malformed'
+    if (!validTestimonialBox(record.box)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'testimonial-show') {
+    if (!hasExactKeys(record, TESTIMONIAL_SHOW_KEYS) || !isHex64(record.from) || !isHex64(record.nonce)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1) return 'malformed'
+    if (!validTestimonialText(record.text)) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   // The creator binds the group root itself: writer may equal group.
@@ -543,6 +602,14 @@ function likeRecord ({ to, on, at = nowIso() } = {}) {
 
 function repostRecord ({ to, on, at = nowIso() } = {}) {
   return build({ type: 'repost', to: copyTarget(to), on, at }, 1)
+}
+
+function testimonialRecord ({ to, gen, hash, box, at = nowIso() } = {}) {
+  return build({ type: 'testimonial', to, gen, hash, box, at }, 1)
+}
+
+function testimonialShowRecord ({ from, seq, text, nonce, at = nowIso() } = {}) {
+  return build({ type: 'testimonial-show', from, seq, text, nonce, at }, 1)
 }
 
 function mediaCoreRecord ({ key, at = nowIso() } = {}) {
@@ -723,6 +790,13 @@ module.exports = {
   MAX_PAGE_GEN,
   DM_KEY_KEYS,
   MAX_DM_KEY_GEN,
+  TESTIMONIAL_KEYS,
+  TESTIMONIAL_SHOW_KEYS,
+  MAX_TESTIMONIAL,
+  MIN_TESTIMONIAL_PLAIN,
+  MAX_TESTIMONIAL_PLAIN,
+  MAX_TESTIMONIAL_SEALED,
+  MAX_TESTIMONIAL_BOX,
   AVATAR_SIDE,
   MAX_AVATAR_BLOCKS,
   MAX_AVATAR_BYTES,
@@ -736,6 +810,7 @@ module.exports = {
   hasExactKeys,
   hasControlChars,
   charLength,
+  validTestimonialText,
   plainCopy,
   isHex64,
   isHex128,
@@ -752,6 +827,8 @@ module.exports = {
   groupConfirmRecord,
   likeRecord,
   repostRecord,
+  testimonialRecord,
+  testimonialShowRecord,
   deleteRecord,
   validDescriptor,
   validAudioDescriptor,

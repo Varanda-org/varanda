@@ -122,6 +122,12 @@ const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 //   `<atMs>.<key>`, no seq: a follow pair is unique by key) ->
 //   Seeder#indexFollows (at most 20 rows, newest first). Follower counts
 //   and lists are public by decision; the seeder parses the cursor.
+// - /index/testimonials/<owner> -> Seeder#indexTestimonials: `{ shown:
+//   [{ seq, from, wseq }], pending: [{ from, seq }], indexing, complete }`
+//   (at most 64 of each, newest first): `seq` the owner's testimonial-show
+//   block, `from` / `wseq` and pending rows a writer's testimonial block.
+//   Pointers only, rebuilt here field by field: the text and the sealed
+//   box never leave the seeder; the node reads and verifies every block.
 // Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
 // construction (page sizes bound every list; apps/cli/test/seed-ws.test.js
 // proves the worst case); HEAD sends the headers only. Load has its own
@@ -249,6 +255,8 @@ const INDEX_COMMUNITY_GROUPS_RE = /^\/index\/community\/([0-9a-f]{64})\/groups\/
 const INDEX_ENGAGERS_RE = /^\/index\/(likes|reposts)\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const INDEX_FOLLOW_COUNTS_RE = /^\/index\/follows\/([0-9a-f]{64})$/
 const INDEX_FOLLOWS_RE = /^\/index\/follows\/([0-9a-f]{64})\/(seguindo|seguidores)(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
+const INDEX_TESTIMONIALS_RE = /^\/index\/testimonials\/([0-9a-f]{64})$/
+const TESTIMONIAL_ROWS_MAX = 64
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
 const INDEX_BURST = 64
@@ -474,7 +482,8 @@ function refuse (socket, code, reason) {
 // ({ maxInFlight, rate, burst }). sockets: optional socket cap of the
 // listener (see socketCap). The seeder's indexPost(authorHex, seq,
 // cursor), indexCounts(refs), indexMember(authorHex, before), indexPageEnd(authorHex),
-// indexSearch(segment) and indexEngagers(kind, authorHex, seq, cursor) ->
+// indexSearch(segment), indexEngagers(kind, authorHex, seq, cursor) and
+// indexTestimonials(ownerHex) ->
 // null | plain object back /index; indexSearch's
 // object is { members: [{ author, profileSeq, usernameSeq, [page, closed, moved] }] (at most 20),
 // more, indexing, complete }. The search segment shares the index bucket
@@ -548,7 +557,28 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexFollowCounts', [m[1]]]
     m = INDEX_FOLLOWS_RE.exec(url)
     if (m) return ['indexFollows', [m[1], m[2], m[3] === undefined ? null : m[3]]]
+    m = INDEX_TESTIMONIALS_RE.exec(url)
+    if (m) return ['indexTestimonials', [m[1]], testimonialsBody]
     return null
+  }
+
+  // Only the pointer fields: an unexpected row or field is a 404 (throw),
+  // never echoed.
+  function testimonialsBody ({ shown, pending, indexing, complete }) {
+    if (!Array.isArray(shown) || !Array.isArray(pending) || shown.length > TESTIMONIAL_ROWS_MAX || pending.length > TESTIMONIAL_ROWS_MAX) throw new Error('index')
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    return {
+      shown: shown.map(({ seq, from, wseq }) => {
+        if (!seqOk(seq) || !seqOk(wseq) || typeof from !== 'string' || !HEX64_RE.test(from)) throw new Error('index')
+        return { seq, from, wseq }
+      }),
+      pending: pending.map(({ from, seq }) => {
+        if (!seqOk(seq) || typeof from !== 'string' || !HEX64_RE.test(from)) throw new Error('index')
+        return { from, seq }
+      }),
+      indexing: indexing === true,
+      complete: complete === true
+    }
   }
 
   // The seeder's group answers flattened into the wire shape. The root
@@ -1030,6 +1060,7 @@ module.exports = {
   INDEX_ENGAGERS_RE,
   INDEX_FOLLOW_COUNTS_RE,
   INDEX_FOLLOWS_RE,
+  INDEX_TESTIMONIALS_RE,
   INDEX_MAX_REFS,
   INDEX_MAX_IN_FLIGHT,
   INDEX_RATE,

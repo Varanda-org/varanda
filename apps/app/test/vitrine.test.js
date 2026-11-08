@@ -113,7 +113,11 @@ const resultKeys = {
   'feed.read': ['items', 'skipped', 'skippedTruncated', 'future', 'futureTruncated', 'incomplete', 'incompleteTruncated'],
   'notices.list': ['notices', 'next', 'incomplete', 'supported', 'activity'],
   'profile.read': ['profiles', 'missing'],
-  'diary.peek': ['key', 'length', 'entries', 'invalid', 'missing', 'profile', 'username']
+  'diary.peek': ['key', 'length', 'entries', 'invalid', 'missing', 'profile', 'username'],
+  'testimonial.write': ['seq', 'ref'],
+  'testimonial.pending': ['items', 'incomplete'],
+  'testimonial.show': ['seq', 'ref'],
+  'testimonial.delete': ['seq', 'deleted']
 }
 
 function keys (t, obj, expected, label) {
@@ -513,9 +517,9 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
     'publicMedia.js': ["import { fixtures, postPictureBytes } from './fixtures.js'"],
     'pictures.js': [],
     'media.js': ["import { pictures } from './pictures.js'", "import { PICTURE_BASE } from './fixtures.js'"],
-    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { largeFeed } from './large.js'"],
+    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { largeFeed } from './large.js'", "import { sealedTestimonial, testimonialHash } from './fixtures.js'", "import { testimonialPointers, useTestimonialSource } from './indexResponder.js'"],
     'large.js': [],
-    'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { fixtures } from './fixtures.js'"]
+    'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { fixtures, testimonialHash } from './fixtures.js'"]
   }
   for (const file of Object.keys(expectedImports)) {
     const source = readFileSync(join(__dirname, '../src/vitrine', file), 'utf8')
@@ -569,6 +573,10 @@ function samples (f) {
     'peek.read': {},
     'notices.list': {},
     'diary.peek': { author: f.own, seqs: [3] },
+    'testimonial.write': { to: member, text: 'Uma vizinha de muitas conversas boas.' },
+    'testimonial.pending': {},
+    'testimonial.show': { from: f.members[4].author, seq: 60 },
+    'testimonial.delete': { to: `${f.own}:38` },
     'account.sign': { phase: 'reserve', nonce, username: 'lia_praca', sub: '' },
     'age.sign': { action: 'result', nonce },
     'age.proof': { verified: { date: f.now }, since: null },
@@ -1147,4 +1155,60 @@ test('the media client reads a fixture post photo through the Vitrine responder'
     '/media/__proto__/constructor/1/1',
     '/other/' + post.author + '/' + d.core + '/' + d.start + '/1'
   ]) t.is((await vitrineMediaResponse(bad)).status, 404, bad)
+})
+
+test('depoimentos: fixtures validate, pending is shown, removed and revoked', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { validateRecord } = require('@varanda/core/lib/records')
+  const { verifyShow } = require('@varanda/core/lib/testimonials')
+  const call = (method, params) => answer(t, request, method, params)
+  const [joao, cecilia, bia] = [f.members[1].author, f.members[2].author, f.members[4].author]
+  const records = f.diaryRecords.filter((e) => e.record.type === 'testimonial' || e.record.type === 'testimonial-show')
+  t.is(records.length, 7)
+  for (const e of records) t.is(validateRecord(e.record, e.seq), null, e.record.type + ' ' + e.author.slice(0, 4) + ':' + e.seq + ' validates')
+  for (const s of f.sealed) {
+    t.ok([...s.text].length <= 400 && !s.text.includes(String.fromCharCode(0x2014)), 'text fits and has no em dash')
+    const show = records.find((e) => e.record.type === 'testimonial-show' && e.record.from === s.author && e.record.seq === s.seq)
+    const block = records.find((e) => e.author === s.author && e.seq === s.seq).record
+    if (show) t.ok(verifyShow(show.record, block, show.author), 'fixture show verifies like the web node')
+  }
+  t.ok(f.sealed.some((s) => s.text.length > 200), 'one long text checks wrapping')
+  const refs = f.diaryRecords.map((e) => e.author + ':' + e.seq)
+  t.is(new Set(refs).size, refs.length, 'every (author, seq) is unique')
+
+  await refused(t, request, 'testimonial.write', { to: f.own, text: 'Eu mesma.' }, 'USAGE', 'não pode escrever um depoimento para si')
+  await refused(t, request, 'testimonial.write', { to: 'e'.repeat(64), text: 'Olá!' }, 'USAGE', 'a pessoa ainda não recebe mensagens')
+  await refused(t, request, 'testimonial.write', { to: cecilia, text: 'a' + String.fromCharCode(7) }, 'USAGE', 'registro inválido: malformed')
+  const written = await call('testimonial.write', { to: cecilia, text: 'Cecília cuida da horta e de todo mundo.' })
+  const writtenPeek = await call('diary.peek', { author: f.own, seqs: [written.seq] })
+  t.is(validateRecord(writtenPeek.entries[0].record, written.seq), null, 'a written block validates')
+  t.is(writtenPeek.entries[0].record.to, cecilia)
+
+  const pending = await call('testimonial.pending', {})
+  t.alike(pending.items.map((i) => [i.from, i.seq]), [[bia, 60]], 'only the pending block, never a shown one')
+  for (const item of pending.items) keys(t, item, ['from', 'seq', 'text', 'at'])
+  await refused(t, request, 'testimonial.show', { from: joao, seq: 3 }, 'USAGE', 'depoimento não encontrado')
+  const shown = await call('testimonial.show', { from: bia, seq: 60 })
+  t.alike(await call('testimonial.show', { from: bia, seq: 60 }), shown, 'showing again writes nothing')
+  t.alike((await call('testimonial.pending', {})).items, [])
+  const peek = await call('diary.peek', { author: f.own, seqs: [36, 37, shown.seq] })
+  t.alike(peek.entries.map((e) => e.seq), [36, 37, shown.seq])
+  t.alike(peek.invalid, [])
+
+  const removed = await call('testimonial.delete', { to: shown.ref })
+  t.alike(removed.deleted, [shown.seq])
+  t.alike(await call('testimonial.delete', { to: shown.ref }), removed, 'a removed show answers its tombstone')
+  t.alike((await call('diary.peek', { author: f.own, seqs: [shown.seq] })).missing, [shown.seq])
+  t.alike((await call('testimonial.pending', {})).items, [], 'a removed show never returns to pending')
+
+  // Lia revokes the one she wrote to João: João's show of it turns invalid.
+  await refused(t, request, 'testimonial.delete', { to: `${f.own}:38`, about: cecilia }, 'USAGE', 'referência inválida')
+  await refused(t, request, 'testimonial.delete', { to: `${f.own}:36`, about: joao }, 'USAGE', 'referência inválida')
+  const revoked = await call('testimonial.delete', { to: `${f.own}:38`, about: joao })
+  t.alike(revoked.deleted, [38])
+  const joaoPeek = await call('diary.peek', { author: joao, seqs: [61] })
+  t.alike(joaoPeek.invalid, [61])
+  t.alike(joaoPeek.entries, [])
+  await refused(t, request, 'testimonial.delete', { to: `${f.own}:3` }, 'USAGE', 'referência inválida')
+  await refused(t, request, 'testimonial.delete', { to: `${joao}:61` }, 'USAGE', 'referência inválida')
 })

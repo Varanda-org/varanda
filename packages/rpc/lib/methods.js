@@ -738,6 +738,11 @@ const SPECS = {
       text: opt(str(0, L.MAX_TEXT), '')
     }
   },
+  'testimonial.write': { fields: { to: req(isKey), text: req(str(1, L.MAX_TESTIMONIAL)) }, mutating: true },
+  // Result { items: [{ from, seq, text, at }], incomplete: boolean } (5.100).
+  'testimonial.pending': { fields: none },
+  'testimonial.show': { fields: { from: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  'testimonial.delete': { fields: { to: req((v) => isRef(v, 1)), about: opt(isKey) }, mutating: true },
   // Signs the terms-acceptance statement with the identity key; the node
   // fills in member and association itself, so a caller never chooses the
   // bytes.

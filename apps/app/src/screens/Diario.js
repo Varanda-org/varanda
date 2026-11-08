@@ -61,9 +61,12 @@ import { useStyles } from '../ui/ThemeProvider'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, refOf, socialRowProps, useSocial } from './ARua'
 import { DeletePrompt, useDelete } from './Conversa'
+import { TESTIMONIALS_TAB, useTestimonialTab, useTestimonials } from './Depoimentos'
 
 const BAND = 96
 const TABS = [{ id: 'posts', label: 'Publicações' }, { id: 'mural', label: 'Mural' }]
+// Depoimentos is the third tab only on a hosted node (node.hosted === true).
+const TABS_HOSTED = TABS.concat([TESTIMONIALS_TAB])
 // Same coalescing window as the Comunidades list.
 const COMMUNITIES_DELAY_MS = 800
 
@@ -146,7 +149,7 @@ function postOf (author, seq, record) {
   }
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onMessage }) {
+export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -165,7 +168,8 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const [editing, setEditing] = useState(false)
   const [sharing, setSharing] = useState(false)
   const [pulls, setPulls] = useState(0)
-  // 'posts' | 'mural'. The state lives here, so it survives a visit to a thread.
+  // 'posts' | 'mural' | 'depoimentos'. The state lives here, so it survives a
+  // visit to a thread.
   const [tab, setTab] = useState('posts')
   const muralPages = useRef(0)
   const { fontScale, height: windowHeight } = useWindowDimensions()
@@ -191,6 +195,20 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const ownPublicKey = typeof ownKey === 'string' ? ownKey : (data && typeof data.info.publicKey === 'string' ? data.info.publicKey : null)
   const social = useSocial({ ownKey: ownPublicKey, onToast })
   const followCounts = useFollowCounts(ownPublicKey, String(refresh) + ':' + pulls)
+  // Own depoimentos and the ones waiting for approval (hosted only).
+  const testimonials = useTestimonials(ownPublicKey, { withPending: true, tick: String(refresh) + ':' + pulls, active: active !== false })
+  const tabs = node.hosted === true ? TABS_HOSTED : TABS
+  // A tab the node no longer offers (not hosted) falls back to Publicações.
+  const shownTab = tabs.some((t) => t.id === tab) ? tab : 'posts'
+  const depo = shownTab === 'depoimentos'
+  const testimonialTab = useTestimonialTab({
+    data: testimonials,
+    own: true,
+    ownKey: ownPublicKey,
+    onOpenAll: typeof onOpenTestimonials === 'function' && ownPublicKey ? () => onOpenTestimonials(ownPublicKey) : undefined,
+    onOpenMember,
+    onReport: typeof onReport === 'function' ? onReport : undefined
+  })
   const { ingest } = social
   // The own admitted communities (community.list), read on every activation,
   // refresh and pull, and again when a group changes: the tab stays mounted
@@ -483,7 +501,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           tabs={
             <View>
               <CommunitiesBox items={communities} title='Suas comunidades' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
-              <Segmented options={TABS} selected={tab} onSelect={setTab} />
+              <Segmented options={tabs} selected={shownTab} onSelect={setTab} />
             </View>
           }
         />
@@ -600,13 +618,13 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     <View style={styles.list}>
       <DeletePrompt del={del} />
       <RefreshableList
-        data={mural ? muralRows : posts}
-        keyExtractor={mural ? (row) => 'm' + row.key : (row) => (row.invalid ? 'i' : 'e') + row.seq}
-        renderItem={mural ? renderMural : renderItem}
-        extraData={extra}
+        data={depo ? testimonialTab.items : mural ? muralRows : posts}
+        keyExtractor={depo ? testimonialTab.keyExtractor : mural ? (row) => 'm' + row.key : (row) => (row.invalid ? 'i' : 'e') + row.seq}
+        renderItem={depo ? testimonialTab.renderItem : mural ? renderMural : renderItem}
+        extraData={depo ? testimonialTab.extraData : extra}
         ListHeaderComponent={header}
-        ListFooterComponent={mural ? muralFooter : footer}
-        ListEmptyComponent={mural && data !== null ? null : empty}
+        ListFooterComponent={depo ? testimonialTab.footer : mural ? muralFooter : footer}
+        ListEmptyComponent={depo || (mural && data !== null) ? null : empty}
         // Always tall enough to scroll the band away: a short list (a small
         // Mural, a tab switch) would otherwise rest with the bar half faded.
         // The 8 pt more tuck the avatar ring, which hangs 48 pt below the
@@ -614,10 +632,10 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         contentContainerStyle={{ paddingBottom: bottomPad, minHeight: windowHeight + bandHeight + 8 }}
         onRefresh={reload}
         refreshing={pull.pending}
-        onLoadMore={mural ? undefined : loadOlder}
+        onLoadMore={mural || depo ? undefined : loadOlder}
         loadingMore={loadingMore}
         loadMoreError={!!olderError}
-        atEnd={data === null || mural ? true : data.atEnd}
+        atEnd={data === null || mural || depo ? true : data.atEnd}
         scrollToTopSignal={scrollToTop}
         onScrollFrame={bar.handleScrollFrame}
         newItemsTop={info !== null && bar.interactive ? insets.top + BAR + 8 : undefined}
@@ -658,6 +676,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           </Sheet>
           )
         : null}
+      {testimonialTab.sheets}
       <SocialToast text={social.toast} />
     </View>
   )

@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1 }
+const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -1419,4 +1419,114 @@ test('fetchCommunityGroups: request options, validation, transport and timeout',
   const limited = await fetchCommunityGroups(C, A, { fetch: json(body, { status: 429 }) })
   t.is(limited.reason, 'rate-limited')
   t.ok(Number.isFinite(limited.retryAfterMs))
+})
+
+const testimonialsBody = (over = {}) => ({
+  shown: [{ seq: 9, from: B, wseq: 4 }, { seq: 7, from: C, wseq: 2 }],
+  pending: [{ from: B, seq: 6 }],
+  indexing: false,
+  complete: true,
+  ...over
+})
+
+test('testimonialsUrl: exact path, owner lowercased, bad owner is null', async (t) => {
+  const { testimonialsUrl, fetchTestimonials, TESTIMONIALS_MAX } = await load()
+  t.is(TESTIMONIALS_MAX, 64)
+  t.is(testimonialsUrl(A), '/index/testimonials/' + A)
+  t.is(testimonialsUrl(A.toUpperCase()), '/index/testimonials/' + A, 'owner lowercased')
+  for (const owner of [A + 'a', 'zz'.repeat(32), A + '/x', '', null, 7]) {
+    t.is(testimonialsUrl(owner), null, 'owner ' + String(owner))
+  }
+  let called = false
+  t.alike(await fetchTestimonials('nope', { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
+  t.absent(called, 'no request for bad input')
+})
+
+test('validTestimonials: exact shape, lowercase keys, positive seqs, caps and no repeats', async (t) => {
+  const { validTestimonials } = await load()
+  t.alike(validTestimonials(testimonialsBody(), A), testimonialsBody())
+  t.alike(validTestimonials(testimonialsBody({ shown: [], pending: [], indexing: true, complete: false })), testimonialsBody({ shown: [], pending: [], indexing: true, complete: false }))
+  const full = []
+  for (let i = 1; i <= 64; i++) full.push({ seq: i, from: B, wseq: i })
+  t.ok(validTestimonials(testimonialsBody({ shown: full, pending: [] })), '64 rows pass')
+  const fullPending = []
+  for (let i = 1; i <= 64; i++) fullPending.push({ from: C, seq: i + 100 })
+  t.ok(validTestimonials(testimonialsBody({ pending: fullPending })), '64 pending pass')
+  const missing = testimonialsBody()
+  delete missing.pending
+  const shown = (row) => testimonialsBody({ shown: [row] })
+  const pending = (row) => testimonialsBody({ pending: [row] })
+  const bad = [
+    testimonialsBody({ extra: 1 }),
+    missing,
+    testimonialsBody({ indexing: 'no' }),
+    testimonialsBody({ complete: null }),
+    testimonialsBody({ shown: null }),
+    testimonialsBody({ shown: {} }),
+    testimonialsBody({ pending: 'x' }),
+    testimonialsBody({ shown: full.concat([{ seq: 65, from: B, wseq: 65 }]) }),
+    testimonialsBody({ pending: fullPending.concat([{ from: C, seq: 165 }]) }),
+    shown({ seq: 1, from: B }),
+    shown({ seq: 1, from: B, wseq: 1, text: 'oi' }),
+    shown({ seq: 1, from: B.toUpperCase(), wseq: 1 }),
+    shown({ seq: 1, from: B + 'a', wseq: 1 }),
+    shown({ seq: 1, from: A, wseq: 1 }),
+    shown({ seq: 0, from: B, wseq: 1 }),
+    shown({ seq: 1, from: B, wseq: 0 }),
+    shown({ seq: 1.5, from: B, wseq: 1 }),
+    shown({ seq: '1', from: B, wseq: 1 }),
+    shown({ seq: 1, from: B, wseq: Number.MAX_SAFE_INTEGER + 1 }),
+    shown(null),
+    shown([]),
+    testimonialsBody({ shown: [{ seq: 1, from: B, wseq: 1 }, { seq: 1, from: C, wseq: 2 }] }),
+    testimonialsBody({ shown: [{ seq: 1, from: B, wseq: 1 }, { seq: 2, from: B, wseq: 1 }] }),
+    pending({ from: B }),
+    pending({ from: B, seq: 1, wseq: 1 }),
+    pending({ from: B.toUpperCase(), seq: 1 }),
+    pending({ from: A, seq: 1 }),
+    pending({ from: B, seq: 0 }),
+    pending({ from: B, seq: -1 }),
+    pending({ from: B, seq: '1' }),
+    pending(null),
+    testimonialsBody({ pending: [{ from: B, seq: 4 }] }),
+    testimonialsBody({ pending: [{ from: C, seq: 1 }, { from: C, seq: 1 }] }),
+    null,
+    []
+  ]
+  for (const body of bad) t.is(validTestimonials(body, A), null, JSON.stringify(body).slice(0, 120))
+  const own = testimonialsBody()
+  const copy = validTestimonials(own, A)
+  copy.shown[0].seq = 99
+  copy.pending[0].seq = 99
+  t.is(own.shown[0].seq, 9, 'shown copied')
+  t.is(own.pending[0].seq, 6, 'pending copied')
+})
+
+test('fetchTestimonials: request options, contract and transport', async (t) => {
+  const { fetchTestimonials } = await load()
+  const calls = []
+  const res = await fetchTestimonials(A.toUpperCase(), {
+    fetch: async (url, opts) => {
+      calls.push({ url, opts })
+      return response(JSON.stringify(testimonialsBody()))
+    }
+  })
+  t.alike(res, { ok: true, value: testimonialsBody() })
+  t.is(calls[0].url, '/index/testimonials/' + A)
+  t.is(calls[0].opts.method, 'GET')
+  t.is(calls[0].opts.credentials, 'omit')
+  t.is(calls[0].opts.redirect, 'error')
+  t.is(calls[0].opts.cache, 'no-store')
+  t.ok(calls[0].opts.signal, 'abortable')
+  t.alike(await fetchTestimonials(A, { fetch: json(testimonialsBody({ extra: 1 })) }), { ok: false, reason: 'malformed' })
+  t.alike(await fetchTestimonials(A, { fetch: json(testimonialsBody({ shown: [{ seq: 1, from: A, wseq: 1 }] })) }), { ok: false, reason: 'malformed' }, 'the owner as writer')
+  const text = JSON.stringify(testimonialsBody())
+  t.is((await fetchTestimonials(A, { fetch: async () => response(text, { status: 404 }) })).reason, 'not-found')
+  t.is((await fetchTestimonials(A, { fetch: async () => response(text, { redirected: true }) })).reason, 'status')
+  const big = response(JSON.stringify(testimonialsBody({ pad: 'x'.repeat(70000) })))
+  t.is((await fetchTestimonials(A, { fetch: async () => big })).reason, 'too-large')
+  t.ok(big.cancelled, 'oversized read is cancelled')
+  const limited = await fetchTestimonials(A, { fetch: async () => response(text, { status: 429 }) })
+  t.is(limited.reason, 'rate-limited')
+  t.ok(Number.isFinite(limited.retryAfterMs), 'with the cooldown left')
 })

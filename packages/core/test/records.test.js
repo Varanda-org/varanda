@@ -669,7 +669,7 @@ test('validateRecord: posts with a link preview', (t) => {
   t.is(validateRecord(post({ quote }), 1), null, 'a quote with a preview')
   t.is(validateRecord(post({ quote, replyTo: { author: K1, seq: 2 } }), 1), 'quote-with-reply')
   t.is(validateRecord(post({ text: '' }), 1), 'text-length', 'a preview is not a caption-free photo')
-  t.is(validateRecord(post({ text: 'a‮b' }), 1), 'control-chars')
+  t.is(validateRecord(post({ text: 'a\u202eb' }), 1), 'control-chars')
   t.is(validateRecord(post({ media: [DESC] }), 1), 'malformed', 'media and a preview together')
   t.is(validateRecord(post({ quote, media: [DESC] }), 1), 'malformed', 'a quote with media and a preview')
   t.is(validateRecord(post({ extra: 1 }), 1), 'malformed')
@@ -838,7 +838,7 @@ test('quote posts', async (t) => {
   t.is(validateRecord(quote({ text: '', media: [DESC] }), 1), 'text-length', 'empty quote text refused even with media')
   t.is(validateRecord(quote({ text: 'x'.repeat(MAX_TEXT) }), 1), null)
   t.is(validateRecord(quote({ text: 'x'.repeat(MAX_TEXT + 1) }), 1), 'text-length')
-  t.is(validateRecord(quote({ text: 'a‮b' }), 1), 'control-chars')
+  t.is(validateRecord(quote({ text: 'a\u202eb' }), 1), 'control-chars')
   t.is(validateRecord(quote({ at: 'x' }), 1), 'date-invalid')
   t.is(validateRecord(quote({ media: [] }), 1), 'media-invalid')
   t.is(validateRecord(quote({ media: [{ ...DESC, extra: 1 }] }), 1), 'media-invalid')
@@ -877,7 +877,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'testimonial', 'testimonial-show'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -1324,4 +1324,78 @@ test('validateRecord: page records', (t) => {
   Object.defineProperty(hostile, 'admins', { enumerable: true, get () { throw new Error('boom') } })
   t.is(validateRecord(hostile, 3), 'malformed')
   t.is(validRecordCopy(hostile, 3), null)
+})
+
+test('testimonial records: sealed commitment shape', async (t) => {
+  const { testimonialRecord, MAX_TESTIMONIAL, MAX_TESTIMONIAL_PLAIN, MAX_TESTIMONIAL_SEALED, MAX_TESTIMONIAL_BOX, MIN_TESTIMONIAL_PLAIN } = records
+  t.is(MAX_TESTIMONIAL, 400)
+  t.is(MAX_TESTIMONIAL_PLAIN, 1686)
+  t.is(MAX_TESTIMONIAL_SEALED, 1734)
+  t.is(MAX_TESTIMONIAL_BOX, 2312)
+  const box = b4a.toString(b4a.alloc(200, 7), 'base64')
+  const tr = { type: 'testimonial', to: K2, gen: 1, hash: 'c'.repeat(64), box, at: AT }
+  t.is(validateRecord(tr, 1), null)
+  t.is(validateRecord(tr, 0), 'genesis-required')
+  t.alike(testimonialRecord({ to: K2, gen: 1, hash: 'c'.repeat(64), box, at: AT }), tr)
+  t.alike(Object.keys(testimonialRecord({ to: K2, gen: 3, hash: 'c'.repeat(64), box })), ['type', 'to', 'gen', 'hash', 'box', 'at'])
+  t.is(validateRecord({ ...tr, extra: 1 }, 1), 'malformed', 'extra key')
+  const missing = { ...tr }
+  delete missing.gen
+  t.is(validateRecord(missing, 1), 'malformed', 'missing key')
+  for (const k of ['A'.repeat(64), K1.slice(1), 1, null]) {
+    t.is(validateRecord({ ...tr, to: k }, 1), 'malformed', 'to ' + k)
+    t.is(validateRecord({ ...tr, hash: k }, 1), 'malformed', 'hash ' + k)
+  }
+  for (const gen of [0, -1, 1.5, '1', null, 4294967296]) t.is(validateRecord({ ...tr, gen }, 1), 'malformed', 'gen ' + gen)
+  // Box: canonical base64 of MIN..MAX sealed bytes.
+  const sealedOf = (n) => b4a.toString(b4a.alloc(n, 9), 'base64')
+  t.is(validateRecord({ ...tr, box: sealedOf(MAX_TESTIMONIAL_SEALED) }, 1), null, 'largest box fits')
+  t.is(sealedOf(MAX_TESTIMONIAL_SEALED).length, MAX_TESTIMONIAL_BOX)
+  t.is(validateRecord({ ...tr, box: sealedOf(MAX_TESTIMONIAL_SEALED + 1) }, 1), 'malformed', 'one byte over')
+  t.is(validateRecord({ ...tr, box: sealedOf(MIN_TESTIMONIAL_PLAIN + 48) }, 1), null, 'smallest box')
+  t.is(validateRecord({ ...tr, box: sealedOf(MIN_TESTIMONIAL_PLAIN + 47) }, 1), 'malformed', 'too small')
+  for (const bad of ['', box.slice(0, -1), box.replace(/=*$/, ''), box + '====', '-_' + box.slice(2), 1, null]) {
+    t.is(validateRecord({ ...tr, box: bad }, 1), 'malformed', 'box ' + String(bad).slice(0, 8))
+  }
+  // A non-canonical last character (unused bits set) is refused.
+  const odd = b4a.toString(b4a.alloc(199, 7), 'base64')
+  const tweak = odd.slice(0, -2) + String.fromCharCode(odd.charCodeAt(odd.length - 2) + 1) + '='
+  t.is(validateRecord({ ...tr, box: odd }, 1), null)
+  t.is(validateRecord({ ...tr, box: tweak }, 1), 'malformed', 'non-canonical base64')
+  t.is(validateRecord({ ...tr, at: '2026-01-01' }, 1), 'date-invalid')
+  await t.exception.all(async () => testimonialRecord({ to: K2, gen: 0, hash: 'c'.repeat(64), box, at: AT }), /malformed/)
+})
+
+test('testimonial-show records: the recipient copy', async (t) => {
+  const { testimonialShowRecord } = records
+  const nonce = 'd'.repeat(64)
+  const sr = { type: 'testimonial-show', from: K1, seq: 5, text: 'Pessoa incrível.\nObrigado!', nonce, at: AT }
+  t.is(validateRecord(sr, 1), null)
+  t.alike(testimonialShowRecord({ from: K1, seq: 5, text: sr.text, nonce, at: AT }), sr)
+  t.alike(Object.keys(testimonialShowRecord({ from: K1, seq: 1, text: 'oi', nonce })), ['type', 'from', 'seq', 'text', 'nonce', 'at'])
+  t.is(validateRecord({ ...sr, extra: 1 }, 1), 'malformed')
+  for (const k of ['A'.repeat(64), K1.slice(1), 1, null]) {
+    t.is(validateRecord({ ...sr, from: k }, 1), 'malformed', 'from ' + k)
+    t.is(validateRecord({ ...sr, nonce: k }, 1), 'malformed', 'nonce ' + k)
+  }
+  for (const seq of [0, -1, 1.5, '1', null]) t.is(validateRecord({ ...sr, seq }, 1), 'malformed', 'seq ' + seq)
+  t.is(validateRecord({ ...sr, text: 'x'.repeat(400) }, 1), null, '400 chars')
+  t.is(validateRecord({ ...sr, text: '\u{1F600}'.repeat(400) }, 1), null, '400 non-BMP chars')
+  t.is(validateRecord({ ...sr, text: 'x'.repeat(401) }, 1), 'malformed', '401 chars')
+  t.is(validateRecord({ ...sr, text: '' }, 1), 'malformed', 'empty')
+  const bads = ['a\u0000b', 'a\rb', 'a\u202eb', 'a\u2028b', 'a\u0085b', 'a\ud800b', 'a\udc00', 7]
+  for (let i = 0; i < bads.length; i++) t.is(validateRecord({ ...sr, text: bads[i] }, 1), 'malformed', 'bad text #' + i)
+  t.is(validateRecord({ ...sr, at: '2026-01-01T00:00:00Z' }, 1), 'date-invalid')
+})
+
+test('testimonial records: old readers skip both as malformed', async (t) => {
+  // A copy of TYPES before Depoimentos: an old reader skips both records.
+  const OLD_TYPES = ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link']
+  const oldReader = (r) => (OLD_TYPES.includes(r.type) ? validateRecord(r, 1) : 'malformed')
+  const box = b4a.toString(b4a.alloc(200, 7), 'base64')
+  t.is(oldReader({ type: 'testimonial', to: K2, gen: 1, hash: 'c'.repeat(64), box, at: AT }), 'malformed')
+  t.is(oldReader({ type: 'testimonial-show', from: K1, seq: 1, text: 'oi', nonce: 'd'.repeat(64), at: AT }), 'malformed')
+  // Neither borrows another type's shape.
+  t.is(validateRecord({ type: 'testimonial', to: K2, on: true, at: AT }, 1), 'malformed')
+  t.is(validateRecord({ type: 'testimonial-show', text: 'oi', at: AT, replyTo: null }, 1), 'malformed')
 })

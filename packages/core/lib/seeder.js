@@ -39,7 +39,8 @@
 // out any author that is not served, gated and unblocked. Trust model: the
 // index only says WHERE TO LOOK (refs, seq hints, counts); nodes fetch and
 // verify the content from the diaries themselves (indexPost, indexEngagers,
-// indexCounts, indexMember back the /index routes of apps/cli/lib/seed-ws.js).
+// indexCounts, indexMember, indexTestimonials back the /index routes of
+// apps/cli/lib/seed-ws.js).
 //
 // Name index (lib/name-index.js): fed by the same scan, the folded tokens of
 // each served author's newest display name and its verified @nome. Like the
@@ -249,7 +250,7 @@ const MAX_BAD_ANNOUNCES = 16
 
 const HEX64 = /^[0-9a-f]{64}$/
 // Record types the engagement index reads from a diary's blocks.
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -4658,8 +4659,14 @@ class Seeder {
           return
         }
         let block = raw === null ? null : decodeBlock(raw)
-        // A page-* block is never deleted (_notePage takes it back out).
-        if (block !== null && entry.deleted?.has(i) && !isPageType(block.type)) block = null
+        // A page-* block is never deleted (_notePage takes it back out). A
+        // tombstoned testimonial-show still held is handed over as removed:
+        // the index's removal rule must remember the writer block it showed.
+        let removed = false
+        if (block !== null && entry.deleted?.has(i) && !isPageType(block.type)) {
+          if (block.type === 'testimonial-show') removed = true
+          else block = null
+        }
         if (block !== null && INDEX_TYPES.has(block.type)) {
           const record = validRecordCopy(block, i)
           // The name index refuses only a new author at its cap: pause like
@@ -4670,7 +4677,7 @@ class Seeder {
             return
           }
           // Page records only feed the name index's hint.
-          if (record !== null && !isPage && !this._index.add(key, i, record)) {
+          if (record !== null && !isPage && !this._index.add(key, i, record, removed ? { removed: true } : null)) {
             entry.indexPaused = true
             return
           }
@@ -5159,6 +5166,22 @@ class Seeder {
       const page = this._index.member(authorHex, before) || { profileSeq: null, usernameSeq: null, posts: [], postsTotal: 0 }
       const entry = this._served.get(authorHex)
       return { length: entry.present, ...page, ...this._names.hint(authorHex), ...this._indexFlags() }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/testimonials/<owner>: pointers to the owner's depoimentos,
+  // { shown: [{ seq, from, wseq }], pending: [{ from, seq }], indexing,
+  // complete } (engagement-index.js testimonials); null when the owner is
+  // not visible. Keys and seqs only: never the text nor the sealed box,
+  // which the node reads from the diaries and verifies itself.
+  indexTestimonials (ownerHex) {
+    try {
+      if (!this._indexVisible(ownerHex)) return null
+      const lists = this._index.testimonials(ownerHex, Date.now(), (hex) => this._indexVisible(hex))
+      if (lists === null) return null
+      return { shown: lists.shown, pending: lists.pending, ...this._indexFlags() }
     } catch {
       return null
     }
