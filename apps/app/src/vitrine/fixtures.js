@@ -1,28 +1,25 @@
 import rpc from '@varanda/rpc'
-import sodium from '@varanda/web-member/lib/sodium-browser'
+import { ed25519 } from '@noble/curves/ed25519.js'
 
 const hex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
 const unhex = (text) => Uint8Array.from(text.match(/../g), (b) => parseInt(b, 16))
 // Public demo seeds only: anyone can sign as these keys, so they never
 // belong to real accounts and must never be seeded into a real deployment.
+// Not the node's sodium: Metro keeps packages/web-member out of the app bundle.
 const fixtureKeys = [1, 2].map((n) => {
-  const publicKey = new Uint8Array(32)
-  const secretKey = new Uint8Array(64)
-  sodium.crypto_sign_seed_keypair(publicKey, secretKey, new Uint8Array(32).fill(n))
-  return { publicKey: hex(publicKey), secretKey }
+  const seed = new Uint8Array(32).fill(n)
+  return { publicKey: hex(ed25519.getPublicKey(seed)), seed }
 })
 
 export function signVitrineConsent (listingAuthor, listingSeq, rater, offerId) {
   const pair = fixtureKeys.find((pair) => pair.publicKey === listingAuthor)
   if (!pair) throw new Error('identidade indisponível')
-  const signature = new Uint8Array(64)
-  sodium.crypto_sign_detached(signature, rpc.feira.dealPayload({ listingAuthor, listingSeq, rater, offerId }), pair.secretKey)
-  return hex(signature)
+  return hex(ed25519.sign(rpc.feira.dealPayload({ listingAuthor, listingSeq, rater, offerId }), pair.seed))
 }
 
 export function verifyVitrineConsent (listingAuthor, listingSeq, rater, offerId, consent) {
   try {
-    return listingAuthor !== rater && /^[0-9a-f]{128}$/.test(consent) && sodium.crypto_sign_verify_detached(unhex(consent), rpc.feira.dealPayload({ listingAuthor, listingSeq, rater, offerId }), unhex(listingAuthor))
+    return listingAuthor !== rater && /^[0-9a-f]{128}$/.test(consent) && ed25519.verify(unhex(consent), rpc.feira.dealPayload({ listingAuthor, listingSeq, rater, offerId }), unhex(listingAuthor), { zip215: false })
   } catch { return false }
 }
 

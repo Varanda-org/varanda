@@ -510,7 +510,7 @@ test('unknown methods and bad params refuse before any local write', async (t) =
 test('vitrine sources stay pure and omit forbidden status words', (t) => {
   const forbidden = new RegExp('(?<!\\p{L})(' + ['li' + 'da', 'entre' + 'gue', 'digi' + 'tando'].join('|') + ')(?!\\p{L})', 'iu')
   const expectedImports = {
-    'fixtures.js': ["import rpc from '@varanda/rpc'", "import sodium from '@varanda/web-member/lib/sodium-browser'"],
+    'fixtures.js': ["import rpc from '@varanda/rpc'", "import { ed25519 } from '@noble/curves/ed25519.js'"],
     'pictures.js': [],
     'media.js': ["import { pictures } from './pictures.js'", "import { PICTURE_BASE } from './fixtures.js'"],
     'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { signVitrineConsent, verifyVitrineConsent } from './fixtures.js'", "import { largeFeed } from './large.js'"],
