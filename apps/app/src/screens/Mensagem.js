@@ -66,14 +66,14 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
-import { mergeMessages, newestOf, pageDmRequest, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
+import { mergeMessages, newestOf, pageDmRequest, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
 import { actAs, pagesDm } from '../pages'
 import { pagesOn } from '../pageGate'
 import { cardFits, composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
 import { cardForSend, draftView, freezeSnapshot, linkDraftIdle, linkDraftStep, withCardFallback } from '../linkCard'
 import { previewTarget } from '../preview'
 import { revokeUrl, urlFromBytes } from '../media/display'
-import { chatMediaRefs, retryChatSend, runChatSend, stagedOf } from '../chatSend'
+import { chatMediaRefs, followAutocorrect, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { Btn, ErrorText, Field, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
@@ -197,6 +197,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const [context, setContext] = useState(null)
   // The chip as it is now, for a send that lands later.
   const contextRef = useRef(null)
+  // The composer's own text of a send in flight, so an autocorrect of its last word in the same tick is cleared too.
+  const inFlightRef = useRef(null)
   contextRef.current = context
   const usedIntents = useRef(new Set())
   // Only the conversation on top takes an intent: one buried under another
@@ -319,6 +321,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     setOfferHold(null)
     setConfirming(null)
     setOfferOpen(false)
+    // A new conversation opens at its end again, like the first open.
+    endPin.current = { pinned: true, newest: '', lastY: null }
+    opened.current = false
     attachments.clear()
   }, [pageKey])
 
@@ -355,18 +360,37 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   }, [ready, loaded, visible, isTop, dm, peer, reread, newest])
 
   // The newest line sits at the bottom: show it on open and when a newer one
-  // arrives; an older page loaded above leaves the position alone.
-  const shownNewest = useRef('')
-  useEffect(() => {
-    if (!loaded || newest === '' || newest === shownNewest.current) return
-    const first = shownNewest.current === ''
-    shownNewest.current = newest
-    const t = setTimeout(() => {
-      const list = listRef.current
-      if (list && typeof list.scrollToEnd === 'function') list.scrollToEnd({ animated: !first })
+  // arrives; an older page loaded above leaves the position alone (loading it
+  // releases the pin).
+  // `opened` turns true once a newer line arrives after the first one shown:
+  // the open itself, with its later batches, jumps without animation.
+  const opened = useRef(false)
+  const endPin = useRef({ pinned: true, newest: '', lastY: null })
+  // On the web the content size can change before FlatList measured the new
+  // row, so the first scroll uses an estimate and stops short: one more,
+  // unanimated, once layout settled.
+  const settleTimer = useRef(null)
+  useEffect(() => () => clearTimeout(settleTimer.current), [])
+  const followEnd = useCallback(() => {
+    if (!endPin.current.pinned) return
+    const list = listRef.current
+    if (!list || typeof list.scrollToEnd !== 'function') return
+    list.scrollToEnd({ animated: opened.current })
+    clearTimeout(settleTimer.current)
+    settleTimer.current = setTimeout(() => {
+      const now = listRef.current
+      if (endPin.current.pinned && now && typeof now.scrollToEnd === 'function') now.scrollToEnd({ animated: false })
     }, 50)
-    return () => clearTimeout(t)
-  }, [loaded, newest])
+  }, [])
+  const releaseEnd = useCallback(() => {
+    endPin.current = pinToEnd(endPin.current, { kind: 'user' })
+  }, [])
+  useEffect(() => {
+    if (!loaded || newest === '' || newest === endPin.current.newest) return
+    opened.current = endPin.current.newest !== ''
+    endPin.current = pinToEnd(endPin.current, { kind: 'newest', newest })
+    followEnd()
+  }, [loaded, newest, followEnd])
 
   // The keyboard shrinks the list: when the person was reading the newest
   // line, keep it above the composer instead of behind it.
@@ -376,6 +400,10 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const atBottom = useRef(true)
   const lastY = useRef(null)
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
+    // A frame only updates the pin. Following the end happens on content
+    // growth (onContentSizeChange): calling scrollToEnd from every frame of an
+    // animated scroll restarts the animation on Android and turns it into a crawl.
+    endPin.current = pinToEnd(endPin.current, { kind: 'frame', y, contentHeight, layoutHeight })
     const bottom = y + layoutHeight >= contentHeight - 48
     const resized = lastY.current !== null && y === lastY.current
     lastY.current = y
@@ -424,6 +452,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const send = async (text, quoteId, heldCard, typed = (heldCard !== undefined && hold && hold.typed) || text, ctx = (heldCard !== undefined && hold && hold.ctx) || null) => {
     setAskNew(false)
     lastErr.current = null
+    // Armed only when the composer shows the text being sent: a held message's retry may run after the draft changed.
+    inFlightRef.current = typed === draft ? { text: typed, at: Date.now(), followed: false } : null
     const snapshot = heldCard === undefined && pageKey === null ? linkDraft.take(text) : null
     let card = heldCard === undefined ? null : heldCard
     const r = await post.run(async () => {
@@ -444,6 +474,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         throw err
       }
     })
+    const followed = inFlightRef.current
+    inFlightRef.current = null
     if (!live.current) return
     const err = lastErr.current
     if (r.ok) {
@@ -453,6 +485,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       // The typed text alone is the same message only while its chip is too:
       // a draft whose chip was removed (or changed) is a new message, kept.
       if (typed !== text && contextRef.current === ctx) setDraft((d) => (d === typed ? '' : d))
+      if (followed && followed.text !== typed && contextRef.current === ctx) setDraft((d) => (d === followed.text ? '' : d))
       setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))
       if (ctx !== null) setContext((c) => (c === ctx ? null : c))
       setHold(null)
@@ -712,6 +745,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const loadOlder = async () => {
     const cursor = nextRef.current
     if (!cursor || loadingMore) return
+    // The pill is a gesture: a short thread shows it without a scroll, and
+    // a pinned list would follow the older page out of view.
+    endPin.current = pinToEnd(endPin.current, { kind: 'user' })
     setLoadingMore(true)
     try {
       const r = await dm('dm.thread', { peer, before: cursor })
@@ -957,7 +993,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     composer = (
       <ChatComposer
         value={draft}
-        onChangeText={(t) => { setDraft(t); setAskNew(false) }}
+        onChangeText={(t) => { inFlightRef.current = followAutocorrect(inFlightRef.current, t, Date.now()); setDraft(t); setAskNew(false) }}
         onSend={onSend}
         sending={post.pending || sendingMedia}
         sendDisabled={!canSend}
@@ -1063,6 +1099,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         refreshing={refreshing}
         keepVisiblePosition
         onScrollFrame={trackBottom}
+        onContentSizeChange={followEnd}
+        onUserScroll={releaseEnd}
       />
       {composer}
       <ForwardSheet

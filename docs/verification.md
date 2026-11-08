@@ -6633,3 +6633,36 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi marcada nesta documentação.
 - Quando o semeador não manda a dica de Página (um semeador antigo, `pageHintOf` em `apps/app/src/indexClient.js`) e o `page.read` responde `NOT_FOUND` (o diário está noutro lugar), o autor é tratado como pessoa e a conversa abre como antes, com o chip. É o padrão decidido: falhar aberto, para uma pessoa nunca ficar sem mensagem quando o semeador demora.
 - Um autor desconhecido sem nome nem @nome não fica guardado como Página (`namesCache.js`), então a ação pode continuar aparecendo até o nome chegar. A conferência no toque continua valendo.
+
+## 140. Conversa abre na mensagem mais nova (PR fix/conversation-newest-and-send)
+
+Três ajustes das conversas (Conversa em particular e Grupo). Não muda protocolo, semeador nem RPC.
+
+Regras que os passos conferem:
+
+- Uma conversa abre na mensagem mais nova e acompanha a lista enquanto ela desenha mais linhas: o fim é fixado por `onContentSizeChange` e, 50 ms depois, mais uma rolagem sem animação, quando o layout assentou.
+- Qualquer gesto solta a fixação: toque, roda do mouse, arrastar, teclas (seta para cima, Page Up, Home, Shift+Espaço) e clique do mouse na lista. Uma rolagem para cima de mais de 48 px também solta. **Mensagens anteriores** solta, e no grupo o salto até uma citação também.
+- Uma mensagem nova fixa de novo no fim.
+- A seta que aparece ao passar o mouse numa mensagem não cobre mais a citação dentro do balão.
+- Se a correção automática do teclado (iOS) muda a última palavra do rascunho no mesmo instante do **Enviar**, e só nos 400 ms seguintes, o campo é limpo mesmo assim, com o texto que a pessoa viu, e não convida a um envio duplo. Só a primeira mudança do campo depois do envio é acompanhada: uma edição seguinte, uma palavra a mais ou outra palavra alterada fica no campo. Reenviar uma mensagem retida continua mantendo um rascunho mais novo.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/chatActions.test.js`, `node apps/app/test/conversas.test.js`, `node apps/app/test/dm.test.js`, `node apps/app/test/groupScreen.test.js`, `node apps/app/test/group-flow.test.js`, `node apps/app/test/wordCheck.test.js`, `node apps/app/test/chatMedia.test.js` e `node apps/app/test/feedRender.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Abrir uma conversa longa: ela abre na mensagem mais nova, mesmo com fotos e cartões carregando depois.
+- [ ] Rolar para cima durante o carregamento: a lista não volta ao fim sozinha. Chegar uma mensagem nova leva ao fim de novo.
+- [ ] **Mensagens anteriores** e, num grupo, tocar numa citação: a lista fica onde a pessoa foi, sem pular para o fim.
+- [ ] Web: a roda do mouse, as teclas e o clique na lista soltam o fim.
+- [ ] Web, passando o mouse numa mensagem com citação: a seta não cobre a citação.
+- [ ] iOS, digitar uma palavra que a correção automática troca (por exemplo "teh") e tocar **Enviar** sem tocar na barra de sugestões: o campo fica vazio.
+- [ ] iOS, enviar e logo digitar outra palavra: o campo guarda o que foi digitado depois.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- A janela de 400 ms e a regra da última palavra são o que o teste cobre; o comportamento real do teclado do iOS só se confere no aparelho.
+- Digitar mais depois do envio ("oi" para "oi!") ou apagar o fim ("oi" para "o") nunca conta como correção. Uma edição manual dentro da última palavra nos 400 ms seguintes ao **Enviar** (apagar uma letra do meio, por exemplo) não se distingue da correção automática e é limpa quando o envio dá certo: sem um sinal do teclado, o app não tem como separar as duas.

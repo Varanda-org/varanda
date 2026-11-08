@@ -408,6 +408,11 @@ test('a retried held message keeps a newer draft', (t) => {
   const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(screen.includes("setDraft((d) => (d === text ? '' : d))"))
   t.ok(screen.includes('setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))'))
+  t.ok(/import \{[^}]*followAutocorrect[^}]*\} from '..\/chatSend'/.test(screen), 'followAutocorrect comes from chatSend')
+  t.ok(screen.indexOf('followed.text') > screen.indexOf("setDraft((d) => (d === text ? '' : d))"), 'the autocorrected text is cleared after the pinned line')
+  const group = readFileSync(join(__dirname, '../src/screens/Grupo.js'), 'utf8')
+  t.ok(/import \{[^}]*followAutocorrect[^}]*\} from '..\/chatSend'/.test(group), 'the group imports followAutocorrect too')
+  t.ok(group.includes('if (f && f.text !== text) setDraft((d) => (d === f.text ? \'\' : d))') && group.includes('clearFollowed(followed, text)'), 'the group clears the autocorrected text next to the pinned lines')
 })
 
 test('a peer named like the own label never reads as own in a quote', (t) => {

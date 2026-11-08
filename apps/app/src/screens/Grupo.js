@@ -53,6 +53,7 @@ import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars } from '../format'
 import { groupRows, replyPreview } from '../group-screen'
+import { pinToEnd } from '../dm-screen'
 import { UNNAMED, readsAs, whoOf } from '../who'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
@@ -86,7 +87,7 @@ import { shouldRedirectToCommunity } from '../groupRedirect'
 import { GrupoAjustes } from './GrupoAjustes'
 import { composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
 import { publicGroupRefusal } from '../wordCheck'
-import { chatMediaRefs, mediaPostLanded, retryChatSend, runChatSend, stagedOf } from '../chatSend'
+import { chatMediaRefs, followAutocorrect, mediaPostLanded, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
 
@@ -185,6 +186,13 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const [draftRefusal, setDraftRefusal] = useState('')
   useEffect(() => { setDraftRefusal('') }, [draft])
   const sendTokenRef = useRef(null)
+  // The draft text of a send in flight, so an autocorrect of its last word in the same tick is cleared too.
+  const inFlightRef = useRef(null)
+  // `f` is the ref value taken right after the send call: a send that ended
+  // otherwise must not leave it armed for a later, unrelated clear.
+  const clearFollowed = (f, text) => {
+    if (f && f.text !== text) setDraft((d) => (d === f.text ? '' : d))
+  }
   useEffect(() => () => { if (sendTokenRef.current) sendTokenRef.current.live = false }, [])
   const seqRef = useRef(0)
   const storeRef = useRef(store)
@@ -341,6 +349,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const loadOlder = useCallback(async () => {
     const before = storeRef.current.next
     if (!before || loadingMore) return
+    // The pill is a gesture: a short thread shows it without a scroll, and
+    // a pinned list would follow the older page out of view.
+    endPin.current = pinToEnd(endPin.current, { kind: 'user' })
     setLoadingMore(true)
     setMoreError('')
     try {
@@ -417,7 +428,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     setPageError('')
     try {
       await fn()
+      const followed = inFlightRef.current
+      inFlightRef.current = null
       setDraft((d) => (d === text ? '' : d))
+      clearFollowed(followed, text)
       setPostHold(null)
       setCheck(null)
       readNewest().then(() => scrollToEnd(), () => {})
@@ -428,6 +442,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       } else {
         setPageError(pageErrorText(err))
       }
+      inFlightRef.current = null
     } finally {
       setPagePending(false)
     }
@@ -469,12 +484,16 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const sendPost = async (text, replyTo = null, heldCard) => {
     if (typeof text !== 'string' || text.trim() === '' || !node.online) return
     if (asPage.page) {
+      // Armed here, not in pageSend: its retry closure holds a stale draft.
+      inFlightRef.current = { text, at: Date.now(), followed: false }
       pageSend(pageStatement('group-post', { group, text }), text, Date.now())
       return
     }
     setCheck(null)
     setPostHold(null)
     const sentAt = Date.now()
+    // A retry (heldCard defined) may run after the draft changed: never armed.
+    inFlightRef.current = heldCard === undefined ? { text, at: sentAt, followed: false } : null
     const plain = replyTo ? { group, text, replyTo: { writer: replyTo.writer, seq: replyTo.seq } } : { group, text }
     // Without the group's info its visibility is unknown: no card, so a
     // private group's thumbnail is never uploaded in the clear.
@@ -491,8 +510,11 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       card = built.card
       return request('group.post', built.op)
     })
+    const followed = inFlightRef.current
+    inFlightRef.current = null
     if (r.ok) {
       setDraft((d) => (d === text ? '' : d))
+      clearFollowed(followed, text)
       if (replyTo) setReplyKey((k) => (k === replyTo.writer + ':' + replyTo.seq ? null : k))
       readNewest().then(() => scrollToEnd(), () => {})
     } else if (r.uncertain) {
@@ -532,7 +554,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     }
   }
 
-  const mediaDone = async (r, text, replyKeyOf, sentAt, acting) => {
+  const mediaDone = async (r, text, replyKeyOf, sentAt, acting, followed) => {
     setMediaSend(null)
     if (r.phase === 'uncertain') {
       const held = { op: r.op, text, replyKey: replyKeyOf, sentAt, acting, checking: true }
@@ -547,6 +569,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     }
     if (r.phase === 'done') {
       setDraft((d) => (d === text ? '' : d))
+      clearFollowed(followed, text)
       if (replyKeyOf) setReplyKey((k) => (k === replyKeyOf ? null : k))
       setMediaHold(null)
       attachments.clear()
@@ -572,6 +595,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     const sealed = visibility === 'private'
     const acting = actingId
     const sentAt = Date.now()
+    inFlightRef.current = { text, at: sentAt, followed: false }
     const token = { live: true }
     sendTokenRef.current = token
     const r = await runChatSend({
@@ -583,8 +607,12 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       onPhase: (p) => { if (token.live) setMediaSend(p) }
     })
     if (sendTokenRef.current === token) sendTokenRef.current = null
+    // A cancelled upload can settle after the next send armed the ref: it
+    // must leave that record alone, so the ref is taken only past this check.
     if (r.phase === 'cancelled') return
-    mediaDone(r, text, replyTo ? replyTo.writer + ':' + replyTo.seq : null, sentAt, acting)
+    const followed = token.live ? inFlightRef.current : null
+    if (token.live) inFlightRef.current = null
+    mediaDone(r, text, replyTo ? replyTo.writer + ':' + replyTo.seq : null, sentAt, acting, followed)
   }
 
   // A recorded voice note: one upload, then one group.post, under the same
@@ -625,7 +653,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     })
     if (sendTokenRef.current === token) sendTokenRef.current = null
     if (r.phase === 'cancelled') return
-    mediaDone(r, '', replyTo ? replyTo.writer + ':' + replyTo.seq : null, sentAt, acting)
+    mediaDone(r, '', replyTo ? replyTo.writer + ':' + replyTo.seq : null, sentAt, acting, null)
   }
 
   // The explicit retry of an uncertain photo post: the same group.post, once.
@@ -640,11 +668,11 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     setMediaError('')
     // A post that landed meanwhile is not sent twice.
     if (await mediaLanded(held) === 'landed') {
-      mediaDone({ phase: 'done' }, held.text, held.replyKey, held.sentAt, held.acting)
+      mediaDone({ phase: 'done' }, held.text, held.replyKey, held.sentAt, held.acting, null)
       return
     }
     const r = await retryChatSend({ op: held.op, request, onPhase: setMediaSend })
-    mediaDone(r, held.text, held.replyKey, held.sentAt, held.acting)
+    mediaDone(r, held.text, held.replyKey, held.sentAt, held.acting, null)
   }
 
   const cancelMedia = () => {
@@ -704,6 +732,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     const index = rows.findIndex((r) => r.key === key)
     const list = listRef.current
     if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return
+    // A quote jump leaves the end: still pinned, its first animated frame
+    // would scroll back to the end.
+    endPin.current = pinToEnd(endPin.current, { kind: 'user' })
     // An unmeasured row far up throws without getItemLayout: stay put then.
     try {
       list.scrollToIndex({ index, animated: true, viewPosition: 0.5 })
@@ -772,18 +803,38 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     })
   }
 
-  const scrollToEnd = () => {
+  const endPin = useRef({ pinned: true, newest: null, lastY: null })
+  // On the web the content size can change before FlatList measured the new
+  // row, so the first scroll uses an estimate and stops short: one more once
+  // layout settled.
+  const settleTimer = useRef(null)
+  useEffect(() => () => clearTimeout(settleTimer.current), [])
+  const followEnd = useCallback(() => {
+    if (!endPin.current.pinned) return
     const list = listRef.current
-    if (list && typeof list.scrollToEnd === 'function') {
-      setTimeout(() => list.scrollToEnd({ animated: false }), 0)
-    }
+    if (!list || typeof list.scrollToEnd !== 'function') return
+    list.scrollToEnd({ animated: false })
+    clearTimeout(settleTimer.current)
+    settleTimer.current = setTimeout(() => {
+      const now = listRef.current
+      if (endPin.current.pinned && now && typeof now.scrollToEnd === 'function') now.scrollToEnd({ animated: false })
+    }, 50)
+  }, [])
+  const releaseEnd = useCallback(() => {
+    endPin.current = pinToEnd(endPin.current, { kind: 'user' })
+  }, [])
+  const scrollToEnd = () => {
+    endPin.current = { ...endPin.current, pinned: true }
+    followEnd()
   }
   const last = rows.length > 0 ? rows[rows.length - 1] : null
   const lastId = last === null ? null : last.id
   cutRef.current = last !== null && typeof last.at === 'string' ? { at: last.at, writer: last.writer, seq: last.seq } : null
   useEffect(() => {
-    if (lastId !== null) scrollToEnd()
-  }, [lastId])
+    if (lastId === null) return
+    endPin.current = pinToEnd(endPin.current, { kind: 'newest', newest: lastId })
+    followEnd()
+  }, [lastId, followEnd])
 
   // The keyboard shrinks the list: when the person was reading the newest
   // line, keep it above the composer instead of behind it (as in Mensagem).
@@ -793,6 +844,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const atBottom = useRef(true)
   const lastY = useRef(null)
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
+    // A frame only updates the pin. Following the end happens on content
+    // growth (onContentSizeChange): calling scrollToEnd from every frame of an
+    // animated scroll restarts the animation on Android and turns it into a crawl.
+    endPin.current = pinToEnd(endPin.current, { kind: 'frame', y, contentHeight, layoutHeight })
     const bottom = y + layoutHeight >= contentHeight - 48
     const resized = lastY.current !== null && y === lastY.current
     lastY.current = y
@@ -1182,7 +1237,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     composer = (
       <ChatComposer
         value={draft}
-        onChangeText={(t) => { setDraft(t); setPostHold(null) }}
+        onChangeText={(t) => { inFlightRef.current = followAutocorrect(inFlightRef.current, t, Date.now()); setDraft(t); setPostHold(null) }}
         onSend={sendDraft}
         sending={post.pending || pagePending || sendingMedia}
         sendDisabled={!canPost || !node.online || left < 0 || postHold !== null || mediaBlocked}
@@ -1250,6 +1305,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         refreshing={refreshing}
         keepVisiblePosition
         onScrollFrame={trackBottom}
+        onContentSizeChange={followEnd}
+        onUserScroll={releaseEnd}
       />
       {composer}
       {!asPage.page

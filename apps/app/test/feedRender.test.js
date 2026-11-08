@@ -142,3 +142,30 @@ test('an older counts pass answering late never brings back its flags', async (t
   const src = read('screens/ARua.js')
   t.is(src.split('countsFlags({').length - 1, 2, 'both counts answers (failed and ok) go through it')
 })
+
+test('RefreshableList forwards content size through a ref after its bookkeeping', (t) => {
+  const src = read('ui/RefreshableList.js')
+  t.ok(src.includes('contentSizeChange.current = onContentSizeChange'))
+  const start = src.indexOf('const handleContentSizeChange = useCallback')
+  const handler = src.slice(start, src.indexOf('}, [check])', start))
+  t.ok(handler.includes('contentSizeChange.current(w, h)'), 'the current callback receives both dimensions')
+  t.ok(handler.indexOf('contentSizeChange.current(w, h)') > handler.indexOf('check()'), 'pagination bookkeeping runs first')
+  t.ok(src.includes('onContentSizeChange={handleContentSizeChange}'))
+  t.ok(src.includes('contentContainerStyle={contentContainerStyle}'), 'caller styles stay forwarded')
+})
+
+test('RefreshableList treats web keyboard scrolls and mouse presses as user gestures', (t) => {
+  const src = read('ui/RefreshableList.js')
+  const start = src.indexOf("node.addEventListener('wheel', onWheel, { passive: true })")
+  const effect = src.slice(src.lastIndexOf('useEffect(', start), src.indexOf('}, [distance, progress, notifyUserScroll])', start))
+  t.ok(effect.length > 0, 'the web wheel effect is found')
+  for (const [name, fn] of [['keydown', 'onKeyDown'], ['mousedown', 'onMouseDown']]) {
+    t.ok(effect.includes(`node.addEventListener('${name}', ${fn}, { passive: true })`), name + ' is listened to')
+    t.ok(effect.includes(`node.removeEventListener('${name}', ${fn}, { passive: true })`), name + ' is removed on cleanup')
+  }
+  const keys = effect.slice(effect.indexOf('const onKeyDown'), effect.indexOf('const onMouseDown'))
+  for (const key of ["'ArrowUp'", "'PageUp'", "'Home'", 'e.shiftKey']) t.ok(keys.includes(key), key + ' leaves the end')
+  t.ok(keys.includes('notifyUserScroll()'), 'a key notifies the gesture')
+  t.ok(effect.includes('const onMouseDown = () => notifyUserScroll()'), 'a press notifies the gesture')
+  t.ok(effect.includes("node.removeEventListener('wheel', onWheel, { passive: true })"), 'the wheel listener stays')
+})
