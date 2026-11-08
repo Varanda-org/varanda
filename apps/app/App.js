@@ -147,6 +147,7 @@ import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, linkReturnTaker, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro from './src/screens/Membro'
+import Depoimentos from './src/screens/Depoimentos'
 import Feira from './src/screens/Feira'
 import Anuncio from './src/screens/Anuncio'
 import Anunciar from './src/screens/Anunciar'
@@ -1628,6 +1629,10 @@ function Member () {
     if ((kind !== 'seguindo' && kind !== 'seguidores') || typeof key !== 'string') return
     pushScreen({ screen: kind, key: key.toLowerCase(), params: {} })
   }, [pushScreen])
+  const openTestimonials = useCallback((key) => {
+    if (typeof key !== 'string') return
+    pushScreen({ screen: 'depoimentos', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
   const enterAvisos = useCallback(() => {
     if (tabRef.current !== 'avisos') setReturnTab(tabRef.current)
     setTab('avisos')
@@ -2635,6 +2640,7 @@ function Member () {
     const on = (id) => tab === id && ready
     const shown = (id) => (tab === id ? styles.flex : styles.hidden)
     const stacked = nav.depth(stack) > 0
+    const fabShown = showPostButton({ tab, screen: stacked ? nav.top(stack).screen : null })
     const tabActions = <TopActions key={tab} help={HELP[tab === 'comunidades' ? 'conversas' : tab]} onAvisos={mode === 'hosted' ? openAvisos : undefined} avisosNew={avisosNew} avisosActive={tab === 'avisos'} />
     // Conversas puts its "+" before help and the bell (the WhatsApp header);
     // its search is a field above the chips, not a header action.
@@ -2670,6 +2676,7 @@ function Member () {
       onDeletedPost: deletedPost,
       onOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
       onOpenPeople: openPeople,
+      onOpenTestimonials: openTestimonials,
       onOpenListings: node.hosted === true ? (author) => pushScreen({ screen: 'anuncios', key: author }) : undefined
     }
     // Pushed screens, plus the one sliding out after a pop under its old index
@@ -2693,6 +2700,13 @@ function Member () {
         return (
           <StackLayer key={i + ':comunidades:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Comunidades onBack={goBack} onOpenGroup={openGroup} onOpenCommunity={openCommunity} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'depoimentos') {
+        return (
+          <StackLayer key={i + ':depoimentos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Depoimentos entry={entry} ownKey={ownKey} onBack={goBack} onOpenMember={openMember} onReport={setReport} />
           </StackLayer>
         )
       }
@@ -2989,6 +3003,7 @@ function Member () {
               refresh={version}
               onSettings={setAjustes}
               onToast={showToast}
+              onReport={setReport}
               onReply={startReply}
               onPublish={openComposer}
               onMessage={openMessage}
@@ -3003,6 +3018,7 @@ function Member () {
               onAvisos={mode === 'hosted' ? openAvisos : undefined}
               avisosNew={avisosNew}
               onOpenPeople={openPeople}
+              onOpenTestimonials={openTestimonials}
             />
           </View>
         </View>
@@ -3013,12 +3029,15 @@ function Member () {
             </View>
             )
           : null}
+        {fabShown ? <Fab onPress={openComposer} /> : null}
+        {/* After the Fab, and above it when it shows: a long toast wraps
+            upward and must never sit under the button. */}
         {toast
           ? (
-            <View style={[styles.toast, { bottom: (stacked ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='box-none'>
+            <View style={[styles.toast, { bottom: fabShown ? insets.bottom + layout.tabBar + layout.fabAboveTabs + layout.fabSize + 12 : (stacked ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='box-none'>
               {/* Only the action takes touches: under box-none the label would
                   otherwise swallow taps meant for the screen below. */}
-              <View pointerEvents='none'>
+              <View pointerEvents='none' style={styles.toastLabel}>
                 <Text style={styles.toastText} accessibilityRole='alert'>{toast.text}</Text>
               </View>
               {toast.onAction
@@ -3037,7 +3056,6 @@ function Member () {
             </View>
             )
           : null}
-        {showPostButton({ tab, screen: stacked ? nav.top(stack).screen : null }) ? <Fab onPress={openComposer} /> : null}
         {/* Avisos is not a tab: the bar keeps the tab it was opened from, and that tab's icon closes it. */}
         {stacked ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot, feira: feiraBadge }} tabs={tabsFor(mode)} me={tabMe} />}
       </View>
@@ -3164,13 +3182,16 @@ const makeStyles = (colors) => StyleSheet.create({
   toast: {
     position: 'absolute',
     alignSelf: 'center',
+    // A long text wraps inside the screen instead of running off its edge.
+    maxWidth: '92%',
     backgroundColor: colors.toastBg,
-    borderRadius: 999,
+    borderRadius: 18,
     paddingVertical: 8,
     paddingHorizontal: 14,
     flexDirection: 'row',
     alignItems: 'center'
   },
+  toastLabel: { flexShrink: 1 },
   toastText: { ...type.counter, color: colors.toastInk },
   toastAction: { marginLeft: 8 },
   toastActionText: { ...type.counter, color: colors.toastInk, fontWeight: '800' }

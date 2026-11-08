@@ -799,6 +799,21 @@ function createSession ({
       throw new UsageError(PEEK_WEB_ONLY)
     }),
 
+    // Depoimentos need diary.peek and the DM box key of the browser node
+    // (docs/rpc.md 5.100): refused the same way, nothing opened.
+    'testimonial.write': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'testimonial.pending': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'testimonial.show': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'testimonial.delete': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
     'follow.add': serial(async ({ key }) => {
       const r = await withStore((c) => member.followAdd(c, key))
       return { changed: r.changed, followCount: r.follows.length }

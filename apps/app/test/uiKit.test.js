@@ -137,3 +137,14 @@ test('the web backdrop is not a button, so the modal focus trap skips it', (t) =
   t.ok(web.includes('<View') && web.includes('onResponderRelease={onClose}'), 'a plain view takes the tap')
   t.absent(web.includes('accessibilityRole') || web.includes('Pressable') || web.includes('tabIndex'), 'no role, no tab stop')
 })
+
+test('a sheet title shrinks to fit at large text before it is cut', (t) => {
+  t.ok(modal.includes("<Text style={[styles.title, fit]} numberOfLines={1} maxFontSizeMultiplier={TEXT_CAP} adjustsFontSizeToFit minimumFontScale={narrow ? TITLE_MIN_SCALE_NARROW : TITLE_MIN_SCALE} accessibilityRole='header'>"), 'native shrink as a fallback')
+  t.ok(modal.includes('const TITLE_MIN_SCALE = 0.7'), 'down to 70%')
+  // react-native-web ignores adjustsFontSizeToFit: the font is scaled from a
+  // hidden copy's measured width against the room the side padding leaves.
+  t.ok(modal.includes('onLayout={measureTitle}') && modal.includes("importantForAccessibility='no-hide-descendants' accessibilityElementsHidden"), 'a hidden, unread measuring copy')
+  t.ok(modal.includes('const scale = natural > 0 && room > 0 && natural > room ? Math.max(narrow ? TITLE_MIN_SCALE_NARROW : TITLE_MIN_SCALE, (room / natural) * TITLE_FIT_MARGIN) : 1'), 'scale only when it does not fit, with a margin')
+  t.ok(modal.includes('const TITLE_FIT_MARGIN = 0.93') && modal.includes('const TITLE_MIN_SCALE_NARROW = 0.6'), 'margin and narrow floor')
+  t.ok(modal.includes('fontSize: type.sheetTitle.fontSize * scale'), 'the font shrinks on every platform')
+})

@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 29)
+  t.is(LEGAL_VERSION, 30)
   t.is(LEGAL_DATE, '08/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 29, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 30, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
@@ -90,7 +90,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'fadab98396c9e8faacf04c3d68b9677da7af8e7c26b01449fb3d1cbfc53f8036', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '28ced1e3b11bf659ac9ffd117c5a77fe15f4b79de8d052c7420e39e1a927d6b6', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
@@ -244,4 +244,20 @@ test('legal: version 27 describes the invite card in the link and the messenger 
   t.ok(text.includes('só pela chave, a situação pública da conta de quem convida'))
   t.ok(text.includes('o @nome de quem convidou para qualquer pessoa com o link'))
   t.ok(text.includes('sem guardar nada novo'))
+})
+
+test('legal: version 28 describes sealed depoimentos shown only by the recipient', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('depoimento de até 400 caracteres'))
+  t.ok(text(TERMS).includes('só a pessoa que recebe consegue ler'))
+  t.ok(text(TERMS).includes('fica público só o fato de que você escreveu um depoimento para ela'))
+  t.ok(text(TERMS).includes('O texto só fica público quando quem recebe escolhe mostrá-lo no próprio perfil'))
+  t.ok(text(TERMS).includes('Você pode retirar o seu depoimento a qualquer momento'))
+  t.ok(text(TERMS).includes('nunca entrega o texto'))
+  t.ok(text(PRIVACY).includes('cifrado de ponta a ponta para a chave de mensagens de quem recebe'))
+  t.ok(text(PRIVACY).includes('Se não escolhe, nada é publicado no diário dela'))
+  t.ok(text(PRIVACY).includes('quem recebeu pode tirá-lo do perfil apagando o registro dela'))
+  t.ok(text(PRIVACY).includes('As duas pessoas podem denunciar a conta da outra'))
+  t.ok(text(PRIVACY).includes('perfil, seguidos, depoimentos, fotos'))
 })

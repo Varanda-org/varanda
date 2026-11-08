@@ -69,6 +69,7 @@ const { certForKey } = require('@varanda/core/lib/cert')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
+const { openOffer } = require('@varanda/core/lib/testimonials')
 const { mediaBounds, audioBounds, dmTextBytes, DM_MEDIA_KEYS, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 const { sealBlob, createBlobClient, fetchBlob } = require('./blob')
 const sodium = require('./sodium-browser')
@@ -355,6 +356,16 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   function boxHex () {
     requireUnlocked()
     return { box: b4a.toString(box.publicKey, 'hex'), gen: box.gen }
+  }
+
+  // A depoimento's sealed box (docs/protocol.md section 2) -> { text, nonce }
+  // or null; the pair never leaves the engine. Only the current generation
+  // is held, so a depoimento sealed to an older dm-key gen reads as null and
+  // is omitted from testimonial.pending.
+  function openTestimonial (sealed, gen) {
+    requireUnlocked()
+    if (gen !== box.gen) return null
+    return openOffer(sealed, box)
   }
 
   // ---- folders ----
@@ -1208,6 +1219,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     unlocked,
     idle,
     boxHex,
+    openTestimonial,
     checkSend,
     list,
     thread,

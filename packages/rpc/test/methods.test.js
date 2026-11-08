@@ -1,6 +1,7 @@
 'use strict'
 
 const test = require('brittle')
+const { MAX_TESTIMONIAL, TESTIMONIAL_PENDING_MAX, MAX_MESSAGE, MAX_ID, utf8ByteLength } = require('..')
 const { createServerDispatcher, validateResponse, validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME, DM_THREAD_LIMIT_MAX } = require('..')
 
 const KEY = 'ab'.repeat(32)
@@ -25,15 +26,125 @@ test('method list and mutating set', (t) => {
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
-    'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
+    'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
     'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
-    'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
+    'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
+})
+
+test('testimonial limits', (t) => {
+  t.is(MAX_TESTIMONIAL, 400)
+  t.is(TESTIMONIAL_PENDING_MAX, 64)
+})
+
+const TESTIMONIAL_PARAMS = [
+  ['testimonial.write', { to: KEY, text: 'oi' }, true],
+  ['testimonial.pending', {}, false],
+  ['testimonial.show', { from: KEY, seq: 1 }, true],
+  ['testimonial.delete', { to: KEY + ':1' }, true]
+]
+
+for (const [method, params, mutating] of TESTIMONIAL_PARAMS) {
+  test(method + ': required fields and exact params', (t) => {
+    t.is(isMutating(method), mutating)
+    ok(t, method, params, params)
+    for (const field of Object.keys(params)) {
+      const missing = { ...params }
+      delete missing[field]
+      bad(t, method, missing, 'missing ' + field)
+    }
+    for (const extra of ['extra', 'nonce', 'hash', 'box', 'gen', 'at']) {
+      bad(t, method, { ...params, [extra]: KEY }, 'extra ' + extra)
+    }
+    for (const invalid of [null, [], 'params', 1, Object.create(params)]) {
+      bad(t, method, invalid, 'invalid params object')
+    }
+  })
+}
+
+test('testimonial.write and testimonial.show: lowercase hex64 keys', (t) => {
+  for (const [method, field, base] of [
+    ['testimonial.write', 'to', { text: 'oi' }],
+    ['testimonial.show', 'from', { seq: 1 }]
+  ]) {
+    ok(t, method, { ...base, [field]: KEY })
+    for (const key of ['', 'ab'.repeat(31), 'ab'.repeat(33), KEY.toUpperCase(), 'g'.repeat(64), KEY + '\n', null, undefined, 1, {}]) {
+      bad(t, method, { ...base, [field]: key })
+    }
+  }
+})
+
+test('testimonial.write: text is 1..400 code points', (t) => {
+  for (const text of ['a', 'a'.repeat(400), '😀'.repeat(400)]) {
+    ok(t, 'testimonial.write', { to: KEY, text })
+  }
+  for (const text of ['', 'a'.repeat(401), '😀'.repeat(401), undefined, null, 1, [], {}]) {
+    bad(t, 'testimonial.write', { to: KEY, text })
+  }
+})
+
+test('testimonial.show: positive safe integer seq', (t) => {
+  ok(t, 'testimonial.show', { from: KEY, seq: Number.MAX_SAFE_INTEGER })
+  for (const seq of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, '1', null, undefined]) {
+    bad(t, 'testimonial.show', { from: KEY, seq })
+  }
+})
+
+test('testimonial.delete: canonical ref with positive safe integer seq', (t) => {
+  ok(t, 'testimonial.delete', { to: KEY + ':' + Number.MAX_SAFE_INTEGER })
+  for (const to of [
+    '', KEY, KEY.toUpperCase() + ':1', 'g'.repeat(64) + ':1', 'ab'.repeat(31) + ':1', 'ab'.repeat(33) + ':1',
+    ...['0', '-1', '01', '+1', '1.5', '1e2', '9007199254740992', '1\n'].map((seq) => KEY + ':' + seq),
+    null, undefined, 1, { author: KEY, seq: 1 }
+  ]) bad(t, 'testimonial.delete', { to })
+})
+
+test('testimonial.delete: optional about is a lowercase hex64 key', (t) => {
+  ok(t, 'testimonial.delete', { to: KEY + ':1', about: KEY })
+  for (const about of ['', 'ab'.repeat(31), KEY.toUpperCase(), 'g'.repeat(64), KEY + ':1', null, 1, {}]) {
+    bad(t, 'testimonial.delete', { to: KEY + ':1', about })
+  }
+})
+
+test('testimonial results survive RPC response validation', async (t) => {
+  const seq = Number.MAX_SAFE_INTEGER
+  const row = { from: KEY, seq, text: '😀'.repeat(400), at: '+275760-09-13T00:00:00.000Z' }
+  const results = {
+    'testimonial.write': [{ seq, ref: KEY + ':' + seq }],
+    'testimonial.pending': [{ items: [], incomplete: false }, { items: [], incomplete: true }, { items: Array.from({ length: 64 }, () => ({ ...row })), incomplete: false }],
+    'testimonial.show': [{ seq, ref: KEY + ':' + seq }],
+    'testimonial.delete': [{ seq, deleted: [1] }]
+  }
+  for (const [method, params] of TESTIMONIAL_PARAMS) {
+    for (const result of results[method]) {
+      let receive
+      const response = new Promise((resolve) => { receive = resolve })
+      const dispatcher = createServerDispatcher({
+        handlers: { [method]: () => result },
+        send: (message, json) => { if (message.id === MAX_ID) receive(JSON.parse(json)) }
+      })
+      dispatcher.receive({ v: 1, id: 1, method: 'session.open', params: {} })
+      dispatcher.receive({ v: 1, id: MAX_ID, method, params })
+      const message = await response
+      t.ok(validateResponse(message).ok, method + ' response accepted')
+      t.is(message.ok, true, method + ' succeeded')
+      t.alike(message.result, result, method + ' result preserved')
+      for (const invalid of [null, [], 'result', 1]) {
+        t.absent(validateResponse({ ...message, ok: true, result: invalid }).ok, method + ' requires an object result')
+      }
+      if (method === 'testimonial.pending' && result.items.length === 64) {
+        const bytes = utf8ByteLength(JSON.stringify(message))
+        t.is(bytes, 111689, 'maximal four-byte texts, keys, seqs, dates, incomplete flag and envelope')
+        t.ok(bytes < MAX_MESSAGE, 'pending result fits MAX_MESSAGE')
+      }
+      dispatcher.close()
+    }
+  }
 })
 
 test('seen.sign', (t) => {

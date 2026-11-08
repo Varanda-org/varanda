@@ -1,7 +1,8 @@
 import rpc from '@varanda/rpc'
 import { createVitrineMedia } from './media.js'
-import { signVitrineConsent, verifyVitrineConsent } from './fixtures.js'
+import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'
 import { largeFeed } from './large.js'
+import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'
 
 const { validateParams, RpcError, feira } = rpc
 let currentFeira = null
@@ -101,6 +102,25 @@ export function createVitrineRequest (fixtures, options) {
       entries.sort((a, b) => a.seq - b.seq)
     }
   }
+
+  // Depoimentos: `sealed` opens a writer block as the recipient's key would.
+  const sealed = new Map(data.sealed.map((s) => [`${s.author}:${s.seq}`, { text: s.text, nonce: s.nonce }]))
+  const allEntries = () => [...logs].flatMap(([author, entries]) => entries.map(({ seq, record }) => ({ author, seq, record })))
+  const testimonialPointersOf = (owner) => testimonialPointers(allEntries(), new Set(deleted.keys()), owner)
+  // The index route has no handle on an instance: the one used last is the
+  // one it reads (the app has one; tests may build several).
+  const testimonialSource = () => ({ entries: allEntries(), deleted: new Set(deleted.keys()) })
+  useTestimonialSource(testimonialSource)
+  const liveEntry = (author, seq) => deleted.has(`${author}:${seq}`) ? null : (logs.get(author) || []).find((e) => e.seq === seq) || null
+  // The web node's verifyShow: a show stands only while the writer block is
+  // live, addressed to the show's diary and commits to the shown text.
+  function showHolds (author, record) {
+    if (record.from === author) return false
+    const block = liveEntry(record.from, record.seq)
+    return !!block && block.record.type === 'testimonial' && block.record.to === author && block.record.hash === testimonialHash(record.from, record.nonce, record.text)
+  }
+  // eslint-disable-next-line no-control-regex
+  const badText = (text) => /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/.test(text) || /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(text)
 
   function append (record) {
     const entries = logs.get(data.own)
@@ -747,6 +767,51 @@ export function createVitrineRequest (fixtures, options) {
       }
       return { profiles, missing }
     },
+    'testimonial.write': ({ to, text }) => {
+      if (to === data.own) refuse('USAGE', 'não pode escrever um depoimento para si')
+      if (!profileOf(to) && !conversationOf(to)) refuse('USAGE', 'a pessoa ainda não recebe mensagens')
+      if (badText(text)) refuse('USAGE', 'registro inválido: malformed')
+      const nonce = keyOf(++serial)
+      const result = append(sealedTestimonial({ from: data.own, to, text, nonce, at: stamp() }))
+      sealed.set(result.ref, { text, nonce })
+      return result
+    },
+    'testimonial.pending': () => ({
+      items: testimonialPointersOf(data.own).pending.flatMap(({ from, seq }) => {
+        const opened = sealed.get(`${from}:${seq}`)
+        const block = liveEntry(from, seq)
+        return opened && block ? [{ from, seq, text: opened.text, at: block.record.at }] : []
+      }),
+      incomplete: false
+    }),
+    'testimonial.show': ({ from, seq }) => {
+      const opened = sealed.get(`${from}:${seq}`)
+      const block = from === data.own ? null : liveEntry(from, seq)
+      if (!opened || !block || block.record.type !== 'testimonial' || block.record.to !== data.own || block.record.hash !== testimonialHash(from, opened.nonce, opened.text)) refuse('USAGE', 'depoimento não encontrado')
+      const existing = logs.get(data.own).find((e) => e.record.type === 'testimonial-show' && e.record.from === from && e.record.seq === seq && !deleted.has(`${data.own}:${e.seq}`))
+      if (existing) return { seq: existing.seq, ref: `${data.own}:${existing.seq}` }
+      return append({ type: 'testimonial-show', from, seq, text: opened.text, nonce: opened.nonce, at: stamp() })
+    },
+    'testimonial.delete': ({ to, about }) => {
+      const target = targetOf(to)
+      if (target.author !== data.own) refuse('USAGE', 'referência inválida')
+      if (deleted.has(to)) return { seq: deleted.get(to).seq, deleted: [target.seq] }
+      const entry = liveEntry(data.own, target.seq)
+      if (!entry || !['testimonial', 'testimonial-show'].includes(entry.record.type)) refuse('USAGE', 'referência inválida')
+      // `about`: a depoimento to that person, never a show or one to someone else.
+      if (about !== undefined && (entry.record.type !== 'testimonial' || entry.record.to !== about)) refuse('USAGE', 'referência inválida')
+      // Removing a show removes every show of that writer, so an older one
+      // never comes back.
+      const seqs = entry.record.type === 'testimonial'
+        ? [target.seq]
+        : logs.get(data.own).filter((e) => e.record.type === 'testimonial-show' && e.record.from === entry.record.from && !deleted.has(`${data.own}:${e.seq}`)).map((e) => e.seq)
+      let last
+      for (const seq of seqs) {
+        last = append({ type: 'delete', seq, at: stamp() })
+        deleted.set(`${data.own}:${seq}`, last)
+      }
+      return { seq: last.seq, deleted: seqs }
+    },
     'diary.peek': ({ author, seqs, profileSeq, usernameSeq }) => {
       const p = profileOf(author)
       if (!p) refuse('NOT_FOUND', 'diário indisponível')
@@ -757,6 +822,7 @@ export function createVitrineRequest (fixtures, options) {
       for (const seq of seqs) {
         const entry = all.find((e) => e.seq === seq)
         if (deleted.has(`${author}:${seq}`)) missing.push(seq)
+        else if (entry && entry.record.type === 'testimonial-show' && !showHolds(author, entry.record)) invalid.push(seq)
         else if (entry) entries.push(entry)
         else missing.push(seq)
       }
@@ -797,6 +863,7 @@ export function createVitrineRequest (fixtures, options) {
   }
 
   const request = async (method, params = {}) => {
+    useTestimonialSource(testimonialSource)
     if (!Object.hasOwn(handlers, method)) refuse('USAGE', 'método desconhecido')
     const checked = validateParams(method, params)
     if (!checked.ok) refuse(checked.code, checked.message)

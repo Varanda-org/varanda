@@ -336,6 +336,58 @@ export const diaryRecords = [
   ...pages.flatMap((p) => members.filter((m) => m.author !== own).map((m, i) => ({ author: p.author, seq: 30 + i, record: { type: 'follow', key: m.author, on: true, at: now } })))
 ]
 
+// Depoimentos. Nothing is sealed for real in the Vitrine: the hash is the
+// real SHA-256 commitment, and the box is filler bytes of the length a real
+// seal would have, so the records validate. `sealed` stands in for opening
+// the box with the recipient's key.
+const utf8 = (s) => Uint8Array.from(encodeURIComponent(s).match(/%[0-9A-F]{2}|[^%]/g), (c) => c.length === 3 ? parseInt(c.slice(1), 16) : c.charCodeAt(0))
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+function base64 (bytes) {
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | ((bytes[i + 1] || 0) << 8) | (bytes[i + 2] || 0)
+    out += BASE64[n >> 18 & 63] + BASE64[n >> 12 & 63] + (i + 1 < bytes.length ? BASE64[n >> 6 & 63] : '=') + (i + 2 < bytes.length ? BASE64[n & 63] : '=')
+  }
+  return out
+}
+const SEAL_BYTES = 48
+// The commitment of docs/protocol.md: bound to the writer's key.
+export const testimonialHash = (from, nonce, text) => hexOf(sha256(utf8(from + nonce + text)))
+export function sealedTestimonial ({ from, to, text, nonce, at, gen = 1 }) {
+  const hash = testimonialHash(from, nonce, text)
+  const length = utf8(JSON.stringify({ text, nonce })).byteLength + SEAL_BYTES
+  const box = new Uint8Array(length)
+  let fill = sha256(utf8(hash))
+  for (let i = 0; i < length; i++) {
+    if (i % 32 === 0 && i > 0) fill = sha256(fill)
+    box[i] = fill[i % 32]
+  }
+  return { type: 'testimonial', to, gen, hash, box: base64(box), at }
+}
+
+// [writer, writer seq, recipient, text, at]. Lia shows João's and Cecília's,
+// Bia's waits for her, and João shows the one Lia wrote to him.
+const testimonialRows = [
+  [members[1].author, 60, own, 'A Lia é daquelas vizinhas que fazem o bairro parecer uma casa só. Foi ela quem organizou o primeiro café na praça, e até hoje lembra o nome de cada pessoa que passa por lá. Quando minha bicicleta quebrou no meio do passeio, ela apareceu com uma bomba de ar e um sorriso. Obrigado por tanto cuidado, Lia!', at(5, 11, 40)],
+  [members[2].author, 60, own, 'Lia me apresentou ao clube de leitura e às melhores conversas de domingo. Pessoa generosa, sempre com uma indicação de livro na ponta da língua.', at(5, 11, 50)],
+  [own, 38, members[1].author, 'João conhece cada atalho do bairro e nunca deixa ninguém para trás nos passeios. Companhia certa para pedalar e conversar.', at(5, 14, 10)],
+  [members[4].author, 60, own, 'Lia, obrigada pelas mudas de manjericão e pela paciência na oficina de compostagem. Você deixa tudo mais leve! 🌿', at(5, 14, 30)]
+]
+
+export const sealed = testimonialRows.map(([author, seq, , text], i) => ({ author, seq, text, nonce: key(800 + i) }))
+
+// [show diary, show seq, testimonialRows index, at]
+const showRows = [
+  [own, 36, 0, at(5, 14, 0)],
+  [own, 37, 1, at(5, 14, 5)],
+  [members[1].author, 61, 2, at(5, 14, 20)]
+]
+
+export const testimonialRecords = [
+  ...testimonialRows.map(([author, seq, to, text, when], i) => ({ author, seq, record: sealedTestimonial({ from: author, to, text, nonce: sealed[i].nonce, at: when }) })),
+  ...showRows.map(([author, seq, i, when]) => ({ author, seq, record: { type: 'testimonial-show', from: sealed[i].author, seq: sealed[i].seq, text: sealed[i].text, nonce: sealed[i].nonce, at: when } }))
+]
+
 const place = { uf: 'SP', city: 'São Paulo', bairro: 'Vila Mariana' }
 const listing = (author, seq, kind, title, price, unit, cat, media) => ({
   author,
@@ -382,4 +434,4 @@ export const offerThread = [
 ]
 conversations[0].messages.push(...offerThread)
 
-export const fixtures = { now, own, association, members, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords, listings, rates }
+export const fixtures = { now, own, association, members, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords], sealed, listings, rates }

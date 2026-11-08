@@ -56,3 +56,16 @@ test('a tile opens its post even when the cover failed', (t) => {
 test('a tile is announced once', (t) => {
   t.ok(grid.includes("importantForAccessibility='no-hide-descendants'") && grid.includes('accessibilityElementsHidden') && grid.includes('aria-hidden'), 'inner image hidden from screen readers')
 })
+
+test('Segmented labels shrink to fit instead of being cut', (t) => {
+  t.ok(segmented.includes('adjustsFontSizeToFit minimumFontScale={0.7}'), 'three tabs at large text keep whole labels')
+})
+
+test('Segmented: three tabs share one text size, two keep theirs', (t) => {
+  t.ok(segmented.includes('export const SEGMENTED_CAP_TWO = 1.5'), 'two tabs keep the 1.5 cap')
+  t.ok(segmented.includes('export const SEGMENTED_CAP_MANY = 1.2'), 'three or more cap at 1.2')
+  t.ok(segmented.includes('return count >= 3 ? SEGMENTED_CAP_MANY : SEGMENTED_CAP_TWO'), 'cap picked by the option count')
+  t.ok(segmented.includes('const cap = segmentedCap(list.length)') && segmented.includes('maxFontSizeMultiplier={cap}'), 'every label gets the same cap')
+  t.absent(segmented.includes('maxFontSizeMultiplier={1.5}'), 'no fixed 1.5 cap left')
+  t.ok(/label: \{[^}]*textAlign: 'center'[^}]*textAlignVertical: 'center'[^}]*includeFontPadding: false/.test(segmented), 'a shrunk label stays centred')
+})

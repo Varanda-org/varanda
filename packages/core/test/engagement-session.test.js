@@ -140,6 +140,22 @@ test('diary.peek is refused on the node session, nothing opened', async (t) => {
   t.alike([fresh.session.internal, m.session.internal], [[], []])
 })
 
+test('the depoimento methods are refused on the node session, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
+  const m = await member(t)
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('testimonial.write', { to: OTHER, text: 'pessoa incrível' })), NO)
+  t.alike(await failure(m.call('testimonial.write', { to: m.publicKey, text: 'eu' })), NO, 'self too: nothing is looked at')
+  t.alike(await failure(m.call('testimonial.pending', {})), NO)
+  t.alike(await failure(m.call('testimonial.show', { from: OTHER, seq: 3 })), NO)
+  t.alike(await failure(m.call('testimonial.delete', { to: m.publicKey + ':1' })), NO)
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike(m.session.internal, [])
+  const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
+  t.alike(await failure(m.call('testimonial.pending', { extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('testimonial.write', { to: OTHER, text: 'x'.repeat(401) })), { code: 'USAGE', message: 'parâmetro inválido: text' })
+})
+
 test('the dispatcher rejects unknown params on the new methods', async (t) => {
   const m = await member(t)
   const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }

@@ -58,3 +58,11 @@ test('a short list can still scroll the profile band away', (t) => {
   t.ok(diario.includes('minHeight: windowHeight + bandHeight + 8'), 'Diario')
   t.ok(membro.includes('minHeight: windowHeight + insets.top + BAND + 8'), 'Membro')
 })
+
+test('the Depoimentos tab sits beside Publicações and Mural, hosted only', (t) => {
+  for (const [name, src] of [['Diario', diario], ['Membro', membro]]) {
+    t.ok(/import \{[^}]*TESTIMONIALS_TAB[^}]*\} from '\.\/Depoimentos'/.test(src), name + ' imports the tab')
+    t.ok(src.includes('const TABS_HOSTED = TABS.concat([TESTIMONIALS_TAB])'), name + ' three tabs when hosted')
+    t.ok(src.includes('onLoadMore={') && /depo \? undefined|mural \|\| depo \? undefined|!depo &&/.test(src), name + ' no infinite scroll on the Depoimentos tab')
+  }
+})

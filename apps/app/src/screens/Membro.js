@@ -70,11 +70,14 @@ import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { LARGE_TEXT, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
+import { ConfirmTestimonialSheet, RETRACT_TITLE, TESTIMONIALS_TAB, WRITE_UNCERTAIN, WriteTestimonialSheet, ownBlockRef, retractBody, useTestimonialTab, useTestimonials } from './Depoimentos'
 import { ratingRefs, ratings } from '../feiraClient'
 import { MAX_RATED_LISTINGS, RATINGS_NOTE, collectRatings, summaryLabel } from '../feiraReview'
 import { isSeederDown, knownAuthors, memberKeyOf, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet } from './Conversa'
 
 const TABS = [{ id: 'posts', label: 'Publicações' }, { id: 'mural', label: 'Mural' }]
+// Depoimentos is the third tab only on a hosted node (node.hosted === true).
+const TABS_HOSTED = TABS.concat([TESTIMONIALS_TAB])
 const NOT_HOSTED_NOTE = 'Publicações completas disponíveis na versão web, com internet.'
 const OFFLINE_NOTE = 'Sem internet: as publicações completas aparecem quando a conexão voltar.'
 
@@ -209,7 +212,7 @@ const INITIAL_POSTS = {
   refreshing: false
 }
 
-export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onToast }) {
+export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onToast }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -236,7 +239,8 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const followsRef = useRef(Promise.resolve(new Set()))
   const genRef = useRef(0)
   const [following, setFollowing] = useState(false)
-  // 'posts' | 'mural'. The state lives here, so it survives a visit to a thread.
+  // 'posts' | 'mural' | 'depoimentos'. The state lives here, so it survives a
+  // visit to a thread.
   const [tab, setTab] = useState('posts')
   const muralPages = useRef(0)
   const { fontScale, height: windowHeight } = useWindowDimensions()
@@ -269,6 +273,17 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   // Only the communities both people are admitted to, never this person's
   // own list (their interests are sensitive data).
   const [common, setCommon] = useState([])
+  // Depoimentos (hosted only): the approved ones in their tab, and the
+  // own sealed one to this person, if any. A write or a retraction is
+  // remembered here until the index catches up.
+  const testimonials = useTestimonials(author, { tick, active: full })
+  const [writingTestimonial, setWritingTestimonial] = useState(false)
+  const [retractingTestimonial, setRetractingTestimonial] = useState(false)
+  const [sentTestimonial, setSentTestimonial] = useState(null)
+  // An uncertain write may be published: no second 'Escrever depoimento' on
+  // this visit (the person checks Enviados first).
+  const [testimonialUncertain, setTestimonialUncertain] = useState(false)
+  const [retractedTestimonials, setRetractedTestimonials] = useState(() => new Set())
   const commonGenRef = useRef(0)
 
   const commitHeader = useCallback((h) => {
@@ -802,6 +817,23 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
 
   const profileUrl = node.hosted === true && author ? buildProfileUrl({ origin: installationOrigin() || globalThis.location?.origin || null, username: header.verified === true ? header.username || null : null, publicKey: author }) : null
   const asPageFollowing = pageFollows !== null && pageFollows.has(author)
+  const canTestimonial = node.hosted === true && full && !own && !isPage && typeof ownKey === 'string'
+  const canWriteTestimonial = canTestimonial && !testimonialUncertain && !blockedHere
+  const myTestimonial = [sentTestimonial, ownBlockRef(testimonials.index, ownKey)].find((r) => typeof r === 'string' && !retractedTestimonials.has(r)) || null
+  const tabs = node.hosted === true ? TABS_HOSTED : TABS
+  // A tab the node no longer offers (not hosted) falls back to Publicações.
+  const shownTab = tabs.some((t) => t.id === tab) ? tab : 'posts'
+  const depo = shownTab === 'depoimentos' && full
+  const testimonialTab = useTestimonialTab({
+    data: testimonials,
+    own: false,
+    ownKey,
+    ownerName: displayText(who.title),
+    canWrite: canWriteTestimonial && myTestimonial === null,
+    onOpenMember,
+    onReport: typeof onReport === 'function' && typeof ownKey === 'string' ? onReport : undefined,
+    onRetracted: (ref) => setRetractedTestimonials((set) => new Set(set).add(ref))
+  })
   const moreActions = [
     canAct
       ? { label: actingHere ? 'Deixar de agir como a página' : 'Agir como esta página', onPress: () => (actingHere ? actingAs.me() : actingAs.asPage({ key: author, name: header.name, username: header.username, closed: pageRead.closed })) }
@@ -812,6 +844,8 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       ? { label: asPageFollowing ? 'Deixar de seguir como a página' : 'Seguir como a página', pending: following, disabled: pageFollows === null, onPress: togglePageFollow }
       : null,
     profileUrl !== null ? { label: 'Compartilhar perfil', onPress: () => setSharing(true) } : null,
+    canWriteTestimonial && myTestimonial === null ? { icon: 'lapis', label: 'Escrever depoimento', onPress: () => setWritingTestimonial(true) } : null,
+    canTestimonial && myTestimonial !== null ? { icon: 'lixeira', label: 'Retirar depoimento', danger: true, onPress: () => setRetractingTestimonial(true) } : null,
     canReport ? { icon: 'bandeira', label: 'Denunciar a conta', danger: true, onPress: () => onReport({ author, name: header.name, username: header.username }) } : null,
     canBlock
       ? { icon: 'slash', label: blockedHere ? BLOCK_TEXTS.unblock : BLOCK_TEXTS.block, danger: !blockedHere, pending: unblocking, onPress: blockedHere ? unblock : () => blocks.ask({ author, name: header.name, username: header.username }) }
@@ -902,7 +936,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
           ? (
             <View>
               <CommunitiesBox items={common} title='Comunidades em comum' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
-              <Segmented options={TABS} selected={tab} onSelect={setTab} />
+              <Segmented options={tabs} selected={shownTab} onSelect={setTab} />
             </View>
             )
           : null}
@@ -914,6 +948,38 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
               <ShareProfile url={profileUrl} />
             </View>
           </Sheet>
+          )
+        : null}
+      {canTestimonial
+        ? (
+          <>
+            <WriteTestimonialSheet
+              open={writingTestimonial}
+              to={author}
+              name={displayText(who.title)}
+              onClose={() => setWritingTestimonial(false)}
+              onSent={(result) => {
+                if (result && typeof result.ref === 'string') setSentTestimonial(result.ref)
+                if (typeof onToast === 'function') onToast('Depoimento enviado. Aparece quando a pessoa aprovar.')
+              }}
+              onUncertain={() => {
+                setTestimonialUncertain(true)
+                if (typeof onToast === 'function') onToast(WRITE_UNCERTAIN)
+              }}
+            />
+            <ConfirmTestimonialSheet
+              open={retractingTestimonial}
+              title={RETRACT_TITLE}
+              body={retractBody(displayText(who.title))}
+              confirmLabel='Retirar'
+              onConfirm={async () => {
+                const ref = myTestimonial
+                await request('testimonial.delete', { to: ref, about: author })
+                setRetractedTestimonials((set) => new Set(set).add(ref))
+              }}
+              onClose={() => setRetractingTestimonial(false)}
+            />
+          </>
           )
         : null}
     </>
@@ -1012,13 +1078,13 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     <View style={styles.flex}>
       <View style={styles.flex}>
         <RefreshableList
-          data={phase === 'ready' ? (mural ? muralRows : shownItems) : []}
-          keyExtractor={mural ? (row) => 'm' + row.key : (i) => i.kind + ':' + i.seq}
-          renderItem={mural ? renderMural : renderItem}
-          extraData={{ eng, follows, now, header, profileOf: names.profileOf }}
+          data={depo ? testimonialTab.items : phase === 'ready' ? (mural ? muralRows : shownItems) : []}
+          keyExtractor={depo ? testimonialTab.keyExtractor : mural ? (row) => 'm' + row.key : (i) => i.kind + ':' + i.seq}
+          renderItem={depo ? testimonialTab.renderItem : mural ? renderMural : renderItem}
+          extraData={depo ? testimonialTab.extraData : { eng, follows, now, header, profileOf: names.profileOf }}
           ListHeaderComponent={listHeader}
-          ListEmptyComponent={mural && phase === 'ready' ? null : empty}
-          ListFooterComponent={listFooter}
+          ListEmptyComponent={depo || (mural && phase === 'ready') ? null : empty}
+          ListFooterComponent={depo ? testimonialTab.footer : listFooter}
           // Always tall enough to scroll the band away: a short list (a small
           // Mural, a tab switch) would otherwise rest with the bar half faded.
           // The 8 pt more tuck the avatar ring, which hangs 48 pt below the
@@ -1026,15 +1092,16 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
           contentContainerStyle={{ paddingBottom: bottomPad, minHeight: windowHeight + insets.top + BAND + 8 }}
           onRefresh={() => { setTick((n) => n + 1); load(true) }}
           refreshing={refreshing}
-          onLoadMore={phase === 'ready' && !mural && !atEnd && !moreError ? loadMore : undefined}
+          onLoadMore={phase === 'ready' && !mural && !depo && !atEnd && !moreError ? loadMore : undefined}
           loadingMore={loadingMore}
           loadMoreError={!!moreError}
-          atEnd={atEnd || mural}
+          atEnd={atEnd || mural || depo}
           onScrollFrame={bar.handleScrollFrame}
         />
         <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)} onBack={onBack} />
         {pageNoticeSheet}
       </View>
+      {testimonialTab.sheets}
     </View>
   )
 }

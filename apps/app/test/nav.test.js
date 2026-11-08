@@ -195,7 +195,7 @@ test('history.web tolerates a missing history API; native is a no-op', async (t)
 
 test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios'])
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
   for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
@@ -299,10 +299,24 @@ test('paginas and novapagina take no key, paginaajustes a lowercase hex64 page k
   }
 })
 
+test('depoimentos is keyed by a lowercase hex64 owner', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('depoimentos'))
+  t.ok(validEntry({ screen: 'depoimentos', key: A }))
+  const stack = push(EMPTY, { screen: 'depoimentos', key: A })
+  t.alike(top(stack), { screen: 'depoimentos', key: A, params: {} })
+  t.is(push(stack, { screen: 'depoimentos', key: A }), stack, 'same top is a no-op')
+  t.is(push(stack, { screen: 'depoimentos', key: B }).length, 2)
+  for (const key of [A.toUpperCase(), 'ab', A + ':1', 42, null, undefined, A + '0']) {
+    t.absent(validEntry({ screen: 'depoimentos', key }), String(key))
+    t.is(push(EMPTY, { screen: 'depoimentos', key }), EMPTY)
+  }
+})
+
 test('popTo drops back to an index and refuses bounds outside the stack', async (t) => {
   const { EMPTY, MAX_DEPTH, SCREENS, push, pop, popTo, top } = await loadNav()
   t.is(MAX_DEPTH, 20)
-  t.is(SCREENS.length, 19, 'popTo adds no screen id')
+  t.is(SCREENS.length, 20, 'popTo adds no screen id')
   let stack = EMPTY
   for (let i = 1; i <= 4; i++) stack = push(stack, { screen: 'conversa', key: A + ':' + i })
   t.is(popTo(stack, 3), stack, 'the top index is a no-op')

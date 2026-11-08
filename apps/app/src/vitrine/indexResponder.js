@@ -3,6 +3,7 @@
 import rpc from '@varanda/rpc'
 import { fixtures } from './fixtures.js'
 import { createVitrineRequest, vitrineFeiraState } from './request.js'
+import { testimonialPointers, testimonialSource } from './testimonialIndex.js'
 
 const { isKey, isRef } = rpc
 const flags = { indexing: false, complete: true }
@@ -237,6 +238,12 @@ export function vitrineIndex (url, request) {
     const groups = rows.slice(0, 32)
     const body = { ...flags, groups, next: rows.length > 32 ? groups[groups.length - 1].group : null }
     return part === undefined ? { ...body, name: c.name, join: c.join, creator: c.creator, members: fixtures.members.length } : body
+  }
+
+  if (route === 'testimonials' && part === undefined) {
+    requireProfile(key)
+    const { entries, deleted } = testimonialSource()
+    return { ...testimonialPointers(entries, deleted, key), ...flags }
   }
 
   if (route === 'group-search' && part === undefined) {

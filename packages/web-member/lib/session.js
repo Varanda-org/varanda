@@ -273,7 +273,7 @@
 // unlock with a dm-key). reset() removes the local store and the dm kv.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 const {
   validRecordCopy,
   validateRecord,
@@ -305,6 +305,7 @@ const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const member = require('./member-ops')
 const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
+const { verifyShow } = require('@varanda/core/lib/testimonials')
 const { createPeeker } = require('./peek')
 const { createNoticer } = require('./notices')
 const { createPageFeeder } = require('./page-feed')
@@ -324,6 +325,36 @@ const { applyBlock, blockedKeys } = require('@varanda/core/lib/member-block')
 const { createSeenSync, groupApplier } = require('./seen-sync')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
+const TESTIMONIAL_SELF = 'não pode escrever um depoimento para si'
+// The pointer answer is keys and seqs only: far below this.
+const TESTIMONIAL_INDEX_MAX_CHARS = 256 * 1024
+
+// A seeder index body read with a cap: a streamed body is cut off (and the
+// stream cancelled) past `max` bytes, so a seeder cannot make the node buffer
+// an endless answer; a response without a stream is read whole and checked,
+// as before. Throws SEEDER_UNAVAILABLE.
+async function boundedIndexText (res, max) {
+  const stream = res.body
+  if (!stream || typeof stream.getReader !== 'function') {
+    const text = await res.text()
+    if (typeof text !== 'string' || text.length > max) throw new Error(SEEDER_UNAVAILABLE)
+    return text
+  }
+  const reader = stream.getReader()
+  const chunks = []
+  let n = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!(value instanceof Uint8Array) || n + value.byteLength > max) {
+      try { reader.cancel().catch(() => {}) } catch {}
+      throw new Error(SEEDER_UNAVAILABLE)
+    }
+    chunks.push(value)
+    n += value.byteLength
+  }
+  return b4a.toString(b4a.concat(chunks), 'utf8')
+}
 const LOCKED_MESSAGE = 'diretório de dados em uso'
 const CLOSED_MESSAGE = 'sessão encerrada'
 const INTERNAL_MESSAGE = 'erro interno'
@@ -1667,7 +1698,8 @@ function createBrowserSession ({
         const peek = await awaitPeek(dropped, deadline)
         if (peek === null) throw new Error(SEEDER_UNAVAILABLE)
         try {
-          return await peek(key, seqs, profileSeq === undefined ? null : profileSeq, usernameSeq === undefined ? null : usernameSeq, deadline, opts)
+          const r = await peek(key, seqs, profileSeq === undefined ? null : profileSeq, usernameSeq === undefined ? null : usernameSeq, deadline, opts)
+          return await checkShows(peek, key, r, deadline)
         } catch (err) {
           if (messageOf(err) !== SEEDER_UNAVAILABLE || Date.now() >= deadline) throw err
           dropped = peek
@@ -1681,6 +1713,53 @@ function createBrowserSession ({
       throw out
     } finally {
       diaryPeeksInFlight--
+    }
+  }
+
+  // A testimonial-show stands only while its writer's block, read now on
+  // the same link, commits to that text for this owner (verifyShow): any
+  // other show, its writer block missing, revoked or mismatched included,
+  // moves to `invalid`. A writer whose diary could not be read at all leaves
+  // its shows `unverified` (docs/rpc.md 5.27): unknown, never proven bad. A
+  // dropped link is the caller's retry.
+  async function checkShows (peek, owner, r, deadline) {
+    const shows = r.entries.filter((e) => e.record.type === 'testimonial-show')
+    if (shows.length === 0) return r
+    const byWriter = new Map()
+    for (const { record } of shows) {
+      if (!byWriter.has(record.from)) byWriter.set(record.from, new Set())
+      byWriter.get(record.from).add(record.seq)
+    }
+    const writer = new Map()
+    const unreadable = new Set()
+    for (const [from, set] of byWriter) {
+      if (from === owner) continue
+      const all = [...set].sort((a, b) => a - b)
+      for (let i = 0; i < all.length; i += PEEK_SEQS_MAX) {
+        try {
+          const w = await peek(from, all.slice(i, i + PEEK_SEQS_MAX), null, null, deadline)
+          for (const e of w.entries) writer.set(from + ':' + e.seq, e.record)
+        } catch (err) {
+          if (messageOf(err) === SEEDER_UNAVAILABLE) throw err
+          unreadable.add(from)
+        }
+      }
+    }
+    const bad = new Set()
+    const unknown = new Set()
+    for (const { seq, record } of shows) {
+      const block = writer.get(record.from + ':' + record.seq) || null
+      if (verifyShow(record, block, owner)) continue
+      // A chunk that failed leaves the writer's other blocks unknown too.
+      if (block === null && unreadable.has(record.from) && record.from !== owner) unknown.add(seq)
+      else bad.add(seq)
+    }
+    const drop = (e) => !bad.has(e.seq) && !unknown.has(e.seq)
+    return {
+      ...r,
+      entries: bad.size === 0 && unknown.size === 0 ? r.entries : r.entries.filter(drop),
+      invalid: bad.size === 0 ? r.invalid : [...r.invalid, ...bad].sort((a, b) => a - b),
+      unverified: [...unknown].sort((a, b) => a - b)
     }
   }
 
@@ -2159,12 +2238,12 @@ function createBrowserSession ({
 
   // post.delete / profile.delete: the post.reply path around member-ops'
   // tombstone writer (a target already deleted writes nothing).
-  async function recordDelete (remove, { to }, epoch) {
+  async function recordDelete (remove, { to, about }, epoch) {
     const ref = parseRef(to)
     if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
     await requireUnlocked()
     await ensureCaughtUp(epoch)
-    const r = await withStore((c) => remove(c, { to: ref }))
+    const r = await withStore((c) => remove(c, about === undefined ? { to: ref } : { to: ref, about }))
     if (r.changed) wrote(r.seq)
     await pushAfterWrite()
     return { seq: r.seq, ref: r.ref, changed: r.changed, deleted: r.deleted }
@@ -2200,6 +2279,93 @@ function createBrowserSession ({
       hi = lo - 1
     }
     return best === null ? { box: null, gen: null } : { box: best.box, gen: best.gen }
+  }
+
+  // ---- depoimentos (docs/rpc.md 5.100) ----
+
+  // GET /index/testimonials/<owner> on this node's own seeder (the media
+  // route's origin rule) -> { pointers: [{ from, seq }] deduped, at most
+  // TESTIMONIAL_PENDING_MAX, incomplete }. Pointers only: every one is read
+  // and verified before it counts. No answer, or one without a `pending`
+  // list -> SEEDER_UNAVAILABLE, never an empty inbox. An index still
+  // indexing or not complete marks the answer incomplete.
+  async function testimonialPointers (owner) {
+    let ws
+    try {
+      ws = new URL(cfg.seederUrl)
+    } catch {
+      throw new Error(SEEDER_UNAVAILABLE)
+    }
+    const loopback = ws.hostname === '127.0.0.1' || ws.hostname === 'localhost' || ws.hostname === '[::1]'
+    if (ws.protocol !== 'wss:' && !(ws.protocol === 'ws:' && loopback)) throw new Error(SEEDER_UNAVAILABLE)
+    const url = (ws.protocol === 'wss:' ? 'https://' : 'http://') + ws.host + '/index/testimonials/' + owner
+    const ctl = new AbortController()
+    const timer = setTimeout(() => ctl.abort(), peekTimeoutMs)
+    let body
+    try {
+      const res = await fetchMedia(url, { cache: 'no-store', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', signal: ctl.signal })
+      if (!res || res.status !== 200 || res.redirected === true) throw new Error(SEEDER_UNAVAILABLE)
+      body = JSON.parse(await boundedIndexText(res, TESTIMONIAL_INDEX_MAX_CHARS))
+    } catch {
+      throw new Error(SEEDER_UNAVAILABLE)
+    } finally {
+      clearTimeout(timer)
+    }
+    if (body === null || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.pending)) throw new Error(SEEDER_UNAVAILABLE)
+    const pending = body.pending
+    const incomplete = body.indexing === true || body.complete === false
+    const out = []
+    const seen = new Set()
+    for (const p of pending) {
+      if (out.length >= TESTIMONIAL_PENDING_MAX) break
+      if (p === null || typeof p !== 'object' || typeof p.from !== 'string' || !/^[0-9a-f]{64}$/.test(p.from)) continue
+      if (!Number.isSafeInteger(p.seq) || p.seq < 1 || p.from === owner) continue
+      const id = p.from + ':' + p.seq
+      if (seen.has(id)) continue
+      seen.add(id)
+      out.push({ from: p.from, seq: p.seq })
+    }
+    return { pointers: out, incomplete }
+  }
+
+  // The DM engine opens each box with its in-memory pair; nothing else
+  // sees the key.
+  function openTestimonial (box, gen) {
+    return dmEngine.openTestimonial(box, gen)
+  }
+
+  // Off the chain (each read is a diary.peek). -> { items, incomplete }:
+  // incomplete when the index is not complete or a writer's blocks could
+  // not be read (a failed peek, not an invalid block, which is omitted).
+  async function testimonialPending (own) {
+    const index = await testimonialPointers(own)
+    const pointers = index.pointers
+    let incomplete = index.incomplete
+    const shown = await serial(() => withCores((c) => member.testimonialShownKeys(c)))({})
+    const byWriter = new Map()
+    for (const p of pointers) {
+      if (shown.has(p.from + ':' + p.seq)) continue
+      if (!byWriter.has(p.from)) byWriter.set(p.from, [])
+      byWriter.get(p.from).push(p.seq)
+    }
+    const blocks = []
+    for (const [from, list] of byWriter) {
+      const all = list.sort((a, b) => a - b)
+      for (let i = 0; i < all.length; i += PEEK_SEQS_MAX) {
+        let r
+        try {
+          r = await diaryPeek({ author: from, seqs: all.slice(i, i + PEEK_SEQS_MAX) })
+        } catch {
+          incomplete = true
+          continue
+        }
+        for (const e of r.entries) blocks.push({ from, seq: e.seq, record: e.record })
+      }
+    }
+    // Newest first, as the app lists them.
+    blocks.sort((a, b) => (a.record.at < b.record.at ? 1 : a.record.at > b.record.at ? -1 : 0))
+    const items = member.testimonialPendingRows(own, blocks, shown, openTestimonial, TESTIMONIAL_PENDING_MAX)
+    return { items, incomplete }
   }
 
   // Read the live run's cores so a current dm-key costs no write gate or
@@ -2947,6 +3113,69 @@ function createBrowserSession ({
     'like.set': serial(async ({ to, on }, epoch) => engagementSet(member.likeSet, { to, on }, epoch)),
 
     'repost.set': serial(async ({ to, on }, epoch) => engagementSet(member.repostSet, { to, on }, epoch)),
+
+    // The recipient's dm-key is looked up off the chain (as dm.send), then
+    // the write runs on the chain like post.create. Never retried.
+    'testimonial.write': async ({ to, text }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const key = to.toLowerCase()
+      await serial(async () => {
+        const own = await requireUnlocked()
+        if (key === own) throw new UsageError(TESTIMONIAL_SELF)
+      })({})
+      let recipient
+      try {
+        recipient = await dmLookupOf(key)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        await requireUnlocked()
+        await ensureCaughtUp(epoch)
+        const r = await withStore((c) => member.testimonialWrite(c, { to: key, text, recipient }))
+        wrote(r.seq)
+        await pushAfterWrite()
+        return { seq: r.seq, ref: r.ref }
+      })({})
+    },
+
+    // Needs the DM key (the boxes are sealed to it), as the DM reads.
+    'testimonial.pending': async () => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const own = await serial(() => requireDm())({})
+      try {
+        return await testimonialPending(own)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    },
+
+    // The writer block is read off the chain, then reopened and checked on
+    // it; a block already shown answers its show. Never retried.
+    'testimonial.show': async ({ from, seq }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const key = from.toLowerCase()
+      await serial(() => requireDm())({})
+      let record = null
+      try {
+        const r = await diaryPeek({ author: key, seqs: [seq] })
+        const e = r.entries.find((x) => x.seq === seq)
+        if (e !== undefined) record = e.record
+      } catch {}
+      return serial(async (_, epoch) => {
+        await requireDm()
+        await ensureCaughtUp(epoch)
+        const r = await withStore((c) => member.testimonialShow(c, { from: key, seq, record, open: openTestimonial }))
+        if (r.changed) wrote(r.seq)
+        await pushAfterWrite()
+        return { seq: r.seq, ref: r.ref }
+      })({})
+    },
+
+    'testimonial.delete': serial(async ({ to, about }, epoch) => {
+      const r = await recordDelete(member.testimonialDelete, { to, about }, epoch)
+      return { seq: r.seq, deleted: r.deleted }
+    }),
 
     // Which of the refs the own diary likes / reposts; local data only,
     // works locked (as profile.read).
