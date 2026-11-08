@@ -134,6 +134,17 @@ jobs:
       - name: Install the Android packages the build pins
         run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --install "ndk;27.1.12297006" "cmake;3.22.1" "platforms;android-36" "build-tools;36.0.0"'
       - run: npm run prepare:native -w apps/app -- android
+      # A fresh runner has no Gradle and the wrapper's single download attempt
+      # is all it gets, so a bad moment at services.gradle.org fails every app
+      # PR. Only the distribution is kept: dependencies still resolve on each
+      # build. PRs read what main saved. On a miss (first run, new version,
+      # evicted entry) the wrapper downloads as before and can fail the same
+      # way. The action saves only after a passing job, so nothing partial is
+      # kept, and a PR's own save reaches only that PR's re-runs.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.gradle/wrapper/dists
+          key: gradle-wrapper-${{ runner.os }}-${{ hashFiles('apps/app/android/gradle/wrapper/gradle-wrapper.properties') }}
       # JDK 17 from the image: the React Native Gradle plugin targets 17.
       - name: Build the debug APK
         working-directory: apps/app/android
