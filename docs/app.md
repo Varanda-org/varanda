@@ -521,7 +521,7 @@ A Feira é o lugar de anúncios da rede: produtos, serviços e procuras ("Procur
 
 ### A aba Feira
 
-- No topo, três segmentos: **Na cidade** (a busca), **Meus** (os próprios anúncios, ou os da Página quando a pessoa age como Página) e **Salvos** (os anúncios salvos neste aparelho).
+- No topo, quatro segmentos: **Na cidade** (a busca), **Meus** (os próprios anúncios, ou os da Página quando a pessoa age como Página), **Salvos** (os anúncios salvos neste aparelho) e **Buscas** (as buscas salvas, veja "Buscas salvas").
 - Na cidade: "Escolher estado" (UF), **Cidade**, **Palavras (opcional)** e **Buscar**; filtros de tipo (**Todos**, **Produtos**, **Serviços**, **Procura-se**) e de categoria ("Todas as categorias" e as categorias da Feira). Sem estado e cidade, a tela pede "Escolha o estado e escreva a cidade.". O estado e a cidade ficam guardados só neste aparelho (no navegador, no `localStorage` com a chave `varanda-feira-location`; no app, no arquivo `varanda-feira-location.json` na pasta de documentos) e nunca vão para a conta; se não der para guardar, a nota é "Não foi possível lembrar a cidade neste aparelho.".
 - O botão **Anunciar** abre o formulário por cima das abas, já com o estado e a cidade lembrados. O formulário pede a confirmação "Público na web e em buscadores" antes de publicar. Publicado, o anúncio abre no lugar do formulário (Voltar não volta para o formulário enviado). Se o envio não teve resposta, a tela diz "Não sabemos se o anúncio foi publicado. Confira em Meus anúncios antes de anunciar de novo." e nada é reenviado sozinho.
 - As linhas vêm do índice do semeador e são só uma dica: a tela **Anúncio** relê o anúncio do diário de quem anunciou. Uma linha velha do índice, que o semeador ainda não atualizou, mostra "Situação desconhecida" no lugar do status.
@@ -535,13 +535,46 @@ Fotos, título, preço, cidade, o status ("Reservado", "Vendido" ou "Encontrado"
 - **Compartilhar** copia ou compartilha o link público do anúncio ("Link copiado.").
 - **Salvar** / **Salvo**: guarda só neste aparelho.
 - **Denunciar** abre a folha de denúncia com o anúncio (veja "Denúncias de anúncio").
-- Para quem anunciou (ou administra a Página que anunciou), com rede: os botões de status ("Reservado", "Vendido", "Encontrei" numa procura, e a volta para disponível) e **Apagar**, que pede "Confirmar: apagar". Apagar tira o anúncio do índice e a página pública passa a responder "Anúncio não encontrado".
+- Para quem anunciou (ou administra a Página que anunciou), com rede: os botões de status ("Reservado", "Vendido", "Encontrei" numa procura, e a volta para disponível) e **Apagar**, que pede "Confirmar: apagar". Apagar tira o anúncio do índice e a página pública passa a responder "Anúncio não encontrado". Com rede, o mesmo dono vê também **Editar** (veja "Editar anúncio").
+- Abaixo do anúncio, as avaliações, com a nota "avaliações confirmadas pelo anunciante" (veja "Avaliações").
+
+### Editar anúncio
+
+**Editar** abre "Editar anúncio" ("Editar anúncio da página" quando a pessoa age como Página): o mesmo formulário de Anunciar, sem trocar o tipo. Título, descrição, valor, unidade, categoria, lugar e fotos mudam; as fotos atuais ficam, saem ou ganham novas, que só sobem no **Salvar**. Antes da primeira edição a tela avisa: "A primeira versão (título, texto e fotos) continua no seu diário até você apagar o anúncio. A página pública mostra a versão nova.". O link público `/f/<diário>/<seq>` não muda; a prévia passa a mostrar a versão nova.
+
+- Salvo, a tela volta para o anúncio, que é lido de novo.
+- Se outro aparelho editou antes: "Este anúncio mudou em outro aparelho. Recarregue para editar a versão atual.", com **Recarregar** ("Recarregar traz a versão atual e descarta o que você mudou aqui.").
+- Sem resposta, nada é reenviado sozinho: o formulário fica travado com **Tentar de novo** (o mesmo pedido) e **Descartar**.
+- Só o dono edita: "Só quem publicou este anúncio pode editá-lo.".
+
+### Ofertas na conversa
+
+Numa conversa que tem o link de um anúncio da outra pessoa, aparece **Fazer oferta**. A folha "Fazer oferta" pede o **Valor (R$)** e **Enviar oferta** manda o link da oferta com o texto (por exemplo "Ofereço …"). Uma Página manda a oferta só como texto com o link, e uma Página responde em texto com o link.
+
+- Quem anunciou vê **Aceitar** e **Recusar** na oferta aberta mais recente. **Aceitar** abre "Aceitar oferta", com o valor e a nota "Ao aceitar, você assina um consentimento que deixa esta pessoa publicar uma avaliação do seu anúncio. Você não escolhe as estrelas, e isso não é um pagamento.", e o botão **Aceitar e assinar**. A assinatura vai na resposta ("Aceitei sua oferta de …"); **Recusar** responde "Recusei sua oferta de …".
+- A oferta não é um pagamento: o pagamento é combinado entre as pessoas, fora do aplicativo.
+- As ofertas existem só na conversa: o estado é lido das mensagens cada vez, e nada fica guardado em outro lugar. Uma oferta, um aceite ou uma recusa sem resposta só é reenviado por **Tentar de novo**. Um aceite de quem não é o dono do anúncio é ignorado.
+
+### Avaliações
+
+Depois de um aceite com a assinatura, só quem fez a oferta vê **Avaliar** na conversa. A tela Avaliar pede de 1 a 5 estrelas e um "Comentário (opcional)", com a nota "A avaliação fica pública no anúncio. Ela não é prova de pagamento.". Sem resposta, nada é reenviado sozinho ("Não sabemos se a avaliação foi publicada. Confira o anúncio antes de avaliar de novo.", com **Tentar de novo** e **Descartar**).
+
+- Uma Página não avalia por enquanto: "Uma página não avalia anúncios por enquanto. Para avaliar, use o seu perfil.".
+- Na tela Anúncio e no perfil (Membro), as avaliações vêm com "avaliações confirmadas pelo anunciante" e só aparecem as que o nó conferiu, uma por pessoa e anúncio (a mais nova vale). Uma avaliação sem o consentimento assinado não aparece, nem a de quem entrou na rede há menos de 7 dias (conta a data do certificado de quem avalia, no relógio de quem lê).
+
+### Buscas salvas
+
+Na cidade, com uma busca feita, **Salvar busca** guarda a busca neste aparelho ("Busca salva neste aparelho."), até 10 ("Você já tem 10 buscas salvas. Remova uma para salvar outra."). O segmento **Buscas** lista as buscas salvas, cada uma com "N novos" (anúncios novos desde a última vez que a busca foi aberta); sem nenhuma: "Você ainda não tem buscas salvas neste aparelho.".
+
+- As contagens são feitas ao abrir a Feira ou voltar ao aplicativo, no máximo a cada 15 minutos, olhando a primeira página de cada busca, e ficam só no aparelho; offline, ficam as últimas contagens. Não há aviso push nem busca em segundo plano.
+- Com alguma busca com anúncios novos, a aba Feira ganha um ponto, que reflete o que a última abertura da Feira viu.
 
 ### Links: `/f/` e `/anuncio/`
 
 - `/f/<diário>/<seq>` é a **página pública** do anúncio, servida pelo semeador: abre no navegador, sem conta, com título, preço, cidade e fotos, e com as etiquetas OpenGraph, então um aplicativo de mensagens mostra a prévia. É indexada por buscadores enquanto o anúncio está disponível ou reservado; um anúncio vendido mantém a página, com `noindex`, e sai do `sitemap.xml`. O botão da página é "Entrar para conversar" ("Entrar para oferecer" numa procura).
 - `/anuncio/<diário>/<seq>` é o mesmo anúncio **dentro do app**: é para onde aquele botão leva. Na web hospedada, o app lê `/anuncio/…` (e também `/f/…`, quando chega até ele) uma vez ao carregar, limpa a barra de endereço para `/` e guarda o anúncio na aba (`sessionStorage`, chave `varanda-feira-listing`, no máximo 1 h), para ele sobreviver ao Google, aos Termos e à configuração. Com as abas na tela, a tela Anúncio abre uma vez; nada é enviado nem seguido sozinho.
 - No app instalado, `varanda:///anuncio/<diário>/<seq>` e os links https `/anuncio/…` e `/f/…` da própria instalação abrem a tela Anúncio quando as abas aparecem. Um link de outro domínio é descartado.
+- Com o app instalado, um link `/anuncio/…` da instalação abre direto no app: no Android pelos App Links (verificados pelo `assetlinks.json`), no iOS pelos links universais, depois que a instalação publica o `apple-app-site-association` com `applinks`. A página pública `/f/…` continua no navegador, para manter a prévia; ela mostra também "Já tem o app? Abrir no app", que leva a `varanda:///anuncio/<diário>/<seq>`, porque o iOS mantém no Safari um toque num link do mesmo site.
 - O link que Compartilhar usa é sempre o público, `<origem da instalação>/f/<diário>/<seq>`, com o número do anúncio original: uma edição troca o conteúdo, o link continua o mesmo.
 
 ### Entrar a partir de um anúncio
@@ -555,6 +588,10 @@ Quem age como Página (o seletor de Publicar) anuncia em nome dela, e "Meus" mos
 ### Denúncias de anúncio
 
 "Denunciar" na tela Anúncio abre a mesma folha das outras denúncias, com o título do anúncio; a denúncia vai sempre para uma pessoa da moderação (a IA não decide anúncios). No painel de moderação ela aparece como "anúncio", com o filtro "Anúncios", o link da página pública e "Ver anúncio".
+
+### Vitrine
+
+Com a Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`, veja [development.md](development.md)), a aba Feira aparece com anúncios de exemplo (produtos, um serviço, uma procura e um anúncio de Página, um deles editado), uma conversa com uma oferta aceita e avaliações (uma delas com um consentimento inválido, que não aparece), para capturas de tela, sem conta. Os dados estão em `apps/app/src/vitrine/fixtures.js`.
 
 ### Anúncios de uma pessoa
 

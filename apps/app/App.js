@@ -147,6 +147,10 @@ import Membro from './src/screens/Membro'
 import Feira from './src/screens/Feira'
 import Anuncio from './src/screens/Anuncio'
 import Anunciar from './src/screens/Anunciar'
+import AnuncioEditar from './src/screens/AnuncioEditar'
+import Avaliar from './src/screens/Avaliar'
+import { alertsStore } from './src/feiraAlertsStore'
+import { alertsBadge } from './src/feiraScreen'
 import { createFeiraEntry, decideEntry, heldIsFeira } from './src/feiraEntry'
 import { useFeiraEntryStart } from './src/useFeiraEntryStart'
 import { captureListing, dropListing, entryStorage, holdFeiraCode } from './src/feiraEntryStore'
@@ -346,6 +350,8 @@ function Member () {
   const [ajustes, setAjustes] = useState(null)
   // The report sheet's target: null | { author, name, username, seq, text }.
   const [report, setReport] = useState(null)
+  // Bumped by a saved edit so the Anúncio under the editor reads it again.
+  const [listingRefresh, setListingRefresh] = useState(0)
   // 'Pular por enquanto' / 'Continuar mesmo assim': session-only, so the name
   // is asked again only after a reload.
   const [skippedName, setSkippedName] = useState(false)
@@ -1755,6 +1761,25 @@ function Member () {
       setDmDot(false)
     }
   }, [dmReady, dmDotGate, readDmDot, node.dmVersion, stackDepth])
+  // --- Feira: the tab dot from saved searches (src/feiraAlerts.js) ---
+  // Only the Feira screen runs the searches, when it is opened; this reads
+  // the counts that run left on the device, so nothing polls here. Counts
+  // are recorded only while the Feira answered as on, so a stored count
+  // stands for "on" at the last opening. Same origin rule as Feira.js.
+  const feiraAlertsOrigin = installationOrigin() || globalThis.location?.origin || node.accountOrigin
+  const feiraOnScreen = tab === 'feira' && stackDepth === 0
+  const [feiraAlerts, setFeiraAlerts] = useState(null)
+  useEffect(() => {
+    if (mode !== 'hosted' || !ready || locked || feiraOnScreen) return
+    let live = true
+    alertsStore.load(feiraAlertsOrigin).then((value) => {
+      if (live) setFeiraAlerts({ epoch: nodeEpoch, origin: feiraAlertsOrigin, value })
+    }, () => {})
+    return () => { live = false }
+  }, [mode, ready, locked, feiraOnScreen, feiraAlertsOrigin, nodeEpoch])
+  const feiraBadge = mode === 'hosted' && !locked && !feiraOnScreen && feiraAlerts !== null &&
+    feiraAlerts.epoch === nodeEpoch && feiraAlerts.origin === feiraAlertsOrigin &&
+    alertsBadge({ node, enabled: true, searches: feiraAlerts.value.searches, counts: feiraAlerts.value.counts })
   // --- Visto em todos os aparelhos (src/seenSync.js) ---
   // The same passkey on another device marked notices, conversations or
   // groups as seen: a pass reads the encrypted seen document from the account
@@ -1932,6 +1957,16 @@ function Member () {
   const openListing = useCallback((author, seq) => {
     if (typeof author !== 'string' || !Number.isSafeInteger(seq)) return
     pushScreen({ screen: 'anuncio', key: author.toLowerCase() + ':' + seq, params: {} })
+  }, [pushScreen])
+  // Anuncio shows Editar only to its owner (or the Página acting as it).
+  const openEditListing = useCallback((listing) => {
+    if (typeof listing?.author !== 'string' || !Number.isSafeInteger(listing.seq)) return
+    pushScreen({ screen: 'editar-anuncio', key: listing.author.toLowerCase() + ':' + listing.seq, params: {} })
+  }, [pushScreen])
+  // Only the thread knows the accepted offer a rating needs (nav.js checks it).
+  const openAvaliar = useCallback(({ author, seq, offer } = {}) => {
+    if (typeof author !== 'string' || !Number.isSafeInteger(seq) || typeof offer !== 'string') return
+    pushScreen({ screen: 'avaliar', key: author.toLowerCase() + ':' + seq, params: { offer } })
   }, [pushScreen])
   // Anunciar starts from the city the Feira remembers.
   const feiraPlaceRef = useRef(null)
@@ -2634,7 +2669,7 @@ function Member () {
       if (entry.screen === 'mensagem') {
         return (
           <StackLayer key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-            <Mensagem peer={entry.key} initial={entry.params.initial || undefined} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} onOpenListing={openListing} />
+            <Mensagem peer={entry.key} initial={entry.params.initial || undefined} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} onOpenListing={openListing} onAvaliar={openAvaliar} />
           </StackLayer>
         )
       }
@@ -2655,7 +2690,23 @@ function Member () {
               onDenunciar={setReport}
               onOpenAuthor={openMember}
               onDeleted={goBack}
+              onEditar={openEditListing}
+              refresh={listingRefresh}
             />
+          </StackLayer>
+        )
+      }
+      // Both go back on success: the listing (or the thread) below re-reads.
+      if (entry.screen === 'editar-anuncio' || entry.screen === 'avaliar') {
+        const at = entry.key.lastIndexOf(':')
+        const author = entry.key.slice(0, at)
+        const seq = Number(entry.key.slice(at + 1))
+        const actingPage = pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && acting.kind === 'page' ? acting.key : null
+        return (
+          <StackLayer key={i + ':' + entry.screen + ':' + entry.key + ':' + actingIdentity + ':' + (actingPage || '') + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            {entry.screen === 'editar-anuncio'
+              ? <AnuncioEditar author={author} seq={seq} me={ownKey} actingPage={actingPage} onBack={goBack} onSaved={() => { setListingRefresh((n) => n + 1); goBack() }} />
+              : <Avaliar author={author} seq={seq} offer={entry.params.offer} me={ownKey} actingPage={actingPage} onBack={goBack} onRated={goBack} />}
           </StackLayer>
         )
       }
@@ -2948,7 +2999,7 @@ function Member () {
           : null}
         {showPostButton({ tab, screen: stacked ? nav.top(stack).screen : null }) ? <Fab onPress={openComposer} /> : null}
         {/* Avisos is not a tab: the bar keeps the tab it was opened from, and that tab's icon closes it. */}
-        {stacked ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot }} tabs={tabsFor(mode)} me={tabMe} />}
+        {stacked ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot, feira: feiraBadge }} tabs={tabsFor(mode)} me={tabMe} />}
       </View>
     )
   }

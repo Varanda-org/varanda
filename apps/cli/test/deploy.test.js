@@ -662,7 +662,10 @@ function checkAssocShapes (t, wk) {
     target: { namespace: 'android_app', package_name: 'app.varanda', sha256_cert_fingerprints: [FAKE_CERT] }
   }], 'assetlinks.json shape (handle_all_urls for the Auth Tab return)')
   t.alike(JSON.parse(fs.readFileSync(path.join(wk, 'apple-app-site-association'), 'utf8')),
-    { webcredentials: { apps: [FAKE_IOS] } }, 'apple-app-site-association shape')
+    {
+      webcredentials: { apps: [FAKE_IOS] },
+      applinks: { apps: [], details: [{ appIDs: [FAKE_IOS], components: [{ '/': '/anuncio/*' }] }] }
+    }, 'apple-app-site-association shape (applinks for /anuncio/ only)')
 }
 
 // A temporary root with deploy/seeder/.env and a www holding the SPA.

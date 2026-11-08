@@ -250,3 +250,92 @@ test('autor segment lists one author, keeps sold and stale rows, drops blocked o
   }
   t.alike(calls, [P], 'a bad key never reaches the request')
 })
+
+test('alert badge requires saved new items and an enabled Feira, keeps offline counts', async (t) => {
+  const { alertsBadge, runFeiraAlerts } = await load()
+  const state = { searches: [{ id: 'search' }], counts: { search: 2 } }
+  t.ok(alertsBadge({ node, enabled: true, ...state }))
+  t.ok(alertsBadge({ node: { ...node, online: false }, enabled: true, ...state }))
+  t.absent(alertsBadge({ node, enabled: false, ...state }))
+  t.absent(alertsBadge({ node: { ...node, hosted: false }, enabled: true, ...state }))
+  t.absent(alertsBadge({ node, enabled: true, ...state, counts: { search: 0, removed: 2 } }))
+  t.absent(alertsBadge({ node, enabled: true, ...state, searches: [] }))
+  const store = { load: async () => state, beginRun: () => { throw new Error('must not run') } }
+  for (const opts of [{ node: { ...node, online: false } }, { node: { ...node, visible: false } }, { enabled: false }, { isActive: () => false }]) {
+    t.alike(await runFeiraAlerts({ node, enabled: true, isActive: () => true, store, ...opts }), state)
+  }
+})
+
+test('alerts run sequentially, at most ten index calls, never follow cursors and throttle', async (t) => {
+  const { runFeiraAlerts } = await load()
+  const { createAlertsStore, INTERVAL_MS } = await import('../src/feiraAlerts.js')
+  let raw = null
+  const store = createAlertsStore({ read: () => raw, write: (value) => { raw = value } })
+  const origin = 'https://bora.varanda.app'
+  const now = Date.parse(row().at) + 100
+  for (let i = 0; i < 10; i++) await store.add(origin, { uf: 'SP', cityKey: 'sao-paulo', cityLabel: 'São Paulo', kind: 'todos', cat: 'todas', tokens: ['busca' + i] }, now - 200)
+  let calls = 0
+  let pending = 0
+  let maxPending = 0
+  const search = async (request, query) => {
+    calls++
+    pending++
+    maxPending = Math.max(maxPending, pending)
+    t.is(query.cursor, null)
+    await Promise.resolve()
+    pending--
+    return page([row({ title: query.tokens }), row({ seq: 2, title: 'unrelated' }), row({ seq: 3, title: query.tokens, status: 'vendido' }), row({ seq: 4, title: query.tokens, author: P })], { next: 'more' })
+  }
+  const options = { node, enabled: true, origin, store, now, isActive: () => true, blocked: new Set([P]) }
+  const state = await runFeiraAlerts(options, { search })
+  t.is(calls, 10)
+  t.is(maxPending, 1)
+  t.alike(Object.values(state.counts), Array(10).fill(1), 'only matching live unblocked rows count')
+  await runFeiraAlerts(options, { search })
+  t.is(calls, 10, 'same opening is throttled')
+  let active = true
+  await runFeiraAlerts({ ...options, now: now + INTERVAL_MS, isActive: () => active }, { search: async () => { calls++; active = false; return page([row()]) } })
+  t.is(calls, 11, 'closing the tab stops remaining calls')
+})
+
+test('alerts keep previous counts on errors and stop on an off index', async (t) => {
+  const { runFeiraAlerts } = await load()
+  const searches = [1, 2].map((id) => ({ id, uf: 'SP', cityLabel: 'São Paulo', kind: 'todos', cat: 'todas', tokens: [], seenAtMs: 0 }))
+  const state = { searches, counts: { 1: 3, 2: 4 } }
+  let recorded = null
+  const store = {
+    load: async () => state,
+    beginRun: async () => state,
+    recordCounts: async (origin, results) => {
+      recorded = results
+      return { searches, counts: Object.fromEntries(results.map((r) => [r.id, r.count])) }
+    }
+  }
+  const options = { node, enabled: true, store, isActive: () => true }
+  let calls = 0
+  const off = await runFeiraAlerts(options, { search: async () => { calls++; return { off: true } } })
+  t.ok(off.off)
+  t.alike(off.counts, { 1: 0, 2: 0 }, 'an off Feira clears the counts, so the tab dot goes out')
+  t.alike(recorded.map((r) => r.count), [0, 0])
+  t.is(calls, 1)
+  recorded = null
+  t.alike(await runFeiraAlerts(options, { search: async () => ({ ok: false }) }), state)
+  t.alike(await runFeiraAlerts(options, { search: async () => { throw new Error('offline') } }), state)
+  t.is(recorded, null, 'errors keep the previous counts')
+})
+
+test('saved-search segment probes availability without a city query; runner bounds even oversized input', async (t) => {
+  const { loadFeiraPage, runFeiraAlerts } = await load()
+  let probes = 0
+  const result = await loadFeiraPage({ node, segment: 'buscas' }, {
+    policy: async () => { probes++; return { enabled: true } },
+    search: () => { throw new Error('no city query') }
+  })
+  t.is(result.ok, true)
+  t.is(probes, 1)
+  const state = { searches: Array.from({ length: 15 }, (_, id) => ({ id, uf: 'SP', cityLabel: 'São Paulo', kind: 'todos', cat: 'todas', tokens: [], seenAtMs: 0 })) }
+  const store = { beginRun: async () => state, recordCounts: async () => state }
+  let calls = 0
+  await runFeiraAlerts({ node, enabled: true, store, isActive: () => true }, { search: async () => { calls++; return page() } })
+  t.is(calls, 10)
+})

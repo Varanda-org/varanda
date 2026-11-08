@@ -2,6 +2,7 @@ import rpc from '@varanda/rpc'
 import { CAT_LABELS, listingView } from './feira.js'
 import { search, byAuthor } from './feiraClient.js'
 import { tokensOf, MAX_QUERY_TOKENS, SEARCH_INPUT_MAX } from './topics.js'
+import { countNew, MAX_SEARCHES } from './feiraAlerts.js'
 
 const { feira, displayText } = rpc
 const HEX64 = /^[0-9a-f]{64}$/
@@ -16,7 +17,8 @@ export const KIND_OPTIONS = [
 export const SEGMENT_OPTIONS = [
   { id: 'cidade', label: 'Na cidade' },
   { id: 'meus', label: 'Meus' },
-  { id: 'salvos', label: 'Salvos' }
+  { id: 'salvos', label: 'Salvos' },
+  { id: 'buscas', label: 'Buscas' }
 ]
 export const CATEGORY_OPTIONS = [{ id: 'todas', label: 'Todas as categorias' },
   ...Object.entries(CAT_LABELS).map(([id, label]) => ({ id, label }))]
@@ -56,7 +58,7 @@ export function searchQuery (filters) {
   return { uf: f.uf, cityKey, kind: f.kind, cat: f.cat, tokens: tokens.length ? tokens.join('+') : null }
 }
 
-// PR4 can save this query without retaining any listing or peer text.
+// Only the canonical query, never a listing or peer text.
 export function savedSearch (filters) {
   const query = searchQuery(filters)
   return query === null ? null : { ...query }
@@ -152,6 +154,7 @@ export async function loadFeiraPage (options, deps = {}) {
       if (!policy) return { ok: false, items: [], next: null }
       if (!policy.enabled) return { off: true, items: [], next: null }
     }
+    if (options.segment === 'buscas') return { ok: true, items: [], next: null }
     if (['location', 'words'].includes(gate.kind)) return { ok: true, items: [], next: null }
     if (source.kind === 'mine') {
       if (!HEX64.test(ownKey)) return { ok: false, items: [], next: null }
@@ -195,6 +198,37 @@ export function mergeRows (before, after) {
   const rows = new Map(before.map((row) => [refOf(row), row]))
   for (const row of after) rows.set(refOf(row), row)
   return [...rows.values()]
+}
+
+export function alertsBadge ({ node, enabled, searches = [], counts = {} } = {}) {
+  return node?.hosted === true && enabled === true && searches.some((s) => Number.isSafeInteger(counts[s.id]) && counts[s.id] > 0)
+}
+
+export async function runFeiraAlerts ({ node, enabled, origin, store, now = Date.now(), isActive = () => false, blocked = new Set() }, deps = {}) {
+  const canRun = () => isActive() && node?.hosted === true && node.online !== false && node.visible !== false && enabled === true
+  if (!canRun()) return store.load(origin)
+  const state = await store.beginRun(origin, now)
+  if (!state) return store.load(origin)
+  const results = []
+  for (const saved of state.searches.slice(0, MAX_SEARCHES)) {
+    if (!canRun()) break
+    const filters = { uf: saved.uf, city: saved.cityLabel, kind: saved.kind, cat: saved.cat, words: saved.tokens.join(' ') }
+    let answer
+    try {
+      answer = await (deps.search || search)((...args) => node.request(...args), { ...searchQuery(filters), cursor: null })
+    } catch { continue }
+    if (!canRun()) break
+    // The Feira went off here: what earlier runs counted is no longer news,
+    // so the tab dot must not keep shining on it.
+    if (answer?.off) {
+      const cleared = await store.recordCounts(origin, state.searches.map((s) => ({ id: s.id, seenAtMs: s.seenAtMs, count: 0 })))
+      return { ...(cleared || await store.load(origin)), off: true }
+    }
+    if (!answer?.ok) continue
+    const items = (answer.items || []).filter((row) => rowDecision(row, { filters, blocked }))
+    results.push({ id: saved.id, seenAtMs: saved.seenAtMs, count: countNew({ items }, saved.seenAtMs, now) })
+  }
+  return results.length ? store.recordCounts(origin, results) : store.load(origin)
 }
 
 // The integration supplies device storage; only UF and city are persisted.

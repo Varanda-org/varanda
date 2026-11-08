@@ -149,6 +149,15 @@ test('unit label, place, seller and enter href', (t) => {
   t.absent(html.includes('\u2014'), 'no em dash')
 })
 
+test('the app link appears only in its exact shape', (t) => {
+  const app = 'varanda:///anuncio/' + HEX + '/7'
+  t.ok(renderListingPage(view({ appUrl: app })).includes('<a class="app" href="' + app + '">Já tem o app? Abrir no app</a>'), 'iOS keeps same-host links in Safari: the scheme link opens the app')
+  for (const bad of ['javascript:alert(1)', 'varanda:///anuncio/' + HEX.toUpperCase() + '/7', 'varanda:///anuncio/' + HEX + '/0', 'varanda://evil/anuncio/' + HEX + '/7', app + '"><script>', 'https://evil.example/anuncio/' + HEX + '/7']) {
+    t.absent(renderListingPage(view({ appUrl: bad })).includes('class="app"'), bad)
+  }
+  t.absent(renderListingPage(view()).includes('class="app"'), 'no link without the field')
+})
+
 test('og:description: price, place and a 160 code point cut of the text', (t) => {
   const html = renderListingPage(view({ text: 'é'.repeat(400) }))
   const m = html.match(/<meta property="og:description" content="([^"]*)">/)

@@ -134,6 +134,9 @@ test('listingLinkOf: own origin only, last link wins, fragment ignored', async (
   t.alike(c.listingLinkOf(URL7 + '#oferta=5000', ORIGIN), { author: A, seq: 7 }, 'an offer url still matches the pill')
   t.alike(c.listingLinkOf({ url: URL7 + '#oferta=5000&resposta=recusada' }, ORIGIN), { author: A, seq: 7 })
   t.alike(c.listingLinkOf({ url: URL7 }, ORIGIN), { author: A, seq: 7 })
+  const CONSENT = '9'.repeat(128)
+  t.alike(c.listingLinkOf('Aceitei sua oferta de R$ 50,00: ' + URL7 + '#oferta=5000&aceite=' + CONSENT, ORIGIN), { author: A, seq: 7 }, 'an aceite text keeps the pill')
+  t.alike(c.listingLinkOf({ url: URL7 + '#oferta=5000&aceite=' + CONSENT }, ORIGIN), { author: A, seq: 7 }, 'an aceite card keeps the pill')
   t.alike(c.listingLinkOf(ORIGIN + '/anuncio/' + A + '/3', ORIGIN), { author: A, seq: 3 })
   t.alike(c.listingLinkOf(ORIGIN + '/f/' + A + '/1 e ' + URL7, ORIGIN), { author: A, seq: 7 })
 
@@ -147,4 +150,12 @@ test('listingLinkOf: own origin only, last link wins, fragment ignored', async (
   t.is(c.listingLinkOf('x'.repeat(4001) + ' ' + URL7, ORIGIN), null)
   t.is(c.listingLinkOf(null, ORIGIN), null)
   t.is(c.listingLinkOf({ url: 42 }, ORIGIN), null)
+})
+
+test('sellerTitle: one line, a title holding a link left out', async (t) => {
+  const c = await load()
+  t.is(c.sellerTitle({ title: 'Bicicleta\naro 26' }, 120), 'Bicicleta aro 26')
+  t.is(c.sellerTitle({ title: 'Bicicleta https://tracker.example/x' }, 120), '')
+  t.is(c.sellerTitle({ title: 'x'.repeat(50) }, 10).length <= 10, true)
+  t.is(c.sellerTitle(null, 10), '')
 })

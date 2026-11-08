@@ -36,6 +36,14 @@
 // Voice notes take the same path: with an empty field the composer records
 // one (where the device can make audio/mp4), it goes to the blob channel as
 // the only item of one dm.send, and the bubble plays it (VoiceBubble).
+// Feira offers (feiraOffer.js): while the thread holds a link to one of the
+// peer's listings, "Fazer oferta" sends the offer link (a card and the text;
+// a page sends text only). The listing author sees Aceitar and Recusar on
+// the latest open offer: Aceitar first shows what the signature means, then
+// signs listing.consent (as a page, the listing-consent action) and replies
+// with the aceite link; the proposer then sees Avaliar (onAvaliar). The
+// offer state is read from the thread every time, nothing else is stored,
+// and an uncertain offer, aceite or recusa is resent only by "Tentar de novo".
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyboardAvoidingView, Platform, StyleSheet, View } from 'react-native'
@@ -51,16 +59,17 @@ import { countChars } from '../format'
 import { LABELS, UNSURE_SEND } from '../dm'
 import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
-import { quickReplies } from '../feira'
+import { parsePriceText, quickReplies } from '../feira'
+import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
 import { mergeMessages, newestOf, pageDmRequest, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
-import { pagesDm } from '../pages'
+import { actAs, pagesDm } from '../pages'
 import { pagesOn } from '../pageGate'
 import { cardFits, composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
 import { cardForSend, draftView, freezeSnapshot, linkDraftIdle, linkDraftStep, withCardFallback } from '../linkCard'
 import { previewTarget } from '../preview'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { chatMediaRefs, retryChatSend, runChatSend, stagedOf } from '../chatSend'
-import { Btn, ErrorText, Soft, errorText, useAction, useNow } from '../ui'
+import { Btn, ErrorText, Field, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
 import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
@@ -122,7 +131,7 @@ export function Mensagem ({ initial, ...props }) {
   return <MensagemThread key={identity + ':' + props.peer} {...props} initial={entry.current.initial} />
 }
 
-function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing }) {
+function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing, onAvaliar }) {
   const styles = useStyles(makeStyles)
   const origin = installationOrigin() || globalThis.location?.origin || ''
   const node = useNode()
@@ -178,6 +187,15 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const [forwarding, setForwarding] = useState(null)
   const post = useAction()
   const act = useAction()
+  // Offers: the "Fazer oferta" sheet and its value, the offer an Aceitar
+  // waits to confirm ({ offer, listing }), and offerHold { op, retry } after
+  // an uncertain offer, aceite or recusa (resent only on a tap).
+  const offerAct = useAction()
+  const [offerOpen, setOfferOpen] = useState(false)
+  const [offerValue, setOfferValue] = useState('')
+  const [offerNote, setOfferNote] = useState('')
+  const [confirming, setConfirming] = useState(null)
+  const [offerHold, setOfferHold] = useState(null)
   const attachments = useChatAttachments()
   // The draft link card (not as a page: its sends are signed statements).
   const initialTarget = initialCard.url !== null && previewTarget(draft) === initialCard.url
@@ -271,6 +289,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     setHold(null)
     setAskNew(false)
     setMediaHold(null)
+    setOfferHold(null)
+    setConfirming(null)
+    setOfferOpen(false)
     attachments.clear()
   }, [pageKey])
 
@@ -503,6 +524,88 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     attachments.clear()
   }
 
+  // One offer step's dm.send. `op` is kept with an uncertain answer and only
+  // "Tentar de novo" sends it again (a page re-puts its signed bytes).
+  const offerSend = async (build) => {
+    let lastOffer = null
+    let sent = null
+    const r = await offerAct.run(async () => {
+      try {
+        const step = await build()
+        sent = step
+        return await (step.retry ? step.retry() : dm('dm.send', step.op))
+      } catch (err) {
+        lastOffer = err
+        throw err
+      }
+    })
+    if (!live.current) return
+    if (r.ok) {
+      setOfferHold(null)
+      setOfferOpen(false)
+      setOfferValue('')
+      setConfirming(null)
+    } else if (sent !== null && (r.uncertain || unsureSend(lastOffer))) {
+      const retry = pageKey !== null && lastOffer && typeof lastOffer.retry === 'function' ? lastOffer.retry : null
+      setOfferHold({ op: sent.op, retry })
+      setOfferOpen(false)
+      setConfirming(null)
+    } else if (lastOffer && lastOffer.message === BLOCKED_SEND) {
+      setBlocked(true)
+    }
+    reread()
+  }
+
+  // A personal account sends the link as a card and in the text; a page's
+  // sends are text only (signed statements), so the text always holds it.
+  const offerOp = (text, card, replyId) => {
+    const target = { kind: 'dm', to: peer, ...(replyId ? { replyTo: replyId } : {}) }
+    if (pageKey !== null || card === null) return { to: peer, text, ...(replyId ? { replyTo: replyId } : {}) }
+    return composePlan({ text, target, card }).send().params
+  }
+
+  const sendOffer = (listing) => {
+    setOfferNote('')
+    const cents = parsePriceText(offerValue)
+    if (!validCents(cents)) {
+      setOfferNote('Escreva um valor maior que zero, como 80 ou 12,50.')
+      return
+    }
+    const card = offerCard({ origin, listing, cents })
+    if (card === null) {
+      setOfferNote('Não foi possível montar a oferta.')
+      return
+    }
+    offerSend(async () => ({ op: offerOp(proposalText(listing, cents, card.url, { asPage: pageKey !== null }), card, null) }))
+  }
+
+  const acceptOffer = ({ offer, listing }) => offerSend(async () => {
+    const params = consentParams(listing, offer)
+    if (params === null) throw new Error('oferta não encontrada')
+    let signed
+    if (pageKey !== null) {
+      const n = nodeRef.current
+      signed = await actAs(n, { member: await memberKeyOf(request, n), action: 'listing-consent', page: pageKey, op: params })
+    } else {
+      signed = await request('listing.consent', params)
+    }
+    const card = acceptCard({ origin, listing, cents: offer.cents, consent: signed && signed.consent })
+    if (card === null) throw new Error('Não foi possível montar a resposta.')
+    return { op: offerOp(acceptText(offer.cents, card.url), card, offer.id) }
+  })
+
+  const declineOffer = ({ offer, listing }) => offerSend(async () => {
+    const card = declineCard({ origin, listing, cents: offer.cents })
+    if (card === null) throw new Error('oferta não encontrada')
+    return { op: offerOp(declineText(offer.cents, card.url), card, offer.id) }
+  })
+
+  const retryOffer = () => {
+    if (!offerHold) return
+    const held = offerHold
+    offerSend(async () => ({ op: held.op, retry: held.retry }))
+  }
+
   const onSend = () => {
     if (mediaHold) return retryMedia()
     if (attachments.items.length > 0) return sendMedia(draft, replyTo ? replyTo.id : null)
@@ -596,6 +699,30 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     return target.mine === true ? OWN_LABEL : quoteName
   }
 
+  // The thread as offer input: every row with its card, reply id and sender.
+  const me = pageKey !== null ? pageKey : ownKey
+  const offerMsgs = rows.map((r) => ({ id: r.id, from: r.from, mine: r.mine, text: r.rawText, card: cardOf.get(r.key), replyTo: replyIdOf.get(r.key), at: r.at, deleted: r.deleted }))
+  const linkOfMsg = (m) => listingLinkOf(m.text, origin) || listingLinkOf(m.card, origin)
+  const offerListing = peer !== me ? offerTarget(offerMsgs, peer, origin, linkOfMsg) : null
+  const offerStates = new Map()
+  const offerOfRow = (index) => {
+    const m = offerMsgs[index]
+    const ref = offerOfMessage(m, origin)
+    if (ref === null || ref.aceite !== null || ref.recusada) return null
+    const listing = { author: ref.author, seq: ref.seq }
+    const key = ref.author + ':' + ref.seq
+    if (!offerStates.has(key)) offerStates.set(key, offerState(offerMsgs, me, listing, origin))
+    const offer = offerStates.get(key)
+    if (!offer || offer.id !== m.id || offer.from !== (m.mine ? me : m.from)) return null
+    const buttons = buttonState(offer, me, listing)
+    // A page does not rate in v1.
+    const rate = buttons.rate && pageKey === null && node.online !== false && typeof onAvaliar === 'function'
+    return buttons.answer || rate ? { offer, listing, answer: buttons.answer, rate } : null
+  }
+  const offerBusy = offerAct.pending || offerHold !== null
+  // Answers go out only where the composer could send.
+  const canAnswer = folder === 'inbox' && !blocked && node.online !== false && !offerBusy
+
   let blockNote = null
   if (blocked) blockNote = LABELS.blockedSend
   else if (peer === ownKey || peer === pageKey) blockNote = LABELS.selfSend
@@ -660,6 +787,20 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
             </View>
             )
           : null}
+        {offerListing !== null && !hold && !mediaHold && !sendingMedia && !post.pending && !offerBusy
+          ? <View style={styles.inline}><Pill label='Fazer oferta' onPress={() => { setOfferNote(''); offerAct.clearError(); setOfferOpen(true) }} /></View>
+          : null}
+        {offerHold
+          ? (
+            <View style={styles.inline}>
+              <Soft>{LABELS.uncertain}</Soft>
+              {offerHold.retry !== null || pageKey === null
+                ? <Pill label='Tentar de novo' onPress={retryOffer} pending={offerAct.pending} />
+                : null}
+              <Pill label='descartar' onPress={() => setOfferHold(null)} />
+            </View>
+            )
+          : (!offerOpen && confirming === null && offerAct.error ? <ErrorText>{offerAct.error}</ErrorText> : null)}
         {mediaHold
           ? (
             <View style={styles.inline}>
@@ -745,6 +886,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           const mine = item.mine === true
           const link = item.inviteLink || null
           const listing = item.listingLink
+          const offerRow = item.deleted ? null : offerOfRow(index)
           const actions = []
           const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media: mediaOf.get(item.key) })
           if (!item.deleted) {
@@ -773,11 +915,20 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
               quote={quoted}
               actions={actions}
               onOpenMention={mentionTap}
-              below={link !== null || (listing !== null && typeof onOpenListing === 'function')
+              below={link !== null || offerRow !== null || (listing !== null && typeof onOpenListing === 'function')
                 ? (
                   <View style={styles.inline}>
                     {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
                     {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
+                    {offerRow !== null && offerRow.answer && canAnswer
+                      ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
+                      : null}
+                    {offerRow !== null && offerRow.answer && canAnswer
+                      ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
+                      : null}
+                    {offerRow !== null && offerRow.rate
+                      ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
+                      : null}
                   </View>
                   )
                 : null}
@@ -799,6 +950,25 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         refs={forwarding ? forwarding.refs : []}
         identity={ownKey}
       />
+      <Sheet open={offerOpen && offerListing !== null} onClose={() => { if (!offerAct.pending) setOfferOpen(false) }} title='Fazer oferta'>
+        <View style={styles.sheet}>
+          <Soft>{offerListing !== null && offerListing.title !== '' ? displayText(offerListing.title) : 'Anúncio na Feira'}</Soft>
+          <Field label='Valor (R$)' value={offerValue} onChangeText={(t) => { setOfferValue(t); setOfferNote('') }} placeholder='80,00' maxLength={16} editable={!offerAct.pending} />
+          <Soft>A oferta vai como mensagem nesta conversa. Não é um pagamento: vocês combinam o resto por aqui.</Soft>
+          <ErrorText>{offerNote || offerAct.error}</ErrorText>
+          <Btn label='Enviar oferta' onPress={() => sendOffer(offerListing)} pending={offerAct.pending} disabled={node.online === false || offerValue.trim() === ''} />
+          <Btn label='Cancelar' secondary onPress={() => setOfferOpen(false)} disabled={offerAct.pending} />
+        </View>
+      </Sheet>
+      <Sheet open={confirming !== null} onClose={() => { if (!offerAct.pending) setConfirming(null) }} title='Aceitar oferta'>
+        <View style={styles.sheet}>
+          <Soft>{confirming !== null ? 'Oferta de ' + centsLabel(confirming.offer.cents) + '.' : ''}</Soft>
+          <Soft>{CONSENT_NOTE}</Soft>
+          <ErrorText>{offerAct.error}</ErrorText>
+          <Btn label='Aceitar e assinar' onPress={() => acceptOffer(confirming)} pending={offerAct.pending} disabled={node.online === false} />
+          <Btn label='Cancelar' secondary onPress={() => setConfirming(null)} disabled={offerAct.pending} />
+        </View>
+      </Sheet>
       <Sheet open={menu} onClose={() => setMenu(false)} title='Conversa'>
         <View style={styles.sheet}>
           <ErrorText>{act.error}</ErrorText>

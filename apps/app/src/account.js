@@ -470,10 +470,9 @@ export const admission = async () => {
 }
 // Feira entry (apps/cli/lib/account/feira-routes.js). The policy is a hint:
 // null (an older service, any failure, a bad shape) falls back to the
-// ordinary invite flow, and the service stays the authority at start. The
-// Vitrine has no Feira entry yet.
+// ordinary invite flow, and the service stays the authority at start.
 export const feiraPolicy = async () => {
-  if (VITRINE) return { enabled: false }
+  if (VITRINE) return { enabled: true }
   try {
     const data = await call('GET', '/account/feira/policy', undefined, { allow404: true })
     return exactKeys(data, ['enabled']) && typeof data.enabled === 'boolean' ? { enabled: data.enabled } : null
@@ -489,6 +488,7 @@ const LISTING_AUTHOR_RE = /^[0-9a-f]{64}$/
 // nothing here asks again. A 429 from the proxy carries no token: it is the
 // generic 'indisponivel', a definite refusal like every 4xx.
 export const feiraStart = async ({ author, seq } = {}) => {
+  if (VITRINE) throw toError('indisponivel')
   if (typeof author !== 'string' || !LISTING_AUTHOR_RE.test(author) || !Number.isSafeInteger(seq) || seq < 1) {
     throw toError('pedido-invalido')
   }

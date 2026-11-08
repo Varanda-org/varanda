@@ -13,6 +13,11 @@ const MAX_PHOTOS = 4
 const OG_DESCRIPTION_MAX = 160
 const INDEXED_STATUSES = ['disponivel', 'reservado']
 const PHOTO_PATH = /^\/f\/[0-9a-f]{64}\/[1-9][0-9]{0,15}\/foto\/[0-9]{1,2}$/
+// The installed app's own link to the listing. iOS keeps a tap on a link of
+// the same host (the enter button's /anuncio/) in Safari, so a universal
+// link never opens the app from this page; this custom-scheme link does,
+// and only in exactly this shape.
+const APP_URL = /^varanda:\/\/\/anuncio\/[0-9a-f]{64}\/[1-9][0-9]{0,15}$/
 
 // displayText marks every unsafe code point with U+FFFD; a public page drops
 // them instead, so a hostile title cannot fill the card with marks.
@@ -107,6 +112,7 @@ function renderListingPage (view) {
     const badge = badgeFor(view)
     const pageUrl = safeUrl(view.pageUrl)
     const enterUrl = safeUrl(view.enterUrl)
+    const appUrl = typeof view.appUrl === 'string' && APP_URL.test(view.appUrl) ? view.appUrl : ''
     const photos = (Array.isArray(view.photoUrls) ? view.photoUrls : []).filter(isPhotoPath).slice(0, MAX_PHOTOS)
 
     const indexed = INDEXED_STATUSES.includes(view.status)
@@ -149,6 +155,7 @@ function renderListingPage (view) {
       html += '<p><a class="enter" href="' + esc(enterUrl) + '">' +
         (procura ? 'Entrar para oferecer' : 'Entrar para conversar') + '</a></p>\n'
     }
+    if (appUrl !== '') html += '<p><a class="app" href="' + esc(appUrl) + '">Já tem o app? Abrir no app</a></p>\n'
     html += '<p class="note">O pagamento é combinado entre vocês, fora do aplicativo.</p>\n'
     return shell(head, html)
   } catch {
