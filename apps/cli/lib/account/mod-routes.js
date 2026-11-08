@@ -3,11 +3,12 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
-const { verifyReport, verifyDmReport } = require('@varanda/core/lib/report')
+const { verifyReport, verifyDmReport, verifyListingReport } = require('@varanda/core/lib/report')
 const { verifyAppeal } = require('@varanda/core/lib/appeal')
 const { verifyModeratorCert } = require('@varanda/core/lib/cert')
 const { canonicalBody, verifyModRequest } = require('@varanda/core/lib/mod-request')
 const { mediaBounds, audioBounds } = require('@varanda/rpc')
+const { safe } = require('@varanda/core/lib/safe')
 const { MAX_REPORTS, MAX_APPEALS, AI_ACTOR, OWNER_ACTOR, ANEXO_MAX_BYTES, ANEXO_MIMES } = require('./moderation-store')
 
 // The moderation desk of the account service (mounted by ./server.js before
@@ -118,6 +119,8 @@ const HEX64_RE = /^[0-9a-f]{64}$/
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 // Report and change ids (moderation-store.js newId: 16 bytes base64url).
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+const REPORT_KINDS = new Set(['listing'])
+const ANUNCIO_KEYS = ['title', 'text', 'priceLabel', 'city', 'uf', 'kind', 'status']
 // Google authorization codes: printable ASCII, bounded (as server.js).
 const PARAM_RE = /^[\x21-\x7e]{1,512}$/
 const MOD_EMAIL_RE = /^[^\s,@]{1,64}@[^\s,@]{1,255}$/
@@ -238,6 +241,10 @@ function createModRoutes ({
   // reporter, so blocking unchecked would let a reporter aim an
   // association-wide block at any key, a diary included.
   groupCheck = null,
+  // A createListingReader instance (./feira-read.js) or null. Only its
+  // readCurrent serves the panel's 'Ver anúncio' of a listing report: the
+  // seeder's folded current version, never the Feira index.
+  listingReader = null,
   panelDir = path.join(__dirname, 'panel'),
   log = () => {},
   now = Date.now,
@@ -250,6 +257,7 @@ function createModRoutes ({
   // no tab instead of a tab that always fails.
   if (usage === null || usage === undefined || typeof usage.view !== 'function') usage = null
   if (groupCheck === null || groupCheck === undefined || typeof groupCheck.check !== 'function') groupCheck = null
+  if (listingReader === null || listingReader === undefined || typeof listingReader.readCurrent !== 'function') listingReader = null
   // The subset rule enforced here too (not only where the env is parsed): a
   // stats e-mail that is not a moderator can never hold a session anyway,
   // and keeping it out makes that explicit.
@@ -326,6 +334,10 @@ function createModRoutes ({
     session: keyedWindow(60, 60 * 1000, now),
     group: keyedWindow(30, 60 * 1000, now),
     anexo: keyedWindow(300, 60 * 1000, now),
+    // 'Ver anúncio' is a moderator's click, kept apart from the automatic
+    // /alvo and /grupo lookups the panel runs for every open report, so
+    // those can never spend it.
+    anuncio: keyedWindow(30, 60 * 1000, now),
     operatorSigned: fixedWindow(30, 60 * 1000, now)
   }
   const over = () => new RouteError('pedido-invalido', 429)
@@ -506,6 +518,7 @@ function createModRoutes ({
     // The own key is never a target; checked before the signature and the store.
     if (target === member) throw refuse('pedido-invalido')
     if (body.kind === 'dm') return reportDm(res, body, { member, nonce, expiresAt, target, anexo })
+    if (body.kind === 'listing') return reportListing(res, body, { member, nonce, expiresAt, target, anexo })
     if (body.kind !== undefined) throw refuse('pedido-invalido')
     const seq = body.seq === undefined || body.seq === null ? null : body.seq
     // A group message (report v2): writer and group come together, only with
@@ -541,6 +554,29 @@ function createModRoutes ({
     // reported block, so only a human decides it. Neither does a report
     // with an anexo (always a group message here, but checked on its own).
     if (!duplicate && writer === null && anexo === null) afterAnswer(() => triage.onReport(added))
+  }
+
+  // A Feira listing (report kind 'listing'): a record at `seq` on the target's
+  // diary, signed under its own prefix so a post report never passes as one.
+  // It sits in no group and carries no image.
+  async function reportListing (res, body, { member, nonce, expiresAt, target, anexo }) {
+    if (anexo !== null) throw refuse('pedido-invalido')
+    for (const k of ['writer', 'group', 'peer']) {
+      if (body[k] !== undefined && body[k] !== null) throw refuse('pedido-invalido')
+    }
+    const seq = body.seq
+    if (!Number.isSafeInteger(seq)) throw refuse('pedido-invalido')
+    const text = body.text === undefined ? '' : body.text
+    const quote = body.quote === undefined ? '' : body.quote
+    const { reason, signature } = body
+    const fields = { nonce, member, association, target, seq, reason, text, quote }
+    if (!verifyListingReport(fields, signature).ok) throw refuse('assinatura-invalida')
+    // Spent as in report(): no await since the nonce check.
+    spend(spentReportNonces, nonce, expiresAt)
+    const { report: added, duplicate } = await storeAsync(() => moderation.add({ reporter: member, target, seq, reason, text, quote, signature, nonce, kind: 'listing' }))
+    log({ event: 'report', reason: duplicate ? 'duplicada' : 'nova' })
+    send(res, 200, { id: added.id, duplicate })
+    if (!duplicate) afterAnswer(() => triage.onReport(added))
   }
 
   // A private message (report kind 'dm', docs/rpc.md 5.81): the message is on
@@ -776,7 +812,10 @@ function createModRoutes ({
       // The triage's suggestion (tokens and numbers) and the verified post
       // text it read from the seeder ({ texto, midia, citacao }), or null.
       ia: triageView('suggestionOf', r.id),
-      publicacao: triageView('verifiedOf', r.id)
+      publicacao: triageView('verifiedOf', r.id),
+      // The public Feira page of a reported listing, on this service's
+      // public origin.
+      ...(r.kind === 'listing' && Number.isSafeInteger(r.seq) ? { anuncioUrl: origin + '/f/' + r.target + '/' + r.seq } : {})
     }
   }
 
@@ -850,12 +889,17 @@ function createModRoutes ({
     // the page starts right after it.
     const antes = url.searchParams.get('antes')
     if (antes !== null && (estado !== 'decidida' || !ID_RE.test(antes))) throw refuse('pedido-invalido')
+    // `kind`: the Anúncios chip. Filtered here, before the page cut, so a
+    // listing report beyond the first page of every kind is still reached.
+    const kind = url.searchParams.get('kind')
+    if (kind !== null && !REPORT_KINDS.has(kind)) throw refuse('pedido-invalido')
     // The moderator's own cases (as target or as reporter) leave the store's
     // list before its cut at MAX_REPORTS and before the page: truncating
     // first could hide every actionable report behind a first page of the
     // moderator's own cases, and `truncated` must not count them either.
     const own = ownMember(session)
-    const { reports: visible, truncated: cut } = store(() => moderation.list({ status: estado, limit: MAX_REPORTS, exclude: own }))
+    const { reports: listed, truncated: cut } = store(() => moderation.list({ status: estado, limit: MAX_REPORTS, exclude: own }))
+    const visible = kind === null ? listed : listed.filter((r) => r.kind === kind)
     let start = 0
     if (antes !== null) {
       const at = visible.findIndex((r) => r.id === antes)
@@ -1018,6 +1062,32 @@ function createModRoutes ({
     const v = await confirmTarget(row)
     if (!v.ok) log({ event: 'alvo', reason: v.code })
     send(res, 200, v.ok ? { confirmed: true } : { confirmed: false, reason: v.code })
+  }
+
+  // The current version of a reported listing, as the local seeder folds
+  // it: { title, text, priceLabel, city, uf, kind, status } (each string
+  // escaped with safe, or null; peer text the panel renders as text), {
+  // ausente: true } once the listing is gone, or { erro } when the seeder
+  // could not answer. Only a view: decide never reads it.
+  async function anuncioInfo (req, res, session, id) {
+    const row = store(() => moderation.get(id))
+    if (row === null || row.kind !== 'listing' || !Number.isSafeInteger(row.seq) || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
+    if (listingReader === null) return send(res, 200, { erro: 'config' })
+    let v
+    try {
+      v = await listingReader.readCurrent(row.target, row.seq)
+    } catch {
+      v = 'recusado'
+    }
+    if (v === 'ausente') return send(res, 200, { ausente: true })
+    if (v === null || typeof v !== 'object') {
+      const reason = typeof v === 'string' && /^[a-z-]{1,32}$/.test(v) ? v : 'recusado'
+      log({ event: 'anuncio', reason })
+      return send(res, 200, { erro: reason })
+    }
+    const view = {}
+    for (const k of ANUNCIO_KEYS) view[k] = typeof v[k] === 'string' ? safe(v[k]) : null
+    send(res, 200, view)
   }
 
   // The stored image of a report, from local disk only (moderation-store.js
@@ -1287,6 +1357,11 @@ function createModRoutes ({
     if (get && targetMatch && ID_RE.test(targetMatch[1])) {
       const id = targetMatch[1]
       return withSession(req, (s) => targetInfo(req, res, s, id), limits.group)
+    }
+    const anuncioMatch = /^\/account\/mod\/api\/reports\/([^/]+)\/anuncio$/.exec(p)
+    if (get && anuncioMatch && ID_RE.test(anuncioMatch[1])) {
+      const id = anuncioMatch[1]
+      return withSession(req, (s) => anuncioInfo(req, res, s, id), limits.anuncio)
     }
     const cancelMatch = /^\/account\/mod\/api\/pending\/([^/]+)\/cancel$/.exec(p)
     if (post && cancelMatch && ID_RE.test(cancelMatch[1])) {

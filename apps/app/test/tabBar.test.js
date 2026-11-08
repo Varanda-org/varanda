@@ -16,19 +16,31 @@ test('tabsFor: native and serve show the four tabs', async (t) => {
   t.alike(tabsFor('serve'), TABS)
 })
 
-test('tabsFor: hosted adds Conversas right after Espiadinha', async (t) => {
+test('tabsFor: hosted adds Conversas and Feira before Busca', async (t) => {
   const { TABS, tabsFor } = await load()
   const tabs = tabsFor('hosted')
-  t.is(tabs.length, 5)
+  t.is(tabs.length, 6)
   t.alike(tabs, [
     { id: 'rua', label: 'A Rua', icon: 'rua' },
     { id: 'espiadinha', label: 'Espiadinha', icon: 'olho' },
     { id: 'comunidades', label: 'Conversas', icon: 'conversas' },
+    { id: 'feira', label: 'Feira', icon: 'feira' },
     { id: 'busca', label: 'Busca', icon: 'lupa' },
     { id: 'diario', label: 'Diário', icon: 'pessoa' }
   ])
   t.alike(tabs[2], { id: 'comunidades', label: 'Conversas', icon: 'conversas' })
   t.is(TABS.length, 4)
+})
+
+test('showPostButton: no "publicar" on Feira nor on its screens', async (t) => {
+  const { showPostButton } = await load()
+  t.absent(showPostButton({ tab: 'feira', screen: null }))
+  t.absent(showPostButton({ tab: 'feira' }))
+  for (const screen of ['anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios']) {
+    for (const tab of ['feira', 'rua', 'comunidades']) {
+      t.absent(showPostButton({ tab, screen }), screen + ' on ' + tab)
+    }
+  }
 })
 
 test('tabsFor: manual and other modes show the default tabs without Conversas', async (t) => {

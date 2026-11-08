@@ -161,6 +161,61 @@ test('post, reply and quote carry 1..4 media descriptors, never more', async (t)
   }
 })
 
+test('listing actions reach the signer and post to their own route', async (t) => {
+  const { actAs } = await load()
+  const place = { uf: 'SP', city: 'Campinas', bairro: null }
+  const ops = {
+    listing: { kind: 'produto', title: 'Bicicleta', text: '', price: 10000, unit: null, cat: 'esporte', place },
+    'listing-edit': { to: P + ':3', expectedRevision: 0, title: 'Bicicleta', text: '', price: 9000, unit: null, cat: 'esporte', place, media: null },
+    'listing-status': { to: P + ':3', status: 'reservado' },
+    'listing-consent': { to: P + ':3', rater: M, offer: 'f'.repeat(32) }
+  }
+  for (const action of Object.keys(ops)) {
+    const calls = stub(t, flow(() => json(200, action === 'listing-consent' ? { consent: 'c'.repeat(128) } : { seq: 4, length: 5, pushed: true })))
+    const node = fakeNode()
+    const res = await actAs(node, { member: M, action, page: P, op: ops[action] })
+    t.alike(body(calls[0]), { member: M, action, page: P })
+    t.ok(calls[1].url.endsWith('/account/pages/' + action), action + ' route')
+    t.alike(body(calls[1]).op, ops[action])
+    t.alike(node.signs[0], { method: 'page.sign', params: { action, nonce: NONCE, page: P, op: ops[action] } })
+    t.alike(res, action === 'listing-consent' ? { consent: 'c'.repeat(128) } : { seq: 4, length: 5, pushed: true })
+  }
+})
+
+test('listing and listing-edit carry 1..4 media descriptors; listing-edit may clear them with null', async (t) => {
+  const { actAs } = await load()
+  const d = { sha256: 'a'.repeat(64), mime: 'image/png', width: 1, height: 1, bytes: 10 }
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { seq: 1, length: 2, pushed: true }))
+  for (const action of ['listing', 'listing-edit']) {
+    const before = calls.length
+    await actAs(fakeNode(), { member: M, action, page: P, op: { title: 'x', media: [d, d] } })
+    t.alike(body(calls[before + 1]).op.media, [d, d], action + ' sends its media')
+    for (const media of [[], [d, d, d, d, d], 'x']) {
+      const n = calls.length
+      const err = await caught(t, actAs(fakeNode(), { member: M, action, page: P, op: { title: 'x', media } }))
+      t.is(err.code, 'pedido-invalido')
+      t.is(calls.length, n, 'nothing is sent')
+    }
+  }
+  const n = calls.length
+  await actAs(fakeNode(), { member: M, action: 'listing-edit', page: P, op: { title: 'x', media: null } })
+  t.is(body(calls[n + 1]).op.media, null)
+  const err = await caught(t, actAs(fakeNode(), { member: M, action: 'listing', page: P, op: { title: 'x', media: null } }))
+  t.is(err.code, 'pedido-invalido', 'a new listing never takes null media')
+})
+
+test('a listing write with an unknown outcome is uncertain and never resent by itself', async (t) => {
+  const { actAs } = await load()
+  for (const action of ['listing', 'listing-edit', 'listing-status', 'listing-consent']) {
+    const calls = stub(t, flow(() => json(500, {})))
+    const node = fakeNode()
+    const err = await caught(t, actAs(node, { member: M, action, page: P, op: { to: P + ':3' } }))
+    t.is(err.uncertain, true, action + ' is uncertain')
+    t.is(calls.length, 2, 'one start and one POST, no automatic resend')
+    t.is(node.signs.length, 1, 'signed once')
+  }
+})
+
 test('op shapes of like, delete, profile, rename, follow and the reads are sent as given', async (t) => {
   const { actAs } = await load()
   const cases = [

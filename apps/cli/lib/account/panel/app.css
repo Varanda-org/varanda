@@ -73,3 +73,9 @@ meter { width: 100%; height: 1em; }
 table.days { width: 100%; border-collapse: collapse; font-size: small; font-variant-numeric: tabular-nums; }
 table.days th, table.days td { text-align: right; padding: 4px 2px; border-bottom: 1px solid #8884; }
 table.days th:first-child, table.days td:first-child { text-align: left; }
+/* Abertas filter chip and the listing badge. */
+.chips { display: flex; gap: 8px; margin-bottom: 12px; }
+.chips button.chip { display: inline-block; width: auto; min-height: 36px; padding: 6px 14px; border-radius: 999px; }
+.chips button.chip[aria-pressed="true"] { font-weight: 700; border-width: 2px; }
+.badge-listing { font-weight: 600; }
+.anuncio-link { overflow-wrap: anywhere; }

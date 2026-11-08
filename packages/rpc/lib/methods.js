@@ -5,6 +5,7 @@ const L = require('./limits')
 const { DM_MEDIA_KEYS, DM_CARD_KEYS } = require('./dm-budget')
 const { cardUrlHost, cardTextLength, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMAGE_BYTES } = require('./link-card')
 const { MAX_AUDIO_MS } = require('./audio-bounds')
+const F = require('./feira')
 const IC = require('./invite-card')
 
 const HEX64 = /^[0-9a-f]{64}$/
@@ -297,6 +298,37 @@ const REPORT_SEQ_MAX = 99999
 
 const isReason = (v) => typeof v === 'string' && REPORT_REASONS.includes(v)
 
+// listing.* (docs/rpc.md, Feira): the record rules live in feira.js.
+const HEX32_RE = /^[0-9a-f]{32}$/
+const HEX128_RE = /^[0-9a-f]{128}$/
+const LISTING_MINE_LIMIT_MAX = 20
+const LISTING_RATINGS_REFS_MAX = 32
+const RATING_REF_KEYS = ['rater', 'seq']
+
+const isHex32 = (v) => typeof v === 'string' && HEX32_RE.test(v)
+const isHex128 = (v) => typeof v === 'string' && HEX128_RE.test(v)
+const isListingPrice = (v) => F.isPrice(v)
+const isListingUnit = (v) => v === null || F.isUnit(v)
+const isListingTitle = str(1, F.MAX_LISTING_TITLE)
+
+function isRatingRefs (v) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > LISTING_RATINGS_REFS_MAX) return false
+  for (let i = 0; i < v.length; i++) {
+    const r = v[i]
+    if (!isPlainObject(r)) return false
+    const own = Object.keys(r)
+    if (own.length !== RATING_REF_KEYS.length || !RATING_REF_KEYS.every((k) => hasOwn(r, k))) return false
+    if (!isKey(r.rater) || !int(1, Number.MAX_SAFE_INTEGER)(r.seq)) return false
+  }
+  return true
+}
+
+// An edit carries no kind: servico, the widest, here; the node checks the
+// pair against the listing it edits.
+function listingUnitCross (given, value) {
+  return F.unitAllowed(hasOwn(value, 'kind') ? value.kind : 'servico', value.price, value.unit) ? null : 'parâmetro inválido: unit'
+}
+
 // terms.sign (docs/rpc.md 5.29). Duplicated from @varanda/core lib/terms.js
 // (VERSION_MAX), which this package cannot import.
 const TERMS_VERSION_MAX = 9999
@@ -529,7 +561,7 @@ const PAGE_ACTIONS = [
   'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar',
   'rename', 'invite', 'dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen', 'follow',
   'follows', 'media', 'notices', 'terms', 'community-join', 'community-leave', 'group-join', 'group-leave',
-  'group-post', 'group-read',
+  'group-post', 'group-read', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
   'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
 ]
 const PAGE_PAGELESS = ['create', 'list', 'terms']
@@ -717,9 +749,14 @@ const SPECS = {
       reason: req(isReason),
       text: opt(str(0, REPORT_TEXT_MAX), ''),
       quote: opt(str(0, L.MAX_TEXT), ''),
-      anexo: opt(isKey)
+      anexo: opt(isKey),
+      kind: opt((v) => v === 'listing')
     },
     cross (given, value) {
+      if (hasOwn(value, 'kind')) {
+        if (!hasOwn(value, 'seq')) return 'kind listing só com seq'
+        if (hasOwn(value, 'writer') || hasOwn(value, 'group') || hasOwn(value, 'anexo')) return 'kind listing sem writer, group ou anexo'
+      }
       if (!hasOwn(value, 'seq') && value.quote !== '') return 'quote só com seq'
       // A group post is addressed by its writer core inside the group.
       if (hasOwn(value, 'writer') && (!hasOwn(value, 'seq') || !hasOwn(value, 'group'))) return 'writer só com seq e group'
@@ -859,6 +896,57 @@ const SPECS = {
   'like.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'repost.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'engagement.read': { fields: { refs: req(isRefList) } },
+  'listing.create': {
+    fields: {
+      kind: req(F.isKind),
+      title: req(isListingTitle),
+      text: req(str(0, L.MAX_TEXT)),
+      price: req(isListingPrice),
+      unit: req(isListingUnit),
+      cat: req(F.isCat),
+      place: req(F.isPlace),
+      media: opt(isMediaList)
+    },
+    mutating: true,
+    cross: listingUnitCross
+  },
+  'listing.status': { fields: { to: req((v) => isRef(v, 1)), status: req(F.isStatus) }, mutating: true },
+  'listing.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
+  // A full snapshot: media null drops the photos, so it is never left out.
+  'listing.edit': {
+    fields: {
+      to: req((v) => isRef(v, 1)),
+      expectedRevision: req(int(0, Number.MAX_SAFE_INTEGER)),
+      title: req(isListingTitle),
+      text: req(str(0, L.MAX_TEXT)),
+      price: req(isListingPrice),
+      unit: req(isListingUnit),
+      cat: req(F.isCat),
+      place: req(F.isPlace),
+      media: req((v) => v === null || isMediaList(v))
+    },
+    mutating: true,
+    cross: listingUnitCross
+  },
+  'listing.mine': {
+    fields: {
+      before: opt(int(1, Number.MAX_SAFE_INTEGER)),
+      limit: opt(int(1, LISTING_MINE_LIMIT_MAX), LISTING_MINE_LIMIT_MAX)
+    }
+  },
+  // Signs the deal consent with the identity key and appends nothing.
+  'listing.consent': { fields: { to: req((v) => isRef(v, 1)), rater: req(isKey), offer: req(isHex32) } },
+  'listing.rate': {
+    fields: {
+      to: req((v) => isRef(v, 1)),
+      offer: req(isHex32),
+      consent: req(isHex128),
+      stars: req(F.isStars),
+      text: req(str(0, F.MAX_RATE_TEXT))
+    },
+    mutating: true
+  },
+  'listing.ratings': { fields: { author: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)), refs: req(isRatingRefs) } },
   'diary.peek': {
     fields: {
       author: req(isKey),

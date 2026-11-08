@@ -877,7 +877,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -1324,4 +1324,75 @@ test('validateRecord: page records', (t) => {
   Object.defineProperty(hostile, 'admins', { enumerable: true, get () { throw new Error('boom') } })
   t.is(validateRecord(hostile, 3), 'malformed')
   t.is(validRecordCopy(hostile, 3), null)
+})
+
+const PLACE = { uf: 'SP', city: 'São Paulo', bairro: 'Pinheiros' }
+const LDESC = (start) => ({ core: K1, mime: 'image/webp', start, blocks: 1, bytes: 1000, sha256: 'e'.repeat(64), width: 512, height: 512 })
+const listing = (over = {}) => ({ type: 'listing', kind: 'produto', title: 'Bicicleta', text: 'Aro 29', price: 50000, unit: null, cat: 'esporte', place: PLACE, at: AT, ...over })
+
+test('listing records: shape, media, units and kinds', (t) => {
+  t.ok(records.TYPES.includes('listing') && records.TYPES.includes('listing-rate'))
+  t.is(validateRecord(listing(), 1), null, 'without media')
+  t.is(validateRecord(listing({ media: [LDESC(1), LDESC(2)] }), 1), null, 'with media')
+  t.is(validateRecord(listing({ media: [LDESC(1), LDESC(2), LDESC(3), LDESC(4), LDESC(5)] }), 1), 'media-invalid', 'a 5th photo')
+  t.is(validateRecord(listing({ media: [] }), 1), 'media-invalid')
+  t.is(validateRecord(listing({ unit: 'hora' }), 1), 'unit-invalid', 'hora on a produto')
+  t.is(validateRecord(listing({ kind: 'servico', unit: 'hora' }), 1), null)
+  t.is(validateRecord(listing({ kind: 'procura', price: null }), 1), null, 'procura a combinar')
+  t.is(validateRecord(listing({ kind: 'procura', unit: 'hora' }), 1), 'unit-invalid', 'procura with a unit')
+  t.is(validateRecord({ ...listing(), extra: 1 }, 1), 'malformed', 'extra key')
+  t.is(validateRecord(listing({ at: 'yesterday' }), 1), 'date-invalid')
+  t.is(validateRecord(listing(), 0), 'genesis-required')
+  const built = records.listingRecord({ kind: 'produto', title: 'Bicicleta', price: 50000, cat: 'esporte', place: { ...PLACE, extra: 1 }, at: AT })
+  t.alike(built.place, PLACE, 'builder copies place keys only')
+  t.is(built.text, '')
+  t.exception.all(() => records.listingRecord({ kind: 'produto', title: 'x', price: 1, unit: 'hora', cat: 'esporte', place: PLACE }), /unit-invalid/)
+  t.alike(records.LISTING_KEYS, ['type', 'kind', 'title', 'text', 'price', 'unit', 'cat', 'place', 'at'])
+})
+
+test('listing-edit and listing-status records target an earlier block', (t) => {
+  const edit = { type: 'listing-edit', seq: 3, title: 'Bike', text: '', price: 40000, unit: null, cat: 'esporte', place: PLACE, at: AT }
+  t.is(validateRecord(edit, 4), null)
+  t.is(validateRecord(edit, 3), 'target-invalid', 'edit at its own seq')
+  t.is(validateRecord({ ...edit, seq: 0 }, 4), 'target-invalid')
+  t.is(validateRecord({ ...edit, kind: 'produto' }, 4), 'malformed', 'an edit has no kind')
+  t.is(validateRecord({ ...edit, media: [LDESC(1), LDESC(2), LDESC(3), LDESC(4), LDESC(5)] }, 4), 'media-invalid')
+  t.alike(records.listingEditRecord({ seq: 3, title: 'Bike', price: 40000, cat: 'esporte', place: PLACE, at: AT }), { ...edit })
+  t.exception.all(() => records.listingEditRecord({ seq: 'x', title: 'Bike', price: 1, cat: 'esporte', place: PLACE }), /target-invalid/)
+
+  const status = { type: 'listing-status', seq: 3, status: 'vendido', at: AT }
+  t.is(validateRecord(status, 4), null)
+  t.is(validateRecord(status, 3), 'target-invalid', 'status at its own seq')
+  t.is(validateRecord({ ...status, status: 'perdido' }, 4), 'status-invalid')
+  t.is(validateRecord({ ...status, extra: 1 }, 4), 'malformed')
+  t.alike(records.listingStatusRecord({ seq: 3, status: 'reservado', at: AT }), { ...status, status: 'reservado' })
+  t.exception.all(() => records.listingStatusRecord({ seq: 3, status: 'x' }), /status-invalid/)
+})
+
+test('listing-rate records round-trip', (t) => {
+  const rate = records.listingRateRecord({ to: { author: K2, seq: 5, x: 1 }, offer: 'f'.repeat(32), consent: 'c'.repeat(128), stars: 5, text: 'Ótimo', at: AT })
+  t.alike(rate, { type: 'listing-rate', to: { author: K2, seq: 5 }, offer: 'f'.repeat(32), consent: 'c'.repeat(128), stars: 5, text: 'Ótimo', at: AT })
+  t.alike(decodeBlock(b4a.from(JSON.stringify(rate))), rate)
+  t.is(validateRecord(rate, 1), null)
+  t.is(validateRecord({ ...rate, stars: 0 }, 1), 'stars-invalid')
+  t.is(validateRecord({ ...rate, to: { author: K2, seq: 0 } }, 1), 'target-invalid')
+  t.is(validateRecord({ ...rate, offer: 'f'.repeat(31) }, 1), 'malformed')
+  t.is(validateRecord({ ...rate, consent: 'C'.repeat(128) }, 1), 'malformed')
+  t.exception.all(() => records.listingRateRecord({ to: { author: K2, seq: 5 }, offer: 'f'.repeat(32), consent: 'c'.repeat(128), stars: 0 }), /stars-invalid/)
+})
+
+test('listing types leave posts and deletes unchanged', (t) => {
+  t.is(validateRecord({ type: 'post', text: 'oi', at: AT, replyTo: null }, 1), null)
+  t.is(validateRecord({ type: 'post', text: 'oi', at: AT, replyTo: null, kind: 'produto' }, 1), 'malformed')
+  const ranges = [1, 2, 3, 4, 5].map((start) => ({ core: K1, start, blocks: 1 }))
+  t.is(validateRecord({ type: 'delete', seq: 1, at: AT, media: ranges }, 2), 'media-invalid', 'a 5-range delete')
+  t.is(validateRecord({ type: 'delete', seq: 1, at: AT, media: ranges.slice(0, 4) }, 2), null)
+})
+
+test('listing builders treat media null or empty as no photos', (t) => {
+  const fields = { title: 'Mesa', price: 100, cat: 'moveis', place: PLACE, at: AT }
+  t.absent('media' in records.listingEditRecord({ seq: 2, ...fields, media: null }))
+  t.absent('media' in records.listingEditRecord({ seq: 2, ...fields, media: [] }))
+  t.absent('media' in records.listingRecord({ kind: 'produto', ...fields, media: null }))
+  t.is(validateRecord({ type: 'listing-edit', seq: 2, text: '', unit: null, ...fields, media: null }, 3), 'media-invalid', 'a null on the wire stays invalid')
 })
