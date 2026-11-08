@@ -3,7 +3,7 @@
 // The seen-sync engine of the browser node (docs/rpc.md 5.95 seen.sign and
 // 5.96 seen.merge): signs the account service's seen statements and merges
 // the member's encrypted seen document (@varanda/core lib/seen-blob.js) with
-// this device's kv dmSeen, groupSeen and seenLocal.
+// this device's kv dmSeen, groupSeen, memberBlocks and seenLocal.
 //
 // Local writes are unions at the LOCAL caps, never the trimmed merge: kv
 // dmSeen keeps up to MAX_DM_SEEN tokens while the shared document holds a
@@ -18,6 +18,7 @@
 const b4a = require('b4a')
 const seenBlob = require('@varanda/core/lib/seen-blob')
 const { HASH_NONE, blobHash, signSeen } = require('@varanda/core/lib/seen-proof')
+const { blockedKeys, mergeBlocks } = require('@varanda/core/lib/member-block')
 const { UsageError } = require('@varanda/core/lib/errors')
 const store = require('./node-store')
 const member = require('./member-ops')
@@ -39,7 +40,7 @@ function nowSec () {
 }
 
 function emptyDoc (gen, own, association) {
-  return { gen, member: own, association, avisos: { own: [], pages: {} }, dm: [], groups: [] }
+  return { gen, member: own, association, avisos: { own: [], pages: {} }, dm: [], groups: [], blocks: [] }
 }
 
 function sameMark (a, b) {
@@ -64,7 +65,7 @@ function addTokens (list, tokens, t) {
 // last; a token older than the newest one the document already holds was
 // cut from its window on purpose and is not offered again, else it would
 // come back as new on every pass), plus the kv group marks, plus the Avisos
-// tokens the app supplies.
+// tokens the app supplies, plus the member's own block list (kv memberBlocks).
 //
 // Once the document holds dm tokens, every token marked here since ranks
 // above all of them (one t for the batch, ties broken by token in the
@@ -72,7 +73,7 @@ function addTokens (list, tokens, t) {
 // one and the window cut drops new marks that then never sync. Only the
 // first merge backdates (newest last), so a device seeding thousands of old
 // marks keeps the newest of them.
-function localView (base, dmIds, marks, avisos, now) {
+function localView (base, dmIds, marks, avisos, now, blocks = []) {
   const inBase = new Set(base.dm.map((e) => e.token))
   let last = -1
   for (let i = dmIds.length - 1; i >= 0; i--) {
@@ -104,7 +105,13 @@ function localView (base, dmIds, marks, avisos, now) {
   }
   const groups = base.groups.slice()
   for (const m of marks) groups.push({ group: m.group, at: m.at, writer: m.writer, seq: m.seq })
-  return { gen: base.gen, member: base.member, association: base.association, avisos: { own, pages }, dm, groups }
+  return { gen: base.gen, member: base.member, association: base.association, avisos: { own, pages }, dm, groups, blocks: mergeBlocks(base.blocks, blocks) }
+}
+
+function sameKeys (a, b) {
+  if (a.size !== b.size) return false
+  for (const key of a) if (!b.has(key)) return false
+  return true
 }
 
 function tokensOf (list) {
@@ -244,7 +251,7 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
     try {
       const { doc: base, unsupported } = await readBase(key, own, sync.gen)
       if (unsupported) throw new UsageError(NEWER_FORMAT)
-      const view = seenBlob.trim(localView(base, await store.readDmSeen(storage), await store.readGroupSeen(storage), null, nowSec()))
+      const view = seenBlob.trim(localView(base, await store.readDmSeen(storage), await store.readGroupSeen(storage), null, nowSec(), await store.readMemberBlocks(storage)))
       const gen = Math.min(sync.gen + 1, U32_MAX)
       const bytes = seenBlob.seal({ ...view, gen }, key)
       const hash = blobHash(bytes)
@@ -270,10 +277,11 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
       const { doc: base, stored, unsupported } = await readBase(key, own, sync.gen)
       const dmIds = await store.readDmSeen(storage)
       const marks = await store.readGroupSeen(storage)
-      const local = localView(base, dmIds, marks, avisos, now)
+      const heldBlocks = await store.readMemberBlocks(storage)
+      const local = localView(base, dmIds, marks, avisos, now, heldBlocks)
       local.gen = Math.max(base.gen, Math.min(sync.gen, U32_MAX))
       // Never re-sealed over a newer format, local or remote.
-      const untouched = () => ({ avisos: avisosOut(seenBlob.trim(local)), pending: false, dmChanged: false, groupChanged: false, caughtUp: [] })
+      const untouched = () => ({ avisos: avisosOut(seenBlob.trim(local)), pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, caughtUp: [] })
       if (unsupported) return untouched()
 
       // remote: what the service holds. Never the local document, which
@@ -367,7 +375,17 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
         await store.writeDmSeen(storage, [...before, ...window])
       }
 
-      return { avisos: avisosOut(merged), pending: ignored ? false : localOnly, dmChanged, groupChanged, caughtUp }
+      // kv memberBlocks goes after the document for the same reason, and takes
+      // every remote entry, not only the ones the window kept: a block too old
+      // for the window still holds here.
+      const nextBlocks = mergeBlocks(mergeBlocks(heldBlocks, remote.blocks), merged.blocks)
+      const blocksChanged = !sameKeys(blockedKeys(heldBlocks), blockedKeys(nextBlocks))
+      if (JSON.stringify(nextBlocks) !== JSON.stringify(heldBlocks)) {
+        guard()
+        await store.writeMemberBlocks(storage, nextBlocks)
+      }
+
+      return { avisos: avisosOut(merged), pending: ignored ? false : localOnly, dmChanged, groupChanged, blocksChanged, caughtUp }
     } finally {
       key.fill(0)
     }

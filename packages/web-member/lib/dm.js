@@ -67,6 +67,7 @@ const { nowIso, MAX_AUDIO_BYTES } = require('@varanda/core/lib/records')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { certForKey } = require('@varanda/core/lib/cert')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
+const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { mediaBounds, audioBounds, dmTextBytes, DM_MEDIA_KEYS, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 const { sealBlob, createBlobClient, fetchBlob } = require('./blob')
@@ -276,11 +277,15 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // The stored blocklist snapshot's sets (empty when none verifies).
   async function moderation () {
     try {
+      // The member's own blocks drop a sender as the association's do, also
+      // on a device the conversation op never reached.
+      const own = blockedKeys(await store.readMemberBlocks(storage))
       const data = await store.readBlocklist(storage)
       const snapshot = data === null ? null : data.snapshot
       if (snapshot !== null && verifySnapshot(snapshot, association).ok) {
-        return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
+        return { blocked: new Set([...blockedSet(snapshot), ...own]), revokedIssuers: revokedIssuerSet(snapshot) }
       }
+      return { blocked: own, revokedIssuers: new Set() }
     } catch {}
     return { blocked: new Set(), revokedIssuers: new Set() }
   }

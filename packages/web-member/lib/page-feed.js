@@ -70,7 +70,7 @@ const { buildFeed } = require('@varanda/core/lib/feed')
 const { pageLifecycle, cutEntries, verifyClose, verifyMoved } = require('@varanda/core/lib/page-lifecycle')
 const { memoryStorage } = require('./storage')
 const { guardedWsStream } = require('./ws-stream')
-const { moderation } = require('./member-ops')
+const { readerModeration } = require('./member-ops')
 const { PEEK_CORE_PAGE_SIZE, PEEK_MAX_FRAME, SEEDER_BUSY } = require('./peek')
 
 const MIN_FETCH_MS = 250
@@ -509,7 +509,7 @@ function createPageFeeder ({ storage, association, seederUrl, createSocket, fetc
 
   async function readWith (run, { keys, limit }) {
     run.deadline = Date.now() + L.deadlineMs
-    const mod = await moderation(storage, association)
+    const mod = await readerModeration(storage, association)
     checkAborted(run)
     await openLink(run)
     checkAborted(run)
@@ -539,11 +539,11 @@ function createPageFeeder ({ storage, association, seederUrl, createSocket, fetc
     checkAborted(run)
     if (run.overBudget || run.lost || run.cut) incomplete = true
     // A snapshot adopted meanwhile (another tab's sync) decides the answer.
-    const final = await moderation(storage, association)
+    const final = await readerModeration(storage, association)
     // As logRead: a block-0 issuer the final snapshot revokes reads as no
     // local data, like a block.
     const kept = logs.filter(({ key, entries }) => !final.blocked.has(key) && !revokedAt0(entries, key, association, final.revokedIssuers))
-    const built = buildFeed({ logs: kept, association, limit, revokedIssuers: final.revokedIssuers })
+    const built = buildFeed({ logs: kept, association, limit, revokedIssuers: final.revokedIssuers, hidden: final.hidden })
     return { items: built.items, incomplete }
   }
 

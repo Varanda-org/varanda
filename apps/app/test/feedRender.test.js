@@ -108,7 +108,7 @@ test('A Rua keys the row cache on what each row shows', (t) => {
 
 test('PostRow is memoized with the default comparison and reads text once', (t) => {
   const src = read('ui/PostRow.js')
-  t.ok(src.includes('export const PostRow = memo(PostRowView)'), 'default shallow compare')
+  t.ok(src.includes('export const PostRow = memo(BlockGate)'), 'default shallow compare')
   t.is(src.split('displayText(text').length - 1, 1, 'displayText of the text once')
   t.absent(/useEffect\([^)]*isReduceMotionEnabled/.test(src), 'no per-mount reduce motion query')
   const list = read('ui/RefreshableList.js')

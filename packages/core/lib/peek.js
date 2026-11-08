@@ -103,7 +103,7 @@ function retainRecords (entries) {
 function diaryPeek (input) {
   const result = { reason: 'not-in-log', name: null, avatar: null, username: null, posts: [], future: 0, scanned: false, capped: false }
   try {
-    const { key, length, entries, fetched, association, revokedIssuers, now = Date.now() } = input
+    const { key, length, entries, fetched, association, revokedIssuers, hidden = null, now = Date.now() } = input
     if (!Number.isSafeInteger(length) || length < 1) return result
     const floor = tailFloor(length, fetched)
     // A full scan holds every seq from the top down to block 0: the head
@@ -144,7 +144,10 @@ function diaryPeek (input) {
         result.future++
         continue
       }
-      result.posts.push({ kind: 'repost', seq, at, to: parseRef(ref) })
+      const to = parseRef(ref)
+      // `hidden`: the member's own blocks (a Set, lib/member-block.js).
+      if (hidden !== null && hidden.has(to.author)) continue
+      result.posts.push({ kind: 'repost', seq, at, to })
     }
     result.posts.sort((a, b) => b.seq - a.seq)
     result.posts = result.posts.slice(0, PEEK_MAX_ROUNDS)

@@ -339,6 +339,8 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 
 ## Moderação e obrigações legais
 
+O bloqueio pessoal é outra coisa: cada membro decide o que não quer ver (`docs/app.md`, "Bloquear uma pessoa"). Os aparelhos da mesma passkey compartilham a lista pelo bloco cifrado de vistos, que o serviço de conta não consegue ler. Ele filtra só as leituras de quem bloqueou. Como os diários são públicos e replicados, não impede a outra pessoa de ler, seguir ou responder, e ela não é avisada. O que segue trata da moderação da associação.
+
 Numa rede P2P não dá para apagar uma cópia de todos os aparelhos, então a moderação funciona por uma lista assinada que os nós honestos obedecem. A lista existe desde a PR B2 (`docs/protocol.md` seção 3), e as denúncias de dentro do app e o painel da equipe, desde a PR B3 (`docs/verification.md` seção 14).
 
 1. **Denúncia:** uma pessoa com a conta Google vinculada denuncia uma publicação ou uma conta pelo app oficial hospedado na web, e a denúncia é assinada com a chave do membro. O serviço de conta guarda a chave de quem denuncia, a chave denunciada, o número da publicação quando há, o motivo, o texto opcional, o trecho citado como o denunciante o enviou, a data e a assinatura. Quem é denunciado não tem tela nem rota que mostre isso. O trecho citado continua sendo o que quem denunciou enviou, e não é conferido. Com a triagem ligada (`VARANDA_AI`), o serviço de conta lê o bloco 0 e o bloco denunciado no semeador, pela rota local com token, reconfere os dois e mostra o texto verificado aos moderadores.
