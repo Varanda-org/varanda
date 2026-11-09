@@ -77,11 +77,12 @@ export const HELP = Object.freeze({
   entrar: Object.freeze({
     title: 'Como funciona a entrada',
     paragraphs: Object.freeze([
-      'Você entra com uma passkey: sem senha e sem e-mail.',
-      'Ela fica no gerenciador de senhas do aparelho e abre com biometria ou PIN.',
-      'Guarde-a num gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro): é ele que devolve a passkey num aparelho novo. Num computador sem esse gerenciador, use o celular: para criar a conta, toque em criar com o celular; para entrar, toque em Entrar com a passkey e escolha usar outro aparelho. Nos dois casos, leia com a câmera do celular o QR code que aparece na tela do computador.',
+      'Na Varanda não existe senha para decorar nem e-mail para confirmar. Sua conta abre com o rosto, a digital ou o bloqueio de tela do aparelho. Por baixo, isso se chama passkey.',
+      'No celular, a passkey costuma ficar salva na conta Google (Android) ou na conta Apple (iPhone), que sincroniza entre os seus aparelhos: num celular novo, entrar nessa mesma conta traz a passkey de volta. Outros gerenciadores de senhas que sincronizam, como o 1Password ou o Bitwarden, também servem.',
+      'Num computador, use o celular: para criar a conta, toque em Outras formas de entrar e em criar com o celular; para entrar, toque em Entrar ou Já tenho conta e escolha usar outro aparelho na janela do sistema. Nos dois casos, leia com a câmera do celular o QR code que aparece na tela do computador.',
       'Em Ajustes → Passkeys e recuperação, cadastre outra passkey ou um código de recuperação: eles abrem a mesma conta. Uma passkey criada fora desse lugar abre outra conta.',
-      LOSS_TEXT
+      LOSS_TEXT,
+      'Em Outras formas de entrar ficam os outros jeitos de entrar, para quem já tem conta em outro aparelho ou guardou um código de recuperação: entrar com outra passkey, usar o celular pelo QR code (no navegador) e entrar com o código de recuperação.'
     ])
   }),
   vinculo: Object.freeze({
@@ -180,7 +181,6 @@ export const HELP = Object.freeze({
 
 export const SHORT = Object.freeze({
   link: 'A associação guarda o vínculo com sua conta Google; o e-mail nunca vai para o seu perfil nem para o seu diário.',
-  passkeyLoss: LOSS_TEXT,
   followsPublic: 'Quem você segue e quem segue você é público.',
   install: 'Abra o menu do navegador e escolha instalar o app. No iPhone: Compartilhar e depois Adicionar à Tela de Início.',
   reportPrivacy: 'A pessoa denunciada não vê quem denunciou.',

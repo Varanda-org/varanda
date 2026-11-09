@@ -55,7 +55,13 @@ test('sign-in help explains synced recovery and phone QR while preserving passke
   t.absent(text.includes('Se perder a passkey, perde a conta'), 'a recovery code or another passkey still opens it')
   t.is(HELP.entrar.paragraphs[3], 'Em Ajustes → Passkeys e recuperação, cadastre outra passkey ou um código de recuperação: eles abrem a mesma conta. Uma passkey criada fora desse lugar abre outra conta.')
   t.is(HELP.entrar.paragraphs[4], LOSS_TEXT)
-  t.is(SHORT.passkeyLoss, LOSS_TEXT)
+  t.absent('passkeyLoss' in SHORT, 'the loss warning lives in the sheet, not on the card')
+  t.ok(HELP.entrar.paragraphs[0].startsWith('Na Varanda não existe senha'))
+  t.absent(text.includes('Entrar com a passkey'), 'the button no longer carries that label')
+  // The card keeps buttons only; what it used to explain is here.
+  for (const fact of ['Google', 'Apple', '1Password', 'Bitwarden', 'traz a passkey de volta', 'Outras formas de entrar', 'outra passkey', 'código de recuperação']) {
+    t.ok(text.includes(fact), fact)
+  }
 })
 
 test('link help keeps the account and privacy disclosures', async (t) => {
