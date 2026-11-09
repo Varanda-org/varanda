@@ -776,9 +776,18 @@ test('inner v2: the worst card fits the DM frame with the largest certificate', 
 const page = signPair()
 page.cert = createCert({ member: page.hex, date: AT }, assoc)
 
-function pageInner (fields, signer = page) {
+const EXP = Date.parse(AT) + dm.DM_V3_TTL_MS
+
+function u64 (n) {
+  const out = b4a.alloc(8)
+  out.writeUInt32BE(Math.floor(n / 0x100000000), 0)
+  out.writeUInt32BE(n % 0x100000000, 4)
+  return out
+}
+
+function pageInner (fields, signer = page, expiresAt = EXP) {
   const { json, digest, body } = dm.innerDigest({ from: page.hex, ...fields })
-  return { inner: dm.assembleInner(json, dm.signDigest(digest, signer.secretKey)), json, digest, body }
+  return { inner: dm.assembleInner(json, dm.signDigest(digest, signer.secretKey, expiresAt), expiresAt), json, digest, body }
 }
 
 test('inner v3: constants and the digest signature', (t) => {
@@ -794,9 +803,12 @@ test('inner v3: constants and the digest signature', (t) => {
   sodium.crypto_hash_sha256(d, json)
   t.is(digest, b4a.toString(d, 'hex'))
   const sig = inner.subarray(2 + json.byteLength, 2 + json.byteLength + 64)
-  t.ok(hcrypto.verify(b4a.concat([b4a.from('varanda-dm-v3\n'), d]), sig, page.publicKey), 'prefix || sha256(json)')
+  t.ok(hcrypto.verify(b4a.concat([b4a.from('varanda-dm-v3\n'), d, u64(EXP)]), sig, page.publicKey), 'prefix || sha256(json) || uint64be(expiresAt)')
+  t.absent(hcrypto.verify(b4a.concat([b4a.from('varanda-dm-v3\n'), d]), sig, page.publicKey), 'the expiry is signed')
   t.absent(hcrypto.verify(b4a.concat([b4a.from(DM_SIG_PREFIX_V2), json]), sig, page.publicKey))
-  for (let i = 2 + json.byteLength + 64; i < DM_INNER_BYTES; i++) {
+  const off = 2 + json.byteLength + 64
+  t.alike(b4a.from(inner.subarray(off, off + 8)), u64(EXP), 'expiresAt follows the signature')
+  for (let i = off + 8; i < DM_INNER_BYTES; i++) {
     if (inner[i] !== 0) { t.fail('padding'); break }
   }
 })
@@ -805,6 +817,7 @@ test('inner v3: a text-only msg round trip, recipient and self copy', (t) => {
   const { inner } = pageInner({ kind: 'msg', to: bia.hex, text: 'olá da página', at: AT, cert: page.cert })
   const theirs = openInner(b4a.from(inner), bia.hex, O)
   t.is(theirs.v, 3)
+  t.is(theirs.expiresAt, EXP)
   t.is(theirs.text, 'olá da página')
   t.is(theirs.media, null)
   t.is(theirs.card, null)
@@ -858,8 +871,9 @@ test('inner v3: tampering, wrong signer and old prefixes are refused', (t) => {
   const v1sig = hcrypto.sign(b4a.concat([b4a.from(DM_SIG_PREFIX), json]), page.secretKey)
   const v2sig = hcrypto.sign(b4a.concat([b4a.from(DM_SIG_PREFIX_V2), json]), page.secretKey)
   const rawDigest = hcrypto.sign(b4a.from(digest, 'hex'), page.secretKey)
-  for (const sig of [v1sig, v2sig, rawDigest]) {
-    t.is(openInner(dm.assembleInner(json, b4a.toString(sig, 'hex')), bia.hex, O), null)
+  const noExpiry = hcrypto.sign(b4a.concat([b4a.from('varanda-dm-v3\n'), b4a.from(digest, 'hex')]), page.secretKey)
+  for (const sig of [v1sig, v2sig, rawDigest, noExpiry]) {
+    t.is(openInner(dm.assembleInner(json, b4a.toString(sig, 'hex'), EXP), bia.hex, O), null)
   }
   const ctl = pageInner({ kind: 'ctl', op: 'accepted', peer: bia.hex, at: AT }, caio).inner
   t.is(openInner(ctl, page.hex), null, 'a ctl signed by another key')
@@ -870,11 +884,61 @@ test('inner v3: the API refuses bad input and long bodies', (t) => {
   t.exception.all(() => dm.innerDigest(null), /mensagem inválida/)
   t.exception.all(() => dm.signDigest('ab', page.secretKey), /resumo inválido/)
   t.exception.all(() => dm.signDigest('A'.repeat(64), page.secretKey), /resumo inválido/)
-  t.exception.all(() => dm.signDigest('a'.repeat(64), b4a.alloc(32)), /chave de assinatura inválida/)
-  t.exception.all(() => dm.assembleInner(b4a.from('{}'), 'zz'), /assinatura inválida/)
-  t.exception.all(() => dm.assembleInner(b4a.alloc(DM_INNER_BYTES - 65), 'a'.repeat(128)), /mensagem inválida/)
+  t.exception.all(() => dm.signDigest('a'.repeat(64), b4a.alloc(32), EXP), /chave de assinatura inválida/)
+  for (const bad of [undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '1', NaN]) {
+    t.exception.all(() => dm.signDigest('a'.repeat(64), page.secretKey, bad), /validade inválida/, 'signDigest expiresAt ' + String(bad))
+    t.exception.all(() => dm.assembleInner(b4a.from('{}'), 'a'.repeat(128), bad), /validade inválida/, 'assembleInner expiresAt ' + String(bad))
+  }
+  t.exception.all(() => dm.assembleInner(b4a.from('{}'), 'zz', EXP), /assinatura inválida/)
+  t.exception.all(() => dm.assembleInner(b4a.alloc(DM_INNER_BYTES - 73), 'a'.repeat(128), EXP), /mensagem inválida/, 'no room for the expiry')
+  t.ok(dm.assembleInner(b4a.alloc(DM_INNER_BYTES - 74), 'a'.repeat(128), EXP), 'exactly fits')
   const media = [blobItem(1), blobItem(2), blobItem(3), blobItem(4)]
   t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: '\u{1F600}'.repeat(DM_MAX_TEXT), media, replyTo: 'c'.repeat(32), at: AT, cert: page.cert }), /mensagem longa demais/)
+})
+
+test('inner v3: the frame expiry must match the signed one', (t) => {
+  const { inner, json } = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert })
+  const off = 2 + json.byteLength + 64
+  const other = b4a.from(inner)
+  other.set(u64(EXP + 1), off)
+  t.is(openInner(other, bia.hex, O), null, 'a different expiresAt than the signed one')
+  const padded = b4a.from(inner)
+  padded[off + 8] = 1
+  t.is(openInner(padded, bia.hex, O), null, 'non-zero padding after the expiry')
+  padded[off + 8] = 0
+  padded[DM_INNER_BYTES - 1] = 1
+  t.is(openInner(padded, bia.hex, O), null, 'non-zero last byte')
+  for (const bad of [0, Number.MAX_SAFE_INTEGER + 1]) {
+    const f = b4a.from(inner)
+    f.set(u64(bad), off)
+    t.is(openInner(f, bia.hex, O), null, 'frame expiresAt ' + bad)
+  }
+  const huge = b4a.from(inner)
+  huge.fill(0xff, off, off + 8)
+  t.is(openInner(huge, bia.hex, O), null, 'frame expiresAt above 2^53')
+  const big = Number.MAX_SAFE_INTEGER
+  t.is(openInner(pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert }, page, big).inner, bia.hex, O).expiresAt, big, 'the largest safe expiry')
+  t.is(openInner(pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert }, page, 1).inner, bia.hex, O).expiresAt, 1)
+})
+
+test('inner v3: pageInnerStale boundaries', (t) => {
+  t.is(dm.DM_V3_TTL_MS, 600000)
+  t.is(dm.DM_V3_STALE_MS, dm.DM_RETENTION_MS + 86400000)
+  const body = { v: 3, expiresAt: EXP }
+  t.is(dm.pageInnerStale(body, EXP), false)
+  t.is(dm.pageInnerStale(body, EXP + dm.DM_V3_STALE_MS), false, 'exactly at the limit is still filed')
+  t.is(dm.pageInnerStale(body, EXP + dm.DM_V3_STALE_MS + 1), true, 'one ms later is stale')
+  t.is(dm.pageInnerStale(body, 0), false, 'a receiver clock behind is not stale')
+  t.is(dm.pageInnerStale({ v: 1 }, EXP + 10 * dm.DM_V3_STALE_MS), false, 'v1 never stale')
+  t.is(dm.pageInnerStale({ v: 2 }, EXP + 10 * dm.DM_V3_STALE_MS), false, 'v2 never stale')
+  t.is(dm.pageInnerStale({ v: 3 }, EXP), true, 'a v3 without expiresAt is refused')
+  t.is(dm.pageInnerStale({ v: 3, expiresAt: 0 }, EXP), true)
+  t.is(dm.pageInnerStale(body, NaN), true)
+  t.is(dm.pageInnerStale(null, EXP), false)
+  const opened = openInner(pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert }).inner, bia.hex, O)
+  t.is(dm.pageInnerStale(opened, EXP + dm.DM_V3_STALE_MS + 1), true, 'works on an opened body')
+  t.absent('expiresAt' in openInner(msg(), bia.hex, O), 'v1 has no expiresAt')
+  t.absent('expiresAt' in openInner(msg({ fwd: 1 }), bia.hex, O), 'v2 has no expiresAt')
 })
 
 test('inner v3: buildInner never writes v3, and v1/v2 vectors are unchanged', (t) => {

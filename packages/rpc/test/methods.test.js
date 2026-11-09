@@ -19,7 +19,7 @@ const bad = (t, method, params, label) => {
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
-    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageImport', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
@@ -29,7 +29,7 @@ test('method list and mutating set', (t) => {
     'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
-    'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageImport', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
+    'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
@@ -2153,7 +2153,7 @@ test('page.* (Páginas)', (t) => {
 
   ok(t, 'page.sign', base, base)
   for (const action of ['list', 'status', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar', 'rename', 'invite',
-    'dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen', 'follow', 'follows', 'media', 'notices', 'terms',
+    'dm-list', 'dm-thread', 'follow', 'follows', 'media', 'notices', 'terms',
     'community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read',
     'accept', 'remove', 'offer', 'transfer-accept', 'create', 'close', 'move']) {
     ok(t, 'page.sign', { ...base, action })
@@ -2163,6 +2163,8 @@ test('page.* (Páginas)', (t) => {
   // terms signature for.
   ok(t, 'page.sign', { action: 'terms', nonce, page: '', op: { version: 13, diary: KEY } })
   bad(t, 'page.sign', { ...base, action: 'offer-cancel', op: {} }, 'the unsigned offer-cancel is gone')
+  // The service no longer holds a page's box: it cannot send, file or mark.
+  for (const action of ['dm-send', 'dm-set', 'dm-seen']) bad(t, 'page.sign', { ...base, action, op: {} }, action + ' is gone')
   // An offer names a recipient and an expiry, or neither (the cancel).
   const offerOp = { to: 'cd'.repeat(32), exp: '2026-11-10T12:00:00.000Z', gen: 2, at, nonce }
   ok(t, 'page.sign', { ...base, action: 'offer', op: offerOp })
@@ -2423,12 +2425,11 @@ test('page end-to-end node methods', (t) => {
   bad(t, 'dm.pageShare', { page: PAGE, member: KEY })
   const secrets = { page: PAGE, gen: 1, sealed: 'abc', by: KEY, sig, box: KEY, groupBox: KEY, cert: {} }
   ok(t, 'dm.pageSecrets', secrets)
-  ok(t, 'dm.pageSecrets', { ...secrets, legacy: { gen: 1, sealed: 'abc' } })
   bad(t, 'dm.pageSecrets', { ...secrets, gen: 0x100000000 }, 'gen above uint32')
   bad(t, 'dm.pageSecrets', { ...secrets, cert: 'x' }, 'cert must be an object')
   bad(t, 'dm.pageSecrets', { ...secrets, sealed: 'a'.repeat(1025) }, 'sealed too long')
   bad(t, 'dm.pageSecrets', { ...secrets, sig: 'ab' }, 'short sig')
-  bad(t, 'dm.pageSecrets', { ...secrets, legacy: { gen: 1 } }, 'legacy without sealed')
+  bad(t, 'dm.pageSecrets', { ...secrets, legacy: { gen: 1, sealed: 'abc' } }, 'the legacy envelope is gone (the bundle carries the box)')
   t.ok(isMutating('dm.pageSecrets'))
   t.absent(isMutating('dm.pageGenerate'))
   t.absent(isMutating('dm.pageShare'))
@@ -2436,17 +2437,29 @@ test('page end-to-end node methods', (t) => {
   ok(t, 'dm.pageDraft', { page: PAGE, kind: 'msg', to: KEY, text: 'oi' }, { page: PAGE, kind: 'msg', to: KEY, text: 'oi', fwd: 0 })
   ok(t, 'dm.pageDraft', { page: PAGE, kind: 'ctl', peer: KEY, op: 'accepted' })
   bad(t, 'dm.pageDraft', { page: PAGE, kind: 'other' })
-  ok(t, 'dm.pageSend', { page: PAGE, id, signature: sig })
-  bad(t, 'dm.pageSend', { page: PAGE, id, signature: 'x' })
-  const row = { id, from: KEY, to: PAGE, text: 'oi', at: '2026-01-01T00:00:00.000Z', replyTo: null, media: null, card: null }
-  ok(t, 'dm.pageImport', { page: PAGE, rows: [row] })
-  bad(t, 'dm.pageImport', { page: PAGE, rows: [{ ...row, extra: 1 }] }, 'extra row key')
-  bad(t, 'dm.pageImport', { page: PAGE, rows: [{ id }] }, 'short row')
-  bad(t, 'dm.pageImport', { page: PAGE, rows: [{ ...row, text: 'x'.repeat(1001) }] }, 'text over MAX_TEXT')
-  bad(t, 'dm.pageImport', { page: PAGE, rows: [{ ...row, media: [{}] }] }, 'media item not a blob descriptor')
-  bad(t, 'dm.pageImport', { page: PAGE, rows: [{ ...row, card: { x: 1 } }] }, 'card not a link card')
-  bad(t, 'dm.pageImport', { page: PAGE, rows: [{ ...row, to: row.from }] }, 'from equals to')
-  bad(t, 'dm.pageImport', { page: PAGE, rows: Array.from({ length: 201 }, () => row) }, '201 rows')
+  const expiresAt = Date.parse('2026-01-01T00:10:00.000Z')
+  ok(t, 'dm.pageSend', { page: PAGE, id, signature: sig, expiresAt })
+  ok(t, 'dm.pageSend', { page: PAGE, id, signature: sig, expiresAt: 1 })
+  ok(t, 'dm.pageSend', { page: PAGE, id, signature: sig, expiresAt: Number.MAX_SAFE_INTEGER })
+  bad(t, 'dm.pageSend', { page: PAGE, id, signature: 'x', expiresAt })
+  bad(t, 'dm.pageSend', { page: PAGE, id, signature: sig }, 'expiresAt required')
+  for (const v of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '1', null]) {
+    bad(t, 'dm.pageSend', { page: PAGE, id, signature: sig, expiresAt: v }, 'expiresAt ' + String(v))
+  }
+  const bundle = 'ab'.repeat(32)
+  ok(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 0, count: 1, sealed: 'abc' })
+  ok(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 1023, count: 1024, sealed: 'a'.repeat(60000) })
+  bad(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 1024, count: 1024, sealed: 'abc' }, 'index past 1023')
+  bad(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 0, count: 0, sealed: 'abc' }, 'count 0')
+  bad(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 0, count: 1025, sealed: 'abc' }, 'count over 1024')
+  bad(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 0, count: 1, sealed: 'a'.repeat(60001) }, 'sealed over 60000')
+  bad(t, 'dm.pageLegacyChunk', { page: PAGE, id: 'x', index: 0, count: 1, sealed: 'abc' }, 'id not hex64')
+  bad(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 0, count: 1 }, 'sealed required')
+  t.ok(isMutating('dm.pageLegacyChunk'))
+  ok(t, 'dm.pageLegacyBlocks', { page: PAGE })
+  bad(t, 'dm.pageLegacyBlocks', {}, 'page required')
+  t.absent(isMutating('dm.pageLegacyBlocks'))
+  t.is(validateParams('dm.pageImport', { page: PAGE, rows: [] }).message, 'método desconhecido', 'dm.pageImport removed')
   ok(t, 'dm.pageForget', { page: PAGE })
   for (const method of ['dm.list', 'dm.thread', 'dm.set', 'dm.seen']) {
     const base = { 'dm.thread': { peer: KEY }, 'dm.set': { peer: KEY, state: 'accepted' }, 'dm.seen': { peer: KEY } }[method] || {}

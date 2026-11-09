@@ -4235,6 +4235,8 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 
 ## 85. Conversas como página (PR feat/pages-app)
 
+> Superada pela seção 146 para as Conversas de página de ponta a ponta.
+
 Uma Página tem Conversas, mas a chave de mensagens dela fica no serviço de conta, que pode ler as mensagens enviadas e recebidas pela página. Protocolo na seção 12 de `docs/protocol.md` ("Conversas como página"); dados em `docs/design.md` (LGPD); telas em `docs/app.md` ("Páginas"). Termos e Política na versão 15.
 
 ### Como verificar
@@ -6833,3 +6835,31 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi marcada nesta documentação.
 - Os testes conferem as respostas da demonstração, não a tela. Fotos, controles de oferta e posição só se confirmam no aparelho ou no simulador.
 - Os controles de oferta nunca foram revistos na demonstração antes desta mudança: a caminhada acima é a primeira revisão deles.
+
+## 146. Conversas de página de ponta a ponta, Termos 33 (PR feat/page-e2e-dm)
+
+As Conversas de Página passam a ser cifradas de ponta a ponta entre quem escreve e os aparelhos do dono e dos administradores. O serviço de conta não abre a caixa nem as mensagens: só publica a chave pública da caixa, guarda envelopes selados para os membros da lista e assina `varanda-dm-v3\n` mais o digest de 32 bytes que o aparelho preparou. A dona ativa a página, importa antes as linhas antigas quando houver e distribui a nova chave aos administradores. Termos e Política passam para a versão 33.
+
+Como verificar, a partir da raiz:
+
+- `node apps/cli/test/pages-dm.test.js`
+- `node packages/web-member/test/page-dm.test.js`
+- `node packages/core/test/page-secrets.test.js`
+- `node apps/app/test/pages.test.js`
+- `node apps/app/test/legal.test.js`
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA, com A (dona), B (administradora) e C (membro):
+
+- [ ] A abre as Conversas da Página, ativa a caixa e importa as linhas antigas, quando houver. A folha explica a mudança e **Enviar chave** entrega a chave a B.
+- [ ] B recebe a chave e abre as Conversas da Página.
+- [ ] C escreve para a Página. B lê a mensagem e responde como a Página; C vê a Página, não B.
+- [ ] A remove B e gira a chave exigida pela remoção. B deixa de ler mensagens novas e não consegue enviar como a Página.
+- [ ] Na Feira, A aceita uma oferta de C como Página sem existir uma conversa entre eles. O aceite não procura a oferta numa conversa da Página.
+- [ ] Faça o `dm-key` público diferir da chave guardada por B. Ao tentar enviar como a Página, o aparelho de B recusa e mostra que a chave publicada não é a deste aparelho, até B receber a chave correta.
+
+Limites desta caminhada:
+
+- O serviço ainda guarda a chave de assinatura da Página. Ele poderia forjar uma mensagem como a Página ou publicar uma chave de caixa própria; os aparelhos administradores avisam da chave diferente e param de enviar.
+- Mensagens escritas antes da ativação eram legíveis pelo serviço.
+- Uma mensagem da Página que nenhum aparelho administrador coletar em 7 dias se perde.
+- O serviço sabe quando um administrador envia, embora não veja a mensagem, o destinatário nem o envelope.

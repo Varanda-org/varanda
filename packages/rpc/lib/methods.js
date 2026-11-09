@@ -509,24 +509,13 @@ const PAGE_RECIPIENTS_MAX = 17
 // The page-secrets header carries gen as uint32be.
 const PAGE_GEN_MAX = 0xffffffff
 const PAGE_SEALED_MAX = 1024
-const PAGE_IMPORT_ROWS_MAX = 200
 const isPageRecipients = (v) => Array.isArray(v) && v.length <= PAGE_RECIPIENTS_MAX &&
   v.every((r) => isPlainObject(r) && Object.keys(r).length === 2 && isKey(r.member) && isKey(r.box))
-const isPageLegacy = (v) => isPlainObject(v) && Object.keys(v).length === 2 &&
-  Number.isSafeInteger(v.gen) && v.gen >= 1 && str(1, PAGE_SEALED_MAX)(v.sealed)
 const isPageDraftKind = (v) => v === 'msg' || v === 'ctl'
-// Exactly { id, from, to, text, at, replyTo, media, card }; the whole request
-// stays under MAX_REQUEST, so the app batches by serialized size. These rows
-// come from the service, not from a signed inner, so they get the same bounds
-// as dm.send here and the node checks them again before filing.
-const PAGE_IMPORT_ROW_KEYS = ['id', 'from', 'to', 'text', 'at', 'replyTo', 'media', 'card']
-const isPageImportRow = (r) => isPlainObject(r) && Object.keys(r).length === PAGE_IMPORT_ROW_KEYS.length &&
-  PAGE_IMPORT_ROW_KEYS.every((k) => hasOwn(r, k)) &&
-  isDmId(r.id) && isKey(r.from) && isKey(r.to) && r.from !== r.to && str(0, L.MAX_TEXT)(r.text) && isCanonicalIso(r.at) &&
-  (r.replyTo === null || isDmId(r.replyTo)) &&
-  (r.media === null || isDmMediaList(r.media)) && (r.card === null || isDmCard(r.card)) &&
-  (r.media === null || r.card === null)
-const isPageImportRows = (v) => Array.isArray(v) && v.length <= PAGE_IMPORT_ROWS_MAX && v.every(isPageImportRow)
+// dm.pageLegacyChunk (docs/rpc.md 5.114): one chunk of the legacy bundle the
+// service sealed to the owner's own dm-key box; the node opens and checks it.
+const PAGE_LEGACY_CHUNKS_MAX = 1024
+const PAGE_LEGACY_SEALED_MAX = 60000
 
 // dm.send `media` (docs/rpc.md 5.75): 1..MAX_DM_MEDIA items, each a blob
 // descriptor (the validateBlobDescriptor rules of @varanda/core lib/blob.js,
@@ -585,7 +574,7 @@ function isDmListCursor (v) {
 // diary through the signed cancel offer ({ to: null, exp: null }).
 const PAGE_ACTIONS = [
   'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar',
-  'rename', 'invite', 'dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'group-seal', 'group-rebox', 'follow',
+  'rename', 'invite', 'dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'group-seal', 'group-rebox', 'follow',
   'follows', 'media', 'notices', 'terms', 'community-join', 'community-leave', 'group-join', 'group-leave',
   'group-post', 'group-read', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
   'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
@@ -1229,8 +1218,7 @@ const SPECS = {
       sig: req(isSignature),
       box: req(isKey),
       groupBox: req(isKey),
-      cert: req(isCert),
-      legacy: opt(isPageLegacy)
+      cert: req(isCert)
     },
     mutating: true
   },
@@ -1246,8 +1234,19 @@ const SPECS = {
       peer: opt(isKey)
     }
   },
-  'dm.pageSend': { fields: { page: req(isKey), id: req(isDmId), signature: req(isSignature) }, mutating: true },
-  'dm.pageImport': { fields: { page: req(isKey), rows: req(isPageImportRows) }, mutating: true },
+  // expiresAt (ms) is what the service signed with the digest, never chosen here.
+  'dm.pageSend': { fields: { page: req(isKey), id: req(isDmId), signature: req(isSignature), expiresAt: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  'dm.pageLegacyChunk': {
+    fields: {
+      page: req(isKey),
+      id: req(isKey),
+      index: req(int(0, PAGE_LEGACY_CHUNKS_MAX - 1)),
+      count: req(int(1, PAGE_LEGACY_CHUNKS_MAX)),
+      sealed: req(str(1, PAGE_LEGACY_SEALED_MAX))
+    },
+    mutating: true
+  },
+  'dm.pageLegacyBlocks': { fields: { page: req(isKey) } },
   'dm.pageForget': { fields: { page: req(isKey) }, mutating: true },
   // The node fills in member and association and hashes text and quote; the
   // quote is the chosen message as this device decrypted it, which no one

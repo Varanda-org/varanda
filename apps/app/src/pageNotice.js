@@ -1,10 +1,21 @@
-// The one-time notice before a member's first message to a Página: the
-// account service keeps a page's inbox and can read it (Termos 28, docs/
-// design.md LGPD). Shown once per device and page key, from the page's
-// profile (Membro) and from "Conversar" on one of its listings (Anuncio).
-// Pure: the device store comes from pageNoticeStore.web.js / .native.js.
+// The one-time note before a member's first message to a Página: the
+// conversation is sealed between the member and the page's owner and admins
+// (docs/rpc.md 5.114). Shown once per device and page key, from the page's
+// profile (Membro), from "Conversar" on one of its listings (Anuncio) and
+// from a page's post (App). Pure: the device store comes from
+// pageNoticeStore.web.js / .native.js.
 
-export const PAGE_DM_NOTICE = 'O serviço de conta pode ler as mensagens desta conversa.'
+export const PAGE_DM_NOTICE = 'As mensagens desta conversa são cifradas entre você e quem administra a página. A associação não lê.'
+export const PAGE_DM_NOT_ACTIVE = 'Esta página ainda não ativou as Conversas privadas. Sua mensagem chega quando ela ativar.'
+
+// Whether the page's published dm-key (dm.lookup of the page) is none or the
+// gen 1 key every page had before its owner activated device-held keys.
+export function pageNotActivated (lookup) {
+  if (lookup === null || typeof lookup !== 'object') return false
+  // A gen 1 key may be a legacy service-held box or the first box of a new
+  // page, so only a page with no key at all reads as not activated.
+  return lookup.box === null
+}
 
 export function pageNoticeKey (page) {
   return typeof page === 'string' && /^[0-9a-f]{64}$/.test(page) ? 'varanda-page-dm-notice-' + page : null

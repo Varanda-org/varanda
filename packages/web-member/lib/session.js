@@ -321,7 +321,7 @@ const store = require('./node-store')
 const { groupKeyPairFromPrf } = require('./passkey')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
-const { createDmEngine, MOMENT_PHOTO_GONE, BLOCKED: DM_BLOCKED } = require('./dm')
+const { createDmEngine, MOMENT_PHOTO_GONE, BLOCKED: DM_BLOCKED, NO_PAGE_KEY, KEY_MISMATCH: DM_KEY_MISMATCH, USE_PAGE_DRAFT: DM_USE_PAGE_DRAFT } = require('./dm')
 const { applyBlock, blockedKeys } = require('@varanda/core/lib/member-block')
 const { createSeenSync, groupApplier } = require('./seen-sync')
 
@@ -407,6 +407,9 @@ const PAGE_READ_WINDOWS = 8
 const PAGE_READ_HEAD = 3
 const PAGE_READ_FOLLOWS_MAX = 64
 const PAGE_READ_LINKS_MAX = 16 + 1
+// docs/protocol.md "Mudar de chave": a chain of moves stops here (as
+// MAX_PAGE_MOVES in ./sync.js).
+const PAGE_MOVE_HOPS_MAX = 4
 // A window is first asked for under this share of the peek deadline: a
 // block the seeder cleared (its tombstone in the same window) never
 // arrives, so only what the answer's tombstones leave missing is asked for
@@ -416,6 +419,8 @@ const PAGE_READ_PROBE_SHARE = 8
 // and checks the wallet on this tick; a dm-key lookup by peek reads at most
 // this many windows of PEEK_WINDOW seqs, newest first.
 const DM_PULL_EVERY_MS = 120000
+// The published dm-key checks after a pull (checkPageKeys), all pages at once.
+const PAGE_KEY_CHECK_MS = 8000
 const DM_TICK_MS = 60000
 const DM_LOOKUP_WINDOWS = 8
 // An internal wire window of the node's own peeks, not an rpc page cap.
@@ -495,9 +500,9 @@ const NOT_FOUND_MESSAGES = new Set([
   MOMENT_PHOTO_GONE
 ])
 
-// A page inbox lives only where the page secrets are held; until this node
-// holds them a page read or write must never fall through to the own inbox
-// or the own groups.
+// A page's private groups are read and sealed only with the page's group
+// box, which this node does not use yet: a page read or seal must never fall
+// through to the own groups.
 function noPageInbox (params) {
   if (params && params.page !== undefined) throw new UsageError('sem chave da página')
 }
@@ -761,6 +766,8 @@ function readyWithin (ready, ms) {
 // never passes it). writeGateTimeoutMs: their deadline (tests).
 // readerWaitMs: how long a read waits for a starting run's cores (tests).
 // peekTimeoutMs: the diary.peek deadline (tests; the contract's otherwise).
+// dmKeyPeek: tests only, (memberKey) -> { box, gen } in place of the bounded
+// diary.peek scan for a dm-key (the published page key check reads it).
 // leaseHoldMs: the lease (header); 0 = off. leaseGapMs, leaseMediaMaxMs:
 // its gap and its media wait. noClear: keep the bytes of deleted blocks
 // (the browser's VARANDA_NO_CLEAR kill switch; tombstones still hide them).
@@ -781,6 +788,7 @@ function createBrowserSession ({
   writeGateTimeoutMs = WRITE_GATE_TIMEOUT_MS,
   readerWaitMs = READER_WAIT_MS,
   peekTimeoutMs = PEEK_TIMEOUT_MS,
+  dmKeyPeek = null,
   ratingsTimeoutMs = RATINGS_TIMEOUT_MS,
   leaseHoldMs = 0,
   leaseGapMs = LEASE_GAP_MS,
@@ -1073,8 +1081,59 @@ function createBrowserSession ({
       if (Date.now() - dmLastPull >= DM_PULL_EVERY_MS && !dmEngine.pulling) {
         dmLastPull = Date.now()
         await dmEngine.pull(own).catch(noop)
+        checkPageKeys().catch(noop)
       }
       if (keyPair !== null) await dmEngine.topUp(keyPair)
+    } catch {}
+  }
+
+  // After a pull, never inside it, and never awaited by it: each held
+  // page's newest published dm-key against the held gen and box, all pages
+  // at once under one PAGE_KEY_CHECK_MS deadline (a page not answered by
+  // then keeps its flag as it was). While either differs the page is
+  // flagged and 'dm.pageKeyMismatch' goes out on every pull (an honest
+  // service publishes the held gen with the held box, so an old box under a
+  // new gen is flagged too). The seeder is always asked, since a stored
+  // replica may not be syncing, and the higher gen of the two answers wins.
+  // A seeder that finds no dm-key at all is a mismatch too. When the seeder
+  // cannot be asked, only a stored replica at or past the held gen that
+  // disagrees flags; anything else leaves the flag as it was. Harmless after
+  // a lock (the engine holds no page then). Never throws.
+  async function checkPageKeys () {
+    const held = dmEngine.heldPageBoxes()
+    if (held.length === 0) return
+    let over = false
+    let timer = null
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        over = true
+        resolve()
+      }, PAGE_KEY_CHECK_MS)
+    })
+    try {
+      await Promise.race([Promise.allSettled(held.map((h) => checkPageKey(h, () => over))), deadline])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  async function checkPageKey ({ page, box, gen }, late) {
+    try {
+      if (closed) return
+      const local = await serial(() => withCores((c) => member.dmLookup(c, page)))({})
+      let published
+      try {
+        published = await peekDmKey(page)
+      } catch {
+        if (local === null || local.gen === null || local.gen < gen || (local.box === box && local.gen === gen)) return
+        published = local
+      }
+      if (closed || late()) return
+      // The seeder answering with no dm-key at all is a mismatch, whatever
+      // a stored replica says (an honest page refreshes its key in reach).
+      if (published.gen !== null && local !== null && local.gen !== null && local.gen > published.gen) published = local
+      const differs = published.box !== box || published.gen !== gen
+      if (dmEngine.setPageMismatch(page, box, differs, gen) && differs) send('dm.pageKeyMismatch', { page })
     } catch {}
   }
 
@@ -2279,6 +2338,15 @@ function createBrowserSession ({
     const key = memberKey.toLowerCase()
     const localHit = await serial(() => withCores((c) => member.dmLookup(c, key)))({})
     if (localHit !== null) return localHit
+    return peekDmKey(key)
+  }
+
+  async function peekDmKey (memberKey) {
+    const key = memberKey.toLowerCase()
+    if (dmKeyPeek !== null) {
+      const r = await dmKeyPeek(key)
+      return r === null ? { box: null, gen: null } : { box: r.box, gen: r.gen }
+    }
     const first = await diaryPeek({ author: key, seqs: [1] })
     const found = first.entries.slice()
     let best = member.newestDmKey(found)
@@ -3441,6 +3509,7 @@ function createBrowserSession ({
       noPageInbox(params)
       return withCores((c) => member.groupRead(c, params))
     }),
+    'group.seal': serial(async () => { throw new UsageError(NO_PAGE_KEY) }),
     'group.seen': serial(async (params) => {
       const before = await store.readGroupSeen(storage)
       const r = await withCores((c) => member.groupSeen(c, params))
@@ -3541,29 +3610,122 @@ function createBrowserSession ({
         return await dmEngine.pull(own)
       } catch (err) {
         throw toRpcError(err, reportInternal)
+      } finally {
+        checkPageKeys().catch(noop)
       }
     },
 
+    // With `page` (5.114) the page's conversations, held under its secrets;
+    // the member's own blocks do not apply to them.
     'dm.list': serial(async (params) => {
-      noPageInbox(params)
       return dmEngine.list(await requireDm(), params)
     }),
     'dm.thread': serial(async (params) => {
-      noPageInbox(params)
       const r = await dmEngine.thread(await requireDm(), params)
+      if (params.page !== undefined) return r
       return (await member.memberBlocks(storage)).has(params.peer) ? { ...r, blocked: true } : r
     }),
+    // A page's ops are signed by the page key: dm.pageDraft, dm.pageSend.
     'dm.set': serial(async ({ peer, state, page }) => {
-      noPageInbox({ page })
+      if (page !== undefined) throw new UsageError(DM_USE_PAGE_DRAFT)
       return dmEngine.set(await requireDm(), keyPair, { peer, state })
     }),
     'dm.seen': serial(async ({ peer, page }) => {
-      noPageInbox({ page })
       const own = await requireDm()
+      if (page !== undefined) return dmEngine.seen(own, peer, page)
       const before = await store.readDmSeen(storage)
       const r = await dmEngine.seen(own, peer)
       if (!sameJson(before, await store.readDmSeen(storage))) seenChanged()
       return r
+    }),
+
+    // ---- Páginas de ponta a ponta (docs/rpc.md 5.114) ----
+
+    'dm.pageGenerate': serial(async (params) => {
+      const own = await requireDm()
+      return dmEngine.pageGenerate(own, keyPair, params)
+    }),
+    'dm.pageShare': serial(async (params) => {
+      await requireDm()
+      return dmEngine.pageShare(keyPair, params)
+    }),
+    // The sharer must be the owner or an admin of the page's current roster,
+    // read as page.read reads it (off the chain: a peek may wait for the run).
+    // The roster is read first, never from inside the engine's tracked
+    // operation: a reset waits for those, and page.read queues on the chain.
+    'dm.pageSecrets': async (params) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const own = await serial(() => requireDm())({})
+      let roster
+      try {
+        const r = await handlers['page.read']({ key: params.page, full: true })
+        roster = { owner: r.owner, admins: r.admins }
+      } catch (err) {
+        if (err && err.code === 'NOT_FOUND') throw rpcError('USAGE', DM_KEY_MISMATCH)
+        throw err
+      }
+      try {
+        return await dmEngine.pageSecrets(own, roster, params)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    },
+    // The recipient's key is looked up off the chain first, as dm.send's.
+    'dm.pageDraft': async (params) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      await serial(() => requireDm())({})
+      let box = null
+      if (params.kind === 'msg' && params.to !== undefined && params.to !== params.page) {
+        try {
+          box = (await dmLookupOf(params.to)).box
+        } catch (err) {
+          throw toRpcError(err, reportInternal)
+        }
+      }
+      return serial(async () => {
+        await requireDm()
+        return dmEngine.pageDraft(params, box)
+      })({})
+    },
+    'dm.pageSend': serial(async (params) => {
+      await requireDm()
+      return dmEngine.pageSend(params)
+    }),
+    // The legacy bundle (5.114) is imported after adoption: a held page only.
+    // The page it moved from (a bundle carried over on a move names it) is
+    // read first, off the engine's tracked operation, as dm.pageSecrets reads
+    // the roster.
+    'dm.pageLegacyChunk': async (params) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      await serial(() => requireDm())({})
+      // The chain of verified page-origin records, newest first.
+      const movedFrom = []
+      let at = typeof params.page === 'string' ? params.page : null
+      while (at !== null && movedFrom.length < PAGE_MOVE_HOPS_MAX) {
+        let r
+        try {
+          r = await handlers['page.read']({ key: at })
+        } catch (err) {
+          if (err && err.code === 'NOT_FOUND') break
+          throw err
+        }
+        const from = r.movedFrom === null ? null : r.movedFrom.from
+        if (from === null || from === params.page || movedFrom.includes(from)) break
+        movedFrom.push(from)
+        at = from
+      }
+      return serial(async () => {
+        await requireDm()
+        return dmEngine.pageLegacyChunk(params, movedFrom)
+      })({})
+    },
+    'dm.pageLegacyBlocks': serial(async (params) => {
+      await requireDm()
+      return dmEngine.pageLegacyBlocks(params)
+    }),
+    'dm.pageForget': serial(async (params) => {
+      await requireDm()
+      return dmEngine.pageForget(params)
     }),
 
     // As report.sign: no diary opened, nothing appended, no network. The

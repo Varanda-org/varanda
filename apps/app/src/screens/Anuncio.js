@@ -219,8 +219,8 @@ export default function Anuncio ({
     return actAs(nodeRef.current, { member, action: req.action, page: req.page, op: req.op })
   }
 
-  // A Página's inbox is kept by the account service: the same one-time
-  // notice as the page's profile comes before the first message.
+  // The same one-time note as the page's profile comes before the first
+  // message to a Página.
   const conversar = async () => {
     if (typeof onConversar !== 'function') return
     if (listing.page === true && !pageNoticeSeen(pageNoticeStore(), listing.author)) {

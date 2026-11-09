@@ -29,7 +29,7 @@ export const HELP = Object.freeze({
       'O pagamento é combinado e feito fora do app. Fazer ou aceitar uma oferta não é pagar nem comprovar pagamento.',
       'Os estados Reservado, Vendido e Encontrado ficam visíveis para todo mundo.',
       'Avaliações precisam do consentimento de quem anuncia e não são prova de pagamento.',
-      'Nas conversas com uma Página, a associação pode ler as mensagens.'
+      'Nas conversas com uma Página, só quem administra a página lê as mensagens.'
     ])
   }),
   seguindo: Object.freeze({

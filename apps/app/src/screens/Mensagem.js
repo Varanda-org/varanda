@@ -66,8 +66,9 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
-import { mergeMessages, newestOf, pageDmRequest, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
+import { mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
 import { actAs, pagesDm } from '../pages'
+import { pageKeyText } from '../pageSecrets'
 import { pagesOn } from '../pageGate'
 import { cardFits, composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
 import { cardForSend, draftView, freezeSnapshot, linkDraftIdle, linkDraftStep, withCardFallback } from '../linkCard'
@@ -156,8 +157,14 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   nodeRef.current = node
   const dm = useMemo(() => {
     if (pageKey === null) return request
-    return pageDmRequest(async (action, op) => pagesDm(nodeRef.current, { member: await memberKeyOf(request, nodeRef.current), page: pageKey, action, op }))
+    const sign = async (digest) => pagesDm(nodeRef.current, { member: await memberKeyOf(request, nodeRef.current), page: pageKey, action: 'dm-sign', op: { digest } })
+    return pageDmClient({ request, sign, page: pageKey })
   }, [request, pageKey])
+  // A refusal about the page's keys ('chave da página não confere', no key
+  // held): the composer stays closed with the reason until the page or the
+  // conversation changes.
+  const [pageKeyNote, setPageKeyNote] = useState('')
+  useEffect(() => { setPageKeyNote('') }, [pageKey, peer])
   const status = node.passkey && node.passkey.status ? node.passkey.status : null
   const unlocked = !!(status && status.unlocked === true)
   const ownKey = status ? status.publicKey : null
@@ -493,6 +500,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       setHold({ text, quoteId, card, typed, ctx, retry: pageKey !== null && err && typeof err.retry === 'function' ? err.retry : null })
     } else if (err && err.message === BLOCKED_SEND) {
       setBlocked(true)
+    } else if (pageKey !== null && pageKeyText(err) !== '') {
+      setPageKeyNote(pageKeyText(err))
     }
     reread()
   }
@@ -846,6 +855,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   let blockNote = null
   if (blocked) blockNote = LABELS.blockedSend
   else if (peer === ownKey || peer === pageKey) blockNote = LABELS.selfSend
+  else if (pageKey !== null && pageKeyNote !== '') blockNote = pageKeyNote
   else if (lookup === null) blockNote = LABELS.noBox
 
   // The chip's prefix counts against the limit: composeText never cuts the typed

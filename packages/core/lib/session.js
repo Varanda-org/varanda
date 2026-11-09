@@ -661,6 +661,16 @@ function createSession ({
     'dm.thread': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.set': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.seen': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    // A Página's secrets live on the browser node only (docs/rpc.md 5.114).
+    'dm.pageGenerate': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageShare': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageSecrets': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageDraft': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageSend': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageLegacyChunk': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageLegacyBlocks': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageForget': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'group.seal': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     // Like report.sign (docs/rpc.md 5.20).
     'dm.reportSign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')

@@ -11,6 +11,8 @@ const { utf8ByteLength } = require('./text')
 const DM_INNER_BYTES = 5120
 // Two length bytes and the 64-byte signature.
 const DM_INNER_FRAMING_BYTES = 66
+// A v3 frame also carries its uint64be expiry after the signature.
+const DM_INNER_V3_EXPIRY_BYTES = 8
 // Insertion order is the wire order; packages/core/lib/dm.js signs the same.
 const DM_INNER_KEYS = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'op', 'peer', 'at', 'cert'])
 const DM_INNER_KEYS_V2 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert'])
@@ -113,13 +115,15 @@ function dmTextBudget (fields = {}) {
     cert: orNull(f.cert)
   }
   body.v = f.v === 3 ? 3 : innerVersion(body)
-  return DM_INNER_BYTES - DM_INNER_FRAMING_BYTES - utf8ByteLength(canonicalInnerJson(body))
+  const framing = DM_INNER_FRAMING_BYTES + (body.v === 3 ? DM_INNER_V3_EXPIRY_BYTES : 0)
+  return DM_INNER_BYTES - framing - utf8ByteLength(canonicalInnerJson(body))
 }
 
 module.exports = {
   MEMBER_CERT_STANDIN,
   DM_INNER_BYTES,
   DM_INNER_FRAMING_BYTES,
+  DM_INNER_V3_EXPIRY_BYTES,
   DM_INNER_KEYS,
   DM_INNER_KEYS_V2,
   DM_INNER_KEYS_V3,
