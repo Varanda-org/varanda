@@ -776,6 +776,9 @@ function readyWithin (ready, ms) {
 // dmUnlockHook: tests only, (unlock, prf) -> promise around the direct
 // message store unlock that setKeyPair starts off the chain; it must call
 // unlock() at most once. Absent, the unlock runs as is.
+// memoCheck: tests only, every group and community fold the memo returns is
+// recomputed and compared (member-ops.js memoFold). groupMemo: tests only,
+// the Map that memo lives in.
 function createBrowserSession ({
   storage,
   association,
@@ -798,7 +801,9 @@ function createBrowserSession ({
   upkeepFullMaxAgeMs = UPKEEP_FULL_MAX_AGE_MS,
   fetchMedia = (...args) => globalThis.fetch(...args),
   hkdf,
-  dmUnlockHook = null
+  dmUnlockHook = null,
+  memoCheck = false,
+  groupMemo: memoMap = null
 } = {}) {
   const cfg = checkConfig({ storage, association, seederUrl, createSocket })
   const reportInternal = (err) => {
@@ -815,6 +820,8 @@ function createBrowserSession ({
       mediaKeyPair,
       groupKeyPair: keyPair !== null && groupPrf !== null ? (nonce) => deriveGroupKeyPair(nonce, epoch, generation) : null,
       groupKeys: boxKeys,
+      memo: groupMemo,
+      memoCheck: memoCheck === true,
       limits,
       noClear: noClear === true
     }
@@ -901,6 +908,9 @@ function createBrowserSession ({
   // in memory only (./group-keys.js): locked with every identity change,
   // closed with the session.
   const boxKeys = createGroupKeys({ hkdf })
+  // The group and community folds of member-ops.js, in memory only: a
+  // private fold holds opened posts, so it goes with every key change.
+  const groupMemo = memoMap instanceof Map ? memoMap : new Map()
   let groupEpoch = 0
   let groupWriting = false
   const groupPairs = new Set()
@@ -2042,6 +2052,7 @@ function createBrowserSession ({
   function cancelGroups () {
     groupEpoch++
     boxKeys.lock()
+    groupMemo.clear()
     if (groupWriting && run !== null && run.internal) run.abort()
   }
 
@@ -4116,6 +4127,7 @@ function createBrowserSession ({
   // notices read in flight (its link is held by the proof the pair signed)
   // is aborted and its slot freed, wherever the lock comes from.
   function zeroKeyPair () {
+    groupMemo.clear()
     noticer.abort()
     noticing = null
     noticeCtxCache = null
@@ -4783,6 +4795,7 @@ function createBrowserSession ({
       zeroKeyPair()
       boxKeys.close()
       pageGroupKeys.close()
+      groupMemo.clear()
       // A pending DM unlock (a no-op once closed) settles before the engine
       // closes.
       await dmReady()

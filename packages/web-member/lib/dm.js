@@ -207,7 +207,7 @@ function zeroPair (pair) {
 // limits (tests): issueBurst, issuePaceMs, topUpEveryMs, topUpRetryMs,
 // budgetBytes, pageMax, openMax, cacheBytesMax (./dm-store.js), link
 // (dm-link limits), blob (./blob.js createBlobClient limits), fetch
-// (./blob.js fetchBlob limits).
+// (./blob.js fetchBlob limits), fold (the dm-fold fold, to count calls).
 // createStore, fetch and mediaOrigin: tests only.
 function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf } = {}) {
   const L = {
@@ -222,6 +222,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     link: {},
     blob: {},
     fetch: {},
+    fold: dmFold.fold,
     ...(limits || {})
   }
   const local = createStore({ storage, cacheBytesMax: L.cacheBytesMax })
@@ -273,6 +274,11 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // and messages whose blob is gone (this unlock only).
   const opening = new Map()
   const gone = new Set()
+  // The last fold per store (own or a page's): { version, own, follows,
+  // seen, result }. Reused only while the store's version, the self key and
+  // the kv follows and seen texts are all unchanged; every caller only
+  // reads the result. Memory only, dropped on lock and unlock.
+  const foldMemo = new Map()
   // Opens waiting for one of the L.openMax slots, in order; job =
   // { key, background, start, cancel }.
   const openQueue = []
@@ -345,6 +351,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // zeroed and the store locked.
   async function unlock (prf) {
     const gen = ++generation
+    foldMemo.clear()
     let pair = null
     let key = null
     let installed = false
@@ -396,6 +403,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     pages.lock()
     for (const s of pageStores.values()) s.local.lock()
     pageStores.clear()
+    foldMemo.clear()
     clearPending()
     forgetAllBlobs()
     publicItems.clear()
@@ -475,23 +483,37 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // A page follows no one here: its folders come from its ops alone.
+  // The kv reads run on every call (another tab or device may have changed
+  // them); only the fold itself is reused.
   async function folded (own, ctx = personal) {
+    const gen = generation
     const follows = ctx === personal ? (await store.readFollows(storage)).map((f) => typeof f === 'string' ? f : f && f.key).filter((k) => typeof k === 'string') : []
-    const stored = new Set(await store.readDmSeen(storage, ctx.prefix))
-    const { messages, ops } = ctx.local.snapshot()
+    const storedIds = await store.readDmSeen(storage, ctx.prefix)
+    const lc = ctx.local
+    const followsText = JSON.stringify(follows)
+    const seenText = JSON.stringify(storedIds)
+    const hit = foldMemo.get(lc)
+    if (hit !== undefined && lc.unlocked() && hit.version === lc.version() && hit.own === own && hit.follows === followsText && hit.seen === seenText) return hit.result
+    const version = lc.version()
+    const stored = new Set(storedIds)
+    const { messages, ops } = lc.snapshot()
     const seen = []
     for (const m of messages) {
       if (m.mine) continue
       const k = dmFold.seenKey(m.from, m.id)
-      if (stored.has(ctx.local.seenToken(k))) seen.push(k)
+      if (stored.has(lc.seenToken(k))) seen.push(k)
     }
-    return dmFold.fold({
+    const result = L.fold({
       self: own,
       followSet: follows,
       seen,
       ops,
       messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: m.replyTo, fwd: m.fwd, media: m.media, card: m.card, at: m.at, filedAt: m.filedAt }))
     })
+    // A store locked (or relocked) since is never remembered.
+    const current = ctx === personal || pageStores.get(ctx.page) === ctx
+    if (gen === generation && current && lc.unlocked() && lc.version() === version) foldMemo.set(lc, { version, own, follows: followsText, seen: seenText, result })
+    return result
   }
 
   // Order and cursor are the fold's: `at` is the effective time it returns
@@ -539,7 +561,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // A thread with no kept message is 'inbox': a conversation the person may
   // start.
   function threadState (own, peer, c, ctx = personal) {
-    const blocked = !dmFold.canSend({ self: own, peer, ops: ctx.local.snapshot().ops })
+    const blocked = !dmFold.canSend({ self: own, peer, ops: ctx.local.ops() })
     return { folder: c === null ? 'inbox' : c.folder, blocked }
   }
 
@@ -926,7 +948,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   function canSend (own, peer) {
-    return dmFold.canSend({ self: own, peer, ops: local.snapshot().ops })
+    return dmFold.canSend({ self: own, peer, ops: local.ops() })
   }
 
   // ---- the wallet ----
@@ -1360,7 +1382,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         if (gen !== generation) throw new UsageError(LOCKED)
         const page = await link.page({ after: cursor, limit: L.pageMax })
         const rows = []
-        const ops = local.snapshot().ops
+        // A copy: this page's ctls join it as they are filed.
+        const ops = [...local.ops()]
         const mod = await moderation()
         const missed = []
         for (const item of page.items) {
@@ -1578,7 +1601,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (kind === 'msg') {
       if (typeof to !== 'string' || typeof text !== 'string') throw new UsageError(BAD_TEXT)
       if (to === page) throw new UsageError(SELF_SEND)
-      if (!dmFold.canSend({ self: page, peer: to, ops: ctx.local.snapshot().ops })) throw new UsageError(BLOCKED)
+      if (!dmFold.canSend({ self: page, peer: to, ops: ctx.local.ops() })) throw new UsageError(BLOCKED)
       if (typeof recipientBox !== 'string') throw new UsageError(NO_BOX)
       const reply = replyTo === undefined ? null : replyTo
       if (reply !== null) {
@@ -1658,7 +1681,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       return { id: b.id, at: b.at }
     }
     // The page may have blocked the recipient after this draft was made.
-    if (!dmFold.canSend({ self: page, peer: b.to, ops: ctx.local.snapshot().ops })) throw new UsageError(BLOCKED)
+    if (!dmFold.canSend({ self: page, peer: b.to, ops: ctx.local.ops() })) throw new UsageError(BLOCKED)
     let entry = d.entry
     if (entry === null) {
       const inner = dm.assembleInner(d.json, signature, expiresAt)
@@ -2032,6 +2055,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       const s = pageStores.get(page)
       pageStores.delete(page)
       if (s !== undefined) {
+        foldMemo.delete(s.local)
         try { await s.ready } catch {}
         s.local.lock()
         await s.local.idle()
@@ -2089,7 +2113,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     topUp,
     walletSize,
     close,
-    get pulling () { return pulling }
+    get pulling () { return pulling },
+    // Tests: how many stores have a remembered fold.
+    get foldMemoSize () { return foldMemo.size }
   }
 }
 

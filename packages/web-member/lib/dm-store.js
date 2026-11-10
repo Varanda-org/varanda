@@ -161,6 +161,13 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
   let cached = new Set()
   let generation = 0
   let queue = Promise.resolve()
+  // Bumped whenever the rows may differ (load, append, lock): a reader's
+  // memo keyed on it never outlives the rows it was built from.
+  let version = 0
+  // The ctl rows of `version`, frozen: callers share them.
+  let opsMemo = null
+  // seenKey -> token under the current key; dropped with the key.
+  let tokens = new Map()
 
   function serial (fn) {
     const p = queue.then(fn)
@@ -181,6 +188,9 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
     rows = null
     lastFiled = 0
     cached = new Set()
+    tokens = new Map()
+    opsMemo = null
+    version++
   }
 
   async function withCore (fn) {
@@ -248,6 +258,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
     const index = await readIndex(storage, prefix)
     if (gen !== generation) return
     rows = loaded
+    version++
     mediaKey = crypto.hash([MEDIA_KEY_DOMAIN, key])
     cached = new Set(index.filter((e) => e.w !== true).map((e) => e.n))
     for (const r of rows) if (r.filedAt > lastFiled) lastFiled = r.filedAt
@@ -283,6 +294,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
       if (ok === null) throw new Error('armazenamento de mensagens inválido')
       if (gen !== generation || rows === null) return
       for (const r of clean) rows.push(r)
+      version++
     })
   }
 
@@ -293,6 +305,21 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
       messages: rows.filter((r) => r.t === 'msg').map(plainRow),
       ops: rows.filter((r) => r.t === 'ctl').map(plainRow)
     }
+  }
+
+  function currentVersion () {
+    return version
+  }
+
+  // -> the ctl rows as one frozen array, shared until the next version;
+  // throws while locked. A caller that adds to it copies it first.
+  function ops () {
+    if (rows === null) throw new Error(LOCKED)
+    if (opsMemo === null || opsMemo.version !== version) {
+      const list = rows.filter((r) => r.t === 'ctl').map((r) => Object.freeze(plainRow(r)))
+      opsMemo = { version, list: Object.freeze(list) }
+    }
+    return opsMemo.list
   }
 
   function hasMessage (from, id) {
@@ -309,7 +336,12 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
   // reader of kv without the passkey learns no sender.
   function seenToken (keyString) {
     if (key === null) throw new Error(LOCKED)
-    return b4a.toString(crypto.hash([SEEN_DOMAIN, key, b4a.from(keyString, 'utf8')]), 'hex').slice(0, 32)
+    let t = tokens.get(keyString)
+    if (t === undefined) {
+      t = b4a.toString(crypto.hash([SEEN_DOMAIN, key, b4a.from(keyString, 'utf8')]), 'hex').slice(0, 32)
+      tokens.set(keyString, t)
+    }
+    return t
   }
 
   // A small kv value (the stamp wallet, the ctl queue) sealed under the same
@@ -519,7 +551,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
     return queue
   }
 
-  return { unlock, lock, unlocked, nextFiled, append, snapshot, hasMessage, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, idle, close }
+  return { unlock, lock, unlocked, nextFiled, append, snapshot, ops, version: currentVersion, hasMessage, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, idle, close }
 }
 
 module.exports = { createDmStore }
