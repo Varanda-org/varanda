@@ -100,7 +100,7 @@ test('unusableSteps acknowledges requested cleanup without hiding names still to
 
 test('notSyncedSteps names only unusable passkeys and recommends synced managers and phone QR', async (t) => {
   const { notSyncedSteps, deleteStep, RETRY_LABEL, PHONE_LABEL } = await load()
-  const phone = 'Sem gerenciador assim neste aparelho? Toque em ' + RETRY_LABEL + ' e depois em ' + PHONE_LABEL + ': leia com a câmera do celular o QR code que aparece na tela.'
+  const phone = 'Sem gerenciador assim neste aparelho? Toque em ' + RETRY_LABEL + ', em Outras formas de entrar e em ' + PHONE_LABEL + ': leia com a câmera do celular o QR code que aparece na tela.'
   const retry = 'Toque em ' + RETRY_LABEL + ' e, ao criar, escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro), nunca uma chave de segurança, o Windows Hello ou o perfil do navegador.'
   t.alike(notSyncedSteps({ userIds: [ID], cleaned: false }), [
     '1. ' + deleteStep([ID]),
@@ -198,24 +198,21 @@ test('notSyncedSteps acknowledges requested cleanup without hiding names still t
   t.absent(/apagada|excluída/.test(some.join(' ')))
 })
 
-test('creation advice explains synced recovery without offering another passkey or recovery code', async (t) => {
-  const { SYNC_ADVICE, PHONE_HINT, PHONE_SIGNIN_HINT, PHONE_LABEL, PHONE_SIGNIN_LABEL } = await load()
-  for (const fact of ['sincroniza', 'Google', 'Apple', '1Password', 'Bitwarden', 'entrar na conta desse gerenciador no aparelho novo traz a passkey de volta']) {
-    t.ok(SYNC_ADVICE.includes(fact), fact)
+test('phone labels read inside sentences; the card explanations moved to the help sheet', async (t) => {
+  const m = await load()
+  t.is(m.PHONE_LABEL, 'criar com o celular')
+  t.is(m.PHONE_SIGNIN_LABEL, 'entrar com o celular')
+  for (const name of ['SYNC_ADVICE', 'PHONE_HINT', 'PHONE_SIGNIN_HINT']) {
+    t.absent(name in m, name + ' lives in HELP.entrar (src/help.js)')
   }
-  t.absent(/segunda passkey|trocar|código de recuperação/.test(SYNC_ADVICE))
-  t.is(PHONE_HINT, 'Sem gerenciador de passkeys neste aparelho? Toque em criar com o celular: aparece um QR code na tela; leia esse código com a câmera do celular e salve a passkey no gerenciador de senhas dele.')
-  t.is(PHONE_SIGNIN_HINT, 'Sua passkey está no celular? Toque em Entrar com a passkey, escolha usar outro aparelho na janela do sistema e leia com a câmera do celular o QR code que aparece na tela.')
-  t.is(PHONE_LABEL, 'criar com o celular')
-  t.is(PHONE_SIGNIN_LABEL, 'entrar com o celular')
 })
 
 test('sign-in texts distinguish missing, known lost and unsuitable passkeys', async (t) => {
   const { NONE_TEXT, KNOWN_LOST_TEXT, NONE_FULL_TEXT, KNOWN_LOST_FULL_TEXT, OTHER_PASSKEY_LABEL, NOT_SYNCED_TITLE } = await load()
-  t.is(NONE_TEXT, 'Nenhuma passkey do Varanda neste aparelho. Crie uma aqui ou entre no site com a passkey que já tem.')
-  t.is(KNOWN_LOST_TEXT, 'A passkey que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar em outro gerenciador: tente entrar com outra passkey ou crie uma nova conta.')
-  t.is(NONE_FULL_TEXT, 'Nenhuma passkey do Varanda neste aparelho. Entre no site com a passkey que já tem.')
-  t.is(KNOWN_LOST_FULL_TEXT, 'A passkey que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar em outro gerenciador: tente entrar com outra passkey.')
+  t.is(NONE_TEXT, 'Nenhuma conta da Varanda neste aparelho. Toque em Criar minha conta. Se você já tem conta, confira se o aparelho está na mesma conta Google de antes, ou toque em Outras formas de entrar e use o código de recuperação.')
+  t.is(KNOWN_LOST_TEXT, 'A conta que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar guardada em outra conta Google, Apple ou de um gerenciador de senhas: toque em Entrar com outra passkey ou crie uma conta nova.')
+  t.is(NONE_FULL_TEXT, 'Nenhuma conta da Varanda neste aparelho. Se você já tem conta, confira se o aparelho está na mesma conta Google de antes, ou toque em Outras formas de entrar e use o código de recuperação.')
+  t.is(KNOWN_LOST_FULL_TEXT, 'A conta que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar guardada em outra conta Google, Apple ou de um gerenciador de senhas: toque em Entrar com outra passkey.')
   for (const text of [NONE_FULL_TEXT, KNOWN_LOST_FULL_TEXT]) {
     t.absent(/Crie|crie|criar/.test(text), 'no creation offered while full')
     t.absent(/\u2014/.test(text), 'no em dash')
@@ -243,4 +240,10 @@ test('texts carry no em dash and never the full user id', async (t) => {
     t.absent(text.toLowerCase().includes(ID.toLowerCase()))
     t.absent(text.includes(ID2))
   }
+})
+
+test('beside a pending concluir the missing-account notice names only Concluir e entrar', async (t) => {
+  const { NONE_PENDING_TEXT } = await load()
+  t.is(NONE_PENDING_TEXT, 'Nenhuma conta da Varanda neste aparelho. Toque em Concluir e entrar para terminar a conta que você começou a criar.')
+  t.absent(/Outras formas de entrar|código/.test(NONE_PENDING_TEXT), 'the code row is hidden while concluir waits')
 })

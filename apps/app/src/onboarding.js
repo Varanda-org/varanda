@@ -24,7 +24,7 @@ export const STEP_TITLES = {
 }
 
 export const STEP_HINTS = {
-  entrar: 'Entre com a passkey deste aparelho.',
+  entrar: 'Crie sua conta ou entre na que já tem. Sem senha e sem e-mail.',
   recuperando: 'Estamos trazendo de volta o que já é seu.',
   idade: 'A Varanda é para quem tem 16 anos ou mais. Só a sua faixa de idade fica guardada.',
   vinculo: 'Seu @nome é como as pessoas encontram você.',

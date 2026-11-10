@@ -17,6 +17,32 @@ const avatar = read('ui/Avatar.js')
 const states = read('ui/States.js')
 const row = read('ui/ConversationRow.js')
 
+test('welcome building blocks', (t) => {
+  const theme = read('ui/theme.js')
+  const welcome = read('ui/Welcome.js')
+  const options = read('ui/OptionRow.js')
+  t.ok(index.includes('btnLarge: { minHeight: 52'), 'large button height')
+  t.ok(index.includes('btnOutlineLarge: { paddingVertical: 14 }'), 'large outline padding')
+  t.ok(index.includes('pageGrow: { flexGrow: 1 }'), 'page can fill the screen')
+  t.ok(/export function Btn \(\{[^}]*icon[^}]*accessibilityLabel/.test(index), 'Btn keeps icon and label')
+  t.ok(/export function Btn \(\{[^}]*expanded, large \}/.test(index), 'large is the last Btn parameter')
+  t.ok(theme.includes('heroTitle: { fontSize: 28'), 'hero title token')
+  t.ok(welcome.includes('export function WelcomeHeader'), 'welcome header export')
+  t.ok(welcome.includes("accessibilityRole='header'"), 'accessible title')
+  t.ok(welcome.includes('cadeira.png'), 'chair mark')
+  t.absent(welcome.includes('numberOfLines'), 'welcome text wraps')
+  for (const name of ['OptionsToggle', 'OptionList', 'OptionRow', 'OptionBlock']) {
+    t.ok(options.includes('export function ' + name + ' ('), name + ' export')
+  }
+  t.ok(options.includes('aria-expanded'), 'web expanded state')
+  t.ok(options.includes('accessibilityState={{ expanded'), 'native expanded state')
+  for (const forbidden of ['setTimeout', 'numberOfLines', 'ActionsSheet', 'Promise']) {
+    t.absent(options.includes(forbidden), 'options have no ' + forbidden)
+  }
+  t.ok(options.includes('minHeight: layout.hit + space.sm'), 'large option targets')
+  t.ok(options.includes('onPress={onPress}'), 'tap callback passed directly')
+})
+
 test('MoreButton owns an ActionsSheet and hides when nothing is usable', (t) => {
   t.ok(/import \{[^}]*ActionsSheet[^}]*\} from '\.\/ActionsSheet'/.test(more), 'imports ActionsSheet')
   t.ok(/import \{[^}]*usableActions[^}]*\} from '\.\/ActionsSheet'/.test(more), 'imports usableActions')

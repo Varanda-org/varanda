@@ -125,7 +125,7 @@ import { StackLayer, stackBusy, useStackMotion } from './src/ui/StackLayer'
 import { stackEntries } from './src/stackEntries'
 import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
 import { HELP } from './src/help'
-import { layout, type } from './src/ui/theme'
+import { layout, space, type } from './src/ui/theme'
 import { paletteFor, statusBarStyle } from './src/appearance.js'
 import { applyBandMeta } from './src/appearanceStore'
 import Avisos from './src/screens/Avisos'
@@ -2690,7 +2690,14 @@ function Member () {
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} right={HELP[step] ? <HelpButton key={step} doc={HELP[step]} /> : null} />
+        {/* The welcome draws its own chair and title (src/ui/Welcome.js); only the help stays at the top right. */}
+        {step === 'entrar'
+          ? (
+            <View style={[styles.helpBar, { paddingTop: insets.top, minHeight: layout.topBar + insets.top }]}>
+              <HelpButton key={step} doc={HELP.entrar} />
+            </View>
+            )
+          : <TopBar title={STEP_TITLES[step]} right={HELP[step] ? <HelpButton key={step} doc={HELP[step]} /> : null} />}
         <OfflineNote />
         <ExclusaoRecibo />
         {/* Without the Conexão link (hosted page) the body clears the home indicator itself. */}
@@ -3316,6 +3323,7 @@ const makeStyles = (colors) => StyleSheet.create({
   center: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', gap: 8 },
   shell: { flex: 1, width: '100%', maxWidth: layout.column, alignSelf: 'center', backgroundColor: colors.bg },
   shellWide: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: colors.line },
+  helpBar: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-end', paddingRight: space.sm, backgroundColor: colors.bg },
   setupBody: { padding: 16, gap: 12 },
   link: { alignItems: 'center', paddingTop: 14, borderTopWidth: 1, borderTopColor: colors.line, backgroundColor: colors.bg },
   linkText: { fontSize: 15, fontWeight: '600', color: colors.accent },

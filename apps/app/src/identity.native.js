@@ -69,7 +69,7 @@ const MISMATCH_TEXT = 'passkey não corresponde ao diário guardado'
 const SIGNED_OUT_TEXT = 'sessão encerrada neste aparelho: entre com a passkey'
 const SIGNOUT_INCOMPLETE_TEXT = 'não foi possível sair por completo neste aparelho: tente de novo'
 const KNOWN_CODES = ['CANCELLED', 'EXISTS', 'UNSUPPORTED', 'NO_PRF', 'WEBAUTHN', 'NOT_SYNCED', 'NONE']
-const MISSING_TEXT = 'a passkey criada não foi encontrada; toque em Criar passkey de novo'
+const MISSING_TEXT = 'não deu para concluir a criação; tente criar de novo'
 // apps/app/worklet/identity-install.js BAD_ENTRY (docs/rpc.md 5.92).
 const BAD_ENTRY_TEXT = 'entrada de recuperação inválida'
 const RECOVERY_EXPIRED_TEXT = 'o tempo da recuperação acabou: entre de novo'
