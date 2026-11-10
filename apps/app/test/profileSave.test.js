@@ -24,6 +24,18 @@ test('Perfil: Salvar waits for the photo editor, flush versions header, capitali
   t.ok(src.includes("label={'Nome ('") && src.includes("label={'Bio ('"))
 })
 
+test('profile page sits on the shared step frame', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Perfil.js'), 'utf8')
+  const pageStart = src.indexOf('if (page) {')
+  const page = src.slice(pageStart, src.indexOf('return (\n    <Sheet', pageStart))
+  const embedded = src.slice(src.indexOf('if (embedded) {'), pageStart)
+  t.ok(page.includes("label='Continuar' block large"), 'the primary action fills the step')
+  t.ok(page.includes("StepLink label='Pular por enquanto'"), 'skip uses the shared link')
+  t.ok(page.includes('hero={editor === null ? photo : null}'), 'the photo is the hero outside the editor')
+  t.ok(/editor === null\s*\?\s*\(\s*<>\s*<Btn label='Continuar'/.test(page), 'step actions hide while the photo editor is open')
+  t.ok(embedded.includes("<Pill label='Salvar' filled"), 'the embedded form keeps its save pill')
+})
+
 const desc = (fill) => ({
   core: fill.repeat(64),
   mime: 'image/webp',

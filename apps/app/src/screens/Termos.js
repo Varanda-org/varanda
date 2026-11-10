@@ -6,13 +6,17 @@
 // opening one would leave this screen.
 
 import { Fragment, useState } from 'react'
-import { Pressable, StyleSheet, Text } from 'react-native'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { LEGAL_DATE, PRIVACY, REVIEW_NOTE, TERMS } from '../legal'
 import { HELP, SHORT } from '../help'
 import { formatAcceptedAt } from '../terms'
 import { HelpNote } from '../ui/Help'
-import { Body, Btn, Card, Label, Page, Soft, Title } from '../ui'
+import { Body, Btn, Card, Label, Page, Soft } from '../ui'
+import { Icon } from '../ui/Icon'
+import { OptionList } from '../ui/OptionRow'
+import { Stepper } from '../ui/Stepper'
 import { useStyles } from '../ui/ThemeProvider'
+import { space } from '../ui/theme'
 
 const NEEDED_TEXT = 'Antes de entrar no Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'
 const ACCOUNT_TEXT = 'Esta conta ainda não aceitou os Termos de Uso e a Política de Privacidade neste aparelho. Leia e aceite para continuar.'
@@ -31,6 +35,12 @@ function gateText (reason, version) {
   return NEEDED_TEXT
 }
 
+function gateTitle (reason) {
+  if (reason === 'updated') return 'Atualizamos os termos'
+  if (reason === 'account') return 'Antes de continuar'
+  return 'Antes de começar'
+}
+
 function acceptedText (version, acceptedAt) {
   return 'Você aceitou a versão ' + version + ' em ' + formatAcceptedAt(acceptedAt) + ' neste aparelho.'
 }
@@ -43,8 +53,36 @@ function syncText (syncState) {
 
 // Collapsed until opened: both documents are long, and in the gate the
 // accept button stays within reach. Each one opens in place; the Page scrolls.
-function LegalDoc ({ doc, expanded, onToggle }) {
+function LegalDoc ({ doc, expanded, onToggle, grouped = false, first = false }) {
   const styles = useStyles(makeStyles)
+  const sections = expanded && doc.sections.map((section) => (
+    <Fragment key={section.heading}>
+      <Label>{section.heading}</Label>
+      {section.paragraphs.map((paragraph, i) => (
+        <Text key={i} selectable style={styles.paragraph}>{paragraph}</Text>
+      ))}
+    </Fragment>
+  ))
+  if (grouped) {
+    return (
+      <View style={first ? null : styles.groupedDivider}>
+        <Pressable
+          accessibilityRole='button'
+          accessibilityState={{ expanded }}
+          // react-native-web does not map accessibilityState.expanded
+          aria-expanded={expanded}
+          accessibilityLabel={doc.title}
+          onPress={onToggle}
+          style={({ pressed }) => [styles.header, styles.groupedHeader, pressed && styles.headerPressed]}
+        >
+          <Text style={styles.headerTitle}>{doc.title}</Text>
+          <Text style={styles.cue}>{expanded ? 'Fechar' : 'Ler'}</Text>
+          <Icon name={expanded ? 'chevron-up' : 'escolher'} size={18} color={styles.cue.color} />
+        </Pressable>
+        {expanded ? <View style={styles.groupedBody}>{sections}</View> : null}
+      </View>
+    )
+  }
   return (
     <Card>
       <Pressable
@@ -57,14 +95,7 @@ function LegalDoc ({ doc, expanded, onToggle }) {
         <Text style={styles.headerTitle}>{doc.title}</Text>
         <Text style={styles.cue}>{expanded ? 'esconder' : 'mostrar'}</Text>
       </Pressable>
-      {expanded && doc.sections.map((section) => (
-        <Fragment key={section.heading}>
-          <Label>{section.heading}</Label>
-          {section.paragraphs.map((paragraph, i) => (
-            <Text key={i} selectable style={styles.paragraph}>{paragraph}</Text>
-          ))}
-        </Fragment>
-      ))}
+      {sections}
     </Card>
   )
 }
@@ -72,21 +103,37 @@ function LegalDoc ({ doc, expanded, onToggle }) {
 export default function Termos ({ gate = false, reason = 'needed', version, acceptedAt = null, saved = true, syncState = null, onAccept }) {
   const [openTerms, setOpenTerms] = useState(false)
   const [openPrivacy, setOpenPrivacy] = useState(false)
+  const styles = useStyles(makeStyles)
   const syncLine = syncText(syncState)
+  if (gate) {
+    return (
+      <Page flush grow padBottom={16}>
+        <Stepper
+          title={gateTitle(reason)}
+          hint={gateText(reason, version)}
+          icon='file-text'
+          actions={<><Btn label={ACCEPT_LABEL} onPress={onAccept} block large /><Soft style={styles.center}>{BLOCKED_TEXT}</Soft></>}
+        >
+          <Soft style={styles.center}>{REVIEW_NOTE}</Soft>
+          <Soft style={styles.center}>{'Versão ' + version + ', de ' + LEGAL_DATE}</Soft>
+          <OptionList>
+            <LegalDoc grouped first doc={TERMS} expanded={openTerms} onToggle={() => setOpenTerms((v) => !v)} />
+            <LegalDoc grouped doc={PRIVACY} expanded={openPrivacy} onToggle={() => setOpenPrivacy((v) => !v)} />
+          </OptionList>
+        </Stepper>
+      </Page>
+    )
+  }
   return (
     <Page>
-      {gate ? <Title>Termos de Uso e Política de Privacidade</Title> : null}
-      {gate ? <Body>{gateText(reason, version)}</Body> : null}
-      {!gate && acceptedAt ? <Body>{acceptedText(version, acceptedAt)}</Body> : null}
-      {!gate && saved === false ? <Soft>{SAVED_TEXT}</Soft> : null}
-      {!gate && syncLine ? <Soft>{syncLine}</Soft> : null}
-      {!gate && syncState === 'so-aparelho' ? <HelpNote doc={HELP.termosAparelho}><Soft>{SHORT.termsDeviceOnly}</Soft></HelpNote> : null}
+      {acceptedAt ? <Body>{acceptedText(version, acceptedAt)}</Body> : null}
+      {saved === false ? <Soft>{SAVED_TEXT}</Soft> : null}
+      {syncLine ? <Soft>{syncLine}</Soft> : null}
+      {syncState === 'so-aparelho' ? <HelpNote doc={HELP.termosAparelho}><Soft>{SHORT.termsDeviceOnly}</Soft></HelpNote> : null}
       <Soft>{REVIEW_NOTE}</Soft>
       <Soft>{'Versão ' + version + ', de ' + LEGAL_DATE}</Soft>
       <LegalDoc doc={TERMS} expanded={openTerms} onToggle={() => setOpenTerms((v) => !v)} />
       <LegalDoc doc={PRIVACY} expanded={openPrivacy} onToggle={() => setOpenPrivacy((v) => !v)} />
-      {gate ? <Btn label={ACCEPT_LABEL} onPress={onAccept} /> : null}
-      {gate ? <Soft>{BLOCKED_TEXT}</Soft> : null}
     </Page>
   )
 }
@@ -101,5 +148,9 @@ const makeStyles = (colors) => StyleSheet.create({
   headerPressed: { opacity: 0.8 },
   headerTitle: { flex: 1, fontSize: 16, fontWeight: '700', color: colors.ink },
   cue: { fontSize: 14, color: colors.soft },
-  paragraph: { fontSize: 16, lineHeight: 22, color: colors.ink }
+  paragraph: { fontSize: 16, lineHeight: 22, color: colors.ink },
+  center: { textAlign: 'center' },
+  groupedDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
+  groupedHeader: { minHeight: 52, paddingHorizontal: space.lg },
+  groupedBody: { paddingHorizontal: space.lg, paddingBottom: space.lg, gap: space.sm }
 })

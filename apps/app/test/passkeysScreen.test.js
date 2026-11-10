@@ -232,7 +232,7 @@ test('Identidade: recovery sign-in paths', (t) => {
   t.ok(src.includes("const onFinishComplete = () => ceremony(() => passkey.complete(), true, true, 'finish')"), 'the recovery concluir keeps the finish mode, in the press')
   t.ok(src.includes("autoCapitalize='characters'"))
   t.ok(src.includes("const CODE_LABEL = 'Entrar com código de recuperação'"))
-  t.ok(src.includes('knownLost || missedOnce || pkStatus.passkeyKnown === true ? <Btn label={OTHER_PASSKEY_LABEL}'), 'another passkey whenever one is known')
+  t.ok(src.includes('knownLost || missedOnce || pkStatus.passkeyKnown === true ? <OptionRow label={OTHER_PASSKEY_LABEL}'), 'another passkey whenever one is known')
   const after = src.slice(src.indexOf('const afterUnlock = async () => {'), src.indexOf('const registerFinished'))
   t.ok(after.indexOf('registerFinished(finished)') < after.indexOf('await passkey.recover()'), 'registered before the once sync')
   const reg = src.slice(src.indexOf('const registerFinished'), src.indexOf('// The handle\'s unlock/complete'))
@@ -269,9 +269,22 @@ test('Identidade: the full network is said before a passkey is created', (t) => 
     }
   }
   const welcomeStart = src.lastIndexOf('} else {', src.indexOf('const entrarBtn'))
-  const welcome = src.slice(welcomeStart, src.indexOf('</Card>', welcomeStart))
-  for (const kept of ["label='Entrar com a passkey'", 'OTHER_PASSKEY_LABEL', 'CODE_LABEL', 'Concluir a criação da passkey']) {
+  const welcome = src.slice(welcomeStart, src.indexOf('const frame = (title, children', welcomeStart))
+  for (const kept of ['label={entrarLabel(offer.create)}', 'OTHER_PASSKEY_LABEL', 'CODE_LABEL', 'label={COMPLETE_LABEL}']) {
     t.ok(welcome.includes(kept), kept + ' stays')
+  }
+  t.ok(src.includes('const moreOpen = advancedOpen({ advanced, knownLost, missedOnce, codeOpen, showComplete })'), 'the technical section is decided by the pure module')
+  t.ok(src.includes('setPkError(plainError(err) || errorText(err))'), 'plain words for a closed sheet, the usual text otherwise')
+  t.absent(welcome.includes('SIMPLE_TEXT'), 'the explanation lives in the (i) sheet')
+  t.ok(src.includes("frame('Entrar', entrar, step === 'entrar')"), 'the hero only on the entrar step')
+  t.ok(welcome.includes('<OptionsToggle label={MORE_LABEL}'), 'one quiet link')
+  t.ok(welcome.includes('secondary={showComplete || codeOpen}'), 'one main action beside concluir or the code field')
+  t.ok(welcome.includes('showComplete ? NONE_PENDING_TEXT : offer.full || offer.waiting ? NONE_FULL_TEXT : NONE_TEXT'), 'beside concluir the notice names only that button')
+  t.absent(welcome.includes('ActionsSheet'), 'rows run in the tap')
+  t.absent(welcome.includes('setTimeout'))
+  t.ok(['OTHER_PASSKEY_LABEL', 'CODE_LABEL', 'PHONE_SIGNIN_BUTTON'].every((k) => welcome.indexOf('MORE_LABEL') < welcome.indexOf(k)), 'technical options behind the disclosure')
+  for (const k of ['SYNC_ADVICE', 'PHONE_HINT', 'PHONE_SIGNIN_HINT', 'SHORT.passkeyLoss', 'ADVANCED_TEXT']) {
+    t.absent(welcome.includes(k), k + ': the explanations live in the (i) sheet, not on the card')
   }
   const needsStart = src.indexOf('} else if (needsPasskey) {')
   t.absent(src.slice(needsStart, src.indexOf('} else {', needsStart)).includes('offer.'), 'the recovery card is not gated')
