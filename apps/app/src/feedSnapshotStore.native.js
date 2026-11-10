@@ -10,6 +10,9 @@
 import { File, Paths } from 'expo-file-system'
 
 const FILE_NAME = 'varanda-rua-snapshot.json'
+// SNAPSHOT_MAX_BYTES of ./feedSnapshot.js (test/snapshotSafety.test.js keeps
+// them equal). Not imported: the store stays free of the snapshot module.
+const MAX_BYTES = 524288
 
 // A Rua paints a snapshot first only where this is true (see the web twin).
 export const previewCapable = true
@@ -56,12 +59,26 @@ function replaceFile (text) {
   removeQuietly(file('.bak'))
 }
 
+// A file over the cap is never read whole: it could only be refused after.
 export function loadSnapshotText () {
   try {
     let f = file()
     if (!f.exists) f = file('.bak')
     if (!f.exists) return null
-    return f.textSync()
+    let size
+    try { size = f.size } catch { size = NaN }
+    // undefined: a File without size (older API, test stubs); the text
+    // length below still bounds it.
+    if (size !== undefined && !(typeof size === 'number' && size >= 0 && size <= MAX_BYTES)) {
+      clearSnapshot()
+      return null
+    }
+    const text = f.textSync()
+    if (typeof text !== 'string' || text.length > MAX_BYTES) {
+      clearSnapshot()
+      return null
+    }
+    return text
   } catch {
     return null
   }

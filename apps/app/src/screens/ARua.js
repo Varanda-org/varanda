@@ -67,7 +67,7 @@ import { canPublishMoment } from '../momentSeen'
 import { useMomentSeen, useMoments } from './Momentos'
 import { useBlocks } from '../blocksProvider'
 import { installationOrigin } from '../installation'
-import { cacheGeneration, keepOnlyAuthors, registerLocalCache } from '../localCaches'
+import { bumpCacheGeneration, cacheGeneration, keepOnlyAuthors, registerLocalCache } from '../localCaches'
 import { buildSnapshot, initialFeedState, keepOnlyAuthors as snapshotKeepOnly, parseSnapshot, socialSeed, withoutAuthors } from '../feedSnapshot'
 import { clearSnapshot, loadSnapshotText, saveSnapshotText } from '../feedSnapshotStore'
 import { statusBarStyle } from '../appearance'
@@ -143,6 +143,94 @@ const SNAPSHOT_DEBOUNCE_MS = 2000
 // complete list prunes what was unfollowed while the app was closed, later
 // ones only when the set changed.
 let reconciledFollows = null
+
+// Own posts deleted this run (App.js calls noteDeleted on every delete). A
+// snapshot write waits for a first page read that started after the last
+// one: the rows in memory may still hold the deleted post. The generation
+// bump drops a write already armed.
+let deletionCount = 0
+export function noteDeleted () {
+  deletionCount++
+  bumpCacheGeneration()
+}
+
+// `loadMark`: deletionCount when the committed first page read started (null
+// before any). -> whether the snapshot may be written from that page.
+export function snapshotWriteAllowed (loadMark, deletions) {
+  return typeof loadMark === 'number' && loadMark === deletions
+}
+
+// Stored rows (A Rua's snapshot, painted before the live first page) under
+// the block list in force: a blocked author's rows, and reposts of them,
+// never show. `loadState` 'failed' (blocksProvider): the list is unknown, so
+// only own rows whose shown content involves no one else stay: an own post
+// with no quote or reply of another author, an own repost of such an own
+// post. `originalOf(ref)` -> the original at hand (post item), if any: its
+// quote card and reply mark show too, one level deep.
+export function snapshotRowsShown (items, blocked, loadState, owner, originalOf) {
+  if (loadState === 'failed') {
+    const own = typeof owner === 'string' ? owner.toLowerCase() : null
+    if (own === null) return []
+    const isOwn = (t) => !!t && typeof t.author === 'string' && t.author.toLowerCase() === own
+    const none = (t) => t === null || t === undefined
+    const lookup = (t) => {
+      const ref = refOf(t)
+      const o = ref === null || typeof originalOf !== 'function' ? null : originalOf(ref)
+      return o && o.kind === 'post' ? o : null
+    }
+    const clean = (p, depth) => {
+      for (const t of [p.quote, p.replyTo]) {
+        if (none(t)) continue
+        if (!isOwn(t)) return false
+        const o = depth > 0 ? lookup(t) : null
+        if (o !== null && !clean(o, depth - 1)) return false
+      }
+      return true
+    }
+    return items.filter((i) => {
+      if (!isOwn(i)) return false
+      if (i.kind !== 'repost') return clean(i, 1)
+      if (!isOwn(i.to)) return false
+      const o = lookup(i.to)
+      return o === null || clean(o, 1)
+    })
+  }
+  if (!blocked || blocked.size === 0) return items
+  return items.filter((i) => !blocked.has(i.author) && !(i.kind === 'repost' && i.to && blocked.has(i.to.author)))
+}
+
+// follow.list pages read before a list counts as whole (500 each).
+export const FOLLOW_PAGES_MAX = 50
+
+// Every page of follow.list, `limit` at a time, up to `maxPages`. `onKey`
+// gets each key (lowercase) as it comes. -> { keys, complete }: complete only
+// when the pages hold exactly `total` keys and the total did not move while
+// paging, nor `version()` (node.followsVersion). A failed page throws.
+export async function readAllFollows (request, onKey, limit, maxPages, version) {
+  // The node's follows version around the pages: a change between them (a
+  // fold, a follow elsewhere) may have swapped entries at the same total.
+  const before = version()
+  const keys = []
+  let total = null
+  let offset = 0
+  for (let n = 0; n < maxPages; n++) {
+    const r = await request('follow.list', { offset, limit })
+    const list = r && Array.isArray(r.follows) ? r.follows : null
+    if (list === null || !Number.isSafeInteger(r.total)) return { keys, complete: false }
+    if (total === null) total = r.total
+    else if (r.total !== total) return { keys, complete: false }
+    for (const k of list) {
+      if (typeof k !== 'string') continue
+      const key = k.toLowerCase()
+      onKey(key)
+      keys.push(key)
+    }
+    offset += list.length
+    if (offset >= total) return { keys, complete: offset === total && keys.length === total && version() === before }
+    if (list.length === 0) return { keys, complete: false }
+  }
+  return { keys, complete: false }
+}
 
 // The installation this app talks to: the one native configuration chose,
 // else the page's own origin (the web build is served by its installation
@@ -404,21 +492,18 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows }) {
   const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
   const isKnown = useCallback((author) => author === own || knownRef.current.has(author), [own])
 
+  const followsVersionRef = useRef(0)
+  followsVersionRef.current = typeof node.followsVersion === 'number' ? node.followsVersion : 0
   // follow.list once per refresh (after a failure, again on the next need).
   const loadFollows = useCallback(async () => {
     if (followsLoadedRef.current) return
     followsLoadedRef.current = true
     const set = knownRef.current
     try {
-      const r = await request('follow.list', { offset: 0, limit: FOLLOW_LIMIT_MAX })
-      const keys = []
-      for (const k of Array.isArray(r.follows) ? r.follows : []) {
-        if (typeof k !== 'string') continue
-        set.add(k.toLowerCase())
-        keys.push(k.toLowerCase())
-      }
+      const { keys, complete } = await readAllFollows(request, (k) => set.add(k), FOLLOW_LIMIT_MAX, FOLLOW_PAGES_MAX, () => followsVersionRef.current)
+      // A partial list is read again on the next need (an ingest), not now.
+      if (!complete && set === knownRef.current) followsLoadedRef.current = false
       // Only the whole list says who is no longer followed.
-      const complete = Array.isArray(r.follows) && Number.isSafeInteger(r.total) && r.follows.length === r.total && keys.length === r.total
       if (complete && set === knownRef.current && typeof onFollowsRef.current === 'function') {
         try { onFollowsRef.current(keys) } catch {}
       }
@@ -1547,6 +1632,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     rangeFrom: null,
     seqBase: null,
     newer: 0,
+    // deletionCount when the committed first page read started.
+    loadMark: null,
     // Snapshot rows (loadedAt stays null): the first loadNewest still runs
     // and replaces them.
     ...(boot.snapshot === null ? {} : initialFeedState(boot.snapshot))
@@ -1655,6 +1742,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     })
     // Taken before the read so growth during it stays visible to the next pass.
     const base = syncLengths(seen) || {}
+    // Before the read: a post deleted while it runs may still be in its page.
+    const loadMark = deletionCount
     try {
       const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT })
       if (mine !== seqRef.current) return
@@ -1673,6 +1762,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
         rangeFrom: null,
         seqBase: null,
         newer: 0,
+        loadMark,
         loading: false,
         refreshing: false
       })
@@ -1771,6 +1861,12 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       w.head = null
       return
     }
+    // An own post deleted after this page was read: dropped and not armed
+    // again; the next first page read arms anew.
+    if (!snapshotWriteAllowed(latest.feed.loadMark, deletionCount)) {
+      pendingWriteRef.current = null
+      return
+    }
     if (pending.gen !== cacheGeneration()) {
       // A purge since arming: this write is dropped, and the key stays not
       // done. The next one is built after the purge, from the rows then
@@ -1815,6 +1911,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       return
     }
     if (binding === null || snapKey === null || w.done === snapKey) return
+    if (!snapshotWriteAllowed(feed.loadMark, deletionCount)) return
     const rows = feed.items.slice(0, FEED_FIRST_ROWS)
     const first = pageNeeds(rows)
     const flags = socialState.flags
@@ -2060,11 +2157,14 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const offered = Object.keys(handlers).filter((k) => typeof handlers[k] === 'function').join()
   const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered, ownKey }), [names.profileOf, now, social.social, offered, ownKey])
   // Snapshot rows (loadedAt null) were stored before the block list now in
-  // force: a blocked author's rows, and reposts of them, never show.
+  // force: a blocked author's rows, and reposts of them, never show; a
+  // failed block.list leaves only the own rows (fail closed).
   const blockedKeys = blocks.keys
-  const shownItems = useMemo(() => (loadedAt !== null || blockedKeys.size === 0
+  const blockLoad = blocks.loadState
+  const shownOriginals = social.social.originals
+  const shownItems = useMemo(() => (loadedAt !== null
     ? items
-    : items.filter((i) => !blockedKeys.has(i.author) && !(i.kind === 'repost' && i.to && blockedKeys.has(i.to.author)))), [items, loadedAt, blockedKeys])
+    : snapshotRowsShown(items, blockedKeys, blockLoad, ownKey, (ref) => shownOriginals.get(ref))), [items, loadedAt, blockedKeys, blockLoad, ownKey, shownOriginals])
   const rowCache = useRowPropsCache(shownItems, feedKey, { h: handlers, social })
   // One renderItem for the list's life: FlatList re-renders the cells on
   // extraData, and the rows whose props did not change skip their render.
@@ -2185,12 +2285,12 @@ export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
     previewMarked = true
     perfMarks().mark('preview-shown')
   }, [])
-  // The block list in force, as A Rua applies it to its snapshot rows.
+  // The block list in force, as A Rua applies it to its snapshot rows. Before
+  // the node is up it is still 'pending' and the rows show as stored.
   const blockedKeys = blocks.keys
-  const rows = useMemo(() => (blockedKeys.size === 0
-    ? view.items
-    : view.items.filter((i) => !blockedKeys.has(i.author) && !(i.kind === 'repost' && i.to && blockedKeys.has(i.to.author)))), [view, blockedKeys])
+  const blockLoad = blocks.loadState
   const ownKey = snapshot.owner
+  const rows = useMemo(() => snapshotRowsShown(view.items, blockedKeys, blockLoad, ownKey, view.original), [view, blockedKeys, blockLoad, ownKey])
   const renderItem = useCallback(({ item }) => {
     let row
     if (item.kind === 'repost') {

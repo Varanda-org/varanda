@@ -43,10 +43,15 @@ function desc (over = {}) {
 
 const bytesOf = (n, fill = 1) => new Uint8Array(n).fill(fill)
 
+// Modification times are BASE + small offsets: real clock values, so the
+// 30-day age bound (measured against Date.now) leaves them alone.
+const BASE = Date.now()
+const DAY = 24 * 60 * 60 * 1000
+
 function reset () {
   files().clear()
   dirs().clear()
-  globalThis.__stubNow = 1000
+  globalThis.__stubNow = BASE + 1000
   globalThis.__stubWriteFails = false
   globalThis.__stubMoveFails = false
 }
@@ -176,7 +181,7 @@ function placeKept (kind, author, d, mtime) {
   dirs().add(ROOT)
   dirs().add(dir)
   const uri = dir + [author, d.core, d.start, d.blocks, d.bytes, d.sha256, d.width + 'x' + d.height].join('-') + '.jpg'
-  files().set(uri, { bytes: bytesOf(d.bytes), mtime })
+  files().set(uri, { bytes: bytesOf(d.bytes), mtime: BASE + mtime })
   return uri
 }
 
@@ -188,7 +193,7 @@ test('trimKept removes oldest first by mtime under both caps', async (t) => {
   for (let i = 0; i < 5; i++) uris.push(placeKept('posts', A, desc({ start: i + 1 }), 5000 - i * 100))
   // Oldest is the last written: uris[4] (4600), then uris[3] ...
   const tmp = ROOT + 'posts/' + uris[0].slice((ROOT + 'posts/').length) + '.tmp'
-  files().set(tmp, { bytes: bytesOf(1), mtime: 9999 })
+  files().set(tmp, { bytes: bytesOf(1), mtime: BASE + 9999 })
   keep.trimKept({ maxFiles: 3 })
   t.absent(files().has(tmp), 'a leftover temporary file goes')
   t.absent(files().has(uris[4]) || files().has(uris[3]), 'the two oldest go')
@@ -216,7 +221,7 @@ test('trimKept never deletes a file whose URI this process handed out', async (t
   t.ok(files().has(uris[0]))
   keep.trimKept({ maxFiles: 0 })
   t.alike(keptFiles(), [uris[3]], 'only in-use files over the cap: trimming stops')
-  globalThis.__stubNow = 1
+  globalThis.__stubNow = BASE + 1
   const fresh = keep.keep('posts', B, desc(), bytesOf(4))
   keep.trimKept({ maxFiles: 0 })
   t.ok(files().has(fresh), 'a file written by keep is in use too')
@@ -237,7 +242,7 @@ test('wipeKept empties the whole store; nothing throws without one', async (t) =
   const keep = await load()
   keep.keep('posts', A, desc(), bytesOf(4))
   keep.keep('avatars', B, desc(), bytesOf(4))
-  files().set('file:///stub/Caches/varanda-media/' + 'ab'.repeat(16) + '.jpg', { bytes: bytesOf(1), mtime: 1 })
+  files().set('file:///stub/Caches/varanda-media/' + 'ab'.repeat(16) + '.jpg', { bytes: bytesOf(1), mtime: BASE + 1 })
   keep.wipeKept()
   t.alike(keptFiles(), [])
   t.absent(dirs().has(ROOT), 'the directory is gone')
@@ -251,11 +256,170 @@ test('wipeKept empties the whole store; nothing throws without one', async (t) =
   t.ok(keep.keep('posts', A, desc(), bytesOf(4)), 'recreated on demand')
 })
 
+// Moves Date.now forward by `ms` for the rest of the test.
+function advance (t, ms) {
+  const real = Date.now
+  const at = real() + ms
+  Date.now = () => at
+  t.teardown(() => { Date.now = real })
+}
+
+const fileCount = () => keptFiles().filter((k) => !k.endsWith('.tmp')).length
+const keptBytes = () => keptFiles().reduce((n, k) => n + files().get(k).bytes.byteLength, 0)
+
+test('keep over the file cap trims the oldest files not in use first', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const old = []
+  for (let i = 0; i < keep.KEEP_MAX_FILES; i++) old.push(placeKept('posts', A, desc({ start: i + 1 }), i + 1))
+  t.is(keep.keptUrl('posts', A, desc({ start: 1 })), old[0], 'the oldest is shown: in use')
+  const fresh = keep.keep('posts', B, desc(), bytesOf(4))
+  t.ok(fresh, 'the new photo is kept')
+  t.ok(fileCount() <= keep.KEEP_MAX_FILES, 'the file cap holds')
+  t.ok(files().has(old[0]), 'the file in use stays')
+  t.absent(files().has(old[1]) || files().has(old[2]), 'the oldest files not in use go')
+  t.ok(files().has(old[old.length - 1]), 'the newest stay')
+  const after = fileCount()
+  keep.keep('posts', B, desc({ start: 2 }), bytesOf(4))
+  t.is(fileCount(), after + 1, 'room was left: the next keep trims nothing')
+})
+
+test('keep over the byte cap trims, and refuses when only files in use are left', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const big = (start) => desc({ start, blocks: 256, bytes: 256 * 32768 })
+  const n = keep.KEEP_MAX_BYTES / (256 * 32768)
+  const old = []
+  for (let i = 0; i < n; i++) old.push(placeKept('posts', A, big(1 + i * 256), i + 1))
+  t.is(keptBytes(), keep.KEEP_MAX_BYTES, 'the store is exactly full')
+  const fresh = keep.keep('posts', B, big(1), bytesOf(256 * 32768))
+  t.ok(fresh, 'kept after a trim')
+  t.ok(keptBytes() <= keep.KEEP_MAX_BYTES, 'the byte cap holds')
+  t.absent(files().has(old[0]), 'the oldest went')
+
+  keep.wipeKept()
+  for (let i = 0; i < n; i++) old[i] = placeKept('posts', A, big(1 + i * 256), i + 1)
+  for (let i = 0; i < n; i++) t.is(keep.keptUrl('posts', A, big(1 + i * 256)), old[i])
+  t.is(keep.keep('posts', B, big(1), bytesOf(256 * 32768)), null, 'every file is in use: not kept')
+  t.is(keptBytes(), keep.KEEP_MAX_BYTES, 'nothing deleted, nothing written')
+  t.is(keep.keep('posts', B, desc(), bytesOf(4)), null, 'not even a small one')
+  keep.releaseKept(old[3])
+  t.is(keep.keep('posts', B, desc(), bytesOf(4)), null, 'released just now: still protected')
+  t.ok(files().has(old[3]))
+  advance(t, keep.KEEP_RELEASE_GRACE_MS + 1000)
+  t.ok(keep.keep('posts', B, desc(), bytesOf(4)), 'a released file makes room after the grace')
+  t.absent(files().has(old[3]), 'the released file went')
+  t.ok(files().has(old[0]), 'files in use stay')
+  t.ok(keptBytes() <= keep.KEEP_MAX_BYTES)
+})
+
+test('a failed write trims nothing', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const old = []
+  for (let i = 0; i < keep.KEEP_MAX_FILES; i++) old.push(placeKept('posts', A, desc({ start: i + 1 }), i + 1))
+  globalThis.__stubWriteFails = true
+  t.is(keep.keep('posts', B, desc(), bytesOf(4)), null)
+  globalThis.__stubWriteFails = false
+  t.is(fileCount(), keep.KEEP_MAX_FILES, 'no kept file was deleted')
+  t.ok(files().has(old[0]))
+  t.absent(keptFiles().some((k) => k.endsWith('.tmp')), 'no temporary file left')
+  t.ok(keep.keep('posts', B, desc(), bytesOf(4)), 'a later write trims and keeps')
+  t.absent(files().has(old[0]))
+})
+
+test('a failed move trims nothing', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  for (let i = 0; i < keep.KEEP_MAX_FILES; i++) placeKept('posts', A, desc({ start: i + 1 }), i + 1)
+  globalThis.__stubMoveFails = true
+  t.is(keep.keep('posts', B, desc(), bytesOf(4)), null)
+  globalThis.__stubMoveFails = false
+  t.is(fileCount(), keep.KEEP_MAX_FILES, 'no kept file was deleted')
+  t.absent(keptFiles().some((k) => k.endsWith('.tmp')), 'no temporary file left')
+})
+
+test('a delete that fails still counts toward the caps', async (t) => {
+  reset()
+  const keep = await load()
+  const { File } = await import(stub)
+  keep.wipeKept()
+  const stuckUri = placeKept('avatars', A, desc({ start: 8000 }), 0)
+  for (let i = 0; i < keep.KEEP_MAX_FILES - 2; i++) placeKept('posts', A, desc({ start: i + 1 }), i + 1)
+  t.ok(keep.keep('posts', B, desc({ start: 2 }), bytesOf(4)), 'fits: the store is now full')
+  t.is(fileCount(), keep.KEEP_MAX_FILES)
+  const realDelete = File.prototype.delete
+  File.prototype.delete = function () { if (this.uri === stuckUri) throw new Error('busy'); return realDelete.call(this) }
+  t.teardown(() => { File.prototype.delete = realDelete })
+  keep.dropKeptRanges([{ core: CORE, start: 8000, blocks: 1 }])
+  t.ok(files().has(stuckUri), 'the delete failed')
+  t.ok(keep.keep('posts', B, desc({ start: 3 }), bytesOf(4)), 'kept')
+  t.ok(fileCount() <= keep.KEEP_MAX_FILES, 'the file left behind is still counted: the cap holds')
+})
+
+test('when the files in use leave no room, nothing is trimmed', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const big = (start) => desc({ start, blocks: 256, bytes: 256 * 32768 })
+  const n = keep.KEEP_MAX_BYTES / (256 * 32768)
+  for (let i = 0; i < n; i++) {
+    placeKept('posts', A, big(1 + i * 256), i + 2)
+    keep.keptUrl('posts', A, big(1 + i * 256))
+  }
+  const spare = placeKept('avatars', A, desc(), 1)
+  t.is(keep.keep('posts', B, desc(), bytesOf(4)), null, 'cannot fit beside the files in use')
+  t.ok(files().has(spare), 'the unused file was not deleted for nothing')
+  t.absent(keptFiles().some((k) => k.endsWith('.tmp')))
+})
+
+test('releaseKept lets trimKept delete a file again, and ignores other URIs', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const uri = placeKept('posts', A, desc(), 1)
+  t.is(keep.keptUrl('posts', A, desc()), uri)
+  for (const other of [null, 7, 'blob:x', 'file:///stub/Caches/varanda-media/x.jpg', ROOT + 'posts/../' + uri.slice(ROOT.length + 6), ROOT + 'other/' + uri.slice(ROOT.length + 6)]) keep.releaseKept(other)
+  keep.trimKept({ maxFiles: 0 })
+  t.ok(files().has(uri), 'still in use')
+  keep.releaseKept(uri)
+  t.ok(files().has(uri), 'releasing deletes nothing')
+  keep.trimKept({ maxFiles: 0 })
+  t.ok(files().has(uri), 'a view may still show it: kept during the grace')
+  t.is(keep.KEEP_RELEASE_GRACE_MS, 120000)
+  advance(t, keep.KEEP_RELEASE_GRACE_MS + 1000)
+  keep.trimKept({ maxFiles: 0 })
+  t.absent(files().has(uri), 'trimmed once the grace ran out')
+})
+
+test('trimKept deletes files older than 30 days unless in use', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  t.is(keep.KEEP_MAX_AGE_MS, 30 * DAY)
+  const stale = placeKept('posts', A, desc({ start: 1 }), -31 * DAY)
+  const recent = placeKept('posts', A, desc({ start: 2 }), -29 * DAY)
+  const shown = placeKept('avatars', A, desc({ start: 3 }), -40 * DAY)
+  t.is(keep.keptUrl('avatars', A, desc({ start: 3 })), shown)
+  t.is(keep.keptUrl('posts', A, desc({ start: 1 })), stale, 'a read does not refresh the age')
+  keep.releaseKept(stale)
+  advance(t, keep.KEEP_RELEASE_GRACE_MS + 1000)
+  keep.trimKept()
+  t.absent(files().has(stale), 'older than 30 days: gone')
+  t.ok(files().has(recent), 'younger: stays')
+  t.ok(files().has(shown), 'in use: stays')
+})
+
 test('keep.web: same names, all no-ops', async (t) => {
   const native = await load()
   const web = await import('../src/media/keep.web.js')
   t.alike(Object.keys(web).sort(), Object.keys(native).sort())
   t.is(web.keep('posts', A, desc(), bytesOf(4)), null)
   t.is(web.keptUrl('posts', A, desc()), null)
-  for (const fn of ['dropKeptRanges', 'dropKeptAuthors', 'keepOnlyKeptAuthors', 'wipeKept', 'trimKept']) t.is(web[fn](), null)
+  for (const fn of ['dropKeptRanges', 'dropKeptAuthors', 'keepOnlyKeptAuthors', 'releaseKept', 'wipeKept', 'trimKept']) t.is(web[fn](), null)
+  t.is(web.KEEP_MAX_AGE_MS, native.KEEP_MAX_AGE_MS)
 })
