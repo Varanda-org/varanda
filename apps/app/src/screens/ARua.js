@@ -359,7 +359,12 @@ function rewriteStored (change) {
 // Once per app run: sign-out, lock, reset and an owner or installation
 // change wipe it; a block and an unfollow prune it.
 registerLocalCache({
-  wipe: clearSnapshot,
+  // A wipe also forgets the reconciled follow set: the allowed set it
+  // recorded is gone, so the next complete follow.list records it again.
+  wipe: () => {
+    reconciledFollows = null
+    return clearSnapshot()
+  },
   dropAuthors: (keys) => rewriteStored((snapshot) => withoutAuthors(snapshot, keys)),
   keepOnlyAuthors: (allowed) => rewriteStored((snapshot) => snapshotKeepOnly(snapshot, allowed))
 })
