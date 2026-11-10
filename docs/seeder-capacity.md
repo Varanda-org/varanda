@@ -82,17 +82,31 @@ count and says little about the seeder alone.
 - **1013 (maxExternal)**: external sockets reach the cap of 32 at 16 clients
   [c16] (peak 32, 3 notices.list refused) and stay pinned there at 32 and 64
   [c32] [c64], where peek.read and notices.list, the operations that open
-  their own seeder links, are refused 8 to 12 percent of the time. The tail
+  their own seeder links, are refused 8 to 12 percent of the time. These
+  counts include the harness's authors: it keeps min(clients, 20) dataset
+  authors connected to the same listener for the whole run
+  (`apps/cli/scripts/content-load.js`, `keep`), and their sockets count as
+  external. At 16 clients that is 16 authors plus 16 readers (peak 2 at one
+  client: 1 author plus 1 reader), so the readers alone would sit near 16
+  sockets there. Do not size `VARANDA_MAX_EXTERNAL` from the client count of
+  these runs. The tail
   of sync.start (p95 3.4 s at 32, 6.6 s at 64) grows in the same runs, most
   likely from waiting on a slot; that is an inference, the harness does not
   split the wait out.
-- **503 on /media (MEDIA_RATE)**: already at ONE client [c1]: a lone reader on
-  loopback asks for about 104 media GETs per second (3124 in 30 s), above the
-  64 per second bucket once its burst of 128 is spent. With more clients the
-  count of 503s falls because each client opens less often, not because the
-  seeder does more.
-- **/index (INDEX_RATE, INDEX_MAX_IN_FLIGHT)**: no refusal in any run; the
-  heaviest run asked for about 15 /index/counts per second, under 32.
+- **503 on /media (MEDIA_RATE or MEDIA_MAX_IN_FLIGHT)**: /media answers the
+  same 503 when the rate bucket (64 per second, burst 128) or the 16
+  responses in flight are exhausted, and the harness does not split the two.
+  At ONE client [c1] it is the rate: a lone reader on loopback asks for about
+  104 media GETs per second (3124 in 30 s). At 16 clients [c16] both the
+  attempts (3700) and the 503s (1795) are highest. At 64 clients [c64] the
+  attempts fall to about 62 per second (1852 in 30 s), under the rate, yet
+  217 still get 503: with 64 readers more than 16 responses are in flight at
+  once, so the in-flight cap refuses them.
+- **/index (INDEX_RATE, INDEX_MAX_IN_FLIGHT)**: no refusal in any run. Each
+  completed open asks one /index/counts, so the heaviest run, 16 clients
+  [c16] with 925 opens in 30 s, asked for about 31 per second: just under
+  the rate of 32 (burst 64), with almost no headroom. The 64-client run
+  [c64] asked for about 15 per second.
 - Throughput (opens in 30 s) peaks near 16 clients [c16] and falls at 32 and
   64 [c32] [c64], as refused links and slot waits take over.
 
@@ -124,8 +138,9 @@ the shared machine, not seeder work.
 
 ## Caps an operator may raise
 
-All are environment variables read by `varanda-serve` (`apps/cli/lib/cli.js`);
-the defaults stay as they are.
+All are environment variables of the seeder process, `varanda seed`
+(parsed in `apps/cli/lib/cli.js`, applied by `apps/cli/lib/commands/seed.js`);
+`varanda-serve` does not read them. The defaults stay as they are.
 
 | Cap | Variable | Default | What it protects |
 |---|---|---|---|
