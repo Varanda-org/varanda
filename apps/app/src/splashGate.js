@@ -92,3 +92,30 @@ export function holdBootCover ({ cover, elapsedMs, settled, step } = {}) {
   const elapsed = Number.isFinite(elapsedMs) ? elapsedMs : 0
   return elapsed < bootPatienceMs(step)
 }
+
+// A returning member's cold start on the phone may show A Rua's saved rows
+// (./feedSnapshot.js) instead of the splash while the node boots. It is a
+// cover, never a step: it shows only where the splash would, and every gate
+// still decides what comes after it. Any doubt keeps the splash.
+// - snapshot: parsed for this installation and association, with rows;
+// - previewCapable: the store's flag (false on the web);
+// - savedAt within PREVIEW_MAX_AGE_MS and not in the future: an older first
+//   page would show what the member may have left behind days ago;
+// - sessionLive: the native session store holds a live record for exactly
+//   the snapshot's owner, the one the resume will use;
+// - no intro, terms or other gate next, no Conexão, not locked;
+// - step: null while it is still unknown (the boot), else not 'entrar' nor a
+//   step that asks the person for something.
+export const PREVIEW_MAX_AGE_MS = 24 * 60 * 60 * 1000
+export const PREVIEW_BLOCKED_STEPS = ['entrar', 'recuperando', 'idade', 'vinculo', 'identidade', 'certificado', 'perfil']
+const PREVIEW_STEPS = ['carregando', 'pronto']
+
+export function previewAllowed ({ snapshot, previewCapable, gateNext, showConexao, step, locked, sessionLive, nowMs } = {}) {
+  if (previewCapable !== true || sessionLive !== true) return false
+  if (gateNext !== false || showConexao !== false || locked !== false) return false
+  if (step !== null && !PREVIEW_STEPS.includes(step)) return false
+  if (snapshot === null || typeof snapshot !== 'object' || !Array.isArray(snapshot.items) || snapshot.items.length === 0) return false
+  const savedAt = snapshot.savedAt
+  if (!Number.isSafeInteger(savedAt) || !Number.isSafeInteger(nowMs)) return false
+  return savedAt <= nowMs && nowMs - savedAt <= PREVIEW_MAX_AGE_MS
+}

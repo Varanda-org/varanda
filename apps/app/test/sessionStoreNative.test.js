@@ -182,6 +182,34 @@ test('session store: idle expiry, refresh, missing and future usedAt', async (t)
   t.absent(items().has(itemKey(RP, PK)))
 })
 
+test('session store: hasLive applies the load rules and never deletes or writes', async (t) => {
+  resetStubs()
+  const { createSessionStore, itemKey } = await loadStore()
+  let now = 1000 * DAY
+  const store = createSessionStore({ now: () => now })
+  await store.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  const saved = items().get(itemKey(RP, PK))
+  t.is(await store.hasLive({ rpId: RP, publicKey: PK }), true, 'a live record')
+  t.is(items().get(itemKey(RP, PK)), saved, 'usedAt is not rewritten')
+  t.is(await store.hasLive({ rpId: RP, publicKey: 'ef'.repeat(32) }), false, 'another key')
+  t.is(await store.hasLive({ rpId: 'other.example', publicKey: PK }), false, 'another rp.id')
+  t.is(await store.hasLive({ rpId: RP, publicKey: 'bad' }), false)
+  now += 30 * DAY + 1
+  t.is(await store.hasLive({ rpId: RP, publicKey: PK }), false, 'idle-expired')
+  t.is(items().get(itemKey(RP, PK)), saved, 'the expired record is not deleted')
+  now = 1000 * DAY
+  items().set(itemKey(RP, PK), '{not json')
+  t.is(await store.hasLive({ rpId: RP, publicKey: PK }), false, 'malformed')
+  t.ok(items().has(itemKey(RP, PK)), 'a malformed record is not deleted')
+  items().set(itemKey(RP, PK), saved)
+  globalThis.__secureGetFails = true
+  t.is(await store.hasLive({ rpId: RP, publicKey: PK }), false, 'a throwing read is false')
+  globalThis.__secureGetFails = false
+  t.is(items().get(itemKey(RP, PK)), saved, 'a throwing read deletes nothing')
+  items().delete(itemKey(RP, PK))
+  t.is(await store.hasLive({ rpId: RP, publicKey: PK }), false, 'missing')
+})
+
 test('session store: clear deletes the item and the index, and throws on failure', async (t) => {
   resetStubs()
   const { createSessionStore, itemKey } = await loadStore()

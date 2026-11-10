@@ -252,3 +252,23 @@ test('a load queued behind the limit before a wipe does not keep after it', asyn
   t.is(store.calls.keep, 0, 'not kept')
   t.is(store.files.size, 0)
 })
+
+// Kept-only mode (src/ui/MediaView.js KeptOnlyContext, A Rua's cold-start
+// preview): MediaView and Avatar load react-native, so their text is checked.
+test('kept-only mode reads keptUrl and never reaches the loader or the fetch', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const strip = (src) => src.replace(/("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, (m, str) => str || ' ')
+  const media = strip(fs.readFileSync(path.join(__dirname, '../src/ui/MediaView.js'), 'utf8'))
+  const avatar = strip(fs.readFileSync(path.join(__dirname, '../src/ui/Avatar.js'), 'utf8'))
+  t.ok(media.includes('export const KeptOnlyContext = createContext(false)'), 'off by default')
+  const helper = media.slice(media.indexOf('export function keptOnlyUrl'), media.indexOf('function useMedia'))
+  t.ok(helper.includes('keptStore.keptUrl(kind, author, d)'))
+  t.absent(/fetch|loadKept|cache\./.test(helper), 'the helper only reads the kept store')
+  t.ok(media.includes('const canFetch = !keptOnly && node !== null && node.hosted === true'), 'no fetch, no cache peek in kept-only mode')
+  t.ok(media.includes("keptOnlyUrl('posts', author, descriptor, persist)"))
+  t.ok(media.includes("if (keptOnly) return kept !== null ? { state: 'ok', url: kept, retry: undefined } : { state: 'loading', url: null, retry: undefined }"), 'a miss is the loading tile')
+  t.ok(avatar.includes('const canFetch = !keptOnly && node !== null && node.hosted === true'), 'the avatar key stays null, so its loader never runs')
+  t.ok(avatar.includes("keptOnlyUrl('avatars', publicKey, picture, persist)"))
+  t.ok(avatar.includes('if (keptOnly) return kept'), 'a miss is the initials')
+})

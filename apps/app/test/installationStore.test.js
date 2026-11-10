@@ -366,6 +366,32 @@ test('saving the same installation keeps its remembered answer; another drops it
   }
 })
 
+test('rememberedConfig: the remembered answer of this installation, from disk only', async (t) => {
+  const { store, installation } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    t.is(await store.rememberedConfig(), null, 'no installation: null')
+    await store.saveInstallation('https://a.test')
+    t.is(await store.rememberedConfig(), null, 'nothing remembered yet: null')
+    globalThis.fetch = jsonAnswer(ASSOC_A, 'https://a.test/varanda.json')
+    await store.discoverConfig()
+    let asked = 0
+    globalThis.fetch = async () => { asked++; throw new Error('no request expected') }
+    const config = await store.rememberedConfig()
+    t.is(config && config.association, ASSOC_A, 'remembered present')
+    t.is(asked, 0, 'never a request')
+    installation.setInstallation('https://b.test')
+    t.is(await store.rememberedConfig(), null, 'another origin: not its answer')
+    installation.setInstallation('https://a.test')
+    files().set(INSTALLATION, '{broken')
+    t.is(await store.rememberedConfig(), null, 'a damaged file: null, no throw')
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
 // preferRemembered: a returning member starts from the remembered answer at
 // once; the live fetch only revalidates it in the background.
 async function rememberA (store) {

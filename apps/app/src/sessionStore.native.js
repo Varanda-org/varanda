@@ -100,6 +100,33 @@ export function createSessionStore ({ secureStore = SecureStore, now = Date.now,
     if (typeof previous === 'string' && previous !== key && previous.startsWith(ITEM_PREFIX)) await removeQuietly(previous)
   }
 
+  function usableRecord (record, rpId, publicKey, t) {
+    return record !== null && typeof record === 'object' &&
+      record.v === VERSION &&
+      record.rpId === rpId &&
+      record.publicKey === publicKey &&
+      validCredentialId(record.credentialId) &&
+      typeof record.prfHex === 'string' && HEX64.test(record.prfHex) &&
+      Number.isSafeInteger(record.usedAt) && record.usedAt >= 0 &&
+      record.usedAt - t <= MAX_FUTURE_MS &&
+      t - record.usedAt <= maxIdleMs
+  }
+
+  // Whether load() would return the record of { rpId, publicKey } now, by
+  // the same rules, but read-only: nothing is deleted or rewritten and any
+  // error is false. For the cold-start preview (App.js), which may run while
+  // the device locks: a failed read there must never cost the sign-in.
+  async function hasLive ({ rpId, publicKey } = {}) {
+    try {
+      if (!validRpId(rpId) || !validPublicKey(publicKey)) return false
+      const raw = await secureStore.getItemAsync(itemKey(rpId, publicKey), options)
+      if (typeof raw !== 'string') return false
+      return usableRecord(JSON.parse(raw), rpId, publicKey, clock())
+    } catch {
+      return false
+    }
+  }
+
   // -> { credentialId, prfHex } or null. Never throws for a bad or absent
   // record; the caller zero-fills nothing (a string), so it hands prfHex
   // straight to the IPC.
@@ -124,16 +151,7 @@ export function createSessionStore ({ secureStore = SecureStore, now = Date.now,
     } catch {
       return null
     }
-    const usable = record !== null && typeof record === 'object' &&
-      record.v === VERSION &&
-      record.rpId === rpId &&
-      record.publicKey === publicKey &&
-      validCredentialId(record.credentialId) &&
-      typeof record.prfHex === 'string' && HEX64.test(record.prfHex) &&
-      Number.isSafeInteger(record.usedAt) && record.usedAt >= 0 &&
-      record.usedAt - t <= MAX_FUTURE_MS &&
-      t - record.usedAt <= maxIdleMs
-    if (!usable) {
+    if (!usableRecord(record, rpId, publicKey, t)) {
       await removeQuietly(key)
       return null
     }
@@ -169,7 +187,7 @@ export function createSessionStore ({ secureStore = SecureStore, now = Date.now,
     await secureStore.deleteItemAsync(INDEX_KEY, options)
   }
 
-  return { save, load, clear, clearAll }
+  return { save, load, hasLive, clear, clearAll }
 }
 
 export const sessionStore = createSessionStore()
