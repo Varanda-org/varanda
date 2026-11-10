@@ -145,3 +145,32 @@ test('withPeek fills only what profile.read left empty and marks the entry loade
   )
   t.is(withPeek(null, { name: null, username: null }), null, 'nothing to fill')
 })
+
+test('withPeek never replaces what profile.read already brought', async (t) => {
+  const { withPeek, partial } = await load()
+  const fields = { name: 'Ana', username: 'ana', bio: 'oi', avatar: null }
+  const onlyUsername = { name: null, username: 'ana2', bio: null, avatar: null, loaded: true }
+  t.ok(partial(onlyUsername))
+  t.absent(partial({ name: 'A', username: 'a', bio: null, avatar: null, loaded: true }))
+  t.alike(
+    withPeek(onlyUsername, fields),
+    { name: 'Ana', username: 'ana2', bio: 'oi', avatar: null, loaded: true },
+    'the name fills in, the @nome stays'
+  )
+  const onlyName = { name: 'Bia', username: null, bio: 'minha', avatar: null, loaded: true }
+  t.alike(
+    withPeek(onlyName, fields),
+    { name: 'Bia', username: 'ana', bio: 'minha', avatar: null, loaded: true },
+    'the @nome fills in, name and bio stay'
+  )
+})
+
+test('a missing key drops the name a peek found earlier', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/names.js'), 'utf8')
+  const body = src.slice(src.indexOf('for (const rawKey of (res && res.missing)'))
+  const block = body.slice(0, body.indexOf('commit(next)'))
+  t.ok(block.includes('next.set(key, null)'), 'missing stores null')
+  t.absent(block.includes('withPeek'), 'and never the peeked name')
+})

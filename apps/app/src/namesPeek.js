@@ -52,12 +52,23 @@ export function peekFields (res) {
   return fields
 }
 
-// The entry once the peeked fields fill what profile.read left empty. It
-// counts as loaded: the node was asked and the answer stands until the diary
-// grows (the freshness path marks it stale again).
+// An entry with a name or an @nome still empty, the case a peek can fill.
+export function partial (entry) {
+  return entry === null || entry === undefined || entry.name === null || entry.username === null
+}
+
+// The entry once the peeked fields fill what profile.read left empty: a
+// field profile.read already brought is never replaced, so a name never
+// drops out while an older block downloads. It counts as loaded: the node was
+// asked and the answer stands until the diary grows (the freshness path marks
+// it stale again).
 export function withPeek (entry, fields) {
   const known = entry || null
-  const merged = applySeed(known, fields)
+  const gap = (field) => known === null || known[field] === null || known[field] === undefined
+  const seed = {}
+  for (const field of ['name', 'username', 'bio']) if (gap(field)) seed[field] = fields[field]
+  if (known === null || !known.avatar) seed.avatar = fields.avatar
+  const merged = applySeed(known, seed)
   if (merged === null) return known === null ? null : { ...known, loaded: true }
   return { ...(known || {}), ...merged, loaded: true }
 }
