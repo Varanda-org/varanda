@@ -7030,3 +7030,31 @@ Limites desta caminhada:
 - Ficaram sem conferir, por falta de publicação de exemplo ou para não mexer nos ajustes do sistema: a citação, a bolha da conversa, a foto que falhou, o GIF, "reduzir movimento", VoiceOver e TalkBack. A citação tem uma asserção no código em `postActions.test.js`; a bolha da conversa não usa o `MediaGrid`, então esta mudança não a alcança.
 - Na web, a animação da troca não foi observada (a aba de teste rodava em segundo plano); só a posição final de cada troca.
 - Nas publicações do feed, as fotos continuam dentro do elemento único da publicação para leitores de tela, como antes. É um limite conhecido e fica para uma correção seguinte.
+
+## 151. Ordem das fotos (PR feat/photo-order)
+
+No Publicar, com duas fotos ou mais, cada miniatura ganha setas para mover a foto uma posição para antes ou para depois, antes de publicar. A primeira foto é a capa, marcada "capa": ela define a forma do quadro do carrossel e é a que aparece no Mural. As setas ficam indisponíveis enquanto a publicação é enviada (e enquanto uma publicação assinada espera o "Tentar de novo") e não aparecem quando há uma foto só; na primeira miniatura não há "antes", e na última não há "depois". Na web, depois de Enter numa seta, o foco fica numa seta da mesma foto.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/photoOrder.test.js`
+- `node apps/app/test/momentosScreen.test.js`
+- `node apps/app/test/group-flow.test.js`
+- `node apps/app/test/platformGate.test.js`
+
+Caminhada, primeiro no celular, build de depuração do Android e simulador iOS, e depois na web e no PWA:
+
+- [x] Com 3 fotos, mover uma foto para o início e publicar: o quadro do carrossel segue a nova primeira foto, e a ordem das fotos na publicação é a das miniaturas. Executado em 2026-11-10, com três fotos de formas diferentes (paisagem, retrato e quadrada): no Android, a quadrada foi para o início e a publicação saiu com o quadro quadrado; no iOS, a paisagem foi para depois e a publicação saiu com o quadro 4:5 da foto em retrato; na web, a mesma ordem deu o quadro 4:5. O selo "capa" acompanha a primeira foto a cada troca.
+- [ ] O Mural do perfil mostra a nova primeira foto.
+- [ ] Mover uma foto enquanto outra ainda está sendo preparada não envia nada nem perde a foto.
+- [ ] Durante o envio, e com "Tentar de novo" pendente, as setas e o "remover" ficam indisponíveis.
+- [ ] Resposta, citação e publicação como página respeitam a ordem.
+- [x] Com uma foto só não há setas nem "capa". Executado em 2026-11-10 no Android.
+- [x] Na web, Enter numa seta move a foto e o foco fica na seta da mesma foto (na outra seta, quando a foto chega à ponta), e não vai para "Cancelar". Executado em 2026-11-10 no Chrome, três vezes seguidas.
+- [ ] TalkBack e VoiceOver leem "mover foto N de M para antes" ou "para depois", e "capa" junto da primeira foto.
+
+Limites desta caminhada:
+
+- Conferido em 2026-11-10 com os dados de demonstração do app (Vitrine), no emulador Android, no simulador iOS (iPhone 16e) e no Chrome. Na Vitrine, a foto enviada aparece como "foto indisponível" no feed, então a ordem foi conferida pela forma do quadro, que segue a primeira foto, e não pela imagem.
+- Os rótulos das setas e da capa foram conferidos na árvore de acessibilidade (Android e web), sem ligar TalkBack nem VoiceOver.
+- Na Vitrine o envio termina na hora, então as setas indisponíveis durante o envio não foram observadas; o código usa o mesmo bloqueio do "remover".
