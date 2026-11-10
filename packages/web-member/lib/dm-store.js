@@ -39,6 +39,18 @@
 // filed from the legacy bundle (./dm.js pageLegacyChunk) carries legacy: true
 // (history the service held in plaintext, never signed evidence).
 //
+// The list summary (docs/protocol.md section 11): kv '<prefix>dmSummary' =
+// { v: 1, nonce, box }, the crypto_secretbox under a key derived from the
+// local key (SUMMARY_KEY_DOMAIN) of { v: 1, core, length, follows, seen,
+// inbox, requests }: the first dm.list pages of both folders as the last
+// fold gave them, with the core key and length and the digests of the kv
+// follows and seen texts that fold read. keyStage() settles once unlock()
+// installed the key and read the summary; the rows load after it (loaded(),
+// what unlock() returns), so a first page can answer before every row is
+// opened. The summary is used
+// only while it opens under this key, names this core and its length and
+// the digests are the current ones (summaryFor); anything else is ignored.
+//
 // Delete is an op row plus the fold rule (@varanda/core lib/dm-fold.js drops
 // what was filed at or before it): the ciphertext of deleted messages stays
 // in the core until a later compaction, which is not done here.
@@ -55,6 +67,11 @@ const SEEN_DOMAIN = b4a.from('varanda/member-dm-local/seen/v1\n', 'utf8')
 const MEDIA_KEY_DOMAIN = b4a.from('varanda/member-dm-local/media-key/v1\n', 'utf8')
 const MEDIA_NAME_DOMAIN = b4a.from('varanda/member-dm-local/media-name/v1\n', 'utf8')
 const BYTES_DOMAIN = b4a.from('varanda/member-dm-local/bytes/v1\n', 'utf8')
+const SUMMARY_KEY_DOMAIN = b4a.from('varanda/member-dm-local/summary-key/v1\n', 'utf8')
+const SUMMARY = 'dmSummary'
+const SUMMARY_DELAY_MS = 1000
+// dm.list's default page size: the summary holds one such page per folder.
+const SUMMARY_PAGE = 30
 const MEDIA_INDEX = 'dmMediaIndex'
 const MEDIA_PREFIX = 'dmMedia/'
 const MEDIA_ITEMS_MAX = 4
@@ -125,6 +142,25 @@ function padded (row) {
   return { ...row, pad: ' '.repeat(size - base) }
 }
 
+function validConversation (c) {
+  return c !== null && typeof c === 'object' && HEX64.test(c.peer) && (c.folder === 'inbox' || c.folder === 'request') &&
+    typeof c.preview === 'string' && typeof c.at === 'string' && typeof c.unread === 'boolean' && typeof c.mine === 'boolean'
+}
+
+// A dm.list result as the summary holds it -> a plain copy, or null.
+function summaryPage (p) {
+  if (p === null || typeof p !== 'object' || !Array.isArray(p.conversations) || p.conversations.length > SUMMARY_PAGE) return null
+  if (!p.conversations.every(validConversation) || typeof p.requests !== 'boolean' || typeof p.inboxUnread !== 'boolean') return null
+  const next = p.next
+  if (next !== null && (typeof next !== 'object' || typeof next.at !== 'string' || !HEX64.test(next.peer))) return null
+  return {
+    conversations: p.conversations.map((c) => ({ peer: c.peer, folder: c.folder, preview: c.preview, at: c.at, unread: c.unread, mine: c.mine })),
+    next: next === null ? null : { at: next.at, peer: next.peer },
+    requests: p.requests,
+    inboxUnread: p.inboxUnread
+  }
+}
+
 function validIndex (data) {
   if (data === null || typeof data !== 'object' || data.v !== 1 || !Array.isArray(data.items)) return []
   return data.items.filter((e) => e !== null && typeof e === 'object' && typeof e.n === 'string' && HEX32.test(e.n) && isCount(e.c, MEDIA_ITEMS_MAX))
@@ -147,11 +183,14 @@ async function readIndex (storage, prefix) {
 }
 
 // cacheBytesMax: tests only.
-function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' } = {}) {
+// summaryDelayMs, loadGate (an async function awaited before the rows
+// load): tests only.
+function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '', summaryDelayMs = SUMMARY_DELAY_MS, loadGate = null } = {}) {
   if (storage === null || typeof storage !== 'object') throw new TypeError('storage required')
   if (typeof prefix !== 'string') throw new TypeError('prefix inválido')
   const indexName = prefix + MEDIA_INDEX
   const entryPrefix = prefix + MEDIA_PREFIX
+  const summaryName = prefix + SUMMARY
   let key = null
   let corePair = null
   let rows = null
@@ -168,6 +207,15 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
   let opsMemo = null
   // seenKey -> token under the current key; dropped with the key.
   let tokens = new Map()
+  // The opened summary (plaintext) and the core length read with it; both
+  // dropped with the key.
+  let summary = null
+  let coreLength = -1
+  // The current unlock's key stage and whole unlock; never reject unhandled.
+  let keying = Promise.resolve()
+  let loading = Promise.resolve()
+  let summaryTimer = null
+  let summaryNext = null
 
   function serial (fn) {
     const p = queue.then(fn)
@@ -190,7 +238,16 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
     cached = new Set()
     tokens = new Map()
     opsMemo = null
+    summary = null
+    coreLength = -1
+    dropSummaryWrite()
     version++
+  }
+
+  function dropSummaryWrite () {
+    if (summaryTimer !== null) clearTimeout(summaryTimer)
+    summaryTimer = null
+    summaryNext = null
   }
 
   async function withCore (fn) {
@@ -211,7 +268,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
     const copy = new Uint8Array(32)
     copy.set(localKey)
     const gen = ++generation
-    return serial(async () => {
+    const keyed = serial(async () => {
       wipe()
       if (gen !== generation) {
         copy.fill(0)
@@ -223,7 +280,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
       key = copy
       corePair = pair
       try {
-        await load(gen)
+        await readSummary(gen)
       } catch (err) {
         if (key === copy) wipe()
         throw err
@@ -231,12 +288,126 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
       // A superseded unlock leaves nothing of its own behind.
       if (gen !== generation && key === copy) wipe()
     })
+    // Queued in the same tick, so nothing runs between the two stages.
+    const rowsLoaded = serial(async () => {
+      if (gen !== generation || key !== copy) return
+      if (loadGate !== null) await loadGate()
+      if (gen !== generation || key !== copy) return
+      try {
+        await load(gen)
+      } catch (err) {
+        if (key === copy) wipe()
+        throw err
+      }
+      if (gen !== generation && key === copy) wipe()
+    })
+    keying = keyed
+    loading = Promise.all([keyed, rowsLoaded]).then(() => {})
+    keying.catch(() => {})
+    loading.catch(() => {})
+    return loading
+  }
+
+  // Runs inside serial(), the key installed: the core's length (-1 for a
+  // core of another key, which load() replaces) and the summary, kept only
+  // when it opens under this key and names this core.
+  async function readSummary (gen) {
+    const length = await withCore(async (core) => core.length)
+    if (gen !== generation) return
+    let data = null
+    try {
+      data = await storage.readJson(summaryName)
+    } catch {}
+    if (gen !== generation) return
+    coreLength = length === null ? -1 : length
+    summary = length === null ? null : openSummary(data)
+  }
+
+  function summaryKey () {
+    return crypto.hash([SUMMARY_KEY_DOMAIN, key])
+  }
+
+  function openSummary (data) {
+    if (data === null || typeof data !== 'object' || data.v !== 1 || typeof data.nonce !== 'string' || !HEX48.test(data.nonce) ||
+        typeof data.box !== 'string' || !BASE64.test(data.box)) return null
+    const box = b4a.from(data.box, 'base64')
+    if (box.byteLength <= sodium.crypto_secretbox_MACBYTES) return null
+    const plain = b4a.alloc(box.byteLength - sodium.crypto_secretbox_MACBYTES)
+    const k = summaryKey()
+    let value = null
+    try {
+      if (sodium.crypto_secretbox_open_easy(plain, box, b4a.from(data.nonce, 'hex'), k)) value = JSON.parse(b4a.toString(plain, 'utf8'))
+    } catch {
+      value = null
+    } finally {
+      k.fill(0)
+      plain.fill(0)
+    }
+    if (value === null || typeof value !== 'object' || value.v !== 1) return null
+    if (value.core !== b4a.toString(corePair.publicKey, 'hex') || !Number.isSafeInteger(value.length) || value.length < 0) return null
+    if (!HEX64.test(value.follows) || !HEX64.test(value.seen)) return null
+    const inbox = summaryPage(value.inbox)
+    const requests = summaryPage(value.requests)
+    if (inbox === null || requests === null) return null
+    return { length: value.length, follows: value.follows, seen: value.seen, inbox, requests }
+  }
+
+  // follows, seen: sha256 hex of the current kv texts -> copies of the
+  // first pages { inbox, requests }, or null when no summary matches them,
+  // this core's length and this key.
+  function summaryFor ({ follows, seen }) {
+    if (key === null || summary === null || coreLength < 0) return null
+    if (summary.length !== coreLength || summary.follows !== follows || summary.seen !== seen) return null
+    return { inbox: summaryPage(summary.inbox), requests: summaryPage(summary.requests) }
+  }
+
+  // The first pages of a fold of the loaded rows at `version` and the
+  // digests of what it read; sealed and written after summaryDelayMs, the
+  // last call winning, only while that unlock and those rows are current.
+  function saveSummary ({ version: v, follows, seen, inbox, requests }) {
+    if (rows === null || key === null || v !== version) return
+    if (summary !== null && summary.length === coreLength && summary.follows === follows && summary.seen === seen) return
+    const a = summaryPage(inbox)
+    const b = summaryPage(requests)
+    if (a === null || b === null || !HEX64.test(follows) || !HEX64.test(seen)) return
+    if (summaryTimer !== null) clearTimeout(summaryTimer)
+    summaryNext = { gen: generation, version: v, follows, seen, inbox: a, requests: b }
+    summaryTimer = setTimeout(flushSummary, summaryDelayMs)
+    if (typeof summaryTimer === 'object' && summaryTimer !== null && typeof summaryTimer.unref === 'function') summaryTimer.unref()
+  }
+
+  function flushSummary () {
+    summaryTimer = null
+    const next = summaryNext
+    summaryNext = null
+    if (next === null) return
+    serial(async () => {
+      if (next.gen !== generation || rows === null || key === null || next.version !== version) return
+      const plain = { v: 1, core: b4a.toString(corePair.publicKey, 'hex'), length: coreLength, follows: next.follows, seen: next.seen, inbox: next.inbox, requests: next.requests }
+      const bytes = b4a.from(JSON.stringify(plain), 'utf8')
+      const k = summaryKey()
+      let sealed
+      try {
+        const nonce = b4a.alloc(sodium.crypto_secretbox_NONCEBYTES)
+        sodium.randombytes_buf(nonce)
+        const box = b4a.alloc(bytes.byteLength + sodium.crypto_secretbox_MACBYTES)
+        sodium.crypto_secretbox_easy(box, bytes, nonce, k)
+        sealed = { v: 1, nonce: b4a.toString(nonce, 'hex'), box: b4a.toString(box, 'base64') }
+      } finally {
+        k.fill(0)
+        bytes.fill(0)
+      }
+      await storage.writeJson(summaryName, sealed)
+      if (next.gen === generation && key !== null) summary = { length: plain.length, follows: plain.follows, seen: plain.seen, inbox: plain.inbox, requests: plain.requests }
+    }).catch(() => {})
   }
 
   async function load (gen) {
+    let length = 0
     let loaded = await withCore(async (core) => {
       const out = []
-      for (let i = 0; i < core.length; i++) {
+      length = core.length
+      for (let i = 0; i < length; i++) {
         const block = await core.get(i, { wait: false })
         if (block === null || typeof block !== 'object' || block.v !== 1) continue
         const row = gc.openRecord({ nonce: block.nonce, box: block.box }, key)
@@ -249,15 +420,20 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
     if (loaded === null) {
       await store.deleteDmLocal(storage, prefix)
       if (gen !== generation) return
+      await storage.writeJson(summaryName, null)
+      if (gen !== generation) return
       // Another key's cache cannot be opened with this one. A lock during
       // the wipe stops it: what is left stays indexed for a later wipe.
       if (!(await wipeEntries(() => gen === generation))) return
       loaded = []
+      length = 0
+      summary = null
     }
     if (gen !== generation) return
     const index = await readIndex(storage, prefix)
     if (gen !== generation) return
     rows = loaded
+    coreLength = length
     version++
     mediaKey = crypto.hash([MEDIA_KEY_DOMAIN, key])
     cached = new Set(index.filter((e) => e.w !== true).map((e) => e.n))
@@ -269,8 +445,25 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
     wipe()
   }
 
+  // The rows are loaded.
   function unlocked () {
     return rows !== null
+  }
+
+  // The key is installed (the rows may still be loading).
+  function keyReady () {
+    return key !== null
+  }
+
+  // Settles once the current unlock installed its key and read the summary
+  // (rejects when that failed).
+  function keyStage () {
+    return keying
+  }
+
+  // Settles once the current unlock's rows load (rejects when it failed).
+  function loaded () {
+    return loading
   }
 
   // A monotonic local filing time in ms.
@@ -294,6 +487,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
       if (ok === null) throw new Error('armazenamento de mensagens inválido')
       if (gen !== generation || rows === null) return
       for (const r of clean) rows.push(r)
+      coreLength += blocks.length
       version++
     })
   }
@@ -536,10 +730,15 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
     return true
   }
 
-  // Deletes every cached item; needs no key (lock, sign-out and reset).
-  // Queued behind every write already issued.
+  // Deletes every cached item and the summary; needs no key (lock, sign-out
+  // and reset). Queued behind every write already issued.
   function wipeCache () {
-    return serial(() => wipeEntries())
+    dropSummaryWrite()
+    return serial(async () => {
+      await storage.writeJson(summaryName, null)
+      summary = null
+      return wipeEntries()
+    })
   }
 
   function idle () {
@@ -551,7 +750,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' 
     return queue
   }
 
-  return { unlock, lock, unlocked, nextFiled, append, snapshot, ops, version: currentVersion, hasMessage, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, idle, close }
+  return { unlock, lock, unlocked, keyReady, keyStage, loaded, summaryFor, saveSummary, nextFiled, append, snapshot, ops, version: currentVersion, hasMessage, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, idle, close }
 }
 
-module.exports = { createDmStore }
+module.exports = { createDmStore, SUMMARY_PAGE }

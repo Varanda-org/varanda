@@ -891,6 +891,12 @@ function createBrowserSession ({
   // identity change bumps dmUnlockGen, which makes a pending one a no-op.
   let dmUnlocking = null
   let dmUnlockGen = 0
+  // The same wait up to the moment that unlock installed its keys and read
+  // the list summary (null when none is pending): dm.list may answer a
+  // first page from the summary while the rows still load.
+  let dmKeying = null
+  // The private answer of a dm.list chain step that must wait off the chain.
+  const DM_LIST_MISS = Symbol('dm-list-miss')
   // The identity requests are issued for, moved synchronously when an
   // identity change is CALLED (its chain entry may run later): another key
   // (setKeyPair; the same key with a new PRF keeps it), a lock or a reset
@@ -2558,6 +2564,53 @@ function createBrowserSession ({
     if (ident !== identityTarget) throw new UsageError(store.LOCKED)
   }
 
+  // The identity unlocked AND the dm keys installed; the rows may still be
+  // loading (dm.list from the summary).
+  async function requireDmKey () {
+    const own = await requireUnlocked()
+    if (!dmEngine.keyReady()) throw new UsageError(store.LOCKED)
+    return own
+  }
+
+  // serialDm for dm.list: it waits OFF the chain only for the keys when
+  // the engine says the summary answers this page, else for the whole
+  // unlock, so a read queued behind it never waits for the row load. Each
+  // wait ends with the identity checked and, in that same tick, the step
+  // queued.
+  // fn returns DM_LIST_MISS when, on the chain, the summary no longer
+  // answers and the rows still load (a step queued ahead changed follows or
+  // seen): the request leaves the chain, waits for the rows off it and
+  // queues again, so no chain step ever waits for the row load.
+  function serialDmList (fn) {
+    const run = serial(fn)
+    return async (params) => {
+      const ident = identityTarget
+      // A page store whose row load keeps failing is opened afresh on each
+      // entry: bounded, then locked as any failed unlock.
+      for (let misses = 0; ; misses++) {
+        if (misses > 2) throw new UsageError(store.LOCKED)
+        for (let p = dmKeying; p !== null; p = dmKeying) await p
+        checkIdentity(ident)
+        let r
+        if (dmUnlocking === null) {
+          r = await run(params)
+        } else if (await dmEngine.listReady(params).catch(() => false)) {
+          if (dmKeying !== null) continue
+          checkIdentity(ident)
+          r = await run(params)
+        } else {
+          for (let p = dmUnlocking; p !== null; p = dmUnlocking) await p
+          checkIdentity(ident)
+          r = await run(params)
+        }
+        if (r !== DM_LIST_MISS) return r
+        await dmEngine.listLoaded(params)
+        for (let p = dmUnlocking; p !== null; p = dmUnlocking) await p
+        checkIdentity(ident)
+      }
+    }
+  }
+
   // The first chain step of a DM request of several steps -> own.
   const dmIdentity = serialDm(() => requireDm())
 
@@ -2579,11 +2632,12 @@ function createBrowserSession ({
   // this unlock's own copy, zero-filled here exactly once when it settles. A
   // newer identity change (dmUnlockGen) makes it a no-op; one under way is
   // stopped by the engine's own generation (the change's lock).
-  async function runDmUnlock (gen, prf) {
+  // keyed() releases dmKeying once the keys are installed.
+  async function runDmUnlock (gen, prf, keyed) {
     const current = () => gen === dmUnlockGen && !closed
     try {
       if (!current()) return
-      const unlock = () => current() ? dmEngine.unlock(prf) : Promise.resolve()
+      const unlock = () => current() ? dmEngine.unlock(prf, { onKey: keyed }) : Promise.resolve()
       await (dmUnlockHook === null ? unlock() : dmUnlockHook(unlock, prf))
     } catch (err) {
       // A superseded unlock can fail on the store its lock wiped: not an error.
@@ -3907,8 +3961,9 @@ function createBrowserSession ({
 
     // With `page` (5.114) the page's conversations, held under its secrets;
     // the member's own blocks do not apply to them.
-    'dm.list': serialDm(async (params) => {
-      return dmEngine.list(await requireDm(), params)
+    'dm.list': serialDmList(async (params) => {
+      const r = await dmEngine.list(await requireDmKey(), params, { wait: false })
+      return r === null ? DM_LIST_MISS : r
     }),
     'dm.thread': serialDm(async (params) => {
       const r = await dmEngine.thread(await requireDm(), params)
@@ -4250,7 +4305,7 @@ function createBrowserSession ({
         // after this entry returns, while the DM requests wait for it.
         started = true
         const gen = dm.gen
-        setTimeout(() => { runDmUnlock(gen, dmPrf).finally(dm.release) }, 0)
+        setTimeout(() => { runDmUnlock(gen, dmPrf, dm.keyed).finally(dm.release) }, 0)
       }
     })().finally(dropDm), { abort: true }).catch((err) => {
       dropDm()
@@ -4267,15 +4322,25 @@ function createBrowserSession ({
   // previous settles with the superseded unlock (never rejects). A wait
   // also covers the one before it, so no unlock ever overlaps an older one,
   // even behind a change that failed before awaiting its previous.
+  // keyed releases the dmKeying part early (release releases both).
   function supersedeDmUnlock () {
     const gen = ++dmUnlockGen
     const previous = dmUnlocking === null ? Promise.resolve() : dmUnlocking
-    let release
-    const unlocking = Promise.all([new Promise((resolve) => { release = resolve }), previous]).then(() => {
+    let full
+    let keyed
+    const unlocking = Promise.all([new Promise((resolve) => { full = resolve }), previous]).then(() => {
       if (dmUnlocking === unlocking) dmUnlocking = null
     })
+    const keying = Promise.all([new Promise((resolve) => { keyed = resolve }), previous]).then(() => {
+      if (dmKeying === keying) dmKeying = null
+    })
     dmUnlocking = unlocking
-    return { gen, previous, release }
+    dmKeying = keying
+    const release = () => {
+      keyed()
+      full()
+    }
+    return { gen, previous, release, keyed: () => keyed() }
   }
 
   function isIntIn (value, min, max) {
@@ -4721,6 +4786,7 @@ function createBrowserSession ({
     // store goes, as a pull, send or top-up still unwinding.
     await previous
     await dmEngine.idle()
+    await dmEngine.dropPageSummaries()
     await store.deleteDmData(storage)
     await dmEngine.wipeMedia()
     await store.deleteAgeProofs(storage)
