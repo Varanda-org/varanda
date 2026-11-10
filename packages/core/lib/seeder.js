@@ -144,8 +144,10 @@ const {
   watchFork,
   startQuarantineFetch,
   MAX_CONNECTIONS,
-  MAX_INVENTORY
+  MAX_INVENTORY,
+  CAP_DISCOVERY
 } = require('./net')
+const { attachDiscovery, newViewId, MAX_DISCOVERY_LIMIT } = require('./discovery-net')
 const {
   openStore,
   lockHeld,
@@ -284,6 +286,22 @@ const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'p
 // An external socket with no incoming data for this long after the handshake
 // is dropped (Hypercore keep-alives every 5 s keep a live peer well inside it).
 const EXTERNAL_IDLE_MS = 30000
+
+// Discovery (docs/protocol.md "Discovery channel"): pages of the served
+// inventory over 'varanda/discovery/1' (lib/discovery-net.js). A page is cut
+// from a FROZEN view: the eligible diaries sorted once (recentAt descending,
+// then h = hash(bootSalt, key) ascending) and named by a random view id. A
+// view is rebuilt at most once per DISCOVERY_REBUILD_MS and only when the
+// order changed; views are kept for DISCOVERY_VIEW_TTL_MS, each with at most
+// DISCOVERY_VIEW_MAX_KEYS keys. DISCOVERY_VIEWS_KEPT = TTL / rebuild, so a
+// view is never evicted by newer ones before its TTL: a traversal that keeps
+// its view stays valid for 5 minutes however busy the seeder is. A request
+// naming a view that is no longer kept is answered stale, never with a page
+// of another order.
+const DISCOVERY_REBUILD_MS = 30 * 1000
+const DISCOVERY_VIEW_TTL_MS = 5 * 60 * 1000
+const DISCOVERY_VIEWS_KEPT = DISCOVERY_VIEW_TTL_MS / DISCOVERY_REBUILD_MS
+const DISCOVERY_VIEW_MAX_KEYS = Math.min(4096, MAX_INVENTORY)
 
 function noop () {}
 
@@ -980,6 +998,11 @@ class Seeder {
   // noClear (default: VARANDA_NO_CLEAR=1, the rollout kill switch) keeps
   // the bytes of deleted diary blocks and media ranges: they are only
   // hidden, as before byte deletion.
+  // discovery (default true) answers 'varanda/discovery/1' and offers
+  // CAP_DISCOVERY and lean hellos on the admission channel; false behaves
+  // exactly like a seeder from before discovery (tests and rollback, no CLI
+  // flag). discoveryViewTtlMs (= DISCOVERY_VIEW_TTL_MS) and
+  // discoveryRebuildMs (= DISCOVERY_REBUILD_MS) are test-only.
   constructor ({
     dataDir,
     associationKey = null,
@@ -994,6 +1017,9 @@ class Seeder {
     onPush = null,
     dm = null,
     noClear = null,
+    discovery = true,
+    discoveryViewTtlMs = DISCOVERY_VIEW_TTL_MS,
+    discoveryRebuildMs = DISCOVERY_REBUILD_MS,
     maxLogBlocks = MAX_LOG_BLOCKS,
     maxLogBytes = MAX_LOG_BYTES,
     maxConnections = MAX_CONNECTIONS,
@@ -1073,6 +1099,15 @@ class Seeder {
     this._dmHandles = new Set()
     this._dmStampChannels = new Map() // seeder stamp handle -> { kid, blobKid, socket, release }
     this.noClear = noClear === null ? (process.env || {}).VARANDA_NO_CLEAR === '1' : noClear === true
+    // Discovery (DISCOVERY_* constants): the salt of the tie-break hash is
+    // new in every process, so a view id or cursor never outlives a restart
+    // with a meaning; _discoveryViews holds the frozen views, newest last.
+    this.discovery = discovery !== false
+    this.discoveryViewTtlMs = discoveryViewTtlMs
+    this.discoveryRebuildMs = discoveryRebuildMs
+    this._bootSalt = crypto.randomBytes(32)
+    this._discoveryViews = []
+    this._discoveryHandles = new Set()
     this.maxLogBlocks = maxLogBlocks
     this.maxLogBytes = maxLogBytes
     // Two independent caps: maxConnections bounds swarm sockets only and
@@ -2152,6 +2187,11 @@ class Seeder {
       arrived: new Set(),
       mediaStart: new Map(),
       present: 0,
+      // Discovery: `recentAt` the time of the newest post or repost in
+      // effect the index scan read (ms, never later than the seeder clock
+      // when it was read; 0 until then), `discoveryH` the tie-break hash.
+      recentAt: 0,
+      discoveryH: null,
       prepared: null,
       clearing: null,
       clearAgain: false,
@@ -4792,6 +4832,7 @@ class Seeder {
             entry.indexPaused = true
             return
           }
+          if (record !== null && !removed) this._noteRecent(entry, record)
         }
         entry.indexed = i + 1
         entry.indexReadFailures = 0
@@ -4916,6 +4957,123 @@ class Seeder {
       }
     }
     return { indexing, complete }
+  }
+
+  // ---- Discovery (DISCOVERY_* constants) --------------------------------
+
+  // Called by the index scan for every record it reads (not deleted): a
+  // post, or a repost in effect, moves the diary's recentAt forward. A date
+  // in the future counts as now, so a diary cannot jump the queue by lying
+  // about its clock for longer than the wait until that date.
+  _noteRecent (entry, record) {
+    if (record.type !== 'post' && !(record.type === 'repost' && record.on === true)) return
+    const at = Date.parse(record.at)
+    if (!Number.isFinite(at)) return
+    const t = Math.max(0, Math.min(at, Date.now()))
+    if (Number.isSafeInteger(t) && t > entry.recentAt) entry.recentAt = t
+  }
+
+  // Whether a served diary may be offered: gated, admitted, not dropped,
+  // not blocked, at least one block past its certificate (present >= 2) and,
+  // when a page is answered, not held by a pending re-gate. Checked when a
+  // view is built and again for every item of every page, so a diary blocked
+  // after the view was frozen is never offered from it. The re-gate hold is
+  // transient (every gated diary is held at once when an issuer is revoked,
+  // and most are released at once), so it never shapes a view: a view built
+  // in that window is not empty, and a page only skips the held diaries.
+  _discoveryEntry (key, atBuild = false) {
+    const entry = this._served.get(key)
+    if (!entry || !entry.gated || entry.dropped || !(entry.present >= 2)) return null
+    if (!this._admitted.has(key) || this._isBlocked(key)) return null
+    if (!atBuild && this._searchHeld(key)) return null
+    return entry
+  }
+
+  // The eligible diaries in view order: recentAt descending, then
+  // h = hash(bootSalt, key) ascending, at most DISCOVERY_VIEW_MAX_KEYS.
+  _discoverySorted () {
+    const rows = []
+    for (const key of this._served.keys()) {
+      const entry = this._discoveryEntry(key, true)
+      if (entry === null) continue
+      if (entry.discoveryH === null) entry.discoveryH = b4a.toString(crypto.hash([this._bootSalt, b4a.from(key, 'hex')]), 'hex')
+      rows.push({ key, t: entry.recentAt, h: entry.discoveryH })
+    }
+    rows.sort((a, b) => (b.t - a.t) || (a.h < b.h ? -1 : a.h > b.h ? 1 : 0))
+    if (rows.length > DISCOVERY_VIEW_MAX_KEYS) rows.length = DISCOVERY_VIEW_MAX_KEYS
+    return rows
+  }
+
+  _pruneDiscoveryViews (now) {
+    this._discoveryViews = this._discoveryViews.filter((v) => now - v.at < this.discoveryViewTtlMs)
+  }
+
+  // The newest view, rebuilt when it is at least discoveryRebuildMs old and
+  // the order (keys or their times) changed since; an unchanged order keeps
+  // the view and its id. An empty newest view (a seeder that just started)
+  // is checked again on every first page.
+  _discoveryNewest (now) {
+    const views = this._discoveryViews
+    const newest = views.length > 0 ? views[views.length - 1] : null
+    if (newest !== null && newest.keys.length > 0 && now - newest.checkedAt < this.discoveryRebuildMs) return newest
+    const rows = this._discoverySorted()
+    if (newest !== null && rows.length === newest.keys.length && rows.every((r, i) => r.key === newest.keys[i] && r.t === newest.ts[i])) {
+      newest.checkedAt = now
+      return newest
+    }
+    const view = {
+      id: newViewId(),
+      at: now,
+      checkedAt: now,
+      keys: rows.map((r) => r.key),
+      ts: rows.map((r) => r.t),
+      hs: rows.map((r) => r.h)
+    }
+    views.push(view)
+    while (views.length > DISCOVERY_VIEWS_KEPT) views.shift()
+    return view
+  }
+
+  // The first index of a view strictly after the cursor { t, h } in view
+  // order (binary search: the cursor is stateless).
+  _discoveryAfter (view, cur) {
+    let lo = 0
+    let hi = view.keys.length
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      const t = view.ts[mid]
+      const atOrBefore = t > cur.t || (t === cur.t && view.hs[mid] <= cur.h)
+      if (atOrBefore) lo = mid + 1
+      else hi = mid
+    }
+    return lo
+  }
+
+  // One discovery page (the page() of lib/discovery-net.js): { view, items,
+  // next, total } from the view the request names, or from the newest view
+  // when it names none; { stale: true } when the named view is no longer
+  // kept (expired, evicted or from before a restart) or the seeder is not
+  // serving. `items` are { key, length } with the present length read now;
+  // `next` is the { t, h } of the last item, null at the end of the view;
+  // `total` is the view's size.
+  discoveryPage ({ after = null, limit = MAX_DISCOVERY_LIMIT, view = null } = {}) {
+    if (!this.discovery || !this._ready || this._closing) return { stale: true }
+    const now = clock.now()
+    this._pruneDiscoveryViews(now)
+    const v = view === null ? this._discoveryNewest(now) : this._discoveryViews.find((x) => x.id === view)
+    if (!v) return { stale: true }
+    const n = Number.isSafeInteger(limit) ? Math.min(Math.max(limit, 1), MAX_DISCOVERY_LIMIT) : MAX_DISCOVERY_LIMIT
+    let i = after === null ? 0 : this._discoveryAfter(v, after)
+    let last = -1
+    const items = []
+    for (; i < v.keys.length && items.length < n; i++) {
+      const entry = this._discoveryEntry(v.keys[i])
+      if (entry === null) continue
+      items.push({ key: v.keys[i], length: Math.min(entry.present, MAX_LOG_BLOCKS) })
+      last = i
+    }
+    const next = i < v.keys.length && last >= 0 ? { t: v.ts[last], h: v.hs[last] } : null
+    return { view: v.id, items, next, total: v.keys.length }
   }
 
   // ---- Topic search index (header comment) ------------------------------
@@ -6793,6 +6951,29 @@ class Seeder {
     }
     this._groupHandles.add(groups)
     release.push(() => this._groupHandles.delete(groups))
+    // Discovery channel: inventory pages, before the hello like the groups
+    // channel. Without the option nothing is attached, so a member's open
+    // is rejected exactly as by a seeder from before discovery.
+    if (this.discovery) {
+      // discovery-net.js releases its handle on its own socket close
+      // listener: room for exactly that one more (a bounded, known count).
+      if (typeof socket.getMaxListeners === 'function' && socket.getMaxListeners() > 0) {
+        socket.setMaxListeners(socket.getMaxListeners() + 1)
+      }
+      let discovery = null
+      try {
+        discovery = attachDiscovery(socket, {
+          role: 'seeder',
+          page: (q) => this.discoveryPage(q),
+          log: (ev) => this.log(ev)
+        })
+      } catch {
+        socket.destroy()
+        return
+      }
+      this._discoveryHandles.add(discovery)
+      release.push(() => this._discoveryHandles.delete(discovery))
+    }
     const have = []
     for (const [key, entry] of this._served) {
       // Never more than a valid hello carries (defence in depth, M1).
@@ -6805,6 +6986,11 @@ class Seeder {
         role: 'seeder',
         cert: this._cert,
         have,
+        // A member that asks for no inventory (CAP_NO_INVENTORY) gets a
+        // lean hello and pages over discovery instead; any other member
+        // gets the full inventory as before.
+        caps: this.discovery ? CAP_DISCOVERY : 0,
+        lean: this.discovery,
         onmessage: (msg, p) => this._onMessage(msg, p),
         onclose: (p) => this._peers.delete(p),
         log: (ev) => { if (ev && ev.event === 'peer-dropped') onDropped(ev) }
@@ -7248,6 +7434,11 @@ class Seeder {
         try { handle.close() } catch {}
       }
       this._groupHandles.clear()
+      for (const handle of this._discoveryHandles) {
+        try { handle.close() } catch {}
+      }
+      this._discoveryHandles.clear()
+      this._discoveryViews = []
       for (const handle of this._dmHandles) {
         try { handle.close() } catch {}
       }
@@ -7275,5 +7466,9 @@ module.exports = {
   FRAME_DEADLINE_CAP_MS,
   FRAME_MIN_BYTES_PER_S,
   frameDeadlineFor,
-  EXTERNAL_IDLE_MS
+  EXTERNAL_IDLE_MS,
+  DISCOVERY_REBUILD_MS,
+  DISCOVERY_VIEWS_KEPT,
+  DISCOVERY_VIEW_TTL_MS,
+  DISCOVERY_VIEW_MAX_KEYS
 }
