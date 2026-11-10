@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 33)
-  t.is(LEGAL_DATE, '08/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 33, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 34)
+  t.is(LEGAL_DATE, '09/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 34, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
@@ -90,7 +90,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'f2ff27977d36de15030d52af2edd9afea03c6147db2602f6e7dc102b367215dc', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'f17c654975e04bf2fa24b9d1478031734d2693336c1fc43d3d81cc131318f51a', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
@@ -150,19 +150,38 @@ test('legal: version 33 states the residual risks of a page\'s end-to-end Conver
   }
   t.absent(pages(TERMS).includes('pode ler as mensagens enviadas para a página'))
   t.absent(pages(PRIVACY).includes('podem ser lidas pelo serviço de conta'))
-  // Private groups change in a later version.
-  t.ok(pages(PRIVACY).includes('pode ler as publicações da página em grupos privados'))
+})
+
+test('legal: version 34 keeps a page\'s private-group key on the owner\'s and admins\' devices', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const pages = (doc) => doc.sections.filter(({ heading }) => heading === 'Páginas').flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.absent(pages(doc).includes('pode ler as publicações da página em grupos privados'), doc.title + ': no service-readable private-group posts')
+    t.absent(pages(doc).includes('a caixa dos grupos privados'), doc.title + ': the service holds no group box')
+    t.ok(pages(doc).includes('a chave da página fica'), doc.title + ': key on devices')
+    t.ok(pages(doc).includes('aparelhos do dono e dos administradores'), doc.title + ': owner and admins')
+    t.ok(pages(doc).includes('guarda só as chaves de escrita da página'), doc.title + ': writer keys only')
+    t.ok(pages(doc).includes('publicações já cifradas, que ele não consegue ler'), doc.title + ': sealed appends')
+    t.ok(pages(doc).includes('As publicações da página em grupos privados escritas antes desta mudança podiam ser lidas pelo serviço'), doc.title + ': before this change')
+    t.ok(pages(doc).includes('os administradores do grupo precisam aprovar a página de novo'), doc.title + ': re-admission after an admin removal')
+    t.ok(pages(doc).includes('a página sai dele'), doc.title + ': no room, the page leaves')
+    t.ok(pages(doc).includes('o dono precisa renovar a chave dos grupos nos ajustes da página'), doc.title + ': legacy page renews')
+    t.ok(pages(doc).includes('o administrador removido ainda pode ler as publicações novas daquele grupo'), doc.title + ': removed admin until re-admission')
+    t.ok(pages(doc).includes('Ele vê em quais grupos a página está e quando ela publica, mas não o que ela escreve'), doc.title + ': metadata the service sees')
+    t.ok(pages(doc).includes('como escritor da página'), doc.title + ': the service appends as the writer')
+    t.ok(pages(doc).includes('fica sabendo qual administrador enviou cada publicação da página em grupos privados e quem pediu cada renovação da chave dos grupos'), doc.title + ': which admin sent each post')
+  }
+  t.ok(pages(TERMS).includes('grupos públicos continua público como a página'))
+  t.ok(pages(PRIVACY).includes('Comunidades e grupos públicos continuam públicos'))
 })
 
 test('legal: version 15 names the group box, the notices custody, the burned name and the automatic follow', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.filter(({ heading }) => heading === 'Páginas').flatMap(({ paragraphs }) => paragraphs).join(' ')
-  t.ok(text(TERMS).includes('a caixa dos grupos privados e as chaves de escrita'))
   t.ok(text(TERMS).includes('lê os avisos enviados para a página'))
   t.ok(text(TERMS).includes('o @nome nunca mais é dado a ninguém'))
   t.ok(text(TERMS).includes('passam a seguir a chave nova sozinhos'))
   t.ok(text(TERMS).includes('uma chave guardada naquele aparelho'))
-  t.ok(text(PRIVACY).includes('pode ler as publicações da página em grupos privados'))
   t.ok(text(PRIVACY).includes('lê os avisos enviados para a página'))
 })
 

@@ -324,6 +324,7 @@ const { checkSeederUrl } = require('./seeder-url')
 const { createDmEngine, MOMENT_PHOTO_GONE, BLOCKED: DM_BLOCKED, NO_PAGE_KEY, KEY_MISMATCH: DM_KEY_MISMATCH, USE_PAGE_DRAFT: DM_USE_PAGE_DRAFT } = require('./dm')
 const { applyBlock, blockedKeys } = require('@varanda/core/lib/member-block')
 const { createSeenSync, groupApplier } = require('./seen-sync')
+const { createPageGroupKeys, peekPageRoots } = require('./page-groups')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
 const TESTIMONIAL_SELF = 'não pode escrever um depoimento para si'
@@ -404,6 +405,8 @@ const NO_LOCAL_DATA = 'sem dados locais para este diário'
 // service refreshes every 256 blocks is always inside). The result's lists
 // are capped as PAGE_READ_FOLLOWS_MAX / PAGE_READ_LINKS_MAX of @varanda/rpc.
 const PAGE_READ_WINDOWS = 8
+// refreshRemotePageRoots' overall deadline.
+const PAGE_ROOTS_PEEK_MS = 5000
 const PAGE_READ_HEAD = 3
 const PAGE_READ_FOLLOWS_MAX = 64
 const PAGE_READ_LINKS_MAX = 16 + 1
@@ -499,13 +502,6 @@ const NOT_FOUND_MESSAGES = new Set([
   DIARY_UNAVAILABLE,
   MOMENT_PHOTO_GONE
 ])
-
-// A page's private groups are read and sealed only with the page's group
-// box, which this node does not use yet: a page read or seal must never fall
-// through to the own groups.
-function noPageInbox (params) {
-  if (params && params.page !== undefined) throw new UsageError('sem chave da página')
-}
 
 function messageOf (err) {
   try {
@@ -1035,6 +1031,11 @@ function createBrowserSession ({
     limits: syncOptions.dm,
     hkdf
   })
+  // The epoch keys of the pages' private groups (./page-groups.js), apart
+  // from boxKeys: read and sealed with the page's group box only.
+  const pageGroupKeys = createPageGroupKeys({ groupBoxOf: (page) => dmEngine.groupBoxOf(page) })
+  // page -> the roots its last remote scan found (refreshRemotePageRoots).
+  const remotePageRoots = new Map()
   // The seen-sync engine (docs/rpc.md 5.95, 5.96). Remote group marks go
   // through the group.seen path on the cores a run lends.
   const seenSync = createSeenSync({
@@ -1168,8 +1169,11 @@ function createBrowserSession ({
       let result = null
       let error = null
       try {
+        const pageRoots = await heldPageRoots()
+        r.pageRoots = new Set(pageRoots)
         result = await runSync({
           ...syncOptions,
+          pageRoots,
           noClear: noClear === true,
           storage,
           associationKey: cfg.association,
@@ -1198,6 +1202,7 @@ function createBrowserSession ({
                   r.ownSynced = true
                   try { onOwnSynced(r) } catch {}
                   if (!once && !internal) {
+                    refreshRemotePageRoots().catch(noop)
                     dmTick()
                     if (dmRecheck) {
                       dmRecheck = false
@@ -2322,6 +2327,105 @@ function createBrowserSession ({
   }
 
   // ---- direct messages (docs/rpc.md 5.73 to 5.81) ----
+
+  // The roots of the pages whose secrets are held (dm.pageForget or a lock
+  // drops them from the next run), read before the run starts and outside
+  // any tracked engine operation: no run lends cores yet, so the stored
+  // page diaries are read on the exclusive path. A failure pages none.
+  // A page whose diary is not stored here adds the roots its last remote
+  // scan found (refreshRemotePageRoots): the peek is served by a run, so
+  // it cannot be read before one starts.
+  async function heldPageRoots () {
+    const pages = dmEngine.heldPageBoxes().map((p) => p.page)
+    const out = new Set()
+    for (const page of pages) for (const key of remotePageRoots.get(page) || []) out.add(key)
+    if (pages.length === 0) return []
+    try {
+      for (const key of await member.pageGroupRoots(ctx(), pages)) out.add(key)
+    } catch {}
+    return [...out]
+  }
+
+  // Once a user's continuous run is verified: the live group joins of each
+  // held page whose diary is not stored here, through the bounded diary
+  // peek (as page.read reads such a page), off the chain and off any
+  // tracked engine operation, under PAGE_ROOTS_PEEK_MS overall. A failure
+  // keeps no roots for that page. New roots reach the next run.
+  let remoteRootsRefresh = null
+  function refreshRemotePageRoots () {
+    if (remoteRootsRefresh !== null || closed) return remoteRootsRefresh
+    remoteRootsRefresh = (async () => {
+      const deadline = Date.now() + PAGE_ROOTS_PEEK_MS
+      const pages = dmEngine.heldPageBoxes().map((p) => p.page)
+      for (const page of [...remotePageRoots.keys()]) if (!pages.includes(page)) remotePageRoots.delete(page)
+      for (const page of pages) {
+        try {
+          if (await store.replicaExists(storage, page)) {
+            remotePageRoots.delete(page)
+            continue
+          }
+          const roots = await peekPageRoots((params, ms) => diaryPeekWithin(params, ms), page, deadline)
+          if (dmEngine.heldPageBoxes().some((p) => p.page === page)) remotePageRoots.set(page, roots)
+        } catch {
+          remotePageRoots.delete(page)
+        }
+      }
+      if (missingPageRoots()) scheduleRootsRestart()
+    })().finally(() => { remoteRootsRefresh = null })
+    return remoteRootsRefresh
+  }
+
+  // A remote root the live continuous run did not start with.
+  function missingPageRoots () {
+    if (run === null || run.once || !(run.pageRoots instanceof Set)) return false
+    for (const roots of remotePageRoots.values()) {
+      for (const key of roots) if (!run.pageRoots.has(key)) return true
+    }
+    return false
+  }
+
+  // Stops the continuous run once, as a fold restart does; the chain's
+  // restartWhenIdle starts it again with the new roots, so the next check
+  // finds none missing (never a loop).
+  let rootsQueued = false
+  const restartForRoots = serial(async () => {
+    rootsQueued = false
+    if (!missingPageRoots()) return
+    await stopRun('preempted')
+  })
+
+  function scheduleRootsRestart () {
+    if (rootsQueued || closed) return
+    rootsQueued = true
+    restartForRoots({}).catch(noop)
+  }
+
+  // group.read and group.seal with `page` (docs/rpc.md 5.114): folded as
+  // the page with its group box, never falling through to the own groups. A
+  // root not held here is listed in kv groupReplicas, so the next sync run
+  // fetches it with its writers and community (./sync.js "groups").
+  // A read without the page's secrets still answers the root header's
+  // visibility (state 'no-key'): the app picks a plain or sealed post from
+  // the node, never from the service.
+  async function pageGroupOp (operation, params) {
+    await requireDm()
+    const page = params.page.toLowerCase()
+    let r
+    if (pageGroupKeys.holds(page)) {
+      const groupKeys = pageGroupKeys.holderFor(page)
+      r = await withCores((c) => operation({ ...c, groupKeys }, params))
+    } else if (operation === member.pageGroupRead) {
+      r = await withCores((c) => member.pageGroupNoKey(c, params))
+    } else {
+      throw new UsageError(NO_PAGE_KEY)
+    }
+    if (r !== null) return r
+    const group = params.group.toLowerCase()
+    if (!(await store.readGroupReplicas(storage)).includes(group)) {
+      await withStore((c) => store.addGroupReplica(c.storage, group))
+    }
+    throw new Error('grupo não encontrado')
+  }
 
   // The identity unlocked AND the dm keys derived (setKeyPair with a prf).
   async function requireDm () {
@@ -3506,10 +3610,10 @@ function createBrowserSession ({
     'group.leave': groupWrite(member.groupLeave),
     'group.post': groupWrite(member.groupPost),
     'group.read': serial((params) => {
-      noPageInbox(params)
+      if (params.page !== undefined) return pageGroupOp(member.pageGroupRead, params)
       return withCores((c) => member.groupRead(c, params))
     }),
-    'group.seal': serial(async () => { throw new UsageError(NO_PAGE_KEY) }),
+    'group.seal': serial((params) => pageGroupOp(member.pageGroupSeal, params)),
     'group.seen': serial(async (params) => {
       const before = await store.readGroupSeen(storage)
       const r = await withCores((c) => member.groupSeen(c, params))
@@ -3821,6 +3925,8 @@ function createBrowserSession ({
     groupPrf = null
     boxKeys.lock()
     dmEngine.lock()
+    pageGroupKeys.lock()
+    remotePageRoots.clear()
     seenSync.forget()
     dmRecheck = false
     dmRecheckTries = 0
@@ -4423,6 +4529,7 @@ function createBrowserSession ({
       pageFeeder.close()
       zeroKeyPair()
       boxKeys.close()
+      pageGroupKeys.close()
       await dmEngine.close()
     })()
     return closing

@@ -14,6 +14,8 @@ const { signRoster, signAccept } = require('@varanda/core/lib/page')
 const { signPage, opHash } = require('@varanda/core/lib/page-proof')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const member = require('@varanda/core/lib/member')
+const groupLib = require('@varanda/core/lib/group')
+const groupCrypto = require('@varanda/core/lib/group-crypto')
 const { person, startSeeder, syncOnce } = require('../../../packages/core/test/helpers/sync-groups')
 const { startSeedWs } = require('../lib/seed-ws')
 const { openAccountStore } = require('../lib/account/store')
@@ -73,7 +75,7 @@ test('account pages groups: the page joins and posts through the routes, a remov
   t.teardown(() => pg.close(), { force: true })
   await pg.ready()
   await until(() => writer.connected() && pg.connected(), { name: 'links up', timeoutMs: 20000 })
-  const server = await createAccountServer({
+  const accountServer = createAccountServer({
     association,
     origin: ORIGIN,
     google: googleStub(),
@@ -81,8 +83,9 @@ test('account pages groups: the page joins and posts through the routes, a remov
     issuer: { keyPair: issuerKp, cert: issuerCert },
     terms,
     log,
-    pages: { keys, writer, pagesStore, dir, pagesGroups: pg, blocklist: { has: () => false } }
-  }).listen({ host: '127.0.0.1', port: 0 })
+    pages: { keys, writer, pagesStore, dir, pagesGroups: pg, blocklist: { has: () => false }, limits: { reboxEveryMs: 0 } }
+  })
+  const server = await accountServer.listen({ host: '127.0.0.1', port: 0 })
   t.teardown(() => server.close(), { force: true })
   const base = 'http://127.0.0.1:' + server.port
 
@@ -179,6 +182,37 @@ test('account pages groups: the page joins and posts through the routes, a remov
   t.is(read.body.role, 'member')
   t.is((await act(bia, 'group-read', P, { group: G, limit: 33 })).body.error, 'pedido-invalido', 'at most 32 a read')
   t.is((await act(bia, 'group-post', P, { group: G, text: '' })).body.error, 'pedido-invalido', 'the group text bounds hold')
+
+  // Private groups: the service holds no group box, so a page without the
+  // device-held one joins none, and a post there is a device-sealed envelope.
+  t.is((await settled(ana, 'group-join', P, { group: GP }, 'boxless private join')).body.error, 'sem-caixa', 'no group box: no private join')
+  t.is((await settled(ana, 'group-post', P, { group: GP, text: 'em claro' }, 'plain private post')).body.error, 'privado', 'no plain post in a private group')
+  const kid = { writer: GP, seq: 1 }
+  const record = groupLib.groupPost({ text: 'x' })
+  const env = groupCrypto.sealRecord(groupLib.sealedInner(record, { writer: G, group: G, kid }), crypto.randomBytes(32))
+  const sealOp = { group: G, kid, nonce: env.nonce, box: env.box, at: record.at, writer: G, seq: 1 }
+  t.is((await settled(ana, 'group-seal', P, sealOp, 'seal in a public group')).body.error, 'pedido-invalido', 'no envelope in a public group')
+  t.is((await act(ana, 'group-seal', P, { ...sealOp, seq: 0 })).body.error, 'pedido-invalido', 'the seal seq is checked before the lock')
+  t.is((await act(ana, 'group-seal', P, { ...sealOp, nonce: 'x' })).body.error, 'pedido-invalido', 'and the envelope shape')
+  t.is((await act(bia, 'group-rebox', P, {})).body.error, 'sem-permissao', 'only the owner reboxes')
+  t.is((await act(ana, 'group-rebox', P, {})).body.error, 'sem-caixa', 'a page with no group box has nothing to rebox')
+  await pagesStore.setDm(P, { gen: 1, box: hex(crypto.randomBytes(32)), groupBox: hex(groupCrypto.newBoxKeyPair().publicKey), shares: {}, pending: {}, reboxPending: true, legacyBundle: null, rotatePending: null })
+  t.is((await act(bia, 'group-read', P, { group: GP })).body.error, 'aguardando-chave', 'a private action waits while reboxPending')
+  const reboxed = await settled(ana, 'group-rebox', P, {}, 'rebox')
+  t.is(reboxed.status, 200, JSON.stringify(reboxed.body))
+  t.alike(reboxed.body, { groups: [], left: [] }, 'no private membership to move')
+  t.is(pagesStore.get(P).dm.reboxPending, false, 'and reboxPending clears')
+  const st = await act(ana, 'status', P, {})
+  t.is(st.body.reboxPending, false, 'status carries reboxPending')
+  t.is(st.body.reboxNeeded, 0, 'and reboxNeeded')
+  // A rebox a route could not finish is retried by the service itself.
+  const d = pagesStore.get(P).dm
+  await pagesStore.setDm(P, { ...d, reboxPending: true })
+  t.is((await act(ana, 'status', P, {})).body.reboxPending, true, 'status shows a pending rebox')
+  t.is(await until(async () => (await accountServer.pagesReboxSweep()) === 1 || null, { name: 'sweep', timeoutMs: 60000, intervalMs: 500 }), true, 'the sweep reboxes the pending page')
+  t.is(pagesStore.get(P).dm.reboxPending, false, 'and clears it')
+  // Back to a page without device-held keys, so the remove below needs no rotation.
+  await pagesStore.setDm(P, null)
 
   // Remove bia; from then on she is refused and nothing is written for her.
   {

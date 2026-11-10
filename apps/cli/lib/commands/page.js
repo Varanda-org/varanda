@@ -42,7 +42,9 @@ const TEXTS = {
   'termos-pendentes': 'aceite os Termos antes (page terms)',
   'troca-bloqueada': 'você ainda não pode trocar o @nome',
   'nao-encontrado': 'não encontrado',
-  'em-andamento': 'pedido ainda em andamento'
+  'em-andamento': 'pedido ainda em andamento',
+  privado: 'grupo privado: publique como a página pelo app',
+  'sem-caixa': 'a página ainda não ativou as Conversas privadas no app'
 }
 
 function usage (message) {
@@ -438,6 +440,7 @@ async function pageRun (flags) {
 module.exports = {
   accountOrigin,
   groupStep,
+  serviceError,
   commands: {
     page: { summary: 'páginas de negócio ou projeto pelo serviço de conta', run: pageRun }
   }

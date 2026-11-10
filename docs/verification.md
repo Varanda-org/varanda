@@ -4373,6 +4373,8 @@ Todas a fazer (nenhuma foi rodada). Primeiro o app no Android (build de debug ap
 
 ## 90. Páginas em comunidades (PR feat/pages-app)
 
+Esta seção foi substituída pela seção 147 para grupos privados como Página.
+
 Uma página entra em comunidades e grupos como membro, por núcleos de escritor próprios que o serviço de conta guarda (`pages-groups`). Ela só entra, sai, lê e escreve: nunca cria, admite, bane, nomeia, oculta nem troca a chave de um grupo. Em comunidade de aprovação a página fica "pedida" até os administradores a admitirem. Nos grupos privados o serviço guarda a caixa da página e pode ler as publicações (Termos 15). Contrato em `docs/protocol.md` seção 12 ("Comunidades como página") e `docs/rpc.md` (5.84).
 
 ### Como verificar
@@ -6388,7 +6390,7 @@ Caminhada com a Feira ligada numa instalação de teste (semeador com `VARANDA_P
 - [ ] "Conversar" abre a conversa com o rascunho "Olá! Tenho interesse no seu anúncio "…" na Feira: <link>" e o cartão do link, sem enviar nada. Depois de enviar, o cartão na conversa tem "Ver anúncio", que abre a tela Anúncio.
 - [ ] Quem anunciou toca em "Reservado"; uma segunda pessoa, ao abrir o anúncio (ou puxar para atualizar a lista), vê o selo "Reservado".
 - [ ] Quem anunciou toca em "Apagar" e em "Confirmar: apagar": o anúncio sai de "Meus" e da busca, e a página pública `/f/<diário>/<seq>` responde "Anúncio não encontrado".
-- [ ] Agindo como Página, anunciar: o anúncio aparece em "Meus" da Página. Outro membro toca em "Conversar": a conversa é com a Página, e a Página, na caixa dela, vê a mensagem com o cartão do anúncio e a nota "A associação pode ler as mensagens desta página"; a resposta da Página chega ao membro na mesma conversa, com o cartão mantido.
+- [ ] Agindo como Página, anunciar: o anúncio aparece em "Meus" da Página. Outro membro toca em "Conversar": a conversa é com a Página, e a Página, na caixa dela, vê a mensagem com o cartão do anúncio; a resposta da Página chega ao membro na mesma conversa, com o cartão mantido.
 - [ ] "Denunciar" no anúncio de outra pessoa abre a folha de denúncia com o título do anúncio; enviada, ela aparece no painel de moderação como "anúncio", no filtro "Anúncios", com "Ver anúncio".
 - [ ] No perfil de um membro (e de uma Página) com anúncios, a linha "Anúncios" abre a lista só daquela pessoa, sem abas, filtros nem "Anunciar"; puxar para atualizar funciona e quem não tem anúncios vê "Nenhum anúncio por aqui.".
 
@@ -6863,3 +6865,32 @@ Limites desta caminhada:
 - Mensagens escritas antes da ativação eram legíveis pelo serviço.
 - Uma mensagem da Página que nenhum aparelho administrador coletar em 7 dias se perde.
 - O serviço sabe quando um administrador envia, embora não veja a mensagem, o destinatário nem o envelope.
+
+## 147. Grupos privados como página de ponta a ponta, Termos 34 (PR feat/page-e2e-groups)
+
+As publicações de uma Página em grupo privado passam a ser seladas no aparelho do dono ou de um administrador. O serviço conserva somente o escritor Ed25519 da Página e acrescenta o bloco que recebe sem abrir o texto. A caixa do grupo vem dos segredos da Página mantidos nos aparelhos administradores. Ao trocar essa caixa, o escritor antigo sai, um escritor novo entra e o grupo fica aguardando a admissão dele e uma época nova. Termos e Política passam para a versão 34.
+
+Como verificar, a partir da raiz:
+
+- `node apps/cli/test/pages-groups.test.js`
+- `node apps/cli/test/account-pages-groups.test.js`
+- `node packages/web-member/test/page-groups.test.js`
+- `node apps/app/test/groupScreen.test.js`
+- `node apps/app/test/legal.test.js`
+
+Caminhada, primeiro no celular, build de depuração do Android e simulador iOS, e depois na web e no PWA:
+
+- [ ] Com uma Página em grupo privado, ler e publicar a partir de um aparelho administrador. O texto aparece para os membros autorizados.
+- [ ] Conferir a resposta `group-read` do serviço: ela não traz texto de publicação privada.
+- [ ] Remover um administrador da Página. O grupo fica aguardando renovação de chave; os administradores do grupo admitem o escritor novo, uma época nova cobre a saída e a publicação volta a funcionar.
+- [ ] Na CLI, `page group-post` em grupo privado imprime a recusa `grupo privado: publique como a página pelo app`.
+- [ ] Publicar uma vez, banir outro membro do grupo e reenviar a publicação selada antiga: o serviço responde `aguardando-chave`; uma publicação selada na época nova entra.
+- [ ] Derrubar o serviço no meio de `group-rebox` (ou fazê-lo falhar) e reiniciar: `dm-box-read` mostra `reboxPending: true` e o serviço conclui sozinho na partida ou no tique seguinte; depois `reboxPending` é `false` e `reboxNeeded` é `0`.
+- [ ] Numa Página ativada antes desta versão, conferir que a partida apaga `groupBoxSecretKey` de `page-keys.json` e que `reboxNeeded` conta os grupos privados que ainda precisam de `Renovar chave dos grupos`.
+- [ ] Conferir a busca do semeador do grupo para um aparelho administrador da Página. Esta checagem não é coberta pelos testes automatizados.
+
+Limites desta caminhada:
+
+- O serviço ainda acrescenta registros como escritor da Página e vê associação, membros e horários. Sem a chave válida da época, um bloco selado que ele forja é descartado por quem lê.
+- As épocas de grupo anteriores à primeira renovação eram conhecidas pelo serviço.
+- Nenhuma caixa acima foi marcada nesta documentação.

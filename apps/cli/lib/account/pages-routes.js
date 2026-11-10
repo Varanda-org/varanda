@@ -115,6 +115,10 @@ const SUCCESSOR = PREFIX + 'successor/'
 const CLOSE_DELETES = ['post', 'like', 'repost', 'profile', 'listing', 'listing-edit']
 const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
+// The rebox retry (reboxSweep): every minute, a failing page backed off up
+// to an hour.
+const REBOX_EVERY_MS = 60 * 1000
+const REBOX_BACKOFF_MAX_MS = HOUR
 // Same names as store.js RESERVED (not exported): a page never takes them.
 const RESERVED = new Set(['admin', 'associacao', 'association', 'ajuda', 'mod', 'moderacao',
   'pagina', 'paginas', 'root', 'seeder', 'semeador', 'suporte', 'support', 'varanda',
@@ -122,12 +126,11 @@ const RESERVED = new Set(['admin', 'associacao', 'association', 'ajuda', 'mod', 
   'andre_costa', 'bia_araujo', 'biblioteca_praca', 'cecilia_ramos',
   'horta_do_bairro', 'joao_nascimento', 'lia_oliveira', 'tomas_ferreira'])
 
-// Conversas as the page (./pages-dm.js, docs/rpc.md 5.84). group-seal and
-// group-rebox are not served here yet.
+// Conversas as the page (./pages-dm.js, docs/rpc.md 5.84).
 const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
 const DM_READS = ['dm-list', 'dm-thread', 'dm-box-read', 'dm-sign', 'dm-legacy-read']
 // Communities and groups as the page (./pages-groups.js).
-const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read']
+const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox']
 const GROUP_READ_LIMIT = 32
 // Feira listings as the page (docs/rpc.md 5.103 to 5.109).
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status']
@@ -167,7 +170,7 @@ const TERMINAL = ['movida', 'encerrada']
 const TOKENS = new Set(['nao-vinculado', 'sem-permissao', 'limite', 'nome-em-uso', 'nome-invalido', 'expirado',
   'assinatura-invalida', 'pedido-invalido', 'pausada', 'encerrada', 'midia-invalida', 'indisponivel', 'termos-pendentes',
   'troca-bloqueada', 'nao-encontrado', 'para-si', 'bloqueou', 'sem-caixa', 'sem-selos', 'resposta-invalida', 'longa-demais',
-  'fora-da-comunidade', 'aguardando-chave', 'conflito', 'rotacao-necessaria'])
+  'fora-da-comunidade', 'aguardando-chave', 'conflito', 'rotacao-necessaria', 'privado', 'sequencia'])
 
 function noop () {}
 
@@ -1200,7 +1203,8 @@ function createPagesRoutes ({
         follows: row.follows,
         closed: row.closed !== null,
         movedTo: row.movedTo,
-        communities: (row.writers || []).filter((w) => w.kind === 'community').map((w) => ({ community: w.group, role: w.state }))
+        communities: (row.writers || []).filter((w) => w.kind === 'community').map((w) => ({ community: w.group, role: w.state })),
+        ...(await reboxState(page))
       }
     } catch (err) {
       throw tokenOf(err)
@@ -1503,8 +1507,10 @@ function createPagesRoutes ({
           length = writer.info(page).length
         }
       })
+      const reboxPending = rotate !== null ? await reboxAfter(page, row.dm.groupBox) : undefined
       const result = { seq: res.seq, length, pushed: res.pushed }
       if (dmGen !== undefined) result.dmGen = dmGen
+      if (reboxPending !== undefined) result.reboxPending = reboxPending
       settle(member, nonce, result)
       keep(page, action, member, res.seq)
       return result
@@ -2170,7 +2176,8 @@ function createPagesRoutes ({
           try {
             cert = writer.certOf(page)
           } catch {}
-          return await pagesDm.read(page, { member, owner: row.owner === member, cert })
+          const out = await pagesDm.read(page, { member, owner: row.owner === member, cert })
+          return { ...out, ...(await reboxState(page)) }
         } catch (err) {
           throw tokenOf(err)
         }
@@ -2206,6 +2213,7 @@ function createPagesRoutes ({
         } catch (err) {
           throw dmFailure(err)
         }
+        result.reboxPending = await reboxAfter(page, row.dm ? row.dm.groupBox : null)
       } else if (action === 'dm-legacy-done') {
         try {
           result = await pagesDm.legacyDone(page, { member, id: params.id })
@@ -2227,6 +2235,99 @@ function createPagesRoutes ({
 
   // ---- communities and groups as the page -------------------------------------
 
+  function reboxPendingOf (page) {
+    try {
+      const r = pagesStore.get(page)
+      return Boolean(r && r.dm && r.dm.reboxPending === true)
+    } catch {
+      return false
+    }
+  }
+
+  // reboxPending and reboxNeeded (the private memberships still boxed to
+  // another key than dm.groupBox) for 'dm-box-read' and 'status'.
+  async function reboxState (page) {
+    let reboxNeeded = 0
+    if (pagesGroups !== null && typeof pagesGroups.reboxNeeded === 'function') {
+      try {
+        reboxNeeded = await pagesGroups.reboxNeeded(page)
+      } catch {}
+    }
+    return { reboxPending: reboxPendingOf(page), reboxNeeded }
+  }
+
+  // A group box that changed moves the page's private memberships to it in
+  // the same request: reboxPending is set first, so a move that does not
+  // finish here ('indisponivel', a crash) is completed by reboxSweep or the
+  // owner's 'group-rebox', and every private group action waits meanwhile.
+  // -> reboxPending after the attempt.
+  async function reboxAfter (page, before) {
+    if (pagesGroups === null) return reboxPendingOf(page)
+    let d = null
+    try {
+      const r = pagesStore.get(page)
+      d = r && r.dm ? r.dm : null
+    } catch {}
+    if (d === null || typeof d.groupBox !== 'string' || (d.groupBox === before && !d.reboxPending)) return reboxPendingOf(page)
+    try {
+      await pagesStore.markRebox(page, d.groupBox)
+      await pagesGroups.groupRebox(page)
+    } catch {
+      note('grupos', 'troca-pendente')
+    }
+    return reboxPendingOf(page)
+  }
+
+  // Every live page with reboxPending, one at a time under its page lock (so
+  // never beside a route on the same page), at the start and on every tick;
+  // a page that fails waits twice as long each time, up to an hour.
+  // limits.reboxEveryMs 0 (tests) keeps only the start's sweep.
+  const reboxEveryMs = Number.isSafeInteger(limits.reboxEveryMs) && limits.reboxEveryMs >= 0 ? limits.reboxEveryMs : REBOX_EVERY_MS
+  const reboxBackoff = new Map()
+  let reboxRunning = null
+  let reboxTimer = null
+  let routesClosed = false
+
+  function reboxSweep () {
+    if (reboxRunning !== null) return reboxRunning
+    reboxRunning = (async () => {
+      let n = 0
+      if (!on || pagesGroups === null || typeof writer.pageKeys !== 'function') return n
+      for (const page of writer.pageKeys()) {
+        if (routesClosed) break
+        let row = null
+        try {
+          row = pagesStore.get(page)
+        } catch {}
+        if (row === null || row.closed !== null || row.movedTo !== null || row.paused || !row.dm || row.dm.reboxPending !== true) {
+          reboxBackoff.delete(page)
+          continue
+        }
+        const b = reboxBackoff.get(page)
+        if (b !== undefined && b.next > now()) continue
+        try {
+          await withLock(page, () => pagesGroups.groupRebox(page))
+          reboxBackoff.delete(page)
+          n++
+        } catch {
+          const fails = b === undefined ? 1 : b.fails + 1
+          reboxBackoff.set(page, { fails, next: now() + Math.min(REBOX_BACKOFF_MAX_MS, Math.max(reboxEveryMs, 1000) * 2 ** Math.min(fails, 20)) })
+          note('grupos', 'troca-pendente')
+        }
+      }
+      return n
+    })().finally(() => { reboxRunning = null })
+    return reboxRunning
+  }
+
+  if (on && pagesGroups !== null) {
+    Promise.resolve().then(reboxSweep).catch(noop)
+    if (reboxEveryMs > 0) {
+      reboxTimer = setInterval(() => { reboxSweep().catch(noop) }, reboxEveryMs)
+      if (reboxTimer.unref) reboxTimer.unref()
+    }
+  }
+
   function groupParams (action, op) {
     if (action === 'community-join' || action === 'community-leave') {
       if (!exactKeys(op, ['community'])) throw refuse('pedido-invalido')
@@ -2240,6 +2341,23 @@ function createPagesRoutes ({
     if (action === 'group-leave') {
       if (!exactKeys(op, ['group'])) throw refuse('pedido-invalido')
       return { key: keyParam(op.group) }
+    }
+    if (action === 'group-rebox') {
+      if (!exactKeys(op, [])) throw refuse('pedido-invalido')
+      return {}
+    }
+    if (action === 'group-seal') {
+      if (!exactKeys(op, ['group', 'kid', 'nonce', 'box', 'at', 'writer', 'seq'])) throw refuse('pedido-invalido')
+      if (!exactKeys(op.kid, ['writer', 'seq']) || !Number.isSafeInteger(op.kid.seq) || op.kid.seq < 0) throw refuse('pedido-invalido')
+      if (!Number.isSafeInteger(op.seq) || op.seq < 1) throw refuse('pedido-invalido')
+      const seal = { kid: { writer: keyParam(op.kid.writer), seq: op.kid.seq }, nonce: op.nonce, box: op.box, at: op.at, writer: keyParam(op.writer), seq: op.seq }
+      // The envelope's own bounds, checked before the page lock.
+      try {
+        groupLib.groupSealed({ kid: seal.kid, nonce: seal.nonce, box: seal.box, at: seal.at })
+      } catch {
+        throw refuse('pedido-invalido')
+      }
+      return { key: keyParam(op.group), seal }
     }
     if (action === 'group-post') {
       if (!exactKeys(op, ['group', 'text'], ['replyTo', 'fwd'])) throw refuse('pedido-invalido')
@@ -2284,6 +2402,8 @@ function createPagesRoutes ({
         if (action === 'group-join') return await pagesGroups.groupJoin(page, params.key)
         if (action === 'group-leave') return await pagesGroups.groupLeave(page, params.key)
         if (action === 'group-post') return await pagesGroups.groupPost(page, params.key, { text: params.text, replyTo: params.replyTo, fwd: params.fwd })
+        if (action === 'group-seal') return await pagesGroups.groupSeal(page, params.key, params.seal)
+        if (action === 'group-rebox') return await pagesGroups.groupRebox(page)
         return await pagesGroups.groupRead(page, params.key, { before: params.before, limit: params.limit })
       } catch (err) {
         // A writer core or the diary may have taken a block before the
@@ -2307,7 +2427,7 @@ function createPagesRoutes ({
     }
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
-      need(row, member, 'admin')
+      need(row, member, action === 'group-rebox' ? 'owner' : 'admin')
       chargeOps(page)
       const out = await call()
       // The joins and leaves went on the diary through the writer: the ACL
@@ -2317,7 +2437,10 @@ function createPagesRoutes ({
       } catch {
         note(action, 'comprimento-pendente')
       }
-      const result = action === 'group-post' ? { seq: out.seq } : { state: out.state, role: out.state }
+      let result
+      if (action === 'group-post' || action === 'group-seal') result = { seq: out.seq }
+      else if (action === 'group-rebox') result = { groups: out.groups, left: out.left }
+      else result = { state: out.state, role: out.state }
       if (action === 'community-join') result.group = out.group
       settle(member, nonce, result)
       keep(page, action, member, 0)
@@ -2402,6 +2525,13 @@ function createPagesRoutes ({
     owns: (pathname) => pathname === '/account/pages' || pathname.startsWith(PREFIX),
     handle,
     stats: () => ({ available: on, ...counts, applied: applied.size, invites: invites.size }),
+    reboxSweep,
+    close: () => {
+      routesClosed = true
+      clearInterval(reboxTimer)
+      reboxTimer = null
+      return reboxRunning === null ? Promise.resolve() : reboxRunning.catch(noop)
+    },
     audit: () => audit.map((a) => ({ ...a }))
   }
 }

@@ -20,6 +20,12 @@
 // remaining roster (dmBox, prepared once: 'Tentar de novo' resends that same
 // request) and a move carries K2's first keys. Members without a share of the
 // current gen are listed for the owner with 'Enviar chave'.
+//
+// 'Renovar chave dos grupos' (owner, once the Conversas are active): moves
+// every private group of the page to a writer boxed to the page's current
+// group key ('group-rebox'). The service runs it by itself after a key change;
+// the button is for a page activated before that, or to finish a pending one.
+// A group with no room for the new writer is left and listed.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
@@ -37,7 +43,7 @@ import { fetchMember } from '../indexClient'
 import { planPeeks } from '../thread'
 import { peekAll, refOf } from './Conversa'
 import { revokeUrl, urlFromBytes } from '../media/display'
-import { PAGE_DM_CORE_ONLY, TEXTS, actAs, pagesAvatar, pagesClose, pagesDmAdopt, pagesDmAdoptNew, pagesDmAwaitsAdopt, pagesDmBoxRead, pagesDmExpectAdopt, pagesDmForgetAdopt, pagesDmInviteShare, pagesDmPrepare, pagesDmCoreOnly, pagesDmShareTo, pagesMove, pagesOrigin, pagesStart } from '../pages'
+import { PAGE_DM_CORE_ONLY, TEXTS, actAs, pagesAvatar, pagesGroup, pagesClose, pagesDmAdopt, pagesDmAdoptNew, pagesDmAwaitsAdopt, pagesDmBoxRead, pagesDmExpectAdopt, pagesDmForgetAdopt, pagesDmInviteShare, pagesDmPrepare, pagesDmCoreOnly, pagesDmShareTo, pagesMove, pagesOrigin, pagesStart } from '../pages'
 import { PAGE_DM_CONFLICT, PAGE_DM_KEY_PENDING, PAGE_DM_ROTATING, PAGE_DM_SEND_KEY, hasDeviceKeys, missingShares, pageKeyText } from '../pageSecrets'
 import { FRESH_FAILED, mergeProfile, profileOp } from '../pageProfile'
 import { usePageMember } from './Paginas'
@@ -74,6 +80,11 @@ const MOVE_UNKNOWN = 'Não deu para ler o estado da página agora. Tente de novo
 const LIFECYCLE_UNCERTAIN = 'Não sabemos se o pedido chegou. Confira a página antes de tentar de novo.'
 const DM_KEYS_UNKNOWN = 'Não deu para ler a chave das Conversas da página. Tente de novo.'
 const SEND_KEY_SOFT = 'Estas pessoas ainda não têm a chave das Conversas da página.'
+const REBOX_LABEL = 'Renovar chave dos grupos'
+const REBOX_SOFT = 'Passa os grupos privados da página para a chave atual, guardada só nos aparelhos do dono e dos administradores.'
+const REBOX_LEFT = 'A página saiu deste grupo para trocar a chave; peça para entrar de novo'
+const REBOX_NEEDED = 'Renove a chave dos grupos privados da página'
+const REBOX_UNCERTAIN = 'Não sabemos se o pedido chegou. Toque em Tentar de novo para reenviar o mesmo pedido.'
 
 // A refusal about the page's keys, in the words of the screen.
 const keyFailure = (err) => {
@@ -199,6 +210,9 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
   const [adoptHold, setAdoptHold] = useState(null) // { page, gen, error }: a new gen the service took, not yet held here
   const [adopting, setAdopting] = useState(false)
   const shareAct = useAction()
+  const reboxAct = useAction()
+  const [reboxHold, setReboxHold] = useState(null) // the uncertain 'group-rebox': err.retry() resends it
+  const [reboxGroups, setReboxGroups] = useState([]) // [{ group, name, text }] of the last answer
   const seqRef = useRef(0)
   const aliveRef = useRef(true)
   const baseRef = useRef(null)
@@ -489,6 +503,40 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     return run(shareAct, () => held.err.retry().catch(keyFailure).catch(holdShare(held.to)), shareDone)
   }
 
+  // The groups the page left (or could not move) are named by the node when
+  // it holds them, else by the start of their key.
+  const groupName = async (group) => {
+    try {
+      const info = await node.request('group.info', { group })
+      if (info && typeof info.name === 'string' && info.name !== '') return displayText(info.name)
+    } catch {}
+    return 'Grupo ' + group.slice(0, 8)
+  }
+  const reboxDone = async (data) => {
+    setReboxHold(null)
+    const keys = (v) => (Array.isArray(v) ? v.filter((g) => typeof g === 'string' && KEY_RE.test(g)) : [])
+    const rows = keys(data && data.left).map((group) => ({ group, text: REBOX_LEFT }))
+    const named = await Promise.all(rows.map(async (r) => ({ ...r, name: await groupName(r.group) })))
+    if (aliveRef.current) setReboxGroups(named)
+    return data
+  }
+  const holdRebox = (err) => {
+    setReboxHold(err && err.uncertain === true && typeof err.retry === 'function' ? err : null)
+    throw err
+  }
+  const reboxNotice = (data) => {
+    const n = data && Array.isArray(data.groups) ? data.groups.length : 0
+    return n === 0 ? 'Nenhum grupo privado precisava de chave nova.' : 'Chave renovada em ' + n + (n === 1 ? ' grupo.' : ' grupos.')
+  }
+  // The service counts the private memberships still on an old box.
+  const reboxWanted = [dmStatus, status].some((v) => !!v && typeof v === 'object' && (v.reboxPending === true || (Number.isSafeInteger(v.reboxNeeded) && v.reboxNeeded > 0)))
+  const rebox = () => run(reboxAct, () => pagesGroup(node, { member, page, action: 'group-rebox' }).then(reboxDone, holdRebox), reboxNotice)
+  const retryRebox = () => {
+    const held = reboxHold
+    if (!held) return
+    return run(reboxAct, () => held.retry().then(reboxDone, holdRebox), reboxNotice)
+  }
+
   const offerPending = !!status && !!status.offer && Date.parse(status.offer.exp) > Date.now()
 
   const transfer = () => run(transferAct, async () => {
@@ -619,7 +667,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
       </>
       )
     : null
-  const busy = adopting || profileAct.pending || inviteAct.pending || removeAct.pending || transferAct.pending || renameAct.pending || lifeAct.pending || shareAct.pending
+  const busy = adopting || profileAct.pending || inviteAct.pending || removeAct.pending || transferAct.pending || renameAct.pending || lifeAct.pending || shareAct.pending || reboxAct.pending
   const who = whoOf(profile)
 
   const photo = (
@@ -797,6 +845,29 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
               <ErrorText>{renameRefused}</ErrorText>
               <ErrorText>{renameAct.error}</ErrorText>
               <Btn label='Trocar @nome' secondary onPress={rename} disabled={renameHandle.trim() === '' || renameRefused !== '' || read.closed === true} pending={renameAct.pending} />
+
+              {hasDeviceKeys(dmStatus) && read.closed !== true
+                ? (
+                  <>
+                    <SectionHeader>Grupos privados</SectionHeader>
+                    {reboxWanted ? <Notice>{REBOX_NEEDED}</Notice> : null}
+                    <Soft>{REBOX_SOFT}</Soft>
+                    <Btn label={REBOX_LABEL} secondary onPress={rebox} disabled={busy || reboxHold !== null} pending={reboxAct.pending} />
+                    <ErrorText>{reboxAct.error}</ErrorText>
+                    {reboxHold
+                      ? (
+                        <>
+                          <Soft>{REBOX_UNCERTAIN}</Soft>
+                          <Pill label='Tentar de novo' onPress={retryRebox} disabled={busy} pending={reboxAct.pending} />
+                        </>
+                        )
+                      : null}
+                    {reboxGroups.map((r) => (
+                      <Soft key={'rebox-' + r.group}>{r.name + ': ' + r.text}</Soft>
+                    ))}
+                  </>
+                  )
+                : null}
 
               {movedKey !== null
                 ? (

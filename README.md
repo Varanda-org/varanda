@@ -727,7 +727,7 @@ O que fica no volume `account-data`:
 - `page-keys.json`: as chaves das páginas, cifradas com AES-256-GCM sob `VARANDA_PAGE_KEYS`; modo `0600`. Nada é impresso nem registrado.
 - `pages.json`: a lista de controle das páginas (dono, administradores, convites pendentes, encerramento e mudança), sem nenhuma chave secreta; modo `0600`.
 - `pages-store/`: os diários das páginas e as cópias das fotos.
-- `pages-groups/` e `pages-replicas/`: os núcleos de escritor das páginas em comunidades e grupos (só chaves públicas) e as cópias dos grupos que elas leem. Os segredos de escritor e a caixa dos grupos privados ficam em `page-keys.json`.
+- `pages-groups/` e `pages-replicas/`: os núcleos de escritor das páginas em comunidades e grupos (só chaves públicas) e as cópias dos grupos que elas leem. Os segredos de escritor ficam em `page-keys.json`; a caixa dos grupos privados deriva dos segredos da Página guardados nos aparelhos administradores.
 - `page-invite-rosters.json` e `page-nonce-key.json`: convites pendentes e a chave que autentica os nonces, modo `0600`.
 
 Regras de operação:
@@ -736,7 +736,7 @@ Regras de operação:
 - Uma página pode publicar fotos nas publicações e seguir outras contas, por ação do dono ou de um administrador.
 - Encerrar a página é definitivo: o @nome fica reservado e nunca é emitido de novo. O serviço continua servindo a página encerrada, só para leitura, e apaga as chaves dela depois que o semeador recebeu o encerramento (isso é refeito depois de um reinício). Cada dono faz no máximo 2 encerramentos ou mudanças de chave a cada 24 h (contagem em memória, zera ao reiniciar). Para uma chave vazada, `mod block` da chave da página é o remédio do operador.
 - Mudar a chave de uma página publica uma declaração sucessora, assinada pela chave antiga, que aponta para a nova. Quem segue a página vê a troca nessa declaração.
-- Páginas em comunidades ficam ligadas sempre que as páginas estão ligadas. Não há interruptor separado. O serviço não guarda a chave das mensagens da página nem lê as mensagens: assina somente os digests, sem ver o conteúdo. Ele ainda guarda a caixa dos grupos privados da página e pode ler as publicações dela ali, e lê os avisos endereçados à página em nome de quem a administra. Termos e Política na versão 33.
+- Páginas em comunidades ficam ligadas sempre que as páginas estão ligadas. Não há interruptor separado. O serviço não guarda a chave das mensagens nem a caixa dos grupos privados da página: assina somente os digests das Conversas e acrescenta blocos de grupo já selados, sem ver o conteúdo. A caixa privada fica nos aparelhos administradores. É exceção a época antiga conhecida pelo serviço antes da renovação da caixa. O serviço ainda lê os avisos endereçados à página em nome de quem a administra. Termos e Política na versão 34.
 - Um nó core administra páginas com uma chave de delegado guardada no aparelho. A CLI usa `VARANDA_ACCOUNT_ORIGIN` (https) e o `varanda-serve --account-origin https://<host>` liga as Páginas no app servido por ele. O `VARANDA_NO_PAGE_MIGRATE=1` desliga o acompanhamento automático da chave nova de uma página nos aparelhos de quem segue.
 - Criar a primeira página é uma migração de mão única do diretório de contas (ver o parágrafo sobre voltar a versões anteriores em "Vínculo de conta Google e @nome").
 

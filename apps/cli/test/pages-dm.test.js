@@ -529,7 +529,7 @@ test('pages-dm: a legacy page keeps its old rows read only until dm-box, which s
   t.is(r.body.gen, 2)
   const keysNow = await dmKeys(s, page)
   t.alike(keysNow[keysNow.length - 1], { seq: r.body.seq, box: op.box, gen: 2 }, 'dm-key gen 2 published')
-  t.alike(Object.keys(r.body).sort(), ['gen', 'seq'], 'no legacy field in the answer')
+  t.alike(Object.keys(r.body).sort(), ['gen', 'reboxPending', 'seq'], 'no legacy field in the answer')
   t.absent(s.keys.get(page).boxSecretKey, 'the legacy secret left page-keys')
   t.absent(fs.existsSync(stateFile(s.dir, page)), 'the rows file is gone')
   t.absent(scanFor(s.dir, 'mensagem antiga'), 'the old text is nowhere in the clear')

@@ -13,8 +13,15 @@
 // each a standalone Hypercore 11 compat core under
 // <dir>/pages-groups/<page>/writer-<hex> opened with the PUBLIC key only;
 // the secret is set in memory for one append and cleared after. Private
-// groups: one X25519 pair per page (groupBoxSecretKey, created lazily,
-// never the DM box) is the box of every page writer header.
+// groups: the box of every page writer header is the page's group box
+// public key from its ACL row (dm.groupBox), whose secret only the devices
+// of the owner and admins hold. The service folds a private group without
+// keys: it never reads a sealed post or a media key, and a post there is a
+// sealed envelope the device built ('group-seal'). A page with no dm.groupBox
+// joins no private group ('sem-caixa'). When the group box rotates, every
+// private membership moves to a new writer boxed to the new key
+// ('group-rebox'), and the legacy service-held groupBoxSecretKey of a page
+// from before is deleted.
 //
 // The link: ONE WebSocket to the loopback seeder, a NoiseSecretStream with
 // a persistent pair of its own, the admission channel in the member role
@@ -46,13 +53,12 @@ const { generateNoiseKeyPair } = require('@varanda/core/lib/net')
 const { groupJoinRecord, latestProfile, validateRecord, MAX_LOG_BLOCKS } = require('@varanda/core/lib/records')
 const { latestUsername } = require('@varanda/core/lib/username')
 const groups = require('@varanda/core/lib/group')
-const groupCrypto = require('@varanda/core/lib/group-crypto')
+const { keyTag, keyCommit, wipe } = require('@varanda/core/lib/group-crypto')
 const { MAX_PAGE_WRITERS } = require('./pages-store')
 const { parseSeederWs } = require('./pages-writer')
 
 const coreDir = path.dirname(require.resolve('@varanda/core/lib/seeder'))
 const NoiseSecretStream = require(require.resolve('@hyperswarm/secret-stream', { paths: [coreDir] }))
-const sodium = require(require.resolve('sodium-universal', { paths: [coreDir] }))
 
 const GROUPS_DIR = 'pages-groups'
 const REPLICAS_DIR = 'pages-replicas'
@@ -65,6 +71,7 @@ const BACKOFF_MAX_MS = 60000
 const HANDSHAKE_TIMEOUT_MS = 10000
 const HEX64_RE = /^[0-9a-f]{64}$/
 const WRITER_RE = /^writer-([0-9a-f]{64})$/
+const REBOX_FILE = 'rebox.json'
 
 function noop () {}
 
@@ -141,12 +148,6 @@ function latestJoins (entries) {
   return out
 }
 
-function boxPublic (secretKey) {
-  const publicKey = b4a.alloc(32)
-  sodium.crypto_scalarmult_base(publicKey, secretKey)
-  return publicKey
-}
-
 const refId = (r) => r.writer + ':' + r.seq
 const isLeave = (e) => e.record !== null && typeof e.record === 'object' && e.record.type === 'group-leave'
 
@@ -169,6 +170,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
   refuseSymlinkDir(dir)
   const groupsDir = path.join(dir, GROUPS_DIR)
   const pages = new Map() // page -> { writers: Map writerHex -> core, chain }
+  const pageOpening = new Map() // page -> pending openPageState
   const replicas = new Map() // key -> { core, refs }, in use order
   const openingReplicas = new Map() // key -> pending open
   const purging = new Map() // key -> pending close and purge
@@ -191,6 +193,9 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     groupJoin,
     groupLeave,
     groupPost,
+    groupSeal,
+    groupRebox,
+    reboxNeeded,
     groupRead,
     leaveAll,
     refuse,
@@ -231,9 +236,32 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     fs.mkdirSync(groupsDir, { recursive: true, mode: 0o700 })
     store = new Corestore(path.join(dir, REPLICAS_DIR))
     await store.ready()
+    await dropLegacyGroupBoxes()
     if (url !== null && !closed) {
       noisePair = loadNoisePair()
       connect()
+    }
+  }
+
+  // The service-held group box of pages from before it moved to devices:
+  // nothing reads it any more (a private membership boxed to it moves only
+  // through 'group-rebox' to the device-held box), so every start deletes it.
+  async function dropLegacyGroupBoxes () {
+    if (typeof writer.ready === 'function') await writer.ready().catch(noop)
+    if (typeof writer.pageKeys !== 'function') return
+    for (const page of writer.pageKeys()) {
+      const row = keys.get(page)
+      try {
+        if (row === null || !row.groupBoxSecretKey) continue
+        const next = { ...row }
+        delete next.groupBoxSecretKey
+        check()
+        keys.put(page, next)
+      } catch {
+        note('legacy-box-failed')
+      } finally {
+        zero(row)
+      }
     }
   }
 
@@ -271,11 +299,21 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     return core
   }
 
-  async function pageState (page) {
-    let p = pages.get(page)
-    if (p !== undefined) return p
-    p = { writers: new Map(), chain: Promise.resolve() }
-    pages.set(page, p)
+  // A page's state is cached only once its writer cores are open: callers
+  // that arrive meanwhile share the same opening.
+  function pageState (page) {
+    const p = pages.get(page)
+    if (p !== undefined) return Promise.resolve(p)
+    let pending = pageOpening.get(page)
+    if (pending === undefined) {
+      pending = openPageState(page).finally(() => pageOpening.delete(page))
+      pageOpening.set(page, pending)
+    }
+    return pending
+  }
+
+  async function openPageState (page) {
+    const p = { writers: new Map(), chain: Promise.resolve() }
     const row = keys.get(page)
     const own = row && row.writers ? Object.keys(row.writers) : []
     zero(row)
@@ -295,6 +333,11 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
         note('writer-open-failed')
       }
     }
+    if (closed) {
+      for (const core of p.writers.values()) await core.close().catch(noop)
+      throw fail('fechado')
+    }
+    pages.set(page, p)
     // A service that restarted knows every membership from the ACL rows
     // before any operation runs (a leave or a key move must see them all).
     knownStates(page, p)
@@ -329,40 +372,28 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     return next
   }
 
-  // The page's X25519 group box, created on first use and kept in its row.
-  function groupBox (page) {
-    const row = keys.get(page)
-    if (row === null) throw fail('chave-ausente')
-    try {
-      if (!row.groupBoxSecretKey) {
-        let kp = null
-        for (let i = 0; i < 4 && kp === null; i++) {
-          const next = groupCrypto.newBoxKeyPair()
-          if (groups.isWeakBoxKey(hex(next.publicKey))) groupCrypto.wipe(next.secretKey)
-          else kp = next
-        }
-        if (kp === null) throw fail('indisponivel')
-        check()
-        keys.put(page, { ...row, groupBoxSecretKey: kp.secretKey })
-        groupCrypto.wipe(kp.secretKey)
-        return groupBox(page)
-      }
-      const secretKey = b4a.from(row.groupBoxSecretKey)
-      const publicKey = boxPublic(secretKey)
-      if (groups.isWeakBoxKey(hex(publicKey))) {
-        groupCrypto.wipe(secretKey)
-        throw fail('indisponivel')
-      }
-      return { publicKey, secretKey }
-    } finally {
-      zero(row)
-    }
+  // The page's dm row in the ACL, or null before its Conversas keys moved
+  // to devices.
+  function dmOf (page) {
+    const acl = pagesStore.get(page)
+    return acl !== null && isPlainObject(acl.dm) ? acl.dm : null
   }
 
+  // The page's group box public key (hex) from its ACL row: the devices hold
+  // its secret, the service never does.
   function groupBoxPublic (page) {
-    const box = groupBox(page)
-    groupCrypto.wipe(box.secretKey)
-    return hex(box.publicKey)
+    const d = dmOf(page)
+    const box = d === null ? null : d.groupBox
+    if (typeof box !== 'string' || !HEX64_RE.test(box) || groups.isWeakBoxKey(box)) throw fail('sem-caixa')
+    return box
+  }
+
+  // While a group box rotation is pending, nothing runs in a private group
+  // but the rotation itself.
+  function gate (page, loaded) {
+    if (!loaded.private) return
+    const d = dmOf(page)
+    if (d !== null && d.reboxPending === true) throw fail('aguardando-chave')
   }
 
   // A new writer pair filed in the page's row, then its core. The secrets
@@ -748,7 +779,9 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     return { group: C, community: true, ...c, view, private: false, held: null, partial: c.incomplete || view.incomplete === true }
   }
 
-  async function loadGroup (page, p, G, { secrets = false } = {}) {
+  // A private group folds without keys (no box secret, no onKey), so the view
+  // holds no plaintext of a sealed record and `sealed` counts them.
+  async function loadGroup (page, p, G) {
     const g = await parts(page, p, G, 'group')
     let cparts = null
     try {
@@ -756,46 +789,93 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     } catch {}
     const input = { ...g.input, community: cparts === null ? null : cparts.input }
     const priv = g.header.visibility === 'private'
-    let view
-    let held = null
-    if (priv) {
-      const box = groupBox(page)
-      const pk = hex(box.publicKey)
-      const mine = new Set()
-      for (const l of g.input.writers) {
-        const h = l.entries[0] && l.entries[0].record
-        if (l.diary === page && h && h.box === pk) mine.add(l.key)
-      }
-      const kept = new Map()
-      const keysOpt = {
-        writers: mine,
-        unseal: (sealed) => groupCrypto.openFrom(b4a.from(sealed, 'base64'), box)
-      }
-      if (secrets) {
-        keysOpt.onKey = (kid, key) => {
-          const id = refId(kid)
-          if (kept.has(id)) return groupCrypto.wipe(key)
-          kept.set(id, key)
-        }
-      }
-      try {
-        view = groups.buildGroup({ ...input, keys: keysOpt })
-      } finally {
-        groupCrypto.wipe(box.secretKey)
-      }
-      if (secrets) held = kept
-    } else {
-      view = groups.buildGroup(input)
-    }
+    const view = groups.buildGroup(input)
     const cw = cparts === null ? null : liveOwn(page, { group: g.header.community, ...cparts })
     const partial = g.incomplete || cparts === null || cparts.incomplete || view.incomplete === true
-    return { group: G, ...g, view, private: priv, held, cw, partial }
+    return { group: G, ...g, foldInput: input, view, private: priv, cw, partial }
   }
 
-  function wipeHeld (loaded) {
-    if (!loaded || !loaded.held) return
-    for (const key of loaded.held.values()) groupCrypto.wipe(key)
-    loaded.held = null
+  // The box a writer's header names, or null.
+  function headerBox (loaded, w) {
+    const l = loaded.input.writers.find((x) => x.key === w)
+    const h = l && l.entries[0] && l.entries[0].record
+    return h && typeof h.box === 'string' ? h.box : null
+  }
+
+  function isKeyBlock (r) {
+    return r !== null && typeof r === 'object' && r.type === 'group-key' && Array.isArray(r.keys) && (r.kid === null || isPlainObject(r.kid))
+  }
+
+  // The epoch the members' fold makes eligible for the page writer `w` now:
+  // { epoch, rekeyPending }, by the fold's own rules (covering every leave
+  // and removal, sent by a distributor in office, to entitled writers only).
+  // Those rules read the epochs a reader holds, and the service holds none:
+  // on a copy of the logs, each entry sealed to `w` is replaced by a random
+  // stand-in key of its own (the epoch's first block commitment rewritten to
+  // match), so only the kids and the recipient lists, plaintext structure,
+  // decide. No envelope opens under a stand-in key, and the keys are wiped.
+  function eligibleEpoch (loaded, page, w) {
+    const input = loaded.foldInput
+    const logs = [{ key: loaded.group, log: input.root }, ...input.writers.map((l) => ({ key: l.key, log: l }))]
+    const kidOf = (key, e) => e.record.kid === null ? { writer: key, seq: e.seq } : e.record.kid
+    const ids = new Set()
+    for (const { key, log } of logs) {
+      for (const e of log.entries || []) {
+        if (e && isKeyBlock(e.record) && e.record.keys.some((k) => k && k.writer === w)) ids.add(refId(kidOf(key, e)))
+      }
+    }
+    const stand = new Map()
+    const plain = new Map()
+    try {
+      const keyFor = (id) => {
+        if (!stand.has(id)) stand.set(id, hcrypto.randomBytes(32))
+        return stand.get(id)
+      }
+      const copyLog = ({ key, log }) => {
+        let changed = false
+        const entries = (log.entries || []).map((e) => {
+          if (!e || !isKeyBlock(e.record)) return e
+          const kid = kidOf(key, e)
+          const id = refId(kid)
+          if (!ids.has(id)) return e
+          const k = keyFor(id)
+          const r = e.record
+          const next = {
+            ...r,
+            keys: r.keys.map((x) => {
+              if (!x || x.writer !== w || typeof x.sealed !== 'string') return x
+              const sealed = b4a.toString(hcrypto.randomBytes(b4a.byteLength(x.sealed, 'base64')), 'base64')
+              plain.set(sealed, b4a.concat([k, keyTag(loaded.group, kid.writer, kid.seq)]))
+              return { writer: x.writer, sealed }
+            })
+          }
+          if (r.kid === null) next.commit = hex(keyCommit(k, loaded.group, kid))
+          changed = true
+          return { ...e, record: next }
+        })
+        return changed ? { ...log, entries } : log
+      }
+      const [root, ...writers] = logs.map(copyLog)
+      const mine = new Set(input.writers.filter((l) => l.diary === page).map((l) => l.key))
+      const view = groups.buildGroup({
+        ...input,
+        root,
+        writers,
+        keys: { writers: mine, unseal: (sealed) => plain.has(sealed) ? b4a.from(plain.get(sealed)) : null }
+      })
+      return { epoch: view.epoch ? { writer: view.epoch.writer, seq: view.epoch.seq } : null, rekeyPending: view.rekeyPending === true }
+    } finally {
+      for (const k of stand.values()) wipe(k)
+      for (const v of plain.values()) wipe(v)
+    }
+  }
+
+  // The last group-leave on writer `w` in the fold's logs, as a rejoin ref.
+  function leaveOf (loaded, w) {
+    const l = loaded.input.writers.find((x) => x.key === w)
+    let out = null
+    for (const e of (l && l.entries) || []) if (e && isLeave(e)) out = { writer: w, seq: e.seq }
+    return out
   }
 
   function rejoinOf (view, page) {
@@ -875,6 +955,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
 
   async function joinGroupNow (page, p, G) {
     const loaded = await loadGroup(page, p, G)
+    gate(page, loaded)
     if (loaded.view.bans.has(page)) throw fail('sem-permissao')
     if (loaded.view.community === null || loaded.view.orphan) throw fail('indisponivel')
     if (loaded.cw === null) throw fail('fora-da-comunidade')
@@ -911,16 +992,80 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
       .map((l) => ({ writer: l.key, seq: l.length }))
     const core = p.writers.get(w)
     if (core === undefined) throw fail('chave-ausente')
-    await appendOn(page, core, loaded.group, groups.groupLeave({ seen: loaded.view.last, cuts }), { priv: loaded.private, community: loaded.community === true })
+    const seq = await appendOn(page, core, loaded.group, groups.groupLeave({ seen: loaded.view.last, cuts }), { priv: loaded.private, community: loaded.community === true })
     await diaryJoin(page, loaded.group, w, false)
     setState(p, w, null)
     await syncWriters(page)
+    return { state: 'left', leave: { writer: w, seq } }
+  }
+
+  // A group that no longer folds (dropped by its community, or unreadable)
+  // is left even while a rebox is pending.
+  async function groupLeave (page, G) {
+    needKey(G)
+    return withPage(page, async (p) => {
+      knownStates(page, p)
+      let loaded
+      try {
+        loaded = await loadGroup(page, p, G)
+      } catch (err) {
+        const w = writerIn(p, G)
+        if (err.code !== 'nao-encontrada' || w === null) throw err
+        await dropMembership(page, p, G, w, null)
+        return leftFor(page, p, G)
+      }
+      if (gone(loaded)) {
+        const w = writerIn(p, G)
+        if (w !== null) await dropMembership(page, p, G, w, loaded)
+        return leftFor(page, p, G)
+      }
+      // A leave is always safe: never held by a pending rebox nor a
+      // partial fold.
+      await leaveNow(page, p, loaded)
+      return leftFor(page, p, G)
+    })
+  }
+
+  // After the owner's leave, a rebox step filed for G goes too (with the
+  // old writer's diary join off if a failure left it on), so no later
+  // rebox rejoins a group the owner left.
+  async function leftFor (page, p, G) {
+    const steps = readSteps(page)
+    const prior = steps.get(G)
+    if (prior !== undefined) {
+      const last = latestJoins(await writer.readEntries(page)).get(prior)
+      if (last !== undefined && last.on === true) await diaryJoin(page, G, prior, false)
+      setState(p, prior, null)
+      await syncWriters(page)
+      endStep(page, steps, G)
+    }
     return { state: 'left' }
   }
 
-  async function groupLeave (page, G) {
-    needKey(G)
-    return withPage(page, async (p) => leaveNow(page, p, await loadGroup(page, p, G)))
+  function gone (loaded) {
+    return loaded.view.orphan === true || (loaded.view.community === null && !loaded.partial)
+  }
+
+  // The page's writer in G as the ACL rows know it, or null.
+  function writerIn (p, G) {
+    for (const [w, st] of p.state || new Map()) if (st.group === G && st.kind === 'group' && p.writers.has(w)) return w
+    return null
+  }
+
+  // Ends a membership the fold cannot act on: a leave when it still folds,
+  // the diary join off, the writer secret and core dropped.
+  async function dropMembership (page, p, G, w, loaded) {
+    if (loaded !== null && liveOwn(page, loaded) === w) {
+      try {
+        await leaveNow(page, p, loaded)
+      } catch (err) {
+        note('leave-failed', { reason: err.code || 'erro' })
+      }
+    }
+    const last = latestJoins(await writer.readEntries(page)).get(w)
+    if (last !== undefined && last.on === true) await diaryJoin(page, G, w, false)
+    await dropWriter(p, page, w)
+    await syncWriters(page)
   }
 
   // Every group of C the page is in, then C.
@@ -973,44 +1118,314 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
   async function groupPost (page, G, { text, replyTo = null, fwd = 0 } = {}) {
     needKey(G)
     return withPage(page, async (p) => {
-      const loaded = await loadGroup(page, p, G, { secrets: true })
+      const loaded = await loadGroup(page, p, G)
+      // A private group's posts are sealed on a device ('group-seal').
+      if (loaded.private) throw fail('privado')
+      if (loaded.view.community === null || loaded.view.orphan || loaded.partial) throw fail('indisponivel')
+      const w = liveOwn(page, loaded)
+      if (w === null || loaded.view.members.get(page) !== 'member') throw fail('sem-permissao')
+      if (!loaded.view.writers.has(w)) throw fail('limite')
+      let record
       try {
-        if (loaded.view.community === null || loaded.view.orphan || loaded.partial) throw fail('indisponivel')
-        const w = liveOwn(page, loaded)
-        if (w === null || loaded.view.members.get(page) !== 'member') throw fail('sem-permissao')
-        if (!loaded.view.writers.has(w)) throw fail('limite')
-        let record
-        try {
-          record = groups.groupPost({ text, replyTo, fwd, seen: loaded.view.last })
-        } catch {
-          throw fail('invalido')
-        }
-        if (loaded.private) {
-          const key = loaded.view.epoch === null ? undefined : loaded.held.get(refId(loaded.view.epoch))
-          if (loaded.view.rekeyPending || key === undefined) throw fail('aguardando-chave')
-          let sealed
-          try {
-            sealed = groupCrypto.sealRecord(groups.sealedInner(record, { writer: w, group: G, kid: loaded.view.epoch }), key)
-          } catch {
-            throw fail('invalido')
-          }
-          record = groups.groupSealed({ kid: loaded.view.epoch, nonce: sealed.nonce, box: sealed.box, at: record.at })
-        }
-        const seq = await appendOn(page, p.writers.get(w), G, record, { priv: loaded.private })
-        return { seq }
-      } finally {
-        wipeHeld(loaded)
+        record = groups.groupPost({ text, replyTo, fwd, seen: loaded.view.last })
+      } catch {
+        throw fail('invalido')
       }
+      const seq = await appendOn(page, p.writers.get(w), G, record)
+      return { seq }
     })
   }
 
-  // rpc.md 5.40's shape; plaintext of a private group the page is in.
+  // A sealed envelope a device of the owner or an admin built for the page's
+  // live writer at `seq` (its inner record binds writer, group, kid and at).
+  // A writer or length other than the device read is 'sequencia': the device
+  // reads again and seals again only on the person's tap.
+  async function groupSeal (page, G, { kid, nonce, box, at, writer: w0, seq: at0 } = {}) {
+    needKey(G)
+    let record
+    try {
+      record = groups.groupSealed({ kid, nonce, box, at })
+    } catch {
+      throw fail('invalido')
+    }
+    if (!Number.isSafeInteger(at0) || at0 < 1 || typeof w0 !== 'string' || !HEX64_RE.test(w0)) throw fail('invalido')
+    if (groups.validateGroupRecord(record, at0, { root: false, private: true }) !== null) throw fail('invalido')
+    return withPage(page, async (p) => {
+      const loaded = await loadGroup(page, p, G)
+      if (!loaded.private) throw fail('invalido')
+      gate(page, loaded)
+      if (loaded.view.community === null || loaded.view.orphan || loaded.partial) throw fail('indisponivel')
+      const w = liveOwn(page, loaded)
+      if (w === null || loaded.view.members.get(page) !== 'member') throw fail('sem-permissao')
+      if (!loaded.view.writers.has(w)) throw fail('limite')
+      if (w !== w0) throw fail('sequencia')
+      if (headerBox(loaded, w) !== groupBoxPublic(page)) throw fail('aguardando-chave')
+      // Only the epoch the members' nodes would send under now: an envelope
+      // sealed before a removal, under a key the removed member holds, waits.
+      const pick = eligibleEpoch(loaded, page, w)
+      if (pick.rekeyPending || pick.epoch === null || refId(pick.epoch) !== refId(record.kid)) throw fail('aguardando-chave')
+      const core = p.writers.get(w)
+      if (core === undefined) throw fail('chave-ausente')
+      if (core.length !== at0) throw fail('sequencia')
+      const seq = await appendOn(page, core, G, record, { priv: true })
+      return { seq }
+    })
+  }
+
+  // Moves every private membership of the page to a writer boxed to its
+  // current group box (dm.groupBox). Per group: the step is filed first
+  // (<page dir>/rebox.json: group -> old writer), then the leave on the old
+  // writer (the only end of a membership), a new writer whose header names
+  // that leave and the new box, and its diary join; the step goes once that
+  // finished. A filed step whose leave landed is completed by the next call
+  // from the leave in the fold. The page waits for the group's admins to
+  // admit it again and for an epoch that covers the leave. A group with no
+  // room for the new writer, or one that no longer folds, is left (`left`),
+  // never kept on the old box. reboxPending clears, and the legacy
+  // groupBoxSecretKey is deleted, only once every group moved or was left
+  // and no step is filed; a failure keeps it pending for the next call.
+  async function groupRebox (page) {
+    return withPage(page, (p) => reboxNow(page, p))
+  }
+
+  function stepsFile (page) {
+    return path.join(pageDir(page), REBOX_FILE)
+  }
+
+  function readSteps (page) {
+    const raw = readFileNoFollow(stepsFile(page))
+    const out = new Map()
+    if (raw === null) return out
+    let data
+    try {
+      data = JSON.parse(b4a.toString(raw, 'utf8'))
+    } catch {
+      throw fail('indisponivel')
+    }
+    if (!isPlainObject(data) || !isPlainObject(data.steps)) throw fail('indisponivel')
+    for (const [G, w] of Object.entries(data.steps)) {
+      if (!HEX64_RE.test(G) || typeof w !== 'string' || !HEX64_RE.test(w)) throw fail('indisponivel')
+      out.set(G, w)
+    }
+    return out
+  }
+
+  function writeSteps (page, steps) {
+    check()
+    refuseSymlinkDir(groupsDir)
+    fs.mkdirSync(pageDir(page), { recursive: true, mode: 0o700 })
+    writeJsonAtomic(stepsFile(page), { v: 1, steps: Object.fromEntries([...steps].sort((a, b) => a[0].localeCompare(b[0]))) }, 0o600)
+  }
+
+  function endStep (page, steps, G) {
+    if (!steps.has(G)) return
+    steps.delete(G)
+    writeSteps(page, steps)
+  }
+
+  async function reboxNow (page, p) {
+    const box = groupBoxPublic(page)
+    knownStates(page, p)
+    const steps = readSteps(page)
+    const todo = new Map(steps)
+    for (const [w, st] of p.state || new Map()) {
+      if (st.kind === 'group' && p.writers.has(w) && !todo.has(st.group)) todo.set(st.group, w)
+    }
+    const moved = []
+    const left = []
+    let failures = 0
+    const ctx = { touched: false }
+    for (const [G, old] of todo) {
+      try {
+        const out = await reboxGroup(page, p, G, old, box, steps, ctx)
+        if (out === 'moved') moved.push(G)
+        else if (out === 'left') left.push(G)
+      } catch (err) {
+        failures++
+        note('rebox-failed', { reason: err.code || 'erro' })
+      }
+    }
+    // Once a move started, a block may have landed: the outcome is unknown.
+    if (failures > 0 || steps.size > 0) throw fail(ctx.touched ? 'incerto' : 'indisponivel')
+    check()
+    await pagesStore.settleRebox(page, box)
+    const row = keys.get(page)
+    try {
+      if (row !== null && row.groupBoxSecretKey) {
+        const next = { ...row }
+        delete next.groupBoxSecretKey
+        check()
+        keys.put(page, next)
+      }
+    } finally {
+      zero(row)
+    }
+    return { groups: moved.sort(), left: left.sort() }
+  }
+
+  // -> 'moved', 'left', or 'skip' (nothing to move in G).
+  async function reboxGroup (page, p, G, old, box, steps, ctx) {
+    const stepped = steps.has(G)
+    let loaded = null
+    try {
+      loaded = await loadGroup(page, p, G)
+    } catch (err) {
+      if (err.code !== 'nao-encontrada') throw err
+    }
+    if (loaded !== null && !loaded.private) {
+      endStep(page, steps, G)
+      return 'skip'
+    }
+    if (loaded === null || gone(loaded)) {
+      ctx.touched = true
+      if (p.writers.has(old)) await dropMembership(page, p, G, old, loaded)
+      endStep(page, steps, G)
+      return 'left'
+    }
+    const live = liveOwn(page, loaded)
+    if (live !== null && headerBox(loaded, live) === box) {
+      // A replacement bound before a crash: its row is persisted again
+      // before the step goes.
+      if (p.writers.has(live)) {
+        const s = loaded.view.members.get(page) === 'member' && loaded.view.writers.has(live) ? 'member' : 'requested'
+        setState(p, live, { group: G, kind: 'group', state: s })
+        await syncWriters(page)
+      }
+      endStep(page, steps, G)
+      return stepped && live !== old ? 'moved' : 'skip'
+    }
+    // A partial fold still ends the old membership now (the leave reads only
+    // the page's own writer and diary); the new writer waits for a complete
+    // fold, the filed step for the next call or the sweep.
+    if (loaded.partial) {
+      if (live !== null) {
+        if (!stepped) {
+          steps.set(G, live)
+          writeSteps(page, steps)
+        }
+        ctx.touched = true
+        await leaveNow(page, p, loaded)
+      }
+      throw fail('indisponivel')
+    }
+    // A membership whose writer the fold no longer counts as live, still
+    // boxed to an old key: left, never skipped.
+    if (live === null && !stepped) {
+      const h = await localHeader(p, old)
+      if (h === null || h.group !== G || typeof h.box !== 'string' || h.box === box) return 'skip'
+      ctx.touched = true
+      await dropMembership(page, p, G, old, loaded)
+      return 'left'
+    }
+    if (!stepped) {
+      steps.set(G, live)
+      writeSteps(page, steps)
+    }
+    let leave
+    if (live !== null) {
+      ctx.touched = true
+      leave = (await leaveNow(page, p, loaded)).leave
+    } else {
+      // The leave landed before a failure: the old writer's diary join off
+      // and its row come first, as leaveNow does them.
+      const prior = steps.get(G)
+      leave = leaveOf(loaded, prior)
+      if (leave) {
+        ctx.touched = true
+        const last = latestJoins(await writer.readEntries(page)).get(prior)
+        if (last !== undefined && last.on === true) await diaryJoin(page, G, prior, false)
+        setState(p, prior, null)
+        await syncWriters(page)
+      }
+    }
+    // The leave is not in the fold yet: the step stays for the next call.
+    if (!leave) throw fail('indisponivel')
+    if (loaded.cw === null) {
+      endStep(page, steps, G)
+      return 'left'
+    }
+    let core
+    try {
+      roomFor(loaded, page, G)
+      core = await newWriter(p, page)
+    } catch (err) {
+      if (err.code !== 'limite') throw err
+      endStep(page, steps, G)
+      return 'left'
+    }
+    ctx.touched = true
+    const w = hex(core.key)
+    await bindWriter(p, page, core, G, groups.writerHeader({ group: G, diary: page, member: loaded.cw, rejoin: leave, box }), { priv: true }, null)
+    setState(p, w, { group: G, kind: 'group', state: 'requested' })
+    await syncWriters(page)
+    endStep(page, steps, G)
+    return 'moved'
+  }
+
+  // Block 0 of one of the page's own writer cores, or null.
+  async function localHeader (p, w) {
+    const core = p.writers.get(w)
+    if (core === undefined || core.length === 0) return null
+    try {
+      const h = await core.get(0, { wait: false })
+      return groups.validateWriterHeader(h) === null ? h : null
+    } catch {
+      return null
+    }
+  }
+
+  // How many of the page's private memberships still have a writer boxed to
+  // another key than dm.groupBox (every one when the page has none): what
+  // 'group-rebox' would move. Read from the page's own cores, no fold.
+  async function reboxNeeded (page) {
+    await opening
+    if (closed) throw fail('fechado')
+    if (typeof page !== 'string' || !HEX64_RE.test(page)) throw fail('nao-encontrada')
+    const p = await pageState(page)
+    // On the page's queue, so it never reads beside a rebox in progress.
+    const run = async () => {
+      knownStates(page, p)
+      const d = dmOf(page)
+      const box = d === null ? null : d.groupBox
+      let n = 0
+      for (const [w, st] of p.state || new Map()) {
+        if (st.kind !== 'group') continue
+        const h = await localHeader(p, w)
+        if (h !== null && typeof h.box === 'string' && h.box !== box) n++
+      }
+      return n
+    }
+    const next = p.chain.then(run, run)
+    p.chain = next.catch(noop)
+    return next
+  }
+
+  // rpc.md 5.40's shape for a public group. A private group answers no
+  // item: its posts are sealed and only the devices open them.
   async function groupRead (page, G, { before = null, limit = 30 } = {}) {
     needKey(G)
     const n = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 100) : 30
     return withPage(page, async (p) => {
       const loaded = await loadGroup(page, p, G)
-      let posts = loaded.view.posts.filter((x) => loaded.profiles.has(x.diary))
+      const v = loaded.view
+      if (loaded.private) {
+        gate(page, loaded)
+        const w = liveOwn(page, loaded)
+        const role = v.members.get(page) || 'left'
+        const pick = w !== null && role === 'member' && v.writers.has(w) ? eligibleEpoch(loaded, page, w) : { epoch: null, rekeyPending: true }
+        return {
+          private: true,
+          items: [],
+          next: null,
+          hidden: 0,
+          incomplete: v.incomplete || loaded.partial,
+          sealed: v.sealed || 0,
+          epoch: pick.epoch,
+          state: pick.epoch !== null && !pick.rekeyPending ? 'ok' : 'rekey-pending',
+          role
+        }
+      }
+      let posts = v.posts.filter((x) => loaded.profiles.has(x.diary))
       if (before !== null && before !== undefined) {
         const i = posts.findIndex((x) => x.writer === before.writer && x.seq === before.seq)
         if (i >= 0) posts = posts.slice(0, i)
@@ -1027,7 +1442,6 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
         ...loaded.profiles.get(x.diary)
       }))
       const last = items[items.length - 1]
-      const v = loaded.view
       return {
         items,
         next: start > 0 && last ? { at: last.at, writer: last.writer, seq: last.seq } : null,
@@ -1054,6 +1468,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     clearTimeout(reconnectTimer)
     reconnectTimer = null
     if (conn !== null) conn.finish()
+    await Promise.all([...pageOpening.values()].map((x) => x.catch(noop)))
     for (const p of pages.values()) {
       await p.chain
       for (const core of p.writers.values()) await core.close().catch(noop)

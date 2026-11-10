@@ -364,7 +364,7 @@ test('follow, follows, notices, terms and group ops', async (t) => {
   await pagesTerms(fakeNode(), { member: M })
   t.is(Object.hasOwn(body(calls[1]), 'page'), false)
 
-  for (const action of ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read']) {
+  for (const action of ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox']) {
     calls = stub(t, flow(() => json(200, {})))
     await pagesGroup(fakeNode(), { member: M, page: P, action, op: { group: K2 } })
     t.ok(calls[1].url.endsWith('/account/pages/' + action), action)
@@ -372,6 +372,26 @@ test('follow, follows, notices, terms and group ops', async (t) => {
   }
   const err = await caught(t, pagesGroup(fakeNode(), { member: M, page: P, action: 'post', op: {} }))
   t.is(err.code, 'pedido-invalido')
+})
+
+test('group-seal sends the sealed envelope as is; its refusals keep their codes', async (t) => {
+  const { pagesGroup } = await load()
+  const op = { group: K2, kid: { writer: K2, seq: 3 }, nonce: 'n'.repeat(32), box: 'b'.repeat(64), at: '2026-11-09T12:00:00.000Z', writer: K2, seq: 7 }
+  const calls = stub(t, flow(() => json(200, { seq: 7 })))
+  t.alike(await pagesGroup(fakeNode(), { member: M, page: P, action: 'group-seal', op }), { seq: 7 })
+  t.ok(calls[1].url.endsWith('/account/pages/group-seal'))
+  t.alike(body(calls[1]).op, op)
+  for (const [code, message] of [
+    ['sequencia', 'Alguém publicou antes; toque para enviar de novo'],
+    ['aguardando-chave', 'aguardando nova chave'],
+    ['privado', 'Este grupo é privado: a mensagem precisa ser cifrada neste aparelho']
+  ]) {
+    stub(t, flow(() => json(409, { error: code })))
+    const err = await caught(t, pagesGroup(fakeNode(), { member: M, page: P, action: 'group-seal', op }))
+    t.is(err.code, code)
+    t.is(err.message, message)
+    t.is(err.uncertain === true, false, code + ' is a refusal')
+  }
 })
 
 test('successor is a plain GET with no body and null when there is none', async (t) => {
