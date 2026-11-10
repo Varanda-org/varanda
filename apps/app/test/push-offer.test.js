@@ -456,6 +456,42 @@ test('offHere', async (t) => {
   h.disableResults[1].resolve({ ok: true })
 })
 
+test('a late turn-off keeps the switch shut and spares another identity', async (t) => {
+  const f = fixture()
+  f.leaveWaitMs = 5
+  const store = await f.make()
+  await store.read(A)
+  store.activate({ member: A })
+  const w = store.offHere({ node: 'n', member: A })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  f.disableResults[0].resolve({ ok: true })
+  await w
+  f.enableResults[0].resolve({ ok: false, reason: 'failed' })
+  await tick()
+  await tick()
+  t.is(f.disablePush.calls.length, 2, 'the same member is still turned off')
+  t.is(store.toggle({ node: 'n', member: A }), false, 'no bell tap while the late turn-off runs')
+  t.is(store.activate({ node: 'n', member: A }), false)
+  f.disableResults[1].resolve({ ok: true })
+  await tick()
+  await tick()
+
+  const g = fixture()
+  g.leaveWaitMs = 5
+  const other = await g.make()
+  await other.read(A)
+  other.activate({ member: A })
+  const x = other.offHere({ node: 'n', member: A })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  g.disableResults[0].resolve({ ok: true })
+  await x
+  await other.read(B)
+  g.enableResults[0].resolve({ ok: false, reason: 'failed' })
+  await tick()
+  await tick()
+  t.is(g.disablePush.calls.length, 1, 'another identity subscription is not cancelled')
+})
+
 test('offHere waits for a turn-on that lands in time, and the switch refuses meanwhile', async (t) => {
   const f = fixture()
   const store = await f.make()

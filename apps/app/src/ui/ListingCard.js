@@ -28,7 +28,7 @@ export function ListingCard ({ listing, onPress }) {
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
     >
       {photo
-        ? <MediaView author={listing.author} descriptor={photo} label={'Foto de ' + title} style={styles.photo} persist={false} />
+        ? <MediaView author={listing.author} descriptor={photo} label={'Foto de ' + title} style={styles.photo} persist={false} tapRetry={false} />
         : <View style={[styles.photo, styles.placeholder]}><Text style={styles.meta}>Sem foto</Text></View>}
       <View style={styles.content}>
         <Text style={styles.title} numberOfLines={2}>{title}</Text>

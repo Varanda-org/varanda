@@ -3,7 +3,7 @@
 // Feira listings as a hosted page (apps/cli/lib/account/pages-routes.js
 // listing, listing-edit, listing-status, listing-consent, delete and close),
 // end to end over loopback: the same account service and real pages writer
-// as account-pages.test.js, with a fake page inbox for the consent.
+// as account-pages.test.js, with no Conversas service: consent needs none.
 
 const nodeCrypto = require('node:crypto')
 const test = require('brittle')
@@ -173,7 +173,7 @@ async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {} } 
       ctx.writer = real
       ctx.pagesStore = openPagesStore(dir)
       const { writer, acl } = faulty(real, ctx.pagesStore)
-      opts.pages = { keys, writer, pagesStore: acl, dir, blocklist: { has: (k) => ctx.blocked.has(k) }, pagesDm: fakeDm(ctx) }
+      opts.pages = { keys, writer, pagesStore: acl, dir, blocklist: { has: (k) => ctx.blocked.has(k) } }
     }
     const server = createAccountServer(opts)
     const l = await server.listen({ host: '127.0.0.1', port: 0 })
@@ -290,28 +290,6 @@ async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {} } 
 
   return { ctx, store, terms, api, logs, newMember, start, sign, act, create, invite, accept, rosterAct, upload, close, restart }
 }
-// The page inbox listing-consent reads (pages-dm.js thread shape): newest
-// last, `next` the id of the oldest row returned when older ones exist.
-function fakeDm (ctx) {
-  ctx.inbox = []
-  return {
-    enable: async () => {},
-    stop: async () => {},
-    forget: async () => {},
-    thread: async (page, { peer, before = null, limit = 30 }) => {
-      const all = ctx.inbox.filter((m) => m.page === page && m.from === peer).map(({ page, ...m }) => m)
-      let end = all.length
-      if (before !== null) {
-        const i = all.findIndex((m) => m.id === before)
-        if (i !== -1) end = i
-      }
-      const startAt = Math.max(0, end - limit)
-      const rows = all.slice(startAt, end)
-      return { messages: rows, next: startAt > 0 && rows.length > 0 ? rows[0].id : null, folder: 'inbox', blocked: false }
-    }
-  }
-}
-
 const PLACE = { uf: 'SP', city: 'São Paulo', bairro: null }
 
 function listingOp (fields = {}) {
@@ -427,27 +405,16 @@ test('page listings: create, edit, status, consent, delete, close, cap and repla
   t.is((await s.act(caio, 'listing-status', K, { to: K + ':' + L, status: 'vendido' })).body.error, 'sem-permissao')
   t.is(ctx.writer.info(K).length, length)
 
-  // Consent: refused until the page inbox holds the member's offer for this
-  // listing, then the page key signs a deal naming the member as rater.
+  // Consent: the admin's signed statement is the whole claim, with no page
+  // thread at all and no Conversas service (the service cannot read them).
   const offer = 'a1'.repeat(16)
   const consentOp = { to: K + ':' + L, rater: dani.hex, offer }
-  t.is((await s.act(bia, 'listing-consent', K, consentOp)).body.error, 'oferta-ausente')
-  ctx.inbox.push({ page: K, id: offer, from: dani.hex, text: 'Topa?', replyTo: null, fwd: 0, media: [], card: { url: ORIGIN + '/f/' + K + '/' + L + '#oferta=4500&aceite=' + 'b'.repeat(128) }, at: new Date().toISOString(), mine: false })
-  t.is((await s.act(bia, 'listing-consent', K, consentOp)).body.error, 'oferta-ausente', 'an answer is not an offer')
-  ctx.inbox.push({ page: K, id: 'c3'.repeat(16), from: dani.hex, text: ORIGIN + '/f/' + K + '/' + P + '#oferta=4500', replyTo: null, fwd: 0, media: [], card: null, at: new Date().toISOString(), mine: false })
-  t.is((await s.act(bia, 'listing-consent', K, { ...consentOp, offer: 'c3'.repeat(16) })).body.error, 'oferta-ausente', 'an offer for another listing')
-  ctx.inbox.length = 0
-  for (let i = 0; i < 60; i++) {
-    ctx.inbox.push({ page: K, id: (i.toString(16).padStart(2, '0')).repeat(16), from: dani.hex, text: 'oi', replyTo: null, fwd: 0, media: [], card: null, at: new Date().toISOString(), mine: false })
-  }
-  ctx.inbox.splice(5, 0, { page: K, id: offer, from: dani.hex, text: ORIGIN + '/f/' + K + '/' + L + '#oferta=4500', replyTo: null, fwd: 0, media: [], card: null, at: new Date().toISOString(), mine: false })
   t.is((await s.act(bia, 'listing-consent', K, { ...consentOp, rater: K })).body.error, 'pedido-invalido', 'the page never rates itself')
   length = ctx.writer.info(K).length
   const signed = await s.act(bia, 'listing-consent', K, consentOp)
   t.is(signed.status, 200, JSON.stringify(signed.body))
   t.ok(verifyConsent({ listingAuthor: K, listingSeq: L, rater: dani.hex, offerId: offer, consent: signed.body.consent }), 'verifies for the page key and the member')
   t.absent(verifyConsent({ listingAuthor: K, listingSeq: L, rater: caio.hex, offerId: offer, consent: signed.body.consent }), 'names only that rater')
-  ctx.inbox.length = 0
   const resent = await api('POST', '/account/pages/listing-consent', signed.sent)
   t.is(resent.status, 200)
   t.is(resent.body.consent, signed.body.consent, 'a repeated nonce answers the same signature')
@@ -469,7 +436,6 @@ test('page listings: create, edit, status, consent, delete, close, cap and repla
   t.ok(dels.some((r) => r.seq === E3), 'the live edit is tombstoned')
   t.ok(dels.some((r) => (r.seq === L || r.seq === E3) && Array.isArray(r.media) && r.media.some((m) => m.core === d.core && m.start === d.start)), 'the photo range is freed')
   t.is((await s.act(ana, 'delete', K, { to: K + ':' + E3 })).body.error, 'pedido-invalido', 'an edit is not deleted on its own')
-  ctx.inbox.push({ page: K, id: offer, from: dani.hex, text: ORIGIN + '/f/' + K + '/' + L + '#oferta=4500', replyTo: null, fwd: 0, media: [], card: null, at: new Date().toISOString(), mine: false })
   t.is((await s.act(ana, 'listing-consent', K, consentOp)).body.error, 'pedido-invalido', 'no consent for a deleted listing')
   t.is((await s.act(ana, 'listing-consent', K, { ...consentOp, to: K + ':' + post.body.seq })).body.error, 'pedido-invalido', 'no consent for a post')
   t.is((await s.act(ana, 'listing-consent', K, { ...consentOp, to: caio.hex + ':' + L })).body.error, 'pedido-invalido', 'no consent for another diary')

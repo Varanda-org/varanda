@@ -661,6 +661,16 @@ function createSession ({
     'dm.thread': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.set': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.seen': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    // A Página's secrets live on the browser node only (docs/rpc.md 5.114).
+    'dm.pageGenerate': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageShare': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageSecrets': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageDraft': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageSend': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageLegacyChunk': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageLegacyBlocks': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageForget': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'group.seal': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     // Like report.sign (docs/rpc.md 5.20).
     'dm.reportSign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')
@@ -917,7 +927,12 @@ function createSession ({
       return r
     }),
 
-    'group.read': serial((params) => withStore((c) => member.groupRead(c, params))),
+    // A page reads its private groups only on a node that holds its secrets
+    // (browser node), never as this member.
+    'group.read': serial((params) => {
+      if (params.page !== undefined) throw new UsageError(DM_WEB_ONLY)
+      return withStore((c) => member.groupRead(c, params))
+    }),
     'group.seen': serial((params) => withStore((c) => member.groupSeen(c, params))),
 
     'group.list': serial((params) => withStore((c) => member.groupList(c, params))),

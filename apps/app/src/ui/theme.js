@@ -40,6 +40,7 @@ export const webInputReset = Platform.OS === 'web' ? { outlineStyle: 'none' } : 
 export const LARGE_TEXT = 1.29
 
 export const type = {
+  heroTitle: { fontSize: 28, fontWeight: '800', lineHeight: 34, letterSpacing: -0.4 },
   barTitle: { fontSize: 21, fontWeight: '800', lineHeight: 25, letterSpacing: -0.2 },
   profileName: { fontSize: 22, fontWeight: '800', lineHeight: 26, letterSpacing: -0.2 },
   postName: { fontSize: 15, fontWeight: '700', lineHeight: 20 },

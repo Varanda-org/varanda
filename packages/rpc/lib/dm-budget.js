@@ -11,9 +11,13 @@ const { utf8ByteLength } = require('./text')
 const DM_INNER_BYTES = 5120
 // Two length bytes and the 64-byte signature.
 const DM_INNER_FRAMING_BYTES = 66
+// A v3 frame also carries its uint64be expiry after the signature.
+const DM_INNER_V3_EXPIRY_BYTES = 8
 // Insertion order is the wire order; packages/core/lib/dm.js signs the same.
 const DM_INNER_KEYS = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'op', 'peer', 'at', 'cert'])
 const DM_INNER_KEYS_V2 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert'])
+// v3 (a Página's digest-signed inner) writes the v2 keys; only its signature differs.
+const DM_INNER_KEYS_V3 = DM_INNER_KEYS_V2
 const DM_MEDIA_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'])
 // A link card (core lib/link-card.js CARD_KEYS); its image is a media item.
 const DM_CARD_KEYS = Object.freeze(['url', 'host', 'title', 'desc', 'image'])
@@ -64,7 +68,7 @@ function canonicalCard (c) {
 }
 
 // The v2 key set only when something needs it: a text-only message stays v1
-// so readers without v2 still open it.
+// so readers without v2 still open it. Never 3: only a Página asks for v3.
 function innerVersion (b) {
   return b.media !== null || b.card !== null || b.fwd !== 0 ? 2 : 1
 }
@@ -73,7 +77,7 @@ function innerVersion (b) {
 // written in DM_MEDIA_KEYS order and a card in DM_CARD_KEYS order whatever
 // order the caller built them in.
 function canonicalInnerJson (body) {
-  const keys = body.v === 2 ? DM_INNER_KEYS_V2 : DM_INNER_KEYS
+  const keys = body.v === 2 || body.v === 3 ? DM_INNER_KEYS_V2 : DM_INNER_KEYS
   const o = {}
   for (const k of keys) {
     o[k] = k === 'media' && Array.isArray(body.media)
@@ -89,8 +93,9 @@ function dmTextBytes (text) {
   return utf8ByteLength(JSON.stringify(text)) - 2
 }
 
-// fields: { kind?, id?, from?, to?, replyTo?, media?, card?, fwd?, op?,
-// peer?, at?, cert? }; text is ignored. Returns the dmTextBytes still free
+// fields: { v?, kind?, id?, from?, to?, replyTo?, media?, card?, fwd?, op?,
+// peer?, at?, cert? }; text is ignored. v 3 measures a Página's inner,
+// which always carries the v2 keys. Returns the dmTextBytes still free
 // under DM_INNER_BYTES; below zero nothing fits, not even empty text.
 function dmTextBudget (fields = {}) {
   const f = fields !== null && typeof fields === 'object' ? fields : {}
@@ -109,16 +114,19 @@ function dmTextBudget (fields = {}) {
     at: f.at === undefined ? AT_STANDIN : f.at,
     cert: orNull(f.cert)
   }
-  body.v = innerVersion(body)
-  return DM_INNER_BYTES - DM_INNER_FRAMING_BYTES - utf8ByteLength(canonicalInnerJson(body))
+  body.v = f.v === 3 ? 3 : innerVersion(body)
+  const framing = DM_INNER_FRAMING_BYTES + (body.v === 3 ? DM_INNER_V3_EXPIRY_BYTES : 0)
+  return DM_INNER_BYTES - framing - utf8ByteLength(canonicalInnerJson(body))
 }
 
 module.exports = {
   MEMBER_CERT_STANDIN,
   DM_INNER_BYTES,
   DM_INNER_FRAMING_BYTES,
+  DM_INNER_V3_EXPIRY_BYTES,
   DM_INNER_KEYS,
   DM_INNER_KEYS_V2,
+  DM_INNER_KEYS_V3,
   DM_MEDIA_KEYS,
   DM_CARD_KEYS,
   innerVersion,

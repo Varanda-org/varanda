@@ -38,7 +38,7 @@ import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { Pill } from '../ui/Pill'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
-import { Stepper } from '../ui/Stepper'
+import { StepLink, Stepper } from '../ui/Stepper'
 
 // The own profile as the node shows it (profile.read, docs/rpc.md 5.21), or
 // null when the node lists the own key as missing or does not know the method.
@@ -527,8 +527,9 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
       : 'A foto do perfil não pode ser colocada neste momento.'
   if (draft === null) soft = 'A foto sai quando você salvar.'
 
+  const PhotoRow = page ? View : Row
   const photo = (
-    <View style={styles.photo}>
+    <View style={page ? styles.photoPage : styles.photo}>
       <Avatar
         name={name}
         publicKey={ownKey || ''}
@@ -538,16 +539,25 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
         localUri={draftIsPhoto ? draft.previewUrl : undefined}
       />
       <View ref={chooseRef}>
-        <Row>
+        <PhotoRow style={page ? styles.photoActions : undefined}>
           {photoLabel !== null ? <Pill label={photoLabel} onPress={choose} disabled={locked} /> : null}
           {draft === undefined && knownAvatar ? <Pill label='Remover foto' danger onPress={() => setDraft(null)} disabled={locked} /> : null}
           {draftIsPhoto ? <Pill label='Descartar foto' onPress={() => setDraft(undefined)} disabled={locked} /> : null}
           {draft === null ? <Pill label='Manter foto' onPress={() => setDraft(undefined)} disabled={locked} /> : null}
-        </Row>
+        </PhotoRow>
       </View>
-      <Soft>{soft}</Soft>
+      {!page || !hasUpload || draft === null ? <Soft style={page ? styles.photoHint : undefined}>{soft}</Soft> : null}
       <ErrorText>{photoError}</ErrorText>
     </View>
+  )
+
+  const inputs = (
+    <>
+      <Field label={'Nome (' + nameLen + '/' + MAX_NAME + ')'} value={name} onChangeText={setName} editable={!locked} />
+      <Field label={'Bio (' + bioLen + '/' + MAX_BIO + ')'} value={bio} onChangeText={setBio} editable={!locked} multiline lines={3} />
+      <ErrorText>{refused}</ErrorText>
+      <ErrorText>{action.error}</ErrorText>
+    </>
   )
 
   const fields = editor !== null
@@ -563,10 +573,7 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
     : (
       <>
         {photo}
-        <Field label={'Nome (' + nameLen + '/' + MAX_NAME + ')'} value={name} onChangeText={setName} editable={!locked} />
-        <Field label={'Bio (' + bioLen + '/' + MAX_BIO + ')'} value={bio} onChangeText={setBio} editable={!locked} multiline lines={3} />
-        <ErrorText>{refused}</ErrorText>
-        <ErrorText>{action.error}</ErrorText>
+        {inputs}
       </>
       )
 
@@ -593,20 +600,17 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
   if (page) {
     return (
       <KeyboardForm>
-        <Page flush padBottom={16}>
-          <Stepper index={index} total={total} title={STEP_TITLES.perfil} hint={STEP_HINTS.perfil}>
-            {fields}
-            <Pill label='Continuar' filled onPress={save} pending={saving} disabled={!valid || locked} />
-            <Pressable
-              accessibilityRole='button'
-              accessibilityState={{ disabled: locked }}
-              disabled={locked}
-              onPress={skip}
-              hitSlop={4}
-              style={styles.skip}
-            >
-              <Text style={styles.skipText}>Pular por enquanto</Text>
-            </Pressable>
+        <Page flush grow padBottom={16}>
+          <Stepper index={index} total={total} title={STEP_TITLES.perfil} hint={STEP_HINTS.perfil} hero={editor === null ? photo : null}>
+            {editor !== null ? fields : inputs}
+            {editor === null
+              ? (
+                <>
+                  <Btn label='Continuar' block large onPress={save} pending={saving} disabled={!valid || locked} />
+                  <StepLink label='Pular por enquanto' onPress={skip} disabled={locked} />
+                </>
+                )
+              : null}
           </Stepper>
         </Page>
       </KeyboardForm>
@@ -655,6 +659,9 @@ const makeStyles = (colors) => StyleSheet.create({
   editorBack: { minWidth: 40, minHeight: 40, justifyContent: 'center', marginLeft: -8 },
   fill: { flex: 1 },
   photo: { gap: 12, alignItems: 'flex-start' },
+  photoPage: { gap: 12, alignItems: 'center' },
+  photoActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center', justifyContent: 'center' },
+  photoHint: { textAlign: 'center' },
   versions: { gap: 8, marginTop: 8 },
   // The header draws the rule above the first version.
   version: { gap: 4, paddingVertical: 8 },
@@ -663,7 +670,5 @@ const makeStyles = (colors) => StyleSheet.create({
   versionRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   versionText: { flex: 1, gap: 4 },
   versionName: { fontSize: 16, fontWeight: '600', color: colors.ink },
-  versionConfirm: { gap: 8 },
-  skip: { alignSelf: 'flex-start', paddingVertical: 10, paddingHorizontal: 4, minHeight: 44, justifyContent: 'center' },
-  skipText: { fontSize: 15, fontWeight: '600', color: colors.accent }
+  versionConfirm: { gap: 8 }
 })

@@ -49,3 +49,24 @@ test('one follower is "1 seguidor"', (t) => {
     t.ok(/seguidores === 1 \? 'seguidor' : 'seguidores'/.test(src), f)
   }
 })
+
+test('the Anúncios row is a link above the tabs, and the page actions have icons', (t) => {
+  const src = read('screens/Membro.js')
+  const i = src.indexOf('const listingsRow')
+  const row = src.slice(i, src.indexOf('const ratingsRow'))
+  t.ok(row.includes("accessibilityRole='link'"), 'link role')
+  t.ok(row.includes("<Icon name='seta'"), 'chevron')
+  const header = read('ui/ProfileHeader.js')
+  t.ok(header.indexOf('{rows || null}') !== -1 && header.indexOf('{rows || null}') < header.indexOf('{tabs || null}'), 'rows render before the tabs')
+  for (const label of ['Agir como esta página', 'Deixar de agir como a página', 'Ajustes da página', 'Seguir como a página', 'Deixar de seguir como a página', 'Compartilhar perfil']) {
+    const at = src.indexOf(label)
+    t.ok(at !== -1 && /icon: /.test(src.slice(src.lastIndexOf('{', at) - 0, at)), label + ' has an icon')
+  }
+})
+
+test('stacked pills keep the more button on the last pill row', (t) => {
+  const src = read('ui/ProfileHeader.js')
+  t.ok(src.includes('lastStacked'), 'last row wrapper')
+  t.ok(src.includes('if (stacked && last && more)'), 'the last stacked pill takes the more button beside it')
+  t.ok(src.includes('!(stacked && shownActions.length > 0)'), 'the more button is not repeated alone below the pills')
+})

@@ -33,6 +33,16 @@ test('LinkCard never reaches the linked site', (t) => {
   t.ok(src.includes('<MediaView author={thumb.author} descriptor={stored}'), 'post thumbnails use the post photo path')
 })
 
+test('LinkCard thumbnails leave taps to the card', (t) => {
+  const src = withoutComments(read('ui', 'LinkCard.js'))
+  const media = [...src.matchAll(/<MediaView\b[^>]*(?:descriptor=\{stored\}|uri=\{chatUri\})[^>]*\/>/g)]
+  t.is(media.length, 2, 'two stored thumbnail variants')
+  for (const element of media) {
+    t.ok(element[0].includes('tapRetry={false}'), 'retry is disabled inside the link')
+    t.absent(element[0].includes('onPress'), 'the thumbnail has no nested press')
+  }
+})
+
 test('the web composer asks the account preview route', (t) => {
   const file = path.join(SRC, 'previewBuild.web.js')
   if (!fs.existsSync(file)) {

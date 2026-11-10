@@ -789,14 +789,20 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
   }
 
   // The hook of page Conversas (./pages-dm.js): appends { type: 'dm-key',
-  // box, gen } unless the newest valid dm-key is exactly that and within the
-  // newest DM_KEY_REFRESH_BLOCKS blocks (the person's refresh rule,
-  // packages/web-member/lib/member-ops.js dmKeyCurrent), on the page's
-  // chain, so two callers never append it twice. -> { seq | null, length,
-  // pushed }.
+  // box, gen }, the public box a device generated, unless the newest valid
+  // dm-key is exactly that and within the newest DM_KEY_REFRESH_BLOCKS
+  // blocks (the person's refresh rule, packages/web-member/lib/member-ops.js
+  // dmKeyCurrent), on the page's chain, so two callers never append it
+  // twice. -> { seq | null, length, pushed }.
   async function ensureDmKey (key, { box, gen } = {}) {
+    const res = await dmKeyNow(key, { box, gen })
+    if (res.seq === null) return { ...res, pushed: true }
+    return { ...res, pushed: await waitPushed(key, res.length) }
+  }
+
+  function dmKeyNow (key, { box, gen } = {}) {
     if (typeof box !== 'string' || !HEX64_RE.test(box) || !Number.isSafeInteger(gen) || gen < 1) throw fail('invalido')
-    const res = await withPage(key, async (p) => {
+    return withPage(key, async (p) => {
       const floor = Math.max(1, p.length - DM_KEY_REFRESH_BLOCKS)
       let best = null
       if (p.dmKey && p.dmKey.seq >= floor && p.dmKey.seq < p.length) {
@@ -823,8 +829,6 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
         throw err.code === 'INVALID_RECORD' ? fail('invalido') : err
       }
     })
-    if (res.seq === null) return { ...res, pushed: true }
-    return { ...res, pushed: await waitPushed(key, res.length) }
   }
 
   // ---- media ----------------------------------------------------------
@@ -1064,12 +1068,16 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
   // all on K1's chain. A paused K1 gets no block: the answer carries the
   // record for a detached statement. K1 is read only from then on, still
   // announced; its secrets are wiped once the seeder holds K2's genesis.
+  // dmKey { box, gen }: K2's dm-key, appended after its genesis and before
+  // K2 is announced, so no reader ever finds K2 without it.
   // -> { key, length, pushed, moved: seq | null, wiped, paused?, record? }.
   async function movePage (args = {}) {
     const input = copyJson(isPlainObject(args)
-      ? { from: args.from, to: args.to, cert: args.cert, usernameRecord: args.usernameRecord, rosterRecord: args.rosterRecord, originRecord: args.originRecord, movedRecord: args.movedRecord, depth: args.depth }
+      ? { from: args.from, to: args.to, cert: args.cert, usernameRecord: args.usernameRecord, rosterRecord: args.rosterRecord, originRecord: args.originRecord, movedRecord: args.movedRecord, depth: args.depth, dmKey: args.dmKey === undefined ? null : args.dmKey }
       : {})
     const { from, to, cert, usernameRecord, rosterRecord, originRecord, movedRecord, depth } = input
+    const dmKey = input.dmKey === undefined ? null : input.dmKey
+    if (dmKey !== null && (!isPlainObject(dmKey) || typeof dmKey.box !== 'string' || !HEX64_RE.test(dmKey.box) || !Number.isSafeInteger(dmKey.gen) || dmKey.gen < 1)) throw fail('invalido')
     if (!Number.isSafeInteger(depth) || depth < 1) throw fail('invalido')
     if (depth > MAX_MOVE_DEPTH) throw fail('limite')
     if (typeof from !== 'string' || !HEX64_RE.test(from) || from === to) throw fail('invalido')
@@ -1102,10 +1110,10 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     }
     // K2 created by an earlier run of this move whose answer was uncertain
     // (never announced, no terminal record on K1 yet): the resend reuses it.
-    const createK2 = () => {
+    const createK2 = async () => {
       const p2 = pages.get(to)
-      if (p2 !== undefined && !p2.announced && p2.terminal === null) return
-      return queueCreate(to, cert, rest, false)
+      if (!(p2 !== undefined && !p2.announced && p2.terminal === null)) await queueCreate(to, cert, rest, false)
+      if (dmKey !== null) await dmKeyNow(to, dmKey)
     }
     const pausedMove = async (p, create) => {
       if (create) await createK2()

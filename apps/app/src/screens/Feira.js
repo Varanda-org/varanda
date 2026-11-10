@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { Keyboard, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -12,6 +12,7 @@ import {
   createFeiraProbe, filterState, loadFeiraPage, mergeRows, rowDecision, runFeiraAlerts, savedSearch, screenState
 } from '../feiraScreen'
 import { Btn, Field, Soft, useBottomPad } from '../ui'
+import { TEXT_CAP } from '../ui/Sheet'
 import { FilterChips } from '../ui/FilterChips'
 import { ListingCard } from '../ui/ListingCard'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -160,6 +161,7 @@ export default function Feira ({
   }, [scope, active, locationReady])
 
   function applyFilters (next = filters) {
+    Keyboard.dismiss()
     const value = filterState(next)
     setFilters(value)
     setApplied(value)
@@ -289,7 +291,7 @@ export default function Feira ({
             onPress={onAnnounce}
             style={({ pressed }) => [styles.fab, { bottom: insets.bottom + layout.tabBar + layout.fabAboveTabs }, pressed && styles.pressed]}
           >
-            <Text style={styles.fabText}>Anunciar</Text>
+            <Text style={styles.fabText} maxFontSizeMultiplier={TEXT_CAP}>Anunciar</Text>
           </Pressable>
           )
         : null}

@@ -728,3 +728,135 @@ test('pages-store: no secret key is ever stored', async (t) => {
   t.absent(fs.readFileSync(file, 'utf8').includes(secret))
   t.absent(fs.readFileSync(file, 'utf8').includes(secret.slice(0, 64)))
 })
+
+function sealedB64 () {
+  return crypto.randomBytes(213).toString('base64')
+}
+
+function dmRow (gen, members, by) {
+  const shares = {}
+  for (const m of members) shares[m] = { gen, sealed: sealedB64(), by, sig: sig(), at: iso(T0) }
+  return { gen, box: key(), groupBox: key(), shares, pending: {}, reboxPending: false, legacyBundle: null, rotatePending: null }
+}
+
+test('pages-store: dm keeps opaque shares, survives a reopen, leaves at close and move', async (t) => {
+  const { store, open } = setup(t)
+  const owner = key()
+  const page = key()
+  await store.create({ page, owner })
+  t.absent('dm' in store.get(page), 'a page starts without dm')
+  t.exception.all(() => store.setDm(page, { ...dmRow(1, [owner], owner), gen: 0 }), /dm must be/)
+  const bad = dmRow(1, [owner], owner)
+  bad.shares[owner].sealed = crypto.randomBytes(212).toString('base64')
+  t.exception.all(() => store.setDm(page, bad), /dm must be/, 'a sealed share of another size is refused')
+  const d = dmRow(1, [owner], owner)
+  t.exception.all(() => store.setDm(page, { ...d, legacyBundle: { for: owner, id: key(), count: 1025 } }), /dm must be/, 'a bundle of more than 1024 chunks is refused')
+  t.exception.all(() => store.setDm(page, { ...d, legacyBundle: { for: owner, id: key() } }), /dm must be/, 'a bundle without its count is refused')
+  d.legacyBundle = { for: owner, id: key(), count: 3 }
+  await store.setDm(page, d)
+  t.alike(open().get(page).dm, d, 'persisted in pages.json')
+  await store.close(page)
+  t.absent('dm' in store.get(page), 'a close drops the shares')
+
+  const p2 = key()
+  const k2 = key()
+  await store.create({ page: p2, owner })
+  await store.setDm(p2, dmRow(1, [owner], owner))
+  await store.move(p2, k2)
+  t.absent('dm' in store.get(p2), 'a moved page keeps no shares')
+  await store.setDm(k2, null)
+  t.absent('dm' in store.get(k2))
+})
+
+test('pages-store: an invite share becomes a share at accept; a removed admin keeps none', async (t) => {
+  const { store } = setup(t)
+  const owner = key()
+  const bia = key()
+  const caio = key()
+  const page = key()
+  await store.create({ page, owner })
+  const share = { sealed: sealedB64(), sig: sig() }
+  await rejects(t, store.invite(page, bia, { gen: 2, rosterSignature: sig(), share }), 'pedido-invalido', 'no share before the page has dm')
+  await store.setDm(page, dmRow(1, [owner], owner))
+  await store.invite(page, bia, { gen: 2, rosterSignature: sig(), share })
+  t.alike(store.get(page).dm.pending[bia], { gen: 1, ...share }, 'kept with the invite')
+  const next = store.accept(page, bia)
+  await store.setRoster(page, { gen: next.gen, seq: 3, owner: next.owner, admins: next.admins })
+  const row = store.get(page)
+  t.alike(row.dm.pending, {}, 'pending emptied')
+  t.is(row.dm.shares[bia].sealed, share.sealed, 'moved to the shares')
+  t.is(row.dm.shares[bia].by, owner, 'by the inviter')
+  t.is(row.dm.shares[bia].gen, 1)
+
+  await store.invite(page, caio, { gen: 3, rosterSignature: sig() })
+  const n2 = store.accept(page, caio)
+  await store.setRoster(page, { gen: n2.gen, seq: 4, owner: n2.owner, admins: n2.admins })
+  t.absent(store.get(page).dm.shares[caio], 'an invite without a share files none')
+  const gone = store.remove(page, bia)
+  await store.setRoster(page, { gen: gone.gen, seq: 5, owner: gone.owner, admins: gone.admins })
+  t.absent(store.get(page).dm.shares[bia], 'a removed admin keeps no share')
+  t.ok(store.get(page).dm.shares[owner])
+})
+
+test('pages-store: never commits a row its own reader would refuse; promoteDm only promotes the rotation it names', async (t) => {
+  const { store, open } = setup(t)
+  const owner = key()
+  const bia = key()
+  const page = key()
+  await store.create({ page, owner })
+  const P = { kind: 'box', idem: owner + ':' + nonce(), gen: 1, box: key(), groupBox: key(), shares: { [owner]: { gen: 1, sealed: sealedB64(), by: owner, sig: sig(), at: iso(T0) } } }
+  await store.setDm(page, { gen: 0, box: null, groupBox: null, shares: {}, pending: {}, reboxPending: false, legacyBundle: null, rotatePending: P })
+  await rejects(t, store.invite(page, bia, { gen: 2, rosterSignature: sig(), share: { sealed: sealedB64(), sig: sig() } }), 'rotacao-necessaria', 'no invite share during a first rotation')
+  t.ok(store.available(), 'the store stays usable')
+  await store.invite(page, bia, { gen: 2, rosterSignature: sig() })
+  t.ok(open().get(page).invites[bia], 'a further write and a reopen succeed')
+
+  t.is(await store.promoteDm(page, { idem: owner + ':' + nonce(), gen: 1 }), null, 'another rotation is not promoted')
+  t.is(store.get(page).dm.rotatePending.idem, P.idem, 'and nothing was written')
+  const d = await store.promoteDm(page, { idem: P.idem, gen: 1 })
+  t.is(d.gen, 1)
+  t.is(d.box, P.box)
+  t.is(d.rotatePending, null)
+  t.alike(open().get(page).dm, d)
+})
+
+test('pages-store: the legacy bundle is carried through a promotion, a roster change and a transfer', async (t) => {
+  const { store, open } = setup(t)
+  const owner = key()
+  const bia = key()
+  const page = key()
+  await store.create({ page, owner })
+  const bundle = { for: owner, id: key(), count: 2 }
+  const P = { kind: 'box', idem: owner + ':' + nonce(), gen: 2, box: key(), groupBox: key(), shares: { [owner]: { gen: 2, sealed: sealedB64(), by: owner, sig: sig(), at: iso(T0) } } }
+  await store.setDm(page, { ...dmRow(1, [owner], owner), legacyBundle: bundle, rotatePending: P })
+  const d = await store.promoteDm(page, { idem: P.idem, gen: 2 })
+  t.alike(d.legacyBundle, bundle, 'kept by the promotion')
+  await store.invite(page, bia, { gen: 2, rosterSignature: sig() })
+  const next = store.accept(page, bia)
+  await store.setRoster(page, { gen: next.gen, seq: 3, owner: next.owner, admins: next.admins })
+  t.alike(store.get(page).dm.legacyBundle, bundle, 'kept by a roster change')
+  await store.setRoster(page, { gen: next.gen + 1, seq: 4, owner: bia, admins: [owner] })
+  t.alike(open().get(page).dm.legacyBundle, bundle, 'kept, still for the old owner, after a transfer')
+  await store.close(page)
+  t.absent('dm' in store.get(page), 'a close drops it')
+})
+
+test('pages-store: a move carries the legacy bundle to K2, with its keys or alone in a gen 0 row', async (t) => {
+  const { store, open } = setup(t)
+  const owner = key()
+  const page = key()
+  await store.create({ page, owner })
+  const bundle = { for: owner, id: key(), count: 2 }
+  const bare = { gen: 0, box: null, groupBox: null, shares: {}, pending: {}, reboxPending: false, legacyBundle: null, rotatePending: null }
+  t.exception.all(() => store.setDm(page, bare), /dm must be/, 'a gen 0 row with neither a rotation nor a bundle is refused')
+  const k2 = key()
+  await store.move(page, k2, { dm: { ...bare, legacyBundle: bundle } })
+  t.alike(open().get(k2).dm, { ...bare, legacyBundle: bundle }, 'K2 holds the bundle alone, after a reopen')
+  t.absent('dm' in store.get(page), 'K1 keeps no dm')
+
+  const k3 = key()
+  const withKeys = { ...dmRow(1, [owner], owner), legacyBundle: bundle }
+  await store.move(k2, k3, { dm: withKeys })
+  t.alike(store.get(k3).dm.legacyBundle, bundle, 'carried with K3 gen 1 keys')
+  t.exception.all(() => store.move(k3, key(), { dm: { ...bare } }), /dm must be/, 'a move never commits an empty gen 0 row')
+})

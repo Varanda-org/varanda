@@ -1,5 +1,5 @@
 import { pictures } from './pictures.js'
-import { PICTURE_BASE } from './fixtures.js'
+import { PICTURE_BASE, postPictureIndex } from './fixtures.js'
 
 // The node's chat media handle for the Vitrine (read, putDm, putMoment,
 // upload and the two no-op sweeps of src/node.js CHAT_MEDIA_CALLS). Everything stays in
@@ -11,9 +11,13 @@ const keyOf = (n) => n.toString(16).padStart(64, '0')
 const fail = (message) => Object.assign(new Error(message), { code: 'USAGE' })
 const gone = () => Object.assign(new Error('foto indisponível'), { code: 'NOT_FOUND' })
 
-// Fixture items name their drawing through the sha256 (see fixtures.js).
+// Fixture items name their drawing through the sha256 (see fixtures.js):
+// either the synthetic key of a private item or the real hash of a public
+// photo (feed posts and listings), which publicMedia.js also serves.
 function pictureOf (sha) {
   if (typeof sha !== 'string' || !/^[0-9a-f]{64}$/.test(sha)) return null
+  const real = postPictureIndex(sha)
+  if (real >= 0) return pictures[real]
   const p = parseInt(sha.slice(2), 16) - PICTURE_BASE
   return Number.isInteger(p) && p >= 0 && p < pictures.length ? pictures[p] : null
 }

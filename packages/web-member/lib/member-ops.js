@@ -2079,9 +2079,21 @@ async function makeGroupRoom (ctx, base, group, more = []) {
   }
 }
 
-// The fold of `group` from local data, or null when its root is not held.
-async function loadGroup (ctx, base, group) {
+// A diary's entries for a fold of `base`: the own diary (and, in a page
+// fold, this device's identity, read as the own fold reads it) whole unless
+// blocked, any other through feedRead's admission.
+async function foldEntriesOf (ctx, base, d) {
   const { ownHex, ownEntries, association, mod } = base
+  if (d === ownHex) return mod.blocked.has(ownHex) ? null : ownEntries
+  if (base.local && d === base.local.hex) return mod.blocked.has(d) ? null : base.local.entries
+  return admittedEntries(await replicaRead(ctx, d, mod), d, association, mod)
+}
+
+// The fold of `group` from local data, or null when its root is not held.
+// asPage: base.ownHex is a page this device holds the secrets of
+// (pageGroupRead), which has no own writer here.
+async function loadGroup (ctx, base, group, asPage = false) {
+  const { ownHex, mod } = base
   // A group block in the stored snapshot names the root key: the group reads
   // as unknown to every operation, its local cores stay where they are.
   if (mod.blocked.has(group)) return null
@@ -2089,9 +2101,11 @@ async function loadGroup (ctx, base, group) {
   if (root === null || root.length === 0 || root.fork !== 0) return null
   const rootHeader = root.entries[0].record
   if (!foldableHeader(rootHeader)) return null
-  const own = (await store.readGroupWriters(ctx.storage)).find((e) => e.group === group) || null
+  const listed = (await store.readGroupWriters(ctx.storage)).find((e) => e.group === group) || null
+  const own = asPage ? null : listed
   const keys = new Set(await store.readGroupReplicas(ctx.storage))
-  if (own !== null) keys.add(own.key)
+  // A page fold keeps this device's identity's writer as a foreign one.
+  if (listed !== null) keys.add(listed.key)
   keys.delete(group)
   const writers = []
   const cores = new Map([[group, { diary: rootHeader.diary, at: rootHeader.at, length: root.length, signed: root.signed, entries: root.entries }]])
@@ -2118,7 +2132,7 @@ async function loadGroup (ctx, base, group) {
   for (const d of new Set([ownHex, rootHeader.diary, ...writers.map((w) => w.diary)])) {
     // A blocked own diary binds none of its writers, as in the core node (the
     // feed keeps its own rule for the own diary).
-    const entries = d === ownHex ? (mod.blocked.has(ownHex) ? null : ownEntries) : admittedEntries(await replicaRead(ctx, d, mod), d, association, mod)
+    const entries = await foldEntriesOf(ctx, base, d)
     diaries.set(d, entries)
     if (entries !== null) {
       joins.set(d, groupJoinHistory(entries, group))
@@ -2905,51 +2919,176 @@ function groupInvitePolicy (ctx, { group, members }) {
 // One page backwards over the causal order, newest first (feed.read's
 // shape); a hidden post keeps its place with an empty text.
 async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = null } = {}) {
-  return withGroup(ctx, group, false, async ({ base, g }) => {
-    const all = g.built.posts.filter((p) => g.diaries.get(p.diary))
-    // Older than the cursor: with the cursor post still in the fold, every
-    // post before it in the causal order; without it (gone after a sync), each
-    // post whose order key (at, writer, seq) is below the cursor's, checked one
-    // by one in causal order. Causal and key order can differ, so a count of
-    // such posts would not be a position in the causal array.
-    let posts = all
-    if (before !== null && before !== undefined) {
-      const i = all.findIndex((p) => p.writer === before.writer && p.seq === before.seq)
-      if (i >= 0) {
-        posts = all.slice(0, i)
-      } else {
-        const k = orderKey(before.at, before.writer, before.seq)
-        posts = all.filter((p) => compareOrder(orderKey(p.at, p.writer, p.seq), k) < 0)
-      }
-    }
-    const start = Math.max(0, posts.length - (limit || GROUP_LIMIT_DEFAULT))
-    const page = posts.slice(start).reverse()
-    const items = page.map((p) => ({
-      writer: p.writer,
-      diary: p.diary,
-      seq: p.seq,
-      at: p.at,
-      text: p.hidden ? '' : p.text,
-      replyTo: p.replyTo,
-      fwd: p.fwd,
-      media: p.hidden || !Array.isArray(p.media) ? null : copyGroupMedia(p.media, typeof p.media[0].key === 'string'),
-      card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
-      hidden: p.hidden,
-      ...authorOf(g, p.diary, base.association, base.mod)
-    }))
-    const oldest = items.length > 0 ? items[items.length - 1] : null
-    return {
-      items,
-      next: start > 0 && oldest !== null ? { at: oldest.at, writer: oldest.writer, seq: oldest.seq } : null,
-      hidden: items.filter((p) => p.hidden).length,
-      incomplete: g.built.incomplete,
-      sealed: g.built.sealed,
-      epoch: g.built.epoch === null ? null : { writer: g.built.epoch.writer, seq: g.built.epoch.seq },
-      state: keyState(ctx, g)
-    }
-  }, (p) => {
+  return withGroup(ctx, group, false, async ({ base, g }) => ({ ...readFold(base, g, { limit, before }), state: keyState(ctx, g) }), (p) => {
     requirePendingOwn(p)
     return { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' }
+  })
+}
+
+// group.read's page of fold g, without its state.
+function readFold (base, g, { limit, before }) {
+  const all = g.built.posts.filter((p) => g.diaries.get(p.diary))
+  // Older than the cursor: with the cursor post still in the fold, every
+  // post before it in the causal order; without it (gone after a sync), each
+  // post whose order key (at, writer, seq) is below the cursor's, checked one
+  // by one in causal order. Causal and key order can differ, so a count of
+  // such posts would not be a position in the causal array.
+  let posts = all
+  if (before !== null && before !== undefined) {
+    const i = all.findIndex((p) => p.writer === before.writer && p.seq === before.seq)
+    if (i >= 0) {
+      posts = all.slice(0, i)
+    } else {
+      const k = orderKey(before.at, before.writer, before.seq)
+      posts = all.filter((p) => compareOrder(orderKey(p.at, p.writer, p.seq), k) < 0)
+    }
+  }
+  const start = Math.max(0, posts.length - (limit || GROUP_LIMIT_DEFAULT))
+  const page = posts.slice(start).reverse()
+  const items = page.map((p) => ({
+    writer: p.writer,
+    diary: p.diary,
+    seq: p.seq,
+    at: p.at,
+    text: p.hidden ? '' : p.text,
+    replyTo: p.replyTo,
+    fwd: p.fwd,
+    media: p.hidden || !Array.isArray(p.media) ? null : copyGroupMedia(p.media, typeof p.media[0].key === 'string'),
+    card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
+    hidden: p.hidden,
+    ...authorOf(g, p.diary, base.association, base.mod)
+  }))
+  const oldest = items.length > 0 ? items[items.length - 1] : null
+  return {
+    items,
+    next: start > 0 && oldest !== null ? { at: oldest.at, writer: oldest.writer, seq: oldest.seq } : null,
+    hidden: items.filter((p) => p.hidden).length,
+    incomplete: g.built.incomplete,
+    sealed: g.built.sealed,
+    epoch: g.built.epoch === null ? null : { writer: g.built.epoch.writer, seq: g.built.epoch.seq }
+  }
+}
+
+// ---- a page's private groups (docs/rpc.md 5.114) ----
+
+// Folds `group` as page `page`: the page diary stands where the own diary
+// does, this device has no writer of its own there, and ctx.groupKeys is the
+// page's holder (./page-groups.js), so the fold's writers are the page's
+// cores whose header box is the page's group box and every epoch key opened
+// stays in that holder. fn({ base, g, pageHex }); null when the root is not
+// held here.
+async function withPageGroup (ctx, group, page, fn) {
+  const key = groupKeyOf(group)
+  const pageHex = groupKeyOf(page)
+  const association = await trustRoot(ctx)
+  const mod = await moderation(ctx.storage, association)
+  const entries = admittedEntries(await replicaRead(ctx, pageHex, mod), pageHex, association, mod)
+  let local = null
+  if (await store.diaryExists(ctx.storage)) {
+    local = await withIdentity(ctx, async ({ diary, ownHex }) => ({ hex: ownHex, entries: await store.readAll(diary) }))
+    if (local.hex === pageHex) local = null
+  }
+  const base = { ownHex: pageHex, ownEntries: entries === null ? [] : entries, association, mod, local }
+  const g = await loadGroup(ctx, base, key, true)
+  if (g === null) return null
+  return fn({ base, g, pageHex })
+}
+
+// The page's writer a sealed post goes in: counted live by the fold, of the
+// page's diary and under the held group box (g.mine).
+function pageLiveWriter (g, pageHex) {
+  if (statusOf(g, pageHex) !== 'member' || !(g.built.liveWriters instanceof Set)) return null
+  for (const key of [...g.mine].sort()) {
+    if (g.built.liveWriters.has(key) && g.built.writers.has(key)) return key
+  }
+  return null
+}
+
+// 'rekey-pending' also when no epoch held covers the page's live writer.
+function pageKeyState (ctx, g, pageHex) {
+  if (!g.private) return 'ok'
+  if (boxHexOf(ctx) === null) return 'locked'
+  if (g.built.rekeyPending) return 'rekey-pending'
+  return pageLiveWriter(g, pageHex) !== null && rekeyBlocksWrite(ctx, g) ? 'rekey-pending' : 'ok'
+}
+
+// group.read with `page` -> group.read's shape plus `role`, the page's,
+// and `visibility`; null when the root is not held here (the caller lists
+// it for the next sync).
+async function pageGroupRead (ctx, { group, page, limit = GROUP_LIMIT_DEFAULT, before = null }) {
+  return withPageGroup(ctx, group, page, ({ base, g, pageHex }) => ({
+    ...readFold(base, g, { limit, before }),
+    state: pageKeyState(ctx, g, pageHex),
+    role: roleOf(g, pageHex),
+    // From the root header this fold verified, never from the service.
+    visibility: g.private ? 'private' : 'public'
+  }))
+}
+
+// The roots `pages` (held here) are in, from each page diary's live
+// group-join records as stored here: what a sync run keeps paged for them
+// (sync.js pageRoots). A page not stored here adds nothing.
+async function pageGroupRoots (ctx, pages) {
+  const association = await trustRoot(ctx)
+  const mod = await moderation(ctx.storage, association)
+  const out = new Set()
+  for (const page of pages) {
+    const pageHex = groupKeyOf(page)
+    const entries = admittedEntries(await replicaRead(ctx, pageHex, mod), pageHex, association, mod)
+    if (entries === null) continue
+    for (const key of grp.diaryGroupKeys(entries)) if (!mod.blocked.has(key)) out.add(key)
+  }
+  return [...out]
+}
+
+// group.read with `page` while this device holds no secrets for the page:
+// the visibility of the root header, checked as loadGroup checks it (the
+// plaintext header needs no key), and nothing else. null when the root is
+// not held here.
+async function pageGroupNoKey (ctx, { group }) {
+  const key = groupKeyOf(group)
+  const association = await trustRoot(ctx)
+  const mod = await moderation(ctx.storage, association)
+  if (mod.blocked.has(key)) return null
+  const root = await readGroupCore(ctx, key)
+  if (root === null || root.length === 0 || root.fork !== 0) return null
+  const header = root.entries[0].record
+  if (!foldableHeader(header)) return null
+  return {
+    items: [],
+    next: null,
+    hidden: 0,
+    incomplete: false,
+    sealed: 0,
+    epoch: null,
+    state: 'no-key',
+    role: null,
+    visibility: header.visibility === 'private' ? 'private' : 'public'
+  }
+}
+
+// group.seal: a group-post sealed under the epoch the fold holds eligible
+// for the page's live writer -> { kid, nonce, box, at, writer, seq } (seq:
+// that writer core's length here), for the owner or an admin to send as
+// 'group-seal'. Writes nothing. null when the root is not held here.
+async function pageGroupSeal (ctx, { group, page, text, replyTo = null, fwd = 0 }) {
+  return withPageGroup(ctx, group, page, ({ g, pageHex }) => {
+    if (!g.private) throw new UsageError(GROUP_PUBLIC_NO_KEY)
+    const writer = pageLiveWriter(g, pageHex)
+    if (writer === null) {
+      if (g.built.rekeyPending) throw new UsageError(GROUP_REKEY_PENDING)
+      throw new UsageError(GROUP_FORBIDDEN)
+    }
+    const record = buildRecord(() => grp.groupPost({ text, replyTo, fwd, seen: g.built.last, sealed: true }))
+    const sealed = sealForGroup(ctx, g, writer, record)
+    return {
+      kid: { writer: sealed.kid.writer, seq: sealed.kid.seq },
+      nonce: sealed.nonce,
+      box: sealed.box,
+      at: sealed.at,
+      writer,
+      seq: g.cores.get(writer).length
+    }
   })
 }
 
@@ -3501,7 +3640,7 @@ function communityKeyOf (community) {
 // null when the root is not held, forked, blocked or no community root.
 // `input` is buildCommunity's (and buildGroup's `community`).
 async function loadCommunity (ctx, base, key) {
-  const { ownHex, ownEntries, association, mod } = base
+  const { ownHex, mod } = base
   if (mod.blocked.has(key)) return null
   const root = await readGroupCore(ctx, key)
   if (root === null || root.length === 0 || root.fork !== 0) return null
@@ -3524,7 +3663,7 @@ async function loadCommunity (ctx, base, key) {
   const joins = new Map()
   const confirms = new Map()
   for (const d of new Set([ownHex, header.diary, ...writers.map((w) => w.diary)])) {
-    const entries = d === ownHex ? (mod.blocked.has(ownHex) ? null : ownEntries) : admittedEntries(await replicaRead(ctx, d, mod), d, association, mod)
+    const entries = await foldEntriesOf(ctx, base, d)
     diaries.set(d, entries)
     if (entries !== null) {
       joins.set(d, groupJoinHistory(entries, key))
@@ -4898,6 +5037,10 @@ module.exports = {
   groupRekey,
   canSealTo,
   groupRead,
+  pageGroupRead,
+  pageGroupNoKey,
+  pageGroupRoots,
+  pageGroupSeal,
   groupList,
   groupInfo,
   groupMembers,

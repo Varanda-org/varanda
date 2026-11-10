@@ -30,6 +30,7 @@ import { hideTestimonial, loadTestimonialHidden } from '../testimonialHideStore'
 import { relativeTime } from '../format'
 import { diaryPeekSlots } from '../engagement'
 import { whoOf } from '../who'
+import { refusalOf } from '../wordCheck'
 import { ConfirmStack, ErrorText, Label, Soft, UNCERTAIN, errorText, useBottomPad, useNow } from '../ui'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
@@ -472,6 +473,8 @@ export function WriteTestimonialSheet ({ open, to, name, onClose, onSent, onUnce
   const body = text.trim()
   const over = textLength(body) > TESTIMONIAL_TEXT_MAX
   const send = async () => {
+    const refused = refusalOf(body)
+    if (refused !== '') { setError(refused); return }
     let result = null
     let uncertain = false
     const ok = await action.run(async () => {
@@ -683,6 +686,8 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
   // 'Mostrar no perfil': one testimonial.show, never repeated by itself.
   const show = useCallback(async (row) => {
     if (showing !== null) return
+    const refused = refusalOf(row.text)
+    if (refused !== '') { setShowError(refused); return }
     setShowing(row.ref)
     setShowError(null)
     try {

@@ -48,8 +48,8 @@ test('constants', (t) => {
   t.is(PREFIX, 'varanda-page-v1')
   t.alike(ACTIONS, [
     'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
-    'avatar', 'rename', 'invite', 'dm-list', 'dm-thread', 'dm-send', 'dm-set',
-    'dm-seen', 'follow', 'follows', 'media', 'notices', 'terms', 'community-join',
+    'avatar', 'rename', 'invite', 'dm-list', 'dm-thread',
+    'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'group-seal', 'group-rebox', 'follow', 'follows', 'media', 'notices', 'terms', 'community-join',
     'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'listing',
     'listing-edit', 'listing-status', 'listing-consent'
   ])
@@ -343,7 +343,7 @@ test('the module is pure: no fs, no network, no cert.js', (t) => {
 
 // The three lists differ by design (record actions, rpc-only names), so only
 // membership of the Feira actions is pinned, read from each file's source.
-test('the Feira actions are in ACTIONS, PAGE_ACTIONS and STATEMENTS', (t) => {
+test('the Feira and legacy bundle actions are in ACTIONS, PAGE_ACTIONS and STATEMENTS', (t) => {
   const fs = require('node:fs')
   const FEIRA = ['listing', 'listing-edit', 'listing-status', 'listing-consent']
   const literal = (file, name) => {
@@ -359,5 +359,12 @@ test('the Feira actions are in ACTIONS, PAGE_ACTIONS and STATEMENTS', (t) => {
     t.ok(ACTIONS.includes(name), 'ACTIONS has ' + name)
     t.ok(pageActions.includes(name), 'PAGE_ACTIONS has ' + name)
     t.ok(statements.includes(name), 'STATEMENTS has ' + name)
+  }
+  // STATEMENTS spreads DM_ACTIONS.
+  const dmActions = literal('apps/cli/lib/account/pages-routes.js', 'DM_ACTIONS')
+  for (const name of ['dm-legacy-read', 'dm-legacy-done']) {
+    t.ok(ACTIONS.includes(name), 'ACTIONS has ' + name)
+    t.ok(pageActions.includes(name), 'PAGE_ACTIONS has ' + name)
+    t.ok(dmActions.includes(name), 'DM_ACTIONS has ' + name)
   }
 })

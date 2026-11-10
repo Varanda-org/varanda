@@ -1,8 +1,8 @@
 import { fixtures, postPictureBytes } from './fixtures.js'
 
 // The Vitrine's stand-in for the installation's /media route, so a public
-// post photo loads through the same verified path as on a live network. It
-// answers only for photos the fixture posts name; nothing leaves the page.
+// post or listing photo loads through the same verified path as on a live network.
+// It answers only for photos the fixtures name; nothing leaves the page.
 
 const HEX64 = /^[0-9a-f]{64}$/
 
@@ -14,12 +14,18 @@ const answer = (status, bytes) => ({
   arrayBuffer: async () => (bytes ? bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) : new ArrayBuffer(0))
 })
 
-// The descriptor a fixture post names at author/core/start/blocks, or null.
+// The descriptor a fixture names at author/core/start/blocks, or null.
 function descriptorOf (author, core, start, blocks) {
   if (!HEX64.test(author) || !HEX64.test(core) || !/^[1-9][0-9]*$/.test(start) || !/^[1-9][0-9]*$/.test(blocks)) return null
   for (const post of fixtures.feed) {
     if (post.author !== author || !Array.isArray(post.media)) continue
     for (const d of post.media) {
+      if (d.core === core && String(d.start) === start && String(d.blocks) === blocks) return d
+    }
+  }
+  for (const { author: owner, record } of fixtures.listings) {
+    if (owner !== author || !['listing', 'listing-edit'].includes(record.type) || !Array.isArray(record.media)) continue
+    for (const d of record.media) {
       if (d.core === core && String(d.start) === start && String(d.blocks) === blocks) return d
     }
   }

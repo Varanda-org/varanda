@@ -4235,6 +4235,8 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 
 ## 85. Conversas como página (PR feat/pages-app)
 
+> Superada pela seção 148 para as Conversas de página de ponta a ponta.
+
 Uma Página tem Conversas, mas a chave de mensagens dela fica no serviço de conta, que pode ler as mensagens enviadas e recebidas pela página. Protocolo na seção 12 de `docs/protocol.md` ("Conversas como página"); dados em `docs/design.md` (LGPD); telas em `docs/app.md` ("Páginas"). Termos e Política na versão 15.
 
 ### Como verificar
@@ -4370,6 +4372,8 @@ Todas a fazer (nenhuma foi rodada). Primeiro o app no Android (build de debug ap
 - A CLI nunca reenvia um pedido: um resultado incerto pede conferência antes de repetir.
 
 ## 90. Páginas em comunidades (PR feat/pages-app)
+
+Esta seção foi substituída pela seção 149 para grupos privados como Página.
 
 Uma página entra em comunidades e grupos como membro, por núcleos de escritor próprios que o serviço de conta guarda (`pages-groups`). Ela só entra, sai, lê e escreve: nunca cria, admite, bane, nomeia, oculta nem troca a chave de um grupo. Em comunidade de aprovação a página fica "pedida" até os administradores a admitirem. Nos grupos privados o serviço guarda a caixa da página e pode ler as publicações (Termos 15). Contrato em `docs/protocol.md` seção 12 ("Comunidades como página") e `docs/rpc.md` (5.84).
 
@@ -5079,7 +5083,7 @@ Limites desta caminhada:
 
 ## 104. Blobs anônimos das conversas: selos, canal, conjunto e rota `/blob` (PR feat/blob-channel)
 
-Roteiro do canal de mídia das mensagens diretas no semeador: o tipo de selo `blob`, o canal `'varanda/blob/1'`, o conjunto em `<dados>/blobs/` e a rota `GET|HEAD /blob/<id>/<índice>`. O formato está em [protocol.md](protocol.md), seção 13, e o tipo de selo na seção 11. A função chega ao app só num PR posterior: nenhuma tela usa isto ainda, então nada aqui muda os Termos nem a Política. Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e o registro fica guardado.
+Roteiro do canal de mídia das mensagens diretas no semeador: o tipo de selo `blob`, o canal `'varanda/blob/1'`, o conjunto em `<dados>/blobs/` e a rota `GET|HEAD /blob/<id>/<índice>`. O formato está em [protocol.md](protocol.md), seção 13, e o tipo de selo na seção 11. O app passou a usar este canal nas seções 107 e 108. Nada abaixo foi executado nesta documentação: as caixas só são marcadas depois que o passo roda e o registro fica guardado.
 
 Regras que os passos conferem:
 
@@ -5113,7 +5117,7 @@ Como verificar, a partir da raiz (só os arquivos desta área):
 
 Limites desta caminhada:
 
-- O app ainda não envia nem mostra mídia por este canal; só o semeador e os testes o exercitam.
+- O app envia e mostra mídia por este canal (veja as seções 107 e 108); esta caminhada exercita só o semeador.
 - O horário e a leitura repetida do mesmo id continuam visíveis ao semeador (protocol.md, seção 13, "Privacidade"); isto não é resistência à análise de tráfego.
 - Nenhuma caixa acima foi executada nesta documentação.
 
@@ -5146,8 +5150,8 @@ Como verificar, a partir da raiz (só os arquivos desta área):
 
 Limites desta caminhada:
 
-- O app ainda não anexa nem mostra mídia, e o `dm.putMedia` nativo responde erro interno até o PR do app.
-- A rota de anexo tem 4 vagas globais que corpos lentos e anônimos podem ocupar até o tempo limite de 10 s; a autorização assinada nos cabeçalhos, antes de ler o corpo, vem com o envio do app.
+- O app anexa e mostra mídia nas mensagens (veja a seção 107); esta caminhada exercita só o nó, o semeador e a RPC.
+- A rota de anexo tem 4 vagas globais que corpos lentos e anônimos podem ocupar até o tempo limite de 10 s; se a autorização assinada nos cabeçalhos, antes de ler o corpo, já vale, esta caminhada não confere.
 - Nenhuma caixa acima foi executada nesta documentação.
 
 ## 106. Fotos nos grupos públicos e privados: protocolo, nó e RPC (PR feat/group-media-protocol)
@@ -5194,7 +5198,7 @@ Como verificar, a partir da raiz (só os arquivos desta área):
 
 Limites desta caminhada:
 
-- O app ainda não mostra nem envia foto de grupo; só o nó, o protocolo, a RPC e os testes exercitam isto.
+- O app mostra e envia foto de grupo (veja a seção 107); esta caminhada exercita só o nó, o protocolo, a RPC e os testes.
 - O semeador continua vendo o horário, o tamanho aproximado (em faixas de 32 KiB) e a leitura repetida de cada item privado; isto não é resistência à análise de tráfego.
 - Nenhuma caixa acima foi executada nesta documentação.
 
@@ -5337,7 +5341,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Dados de autenticação ilegíveis são aceitos, então um autenticador que não informa a flag passa na criação.
 - As dicas (`client-device`, `hybrid`) são só orientação: não forçam a tela do QR code.
 - No Android, a limpeza de passkeys é só exclusão, e só com androidx.credentials 1.5.0.
-- No iOS nativo, passkeys ainda esperam o domínio associado da conta Apple Developer.
+- No iOS nativo, o domínio associado já está no projeto (`Varanda.entitlements`); entrar com passkey numa instalação de produção depende da conta Apple Developer.
 - O build de debug do Android (`app.varanda.debug`) não usa passkeys de produção.
 - Entrar com uma passkey do Varanda antiga, num aparelho sem diário, ainda abre um diário vazio.
 - Depois de recarregar a página, o cartão não lembra mais quais passkeys criadas aqui não serviram: a pessoa não recebe o nome para apagar. É de propósito, para nunca mandar apagar uma passkey que virou a conta em outro aparelho.
@@ -5571,7 +5575,7 @@ Pré-requisito: a mesma passkey em dois navegadores (ou aba e app instalado) na 
 - O ponto da aba de grupos só é apagado até as versões que o app conhecia quando a fusão foi pedida. Uma publicação que chega durante a fusão mantém o ponto, mesmo que outro aparelho já a tenha lido; ele some ao abrir a aba ou o grupo.
 - A trava da conta não é do sistema operacional. Se o processo perder a trava entre a conferência e o renomear, uma gravação antiga pode substituir um bloco que o novo titular já confirmou. A conferência não reproduz essa corrida; ela se recupera pela fusão, porque cada aparelho reescreve as suas marcas (`seen-store.js`, cabeçalho).
 - Não há apagamento pedido por um aparelho: a rota `delete` existe, mas nenhum cliente a chama. O apagamento hoje é um pedido à associação.
-- A exclusão da conta ainda não existe, e o bloco não é apagado com ela.
+- A exclusão da conta existe (seção 115) e apaga o bloco cifrado de vistos no serviço de conta.
 - Não verificado em servidor real: esta seção foi escrita sem executar os roteiros acima, o do servidor e o do app.
 
 ## 114. Encaminhar mensagens nas conversas e nos grupos (PR feat/forwarding)
@@ -5640,7 +5644,7 @@ Passos (marcar só depois de executar e guardar o registro), primeiro no Android
 - [ ] Entrar com a mesma passkey: aparece "Esta conta foi excluída" e "Apagar deste aparelho"; tocar apaga e volta para "Entrar".
 - [ ] Dois aparelhos com a mesma passkey: excluir no primeiro; abrir o segundo mostra "Esta conta foi excluída" antes dos Termos e de A Rua.
 - [ ] Bloqueio já pendente: decidir "bloquear" uma denúncia contra uma conta de teste (sem rodar `mod apply`) e então excluir essa conta pelo app. O painel mostra o bloqueio do moderador e o da pessoa; "cancelar" no do moderador (por `curl` com a sessão do painel) responde 409 `conta-excluida`; `mod apply --yes` assina os dois.
-- [ ] Dono de página (`VARANDA_PAGES` ligado): a tela mostra "Você ainda é dono de uma página" e "Abrir Páginas"; depois de encerrar a página, a exclusão segue.
+- [ ] Dono de página (`VARANDA_PAGE_KEYS` com a chave da página): a tela mostra "Você ainda é dono de uma página" e "Abrir Páginas"; depois de encerrar a página, a exclusão segue.
 - [ ] Criar uma conta nova com a mesma conta Google e outra passkey: o vínculo funciona; escolher o @nome da conta excluída responde "esse nome já está em uso".
 - [ ] Registros do serviço depois de tudo: só linhas `exclusao` com `pedido` (e `purga-pendente` só se algum arquivo estava indisponível); procurar o e-mail, o sub e a chave não encontra nada.
 - [ ] iOS (simulador), Safari e Chrome na web hospedada e o PWA instalado: repetir os passos de exclusão, a passkey pedida de novo e o recibo em "Entrar".
@@ -5787,6 +5791,246 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi executada nesta documentação.
 - O histórico de mensagens de um aparelho não passa para outro: um aparelho novo só recebe o que o semeador guarda (7 dias).
 - Uma passkey de outra conta ainda tranca o app e apaga o cache de mídia aberta, como todo bloqueio; as mensagens guardadas não são apagadas.
+
+## 119. Ações em linha única e folhas de mais ações (PR fix/mobile-action-hierarchy)
+
+Caminhada da hierarquia de ações no celular: uma ação principal por tela, fileiras que não quebram e ações raras atrás do botão de mais. As telas estão em [app.md](app.md) ("Telas", "Conversas", "Comunidades") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Componentes").
+
+Regras que os passos conferem:
+
+- Uma ação principal por linha, as raras atrás do botão de mais (`MoreButton`, que abre o `ActionsSheet`) em toda tela: Membro mostra no máximo duas pílulas (Seguir ou Seguindo, Mensagem) e o botão de mais; Agir como a página, Ajustes da página, Seguir como a página, Compartilhar perfil e Denunciar a conta ficam na folha de ações. O botão de mais só aparece com ao menos uma ação usável.
+- O pedido de mensagem mostra só Aceitar e Recusar, em partes iguais, acima da barra de gestos; Bloquear e Apagar ficam no menu da conversa. O menu de mais da Mensagem é compacto e o campo diz "Mensagem".
+- Toda confirmação que não se desfaz (Banir, Sair, Remover, Apagar versão) é uma `ConfirmStack`: a ação em cima, Cancelar embaixo, as duas em largura total. Apagar uma conversa confirma numa folha de ações compacta, com Apagar e Cancelar em largura total.
+- `Pill` e `Btn` aceitam ícone, têm 40 pt de altura e nunca cortam o rótulo (no Android, "Trocar passkey" aparecia como "Trocar"). Sem rótulo, a pílula é um círculo de 40 pt com nome falado e alvo de 44 pt.
+- Linha do perfil: duas pílulas em partes iguais e o botão de mais; com texto grande a linha empilha em vez de cortar. No Diário, Editar perfil ocupa a linha.
+- Cabeçalho de publicação e de citação: o @nome cede primeiro e some a partir da escala de fonte 1,29 (o 1,3 do Android chega como 1,2999999); a data nunca é cortada e o nome fica com o resto. "1 seguidor" no singular.
+- Título da `Sheet` com folga lateral e limite de escala de fonte; menus longos limitados a 85% da tela, com rolagem por dentro.
+- Escape na web (`src/ui/escapeLayer.js`): uma pilha compartilhada por folhas, menus, visualizador de foto e editor de foto; só a camada do topo fecha, e a tela de baixo não volta junto. Numa subpágina de Ajustes, Escape volta para a lista. O Android volta da subpágina de Ajustes para a lista com o botão voltar.
+- Na web, o `Backdrop` não é parada de foco e o guarda de `src/ui/scrollerFocus.web.js` impede que o foco caia num corpo que rola (sem anel em volta da folha inteira). `html` e `body` ficam com `overflow: hidden` (sem pan da viewport).
+- No Android, a área do teclado só entra no cálculo com o teclado aberto (`src/ui/keyboardAvoid.js`): sem isso a barra de escrita ficava sobre uma faixa vazia depois de fechar o teclado (Mensagem, Grupo, Perfil).
+- Na Informação da comunidade, Sair fica no botão de mais da tela; na comunidade e nos Ajustes do grupo, Banir fica no botão de mais de cada pessoa (no grupo, também Tornar e Tirar admin), e nos Ajustes do grupo Sair do grupo segue como botão no fim e Desbanir e Tirar admin seguem como pílulas nas suas seções; Aprovar e Recusar são ícones; Quem pode convidar e Entrada são pílulas com chevron que abrem uma folha com a escolha atual marcada com um visto; painéis e divisor alinhados. Linhas de pessoa (membros e pedidos) têm avatar à esquerda.
+- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/fix/mobile-action-hierarchy/<plataforma>/` (rodadas r1 a r15, Android, simulador iOS e Chrome), gravadas por `apps/app/scripts/review-shots.sh`, e o registro das rodadas em `~/Workspace/evidencias/fix/mobile-action-hierarchy/rounds.md`.
+
+Como verificar, a partir de `apps/app` (um arquivo por vez):
+
+- `node test/uiKit.test.js`, `node test/profileActions.test.js`, `node test/chatActions.test.js`, `node test/postOverflow.test.js`, `node test/escapeLayer.test.js`, `node test/scrollerFocus.test.js`, `node test/passkeysScreen.test.js`, `node test/group-flow.test.js`, `node test/groups.test.js`, `node test/conversas.test.js`, `node test/profileSave.test.js`, `node test/mediaCrop.test.js`, `node test/pwa.test.js`.
+- `npm run lint`, a partir da raiz, que tem de passar.
+
+Primeiro no Android (build de debug, emulador `varanda-api36`, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome:
+
+- [ ] Android: Membro de outra pessoa; Seguindo e Mensagem numa linha, com o botão de mais; a folha abre com Denunciar a conta em vermelho.
+- [ ] Android: Diário; Editar perfil ocupa a linha, sem quebra.
+- [ ] Android: Conversas › Pedidos de mensagem › um pedido; Aceitar e Recusar em partes iguais, acima da barra de gestos.
+- [ ] Android: no mesmo pedido, menu da conversa › Apagar conversa neste aparelho; a confirmação é uma folha de ações com Apagar (com a frase) e Cancelar, em largura total.
+- [ ] Android: Comunidade › Informações; dados e ações centralizados; Membros e Pedidos com avatar; o botão de mais de uma pessoa abre Banir; Quem pode convidar abre a folha com a escolha atual.
+- [ ] Android: Grupo › Ajustes; o mesmo seletor de Quem pode convidar, pedidos com Aprovar e Recusar, linhas com avatar, o botão de mais de uma pessoa.
+- [ ] Android: Editar perfil; a versão do perfil com a lixeira ao lado; tocar abre a pilha Apagar versão/Cancelar. Escolher foto abre o editor com as setas e o zoom sem corte.
+- [ ] Android: Ajustes › Passkeys e recuperação; Adicionar passkey, Trocar passkey (inteiro, sem corte) e Criar código de recuperação; Trocar passkey abre a pilha Adicionar a nova passkey/Cancelar.
+- [ ] iOS (simulador iPhone 16e, build de debug ligado ao Metro): as mesmas telas.
+- [ ] Chrome em 390 px e em 1280 px, nos temas claro e escuro: as mesmas telas; na web, Escape fecha só a camada de cima (folha, menu, visualizador ou editor de foto) e, numa subpágina de Ajustes, volta para a lista.
+- [ ] Android: abrir o teclado em Mensagem, Grupo e Perfil e fechá-lo; a barra de escrita volta ao rodapé sem faixa vazia. Em Ajustes, entrar numa subpágina e usar o botão voltar do sistema: volta para a lista.
+- [ ] Texto grande (Android `font_scale` 1.3, iOS `accessibility-large`) e movimento reduzido: as mesmas telas sem rótulo cortado nem fileira quebrada; o @nome some dos cabeçalhos de publicação e citação e a data fica inteira; a linha do perfil empilha.
+
+Ainda falta a um humano, em aparelho real (nenhuma caixa acima foi executada nesta documentação):
+
+- [ ] celulares Android e iPhone físicos, não só emulador e simulador: as telas acima, o teclado e o texto grande.
+- [ ] TalkBack e VoiceOver: o botão de mais, a lixeira, o círculo Compartilhar e os seletores com chevron leem o nome certo; a folha de ações lê as linhas e o foco volta ao botão que a abriu.
+- [ ] iOS: as rodadas visuais 8 a 12 não rodaram no simulador (a ferramenta esperava aprovação por aparelho); as rodadas 6, 7 e 13 a 15 rodaram, e as duas últimas saíram limpas. Falta o iPhone físico.
+- [ ] Android: a revisão final do teclado e do botão voltar em Ajustes (única checagem pendente no Android).
+
+Pontos conhecidos, deixados como estão (P3):
+
+- Cabeçalho de publicação e de citação com texto de acessibilidade extra-grande, tela de 320 pt e data de ano anterior: o nome fica com cerca de 80 pt na publicação e 40 pt no cartão de citação; não chega a zero, mas rever se um aparelho mostrar o contrário.
+- Visualizador de foto da conversa: ícones da barra de status escuros sobre o fundo preto no Android (já era assim; a correção pede definir a barra antes de abrir o Modal ou trocar o Modal por uma sobreposição).
+- Texto: "Fechar" e "Cancelar" ainda variam entre telas; "serviço indisponível" e "foto indisponível" em minúscula; marcador monoespaçado do convite; Perfil como folha no Diário e como página nos Ajustes; iniciais do cabeçalho de pedido contra o ícone da lista; o rótulo Denunciar na publicação e no perfil tem tintas diferentes (fixado pelos testes de `postActions`).
+- Web: anel de foco do Fechar sem folga; seta de voltar de 40 x 40; foco depois de Escape volta ao topo em vez de à lista; campo da Busca 4 pt abaixo do de Conversas; abas da Busca sem `aria-selected`; foco depois de fechar a Publicar com Escape; o rascunho do Perfil zera ao voltar para a lista de Ajustes (igual com a seta; já era assim).
+- Compartilhar sem origem da instalação mostra "Não foi possível copiar o link." (`communityShare.js`, fora desta PR).
+
+Limites desta caminhada:
+
+- Na Vitrine, Passkeys responde "serviço indisponível": a lista de passkeys com itens e a remoção se conferem no laboratório hospedado.
+- Compartilhar perfil só aparece com a origem da instalação, que a Vitrine nativa não tem.
+
+## 120. Mural de fotos no perfil (PR feat/profile-mural)
+
+Caminhada do Mural: as abas Publicações e Mural no Diário e no perfil de outra pessoa (Membro). A tela está em [app.md](app.md) ("Mural") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Abas do perfil", "Mural").
+
+Regras que os passos conferem:
+
+- O Mural é uma projeção das publicações que a tela já leu (`src/mural.js`): no Diário, as linhas do `log.read`; em Membro, os itens montados das páginas do índice, com o corte de página movida (`applyCut`). Entram só publicações (`post`) com foto, sem `replyTo` e sem citação; respostas, republicações e citações nunca viram quadrado. Uma publicação com data mais de 24 h no futuro fica escondida, como no feed.
+- Uma lista só por tela (`RefreshableList`): o Mural troca as linhas, não a lista, então puxar para atualizar, a barra fixa do perfil e a rolagem continuam; a aba escolhida e a rolagem voltam iguais depois de abrir uma foto.
+- Faltando foto, a tela lê páginas mais antigas sozinha até 6 páginas (`fillState`); depois, só a pílula "Ver mais" lê mais uma, nunca a rolagem. Uma página só conta quando a leitura começa de fato, a contagem zera quando a lista é recarregada, e uma atualização que falha não deixa a pílula presa.
+- "Nenhuma foto ainda" só aparece quando a fonte acabou de verdade; antes disso, "Ver mais". "Algumas fotos podem faltar" quando o índice diz que está incompleto.
+- Tocar numa foto abre a conversa da publicação com a publicação já carregada como semente (sem internet, a conversa ainda mostra a publicação e as fotos).
+- Fotos de quem a pessoa não segue são buscadas sem guardar cópia no aparelho (`persist` falso), como no resto do app.
+- Membro sem internet, ou fora do nó hospedado: o aviso de sempre, sem a aba Mural e sem leitura remota.
+- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/feat/profile-mural/<plataforma>/` (rodadas r1 em diante, Android, simulador iOS e Chrome).
+
+Como verificar, a partir de `apps/app` (um arquivo por vez):
+
+- `node test/mural.test.js`, `node test/muralGrid.test.js`, `node test/muralScreen.test.js`, `node test/vitrine.test.js`, `node test/vitrineIndex.test.js`, `node test/vitrineGuard.test.js`, `node test/mediaFetch.test.js`.
+- `npm run lint`, a partir da raiz, que tem de passar.
+
+Primeiro no Android (build de debug, emulador `varanda-api36`, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome:
+
+- [ ] Android: Diário › Mural; quadrados com 2 pt entre colunas e fileiras, selo de várias fotos no canto, "Fim do Mural" no fim, a barra de abas não cobre a última fileira.
+- [ ] Android: tocar numa foto abre a conversa com as fotos; voltar mantém a aba Mural e a rolagem.
+- [ ] Android: puxar para atualizar na aba Mural; a barra fixa do perfil aparece ao rolar.
+- [ ] Android: Membro de João (seguido) e de Bia (não seguida) › Mural; a última fileira curta fica com células vazias; Cecília e a página Biblioteca da Praça mostram o estado vazio.
+- [ ] iOS (simulador, build de debug ligado ao Metro): as mesmas telas.
+- [ ] Chrome em 375 px, 1280 px e 320 px, nos temas claro e escuro: as mesmas telas; Tab passa pelas abas e pelos quadrados; a aba escolhida tem `aria-selected`.
+- [ ] Texto grande (Android `font_scale` 1.3, iOS `accessibility-large`): 2 colunas, rótulos das abas inteiros.
+- [ ] Laboratório hospedado com duas identidades: publicar uma foto na primeira, ver no Mural dela no aparelho da segunda, apagar a publicação e ver o quadrado sumir depois de atualizar.
+
+Ainda falta a um humano, em aparelho real:
+
+- [ ] celulares Android e iPhone físicos: as telas acima, com fotos de verdade.
+- [ ] TalkBack e VoiceOver: as abas leem nome e estado; cada quadrado lê "foto" ou "N fotos" e a data.
+- [ ] um diário longo de verdade, com mais de 6 páginas sem foto entre as fotos: a pílula "Ver mais" aparece e não diz "vazio".
+
+Limites desta caminhada:
+
+- A Vitrine responde as fotos das publicações por um responder local de `/media` (`src/vitrine/publicMedia.js`, só no bundle de desenvolvimento); o caminho real (semeador, tamanho e SHA-256 conferidos) é o mesmo código, e a única coisa trocada é o transporte.
+- Na Vitrine, nenhuma pessoa tem foto suficiente para mostrar "Ver mais".
+
+## 121. Ponte de comunidades para a conversa privada (PR feat/community-bridge)
+
+Caminhada da ponte entre comunidades, publicações e conversa privada: o menu de pessoa na comunidade e no grupo, "Mensagem em particular" nas publicações, a faixa de comunidades nos perfis e a busca de comunidades mais clara. As telas estão em [app.md](app.md) ("Conversar em particular", "Comunidades no perfil") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Menu de pessoa", "Contexto na conversa", "Faixa de comunidades").
+
+Regras que os passos conferem:
+
+- **Menu de pessoa.** Na lista de Membros da comunidade (criador e administradores), o botão de mais e o toque longo de cada pessoa abrem a mesma folha: Conversar em particular, Ver perfil e as ações de administração. Escolher uma linha do toque longo executa a ação (a folha fica montada até fechar). No grupo, as ações da mensagem de outra pessoa têm Conversar em particular, que usa o diário conferido da mensagem, nunca o escritor, e não leva nada do grupo.
+- **Mensagem em particular.** Aparece nas ações de uma publicação de outra pessoa no nó hospedado, nunca na própria nem na de uma página. Abre a conversa com o autor e mostra um chip de contexto acima do campo. Só a conversa no topo da pilha consome o pedido; uma conversa por baixo não muda.
+- **Envio com contexto.** Só envia com texto escrito pela pessoa: a mensagem é `Sobre a sua publicação "<trecho de até 60 caracteres>" (<data>): <texto>`, ou "Sobre a sua foto" sem texto, com a data absoluta (nunca "5 min"). O total cabe em 1000 caracteres e o contador do campo já desconta o prefixo. Uma nova tentativa depois de um envio incerto manda exatamente o mesmo texto. O contexto nunca vira `replyTo`.
+- **Faixa de comunidades.** No seu Diário, Suas comunidades (as que você criou, administra ou é membro, de `community.list`); no perfil de outra pessoa, só Comunidades em comum: no máximo 8 das suas comunidades, conferidas uma de cada vez na lista de membros (`community.members`, em ordem de chave, até 10 páginas por comunidade, sem banidos). A lista completa de outra pessoa nunca aparece. O Diário relê a lista ao voltar à aba e quando um grupo muda.
+- **Comunidades.** Minhas comunidades e Descobrir em seções; a busca mostra a comunidade de cada grupo e os estados de carregando, erro com Tentar de novo, resultado parcial e busca indisponível.
+- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/feat/community-bridge/<plataforma>/`.
+
+Como verificar, a partir de `apps/app` (um arquivo por vez):
+
+- `node test/privateReply.test.js`, `node test/communitiesBox.test.js`, `node test/communitiesBoxScreen.test.js`, `node test/groupScreen.test.js`, `node test/dm.test.js`, `node test/postActions.test.js`, `node test/conversasList.test.js`, `node test/conversas.test.js`.
+- `npm run lint`, a partir da raiz, que tem de passar.
+
+Primeiro no Android (build de debug, emulador `varanda-api36`, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome:
+
+- [ ] Android: A Rua › uma publicação de João › mais › Mensagem em particular; a conversa abre com o chip; Enviar só com texto; a mensagem enviada começa com o prefixo e o chip some; o X tira o chip sem enviar.
+- [ ] Android: com o teclado aberto, o chip e o campo ficam acima do teclado.
+- [ ] Android: perfil de João › Comunidades em comum acima das abas; tocar numa comunidade a abre; o seu Diário mostra Suas comunidades.
+- [ ] Android: Comunidades › Minhas comunidades e Descobrir; buscar "horta".
+- [ ] Android: uma comunidade › Informações › Membros; o mais e o toque longo de uma pessoa abrem a folha; Ver perfil abre o perfil.
+- [ ] iOS (simulador, build de debug ligado ao Metro): as mesmas telas.
+- [ ] Chrome em 375 px e 1280 px, temas claro e escuro: as mesmas telas; o X do chip tem nome e entra na ordem do Tab.
+- [ ] Texto grande (Android `font_scale` 1.3, iOS `accessibility-large`): chip, faixa e folhas sem corte.
+- [ ] Laboratório hospedado com duas identidades na mesma comunidade pública: a segunda vê Comunidades em comum no perfil da primeira; Mensagem em particular a partir de uma publicação chega à primeira só depois de Enviar, com o prefixo.
+
+Ainda falta a um humano, em aparelho real:
+
+- [ ] celulares Android e iPhone físicos: as telas acima.
+- [ ] TalkBack e VoiceOver: a folha de pessoa, o chip (com o X "remover contexto") e a faixa de comunidades.
+- [ ] uma comunidade grande de verdade, com mais de 100 membros: a outra pessoa numa página depois da primeira ainda aparece em comum.
+
+Limites desta caminhada:
+
+- Na Vitrine, as comunidades e os membros são fictícios e sempre respondem; o tempo das leituras em série de `community.members` num nó real fica para o laboratório.
+- A lista de Membros continua só para criador e administradores; quem não administra chega à conversa privada pelo grupo e pelas publicações.
+
+
+## 122. Depoimentos no perfil (PR feat/depoimentos)
+
+Caminhada dos Depoimentos: escrever um depoimento para outra pessoa, aprovar no próprio Diário, mostrar no perfil, tirar do perfil e retirar o que escreveu. As telas estão em [app.md](app.md) ("Depoimentos") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Depoimentos no perfil", "Linha de depoimento"). O contrato está em [rpc.md](rpc.md) 5.100 e o formato dos registros em [protocol.md](protocol.md).
+
+Regras que os passos conferem:
+
+- **Selado até mostrar.** Quem escreve publica no próprio diário só um compromisso (`testimonial`: destinatário, geração da chave, hash e caixa selada). O texto fica legível só para quem recebe; ele vira público apenas quando a pessoa escolhe Mostrar no perfil, que publica um `testimonial-show` no diário dela com o texto e o nonce.
+- **Ninguém escreve para si.** `testimonial.write` para a própria chave responde "não pode escrever um depoimento para si"; para quem ainda não tem chave de mensagens, "a pessoa ainda não recebe mensagens". O texto tem de 1 a 400 caracteres.
+- **Depoimentos para aprovar.** Só no seu Diário: a lista de `testimonial.pending`, um por pessoa, sem os já mostrados. Mostrar no perfil publica; Agora não esconde só neste aparelho e não grava registro. Mostrar de novo o mesmo depoimento não escreve nada.
+- **Remover do perfil e Retirar.** Remover do perfil apaga todos os `testimonial-show` daquela pessoa no seu diário, para um antigo não voltar; o depoimento removido não volta para a lista de aprovar. Retirar (quem escreveu) apaga o bloco selado, e o depoimento some do perfil de quem recebeu: o nó da web confere cada `testimonial-show` contra o bloco vivo de quem escreveu (hash, destinatário, não retirado) e manda o que falha para `invalid`.
+- **Perfil.** O índice do semeador (`/index/testimonials/<dono>`) só dá ponteiros, nunca texto; o texto vem do `diary.peek` do diário de quem recebeu, conferido, e passa por `displayText`. Sem curtidas, sem contagem e sem resposta. Cada linha tem Denunciar.
+- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/feat/depoimentos/<plataforma>/`.
+
+Como verificar, a partir de `apps/app` (um arquivo por vez):
+
+- `node test/testimonials.test.js`, `node test/indexClient.test.js`, `node test/legal.test.js`, `node test/vitrine.test.js`, `node test/vitrineIndex.test.js`, `node test/vitrineGuard.test.js`, `node test/vitrineLarge.test.js`.
+- A partir da raiz: `node packages/core/test/testimonials.test.js`, `node packages/core/test/records.test.js`, `node packages/web-member/test/session-e2e.test.js` (Node 20.19 ou mais novo).
+- `npm run lint`, a partir da raiz, que tem de passar.
+
+Primeiro no Android (build de debug, emulador `varanda-api36`, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome. Na Vitrine, Lia mostra os depoimentos de João e de Cecília, tem o de Bia para aprovar e escreveu um para João, que ele mostra:
+
+- [ ] Android: Diário de Lia com as abas Publicações, Mural e Depoimentos numa linha, sem corte, e nada entre as abas e o conteúdo; aba Depoimentos com João e Cecília, o mais novo primeiro; o texto longo de João quebra em várias linhas sem corte; nenhuma contagem nem curtida.
+- [ ] Android: na aba Depoimentos, abrir o perfil de João por uma linha e voltar: a aba Depoimentos continua escolhida.
+- [ ] Android: aba Depoimentos do Diário começa com "Depoimentos para aprovar (1)" e "Enviados", linhas de 44 pt com seta; a primeira abre a tela com o de Bia; Agora não esconde a linha; reabrir o app no mesmo aparelho continua sem a linha e sem a linha fixa.
+- [ ] Android: com a linha de Bia de volta (dados do app limpos), Mostrar no perfil; a linha sai da lista e aparece na aba Depoimentos.
+- [ ] Android: Remover do perfil no depoimento de Bia; a folha tem o título "Remover do perfil?" sem corte e o nome de Bia no texto; some do perfil e não volta para aprovar.
+- [ ] Android: perfil de João › aba Depoimentos com o de Lia; Retirar depoimento (como Lia, no mais da linha ou do perfil), folha "Retirar depoimento?" com o nome de João no texto, e ver o depoimento sumir do perfil de João depois de atualizar.
+- [ ] Android: perfil de Cecília › aba Depoimentos vazia com "Nenhum depoimento ainda" e "Toque em ⋯ no perfil para escrever um depoimento."; mais › Escrever depoimento, folha "Escrever depoimento" com o campo "Para Cecília"; contador até 400 (200 emojis contam 200, o campo aceita até 400 emojis e Enviar desliga acima de 400); enviar para si mesma não aparece como opção.
+- [ ] iOS e Android com texto grande (accessibility-large, 1.3): na folha "Escrever depoimento" com o teclado aberto, Enviar fica no topo da folha, o campo para de crescer depois de umas seis linhas e rola por dentro, e o contador e o aviso de aprovação rolam para cima do teclado; tocar fora do campo não perde o texto.
+- [ ] Android: com um nó que não é hospedado (`node.hosted` diferente de `true`), o perfil mostra só Publicações e Mural.
+- [ ] iOS (simulador, build de debug ligado ao Metro): as mesmas telas.
+- [ ] Chrome em 375 px, 1280 px e 320 px, nos temas claro e escuro: as mesmas telas; Tab passa por Mostrar no perfil, Agora não e Denunciar.
+- [ ] Texto grande (Android `font_scale` 1.3, iOS `accessibility-large`): as três abas numa linha, sem corte; linhas de depoimento, linhas fixas e botões sem corte; títulos das folhas sem corte.
+- [ ] Laboratório hospedado com duas identidades: a primeira escreve para a segunda; a segunda vê em Depoimentos para aprovar e toca Mostrar no perfil; no aparelho da primeira, o perfil da segunda mostra o depoimento; a segunda toca Remover do perfil e some; a primeira escreve de novo, a segunda mostra, e a primeira toca Retirar depoimento: some do perfil da segunda nos dois aparelhos.
+
+Ainda falta a um humano, em aparelho real:
+
+- [ ] celulares Android e iPhone físicos: as telas acima.
+- [ ] TalkBack e VoiceOver: cada linha lê o nome, a data e o texto; os botões Mostrar no perfil, Agora não, Remover do perfil, Retirar depoimento e Denunciar têm nome; as abas leem Publicações, Mural e Depoimentos.
+- [ ] aceite dos Termos e da Política na versão 30 numa instalação já aceita na versão anterior.
+
+Limites desta caminhada:
+
+- A Vitrine não cifra nada: a caixa dos fixtures é preenchimento do tamanho de uma caixa selada real, e o texto é aberto por uma tabela local. O hash é o SHA-256 real, então o compromisso, a conferência do `testimonial-show` e o `invalid` de um bloco retirado são os mesmos do nó da web.
+- Na Vitrine, o índice `/index/testimonials/<dono>` responde do estado local da Vitrine aberta; a conferência no semeador real fica para o laboratório hospedado.
+
+## 123. Momentos (PR feat/momentos)
+
+Caminhada dos Momentos: publicar uma foto com texto curto que aparece por 24 horas para quem segue, ver os momentos de quem você segue, responder em particular e apagar o seu. As telas estão em [app.md](app.md) ("Momentos") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Faixa de momentos", "Visualizador de momento", "Publicar em Momento", "Momentos no Diário"). O contrato está em [rpc.md](rpc.md) 5.113 e o formato do registro `moment` em [protocol.md](protocol.md).
+
+Regras que os passos conferem:
+
+- **Só no nó web (navegador ou worklet nativo).** A faixa, o modo Momento de Publicar e as linhas do Diário dependem de `node.hosted === true`; o nó core responde `USAGE` para `moment.create`, `moments.read` e `moment.delete`.
+- **24 horas, do lado de quem lê.** Um momento some da faixa, do visualizador e de "Seus momentos (24 h)" quando passam 24 h do `at`. Um momento datado mais de 10 minutos à frente do relógio de quem lê espera a hora chegar. Esconder não é apagar: o registro fica no diário, e os seus aparecem em "Momentos anteriores" até você apagar.
+- **A foto tem vida curta.** Ela vai para o depósito anônimo de blobs (um blob novo por momento, com a chave e o nonce públicos no registro), e os semeadores a apagam em até 7 dias. Depois disso o visualizador mostra "Foto indisponível", nunca um erro.
+- **Sem curtidas, sem contagem de visualizações, sem resposta pública.** "Responder" abre a conversa privada com quem publicou, com o chip de contexto. O visto do anel fica só no aparelho e não grava registro.
+- **Apagar.** Só o seu momento, no ar ou anterior: `moment.delete` de outra pessoa ou de outro tipo de registro responde "referência inválida". A confirmação diz que cópias feitas por outras pessoas não voltam, e o momento no ar traz a nota "A foto sai dos servidores em até 7 dias.".
+- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/feat/momentos/<plataforma>/`.
+
+Como verificar, a partir de `apps/app` (um arquivo por vez):
+
+- `node test/moments.test.js`, `node test/momentosScreen.test.js`, `node test/legal.test.js`, `node test/vitrine.test.js`, `node test/vitrineIndex.test.js`, `node test/vitrineGuard.test.js`, `node test/vitrineLarge.test.js`.
+- A partir da raiz: `node packages/core/test/moments.test.js`, `node packages/core/test/records.test.js`, `node packages/rpc/test/methods.test.js`, `node packages/web-member/test/moments-e2e.test.js` (Node 20.19 ou mais novo).
+- `npm run lint`, a partir da raiz, que tem de passar.
+
+Primeiro no Android (build de debug, emulador `varanda-api36` ou aparelho, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome e no PWA, cada um nos temas claro e escuro e com texto normal e grande (Android `font_scale` 1.3, iOS `accessibility-large`). Na Vitrine, Lia segue João (dois momentos), Cecília e André (um cada), tem um momento seu no ar e dois anteriores; as datas seguem o relógio da demonstração, deslocado para a hora do aparelho, então os momentos estão sempre dentro das 24 h:
+
+- [ ] Android: A Rua começa com a faixa de momentos; o anel "Você" vem primeiro, depois João, Cecília e André; todos com o anel verde de não visto; nomes numa linha, sem corte.
+- [ ] Android: abrir João; a barra mostra dois segmentos; tocar à direita passa para o segundo, à esquerda volta; segurar pausa a barra; sem tocar, o momento passa sozinho em 5 s e, depois do último, vem a próxima pessoa da faixa; deslizar para baixo fecha.
+- [ ] Android: depois de ver João, o anel dele fica com a cor de linha e vai para depois dos não vistos; reabrir o app no mesmo aparelho mantém isso.
+- [ ] Android: com "Remover animações" (Reduzir movimento) ligado, o momento não passa sozinho; tocar à direita ainda avança.
+- [ ] Android: no momento de João, "Responder" abre a conversa privada com João e o chip de contexto do momento acima do campo; o chip sai com o X.
+- [ ] Android: em nenhum momento aparece curtida, coração, contagem de visualizações ou campo de resposta pública.
+- [ ] Android: o seu momento mostra a nota "A foto sai dos servidores em até 7 dias." e "Novo momento"; o botão de mais tem Apagar; a folha "Apagar momento?" apaga e o anel "Você" volta a ter o "+".
+- [ ] Android: tocar no anel "Você" com o "+" abre Publicar já em "Publicação | Momento", em Momento. Escolher foto, depois Trocar foto: fica uma foto só; tentar mais de uma diz "Um momento leva uma foto só."; o contador vai até 200 (200 emojis contam 200) e Publicar desliga acima disso; o momento aparece primeiro na faixa.
+- [ ] Android: com um rascunho em Publicação, trocar para Momento: aparece "Seu rascunho da publicação continua guardado."; voltar para Publicação traz o rascunho e as fotos dele. Com o envio de um momento sem confirmação (rede cortada no meio), o rascunho do momento fica parado com "Descartar" e o aviso para conferir em Seus momentos; nada é enviado de novo sozinho.
+- [ ] Android: Diário de Lia mostra, abaixo do topo do perfil e fora das abas, "Seus momentos (24 h)" (abre o visualizador) e "Momentos anteriores (2)", recolhida; abrir mostra os dois com data e começo do texto; Apagar num deles deixa "Momentos anteriores (1)".
+- [ ] Android: num momento cuja foto já saiu do servidor (laboratório, com o relógio do semeador adiantado 8 dias, ou um blob apagado à mão), o visualizador mostra "Foto indisponível" no lugar da foto, sem banner de erro, e o texto continua.
+- [ ] iOS (simulador, build de debug ligado ao Metro): os mesmos passos; deslizar para baixo fecha sem abrir a central de notificações; com "Reduzir movimento" ligado, nada passa sozinho.
+- [ ] Chrome em 375 px, 1280 px e 320 px, e o PWA instalado: os mesmos passos; Tab chega aos anéis, ao botão de fechar, ao de mais e a "Responder"; Escape fecha o visualizador.
+- [ ] Texto grande: nomes da faixa numa linha (encolhem um pouco e só um nome longo termina em "…"); a nota, "Responder", "Novo momento", as linhas do Diário e a escolha "Publicação | Momento" sem corte.
+- [ ] Com um nó que não é hospedado (`node.hosted` diferente de `true`): sem faixa em A Rua, sem "Publicação | Momento" em Publicar e sem linhas de momentos no Diário.
+- [ ] A regra das 24 horas, no laboratório hospedado: um momento publicado some da faixa e do visualizador de quem segue depois de 24 h (relógio do aparelho adiantado 24 h) e passa para "Momentos anteriores" de quem publicou; um registro `moment` datado 1 h à frente (escrito à mão no laboratório) só aparece quando a hora chega.
+- [ ] Termos de Uso e Política de Privacidade na versão 31 apresentados para novo aceite numa instalação já aceita na versão 28; o texto diz que o momento deixa de aparecer depois de 24 horas, que a foto sai dos servidores da Varanda em até 7 dias, que o texto fica no diário até a pessoa apagar e que cópias feitas por outras pessoas não voltam.
+- [ ] Laboratório hospedado com duas identidades (`apps/cli/scripts/hosted-lab.js`, dois perfis do navegador, ou um aparelho e um perfil): A publica um momento; B segue A e vê o anel de A na faixa, abre e vê a foto e o texto; B toca "Responder" e manda uma mensagem, que chega a A com o contexto; A apaga o momento; em B, depois de atualizar, o anel de A some e o momento não abre mais.
+
+Ainda falta a um humano, em aparelho real:
+
+- [ ] celulares Android e iPhone físicos: as telas acima, com uma foto da câmera.
+- [ ] TalkBack e VoiceOver: cada anel lê "momentos de <nome>" ("seu momento" no seu); o visualizador lê "momento N de M", o nome, a hora e o texto; os botões fechar, mais ações, Responder, Novo momento e Apagar têm nome.
+- [ ] Publicar um momento com a chave de mensagens bloqueada pede para desbloquear com a passkey ("Desbloqueie com a passkey para publicar um momento.").
+
+Limites desta caminhada:
+
+- A Vitrine não sobe nada: a foto de um momento é um dos desenhos locais da Vitrine (ou a foto escolhida, guardada só na memória da página), e o blob, a chave e o nonce são de mentira. A busca no semeador, a decifração e a conferência do tamanho e do SHA-256 ficam para o laboratório hospedado.
+- Na Vitrine, as datas dos momentos são as do relógio da demonstração (5 nov, 15 h), deslocadas para a hora do aparelho; os momentos anteriores são os que já passaram das 24 h nesse relógio.
 
 ## 124. Aviso de rede cheia antes da passkey (PR feat/signup-seats-before-passkey)
 
@@ -5985,246 +6229,6 @@ Limites:
 - As imagens são geometria gerada, não arte encomendada.
 - O `User-Agent` é declarado pelo cliente: quem quiser pode se passar por um robô e ver a página de prévia, que não traz nada além do que está acima.
 
-## 119. Ações em linha única e folhas de mais ações (PR fix/mobile-action-hierarchy)
-
-Caminhada da hierarquia de ações no celular: uma ação principal por tela, fileiras que não quebram e ações raras atrás do botão de mais. As telas estão em [app.md](app.md) ("Telas", "Conversas", "Comunidades") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Componentes").
-
-Regras que os passos conferem:
-
-- Uma ação principal por linha, as raras atrás do botão de mais (`MoreButton`, que abre o `ActionsSheet`) em toda tela: Membro mostra no máximo duas pílulas (Seguir ou Seguindo, Mensagem) e o botão de mais; Agir como a página, Ajustes da página, Seguir como a página, Compartilhar perfil e Denunciar a conta ficam na folha de ações. O botão de mais só aparece com ao menos uma ação usável.
-- O pedido de mensagem mostra só Aceitar e Recusar, em partes iguais, acima da barra de gestos; Bloquear e Apagar ficam no menu da conversa. O menu de mais da Mensagem é compacto e o campo diz "Mensagem".
-- Toda confirmação que não se desfaz (Banir, Sair, Remover, Apagar versão) é uma `ConfirmStack`: a ação em cima, Cancelar embaixo, as duas em largura total. Apagar uma conversa confirma numa folha de ações compacta, com Apagar e Cancelar em largura total.
-- `Pill` e `Btn` aceitam ícone, têm 40 pt de altura e nunca cortam o rótulo (no Android, "Trocar passkey" aparecia como "Trocar"). Sem rótulo, a pílula é um círculo de 40 pt com nome falado e alvo de 44 pt.
-- Linha do perfil: duas pílulas em partes iguais e o botão de mais; com texto grande a linha empilha em vez de cortar. No Diário, Editar perfil ocupa a linha.
-- Cabeçalho de publicação e de citação: o @nome cede primeiro e some a partir da escala de fonte 1,29 (o 1,3 do Android chega como 1,2999999); a data nunca é cortada e o nome fica com o resto. "1 seguidor" no singular.
-- Título da `Sheet` com folga lateral e limite de escala de fonte; menus longos limitados a 85% da tela, com rolagem por dentro.
-- Escape na web (`src/ui/escapeLayer.js`): uma pilha compartilhada por folhas, menus, visualizador de foto e editor de foto; só a camada do topo fecha, e a tela de baixo não volta junto. Numa subpágina de Ajustes, Escape volta para a lista. O Android volta da subpágina de Ajustes para a lista com o botão voltar.
-- Na web, o `Backdrop` não é parada de foco e o guarda de `src/ui/scrollerFocus.web.js` impede que o foco caia num corpo que rola (sem anel em volta da folha inteira). `html` e `body` ficam com `overflow: hidden` (sem pan da viewport).
-- No Android, a área do teclado só entra no cálculo com o teclado aberto (`src/ui/keyboardAvoid.js`): sem isso a barra de escrita ficava sobre uma faixa vazia depois de fechar o teclado (Mensagem, Grupo, Perfil).
-- Na Informação da comunidade, Sair fica no botão de mais da tela; na comunidade e nos Ajustes do grupo, Banir fica no botão de mais de cada pessoa (no grupo, também Tornar e Tirar admin), e nos Ajustes do grupo Sair do grupo segue como botão no fim e Desbanir e Tirar admin seguem como pílulas nas suas seções; Aprovar e Recusar são ícones; Quem pode convidar e Entrada são pílulas com chevron que abrem uma folha com a escolha atual marcada com um visto; painéis e divisor alinhados. Linhas de pessoa (membros e pedidos) têm avatar à esquerda.
-- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/fix/mobile-action-hierarchy/<plataforma>/` (rodadas r1 a r15, Android, simulador iOS e Chrome), gravadas por `apps/app/scripts/review-shots.sh`, e o registro das rodadas em `~/Workspace/evidencias/fix/mobile-action-hierarchy/rounds.md`.
-
-Como verificar, a partir de `apps/app` (um arquivo por vez):
-
-- `node test/uiKit.test.js`, `node test/profileActions.test.js`, `node test/chatActions.test.js`, `node test/postOverflow.test.js`, `node test/escapeLayer.test.js`, `node test/scrollerFocus.test.js`, `node test/passkeysScreen.test.js`, `node test/group-flow.test.js`, `node test/groups.test.js`, `node test/conversas.test.js`, `node test/profileSave.test.js`, `node test/mediaCrop.test.js`, `node test/pwa.test.js`.
-- `npm run lint`, a partir da raiz, que tem de passar.
-
-Primeiro no Android (build de debug, emulador `varanda-api36`, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome:
-
-- [ ] Android: Membro de outra pessoa; Seguindo e Mensagem numa linha, com o botão de mais; a folha abre com Denunciar a conta em vermelho.
-- [ ] Android: Diário; Editar perfil ocupa a linha, sem quebra.
-- [ ] Android: Conversas › Pedidos de mensagem › um pedido; Aceitar e Recusar em partes iguais, acima da barra de gestos.
-- [ ] Android: no mesmo pedido, menu da conversa › Apagar conversa neste aparelho; a confirmação é uma folha de ações com Apagar (com a frase) e Cancelar, em largura total.
-- [ ] Android: Comunidade › Informações; dados e ações centralizados; Membros e Pedidos com avatar; o botão de mais de uma pessoa abre Banir; Quem pode convidar abre a folha com a escolha atual.
-- [ ] Android: Grupo › Ajustes; o mesmo seletor de Quem pode convidar, pedidos com Aprovar e Recusar, linhas com avatar, o botão de mais de uma pessoa.
-- [ ] Android: Editar perfil; a versão do perfil com a lixeira ao lado; tocar abre a pilha Apagar versão/Cancelar. Escolher foto abre o editor com as setas e o zoom sem corte.
-- [ ] Android: Ajustes › Passkeys e recuperação; Adicionar passkey, Trocar passkey (inteiro, sem corte) e Criar código de recuperação; Trocar passkey abre a pilha Adicionar a nova passkey/Cancelar.
-- [ ] iOS (simulador iPhone 16e, build de debug ligado ao Metro): as mesmas telas.
-- [ ] Chrome em 390 px e em 1280 px, nos temas claro e escuro: as mesmas telas; na web, Escape fecha só a camada de cima (folha, menu, visualizador ou editor de foto) e, numa subpágina de Ajustes, volta para a lista.
-- [ ] Android: abrir o teclado em Mensagem, Grupo e Perfil e fechá-lo; a barra de escrita volta ao rodapé sem faixa vazia. Em Ajustes, entrar numa subpágina e usar o botão voltar do sistema: volta para a lista.
-- [ ] Texto grande (Android `font_scale` 1.3, iOS `accessibility-large`) e movimento reduzido: as mesmas telas sem rótulo cortado nem fileira quebrada; o @nome some dos cabeçalhos de publicação e citação e a data fica inteira; a linha do perfil empilha.
-
-Ainda falta a um humano, em aparelho real (nenhuma caixa acima foi executada nesta documentação):
-
-- [ ] celulares Android e iPhone físicos, não só emulador e simulador: as telas acima, o teclado e o texto grande.
-- [ ] TalkBack e VoiceOver: o botão de mais, a lixeira, o círculo Compartilhar e os seletores com chevron leem o nome certo; a folha de ações lê as linhas e o foco volta ao botão que a abriu.
-- [ ] iOS: as rodadas visuais 8 a 12 não rodaram no simulador (a ferramenta esperava aprovação por aparelho); as rodadas 6, 7 e 13 a 15 rodaram, e as duas últimas saíram limpas. Falta o iPhone físico.
-- [ ] Android: a revisão final do teclado e do botão voltar em Ajustes (única checagem pendente no Android).
-
-Pontos conhecidos, deixados como estão (P3):
-
-- Cabeçalho de publicação e de citação com texto de acessibilidade extra-grande, tela de 320 pt e data de ano anterior: o nome fica com cerca de 80 pt na publicação e 40 pt no cartão de citação; não chega a zero, mas rever se um aparelho mostrar o contrário.
-- Visualizador de foto da conversa: ícones da barra de status escuros sobre o fundo preto no Android (já era assim; a correção pede definir a barra antes de abrir o Modal ou trocar o Modal por uma sobreposição).
-- Texto: "Fechar" e "Cancelar" ainda variam entre telas; "serviço indisponível" e "foto indisponível" em minúscula; marcador monoespaçado do convite; barra de abas translúcida; Perfil como folha no Diário e como página nos Ajustes; iniciais do cabeçalho de pedido contra o ícone da lista; o rótulo Denunciar na publicação e no perfil tem tintas diferentes (fixado pelos testes de `postActions`).
-- Web: anel de foco do Fechar sem folga; seta de voltar de 40 x 40; foco depois de Escape volta ao topo em vez de à lista; campo da Busca 4 pt abaixo do de Conversas; abas da Busca sem `aria-selected`; foco depois de fechar a Publicar com Escape; o rascunho do Perfil zera ao voltar para a lista de Ajustes (igual com a seta; já era assim).
-- Compartilhar sem origem da instalação mostra "Não foi possível copiar o link." (`communityShare.js`, fora desta PR).
-
-Limites desta caminhada:
-
-- Na Vitrine, Passkeys responde "serviço indisponível": a lista de passkeys com itens e a remoção se conferem no laboratório hospedado.
-- Compartilhar perfil só aparece com a origem da instalação, que a Vitrine nativa não tem.
-
-## 120. Mural de fotos no perfil (PR feat/profile-mural)
-
-Caminhada do Mural: as abas Publicações e Mural no Diário e no perfil de outra pessoa (Membro). A tela está em [app.md](app.md) ("Mural") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Abas do perfil", "Mural").
-
-Regras que os passos conferem:
-
-- O Mural é uma projeção das publicações que a tela já leu (`src/mural.js`): no Diário, as linhas do `log.read`; em Membro, os itens montados das páginas do índice, com o corte de página movida (`applyCut`). Entram só publicações (`post`) com foto, sem `replyTo` e sem citação; respostas, republicações e citações nunca viram quadrado. Uma publicação com data mais de 24 h no futuro fica escondida, como no feed.
-- Uma lista só por tela (`RefreshableList`): o Mural troca as linhas, não a lista, então puxar para atualizar, a barra fixa do perfil e a rolagem continuam; a aba escolhida e a rolagem voltam iguais depois de abrir uma foto.
-- Faltando foto, a tela lê páginas mais antigas sozinha até 6 páginas (`fillState`); depois, só a pílula "Ver mais" lê mais uma, nunca a rolagem. Uma página só conta quando a leitura começa de fato, a contagem zera quando a lista é recarregada, e uma atualização que falha não deixa a pílula presa.
-- "Nenhuma foto ainda" só aparece quando a fonte acabou de verdade; antes disso, "Ver mais". "Algumas fotos podem faltar" quando o índice diz que está incompleto.
-- Tocar numa foto abre a conversa da publicação com a publicação já carregada como semente (sem internet, a conversa ainda mostra a publicação e as fotos).
-- Fotos de quem a pessoa não segue são buscadas sem guardar cópia no aparelho (`persist` falso), como no resto do app.
-- Membro sem internet, ou fora do nó hospedado: o aviso de sempre, sem a aba Mural e sem leitura remota.
-- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/feat/profile-mural/<plataforma>/` (rodadas r1 em diante, Android, simulador iOS e Chrome).
-
-Como verificar, a partir de `apps/app` (um arquivo por vez):
-
-- `node test/mural.test.js`, `node test/muralGrid.test.js`, `node test/muralScreen.test.js`, `node test/vitrine.test.js`, `node test/vitrineIndex.test.js`, `node test/vitrineGuard.test.js`, `node test/mediaFetch.test.js`.
-- `npm run lint`, a partir da raiz, que tem de passar.
-
-Primeiro no Android (build de debug, emulador `varanda-api36`, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome:
-
-- [ ] Android: Diário › Mural; quadrados com 2 pt entre colunas e fileiras, selo de várias fotos no canto, "Fim do Mural" no fim, a barra de abas não cobre a última fileira.
-- [ ] Android: tocar numa foto abre a conversa com as fotos; voltar mantém a aba Mural e a rolagem.
-- [ ] Android: puxar para atualizar na aba Mural; a barra fixa do perfil aparece ao rolar.
-- [ ] Android: Membro de João (seguido) e de Bia (não seguida) › Mural; a última fileira curta fica com células vazias; Cecília e a página Biblioteca da Praça mostram o estado vazio.
-- [ ] iOS (simulador, build de debug ligado ao Metro): as mesmas telas.
-- [ ] Chrome em 375 px, 1280 px e 320 px, nos temas claro e escuro: as mesmas telas; Tab passa pelas abas e pelos quadrados; a aba escolhida tem `aria-selected`.
-- [ ] Texto grande (Android `font_scale` 1.3, iOS `accessibility-large`): 2 colunas, rótulos das abas inteiros.
-- [ ] Laboratório hospedado com duas identidades: publicar uma foto na primeira, ver no Mural dela no aparelho da segunda, apagar a publicação e ver o quadrado sumir depois de atualizar.
-
-Ainda falta a um humano, em aparelho real:
-
-- [ ] celulares Android e iPhone físicos: as telas acima, com fotos de verdade.
-- [ ] TalkBack e VoiceOver: as abas leem nome e estado; cada quadrado lê "foto" ou "N fotos" e a data.
-- [ ] um diário longo de verdade, com mais de 6 páginas sem foto entre as fotos: a pílula "Ver mais" aparece e não diz "vazio".
-
-Limites desta caminhada:
-
-- A Vitrine responde as fotos das publicações por um responder local de `/media` (`src/vitrine/publicMedia.js`, só no bundle de desenvolvimento); o caminho real (semeador, tamanho e SHA-256 conferidos) é o mesmo código, e a única coisa trocada é o transporte.
-- Na Vitrine, nenhuma pessoa tem foto suficiente para mostrar "Ver mais".
-
-## 121. Ponte de comunidades para a conversa privada (PR feat/community-bridge)
-
-Caminhada da ponte entre comunidades, publicações e conversa privada: o menu de pessoa na comunidade e no grupo, "Mensagem em particular" nas publicações, a faixa de comunidades nos perfis e a busca de comunidades mais clara. As telas estão em [app.md](app.md) ("Conversar em particular", "Comunidades no perfil") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Menu de pessoa", "Contexto na conversa", "Faixa de comunidades").
-
-Regras que os passos conferem:
-
-- **Menu de pessoa.** Na lista de Membros da comunidade (criador e administradores), o botão de mais e o toque longo de cada pessoa abrem a mesma folha: Conversar em particular, Ver perfil e as ações de administração. Escolher uma linha do toque longo executa a ação (a folha fica montada até fechar). No grupo, as ações da mensagem de outra pessoa têm Conversar em particular, que usa o diário conferido da mensagem, nunca o escritor, e não leva nada do grupo.
-- **Mensagem em particular.** Aparece nas ações de uma publicação de outra pessoa no nó hospedado, nunca na própria nem na de uma página. Abre a conversa com o autor e mostra um chip de contexto acima do campo. Só a conversa no topo da pilha consome o pedido; uma conversa por baixo não muda.
-- **Envio com contexto.** Só envia com texto escrito pela pessoa: a mensagem é `Sobre a sua publicação "<trecho de até 60 caracteres>" (<data>): <texto>`, ou "Sobre a sua foto" sem texto, com a data absoluta (nunca "5 min"). O total cabe em 1000 caracteres e o contador do campo já desconta o prefixo. Uma nova tentativa depois de um envio incerto manda exatamente o mesmo texto. O contexto nunca vira `replyTo`.
-- **Faixa de comunidades.** No seu Diário, Suas comunidades (as que você criou, administra ou é membro, de `community.list`); no perfil de outra pessoa, só Comunidades em comum: no máximo 8 das suas comunidades, conferidas uma de cada vez na lista de membros (`community.members`, em ordem de chave, até 10 páginas por comunidade, sem banidos). A lista completa de outra pessoa nunca aparece. O Diário relê a lista ao voltar à aba e quando um grupo muda.
-- **Comunidades.** Minhas comunidades e Descobrir em seções; a busca mostra a comunidade de cada grupo e os estados de carregando, erro com Tentar de novo, resultado parcial e busca indisponível.
-- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/feat/community-bridge/<plataforma>/`.
-
-Como verificar, a partir de `apps/app` (um arquivo por vez):
-
-- `node test/privateReply.test.js`, `node test/communitiesBox.test.js`, `node test/communitiesBoxScreen.test.js`, `node test/groupScreen.test.js`, `node test/dm.test.js`, `node test/postActions.test.js`, `node test/conversasList.test.js`, `node test/conversas.test.js`.
-- `npm run lint`, a partir da raiz, que tem de passar.
-
-Primeiro no Android (build de debug, emulador `varanda-api36`, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome:
-
-- [ ] Android: A Rua › uma publicação de João › mais › Mensagem em particular; a conversa abre com o chip; Enviar só com texto; a mensagem enviada começa com o prefixo e o chip some; o X tira o chip sem enviar.
-- [ ] Android: com o teclado aberto, o chip e o campo ficam acima do teclado.
-- [ ] Android: perfil de João › Comunidades em comum acima das abas; tocar numa comunidade a abre; o seu Diário mostra Suas comunidades.
-- [ ] Android: Comunidades › Minhas comunidades e Descobrir; buscar "horta".
-- [ ] Android: uma comunidade › Informações › Membros; o mais e o toque longo de uma pessoa abrem a folha; Ver perfil abre o perfil.
-- [ ] iOS (simulador, build de debug ligado ao Metro): as mesmas telas.
-- [ ] Chrome em 375 px e 1280 px, temas claro e escuro: as mesmas telas; o X do chip tem nome e entra na ordem do Tab.
-- [ ] Texto grande (Android `font_scale` 1.3, iOS `accessibility-large`): chip, faixa e folhas sem corte.
-- [ ] Laboratório hospedado com duas identidades na mesma comunidade pública: a segunda vê Comunidades em comum no perfil da primeira; Mensagem em particular a partir de uma publicação chega à primeira só depois de Enviar, com o prefixo.
-
-Ainda falta a um humano, em aparelho real:
-
-- [ ] celulares Android e iPhone físicos: as telas acima.
-- [ ] TalkBack e VoiceOver: a folha de pessoa, o chip (com o X "remover contexto") e a faixa de comunidades.
-- [ ] uma comunidade grande de verdade, com mais de 100 membros: a outra pessoa numa página depois da primeira ainda aparece em comum.
-
-Limites desta caminhada:
-
-- Na Vitrine, as comunidades e os membros são fictícios e sempre respondem; o tempo das leituras em série de `community.members` num nó real fica para o laboratório.
-- A lista de Membros continua só para criador e administradores; quem não administra chega à conversa privada pelo grupo e pelas publicações.
-
-
-## 122. Depoimentos no perfil (PR feat/depoimentos)
-
-Caminhada dos Depoimentos: escrever um depoimento para outra pessoa, aprovar no próprio Diário, mostrar no perfil, tirar do perfil e retirar o que escreveu. As telas estão em [app.md](app.md) ("Depoimentos") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Depoimentos no perfil", "Linha de depoimento"). O contrato está em [rpc.md](rpc.md) 5.100 e o formato dos registros em [protocol.md](protocol.md).
-
-Regras que os passos conferem:
-
-- **Selado até mostrar.** Quem escreve publica no próprio diário só um compromisso (`testimonial`: destinatário, geração da chave, hash e caixa selada). O texto fica legível só para quem recebe; ele vira público apenas quando a pessoa escolhe Mostrar no perfil, que publica um `testimonial-show` no diário dela com o texto e o nonce.
-- **Ninguém escreve para si.** `testimonial.write` para a própria chave responde "não pode escrever um depoimento para si"; para quem ainda não tem chave de mensagens, "a pessoa ainda não recebe mensagens". O texto tem de 1 a 400 caracteres.
-- **Depoimentos para aprovar.** Só no seu Diário: a lista de `testimonial.pending`, um por pessoa, sem os já mostrados. Mostrar no perfil publica; Agora não esconde só neste aparelho e não grava registro. Mostrar de novo o mesmo depoimento não escreve nada.
-- **Remover do perfil e Retirar.** Remover do perfil apaga todos os `testimonial-show` daquela pessoa no seu diário, para um antigo não voltar; o depoimento removido não volta para a lista de aprovar. Retirar (quem escreveu) apaga o bloco selado, e o depoimento some do perfil de quem recebeu: o nó da web confere cada `testimonial-show` contra o bloco vivo de quem escreveu (hash, destinatário, não retirado) e manda o que falha para `invalid`.
-- **Perfil.** O índice do semeador (`/index/testimonials/<dono>`) só dá ponteiros, nunca texto; o texto vem do `diary.peek` do diário de quem recebeu, conferido, e passa por `displayText`. Sem curtidas, sem contagem e sem resposta. Cada linha tem Denunciar.
-- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/feat/depoimentos/<plataforma>/`.
-
-Como verificar, a partir de `apps/app` (um arquivo por vez):
-
-- `node test/testimonials.test.js`, `node test/indexClient.test.js`, `node test/legal.test.js`, `node test/vitrine.test.js`, `node test/vitrineIndex.test.js`, `node test/vitrineGuard.test.js`, `node test/vitrineLarge.test.js`.
-- A partir da raiz: `node packages/core/test/testimonials.test.js`, `node packages/core/test/records.test.js`, `node packages/web-member/test/session-e2e.test.js` (Node 20.19 ou mais novo).
-- `npm run lint`, a partir da raiz, que tem de passar.
-
-Primeiro no Android (build de debug, emulador `varanda-api36`, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome. Na Vitrine, Lia mostra os depoimentos de João e de Cecília, tem o de Bia para aprovar e escreveu um para João, que ele mostra:
-
-- [ ] Android: Diário de Lia com as abas Publicações, Mural e Depoimentos numa linha, sem corte, e nada entre as abas e o conteúdo; aba Depoimentos com João e Cecília, o mais novo primeiro; o texto longo de João quebra em várias linhas sem corte; nenhuma contagem nem curtida.
-- [ ] Android: na aba Depoimentos, abrir o perfil de João por uma linha e voltar: a aba Depoimentos continua escolhida.
-- [ ] Android: aba Depoimentos do Diário começa com "Depoimentos para aprovar (1)" e "Enviados", linhas de 44 pt com seta; a primeira abre a tela com o de Bia; Agora não esconde a linha; reabrir o app no mesmo aparelho continua sem a linha e sem a linha fixa.
-- [ ] Android: com a linha de Bia de volta (dados do app limpos), Mostrar no perfil; a linha sai da lista e aparece na aba Depoimentos.
-- [ ] Android: Remover do perfil no depoimento de Bia; a folha tem o título "Remover do perfil?" sem corte e o nome de Bia no texto; some do perfil e não volta para aprovar.
-- [ ] Android: perfil de João › aba Depoimentos com o de Lia; Retirar depoimento (como Lia, no mais da linha ou do perfil), folha "Retirar depoimento?" com o nome de João no texto, e ver o depoimento sumir do perfil de João depois de atualizar.
-- [ ] Android: perfil de Cecília › aba Depoimentos vazia com "Nenhum depoimento ainda" e "Toque em ⋯ no perfil para escrever um depoimento."; mais › Escrever depoimento, folha "Escrever depoimento" com o campo "Para Cecília"; contador até 400 (200 emojis contam 200, o campo aceita até 400 emojis e Enviar desliga acima de 400); enviar para si mesma não aparece como opção.
-- [ ] iOS e Android com texto grande (accessibility-large, 1.3): na folha "Escrever depoimento" com o teclado aberto, Enviar fica no topo da folha, o campo para de crescer depois de umas seis linhas e rola por dentro, e o contador e o aviso de aprovação rolam para cima do teclado; tocar fora do campo não perde o texto.
-- [ ] Android: com um nó que não é hospedado (`node.hosted` diferente de `true`), o perfil mostra só Publicações e Mural.
-- [ ] iOS (simulador, build de debug ligado ao Metro): as mesmas telas.
-- [ ] Chrome em 375 px, 1280 px e 320 px, nos temas claro e escuro: as mesmas telas; Tab passa por Mostrar no perfil, Agora não e Denunciar.
-- [ ] Texto grande (Android `font_scale` 1.3, iOS `accessibility-large`): as três abas numa linha, sem corte; linhas de depoimento, linhas fixas e botões sem corte; títulos das folhas sem corte.
-- [ ] Laboratório hospedado com duas identidades: a primeira escreve para a segunda; a segunda vê em Depoimentos para aprovar e toca Mostrar no perfil; no aparelho da primeira, o perfil da segunda mostra o depoimento; a segunda toca Remover do perfil e some; a primeira escreve de novo, a segunda mostra, e a primeira toca Retirar depoimento: some do perfil da segunda nos dois aparelhos.
-
-Ainda falta a um humano, em aparelho real:
-
-- [ ] celulares Android e iPhone físicos: as telas acima.
-- [ ] TalkBack e VoiceOver: cada linha lê o nome, a data e o texto; os botões Mostrar no perfil, Agora não, Remover do perfil, Retirar depoimento e Denunciar têm nome; as abas leem Publicações, Mural e Depoimentos.
-- [ ] aceite dos Termos e da Política na versão 30 numa instalação já aceita na versão anterior.
-
-Limites desta caminhada:
-
-- A Vitrine não cifra nada: a caixa dos fixtures é preenchimento do tamanho de uma caixa selada real, e o texto é aberto por uma tabela local. O hash é o SHA-256 real, então o compromisso, a conferência do `testimonial-show` e o `invalid` de um bloco retirado são os mesmos do nó da web.
-- Na Vitrine, o índice `/index/testimonials/<dono>` responde do estado local da Vitrine aberta; a conferência no semeador real fica para o laboratório hospedado.
-
-## 123. Momentos (PR feat/momentos)
-
-Caminhada dos Momentos: publicar uma foto com texto curto que aparece por 24 horas para quem segue, ver os momentos de quem você segue, responder em particular e apagar o seu. As telas estão em [app.md](app.md) ("Momentos") e as peças em [app-design.md](../apps/site/artwork/app-design.md) ("Faixa de momentos", "Visualizador de momento", "Publicar em Momento", "Momentos no Diário"). O contrato está em [rpc.md](rpc.md) 5.113 e o formato do registro `moment` em [protocol.md](protocol.md).
-
-Regras que os passos conferem:
-
-- **Só no nó web (navegador ou worklet nativo).** A faixa, o modo Momento de Publicar e as linhas do Diário dependem de `node.hosted === true`; o nó core responde `USAGE` para `moment.create`, `moments.read` e `moment.delete`.
-- **24 horas, do lado de quem lê.** Um momento some da faixa, do visualizador e de "Seus momentos (24 h)" quando passam 24 h do `at`. Um momento datado mais de 10 minutos à frente do relógio de quem lê espera a hora chegar. Esconder não é apagar: o registro fica no diário, e os seus aparecem em "Momentos anteriores" até você apagar.
-- **A foto tem vida curta.** Ela vai para o depósito anônimo de blobs (um blob novo por momento, com a chave e o nonce públicos no registro), e os semeadores a apagam em até 7 dias. Depois disso o visualizador mostra "Foto indisponível", nunca um erro.
-- **Sem curtidas, sem contagem de visualizações, sem resposta pública.** "Responder" abre a conversa privada com quem publicou, com o chip de contexto. O visto do anel fica só no aparelho e não grava registro.
-- **Apagar.** Só o seu momento, no ar ou anterior: `moment.delete` de outra pessoa ou de outro tipo de registro responde "referência inválida". A confirmação diz que cópias feitas por outras pessoas não voltam, e o momento no ar traz a nota "A foto sai dos servidores em até 7 dias.".
-- Uma caixa só é marcada depois que o passo foi executado e o registro guardado. As capturas ficam fora do git, em `~/Workspace/evidencias/feat/momentos/<plataforma>/`.
-
-Como verificar, a partir de `apps/app` (um arquivo por vez):
-
-- `node test/moments.test.js`, `node test/momentosScreen.test.js`, `node test/legal.test.js`, `node test/vitrine.test.js`, `node test/vitrineIndex.test.js`, `node test/vitrineGuard.test.js`, `node test/vitrineLarge.test.js`.
-- A partir da raiz: `node packages/core/test/moments.test.js`, `node packages/core/test/records.test.js`, `node packages/rpc/test/methods.test.js`, `node packages/web-member/test/moments-e2e.test.js` (Node 20.19 ou mais novo).
-- `npm run lint`, a partir da raiz, que tem de passar.
-
-Primeiro no Android (build de debug, emulador `varanda-api36` ou aparelho, Metro com `EXPO_PUBLIC_VARANDA_VITRINE=1`), depois no simulador iOS, depois no Chrome e no PWA, cada um nos temas claro e escuro e com texto normal e grande (Android `font_scale` 1.3, iOS `accessibility-large`). Na Vitrine, Lia segue João (dois momentos), Cecília e André (um cada), tem um momento seu no ar e dois anteriores; as datas seguem o relógio da demonstração, deslocado para a hora do aparelho, então os momentos estão sempre dentro das 24 h:
-
-- [ ] Android: A Rua começa com a faixa de momentos; o anel "Você" vem primeiro, depois João, Cecília e André; todos com o anel verde de não visto; nomes numa linha, sem corte.
-- [ ] Android: abrir João; a barra mostra dois segmentos; tocar à direita passa para o segundo, à esquerda volta; segurar pausa a barra; sem tocar, o momento passa sozinho em 5 s e, depois do último, vem a próxima pessoa da faixa; deslizar para baixo fecha.
-- [ ] Android: depois de ver João, o anel dele fica com a cor de linha e vai para depois dos não vistos; reabrir o app no mesmo aparelho mantém isso.
-- [ ] Android: com "Remover animações" (Reduzir movimento) ligado, o momento não passa sozinho; tocar à direita ainda avança.
-- [ ] Android: no momento de João, "Responder" abre a conversa privada com João e o chip de contexto do momento acima do campo; o chip sai com o X.
-- [ ] Android: em nenhum momento aparece curtida, coração, contagem de visualizações ou campo de resposta pública.
-- [ ] Android: o seu momento mostra a nota "A foto sai dos servidores em até 7 dias." e "Novo momento"; o botão de mais tem Apagar; a folha "Apagar momento?" apaga e o anel "Você" volta a ter o "+".
-- [ ] Android: tocar no anel "Você" com o "+" abre Publicar já em "Publicação | Momento", em Momento. Escolher foto, depois Trocar foto: fica uma foto só; tentar mais de uma diz "Um momento leva uma foto só."; o contador vai até 200 (200 emojis contam 200) e Publicar desliga acima disso; o momento aparece primeiro na faixa.
-- [ ] Android: com um rascunho em Publicação, trocar para Momento: aparece "Seu rascunho da publicação continua guardado."; voltar para Publicação traz o rascunho e as fotos dele. Com o envio de um momento sem confirmação (rede cortada no meio), o rascunho do momento fica parado com "Descartar" e o aviso para conferir em Seus momentos; nada é enviado de novo sozinho.
-- [ ] Android: Diário de Lia mostra, abaixo do topo do perfil e fora das abas, "Seus momentos (24 h)" (abre o visualizador) e "Momentos anteriores (2)", recolhida; abrir mostra os dois com data e começo do texto; Apagar num deles deixa "Momentos anteriores (1)".
-- [ ] Android: num momento cuja foto já saiu do servidor (laboratório, com o relógio do semeador adiantado 8 dias, ou um blob apagado à mão), o visualizador mostra "Foto indisponível" no lugar da foto, sem banner de erro, e o texto continua.
-- [ ] iOS (simulador, build de debug ligado ao Metro): os mesmos passos; deslizar para baixo fecha sem abrir a central de notificações; com "Reduzir movimento" ligado, nada passa sozinho.
-- [ ] Chrome em 375 px, 1280 px e 320 px, e o PWA instalado: os mesmos passos; Tab chega aos anéis, ao botão de fechar, ao de mais e a "Responder"; Escape fecha o visualizador.
-- [ ] Texto grande: nomes da faixa numa linha (encolhem um pouco e só um nome longo termina em "…"); a nota, "Responder", "Novo momento", as linhas do Diário e a escolha "Publicação | Momento" sem corte.
-- [ ] Com um nó que não é hospedado (`node.hosted` diferente de `true`): sem faixa em A Rua, sem "Publicação | Momento" em Publicar e sem linhas de momentos no Diário.
-- [ ] A regra das 24 horas, no laboratório hospedado: um momento publicado some da faixa e do visualizador de quem segue depois de 24 h (relógio do aparelho adiantado 24 h) e passa para "Momentos anteriores" de quem publicou; um registro `moment` datado 1 h à frente (escrito à mão no laboratório) só aparece quando a hora chega.
-- [ ] Termos de Uso e Política de Privacidade na versão 31 apresentados para novo aceite numa instalação já aceita na versão 28; o texto diz que o momento deixa de aparecer depois de 24 horas, que a foto sai dos servidores da Varanda em até 7 dias, que o texto fica no diário até a pessoa apagar e que cópias feitas por outras pessoas não voltam.
-- [ ] Laboratório hospedado com duas identidades (`apps/cli/scripts/hosted-lab.js`, dois perfis do navegador, ou um aparelho e um perfil): A publica um momento; B segue A e vê o anel de A na faixa, abre e vê a foto e o texto; B toca "Responder" e manda uma mensagem, que chega a A com o contexto; A apaga o momento; em B, depois de atualizar, o anel de A some e o momento não abre mais.
-
-Ainda falta a um humano, em aparelho real:
-
-- [ ] celulares Android e iPhone físicos: as telas acima, com uma foto da câmera.
-- [ ] TalkBack e VoiceOver: cada anel lê "momentos de <nome>" ("seu momento" no seu); o visualizador lê "momento N de M", o nome, a hora e o texto; os botões fechar, mais ações, Responder, Novo momento e Apagar têm nome.
-- [ ] Publicar um momento com a chave de mensagens bloqueada pede para desbloquear com a passkey ("Desbloqueie com a passkey para publicar um momento.").
-
-Limites desta caminhada:
-
-- A Vitrine não sobe nada: a foto de um momento é um dos desenhos locais da Vitrine (ou a foto escolhida, guardada só na memória da página), e o blob, a chave e o nonce são de mentira. A busca no semeador, a decifração e a conferência do tamanho e do SHA-256 ficam para o laboratório hospedado.
-- Na Vitrine, as datas dos momentos são as do relógio da demonstração (5 nov, 15 h), deslocadas para a hora do aparelho; os momentos anteriores são os que já passaram das 24 h nesse relógio.
-
 ## 129. Carregamento mais rápido de A Rua, Diário e perfis (PRs chore/perf-harness até perf/app-render)
 
 Caminhada da pilha de desempenho: medição, leituras do nó, partida, concessão do app instalado e renderização. Ciclo de medição, metas e números em [performance.md](performance.md).
@@ -6386,7 +6390,7 @@ Caminhada com a Feira ligada numa instalação de teste (semeador com `VARANDA_P
 - [ ] "Conversar" abre a conversa com o rascunho "Olá! Tenho interesse no seu anúncio "…" na Feira: <link>" e o cartão do link, sem enviar nada. Depois de enviar, o cartão na conversa tem "Ver anúncio", que abre a tela Anúncio.
 - [ ] Quem anunciou toca em "Reservado"; uma segunda pessoa, ao abrir o anúncio (ou puxar para atualizar a lista), vê o selo "Reservado".
 - [ ] Quem anunciou toca em "Apagar" e em "Confirmar: apagar": o anúncio sai de "Meus" e da busca, e a página pública `/f/<diário>/<seq>` responde "Anúncio não encontrado".
-- [ ] Agindo como Página, anunciar: o anúncio aparece em "Meus" da Página. Outro membro toca em "Conversar": a conversa é com a Página, e a Página, na caixa dela, vê a mensagem com o cartão do anúncio e a nota "A associação pode ler as mensagens desta página"; a resposta da Página chega ao membro na mesma conversa, com o cartão mantido.
+- [ ] Agindo como Página, anunciar: o anúncio aparece em "Meus" da Página. Outro membro toca em "Conversar": a conversa é com a Página, e a Página, na caixa dela, vê a mensagem com o cartão do anúncio; a resposta da Página chega ao membro na mesma conversa, com o cartão mantido.
 - [ ] "Denunciar" no anúncio de outra pessoa abre a folha de denúncia com o título do anúncio; enviada, ela aparece no painel de moderação como "anúncio", no filtro "Anúncios", com "Ver anúncio".
 - [ ] No perfil de um membro (e de uma Página) com anúncios, a linha "Anúncios" abre a lista só daquela pessoa, sem abas, filtros nem "Anunciar"; puxar para atualizar funciona e quem não tem anúncios vê "Nenhum anúncio por aqui.".
 
@@ -6518,6 +6522,8 @@ Limites desta caminhada:
 - Nenhuma caixa acima foi executada nesta documentação.
 - Passa o limite de 128 mudanças, a mais antiga fica só no aparelho onde já estava; um aparelho novo não a recebe.
 
+Nota: não existe a seção 136. O número nunca foi usado (o histórico do arquivo não tem essa seção), então a numeração pula da 135 para a 137 sem roteiro perdido.
+
 ## 137. Termos 29 e manifesto de privacidade para a revisão da App Store (PR fix/terms-privacy-manifest-store)
 
 As seções anteriores não mudam. Esta seção documenta os textos e o manifesto preparados para a primeira revisão da App Store (issue #46).
@@ -6538,7 +6544,7 @@ As seções anteriores não mudam. Esta seção documenta os textos e o manifest
 
 ### Checagens humanas (a fazer)
 
-- [ ] A conferência de termos no aparelho e o bloqueio de outra pessoa, com a lista guardada no bloco cifrado, já estão no ar antes de a versão 29 ir ao ar, porque os documentos os descrevem como existentes. Eles vêm em outros PRs.
+- [ ] A conferência de termos no aparelho e o bloqueio de outra pessoa, com a lista guardada no bloco cifrado, já estão no ar antes de a versão 29 ir ao ar, porque os documentos os descrevem como existentes. Os dois já entraram (seções 134, 135 e 138); falta só conferir no ar.
 - [ ] A caixa `contato@varanda.app` existe e recebe e-mail antes de a versão 29 ir ao ar. Em 2026-11-08, `varanda.app` não tinha registro MX.
 - [ ] App Store Connect, App Privacy: as respostas publicadas (Publish) são as do manifesto (`docs/development.md`).
 - [ ] App Store Connect, direitos de conteúdo: resposta dada com base na seção "Seu conteúdo".
@@ -6561,6 +6567,7 @@ Regras que os passos conferem:
 
 - A comparação é por palavra inteira, depois de dobrar acentos e maiúsculas, e lê o texto todo.
 - A recusa é definitiva: o rascunho fica para editar, e não há como publicar mesmo assim.
+- Momentos e depoimentos também passam pela conferência, inclusive ao tocar em "Mostrar no perfil" para um depoimento recebido (seção 143).
 - Mensagens diretas, grupos privados, denúncias e recursos não passam pela conferência.
 - Nada sai do aparelho: nenhum pedido, contador, log ou registro de recusa.
 
@@ -6597,3 +6604,389 @@ Limites desta caminhada:
 - Um @nome com letras e números colados (`termo123`) conta como uma palavra só e passa.
 - Um app modificado, um build antigo ou a CLI publicam sem passar por ela. Isso se confere lendo `apps/app/src/wordCheck.js`: o protocolo e o semeador não têm a lista.
 - Ela não lê fotos nem áudio, e grafias diferentes passam.
+
+## 139. Mensagem em particular numa publicação de Página (PR fix/page-dm-from-posts)
+
+Os itens do feed não dizem se o autor é uma Página, então **Mensagem em particular** aparece numa publicação de Página até o app aprender isso. Antes, o toque abria a conversa da página com o chip da publicação e sem o aviso único de "Conversar com a página". Agora o toque confere o autor antes de abrir. Não muda protocolo, semeador nem RPC.
+
+Regras que os passos conferem:
+
+- Ao tocar, o app pergunta, em paralelo, ao índice de membros do semeador (dica de Página, guardada por 5 min) e ao nó (`page.read`). Um autor que o app já conhece como Página não gera pedido.
+- Uma Página aberta passa pelo aviso "Conversar com a página" (uma vez por aparelho e por página, o mesmo do perfil e da Feira) e abre a conversa da página sem o chip de contexto.
+- Uma Página encerrada ou que mudou de chave, confirmada pelo nó (`page.read`), mostra "Esta página não recebe mensagens." e não abre nada.
+- Uma Página conhecida só pela dica do semeador nunca é recusada: recebe o aviso e abre sem o chip. A dica não é confiável e não pode calar a mensagem de uma pessoa.
+- Uma pessoa abre a conversa com o chip, como antes.
+- Um segundo toque enquanto a conferência não respondeu é ignorado, e uma resposta que chega depois de bloquear, desbloquear ou trocar de conta é descartada.
+- Depois do toque, o app guarda que o autor é uma Página só quando o nó confirmou, e então a ação some das publicações dele. A dica do semeador sozinha não fica guardada.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/dm.test.js`, `node apps/app/test/postActions.test.js`, `node apps/app/test/privateReply.test.js`, `node apps/app/test/platformGate.test.js` e `node apps/app/test/feedRender.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA, com uma conta que segue uma Página aberta, uma Página encerrada e uma pessoa:
+
+- [ ] A Rua, publicação da Página aberta, num aparelho que nunca conversou com ela: ⋯ e **Mensagem em particular** abrem o aviso "Conversar com a página". Continuar abre a conversa da página, sem chip acima do campo. Cancelar não abre nada.
+- [ ] De novo, noutra publicação da mesma Página (se a ação ainda aparecer): a conversa abre direto, sem o aviso.
+- [ ] Depois do primeiro toque, voltar à Rua: as publicações da Página não têm mais **Mensagem em particular**.
+- [ ] Publicação da Página encerrada, com o diário dela já no nó: o toque mostra "Esta página não recebe mensagens." e nada abre.
+- [ ] Publicação de uma pessoa: a conversa abre com o chip "Sobre a sua publicação de ...", como antes.
+- [ ] Toque duplo rápido numa publicação de Página: só um aviso aparece.
+- [ ] Sem internet: o toque numa publicação de pessoa ainda abre a conversa com o chip.
+- [ ] O mesmo numa conversa (Conversa) e num perfil.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Quando o semeador não manda a dica de Página (um semeador antigo, `pageHintOf` em `apps/app/src/indexClient.js`) e o `page.read` responde `NOT_FOUND` (o diário está noutro lugar), o autor é tratado como pessoa e a conversa abre como antes, com o chip. É o padrão decidido: falhar aberto, para uma pessoa nunca ficar sem mensagem quando o semeador demora.
+- Um autor desconhecido sem nome nem @nome não fica guardado como Página (`namesCache.js`), então a ação pode continuar aparecendo até o nome chegar. A conferência no toque continua valendo.
+
+## 140. Conversa abre na mensagem mais nova (PR fix/conversation-newest-and-send)
+
+Três ajustes das conversas (Conversa em particular e Grupo). Não muda protocolo, semeador nem RPC.
+
+Regras que os passos conferem:
+
+- Uma conversa abre na mensagem mais nova e acompanha a lista enquanto ela desenha mais linhas: o fim é fixado por `onContentSizeChange` e, 50 ms depois, mais uma rolagem sem animação, quando o layout assentou.
+- Qualquer gesto solta a fixação: toque, roda do mouse, arrastar, teclas (seta para cima, Page Up, Home, Shift+Espaço) e clique do mouse na lista. Uma rolagem para cima de mais de 48 px também solta. **Mensagens anteriores** solta, e no grupo o salto até uma citação também.
+- Uma mensagem nova fixa de novo no fim.
+- A seta que aparece ao passar o mouse numa mensagem não cobre mais a citação dentro do balão.
+- Se a correção automática do teclado (iOS) muda a última palavra do rascunho no mesmo instante do **Enviar**, e só nos 400 ms seguintes, o campo é limpo mesmo assim, com o texto que a pessoa viu, e não convida a um envio duplo. Só a primeira mudança do campo depois do envio é acompanhada: uma edição seguinte, uma palavra a mais ou outra palavra alterada fica no campo. Reenviar uma mensagem retida continua mantendo um rascunho mais novo.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/chatActions.test.js`, `node apps/app/test/conversas.test.js`, `node apps/app/test/dm.test.js`, `node apps/app/test/groupScreen.test.js`, `node apps/app/test/group-flow.test.js`, `node apps/app/test/wordCheck.test.js`, `node apps/app/test/chatMedia.test.js` e `node apps/app/test/feedRender.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Abrir uma conversa longa: ela abre na mensagem mais nova, mesmo com fotos e cartões carregando depois.
+- [ ] Rolar para cima durante o carregamento: a lista não volta ao fim sozinha. Chegar uma mensagem nova leva ao fim de novo.
+- [ ] **Mensagens anteriores** e, num grupo, tocar numa citação: a lista fica onde a pessoa foi, sem pular para o fim.
+- [ ] Web: a roda do mouse, as teclas e o clique na lista soltam o fim.
+- [ ] Web, passando o mouse numa mensagem com citação: a seta não cobre a citação.
+- [ ] iOS, digitar uma palavra que a correção automática troca (por exemplo "teh") e tocar **Enviar** sem tocar na barra de sugestões: o campo fica vazio.
+- [ ] iOS, enviar e logo digitar outra palavra: o campo guarda o que foi digitado depois.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- A janela de 400 ms e a regra da última palavra são o que o teste cobre; o comportamento real do teclado do iOS só se confere no aparelho.
+- Digitar mais depois do envio ("oi" para "oi!") ou apagar o fim ("oi" para "o") nunca conta como correção. Uma edição manual dentro da última palavra nos 400 ms seguintes ao **Enviar** (apagar uma letra do meio, por exemplo) não se distingue da correção automática e é limpa quando o envio dá certo: sem um sinal do teclado, o app não tem como separar as duas.
+
+## 141. Toques na web: visualizador de fotos, botões aninhados, alvos de 44 pt e barra de abas opaca (PR fix/web-taps-and-targets)
+
+Conjunto de correções de toque. Não muda protocolo, semeador nem RPC.
+
+Regras que os passos conferem:
+
+- Web: tocar dentro do visualizador de fotos não abre mais a publicação que está por trás dele. O visualizador para a propagação do clique.
+- Ações e contagens da publicação (curtir, republicar, responder, mais) e o botão de informações têm 44 pt de altura. A altura da linha não muda. Os pares divididos de curtir e republicar mantêm a largura estreita, para a barra caber em 320 pt.
+- O botão de ajuda de A Rua tem 44 pt.
+- As abas ficam com 48 pt de altura dentro da barra de 49 pt (a borda de 1 pt fica por cima). Toda a faixa sob o ícone é alvo de toque. A barra não tem mais preenchimento superior.
+- No aplicativo (iOS e Android) a barra de abas é opaca, nos dois esquemas de cor: o conteúdo que passa por baixo não aparece através dela. Na web ela já era opaca.
+- Miniatura de link (cartão de link) não é mais um botão aninhado dentro de outro botão. A nova tentativa de foto de anúncio da Feira também não (`tapRetry={false}`).
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/appearance.test.js`, `node apps/app/test/themeUsage.test.js`, `node apps/app/test/tabBar.test.js`, `node apps/app/test/pwa.test.js`, `node apps/app/test/renderOg.test.js` e `node apps/app/test/momentosScreen.test.js`.
+- `node apps/app/test/postActions.test.js`, `node apps/app/test/help.test.js`, `node apps/app/test/linkPreview.test.js` e `node apps/app/test/muralGrid.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Abas: tocar na faixa de baixo do ícone de cada aba troca de aba. A barra tem a mesma altura de antes, sem espaço vazio em cima dos ícones.
+- [ ] iOS: com uma lista rolando por baixo da barra, o conteúdo não aparece através dela, no modo claro e no escuro.
+- [ ] Publicação: curtir, republicar, responder e o menu de mais têm área de toque de 44 pt. Num aparelho de 320 pt de largura, a barra de curtir e republicar cabe sem cortar nenhum botão.
+- [ ] A Rua: o botão de ajuda abre a folha de ajuda com a área de toque inteira.
+- [ ] Web: abrir uma foto em tela cheia no visualizador e tocar nela (ou nos controles dentro dele) não abre a publicação de trás.
+- [ ] Cartão de link com miniatura: tocar na miniatura faz o mesmo que tocar no cartão, e o app não reclama de botão dentro de botão.
+- [ ] Feira: uma foto de anúncio que falha mostra "foto indisponível" sem botão próprio; tocar nela abre o anúncio, e a foto tenta de novo sozinha (2, 5 e 15 s) enquanto o cartão estiver na tela.
+- [ ] Web e PWA: repetir as conferências de abas e de publicação na largura de celular.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Os testes conferem o código-fonte dos estilos e a ausência de botões aninhados por leitura de arquivo, não o toque real. A área de 44 pt e a opacidade do iOS só se confirmam no aparelho ou no simulador.
+
+## 142. Perfil: linha Anúncios, ícones do menu mais e pílulas com texto grande (PR fix/profile-polish)
+
+Correções de acabamento do perfil. Não muda protocolo, semeador nem RPC.
+
+Regras que os passos conferem:
+
+- No perfil de um membro ou de uma Página (nó hospedado), a linha "Anúncios" é um link com ícone da Feira à esquerda e seta à direita, e fica acima das abas, junto com a linha "Avaliações". Perfil bloqueado não mostra as duas.
+- No menu "mais" de uma Página, "Agir como esta página", "Deixar de agir como a página", "Ajustes da página", "Seguir como a página" (e "Deixar de seguir") e "Compartilhar perfil" têm ícone.
+- Com texto grande (escala de fonte acima de 1,3), as pílulas empilham em largura total e o botão "mais" fica na mesma linha da última pílula. No tamanho normal o layout não muda.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/profileActions.test.js`, `node apps/app/test/dm.test.js`, `node apps/app/test/muralScreen.test.js`, `node apps/app/test/profileBar.test.js`, `node apps/app/test/pageProfile.test.js` e `node apps/app/test/platformGate.test.js`.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Perfil de uma Página com anúncios: "Anúncios" aparece logo acima das abas, com o ícone e a seta, e tocar abre a lista.
+- [ ] Perfil sem anúncios ou com perfil bloqueado: a linha não aparece.
+- [ ] Menu "mais" de uma Página que você administra: cada item mostra o ícone certo.
+- [ ] Texto do sistema no maior tamanho: as pílulas ficam empilhadas e o botão "mais" fica ao lado da última, sem terceira linha.
+- [ ] Web e PWA: repetir as conferências acima na largura de celular.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Os testes conferem o código-fonte por leitura de arquivo, não a tela. A posição da linha e o layout com texto grande só se confirmam no aparelho ou no simulador.
+
+## 143. Conferência de palavras em momentos e depoimentos, Termos 32 (PR feat/word-check-moments-testimonials)
+
+A conferência de palavras no aparelho passa a cobrir momentos e depoimentos, inclusive a exibição de um depoimento recebido no perfil. Os Termos descrevem essas superfícies na versão 32, com novo aceite dos Termos e da Política de Privacidade. A data continua 08/11/2026. Não muda protocolo, semeador nem RPC.
+
+Regras que os passos conferem:
+
+- Um momento com termo da lista é recusado antes de `putMoment`, sem enviar texto nem mídia. O rascunho fica para editar.
+- Um depoimento com termo da lista é recusado antes de `testimonial.write`, com o texto preservado para edição.
+- "Mostrar no perfil" confere o texto do depoimento recebido e recusa antes de `testimonial.show` se houver termo da lista, inclusive quando ele veio de um app antigo ou modificado.
+- Texto permitido continua funcionando nas três ações. A comparação por palavra inteira e as exclusões da seção 138 continuam valendo.
+- Nada dessa conferência sai do aparelho nem fica registrado.
+- `LEGAL_VERSION` e `TERMS_VERSION` são 32, a nota de revisão acompanha a versão e o digest SHA-256 fixa o novo texto. Os Termos e a Política não contêm termos da lista.
+- As páginas de Termos e Privacidade do site são regeneradas por `node apps/site/scripts/render-legal.js` e correspondem ao texto do app.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/wordCheck.test.js`, `node apps/app/test/momentosScreen.test.js` e `node apps/app/test/depoimentos.test.js`.
+- `node apps/app/test/legal.test.js`, `node apps/app/test/terms-version.test.js`, `node apps/app/test/terms.test.js` e `node packages/core/test/terms.test.js`.
+- `node apps/site/scripts/render-legal.js --check`, que deve sair com código 0, e `node apps/site/test/legal.test.js`, `node apps/site/test/site.test.js` e `node apps/site/test/brand.test.js`.
+- `npx standard apps/app/src/legal.js packages/core/lib/terms.js packages/core/test/terms.test.js apps/app/test/legal.test.js apps/app/src/screens/Publicar.js apps/app/src/screens/Depoimentos.js apps/app/test/wordCheck.test.js apps/app/test/momentosScreen.test.js apps/app/test/depoimentos.test.js`.
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA. Use um termo da lista de `apps/app/src/blockedTerms.js`:
+
+- [ ] Momento: escrever o termo, anexar uma foto e tentar publicar. A recusa aparece, o rascunho permanece e nada é enviado. Editar para texto permitido e publicar funciona.
+- [ ] Escrever depoimento: inserir o termo e tentar enviar. A recusa aparece e o texto continua disponível para editar. Corrigir e enviar funciona.
+- [ ] Depoimento recebido por um app antigo ou modificado: tocar em "Mostrar no perfil" com um termo no texto. A recusa aparece e o depoimento não é mostrado. Um depoimento permitido pode ser mostrado normalmente.
+- [ ] Sem conexão: repetir as recusas e confirmar que nenhuma ação entra na fila de envio.
+- [ ] Novo aceite: entrar com aceite anterior e conferir a apresentação da versão 32. Em Ajustes e nas páginas do site, conferir a mesma versão, data e redação sobre momentos e depoimentos.
+- [ ] Web e PWA: repetir as conferências acima; uma recusa não gera pedido no inspetor de rede.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Os testes por leitura do código não substituem a conferência das telas no aparelho ou no simulador.
+- A lista continua local ao app; um app modificado, um build antigo ou a CLI podem publicar sem essa conferência. Fotos e áudio não são analisados.
+
+## 144. Momentos, Feira e botão de publicar nos depoimentos: ajustes visuais (PR fix/momentos-feira-polish)
+
+Ajustes de tela que sobravam de revisões anteriores. Não muda protocolo, semeador, RPC nem Termos.
+
+Regras que os passos conferem:
+
+- A faixa de aviso (toast) não aparece por cima do visualizador de momentos. Ela fica escondida enquanto o visualizador está aberto ou fechando, e abrir o visualizador descarta um aviso pendente. Assim, "A foto sai dos servidores em até 7 dias" não é coberto e não reaparece ao fechar.
+- No compositor de momento, escolher uma foto rola a tela até o campo de texto e o contador, sem focar o campo. O teclado não abre sozinho.
+- O botão flutuante de publicar fica escondido enquanto a aba Depoimentos do perfil está aberta, no Diário e no perfil de um membro ou de uma Página. Assim ele não cobre a seta "Enviados" nem a aba vazia de uma Página. Voltar para Publicações ou Mural o mostra de novo.
+- Na Feira, o botão "Anunciar" tem o texto limitado a 1,3 de escala de fonte, para não cobrir "Salvar busca" com texto grande no iOS.
+- Na Feira, as pílulas de filtro (tipo e categoria) têm espaço vertical e não encostam nas linhas divisórias.
+- Na Feira, "Buscar" e Enter nos campos de cidade e palavras fecham o teclado antes de aplicar a busca, para o resultado aparecer sem ele por cima.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/feiraScreen.test.js`, `node apps/app/test/feira.test.js`, `node apps/app/test/feiraAlerts.test.js`, `node apps/app/test/feiraSaved.test.js`, `node apps/app/test/conversasList.test.js` e `node apps/app/test/platformGate.test.js`. O primeiro confere por leitura do código o botão "Anunciar", o fechamento do teclado em `applyFilters` e o espaçamento das pílulas.
+- `node apps/app/test/momentosScreen.test.js`, `node apps/app/test/depoimentos.test.js` e `node apps/app/test/tabBar.test.js`, que cobrem o aviso sobre o visualizador, o compositor e o botão de publicar.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA:
+
+- [ ] Momentos: com a barra de aviso ativa, abrir um momento. O aviso não aparece por cima do visualizador, e não reaparece ao fechá-lo.
+- [ ] Momentos: no compositor, com o campo de texto no fim da tela, escolher uma foto. A tela rola até o campo e o contador, e o teclado não abre.
+- [ ] Diário, aba Depoimentos: o botão de publicar some, e a seta "Enviados" fica livre. Voltar para Publicações ou Mural mostra o botão de novo.
+- [ ] Perfil de uma Página sem depoimentos, aba Depoimentos: a aba vazia não tem o botão por cima.
+- [ ] Perfil de um membro, aba Depoimentos: o botão some e volta ao trocar de aba.
+- [ ] Feira com texto grande no iOS: "Anunciar" cabe no botão e não cobre "Salvar busca".
+- [ ] Feira: as pílulas de tipo e de categoria têm respiro acima e abaixo e não encostam nas linhas.
+- [ ] Feira: tocar em "Buscar", ou Enter na cidade ou nas palavras, fecha o teclado e mostra o resultado.
+- [ ] Web e PWA: repetir as conferências acima na largura de celular.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Os testes conferem o código-fonte por leitura de arquivo, não a tela. A posição do botão, o respiro das pílulas e o comportamento do teclado só se confirmam no aparelho ou no simulador.
+- O fechamento do teclado em "Buscar" vale para todas as plataformas, porque a regra fica na função compartilhada; a conferência no Android é a que importa para o teclado.
+
+## 145. Vitrine: fotos de anúncios, origem de demonstração, contagens ao vivo (PR chore/vitrine-demo-data)
+
+Ajustes só do modo Vitrine (demonstração, `EXPO_PUBLIC_VARANDA_VITRINE=1`). Não mudam nada no uso real: protocolo, RPC, semeador e o nó de verdade ficam como estão.
+
+O que mudou:
+
+- As fotos dos anúncios da Feira carregam na demonstração. A mídia do anúncio é montada com bytes de fotos de verdade e o `publicMedia` a encontra.
+- A origem de instalação da demonstração é `https://vitrine.invalid`. Com isso as buscas salvas da Feira persistem e os controles de oferta (Aceitar, Recusar, Fazer oferta e as respostas rápidas) aparecem na conversa de demonstração. Eles nunca apareciam na demonstração e por isso nunca foram revistos.
+- As contagens de curtidas e de compartilhamentos seguem os toques ao vivo. Curtir ou compartilhar uma publicação e sair de A Rua e voltar mantém a contagem, e desfazer a leva de volta ao valor de antes. Cada instância da demonstração tem a sua lista, e os dados de exemplo não mudam.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/vitrineIndex.test.js`, `node apps/app/test/vitrine.test.js`, `node apps/app/test/vitrineGuard.test.js`, `node apps/app/test/vitrineFeira.test.js`, `node apps/app/test/vitrineLarge.test.js` e `node apps/app/test/engagement.test.js`. O teste "live likes and reposts move the counts" falha sem a junção dos registros ao vivo.
+- `npm run lint`, `npm test` e `npm run demo`, que têm de passar (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA, com `EXPO_PUBLIC_VARANDA_VITRINE=1`:
+
+- [ ] Feira: os anúncios mostram foto, na lista e na página do anúncio.
+- [ ] Feira: salvar uma busca, sair da tela e voltar. A busca continua salva.
+- [ ] Conversa de demonstração com um anúncio: aparecem Aceitar e Recusar numa oferta recebida, Fazer oferta e as respostas rápidas. Percorrer cada controle: aceitar, recusar, fazer uma oferta e tocar numa resposta rápida, conferindo o texto, o estado depois do toque e que nada quebra.
+- [ ] A Rua: curtir uma publicação e compartilhar outra. Ir para outra aba e voltar: as contagens e os ícones continuam. Desfazer volta ao número de antes.
+- [ ] Diário: um compartilhamento feito na demonstração aparece na lista do próprio Diário e some ao desfazer.
+- [ ] Web e PWA: repetir as conferências acima na largura de celular.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Os testes conferem as respostas da demonstração, não a tela. Fotos, controles de oferta e posição só se confirmam no aparelho ou no simulador.
+- Os controles de oferta nunca foram revistos na demonstração antes desta mudança: a caminhada acima é a primeira revisão deles.
+
+## 146. Entrar e criar conta em palavras simples (PR feat/simple-sign-in)
+
+Só apresentação e texto: protocolo, RPC, handlers e o serviço de conta ficam como estão.
+
+O que mudou:
+
+- O primeiro passo "Bem-vindo à Varanda" é uma tela de boas-vindas. Não tem título na barra nem "Passo 1 de 3": só o botão de informação (i) no canto de cima, que abre "Como funciona a entrada" com todas as explicações.
+- O hero tem a cadeira num disco (creme no escuro), o título "Bem-vindo à Varanda" (28 pt) e "Uma rede social feita entre pessoas.".
+- Dois botões grandes de largura total (52 pt) perto de baixo: "Criar minha conta" (cheio) e "Já tenho conta" (contornado). Quando o aparelho já conhece a conta, só "Entrar". Com "Concluir e entrar" esperando, "Criar minha conta" vira secundário.
+- Os avisos (conta não encontrada, conta conhecida que não apareceu, entrada perdida, rede cheia, convite, Feira, conta de outra passkey) aparecem em caixas suaves acima dos botões.
+- O link calmo "Outras formas de entrar" com seta (no lugar de "Mais opções" e "Menos opções") tem o mesmo texto aberto ou fechado; leitores de tela anunciam expandido e recolhido. Some quando nenhuma opção se aplica. Aberto, mostra linhas: "Entrar com outra passkey", "Criar com o celular" ou "Entrar com o celular" (só na web, com QR code) e "Entrar com código de recuperação", cujo campo abre dentro da lista e fica acima do teclado no Android. Abre sozinho depois de uma entrada que não encontra a conta e pode ser fechado.
+- A linha "Para criar a conta ou entrar, basta confirmar com o rosto..." saiu da tela; está na ajuda (i).
+- Quando criar a conta precisa de uma confirmação extra, a tela diz "Falta só confirmar mais uma vez. Toque em Concluir e entrar.". Fechar a janela do Face ID ou da digital mostra "Você fechou a confirmação. Toque de novo quando quiser.".
+- Em Ajustes › Conta o mesmo conteúdo aparece dentro do cartão, sem o hero.
+- Peças novas: `apps/app/src/ui/Welcome.js` (WelcomeHeader), `apps/app/src/ui/OptionRow.js` (OptionsToggle, OptionList, OptionRow, OptionBlock), `Btn large`, `Page grow` e `type.heroTitle`. Nada muda em como a conta é criada ou aberta.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/entrarCard.test.js`, `node apps/app/test/passkeysScreen.test.js`, `node apps/app/test/passkeyTrouble.test.js`, `node apps/app/test/help.test.js`, `node apps/app/test/onboarding.test.js`, `node apps/app/test/signupAdmission.test.js`, `node apps/app/test/sessionStoreNative.test.js` e `node apps/app/test/uiKit.test.js`.
+- `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo` (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (Android e iOS) e depois na web e no PWA (390 e 1280 de largura), em claro e escuro:
+
+- [ ] Sem barra com título nem "Passo 1 de 3"; só o botão (i) no canto de cima.
+- [ ] Um só título "Bem-vindo à Varanda".
+- [ ] A cadeira aparece num disco, creme no escuro.
+- [ ] Dois botões de largura total, 52 pt, perto de baixo num celular de 375 pt.
+- [ ] "Outras formas de entrar" tem seta, abre e fecha; TalkBack e VoiceOver anunciam expandido e recolhido.
+- [ ] As linhas da lista têm pelo menos 44 pt.
+- [ ] Sem nenhuma linha para mostrar, o link some.
+- [ ] O campo do código de recuperação abre dentro da lista e fica acima do teclado.
+- [ ] Os avisos aparecem em caixa suave acima dos botões.
+- [ ] Com "Concluir e entrar" esperando, "Criar minha conta" fica secundário.
+- [ ] Texto grande (tamanho de fonte do sistema no máximo): nada cortado.
+- [ ] Movimento reduzido: nenhuma animação nova.
+- [ ] O botão (i) abre "Como funciona a entrada".
+- [ ] Ajustes › Conta mostra o mesmo conteúdo no cartão, sem o hero.
+- [ ] O passo 2 continua com "Passo 2 de 3".
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- O build de debug não conclui uma passkey numa instalação de produção (veja `docs/development.md`). A cerimônia real se confere com o APK de preview do EAS ou no iPhone com o domínio associado.
+- Os estados nativos de criação pendente, código de recuperação e teclado com conta real só se conferem no APK de preview do EAS ou no TestFlight.
+- Os testes conferem textos e ordem no código, não a tela.
+
+## 147. Toda a entrada em layout moderno (PR feat/modern-onboarding)
+
+Só apresentação e texto: protocolo, RPC, handlers, o serviço de conta, a idade e o vínculo Google ficam como estão.
+
+O que mudou:
+
+- Todo passo depois das boas-vindas usa um só layout (`apps/app/src/ui/Stepper.js`): barra do topo sem título, só com o botão (i) nos passos que têm ajuda; "Passo n de 3" centrado com pontos; um disco de 72 pt com um ícone (ou um spinner enquanto espera, ou o avatar do perfil); um título (28 pt, arredondado); uma frase curta; o corpo; botões grandes de largura total (52 pt) perto de baixo, um cheio e o segundo contornado; a terceira escolha como link calmo centrado; avisos em caixas suaves e quentes; nenhum cartão dentro do passo. As explicações ficam no (i).
+- Termos (antes de entrar): ícone "file-text", título "Antes de começar" (ou "Atualizamos os termos" ou "Antes de continuar"), a frase de sempre, os dois documentos como uma lista de linhas que abrem no lugar ("Ler" e "Fechar"), o botão grande "Li e aceito os Termos de Uso e a Política de Privacidade" e, embaixo, "Sem aceitar, não é possível entrar no Varanda.". Ajustes › Termos não mudou.
+- Introdução: título maior e arredondado, botão grande "Próximo" ou "Começar" e "Voltar" como link calmo embaixo.
+- Buscando sua conta: spinner no disco; a linha repetida "Buscando sua conta…" e o "carregando…" saíram.
+- Confirme sua idade: ícone "shield"; o (i) abre "Como funciona a confirmação de idade" (Didit, selfie ou documento, só a faixa guardada, retomar por cerca de uma hora, volta pelo app ou pelo navegador, política de privacidade). As linhas sobre a Didit e "a foto não chega à Varanda" saíram da tela. Os estados ficam em caixas suaves (em análise com continuar, inconclusivo, vencida, recusada, confirmada), com os botões grandes "Verificar minha idade", "Continuar a verificação", "Tentar com um documento" e "Conferir de novo". "Pedir entrada" da Feira fica numa caixa; o convite colado tem "Usar este convite"; a barra de offline repetida do shell fica escondida neste passo.
+- Escolha seu @nome (Google): ícone "at-sign"; o campo @nome e o botão grande "Continuar com o Google"; a linha de privacidade sobre o vínculo Google está no (i). A linha "Sem a liberação da associação, este aparelho não publica nem sincroniza." não aparece mais neste passo (continua nos passos manuais e em Ajustes). A confirmação diz "Quase lá: você vai entrar como @x." com "Confirmar" grande e "Começar de novo" como link calmo. Convite, lista de espera e aviso de volta ficam em caixas suaves. Carregando: "Preparando sua conta…". Antes de abrir o Google: "Vamos abrir o Google. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.". Ajustes › Conta não mudou.
+- Um instante: spinner, a linha "Buscando seu perfil." e "Continuar mesmo assim" depois de 10 s.
+- Como você quer aparecer: o avatar é o herói, com os botões de foto embaixo; nome e bio; "Continuar" grande e "Pular por enquanto" como link calmo (os dois somem enquanto o editor de foto está aberto). A explicação da foto pública foi para o (i).
+- Passos da configuração manual (nativo ou instalação própria): o mesmo quadro, botões grandes e os mesmos textos.
+- Aviso antes da verificação de idade: "Vamos abrir a verificação. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.".
+- Peças: `Stepper`, `StepLink` e `StepNotice`. Nada muda em como a conta, a idade ou o Google funcionam.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/{uiKit,help,onboarding,age,wordCheck,linkReturn,passkeyTrouble,passkeysScreen,signupInvite,account,profileSave,mediaCrop,intro,terms,terms-version,legal,platformGate,themeUsage,splashGate}.test.js`, um arquivo por vez.
+- `npm run lint`, `npm test` e `npm run demo` (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA, claro e escuro:
+
+- [ ] Sem barra com título e com o título uma só vez em todo passo.
+- [ ] "Passo n de 3" certo em cada passo, centrado com pontos.
+- [ ] Botões de largura total e 52 pt; links calmos com 44 pt.
+- [ ] Avisos em caixas suaves, sem cartão dentro do passo.
+- [ ] Termos: as linhas abrem e fecham no lugar ("Ler" e "Fechar") e o aceite segue em frente.
+- [ ] Introdução: "Próximo", "Começar" e "Voltar" funcionam.
+- [ ] Idade: cada estado (em análise, inconclusivo, vencida, recusada, confirmada), a Feira "Pedir entrada", o convite colado com "Usar este convite" e, uma vez, o offline sem barra repetida.
+- [ ] @nome: o formulário, a confirmação "Quase lá", o convite, a lista de espera e o aviso de volta.
+- [ ] Um instante: "Continuar mesmo assim" aparece depois de 10 s.
+- [ ] Perfil: com o editor de foto aberto, "Continuar" e "Pular por enquanto" somem.
+- [ ] Texto grande (tamanho de fonte do sistema no máximo): nada cortado.
+- [ ] Movimento reduzido: nenhuma animação nova.
+- [ ] TalkBack e VoiceOver leem na ordem certa.
+- [ ] O teclado não cobre os campos.
+- [ ] Ajustes › Conta e Ajustes › Termos continuam como eram.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Os testes leem o código-fonte, não a tela.
+- Os fluxos reais do Google e da Didit e o Android não foram exercitados neste PR.
+- Entrar de verdade no nativo precisa do APK de preview do EAS ou do TestFlight.
+
+## 148. Conversas de página de ponta a ponta, Termos 33 (PR feat/page-e2e-dm)
+
+As Conversas de Página passam a ser cifradas de ponta a ponta entre quem escreve e os aparelhos do dono e dos administradores. O serviço de conta não abre a caixa nem as mensagens: só publica a chave pública da caixa, guarda envelopes selados para os membros da lista e assina `varanda-dm-v3\n` mais o digest de 32 bytes que o aparelho preparou. A dona ativa a página, importa antes as linhas antigas quando houver e distribui a nova chave aos administradores. Termos e Política passam para a versão 33.
+
+Como verificar, a partir da raiz:
+
+- `node apps/cli/test/pages-dm.test.js`
+- `node packages/web-member/test/page-dm.test.js`
+- `node packages/core/test/page-secrets.test.js`
+- `node apps/app/test/pages.test.js`
+- `node apps/app/test/legal.test.js`
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA, com A (dona), B (administradora) e C (membro):
+
+- [ ] A abre as Conversas da Página, ativa a caixa e importa as linhas antigas, quando houver. A folha explica a mudança e **Enviar chave** entrega a chave a B.
+- [ ] B recebe a chave e abre as Conversas da Página.
+- [ ] C escreve para a Página. B lê a mensagem e responde como a Página; C vê a Página, não B.
+- [ ] A remove B e gira a chave exigida pela remoção. B deixa de ler mensagens novas e não consegue enviar como a Página.
+- [ ] Na Feira, A aceita uma oferta de C como Página sem existir uma conversa entre eles. O aceite não procura a oferta numa conversa da Página.
+- [ ] Faça o `dm-key` público diferir da chave guardada por B. Ao tentar enviar como a Página, o aparelho de B recusa e mostra que a chave publicada não é a deste aparelho, até B receber a chave correta.
+
+Limites desta caminhada:
+
+- O serviço ainda guarda a chave de assinatura da Página. Ele poderia forjar uma mensagem como a Página ou publicar uma chave de caixa própria; os aparelhos administradores avisam da chave diferente e param de enviar.
+- Mensagens escritas antes da ativação eram legíveis pelo serviço.
+- Uma mensagem da Página que nenhum aparelho administrador coletar em 7 dias se perde.
+- O serviço sabe quando um administrador envia, embora não veja a mensagem, o destinatário nem o envelope.
+
+## 149. Grupos privados como página de ponta a ponta, Termos 34 (PR feat/page-e2e-groups)
+
+As publicações de uma Página em grupo privado passam a ser seladas no aparelho do dono ou de um administrador. O serviço conserva somente o escritor Ed25519 da Página e acrescenta o bloco que recebe sem abrir o texto. A caixa do grupo vem dos segredos da Página mantidos nos aparelhos administradores. Ao trocar essa caixa, o escritor antigo sai, um escritor novo entra e o grupo fica aguardando a admissão dele e uma época nova. Termos e Política passam para a versão 34.
+
+Como verificar, a partir da raiz:
+
+- `node apps/cli/test/pages-groups.test.js`
+- `node apps/cli/test/account-pages-groups.test.js`
+- `node packages/web-member/test/page-groups.test.js`
+- `node apps/app/test/groupScreen.test.js`
+- `node apps/app/test/legal.test.js`
+
+Caminhada, primeiro no celular, build de depuração do Android e simulador iOS, e depois na web e no PWA:
+
+- [ ] Com uma Página em grupo privado, ler e publicar a partir de um aparelho administrador. O texto aparece para os membros autorizados.
+- [ ] Conferir a resposta `group-read` do serviço: ela não traz texto de publicação privada.
+- [ ] Remover um administrador da Página. O grupo fica aguardando renovação de chave; os administradores do grupo admitem o escritor novo, uma época nova cobre a saída e a publicação volta a funcionar.
+- [ ] Na CLI, `page group-post` em grupo privado imprime a recusa `grupo privado: publique como a página pelo app`.
+- [ ] Publicar uma vez, banir outro membro do grupo e reenviar a publicação selada antiga: o serviço responde `aguardando-chave`; uma publicação selada na época nova entra.
+- [ ] Derrubar o serviço no meio de `group-rebox` (ou fazê-lo falhar) e reiniciar: `dm-box-read` mostra `reboxPending: true` e o serviço conclui sozinho na partida ou no tique seguinte; depois `reboxPending` é `false` e `reboxNeeded` é `0`.
+- [ ] Numa Página ativada antes desta versão, conferir que a partida apaga `groupBoxSecretKey` de `page-keys.json` e que `reboxNeeded` conta os grupos privados que ainda precisam de `Renovar chave dos grupos`.
+- [ ] Conferir a busca do semeador do grupo para um aparelho administrador da Página. Esta checagem não é coberta pelos testes automatizados.
+
+Limites desta caminhada:
+
+- O serviço ainda acrescenta registros como escritor da Página e vê associação, membros e horários. Sem a chave válida da época, um bloco selado que ele forja é descartado por quem lê.
+- As épocas de grupo anteriores à primeira renovação eram conhecidas pelo serviço.
+- Nenhuma caixa acima foi marcada nesta documentação.

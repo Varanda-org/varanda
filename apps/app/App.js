@@ -67,6 +67,10 @@ import { makeIntent, validIntent } from './src/privateReply'
 import { NamesProvider, useNames } from './src/names'
 import { BlocksProvider, useBlocks } from './src/blocksProvider'
 import { BlockSheet } from './src/ui/BlockSheet'
+import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
+import { fetchMember } from './src/indexClient'
+import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
+import { pageNoticeStore } from './src/pageNoticeStore'
 import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
 import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotBefore } from './src/seenSync'
@@ -77,7 +81,7 @@ import { ageBlocking, ageErrorText, ageGate, ageReadAllowed, parseReturnAge } fr
 import { ageAnswerOutcome, ageStateShown, nodeVouches } from './src/ageMemory.js'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
-import { STEP_TITLES, onboardingStep } from './src/onboarding'
+import { STEP_HINTS, STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
 import { captureEntryLink, dropEntryLink } from './src/groupLinkStore'
 import { ENTRY_LINK_LABELS, ENTRY_OPEN_TEXT, entryCardText, entryPath } from './src/groupLink'
@@ -94,7 +98,8 @@ import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
 import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, holdBootCover, holdSplash } from './src/splashGate'
-import { Btn, ErrorText, Soft, Spinner, errorText } from './src/ui'
+import { Btn, ErrorText, Page, errorText } from './src/ui'
+import { Stepper } from './src/ui/Stepper'
 import { ThemeProvider, useStyles, useTheme } from './src/ui/ThemeProvider'
 import { Fab } from './src/ui/Fab'
 import { Splash } from './src/ui/Splash'
@@ -121,7 +126,7 @@ import { StackLayer, stackBusy, useStackMotion } from './src/ui/StackLayer'
 import { stackEntries } from './src/stackEntries'
 import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
 import { HELP } from './src/help'
-import { layout, type } from './src/ui/theme'
+import { layout, space, type } from './src/ui/theme'
 import { paletteFor, statusBarStyle } from './src/appearance.js'
 import { applyBandMeta } from './src/appearanceStore'
 import Avisos from './src/screens/Avisos'
@@ -146,7 +151,7 @@ import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, linkReturnTaker, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
-import Membro from './src/screens/Membro'
+import Membro, { canConverseWithPage } from './src/screens/Membro'
 import Depoimentos from './src/screens/Depoimentos'
 import Momentos from './src/screens/Momentos'
 import Feira from './src/screens/Feira'
@@ -197,7 +202,7 @@ const TERMS_REARM_MAX = 5
 const agePolicyDelay = (n) => (n === 0 ? 5000 : n === 1 ? 15000 : 60000)
 // The node.info read for the certificate proof on the age step, same idea.
 const ageInfoDelay = (n) => (n === 0 ? 2000 : n === 1 ? 5000 : n === 2 ? 15000 : 30000)
-const AGE_REDIRECT_TEXT = 'Vamos abrir a verificação e, na volta, pedir sua passkey de novo.'
+const AGE_REDIRECT_TEXT = 'Vamos abrir a verificação. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.'
 
 // The steps the setup branch (Identidade, Idade) renders; the others belong
 // to the shell (spinner, Perfil, the tabs).
@@ -391,6 +396,9 @@ function Member () {
   // later failed or slow read never hides the tabs again.
   const [setupDone, setSetupDone] = useState(false)
   const [toast, setToast] = useState(null)
+  // The selected tab of each profile on screen (Diário, Membro entries), for the publish button.
+  const [profileTabs, setProfileTabs] = useState({})
+  const reportProfileTab = useCallback((key, id) => setProfileTabs((prev) => prev[key] === id ? prev : { ...prev, [key]: id }), [])
   const toastTimer = useRef(null)
   // The pending profile invite (src/profileLink.js): the record in tab
   // storage, re-read before every step that acts on it.
@@ -1634,6 +1642,8 @@ function Member () {
   // strip and the Diário rows that call it render only there).
   const openMomentos = useCallback((key) => {
     if (typeof key !== 'string') return
+    // The publication toast must not outlive the viewer it covered.
+    clearTimeout(toastTimer.current); setToast(null)
     pushScreen({ screen: 'momentos', key: key.toLowerCase(), params: {} })
   }, [pushScreen])
   const openTestimonials = useCallback((key) => {
@@ -1977,26 +1987,100 @@ function Member () {
   // and Mensagem reads the new intent as a prop. Mensagem uses one only once,
   // and only the conversation on top of the stack is handed it.
   const intentsRef = useRef(new Map())
-  // A lock, an unlock or another identity drops every pending context.
-  useEffect(() => { intentsRef.current.clear() }, [ownKey, nodeEpoch])
+  // The page notice asked from a post's "Mensagem em particular" ({ key }).
+  const [pageDmAsk, setPageDmAsk] = useState(null)
+  const pageDmPending = useRef(null)
+  // A lock, an unlock or another identity drops every pending context, and a
+  // page notice left open must not open a conversation under the new identity.
+  useEffect(() => {
+    intentsRef.current.clear()
+    setPageDmAsk(null)
+    pageDmPending.current = null
+  }, [ownKey, nodeEpoch])
   const intentCount = useRef(0)
   const [, setIntentTick] = useState(0)
+  const pageDmGen = useRef(0)
+  const ownKeyRef = useRef(ownKey)
+  ownKeyRef.current = ownKey
   const openMessage = useCallback((peer, options) => {
     const key = typeof peer === 'string' ? peer.toLowerCase() : peer
-    if (options && options.context && typeof key === 'string') {
-      intentCount.current += 1
-      const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
-      const intent = makeIntent({ id: intentCount.current + ':' + Date.now(), peer: key, from: own, context: options.context })
-      if (validIntent(intent, own)) {
-        intentsRef.current.set(key, intent)
-        setIntentTick((n) => n + 1)
+    const open = () => {
+      if (options && options.context && typeof key === 'string') {
+        intentCount.current += 1
+        const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
+        const intent = makeIntent({ id: intentCount.current + ':' + Date.now(), peer: key, from: own, context: options.context })
+        if (validIntent(intent, own)) {
+          intentsRef.current.set(key, intent)
+          setIntentTick((n) => n + 1)
+        }
       }
+      // { draft, card } from a listing's Conversar, shown in the composer only;
+      // nothing is sent until the member presses send.
+      const initial = options && (typeof options.draft === 'string' || options.card) ? { draft: options.draft, card: options.card || null } : null
+      pushScreen({ screen: 'mensagem', key, params: initial ? { initial } : {} })
     }
-    // { draft, card } from a listing's Conversar, shown in the composer only;
-    // nothing is sent until the member presses send.
-    const initial = options && (typeof options.draft === 'string' || options.card) ? { draft: options.draft, card: options.card || null } : null
-    pushScreen({ screen: 'mensagem', key, params: initial ? { initial } : {} })
-  }, [pushScreen, ownKey])
+    if (!(options && options.context && typeof key === 'string')) {
+      pageDmGen.current++
+      pageDmPending.current = null
+      return open()
+    }
+    // A post's row offers the message before the author is known as a Pagina
+    // (feed items carry no page flag): a page gets its one-time notice and no
+    // private context chip, and a closed or moved one gets none at all.
+    const decide = ({ read, hint, closed, moved }) => {
+      const canConverse = canConverseWithPage({
+        page: true,
+        closed,
+        moved,
+        hosted: node.hosted,
+        enabled: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })
+      })
+      const plan = pageDmPlan({ hint, read, seen: pageNoticeSeen(pageNoticeStore(), key), canConverse })
+      if (plan === 'open') return open()
+      if (plan === 'direct') return pushScreen({ screen: 'mensagem', key, params: {} })
+      if (plan === 'notice') return setPageDmAsk({ key })
+      // showToast only touches setToast and toastTimer, both stable.
+      showToast('Esta página não recebe mensagens.')
+    }
+    const prof = names.profileOf(key)
+    if (prof && prof.page === true) {
+      pageDmGen.current++
+      pageDmPending.current = null
+      return decide({ read: 'page', hint: null, closed: prof.closed === true, moved: prof.moved === true })
+    }
+    if (pageDmPending.current === key) return
+    const pressGen = ++pageDmGen.current
+    pageDmPending.current = key
+    const pressOwn = ownKey
+    const pressEpoch = nodeEpoch
+    // Slow page discovery must not hold up a person's conversation.
+    const bounded = (promise) => {
+      let timer
+      return Promise.race([
+        promise,
+        new Promise((resolve) => { timer = setTimeout(() => resolve(null), 2500) })
+      ]).finally(() => clearTimeout(timer))
+    }
+    const hintP = Promise.resolve().then(() => fetchMember(key)).then(
+      (res) => res && res.ok && res.value.page === true ? { page: true, closed: res.value.closed === true, moved: res.value.moved === true } : null
+    ).catch(() => null)
+    const readP = Promise.resolve().then(() => node.request('page.read', { key })).catch(() => null)
+    Promise.all([bounded(hintP), bounded(readP)]).then(([hint, r]) => {
+      if (pageDmGen.current !== pressGen) return
+      if (pageDmPending.current === key) pageDmPending.current = null
+      if (ownKeyRef.current !== pressOwn || nodeEpochRef.current !== pressEpoch) return
+      const read = pageReadKind(r, key)
+      const fromRead = read === 'page'
+      const closed = fromRead ? r.closed === true : !!(hint && hint.closed)
+      const moved = fromRead ? (r.movedTo !== null && r.movedTo !== undefined) : !!(hint && hint.moved)
+      // Only the member's own node may mark a key as a page in the names
+      // cache: the seeder's hint is untrusted and would otherwise stick.
+      if (read === 'page') {
+        names.learnMany([[key, { name: prof ? prof.name : null, username: prof ? prof.username : null, page: true, closed, moved }]])
+      }
+      decide({ read, hint, closed, moved })
+    }).catch(() => { if (pageDmGen.current === pressGen && pageDmPending.current === key) pageDmPending.current = null })
+  }, [pushScreen, ownKey, nodeEpoch, names, node.request, node.hosted, node.accountOrigin])
   const intentUsed = useCallback((id) => {
     for (const [key, intent] of intentsRef.current) {
       if (intent.id === id) intentsRef.current.delete(key)
@@ -2548,6 +2632,12 @@ function Member () {
   // On a wide web window the setup step and the tabs share one centred column.
   const wide = Platform.OS === 'web' && width > layout.column
   let content
+  // Onboarding steps draw their own title (src/ui/Stepper.js, src/ui/Welcome.js); the bar keeps only the help.
+  const stepBar = (
+    <View style={[styles.helpBar, { paddingTop: insets.top, minHeight: layout.topBar + insets.top }]}>
+      {HELP[step] ? <HelpButton key={step} doc={HELP[step]} /> : null}
+    </View>
+  )
   if (setupStep) {
     // The first setup (identity, member certificate) before the tabs. The
     // tabs never render before a successful node.info confirms both.
@@ -2573,7 +2663,7 @@ function Member () {
         />
       )
     } else if (passkey !== null || info !== null) {
-      // embedded: the top bar above already carries the step's title
+      // embedded: the step frame (or the Ajustes page) carries the title
       // The invite card shows on Entrar only (never in the Ajustes Identidade).
       const inviteProp = action === 'card'
         ? {
@@ -2597,18 +2687,19 @@ function Member () {
       body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={dropLinkReturn} onInviteChanged={reloadCard} invite={inviteProp || entryProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
-        <View style={styles.setupBody}>
-          <ErrorText>{infoError}</ErrorText>
-          <Btn label='tentar de novo' onPress={readInfo} disabled={!ready} />
-        </View>
+        <Page flush grow padBottom={16}>
+          <Stepper index={index} total={total} title={STEP_TITLES[step]} hint={STEP_HINTS[step] || ''} actions={<Btn label='Tentar de novo' onPress={readInfo} disabled={!ready} block large />}>
+            <ErrorText>{infoError}</ErrorText>
+          </Stepper>
+        </Page>
       )
     } else {
-      body = <View style={styles.setupBody}><Soft>carregando…</Soft></View>
+      body = <Page flush grow padBottom={16}><Stepper index={index} total={total} title={STEP_TITLES[step]} hint={STEP_HINTS[step] || ''} busy /></Page>
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} right={HELP[step] ? <HelpButton key={step} doc={HELP[step]} /> : null} />
-        <OfflineNote />
+        {stepBar}
+        {step === 'idade' ? null : <OfflineNote />}
         <ExclusaoRecibo />
         {/* Without the Conexão link (hosted page) the body clears the home indicator itself. */}
         <View style={[styles.flex, connectionLink === null && { paddingBottom: insets.bottom }]}>{body}</View>
@@ -2619,13 +2710,12 @@ function Member () {
     // The own profile is being looked up (sync already runs in the background).
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} />
+        {stepBar}
         <OfflineNote />
-        <View style={styles.center}>
-          <Spinner size='large' />
-          {slow
-            ? <Btn label='Continuar mesmo assim' secondary onPress={() => setSkippedName(true)} />
-            : null}
+        <View style={[styles.flex, { paddingBottom: insets.bottom }]}>
+          <Page flush grow padBottom={16}>
+            <Stepper index={index} total={total} title={STEP_TITLES.carregando} hint={STEP_HINTS.carregando} busy actions={slow ? <Btn label='Continuar mesmo assim' secondary block large onPress={() => setSkippedName(true)} /> : null} />
+          </Page>
         </View>
       </View>
     )
@@ -2634,7 +2724,7 @@ function Member () {
     // (the step machine then shows the tabs) and the welcome toast shows there.
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} right={<HelpButton doc={HELP.perfil} />} />
+        {stepBar}
         <OfflineNote />
         <View style={[styles.flex, Platform.OS === 'web' && { paddingBottom: insets.bottom }]}>
           <Perfil
@@ -2665,7 +2755,11 @@ function Member () {
     const leavingEntry = stackMotion.leaving && stackMotion.leaving.entry && stackMotion.leaving.index >= nav.depth(stack) ? stackMotion.leaving.entry : null
     const viewerLeaving = leavingEntry !== null && leavingEntry.screen === 'momentos'
     const barsHidden = stacked || viewerLeaving
-    const fabShown = !viewerLeaving && showPostButton({ tab, screen: stacked ? nav.top(stack).screen : null })
+    const topProfile = stacked ? nav.top(stack) : null
+    const profileTab = stacked
+      ? (topProfile.screen === 'membro' ? profileTabs[(stack.length - 1) + ':' + topProfile.key] : undefined)
+      : (tab === 'diario' ? profileTabs.diario : undefined)
+    const fabShown = !viewerLeaving && showPostButton({ tab, screen: stacked ? topProfile.screen : null, profileTab })
     const tabActions = <TopActions key={tab} help={HELP[tab === 'comunidades' ? 'conversas' : tab]} onAvisos={mode === 'hosted' ? openAvisos : undefined} avisosNew={avisosNew} avisosActive={tab === 'avisos'} />
     // Conversas puts its "+" before help and the bell (the WhatsApp header);
     // its search is a field above the chips, not a header action.
@@ -2871,7 +2965,7 @@ function Member () {
       const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
       return (
         <StackLayer key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-          <Screen entry={entry} {...screenProps} />
+          <Screen entry={entry} {...screenProps} onTabChange={entry.screen === 'membro' ? (id) => reportProfileTab(i + ':' + entry.key, id) : undefined} />
         </StackLayer>
       )
     }
@@ -3032,6 +3126,7 @@ function Member () {
             : null}
           <View style={shown('diario')}>
             <Diario
+              onTabChange={(id) => reportProfileTab('diario', id)}
               onDeletedPost={deletedPost}
               active={on('diario')}
               refresh={version}
@@ -3067,7 +3162,7 @@ function Member () {
         {fabShown ? <Fab onPress={openComposer} /> : null}
         {/* After the Fab, and above it when it shows: a long toast wraps
             upward and must never sit under the button. */}
-        {toast
+        {toast && !(viewerOnTop || viewerLeaving)
           ? (
             <View style={[styles.toast, { bottom: fabShown ? insets.bottom + layout.tabBar + layout.fabAboveTabs + layout.fabSize + 12 : (barsHidden ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='box-none'>
               {/* Only the action takes touches: under box-none the label would
@@ -3091,6 +3186,16 @@ function Member () {
             </View>
             )
           : null}
+        <PageNoticeSheet
+          open={pageDmAsk !== null}
+          page={pageDmAsk ? pageDmAsk.key : null}
+          onClose={() => setPageDmAsk(null)}
+          onContinue={() => {
+            const k = pageDmAsk.key
+            setPageDmAsk(null)
+            pushScreen({ screen: 'mensagem', key: k, params: {} })
+          }}
+        />
         {/* Avisos is not a tab: the bar keeps the tab it was opened from, and that tab's icon closes it. */}
         {barsHidden ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot, feira: feiraBadge }} tabs={tabsFor(mode)} me={tabMe} />}
       </View>
@@ -3215,10 +3320,9 @@ const makeStyles = (colors) => StyleSheet.create({
   // Clear: each StackLayer paints its own background, so a slide shows the
   // screen (or tab) under it.
   layer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
-  center: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', gap: 8 },
   shell: { flex: 1, width: '100%', maxWidth: layout.column, alignSelf: 'center', backgroundColor: colors.bg },
   shellWide: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: colors.line },
-  setupBody: { padding: 16, gap: 12 },
+  helpBar: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-end', paddingRight: space.sm, backgroundColor: colors.bg },
   link: { alignItems: 'center', paddingTop: 14, borderTopWidth: 1, borderTopColor: colors.line, backgroundColor: colors.bg },
   linkText: { fontSize: 15, fontWeight: '600', color: colors.accent },
   toast: {

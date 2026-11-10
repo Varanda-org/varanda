@@ -29,7 +29,7 @@ export const HELP = Object.freeze({
       'O pagamento é combinado e feito fora do app. Fazer ou aceitar uma oferta não é pagar nem comprovar pagamento.',
       'Os estados Reservado, Vendido e Encontrado ficam visíveis para todo mundo.',
       'Avaliações precisam do consentimento de quem anuncia e não são prova de pagamento.',
-      'Nas conversas com uma Página, a associação pode ler as mensagens.'
+      'Nas conversas com uma Página, só quem administra a página lê as mensagens.'
     ])
   }),
   seguindo: Object.freeze({
@@ -77,11 +77,12 @@ export const HELP = Object.freeze({
   entrar: Object.freeze({
     title: 'Como funciona a entrada',
     paragraphs: Object.freeze([
-      'Você entra com uma passkey: sem senha e sem e-mail.',
-      'Ela fica no gerenciador de senhas do aparelho e abre com biometria ou PIN.',
-      'Guarde-a num gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro): é ele que devolve a passkey num aparelho novo. Num computador sem esse gerenciador, use o celular: para criar a conta, toque em criar com o celular; para entrar, toque em Entrar com a passkey e escolha usar outro aparelho. Nos dois casos, leia com a câmera do celular o QR code que aparece na tela do computador.',
+      'Na Varanda não existe senha para decorar nem e-mail para confirmar. Sua conta abre com o rosto, a digital ou o bloqueio de tela do aparelho. Por baixo, isso se chama passkey.',
+      'No celular, a passkey costuma ficar salva na conta Google (Android) ou na conta Apple (iPhone), que sincroniza entre os seus aparelhos: num celular novo, entrar nessa mesma conta traz a passkey de volta. Outros gerenciadores de senhas que sincronizam, como o 1Password ou o Bitwarden, também servem.',
+      'Num computador, use o celular: para criar a conta, toque em Outras formas de entrar e em criar com o celular; para entrar, toque em Entrar ou Já tenho conta e escolha usar outro aparelho na janela do sistema. Nos dois casos, leia com a câmera do celular o QR code que aparece na tela do computador.',
       'Em Ajustes → Passkeys e recuperação, cadastre outra passkey ou um código de recuperação: eles abrem a mesma conta. Uma passkey criada fora desse lugar abre outra conta.',
-      LOSS_TEXT
+      LOSS_TEXT,
+      'Em Outras formas de entrar ficam os outros jeitos de entrar, para quem já tem conta em outro aparelho ou guardou um código de recuperação: entrar com outra passkey, usar o celular pelo QR code (no navegador) e entrar com o código de recuperação.'
     ])
   }),
   vinculo: Object.freeze({
@@ -94,6 +95,17 @@ export const HELP = Object.freeze({
       'Vamos abrir o Google e, na volta, pedir sua passkey de novo.',
       'O @nome tem de 3 a 20 letras minúsculas, números ou _, começando por letra. Você pode trocá-lo depois, uma vez a cada 7 dias.',
       'Se a rede estiver por convite, a entrada é pelo link que alguém que já está na Varanda te enviou.'
+    ])
+  }),
+  idade: Object.freeze({
+    title: 'Como funciona a confirmação de idade',
+    paragraphs: Object.freeze([
+      'A Varanda é para quem tem 16 anos ou mais. A verificação é feita por um serviço parceiro, a Didit, em geral com uma selfie e às vezes com um documento.',
+      'A foto e o documento não chegam à Varanda. Só a sua faixa de idade fica guardada.',
+      'Se não der para confirmar só pelo rosto, dá para tentar de novo com um documento.',
+      'Se você saiu antes de terminar, a mesma verificação pode ser retomada por cerca de uma hora.',
+      'No app, a verificação abre no navegador. Ao terminar, volte para a Varanda: o resultado é conferido de novo. Na web, a verificação abre nesta aba. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.',
+      'O que é guardado está na Política de Privacidade (Ajustes → Termos e privacidade).'
     ])
   }),
   identidade: Object.freeze({
@@ -116,7 +128,8 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Seu nome aparece em cada publicação e no seu perfil. A bio é opcional.',
       'O perfil é público: aparece para todo mundo assim que é publicado.',
-      'Dá para pular agora e preencher depois, em Ajustes → Editar perfil.'
+      'Dá para pular agora e preencher depois, em Ajustes → Editar perfil.',
+      'A foto do perfil é pública. Ela é recortada em quadrado e enviada sem dados de localização. Tirar a foto deixa de mostrá-la no app, mas a cópia enviada continua na rede.'
     ])
   }),
   busca: Object.freeze({
@@ -180,7 +193,6 @@ export const HELP = Object.freeze({
 
 export const SHORT = Object.freeze({
   link: 'A associação guarda o vínculo com sua conta Google; o e-mail nunca vai para o seu perfil nem para o seu diário.',
-  passkeyLoss: LOSS_TEXT,
   followsPublic: 'Quem você segue e quem segue você é público.',
   install: 'Abra o menu do navegador e escolha instalar o app. No iPhone: Compartilhar e depois Adicionar à Tela de Início.',
   reportPrivacy: 'A pessoa denunciada não vê quem denunciou.',

@@ -15,7 +15,7 @@ import { useStyles } from './ThemeProvider'
 
 const STACK_SCALE = 1.3
 
-export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, tabs }) {
+export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs }) {
   const styles = useStyles(makeStyles)
   const shownCounts = Array.isArray(counts) ? counts.filter((c) => c && c.value !== null && c.value !== undefined) : []
   const shownActions = Array.isArray(actions) ? actions.filter(Boolean) : []
@@ -79,12 +79,25 @@ export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, 
         {shownActions.length > 0 || more
           ? (
             <View style={stacked ? styles.actionsStacked : styles.actions}>
-              {shownActions.map((action, i) => <View key={i} style={stacked ? styles.actionStacked : styles.action}>{action}</View>)}
-              {more ? <View style={stacked ? styles.moreStacked : null}>{more}</View> : null}
+              {shownActions.map((action, i) => {
+                const last = i === shownActions.length - 1
+                // Stacked: the more button shares the last pill's row.
+                if (stacked && last && more) {
+                  return (
+                    <View key={i} style={styles.lastStacked}>
+                      <View style={styles.actionStackedGrow}>{action}</View>
+                      {more}
+                    </View>
+                  )
+                }
+                return <View key={i} style={stacked ? styles.actionStacked : styles.action}>{action}</View>
+              })}
+              {more && !(stacked && shownActions.length > 0) ? <View style={stacked ? styles.moreStacked : null}>{more}</View> : null}
             </View>
             )
           : null}
       </View>
+      {rows || null}
       {tabs || null}
     </View>
   )
@@ -117,10 +130,12 @@ const makeStyles = (colors) => StyleSheet.create({
   countsNum: { color: colors.ink, fontWeight: '700' },
   // Pill sets no width, so the column has to stretch it. At most two pills and
   // the overflow button share one row at normal sizes; past STACK_SCALE they
-  // stack full width and the overflow button closes the column at the end.
+  // stack full width and the overflow button shares the last pill's row.
   actions: { flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', gap: 8, marginTop: 12 },
   action: { flexGrow: 1, flexBasis: 0, alignItems: 'stretch' },
   actionsStacked: { flexDirection: 'column', alignItems: 'stretch', gap: 8, marginTop: 12 },
   actionStacked: { alignItems: 'stretch' },
+  lastStacked: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  actionStackedGrow: { flexGrow: 1, flexBasis: 0, alignItems: 'stretch' },
   moreStacked: { alignSelf: 'flex-end' }
 })

@@ -236,6 +236,9 @@ export function createPushStore ({ getPushState, pushKey, pushCheck, enablePush,
   // a late "Permitir" cannot leave this browser subscribed after the exit.
   async function offHere ({ node, member: who } = {}) {
     leaving += 1
+    // The late turn-off below keeps `leaving` up until it ends, so the switch
+    // refuses taps meanwhile like it does during the wait.
+    let late = false
     try {
       if (who == null || pushSupportNow() !== 'ok') return
       const flying = op
@@ -254,9 +257,15 @@ export function createPushStore ({ getPushState, pushKey, pushCheck, enablePush,
       // no user activation, so that await costs nothing.
       const off = () => disablePush({ node, member: who, registration: state ? state.registration : null, subscription: null })
       try { await off() } catch {}
-      if (!settled) landed.then(off).catch(() => {})
+      if (!settled) {
+        late = true
+        // Another identity may have unlocked and subscribed while the prompt
+        // stayed open, and disablePush cancels whatever subscription the
+        // browser holds then: leave it alone.
+        landed.then(() => (member === null || member === who) ? off() : undefined).catch(() => {}).finally(() => { leaving -= 1 })
+      }
     } catch {} finally {
-      leaving -= 1
+      if (!late) leaving -= 1
     }
   }
 

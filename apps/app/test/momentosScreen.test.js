@@ -95,6 +95,7 @@ test('Publicar: Momento mode is one photo, putMoment then moment.create', (t) =>
   const put = send.indexOf('node.media.putMoment(')
   const create = send.indexOf("node.request('moment.create', { text, media: itemRef.current })")
   t.ok(put > 0 && create > put, 'putMoment then moment.create')
+  t.ok(send.includes('refusalOf(text)') && send.indexOf('refusalOf(text)') < put, 'the word check runs before putMoment')
   t.ok(send.includes('bytes: file.bytes.slice()'), 'putMoment gets a copy (it wipes its buffer)')
   t.is((send.match(/moment\.create/g) || []).length, 1, 'one create per press')
   t.ok(send.includes('setHeld(true)') && send.includes('MOMENT_UNCERTAIN'), 'uncertain holds the draft')
@@ -347,8 +348,92 @@ test('visual 1, 1: both composers avoid the keyboard with a measured offset', (t
   t.absent(src.includes("behavior={Platform.OS === 'ios' ? 'padding' : undefined}"), 'no composer left without Android padding')
   t.is((src.match(/<SheetKeyboard>/g) || []).length, 2, 'Momento and Publicação use it')
   t.ok(src.includes("keyboardDismissMode: 'interactive'") && src.includes('onLayout={momentView.handleLayout}') && src.includes('onContentSizeChange={momentView.handleContentSizeChange}'), 'the Momento body scrolls')
-  const keep = fnBody(fnBody(src, 'function useKeepInView (on, caretAtEnd = null, givenFieldRef = null)'), 'const keep = useCallback(() =>')
-  t.ok(keep.includes('if (!focusRef.current || !view) return') && keep.includes('scrollToEnd('), 'the counter and hints scroll into view while typing')
+  const hook = fnBody(src, 'function useKeepInView (on, caretAtEnd = null, givenFieldRef = null)')
+  const keep = fnBody(hook, 'const keep = useCallback(() =>')
+  const scroll = fnBody(hook, 'const scrollIntoView = useCallback(() =>')
+  t.ok(keep.includes('if (!focusRef.current || !view) return') && keep.includes('scrollIntoView()'), 'typing scrolls only while focused')
+  t.ok(scroll && scroll.includes('scrollToEnd('), 'the shared helper scrolls the counter and hints into view')
+})
+
+test('Momento reveals the field and measured counter without focusing after a photo', (t) => {
+  const src = read('src/screens/Publicar.js')
+  const hook = fnBody(src, 'function useKeepInView (on, caretAtEnd = null, givenFieldRef = null)')
+  const reveal = fnBody(hook, 'const reveal = useCallback(')
+  t.ok(reveal, 'the hook exposes reveal')
+  if (!reveal) return
+  t.absent(reveal.includes('focusRef.current'), 'reveal does not depend on focus')
+  t.ok(src.includes('ref={momentView.tailRef}') && src.includes("onLayout={(e) => momentView.handleTailLayout(e, 'body')}"), 'the counter reports its node and nested layout')
+  const frames = []
+  const scrolls = []
+  const measurements = []
+  let target = 300
+  const useKeepInView = new Function('useRef', 'useCallback', 'useEffect', 'nextFrame', 'layoutOf', 'livePositions', 'keepInView', 'return function (on, caretAtEnd = null, givenFieldRef = null) ' + hook)( // eslint-disable-line no-new-func
+    (current) => ({ current }), (fn) => fn, () => {}, (fn) => frames.push(fn),
+    (e) => e.nativeEvent.layout, () => null,
+    (size) => { measurements.push(size); return target }
+  )
+  const view = useKeepInView(true)
+  const layout = (y, height) => ({ nativeEvent: { layout: { y, height } } })
+  view.scrollRef.current = { scrollTo: (to) => scrolls.push(to), scrollToEnd: () => scrolls.push('end') }
+  view.at('body')(layout(40, 600))
+  view.at('field')(layout(300, 142))
+  view.handleTailLayout(layout(450, 20), 'body')
+  view.handleLayout(layout(0, 340))
+  view.handleContentSizeChange(375, 700)
+  view.defer()
+  t.is(scrolls.length, 0, 'layout and typing do not scroll an unfocused field')
+  t.is(frames.length, 0, 'defer still requires focus')
+  view.reveal()
+  t.alike(scrolls, [{ y: 300, animated: true }], 'reveal scrolls without a focus event')
+  t.alike(measurements[0], { fieldY: 340, fieldHeight: 142, contentHeight: 700, viewHeight: 340, atEnd: false, tailBottom: 510 }, 'the nested counter uses content coordinates')
+  view.handleFocus()
+  view.defer()
+  frames.shift()()
+  t.alike(measurements[1], measurements[0], 'typing and reveal share their measurements')
+  view.handleBlur()
+  target = 'end'
+  view.reveal()
+  t.is(scrolls[2], 'end', 'reveal shares the scroll-to-end fallback')
+  view.scrollRef.current = null
+  view.reveal()
+  t.is(scrolls.length, 3, 'an unmounted view is ignored')
+})
+
+test('Momento photo reveal runs once when ready and cancels on close or mode change', (t) => {
+  const src = read('src/screens/Publicar.js')
+  const effect = fnBody(src, 'useEffect(() => {\n    if (!open || !momentMode || !staged')
+  t.ok(effect && effect.includes('momentView.reveal()'), 'the Momento effect reveals the photo caption')
+  if (!effect) return
+  t.ok(src.includes('const staged = moment.photo.items[0] || null') && src.includes('[open, momentMode, staged, moment.photo.ready, momentView.reveal]'), 'photo identity, readiness, sheet and mode drive cleanup')
+  const run = new Function('open', 'momentMode', 'staged', 'moment', 'momentView', 'revealedMomentPhotoRef', 'nextFrame', effect) // eslint-disable-line no-new-func
+  const frames = []
+  const shown = []
+  const ref = { current: null }
+  const photo = { id: 1 }
+  const replacement = { id: 2 }
+  const schedule = (staged, ready = true, open = true, mode = true) => run(open, mode, staged, { photo: { ready } }, { reveal: () => shown.push(staged) }, ref, (fn) => frames.push(fn))
+  schedule(null)
+  schedule(photo, false)
+  schedule(photo, true, false)
+  schedule(photo, true, true, false)
+  t.is(frames.length, 0, 'no reveal without a ready photo in an open Momento')
+  const close = schedule(photo)
+  t.is(shown.length, 0, 'waits for the next layout frame')
+  close()
+  frames.shift()()
+  t.is(shown.length, 0, 'closing before the frame cancels reveal')
+  const switchMode = schedule(photo)
+  switchMode()
+  frames.shift()()
+  t.is(shown.length, 0, 'switching mode cancels reveal too')
+  schedule(photo)
+  frames.shift()()
+  schedule(photo)
+  t.alike(shown, [photo], 'a ready photo reveals once, even after reopening')
+  t.is(frames.length, 0, 'the same photo queues no more work')
+  schedule(replacement)
+  frames.shift()()
+  t.alike(shown, [photo, replacement], 'a replacement reveals again')
 })
 
 test('visual 1, 2: a swipe down closes once and never also steps', (t) => {

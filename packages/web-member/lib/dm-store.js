@@ -33,6 +33,12 @@
 // message row keeps the descriptors only; the 7-day pool sweep does not
 // touch this cache.
 //
+// prefix: '' for the own store; a Página's store (./page-dm.js) passes
+// node-store pageDmPrefix(page), and its core, media index and media
+// entries then live under that prefix, apart from the own ones. A page row
+// filed from the legacy bundle (./dm.js pageLegacyChunk) carries legacy: true
+// (history the service held in plaintext, never signed evidence).
+//
 // Delete is an op row plus the fold rule (@varanda/core lib/dm-fold.js drops
 // what was filed at or before it): the ciphertext of deleted messages stays
 // in the core until a later compaction, which is not done here.
@@ -48,6 +54,7 @@ const CORE_SEED_DOMAIN = b4a.from('varanda/member-dm-local/core/v1\n', 'utf8')
 const SEEN_DOMAIN = b4a.from('varanda/member-dm-local/seen/v1\n', 'utf8')
 const MEDIA_KEY_DOMAIN = b4a.from('varanda/member-dm-local/media-key/v1\n', 'utf8')
 const MEDIA_NAME_DOMAIN = b4a.from('varanda/member-dm-local/media-name/v1\n', 'utf8')
+const BYTES_DOMAIN = b4a.from('varanda/member-dm-local/bytes/v1\n', 'utf8')
 const MEDIA_INDEX = 'dmMediaIndex'
 const MEDIA_PREFIX = 'dmMedia/'
 const MEDIA_ITEMS_MAX = 4
@@ -96,6 +103,7 @@ function validRow (r) {
   if (!Number.isFinite(r.filedAt)) return false
   if (r.t === 'ctl') return DM_OPS.includes(r.op) && HEX32.test(r.id)
   if (r.t !== 'msg') return false
+  if (r.legacy !== undefined && r.legacy !== true) return false
   return HEX32.test(r.id) && HEX64.test(r.from) && typeof r.text === 'string' &&
     (r.replyTo === null || HEX32.test(r.replyTo)) && typeof r.mine === 'boolean' &&
     (r.fwd === undefined || r.fwd === 0 || r.fwd === 1) &&
@@ -105,7 +113,9 @@ function validRow (r) {
 
 function plainRow (r) {
   if (r.t === 'ctl') return { t: 'ctl', id: r.id, op: r.op, peer: r.peer, at: r.at, filedAt: r.filedAt }
-  return { t: 'msg', id: r.id, peer: r.peer, from: r.from, text: r.text, replyTo: r.replyTo, fwd: r.fwd === 1 ? 1 : 0, media: plainMedia(r.media), card: r.card == null ? null : copyLinkCard(r.card, (d) => plainMedia([d])[0]), at: r.at, mine: r.mine, filedAt: r.filedAt }
+  const out = { t: 'msg', id: r.id, peer: r.peer, from: r.from, text: r.text, replyTo: r.replyTo, fwd: r.fwd === 1 ? 1 : 0, media: plainMedia(r.media), card: r.card == null ? null : copyLinkCard(r.card, (d) => plainMedia([d])[0]), at: r.at, mine: r.mine, filedAt: r.filedAt }
+  if (r.legacy === true) out.legacy = true
+  return out
 }
 
 // The row with `pad` last, its JSON rounded up to a ROW_BUCKET multiple.
@@ -127,9 +137,9 @@ function validIndex (data) {
     })
 }
 
-async function readIndex (storage) {
+async function readIndex (storage, prefix) {
   try {
-    return validIndex(await storage.readJson(MEDIA_INDEX))
+    return validIndex(await storage.readJson(prefix + MEDIA_INDEX))
   } catch (err) {
     if (err instanceof SyntaxError) return []
     throw err
@@ -137,8 +147,11 @@ async function readIndex (storage) {
 }
 
 // cacheBytesMax: tests only.
-function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX } = {}) {
+function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '' } = {}) {
   if (storage === null || typeof storage !== 'object') throw new TypeError('storage required')
+  if (typeof prefix !== 'string') throw new TypeError('prefix inválido')
+  const indexName = prefix + MEDIA_INDEX
+  const entryPrefix = prefix + MEDIA_PREFIX
   let key = null
   let corePair = null
   let rows = null
@@ -171,7 +184,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX } = {}) {
   }
 
   async function withCore (fn) {
-    const core = await store.openDmLocal(storage, corePair)
+    const core = await store.openDmLocal(storage, corePair, prefix)
     if (core === null) return null
     try {
       return await fn(core)
@@ -224,7 +237,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX } = {}) {
     // Only the current unlock may replace a core of another key.
     if (gen !== generation) return
     if (loaded === null) {
-      await store.deleteDmLocal(storage)
+      await store.deleteDmLocal(storage, prefix)
       if (gen !== generation) return
       // Another key's cache cannot be opened with this one. A lock during
       // the wipe stops it: what is left stays indexed for a later wipe.
@@ -232,7 +245,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX } = {}) {
       loaded = []
     }
     if (gen !== generation) return
-    const index = await readIndex(storage)
+    const index = await readIndex(storage, prefix)
     if (gen !== generation) return
     rows = loaded
     mediaKey = crypto.hash([MEDIA_KEY_DOMAIN, key])
@@ -312,6 +325,38 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX } = {}) {
     return gc.openRecord(sealed, key)
   }
 
+  // Bytes past seal's record bound (a legacy bundle chunk, ./dm.js), under a
+  // key of their own derived from the local key -> { nonce, box }.
+  function sealBytes (bytes) {
+    if (key === null) throw new Error(LOCKED)
+    const k = crypto.hash([BYTES_DOMAIN, key])
+    try {
+      const nonce = b4a.alloc(sodium.crypto_secretbox_NONCEBYTES)
+      sodium.randombytes_buf(nonce)
+      const box = b4a.alloc(bytes.byteLength + sodium.crypto_secretbox_MACBYTES)
+      sodium.crypto_secretbox_easy(box, bytes, nonce, k)
+      return { nonce: b4a.toString(nonce, 'hex'), box: b4a.toString(box, 'base64') }
+    } finally {
+      k.fill(0)
+    }
+  }
+
+  // -> the bytes or null (wrong key, tampered); throws while locked.
+  function openBytes (sealed) {
+    if (key === null) throw new Error(LOCKED)
+    const k = crypto.hash([BYTES_DOMAIN, key])
+    try {
+      const box = b4a.from(sealed.box, 'base64')
+      if (box.byteLength < sodium.crypto_secretbox_MACBYTES) return null
+      const out = b4a.alloc(box.byteLength - sodium.crypto_secretbox_MACBYTES)
+      return sodium.crypto_secretbox_open_easy(out, box, b4a.from(sealed.nonce, 'hex'), k) ? out : null
+    } catch {
+      return null
+    } finally {
+      k.fill(0)
+    }
+  }
+
   // ---- the media cache ----
 
   function mediaName (from, id) {
@@ -345,7 +390,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX } = {}) {
       if (size > cacheBytesMax) return false
       const name = mediaName(from, id)
       cached.delete(name)
-      const all = await readIndex(storage)
+      const all = await readIndex(storage, prefix)
       const index = all.filter((e) => e.n !== name)
       let total = index.reduce((n, e) => n + e.b, 0)
       const evicted = []
@@ -362,23 +407,23 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX } = {}) {
       // and the index still names every item a wipe must find.
       for (const e of evicted) cached.delete(e.n)
       const stale = evicted.map((e) => ({ n: e.n, c: e.c, b: e.b, w: true }))
-      await storage.writeJson(MEDIA_INDEX, { v: 1, items: [...stale, ...index, { n: name, c, b: size, w: true }] })
+      await storage.writeJson(indexName, { v: 1, items: [...stale, ...index, { n: name, c, b: size, w: true }] })
       for (const e of evicted) {
-        for (let i = 0; i < e.c; i++) await storage.writeJson(MEDIA_PREFIX + e.n + '/' + i, null)
+        for (let i = 0; i < e.c; i++) await storage.writeJson(entryPrefix + e.n + '/' + i, null)
       }
       if (rows === null || gen !== generation) throw new Error(LOCKED)
-      if (evicted.length > 0) await storage.writeJson(MEDIA_INDEX, { v: 1, items: [...index, { n: name, c, b: size, w: true }] })
+      if (evicted.length > 0) await storage.writeJson(indexName, { v: 1, items: [...index, { n: name, c, b: size, w: true }] })
       for (let i = 0; i < copies.length; i++) {
         if (rows === null || gen !== generation) throw new Error(LOCKED)
         const nonce = b4a.alloc(sodium.crypto_secretbox_NONCEBYTES)
         sodium.randombytes_buf(nonce)
         const box = b4a.alloc(copies[i].byteLength + sodium.crypto_secretbox_MACBYTES)
         sodium.crypto_secretbox_easy(box, copies[i], nonce, mediaKey)
-        await storage.writeJson(MEDIA_PREFIX + name + '/' + i, { v: 1, nonce: b4a.toString(nonce, 'hex'), box: b4a.toString(box, 'base64') })
+        await storage.writeJson(entryPrefix + name + '/' + i, { v: 1, nonce: b4a.toString(nonce, 'hex'), box: b4a.toString(box, 'base64') })
       }
-      for (let i = copies.length; i < c; i++) await storage.writeJson(MEDIA_PREFIX + name + '/' + i, null)
+      for (let i = copies.length; i < c; i++) await storage.writeJson(entryPrefix + name + '/' + i, null)
       if (rows === null || gen !== generation) throw new Error(LOCKED)
-      await storage.writeJson(MEDIA_INDEX, { v: 1, items: [...index, { n: name, c: copies.length, b: size }] })
+      await storage.writeJson(indexName, { v: 1, items: [...index, { n: name, c: copies.length, b: size }] })
       if (gen === generation && rows !== null) cached.add(name)
       return true
     })
@@ -395,12 +440,12 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX } = {}) {
       if (rows === null || gen !== generation) throw new Error(LOCKED)
       const name = mediaName(from, id)
       if (!cached.has(name)) return null
-      const entry = (await readIndex(storage)).find((e) => e.n === name)
+      const entry = (await readIndex(storage, prefix)).find((e) => e.n === name)
       if (entry === undefined || entry.w === true) return null
       const out = []
       for (let i = 0; i < entry.c; i++) {
         let v = null
-        try { v = await storage.readJson(MEDIA_PREFIX + name + '/' + i) } catch {}
+        try { v = await storage.readJson(entryPrefix + name + '/' + i) } catch {}
         const plain = openEntry(v)
         if (plain === null) {
           for (const b of out) b.fill(0)
@@ -423,9 +468,9 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX } = {}) {
   // but never reads as cached again, after a reopen too.
   async function markUnfinished (name) {
     cached.delete(name)
-    const index = await readIndex(storage)
+    const index = await readIndex(storage, prefix)
     if (!index.some((e) => e.n === name && e.w !== true)) return
-    await storage.writeJson(MEDIA_INDEX, { v: 1, items: index.map((e) => e.n === name ? { ...e, w: true } : e) })
+    await storage.writeJson(indexName, { v: 1, items: index.map((e) => e.n === name ? { ...e, w: true } : e) })
   }
 
   function openEntry (v) {
@@ -445,15 +490,15 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX } = {}) {
   // live: checked after every await; once false the wipe stops, the index
   // still naming what is left. -> true when everything was wiped.
   async function wipeEntries (live = () => true) {
-    const index = await readIndex(storage)
+    const index = await readIndex(storage, prefix)
     if (!live()) return false
     for (const e of index) {
       for (let i = 0; i < e.c; i++) {
-        await storage.writeJson(MEDIA_PREFIX + e.n + '/' + i, null)
+        await storage.writeJson(entryPrefix + e.n + '/' + i, null)
         if (!live()) return false
       }
     }
-    await storage.writeJson(MEDIA_INDEX, null)
+    await storage.writeJson(indexName, null)
     if (!live()) return false
     cached = new Set()
     return true
@@ -474,7 +519,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX } = {}) {
     return queue
   }
 
-  return { unlock, lock, unlocked, nextFiled, append, snapshot, hasMessage, hasOp, seenToken, seal, open, hasMedia, putMedia, getMedia, wipeCache, idle, close }
+  return { unlock, lock, unlocked, nextFiled, append, snapshot, hasMessage, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, idle, close }
 }
 
 module.exports = { createDmStore }

@@ -278,10 +278,11 @@ export function roleLabel (role) {
 }
 
 // The visibility of the group being written in, or null while it is not known.
-// A page's read names no visibility, but it can only write in a private group
-// with an epoch key (rpc 5.40), so no epoch means public or nothing to send.
-export function knownVisibility ({ page, info, epoch }) {
-  if (page) return epoch ? 'private' : 'public'
+// A page's service read says `private: true` (pagePrivate); otherwise it can
+// only write in a private group with an epoch key (rpc 5.40), so no epoch
+// means public or nothing to send.
+export function knownVisibility ({ page, info, epoch, pagePrivate = false }) {
+  if (page) return epoch || pagePrivate === true ? 'private' : 'public'
   return info && typeof info.visibility === 'string' ? info.visibility : null
 }
 
@@ -519,6 +520,75 @@ export function isPageSoon (err) {
 export function pageErrorText (err) {
   if (isPageSoon(err)) return PAGE_SOON_TEXT
   return err && typeof err.message === 'string' && err.message !== '' ? err.message : 'Serviço indisponível'
+}
+
+// The node's words for a page's private group (group.read and group.seal
+// with `page`, docs/rpc.md 5.114), and what the screen says for each.
+export const PAGE_NO_KEY_TEXT = 'Peça ao dono da página para enviar a chave'
+export const PAGE_GROUP_LOADING_TEXT = 'Carregando o grupo neste aparelho. Puxe para atualizar.'
+export const PAGE_SEAL_AGAIN_LABEL = 'Enviar de novo'
+export const PAGE_REKEYING_TEXT = 'A chave deste grupo está sendo trocada'
+const PAGE_NODE_TEXTS = Object.freeze({
+  'sem chave da página': PAGE_NO_KEY_TEXT,
+  'grupo não encontrado': PAGE_GROUP_LOADING_TEXT,
+  'aguardando nova chave': PAGE_REKEYING_TEXT
+})
+
+// pageErrorText, with the node's refusals of a page's private group put in
+// plain words. A service refusal keeps its own text (pages.js TEXTS).
+export function pageGroupErrorText (err) {
+  const m = err && typeof err.message === 'string' ? err.message : ''
+  if (Object.hasOwn(PAGE_NODE_TEXTS, m) && !(err && err.uncertain === true)) return PAGE_NODE_TEXTS[m]
+  if (err && err.code === 'aguardando-chave' && err.uncertain !== true) return PAGE_REKEYING_TEXT
+  return pageErrorText(err)
+}
+
+// A page's read of a group (Grupo.js). The visibility is the node's alone,
+// read from the verified header with the page's key: the service's answer
+// never decides it, so a lying service cannot get a private post sent in
+// the clear. nodeRead() is node group.read { group, page }; serviceRead()
+// the service's 'group-read'. -> { read, visibility, noKey, nodeError },
+// visibility 'public' | 'private', or null while the node has not answered.
+// noKey: the device holds none of the page's secrets (state 'no-key'); a
+// public group still posts through the service, a private one cannot.
+export async function readAsPage ({ nodeRead, serviceRead }) {
+  let fromNode = null
+  let nodeError = null
+  try {
+    fromNode = await nodeRead()
+  } catch (err) {
+    nodeError = err
+  }
+  const v = fromNode && (fromNode.visibility === 'private' || fromNode.visibility === 'public') ? fromNode.visibility : null
+  const noKey = !!fromNode && fromNode.state === 'no-key'
+  if (v === 'private' && !noKey) return { read: fromNode, visibility: v, noKey, nodeError: null }
+  return { read: await serviceRead(), visibility: v, noKey, nodeError }
+}
+
+// The visibility a page may post under: null (composer closed) while the
+// node has not answered, or in a private group with no page secrets here.
+export function pagePostVisibility ({ visibility, noKey }) {
+  if (visibility === 'public') return 'public'
+  return visibility === 'private' && noKey !== true ? 'private' : null
+}
+
+// A page's post: sealed on the device in a private group (seal(text) is node
+// group.seal, writing nothing; its envelope goes as 'group-seal'), plaintext
+// 'group-post' only where the node read a public header, nothing while the
+// visibility is unknown (null). send(action, op) is the service statement;
+// plain() sends the 'group-post'.
+export function postAsPage ({ visibility, group, text, seal, send, plain }) {
+  if (visibility === 'private') {
+    return seal(text).then((s) => send('group-seal', { group, kid: { writer: s.kid.writer, seq: s.kid.seq }, nonce: s.nonce, box: s.box, at: s.at, writer: s.writer, seq: s.seq }))
+  }
+  if (visibility === 'public') return plain()
+  return null
+}
+
+// A 'group-seal' the service refused because another post took the writer's
+// next seq first: only the person's tap seals it again.
+export function sealRaced (err) {
+  return !!err && err.code === 'sequencia' && err.uncertain !== true
 }
 
 // The rows of a group-read answer; the author of each is the page key.

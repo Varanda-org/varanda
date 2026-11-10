@@ -256,6 +256,11 @@ if (VITRINE) {
   const { saveTermsRecord } = require('./termsStore')
   const { withMember, withSynced } = require('./terms')
   const { LEGAL_VERSION } = require('./legal')
+  // The fixtures' message and feed links use this origin, so the screens that
+  // compare a link with the installation origin (feiraLink, feiraOffer, the
+  // saved searches) accept them. Kept in memory only; nothing is persisted.
+  const { setInstallation } = require('./installation')
+  setInstallation('https://vitrine.invalid')
   // Saved before the shell mounts and loads the record (both stores write
   // synchronously up to here), so the terms gate opens for the fixture key;
   // synced, so nothing is sent to an account service. Under the Vitrine the

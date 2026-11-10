@@ -44,17 +44,19 @@ import * as actingAs from '../actingAs'
 import { TEXTS, pagesFollow, pagesFollows, pagesSuccessor } from '../pages'
 import { MAX_HOPS, moveOf, pageMoveView, resolveChain, shownUnderCut, successorOf } from '../pageMove'
 import { rosterRows } from '../pageRoster'
-import { Btn, Soft, errorText, useBottomPad, useNow } from '../ui'
+import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
+import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { MoreButton } from '../ui/MoreButton'
+import { PageNoticeSheet } from '../ui/PageNoticeSheet'
 import { Sheet } from '../ui/Sheet'
 import { ShareProfile } from '../ui/ShareProfile'
 import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
 import { pageNoticeStore } from '../pageNoticeStore'
-import { PAGE_DM_NOTICE, pageNoticeKey } from '../pageNotice'
+import { pageNoticeKey, pageReadKind } from '../pageNotice'
 import { ProfileHeader } from '../ui/ProfileHeader'
 import { ProfileBar, useProfileBar } from '../ui/ProfileBar'
 import { LABELS } from '../dm'
@@ -68,7 +70,7 @@ import { CommunitiesBox } from '../ui/CommunitiesBox'
 import { commonCommunities, communitiesOf, MAX_COMMON_LOOKUPS } from '../communitiesBox'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { LARGE_TEXT, type } from '../ui/theme'
-import { useStyles } from '../ui/ThemeProvider'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
 import { ConfirmTestimonialSheet, RETRACT_TITLE, TESTIMONIALS_TAB, WRITE_UNCERTAIN, WriteTestimonialSheet, ownBlockRef, retractBody, useTestimonialTab, useTestimonials } from './Depoimentos'
 import { ratingRefs, ratings } from '../feiraClient'
@@ -123,10 +125,7 @@ export function membersPageStep (res, person, offset) {
 }
 
 // Whether a page.read answer is about a page (a person's diary has no roster).
-function isPageRead (r, key) {
-  if (!r || typeof r !== 'object' || r.page !== key) return false
-  return r.gen !== null || r.owner !== null || r.closed === true || (r.movedTo !== null && r.movedTo !== undefined)
-}
+const isPageRead = (r, key) => pageReadKind(r, key) === 'page'
 
 function useActingAs () {
   const [state, setState] = useState(() => actingAs.get())
@@ -212,8 +211,9 @@ const INITIAL_POSTS = {
   refreshing: false
 }
 
-export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onToast }) {
+export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onToast, onTabChange }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -735,26 +735,23 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     setPageNotice(author)
   }
   const pageNoticeSheet = (
-    <Sheet open={pageNotice === author && canConverse} onClose={() => setPageNotice(null)} title='Conversar com a página'>
-      <View style={styles.note}>
-        <Soft>{PAGE_DM_NOTICE}</Soft>
-        <Btn
-          label='Continuar'
-          onPress={() => {
-            if (!canConverse || pageNotice !== author) return
-            try { pageNoticeStore().setItem(pageNoticeKey(author), '1') } catch {}
-            setPageNotice(null)
-            onMessage(author)
-          }}
-        />
-        <Btn label='Cancelar' secondary onPress={() => setPageNotice(null)} />
-      </View>
-    </Sheet>
+    <PageNoticeSheet
+      open={pageNotice === author && canConverse}
+      page={author}
+      onClose={() => setPageNotice(null)}
+      onContinue={() => {
+        if (!canConverse || pageNotice !== author) return
+        setPageNotice(null)
+        onMessage(author)
+      }}
+    />
   )
   const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'
     ? (
-      <Pressable accessibilityRole='button' accessibilityLabel='Anúncios' onPress={() => onOpenListings(author)} style={({ pressed }) => [styles.listings, pressed && styles.pressed]}>
-        <Text style={styles.rosterName}>Anúncios</Text>
+      <Pressable accessibilityRole='link' accessibilityLabel='Anúncios' onPress={() => onOpenListings(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
+        <Icon name='feira' size={20} color={colors.accent} />
+        <Text style={styles.linkText}>Anúncios</Text>
+        <Icon name='seta' size={20} color={colors.soft} />
       </Pressable>
       )
     : null
@@ -823,6 +820,12 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const tabs = node.hosted === true ? TABS_HOSTED : TABS
   // A tab the node no longer offers (not hosted) falls back to Publicações.
   const shownTab = tabs.some((t) => t.id === tab) ? tab : 'posts'
+  // The tab on screen, not the raw state: a tab the node no longer offers shows
+  // Publicações, and the publish button follows what is shown.
+  useEffect(() => { if (onTabChange) onTabChange(shownTab) }, [shownTab])
+  // A profile left on Depoimentos must not hide the button for a later visit
+  // to the same entry before it reports again.
+  useEffect(() => () => { if (onTabChange) onTabChange(null) }, [])
   const depo = shownTab === 'depoimentos' && full
   const testimonialTab = useTestimonialTab({
     data: testimonials,
@@ -836,14 +839,14 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   })
   const moreActions = [
     canAct
-      ? { label: actingHere ? 'Deixar de agir como a página' : 'Agir como esta página', onPress: () => (actingHere ? actingAs.me() : actingAs.asPage({ key: author, name: header.name, username: header.username, closed: pageRead.closed })) }
+      ? { icon: actingHere ? 'sair' : 'pessoa', label: actingHere ? 'Deixar de agir como a página' : 'Agir como esta página', onPress: () => (actingHere ? actingAs.me() : actingAs.asPage({ key: author, name: header.name, username: header.username, closed: pageRead.closed })) }
       : null,
-    !canAct && actingHere ? { label: 'Deixar de agir como a página', onPress: () => actingAs.me() } : null,
-    canAct && typeof onOpenPageSettings === 'function' ? { label: 'Ajustes da página', onPress: () => onOpenPageSettings(author) } : null,
+    !canAct && actingHere ? { icon: 'sair', label: 'Deixar de agir como a página', onPress: () => actingAs.me() } : null,
+    canAct && typeof onOpenPageSettings === 'function' ? { icon: 'engrenagem', label: 'Ajustes da página', onPress: () => onOpenPageSettings(author) } : null,
     !own && asPageMode && !closedPage && !blockedHere
-      ? { label: asPageFollowing ? 'Deixar de seguir como a página' : 'Seguir como a página', pending: following, disabled: pageFollows === null, onPress: togglePageFollow }
+      ? { icon: 'seguir', label: asPageFollowing ? 'Deixar de seguir como a página' : 'Seguir como a página', pending: following, disabled: pageFollows === null, onPress: togglePageFollow }
       : null,
-    profileUrl !== null ? { label: 'Compartilhar perfil', onPress: () => setSharing(true) } : null,
+    profileUrl !== null ? { icon: 'compartilhar', label: 'Compartilhar perfil', onPress: () => setSharing(true) } : null,
     canWriteTestimonial && myTestimonial === null ? { icon: 'lapis', label: 'Escrever depoimento', onPress: () => setWritingTestimonial(true) } : null,
     canTestimonial && myTestimonial !== null ? { icon: 'lixeira', label: 'Retirar depoimento', danger: true, onPress: () => setRetractingTestimonial(true) } : null,
     canReport ? { icon: 'bandeira', label: 'Denunciar a conta', danger: true, onPress: () => onReport({ author, name: header.name, username: header.username }) } : null,
@@ -883,6 +886,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
         topInset={insets.top}
         onBack={full && bar.interactive ? undefined : onBack}
         bandButtons={null}
+        rows={blockedHere ? null : <>{listingsRow}{ratingsRow}</>}
         avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
         title={displayText(who.title)}
         subtitle={who.subtitle ? displayText(who.subtitle) : null}
@@ -990,8 +994,6 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       <View style={styles.flex}>
         <View style={styles.flex}>
           {head}
-          {listingsRow}
-          {ratingsRow}
           {pageNoticeSheet}
           <OfflineNote />
           <View style={styles.note}><Soft>{node.hosted ? OFFLINE_NOTE : NOT_HOSTED_NOTE}</Soft></View>
@@ -1012,8 +1014,6 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const listHeader = (
     <View>
       {head}
-      {blockedHere ? null : listingsRow}
-      {blockedHere ? null : ratingsRow}
       <OfflineNote />
       {notes.length > 0 ? <View style={styles.note}>{notes.map((n) => <Soft key={n}>{n}</Soft>)}</View> : null}
     </View>
@@ -1110,6 +1110,8 @@ const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   note: { paddingHorizontal: 16, paddingVertical: 12, gap: 4 },
   listings: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.line },
+  linkRow: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.line },
+  linkText: { ...type.postName, color: colors.ink, flex: 1 },
   pageNote: { marginTop: 8, gap: 8 },
   badge: { ...type.postMeta, color: colors.ink, fontWeight: '700' },
   banner: { ...type.postName, color: colors.ink },

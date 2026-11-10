@@ -12,7 +12,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { Sheet } from './Sheet'
 import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
-import { type } from './theme'
+import { layout, type } from './theme'
 import { Body } from './index'
 
 let current = null
@@ -92,7 +92,7 @@ export function HelpButton ({ doc, color, style, size = 22 }) {
         accessibilityLabel={doc.title}
         hitSlop={6}
         onPress={help.handleShow}
-        style={({ pressed }) => [styles.button, style, pressed && styles.pressed]}
+        style={({ pressed }) => [styles.button, style === undefined ? styles.inset : style, pressed && styles.pressed]}
       >
         <Icon name='info' size={size} color={tint} />
       </Pressable>
@@ -115,7 +115,11 @@ const makeStyles = (colors) => StyleSheet.create({
   close: { ...type.cancel, color: colors.ink },
   content: { padding: 16, gap: 12 },
   title: { ...type.sheetTitle, color: colors.ink },
-  button: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
+  button: { width: layout.hit, height: layout.hit, alignItems: 'center', justifyContent: 'center' },
+  // Pulls the 44 pt target back into the 32 pt box the bars lay out, so the
+  // icon stays put. A caller with its own style (the Diário discs) sizes the
+  // button itself and must not inherit the negative margin.
+  inset: { margin: -6 },
   pressed: { opacity: 0.6 },
   note: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'stretch' },
   noteText: { flexShrink: 1 }

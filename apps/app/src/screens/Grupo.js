@@ -45,6 +45,13 @@
 // one (where the device can make audio/mp4), it is uploaded (sealed in a
 // private group) as the only item of one group.post, and the bubble plays
 // it (VoiceBubble).
+// As a page, the visibility comes only from the node's read with the page's
+// key (group.read { group, page }, from the verified header), never from the
+// service, which could otherwise get a private post sent as plaintext. A
+// private group is read by the node and a post is sealed by it (group.seal)
+// and sent as 'group-seal', so the service only appends what it cannot read.
+// A public one is read and posted through the service. Until the node
+// answers, the composer stays closed.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Keyboard, KeyboardAvoidingView, Pressable, StyleSheet, Text, View } from 'react-native'
@@ -53,13 +60,14 @@ import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars } from '../format'
 import { groupRows, replyPreview } from '../group-screen'
+import { pinToEnd } from '../dm-screen'
 import { UNNAMED, readsAs, whoOf } from '../who'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import {
   AS_PAGE_LABEL, DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT,
-  EMPTY_PAGES, OWN_LABEL, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PRIVATE_LABEL, REKEY_PENDING_LABEL,
-  applyPage, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
+  EMPTY_PAGES, OWN_LABEL, PAGE_GROUP_LOADING_TEXT, PAGE_NO_KEY_TEXT, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PAGE_REKEYING_TEXT, PAGE_SEAL_AGAIN_LABEL, PRIVATE_LABEL, REKEY_PENDING_LABEL,
+  applyPage, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pagePostVisibility, postAsPage, readAsPage, pageGroupErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealRaced, sealedLabel, visibilityLabel
 } from '../groups'
 import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -86,7 +94,7 @@ import { shouldRedirectToCommunity } from '../groupRedirect'
 import { GrupoAjustes } from './GrupoAjustes'
 import { composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
 import { publicGroupRefusal } from '../wordCheck'
-import { chatMediaRefs, mediaPostLanded, retryChatSend, runChatSend, stagedOf } from '../chatSend'
+import { chatMediaRefs, followAutocorrect, mediaPostLanded, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
 
@@ -164,6 +172,15 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const [pageError, setPageError] = useState('')
   const [pageRetry, setPageRetry] = useState(null)
   const [pagePending, setPagePending] = useState(false)
+  // As a page: the group's visibility as the node read it, for this page
+  // and group only ({ id, value }; value 'public' | 'private', or null until
+  // the node answers), and why it has not answered yet.
+  const pageVisRef = useRef({ id: null, value: null })
+  const [pageVis, setPageVis] = useState(null)
+  const [pageVisNote, setPageVisNote] = useState('')
+  // The text of a sealed post the service refused as 'sequencia': sealed
+  // again only on the person's tap.
+  const [sealAgain, setSealAgain] = useState(null)
   // The text of a post whose outcome is not known: no second send until the
   // person edits the draft or asks for it.
   const [postHold, setPostHold] = useState(null)
@@ -185,6 +202,13 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const [draftRefusal, setDraftRefusal] = useState('')
   useEffect(() => { setDraftRefusal('') }, [draft])
   const sendTokenRef = useRef(null)
+  // The draft text of a send in flight, so an autocorrect of its last word in the same tick is cleared too.
+  const inFlightRef = useRef(null)
+  // `f` is the ref value taken right after the send call: a send that ended
+  // otherwise must not leave it armed for a later, unrelated clear.
+  const clearFollowed = (f, text) => {
+    if (f && f.text !== text) setDraft((d) => (d === f.text ? '' : d))
+  }
   useEffect(() => () => { if (sendTokenRef.current) sendTokenRef.current.live = false }, [])
   const seqRef = useRef(0)
   const storeRef = useRef(store)
@@ -231,11 +255,26 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     }
   }, [])
 
+  // As a page, the node reads first: a private group is shown from that
+  // read; a public one, or one the node has not answered for (the service's
+  // read gives the role then), from the service's read.
   const readGroup = useCallback(async (before) => {
-    if (!asPage.page) return request('group.read', before ? { group, before } : { group })
-    const member = await memberKeyOf(request, node)
-    return pagesGroup(node, { member, page: asPage.key, action: 'group-read', op: before ? { group, before } : { group } })
+    const op = before ? { group, before } : { group }
+    if (!asPage.page) return request('group.read', op)
+    const id = asPage.key + ':' + group
+    const { read, visibility: seen, noKey, nodeError } = await readAsPage({
+      nodeRead: () => request('group.read', { ...op, page: asPage.key }),
+      serviceRead: async () => pagesGroup(node, { member: await memberKeyOf(request, node), page: asPage.key, action: 'group-read', op })
+    })
+    const visibility = pagePostVisibility({ visibility: seen, noKey })
+    pageVisRef.current = { id, value: visibility }
+    setPageVis(visibility)
+    let note = ''
+    if (visibility === null) note = seen === 'private' ? PAGE_NO_KEY_TEXT : (nodeError ? pageGroupErrorText(nodeError) : PAGE_GROUP_LOADING_TEXT)
+    setPageVisNote(note)
+    return read
   }, [request, group, node, asPage.page, asPage.key])
+  const pageVisNow = () => (pageVisRef.current.id === asPage.key + ':' + group ? pageVisRef.current.value : null)
 
   const readNewest = useCallback(async () => {
     const read = await readGroup()
@@ -271,7 +310,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         if (mine !== seqRef.current) return
         setMoreError('')
       } catch (err) {
-        if (mine === seqRef.current) setLoadError(pageErrorText(err))
+        if (mine === seqRef.current) setLoadError(pageGroupErrorText(err))
       }
       if (mine !== seqRef.current) return
       setLoadedAt(Date.now())
@@ -333,6 +372,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     setPageRole(null)
     setPageError('')
     setPageRetry(null)
+    setSealAgain(null)
+    pageVisRef.current = { id: null, value: null }
+    setPageVis(null)
+    setPageVisNote('')
     setLoadError('')
     setLoadedAt(null)
     loadRef.current()
@@ -341,6 +384,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const loadOlder = useCallback(async () => {
     const before = storeRef.current.next
     if (!before || loadingMore) return
+    // The pill is a gesture: a short thread shows it without a scroll, and
+    // a pinned list would follow the older page out of view.
+    endPin.current = pinToEnd(endPin.current, { kind: 'user' })
     setLoadingMore(true)
     setMoreError('')
     try {
@@ -415,9 +461,13 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const pageSend = async (fn, text, sentAt) => {
     setPagePending(true)
     setPageError('')
+    setSealAgain(null)
     try {
       await fn()
+      const followed = inFlightRef.current
+      inFlightRef.current = null
       setDraft((d) => (d === text ? '' : d))
+      clearFollowed(followed, text)
       setPostHold(null)
       setCheck(null)
       readNewest().then(() => scrollToEnd(), () => {})
@@ -425,9 +475,14 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       if (err && err.uncertain === true && typeof err.retry === 'function') {
         setPostHold(text)
         settle({ action: 'post', diary: asPage.key, text, sentAt }, () => pageSend(err.retry, text, sentAt))
+      } else if (sealRaced(err)) {
+        setSealAgain(text)
+        setPageError(pageGroupErrorText(err))
+        readNewest().catch(() => {})
       } else {
-        setPageError(pageErrorText(err))
+        setPageError(pageGroupErrorText(err))
       }
+      inFlightRef.current = null
     } finally {
       setPagePending(false)
     }
@@ -448,7 +503,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         setPageRetry(() => () => pageMembership(err.retry))
         setPageError(CHECK_UNKNOWN)
       } else {
-        setPageError(pageErrorText(err))
+        setPageError(pageGroupErrorText(err))
       }
     } finally {
       setPagePending(false)
@@ -460,6 +515,18 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     return pagesGroup(node, { member, page: asPage.key, action, op })
   }
 
+  // A post in a private group: the node seals it with the page's key
+  // (writing nothing) and the service appends the envelope it cannot read.
+  // A retry of an unknown outcome resends that same envelope (err.retry).
+  const pagePost = (visibility, text) => () => postAsPage({
+    visibility,
+    group,
+    text,
+    seal: (t) => request('group.seal', { group, page: asPage.key, text: t }),
+    send: async (action, op) => pagesGroup(node, { member: await memberKeyOf(request, node), page: asPage.key, action, op }),
+    plain: pageStatement('group-post', { group, text })
+  })
+
   // `replyTo` is { writer, seq } exactly (rpc group.post) or null. A page's
   // statement carries no reply: Responder is not offered as a page.
   // heldCard: the card frozen into an uncertain post's retry (null: none); a
@@ -469,12 +536,22 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const sendPost = async (text, replyTo = null, heldCard) => {
     if (typeof text !== 'string' || text.trim() === '' || !node.online) return
     if (asPage.page) {
-      pageSend(pageStatement('group-post', { group, text }), text, Date.now())
+      // Armed here, not in pageSend: its retry closure holds a stale draft.
+      inFlightRef.current = { text, at: Date.now(), followed: false }
+      // Plaintext only where the node read a public header.
+      const vis = pageVisNow()
+      if (vis === null) {
+        inFlightRef.current = null
+        return
+      }
+      pageSend(pagePost(vis, text), text, Date.now())
       return
     }
     setCheck(null)
     setPostHold(null)
     const sentAt = Date.now()
+    // A retry (heldCard defined) may run after the draft changed: never armed.
+    inFlightRef.current = heldCard === undefined ? { text, at: sentAt, followed: false } : null
     const plain = replyTo ? { group, text, replyTo: { writer: replyTo.writer, seq: replyTo.seq } } : { group, text }
     // Without the group's info its visibility is unknown: no card, so a
     // private group's thumbnail is never uploaded in the clear.
@@ -491,8 +568,11 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       card = built.card
       return request('group.post', built.op)
     })
+    const followed = inFlightRef.current
+    inFlightRef.current = null
     if (r.ok) {
       setDraft((d) => (d === text ? '' : d))
+      clearFollowed(followed, text)
       if (replyTo) setReplyKey((k) => (k === replyTo.writer + ':' + replyTo.seq ? null : k))
       readNewest().then(() => scrollToEnd(), () => {})
     } else if (r.uncertain) {
@@ -532,7 +612,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     }
   }
 
-  const mediaDone = async (r, text, replyKeyOf, sentAt, acting) => {
+  const mediaDone = async (r, text, replyKeyOf, sentAt, acting, followed) => {
     setMediaSend(null)
     if (r.phase === 'uncertain') {
       const held = { op: r.op, text, replyKey: replyKeyOf, sentAt, acting, checking: true }
@@ -547,6 +627,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     }
     if (r.phase === 'done') {
       setDraft((d) => (d === text ? '' : d))
+      clearFollowed(followed, text)
       if (replyKeyOf) setReplyKey((k) => (k === replyKeyOf ? null : k))
       setMediaHold(null)
       attachments.clear()
@@ -572,6 +653,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     const sealed = visibility === 'private'
     const acting = actingId
     const sentAt = Date.now()
+    inFlightRef.current = { text, at: sentAt, followed: false }
     const token = { live: true }
     sendTokenRef.current = token
     const r = await runChatSend({
@@ -583,8 +665,12 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
       onPhase: (p) => { if (token.live) setMediaSend(p) }
     })
     if (sendTokenRef.current === token) sendTokenRef.current = null
+    // A cancelled upload can settle after the next send armed the ref: it
+    // must leave that record alone, so the ref is taken only past this check.
     if (r.phase === 'cancelled') return
-    mediaDone(r, text, replyTo ? replyTo.writer + ':' + replyTo.seq : null, sentAt, acting)
+    const followed = token.live ? inFlightRef.current : null
+    if (token.live) inFlightRef.current = null
+    mediaDone(r, text, replyTo ? replyTo.writer + ':' + replyTo.seq : null, sentAt, acting, followed)
   }
 
   // A recorded voice note: one upload, then one group.post, under the same
@@ -625,7 +711,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     })
     if (sendTokenRef.current === token) sendTokenRef.current = null
     if (r.phase === 'cancelled') return
-    mediaDone(r, '', replyTo ? replyTo.writer + ':' + replyTo.seq : null, sentAt, acting)
+    mediaDone(r, '', replyTo ? replyTo.writer + ':' + replyTo.seq : null, sentAt, acting, null)
   }
 
   // The explicit retry of an uncertain photo post: the same group.post, once.
@@ -640,11 +726,11 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     setMediaError('')
     // A post that landed meanwhile is not sent twice.
     if (await mediaLanded(held) === 'landed') {
-      mediaDone({ phase: 'done' }, held.text, held.replyKey, held.sentAt, held.acting)
+      mediaDone({ phase: 'done' }, held.text, held.replyKey, held.sentAt, held.acting, null)
       return
     }
     const r = await retryChatSend({ op: held.op, request, onPhase: setMediaSend })
-    mediaDone(r, held.text, held.replyKey, held.sentAt, held.acting)
+    mediaDone(r, held.text, held.replyKey, held.sentAt, held.acting, null)
   }
 
   const cancelMedia = () => {
@@ -661,7 +747,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     if (mediaHold) return retryMedia()
     // Before every path below (a caption, a page's statement, plain text). The
     // draft is kept, so the person can edit it.
-    const refused = publicGroupRefusal(knownVisibility({ page: asPage.page, info, epoch: meta.epoch }), draft)
+    const refused = publicGroupRefusal(knownVisibility({ page: asPage.page, info, epoch: meta.epoch, pagePrivate: pageVis === 'private' }), draft)
     setDraftRefusal(refused)
     if (refused !== '') return
     if (attachments.items.length > 0 && !asPage.page) {
@@ -704,6 +790,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     const index = rows.findIndex((r) => r.key === key)
     const list = listRef.current
     if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return
+    // A quote jump leaves the end: still pinned, its first animated frame
+    // would scroll back to the end.
+    endPin.current = pinToEnd(endPin.current, { kind: 'user' })
     // An unmeasured row far up throws without getItemLayout: stay put then.
     try {
       list.scrollToIndex({ index, animated: true, viewPosition: 0.5 })
@@ -772,18 +861,38 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     })
   }
 
-  const scrollToEnd = () => {
+  const endPin = useRef({ pinned: true, newest: null, lastY: null })
+  // On the web the content size can change before FlatList measured the new
+  // row, so the first scroll uses an estimate and stops short: one more once
+  // layout settled.
+  const settleTimer = useRef(null)
+  useEffect(() => () => clearTimeout(settleTimer.current), [])
+  const followEnd = useCallback(() => {
+    if (!endPin.current.pinned) return
     const list = listRef.current
-    if (list && typeof list.scrollToEnd === 'function') {
-      setTimeout(() => list.scrollToEnd({ animated: false }), 0)
-    }
+    if (!list || typeof list.scrollToEnd !== 'function') return
+    list.scrollToEnd({ animated: false })
+    clearTimeout(settleTimer.current)
+    settleTimer.current = setTimeout(() => {
+      const now = listRef.current
+      if (endPin.current.pinned && now && typeof now.scrollToEnd === 'function') now.scrollToEnd({ animated: false })
+    }, 50)
+  }, [])
+  const releaseEnd = useCallback(() => {
+    endPin.current = pinToEnd(endPin.current, { kind: 'user' })
+  }, [])
+  const scrollToEnd = () => {
+    endPin.current = { ...endPin.current, pinned: true }
+    followEnd()
   }
   const last = rows.length > 0 ? rows[rows.length - 1] : null
   const lastId = last === null ? null : last.id
   cutRef.current = last !== null && typeof last.at === 'string' ? { at: last.at, writer: last.writer, seq: last.seq } : null
   useEffect(() => {
-    if (lastId !== null) scrollToEnd()
-  }, [lastId])
+    if (lastId === null) return
+    endPin.current = pinToEnd(endPin.current, { kind: 'newest', newest: lastId })
+    followEnd()
+  }, [lastId, followEnd])
 
   // The keyboard shrinks the list: when the person was reading the newest
   // line, keep it above the composer instead of behind it (as in Mensagem).
@@ -793,6 +902,10 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   const atBottom = useRef(true)
   const lastY = useRef(null)
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
+    // A frame only updates the pin. Following the end happens on content
+    // growth (onContentSizeChange): calling scrollToEnd from every frame of an
+    // animated scroll restarts the animation on Android and turns it into a crawl.
+    endPin.current = pinToEnd(endPin.current, { kind: 'frame', y, contentHeight, layoutHeight })
     const bottom = y + layoutHeight >= contentHeight - 48
     const resized = lastY.current !== null && y === lastY.current
     lastY.current = y
@@ -1045,7 +1158,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         {meta.state === 'rekey-pending'
           ? (
             <View style={styles.note}>
-              <Notice>{REKEY_PENDING_LABEL}</Notice>
+              <Notice>{asPage.page ? PAGE_REKEYING_TEXT : REKEY_PENDING_LABEL}</Notice>
               {can('rekey', role) ? <Pill label='Gerar nova chave' onPress={rekey} pending={act.pending} /> : null}
             </View>
             )
@@ -1055,7 +1168,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     : null
 
   let empty
-  if (loadError && rows.length === 0) empty = <ErrorState message={loadError} onRetry={() => load()} pending={loading} />
+  if (loadError === PAGE_GROUP_LOADING_TEXT && rows.length === 0) empty = <EmptyState icon='cadeira' title='Carregando o grupo' body={PAGE_GROUP_LOADING_TEXT} />
+  else if (loadError && rows.length === 0) empty = <ErrorState message={loadError} onRetry={() => load()} pending={loading} />
   else if (loadedAt === null) empty = <Skeleton />
   else if (outside) empty = outside
   else if (reader) empty = <EmptyState icon='cadeira' title='Nenhuma mensagem ainda' body={deviceJoin ? undefined : 'Escreva a primeira.'} />
@@ -1135,7 +1249,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
   }
 
   const canPost = asPage.page
-    ? pageCan('post', pageRole) && meta.state === 'ok'
+    ? pageCan('post', pageRole) && meta.state === 'ok' && pageVis !== null
     : reader && can('post', role) && meta.state === 'ok' && !orphan && canWriteHere(info)
   const left = MAX_TEXT - countChars(draft)
   // A writer is here but a post would still be refused. rekey-pending already
@@ -1182,7 +1296,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
     composer = (
       <ChatComposer
         value={draft}
-        onChangeText={(t) => { setDraft(t); setPostHold(null) }}
+        onChangeText={(t) => { inFlightRef.current = followAutocorrect(inFlightRef.current, t, Date.now()); setDraft(t); setPostHold(null) }}
         onSend={sendDraft}
         sending={post.pending || pagePending || sendingMedia}
         sendDisabled={!canPost || !node.online || left < 0 || postHold !== null || mediaBlocked}
@@ -1193,7 +1307,7 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         onRemoveAttachment={mediaHold === null ? attachments.remove : undefined}
         onCancelAttachments={mediaHold === null && !(mediaSend && mediaSend.phase === 'sending') ? cancelMedia : undefined}
         progress={sendingMedia ? mediaSend.progress : null}
-        placeholder={meta.state === 'rekey-pending' || awaitingKey ? REKEY_PENDING_LABEL : 'Mensagem'}
+        placeholder={asPage.page && pageVis === null ? 'Carregando o grupo' : (meta.state === 'rekey-pending' || awaitingKey ? (asPage.page ? PAGE_REKEYING_TEXT : REKEY_PENDING_LABEL) : 'Mensagem')}
         accessibilityLabel='mensagem para o grupo'
         reply={replyBar ? { name: replyBar.name, text: replyBar.text, senderKey: replyBar.senderKey, mine: replyBar.mine } : null}
         onCancelReply={() => setReplyKey(null)}
@@ -1230,7 +1344,9 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
                 ? <MoreButton title={AS_PAGE_LABEL} actions={[{ icon: 'sair', label: PAGE_LEAVE_LABEL, danger: true, pending: pagePending, onPress: () => pageMembership(pageStatement('group-leave', { group })) }]} />
                 : <Btn label={PAGE_JOIN_LABEL} onPress={enter} pending={pagePending} disabled={!node.online} />}
               {pageRetry ? <Pill label='Conferir de novo' onPress={pageRetry} pending={pagePending} /> : null}
+              {sealAgain !== null ? <Pill label={PAGE_SEAL_AGAIN_LABEL} onPress={() => sendPost(sealAgain)} pending={pagePending} /> : null}
             </View>
+            {pageVis === null && loadedAt !== null && pageVisNote !== '' && pageVisNote !== loadError ? <Soft>{pageVisNote}</Soft> : null}
             <ErrorText>{pageError}</ErrorText>
           </View>
           )
@@ -1250,6 +1366,8 @@ export function Grupo ({ group, onBack, onOpenCommunity, onOpenMember, onMessage
         refreshing={refreshing}
         keepVisiblePosition
         onScrollFrame={trackBottom}
+        onContentSizeChange={followEnd}
+        onUserScroll={releaseEnd}
       />
       {composer}
       {!asPage.page

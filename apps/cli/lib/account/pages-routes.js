@@ -22,9 +22,17 @@
 //     listings, an edit only with the live edit's seq as expectedRevision
 //     ('conflito' otherwise) and written with the tombstone of the edit it
 //     replaces, no reservado on a procura. listing-consent appends nothing:
-//     the page key signs the deal of an offer that a member sent the page
-//     in Conversas (docs/rpc.md 5.109), and the admin's app puts that
-//     signature in the aceite URL of its text answer (dm-send stays text).
+//     the page key signs the deal the admin states (docs/rpc.md 5.109); the
+//     service cannot read the page's Conversas, so it does not check that
+//     the offer exists, and the admin's app puts that signature in the
+//     aceite URL of its answer.
+//   - dm-* (./pages-dm.js): the page's Conversas are sealed on the devices
+//     of its owner and admins. dm-sign signs a digest, dm-box, dm-box-share
+//     and dm-box-read keep the public boxes and the sealed shares;
+//     dm-legacy-read and dm-legacy-done hand the owner's device the sealed
+//     bundle of a legacy page's old Conversas and drop it once imported.
+//     dm-list and dm-thread serve the old rows only while the service still
+//     holds them.
 //   - media and avatar take the raw image as the body and the statement in
 //     x-varanda-page-* headers.
 //   - close and move are the owner's record actions (docs/protocol.md §12,
@@ -78,9 +86,10 @@ const groupLib = require('@varanda/core/lib/group')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan } = require('@varanda/core/lib/listing')
 const { feira } = require('@varanda/rpc')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
+const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
   postRecord, likeRecord, repostRecord, deleteRecord, profileRecords, followRecord, listingRecord, listingStatusRecord,
-  parseRef, validDescriptor, isCanonicalIso, charLength, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, MAX_AVATAR_BYTES, AVATAR_MIMES
+  parseRef, validDescriptor, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, MAX_AVATAR_BYTES, AVATAR_MIMES
 } = require('@varanda/core/lib/records')
 
 const PREFIX = '/account/pages/'
@@ -99,7 +108,6 @@ const NONCE_KEY_FILE = 'page-nonce-key.json'
 const HEX64_RE = /^[0-9a-f]{64}$/
 const HEX128_RE = /^[0-9a-f]{128}$/
 const HEX32_RE = /^[0-9a-f]{32}$/
-const DM_MAX_TEXT = 1000
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const SUCCESSOR = PREFIX + 'successor/'
 // What a close tombstones: everything the page still shows, never a page-*
@@ -107,6 +115,10 @@ const SUCCESSOR = PREFIX + 'successor/'
 const CLOSE_DELETES = ['post', 'like', 'repost', 'profile', 'listing', 'listing-edit']
 const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
+// The rebox retry (reboxSweep): every minute, a failing page backed off up
+// to an hour.
+const REBOX_EVERY_MS = 60 * 1000
+const REBOX_BACKOFF_MAX_MS = HOUR
 // Same names as store.js RESERVED (not exported): a page never takes them.
 const RESERVED = new Set(['admin', 'associacao', 'association', 'ajuda', 'mod', 'moderacao',
   'pagina', 'paginas', 'root', 'seeder', 'semeador', 'suporte', 'support', 'varanda',
@@ -114,18 +126,14 @@ const RESERVED = new Set(['admin', 'associacao', 'association', 'ajuda', 'mod', 
   'andre_costa', 'bia_araujo', 'biblioteca_praca', 'cecilia_ramos',
   'horta_do_bairro', 'joao_nascimento', 'lia_oliveira', 'tomas_ferreira'])
 
-// Conversas as the page (./pages-dm.js, docs/rpc.md 5.77 to 5.80 shapes).
-const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen']
-const DM_READS = ['dm-list', 'dm-thread']
-const DM_STATES = ['accepted', 'declined', 'blocked', 'unblocked', 'deleted']
+// Conversas as the page (./pages-dm.js, docs/rpc.md 5.84).
+const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
+const DM_READS = ['dm-list', 'dm-thread', 'dm-box-read', 'dm-sign', 'dm-legacy-read']
 // Communities and groups as the page (./pages-groups.js).
-const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read']
+const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox']
 const GROUP_READ_LIMIT = 32
 // Feira listings as the page (docs/rpc.md 5.103 to 5.109).
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status']
-// listing-consent: the newest pages of the offerer's thread it reads.
-const CONSENT_PAGES = 20
-const CONSENT_PAGE_LIMIT = 50
 const STATEMENTS = ['create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
   'avatar', 'rename', 'invite', 'follow', 'follows', 'media', 'notices', 'terms', ...DM_ACTIONS, ...GROUP_ACTIONS,
   'listing', 'listing-edit', 'listing-status', 'listing-consent']
@@ -162,7 +170,7 @@ const TERMINAL = ['movida', 'encerrada']
 const TOKENS = new Set(['nao-vinculado', 'sem-permissao', 'limite', 'nome-em-uso', 'nome-invalido', 'expirado',
   'assinatura-invalida', 'pedido-invalido', 'pausada', 'encerrada', 'midia-invalida', 'indisponivel', 'termos-pendentes',
   'troca-bloqueada', 'nao-encontrado', 'para-si', 'bloqueou', 'sem-caixa', 'sem-selos', 'resposta-invalida', 'longa-demais',
-  'fora-da-comunidade', 'aguardando-chave', 'conflito', 'oferta-ausente'])
+  'fora-da-comunidade', 'aguardando-chave', 'conflito', 'rotacao-necessaria', 'privado', 'sequencia'])
 
 function noop () {}
 
@@ -514,6 +522,7 @@ function createPagesRoutes ({
       }
     }
     if (seq !== null) {
+      if (action === 'dm-box-share') return { ok: true, replay: true }
       const out = { seq, replay: true }
       if (action === 'move') {
         const r = pagesStore.get(page)
@@ -877,9 +886,6 @@ function createPagesRoutes ({
             const result = { page, seq: res.seq, length: res.length, pushed: res.pushed }
             settle(member, nonce, result)
             keep(page, 'create', member, res.seq)
-            // The page's box and dm-key: on the writer's chain, after this
-            // answer; the pool's next pass retries a failure.
-            if (pagesDm !== null) pagesDm.enable(page).catch(() => note('create', 'conversas-pendentes'))
             return result
           } catch (err) {
             await burn(page)
@@ -1127,35 +1133,11 @@ function createPagesRoutes ({
 
   // ---- Feira consent ---------------------------------------------------------
 
-  // Whether the page's thread with `rater` holds an inbound message `offer`
-  // whose card URL or text is an offer naming exactly listing page:seq, with
-  // no answer in it (the browser node's rule, docs/rpc.md 5.109).
-  async function inboundOffer (page, rater, offer, seq) {
-    let before = null
-    for (let i = 0; i < CONSENT_PAGES; i++) {
-      let res
-      try {
-        res = await pagesDm.thread(page, { peer: rater, before, limit: CONSENT_PAGE_LIMIT })
-      } catch (err) {
-        throw tokenOf(err)
-      }
-      const messages = res && Array.isArray(res.messages) ? res.messages : []
-      for (const m of messages) {
-        if (!isPlainObject(m) || m.mine === true || m.from !== rater || m.id !== offer) continue
-        for (const url of [isPlainObject(m.card) ? m.card.url : null, m.text]) {
-          const ref = feira.parseOfferRef(url)
-          if (ref !== null && ref.author === page && ref.seq === seq && ref.aceite === null && !ref.recusada) return true
-        }
-      }
-      if (!res || typeof res.next !== 'string') return false
-      before = res.next
-    }
-    return false
-  }
-
-  // The page's signature over one deal; appends nothing. A resend of the
-  // same use answers the stored signature (Ed25519 is deterministic, so a
-  // run after a restart signs the same bytes again).
+  // The page's signature over one deal; appends nothing. The admin's signed
+  // statement { to, rater, offer } is the whole claim: the service cannot
+  // read the page's Conversas, so it does not look for the offer. A resend
+  // of the same use answers the stored signature (Ed25519 is deterministic,
+  // so a run after a restart signs the same bytes again).
   async function consent (body) {
     const { member, page, nonce, op, hash } = await statement(body, 'listing-consent', false)
     if (!exactKeys(op, ['to', 'rater', 'offer'])) throw refuse('pedido-invalido')
@@ -1174,8 +1156,6 @@ function createPagesRoutes ({
         throw tokenOf(err)
       }
       if (!foldListings(entries).bySeq.has(t.seq)) throw refuse('pedido-invalido')
-      need(writableRow(page), member, 'admin')
-      if (pagesDm === null || !(await inboundOffer(page, rater, op.offer, t.seq))) throw refuse('oferta-ausente')
       need(writableRow(page), member, 'admin')
       let signature
       try {
@@ -1223,7 +1203,8 @@ function createPagesRoutes ({
         follows: row.follows,
         closed: row.closed !== null,
         movedTo: row.movedTo,
-        communities: (row.writers || []).filter((w) => w.kind === 'community').map((w) => ({ community: w.group, role: w.state }))
+        communities: (row.writers || []).filter((w) => w.kind === 'community').map((w) => ({ community: w.group, role: w.state })),
+        ...(await reboxState(page))
       }
     } catch (err) {
       throw tokenOf(err)
@@ -1313,7 +1294,15 @@ function createPagesRoutes ({
 
   async function invite (body) {
     const { member, page, nonce, op, hash } = await statement(body, 'invite', false)
-    if (!exactKeys(op, ['member', 'gen', 'rosterSignature', 'roster']) || !exactKeys(op.roster, ['owner', 'admins', 'prev', 'at', 'nonce'])) {
+    if (!exactKeys(op, ['member', 'gen', 'rosterSignature', 'roster'], ['share']) || !exactKeys(op.roster, ['owner', 'admins', 'prev', 'at', 'nonce'])) {
+      throw refuse('pedido-invalido')
+    }
+    // The page's current Conversas keys sealed for the invitee, covered by
+    // the statement (opHash is over the whole op): kept until accept.
+    let share
+    try {
+      share = parseInviteShare(op.share)
+    } catch {
       throw refuse('pedido-invalido')
     }
     const invitee = keyParam(op.member)
@@ -1342,7 +1331,7 @@ function createPagesRoutes ({
       chargeOps(page)
       let inv
       try {
-        inv = await pagesStore.invite(page, invitee, { gen: op.gen, rosterSignature: op.rosterSignature, spend: spendOf(member, nonce, 0) })
+        inv = await pagesStore.invite(page, invitee, { gen: op.gen, rosterSignature: op.rosterSignature, share, spend: spendOf(member, nonce, 0) })
       } catch (err) {
         throw tokenOf(err)
       }
@@ -1394,10 +1383,82 @@ function createPagesRoutes ({
     }))
   }
 
+  // The dmBox a remove or a move may carry (HTTP body, not signed by the
+  // node): bound to the use by the replay hash, so a same-nonce resend with
+  // another dmBox is 'expirado'.
+  function dmBoxOf (body, action) {
+    if (!has(body, 'dmBox')) return undefined
+    if (pagesDm === null || (action !== 'remove' && action !== 'move')) throw refuse('pedido-invalido')
+    if (!isPlainObject(body.dmBox)) throw refuse('pedido-invalido')
+    return body.dmBox
+  }
+
+  // A page with device-held keys needs its rotation with the roster change;
+  // checked, and the gen compared, before anything is appended.
+  function dmBoxFor (row, raw, roster, owner, { move = false } = {}) {
+    if (!row.dm) {
+      if (raw !== undefined) throw refuse('pedido-invalido')
+      return null
+    }
+    if (raw === undefined) {
+      // No promoted gen yet (gen 0: a first rotation that never published,
+      // or only a legacy bundle a move carried): nothing a move must seal
+      // again, and the move drops the pending first rotation anyway.
+      if (row.dm.gen === 0 && (move || row.dm.rotatePending === null)) return null
+      throw refuse('rotacao-necessaria')
+    }
+    // Another rotation still pending: the device's shares would be sealed
+    // for a gen that is not settled. It completes first (its resend, or the
+    // service's start or tick). A move is let through: K2 starts its own
+    // gen 1 and the move drops K1's pending rotation, so a page whose
+    // writer can no longer publish still has its way out.
+    if (!move && row.dm.rotatePending !== null) throw refuse('rotacao-necessaria')
+    let dmBox
+    try {
+      dmBox = parseBox(raw, { roster, owner })
+    } catch {
+      throw refuse('pedido-invalido')
+    }
+    if (dmBox.expectedGen !== (move ? 0 : row.dm.gen)) throw refuse('conflito')
+    return dmBox
+  }
+
+  // A resend of a remove whose rotation is still pending completes it
+  // instead of answering the stored success alone.
+  function finishRemove (page, member, nonce, prior) {
+    return withLock(page, async () => {
+      let row
+      try {
+        row = pagesStore.get(page)
+      } catch {
+        throw refuse('indisponivel')
+      }
+      const p = row && row.dm ? row.dm.rotatePending : null
+      if (p === null || p.idem !== member + ':' + nonce) return prior
+      let out
+      try {
+        out = await pagesDm.complete(page)
+      } catch (err) {
+        throw dmFailure(err)
+      }
+      return { ...prior, dmGen: out === null ? pagesStore.get(page).dm.gen : out.gen }
+    })
+  }
+
   async function rosterAction (action, body) {
-    const { member, page, nonce, record, hash } = await recordProof(body, action, 'page-roster')
+    const proof = await recordProof(body, action, 'page-roster')
+    const { member, page, nonce, record } = proof
+    const rawBox = dmBoxOf(body, action)
+    let hash = proof.hash
+    if (rawBox !== undefined) {
+      try {
+        hash = opHash({ record, dmBox: rawBox })
+      } catch {
+        throw refuse('pedido-invalido')
+      }
+    }
     const prior = claim(member, nonce, hash, false, page, action)
-    if (prior !== null) return prior
+    if (prior !== null) return action === 'remove' ? finishRemove(page, member, nonce, prior) : prior
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
       let next
@@ -1418,14 +1479,38 @@ function createPagesRoutes ({
       if (record.gen !== next.gen || record.owner !== next.owner || !sameList(record.admins, next.admins) || record.prev !== next.prev) {
         throw refuse('expirado')
       }
+      const dmBox = action === 'remove' ? dmBoxFor(row, rawBox, [next.owner, ...next.admins], next.owner) : null
+      let rotate = null
+      if (dmBox !== null) {
+        try {
+          rotate = await pagesDm.prepareRemove(page, { by: member, dmBox, idem: { member, nonce } })
+        } catch (err) {
+          throw tokenOf(err)
+        }
+      }
       const roster = countersign(record, page)
       chargeOps(page)
       const res = await append(page, [roster], { member, nonce })
+      let length = res.length
+      let dmGen
       await after(async () => {
-        await pagesStore.setRoster(page, { gen: roster.gen, seq: res.seq, owner: roster.owner, admins: roster.admins, spend: spendOf(member, nonce, res.seq) })
+        // The removed admin's keys rotate with the removal: the prepared
+        // rotation is committed with the roster, so a crash before it is
+        // published leaves it pending (dm-sign refused) for the resend or
+        // the next start to complete.
+        await pagesStore.setRoster(page, { gen: roster.gen, seq: res.seq, owner: roster.owner, admins: roster.admins, spend: spendOf(member, nonce, res.seq), rotate })
         await pagesStore.expectLength(page, res.length)
+        if (rotate !== null) {
+          // null: the start or the tick completed it meanwhile.
+          const out = await pagesDm.complete(page)
+          dmGen = out === null ? pagesStore.get(page).dm.gen : out.gen
+          length = writer.info(page).length
+        }
       })
-      const result = { seq: res.seq, length: res.length, pushed: res.pushed }
+      const reboxPending = rotate !== null ? await reboxAfter(page, row.dm.groupBox) : undefined
+      const result = { seq: res.seq, length, pushed: res.pushed }
+      if (dmGen !== undefined) result.dmGen = dmGen
+      if (reboxPending !== undefined) result.reboxPending = reboxPending
       settle(member, nonce, result)
       keep(page, action, member, res.seq)
       return result
@@ -1530,16 +1615,10 @@ function createPagesRoutes ({
     return res && Array.isArray(res.communities) ? res.communities : []
   }
 
-  function stopDm (page) {
-    if (pagesDm === null) return
-    Promise.resolve().then(() => pagesDm.stop(page)).catch(() => note('conversas', 'parada-pendente'))
-  }
-
-  // A closed page's Conversas are dropped, never saved again: stop would
-  // write the cached inbox back after the writer deleted it.
+  // A closed page's legacy rows and legacy box secret go; its shares left
+  // the ACL row with the close.
   function forgetDm (page) {
     if (pagesDm === null) return
-    if (typeof pagesDm.forget !== 'function') return stopDm(page)
     Promise.resolve().then(() => pagesDm.forget(page)).catch(() => note('conversas', 'parada-pendente'))
   }
 
@@ -1638,24 +1717,25 @@ function createPagesRoutes ({
         roster.owner !== member || !sameList(roster.admins, origin.admins)) {
       throw refuse('pedido-invalido')
     }
+    const dmBox = dmBoxOf(body, 'move')
     let hash
     try {
-      hash = opHash({ record, origin, roster })
+      hash = opHash(dmBox === undefined ? { record, origin, roster } : { record, origin, roster, dmBox })
     } catch {
       throw refuse('pedido-invalido')
     }
-    return { to, origin, roster, hash }
+    return { to, origin, roster, hash, dmBox }
   }
 
   async function move (body) {
     const { member, page, nonce, record } = await recordProof(body, 'move', 'page-moved')
-    const { to, origin, roster, hash } = moveParts(body, member, page, nonce, record)
+    const { to, origin, roster, hash, dmBox } = moveParts(body, member, page, nonce, record)
     const prior = claim(member, nonce, hash, false, page, 'move')
     if (prior !== null) return prior
     return once(member, nonce, () => withLock(page, async () => {
       // The writer moved K1 to K2 and a later step failed: the resend
       // finishes the move.
-      if (movedHere(page, to)) return moveLocked({ member, page, nonce, record, to, origin, roster, pending: null })
+      if (movedHere(page, to)) return moveLocked({ member, page, nonce, record, to, origin, roster, dmBox, pending: null })
       let pending
       try {
         pending = keys.pending(nonce)
@@ -1664,7 +1744,7 @@ function createPagesRoutes ({
       }
       try {
         if (pending.key !== to) throw refuse('expirado')
-        return await moveLocked({ member, page, nonce, record, to, origin, roster, pending })
+        return await moveLocked({ member, page, nonce, record, to, origin, roster, dmBox, pending })
       } finally {
         pending.row.secretKey.fill(0)
         pending.row.mediaSecretKey.fill(0)
@@ -1690,9 +1770,11 @@ function createPagesRoutes ({
   }
 
   // `pending` null: a resumed move, whose writer step already ran.
-  async function moveLocked ({ member, page, nonce, record, to, origin, roster, pending }) {
+  async function moveLocked ({ member, page, nonce, record, to, origin, roster, dmBox: rawBox, pending }) {
     const resume = pending === null
     const row = ownerRow(page, member)
+    // K2 starts its own gen 1, so expectedGen is 0; the roster carries over.
+    const dmBox = dmBoxFor(row, rawBox, [row.owner, ...row.admins], row.owner, { move: true })
     // The roster carries over unchanged, at K1's final gen; fromSeq is K1's
     // length as the owner last read it.
     if (record.gen !== row.gen || origin.owner !== row.owner || !sameList(origin.admins, row.admins) ||
@@ -1721,6 +1803,21 @@ function createPagesRoutes ({
     let cert
     let usernameRecord
     let left = moveLeft.get(page) || []
+    // A resumed move's K2 already carries its dm-key: a retry (after a
+    // restart forgot the replay hash) must bring that same box, or the
+    // shares it stores would not open what is sealed to K2.
+    if (resume && dmBox !== null) {
+      let published = null
+      try {
+        for (const e of await writer.readEntries(to)) {
+          const r = e.record
+          if (isPlainObject(r) && r.type === 'dm-key' && (published === null || r.gen > published.gen || (r.gen === published.gen && e.seq > published.seq))) published = { box: r.box, gen: r.gen, seq: e.seq }
+        }
+      } catch {
+        throw refuse('indisponivel')
+      }
+      if (published === null || published.gen !== 1 || published.box !== dmBox.box) throw refuse('conflito')
+    }
     if (resume) {
       try {
         cert = writer.certOf(to)
@@ -1744,7 +1841,7 @@ function createPagesRoutes ({
         usernameRecord = createUsernameRecord({ member: to, username: entry.username, date }, issuerKeyPair, issuerCert)
         try {
           keys.put(to, pending.row)
-          res = await writer.movePage({ from: page, to, cert, usernameRecord, rosterRecord, originRecord, movedRecord, depth })
+          res = await writer.movePage({ from: page, to, cert, usernameRecord, rosterRecord, originRecord, movedRecord, depth, dmKey: dmBox === null ? undefined : { box: dmBox.box, gen: 1 } })
         } catch (err) {
           const e = writerFailure(err)
           // A refusal created nothing: K2's secrets go too.
@@ -1760,11 +1857,23 @@ function createPagesRoutes ({
     }
     const seq = res.moved === null || res.moved === undefined ? 0 : res.moved
     let length = res.length
+    let carried = null
     try {
       await after(async () => {
         if (!dirMoved) await store.movePage({ from: page, to, usernameRecord, cert })
-        await pagesStore.move(page, to, { spend: spendOf(member, nonce, seq) })
+        // K1's legacy bundle is copied to K2 first and named by K2's row in
+        // the move's commit: the old Conversas outlive the move until the
+        // member it is sealed to imports them.
+        carried = pagesDm === null ? null : pagesDm.carryBundle(page, to)
+        // K2's shares in the same commit as the move: its gen 1 dm-key is
+        // already on K2, appended before K2 was announced.
+        const k2dm = pagesDm === null ? null : pagesDm.moveDm({ by: member, dmBox, legacyBundle: carried })
+        await pagesStore.move(page, to, { spend: spendOf(member, nonce, seq), dm: k2dm })
         if (res.paused) await pagesStore.setStatement(page, res.record)
+        if (dmBox !== null) {
+          length = writer.info(to).length
+          await pagesStore.expectLength(to, length)
+        }
       })
     } catch (err) {
       // The writer has moved and the directory or the ACL may not have: K1
@@ -1774,6 +1883,8 @@ function createPagesRoutes ({
       throw err
     }
     moveLeft.delete(page)
+    // K2 holds the bundle now: K1's copy, legacy rows and legacy secret go.
+    if (carried !== null) forgetDm(page)
     // A core delegate owner keeps its diary's profile on K2.
     let delegate = null
     try {
@@ -1789,8 +1900,6 @@ function createPagesRoutes ({
         note('move', 'vinculo-pendente')
       }
     }
-    stopDm(page)
-    if (pagesDm !== null) Promise.resolve().then(() => pagesDm.enable(to)).catch(() => note('move', 'conversas-pendentes'))
     rejoin(to, left)
     const result = { page: to, seq, length, pushed: res.pushed }
     if (res.paused) result.paused = true
@@ -1976,7 +2085,9 @@ function createPagesRoutes ({
 
   // ---- Conversas as the page ------------------------------------------------
 
-  // The op of each dm action, exactly the params of docs/rpc.md 5.75 to 5.80.
+  // The op of each dm action (docs/rpc.md 5.84; the legacy reads keep the
+  // 5.77 and 5.78 shapes). 'dm-box' is checked under the lock, against the
+  // roster.
   function dmParams (action, op) {
     const peerOf = (v) => {
       if (typeof v !== 'string' || !HEX64_RE.test(v)) throw refuse('pedido-invalido')
@@ -2004,26 +2115,50 @@ function createPagesRoutes ({
       if (before !== null && (typeof before !== 'string' || !HEX32_RE.test(before))) throw refuse('pedido-invalido')
       return { peer: peerOf(op.peer), before, limit: limitOf(op.limit) }
     }
-    if (action === 'dm-send') {
-      if (!exactKeys(op, ['to', 'text'], ['replyTo', 'fwd'])) throw refuse('pedido-invalido')
-      const fwd = op.fwd === undefined ? 0 : op.fwd
-      if (fwd !== 0 && fwd !== 1) throw refuse('pedido-invalido')
-      const replyTo = op.replyTo === undefined ? null : op.replyTo
-      if (replyTo !== null && (typeof replyTo !== 'string' || !HEX32_RE.test(replyTo))) throw refuse('pedido-invalido')
-      if (typeof op.text !== 'string' || charLength(op.text) < 1 || charLength(op.text) > DM_MAX_TEXT) throw refuse('pedido-invalido')
-      return { to: peerOf(op.to), text: op.text, replyTo, fwd }
+    if (action === 'dm-sign') {
+      if (!exactKeys(op, ['digest']) || typeof op.digest !== 'string' || !HEX64_RE.test(op.digest)) throw refuse('pedido-invalido')
+      return { digest: op.digest }
     }
-    if (action === 'dm-set') {
-      if (!exactKeys(op, ['peer', 'state']) || !DM_STATES.includes(op.state)) throw refuse('pedido-invalido')
-      return { peer: peerOf(op.peer), state: op.state }
+    if (action === 'dm-box-read') {
+      if (!exactKeys(op, [])) throw refuse('pedido-invalido')
+      return {}
     }
-    if (!exactKeys(op, ['peer'])) throw refuse('pedido-invalido')
-    return { peer: peerOf(op.peer) }
+    if (action === 'dm-legacy-read') {
+      if (!exactKeys(op, ['from']) || !Number.isSafeInteger(op.from) || op.from < 0) throw refuse('pedido-invalido')
+      return { from: op.from }
+    }
+    if (action === 'dm-legacy-done') {
+      if (!exactKeys(op, ['id']) || typeof op.id !== 'string' || !HEX64_RE.test(op.id)) throw refuse('pedido-invalido')
+      return { id: op.id }
+    }
+    if (action === 'dm-box-share') {
+      if (!exactKeys(op, ['member', 'gen', 'sealed', 'sig'])) throw refuse('pedido-invalido')
+      if (!Number.isSafeInteger(op.gen) || op.gen < 1 || typeof op.sealed !== 'string' || typeof op.sig !== 'string') throw refuse('pedido-invalido')
+      return { member: peerOf(op.member), gen: op.gen, sealed: op.sealed, sig: op.sig }
+    }
+    if (!isPlainObject(op)) throw refuse('pedido-invalido')
+    return op
   }
 
-  // Owner or admin, checked under the page lock on every call: a removed
-  // admin is 'sem-permissao' from the remove's commit on, and nothing is
-  // read or sealed for them.
+  // Under the page lock: a live, unblocked page whose ACL names the member.
+  function dmRow (page, member, role) {
+    const row = rowOf(page)
+    if (row.movedTo !== null) throw new RouteError('movida', 409)
+    if (row.closed !== null) throw refuse('encerrada')
+    if (blocked(page)) throw refuse('sem-permissao')
+    need(row, member, role)
+    return row
+  }
+
+  function dmFailure (err) {
+    if (err instanceof RouteError || err instanceof Uncertain) return err
+    const known = err && typeof err.code === 'string' && (has(WRITER_TOKENS, err.code) || TOKENS.has(err.code))
+    return known ? tokenOf(err) : new Uncertain()
+  }
+
+  // Owner or admin ('dm-box' owner only), checked under the page lock on
+  // every call: a removed admin is 'sem-permissao' from the remove's commit
+  // on, and nothing is signed, read or stored for them.
   async function dm (action, body) {
     if (pagesDm === null) throw refuse('nao-encontrado')
     const { member, page, nonce, op, hash } = await statement(body, action, false)
@@ -2031,38 +2166,167 @@ function createPagesRoutes ({
     const read = DM_READS.includes(action)
     const prior = claim(member, nonce, hash, read, page, action)
     if (prior !== null) return prior
-    const run = async () => {
-      await withLock(page, () => {
-        const row = rowOf(page)
-        if (row.movedTo !== null) throw new RouteError('movida', 409)
-        if (row.closed !== null) throw refuse('encerrada')
-        if (blocked(page)) throw refuse('sem-permissao')
-        need(row, member, 'admin')
-        if (action === 'dm-send' || action === 'dm-set') chargeOps(page)
+    if (action === 'dm-sign' || action === 'dm-box-read' || action === 'dm-legacy-read') {
+      return withLock(page, async () => {
+        const row = dmRow(page, member, 'admin')
+        try {
+          if (action === 'dm-sign') return await pagesDm.signDigest(page, params.digest)
+          if (action === 'dm-legacy-read') return await pagesDm.legacyRead(page, { member, from: params.from })
+          let cert = null
+          try {
+            cert = writer.certOf(page)
+          } catch {}
+          const out = await pagesDm.read(page, { member, owner: row.owner === member, cert })
+          return { ...out, ...(await reboxState(page)) }
+        } catch (err) {
+          throw tokenOf(err)
+        }
       })
+    }
+    if (read) {
+      await withLock(page, () => { dmRow(page, member, 'admin') })
       let result
       try {
-        if (action === 'dm-list') result = await pagesDm.list(page, params)
-        else if (action === 'dm-thread') result = await pagesDm.thread(page, params)
-        else if (action === 'dm-send') result = await pagesDm.send(page, params, { member, nonce, recheck: () => stillAdmin(page, member, { paused: true }) })
-        else if (action === 'dm-set') result = await pagesDm.set(page, params, { recheck: () => stillAdmin(page, member, { paused: true }) })
-        else result = await pagesDm.seen(page, params)
+        result = action === 'dm-list' ? await pagesDm.list(page, params) : await pagesDm.thread(page, params)
       } catch (err) {
-        if (err && err.code === 'incerto') throw new Uncertain()
         throw tokenOf(err)
       }
       // A removed admin gets nothing of a read that was in flight.
-      if (read && !stillAdmin(page, member)) throw refuse('sem-permissao')
-      if (!read) {
-        settle(member, nonce, result)
-        keep(page, action, member, 0)
-      }
+      if (!stillAdmin(page, member)) throw refuse('sem-permissao')
       return result
     }
-    return read ? run() : once(member, nonce, run)
+    return once(member, nonce, () => withLock(page, async () => {
+      const row = writableRow(page)
+      need(row, member, action === 'dm-box' ? 'owner' : 'admin')
+      chargeOps(page)
+      let result
+      if (action === 'dm-box') {
+        let dmBox
+        try {
+          dmBox = parseBox(params, { roster: [row.owner, ...row.admins], owner: row.owner })
+        } catch {
+          throw refuse('pedido-invalido')
+        }
+        try {
+          const out = await pagesDm.applyBox(page, { by: member, dmBox, idem: { member, nonce } })
+          result = { seq: out.seq, gen: out.gen }
+        } catch (err) {
+          throw dmFailure(err)
+        }
+        result.reboxPending = await reboxAfter(page, row.dm ? row.dm.groupBox : null)
+      } else if (action === 'dm-legacy-done') {
+        try {
+          result = await pagesDm.legacyDone(page, { member, id: params.id })
+        } catch (err) {
+          throw dmFailure(err)
+        }
+      } else {
+        try {
+          result = await pagesDm.share(page, { ...params, by: member, owner: row.owner === member, idem: { member, nonce } })
+        } catch (err) {
+          throw tokenOf(err)
+        }
+      }
+      settle(member, nonce, result)
+      keep(page, action, member, result.seq || 0)
+      return result
+    }))
   }
 
   // ---- communities and groups as the page -------------------------------------
+
+  function reboxPendingOf (page) {
+    try {
+      const r = pagesStore.get(page)
+      return Boolean(r && r.dm && r.dm.reboxPending === true)
+    } catch {
+      return false
+    }
+  }
+
+  // reboxPending and reboxNeeded (the private memberships still boxed to
+  // another key than dm.groupBox) for 'dm-box-read' and 'status'.
+  async function reboxState (page) {
+    let reboxNeeded = 0
+    if (pagesGroups !== null && typeof pagesGroups.reboxNeeded === 'function') {
+      try {
+        reboxNeeded = await pagesGroups.reboxNeeded(page)
+      } catch {}
+    }
+    return { reboxPending: reboxPendingOf(page), reboxNeeded }
+  }
+
+  // A group box that changed moves the page's private memberships to it in
+  // the same request: reboxPending is set first, so a move that does not
+  // finish here ('indisponivel', a crash) is completed by reboxSweep or the
+  // owner's 'group-rebox', and every private group action waits meanwhile.
+  // -> reboxPending after the attempt.
+  async function reboxAfter (page, before) {
+    if (pagesGroups === null) return reboxPendingOf(page)
+    let d = null
+    try {
+      const r = pagesStore.get(page)
+      d = r && r.dm ? r.dm : null
+    } catch {}
+    if (d === null || typeof d.groupBox !== 'string' || (d.groupBox === before && !d.reboxPending)) return reboxPendingOf(page)
+    try {
+      await pagesStore.markRebox(page, d.groupBox)
+      await pagesGroups.groupRebox(page)
+    } catch {
+      note('grupos', 'troca-pendente')
+    }
+    return reboxPendingOf(page)
+  }
+
+  // Every live page with reboxPending, one at a time under its page lock (so
+  // never beside a route on the same page), at the start and on every tick;
+  // a page that fails waits twice as long each time, up to an hour.
+  // limits.reboxEveryMs 0 (tests) keeps only the start's sweep.
+  const reboxEveryMs = Number.isSafeInteger(limits.reboxEveryMs) && limits.reboxEveryMs >= 0 ? limits.reboxEveryMs : REBOX_EVERY_MS
+  const reboxBackoff = new Map()
+  let reboxRunning = null
+  let reboxTimer = null
+  let routesClosed = false
+
+  function reboxSweep () {
+    if (reboxRunning !== null) return reboxRunning
+    reboxRunning = (async () => {
+      let n = 0
+      if (!on || pagesGroups === null || typeof writer.pageKeys !== 'function') return n
+      for (const page of writer.pageKeys()) {
+        if (routesClosed) break
+        let row = null
+        try {
+          row = pagesStore.get(page)
+        } catch {}
+        if (row === null || row.closed !== null || row.movedTo !== null || row.paused || !row.dm || row.dm.reboxPending !== true) {
+          reboxBackoff.delete(page)
+          continue
+        }
+        const b = reboxBackoff.get(page)
+        if (b !== undefined && b.next > now()) continue
+        try {
+          await withLock(page, () => pagesGroups.groupRebox(page))
+          reboxBackoff.delete(page)
+          n++
+        } catch {
+          const fails = b === undefined ? 1 : b.fails + 1
+          reboxBackoff.set(page, { fails, next: now() + Math.min(REBOX_BACKOFF_MAX_MS, Math.max(reboxEveryMs, 1000) * 2 ** Math.min(fails, 20)) })
+          note('grupos', 'troca-pendente')
+        }
+      }
+      return n
+    })().finally(() => { reboxRunning = null })
+    return reboxRunning
+  }
+
+  if (on && pagesGroups !== null) {
+    Promise.resolve().then(reboxSweep).catch(noop)
+    if (reboxEveryMs > 0) {
+      reboxTimer = setInterval(() => { reboxSweep().catch(noop) }, reboxEveryMs)
+      if (reboxTimer.unref) reboxTimer.unref()
+    }
+  }
 
   function groupParams (action, op) {
     if (action === 'community-join' || action === 'community-leave') {
@@ -2077,6 +2341,23 @@ function createPagesRoutes ({
     if (action === 'group-leave') {
       if (!exactKeys(op, ['group'])) throw refuse('pedido-invalido')
       return { key: keyParam(op.group) }
+    }
+    if (action === 'group-rebox') {
+      if (!exactKeys(op, [])) throw refuse('pedido-invalido')
+      return {}
+    }
+    if (action === 'group-seal') {
+      if (!exactKeys(op, ['group', 'kid', 'nonce', 'box', 'at', 'writer', 'seq'])) throw refuse('pedido-invalido')
+      if (!exactKeys(op.kid, ['writer', 'seq']) || !Number.isSafeInteger(op.kid.seq) || op.kid.seq < 0) throw refuse('pedido-invalido')
+      if (!Number.isSafeInteger(op.seq) || op.seq < 1) throw refuse('pedido-invalido')
+      const seal = { kid: { writer: keyParam(op.kid.writer), seq: op.kid.seq }, nonce: op.nonce, box: op.box, at: op.at, writer: keyParam(op.writer), seq: op.seq }
+      // The envelope's own bounds, checked before the page lock.
+      try {
+        groupLib.groupSealed({ kid: seal.kid, nonce: seal.nonce, box: seal.box, at: seal.at })
+      } catch {
+        throw refuse('pedido-invalido')
+      }
+      return { key: keyParam(op.group), seal }
     }
     if (action === 'group-post') {
       if (!exactKeys(op, ['group', 'text'], ['replyTo', 'fwd'])) throw refuse('pedido-invalido')
@@ -2121,6 +2402,8 @@ function createPagesRoutes ({
         if (action === 'group-join') return await pagesGroups.groupJoin(page, params.key)
         if (action === 'group-leave') return await pagesGroups.groupLeave(page, params.key)
         if (action === 'group-post') return await pagesGroups.groupPost(page, params.key, { text: params.text, replyTo: params.replyTo, fwd: params.fwd })
+        if (action === 'group-seal') return await pagesGroups.groupSeal(page, params.key, params.seal)
+        if (action === 'group-rebox') return await pagesGroups.groupRebox(page)
         return await pagesGroups.groupRead(page, params.key, { before: params.before, limit: params.limit })
       } catch (err) {
         // A writer core or the diary may have taken a block before the
@@ -2144,7 +2427,7 @@ function createPagesRoutes ({
     }
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
-      need(row, member, 'admin')
+      need(row, member, action === 'group-rebox' ? 'owner' : 'admin')
       chargeOps(page)
       const out = await call()
       // The joins and leaves went on the diary through the writer: the ACL
@@ -2154,7 +2437,10 @@ function createPagesRoutes ({
       } catch {
         note(action, 'comprimento-pendente')
       }
-      const result = action === 'group-post' ? { seq: out.seq } : { state: out.state, role: out.state }
+      let result
+      if (action === 'group-post' || action === 'group-seal') result = { seq: out.seq }
+      else if (action === 'group-rebox') result = { groups: out.groups, left: out.left }
+      else result = { state: out.state, role: out.state }
       if (action === 'community-join') result.group = out.group
       settle(member, nonce, result)
       keep(page, action, member, 0)
@@ -2239,6 +2525,13 @@ function createPagesRoutes ({
     owns: (pathname) => pathname === '/account/pages' || pathname.startsWith(PREFIX),
     handle,
     stats: () => ({ available: on, ...counts, applied: applied.size, invites: invites.size }),
+    reboxSweep,
+    close: () => {
+      routesClosed = true
+      clearInterval(reboxTimer)
+      reboxTimer = null
+      return reboxRunning === null ? Promise.resolve() : reboxRunning.catch(noop)
+    },
     audit: () => audit.map((a) => ({ ...a }))
   }
 }

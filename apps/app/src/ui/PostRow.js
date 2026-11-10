@@ -64,7 +64,7 @@ import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
 import { useNode } from '../node'
 import { QuoteCard } from './QuoteCard'
-import { LARGE_TEXT, type } from './theme'
+import { LARGE_TEXT, layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
 const ICON = 18
@@ -668,8 +668,8 @@ const makeStyles = (colors) => StyleSheet.create({
   reply: { ...type.replyMark, color: colors.soft, marginTop: 1 },
   replyName: { color: colors.accent, fontWeight: '600' },
   text: { ...type.postText, color: colors.ink, marginTop: 3 },
-  bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, marginLeft: -8, maxWidth: 360 },
-  action: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 36, minWidth: 44, paddingHorizontal: 8 },
+  bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 0, marginBottom: -4, marginLeft: -8, maxWidth: 360 },
+  action: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: layout.hit, minWidth: 44, paddingHorizontal: 8 },
   // An empty column where "mais" would be, so a row without it keeps its icons
   // in the same columns as the rows around it (the bar spreads them apart).
   slot: { minWidth: 44 },
@@ -677,7 +677,7 @@ const makeStyles = (colors) => StyleSheet.create({
   // 8), so the bar still fits a 320 pt screen.
   actionSplit: { gap: 0, minWidth: 0, paddingRight: 2 },
   splitAction: { flexDirection: 'row', alignItems: 'center' },
-  countAction: { minHeight: 36, paddingLeft: 3, paddingRight: 8, justifyContent: 'center' },
+  countAction: { minHeight: layout.hit, paddingLeft: 3, paddingRight: 8, justifyContent: 'center' },
   count: { ...type.counter, color: colors.soft },
   countOn: { color: colors.accent },
   burst: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },

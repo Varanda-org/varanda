@@ -181,6 +181,8 @@ function useMomentDraft ({ node, open, active }) {
   const valid = !held && unlocked && node.online !== false && momentValid({ files: photo.files, ready: photo.ready, text })
   const send = async () => {
     if (busyRef.current || !valid) return false
+    const refused = refusalOf(text)
+    if (refused !== '') { setError(refused); return false }
     const file = photo.files[0]
     const gen = genRef.current
     busyRef.current = true
@@ -325,9 +327,9 @@ function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
   const tailRef = useRef(null)
   const focusRef = useRef(false)
   const m = useRef({ parts: {}, fieldHeight: NaN, content: NaN, view: NaN, keyboard: 0, tailBottom: NaN })
-  const keep = useCallback(() => {
+  const scrollIntoView = useCallback(() => {
     const view = scrollRef.current
-    if (!focusRef.current || !view) return
+    if (!view) return
     // Each mode keeps its own ScrollView (key): react-native-web binds the
     // ref once, so a reused one kept the other mode's unmounted node. Still,
     // never scroll a view whose node is gone.
@@ -345,6 +347,14 @@ function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
       view.scrollTo({ y: to, animated: true })
     }
   }, [caretAtEnd, fieldRef])
+  const keep = useCallback(() => {
+    const view = scrollRef.current
+    if (!focusRef.current || !view) return
+    scrollIntoView()
+  }, [scrollIntoView])
+  const reveal = useCallback(() => {
+    scrollIntoView()
+  }, [scrollIntoView])
   const defer = useCallback(() => {
     if (!focusRef.current) return
     nextFrame(() => keep())
@@ -366,11 +376,11 @@ function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
     m.current.parts[key] = l.y
     if (key === 'field') m.current.fieldHeight = l.height
   }, [])
-  // The row under the field (toolbar and counter), a direct child of the
-  // ScrollView content: its bottom in content coordinates.
-  const handleTailLayout = useCallback((e) => {
+  // The post row is a direct child of the ScrollView content; the Momento
+  // counter needs its body's offset to reach content coordinates.
+  const handleTailLayout = useCallback((e, parent = null) => {
     const l = layoutOf(e)
-    if (l) m.current.tailBottom = l.y + l.height
+    if (l) m.current.tailBottom = l.y + l.height + (m.current.parts[parent] || 0)
   }, [])
   const handleLayout = useCallback((e) => {
     const l = layoutOf(e)
@@ -383,7 +393,7 @@ function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
   }, [keep])
   const handleFocus = useCallback(() => { focusRef.current = true }, [])
   const handleBlur = useCallback(() => { focusRef.current = false }, [])
-  return { scrollRef, fieldRef, tailRef, defer, at, handleTailLayout, handleLayout, handleContentSizeChange, handleFocus, handleBlur }
+  return { scrollRef, fieldRef, tailRef, reveal, defer, at, handleTailLayout, handleLayout, handleContentSizeChange, handleFocus, handleBlur }
 }
 
 export function SheetKeyboard ({ children }) {
@@ -1157,6 +1167,18 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // keepInView): every keystroke, also at the six-line maximum where the
   // body's content size no longer changes, and the keyboard opening.
   const momentView = useKeepInView(momentMode)
+  const staged = moment.photo.items[0] || null
+  const revealedMomentPhotoRef = useRef(null)
+  useEffect(() => {
+    if (!open || !momentMode || !staged || !moment.photo.ready || revealedMomentPhotoRef.current === staged) return
+    let cancelled = false
+    nextFrame(() => {
+      if (cancelled) return
+      momentView.reveal()
+      revealedMomentPhotoRef.current = staged
+    })
+    return () => { cancelled = true }
+  }, [open, momentMode, staged, moment.photo.ready, momentView.reveal])
   // The post caret at the end of its text (a reopened long draft): the body
   // scrolls to its end so the caret line sits above the toolbar and counter.
   const postTextRef = useRef(text)
@@ -1209,7 +1231,6 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     : null
 
   if (momentMode) {
-    const staged = moment.photo.items[0] || null
     return (
       <Sheet
         open={open}
@@ -1258,6 +1279,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 accessibilityLabel='texto do momento'
               />
               <Text
+                ref={momentView.tailRef}
+                onLayout={(e) => momentView.handleTailLayout(e, 'body')}
                 style={[styles.counter, styles.momentCounter, momentCount >= MOMENT_COUNTER_WARN && styles.counterWarn, momentCount > MOMENT_TEXT_MAX && styles.counterFull]}
                 accessibilityLabel={momentCount + ' de ' + MOMENT_TEXT_MAX + ' caracteres'}
               >

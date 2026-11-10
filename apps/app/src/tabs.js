@@ -33,7 +33,9 @@ const NO_POST_SCREENS = new Set(['depoimentos', 'momentos'])
 // The floating "publicar" button belongs to posts: it is hidden on the
 // Conversas and Feira tabs, on their screens and on NO_POST_SCREENS. `screen`
 // is the top of the stack, or null when no screen is open above the tabs.
-export function showPostButton ({ tab, screen }) {
+// A profile's Depoimentos tab (profileTab) hides it too: its rows sit under the button.
+export function showPostButton ({ tab, screen, profileTab }) {
+  if (profileTab === 'depoimentos') return false
   if (typeof screen === 'string') return !CONVERSAS_SCREENS.has(screen) && !FEIRA_SCREENS.has(screen) && !NO_POST_SCREENS.has(screen)
   return tab !== 'comunidades' && tab !== 'feira'
 }

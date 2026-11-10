@@ -1,115 +1,74 @@
 'use strict'
 
-// Conversas as a page (docs/protocol.md §12 'Conversas como página', the
-// client side of section 11): the account service holds each page's box.
+// Conversas as a page (docs/protocol.md §12 'Conversas como página', docs/rpc.md
+// 5.84): the page's box keys live on the devices of its owner and admins,
+// never here. The account service keeps three duties:
 //
-// Box: per page one X25519 pair (crypto_box_keypair, a weak key refused),
-// kept by ./page-keys.js as boxSecretKey beside the signing key, never the
-// group box. Its public half is the page's dm-key gen 1, appended through
-// the writer's own hook (./pages-writer.js ensureDmKey) at start, at
-// creation (enable) and again whenever it falls out of the newest 256
-// blocks, on the writer's chain and under its guard and pause.
+//   - the digest oracle: 'dm-sign' signs DM_V3_PREFIX || digest with the
+//     page key (core dm.js signDigest), the digest of a drop a device built
+//     and sealed. The service never sees the text, the recipient or the
+//     sealed bytes. Rate limited per page and per host.
+//   - opaque shares: 'dm-box' publishes the page's new box as its dm-key
+//     (gen + 1, through the writer's own hook) and stores the public boxes
+//     and each member's sealed share in the ACL row (./pages-store.js dm);
+//     'dm-box-share' adds one share, 'dm-box-read' hands a member its own.
+//     The service checks shapes only: the devices verify every signature.
+//   - legacy: a page that existed before keeps its gen 1 box secret
+//     (page-keys boxSecretKey, never created any more) and its sealed rows
+//     file until the owner's first 'dm-box'. That 'dm-box' first seals one
+//     bundle (the secret, every old row and every old folder op) to the
+//     owner's own box in chunks, records it with the rotation, and only
+//     then deletes the rows and the secret. The service keeps the sealed
+//     chunks, which it cannot open, until the owner's device confirms the
+//     import ('dm-legacy-done') or the page closes.
 //
-// Links, each a short-lived WebSocket to the loopback seeder with a FRESH
-// Noise key, the admission hello in the member role, an EMPTY inventory and
-// no announce, the seeder's hello verified before anything is sent (the
-// packages/web-member/lib/dm-link.js shape):
-//   - the drop link: 'varanda/dm/1' (core dm-net.js, member role, one
-//     request in flight), nothing on it names a page;
-//   - the stamp link: 'varanda/dm-stamp/1', proving the PAGE key, used for
-//     a wallet top-up and closed right after;
-//   - the lookup link: replicates the recipient's diary into a temporary
-//     store to read ITS newest dm-key (block 0 gate first). The recipient's
-//     box never comes from the caller.
+// A refresh tick appends the stored dm-key again whenever it falls out of
+// the newest DM_KEY_REFRESH_BLOCKS blocks, from stored public values only.
 //
-// Pull: every pullEveryMs, one at a time, the global pool with one cursor
-// per page (a page moves past a drop only once its box tried it); every
-// drop is tried against every live page box (the global-pool rule).
-// A msg opens only with a certificate of the association (revoked issuers
-// honoured) and is dropped when the sender is blocked by the association or
-// by the page.
+// Every function that changes a page runs under the caller's page lock
+// (./pages-routes.js withLock), so the gen check and the writes are one step.
 //
-// Rows: per page in <dir>/pages-dm/<page>.json (0600, atomic), sealed with
-// AES-256-GCM under a key derived from VARANDA_PAGE_KEYS and the page key:
-// messages, the page's folder ops (blocked peers included), the seen marks,
-// the stamp wallet and the sends in progress. Folders are core dm-fold.js
-// at ownKey = page key, followSet = the page's follows.
-//
-// Sends: the inner message is built with from = the page key and the page's
-// v2 certificate (block 0), signed with the page key, sealed to the
-// recipient's box and to the page's own box, two drops each with its own
-// stamp. The exact drop bytes are saved under (member, nonce) BEFORE the
-// first put, so a resend of an unanswered request puts the same bytes (the
-// pool answers an identical drop as success) and never mints a second
-// message; a put without an ack throws { code: 'incerto' }. A page answers
-// in text only; a forward uses a v2 inner with no media.
-//
-// Media: a member's v2 inner opens like any other; its media items (blob
-// descriptors, section 13) are kept in the sealed rows and handed to the
-// admin device in dm-thread. The service never fetches a blob.
-//
-// Cards: a member's link card (a listing or an offer, say) is kept as it
-// arrived, its image a DM media item checked like any other, and handed to
-// the owner and admins in dm-thread. The service never fetches the card's
-// URL nor its image; the list preview stays the text.
-//
-// Logs carry { event: 'page-dm', reason } only: never a text, key or peer.
+// Logs carry { event: 'page-dm', reason } only: never a text, digest, key or
+// peer.
 
 const fs = require('node:fs')
-const os = require('node:os')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
 const b4a = require('b4a')
-const hcrypto = require('hypercore-crypto')
-const Hypercore = require('hypercore')
-const Corestore = require('corestore')
-const { WebSocket, createWebSocketStream } = require('ws')
 const dm = require('@varanda/core/lib/dm')
 const dmFold = require('@varanda/core/lib/dm-fold')
-const postage = require('@varanda/core/lib/dm-postage')
-const { attachDm } = require('@varanda/core/lib/dm-net')
-const { attachDmStamp } = require('@varanda/core/lib/dm-stamp-net')
-const { attachAdmission } = require('@varanda/core/lib/admission')
-const { seederCertForKey, certForKey, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
-const { decodeBlock, validateRecord, MAX_BLOCK_BYTES } = require('@varanda/core/lib/records')
+const { PAGE_SECRETS_SEALED_BYTES } = require('@varanda/core/lib/page-secrets')
+const { isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { isWeakBoxKey } = require('@varanda/core/lib/group')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
-const { parseSeederWs } = require('./pages-writer')
 const { ENV } = require('./page-keys')
 
 const coreDir = path.dirname(require.resolve('@varanda/core/lib/seeder'))
-const NoiseSecretStream = require(require.resolve('@hyperswarm/secret-stream', { paths: [coreDir] }))
 const sodium = require(require.resolve('sodium-universal', { paths: [coreDir] }))
 
 const STATE_DIR = 'pages-dm'
-const CURSOR_FILE = 'cursor.json'
 const VERSION = 1
 const AAD = b4a.from('varanda-page-dm-v1')
 const KEY_LABEL = 'varanda-page-dm-rows-v1'
-const PULL_EVERY_MS = 60000
-const CONNECT_TIMEOUT_MS = 15000
-const LINK_DEADLINE_MS = 25000
-const STAMP_DEADLINE_MS = 45000
-const MAX_PAYLOAD = 2 * 1024 * 1024
-// The newest blocks a lookup reads for a dm-key: the 256-block refresh rule
-// plus one window of margin, as the session's 8 windows of 36.
-const LOOKUP_BLOCKS = 288
-const DM_GEN = 1
+const REFRESH_EVERY_MS = 60000
 const PREVIEW_MAX = 140
-const MAX_MESSAGES = 5000
-const MAX_OPS = 2000
-const MAX_SEEN = 10000
-const MAX_SENDS = 64
-const SEND_TTL_MS = 600 * 1000
-const ISSUE_BURST = 8
-const ISSUE_PACE_MS = 1100
+const SIGN_PER_PAGE = 30
+const SIGN_PER_HOST = 240
+const SIGN_WINDOW_MS = 60000
+const MAX_GEN = 4294967295
+// The legacy bundle: chunks of at most BUNDLE_CHUNK_BYTES plaintext, each
+// bundleId (32) || uint16be index || uint16be count || bytes, sealed to the
+// owner's own box. More than BUNDLE_MAX_CHUNKS is refused, never cut.
+const BUNDLE_V = 1
+const BUNDLE_CHUNK_BYTES = 40000
+const BUNDLE_MAX_CHUNKS = 1024
+const BUNDLE_READ_CHUNKS = 8
+const BUNDLE_OPS = ['accepted', 'declined', 'blocked', 'unblocked', 'deleted']
 const HEX64_RE = /^[0-9a-f]{64}$/
-const TIMEOUT = Symbol('timeout')
+const HEX128_RE = /^[0-9a-f]{128}$/
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/
 // Below this a filedAt is a counter from an older state file, not ms.
 const FILED_MS_FLOOR = 1e12
-// The ops dm-fold reads; any other is ignored by it and not kept.
-const OP_KINDS = ['accepted', 'declined', 'blocked', 'unblocked', 'deleted']
 
 function noop () {}
 
@@ -123,21 +82,16 @@ function hex (buf) {
   return b4a.toString(buf, 'hex')
 }
 
-function sleep (ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function within (promise, ms) {
-  let timer
-  const expired = new Promise((resolve) => { timer = setTimeout(resolve, Math.max(1, ms), TIMEOUT) })
-  return Promise.race([promise, expired]).finally(() => clearTimeout(timer))
+function exactKeys (obj, required, optional = []) {
+  if (!isPlainObject(obj)) return false
+  const keys = Object.keys(obj)
+  return required.every((k) => keys.includes(k)) && keys.every((k) => required.includes(k) || optional.includes(k))
 }
 
 function preview (text) {
   return Array.from(text).slice(0, PREVIEW_MAX).join('')
 }
 
-// openInner already checked every item of a v2 body; a v1 body or row has none.
 function mediaOf (m) {
   return Array.isArray(m.media) && m.media.length > 0 ? m.media : null
 }
@@ -153,43 +107,92 @@ function cardOf (card) {
   return dm.validDmCard(bare) ? bare : null
 }
 
-function emptyState () {
-  return { v: VERSION, filed: 0, stopped: false, messages: [], ops: [], seen: [], wallet: { items: [], kids: [] }, sends: {} }
-}
-
 function validState (s) {
-  return isPlainObject(s) && s.v === VERSION && Number.isSafeInteger(s.filed) && typeof s.stopped === 'boolean' &&
-    Array.isArray(s.messages) && Array.isArray(s.ops) && Array.isArray(s.seen) && isPlainObject(s.wallet) &&
-    Array.isArray(s.wallet.items) && Array.isArray(s.wallet.kids) && isPlainObject(s.sends)
+  return isPlainObject(s) && s.v === VERSION && Number.isSafeInteger(s.filed) && Array.isArray(s.messages) &&
+    Array.isArray(s.ops) && Array.isArray(s.seen)
 }
 
-// The newest valid dm-key among entries ({ seq, record }): highest gen, ties
-// by highest seq. -> { box, gen, seq } | null.
-function newestDmKey (entries) {
-  let best = null
-  for (const e of entries) {
-    if (!e || !isPlainObject(e.record) || e.record.type !== 'dm-key' || validateRecord(e.record, e.seq) !== null) continue
-    if (best === null || e.record.gen > best.gen || (e.record.gen === best.gen && e.seq > best.seq)) {
-      best = { box: e.record.box, gen: e.record.gen, seq: e.seq }
-    }
+function isBoxKey (v) {
+  return typeof v === 'string' && HEX64_RE.test(v) && !isWeakBoxKey(v)
+}
+
+// Canonical base64 of exactly PAGE_SECRETS_SEALED_BYTES: one envelope, one
+// encoding.
+function isSealed (s) {
+  if (typeof s !== 'string' || s.length !== Math.ceil(PAGE_SECRETS_SEALED_BYTES / 3) * 4 || !BASE64_RE.test(s)) return false
+  const buf = Buffer.from(s, 'base64')
+  return buf.length === PAGE_SECRETS_SEALED_BYTES && buf.toString('base64') === s
+}
+
+function isSig (s) {
+  return typeof s === 'string' && HEX128_RE.test(s)
+}
+
+// The shape of a share sent with an invite: { sealed, sig }, or null.
+function parseInviteShare (share) {
+  if (share === undefined) return null
+  if (!exactKeys(share, ['sealed', 'sig']) || !isSealed(share.sealed) || !isSig(share.sig)) throw fail('pedido-invalido')
+  return { sealed: share.sealed, sig: share.sig }
+}
+
+// A 'dm-box' op, or the dmBox of a remove or a move: exactly { expectedGen,
+// box, groupBox, ownBox, shares }. shares name a subset of `roster` that
+// includes `owner`, each member at most once.
+function parseBox (raw, { roster, owner }) {
+  if (!exactKeys(raw, ['expectedGen', 'box', 'groupBox', 'ownBox', 'shares'])) throw fail('pedido-invalido')
+  if (!Number.isSafeInteger(raw.expectedGen) || raw.expectedGen < 0 || raw.expectedGen >= MAX_GEN) throw fail('pedido-invalido')
+  if (!isBoxKey(raw.box) || !isBoxKey(raw.groupBox) || !isBoxKey(raw.ownBox) || raw.box === raw.groupBox) throw fail('pedido-invalido')
+  if (!Array.isArray(raw.shares) || raw.shares.length < 1 || raw.shares.length > roster.length) throw fail('pedido-invalido')
+  const shares = []
+  const seen = new Set()
+  for (let i = 0; i < raw.shares.length; i++) {
+    const s = raw.shares[i]
+    if (!(i in raw.shares) || !exactKeys(s, ['member', 'sealed', 'sig'])) throw fail('pedido-invalido')
+    if (typeof s.member !== 'string' || !roster.includes(s.member) || seen.has(s.member)) throw fail('pedido-invalido')
+    if (!isSealed(s.sealed) || !isSig(s.sig)) throw fail('pedido-invalido')
+    seen.add(s.member)
+    shares.push({ member: s.member, sealed: s.sealed, sig: s.sig })
   }
-  return best
+  if (!seen.has(owner)) throw fail('pedido-invalido')
+  return { expectedGen: raw.expectedGen, box: raw.box, groupBox: raw.groupBox, ownBox: raw.ownBox, shares }
 }
 
-function boxPairOf (secretKey) {
-  const publicKey = b4a.alloc(sodium.crypto_box_PUBLICKEYBYTES)
-  sodium.crypto_scalarmult_base(publicKey, secretKey)
-  return { publicKey, secretKey }
+// JSON with the keys of every object sorted: one bundle, one encoding.
+function canonical (v) {
+  if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']'
+  if (isPlainObject(v)) return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}'
+  return JSON.stringify(v === undefined ? null : v)
 }
 
-// -> a fresh 32-byte X25519 secret whose public half is not weak.
-function newBoxSecret () {
-  for (;;) {
-    const publicKey = b4a.alloc(sodium.crypto_box_PUBLICKEYBYTES)
-    const secretKey = b4a.alloc(sodium.crypto_box_SECRETKEYBYTES)
-    sodium.crypto_box_keypair(publicKey, secretKey)
-    if (!isWeakBoxKey(hex(publicKey))) return secretKey
-    secretKey.fill(0)
+// Writes `buf` to `file` through a temporary file: fsync, rename, then the
+// directory's fsync, so a crash leaves the old file or the whole new one.
+function writeDurable (file, buf) {
+  const tmp = file + '.tmp'
+  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o600)
+  try {
+    let done = 0
+    while (done < buf.byteLength) done += fs.writeSync(fd, buf, done, buf.byteLength - done)
+    fs.fsyncSync(fd)
+  } finally {
+    fs.closeSync(fd)
+  }
+  fs.renameSync(tmp, file)
+  syncDir(path.dirname(file))
+}
+
+// Only a platform that cannot fsync a directory is tolerated; any other
+// failure (EIO, ENOSPC) must stop the caller before it deletes the only copy.
+const DIR_SYNC_UNSUPPORTED = new Set(['EINVAL', 'ENOTSUP', 'EISDIR', 'EBADF'])
+
+function syncDir (dir) {
+  let fd
+  try {
+    fd = fs.openSync(dir, fs.constants.O_RDONLY)
+    fs.fsyncSync(fd)
+  } catch (err) {
+    if (!(err && DIR_SYNC_UNSUPPORTED.has(err.code))) throw err
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd)
   }
 }
 
@@ -210,26 +213,31 @@ function readNoFollow (file) {
   }
 }
 
-// limits (tests): pullEveryMs, connectTimeoutMs, deadlineMs, stampDeadlineMs,
-// requestTimeoutMs, issuePaceMs, budgetBytes. revokedIssuers: () => Set |
-// Array; blocklist: { has(key) } (the association's).
-function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs, dir, env = process.env, blocklist = null, revokedIssuers = null, guard = () => true, tmpRoot = os.tmpdir(), log = noop, limits = {} } = {}) {
-  if (!writer || typeof writer.ensureDmKey !== 'function' || typeof writer.readEntries !== 'function') throw new TypeError('writer must be a pages writer')
+function zeroRow (row) {
+  if (row === null) return
+  for (const k of ['secretKey', 'mediaSecretKey', 'boxSecretKey', 'groupBoxSecretKey']) if (row[k]) row[k].fill(0)
+  if (row.writers) for (const w of Object.values(row.writers)) w.fill(0)
+}
+
+// limits (tests): refreshEveryMs, signPerPage, signPerHost, signWindowMs.
+// hooks (tests): afterLegacyPersist(page), run after the legacy bundle is
+// recorded and promoted and before the legacy secret and rows are deleted;
+// afterBundleChunks(page), run after the chunks are written and before the
+// store write that records them.
+// seederWs, blocklist, revokedIssuers and tmpRoot are accepted for the
+// callers' sake and unused: the service no longer reaches the drop pool.
+function createPagesDm ({ writer, pagesStore = null, keys, association, dir, env = process.env, guard = () => true, log = noop, limits = {}, hooks = {} } = {}) {
+  if (!writer || typeof writer.ensureDmKey !== 'function') throw new TypeError('writer must be a pages writer')
   if (!keys || typeof keys.get !== 'function') throw new TypeError('keys must be a page-keys table')
   if (typeof association !== 'string' || !HEX64_RE.test(association)) throw new TypeError('association must be 64 lowercase hex characters')
   if (typeof dir !== 'string' || dir === '') throw new TypeError('dir must be a path')
-  const url = parseSeederWs(seederWs)
-  if (url === null) throw new TypeError('seederWs must be a loopback http or ws URL with a port')
   const raw = env && typeof env[ENV] === 'string' ? env[ENV] : ''
   if (!HEX64_RE.test(raw)) throw new TypeError(ENV + ' ausente')
   const L = {
-    pullEveryMs: PULL_EVERY_MS,
-    connectTimeoutMs: CONNECT_TIMEOUT_MS,
-    deadlineMs: LINK_DEADLINE_MS,
-    stampDeadlineMs: STAMP_DEADLINE_MS,
-    requestTimeoutMs: undefined,
-    issuePaceMs: ISSUE_PACE_MS,
-    budgetBytes: dm.DM_PULL_BUDGET_BYTES,
+    refreshEveryMs: REFRESH_EVERY_MS,
+    signPerPage: SIGN_PER_PAGE,
+    signPerHost: SIGN_PER_HOST,
+    signWindowMs: SIGN_WINDOW_MS,
     ...(limits || {})
   }
   // Only a derived key is kept, never the env value itself.
@@ -239,12 +247,10 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
 
   refuseSymlinkDir(dir)
   const stateDir = path.join(dir, STATE_DIR)
-  const states = new Map() // page -> state
+  const signs = new Map() // page -> [ms]
   const chains = new Map() // page -> Promise
-  const forgotten = new Set() // closed pages: never saved again
-  const topping = new Map() // page -> Promise
-  let cursor = null
-  let pulling = null
+  const hostSigns = []
+  let refreshing = null
   let timer = null
   let closed = false
   const inflight = new Set()
@@ -254,17 +260,22 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
 
   return {
     ready: () => starting,
-    enable: tracked(enable),
-    stop: tracked(stop),
-    forget: tracked(forget),
+    signDigest: tracked(signDigest),
+    applyBox: tracked(applyBox),
+    complete: tracked(complete),
+    prepareRemove: tracked(prepareRemove),
+    moveDm,
+    carryBundle,
+    share: tracked(share),
+    read: tracked(read),
+    gen: tracked(genOf),
+    legacy: tracked(async (page) => hasRows(page)),
+    legacyRead: tracked(legacyRead),
+    legacyDone: tracked(legacyDone),
     list: tracked(list),
     thread: tracked(thread),
-    send: tracked(send),
-    set: tracked(setOp),
-    seen: tracked(seen),
-    pull: tracked(pull),
-    topUp: tracked((page) => topUp(page, { force: true })),
-    walletSize: tracked(walletSize),
+    forget: tracked(forget),
+    refresh: tracked(refresh),
     close
   }
 
@@ -296,7 +307,331 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
     return page
   }
 
-  // ---- state ------------------------------------------------------------
+  function needStore () {
+    if (pagesStore === null) throw fail('indisponivel')
+  }
+
+  function aclRow (page) {
+    needStore()
+    let row
+    try {
+      row = pagesStore.get(page)
+    } catch {
+      throw fail('indisponivel')
+    }
+    if (row === null) throw fail('pedido-invalido')
+    return row
+  }
+
+  // ---- the legacy secret --------------------------------------------------
+
+  // The public half of the legacy gen 1 box, or null when none is held.
+  function legacyBox (page) {
+    const row = keys.get(page)
+    try {
+      if (row === null || !row.boxSecretKey) return null
+      const pk = b4a.alloc(32)
+      sodium.crypto_scalarmult_base(pk, row.boxSecretKey)
+      return hex(pk)
+    } finally {
+      zeroRow(row)
+    }
+  }
+
+  // The legacy secret leaves page-keys and the old rows leave the disk. The
+  // row is put back in the same synchronous step that read it. The rows go
+  // first: a crash between the two leaves only the secret, which the start
+  // removes again (the legacy envelope being on record).
+  function dropLegacy (page) {
+    check()
+    refuseSymlinkDir(dir)
+    if (fs.existsSync(stateDir)) refuseSymlinkDir(stateDir)
+    fs.rmSync(fileOf(page), { force: true })
+    syncDir(stateDir)
+    if (typeof hooks.afterRowsDropped === 'function') hooks.afterRowsDropped(page)
+    check()
+    const row = keys.get(page)
+    if (row !== null && row.boxSecretKey) {
+      try {
+        row.boxSecretKey.fill(0)
+        delete row.boxSecretKey
+        keys.put(page, row)
+      } finally {
+        zeroRow(row)
+      }
+    } else {
+      zeroRow(row)
+    }
+  }
+
+  // Legacy material still on the service: the old rows or the gen 1 secret.
+  function legacyHeld (page) {
+    return hasRows(page) || legacyBox(page) !== null
+  }
+
+  // ---- the digest oracle --------------------------------------------------
+
+  function admitSign (page) {
+    const t = Date.now()
+    const floor = t - L.signWindowMs
+    while (hostSigns.length > 0 && hostSigns[0] <= floor) hostSigns.shift()
+    const list = (signs.get(page) || []).filter((x) => x > floor)
+    if (list.length >= L.signPerPage || hostSigns.length >= L.signPerHost) {
+      signs.set(page, list)
+      throw fail('limite')
+    }
+    list.push(t)
+    hostSigns.push(t)
+    signs.set(page, list)
+    for (const [k, v] of signs) if (v.length === 0 || v[v.length - 1] <= floor) signs.delete(k)
+  }
+
+  // -> { signature, expiresAt }: the page's signature over DM_V3_PREFIX ||
+  // digest || uint64be(expiresAt). The service picks expiresAt, never the
+  // caller, so an admin cannot stockpile signatures that outlive its role by
+  // more than DM_V3_STALE_MS (receivers drop a stale v3).
+  async function signDigest (page, digest) {
+    pageParam(page)
+    if (typeof digest !== 'string' || !HEX64_RE.test(digest)) throw fail('pedido-invalido')
+    // A rotation in progress (a removed admin among the old holders): no
+    // signature until it completes.
+    if (pagesStore !== null) {
+      const row = aclRow(page)
+      if (row.dm && row.dm.rotatePending !== null) throw fail('rotacao-necessaria')
+    }
+    try {
+      admitSign(page)
+    } catch (err) {
+      note('limite')
+      throw err
+    }
+    const row = keys.get(page)
+    if (row === null) throw fail('pausada')
+    try {
+      const expiresAt = Date.now() + dm.DM_V3_TTL_MS
+      return { signature: dm.signDigest(digest, row.secretKey, expiresAt), expiresAt }
+    } catch {
+      throw fail('pedido-invalido')
+    } finally {
+      zeroRow(row)
+    }
+  }
+
+  // ---- shares -------------------------------------------------------------
+
+  // One page at a time, here as well as under the routes' page lock, so the
+  // refresh tick and the start never race a route's rotation.
+  function chained (page, fn) {
+    const prev = chains.get(page) || Promise.resolve()
+    const next = prev.then(fn, fn)
+    const tail = next.then(noop, noop)
+    chains.set(page, tail)
+    tail.then(() => { if (chains.get(page) === tail) chains.delete(page) })
+    return next
+  }
+
+  // The current gen: the device-held one, else 1 for a legacy page whose
+  // gen 1 box the service still holds, else 0.
+  function currentGen (page, row) {
+    if (row.dm && row.dm.gen > 0) return row.dm.gen
+    return legacyBox(page) !== null ? 1 : 0
+  }
+
+  async function genOf (page) {
+    pageParam(page)
+    return currentGen(page, aclRow(page))
+  }
+
+  function sharesOf (shares, gen, by, at) {
+    const out = {}
+    for (const s of shares) out[s.member] = { gen, sealed: s.sealed, by, sig: s.sig, at }
+    return out
+  }
+
+  function emptyDm () {
+    return { gen: 0, box: null, groupBox: null, shares: {}, pending: {}, reboxPending: false, legacyBundle: null, rotatePending: null }
+  }
+
+  // A rotation (from 'dm-box' or a remove), prepared and persisted before
+  // its dm-key is published. kind 'remove' is committed by the routes with
+  // the roster (pagesStore.setRoster rotate); this builds it.
+  function prepare (page, row, { kind, idem, by, dmBox, gen }) {
+    return { kind, idem, gen, box: dmBox.box, groupBox: dmBox.groupBox, shares: sharesOf(dmBox.shares, gen, by, new Date().toISOString()) }
+  }
+
+  // Publishes the persisted rotation (a no-op when that exact dm-key is
+  // already the newest) and promotes it to current, then drops the legacy
+  // material it replaces. -> { seq, gen } or null with none.
+  async function completeNow (page) {
+    check()
+    const row = aclRow(page)
+    const d = row.dm || null
+    if (d === null || d.rotatePending === null) {
+      if (d !== null && d.legacyBundle !== null && legacyHeld(page)) dropLegacy(page)
+      return null
+    }
+    const P = d.rotatePending
+    if (typeof hooks.beforePublish === 'function') await hooks.beforePublish(page)
+    let res
+    try {
+      res = await writer.ensureDmKey(page, { box: P.box, gen: P.gen })
+    } catch (err) {
+      note('dm-key-falhou')
+      throw err
+    }
+    if (typeof hooks.afterPublish === 'function') await hooks.afterPublish(page)
+    const i = P.idem.indexOf(':')
+    const spend = P.kind === 'box' ? { member: P.idem.slice(0, i), nonce: P.idem.slice(i + 1), seq: res.seq === null ? 0 : res.seq } : undefined
+    let promoted
+    try {
+      if (res.seq !== null) {
+        try { await pagesStore.expectLength(page, res.length) } catch {}
+      }
+      // Compare-and-set in the store: only the rotation this run read is
+      // promoted, so a newer one (a remove committed while this run waited
+      // on the publish) is left for its own request.
+      promoted = await pagesStore.promoteDm(page, { idem: P.idem, gen: P.gen, spend })
+    } catch (err) {
+      note('armazenamento-indisponivel')
+      throw err
+    }
+    if (promoted === null) {
+      note('rotacao-superada')
+      return null
+    }
+    if (promoted.legacyBundle !== null && legacyHeld(page)) {
+      if (typeof hooks.afterLegacyPersist === 'function') await hooks.afterLegacyPersist(page)
+      dropLegacy(page)
+      note('legado-removido')
+    }
+    return { seq: res.seq, gen: P.gen }
+  }
+
+  function complete (page) {
+    pageParam(page)
+    return chained(page, () => completeNow(page))
+  }
+
+  // 'dm-box', under the caller's page lock. dmBox: parseBox output; by: the
+  // owner; idem: { member, nonce }. The new { gen, box, groupBox, shares }
+  // is persisted first, then published, then promoted, so a device is never
+  // handed shares that do not match the newest published box. A resend of
+  // the same request completes its own rotation. On a legacy page the
+  // bundle of the old Conversas is sealed and recorded in the same write as
+  // the rotation, before anything legacy is deleted. -> { seq, gen }.
+  function applyBox (page, { by, dmBox, idem }) {
+    pageParam(page)
+    return chained(page, async () => {
+      check()
+      const id = idem.member + ':' + idem.nonce
+      let row = aclRow(page)
+      if (row.dm && row.dm.rotatePending !== null) {
+        const mine = row.dm.rotatePending.idem === id
+        const done = await completeNow(page)
+        if (mine) {
+          if (done === null) throw fail('conflito')
+          return done
+        }
+        row = aclRow(page)
+      }
+      const cur = currentGen(page, row)
+      if (dmBox.expectedGen !== cur) throw fail('conflito')
+      const base = row.dm ? JSON.parse(JSON.stringify(row.dm)) : emptyDm()
+      // A bundle already on record was built from the same frozen rows: it
+      // is kept, so its chunks on disk always match the record.
+      if (base.legacyBundle === null && !(row.dm && row.dm.gen > 0) && cur === 1) {
+        base.legacyBundle = writeBundle(page, by, dmBox.ownBox)
+        if (typeof hooks.afterBundleChunks === 'function') await hooks.afterBundleChunks(page)
+      }
+      base.rotatePending = prepare(page, row, { kind: 'box', idem: id, by, dmBox, gen: cur + 1 })
+      await pagesStore.setDm(page, base)
+      const done = await completeNow(page)
+      if (done === null) throw fail('conflito')
+      return done
+    })
+  }
+
+  // The prepared rotation of a remove, for pagesStore.setRoster's rotate:
+  // exactly expectedGen + 1, the gen the device sealed the shares for. The
+  // routes refuse a remove while another rotation is pending.
+  function prepareRemove (page, { by, dmBox, idem }) {
+    pageParam(page)
+    const row = aclRow(page)
+    if (row.dm.rotatePending !== null || dmBox.expectedGen !== row.dm.gen) throw fail('rotacao-necessaria')
+    return prepare(page, row, { kind: 'remove', idem: idem.member + ':' + idem.nonce, by, dmBox, gen: dmBox.expectedGen + 1 })
+  }
+
+  // The dm row of a move's K2: its gen 1 dm-key is already on K2. K1's
+  // legacy bundle (carryBundle) comes along unchanged, still sealed to the
+  // same member; without a dmBox it is K2's only dm (gen 0). -> row or null.
+  function moveDm ({ by, dmBox = null, legacyBundle = null }) {
+    const bundle = legacyBundle === null ? null : { for: legacyBundle.for, id: legacyBundle.id, count: legacyBundle.count }
+    if (dmBox === null) return bundle === null ? null : { ...emptyDm(), legacyBundle: bundle }
+    return { gen: 1, box: dmBox.box, groupBox: dmBox.groupBox, shares: sharesOf(dmBox.shares, 1, by, new Date().toISOString()), pending: {}, reboxPending: false, legacyBundle: bundle, rotatePending: null }
+  }
+
+  // One more member's share of the current gen ('dm-box-share').
+  // idem { member, nonce }: spent in the same write as the share, so a
+  // replay after a restart is answered from the spent nonce, never applied
+  // again over a newer share. owner: the route found `by` is the page's
+  // owner. Only the owner replaces a share of the current gen or writes its
+  // own; an admin only adds a missing one, so it cannot overwrite another
+  // holder's share and stop the key from reaching them.
+  function share (page, { by, owner = false, member, gen, sealed, sig, idem = null } = {}) {
+    pageParam(page)
+    if (!isSealed(sealed) || !isSig(sig) || typeof member !== 'string' || !HEX64_RE.test(member)) throw fail('pedido-invalido')
+    if (!Number.isSafeInteger(gen) || gen < 1) throw fail('pedido-invalido')
+    return chained(page, async () => {
+      const row = aclRow(page)
+      if (row.owner !== member && !row.admins.includes(member)) throw fail('pedido-invalido')
+      if (row.dm && row.dm.rotatePending !== null) throw fail('rotacao-necessaria')
+      if (!row.dm || row.dm.gen !== gen) throw fail('conflito')
+      const byOwner = owner === true && by === row.owner
+      const held = row.dm.shares[member]
+      if (!byOwner && (member === row.owner || (held && held.gen === gen))) throw fail('conflito')
+      const next = JSON.parse(JSON.stringify(row.dm))
+      next.shares[member] = { gen, sealed, by, sig, at: new Date().toISOString() }
+      await pagesStore.setDm(page, next, { spend: idem === null ? undefined : { member: idem.member, nonce: idem.nonce, seq: 0 } })
+      return { ok: true }
+    })
+  }
+
+  // 'dm-box-read' for an owner or admin (the caller checked the role).
+  function read (page, { member, owner = false, cert = null } = {}) {
+    pageParam(page)
+    return chained(page, async () => {
+      let row = aclRow(page)
+      // A legacy cleanup a crash cut short finishes now, the bundle being
+      // on record.
+      if (row.dm && row.dm.rotatePending === null && row.dm.legacyBundle !== null && legacyHeld(page)) {
+        dropLegacy(page)
+        row = aclRow(page)
+      }
+      const d = row.dm && row.dm.gen > 0 ? row.dm : null
+      const rotating = Boolean(row.dm && row.dm.rotatePending !== null)
+      const legacyPub = d === null ? legacyBox(page) : null
+      const bundle = row.dm ? row.dm.legacyBundle : null
+      const out = {
+        gen: d !== null ? d.gen : legacyPub !== null ? 1 : 0,
+        box: d !== null ? d.box : legacyPub,
+        groupBox: d !== null ? d.groupBox : null,
+        // Mid rotation the newest published box may already be the pending
+        // one: no share is handed out until it is promoted.
+        share: d !== null && !rotating && d.shares[member] ? { ...d.shares[member] } : null,
+        cert,
+        legacy: hasRows(page),
+        rotatePending: rotating,
+        // Only to the member it is sealed to: a later owner cannot open it.
+        legacyBundle: bundle !== null && bundle.for === member ? { id: bundle.id, count: bundle.count } : null
+      }
+      if (owner) {
+        out.shared = d !== null ? Object.keys(d.shares).sort() : []
+      }
+      return out
+    })
+  }
+
+  // ---- legacy rows, read only ---------------------------------------------
 
   function keyOf (page) {
     return nodeCrypto.createHmac('sha256', master).update(page).digest()
@@ -306,53 +641,45 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
     return path.join(stateDir, page + '.json')
   }
 
-  function loadState (page) {
-    // A forgotten page reads as stopped and is never cached nor saved.
-    if (forgotten.has(page)) return { ...emptyState(), stopped: true }
-    let s = states.get(page)
-    if (s !== undefined) return s
-    const buf = readNoFollow(fileOf(page))
-    if (buf === null) {
-      s = emptyState()
-    } else {
-      const key = keyOf(page)
-      let plain = null
-      try {
-        const outer = JSON.parse(b4a.toString(buf, 'utf8'))
-        const decipher = nodeCrypto.createDecipheriv('aes-256-gcm', key, Buffer.from(outer.iv, 'base64'), { authTagLength: 16 })
-        decipher.setAAD(AAD)
-        decipher.setAuthTag(Buffer.from(outer.tag, 'base64'))
-        plain = b4a.concat([decipher.update(Buffer.from(outer.data, 'base64')), decipher.final()])
-        s = JSON.parse(b4a.toString(plain, 'utf8'))
-      } catch {
-        throw fail('indisponivel')
-      } finally {
-        key.fill(0)
-        if (plain !== null) plain.fill(0)
-      }
-      if (!validState(s)) throw fail('indisponivel')
-      let mtime = Date.now()
-      try { mtime = fs.lstatSync(fileOf(page)).mtimeMs } catch {}
-      migrateFiled(s, mtime)
-      for (const m of s.messages) {
-        if (isPlainObject(m) && Object.hasOwn(m, 'card')) m.card = cardOf(m.card)
-      }
+  function hasRows (page) {
+    try {
+      return fs.lstatSync(fileOf(page)).isFile()
+    } catch {
+      return false
     }
-    states.set(page, s)
+  }
+
+  function loadState (page) {
+    const buf = readNoFollow(fileOf(page))
+    if (buf === null) return null
+    const key = keyOf(page)
+    let plain = null
+    let s
+    try {
+      const outer = JSON.parse(b4a.toString(buf, 'utf8'))
+      const decipher = nodeCrypto.createDecipheriv('aes-256-gcm', key, Buffer.from(outer.iv, 'base64'), { authTagLength: 16 })
+      decipher.setAAD(AAD)
+      decipher.setAuthTag(Buffer.from(outer.tag, 'base64'))
+      plain = b4a.concat([decipher.update(Buffer.from(outer.data, 'base64')), decipher.final()])
+      s = JSON.parse(b4a.toString(plain, 'utf8'))
+    } catch {
+      throw fail('indisponivel')
+    } finally {
+      key.fill(0)
+      if (plain !== null) plain.fill(0)
+    }
+    if (!validState(s)) throw fail('indisponivel')
+    let mtime = Date.now()
+    try { mtime = fs.lstatSync(fileOf(page)).mtimeMs } catch {}
+    migrateFiled(s, mtime)
+    for (const m of s.messages) {
+      if (isPlainObject(m) && Object.hasOwn(m, 'card')) m.card = cardOf(m.card)
+    }
     return s
   }
 
-  // filedAt is the local filing time in ms (dm-fold reads it so), strictly
-  // increasing per page; s.filed is the last one handed out.
-  function nextFiled (s) {
-    s.filed = Math.max(Date.now(), s.filed + 1)
-    return s.filed
-  }
-
-  // Older files numbered rows 1, 2, 3 (s.filed++). Those counters become ms
-  // just before the file's last write, in the same order, so no row reads as
-  // 1970 and every later filing sorts after them. Kept in memory only: the
-  // next save writes it, and until then a reload maps the same way.
+  // Older files numbered rows 1, 2, 3. Those counters become ms just before
+  // the file's last write, in the same order, so no row reads as 1970.
   function migrateFiled (s, mtime) {
     const rows = [...s.messages, ...s.ops]
     if (!rows.some((r) => isPlainObject(r) && typeof r.filedAt === 'number' && r.filedAt < FILED_MS_FLOOR)) return
@@ -360,580 +687,232 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
     let top = legacy ? s.filed : 0
     for (const r of rows) if (isPlainObject(r) && Number.isSafeInteger(r.filedAt) && r.filedAt < FILED_MS_FLOOR && r.filedAt > top) top = r.filedAt
     const base = Math.floor(Math.min(mtime, Date.now())) - top - 1
-    let last = 0
     for (const r of rows) {
       if (!isPlainObject(r) || typeof r.filedAt !== 'number') continue
       if (r.filedAt < FILED_MS_FLOOR) r.filedAt = base + r.filedAt
-      if (r.filedAt > last) last = r.filedAt
     }
-    s.filed = legacy ? last : Math.max(last, s.filed)
   }
 
-  function saveState (page, s) {
-    if (forgotten.has(page)) return
-    check()
+  // ---- the legacy bundle ----------------------------------------------------
+
+  function bundleDir (page) {
+    return path.join(stateDir, page + '.legacy')
+  }
+
+  function dropBundleFiles (page) {
     refuseSymlinkDir(dir)
-    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 })
-    refuseSymlinkDir(stateDir)
-    const plain = b4a.from(JSON.stringify(s))
-    const key = keyOf(page)
+    if (fs.existsSync(stateDir)) refuseSymlinkDir(stateDir)
+    fs.rmSync(bundleDir(page), { recursive: true, force: true })
+    syncDir(stateDir)
+  }
+
+  // Rows and ops together in the order they were filed (filedAt, ties in
+  // stored order, rows before ops): a 'deleted' op hides only what was
+  // filed before it, so their relative order must survive the bundle.
+  function filed (messages, ops) {
+    const all = [...messages.map((r) => ({ kind: 'row', r })), ...ops.map((r) => ({ kind: 'op', r }))]
+    return all.map((x, i) => ({ ...x, i, at: isPlainObject(x.r) && typeof x.r.filedAt === 'number' ? x.r.filedAt : 0 }))
+      .sort((a, b) => a.at - b.at || a.i - b.i)
+  }
+
+  // The plaintext of the bundle: the gen 1 box secret, every old row and
+  // every old folder op, canonical JSON. -> Buffer (the caller wipes it).
+  function bundleBytes (page) {
+    const krow = keys.get(page)
+    let box
     try {
-      const iv = nodeCrypto.randomBytes(12)
-      const cipher = nodeCrypto.createCipheriv('aes-256-gcm', key, iv, { authTagLength: 16 })
-      cipher.setAAD(AAD)
-      const data = b4a.concat([cipher.update(plain), cipher.final()])
-      check()
-      writeJsonAtomic(fileOf(page), { v: VERSION, iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), data: data.toString('base64') }, 0o600)
+      if (krow === null || !krow.boxSecretKey) throw fail('pedido-invalido')
+      box = hex(krow.boxSecretKey)
+    } finally {
+      zeroRow(krow)
+    }
+    const st = loadState(page)
+    const rows = []
+    const ops = []
+    if (st !== null) {
+      // n: one filing position shared by rows and ops.
+      let n = 0
+      for (const { kind, r } of filed(st.messages, st.ops)) {
+        if (kind === 'op') {
+          // Only folder, block and delete ops: the device refuses the whole
+          // bundle on any other shape.
+          if (isPlainObject(r) && BUNDLE_OPS.includes(r.op) && typeof r.peer === 'string' && HEX64_RE.test(r.peer) && r.peer !== page) {
+            ops.push({ op: r.op, peer: r.peer, n: n++ })
+          }
+          continue
+        }
+        const m = r
+        if (!isPlainObject(m)) continue
+        rows.push({
+          id: m.id,
+          from: m.from,
+          to: m.mine ? m.peer : page,
+          text: m.text,
+          at: m.at,
+          replyTo: m.replyTo === undefined ? null : m.replyTo,
+          media: mediaOf(m),
+          card: m.card === undefined ? null : m.card,
+          fwd: m.fwd === 1 ? 1 : 0,
+          n: n++
+        })
+      }
+    }
+    return b4a.from(canonical({ v: BUNDLE_V, page, box, rows, ops }), 'utf8')
+  }
+
+  // Seals the bundle to the owner's own box and writes its chunks, each
+  // durable, before the caller records it. A partial set left by a crash
+  // has no record and is removed here or at the next start.
+  // -> { for, id, count }.
+  function writeBundle (page, by, ownBox) {
+    check()
+    const plain = bundleBytes(page)
+    try {
+      const count = Math.max(1, Math.ceil(plain.byteLength / BUNDLE_CHUNK_BYTES))
+      if (count > BUNDLE_MAX_CHUNKS) {
+        note('legado-grande')
+        throw fail('limite')
+      }
+      const id = nodeCrypto.randomBytes(32)
+      const pk = b4a.from(ownBox, 'hex')
+      refuseSymlinkDir(dir)
+      fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 })
+      refuseSymlinkDir(stateDir)
+      dropBundleFiles(page)
+      fs.mkdirSync(bundleDir(page), { mode: 0o700 })
+      refuseSymlinkDir(bundleDir(page))
+      for (let i = 0; i < count; i++) {
+        const part = plain.subarray(i * BUNDLE_CHUNK_BYTES, Math.min(plain.byteLength, (i + 1) * BUNDLE_CHUNK_BYTES))
+        const msg = b4a.alloc(36 + part.byteLength)
+        msg.set(id, 0)
+        msg.writeUInt16BE(i, 32)
+        msg.writeUInt16BE(count, 34)
+        msg.set(part, 36)
+        const sealed = b4a.alloc(msg.byteLength + sodium.crypto_box_SEALBYTES)
+        sodium.crypto_box_seal(sealed, msg, pk)
+        msg.fill(0)
+        writeDurable(path.join(bundleDir(page), String(i)), sealed)
+      }
+      syncDir(stateDir)
+      return { for: by, id: hex(id), count }
+    } catch (err) {
+      try { dropBundleFiles(page) } catch {}
+      if (err && ['limite', 'indisponivel', 'pedido-invalido'].includes(err.code)) throw err
+      note('legado-falhou')
+      throw fail('indisponivel')
     } finally {
       plain.fill(0)
-      key.fill(0)
     }
-    states.set(page, s)
   }
 
-  // Runs fn(state) on the page's chain; fn returns true to save.
-  function withState (page, fn) {
-    const prev = chains.get(page) || Promise.resolve()
-    const run = async () => {
-      const s = loadState(page)
-      const out = await fn(s)
-      return out
-    }
-    const next = prev.then(run, run)
-    const tail = next.then(noop, noop)
-    chains.set(page, tail)
-    tail.then(() => { if (chains.get(page) === tail) chains.delete(page) })
-    return next
-  }
-
-  function trim (s) {
-    if (s.messages.length > MAX_MESSAGES) s.messages = s.messages.slice(-MAX_MESSAGES)
-    if (s.ops.length > MAX_OPS) s.ops = compactOps(s.ops)
-    if (s.seen.length > MAX_SEEN) s.seen = s.seen.slice(-MAX_SEEN)
-  }
-
-  // dm-fold reads, per peer, only the newest op of each kind (the newest
-  // folder op, the newest declined, blocked and deleted as cutoffs, the
-  // newest block op), so the newest row per (peer, op) carries the whole
-  // state and older ones go first. Past the cap even then, the peers whose
-  // newest op is oldest lose all their rows at once: such a peer is back to
-  // no op at all (not blocked, not accepted, no delete cutoff), never left
-  // with a half state such as an unblock without its block.
-  function compactOps (ops) {
-    const newest = new Map() // peer + op -> row
-    for (const o of ops) {
-      if (!isPlainObject(o) || !OP_KINDS.includes(o.op) || typeof o.peer !== 'string' || typeof o.filedAt !== 'number') continue
-      const k = o.peer + ':' + o.op
-      const had = newest.get(k)
-      if (had === undefined || o.filedAt >= had.filedAt) newest.set(k, o)
-    }
-    let kept = [...newest.values()].sort((a, b) => a.filedAt - b.filedAt)
-    if (kept.length <= MAX_OPS) return kept
-    const lastOf = new Map() // peer -> newest filedAt
-    for (const o of kept) lastOf.set(o.peer, o.filedAt)
-    const peers = [...lastOf.keys()].sort((a, b) => lastOf.get(b) - lastOf.get(a))
-    const keep = new Set()
-    let n = 0
-    const count = new Map()
-    for (const o of kept) count.set(o.peer, (count.get(o.peer) || 0) + 1)
-    for (const p of peers) {
-      if (n + count.get(p) > MAX_OPS) break
-      keep.add(p)
-      n += count.get(p)
-    }
-    kept = kept.filter((o) => keep.has(o.peer))
-    return kept
-  }
-
-  // One pool cursor per page: a page moves past a drop only once its box
-  // tried it, so a page that was stopped, paused, unloadable or without a
-  // box picks up from where it left off (within the pool's retention).
-  // `cursor` is the single cursor of older files (0 in a new one) and the
-  // start of a page without its own yet: it is never moved again, so it is
-  // at or before anything that page could have been sent.
-  function readCursor () {
-    if (cursor !== null) return cursor
-    const buf = readNoFollow(path.join(stateDir, CURSOR_FILE))
-    const c = { legacy: 0, pages: new Map() }
-    if (buf !== null) {
-      try {
-        const j = JSON.parse(b4a.toString(buf, 'utf8'))
-        if (isPlainObject(j) && j.v === VERSION) {
-          if (Number.isSafeInteger(j.cursor) && j.cursor >= 0) c.legacy = j.cursor
-          if (isPlainObject(j.pages)) {
-            for (const [k, v] of Object.entries(j.pages)) if (HEX64_RE.test(k) && Number.isSafeInteger(v) && v >= 0) c.pages.set(k, v)
-          }
-        }
-      } catch {}
-    }
-    cursor = c
-    return c
-  }
-
-  function cursorOf (page) {
-    const c = readCursor()
-    const v = c.pages.get(page)
-    return v === undefined ? c.legacy : v
-  }
-
-  function writeCursor (moved) {
+  // A move, before its commit: K1's sealed chunks are copied, each durable,
+  // to K2's directory, and K1's record is returned for K2's dm row. K1's
+  // chunks stay until K1's row is closed (the move's commit), so a crash
+  // at any point leaves a row naming a complete directory; a copy no row
+  // names yet is removed at the next start and made again by the resend.
+  // -> { for, id, count } or null without a bundle.
+  function carryBundle (from, to) {
+    pageParam(from)
+    pageParam(to)
     check()
-    const c = readCursor()
-    const pages = new Map(c.pages)
-    for (const [k, v] of moved) pages.set(k, v)
-    // Keys the writer no longer holds drop out, so the file stays bounded.
-    const held = new Set(writer.pageKeys())
-    for (const k of [...pages.keys()]) if (!held.has(k)) pages.delete(k)
-    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 })
-    refuseSymlinkDir(stateDir)
-    writeJsonAtomic(path.join(stateDir, CURSOR_FILE), { v: VERSION, cursor: c.legacy, pages: Object.fromEntries(pages) }, 0o600)
-    cursor = { legacy: c.legacy, pages }
-  }
-
-  // ---- the page, its box and its role -----------------------------------
-
-  function live (page) {
-    if (pagesStore === null) return true
-    let row = null
+    const row = aclRow(from)
+    const b = row.dm ? row.dm.legacyBundle : null
+    if (b === null) return null
     try {
-      row = pagesStore.get(page)
-    } catch {
-      return false
-    }
-    // A key the ACL does not hold yet (a move's K2 before its row) is live;
-    // a closed or paused one is not.
-    return row === null || (row.closed === null && row.paused !== true)
-  }
-
-  // -> { publicKey, secretKey } of the page's box (caller zeroes), or null.
-  function boxOf (page) {
-    const row = keys.get(page)
-    if (row === null) return null
-    const box = row.boxSecretKey ? boxPairOf(b4a.from(row.boxSecretKey)) : null
-    row.secretKey.fill(0)
-    row.mediaSecretKey.fill(0)
-    if (row.boxSecretKey) row.boxSecretKey.fill(0)
-    if (row.groupBoxSecretKey) row.groupBoxSecretKey.fill(0)
-    if (row.writers) for (const w of Object.values(row.writers)) w.fill(0)
-    return box
-  }
-
-  function zeroPair (pair) {
-    if (pair === null) return
-    pair.publicKey.fill(0)
-    pair.secretKey.fill(0)
-  }
-
-  function signingPair (page) {
-    const row = keys.get(page)
-    if (row === null) throw fail('pausada')
-    row.mediaSecretKey.fill(0)
-    if (row.boxSecretKey) row.boxSecretKey.fill(0)
-    if (row.groupBoxSecretKey) row.groupBoxSecretKey.fill(0)
-    if (row.writers) for (const w of Object.values(row.writers)) w.fill(0)
-    return { publicKey: b4a.from(page, 'hex'), secretKey: row.secretKey }
-  }
-
-  // The box secret is put in the same synchronous step that read the row,
-  // so a concurrent row change (put replaces the whole row) is not lost.
-  function ensureBox (page) {
-    const row = keys.get(page)
-    if (row === null) return false
-    try {
-      if (row.boxSecretKey) return true
-      row.boxSecretKey = newBoxSecret()
-      keys.put(page, row)
-      return true
-    } finally {
-      for (const k of ['secretKey', 'mediaSecretKey', 'boxSecretKey', 'groupBoxSecretKey']) if (row[k]) row[k].fill(0)
-      if (row.writers) for (const w of Object.values(row.writers)) w.fill(0)
-    }
-  }
-
-  async function ensureDmKey (page) {
-    if (!live(page)) return null
-    if (!ensureBox(page)) return null
-    const pair = boxOf(page)
-    if (pair === null) return null
-    const box = hex(pair.publicKey)
-    zeroPair(pair)
-    let res
-    try {
-      res = await writer.ensureDmKey(page, { box, gen: DM_GEN })
-    } catch {
-      note('dm-key-falhou')
-      return null
-    }
-    if (res.seq !== null && pagesStore !== null) {
-      // Behind a later route append the ACL is already longer: nothing to do.
-      try { await pagesStore.expectLength(page, res.length) } catch {}
-    }
-    return { box, gen: DM_GEN, seq: res.seq }
-  }
-
-  async function start () {
-    await writer.ready()
-    readCursor()
-    for (const page of writer.pageKeys()) {
-      if (closed) return
-      await ensureDmKey(page)
-    }
-    if (L.pullEveryMs > 0 && !closed) {
-      timer = setInterval(() => { tick().catch(noop) }, L.pullEveryMs)
-      if (timer.unref) timer.unref()
-    }
-  }
-
-  async function tick () {
-    if (closed) return
-    for (const page of writer.pageKeys()) {
-      if (closed) return
-      await ensureDmKey(page)
-      if (live(page)) await topUp(page).catch(noop)
-    }
-    await pull().catch(noop)
-  }
-
-  async function enable (page) {
-    pageParam(page)
-    await starting
-    await withState(page, async (s) => {
-      if (s.stopped) {
-        s.stopped = false
-        saveState(page, s)
-        // Stopped under the single cursor of an older file: that cursor went
-        // on without it, so the pool's retained window is read again for it
-        // (ids already filed are skipped).
-        if (!readCursor().pages.has(page)) writeCursor([[page, 0]])
+      refuseSymlinkDir(dir)
+      refuseSymlinkDir(stateDir)
+      refuseSymlinkDir(bundleDir(from))
+      fs.mkdirSync(bundleDir(to), { recursive: true, mode: 0o700 })
+      refuseSymlinkDir(bundleDir(to))
+      for (let i = 0; i < b.count; i++) {
+        const buf = readNoFollow(path.join(bundleDir(from), String(i)))
+        if (buf === null) throw fail('indisponivel')
+        writeDurable(path.join(bundleDir(to), String(i)), buf)
       }
-    })
-    const res = await ensureDmKey(page)
-    if (res === null) throw fail('indisponivel')
-    await topUp(page).catch(noop)
-    return res
-  }
-
-  async function stop (page) {
-    pageParam(page)
-    await withState(page, async (s) => {
-      if (s.stopped) return
-      s.stopped = true
-      s.sends = {}
-      saveState(page, s)
-    })
-    note('parada')
-    return { ok: true }
-  }
-
-  // A closed page: its rows leave memory and disk once its in-flight work
-  // ends, and nothing saves them again (a later stop included). Idempotent.
-  async function forget (page) {
-    pageParam(page)
-    forgotten.add(page)
-    let prev = chains.get(page)
-    while (prev !== undefined) {
-      await prev
-      const next = chains.get(page)
-      prev = next === prev ? undefined : next
+      syncDir(stateDir)
+    } catch {
+      note('legado-mover-falhou')
+      throw fail('indisponivel')
     }
-    states.delete(page)
-    check()
-    refuseSymlinkDir(dir)
-    refuseSymlinkDir(stateDir)
-    fs.rmSync(fileOf(page), { force: true })
-    note('esquecida')
-    return { ok: true }
+    return { for: b.for, id: b.id, count: b.count }
   }
 
-  // ---- links --------------------------------------------------------------
-
-  function destroyLink (link) {
-    try { if (link.noise !== null) link.noise.destroy() } catch {}
-    try { if (link.ws !== null) link.ws.terminate() } catch {}
+  // The bundle recorded for `member`, or 'nao-encontrado'.
+  function bundleFor (page, member) {
+    const row = aclRow(page)
+    const b = row.dm ? row.dm.legacyBundle : null
+    if (b === null || b.for !== member) throw fail('nao-encontrado')
+    return b
   }
 
-  // -> the link once the seeder's hello verified; attach(noise, link) runs
-  // on connect, before the hello can arrive.
-  function dial (attach, deadlineMs) {
-    return new Promise((resolve, reject) => {
-      const link = { ws: null, noise: null, verified: false, closeCode: null }
-      let settled = false
-      const finish = (err) => {
-        if (settled) return
-        settled = true
-        clearTimeout(connectTimer)
-        if (err) {
-          destroyLink(link)
-          reject(err)
-        } else {
-          resolve(link)
-        }
+  // 'dm-legacy-read' (the caller checked the role): up to
+  // BUNDLE_READ_CHUNKS sealed chunks from `from`.
+  function legacyRead (page, { member, from } = {}) {
+    pageParam(page)
+    if (!Number.isSafeInteger(from) || from < 0) throw fail('pedido-invalido')
+    return chained(page, async () => {
+      const b = bundleFor(page, member)
+      const chunks = []
+      for (let i = from; i < Math.min(b.count, from + BUNDLE_READ_CHUNKS); i++) {
+        const buf = readNoFollow(path.join(bundleDir(page), String(i)))
+        if (buf === null) throw fail('indisponivel')
+        chunks.push({ index: i, sealed: b4a.toString(buf, 'base64') })
       }
-      const connectTimer = setTimeout(() => finish(fail('sem-semeador')), L.connectTimeoutMs)
-      const deadline = setTimeout(() => destroyLink(link), deadlineMs)
-      if (deadline.unref) deadline.unref()
+      return { id: b.id, count: b.count, chunks }
+    })
+  }
+
+  // 'dm-legacy-done': the owner's device imported the bundle. The record
+  // goes first, then the chunks (stray chunks without a record are removed
+  // at the next start). An absent bundle answers ok.
+  function legacyDone (page, { member, id } = {}) {
+    pageParam(page)
+    if (typeof id !== 'string' || !HEX64_RE.test(id)) throw fail('pedido-invalido')
+    return chained(page, async () => {
+      check()
+      const row = aclRow(page)
+      const b = row.dm ? row.dm.legacyBundle : null
+      if (b === null) return { ok: true }
+      if (b.for !== member || b.id !== id) throw fail('conflito')
+      // The cleanup the bundle was recorded for comes first: once the
+      // record is gone nothing would remove the old rows and the secret.
+      if (row.dm.rotatePending !== null) throw fail('rotacao-necessaria')
+      if (legacyHeld(page)) dropLegacy(page)
+      const next = JSON.parse(JSON.stringify(row.dm))
+      next.legacyBundle = null
+      // A moved page's gen 0 row held only the bundle: nothing is left.
+      await pagesStore.setDm(page, next.gen === 0 && next.rotatePending === null ? null : next)
+      dropBundleFiles(page)
+      note('legado-importado')
+      return { ok: true }
+    })
+  }
+
+  // Chunk directories no row names (a crash before the record, a page
+  // gone): removed. A bundle a row names is never touched.
+  function sweepBundles () {
+    if (pagesStore === null) return
+    let names = []
+    try {
+      if (!fs.existsSync(stateDir)) return
+      refuseSymlinkDir(stateDir)
+      names = fs.readdirSync(stateDir)
+    } catch {
+      return
+    }
+    for (const name of names) {
+      const page = name.endsWith('.legacy') ? name.slice(0, -7) : null
+      if (page === null || !HEX64_RE.test(page)) continue
+      let row = null
       try {
-        link.ws = new WebSocket(url, { perMessageDeflate: false, handshakeTimeout: L.connectTimeoutMs, maxPayload: MAX_PAYLOAD })
-        link.ws.on('error', noop)
-        link.ws.on('close', (code) => { link.closeCode = code })
-        const duplex = createWebSocketStream(link.ws)
-        duplex.on('error', noop)
-        link.noise = new NoiseSecretStream(true, duplex, { keyPair: hcrypto.keyPair() })
-        link.noise.on('error', noop)
+        row = pagesStore.get(page)
       } catch {
-        finish(fail('sem-semeador'))
-        return
+        continue
       }
-      link.noise.once('close', () => {
-        clearTimeout(deadline)
-        finish(fail(link.closeCode === 1013 ? 'limite' : 'sem-semeador'))
-      })
-      link.noise.once('connect', () => {
-        try {
-          Hypercore.createProtocolStream(link.noise)
-          attachAdmission(link.noise, {
-            role: 'member',
-            have: [],
-            onmessage: (msg, peer) => {
-              if (msg.type !== 'hello') return
-              link.verified = msg.role === 'seeder' && peer.peerKey !== null &&
-                seederCertForKey(peer.remoteCert, peer.peerKey, association).ok
-              if (!link.verified) {
-                note('semeador-nao-verificado')
-                finish(fail('sem-semeador'))
-                return
-              }
-              finish(null)
-            },
-            log: noop
-          })
-          attach(link.noise, link)
-        } catch {
-          finish(fail('sem-semeador'))
-        }
-      })
-    })
-  }
-
-  function reqOpts () {
-    return L.requestTimeoutMs ? { requestTimeoutMs: L.requestTimeoutMs } : {}
-  }
-
-  async function openDropLink () {
-    let ch = null
-    const link = await dial((noise) => { ch = attachDm(noise, { role: 'member', ...reqOpts() }) }, L.deadlineMs)
-    return {
-      put: (bytes) => ch.put(bytes),
-      page: (q) => ch.requestPage(q),
-      close () {
-        try { ch.close() } catch {}
-        destroyLink(link)
-      }
+      if (row !== null && row.closed === null && row.dm && row.dm.legacyBundle !== null) continue
+      try { dropBundleFiles(page) } catch { note('legado-sobra') }
     }
   }
-
-  // null when the revocation list cannot be read (a throw, an unexpected
-  // type): no certificate is judged without it. Not wired at all (null or
-  // undefined): no issuer is revoked.
-  function revoked () {
-    if (revokedIssuers === null || revokedIssuers === undefined) return new Set()
-    try {
-      const v = typeof revokedIssuers === 'function' ? revokedIssuers() : revokedIssuers
-      if (v instanceof Set) return new Set(v)
-      if (Array.isArray(v)) return new Set(v)
-    } catch {}
-    return null
-  }
-
-  function blockedKey (key) {
-    if (blocklist === null) return false
-    try {
-      return blocklist.has(key) === true
-    } catch {
-      return true
-    }
-  }
-
-  // ---- the recipient's box ----------------------------------------------
-
-  // One deadline (deadlineMs) bounds the whole lookup. The newest dm-key is
-  // only trusted from a complete tail: a range with holes may hide a newer
-  // gen, so then nothing is sealed ('indisponivel').
-  async function lookupBox (to) {
-    if (writer.pageKeys().includes(to)) {
-      const best = newestDmKey(await writer.readEntries(to))
-      return best === null ? null : best.box
-    }
-    const revokedSet = revoked()
-    if (revokedSet === null) throw fail('indisponivel')
-    const until = Date.now() + L.deadlineMs
-    const left = () => until - Date.now()
-    const bounded = async (promise) => {
-      if (left() <= 0) throw fail('indisponivel')
-      const v = await within(promise, left())
-      if (v === TIMEOUT) throw fail('indisponivel')
-      return v
-    }
-    fs.mkdirSync(tmpRoot, { recursive: true })
-    const tmp = fs.mkdtempSync(path.join(tmpRoot, 'varanda-page-dm-'))
-    let store = null
-    let link = null
-    let q = null
-    try {
-      const dialing = dial(noop, L.deadlineMs)
-      try {
-        link = await bounded(dialing)
-      } catch (err) {
-        // Past the deadline the dial may still land: that link is closed.
-        dialing.then(destroyLink, noop)
-        throw err
-      }
-      store = new Corestore(tmp)
-      await bounded(store.ready())
-      q = store.get({ key: b4a.from(to, 'hex') })
-      await bounded(q.ready())
-      q.replicate(link.noise)
-      const decoded = (v) => (v instanceof Uint8Array && v.byteLength <= MAX_BLOCK_BYTES) ? decodeBlock(v) : null
-      let first = null
-      try {
-        first = decoded(await bounded(q.get(0, { timeout: Math.max(1, left()) })))
-      } catch {
-        if (left() <= 0) throw fail('indisponivel')
-      }
-      if (!isPlainObject(first) || first.type !== 'member-cert' || q.fork !== 0) return null
-      if (!certForKey(first.cert, to, association, { revokedIssuers: revokedSet }).ok) return null
-      await bounded(q.update({ wait: true }))
-      const length = q.length
-      const floor = Math.max(1, length - LOOKUP_BLOCKS)
-      if (length > floor) {
-        await bounded(q.download({ start: floor, end: length }).done())
-        if (!(await bounded(q.has(floor, length)))) throw fail('indisponivel')
-      }
-      const entries = []
-      for (let seq = length - 1; seq >= floor; seq--) {
-        const v = await bounded(q.get(seq, { wait: false }))
-        if (v === null) throw fail('indisponivel')
-        const record = decoded(v)
-        if (record !== null) entries.push({ seq, record })
-      }
-      const best = newestDmKey(entries)
-      return best === null ? null : best.box
-    } catch (err) {
-      throw fail(err && err.code === 'indisponivel' ? 'indisponivel' : 'sem-semeador')
-    } finally {
-      if (q !== null) await q.close().catch(noop)
-      if (store !== null) await store.close().catch(noop)
-      if (link !== null) destroyLink(link)
-      fs.rmSync(tmp, { recursive: true, force: true })
-    }
-  }
-
-  // ---- stamps -------------------------------------------------------------
-
-  function usable (w) {
-    return w.items.filter((s) => w.kids.length === 0 || w.kids.includes(s.kid))
-  }
-
-  async function walletSize (page) {
-    pageParam(page)
-    return withState(page, async (s) => usable(s.wallet).length)
-  }
-
-  // Fills the page's wallet to DM_STAMP_WALLET when below DM_STAMP_WALLET_LOW
-  // (or forced). Single flight per page.
-  function topUp (page, { force = false } = {}) {
-    const busy = topping.get(page)
-    if (busy !== undefined) return busy
-    const p = (async () => {
-      const have = await withState(page, async (s) => s.stopped ? null : usable(s.wallet).length)
-      if (have === null || (!force && have >= dm.DM_STAMP_WALLET_LOW)) return 0
-      let fresh = []
-      let kid = null
-      try {
-        ({ fresh, kid } = await issueStamps(page, dm.DM_STAMP_WALLET - have))
-      } catch {}
-      if (fresh.length === 0) {
-        note('selos-nao-renovados')
-        return 0
-      }
-      await withState(page, async (s) => {
-        const w = s.wallet
-        const kids = w.kids[0] === kid ? w.kids : [kid, ...w.kids.slice(0, 1)]
-        const known = new Set(w.items.map((x) => x.token))
-        s.wallet = { items: [...w.items.filter((x) => kids.includes(x.kid)), ...fresh.filter((x) => !known.has(x.token))], kids }
-        saveState(page, s)
-      })
-      return fresh.length
-    })()
-    topping.set(page, p)
-    const clear = () => { if (topping.get(page) === p) topping.delete(page) }
-    p.then(clear, clear)
-    return p
-  }
-
-  async function issueStamps (page, need) {
-    let stamp = null
-    const pair = signingPair(page)
-    let link
-    try {
-      link = await dial((noise, l) => {
-        stamp = attachDmStamp(noise, {
-          role: 'member',
-          ownKey: page,
-          ...reqOpts(),
-          sign: (payload) => {
-            if (!l.verified) throw new Error('semeador não verificado')
-            return hcrypto.sign(payload, pair.secretKey)
-          }
-        })
-      }, L.stampDeadlineMs)
-    } catch (err) {
-      pair.secretKey.fill(0)
-      throw err
-    }
-    const fresh = []
-    let kid = null
-    try {
-      const pub = await stamp.key()
-      const parsed = postage.parsePublicKey(pub)
-      if (parsed === null) return { fresh, kid }
-      kid = pub.kid
-      for (let i = 0; i < need; i++) {
-        if (i >= ISSUE_BURST && L.issuePaceMs > 0) await sleep(L.issuePaceMs)
-        const token = postage.newToken(parsed.n)
-        const { blinded, r } = postage.blind(postage.representative(token), parsed.n)
-        let res
-        try {
-          res = await stamp.issue(postage.toBase64(blinded))
-        } catch {
-          break
-        }
-        if (res.error !== undefined || res.kid !== pub.kid) break
-        const s = postage.fromBase64(res.sig)
-        if (s === null) break
-        const sig = postage.unblind(s, r, parsed.n)
-        if (!postage.verify(token, sig, pub)) break
-        fresh.push({ kid: pub.kid, token: hex(token), sig: postage.toBase64(sig) })
-      }
-    } finally {
-      pair.secretKey.fill(0)
-      try { stamp.close() } catch {}
-      destroyLink(link)
-    }
-    return { fresh, kid }
-  }
-
-  function dropOf (sealed, stamp) {
-    return dm.encodeDrop({
-      dropId: dm.newDropId(),
-      kid: b4a.from(stamp.kid, 'hex'),
-      rsaSig: b4a.from(stamp.sig, 'base64'),
-      token: b4a.from(stamp.token, 'hex'),
-      sealed
-    })
-  }
-
-  // ---- folders ------------------------------------------------------------
 
   function followKeys (page) {
     try {
@@ -953,439 +932,132 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
     })
   }
 
-  function threadOf (page, s, peer) {
-    const { inbox, requests } = folded(page, s)
-    return inbox.find((c) => c.peer === peer) || requests.find((c) => c.peer === peer) || null
-  }
-
-  function hasMessage (s, from, id) {
-    return s.messages.some((m) => m.from === from && m.id === id)
-  }
-
   async function list (page, { folder = 'inbox', limit = 30, before = null } = {}) {
     pageParam(page)
-    return withState(page, async (s) => {
-      const { inbox, requests } = folded(page, s)
-      const all = folder === 'request' ? requests : inbox
-      let start = 0
-      if (before !== null && before !== undefined) {
-        const i = all.findIndex((c) => c.at === before.at && c.peer === before.peer)
-        if (i !== -1) {
-          start = i + 1
-        } else {
-          const t = Date.parse(before.at)
-          start = all.findIndex((c) => Date.parse(c.at) < t || (Date.parse(c.at) === t && c.peer > before.peer))
-          if (start === -1) start = all.length
-        }
+    const s = loadState(page)
+    if (s === null) throw fail('nao-encontrado')
+    const { inbox, requests } = folded(page, s)
+    const all = folder === 'request' ? requests : inbox
+    let start = 0
+    if (before !== null && before !== undefined) {
+      const i = all.findIndex((c) => c.at === before.at && c.peer === before.peer)
+      if (i !== -1) {
+        start = i + 1
+      } else {
+        const t = Date.parse(before.at)
+        start = all.findIndex((c) => Date.parse(c.at) < t || (Date.parse(c.at) === t && c.peer > before.peer))
+        if (start === -1) start = all.length
       }
-      const pageRows = all.slice(start, start + limit)
-      const more = start + pageRows.length < all.length
-      const tail = pageRows[pageRows.length - 1]
-      return {
-        conversations: pageRows.map((c) => {
-          const last = c.messages[c.messages.length - 1]
-          return { peer: c.peer, folder: c.folder, preview: preview(dmFold.previewText(last)), at: c.at, unread: c.unread, mine: last.mine }
-        }),
-        next: more && tail ? { at: tail.at, peer: tail.peer } : null,
-        requests: requests.some((c) => c.unread),
-        inboxUnread: inbox.some((c) => c.unread)
-      }
-    })
+    }
+    const rows = all.slice(start, start + limit)
+    const more = start + rows.length < all.length
+    const tail = rows[rows.length - 1]
+    return {
+      conversations: rows.map((c) => {
+        const last = c.messages[c.messages.length - 1]
+        return { peer: c.peer, folder: c.folder, preview: preview(dmFold.previewText(last)), at: c.at, unread: c.unread, mine: last.mine, legacy: true }
+      }),
+      next: more && tail ? { at: tail.at, peer: tail.peer } : null,
+      requests: requests.some((c) => c.unread),
+      inboxUnread: inbox.some((c) => c.unread)
+    }
   }
 
   async function thread (page, { peer, before = null, limit = 30 } = {}) {
     pageParam(page)
-    return withState(page, async (s) => {
-      const c = threadOf(page, s, peer)
-      const state = { folder: c === null ? 'inbox' : c.folder, blocked: !dmFold.canSend({ self: page, peer, ops: s.ops }) }
-      if (c === null) return { messages: [], next: null, ...state }
-      let end = c.messages.length
-      if (before !== null && before !== undefined) {
-        const i = c.messages.findIndex((m) => m.id === before)
-        if (i !== -1) end = i
-      }
-      const startAt = Math.max(0, end - limit)
-      const rows = c.messages.slice(startAt, end)
-      return {
-        messages: rows.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media: mediaOf(m), card: m.card === undefined || m.card === null ? null : m.card, at: m.at, mine: m.mine })),
-        next: startAt > 0 && rows.length > 0 ? rows[0].id : null,
-        ...state
-      }
-    })
+    const s = loadState(page)
+    if (s === null) throw fail('nao-encontrado')
+    const { inbox, requests } = folded(page, s)
+    const c = inbox.find((x) => x.peer === peer) || requests.find((x) => x.peer === peer) || null
+    const state = { folder: c === null ? 'inbox' : c.folder, blocked: !dmFold.canSend({ self: page, peer, ops: s.ops }) }
+    if (c === null) return { messages: [], next: null, ...state }
+    let end = c.messages.length
+    if (before !== null && before !== undefined) {
+      const i = c.messages.findIndex((m) => m.id === before)
+      if (i !== -1) end = i
+    }
+    const startAt = Math.max(0, end - limit)
+    const rows = c.messages.slice(startAt, end)
+    return {
+      messages: rows.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd === 1 ? 1 : 0, media: mediaOf(m), card: m.card === undefined || m.card === null ? null : m.card, at: m.at, mine: m.mine, legacy: true })),
+      next: startAt > 0 && rows.length > 0 ? rows[0].id : null,
+      ...state
+    }
   }
 
-  async function seen (page, { peer } = {}) {
+  // A closed page: its legacy rows, legacy secret and legacy bundle go.
+  // Idempotent.
+  async function forget (page) {
     pageParam(page)
-    return withState(page, async (s) => {
-      const c = threadOf(page, s, peer)
-      if (c === null) return { ok: true }
-      const marks = new Set(s.seen)
-      let added = false
-      for (const m of c.messages) {
-        if (m.mine) continue
-        const k = dmFold.seenKey(m.from, m.id)
-        if (!marks.has(k)) {
-          s.seen.push(k)
-          added = true
-        }
-      }
-      if (added) {
-        trim(s)
-        saveState(page, s)
-      }
-      return { ok: true }
-    })
+    dropLegacy(page)
+    dropBundleFiles(page)
+    note('esquecida')
+    return { ok: true }
   }
 
-  // One service holds the page box, so a folder op is filed here and no
-  // ctl is sealed: there is no other device to tell, and nothing goes to the
-  // peer.
-  async function setOp (page, { peer, state } = {}, { recheck = null } = {}) {
-    pageParam(page)
-    if (peer === page) throw fail('pedido-invalido')
-    return withState(page, async (s) => {
-      if (s.stopped) throw fail('encerrada')
-      // Queued behind a send: the role is checked again when its turn comes.
-      if (typeof recheck === 'function') {
-        let ok = false
+  // ---- the dm-key refresh ---------------------------------------------------
+
+  async function start () {
+    if (typeof writer.ready === 'function') await writer.ready()
+    sweepBundles()
+    // A rotation or a legacy cleanup a crash cut short completes now.
+    if (pagesStore !== null && typeof writer.pageKeys === 'function') {
+      for (const page of writer.pageKeys()) {
+        if (closed) return
         try {
-          ok = recheck() === true
-        } catch {}
-        if (!ok) throw fail('sem-permissao')
-      }
-      s.ops.push({ t: 'ctl', id: dm.newMessageId(), op: state, peer, at: new Date().toISOString(), filedAt: nextFiled(s) })
-      trim(s)
-      saveState(page, s)
-      return { ok: true }
-    })
-  }
-
-  // ---- sending ------------------------------------------------------------
-
-  // Keep the hash of pending sends saved before forward flags existed.
-  function sendHash (to, text, replyTo, fwd) {
-    return nodeCrypto.createHash('sha256').update(JSON.stringify(fwd === 0 ? [to, text, replyTo] : [to, text, replyTo, fwd])).digest('hex')
-  }
-
-  function sweepSends (s) {
-    const t = Date.now()
-    for (const [k, v] of Object.entries(s.sends)) if (!isPlainObject(v) || v.expiresAt <= t) delete s.sends[k]
-    const ids = Object.keys(s.sends)
-    for (let i = 0; i <= ids.length - MAX_SENDS; i++) delete s.sends[ids[i]]
-  }
-
-  function fileSent (s, entry) {
-    if (!hasMessage(s, entry.from, entry.id)) {
-      s.messages.push({ id: entry.id, peer: entry.to, from: entry.from, text: entry.text, replyTo: entry.replyTo, fwd: entry.fwd === 1 ? 1 : 0, at: entry.at, mine: true, filedAt: nextFiled(s) })
-      trim(s)
-    }
-  }
-
-  async function takeTwo (page, s) {
-    let items = usable(s.wallet)
-    if (items.length < 2) {
-      // The chain is ours: the top-up below must not wait on it.
-      const fresh = await issueStamps(page, dm.DM_STAMP_WALLET - items.length).catch(() => ({ fresh: [], kid: null }))
-      if (fresh.fresh.length > 0) {
-        const w = s.wallet
-        const kids = w.kids[0] === fresh.kid ? w.kids : [fresh.kid, ...w.kids.slice(0, 1)]
-        s.wallet = { items: [...w.items.filter((x) => kids.includes(x.kid)), ...fresh.fresh], kids }
-        items = usable(s.wallet)
-      }
-    }
-    if (items.length < 2) return null
-    const taken = items.slice(0, 2)
-    const spent = new Set(taken.map((x) => x.token))
-    s.wallet = { items: s.wallet.items.filter((x) => !spent.has(x.token)), kids: s.wallet.kids }
-    return taken
-  }
-
-  // idem: { member, nonce, recheck? } of the signed request. recheck() is
-  // the route's admin check, run again on the page's DM chain right before
-  // anything is sealed or delivered as the page: the recipient lookup can
-  // take until its deadline, and an admin removed meanwhile is refused
-  // 'sem-permissao' with nothing filed. -> { id, at }.
-  async function send (page, { to, text, replyTo = null, fwd = 0 } = {}, idem = {}) {
-    pageParam(page)
-    if (!isPlainObject(idem) || typeof idem.member !== 'string' || typeof idem.nonce !== 'string') throw fail('pedido-invalido')
-    if (idem.recheck !== undefined && typeof idem.recheck !== 'function') throw fail('pedido-invalido')
-    const allowed = () => {
-      let ok = true
-      try {
-        if (idem.recheck !== undefined) ok = idem.recheck() === true
-      } catch {
-        ok = false
-      }
-      if (!ok) throw fail('sem-permissao')
-    }
-    const slot = idem.member + ':' + idem.nonce
-    const hash = sendHash(to, text, replyTo, fwd)
-    // -> the saved entry of this request, or null when a new one may be made.
-    const admit = (s) => {
-      if (s.stopped || !live(page)) throw fail('encerrada')
-      sweepSends(s)
-      const entry = s.sends[slot]
-      if (entry !== undefined && entry.hash !== hash) throw fail('expirado')
-      if (entry !== undefined) return entry
-      if (to === page) throw fail('para-si')
-      if (!dmFold.canSend({ self: page, peer: to, ops: s.ops })) throw fail('bloqueou')
-      if (blockedKey(to)) throw fail('sem-permissao')
-      if (replyTo !== null) {
-        const c = threadOf(page, s, to)
-        if (c === null || dmFold.replyTarget(c.messages, replyTo) === null) throw fail('resposta-invalida')
-      }
-      return null
-    }
-    const resent = await withState(page, async (s) => {
-      const entry = admit(s)
-      if (entry === null) return null
-      if (!entry.done) {
-        allowed()
-        await deliver(page, s, slot, entry)
-      }
-      return { id: entry.id, at: entry.at }
-    })
-    if (resent !== null) return resent
-    // The recipient's diary is read off the page's chain, so its list, pull
-    // and ops do not wait on the network; the checks run again once back.
-    const box = await lookupBox(to)
-    if (box === null) throw fail('sem-caixa')
-    return withState(page, async (s) => {
-      let entry = admit(s)
-      if (entry === null || !entry.done) allowed()
-      if (entry === null) {
-        const own = boxOf(page)
-        if (own === null) throw fail('sem-caixa')
-        const ownBox = hex(own.publicKey)
-        zeroPair(own)
-        let cert
-        try {
-          cert = writer.certOf(page)
+          const row = pagesStore.get(page)
+          if (row !== null && row.dm && row.closed === null && !row.paused) await chained(page, () => completeNow(page))
         } catch {
-          throw fail('pausada')
+          note('rotacao-pendente')
         }
-        const id = dm.newMessageId()
-        const at = new Date().toISOString()
-        const pair = signingPair(page)
-        let inner
-        try {
-          inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, fwd, cert }, pair)
-        } catch (err) {
-          throw fail(err && err.message === 'mensagem longa demais' ? 'longa-demais' : 'pedido-invalido')
-        } finally {
-          pair.secretKey.fill(0)
-        }
-        let sealedTo, sealedSelf
-        try {
-          sealedTo = dm.sealInner(inner, box)
-          sealedSelf = dm.sealInner(inner, ownBox)
-        } catch {
-          throw fail('sem-caixa')
-        } finally {
-          inner.fill(0)
-        }
-        const stamps = await takeTwo(page, s)
-        if (stamps === null) {
-          saveState(page, s)
-          throw fail('sem-selos')
-        }
-        // The stamp wait can be long: a role lost meanwhile files nothing.
-        allowed()
-        entry = {
-          hash,
-          id,
-          at,
-          from: page,
-          to,
-          text,
-          replyTo,
-          fwd,
-          drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])].map((d) => b4a.toString(d, 'base64')),
-          acked: [false, false],
-          done: false,
-          expiresAt: Date.now() + SEND_TTL_MS
-        }
-        s.sends[slot] = entry
-        // Saved before the first put: a resend puts these exact bytes.
-        saveState(page, s)
       }
-      if (!entry.done) await deliver(page, s, slot, entry)
-      return { id: entry.id, at: entry.at }
-    })
+    }
+    if (L.refreshEveryMs > 0 && !closed) {
+      timer = setInterval(() => { refresh().catch(noop) }, L.refreshEveryMs)
+      if (timer.unref) timer.unref()
+    }
   }
 
-  async function deliver (page, s, slot, entry) {
-    let link
-    try {
-      link = await openDropLink()
-    } catch (err) {
-      throw fail(err && err.code === 'limite' ? 'limite' : 'indisponivel')
-    }
-    try {
-      for (let i = 0; i < entry.drops.length; i++) {
-        if (entry.acked[i]) continue
-        let r
-        try {
-          r = await link.put(b4a.from(entry.drops[i], 'base64'))
-        } catch {
-          note('envio-incerto')
-          throw fail('incerto')
-        }
-        if (!r || !r.ok) {
-          if (r && r.reason === 'invalido') {
-            delete s.sends[slot]
-            saveState(page, s)
-          }
-          note('envio-recusado')
-          throw fail(r && (r.reason === 'cheio' || r.reason === 'ritmo') ? 'limite' : 'pedido-invalido')
-        }
-        entry.acked[i] = true
-        if (i === 0) fileSent(s, entry)
-        saveState(page, s)
-      }
-    } finally {
-      link.close()
-    }
-    entry.done = true
-    entry.drops = []
-    saveState(page, s)
-  }
-
-  // ---- pulling ------------------------------------------------------------
-
-  function pull () {
-    if (pulling !== null) return pulling
-    const p = pullNow()
-    pulling = p
-    const clear = () => { if (pulling === p) pulling = null }
-    p.then(clear, clear)
-    return p
-  }
-
-  async function pullNow () {
-    await starting
-    const boxes = []
-    for (const page of writer.pageKeys()) {
-      if (!live(page)) continue
-      let s
-      try {
-        s = await withState(page, async (st) => st)
-      } catch {
-        continue
-      }
-      if (s.stopped) continue
-      const pair = boxOf(page)
-      if (pair !== null) boxes.push({ page, pair, at: cursorOf(page), failed: false })
-    }
-    let added = 0
-    let incomplete = false
-    let link = null
-    try {
-      if (boxes.length === 0) return { added, incomplete }
-      const mod = { revokedIssuers: revoked() }
-      // Nothing is opened, so no cursor moves: the next pull tries again.
-      if (mod.revokedIssuers === null) {
-        note('revogacao-indisponivel')
-        return { added, incomplete: true }
-      }
-      link = await openDropLink()
-      let c = Math.min(...boxes.map((b) => b.at))
-      let read = 0
-      for (;;) {
-        if (closed) break
-        let pageRes
-        try {
-          pageRes = await link.page({ after: c, limit: dm.DM_PAGE_MAX })
-        } catch {
-          incomplete = true
-          break
-        }
-        const byPage = new Map()
-        for (const item of pageRes.items) {
-          read += item.bytes.byteLength
-          const drop = dm.decodeDrop(item.bytes)
-          if (drop === null) continue
-          for (const b of boxes) {
-            // At or before its own cursor this page already tried the drop.
-            if (b.failed || item.seq <= b.at) continue
-            const inner = dm.openSealed(drop.sealed, b.pair)
-            if (inner === null) continue
-            const body = dm.openInner(inner, b.page, { association, revokedIssuers: mod.revokedIssuers })
-            if (body !== null && body.kind === 'msg') {
-              if (!byPage.has(b.page)) byPage.set(b.page, [])
-              byPage.get(b.page).push(body)
-            }
-            break
-          }
-        }
-        for (const [page, bodies] of byPage) {
-          const b = boxes.find((x) => x.page === page)
-          let n
-          try {
-            n = await fileBodies(page, bodies)
-          } catch {
-            n = null
-          }
-          // Not filed (stopped meanwhile, storage down): its cursor stays, so
-          // the next pull tries these drops again for it.
-          if (n === null) {
-            b.failed = true
-            incomplete = true
-          } else {
-            added += n
-          }
-        }
-        if (pageRes.items.length > 0) {
-          c = pageRes.items[pageRes.items.length - 1].seq
-          const moved = []
-          for (const b of boxes) {
-            if (b.failed || c <= b.at) continue
-            b.at = c
-            moved.push([b.page, c])
-          }
-          if (moved.length > 0) writeCursor(moved)
-        }
-        if (pageRes.next === null || pageRes.items.length === 0) break
-        if (boxes.every((b) => b.failed)) break
-        if (read >= L.budgetBytes) {
-          incomplete = true
-          break
-        }
-      }
-    } catch (err) {
-      note(err && err.code === 'indisponivel' ? 'armazenamento-indisponivel' : 'sem-semeador')
-      incomplete = true
-    } finally {
-      for (const b of boxes) zeroPair(b.pair)
-      if (link !== null) link.close()
-    }
-    return { added, incomplete }
-  }
-
-  // -> how many rows were filed, or null when the page is stopped.
-  function fileBodies (page, bodies) {
-    return withState(page, async (s) => {
-      if (s.stopped) return null
+  // Public values only: the stored box and gen of every page with dm.
+  function refresh () {
+    if (refreshing !== null) return refreshing
+    const p = (async () => {
       let n = 0
-      for (const body of bodies) {
-        if (!body.mine && blockedKey(body.from)) continue
-        const peer = body.mine ? body.to : body.from
-        if (!body.mine && !dmFold.canSend({ self: page, peer, ops: s.ops })) continue
-        if (hasMessage(s, body.from, body.id)) continue
-        const row = { id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, fwd: body.fwd === 1 ? 1 : 0, at: body.at, mine: body.mine, filedAt: nextFiled(s) }
-        const media = mediaOf(body)
-        if (media !== null) row.media = media
-        // openInner already checked a v2 card; a v1 body has none.
-        else if (isPlainObject(body.card)) row.card = cardOf(body.card)
-        s.messages.push(row)
-        n++
-      }
-      if (n > 0) {
-        trim(s)
-        saveState(page, s)
+      if (pagesStore === null || typeof writer.pageKeys !== 'function') return n
+      for (const page of writer.pageKeys()) {
+        if (closed) break
+        let row = null
+        try {
+          row = pagesStore.get(page)
+        } catch {}
+        if (row === null || !row.dm || row.closed !== null || row.paused) continue
+        try {
+          const appended = await chained(page, async () => {
+            const r = aclRow(page)
+            if (!r.dm) return false
+            if (r.dm.rotatePending !== null) {
+              await completeNow(page)
+              return false
+            }
+            // A moved page's bundle alone: no dm-key yet.
+            if (r.dm.gen < 1) return false
+            const res = await writer.ensureDmKey(page, { box: r.dm.box, gen: r.dm.gen })
+            if (res.seq === null) return false
+            // Behind a later route append the ACL is already longer.
+            try { await pagesStore.expectLength(page, res.length) } catch {}
+            return true
+          })
+          if (appended) n++
+        } catch {
+          note('dm-key-falhou')
+        }
       }
       return n
-    })
+    })()
+    refreshing = p
+    const clear = () => { if (refreshing === p) refreshing = null }
+    p.then(clear, clear)
+    return p
   }
 
   async function close () {
@@ -1395,10 +1067,9 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, seederWs
     timer = null
     await starting.catch(noop)
     while (inflight.size > 0) await Promise.allSettled([...inflight])
-    if (pulling !== null) await pulling.catch(noop)
+    if (refreshing !== null) await refreshing.catch(noop)
     master.fill(0)
-    states.clear()
   }
 }
 
-module.exports = { createPagesDm, PULL_EVERY_MS, STATE_DIR }
+module.exports = { createPagesDm, parseBox, parseInviteShare, REFRESH_EVERY_MS, STATE_DIR }

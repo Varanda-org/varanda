@@ -6,10 +6,16 @@ import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js
 
 const { validateParams, RpcError, feira } = rpc
 let currentFeira = null
+let currentLive = null
 
 // The index client has no node handle; explicit handles keep lab instances isolated.
 export function vitrineFeiraState (request) {
   return request ? request.feira() : currentFeira?.() || null
+}
+
+// Live like and repost records of one instance, for the counts the index answers.
+export function vitrineLiveRecords (request) {
+  return request ? request.live() : currentLive?.() || []
 }
 const copy = (value) => JSON.parse(JSON.stringify(value))
 const compareText = (a, b) => a < b ? -1 : a > b ? 1 : 0
@@ -50,6 +56,7 @@ export function createVitrineRequest (fixtures, options) {
   let mediaStart = 1
   const age = { ageVerifiedDate: data.now, ageSince: null, ageSinceUntil: null }
   const reactions = { like: new Map(), repost: new Map() }
+  const live = []
   const deleted = new Map()
   const logs = new Map()
   const roster = new Map()
@@ -153,6 +160,7 @@ export function createVitrineRequest (fixtures, options) {
     const entries = logs.get(data.own)
     const seq = entries[entries.length - 1].seq + 1
     entries.push({ seq, record })
+    if (record.type === 'like' || record.type === 'repost') live.push({ author: data.own, seq, record: { type: record.type, to: record.to, on: record.on, at: record.at } })
     return { seq, ref: `${data.own}:${seq}` }
   }
 
@@ -373,6 +381,16 @@ export function createVitrineRequest (fixtures, options) {
     'identity.clear': unavailable,
     'identity.reset': unavailable,
     'identity.forget': unavailable,
+    // A Página's keys and sealed posts live only on a device holding them.
+    'group.seal': unavailable,
+    'dm.pageGenerate': unavailable,
+    'dm.pageShare': unavailable,
+    'dm.pageSecrets': unavailable,
+    'dm.pageDraft': unavailable,
+    'dm.pageSend': unavailable,
+    'dm.pageLegacyChunk': unavailable,
+    'dm.pageLegacyBlocks': unavailable,
+    'dm.pageForget': unavailable,
     'identity.sessionSaved': () => ({}),
     'identity.recoveryLookup': unavailable,
     'identity.recoveryOpen': unavailable,
@@ -937,6 +955,8 @@ export function createVitrineRequest (fixtures, options) {
     listings: [...logs.keys()].flatMap(folded),
     rates: [...logs].flatMap(([author, entries]) => entries.filter((e) => e.record.type === 'listing-rate' && !deleted.has(`${author}:${e.seq}`)).map((e) => ({ author, ...e })))
   })
+  request.live = () => copy(live)
   currentFeira = request.feira
+  currentLive = request.live
   return request
 }
