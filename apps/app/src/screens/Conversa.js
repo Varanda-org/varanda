@@ -532,7 +532,7 @@ export function identityOf (names, author, item) {
 // The PostRow props for an assembled (or seed) post item. `extra` overrides
 // (repostedBy, onOpenReposter, replyToName...).
 export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, handlers, extra = {} }) {
-  const { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete } = handlers
+  const { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete, onMessage } = handlers
   const ref = refOf(item.author, item.seq)
   const who = identityOf(names, item.author, item)
   const hasSeq = Number.isSafeInteger(item.seq) && item.seq >= 1
@@ -549,6 +549,10 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
   }
   const parentRef = item.replyTo ? refOf(item.replyTo.author, item.replyTo.seq) : null
   const reportable = typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey && hasSeq
+  // Someone else's post, not a page's: PostRow adds the hosted check.
+  const authorProfile = names.profileOf(item.author)
+  const messageable = typeof onMessage === 'function' && typeof ownKey === 'string' && hasSeq &&
+    String(item.author).toLowerCase() !== ownKey.toLowerCase() && !(authorProfile && authorProfile.page === true)
   return {
     author: item.author,
     name: who.name,
@@ -582,6 +586,8 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     onDelete: hasSeq && typeof onDelete === 'function' && canDelete(item, typeof ownKey === 'string' ? ownKey.toLowerCase() : null, actingPageKey())
       ? () => onDelete({ ref, seq: item.seq })
       : undefined,
+    seq: hasSeq ? item.seq : undefined,
+    onMessage: messageable ? onMessage : undefined,
     ...extra
   }
 }
@@ -633,7 +639,7 @@ const INITIAL = {
   refreshing: false
 }
 
-export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast, onDeletedPost }) {
+export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onToast, onDeletedPost, onMessage }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -795,7 +801,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       })
     }
   })
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
   const props = (item, extra) => rowProps({ item, names, peeked: peekedRef.current, now, ownKey, follows, eng: full ? eng : null, handlers, extra })
 
   const title = 'Conversa'
@@ -821,6 +827,7 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
   if (view.parentGone) notes.push(PARENT_GONE_NOTE)
   if (meta && meta.indexing) notes.push('Ainda montando a conversa completa…')
   else if (meta && meta.complete === false) notes.push('Algumas respostas podem faltar.')
+  const hasReplies = (meta ? meta.repliesTotal : 0) > 0 || replies.length > 0
   if (unavailable > 0) notes.push(unavailable === 1 ? '1 resposta indisponível' : String(unavailable) + ' respostas indisponíveis')
 
   const header = (
@@ -850,12 +857,17 @@ export default function Conversa ({ entry, ownKey, onBack, onReply, onQuote, onR
       {phase === 'error'
         ? <ErrorState message={displayText(error)} onRetry={() => load(false)} />
         : null}
-      {phase === 'ready'
+      {/* No "0 respostas" header over an empty thread; the notes still show. */}
+      {phase === 'ready' && (hasReplies || notes.length > 0)
         ? (
           <View style={styles.repliesHead}>
-            <Text style={styles.repliesTitle} accessibilityRole='header'>
-              {meta && meta.repliesTotal === 1 ? '1 resposta' : String(meta ? meta.repliesTotal : 0) + ' respostas'}
-            </Text>
+            {hasReplies
+              ? (
+                <Text style={styles.repliesTitle} accessibilityRole='header'>
+                  {meta && meta.repliesTotal === 1 ? '1 resposta' : String(meta ? meta.repliesTotal : 0) + ' respostas'}
+                </Text>
+                )
+              : null}
             {notes.map((n) => <Soft key={n}>{n}</Soft>)}
           </View>
           )

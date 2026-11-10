@@ -86,15 +86,16 @@ const makeStyles = (colors) => StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    // 6 top padding + 1 pt top border + 42 pt for the centred 27 pt icon = 49.
-    paddingTop: 6,
+    // The 1 pt top border plus 48 pt of tabs make the 49 pt bar (layout.tabBar).
     paddingHorizontal: 8,
     flexDirection: 'row',
     backgroundColor: colors.tabBar,
     borderTopWidth: 1,
     borderTopColor: colors.line
   },
-  tab: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  // 48 pt tall, the full height inside the bar's 1 pt border, so the whole
+  // strip under each icon is a tap target (Apple HIG: at least 44 pt).
+  tab: { flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: layout.tabBar - 1 },
   // Anchors the dot to the icon's corner rather than the whole tab.
   iconWrap: { position: 'relative' },
   pressed: { opacity: 0.65 },

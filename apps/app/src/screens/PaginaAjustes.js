@@ -14,6 +14,18 @@
 // Only the owner closes the page or moves it to a new key. An uncertain
 // close or move keeps its signed bytes: 'Tentar de novo' resends them and
 // nothing is signed again.
+//
+// The page's Conversas keys (docs/rpc.md 5.84, 5.114): once activated, an
+// invite carries the invitee's share, a removal carries new keys for the
+// remaining roster (dmBox, prepared once: 'Tentar de novo' resends that same
+// request) and a move carries K2's first keys. Members without a share of the
+// current gen are listed for the owner with 'Enviar chave'.
+//
+// 'Renovar chave dos grupos' (owner, once the Conversas are active): moves
+// every private group of the page to a writer boxed to the page's current
+// group key ('group-rebox'). The service runs it by itself after a key change;
+// the button is for a page activated before that, or to finish a pending one.
+// A group with no room for the new writer is left and listed.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
@@ -31,7 +43,8 @@ import { fetchMember } from '../indexClient'
 import { planPeeks } from '../thread'
 import { peekAll, refOf } from './Conversa'
 import { revokeUrl, urlFromBytes } from '../media/display'
-import { TEXTS, actAs, pagesAvatar, pagesClose, pagesMove, pagesOrigin, pagesStart } from '../pages'
+import { PAGE_DM_CORE_ONLY, TEXTS, actAs, pagesAvatar, pagesGroup, pagesClose, pagesDmAdopt, pagesDmAdoptNew, pagesDmAwaitsAdopt, pagesDmBoxRead, pagesDmExpectAdopt, pagesDmForgetAdopt, pagesDmInviteShare, pagesDmPrepare, pagesDmCoreOnly, pagesDmShareTo, pagesMove, pagesOrigin, pagesStart } from '../pages'
+import { PAGE_DM_CONFLICT, PAGE_DM_KEY_PENDING, PAGE_DM_ROTATING, PAGE_DM_SEND_KEY, hasDeviceKeys, missingShares, pageKeyText } from '../pageSecrets'
 import { FRESH_FAILED, mergeProfile, profileOp } from '../pageProfile'
 import { usePageMember } from './Paginas'
 import { copyText } from '../share'
@@ -39,7 +52,8 @@ import { shareNav } from '../shareNav'
 import { MAX_ADMINS, cancelOfferOp, closeOp, inviteOp, moveOp, offerOp, removeOp, rosterRows } from '../pageRoster'
 import { pagesOn } from '../pageGate'
 import * as actingAs from '../actingAs'
-import { Btn, ErrorText, Field, Notice, Page, Row, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { Btn, ConfirmStack, ErrorText, Field, Notice, Page, Row, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { refusalOf } from '../wordCheck'
 import { Avatar } from '../ui/Avatar'
 import { AvatarEditor } from '../ui/AvatarEditor'
 import { Pill } from '../ui/Pill'
@@ -64,6 +78,20 @@ const ADMINS_UNAVAILABLE = 'lista de administradores indisponível'
 const MOVE_SOFT = 'Use se desconfiar que a chave vazou. Quem segue continua vendo a página e pode seguir a chave nova.'
 const MOVE_UNKNOWN = 'Não deu para ler o estado da página agora. Tente de novo antes de mudar a chave.'
 const LIFECYCLE_UNCERTAIN = 'Não sabemos se o pedido chegou. Confira a página antes de tentar de novo.'
+const DM_KEYS_UNKNOWN = 'Não deu para ler a chave das Conversas da página. Tente de novo.'
+const SEND_KEY_SOFT = 'Estas pessoas ainda não têm a chave das Conversas da página.'
+const REBOX_LABEL = 'Renovar chave dos grupos'
+const REBOX_SOFT = 'Passa os grupos privados da página para a chave atual, guardada só nos aparelhos do dono e dos administradores.'
+const REBOX_LEFT = 'A página saiu deste grupo para trocar a chave; peça para entrar de novo'
+const REBOX_NEEDED = 'Renove a chave dos grupos privados da página'
+const REBOX_UNCERTAIN = 'Não sabemos se o pedido chegou. Toque em Tentar de novo para reenviar o mesmo pedido.'
+
+// A refusal about the page's keys, in the words of the screen.
+const keyFailure = (err) => {
+  if (err && err.uncertain !== true && err.code === 'conflito') err.message = PAGE_DM_CONFLICT
+  if (err && err.uncertain !== true && err.code === 'rotacao-necessaria') err.message = PAGE_DM_ROTATING
+  throw err
+}
 
 // The two steps of 'Encerrar página', naming the @nome.
 const closeWarning = (handle) => 'Encerrar ' + (handle || 'esta página') + '? As publicações deixam de aparecer para quem estiver com o aplicativo em dia. Cópias que alguém já tenha guardado continuam existindo.'
@@ -176,6 +204,15 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
   const [lifeUncertain, setLifeUncertain] = useState(null) // { kind, err, to? }: err.retry() resends the same bytes
   const [movedKey, setMovedKey] = useState(null)
   const [copyNote, setCopyNote] = useState('')
+  const [dmStatus, setDmStatus] = useState(undefined) // 'dm-box-read' answer, null when it failed
+  const [removeHold, setRemoveHold] = useState(null) // the uncertain removal: err.retry() resends it
+  const [shareHold, setShareHold] = useState(null) // { to, err } of an uncertain 'Enviar chave'
+  const [adoptHold, setAdoptHold] = useState(null) // { page, gen, error }: a new gen the service took, not yet held here
+  const [adopting, setAdopting] = useState(false)
+  const shareAct = useAction()
+  const reboxAct = useAction()
+  const [reboxHold, setReboxHold] = useState(null) // the uncertain 'group-rebox': err.retry() resends it
+  const [reboxGroups, setReboxGroups] = useState([]) // [{ group, name, text }] of the last answer
   const seqRef = useRef(0)
   const aliveRef = useRef(true)
   const baseRef = useRef(null)
@@ -199,6 +236,14 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
           st = null
         }
       }
+      let box = null
+      if (value.isOwner === true || value.isAdmin === true) {
+        try {
+          box = await pagesDmBoxRead(node, { member, page })
+        } catch {
+          box = null
+        }
+      }
       let current = baseRef.current
       if (current === null) current = await readProfileOf(node, page)
       if (seq !== seqRef.current) return
@@ -206,6 +251,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
       setProfileFailed(baseRef.current === null)
       setRead(value)
       setStatus(st)
+      setDmStatus(box)
       resolveMany([page, value.owner, ...rosterRows(value).admins, ...(st && st.offer ? [st.offer.to] : [])].filter(Boolean))
     } catch (err) {
       if (seq === seqRef.current) setLoadError(errorText(err))
@@ -326,7 +372,8 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
 
   const nameLen = form ? countChars(form.name) : 0
   const bioLen = form ? countChars(form.bio) : 0
-  const formValid = form !== null && nameLen >= 1 && nameLen <= MAX_NAME && form.name.trim() !== '' && bioLen <= MAX_BIO
+  const profileRefused = form ? refusalOf(form.name, form.bio) : ''
+  const formValid = form !== null && nameLen >= 1 && nameLen <= MAX_NAME && form.name.trim() !== '' && bioLen <= MAX_BIO && profileRefused === ''
   const photoDraft = !!draft && typeof draft === 'object'
   const dirty = form !== null && base !== null && (form.name !== base.name || form.bio !== base.bio || draft !== undefined)
 
@@ -371,14 +418,124 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     const who = await memberOf(inviteHandle, pagesOrigin(node))
     if (roster.rows.some((r) => r.key === who)) throw new Error(ALREADY_ADMIN)
     if (roster.admins.length >= MAX_ADMINS) throw new Error(TEXTS.limite)
-    return actAs(node, { member, action: 'invite', page, op: ({ nonce }) => inviteOp(read, who, { nonce }) })
+    const share = hasDeviceKeys(dmStatus) && dmStatus.rotatePending !== true ? await pagesDmInviteShare(node, { page, to: who, status: dmStatus }) : null
+    return actAs(node, { member, action: 'invite', page, op: ({ nonce }) => share === null ? inviteOp(read, who, { nonce }) : { ...inviteOp(read, who, { nonce }), share } })
   }, () => { setInviteHandle(''); changed(); return 'Convite enviado. A pessoa vê o convite em Páginas e tem 7 dias para aceitar.' })
+
+  // The last step of a remove or a move the service took: this device
+  // adopts the own share of the new gen at once (a fresh 'dm-box-read'), so
+  // a second rotation never replaces secrets it did not keep. A failure
+  // stays on screen with a manual retry; the action itself stands.
+  const adoptNew = async (p, gen) => {
+    setAdopting(true)
+    try {
+      await pagesDmAdoptNew(node, { member, page: p, gen })
+      if (aliveRef.current) setAdoptHold(null)
+    } catch (err) {
+      if (aliveRef.current) setAdoptHold({ page: p, gen, error: pageKeyText(err) || errorText(err) })
+    }
+    if (aliveRef.current) setAdopting(false)
+  }
+  const retryAdopt = () => adoptHold && adoptNew(adoptHold.page, adoptHold.gen)
+  // A definite refusal sent no gen; an uncertain one may have: the guard stays.
+  const forgetOnRefusal = (p, gen) => (err) => {
+    if (!err || err.uncertain !== true) pagesDmForgetAdopt(p, gen)
+    throw err
+  }
+
+  const removed = () => { setRemoveHold(null); changed(); return 'Administrador removido.' }
+  const holdRemove = (err) => {
+    setRemoveHold(err && err.uncertain === true && typeof err.retry === 'function' ? err : null)
+    throw err
+  }
 
   const remove = (key) => run(removeAct, async () => {
     setConfirm(null)
     if (!rosterKnown) throw new Error(ADMINS_UNAVAILABLE)
-    return actAs(node, { member, action: 'remove', page, op: ({ nonce }) => removeOp(read, key, { nonce }) })
-  }, () => { changed(); return 'Administrador removido.' })
+    if (dmStatus === undefined || dmStatus === null) throw new Error(DM_KEYS_UNKNOWN)
+    let dmBox
+    let gen = null
+    if (hasDeviceKeys(dmStatus)) {
+      // A core node holds no page keys: the rotation, and so the remove, waits for the app.
+      if (pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)
+      const rest = { owner: roster.owner, admins: roster.admins.filter((k) => k !== key) }
+      const prep = await pagesDmPrepare(node, { member, page, status: dmStatus, roster: rest })
+      dmBox = prep.dmBox
+      gen = prep.gen
+      pagesDmExpectAdopt(page, gen)
+    }
+    const tag = (err) => { if (err) err.adoptGen = gen; throw err }
+    const out = await actAs(node, { member, action: 'remove', page, op: ({ nonce }) => removeOp(read, key, { nonce }), dmBox })
+      .catch(gen === null ? (e) => { throw e } : forgetOnRefusal(page, gen)).catch(tag).catch(keyFailure).catch(holdRemove)
+    if (gen !== null) await adoptNew(page, gen)
+    return out
+  }, removed)
+
+  // The same prepared removal again, only on a tap; then its adoption.
+  const retryRemove = () => {
+    const held = removeHold
+    if (!held) return
+    const gen = Number.isInteger(held.adoptGen) ? held.adoptGen : null
+    return run(removeAct, async () => {
+      const out = await held.retry().catch(gen === null ? (e) => { throw e } : forgetOnRefusal(page, gen)).catch((err) => { if (err) err.adoptGen = gen; throw err }).catch(keyFailure).catch(holdRemove)
+      if (gen !== null) await adoptNew(page, gen)
+      return out
+    }, removed)
+  }
+
+  // An owner without a share of the current gen (after a transfer) holds
+  // nothing to send: the page's Conversas offer a new gen instead.
+  const missingKeys = isOwner && rosterKnown && dmStatus && hasDeviceKeys(dmStatus) && dmStatus.rotatePending !== true && dmStatus.share ? missingShares(dmStatus, roster) : []
+  const shareDone = () => { setShareHold(null); return 'Chave enviada.' }
+  const holdShare = (to) => (err) => {
+    setShareHold(err && err.uncertain === true && typeof err.retry === 'function' ? { to, err } : null)
+    throw err
+  }
+  // A fresh device holds no secrets yet: the own share from the read this
+  // screen made goes in first, as the inbox does.
+  const sendKey = (to) => run(shareAct, async () => {
+    if (dmStatus && dmStatus.share) await pagesDmAdopt(node, { page, status: dmStatus })
+    return pagesDmShareTo(node, { member, page, to }).catch(keyFailure).catch(holdShare(to))
+  }, shareDone)
+  const retryShare = () => {
+    const held = shareHold
+    if (!held) return
+    return run(shareAct, () => held.err.retry().catch(keyFailure).catch(holdShare(held.to)), shareDone)
+  }
+
+  // The groups the page left (or could not move) are named by the node when
+  // it holds them, else by the start of their key.
+  const groupName = async (group) => {
+    try {
+      const info = await node.request('group.info', { group })
+      if (info && typeof info.name === 'string' && info.name !== '') return displayText(info.name)
+    } catch {}
+    return 'Grupo ' + group.slice(0, 8)
+  }
+  const reboxDone = async (data) => {
+    setReboxHold(null)
+    const keys = (v) => (Array.isArray(v) ? v.filter((g) => typeof g === 'string' && KEY_RE.test(g)) : [])
+    const rows = keys(data && data.left).map((group) => ({ group, text: REBOX_LEFT }))
+    const named = await Promise.all(rows.map(async (r) => ({ ...r, name: await groupName(r.group) })))
+    if (aliveRef.current) setReboxGroups(named)
+    return data
+  }
+  const holdRebox = (err) => {
+    setReboxHold(err && err.uncertain === true && typeof err.retry === 'function' ? err : null)
+    throw err
+  }
+  const reboxNotice = (data) => {
+    const n = data && Array.isArray(data.groups) ? data.groups.length : 0
+    return n === 0 ? 'Nenhum grupo privado precisava de chave nova.' : 'Chave renovada em ' + n + (n === 1 ? ' grupo.' : ' grupos.')
+  }
+  // The service counts the private memberships still on an old box.
+  const reboxWanted = [dmStatus, status].some((v) => !!v && typeof v === 'object' && (v.reboxPending === true || (Number.isSafeInteger(v.reboxNeeded) && v.reboxNeeded > 0)))
+  const rebox = () => run(reboxAct, () => pagesGroup(node, { member, page, action: 'group-rebox' }).then(reboxDone, holdRebox), reboxNotice)
+  const retryRebox = () => {
+    const held = reboxHold
+    if (!held) return
+    return run(reboxAct, () => held.retry().then(reboxDone, holdRebox), reboxNotice)
+  }
 
   const offerPending = !!status && !!status.offer && Date.parse(status.offer.exp) > Date.now()
 
@@ -396,6 +553,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     return actAs(node, { member, action: 'offer', page, op: ({ nonce }) => cancelOfferOp(read, { nonce }) })
   }, () => { changed(); return 'Oferta cancelada.' })
 
+  const renameRefused = refusalOf(isUsername(renameHandle))
   const rename = () => run(renameAct, async () => {
     const username = isUsername(renameHandle)
     if (username === null) throw new Error(NAME_RULE)
@@ -448,17 +606,35 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     return lifecycle('move', async () => {
       if (!rosterKnown) throw new Error(ADMINS_UNAVAILABLE)
       if (fromSeq === null) throw new Error(MOVE_UNKNOWN)
-      return pagesMove(node, {
+      if (dmStatus === undefined || dmStatus === null) throw new Error(DM_KEYS_UNKNOWN)
+      if (hasDeviceKeys(dmStatus) && pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)
+      // K2 starts with its own keys, gen 1, for the same roster, only when
+      // the page has a promoted device gen: a first rotation still pending
+      // at gen 0 is discarded by the move, so it carries none.
+      const dmBox = hasDeviceKeys(dmStatus)
+        ? async ({ to }) => {
+          // The old page's current gen stays readable on this device.
+          if (dmStatus.share) await pagesDmAdopt(node, { page, status: dmStatus })
+          const made = (await pagesDmPrepare(node, { member, page: to, status: { gen: 0 }, roster: { owner: roster.owner, admins: roster.admins }, gen: 1 })).dmBox
+          pagesDmExpectAdopt(to, 1)
+          return made
+        }
+        : undefined
+      const moved = await pagesMove(node, {
         member,
         page,
         op: ({ nonce, to }) => {
           box.to = to
           return moveOp(read, to, { fromSeq, nonce })
-        }
+        },
+        dmBox
       }).catch((err) => {
         if (err && err.uncertain === true && box.to) err.movedTo = box.to
+        if (dmBox && box.to && (!err || err.uncertain !== true)) pagesDmForgetAdopt(box.to, 1)
         throw err
       })
+      if (dmBox) await adoptNew(moved, 1)
+      return moved
     })
   }
 
@@ -468,18 +644,30 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     if (!u || !u.err || typeof u.err.retry !== 'function') return
     const to = u.kind === 'move' && typeof u.err.movedTo === 'string' ? u.err.movedTo : null
     return lifecycle(u.kind, async () => {
+      let out
       try {
-        return await u.err.retry()
+        out = await u.err.retry()
       } catch (err) {
         if (err && err.uncertain === true && to) err.movedTo = to
+        if (u.kind === 'move' && to && (!err || err.uncertain !== true)) pagesDmForgetAdopt(to, 1)
         throw err
       }
+      if (u.kind === 'move' && to && pagesDmAwaitsAdopt(to)) await adoptNew(to, 1)
+      return out
     }, to)
   }
 
   // ---- view ------------------------------------------------------------------
 
-  const busy = profileAct.pending || inviteAct.pending || removeAct.pending || transferAct.pending || renameAct.pending || lifeAct.pending
+  const adoptCard = adoptHold
+    ? (
+      <>
+        <ErrorText>{adoptHold.error}</ErrorText>
+        <Pill label='Tentar de novo' onPress={retryAdopt} disabled={adopting} pending={adopting} />
+      </>
+      )
+    : null
+  const busy = adopting || profileAct.pending || inviteAct.pending || removeAct.pending || transferAct.pending || renameAct.pending || lifeAct.pending || shareAct.pending || reboxAct.pending
   const who = whoOf(profile)
 
   const photo = (
@@ -540,6 +728,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
               {photo}
               <Field label={'nome (' + nameLen + '/' + MAX_NAME + ')'} value={form.name} onChangeText={(v) => setForm({ ...form, name: v })} editable={!busy} />
               <Field label={'bio (' + bioLen + '/' + MAX_BIO + ')'} value={form.bio} onChangeText={(v) => setForm({ ...form, bio: v })} editable={!busy} multiline lines={3} />
+              <ErrorText>{profileRefused}</ErrorText>
               <ErrorText>{profileAct.error}</ErrorText>
               <Btn label='Salvar' onPress={save} disabled={!formValid || !dirty || read.closed === true} pending={profileAct.pending} />
             </>
@@ -573,14 +762,39 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
           ? (
             <View style={styles.confirm}>
               <Soft>{'Remover ' + displayText(whoOf(profileOf(confirm.key)).title) + ' da administração da página?'}</Soft>
-              <Row>
-                <Btn label='Remover' danger onPress={() => remove(confirm.key)} pending={removeAct.pending} />
-                <Btn label='Cancelar' secondary onPress={() => setConfirm(null)} disabled={removeAct.pending} />
-              </Row>
+              <ConfirmStack
+                confirm={<Btn label='Remover' danger onPress={() => remove(confirm.key)} pending={removeAct.pending} />}
+                cancel={<Btn label='Cancelar' secondary onPress={() => setConfirm(null)} disabled={removeAct.pending} />}
+              />
             </View>
             )
           : null}
         <ErrorText>{removeAct.error}</ErrorText>
+        {adoptHold && adoptHold.page === page ? adoptCard : null}
+        {removeHold
+          ? (
+            <>
+              <Soft>{PAGE_DM_KEY_PENDING}</Soft>
+              <Pill label='Tentar de novo' onPress={retryRemove} disabled={busy} pending={removeAct.pending} />
+            </>
+            )
+          : null}
+        {missingKeys.length > 0
+          ? (
+            <>
+              <Soft>{SEND_KEY_SOFT}</Soft>
+              {missingKeys.map((key) => (
+                <PersonRow key={'share-' + key} personKey={key} profile={profileOf(key)} role={key === roster.owner ? 'Dono' : 'Administrador'}>
+                  <Pill label={PAGE_DM_SEND_KEY} onPress={() => sendKey(key)} disabled={busy} />
+                </PersonRow>
+              ))}
+              <ErrorText>{shareAct.error}</ErrorText>
+              {shareHold
+                ? <Pill label='Tentar de novo' onPress={retryShare} disabled={busy} pending={shareAct.pending} />
+                : null}
+            </>
+            )
+          : null}
 
         {isOwner
           ? (
@@ -612,10 +826,10 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
                         ? (
                           <View style={styles.confirm}>
                             <Soft>Oferecer a página a essa pessoa?</Soft>
-                            <Row>
-                              <Btn label='Transferir' danger onPress={transfer} pending={transferAct.pending} />
-                              <Btn label='Cancelar' secondary onPress={() => setConfirm(null)} disabled={transferAct.pending} />
-                            </Row>
+                            <ConfirmStack
+                              confirm={<Btn label='Transferir' danger onPress={transfer} pending={transferAct.pending} />}
+                              cancel={<Btn label='Cancelar' secondary onPress={() => setConfirm(null)} disabled={transferAct.pending} />}
+                            />
                           </View>
                           )
                         : <Btn label='Transferir' secondary onPress={() => setConfirm({ kind: 'transfer' })} disabled={transferHandle.trim() === '' || read.closed === true} />}
@@ -628,8 +842,32 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
               <Soft>{who.subtitle ? 'Agora: ' + displayText(who.subtitle) : 'Sem @nome ainda.'}</Soft>
               <Field label='Novo @nome' value={renameHandle} onChangeText={setRenameHandle} editable={!busy} placeholder='@nome' />
               <Soft>{RENAME_RULE}</Soft>
+              <ErrorText>{renameRefused}</ErrorText>
               <ErrorText>{renameAct.error}</ErrorText>
-              <Btn label='Trocar @nome' secondary onPress={rename} disabled={renameHandle.trim() === '' || read.closed === true} pending={renameAct.pending} />
+              <Btn label='Trocar @nome' secondary onPress={rename} disabled={renameHandle.trim() === '' || renameRefused !== '' || read.closed === true} pending={renameAct.pending} />
+
+              {hasDeviceKeys(dmStatus) && read.closed !== true
+                ? (
+                  <>
+                    <SectionHeader>Grupos privados</SectionHeader>
+                    {reboxWanted ? <Notice>{REBOX_NEEDED}</Notice> : null}
+                    <Soft>{REBOX_SOFT}</Soft>
+                    <Btn label={REBOX_LABEL} secondary onPress={rebox} disabled={busy || reboxHold !== null} pending={reboxAct.pending} />
+                    <ErrorText>{reboxAct.error}</ErrorText>
+                    {reboxHold
+                      ? (
+                        <>
+                          <Soft>{REBOX_UNCERTAIN}</Soft>
+                          <Pill label='Tentar de novo' onPress={retryRebox} disabled={busy} pending={reboxAct.pending} />
+                        </>
+                        )
+                      : null}
+                    {reboxGroups.map((r) => (
+                      <Soft key={'rebox-' + r.group}>{r.name + ': ' + r.text}</Soft>
+                    ))}
+                  </>
+                  )
+                : null}
 
               {movedKey !== null
                 ? (
@@ -644,6 +882,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
                   </View>
                   )
                 : null}
+              {adoptHold && adoptHold.page !== page ? adoptCard : null}
               {lifeUncertain !== null
                 ? (
                   <View style={styles.confirm}>
@@ -664,10 +903,10 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
                       ? (
                         <View style={styles.confirm}>
                           <Soft>Mudar a página para uma chave nova? A chave atual deixa de valer para publicar.</Soft>
-                          <Row>
-                            <Btn label='Mudar a chave' danger onPress={movePage} pending={lifeAct.pending} />
-                            <Btn label='Cancelar' secondary onPress={() => setLife(null)} disabled={lifeAct.pending} />
-                          </Row>
+                          <ConfirmStack
+                            confirm={<Btn label='Mudar a chave' danger onPress={movePage} pending={lifeAct.pending} />}
+                            cancel={<Btn label='Cancelar' secondary onPress={() => setLife(null)} disabled={lifeAct.pending} />}
+                          />
                         </View>
                         )
                       : <Btn label='Mudar a chave' secondary onPress={() => setLife({ kind: 'move', step: 1 })} disabled={busy || !rosterKnown || fromSeq === null} />}
@@ -677,12 +916,12 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
                       ? (
                         <View style={styles.confirm}>
                           <Soft>{life.step === 1 ? closeWarning(who.subtitle ? displayText(who.subtitle) : '') : closeFinal(who.subtitle ? displayText(who.subtitle) : '')}</Soft>
-                          <Row>
-                            {life.step === 1
+                          <ConfirmStack
+                            confirm={life.step === 1
                               ? <Btn label='Continuar' danger onPress={() => setLife({ kind: 'close', step: 2 })} />
                               : <Btn label='Encerrar de vez' danger onPress={closePage} pending={lifeAct.pending} />}
-                            <Btn label='Cancelar' secondary onPress={() => setLife(null)} disabled={lifeAct.pending} />
-                          </Row>
+                            cancel={<Btn label='Cancelar' secondary onPress={() => setLife(null)} disabled={lifeAct.pending} />}
+                          />
                         </View>
                         )
                       : <Btn label='Encerrar página' danger onPress={() => setLife({ kind: 'close', step: 1 })} disabled={busy || !rosterKnown} />}

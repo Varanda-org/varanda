@@ -1,6 +1,7 @@
 'use strict'
 
 const test = require('brittle')
+const { MAX_TESTIMONIAL, TESTIMONIAL_PENDING_MAX, MAX_MESSAGE, MAX_ID, utf8ByteLength } = require('..')
 const { createServerDispatcher, validateResponse, validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME, DM_THREAD_LIMIT_MAX } = require('..')
 
 const KEY = 'ab'.repeat(32)
@@ -17,23 +18,293 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.proof', 'age.sign', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
-    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pull', 'dm.putMedia', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
+    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
-    'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seen',
+    'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
-    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'like.set', 'log.read', 'media.readFile', 'media.uploadFile', 'node.close', 'node.info', 'notices.list',
+    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
-    'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'username.add'
+    'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
-    'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
+    'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
-    'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'media.uploadFile', 'node.close', 'page.register', 'post.create', 'post.delete',
+    'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply',
-    'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'username.add'
+    'profile.delete', 'profile.set', 'repost.set', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
+})
+
+test('testimonial limits', (t) => {
+  t.is(MAX_TESTIMONIAL, 400)
+  t.is(TESTIMONIAL_PENDING_MAX, 64)
+})
+
+const TESTIMONIAL_PARAMS = [
+  ['testimonial.write', { to: KEY, text: 'oi' }, true],
+  ['testimonial.pending', {}, false],
+  ['testimonial.show', { from: KEY, seq: 1 }, true],
+  ['testimonial.delete', { to: KEY + ':1' }, true]
+]
+
+for (const [method, params, mutating] of TESTIMONIAL_PARAMS) {
+  test(method + ': required fields and exact params', (t) => {
+    t.is(isMutating(method), mutating)
+    ok(t, method, params, params)
+    for (const field of Object.keys(params)) {
+      const missing = { ...params }
+      delete missing[field]
+      bad(t, method, missing, 'missing ' + field)
+    }
+    for (const extra of ['extra', 'nonce', 'hash', 'box', 'gen', 'at']) {
+      bad(t, method, { ...params, [extra]: KEY }, 'extra ' + extra)
+    }
+    for (const invalid of [null, [], 'params', 1, Object.create(params)]) {
+      bad(t, method, invalid, 'invalid params object')
+    }
+  })
+}
+
+test('testimonial.write and testimonial.show: lowercase hex64 keys', (t) => {
+  for (const [method, field, base] of [
+    ['testimonial.write', 'to', { text: 'oi' }],
+    ['testimonial.show', 'from', { seq: 1 }]
+  ]) {
+    ok(t, method, { ...base, [field]: KEY })
+    for (const key of ['', 'ab'.repeat(31), 'ab'.repeat(33), KEY.toUpperCase(), 'g'.repeat(64), KEY + '\n', null, undefined, 1, {}]) {
+      bad(t, method, { ...base, [field]: key })
+    }
+  }
+})
+
+test('testimonial.write: text is 1..400 code points', (t) => {
+  for (const text of ['a', 'a'.repeat(400), '😀'.repeat(400)]) {
+    ok(t, 'testimonial.write', { to: KEY, text })
+  }
+  for (const text of ['', 'a'.repeat(401), '😀'.repeat(401), undefined, null, 1, [], {}]) {
+    bad(t, 'testimonial.write', { to: KEY, text })
+  }
+})
+
+test('testimonial.show: positive safe integer seq', (t) => {
+  ok(t, 'testimonial.show', { from: KEY, seq: Number.MAX_SAFE_INTEGER })
+  for (const seq of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, '1', null, undefined]) {
+    bad(t, 'testimonial.show', { from: KEY, seq })
+  }
+})
+
+test('testimonial.delete: canonical ref with positive safe integer seq', (t) => {
+  ok(t, 'testimonial.delete', { to: KEY + ':' + Number.MAX_SAFE_INTEGER })
+  for (const to of [
+    '', KEY, KEY.toUpperCase() + ':1', 'g'.repeat(64) + ':1', 'ab'.repeat(31) + ':1', 'ab'.repeat(33) + ':1',
+    ...['0', '-1', '01', '+1', '1.5', '1e2', '9007199254740992', '1\n'].map((seq) => KEY + ':' + seq),
+    null, undefined, 1, { author: KEY, seq: 1 }
+  ]) bad(t, 'testimonial.delete', { to })
+})
+
+test('testimonial.delete: optional about is a lowercase hex64 key', (t) => {
+  ok(t, 'testimonial.delete', { to: KEY + ':1', about: KEY })
+  for (const about of ['', 'ab'.repeat(31), KEY.toUpperCase(), 'g'.repeat(64), KEY + ':1', null, 1, {}]) {
+    bad(t, 'testimonial.delete', { to: KEY + ':1', about })
+  }
+})
+
+test('testimonial results survive RPC response validation', async (t) => {
+  const seq = Number.MAX_SAFE_INTEGER
+  const row = { from: KEY, seq, text: '😀'.repeat(400), at: '+275760-09-13T00:00:00.000Z' }
+  const results = {
+    'testimonial.write': [{ seq, ref: KEY + ':' + seq }],
+    'testimonial.pending': [{ items: [], incomplete: false }, { items: [], incomplete: true }, { items: Array.from({ length: 64 }, () => ({ ...row })), incomplete: false }],
+    'testimonial.show': [{ seq, ref: KEY + ':' + seq }],
+    'testimonial.delete': [{ seq, deleted: [1] }]
+  }
+  for (const [method, params] of TESTIMONIAL_PARAMS) {
+    for (const result of results[method]) {
+      let receive
+      const response = new Promise((resolve) => { receive = resolve })
+      const dispatcher = createServerDispatcher({
+        handlers: { [method]: () => result },
+        send: (message, json) => { if (message.id === MAX_ID) receive(JSON.parse(json)) }
+      })
+      dispatcher.receive({ v: 1, id: 1, method: 'session.open', params: {} })
+      dispatcher.receive({ v: 1, id: MAX_ID, method, params })
+      const message = await response
+      t.ok(validateResponse(message).ok, method + ' response accepted')
+      t.is(message.ok, true, method + ' succeeded')
+      t.alike(message.result, result, method + ' result preserved')
+      for (const invalid of [null, [], 'result', 1]) {
+        t.absent(validateResponse({ ...message, ok: true, result: invalid }).ok, method + ' requires an object result')
+      }
+      if (method === 'testimonial.pending' && result.items.length === 64) {
+        const bytes = utf8ByteLength(JSON.stringify(message))
+        t.is(bytes, 111689, 'maximal four-byte texts, keys, seqs, dates, incomplete flag and envelope')
+        t.ok(bytes < MAX_MESSAGE, 'pending result fits MAX_MESSAGE')
+      }
+      dispatcher.close()
+    }
+  }
+})
+
+const MOMENT_MEDIA = {
+  id: KEY,
+  key: 'cd'.repeat(32),
+  nonce: 'ef'.repeat(24),
+  chunks: 1,
+  bytes: 17,
+  sha256: '01'.repeat(32),
+  mime: 'image/jpeg',
+  w: 1,
+  h: 1,
+  ms: 0
+}
+const MOMENT_UPLOAD = { name: 'ab'.repeat(16) + '.bin', mime: 'image/jpeg', width: 1, height: 1 }
+const MOMENT_PARAMS = [
+  ['moment.putMedia', MOMENT_UPLOAD, true],
+  ['moment.create', { text: '', media: MOMENT_MEDIA }, true],
+  ['moments.read', {}, false],
+  ['moment.delete', { to: KEY + ':1' }, true]
+]
+
+for (const [method, params, mutating] of MOMENT_PARAMS) {
+  test(method + ': required fields and exact params', (t) => {
+    t.is(isMutating(method), mutating)
+    ok(t, method, params, params)
+    for (const field of Object.keys(params)) {
+      const missing = { ...params }
+      delete missing[field]
+      bad(t, method, missing, 'missing ' + field)
+    }
+    for (const extra of ['extra', 'at', 'type', 'author', 'bytes']) {
+      bad(t, method, { ...params, [extra]: KEY }, 'extra ' + extra)
+    }
+    for (const invalid of [null, [], 'params', 1, Object.create(params)]) {
+      bad(t, method, invalid, 'invalid params object')
+    }
+  })
+}
+
+test('moment.putMedia: image upload bounds and cache name', (t) => {
+  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
+    ok(t, 'moment.putMedia', { ...MOMENT_UPLOAD, mime, width: 16384, height: 16384 })
+  }
+  for (const mime of ['audio/mp4', 'video/mp4', 'image/svg+xml', '', null]) {
+    bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, mime })
+  }
+  for (const field of ['width', 'height']) {
+    for (const value of [0, -1, 16385, 1.5, '1', null]) {
+      bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, [field]: value })
+    }
+  }
+  for (const name of ['', '../' + MOMENT_UPLOAD.name, 'AB'.repeat(16) + '.bin', 'ab'.repeat(15) + '.bin', null]) {
+    bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, name })
+  }
+  for (const [field, value] of [['kind', 'voice'], ['ms', 0], ['to', KEY], ['sealed', true]]) {
+    bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, [field]: value })
+  }
+  bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 1000 })
+})
+
+test('moment.create: text is 0..200 code points and media is one image item', (t) => {
+  for (const text of ['', 'a'.repeat(200), '😀'.repeat(200)]) {
+    ok(t, 'moment.create', { text, media: MOMENT_MEDIA })
+  }
+  for (const text of ['a'.repeat(201), '😀'.repeat(201), null, 1, [], {}]) {
+    bad(t, 'moment.create', { text, media: MOMENT_MEDIA })
+  }
+  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
+    ok(t, 'moment.create', { text: '', media: { ...MOMENT_MEDIA, mime, w: 16384, h: 16384, chunks: 257, bytes: 257 * 32768 } })
+  }
+  for (const field of Object.keys(MOMENT_MEDIA)) {
+    const media = { ...MOMENT_MEDIA }
+    delete media[field]
+    bad(t, 'moment.create', { text: '', media }, 'missing media ' + field)
+  }
+  for (const media of [
+    null, [], [MOMENT_MEDIA], {},
+    { ...MOMENT_MEDIA, extra: true },
+    { ...MOMENT_MEDIA, mime: 'audio/mp4', w: 0, h: 0, ms: 1000 },
+    { ...MOMENT_MEDIA, mime: 'audio/mp4' },
+    { ...MOMENT_MEDIA, mime: 'image/svg+xml' },
+    ...[1, -1, '0', null].map((ms) => ({ ...MOMENT_MEDIA, ms })),
+    ...['id', 'key', 'sha256'].map((field) => ({ ...MOMENT_MEDIA, [field]: KEY.toUpperCase() })),
+    { ...MOMENT_MEDIA, nonce: 'ef'.repeat(23) },
+    { ...MOMENT_MEDIA, chunks: 0 },
+    { ...MOMENT_MEDIA, chunks: 2 },
+    { ...MOMENT_MEDIA, chunks: 258, bytes: 258 * 32768 },
+    { ...MOMENT_MEDIA, bytes: 16 },
+    { ...MOMENT_MEDIA, bytes: 17.5 },
+    ...['w', 'h'].flatMap((field) => [0, 16385, 1.5].map((value) => ({ ...MOMENT_MEDIA, [field]: value })))
+  ]) bad(t, 'moment.create', { text: '', media })
+})
+
+test('moment.delete: canonical ref with positive safe integer seq', (t) => {
+  ok(t, 'moment.delete', { to: KEY + ':' + Number.MAX_SAFE_INTEGER })
+  for (const to of [
+    KEY, KEY + ':0', KEY + ':-1', KEY + ':01', KEY + ':1.5',
+    KEY + ':' + (Number.MAX_SAFE_INTEGER + 1), KEY.toUpperCase() + ':1',
+    KEY + ':1\n', '', null, 1, {}, []
+  ]) bad(t, 'moment.delete', { to })
+})
+
+test('moment results survive RPC response validation', async (t) => {
+  const seq = Number.MAX_SAFE_INTEGER
+  const ref = KEY + ':' + seq
+  const past = { seq, ref, text: '😀'.repeat(200), at: '+275760-09-13T00:00:00.000Z' }
+  const row = { ...past, media: MOMENT_MEDIA }
+  const results = {
+    'moment.putMedia': MOMENT_MEDIA,
+    'moment.create': { seq, ref },
+    'moments.read': { authors: [{ author: 'cd'.repeat(32), items: [{ ...row, ref: 'cd'.repeat(32) + ':' + seq }] }], own: [row], past: [past] },
+    'moment.delete': { seq, deleted: [1] }
+  }
+  for (const [method, params] of MOMENT_PARAMS) {
+    let receive
+    const response = new Promise((resolve) => { receive = resolve })
+    const dispatcher = createServerDispatcher({
+      handlers: { [method]: () => results[method] },
+      send: (message, json) => { if (message.id === MAX_ID) receive(JSON.parse(json)) }
+    })
+    dispatcher.receive({ v: 1, id: 1, method: 'session.open', params: {} })
+    dispatcher.receive({ v: 1, id: MAX_ID, method, params })
+    const message = await response
+    t.ok(validateResponse(message).ok, method + ' response accepted')
+    t.is(message.ok, true, method + ' succeeded')
+    t.alike(message.result, results[method], method + ' result preserved')
+    dispatcher.close()
+  }
+})
+
+test('moments.read: the worst case under the caps fits MAX_MESSAGE', async (t) => {
+  // 32 authors x 4 items, 4 own items and 16 past records (docs/rpc.md 5.113),
+  // every field at its longest.
+  const seq = Number.MAX_SAFE_INTEGER
+  const past = { seq, ref: KEY + ':' + seq, text: '😀'.repeat(200), at: '+275760-09-13T00:00:00.000Z' }
+  const media = { ...MOMENT_MEDIA, chunks: 257, bytes: 257 * 32768, w: 16384, h: 16384 }
+  const live = (author, j) => ({ ...past, seq: seq - j, ref: author + ':' + (seq - j), media })
+  const result = {
+    authors: Array.from({ length: 32 }, (_, i) => {
+      const author = (i + 1).toString(16).padStart(64, '0')
+      return { author, items: Array.from({ length: 4 }, (_, j) => live(author, j)) }
+    }),
+    own: Array.from({ length: 4 }, (_, j) => live(KEY, j)),
+    past: Array.from({ length: 16 }, (_, i) => ({ ...past, seq: seq - i, ref: KEY + ':' + (seq - i) }))
+  }
+  const bytes = utf8ByteLength(JSON.stringify({ v: 1, id: MAX_ID, ok: true, result }))
+  t.ok(bytes <= MAX_MESSAGE, 'maximal texts, descriptors, refs, seqs, dates and envelope fit (' + bytes + ' bytes)')
+  let receive
+  const response = new Promise((resolve) => { receive = resolve })
+  const dispatcher = createServerDispatcher({
+    handlers: { 'moments.read': () => result },
+    send: (message, json) => { if (message.id === MAX_ID) receive(JSON.parse(json)) }
+  })
+  dispatcher.receive({ v: 1, id: 1, method: 'session.open', params: {} })
+  dispatcher.receive({ v: 1, id: MAX_ID, method: 'moments.read', params: {} })
+  const message = await response
+  t.ok(validateResponse(message).ok, 'a valid response')
+  t.is(message.ok, true, 'the worst case is answered')
+  dispatcher.close()
 })
 
 test('seen.sign', (t) => {
@@ -188,6 +459,25 @@ test('account.sign', (t) => {
   }
 })
 
+test('appeal.sign', (t) => {
+  const base = { nonce: 'n'.repeat(43) }
+  t.absent(isMutating('appeal.sign'))
+  ok(t, 'appeal.sign', base, { ...base, text: '' })
+  ok(t, 'appeal.sign', { ...base, text: 'foi um engano' })
+  ok(t, 'appeal.sign', { ...base, text: 'a'.repeat(1000) })
+  ok(t, 'appeal.sign', { nonce: 'A-_9'.repeat(32) }, { nonce: 'A-_9'.repeat(32), text: '' })
+  bad(t, 'appeal.sign', {})
+  bad(t, 'appeal.sign', { text: 'x' }, 'missing nonce')
+  // The caller never chooses the member, the association or the bytes.
+  for (const k of ['member', 'association', 'payload', 'bytes', 'key', 'target', 'reason']) {
+    bad(t, 'appeal.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const text of ['a'.repeat(1001), 1, null]) bad(t, 'appeal.sign', { ...base, text }, 'text ' + String(text).slice(0, 8))
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
+    bad(t, 'appeal.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
+})
+
 test('terms.sign', (t) => {
   const base = { nonce: 'n'.repeat(43), version: 1 }
   t.absent(isMutating('terms.sign'))
@@ -230,6 +520,51 @@ test('invite.sign', (t) => {
   for (const action of ['revoke', 'read', 'SUMMARY', 'ISSUE', '', null, 1]) bad(t, 'invite.sign', { ...base, action }, 'action ' + action)
   for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
     bad(t, 'invite.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
+})
+
+test('inviteCard.sign and inviteCard.verify', (t) => {
+  const base = { code: 'A-_9'.repeat(10) + 'abc', design: 'cordel', name: 'Ana Souza', message: 'Vem pra Varanda!\nTe espero lá.', expires: 1800000000 }
+  const full = { ...base, member: KEY, signature: 'cd'.repeat(64) }
+  t.absent(isMutating('inviteCard.sign'))
+  t.absent(isMutating('inviteCard.verify'))
+  ok(t, 'inviteCard.sign', base, base)
+  ok(t, 'inviteCard.verify', full, full)
+  ok(t, 'inviteCard.sign', { ...base, design: 'chimarrao', name: 'a'.repeat(40), message: 'é'.repeat(100), expires: 2 ** 32 - 1 })
+  ok(t, 'inviteCard.sign', { ...base, message: 'x' })
+  for (const [method, p0] of [['inviteCard.sign', base], ['inviteCard.verify', full]]) {
+    bad(t, method, {})
+    for (const k of Object.keys(p0)) {
+      const p = { ...p0 }
+      delete p[k]
+      bad(t, method, p, 'missing ' + k)
+    }
+    for (const design of ['Cordel', 'nope', '', 0, 3, null]) bad(t, method, { ...p0, design }, 'design ' + design)
+    for (const name of ['a'.repeat(41), '', ' Ana', 'Ana ', 'A\u0000na', 'A\nna', 'A\u202ena', 'Jose\u0301', 1, null]) {
+      bad(t, method, { ...p0, name }, 'name ' + JSON.stringify(name))
+    }
+    for (const message of ['', ' oi', 'oi\n', 'o\u0007i', 'o\ri', 'o\u202ei', 'a'.repeat(201), 'é'.repeat(101), null]) {
+      bad(t, method, { ...p0, message }, 'message ' + JSON.stringify(message).slice(0, 20))
+    }
+    for (const expires of [0, -1, 2 ** 32, 1.5, '1800000000', null]) bad(t, method, { ...p0, expires }, 'expires ' + expires)
+    for (const code of ['a'.repeat(42), 'a'.repeat(44), 'a'.repeat(42) + '=', 'a'.repeat(42) + '+', 1]) {
+      bad(t, method, { ...p0, code }, 'code ' + code)
+    }
+    for (const k of ['digest', 'payload', 'bytes', 'url', 'origin']) bad(t, method, { ...p0, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  // The caller never chooses the member or the association on sign.
+  for (const k of ['member', 'association', 'signature']) {
+    bad(t, 'inviteCard.sign', { ...base, [k]: k === 'signature' ? 'cd'.repeat(64) : KEY }, 'sign extra ' + k)
+  }
+  bad(t, 'inviteCard.verify', { ...full, association: KEY }, 'verify extra association')
+  for (const member of ['AB'.repeat(32), 'ab'.repeat(31), 'ab'.repeat(33), '', 1]) bad(t, 'inviteCard.verify', { ...full, member }, 'member ' + member)
+  for (const signature of ['CD'.repeat(64), 'cd'.repeat(63), 'cd'.repeat(65), KEY, 1]) {
+    bad(t, 'inviteCard.verify', { ...full, signature }, 'signature ' + String(signature).slice(0, 8))
+  }
+  // invite.sign keeps exactly action and nonce.
+  ok(t, 'invite.sign', { action: 'issue', nonce: 'n'.repeat(43) })
+  for (const k of Object.keys(base)) {
+    bad(t, 'invite.sign', { action: 'issue', nonce: 'n'.repeat(43), [k]: base[k] }, 'invite.sign extra ' + k)
   }
 })
 
@@ -373,6 +708,88 @@ test('report.sign', (t) => {
   t.alike(validateParams('report.sign', { ...account, anexo }), { ok: false, code: 'USAGE', message: 'anexo só com writer' })
   for (const a of ['', anexo.toUpperCase(), anexo.slice(1), anexo + '0', 1, null]) bad(t, 'report.sign', { ...group, anexo: a }, 'anexo ' + a)
   bad(t, 'report.sign', { ...group, anexo, bytes: 'AAAA' }, 'the image bytes never reach the node')
+  // kind listing: a listing of the target's diary, never a group message.
+  const listing = { ...post, kind: 'listing' }
+  ok(t, 'report.sign', listing, listing)
+  for (const kind of ['post', 'Listing', '', null, true]) bad(t, 'report.sign', { ...post, kind }, 'kind ' + kind)
+  t.alike(validateParams('report.sign', { ...account, kind: 'listing' }), { ok: false, code: 'USAGE', message: 'kind listing só com seq' })
+  for (const extra of [{ writer: KEY }, { writer: KEY, group: KEY }, { writer: KEY, group: KEY, anexo }]) {
+    t.alike(validateParams('report.sign', { ...listing, ...extra }), { ok: false, code: 'USAGE', message: 'kind listing sem writer, group ou anexo' })
+  }
+})
+
+test('listing.*', (t) => {
+  const place = { uf: 'SP', city: 'São Paulo', bairro: 'Pinheiros' }
+  const create = { kind: 'produto', title: 'Bicicleta', text: '', price: 50000, unit: null, cat: 'esporte', place }
+  const descriptor = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: KEY, width: 10, height: 10 }
+  for (const m of ['listing.create', 'listing.status', 'listing.delete', 'listing.edit', 'listing.rate']) t.ok(isMutating(m), m)
+  for (const m of ['listing.mine', 'listing.consent', 'listing.ratings']) t.absent(isMutating(m), m)
+
+  ok(t, 'listing.create', create, create)
+  ok(t, 'listing.create', { ...create, media: [descriptor, descriptor, descriptor, descriptor] })
+  ok(t, 'listing.create', { ...create, kind: 'servico', unit: 'hora' })
+  ok(t, 'listing.create', { ...create, price: null })
+  ok(t, 'listing.create', { ...create, price: 0 })
+  bad(t, 'listing.create', { ...create, extra: 1 }, 'unknown key')
+  bad(t, 'listing.create', { ...create, place: { ...place, uf: 'XX' } }, 'bad uf')
+  bad(t, 'listing.create', { ...create, place: { ...place, cep: '01000' } }, 'place extra key')
+  bad(t, 'listing.create', { ...create, price: 1.5 }, 'float price')
+  bad(t, 'listing.create', { ...create, media: [descriptor, descriptor, descriptor, descriptor, descriptor] }, '5th photo')
+  bad(t, 'listing.create', { ...create, unit: 'hora' }, 'produto per hour')
+  bad(t, 'listing.create', { ...create, kind: 'procura', unit: 'a-partir' }, 'procura with a unit')
+  bad(t, 'listing.create', { ...create, kind: 'servico', price: 0, unit: 'hora' }, 'free per hour')
+  bad(t, 'listing.create', { ...create, title: '' }, 'empty title')
+  bad(t, 'listing.create', { ...create, title: 'x'.repeat(81) }, 'long title')
+  bad(t, 'listing.create', { ...create, text: 'x'.repeat(MAX_TEXT + 1) }, 'long text')
+  bad(t, 'listing.create', { ...create, cat: 'carros' }, 'bad cat')
+  const noUnit = { ...create }
+  delete noUnit.unit
+  bad(t, 'listing.create', noUnit, 'unit is required')
+
+  const to = KEY + ':3'
+  ok(t, 'listing.status', { to, status: 'vendido' })
+  bad(t, 'listing.status', { to, status: 'encontrado' }, 'bad status')
+  bad(t, 'listing.status', { to: KEY + ':0', status: 'vendido' }, 'seq 0')
+  ok(t, 'listing.delete', { to })
+  bad(t, 'listing.delete', { to, status: 'vendido' })
+
+  const edit = { to, expectedRevision: 0, title: 'Bicicleta', text: 'x', price: 100, unit: 'hora', cat: 'esporte', place, media: null }
+  ok(t, 'listing.edit', edit, edit)
+  ok(t, 'listing.edit', { ...edit, media: [descriptor] })
+  const noMedia = { ...edit }
+  delete noMedia.media
+  bad(t, 'listing.edit', noMedia, 'media is required')
+  bad(t, 'listing.edit', { ...edit, expectedRevision: -1 })
+  bad(t, 'listing.edit', { ...edit, price: 0 }, 'free with a unit')
+  bad(t, 'listing.edit', { ...edit, kind: 'servico' }, 'kind never changes')
+
+  ok(t, 'listing.mine', {}, { limit: 20 })
+  ok(t, 'listing.mine', { before: 9, limit: 1 })
+  for (const limit of [0, 21, 1.5]) bad(t, 'listing.mine', { limit }, 'limit ' + limit)
+  bad(t, 'listing.mine', { before: 0 })
+
+  const consent = { to, rater: KEY, offer: 'c'.repeat(32) }
+  ok(t, 'listing.consent', consent, consent)
+  bad(t, 'listing.consent', { ...consent, offer: 'c'.repeat(31) })
+  bad(t, 'listing.consent', { ...consent, rater: KEY.toUpperCase() })
+
+  const rate = { to, offer: 'c'.repeat(32), consent: 'd'.repeat(128), stars: 5, text: '' }
+  ok(t, 'listing.rate', rate, rate)
+  ok(t, 'listing.rate', { ...rate, text: '😀'.repeat(280) })
+  bad(t, 'listing.rate', { ...rate, stars: 6 }, 'stars 6')
+  bad(t, 'listing.rate', { ...rate, stars: 0 }, 'stars 0')
+  bad(t, 'listing.rate', { ...rate, consent: 'd'.repeat(127) }, 'consent of 127 chars')
+  bad(t, 'listing.rate', { ...rate, text: 'x'.repeat(281) })
+
+  const refs = Array.from({ length: 32 }, (_, i) => ({ rater: KEY, seq: i + 1 }))
+  ok(t, 'listing.ratings', { author: KEY, seq: 4, refs })
+  bad(t, 'listing.ratings', { author: KEY, refs })
+  bad(t, 'listing.ratings', { author: KEY, seq: 0, refs })
+  bad(t, 'listing.ratings', { author: KEY, seq: 4, refs: [] })
+  bad(t, 'listing.ratings', { author: KEY, seq: 4, refs: [...refs, { rater: KEY, seq: 33 }] })
+  bad(t, 'listing.ratings', { author: KEY, seq: 4, refs: [{ rater: KEY, seq: 0 }] })
+  bad(t, 'listing.ratings', { author: KEY, seq: 4, refs: [{ rater: KEY, seq: 1, x: 1 }] })
+  bad(t, 'listing.ratings', { author: KEY, seq: 4, refs: [{ rater: KEY }] })
 })
 
 test('username.add', (t) => {
@@ -612,7 +1029,24 @@ test('diary.peek requires an author and dense strictly ascending seqs', (t) => {
     }
   }
   ok(t, 'diary.peek', { ...base, profileSeq: 1, usernameSeq: 2 })
+  ok(t, 'diary.peek', { ...base, profileOnly: true }, { ...base, profileOnly: true })
+  t.absent('profileOnly' in validateParams('diary.peek', base).value, 'absent stays absent')
+  for (const v of [null, 'true', 1]) t.is(validateParams('diary.peek', { ...base, profileOnly: v }).message, 'parâmetro inválido: profileOnly')
   t.is(validateParams('diary.peek', { ...base, extra: true }).message, 'parâmetro desconhecido')
+})
+
+test('block.*', (t) => {
+  t.ok(isMutating('block.set'))
+  t.absent(isMutating('block.list'))
+  ok(t, 'block.set', { key: KEY, on: true }, { key: KEY, on: true })
+  ok(t, 'block.set', { key: KEY, on: false }, { key: KEY, on: false })
+  bad(t, 'block.set', { key: KEY })
+  bad(t, 'block.set', { on: true })
+  bad(t, 'block.set', { key: KEY.toUpperCase(), on: true })
+  bad(t, 'block.set', { key: KEY, on: 'true' })
+  bad(t, 'block.set', { key: KEY, on: true, name: 'x' })
+  ok(t, 'block.list', {}, {})
+  bad(t, 'block.list', { key: KEY })
 })
 
 test('follow.*', (t) => {
@@ -1416,6 +1850,28 @@ test('media.readFile', (t) => {
   bad(t, 'media.readFile', { ...group, diary: 'x' }, 'bad diary')
   bad(t, 'media.readFile', { ...dm, diary: KEY }, 'dm with a group field')
   bad(t, 'media.readFile', { ...group, index: 0 }, 'group with a dm field')
+  const moment = { kind: 'moment', author: KEY, seq: 1 }
+  ok(t, 'media.readFile', moment, moment)
+  ok(t, 'media.readFile', { ...moment, seq: Number.MAX_SAFE_INTEGER })
+  for (const k of ['author', 'seq']) {
+    const p = { ...moment }
+    delete p[k]
+    bad(t, 'media.readFile', p, 'moment missing ' + k)
+    t.is(validateParams('media.readFile', p).message, 'parâmetro obrigatório: ' + k)
+    for (const other of [dm, group]) {
+      bad(t, 'media.readFile', { ...other, [k]: moment[k] }, other.kind + ' with a moment field')
+    }
+  }
+  for (const author of [KEY.toUpperCase(), KEY.slice(1), '', null, 1]) {
+    bad(t, 'media.readFile', { ...moment, author })
+  }
+  for (const seq of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, '1', null]) {
+    bad(t, 'media.readFile', { ...moment, seq })
+  }
+  for (const [k, value] of Object.entries({ from: KEY, id: ID, index: 0, diary: KEY, item, extra: true })) {
+    bad(t, 'media.readFile', { ...moment, [k]: value }, 'moment with ' + k)
+  }
+  bad(t, 'media.readFile', { ...dm, kind: 'moment' }, 'moment with only dm fields')
   for (const kind of ['', 'DM', 'blob', null, undefined]) bad(t, 'media.readFile', { ...dm, kind }, 'bad kind')
   const { kind, ...noKind } = dm
   bad(t, 'media.readFile', noKind, 'missing kind')
@@ -1697,7 +2153,7 @@ test('page.* (Páginas)', (t) => {
 
   ok(t, 'page.sign', base, base)
   for (const action of ['list', 'status', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar', 'rename', 'invite',
-    'dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen', 'follow', 'follows', 'media', 'notices', 'terms',
+    'dm-list', 'dm-thread', 'follow', 'follows', 'media', 'notices', 'terms',
     'community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read',
     'accept', 'remove', 'offer', 'transfer-accept', 'create', 'close', 'move']) {
     ok(t, 'page.sign', { ...base, action })
@@ -1707,6 +2163,8 @@ test('page.* (Páginas)', (t) => {
   // terms signature for.
   ok(t, 'page.sign', { action: 'terms', nonce, page: '', op: { version: 13, diary: KEY } })
   bad(t, 'page.sign', { ...base, action: 'offer-cancel', op: {} }, 'the unsigned offer-cancel is gone')
+  // The service no longer holds a page's box: it cannot send, file or mark.
+  for (const action of ['dm-send', 'dm-set', 'dm-seen']) bad(t, 'page.sign', { ...base, action, op: {} }, action + ' is gone')
   // An offer names a recipient and an expiry, or neither (the cancel).
   const offerOp = { to: 'cd'.repeat(32), exp: '2026-11-10T12:00:00.000Z', gen: 2, at, nonce }
   ok(t, 'page.sign', { ...base, action: 'offer', op: offerOp })
@@ -1946,4 +2404,69 @@ test('read results preserve link cards, nulls, replies and quotes over RPC', asy
     t.alike(message.result, result, method + ' cards preserved')
     dispatcher.close()
   }
+})
+
+test('page statement actions: core ACTIONS plus the record actions', (t) => {
+  const { ACTIONS } = require('@varanda/core/lib/page-proof')
+  const { PAGE_ACTIONS } = require('../lib/methods')
+  t.alike([...PAGE_ACTIONS].sort(), [...ACTIONS, 'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'].sort())
+})
+
+test('page end-to-end node methods', (t) => {
+  const PAGE = 'cd'.repeat(32)
+  const sig = 'ab'.repeat(64)
+  const id = '0'.repeat(32)
+  ok(t, 'dm.pageGenerate', { page: PAGE, gen: 1, recipients: [{ member: KEY, box: KEY }] })
+  ok(t, 'dm.pageGenerate', { page: PAGE, gen: 2, recipients: [] })
+  bad(t, 'dm.pageGenerate', { page: PAGE, gen: 0, recipients: [] }, 'gen 0')
+  bad(t, 'dm.pageGenerate', { page: PAGE, gen: 1, recipients: Array.from({ length: 18 }, () => ({ member: KEY, box: KEY })) }, '18 recipients')
+  bad(t, 'dm.pageGenerate', { page: PAGE, gen: 1, recipients: [{ member: KEY }] }, 'recipient without box')
+  ok(t, 'dm.pageShare', { page: PAGE, member: KEY, box: KEY })
+  bad(t, 'dm.pageShare', { page: PAGE, member: KEY })
+  const secrets = { page: PAGE, gen: 1, sealed: 'abc', by: KEY, sig, box: KEY, groupBox: KEY, cert: {} }
+  ok(t, 'dm.pageSecrets', secrets)
+  bad(t, 'dm.pageSecrets', { ...secrets, gen: 0x100000000 }, 'gen above uint32')
+  bad(t, 'dm.pageSecrets', { ...secrets, cert: 'x' }, 'cert must be an object')
+  bad(t, 'dm.pageSecrets', { ...secrets, sealed: 'a'.repeat(1025) }, 'sealed too long')
+  bad(t, 'dm.pageSecrets', { ...secrets, sig: 'ab' }, 'short sig')
+  bad(t, 'dm.pageSecrets', { ...secrets, legacy: { gen: 1, sealed: 'abc' } }, 'the legacy envelope is gone (the bundle carries the box)')
+  t.ok(isMutating('dm.pageSecrets'))
+  t.absent(isMutating('dm.pageGenerate'))
+  t.absent(isMutating('dm.pageShare'))
+  t.absent(isMutating('group.seal'))
+  ok(t, 'dm.pageDraft', { page: PAGE, kind: 'msg', to: KEY, text: 'oi' }, { page: PAGE, kind: 'msg', to: KEY, text: 'oi', fwd: 0 })
+  ok(t, 'dm.pageDraft', { page: PAGE, kind: 'ctl', peer: KEY, op: 'accepted' })
+  bad(t, 'dm.pageDraft', { page: PAGE, kind: 'other' })
+  const expiresAt = Date.parse('2026-01-01T00:10:00.000Z')
+  ok(t, 'dm.pageSend', { page: PAGE, id, signature: sig, expiresAt })
+  ok(t, 'dm.pageSend', { page: PAGE, id, signature: sig, expiresAt: 1 })
+  ok(t, 'dm.pageSend', { page: PAGE, id, signature: sig, expiresAt: Number.MAX_SAFE_INTEGER })
+  bad(t, 'dm.pageSend', { page: PAGE, id, signature: 'x', expiresAt })
+  bad(t, 'dm.pageSend', { page: PAGE, id, signature: sig }, 'expiresAt required')
+  for (const v of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '1', null]) {
+    bad(t, 'dm.pageSend', { page: PAGE, id, signature: sig, expiresAt: v }, 'expiresAt ' + String(v))
+  }
+  const bundle = 'ab'.repeat(32)
+  ok(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 0, count: 1, sealed: 'abc' })
+  ok(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 1023, count: 1024, sealed: 'a'.repeat(60000) })
+  bad(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 1024, count: 1024, sealed: 'abc' }, 'index past 1023')
+  bad(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 0, count: 0, sealed: 'abc' }, 'count 0')
+  bad(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 0, count: 1025, sealed: 'abc' }, 'count over 1024')
+  bad(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 0, count: 1, sealed: 'a'.repeat(60001) }, 'sealed over 60000')
+  bad(t, 'dm.pageLegacyChunk', { page: PAGE, id: 'x', index: 0, count: 1, sealed: 'abc' }, 'id not hex64')
+  bad(t, 'dm.pageLegacyChunk', { page: PAGE, id: bundle, index: 0, count: 1 }, 'sealed required')
+  t.ok(isMutating('dm.pageLegacyChunk'))
+  ok(t, 'dm.pageLegacyBlocks', { page: PAGE })
+  bad(t, 'dm.pageLegacyBlocks', {}, 'page required')
+  t.absent(isMutating('dm.pageLegacyBlocks'))
+  t.is(validateParams('dm.pageImport', { page: PAGE, rows: [] }).message, 'método desconhecido', 'dm.pageImport removed')
+  ok(t, 'dm.pageForget', { page: PAGE })
+  for (const method of ['dm.list', 'dm.thread', 'dm.set', 'dm.seen']) {
+    const base = { 'dm.thread': { peer: KEY }, 'dm.set': { peer: KEY, state: 'accepted' }, 'dm.seen': { peer: KEY } }[method] || {}
+    ok(t, method, { ...base, page: PAGE })
+    bad(t, method, { ...base, page: 'x' })
+  }
+  ok(t, 'group.read', { group: KEY, page: PAGE })
+  ok(t, 'group.seal', { group: KEY, page: PAGE, text: 'oi' }, { group: KEY, page: PAGE, text: 'oi', fwd: 0 })
+  bad(t, 'group.seal', { group: KEY, text: 'oi' }, 'page required')
 })

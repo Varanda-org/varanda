@@ -1238,3 +1238,42 @@ test('presentState: one candidate scan answers as the three full folds', async (
   t.ok(undone > 0, 'some tombstones were undone')
   t.ok(pageKept > 0, 'some tombstones named a page record')
 })
+
+const PLACE = { uf: 'SP', city: 'Recife', bairro: 'Boa Vista' }
+const listingRec = (media) => ({ type: 'listing', kind: 'produto', title: 'Mesa', text: '', price: 100, unit: null, cat: 'moveis', place: PLACE, at: AT, ...(media ? { media } : {}) })
+const editRec = (target, media) => ({ type: 'listing-edit', seq: target, title: 'Mesa', text: '', price: 90, unit: null, cat: 'moveis', place: PLACE, at: AT, ...(media ? { media } : {}) })
+
+test('shownMedia: listing and edit photos, nothing for status or rate', (t) => {
+  const a = desc(K3, 1, 2)
+  const b = desc(K3, 3, 1)
+  t.alike(shownMedia(listingRec([a])), [a])
+  t.alike(shownMedia(listingRec()), [])
+  t.alike(shownMedia(editRec(1, [b])), [b])
+  t.alike(shownMedia(editRec(1)), [])
+  t.alike(shownMedia({ type: 'listing-status', seq: 1, status: 'vendido', at: AT }), [])
+  t.alike(shownMedia({ type: 'listing-rate', to: { author: K2, seq: 1 }, offer: 'f'.repeat(32), consent: 'c'.repeat(128), stars: 5, text: '', at: AT }), [])
+})
+
+test('liveMediaRefs: a live listing root keeps its photos after an edit replaced them', (t) => {
+  const a = desc(K3, 1, 2)
+  const b = desc(K3, 3, 1)
+  const entries = [genesis, { seq: 1, record: listingRec([a]) }, { seq: 2, record: editRec(1, [b]) }]
+  t.alike(liveMediaRefs(entries), [{ core: K3, start: 1, blocks: 2 }, { core: K3, start: 3, blocks: 1 }])
+})
+
+test('deletedRanges: a range a listing shares with a post survives', (t) => {
+  const shared = desc(K3, 1, 2)
+  const own = desc(K3, 5, 1)
+  const ranges = [{ core: K3, start: 1, blocks: 2 }, { core: K3, start: 5, blocks: 1 }]
+  const entries = [genesis, post(1, { text: '', media: [shared] }), { seq: 2, record: listingRec([shared, own]) }, del(3, 2, ranges)]
+  t.is(validateRecord(entries[2].record, 2), null)
+  t.alike(deletedRanges(entries, [K3]), [{ core: K3, start: 5, blocks: 1 }])
+})
+
+test('liveMediaRefs: an edit of a deleted listing shows nothing', (t) => {
+  const a = desc(K3, 1, 1)
+  const b = desc(K3, 2, 1)
+  const entries = [genesis, { seq: 1, record: listingRec([a]) }, { seq: 2, record: editRec(1, [b]) }, del(3, 1, [{ core: K3, start: 1, blocks: 1 }])]
+  t.alike(liveMediaRefs(entries), [])
+  t.alike(deletedRanges([...entries, del(4, 2, [{ core: K3, start: 2, blocks: 1 }])], [K3]), [{ core: K3, start: 2, blocks: 1 }, { core: K3, start: 1, blocks: 1 }])
+})

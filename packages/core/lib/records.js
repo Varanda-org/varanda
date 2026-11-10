@@ -11,6 +11,7 @@
 
 const b4a = require('b4a')
 const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
+const { feira } = require('@varanda/rpc')
 
 const MAX_NAME = 80
 const MAX_BIO = 280
@@ -88,6 +89,30 @@ const GROUP_CONFIRM_KEYS = ['type', 'group', 'writer', 'seq', 'digest', 'at']
 const DELETE_KEYS = ['type', 'seq', 'at']
 const DELETE_MEDIA_KEYS = ['type', 'seq', 'at', 'media']
 const DELETE_RANGE_KEYS = ['core', 'start', 'blocks']
+// Depoimentos (docs/protocol.md): the writer's sealed commitment and the
+// recipient's opt-in copy of the text.
+const TESTIMONIAL_KEYS = ['type', 'to', 'gen', 'hash', 'box', 'at']
+const TESTIMONIAL_SHOW_KEYS = ['type', 'from', 'seq', 'text', 'nonce', 'at']
+const MAX_TESTIMONIAL = 400
+// Momentos (docs/protocol.md): one photo in the anonymous blob pool, its key
+// and nonce public in the record, shown by readers for 24 hours. The media
+// item has the DM media item shape (packages/rpc isDmMediaItem), images only.
+const MOMENT_KEYS = ['type', 'text', 'at', 'media']
+const MOMENT_MEDIA_KEYS = ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms']
+const MOMENT_BLOB_KEYS = ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256']
+const MAX_MOMENT_TEXT = 200
+const TESTIMONIAL_SEAL_BYTES = 48 // crypto_box_SEALBYTES
+// The sealed plaintext is canonical JSON {"text":...,"nonce":...}. A valid
+// text has no lone surrogates and no control characters but LF, so no
+// character takes more than 4 bytes in the JSON (a non-BMP character; a
+// quote, a backslash or LF escape to 2).
+const TESTIMONIAL_JSON_FRAME = '{"text":"","nonce":""}'.length + 64
+const MIN_TESTIMONIAL_PLAIN = TESTIMONIAL_JSON_FRAME + 1
+const MAX_TESTIMONIAL_PLAIN = TESTIMONIAL_JSON_FRAME + 4 * MAX_TESTIMONIAL
+const MIN_TESTIMONIAL_SEALED = MIN_TESTIMONIAL_PLAIN + TESTIMONIAL_SEAL_BYTES
+const MAX_TESTIMONIAL_SEALED = MAX_TESTIMONIAL_PLAIN + TESTIMONIAL_SEAL_BYTES
+const MAX_TESTIMONIAL_BOX = Math.ceil(MAX_TESTIMONIAL_SEALED / 3) * 4
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/
 const USERNAME_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 // Same field rules as validateCertShape and validateUsernameRecordShape in
 // lib/cert.js (not imported here); packages/core/test/records.test.js checks parity.
@@ -162,6 +187,51 @@ function hasControlChars (s, allowLf) {
     if (isForbiddenChar(ch.codePointAt(0), allowLf)) return true
   }
   return false
+}
+
+// Lone surrogates would reach the hash as U+FFFD, so two texts could share
+// one commitment.
+function hasLoneSurrogate (s) {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const n = s.charCodeAt(i + 1)
+      if (!(n >= 0xdc00 && n <= 0xdfff)) return true
+      i++
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return true
+    }
+  }
+  return false
+}
+
+function validTestimonialText (text) {
+  if (typeof text !== 'string') return false
+  const len = charLength(text)
+  return len >= 1 && len <= MAX_TESTIMONIAL && !hasControlChars(text, true) && !hasLoneSurrogate(text)
+}
+
+function validMomentText (text) {
+  if (typeof text !== 'string') return false
+  return charLength(text) <= MAX_MOMENT_TEXT && !hasControlChars(text, true) && !hasLoneSurrogate(text)
+}
+
+// Required lazily: lib/blob.js requires this module at load time.
+function validMomentMedia (m) {
+  if (!isPlainObject(m) || !hasExactKeys(m, MOMENT_MEDIA_KEYS)) return false
+  const blob = {}
+  for (const k of MOMENT_BLOB_KEYS) blob[k] = m[k]
+  if (!require('./blob').validateBlobDescriptor(blob)) return false
+  return MEDIA_MIMES.includes(m.mime) && isIntIn(m.w, 1, MAX_MEDIA_DIMENSION) &&
+    isIntIn(m.h, 1, MAX_MEDIA_DIMENSION) && m.ms === 0
+}
+
+// Canonical base64 (padded, the exact re-encoding) of a sealed testimonial.
+function validTestimonialBox (s) {
+  if (typeof s !== 'string' || s.length === 0 || s.length % 4 !== 0) return false
+  if (s.length > MAX_TESTIMONIAL_BOX || !BASE64_RE.test(s)) return false
+  const buf = b4a.from(s, 'base64')
+  return buf.byteLength >= MIN_TESTIMONIAL_SEALED && buf.byteLength <= MAX_TESTIMONIAL_SEALED && b4a.toString(buf, 'base64') === s
 }
 
 function isUsername (s) {
@@ -383,7 +453,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -436,6 +506,24 @@ function check (record, seq) {
     if (!Number.isSafeInteger(record.gen) || record.gen < 1 || record.gen > MAX_DM_KEY_GEN) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
+  if (type === 'testimonial') {
+    if (!hasExactKeys(record, TESTIMONIAL_KEYS) || !isHex64(record.to) || !isHex64(record.hash)) return 'malformed'
+    if (!Number.isSafeInteger(record.gen) || record.gen < 1 || record.gen > MAX_DM_KEY_GEN) return 'malformed'
+    if (!validTestimonialBox(record.box)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'testimonial-show') {
+    if (!hasExactKeys(record, TESTIMONIAL_SHOW_KEYS) || !isHex64(record.from) || !isHex64(record.nonce)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1) return 'malformed'
+    if (!validTestimonialText(record.text)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'moment') {
+    if (!hasExactKeys(record, MOMENT_KEYS)) return 'malformed'
+    if (!validMomentText(record.text)) return 'text-length'
+    if (!validMomentMedia(record.media)) return 'media-invalid'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
   // The creator binds the group root itself: writer may equal group.
   if (type === 'group-join') {
     const withRejoin = hasExactKeys(record, GROUP_JOIN_REJOIN_KEYS)
@@ -454,6 +542,25 @@ function check (record, seq) {
   }
   if (type === 'like' || type === 'repost') {
     if (!hasExactKeys(record, ENGAGEMENT_KEYS) || !validTarget(record.to) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  // Feira (docs/protocol.md, "Feira"): an older reader skips these types as
+  // unknown and the diary is not rejected. Whether an edit or a status
+  // targets a live listing of this diary, and whether a rating is a
+  // self-rating, is the fold's check (lib/listing.js): this module sees one
+  // record, not the diary.
+  if (type === 'listing' || type === 'listing-edit') {
+    const reason = type === 'listing' ? feira.checkListingShape(record) : feira.checkEditShape(record, seq)
+    if (reason !== null) return reason
+    if (Object.prototype.hasOwnProperty.call(record, 'media') && !validMediaList(record.media)) return 'media-invalid'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'listing-status') return feira.checkStatusShape(record, seq)
+  if (type === 'listing-rate') {
+    const reason = feira.checkRateShape(record)
+    if (reason !== null) return reason
+    if (!validTarget(record.to)) return 'target-invalid'
+    if (!/^[0-9a-f]{32}$/.test(record.offer) || !isHex128(record.consent)) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   const withPreview = hasExactKeys(record, POST_PREVIEW_KEYS) || hasExactKeys(record, QUOTE_PREVIEW_KEYS)
@@ -545,6 +652,25 @@ function repostRecord ({ to, on, at = nowIso() } = {}) {
   return build({ type: 'repost', to: copyTarget(to), on, at }, 1)
 }
 
+function testimonialRecord ({ to, gen, hash, box, at = nowIso() } = {}) {
+  return build({ type: 'testimonial', to, gen, hash, box, at }, 1)
+}
+
+function testimonialShowRecord ({ from, seq, text, nonce, at = nowIso() } = {}) {
+  return build({ type: 'testimonial-show', from, seq, text, nonce, at }, 1)
+}
+
+// `media` is copied with exactly the item keys (anything else is passed
+// through for validation to reject).
+function momentRecord ({ text = '', media, at = nowIso() } = {}) {
+  let item = media
+  if (isPlainObject(media)) {
+    item = {}
+    for (const k of MOMENT_MEDIA_KEYS) item[k] = media[k]
+  }
+  return build({ type: 'moment', text, at, media: item }, 1)
+}
+
 function mediaCoreRecord ({ key, at = nowIso() } = {}) {
   return build({ type: 'media-core', key, at }, 1)
 }
@@ -581,6 +707,39 @@ function deleteRecord ({ seq, at = nowIso(), media } = {}) {
   const record = { type: 'delete', seq, at }
   if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyRange) : media
   return build(record, Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
+function copyPlace (p) {
+  if (!isPlainObject(p)) return p
+  return { uf: p.uf, city: p.city, bairro: p.bairro }
+}
+
+function listingFields (record, { title, text = '', price, unit = null, cat, place, media, at = nowIso() }) {
+  Object.assign(record, { title, text, price, unit, cat, place: copyPlace(place), at })
+  // Null or [] is "no photos" (listing.edit sends null to drop them): the
+  // record then has no media key, the only form a reader accepts.
+  if (media === undefined || media === null || (Array.isArray(media) && media.length === 0)) return record
+  record.media = Array.isArray(media) ? media.map(copyDescriptor) : media
+  return record
+}
+
+// `media` is added only when it holds photos, here and in an edit.
+function listingRecord ({ kind, ...fields } = {}) {
+  return build(listingFields({ type: 'listing', kind }, fields), 1)
+}
+
+// The whole new content of listing `seq`; its kind stays the root's.
+// Validated as if appended right after its target, like deleteRecord.
+function listingEditRecord ({ seq, ...fields } = {}) {
+  return build(listingFields({ type: 'listing-edit', seq }, fields), Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
+function listingStatusRecord ({ seq, status, at = nowIso() } = {}) {
+  return build({ type: 'listing-status', seq, status, at }, Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
+function listingRateRecord ({ to, offer, consent, stars, text = '', at = nowIso() } = {}) {
+  return build({ type: 'listing-rate', to: copyTarget(to), offer, consent, stars, text, at }, 1)
 }
 
 function parseRef (str) {
@@ -661,9 +820,21 @@ function plainCopy (value) {
 }
 
 function latestProfile (entries) {
+  return pickProfile(entries, validRecordCopy)
+}
+
+// latestProfile over entries whose records are already validRecordCopy
+// output for that same entry's seq (or null): lib/feed.js copies each entry
+// once per call and hands the copies to every walker. Never pass a caller's
+// records here, they would skip both the copy and the validation.
+function latestProfileOfCopies (copies) {
+  return pickProfile(copies, (record) => record)
+}
+
+function pickProfile (entries, copyOf) {
   let best = null
   for (const { seq, record } of entries) {
-    const copy = validRecordCopy(record, seq)
+    const copy = copyOf(record, seq)
     if (copy === null || copy.type !== 'profile') continue
     if (best === null || seq > best.seq) best = { seq, name: copy.name, bio: copy.bio, avatar: copy.avatar }
   }
@@ -711,6 +882,16 @@ module.exports = {
   MAX_PAGE_GEN,
   DM_KEY_KEYS,
   MAX_DM_KEY_GEN,
+  TESTIMONIAL_KEYS,
+  TESTIMONIAL_SHOW_KEYS,
+  MAX_TESTIMONIAL,
+  MIN_TESTIMONIAL_PLAIN,
+  MAX_TESTIMONIAL_PLAIN,
+  MAX_TESTIMONIAL_SEALED,
+  MAX_TESTIMONIAL_BOX,
+  MOMENT_KEYS,
+  MOMENT_MEDIA_KEYS,
+  MAX_MOMENT_TEXT,
   AVATAR_SIDE,
   MAX_AVATAR_BLOCKS,
   MAX_AVATAR_BYTES,
@@ -719,11 +900,20 @@ module.exports = {
   POST_PREVIEW_KEYS,
   QUOTE_PREVIEW_KEYS,
   DELETE_RANGE_KEYS,
+  LISTING_KEYS: feira.LISTING_KEYS,
+  LISTING_MEDIA_KEYS: feira.LISTING_MEDIA_KEYS,
+  LISTING_EDIT_KEYS: feira.EDIT_KEYS,
+  LISTING_EDIT_MEDIA_KEYS: feira.EDIT_MEDIA_KEYS,
+  LISTING_STATUS_KEYS: feira.STATUS_KEYS,
+  LISTING_RATE_KEYS: feira.RATE_KEYS,
   nowIso,
   isPlainObject,
   hasExactKeys,
   hasControlChars,
   charLength,
+  validTestimonialText,
+  validMomentText,
+  validMomentMedia,
   plainCopy,
   isHex64,
   isHex128,
@@ -740,7 +930,14 @@ module.exports = {
   groupConfirmRecord,
   likeRecord,
   repostRecord,
+  testimonialRecord,
+  testimonialShowRecord,
+  momentRecord,
   deleteRecord,
+  listingRecord,
+  listingEditRecord,
+  listingStatusRecord,
+  listingRateRecord,
   validDescriptor,
   validAudioDescriptor,
   validAvatar,
@@ -751,5 +948,6 @@ module.exports = {
   parseRef,
   formatRef,
   latestProfile,
+  latestProfileOfCopies,
   genesisCert
 }

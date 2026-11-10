@@ -37,12 +37,12 @@ const PRECACHE = __VARANDA_PRECACHE__
 const PREFIX = 'varanda-shell-'
 const CACHE = PREFIX + VERSION
 
-// Paths that are never intercepted (besides /seeder/..., /account/..., /media/..., /blob/... and /index/...):
+// Paths that are never intercepted (besides /seeder/..., /account/..., /media/..., /blob/..., /index/... and /f/...):
 // live configuration, the worker script itself and the seeder's own pages.
 // /version.json is live deploy state written by deploy.sh: never precached,
 // never answered from the cache or with the shell, so offline it fails like
 // any network error. The pathname check below already ignores a query string.
-const BYPASS = new Set(['/varanda.json', '/sw.js', '/seeder', '/version.json'])
+const BYPASS = new Set(['/varanda.json', '/sw.js', '/seeder', '/version.json', '/f'])
 // The account service (Google link, @username; a later moderation panel under
 // /account/mod/) is reverse-proxied by Caddy and never part of the shell. The
 // Google step returns by a top-level navigation to /account/callback?code=…,
@@ -65,6 +65,11 @@ const BLOB_PREFIX = '/blob/'
 // no-store and real 404s: never answered by the worker either (an app route
 // such as /indexes keeps the shell: only the '/index/' prefix is bypassed).
 const INDEX_PREFIX = '/index/'
+// The Feira's public pages (/f/<diary>/<seq>, .../foto/<n>, /f/sitemap.xml)
+// come from the seeder with their own headers and real 404s. Only the '/f/'
+// prefix is bypassed; /anuncio/... is an app route that keeps the shell, and
+// /robots.txt is a Caddy response the worker never looks at.
+const FEIRA_PREFIX = '/f/'
 const BAD_TYPES = new Set(['opaque', 'opaqueredirect', 'error'])
 // Mute deadline for DM wakes after an own send. The cache name must not start
 // with PREFIX (dropOldCaches deletes those), and the fetch handler only ever
@@ -72,6 +77,11 @@ const BAD_TYPES = new Set(['opaque', 'opaqueredirect', 'error'])
 const DM_WAKE_MUTE_MS = 120000
 const DM_STATE_CACHE = 'varanda-dm-state'
 const DM_STATE_KEY = self.location.origin + '/__varanda-dm-state'
+// The member's own block list, which the page reports (src/pushBlocks.web.js):
+// a push from one of these keys stays quiet. Same cache rules as above.
+const BLOCK_STATE_CACHE = 'varanda-block-state'
+const BLOCK_STATE_KEY = self.location.origin + '/__varanda-blocks'
+const BLOCKS_MAX = 500
 
 const abs = (p) => new URL(p, self.location.origin).href
 const RELEASE_META = '<meta name="varanda-release" content="' + VERSION + '">'
@@ -283,7 +293,8 @@ self.addEventListener('fetch', (event) => {
   // /.well-known/ holds the native app association files: a missing one must
   // stay a real 404, never the cached shell.
   if (BYPASS.has(pathname) || pathname.startsWith('/seeder/') || pathname.startsWith('/.well-known/') || pathname.startsWith(ACCOUNT_PREFIX) ||
-    pathname.startsWith(MEDIA_PREFIX) || pathname.startsWith(BLOB_PREFIX) || pathname.startsWith(INDEX_PREFIX)) return
+    pathname.startsWith(MEDIA_PREFIX) || pathname.startsWith(BLOB_PREFIX) || pathname.startsWith(INDEX_PREFIX) ||
+    pathname.startsWith(FEIRA_PREFIX)) return
   if (request.mode === 'navigate') {
     event.respondWith(navigate(request))
   } else if (pathname === '/varanda-node.js') {
@@ -382,7 +393,7 @@ function isAppWindow (c) {
     const p = u.pathname
     return u.origin === self.location.origin && !BYPASS.has(p) && !p.startsWith('/seeder/') &&
       !p.startsWith('/.well-known/') && !p.startsWith(ACCOUNT_PREFIX) && !p.startsWith(MEDIA_PREFIX) &&
-      !p.startsWith(BLOB_PREFIX) && !p.startsWith(INDEX_PREFIX)
+      !p.startsWith(BLOB_PREFIX) && !p.startsWith(INDEX_PREFIX) && !p.startsWith(FEIRA_PREFIX)
   } catch {
     return false
   }
@@ -432,6 +443,41 @@ async function mutedInCache () {
 async function dmWakesMuted () {
   if (mutedInMemory()) return true
   return (await mutedInCache()) || mutedInMemory()
+}
+
+let blockStateWrite = Promise.resolve()
+// null until read from the cache: the worker may have just started for a push.
+let blockedActors = null
+
+function validBlockKeys (keys) {
+  return Array.isArray(keys) && keys.length <= BLOCKS_MAX && keys.every((k) => typeof k === 'string' && HEX64.test(k))
+}
+
+function rememberBlocks (keys) {
+  blockedActors = new Set(keys)
+  blockStateWrite = blockStateWrite.then(async () => {
+    const cache = await caches.open(BLOCK_STATE_CACHE)
+    await cache.put(BLOCK_STATE_KEY, new Response(JSON.stringify({ v: 1, keys }), { headers: { 'content-type': 'application/json' } }))
+  }).catch(() => {})
+  return blockStateWrite
+}
+
+// A read that fails shows the push: losing a notice would be worse.
+async function actorBlocked (actor) {
+  if (blockedActors === null) {
+    try {
+      await blockStateWrite
+      const cache = await caches.open(BLOCK_STATE_CACHE)
+      const res = await cache.match(BLOCK_STATE_KEY)
+      const r = res ? JSON.parse(await res.text()) : null
+      const keys = isPlainObject(r) && r.v === 1 && validBlockKeys(r.keys) ? r.keys : []
+      // A list reported while the cache was being read is newer.
+      if (blockedActors === null) blockedActors = new Set(keys)
+    } catch {
+      return false
+    }
+  }
+  return blockedActors.has(actor)
 }
 
 // True when the wake was handed to a visible, focused app window instead.
@@ -525,6 +571,10 @@ async function showPush (data) {
     }
     options = { body: DM_WAKE_TEXT, icon: '/icon-192.png', tag: 'varanda-dm-wake', renotify: false, data: { kind: 'dm-wake' } }
   } else if (p) {
+    if (await actorBlocked(p.actor)) {
+      await showQuietlyAndClose()
+      return
+    }
     options = {
       body: p.body,
       icon: '/icon-192.png',
@@ -596,7 +646,16 @@ self.addEventListener('notificationclick', (event) => {
 self.addEventListener('message', (event) => {
   try {
     const d = event.data
-    if (!isPlainObject(d) || Object.keys(d).length !== 1) return
+    if (!isPlainObject(d)) return
+    if (d.type === 'varanda-blocks') {
+      const from = event.source
+      if (Object.keys(d).length !== 2 || !validBlockKeys(d.keys)) return
+      if (!from || from.type !== 'window' || !isAppWindow(from)) return
+      const kept = rememberBlocks(d.keys.slice())
+      if (typeof event.waitUntil === 'function') event.waitUntil(kept)
+      return
+    }
+    if (Object.keys(d).length !== 1) return
     if (d.type === 'varanda-push-ping') {
       const port = event.ports && event.ports[0]
       if (port) port.postMessage({ source: 'varanda-sw', push: 1 })

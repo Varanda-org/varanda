@@ -29,6 +29,10 @@
 //   The bar is reply, repost, like, share and 'mais'. The repost button opens
 //   a small sheet (Republicar, and Citar with onQuote); report and delete live
 //   in the 'mais' sheet next to Copiar link, each only with its handler.
+// - onMessage(author, { context }), with the post's `seq`: 'Mensagem em
+//   particular' in the 'mais' sheet, only on a hosted node. The caller passes
+//   it only for someone else's post that is not a page (rowProps,
+//   socialRowProps); the context is the post as shown, never sent by itself.
 // - link: a public http(s) URL of the post (postActions.shareLink decides);
 //   without one there is no Compartilhar. onNotice(text) shows the toast of
 //   a copy to the clipboard.
@@ -39,13 +43,15 @@
 //   browser or the profile, never the conversation. A quote is lifted out only
 //   for a handled mention; its web links stay plain (./QuoteCard).
 
-import { useEffect, useRef, useState } from 'react'
-import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { pendingOpen, tapKind } from '../doubleTap'
 import { relativeTime } from '../format'
 import { hasLink } from '../links'
 import { moreActions, repostActions, shareLink } from '../postActions'
+import { useBlocks } from '../blocksProvider'
+import { blockedRowView } from '../memberBlocks'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
 import { whoOf } from '../who'
@@ -56,8 +62,9 @@ import { LinkCard } from './LinkCard'
 import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
 import { hasMention, MentionText } from './MentionText'
+import { useNode } from '../node'
 import { QuoteCard } from './QuoteCard'
-import { type } from './theme'
+import { LARGE_TEXT, layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
 const ICON = 18
@@ -88,6 +95,14 @@ if (Platform.OS !== 'web') {
     AccessibilityInfo.addEventListener('screenReaderChanged', (on) => { screenReaderOn = on === true })
   } catch {}
 }
+
+// Read once for the module, not per row mount: a feed mounts many rows and
+// each query is a bridge call. The listener keeps a changed setting current.
+let reduceMotionOn = false
+try {
+  Promise.resolve(AccessibilityInfo.isReduceMotionEnabled()).then((reduce) => { reduceMotionOn = reduce === true }, () => {})
+  AccessibilityInfo.addEventListener('reduceMotionChanged', (reduce) => { reduceMotionOn = reduce === true })
+} catch {}
 
 // The pop when a toggle turns on: the scale is owned by the row, so the icon
 // keeps it when the bar swaps between its split and plain layouts (the first
@@ -124,11 +139,12 @@ function Action ({ label, onPress, disabled, on, count, split, children }) {
   )
 }
 
-export function PostRow ({
+function PostRowView ({
   author, name, username, avatar, at, text, replyToName, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending,
   onOpen, onOpenAuthor, onOpenParent, onOpenReposter, onFollowReposter, onOpenMention,
-  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onDelete, link, onNotice
+  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
+  seq, onMessage
 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -136,10 +152,17 @@ export function PostRow ({
   const reposts = countOf(counts, 'reposts')
   const hasMedia = Array.isArray(media) && media.length > 0
   const hasText = typeof text === 'string' && text !== ''
+  // The body label, the plain text and the label without the text all use it.
+  const shownText = useMemo(() => (hasText ? displayText(text, { multiline: true }) : null), [hasText, text])
   const time = relativeTime(at, now) ?? displayText(at)
   const who = whoOf({ name, username })
   const title = displayText(who.title)
-  const meta = who.subtitle ? displayText(who.subtitle) + ' · ' + time : time
+  // At large text there is no room for the @nome beside the name and the
+  // date: iOS shrank it to a clipped sliver ("( · 5 nov"), so it is left out.
+  // Android's 1.3 step arrives as 1.2999999523 (a 32-bit float), so the
+  // threshold sits just under it.
+  const { fontScale } = useWindowDimensions()
+  const handle = who.subtitle && !(fontScale >= LARGE_TEXT) ? displayText(who.subtitle) : null
   const open = fn(onOpen)
   const like = fn(onLike)
   const heartScale = useRef(new Animated.Value(1)).current
@@ -148,21 +171,9 @@ export function PostRow ({
   const burstOpacity = useRef(new Animated.Value(0)).current
   const [burstOn, setBurstOn] = useState(false)
   const [sheet, setSheet] = useState(null)
-  const reduceMotion = useRef(false)
   const rowId = useRef({}).current
   const previousTap = useRef(null)
-  useEffect(() => {
-    let live = true
-    try {
-      Promise.resolve(AccessibilityInfo.isReduceMotionEnabled()).then((reduce) => {
-        if (live) reduceMotion.current = reduce === true
-      }, () => {})
-    } catch {}
-    return () => {
-      live = false
-      pendingOpen.cancelOwn(rowId)
-    }
-  }, [])
+  useEffect(() => () => pendingOpen.cancelOwn(rowId), [])
   const cancelPendingOpen = () => {
     pendingOpen.cancel()
     previousTap.current = null
@@ -180,7 +191,7 @@ export function PostRow ({
   }
   const feedback = (scale) => {
     tap('light')
-    if (!reduceMotion.current) pop(scale)
+    if (!reduceMotionOn) pop(scale)
   }
   const pressLike = otherPress(like && (() => {
     if (pending === 'like') return
@@ -209,8 +220,11 @@ export function PostRow ({
     const ok = await copyText(nav, href)
     if (fn(onNotice)) onNotice(ok ? 'Link copiado' : 'Não foi possível copiar o link')
   }))
+  const node = useNode()
+  const messageable = fn(onMessage) && node !== null && node.hosted === true && Number.isSafeInteger(seq) && seq > 0
   const moreRows = [
-    ...moreActions(null, { link, onReport: fn(onReport) ? true : null }),
+    ...(messageable ? [{ id: 'message', icon: 'mensagem', label: 'Mensagem em particular' }] : []),
+    ...moreActions(null, { link, onReport: fn(onReport) ? true : null, onBlock: fn(onBlock) ? true : null }),
     ...(fn(onDelete) ? [{ id: 'delete', icon: 'lixeira', label: 'Apagar', danger: true }] : [])
   ]
   const runMore = (row) => {
@@ -220,7 +234,9 @@ export function PostRow ({
         if (fn(onNotice)) onNotice(ok ? 'Link copiado' : 'Não foi possível copiar o link')
       }
     }
+    if (row.id === 'message') return () => onMessage(author, { context: { author, seq, at, text, hasMedia } })
     if (row.id === 'report') return onReport
+    if (row.id === 'block') return onBlock
     if (row.id === 'delete') return onDelete
     return undefined
   }
@@ -232,7 +248,7 @@ export function PostRow ({
   }))
   const hasMore = moreSheet.length > 0
   const burst = () => {
-    if (reduceMotion.current) return
+    if (reduceMotionOn) return
     burstScale.setValue(0.6)
     burstOpacity.setValue(0)
     setBurstOn(true)
@@ -295,7 +311,7 @@ export function PostRow ({
   const bodyParts = [
     title,
     replyToName !== null ? ('respondendo a ' + displayText(replyToName)) : null,
-    hasText ? displayText(text, { multiline: true }) : null,
+    shownText,
     time
   ].filter(Boolean)
   const bodyLabel = bodyParts.join('. ')
@@ -306,7 +322,7 @@ export function PostRow ({
   const quoteMention = (quoteOn && otherPress(quote.onOpenMention)) || openMention
   const quoteOut = quoteOn && typeof quote.text === 'string' && !!quoteMention && hasMention(quote.text)
   const quoteProp = quoteOn ? { ...quote, onOpen: otherPress(quote.onOpen), onOpenMention: quoteMention } : quote
-  const label = textOut ? bodyParts.filter((part) => part !== displayText(text, { multiline: true })).join('. ') : bodyLabel
+  const label = textOut ? bodyParts.filter((part) => part !== shownText).join('. ') : bodyLabel
   const textNode = hasText
     ? textOut
       ? <MentionText text={text} onOpenMention={openMention} onOpenPlain={openTap} style={styles.text} />
@@ -318,7 +334,7 @@ export function PostRow ({
           onPress={openTap}
           {...a11yOpen}
         >
-          <Text style={styles.text}>{displayText(text, { multiline: true })}</Text>
+          <Text style={styles.text}>{shownText}</Text>
         </Pressable>
         )
     : null
@@ -393,10 +409,23 @@ export function PostRow ({
                   accessibilityLabel={'ver o perfil de ' + title}
                   disabled={!openAuthor}
                   onPress={openAuthor}
-                  style={({ pressed }) => [styles.nameBox, pressed && openAuthor && styles.pressed]}
+                  style={({ pressed }) => [styles.nameBox, handle && styles.nameBeside, pressed && openAuthor && styles.pressed]}
                 >
                   <Text style={styles.name} numberOfLines={1}>{title}</Text>
                 </Pressable>
+                {handle
+                  ? (
+                    <Pressable
+                      accessible={false}
+                      disabled={!open}
+                      onPress={openTap}
+                      hitSlop={4}
+                      style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
+                    >
+                      <Text style={styles.handle} numberOfLines={1}>{handle}</Text>
+                    </Pressable>
+                    )
+                  : null}
                 <Pressable
                   accessibilityRole={open ? 'link' : 'text'}
                   accessibilityLabel={open ? 'abrir conversa' : undefined}
@@ -404,9 +433,9 @@ export function PostRow ({
                   onPress={openTap}
                   {...a11yOpen}
                   hitSlop={4}
-                  style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
+                  style={({ pressed }) => [styles.timeBox, pressed && open && styles.pressed]}
                 >
-                  <Text style={styles.meta} numberOfLines={1}>{meta}</Text>
+                  <Text style={styles.time} numberOfLines={1}>{(handle ? '\u00a0· ' : '· ') + time}</Text>
                 </Pressable>
               </View>
               {replyToName
@@ -555,7 +584,7 @@ export function PostRow ({
                       <Icon name='mais' size={ICON} color={colors.soft} />
                     </Action>
                     )
-                  : null}
+                  : <View style={styles.slot} />}
               </View>
               )
             : null}
@@ -579,6 +608,24 @@ export function PostRow ({
   )
 }
 
+// Default shallow comparison: the screens keep each row's props stable while
+// what it shows did not change (socialRowProps with a row cache).
+// The block gate in front of every timeline: the node already leaves a blocked
+// author out of each read, and this clears rows that are already on screen.
+// Bloquear goes where Denunciar goes, so a row that can be reported can be
+// blocked and the two rules stay one.
+function BlockGate (props) {
+  const blocks = useBlocks()
+  const view = blockedRowView(props, blocks.has)
+  if (view === null) return null
+  const onBlock = blocks.available && typeof props.onReport === 'function'
+    ? () => blocks.ask({ author: props.author, name: props.name, username: props.username })
+    : undefined
+  return <PostRowView {...props} quote={view.quote} onBlock={onBlock} />
+}
+
+export const PostRow = memo(BlockGate)
+
 const makeStyles = (colors) => StyleSheet.create({
   row: {
     paddingTop: 12,
@@ -595,21 +642,41 @@ const makeStyles = (colors) => StyleSheet.create({
   repostedFollowText: { ...type.counter, color: colors.accent },
   main: { flexDirection: 'row', gap: 12 },
   body: { flex: 1, minWidth: 0 },
-  head: { flexDirection: 'row', alignItems: 'baseline', gap: 6 },
-  nameBox: { flexShrink: 1 },
+  // No gap: the name keeps 6 pt on its right and the time starts with a
+  // no-break space (web drops a plain leading space under numberOfLines), so
+  // the "·" has one space on each side.
+  head: { flexDirection: 'row', alignItems: 'baseline' },
+  // The @nome gives way first and the date never does (as on X): one Text for
+  // both cut the date to "· 5…", or dropped it at large text.
+  nameBox: { flexShrink: 1, marginRight: 6 },
+  // Shrink weights: Yoga and CSS share an overflow by basis x flexShrink. The
+  // handle (10000 against the name's 1) takes all but a thousandth of a pixel,
+  // so a name that fits is never cut. The name keeps flexShrink 1: CSS shares
+  // only part of the overflow when the factors left sum to less than 1, so a
+  // smaller one would push the date out once the handle is at its floor. The handle stops at 32 pt ("@jo…", never a clipped sliver);
+  // past that the name gives way, so the date always fits, even a 320 pt
+  // screen with "· 31 dez 2025".
+  nameBeside: { flexShrink: 1 },
   name: { ...type.postName, color: colors.ink },
-  metaBox: { flexShrink: 1 },
-  meta: { ...type.postMeta, color: colors.soft },
+  // The time sits outside the shrinking box: a box that shrinks can go below
+  // a child's width in Yoga, so a non-shrinking time inside it still clipped.
+  metaBox: { flexShrink: 10000, minWidth: 32 },
+  timeBox: { flexShrink: 0 },
+  handle: { ...type.postMeta, color: colors.soft, flexShrink: 1 },
+  time: { ...type.postMeta, color: colors.soft, flexShrink: 0 },
   reply: { ...type.replyMark, color: colors.soft, marginTop: 1 },
   replyName: { color: colors.accent, fontWeight: '600' },
   text: { ...type.postText, color: colors.ink, marginTop: 3 },
-  bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, marginLeft: -8, maxWidth: 360 },
-  action: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 36, minWidth: 44, paddingHorizontal: 8 },
+  bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 0, marginBottom: -4, marginLeft: -8, maxWidth: 360 },
+  action: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: layout.hit, minWidth: 44, paddingHorizontal: 8 },
+  // An empty column where "mais" would be, so a row without it keeps its icons
+  // in the same columns as the rows around it (the bar spreads them apart).
+  slot: { minWidth: 44 },
   // A split pair is as wide as the combined button (8 + icon + gap + digits +
   // 8), so the bar still fits a 320 pt screen.
   actionSplit: { gap: 0, minWidth: 0, paddingRight: 2 },
   splitAction: { flexDirection: 'row', alignItems: 'center' },
-  countAction: { minHeight: 36, paddingLeft: 3, paddingRight: 8, justifyContent: 'center' },
+  countAction: { minHeight: layout.hit, paddingLeft: 3, paddingRight: 8, justifyContent: 'center' },
   count: { ...type.counter, color: colors.soft },
   countOn: { color: colors.accent },
   burst: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },

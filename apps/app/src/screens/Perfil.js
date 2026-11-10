@@ -29,13 +29,16 @@ import { AVATAR_SIDE, MAX_AVATAR_BYTES, checkAvatarBytes } from '../media/avatar
 import { revokeDeletedMedia } from '../media/cache'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { confirmSaved, planSave } from '../profileSave'
-import { Btn, ErrorText, Field, Page, Row, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { Btn, ConfirmStack, ErrorText, Field, Page, Row, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { refusalOf } from '../wordCheck'
 import { Avatar, primeAvatar } from '../ui/Avatar'
 import { AvatarEditor } from '../ui/AvatarEditor'
+import { Icon } from '../ui/Icon'
+import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { Pill } from '../ui/Pill'
-import { Sheet } from '../ui/Sheet'
+import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
-import { Stepper } from '../ui/Stepper'
+import { StepLink, Stepper } from '../ui/Stepper'
 
 // The own profile as the node shows it (profile.read, docs/rpc.md 5.21), or
 // null when the node lists the own key as missing or does not know the method.
@@ -69,6 +72,33 @@ const VERSION_PAGES = 10
 // The own profile versions, newest first, each with 'Apagar versão'
 // (profile.delete once; the node deletes a compat pair as one version). After
 // an uncertain failure the list is re-read before the button is offered again.
+// Every form avoids the keyboard: iOS never resizes for it, and Android runs
+// edge to edge (targetSdk 36), where adjustResize no longer resizes either.
+// KeyboardAvoidingView compares its parent-relative frame with the keyboard's
+// screen position, so inside a sheet it pads too little by the sheet's own
+// top; the measured top goes back in as keyboardVerticalOffset. Android only:
+// that is where the form sits under the keyboard; the iOS page sheet is
+// unchanged until it is checked on a device.
+const formStyles = StyleSheet.create({ fill: { flex: 1 } })
+
+export function KeyboardForm ({ children }) {
+  const ref = useRef(null)
+  const avoidKeyboard = useKeyboardAvoidEnabled()
+  const [top, setTop] = useState(0)
+  const measure = () => {
+    const view = ref.current
+    if (Platform.OS !== 'android' || !view || typeof view.measureInWindow !== 'function') return
+    view.measureInWindow((x, y) => { if (Number.isFinite(y)) setTop(y) })
+  }
+  return (
+    <View ref={ref} style={formStyles.fill} onLayout={measure} collapsable={false}>
+      <KeyboardAvoidingView style={formStyles.fill} behavior='padding' keyboardVerticalOffset={top} enabled={avoidKeyboard}>
+        {children}
+      </KeyboardAvoidingView>
+    </View>
+  )
+}
+
 function ProfileVersions ({ node, ownKey, shown }) {
   const styles = useStyles(makeStyles)
   const names = useNames()
@@ -152,7 +182,7 @@ function ProfileVersions ({ node, ownKey, shown }) {
   if (loadError) {
     return (
       <View style={styles.versions}>
-        <SectionHeader>Versões do perfil</SectionHeader>
+        <SectionHeader flush>Versões do perfil</SectionHeader>
         <ErrorText>{loadError}</ErrorText>
         <Pill label='Tentar de novo' onPress={load} />
       </View>
@@ -162,23 +192,30 @@ function ProfileVersions ({ node, ownKey, shown }) {
   if (versions.length === 0 && !done) return null
   return (
     <View style={styles.versions}>
-      <SectionHeader>Versões do perfil</SectionHeader>
+      <SectionHeader flush>Versões do perfil</SectionHeader>
       {done ? <Soft>versão apagada</Soft> : null}
       {versions.map((v, i) => (
-        <View key={v.seq} style={styles.version}>
-          <Text style={styles.versionName}>{displayText(v.name)}</Text>
-          <Soft>{(i === 0 ? 'atual · ' : '') + (relativeTime(v.at) ?? displayText(String(v.at))) + (v.avatar ? ' · com foto' : '')}</Soft>
+        <View key={v.seq} style={[styles.version, i > 0 && styles.versionRule]}>
+          <View style={styles.versionRow}>
+            <View style={styles.versionText}>
+              <Text style={styles.versionName}>{displayText(v.name)}</Text>
+              <Soft>{(i === 0 ? 'atual · ' : '') + (relativeTime(v.at) ?? displayText(String(v.at))) + (v.avatar ? ' · com foto' : '')}</Soft>
+            </View>
+            {confirm === v.seq
+              ? null
+              : <Pill icon='lixeira' danger accessibilityLabel='Apagar versão' onPress={() => { action.clearError(); setDone(false); setConfirm(v.seq) }} disabled={action.pending} />}
+          </View>
           {confirm === v.seq
             ? (
               <View style={styles.versionConfirm}>
                 <Soft>Apagar esta versão do perfil? Ela some do seu diário e dos feeds de quem te segue. A cópia da foto enviada continua na rede.</Soft>
-                <Row>
-                  <Btn label='Apagar versão' danger onPress={() => remove(v)} pending={action.pending} />
-                  <Btn label='Cancelar' secondary onPress={() => { action.clearError(); setConfirm(null) }} disabled={action.pending} />
-                </Row>
+                <ConfirmStack
+                  confirm={<Btn label='Apagar versão' danger onPress={() => remove(v)} pending={action.pending} />}
+                  cancel={<Btn label='Cancelar' secondary onPress={() => { action.clearError(); setConfirm(null) }} disabled={action.pending} />}
+                />
               </View>
               )
-            : <Pill label='Apagar versão' danger onPress={() => { action.clearError(); setDone(false); setConfirm(v.seq) }} disabled={action.pending} />}
+            : null}
         </View>
       ))}
       {partial ? <Soft>Mostrando só as versões mais recentes.</Soft> : null}
@@ -297,7 +334,8 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
 
   const nameLen = countChars(name)
   const bioLen = countChars(bio)
-  const valid = nameLen >= 1 && nameLen <= MAX_NAME && name.trim() !== '' && bioLen <= MAX_BIO
+  const refused = refusalOf(name, bio)
+  const valid = nameLen >= 1 && nameLen <= MAX_NAME && name.trim() !== '' && bioLen <= MAX_BIO && refused === ''
   // While a save, its upload or its uncertain re-read runs, or the crop
   // editor is open, the fields are locked: a success closes the sheet and the
   // next open restarts from the saved profile.
@@ -489,8 +527,9 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
       : 'A foto do perfil não pode ser colocada neste momento.'
   if (draft === null) soft = 'A foto sai quando você salvar.'
 
+  const PhotoRow = page ? View : Row
   const photo = (
-    <View style={styles.photo}>
+    <View style={page ? styles.photoPage : styles.photo}>
       <Avatar
         name={name}
         publicKey={ownKey || ''}
@@ -500,16 +539,25 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
         localUri={draftIsPhoto ? draft.previewUrl : undefined}
       />
       <View ref={chooseRef}>
-        <Row>
+        <PhotoRow style={page ? styles.photoActions : undefined}>
           {photoLabel !== null ? <Pill label={photoLabel} onPress={choose} disabled={locked} /> : null}
           {draft === undefined && knownAvatar ? <Pill label='Remover foto' danger onPress={() => setDraft(null)} disabled={locked} /> : null}
           {draftIsPhoto ? <Pill label='Descartar foto' onPress={() => setDraft(undefined)} disabled={locked} /> : null}
           {draft === null ? <Pill label='Manter foto' onPress={() => setDraft(undefined)} disabled={locked} /> : null}
-        </Row>
+        </PhotoRow>
       </View>
-      <Soft>{soft}</Soft>
+      {!page || !hasUpload || draft === null ? <Soft style={page ? styles.photoHint : undefined}>{soft}</Soft> : null}
       <ErrorText>{photoError}</ErrorText>
     </View>
+  )
+
+  const inputs = (
+    <>
+      <Field label={'Nome (' + nameLen + '/' + MAX_NAME + ')'} value={name} onChangeText={setName} editable={!locked} />
+      <Field label={'Bio (' + bioLen + '/' + MAX_BIO + ')'} value={bio} onChangeText={setBio} editable={!locked} multiline lines={3} />
+      <ErrorText>{refused}</ErrorText>
+      <ErrorText>{action.error}</ErrorText>
+    </>
   )
 
   const fields = editor !== null
@@ -525,45 +573,47 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
     : (
       <>
         {photo}
-        <Field label={'nome (' + nameLen + '/' + MAX_NAME + ')'} value={name} onChangeText={setName} editable={!locked} />
-        <Field label={'bio (' + bioLen + '/' + MAX_BIO + ')'} value={bio} onChangeText={setBio} editable={!locked} multiline lines={3} />
-        <ErrorText>{action.error}</ErrorText>
+        {inputs}
       </>
       )
 
   if (embedded) {
     return (
-      <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardForm>
         <Page>
           {fields}
-          <Pill label='Salvar' filled onPress={save} pending={saving} disabled={!valid || locked} />
-          <Soft>Seu perfil novo aparece para todo mundo assim que for publicado.</Soft>
-          {editor === null ? <ProfileVersions node={node} ownKey={ownKey} shown={shown} /> : null}
+          {/* The open photo editor has its own Cancelar and Usar foto. */}
+          {editor === null
+            ? (
+              <>
+                <Pill label='Salvar' filled onPress={save} pending={saving} disabled={!valid || locked} />
+                <Soft>Seu perfil novo aparece para todo mundo assim que for publicado.</Soft>
+                <ProfileVersions node={node} ownKey={ownKey} shown={shown} />
+              </>
+              )
+            : null}
         </Page>
-      </KeyboardAvoidingView>
+      </KeyboardForm>
     )
   }
 
   if (page) {
     return (
-      <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <Page flush padBottom={16}>
-          <Stepper index={index} total={total} title={STEP_TITLES.perfil} hint={STEP_HINTS.perfil}>
-            {fields}
-            <Pill label='Continuar' filled onPress={save} pending={saving} disabled={!valid || locked} />
-            <Pressable
-              accessibilityRole='button'
-              accessibilityState={{ disabled: locked }}
-              disabled={locked}
-              onPress={skip}
-              hitSlop={4}
-              style={styles.skip}
-            >
-              <Text style={styles.skipText}>Pular por enquanto</Text>
-            </Pressable>
+      <KeyboardForm>
+        <Page flush grow padBottom={16}>
+          <Stepper index={index} total={total} title={STEP_TITLES.perfil} hint={STEP_HINTS.perfil} hero={editor === null ? photo : null}>
+            {editor !== null ? fields : inputs}
+            {editor === null
+              ? (
+                <>
+                  <Btn label='Continuar' block large onPress={save} pending={saving} disabled={!valid || locked} />
+                  <StepLink label='Pular por enquanto' onPress={skip} disabled={locked} />
+                </>
+                )
+              : null}
           </Stepper>
         </Page>
-      </KeyboardAvoidingView>
+      </KeyboardForm>
     )
   }
 
@@ -571,28 +621,54 @@ export default function Perfil ({ open, current, onClose, onSaved, ownKey, page 
     <Sheet
       open={open}
       onClose={onClose}
+      // Android back in the photo editor closes only the editor, as the
+      // header chevron does, not the sheet with its draft.
+      onBack={editor !== null ? closeEditor : undefined}
       title='Editar perfil'
       background={colors.bg}
-      right={<Pill label='Salvar' filled onPress={save} pending={saving} disabled={!valid || locked} />}
+      // While the photo editor is open its own Cancelar / Usar foto are the
+      // only actions: a header Cancelar would drop the whole draft instead.
+      left={editor !== null
+        ? (
+          <Pressable accessibilityRole='button' accessibilityLabel='voltar ao perfil' onPress={closeEditor} hitSlop={8} style={styles.editorBack}>
+            <Icon name='voltar' size={24} color={colors.ink} />
+          </Pressable>
+          )
+        : undefined}
+      right={editor !== null ? null : <Pill label='Salvar' filled onPress={save} pending={saving} disabled={!valid || locked} maxFontSizeMultiplier={TEXT_CAP} />}
     >
-      <KeyboardAvoidingView style={styles.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardForm>
         <Page>
           {fields}
-          <Soft>Seu perfil novo aparece para todo mundo assim que for publicado.</Soft>
-          {editor === null ? <ProfileVersions node={node} ownKey={ownKey} shown={shown} /> : null}
+          {editor === null
+            ? (
+              <>
+                <Soft>Seu perfil novo aparece para todo mundo assim que for publicado.</Soft>
+                <ProfileVersions node={node} ownKey={ownKey} shown={shown} />
+              </>
+              )
+            : null}
         </Page>
-      </KeyboardAvoidingView>
+      </KeyboardForm>
     </Sheet>
   )
 }
 
 const makeStyles = (colors) => StyleSheet.create({
+  // Same place as the Ajustes back chevron.
+  editorBack: { minWidth: 40, minHeight: 40, justifyContent: 'center', marginLeft: -8 },
   fill: { flex: 1 },
   photo: { gap: 12, alignItems: 'flex-start' },
+  photoPage: { gap: 12, alignItems: 'center' },
+  photoActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center', justifyContent: 'center' },
+  photoHint: { textAlign: 'center' },
   versions: { gap: 8, marginTop: 8 },
-  version: { gap: 4, paddingVertical: 8, borderTopWidth: 1, borderTopColor: colors.line },
+  // The header draws the rule above the first version.
+  version: { gap: 4, paddingVertical: 8 },
+  versionRule: { borderTopWidth: 1, borderTopColor: colors.line },
+  // The trash icon sits beside the version, so a red full-width button does not compete with Salvar.
+  versionRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  versionText: { flex: 1, gap: 4 },
   versionName: { fontSize: 16, fontWeight: '600', color: colors.ink },
-  versionConfirm: { gap: 8 },
-  skip: { alignSelf: 'flex-start', paddingVertical: 10, paddingHorizontal: 4, minHeight: 44, justifyContent: 'center' },
-  skipText: { fontSize: 15, fontWeight: '600', color: colors.accent }
+  versionConfirm: { gap: 8 }
 })

@@ -21,6 +21,32 @@ export const CHAT_MEDIA_GAP = 2
 const MIN_RATIO = 0.5
 const MAX_RATIO = 2
 
+// iOS autocorrect can rewrite the last word of the draft in the same tick as
+// Enviar. `sent` is { text, at, followed } (the composer's own text when the
+// send started) or null. Only the first composer change after the send is
+// considered; it is followed when it lands inside windowMs and differs from
+// sent.text only in the last whitespace-delimited word. Pure: returns the new
+// value of the in-flight record.
+export function followAutocorrect (sent, value, now, windowMs = 400) {
+  if (sent === null || sent === undefined || sent.followed === true) return sent
+  const age = now - sent.at
+  if (age >= 0 && age < windowMs && typeof value === 'string' && value !== '' && typeof sent.text === 'string') {
+    const cut = /^[\s\S]*\s/.exec(sent.text)
+    const prefix = cut ? cut[0] : ''
+    // A text that ends in a space has no word left for autocorrect to change:
+    // what comes after it is a new word being typed, never a correction.
+    if (sent.text.length > prefix.length && value.startsWith(prefix)) {
+      const rest = value.slice(prefix.length)
+      // Autocorrect replaces letters inside the word; typing more after the
+      // send ("oi" -> "oi!") or deleting back ("oi" -> "o") is the person's
+      // own new draft and must never be cleared.
+      const typedOn = value.startsWith(sent.text) || sent.text.startsWith(value)
+      if (!typedOn && rest !== '' && !/\s/.test(rest)) return { text: value, at: sent.at, followed: true }
+    }
+  }
+  return { ...sent, followed: true }
+}
+
 export const SEND_PHASES = Object.freeze(['idle', 'uploading', 'sending', 'done', 'uncertain', 'failed', 'cancelled'])
 
 function ratioOf (item) {

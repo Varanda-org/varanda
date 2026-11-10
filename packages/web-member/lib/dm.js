@@ -58,8 +58,23 @@
 // forgets the sealed blobs; wipeMedia() (lock, sign-out, reset) deletes the
 // cache as well.
 //
+// Páginas (docs/rpc.md 5.114): the page secrets this identity holds live in
+// ./page-dm.js. Each held page has its own local store (./dm-store.js under
+// node-store pageDmPrefix) and its own pool cursor with the gen it scanned
+// for. A pull first runs the own pass; a page whose cursor stands where the
+// own one did rides along (a drop the own box does not open is tried with
+// that page's boxes, the current gen, the previous ones, then the legacy one), and every other
+// held page then catches up from its own cursor with only its boxes, so
+// drops pulled before its secrets arrived still open. After each pull the
+// newest dm-key the page published is compared with the held box; while they
+// differ 'dm.pageKeyMismatch' goes out on every pull and the page's drafts
+// and sends are refused. A page message is a draft the page key signs
+// elsewhere (dm.pageDraft, dm.pageSend): this node builds the v3 inner and
+// its digest, holds it in memory and seals it once the signature verifies.
+//
 // Nothing here logs a key, a text or a peer.
 const b4a = require('b4a')
+const hcrypto = require('hypercore-crypto')
 const dm = require('@varanda/core/lib/dm')
 const dmFold = require('@varanda/core/lib/dm-fold')
 const postage = require('@varanda/core/lib/dm-postage')
@@ -67,12 +82,15 @@ const { nowIso, MAX_AUDIO_BYTES } = require('@varanda/core/lib/records')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { certForKey } = require('@varanda/core/lib/cert')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
+const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
+const { openOffer } = require('@varanda/core/lib/testimonials')
 const { mediaBounds, audioBounds, dmTextBytes, DM_MEDIA_KEYS, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 const { sealBlob, createBlobClient, fetchBlob } = require('./blob')
 const sodium = require('./sodium-browser')
 const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf } = require('./passkey')
 const { createDmStore } = require('./dm-store')
+const { createPageHolder, NO_PAGE_KEY, KEY_MISMATCH } = require('./page-dm')
 const { openDmLink, openStampLink } = require('./dm-link')
 const store = require('./node-store')
 
@@ -94,6 +112,9 @@ const BAD_MEDIA = 'mídia inválida'
 const MEDIA_GONE = 'mídia indisponível'
 const MEDIA_STALE = 'prepare a mídia de novo'
 const UPLOAD_FAILED = 'não deu para enviar a mídia: tente de novo'
+// A momento's photo that cannot be fetched or does not verify (the same
+// answer for both, so it never says why).
+const MOMENT_PHOTO_GONE = 'foto indisponível'
 // Sealed blobs kept for a send or a retry (each holds its plaintext and
 // ciphertext in memory).
 const BLOBS_MAX = 8
@@ -107,6 +128,21 @@ const ISSUE_BURST = 8
 const ISSUE_PACE_MS = 1100
 const OPEN_MAX = 2
 const OPEN_DROPPED = 'abertura de mídia cancelada'
+const USE_PAGE_DRAFT = 'use dm.pageDraft'
+const DRAFT_GONE = 'rascunho expirado'
+const BAD_SIGNATURE = 'assinatura inválida'
+const BAD_ROW = 'linha inválida'
+// n: the service's filing position, shared by rows and ops.
+const IMPORT_ROW_KEYS = ['id', 'from', 'to', 'text', 'at', 'replyTo', 'media', 'card', 'fwd', 'n']
+// The legacy bundle (docs/rpc.md 5.114): each chunk's plaintext is
+// bundleId (32) || uint16be index || uint16be count || at most
+// LEGACY_CHUNK_BYTES of the bundle's UTF-8 JSON.
+const LEGACY_HEADER_BYTES = 36
+const LEGACY_CHUNK_BYTES = 40000
+const BUNDLE_KEYS = ['v', 'page', 'box', 'rows', 'ops']
+const LEGACY_DONE_MAX = 16
+const LEGACY_OP_DOMAIN = b4a.from('varanda/member-dm-local/legacy-op/v1\n', 'utf8')
+const SIG_PREFIX_V3 = b4a.from(dm.DM_V3_PREFIX, 'utf8')
 
 function noop () {}
 
@@ -189,6 +225,16 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     ...(limits || {})
   }
   const local = createStore({ storage, cacheBytesMax: L.cacheBytesMax })
+  // The own store; a held page's is { local, prefix, page, ready } (pageCtx).
+  const personal = { local, prefix: '', page: null }
+  const pages = createPageHolder({ storage, association })
+  const pageStores = new Map()
+  // page -> adoption epoch, bumped whenever its keys change: a pull writes a
+  // page cursor only while the epoch it started with is current, so it never
+  // overwrites the restart an adoption made under it.
+  const pageEpochs = new Map()
+  // Pages a dm.pageForget is removing: no new store is opened for them.
+  const forgetting = new Set()
   let box = null // { publicKey, secretKey, gen }
   let generation = 0
   let pulling = false
@@ -220,6 +266,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // plaintext key -> entry; entry = { sealed, mime, w, h, ms, plain, hash, lock }.
   const sealedById = new Map()
   const sealedByPlain = new Map()
+  // Momento items putPublicMedia answered in this unlock, by blob id -> item
+  // (no plaintext kept: a retry seals a fresh blob).
+  const publicItems = new Map()
   // Lazy opens queued or in flight, by sender and message id -> { p, job },
   // and messages whose blob is gone (this unlock only).
   const opening = new Map()
@@ -240,6 +289,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   async function idle () {
     while (inflight.size > 0) await Promise.allSettled([...inflight])
     await local.idle()
+    for (const s of [...pageStores.values()]) await s.local.idle()
   }
 
   function withWallet (fn) {
@@ -276,13 +326,19 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // The stored blocklist snapshot's sets (empty when none verifies).
   async function moderation () {
     try {
+      // The member's own blocks drop a sender as the association's do, also
+      // on a device the conversation op never reached.
+      const own = blockedKeys(await store.readMemberBlocks(storage))
       const data = await store.readBlocklist(storage)
       const snapshot = data === null ? null : data.snapshot
       if (snapshot !== null && verifySnapshot(snapshot, association).ok) {
-        return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
+        // `association` alone: a page's inbox keeps the association's blocks,
+        // not the member's own.
+        return { blocked: new Set([...blockedSet(snapshot), ...own]), association: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
       }
+      return { blocked: own, association: new Set(), revokedIssuers: new Set() }
     } catch {}
-    return { blocked: new Set(), revokedIssuers: new Set() }
+    return { blocked: new Set(), association: new Set(), revokedIssuers: new Set() }
   }
 
   // Any throw leaves no key material behind: the derived pair and key are
@@ -303,18 +359,32 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         local.lock()
         return
       }
+      await pages.unlock(key)
+      if (gen !== generation) {
+        pages.lock()
+        local.lock()
+        return
+      }
       zeroPair(box)
       box = { publicKey: pair.publicKey, secretKey: pair.secretKey, gen: g }
       installed = true
     } catch (err) {
-      if (gen === generation) local.lock()
+      if (gen === generation) {
+        pages.lock()
+        local.lock()
+      }
       throw err
     } finally {
       if (key !== null) key.fill(0)
       if (!installed) zeroPair(pair)
     }
-    // Ctls left from before go out now (a stamped one needs no new stamp).
+    // Ctls left from before go out now (a stamped one needs no new stamp),
+    // the own queue first, then each held page's.
     if ((await store.readDmCtlQueue(storage)).length > 0) track(flushQueued())
+    for (const page of pages.pages()) {
+      if ((await store.readDmCtlQueue(storage, store.pageDmPrefix(page))).length === 0) continue
+      track(pageCtx(page).then((ctx) => flushQueued(ctx)).catch(noop))
+    }
   }
 
   function lock () {
@@ -323,8 +393,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     box = null
     ownCert = null
     local.lock()
+    pages.lock()
+    for (const s of pageStores.values()) s.local.lock()
+    pageStores.clear()
     clearPending()
     forgetAllBlobs()
+    publicItems.clear()
     dropQueued(false, LOCKED)
     opening.clear()
     gone.clear()
@@ -352,17 +426,64 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return { box: b4a.toString(box.publicKey, 'hex'), gen: box.gen }
   }
 
+  // A depoimento's sealed box (docs/protocol.md section 2) -> { text, nonce }
+  // or null; the pair never leaves the engine. Only the current generation
+  // is held, so a depoimento sealed to an older dm-key gen reads as null and
+  // is omitted from testimonial.pending.
+  function openTestimonial (sealed, gen) {
+    requireUnlocked()
+    if (gen !== box.gen) return null
+    return openOffer(sealed, box)
+  }
+
   // ---- folders ----
 
-  async function folded (own) {
-    const follows = (await store.readFollows(storage)).map((f) => typeof f === 'string' ? f : f && f.key).filter((k) => typeof k === 'string')
-    const stored = new Set(await store.readDmSeen(storage))
-    const { messages, ops } = local.snapshot()
+  // A held page's store, opened once per unlock under its own key. Throws
+  // NO_PAGE_KEY for a page this node holds no secrets of, or one being
+  // forgotten (a pull then never opens its store again under the forget).
+  async function pageCtx (page) {
+    requireUnlocked()
+    if (forgetting.has(page)) throw new UsageError(NO_PAGE_KEY)
+    pages.need(page)
+    let s = pageStores.get(page)
+    if (s === undefined) {
+      // Listed before anything of it is written, so a reset always finds it.
+      await store.notePageStore(storage, page)
+      if (pageStores.get(page) !== undefined) return pageCtx(page)
+      const prefix = store.pageDmPrefix(page)
+      const lc = createDmStore({ storage, cacheBytesMax: L.cacheBytesMax, prefix })
+      const k = pages.localKeyOf(page)
+      const ready = lc.unlock(k)
+      ready.then(() => k.fill(0), () => k.fill(0))
+      s = { local: lc, prefix, page, ready }
+      pageStores.set(page, s)
+    }
+    try {
+      await s.ready
+    } catch (err) {
+      if (pageStores.get(page) === s) pageStores.delete(page)
+      throw err
+    }
+    if (pageStores.get(page) !== s || !s.local.unlocked()) throw new UsageError(LOCKED)
+    return s
+  }
+
+  // The context of a request's optional `page` -> [self, ctx].
+  async function contextOf (own, page) {
+    if (page === undefined || page === null) return [own, personal]
+    return [page, await pageCtx(page)]
+  }
+
+  // A page follows no one here: its folders come from its ops alone.
+  async function folded (own, ctx = personal) {
+    const follows = ctx === personal ? (await store.readFollows(storage)).map((f) => typeof f === 'string' ? f : f && f.key).filter((k) => typeof k === 'string') : []
+    const stored = new Set(await store.readDmSeen(storage, ctx.prefix))
+    const { messages, ops } = ctx.local.snapshot()
     const seen = []
     for (const m of messages) {
       if (m.mine) continue
       const k = dmFold.seenKey(m.from, m.id)
-      if (stored.has(local.seenToken(k))) seen.push(k)
+      if (stored.has(ctx.local.seenToken(k))) seen.push(k)
     }
     return dmFold.fold({
       self: own,
@@ -375,9 +496,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
 
   // Order and cursor are the fold's: `at` is the effective time it returns
   // (never re-sorted here by the sender's time).
-  async function list (own, { folder = 'inbox', limit = 30, before } = {}) {
+  async function list (own, { folder = 'inbox', limit = 30, before, page: pageKey } = {}) {
     requireUnlocked()
-    const { inbox, requests } = await folded(own)
+    const [self, ctx] = await contextOf(own, pageKey)
+    const { inbox, requests } = await folded(self, ctx)
     const all = folder === 'request' ? requests : inbox
     let start = 0
     if (before !== undefined && before !== null) {
@@ -405,8 +527,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     }
   }
 
-  async function threadOf (own, peer) {
-    const { inbox, requests } = await folded(own)
+  async function threadOf (own, peer, ctx = personal) {
+    const { inbox, requests } = await folded(own, ctx)
     return inbox.find((c) => c.peer === peer) || requests.find((c) => c.peer === peer) || null
   }
 
@@ -416,15 +538,16 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // whether the newest block op for the peer is 'blocked' (dm-fold canSend).
   // A thread with no kept message is 'inbox': a conversation the person may
   // start.
-  function threadState (own, peer, c) {
-    const blocked = !dmFold.canSend({ self: own, peer, ops: local.snapshot().ops })
+  function threadState (own, peer, c, ctx = personal) {
+    const blocked = !dmFold.canSend({ self: own, peer, ops: ctx.local.snapshot().ops })
     return { folder: c === null ? 'inbox' : c.folder, blocked }
   }
 
-  async function thread (own, { peer, before, limit = 30 }) {
+  async function thread (own, { peer, before, limit = 30, page }) {
     requireUnlocked()
-    const c = await threadOf(own, peer)
-    const state = threadState(own, peer, c)
+    const [self, ctx] = await contextOf(own, page)
+    const c = await threadOf(self, peer, ctx)
+    const state = threadState(self, peer, c, ctx)
     if (c === null) return { messages: [], next: null, ...state }
     // `before` is an id, unique within the thread (core dm-fold keeps one
     // row per id per conversation); an id no longer kept pages from the
@@ -435,15 +558,15 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (i !== -1) end = i
     }
     const start = Math.max(0, end - limit)
-    const page = c.messages.slice(start, end)
+    const rows = c.messages.slice(start, end)
     // Another page: what an earlier one queued and did not start is dropped.
     dropQueued(true, OPEN_DROPPED)
     // A request is a peer the person neither follows nor accepted: nothing
     // of theirs is fetched until a tap or an accept.
     const auto = c.folder !== 'request'
     return {
-      messages: page.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd, at: m.at, mine: m.mine, media: mediaView(m, auto), card: m.card ? copyLinkCard(m.card, mediaItem) : null })),
-      next: start > 0 && page.length > 0 ? page[0].id : null,
+      messages: rows.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd, at: m.at, mine: m.mine, media: mediaView(m, auto, ctx), card: m.card ? copyLinkCard(m.card, mediaItem) : null })),
+      next: start > 0 && rows.length > 0 ? rows[0].id : null,
       ...state
     }
   }
@@ -461,9 +584,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // A thread row's media: the items (cached, or opening in the background
   // now when `auto`), or { unavailable: true } when the blob is gone and
   // nothing is cached. Copies: the caller may hand them out.
-  function mediaView (m, auto) {
+  // A page's media is never opened in the background (no readMedia for a
+  // page): its thread shows the items only.
+  function mediaView (m, auto, ctx = personal) {
     if (!Array.isArray(m.media)) return null
-    if (local.hasMedia(m.from, m.id)) return m.media.map(mediaItem)
+    if (ctx.local.hasMedia(m.from, m.id)) return m.media.map(mediaItem)
+    if (ctx !== personal) return m.media.map(mediaItem)
     if (gone.has(openKey(m.from, m.id))) return { unavailable: true }
     if (auto) openMedia(m, true).catch(noop)
     return m.media.map(mediaItem)
@@ -722,12 +848,80 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return entry
   }
 
-  async function seen (own, peer) {
+  // A momento's photo (docs/rpc.md 5.113). bytes: the caller's copy, wiped
+  // here. Every call seals a FRESH blob, never the putMedia reuse map: the
+  // key and nonce go public in the moment record, so a blob shared with a
+  // DM (or another moment) would open that one for every reader of the
+  // diary. The upload takes stamps as putMedia does. -> the item, ms 0.
+  async function putPublicMedia (own, keyPair, { bytes, mime, width, height }) {
     requireUnlocked()
-    const c = await threadOf(own, peer)
+    const gen = generation
+    const ok = bytes instanceof Uint8Array && mime !== dm.DM_AUDIO_MIME && dm.DM_MEDIA_MIMES.includes(mime) &&
+      Number.isInteger(width) && width >= 1 && Number.isInteger(height) && height >= 1 &&
+      mediaBounds(bytes, mime) !== null
+    if (!ok) {
+      if (bytes instanceof Uint8Array) wipe(bytes)
+      throw new UsageError(BAD_MEDIA)
+    }
+    let sealed
+    try {
+      sealed = sealBlob(bytes)
+    } finally {
+      wipe(bytes)
+    }
+    const entry = { sealed, lock: Promise.resolve() }
+    const missing = sealed.frames.filter((f) => f === null).length
+    if (missing > 0 && (await blobs.walletSize()) < missing) await blobs.topUp(keyPair, { force: true })
+    if (gen !== generation) throw new UsageError(LOCKED)
+    await upload(entry, keyPair)
+    if (gen !== generation) throw new UsageError(LOCKED)
+    const item = mediaItem({ ...sealed.descriptor, mime, w: width, h: height, ms: 0 })
+    publicItems.set(item.id, item)
+    while (publicItems.size > BLOBS_MAX) publicItems.delete(publicItems.keys().next().value)
+    return mediaItem(item)
+  }
+
+  // Whether `item` is exactly one putPublicMedia answered in this unlock.
+  function isOwnPublicItem (item) {
+    if (!unlocked() || item === null || typeof item !== 'object') return false
+    const want = publicItems.get(item.id)
+    return want !== undefined && DM_MEDIA_KEYS.every((k) => want[k] === item[k])
+  }
+
+  // A published item is not offered again: the next moment seals its own.
+  function forgetPublicItem (item) {
+    if (item !== null && typeof item === 'object' && isOwnPublicItem(item)) publicItems.delete(item.id)
+  }
+
+  // A momento's photo -> { bytes, mime, w, h } (bytes: a fresh copy the
+  // caller owns). The key and nonce are the record's own (public), so no
+  // unlock is needed: the blob is fetched over plain HTTP GETs from the
+  // seeder's origin. Gone, refused or not verifying (size, sha256, an image
+  // of that mime) all answer MOMENT_PHOTO_GONE.
+  async function readPublicMedia (item) {
+    const d = item
+    if (d === null || typeof d !== 'object' || d.ms !== 0 || d.mime === dm.DM_AUDIO_MIME || !dm.DM_MEDIA_MIMES.includes(d.mime)) {
+      throw new Error(MOMENT_PHOTO_GONE)
+    }
+    if (blobOrigin === null) throw new Error(MOMENT_PHOTO_GONE)
+    let r
+    try {
+      r = await fetchBlob({ id: d.id, key: d.key, nonce: d.nonce, chunks: d.chunks, bytes: d.bytes, sha256: d.sha256 }, blobOrigin, { mime: d.mime, fetch: fetchImpl, limits: L.fetch })
+    } catch (err) {
+      const msg = err && err.message
+      if (msg === MEDIA_GONE || msg === BAD_MEDIA) throw new Error(MOMENT_PHOTO_GONE)
+      throw err
+    }
+    return { bytes: r.bytes, mime: d.mime, w: d.w, h: d.h }
+  }
+
+  async function seen (own, peer, page) {
+    requireUnlocked()
+    const [self, ctx] = await contextOf(own, page)
+    const c = await threadOf(self, peer, ctx)
     if (c === null) return { ok: true }
-    const ids = c.messages.filter((m) => !m.mine).map((m) => local.seenToken(dmFold.seenKey(m.from, m.id)))
-    if (ids.length > 0) await store.writeDmSeen(storage, [...await store.readDmSeen(storage), ...ids])
+    const ids = c.messages.filter((m) => !m.mine).map((m) => ctx.local.seenToken(dmFold.seenKey(m.from, m.id)))
+    if (ids.length > 0) await store.writeDmSeen(storage, [...await store.readDmSeen(storage, ctx.prefix), ...ids], ctx.prefix)
     return { ok: true }
   }
 
@@ -758,17 +952,17 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
 
   // The ctl queue as base64 strings (sealed envelopes or encoded drops);
   // kv holds each sealed under the local key. Throws while locked.
-  async function readQueue () {
+  async function readQueue (ctx = personal) {
     const out = []
-    for (const item of await store.readDmCtlQueue(storage)) {
-      const v = local.open(item)
+    for (const item of await store.readDmCtlQueue(storage, ctx.prefix)) {
+      const v = ctx.local.open(item)
       if (v !== null && typeof v.b === 'string') out.push(v.b)
     }
     return out
   }
 
-  function writeQueue (list) {
-    return store.writeDmCtlQueue(storage, list.map((b) => local.seal({ b })))
+  function writeQueue (list, ctx = personal) {
+    return store.writeDmCtlQueue(storage, list.map((b) => ctx.local.seal({ b })), ctx.prefix)
   }
 
   // Takes n stamps at once (all or none) -> [{ kid, token, sig }] or null.
@@ -926,7 +1120,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // from the put, so a retry after a failed filing files without a re-put.
   async function fileSent (entry) {
     if (entry.row === null || !entry.acked[0]) return
-    if (!local.hasMessage(entry.row.from, entry.row.id)) await local.append([{ ...entry.row, filedAt: local.nextFiled() }])
+    const lc = entry.local || local
+    if (!lc.hasMessage(entry.row.from, entry.row.id)) await lc.append([{ ...entry.row, filedAt: lc.nextFiled() }])
     const row = entry.row
     entry.row = null
     // The sender's own photos are cached from the bytes it put, so its
@@ -955,12 +1150,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
 
   // Puts the queue (flushCtlQueue). Never throws; warns when something
   // stays queued.
-  async function flushQueued () {
+  async function flushQueued (ctx = personal) {
     try {
-      await withQueue(flushCtlQueue)
+      await withQueue(() => flushCtlQueue(ctx))
     } catch {}
     try {
-      if ((await store.readDmCtlQueue(storage)).length > 0) log('aviso: estado da conversa ainda não enviado aos seus outros aparelhos')
+      if ((await store.readDmCtlQueue(storage, ctx.prefix)).length > 0) log('aviso: estado da conversa ainda não enviado aos seus outros aparelhos')
     } catch {}
   }
 
@@ -968,9 +1163,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // stamped and its drop bytes written back to the queue before the put; it
   // stops at the first one that cannot go (no stamp, full pool, rate, lost
   // link) and keeps it. A refused drop (invalido) is removed with a warning.
-  async function flushCtlQueue () {
+  async function flushCtlQueue (ctx = personal) {
     if (!unlocked()) return
-    let queue = await readQueue()
+    let queue = await readQueue(ctx)
     if (queue.length === 0) return
     let link = null
     try {
@@ -981,7 +1176,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
           if (stamps === null) return
           bytes = dropOf(bytes, stamps[0])
           queue = [b4a.toString(bytes, 'base64'), ...queue.slice(1)]
-          await writeQueue(queue)
+          await writeQueue(queue, ctx)
         }
         if (link === null) link = await openDmLink(linkOpts)
         emit('dm.sending', {})
@@ -989,7 +1184,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         if (!r.ok && r.reason !== 'invalido') return
         if (!r.ok) log('aviso: 1 estado de conversa recusado pelo semeador')
         queue = queue.slice(1)
-        await writeQueue(queue)
+        await writeQueue(queue, ctx)
       }
     } finally {
       if (link !== null) link.close()
@@ -1106,6 +1301,39 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
 
   // ---- pulling ----
 
+  // Each held page's scan state for one pull: its store, its boxes (the
+  // held gen, the previous ones, then the legacy one) and its pool cursor. A cursor scanned
+  // for another gen starts over (the pool keeps 7 days).
+  async function pageScans () {
+    const out = []
+    for (const page of pages.pages()) {
+      try {
+        const epoch = pageEpochs.get(page) || 0
+        const ctx = await pageCtx(page)
+        const e = pages.get(page)
+        if (e === null) continue
+        // Each box with the page key its drops are addressed to.
+        const boxes = [e.dmBox, ...e.previous.map((x) => x.box)].map((pair) => ({ pair, key: page }))
+        if (e.legacy !== null) boxes.push({ pair: e.legacy.box, key: e.legacy.page })
+        // A cursor scanned with other boxes starts over: an adoption whose
+        // own cursor reset never got written still heals here.
+        const set = boxSetOf(e)
+        let cursor = await store.readPageCursor(storage, ctx.prefix)
+        if (cursor.gen !== e.gen || cursor.set !== set) cursor = { after: 0, gen: e.gen, set }
+        out.push({ page, ctx, gen: e.gen, set, epoch, boxes, cursor, added: 0, applied: 0, stale: false })
+      } catch {}
+    }
+    return out
+  }
+
+  // A hex32 digest of a held page's public boxes (current, previous, then
+  // legacy): read only, sends always seal to the current one.
+  function boxSetOf (e) {
+    const parts = [e.dmBox.publicKey, ...e.previous.map((x) => x.box.publicKey)]
+    if (e.legacy !== null) parts.push(e.legacy.box.publicKey)
+    return b4a.toString(hcrypto.hash(parts), 'hex').slice(0, 32)
+  }
+
   async function pull (own) {
     requireUnlocked()
     if (pulling) throw new UsageError(PULL_BUSY)
@@ -1116,6 +1344,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     let cursor = await store.readDmCursor(storage)
     let incomplete = false
     let link = null
+    let scans = []
     try {
       try {
         link = await openDmLink(linkOpts)
@@ -1123,6 +1352,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         if (err instanceof UsageError) throw err
         throw new UsageError('sem conexão com o semeador')
       }
+      scans = await pageScans()
+      // Pages scanned up to where the own cursor stands ride along.
+      const along = scans.filter((p) => p.cursor.after === cursor)
       let read = 0
       for (;;) {
         if (gen !== generation) throw new UsageError(LOCKED)
@@ -1130,6 +1362,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         const rows = []
         const ops = local.snapshot().ops
         const mod = await moderation()
+        const missed = []
         for (const item of page.items) {
           read += item.bytes.byteLength
           const row = openItem(own, item.bytes, ops, rows, mod)
@@ -1140,6 +1373,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
             row.filedAt = local.nextFiled()
             rows.push(row)
             if (row.t === 'ctl') ops.push(row)
+          } else if (along.length > 0) {
+            missed.push(item.bytes)
           }
         }
         if (gen !== generation) throw new UsageError(LOCKED)
@@ -1150,9 +1385,11 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
             else applied++
           }
         }
+        for (const p of along) await filePageItems(p, missed, mod)
         if (page.items.length > 0) {
           cursor = page.items[page.items.length - 1].seq
           await store.writeDmCursor(storage, cursor)
+          for (const p of along) await movePageCursor(p, cursor)
         }
         if (page.next === null || page.items.length === 0) break
         if (read >= L.budgetBytes) {
@@ -1160,12 +1397,100 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
           break
         }
       }
+      // The other held pages catch up from their own cursor.
+      for (const p of scans) {
+        if (incomplete) break
+        if (along.includes(p)) continue
+        for (;;) {
+          if (gen !== generation) throw new UsageError(LOCKED)
+          if (p.stale) break
+          const page = await link.page({ after: p.cursor.after, limit: L.pageMax })
+          const mod = await moderation()
+          for (const item of page.items) read += item.bytes.byteLength
+          await filePageItems(p, page.items.map((item) => item.bytes), mod)
+          if (page.items.length > 0) await movePageCursor(p, page.items[page.items.length - 1].seq)
+          if (page.next === null || page.items.length === 0) break
+          if (read >= L.budgetBytes) {
+            incomplete = true
+            break
+          }
+        }
+      }
     } finally {
       pulling = false
       if (link !== null) link.close()
       if (added > 0 || applied > 0) emit('dm.changed', { added })
+      for (const p of scans) {
+        if (p.added > 0 || p.applied > 0) emit('dm.changed', { added: p.added, page: p.page })
+      }
     }
     return { added, cursor, incomplete }
+  }
+
+  // An adoption or a forget since the pull began (the epoch moved) leaves
+  // the page to the next pull: nothing more is written for it here.
+  function pageStale (p) {
+    if (p.stale || forgetting.has(p.page) || (pageEpochs.get(p.page) || 0) !== p.epoch) p.stale = true
+    return p.stale
+  }
+
+  async function movePageCursor (p, after) {
+    if (pageStale(p)) return
+    if (!p.ctx.local.unlocked()) throw new UsageError(LOCKED)
+    p.cursor = { after, gen: p.gen, set: p.set }
+    await store.writePageCursor(storage, p.ctx.prefix, p.cursor)
+  }
+
+  // Pool items (drop bytes) -> rows filed in page p's store.
+  async function filePageItems (p, items, mod) {
+    if (items.length === 0 || pageStale(p)) return
+    const lc = p.ctx.local
+    const rows = []
+    const ops = lc.snapshot().ops
+    for (const bytes of items) {
+      const row = openPageItem(p, bytes, ops, rows, mod)
+      if (row !== null) {
+        row.filedAt = lc.nextFiled()
+        rows.push(row)
+        if (row.t === 'ctl') ops.push(row)
+      }
+    }
+    if (rows.length === 0) return
+    try {
+      await lc.append(rows)
+    } catch (err) {
+      // A forget that locked the store under this append.
+      if (pageStale(p)) return
+      throw err
+    }
+    for (const r of rows) {
+      if (r.t === 'msg') p.added++
+      else p.applied++
+    }
+  }
+
+  // The held pages and their boxes (hex), for the published-key check the
+  // session runs after a pull, outside any tracked operation (its lookup
+  // queues on the session's chain, which a reset may hold while it waits
+  // for this engine to go idle).
+  function heldPageBoxes () {
+    if (!unlocked()) return []
+    return pages.pages().map((page) => {
+      const e = pages.get(page)
+      return { page, box: b4a.toString(e.dmBox.publicKey, 'hex'), gen: e.gen }
+    })
+  }
+
+  // While the page's published dm-key differs from the held gen or box, the
+  // page is flagged (drafts and sends refused). `box`, `gen`: the held ones
+  // the check compared; a page adopted again since then is left as it is.
+  // -> whether the flag was applied.
+  function setPageMismatch (page, box, differs, gen) {
+    const e = pages.get(page)
+    if (e === null || b4a.toString(e.dmBox.publicKey, 'hex') !== box) return false
+    if (gen !== undefined && e.gen !== gen) return false
+    pages.setMismatch(page, differs)
+    return true
   }
 
   // One pool item -> a row to file, or null (not ours, uncertified, known,
@@ -1176,17 +1501,548 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const inner = dm.openSealed(drop.sealed, box)
     if (inner === null) return null
     const body = dm.openInner(inner, own, { association, revokedIssuers: mod.revokedIssuers })
-    if (body === null) return null
-    if (body.kind === 'msg' && !body.mine && mod.blocked.has(body.from)) return null
+    if (body === null || dm.pageInnerStale(body, Date.now())) return null
+    return rowOf(own, body, ops, batch, mod.blocked, local)
+  }
+
+  // The same rules with the page as self, opened by the page's boxes; only
+  // the association's blocks drop a sender.
+  function openPageItem (p, bytes, ops, batch, mod) {
+    const drop = dm.decodeDrop(bytes)
+    if (drop === null) return null
+    for (const { pair, key } of p.boxes) {
+      const inner = dm.openSealed(drop.sealed, pair)
+      if (inner === null) continue
+      let body = dm.openInner(inner, key, { association, revokedIssuers: mod.revokedIssuers })
+      // A page message put after its signature's expiry is a replay of a
+      // stockpiled signature (core dm.js pageInnerStale): never filed.
+      if (body === null || dm.pageInnerStale(body, Date.now())) return null
+      // A drop to the key a carried legacy box belonged to is filed for this
+      // page, as the bundle's rows are.
+      if (key !== p.page) {
+        if (body.kind === 'ctl' && body.peer === p.page) return null
+        body = { ...body, from: body.from === key ? p.page : body.from, to: body.to === key ? p.page : body.to }
+        if (body.from === body.to) return null
+      }
+      return rowOf(p.page, body, ops, batch, mod.association, p.ctx.local)
+    }
+    return null
+  }
+
+  function rowOf (own, body, ops, batch, blocked, lc) {
+    if (body.kind === 'msg' && !body.mine && blocked.has(body.from)) return null
     if (body.kind === 'ctl') {
-      if (local.hasOp(body.id) || batch.some((r) => r.t === 'ctl' && r.id === body.id)) return null
+      if (lc.hasOp(body.id) || batch.some((r) => r.t === 'ctl' && r.id === body.id)) return null
       return { t: 'ctl', id: body.id, op: body.op, peer: body.peer, at: body.at }
     }
     const peer = body.mine ? body.to : body.from
-    if (local.hasMessage(body.from, body.id) || batch.some((r) => r.t === 'msg' && r.from === body.from && r.id === body.id)) return null
+    if (lc.hasMessage(body.from, body.id) || batch.some((r) => r.t === 'msg' && r.from === body.from && r.id === body.id)) return null
     // A blocked sender's messages are dropped once they open.
     if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
     return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine }
+  }
+
+  // ---- Páginas (docs/rpc.md 5.114) ----
+
+  function pageGenerate (own, identity, params) {
+    requireUnlocked()
+    return pages.generate(own, identity, params)
+  }
+
+  function pageShare (identity, params) {
+    requireUnlocked()
+    return pages.share(identity, params)
+  }
+
+  // roster: the page's current { owner, admins }, read before this runs (a
+  // tracked operation never waits on the session's queue). A new gen or box
+  // scans the pool again for that page from its oldest drop.
+  async function pageSecrets (own, roster, params) {
+    requireUnlocked()
+    const r = await pages.adopt(own, box, roster, params)
+    if (r.changed) {
+      pageEpochs.set(params.page, (pageEpochs.get(params.page) || 0) + 1)
+      const ctx = await pageCtx(params.page)
+      await store.writePageCursor(storage, ctx.prefix, { after: 0, gen: params.gen, set: boxSetOf(pages.get(params.page)) })
+    }
+    return { ok: true }
+  }
+
+  // recipientBox: the newest dm-key box of `to` (a msg), as dm.send's.
+  async function pageDraft ({ page, kind, to, text, replyTo, fwd, op, peer }, recipientBox) {
+    requireUnlocked()
+    const e = pages.need(page)
+    pages.requireMatch(page)
+    const ctx = await pageCtx(page)
+    let fields
+    if (kind === 'msg') {
+      if (typeof to !== 'string' || typeof text !== 'string') throw new UsageError(BAD_TEXT)
+      if (to === page) throw new UsageError(SELF_SEND)
+      if (!dmFold.canSend({ self: page, peer: to, ops: ctx.local.snapshot().ops })) throw new UsageError(BLOCKED)
+      if (typeof recipientBox !== 'string') throw new UsageError(NO_BOX)
+      const reply = replyTo === undefined ? null : replyTo
+      if (reply !== null) {
+        const c = await threadOf(page, to, ctx)
+        if (c === null || dmFold.replyTarget(c.messages, reply) === null) throw new UsageError(BAD_REPLY)
+      }
+      fields = { kind: 'msg', from: page, to, text, replyTo: reply, fwd: fwd === 1 ? 1 : 0, cert: e.cert }
+    } else {
+      if (typeof peer !== 'string' || peer === page || !dm.DM_OPS.includes(op)) throw new UsageError('nada a alterar')
+      fields = { kind: 'ctl', from: page, to: page, op, peer, cert: e.cert }
+    }
+    let d
+    try {
+      d = dm.innerDigest(fields)
+    } catch (err) {
+      throw new UsageError(err && err.message === TOO_LONG ? TOO_LONG : BAD_TEXT)
+    }
+    pages.putDraft(d.body.id, { page, kind, json: d.json, body: d.body, box: kind === 'msg' ? recipientBox : null, entry: null })
+    return { id: d.body.id, digest: d.digest, at: d.body.at }
+  }
+
+  function verifyPageSig (json, sigHex, expiresAt, page) {
+    try {
+      if (typeof sigHex !== 'string' || !/^[0-9a-f]{128}$/.test(sigHex)) return false
+      const digest = b4a.alloc(sodium.crypto_hash_sha256_BYTES)
+      sodium.crypto_hash_sha256(digest, json)
+      const exp = b4a.alloc(8)
+      new DataView(exp.buffer, exp.byteOffset, 8).setBigUint64(0, BigInt(expiresAt))
+      return hcrypto.verify(b4a.concat([SIG_PREFIX_V3, digest, exp]), b4a.from(sigHex, 'hex'), b4a.from(page, 'hex'))
+    } catch {
+      return false
+    }
+  }
+
+  // A msg goes as dm.send's: to the recipient's box and the page's own, two
+  // stamps from this identity's wallet, the exact drops kept on the draft so
+  // the user's retry after an unconfirmed put repeats the same bytes. A ctl
+  // goes to the page box only, through the page's ctl queue.
+  async function pageSend ({ page, id, signature, expiresAt }) {
+    requireUnlocked()
+    const d = pages.draftOf(page, id)
+    if (d === null) throw new UsageError(DRAFT_GONE)
+    const e = pages.need(page)
+    pages.requireMatch(page)
+    if (!Number.isSafeInteger(expiresAt) || expiresAt <= 0) throw new UsageError(BAD_SIGNATURE)
+    if (!verifyPageSig(d.json, signature, expiresAt, page)) throw new UsageError(BAD_SIGNATURE)
+    const ctx = await pageCtx(page)
+    const b = d.body
+    if (d.kind === 'ctl') {
+      // Each step once: a retry after a failed write redoes only what is
+      // missing, with the same sealed bytes.
+      if (d.sealed === undefined) {
+        const inner = dm.assembleInner(d.json, signature, expiresAt)
+        try {
+          d.sealed = b4a.toString(dm.sealInner(inner, b4a.toString(e.dmBox.publicKey, 'hex')), 'base64')
+        } finally {
+          inner.fill(0)
+        }
+      }
+      if (!ctx.local.hasOp(b.id)) await ctx.local.append([{ t: 'ctl', id: b.id, op: b.op, peer: b.peer, at: b.at, filedAt: ctx.local.nextFiled() }])
+      if (d.queued !== true) {
+        const dropped = await withQueue(() => store.pushDmCtlQueue(storage, ctx.local.seal({ b: d.sealed }), ctx.prefix))
+        d.queued = true
+        if (dropped > 0) log('aviso: ' + dropped + ' estados de conversa antigos descartados da fila')
+      }
+      pages.dropDraft(id)
+      await flushQueued(ctx)
+      // A legacy block signed again leaves the pending list once its ctl was
+      // put, never before.
+      if (b.op === 'blocked') {
+        try {
+          if (!(await stillQueued(ctx, d.sealed))) await dropLegacyBlock(ctx, b.peer)
+        } catch {
+          log('aviso: lista de bloqueios antigos não atualizada')
+        }
+      }
+      return { id: b.id, at: b.at }
+    }
+    // The page may have blocked the recipient after this draft was made.
+    if (!dmFold.canSend({ self: page, peer: b.to, ops: ctx.local.snapshot().ops })) throw new UsageError(BLOCKED)
+    let entry = d.entry
+    if (entry === null) {
+      const inner = dm.assembleInner(d.json, signature, expiresAt)
+      let sealedTo, sealedSelf
+      try {
+        sealedTo = dm.sealInner(inner, d.box)
+        sealedSelf = dm.sealInner(inner, b4a.toString(e.dmBox.publicKey, 'hex'))
+      } catch {
+        throw new UsageError(NO_BOX)
+      } finally {
+        inner.fill(0)
+      }
+      const stamps = await takeStamps(2)
+      if (stamps === null) throw new UsageError(NO_STAMPS)
+      entry = {
+        key: null,
+        id: b.id,
+        at: b.at,
+        drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
+        acked: [false, false],
+        row: { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, replyTo: b.replyTo, fwd: b.fwd, media: null, card: null, at: b.at, mine: true },
+        blobs: [],
+        plains: [],
+        local: ctx.local
+      }
+      d.entry = entry
+    }
+    // The page's queued ops go first, as the own ones do before a dm.set.
+    await flushQueued(ctx)
+    await deliver(entry)
+    pages.dropDraft(id)
+    return { id: b.id, at: b.at }
+  }
+
+  // A row of the page's history the service held in plaintext: checked with
+  // the inner rules (core dm.js innerDigest builds and validates the body:
+  // text, media, card, never both, from !== to) and one side is the page.
+  function validImportRow (page, r) {
+    if (r === null || typeof r !== 'object' || Array.isArray(r)) return false
+    const keys = Object.keys(r)
+    if (keys.length !== IMPORT_ROW_KEYS.length || !IMPORT_ROW_KEYS.every((k) => keys.includes(k))) return false
+    if (typeof r.id !== 'string' || !/^[0-9a-f]{32}$/.test(r.id) || !Number.isSafeInteger(r.n) || r.n < 0) return false
+    if (r.fwd !== 0 && r.fwd !== 1) return false
+    if (typeof r.from !== 'string' || typeof r.to !== 'string' || r.from === r.to || (r.from !== page && r.to !== page)) return false
+    try {
+      dm.innerDigest({ kind: 'msg', id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, media: r.media, card: r.card, fwd: r.fwd, at: r.at, cert: null })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // Whether the ctl sealed as `sealedB64` is still in the page's queue,
+  // stamped or not.
+  async function stillQueued (ctx, sealedB64) {
+    const target = b4a.from(sealedB64, 'base64')
+    for (const item of await readQueue(ctx)) {
+      if (item === sealedB64) return true
+      const drop = dm.decodeDrop(b4a.from(item, 'base64'))
+      if (drop !== null && b4a.equals(drop.sealed, target)) return true
+    }
+    return false
+  }
+
+  // kv dmLegacyBlocks: the peers whose legacy block the page key still has
+  // to sign again, sealed under the page store's key.
+  async function legacyBlocksOf (ctx) {
+    const sealed = await store.readPageLegacyBlocks(storage, ctx.prefix)
+    if (sealed === null) return []
+    const bytes = ctx.local.openBytes(sealed)
+    if (bytes === null) return []
+    try {
+      const v = JSON.parse(b4a.toString(bytes, 'utf8'))
+      if (v === null || typeof v !== 'object' || !Array.isArray(v.peers)) return []
+      return [...new Set(v.peers.filter((k) => typeof k === 'string' && /^[0-9a-f]{64}$/.test(k)))]
+    } catch {
+      return []
+    } finally {
+      wipe(bytes)
+    }
+  }
+
+  async function writeLegacyBlocks (ctx, peers) {
+    if (peers.length === 0) return store.writePageLegacyBlocks(storage, ctx.prefix, null)
+    const bytes = b4a.from(JSON.stringify({ peers }), 'utf8')
+    try {
+      await store.writePageLegacyBlocks(storage, ctx.prefix, ctx.local.sealBytes(bytes))
+    } finally {
+      wipe(bytes)
+    }
+  }
+
+  // kv dmLegacyDone: the bundle ids filed here, sealed the same way, so the
+  // same bundle fed again (after an uncertain 'dm-legacy-done') never files
+  // its ops a second time.
+  async function legacyDoneOf (ctx) {
+    const sealed = await store.readPageLegacyDone(storage, ctx.prefix)
+    if (sealed === null) return []
+    const bytes = ctx.local.openBytes(sealed)
+    if (bytes === null) return []
+    try {
+      const v = JSON.parse(b4a.toString(bytes, 'utf8'))
+      if (v === null || typeof v !== 'object' || !Array.isArray(v.ids)) return []
+      return v.ids.filter((k) => typeof k === 'string' && /^[0-9a-f]{64}$/.test(k))
+    } catch {
+      return []
+    } finally {
+      wipe(bytes)
+    }
+  }
+
+  async function writeLegacyDone (ctx, ids) {
+    const bytes = b4a.from(JSON.stringify({ ids: [...new Set(ids)].slice(-LEGACY_DONE_MAX) }), 'utf8')
+    try {
+      await store.writePageLegacyDone(storage, ctx.prefix, ctx.local.sealBytes(bytes))
+    } finally {
+      wipe(bytes)
+    }
+  }
+
+  async function dropLegacyBlock (ctx, peer) {
+    const peers = await legacyBlocksOf(ctx)
+    if (peers.includes(peer)) await writeLegacyBlocks(ctx, peers.filter((k) => k !== peer))
+  }
+
+  function validImportOp (page, o) {
+    if (o === null || typeof o !== 'object' || Array.isArray(o)) return false
+    const keys = Object.keys(o)
+    return keys.length === 3 && keys.includes('op') && keys.includes('peer') && keys.includes('n') &&
+      Number.isSafeInteger(o.n) && o.n >= 0 && dm.DM_OPS.includes(o.op) &&
+      typeof o.peer === 'string' && /^[0-9a-f]{64}$/.test(o.peer) && o.peer !== page
+  }
+
+  // Whether the parsed bundle's frame is exactly { v: 1, page, box, rows,
+  // ops }. Its rows and ops are checked one by one when filed.
+  function validBundle (page, v) {
+    if (v === null || typeof v !== 'object' || Array.isArray(v)) return false
+    const keys = Object.keys(v)
+    if (keys.length !== BUNDLE_KEYS.length || !BUNDLE_KEYS.every((k) => keys.includes(k))) return false
+    if (v.v !== 1 || v.page !== page || typeof v.box !== 'string' || !/^[0-9a-f]{64}$/.test(v.box)) return false
+    return Array.isArray(v.rows) && Array.isArray(v.ops)
+  }
+
+  // A legacy op's local id, the same on every retry of the same bundle, so
+  // an import repeated after a failure files it once.
+  function legacyOpId (bundleId, i) {
+    const n = b4a.alloc(4)
+    new DataView(n.buffer, n.byteOffset, 4).setUint32(0, i)
+    return b4a.toString(hcrypto.hash([LEGACY_OP_DOMAIN, b4a.from(bundleId, 'hex'), n]), 'hex').slice(0, 32)
+  }
+
+  // One chunk of the legacy bundle the service sealed to this identity's own
+  // dm-key box (docs/rpc.md 5.114), for a page whose secrets are held. Each
+  // chunk is kept sealed under the page store's key until all `count` are
+  // here; then the bundle is checked (a bad frame refuses it and nothing is
+  // filed; a bad row or op is skipped and counted, since the service no
+  // longer holds the history to send it again) and filed: rows as legacy
+  // rows, seen; ops as local ops
+  // only (never put to the pool), in their order; its gen 1 box secret as
+  // the page's legacy box; the peers it leaves blocked as the pending list
+  // (dm.pageLegacyBlocks). A chunk sealed to another box (after a transfer)
+  // answers KEY_MISMATCH and touches nothing.
+  //
+  // movedFrom: the pages this one moved from, newest first, as the chain of
+  // verified page-origin records names them (read by the caller), or null.
+  // A bundle carried over on a move names one of them: its rows and ops are
+  // filed for this one, and its box becomes the legacy box only when none
+  // is held.
+  async function pageLegacyChunk ({ page, id, index, count, sealed }, movedFrom = null) {
+    requireUnlocked()
+    const ctx = await pageCtx(page)
+    let plain = null
+    try {
+      const bytes = b4a.from(sealed, 'base64')
+      if (bytes.byteLength > sodium.crypto_box_SEALBYTES + LEGACY_HEADER_BYTES) {
+        plain = b4a.alloc(bytes.byteLength - sodium.crypto_box_SEALBYTES)
+        if (!sodium.crypto_box_seal_open(plain, bytes, box.publicKey, box.secretKey)) plain = null
+      }
+    } catch {
+      plain = null
+    }
+    if (plain === null) throw new UsageError(KEY_MISMATCH)
+    try {
+      const head = new DataView(plain.buffer, plain.byteOffset, LEGACY_HEADER_BYTES)
+      if (b4a.toString(plain.subarray(0, 32), 'hex') !== id || head.getUint16(32) !== index || head.getUint16(34) !== count ||
+          index >= count || plain.byteLength - LEGACY_HEADER_BYTES > LEGACY_CHUNK_BYTES) throw new UsageError(BAD_ROW)
+      const done = await legacyDoneOf(ctx)
+      if (done.includes(id)) {
+        return { complete: true, added: 0, blocked: (await legacyBlocksOf(ctx)).length, skipped: 0 }
+      }
+      // A page has one legacy history: another bundle after it is refused.
+      if (done.length > 0) throw new UsageError(BAD_ROW)
+      let meta = await store.readPageLegacy(storage, ctx.prefix)
+      if (meta !== null && meta.id === id && meta.count !== count) throw new UsageError(BAD_ROW)
+      if (meta !== null && meta.id !== id) {
+        await store.deletePageLegacyChunks(storage, ctx.prefix)
+        meta = null
+      }
+      if (meta === null) {
+        meta = { id, count, have: [], horizon: legacyHorizon(ctx.local) }
+        await store.writePageLegacy(storage, ctx.prefix, meta)
+      }
+      if (!meta.have.includes(index)) {
+        await store.writePageLegacyChunk(storage, ctx.prefix, index, ctx.local.sealBytes(plain.subarray(LEGACY_HEADER_BYTES)))
+        meta = { ...meta, have: [...meta.have, index] }
+        await store.writePageLegacy(storage, ctx.prefix, meta)
+      }
+      if (meta.have.length < count) return { complete: false, added: 0, blocked: 0, skipped: 0 }
+    } finally {
+      wipe(plain)
+    }
+    return fileLegacyBundle(page, ctx, id, count, movedFrom)
+  }
+
+  // The filing time the legacy items go below: older than every row the page
+  // store held when the bundle began, so a legacy op never reaches a message
+  // pulled since. Kept with the chunks, the same on every retry.
+  function legacyHorizon (lc) {
+    const { messages, ops } = lc.snapshot()
+    let min = lc.nextFiled()
+    for (const r of [...messages, ...ops]) if (Number.isFinite(r.filedAt) && r.filedAt < min) min = r.filedAt
+    return min
+  }
+
+  async function fileLegacyBundle (page, ctx, id, count, movedFrom) {
+    const parts = []
+    let bundle
+    try {
+      for (let i = 0; i < count; i++) {
+        const s = await store.readPageLegacyChunk(storage, ctx.prefix, i)
+        const part = s === null ? null : ctx.local.openBytes(s)
+        if (part === null) {
+          // A stored chunk that no longer opens is asked for again.
+          const meta = await store.readPageLegacy(storage, ctx.prefix)
+          if (meta !== null) await store.writePageLegacy(storage, ctx.prefix, { ...meta, have: meta.have.filter((x) => x !== i) })
+          throw new UsageError(BAD_ROW)
+        }
+        parts.push(part)
+      }
+      try {
+        bundle = JSON.parse(b4a.toString(b4a.concat(parts), 'utf8'))
+      } catch {
+        throw new UsageError(BAD_ROW)
+      }
+    } finally {
+      parts.forEach(wipe)
+    }
+    const before = (Array.isArray(movedFrom) ? movedFrom : [movedFrom])
+      .filter((k) => typeof k === 'string' && /^[0-9a-f]{64}$/.test(k) && k !== page)
+    if (!validBundle(page, bundle) && !before.some((k) => validBundle(k, bundle))) throw new UsageError(BAD_ROW)
+    const carried = bundle.page !== page
+    const secret = b4a.from(bundle.box, 'hex')
+    try {
+      // Another legacy box held already: nothing of this bundle is filed.
+      const held = pages.legacyMatches(page, secret)
+      if (!carried && held === false) throw new UsageError(BAD_ROW)
+      return await fileLegacyItems(page, ctx, id, bundle, secret, !carried || held === null)
+    } finally {
+      wipe(secret)
+    }
+  }
+
+  async function fileLegacyItems (page, ctx, id, bundle, secret, adoptBox) {
+    const meta = await store.readPageLegacy(storage, ctx.prefix)
+    const horizon = meta !== null && meta.id === id && meta.horizon !== null ? meta.horizon : legacyHorizon(ctx.local)
+    // Each valid item once per filing position (a repeated n skips the later
+    // item), then everything in n order, so a deleted op hides only the rows
+    // filed before it. An op keeps its bundle index (its local id).
+    const items = []
+    const taken = new Set()
+    let skipped = 0
+    const take = (item, ok) => {
+      if (!ok || taken.has(item.n)) {
+        skipped++
+        return
+      }
+      taken.add(item.n)
+      items.push(item)
+    }
+    // A carried bundle's page side is this page now.
+    const src = bundle.page
+    const carry = (r) => src === page || r === null || typeof r !== 'object' || Array.isArray(r)
+      ? r
+      : { ...r, from: r.from === src ? page : r.from, to: r.to === src ? page : r.to }
+    for (const r of bundle.rows) {
+      const c = carry(r)
+      take({ n: r && r.n, r: c }, validImportRow(page, c))
+    }
+    bundle.ops.forEach((o, i) => take({ n: o && o.n, o, i }, validImportOp(page, o) && o.peer !== src))
+    items.sort((x, y) => x.n - y.n)
+    const rows = items.filter((x) => x.r !== undefined).map((x) => x.r)
+    const goodOps = items.filter((x) => x.o !== undefined)
+    const lc = ctx.local
+    const out = []
+    const ops = []
+    const at = nowIso()
+    for (let pos = 0; pos < items.length; pos++) {
+      const item = items[pos]
+      // Below the horizon in n order, the same values on every retry.
+      const filedAt = horizon - items.length + pos
+      if (item.o !== undefined) {
+        const oid = legacyOpId(id, item.i)
+        if (!lc.hasOp(oid)) ops.push({ t: 'ctl', id: oid, op: item.o.op, peer: item.o.peer, at, filedAt })
+        continue
+      }
+      const r = item.r
+      if (lc.hasMessage(r.from, r.id) || out.some((x) => x.from === r.from && x.id === r.id)) continue
+      const mine = r.from === page
+      out.push({
+        t: 'msg',
+        id: r.id,
+        peer: mine ? r.to : r.from,
+        from: r.from,
+        text: r.text,
+        replyTo: r.replyTo,
+        fwd: r.fwd,
+        media: r.media === null ? null : r.media.map(mediaItem),
+        card: r.card === null ? null : copyLinkCard(r.card, mediaItem),
+        at: r.at,
+        mine,
+        legacy: true,
+        filedAt
+      })
+    }
+    if (out.length > 0 || ops.length > 0) {
+      try {
+        await lc.append([...out, ...ops].sort((x, y) => x.filedAt - y.filedAt))
+      } catch (err) {
+        if (err instanceof TypeError) throw new UsageError(BAD_ROW)
+        throw err
+      }
+    }
+    // Every row of the bundle now in the store, filed by this call or by an
+    // earlier one that failed after it: a retry still marks it seen.
+    const seenIds = rows.filter((r) => r.from !== page && lc.hasMessage(r.from, r.id)).map((r) => lc.seenToken(dmFold.seenKey(r.from, r.id)))
+    if (seenIds.length > 0) await store.writeDmSeen(storage, [...await store.readDmSeen(storage, ctx.prefix), ...seenIds], ctx.prefix)
+    if (adoptBox && await pages.setLegacy(page, secret, src)) {
+      // The page scans the pool again, so drops sealed to the legacy box open.
+      pageEpochs.set(page, (pageEpochs.get(page) || 0) + 1)
+      const e = pages.need(page)
+      await store.writePageCursor(storage, ctx.prefix, { after: 0, gen: e.gen, set: boxSetOf(e) })
+    }
+    // The newest block-class op per peer decides.
+    const last = new Map()
+    for (const { o } of goodOps) if (o.op === 'blocked' || o.op === 'unblocked') last.set(o.peer, o.op)
+    const blocked = [...last].filter(([, op]) => op === 'blocked').map(([peer]) => peer)
+    const pending = [...new Set([...await legacyBlocksOf(ctx), ...blocked])]
+    await writeLegacyBlocks(ctx, pending)
+    await writeLegacyDone(ctx, [...await legacyDoneOf(ctx), id])
+    await store.deletePageLegacyChunks(storage, ctx.prefix)
+    if (out.length > 0 || ops.length > 0) emit('dm.changed', { added: out.length, page })
+    return { complete: true, added: out.length, blocked: pending.length, skipped }
+  }
+
+  // -> { pending: [peer] }: the legacy blocks still to sign again.
+  async function pageLegacyBlocks ({ page }) {
+    requireUnlocked()
+    const ctx = await pageCtx(page)
+    return { pending: await legacyBlocksOf(ctx) }
+  }
+
+  // The page is marked first: a pull under way stops writing for it and no
+  // new one opens its store again. The history goes before the secrets and
+  // the registry entry, so a failure in between leaves a page still listed
+  // for the next try.
+  async function pageForget ({ page }) {
+    requireUnlocked()
+    forgetting.add(page)
+    pageEpochs.set(page, (pageEpochs.get(page) || 0) + 1)
+    try {
+      const s = pageStores.get(page)
+      pageStores.delete(page)
+      if (s !== undefined) {
+        try { await s.ready } catch {}
+        s.local.lock()
+        await s.local.idle()
+      }
+      await store.deletePageDm(storage, page)
+      await pages.forget(page)
+      await store.forgetPageStore(storage, page)
+    } finally {
+      forgetting.delete(page)
+    }
+    return { ok: true }
   }
 
   async function close () {
@@ -1203,6 +2059,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     unlocked,
     idle,
     boxHex,
+    openTestimonial,
     checkSend,
     list,
     thread,
@@ -1210,9 +2067,25 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     send: tracked(send),
     putMedia: tracked(putMedia),
     readMedia: tracked(readMedia),
+    putPublicMedia: tracked(putPublicMedia),
+    isOwnPublicItem,
+    forgetPublicItem,
+    readPublicMedia,
     wipeMedia,
     set: tracked(set),
     pull: tracked(pull),
+    pageGenerate,
+    pageShare,
+    pageSecrets: tracked(pageSecrets),
+    pageDraft: tracked(pageDraft),
+    pageSend: tracked(pageSend),
+    pageLegacyChunk: tracked(pageLegacyChunk),
+    pageLegacyBlocks: tracked(pageLegacyBlocks),
+    pageForget: tracked(pageForget),
+    groupBoxOf: (page) => pages.groupBoxOf(page),
+    heldPageBoxes,
+    holdsPage: (page) => pages.get(page) !== null,
+    setPageMismatch,
     topUp,
     walletSize,
     close,
@@ -1235,6 +2108,12 @@ module.exports = {
   MEDIA_GONE,
   MEDIA_STALE,
   UPLOAD_FAILED,
+  MOMENT_PHOTO_GONE,
   BLOBS_MAX,
+  NO_PAGE_KEY,
+  KEY_MISMATCH,
+  USE_PAGE_DRAFT,
+  DRAFT_GONE,
+  BAD_ROW,
   voiceMs
 }

@@ -3,11 +3,13 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
-const { verifyReport, verifyDmReport } = require('@varanda/core/lib/report')
+const { verifyReport, verifyDmReport, verifyListingReport } = require('@varanda/core/lib/report')
+const { verifyAppeal } = require('@varanda/core/lib/appeal')
 const { verifyModeratorCert } = require('@varanda/core/lib/cert')
 const { canonicalBody, verifyModRequest } = require('@varanda/core/lib/mod-request')
 const { mediaBounds, audioBounds } = require('@varanda/rpc')
-const { MAX_REPORTS, AI_ACTOR, OWNER_ACTOR, ANEXO_MAX_BYTES, ANEXO_MIMES } = require('./moderation-store')
+const { safe } = require('@varanda/core/lib/safe')
+const { MAX_REPORTS, MAX_APPEALS, AI_ACTOR, OWNER_ACTOR, ANEXO_MAX_BYTES, ANEXO_MIMES } = require('./moderation-store')
 
 // The moderation desk of the account service (mounted by ./server.js before
 // any issuer-only route, so it works on an unconfigured service):
@@ -23,6 +25,10 @@ const { MAX_REPORTS, AI_ACTOR, OWNER_ACTOR, ANEXO_MAX_BYTES, ANEXO_MIMES } = req
 //     bodies are read at once. The image is stored as the reporter's word
 //     and served to the panel from local disk only; it never reaches the AI
 //     triage, a log or the seeder.
+//   - a blocked member's appeal (POST /account/appeal/start, POST
+//     /account/appeal): the same rules as a report (no cookie, the member's
+//     key proof over a single-use nonce, a linked Google account), about the
+//     signer's own key only; the store refuses it unless that key is blocked.
 //   - the moderators' panel: Google sign-in on the server (PKCE, the same
 //     google.js as the link flow, its own redirect URI), an in-memory
 //     session cookie `__Host-varanda-mod` for e-mails in
@@ -76,6 +82,7 @@ const CHALLENGE_TTL_MS = 120 * 1000
 // Nonce domains: a report nonce can never stand in for an operator
 // challenge, nor the reverse.
 const REPORT_NONCE_DOMAIN = 'varanda-report-nonce'
+const APPEAL_NONCE_DOMAIN = 'varanda-appeal-nonce'
 const CHALLENGE_DOMAIN = 'varanda-mod-challenge'
 // expiry (8 bytes) || random (16) || truncated HMAC-SHA256 (16) = 40 bytes,
 // 54 base64url characters: inside the NONCE_RE of report.js and
@@ -112,6 +119,8 @@ const HEX64_RE = /^[0-9a-f]{64}$/
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 // Report and change ids (moderation-store.js newId: 16 bytes base64url).
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+const REPORT_KINDS = new Set(['listing'])
+const ANUNCIO_KEYS = ['title', 'text', 'priceLabel', 'city', 'uf', 'kind', 'status']
 // Google authorization codes: printable ASCII, bounded (as server.js).
 const PARAM_RE = /^[\x21-\x7e]{1,512}$/
 const MOD_EMAIL_RE = /^[^\s,@]{1,64}@[^\s,@]{1,255}$/
@@ -232,6 +241,10 @@ function createModRoutes ({
   // reporter, so blocking unchecked would let a reporter aim an
   // association-wide block at any key, a diary included.
   groupCheck = null,
+  // A createListingReader instance (./feira-read.js) or null. Only its
+  // readCurrent serves the panel's 'Ver anúncio' of a listing report: the
+  // seeder's folded current version, never the Feira index.
+  listingReader = null,
   panelDir = path.join(__dirname, 'panel'),
   log = () => {},
   now = Date.now,
@@ -244,6 +257,7 @@ function createModRoutes ({
   // no tab instead of a tab that always fails.
   if (usage === null || usage === undefined || typeof usage.view !== 'function') usage = null
   if (groupCheck === null || groupCheck === undefined || typeof groupCheck.check !== 'function') groupCheck = null
+  if (listingReader === null || listingReader === undefined || typeof listingReader.readCurrent !== 'function') listingReader = null
   // The subset rule enforced here too (not only where the env is parsed): a
   // stats e-mail that is not a moderator can never hold a session anyway,
   // and keeping it out makes that explicit.
@@ -275,6 +289,7 @@ function createModRoutes ({
   // the nonces this process minted and by MAX_ANEXO_INFLIGHT reads at once.
   // nonce -> expiresAt.
   const spentReportNonces = new Map()
+  const spentAppealNonces = new Map()
   const spentChallenges = new Map()
   // Anexo bodies being read right now (see MAX_ANEXO_INFLIGHT).
   let anexoInflight = 0
@@ -319,6 +334,10 @@ function createModRoutes ({
     session: keyedWindow(60, 60 * 1000, now),
     group: keyedWindow(30, 60 * 1000, now),
     anexo: keyedWindow(300, 60 * 1000, now),
+    // 'Ver anúncio' is a moderator's click, kept apart from the automatic
+    // /alvo and /grupo lookups the panel runs for every open report, so
+    // those can never spend it.
+    anuncio: keyedWindow(30, 60 * 1000, now),
     operatorSigned: fixedWindow(30, 60 * 1000, now)
   }
   const over = () => new RouteError('pedido-invalido', 429)
@@ -499,6 +518,7 @@ function createModRoutes ({
     // The own key is never a target; checked before the signature and the store.
     if (target === member) throw refuse('pedido-invalido')
     if (body.kind === 'dm') return reportDm(res, body, { member, nonce, expiresAt, target, anexo })
+    if (body.kind === 'listing') return reportListing(res, body, { member, nonce, expiresAt, target, anexo })
     if (body.kind !== undefined) throw refuse('pedido-invalido')
     const seq = body.seq === undefined || body.seq === null ? null : body.seq
     // A group message (report v2): writer and group come together, only with
@@ -536,6 +556,29 @@ function createModRoutes ({
     if (!duplicate && writer === null && anexo === null) afterAnswer(() => triage.onReport(added))
   }
 
+  // A Feira listing (report kind 'listing'): a record at `seq` on the target's
+  // diary, signed under its own prefix so a post report never passes as one.
+  // It sits in no group and carries no image.
+  async function reportListing (res, body, { member, nonce, expiresAt, target, anexo }) {
+    if (anexo !== null) throw refuse('pedido-invalido')
+    for (const k of ['writer', 'group', 'peer']) {
+      if (body[k] !== undefined && body[k] !== null) throw refuse('pedido-invalido')
+    }
+    const seq = body.seq
+    if (!Number.isSafeInteger(seq)) throw refuse('pedido-invalido')
+    const text = body.text === undefined ? '' : body.text
+    const quote = body.quote === undefined ? '' : body.quote
+    const { reason, signature } = body
+    const fields = { nonce, member, association, target, seq, reason, text, quote }
+    if (!verifyListingReport(fields, signature).ok) throw refuse('assinatura-invalida')
+    // Spent as in report(): no await since the nonce check.
+    spend(spentReportNonces, nonce, expiresAt)
+    const { report: added, duplicate } = await storeAsync(() => moderation.add({ reporter: member, target, seq, reason, text, quote, signature, nonce, kind: 'listing' }))
+    log({ event: 'report', reason: duplicate ? 'duplicada' : 'nova' })
+    send(res, 200, { id: added.id, duplicate })
+    if (!duplicate) afterAnswer(() => triage.onReport(added))
+  }
+
   // A private message (report kind 'dm', docs/rpc.md 5.81): the message is on
   // no diary, so the seeder is never asked for it and the quote is the
   // reporter's word only. Fields of a diary or group report make it invalid.
@@ -559,6 +602,36 @@ function createModRoutes ({
     // without reading or embedding anything, an anexo included: the row
     // it gets carries the anexo's shape only, never the bytes.
     if (!duplicate) afterAnswer(() => triage.onReport(added))
+  }
+
+  // --- member appeals ------------------------------------------------------
+
+  // Like reportStart: a linked member only, no quota and no stored row.
+  async function appealStart (req, res, body) {
+    needModeration()
+    const member = hex64(body.member)
+    if (accounts.contact(member) === null) throw refuse('nao-vinculado')
+    if (typeof accounts.deletedAt === 'function' && accounts.deletedAt(member) !== null) throw refuse('conta-excluida')
+    send(res, 200, { nonce: mintNonce(APPEAL_NONCE_DOMAIN, [member], REPORT_NONCE_TTL_MS) })
+  }
+
+  // The statement names no target: the appeal is about the signer's own key,
+  // and the store answers 'nao-bloqueado' unless that key is blocked, so only
+  // the key's owner (who proved it) learns whether it is.
+  async function appeal (req, res, body) {
+    needModeration()
+    const member = hex64(body.member)
+    const nonce = body.nonce
+    const expiresAt = checkNonce(nonce, APPEAL_NONCE_DOMAIN, [member])
+    if (expiresAt === null || spentAppealNonces.has(nonce)) throw new RouteError('expirado', 400)
+    const text = body.text === undefined ? '' : body.text
+    if (!verifyAppeal({ nonce, member, association, text }, body.signature).ok) throw refuse('assinatura-invalida')
+    // Spent only now that the signature verified, with no await in between
+    // (as report).
+    spend(spentAppealNonces, nonce, expiresAt)
+    const { appeal: added, duplicate } = await storeAsync(() => moderation.addAppeal({ member, text, signature: body.signature, nonce }))
+    log({ event: 'appeal', reason: duplicate ? 'duplicado' : 'novo' })
+    send(res, 200, { id: added.id, duplicate })
   }
 
   // --- moderator sign-in ---------------------------------------------------
@@ -739,7 +812,10 @@ function createModRoutes ({
       // The triage's suggestion (tokens and numbers) and the verified post
       // text it read from the seeder ({ texto, midia, citacao }), or null.
       ia: triageView('suggestionOf', r.id),
-      publicacao: triageView('verifiedOf', r.id)
+      publicacao: triageView('verifiedOf', r.id),
+      // The public Feira page of a reported listing, on this service's
+      // public origin.
+      ...(r.kind === 'listing' && Number.isSafeInteger(r.seq) ? { anuncioUrl: origin + '/f/' + r.target + '/' + r.seq } : {})
     }
   }
 
@@ -778,10 +854,12 @@ function createModRoutes ({
     const own = ownMember(session)
     const { reports: rows } = store(() => moderation.list({ status: 'aberta', limit: MAX_REPORTS, exclude: own }))
     const { changes } = store(() => moderation.pending())
+    const { appeals: waiting } = store(() => moderation.listAppeals({ status: 'aberta', limit: MAX_APPEALS, exclude: own, excludeBy: session.email }))
     send(res, 200, {
       email: session.email,
       published: store(publishedInfo),
       open: rows.length,
+      appeals: waiting.length,
       pending: changes.filter((c) => c.member !== own).length,
       // Present only for the stats allow-list; never `stats: false`, so
       // everyone else gets the exact body they always got.
@@ -811,12 +889,17 @@ function createModRoutes ({
     // the page starts right after it.
     const antes = url.searchParams.get('antes')
     if (antes !== null && (estado !== 'decidida' || !ID_RE.test(antes))) throw refuse('pedido-invalido')
+    // `kind`: the Anúncios chip. Filtered here, before the page cut, so a
+    // listing report beyond the first page of every kind is still reached.
+    const kind = url.searchParams.get('kind')
+    if (kind !== null && !REPORT_KINDS.has(kind)) throw refuse('pedido-invalido')
     // The moderator's own cases (as target or as reporter) leave the store's
     // list before its cut at MAX_REPORTS and before the page: truncating
     // first could hide every actionable report behind a first page of the
     // moderator's own cases, and `truncated` must not count them either.
     const own = ownMember(session)
-    const { reports: visible, truncated: cut } = store(() => moderation.list({ status: estado, limit: MAX_REPORTS, exclude: own }))
+    const { reports: listed, truncated: cut } = store(() => moderation.list({ status: estado, limit: MAX_REPORTS, exclude: own }))
+    const visible = kind === null ? listed : listed.filter((r) => r.kind === kind)
     let start = 0
     if (antes !== null) {
       const at = visible.findIndex((r) => r.id === antes)
@@ -831,6 +914,63 @@ function createModRoutes ({
       // can reach, older rows may exist that it never shows.
       alemDoLimite: cut && visible.length <= start + REPORTS_PAGE
     })
+  }
+
+  // An appeal is judged by someone who did not decide the block, and never
+  // by the appellant (the same rule as ownCase for reports).
+  function appealHidden (a, session) {
+    return a.member === ownMember(session) || store(() => moderation.blockedBy(a.member)).includes(session.email)
+  }
+
+  function projectAppeal (a, cache) {
+    // A group block blocked the root key, not the diary: not the reason of
+    // this account's block.
+    const blocks = store(() => moderation.exportRows({ member: a.member })).filter((r) => r.status === 'bloquear' && r.blocked !== 'grupo')
+    return {
+      id: a.id,
+      at: a.at,
+      member: a.member,
+      username: usernameOf(a.member, cache),
+      text: a.text,
+      // The reports that blocked the diary, by id, reason and date only: the
+      // panel's Histórico shows the rest.
+      bloqueios: blocks.map((r) => ({ id: r.id, reason: r.reason, at: r.decidedAt })),
+      status: a.status,
+      decidedAt: a.decidedAt,
+      note: a.note
+    }
+  }
+
+  async function appeals (req, res, session, url) {
+    const estado = url.searchParams.get('estado') ?? 'aberta'
+    if (estado !== 'aberta' && estado !== 'decidida') throw refuse('pedido-invalido')
+    // `antes`, as in api/reports: only for the decided ones.
+    const antes = url.searchParams.get('antes')
+    if (antes !== null && (estado !== 'decidida' || !ID_RE.test(antes))) throw refuse('pedido-invalido')
+    const { appeals: visible, truncated: cut } = store(() => moderation.listAppeals({ status: estado, limit: MAX_APPEALS, exclude: ownMember(session), excludeBy: session.email }))
+    let start = 0
+    if (antes !== null) {
+      const at = visible.findIndex((a) => a.id === antes)
+      if (at === -1) throw refuse('pedido-invalido')
+      start = at + 1
+    }
+    const cache = new Map()
+    send(res, 200, {
+      appeals: visible.slice(start, start + REPORTS_PAGE).map((a) => projectAppeal(a, cache)),
+      truncated: visible.length > start + REPORTS_PAGE,
+      alemDoLimite: cut && visible.length <= start + REPORTS_PAGE
+    })
+  }
+
+  async function decideAppeal (req, res, session, id, body) {
+    const row = store(() => moderation.getAppeal(id))
+    if (row === null || appealHidden(row, session)) throw refuse('nao-encontrado')
+    const note = body.note === undefined ? '' : body.note
+    const result = await storeAsync(() => moderation.decideAppeal(id, { decision: body.decision, by: session.email, note }))
+    log({ event: 'appeal-decided', reason: result.appeal.status })
+    const cache = new Map()
+    send(res, 200, { appeal: projectAppeal(result.appeal, cache), change: projectChange(result.change, cache) })
+    if (result.appeal.status === 'aceito') afterAnswer(() => triage.onUnblock(result.appeal.member))
   }
 
   async function decide (req, res, session, id, body) {
@@ -922,6 +1062,32 @@ function createModRoutes ({
     const v = await confirmTarget(row)
     if (!v.ok) log({ event: 'alvo', reason: v.code })
     send(res, 200, v.ok ? { confirmed: true } : { confirmed: false, reason: v.code })
+  }
+
+  // The current version of a reported listing, as the local seeder folds
+  // it: { title, text, priceLabel, city, uf, kind, status } (each string
+  // escaped with safe, or null; peer text the panel renders as text), {
+  // ausente: true } once the listing is gone, or { erro } when the seeder
+  // could not answer. Only a view: decide never reads it.
+  async function anuncioInfo (req, res, session, id) {
+    const row = store(() => moderation.get(id))
+    if (row === null || row.kind !== 'listing' || !Number.isSafeInteger(row.seq) || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
+    if (listingReader === null) return send(res, 200, { erro: 'config' })
+    let v
+    try {
+      v = await listingReader.readCurrent(row.target, row.seq)
+    } catch {
+      v = 'recusado'
+    }
+    if (v === 'ausente') return send(res, 200, { ausente: true })
+    if (v === null || typeof v !== 'object') {
+      const reason = typeof v === 'string' && /^[a-z-]{1,32}$/.test(v) ? v : 'recusado'
+      log({ event: 'anuncio', reason })
+      return send(res, 200, { erro: reason })
+    }
+    const view = {}
+    for (const k of ANUNCIO_KEYS) view[k] = typeof v[k] === 'string' ? safe(v[k]) : null
+    send(res, 200, view)
   }
 
   // The stored image of a report, from local disk only (moderation-store.js
@@ -1039,6 +1205,7 @@ function createModRoutes ({
 
   function owns (pathname) {
     return pathname === '/account/report' || pathname.startsWith('/account/report/') ||
+      pathname === '/account/appeal' || pathname.startsWith('/account/appeal/') ||
       pathname === '/account/mod' || pathname.startsWith('/account/mod/')
   }
 
@@ -1116,6 +1283,8 @@ function createModRoutes ({
 
     if (post && p === '/account/report/start') return reportStart(req, res, await postBody(req, undefined))
     if (post && p === '/account/report') return report(req, res, await postBody(req, REPORT_BODY_MAX))
+    if (post && p === '/account/appeal/start') return appealStart(req, res, await postBody(req, undefined))
+    if (post && p === '/account/appeal') return appeal(req, res, await postBody(req, REPORT_BODY_MAX))
     if (post && p === '/account/report/anexo') {
       needModeration()
       checkPost(req)
@@ -1155,6 +1324,7 @@ function createModRoutes ({
     // is disabled: deploy/seeder/deploy.sh probes exactly that.
     if (get && p === '/account/mod/api/me') return withSession(req, (s) => me(req, res, s))
     if (get && p === '/account/mod/api/reports') return withSession(req, (s) => reports(req, res, s, url))
+    if (get && p === '/account/mod/api/appeals') return withSession(req, (s) => appeals(req, res, s, url))
     if (get && p === '/account/mod/api/blocked') return withSession(req, (s) => blocked(req, res, s))
     if (get && p === '/account/mod/api/stats') return withSession(req, (s) => usageStats(req, res, s))
     if (post && p === '/account/mod/api/unblock') {
@@ -1166,6 +1336,12 @@ function createModRoutes ({
       const id = decideMatch[1]
       const body = await postBody(req, undefined)
       return withSession(req, (s) => decide(req, res, s, id, body))
+    }
+    const appealMatch = /^\/account\/mod\/api\/appeals\/([^/]+)\/decide$/.exec(p)
+    if (post && appealMatch && ID_RE.test(appealMatch[1])) {
+      const id = appealMatch[1]
+      const body = await postBody(req, undefined)
+      return withSession(req, (s) => decideAppeal(req, res, s, id, body))
     }
     const groupMatch = /^\/account\/mod\/api\/reports\/([^/]+)\/grupo$/.exec(p)
     if (get && groupMatch && ID_RE.test(groupMatch[1])) {
@@ -1182,6 +1358,11 @@ function createModRoutes ({
       const id = targetMatch[1]
       return withSession(req, (s) => targetInfo(req, res, s, id), limits.group)
     }
+    const anuncioMatch = /^\/account\/mod\/api\/reports\/([^/]+)\/anuncio$/.exec(p)
+    if (get && anuncioMatch && ID_RE.test(anuncioMatch[1])) {
+      const id = anuncioMatch[1]
+      return withSession(req, (s) => anuncioInfo(req, res, s, id), limits.anuncio)
+    }
     const cancelMatch = /^\/account\/mod\/api\/pending\/([^/]+)\/cancel$/.exec(p)
     if (post && cancelMatch && ID_RE.test(cancelMatch[1])) {
       const id = cancelMatch[1]
@@ -1194,7 +1375,7 @@ function createModRoutes ({
   // Sizes only (server.js modStats): tests check that anonymous or invalid
   // requests never grow a table.
   function stats () {
-    return { spentReportNonces: spentReportNonces.size, spentChallenges: spentChallenges.size, spentLogins: spentLogins.size, sessions: sessions.size }
+    return { spentReportNonces: spentReportNonces.size, spentAppealNonces: spentAppealNonces.size, spentChallenges: spentChallenges.size, spentLogins: spentLogins.size, sessions: sessions.size }
   }
 
   return { owns, handle, stats }

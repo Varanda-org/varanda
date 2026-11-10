@@ -84,7 +84,9 @@ const AI_REASONS = {
   modelo: 'o modelo da IA mudou; a triagem está parada',
   'falha-ia': 'a IA falhou ao ler a publicação; nova tentativa mais tarde',
   lotado: 'a lista de bloqueio está cheia',
-  exato: 'igual a um caso já decidido'
+  exato: 'igual a um caso já decidido',
+  // ./ai/worker.js never reads a Feira listing: a person always decides.
+  anuncio: 'anúncio, só revisão humana'
 }
 const AI_FALLBACK = 'sem precedente suficiente'
 const VERIFIED_MAX = 1000
@@ -92,6 +94,10 @@ const VERIFIED_MAX = 1000
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 const HEX64 = /^[0-9a-f]{64}$/
 const NOTE_MAX = 280
+// report.anuncioUrl as mod-routes.js builds it (public origin + /f/<key>/<seq>);
+// anything else is not shown as a link.
+const ANUNCIO_URL_RE = /^https:\/\/[A-Za-z0-9.-]+(?::[0-9]{1,5})?\/f\/[0-9a-f]{64}\/[1-9][0-9]{0,15}$/
+const ANUNCIO_FIELDS = ['title', 'text', 'priceLabel', 'city', 'uf', 'kind', 'status']
 
 const TEXT = {
   title: 'Moderação',
@@ -128,12 +134,39 @@ const TEXT = {
   byAi: 'pedido pela IA',
   byOwner: 'exclusão da conta pedida pela própria pessoa (não pode ser cancelada aqui)',
   commentLabel: 'Comentário de quem denunciou',
+  listingChip: 'Anúncios',
+  listingLink: 'Página pública do anúncio',
+  listingShow: 'Ver anúncio',
+  listingLoading: 'lendo o anúncio no semeador…',
+  listingCurrent: 'versão atual; o anúncio pode ter mudado',
+  listingGone: 'O anúncio não está mais no semeador (apagado ou nunca servido).',
+  listingFailed: 'O semeador não respondeu agora; tente de novo.',
+  listingBusy: 'Muitos pedidos agora; tente de novo em instantes.',
+  listingBlockWarning: 'Bloquear atinge o diário inteiro, não só este anúncio.',
+  listingTitle: 'título: ',
+  listingPrice: 'preço: ',
+  listingPlace: 'local: ',
+  listingKind: 'tipo: ',
+  listingStatus: 'situação: ',
+  noListings: 'Nenhuma denúncia de anúncio aberta.',
   noteLabel: 'motivo da decisão (opcional)',
   blockWarning: 'O bloqueio vale para a conta inteira, incluindo suas publicações.',
   waiting: 'aguardando assinatura do operador',
   decided: 'Decisão registrada. Ela vale quando a operação assinar e publicar.',
   discarded: 'Denúncia descartada.',
   noOpen: 'Nenhuma denúncia aberta.',
+  noAppeals: 'Nenhum recurso aberto.',
+  appealWords: 'Palavras de quem recorreu, não conferidas.',
+  appealBlocks: 'Bloqueio decidido por denúncia de motivo: ',
+  appealBlocksNone: 'Esta chave foi bloqueada fora do painel.',
+  appealAccept: 'Aceitar',
+  appealDeny: 'Negar',
+  appealAccepted: 'Recurso aceito. O desbloqueio só vale quando a operação rodar `varanda mod apply` e publicar a lista.',
+  appealDenied: 'Recurso negado.',
+  appealDecidedTitle: 'Recursos decididos',
+  appealAcceptWarning: 'Aceitar pede o desbloqueio da conta inteira.',
+  appealDenyWarning: 'Negar mantém o bloqueio. A pessoa só pode recorrer de novo em 30 dias.',
+  appealNote: 'Só quem não decidiu o bloqueio vê este recurso.',
   moreOpen: 'Há mais denúncias depois destas.',
   moreDecided: 'Há mais decisões antes destas.',
   showMore: 'mostrar mais',
@@ -179,6 +212,7 @@ const TEXT = {
 
 const TABS = [
   { id: 'abertas', label: 'Abertas' },
+  { id: 'recursos', label: 'Recursos' },
   { id: 'pendentes', label: 'Pendentes' },
   { id: 'bloqueadas', label: 'Bloqueadas' },
   { id: 'historico', label: 'Histórico' }
@@ -283,6 +317,7 @@ function actorOf (r) {
 // HTTP status -> what the panel does next.
 function kindLabel (r) {
   if (r.kind === 'dm') return 'mensagem privada'
+  if (r.kind === 'listing') return 'anúncio'
   return r.kind === 'account' ? 'conta' : 'publicação'
 }
 
@@ -302,11 +337,12 @@ function reportRow (r) {
   // A private message has no post fields at all; a group message names
   // both keys; anything else is a diary report.
   const dm = r.kind === 'dm'
-  const grouped = !dm && has(r, 'writer') && has(r, 'group') && HEX64.test(str(r.writer)) && HEX64.test(str(r.group))
+  const listing = r.kind === 'listing'
+  const grouped = !dm && !listing && has(r, 'writer') && has(r, 'group') && HEX64.test(str(r.writer)) && HEX64.test(str(r.group))
   return {
     id: r.id,
     at: str(r.at),
-    kind: dm ? 'dm' : r.kind === 'account' ? 'account' : 'post',
+    kind: dm ? 'dm' : listing ? 'listing' : r.kind === 'account' ? 'account' : 'post',
     seq: !dm && Number.isInteger(r.seq) ? r.seq : null,
     writer: grouped ? r.writer : null,
     group: grouped ? r.group : null,
@@ -322,7 +358,43 @@ function reportRow (r) {
     ai: has(r, 'ia') ? aiOf(r.ia) : null,
     verified: has(r, 'publicacao') ? verifiedOf(r.publicacao) : null,
     anexo: has(r, 'anexo') && r.anexo !== null && typeof r.anexo === 'object',
-    anexoAudio: has(r, 'anexo') && r.anexo !== null && typeof r.anexo === 'object' && r.anexo.mime === 'audio/mp4'
+    anexoAudio: has(r, 'anexo') && r.anexo !== null && typeof r.anexo === 'object' && r.anexo.mime === 'audio/mp4',
+    anuncioUrl: listing && typeof r.anuncioUrl === 'string' && ANUNCIO_URL_RE.test(r.anuncioUrl) ? r.anuncioUrl : null
+  }
+}
+
+// api/reports/<id>/anuncio -> { ausente: true }, { failed: true } or the
+// listing view with every field a string or null.
+function anuncioOf (json) {
+  if (has(json, 'ausente') && json.ausente === true) return { ausente: true }
+  if (json === null || typeof json !== 'object' || Array.isArray(json) || has(json, 'erro')) return { failed: true }
+  const view = {}
+  for (const k of ANUNCIO_FIELDS) view[k] = has(json, k) && typeof json[k] === 'string' ? json[k] : null
+  return view
+}
+
+function appealRow (a) {
+  if (!has(a, 'id') || typeof a.id !== 'string' || !ID_RE.test(a.id)) return null
+  const blocks = has(a, 'bloqueios') && Array.isArray(a.bloqueios) ? a.bloqueios : []
+  return {
+    id: a.id,
+    at: str(a.at),
+    member: str(a.member),
+    username: str(a.username),
+    text: str(a.text),
+    blocks: blocks.filter((b) => has(b, 'reason')).map((b) => ({ reason: str(b.reason), at: str(b.at) })),
+    status: str(a.status),
+    decidedAt: str(a.decidedAt),
+    note: str(a.note)
+  }
+}
+
+function appealList (json) {
+  const rows = has(json, 'appeals') && Array.isArray(json.appeals) ? json.appeals : []
+  return {
+    appeals: rows.map(appealRow).filter((a) => a !== null),
+    truncated: has(json, 'truncated') && json.truncated === true,
+    beyondLimit: has(json, 'alemDoLimite') && json.alemDoLimite === true
   }
 }
 
@@ -486,7 +558,7 @@ function groupInfoOf (json) {
   }
 }
 
-function buildState ({ me, open, decided, blocked } = {}) {
+function buildState ({ me, open, decided, blocked, appeals, appealsDecided, appealsError = '' } = {}) {
   const blockedRows = has(blocked, 'blocked') && Array.isArray(blocked.blocked) ? blocked.blocked : []
   const pendingRows = has(blocked, 'pending') && Array.isArray(blocked.pending) ? blocked.pending : []
   const published = publishedOf(has(blocked, 'published') ? blocked.published : null) ||
@@ -530,6 +602,9 @@ function buildState ({ me, open, decided, blocked } = {}) {
     published,
     open: reportList(open),
     decided: reportList(decided),
+    appeals: appealList(appeals),
+    appealsDecided: appealList(appealsDecided),
+    appealsError,
     blocked: list,
     pending,
     net
@@ -569,6 +644,11 @@ function createPanel (env) {
   // page and the image is served no-store, so a fresh node on every render
   // would fetch it again and spend the moderator's request allowance.
   const anexoImgs = new Map()
+  // report id -> the api/reports/<id>/anuncio answer (anuncioOf), or
+  // 'loading'. Read only when the moderator asks ('Ver anúncio').
+  const anuncios = new Map()
+  // The Abertas filter chip: true shows only listing reports.
+  let onlyListings = false
   let groupsLast = Promise.resolve()
   let session = 0
   let gen = 0
@@ -589,6 +669,12 @@ function createPanel (env) {
     if (p.dir) node.setAttribute('dir', p.dir)
     // <img>: a same-origin path built here, never a peer-supplied URL.
     if (p.src) node.setAttribute('src', p.src)
+    // <a>: only a report's anuncioUrl, after ANUNCIO_URL_RE.
+    if (p.href) {
+      node.setAttribute('href', p.href)
+      node.setAttribute('target', '_blank')
+      node.setAttribute('rel', 'noopener noreferrer')
+    }
     if (p.alt !== undefined) node.setAttribute('alt', p.alt)
     // <audio>: the report's own audio, played only when the moderator asks.
     if (p.controls) node.setAttribute('controls', '')
@@ -681,6 +767,21 @@ function createPanel (env) {
     return json
   }
 
+  // The appeals lists of a server from before they existed answer
+  // 'nao-encontrado' (an unknown route): the rest of the panel must still
+  // load, with no appeals. Any other failure (429, 500, network) is kept in
+  // `failed.message` for the Recursos tab, so it never reads as an empty
+  // queue. A lost session still goes to login.
+  async function optional (fn, failed) {
+    try {
+      return await fn()
+    } catch (err) {
+      if (err instanceof LoginRequired) throw err
+      if (err.token !== 'nao-encontrado') failed.message = err.message
+      return null
+    }
+  }
+
   // Every async step goes through here: a 401 anywhere drops the state and
   // shows the login view; other errors are shown as a fixed message.
   function run (fn) {
@@ -712,6 +813,8 @@ function createPanel (env) {
     session++
     statsData = null
     groupInfo.clear()
+    anuncios.clear()
+    onlyListings = false
     // Report images leave the tab with the session: release each node's
     // image and forget it, so a later sign-in fetches under its own session.
     for (const img of anexoImgs.values()) img.removeAttribute('src')
@@ -740,14 +843,17 @@ function createPanel (env) {
   async function load () {
     const mine = ++gen
     const me = await call('GET', API + 'me')
-    const [open, decided, blocked] = await Promise.all([
-      call('GET', API + 'reports?estado=aberta'),
+    const failed = { message: '' }
+    const [open, decided, blocked, appeals, appealsDecided] = await Promise.all([
+      call('GET', API + 'reports?estado=aberta' + (onlyListings ? '&kind=listing' : '')),
       call('GET', API + 'reports?estado=decidida'),
-      call('GET', API + 'blocked')
+      call('GET', API + 'blocked'),
+      optional(() => call('GET', API + 'appeals?estado=aberta'), failed),
+      optional(() => call('GET', API + 'appeals?estado=decidida'), failed)
     ])
     if (mine !== gen) return
-    state = buildState({ me, open, decided, blocked })
-    const openIds = new Set(state.open.reports.map((r) => r.id))
+    state = buildState({ me, open, decided, blocked, appeals, appealsDecided, appealsError: failed.message })
+    const openIds = new Set([...state.open.reports, ...state.appeals.appeals].map((r) => r.id))
     for (const id of drafts.keys()) if (!openIds.has(id)) drafts.delete(id)
     render()
     loadGroups()
@@ -793,6 +899,55 @@ function createPanel (env) {
         if (state && tab === 'abertas') render()
       }
     })
+  }
+
+  function loadAnuncio (id) {
+    if (anuncios.get(id) === 'loading') return groupsLast
+    const mine = session
+    anuncios.set(id, 'loading')
+    if (state && tab === 'abertas') render()
+    groupsLast = groupsLast.then(async () => {
+      if (mine !== session) return
+      let view = { failed: true }
+      try {
+        view = anuncioOf(await call('GET', API + 'reports/' + encodeURIComponent(id) + '/anuncio'))
+      } catch (err) {
+        if (mine !== session) return
+        if (err instanceof LoginRequired) {
+          toLogin('')
+          return
+        }
+        if (err && err.token === 'muitos-pedidos') view = { failed: true, busy: true }
+      }
+      if (mine !== session) return
+      anuncios.set(id, view)
+      if (state && tab === 'abertas') render()
+    })
+    return groupsLast
+  }
+
+  // The listing as the seeder holds it now, as text only.
+  function anuncioBlock (r) {
+    const v = anuncios.get(r.id)
+    if (v === undefined) return button(TEXT.listingShow, () => loadAnuncio(r.id), { disabled: busy })
+    if (v === 'loading') return h('p', { className: 'meta', text: TEXT.listingLoading })
+    if (v.ausente) return h('p', { className: 'warning', text: TEXT.listingGone })
+    if (v.failed) {
+      return h('div', { className: 'verified' },
+        h('p', { className: 'warning', text: v.busy ? TEXT.listingBusy : TEXT.listingFailed }),
+        button(TEXT.listingShow, () => loadAnuncio(r.id), { disabled: busy }))
+    }
+    const place = [v.city, v.uf].filter((x) => x !== null && x !== '').join(' / ')
+    const line = (label, value) => value !== null && value !== '' ? untrusted('p', label + value) : null
+    return h('div', { className: 'verified' },
+      h('p', { className: 'label', text: TEXT.listingCurrent }),
+      line(TEXT.listingTitle, v.title),
+      v.text !== null && v.text !== '' ? untrusted('blockquote', v.text) : null,
+      line(TEXT.listingPrice, v.priceLabel),
+      line(TEXT.listingPlace, place),
+      line(TEXT.listingKind, v.kind),
+      line(TEXT.listingStatus, v.status)
+    )
   }
 
   // A mutation: confirm, POST, then refetch everything (the server is the
@@ -889,11 +1044,13 @@ function createPanel (env) {
       error ? h('p', { className: 'error', text: error }) : null,
       tab === 'abertas'
         ? renderOpen()
-        : tab === 'pendentes'
-          ? renderPending()
-          : tab === 'bloqueadas'
-            ? renderBlocked()
-            : tab === STATS_TAB.id ? renderStats() : renderHistory()
+        : tab === 'recursos'
+          ? renderAppeals()
+          : tab === 'pendentes'
+            ? renderPending()
+            : tab === 'bloqueadas'
+              ? renderBlocked()
+              : tab === STATS_TAB.id ? renderStats() : renderHistory()
     )
   }
 
@@ -1009,8 +1166,13 @@ function createPanel (env) {
 
   function renderOpen () {
     const { reports, truncated } = state.open
-    if (reports.length === 0) return h('p', { text: TEXT.noOpen })
+    // The server filters (kind=listing) before its page cut; the chip
+    // reloads the queue.
+    const chips = h('div', { className: 'chips' },
+      button(TEXT.listingChip, () => { onlyListings = !onlyListings; return run(load) }, { className: 'chip', pressed: onlyListings, disabled: busy }))
+    if (reports.length === 0) return h('div', null, chips, h('p', { text: onlyListings ? TEXT.noListings : TEXT.noOpen }))
     const cards = reports.map((r) => {
+      const listing = r.kind === 'listing'
       const note = h('textarea', {
         maxLength: NOTE_MAX,
         value: drafts.has(r.id) ? drafts.get(r.id) : '',
@@ -1043,7 +1205,7 @@ function createPanel (env) {
             ? 'Descartar esta denúncia?'
             : block === 'grupo'
               ? 'Bloquear o grupo de chave ' + r.group + '? ' + TEXT.groupBlockWarning
-              : 'Bloquear ' + target + '? ' + TEXT.blockWarning,
+              : 'Bloquear ' + target + '? ' + (listing ? TEXT.listingBlockWarning : TEXT.blockWarning),
           API + 'reports/' + encodeURIComponent(r.id) + '/decide',
           body,
           decision === 'bloquear' ? TEXT.decided : TEXT.discarded,
@@ -1053,10 +1215,13 @@ function createPanel (env) {
       }
       return h('div', { className: 'card' },
         h('h2', { text: reasonLabel(r.reason) }),
-        h('p', { className: 'meta', text: formatDate(r.at) + ' · ' + kindLabel(r) + (r.kind === 'post' && r.seq !== null ? ' nº ' + r.seq : '') }),
+        h('p', { className: 'meta' + (listing ? ' badge-listing' : ''), text: formatDate(r.at) + ' · ' + kindLabel(r) + ((r.kind === 'post' || listing) && r.seq !== null ? ' nº ' + r.seq : '') }),
         h('p', { text: 'denunciada: ' + target }),
-        r.ai !== null ? h('p', { className: 'ai', text: aiLine(r.ai) }) : null,
-        verifiedBlock(r.verified),
+        // A listing row never shows a suggestion, whatever the ledger holds.
+        r.ai !== null ? h('p', { className: 'ai', text: listing ? TEXT.aiAbstain + ' ' + AI_REASONS.anuncio : aiLine(r.ai) }) : null,
+        listing ? null : verifiedBlock(r.verified),
+        listing && r.anuncioUrl !== null ? h('a', { className: 'anuncio-link', href: r.anuncioUrl, text: TEXT.listingLink }) : null,
+        listing ? anuncioBlock(r) : null,
         grouped ? h('p', { className: 'label', text: TEXT.groupMessage }) : null,
         grouped ? groupBlock(r, groupChecked ? info : null) : null,
         r.quote !== '' ? h('p', { className: 'label', text: r.kind === 'dm' ? TEXT.dmQuoteLabel : TEXT.quoteLabel }) : null,
@@ -1068,7 +1233,7 @@ function createPanel (env) {
         r.text !== '' ? untrusted('p', r.text) : null,
         h('p', { className: 'meta', text: 'denunciada por: ' + who(r.reporter.member, r.reporter.username) }),
         h('label', { text: TEXT.noteLabel }, note),
-        h('p', { className: 'warning', text: TEXT.blockWarning }),
+        h('p', { className: 'warning', text: listing ? TEXT.listingBlockWarning : TEXT.blockWarning }),
         waiting ? h('p', { className: 'waiting', text: TEXT.waiting }) : null,
         targetLine,
         rootMissing ? h('p', { className: 'warning', text: TEXT.groupRootUnconfirmed }) : null,
@@ -1081,7 +1246,63 @@ function createPanel (env) {
         button('Descartar', () => decide('descartar'), { disabled: busy })
       )
     })
-    return h('div', { className: 'list' }, ...cards, truncated ? h('p', { className: 'meta', text: TEXT.moreOpen }) : null)
+    return h('div', null, chips, h('div', { className: 'list' }, ...cards, truncated ? h('p', { className: 'meta', text: TEXT.moreOpen }) : null))
+  }
+
+  function renderAppeals () {
+    const { appeals } = state.appeals
+    const cards = appeals.map((a) => {
+      const note = h('textarea', {
+        maxLength: NOTE_MAX,
+        value: drafts.has(a.id) ? drafts.get(a.id) : '',
+        onInput: () => { drafts.set(a.id, str(note.value).slice(0, NOTE_MAX)) }
+      })
+      const name = who(a.member, a.username)
+      const decide = (decision) => {
+        drafts.set(a.id, str(note.value).slice(0, NOTE_MAX))
+        return mutate(
+          decision === 'aceitar'
+            ? 'Aceitar o recurso de ' + name + '? ' + TEXT.appealAcceptWarning
+            : 'Negar o recurso de ' + name + '? ' + TEXT.appealDenyWarning,
+          API + 'appeals/' + encodeURIComponent(a.id) + '/decide',
+          { decision, note: str(note.value).slice(0, NOTE_MAX) },
+          decision === 'aceitar' ? TEXT.appealAccepted : TEXT.appealDenied,
+          () => { drafts.delete(a.id) }
+        )
+      }
+      return h('div', { className: 'card' },
+        h('h2', { text: name }),
+        h('p', { className: 'meta', text: formatDate(a.at) }),
+        h('p', { className: 'key', text: 'chave da conta: ' + a.member }),
+        a.blocks.length === 0
+          ? h('p', { className: 'meta', text: TEXT.appealBlocksNone })
+          : h('div', null, ...a.blocks.map((b) => h('p', { className: 'meta', text: TEXT.appealBlocks + reasonLabel(b.reason) + ' · ' + formatDate(b.at) }))),
+        a.text !== '' ? h('p', { className: 'label', text: TEXT.appealWords }) : null,
+        a.text !== '' ? untrusted('blockquote', a.text) : null,
+        h('label', { text: TEXT.noteLabel }, note),
+        h('p', { className: 'warning', text: TEXT.appealAcceptWarning }),
+        button(TEXT.appealAccept, () => decide('aceitar'), { className: 'danger', disabled: busy }),
+        button(TEXT.appealDeny, () => decide('negar'), { disabled: busy })
+      )
+    })
+    const decided = state.appealsDecided.appeals.map((a) => h('div', { className: 'card' },
+      h('h2', { text: (a.status === 'aceito' ? 'aceito' : a.status === 'negado' ? 'negado' : a.status === 'encerrado' ? 'encerrado' : '?') + ' · ' + who(a.member, a.username) }),
+      h('p', { className: 'meta', text: formatDate(a.decidedAt) }),
+      a.note !== '' ? h('p', { className: 'label', text: 'motivo da decisão' }) : null,
+      a.note !== '' ? untrusted('p', a.note) : null
+    ))
+    return h('div', { className: 'list' },
+      h('p', { className: 'meta', text: TEXT.appealNote }),
+      state.appealsError !== '' ? h('p', { className: 'error', text: state.appealsError }) : null,
+      appeals.length === 0 && state.appealsError === '' ? h('p', { text: TEXT.noAppeals }) : null,
+      ...cards,
+      state.appeals.truncated ? h('p', { className: 'meta', text: TEXT.moreOpen }) : null,
+      decided.length > 0 ? h('h2', { text: TEXT.appealDecidedTitle }) : null,
+      ...decided,
+      state.appealsDecided.truncated ? h('p', { className: 'meta', text: TEXT.moreDecided }) : null,
+      state.appealsDecided.truncated ? button(TEXT.showMore, showMoreAppealsDecided, { disabled: busy }) : null,
+      state.appealsDecided.beyondLimit ? h('p', { className: 'meta', text: TEXT.beyondLimit }) : null
+    )
   }
 
   function renderPending () {
@@ -1147,7 +1368,7 @@ function createPanel (env) {
       h('h2', { text: r.status === 'descartar' ? 'descartada' : r.status === 'bloquear' ? 'bloquear' : '?' }),
       h('p', { className: 'meta', text: reasonLabel(r.reason) + ' · ' + formatDate(r.decidedAt) + ' · ' + kindLabel(r) + (r.actor === 'ia' ? ' · pela IA' : ' · por uma pessoa') }),
       h('p', { text: 'denunciada: ' + who(r.reported.member, r.reported.username) }),
-      verifiedBlock(r.verified),
+      r.kind === 'listing' ? null : verifiedBlock(r.verified),
       r.note !== '' ? h('p', { className: 'label', text: 'motivo da decisão' }) : null,
       r.note !== '' ? untrusted('p', r.note) : null
     ))
@@ -1173,6 +1394,27 @@ function createPanel (env) {
         if (mine !== gen) return
         const seen = new Set(shown.map((r) => r.id))
         state.decided = { ...page, reports: [...shown, ...page.reports.filter((r) => !seen.has(r.id))] }
+      } finally {
+        busy = false
+        if (state) render()
+      }
+    })
+  }
+
+  function showMoreAppealsDecided () {
+    if (busy) return last
+    const mine = gen
+    const shown = state.appealsDecided.appeals
+    const cursor = shown[shown.length - 1].id
+    busy = true
+    error = ''
+    render()
+    return run(async () => {
+      try {
+        const page = appealList(await call('GET', API + 'appeals?estado=decidida&antes=' + encodeURIComponent(cursor)))
+        if (mine !== gen) return
+        const seen = new Set(shown.map((a) => a.id))
+        state.appealsDecided = { ...page, appeals: [...shown, ...page.appeals.filter((a) => !seen.has(a.id))] }
       } finally {
         busy = false
         if (state) render()
@@ -1227,7 +1469,7 @@ function createPanel (env) {
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { reasonLabel, aiReasonLabel, formatSimilarity, aiLine, formatDate, buildState, nextAction, shortKey, who, statsOf, formatCount, formatBytes, formatDay, formatMonth, createPanel, REASON_LABELS, LOGIN_ERRORS, AI_REASONS, TEXT }
+  module.exports = { reasonLabel, aiReasonLabel, formatSimilarity, aiLine, formatDate, buildState, nextAction, shortKey, who, statsOf, formatCount, formatBytes, formatDay, formatMonth, createPanel, anuncioOf, REASON_LABELS, LOGIN_ERRORS, AI_REASONS, TEXT }
 } else {
   createPanel({
     document,

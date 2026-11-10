@@ -10,7 +10,9 @@ const path = require('path')
 const APP = path.join(__dirname, '..')
 const SRC = path.join(APP, 'src')
 const VITRINE_DIR = path.join(SRC, 'vitrine')
-const ALLOWED = ['src/node.js', 'src/account.js', 'src/termsStore.web.js', 'src/termsStore.native.js', 'src/usePush.web.js', 'src/indexClient.js']
+// src/client/connect.web.js only reads enabled.js, so the Vitrine page skips
+// the browser node script it would otherwise preload.
+const ALLOWED = ['src/node.js', 'src/account.js', 'src/termsStore.web.js', 'src/termsStore.native.js', 'src/usePush.web.js', 'src/indexClient.js', 'src/client/connect.web.js', 'src/media/fetch.js']
 const TERMS_STORES = ['src/termsStore.web.js', 'src/termsStore.native.js']
 const IMPORT_RE = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)(['"])([^'"]*vitrine\/[^'"]*)\1/g
 const GUARD_RE = /const VITRINE = vitrineEnabled\(\{ EXPO_PUBLIC_VARANDA_VITRINE: process\.env\.EXPO_PUBLIC_VARANDA_VITRINE \}, typeof __DEV__ !== 'undefined' && __DEV__\)/
@@ -202,6 +204,24 @@ test('the Vitrine node refuses identity and connection changes', (t) => {
   t.ok(/const unavailable = \(\) => Promise\.reject\(Object\.assign\(new Error\('indisponível no modo vitrine'\), \{ code: 'USAGE' \}\)\)/.test(body))
   for (const op of ['restart', 'connect', 'forgetConfig', 'unlock', 'complete', 'lock', 'signOut', 'reset', 'confirm']) {
     t.ok(new RegExp('\\b' + op + ': unavailable,').test(body), op + ' refuses')
+  }
+})
+
+test('the Vitrine sets its installation origin only inside the guard in node.js', (t) => {
+  const literal = "setInstallation('https://vitrine.invalid')"
+  // The offer controls appear only when the fixture links share this origin.
+  const fixtureSrc = fs.readFileSync(path.join(SRC, 'vitrine', 'fixtures.js'), 'utf8')
+  t.ok(fixtureSrc.includes('const offerUrl = (author, seq, cents) => `https://vitrine.invalid/f/'), 'fixture offer links use the same origin')
+  const code = withoutComments(fs.readFileSync(path.join(SRC, 'node.js'), 'utf8'))
+  const blocks = guardedBlocks(code)
+  const at = code.indexOf(literal)
+  const guard = code.indexOf('if (VITRINE) {')
+  const provider = code.indexOf('export function NodeProvider')
+  t.ok(at > guard && at < provider, 'the call sits between if (VITRINE) { and export function NodeProvider')
+  t.ok(blocks.some(([start, end]) => at > start && at < end), 'the call sits inside the if (VITRINE) block')
+  for (const file of sources(SRC)) {
+    if (rel(file) === 'src/node.js') continue
+    t.absent(fs.readFileSync(file, 'utf8').includes(literal), rel(file) + ' does not set the Vitrine origin')
   }
 })
 

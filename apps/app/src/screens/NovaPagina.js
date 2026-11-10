@@ -18,6 +18,7 @@ import { actAs, pagesOrigin, TEXTS } from '../pages'
 import { pagesOn } from '../pageGate'
 import { ActorKey, usePageMember } from './Paginas'
 import { Btn, ErrorText, Field, Page, Soft, useAction } from '../ui'
+import { refusalOf } from '../wordCheck'
 import { Pill } from '../ui/Pill'
 import { TopBar } from '../ui/TopBar'
 import { useStyles } from '../ui/ThemeProvider'
@@ -43,7 +44,8 @@ export default function NovaPagina ({ onBack, onCreated }) {
   const nameLen = countChars(name)
   const bioLen = countChars(bio)
   const username = isUsername(handle)
-  const valid = username !== null && nameLen >= 1 && nameLen <= MAX_NAME && name.trim() !== '' && bioLen <= MAX_BIO
+  const refused = refusalOf(username, name, bio)
+  const valid = username !== null && nameLen >= 1 && nameLen <= MAX_NAME && name.trim() !== '' && bioLen <= MAX_BIO && refused === ''
 
   const submit = async () => {
     if (!valid || member === null) return
@@ -115,6 +117,7 @@ export default function NovaPagina ({ onBack, onCreated }) {
         <Field label={'bio (' + bioLen + '/' + MAX_BIO + ')'} value={bio} onChangeText={setBio} editable={!action.pending && uncertain === null} multiline lines={3} />
         {who.core ? <ActorKey actor={who.actor} /> : null}
         <Soft>O @nome, o nome e a bio de uma página são públicos. Quem cria a página é a dona ou o dono e pode convidar administradores depois.</Soft>
+        <ErrorText>{refused}</ErrorText>
         <ErrorText>{action.error}</ErrorText>
         <Btn label='Criar página' onPress={submit} disabled={!valid || uncertain !== null} pending={action.pending} />
         {uncertain !== null

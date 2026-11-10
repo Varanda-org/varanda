@@ -177,3 +177,39 @@ test('sources have no em dash', (t) => {
   t.absent(src.includes('\u2014'))
   t.absent(testSrc.includes('\u2014'))
 })
+
+test('Mensagem em particular sits in the mais sheet only on a hosted node, for someone else and not a page', (t) => {
+  const read = (file) => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')
+  const row = read('ui/PostRow.js')
+  t.ok(row.includes('const messageable = fn(onMessage) && node !== null && node.hosted === true && Number.isSafeInteger(seq) && seq > 0'), 'hosted, with a handler and a post seq')
+  t.ok(row.includes("...(messageable ? [{ id: 'message', icon: 'mensagem', label: 'Mensagem em particular' }] : []),"), 'the row only when messageable')
+  t.ok(row.includes("if (row.id === 'message') return () => onMessage(author, { context: { author, seq, at, text, hasMedia } })"), 'the post goes as context, never sent')
+  const conversa = read('screens/Conversa.js')
+  t.ok(conversa.includes('String(item.author).toLowerCase() !== ownKey.toLowerCase() && !(authorProfile && authorProfile.page === true)'), 'rowProps: not own, not a page')
+  t.ok(conversa.includes('onMessage: messageable ? onMessage : undefined,'), 'rowProps hands the handler only then')
+  const rua = read('screens/ARua.js')
+  t.ok(rua.includes('message: fnOf(h.onMessage) && own !== null && String(post.author).toLowerCase() !== own && !(prof && prof.page === true)'), 'socialRowProps: not own, not a page')
+  t.ok(rua.includes('onMessage: offers.message ? (author, options) => live.h.onMessage(author, options) : undefined'), 'a cached row reads the newest handler from its live box')
+  t.ok(fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8').includes('<PageNoticeSheet'), 'App.js shows the page notice for a post of a page')
+})
+
+test('more: Bloquear sits after Denunciar, only with a handler, never on the own post', async (t) => {
+  const { moreActions } = await load()
+  const item = { author: THEM, seq: 4 }
+  t.alike(ids(moreActions(item, { onReport: true, onBlock: true })), ['report', 'block'])
+  t.alike(moreActions(item, { onBlock: () => {} }), [{ id: 'block', icon: 'bloquear', label: 'Bloquear' }])
+  t.alike(ids(moreActions(item, { onReport: true })), ['report'], 'no handler, no row')
+  t.alike(ids(moreActions({ author: ME, seq: 4 }, { ownKey: ME, onBlock: true })), ['delete'], 'never the own post')
+  t.alike(ids(moreActions({ author: PAGE, seq: 4 }, { ownKey: ME, page: PAGE, onBlock: true })), ['delete'], 'never the page acted as')
+})
+
+test('touch targets: the photo viewer stops clicks and post actions are 44 pt', (t) => {
+  const read = (file) => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')
+  const grid = read('ui/MediaGrid.js')
+  const modal = grid.slice(grid.indexOf('<Modal'), grid.indexOf('styles.viewerTop'))
+  t.ok(modal.includes('onClick={stopClick}'), 'viewer root stops clicks bubbling through the portal')
+  t.ok(modal.includes('onStartShouldSetResponder={() => true}'), 'viewer root claims the responder')
+  const row = read('ui/PostRow.js')
+  t.ok(/\n {2}action: \{[^\n]*minHeight: layout\.hit/.test(row), 'action is 44 pt tall')
+  t.ok(/\n {2}countAction: \{[^\n]*minHeight: layout\.hit/.test(row), 'countAction is 44 pt tall')
+})

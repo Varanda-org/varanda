@@ -1,3 +1,30 @@
+import { pictures } from './pictures.js'
+import { sha256 } from '@noble/hashes/sha2.js'
+import rpc from '@varanda/rpc'
+import { ed25519 } from '@noble/curves/ed25519.js'
+
+const hex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+const unhex = (text) => Uint8Array.from(text.match(/../g), (b) => parseInt(b, 16))
+// Public demo seeds only: anyone can sign as these keys, so they never
+// belong to real accounts and must never be seeded into a real deployment.
+// Not the node's sodium: Metro keeps packages/web-member out of the app bundle.
+const fixtureKeys = [1, 2].map((n) => {
+  const seed = new Uint8Array(32).fill(n)
+  return { publicKey: hex(ed25519.getPublicKey(seed)), seed }
+})
+
+export function signVitrineConsent (listingAuthor, listingSeq, rater, offerId) {
+  const pair = fixtureKeys.find((pair) => pair.publicKey === listingAuthor)
+  if (!pair) throw new Error('identidade indisponível')
+  return hex(ed25519.sign(rpc.feira.dealPayload({ listingAuthor, listingSeq, rater, offerId }), pair.seed))
+}
+
+export function verifyVitrineConsent (listingAuthor, listingSeq, rater, offerId, consent) {
+  try {
+    return listingAuthor !== rater && /^[0-9a-f]{128}$/.test(consent) && ed25519.verify(unhex(consent), rpc.feira.dealPayload({ listingAuthor, listingSeq, rater, offerId }), unhex(listingAuthor), { zip215: false })
+  } catch { return false }
+}
+
 // The first byte varies so avatar colours (first byte mod 5) vary as on a
 // real network; the rest still encodes n, so keys stay unique.
 const key = (n) => (n % 256).toString(16).padStart(2, '0') + n.toString(16).padStart(62, '0')
@@ -15,6 +42,21 @@ const PICTURE_BYTES = [1405, 1291, 1391, 1605]
 const PICTURE_SIZE = [[1280, 960], [768, 1024], [1024, 1024], [1344, 896]]
 const dmPhoto = (n, p) => ({ id: key(710 + n), key: key(720 + n), nonce: '0'.repeat(46) + (n % 100).toString().padStart(2, '0'), chunks: 1, bytes: PICTURE_BYTES[p] + 16, sha256: key(PICTURE_BASE + p), mime: 'image/jpeg', w: PICTURE_SIZE[p][0], h: PICTURE_SIZE[p][1], ms: 0 })
 const publicPhoto = (n, p) => ({ core: key(730), mime: 'image/jpeg', start: 1 + n, blocks: 1, bytes: PICTURE_BYTES[p], sha256: key(PICTURE_BASE + p), width: PICTURE_SIZE[p][0], height: PICTURE_SIZE[p][1] })
+
+// Public post photos carry the real length and SHA-256 of the drawing, so the
+// verified media client accepts them (./publicMedia.js answers their route).
+const hexBytes = (hex) => Uint8Array.from(hex.match(/../g).map((b) => parseInt(b, 16)))
+const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+const POST_BYTES = pictures.map((picture) => hexBytes(picture.hex))
+const POST_SHA = POST_BYTES.map((bytes) => hexOf(sha256(bytes)))
+export const postPhoto = (n, p) => ({ core: key(300), mime: 'image/jpeg', start: 1 + n, blocks: 1, bytes: POST_BYTES[p].byteLength, sha256: POST_SHA[p], width: PICTURE_SIZE[p][0], height: PICTURE_SIZE[p][1] })
+// Which drawing a post photo's SHA-256 names, or -1.
+export const postPictureIndex = (sha) => POST_SHA.indexOf(sha)
+// A fresh copy of the drawing a post photo names, or null.
+export const postPictureBytes = (sha) => {
+  const i = POST_SHA.indexOf(sha)
+  return i < 0 ? null : new Uint8Array(POST_BYTES[i])
+}
 const privatePhoto = (n, p) => ({ core: key(740), mime: 'application/octet-stream', start: 1 + n, blocks: 1, bytes: 32768, sha256: key(750 + n), key: key(760 + n), nonce: '0'.repeat(46) + (n % 100).toString().padStart(2, '0'), plainMime: 'image/jpeg', plainSha256: key(PICTURE_BASE + p), w: PICTURE_SIZE[p][0], h: PICTURE_SIZE[p][1], ms: 0 })
 
 // The member and page handles appear in the varanda.app screenshots, so the
@@ -27,7 +69,7 @@ export const members = [
   ['André Costa', 'andre_costa', 'Fotografia e memória da cidade.'],
   ['Bia Araújo', 'bia_araujo', 'Sempre com um livro por perto.'],
   ['Tomás Ferreira', 'tomas_ferreira', 'Música para compartilhar.']
-].map(([name, username, bio], i) => ({ author: key(i + 1), name, username, bio, avatar: null }))
+].map(([name, username, bio], i) => ({ author: fixtureKeys[i]?.publicKey || key(i + 1), name, username, bio, avatar: null }))
 
 export const own = members[0].author
 export const association = key(900)
@@ -178,7 +220,10 @@ export const follows = [members[1].author, members[2].author, members[3].author,
 
 const feedAuthors = [members[0], members[1], members[2], members[3], pages[0], pages[1]]
 
-export const feed = postTexts.map((text, i) => {
+// Photos of the Mural: a few of the first posts carry one.
+const feedPhotos = { 0: [postPhoto(0, 0)], 6: [postPhoto(1, 2)], 11: [postPhoto(2, 3)], 18: [postPhoto(3, 1)] }
+
+const baseFeed = postTexts.map((text, i) => {
   const author = feedAuthors[i % feedAuthors.length]
   return {
     kind: 'post',
@@ -190,9 +235,35 @@ export const feed = postTexts.map((text, i) => {
     text,
     replyTo: null,
     quote: i === 12 ? { author: members[2].author, seq: 3 } : null,
-    media: i === 11 ? [{ core: key(300), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 2048, sha256: key(301), width: 1200, height: 800 }] : null
+    media: feedPhotos[i] || null
   }
 })
+
+const photoPost = (member, seq, when, text, media, replyTo = null) => ({ kind: 'post', author: member.author, name: member.name, username: member.username, seq, at: when, text, replyTo, quote: null, media })
+
+// Later photo posts, in time order after the posts above. The own diary gets
+// six more tiles plus a reply with a photo (never a tile), a followed member
+// and one who is not followed get a few each.
+const photoPosts = [
+  photoPost(members[0], 12, at(5, 10, 0), 'Primeiras fotos da exposição no bairro.', [postPhoto(4, 0)]),
+  photoPost(members[0], 13, at(5, 10, 10), '', [postPhoto(5, 1), postPhoto(6, 2)]),
+  photoPost(members[0], 14, at(5, 10, 20), 'Mutirão da horta: antes e depois.', [postPhoto(7, 3), postPhoto(8, 0)]),
+  photoPost(members[0], 15, at(5, 10, 30), '', [postPhoto(9, 2)]),
+  photoPost(members[0], 16, at(5, 10, 40), 'Passeio de bicicleta no fim da tarde 🚲', [postPhoto(10, 3), postPhoto(11, 1), postPhoto(12, 0), postPhoto(13, 2)]),
+  photoPost(members[0], 17, at(5, 10, 50), '', [postPhoto(14, 1), postPhoto(15, 0)]),
+  photoPost(members[0], 18, at(5, 10, 55), 'Que foto bonita da praça!', [postPhoto(16, 2)], { author: members[1].author, seq: 3 }),
+  photoPost(members[1], 50, at(5, 11, 0), 'Pedal de domingo pelo parque.', [postPhoto(17, 3)]),
+  photoPost(members[1], 51, at(5, 11, 10), '', [postPhoto(18, 0), postPhoto(19, 1)]),
+  photoPost(members[1], 52, at(5, 11, 20), 'Parada para um café no caminho.', [postPhoto(20, 2)]),
+  photoPost(members[1], 53, at(5, 11, 30), '', [postPhoto(21, 3)]),
+  photoPost(members[4], 40, at(5, 12, 0), 'Meu canto de leitura hoje.', [postPhoto(22, 1)]),
+  photoPost(members[4], 41, at(5, 12, 10), '', [postPhoto(23, 0)]),
+  photoPost(members[4], 42, at(5, 12, 20), 'Livros novos para o clube.', [postPhoto(24, 2), postPhoto(25, 3)]),
+  photoPost(members[4], 43, at(5, 12, 30), '', [postPhoto(26, 1), postPhoto(27, 0), postPhoto(28, 2)]),
+  photoPost(members[4], 44, at(5, 12, 40), 'A biblioteca da praça em uma tarde de chuva.', [postPhoto(29, 3)])
+]
+
+export const feed = [...baseFeed, ...photoPosts]
 
 const ownPost = (n) => feed.filter((post) => post.author === own)[n]
 
@@ -260,7 +331,129 @@ export const diaryRecords = [
       : { type: n.kind, to: { author: own, seq: Number(n.post.split(':')[1]) }, on: true, at: n.at }
   })),
   ...follows.map((key, i) => ({ author: own, seq: 7 + i, record: { type: 'follow', key, on: true, at: now } })),
+  // A repost is no tile, and the likes make the own log longer than one
+  // log.read page (32 blocks), so older photos sit on a second page.
+  { author: own, seq: 19, record: { type: 'repost', to: { author: members[2].author, seq: 3 }, on: true, at: at(5, 11, 0) } },
+  ...baseFeed.filter((post) => post.author !== own && post.quote === null).slice(0, 16).map((post, i) => ({ author: own, seq: 20 + i, record: { type: 'like', to: { author: post.author, seq: post.seq }, on: true, at: at(5, 13, i) } })),
   ...pages.flatMap((p) => members.filter((m) => m.author !== own).map((m, i) => ({ author: p.author, seq: 30 + i, record: { type: 'follow', key: m.author, on: true, at: now } })))
 ]
 
-export const fixtures = { now, own, association, members, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords }
+// Depoimentos. Nothing is sealed for real in the Vitrine: the hash is the
+// real SHA-256 commitment, and the box is filler bytes of the length a real
+// seal would have, so the records validate. `sealed` stands in for opening
+// the box with the recipient's key.
+const utf8 = (s) => Uint8Array.from(encodeURIComponent(s).match(/%[0-9A-F]{2}|[^%]/g), (c) => c.length === 3 ? parseInt(c.slice(1), 16) : c.charCodeAt(0))
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+function base64 (bytes) {
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | ((bytes[i + 1] || 0) << 8) | (bytes[i + 2] || 0)
+    out += BASE64[n >> 18 & 63] + BASE64[n >> 12 & 63] + (i + 1 < bytes.length ? BASE64[n >> 6 & 63] : '=') + (i + 2 < bytes.length ? BASE64[n & 63] : '=')
+  }
+  return out
+}
+const SEAL_BYTES = 48
+// The commitment of docs/protocol.md: bound to the writer's key.
+export const testimonialHash = (from, nonce, text) => hexOf(sha256(utf8(from + nonce + text)))
+export function sealedTestimonial ({ from, to, text, nonce, at, gen = 1 }) {
+  const hash = testimonialHash(from, nonce, text)
+  const length = utf8(JSON.stringify({ text, nonce })).byteLength + SEAL_BYTES
+  const box = new Uint8Array(length)
+  let fill = sha256(utf8(hash))
+  for (let i = 0; i < length; i++) {
+    if (i % 32 === 0 && i > 0) fill = sha256(fill)
+    box[i] = fill[i % 32]
+  }
+  return { type: 'testimonial', to, gen, hash, box: base64(box), at }
+}
+
+// [writer, writer seq, recipient, text, at]. Lia shows João's and Cecília's,
+// Bia's waits for her, and João shows the one Lia wrote to him.
+const testimonialRows = [
+  [members[1].author, 60, own, 'A Lia é daquelas vizinhas que fazem o bairro parecer uma casa só. Foi ela quem organizou o primeiro café na praça, e até hoje lembra o nome de cada pessoa que passa por lá. Quando minha bicicleta quebrou no meio do passeio, ela apareceu com uma bomba de ar e um sorriso. Obrigado por tanto cuidado, Lia!', at(5, 11, 40)],
+  [members[2].author, 60, own, 'Lia me apresentou ao clube de leitura e às melhores conversas de domingo. Pessoa generosa, sempre com uma indicação de livro na ponta da língua.', at(5, 11, 50)],
+  [own, 38, members[1].author, 'João conhece cada atalho do bairro e nunca deixa ninguém para trás nos passeios. Companhia certa para pedalar e conversar.', at(5, 14, 10)],
+  [members[4].author, 60, own, 'Lia, obrigada pelas mudas de manjericão e pela paciência na oficina de compostagem. Você deixa tudo mais leve! 🌿', at(5, 14, 30)]
+]
+
+export const sealed = testimonialRows.map(([author, seq, , text], i) => ({ author, seq, text, nonce: key(800 + i) }))
+
+// [show diary, show seq, testimonialRows index, at]
+const showRows = [
+  [own, 36, 0, at(5, 14, 0)],
+  [own, 37, 1, at(5, 14, 5)],
+  [members[1].author, 61, 2, at(5, 14, 20)]
+]
+
+export const testimonialRecords = [
+  ...testimonialRows.map(([author, seq, to, text, when], i) => ({ author, seq, record: sealedTestimonial({ from: author, to, text, nonce: sealed[i].nonce, at: when }) })),
+  ...showRows.map(([author, seq, i, when]) => ({ author, seq, record: { type: 'testimonial-show', from: sealed[i].author, seq: sealed[i].seq, text: sealed[i].text, nonce: sealed[i].nonce, at: when } }))
+]
+
+const place = { uf: 'SP', city: 'São Paulo', bairro: 'Vila Mariana' }
+const listing = (author, seq, kind, title, price, unit, cat, media) => ({
+  author,
+  seq,
+  record: { type: 'listing', kind, title, text: 'Combine os detalhes pela conversa.', price, unit, cat, place, at: at(4, 14, seq - 40), ...(media ? { media } : {}) }
+})
+
+export const listings = [
+  listing(own, 40, 'produto', 'Bicicleta azul', 25000, null, 'esporte', [postPhoto(40, 3), postPhoto(41, 0)]),
+  listing(own, 41, 'procura', 'Procuro estante pequena', 18000, null, 'moveis'),
+  listing(own, 42, 'produto', 'Livros de receitas', 3500, null, 'casa'),
+  listing(members[1].author, 40, 'servico', 'Aulas de bicicleta', 6000, 'hora', 'aulas'),
+  listing(members[1].author, 41, 'produto', 'Capacete de ciclismo', 8000, null, 'esporte'),
+  listing(pages[0].author, 40, 'produto', 'Livros da biblioteca', 1500, null, 'outros'),
+  { author: own, seq: 44, record: { type: 'listing-edit', seq: 40, title: 'Bicicleta azul revisada', text: 'Revisada e pronta para passear.', price: 25000, unit: null, cat: 'esporte', place, media: [postPhoto(40, 3), postPhoto(41, 0)], at: at(5, 12) } },
+  { author: own, seq: 45, record: { type: 'listing-status', seq: 42, status: 'vendido', at: at(5, 12, 10) } },
+  { author: members[1].author, seq: 42, record: { type: 'listing-status', seq: 41, status: 'reservado', at: at(5, 12, 20) } }
+]
+
+const consent = signVitrineConsent(own, 40, members[1].author, id(600))
+export const rates = [
+  { author: members[1].author, seq: 46, record: { type: 'listing-rate', to: { author: own, seq: 40 }, offer: id(600), consent, stars: 5, text: 'Combinamos tudo pela conversa.', at: at(5, 14) } },
+  { author: members[2].author, seq: 46, record: { type: 'listing-rate', to: { author: own, seq: 40 }, offer: id(610), consent: '0'.repeat(128), stars: 1, text: 'Consentimento de demonstração inválido.', at: at(5, 14, 5) } }
+]
+
+const offerUrl = (author, seq, cents) => `https://vitrine.invalid/f/${author}/${seq}#oferta=${cents}`
+const offerMessage = (n, mine, url, title, replyTo = null, image = null) => ({
+  id: id(n),
+  from: mine ? own : members[1].author,
+  mine,
+  text: title,
+  replyTo,
+  at: at(5, 14, n - 600),
+  media: null,
+  card: { url, host: rpc.cardUrlHost(url), title, desc: '', image }
+})
+export const offerThread = [
+  offerMessage(600, false, offerUrl(own, 40, 24000), 'Proposta', null, dmPhoto(4, 3)),
+  offerMessage(601, true, offerUrl(own, 40, 24000) + '&aceite=' + consent, 'Aceite', id(600)),
+  offerMessage(602, false, offerUrl(own, 40, 20000), 'Proposta'),
+  offerMessage(603, true, offerUrl(own, 40, 20000) + '&resposta=recusada', 'Recusa', id(602)),
+  offerMessage(604, true, offerUrl(members[1].author, 40, 6000), 'Proposta'),
+  offerMessage(605, false, offerUrl(members[1].author, 40, 6000) + '&aceite=' + signVitrineConsent(members[1].author, 40, own, id(604)), 'Aceite', id(604))
+]
+conversations[0].messages.push(...offerThread)
+
+// Momentos (docs/rpc.md 5.113). A photo is one blob item, like a chat photo,
+// that names its drawing through the sha256 (./media.js reads it back). The
+// dates follow the demo clock `now`: the followed diaries and Lia have
+// moments inside the 24 h, and Lia's two older ones are past, so the Diário
+// lists them under "Momentos anteriores". Which ones were seen is the app's
+// own state on the device, never fixture data.
+const momentPhoto = (n, p) => ({ ...dmPhoto(40 + n, p), id: key(770 + n), key: key(780 + n) })
+// [diary, seq, text, at, picture]
+const momentRows = [
+  [members[1].author, 70, 'Saindo para pedalar até o parque 🚲', at(5, 13, 20), 3],
+  [members[1].author, 71, 'Parada para um café no meio do caminho.', at(5, 14, 10), 2],
+  [members[2].author, 70, 'As mudas de manjericão estão prontas para troca 🌱', at(5, 11, 30), 1],
+  [members[3].author, 70, 'Luz de fim de tarde na praça.', at(4, 18, 45), 0],
+  [own, 48, 'Café na varanda antes do clube de leitura ☕', at(5, 12, 0), 0],
+  [own, 47, 'Mutirão da horta, primeira hora.', at(3, 9, 30), 3],
+  [own, 46, 'Livros novos na biblioteca da praça.', at(2, 16, 0), 2]
+]
+
+export const momentRecords = momentRows.map(([author, seq, text, when, p], i) => ({ author, seq, record: { type: 'moment', text, at: when, media: momentPhoto(i, p) } }))
+
+export const fixtures = { now, own, association, members, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords], sealed, listings, rates }

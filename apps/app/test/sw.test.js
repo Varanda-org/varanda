@@ -237,6 +237,18 @@ test('a version.json in dist is not precached and does not change the release id
   t.ok(sw1.equals(fs.readFileSync(path.join(dist, 'sw.js'))), 'second run byte-identical')
 })
 
+test('the messenger preview images under /og/ are not precached', (t) => {
+  const plain = makeDist()
+  quiet(() => finishWeb(plain))
+  const dist = makeDist()
+  fs.mkdirSync(path.join(dist, 'og'))
+  fs.writeFileSync(path.join(dist, 'og', 'convite.png'), 'png')
+  quiet(() => finishWeb(dist))
+  const { version, precache } = readWorker(dist)
+  t.absent(precache.some((e) => e.url.startsWith('/og/')), 'not precached')
+  t.is(version, readWorker(plain).version, 'same release id as without them')
+})
+
 test('finishWeb refuses an incomplete export', (t) => {
   for (const missing of ['index.html', 'varanda-node.js', 'manifest.webmanifest', BUNDLE.slice(1)]) {
     const dist = makeDist()
@@ -489,6 +501,22 @@ test('/index/* is never intercepted', async (t) => {
   t.is(w.calls.length, 0, 'the worker fetched nothing')
   t.ok((await dispatch(w, ORIGIN + '/indexes', { mode: 'navigate' })).responded, '/indexes is an app route')
   t.ok((await dispatch(w, ORIGIN + '/index', { mode: 'navigate' })).responded, '/index (no slash) is an app route')
+})
+
+// The Feira's public pages come from the seeder (no-store, real 404s): never
+// intercepted. /anuncio/... is an app route and keeps the shell.
+test('/f/* is never intercepted, /anuncio/* keeps the shell', async (t) => {
+  const { w } = await installed()
+  w.server = offline
+  const A = 'a'.repeat(64)
+  for (const p of ['/f/' + A + '/7', '/f/' + A + '/7/foto/1', '/f/sitemap.xml', '/f']) {
+    t.absent((await dispatch(w, ORIGIN + p)).responded, p)
+    t.absent((await dispatch(w, ORIGIN + p, { method: 'HEAD' })).responded, 'HEAD ' + p)
+    t.absent((await dispatch(w, ORIGIN + p, { mode: 'navigate' })).responded, 'navigate ' + p)
+  }
+  t.is(w.calls.length, 0, 'the worker fetched nothing')
+  t.ok((await dispatch(w, ORIGIN + '/anuncio/' + A + '/7', { mode: 'navigate' })).responded, '/anuncio/<hex>/<seq> keeps the shell')
+  t.ok((await dispatch(w, ORIGIN + '/fa', { mode: 'navigate' })).responded, '/fa is an app route')
 })
 
 test('nothing cached and offline: 503 sem conexão', async (t) => {
@@ -761,6 +789,48 @@ test('push: a valid payload shows its body, tag and data', async (t) => {
 
   const long = await push(w, pushData(valid({ body: '😀'.repeat(120) })))
   t.is(long.options.body, '😀'.repeat(120), '120 code points are allowed')
+})
+
+test('push: a blocked actor stays quiet, the shown notice is closed at once, others still show', async (t) => {
+  const w = renderedWorker()
+  const page = fakeWindow(ORIGIN + '/')
+  await message(w, { type: 'varanda-blocks', keys: [ACTOR] }, page)
+  const reply = await push(w, pushData(valid()))
+  t.is(reply.options.tag, 'varanda-dm-wake-quiet', 'WebKit: a push always shows something')
+  t.is(reply.options.silent, true)
+
+  const other = 'c'.repeat(64)
+  const shown = await push(w, pushData(valid({ actor: other })))
+  t.is(shown.options.body, 'Ana respondeu ao seu post')
+  t.is(shown.options.data.actor, other)
+
+  await message(w, { type: 'varanda-blocks', keys: [] }, page)
+  const undone = await push(w, pushData(valid()))
+  t.is(undone.options.body, 'Ana respondeu ao seu post', 'an empty list undoes it')
+})
+
+test('push: the list outlives a worker restart', async (t) => {
+  const dist = makeDist()
+  quiet(() => finishWeb(dist))
+  const { code } = readWorker(dist)
+  const first = loadWorker(code, serveDist(dist))
+  await message(first, { type: 'varanda-blocks', keys: [ACTOR] }, fakeWindow(ORIGIN + '/'))
+  const again = loadWorker(code, serveDist(dist), { caches: first.caches })
+  const reply = await push(again, pushData(valid()))
+  t.is(reply.options.tag, 'varanda-dm-wake-quiet')
+})
+
+test('push: a report that is not from an app window, or not a clean list, changes nothing', async (t) => {
+  const w = renderedWorker()
+  const page = fakeWindow(ORIGIN + '/')
+  await message(w, { type: 'varanda-blocks', keys: [ACTOR] }, { ...fakeWindow(ORIGIN + '/'), type: 'worker' })
+  await message(w, { type: 'varanda-blocks', keys: [ACTOR] }, null)
+  await message(w, { type: 'varanda-blocks', keys: [ACTOR.toUpperCase()] }, page)
+  await message(w, { type: 'varanda-blocks', keys: ACTOR }, page)
+  await message(w, { type: 'varanda-blocks', keys: new Array(501).fill(ACTOR) }, page)
+  await message(w, { type: 'varanda-blocks', keys: [ACTOR], extra: 1 }, page)
+  const reply = await push(w, pushData(valid()))
+  t.is(reply.options.body, 'Ana respondeu ao seu post')
 })
 
 test('push: missing or invalid data shows only the fallback sentence', async (t) => {

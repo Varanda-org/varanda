@@ -1,9 +1,9 @@
 # Builds the native app on every pull request that touches it and on pushes
 # to main: the Android debug APK (Gradle), the iOS app for the simulator
-# (xcodebuild, unsigned) and the JavaScript bundles of both platforms
-# (expo export). A change that only works on the web, a pod or Expo module
-# left out of the lock, or a Kotlin, Swift or CMake error turns this red
-# before merge.
+# (xcodebuild, unsigned), the JavaScript bundles of both platforms (expo
+# export) and the web app the deploy publishes (npm run export:web). A change
+# that only works on the web, a pod or Expo module left out of the lock, or a
+# Kotlin, Swift or CMake error turns this red before merge.
 #
 # The debug builds load JavaScript from Metro and bundle none, so the export
 # job is what proves the bundles resolve. None of it proves a screen avoids
@@ -97,6 +97,19 @@ jobs:
         run: |
           find /tmp/varanda-export-android -type f \( -name '*.hbc' -o -name '*.js' \) | grep -q .
           find /tmp/varanda-export-ios -type f \( -name '*.hbc' -o -name '*.js' \) | grep -q .
+      # The command deploy/seeder/build-web.sh runs: a break only the web hits
+      # would otherwise first show up as a failed deploy.
+      - name: Export the web app
+        env:
+          CI: '1'
+          EXPO_NO_TELEMETRY: '1'
+        run: npm run export:web -w apps/app
+      # The same three files build-web.sh checks.
+      - name: Check the web app exists
+        run: |
+          test -f apps/app/dist/index.html
+          test -f apps/app/dist/varanda-node.js
+          test -f apps/app/dist/sw.js
 
   android-build:
     needs: changes
@@ -121,6 +134,17 @@ jobs:
       - name: Install the Android packages the build pins
         run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --install "ndk;27.1.12297006" "cmake;3.22.1" "platforms;android-36" "build-tools;36.0.0"'
       - run: npm run prepare:native -w apps/app -- android
+      # A fresh runner has no Gradle and the wrapper's single download attempt
+      # is all it gets, so a bad moment at services.gradle.org fails every app
+      # PR. Only the distribution is kept: dependencies still resolve on each
+      # build. PRs read what main saved. On a miss (first run, new version,
+      # evicted entry) the wrapper downloads as before and can fail the same
+      # way. The action saves only after a passing job, so nothing partial is
+      # kept, and a PR's own save reaches only that PR's re-runs.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.gradle/wrapper/dists
+          key: gradle-wrapper-${{ runner.os }}-${{ hashFiles('apps/app/android/gradle/wrapper/gradle-wrapper.properties') }}
       # JDK 17 from the image: the React Native Gradle plugin targets 17.
       - name: Build the debug APK
         working-directory: apps/app/android

@@ -42,9 +42,14 @@ const ACTIONS = Object.freeze([
   'invite',
   'dm-list',
   'dm-thread',
-  'dm-send',
-  'dm-set',
-  'dm-seen',
+  'dm-sign',
+  'dm-box',
+  'dm-box-share',
+  'dm-box-read',
+  'dm-legacy-read',
+  'dm-legacy-done',
+  'group-seal',
+  'group-rebox',
   'follow',
   'follows',
   'media',
@@ -55,7 +60,11 @@ const ACTIONS = Object.freeze([
   'group-join',
   'group-leave',
   'group-post',
-  'group-read'
+  'group-read',
+  'listing',
+  'listing-edit',
+  'listing-status',
+  'listing-consent'
 ])
 // Actions that are not about one existing page sign page = ''.
 const PAGELESS = Object.freeze(['create', 'list', 'terms'])

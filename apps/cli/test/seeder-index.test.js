@@ -1973,3 +1973,67 @@ test('name search: a page hint reaches search and member rows, a closed page dro
   t.is(m.moved, false)
   t.is(seeder.indexMember(P).closed, false)
 })
+
+test('indexTestimonials: pending and shown pointers, revoke and remove in either pass order, kept by a rebuild and a restart', async (t) => {
+  const { testimonialRecord, testimonialShowRecord } = require('@varanda/core/lib/records')
+  const { commitment } = require('@varanda/core/lib/testimonials')
+  const nonce = 'e'.repeat(64)
+  const box = b4a.toString(b4a.alloc(200, 7), 'base64')
+  const written = (from, to, text, i) => testimonialRecord({ to, gen: 1, hash: commitment(from, nonce, text), box, at: at(i) })
+  const shownBy = (from, seq, text, i) => testimonialShowRecord({ from, seq, text, nonce, at: at(i) })
+  const O = authorKey(1)
+  const W = authorKey(2)
+  const V = authorKey(3)
+  // W writes two (the first revoked), V one; O shows a forged text for W's
+  // first, then W's second (the newest show per writer decides) and V's,
+  // then removes V's show.
+  const ofW = [written(W, O, 'primeiro', 0), written(W, O, 'segundo', 1), deleteRecord({ seq: 1, at: at(2) })]
+  const ofV = [written(V, O, 'do v', 3)]
+  const ofO = [shownBy(W, 1, 'forjado', 4), shownBy(W, 2, 'segundo', 5), shownBy(V, 1, 'do v', 6), deleteRecord({ seq: 3, at: at(7) })]
+  const expected = { shown: [{ seq: 2, from: W, wseq: 2 }], pending: [] }
+  for (const scanFirst of [false, true]) {
+    const label = scanFirst ? ' (scan first)' : ' (index first)'
+    const { seeder, diary } = scanFixture()
+    const o = scannable(seeder, diary(O, ofO.length, (seq) => ofO[seq - 1]))
+    const w = scannable(seeder, diary(W, ofW.length, (seq) => ofW[seq - 1]))
+    const v = scannable(seeder, diary(V, ofV.length, (seq) => ofV[seq - 1]))
+    if (scanFirst) {
+      await seeder._runScan(O, o)
+      await seeder._runScan(W, w)
+    }
+    for (const [key, entry] of [[O, o], [W, w], [V, v]]) seeder._onGrow(key, entry, entry.core.contiguousLength)
+    await settleIndex(seeder)
+    if (!scanFirst) {
+      await seeder._runScan(O, o)
+      await seeder._runScan(W, w)
+    }
+    await seeder._runScan(V, v)
+    const answer = seeder.indexTestimonials(O)
+    t.alike({ shown: answer.shown, pending: answer.pending }, expected, 'the revoked block, the removed show and the forged show are out; nothing returns to pending' + label)
+    t.is(answer.indexing, false)
+    t.is(answer.complete, true)
+    t.absent(JSON.stringify(answer).includes('segundo'), 'no text in the answer' + label)
+    t.alike(seeder.indexTestimonials(W), { shown: [], pending: [], indexing: false, complete: true })
+    t.is(seeder.indexTestimonials('f'.repeat(64)), null, 'an owner not served is unknown')
+
+    seeder._rebuildIndex()
+    await settleIndex(seeder)
+    const rebuilt = seeder.indexTestimonials(O)
+    t.alike({ shown: rebuilt.shown, pending: rebuilt.pending }, expected, 'the same after a rebuild' + label)
+
+    seeder._isBlocked = (hex) => hex === W
+    t.alike(seeder.indexTestimonials(O).shown, [], 'a blocked writer is filtered' + label)
+    seeder._isBlocked = (hex) => hex === O
+    t.is(seeder.indexTestimonials(O), null, 'a blocked owner is unknown' + label)
+  }
+
+  // A new block from V after the removed show is pending again.
+  const { seeder, diary } = scanFixture()
+  const ofV2 = [...ofV, written(V, O, 'de novo', 8)]
+  const o = scannable(seeder, diary(O, ofO.length, (seq) => ofO[seq - 1]))
+  const v = scannable(seeder, diary(V, ofV2.length, (seq) => ofV2[seq - 1]))
+  await seeder._runScan(O, o)
+  for (const [key, entry] of [[O, o], [V, v]]) seeder._onGrow(key, entry, entry.core.contiguousLength)
+  await settleIndex(seeder)
+  t.alike(seeder.indexTestimonials(O).pending, [{ from: V, seq: 2 }])
+})

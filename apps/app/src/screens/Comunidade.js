@@ -92,7 +92,7 @@ function GroupRow ({ title, detail, own, time, unread, onPress }) {
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
       accessibilityRole='button'
-      accessibilityLabel={unread ? title + ', ' + unread + ' não lidas' : title}
+      accessibilityLabel={unread ? title + ', ' + (unread === '1' ? '1 mensagem nova' : unread === '99+' ? '99 ou mais mensagens novas' : unread + ' mensagens novas') : title}
       accessibilityHint='abre o grupo'
       onPress={onPress}
     >
@@ -100,7 +100,7 @@ function GroupRow ({ title, detail, own, time, unread, onPress }) {
       <View style={styles.hitText}>
         <View style={styles.line}>
           <Text style={styles.name} numberOfLines={1}>{title}</Text>
-          {time ? <Text style={styles.time}>{time}</Text> : null}
+          {time ? <Text style={[styles.time, unread && styles.timeUnread]}>{time}</Text> : null}
         </View>
         {detail || unread
           ? (
@@ -109,7 +109,7 @@ function GroupRow ({ title, detail, own, time, unread, onPress }) {
                 {own ? <Text style={styles.own}>{OWN_LABEL + ': '}</Text> : null}
                 {detail}
               </Text>
-              {unread ? <View style={styles.badge}><Text style={styles.badgeText}>{unread}</Text></View> : null}
+              {unread ? <View style={styles.badge}><Text style={styles.badgeText} maxFontSizeMultiplier={1.5}>{unread}</Text></View> : null}
             </View>
             )
           : null}
@@ -659,8 +659,12 @@ const makeStyles = (colors) => StyleSheet.create({
   handle: { ...type.postMeta, color: colors.soft },
   own: { color: colors.accent, fontWeight: '600' },
   time: { fontSize: 12, color: colors.soft },
+  // As in Conversas (ui/ConversationRow): an unread row's date takes the accent.
+  timeUnread: { color: colors.accent, fontWeight: '600' },
   grow: { flex: 1 },
-  badge: { minWidth: 22, height: 22, borderRadius: radius.pill, paddingHorizontal: space.sm, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+  // minHeight and a font cap, as in ConversationRow: a fixed height clipped the
+  // digits at large text.
+  badge: { minWidth: 22, minHeight: 22, borderRadius: radius.pill, paddingHorizontal: space.sm, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
   badgeText: { fontSize: 12, fontWeight: '600', color: colors.accentInk },
   hitText: { flex: 1 }
 })

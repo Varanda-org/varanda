@@ -26,7 +26,7 @@ test('every index route and cursor returns a deterministic validated fixture bod
   const cases = [
     [c.postUrl(ref), (b) => c.validPostIndex(b, ref)],
     [c.postUrl(ref, cursor), (b) => c.validPostIndex(b, ref)],
-    [c.countsUrl(f.feed.map(refOf)), (b) => c.validCounts(b, f.feed.map(refOf))],
+    [c.countsUrl(f.feed.slice(0, 31).map(refOf)), (b) => c.validCounts(b, f.feed.slice(0, 31).map(refOf))],
     [c.memberUrl(f.own), c.validMemberIndex],
     [c.memberUrl(f.own, 5), (b) => c.validMemberIndex(b, 5)],
     [c.memberUrl(f.pages[0].author), c.validMemberIndex],
@@ -48,7 +48,9 @@ test('every index route and cursor returns a deterministic validated fixture bod
     [c.groupsUrl(f.own), c.validGroups],
     [c.communityUrl(community), c.validCommunity],
     [c.communityGroupsUrl(community, group.group), (b) => c.validCommunityGroups(b, group.group)],
-    [c.groupSearchUrl('bicicleta'), c.validGroupSearch]
+    [c.groupSearchUrl('bicicleta'), c.validGroupSearch],
+    [c.testimonialsUrl(f.own), (b) => c.validTestimonials(b, f.own)],
+    [c.testimonialsUrl(f.members[1].author), (b) => c.validTestimonials(b, f.members[1].author)]
   ]
   for (const [url, validate] of cases) {
     t.ok(url, 'builder accepts the fixture input')
@@ -76,7 +78,9 @@ test('post, member, search, engagement and follow references resolve through dia
     return (await peek(author, [Number(seq)])).entries[0].record
   }
   const posts = [...f.feed, ...f.noticePosts]
-  const counts = respond(c.countsUrl(posts.map(refOf))).counts
+  // The counts route takes at most 31 refs a call.
+  const counts = {}
+  for (let i = 0; i < posts.length; i += 31) Object.assign(counts, respond(c.countsUrl(posts.slice(i, i + 31).map(refOf))).counts)
   for (const post of posts) {
     const ref = refOf(post)
     const body = respond(c.postUrl(ref))
@@ -312,7 +316,8 @@ test('Vitrine fetchers bypass HTTP and the scheduler, and map unknown fixtures t
     () => c.fetchGroups(f.own, deps),
     () => c.fetchCommunity(f.communities[0].community, deps),
     () => c.fetchCommunityGroups(f.communities[0].community, f.groups[0].group, deps),
-    () => c.fetchGroupSearch('geral', deps)
+    () => c.fetchGroupSearch('geral', deps),
+    () => c.fetchTestimonials(f.own, deps)
   ]
   for (let pass = 0; pass < 2; pass++) {
     for (const call of calls) t.is((await call()).ok, true, 'validated result without HTTP or timers')
@@ -327,6 +332,30 @@ test('Vitrine fetchers bypass HTTP and the scheduler, and map unknown fixtures t
   t.is(fetched, 0)
 })
 
+test('the testimonials route answers pointers from the live Vitrine state', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond, request } = await load()
+  const [joao, cecilia, bia] = [f.members[1].author, f.members[2].author, f.members[4].author]
+  const body = () => respond(c.testimonialsUrl(f.own))
+  t.alike(body(), { shown: [{ seq: 37, from: cecilia, wseq: 60 }, { seq: 36, from: joao, wseq: 60 }], pending: [{ from: bia, seq: 60 }], indexing: false, complete: true })
+  t.ok(c.validTestimonials(body(), f.own))
+  t.alike(respond(c.testimonialsUrl(joao)).shown, [{ seq: 61, from: f.own, wseq: 38 }])
+  t.alike(respond(c.testimonialsUrl(f.members[3].author)), { shown: [], pending: [], indexing: false, complete: true })
+  t.exception(() => respond(c.testimonialsUrl('f'.repeat(64))), /not-found/)
+  t.exception(() => respond('/index/testimonials/' + f.own + '/extra'), /not-found/)
+
+  const shown = await request('testimonial.show', { from: bia, seq: 60 })
+  t.alike(body().shown[0], { seq: shown.seq, from: bia, wseq: 60 })
+  t.alike(body().pending, [])
+  t.ok(c.validTestimonials(body(), f.own), 'never one block both shown and pending')
+  await request('testimonial.delete', { to: shown.ref })
+  t.absent(body().shown.some((row) => row.from === bia), 'a removed show leaves the profile')
+  t.alike(body().pending, [], 'and never returns to pending')
+  await request('testimonial.delete', { to: f.own + ':38' })
+  t.alike(respond(c.testimonialsUrl(joao)).shown, [], 'a revoked writer block hides the show')
+  const written = await request('testimonial.write', { to: cecilia, text: 'Obrigada pelas mudas!' })
+  t.alike(respond(c.testimonialsUrl(cecilia)).pending, [{ from: f.own, seq: written.seq }])
+})
+
 test('release bundles and development without the opt-in retain HTTP behavior', async (t) => {
   let fetched = 0
   for (const [dev, flag] of [[false, '1'], [true, '0'], [undefined, '1']]) {
@@ -335,4 +364,142 @@ test('release bundles and development without the opt-in retain HTTP behavior', 
     t.alike(result, { ok: false, reason: 'not-found' })
   }
   t.is(fetched, 3)
+})
+
+test('the testimonials route reads the Vitrine instance used last', async (t) => {
+  const { fixtures } = await import('../src/vitrine/fixtures.js')
+  const { createVitrineRequest } = await import('../src/vitrine/request.js')
+  const { vitrineIndex } = await import('../src/vitrine/indexResponder.js')
+  const a = createVitrineRequest(fixtures)
+  createVitrineRequest(fixtures)
+  const before = vitrineIndex('/index/testimonials/' + fixtures.own)
+  t.ok(before.pending.length > 0, 'a pending depoimento in the fixtures')
+  const { from, seq } = before.pending[0]
+  await a('testimonial.show', { from, seq })
+  const after = vitrineIndex('/index/testimonials/' + fixtures.own)
+  t.absent(after.pending.some((p) => p.from === from && p.seq === seq), 'the instance that showed it is the one the route reads')
+})
+
+test('Feira city, author and rating routes validate and hydrate their fixture refs', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex, request } = await load()
+  const respond = (url) => vitrineIndex(url, request)
+  const { hydrate, ratingRefs, ratings } = await import('../src/feiraClient.js')
+  const cityUrl = c.feiraUrl({ uf: 'SP', cityKey: 'sao-paulo' })
+  const body = respond(cityUrl)
+  t.ok(c.validFeira(body))
+  const city = await hydrate(request, body)
+  t.is(city.dropped, 0)
+  t.is(city.unavailable, 0)
+  t.ok(city.items.length > 0)
+  t.absent(city.items.some((i) => i.status === 'vendido' || i.kind === 'procura'))
+  t.ok(city.items.some((i) => i.status === 'reservado'))
+  t.ok(city.items.some((i) => i.page))
+  t.ok(city.items.some((i) => i.kind === 'servico' && i.unit === 'hora'))
+  const author = respond(c.feiraAuthorUrl(f.own))
+  t.ok(c.validFeira(author, { author: f.own }))
+  const own = await hydrate(request, author)
+  t.ok(own.items.some((i) => i.status === 'vendido'))
+  t.ok(own.items.some((i) => i.kind === 'procura'))
+  const wanted = respond(c.feiraUrl({ uf: 'SP', cityKey: 'sao-paulo', kind: 'procura' }))
+  t.is(wanted.items.length, 1)
+  const filtered = respond(c.feiraUrl({ uf: 'SP', cityKey: 'sao-paulo', kind: 'produto', cat: 'esporte', tokens: 'azul+revisada' }))
+  t.alike(filtered.items.map((i) => i.ref), [`${f.own}:40`])
+  t.alike(respond(c.feiraUrl({ uf: 'RJ', cityKey: 'rio-de-janeiro' })).items, [])
+  const rateBody = respond(c.feiraRatingsUrl(f.own))
+  t.ok(c.validFeira(rateBody, { ratings: true }))
+  t.alike(rateBody.items.map((i) => i.ref).sort(), f.rates.map(refOf).sort())
+  for (const item of rateBody.items) t.alike(Object.keys(item), ['ref'])
+  const refs = await ratingRefs(f.own, null, { fetchFeiraRatings: async () => ({ ok: true, value: rateBody }) })
+  const verified = await ratings(request, { author: f.own, seq: 40, refs: refs.refs })
+  t.is(verified.items.length, 1)
+  body.items[0].status = 'vendido'
+  t.absent(respond(cityUrl).items.some((i) => i.status === 'vendido'), 'responses cannot mutate the instance')
+})
+
+test('Feira cursors are exclusive across authors and live edits and statuses refresh index hints', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex, request } = await load()
+  const sample = f.listings.find((e) => e.author === f.own && e.seq === 40).record
+  const { type, at, ...fields } = sample
+  for (let i = 0; i < 27; i++) await request('listing.create', fields)
+  const query = { uf: 'SP', cityKey: 'sao-paulo' }
+  const first = vitrineIndex(c.feiraUrl(query), request)
+  t.is(first.items.length, 30)
+  t.ok(first.next)
+  t.ok(c.validFeira(first))
+  const second = vitrineIndex(c.feiraUrl({ ...query, cursor: first.next }), request)
+  t.is(second.items.length, 1)
+  t.is(second.next, null)
+  t.ok(c.validFeira(second))
+  t.is(new Set([...first.items, ...second.items].map((i) => i.ref)).size, 31)
+  const searched = vitrineIndex(c.feiraUrl({ ...query, tokens: 'bicicleta' }), request)
+  t.ok(c.validFeira(searched))
+  const cursor = `${Date.parse(sample.at)}.${f.own}.40`
+  t.ok(c.validFeira(vitrineIndex(c.feiraUrl({ ...query, tokens: 'bicicleta', cursor }), request)))
+  t.ok(c.validFeira(vitrineIndex(c.feiraAuthorUrl(f.own, cursor), request), { author: f.own }))
+  const rating = f.rates[1]
+  const rateCursor = `${Date.parse(rating.record.at)}.${rating.author}.${rating.seq}`
+  const ratings = vitrineIndex(c.feiraRatingsUrl(f.own, rateCursor), request)
+  t.is(ratings.items.length, 1)
+  t.ok(c.validFeira(ratings, { ratings: true }))
+  const to = `${f.own}:40`
+  const { kind, ...snapshot } = fields
+  const edited = await request('listing.edit', { to, expectedRevision: 44, ...snapshot, title: 'Bicicleta amarela' })
+  const status = await request('listing.status', { to, status: 'reservado' })
+  const refreshed = vitrineIndex(c.feiraUrl({ ...query, tokens: 'amarela' }), request)
+  t.alike(refreshed.items, [{ ref: to, editSeq: edited.seq, status: 'reservado', statusSeq: status.seq }])
+})
+
+test('Feira probe sees the offline demo index as enabled and malformed routes refuse', async (t) => {
+  const { fixtures: f, vitrineIndex, request } = await load()
+  const { search, byAuthor } = await import('../src/feiraClient.js')
+  const { createFeiraProbe } = await import('../src/feiraScreen.js')
+  const probe = createFeiraProbe((request, author) => byAuthor(request, author, null, {
+    fetchFeiraAuthor: async () => ({ ok: true, value: vitrineIndex('/index/feira/autor/' + author, request) })
+  }))
+  t.alike(await probe(request, f.own), { enabled: true })
+  const result = await search(request, { uf: 'SP', cityKey: 'sao-paulo' }, {
+    fetchFeira: async () => ({ ok: true, value: vitrineIndex('/index/feira/sp/sao-paulo/todos/todas', request) })
+  })
+  t.is(result.ok, true)
+  t.absent(result.off)
+  for (const path of [
+    '/index/feira',
+    '/index/feira/sp',
+    '/index/feira/xx/sao-paulo/todos/todas',
+    '/index/feira/sp/sao-paulo/todos/inexistente',
+    '/index/feira/sp/sao-paulo/todos/todas/a',
+    '/index/feira/sp/sao-paulo/todos/todas/a/b/c',
+    '/index/feira/autor/nope',
+    '/index/feira/avaliacoes/' + f.own + '/invalid'
+  ]) t.exception(() => vitrineIndex(path, request), /not-found/)
+})
+
+test('live likes and reposts move the counts and the member repost index', async (t) => {
+  const { fixtures: f, vitrineIndex: respond, request } = await load()
+  const { createVitrineRequest } = await import('../src/vitrine/request.js')
+  const other = createVitrineRequest(f)
+  const mine = (type) => new Set(f.diaryRecords.filter((e) => e.author === f.own && e.record.type === type).map((e) => refOf(e.record.to)))
+  const post = f.feed.find((p) => p.author !== f.own && !mine('like').has(refOf(p)) && !mine('repost').has(refOf(p)))
+  const ref = refOf(post)
+  const countsOf = (req, url = `/index/counts/${ref}`) => respond(url, req).counts[ref]
+  const base = countsOf(request)
+  const memberSeqs = (req) => respond(`/index/member/${f.own}`, req).posts
+
+  await request('like.set', { to: ref, on: true })
+  t.is(countsOf(request).likes, base.likes + 1, 'like adds one')
+  await request('like.set', { to: ref, on: true })
+  t.is(countsOf(request).likes, base.likes + 1, 'repeated like does not inflate')
+  t.is(countsOf(other).likes, base.likes, 'a second instance keeps its baseline')
+  await request('like.set', { to: ref, on: false })
+  t.is(countsOf(request).likes, base.likes, 'unlike returns to the baseline')
+
+  const before = memberSeqs(request)
+  const { seq } = await request('repost.set', { to: ref, on: true })
+  t.is(countsOf(request).reposts, base.reposts + 1, 'repost adds one')
+  t.ok(memberSeqs(request).includes(seq), 'member index lists the repost')
+  t.is(countsOf(other).reposts, base.reposts, 'other instance repost count unchanged')
+  t.absent(memberSeqs(other).includes(seq), 'other instance member index unchanged')
+  await request('repost.set', { to: ref, on: false })
+  t.is(countsOf(request).reposts, base.reposts, 'unrepost returns to the baseline')
+  t.alike(memberSeqs(request), before, 'member index returns to the baseline')
 })

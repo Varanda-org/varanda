@@ -55,6 +55,15 @@ const {
   likeRecord,
   repostRecord,
   deleteRecord,
+  testimonialRecord,
+  testimonialShowRecord,
+  momentRecord,
+  MAX_TESTIMONIAL,
+  charLength,
+  validTestimonialText,
+  listingRecord,
+  listingStatusRecord,
+  listingRateRecord,
   validAvatar,
   validateRecord,
   validRecordCopy,
@@ -72,15 +81,19 @@ const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, ha
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
+const { foldMoments, ownPast, showingMoment } = require('@varanda/core/lib/moments')
 const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
+const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
+const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS } = require('@varanda/core/lib/group-media')
-const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, COMMUNITY_LIST_MAX } = require('@varanda/rpc')
+const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, COMMUNITY_LIST_MAX, feira } = require('@varanda/rpc')
+const listing = require('@varanda/core/lib/listing')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const store = require('./node-store')
 
@@ -245,6 +258,21 @@ async function moderation (storage, association) {
     return { blocked: new Set(), revokedIssuers: new Set() }
   }
   return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
+}
+
+// The keys this member blocked (kv memberBlocks).
+async function memberBlocks (storage) {
+  return blockedKeys(await store.readMemberBlocks(storage))
+}
+
+// moderation() for what this member reads: `blocked` also holds the member's
+// own blocks, and `hidden` holds them alone. Only for reads of posts and
+// notices. A group fold keeps plain moderation(): one member's block must not
+// change who is in a group, or its roles, on that member's devices.
+async function readerModeration (storage, association) {
+  const mod = await moderation(storage, association)
+  const hidden = await memberBlocks(storage)
+  return { blocked: new Set([...mod.blocked, ...hidden]), revokedIssuers: mod.revokedIssuers, hidden }
 }
 
 // ---- id ----
@@ -415,12 +443,346 @@ async function postQuote (ctx, { to, text, media, preview }) {
   return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media, preview } : { text, quote: to, preview })))
 }
 
+// ---- momentos (docs/rpc.md 5.113) ----
+
+const MOMENT_MEDIA_STALE = 'prepare a mídia de novo'
+
+// owned(item): whether the dm engine's putPublicMedia answered exactly this
+// item in this unlock; anything else (an item from another unlock, another
+// node or a DM) is refused before a record is built.
+async function momentCreate (ctx, { text, media, owned }) {
+  if (typeof owned !== 'function' || owned(media) !== true) throw new UsageError(MOMENT_MEDIA_STALE)
+  return publish(ctx, buildRecord(() => momentRecord({ text, media })))
+}
+
+// Tombstones the caller's own moment `to` (parsed ref) -> recordDelete's
+// result. Any other type, another author's ref or a block that is not there
+// answers 'referência inválida'; one already deleted answers its tombstone.
+async function momentDelete (ctx, { to }) {
+  await withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (to.author !== ownHex || !(to.seq >= 1) || to.seq >= diary.length) throw new UsageError('referência inválida')
+    const raw = await store.readRaw(diary)
+    if (to.seq < raw.length && raw[to.seq].record === null && deletedSeqs(raw).has(to.seq)) return
+    const target = recordAt(raw, to.seq)
+    if (target === null || target.type !== 'moment') throw new UsageError('referência inválida')
+  })
+  return recordDelete(ctx, 'moment', { to })
+}
+
+// The showing moments of the followed diaries (feedRead's admission, local
+// replicas only) and of the own diary, plus the own expired ones ->
+// { authors, own, past } (docs/rpc.md 5.113).
+async function momentsRead (ctx, { now = Date.now() } = {}) {
+  const { association, final, own, kept } = await gatherLogs(ctx)
+  // The feed's page cut applies: a closed or migrated page shows no moment.
+  const others = kept.filter((l) => l.key !== own.key).map((l) => ({ key: l.key, entries: l.entries, raw: l.raw }))
+  const mine = foldMoments({ logs: [{ key: own.key, entries: own.entries }], now }).authors
+  return {
+    authors: foldMoments({ logs: others, now, association, revokedIssuers: final.revokedIssuers }).authors,
+    own: mine.length > 0 ? mine[0].items : [],
+    past: ownPast({ key: own.key, entries: own.entries }, now)
+  }
+}
+
+// The media item of the showing moment author:seq from local data (the own
+// diary or a stored replica, logRead's admission), or null.
+async function momentMedia (ctx, { author, seq, now = Date.now() }) {
+  const key = String(author).toLowerCase()
+  if (!HEX64.test(key) || !Number.isSafeInteger(seq) || seq < 1) return null
+  let log
+  try {
+    log = await logRead(ctx, { author: key })
+  } catch (err) {
+    if (err && err.message === 'sem dados locais para este diário') return null
+    throw err
+  }
+  // The record itself, not the capped list: an older moment still in its
+  // 24 h keeps its photo after newer ones fill the strip.
+  const association = await trustRoot(ctx)
+  const { revokedIssuers } = await moderation(ctx.storage, association)
+  return showingMoment({ key, entries: log.entries }, seq, now, { association, revokedIssuers })
+}
+
+// ---- feira (docs/protocol.md, "Feira") ----
+
+const NOT_LISTING = 'o registro não é um anúncio'
+const LISTING_LIMIT = 'limite'
+const LISTING_CONFLICT = 'conflito'
+const PROCURA_RESERVED = 'uma procura não fica reservada'
+const BAD_CONSENT = 'consentimento inválido'
+const BAD_REF = 'referência inválida'
+const RATE_SENT = 'avaliação já enviada para esta oferta'
+
+function appendAll (ctx, diary, records) {
+  return records.length === 1 ? appendOwn(ctx, diary, records[0]) : store.appendRecords(diary, records, ctx.limits)
+}
+
+// The folded own listing `seq` of the own diary of `length` blocks, as the
+// core node answers: BAD_REF for another author's ref or a seq out of
+// range, NOT_LISTING for an own seq that is no live listing root.
+function ownListing (raw, ownHex, to, length) {
+  if (to.author !== ownHex || !Number.isSafeInteger(to.seq) || to.seq < 1 || to.seq >= length) throw new UsageError(BAD_REF)
+  const item = listing.foldListings(raw).bySeq.get(to.seq)
+  if (item === undefined) throw new UsageError(NOT_LISTING)
+  return item
+}
+
+// Tombstone ranges only in media cores the diary declared, as recordDelete
+// keeps them for a post.
+function declaredOnly (raw, ownHex, records) {
+  const declared = new Set(latestMediaCores(applyDeletes(raw), ownHex, Number.MAX_SAFE_INTEGER).map((c) => c.key))
+  return records.map((r) => {
+    if (r.type !== 'delete' || !Array.isArray(r.media)) return r
+    const media = r.media.filter((m) => declared.has(m.core))
+    if (media.length === r.media.length) return r
+    return buildRecord(() => deleteRecord(media.length > 0 ? { seq: r.seq, at: r.at, media } : { seq: r.seq, at: r.at }))
+  })
+}
+
+// -> { seq, ref }. The cap counts live roots after the catch-up, inside the
+// write.
+async function listingCreate (ctx, { kind, title, text, price, unit, cat, place, media }) {
+  if (hasMedia(media)) await verifyMedia(ctx, media)
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (listing.countLive(await store.readRaw(diary)) >= feira.MAX_LISTINGS) throw new UsageError(LISTING_LIMIT)
+    const record = buildRecord(() => listingRecord({ kind, title, text, price, unit, cat, place, media: hasMedia(media) ? media : undefined }))
+    const seq = await appendOwn(ctx, diary, record)
+    return { seq, ref: formatRef({ author: ownHex, seq }) }
+  })
+}
+
+// A full snapshot for listing `to` -> { seq (the edit's), ref (the root's,
+// which never changes) }. A descriptor the listing already shows is kept
+// unverified (it may live in another device's media core); every other one
+// is verified as for a post. expectedRevision is the live edit's seq (0 for
+// none), checked after the catch-up inside the write: a stale one appends
+// nothing. The edit and the tombstone of the edit it replaces are one
+// append.
+async function listingEdit (ctx, { to, expectedRevision, title, text, price, unit, cat, place, media }) {
+  const current = await withIdentity(ctx, async ({ diary, ownHex }) => ownListing(await store.readRaw(diary), ownHex, to, diary.length))
+  const shown = Array.isArray(current.record.media) ? current.record.media : []
+  const fresh = hasMedia(media) ? media.filter((d) => !shown.some((s) => deepEqual(s, d))) : []
+  if (fresh.length > 0) await verifyMedia(ctx, fresh)
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const raw = await store.readRaw(diary)
+    const item = ownListing(raw, ownHex, to, diary.length)
+    if ((item.editSeq === null ? 0 : item.editSeq) !== expectedRevision) throw new UsageError(LISTING_CONFLICT)
+    const live = Array.isArray(item.record.media) ? item.record.media : []
+    // Kept before the write but no longer shown: only the revision check
+    // above lets this happen, so refuse rather than publish it unverified.
+    if (hasMedia(media) && media.some((d) => !fresh.includes(d) && !live.some((s) => deepEqual(s, d)))) throw new UsageError(LISTING_CONFLICT)
+    let plan
+    try {
+      plan = listing.editPlan(raw, to.seq, { title, text, price, unit, cat, place, media: hasMedia(media) ? media : null })
+    } catch (err) {
+      if (err instanceof TypeError && err.message === 'not-found') throw new UsageError(NOT_LISTING)
+      if (err instanceof TypeError && err.message === 'unit-invalid') throw new UsageError('parâmetro inválido: unit')
+      throw new Error('registro inválido: ' + err.message)
+    }
+    const records = declaredOnly(raw, ownHex, plan.records)
+    const last = await appendAll(ctx, diary, records)
+    const seq = last - records.length + 1
+    if (records.length > 1) {
+      const tomb = records[1]
+      await clearAfterDelete(ctx, diary, ownHex, [tomb.seq], [tomb])
+    }
+    return { seq, last, ref: formatRef(to) }
+  })
+}
+
+// Throws unless `to` is a live listing of the own diary (ownListing's
+// errors). Local data only.
+async function listingLive (ctx, to) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    ownListing(await store.readRaw(diary), ownHex, to, diary.length)
+    return true
+  })
+}
+
+// -> { seq, ref (the root's) }.
+async function listingStatus (ctx, { to, status }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const item = ownListing(await store.readRaw(diary), ownHex, to, diary.length)
+    if (item.record.kind === 'procura' && status === 'reservado') throw new UsageError(PROCURA_RESERVED)
+    return { seq: await appendOwn(ctx, diary, buildRecord(() => listingStatusRecord({ seq: to.seq, status }))), ref: formatRef(to) }
+  })
+}
+
+function listingDelete (ctx, params) {
+  return recordDelete(ctx, 'listing', params)
+}
+
+// The rating of listing `to` (another member's) under its author's consent
+// -> { seq, ref }. The consent must verify with the own key as the rater.
+// One rating per offer, never rewritten: a listing-rate for that offer
+// already in the own diary (tombstoned or not) refuses.
+async function listingRate (ctx, { to, offer, consent, stars, text }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (!listing.verifyConsent({ listingAuthor: to.author, listingSeq: to.seq, rater: ownHex, offerId: offer, consent })) throw new UsageError(BAD_CONSENT)
+    if (rateSent(await store.readRaw(diary), offer)) throw new UsageError(RATE_SENT)
+    const seq = await appendOwn(ctx, diary, buildRecord(() => listingRateRecord({ to, offer, consent, stars, text })))
+    return { seq, ref: formatRef({ author: ownHex, seq }) }
+  })
+}
+
+// Whether a listing-rate for `offer` is in the raw blocks, deletes not
+// applied (a tombstoned rating still holds its offer).
+function rateSent (raw, offer) {
+  return raw.some(({ seq, record }) => {
+    if (record === null || typeof record !== 'object' || record.type !== 'listing-rate') return false
+    const copy = validRecordCopy(record, seq)
+    return copy !== null && copy.offer === offer
+  })
+}
+
+function mineItem (item) {
+  const r = item.record
+  return {
+    seq: item.seq,
+    editSeq: item.editSeq,
+    statusSeq: item.statusSeq,
+    kind: r.kind,
+    status: item.status,
+    title: r.title,
+    text: r.text,
+    price: r.price,
+    unit: r.unit,
+    cat: r.cat,
+    place: r.place,
+    media: Array.isArray(r.media) ? r.media : [],
+    at: r.at,
+    editedAt: item.editedAt
+  }
+}
+
+// The own listings, newest first -> { items, next } (next: the `before` of
+// the following page, or null). Local data only, works locked.
+async function listingMine (ctx, { before = null, limit = 20 } = {}) {
+  return withIdentity(ctx, async ({ diary }) => {
+    const all = listing.foldListings(await store.readRaw(diary)).items
+      .filter((item) => before === null || item.seq < before)
+    const page = all.slice(0, limit)
+    return { items: page.map(mineItem), next: all.length > page.length ? page[page.length - 1].seq : null }
+  })
+}
+
+// Whether `messages` (a DM thread as dm.thread lists it) holds the inbound
+// proposta `offer` from `rater` for the own listing `seq`: its card URL or
+// its text must parse as an offer on exactly that listing.
+function offerReceived (messages, { own, seq, rater, offer }) {
+  if (!Array.isArray(messages)) return false
+  return messages.some((m) => {
+    if (m === null || typeof m !== 'object' || m.mine === true || m.from !== rater || m.id !== offer) return false
+    for (const url of [m.card && m.card.url, m.text]) {
+      const ref = feira.parseOfferRef(url)
+      if (ref !== null && ref.author === own && ref.seq === seq && ref.aceite === null && !ref.recusada) return true
+    }
+    return false
+  })
+}
+
+// The deal consent of the own listing `seq` for `rater` and `offer`,
+// signed with the identity key -> hex128.
+function signConsent (keyPair, { own, seq, rater, offer }) {
+  const payload = feira.dealPayload({ listingAuthor: own, listingSeq: seq, rater, offerId: offer })
+  return b4a.toString(crypto.sign(b4a.from(payload), keyPair.secretKey), 'hex')
+}
+
+// Verified ratings of listing `author`:`seq` from peeked rater diaries.
+// peeks, one per rater: { rater, entries: [{ seq, record }], invalid,
+// missing, certDate } as the diary.peek path answers (certDate: the rater's
+// block-0 certificate date, null when unread), or { rater, hidden: true }
+// for a diary the gate refuses, or { rater, failed: true } for a read that
+// did not finish. A rating counts when it is a valid listing-rate at the
+// hinted seq, about exactly this listing, signed by `author` for this rater,
+// from a membership seven days old or more, and not a self-rating. Per
+// rater the first block of an offer is the only one (a later block naming
+// an offer an earlier read block of that rater holds is dropped: one
+// rating per offer, protocol section 15), and per rater and listing the
+// newest such block wins. Everything from a peer is untrusted. `seq` null
+// (the request named no listing) keeps every listing of `author`.
+// -> { items: [{ rater, seq, listingSeq, stars, text, at }], dropped,
+// incomplete }: dropped counts the hinted refs read and found invalid;
+// a ref not read (a transient failure, a missing block) is not dropped but
+// makes the answer incomplete.
+function ratingsOf ({ author, seq = null, refs, peeks, nowMs = Date.now() }) {
+  const byRater = new Map()
+  for (const p of Array.isArray(peeks) ? peeks : []) {
+    if (p !== null && typeof p === 'object' && typeof p.rater === 'string') byRater.set(p.rater, p)
+  }
+  // Per rater, offer -> the lowest seq of a listing-rate read for it.
+  const firstOffer = new Map()
+  for (const p of byRater.values()) {
+    const offers = new Map()
+    for (const e of Array.isArray(p.entries) ? p.entries : []) {
+      if (e === null || typeof e !== 'object' || !Number.isSafeInteger(e.seq)) continue
+      const r = validRecordCopy(e.record, e.seq)
+      if (r === null || r.type !== 'listing-rate') continue
+      const prev = offers.get(r.offer)
+      if (prev === undefined || e.seq < prev) offers.set(r.offer, e.seq)
+    }
+    firstOffer.set(p.rater, offers)
+  }
+  const best = new Map()
+  let dropped = 0
+  let incomplete = false
+  for (const ref of refs) {
+    if (ref.rater === author) {
+      dropped++
+      continue
+    }
+    const p = byRater.get(ref.rater)
+    if (p === undefined || p.failed === true) {
+      incomplete = true
+      continue
+    }
+    if (p.hidden === true || (Array.isArray(p.invalid) && p.invalid.includes(ref.seq))) {
+      dropped++
+      continue
+    }
+    const entry = (Array.isArray(p.entries) ? p.entries : []).find((e) => e !== null && typeof e === 'object' && e.seq === ref.seq)
+    if (entry === undefined || p.certDate === null || p.certDate === undefined) {
+      incomplete = true
+      continue
+    }
+    const r = validRecordCopy(entry.record, entry.seq)
+    if (!listing.certOldEnough(p.certDate, nowMs) || r === null || r.type !== 'listing-rate' || r.to.author !== author ||
+        (seq !== null && r.to.seq !== seq) ||
+        !listing.verifyConsent({ listingAuthor: author, listingSeq: r.to.seq, rater: ref.rater, offerId: r.offer, consent: r.consent }) ||
+        firstOffer.get(ref.rater).get(r.offer) !== entry.seq) {
+      dropped++
+      continue
+    }
+    const k = ref.rater + ':' + r.to.seq
+    const prev = best.get(k)
+    if (prev === undefined || entry.seq > prev.seq) best.set(k, { rater: ref.rater, seq: entry.seq, listingSeq: r.to.seq, stars: r.stars, text: r.text, at: r.at })
+  }
+  const items = [...best.values()].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
+  return { items, dropped, incomplete }
+}
+
 // ---- delete ----
 
 const NOT_DELETABLE = 'não é possível apagar este registro'
+// Records store.appendRecords takes in one atomic append.
+const APPEND_MAX = 8
+// other: the record type refused with `wrong`; null refuses every other
+// type with it.
 const DELETE_KINDS = {
   post: { other: 'profile', wrong: 'o registro não é uma publicação' },
-  profile: { other: 'post', wrong: 'o registro não é um perfil' }
+  profile: { other: 'post', wrong: 'o registro não é um perfil' },
+  listing: { other: null, wrong: NOT_LISTING },
+  // testimonialDelete picks the kind from the target, so `other` never applies.
+  testimonial: { other: null, wrong: null },
+  'testimonial-show': { other: null, wrong: null },
+  // momentDelete checks the target first; the blob expires by itself, so no
+  // media core is cleared (shownMedia names none for a moment).
+  moment: { other: null, wrong: null }
 }
 
 // The compat pair profileRecords writes: a plain profile immediately
@@ -532,9 +894,22 @@ async function recordDelete (ctx, kind, { to }) {
     }
     const target = recordAt(raw, to.seq)
     if (target === null) throw new UsageError('referência inválida')
-    if (target.type === rules.other) throw new UsageError(rules.wrong)
+    if (target.type === rules.other || (rules.other === null && target.type !== kind)) throw new UsageError(rules.wrong)
     if (target.type !== kind) throw new UsageError(NOT_DELETABLE)
+    if (kind === 'listing') {
+      // Already tombstoned while its block is still readable (a local clear
+      // that failed, or another device's tombstone replicated first).
+      const gone = deletedSeqs(raw)
+      if (gone.has(to.seq)) {
+        const seq = existingTombstone(raw, gone, [to.seq])
+        return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: [to.seq] }
+      }
+      return listingTombstones(ctx, diary, ownHex, raw, to.seq)
+    }
     let targets = [to.seq]
+    // Every live show of that writer goes: shownRows takes the newest live
+    // one, so removing only this one would bring an older one back.
+    if (kind === 'testimonial-show') targets = [...new Set([to.seq, ...liveShowSeqs(raw, target.from)])].sort((a, b) => a - b)
     if (kind === 'profile') {
       if (target.avatar === undefined && compatPair(target, recordAt(raw, to.seq + 1))) targets = [to.seq, to.seq + 1]
       else if (target.avatar !== undefined && compatPair(recordAt(raw, to.seq - 1), target)) targets = [to.seq - 1, to.seq]
@@ -555,12 +930,53 @@ async function recordDelete (ctx, kind, { to }) {
         .map((d) => ({ core: d.core, start: d.start, blocks: d.blocks }))
       return buildRecord(() => deleteRecord(media.length > 0 ? { seq, at, media } : { seq, at }))
     })
-    const seq = records.length === 1
-      ? await appendOwn(ctx, diary, records[0])
-      : await store.appendRecords(diary, records, ctx.limits)
+    let seq
+    if (records.length <= APPEND_MAX) {
+      seq = records.length === 1
+        ? await appendOwn(ctx, diary, records[0])
+        : await store.appendRecords(diary, records, ctx.limits)
+    } else {
+      // Only a writer's many shows get here (a post or a profile pair is at
+      // most 2). One append takes at most APPEND_MAX records, so the
+      // tombstones go in chunks: every other show of that writer first,
+      // newest first, and the targeted show's in the last chunk. A chunk
+      // that fails throws like any failed write and the client never
+      // resends by itself; while any show of that writer remains, the
+      // target is still live (never cleared by sync), so a repeat of the
+      // same ref reads its `from` again and finishes the rest.
+      const order = records.map((r, i) => i).sort((a, b) => {
+        if (pending[a] === to.seq) return 1
+        if (pending[b] === to.seq) return -1
+        return pending[b] - pending[a]
+      })
+      for (let i = 0; i < order.length; i += APPEND_MAX) {
+        const chunk = order.slice(i, i + APPEND_MAX).map((j) => records[j])
+        seq = chunk.length === 1
+          ? await appendOwn(ctx, diary, chunk[0])
+          : await store.appendRecords(diary, chunk, ctx.limits)
+      }
+    }
     await clearAfterDelete(ctx, diary, ownHex, pending, records)
     return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: targets }
   })
+}
+
+// A listing goes with its live edits in one append (core listing.js
+// deletePlan): each tombstone frees only the photos no surviving record
+// shows.
+async function listingTombstones (ctx, diary, ownHex, raw, seq) {
+  let records
+  try {
+    records = listing.deletePlan(raw, seq, nowIso())
+  } catch (err) {
+    if (err instanceof TypeError && err.message === 'not-found') throw new UsageError(NOT_LISTING)
+    throw new Error('registro inválido: ' + err.message)
+  }
+  records = declaredOnly(raw, ownHex, records)
+  const targets = records.filter((r) => r.type === 'delete').map((r) => r.seq)
+  const last = await appendAll(ctx, diary, records)
+  await clearAfterDelete(ctx, diary, ownHex, targets, records)
+  return { seq: last, ref: formatRef({ author: ownHex, seq: last }), changed: true, deleted: targets }
 }
 
 function postDelete (ctx, params) {
@@ -621,6 +1037,146 @@ async function engagementRead (ctx, { refs }) {
       reposted: refs.filter((ref) => state.reposted.has(ref.toLowerCase()))
     }
   })
+}
+
+// ---- depoimentos (docs/protocol.md section 2, docs/rpc.md 5.100) ----
+
+const TESTIMONIAL_SELF = 'não pode escrever um depoimento para si'
+const TESTIMONIAL_NO_BOX = 'a pessoa ainda não recebe mensagens'
+const TESTIMONIAL_TOO_LONG = 'texto muito longo'
+const TESTIMONIAL_NOT_FOUND = 'depoimento não encontrado'
+
+// The seqs of the live (not tombstoned) testimonial-show blocks of `from`
+// in the own diary's raw entries, ascending.
+function liveShowSeqs (raw, from) {
+  const deleted = deletedSeqs(raw)
+  const out = []
+  for (const { seq, record } of raw) {
+    if (deleted.has(seq)) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null && copy.type === 'testimonial-show' && copy.from === from) out.push(seq)
+  }
+  return out
+}
+
+// The live shows of the own diary -> Map 'from:seq' (the writer block) ->
+// the show's seq (the newest one when several name the same block).
+function liveShows (raw) {
+  const deleted = deletedSeqs(raw)
+  const out = new Map()
+  for (const { seq, record } of raw) {
+    if (deleted.has(seq)) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null && copy.type === 'testimonial-show') out.set(copy.from + ':' + copy.seq, seq)
+  }
+  return out
+}
+
+// recipient: { box, gen } of the recipient's newest dm-key (the session's DM
+// lookup), box null when there is none. -> { seq, ref }.
+async function testimonialWrite (ctx, { to, text, recipient }) {
+  const key = String(to).toLowerCase()
+  if (typeof text !== 'string' || charLength(text) > MAX_TESTIMONIAL) throw new UsageError(TESTIMONIAL_TOO_LONG)
+  const self = (ownHex) => { if (key === ownHex) throw new UsageError(TESTIMONIAL_SELF) }
+  // Self first: the own key needs no lookup and must not read as "no box".
+  await withIdentity(ctx, async ({ ownHex }) => self(ownHex))
+  if (recipient === null || typeof recipient !== 'object' || recipient.box === null || recipient.box === undefined) {
+    throw new UsageError(TESTIMONIAL_NO_BOX)
+  }
+  if (!validTestimonialText(text)) throw new UsageError('registro inválido: malformed')
+  const ownHex = await withIdentity(ctx, async ({ ownHex }) => ownHex)
+  let sealed
+  try {
+    sealed = sealOffer({ from: ownHex, text, boxPk: recipient.box })
+  } catch {
+    // Only the recipient's key can fail here (the text and own key passed).
+    throw new UsageError(TESTIMONIAL_NO_BOX)
+  }
+  const record = buildRecord(() => testimonialRecord({ to: key, gen: recipient.gen, hash: sealed.hash, box: sealed.box }))
+  // publish re-reads the identity: a sign-out and a sign-in as someone else
+  // in between would seal a commitment to the wrong author.
+  return publish(ctx, record, (now) => { self(now); if (now !== ownHex) throw new UsageError(TESTIMONIAL_NO_BOX) })
+}
+
+// A writer block read from `from`'s diary, opened with `open(box, gen)`
+// (the DM engine's in-memory pair) -> { text, nonce, at } when it is a valid
+// testimonial from someone else to ownHex whose opened text and nonce match
+// its commitment with `from` as the writer, else null: a block copied
+// verbatim into another diary opens but does not match. Never throws.
+function openTestimonialBlock (ownHex, from, seq, record, open) {
+  try {
+    if (from === ownHex) return null
+    const copy = validRecordCopy(record, seq)
+    if (copy === null || copy.type !== 'testimonial' || copy.to !== ownHex) return null
+    const opened = open(copy.box, copy.gen)
+    if (opened === null || typeof opened !== 'object') return null
+    if (!isHex64(from) || commitment(from, opened.nonce, opened.text) !== copy.hash) return null
+    return { text: opened.text, nonce: opened.nonce, at: copy.at }
+  } catch {
+    return null
+  }
+}
+
+// The writer blocks already shown by a live show of the own diary, as
+// 'from:seq' keys. Works locked.
+async function testimonialShownKeys (ctx) {
+  return withIdentity(ctx, async ({ diary }) => new Set(liveShows(await store.readRaw(diary)).keys()))
+}
+
+// blocks: [{ from, seq, record }] the writer blocks read for the seeder's
+// pending pointers (in their order). -> rows { from, seq, text, at }: only
+// those that open, match and are not shown yet, at most `max`, one per block.
+function testimonialPendingRows (ownHex, blocks, shown, open, max) {
+  const rows = []
+  const seen = new Set()
+  for (const b of Array.isArray(blocks) ? blocks : []) {
+    if (rows.length >= max) break
+    if (b === null || typeof b !== 'object' || !isHex64(b.from) || !Number.isSafeInteger(b.seq) || b.seq < 1) continue
+    const id = b.from + ':' + b.seq
+    if (seen.has(id) || shown.has(id)) continue
+    seen.add(id)
+    const opened = openTestimonialBlock(ownHex, b.from, b.seq, b.record, open)
+    if (opened !== null) rows.push({ from: b.from, seq: b.seq, text: opened.text, at: opened.at })
+  }
+  return rows
+}
+
+// record: block `seq` of `from` as read now (null when unavailable). A
+// writer block already shown by a live show answers that show; anything
+// that does not open and match is TESTIMONIAL_NOT_FOUND, never why.
+async function testimonialShow (ctx, { from, seq, record, open }) {
+  const key = String(from).toLowerCase()
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const existing = liveShows(await store.readRaw(diary)).get(key + ':' + seq)
+    if (existing !== undefined) return { seq: existing, ref: formatRef({ author: ownHex, seq: existing }), changed: false }
+    const opened = openTestimonialBlock(ownHex, key, seq, record, open)
+    if (opened === null) throw new UsageError(TESTIMONIAL_NOT_FOUND)
+    const show = buildRecord(() => testimonialShowRecord({ from: key, seq, text: opened.text, nonce: opened.nonce }))
+    const at = await appendOwn(ctx, diary, show)
+    return { seq: at, ref: formatRef({ author: ownHex, seq: at }), changed: true }
+  })
+}
+
+// The kind comes from the target: the own testimonial (revoke) or the own
+// testimonial-show (remove, with every other live show of that writer).
+// `about` (a key): the caller means to revoke its depoimento to that person,
+// a ref it may have taken from an untrusted seeder index, so the live target
+// must be a testimonial addressed to `about`, never a show or one to someone
+// else.
+async function testimonialDelete (ctx, { to, about }) {
+  const kind = await withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (to.author !== ownHex || !(to.seq >= 1) || to.seq >= diary.length) throw new UsageError('referência inválida')
+    const raw = await store.readRaw(diary)
+    // A target already deleted and cleared: recordDelete answers its tombstone.
+    if (to.seq < raw.length && raw[to.seq].record === null && deletedSeqs(raw).has(to.seq)) return 'testimonial'
+    const target = recordAt(raw, to.seq)
+    if (target === null || (target.type !== 'testimonial' && target.type !== 'testimonial-show')) throw new UsageError('referência inválida')
+    if (about !== undefined && (target.type !== 'testimonial' || target.to !== String(about).toLowerCase())) throw new UsageError('referência inválida')
+    return target.type
+  })
+  return recordDelete(ctx, kind, { to })
 }
 
 // ---- media ----
@@ -1165,9 +1721,13 @@ function skipReason (core, entries, key, association, mod = {}) {
   return r.ok ? null : r.reason
 }
 
-async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
+// The own log and the followed logs feedRead admits, from local data only
+// -> { association, final, own, kept, skipped, incomplete }; kept starts
+// with own.
+async function gatherLogs (ctx) {
   const association = await trustRoot(ctx)
   const mod = await moderation(ctx.storage, association)
+  const hidden = await memberBlocks(ctx.storage)
   const own = await withIdentity(ctx, async ({ diary, ownHex }) => ({ key: ownHex, entries: await store.readAll(diary) }))
   // One slot per followed key, in follow order: a fixed reason, or what was
   // read, judged only once every read is done.
@@ -1178,6 +1738,9 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
     const key = raw.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
+    // Followed on another device after this member blocked them: no slot, as
+    // this is the member's choice and not a problem to report in `skipped`.
+    if (hidden.has(key)) continue
     // Hidden before any read, whether or not its purge already ran.
     if (mod.blocked.has(key)) {
       slots.push({ key, reason: 'blocked' })
@@ -1208,7 +1771,12 @@ async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
     if (reason === null) kept.push({ key, entries: read.entries, raw: read.raw })
     else skipped.push({ key, reason })
   }
-  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before })
+  return { association, final, own, kept, skipped, incomplete, hidden }
+}
+
+async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
+  const { association, final, kept, skipped, incomplete, hidden } = await gatherLogs(ctx)
+  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before, hidden })
   return { items: built.items, skipped, future: built.future, incomplete }
 }
 
@@ -1511,9 +2079,21 @@ async function makeGroupRoom (ctx, base, group, more = []) {
   }
 }
 
-// The fold of `group` from local data, or null when its root is not held.
-async function loadGroup (ctx, base, group) {
+// A diary's entries for a fold of `base`: the own diary (and, in a page
+// fold, this device's identity, read as the own fold reads it) whole unless
+// blocked, any other through feedRead's admission.
+async function foldEntriesOf (ctx, base, d) {
   const { ownHex, ownEntries, association, mod } = base
+  if (d === ownHex) return mod.blocked.has(ownHex) ? null : ownEntries
+  if (base.local && d === base.local.hex) return mod.blocked.has(d) ? null : base.local.entries
+  return admittedEntries(await replicaRead(ctx, d, mod), d, association, mod)
+}
+
+// The fold of `group` from local data, or null when its root is not held.
+// asPage: base.ownHex is a page this device holds the secrets of
+// (pageGroupRead), which has no own writer here.
+async function loadGroup (ctx, base, group, asPage = false) {
+  const { ownHex, mod } = base
   // A group block in the stored snapshot names the root key: the group reads
   // as unknown to every operation, its local cores stay where they are.
   if (mod.blocked.has(group)) return null
@@ -1521,9 +2101,11 @@ async function loadGroup (ctx, base, group) {
   if (root === null || root.length === 0 || root.fork !== 0) return null
   const rootHeader = root.entries[0].record
   if (!foldableHeader(rootHeader)) return null
-  const own = (await store.readGroupWriters(ctx.storage)).find((e) => e.group === group) || null
+  const listed = (await store.readGroupWriters(ctx.storage)).find((e) => e.group === group) || null
+  const own = asPage ? null : listed
   const keys = new Set(await store.readGroupReplicas(ctx.storage))
-  if (own !== null) keys.add(own.key)
+  // A page fold keeps this device's identity's writer as a foreign one.
+  if (listed !== null) keys.add(listed.key)
   keys.delete(group)
   const writers = []
   const cores = new Map([[group, { diary: rootHeader.diary, at: rootHeader.at, length: root.length, signed: root.signed, entries: root.entries }]])
@@ -1550,7 +2132,7 @@ async function loadGroup (ctx, base, group) {
   for (const d of new Set([ownHex, rootHeader.diary, ...writers.map((w) => w.diary)])) {
     // A blocked own diary binds none of its writers, as in the core node (the
     // feed keeps its own rule for the own diary).
-    const entries = d === ownHex ? (mod.blocked.has(ownHex) ? null : ownEntries) : admittedEntries(await replicaRead(ctx, d, mod), d, association, mod)
+    const entries = await foldEntriesOf(ctx, base, d)
     diaries.set(d, entries)
     if (entries !== null) {
       joins.set(d, groupJoinHistory(entries, group))
@@ -2337,51 +2919,176 @@ function groupInvitePolicy (ctx, { group, members }) {
 // One page backwards over the causal order, newest first (feed.read's
 // shape); a hidden post keeps its place with an empty text.
 async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = null } = {}) {
-  return withGroup(ctx, group, false, async ({ base, g }) => {
-    const all = g.built.posts.filter((p) => g.diaries.get(p.diary))
-    // Older than the cursor: with the cursor post still in the fold, every
-    // post before it in the causal order; without it (gone after a sync), each
-    // post whose order key (at, writer, seq) is below the cursor's, checked one
-    // by one in causal order. Causal and key order can differ, so a count of
-    // such posts would not be a position in the causal array.
-    let posts = all
-    if (before !== null && before !== undefined) {
-      const i = all.findIndex((p) => p.writer === before.writer && p.seq === before.seq)
-      if (i >= 0) {
-        posts = all.slice(0, i)
-      } else {
-        const k = orderKey(before.at, before.writer, before.seq)
-        posts = all.filter((p) => compareOrder(orderKey(p.at, p.writer, p.seq), k) < 0)
-      }
-    }
-    const start = Math.max(0, posts.length - (limit || GROUP_LIMIT_DEFAULT))
-    const page = posts.slice(start).reverse()
-    const items = page.map((p) => ({
-      writer: p.writer,
-      diary: p.diary,
-      seq: p.seq,
-      at: p.at,
-      text: p.hidden ? '' : p.text,
-      replyTo: p.replyTo,
-      fwd: p.fwd,
-      media: p.hidden || !Array.isArray(p.media) ? null : copyGroupMedia(p.media, typeof p.media[0].key === 'string'),
-      card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
-      hidden: p.hidden,
-      ...authorOf(g, p.diary, base.association, base.mod)
-    }))
-    const oldest = items.length > 0 ? items[items.length - 1] : null
-    return {
-      items,
-      next: start > 0 && oldest !== null ? { at: oldest.at, writer: oldest.writer, seq: oldest.seq } : null,
-      hidden: items.filter((p) => p.hidden).length,
-      incomplete: g.built.incomplete,
-      sealed: g.built.sealed,
-      epoch: g.built.epoch === null ? null : { writer: g.built.epoch.writer, seq: g.built.epoch.seq },
-      state: keyState(ctx, g)
-    }
-  }, (p) => {
+  return withGroup(ctx, group, false, async ({ base, g }) => ({ ...readFold(base, g, { limit, before }), state: keyState(ctx, g) }), (p) => {
     requirePendingOwn(p)
     return { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' }
+  })
+}
+
+// group.read's page of fold g, without its state.
+function readFold (base, g, { limit, before }) {
+  const all = g.built.posts.filter((p) => g.diaries.get(p.diary))
+  // Older than the cursor: with the cursor post still in the fold, every
+  // post before it in the causal order; without it (gone after a sync), each
+  // post whose order key (at, writer, seq) is below the cursor's, checked one
+  // by one in causal order. Causal and key order can differ, so a count of
+  // such posts would not be a position in the causal array.
+  let posts = all
+  if (before !== null && before !== undefined) {
+    const i = all.findIndex((p) => p.writer === before.writer && p.seq === before.seq)
+    if (i >= 0) {
+      posts = all.slice(0, i)
+    } else {
+      const k = orderKey(before.at, before.writer, before.seq)
+      posts = all.filter((p) => compareOrder(orderKey(p.at, p.writer, p.seq), k) < 0)
+    }
+  }
+  const start = Math.max(0, posts.length - (limit || GROUP_LIMIT_DEFAULT))
+  const page = posts.slice(start).reverse()
+  const items = page.map((p) => ({
+    writer: p.writer,
+    diary: p.diary,
+    seq: p.seq,
+    at: p.at,
+    text: p.hidden ? '' : p.text,
+    replyTo: p.replyTo,
+    fwd: p.fwd,
+    media: p.hidden || !Array.isArray(p.media) ? null : copyGroupMedia(p.media, typeof p.media[0].key === 'string'),
+    card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
+    hidden: p.hidden,
+    ...authorOf(g, p.diary, base.association, base.mod)
+  }))
+  const oldest = items.length > 0 ? items[items.length - 1] : null
+  return {
+    items,
+    next: start > 0 && oldest !== null ? { at: oldest.at, writer: oldest.writer, seq: oldest.seq } : null,
+    hidden: items.filter((p) => p.hidden).length,
+    incomplete: g.built.incomplete,
+    sealed: g.built.sealed,
+    epoch: g.built.epoch === null ? null : { writer: g.built.epoch.writer, seq: g.built.epoch.seq }
+  }
+}
+
+// ---- a page's private groups (docs/rpc.md 5.114) ----
+
+// Folds `group` as page `page`: the page diary stands where the own diary
+// does, this device has no writer of its own there, and ctx.groupKeys is the
+// page's holder (./page-groups.js), so the fold's writers are the page's
+// cores whose header box is the page's group box and every epoch key opened
+// stays in that holder. fn({ base, g, pageHex }); null when the root is not
+// held here.
+async function withPageGroup (ctx, group, page, fn) {
+  const key = groupKeyOf(group)
+  const pageHex = groupKeyOf(page)
+  const association = await trustRoot(ctx)
+  const mod = await moderation(ctx.storage, association)
+  const entries = admittedEntries(await replicaRead(ctx, pageHex, mod), pageHex, association, mod)
+  let local = null
+  if (await store.diaryExists(ctx.storage)) {
+    local = await withIdentity(ctx, async ({ diary, ownHex }) => ({ hex: ownHex, entries: await store.readAll(diary) }))
+    if (local.hex === pageHex) local = null
+  }
+  const base = { ownHex: pageHex, ownEntries: entries === null ? [] : entries, association, mod, local }
+  const g = await loadGroup(ctx, base, key, true)
+  if (g === null) return null
+  return fn({ base, g, pageHex })
+}
+
+// The page's writer a sealed post goes in: counted live by the fold, of the
+// page's diary and under the held group box (g.mine).
+function pageLiveWriter (g, pageHex) {
+  if (statusOf(g, pageHex) !== 'member' || !(g.built.liveWriters instanceof Set)) return null
+  for (const key of [...g.mine].sort()) {
+    if (g.built.liveWriters.has(key) && g.built.writers.has(key)) return key
+  }
+  return null
+}
+
+// 'rekey-pending' also when no epoch held covers the page's live writer.
+function pageKeyState (ctx, g, pageHex) {
+  if (!g.private) return 'ok'
+  if (boxHexOf(ctx) === null) return 'locked'
+  if (g.built.rekeyPending) return 'rekey-pending'
+  return pageLiveWriter(g, pageHex) !== null && rekeyBlocksWrite(ctx, g) ? 'rekey-pending' : 'ok'
+}
+
+// group.read with `page` -> group.read's shape plus `role`, the page's,
+// and `visibility`; null when the root is not held here (the caller lists
+// it for the next sync).
+async function pageGroupRead (ctx, { group, page, limit = GROUP_LIMIT_DEFAULT, before = null }) {
+  return withPageGroup(ctx, group, page, ({ base, g, pageHex }) => ({
+    ...readFold(base, g, { limit, before }),
+    state: pageKeyState(ctx, g, pageHex),
+    role: roleOf(g, pageHex),
+    // From the root header this fold verified, never from the service.
+    visibility: g.private ? 'private' : 'public'
+  }))
+}
+
+// The roots `pages` (held here) are in, from each page diary's live
+// group-join records as stored here: what a sync run keeps paged for them
+// (sync.js pageRoots). A page not stored here adds nothing.
+async function pageGroupRoots (ctx, pages) {
+  const association = await trustRoot(ctx)
+  const mod = await moderation(ctx.storage, association)
+  const out = new Set()
+  for (const page of pages) {
+    const pageHex = groupKeyOf(page)
+    const entries = admittedEntries(await replicaRead(ctx, pageHex, mod), pageHex, association, mod)
+    if (entries === null) continue
+    for (const key of grp.diaryGroupKeys(entries)) if (!mod.blocked.has(key)) out.add(key)
+  }
+  return [...out]
+}
+
+// group.read with `page` while this device holds no secrets for the page:
+// the visibility of the root header, checked as loadGroup checks it (the
+// plaintext header needs no key), and nothing else. null when the root is
+// not held here.
+async function pageGroupNoKey (ctx, { group }) {
+  const key = groupKeyOf(group)
+  const association = await trustRoot(ctx)
+  const mod = await moderation(ctx.storage, association)
+  if (mod.blocked.has(key)) return null
+  const root = await readGroupCore(ctx, key)
+  if (root === null || root.length === 0 || root.fork !== 0) return null
+  const header = root.entries[0].record
+  if (!foldableHeader(header)) return null
+  return {
+    items: [],
+    next: null,
+    hidden: 0,
+    incomplete: false,
+    sealed: 0,
+    epoch: null,
+    state: 'no-key',
+    role: null,
+    visibility: header.visibility === 'private' ? 'private' : 'public'
+  }
+}
+
+// group.seal: a group-post sealed under the epoch the fold holds eligible
+// for the page's live writer -> { kid, nonce, box, at, writer, seq } (seq:
+// that writer core's length here), for the owner or an admin to send as
+// 'group-seal'. Writes nothing. null when the root is not held here.
+async function pageGroupSeal (ctx, { group, page, text, replyTo = null, fwd = 0 }) {
+  return withPageGroup(ctx, group, page, ({ g, pageHex }) => {
+    if (!g.private) throw new UsageError(GROUP_PUBLIC_NO_KEY)
+    const writer = pageLiveWriter(g, pageHex)
+    if (writer === null) {
+      if (g.built.rekeyPending) throw new UsageError(GROUP_REKEY_PENDING)
+      throw new UsageError(GROUP_FORBIDDEN)
+    }
+    const record = buildRecord(() => grp.groupPost({ text, replyTo, fwd, seen: g.built.last, sealed: true }))
+    const sealed = sealForGroup(ctx, g, writer, record)
+    return {
+      kid: { writer: sealed.kid.writer, seq: sealed.kid.seq },
+      nonce: sealed.nonce,
+      box: sealed.box,
+      at: sealed.at,
+      writer,
+      seq: g.cores.get(writer).length
+    }
   })
 }
 
@@ -2933,7 +3640,7 @@ function communityKeyOf (community) {
 // null when the root is not held, forked, blocked or no community root.
 // `input` is buildCommunity's (and buildGroup's `community`).
 async function loadCommunity (ctx, base, key) {
-  const { ownHex, ownEntries, association, mod } = base
+  const { ownHex, mod } = base
   if (mod.blocked.has(key)) return null
   const root = await readGroupCore(ctx, key)
   if (root === null || root.length === 0 || root.fork !== 0) return null
@@ -2956,7 +3663,7 @@ async function loadCommunity (ctx, base, key) {
   const joins = new Map()
   const confirms = new Map()
   for (const d of new Set([ownHex, header.diary, ...writers.map((w) => w.diary)])) {
-    const entries = d === ownHex ? (mod.blocked.has(ownHex) ? null : ownEntries) : admittedEntries(await replicaRead(ctx, d, mod), d, association, mod)
+    const entries = await foldEntriesOf(ctx, base, d)
     diaries.set(d, entries)
     if (entries !== null) {
       joins.set(d, groupJoinHistory(entries, key))
@@ -4257,6 +4964,8 @@ module.exports = {
   trustRoot,
   withIdentity,
   moderation,
+  memberBlocks,
+  readerModeration,
   idCreate,
   idShow,
   identityState,
@@ -4266,10 +4975,29 @@ module.exports = {
   postReply,
   postQuote,
   postDelete,
+  listingCreate,
+  listingEdit,
+  listingStatus,
+  listingDelete,
+  listingRate,
+  listingMine,
+  listingLive,
+  offerReceived,
+  signConsent,
+  ratingsOf,
   profileDelete,
   likeSet,
   repostSet,
   engagementRead,
+  testimonialWrite,
+  testimonialShownKeys,
+  testimonialPendingRows,
+  testimonialShow,
+  testimonialDelete,
+  momentCreate,
+  momentDelete,
+  momentsRead,
+  momentMedia,
   usernameAdd,
   ownEntries,
   ownNoticeContext,
@@ -4309,6 +5037,10 @@ module.exports = {
   groupRekey,
   canSealTo,
   groupRead,
+  pageGroupRead,
+  pageGroupNoKey,
+  pageGroupRoots,
+  pageGroupSeal,
   groupList,
   groupInfo,
   groupMembers,

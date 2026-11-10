@@ -44,6 +44,17 @@
 // acknowledged, and whatever it dropped is written back within one heal
 // interval by the current holder, which keeps everything it acknowledged in
 // memory. What remains is a crash of the holder inside that interval.
+//
+// Options for a second file with other rules (the Feira's 1 h codes): `file`
+// names the sidecar, `ttlMs` the code lifetime, `maxRows` the issue ceiling.
+// capOn 'use' moves the weekly cap from issue to check: issue only enforces
+// maxRows, and check refuses once the inviter's rows of the current Brasília
+// week that are used, or held by a directory link (isUsed), reach perWeek.
+// Rows are counted by createdAt, so a code issued late on a Sunday and used
+// on Monday counts for the week it was issued in; the drift is at most ttlMs.
+// pruneUnused drops, on every write, the unused rows older than ttlMs that
+// no directory link holds, even inside the current week; used rows stay
+// because the cap counts them.
 
 const fs = require('node:fs')
 const path = require('node:path')
@@ -212,14 +223,33 @@ function merge (mem, disk, used) {
   return { v: VERSION, invites: invites.sort(byDate) }
 }
 
-function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = () => true, perWeek = null, isUsed = () => false, opened = null } = {}) {
+const SAFE_FILE_RE = /^[a-z0-9][a-z0-9.-]{0,63}\.json$/
+
+function openInvitesStore (dataDir, {
+  now = Date.now,
+  readOnly = false,
+  guard = () => true,
+  perWeek = null,
+  isUsed = () => false,
+  opened = null,
+  file: fileName = FILE,
+  ttlMs = INVITE_TTL_MS,
+  capOn = 'issue',
+  maxRows = MAX_ROWS,
+  pruneUnused = false
+} = {}) {
   if (perWeek !== null && !(Number.isSafeInteger(perWeek) && perWeek >= 1 && perWeek <= PER_WEEK_MAX)) {
     throw new TypeError('perWeek must be null or an integer from 1 to ' + PER_WEEK_MAX)
   }
   if (typeof isUsed !== 'function') throw new TypeError('isUsed must be a function')
   if (opened !== null && typeof opened !== 'function') throw new TypeError('opened must be null or a function')
+  if (typeof fileName !== 'string' || !SAFE_FILE_RE.test(fileName)) throw new TypeError('file must be a plain .json file name')
+  if (!(Number.isSafeInteger(ttlMs) && ttlMs >= 1)) throw new TypeError('ttlMs must be a positive integer')
+  if (capOn !== 'issue' && capOn !== 'use') throw new TypeError("capOn must be 'issue' or 'use'")
+  if (!(Number.isSafeInteger(maxRows) && maxRows >= 1)) throw new TypeError('maxRows must be a positive integer')
+  if (typeof pruneUnused !== 'boolean') throw new TypeError('pruneUnused must be a boolean')
   refuseSymlinkDir(dataDir)
-  const file = path.join(dataDir, FILE)
+  const file = path.join(dataDir, fileName)
   let state = emptyState()
   let byId = new Map()
   let failed = false
@@ -284,6 +314,11 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
     } catch {
       failed = true
       throw fail('indisponivel')
+    }
+    if (pruneUnused) {
+      // merge() already marked used every row a directory link holds.
+      const nowMs = now()
+      next = { ...next, invites: next.invites.filter((r) => r.used || Date.parse(r.createdAt) + ttlMs > nowMs) }
     }
     const stale = dirty || canonical(next) !== canonical(disk || emptyState())
     return { next, stale }
@@ -367,6 +402,24 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
     return n
   }
 
+  // capOn 'use': the inviter's rows of the current week that are used or
+  // held by a directory link.
+  function useCount (invites, member, nowMs) {
+    const from = weekStart(nowMs)
+    const to = from + WEEK_MS
+    let n = 0
+    for (const r of invites) {
+      if (r.inviter !== member) continue
+      const at = Date.parse(r.createdAt)
+      if (at >= from && at < to && (r.used || used(r.id))) n++
+    }
+    return n
+  }
+
+  function counted (invites, member, nowMs) {
+    return capOn === 'use' ? useCount(invites, member, nowMs) : weekCount(invites, member, nowMs)
+  }
+
   // A failing or malformed callback refuses instead of granting the full
   // week: invites that should still be waiting must never leak early.
   function allowance (member, nowMs) {
@@ -394,9 +447,10 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
       const from = weekStart(nowMs)
       const kept = next.invites.filter((r) => {
         const at = Date.parse(r.createdAt)
-        return !(at < from && at + INVITE_TTL_MS <= nowMs)
+        return !(at < from && at + ttlMs <= nowMs)
       })
-      const count = weekCount(kept, member, nowMs)
+      const count = counted(kept, member, nowMs)
+      if (capOn === 'use') return mint(kept, member, nowMs, count, perWeek, stale, next)
       if (count >= perWeek) {
         settle(next, stale)
         throw fail('limite-convites')
@@ -412,30 +466,34 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
         settle(next, stale)
         throw fail('convite-aguardando')
       }
-      if (kept.length >= MAX_ROWS) {
-        settle(next, stale)
-        throw fail('limite')
-      }
-      const slots = new Set(kept.map((r) => r.slot))
-      let code, id, slot
-      do {
-        code = newCode()
-        id = inviteId(code)
-      } while (byId.has(id) || kept.some((r) => r.id === id))
-      do {
-        slot = nodeCrypto.randomBytes(16).toString('hex')
-      } while (slots.has(slot))
-      const row = { slot, id, inviter: member, createdAt: iso(nowMs), used: false }
-      persist({ v: VERSION, invites: [...kept, row].sort(byDate) })
-      const usedNow = count + 1
-      return {
-        code,
-        expiresAt: iso(nowMs + INVITE_TTL_MS),
-        used: usedNow,
-        remaining: Math.max(0, limit - usedNow),
-        resetsAt: iso(weekEnd(nowMs))
-      }
+      return mint(kept, member, nowMs, count + 1, limit, stale, next)
     })
+  }
+
+  // `usedNow` is what the answer reports as used after this issue.
+  function mint (kept, member, nowMs, usedNow, limit, stale, next) {
+    if (kept.length >= maxRows) {
+      settle(next, stale)
+      throw fail('limite')
+    }
+    const slots = new Set(kept.map((r) => r.slot))
+    let code, id, slot
+    do {
+      code = newCode()
+      id = inviteId(code)
+    } while (byId.has(id) || kept.some((r) => r.id === id))
+    do {
+      slot = nodeCrypto.randomBytes(16).toString('hex')
+    } while (slots.has(slot))
+    const row = { slot, id, inviter: member, createdAt: iso(nowMs), used: false }
+    persist({ v: VERSION, invites: [...kept, row].sort(byDate) })
+    return {
+      code,
+      expiresAt: iso(nowMs + ttlMs),
+      used: usedNow,
+      remaining: Math.max(0, limit - usedNow),
+      resetsAt: iso(weekEnd(nowMs))
+    }
   }
 
   // One token for unknown, used and expired: the public answer never tells
@@ -445,9 +503,22 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
     usable()
     const r = byId.get(id)
     if (!r || r.used) return 'convite-invalido'
-    if (!(now() < Date.parse(r.createdAt) + INVITE_TTL_MS)) return 'convite-invalido'
+    const nowMs = now()
+    if (!(nowMs < Date.parse(r.createdAt) + ttlMs)) return 'convite-invalido'
     if (used(id)) return 'convite-invalido'
+    // A code from an earlier week would be counted in that week only, so it
+    // could pass after Monday 00:00 outside both counts: it is refused.
+    if (capOn === 'use' && Date.parse(r.createdAt) < weekStart(nowMs)) return 'convite-invalido'
+    if (capOn === 'use' && (perWeek === null || useCount(state.invites, r.inviter, nowMs) >= perWeek)) return 'convite-invalido'
     return null
+  }
+
+  // Read-only: the inviter's key of a row that check(id) would accept, else
+  // null. For the link preview, which names the inviter of a live invite,
+  // and for the Feira entry, which charges paid age sessions to that owner.
+  function inviterOf (id) {
+    if (check(id) !== null) return null
+    return byId.get(id).inviter
   }
 
   // Idempotent: the link commit in the directory is the single-use authority
@@ -500,7 +571,7 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
     if (perWeek === null) return null
     const nowMs = now()
     const limit = allowance(member, nowMs)
-    const usedNow = weekCount(state.invites, member, nowMs)
+    const usedNow = counted(state.invites, member, nowMs)
     return { perWeek, opened: limit, used: usedNow, remaining: Math.max(0, limit - usedNow), resetsAt: iso(weekEnd(nowMs)) }
   }
 
@@ -518,6 +589,7 @@ function openInvitesStore (dataDir, { now = Date.now, readOnly = false, guard = 
     forget,
     holds,
     check,
+    inviterOf,
     consume,
     heal,
     summary,

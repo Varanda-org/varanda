@@ -135,3 +135,112 @@ test('groupRows takes the clock, so a day change relabels hoje as ontem', async 
   t.is(sameDay[0].dayMark, 'hoje')
   t.is(nextDay[0].dayMark, 'ontem')
 })
+
+test('person menus offer Conversar em particular, hosted and not for the own key', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const read = (f) => fs.readFileSync(path.join(__dirname, '../src/screens', f), 'utf8')
+  const info = read('ComunidadeInfo.js')
+  const grupo = read('Grupo.js')
+  for (const src of [info, grupo]) {
+    t.ok(src.includes('onMessage') && src.includes("label: 'Conversar em particular'"), 'accepts onMessage and has the row')
+    t.ok(src.includes("typeof onMessage === 'function' &&"), 'gated on the prop')
+    t.ok(/hosted && .*(!== ownKey)/.test(src), 'gated on hosted and the own key')
+  }
+  t.ok(grupo.includes('onMessage(row.diary)') && !grupo.includes('onMessage(row.writer)'), 'passes the verified diary, never the writer')
+  t.ok(info.includes('onMessage(m.member)') && info.includes('onLongPress'), 'member rows open the menu on long press')
+})
+
+test('the community long-press sheet stays mounted while it closes', (t) => {
+  // ActionsSheet runs the chosen action after its close animation and drops it
+  // on unmount: closing must flip `open`, never unmount the sheet.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'ComunidadeInfo.js'), 'utf8')
+  t.ok(src.includes('<ActionsSheet open={menuOpen} onClose={() => setMenuOpen(false)}'), 'closing flips open')
+  t.absent(src.includes('setMenuMember(null)'), 'the member is not cleared on close')
+})
+
+test('a page in a private group: node read and seal, plain refusals', async (t) => {
+  const { knownVisibility, pageGroupErrorText, sealRaced, PAGE_NO_KEY_TEXT, PAGE_GROUP_LOADING_TEXT, PAGE_REKEYING_TEXT } = await import('../src/groups.js')
+  t.is(knownVisibility({ page: true, info: null, epoch: null, pagePrivate: true }), 'private', 'the service read says private')
+  t.is(knownVisibility({ page: true, info: null, epoch: null }), 'public')
+  t.is(pageGroupErrorText(new Error('sem chave da página')), PAGE_NO_KEY_TEXT)
+  t.is(PAGE_NO_KEY_TEXT, 'Peça ao dono da página para enviar a chave')
+  t.is(pageGroupErrorText(new Error('grupo não encontrado')), PAGE_GROUP_LOADING_TEXT)
+  t.is(pageGroupErrorText(new Error('aguardando nova chave')), PAGE_REKEYING_TEXT)
+  t.is(PAGE_REKEYING_TEXT, 'A chave deste grupo está sendo trocada')
+  t.is(pageGroupErrorText(Object.assign(new Error('x'), { code: 'aguardando-chave' })), PAGE_REKEYING_TEXT)
+  t.is(pageGroupErrorText(Object.assign(new Error('Limite atingido'), { code: 'limite' })), 'Limite atingido')
+  t.ok(sealRaced({ code: 'sequencia' }))
+  t.absent(sealRaced({ code: 'sequencia', uncertain: true }), 'an unknown outcome is never sealed again')
+  t.absent(sealRaced({ code: 'limite' }))
+
+  const fs = require('fs')
+  const path = require('path')
+  const grupo = fs.readFileSync(path.join(__dirname, '../src/screens/Grupo.js'), 'utf8')
+  t.ok(grupo.includes("nodeRead: () => request('group.read', { ...op, page: asPage.key })"), 'the node reads as the page')
+  t.ok(grupo.includes("seal: (t) => request('group.seal', { group, page: asPage.key, text: t })"), 'sealed on the device')
+  t.ok(grupo.includes('pageSend(pagePost(vis, text), text, Date.now())'), 'posts go through postAsPage')
+  t.absent(grupo.includes('read.private'), 'the service never decides the visibility')
+  t.ok(grupo.includes("plain: pageStatement('group-post', { group, text })"), 'the plaintext post only through postAsPage')
+  t.is(grupo.split("pageStatement('group-post'").length, 2, 'and nowhere else')
+  t.ok(grupo.includes("seen === 'private' ? PAGE_NO_KEY_TEXT"), 'a private group with no page secrets asks for the key')
+  t.ok(grupo.includes("pageCan('post', pageRole) && meta.state === 'ok' && pageVis !== null"), 'no composer until the node answers')
+  t.ok(grupo.includes('onPress={() => sendPost(sealAgain)}'), 'sealed again only on a tap')
+  const ajustes = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
+  t.ok(ajustes.includes("action: 'group-rebox'") && ajustes.includes('Renovar chave dos grupos'), 'owner button')
+  t.ok(ajustes.includes('A página saiu deste grupo para trocar a chave; peça para entrar de novo'), 'left groups are listed')
+  t.absent(ajustes.includes('skipped'), 'the service answers only groups and left')
+  t.ok(ajustes.includes('Renove a chave dos grupos privados da página') && ajustes.includes('reboxNeeded') && ajustes.includes('reboxPending'), 'owner card when a rebox is owed')
+})
+
+test('a lying service read never gets a private page post sent in the clear', async (t) => {
+  const { readAsPage, postAsPage, pagePostVisibility } = await import('../src/groups.js')
+  const G = 'aa'.repeat(32)
+  const envelope = { kid: { writer: B, seq: 2 }, nonce: 'n', box: 'b', at: '2026-11-09T12:00:00.000Z', writer: B, seq: 5 }
+  for (const service of [{ private: false, items: [] }, { items: [] }]) {
+    const sent = []
+    let seals = 0
+    const { visibility, read } = await readAsPage({
+      nodeRead: async () => ({ visibility: 'private', items: [message(A, 1)], role: 'member' }),
+      serviceRead: async () => service
+    })
+    t.is(visibility, 'private')
+    t.is(read.items.length, 1, 'the node read is shown')
+    await postAsPage({ visibility, group: G, text: 'oi', seal: async () => { seals++; return envelope }, send: async (action, op) => sent.push({ action, op }), plain: async () => sent.push({ action: 'group-post' }) })
+    t.is(seals, 1, 'one group.seal')
+    t.is(sent.filter((c) => c.action === 'group-post').length, 0, 'zero group-post')
+    t.alike(sent, [{ action: 'group-seal', op: { group: G, ...envelope } }])
+  }
+
+  // The node has not answered (or names no visibility): nothing is sent.
+  for (const nodeRead of [async () => { throw new Error('grupo não encontrado') }, async () => ({ items: [] })]) {
+    const { visibility, read } = await readAsPage({ nodeRead, serviceRead: async () => ({ private: false, items: [], role: 'member' }) })
+    t.is(visibility, null)
+    t.is(read.role, 'member', 'the service read still gives the role')
+    const sent = []
+    t.is(postAsPage({ visibility, group: G, text: 'oi', seal: async () => { throw new Error('no seal') }, send: async (a) => sent.push(a), plain: async () => sent.push('group-post') }), null)
+    t.is(sent.length, 0)
+  }
+
+  // No page secrets here: a public group still posts in the clear through
+  // the service; a private one keeps the composer closed.
+  const noKey = (visibility) => async () => ({ items: [], next: null, hidden: 0, incomplete: false, sealed: 0, epoch: null, state: 'no-key', role: null, visibility })
+  const pub = await readAsPage({ nodeRead: noKey('public'), serviceRead: async () => ({ items: [message(A, 1)], role: 'member' }) })
+  t.is(pagePostVisibility(pub), 'public')
+  t.is(pub.read.items.length, 1, 'the service read is shown')
+  const plainSent = []
+  await postAsPage({ visibility: pagePostVisibility(pub), group: G, text: 'oi', seal: async () => { throw new Error('no seal') }, send: async (a) => plainSent.push(a), plain: async () => plainSent.push('group-post') })
+  t.alike(plainSent, ['group-post'], 'a public group with no page secrets posts through group-post')
+  const priv = await readAsPage({ nodeRead: noKey('private'), serviceRead: async () => ({ items: [], role: 'member' }) })
+  t.is(priv.visibility, 'private')
+  t.is(priv.noKey, true)
+  t.is(pagePostVisibility(priv), null, 'a private group with no page secrets stays closed')
+  t.is(pagePostVisibility({ visibility: null, noKey: false }), null)
+
+  // Plaintext only where the node read a public header.
+  const sent = []
+  const { visibility } = await readAsPage({ nodeRead: async () => ({ visibility: 'public', items: [] }), serviceRead: async () => ({ private: true, items: [] }) })
+  t.is(visibility, 'public')
+  await postAsPage({ visibility, group: G, text: 'oi', seal: async () => { throw new Error('no seal') }, send: async (action, op) => sent.push({ action, op }), plain: async () => sent.push({ action: 'group-post' }) })
+  t.alike(sent, [{ action: 'group-post' }])
+})

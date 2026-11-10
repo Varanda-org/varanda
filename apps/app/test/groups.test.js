@@ -162,8 +162,8 @@ test('labels in pt-BR', async (t) => {
   t.is(visibilityLabel('public'), 'grupo público')
   t.is(joinLabel('approval'), 'entrada com aprovação')
   t.is(joinLabel('x'), '')
-  t.is(membersLabel(1), '1 membro')
-  t.is(membersLabel(0), '0 membros')
+  t.is(membersLabel(1), '1\u00a0membro')
+  t.is(membersLabel(0), '0\u00a0membros')
   t.is(membersLabel(null), '')
 })
 
@@ -547,4 +547,14 @@ test('reconcile post: a reply is confirmed only by a message answering the same 
   t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt, replyKey: W + ':1' }, view), 'landed')
   t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt, replyKey: null }, view), 'not-landed', 'a plain post is not confirmed by a reply')
   t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt }, view), 'landed', 'without replyKey the old rule stays')
+})
+
+test('knownVisibility: from the info, or for a page from its epoch', async (t) => {
+  const { knownVisibility } = await load()
+  t.is(knownVisibility({ page: false, info: { visibility: 'public' }, epoch: null }), 'public')
+  t.is(knownVisibility({ page: false, info: { visibility: 'private' }, epoch: null }), 'private')
+  t.is(knownVisibility({ page: false, info: null, epoch: null }), null, 'no info yet: not known')
+  t.is(knownVisibility({ page: false, info: {}, epoch: { writer: A, seq: 1 } }), null, 'a member\'s visibility never comes from the epoch')
+  t.is(knownVisibility({ page: true, info: null, epoch: null }), 'public', 'a page with no epoch')
+  t.is(knownVisibility({ page: true, info: null, epoch: { writer: A, seq: 1 } }), 'private', 'a page with an epoch')
 })

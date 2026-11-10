@@ -8,6 +8,12 @@ export const FILTER_LABELS = Object.freeze({
   grupos: 'Grupos'
 })
 
+// The tab stays mounted while hidden; its reads wait for the first show so
+// they never queue on the node's serial chain in front of A Rua at boot.
+export function conversasReadsAllowed ({ active, shownOnce } = {}) {
+  return active === true || shownOnce === true
+}
+
 function textOf (value) {
   return typeof value === 'string' ? value : ''
 }

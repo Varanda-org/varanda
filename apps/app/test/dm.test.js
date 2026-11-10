@@ -385,3 +385,340 @@ test('Mensagem offers Encaminhar and marks forwarded messages without the origin
   const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
   t.ok(bubble.includes("<Icon name='encaminhar'") && bubble.includes('FORWARDED_LABEL'), 'Encaminhada with the encaminhar icon')
 })
+
+test('Bubble keeps a quote clear of the hover chevron only when there are actions', (t) => {
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes('quoteWithChevron'), 'the quote style for the chevron exists')
+  t.ok(/style=\{\[styles\.quote, rows\.length > 0 && styles\.quoteWithChevron\]\}/.test(bubble), 'the quote View takes it only under rows.length > 0')
+  t.ok(bubble.includes("accessibilityLabel='ações da mensagem'"), 'the chevron keeps its label')
+})
+
+test('Mensagem shows a removable post context chip and sends it only as composed text', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("<IconAction icon='fechar' label='remover contexto' onPress={() => setContext(null)} />"), 'the chip is removable')
+  t.ok(src.includes('const [context, setContext] = useState(null)') && src.includes('const [draft, setDraft] = useState(() => initialMessage(initial).draft)'), 'the chip is apart from the draft')
+  t.ok(src.includes('usedIntents.current.has(intent.id)') && src.includes('onIntentUsed(intent.id)'), 'an intent is used once')
+  t.ok(src.includes('const outgoing = context !== null ? composeText(context, draft) : draft'), 'composeText on Enviar')
+  t.ok(src.includes("if (context !== null && draft.trim() === '') return undefined"), 'never without the typed text')
+  // contextExcerpt runs displayText after flattening the text and dropping links.
+  t.ok(src.includes('{contextExcerpt(context.text)}'), 'the preview is the safe excerpt that is sent')
+  t.absent(/replyTo:\s*(intent|context)/.test(src), 'replyTo never comes from the intent')
+  t.absent(src.includes('intent.context.seq') || src.includes('context.seq'), 'the post reference never reaches dm.send')
+})
+
+test('Mensagem takes an intent only on top of the stack', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("if (!isTop || !intent || typeof intent.id !== 'string' || usedIntents.current.has(intent.id)) return"), 'a buried conversation neither shows nor uses an intent')
+  t.ok(src.includes('}, [isTop, intent, peer, onIntentUsed])'), 'the intent is read again when the screen comes on top')
+  const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
+  t.ok(app.includes('<Mensagem peer={entry.key} intent={i === stack.length - 1 ? intentsRef.current.get(entry.key) : undefined}'), 'App hands the intent to the top Mensagem only')
+  t.absent(app.includes('intent={intentsRef.current.get(entry.key)}'), 'never to every mounted Mensagem')
+})
+
+test('Mensagem names the post by an absolute date and retries the held text', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('{contextLabel(context, now)}'), 'the chip title is the absolute date')
+  t.absent(src.includes('relativeTime(context.at'), 'never a relative time on the chip')
+  t.ok(src.includes('const attempt = sendAttempt(hold, draft, context, outgoing)') && src.includes('sendPlan(hold, attempt, quoteId)'), 'an unchanged draft retries the held text')
+})
+
+test('Mensagem gives the composer the budget left after the chip prefix', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("const budget = MAX_TEXT - (context !== null ? countChars(composeText(context, '.')) - 1 : 0)"), 'the budget subtracts the prefix')
+  t.ok(src.includes('const left = budget - countChars(draft)'), 'Enviar uses the same budget')
+  t.ok(src.includes('max={budget}'), 'the counter uses the same budget')
+  const composer = readFileSync(join(__dirname, '../src/ui/ChatComposer.js'), 'utf8')
+  t.ok(composer.includes('max = MAX_TEXT,') && composer.includes('const left = max - countChars(text)'), 'the composer counts from max, MAX_TEXT by default')
+})
+
+test('the context chip keeps its date with large text and blocks voice notes', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  // The date tells two photos apart: the title may wrap, never be cut to one line.
+  if (!src.includes('<Text style={styles.chipTitle} numberOfLines={2}>')) throw new Error('chip title must wrap to two lines')
+  // A voice note would go without the context and leave the chip behind.
+  if (!src.includes('attachments.items.length === 0 && context === null ? sendVoice : null')) throw new Error('no voice note while a context chip waits')
+})
+
+test('the chip shows the excerpt the message will carry, never the raw post text', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  if (src.includes('displayText(context.text)')) throw new Error('raw post text in the chip (newlines become U+FFFD, links differ from the sent text)')
+  if (!src.includes('{contextExcerpt(context.text)}</Text>')) throw new Error('the chip must show contextExcerpt')
+})
+
+test('a held send that lands later keeps a draft whose chip changed', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  if (!src.includes("if (typed !== text && contextRef.current === ctx) setDraft((d) => (d === typed ? '' : d))")) throw new Error('the typed draft is cleared only while its chip is unchanged')
+})
+
+test('a photo send that lands later keeps a draft whose chip changed', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  if (!src.includes("if (contextRef.current === ctx) setDraft((d) => (d === typed ? '' : d))")) throw new Error('the photo path clears the typed draft only while its chip is unchanged')
+})
+
+test('a page retry keeps a draft whose chip was removed', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  if (!src.includes("if (contextRef.current === (hold.ctx || null)) setDraft('')")) throw new Error('the page retry clears the draft only while its chip is unchanged')
+})
+
+// The owned screen exports these pure rules; extracting them avoids loading React Native.
+function screenHelper (file, name, deps = {}) {
+  const source = readFileSync(join(__dirname, '../src/screens/' + file + '.js'), 'utf8')
+  const match = source.match(new RegExp('(?:export )?function ' + name + ' \\([^]*?\\n\\}'))
+  if (!match) throw new Error('missing helper: ' + name)
+  // eslint-disable-next-line no-new-func
+  return new Function(...Object.keys(deps), match[0].replace(/^export /, '') + '\nreturn ' + name)(...Object.values(deps))
+}
+
+test('Mensagem listing pill recognizes text, stored cards and fragments only on this installation', async (t) => {
+  const { listingLinkOf } = await import('../src/feiraChat.js')
+  const listingLinkForRow = screenHelper('Mensagem', 'listingLinkForRow', { listingLinkOf })
+  const origin = 'https://bora.varanda.app'
+  const url = origin + '/f/' + HEX('a') + '/7'
+  const ref = { author: HEX('a'), seq: 7 }
+  t.alike(listingLinkForRow({ rawText: 'Veja: ' + url }, origin), ref)
+  t.alike(listingLinkForRow({ rawText: 'Tenho interesse', card: { url } }, origin), ref)
+  t.alike(listingLinkForRow({ rawText: url + '#oferta=5000' }, origin), ref)
+  t.alike(listingLinkForRow({ card: { url: url + '#oferta=5000&resposta=recusada' } }, origin), ref)
+  const foreign = 'https://outra.example/f/' + HEX('a') + '/7'
+  t.is(listingLinkForRow({ rawText: foreign }, origin), null)
+  t.is(listingLinkForRow({ card: { url: foreign } }, origin), null)
+  t.is(listingLinkForRow({ deleted: true, rawText: url, card: { url } }, origin), null)
+  t.is(listingLinkForRow(null, origin), null)
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("<Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)}"), 'opening is an explicit navigation tap')
+  t.ok(src.includes('row.listingLink = listingLinkForRow({ ...row, card: cardOf.get(row.key) }, origin)'), 'stored card URL reaches the same rule')
+  t.ok(src.includes('showListingReplies(rows, pageKey !== null ? pageKey : ownKey) && !hold'), 'quick replies use the listing author rule')
+  t.ok(src.includes('quickReplies().map((text) => <Pill'), 'chips use the shared replies')
+})
+
+test('Mensagem quick replies show to whoever did not author the newest listing link', (t) => {
+  const showListingReplies = screenHelper('Mensagem', 'showListingReplies')
+  const seller = HEX('a')
+  const buyer = HEX('b')
+  const card = (mine) => ({ listingLink: { author: seller, seq: 7 }, mine })
+  const plain = { listingLink: null, mine: true }
+  t.is(showListingReplies([], buyer), false)
+  t.is(showListingReplies([plain], buyer), false)
+  t.is(showListingReplies([card(true)], buyer), true, 'the buyer sent the seller card: the buyer sees the replies')
+  t.is(showListingReplies([card(false)], seller), false, 'the seller receiving that card does not')
+  t.is(showListingReplies([card(true)], seller), false, 'the seller sharing their own card does not')
+  t.is(showListingReplies([card(false)], buyer), true, 'the buyer receiving the seller card does')
+  t.is(showListingReplies([{ listingLink: { author: buyer, seq: 1 }, mine: true }, card(false), plain], buyer), true, 'the newest link decides')
+  t.is(showListingReplies([card(true)], seller.toUpperCase()), true, 'keys compare as given')
+  t.is(showListingReplies([card(true)]), false, 'no identity: no replies')
+})
+
+test('Mensagem initial snapshot stays editable, sends its DM thumbnail once and drops the card for photos', async (t) => {
+  const linkCard = await import('../src/linkCard.js')
+  const { previewTarget } = await import('../src/preview.js')
+  const { displayText, validateParams } = require('@varanda/rpc')
+  const initialMessage = screenHelper('Mensagem', 'initialMessage', { ...linkCard, previewTarget, displayText })
+  const url = 'https://bora.varanda.app/f/' + HEX('a') + '/7'
+  const initial = {
+    draft: 'Olá! ' + url,
+    card: { url, host: 'bora.varanda.app', title: 'Bicicleta', desc: 'Produto', thumb: { bytes: new Uint8Array([1, 2]), mime: 'image/jpeg', width: 2, height: 1 } }
+  }
+  const state = initialMessage(initial)
+  t.is(state.draft, initial.draft)
+  t.alike(initialMessage(null), { draft: '', card: linkCard.linkDraftIdle() })
+  const edited = 'Tenho uma pergunta: ' + url
+  const snapshot = linkCard.freezeSnapshot(state.card, edited)
+  t.ok(snapshot)
+  t.is(snapshot.thumb.bytes, initial.card.thumb.bytes, 'the shell thumbnail survives without a fetch')
+  t.is(linkCard.freezeSnapshot(state.card, 'Sem link'), null, 'editing away the URL drops the card')
+  const dismissed = linkCard.linkDraftStep(state.card, { type: 'dismiss' })
+  t.is(linkCard.freezeSnapshot(dismissed, state.draft), null)
+  const photo = linkCard.photoDropsCard(state.card, true)
+  t.is(linkCard.freezeSnapshot(photo, state.draft), null)
+  t.is(linkCard.freezeSnapshot(linkCard.photoDropsCard(photo, false), state.draft), null, 'removing the photo does not revive the card')
+  const { composePlan } = await plans()
+  const target = { kind: 'dm', to: HEX('b') }
+  let uploads = 0
+  const card = await linkCard.cardForSend(snapshot, { upload: async () => { uploads++; return dmItem(1) } })
+  const params = composePlan({ text: edited, target, card }).send().params
+  t.is(uploads, 1)
+  t.alike(Object.keys(params.card).sort(), ['desc', 'host', 'image', 'title', 'url'])
+  t.ok(validateParams('dm.send', params).ok, 'the actual RPC validator accepts the stored thumbnail')
+  const { stagedOf } = await chatSend()
+  const attachments = stagedOf([{ bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 1, height: 1 }])
+  t.exception(() => composePlan({ text: edited, target, card, attachments }), 'card and attachments remain mutually exclusive')
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('mediaApi.putDm({ bytes: t.bytes, mime: t.mime, width: t.width, height: t.height, to: peer })'), 'the upload is bound to the destination')
+  t.ok(src.includes('card = await cardForSend(snapshot,'), 'initial snapshots use the existing send path')
+  t.ok(src.includes("linkDraftStep(s, { type: 'photo' })"), 'staging a photo drops the initial snapshot')
+})
+
+test('Mensagem discards initial state across identity changes, including switching back', (t) => {
+  const messageEntry = screenHelper('Mensagem', 'messageEntry')
+  const initial = { draft: 'rascunho', card: { url: 'https://bora.varanda.app' } }
+  const first = messageEntry(null, 'member-a', initial)
+  t.is(first.initial, initial)
+  t.is(messageEntry(first, 'member-a', initial), first)
+  const page = messageEntry(first, 'page-a', initial)
+  t.is(page.initial, null)
+  const member = messageEntry(page, 'member-b', initial)
+  t.is(member.initial, null)
+  t.is(messageEntry(member, 'member-a', initial).initial, null, 'the original snapshot is never restored')
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("key={identity + ':' + props.peer}"), 'identity and peer changes remount the whole composer and its holds')
+  t.ok(src.includes('if (!live.current) return null'), 'an upload finishing after unmount cannot send')
+  t.ok(src.includes('if (!live.current) return\n'), 'a late send answer cannot restore a held message')
+})
+
+test('Conversar is offered only for an open page on a hosted node with pages enabled', (t) => {
+  const canConverse = screenHelper('Membro', 'canConverseWithPage')
+  const open = { page: true, closed: false, moved: false, hosted: true, enabled: true }
+  t.is(canConverse(open), true)
+  for (const flags of [{ page: false }, { closed: true }, { moved: true }, { hosted: false }, { hosted: 1 }, { enabled: false }]) {
+    t.is(canConverse({ ...open, ...flags }), false)
+  }
+  const src = readFileSync(join(__dirname, '../src/screens/Membro.js'), 'utf8')
+  t.absent(src.includes('PAGE_NO_DM'))
+  const anuncioSrc = readFileSync(join(__dirname, '../src/screens/Anuncio.js'), 'utf8')
+  const sheetSrc = readFileSync(join(__dirname, '../src/ui/PageNoticeSheet.js'), 'utf8')
+  t.ok(src.includes('<PageNoticeSheet') && anuncioSrc.includes('<PageNoticeSheet'), 'the profile and the listing show the shared page notice sheet')
+  t.ok(sheetSrc.includes('{PAGE_DM_NOTICE}') && sheetSrc.includes('<ConfirmStack'), 'the sheet shows the notice over a full-width confirm stack')
+  t.ok(sheetSrc.includes("request('dm.lookup', { member: page })") && sheetSrc.includes('{inactive ? <Soft>{PAGE_DM_NOT_ACTIVE}</Soft> : null}'), 'a page without device-held keys gets the extra line')
+  t.ok(anuncioSrc.includes('listing.page === true && !pageNoticeSeen(pageNoticeStore(), listing.author)'), 'Conversar on a page listing shows the same notice first')
+  t.ok(src.includes("<Pill icon='mensagem' label='Conversar' onPress={openPageConversation}"))
+  t.ok(src.includes('onPress={() => onOpenListings(author)}'))
+  t.ok(src.includes("const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'"), 'listings require a hosted node and stay hidden on a moved page')
+})
+
+test('the page conversation notice persists per device and page key on both storage adapters', async (t) => {
+  const { pageNoticeKey, pageNoticeSeen, notePageNotice } = await import('../src/pageNotice.js')
+  const seenStore = new Map()
+  const fake = { getItem: (k) => seenStore.get(k) || null, setItem: (k, v) => seenStore.set(k, v) }
+  t.absent(pageNoticeSeen(fake, HEX('a')))
+  notePageNotice(fake, HEX('a'))
+  t.ok(pageNoticeSeen(fake, HEX('a')), 'shown once per page key')
+  t.absent(pageNoticeSeen(fake, HEX('b')))
+  t.absent(pageNoticeSeen({ getItem: () => { throw new Error('x') } }, HEX('a')), 'a failing store shows the notice again')
+  const a = pageNoticeKey(HEX('a'))
+  const b = pageNoticeKey(HEX('b'))
+  t.not(a, b)
+  t.is(pageNoticeKey('../invalid'), null)
+  for (const platform of ['web', 'native']) {
+    const data = new Map()
+    const store = { getItem: (key) => data.get(key) || null, setItem: (key, value) => data.set(key, value) }
+    class File {
+      constructor (root, name) { this.name = root + '/' + name }
+      get exists () { return data.has(this.name) }
+      create () { data.set(this.name, '') }
+      textSync () { return data.get(this.name) }
+      write (text) { data.set(this.name, text) }
+    }
+    const pageNoticeStore = screenHelper('../pageNoticeStore.' + platform, 'pageNoticeStore', {
+      globalThis: { localStorage: store },
+      File,
+      Paths: { document: '/device' }
+    })
+    t.is(pageNoticeStore().getItem(a), null, platform + ': first visit needs the sheet')
+    pageNoticeStore().setItem(a, '1')
+    t.is(pageNoticeStore().getItem(a), '1', platform + ': a new adapter remembers confirmation')
+    t.is(pageNoticeStore().getItem(b), null, platform + ': another page needs its own sheet')
+    if (platform === 'native') t.is(data.get('/device/' + a + '.json'), '1', 'one file per page key')
+  }
+  const src = readFileSync(join(__dirname, '../src/screens/Membro.js'), 'utf8')
+  t.ok(src.includes("import { pageNoticeStore } from '../pageNoticeStore'"))
+  t.absent(src.includes('Platform.OS'))
+  t.absent(src.includes('expo-file-system'))
+})
+
+test('the web page notice tolerates unavailable storage and denied reads or writes', (t) => {
+  const denied = () => { throw new Error('storage denied') }
+  for (const globalThis of [
+    {},
+    { get localStorage () { return denied() } },
+    { localStorage: { getItem: denied, setItem: denied } }
+  ]) {
+    const pageNoticeStore = screenHelper('../pageNoticeStore.web', 'pageNoticeStore', { globalThis })
+    t.is(pageNoticeStore().getItem('notice'), null)
+    t.execution(() => pageNoticeStore().setItem('notice', '1'))
+  }
+})
+
+test('pageReadKind tells a page from a person from an unknown read', async (t) => {
+  const { pageReadKind } = await import('../src/pageNotice.js')
+  const key = 'a'.repeat(64)
+  const base = { page: key, gen: null, owner: null, closed: false, movedTo: null, complete: true }
+  t.is(pageReadKind({ ...base, gen: 1 }, key), 'page')
+  t.is(pageReadKind({ ...base, owner: 'b'.repeat(64) }, key), 'page')
+  t.is(pageReadKind({ ...base, closed: true }, key), 'page')
+  t.is(pageReadKind({ ...base, movedTo: 'c'.repeat(64) }, key), 'page')
+  t.is(pageReadKind({ ...base, gen: 1, complete: false }, key), 'page')
+  t.is(pageReadKind(base, key), 'person')
+  t.is(pageReadKind({ ...base, complete: false }, key), 'unknown')
+  t.is(pageReadKind(null, key), 'unknown')
+  t.is(pageReadKind(undefined, key), 'unknown')
+  t.is(pageReadKind(new Error('boom'), key), 'unknown')
+  t.is(pageReadKind({ ...base, gen: 1 }, 'd'.repeat(64)), 'unknown')
+})
+
+test('pageDmPlan opens, refuses, notices or goes direct', async (t) => {
+  const { pageDmPlan } = await import('../src/pageNotice.js')
+  const hint = { page: true, closed: false, moved: false }
+  t.is(pageDmPlan({ hint: null, read: 'person', seen: false, canConverse: true }), 'open')
+  t.is(pageDmPlan({ hint: null, read: 'unknown', seen: false, canConverse: true }), 'open')
+  t.is(pageDmPlan({ hint: { ...hint, page: false }, read: 'unknown', seen: false, canConverse: true }), 'open')
+  t.is(pageDmPlan({ hint, read: 'person', seen: false, canConverse: true }), 'open')
+  t.is(pageDmPlan({ hint: null, read: 'page', seen: false, canConverse: false }), 'refuse')
+  t.is(pageDmPlan({ hint: null, read: 'page', seen: false, canConverse: true }), 'notice')
+  t.is(pageDmPlan({ hint: null, read: 'page', seen: true, canConverse: true }), 'direct')
+  t.is(pageDmPlan({ hint: null, read: 'page', seen: true, canConverse: false }), 'refuse')
+  t.is(pageDmPlan({ hint, read: 'page', seen: false, canConverse: false }), 'refuse')
+  t.is(pageDmPlan({ hint, read: 'unknown', seen: false, canConverse: true }), 'notice')
+  t.is(pageDmPlan({ hint, read: 'unknown', seen: true, canConverse: true }), 'direct')
+  // The seeder's hint alone never refuses: a person's messages stay open.
+  t.is(pageDmPlan({ hint: { ...hint, closed: true }, read: 'unknown', seen: false, canConverse: false }), 'notice')
+  t.is(pageDmPlan({ hint: { ...hint, moved: true }, read: 'unknown', seen: true, canConverse: false }), 'direct')
+})
+
+test('pageNotice.js stays pure and the notice ends with a period', async (t) => {
+  const { PAGE_DM_NOTICE, PAGE_DM_NOT_ACTIVE } = await import('../src/pageNotice.js')
+  t.ok(PAGE_DM_NOTICE.endsWith('.'))
+  t.is(PAGE_DM_NOTICE, 'As mensagens desta conversa são cifradas entre você e quem administra a página. A associação não lê.')
+  t.is(PAGE_DM_NOT_ACTIVE, 'Esta página ainda não ativou as Conversas privadas. Sua mensagem chega quando ela ativar.')
+  t.absent(/pode ler/.test(PAGE_DM_NOTICE), 'no custody caveat')
+  const src = readFileSync(join(__dirname, '../src/pageNotice.js'), 'utf8')
+  t.absent(src.split('\n').some((l) => l.startsWith('import ')))
+})
+
+test('openMessage checks whether a post author is a page before the context chip', (t) => {
+  const src = readFileSync(join(__dirname, '../App.js'), 'utf8')
+  const start = src.indexOf('const openMessage = useCallback(')
+  const end = src.indexOf('const intentUsed', start)
+  t.ok(start !== -1 && end > start, 'openMessage slice found')
+  const slice = src.slice(start, end)
+  t.ok(slice.includes("request('page.read', { key })"), 'asks the node for the page')
+  t.ok(slice.includes('fetchMember('), 'asks the member index for the page hint')
+  t.ok(slice.includes('pageDmPlan('), 'one plan decides')
+  t.ok(slice.includes("showToast('Esta página não recebe mensagens.')"), 'a closed or moved page refuses')
+  t.ok(slice.includes("if (plan === 'direct') return pushScreen({ screen: 'mensagem', key, params: {} })"), 'a page opens with no context')
+  t.ok(slice.includes('if (pageDmPending.current === key) return'), 'a double tap waits for the first')
+  t.ok(slice.includes('if (ownKeyRef.current !== pressOwn || nodeEpochRef.current !== pressEpoch) return'), 'a late answer after a lock or identity change is dropped')
+  t.ok(src.includes('const pageDmGen = useRef(0)'), 'lookup generations persist across renders')
+  t.ok(slice.includes('const pressGen = ++pageDmGen.current'), 'a lookup captures a new generation')
+  t.ok(slice.indexOf('if (pageDmPending.current === key) return') < slice.indexOf('const pressGen = ++pageDmGen.current'), 'a double tap preserves the pending generation')
+  t.ok(/if \(!\(options && options.context && typeof key === 'string'\)\) \{\s*pageDmGen.current\+\+\s*pageDmPending.current = null\s*return open\(\)/.test(slice), 'an immediate conversation supersedes pending lookups')
+  t.ok(/if \(prof && prof.page === true\) \{\s*pageDmGen.current\+\+\s*pageDmPending.current = null\s*return decide\(/.test(slice), 'a known page supersedes pending lookups')
+  t.ok(/\.then\(\(\[hint, r\]\) => \{\s*if \(pageDmGen.current !== pressGen\) return/.test(slice), 'superseded completions return before learning or deciding')
+  t.ok(slice.includes('setTimeout(() => resolve(null), 2500)'), 'a slow lookup becomes no answer after 2500 ms')
+  t.ok(slice.includes('Promise.race([') && slice.includes('.finally(() => clearTimeout(timer))'), 'the timeout races the lookup and is cleared on completion')
+  t.ok(slice.includes('Promise.all([bounded(hintP), bounded(readP)])'), 'both parallel lookups have a timeout')
+  t.ok(src.includes("import Membro, { canConverseWithPage } from './src/screens/Membro'"))
+  const learn = slice.indexOf('names.learnMany(')
+  const guard = slice.indexOf("if (read === 'page') {")
+  t.ok(guard !== -1 && learn > guard, 'only a node-verified page is remembered as a page')
+  t.absent(slice.includes('hint !== null)'), 'the seeder hint alone never reaches the names cache')
+  t.is(slice.split('names.learnMany(').length, 2, 'one guarded learn')
+  t.ok(/useEffect\(\(\) => \{\s*intentsRef\.current\.clear\(\)\s*setPageDmAsk\(null\)\s*pageDmPending\.current = null\s*\}, \[ownKey, nodeEpoch\]\)/.test(src), 'a lock or identity switch closes the page notice and drops the pending lookup')
+})
+
+test('pageNotActivated reads the page\'s published dm-key', async (t) => {
+  const { pageNotActivated } = await import('../src/pageNotice.js')
+  t.is(pageNotActivated({ box: null, gen: null }), true, 'no key')
+  t.is(pageNotActivated({ box: 'a'.repeat(64), gen: 1 }), false, 'a gen 1 key may be a new activated page')
+  t.is(pageNotActivated({ box: 'a'.repeat(64), gen: 2 }), false)
+  t.is(pageNotActivated(null), false, 'an unknown read shows nothing extra')
+})

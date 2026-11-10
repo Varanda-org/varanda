@@ -48,7 +48,6 @@ export const QUERY_RE = /^[a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7}$/
 
 export const SEARCH_LABEL = 'pesquisar por assunto'
 export const SEARCH_PLACEHOLDER = 'uma palavra ou frase'
-export const SEARCH_BUTTON = 'pesquisar'
 export const SEARCH_CLEAR = 'limpar'
 export const SEARCH_HINT = 'Procura palavras inteiras nas publicações públicas guardadas pela associação, no histórico inteiro e também de quem você segue, da mais nova para a mais antiga, sem pesos escondidos. Maiúsculas e acentos não importam: "ceu" encontra "Céu" e "#Céu". Uma frase encontra as publicações que têm todas as palavras.'
 export const SEARCH_INVALID = 'Escreva uma palavra com pelo menos 2 letras ou números.'

@@ -109,3 +109,55 @@ test('Avisos never gives the unread dot to a row read on another device', (t) =>
   t.ok(body.includes('new Set([...u].filter((id) => !elsewhere.includes(id)))'), 'only marks from elsewhere clear the dot')
   t.ok(body.indexOf('const stored = new Set(seen.ids)') < body.indexOf('markSeenPadded('), 'stored is read before this settle marks anything')
 })
+
+test('Avisos completes a missing row photo from the names cache or a hinted peek', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  for (const piece of ["from '../names'", 'fetchMember', 'pickAvatar', 'avatarOf', 'needsAvatar', 'resolveRowAvatars', 'rowAvatarSource(item, avatars[item.key])', 'picture={picture}', 'avatar: picture || null', 'resolveMany(', 'const AVATAR_BATCH = 10', 'persist={false}']) {
+    t.ok(source.includes(piece), piece)
+  }
+  t.absent(source.includes('picture={item.avatar}'))
+  t.absent(source.includes('avatar: item.avatar'))
+  t.absent(/[^a-zA-Z]fetch\(/.test(source), 'no raw fetch call')
+  t.absent(source.includes('\u2014'))
+})
+
+test('Avisos marks avatar authors tried only after the batch completed and keeps the cache out of its lifetime', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  const hook = source.slice(source.indexOf('function useRowAvatars'), source.indexOf('const SNIPPET_BATCH'))
+  t.ok(hook.indexOf('if (!alive) return') < hook.indexOf('triedRef.current.add(k)'))
+  t.ok(hook.includes('resolveRowAvatars(list, { fetchMember, peekChunk, alive: () => alive })'))
+  t.ok(hook.includes('peekAll(request, [chunk], new Map(), () => alive)'))
+  t.ok(hook.includes('setRound('))
+  // A batch in flight is frozen: a names-cache commit cannot change its key.
+  t.ok(hook.includes('if (enabled && batchRef.current !== null) {\n    wantedKey = batchRef.current'))
+  t.ok(hook.indexOf('if (!alive) return') < hook.indexOf('batchRef.current = null\n      const next'))
+  // A new cycle restarts the batch in flight, so a reload never loses its retry.
+  t.ok(hook.includes('}, [wantedKey, request, cycle])'))
+  // A reload asks the index again for the authors already asked.
+  const reset = hook.slice(hook.indexOf('useEffect(() => {'), hook.indexOf('}, [cycle])'))
+  const drop = reset.indexOf('for (const k of triedRef.current) invalidateMember(k)')
+  t.ok(drop >= 0 && drop < reset.indexOf('triedRef.current.clear()'))
+  t.absent(/\}, \[[^\]]*(cachedOf|profileOf)[^\]]*\]\)/.test(hook))
+})
+
+test('Avisos asks the names cache only while the screen is active and hosted', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  t.ok(source.includes("if (active && hosted && shownKeys !== '') resolveMany(shownKeys.split(','))"))
+  t.ok(source.includes('}, [active, hosted, shownKeys, resolveMany])'))
+})
+
+test('Avisos retries avatars once per full reload, not per partial page', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  const callAt = source.indexOf('useRowAvatars(shownItems')
+  const call = source.slice(callAt, source.indexOf('\n', callAt))
+  t.ok(callAt > 0)
+  t.absent(call.includes('loadedAt'))
+  const from = source.indexOf('const loadFirst = useCallback')
+  const to = source.indexOf('const loadMore', from)
+  const slice = source.slice(from, to)
+  t.ok(from > 0 && to > from)
+  t.ok(slice.includes('setAvatarCycle('))
+  t.is(source.split('setAvatarCycle(').length - 1, 1, 'only loadFirst bumps the cycle')
+  const pollAt = source.indexOf('const poll = useCallback')
+  t.absent(source.slice(pollAt, source.indexOf('\n  }, [', pollAt)).includes('setAvatarCycle'))
+})

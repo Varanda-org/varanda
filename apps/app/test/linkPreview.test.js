@@ -33,6 +33,16 @@ test('LinkCard never reaches the linked site', (t) => {
   t.ok(src.includes('<MediaView author={thumb.author} descriptor={stored}'), 'post thumbnails use the post photo path')
 })
 
+test('LinkCard thumbnails leave taps to the card', (t) => {
+  const src = withoutComments(read('ui', 'LinkCard.js'))
+  const media = [...src.matchAll(/<MediaView\b[^>]*(?:descriptor=\{stored\}|uri=\{chatUri\})[^>]*\/>/g)]
+  t.is(media.length, 2, 'two stored thumbnail variants')
+  for (const element of media) {
+    t.ok(element[0].includes('tapRetry={false}'), 'retry is disabled inside the link')
+    t.absent(element[0].includes('onPress'), 'the thumbnail has no nested press')
+  }
+})
+
 test('the web composer asks the account preview route', (t) => {
   const file = path.join(SRC, 'previewBuild.web.js')
   if (!fs.existsSync(file)) {
@@ -99,7 +109,9 @@ test('a DM card thumbnail is read by the node with index card', (t) => {
   t.ok(/thumb\.kind === 'dm'\) return \{ kind: 'dm', from: thumb\.from, id: thumb\.id, index: 'card', item: image \}/.test(card), 'LinkCard builds the DM card ref')
   t.ok(card.includes('sourceFor(ref'), 'read through chatMedia sourceFor')
   const msg = withoutComments(read('screens', 'Mensagem.js'))
-  t.ok(/cardThumb=\{item\.deleted \? undefined : \{ kind: 'dm', from: item\.from \|\| \(mine \? ownKey : null\), id: item\.id, identity: ownKey \}\}/.test(msg), 'Mensagem passes the DM card thumb')
+  // A page thread (acting as a page) has no page-inbox media read, so its
+  // cards show without the thumbnail.
+  t.ok(/cardThumb=\{item\.deleted \|\| pageKey !== null \? undefined : \{ kind: 'dm', from: item\.from \|\| \(mine \? ownKey : null\), id: item\.id, identity: ownKey \}\}/.test(msg), 'Mensagem passes the DM card thumb, never in a page thread')
 })
 
 test('no em dash in the link card files', (t) => {

@@ -37,7 +37,24 @@
 // Records given to `add` must already be plain validated copies
 // (validRecordCopy) handed in ascending seq per author; the last operation
 // per (engager, target) wins for likes and reposts.
+//
+// Depoimentos (docs/protocol.md section 5 "Seeder testimonial index"): per
+// owner O, `pending` points at the newest live `testimonial` of each writer
+// addressed to O, and `shown` at O's newest `testimonial-show` per writer
+// while the writer block it names is live, indexed, addressed to O and
+// commits to the shown text (the verifyShow rule of lib/testimonials.js, on
+// the stored hash and commitment). Only keys, seqs, the writer's hash and
+// the show's commitment are kept: never the text, the nonce or the box.
+// Removal rule: once O has shown a writer block, that (writer, seq) never
+// returns to `pending`, even after O tombstones the show; only a NEW block
+// from that writer is pending again. So a tombstoned show keeps its record
+// slot (it is the memory of that rule) and the seeder hands over a
+// tombstoned show block it still holds (add(..., { removed: true })). A
+// show whose content the seeder no longer holds at a rebuild is forgotten,
+// and that writer block may be pending again: the app's per-device hide
+// still applies.
 const { formatRef, parseRef } = require('./records')
+const { commitment } = require('./testimonials')
 
 const DEFAULT_MAX_RECORDS = 1000000
 const DEFAULT_MAX_TARGETS = 500000
@@ -51,8 +68,9 @@ const ENGAGER_PAGE = 20
 const NOTICE_ROWS_PER_ENGAGER = 64
 const NOTICE_ROWS_MAX = 4096
 const NOTICE_CACHE_AUTHORS = 16
+const TESTIMONIAL_ROWS = 64
 // Same value as lib/feed.js MAX_FUTURE_MS (not imported: this module only
-// requires ./records). An engager edge dated further ahead is hidden, never
+// requires ./records and ./testimonials). An engager edge dated further ahead is hidden, never
 // removed, and appears once the clock catches up.
 const MAX_FUTURE_MS = 86400000
 const HEX64 = /^[0-9a-f]{64}$/
@@ -236,6 +254,12 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   // sort every edge aimed at its posts each time. Insertion order is the LRU
   // order. Any write that can change an author's rows drops its entry.
   const noticeCache = new Map()
+  // Owner -> Map<writer, edge { atMs, author, seq }>: the newest (highest
+  // seq) live `testimonial` of each writer addressed to that owner, kept
+  // across a drop of the owner (they belong to the writers' diaries). Folded
+  // by writer so an anonymous /index/testimonials request costs the distinct
+  // writers, never every block a writer appended.
+  const incoming = new Map()
 
   function invalidateNotices (author) {
     noticeCache.delete(author)
@@ -243,7 +267,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   function authorEntry (author) {
     let entry = authors.get(author)
     if (entry === undefined) {
-      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], engagements: new Map() }
+      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], engagements: new Map(), testimonials: null, shows: null }
       authors.set(author, entry)
     }
     return entry
@@ -342,13 +366,20 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     if (target[type].size === 0) target[type] = null
   }
 
-  function add (author, seq, record) {
+  // opts.removed: a tombstoned `testimonial-show` (the removal rule above);
+  // any other tombstoned block is skipped.
+  function add (author, seq, record, opts = null) {
     try {
       if (typeof author !== 'string' || !HEX64.test(author) || !isSeq(seq)) return false
-      if (deleted.get(author)?.has(seq)) return true
+      const tombstoned = deleted.get(author)?.has(seq) === true || opts?.removed === true
+      if (tombstoned && record?.type !== 'testimonial-show') return true
       if (record === null || typeof record !== 'object') return false
       const type = record.type
-      if (type !== 'post' && type !== 'like' && type !== 'repost' && type !== 'profile' && type !== 'username') return false
+      if (type !== 'post' && type !== 'like' && type !== 'repost' && type !== 'profile' && type !== 'username' &&
+          type !== 'testimonial' && type !== 'testimonial-show') return false
+      if (type === 'testimonial' && (!HEX64.test(record.to) || !HEX64.test(record.hash))) return false
+      if (type === 'testimonial-show' && (!HEX64.test(record.from) || !isSeq(record.seq) ||
+          typeof record.text !== 'string' || typeof record.nonce !== 'string')) return false
       let replyTo = type === 'post' && record.replyTo ? formatRef(record.replyTo) : null
       let quote = type === 'post' && record.quote ? formatRef(record.quote) : null
       const to = type === 'like' || type === 'repost' ? formatRef(record.to) : null
@@ -361,7 +392,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       const existing = authors.get(author)
       if (existing && (existing.posts.has(seq) || existing.engagements.has(seq) ||
           indexOfSeq(existing.profileSeqs, seq) !== -1 || indexOfSeq(existing.usernameSeqs, seq) !== -1 ||
-          indexOfSeq(existing.copiedSeqs, seq) !== -1)) return true
+          indexOfSeq(existing.copiedSeqs, seq) !== -1 || existing.testimonials?.has(seq) || existing.shows?.has(seq))) return true
       if (records >= cap || (existing ? existing.count : 0) >= authorCap) return false
       // Off operations need no new target; they may free one at the cap.
       const needed = new Set([replyTo, quote, record.on === true ? to : null])
@@ -414,6 +445,21 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         }
       } else if (type === 'profile') {
         entry.profileSeqs.splice(lowerBoundSeq(entry.profileSeqs, seq), 0, seq)
+      } else if (type === 'testimonial') {
+        if (entry.testimonials === null) entry.testimonials = new Map()
+        const atMs = atMillis(record.at)
+        entry.testimonials.set(seq, { to: record.to, hash: record.hash, atMs })
+        let owned = incoming.get(record.to)
+        if (owned === undefined) {
+          owned = new Map()
+          incoming.set(record.to, owned)
+        }
+        const prev = owned.get(author)
+        if (prev === undefined || seq > prev.seq) owned.set(author, { atMs, author, seq })
+      } else if (type === 'testimonial-show') {
+        if (entry.shows === null) entry.shows = new Map()
+        entry.shows.set(seq, { from: record.from, wseq: record.seq, commit: tombstoned ? null : commitment(record.from, record.nonce, record.text), removed: tombstoned })
+        if (tombstoned) markDeleted(author, seq)
       } else if (record.member === author) {
         entry.usernameSeqs.splice(lowerBoundSeq(entry.usernameSeqs, seq), 0, seq)
       } else {
@@ -504,7 +550,22 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       // engaged it). That still has to guard the ref, same as removePost.
       if (entry === undefined) return removePost(author, seq)
       if (entry.posts.has(seq)) return removePost(author, seq)
+      const show = entry.shows === null ? undefined : entry.shows.get(seq)
+      if (show !== undefined) {
+        // Keeps its record slot: it is the memory of the removal rule.
+        show.removed = true
+        show.commit = null
+        markDeleted(author, seq)
+        return true
+      }
       let found = false
+      const testimonial = entry.testimonials === null ? undefined : entry.testimonials.get(seq)
+      if (testimonial !== undefined) {
+        dropIncoming(testimonial.to, author, seq)
+        entry.testimonials.delete(seq)
+        if (entry.testimonials.size === 0) entry.testimonials = null
+        found = true
+      }
       for (const list of [entry.profileSeqs, entry.usernameSeqs, entry.copiedSeqs]) {
         const at = indexOfSeq(list, seq)
         if (at === -1) continue
@@ -540,6 +601,32 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     } catch {
       return false
     }
+  }
+
+  // Block `seq` of `author` to `owner` leaves the index (called before it
+  // leaves author's testimonials). When it was that writer's newest, the
+  // next newest live block of the same writer to the same owner takes over,
+  // read from that writer's own blocks only.
+  function dropIncoming (owner, author, seq) {
+    const owned = incoming.get(owner)
+    if (owned === undefined) return
+    const current = owned.get(author)
+    if (current === undefined || current.seq !== seq) return
+    let best = null
+    for (const [s, t] of authors.get(author)?.testimonials || EMPTY_LIST) {
+      if (s !== seq && t.to === owner && (best === null || s > best.seq)) best = { atMs: t.atMs, author, seq: s }
+    }
+    if (best !== null) owned.set(author, best)
+    else owned.delete(author)
+    if (owned.size === 0) incoming.delete(owner)
+  }
+
+  // Every block of `author` leaves the index at once.
+  function dropWriter (owner, author) {
+    const owned = incoming.get(owner)
+    if (owned === undefined) return
+    owned.delete(author)
+    if (owned.size === 0) incoming.delete(owner)
   }
 
   // Removes every trace of a diary: its edges on every target it touched,
@@ -604,6 +691,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         }
         dropTargetIfEmpty(ref, target)
       }
+      for (const t of entry?.testimonials?.values() || EMPTY_LIST) dropWriter(t.to, author)
       authors.delete(author)
       if (entry !== undefined) {
         if (entry.count === authorCap) fullAuthors--
@@ -874,6 +962,60 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     return edges
   }
 
+  // Pointers to the depoimentos of `owner` (see the header): { shown: [{ seq,
+  // from, wseq }] by show seq descending, pending: [{ from, seq }] newest
+  // first by the writer's own `at` claim (then writer, then seq) }, at most
+  // TESTIMONIAL_ROWS each, one row per writer in each list. `visible`
+  // filters writers after sorting, so a hidden writer is never examined
+  // past the cap; a pending block dated more than MAX_FUTURE_MS after `now`
+  // is hidden until the clock catches up. Null for a malformed owner.
+  function testimonials (owner, now, visible = allVisible) {
+    try {
+      if (typeof owner !== 'string' || !HEX64.test(owner)) return null
+      if (typeof now !== 'number' || !Number.isFinite(now)) return null
+      if (typeof visible !== 'function') visible = allVisible
+      const entry = authors.get(owner)
+      const everShown = new Set()
+      const newestShow = new Map()
+      for (const [showSeq, show] of entry?.shows || EMPTY_LIST) {
+        everShown.add(show.from + ':' + show.wseq)
+        const prev = newestShow.get(show.from)
+        if (prev === undefined || showSeq > prev.seq) newestShow.set(show.from, { seq: showSeq, from: show.from, wseq: show.wseq, show })
+      }
+      const shownRows = []
+      for (const row of newestShow.values()) {
+        const { show } = row
+        if (show.removed || show.from === owner) continue
+        const writer = authors.get(show.from)
+        const block = writer?.testimonials?.get(show.wseq)
+        if (block === undefined || block.to !== owner || block.hash !== show.commit) continue
+        shownRows.push(row)
+      }
+      shownRows.sort((a, b) => b.seq - a.seq)
+      const shown = []
+      for (const row of shownRows) {
+        if (shown.length >= TESTIMONIAL_ROWS) break
+        if (visible(row.from)) shown.push({ seq: row.seq, from: row.from, wseq: row.wseq })
+      }
+      const pendingEdges = []
+      for (const edge of incoming.get(owner)?.values() || EMPTY_LIST) {
+        if (edge.author === owner) continue
+        if (everShown.has(edge.author + ':' + edge.seq)) continue
+        if (edge.atMs - now > MAX_FUTURE_MS) continue
+        pendingEdges.push(edge)
+      }
+      pendingEdges.sort((a, b) => compareEdges(b, a))
+      const pending = []
+      for (const edge of pendingEdges) {
+        if (pending.length >= TESTIMONIAL_ROWS) break
+        if (visible(edge.author)) pending.push({ from: edge.author, seq: edge.seq })
+      }
+      return { shown, pending }
+    } catch {
+      return null
+    }
+  }
+
   function stats () {
     return { records, targets: targets.size, saturated: records >= cap || targets.size >= targetCap || authorCap === 0 || fullAuthors > 0, maxRecords: cap }
   }
@@ -885,11 +1027,12 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     deleted.clear()
     deletedRefs.clear()
     noticeCache.clear()
+    incoming.clear()
     records = 0
     fullAuthors = 0
   }
 
-  return { add, removePost, removeRecord, removeDiary, post, counts, engagers, member, hints, noticeRows, stats, clear }
+  return { add, removePost, removeRecord, removeDiary, post, counts, engagers, member, hints, noticeRows, testimonials, stats, clear }
 }
 
 module.exports = {
@@ -904,5 +1047,6 @@ module.exports = {
   NOTICE_ROWS_PER_ENGAGER,
   NOTICE_ROWS_MAX,
   NOTICE_CACHE_AUTHORS,
+  TESTIMONIAL_ROWS,
   CURSOR_RE
 }

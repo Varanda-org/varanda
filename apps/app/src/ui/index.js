@@ -3,10 +3,11 @@
 // rendered by the screens through displayText (docs/rpc.md section 10).
 // Design: apps/site/artwork/app-design.md.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { cloneElement, isValidElement, useCallback, useEffect, useRef, useState } from 'react'
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
+import { Icon } from './Icon'
 import { fonts, layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
@@ -110,12 +111,12 @@ export function useBottomPad () {
   return layout.tabBar + insets.bottom + 96
 }
 
-export function Page ({ children, flush, padBottom = 0, refreshControl }) {
+export function Page ({ children, flush, padBottom = 0, refreshControl, grow }) {
   const styles = useStyles(makeStyles)
   return (
     <ScrollView
       style={styles.scroll}
-      contentContainerStyle={[flush ? styles.pageFlush : styles.pageContent, { paddingBottom: (flush ? 0 : 16) + padBottom }]}
+      contentContainerStyle={[flush ? styles.pageFlush : styles.pageContent, grow && styles.pageGrow, { paddingBottom: (flush ? 0 : 16) + padBottom }]}
       keyboardShouldPersistTaps='handled'
       refreshControl={refreshControl}
     >
@@ -124,14 +125,20 @@ export function Page ({ children, flush, padBottom = 0, refreshControl }) {
   )
 }
 
-export function SectionHeader ({ children, right }) {
+// `flush` drops the 16 pt sides, for a header inside an already padded Page
+// (it lined up 16 pt to the right of everything else there).
+export function SectionHeader ({ children, right, flush }) {
   const styles = useStyles(makeStyles)
   return (
-    <View style={styles.section}>
+    <View style={[styles.section, flush && styles.sectionFlush]}>
       <Text style={styles.sectionText} accessibilityRole='header'>{children}</Text>
       {right || null}
     </View>
   )
+}
+
+export function FlushSectionHeader (props) {
+  return <SectionHeader {...props} flush />
 }
 
 export function Title ({ children }) {
@@ -149,9 +156,9 @@ export function Body ({ children, style }) {
   return <Text style={[styles.body, style]}>{children}</Text>
 }
 
-export function Soft ({ children }) {
+export function Soft ({ children, style }) {
   const styles = useStyles(makeStyles)
-  return <Text style={styles.soft}>{children}</Text>
+  return <Text style={[styles.soft, style]}>{children}</Text>
 }
 
 // Selectable text for keys and other values the person may want to copy.
@@ -187,24 +194,33 @@ export function Row ({ children }) {
   return <View style={styles.row}>{children}</View>
 }
 
-export function Btn ({ label, onPress, disabled, pending, secondary, danger }) {
+export function Btn ({ label, icon, onPress, disabled, pending, secondary, danger, accessibilityLabel, block, expanded, large }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const off = disabled === true || pending === true
   const outline = secondary || danger
   return (
     <Pressable
       accessibilityRole='button'
-      accessibilityState={{ disabled: off }}
+      accessibilityState={{ disabled: off, expanded }}
+      // react-native-web does not map accessibilityState.expanded.
+      aria-expanded={expanded}
+      accessibilityLabel={accessibilityLabel}
       disabled={off}
       onPress={onPress}
       style={({ pressed }) => [
         styles.btn,
+        large && styles.btnLarge,
+        typeof icon === 'string' && styles.btnRow,
+        block && styles.btnBlock,
         outline && styles.btnOutline,
+        outline && large && styles.btnOutlineLarge,
         danger && styles.btnDanger,
         off && styles.btnOff,
         pressed && styles.btnPressed
       ]}
     >
+      {typeof icon === 'string' ? <Icon name={icon} size={18} color={danger ? colors.danger : outline ? colors.ink : colors.accentInk} /> : null}
       <Text style={[styles.btnText, outline && styles.btnTextOutline, danger && styles.btnTextDanger]}>
         {pending ? label + '…' : label}
       </Text>
@@ -212,12 +228,30 @@ export function Btn ({ label, onPress, disabled, pending, secondary, danger }) {
   )
 }
 
+// Every Apagar/Cancelar pair: the filled (or danger) action on top, the
+// secondary Cancelar below, so neither is squeezed beside the other. Each
+// side is a Btn element or the props of one ({ label, onPress, ... }).
+export function ConfirmStack ({ confirm, cancel }) {
+  const styles = useStyles(makeStyles)
+  // Full width, so the pair reads as one choice and a long label never wraps.
+  const wide = (el) => (el.type === Btn ? cloneElement(el, { block: true }) : el)
+  const top = isValidElement(confirm) ? wide(confirm) : confirm ? <Btn block {...confirm} /> : null
+  const bottom = isValidElement(cancel) ? wide(cancel) : <Btn block secondary label='Cancelar' {...(cancel || {})} />
+  return (
+    <View style={styles.confirmStack}>
+      {top}
+      {bottom}
+    </View>
+  )
+}
+
 // Key, JSON and host fields are `mono`: no capitalisation or correction.
 // Free text (name, bio) keeps the platform defaults.
-export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4, onSubmitEditing, returnKeyType }) {
+export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4, onSubmitEditing, returnKeyType, plain }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
-  const raw = mono ? { autoCapitalize: 'none', autoCorrect: false, spellCheck: false } : {}
+  // plain: a search, typed as is (no capitals, no autocorrect) in the normal font.
+  const raw = mono || plain ? { autoCapitalize: 'none', autoCorrect: false, spellCheck: false } : {}
   // Forwarded only when passed: existing callers are unchanged.
   const submit = {}
   if (onSubmitEditing !== undefined) submit.onSubmitEditing = onSubmitEditing
@@ -246,6 +280,7 @@ const makeStyles = (colors) => StyleSheet.create({
   scroll: { flex: 1, backgroundColor: colors.bg },
   pageContent: { padding: 16 },
   pageFlush: {},
+  pageGrow: { flexGrow: 1 },
   column: { width: '100%', maxWidth: layout.column, alignSelf: 'center', gap: 12 },
   section: {
     flexDirection: 'row',
@@ -257,6 +292,7 @@ const makeStyles = (colors) => StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.line
   },
+  sectionFlush: { paddingHorizontal: 0 },
   sectionText: { ...type.section, color: colors.soft },
   title: { fontSize: 22, fontWeight: '800', color: colors.ink, fontFamily: fonts.title },
   label: { fontSize: 14, fontWeight: '600', color: colors.soft },
@@ -276,11 +312,18 @@ const makeStyles = (colors) => StyleSheet.create({
     minHeight: 40,
     justifyContent: 'center'
   },
+  btnLarge: { minHeight: 52, paddingVertical: 15 },
+  btnRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  confirmStack: { flexDirection: 'column', alignItems: 'stretch', gap: 8 },
+  btnBlock: { alignSelf: 'stretch' },
   btnOutline: { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.outline, paddingVertical: 8, paddingHorizontal: 15 },
+  btnOutlineLarge: { paddingVertical: 14 },
   btnDanger: { borderColor: colors.danger },
   btnOff: { opacity: 0.45 },
   btnPressed: { opacity: 0.8 },
-  btnText: { ...type.pill, color: colors.accentInk },
+  // The 1 pt sides absorb Android's rounding with the 1.5 pt outline: the label got its
+  // exact width, lost a pixel and wrapped its last word out of sight ("Trocar passkey").
+  btnText: { ...type.pill, color: colors.accentInk, textAlign: 'center', paddingHorizontal: 1 },
   btnTextOutline: { color: colors.ink },
   btnTextDanger: { color: colors.danger },
   field: { gap: 4 },

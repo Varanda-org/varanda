@@ -18,10 +18,14 @@
 // The own 'seguindo' count comes from the local node; 'seguidores' comes
 // from the seeder (hosted only, useFollowCounts) and can be lower than
 // reality, hence the note under the counts.
+// Momentos (hosted only): under the profile header, never a tab, the own
+// live moments ('Seus momentos (24 h)', opening the own viewer) and the own
+// expired ones ('Momentos anteriores (N)', collapsed) with Apagar
+// (../ui/MomentosStrip DiarioMoments, moment.delete after a confirmation).
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -36,6 +40,7 @@ import { lastLocalWrite } from '../localWrites'
 import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
+import { fillState, hideFuture, tilesFromLog } from '../mural'
 import { ErrorText, SectionHeader, Soft, errorText, plainMessage, useAction, useBottomPad, useNow } from '../ui'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
@@ -45,19 +50,31 @@ import { ShareProfile } from '../ui/ShareProfile'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { ProfileHeader } from '../ui/ProfileHeader'
+import { MuralFooter, MuralRow, muralGridRows } from '../ui/MuralGrid'
+import { Segmented } from '../ui/Segmented'
+import { CommunitiesBox } from '../ui/CommunitiesBox'
+import { communitiesOf } from '../communitiesBox'
 import { BAR, ProfileBar, useProfileBar } from '../ui/ProfileBar'
 import { BellButton } from '../ui/TopActions'
 import { HelpButton } from '../ui/Help'
 import { HELP } from '../help'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
 import { useFollowCounts } from '../useFollowCounts'
-import { type } from '../ui/theme'
+import { LARGE_TEXT, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, refOf, socialRowProps, useSocial } from './ARua'
 import { DeletePrompt, useDelete } from './Conversa'
+import { TESTIMONIALS_TAB, useTestimonialTab, useTestimonials } from './Depoimentos'
+import { ConfirmMomentDelete, useMoments } from './Momentos'
+import { DiarioMoments } from '../ui/MomentosStrip'
 
 const BAND = 96
+const TABS = [{ id: 'posts', label: 'Publicações' }, { id: 'mural', label: 'Mural' }]
+// Depoimentos is the third tab only on a hosted node (node.hosted === true).
+const TABS_HOSTED = TABS.concat([TESTIMONIALS_TAB])
+// Same coalescing window as the Comunidades list.
+const COMMUNITIES_DELAY_MS = 800
 
 // The state line of an outbox item. `held`: queued, but not sent
 // automatically (found in storage from an earlier visit).
@@ -138,7 +155,7 @@ function postOf (author, seq, record) {
   }
 }
 
-export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople }) {
+export default function Diario ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onTabChange }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
@@ -151,9 +168,17 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const [loadError, setLoadError] = useState('')
   const [loadingMore, setLoadingMore] = useState(false)
   const [olderError, setOlderError] = useState('')
+  // True while the newest page is read: the Mural fill waits for it, then
+  // runs again whether the read worked or failed.
+  const [newestLoading, setNewestLoading] = useState(false)
   const [editing, setEditing] = useState(false)
   const [sharing, setSharing] = useState(false)
   const [pulls, setPulls] = useState(0)
+  // 'posts' | 'mural' | 'depoimentos'. The state lives here, so it survives a
+  // visit to a thread.
+  const [tab, setTab] = useState('posts')
+  const muralPages = useRef(0)
+  const { fontScale, height: windowHeight } = useWindowDimensions()
   const pull = useAction()
   const seqRef = useRef(0)
   const olderBusy = useRef(false)
@@ -165,13 +190,62 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
   const loadedAtRef = useRef(null)
   const dataRef = useRef(null)
   dataRef.current = data
+  // The identity (epoch and passkey generation, both live at the render) the
+  // rows' own key was read under; the key is reused only while it still holds.
+  const identityRef = useRef(null)
+  identityRef.current = { epoch: node.epoch, generation: node.passkey ? node.passkey.generation : undefined, hosted: node.hosted === true }
+  const infoIdentityRef = useRef(null)
 
   const { learn, resolve, invalidate, profileOf } = names
   const { request, ackFresh } = node
   const ownPublicKey = typeof ownKey === 'string' ? ownKey : (data && typeof data.info.publicKey === 'string' ? data.info.publicKey : null)
   const social = useSocial({ ownKey: ownPublicKey, onToast })
   const followCounts = useFollowCounts(ownPublicKey, String(refresh) + ':' + pulls)
+  // Own depoimentos and the ones waiting for approval (hosted only).
+  const testimonials = useTestimonials(ownPublicKey, { withPending: true, tick: String(refresh) + ':' + pulls, active: active !== false })
+  // Own live and past moments (hosted only).
+  const moments = useMoments({ ownKey: ownPublicKey, active: active !== false, tick: String(refresh) + ':' + pulls })
+  const [momentDeleting, setMomentDeleting] = useState(null)
+  const tabs = node.hosted === true ? TABS_HOSTED : TABS
+  // A tab the node no longer offers (not hosted) falls back to Publicações.
+  const shownTab = tabs.some((t) => t.id === tab) ? tab : 'posts'
+  // The tab on screen, not the raw state: a tab the node no longer offers shows
+  // Publicações, and the publish button follows what is shown.
+  useEffect(() => { if (onTabChange) onTabChange(shownTab) }, [shownTab])
+  const depo = shownTab === 'depoimentos'
+  const testimonialTab = useTestimonialTab({
+    data: testimonials,
+    own: true,
+    ownKey: ownPublicKey,
+    onOpenAll: typeof onOpenTestimonials === 'function' && ownPublicKey ? () => onOpenTestimonials(ownPublicKey) : undefined,
+    onOpenMember,
+    onReport: typeof onReport === 'function' ? onReport : undefined
+  })
   const { ingest } = social
+  // The own admitted communities (community.list), read on every activation,
+  // refresh and pull, and again when a group changes: the tab stays mounted
+  // while the person joins, creates or leaves a community elsewhere.
+  const [communities, setCommunities] = useState([])
+  const groupVersions = node.groupVersions
+  const communitiesVersions = useRef(groupVersions)
+  useEffect(() => {
+    let alive = true
+    if (node.hosted !== true) {
+      setCommunities([])
+      return
+    }
+    if (!active) return
+    // A burst of groups.changed events costs one read.
+    const delay = groupVersions !== communitiesVersions.current ? COMMUNITIES_DELAY_MS : 0
+    communitiesVersions.current = groupVersions
+    const timer = setTimeout(() => {
+      request('community.list', {}).then((res) => { if (alive) setCommunities(communitiesOf(res)) }, () => {})
+    }, delay)
+    return () => {
+      alive = false
+      clearTimeout(timer)
+    }
+  }, [node.hosted, request, refresh, pulls, active, groupVersions])
   // Replaces the rows with the newest page (a refresh).
   const loadNewest = useCallback(async (refreshProfile = false) => {
     const mine = ++seqRef.current
@@ -179,20 +253,39 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     // while it runs may be missing, so it must still count as newer.
     const startedAt = Date.now()
     newestBusy.current = true
+    setNewestLoading(true)
     setLoadingMore(false)
     setOlderError('')
     olderBusy.current = false
     const knownKey = dataRef.current && dataRef.current.info.publicKey
     if (refreshProfile && typeof knownKey === 'string') invalidate([knownKey])
+    const identity = identityRef.current
+    // Hosted reads borrow the live sync run instead of preempting it, so
+    // node.info (a round trip that changes nothing) is skipped when the key
+    // was read under this same identity. A new epoch (connect, lock, unlock,
+    // sign out) or passkey generation (the identity may have changed) forces
+    // the read again, so a key of another identity never reads this diary.
+    const reuseInfo = !refreshProfile && identity.hosted && dataRef.current !== null &&
+      infoIdentityRef.current !== null && identity.generation !== undefined &&
+      infoIdentityRef.current.epoch === identity.epoch &&
+      infoIdentityRef.current.generation === identity.generation
     try {
-      // One read after the other: each read preempts a running sync.
-      const info = await request('node.info', {})
+      // Core nodes: one read after the other, since each read preempts a running sync.
+      let info = reuseInfo ? dataRef.current.info : await request('node.info', {})
       if (refreshProfile && mine === seqRef.current && typeof info.publicKey === 'string' && info.publicKey !== knownKey) {
         invalidate([info.publicKey])
       }
       const log = await request('log.read', { limit: LOG_LIMIT_MAX })
+      // The node can switch identity a round trip before the epoch moves
+      // (passkeyOp re-reads the status first): log.read names the diary it
+      // read, so a reused key that is not that diary's is read again.
+      if (reuseInfo && log.key !== info.publicKey) info = await request('node.info', {})
       if (mine !== seqRef.current) return
       const rows = logRows(log)
+      if (!reuseInfo) infoIdentityRef.current = identity
+      // The older pages are gone with the replaced rows: the Mural fill
+      // budget starts over with them.
+      muralPages.current = 0
       setData({ info, rows, atEnd: isLastLogPage(log) })
       loadedAtRef.current = startedAt
       setLoadError('')
@@ -212,7 +305,10 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         setLoadError(errorText(err))
       }
     } finally {
-      if (mine === seqRef.current) newestBusy.current = false
+      if (mine === seqRef.current) {
+        newestBusy.current = false
+        setNewestLoading(false)
+      }
     }
   }, [request, ackFresh, resolve, invalidate, ingest])
 
@@ -281,8 +377,28 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
 
   const info = data === null ? null : data.info
   const posts = shownRows
+  const mural = tab === 'mural'
   const publicKey = info && typeof info.publicKey === 'string' ? info.publicKey : null
   const profile = publicKey ? profileOf(publicKey) : undefined
+  // Only the rows log.read already loaded: no extra read for the Mural.
+  const muralTiles = useMemo(() => {
+    if (!mural || data === null || publicKey === null) return []
+    return hideFuture(tilesFromLog(publicKey, data.rows), now)
+  }, [mural, data, publicKey, now])
+  const muralFill = data === null ? 'end' : fillState({ tiles: muralTiles, atEnd: data.atEnd, pages: muralPages.current })
+  // Bounded automatic fill: older pages are read while the Mural is short of
+  // photos, up to the cap. After that only 'Ver mais' reads one.
+  // A page counts only when a read really starts (loadOlder skips while a
+  // refresh or another page runs).
+  useEffect(() => {
+    if (!mural) { muralPages.current = 0; return }
+    if (data === null || loadingMore || newestLoading || olderError) return
+    if (muralFill !== 'more') return
+    const current = dataRef.current
+    if (current === null || current.atEnd || olderBusy.current || newestBusy.current) return
+    muralPages.current += 1
+    loadOlder()
+  }, [mural, data, loadingMore, newestLoading, olderError, muralFill, loadOlder])
   const who = whoOf(profile || undefined)
   const bio = profile && profile.bio ? profile.bio : ''
   const profileUrl = node.hosted === true && publicKey ? buildProfileUrl({ origin: installationOrigin() || globalThis.location?.origin || null, username: profile ? profile.username : null, publicKey }) : null
@@ -330,7 +446,7 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
         {heldIds.length > 0
           ? (
             <View style={styles.pendingAll}>
-              <Pill label='enviar tudo' onPress={() => outbox.release(held)} />
+              <Pill label='Enviar tudo' onPress={() => outbox.release(held)} />
             </View>
             )
           : null}
@@ -349,12 +465,12 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
               ? (
                 <View style={styles.pendingActions}>
                   {heldIds.includes(item.id)
-                    ? <Pill label='enviar' onPress={() => outbox.release([item])} />
+                    ? <Pill label='Enviar' onPress={() => outbox.release([item])} />
                     : null}
-                  {item.state === 'uncertain' || item.state === 'failed'
-                    ? <Pill label='tentar de novo' onPress={() => outbox.retry(item)} />
+                  {!heldIds.includes(item.id) && (item.state === 'uncertain' || item.state === 'failed')
+                    ? <Pill label='Tentar de novo' onPress={() => outbox.retry(item)} />
                     : null}
-                  <Pill label='apagar' onPress={() => outbox.discard(item.id)} />
+                  <Pill icon='lixeira' accessibilityLabel='apagar' onPress={() => outbox.discard(item.id)} />
                 </View>
                 )
               : null}
@@ -385,22 +501,48 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
             value: info.followCount === undefined || info.followCount === null ? null : displayText(String(info.followCount)),
             onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguindo') : undefined
           }, {
-            label: 'seguidores',
+            label: followCounts.seguidores === 1 ? 'seguidor' : 'seguidores',
             value: followCounts.seguidores === null ? null : displayText(String(followCounts.seguidores)),
             onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguidores') : undefined
           }]}
           note={followCounts.incomplete && followCounts.seguidores !== null ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
           actions={[
             <Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} />,
-            profileUrl !== null ? <Pill key='share' label='Compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /> : null
+            profileUrl !== null ? <Pill key='share' icon='compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => setSharing(true)} /> : null
           ]}
+          tabs={
+            <View>
+              <DiarioMoments
+                hosted={node.hosted === true}
+                data={moments}
+                now={now}
+                onOpenOwn={typeof onOpenMomentos === 'function' && ownPublicKey ? () => onOpenMomentos(ownPublicKey) : undefined}
+                onDelete={setMomentDeleting}
+              />
+              <CommunitiesBox items={communities} title='Suas comunidades' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
+              <Segmented options={tabs} selected={shownTab} onSelect={setTab} />
+            </View>
+          }
         />
         {outboxList}
-        <SectionHeader>Publicações</SectionHeader>
         <CountsNote social={social} />
         <ErrorText>{loadError}</ErrorText>
       </View>
       )
+
+  // A failed page shows only the error row with its retry, not Ver mais too.
+  const muralState = data === null ? 'loading' : data.atEnd ? 'end' : (loadingMore || newestLoading || (muralFill === 'more' && !olderError)) ? 'loading' : olderError ? 'error' : 'capped'
+  const muralFooter = data !== null
+    ? (
+      <MuralFooter
+        count={muralTiles.length}
+        state={muralState}
+        onMore={loadOlder}
+        emptyBody='As fotos que você publicar aparecem aqui.'
+        footer={olderError ? <ListFooter error={olderError} onRetry={loadOlder} pending={loadingMore} /> : null}
+      />
+      )
+    : null
 
   const footer = data !== null && posts.length > 0
     ? (
@@ -458,7 +600,8 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
       }
     }
   })
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onDelete: del.offered ? del.ask : undefined }
+  // onMessage reaches only reposts of other people's posts: socialRowProps drops it for own posts.
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onMessage, onDelete: del.offered ? del.ask : undefined }
   // An own repost is the ORIGINAL post under 'Você republicou' (every action
   // targets the original); an own post (or quote) targets itself.
   const renderItem = ({ item: row }) => {
@@ -474,6 +617,18 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     return <PostRow {...socialRowProps({ post, ref: info.publicKey + ':' + row.seq, social, profileOf, now, ownKey: info.publicKey, h: handlers })} />
   }
 
+  const muralCols = fontScale >= LARGE_TEXT ? 2 : 3
+  const muralRows = useMemo(() => muralGridRows(muralTiles, muralCols), [muralTiles, muralCols])
+  // The post a tile came from, seeded as a Publicações row seeds it, so the
+  // thread shows it even when the network cannot be read.
+  const muralSeed = (tile) => {
+    const row = data === null ? null : data.rows.find((r) => r.seq === tile.seq && r.entry && r.entry.record)
+    return row ? postOf(tile.author, tile.seq, row.entry.record) : null
+  }
+  const renderMural = ({ item }) => (
+    <MuralRow item={item} columns={muralCols} persist onOpen={(tile) => onOpenThread({ ref: tile.ref, seed: muralSeed(tile) })} />
+  )
+
   // Rows re-render when a name is learned, the clock ticks or the originals,
   // counts or own state change.
   const extra = useMemo(() => ({ profileOf, now, profile, social: social.social, offered: del.offered }), [profileOf, now, profile, social.social, del.offered])
@@ -482,20 +637,24 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
     <View style={styles.list}>
       <DeletePrompt del={del} />
       <RefreshableList
-        data={posts}
-        keyExtractor={(row) => (row.invalid ? 'i' : 'e') + row.seq}
-        renderItem={renderItem}
-        extraData={extra}
+        data={depo ? testimonialTab.items : mural ? muralRows : posts}
+        keyExtractor={depo ? testimonialTab.keyExtractor : mural ? (row) => 'm' + row.key : (row) => (row.invalid ? 'i' : 'e') + row.seq}
+        renderItem={depo ? testimonialTab.renderItem : mural ? renderMural : renderItem}
+        extraData={depo ? testimonialTab.extraData : extra}
         ListHeaderComponent={header}
-        ListFooterComponent={footer}
-        ListEmptyComponent={empty}
-        contentContainerStyle={{ paddingBottom: bottomPad }}
+        ListFooterComponent={depo ? testimonialTab.footer : mural ? muralFooter : footer}
+        ListEmptyComponent={depo || (mural && data !== null) ? null : empty}
+        // Always tall enough to scroll the band away: a short list (a small
+        // Mural, a tab switch) would otherwise rest with the bar half faded.
+        // The 8 pt more tuck the avatar ring, which hangs 48 pt below the
+        // band, fully under the 44 pt bar when there is no top inset.
+        contentContainerStyle={{ paddingBottom: bottomPad, minHeight: windowHeight + bandHeight + 8 }}
         onRefresh={reload}
         refreshing={pull.pending}
-        onLoadMore={loadOlder}
+        onLoadMore={mural || depo ? undefined : loadOlder}
         loadingMore={loadingMore}
         loadMoreError={!!olderError}
-        atEnd={data === null ? true : data.atEnd}
+        atEnd={data === null || mural || depo ? true : data.atEnd}
         scrollToTopSignal={scrollToTop}
         onScrollFrame={bar.handleScrollFrame}
         newItemsTop={info !== null && bar.interactive ? insets.top + BAR + 8 : undefined}
@@ -536,6 +695,8 @@ export default function Diario ({ active, refresh, onSettings, onReply, onPublis
           </Sheet>
           )
         : null}
+      {testimonialTab.sheets}
+      <ConfirmMomentDelete open={momentDeleting !== null} target={momentDeleting} onClose={() => setMomentDeleting(null)} />
       <SocialToast text={social.toast} />
     </View>
   )

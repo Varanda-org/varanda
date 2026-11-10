@@ -191,7 +191,7 @@ test('the built node bundle serves the RPC over IndexedDB and syncs with a seede
   t.alike(Object.keys(handle).sort(), ['close', 'connect', 'follows', 'identity', 'media'], 'only connect, close, follows, identity and media are exposed')
   t.ok(Object.isFrozen(handle) && Object.isFrozen(handle.identity) && Object.isFrozen(handle.media) && Object.isFrozen(handle.follows), 'the handle, identity, media and follows are frozen')
   t.alike(Object.keys(handle.identity).sort(), ['addPasskey', 'bindPasskey', 'cancelRecovery', 'complete', 'confirm', 'dropEnrolment', 'enrolment', 'finishRecovery', 'lock', 'makeRecoveryCode', 'reset', 'signOut', 'status', 'unlock', 'unlockWithCode', 'unlockWrapped'], 'no getter, no signer')
-  t.alike(Object.keys(handle.media), ['upload', 'putDm', 'readDm', 'readGroup'], 'media: post upload, DM media put and read (rpc.md 5.88), private group media read')
+  t.alike(Object.keys(handle.media), ['upload', 'putDm', 'readDm', 'readGroup', 'putMoment', 'readMoment'], 'media: post upload, DM media put and read (rpc.md 5.88), private group media read, momento photo put and read (5.113)')
   t.alike(Object.keys(handle.follows).sort(), ['confirmLegacy', 'legacy'])
   const badKeys = await errorOf(handle.follows.confirmLegacy('x'))
   t.ok(badKeys instanceof TypeError, 'a sync throw becomes a rejection')

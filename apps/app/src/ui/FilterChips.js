@@ -37,7 +37,7 @@ export function FilterChips ({ options, selected, onSelect }) {
 
 const makeStyles = (colors) => StyleSheet.create({
   wrap: { borderBottomWidth: 1, borderBottomColor: colors.line },
-  row: { paddingHorizontal: space.lg, gap: space.sm, alignItems: 'center' },
+  row: { paddingHorizontal: space.lg, paddingVertical: space.sm, gap: space.sm, alignItems: 'center' },
   hit: { minHeight: layout.hit, justifyContent: 'center' },
   pressed: { opacity: 0.6 },
   chip: {

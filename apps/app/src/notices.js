@@ -405,11 +405,98 @@ export function isWebOnlyError (err) {
   return Boolean(err && err.code === 'USAGE' && WEB_ONLY_MESSAGES.includes(err.message))
 }
 
+const KEY64 = /^[0-9a-f]{64}$/
+const isSeq = (n) => Number.isSafeInteger(n) && n >= 1
+
+export function needsAvatar (item, cached) {
+  try {
+    if (!item || typeof item !== 'object') return false
+    const key = item.key
+    const avatar = item.avatar
+    if (typeof key !== 'string' || !KEY64.test(key) || (avatar !== null && avatar !== undefined)) return false
+    // A cached profile with avatar null confirms there is no photo.
+    return cached === undefined || cached === null || (typeof cached === 'object' && cached.avatar === undefined)
+  } catch {
+    return false
+  }
+}
+
+export function avatarPeeks (keys, hints) {
+  const chunks = []
+  try {
+    if (!hints || typeof hints !== 'object') return chunks
+    const seen = new Set()
+    for (const key of keys) {
+      if (typeof key !== 'string' || !KEY64.test(key) || seen.has(key)) continue
+      seen.add(key)
+      if (!Object.prototype.hasOwnProperty.call(hints, key)) continue
+      const hint = hints[key]
+      if (!hint || typeof hint !== 'object') continue
+      const profileSeq = hint.profileSeq
+      // Username blocks carry no avatar, so only fetch the profile block.
+      if (isSeq(profileSeq)) chunks.push({ author: key, seqs: [profileSeq], profileSeq })
+    }
+  } catch {}
+  return chunks
+}
+
+export function avatarFromPeek (peek) {
+  try {
+    if (!peek || typeof peek !== 'object') return undefined
+    const profile = peek.profile
+    // A cleared head or a non-profile block leaves the answer unresolved.
+    if (!profile || typeof profile !== 'object') return undefined
+    const avatar = profile.avatar
+    return avatar !== null && typeof avatar === 'object' ? avatar : null
+  } catch {
+    return undefined
+  }
+}
+
+export async function resolveRowAvatars (keys, { fetchMember, peekChunk, alive = () => true }) {
+  keys = [...new Set(keys.filter((key) => typeof key === 'string' && KEY64.test(key)))]
+  const found = {}
+  const hints = {}
+  const peeked = new Map()
+  for (const key of keys) {
+    if (!alive()) return found
+    let m
+    try { m = await fetchMember(key) } catch { m = null }
+    if (m && m.ok === true && m.value && typeof m.value === 'object') {
+      hints[key] = { profileSeq: m.value.profileSeq }
+    }
+  }
+  for (const chunk of avatarPeeks(keys, hints)) {
+    if (!alive()) return found
+    try {
+      const peek = await peekChunk(chunk)
+      if (peek && typeof peek === 'object' && peek.key === chunk.author) peeked.set(chunk.author, peek)
+    } catch {}
+  }
+  for (const key of keys) {
+    const v = avatarFromPeek(peeked.get(key))
+    if (v !== undefined) found[key] = v
+  }
+  return found
+}
+
+export function rowAvatarSource (item, peeked) {
+  try {
+    if (item && typeof item === 'object') {
+      const avatar = item.avatar
+      // A photo now in the node's window wins over an older peek answer.
+      if (avatar !== null && typeof avatar === 'object') return item
+    }
+    return peeked !== undefined ? { avatar: peeked } : item
+  } catch {
+    return item
+  }
+}
+
 // A page key is 64 hex, the same shape as a member key. Seen tokens for a
 // page live in the same stored document, but under `page:<key>`, which can
 // never equal `own`. Otherwise marking one list seen would mark the other,
 // including when the page key and the member key are the same hex.
-const KEY64 = /^[0-9a-f]{64}$/
 const PAGE_SEEN_PREFIX = 'page:'
 
 export const PAGE_EMPTY_TITLE = 'Nenhum aviso da página ainda'

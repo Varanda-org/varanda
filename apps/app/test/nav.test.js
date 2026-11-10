@@ -195,7 +195,7 @@ test('history.web tolerates a missing history API; native is a no-op', async (t)
 
 test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos'])
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
   for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
@@ -299,10 +299,38 @@ test('paginas and novapagina take no key, paginaajustes a lowercase hex64 page k
   }
 })
 
+test('depoimentos is keyed by a lowercase hex64 owner', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('depoimentos'))
+  t.ok(validEntry({ screen: 'depoimentos', key: A }))
+  const stack = push(EMPTY, { screen: 'depoimentos', key: A })
+  t.alike(top(stack), { screen: 'depoimentos', key: A, params: {} })
+  t.is(push(stack, { screen: 'depoimentos', key: A }), stack, 'same top is a no-op')
+  t.is(push(stack, { screen: 'depoimentos', key: B }).length, 2)
+  for (const key of [A.toUpperCase(), 'ab', A + ':1', 42, null, undefined, A + '0']) {
+    t.absent(validEntry({ screen: 'depoimentos', key }), String(key))
+    t.is(push(EMPTY, { screen: 'depoimentos', key }), EMPTY)
+  }
+})
+
+test('momentos is keyed by a lowercase hex64 author', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('momentos'))
+  t.ok(validEntry({ screen: 'momentos', key: A }))
+  const stack = push(EMPTY, { screen: 'momentos', key: A })
+  t.alike(top(stack), { screen: 'momentos', key: A, params: {} })
+  t.is(push(stack, { screen: 'momentos', key: A }), stack, 'same top is a no-op')
+  t.is(push(stack, { screen: 'momentos', key: B }).length, 2)
+  for (const key of [A.toUpperCase(), 'ab', A + ':1', 42, null, undefined, '', A + '0']) {
+    t.absent(validEntry({ screen: 'momentos', key }), String(key))
+    t.is(push(EMPTY, { screen: 'momentos', key }), EMPTY)
+  }
+})
+
 test('popTo drops back to an index and refuses bounds outside the stack', async (t) => {
   const { EMPTY, MAX_DEPTH, SCREENS, push, pop, popTo, top } = await loadNav()
   t.is(MAX_DEPTH, 20)
-  t.is(SCREENS.length, 14, 'popTo adds no screen id')
+  t.is(SCREENS.length, 21, 'popTo adds no screen id')
   let stack = EMPTY
   for (let i = 1; i <= 4; i++) stack = push(stack, { screen: 'conversa', key: A + ':' + i })
   t.is(popTo(stack, 3), stack, 'the top index is a no-op')
@@ -336,4 +364,53 @@ test('popTo drops back to an index and refuses bounds outside the stack', async 
   t.is(oldest.length, 1)
   t.is(oldest[0], deep[0])
   t.is(MAX_DEPTH, 20, 'popTo does not raise the cap')
+})
+
+test('Feira screens validate listing refs, page keys and offer ids', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  const offer = 'cd'.repeat(16)
+  const entries = [
+    { screen: 'anuncio', key: A + ':1', params: {} },
+    { screen: 'editar-anuncio', key: A + ':2', params: {} },
+    { screen: 'anunciar', key: '', params: {} },
+    { screen: 'anunciar', key: '', params: { page: B } },
+    { screen: 'avaliar', key: A + ':3', params: { offer } }
+  ]
+  t.ok(validEntry({ screen: 'anunciar', key: '' }), 'params are optional when composing')
+  for (const key of [undefined, null]) t.ok(validEntry({ screen: 'anunciar', key }), 'no key, like the other keyless screens')
+  for (const entry of entries) {
+    t.ok(SCREENS.includes(entry.screen))
+    t.ok(validEntry(entry))
+    const stack = push(EMPTY, entry)
+    t.alike(top(stack), entry)
+    t.is(push(stack, entry), stack, 'same screen and key dedupe')
+  }
+  const bad = []
+  for (const screen of ['anuncio', 'editar-anuncio', 'avaliar']) {
+    for (const key of [undefined, null, 42, '', A, 'ab:1', A.toUpperCase() + ':1', A + ':0', A + ':01', A + ':9007199254740992']) {
+      bad.push({ screen, key, params: { offer } })
+    }
+  }
+  for (const key of [42, A, A + ':1']) bad.push({ screen: 'anunciar', key })
+  for (const page of [null, 42, '', 'ab', B.toUpperCase(), B + ':1']) bad.push({ screen: 'anunciar', key: '', params: { page } })
+  for (const value of [undefined, null, 42, '', 'cd', offer.toUpperCase(), A]) bad.push({ screen: 'avaliar', key: A + ':1', params: { offer: value } })
+  for (const params of [null, [], 'bad', 42]) bad.push({ screen: 'anunciar', key: '', params })
+  for (const params of [undefined, null, [], 'bad', 42]) bad.push({ screen: 'avaliar', key: A + ':1', params })
+  for (const entry of bad) {
+    t.absent(validEntry(entry), JSON.stringify(entry))
+    t.is(push(EMPTY, entry), EMPTY)
+  }
+})
+
+test('anuncios is keyed by a lowercase hex64 author and dedupes', async (t) => {
+  const { EMPTY, push, top, validEntry } = await loadNav()
+  const entry = { screen: 'anuncios', key: A }
+  t.ok(validEntry(entry))
+  const stack = push(EMPTY, entry)
+  t.is(top(stack).key, A)
+  t.is(push(stack, entry), stack)
+  for (const key of [undefined, null, 42, '', 'ab', A.toUpperCase(), A + ':1']) {
+    t.absent(validEntry({ screen: 'anuncios', key }), String(key))
+    t.is(push(EMPTY, { screen: 'anuncios', key }), EMPTY)
+  }
 })

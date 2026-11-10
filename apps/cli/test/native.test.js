@@ -28,16 +28,18 @@ function block (startRe, endRe) {
 const job = (id) => block(new RegExp('^ {2}' + id + ':\\s*$'), /^ {2}\S/)
 const BUILDS = ['js-bundles', 'android-build', 'ios-build']
 
-test('native.yml: actions pinned to the commits ci.yml uses', (t) => {
+test('native.yml: actions pinned to the expected commits', (t) => {
+  // checkout and setup-node at the commits ci.yml uses; cache is used only here.
   const pins = {
     'actions/checkout': '3d3c42e5aac5ba805825da76410c181273ba90b1',
-    'actions/setup-node': '820762786026740c76f36085b0efc47a31fe5020'
+    'actions/setup-node': '820762786026740c76f36085b0efc47a31fe5020',
+    'actions/cache': '55cc8345863c7cc4c66a329aec7e433d2d1c52a9'
   }
   const uses = [...code.matchAll(/uses:\s*(\S+)/g)].map((m) => m[1])
   t.ok(uses.length > 0, 'uses: lines present')
   for (const u of uses) {
     const [name, ref] = u.split('@')
-    t.ok(name in pins, 'only checkout and setup-node: ' + name)
+    t.ok(name in pins, 'only the pinned actions: ' + name)
     t.is(ref, pins[name], 'expected pin for ' + name)
   }
   const checkouts = code.split(/uses:\s*actions\/checkout@/).slice(1)
@@ -98,6 +100,8 @@ test('native.yml: the builds the job names promise', (t) => {
   const js = job('js-bundles')
   t.ok(/expo export --platform android/.test(js), 'android export')
   t.ok(/expo export --platform ios/.test(js), 'ios export')
+  t.ok(/npm run export:web -w apps\/app/.test(js), 'the web export the deploy runs')
+  for (const file of ['index.html', 'varanda-node.js', 'sw.js']) t.ok(js.includes('test -f apps/app/dist/' + file), 'the web app has ' + file)
 
   const android = job('android-build')
   t.ok(/"ndk;27\.1\.12297006"/.test(android), 'the NDK React Native 0.83 builds with')
@@ -110,6 +114,29 @@ test('native.yml: the builds the job names promise', (t) => {
   t.ok(/prepare:native -w apps\/app -- ios/.test(ios))
   t.ok(/check-pods-lock\.js/.test(ios), 'the committed Podfile.lock is checked')
   t.ok(/-sdk iphonesimulator/.test(ios) && /CODE_SIGNING_ALLOWED=NO/.test(ios), 'unsigned simulator build')
+})
+
+test('native.yml: android-build caches the Gradle wrapper distribution and nothing else', (t) => {
+  const android = job('android-build')
+  const at = android.indexOf('actions/cache@')
+  t.ok(at !== -1 && at < android.indexOf('./gradlew'), 'restored before the wrapper runs')
+  const step = (android.match(/- uses: actions\/cache@[\s\S]*?(?=\n\s+- )/) || [''])[0]
+
+  // Dependencies stay out of the cache, so each build still proves they resolve.
+  t.ok(/^\s+path:\s*~\/\.gradle\/wrapper\/dists\s*$/m.test(step), 'caches the wrapper distributions only')
+
+  const wrapper = 'apps/app/android/gradle/wrapper/gradle-wrapper.properties'
+  t.ok(step.includes("hashFiles('" + wrapper + "')"), 'the key follows the wrapper file, so a new version misses')
+  // A distribution moved elsewhere would leave the cache restoring a folder no one reads.
+  const props = fs.readFileSync(path.join(repoRoot, wrapper), 'utf8')
+  t.ok(/^distributionBase=GRADLE_USER_HOME$/m.test(props), 'the wrapper unpacks under the Gradle user home')
+  t.ok(/^distributionPath=wrapper\/dists$/m.test(props), 'the wrapper unpacks into wrapper/dists')
+
+  // Another version sits in a folder the wrapper ignores, so a partial key match
+  // only adds weight. A miss has to fall through to the wrapper's download.
+  t.absent(/restore-keys|fail-on-cache-miss/.test(step), 'exact key only, and a miss does not fail the job')
+
+  for (const id of ['changes', 'js-bundles', 'ios-build', 'native']) t.absent(job(id).includes('actions/cache@'), id + ' does not use the action')
 })
 
 test('native.yml: the gate', (t) => {

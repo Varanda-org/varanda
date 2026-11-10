@@ -100,7 +100,7 @@ export function toError (code) {
   return err
 }
 
-async function readJson (res) {
+export async function readJson (res) {
   const type = res.headers && res.headers.get ? res.headers.get('content-type') : ''
   if (!/^application\/json\b/i.test(type || '')) return null
   let text
@@ -109,7 +109,7 @@ async function readJson (res) {
   try { return JSON.parse(text) } catch { return null }
 }
 
-function buildPost (path, body, timeout = TIMEOUT_MS) {
+export function buildPost (path, body, timeout = TIMEOUT_MS) {
   const app = isAppClient()
   const headers = { accept: 'application/json', 'content-type': 'application/json' }
   if (app) headers['x-varanda-client'] = 'app'
@@ -284,6 +284,40 @@ export async function submitDmReport ({ member, sign, isStale, target, reason, t
   if (isStale()) return null
   const { anexo: digest, ...signed } = params
   const data = await call(buildDmReportSend({ member, ...signed, signature, anexo: digest === undefined ? null : anexo.bytes }))
+  return { id: typeof data.id === 'string' ? data.id : null, duplicate: data.duplicate === true }
+}
+
+// A Feira listing report (docs/rpc.md 5.20, kind 'listing'): the listing as
+// the sheet opened it, or null. `seq` is the listing's ROOT record, the key
+// moderation reads it by; an `editSeq` on the target is never used, so an
+// edit while the sheet is open never moves the report to another block.
+export function listingTarget (target) {
+  if (!target || typeof target !== 'object' || target.kind !== 'listing') return null
+  if (typeof target.author !== 'string' || !HEX64.test(target.author)) return null
+  if (!Number.isSafeInteger(target.seq) || target.seq < 1) return null
+  return { author: target.author, seq: target.seq, title: typeof target.title === 'string' ? target.title : '' }
+}
+
+// The report.sign params for a listing: never a writer, a group or an anexo.
+export function listingReportParams ({ nonce, target, seq, reason, text, quote }) {
+  return { kind: 'listing', nonce, target, seq, reason, text, quote: wellFormed(quote) }
+}
+
+// The diary-post body plus kind 'listing', on the plain route.
+export function buildListingReportSend ({ member, nonce, target, seq, reason, text, quote, signature }) {
+  return buildPost('/account/report', { kind: 'listing', member, nonce, target, seq, reason, text, quote, signature })
+}
+
+// As submitReport, signed with report.sign kind 'listing'. No retry: a
+// failed POST throws and the next attempt starts from a fresh nonce.
+export async function submitListingReport ({ member, sign, isStale, target, seq, reason, text, quote }) {
+  const { nonce } = await reportStart({ member })
+  if (isStale()) return null
+  const params = listingReportParams({ nonce, target, seq, reason, text, quote })
+  const { signature } = await sign(params)
+  if (isStale()) return null
+  const { kind, ...signed } = params
+  const data = await call(buildListingReportSend({ member, ...signed, signature }))
   return { id: typeof data.id === 'string' ? data.id : null, duplicate: data.duplicate === true }
 }
 

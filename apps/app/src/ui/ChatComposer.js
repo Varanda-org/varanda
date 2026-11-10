@@ -369,7 +369,9 @@ export function ChatComposer ({
   sending = false,
   sendDisabled = false,
   editable = true,
-  placeholder = 'Escreva uma mensagem',
+  // One short word: "Escreva uma mensagem" wrapped and was clipped in the
+  // single-line field on a 320 pt screen.
+  placeholder = 'Mensagem',
   accessibilityLabel = 'mensagem',
   reply = null,
   onCancelReply,

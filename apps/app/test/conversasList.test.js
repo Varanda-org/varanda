@@ -231,3 +231,46 @@ test('group names with no visible character fall back to Geral or Grupo', async 
     t.is(plain.title, 'Grupo', JSON.stringify(name))
   }
 })
+
+test('Comunidades separates Minhas comunidades from Descobrir and tells the search states apart', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
+  const mine = src.indexOf('<SectionHeader>Minhas comunidades</SectionHeader>')
+  const discover = src.indexOf('<SectionHeader>Descobrir</SectionHeader>')
+  t.ok(mine > 0 && discover > 0, 'both headers')
+  // The search goes first: a field under a long list ends up under the keyboard.
+  const header = src.slice(src.indexOf('  const header = ('), src.indexOf('\n  )\n', src.indexOf('  const header = (')))
+  t.ok(header.indexOf('{discover}') > 0 && header.indexOf('{discover}') < header.indexOf('{mineSection}'), 'Descobrir above Minhas comunidades')
+  t.absent(src.includes('ListFooterComponent={discover}'), 'not under the rows')
+  t.ok(src.includes("label='Buscar grupos públicos'"), 'the true search label stays')
+  t.ok(src.includes('<Soft>O resultado abre um grupo da comunidade</Soft>'), 'one line says what a hit opens')
+  t.ok(src.includes("'na comunidade ' + community"), 'each hit names its community')
+  t.ok(src.includes("label='Tentar de novo' onPress={() => search.retry()}"), 'an error offers a retry')
+  t.ok(src.includes('v.complete === false') && src.includes('<Soft>Alguns grupos podem faltar</Soft>'), 'an incomplete index says groups may be missing')
+  t.ok(src.includes('search.unavailable'), 'an absent index is not a retryable error')
+  t.absent(src.includes('Platform.OS'), 'no platform check')
+})
+
+test('a group search result shows its community and count on up to two lines', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidades.js'), 'utf8')
+  t.ok(src.includes('numberOfLines={metaLines}') && src.includes('metaLines={3}'), 'search meta wraps')
+  t.ok(src.indexOf("label='Buscar grupos públicos'") < src.indexOf('O resultado abre um grupo da comunidade'), 'the hint follows the field')
+})
+
+test('the Comunidades list shrinks above the keyboard, so a search result can be reached', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidades.js'), 'utf8')
+  t.ok(src.includes("import { KeyboardForm } from './Perfil'") && src.indexOf('<KeyboardForm>') < src.indexOf('<RefreshableList') && src.indexOf('</KeyboardForm>') > src.indexOf('<RefreshableList'), 'the list sits in the keyboard form')
+})
+
+test('the group search is typed as is', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidades.js'), 'utf8')
+  const ui = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ui', 'index.js'), 'utf8')
+  t.ok(/returnKeyType='search'\s+plain/.test(src), 'the field is plain')
+  t.ok(ui.includes("mono || plain ? { autoCapitalize: 'none', autoCorrect: false, spellCheck: false }"), 'plain turns capitals and autocorrect off')
+})
+
+test('opening a community or group from Comunidades closes the search keyboard', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidades.js'), 'utf8')
+  const at = (name) => src.slice(src.indexOf('const ' + name + ' = useCallback('), src.indexOf('}, [', src.indexOf('const ' + name + ' = useCallback(')))
+  t.ok(at('openCommunity').includes('Keyboard.dismiss()'), 'community')
+  t.ok(at('openGroup').includes('Keyboard.dismiss()'), 'group')
+})

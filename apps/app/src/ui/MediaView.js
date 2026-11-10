@@ -91,7 +91,10 @@ function useMedia (author, descriptor, persist) {
   return { state: 'loading', url: null, retry }
 }
 
-export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cover', style, onPress, dark, persist = true }) {
+// tapRetry false: a failed photo stays a plain image (no retry button of its
+// own), for a parent control that owns the press, such as a Mural tile; the
+// automatic retries still run.
+export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cover', style, onPress, dark, persist = true, tapRetry = true }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const local = uri !== undefined
@@ -100,8 +103,8 @@ export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cov
     ? { state: isShownUrl(uri) ? 'ok' : 'error', url: isShownUrl(uri) ? uri : null, retry: undefined }
     : fetched
   const failed = state === 'error'
-  const press = failed ? retry : onPress
-  const a11y = failed ? label + ', indisponível; toque para tentar de novo' : label
+  const press = failed ? (tapRetry ? retry : undefined) : onPress
+  const a11y = failed ? label + (tapRetry ? ', indisponível; toque para tentar de novo' : ', indisponível') : label
   let inner
   if (state === 'ok') {
     inner = <Image source={{ uri: url }} style={styles.fill} resizeMode={fit} accessibilityIgnoresInvertColors />

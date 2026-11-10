@@ -60,8 +60,15 @@ function loadNode () {
   return loading
 }
 
+// The script is large, so the page asks for it while /varanda.json is still
+// in flight (connect.web.js). A failure stays quiet: this never opens a
+// session, and the connect that needs the node is what reports the miss.
+export function preloadNode () {
+  loadNode().catch(() => {})
+}
+
 // The node's media facade in the native handle's shape
-// (./webnode.native.js), so screens see one API: upload, putDm and
+// (./webnode.native.js), so screens see one API: upload, putDm, putMoment and
 // read(ref) -> { bytes, mime, w, h } (the native handle answers a uri
 // instead). Here the bytes never cross RPC: they stay in the page. A method
 // the facade lacks is a capability this node does not have.
@@ -71,14 +78,16 @@ export function mediaOf (facade) {
   const out = {}
   if (has('upload')) out.upload = (args) => facade.upload(args)
   if (has('putDm')) out.putDm = (args) => facade.putDm(args)
-  if (has('readDm') || has('readGroup')) {
+  if (has('putMoment')) out.putMoment = (args) => facade.putMoment(args)
+  if (has('readDm') || has('readGroup') || has('readMoment')) {
     out.read = async (ref) => {
       if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
-      const dm = ref.kind === 'dm'
-      if (!has(dm ? 'readDm' : 'readGroup')) throw new TypeError('mídia inválida')
-      const got = dm
-        ? await facade.readDm({ from: ref.from, id: ref.id, index: ref.index })
-        : await facade.readGroup({ diary: ref.diary, item: ref.item })
+      const call = ref.kind === 'dm' ? 'readDm' : ref.kind === 'moment' ? 'readMoment' : 'readGroup'
+      if (!has(call)) throw new TypeError('mídia inválida')
+      let got
+      if (call === 'readDm') got = await facade.readDm({ from: ref.from, id: ref.id, index: ref.index })
+      else if (call === 'readMoment') got = await facade.readMoment({ author: ref.author, seq: ref.seq })
+      else got = await facade.readGroup({ diary: ref.diary, item: ref.item })
       let w = got.w
       let h = got.h
       if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h)) {

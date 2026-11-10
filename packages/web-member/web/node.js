@@ -55,6 +55,14 @@
 //                          groupReadMedia: a private group item fetched from
 //                          the node's own seeder and opened; 'mídia
 //                          indisponível' on any failure)
+//   media.putMoment({ bytes, mime, width, height })
+//                       -> Promise<media item>  (lib/node.js momentPutMedia:
+//                          a momento's photo sealed in a fresh blob; the item
+//                          goes back unchanged in moment.create `media`)
+//   media.readMoment({ author, seq })
+//                       -> Promise<{ bytes, mime, w, h }>  (lib/node.js
+//                          momentReadMedia: the momento's photo opened with
+//                          its public key; 'foto indisponível' when gone)
 //   follows.legacy()    -> Promise<{ keys }>  (the follows kept from before
 //                          `follow` records existed, awaiting confirmation)
 //   follows.confirmLegacy(keys)
@@ -1548,6 +1556,21 @@ async function start ({ association, seederUrl } = {}) {
         readGroup (args) {
           try {
             return Promise.resolve(node.groupReadMedia(args))
+          } catch (err) {
+            return Promise.reject(err)
+          }
+        },
+        // Synchronous as putDm: the node copies the photo before any await.
+        putMoment (args) {
+          try {
+            return Promise.resolve(node.momentPutMedia(args))
+          } catch (err) {
+            return Promise.reject(err)
+          }
+        },
+        readMoment ({ author, seq } = {}) {
+          try {
+            return Promise.resolve(node.momentReadMedia({ author, seq }))
           } catch (err) {
             return Promise.reject(err)
           }

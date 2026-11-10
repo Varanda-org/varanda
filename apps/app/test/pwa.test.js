@@ -123,13 +123,21 @@ test('the service worker is a template outside public/', (t) => {
   for (const s of ['skipWaiting', 'clients.claim', 'cache.addAll', 'importScripts', 'eval(', 'RUNTIME_PREFIXES']) {
     t.absent(sw.includes(s), 'no ' + s)
   }
-  // Besides the shell, the only cache entry is the DM wake mute record: a
-  // value the worker writes itself, never a network response, never served.
-  t.is(sw.split('cache.put(').length - 1, 2, 'two cache.put: precache and the DM mute record (no runtime caching)')
+  // Besides the shell, the only cache entries are the DM wake mute record and
+  // the block list: values the worker writes itself, never a network response,
+  // never served.
+  t.is(sw.split('cache.put(').length - 1, 3, 'three cache.put: precache, the DM mute record and the block list (no runtime caching)')
   t.is(sw.split('cache.put(DM_STATE_KEY, ').length - 1, 1, 'the second writes only the DM mute record')
+  t.is(sw.split('cache.put(BLOCK_STATE_KEY, ').length - 1, 1, 'the third writes only the block list')
   t.ok(sw.includes('async function verifiedMatch ('), 'cached responses are re-verified')
-  t.is(sw.split('.match(').length - 1, 2, 'two cache reads: verifiedMatch and the DM mute record')
+  t.is(sw.split('.match(').length - 1, 3, 'three cache reads: verifiedMatch, the DM mute record and the block list')
   t.is(sw.split('cache.match(DM_STATE_KEY)').length - 1, 1, 'the second reads only the DM mute record')
+  t.is(sw.split('cache.match(BLOCK_STATE_KEY)').length - 1, 1, 'the third reads only the block list')
   t.ok(sw.includes("new Response(buf, { status: 200, statusText: 'OK', headers })"), 'a cache hit is rebuilt, never returned as stored')
   t.absent(/<script/i.test(html), 'index.html still has no script tag')
+})
+
+test('round 8: html and body never pan or bounce after a screen push', (t) => {
+  t.ok(/html,\s*body \{\s*overflow: hidden;/.test(html), 'html is clipped too')
+  t.ok(/html,\s*body \{\s*overscroll-behavior: none;/.test(html), 'no overscroll on either axis')
 })

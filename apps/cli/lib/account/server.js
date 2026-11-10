@@ -23,6 +23,8 @@ const { LINK_HEADER, REDEEM_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, p
 const { createPagesRoutes } = require('./pages-routes')
 const { createGifRoutes } = require('./gif-routes')
 const { createPreviewRoutes } = require('./preview-routes')
+const { createFeiraRoutes } = require('./feira-routes')
+const { createOgRoutes } = require('./og-routes')
 
 // The account service's HTTPS surface (behind Caddy, deploy/seeder/Caddyfile
 // `handle /account/*`): the member proves its diary key over a single-use
@@ -122,6 +124,9 @@ const ERROR_STATUS = Object.freeze({
   'nao-vinculado': 403,
   'nao-autorizado': 401,
   'limite-denuncias': 429,
+  // An appeal (./mod-routes.js): only a blocked key appeals, once per window.
+  'nao-bloqueado': 403,
+  'limite-recursos': 429,
   limite: 503,
   defasado: 409,
   // A group block whose key the seeder did not confirm as a group root.
@@ -156,6 +161,9 @@ const ERROR_STATUS = Object.freeze({
   // invite for a key whose age band is not on record.
   'idade-pendente': 403,
   'limite-idade': 429,
+  // A Feira code on POST /account/age/session: its paid session opens only
+  // through POST /account/feira/idade, which the edge limits per address.
+  'use-a-rota-da-feira': 409,
   // The age routes could not tell whether something was applied (the provider
   // timed out after maybe creating a session, a write that may have landed):
   // unlike 'indisponivel', the app must not read this as a plain refusal.
@@ -680,6 +688,12 @@ function checkRawPost (req, origin) {
 // `androidCertSha256` (VARANDA_ANDROID_CERT_SHA256, '' for none) adds the
 // Android app's origin to the ones a passkey assertion may report
 // (./webauthn.js passkeyOrigins).
+// `listingReader` (a createListingReader of ./feira-read.js, or null) is the
+// one loopback listing reader, shared by the Feira entry and ./mod-routes.js.
+// `feiraInvites` (the Feira's openInvitesStore, feira-invites.json, or null:
+// off) turns the /account/feira/* routes of ./feira-routes.js on together
+// with `listingReader`; `invites` is then the ./invites-pair.js facade over
+// both stores, so sign-up and Excluir conta see the Feira codes too.
 function createAccountServer ({
   association,
   origin,
@@ -715,6 +729,8 @@ function createAccountServer ({
   recovery = null,
   drops = null,
   passkeys = null,
+  listingReader = null,
+  feiraInvites = null,
   androidCertSha256 = '',
   maxConnections = MAX_SOCKETS,
   ratePerSecond = DEFAULT_RATE,
@@ -761,6 +777,7 @@ function createAccountServer ({
     statsEmails,
     usage,
     groupCheck,
+    listingReader,
     panelDir,
     log,
     now,
@@ -943,6 +960,28 @@ function createAccountServer ({
     log,
     now,
     http: { send, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, keyedWindow }
+  })
+
+  // Always mounted, so /account/feira/policy answers even when the Feira is off.
+  const feiraRoutes = createFeiraRoutes({
+    enabled: feiraInvites !== null && listingReader !== null,
+    invites: feiraInvites,
+    reader: listingReader,
+    store,
+    pagesStore: pages !== null && pages.pagesStore ? pages.pagesStore : null,
+    log,
+    now,
+    http: { send, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow }
+  })
+
+  // Messenger link previews of signup invite links (./og-routes.js).
+  const ogRoutes = createOgRoutes({
+    origin,
+    store,
+    invites,
+    limits: { lookup: limits.lookup },
+    log,
+    http: { RouteError, refuse }
   })
 
   // With age verification on, no key without a band on record gets a Google
@@ -1699,6 +1738,8 @@ function createAccountServer ({
     if (pagesRoutes.owns(pathname)) return pagesRoutes.handle(req, res, url)
     if (gifRoutes.owns(pathname)) return gifRoutes.handle(req, res, url)
     if (previewRoutes.owns(pathname)) return previewRoutes.handle(req, res, url)
+    if (feiraRoutes.owns(pathname)) return feiraRoutes.handle(req, res, url)
+    if (ogRoutes.owns(pathname)) return ogRoutes.handle(req, res, url)
     if (req.method === 'GET') {
       if (pathname === '/account/callback') return callback(req, res, url)
       if (pathname === APP_RETURN_PATH) return appReturn(res)
@@ -1750,7 +1791,7 @@ function createAccountServer ({
       closing = new Promise((resolve) => {
         server.close(() => resolve())
         server.closeAllConnections()
-      })
+      }).then(() => pagesRoutes.close())
       return closing
     }
 
@@ -1793,7 +1834,7 @@ function createAccountServer ({
     return pushRoutes === null ? 0 : pushRoutes.room()
   }
 
-  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {

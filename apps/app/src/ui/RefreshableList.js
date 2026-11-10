@@ -85,6 +85,12 @@ function renderSlot (slot) {
 // react-native-web 0.21 drops the prop, so the web gets only what the
 // browser's own scroll anchoring does.
 const KEEP_VISIBLE = Object.freeze({ minIndexForVisible: 0, autoscrollToTopThreshold: 24 })
+// Fewer rows per pass than FlatList's defaults (10 first, 10 per batch, 21
+// screens): the first rows paint sooner on a slow phone, and 7 screens still
+// keep a fast fling inside rendered content.
+const FIRST_ROWS = 8
+const ROWS_PER_BATCH = 8
+const WINDOW_SCREENS = 7
 
 export function RefreshableList ({
   data,
@@ -106,7 +112,9 @@ export function RefreshableList ({
   newItemsTop,
   listRef,
   keepVisiblePosition = false,
-  onScrollFrame
+  onScrollFrame,
+  onContentSizeChange,
+  onUserScroll
 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -120,6 +128,13 @@ export function RefreshableList ({
     if (typeof listRef === 'function') listRef(node)
     else if (listRef) listRef.current = node
   }, [listRef])
+  const userScroll = useRef(onUserScroll)
+  userScroll.current = onUserScroll
+  const notifyUserScroll = useCallback(() => {
+    if (typeof userScroll.current === 'function') userScroll.current()
+  }, [])
+  const userTouch = useRef(false)
+  const userWheelAt = useRef(null)
 
   // Infinite scroll. check() is the one place that starts a page (endStep):
   // - `fired` allows one onLoadMore per end reach; it is re-armed when a busy
@@ -371,6 +386,9 @@ export function RefreshableList ({
     const onWheel = (e) => {
       // A pinch zoom (ctrlKey) or a touch pull in progress is not a wheel pull.
       if (e.ctrlKey || touch.current !== null) return
+      const now = Date.now()
+      if (!userTouch.current && (userWheelAt.current === null || now - userWheelAt.current > WHEEL_DECAY_MS)) notifyUserScroll()
+      userWheelAt.current = now
       const unit = e.deltaMode === 1 ? LINE_PX : (e.deltaMode === 2 ? (node.clientHeight || 1) : 1)
       const l = live.current
       const s = wheelPullState(wheel.current, {
@@ -391,12 +409,22 @@ export function RefreshableList ({
       if (wheelTimer.current) clearTimeout(wheelTimer.current)
       wheelTimer.current = setTimeout(onIdle, WHEEL_DECAY_MS)
     }
+    // A keyboard scroll moves in small smooth steps that never look like a
+    // move up to the frame heuristic, and a scrollbar drag has no wheel.
+    const onKeyDown = (e) => {
+      if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home' || (e.key === ' ' && e.shiftKey)) notifyUserScroll()
+    }
+    const onMouseDown = () => notifyUserScroll()
     node.addEventListener('wheel', onWheel, { passive: true })
+    node.addEventListener('keydown', onKeyDown, { passive: true })
+    node.addEventListener('mousedown', onMouseDown, { passive: true })
     return () => {
       node.removeEventListener('wheel', onWheel, { passive: true })
+      node.removeEventListener('keydown', onKeyDown, { passive: true })
+      node.removeEventListener('mousedown', onMouseDown, { passive: true })
       reset()
     }
-  }, [distance, progress])
+  }, [distance, progress, notifyUserScroll])
 
   // A ref, so a new callback each render does not rebuild onScroll.
   const scrollFrame = useRef(onScrollFrame)
@@ -417,12 +445,15 @@ export function RefreshableList ({
       setPaused(false)
     }
   }, [check, paused])
+  const contentSizeChange = useRef(onContentSizeChange)
+  contentSizeChange.current = onContentSizeChange
   // Short lists never scroll: their end reach comes from laying them out.
-  const onContentSizeChange = useCallback((w, h) => {
+  const handleContentSizeChange = useCallback((w, h) => {
     metrics.current = { ...metrics.current, content: h }
     measured.current = true
     endLayoutWait()
     check()
+    if (typeof contentSizeChange.current === 'function') contentSizeChange.current(w, h)
   }, [check])
   const onLayout = useCallback((e) => {
     metrics.current = { ...metrics.current, layout: e.nativeEvent.layout.height }
@@ -434,6 +465,8 @@ export function RefreshableList ({
   // rejected lock, a start while tracking) hides it unless a refresh is busy.
   const onTouchStart = useCallback((e) => {
     const ev = e.nativeEvent
+    if (!userTouch.current) notifyUserScroll()
+    userTouch.current = true
     const abandoned = touch.current !== null
     touch.current = null
     if (abandoned && !busy.current) hide()
@@ -442,7 +475,7 @@ export function RefreshableList ({
     if (ignoredTarget(e.target)) return
     const t = ev.touches[0]
     touch.current = { startX: t.pageX, startY: t.pageY, lock: null, armed: false }
-  }, [refreshing, hide])
+  }, [refreshing, hide, notifyUserScroll])
 
   const onTouchMove = useCallback((e) => {
     const cur = touch.current
@@ -478,7 +511,8 @@ export function RefreshableList ({
     }
   }, [refreshing, distance, progress, hide])
 
-  const onTouchEnd = useCallback(() => {
+  const onTouchEnd = useCallback((e) => {
+    if (!e.nativeEvent.touches || e.nativeEvent.touches.length === 0) userTouch.current = false
     const cur = touch.current
     touch.current = null
     if (busy.current) return
@@ -493,6 +527,7 @@ export function RefreshableList ({
   }, [refreshing, runRefresh, hide, showIndicator])
 
   const onTouchCancel = useCallback(() => {
+    userTouch.current = false
     touch.current = null
     if (!busy.current) hide()
   }, [hide])
@@ -555,6 +590,9 @@ export function RefreshableList ({
         renderItem={renderItem}
         keyExtractor={keyExtractor}
         extraData={extraData}
+        initialNumToRender={FIRST_ROWS}
+        maxToRenderPerBatch={ROWS_PER_BATCH}
+        windowSize={WINDOW_SCREENS}
         ListHeaderComponent={ListHeaderComponent}
         ListFooterComponent={footer}
         ListEmptyComponent={ListEmptyComponent}
@@ -563,7 +601,8 @@ export function RefreshableList ({
         onEndReachedThreshold={END_THRESHOLD}
         keyboardShouldPersistTaps='handled'
         onScroll={onScroll}
-        onContentSizeChange={onContentSizeChange}
+        onScrollBeginDrag={web ? undefined : notifyUserScroll}
+        onContentSizeChange={handleContentSizeChange}
         onLayout={onLayout}
         scrollEventThrottle={16}
         dataSet={{ pull: 'y' }}

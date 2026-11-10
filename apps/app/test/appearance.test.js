@@ -22,7 +22,7 @@ test('light palette keeps the strings the app shipped with', async (t) => {
     outline: 'rgba(31,42,36,0.30)',
     ring: 'rgba(31,42,36,0.12)',
     dim: 'rgba(31,42,36,0.35)',
-    tabBar: 'rgba(251,248,243,0.94)',
+    tabBar: 'rgba(251,248,243,1)',
     danger: '#a3201a',
     warn: '#8a5a00',
     placeholder: '#616c67',
@@ -35,6 +35,12 @@ test('light palette keeps the strings the app shipped with', async (t) => {
     bubbleMine: '#d9efe2'
   })
   t.ok(Object.isFrozen(light))
+})
+
+test('tab bar is opaque in both palettes so content does not show through', async (t) => {
+  const { light, dark } = await load()
+  t.is(light.tabBar, 'rgba(251,248,243,1)')
+  t.is(dark.tabBar, 'rgba(28,38,34,1)')
 })
 
 test('dark palette shares the keys and is warm green ink, not black', async (t) => {

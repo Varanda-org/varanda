@@ -20,7 +20,11 @@ import { can, joinLink, reconcile, roleOf, writerOnDevice } from '../groups'
 import { installationOrigin } from '../installation'
 import { inviteText } from '../inviteMessage'
 import { InviteByName } from '../ui/InviteByName'
-import { Btn, ErrorText, Field, Label, Notice, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { Btn, ConfirmStack, ErrorText, Field, Notice, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { MoreButton } from '../ui/MoreButton'
+import { ActionsSheet } from '../ui/ActionsSheet'
+import { Avatar } from '../ui/Avatar'
+import { publicGroupRefusal } from '../wordCheck'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
 import { Skeleton } from '../ui/States'
@@ -54,6 +58,7 @@ function PersonRow ({ row, label, onOpenMember, children }) {
   const name = nameOf(row)
   return (
     <View style={styles.person}>
+      <Avatar name={name} publicKey={row.member} size={40} />
       <View style={styles.personText}>
         {typeof onOpenMember === 'function'
           ? <Text style={styles.name} accessibilityRole='link' accessibilityLabel={name + ', ver perfil'} onPress={() => onOpenMember(row.member)} numberOfLines={1}>{name}</Text>
@@ -79,6 +84,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
   const [loading, setLoading] = useState(false)
   const [check, setCheck] = useState(null)
   const [confirm, setConfirm] = useState(null)
+  const [policyOpen, setPolicyOpen] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const act = useAction()
   const more = useAction()
@@ -136,19 +142,6 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     }).catch(() => {})
     return () => { live = false }
   }, [visible, request, communityKey])
-
-  // App's web Escape handler pops the screen stack unless the event was
-  // handled: while this sheet is open, Escape closes only the sheet.
-  useEffect(() => {
-    if (!visible || typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
-    const onKey = (event) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      if (typeof onClose === 'function') onClose()
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [visible, onClose])
 
   const loadMore = async (kind) => {
     const current = kind === 'members' ? members : requests
@@ -275,7 +268,8 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     setShareNote((await copyText(nav, url)) ? 'Link copiado.' : 'Não foi possível copiar o link.')
   }
   const newName = nameDraft.trim()
-  const nameOk = newName !== '' && countChars(newName) <= MAX_GROUP_NAME && newName !== info?.name
+  const nameRefused = publicGroupRefusal(info?.visibility, newName)
+  const nameOk = newName !== '' && countChars(newName) <= MAX_GROUP_NAME && nameRefused === '' && newName !== info?.name
 
   // On the web the sheet's Modal is a portal that would stay over the
   // destination: close it before navigating.
@@ -286,10 +280,10 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     ? (
       <View style={styles.box}>
         <Soft>{confirm.text}</Soft>
-        <View style={styles.inline}>
-          <Btn label={confirm.label} danger onPress={() => confirm.run()} pending={act.pending} />
-          <Btn label='Cancelar' secondary onPress={() => setConfirm(null)} />
-        </View>
+        <ConfirmStack
+          confirm={{ label: confirm.label, danger: true, onPress: () => confirm.run(), pending: act.pending }}
+          cancel={{ onPress: () => setConfirm(null) }}
+        />
       </View>
       )
     : null
@@ -300,9 +294,9 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
         <Notice>{check.verdict === 'not-landed' ? CHECK_NOT_LANDED : CHECK_UNKNOWN}</Notice>
         <View style={styles.inline}>
           {check.verdict === 'not-landed'
-            ? <Pill label='tentar de novo' onPress={() => { setCheck(null); check.retry() }} />
-            : <Pill label='conferir' onPress={() => settle(check.change, check.retry)} />}
-          <Pill label='dispensar' onPress={() => setCheck(null)} />
+            ? <Pill label='Tentar de novo' onPress={() => { setCheck(null); check.retry() }} />
+            : <Pill label='Conferir' onPress={() => settle(check.change, check.retry)} />}
+          <Pill label='Dispensar' onPress={() => setCheck(null)} />
         </View>
       </View>
       )
@@ -311,12 +305,16 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
   const memberActions = (m) => {
     if (m.member === creator || isOwn(m.member)) return null
     return (
-      <>
-        {can('admin', role) ? <Pill label={m.admin ? 'tirar admin' : 'tornar admin'} onPress={() => admin(m.member, !m.admin)} pending={act.pending} /> : null}
-        {staff && !m.admin
-          ? <Pill label='banir' danger pending={act.pending} onPress={() => setConfirm({ text: 'Banir ' + nameOf(m) + ' deste grupo?', label: 'Banir', run: () => ban(m.member, true) })} />
-          : null}
-      </>
+      <MoreButton
+        label={'ações de ' + nameOf(m)}
+        title={nameOf(m)}
+        actions={[
+          can('admin', role) ? { icon: 'shield', label: m.admin ? 'Tirar admin' : 'Tornar admin', pending: act.pending, onPress: () => admin(m.member, !m.admin) } : null,
+          staff && !m.admin
+            ? { icon: 'slash', label: 'Banir', danger: true, pending: act.pending, onPress: () => setConfirm({ text: 'Banir ' + nameOf(m) + ' deste grupo?', label: 'Banir', run: () => ban(m.member, true) }) }
+            : null
+        ]}
+      />
     )
   }
 
@@ -327,7 +325,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     body = (
       <View style={styles.box}>
         <ErrorText>{loadError}</ErrorText>
-        <Pill label='tentar de novo' onPress={load} />
+        <Pill label='Tentar de novo' onPress={load} />
       </View>
     )
   } else {
@@ -340,12 +338,14 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
 
         {link0
           ? (
-            <View style={styles.box}>
-              <Label>Convite</Label>
-              <Soft>Envie o convite deste grupo para quem você quiser.</Soft>
-              <Btn label='Compartilhar' onPress={() => shareInvite(link0)} secondary />
-              {shareNote ? <Soft>{shareNote}</Soft> : null}
-              <Soft>{isPrivate ? 'Grupo privado: quem abrir o convite pede para entrar, e um administrador aprova.' : 'Quem abrir o convite pode entrar no grupo.'}</Soft>
+            <View>
+              <SectionHeader>Convite</SectionHeader>
+              <View style={styles.box}>
+                <Soft>Envie o convite deste grupo para quem você quiser.</Soft>
+                <Btn label='Compartilhar' onPress={() => shareInvite(link0)} secondary />
+                {shareNote ? <Soft>{shareNote}</Soft> : null}
+                <Soft>{isPrivate ? 'Grupo privado: quem abrir o convite pede para entrar, e um administrador aprova.' : 'Quem abrir o convite pode entrar no grupo.'}</Soft>
+              </View>
             </View>
             )
           : null}
@@ -357,6 +357,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
               <View style={styles.box}>
                 <Field label='Novo nome' value={nameDraft} onChangeText={setNameDraft} maxLength={MAX_GROUP_NAME * 2} placeholder={typeof info.name === 'string' ? displayText(info.name) : ''} />
                 {countChars(newName) > MAX_GROUP_NAME ? <Soft>{'No máximo ' + MAX_GROUP_NAME + ' caracteres.'}</Soft> : null}
+                <ErrorText>{nameRefused}</ErrorText>
                 <Btn label='Renomear' onPress={() => rename(newName)} disabled={!nameOk || !node.online} pending={act.pending} />
               </View>
             </View>
@@ -390,9 +391,17 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
               <SectionHeader>Quem pode convidar</SectionHeader>
               <View style={styles.box}>
                 <View style={styles.inline}>
-                  <Pill label='Só administradores' filled={info.memberInvite !== true} onPress={() => setInvitePolicy(false)} disabled={!node.online || info.memberInvite !== true} />
-                  <Pill label='Membros podem convidar' filled={info.memberInvite === true} onPress={() => setInvitePolicy(true)} disabled={!node.online || info.memberInvite === true} />
+                  <Pill label={info.memberInvite === true ? 'Membros podem convidar' : 'Só administradores'} iconEnd='escolher' onPress={() => setPolicyOpen(true)} disabled={!node.online} />
                 </View>
+                <ActionsSheet
+                  open={policyOpen}
+                  onClose={() => setPolicyOpen(false)}
+                  title='Quem pode convidar'
+                  actions={[
+                    { label: 'Só administradores', selected: info.memberInvite !== true, disabled: !node.online || info.memberInvite !== true, onPress: () => setInvitePolicy(false) },
+                    { label: 'Membros podem convidar', selected: info.memberInvite === true, disabled: !node.online || info.memberInvite === true, onPress: () => setInvitePolicy(true) }
+                  ]}
+                />
                 <Soft>Um convite só avisa a pessoa. Quem recebe escolhe se entra.</Soft>
               </View>
             </View>
@@ -406,11 +415,11 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
               {requests.rows.length === 0 ? <View style={styles.box}><Soft>Nenhum pedido agora.</Soft></View> : null}
               {requests.rows.map((r) => (
                 <PersonRow key={r.member} row={r} onOpenMember={openMember}>
-                  <Pill label='aprovar' filled onPress={() => admit(r.member, true)} pending={act.pending} />
-                  <Pill label='recusar' onPress={() => admit(r.member, false)} pending={act.pending} />
+                  <Pill icon='ok' accessibilityLabel={'Aprovar ' + nameOf(r)} filled onPress={() => admit(r.member, true)} pending={act.pending} />
+                  <Pill icon='fechar' accessibilityLabel={'Recusar ' + nameOf(r)} onPress={() => admit(r.member, false)} pending={act.pending} />
                 </PersonRow>
               ))}
-              {requests.rows.length < requests.total ? <View style={styles.box}><Pill label='mais pedidos' onPress={() => loadMore('requests')} pending={more.pending} /></View> : null}
+              {requests.rows.length < requests.total ? <View style={styles.box}><Pill label='Mais pedidos' onPress={() => loadMore('requests')} pending={more.pending} /></View> : null}
             </View>
             )
           : null}
@@ -421,14 +430,14 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
             {memberActions(m)}
           </PersonRow>
         ))}
-        {members.rows.length < members.total ? <View style={styles.box}><Pill label='mais membros' onPress={() => loadMore('members')} pending={more.pending} /></View> : null}
+        {members.rows.length < members.total ? <View style={styles.box}><Pill label='Mais membros' onPress={() => loadMore('members')} pending={more.pending} /></View> : null}
         <ErrorText>{more.error}</ErrorText>
 
         <SectionHeader>Administradores</SectionHeader>
         {admins.length === 0 ? <View style={styles.box}><Soft>Nenhum administrador listado.</Soft></View> : null}
         {admins.map((m) => (
           <PersonRow key={'a' + m.member} row={m} label={m.member === creator ? 'criador' : 'administrador'} onOpenMember={openMember}>
-            {can('admin', role) && m.member !== creator ? <Pill label='tirar admin' onPress={() => admin(m.member, false)} pending={act.pending} /> : null}
+            {can('admin', role) && m.member !== creator ? <Pill label='Tirar admin' onPress={() => admin(m.member, false)} pending={act.pending} /> : null}
           </PersonRow>
         ))}
 
@@ -439,7 +448,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
               {banned.length === 0 ? <View style={styles.box}><Soft>Ninguém banido.</Soft></View> : null}
               {banned.map((m) => (
                 <PersonRow key={'b' + m.member} row={m} onOpenMember={openMember}>
-                  {staff ? <Pill label='desbanir' onPress={() => ban(m.member, false)} pending={act.pending} /> : null}
+                  {staff ? <Pill label='Desbanir' onPress={() => ban(m.member, false)} pending={act.pending} /> : null}
                 </PersonRow>
               ))}
             </View>
@@ -492,9 +501,10 @@ const makeStyles = (colors) => StyleSheet.create({
   person: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 12,
     paddingVertical: 10,
     paddingHorizontal: 16,
+    minHeight: 60,
     borderBottomWidth: 1,
     borderBottomColor: colors.line
   },

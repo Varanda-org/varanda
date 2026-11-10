@@ -66,7 +66,7 @@ test('response: success and error', (t) => {
 })
 
 test('event names and stop reasons (sync.started and preempted included)', (t) => {
-  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed', 'dm.sending', 'seen.changed'])
+  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed', 'dm.sending', 'seen.changed', 'dm.pageKeyMismatch'])
   t.alike([...STOP_REASONS], ['done', 'stopped', 'preempted', 'timeout', 'error', 'idle'])
   t.is(STOP_REASONS.length, 6)
   t.ok(Object.isFrozen(EVENTS))
@@ -131,6 +131,25 @@ test('event: dm.changed', (t) => {
   t.ok(ev({ added: 8 }).ok)
   t.alike(ev({ added: 2 }).value, { v: 1, event: 'dm.changed', seq: 1, data: { added: 2 } })
   for (const data of [{}, { added: -1 }, { added: 1.5 }, { added: '1' }, { added: null }, { added: 2 ** 53 }, { added: 1, peer: 'ab'.repeat(32) }, { count: 1 }, [], null]) {
+    t.absent(ev(data).ok, JSON.stringify(data))
+  }
+})
+
+test('event: dm.changed with a page', (t) => {
+  const ev = (data) => validateEvent({ v: 1, event: 'dm.changed', seq: 1, data })
+  const page = 'cd'.repeat(32)
+  t.ok(ev({ added: 1, page }).ok)
+  t.alike(ev({ added: 1, page }).value.data, { added: 1, page })
+  for (const data of [{ added: 1, page: 'x' }, { added: 1, page: null }, { page }, { added: 1, page, peer: page }]) {
+    t.absent(ev(data).ok, JSON.stringify(data))
+  }
+})
+
+test('event: dm.pageKeyMismatch', (t) => {
+  const ev = (data) => validateEvent({ v: 1, event: 'dm.pageKeyMismatch', seq: 1, data })
+  const page = 'cd'.repeat(32)
+  t.ok(ev({ page }).ok)
+  for (const data of [{}, { page: 'x' }, { page, added: 1 }, [], null]) {
     t.absent(ev(data).ok, JSON.stringify(data))
   }
 })

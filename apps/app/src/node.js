@@ -67,8 +67,8 @@
 // height, sealed?, onProgress }) -> Promise<descriptor or private item>; the
 // caller shows its errors (errorText). When the handle has them, also the
 // chat media calls (client/webnode.native.js, client/browser.js mediaOf):
-// putDm(args), read(ref), forgetReadFile(name), clearReadFiles(); a missing
-// one means that capability is absent.
+// putDm(args), putMoment(args), read(ref), forgetReadFile(name),
+// clearReadFiles(); a missing one means that capability is absent.
 //
 // `followsVersion` is bumped once per `follows.changed` event (the follows
 // of the own diary changed, possibly on another device) and `followCount` is
@@ -106,6 +106,12 @@
 // resolves at once. Every awaited continuation re-checks the connection,
 // epoch and passkey generation.
 // `signals` folds the sync events into UI hints (syncSignals.js).
+// Contexts: a sync log line or a download hint arrives dozens of times a
+// second while many diaries sync, so neither rides in the useNode() value
+// (which every Avatar, MediaView, LinkCard and screen reads). useSyncLines()
+// carries the log and useSyncSignals() the folded hints; useNode() keeps
+// sync { active, stopped, starting } and `signals` as a run-flags view
+// (see runFlags) that does not change on download lines.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { displayText, isMutating } from '@varanda/rpc'
@@ -124,9 +130,11 @@ import { errorText } from './ui'
 import { accountOriginOf } from './pageGate'
 import { slowRequestLine } from './slowRequest'
 import { createIdleTracker } from './idle'
+import { createRequestQueue } from './requestQueue'
 import { noteOwnDmDrop } from './dmWakeMute'
 import { setDmDropObserver } from './pages'
-import { vitrineEnabled } from './vitrine/enabled'
+import { vitrineEnabled, vitrineLarge } from './vitrine/enabled'
+import { createMarks, devHookRequest, perfEnabled } from './perfMarks'
 import { recoveryFetch } from './account'
 import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 
@@ -175,12 +183,36 @@ function appendLine (prev, line) {
 }
 
 const NodeContext = createContext(null)
+const EMPTY_LINES = Object.freeze([])
+const SyncLinesContext = createContext(EMPTY_LINES)
+const SyncSignalsContext = createContext(EMPTY_SIGNALS)
 
 // The chat media calls a handle may offer besides upload (see the header).
-const CHAT_MEDIA_CALLS = ['putDm', 'read', 'forgetReadFile', 'clearReadFiles']
+const CHAT_MEDIA_CALLS = ['putDm', 'putMoment', 'read', 'forgetReadFile', 'clearReadFiles']
 
 export function useNode () {
   return useContext(NodeContext)
+}
+
+// The last sync event and warning lines (at most MAX_SYNC_LINES).
+export function useSyncLines () {
+  return useContext(SyncLinesContext)
+}
+
+// The full folded sync hints (lengths, newest, fresh, lastDownloadAt, ...).
+export function useSyncSignals () {
+  return useContext(SyncSignalsContext)
+}
+
+// What useNode().signals keeps for screens that only need the run flags and
+// the own diary's growth: the per-diary maps and lastDownloadAt change on
+// every download line, so they are left to useSyncSignals().
+function useRunFlags (signals) {
+  const { runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength } = signals
+  const freshOwn = signals.fresh ? signals.fresh.own : undefined
+  return useMemo(() => ({
+    ...EMPTY_SIGNALS, runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, fresh: freshOwn === undefined ? {} : { own: freshOwn }
+  }), [runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, freshOwn])
 }
 
 // A screen notice ('publicado', 'seguindo', ...) describes what the current
@@ -208,6 +240,15 @@ const noConnection = () => Promise.reject(Object.assign(new Error('sem conexão 
 // The Vitrine (src/vitrine/enabled.js): development bundles only, behind an
 // opt-in env var. The literal member access is what Expo inlines.
 const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
+// 200 extra feed rows for timing native list rendering (docs/performance.md).
+const VITRINE_LARGE = vitrineLarge({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE, EXPO_PUBLIC_VARANDA_VITRINE_LARGE: process.env.EXPO_PUBLIC_VARANDA_VITRINE_LARGE }, typeof __DEV__ !== 'undefined' && __DEV__)
+
+// Dev-only timing marks (src/perfMarks.js): off unless a development bundle
+// sets the env var. Kept out of the NodeContext value and the sync lines,
+// whose changes re-render the shell: that is the cost being measured.
+const PERF = perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: process.env.EXPO_PUBLIC_VARANDA_PERF }, typeof __DEV__ !== 'undefined' && __DEV__)
+const marks = createMarks({ enabled: PERF })
+export function perfMarks () { return marks }
 let vitrine = null
 if (VITRINE) {
   const { fixtures } = require('./vitrine/fixtures')
@@ -215,6 +256,11 @@ if (VITRINE) {
   const { saveTermsRecord } = require('./termsStore')
   const { withMember, withSynced } = require('./terms')
   const { LEGAL_VERSION } = require('./legal')
+  // The fixtures' message and feed links use this origin, so the screens that
+  // compare a link with the installation origin (feiraLink, feiraOffer, the
+  // saved searches) accept them. Kept in memory only; nothing is persisted.
+  const { setInstallation } = require('./installation')
+  setInstallation('https://vitrine.invalid')
   // Saved before the shell mounts and loads the record (both stores write
   // synchronously up to here), so the terms gate opens for the fixture key;
   // synced, so nothing is sent to an account service. Under the Vitrine the
@@ -234,7 +280,9 @@ export function NodeProvider ({ children }) {
 // What the shell reads to show the hosted, unlocked, member-certified
 // screens over the fixtures: no connection, no sync, no passkey ceremony.
 function VitrineNodeProvider ({ children }) {
-  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures))
+  // The device clock (vitrine sources never read it): Momentos keep their
+  // demo-clock ages, so the 24 h rule on the device still shows them.
+  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures, { large: VITRINE_LARGE, clock: Date.now }))
   const [dmVersion, setDmVersion] = useState(0)
   const bumpDm = useCallback(() => setDmVersion((n) => n + 1), [])
   const [autoWanted, setAutoWanted] = useState(false)
@@ -255,6 +303,14 @@ function VitrineNodeProvider ({ children }) {
     return result
   }), [fixtureRequest])
   const getGroupVersion = useCallback((group) => readGroupVersion(groupVersions, group), [groupVersions])
+  // The real visibility, as the live node reads it: screens that pause while
+  // the app is hidden (the Momentos viewer) behave the same in the demo.
+  const [visible, setVisible] = useState(() => isVisible())
+  useEffect(() => {
+    const unsubscribe = subscribeVisible(setVisible)
+    setVisible(isVisible())
+    return unsubscribe
+  }, [])
   const value = useMemo(() => {
     const done = () => Promise.resolve({})
     // Anything that would change the identity or the connection refuses, so
@@ -269,8 +325,8 @@ function VitrineNodeProvider ({ children }) {
       accountOrigin: 'http://localhost:8080',
       hostedSource: 'live',
       online: true,
-      visible: true,
-      sync: { active: null, lines: [], stopped: null, starting: false },
+      visible,
+      sync: { active: null, stopped: null, starting: false },
       epoch: 1,
       request: vitrineRequest,
       restart: unavailable,
@@ -323,8 +379,14 @@ function VitrineNodeProvider ({ children }) {
       setAutoSync,
       syncNow: () => Promise.resolve()
     }
-  }, [vitrineRequest, groupVersions, followsVersion, getGroupVersion, dmVersion, bumpDm, autoWanted, setAutoSync])
-  return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
+  }, [vitrineRequest, groupVersions, followsVersion, getGroupVersion, dmVersion, bumpDm, autoWanted, setAutoSync, visible])
+  return (
+    <NodeContext.Provider value={value}>
+      <SyncSignalsContext.Provider value={EMPTY_SIGNALS}>
+        <SyncLinesContext.Provider value={EMPTY_LINES}>{children}</SyncLinesContext.Provider>
+      </SyncSignalsContext.Provider>
+    </NodeContext.Provider>
+  )
 }
 
 function LiveNodeProvider ({ children }) {
@@ -361,6 +423,15 @@ function LiveNodeProvider ({ children }) {
   // Bumped when a connection starts and when one ends (useNotice).
   const [epoch, setEpoch] = useState(0)
   const connRef = useRef(null)
+  const requestQueueRef = useRef(null)
+  const setConnection = useCallback((conn) => {
+    if (connRef.current === conn) return
+    if (requestQueueRef.current) {
+      requestQueueRef.current.clear(Object.assign(new Error('sem conexão com o nó'), { code: 'CLOSED' }))
+    }
+    requestQueueRef.current = conn ? createRequestQueue() : null
+    connRef.current = conn
+  }, [])
   const startedRef = useRef(false)
   const installationLoadedRef = useRef(false)
   const busyRef = useRef(false)
@@ -380,8 +451,8 @@ function LiveNodeProvider ({ children }) {
   const [pkGeneration, setPkGeneration] = useState(0)
   // The handle has media.upload (browser node).
   const [hasMedia, setHasMedia] = useState(false)
-  // Which chat media calls the handle has (putDm, read, forgetReadFile,
-  // clearReadFiles); decided once per connection like hasMedia.
+  // Which chat media calls the handle has (putDm, putMoment, read,
+  // forgetReadFile, clearReadFiles); decided once per connection like hasMedia.
   const [mediaCaps, setMediaCaps] = useState('')
   // The handle has follows.legacy / confirmLegacy (browser node).
   const [hasLegacy, setHasLegacy] = useState(false)
@@ -650,7 +721,7 @@ function LiveNodeProvider ({ children }) {
         onEvent,
         onClose: ({ code }) => {
           if (connRef.current !== holder.conn) return
-          connRef.current = null
+          setConnection(null)
           setRecovery(null)
           setSync({ active: null, lines: [], stopped: null })
           resetSignals()
@@ -660,12 +731,13 @@ function LiveNodeProvider ({ children }) {
         }
       })
       holder.conn = conn
-      connRef.current = conn
+      setConnection(conn)
       setInfoOrigin(undefined)
       if (save && cfg) {
         try { await saveConfig(cfg) } catch { setError('a configuração não pôde ser guardada neste aparelho') }
       }
       const status = await conn.request('sync.status')
+      marks.mark('sync.status')
       if (status.state === 'running') {
         setSync((prev) => (prev.active ? prev : { ...prev, active: { runId: status.runId, once: status.once } }))
         adoptSignals(status.runId, status.once)
@@ -678,6 +750,7 @@ function LiveNodeProvider ({ children }) {
       if (identity !== null) {
         try { pk = await identity.status() } catch (err) { pkErr = errorText(err) }
       }
+      marks.mark('identity.status')
       setHasPasskey(identity !== null)
       setHasMedia(identity !== null && conn.media != null && typeof conn.media.upload === 'function')
       setMediaCaps(identity !== null && conn.media != null ? CHAT_MEDIA_CALLS.filter((k) => typeof conn.media[k] === 'function').join(',') : '')
@@ -688,8 +761,9 @@ function LiveNodeProvider ({ children }) {
       setConfig(cfg)
       if (nativeHosted) setHosted(true)
       setPhase('ready')
+      marks.mark('ready')
     } catch (err) {
-      connRef.current = null
+      setConnection(null)
       if (holder.conn) { try { await holder.conn.close() } catch {} }
       if (cfg) setConfig(cfg) // the form keeps what was tried
       setError(errorText(err))
@@ -697,12 +771,13 @@ function LiveNodeProvider ({ children }) {
     } finally {
       busyRef.current = false
     }
-  }, [onEvent, resetSignals, bumpEpoch, bumpGeneration, adoptSignals])
+  }, [onEvent, resetSignals, bumpEpoch, bumpGeneration, adoptSignals, setConnection])
 
   // One connect at a time: a call while one is in flight returns that one.
   const connect = useCallback((cfg, opts) => {
     if (busyRef.current) return inflightRef.current
     busyRef.current = true
+    marks.mark('config')
     const run = connectNow(cfg, opts)
     inflightRef.current = run
     run.then(() => { if (inflightRef.current === run) inflightRef.current = null })
@@ -775,7 +850,7 @@ function LiveNodeProvider ({ children }) {
     // first; its connection is then closed below.
     while (inflightRef.current !== null) await inflightRef.current
     const conn = connRef.current
-    connRef.current = null
+    setConnection(null)
     if (conn) {
       setPhase('connecting')
       try { await conn.close() } catch {}
@@ -783,14 +858,14 @@ function LiveNodeProvider ({ children }) {
     await clearConfig()
     setHostedSource(null)
     await begin()
-  }, [begin])
+  }, [begin, setConnection])
 
   // Native: apply a new configuration (bootstrap, DHT): stop the node
   // (node.close, then terminate) and start it again. The client module
   // handles recover.
   const restart = useCallback(async (cfg) => {
     const conn = connRef.current
-    connRef.current = null
+    setConnection(null)
     if (conn) {
       setPhase('connecting')
       try { await conn.close() } catch {}
@@ -798,14 +873,14 @@ function LiveNodeProvider ({ children }) {
     setHosted(false)
     setHostedSource(null)
     await connect(cfg, { save: true })
-  }, [connect])
+  }, [connect, setConnection])
 
   const reconnect = useCallback(async () => {
     const conn = connRef.current
-    connRef.current = null
+    setConnection(null)
     if (conn) { try { await conn.close() } catch {} }
     await connect(config)
-  }, [connect, config])
+  }, [connect, config, setConnection])
 
   // While the node should restart a preempted continuous run, every request
   // sent may queue behind (or preempt) it again: the node restarts after the
@@ -817,36 +892,47 @@ function LiveNodeProvider ({ children }) {
   const request = useCallback((method, params) => {
     const conn = connRef.current
     if (!conn) return noConnection()
-    const waiting = awaitingRef.current !== 0
-    if (waiting) extendWait()
-    const startedAt = Date.now()
-    const idle = idleRef.current
-    idle.begin()
-    const done = () => {
-      const line = slowRequestLine(method, startedAt, Date.now())
-      idle.end()
-      if (line !== null && connRef.current === conn) setSync((prev) => appendLine(prev, 'aviso: ' + line))
-    }
-    if (method !== 'sync.start') {
+    return requestQueueRef.current.run(method, params, (method, params) => {
+      const waiting = awaitingRef.current !== 0
+      if (waiting) extendWait()
+      const startedAt = Date.now()
+      const idle = idleRef.current
+      idle.begin()
+      const done = () => {
+        const line = slowRequestLine(method, startedAt, Date.now())
+        marks.span('req:' + method, startedAt, Date.now())
+        idle.end()
+        if (line !== null && connRef.current === conn) setSync((prev) => appendLine(prev, 'aviso: ' + line))
+      }
+      if (method !== 'sync.start') {
+        const pending = conn.request(method, params)
+        pending.then(done, done)
+        if (waiting) pending.then(extendWait, extendWait)
+        return pending
+      }
+      startingRef.current += 1
+      setStarting(true)
+      const settled = () => {
+        startingRef.current -= 1
+        if (startingRef.current === 0) setStarting(false)
+        if (waiting) extendWait()
+      }
       const pending = conn.request(method, params)
       pending.then(done, done)
-      if (waiting) pending.then(extendWait, extendWait)
+      pending.then(settled, settled)
       return pending
-    }
-    startingRef.current += 1
-    setStarting(true)
-    const settled = () => {
-      startingRef.current -= 1
-      if (startingRef.current === 0) setStarting(false)
-      if (waiting) extendWait()
-    }
-    const pending = conn.request(method, params)
-    pending.then(done, done)
-    pending.then(settled, settled)
-    return pending
+    })
   }, [extendWait])
 
   const whenIdle = useCallback((quietMs) => idleRef.current.whenIdle(quietMs), [])
+
+  // Lets a lab driver act as the signed-in user in a development build; the
+  // same PERF check keeps it out of release bundles and off by default.
+  useEffect(() => {
+    if (!PERF || phase !== 'ready') return
+    globalThis.__varandaDev = Object.freeze({ request: devHookRequest(request), report: () => marks.report() })
+    return () => { delete globalThis.__varandaDev }
+  }, [phase, request])
 
   // Re-reads identity.status() of `conn` (the current connection by
   // default); a result for a connection that is no longer current is dropped.
@@ -876,6 +962,14 @@ function LiveNodeProvider ({ children }) {
   const passkeyOp = useCallback((name, arg) => {
     const conn = connRef.current
     if (!conn || !conn.identity) return noConnection()
+    // A request still waiting in the app-side queue was asked for under the
+    // identity that is about to change; sent after the operation, the node
+    // would sign it with the next identity's key. Dropped here, before the
+    // operation is dispatched, it is never sent. Requests already in flight
+    // reached the node first, and its serial chain runs them before it.
+    if (IDENTITY_OPS.has(name) && requestQueueRef.current) {
+      requestQueueRef.current.clear(Object.assign(new Error('a identidade mudou antes do envio'), { code: 'CLOSED' }))
+    }
     let pending
     try {
       // A node script without signOut (an older build) locks instead.
@@ -1412,11 +1506,20 @@ function LiveNodeProvider ({ children }) {
   }, [])
   const legacyFollows = useMemo(() => (hasPasskey && hasLegacy && unlocked ? { keys: legacyKeys, confirm: legacyConfirm } : null), [hasPasskey, hasLegacy, unlocked, legacyKeys, legacyConfirm])
 
+  // Without the lines: a log line replaces `sync` but keeps active and stopped.
+  const syncView = useMemo(() => ({ active: sync.active, stopped: sync.stopped, starting }), [sync.active, sync.stopped, starting])
+  const runFlags = useRunFlags(signals)
   const value = useMemo(() => ({
-    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: { ...sync, starting }, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals, ackFresh, setAutoSync, syncNow, whenIdle
-  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync, starting, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals, ackFresh, setAutoSync, syncNow, whenIdle])
+    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: syncView, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals: runFlags, ackFresh, setAutoSync, syncNow, whenIdle
+  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, syncView, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, runFlags, ackFresh, setAutoSync, syncNow, whenIdle])
 
-  return <NodeContext.Provider value={value}>{children}</NodeContext.Provider>
+  return (
+    <NodeContext.Provider value={value}>
+      <SyncSignalsContext.Provider value={signals}>
+        <SyncLinesContext.Provider value={sync.lines}>{children}</SyncLinesContext.Provider>
+      </SyncSignalsContext.Provider>
+    </NodeContext.Provider>
+  )
 }
 
 // 'hh:mm' style time for an ISO instant (peer-derived: falls back to the

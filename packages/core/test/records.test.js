@@ -669,7 +669,7 @@ test('validateRecord: posts with a link preview', (t) => {
   t.is(validateRecord(post({ quote }), 1), null, 'a quote with a preview')
   t.is(validateRecord(post({ quote, replyTo: { author: K1, seq: 2 } }), 1), 'quote-with-reply')
   t.is(validateRecord(post({ text: '' }), 1), 'text-length', 'a preview is not a caption-free photo')
-  t.is(validateRecord(post({ text: 'a‮b' }), 1), 'control-chars')
+  t.is(validateRecord(post({ text: 'a\u202eb' }), 1), 'control-chars')
   t.is(validateRecord(post({ media: [DESC] }), 1), 'malformed', 'media and a preview together')
   t.is(validateRecord(post({ quote, media: [DESC] }), 1), 'malformed', 'a quote with media and a preview')
   t.is(validateRecord(post({ extra: 1 }), 1), 'malformed')
@@ -838,7 +838,7 @@ test('quote posts', async (t) => {
   t.is(validateRecord(quote({ text: '', media: [DESC] }), 1), 'text-length', 'empty quote text refused even with media')
   t.is(validateRecord(quote({ text: 'x'.repeat(MAX_TEXT) }), 1), null)
   t.is(validateRecord(quote({ text: 'x'.repeat(MAX_TEXT + 1) }), 1), 'text-length')
-  t.is(validateRecord(quote({ text: 'a‮b' }), 1), 'control-chars')
+  t.is(validateRecord(quote({ text: 'a\u202eb' }), 1), 'control-chars')
   t.is(validateRecord(quote({ at: 'x' }), 1), 'date-invalid')
   t.is(validateRecord(quote({ media: [] }), 1), 'media-invalid')
   t.is(validateRecord(quote({ media: [{ ...DESC, extra: 1 }] }), 1), 'media-invalid')
@@ -877,7 +877,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -1324,4 +1324,231 @@ test('validateRecord: page records', (t) => {
   Object.defineProperty(hostile, 'admins', { enumerable: true, get () { throw new Error('boom') } })
   t.is(validateRecord(hostile, 3), 'malformed')
   t.is(validRecordCopy(hostile, 3), null)
+})
+
+test('testimonial records: sealed commitment shape', async (t) => {
+  const { testimonialRecord, MAX_TESTIMONIAL, MAX_TESTIMONIAL_PLAIN, MAX_TESTIMONIAL_SEALED, MAX_TESTIMONIAL_BOX, MIN_TESTIMONIAL_PLAIN } = records
+  t.is(MAX_TESTIMONIAL, 400)
+  t.is(MAX_TESTIMONIAL_PLAIN, 1686)
+  t.is(MAX_TESTIMONIAL_SEALED, 1734)
+  t.is(MAX_TESTIMONIAL_BOX, 2312)
+  const box = b4a.toString(b4a.alloc(200, 7), 'base64')
+  const tr = { type: 'testimonial', to: K2, gen: 1, hash: 'c'.repeat(64), box, at: AT }
+  t.is(validateRecord(tr, 1), null)
+  t.is(validateRecord(tr, 0), 'genesis-required')
+  t.alike(testimonialRecord({ to: K2, gen: 1, hash: 'c'.repeat(64), box, at: AT }), tr)
+  t.alike(Object.keys(testimonialRecord({ to: K2, gen: 3, hash: 'c'.repeat(64), box })), ['type', 'to', 'gen', 'hash', 'box', 'at'])
+  t.is(validateRecord({ ...tr, extra: 1 }, 1), 'malformed', 'extra key')
+  const missing = { ...tr }
+  delete missing.gen
+  t.is(validateRecord(missing, 1), 'malformed', 'missing key')
+  for (const k of ['A'.repeat(64), K1.slice(1), 1, null]) {
+    t.is(validateRecord({ ...tr, to: k }, 1), 'malformed', 'to ' + k)
+    t.is(validateRecord({ ...tr, hash: k }, 1), 'malformed', 'hash ' + k)
+  }
+  for (const gen of [0, -1, 1.5, '1', null, 4294967296]) t.is(validateRecord({ ...tr, gen }, 1), 'malformed', 'gen ' + gen)
+  // Box: canonical base64 of MIN..MAX sealed bytes.
+  const sealedOf = (n) => b4a.toString(b4a.alloc(n, 9), 'base64')
+  t.is(validateRecord({ ...tr, box: sealedOf(MAX_TESTIMONIAL_SEALED) }, 1), null, 'largest box fits')
+  t.is(sealedOf(MAX_TESTIMONIAL_SEALED).length, MAX_TESTIMONIAL_BOX)
+  t.is(validateRecord({ ...tr, box: sealedOf(MAX_TESTIMONIAL_SEALED + 1) }, 1), 'malformed', 'one byte over')
+  t.is(validateRecord({ ...tr, box: sealedOf(MIN_TESTIMONIAL_PLAIN + 48) }, 1), null, 'smallest box')
+  t.is(validateRecord({ ...tr, box: sealedOf(MIN_TESTIMONIAL_PLAIN + 47) }, 1), 'malformed', 'too small')
+  for (const bad of ['', box.slice(0, -1), box.replace(/=*$/, ''), box + '====', '-_' + box.slice(2), 1, null]) {
+    t.is(validateRecord({ ...tr, box: bad }, 1), 'malformed', 'box ' + String(bad).slice(0, 8))
+  }
+  // A non-canonical last character (unused bits set) is refused.
+  const odd = b4a.toString(b4a.alloc(199, 7), 'base64')
+  const tweak = odd.slice(0, -2) + String.fromCharCode(odd.charCodeAt(odd.length - 2) + 1) + '='
+  t.is(validateRecord({ ...tr, box: odd }, 1), null)
+  t.is(validateRecord({ ...tr, box: tweak }, 1), 'malformed', 'non-canonical base64')
+  t.is(validateRecord({ ...tr, at: '2026-01-01' }, 1), 'date-invalid')
+  await t.exception.all(async () => testimonialRecord({ to: K2, gen: 0, hash: 'c'.repeat(64), box, at: AT }), /malformed/)
+})
+
+test('testimonial-show records: the recipient copy', async (t) => {
+  const { testimonialShowRecord } = records
+  const nonce = 'd'.repeat(64)
+  const sr = { type: 'testimonial-show', from: K1, seq: 5, text: 'Pessoa incrível.\nObrigado!', nonce, at: AT }
+  t.is(validateRecord(sr, 1), null)
+  t.alike(testimonialShowRecord({ from: K1, seq: 5, text: sr.text, nonce, at: AT }), sr)
+  t.alike(Object.keys(testimonialShowRecord({ from: K1, seq: 1, text: 'oi', nonce })), ['type', 'from', 'seq', 'text', 'nonce', 'at'])
+  t.is(validateRecord({ ...sr, extra: 1 }, 1), 'malformed')
+  for (const k of ['A'.repeat(64), K1.slice(1), 1, null]) {
+    t.is(validateRecord({ ...sr, from: k }, 1), 'malformed', 'from ' + k)
+    t.is(validateRecord({ ...sr, nonce: k }, 1), 'malformed', 'nonce ' + k)
+  }
+  for (const seq of [0, -1, 1.5, '1', null]) t.is(validateRecord({ ...sr, seq }, 1), 'malformed', 'seq ' + seq)
+  t.is(validateRecord({ ...sr, text: 'x'.repeat(400) }, 1), null, '400 chars')
+  t.is(validateRecord({ ...sr, text: '\u{1F600}'.repeat(400) }, 1), null, '400 non-BMP chars')
+  t.is(validateRecord({ ...sr, text: 'x'.repeat(401) }, 1), 'malformed', '401 chars')
+  t.is(validateRecord({ ...sr, text: '' }, 1), 'malformed', 'empty')
+  const bads = ['a\u0000b', 'a\rb', 'a\u202eb', 'a\u2028b', 'a\u0085b', 'a\ud800b', 'a\udc00', 7]
+  for (let i = 0; i < bads.length; i++) t.is(validateRecord({ ...sr, text: bads[i] }, 1), 'malformed', 'bad text #' + i)
+  t.is(validateRecord({ ...sr, at: '2026-01-01T00:00:00Z' }, 1), 'date-invalid')
+})
+
+test('testimonial records: old readers skip both as malformed', async (t) => {
+  // A copy of TYPES before Depoimentos: an old reader skips both records.
+  const OLD_TYPES = ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link']
+  const oldReader = (r) => (OLD_TYPES.includes(r.type) ? validateRecord(r, 1) : 'malformed')
+  const box = b4a.toString(b4a.alloc(200, 7), 'base64')
+  t.is(oldReader({ type: 'testimonial', to: K2, gen: 1, hash: 'c'.repeat(64), box, at: AT }), 'malformed')
+  t.is(oldReader({ type: 'testimonial-show', from: K1, seq: 1, text: 'oi', nonce: 'd'.repeat(64), at: AT }), 'malformed')
+  // Neither borrows another type's shape.
+  t.is(validateRecord({ type: 'testimonial', to: K2, on: true, at: AT }, 1), 'malformed')
+  t.is(validateRecord({ type: 'testimonial-show', text: 'oi', at: AT, replyTo: null }, 1), 'malformed')
+})
+
+function momentMedia (over = {}) {
+  return { id: 'a'.repeat(64), key: 'b'.repeat(64), nonce: 'c'.repeat(48), chunks: 2, bytes: 40000, sha256: 'd'.repeat(64), mime: 'image/jpeg', w: 1080, h: 1350, ms: 0, ...over }
+}
+
+test('moment records: one public blob image and short text', async (t) => {
+  const { momentRecord, MOMENT_KEYS, MOMENT_MEDIA_KEYS, MAX_MOMENT_TEXT, MEDIA_MIMES } = records
+  t.alike(MOMENT_KEYS, ['type', 'text', 'at', 'media'])
+  t.alike(MOMENT_MEDIA_KEYS, ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'])
+  t.is(MAX_MOMENT_TEXT, 200)
+  const mr = { type: 'moment', text: 'Pôr do sol 🌅\nna varanda', at: AT, media: momentMedia() }
+  t.is(validateRecord(mr, 1), null)
+  t.is(validateRecord(mr, 0), 'genesis-required')
+  t.is(validateRecord({ ...mr, text: '' }, 1), null, 'photo only')
+  t.is(validateRecord({ ...mr, text: '😀'.repeat(200) }, 1), null, '200 code points')
+  t.is(validateRecord({ ...mr, text: 'x'.repeat(201) }, 1), 'text-length')
+  t.is(validateRecord({ ...mr, text: '😀'.repeat(201) }, 1), 'text-length')
+  const bads = ['a\u0000b', 'a\rb', 'a\u202eb', 'a\u2028b', 'a\u0085b', 'a\ud800b', 'a\udc00', 7, null]
+  for (let i = 0; i < bads.length; i++) t.is(validateRecord({ ...mr, text: bads[i] }, 1), 'text-length', 'bad text #' + i)
+  t.is(validateRecord({ ...mr, at: '2026-01-01T00:00:00Z' }, 1), 'date-invalid')
+  // Exact record keys.
+  t.is(validateRecord({ ...mr, extra: 1 }, 1), 'malformed')
+  t.is(validateRecord({ type: 'moment', text: 'oi', at: AT }, 1), 'malformed', 'media required')
+  t.is(validateRecord({ type: 'moment', text: 'oi', at: AT, replyTo: null }, 1), 'malformed')
+  // Every chat image mime, never audio.
+  for (const mime of MEDIA_MIMES) t.is(validateRecord({ ...mr, media: momentMedia({ mime }) }, 1), null, mime)
+  const badMedia = [
+    null, [], 'x', [momentMedia()],
+    momentMedia({ extra: 1 }),
+    { ...momentMedia(), ms: undefined },
+    momentMedia({ mime: 'audio/mp4', w: 0, h: 0, ms: 3000 }),
+    momentMedia({ mime: 'audio/mp4' }),
+    momentMedia({ mime: 'image/svg+xml' }),
+    momentMedia({ ms: 1 }),
+    momentMedia({ ms: '0' }),
+    momentMedia({ w: 0 }),
+    momentMedia({ h: 16385 }),
+    momentMedia({ w: 1.5 }),
+    momentMedia({ nonce: 'c'.repeat(64) }),
+    momentMedia({ nonce: 'c'.repeat(47) }),
+    momentMedia({ nonce: 'C'.repeat(48) }),
+    momentMedia({ id: 'a'.repeat(63) }),
+    momentMedia({ key: 'z'.repeat(64) }),
+    momentMedia({ sha256: 7 }),
+    momentMedia({ chunks: 3 }),
+    momentMedia({ chunks: 1 }),
+    momentMedia({ bytes: 16, chunks: 1 }),
+    momentMedia({ bytes: 258 * 32768, chunks: 258 })
+  ]
+  const { ms, ...noMs } = momentMedia()
+  badMedia.push(noMs)
+  for (let i = 0; i < badMedia.length; i++) t.is(validateRecord({ ...mr, media: badMedia[i] }, 1), 'media-invalid', 'bad media #' + i)
+  t.is(validateRecord({ ...mr, media: momentMedia({ bytes: 17, chunks: 1 }) }, 1), null, 'smallest blob')
+  t.is(validateRecord({ ...mr, media: momentMedia({ bytes: 257 * 32768, chunks: 257 }) }, 1), null, 'largest blob')
+  // Builder: exact keys, extra item keys dropped, invalid input throws.
+  t.alike(momentRecord({ text: mr.text, media: mr.media, at: AT }), mr)
+  t.alike(Object.keys(momentRecord({ media: momentMedia() })), ['type', 'text', 'at', 'media'])
+  t.is(momentRecord({ media: momentMedia() }).text, '')
+  t.alike(momentRecord({ text: 'oi', media: momentMedia({ extra: 1 }), at: AT }).media, momentMedia())
+  const media = momentMedia()
+  t.not(momentRecord({ media, at: AT }).media, media, 'the item is copied')
+  await t.exception.all(async () => momentRecord({ text: 'oi', at: AT }), /media-invalid/)
+  await t.exception.all(async () => momentRecord({ text: 'x'.repeat(201), media, at: AT }), /text-length/)
+  await t.exception.all(async () => momentRecord({ media: momentMedia({ mime: 'audio/mp4' }), at: AT }), /media-invalid/)
+  // Hostile getters never throw out of validation.
+  const hostile = { type: 'moment', text: 'oi', at: AT }
+  Object.defineProperty(hostile, 'media', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(hostile, 1), 'malformed')
+})
+
+test('moment records: old readers skip it as malformed', async (t) => {
+  // A copy of TYPES before Momentos: an old reader skips the record as any
+  // unknown type today.
+  const OLD_TYPES = ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'testimonial', 'testimonial-show']
+  const oldReader = (r) => (OLD_TYPES.includes(r.type) ? validateRecord(r, 1) : 'malformed')
+  const mr = { type: 'moment', text: 'oi', at: AT, media: momentMedia() }
+  t.is(oldReader(mr), 'malformed')
+  t.is(validateRecord({ ...mr, type: 'momento' }, 1), 'malformed', 'unknown types stay malformed')
+  // It does not borrow a post shape.
+  t.is(validateRecord({ type: 'moment', text: 'oi', at: AT, replyTo: null }, 1), 'malformed')
+  t.is(validateRecord({ type: 'post', text: 'oi', at: AT, replyTo: null, media: [momentMedia()] }, 1), 'media-invalid', 'not a post media descriptor')
+})
+
+const PLACE = { uf: 'SP', city: 'São Paulo', bairro: 'Pinheiros' }
+const LDESC = (start) => ({ core: K1, mime: 'image/webp', start, blocks: 1, bytes: 1000, sha256: 'e'.repeat(64), width: 512, height: 512 })
+const listing = (over = {}) => ({ type: 'listing', kind: 'produto', title: 'Bicicleta', text: 'Aro 29', price: 50000, unit: null, cat: 'esporte', place: PLACE, at: AT, ...over })
+
+test('listing records: shape, media, units and kinds', (t) => {
+  t.ok(records.TYPES.includes('listing') && records.TYPES.includes('listing-rate'))
+  t.is(validateRecord(listing(), 1), null, 'without media')
+  t.is(validateRecord(listing({ media: [LDESC(1), LDESC(2)] }), 1), null, 'with media')
+  t.is(validateRecord(listing({ media: [LDESC(1), LDESC(2), LDESC(3), LDESC(4), LDESC(5)] }), 1), 'media-invalid', 'a 5th photo')
+  t.is(validateRecord(listing({ media: [] }), 1), 'media-invalid')
+  t.is(validateRecord(listing({ unit: 'hora' }), 1), 'unit-invalid', 'hora on a produto')
+  t.is(validateRecord(listing({ kind: 'servico', unit: 'hora' }), 1), null)
+  t.is(validateRecord(listing({ kind: 'procura', price: null }), 1), null, 'procura a combinar')
+  t.is(validateRecord(listing({ kind: 'procura', unit: 'hora' }), 1), 'unit-invalid', 'procura with a unit')
+  t.is(validateRecord({ ...listing(), extra: 1 }, 1), 'malformed', 'extra key')
+  t.is(validateRecord(listing({ at: 'yesterday' }), 1), 'date-invalid')
+  t.is(validateRecord(listing(), 0), 'genesis-required')
+  const built = records.listingRecord({ kind: 'produto', title: 'Bicicleta', price: 50000, cat: 'esporte', place: { ...PLACE, extra: 1 }, at: AT })
+  t.alike(built.place, PLACE, 'builder copies place keys only')
+  t.is(built.text, '')
+  t.exception.all(() => records.listingRecord({ kind: 'produto', title: 'x', price: 1, unit: 'hora', cat: 'esporte', place: PLACE }), /unit-invalid/)
+  t.alike(records.LISTING_KEYS, ['type', 'kind', 'title', 'text', 'price', 'unit', 'cat', 'place', 'at'])
+})
+
+test('listing-edit and listing-status records target an earlier block', (t) => {
+  const edit = { type: 'listing-edit', seq: 3, title: 'Bike', text: '', price: 40000, unit: null, cat: 'esporte', place: PLACE, at: AT }
+  t.is(validateRecord(edit, 4), null)
+  t.is(validateRecord(edit, 3), 'target-invalid', 'edit at its own seq')
+  t.is(validateRecord({ ...edit, seq: 0 }, 4), 'target-invalid')
+  t.is(validateRecord({ ...edit, kind: 'produto' }, 4), 'malformed', 'an edit has no kind')
+  t.is(validateRecord({ ...edit, media: [LDESC(1), LDESC(2), LDESC(3), LDESC(4), LDESC(5)] }, 4), 'media-invalid')
+  t.alike(records.listingEditRecord({ seq: 3, title: 'Bike', price: 40000, cat: 'esporte', place: PLACE, at: AT }), { ...edit })
+  t.exception.all(() => records.listingEditRecord({ seq: 'x', title: 'Bike', price: 1, cat: 'esporte', place: PLACE }), /target-invalid/)
+
+  const status = { type: 'listing-status', seq: 3, status: 'vendido', at: AT }
+  t.is(validateRecord(status, 4), null)
+  t.is(validateRecord(status, 3), 'target-invalid', 'status at its own seq')
+  t.is(validateRecord({ ...status, status: 'perdido' }, 4), 'status-invalid')
+  t.is(validateRecord({ ...status, extra: 1 }, 4), 'malformed')
+  t.alike(records.listingStatusRecord({ seq: 3, status: 'reservado', at: AT }), { ...status, status: 'reservado' })
+  t.exception.all(() => records.listingStatusRecord({ seq: 3, status: 'x' }), /status-invalid/)
+})
+
+test('listing-rate records round-trip', (t) => {
+  const rate = records.listingRateRecord({ to: { author: K2, seq: 5, x: 1 }, offer: 'f'.repeat(32), consent: 'c'.repeat(128), stars: 5, text: 'Ótimo', at: AT })
+  t.alike(rate, { type: 'listing-rate', to: { author: K2, seq: 5 }, offer: 'f'.repeat(32), consent: 'c'.repeat(128), stars: 5, text: 'Ótimo', at: AT })
+  t.alike(decodeBlock(b4a.from(JSON.stringify(rate))), rate)
+  t.is(validateRecord(rate, 1), null)
+  t.is(validateRecord({ ...rate, stars: 0 }, 1), 'stars-invalid')
+  t.is(validateRecord({ ...rate, to: { author: K2, seq: 0 } }, 1), 'target-invalid')
+  t.is(validateRecord({ ...rate, offer: 'f'.repeat(31) }, 1), 'malformed')
+  t.is(validateRecord({ ...rate, consent: 'C'.repeat(128) }, 1), 'malformed')
+  t.exception.all(() => records.listingRateRecord({ to: { author: K2, seq: 5 }, offer: 'f'.repeat(32), consent: 'c'.repeat(128), stars: 0 }), /stars-invalid/)
+})
+
+test('listing types leave posts and deletes unchanged', (t) => {
+  t.is(validateRecord({ type: 'post', text: 'oi', at: AT, replyTo: null }, 1), null)
+  t.is(validateRecord({ type: 'post', text: 'oi', at: AT, replyTo: null, kind: 'produto' }, 1), 'malformed')
+  const ranges = [1, 2, 3, 4, 5].map((start) => ({ core: K1, start, blocks: 1 }))
+  t.is(validateRecord({ type: 'delete', seq: 1, at: AT, media: ranges }, 2), 'media-invalid', 'a 5-range delete')
+  t.is(validateRecord({ type: 'delete', seq: 1, at: AT, media: ranges.slice(0, 4) }, 2), null)
+})
+
+test('listing builders treat media null or empty as no photos', (t) => {
+  const fields = { title: 'Mesa', price: 100, cat: 'moveis', place: PLACE, at: AT }
+  t.absent('media' in records.listingEditRecord({ seq: 2, ...fields, media: null }))
+  t.absent('media' in records.listingEditRecord({ seq: 2, ...fields, media: [] }))
+  t.absent('media' in records.listingRecord({ kind: 'produto', ...fields, media: null }))
+  t.is(validateRecord({ type: 'listing-edit', seq: 2, text: '', unit: null, ...fields, media: null }, 3), 'media-invalid', 'a null on the wire stays invalid')
 })

@@ -1,4 +1,4 @@
-/* global fetch, crypto, URL, AbortController */
+/* global fetch, crypto, URL, AbortController, __DEV__ */
 
 // Verified media fetch for the hosted web app. A photo is fetched from the
 // installation that served the page (same origin: GET
@@ -35,7 +35,14 @@ import rpc from '@varanda/rpc'
 import { sha256 as nobleSha256 } from '@noble/hashes/sha2.js'
 import { isAppClient } from '../appClient.js'
 import { installationOrigin, resolveUrl } from '../installation.js'
+import { vitrineEnabled } from '../vitrine/enabled.js'
 import { MAX_MEDIA_DIMENSION, MAX_MEDIA_ITEM_BLOCKS, MEDIA_BLOCK_BYTES, MEDIA_MIMES, toHex } from './plan.js'
+
+const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
+let vitrineGet
+if (VITRINE) {
+  vitrineGet = require('../vitrine/publicMedia').vitrineMediaResponse
+}
 
 // Same value as packages/core/lib/records.js.
 export const MAX_MEDIA_BLOCKS = 8192
@@ -194,6 +201,19 @@ function retryable (message) {
   return err
 }
 
+// Retry-After as milliseconds when it is a whole number of seconds from 1 to
+// 30; anything else (dates, huge values, junk) is ignored.
+function retryAfterMs (res) {
+  try {
+    const h = res.headers && typeof res.headers.get === 'function' ? res.headers.get('retry-after') : null
+    if (typeof h !== 'string' || !/^[0-9]{1,2}$/.test(h.trim())) return null
+    const n = Number(h.trim())
+    return n >= 1 && n <= 30 ? n * 1000 : null
+  } catch {
+    return null
+  }
+}
+
 // -> Uint8Array of the verified bytes; throws on any failed check.
 // deps.fresh: revalidate with the server instead of reusing the HTTP cache
 // (used by retries, so a stored 404 is not served again).
@@ -219,7 +239,7 @@ export async function fetchMedia (author, d, deps) {
   const url = mediaUrl(author, d, { chat: deps && deps.chat })
   if (url === null) throw fail('foto inválida')
   const hashing = defaults(deps)
-  const get = hashing.fetch
+  const get = VITRINE ? vitrineGet : hashing.fetch
   const transient = deps && deps.persist === false
   const init = { method: 'GET', credentials: 'omit', redirect: 'error' }
   let stop = () => {}
@@ -243,6 +263,14 @@ export async function fetchMedia (author, d, deps) {
     cancelBody(res)
     stop()
     if (res && res.status === 404 && !leftOrigin(res, url)) throw retryable('indisponível')
+    // The seeder bounds /media globally (in flight and per second, never per
+    // client), so a busy 503 from our own origin is "try again in a moment".
+    if (res && res.status === 503 && !leftOrigin(res, url)) {
+      const err = retryable('indisponível')
+      const ms = retryAfterMs(res)
+      if (ms !== null) err.retryAfterMs = ms
+      throw err
+    }
     throw fail('indisponível')
   }
   if (tooLong(res, d.bytes)) {

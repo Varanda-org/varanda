@@ -7,13 +7,16 @@
 // is never stored, and the service cannot show it again.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { buildInviteCardUrl } from '@varanda/rpc'
 import { accountStatus, invitesFinish, invitesStart, invitesSummary } from '../account'
+import { origin as inviteOrigin } from '../communityShare'
 import { HELP } from '../help'
-import { installationOrigin } from '../installation'
+import { CARD_FAILED_TEXT, PROBLEM_TEXT, cardFields, cardRefusal, composeTransition, createLabel, initialCompose, problem } from '../inviteCardCompose'
 import { useNode } from '../node'
 import { DROPS_HINT_TEXT, INVITE_VALID_TEXT, WEEK_RESET_TEXT, allowanceText, buildSignupInviteUrl, dropView, inviteCountText } from '../signupInvite'
 import { Body, Btn, ErrorText, Page, Soft, errorText } from '../ui'
 import { HelpNote } from '../ui/Help'
+import { InviteCardButton, InviteCardCompose } from '../ui/InviteCardCompose'
 import { ShareProfile } from '../ui/ShareProfile'
 
 const NOT_LINKED_TEXT = 'Vincule sua conta Google em Conta e @nome para poder convidar.'
@@ -25,9 +28,9 @@ const MAYBE_CREATED_TEXT = 'Se o convite foi criado, ele já conta nesta semana.
 const SUMMARY_REFRESH_MS = 15 * 60 * 1000
 const LABELS = Object.freeze({
   field: 'link do convite',
-  copy: 'copiar link do convite',
+  copy: 'Copiar link do convite',
   copyLabel: 'copiar link do convite',
-  share: 'compartilhar convite',
+  share: 'Compartilhar convite',
   shareLabel: 'compartilhar convite'
 })
 
@@ -39,6 +42,9 @@ const LABELS = Object.freeze({
 export default function Convites ({ open, active, ownKey, perWeek, keyFailed = false, onRetryKey, inviteNudge = 0 }) {
   const node = useNode()
   const request = node.request
+  const origin = inviteOrigin() || null
+  const [draft, setDraft] = useState(initialCompose)
+  const changeDraft = (event) => setDraft((current) => composeTransition(current, event))
   // { key, linked } of the last status read for this key.
   const [state, setState] = useState(null)
   // { key, used, remaining } from the last create answer in this opening.
@@ -151,11 +157,14 @@ export default function Convites ({ open, active, ownKey, perWeek, keyFailed = f
     setCount(null)
     setLimitHit(false)
     setAwaitingDrop(false)
+    setDraft(initialCompose())
   }, [open])
 
   const create = async () => {
     if (busyRef.current || typeof ownKey !== 'string') return
     busyRef.current = true
+    const card = cardFields(draft, origin)
+    changeDraft({ type: 'create' })
     setBusy(true)
     setError('')
     errorCodeRef.current = ''
@@ -171,11 +180,28 @@ export default function Convites ({ open, active, ownKey, perWeek, keyFailed = f
       // Once finish is sent the service decides; closing now cannot undo it.
       finishing = true
       const done = await invitesFinish({ member: ownKey, nonce, signature })
-      const link = buildSignupInviteUrl({ origin: installationOrigin() || globalThis.location?.origin || null, code: done.code })
+      const link = buildSignupInviteUrl({ origin, code: done.code })
       // The previous link (still valid, already counted) stays until a new
       // one replaces it.
-      if (link === null) setError(UNAVAILABLE_TEXT)
-      else setUrl(link)
+      if (card !== null) {
+        changeDraft({ type: 'sign' })
+        try {
+          const expires = Math.floor(Date.parse(done.expiresAt) / 1000)
+          const { signature } = await node.request('inviteCard.sign', { code: done.code, ...card, expires })
+          const cardUrl = buildInviteCardUrl({ origin, code: done.code, ...card, expires, member: ownKey, signature })
+          if (cardUrl === null) throw new Error('invalid card link')
+          setUrl(cardUrl)
+          changeDraft({ type: 'card' })
+        } catch {
+          setUrl(link)
+          setNote(CARD_FAILED_TEXT)
+          changeDraft({ type: 'card-failed' })
+        }
+      } else {
+        if (link === null) setError(UNAVAILABLE_TEXT)
+        else setUrl(link)
+        changeDraft({ type: 'plain' })
+      }
       setCount({ key: ownKey, used: done.used, remaining: done.remaining })
       // If the refresh below fails, the shown summary still counts this link.
       // finish answers remaining = opened now - used, so opened follows from it
@@ -185,6 +211,7 @@ export default function Convites ({ open, active, ownKey, perWeek, keyFailed = f
         : s)
       await refreshSummary()
     } catch (err) {
+      changeDraft({ type: 'error' })
       const code = err && err.code
       // A finish whose answer was lost may still have spent an invite: say
       // so. Never issue again on our own.
@@ -204,6 +231,8 @@ export default function Convites ({ open, active, ownKey, perWeek, keyFailed = f
     } finally {
       busyRef.current = false
       setBusy(false)
+      // A spent invite keeps its link for the next opening; only the card draft goes.
+      if (!openRef.current) setDraft(initialCompose())
     }
   }
 
@@ -235,11 +264,18 @@ export default function Convites ({ open, active, ownKey, perWeek, keyFailed = f
       : view.text
     const hint = known !== null && known.mode === 'sorteio' ? DROPS_HINT_TEXT : WEEK_RESET_TEXT
     const noLeft = view === null ? last !== null && last.remaining === 0 : !view.enabled
+    // The card shows why the button waits; skipping it never sends a plain link by accident.
+    const cardMissing = draft.enabled && cardFields(draft, origin) === null
+    const cardRefused = draft.enabled ? cardRefusal(draft) : ''
     body = (
       <>
         {text ? <Body>{text}</Body> : null}
         <HelpNote doc={HELP.convites}><Soft>{hint}</Soft></HelpNote>
-        <Btn label='Criar link de convite' onPress={create} pending={busy} disabled={busy || limitHit || awaitingDrop || noLeft} />
+        <InviteCardButton label={draft.enabled ? 'Mandar sem cartão' : 'Mandar com um cartão'} secondary onPress={() => changeDraft({ type: 'toggle' })} disabled={busy} expanded={draft.enabled} />
+        {draft.enabled ? <InviteCardCompose draft={draft} origin={origin} onChange={changeDraft} disabled={busy} /> : null}
+        <InviteCardButton label={createLabel(draft, origin)} onPress={create} pending={busy} disabled={busy || limitHit || awaitingDrop || noLeft || cardMissing} />
+        {cardRefused !== '' ? <ErrorText>{cardRefused}</ErrorText> : null}
+        {cardMissing && cardRefused === '' ? <Soft>{PROBLEM_TEXT[problem(draft, origin)]}</Soft> : null}
       </>
     )
   }

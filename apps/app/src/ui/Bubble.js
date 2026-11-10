@@ -161,7 +161,7 @@ export function Bubble ({ item, mine = false, shape = 'single', name, handle, se
                 : null}
               {quote
                 ? (
-                  <View style={styles.quote}>
+                  <View style={[styles.quote, rows.length > 0 && styles.quoteWithChevron]}>
                     <ReplyPreview name={quote.name} handle={quote.handle} text={quote.text} senderKey={quote.senderKey} mine={quote.mine} onPress={openQuote} onLongPress={rows.length > 0 ? () => setOpen(true) : undefined} />
                   </View>
                   )
@@ -260,6 +260,8 @@ const makeStyles = (colors) => StyleSheet.create({
   name: { ...type.counter, marginBottom: 2 },
   handle: { fontWeight: '400', color: colors.soft },
   quote: { marginBottom: space.xs + 2 },
+  // The hover chevron sits in the top right corner; the quote keeps clear of it.
+  quoteWithChevron: { paddingRight: layout.hit - 16 },
   forwarded: { flexDirection: 'row', alignItems: 'center', gap: space.xs, marginBottom: 2 },
   forwardedText: { fontSize: 12, lineHeight: 16, fontStyle: 'italic', color: colors.soft },
   media: { marginHorizontal: -(space.md - MEDIA_INSET), marginTop: -3 },

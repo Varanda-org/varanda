@@ -58,12 +58,19 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
 import { AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
-import { NodeProvider, useNode } from './src/node'
+import { NodeProvider, perfMarks, useNode } from './src/node'
 import { hostedPage } from './src/configStore'
 import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin } from './src/installation'
+import { makeIntent, validIntent } from './src/privateReply'
 import { NamesProvider, useNames } from './src/names'
+import { BlocksProvider, useBlocks } from './src/blocksProvider'
+import { BlockSheet } from './src/ui/BlockSheet'
+import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
+import { fetchMember } from './src/indexClient'
+import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
+import { pageNoticeStore } from './src/pageNoticeStore'
 import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
 import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotBefore } from './src/seenSync'
@@ -74,12 +81,14 @@ import { ageBlocking, ageErrorText, ageGate, ageReadAllowed, parseReturnAge } fr
 import { ageAnswerOutcome, ageStateShown, nodeVouches } from './src/ageMemory.js'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
-import { STEP_TITLES, onboardingStep } from './src/onboarding'
+import { STEP_HINTS, STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
 import { captureEntryLink, dropEntryLink } from './src/groupLinkStore'
 import { ENTRY_LINK_LABELS, ENTRY_OPEN_TEXT, entryCardText, entryPath } from './src/groupLink'
 import { showPostButton, tabsFor } from './src/tabs'
-import { captureSignupInvite, dropSignupInvite, loadSignupInvite } from './src/signupInviteStore'
+import { captureSignupInvite, dropSignupInvite, dropSignupInviteCard, loadSignupInvite, loadSignupInviteCard } from './src/signupInviteStore'
+import { CARD_RECORD_TTL_MS, canAttribute, cardRecordId, resolveInviteCard } from './src/inviteCardFlow'
+import { OPEN_WAIT_MS, arrivalGate, expiryLine, openingGate } from './src/inviteCardCopy'
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { LEGAL_VERSION } from './src/legal'
@@ -89,7 +98,8 @@ import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
 import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, holdBootCover, holdSplash } from './src/splashGate'
-import { Btn, ErrorText, Soft, Spinner, errorText } from './src/ui'
+import { Btn, ErrorText, Page, errorText } from './src/ui'
+import { Stepper } from './src/ui/Stepper'
 import { ThemeProvider, useStyles, useTheme } from './src/ui/ThemeProvider'
 import { Fab } from './src/ui/Fab'
 import { Splash } from './src/ui/Splash'
@@ -99,6 +109,8 @@ import { InstallCard } from './src/ui/InstallCard'
 import { PushNote } from './src/ui/PushNote'
 import { DeletionNote } from './src/ui/DeletionNote'
 import { InviteDropNote } from './src/ui/InviteDropNote'
+import { InviteArrival } from './src/ui/InviteArrival'
+import { InviteCardOpen } from './src/ui/InviteCardOpen'
 import { useInviteDrop } from './src/useInviteDrop'
 import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
@@ -114,7 +126,7 @@ import { StackLayer, stackBusy, useStackMotion } from './src/ui/StackLayer'
 import { stackEntries } from './src/stackEntries'
 import { HelpButton, closeHelp, useHelpOpen } from './src/ui/Help'
 import { HELP } from './src/help'
-import { layout, type } from './src/ui/theme'
+import { layout, space, type } from './src/ui/theme'
 import { paletteFor, statusBarStyle } from './src/appearance.js'
 import { applyBandMeta } from './src/appearanceStore'
 import Avisos from './src/screens/Avisos'
@@ -130,7 +142,7 @@ import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
 import ARua from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
-import Conversa from './src/screens/Conversa'
+import Conversa, { useActing } from './src/screens/Conversa'
 import Curtidas from './src/screens/Curtidas'
 import Denunciar from './src/screens/Denunciar'
 import Diario from './src/screens/Diario'
@@ -139,7 +151,20 @@ import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, linkReturnTaker, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
-import Membro from './src/screens/Membro'
+import Membro, { canConverseWithPage } from './src/screens/Membro'
+import Depoimentos from './src/screens/Depoimentos'
+import Momentos from './src/screens/Momentos'
+import Feira from './src/screens/Feira'
+import Anuncio from './src/screens/Anuncio'
+import Anunciar from './src/screens/Anunciar'
+import AnuncioEditar from './src/screens/AnuncioEditar'
+import Avaliar from './src/screens/Avaliar'
+import { alertsStore } from './src/feiraAlertsStore'
+import { alertsBadge } from './src/feiraScreen'
+import { createFeiraEntry, decideEntry, heldIsFeira } from './src/feiraEntry'
+import { useFeiraEntryStart } from './src/useFeiraEntryStart'
+import { captureListing, dropListing, entryStorage, holdFeiraCode } from './src/feiraEntryStore'
+import { feiraLocation } from './src/feiraPlaceStore'
 import Perfil from './src/screens/Perfil'
 import Pessoas from './src/screens/Pessoas'
 import Paginas from './src/screens/Paginas'
@@ -162,7 +187,7 @@ const TOAST_ACTION_MS = 4000
 // The native splash stays cream in both schemes (Splash.js), and so does what
 // wraps it: the side insets around it would otherwise show the dark bg.
 const SPLASH_WRAP = Platform.OS === 'web' ? null : { backgroundColor: paletteFor('light').bg }
-const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', comunidades: 'Conversas', busca: 'Busca', avisos: 'Avisos' }
+const TAB_TITLES = { rua: 'A Rua', espiadinha: 'Espiadinha', comunidades: 'Conversas', feira: 'Feira', busca: 'Busca', avisos: 'Avisos' }
 // 'Um instante' offers 'Continuar mesmo assim' after this long.
 const SLOW_LOOKUP_MS = 10000
 // While the own profile is still unknown, it is asked again this often (the
@@ -177,7 +202,7 @@ const TERMS_REARM_MAX = 5
 const agePolicyDelay = (n) => (n === 0 ? 5000 : n === 1 ? 15000 : 60000)
 // The node.info read for the certificate proof on the age step, same idea.
 const ageInfoDelay = (n) => (n === 0 ? 2000 : n === 1 ? 5000 : n === 2 ? 15000 : 30000)
-const AGE_REDIRECT_TEXT = 'Vamos abrir a verificação e, na volta, pedir sua passkey de novo.'
+const AGE_REDIRECT_TEXT = 'Vamos abrir a verificação. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.'
 
 // The steps the setup branch (Identidade, Idade) renders; the others belong
 // to the shell (spinner, Perfil, the tabs).
@@ -230,6 +255,14 @@ const INVITE_IN_MEMORY = CAPTURED_INVITE !== null && loadInvite() === null
 // storage for 1 h so it survives the Google step's reload, and it is dropped
 // once opened. The native app has no page load: its links come through Linking.
 const CAPTURED_ENTRY = captureEntryLink()
+// A Feira listing link (/f/<hex>/<seq>, /anuncio/<hex>/<seq>) is read and
+// cleaned the same way, once, after the group link. Its signup entry
+// (src/feiraEntry.js) is kept with the installation it was captured for: ''
+// on the hosted web page (relative requests), so it survives the Google step,
+// the Terms and the setup, and the listing opens once the tabs are up.
+const FEIRA_ENTRY = createFeiraEntry({ getStorage: entryStorage })
+const CAPTURED_LISTING = captureListing()
+if (CAPTURED_LISTING !== null) FEIRA_ENTRY.capture({ author: CAPTURED_LISTING.author, seq: CAPTURED_LISTING.seq, origin: '' })
 // The native app reads Linking's initial URL once per process: it stays the
 // same for the whole run, and Member may mount again.
 let initialUrlTaken = false
@@ -248,6 +281,16 @@ const sameTarget = (a, b) => !!a && !!b && a.username === b.username && a.key ==
 const CAPTURED_LAUNCH = captureLaunch()
 
 // True when node.info confirms an identity and a member certificate.
+// resolveInviteCard counts a card expired once the whole second after its
+// signed expires (seconds) has passed.
+function cardExpiredAt (expires) {
+  return (expires + 1) * 1000
+}
+
+function cardPastExpires (card, now) {
+  return !!card && typeof card.expires === 'number' && now >= cardExpiredAt(card.expires)
+}
+
 function setupComplete (info) {
   return info !== null && info.publicKey !== null && info.memberCert === true
 }
@@ -317,6 +360,8 @@ function Member () {
   const [ajustes, setAjustes] = useState(null)
   // The report sheet's target: null | { author, name, username, seq, text }.
   const [report, setReport] = useState(null)
+  // Bumped by a saved edit so the Anúncio under the editor reads it again.
+  const [listingRefresh, setListingRefresh] = useState(0)
   // 'Pular por enquanto' / 'Continuar mesmo assim': session-only, so the name
   // is asked again only after a reload.
   const [skippedName, setSkippedName] = useState(false)
@@ -336,6 +381,13 @@ function Member () {
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
   }, [])
+  // A block or an unblock changes what A Rua and the Espiadinha may read.
+  const { changed: blocksChanged, refresh: refreshBlocks } = useBlocks()
+  useEffect(() => {
+    if (blocksChanged === 0) return
+    setVersion((v) => v + 1)
+    setPeekVersion((v) => v + 1)
+  }, [blocksChanged])
   // Avisos has something unseen: a plain dot on the bell, never a number.
   const [avisosNew, setAvisosNew] = useState(false)
   const [info, setInfo] = useState(null)
@@ -344,6 +396,9 @@ function Member () {
   // later failed or slow read never hides the tabs again.
   const [setupDone, setSetupDone] = useState(false)
   const [toast, setToast] = useState(null)
+  // The selected tab of each profile on screen (Diário, Membro entries), for the publish button.
+  const [profileTabs, setProfileTabs] = useState({})
+  const reportProfileTab = useCallback((key, id) => setProfileTabs((prev) => prev[key] === id ? prev : { ...prev, [key]: id }), [])
   const toastTimer = useRef(null)
   // The pending profile invite (src/profileLink.js): the record in tab
   // storage, re-read before every step that acts on it.
@@ -469,6 +524,14 @@ function Member () {
   const terms = useTerms(LEGAL_VERSION)
   const intro = useIntro()
   const introState = introDecision({ status: intro.status, record: intro.record, version: INTRO_VERSION })
+  // The signup invite card (src/inviteCardFlow.js) kept beside the code by
+  // the captures (the web load above, appUrlRef, the paste fields). Read
+  // again on every capture, drop, focus and expiry: the store re-checks its
+  // 24 h on each read and clears an expired record, and the rendered card
+  // follows. tick also re-runs the resolve for the same record (a retry).
+  const [cardState, setCardState] = useState(() => ({ record: loadSignupInviteCard(), tick: 0 }))
+  const reloadCard = useCallback(() => setCardState((c) => ({ record: loadSignupInviteCard(), tick: c.tick + 1 })), [])
+  const cardKey = cardRecordId(cardState.record)
   const member = passkey !== null
     ? ((!locked && pkStatus && pkStatus.publicKey) || null)
     : ((info && info.publicKey) || null)
@@ -633,6 +696,8 @@ function Member () {
   // Bumped by every age request and by a lock or generation change: an
   // answer that arrives under another number is dropped.
   const ageSeq = useRef(0)
+  // The age-step Feira hook's limit(err) (set below, where it is called).
+  const ageFeiraLimitRef = useRef(() => false)
   const ageRan = useRef(null)
   // The key of the last background read that finished (see ageReadPending).
   const [ageReadDone, setAgeReadDone] = useState(null)
@@ -695,9 +760,19 @@ function Member () {
     setAgeNote('')
     work(stale, who, origin).catch((err) => {
       if (stale()) return
+      // The held Feira code refused: the seller's week ran out. The hook drops
+      // the code and shows LIMIT_TEXT in place of "Pedir entrada".
+      if (ageFeiraLimitRef.current(err)) {
+        if (NATIVE_APP) setAgeInviteRefused(true)
+        return
+      }
       // The app drops a refused code so the paste field shows again; the web
       // keeps its stored code as it always did.
-      if (dropsHeldInvite(err, NATIVE_APP)) dropSignupInvite()
+      if (dropsHeldInvite(err, NATIVE_APP)) {
+        dropSignupInvite()
+        dropSignupInviteCard()
+        reloadCard()
+      }
       if (NATIVE_APP && isInviteRefusal(err)) setAgeInviteRefused(true)
       setAgeError(ageErrorText(err) || errorText(err))
     }).finally(() => {
@@ -709,18 +784,21 @@ function Member () {
   // when the network is by invite, and the app has no App Links, so a code
   // can only come in pasted (src/linkReturn.js invitePasteShown). The policy
   // is read once; a failed read leaves the field to a refusal from the service.
+  // The web reads it too for a visitor from a Feira listing link, whose
+  // "Pedir entrada" shows on this step when the network is by invite.
   const [ageInviteRequired, setAgeInviteRequired] = useState(undefined)
   const [ageInviteRefused, setAgeInviteRefused] = useState(false)
   const [, setAgeInviteTick] = useState(0)
+  const ageFeiraHere = FEIRA_ENTRY.load(hostedPage === true ? '' : ageOrigin) !== null
   useEffect(() => {
-    if (!NATIVE_APP || !ageHosted || !ready || ageInviteRequired !== undefined) return
+    if ((!NATIVE_APP && !ageFeiraHere) || !ageHosted || !ready || ageInviteRequired !== undefined) return
     let cancelled = false
     readInvitePolicy().then(
       (p) => { if (!cancelled) setAgeInviteRequired(!!p && p.required === true) },
       () => { if (!cancelled) setAgeInviteRequired(false) }
     )
     return () => { cancelled = true }
-  }, [ageHosted, ready, ageInviteRequired])
+  }, [ageHosted, ready, ageInviteRequired, ageFeiraHere])
   const ageInvitePaste = invitePasteShown({
     native: NATIVE_APP,
     required: ageInviteRequired,
@@ -731,6 +809,7 @@ function Member () {
     setAgeInviteRefused(false)
     setAgeError('')
     setAgeInviteTick((n) => n + 1)
+    reloadCard()
   }
   useEffect(() => {
     if (!ageReadNow) return
@@ -773,7 +852,10 @@ function Member () {
       if (stale()) return
       const { signature } = await node.request('age.sign', { action: 'session', nonce })
       if (stale()) return
-      const r = await ageSession({ member, nonce, signature, invite: loadSignupInvite()?.code })
+      // The Feira code's paid session has its own route (src/account.js).
+      const held = loadSignupInvite()
+      const feira = heldIsFeira(FEIRA_ENTRY.load(feiraOrigin), held)
+      const r = await ageSession({ member, nonce, signature, invite: held?.code }, { feira })
       if (stale()) return
       if (r.state === 'verificado') return answerAge('verificado', who, origin, r.proof)
       if (typeof r.url !== 'string' || !r.url.startsWith('https://')) throw new Error('serviço indisponível')
@@ -1074,6 +1156,22 @@ function Member () {
     : null)
   const heldUrlRef = useRef(null)
   const appUrlRef = useRef(null)
+  // The installation a Feira listing entry belongs to: '' on the hosted web
+  // page, as captured at load; the installation's origin in the app.
+  const feiraOrigin = hostedPage === true ? '' : ageOrigin
+  // "Pedir entrada" on the age step (src/useFeiraEntryStart.js): with invites
+  // and the age check on, the age session refuses a visitor with no code, so
+  // the Feira code is asked for here first, by a press only. Once held, the
+  // ordinary age start sends it.
+  const [ageFeiraNote, setAgeFeiraNote] = useState('')
+  const ageFeira = useFeiraEntryStart({
+    feira: { holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode },
+    active: ageHosted && ready && !ageClear && ageFeiraHere,
+    required: ageInviteRequired,
+    onNote: setAgeFeiraNote
+  })
+  ageFeiraLimitRef.current = ageFeira.limit
+  const [feiraTick, setFeiraTick] = useState(0)
   appUrlRef.current = (url) => {
     if (typeof url !== 'string') return
     const ret = parseAppReturn(url)
@@ -1086,6 +1184,7 @@ function Member () {
     if (signup !== null) {
       setAgeInviteRefused(false)
       setAgeInviteTick((n) => n + 1)
+      reloadCard()
     }
     const rec = captureInvite(url)
     if (rec !== null) {
@@ -1102,6 +1201,17 @@ function Member () {
     const link = parseAppLink(url)
     if (link !== null && (link.kind === 'grupo' || link.kind === 'comunidade')) {
       setPendingLink({ kind: link.kind, key: link.key, origin: ageOrigin })
+      return
+    }
+    if (link !== null && link.kind === 'anuncio') {
+      // The entry belongs to an installation: with none known yet, the URL
+      // waits for the first one, like an App Link on a cold start.
+      if (feiraOrigin === '') {
+        heldUrlRef.current = url
+        return
+      }
+      FEIRA_ENTRY.capture({ author: link.author, seq: link.seq, origin: feiraOrigin })
+      setFeiraTick((n) => n + 1)
       return
     }
     if (signup === null && rec === null && link === null && waitsForInstallation(url)) {
@@ -1178,6 +1288,133 @@ function Member () {
     index = total
   }
   useEffect(() => { if (!setupStep && step === 'pronto') setReachedTabs(true) }, [setupStep, step])
+
+  // The invite card is resolved from scratch for the screen that may show
+  // it: the opening card (before the intro cards, bound to the held code)
+  // or the arrival card (at 'pronto', once the code was used, bound to the
+  // record's own code). Nothing is resolved for the steps in between.
+  const cardStage = !setupStep && step === 'pronto' ? 'arrival' : 'open'
+  // The arrival card is for someone joining with this card: it needs the
+  // node to have said, on this page load and while this very card was held,
+  // that the identity is not a member yet (info loaded, no member
+  // certificate). A setup step alone is not that signal: it also holds while
+  // info is still loading for a member. A member who was already signed in
+  // when opening a card link never sees it, a replaced card starts
+  // ineligible, and a load that never saw the signal fails closed: no card.
+  // The signal is bound to the identity that gave it: signing into another
+  // account in the same tab never inherits a newcomer's arrival card.
+  const eligibleCardRef = useRef(null)
+  const ownPublicKey = info !== null && typeof info.publicKey === 'string' ? info.publicKey : null
+  if (cardKey !== null && ownPublicKey !== null && info.memberCert !== true) eligibleCardRef.current = { card: cardKey, key: ownPublicKey }
+  const arrivalEligible = cardKey !== null && eligibleCardRef.current !== null &&
+    eligibleCardRef.current.card === cardKey && eligibleCardRef.current.key === ownPublicKey
+  const cardWanted = cardKey !== null && ((cardStage === 'arrival' && arrivalEligible) || (introState === 'show' && !LINK_RETURN && !AGE_RETURN))
+  const [cardView, setCardView] = useState(null)
+  const cardSeq = useRef(0)
+  const resolveCard = useCallback((stage) => {
+    const record = loadSignupInviteCard()
+    return resolveInviteCard({
+      record,
+      heldCode: stage === 'arrival' ? (record !== null ? record.code : undefined) : loadSignupInvite()?.code,
+      request: node.request,
+      accountStatus: (who) => accountStatus(who, { origin: ageOrigin }),
+      nodeReady: node.phase === 'ready',
+      now: Date.now()
+    })
+  }, [node.request, node.phase, ageOrigin])
+  useEffect(() => {
+    const seq = ++cardSeq.current
+    if (!cardWanted) {
+      setCardView(null)
+      return
+    }
+    resolveCard(cardStage).then((result) => {
+      if (seq !== cardSeq.current) return
+      // The store moved since the last read (a drop elsewhere, the 24 h):
+      // read it again; the next resolve is for that record.
+      if (result.recordId !== cardKey) return reloadCard()
+      // A node that went back to connecting keeps the card already verified.
+      // A card past its signed expires is not kept: the expired answer, or
+      // none, takes its place.
+      setCardView((v) => result.signature === 'wait' && v !== null && v.id === result.recordId && v.stage === cardStage && v.result.signature === 'ok' &&
+        !cardPastExpires(v.result.card, Date.now())
+        ? v
+        : { id: result.recordId, stage: cardStage, result })
+    }, () => {})
+  }, [cardWanted, cardKey, cardStage, cardState.tick, resolveCard, generation, node.online])
+  const cardRetry = cardView !== null && (cardView.result.signature === 'wait' || cardView.result.membership === 'unknown')
+  const cardRetryRef = useRef(cardRetry)
+  cardRetryRef.current = cardRetry
+  const cardKeyRef = useRef(cardKey)
+  cardKeyRef.current = cardKey
+  const shownCard = cardView !== null && cardView.id === cardKey && cardView.result.card ? cardView.result.card : null
+  const cardCardRef = useRef(shownCard)
+  cardCardRef.current = shownCard
+  // Back in the foreground: resolve again when the last answer has to be
+  // retried, and read the store again when the record moved (expired,
+  // replaced) so the rendered card follows it.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return
+      if (cardRetryRef.current || cardRecordId(loadSignupInviteCard()) !== cardKeyRef.current ||
+        (cardCardRef.current !== null && cardPastExpires(cardCardRef.current, Date.now()))) reloadCard()
+    })
+    return () => sub.remove()
+  }, [reloadCard])
+  // The record's 24 h or the card's signed expires, whichever comes first,
+  // ends while the app stays open: resolve again so the card is marked
+  // expired and canAttribute hides it.
+  const shownExpires = shownCard !== null ? shownCard.expires : null
+  useEffect(() => {
+    const record = cardState.record
+    if (record === null) return
+    let end = record.at + CARD_RECORD_TTL_MS
+    if (typeof shownExpires === 'number') end = Math.min(end, cardExpiredAt(shownExpires))
+    const fire = () => {
+      // A card past its signed expires is spent: drop it, or the store read
+      // would hand back the same record and this timer would fire again.
+      if (typeof shownExpires === 'number' && Date.now() >= cardExpiredAt(shownExpires)) dropSignupInviteCard()
+      reloadCard()
+    }
+    const t = setTimeout(fire, Math.max(0, end - Date.now()) + 50)
+    return () => clearTimeout(t)
+  }, [cardState.record, shownExpires, reloadCard])
+  const cardViewFor = (stage) => cardView !== null && cardView.id === cardKey && cardView.stage === stage ? cardView.result : null
+  // Agora não on the opening card: hidden for this load, code and card kept.
+  const [openLater, setOpenLater] = useState(false)
+  const [openHow, setOpenHow] = useState(false)
+  const openResult = cardViewFor('open')
+  // An offline membership ('unknown') or a node not ready yet is still
+  // pending; an unlinked key, a bad signature or an expired card is not a card.
+  const openVerified = cardKey === null
+    ? false
+    : openResult === null || openResult.signature === 'wait' || (openResult.signature === 'ok' && openResult.membership === 'unknown')
+      ? null
+      : canAttribute(openResult)
+  // The record the arrival card closed (Agora não, or both taps done):
+  // dismissed even when the store refused the drop.
+  const [arrivalClosed, setArrivalClosed] = useState(null)
+  const arrivalResult = cardViewFor('arrival')
+  const showArrival = arrivalEligible && arrivalResult !== null && typeof arrivalResult.username === 'string' && arrivalGate({
+    step,
+    verified: canAttribute(arrivalResult),
+    linked: arrivalResult.membership === 'linked',
+    dismissed: arrivalClosed === arrivalResult.recordId,
+    ownKey,
+    member: arrivalResult.member
+  })
+  const closeArrival = useCallback(() => {
+    setArrivalClosed(cardKeyRef.current)
+    dropSignupInviteCard()
+    reloadCard()
+  }, [reloadCard])
+  const resolveArrival = useCallback(() => resolveCard('arrival'), [resolveCard])
+  // Bound when the arrival card renders: true only while this identity and
+  // this record are current, asked before each write.
+  const arrivalGen = generation
+  const arrivalId = arrivalResult !== null ? arrivalResult.recordId : null
+  const arrivalGuard = useCallback(() => arrivalGen === generationRef.current && arrivalId !== null &&
+    cardRecordId(loadSignupInviteCard()) === arrivalId, [arrivalGen, arrivalId])
 
   // Only the unlocked passkey key, behind the terms, age and setup gates: the
   // browser registration is read here so the note's first tap already holds
@@ -1401,6 +1638,18 @@ function Member () {
     if ((kind !== 'seguindo' && kind !== 'seguidores') || typeof key !== 'string') return
     pushScreen({ screen: kind, key: key.toLowerCase(), params: {} })
   }, [pushScreen])
+  // The Momentos viewer, starting at one author's ring (hosted only: the
+  // strip and the Diário rows that call it render only there).
+  const openMomentos = useCallback((key) => {
+    if (typeof key !== 'string') return
+    // The publication toast must not outlive the viewer it covered.
+    clearTimeout(toastTimer.current); setToast(null)
+    pushScreen({ screen: 'momentos', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
+  const openTestimonials = useCallback((key) => {
+    if (typeof key !== 'string') return
+    pushScreen({ screen: 'depoimentos', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
   const enterAvisos = useCallback(() => {
     if (tabRef.current !== 'avisos') setReturnTab(tabRef.current)
     setTab('avisos')
@@ -1467,6 +1716,7 @@ function Member () {
   // reconnect also bumps the epoch, but the same unlocked identity keeps
   // acting as its page (and the page screens keep their drafts).
   const actingIdentity = locked ? 'locked' : (typeof ownKey === 'string' ? ownKey : 'none')
+  const acting = useActing()
   useEffect(() => { actingAs.reset() }, [actingIdentity])
   const [groupSeen, setGroupSeen] = useState({ epoch: nodeEpoch, map: {} })
   const seenMap = groupSeen.epoch === nodeEpoch ? groupSeen.map : {}
@@ -1513,13 +1763,55 @@ function Member () {
       setDmDot(r.inboxUnread === true || r.requests === true)
     } catch {}
   }, [dmRequest])
+  // The first read waits for A Rua's first rows (or a quiet node, for a start
+  // elsewhere): the dot is not worth a place in the boot chain.
+  const [dmDotGate, setDmDotGate] = useState(false)
+  const nodeWhenIdle = node.whenIdle
   useEffect(() => {
-    if (dmReady) readDmDot()
+    if (!dmReady) {
+      setDmDotGate(false)
+      return
+    }
+    if (feedBoot.details) {
+      setDmDotGate(true)
+      return
+    }
+    if (typeof nodeWhenIdle !== 'function') return
+    let alive = true
+    // whenIdle answers { promise, cancel } (src/idle.js), not a promise.
+    const wait = nodeWhenIdle(4000)
+    wait.promise.then(() => { if (alive) setDmDotGate(true) }, () => {})
+    return () => {
+      alive = false
+      wait.cancel()
+    }
+  }, [dmReady, feedBoot.details, nodeWhenIdle])
+  useEffect(() => {
+    if (dmReady && dmDotGate) readDmDot()
     else {
       dmDotGen.current++
       setDmDot(false)
     }
-  }, [dmReady, readDmDot, node.dmVersion, stackDepth])
+  }, [dmReady, dmDotGate, readDmDot, node.dmVersion, stackDepth])
+  // --- Feira: the tab dot from saved searches (src/feiraAlerts.js) ---
+  // Only the Feira screen runs the searches, when it is opened; this reads
+  // the counts that run left on the device, so nothing polls here. Counts
+  // are recorded only while the Feira answered as on, so a stored count
+  // stands for "on" at the last opening. Same origin rule as Feira.js.
+  const feiraAlertsOrigin = installationOrigin() || globalThis.location?.origin || node.accountOrigin
+  const feiraOnScreen = tab === 'feira' && stackDepth === 0
+  const [feiraAlerts, setFeiraAlerts] = useState(null)
+  useEffect(() => {
+    if (mode !== 'hosted' || !ready || locked || feiraOnScreen) return
+    let live = true
+    alertsStore.load(feiraAlertsOrigin).then((value) => {
+      if (live) setFeiraAlerts({ epoch: nodeEpoch, origin: feiraAlertsOrigin, value })
+    }, () => {})
+    return () => { live = false }
+  }, [mode, ready, locked, feiraOnScreen, feiraAlertsOrigin, nodeEpoch])
+  const feiraBadge = mode === 'hosted' && !locked && !feiraOnScreen && feiraAlerts !== null &&
+    feiraAlerts.epoch === nodeEpoch && feiraAlerts.origin === feiraAlertsOrigin &&
+    alertsBadge({ node, enabled: true, searches: feiraAlerts.value.searches, counts: feiraAlerts.value.counts })
   // --- Visto em todos os aparelhos (src/seenSync.js) ---
   // The same passkey on another device marked notices, conversations or
   // groups as seen: a pass reads the encrypted seen document from the account
@@ -1591,6 +1883,8 @@ function Member () {
         setRemoteSeen(result.avisos)
       }
       if (result.dmChanged) bumpDm()
+      // Another device of the passkey blocked or unblocked someone.
+      if (result.blocksChanged) refreshBlocks().catch(() => {})
       if (result.groupChanged) {
         bumpSeen()
         const taken = snap.value
@@ -1688,9 +1982,145 @@ function Member () {
     dmWakePending.current = false
     dmRequest('dm.pull', {}).catch(() => {}).then(() => bumpDm())
   }, [dmReady, dmRequest, bumpDm])
-  const openMessage = useCallback((peer) => {
-    pushScreen({ screen: 'mensagem', key: typeof peer === 'string' ? peer.toLowerCase() : peer, params: {} })
+  // A post the person came from rides beside the stack, keyed by peer: nav.push
+  // drops a push equal to the top, so the tick re-renders a DM already shown
+  // and Mensagem reads the new intent as a prop. Mensagem uses one only once,
+  // and only the conversation on top of the stack is handed it.
+  const intentsRef = useRef(new Map())
+  // The page notice asked from a post's "Mensagem em particular" ({ key }).
+  const [pageDmAsk, setPageDmAsk] = useState(null)
+  const pageDmPending = useRef(null)
+  // A lock, an unlock or another identity drops every pending context, and a
+  // page notice left open must not open a conversation under the new identity.
+  useEffect(() => {
+    intentsRef.current.clear()
+    setPageDmAsk(null)
+    pageDmPending.current = null
+  }, [ownKey, nodeEpoch])
+  const intentCount = useRef(0)
+  const [, setIntentTick] = useState(0)
+  const pageDmGen = useRef(0)
+  const ownKeyRef = useRef(ownKey)
+  ownKeyRef.current = ownKey
+  const openMessage = useCallback((peer, options) => {
+    const key = typeof peer === 'string' ? peer.toLowerCase() : peer
+    const open = () => {
+      if (options && options.context && typeof key === 'string') {
+        intentCount.current += 1
+        const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
+        const intent = makeIntent({ id: intentCount.current + ':' + Date.now(), peer: key, from: own, context: options.context })
+        if (validIntent(intent, own)) {
+          intentsRef.current.set(key, intent)
+          setIntentTick((n) => n + 1)
+        }
+      }
+      // { draft, card } from a listing's Conversar, shown in the composer only;
+      // nothing is sent until the member presses send.
+      const initial = options && (typeof options.draft === 'string' || options.card) ? { draft: options.draft, card: options.card || null } : null
+      pushScreen({ screen: 'mensagem', key, params: initial ? { initial } : {} })
+    }
+    if (!(options && options.context && typeof key === 'string')) {
+      pageDmGen.current++
+      pageDmPending.current = null
+      return open()
+    }
+    // A post's row offers the message before the author is known as a Pagina
+    // (feed items carry no page flag): a page gets its one-time notice and no
+    // private context chip, and a closed or moved one gets none at all.
+    const decide = ({ read, hint, closed, moved }) => {
+      const canConverse = canConverseWithPage({
+        page: true,
+        closed,
+        moved,
+        hosted: node.hosted,
+        enabled: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })
+      })
+      const plan = pageDmPlan({ hint, read, seen: pageNoticeSeen(pageNoticeStore(), key), canConverse })
+      if (plan === 'open') return open()
+      if (plan === 'direct') return pushScreen({ screen: 'mensagem', key, params: {} })
+      if (plan === 'notice') return setPageDmAsk({ key })
+      // showToast only touches setToast and toastTimer, both stable.
+      showToast('Esta página não recebe mensagens.')
+    }
+    const prof = names.profileOf(key)
+    if (prof && prof.page === true) {
+      pageDmGen.current++
+      pageDmPending.current = null
+      return decide({ read: 'page', hint: null, closed: prof.closed === true, moved: prof.moved === true })
+    }
+    if (pageDmPending.current === key) return
+    const pressGen = ++pageDmGen.current
+    pageDmPending.current = key
+    const pressOwn = ownKey
+    const pressEpoch = nodeEpoch
+    // Slow page discovery must not hold up a person's conversation.
+    const bounded = (promise) => {
+      let timer
+      return Promise.race([
+        promise,
+        new Promise((resolve) => { timer = setTimeout(() => resolve(null), 2500) })
+      ]).finally(() => clearTimeout(timer))
+    }
+    const hintP = Promise.resolve().then(() => fetchMember(key)).then(
+      (res) => res && res.ok && res.value.page === true ? { page: true, closed: res.value.closed === true, moved: res.value.moved === true } : null
+    ).catch(() => null)
+    const readP = Promise.resolve().then(() => node.request('page.read', { key })).catch(() => null)
+    Promise.all([bounded(hintP), bounded(readP)]).then(([hint, r]) => {
+      if (pageDmGen.current !== pressGen) return
+      if (pageDmPending.current === key) pageDmPending.current = null
+      if (ownKeyRef.current !== pressOwn || nodeEpochRef.current !== pressEpoch) return
+      const read = pageReadKind(r, key)
+      const fromRead = read === 'page'
+      const closed = fromRead ? r.closed === true : !!(hint && hint.closed)
+      const moved = fromRead ? (r.movedTo !== null && r.movedTo !== undefined) : !!(hint && hint.moved)
+      // Only the member's own node may mark a key as a page in the names
+      // cache: the seeder's hint is untrusted and would otherwise stick.
+      if (read === 'page') {
+        names.learnMany([[key, { name: prof ? prof.name : null, username: prof ? prof.username : null, page: true, closed, moved }]])
+      }
+      decide({ read, hint, closed, moved })
+    }).catch(() => { if (pageDmGen.current === pressGen && pageDmPending.current === key) pageDmPending.current = null })
+  }, [pushScreen, ownKey, nodeEpoch, names, node.request, node.hosted, node.accountOrigin])
+  const intentUsed = useCallback((id) => {
+    for (const [key, intent] of intentsRef.current) {
+      if (intent.id === id) intentsRef.current.delete(key)
+    }
+  }, [])
+  const openListing = useCallback((author, seq) => {
+    if (typeof author !== 'string' || !Number.isSafeInteger(seq)) return
+    pushScreen({ screen: 'anuncio', key: author.toLowerCase() + ':' + seq, params: {} })
   }, [pushScreen])
+  // Anuncio shows Editar only to its owner (or the Página acting as it).
+  const openEditListing = useCallback((listing) => {
+    if (typeof listing?.author !== 'string' || !Number.isSafeInteger(listing.seq)) return
+    pushScreen({ screen: 'editar-anuncio', key: listing.author.toLowerCase() + ':' + listing.seq, params: {} })
+  }, [pushScreen])
+  // Only the thread knows the accepted offer a rating needs (nav.js checks it).
+  const openAvaliar = useCallback(({ author, seq, offer } = {}) => {
+    if (typeof author !== 'string' || !Number.isSafeInteger(seq) || typeof offer !== 'string') return
+    pushScreen({ screen: 'avaliar', key: author.toLowerCase() + ':' + seq, params: { offer } })
+  }, [pushScreen])
+  // Anunciar starts from the city the Feira remembers.
+  const feiraPlaceRef = useRef(null)
+  const openAnnounce = useCallback(() => {
+    feiraLocation.load().then((place) => {
+      feiraPlaceRef.current = place
+      pushScreen({ screen: 'anunciar' })
+    })
+  }, [pushScreen])
+  // A published listing replaces the form on the stack (same depth, so the
+  // web history entries stay in step): Back never returns to a sent form.
+  const showPublished = useCallback(({ answer, dest } = {}) => {
+    const author = dest && dest.kind === 'page' ? dest.page : ownKey
+    const seq = answer && answer.seq
+    if (typeof author !== 'string' || !Number.isSafeInteger(seq)) {
+      goBack()
+      return
+    }
+    const top = nav.top(stackRef.current)
+    if (!top || top.screen !== 'anunciar') return
+    commitStack(nav.push(nav.pop(stackRef.current), { screen: 'anuncio', key: author.toLowerCase() + ':' + seq, params: {} }))
+  }, [commitStack, goBack, ownKey])
   const openCommunities = useCallback(() => {
     pushScreen({ screen: 'comunidades' })
   }, [pushScreen])
@@ -1736,6 +2166,18 @@ function Member () {
     pushScreen({ screen: pendingLink.kind === 'grupo' ? 'grupo' : 'comunidade', key: pendingLink.key, params: {} })
     setPendingLink(null)
   }, [pendingLink, mode, atTabs, pushScreen, ageOrigin])
+  // A Feira listing link opens once the tabs are on screen on a hosted node,
+  // exactly once (consume), and only ever shows the listing. An entry of
+  // another installation is dropped by load().
+  useEffect(() => {
+    if (hostedPage !== true && ageOrigin === '') return
+    const entry = FEIRA_ENTRY.load(feiraOrigin)
+    const decision = decideEntry({ entry, signedIn: atTabs, ready: mode === 'hosted' })
+    if (decision.action !== 'open') return
+    FEIRA_ENTRY.consume(feiraOrigin)
+    dropListing()
+    openListing(decision.author, decision.seq)
+  }, [feiraTick, atTabs, mode, feiraOrigin, ageOrigin, openListing])
   const action = inviteAction({
     invite,
     hosted: mode === 'hosted',
@@ -1976,6 +2418,15 @@ function Member () {
     return () => globalThis.removeEventListener('keydown', onKey)
   }, [commitStack, goBack, closeAvisos])
   const openComposer = () => setComposer((c) => ({ ...c, open: true }))
+  // The composer in Momento mode (the strip's own ring, 'Novo momento' in the
+  // own viewer): `moment` is a counter, so every request switches it again.
+  // A momento is the person's own: a page chosen in Publicar como is set
+  // back to the person for this open, or Publicar would not offer Momento.
+  const openMomentComposer = () => {
+    clearStack()
+    actingAs.me()
+    setComposer((c) => ({ ...c, open: true, reply: null, quote: null, moment: (c.moment || 0) + 1 }))
+  }
   const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
   const openAvisos = () => {
     if (tab === 'avisos') reselectTab('avisos')
@@ -2040,6 +2491,25 @@ function Member () {
     const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
     return () => clearTimeout(t)
   }, [coveringBoot, step])
+  // Dev-only timing (src/perfMarks.js): no-ops unless the env opt-in is set.
+  const splashEndMarked = useRef(false)
+  useEffect(() => {
+    if (!atShell || coveringBoot || splashEndMarked.current) return
+    splashEndMarked.current = true
+    perfMarks().mark('splash-end', feedReady ? 'feedReady' : 'patience')
+  }, [atShell, coveringBoot, feedReady])
+  const markedTab = useRef(tab)
+  useEffect(() => {
+    if (markedTab.current === tab) return
+    markedTab.current = tab
+    const marks = perfMarks()
+    marks.mark('tab:' + tab)
+    for (const line of marks.report()) console.log(line)
+  }, [tab])
+  useEffect(() => {
+    if (!feedBoot.details) return
+    for (const line of perfMarks().report()) console.log(line)
+  }, [feedBoot.details])
   // Light over the Diário band (dark over the offline note above it) and over
   // Membro's band, which stays on top while offline (its note sits below the
   // band and the stack layer covers the shell's). The sheets leave the status
@@ -2048,17 +2518,63 @@ function Member () {
     (topEntry !== null && topEntry.screen === 'membro') ||
     (topEntry === null && tab === 'diario' && node.online !== false)
   )
+  // The Momentos viewer is black in both themes: light icons while it is on
+  // top, the scheme's again once it closes. Status bar only, no band colour.
+  const viewerOnTop = step === 'pronto' && topEntry !== null && topEntry.screen === 'momentos'
   // Only the final return shows the band; the gates below never do.
   const bandShown = light && !loadingGate && !holding && !showIntro && !showTerms && (ready || seen)
   // Runs after ThemeProvider's layout effect, so the band colour wins and a
   // band that goes away gives back the current scheme's bg.
   useEffect(() => { applyBandMeta(bandShown, colors.bg) }, [bandShown, colors.bg])
+  // The opening invite card (inviteCardCopy.js openingGate) waits under the
+  // splash for at most OPEN_WAIT_MS, counted from when the intro cards would
+  // show. Once the intro cards have shown the splash never comes back for
+  // it, and a card verified later takes their place.
+  const openWaitAt = useRef(null)
+  const introRendered = useRef(false)
+  const introDue = showIntro && !loadingGate && !holding
+  if (introDue && openWaitAt.current === null) openWaitAt.current = Date.now()
+  let opening = openingGate({
+    introShow: introDue,
+    linkReturn: LINK_RETURN,
+    ageReturn: AGE_RETURN,
+    card: cardKey !== null,
+    verified: openVerified,
+    waitedMs: openWaitAt.current === null ? 0 : Date.now() - openWaitAt.current,
+    dismissed: openLater
+  })
+  if (opening === 'wait' && introRendered.current) opening = 'none'
+  useEffect(() => {
+    if (opening !== 'wait') return
+    const t = setTimeout(() => bumpSplash((n) => n + 1), Math.max(0, OPEN_WAIT_MS - (Date.now() - openWaitAt.current)) + 50)
+    return () => clearTimeout(t)
+  }, [opening])
   // The same root View with the Splash at child 0 is what React preserves
   // across these returns and the final one, so the chair animation does not
   // replay and, on the web, the Splash unmount that removes
   // #varanda-pre-splash happens only when the real screen is ready.
-  if (loadingGate || holding) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
-  if (showIntro) return <Introducao onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
+  if (loadingGate || holding || opening === 'wait') return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
+  if (opening === 'card' && openResult !== null) {
+    // Como funciona: the intro cards, then back to the card; only Entrar
+    // marks them seen.
+    if (openHow) return <Introducao key='how' onDone={() => setOpenHow(false)} sidePad={sidePad} edges={sideEdges} />
+    return (
+      <InviteCardOpen
+        card={openResult.card}
+        username={openResult.username}
+        expiryText={expiryLine(openResult.card.expires, Date.now())}
+        onEnter={() => intro.markSeen()}
+        onHow={() => setOpenHow(true)}
+        onLater={() => setOpenLater(true)}
+        sidePad={sidePad}
+        edges={sideEdges}
+      />
+    )
+  }
+  if (showIntro) {
+    introRendered.current = true
+    return <Introducao key='intro' onDone={() => intro.markSeen()} sidePad={sidePad} edges={sideEdges} />
+  }
   if (deletedState !== null && member !== null && passkey !== null) {
     const erase = async () => {
       const key = member
@@ -2116,6 +2632,12 @@ function Member () {
   // On a wide web window the setup step and the tabs share one centred column.
   const wide = Platform.OS === 'web' && width > layout.column
   let content
+  // Onboarding steps draw their own title (src/ui/Stepper.js, src/ui/Welcome.js); the bar keeps only the help.
+  const stepBar = (
+    <View style={[styles.helpBar, { paddingTop: insets.top, minHeight: layout.topBar + insets.top }]}>
+      {HELP[step] ? <HelpButton key={step} doc={HELP[step]} /> : null}
+    </View>
+  )
   if (setupStep) {
     // The first setup (identity, member certificate) before the tabs. The
     // tabs never render before a successful node.info confirms both.
@@ -2135,12 +2657,13 @@ function Member () {
           onCheck={checkAge}
           invitePaste={ageInvitePaste}
           onInvitePasted={ageInvitePasted}
+          feiraEntry={ageFeiraHere ? { offer: ageFeira.offer, busy: ageFeira.busy, tried: ageFeira.tried, onPress: ageFeira.press, note: ageFeiraNote } : null}
           index={index}
           total={total}
         />
       )
     } else if (passkey !== null || info !== null) {
-      // embedded: the top bar above already carries the step's title
+      // embedded: the step frame (or the Ajustes page) carries the title
       // The invite card shows on Entrar only (never in the Ajustes Identidade).
       const inviteProp = action === 'card'
         ? {
@@ -2161,21 +2684,22 @@ function Member () {
             onDismiss: () => { dropEntryLink(); setPendingLink(null) }
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={dropLinkReturn} invite={inviteProp || entryProp} />
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={dropLinkReturn} onInviteChanged={reloadCard} invite={inviteProp || entryProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
-        <View style={styles.setupBody}>
-          <ErrorText>{infoError}</ErrorText>
-          <Btn label='tentar de novo' onPress={readInfo} disabled={!ready} />
-        </View>
+        <Page flush grow padBottom={16}>
+          <Stepper index={index} total={total} title={STEP_TITLES[step]} hint={STEP_HINTS[step] || ''} actions={<Btn label='Tentar de novo' onPress={readInfo} disabled={!ready} block large />}>
+            <ErrorText>{infoError}</ErrorText>
+          </Stepper>
+        </Page>
       )
     } else {
-      body = <View style={styles.setupBody}><Soft>carregando…</Soft></View>
+      body = <Page flush grow padBottom={16}><Stepper index={index} total={total} title={STEP_TITLES[step]} hint={STEP_HINTS[step] || ''} busy /></Page>
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} right={HELP[step] ? <HelpButton key={step} doc={HELP[step]} /> : null} />
-        <OfflineNote />
+        {stepBar}
+        {step === 'idade' ? null : <OfflineNote />}
         <ExclusaoRecibo />
         {/* Without the Conexão link (hosted page) the body clears the home indicator itself. */}
         <View style={[styles.flex, connectionLink === null && { paddingBottom: insets.bottom }]}>{body}</View>
@@ -2186,13 +2710,12 @@ function Member () {
     // The own profile is being looked up (sync already runs in the background).
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} />
+        {stepBar}
         <OfflineNote />
-        <View style={styles.center}>
-          <Spinner size='large' />
-          {slow
-            ? <Btn label='Continuar mesmo assim' secondary onPress={() => setSkippedName(true)} />
-            : null}
+        <View style={[styles.flex, { paddingBottom: insets.bottom }]}>
+          <Page flush grow padBottom={16}>
+            <Stepper index={index} total={total} title={STEP_TITLES.carregando} hint={STEP_HINTS.carregando} busy actions={slow ? <Btn label='Continuar mesmo assim' secondary block large onPress={() => setSkippedName(true)} /> : null} />
+          </Page>
         </View>
       </View>
     )
@@ -2201,7 +2724,7 @@ function Member () {
     // (the step machine then shows the tabs) and the welcome toast shows there.
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} right={<HelpButton doc={HELP.perfil} />} />
+        {stepBar}
         <OfflineNote />
         <View style={[styles.flex, Platform.OS === 'web' && { paddingBottom: insets.bottom }]}>
           <Perfil
@@ -2226,6 +2749,17 @@ function Member () {
     const on = (id) => tab === id && ready
     const shown = (id) => (tab === id ? styles.flex : styles.hidden)
     const stacked = nav.depth(stack) > 0
+    // The black Momentos viewer slides out over the tabs on close: the tab bar
+    // and the publish button wait for the end of its pop, or they show over
+    // the black for the whole slide.
+    const leavingEntry = stackMotion.leaving && stackMotion.leaving.entry && stackMotion.leaving.index >= nav.depth(stack) ? stackMotion.leaving.entry : null
+    const viewerLeaving = leavingEntry !== null && leavingEntry.screen === 'momentos'
+    const barsHidden = stacked || viewerLeaving
+    const topProfile = stacked ? nav.top(stack) : null
+    const profileTab = stacked
+      ? (topProfile.screen === 'membro' ? profileTabs[(stack.length - 1) + ':' + topProfile.key] : undefined)
+      : (tab === 'diario' ? profileTabs.diario : undefined)
+    const fabShown = !viewerLeaving && showPostButton({ tab, screen: stacked ? topProfile.screen : null, profileTab })
     const tabActions = <TopActions key={tab} help={HELP[tab === 'comunidades' ? 'conversas' : tab]} onAvisos={mode === 'hosted' ? openAvisos : undefined} avisosNew={avisosNew} avisosActive={tab === 'avisos'} />
     // Conversas puts its "+" before help and the bell (the WhatsApp header);
     // its search is a field above the chips, not a header action.
@@ -2257,9 +2791,12 @@ function Member () {
       onToast: showToast,
       onFollowsChanged: followsChanged,
       onMessage: openMessage,
+      onOpenCommunity: openCommunity,
       onDeletedPost: deletedPost,
       onOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
-      onOpenPeople: openPeople
+      onOpenPeople: openPeople,
+      onOpenTestimonials: openTestimonials,
+      onOpenListings: node.hosted === true ? (author) => pushScreen({ screen: 'anuncios', key: author }) : undefined
     }
     // Pushed screens, plus the one sliding out after a pop under its old index
     // (and key), so it stays mounted until StackLayer says it has left. Both
@@ -2271,9 +2808,9 @@ function Member () {
         return (
           <StackLayer key={i + ':' + entry.screen + ':' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             {entry.screen === 'grupo'
-              ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onSeen={bumpSeen} />
+              ? <Grupo group={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenCommunity={openCommunity} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onSeen={bumpSeen} onMessage={openMessage} />
               : entry.screen === 'comunidade-info'
-                ? <ComunidadeInfo community={entry.key} onBack={goBack} onOpenMember={openMember} />
+                ? <ComunidadeInfo community={entry.key} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} />
                 : <Comunidade community={entry.key} afterGroup={entry.params.group || null} isTop={i === stack.length - 1} seenTick={seenTick} onBack={goBack} onOpenGroup={openGroup} onOpenInfo={openCommunityInfo} />}
           </StackLayer>
         )
@@ -2282,6 +2819,20 @@ function Member () {
         return (
           <StackLayer key={i + ':comunidades:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Comunidades onBack={goBack} onOpenGroup={openGroup} onOpenCommunity={openCommunity} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'depoimentos') {
+        return (
+          <StackLayer key={i + ':depoimentos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Depoimentos entry={entry} ownKey={ownKey} onBack={goBack} onOpenMember={openMember} onReport={setReport} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'momentos') {
+        return (
+          <StackLayer key={i + ':momentos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} onCreate={openMomentComposer} />
           </StackLayer>
         )
       }
@@ -2295,7 +2846,68 @@ function Member () {
       if (entry.screen === 'mensagem') {
         return (
           <StackLayer key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-            <Mensagem peer={entry.key} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} />
+            <Mensagem peer={entry.key} intent={i === stack.length - 1 ? intentsRef.current.get(entry.key) : undefined} onIntentUsed={intentUsed} initial={entry.params.initial || undefined} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={(link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key)} onOpenListing={openListing} onAvaliar={openAvaliar} />
+          </StackLayer>
+        )
+      }
+      // Feira screens, keyed by who acts: a lock, unlock or a switch to a
+      // Página remounts them, so a late answer never lands on the other one.
+      if (entry.screen === 'anuncio') {
+        const at = entry.key.lastIndexOf(':')
+        const actingPage = pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && acting.kind === 'page' ? acting.key : null
+        return (
+          <StackLayer key={i + ':anuncio:' + entry.key + ':' + actingIdentity + ':' + (actingPage || '') + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Anuncio
+              author={entry.key.slice(0, at)}
+              seq={Number(entry.key.slice(at + 1))}
+              me={ownKey}
+              actingPage={actingPage}
+              onBack={goBack}
+              onConversar={({ peer, draft, card }) => openMessage(peer, { draft, card })}
+              onDenunciar={setReport}
+              onOpenAuthor={openMember}
+              onDeleted={goBack}
+              onEditar={openEditListing}
+              refresh={listingRefresh}
+            />
+          </StackLayer>
+        )
+      }
+      // Both go back on success: the listing (or the thread) below re-reads.
+      if (entry.screen === 'editar-anuncio' || entry.screen === 'avaliar') {
+        const at = entry.key.lastIndexOf(':')
+        const author = entry.key.slice(0, at)
+        const seq = Number(entry.key.slice(at + 1))
+        const actingPage = pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && acting.kind === 'page' ? acting.key : null
+        return (
+          <StackLayer key={i + ':' + entry.screen + ':' + entry.key + ':' + actingIdentity + ':' + (actingPage || '') + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            {entry.screen === 'editar-anuncio'
+              ? <AnuncioEditar author={author} seq={seq} me={ownKey} actingPage={actingPage} onBack={goBack} onSaved={() => { setListingRefresh((n) => n + 1); goBack() }} />
+              : <Avaliar author={author} seq={seq} offer={entry.params.offer} me={ownKey} actingPage={actingPage} onBack={goBack} onRated={goBack} />}
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'anuncios') {
+        return (
+          <StackLayer key={i + ':anuncios:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <View style={[styles.shell, wide && styles.shellWide]}>
+              <TopBar title='Anúncios' onBack={goBack} />
+              <Feira
+                author={entry.key}
+                active={i === stack.length - 1}
+                ownKey={ownKey}
+                origin={installationOrigin()}
+                locationStore={feiraLocation}
+                onOpenListing={({ author, seq } = {}) => openListing(author, seq)}
+              />
+            </View>
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'anunciar') {
+        return (
+          <StackLayer key={i + ':anunciar:' + actingIdentity} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Anunciar initialPlace={feiraPlaceRef.current} onBack={goBack} onPublished={showPublished} />
           </StackLayer>
         )
       }
@@ -2353,7 +2965,7 @@ function Member () {
       const Screen = entry.screen === 'conversa' ? Conversa : entry.screen === 'curtidas' ? Curtidas : Membro
       return (
         <StackLayer key={i + ':' + entry.screen + ':' + entry.key + (entry.screen === 'conversa' && entry.key === threadReload.ref ? ':' + threadReload.n : '')} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-          <Screen entry={entry} {...screenProps} />
+          <Screen entry={entry} {...screenProps} onTabChange={entry.screen === 'membro' ? (id) => reportProfileTab(i + ':' + entry.key, id) : undefined} />
         </StackLayer>
       )
     }
@@ -2369,6 +2981,21 @@ function Member () {
             )
           : null}
         <OfflineNote inset={tab === 'diario'} />
+        {showArrival
+          ? (
+            <InviteArrival
+              key={arrivalResult.recordId + ':' + generation}
+              result={arrivalResult}
+              request={node.request}
+              resolve={resolveArrival}
+              guard={arrivalGuard}
+              onStale={reloadCard}
+              onFollowed={followsChanged}
+              onLater={closeArrival}
+              onDone={closeArrival}
+            />
+            )
+          : null}
         {scheduledDeletion !== null
           ? <DeletionNote scheduled={scheduledDeletion} onOpen={() => setAjustes('excluir')} inset={tab === 'diario' && node.online !== false} />
           : null}
@@ -2397,6 +3024,9 @@ function Member () {
               onOpenMember={openMember}
               onOpenMention={mentionHandler}
               onQuote={startQuote}
+              onMessage={openMessage}
+              onOpenMomentos={openMomentos}
+              onCreateMoment={openMomentComposer}
               ownKey={ownKey}
               scrollToTop={scrollSignal.rua}
               followCount={followCount}
@@ -2478,25 +3108,47 @@ function Member () {
               </View>
               )
             : null}
+          {mode === 'hosted'
+            ? (
+              <View style={shown('feira')}>
+                <Feira
+                  key={'f' + nodeEpoch}
+                  active={on('feira') && !stacked}
+                  ownKey={ownKey}
+                  origin={installationOrigin()}
+                  locationStore={feiraLocation}
+                  onOpenListing={({ author, seq } = {}) => openListing(author, seq)}
+                  onAnnounce={openAnnounce}
+                  scrollToTop={scrollSignal.feira}
+                />
+              </View>
+              )
+            : null}
           <View style={shown('diario')}>
             <Diario
+              onTabChange={(id) => reportProfileTab('diario', id)}
               onDeletedPost={deletedPost}
               active={on('diario')}
               refresh={version}
               onSettings={setAjustes}
               onToast={showToast}
+              onReport={setReport}
               onReply={startReply}
               onPublish={openComposer}
+              onMessage={openMessage}
               onOpenThread={openThread}
               onOpenEngagers={openEngagers}
               onOpenMember={openMember}
               onOpenMention={mentionHandler}
               onQuote={startQuote}
+              onOpenCommunity={openCommunity}
               ownKey={ownKey}
               scrollToTop={scrollSignal.diario}
               onAvisos={mode === 'hosted' ? openAvisos : undefined}
               avisosNew={avisosNew}
               onOpenPeople={openPeople}
+              onOpenTestimonials={openTestimonials}
+              onOpenMomentos={openMomentos}
             />
           </View>
         </View>
@@ -2507,12 +3159,15 @@ function Member () {
             </View>
             )
           : null}
-        {toast
+        {fabShown ? <Fab onPress={openComposer} /> : null}
+        {/* After the Fab, and above it when it shows: a long toast wraps
+            upward and must never sit under the button. */}
+        {toast && !(viewerOnTop || viewerLeaving)
           ? (
-            <View style={[styles.toast, { bottom: (stacked ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='box-none'>
+            <View style={[styles.toast, { bottom: fabShown ? insets.bottom + layout.tabBar + layout.fabAboveTabs + layout.fabSize + 12 : (barsHidden ? 0 : layout.tabBar) + insets.bottom + 12 }]} pointerEvents='box-none'>
               {/* Only the action takes touches: under box-none the label would
                   otherwise swallow taps meant for the screen below. */}
-              <View pointerEvents='none'>
+              <View pointerEvents='none' style={styles.toastLabel}>
                 <Text style={styles.toastText} accessibilityRole='alert'>{toast.text}</Text>
               </View>
               {toast.onAction
@@ -2531,9 +3186,18 @@ function Member () {
             </View>
             )
           : null}
-        {showPostButton({ tab, screen: stacked ? nav.top(stack).screen : null }) ? <Fab onPress={openComposer} /> : null}
+        <PageNoticeSheet
+          open={pageDmAsk !== null}
+          page={pageDmAsk ? pageDmAsk.key : null}
+          onClose={() => setPageDmAsk(null)}
+          onContinue={() => {
+            const k = pageDmAsk.key
+            setPageDmAsk(null)
+            pushScreen({ screen: 'mensagem', key: k, params: {} })
+          }}
+        />
         {/* Avisos is not a tab: the bar keeps the tab it was opened from, and that tab's icon closes it. */}
-        {stacked ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot }} tabs={tabsFor(mode)} me={tabMe} />}
+        {barsHidden ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot, feira: feiraBadge }} tabs={tabsFor(mode)} me={tabMe} />}
       </View>
     )
   }
@@ -2569,11 +3233,18 @@ function Member () {
           open={composer.open}
           reply={composer.reply}
           quote={composer.quote}
+          momentRequest={composer.moment || 0}
           me={me}
           onClose={() => setComposer((c) => ({ ...c, open: false }))}
           onClearReply={() => setComposer((c) => ({ ...c, reply: null }))}
           onClearQuote={() => setComposer((c) => ({ ...c, quote: null }))}
           onPublished={(kind, sentRef) => {
+            // A momento touches no post state: Publicar already told the
+            // Momentos readers (momentsChanged).
+            if (kind === 'moment') {
+              setComposer((c) => ({ ...c, open: false }))
+              return showToast('momento publicado')
+            }
             // The reply context is dropped only if it is still the one sent; a
             // sent quote always drops the quote context.
             setComposer((c) => ({
@@ -2589,6 +3260,7 @@ function Member () {
           }}
         />
       )}
+      <BlockSheet onToast={showToast} />
       <Denunciar
         open={report !== null}
         target={report}
@@ -2601,7 +3273,7 @@ function Member () {
       <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} />
       {/* Mounted after the splash, so it wins: while the boot cover shows it
           follows the splash, which stays cream on native (Splash.js). */}
-      <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light })} />
+      <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />
     </View>
   )
 }
@@ -2629,9 +3301,11 @@ export default function App () {
       <ThemeProvider>
         <NodeProvider>
           <NamesProvider>
-            <OutboxProvider>
-              <Member />
-            </OutboxProvider>
+            <BlocksProvider>
+              <OutboxProvider>
+                <Member />
+              </OutboxProvider>
+            </BlocksProvider>
           </NamesProvider>
         </NodeProvider>
       </ThemeProvider>
@@ -2646,22 +3320,24 @@ const makeStyles = (colors) => StyleSheet.create({
   // Clear: each StackLayer paints its own background, so a slide shows the
   // screen (or tab) under it.
   layer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
-  center: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', gap: 8 },
   shell: { flex: 1, width: '100%', maxWidth: layout.column, alignSelf: 'center', backgroundColor: colors.bg },
   shellWide: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: colors.line },
-  setupBody: { padding: 16, gap: 12 },
+  helpBar: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-end', paddingRight: space.sm, backgroundColor: colors.bg },
   link: { alignItems: 'center', paddingTop: 14, borderTopWidth: 1, borderTopColor: colors.line, backgroundColor: colors.bg },
   linkText: { fontSize: 15, fontWeight: '600', color: colors.accent },
   toast: {
     position: 'absolute',
     alignSelf: 'center',
+    // A long text wraps inside the screen instead of running off its edge.
+    maxWidth: '92%',
     backgroundColor: colors.toastBg,
-    borderRadius: 999,
+    borderRadius: 18,
     paddingVertical: 8,
     paddingHorizontal: 14,
     flexDirection: 'row',
     alignItems: 'center'
   },
+  toastLabel: { flexShrink: 1 },
   toastText: { ...type.counter, color: colors.toastInk },
   toastAction: { marginLeft: 8 },
   toastActionText: { ...type.counter, color: colors.toastInk, fontWeight: '800' }

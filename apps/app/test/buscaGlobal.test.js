@@ -3,6 +3,11 @@
 const test = require('brittle')
 const fs = require('fs')
 const path = require('path')
+
+test('handle follow keeps its target in the accessible label', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/BuscaGlobal.js'), 'utf8')
+  t.ok(src.includes("<Pill label='Seguir' accessibilityLabel={'seguir @' + handle} filled onPress={doAdd} pending={add.pending} disabled={changing || offline || !followsReady} />"), 'a long handle does not lengthen the visible action or change its guards')
+})
 const load = () => import('../src/buscaGlobal.js')
 
 const EM_DASH = '\u2014'
@@ -192,4 +197,17 @@ test('BuscaGlobal: Enter always searches again, a hidden pane never searches, th
   t.ok(/if \(category === 'publicacoes'\) return\n\s*postsSeq\.current \+= 1\n\s*stopPostsTimer\(\)\n\s*\}, \[category\]\)/.test(src), 'leaving Publicações stops the pause timer')
   t.ok(src.includes("const raw = { autoCapitalize: 'none', autoCorrect: false, spellCheck: false }"), 'both panes turn off autocorrect')
   t.absent(src.includes('mono='), 'no per-pane switch left')
+})
+
+test('Publicações submits from the keyboard search key, without a worded Pesquisar button', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'BuscaGlobal.js'), 'utf8')
+  t.absent(src.includes('SEARCH_BUTTON'), 'no Pesquisar button between the field and the tabs')
+  t.ok(src.includes("returnKeyType='search'"), 'the keyboard key reads as search')
+  t.ok(src.includes("onSubmitEditing={category === 'contas' ? (hosted ? handleSearch : undefined) : submit}"), 'and submits')
+})
+
+test('the search field grows with large text instead of clipping its placeholder', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'BuscaGlobal.js'), 'utf8')
+  t.ok(src.includes('minHeight: layout.hit,') && src.includes('minHeight: layout.hit - 3'))
+  t.absent(/\bheight: layout\.hit/.test(src.replace(/minHeight/g, '')), 'no fixed height left')
 })

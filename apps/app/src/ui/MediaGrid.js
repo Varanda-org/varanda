@@ -12,6 +12,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { useEscapeLayer } from './escapeLayer'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_MEDIA_PER_POST, gridLayout } from '../media/plan'
 import { Icon } from './Icon'
@@ -19,6 +20,8 @@ import { MediaView } from './MediaView'
 
 const GAP = 2
 const SWIPE_PX = 50
+
+const stopClick = (e) => { if (e && typeof e.stopPropagation === 'function') e.stopPropagation() }
 
 function ratioOf (d) {
   const r = d && d.width > 0 && d.height > 0 ? d.width / d.height : 1
@@ -40,18 +43,13 @@ function Viewer ({ author, media, index, onIndex, onClose, persist }) {
   const closeRef = useRef(onClose)
   closeRef.current = onClose
 
+  // Escape closes only the viewer, even over a sheet (src/ui/escapeLayer.js).
+  useEscapeLayer(!!open, () => closeRef.current(), 'viewer')
   useEffect(() => {
     if (!open || Platform.OS !== 'web' || typeof document === 'undefined') return
     const onKey = (event) => {
       if (event.key === 'ArrowLeft') goRef.current(-1)
       else if (event.key === 'ArrowRight') goRef.current(1)
-      else if (event.key === 'Escape') {
-        // Handled here: the app's own Escape (closing a pushed screen) must
-        // not also run.
-        event.preventDefault()
-        event.stopPropagation()
-        closeRef.current()
-      }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
@@ -61,7 +59,11 @@ function Viewer ({ author, media, index, onIndex, onClose, persist }) {
   const label = 'foto ' + (index + 1) + ' de ' + count
   return (
     <Modal visible animationType='fade' transparent={false} statusBarTranslucent onRequestClose={onClose}>
-      <View style={[styles.viewer, { paddingTop: insets.top, paddingBottom: insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }]}>
+      <View
+        onClick={stopClick}
+        onStartShouldSetResponder={() => true}
+        style={[styles.viewer, { paddingTop: insets.top, paddingBottom: insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }]}
+      >
         <View style={styles.viewerTop}>
           <Pressable accessibilityRole='button' accessibilityLabel='fechar' onPress={onClose} hitSlop={10} style={styles.viewerBtn}>
             <Icon name='x' size={26} color='#ffffff' />

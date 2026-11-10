@@ -5,7 +5,7 @@
 // peer text, which MentionText passes through displayText piece by piece so
 // its links stay tappable, as in a post.
 
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { MentionText } from './MentionText'
@@ -13,11 +13,16 @@ import { SunsetBand } from './SunsetBand'
 import { fonts, type } from './theme'
 import { useStyles } from './ThemeProvider'
 
-export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions }) {
+const STACK_SCALE = 1.3
+
+export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs }) {
   const styles = useStyles(makeStyles)
   const shownCounts = Array.isArray(counts) ? counts.filter((c) => c && c.value !== null && c.value !== undefined) : []
   const shownActions = Array.isArray(actions) ? actions.filter(Boolean) : []
   const a = avatar || {}
+  // Large system text: a one-word label in a half-width pill could only wrap
+  // inside the word ("Seguin/do"), so each pill takes a full-width row.
+  const stacked = useWindowDimensions().fontScale > STACK_SCALE
   return (
     <View>
       <SunsetBand height={bandHeight}>
@@ -71,14 +76,29 @@ export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, 
             )
           : null}
         {note || null}
-        {shownActions.length > 0
+        {shownActions.length > 0 || more
           ? (
-            <View style={styles.actions}>
-              {shownActions.map((action, i) => <View key={i} style={styles.action}>{action}</View>)}
+            <View style={stacked ? styles.actionsStacked : styles.actions}>
+              {shownActions.map((action, i) => {
+                const last = i === shownActions.length - 1
+                // Stacked: the more button shares the last pill's row.
+                if (stacked && last && more) {
+                  return (
+                    <View key={i} style={styles.lastStacked}>
+                      <View style={styles.actionStackedGrow}>{action}</View>
+                      {more}
+                    </View>
+                  )
+                }
+                return <View key={i} style={stacked ? styles.actionStacked : styles.action}>{action}</View>
+              })}
+              {more && !(stacked && shownActions.length > 0) ? <View style={stacked ? styles.moreStacked : null}>{more}</View> : null}
             </View>
             )
           : null}
       </View>
+      {rows || null}
+      {tabs || null}
     </View>
   )
 }
@@ -108,9 +128,14 @@ const makeStyles = (colors) => StyleSheet.create({
   countsRow: { flexDirection: 'row', gap: 16, marginTop: 8 },
   counts: { fontSize: 15, color: colors.soft },
   countsNum: { color: colors.ink, fontWeight: '700' },
-  // Pill sets no width, so the column has to stretch it.
-  // Wraps so a third pill (Seguir, Mensagem, denunciar a conta) takes a full
-  // row on a 360 pt phone instead of squeezing its label onto two lines.
-  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 12 },
-  action: { flexGrow: 1, flexBasis: 120, alignItems: 'stretch' }
+  // Pill sets no width, so the column has to stretch it. At most two pills and
+  // the overflow button share one row at normal sizes; past STACK_SCALE they
+  // stack full width and the overflow button shares the last pill's row.
+  actions: { flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', gap: 8, marginTop: 12 },
+  action: { flexGrow: 1, flexBasis: 0, alignItems: 'stretch' },
+  actionsStacked: { flexDirection: 'column', alignItems: 'stretch', gap: 8, marginTop: 12 },
+  actionStacked: { alignItems: 'stretch' },
+  lastStacked: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  actionStackedGrow: { flexGrow: 1, flexBasis: 0, alignItems: 'stretch' },
+  moreStacked: { alignSelf: 'flex-end' }
 })

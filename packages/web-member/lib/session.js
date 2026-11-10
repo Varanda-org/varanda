@@ -38,12 +38,15 @@
 // clearKeyPair(), reset() and close(). Reads work locked; a write without
 // the key is USAGE 'identidade bloqueada: entre com a passkey'. The only
 // signatures the session makes outside the diary are account.sign,
-// report.sign, terms.sign, invite.sign, push.sign and age.sign: the
-// domain-separated account-link statement (@varanda/core lib/account-link.js,
-// prefix 'varanda-account-link-v1'), report statement (@varanda/core
-// lib/report.js, prefix 'varanda-report-v1'), terms-acceptance statement
-// (@varanda/core lib/terms.js, prefix 'varanda-terms-v1'), signup-invite
-// request (@varanda/core lib/invite.js, prefix 'varanda-invite-v1'),
+// report.sign, appeal.sign, terms.sign, invite.sign, inviteCard.sign,
+// push.sign and age.sign: the domain-separated account-link statement
+// (@varanda/core lib/account-link.js, prefix 'varanda-account-link-v1'),
+// report statement (@varanda/core lib/report.js, prefix
+// 'varanda-report-v1'), appeal statement (@varanda/core lib/appeal.js,
+// prefix 'varanda-appeal-v1'), terms-acceptance statement (@varanda/core
+// lib/terms.js, prefix 'varanda-terms-v1'), signup-invite request
+// (@varanda/core lib/invite.js, prefix 'varanda-invite-v1'), signup-invite
+// card (@varanda/core lib/invite-card.js, prefix 'varanda-invite-card-v1'),
 // push-subscription statement (@varanda/core lib/push-proof.js, prefix
 // 'varanda-push-v1') and age-verification request (@varanda/core
 // lib/age.js, prefix 'varanda-age-v1'), whose member and association the
@@ -167,8 +170,8 @@
 // storage.
 //
 // The lease (web only, docs/rpc.md 6.1; off unless leaseHoldMs > 0, which
-// no shipped entry sets today, the browser entry keeps it off): a seeder link that has nothing left to do
-// is not held open. The sync reports 'settled { settled, mediaPending }'
+// both shipped entries, the browser page and the app worklet, leave at 0):
+// a seeder link that has nothing left to do is not held open. The sync reports 'settled { settled, mediaPending }'
 // (./sync.js header: inventory complete and not timed out, no unmet goal,
 // no failing follow; mediaPending while an own media core with blocks is
 // not confirmed pushed). Once a user's continuous run has been settled for
@@ -270,7 +273,7 @@
 // unlock with a dm-key). reset() removes the local store and the dm kv.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 const {
   validRecordCopy,
   validateRecord,
@@ -286,11 +289,15 @@ const {
 const { formatEvent, key8 } = require('@varanda/core/lib/sync-format')
 const { safe } = require('@varanda/core/lib/safe')
 const { UsageError } = require('@varanda/core/lib/errors')
+
 const { signAccountLink } = require('@varanda/core/lib/account-link')
-const { signReport, signDmReport } = require('@varanda/core/lib/report')
+const { signReport, signDmReport, signListingReport } = require('@varanda/core/lib/report')
+const { signAppeal } = require('@varanda/core/lib/appeal')
 const { signTerms } = require('@varanda/core/lib/terms')
 const { signRecovery, blobHashOf } = require('@varanda/core/lib/recovery-proof')
 const { signInvite } = require('@varanda/core/lib/invite')
+const { signInviteCard, isInviteCardExpired } = require('@varanda/core/lib/invite-card')
+const { strictVerifyInviteCard } = require('./invite-card')
 const { signAge } = require('@varanda/core/lib/age')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
@@ -299,6 +306,7 @@ const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const member = require('./member-ops')
 const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
+const { verifyShow } = require('@varanda/core/lib/testimonials')
 const { createPeeker } = require('./peek')
 const { createNoticer } = require('./notices')
 const { createPageFeeder } = require('./page-feed')
@@ -313,10 +321,42 @@ const store = require('./node-store')
 const { groupKeyPairFromPrf } = require('./passkey')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
-const { createDmEngine } = require('./dm')
+const { createDmEngine, MOMENT_PHOTO_GONE, BLOCKED: DM_BLOCKED, NO_PAGE_KEY, KEY_MISMATCH: DM_KEY_MISMATCH, USE_PAGE_DRAFT: DM_USE_PAGE_DRAFT } = require('./dm')
+const { applyBlock, blockedKeys } = require('@varanda/core/lib/member-block')
 const { createSeenSync, groupApplier } = require('./seen-sync')
+const { createPageGroupKeys, peekPageRoots } = require('./page-groups')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
+const TESTIMONIAL_SELF = 'não pode escrever um depoimento para si'
+// The pointer answer is keys and seqs only: far below this.
+const TESTIMONIAL_INDEX_MAX_CHARS = 256 * 1024
+
+// A seeder index body read with a cap: a streamed body is cut off (and the
+// stream cancelled) past `max` bytes, so a seeder cannot make the node buffer
+// an endless answer; a response without a stream is read whole and checked,
+// as before. Throws SEEDER_UNAVAILABLE.
+async function boundedIndexText (res, max) {
+  const stream = res.body
+  if (!stream || typeof stream.getReader !== 'function') {
+    const text = await res.text()
+    if (typeof text !== 'string' || text.length > max) throw new Error(SEEDER_UNAVAILABLE)
+    return text
+  }
+  const reader = stream.getReader()
+  const chunks = []
+  let n = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!(value instanceof Uint8Array) || n + value.byteLength > max) {
+      try { reader.cancel().catch(() => {}) } catch {}
+      throw new Error(SEEDER_UNAVAILABLE)
+    }
+    chunks.push(value)
+    n += value.byteLength
+  }
+  return b4a.toString(b4a.concat(chunks), 'utf8')
+}
 const LOCKED_MESSAGE = 'diretório de dados em uso'
 const CLOSED_MESSAGE = 'sessão encerrada'
 const INTERNAL_MESSAGE = 'erro interno'
@@ -326,7 +366,14 @@ const BAD_AGE_PROOF = 'comprovante de idade inválido'
 const OLD_USERNAME_RECORD = 'registro de nome antigo'
 const SELF_REPORT = 'não é possível denunciar a própria chave'
 const BAD_REPORT = 'denúncia inválida'
+const BAD_APPEAL = 'recurso inválido'
 const BAD_PUSH = 'inscrição de notificação inválida'
+const BAD_INVITE_CARD = 'cartão de convite inválido'
+const INVITE_CARD_EXPIRES = 'validade do cartão de convite fora do prazo'
+// inviteCard.sign: expires may lag the clock by a day and lead it by eight
+// (a signup invite lasts a week, plus a day of clock skew).
+const INVITE_CARD_PAST = 24 * 60 * 60
+const INVITE_CARD_AHEAD = 8 * 24 * 60 * 60
 const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
@@ -338,6 +385,16 @@ const PEEK_BUSY = 'espiadinha já em andamento'
 const SEEN_CHANGED_MS = 5000
 const NOTICES_BUSY = 'avisos já em andamento'
 const DIARY_PEEK_BUSY = 'ocupado'
+const DIARY_HIDDEN = 'diário indisponível'
+const NO_OFFER = 'oferta-ausente'
+// listing.consent pages the rater's thread at most this far back.
+const OFFER_PAGES = 20
+const OFFER_PAGE = 100
+// listing.ratings: one deadline for all its sequential peeks, under the
+// client's request timeout.
+const RATINGS_TIMEOUT_MS = 20000
+// The race result that says a rater peek ran past the shared deadline.
+const RATINGS_LATE = Symbol('late')
 const BAD_PAGE = 'operação de página inválida'
 const PAGE_FEED_BUSY = 'feed de página já em andamento'
 const PAGE_REGISTER_CORE_ONLY = 'registro de página disponível só no nó core'
@@ -348,9 +405,14 @@ const NO_LOCAL_DATA = 'sem dados locais para este diário'
 // service refreshes every 256 blocks is always inside). The result's lists
 // are capped as PAGE_READ_FOLLOWS_MAX / PAGE_READ_LINKS_MAX of @varanda/rpc.
 const PAGE_READ_WINDOWS = 8
+// refreshRemotePageRoots' overall deadline.
+const PAGE_ROOTS_PEEK_MS = 5000
 const PAGE_READ_HEAD = 3
 const PAGE_READ_FOLLOWS_MAX = 64
 const PAGE_READ_LINKS_MAX = 16 + 1
+// docs/protocol.md "Mudar de chave": a chain of moves stops here (as
+// MAX_PAGE_MOVES in ./sync.js).
+const PAGE_MOVE_HOPS_MAX = 4
 // A window is first asked for under this share of the peek deadline: a
 // block the seeder cleared (its tombstone in the same window) never
 // arrives, so only what the answer's tombstones leave missing is asked for
@@ -360,6 +422,8 @@ const PAGE_READ_PROBE_SHARE = 8
 // and checks the wallet on this tick; a dm-key lookup by peek reads at most
 // this many windows of PEEK_WINDOW seqs, newest first.
 const DM_PULL_EVERY_MS = 120000
+// The published dm-key checks after a pull (checkPageKeys), all pages at once.
+const PAGE_KEY_CHECK_MS = 8000
 const DM_TICK_MS = 60000
 const DM_LOOKUP_WINDOWS = 8
 // An internal wire window of the node's own peeks, not an rpc page cap.
@@ -419,6 +483,7 @@ const USAGE_MESSAGES = new Set([
   OLD_USERNAME_RECORD,
   SELF_REPORT,
   BAD_REPORT,
+  BAD_APPEAL,
   BAD_PUSH,
   NO_SEEDER,
   PEEK_BUSY,
@@ -434,7 +499,8 @@ const NOT_FOUND_MESSAGES = new Set([
   'grupo não encontrado',
   'comunidade não encontrada',
   SEEDER_UNAVAILABLE,
-  DIARY_UNAVAILABLE
+  DIARY_UNAVAILABLE,
+  MOMENT_PHOTO_GONE
 ])
 
 function messageOf (err) {
@@ -556,9 +622,13 @@ function pageSignResult ({ action, nonce, page, op }, own, keyPair, association)
       return { signature: statement(op), record }
     }
     case 'invite': {
-      exactOp(op, ['member', 'gen', 'rosterSignature', 'roster'])
+      exactOp(op, hasOwn(op, 'share') ? ['member', 'gen', 'rosterSignature', 'roster', 'share'] : ['member', 'gen', 'rosterSignature', 'roster'])
       const r = exactOp(op.roster, ['owner', 'admins', 'prev', 'at', 'nonce'])
       if (typeof op.rosterSignature !== 'string') throw new TypeError('invalid page op')
+      if (hasOwn(op, 'share')) {
+        const s = exactOp(op.share, ['sealed', 'sig'])
+        if (typeof s.sealed !== 'string' || typeof s.sig !== 'string' || !/^[0-9a-f]{128}$/.test(s.sig)) throw new TypeError('invalid page op')
+      }
       const record = roster({ page, gen: op.gen, owner: r.owner, admins: copyList(r.admins), prev: r.prev, at: r.at, nonce: r.nonce, association })
       return { signature: statement({ ...op, rosterSignature: record.signature }), record }
     }
@@ -692,6 +762,8 @@ function readyWithin (ready, ms) {
 // never passes it). writeGateTimeoutMs: their deadline (tests).
 // readerWaitMs: how long a read waits for a starting run's cores (tests).
 // peekTimeoutMs: the diary.peek deadline (tests; the contract's otherwise).
+// dmKeyPeek: tests only, (memberKey) -> { box, gen } in place of the bounded
+// diary.peek scan for a dm-key (the published page key check reads it).
 // leaseHoldMs: the lease (header); 0 = off. leaseGapMs, leaseMediaMaxMs:
 // its gap and its media wait. noClear: keep the bytes of deleted blocks
 // (the browser's VARANDA_NO_CLEAR kill switch; tombstones still hide them).
@@ -712,6 +784,8 @@ function createBrowserSession ({
   writeGateTimeoutMs = WRITE_GATE_TIMEOUT_MS,
   readerWaitMs = READER_WAIT_MS,
   peekTimeoutMs = PEEK_TIMEOUT_MS,
+  dmKeyPeek = null,
+  ratingsTimeoutMs = RATINGS_TIMEOUT_MS,
   leaseHoldMs = 0,
   leaseGapMs = LEASE_GAP_MS,
   leaseMediaMaxMs = LEASE_MEDIA_MAX_MS,
@@ -957,6 +1031,11 @@ function createBrowserSession ({
     limits: syncOptions.dm,
     hkdf
   })
+  // The epoch keys of the pages' private groups (./page-groups.js), apart
+  // from boxKeys: read and sealed with the page's group box only.
+  const pageGroupKeys = createPageGroupKeys({ groupBoxOf: (page) => dmEngine.groupBoxOf(page) })
+  // page -> the roots its last remote scan found (refreshRemotePageRoots).
+  const remotePageRoots = new Map()
   // The seen-sync engine (docs/rpc.md 5.95, 5.96). Remote group marks go
   // through the group.seen path on the cores a run lends.
   const seenSync = createSeenSync({
@@ -1003,8 +1082,59 @@ function createBrowserSession ({
       if (Date.now() - dmLastPull >= DM_PULL_EVERY_MS && !dmEngine.pulling) {
         dmLastPull = Date.now()
         await dmEngine.pull(own).catch(noop)
+        checkPageKeys().catch(noop)
       }
       if (keyPair !== null) await dmEngine.topUp(keyPair)
+    } catch {}
+  }
+
+  // After a pull, never inside it, and never awaited by it: each held
+  // page's newest published dm-key against the held gen and box, all pages
+  // at once under one PAGE_KEY_CHECK_MS deadline (a page not answered by
+  // then keeps its flag as it was). While either differs the page is
+  // flagged and 'dm.pageKeyMismatch' goes out on every pull (an honest
+  // service publishes the held gen with the held box, so an old box under a
+  // new gen is flagged too). The seeder is always asked, since a stored
+  // replica may not be syncing, and the higher gen of the two answers wins.
+  // A seeder that finds no dm-key at all is a mismatch too. When the seeder
+  // cannot be asked, only a stored replica at or past the held gen that
+  // disagrees flags; anything else leaves the flag as it was. Harmless after
+  // a lock (the engine holds no page then). Never throws.
+  async function checkPageKeys () {
+    const held = dmEngine.heldPageBoxes()
+    if (held.length === 0) return
+    let over = false
+    let timer = null
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        over = true
+        resolve()
+      }, PAGE_KEY_CHECK_MS)
+    })
+    try {
+      await Promise.race([Promise.allSettled(held.map((h) => checkPageKey(h, () => over))), deadline])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  async function checkPageKey ({ page, box, gen }, late) {
+    try {
+      if (closed) return
+      const local = await serial(() => withCores((c) => member.dmLookup(c, page)))({})
+      let published
+      try {
+        published = await peekDmKey(page)
+      } catch {
+        if (local === null || local.gen === null || local.gen < gen || (local.box === box && local.gen === gen)) return
+        published = local
+      }
+      if (closed || late()) return
+      // The seeder answering with no dm-key at all is a mismatch, whatever
+      // a stored replica says (an honest page refreshes its key in reach).
+      if (published.gen !== null && local !== null && local.gen !== null && local.gen > published.gen) published = local
+      const differs = published.box !== box || published.gen !== gen
+      if (dmEngine.setPageMismatch(page, box, differs, gen) && differs) send('dm.pageKeyMismatch', { page })
     } catch {}
   }
 
@@ -1039,8 +1169,11 @@ function createBrowserSession ({
       let result = null
       let error = null
       try {
+        const pageRoots = await heldPageRoots()
+        r.pageRoots = new Set(pageRoots)
         result = await runSync({
           ...syncOptions,
+          pageRoots,
           noClear: noClear === true,
           storage,
           associationKey: cfg.association,
@@ -1069,6 +1202,7 @@ function createBrowserSession ({
                   r.ownSynced = true
                   try { onOwnSynced(r) } catch {}
                   if (!once && !internal) {
+                    refreshRemotePageRoots().catch(noop)
                     dmTick()
                     if (dmRecheck) {
                       dmRecheck = false
@@ -1620,14 +1754,16 @@ function createBrowserSession ({
     return diaryPeekWithin(params, peekTimeoutMs)
   }
 
-  // diary.peek under its own deadline (page.read's probe).
-  function diaryPeekWithin (params, timeoutMs) {
+  // diary.peek under its own deadline (page.read's probe). opts: internal
+  // only (listing.ratings asks for the block-0 certificate date); the
+  // diary.peek method never passes it.
+  function diaryPeekWithin (params, timeoutMs, opts = null) {
     if (closed) return Promise.reject(rpcError('LOCKED', CLOSED_MESSAGE))
     if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) return Promise.reject(rpcError('USAGE', DIARY_PEEK_BUSY))
-    return borrow(() => diaryPeekWith(params, timeoutMs))
+    return borrow(() => diaryPeekWith(params, timeoutMs, opts))
   }
 
-  async function diaryPeekWith ({ author, seqs, profileSeq, usernameSeq }, timeoutMs) {
+  async function diaryPeekWith ({ author, seqs, profileSeq, usernameSeq }, timeoutMs, opts = null) {
     diaryPeeksInFlight++
     try {
       const deadline = Date.now() + timeoutMs
@@ -1639,7 +1775,8 @@ function createBrowserSession ({
         const peek = await awaitPeek(dropped, deadline)
         if (peek === null) throw new Error(SEEDER_UNAVAILABLE)
         try {
-          return await peek(key, seqs, profileSeq === undefined ? null : profileSeq, usernameSeq === undefined ? null : usernameSeq, deadline)
+          const r = await peek(key, seqs, profileSeq === undefined ? null : profileSeq, usernameSeq === undefined ? null : usernameSeq, deadline, opts)
+          return await checkShows(peek, key, r, deadline)
         } catch (err) {
           if (messageOf(err) !== SEEDER_UNAVAILABLE || Date.now() >= deadline) throw err
           dropped = peek
@@ -1647,9 +1784,59 @@ function createBrowserSession ({
       }
       throw new Error(SEEDER_UNAVAILABLE)
     } catch (err) {
-      throw toRpcError(err, reportInternal)
+      const out = toRpcError(err, reportInternal)
+      // Internal readers only: the unread-block-0 flag of ./sync.js.
+      if (opts !== null && err !== null && typeof err === 'object' && err.unread === true) out.unread = true
+      throw out
     } finally {
       diaryPeeksInFlight--
+    }
+  }
+
+  // A testimonial-show stands only while its writer's block, read now on
+  // the same link, commits to that text for this owner (verifyShow): any
+  // other show, its writer block missing, revoked or mismatched included,
+  // moves to `invalid`. A writer whose diary could not be read at all leaves
+  // its shows `unverified` (docs/rpc.md 5.27): unknown, never proven bad. A
+  // dropped link is the caller's retry.
+  async function checkShows (peek, owner, r, deadline) {
+    const shows = r.entries.filter((e) => e.record.type === 'testimonial-show')
+    if (shows.length === 0) return r
+    const byWriter = new Map()
+    for (const { record } of shows) {
+      if (!byWriter.has(record.from)) byWriter.set(record.from, new Set())
+      byWriter.get(record.from).add(record.seq)
+    }
+    const writer = new Map()
+    const unreadable = new Set()
+    for (const [from, set] of byWriter) {
+      if (from === owner) continue
+      const all = [...set].sort((a, b) => a - b)
+      for (let i = 0; i < all.length; i += PEEK_SEQS_MAX) {
+        try {
+          const w = await peek(from, all.slice(i, i + PEEK_SEQS_MAX), null, null, deadline)
+          for (const e of w.entries) writer.set(from + ':' + e.seq, e.record)
+        } catch (err) {
+          if (messageOf(err) === SEEDER_UNAVAILABLE) throw err
+          unreadable.add(from)
+        }
+      }
+    }
+    const bad = new Set()
+    const unknown = new Set()
+    for (const { seq, record } of shows) {
+      const block = writer.get(record.from + ':' + record.seq) || null
+      if (verifyShow(record, block, owner)) continue
+      // A chunk that failed leaves the writer's other blocks unknown too.
+      if (block === null && unreadable.has(record.from) && record.from !== owner) unknown.add(seq)
+      else bad.add(seq)
+    }
+    const drop = (e) => !bad.has(e.seq) && !unknown.has(e.seq)
+    return {
+      ...r,
+      entries: bad.size === 0 && unknown.size === 0 ? r.entries : r.entries.filter(drop),
+      invalid: bad.size === 0 ? r.invalid : [...r.invalid, ...bad].sort((a, b) => a - b),
+      unverified: [...unknown].sort((a, b) => a - b)
     }
   }
 
@@ -2119,20 +2306,126 @@ function createBrowserSession ({
     }
   })
 
+  // A listing reference -> { author, seq }, else 'referência inválida'.
+  function listingRef (to) {
+    const ref = parseRef(to)
+    if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+    return ref
+  }
+
   // post.delete / profile.delete: the post.reply path around member-ops'
   // tombstone writer (a target already deleted writes nothing).
-  async function recordDelete (remove, { to }, epoch) {
+  async function recordDelete (remove, { to, about }, epoch) {
     const ref = parseRef(to)
     if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
     await requireUnlocked()
     await ensureCaughtUp(epoch)
-    const r = await withStore((c) => remove(c, { to: ref }))
+    const r = await withStore((c) => remove(c, about === undefined ? { to: ref } : { to: ref, about }))
     if (r.changed) wrote(r.seq)
     await pushAfterWrite()
     return { seq: r.seq, ref: r.ref, changed: r.changed, deleted: r.deleted }
   }
 
   // ---- direct messages (docs/rpc.md 5.73 to 5.81) ----
+
+  // The roots of the pages whose secrets are held (dm.pageForget or a lock
+  // drops them from the next run), read before the run starts and outside
+  // any tracked engine operation: no run lends cores yet, so the stored
+  // page diaries are read on the exclusive path. A failure pages none.
+  // A page whose diary is not stored here adds the roots its last remote
+  // scan found (refreshRemotePageRoots): the peek is served by a run, so
+  // it cannot be read before one starts.
+  async function heldPageRoots () {
+    const pages = dmEngine.heldPageBoxes().map((p) => p.page)
+    const out = new Set()
+    for (const page of pages) for (const key of remotePageRoots.get(page) || []) out.add(key)
+    if (pages.length === 0) return []
+    try {
+      for (const key of await member.pageGroupRoots(ctx(), pages)) out.add(key)
+    } catch {}
+    return [...out]
+  }
+
+  // Once a user's continuous run is verified: the live group joins of each
+  // held page whose diary is not stored here, through the bounded diary
+  // peek (as page.read reads such a page), off the chain and off any
+  // tracked engine operation, under PAGE_ROOTS_PEEK_MS overall. A failure
+  // keeps no roots for that page. New roots reach the next run.
+  let remoteRootsRefresh = null
+  function refreshRemotePageRoots () {
+    if (remoteRootsRefresh !== null || closed) return remoteRootsRefresh
+    remoteRootsRefresh = (async () => {
+      const deadline = Date.now() + PAGE_ROOTS_PEEK_MS
+      const pages = dmEngine.heldPageBoxes().map((p) => p.page)
+      for (const page of [...remotePageRoots.keys()]) if (!pages.includes(page)) remotePageRoots.delete(page)
+      for (const page of pages) {
+        try {
+          if (await store.replicaExists(storage, page)) {
+            remotePageRoots.delete(page)
+            continue
+          }
+          const roots = await peekPageRoots((params, ms) => diaryPeekWithin(params, ms), page, deadline)
+          if (dmEngine.heldPageBoxes().some((p) => p.page === page)) remotePageRoots.set(page, roots)
+        } catch {
+          remotePageRoots.delete(page)
+        }
+      }
+      if (missingPageRoots()) scheduleRootsRestart()
+    })().finally(() => { remoteRootsRefresh = null })
+    return remoteRootsRefresh
+  }
+
+  // A remote root the live continuous run did not start with.
+  function missingPageRoots () {
+    if (run === null || run.once || !(run.pageRoots instanceof Set)) return false
+    for (const roots of remotePageRoots.values()) {
+      for (const key of roots) if (!run.pageRoots.has(key)) return true
+    }
+    return false
+  }
+
+  // Stops the continuous run once, as a fold restart does; the chain's
+  // restartWhenIdle starts it again with the new roots, so the next check
+  // finds none missing (never a loop).
+  let rootsQueued = false
+  const restartForRoots = serial(async () => {
+    rootsQueued = false
+    if (!missingPageRoots()) return
+    await stopRun('preempted')
+  })
+
+  function scheduleRootsRestart () {
+    if (rootsQueued || closed) return
+    rootsQueued = true
+    restartForRoots({}).catch(noop)
+  }
+
+  // group.read and group.seal with `page` (docs/rpc.md 5.114): folded as
+  // the page with its group box, never falling through to the own groups. A
+  // root not held here is listed in kv groupReplicas, so the next sync run
+  // fetches it with its writers and community (./sync.js "groups").
+  // A read without the page's secrets still answers the root header's
+  // visibility (state 'no-key'): the app picks a plain or sealed post from
+  // the node, never from the service.
+  async function pageGroupOp (operation, params) {
+    await requireDm()
+    const page = params.page.toLowerCase()
+    let r
+    if (pageGroupKeys.holds(page)) {
+      const groupKeys = pageGroupKeys.holderFor(page)
+      r = await withCores((c) => operation({ ...c, groupKeys }, params))
+    } else if (operation === member.pageGroupRead) {
+      r = await withCores((c) => member.pageGroupNoKey(c, params))
+    } else {
+      throw new UsageError(NO_PAGE_KEY)
+    }
+    if (r !== null) return r
+    const group = params.group.toLowerCase()
+    if (!(await store.readGroupReplicas(storage)).includes(group)) {
+      await withStore((c) => store.addGroupReplica(c.storage, group))
+    }
+    throw new Error('grupo não encontrado')
+  }
 
   // The identity unlocked AND the dm keys derived (setKeyPair with a prf).
   async function requireDm () {
@@ -2149,6 +2442,15 @@ function createBrowserSession ({
     const key = memberKey.toLowerCase()
     const localHit = await serial(() => withCores((c) => member.dmLookup(c, key)))({})
     if (localHit !== null) return localHit
+    return peekDmKey(key)
+  }
+
+  async function peekDmKey (memberKey) {
+    const key = memberKey.toLowerCase()
+    if (dmKeyPeek !== null) {
+      const r = await dmKeyPeek(key)
+      return r === null ? { box: null, gen: null } : { box: r.box, gen: r.gen }
+    }
     const first = await diaryPeek({ author: key, seqs: [1] })
     const found = first.entries.slice()
     let best = member.newestDmKey(found)
@@ -2162,6 +2464,93 @@ function createBrowserSession ({
       hi = lo - 1
     }
     return best === null ? { box: null, gen: null } : { box: best.box, gen: best.gen }
+  }
+
+  // ---- depoimentos (docs/rpc.md 5.100) ----
+
+  // GET /index/testimonials/<owner> on this node's own seeder (the media
+  // route's origin rule) -> { pointers: [{ from, seq }] deduped, at most
+  // TESTIMONIAL_PENDING_MAX, incomplete }. Pointers only: every one is read
+  // and verified before it counts. No answer, or one without a `pending`
+  // list -> SEEDER_UNAVAILABLE, never an empty inbox. An index still
+  // indexing or not complete marks the answer incomplete.
+  async function testimonialPointers (owner) {
+    let ws
+    try {
+      ws = new URL(cfg.seederUrl)
+    } catch {
+      throw new Error(SEEDER_UNAVAILABLE)
+    }
+    const loopback = ws.hostname === '127.0.0.1' || ws.hostname === 'localhost' || ws.hostname === '[::1]'
+    if (ws.protocol !== 'wss:' && !(ws.protocol === 'ws:' && loopback)) throw new Error(SEEDER_UNAVAILABLE)
+    const url = (ws.protocol === 'wss:' ? 'https://' : 'http://') + ws.host + '/index/testimonials/' + owner
+    const ctl = new AbortController()
+    const timer = setTimeout(() => ctl.abort(), peekTimeoutMs)
+    let body
+    try {
+      const res = await fetchMedia(url, { cache: 'no-store', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', signal: ctl.signal })
+      if (!res || res.status !== 200 || res.redirected === true) throw new Error(SEEDER_UNAVAILABLE)
+      body = JSON.parse(await boundedIndexText(res, TESTIMONIAL_INDEX_MAX_CHARS))
+    } catch {
+      throw new Error(SEEDER_UNAVAILABLE)
+    } finally {
+      clearTimeout(timer)
+    }
+    if (body === null || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.pending)) throw new Error(SEEDER_UNAVAILABLE)
+    const pending = body.pending
+    const incomplete = body.indexing === true || body.complete === false
+    const out = []
+    const seen = new Set()
+    for (const p of pending) {
+      if (out.length >= TESTIMONIAL_PENDING_MAX) break
+      if (p === null || typeof p !== 'object' || typeof p.from !== 'string' || !/^[0-9a-f]{64}$/.test(p.from)) continue
+      if (!Number.isSafeInteger(p.seq) || p.seq < 1 || p.from === owner) continue
+      const id = p.from + ':' + p.seq
+      if (seen.has(id)) continue
+      seen.add(id)
+      out.push({ from: p.from, seq: p.seq })
+    }
+    return { pointers: out, incomplete }
+  }
+
+  // The DM engine opens each box with its in-memory pair; nothing else
+  // sees the key.
+  function openTestimonial (box, gen) {
+    return dmEngine.openTestimonial(box, gen)
+  }
+
+  // Off the chain (each read is a diary.peek). -> { items, incomplete }:
+  // incomplete when the index is not complete or a writer's blocks could
+  // not be read (a failed peek, not an invalid block, which is omitted).
+  async function testimonialPending (own) {
+    const index = await testimonialPointers(own)
+    const pointers = index.pointers
+    let incomplete = index.incomplete
+    const shown = await serial(() => withCores((c) => member.testimonialShownKeys(c)))({})
+    const byWriter = new Map()
+    for (const p of pointers) {
+      if (shown.has(p.from + ':' + p.seq)) continue
+      if (!byWriter.has(p.from)) byWriter.set(p.from, [])
+      byWriter.get(p.from).push(p.seq)
+    }
+    const blocks = []
+    for (const [from, list] of byWriter) {
+      const all = list.sort((a, b) => a - b)
+      for (let i = 0; i < all.length; i += PEEK_SEQS_MAX) {
+        let r
+        try {
+          r = await diaryPeek({ author: from, seqs: all.slice(i, i + PEEK_SEQS_MAX) })
+        } catch {
+          incomplete = true
+          continue
+        }
+        for (const e of r.entries) blocks.push({ from, seq: e.seq, record: e.record })
+      }
+    }
+    // Newest first, as the app lists them.
+    blocks.sort((a, b) => (a.record.at < b.record.at ? 1 : a.record.at > b.record.at ? -1 : 0))
+    const items = member.testimonialPendingRows(own, blocks, shown, openTestimonial, TESTIMONIAL_PENDING_MAX)
+    return { items, incomplete }
   }
 
   // Read the live run's cores so a current dm-key costs no write gate or
@@ -2302,7 +2691,7 @@ function createBrowserSession ({
     // in member and association; text and quote enter the payload hashed.
     // An `anexo` (a group message only) is the attachment's hex SHA-256: it
     // switches the statement to report v3, and the bytes never reach here.
-    'report.sign': serial(async ({ nonce, target, seq, reason, text, quote, writer, group, anexo }) => {
+    'report.sign': serial(async ({ nonce, target, seq, reason, text, quote, writer, group, anexo, kind }) => {
       let own
       if (ownKey !== null) own = ownKey
       else if (diaryInfo !== null) own = diaryInfo.publicKey
@@ -2313,6 +2702,16 @@ function createBrowserSession ({
       if (keyPair === null) throw new UsageError(store.LOCKED)
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
       if (target === own) throw new UsageError(SELF_REPORT)
+      // A Feira listing: its own statement (report v1 lines under the listing
+      // prefix), so a moderator never reads it as a post report.
+      if (kind === 'listing') {
+        try {
+          return { signature: signListingReport({ nonce, member: own, association: cfg.association, target, seq, reason, text, quote }, keyPair) }
+        } catch (err) {
+          if (err instanceof TypeError) throw new UsageError(BAD_REPORT)
+          throw err
+        }
+      }
       const fields = { nonce, member: own, association: cfg.association, target, seq: seq === undefined ? null : seq, reason, text, quote }
       if (writer !== undefined) fields.writer = writer
       if (group !== undefined) fields.group = group
@@ -2324,6 +2723,32 @@ function createBrowserSession ({
         // A shape the RPC layer lets through but the statement refuses (a
         // control character or a lone surrogate in text or quote).
         if (err instanceof TypeError) throw new UsageError(BAD_REPORT)
+        throw err
+      }
+      return { signature }
+    }),
+
+    // Signs the appeal statement with the in-memory key (docs/rpc.md 5.99),
+    // exactly like terms.sign: not a diary write, no append, no network. The
+    // session fills in member and association; the text enters the payload
+    // hashed.
+    'appeal.sign': serial(async ({ nonce, text }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      let signature
+      try {
+        signature = signAppeal({ nonce, member: own, association: cfg.association, text }, keyPair)
+      } catch (err) {
+        // A text the RPC layer lets through but the statement refuses (a
+        // control character or a lone surrogate).
+        if (err instanceof TypeError) throw new UsageError(BAD_APPEAL)
         throw err
       }
       return { signature }
@@ -2395,6 +2820,42 @@ function createBrowserSession ({
       const signature = signInvite({ action, nonce, member: own, association: cfg.association }, keyPair)
       return { signature }
     }),
+
+    // Signs a signup-invite card with the in-memory key, exactly like
+    // invite.sign. The session fills in member and association; name and
+    // message enter the statement hashed.
+    'inviteCard.sign': serial(async ({ code, design, name, message, expires }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      const now = Math.floor(Date.now() / 1000)
+      if (expires < now - INVITE_CARD_PAST || expires > now + INVITE_CARD_AHEAD) throw new UsageError(INVITE_CARD_EXPIRES)
+      let signature
+      try {
+        signature = signInviteCard({ code, design, name, message, expires, member: own, association: cfg.association }, keyPair)
+      } catch (err) {
+        if (err instanceof TypeError) throw new UsageError(BAD_INVITE_CARD)
+        throw err
+      }
+      return { signature }
+    }),
+
+    // Checks a card someone else signed. Pure: works locked and with no
+    // identity, and never touches the diary, the storage or the network.
+    'inviteCard.verify': async ({ signature, ...fields }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const result = strictVerifyInviteCard({ ...fields, association: cfg.association }, signature)
+      // A genuine card past its expiry (plus a day of skew) is refused here,
+      // so no screen has to carry the clock check (docs/rpc.md 5.102).
+      if (result.ok && isInviteCardExpired(fields.expires, Math.floor(Date.now() / 1000))) return { ok: false, reason: 'expired' }
+      return result
+    },
 
     // Signs the age-verification request with the in-memory key (docs/rpc.md
     // 5.32), exactly like invite.sign. It needs no member certificate: the
@@ -2706,11 +3167,227 @@ function createBrowserSession ({
 
     'profile.delete': serial(async ({ to }, epoch) => recordDelete(member.profileDelete, { to }, epoch)),
 
+    // ---- the Feira (docs/rpc.md, Feira): the post.create path ----
+
+    'listing.create': serial(async ({ kind, title, text, price, unit, cat, place, media }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.listingCreate(c, { kind, title, text, price, unit, cat, place, media }))
+      wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.edit': serial(async ({ to, expectedRevision, title, text, price, unit, cat, place, media }, epoch) => {
+      const ref = listingRef(to)
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.listingEdit(c, { to: ref, expectedRevision, title, text, price, unit, cat, place, media }))
+      wrote(r.last)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.status': serial(async ({ to, status }, epoch) => {
+      const ref = listingRef(to)
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.listingStatus(c, { to: ref, status }))
+      wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.delete': serial(async ({ to }, epoch) => recordDelete(member.listingDelete, { to }, epoch)),
+
+    'listing.rate': serial(async ({ to, offer, consent, stars, text }, epoch) => {
+      const ref = listingRef(to)
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.listingRate(c, { to: ref, offer, consent, stars, text }))
+      wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    // Local data only, works locked.
+    'listing.mine': serial(async ({ before, limit }) => {
+      return withCores((c) => member.listingMine(c, { before: before === undefined ? null : before, limit }))
+    }),
+
+    // Signs the deal consent for an inbound proposta the local DM store
+    // holds; appends nothing. The listing must be an own live root, and the
+    // offer must be a message from `rater` naming exactly that listing.
+    'listing.consent': serial(async ({ to, rater, offer }) => {
+      const ref = listingRef(to)
+      const own = await requireUnlocked()
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      await withCores((c) => member.listingLive(c, ref))
+      const peer = rater.toLowerCase()
+      // Without the DM keys the history cannot be read: locked, as dm.thread.
+      if (!dmEngine.unlocked()) throw new UsageError(store.LOCKED)
+      const want = { own, seq: ref.seq, rater: peer, offer }
+      let before = null
+      let found = false
+      for (let i = 0; i < OFFER_PAGES && !found; i++) {
+        const page = await dmEngine.thread(own, { peer, before, limit: OFFER_PAGE })
+        found = member.offerReceived(page.messages, want)
+        if (page.next === null) break
+        before = page.next
+      }
+      if (!found) throw new UsageError(NO_OFFER)
+      return { consent: member.signConsent(keyPair, want) }
+    }),
+
+    // Verified ratings of one listing (docs/rpc.md, Feira): each rater's
+    // hinted blocks and block-0 certificate through the diary.peek path, one
+    // rater at a time, OFF the chain (as dmLookupOf), under one deadline.
+    // Stores nothing. A diary the gate refuses drops its refs; a read that
+    // does not finish (busy, timeout, no seeder, the deadline) only marks
+    // the answer incomplete with what was verified so far.
+    'listing.ratings': async ({ author, seq, refs }) => {
+      const key = author.toLowerCase()
+      const wanted = refs.map((r) => ({ rater: r.rater.toLowerCase(), seq: r.seq }))
+      const byRater = new Map()
+      for (const r of wanted) {
+        if (!byRater.has(r.rater)) byRater.set(r.rater, new Set())
+        byRater.get(r.rater).add(r.seq)
+      }
+      const deadline = Date.now() + ratingsTimeoutMs
+      const peeks = []
+      for (const [rater, seqs] of byRater) {
+        if (rater === key) continue
+        const left = Math.min(peekTimeoutMs, deadline - Date.now())
+        if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+        if (left <= 0) {
+          peeks.push({ rater, failed: true })
+          continue
+        }
+        try {
+          // A followed rater's in-flight fetch can wait past `left` inside the
+          // peek, so the shared deadline is enforced here too; the late peek
+          // is left to settle on its own (its rejection is swallowed).
+          const peek = diaryPeekWithin({ author: rater, seqs: [...seqs].sort((a, b) => a - b) }, left, { cert: true })
+          let timer = null
+          const late = new Promise((resolve) => { timer = setTimeout(resolve, left, RATINGS_LATE) })
+          let r
+          try {
+            r = await Promise.race([peek, late])
+          } finally {
+            clearTimeout(timer)
+          }
+          if (r === RATINGS_LATE) {
+            peek.catch(() => {})
+            peeks.push({ rater, failed: true })
+            continue
+          }
+          peeks.push({ rater, entries: r.entries, invalid: r.invalid, missing: r.missing, certDate: r.certDate === undefined ? null : r.certDate })
+        } catch (err) {
+          if (closed) throw toRpcError(err, reportInternal)
+          // Only a verified refusal drops the rater; an unread block 0 is a
+          // timeout like any other.
+          const refused = messageOf(err) === DIARY_UNAVAILABLE && err.unread !== true
+          peeks.push(refused ? { rater, hidden: true } : { rater, failed: true })
+        }
+      }
+      return member.ratingsOf({ author: key, seq: seq === undefined ? null : seq, refs: wanted, peeks })
+    },
+
     // Idempotent toggles on the post.reply path: a state already held
     // writes nothing (changed: false) and only pushes an outstanding length.
     'like.set': serial(async ({ to, on }, epoch) => engagementSet(member.likeSet, { to, on }, epoch)),
 
     'repost.set': serial(async ({ to, on }, epoch) => engagementSet(member.repostSet, { to, on }, epoch)),
+
+    // The recipient's dm-key is looked up off the chain (as dm.send), then
+    // the write runs on the chain like post.create. Never retried.
+    'testimonial.write': async ({ to, text }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const key = to.toLowerCase()
+      await serial(async () => {
+        const own = await requireUnlocked()
+        if (key === own) throw new UsageError(TESTIMONIAL_SELF)
+      })({})
+      let recipient
+      try {
+        recipient = await dmLookupOf(key)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        await requireUnlocked()
+        await ensureCaughtUp(epoch)
+        const r = await withStore((c) => member.testimonialWrite(c, { to: key, text, recipient }))
+        wrote(r.seq)
+        await pushAfterWrite()
+        return { seq: r.seq, ref: r.ref }
+      })({})
+    },
+
+    // Needs the DM key (the boxes are sealed to it), as the DM reads.
+    'testimonial.pending': async () => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const own = await serial(() => requireDm())({})
+      try {
+        return await testimonialPending(own)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    },
+
+    // The writer block is read off the chain, then reopened and checked on
+    // it; a block already shown answers its show. Never retried.
+    'testimonial.show': async ({ from, seq }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const key = from.toLowerCase()
+      await serial(() => requireDm())({})
+      let record = null
+      try {
+        const r = await diaryPeek({ author: key, seqs: [seq] })
+        const e = r.entries.find((x) => x.seq === seq)
+        if (e !== undefined) record = e.record
+      } catch {}
+      return serial(async (_, epoch) => {
+        await requireDm()
+        await ensureCaughtUp(epoch)
+        const r = await withStore((c) => member.testimonialShow(c, { from: key, seq, record, open: openTestimonial }))
+        if (r.changed) wrote(r.seq)
+        await pushAfterWrite()
+        return { seq: r.seq, ref: r.ref }
+      })({})
+    },
+
+    'testimonial.delete': serial(async ({ to, about }, epoch) => {
+      const r = await recordDelete(member.testimonialDelete, { to, about }, epoch)
+      return { seq: r.seq, deleted: r.deleted }
+    }),
+
+    // Momentos (docs/rpc.md 5.113): the item must be one this node's
+    // momentPutMedia answered in this unlock; published like post.create.
+    // A published item is never offered for a second moment.
+    'moment.create': serial(async ({ text, media }, epoch) => {
+      await requireDm()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.momentCreate(c, { text, media, owned: (item) => dmEngine.isOwnPublicItem(item) }))
+      dmEngine.forgetPublicItem(media)
+      wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    // Local data only, works locked (as feed.read).
+    'moments.read': serial(async () => withCores((c) => member.momentsRead(c, { now: Date.now() }))),
+
+    'moment.delete': serial(async ({ to }, epoch) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.momentDelete(c, { to: ref }))
+      if (r.changed) wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, deleted: r.deleted }
+    }),
 
     // Which of the refs the own diary likes / reposts; local data only,
     // works locked (as profile.read).
@@ -2719,7 +3396,57 @@ function createBrowserSession ({
       return { liked: r.liked, reposted: r.reposted }
     }),
 
-    'diary.peek': diaryPeek,
+    // A key the member blocked reads as any unavailable diary, so every screen
+    // built on this read (Busca, threads, quotes, profiles) drops it the same
+    // way. profileOnly answers the name and @nome alone, for that key too: the
+    // block can only be undone by a person the list can name.
+    'diary.peek': async ({ profileOnly, ...params }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      let hidden
+      try {
+        hidden = (await member.memberBlocks(storage)).has(params.author.toLowerCase())
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      if (hidden && profileOnly !== true) throw rpcError('NOT_FOUND', DIARY_HIDDEN)
+      const r = await diaryPeek(params)
+      return profileOnly === true ? { ...r, entries: [], invalid: [], missing: [] } : r
+    },
+
+    // The member's own block list (docs/rpc.md 5.111). The list is written
+    // first, so the block holds even when the follow or the conversation step
+    // fails: each only warns. Unlocked only, as follow.add. Nothing reaches the
+    // other person: the unfollow is an ordinary follow record, and the
+    // conversation op is sealed to the own box.
+    'block.set': serial(async ({ key, on }, epoch) => {
+      const own = await requireUnlocked()
+      if (key === own) throw new UsageError('não é possível bloquear a própria chave')
+      const r = applyBlock(await store.readMemberBlocks(storage), key, on, Math.floor(Date.now() / 1000))
+      if (r.full) throw new UsageError('limite de bloqueios atingido')
+      if (r.changed) {
+        await store.writeMemberBlocks(storage, r.entries)
+        seenChanged()
+      }
+      if (on && (await store.readFollows(storage)).includes(key)) {
+        try {
+          const f = await withStore((c) => member.followChange(c, key, false))
+          if (f.changed) followChanged()
+        } catch {
+          warning('aviso: não deu para deixar de seguir quem você bloqueou', epoch)
+        }
+      }
+      if (r.changed && dmEngine.unlocked()) {
+        try {
+          await dmEngine.set(own, keyPair, { peer: key, state: on ? 'blocked' : 'unblocked' })
+        } catch {
+          warning('aviso: bloqueio das mensagens ainda não enviado aos outros aparelhos', epoch)
+        }
+      }
+      return { changed: r.changed, total: blockedKeys(r.entries).size }
+    }),
+
+    // kv only, works locked: the screens hide these keys at once.
+    'block.list': serial(async () => ({ keys: [...await member.memberBlocks(storage)] })),
 
     // Local-first, unlocked only (a change queued while signed out would be
     // signed into the diary at the next sign-in by whoever had the browser);
@@ -2727,6 +3454,7 @@ function createBrowserSession ({
     // never fails this request.
     'follow.add': serial(async ({ key }) => {
       await requireUnlocked()
+      if ((await member.memberBlocks(storage)).has(key)) throw new UsageError(DM_BLOCKED)
       const r = await withStore((c) => member.followChange(c, key, true))
       if (r.changed) followChanged()
       return { changed: r.changed, followCount: r.follows.length }
@@ -2881,7 +3609,11 @@ function createBrowserSession ({
     'group.join': groupWrite(member.groupJoin),
     'group.leave': groupWrite(member.groupLeave),
     'group.post': groupWrite(member.groupPost),
-    'group.read': serial((params) => withCores((c) => member.groupRead(c, params))),
+    'group.read': serial((params) => {
+      if (params.page !== undefined) return pageGroupOp(member.pageGroupRead, params)
+      return withCores((c) => member.groupRead(c, params))
+    }),
+    'group.seal': serial((params) => pageGroupOp(member.pageGroupSeal, params)),
     'group.seen': serial(async (params) => {
       const before = await store.readGroupSeen(storage)
       const r = await withCores((c) => member.groupSeen(c, params))
@@ -2955,7 +3687,10 @@ function createBrowserSession ({
     'dm.send': async ({ to, text, replyTo, media, card, fwd }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       // Self and a blocked peer are refused before any lookup.
-      await serial(async () => dmEngine.checkSend(await requireDm(), to))({})
+      await serial(async () => {
+        dmEngine.checkSend(await requireDm(), to)
+        if ((await member.memberBlocks(storage)).has(to)) throw new UsageError(DM_BLOCKED)
+      })({})
       let recipient
       try {
         recipient = to === ownKey ? { box: null } : await dmLookupOf(to)
@@ -2979,18 +3714,122 @@ function createBrowserSession ({
         return await dmEngine.pull(own)
       } catch (err) {
         throw toRpcError(err, reportInternal)
+      } finally {
+        checkPageKeys().catch(noop)
       }
     },
 
-    'dm.list': serial(async (params) => dmEngine.list(await requireDm(), params)),
-    'dm.thread': serial(async (params) => dmEngine.thread(await requireDm(), params)),
-    'dm.set': serial(async ({ peer, state }) => dmEngine.set(await requireDm(), keyPair, { peer, state })),
-    'dm.seen': serial(async ({ peer }) => {
+    // With `page` (5.114) the page's conversations, held under its secrets;
+    // the member's own blocks do not apply to them.
+    'dm.list': serial(async (params) => {
+      return dmEngine.list(await requireDm(), params)
+    }),
+    'dm.thread': serial(async (params) => {
+      const r = await dmEngine.thread(await requireDm(), params)
+      if (params.page !== undefined) return r
+      return (await member.memberBlocks(storage)).has(params.peer) ? { ...r, blocked: true } : r
+    }),
+    // A page's ops are signed by the page key: dm.pageDraft, dm.pageSend.
+    'dm.set': serial(async ({ peer, state, page }) => {
+      if (page !== undefined) throw new UsageError(DM_USE_PAGE_DRAFT)
+      return dmEngine.set(await requireDm(), keyPair, { peer, state })
+    }),
+    'dm.seen': serial(async ({ peer, page }) => {
       const own = await requireDm()
+      if (page !== undefined) return dmEngine.seen(own, peer, page)
       const before = await store.readDmSeen(storage)
       const r = await dmEngine.seen(own, peer)
       if (!sameJson(before, await store.readDmSeen(storage))) seenChanged()
       return r
+    }),
+
+    // ---- Páginas de ponta a ponta (docs/rpc.md 5.114) ----
+
+    'dm.pageGenerate': serial(async (params) => {
+      const own = await requireDm()
+      return dmEngine.pageGenerate(own, keyPair, params)
+    }),
+    'dm.pageShare': serial(async (params) => {
+      await requireDm()
+      return dmEngine.pageShare(keyPair, params)
+    }),
+    // The sharer must be the owner or an admin of the page's current roster,
+    // read as page.read reads it (off the chain: a peek may wait for the run).
+    // The roster is read first, never from inside the engine's tracked
+    // operation: a reset waits for those, and page.read queues on the chain.
+    'dm.pageSecrets': async (params) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const own = await serial(() => requireDm())({})
+      let roster
+      try {
+        const r = await handlers['page.read']({ key: params.page, full: true })
+        roster = { owner: r.owner, admins: r.admins }
+      } catch (err) {
+        if (err && err.code === 'NOT_FOUND') throw rpcError('USAGE', DM_KEY_MISMATCH)
+        throw err
+      }
+      try {
+        return await dmEngine.pageSecrets(own, roster, params)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    },
+    // The recipient's key is looked up off the chain first, as dm.send's.
+    'dm.pageDraft': async (params) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      await serial(() => requireDm())({})
+      let box = null
+      if (params.kind === 'msg' && params.to !== undefined && params.to !== params.page) {
+        try {
+          box = (await dmLookupOf(params.to)).box
+        } catch (err) {
+          throw toRpcError(err, reportInternal)
+        }
+      }
+      return serial(async () => {
+        await requireDm()
+        return dmEngine.pageDraft(params, box)
+      })({})
+    },
+    'dm.pageSend': serial(async (params) => {
+      await requireDm()
+      return dmEngine.pageSend(params)
+    }),
+    // The legacy bundle (5.114) is imported after adoption: a held page only.
+    // The page it moved from (a bundle carried over on a move names it) is
+    // read first, off the engine's tracked operation, as dm.pageSecrets reads
+    // the roster.
+    'dm.pageLegacyChunk': async (params) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      await serial(() => requireDm())({})
+      // The chain of verified page-origin records, newest first.
+      const movedFrom = []
+      let at = typeof params.page === 'string' ? params.page : null
+      while (at !== null && movedFrom.length < PAGE_MOVE_HOPS_MAX) {
+        let r
+        try {
+          r = await handlers['page.read']({ key: at })
+        } catch (err) {
+          if (err && err.code === 'NOT_FOUND') break
+          throw err
+        }
+        const from = r.movedFrom === null ? null : r.movedFrom.from
+        if (from === null || from === params.page || movedFrom.includes(from)) break
+        movedFrom.push(from)
+        at = from
+      }
+      return serial(async () => {
+        await requireDm()
+        return dmEngine.pageLegacyChunk(params, movedFrom)
+      })({})
+    },
+    'dm.pageLegacyBlocks': serial(async (params) => {
+      await requireDm()
+      return dmEngine.pageLegacyBlocks(params)
+    }),
+    'dm.pageForget': serial(async (params) => {
+      await requireDm()
+      return dmEngine.pageForget(params)
     }),
 
     // As report.sign: no diary opened, nothing appended, no network. The
@@ -3086,6 +3925,8 @@ function createBrowserSession ({
     groupPrf = null
     boxKeys.lock()
     dmEngine.lock()
+    pageGroupKeys.lock()
+    remotePageRoots.clear()
     seenSync.forget()
     dmRecheck = false
     dmRecheckTries = 0
@@ -3364,6 +4205,53 @@ function createBrowserSession ({
     })()
   }
 
+  // A momento's photo (docs/rpc.md 5.113): validated and copied
+  // synchronously (TypeError), the caller's buffer wiped, then sealed into a
+  // FRESH blob and put on the anonymous blob channel by the dm engine (the
+  // stamps need the DM key) -> the moment media item. The native IPC
+  // moment.putMedia reads its cache file and calls this same function.
+  // Nothing about the bytes is logged.
+  function momentPutMedia ({ bytes, mime, width, height } = {}) {
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > MAX_MEDIA_ITEM_BYTES) throw new TypeError(BAD_MEDIA_ARGS)
+    if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
+    if (!isIntIn(width, 1, MAX_MEDIA_DIMENSION) || !isIntIn(height, 1, MAX_MEDIA_DIMENSION)) throw new TypeError(BAD_MEDIA_ARGS)
+    const copy = new Uint8Array(bytes.byteLength)
+    copy.set(bytes)
+    bytes.fill(0)
+    return (async () => {
+      try {
+        if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+        const own = await serial(() => requireDm())({})
+        const pair = keyPair
+        if (pair === null) throw new UsageError(store.LOCKED)
+        return await dmEngine.putPublicMedia(own, pair, { bytes: copy, mime, width, height })
+      } catch (err) {
+        copy.fill(0)
+        throw toRpcError(err, reportInternal)
+      }
+    })()
+  }
+
+  // The photo of the showing moment author:seq -> { bytes, mime, w, h }, for
+  // the page only (never over RPC). The record is read on the chain from
+  // local data; the blob is fetched off it (the public key and nonce of the
+  // record open it, no DM key needed). Gone, expired or not verifying:
+  // NOT_FOUND 'foto indisponível'.
+  function momentReadMedia ({ author, seq } = {}) {
+    if (typeof author !== 'string' || !HEX64.test(author) || !Number.isSafeInteger(seq) || seq < 1) throw new TypeError(BAD_MEDIA_ARGS)
+    const key = author.toLowerCase()
+    return (async () => {
+      try {
+        if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+        const item = await serial(() => withCores((c) => member.momentMedia(c, { author: key, seq, now: Date.now() })))({})
+        if (item === null) throw new Error(MOMENT_PHOTO_GONE)
+        return await dmEngine.readPublicMedia(item)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    })()
+  }
+
   // The plaintext of item `index` of a kept message -> { bytes, mime }, for
   // the page only (never over RPC: a photo is far above MAX_MESSAGE).
   function dmReadMedia ({ from, id, index } = {}) {
@@ -3564,6 +4452,7 @@ function createBrowserSession ({
     await store.deleteGroupData(storage)
     await store.writeFollowsPending(storage, [])
     await store.clearFollowsMigrated(storage)
+    await store.writeMemberBlocks(storage, [])
     zeroKeyPair()
     // A pull, send or top-up still unwinding must not see its store go.
     await dmEngine.idle()
@@ -3640,6 +4529,7 @@ function createBrowserSession ({
       pageFeeder.close()
       zeroKeyPair()
       boxKeys.close()
+      pageGroupKeys.close()
       await dmEngine.close()
     })()
     return closing
@@ -3656,6 +4546,8 @@ function createBrowserSession ({
     dmPutMedia,
     dmReadMedia,
     groupReadMedia,
+    momentPutMedia,
+    momentReadMedia,
     borrow,
     legacyFollows: () => legacyFollows({}),
     confirmLegacyFollows,
@@ -3671,4 +4563,4 @@ function createBrowserSession ({
   }
 }
 
-module.exports = { createBrowserSession, toRpcError, checkConfig, redactLogLine }
+module.exports = { pageSignResult, createBrowserSession, toRpcError, checkConfig, redactLogLine }

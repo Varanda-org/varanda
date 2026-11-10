@@ -1038,7 +1038,7 @@ test('identity: complete with the pending passkey missing refuses it as MISSING'
   t.alike(await id.unlock({ register: true }), { pending: true })
   const err = await id.complete().catch((e) => e)
   t.is(err.code, 'WEBAUTHN')
-  t.is(err.message, 'a passkey criada não foi encontrada; toque em Criar passkey de novo')
+  t.is(err.message, 'não deu para concluir a criação; tente criar de novo')
   t.is(local.byRp.get(RP).pending, null)
   t.alike(local.byRp.get(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'MISSING', true]])
   const st = await id.status()

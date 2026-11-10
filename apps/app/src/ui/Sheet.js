@@ -5,31 +5,85 @@
 // colours the body down to the bottom edge (home indicator included); it
 // defaults to the card colour.
 
+import { useState } from 'react'
 import { Modal, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context'
+import { Backdrop } from './Backdrop'
+import { scrollerFocusProps } from './scrollerFocus'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, type } from './theme'
 import { sideInset } from './sideInset'
+import { useEscapeLayer } from './escapeLayer'
 
+export const TEXT_CAP = 1.3
+// The row's 16 pt edge plus 8 pt of air between a side control and the title.
+const TITLE_GAP = 24
+// A title that does not fit beside the side controls shrinks down to this
+// share of its size before it is cut (a little further on a phone under
+// 360 pt, where both side controls take more of the row).
+const TITLE_MIN_SCALE = 0.7
+const TITLE_MIN_SCALE_NARROW = 0.6
+// Text does not narrow in proportion to its size (measured on the web: 5%
+// wider than proportional near 70%), so the scale keeps this margin.
+const TITLE_FIT_MARGIN = 0.93
+
+// The title stays centred on the sheet but is padded by the wider of the two
+// side controls, measured: with large text "‹ Ajustes" or "Cancelar" grow and a
+// fixed padding let the title run into them. One line, capped growth, shrunk
+// to fit before it is cut.
 function TopRow ({ onClose, title, left, right }) {
   const styles = useStyles(makeStyles)
+  const [sides, setSides] = useState({ left: 0, right: 0, row: 0 })
+  const [natural, setNatural] = useState(0)
+  const measure = (side) => (event) => {
+    const w = Math.ceil(event.nativeEvent.layout.width)
+    setSides((s) => (s[side] === w ? s : { ...s, [side]: w }))
+  }
+  const measureTitle = (event) => {
+    const w = Math.ceil(event.nativeEvent.layout.width)
+    setNatural((n) => (n === w ? n : w))
+  }
+  // Centred by the wider side; on a narrow phone (under 360 pt) each side
+  // pads only its own control, so "Ajustes do grupo" beside a lone Cancelar
+  // is not cut to "Ajustes do gru…" at 320.
+  const pad = Math.max(sides.left, sides.right) + TITLE_GAP
+  const narrow = sides.row > 0 && sides.row < 360
+  const titlePad = narrow
+    ? { paddingLeft: sides.left + TITLE_GAP, paddingRight: sides.right + TITLE_GAP }
+    : { paddingHorizontal: pad }
+  // The title's own width, measured on a hidden copy, against the room the
+  // padding leaves: the font shrinks to fit (down to TITLE_MIN_SCALE) on
+  // every platform, react-native-web included, where adjustsFontSizeToFit
+  // does nothing ('Escrever depoimento' beside Cancelar and Enviar at 375).
+  const room = sides.row > 0 ? sides.row - (narrow ? sides.left + sides.right + 2 * TITLE_GAP : 2 * pad) : 0
+  const scale = natural > 0 && room > 0 && natural > room ? Math.max(narrow ? TITLE_MIN_SCALE_NARROW : TITLE_MIN_SCALE, (room / natural) * TITLE_FIT_MARGIN) : 1
+  const fit = scale < 1 ? { fontSize: type.sheetTitle.fontSize * scale, lineHeight: Math.ceil(type.sheetTitle.lineHeight * scale) } : null
   return (
-    <View style={styles.topRow}>
+    <View style={styles.topRow} onLayout={measure('row')}>
       {title
         ? (
-          <View style={styles.titleWrap} pointerEvents='none'>
-            <Text style={styles.title} numberOfLines={2} accessibilityRole='header'>{title}</Text>
+          <View style={[styles.titleWrap, titlePad]} pointerEvents='none'>
+            <Text style={[styles.title, fit]} numberOfLines={1} maxFontSizeMultiplier={TEXT_CAP} adjustsFontSizeToFit minimumFontScale={narrow ? TITLE_MIN_SCALE_NARROW : TITLE_MIN_SCALE} accessibilityRole='header'>{title}</Text>
           </View>
           )
         : null}
-      {left !== undefined
-        ? left
-        : (
-          <Pressable accessibilityRole='button' accessibilityLabel='Cancelar' onPress={onClose} hitSlop={8}>
-            <Text style={styles.cancel}>Cancelar</Text>
-          </Pressable>
-          )}
-      {right || null}
+      {title
+        ? (
+          <View style={styles.titleMeasure} pointerEvents='none' aria-hidden importantForAccessibility='no-hide-descendants' accessibilityElementsHidden>
+            <Text style={styles.title} maxFontSizeMultiplier={TEXT_CAP} onLayout={measureTitle}>{title}</Text>
+          </View>
+          )
+        : null}
+      <View style={styles.side} onLayout={measure('left')}>
+        {left !== undefined
+          ? left
+          : (
+            <Pressable accessibilityRole='button' accessibilityLabel='Cancelar' onPress={onClose} hitSlop={8} style={styles.cancelHit}>
+              <Text style={styles.cancel} maxFontSizeMultiplier={TEXT_CAP}>Cancelar</Text>
+            </Pressable>
+            )}
+      </View>
+      <View style={styles.side} onLayout={measure('right')}>{right || null}</View>
     </View>
   )
 }
@@ -49,18 +103,23 @@ function IosContent ({ onClose, title, left, right, background, grabber, childre
 
 // `dismissable` false turns off the iOS swipe-down, which can close the page
 // sheet without waiting for onClose (a sheet with a send in flight).
-export function Sheet ({ open, onClose, title, left, right, background, grabber = false, dismissable = true, children }) {
+export function Sheet ({ open, onClose, onBack, title, left, right, background, grabber = false, dismissable = true, children }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const bodyBackground = background ?? colors.card
   const insets = useSafeAreaInsets()
   const { width } = useWindowDimensions()
+  // Web: Escape closes this sheet only, not the screen behind it, and leaves
+  // the key to a menu opened on top.
+  useEscapeLayer(!!open, onClose, 'sheet')
   if (Platform.OS === 'ios') {
     return (
       <Modal
         visible={!!open}
         animationType='slide'
         presentationStyle='pageSheet'
+        // A swipe down has already dismissed the page sheet when this runs,
+        // so it always closes (onBack is the Android back button only).
         onRequestClose={onClose}
         allowSwipeDismissal={dismissable}
       >
@@ -82,10 +141,10 @@ export function Sheet ({ open, onClose, title, left, right, background, grabber 
       animationType='slide'
       transparent
       statusBarTranslucent
-      onRequestClose={onClose}
+      onRequestClose={typeof onBack === 'function' ? onBack : onClose}
     >
-      <Pressable style={styles.backdrop} accessibilityRole='button' accessibilityLabel='fechar' onPress={onClose} />
-      <View style={[styles.panel, { top: insets.top + layout.sheetTop }]}>
+      <Backdrop style={styles.backdrop} onClose={onClose} />
+      <View style={[styles.panel, { top: insets.top + layout.sheetTop }]} {...scrollerFocusProps}>
         {grabber ? <View style={styles.grabberRow} pointerEvents='none'><View style={styles.grabber} /></View> : null}
         <View style={{ paddingLeft: padL, paddingRight: padR }}>
           <TopRow onClose={onClose} title={title} left={left} right={right} />
@@ -97,6 +156,8 @@ export function Sheet ({ open, onClose, title, left, right, background, grabber 
 }
 
 const makeStyles = (colors) => StyleSheet.create({
+  // A 44 pt target: the word alone was 22 pt tall.
+  cancelHit: { minHeight: 44, justifyContent: 'center' },
   iosRoot: { flex: 1, backgroundColor: colors.card },
   backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.45)' },
   panel: {
@@ -129,8 +190,11 @@ const makeStyles = (colors) => StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center'
   },
-  titleWrap: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 96 },
-  title: { ...type.sheetTitle, color: colors.ink },
+  titleWrap: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center' },
+  // Off screen and invisible: only its width is read.
+  titleMeasure: { position: 'absolute', left: 0, top: 0, opacity: 0 },
+  side: { flexShrink: 0, flexDirection: 'row', alignItems: 'center' },
+  title: { ...type.sheetTitle, color: colors.ink, textAlign: 'center' },
   cancel: { ...type.cancel, color: colors.ink },
   children: { flex: 1 }
 })

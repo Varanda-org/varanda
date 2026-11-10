@@ -52,6 +52,7 @@ const { validateGroupRecord, validateGroupHeader, validateWriterHeader, MAX_GROU
 const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
+const { normalizeBlocks } = require('@varanda/core/lib/member-block')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { DIARY_OPTIONS } = require('./diary-options')
 
@@ -72,6 +73,82 @@ const MAX_GROUP_REPLICAS = MAX_GROUPS_PER_DIARY * MAX_GROUP_WRITERS
 // appendNow trusts this and never `core.writable` (a legacy store is
 // writable from its stored header).
 const UNLOCKED = Symbol('varanda.unlocked')
+
+// Every read scans each diary, replica and group core in full, so without
+// Hypercore's block cache each read fetches every block from IndexedDB or
+// flash again. Records are small (MAX_BLOCK_BYTES, a log capped by
+// MAX_LOG_BYTES), so the default bound (2 x 65536 blocks per core) keeps a
+// realistic core whole; media cores (32 KiB blocks, read once) stay uncached.
+const BLOCK_CACHE = true
+const EVICTS = Symbol('varanda.evictsOnClear')
+
+// Hypercore 10's clear never evicts the block cache, so a cleared (deleted)
+// block would still be served from memory, also by get({ wait: false }).
+// The wrap sits on the per-files state (core.core), not on one handle: every
+// session of the core, including those openShared hands out and any made
+// later with core.session(), clears through it and is in its session list
+// (Core.sessions, the array every session of these files shares).
+// Evicting before and after the clear also drops an entry that a read
+// started while the clear waited on the oplog put back.
+// Evictions alone are not enough: a get pending on a block not held yet is
+// answered by a storage read (an append or upgrade resolving it locally, or
+// a peer's block) that can settle after the clear, and Hypercore then caches
+// it (_cacheOnResolve). So the cache refuses any set for a block the
+// bitfield does not hold at that moment; it is installed on the root right
+// after ready, before any session exists, and sessions inherit it.
+function evictOnClear (core) {
+  const state = core.core
+  if (state === null || state === undefined || state[EVICTS] === true) return core
+  const clear = state.clear
+  const sessions = state.sessions || core.sessions
+  state.clear = async function (start, end, cleared) {
+    evictRange(sessions, start, end)
+    try {
+      return await clear.call(this, start, end, cleared)
+    } finally {
+      evictRange(sessions, start, end)
+    }
+  }
+  if (core.cache) core.cache = heldOnlyCache(core.cache, state)
+  state[EVICTS] = true
+  return core
+}
+
+function heldOnlyCache (inner, state) {
+  return {
+    get size () { return inner.size },
+    keys () { return inner.keys() },
+    // Also gated on the bitfield: between Core.clear dropping the bit and
+    // the eviction that follows it, an entry cached a moment before the
+    // clear must already read as absent.
+    has (index) { return state.bitfield.get(index) && inner.has(index) },
+    get (index) { return state.bitfield.get(index) ? inner.get(index) : undefined },
+    set (index, value) {
+      if (!state.bitfield.get(index)) return this
+      inner.set(index, value)
+      // Hypercore caches the read's promise before it settles: a transient
+      // storage failure must not stay cached and fail every later read.
+      if (value !== null && typeof value === 'object' && typeof value.then === 'function') {
+        value.then(null, () => { if (inner.get(index) === value) inner.delete(index) })
+      }
+      return this
+    },
+    delete (index) { return inner.delete(index) },
+    clear () { inner.clear() }
+  }
+}
+
+function evictRange (sessions, start, end) {
+  for (const s of sessions) {
+    const cache = s.cache
+    if (!cache) continue
+    if (end - start <= cache.size) {
+      for (let i = start; i < end; i++) cache.delete(i)
+    } else {
+      for (const i of [...cache.keys()]) if (i >= start && i < end) cache.delete(i)
+    }
+  }
+}
 
 function replicaName (hex) {
   return 'replica/' + hex.toLowerCase()
@@ -270,13 +347,14 @@ async function openDiary (storage, keyPair = null) {
   if (keyPair !== null) checkKeyPair(keyPair)
   const exists = await storage.hasCore(DIARY)
   if (!exists && keyPair === null) throw new Error('identidade não encontrada')
-  const options = { ...DIARY_OPTIONS, valueEncoding: 'json' }
+  const options = { ...DIARY_OPTIONS, valueEncoding: 'json', cache: BLOCK_CACHE }
   if (!exists) options.keyPair = { publicKey: keyPair.publicKey }
   // The legacy scrub writes the oplog file directly: only on a first open,
   // never beside a live core.
   const { core } = await openShared(storage, DIARY, 'json', async () => {
     const core = new Hypercore(storage.core(DIARY), options)
     await core.ready()
+    evictOnClear(core)
     try {
       if (await scrubLegacySecret(core)) legacySeen.add(storage)
     } catch (err) {
@@ -318,8 +396,9 @@ async function diaryStatus (storage) {
 // Replicas are read-only: opened by key, so the storage never holds a secret.
 async function openReplica (storage, hex) {
   if (typeof hex !== 'string' || !HEX64.test(hex)) throw new Error('chave inválida')
-  const core = new Hypercore(storage.core(replicaName(hex)), b4a.from(hex.toLowerCase(), 'hex'), { valueEncoding: 'binary' })
+  const core = new Hypercore(storage.core(replicaName(hex)), b4a.from(hex.toLowerCase(), 'hex'), { valueEncoding: 'binary', cache: BLOCK_CACHE })
   await core.ready()
+  evictOnClear(core)
   if (core.writable) {
     await core.close()
     throw new Error('chave do próprio diário')
@@ -601,6 +680,17 @@ function writeBlocklist (storage, snapshot) {
   return storage.writeJson('blocklist', { v: 1, snapshot })
 }
 
+// kv memberBlocks = { v: 1, entries }: the member's own block list
+// (@varanda/core lib/member-block.js). Identity state: reset() deletes it.
+async function readMemberBlocks (storage) {
+  const data = await readKv(storage, 'memberBlocks')
+  return data && typeof data === 'object' && data.v === 1 ? normalizeBlocks(data.entries) : []
+}
+
+function writeMemberBlocks (storage, entries) {
+  return storage.writeJson('memberBlocks', entries.length === 0 ? null : { v: 1, entries })
+}
+
 // ---- media cores ----
 
 function mediaName (hex) {
@@ -863,13 +953,14 @@ async function openGroupWriter (storage, keyPair) {
   const unlock = keyPair.secretKey !== undefined && keyPair.secretKey !== null
   if (unlock) checkKeyPair(keyPair)
   const name = groupName(b4a.toString(keyPair.publicKey, 'hex'))
-  const options = { ...DIARY_OPTIONS, valueEncoding: 'json' }
+  const options = { ...DIARY_OPTIONS, valueEncoding: 'json', cache: BLOCK_CACHE }
   if (!(await storage.hasCore(name))) {
     options.keyPair = { publicKey: keyPair.publicKey }
     await registerGroupCore(storage, b4a.toString(keyPair.publicKey, 'hex'))
   }
   const core = new Hypercore(storage.core(name, GROUP_STORAGE), options)
   await core.ready()
+  evictOnClear(core)
   if (!b4a.equals(core.key, keyPair.publicKey)) {
     await core.close()
     throw new Error('núcleo de grupo de outra chave')
@@ -886,8 +977,9 @@ async function openGroupWriter (storage, keyPair) {
 async function openGroupReplica (storage, hex) {
   if (typeof hex !== 'string' || !HEX64.test(hex)) throw new Error('chave inválida')
   if (!(await groupCoreExists(storage, hex))) await registerGroupCore(storage, hex)
-  const core = new Hypercore(storage.core(groupName(hex), GROUP_STORAGE), b4a.from(hex.toLowerCase(), 'hex'), { valueEncoding: 'binary' })
+  const core = new Hypercore(storage.core(groupName(hex), GROUP_STORAGE), b4a.from(hex.toLowerCase(), 'hex'), { valueEncoding: 'binary', cache: BLOCK_CACHE })
   await core.ready()
+  evictOnClear(core)
   return core
 }
 
@@ -1323,13 +1415,23 @@ function writeFoldedFollows (storage, derived, ownHex) {
 // mode with a key pair derived from the local store key, created with the
 // public key only; the pair is set in memory, as the diary's.
 const DM_LOCAL = 'dm-local'
+// A Página's conversations held on this device (./page-dm.js): the same
+// stores and kv entries as the own ones, every name under this prefix.
+const PAGE_DM_PREFIX = 'pages/'
 
-async function openDmLocal (storage, keyPair) {
+function pageDmPrefix (page) {
+  if (typeof page !== 'string' || !/^[0-9a-f]{64}$/.test(page)) throw new TypeError('página inválida')
+  return PAGE_DM_PREFIX + page + '/'
+}
+
+// prefix: '' for the own store, pageDmPrefix(page) for a page's.
+async function openDmLocal (storage, keyPair, prefix = '') {
   checkKeyPair(keyPair)
+  const name = prefix + DM_LOCAL
   const options = { ...DIARY_OPTIONS, valueEncoding: 'json' }
-  if (!(await storage.hasCore(DM_LOCAL))) options.keyPair = { publicKey: keyPair.publicKey }
-  const { core } = await openShared(storage, DM_LOCAL, 'json', async () => {
-    const core = new Hypercore(storage.core(DM_LOCAL), options)
+  if (!(await storage.hasCore(name))) options.keyPair = { publicKey: keyPair.publicKey }
+  const { core } = await openShared(storage, name, 'json', async () => {
+    const core = new Hypercore(storage.core(name), options)
     await core.ready()
     return core
   })
@@ -1341,8 +1443,8 @@ async function openDmLocal (storage, keyPair) {
   return core
 }
 
-function deleteDmLocal (storage) {
-  return storage.deleteCore(DM_LOCAL)
+function deleteDmLocal (storage, prefix = '') {
+  return storage.deleteCore(prefix + DM_LOCAL)
 }
 
 const SEEN_TOKEN_RE = /^[0-9a-f]{32}$/
@@ -1373,20 +1475,40 @@ function writeDmCursor (storage, after) {
   return storage.writeJson('dmCursor', { v: 1, after })
 }
 
+// kv <page prefix>dmCursor = { v: 1, after, gen, set }: a page's own pool
+// cursor, the secrets gen and the box set (a hex32 digest of the held
+// public boxes, ./dm.js) it was scanned with; absent, the oldest retained
+// drop.
+async function readPageCursor (storage, prefix) {
+  const data = await readKv(storage, prefix + 'dmCursor')
+  if (!isVersioned(data) || !Number.isSafeInteger(data.after) || data.after < 0) return { after: 0, gen: 0, set: '' }
+  return {
+    after: data.after,
+    gen: Number.isSafeInteger(data.gen) && data.gen >= 0 ? data.gen : 0,
+    set: typeof data.set === 'string' && SEEN_TOKEN_RE.test(data.set) ? data.set : ''
+  }
+}
+
+function writePageCursor (storage, prefix, { after, gen, set }) {
+  if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(gen) || gen < 0) throw new TypeError('cursor inválido')
+  if (typeof set !== 'string' || !SEEN_TOKEN_RE.test(set)) throw new TypeError('cursor inválido')
+  return storage.writeJson(prefix + 'dmCursor', { v: 1, after, gen, set })
+}
+
 // kv dmSeen = { v: 1, ids: [hex32] }: for each message marked seen here, a
 // token keyed by the local store key over its seen key (@varanda/core
 // lib/dm-fold.js seenKey, which names the sender), so kv holds no peer key;
 // newest last, at most MAX_DM_SEEN. A bare id of an earlier form matches no
 // token and is dropped in effect (its dot may show once more).
-async function readDmSeen (storage) {
-  const data = await readKv(storage, 'dmSeen')
+async function readDmSeen (storage, prefix = '') {
+  const data = await readKv(storage, prefix + 'dmSeen')
   if (!isVersioned(data) || !Array.isArray(data.ids)) return []
   return data.ids.filter((id) => typeof id === 'string' && SEEN_TOKEN_RE.test(id))
 }
 
-function writeDmSeen (storage, ids) {
+function writeDmSeen (storage, ids, prefix = '') {
   const list = [...new Set(ids.filter((id) => typeof id === 'string' && SEEN_TOKEN_RE.test(id)))]
-  return storage.writeJson('dmSeen', { v: 1, ids: list.slice(-MAX_DM_SEEN) })
+  return storage.writeJson(prefix + 'dmSeen', { v: 1, ids: list.slice(-MAX_DM_SEEN) })
 }
 
 // kv groupSeen = { v: 1, marks: [{ group, at, writer, seq }] }: per group the
@@ -1557,26 +1679,240 @@ function writeBlobStamps (storage, { items, kids }) {
 // bytes.
 const MAX_DM_CTL_QUEUE = 32
 
-async function readDmCtlQueue (storage) {
-  const data = await readKv(storage, 'dmCtlQueue')
+async function readDmCtlQueue (storage, prefix = '') {
+  const data = await readKv(storage, prefix + 'dmCtlQueue')
   if (!isV2(data)) return []
   return data.items.filter(validBox).slice(-MAX_DM_CTL_QUEUE).map((b) => ({ nonce: b.nonce, box: b.box }))
 }
 
-function writeDmCtlQueue (storage, items) {
-  return storage.writeJson('dmCtlQueue', { v: 2, items: items.filter(validBox).slice(-MAX_DM_CTL_QUEUE).map((b) => ({ nonce: b.nonce, box: b.box })) })
+function writeDmCtlQueue (storage, items, prefix = '') {
+  return storage.writeJson(prefix + 'dmCtlQueue', { v: 2, items: items.filter(validBox).slice(-MAX_DM_CTL_QUEUE).map((b) => ({ nonce: b.nonce, box: b.box })) })
 }
 
 // Appends one sealed item -> how many old ones were dropped to fit.
-async function pushDmCtlQueue (storage, item) {
-  const items = [...await readDmCtlQueue(storage), item]
+async function pushDmCtlQueue (storage, item, prefix = '') {
+  const items = [...await readDmCtlQueue(storage, prefix), item]
   const dropped = Math.max(0, items.length - MAX_DM_CTL_QUEUE)
-  await writeDmCtlQueue(storage, items)
+  await writeDmCtlQueue(storage, items, prefix)
   return dropped
+}
+
+// kv pageSecrets = { v: 1, pages: { <page>: { gen, sealed, legacy, cert, previous? } } }:
+// the Página secrets this identity holds (./page-dm.js), `sealed`,
+// legacy.sealed and each previous[i].sealed a secretbox under the local dm
+// key, so kv alone opens nothing; cert is the page's public membership
+// certificate. previous: the dm box secrets of the gens held before the
+// current one, newest first, for reading only.
+const MAX_PAGE_SECRETS = 64
+const MAX_PAGE_PREVIOUS = 3
+
+function validPrevious (list) {
+  if (list === undefined) return true
+  return Array.isArray(list) && list.length <= MAX_PAGE_PREVIOUS && list.every((p) => p !== null && typeof p === 'object' &&
+    Number.isSafeInteger(p.gen) && p.gen >= 1 && p.gen <= 0xffffffff && validBox(p.sealed))
+}
+
+function validPageEntry (e) {
+  if (e === null || typeof e !== 'object' || Array.isArray(e)) return false
+  if (!Number.isSafeInteger(e.gen) || e.gen < 1 || e.gen > 0xffffffff || !validBox(e.sealed)) return false
+  if (e.legacy !== null && (typeof e.legacy !== 'object' || !Number.isSafeInteger(e.legacy.gen) ||
+      e.legacy.gen < 1 || !validBox(e.legacy.sealed))) return false
+  if (!validPrevious(e.previous)) return false
+  return e.cert !== null && typeof e.cert === 'object' && !Array.isArray(e.cert)
+}
+
+function copyPageEntry (e) {
+  return {
+    gen: e.gen,
+    sealed: { nonce: e.sealed.nonce, box: e.sealed.box },
+    legacy: e.legacy === null ? null : { gen: e.legacy.gen, sealed: { nonce: e.legacy.sealed.nonce, box: e.legacy.sealed.box } },
+    cert: JSON.parse(JSON.stringify(e.cert)),
+    previous: (e.previous || []).map((p) => ({ gen: p.gen, sealed: { nonce: p.sealed.nonce, box: p.sealed.box } }))
+  }
+}
+
+// -> { <page>: entry }; a torn value or a bad entry reads as absent.
+async function readPageSecrets (storage) {
+  const data = await readKv(storage, 'pageSecrets')
+  const out = {}
+  if (!isVersioned(data) || data.pages === null || typeof data.pages !== 'object' || Array.isArray(data.pages)) return out
+  for (const [page, e] of Object.entries(data.pages)) {
+    if (/^[0-9a-f]{64}$/.test(page) && validPageEntry(e) && Object.keys(out).length < MAX_PAGE_SECRETS) out[page] = copyPageEntry(e)
+  }
+  return out
+}
+
+function writePageSecrets (storage, pages) {
+  const out = {}
+  for (const [page, e] of Object.entries(pages)) {
+    if (!/^[0-9a-f]{64}$/.test(page) || !validPageEntry(e)) throw new TypeError('segredos inválidos')
+    out[page] = copyPageEntry(e)
+  }
+  if (Object.keys(out).length > MAX_PAGE_SECRETS) throw new UsageError('páginas demais neste aparelho')
+  return storage.writeJson('pageSecrets', { v: 1, pages: out })
+}
+
+// kv pageMaxGen = { v: 1, pages: { <page>: gen } }: the highest page share
+// gen this device ever held per page (./page-dm.js adopt refuses a lower
+// one, so a replayed older share cannot roll a page back). Kept by
+// dm.pageForget and across lock; only the identity reset removes it.
+const MAX_PAGE_MAX_GEN = 256
+
+function validGen (g) {
+  return Number.isSafeInteger(g) && g >= 1 && g <= 0xffffffff
+}
+
+// -> { <page>: gen }; a torn value or a bad entry reads as absent.
+async function readPageMaxGen (storage) {
+  const data = await readKv(storage, 'pageMaxGen')
+  const out = {}
+  if (!isVersioned(data) || data.pages === null || typeof data.pages !== 'object' || Array.isArray(data.pages)) return out
+  for (const [page, g] of Object.entries(data.pages)) {
+    if (/^[0-9a-f]{64}$/.test(page) && validGen(g) && Object.keys(out).length < MAX_PAGE_MAX_GEN) out[page] = g
+  }
+  return out
+}
+
+function writePageMaxGen (storage, pages) {
+  const out = {}
+  for (const [page, g] of Object.entries(pages)) {
+    if (!/^[0-9a-f]{64}$/.test(page) || !validGen(g)) throw new TypeError('gerações inválidas')
+    out[page] = g
+  }
+  if (Object.keys(out).length > MAX_PAGE_MAX_GEN) throw new UsageError('páginas demais neste aparelho')
+  return storage.writeJson('pageMaxGen', { v: 1, pages: out })
+}
+
+// The legacy bundle of a page (dm.pageLegacyChunk, docs/rpc.md 5.114), all
+// under the page prefix: kv dmLegacy = { v: 1, id, count, have } names the
+// bundle being gathered (written before its first chunk, so a forget or a
+// reset finds every chunk); kv dmLegacy/<index> = { nonce, box }, a chunk's
+// plaintext sealed under the page store's key (./dm-store.js sealBytes);
+// kv dmLegacyBlocks = { nonce, box }, the sealed list of peers whose legacy
+// block still has to be signed again; kv dmLegacyDone = { nonce, box }, the
+// sealed ids of the bundles filed here, so a repeated chunk never files one
+// twice.
+const PAGE_LEGACY_CHUNKS_MAX = 1024
+const MAX_LEGACY_SEALED_B64 = 1 << 21
+const HEX64_RE = /^[0-9a-f]{64}$/
+
+function validLegacySealed (b) {
+  return b !== null && typeof b === 'object' && typeof b.nonce === 'string' && NONCE48_RE.test(b.nonce) &&
+    typeof b.box === 'string' && b.box.length <= MAX_LEGACY_SEALED_B64 && BASE64_RE.test(b.box)
+}
+
+function legacyIndex (index) {
+  if (!Number.isSafeInteger(index) || index < 0 || index >= PAGE_LEGACY_CHUNKS_MAX) throw new TypeError('parte inválida')
+  return index
+}
+
+// -> { id, count, have } or null.
+async function readPageLegacy (storage, prefix) {
+  const data = await readKv(storage, prefix + 'dmLegacy')
+  if (!isVersioned(data) || typeof data.id !== 'string' || !HEX64_RE.test(data.id)) return null
+  if (!Number.isSafeInteger(data.count) || data.count < 1 || data.count > PAGE_LEGACY_CHUNKS_MAX || !Array.isArray(data.have)) return null
+  const have = [...new Set(data.have.filter((i) => Number.isSafeInteger(i) && i >= 0 && i < data.count))].sort((a, b) => a - b)
+  return { id: data.id, count: data.count, have, horizon: Number.isSafeInteger(data.horizon) ? data.horizon : null }
+}
+
+function writePageLegacy (storage, prefix, meta) {
+  if (meta === null) return storage.writeJson(prefix + 'dmLegacy', null)
+  if (typeof meta.id !== 'string' || !HEX64_RE.test(meta.id) || !Number.isSafeInteger(meta.count) || meta.count < 1 || meta.count > PAGE_LEGACY_CHUNKS_MAX) throw new TypeError('pacote inválido')
+  const have = [...new Set(meta.have)].filter((i) => Number.isSafeInteger(i) && i >= 0 && i < meta.count).sort((a, b) => a - b)
+  const out = { v: 1, id: meta.id, count: meta.count, have }
+  if (Number.isSafeInteger(meta.horizon)) out.horizon = meta.horizon
+  return storage.writeJson(prefix + 'dmLegacy', out)
+}
+
+async function readPageLegacyChunk (storage, prefix, index) {
+  const data = await readKv(storage, prefix + 'dmLegacy/' + legacyIndex(index))
+  return validLegacySealed(data) ? { nonce: data.nonce, box: data.box } : null
+}
+
+function writePageLegacyChunk (storage, prefix, index, sealed) {
+  const k = prefix + 'dmLegacy/' + legacyIndex(index)
+  if (sealed === null) return storage.writeJson(k, null)
+  if (!validLegacySealed(sealed)) throw new TypeError('parte inválida')
+  return storage.writeJson(k, { nonce: sealed.nonce, box: sealed.box })
+}
+
+// Every chunk the bundle record names, then the record.
+async function deletePageLegacyChunks (storage, prefix) {
+  const meta = await readPageLegacy(storage, prefix)
+  if (meta !== null) for (let i = 0; i < meta.count; i++) await storage.writeJson(prefix + 'dmLegacy/' + i, null)
+  await storage.writeJson(prefix + 'dmLegacy', null)
+}
+
+async function readPageLegacyBlocks (storage, prefix) {
+  const data = await readKv(storage, prefix + 'dmLegacyBlocks')
+  return validLegacySealed(data) ? { nonce: data.nonce, box: data.box } : null
+}
+
+function writePageLegacyBlocks (storage, prefix, sealed) {
+  if (sealed === null) return storage.writeJson(prefix + 'dmLegacyBlocks', null)
+  if (!validLegacySealed(sealed)) throw new TypeError('lista inválida')
+  return storage.writeJson(prefix + 'dmLegacyBlocks', { nonce: sealed.nonce, box: sealed.box })
+}
+
+async function readPageLegacyDone (storage, prefix) {
+  const data = await readKv(storage, prefix + 'dmLegacyDone')
+  return validLegacySealed(data) ? { nonce: data.nonce, box: data.box } : null
+}
+
+function writePageLegacyDone (storage, prefix, sealed) {
+  if (sealed === null) return storage.writeJson(prefix + 'dmLegacyDone', null)
+  if (!validLegacySealed(sealed)) throw new TypeError('lista inválida')
+  return storage.writeJson(prefix + 'dmLegacyDone', { nonce: sealed.nonce, box: sealed.box })
+}
+
+// One page's store and kv entries (dm.pageForget, reset), its media cache
+// included (the ./dm-store.js index under the prefix needs no key).
+async function deletePageDm (storage, page) {
+  const prefix = pageDmPrefix(page)
+  const index = await readKv(storage, prefix + 'dmMediaIndex')
+  if (isVersioned(index) && Array.isArray(index.items)) {
+    for (const e of index.items) {
+      if (e === null || typeof e !== 'object' || typeof e.n !== 'string' || !SEEN_TOKEN_RE.test(e.n) || !Number.isSafeInteger(e.c) || e.c < 1 || e.c > 4) continue
+      for (let i = 0; i < e.c; i++) await storage.writeJson(prefix + 'dmMedia/' + e.n + '/' + i, null)
+    }
+  }
+  await storage.writeJson(prefix + 'dmMediaIndex', null)
+  await storage.deleteCore(prefix + DM_LOCAL)
+  await deletePageLegacyChunks(storage, prefix)
+  for (const key of ['dmCursor', 'dmSeen', 'dmCtlQueue', 'dmLegacyBlocks', 'dmLegacyDone']) await storage.writeJson(prefix + key, null)
+}
+
+// kv pageStores = { v: 1, pages: [page] }: every page whose local store this
+// device ever opened, written ahead of the store, so a reset removes a page
+// history whose secrets entry is already gone. Only page keys, no secret.
+const MAX_PAGE_STORES = 256
+
+async function readPageStores (storage) {
+  const data = await readKv(storage, 'pageStores')
+  if (!isVersioned(data) || !Array.isArray(data.pages)) return []
+  return [...new Set(data.pages.filter((p) => typeof p === 'string' && /^[0-9a-f]{64}$/.test(p)))].slice(0, MAX_PAGE_STORES)
+}
+
+async function notePageStore (storage, page) {
+  pageDmPrefix(page)
+  const pages = await readPageStores(storage)
+  if (pages.includes(page)) return
+  if (pages.length >= MAX_PAGE_STORES) throw new UsageError('páginas demais neste aparelho')
+  await storage.writeJson('pageStores', { v: 1, pages: [...pages, page] })
+}
+
+async function forgetPageStore (storage, page) {
+  const pages = await readPageStores(storage)
+  if (pages.includes(page)) await storage.writeJson('pageStores', { v: 1, pages: pages.filter((p) => p !== page) })
 }
 
 // Every dm kv entry and the local store (reset).
 async function deleteDmData (storage) {
+  const listed = new Set([...Object.keys(await readPageSecrets(storage)), ...await readPageStores(storage)])
+  for (const page of listed) await deletePageDm(storage, page)
+  await storage.writeJson('pageSecrets', null)
+  await storage.writeJson('pageMaxGen', null)
+  await storage.writeJson('pageStores', null)
   await storage.deleteCore(DM_LOCAL)
   // seenSync before seenRemote and seenLocal: an interrupted reset must
   // never leave the compare-and-swap cursor without the documents it was
@@ -1639,6 +1975,27 @@ module.exports = {
   writeDmKey,
   readDmCursor,
   writeDmCursor,
+  readPageCursor,
+  readPageLegacy,
+  writePageLegacy,
+  readPageLegacyChunk,
+  writePageLegacyChunk,
+  deletePageLegacyChunks,
+  readPageLegacyBlocks,
+  writePageLegacyBlocks,
+  readPageLegacyDone,
+  writePageLegacyDone,
+  PAGE_LEGACY_CHUNKS_MAX,
+  writePageCursor,
+  readPageSecrets,
+  writePageSecrets,
+  readPageMaxGen,
+  writePageMaxGen,
+  deletePageDm,
+  pageDmPrefix,
+  readPageStores,
+  notePageStore,
+  forgetPageStore,
   readDmSeen,
   writeDmSeen,
   readGroupSeen,
@@ -1694,6 +2051,8 @@ module.exports = {
   writeFollows,
   readBlocklist,
   writeBlocklist,
+  readMemberBlocks,
+  writeMemberBlocks,
   openMediaCore,
   openMediaCoreReadOnly,
   writeMediaHeader,

@@ -1223,6 +1223,8 @@ function watchFork (core, onFork) {
 // The session's reader (see the header) is withdrawn however the run ends,
 // before it published too. startupSlowMs: the startup watchdog's interval
 // (tests).
+const MAX_PAGE_ROOTS = 64
+
 async function runSync (opts = {}) {
   const reader = (opts && opts.reader) || NO_READER
   const log = opts && typeof opts.log === 'function' ? opts.log : noop
@@ -1312,9 +1314,15 @@ async function syncRun ({
   noPageMigrate = false,
   // async (key) => queues a signed follow of key (member-ops followAdd);
   // null while the session is locked, so a move is then left for later.
-  followPage = null
+  followPage = null,
+  // The roots the pages this device holds the secrets of are in (docs/rpc.md
+  // 5.114), kept paged like the roots the own diary binds: as replicas
+  // only, never an own writer, nothing appended. At most MAX_PAGE_ROOTS.
+  pageRoots = []
 } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
+  const heldPageRoots = [...new Set((Array.isArray(pageRoots) ? pageRoots : [])
+    .filter((k) => typeof k === 'string' && /^[0-9a-f]{64}$/.test(k)))].slice(0, MAX_PAGE_ROOTS)
   // The trust root is checked before anything is opened.
   const config = await store.readConfig(storage)
   if (!config || config.role !== 'member') throw new Error('identidade não encontrada')
@@ -1684,7 +1692,7 @@ async function syncRun ({
     pumpGroupGates()
     // On-demand reads are served from this link from now on.
     if (peeker !== null) {
-      l.peek = (key, seqs, profileSeq, usernameSeq, deadline) => peek(l, key, seqs, profileSeq, usernameSeq, deadline)
+      l.peek = (key, seqs, profileSeq, usernameSeq, deadline, opts) => peek(l, key, seqs, profileSeq, usernameSeq, deadline, opts)
       peeker.set(l.peek)
     }
   }
@@ -2697,8 +2705,11 @@ async function syncRun ({
   // -> the peek result (docs/rpc.md diary.peek). key: lowercase hex64;
   // seqs: the requested seqs (each lands in exactly one of entries, invalid
   // or missing); profileSeq / usernameSeq: the seeder's hints (null = none),
-  // read only for `profile` / `username`; deadline: the session's.
-  async function peek (l, key, seqs, profileSeq, usernameSeq, deadline) {
+  // read only for `profile` / `username`; deadline: the session's. opts.cert
+  // (internal, never from diary.peek): the result also carries certDate, the
+  // date of the block-0 certificate (null when unreadable), for the Feira
+  // rule on a rater's membership age.
+  async function peek (l, key, seqs, profileSeq, usernameSeq, deadline, opts = null) {
     if (ending || link !== l || seederLink() !== l) throw unavailable()
     if (isBlockedKey(key)) throw hidden()
     const { core, release } = await lendCore(l, key)
@@ -2709,6 +2720,7 @@ async function syncRun ({
       // or a fork seen while the blocks downloaded hides the diary.
       if (isBlockedKey(key)) throw hidden()
       if (raw0 !== null && (core.fork !== 0 || gateVerdict(raw0, key, association, gateOpts()) !== null)) throw hidden()
+      if (opts !== null && opts.cert === true) return { ...result, certDate: await peekCertDate(l, core, raw0, deadline) }
       return result
     } finally {
       release()
@@ -2754,9 +2766,33 @@ async function syncRun ({
       raw = await core.get(0, { raw: true, timeout: budget(deadline) })
     } catch {}
     if (ending || link !== l) throw unavailable()
-    if (raw === null || isBlockedKey(key) || core.fork !== 0) throw hidden()
+    if (raw === null) throw unread()
+    if (isBlockedKey(key) || core.fork !== 0) throw hidden()
     if (gateVerdict(raw, key, association, gateOpts()) !== null || overQuota(core)) throw hidden()
     return raw
+  }
+
+  // Block 0 never arrived: hidden to diary.peek (same text), but flagged so an
+  // internal reader (listing.ratings) tells it from a verified refusal.
+  function unread () {
+    const err = hidden()
+    err.unread = true
+    return err
+  }
+
+  // The certificate date of block 0: the gate's raw block, else (the own
+  // diary, never gated) the local block. -> ISO string or null.
+  async function peekCertDate (l, core, raw0, deadline) {
+    let raw = raw0
+    if (raw === null) {
+      try {
+        raw = await core.get(0, { raw: true, timeout: budget(deadline) })
+      } catch {}
+      if (ending || link !== l) throw unavailable()
+    }
+    if (raw === null) return null
+    const copy = validRecordCopy(decodeBlock(raw), 0)
+    return copy !== null && copy.type === 'member-cert' && copy.cert && typeof copy.cert.date === 'string' ? copy.cert.date : null
   }
 
   function deletedOf (core) {
@@ -3455,6 +3491,7 @@ async function syncRun ({
       if (entries === null) log('aviso: falha ao ler os grupos do diário')
       for (const key of diaryGroupKeys(entries || [])) adoptDiaryRoot(key)
     }
+    for (const key of heldPageRoots) adoptDiaryRoot(key)
     for (const s of stored) {
       if (s.key !== s.group || !diaryRoots.has(s.key) || !s.community) continue
       diaryCommunities.add(s.key)

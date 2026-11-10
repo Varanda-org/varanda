@@ -32,7 +32,7 @@ function toSet (v) {
 // Valid tombstones, highest block first, one per block, and the seqs of the
 // valid page-* records, in one pass: validating each record once keeps the
 // fold as cheap as it was before the page rule.
-function scan (entries) {
+function scan (entries, copyOf = validRecordCopy) {
   const out = []
   const pages = new Set()
   if (!Array.isArray(entries)) return { tombstones: out, pages }
@@ -43,7 +43,7 @@ function scan (entries) {
       if (entry === null || typeof entry !== 'object') continue
       const seq = entry.seq
       if (!Number.isSafeInteger(seq)) continue
-      const copy = validRecordCopy(entry.record, seq)
+      const copy = copyOf(entry.record, seq)
       if (copy === null) continue
       if (isPageType(copy.type)) pages.add(seq)
       else if (copy.type === 'delete' && !seen.has(seq)) {
@@ -79,6 +79,21 @@ function deletedSeqs (entries) {
 function applyDeletes (entries) {
   if (!Array.isArray(entries)) return []
   return withDeleted(entries, fold(entries).deleted)
+}
+
+// deletedSeqs and applyDeletes over entries whose records are already
+// validRecordCopy output for that same entry's seq (or null), as lib/feed.js
+// makes once per call. Never pass a caller's records: a tombstone's validity
+// depends on its seq, and these skip both the copy and the check.
+const asCopy = (record) => record
+
+function deletedSeqsOfCopies (copies) {
+  return foldScanned(scan(copies, asCopy)).deleted
+}
+
+function applyDeletesOfCopies (copies) {
+  if (!Array.isArray(copies)) return []
+  return withDeleted(copies, foldScanned(scan(copies, asCopy)).deleted)
 }
 
 function withDeleted (entries, deleted) {
@@ -154,7 +169,8 @@ function covered (index, r) {
 
 // The media descriptors a valid record copy shows: a post's photos or its
 // link preview thumbnail (`preview.image`, a block in a media core like a
-// photo), a profile's avatar; [] otherwise.
+// photo), a profile's avatar, a listing's or listing edit's photos; []
+// otherwise.
 function shownMedia (copy) {
   if (copy === null || typeof copy !== 'object') return []
   if (copy.type === 'post') {
@@ -163,11 +179,16 @@ function shownMedia (copy) {
     return image !== null && typeof image === 'object' ? [image] : []
   }
   if (copy.type === 'profile' && copy.avatar !== undefined) return [copy.avatar]
+  // Each listing and edit counts on its own, so a root's photos stay live
+  // while the root does, even after an edit replaced them on screen: the
+  // root is the fallback when the edit is deleted. A status or a rating
+  // shows no media.
+  if (copy.type === 'listing' || copy.type === 'listing-edit') return Array.isArray(copy.media) ? copy.media : []
   return []
 }
 
-// Media still referenced by a surviving post or profile, other than the
-// blocks in exceptSeqs.
+// Media still referenced by a surviving post, profile, listing or edit of a
+// surviving listing, other than the blocks in exceptSeqs.
 function liveMediaRefs (entries, exceptSeqs) {
   const except = toSet(exceptSeqs)
   const out = []
@@ -181,6 +202,8 @@ function liveMediaRefs (entries, exceptSeqs) {
       if (!Number.isSafeInteger(seq) || deleted.has(seq) || except.has(seq)) continue
       const copy = validRecordCopy(entry.record, seq)
       if (copy === null) continue
+      // An edit of a deleted listing shows nothing, so it keeps nothing live.
+      if (copy.type === 'listing-edit' && deleted.has(copy.seq)) continue
       for (const d of shownMedia(copy)) out.push({ core: d.core, start: d.start, blocks: d.blocks })
     } catch {}
   }
@@ -833,6 +856,8 @@ async function clearRanges (core, ranges) {
 module.exports = {
   deletedSeqs,
   applyDeletes,
+  deletedSeqsOfCopies,
+  applyDeletesOfCopies,
   deletedRanges,
   liveMediaRefs,
   shownMedia,

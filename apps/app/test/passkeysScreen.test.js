@@ -31,6 +31,21 @@ const awaitAt = (src) => src.search(/\bawait\s/)
 const screen = read('screens', 'Passkeys.js')
 const code = withoutComments(screen)
 
+test('Passkeys keeps its action labels exact and explains only what the label cannot', (t) => {
+  for (const [label, action, explanation] of [
+    ['Usar a passkey nova', 'onBind', 'Este aparelho passará a usar a passkey nova.'],
+    ['Concluir a criação da passkey', 'onComplete', null],
+    ['Trocar passkey', '() => setConfirmChange(true)', null]
+  ]) {
+    const button = code.indexOf("<Btn label='" + label + "'")
+    const end = code.indexOf('/>', button)
+    t.ok(button >= 0 && code.slice(button, end).includes('onPress={' + action + '}'), label + ' keeps its action')
+    const below = code.slice(end + 2).trimStart()
+    if (explanation) t.ok(button >= 0 && below.startsWith('<Soft>' + explanation + '</Soft>'), label + ' has its explanation immediately below')
+    else t.absent(below.startsWith('<Soft>'), label + ' has no line that only restates it')
+  }
+})
+
 test('Passkeys is a shared screen: no platform switch and no browser API', (t) => {
   t.absent(code.includes('Platform'), 'decided by capability, never by Platform.OS')
   for (const api of ['window.', 'document.', 'navigator', 'localStorage', 'sessionStorage', 'console.']) {
@@ -55,7 +70,7 @@ test('Adicionar passkey calls addPasskey in the press, before any await', (t) =>
 })
 
 test('Trocar shows CHANGE_TEXT first and binds only after a successful put', (t) => {
-  t.ok(code.includes("<Btn label='Trocar a passkey deste aparelho' secondary onPress={() => setConfirmChange(true)}"), 'the first press only opens the text')
+  t.ok(code.includes("<Btn label='Trocar passkey' secondary onPress={() => setConfirmChange(true)}"), 'the first press only opens the text')
   t.ok(code.includes('<Notice>{CHANGE_TEXT}</Notice>'))
   t.ok(code.includes('onPress={() => onAdd(true)}'))
   const register = body(code, 'const register = async (entry) => {')
@@ -65,7 +80,7 @@ test('Trocar shows CHANGE_TEXT first and binds only after a successful put', (t)
   const fail = register.slice(put, register.indexOf('releaseUnregistered()'))
   t.ok(fail.includes('holdUnregistered(entry)'), 'a failed put keeps the passkey for registrar de novo')
   t.ok(fail.includes('return'), 'and never binds')
-  t.ok(code.includes("<Btn label='registrar de novo' onPress={onRetry}"))
+  t.ok(code.includes("<Btn label='Registrar de novo' onPress={onRetry}"))
 })
 
 test('failures: fixed sentences, unknown outcomes offer conferir', (t) => {
@@ -74,7 +89,7 @@ test('failures: fixed sentences, unknown outcomes offer conferir', (t) => {
   t.ok(NOT_REGISTERED_TEXT.includes('não foi cadastrada'))
   t.ok(NOT_REGISTERED_TEXT.includes('apague essa passkey no gerenciador de senhas'))
   t.ok(code.includes('<Notice>{UNCERTAIN}</Notice>'))
-  t.ok(code.includes("<Btn label='conferir' secondary onPress={onCheck}"))
+  t.ok(code.includes("<Btn label='Conferir' secondary onPress={onCheck}"))
   t.ok(body(code, 'const onRemove = (e) => {').includes('setFailure({ uncertain: true })'), 'an unknown remove is checked, not repeated')
   t.ok(body(code, 'const onCheck = () => {').includes('load()'), 'conferir lists the entries')
   t.absent(/err\.message|\.body|res\.text/.test(code), 'no raw server text reaches the screen')
@@ -95,8 +110,8 @@ test('the recovery code: once, with a copy, an acknowledgement and a cleanup', (
   t.ok(newCode.includes('criar uma conta nova'), 'a leak points to a new account')
   t.ok(code.includes('<Notice>{CODE_ONCE_TEXT}</Notice>'))
   t.ok(code.includes("CODE_ACK_LABEL = 'Anotei o código'"))
-  t.ok(code.includes("<Btn label='pronto' onPress={onCodeDone} disabled={!codeAck} />"), 'closing waits for the checkbox')
-  t.ok(code.includes("<Btn label='copiar o código'"))
+  t.ok(code.includes("<Btn label='Pronto' onPress={onCodeDone} disabled={!codeAck} />"), 'closing waits for the checkbox')
+  t.ok(code.includes("<Btn label='Copiar o código'"))
   const done = body(code, 'const onCodeDone = () => {')
   t.ok(done.includes('if (!codeAck || myCode === null) return'), 'pronto waits for the tick')
   t.ok(done.includes('setHeldCode(null)'), 'pronto drops the code')
@@ -117,10 +132,10 @@ test('a code with an unknown registration stays shown with conferir', (t) => {
   t.ok(code.includes('const codeUnknown = shownCode !== null && myCode.unknown ? { lookupId: myCode.lookupId } : null'))
   const view = code.slice(code.indexOf('if (shownCode !== null) {'), code.indexOf('<Body>{INTRO_TEXT}</Body>'))
   t.ok(view.includes('<Notice>{CODE_ONCE_TEXT}</Notice>'))
-  t.ok(view.includes("<Btn label='copiar o código'"))
+  t.ok(view.includes("<Btn label='Copiar o código'"))
   t.ok(view.includes('<Notice>{UNCERTAIN}</Notice>'), 'the unknown-outcome wording sits with the code')
-  t.ok(view.includes("<Btn label='conferir' secondary onPress={onCheckCode}"))
-  t.ok(view.includes("<Btn label='pronto' onPress={onCodeDone} disabled={!codeAck} />"), 'or the person confirms they noted it')
+  t.ok(view.includes("<Btn label='Conferir' secondary onPress={onCheckCode}"))
+  t.ok(view.includes("<Btn label='Pronto' onPress={onCodeDone} disabled={!codeAck} />"), 'or the person confirms they noted it')
   const check = body(code, 'const onCheckCode = () => {')
   t.ok(check.includes('load()'), 'conferir lists the entries')
   const listed = check.indexOf("e.kind === 'code' && e.lookupId === unknown.lookupId")
@@ -154,7 +169,7 @@ test('an unknown code put is answered by the list conferir after pronto', (t) =>
   t.ok(check.slice(listed).indexOf('setError(CODE_NOTED_NOT_SAVED_TEXT)') > 0, 'an absent code is said to open nothing')
   t.ok(screen.includes("CODE_NOTED_NOT_SAVED_TEXT = 'O código anotado não foi cadastrado e não abre a conta. Crie outro.'"))
   t.ok(body(code, 'const onCheckCode = () => {').includes('if (uncertainCode !== null && uncertainCode.lookupId === unknown.lookupId) setUncertainCode(null)'), 'the shown-code conferir answers it too')
-  t.ok(code.includes("<Btn label='Criar código de recuperação' secondary onPress={onCode} disabled={busy || entries === null || codeInFlight} />"), 'a new code stays available')
+  t.ok(code.includes("<Btn label='Criar código de recuperação' secondary onPress={onCode} disabled={busy || entries === null || codeInFlight} block />"), 'a new code stays available')
 })
 
 test('a new code survives the screen going inactive or unmounting mid put', (t) => {
@@ -217,7 +232,7 @@ test('Identidade: recovery sign-in paths', (t) => {
   t.ok(src.includes("const onFinishComplete = () => ceremony(() => passkey.complete(), true, true, 'finish')"), 'the recovery concluir keeps the finish mode, in the press')
   t.ok(src.includes("autoCapitalize='characters'"))
   t.ok(src.includes("const CODE_LABEL = 'Entrar com código de recuperação'"))
-  t.ok(src.includes('knownLost || missedOnce || pkStatus.passkeyKnown === true ? <Btn label={OTHER_PASSKEY_LABEL}'), 'another passkey whenever one is known')
+  t.ok(src.includes('knownLost || missedOnce || pkStatus.passkeyKnown === true ? <OptionRow label={OTHER_PASSKEY_LABEL}'), 'another passkey whenever one is known')
   const after = src.slice(src.indexOf('const afterUnlock = async () => {'), src.indexOf('const registerFinished'))
   t.ok(after.indexOf('registerFinished(finished)') < after.indexOf('await passkey.recover()'), 'registered before the once sync')
   const reg = src.slice(src.indexOf('const registerFinished'), src.indexOf('// The handle\'s unlock/complete'))
@@ -238,9 +253,9 @@ test('Identidade: the full network is said before a passkey is created', (t) => 
   t.absent(src.includes("{toError('lista-de-espera').message}"), 'not the refusal after an attempt')
   t.ok(src.includes('offer.full || offer.waiting ? KNOWN_LOST_FULL_TEXT : KNOWN_LOST_TEXT'))
   t.ok(src.includes('offer.full || offer.waiting ? NONE_FULL_TEXT : NONE_TEXT'))
-  t.ok(src.includes('<Btn label={RETRY_LABEL} secondary onPress={readAdmission}'), "'tentar de novo' asks again")
+  t.ok(src.includes('<Btn label={RETRY_BUTTON} secondary onPress={readAdmission}'), "'tentar de novo' asks again")
   t.ok(src.includes('secondary={showComplete || offer.create}'), 'Entrar leads while creation is withheld')
-  t.ok(src.includes('offer.phoneCreate ? PHONE_LABEL : PHONE_SIGNIN_LABEL'))
+  t.ok(src.includes('offer.phoneCreate ? PHONE_BUTTON : PHONE_SIGNIN_BUTTON'))
   t.ok(src.includes('passkey.unlock(offer.phoneCreate ? { register: true, phone: true } : { phone: true }), offer.phoneCreate)'), 'a phone sign-in is not a creation')
   t.absent(src.includes('createFirst ? { register: true, phone: true }'))
   t.absent(src.includes(': { phone: true }), createFirst)'))
@@ -254,9 +269,22 @@ test('Identidade: the full network is said before a passkey is created', (t) => 
     }
   }
   const welcomeStart = src.lastIndexOf('} else {', src.indexOf('const entrarBtn'))
-  const welcome = src.slice(welcomeStart, src.indexOf('</Card>', welcomeStart))
-  for (const kept of ["label='Entrar com a passkey'", 'OTHER_PASSKEY_LABEL', 'CODE_LABEL', 'concluir a criação da passkey']) {
+  const welcome = src.slice(welcomeStart, src.indexOf('const frame = (title, children', welcomeStart))
+  for (const kept of ['label={entrarLabel(offer.create)}', 'OTHER_PASSKEY_LABEL', 'CODE_LABEL', 'label={COMPLETE_LABEL}']) {
     t.ok(welcome.includes(kept), kept + ' stays')
+  }
+  t.ok(src.includes('const moreOpen = advancedOpen({ advanced, knownLost, missedOnce, codeOpen, showComplete })'), 'the technical section is decided by the pure module')
+  t.ok(src.includes('setPkError(plainError(err) || errorText(err))'), 'plain words for a closed sheet, the usual text otherwise')
+  t.absent(welcome.includes('SIMPLE_TEXT'), 'the explanation lives in the (i) sheet')
+  t.ok(src.includes("frame('Entrar', entrar, step === 'entrar')"), 'the hero only on the entrar step')
+  t.ok(welcome.includes('<OptionsToggle label={MORE_LABEL}'), 'one quiet link')
+  t.ok(welcome.includes('secondary={showComplete || codeOpen}'), 'one main action beside concluir or the code field')
+  t.ok(welcome.includes('showComplete ? NONE_PENDING_TEXT : offer.full || offer.waiting ? NONE_FULL_TEXT : NONE_TEXT'), 'beside concluir the notice names only that button')
+  t.absent(welcome.includes('ActionsSheet'), 'rows run in the tap')
+  t.absent(welcome.includes('setTimeout'))
+  t.ok(['OTHER_PASSKEY_LABEL', 'CODE_LABEL', 'PHONE_SIGNIN_BUTTON'].every((k) => welcome.indexOf('MORE_LABEL') < welcome.indexOf(k)), 'technical options behind the disclosure')
+  for (const k of ['SYNC_ADVICE', 'PHONE_HINT', 'PHONE_SIGNIN_HINT', 'SHORT.passkeyLoss', 'ADVANCED_TEXT']) {
+    t.absent(welcome.includes(k), k + ': the explanations live in the (i) sheet, not on the card')
   }
   const needsStart = src.indexOf('} else if (needsPasskey) {')
   t.absent(src.slice(needsStart, src.indexOf('} else {', needsStart)).includes('offer.'), 'the recovery card is not gated')
@@ -351,4 +379,28 @@ test('removal confirmations do not promise revocation', (t) => {
   }
   t.ok(screen.match(/REMOVE_PASSKEY_TEXT = '([^']+)'/)[1].includes('um aparelho ainda aberto com ela'))
   t.ok(code.includes("<Soft>{e.kind === 'code' ? REMOVE_CODE_TEXT : REMOVE_PASSKEY_TEXT}</Soft>"))
+})
+
+test('the stacked page buttons share one width and Adicionar hides behind the change confirmation', (t) => {
+  for (const label of ['Tentar de novo', 'Conferir', 'Registrar de novo', 'Usar a passkey nova', 'Concluir a criação da passkey', 'Adicionar passkey', 'Trocar passkey', 'Criar código de recuperação']) {
+    const at = code.lastIndexOf("<Btn label='" + label + "'")
+    t.ok(at >= 0 && code.slice(at, code.indexOf('/>', at)).endsWith(' block '), label + ' is block')
+  }
+  t.ok(code.includes("{confirmChange ? null : <Btn label='Adicionar passkey'"), 'no second add button beside the confirmation')
+  t.absent(/<>\s*<Btn label='Trocar passkey'/.test(code), 'no empty fragment')
+})
+
+test('Ajustes: the link preview note sits right under the row it describes', (t) => {
+  const ajustes = withoutComments(read('screens', 'Ajustes.js'))
+  const row = ajustes.indexOf('label={PREVIEW_PREF_LABEL}')
+  const note = ajustes.indexOf('<Soft>{PREVIEW_PREF_NOTE}</Soft>')
+  t.ok(row > 0 && note > row, 'the note follows the row')
+  t.is(ajustes.slice(row, note).split('<Item').length - 1, 0, 'with no other row between them')
+})
+
+test('Ajustes sub-pages go back with an icon-only chevron', (t) => {
+  const src = read('screens', 'Ajustes.js')
+  const back = src.slice(src.indexOf("accessibilityLabel='voltar para Ajustes'"), src.indexOf('</Pressable>', src.indexOf("accessibilityLabel='voltar para Ajustes'")))
+  t.ok(back.includes("<Icon name='voltar'"), 'the chevron')
+  t.absent(back.includes('<Text'), 'no worded label beside it')
 })

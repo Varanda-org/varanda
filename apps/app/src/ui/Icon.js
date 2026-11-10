@@ -13,6 +13,7 @@ const GLYPHS = {
   pessoa: 'user',
   resposta: 'message-circle',
   conversas: 'message-square',
+  feira: 'shopping-bag',
   lapis: 'edit-2',
   engrenagem: 'settings',
   sinc: 'refresh-cw',
@@ -22,6 +23,7 @@ const GLYPHS = {
   seta: 'chevron-right',
   fechar: 'x',
   bandeira: 'flag',
+  bloquear: 'slash',
   seta_cima: 'arrow-up',
   copiar: 'copy',
   chave: 'key',
@@ -48,7 +50,14 @@ const GLYPHS = {
   pausar: 'pause',
   parar: 'square',
   sorriso: 'smile',
-  clipe: 'paperclip'
+  clipe: 'paperclip',
+  mensagem: 'mail',
+  esquerda: 'arrow-left',
+  direita: 'arrow-right',
+  baixo: 'arrow-down',
+  escolher: 'chevron-down',
+  info: 'info',
+  sair: 'log-out'
 }
 
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the

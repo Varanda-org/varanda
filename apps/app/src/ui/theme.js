@@ -35,7 +35,12 @@ export const fonts = {
 // native text fields have no such ring.
 export const webInputReset = Platform.OS === 'web' ? { outlineStyle: 'none' } : {}
 
+// The font scale from which the @nome leaves post and quote headers. Android's
+// 1.3 step arrives as 1.2999999523, so it sits just under 1.3.
+export const LARGE_TEXT = 1.29
+
 export const type = {
+  heroTitle: { fontSize: 28, fontWeight: '800', lineHeight: 34, letterSpacing: -0.4 },
   barTitle: { fontSize: 21, fontWeight: '800', lineHeight: 25, letterSpacing: -0.2 },
   profileName: { fontSize: 22, fontWeight: '800', lineHeight: 26, letterSpacing: -0.2 },
   postName: { fontSize: 15, fontWeight: '700', lineHeight: 20 },

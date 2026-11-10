@@ -16,7 +16,14 @@
 // and each writer secret are 64-byte Ed25519 secrets (the public key is the
 // last 32 bytes and must be the key the row is filed under); box keys are
 // 32-byte X25519 secrets. The optional fields are simply absent from older
-// rows. put replaces the whole row.
+// rows. put replaces the whole row. boxSecretKey is legacy only: the gen 1
+// Conversas box of a page from before its keys moved to devices, read while
+// present and never created here or by anything that starts or restores a
+// page (./pages-dm.js deletes it at the owner's first 'dm-box').
+// groupBoxSecretKey is legacy only too: the private group box of a page from
+// before its group box moved to devices, read while present and never
+// created (./pages-groups.js deletes it once the page's private groups moved
+// to the device-held box, 'group-rebox').
 //
 // pending(nonce) derives a page key pair and a media key pair for a
 // creation (or a move's K2) in progress from the nonce alone: the seeds are

@@ -8,8 +8,8 @@ test('help keys match the supported tabs and setup steps', async (t) => {
   const { HELP } = await load()
   t.alike(Object.keys(HELP).sort(), [
     'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'conversas', 'entrar', 'vinculo',
-    'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
-    'instalar', 'denuncia', 'termosAparelho', 'convites'
+    'idade', 'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
+    'instalar', 'denuncia', 'termosAparelho', 'convites', 'feira'
   ].sort())
 })
 
@@ -55,7 +55,13 @@ test('sign-in help explains synced recovery and phone QR while preserving passke
   t.absent(text.includes('Se perder a passkey, perde a conta'), 'a recovery code or another passkey still opens it')
   t.is(HELP.entrar.paragraphs[3], 'Em Ajustes → Passkeys e recuperação, cadastre outra passkey ou um código de recuperação: eles abrem a mesma conta. Uma passkey criada fora desse lugar abre outra conta.')
   t.is(HELP.entrar.paragraphs[4], LOSS_TEXT)
-  t.is(SHORT.passkeyLoss, LOSS_TEXT)
+  t.absent('passkeyLoss' in SHORT, 'the loss warning lives in the sheet, not on the card')
+  t.ok(HELP.entrar.paragraphs[0].startsWith('Na Varanda não existe senha'))
+  t.absent(text.includes('Entrar com a passkey'), 'the button no longer carries that label')
+  // The card keeps buttons only; what it used to explain is here.
+  for (const fact of ['Google', 'Apple', '1Password', 'Bitwarden', 'traz a passkey de volta', 'Outras formas de entrar', 'outra passkey', 'código de recuperação']) {
+    t.ok(text.includes(fact), fact)
+  }
 })
 
 test('link help keeps the account and privacy disclosures', async (t) => {
@@ -77,6 +83,20 @@ test('link help keeps the account and privacy disclosures', async (t) => {
   }
 })
 
+test('age and profile help carry the explanations that left the screens', async (t) => {
+  const { HELP } = await load()
+  t.is(HELP.idade.title, 'Como funciona a confirmação de idade')
+  t.is(HELP.idade.paragraphs.length, 6)
+  const age = HELP.idade.paragraphs.join(' ')
+  for (const fact of ['Didit', 'faixa de idade', 'Política de Privacidade']) {
+    t.ok(age.includes(fact), fact)
+  }
+  t.ok(HELP.perfil.paragraphs.join(' ').includes('sem dados de localização'))
+  for (const paragraph of HELP.idade.paragraphs) {
+    t.absent(paragraph.includes('\u2014'), 'no em dash in the age help')
+  }
+})
+
 test('invite help keeps the validity, renewal and privacy facts', async (t) => {
   const { HELP } = await load()
   const text = HELP.convites.paragraphs.join(' ')
@@ -85,6 +105,8 @@ test('invite help keeps the validity, renewal and privacy facts', async (t) => {
   }
   t.ok(text.includes('Quando a associação liga os convites de surpresa, cada convite chega num dia e hora ao acaso, com um aviso. Escolha com carinho quem você quer chamar.'))
   t.ok(HELP.vinculo.paragraphs.join(' ').includes('Se a rede estiver por convite,'))
+  t.is(HELP.convites.paragraphs.length, 5)
+  t.is(HELP.convites.paragraphs[4], 'Se você escrever um cartão, ele vai dentro do próprio link, e o app de quem recebe confere que foi você quem escreveu. A associação não recebe o nome nem a mensagem.')
 })
 
 test('missing diaries help covers all eight skip reasons', async (t) => {
@@ -173,4 +195,16 @@ test('conversas help states the private-message rules', async (t) => {
     'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
     'A linha Comunidades serve para achar e criar comunidades.'
   ])
+})
+
+test('the info button is a 44 pt target with the icon kept in place', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/ui/Help.js'), 'utf8')
+  t.ok(src.includes('width: layout.hit, height: layout.hit'))
+  t.ok(src.includes('style === undefined ? styles.inset : style') && src.includes('inset: { margin: -6 }') && !/button: \{[^}]*margin: -6/.test(src), 'the negative margin applies only without a caller style (the Diário discs keep their place)')
+})
+
+test('the Feira help says only the page\'s admins read a page chat', async (t) => {
+  const { HELP } = await load()
+  t.ok(HELP.feira.paragraphs.includes('Nas conversas com uma Página, só quem administra a página lê as mensagens.'))
+  t.absent(HELP.feira.paragraphs.some((p) => p.includes('pode ler')))
 })

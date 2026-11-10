@@ -5,22 +5,26 @@
 export const BROWSER_TEXT = 'Este navegador não funciona com o Varanda. Use o Chrome, o Edge ou o Safari 18 ou mais novo.'
 export const UNUSABLE_TITLE = 'Não deu para entrar com essa passkey.'
 export const RETRY_LABEL = 'tentar de novo'
-export const SYNC_ADVICE = 'Salve a passkey num gerenciador de senhas que sincroniza entre aparelhos (Google, Apple, 1Password, Bitwarden). Se perder o celular, entrar na conta desse gerenciador no aparelho novo traz a passkey de volta.'
-export const PHONE_HINT = 'Sem gerenciador de passkeys neste aparelho? Toque em criar com o celular: aparece um QR code na tela; leia esse código com a câmera do celular e salve a passkey no gerenciador de senhas dele.'
-export const PHONE_SIGNIN_HINT = 'Sua passkey está no celular? Toque em Entrar com a passkey, escolha usar outro aparelho na janela do sistema e leia com a câmera do celular o QR code que aparece na tela.'
 export const PHONE_LABEL = 'criar com o celular'
 // The same phone button when it opens an existing account instead.
 export const PHONE_SIGNIN_LABEL = 'entrar com o celular'
+// Capitalised forms for the buttons; the lower-case ones read inside sentences.
+export const RETRY_BUTTON = 'Tentar de novo'
+export const PHONE_BUTTON = 'Criar com o celular'
+export const PHONE_SIGNIN_BUTTON = 'Entrar com o celular'
 export const NOT_SYNCED_TITLE = 'Essa passkey não serve para o Varanda.'
-export const NONE_TEXT = 'Nenhuma passkey do Varanda neste aparelho. Crie uma aqui ou entre no site com a passkey que já tem.'
-export const KNOWN_LOST_TEXT = 'A passkey que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar em outro gerenciador: tente entrar com outra passkey ou crie uma nova conta.'
+export const NONE_TEXT = 'Nenhuma conta da Varanda neste aparelho. Toque em Criar minha conta. Se você já tem conta, confira se o aparelho está na mesma conta Google de antes, ou toque em Outras formas de entrar e use o código de recuperação.'
+export const KNOWN_LOST_TEXT = 'A conta que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar guardada em outra conta Google, Apple ou de um gerenciador de senhas: toque em Entrar com outra passkey ou crie uma conta nova.'
 // Variants shown while creation is withheld: the network is full, or its
 // answer has not arrived yet.
-export const NONE_FULL_TEXT = 'Nenhuma passkey do Varanda neste aparelho. Entre no site com a passkey que já tem.'
-export const KNOWN_LOST_FULL_TEXT = 'A passkey que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar em outro gerenciador: tente entrar com outra passkey.'
+export const NONE_FULL_TEXT = 'Nenhuma conta da Varanda neste aparelho. Se você já tem conta, confira se o aparelho está na mesma conta Google de antes, ou toque em Outras formas de entrar e use o código de recuperação.'
+// The same miss while a creation waits for 'concluir': the code row is hidden
+// then, so the notice names only the button on screen.
+export const NONE_PENDING_TEXT = 'Nenhuma conta da Varanda neste aparelho. Toque em Concluir e entrar para terminar a conta que você começou a criar.'
+export const KNOWN_LOST_FULL_TEXT = 'A conta que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar guardada em outra conta Google, Apple ou de um gerenciador de senhas: toque em Entrar com outra passkey.'
 // After one sign-in that did not finish (closed sheet or missing passkey).
-export const MISSED_TEXT = 'A passkey não apareceu? Tente entrar de novo ou toque em entrar com outra passkey para escolher outra.'
-export const OTHER_PASSKEY_LABEL = 'entrar com outra passkey'
+export const MISSED_TEXT = 'Sua conta não apareceu? Tente entrar de novo ou toque em Entrar com outra passkey para escolher outra.'
+export const OTHER_PASSKEY_LABEL = 'Entrar com outra passkey'
 
 const CLEANED_STEP = 'O app já pediu ao gerenciador para retirar a passkey que não serviu.'
 
@@ -82,7 +86,7 @@ export function notSyncedSteps ({ userIds = [], cleaned = false, native = false,
   const fallback = native
     ? 'Se não der certo, escolha nas configurações do aparelho um gerenciador de senhas que sincroniza e crie a passkey de novo.'
     : phone
-      ? 'Sem gerenciador assim neste aparelho? Toque em ' + RETRY_LABEL + ' e depois em ' + PHONE_LABEL + ': leia com a câmera do celular o QR code que aparece na tela.'
+      ? 'Sem gerenciador assim neste aparelho? Toque em ' + RETRY_LABEL + ', em Outras formas de entrar e em ' + PHONE_LABEL + ': leia com a câmera do celular o QR code que aparece na tela.'
       : 'Se não der certo, abra o Varanda no celular e crie a passkey lá: o celular guarda a passkey num gerenciador que sincroniza.'
   const steps = [
     ...cleanupSteps(cleaned, userIds),

@@ -227,13 +227,20 @@ export async function runGate (base, show) {
       ' ms (publicKey ' + info.publicKey.slice(0, 8) + ', ' + entries.length + ' entries)'
   })
   if (cfg.reload === true) {
-    if (typeof DevSettings.reload !== 'function') throw new Error('sem DevSettings.reload (build de release)')
-    // Not Fast Refresh: a full reload makes a new JS context in this same
-    // process while the worklet above is still running its continuous sync.
-    const { runId } = await running.client.request('sync.start', { once: false })
-    await waitFor(() => events.find((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line === 'sync ready'), 30000, 'sync ready')
-    await report('ready:reload', true, 'continuous sync ' + runId + ' running, reloading the JS context')
-    DevSettings.reload()
+    // A failure before the reload is step j's result: the driver would
+    // otherwise wait out the whole gate timeout for a report that never comes.
+    try {
+      if (typeof DevSettings.reload !== 'function') throw new Error('sem DevSettings.reload (build de release)')
+      // Not Fast Refresh: a full reload makes a new JS context in this same
+      // process while the worklet above is still running its continuous sync.
+      const { runId } = await running.client.request('sync.start', { once: false })
+      await waitFor(() => events.find((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line === 'sync ready'), 30000, 'sync ready')
+      await report('ready:reload', true, 'continuous sync ' + runId + ' running, reloading the JS context')
+      DevSettings.reload()
+    } catch (err) {
+      await report('j', false, 'antes do reload: ' + describe(err))
+      throw err
+    }
     return
   }
   await report('done', true, 'all app steps finished')

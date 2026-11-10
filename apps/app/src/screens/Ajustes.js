@@ -52,11 +52,13 @@ import { usePush } from '../usePush'
 import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
-import { Sheet } from '../ui/Sheet'
+import { Sheet, TEXT_CAP } from '../ui/Sheet'
+import { useEscapeLayer } from '../ui/escapeLayer'
 import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MODES, MODE_LABELS } from '../appearance'
 import { Btn, ErrorText, Notice, Page, Row, Soft, useAction } from '../ui'
+import { BLOCK_TEXTS } from '../memberBlocks'
 import { pagesOn } from '../pageGate'
 import { PREVIEW_PREF_LABEL, previewsEnabled, setPreviewsEnabled } from '../previewPref'
 import { previewPrefStore } from '../previewBuild'
@@ -71,6 +73,8 @@ import Convites from './Convites'
 import Identidade from './Identidade'
 import Passkeys from './Passkeys'
 import Perfil from './Perfil'
+import Recurso from './Recurso'
+import Bloqueados from './Bloqueados'
 import Sincronizar from './Sincronizar'
 import Termos from './Termos'
 
@@ -93,6 +97,8 @@ const TITLES = {
   sincronizar: 'Sincronização',
   identidade: 'Identidade técnica',
   convites: 'Convidar pessoas',
+  recurso: 'Recorrer de um bloqueio',
+  bloqueados: BLOCK_TEXTS.listTitle,
   excluir: 'Excluir conta'
 }
 
@@ -329,13 +335,19 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     }
   }
 
+  // Escape on a sub-page goes back to the list, as the back chevron does,
+  // instead of closing the whole sheet and dropping a draft (src/ui/escapeLayer.js).
+  useEscapeLayer(screen !== null && screen !== 'lista', () => onNavigate('lista'), 'sheet')
+
   const left = screen === 'lista'
     ? (
-      <Pressable accessibilityRole='button' accessibilityLabel='Fechar' onPress={onClose} hitSlop={8}>
-        <Text style={styles.cancel}>Fechar</Text>
+      <Pressable accessibilityRole='button' accessibilityLabel='Fechar' onPress={onClose} hitSlop={8} style={styles.closeHit}>
+        <Text style={styles.cancel} maxFontSizeMultiplier={TEXT_CAP}>Fechar</Text>
       </Pressable>
       )
     : (
+      // Icon only: a worded "‹ Ajustes" took the title's room (the title is
+      // padded by the wider side), cutting "Passkeys e recupe…" at large text.
       <Pressable
         style={styles.back}
         accessibilityRole='button'
@@ -343,8 +355,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         onPress={() => onNavigate('lista')}
         hitSlop={8}
       >
-        <Icon name='voltar' size={22} color={colors.ink} />
-        <Text style={styles.cancel}>Ajustes</Text>
+        <Icon name='voltar' size={24} color={colors.ink} />
       </Pressable>
       )
 
@@ -384,13 +395,14 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
               {account && unlocked ? <Item icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}
+              {account ? <Item icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
+              {hosted ? <Item icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
               {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
               {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function'
                 ? <Item icon='gente' label='Páginas' onPress={openPaginas} />
                 : null}
               <Item icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
               <Item icon='sun' label='Aparência' trailingText={MODE_LABELS[mode]} onPress={() => onNavigate('aparencia')} />
-              <Item icon='link' label={PREVIEW_PREF_LABEL} toggle checked={previews} trailingText={previews ? 'Ligada' : 'Desligada'} onPress={togglePreviews} />
               {pushRow
                 ? (
                   <Item
@@ -408,6 +420,8 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 ? <Item icon='download' label='Guardar dados neste aparelho' trailing={null} pending={persistPending} onPress={doPersist} />
                 : null}
               {hasPasskey && Platform.OS === 'web' ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
+              {/* Last, so the note right under the group describes this row. */}
+              <Item icon='link' label={PREVIEW_PREF_LABEL} toggle checked={previews} trailingText={previews ? 'Ligada' : 'Desligada'} onPress={togglePreviews} />
             </View>
             <Soft>{PREVIEW_PREF_NOTE}</Soft>
             {pushRow && pushUi.note && pushUi.note !== pushError ? <Soft>{pushUi.note}</Soft> : null}
@@ -521,6 +535,20 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             </View>
             )
           : null}
+        {account
+          ? (
+            <View style={shown('recurso')}>
+              <Recurso open={screen === 'recurso'} active={ready && screen === 'recurso'} />
+            </View>
+            )
+          : null}
+        {hosted
+          ? (
+            <View style={shown('bloqueados')}>
+              <Bloqueados active={ready && screen === 'bloqueados'} />
+            </View>
+            )
+          : null}
         {account && unlocked
           ? (
             <View style={shown('excluir')}>
@@ -605,7 +633,9 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
       )
 
   return (
-    <Sheet open={screen !== null} onClose={onClose} title={TITLES[screen]} left={left} background={colors.bg}>
+    // Android back on a sub-page goes back to the list, as the chevron and
+    // Escape do, instead of closing Ajustes and dropping a draft.
+    <Sheet open={screen !== null} onClose={onClose} onBack={screen !== null && screen !== 'lista' ? () => onNavigate('lista') : undefined} title={TITLES[screen]} left={left} background={colors.bg}>
       {body}
     </Sheet>
   )
@@ -615,7 +645,8 @@ const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
   hidden: { display: 'none' },
   cancel: { ...type.cancel, color: colors.ink },
-  back: { flexDirection: 'row', alignItems: 'center', marginLeft: -6 },
+  closeHit: { minHeight: 44, justifyContent: 'center' },
+  back: { minWidth: 40, minHeight: 40, justifyContent: 'center', marginLeft: -8 },
   group: {
     backgroundColor: colors.card,
     borderRadius: 14,

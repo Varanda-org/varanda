@@ -31,6 +31,7 @@ const { certForKey } = require('./cert')
 const { formatEvent, key8 } = require('./sync-format')
 const { safe } = require('./safe')
 const { UsageError } = require('./errors')
+const { verifyInviteCard, isInviteCardExpired } = require('./invite-card')
 const { validBootstrap, isLoopbackAddress, isLoopbackBootstrap } = require('./config')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
@@ -44,6 +45,7 @@ const MEDIA_WEB_ONLY = 'mídia disponível só na versão web'
 const PEEK_WEB_ONLY = 'leitura sob demanda só na versão web'
 const DM_WEB_ONLY = 'mensagens diretas disponíveis só no navegador'
 const SEEN_WEB_ONLY = 'estado de vistos sincronizado só no navegador'
+const BLOCK_WEB_ONLY = 'bloqueio de membros disponível só no navegador'
 // How long downloads in a group are gathered into one groups.changed.
 const GROUPS_CHANGED_MS = 50
 
@@ -550,6 +552,11 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
+    // And for the appeal statement (docs/rpc.md 5.99).
+    'appeal.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
     // And for the terms-acceptance statement (docs/rpc.md 5.29).
     'terms.sign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')
@@ -563,6 +570,24 @@ function createSession ({
     // And for the signup-invite request (docs/rpc.md 5.30).
     'invite.sign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')
+    }),
+
+    // And for the invite card (docs/rpc.md 5.101): signed only in the browser.
+    'inviteCard.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
+    // docs/rpc.md 5.102: pure, no identity needed. Still serial, so a closed
+    // or errored session answers LOCKED like every other request.
+    'inviteCard.verify': serial(async (params) => {
+      try {
+        const { signature, ...fields } = params
+        const result = verifyInviteCard({ ...fields, association: cfg.association }, signature)
+        if (result.ok && isInviteCardExpired(fields.expires, Math.floor(Date.now() / 1000))) return { ok: false, reason: 'expired' }
+        return result
+      } catch {
+        return { ok: false, reason: 'malformed' }
+      }
     }),
 
     // And for the push-subscription statement (docs/rpc.md 5.31).
@@ -620,6 +645,11 @@ function createSession ({
     'seen.sign': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
     'seen.merge': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
 
+    // The browser node's own block list (docs/rpc.md 5.111, 5.112): the reads
+    // it filters (peek.read, notices.list, dm.*) exist only there.
+    'block.set': serial(async () => { throw new UsageError(BLOCK_WEB_ONLY) }),
+    'block.list': serial(async () => { throw new UsageError(BLOCK_WEB_ONLY) }),
+
     // Conversas seal to an X25519 box key derived from the Ed25519 identity
     // key and talk to the seeder over the browser node's link, so only the
     // browser node offers them (docs/rpc.md 5.73 to 5.81). Nothing is opened.
@@ -631,6 +661,16 @@ function createSession ({
     'dm.thread': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.set': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.seen': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    // A Página's secrets live on the browser node only (docs/rpc.md 5.114).
+    'dm.pageGenerate': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageShare': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageSecrets': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageDraft': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageSend': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageLegacyChunk': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageLegacyBlocks': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.pageForget': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'group.seal': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     // Like report.sign (docs/rpc.md 5.20).
     'dm.reportSign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')
@@ -706,6 +746,57 @@ function createSession ({
       return withStore((c) => member.profileDelete(c, { to: ref }))
     }),
 
+    // Feira listings (docs/rpc.md, listing.*). Photos live in media cores
+    // only the browser node writes: a list is refused before anything opens.
+    'listing.create': serial(async ({ kind, title, text, price, unit, cat, place, media }) => {
+      if (media !== undefined && media !== null) throw new UsageError(MEDIA_WEB_ONLY)
+      const r = await withStore((c) => member.listingCreate(c, { kind, title, text, price, unit, cat, place }))
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.edit': serial(async ({ to, expectedRevision, title, text, price, unit, cat, place, media }) => {
+      if (media !== undefined && media !== null) throw new UsageError(MEDIA_WEB_ONLY)
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      const r = await withStore((c) => member.listingEdit(c, { to: ref, expectedRevision, title, text, price, unit, cat, place }))
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.status': serial(async ({ to, status }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      const r = await withStore((c) => member.listingStatus(c, { to: ref, status }))
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.delete': serial(async ({ to }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      return withStore((c) => member.listingDelete(c, { to: ref }))
+    }),
+
+    'listing.rate': serial(async ({ to, offer, consent, stars, text }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      const r = await withStore((c) => member.listingRate(c, { to: ref, offer, consent, stars, text }))
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'listing.mine': serial(async ({ before, limit }) => {
+      return withStore((c) => member.listingMine(c, { before: before === undefined ? null : before, limit }))
+    }),
+
+    // The deal consent is signed where the offer arrived, in the browser's
+    // DM store; verified ratings need its seeder link. Both are refused
+    // before anything opens.
+    'listing.consent': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
+    'listing.ratings': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
     // Which refs the own diary likes / reposts (docs/rpc.md), local data only.
     'engagement.read': serial(async ({ refs }) => {
       const r = await withStore((c) => member.engagementRead(c, { refs }))
@@ -716,6 +807,33 @@ function createSession ({
     // before anything is opened (like account.sign).
     'diary.peek': serial(async () => {
       throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
+    // Depoimentos need diary.peek and the DM box key of the browser node
+    // (docs/rpc.md 5.100): refused the same way, nothing opened.
+    'testimonial.write': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'testimonial.pending': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'testimonial.show': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'testimonial.delete': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
+    // A momento's photo lives in the browser node's anonymous blob pool
+    // (docs/rpc.md 5.113): refused the same way, nothing opened.
+    'moment.create': serial(async () => {
+      throw new UsageError(MEDIA_WEB_ONLY)
+    }),
+    'moments.read': serial(async () => {
+      throw new UsageError(MEDIA_WEB_ONLY)
+    }),
+    'moment.delete': serial(async () => {
+      throw new UsageError(MEDIA_WEB_ONLY)
     }),
 
     'follow.add': serial(async ({ key }) => {
@@ -809,7 +927,12 @@ function createSession ({
       return r
     }),
 
-    'group.read': serial((params) => withStore((c) => member.groupRead(c, params))),
+    // A page reads its private groups only on a node that holds its secrets
+    // (browser node), never as this member.
+    'group.read': serial((params) => {
+      if (params.page !== undefined) throw new UsageError(DM_WEB_ONLY)
+      return withStore((c) => member.groupRead(c, params))
+    }),
     'group.seen': serial((params) => withStore((c) => member.groupSeen(c, params))),
 
     'group.list': serial((params) => withStore((c) => member.groupList(c, params))),

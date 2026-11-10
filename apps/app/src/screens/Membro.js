@@ -27,16 +27,19 @@
 // way to follow K2. The node also follows K2 by itself, once, after it
 // verified the move (Terms 15). K1's posts past the move are not shown.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
+import { readBlockedPeek, useBlocks } from '../blocksProvider'
+import { BLOCK_TEXTS } from '../memberBlocks'
 import { avatarOf } from '../media/avatar'
-import { fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
+import { fetchFeiraAuthor, fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { whoOf } from '../who'
+import { applyCut, fillState, hideFuture, tilesFromItems } from '../mural'
 import * as actingAs from '../actingAs'
 import { TEXTS, pagesFollow, pagesFollows, pagesSuccessor } from '../pages'
 import { MAX_HOPS, moveOf, pageMoveView, resolveChain, shownUnderCut, successorOf } from '../pageMove'
@@ -44,7 +47,16 @@ import { rosterRows } from '../pageRoster'
 import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
+import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
+import { MoreButton } from '../ui/MoreButton'
+import { PageNoticeSheet } from '../ui/PageNoticeSheet'
+import { Sheet } from '../ui/Sheet'
+import { ShareProfile } from '../ui/ShareProfile'
+import { buildProfileUrl } from '../profileLink'
+import { installationOrigin } from '../installation'
+import { pageNoticeStore } from '../pageNoticeStore'
+import { pageNoticeKey, pageReadKind } from '../pageNotice'
 import { ProfileHeader } from '../ui/ProfileHeader'
 import { ProfileBar, useProfileBar } from '../ui/ProfileBar'
 import { LABELS } from '../dm'
@@ -52,20 +64,33 @@ import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
 import { useFollowCounts } from '../useFollowCounts'
 import { PostRow } from '../ui/PostRow'
 import { RefreshableList } from '../ui/RefreshableList'
+import { MuralFooter, MuralRow, muralGridRows } from '../ui/MuralGrid'
+import { Segmented } from '../ui/Segmented'
+import { CommunitiesBox } from '../ui/CommunitiesBox'
+import { commonCommunities, communitiesOf, MAX_COMMON_LOOKUPS } from '../communitiesBox'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
-import { type } from '../ui/theme'
-import { useStyles } from '../ui/ThemeProvider'
+import { LARGE_TEXT, type } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
+import { ConfirmTestimonialSheet, RETRACT_TITLE, TESTIMONIALS_TAB, WRITE_UNCERTAIN, WriteTestimonialSheet, ownBlockRef, retractBody, useTestimonialTab, useTestimonials } from './Depoimentos'
+import { ratingRefs, ratings } from '../feiraClient'
+import { MAX_RATED_LISTINGS, RATINGS_NOTE, collectRatings, summaryLabel } from '../feiraReview'
 import { isSeederDown, knownAuthors, memberKeyOf, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet } from './Conversa'
 
+const TABS = [{ id: 'posts', label: 'Publicações' }, { id: 'mural', label: 'Mural' }]
+// Depoimentos is the third tab only on a hosted node (node.hosted === true).
+const TABS_HOSTED = TABS.concat([TESTIMONIALS_TAB])
 const NOT_HOSTED_NOTE = 'Publicações completas disponíveis na versão web, com internet.'
 const OFFLINE_NOTE = 'Sem internet: as publicações completas aparecem quando a conexão voltar.'
 
 const BAND = 96
 
-const PAGE_NO_DM = 'Esta página ainda não recebe mensagens'
 const ROSTER_UNAVAILABLE = 'lista de administradores indisponível'
 const PAGE_UNCERTAIN = 'Não sabemos se a mudança foi feita. Confira antes de tentar de novo.'
+
+export function canConverseWithPage ({ page, closed, moved, hosted, enabled }) {
+  return page === true && closed !== true && moved !== true && hosted === true && enabled === true
+}
 
 // The 'Página' badge text from an index hint, a seed or a page.read answer:
 // null for a person. Closed and moved pages say so.
@@ -76,11 +101,31 @@ export function pageBadgeLabel (info) {
   return 'Página'
 }
 
-// Whether a page.read answer is about a page (a person's diary has no roster).
-function isPageRead (r, key) {
-  if (!r || typeof r !== 'object' || r.page !== key) return false
-  return r.gen !== null || r.owner !== null || r.closed === true || (r.movedTo !== null && r.movedTo !== undefined)
+// One community.members read (docs/rpc.md 5.65) of at most this many rows.
+const MEMBERS_PAGE = 100
+// Past this many pages a community counts as not in common (fail closed).
+const MEMBERS_PAGES_MAX = 10
+// Same pause as the Diário's list and Comunidades: one read for a burst of
+// group events.
+const COMMON_DELAY_MS = 800
+
+// One page of a community's members, listed in key order: the person's rows
+// on it, and the offset of the next page to read, or null when the person is
+// found or cannot be on a later page (the last key sorts after theirs, or the
+// list ends).
+export function membersPageStep (res, person, offset) {
+  const members = res && typeof res === 'object' && Array.isArray(res.members) ? res.members : []
+  const hits = members.filter((row) => row !== null && typeof row === 'object' && row.member === person)
+  if (hits.length > 0 || members.length === 0 || typeof person !== 'string') return { hits, next: null }
+  const last = members[members.length - 1]
+  if (last && typeof last.member === 'string' && last.member.toLowerCase() > person.toLowerCase()) return { hits, next: null }
+  const next = offset + members.length
+  const total = res && Number.isSafeInteger(res.total) ? res.total : 0
+  return { hits, next: next < total ? next : null }
 }
+
+// Whether a page.read answer is about a page (a person's diary has no roster).
+const isPageRead = (r, key) => pageReadKind(r, key) === 'page'
 
 function useActingAs () {
   const [state, setState] = useState(() => actingAs.get())
@@ -166,8 +211,9 @@ const INITIAL_POSTS = {
   refreshing: false
 }
 
-export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onToast }) {
+export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onToast, onTabChange }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const names = useNames()
   const now = useNow(60000)
@@ -193,7 +239,14 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   const followsRef = useRef(Promise.resolve(new Set()))
   const genRef = useRef(0)
   const [following, setFollowing] = useState(false)
+  // 'posts' | 'mural' | 'depoimentos'. The state lives here, so it survives a
+  // visit to a thread.
+  const [tab, setTab] = useState('posts')
+  const muralPages = useRef(0)
+  const { fontScale, height: windowHeight } = useWindowDimensions()
+  const [sharing, setSharing] = useState(false)
   const [pageRead, setPageRead] = useState(null)
+  const [pageNotice, setPageNotice] = useState(null)
   // The index's page/closed/moved fields (a hint until page.read answers),
   // and whether page.read said "not a page" (it overrides every hint).
   const [idxHint, setIdxHint] = useState(null)
@@ -214,6 +267,24 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   nodeRef.current = node
   const [tick, setTick] = useState(0)
   const c = useFollowCounts(author, tick)
+  const blocks = useBlocks()
+  const blockedHere = blocks.has(author)
+  const [unblocking, setUnblocking] = useState(false)
+  // Only the communities both people are admitted to, never this person's
+  // own list (their interests are sensitive data).
+  const [common, setCommon] = useState([])
+  // Depoimentos (hosted only): the approved ones in their tab, and the
+  // own sealed one to this person, if any. A write or a retraction is
+  // remembered here until the index catches up.
+  const testimonials = useTestimonials(author, { tick, active: full })
+  const [writingTestimonial, setWritingTestimonial] = useState(false)
+  const [retractingTestimonial, setRetractingTestimonial] = useState(false)
+  const [sentTestimonial, setSentTestimonial] = useState(null)
+  // An uncertain write may be published: no second 'Escrever depoimento' on
+  // this visit (the person checks Enviados first).
+  const [testimonialUncertain, setTestimonialUncertain] = useState(false)
+  const [retractedTestimonials, setRetractedTestimonials] = useState(() => new Set())
+  const commonGenRef = useRef(0)
 
   const commitHeader = useCallback((h) => {
     headerRef.current = h
@@ -366,6 +437,16 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     commitHeader({ ...headerRef.current, verified: false })
     const held = await readProfile()
     if (!alive()) return
+    if (blockedHere) {
+      // The name alone, so the block can be undone by a person the screen
+      // names. The node refuses this author's posts anyway.
+      if (!held) {
+        try { headerFromPeek(await readBlockedPeek(request, author)) } catch {}
+        if (!alive()) return
+      }
+      commit({ ...INITIAL_POSTS, phase: 'ready', atEnd: true })
+      return
+    }
     followsRef.current = loadFollows()
     if (pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })) {
       readPageInfo(alive)
@@ -386,6 +467,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       const page = await readPage(null, alive, !held)
       if (!alive() || page === null) return
       const { items, unavailable, index } = page
+      // The first page replaces every older one: the Mural fill budget starts
+      // over with it.
+      muralPages.current = 0
       commit({
         phase: 'ready',
         error: '',
@@ -404,7 +488,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       if (!alive()) return
       commit({ phase: 'error', refreshing: false, error: isSeederDown(err) ? 'Sem conexão com o servidor agora.' : (err && err.reason ? err.message : errorText(err)) })
     }
-  }, [commit, commitHeader, readProfile, loadFollows, full, reset, readPage, afterPage, readPageInfo, node.hosted, node.accountOrigin])
+  }, [commit, commitHeader, readProfile, loadFollows, full, reset, readPage, afterPage, readPageInfo, node.hosted, node.accountOrigin, blockedHere, headerFromPeek, request, author])
 
   const loadMore = useCallback(async () => {
     const current = postsRef.current
@@ -437,6 +521,53 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     load(false)
     return () => { genRef.current += 1 }
   }, [load])
+
+  const ownProfile = typeof ownKey === 'string' && author === ownKey
+  const postsReady = posts.phase === 'ready'
+  // Joining or leaving a community anywhere bumps the node's group versions:
+  // the box is read again (after a short pause for a burst), keeping what it
+  // shows until the new answer, and cleared only for another profile.
+  const groupVersions = node.groupVersions
+  const commonVersions = useRef(groupVersions)
+  const commonFor = useRef(author)
+  useEffect(() => {
+    const mine = ++commonGenRef.current
+    const alive = () => mine === commonGenRef.current
+    const delay = groupVersions !== commonVersions.current ? COMMON_DELAY_MS : 0
+    commonVersions.current = groupVersions
+    if (commonFor.current !== author) {
+      commonFor.current = author
+      setCommon([])
+    }
+    if (node.hosted !== true || ownProfile || !postsReady) {
+      setCommon([])
+      return
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const own = communitiesOf(await request('community.list', {}))
+        const byCommunity = new Map()
+        // One after the other: the browser node serialises requests anyway.
+        for (const item of own.slice(0, MAX_COMMON_LOOKUPS)) {
+          const rows = []
+          let offset = 0
+          for (let page = 0; page < MEMBERS_PAGES_MAX && offset !== null; page++) {
+            if (!alive()) return
+            const res = await request('community.members', { community: item.community, offset, limit: MEMBERS_PAGE })
+            const step = membersPageStep(res, author, offset)
+            rows.push(...step.hits)
+            offset = step.next
+          }
+          byCommunity.set(item.community, rows)
+        }
+        if (alive()) setCommon(commonCommunities(own, byCommunity, author).items)
+      } catch {}
+    }, delay)
+    return () => {
+      commonGenRef.current += 1
+      clearTimeout(timer)
+    }
+  }, [node.hosted, ownProfile, postsReady, request, author, tick, groupVersions])
 
   const isPage = !notPage && ((seed && seed.page === true) || (idxHint !== null && idxHint.page === true) || pageRead !== null)
   const roster = isPage && pageRead !== null ? rosterRows(pageRead) : null
@@ -531,9 +662,45 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     }
   }
 
+  // The seller's verified ratings over the newest listings (hosted only),
+  // read once per opened key; a failure only hides the row.
+  const [rated, setRated] = useState(null)
+  const ratingsHosted = node.hosted === true
+  useEffect(() => {
+    setRated(null)
+    if (!ratingsHosted || typeof author !== 'string') return undefined
+    let live = true
+    const read = async () => {
+      // The index's hints are enough here: listing.ratings proves each row
+      // against the listing itself, so no listing needs a diary read.
+      const first = await fetchFeiraAuthor(author)
+      if (!live || !first || first.ok !== true) return
+      const seqs = first.value.items.map((i) => Number(String(i.ref).slice(author.length + 1))).slice(0, MAX_RATED_LISTINGS)
+      const r = await collectRatings({ author, seqs }, {
+        refsPage: (cursor) => ratingRefs(author, cursor),
+        verify: (q) => ratings(request, q)
+      })
+      if (live) setRated(r)
+    }
+    read().catch(() => {})
+    return () => { live = false }
+  }, [ratingsHosted, author, request])
+
   const who = whoOf({ name: header.name, username: header.username })
   const own = typeof ownKey === 'string' && author === ownKey
   const canReport = full && !own && typeof onReport === 'function' && typeof ownKey === 'string'
+  const canBlock = canReport && blocks.available
+  const unblock = async () => {
+    setUnblocking(true)
+    try {
+      await blocks.setBlock(author, false)
+      if (typeof onToast === 'function') onToast(BLOCK_TEXTS.undone)
+    } catch (err) {
+      if (typeof onToast === 'function') onToast(errorText(err))
+    } finally {
+      setUnblocking(false)
+    }
+  }
 
   const moveView = pageRead !== null ? pageMoveView(pageRead, moveInfo || {}) : null
   const movedView = moveView !== null && moveView.moved ? moveView : null
@@ -549,6 +716,54 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       : { closed: !!seed && seed.closed === true, moved: !!seed && (seed.moved === true || (seed.movedTo !== undefined && seed.movedTo !== null)) }
   const badge = pageBadgeLabel({ page: isPage, closed: lifecycle.closed, moved: lifecycle.moved })
   const closedPage = isPage && lifecycle.closed === true
+  const canConverse = !own && typeof onMessage === 'function' && canConverseWithPage({
+    page: isPage,
+    closed: lifecycle.closed,
+    moved: lifecycle.moved,
+    hosted: node.hosted,
+    enabled: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })
+  })
+  const openPageConversation = () => {
+    const key = pageNoticeKey(author)
+    if (!canConverse || key === null) return
+    try {
+      if (pageNoticeStore().getItem(key) === '1') {
+        onMessage(author)
+        return
+      }
+    } catch {}
+    setPageNotice(author)
+  }
+  const pageNoticeSheet = (
+    <PageNoticeSheet
+      open={pageNotice === author && canConverse}
+      page={author}
+      onClose={() => setPageNotice(null)}
+      onContinue={() => {
+        if (!canConverse || pageNotice !== author) return
+        setPageNotice(null)
+        onMessage(author)
+      }}
+    />
+  )
+  const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'
+    ? (
+      <Pressable accessibilityRole='link' accessibilityLabel='Anúncios' onPress={() => onOpenListings(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
+        <Icon name='feira' size={20} color={colors.accent} />
+        <Text style={styles.linkText}>Anúncios</Text>
+        <Icon name='seta' size={20} color={colors.soft} />
+      </Pressable>
+      )
+    : null
+  const ratingsRow = ratingsHosted && !(isPage && lifecycle.moved) && rated && rated.summary.count > 0
+    ? (
+      <View accessibilityLabel='Avaliações' style={styles.listings}>
+        <Text style={styles.rosterName}>Avaliações</Text>
+        <Soft>{summaryLabel(rated.summary)}</Soft>
+        <Soft>{RATINGS_NOTE}</Soft>
+      </View>
+      )
+    : null
   const newKey = movedView !== null ? movedView.key : null
   const canFollowNew = newKey !== null && movedView.follow && !own && !asPageMode && follows !== null && !follows.has(newKey) && newKey !== ownKey
 
@@ -597,88 +812,181 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     : null
   const countsNote = c.incomplete && (c.seguindo !== null || c.seguidores !== null) ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null
 
+  const profileUrl = node.hosted === true && author ? buildProfileUrl({ origin: installationOrigin() || globalThis.location?.origin || null, username: header.verified === true ? header.username || null : null, publicKey: author }) : null
+  const asPageFollowing = pageFollows !== null && pageFollows.has(author)
+  const canTestimonial = node.hosted === true && full && !own && !isPage && typeof ownKey === 'string'
+  const canWriteTestimonial = canTestimonial && !testimonialUncertain && !blockedHere
+  const myTestimonial = [sentTestimonial, ownBlockRef(testimonials.index, ownKey)].find((r) => typeof r === 'string' && !retractedTestimonials.has(r)) || null
+  const tabs = node.hosted === true ? TABS_HOSTED : TABS
+  // A tab the node no longer offers (not hosted) falls back to Publicações.
+  const shownTab = tabs.some((t) => t.id === tab) ? tab : 'posts'
+  // The tab on screen, not the raw state: a tab the node no longer offers shows
+  // Publicações, and the publish button follows what is shown.
+  useEffect(() => { if (onTabChange) onTabChange(shownTab) }, [shownTab])
+  // A profile left on Depoimentos must not hide the button for a later visit
+  // to the same entry before it reports again.
+  useEffect(() => () => { if (onTabChange) onTabChange(null) }, [])
+  const depo = shownTab === 'depoimentos' && full
+  const testimonialTab = useTestimonialTab({
+    data: testimonials,
+    own: false,
+    ownKey,
+    ownerName: displayText(who.title),
+    canWrite: canWriteTestimonial && myTestimonial === null,
+    onOpenMember,
+    onReport: typeof onReport === 'function' && typeof ownKey === 'string' ? onReport : undefined,
+    onRetracted: (ref) => setRetractedTestimonials((set) => new Set(set).add(ref))
+  })
+  const moreActions = [
+    canAct
+      ? { icon: actingHere ? 'sair' : 'pessoa', label: actingHere ? 'Deixar de agir como a página' : 'Agir como esta página', onPress: () => (actingHere ? actingAs.me() : actingAs.asPage({ key: author, name: header.name, username: header.username, closed: pageRead.closed })) }
+      : null,
+    !canAct && actingHere ? { icon: 'sair', label: 'Deixar de agir como a página', onPress: () => actingAs.me() } : null,
+    canAct && typeof onOpenPageSettings === 'function' ? { icon: 'engrenagem', label: 'Ajustes da página', onPress: () => onOpenPageSettings(author) } : null,
+    !own && asPageMode && !closedPage && !blockedHere
+      ? { icon: 'seguir', label: asPageFollowing ? 'Deixar de seguir como a página' : 'Seguir como a página', pending: following, disabled: pageFollows === null, onPress: togglePageFollow }
+      : null,
+    profileUrl !== null ? { icon: 'compartilhar', label: 'Compartilhar perfil', onPress: () => setSharing(true) } : null,
+    canWriteTestimonial && myTestimonial === null ? { icon: 'lapis', label: 'Escrever depoimento', onPress: () => setWritingTestimonial(true) } : null,
+    canTestimonial && myTestimonial !== null ? { icon: 'lixeira', label: 'Retirar depoimento', danger: true, onPress: () => setRetractingTestimonial(true) } : null,
+    canReport ? { icon: 'bandeira', label: 'Denunciar a conta', danger: true, onPress: () => onReport({ author, name: header.name, username: header.username }) } : null,
+    canBlock
+      ? { icon: 'slash', label: blockedHere ? BLOCK_TEXTS.unblock : BLOCK_TEXTS.block, danger: !blockedHere, pending: unblocking, onPress: blockedHere ? unblock : () => blocks.ask({ author, name: header.name, username: header.username }) }
+      : null
+  ].filter(Boolean)
+
+  // The Mural reads the same assembled pages as the posts: never a read of
+  // its own, and none at all when the screen is not full (hosted and online).
+  const mural = tab === 'mural' && full
+  const muralTiles = useMemo(() => {
+    if (!mural || posts.phase !== 'ready') return []
+    const shown = hideFuture(tilesFromItems(posts.items), now)
+    return applyCut(shown, movedView !== null ? movedView.cut : null)
+  }, [mural, posts.phase, posts.items, now, movedView])
+  const muralFill = fillState({ tiles: muralTiles, atEnd: posts.atEnd, pages: muralPages.current })
+  // Bounded automatic fill: the next index page is read while the Mural is
+  // short of photos, up to the cap. After that only 'Ver mais' reads one.
+  useEffect(() => {
+    if (!mural) { muralPages.current = 0; return }
+    if (posts.phase !== 'ready' || posts.loadingMore || posts.refreshing || posts.moreError) return
+    if (muralFill !== 'more') return
+    // A page counts only when a read really starts (loadMore skips otherwise).
+    const current = postsRef.current
+    if (current.atEnd || current.before === null) return
+    muralPages.current += 1
+    loadMore()
+  }, [mural, posts.phase, posts.items, posts.loadingMore, posts.refreshing, posts.moreError, muralFill, loadMore])
+
   const insets = useSafeAreaInsets()
   const bar = useProfileBar(insets.top + BAND, { controlsBottom: insets.top + 42 })
   const head = (
-    <ProfileHeader
-      bandHeight={insets.top + BAND}
-      topInset={insets.top}
-      onBack={full && bar.interactive ? undefined : onBack}
-      bandButtons={null}
-      avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
-      title={displayText(who.title)}
-      subtitle={who.subtitle ? displayText(who.subtitle) : null}
-      bio={header.bio || null}
-      counts={[
-        {
-          label: 'seguindo',
-          value: c.seguindo === null ? null : displayText(String(c.seguindo)),
-          onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(author, 'seguindo') : undefined
-        },
-        {
-          label: 'seguidores',
-          value: c.seguidores === null ? null : displayText(String(c.seguidores)),
-          onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(author, 'seguidores') : undefined
-        }
-      ]}
-      note={pageNote !== null ? <View>{pageNote}{countsNote}</View> : countsNote}
-      actions={[
-        canAct
+    <>
+      <ProfileHeader
+        bandHeight={insets.top + BAND}
+        topInset={insets.top}
+        onBack={full && bar.interactive ? undefined : onBack}
+        bandButtons={null}
+        rows={blockedHere ? null : <>{listingsRow}{ratingsRow}</>}
+        avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
+        title={displayText(who.title)}
+        subtitle={who.subtitle ? displayText(who.subtitle) : null}
+        bio={header.bio || null}
+        counts={[
+          {
+            label: 'seguindo',
+            value: c.seguindo === null ? null : displayText(String(c.seguindo)),
+            onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(author, 'seguindo') : undefined
+          },
+          {
+            label: c.seguidores === 1 ? 'seguidor' : 'seguidores',
+            value: c.seguidores === null ? null : displayText(String(c.seguidores)),
+            onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(author, 'seguidores') : undefined
+          }
+        ]}
+        note={pageNote !== null ? <View>{pageNote}{countsNote}</View> : countsNote}
+        actions={[
+          !own && asPageMode && !closedPage && !blockedHere
+            ? (
+              <Pill
+                label={pageFollowsFailed ? 'Tentar de novo' : pageFollows !== null && pageFollows.has(author) ? 'Seguindo' : 'Seguir'}
+                filled={!pageFollowsFailed && !(pageFollows !== null && pageFollows.has(author))}
+                pending={following}
+                disabled={pageFollows === null && !pageFollowsFailed}
+                onPress={pageFollowsFailed ? loadPageFollows : togglePageFollow}
+              />
+              )
+            : null,
+          !own && !asPageMode && !closedPage && !blockedHere
+            ? (
+              <FollowPill
+                following={follows === null ? null : isFollowed}
+                title={displayText(who.title)}
+                pending={following}
+                disabled={false}
+                onFollow={toggleFollow}
+                onUnfollow={toggleFollow}
+              />
+              )
+            : null,
+          canConverse && !blockedHere
+            ? <Pill icon='mensagem' label='Conversar' onPress={openPageConversation} />
+            : null,
+          !own && !isPage && node.hosted === true && typeof onMessage === 'function' && !blockedHere
+            ? <Pill icon='mensagem' label={LABELS.message} onPress={() => onMessage(author)} />
+            : null
+        ].filter(Boolean).slice(0, 2)}
+        more={<MoreButton title={displayText(who.title)} actions={moreActions} />}
+        tabs={full
           ? (
-            <Pill
-              label={actingHere ? 'Deixar de agir como a página' : 'Agir como esta página'}
-              onPress={() => (actingHere
-                ? actingAs.me()
-                : actingAs.asPage({ key: author, name: header.name, username: header.username, closed: pageRead.closed }))}
-            />
+            <View>
+              <CommunitiesBox items={common} title='Comunidades em comum' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
+              <Segmented options={tabs} selected={shownTab} onSelect={setTab} />
+            </View>
             )
-          : null,
-        !canAct && actingHere
-          ? <Pill label='Deixar de agir como a página' onPress={() => actingAs.me()} />
-          : null,
-        canAct && typeof onOpenPageSettings === 'function'
-          ? <Pill label='Ajustes da página' onPress={() => onOpenPageSettings(author)} />
-          : null,
-        !own && asPageMode && !closedPage
-          ? (
-            <Pill
-              label={pageFollowsFailed ? 'Tentar de novo' : pageFollows !== null && pageFollows.has(author) ? 'Deixar de seguir como a página' : 'Seguir como a página'}
-              filled={!pageFollowsFailed && !(pageFollows !== null && pageFollows.has(author))}
-              pending={following}
-              disabled={pageFollows === null && !pageFollowsFailed}
-              onPress={pageFollowsFailed ? loadPageFollows : togglePageFollow}
+          : null}
+      />
+      {profileUrl !== null
+        ? (
+          <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil'>
+            <View style={styles.shareBody}>
+              <ShareProfile url={profileUrl} />
+            </View>
+          </Sheet>
+          )
+        : null}
+      {canTestimonial
+        ? (
+          <>
+            <WriteTestimonialSheet
+              open={writingTestimonial}
+              to={author}
+              name={displayText(who.title)}
+              onClose={() => setWritingTestimonial(false)}
+              onSent={(result) => {
+                if (result && typeof result.ref === 'string') setSentTestimonial(result.ref)
+                if (typeof onToast === 'function') onToast('Depoimento enviado. Aparece quando a pessoa aprovar.')
+              }}
+              onUncertain={() => {
+                setTestimonialUncertain(true)
+                if (typeof onToast === 'function') onToast(WRITE_UNCERTAIN)
+              }}
             />
-            )
-          : null,
-        !own && !asPageMode && !closedPage
-          ? (
-            <FollowPill
-              following={follows === null ? null : isFollowed}
-              title={displayText(who.title)}
-              pending={following}
-              disabled={false}
-              onFollow={toggleFollow}
-              onUnfollow={toggleFollow}
+            <ConfirmTestimonialSheet
+              open={retractingTestimonial}
+              title={RETRACT_TITLE}
+              body={retractBody(displayText(who.title))}
+              confirmLabel='Retirar'
+              onConfirm={async () => {
+                const ref = myTestimonial
+                await request('testimonial.delete', { to: ref, about: author })
+                setRetractedTestimonials((set) => new Set(set).add(ref))
+              }}
+              onClose={() => setRetractingTestimonial(false)}
             />
-            )
-          : null,
-        !own && isPage && !closedPage && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })
-          ? <Pill label={PAGE_NO_DM} disabled />
-          : null,
-        !own && !isPage && node.hosted === true && typeof onMessage === 'function'
-          ? <Pill label={LABELS.message} onPress={() => onMessage(author)} />
-          : null,
-        canReport
-          ? (
-            <Pill
-              label='denunciar a conta'
-              danger
-              onPress={() => onReport({ author, name: header.name, username: header.username })}
-            />
-            )
-          : null
-      ]}
-    />
+          </>
+          )
+        : null}
+    </>
   )
 
   if (!full) {
@@ -686,6 +994,7 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
       <View style={styles.flex}>
         <View style={styles.flex}>
           {head}
+          {pageNoticeSheet}
           <OfflineNote />
           <View style={styles.note}><Soft>{node.hosted ? OFFLINE_NOTE : NOT_HOSTED_NOTE}</Soft></View>
         </View>
@@ -711,11 +1020,49 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
   )
 
   let empty = null
-  if (phase === 'loading') empty = <Skeleton />
+  if (blockedHere && phase !== 'loading') empty = <EmptyState icon='bloquear' title={BLOCK_TEXTS.profileTitle} body={BLOCK_TEXTS.profileBody} />
+  else if (phase === 'loading') empty = <Skeleton />
   else if (phase === 'error') empty = <ErrorState message={displayText(error)} onRetry={() => { setTick((n) => n + 1); load(false) }} pending={refreshing} />
   else if (unavailable === 0) empty = <EmptyState icon='lapis' title='Nenhuma publicação ainda' />
 
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
+  const muralCols = fontScale >= LARGE_TEXT ? 2 : 3
+  const muralRows = muralGridRows(muralTiles, muralCols)
+  // A failed page shows only the error row with its retry, not Ver mais too.
+  const muralState = atEnd ? 'end' : (loadingMore || posts.refreshing || (muralFill === 'more' && !moreError && posts.before !== null)) ? 'loading' : moreError ? 'error' : 'capped'
+  // The post a tile came from, seeded as a Publicações row seeds it, so the
+  // thread shows it even when the network cannot be read.
+  const muralSeed = (tile) => {
+    const item = items.find((i) => i.kind === 'post' && i.author === tile.author && i.seq === tile.seq)
+    return item ? { ...item, name: item.name || header.name, username: item.username || header.username } : null
+  }
+  const renderMural = ({ item }) => (
+    <MuralRow item={item} columns={muralCols} persist={own || isFollowed} onOpen={(tile) => onOpenThread({ ref: tile.ref, seed: muralSeed(tile) })} />
+  )
+
+  const listFooter = phase !== 'ready'
+    ? null
+    : mural
+      ? (
+        <MuralFooter
+          count={muralTiles.length}
+          state={muralState}
+          complete={!indexing && complete !== false}
+          onMore={loadMore}
+          footer={moreError ? <ListFooter error={moreError} onRetry={loadMore} pending={loadingMore} /> : null}
+        />
+        )
+      : (
+        <ListFooter
+          loading={loadingMore}
+          atEnd={atEnd && shownItems.length > 0}
+          endText='Isso é tudo por enquanto.'
+          error={moreError}
+          onRetry={loadMore}
+          pending={loadingMore}
+        />
+        )
+
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onMessage }
   const memberWho = { author, name: header.name, username: header.username }
   const renderItem = ({ item }) => {
     const peeked = peekedRef.current
@@ -731,35 +1078,30 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
     <View style={styles.flex}>
       <View style={styles.flex}>
         <RefreshableList
-          data={phase === 'ready' ? shownItems : []}
-          keyExtractor={(i) => i.kind + ':' + i.seq}
-          renderItem={renderItem}
-          extraData={{ eng, follows, now, header, profileOf: names.profileOf }}
+          data={depo ? testimonialTab.items : phase === 'ready' ? (mural ? muralRows : shownItems) : []}
+          keyExtractor={depo ? testimonialTab.keyExtractor : mural ? (row) => 'm' + row.key : (i) => i.kind + ':' + i.seq}
+          renderItem={depo ? testimonialTab.renderItem : mural ? renderMural : renderItem}
+          extraData={depo ? testimonialTab.extraData : { eng, follows, now, header, profileOf: names.profileOf }}
           ListHeaderComponent={listHeader}
-          ListEmptyComponent={empty}
-          ListFooterComponent={phase === 'ready'
-            ? (
-              <ListFooter
-                loading={loadingMore}
-                atEnd={atEnd && shownItems.length > 0}
-                endText='Isso é tudo por enquanto.'
-                error={moreError}
-                onRetry={loadMore}
-                pending={loadingMore}
-              />
-              )
-            : null}
-          contentContainerStyle={{ paddingBottom: bottomPad }}
+          ListEmptyComponent={depo || (mural && phase === 'ready') ? null : empty}
+          ListFooterComponent={depo ? testimonialTab.footer : listFooter}
+          // Always tall enough to scroll the band away: a short list (a small
+          // Mural, a tab switch) would otherwise rest with the bar half faded.
+          // The 8 pt more tuck the avatar ring, which hangs 48 pt below the
+          // band, fully under the 44 pt bar when there is no top inset.
+          contentContainerStyle={{ paddingBottom: bottomPad, minHeight: windowHeight + insets.top + BAND + 8 }}
           onRefresh={() => { setTick((n) => n + 1); load(true) }}
           refreshing={refreshing}
-          onLoadMore={phase === 'ready' && !atEnd && !moreError ? loadMore : undefined}
+          onLoadMore={phase === 'ready' && !mural && !depo && !atEnd && !moreError ? loadMore : undefined}
           loadingMore={loadingMore}
           loadMoreError={!!moreError}
-          atEnd={atEnd}
+          atEnd={atEnd || mural || depo}
           onScrollFrame={bar.handleScrollFrame}
         />
         <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)} onBack={onBack} />
+        {pageNoticeSheet}
       </View>
+      {testimonialTab.sheets}
     </View>
   )
 }
@@ -767,6 +1109,9 @@ export default function Membro ({ entry, ownKey, onBack, onFollowsChanged, onMes
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   note: { paddingHorizontal: 16, paddingVertical: 12, gap: 4 },
+  listings: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.line },
+  linkRow: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.line },
+  linkText: { ...type.postName, color: colors.ink, flex: 1 },
   pageNote: { marginTop: 8, gap: 8 },
   badge: { ...type.postMeta, color: colors.ink, fontWeight: '700' },
   banner: { ...type.postName, color: colors.ink },
@@ -778,5 +1123,6 @@ const makeStyles = (colors) => StyleSheet.create({
   rosterName: { ...type.postName, color: colors.ink },
   rosterSoft: { ...type.postMeta, color: colors.soft },
   pressed: { opacity: 0.6 },
-  countsNote: { marginTop: 4 }
+  countsNote: { marginTop: 4 },
+  shareBody: { padding: 16, gap: 12 }
 })

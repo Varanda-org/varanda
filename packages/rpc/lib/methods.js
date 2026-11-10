@@ -5,6 +5,8 @@ const L = require('./limits')
 const { DM_MEDIA_KEYS, DM_CARD_KEYS } = require('./dm-budget')
 const { cardUrlHost, cardTextLength, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMAGE_BYTES } = require('./link-card')
 const { MAX_AUDIO_MS } = require('./audio-bounds')
+const F = require('./feira')
+const IC = require('./invite-card')
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):(0|[1-9][0-9]*)$/
@@ -296,9 +298,57 @@ const REPORT_SEQ_MAX = 99999
 
 const isReason = (v) => typeof v === 'string' && REPORT_REASONS.includes(v)
 
+// listing.* (docs/rpc.md, Feira): the record rules live in feira.js.
+const HEX32_RE = /^[0-9a-f]{32}$/
+const HEX128_RE = /^[0-9a-f]{128}$/
+const LISTING_MINE_LIMIT_MAX = 20
+const LISTING_RATINGS_REFS_MAX = 32
+const RATING_REF_KEYS = ['rater', 'seq']
+
+const isHex32 = (v) => typeof v === 'string' && HEX32_RE.test(v)
+const isHex128 = (v) => typeof v === 'string' && HEX128_RE.test(v)
+const isListingPrice = (v) => F.isPrice(v)
+const isListingUnit = (v) => v === null || F.isUnit(v)
+const isListingTitle = str(1, F.MAX_LISTING_TITLE)
+
+function isRatingRefs (v) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > LISTING_RATINGS_REFS_MAX) return false
+  for (let i = 0; i < v.length; i++) {
+    const r = v[i]
+    if (!isPlainObject(r)) return false
+    const own = Object.keys(r)
+    if (own.length !== RATING_REF_KEYS.length || !RATING_REF_KEYS.every((k) => hasOwn(r, k))) return false
+    if (!isKey(r.rater) || !int(1, Number.MAX_SAFE_INTEGER)(r.seq)) return false
+  }
+  return true
+}
+
+// An edit carries no kind: servico, the widest, here; the node checks the
+// pair against the listing it edits.
+function listingUnitCross (given, value) {
+  return F.unitAllowed(hasOwn(value, 'kind') ? value.kind : 'servico', value.price, value.unit) ? null : 'parâmetro inválido: unit'
+}
+
 // terms.sign (docs/rpc.md 5.29). Duplicated from @varanda/core lib/terms.js
 // (VERSION_MAX), which this package cannot import.
 const TERMS_VERSION_MAX = 9999
+
+// inviteCard.sign / inviteCard.verify: a value is valid only when already
+// canonical, so the signed bytes are exactly what the caller sent.
+const HEX128 = /^[0-9a-f]{128}$/
+const isInviteCardDesign = (v) => IC.designIndex(v) >= 0
+const isInviteCardName = (v) => typeof v === 'string' && IC.canonicalInviteCardText(v, IC.NAME_MAX) === v
+const isInviteCardMessage = (v) => typeof v === 'string' &&
+  IC.canonicalInviteCardText(v, IC.MESSAGE_MAX_BYTES, { multiline: true }) === v &&
+  utf8ByteLength(v) <= IC.MESSAGE_MAX_BYTES
+const isSignature = (v) => typeof v === 'string' && HEX128.test(v)
+const INVITE_CARD_FIELDS = {
+  code: req(IC.isInviteCode),
+  design: req(isInviteCardDesign),
+  name: req(isInviteCardName),
+  message: req(isInviteCardMessage),
+  expires: req(IC.isInviteCardExpires)
+}
 
 // invite.sign (docs/rpc.md 5.30). Duplicated from @varanda/core
 // lib/invite.js (ACTIONS), which this package cannot import.
@@ -455,6 +505,17 @@ const DM_LIST_LIMIT_MAX = 50
 const isDmId = (v) => typeof v === 'string' && DM_ID_RE.test(v)
 const isDmState = (v) => typeof v === 'string' && DM_STATES.includes(v)
 const isDmFolder = (v) => v === 'inbox' || v === 'request'
+const PAGE_RECIPIENTS_MAX = 17
+// The page-secrets header carries gen as uint32be.
+const PAGE_GEN_MAX = 0xffffffff
+const PAGE_SEALED_MAX = 1024
+const isPageRecipients = (v) => Array.isArray(v) && v.length <= PAGE_RECIPIENTS_MAX &&
+  v.every((r) => isPlainObject(r) && Object.keys(r).length === 2 && isKey(r.member) && isKey(r.box))
+const isPageDraftKind = (v) => v === 'msg' || v === 'ctl'
+// dm.pageLegacyChunk (docs/rpc.md 5.114): one chunk of the legacy bundle the
+// service sealed to the owner's own dm-key box; the node opens and checks it.
+const PAGE_LEGACY_CHUNKS_MAX = 1024
+const PAGE_LEGACY_SEALED_MAX = 60000
 
 // dm.send `media` (docs/rpc.md 5.75): 1..MAX_DM_MEDIA items, each a blob
 // descriptor (the validateBlobDescriptor rules of @varanda/core lib/blob.js,
@@ -477,6 +538,10 @@ function isDmMediaItem (d) {
     chunks === Math.ceil(bytes / L.DM_MEDIA_CHUNK_BYTES) &&
     (mime !== AUDIO_MIME || bytes <= DM_AUDIO_MAX_BYTES) &&
     isChatMediaKind(mime, w, h, ms)
+}
+
+function isMomentMediaItem (d) {
+  return isDmMediaItem(d) && d.ms === 0 && isMediaMime(d.mime)
 }
 
 // By index, never every(): a hole in a sparse array is undefined and invalid.
@@ -509,9 +574,9 @@ function isDmListCursor (v) {
 // diary through the signed cancel offer ({ to: null, exp: null }).
 const PAGE_ACTIONS = [
   'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar',
-  'rename', 'invite', 'dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen', 'follow',
+  'rename', 'invite', 'dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'group-seal', 'group-rebox', 'follow',
   'follows', 'media', 'notices', 'terms', 'community-join', 'community-leave', 'group-join', 'group-leave',
-  'group-post', 'group-read',
+  'group-post', 'group-read', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
   'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
 ]
 const PAGE_PAGELESS = ['create', 'list', 'terms']
@@ -699,9 +764,14 @@ const SPECS = {
       reason: req(isReason),
       text: opt(str(0, REPORT_TEXT_MAX), ''),
       quote: opt(str(0, L.MAX_TEXT), ''),
-      anexo: opt(isKey)
+      anexo: opt(isKey),
+      kind: opt((v) => v === 'listing')
     },
     cross (given, value) {
+      if (hasOwn(value, 'kind')) {
+        if (!hasOwn(value, 'seq')) return 'kind listing só com seq'
+        if (hasOwn(value, 'writer') || hasOwn(value, 'group') || hasOwn(value, 'anexo')) return 'kind listing sem writer, group ou anexo'
+      }
       if (!hasOwn(value, 'seq') && value.quote !== '') return 'quote só com seq'
       // A group post is addressed by its writer core inside the group.
       if (hasOwn(value, 'writer') && (!hasOwn(value, 'seq') || !hasOwn(value, 'group'))) return 'writer só com seq e group'
@@ -711,6 +781,23 @@ const SPECS = {
       return null
     }
   },
+  // Signs a blocked member's appeal with the identity key; the node fills in
+  // member and association itself and hashes the text into the payload, so a
+  // caller never chooses the bytes.
+  'appeal.sign': {
+    fields: {
+      nonce: req(isNonce),
+      text: opt(str(0, L.MAX_TEXT), '')
+    }
+  },
+  'testimonial.write': { fields: { to: req(isKey), text: req(str(1, L.MAX_TESTIMONIAL)) }, mutating: true },
+  // Result { items: [{ from, seq, text, at }], incomplete: boolean } (5.100).
+  'testimonial.pending': { fields: none },
+  'testimonial.show': { fields: { from: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  'testimonial.delete': { fields: { to: req((v) => isRef(v, 1)), about: opt(isKey) }, mutating: true },
+  'moment.create': { fields: { text: req(str(0, 200)), media: req(isMomentMediaItem) }, mutating: true },
+  'moments.read': { fields: none },
+  'moment.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   // Signs the terms-acceptance statement with the identity key; the node
   // fills in member and association itself, so a caller never chooses the
   // bytes.
@@ -754,6 +841,18 @@ const SPECS = {
     fields: {
       action: req(isInviteAction),
       nonce: req(isNonce)
+    }
+  },
+  // Signs a signup invite card with the identity key; the node fills in the
+  // member itself, so a caller never chooses who signs. Not mutating: it
+  // only signs.
+  'inviteCard.sign': { fields: { ...INVITE_CARD_FIELDS } },
+  // Checks a card's signature against the member key it names. Pure.
+  'inviteCard.verify': {
+    fields: {
+      ...INVITE_CARD_FIELDS,
+      member: req(isKey),
+      signature: req(isSignature)
     }
   },
   // Signs the age-verification request with the identity key; the node fills
@@ -820,14 +919,72 @@ const SPECS = {
   'like.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'repost.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'engagement.read': { fields: { refs: req(isRefList) } },
+  'listing.create': {
+    fields: {
+      kind: req(F.isKind),
+      title: req(isListingTitle),
+      text: req(str(0, L.MAX_TEXT)),
+      price: req(isListingPrice),
+      unit: req(isListingUnit),
+      cat: req(F.isCat),
+      place: req(F.isPlace),
+      media: opt(isMediaList)
+    },
+    mutating: true,
+    cross: listingUnitCross
+  },
+  'listing.status': { fields: { to: req((v) => isRef(v, 1)), status: req(F.isStatus) }, mutating: true },
+  'listing.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
+  // A full snapshot: media null drops the photos, so it is never left out.
+  'listing.edit': {
+    fields: {
+      to: req((v) => isRef(v, 1)),
+      expectedRevision: req(int(0, Number.MAX_SAFE_INTEGER)),
+      title: req(isListingTitle),
+      text: req(str(0, L.MAX_TEXT)),
+      price: req(isListingPrice),
+      unit: req(isListingUnit),
+      cat: req(F.isCat),
+      place: req(F.isPlace),
+      media: req((v) => v === null || isMediaList(v))
+    },
+    mutating: true,
+    cross: listingUnitCross
+  },
+  'listing.mine': {
+    fields: {
+      before: opt(int(1, Number.MAX_SAFE_INTEGER)),
+      limit: opt(int(1, LISTING_MINE_LIMIT_MAX), LISTING_MINE_LIMIT_MAX)
+    }
+  },
+  // Signs the deal consent with the identity key and appends nothing.
+  'listing.consent': { fields: { to: req((v) => isRef(v, 1)), rater: req(isKey), offer: req(isHex32) } },
+  'listing.rate': {
+    fields: {
+      to: req((v) => isRef(v, 1)),
+      offer: req(isHex32),
+      consent: req(isHex128),
+      stars: req(F.isStars),
+      text: req(str(0, F.MAX_RATE_TEXT))
+    },
+    mutating: true
+  },
+  'listing.ratings': { fields: { author: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)), refs: req(isRatingRefs) } },
   'diary.peek': {
     fields: {
       author: req(isKey),
       seqs: req(isPeekSeqs),
       profileSeq: opt(int(1, Number.MAX_SAFE_INTEGER)),
-      usernameSeq: opt(int(1, Number.MAX_SAFE_INTEGER))
+      usernameSeq: opt(int(1, Number.MAX_SAFE_INTEGER)),
+      // Name and @nome only, no entries (docs/rpc.md 5.27): the one read a
+      // blocked author still answers, so the block can be undone by name.
+      profileOnly: opt(isBool)
     }
   },
+  // The member's own block list, browser node only (docs/rpc.md 5.111 and
+  // 5.112). Filters what this member reads; nothing reaches the other person.
+  'block.set': { fields: { key: req(isKey), on: req(isBool) }, mutating: true },
+  'block.list': { fields: none },
   'follow.add': { fields: { key: req(isKey) }, mutating: true },
   'follow.remove': { fields: { key: req(isKey) }, mutating: true },
   'follow.list': {
@@ -920,10 +1077,16 @@ const SPECS = {
   'group.read': {
     fields: {
       group: req(isKey),
+      page: opt(isKey),
       limit: opt(int(1, L.GROUP_LIMIT_MAX), L.GROUP_LIMIT_DEFAULT),
       // Exclusive group-order cursor; absent = the newest page.
       before: opt(isGroupCursor)
     }
+  },
+  // A private-group post sealed for a page (docs/rpc.md 5.114); writes
+  // nothing, the owner or admin signs and sends it through 'group-seal'.
+  'group.seal': {
+    fields: { group: req(isKey), page: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), fwd: opt(int(0, 1), 0) }
   },
   // Idempotent local mark like dm.seen. Result { ok: true }: writes no diary,
   // never goes to peers; the client re-reads community.info. upTo is optional,
@@ -1032,14 +1195,59 @@ const SPECS = {
   'dm.pull': { fields: none },
   'dm.list': {
     fields: {
+      page: opt(isKey),
       folder: opt(isDmFolder, 'inbox'),
       limit: opt(int(1, DM_LIST_LIMIT_MAX), DM_LIST_LIMIT_DEFAULT),
       before: opt(isDmListCursor)
     }
   },
-  'dm.thread': { fields: { peer: req(isKey), before: opt(isDmId), limit: opt(int(1, L.DM_THREAD_LIMIT_MAX), L.DM_THREAD_LIMIT_DEFAULT) } },
-  'dm.set': { fields: { peer: req(isKey), state: req(isDmState) }, mutating: true },
-  'dm.seen': { fields: { peer: req(isKey) } },
+  'dm.thread': { fields: { page: opt(isKey), peer: req(isKey), before: opt(isDmId), limit: opt(int(1, L.DM_THREAD_LIMIT_MAX), L.DM_THREAD_LIMIT_DEFAULT) } },
+  'dm.set': { fields: { page: opt(isKey), peer: req(isKey), state: req(isDmState) }, mutating: true },
+  'dm.seen': { fields: { page: opt(isKey), peer: req(isKey) } },
+  // Páginas de ponta a ponta no nó (docs/rpc.md 5.114), browser node only.
+  // dm.pageGenerate and dm.pageShare write nothing remote, so they are not
+  // mutating; dm.pageDraft only holds a draft in memory.
+  'dm.pageGenerate': { fields: { page: req(isKey), gen: req(int(1, PAGE_GEN_MAX)), recipients: req(isPageRecipients) } },
+  'dm.pageShare': { fields: { page: req(isKey), member: req(isKey), box: req(isKey) } },
+  'dm.pageSecrets': {
+    fields: {
+      page: req(isKey),
+      gen: req(int(1, PAGE_GEN_MAX)),
+      sealed: req(str(1, PAGE_SEALED_MAX)),
+      by: req(isKey),
+      sig: req(isSignature),
+      box: req(isKey),
+      groupBox: req(isKey),
+      cert: req(isCert)
+    },
+    mutating: true
+  },
+  'dm.pageDraft': {
+    fields: {
+      page: req(isKey),
+      kind: req(isPageDraftKind),
+      to: opt(isKey),
+      text: opt(str(0, L.MAX_TEXT)),
+      replyTo: opt(isDmId),
+      fwd: opt(int(0, 1), 0),
+      op: opt(isDmState),
+      peer: opt(isKey)
+    }
+  },
+  // expiresAt (ms) is what the service signed with the digest, never chosen here.
+  'dm.pageSend': { fields: { page: req(isKey), id: req(isDmId), signature: req(isSignature), expiresAt: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  'dm.pageLegacyChunk': {
+    fields: {
+      page: req(isKey),
+      id: req(isKey),
+      index: req(int(0, PAGE_LEGACY_CHUNKS_MAX - 1)),
+      count: req(int(1, PAGE_LEGACY_CHUNKS_MAX)),
+      sealed: req(str(1, PAGE_LEGACY_SEALED_MAX))
+    },
+    mutating: true
+  },
+  'dm.pageLegacyBlocks': { fields: { page: req(isKey) } },
+  'dm.pageForget': { fields: { page: req(isKey) }, mutating: true },
   // The node fills in member and association and hashes text and quote; the
   // quote is the chosen message as this device decrypted it, which no one
   // can verify. target is the sender's diary key, never its signature.
@@ -1220,25 +1428,41 @@ const SPECS = {
     mutating: true,
     cross: mediaUploadCross
   },
+  // IPC only, in-app web-node worklet (docs/rpc.md 5.113). On the web,
+  // momentPutMedia hands bytes directly to the node, outside RPC.
+  'moment.putMedia': {
+    fields: {
+      name: req(isMediaName),
+      mime: req(isMediaMime),
+      width: req(int(1, MEDIA_SIDE_MAX)),
+      height: req(int(1, MEDIA_SIDE_MAX))
+    },
+    mutating: true,
+    cross: mediaUploadCross
+  },
   // IPC only, in-app web-node worklet (docs/rpc.md 5.89): the opened image
   // of a chat item is written to a file in the worklet's read directory and
   // only its name comes back, since a photo is far above MAX_MESSAGE. A DM
   // item is { kind: 'dm', from, id, index }, a private group item
-  // { kind: 'group', diary, item }. Not mutating: it changes no diary.
+  // { kind: 'group', diary, item }, a moment { kind: 'moment', author, seq }.
+  // Not mutating: it changes no diary.
   'media.readFile': {
     fields: {
-      kind: req((v) => v === 'dm' || v === 'group'),
+      kind: req((v) => v === 'dm' || v === 'group' || v === 'moment'),
       from: opt(isKey),
       id: opt(isDmId),
       index: opt((v) => v === 'card' || int(0, L.MAX_DM_MEDIA - 1)(v)),
       diary: opt(isKey),
-      item: opt(isPrivateGroupMediaItem)
+      item: opt(isPrivateGroupMediaItem),
+      author: opt(isKey),
+      seq: opt(int(1, Number.MAX_SAFE_INTEGER))
     },
     cross (given) {
       const dm = ['from', 'id', 'index']
       const group = ['diary', 'item']
-      const want = given.kind === 'dm' ? dm : group
-      const other = given.kind === 'dm' ? group : dm
+      const moment = ['author', 'seq']
+      const want = given.kind === 'dm' ? dm : given.kind === 'group' ? group : moment
+      const other = [...dm, ...group, ...moment].filter((k) => !want.includes(k))
       for (const k of want) if (!hasOwn(given, k)) return 'parâmetro obrigatório: ' + k
       for (const k of other) if (hasOwn(given, k)) return 'parâmetro desconhecido'
       return null
@@ -1305,6 +1529,7 @@ module.exports = {
   isId,
   isKey,
   isRef,
+  PAGE_ACTIONS,
   PAGE_READ_FOLLOWS_MAX,
   PAGE_READ_LINKS_MAX
 }

@@ -5,8 +5,9 @@
 // <dataDir>/web-node, syncing with the installation's seeder over
 // wss://<installation>/seeder (bare-ws). It answers the same handlers as
 // the browser page's node plus the IPC-only host controls of docs/rpc.md
-// 5.50 to 5.56, 5.88 and 5.89 (./identity-install.js, media.uploadFile,
-// dm.putMedia and media.readFile below), and recovery's 5.91 to 5.94
+// 5.50 to 5.56, 5.88, 5.89 and 5.113 (./identity-install.js,
+// media.uploadFile, dm.putMedia, moment.putMedia and media.readFile below),
+// and recovery's 5.91 to 5.94
 // (./identity-install.js).
 //
 // The storage's exclusive LOCK (fileNodeStorage lock(), fs-native-extensions)
@@ -16,7 +17,8 @@
 // request with LOCKED and the storage is never touched. Building the
 // session opens nothing (lib/session.js only checks its configuration).
 //
-// The web session has no suspend/resume: its lease redials when needed.
+// The web session has no suspend/resume: the run redials on its own backoff
+// while the app is in front, and the app stops the sync when it is hidden.
 const fs = require('bare-fs')
 const path = require('bare-path')
 const crypto = require('bare-crypto')
@@ -29,11 +31,14 @@ const { hkdfSha256 } = require('@varanda/web-member/lib/hkdf')
 const { MAX_MEDIA_ITEM_BLOCKS, MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
 const { createIdentityHost } = require('./identity-install')
 const { createBareFetch } = require('./bare-fetch')
-const { readMediaFile, createLifecycle, uploadMedia, putDmMedia, clearReadDir, writeReadFile, readMediaToFile } = require('./web-node-parts')
+const { readMediaFile, createLifecycle, uploadMedia, putDmMedia, putMomentMedia, clearReadDir, writeReadFile, readMediaToFile } = require('./web-node-parts')
 
 const MAX_MEDIA_ITEM_BYTES = MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES
-// The browser entry's lease values (packages/web-member/web/node.js).
-const LEASE_HOLD_MS = 8000
+// The lease stays off, as in the browser entry: the visible app keeps its
+// seeder link (each foreground app holds one external seeder slot), and the
+// app's own visibility handling stops the sync in the background. The gap
+// is kept for the escape hatch, where the lease is turned on for seeder
+// capacity (docs/rpc.md 6.1).
 const LEASE_GAP_MS = 45000
 const DATA_DIR_IN_USE = 'diretório de dados em uso'
 const LOCK_UNAVAILABLE = 'trava do diretório indisponível'
@@ -79,7 +84,7 @@ function createWebNode (args, { onInternalError } = {}) {
     association: args.association,
     seederUrl: args.seederUrl,
     createSocket: (url) => duplexSocket(new Socket(url)),
-    leaseHoldMs: LEASE_HOLD_MS,
+    leaseHoldMs: 0,
     leaseGapMs: LEASE_GAP_MS,
     // Bare has no globalThis.fetch: group and DM media download through this.
     fetchMedia: createBareFetch({ http: require('bare-http1'), https: require('bare-https') }),
@@ -117,6 +122,11 @@ function createWebNode (args, { onInternalError } = {}) {
   function putMedia ({ name, mime, width, height, ms, kind, to }) {
     if (cacheDir === null) throw new RpcError('USAGE', BAD_MEDIA_FILE)
     return putDmMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, ms, kind, to })
+  }
+
+  function putMoment ({ name, mime, width, height }) {
+    if (cacheDir === null) throw new RpcError('USAGE', BAD_MEDIA_FILE)
+    return putMomentMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height })
   }
 
   // Opened chat images on disk: cleared at start, on every lock and at
@@ -191,6 +201,10 @@ function createWebNode (args, { onInternalError } = {}) {
   handlers['dm.putMedia'] = lifecycle.guardUpload(async (params) => {
     await ready()
     return putMedia(params)
+  })
+  handlers['moment.putMedia'] = lifecycle.guardUpload(async (params) => {
+    await ready()
+    return putMoment(params)
   })
   handlers['media.readFile'] = lifecycle.guardUpload(async (params) => {
     await ready()
