@@ -3118,12 +3118,12 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - [ ] Navegador novo, seguindo contas com histórico longo: A Rua mostra os posts mais novos de cada conta em poucos segundos, enquanto o histórico completa (não realizada ainda).
 - [ ] Visita de volta depois de as contas postarem bastante: os posts novos aparecem antes do histórico que faltava (não realizada ainda).
 - [ ] Semeador sem o meio de um diário: A Rua mostra o começo e os mais novos, e o resto quando o semeador o tiver (não realizada ainda).
-- [ ] Um nome pode aparecer como "sem nome" por um instante, até chegar o bloco do perfil (não realizada ainda).
+- [ ] Um perfil cujo registro está só no meio do diário ainda não baixado aparece "sem nome" por um instante e logo ganha o nome (e o @nome) lido pelo índice do semeador e por `diary.peek`, sem esperar o histórico; no nó central e com o semeador sem índice nenhum pedido a mais é feito (não realizada ainda).
 
 ### Limites
 
 - A Rua atualiza quando o comprimento presente cresce: os posts mais novos aparecem cerca de uma ida e volta depois do bloco 2, ou ao puxar para atualizar se o semeador não tem o meio do diário.
-- Um perfil que está só no meio do diário lê "sem nome" até o histórico chegar.
+- A leitura do nome pelo índice vale só no nó do navegador e uma vez por chave e por conexão: se o índice ou o `diary.peek` falhar, a chave segue "sem nome" até o histórico chegar (`apps/app/test/namesPeek.test.js`).
 - Um semeador que anuncia um comprimento que não serve atrasa o histórico em no máximo 3 s por crescimento do comprimento.
 - Blocos guardados entre o prefixo e a corrida mais nova não aparecem: se um diário ainda no meio do histórico cresce, a corrida anterior some até chegar a ponta nova, e curtidas desfeitas, exclusões ou um perfil novo guardados nesse trecho só valem quando o histórico chega até eles. Mostrar esse trecho não é seguro (uma lápide pode estar num buraco depois dele); aplicar só os registros dele pediria mudar o `buildFeed` de `packages/core`.
 

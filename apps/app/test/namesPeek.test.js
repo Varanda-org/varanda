@@ -1,0 +1,147 @@
+'use strict'
+
+// Naming a key whose profile record is still in the middle of a diary the
+// browser node has not downloaded (src/namesPeek.js, #436).
+const test = require('brittle')
+const load = () => import('../src/namesPeek.js')
+
+const KEY = 'ab'.repeat(32)
+const KEY2 = 'cd'.repeat(32)
+const WEB_ONLY = Object.assign(new Error('leitura sob demanda só na versão web'), { code: 'USAGE' })
+
+function harness (over = {}) {
+  const calls = { lookup: [], peek: [] }
+  const deps = {
+    enabled: true,
+    lookup: async (key) => { calls.lookup.push(key); return { ok: true, value: { profileSeq: 7, usernameSeq: 3 } } },
+    peek: async (params) => {
+      calls.peek.push(params)
+      return { key: params.author, length: 99, entries: [], invalid: [], missing: [], profile: { name: 'Ana', bio: 'oi', avatar: null }, username: 'ana' }
+    },
+    ...over
+  }
+  return { calls, deps }
+}
+
+test('a key without a name gets the verified profile named by the index', async (t) => {
+  const { createNamePeeker } = await load()
+  const { calls, deps } = harness()
+  const peeker = createNamePeeker(deps)
+  t.is(peeker.enqueue([KEY]), 1)
+  const done = await peeker.next()
+  t.alike(calls.lookup, [KEY], 'the index is asked for the key')
+  t.alike(calls.peek, [{ author: KEY, seqs: [3, 7], profileSeq: 7, usernameSeq: 3 }], 'diary.peek reads the blocks the index names')
+  t.alike(done, { key: KEY, fields: { name: 'Ana', username: 'ana', bio: 'oi', avatar: null } })
+  t.alike(peeker.foundFor(KEY), done.fields, 'remembered for the next profile.read')
+})
+
+test('params: sorted distinct seqs, hints only when valid, null when the index names none', async (t) => {
+  const { peekParams } = await load()
+  t.alike(peekParams(KEY, { profileSeq: 5, usernameSeq: 5 }), { author: KEY, seqs: [5], profileSeq: 5, usernameSeq: 5 })
+  t.alike(peekParams(KEY, { profileSeq: 9, usernameSeq: null }), { author: KEY, seqs: [9], profileSeq: 9 })
+  t.alike(peekParams(KEY, { profileSeq: null, usernameSeq: 4 }), { author: KEY, seqs: [4], usernameSeq: 4 })
+  t.is(peekParams(KEY, { profileSeq: null, usernameSeq: null }), null)
+  t.is(peekParams(KEY, { profileSeq: 0, usernameSeq: -1 }), null, 'seqs start at 1')
+  t.is(peekParams(KEY, { profileSeq: 1.5, usernameSeq: '2' }), null)
+  t.is(peekParams(KEY, null), null)
+})
+
+test('an answer with no name and no @nome names nobody', async (t) => {
+  const { peekFields } = await load()
+  t.is(peekFields(null), null)
+  t.is(peekFields({ profile: null, username: null }), null)
+  t.is(peekFields({ profile: { name: '', bio: 'x', avatar: null }, username: '' }), null)
+  t.alike(peekFields({ profile: null, username: 'ana' }), { name: null, username: 'ana' }, 'an @nome alone is enough')
+})
+
+test('no new request when the index has nothing, the node is the core node or the key is named', async (t) => {
+  const { createNamePeeker } = await load()
+
+  const none = harness({ lookup: async () => ({ ok: false }) })
+  const a = createNamePeeker(none.deps)
+  a.enqueue([KEY])
+  t.alike(await a.next(), { key: KEY, fields: null }, 'seeder without an index')
+  t.is(none.calls.peek.length, 0, 'no diary.peek')
+
+  const blind = harness({ lookup: async () => ({ ok: true, value: { profileSeq: null, usernameSeq: null } }) })
+  const b = createNamePeeker(blind.deps)
+  b.enqueue([KEY])
+  await b.next()
+  t.is(blind.calls.peek.length, 0, 'an index with no profile block')
+
+  const off = harness()
+  const c = createNamePeeker({ ...off.deps, enabled: false })
+  t.is(c.enqueue([KEY]), 0, 'not the browser node')
+  t.is(await c.next(), null)
+  t.is(off.calls.lookup.length + off.calls.peek.length, 0)
+
+  const core = harness({ peek: async () => { throw WEB_ONLY } })
+  const d = createNamePeeker(core.deps)
+  d.enqueue([KEY, KEY2])
+  t.alike(await d.next(), { key: KEY, fields: null })
+  t.ok(d.off, 'the core node answered USAGE: switched off')
+  t.is(d.size, 0, 'the queue is dropped')
+  t.is(d.enqueue([KEY2]), 0)
+  t.is(await d.next(), null)
+  t.is(core.calls.lookup.length, 1, 'one index read in all')
+})
+
+test('a key is tried once: a failure is never repeated, a hit is not asked again', async (t) => {
+  const { createNamePeeker } = await load()
+  let n = 0
+  const flaky = harness({ peek: async () => { n++; throw Object.assign(new Error('semeador indisponível'), { code: 'NOT_FOUND' }) } })
+  const a = createNamePeeker(flaky.deps)
+  a.enqueue([KEY])
+  t.alike(await a.next(), { key: KEY, fields: null })
+  t.is(a.enqueue([KEY]), 0, 'the failed key is not queued again')
+  t.is(await a.next(), null)
+  t.is(n, 1)
+  t.not(a.off, 'a plain failure keeps the other keys going')
+
+  const ok = harness()
+  const b = createNamePeeker(ok.deps)
+  b.enqueue([KEY, KEY, KEY2])
+  t.is(b.size, 2, 'duplicates collapse')
+  await b.next()
+  t.is(b.enqueue([KEY]), 1, 'only the second key waits: the first was found')
+  await b.next()
+  t.is(ok.calls.peek.length, 2)
+  t.is(b.enqueue([KEY, KEY2]), 0)
+})
+
+test('one key at a time, in the order they were queued', async (t) => {
+  const { createNamePeeker } = await load()
+  let open = 0
+  let most = 0
+  const h = harness({
+    peek: async (params) => {
+      open++
+      most = Math.max(most, open)
+      await new Promise((resolve) => setImmediate(resolve))
+      open--
+      return { profile: { name: params.author.slice(0, 2), bio: null, avatar: null }, username: null }
+    }
+  })
+  const peeker = createNamePeeker(h.deps)
+  peeker.enqueue([KEY, KEY2])
+  const first = await peeker.next()
+  const second = await peeker.next()
+  t.is(first.key, KEY)
+  t.is(second.key, KEY2)
+  t.is(most, 1)
+})
+
+test('withPeek fills only what profile.read left empty and marks the entry loaded', async (t) => {
+  const { withPeek, unnamed } = await load()
+  const fields = { name: 'Ana', username: 'ana', bio: 'oi', avatar: null }
+  t.ok(unnamed(null))
+  t.ok(unnamed({ name: null, username: null, bio: 'só bio', avatar: null, loaded: true }))
+  t.absent(unnamed({ name: null, username: 'ana', bio: null, avatar: null, loaded: true }))
+  t.alike(withPeek(null, fields), { name: 'Ana', username: 'ana', bio: 'oi', avatar: null, loaded: true }, 'a missing profile')
+  t.alike(
+    withPeek({ name: null, username: null, bio: null, avatar: null, loaded: true, page: true, closed: false, moved: false }, fields),
+    { name: 'Ana', username: 'ana', bio: 'oi', avatar: null, loaded: true, page: true, closed: false, moved: false },
+    'the page flags stay'
+  )
+  t.is(withPeek(null, { name: null, username: null }), null, 'nothing to fill')
+})
