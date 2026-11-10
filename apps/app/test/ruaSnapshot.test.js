@@ -282,7 +282,7 @@ test('PageARua never reads or writes the snapshot', (t) => {
 test('the cache registry entry is registered once, at module scope', (t) => {
   const calls = CODE.match(/\bregisterLocalCache\(/g) || []
   t.is(calls.length, 1)
-  t.ok(/\nregisterLocalCache\(\{\n {2}wipe: clearSnapshot,/.test(CODE))
+  t.ok(/\nregisterLocalCache\(\{\s+wipe: \(\) => \{\s+reconciledFollows = null\s+return clearSnapshot\(\)\s+\},/.test(CODE), 'a wipe clears the snapshot and forgets the reconciled follows')
   t.ok(/dropAuthors: \(keys\) => rewriteStored\(\(snapshot\) => withoutAuthors\(snapshot, keys\)\)/.test(CODE))
   t.ok(/keepOnlyAuthors: \(allowed\) => rewriteStored\(\(snapshot\) => snapshotKeepOnly\(snapshot, allowed\)\)/.test(CODE))
 })
