@@ -257,9 +257,60 @@ test('withoutAuthors and keepOnlyAuthors rewrite membro and diario', async (t) =
   const diary = s.buildScreenSnapshot('diario', KINDS.diario())
   const noFollow = s.screenKeepOnlyAuthors(diary, [])
   t.alike(noFollow.body.originals, {}, 'originals of an unfollowed author go')
-  t.alike(noFollow.body.rows, diary.body.rows, 'own rows stay')
+  t.alike(noFollow.body.rows, diary.body.rows.filter((r) => r.record.type !== 'repost'), 'own posts stay; an own repost of an unfollowed author goes with its original')
   t.alike(s.screenWithoutAuthors(diary, [FOLLOW]).body.originals, {})
   const perfil = s.buildScreenSnapshot('perfil', KINDS.perfil())
   t.alike(s.screenWithoutAuthors(perfil, [FOLLOW]), perfil, 'other kinds hold no other author')
   t.is(s.screenWithoutAuthors(null, [FOLLOW]), null)
+})
+
+test('rows past the item cap count as a cut: the paging bound is the oldest kept', async (t) => {
+  const s = await load()
+  const items = Array.from({ length: 40 }, (_, i) => post(FOLLOW, 40 - i))
+  const m = s.buildScreenSnapshot('membro', { ...id(), ...memberInput(FOLLOW, { items, before: 1, atEnd: true }) })
+  const e = m.body.authors[FOLLOW]
+  t.is(e.items.length, 32)
+  t.is(e.before, e.items[e.items.length - 1].seq, 'next page starts below the oldest kept item')
+  t.is(e.atEnd, false)
+  const entries = Array.from({ length: 40 }, (_, i) => ({ seq: 40 - i, record: { type: 'post', text: 'p' + i, at: at(40 - i), replyTo: null } }))
+  const d = s.buildScreenSnapshot('diario', { ...id(), log: { key: OWN, entries, entriesTruncated: 0 }, originals: new Map(), followed: new Set([FOLLOW]) })
+  t.is(d.body.rows.length, 32)
+  t.is(d.body.oldest, d.body.rows[d.body.rows.length - 1].seq)
+  t.is(d.body.atEnd, false)
+})
+
+test('each membro entry ages on its own', async (t) => {
+  const s = await load()
+  const old = s.buildScreenSnapshot('membro', { ...id({ now: NOW }), ...memberInput(FOLLOW) })
+  const other = 'dd'.repeat(32)
+  // Refreshing another author on day 13 keeps the day-0 entry only until day 14.
+  const both = s.buildScreenSnapshot('membro', { ...id({ now: NOW + 13 * DAY }), ...memberInput(other), previous: old })
+  t.ok(both.body.authors[FOLLOW], 'still within its 14 days')
+  const later = s.parseScreenSnapshot(JSON.stringify(both), 'membro', bind({ now: NOW + 20 * DAY }))
+  t.ok(later, 'the envelope is 7 days old')
+  t.absent(later.body.authors[FOLLOW], 'the day-0 entry is gone on day 20')
+  t.ok(later.body.authors[other])
+  const rebuilt = s.buildScreenSnapshot('membro', { ...id({ now: NOW + 20 * DAY }), ...memberInput(other), previous: both })
+  t.absent(rebuilt.body.authors[FOLLOW], 'a rebuild drops it too')
+})
+
+test('dropping an author also drops the own reposts of that author in diario', async (t) => {
+  const s = await load()
+  const d = s.buildScreenSnapshot('diario', { ...id(), log: diaryLog(), originals: diaryOriginals(), followed: new Set([FOLLOW]) })
+  t.ok(d.body.rows.some((r) => r.record.type === 'repost' && r.record.to.author === FOLLOW))
+  const pruned = s.screenWithoutAuthors(d, [FOLLOW])
+  t.absent(pruned.body.rows.some((r) => r.record.type === 'repost' && r.record.to.author === FOLLOW))
+  t.ok(pruned.body.rows.some((r) => r.record.type === 'post'), 'own posts stay')
+})
+
+test('a membro entry opened in the future is not fresh; a cut page with nothing kept stores no entry', async (t) => {
+  const s = await load()
+  const m = s.buildScreenSnapshot('membro', { ...id({ now: NOW + 30 * DAY }), ...memberInput(FOLLOW) })
+  // The device clock went back 30 days: the entry now reads as opened in the future.
+  t.absent(s.parseScreenSnapshot(JSON.stringify({ ...m, savedAt: NOW }), 'membro', bind({ now: NOW })).body.authors[FOLLOW])
+  const other = 'dd'.repeat(32)
+  const rebuilt = s.buildScreenSnapshot('membro', { ...id({ now: NOW }), ...memberInput(other), previous: m })
+  t.absent(rebuilt.body.authors[FOLLOW], 'a rebuild does not carry it either')
+  const strangers = Array.from({ length: 40 }, (_, i) => post(STRANGER, 80 - i))
+  t.is(s.buildScreenSnapshot('membro', { ...id(), ...memberInput(FOLLOW, { items: strangers.concat([post(FOLLOW, 1)]) }) }), null)
 })

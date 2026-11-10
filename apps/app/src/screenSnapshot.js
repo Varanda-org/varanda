@@ -338,6 +338,7 @@ function buildDiario (id, { log, originals, followed, blocked }) {
   const ok = (a) => !block.has(a) && (a === id.owner || known(a))
   let oldest = null
   const rows = []
+  let truncated = false
   const all = log.entries.concat(Array.isArray(log.invalid) ? log.invalid : [])
   for (const e of all) {
     if (isPlain(e) && isSeq(e.seq) && (oldest === null || e.seq < oldest)) oldest = e.seq
@@ -346,15 +347,17 @@ function buildDiario (id, { log, originals, followed, blocked }) {
     if (!isPlain(e) || !isSeq(e.seq)) continue
     // Likes, follows, group joins, keys and the rest are never kept.
     const record = recordOf(e.record, false)
-    if (record !== null && rows.length < MAX_ROWS) rows.push({ seq: e.seq, record })
+    if (record === null) continue
+    if (rows.length < MAX_ROWS) rows.push({ seq: e.seq, record })
+    else truncated = true
   }
   const atEnd = log.entriesTruncated === 0
   const at = getter(originals)
   const originalAt = (ref) => originalOf(at(ref), ref, false)
   return fitPrefix(rows, (kept) => {
     // A cut page is no longer the whole page: the next `before` is the
-    // oldest row kept.
-    const cut = kept.length < rows.length
+    // oldest row kept (rows past MAX_ROWS count as cut too).
+    const cut = truncated || kept.length < rows.length
     const bound = cut ? (kept.length > 0 ? kept[kept.length - 1].seq : null) : oldest
     if (bound === null) return null
     return envelope('diario', id, { rows: kept, oldest: bound, atEnd: cut ? false : atEnd, originals: originalsFor(recordTargets(kept), ok, originalAt) })
@@ -379,11 +382,16 @@ function memberEntry (author, { header, items, before, atEnd, originals }, ok, n
     if (item.kind === 'repost' && !ok(item.to.author)) continue
     rows.push(item)
   }
+  // Items past MAX_ITEMS are cut too: the next page must start below the
+  // oldest item kept, not at the live page's bound.
+  const truncated = items.length > MAX_ITEMS
+  // Nothing kept of a cut page leaves no bound to continue from: no entry.
+  if (truncated && rows.length === 0) return null
   const at = getter(originals)
   const originalAt = (ref) => originalOf(at(ref), ref, false)
   const whole = isSeq(before) || before === null
   return fitPrefix(rows, (kept) => {
-    const cut = kept.length < rows.length
+    const cut = truncated || kept.length < rows.length
     const bound = cut ? (kept.length > 0 ? kept[kept.length - 1].seq : null) : (whole ? before : null)
     return { openedAt: now, header: h, items: kept, before: bound, atEnd: cut ? false : atEnd === true, originals: originalsFor(itemTargets(kept), ok, originalAt) }
   }, MEMBER_ENTRY_MAX_BYTES)
@@ -400,8 +408,10 @@ function buildMembro (id, { previous, author, header, items, before, atEnd, orig
   if (entry === null) return null
   const same = previous && previous.kind === 'membro' && previous.origin === id.origin &&
     previous.association === id.association && previous.owner === id.owner && isPlain(previous.body) && isPlain(previous.body.authors)
+  // Each author's entry ages on its own: refreshing one never extends
+  // another past SCREEN_SNAPSHOT_MAX_AGE_MS.
   const others = same
-    ? Object.entries(previous.body.authors).filter(([a]) => a !== key && !block.has(a) && known(a))
+    ? Object.entries(previous.body.authors).filter(([a, e]) => a !== key && !block.has(a) && known(a) && fresh(e, id.now))
     : []
   // Most recently opened first; the oldest go when over the limits.
   others.sort((a, b) => b[1].openedAt - a[1].openedAt)
@@ -577,12 +587,24 @@ export function parseScreenSnapshot (text, kind, { origin, association, owner, a
     if (!isHex64(s.owner) || (owner !== undefined && owner !== null && s.owner !== owner)) return null
     if (!Number.isSafeInteger(s.savedAt) || s.savedAt < 0 || !Number.isSafeInteger(now)) return null
     if (now - s.savedAt > SCREEN_SNAPSHOT_MAX_AGE_MS || s.savedAt - now > FUTURE_SLACK_MS) return null
-    const body = parseBody(kind, s.body, s.owner)
+    let body = parseBody(kind, s.body, s.owner)
     if (body === null) return null
+    if (kind === 'membro') {
+      body = { authors: Object.fromEntries(Object.entries(body.authors).filter(([, e]) => fresh(e, now))) }
+    }
     return { v: s.v, kind, origin: s.origin, association: s.association, owner: s.owner, savedAt: s.savedAt, body }
   } catch {
     return null
   }
+}
+
+// A 'membro' entry is kept for SCREEN_SNAPSHOT_MAX_AGE_MS from its own
+// openedAt, whatever the envelope's savedAt says.
+function fresh (entry, now) {
+  // A time ahead of the clock (past the envelope's slack) is not fresh: it
+  // would otherwise outlive every later save.
+  return Number.isSafeInteger(entry.openedAt) && now - entry.openedAt <= SCREEN_SNAPSHOT_MAX_AGE_MS &&
+    entry.openedAt - now <= FUTURE_SLACK_MS
 }
 
 function withBody (snapshot, body) {
@@ -601,7 +623,9 @@ function filterOriginals (originals, ok) {
 function prune (snapshot, ok) {
   const b = snapshot.body
   if (snapshot.kind === 'diario') {
-    return withBody(snapshot, { ...b, originals: filterOriginals(b.originals, (a) => a === snapshot.owner || ok(a)) })
+    // An own repost of a dropped author goes with that author's originals.
+    const rows = b.rows.filter((r) => r.record.type !== 'repost' || r.record.to.author === snapshot.owner || ok(r.record.to.author))
+    return withBody(snapshot, { ...b, rows, originals: filterOriginals(b.originals, (a) => a === snapshot.owner || ok(a)) })
   }
   if (snapshot.kind !== 'membro') return snapshot
   const authors = {}
