@@ -42,6 +42,9 @@ const DM_REQUESTS_MAX = 100
 const DM_MESSAGES_PER_PEER = 500
 const DM_SIG_PREFIX = 'varanda-dm-v1\n'
 const DM_SIG_PREFIX_V2 = 'varanda-dm-v2\n'
+// v3 signs a digest of the JSON, so a remote holder of a Página's key signs
+// the prefix and a 32-byte digest and never sees the message.
+const DM_V3_PREFIX = 'varanda-dm-v3\n'
 const DM_KEY_HKDF_SALT = 'varanda/member-dm-box/hkdf/v1'
 const DM_KEY_HKDF_INFO = 'varanda/member-dm-box/x25519/v1'
 const DM_LOCAL_HKDF_SALT = 'varanda/member-dm-local/hkdf/v1'
@@ -73,6 +76,7 @@ const DM_OPS = Object.freeze(['accepted', 'declined', 'blocked', 'unblocked', 'd
 // the text budget with the very bytes signed here.
 const INNER_KEYS = rpc.DM_INNER_KEYS
 const INNER_KEYS_V2 = rpc.DM_INNER_KEYS_V2
+const INNER_KEYS_V3 = INNER_KEYS_V2
 const DM_MEDIA_KEYS = rpc.DM_MEDIA_KEYS
 const BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
 const DM_MEDIA_MAX = 4
@@ -88,8 +92,11 @@ const SIG_BYTES = 64
 const LEN_BYTES = 2
 const SIG_PREFIX = b4a.from(DM_SIG_PREFIX, 'utf8')
 const SIG_PREFIX_V2 = b4a.from(DM_SIG_PREFIX_V2, 'utf8')
+const SIG_PREFIX_V3 = b4a.from(DM_V3_PREFIX, 'utf8')
 const MAGIC = b4a.from(DM_MAGIC, 'ascii')
 const HEX32 = /^[0-9a-f]{32}$/
+const HEX64_DIGEST = /^[0-9a-f]{64}$/
+const HEX128 = /^[0-9a-f]{128}$/
 
 function isBytes (x, len) {
   return x instanceof Uint8Array && (len === undefined || x.byteLength === len)
@@ -187,7 +194,9 @@ function validDmCard (card) {
 // association is checked on open only. v1 and v2 are two exact key sets.
 // v2 is only a msg that needs it (media, a link card, or a forward), so a
 // plain text message stays v1 and every message has one encoding. A card
-// goes with text only: a message with media carries card null.
+// goes with text only: a message with media carries card null. v3 is what a
+// Página writes, always: the v2 keys for every msg (text only included) and
+// for a ctl, which carries no media, card or forward.
 function validBody (b) {
   if (!isPlainObject(b)) return false
   if (b.v === 1) {
@@ -199,6 +208,15 @@ function validBody (b) {
     if (b.card !== null && (b.media !== null || !validDmCard(b.card))) return false
     // Null media is a card or the text forward. Neither of the three is a v1 message.
     if (b.media === null ? b.fwd !== 1 && b.card === null : !validMedia(b.media)) return false
+  } else if (b.v === 3) {
+    if (!hasExactKeys(b, INNER_KEYS_V3)) return false
+    if (b.fwd !== 0 && b.fwd !== 1) return false
+    if (b.kind === 'ctl') {
+      if (b.media !== null || b.card !== null || b.fwd !== 0) return false
+    } else {
+      if (b.card !== null && (b.media !== null || !validDmCard(b.card))) return false
+      if (b.media !== null && !validMedia(b.media)) return false
+    }
   } else {
     return false
   }
@@ -209,7 +227,7 @@ function validBody (b) {
     if (b.op !== null || b.peer !== null || b.from === b.to) return false
     if (b.replyTo !== null && !isHex32(b.replyTo)) return false
     // Empty text is a photo with no caption, not a text-only forward.
-    return validText(b.text, b.v === 2 && b.media !== null)
+    return validText(b.text, b.v !== 1 && b.media !== null)
   }
   if (b.text !== '' || b.replyTo !== null || b.from !== b.to) return false
   return DM_OPS.includes(b.op) && isHex64(b.peer) && b.peer !== b.from
@@ -221,6 +239,25 @@ function canonicalJson (b) {
 
 function sigPrefix (v) {
   return v === 2 ? SIG_PREFIX_V2 : SIG_PREFIX
+}
+
+function digestBytes (json) {
+  const d = b4a.alloc(32)
+  sodium.crypto_hash_sha256(d, json)
+  return d
+}
+
+function v3Message (digest) {
+  return b4a.concat([SIG_PREFIX_V3, digest])
+}
+
+function frameInner (json, sig) {
+  const out = b4a.alloc(DM_INNER_BYTES)
+  out[0] = json.byteLength >>> 8
+  out[1] = json.byteLength & 0xff
+  out.set(json, LEN_BYTES)
+  out.set(sig, LEN_BYTES + json.byteLength)
+  return out
 }
 
 // The text bytes (rpc dmTextBytes) that still fit next to the given cert,
@@ -268,13 +305,56 @@ function buildInner (fields, signKeyPair) {
   const json = b4a.from(canonicalJson(body), 'utf8')
   if (json.byteLength + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) throw new TypeError('mensagem longa demais')
   const sig = hcrypto.sign(b4a.concat([sigPrefix(v), json]), signKeyPair.secretKey)
-  const out = b4a.alloc(DM_INNER_BYTES)
-  out[0] = json.byteLength >>> 8
-  out[1] = json.byteLength & 0xff
-  out.set(json, LEN_BYTES)
-  out.set(sig, LEN_BYTES + json.byteLength)
+  const out = frameInner(json, sig)
   sodium.sodium_memzero(json)
   return out
+}
+
+// A Página's inner, built on a device that does not hold the page key.
+// fields: as buildInner, with from (hex64) instead of a key pair. Always v3,
+// whatever the body needs. Returns { json, digest, body }: digest (hex64) is
+// what the key holder signs with signDigest, json goes to assembleInner.
+function innerDigest (fields) {
+  if (!isPlainObject(fields) || !isHex64(fields.from)) throw new TypeError('mensagem inválida')
+  const kind = fields.kind
+  const from = fields.from
+  const body = {
+    v: 3,
+    kind,
+    id: fields.id === undefined ? newMessageId() : fields.id,
+    from,
+    to: kind === 'ctl' && fields.to === undefined ? from : fields.to,
+    replyTo: fields.replyTo === undefined ? null : fields.replyTo,
+    text: fields.text === undefined && kind === 'ctl' ? '' : fields.text,
+    media: fields.media === undefined ? null : fields.media,
+    card: fields.card === undefined ? null : fields.card,
+    fwd: fields.fwd === undefined ? 0 : fields.fwd,
+    op: fields.op === undefined ? null : fields.op,
+    peer: fields.peer === undefined ? null : fields.peer,
+    at: fields.at === undefined ? nowIso() : fields.at,
+    cert: fields.cert === undefined ? null : fields.cert
+  }
+  if (!validBody(body)) throw new TypeError('mensagem inválida')
+  const json = b4a.from(canonicalJson(body), 'utf8')
+  if (json.byteLength + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) throw new TypeError('mensagem longa demais')
+  return { json, digest: b4a.toString(digestBytes(json), 'hex'), body: JSON.parse(canonicalJson(body)) }
+}
+
+// The only bytes a key holder signs through this API: the v3 prefix and a
+// 32-byte digest, so it cannot be led to sign a v1 or v2 inner or any other
+// record of the protocol.
+function signDigest (digestHex, secretKey) {
+  if (typeof digestHex !== 'string' || !HEX64_DIGEST.test(digestHex)) throw new TypeError('resumo inválido')
+  if (!isBytes(secretKey, 64)) throw new TypeError('chave de assinatura inválida')
+  return b4a.toString(hcrypto.sign(v3Message(b4a.from(digestHex, 'hex')), secretKey), 'hex')
+}
+
+function assembleInner (json, sigHex) {
+  if (!isBytes(json) || json.byteLength < 2 || json.byteLength + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) {
+    throw new TypeError('mensagem inválida')
+  }
+  if (typeof sigHex !== 'string' || !HEX128.test(sigHex)) throw new TypeError('assinatura inválida')
+  return frameInner(json, b4a.from(sigHex, 'hex'))
 }
 
 // Reads and then zeroes buf (the plaintext from openSealed). Returns the
@@ -299,7 +379,8 @@ function openInner (buf, ownKey, opts = {}) {
     if (!validBody(body)) return null
     // The exact bytes are signed: a reordered or re-escaped JSON is refused.
     if (canonicalJson(body) !== text) return null
-    if (!hcrypto.verify(b4a.concat([sigPrefix(body.v), json]), sig, b4a.from(body.from, 'hex'))) return null
+    const signed = body.v === 3 ? v3Message(digestBytes(json)) : b4a.concat([sigPrefix(body.v), json])
+    if (!hcrypto.verify(signed, sig, b4a.from(body.from, 'hex'))) return null
     if (body.kind === 'ctl') {
       if (body.from !== ownKey) return null
       return { ...body, mine: true }
@@ -408,6 +489,7 @@ module.exports = Object.freeze({
   DM_MESSAGES_PER_PEER,
   DM_SIG_PREFIX,
   DM_SIG_PREFIX_V2,
+  DM_V3_PREFIX,
   DM_KEY_HKDF_SALT,
   DM_KEY_HKDF_INFO,
   DM_LOCAL_HKDF_SALT,
@@ -417,6 +499,7 @@ module.exports = Object.freeze({
   DM_OPS,
   INNER_KEYS,
   INNER_KEYS_V2,
+  INNER_KEYS_V3,
   DM_MEDIA_KEYS,
   DM_MEDIA_MAX,
   DM_MEDIA_MIMES,
@@ -446,6 +529,9 @@ module.exports = Object.freeze({
   newDropId,
   textBudget,
   buildInner,
+  innerDigest,
+  signDigest,
+  assembleInner,
   openInner,
   sealInner,
   openSealed,
