@@ -13,6 +13,7 @@ import { diaryPeekSlots } from './engagement'
 import { fetchMember } from './indexClient'
 import { blockedPeekParams, blockedSetOf } from './memberBlocks'
 import { reportBlocks } from './pushBlocks'
+import { dropAuthors, newlyBlocked } from './localCaches'
 
 const EMPTY = new Set()
 const noop = () => {}
@@ -51,6 +52,11 @@ export function BlocksProvider ({ children }) {
 
   const keysRef = useRef(EMPTY)
   const commit = useCallback((next) => {
+    // Kept copies of a newly blocked author go before any screen can show
+    // them again, whether the block was made here, on another device of the
+    // passkey (reload) or is the first list read at launch.
+    const added = newlyBlocked(keysRef.current, next)
+    if (added.length > 0) dropAuthors(added)
     keysRef.current = next
     setKeys(next)
     reportBlocks([...next])

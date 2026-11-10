@@ -233,9 +233,34 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
   return api
 }
 
-// Drops overlapping entries in every cache createMediaCache has returned.
+// Called with the freed ranges by revokeMedia only, never on eviction or
+// clear: an evicted photo is still valid, a deleted one must also leave any
+// persistent copy (../media/keep).
+const revokedListeners = new Set()
+
+// Registers fn(ranges) for range revocations; returns the unsubscribe.
+export function onRevokedRanges (fn) {
+  if (typeof fn !== 'function') return () => {}
+  const entry = (ranges) => fn(ranges)
+  revokedListeners.add(entry)
+  return () => { revokedListeners.delete(entry) }
+}
+
+// Drops overlapping entries in every cache createMediaCache has returned,
+// then tells the listeners. A throwing listener does not stop the others.
 export function revokeMedia (ranges) {
   for (const cache of caches) cache.revoke(ranges)
+  const list = []
+  if (Array.isArray(ranges)) {
+    for (const r of ranges) {
+      const range = asRange(r)
+      if (range !== null) list.push(range)
+    }
+  }
+  if (list.length === 0) return
+  for (const listener of [...revokedListeners]) {
+    try { listener(list.map((r) => ({ ...r }))) } catch {}
+  }
 }
 
 function descriptorRanges (record) {

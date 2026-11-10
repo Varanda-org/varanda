@@ -371,3 +371,39 @@ test('revokeDeletedMedia ignores a failed read', async (t) => {
   await revokeDeletedMedia(async () => { throw new Error('falhou') }, [1])
   t.is(cache.peek(key), 'blob:keep')
 })
+
+test('onRevokedRanges fires on a range revoke, not on eviction or clear, and unsubscribes', async (t) => {
+  const { createMediaCache, mediaKey, onRevokedRanges, revokeMedia, revokeDeletedMedia } = await load()
+  const seen = []
+  const other = []
+  const offBroken = onRevokedRanges(() => { throw new Error('boom') })
+  const off = onRevokedRanges((ranges) => seen.push(ranges))
+  const offOther = onRevokedRanges((ranges) => other.push(ranges))
+  t.teardown(() => { offBroken(); offOther() })
+
+  const cache = createMediaCache({ max: 1, revoke: () => {} })
+  await cache.get(mediaKey(photo(hex('1'), 1, 1, 'a')), async () => 'blob:1')
+  await cache.get(mediaKey(photo(hex('1'), 2, 1, 'b')), async () => 'blob:2')
+  cache.clear()
+  t.alike(seen, [], 'eviction and clear do not fire')
+
+  cache.revoke([{ core: hex('1'), start: 1, blocks: 1 }])
+  t.alike(seen, [], 'a single cache revoke does not fire')
+
+  revokeMedia([{ core: hex('2'), start: 3, blocks: 2 }, { core: 'nope', start: 1, blocks: 1 }])
+  t.alike(seen, [[{ core: hex('2'), start: 3, blocks: 2 }]], 'fires with the valid ranges')
+  t.is(other.length, 1, 'a throwing listener does not stop the others')
+
+  revokeMedia([])
+  revokeMedia(null)
+  t.is(seen.length, 1, 'no ranges, no call')
+
+  const tomb = { seq: 2, record: { type: 'delete', seq: 1, media: [{ core: hex('3'), start: 1, blocks: 1 }] } }
+  await revokeDeletedMedia(async () => ({ entries: [tomb], entriesTruncated: 0 }), [1])
+  t.alike(seen[1], [{ core: hex('3'), start: 1, blocks: 1 }], 'the deletion path fires')
+
+  off()
+  revokeMedia([{ core: hex('4'), start: 1, blocks: 1 }])
+  t.is(seen.length, 2, 'unsubscribed')
+  t.is(other.length, 3)
+})
