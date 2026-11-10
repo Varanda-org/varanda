@@ -183,6 +183,23 @@ async function readBorrowed (core, read) {
   return value
 }
 
+// The core look() finds among the run's lends, or null. The run lends before
+// its startup is over (./sync.js reader): a null lend may only mean "not open
+// yet", so it counts only once the follows are open (cores.opened) and, still
+// null, once the startup sweeps are done (cores.settled). Each is a promise
+// or a function returning one; cores without them are taken as they are.
+async function lentCore (cores, look) {
+  let core = look()
+  if (core !== null) return core
+  for (const step of [cores.opened, cores.settled]) {
+    if (step === undefined || step === null) continue
+    await (typeof step === 'function' ? step() : step)
+    core = look()
+    if (core !== null) return core
+  }
+  return null
+}
+
 // read(core) on the stored replica of `key` (hex64, lowercase) -> its result,
 // or null when there is no local data (nothing is created). The result
 // carries `entries` (and `borrowed`, the core, on the borrowed path); an
@@ -192,7 +209,7 @@ async function withReplica (ctx, key, read) {
   if (cores !== null) {
     // A core the run holds always has bytes stored: the storage is only
     // asked about the others.
-    const core = cores.replica(key)
+    const core = await lentCore(cores, () => cores.replica(key))
     if (core !== null) return { ...(await readBorrowed(core, read)), borrowed: core }
     if (!(await store.replicaExists(ctx.storage, key))) return null
     throw needsExclusive()
@@ -1932,7 +1949,7 @@ async function appendToOwnGroupCore (ctx, entry, record, priv = false) {
 async function withGroupCore (ctx, key, read) {
   const cores = borrowedCores(ctx)
   if (cores !== null) {
-    const core = typeof cores.group === 'function' ? cores.group(key) : null
+    const core = typeof cores.group === 'function' ? await lentCore(cores, () => cores.group(key)) : null
     if (core !== null) {
       const fork = core.fork
       const value = await readBorrowed(core, read)
@@ -4936,7 +4953,7 @@ async function dmLookup (ctx, member) {
     return best === null ? { box: null, gen: null } : { box: best.box, gen: best.gen }
   }
   let entries
-  const borrowed = cores === null ? null : cores.replica(key)
+  const borrowed = cores === null ? null : await lentCore(cores, () => cores.replica(key))
   if (borrowed !== null) {
     entries = await readBorrowed(borrowed, async (core) => (await store.readVisible(core)).entries)
   } else {
@@ -5066,5 +5083,6 @@ module.exports = {
   deviceUpkeep,
   AUTO_ENROL_RESERVE,
   isNeedsExclusive,
-  needsExclusive
+  needsExclusive,
+  lentCore
 }

@@ -283,18 +283,23 @@
 //                cores with the media (mediaPending).
 //
 // Member reads over the run's cores: the session may hand in a `reader`;
-// once the startup sequence opened the own diary and the stored follows
-// (just before the first connection) the run publishes { diary, replica,
-// group, hold, release } on it (reader.set), withdrawing it (reader.clear)
-// before teardown closes any core and whenever runSync returns or throws. A
-// second Hypercore instance on the same storage corrupts it, so the reader
-// only ever sees cores this run already holds: replica(key) is the open
-// follow core in whatever state, else the open replica of a binding diary
-// (kv groupDiaries), or null; group(key) is an own group core, or a foreign
-// one whose blocks the storage keeps once the run ends (active, failed but
-// kept, or a regate of a core stored before the run), or null. Neither ever
-// opens a core (the run opens them itself mid-run, after a quarantine fetch
-// or a sweep). A hold
+// once the startup sequence opened the own diary and the own group cores
+// (before the follow pass) the run publishes { diary, replica, group, hold,
+// release, opened, settled } on it (reader.set), withdrawing it
+// (reader.clear) before teardown closes any core and whenever runSync
+// returns or throws. `opened` resolves true once the stored follows and the
+// binding diaries are open, `settled` once the startup sweeps are done (just
+// before the first connection); both resolve false when the run ends first.
+// A null lend before them may only mean "not open yet": a read waits for
+// them before it concludes anything from it. A second Hypercore instance on
+// the same storage corrupts it, so the reader only ever sees cores this run
+// already holds: replica(key) is the open follow core in whatever state,
+// else (once settled) the open replica of a binding diary (kv
+// groupDiaries), or null; group(key) is an own group core, or (once
+// settled) a foreign one whose blocks the storage keeps once the run ends
+// (active, failed but kept, or a regate of a core stored before the run),
+// or null. Neither ever opens a core (the run opens them itself mid-run,
+// after a quarantine fetch or a sweep). A hold
 // keeps teardown from closing the cores until it is released; none starts
 // once the run is ending. Holds do not fence the run's own mid-run closes
 // (a failed or forked follow, a re-gate, a sweep, cleared deleted blocks):
@@ -1331,7 +1336,11 @@ async function syncRun ({
   // The roots the pages this device holds the secrets of are in (docs/rpc.md
   // 5.114), kept paged like the roots the own diary binds: as replicas
   // only, never an own writer, nothing appended. At most MAX_PAGE_ROOTS.
-  pageRoots = []
+  pageRoots = [],
+  // Tests only: async (point) awaited at 'follows' (before the follow pass)
+  // and at 'sweeps' (once the follows are open, before the index and the
+  // sweeps), to hold the startup there.
+  startupGate = null
 } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
   const heldPageRoots = [...new Set((Array.isArray(pageRoots) ? pageRoots : [])
@@ -1454,6 +1463,17 @@ async function syncRun ({
   let holds = 0 // reader holds outstanding
   let drained = Promise.resolve() // resolves when holds reaches 0
   let drain = noop
+  // The reader is published before the follow pass: `opened` settles true
+  // once the follows and binding diaries are open, `settled` once the
+  // startup sweeps are done (where the reader used to be published), both
+  // false when the run ends first. Until settled, the lends below withhold
+  // what a sweep may still close or purge (a binding diary, a foreign group
+  // core), so an early read never answers from it.
+  let lendSettled = false
+  let openedDone = noop
+  let settledDone = noop
+  const lendOpened = new Promise((resolve) => { openedDone = resolve })
+  const lendSettledP = new Promise((resolve) => { settledDone = resolve })
 
   function hold () {
     if (ending) return false
@@ -1470,13 +1490,14 @@ async function syncRun ({
     const e = follows.get(key)
     if (e) return e.core === null || e.core.closing ? null : e.core
     const gd = groupDiaries.get(key)
-    if (!gd || gd.dropped || gd.core === null || gd.core.closing) return null
+    if (!lendSettled || !gd || gd.dropped || gd.core === null || gd.core.closing) return null
     return gd.core
   }
 
   function lentGroup (key) {
     const m = groupOwn.find((x) => x.key === key)
     if (m !== undefined) return m.core.closing ? null : m.core
+    if (!lendSettled) return null
     const ge = groupCores.get(key)
     if (!ge || !ge.core || ge.core.closing) return null
     const kept = ge.state === 'active' || (ge.state === 'failed' && ge.kept === true) || (ge.state === 'regate' && ge.preStored === true)
@@ -5109,6 +5130,9 @@ async function syncRun ({
     await openOwnMedia()
     startup.step('grupos')
     await openGroups()
+    // The own diary is lent before its deleted blocks are cleared: a read
+    // folds the tombstones itself (presentState), cleared or not.
+    if (!ending) reader.set({ diary, replica, group: lentGroup, hold, release, opened: lendOpened, settled: lendSettledP })
     startup.step('leitura do próprio diário')
     // Deleted blocks and media are cleared, and growth is measured on the
     // present length, before any connection; whatever the verified seeder
@@ -5137,6 +5161,7 @@ async function syncRun ({
       else signal.addEventListener('abort', onAbort)
     }
 
+    if (startupGate !== null) await startupGate('follows')
     // Follow gate at start (R5.8 a), before any connection.
     startup.step('seguidos (abertura)')
     let followList = await store.readFollows(storage)
@@ -5279,6 +5304,8 @@ async function syncRun ({
     // diary is never opened twice).
     startup.step('diários de grupo')
     if (!ending) await startGroupDiaries()
+    openedDone(!ending)
+    if (startupGate !== null) await startupGate('sweeps')
     startup.step('índice de réplicas')
     if (!ending) await updateReplicaIndex()
     // Stored replicas of blocked keys, and unfollowed ones from a revoked
@@ -5291,7 +5318,8 @@ async function syncRun ({
     if (!ending && blocklist.revokedIssuers().size > 0) await sweepRevokedGroups()
 
     if (!ending) {
-      reader.set({ diary, replica, group: lentGroup, hold, release })
+      lendSettled = true
+      settledDone(true)
       startup.step('conexão')
       connect()
     }
@@ -5301,6 +5329,8 @@ async function syncRun ({
   } finally {
     ending = true
     ended = true
+    openedDone(false)
+    settledDone(false)
     if (deadlineTimer) clearTimeout(deadlineTimer)
     for (const timer of timers) clearTimeout(timer)
     timers.clear()
