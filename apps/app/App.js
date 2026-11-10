@@ -142,7 +142,7 @@ import { onDmOpen, onDmWake, requestDmOpen } from './src/dm-open'
 import { Comunidade } from './src/screens/Comunidade'
 import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
-import ARua, { liveBinding } from './src/screens/ARua'
+import ARua, { liveBinding, noteDeleted } from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
 import Conversa, { useActing } from './src/screens/Conversa'
 import Curtidas from './src/screens/Curtidas'
@@ -385,8 +385,11 @@ function Member () {
   }, [])
   // Every screen's delete goes through here: A Rua's stored first page may
   // hold the deleted post, and it must not show again at the next launch
-  // even if A Rua is not visited before the app closes.
+  // even if A Rua is not visited before the app closes. A Rua may still hold
+  // it in memory: noteDeleted drops an armed write (cache generation) and
+  // none is made until a first page read that starts after this delete.
   const deletedPost = useCallback(() => {
+    noteDeleted()
     clearSnapshot()
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)

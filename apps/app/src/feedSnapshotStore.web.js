@@ -7,6 +7,9 @@
 // modules, so the store does not import it).
 
 const KEY = 'varanda-rua-snapshot'
+// SNAPSHOT_MAX_BYTES of ./feedSnapshot.js (test/snapshotSafety.test.js keeps
+// them equal). A longer text is over it in bytes too.
+const MAX_BYTES = 524288
 
 // A Rua paints a snapshot first only on the phone. The web keeps the same
 // API, so the shared screen decides by this flag, not by Platform.OS.
@@ -19,7 +22,12 @@ function storage () {
 export function loadSnapshotText () {
   try {
     const raw = storage().getItem(KEY)
-    return typeof raw === 'string' ? raw : null
+    if (typeof raw !== 'string') return null
+    if (raw.length > MAX_BYTES) {
+      clearSnapshot()
+      return null
+    }
+    return raw
   } catch {
     return null
   }
