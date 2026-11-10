@@ -1,3 +1,4 @@
+/* global __DEV__ */
 // One photo of a post. Only a hosted node (node.hosted: the hosted web app or
 // the native app on an installation) fetches it: the bytes come from the
 // installation's /media route and are shown only after ../media/fetch.js
@@ -22,8 +23,10 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
 import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
-import { useNode } from '../node'
+import { perfMarks, useNode } from '../node'
 import { fetchMedia, validDescriptor } from '../media/fetch'
+import { nativeSubtle } from '../media/hash'
+import { perfEnabled } from '../perfMarks'
 import { createMediaCache, mediaKey, onRevokedRanges, retryDelay } from '../media/cache'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import * as keptStore from '../media/keep'
@@ -36,6 +39,13 @@ import { useStyles, useTheme } from './ThemeProvider'
 // The native app streams media through expo/fetch so the byte cap stops the
 // download (see fetchMedia); the web keeps the global fetch.
 const mediaFetch = () => (isAppClient() ? expoFetch : undefined)
+
+// The photo hash: natively expo-crypto's digest (../media/hash.native.js),
+// on the web WebCrypto (nativeSubtle undefined keeps fetch.js's default).
+// The 'media-hash' timing only in a dev bundle with EXPO_PUBLIC_VARANDA_PERF;
+// the literal member access is what Expo inlines. Avatar uses it too.
+const HASH_PERF = perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: process.env.EXPO_PUBLIC_VARANDA_PERF }, typeof __DEV__ !== 'undefined' && __DEV__)
+export const mediaHashDeps = () => (HASH_PERF ? { subtle: nativeSubtle, marks: perfMarks() } : { subtle: nativeSubtle })
 
 const cache = createMediaCache({ max: 64, concurrency: 4, revoke: revokeUrl })
 
@@ -102,7 +112,7 @@ function useMedia (author, descriptor, persist) {
       persist,
       keptUrl: keptStore.keptUrl,
       keep: keptStore.keep,
-      fetchBytes: (d) => fetchMedia(author, d, { fresh, persist, fetch: mediaFetch() }),
+      fetchBytes: (d) => fetchMedia(author, d, { ...mediaHashDeps(), fresh, persist, fetch: mediaFetch() }),
       urlFromBytes,
       generation: cacheGeneration,
       requestedGeneration
