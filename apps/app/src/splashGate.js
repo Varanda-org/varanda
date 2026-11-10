@@ -1,5 +1,7 @@
-// The entrance needs time on screen to be seen. A failure is exempt only when
-// Conexao would show next, so retry and 'Detalhes técnicos' stay reachable:
+// The entrance needs time on screen during loading and connecting. 'ready'
+// skips the minimum so a returning member sees A Rua as soon as it is ready.
+// A failure is exempt when Conexao would show next, so retry and
+// 'Detalhes técnicos' stay reachable:
 // node.js uses 'config' for a failed configurable connection or the first-run
 // form, and 'config-error' for hosted discovery failure. When the intro or the
 // terms gate comes next (gateNext), holding delays nothing anyone needs, so the
@@ -7,7 +9,7 @@
 // mounted so its local state survives.
 export const SPLASH_MIN_MS = 1500
 export const CONNECT_PATIENCE_MS = 10000
-export const HOLD_PHASES = ['loading', 'connecting', 'ready']
+export const HOLD_PHASES = ['loading', 'connecting']
 
 export function holdSplash ({ phase, elapsedMs, released, gateNext }) {
   const elapsed = Number.isFinite(elapsedMs) ? elapsedMs : 0
@@ -31,10 +33,14 @@ export function coverConnecting ({ phase, canConfigure, elapsedMs, released }) {
 // sets once the first real screen has shown.
 export const BOOT_PATIENCE_MS = 10000
 export const RECOVERY_PATIENCE_MS = 65000
-// 'pronto' stays covered until A Rua's first page is on screen with the
-// names and counts of its first rows (feedReady), so the person does not see
-// them fill in; never longer than this, then A Rua finishes in view.
+// A missing first page must not keep A Rua covered forever. Names and counts
+// get only a short grace after the page arrives, then finish in view.
 export const CONTENT_PATIENCE_MS = 5000
+export const DETAILS_GRACE_MS = 400
+
+export function detailsGraceOver ({ page, pageAtMs, nowMs }) {
+  return page === true && Number.isFinite(pageAtMs) && Number.isFinite(nowMs) && nowMs - pageAtMs >= DETAILS_GRACE_MS
+}
 
 export function bootPatienceMs (step) {
   if (step === 'recuperando') return RECOVERY_PATIENCE_MS
