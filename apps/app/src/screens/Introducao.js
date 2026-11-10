@@ -9,8 +9,9 @@ import { StatusBar } from 'expo-status-bar'
 import { INTRO_CARDS } from '../intro'
 import { Icon } from '../ui/Icon'
 import { statusBarStyle } from '../appearance'
-import { Body, Btn, Title } from '../ui'
-import { layout } from '../ui/theme'
+import { Body, Btn } from '../ui'
+import { StepLink } from '../ui/Stepper'
+import { fonts, layout, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const SKIP_LABEL = 'Pular'
@@ -145,7 +146,7 @@ export default function Introducao ({ onDone, sidePad = 0, edges }) {
                 <View style={styles.circle}>
                   <Icon name={card.icon} size={56} color={colors.accent} />
                 </View>
-                <Title>{card.title}</Title>
+                <Text accessibilityRole='header' style={styles.title}>{card.title}</Text>
                 <Body style={styles.body}>{card.body}</Body>
               </View>
             </ScrollView>
@@ -159,10 +160,8 @@ export default function Introducao ({ onDone, sidePad = 0, edges }) {
             ))}
           </View>
           <View style={styles.actions}>
-            <View style={styles.side}>
-              {index > 0 ? <Btn secondary label={BACK_LABEL} onPress={() => goTo(index - 1)} /> : null}
-            </View>
-            <Btn label={index === last ? START_LABEL : NEXT_LABEL} onPress={index === last ? finish : () => goTo(index + 1)} />
+            <Btn label={index === last ? START_LABEL : NEXT_LABEL} onPress={index === last ? finish : () => goTo(index + 1)} block large />
+            {index > 0 ? <StepLink label={BACK_LABEL} onPress={() => goTo(index - 1)} /> : <View style={styles.backSpace} />}
           </View>
         </View>
       </View>
@@ -189,6 +188,7 @@ const makeStyles = (colors) => StyleSheet.create({
   dotActive: { backgroundColor: colors.accent },
   dotDone: { backgroundColor: colors.accent, opacity: 0.5 },
   dotPending: { backgroundColor: colors.line },
-  actions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  side: { minWidth: 96 }
+  title: { ...type.heroTitle, fontFamily: fonts.title, color: colors.ink, textAlign: 'center' },
+  actions: { gap: 8 },
+  backSpace: { height: layout.hit }
 })

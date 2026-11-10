@@ -4,6 +4,8 @@
 // (src/termsStore.web.js). ES modules loaded through import(); storage is a
 // fake globalThis.localStorage.
 const test = require('brittle')
+const fs = require('fs')
+const path = require('path')
 
 const load = () => import('../src/terms.js')
 const loadWeb = () => import('../src/termsStore.web.js')
@@ -341,4 +343,15 @@ test('termsStore.web: a throwing or missing storage never throws', async (t) => 
   impl = () => undefined
   t.is(await loadTermsRecord(), null)
   t.is(await saveTermsRecord(r), false)
+})
+
+test('the terms gate keeps its legal words on the shared frame', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'Termos.js'), 'utf8')
+  for (const word of [
+    "const ACCEPT_LABEL = 'Li e aceito os Termos de Uso e a Política de Privacidade'",
+    "const BLOCKED_TEXT = 'Sem aceitar, não é possível entrar no Varanda.'",
+    "const NEEDED_TEXT = 'Antes de entrar no Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'",
+    'OptionList', 'block large', "icon='file-text'", 'aria-expanded'
+  ]) t.ok(src.includes(word), word)
+  t.is(src.split('onPress={onAccept}').length - 1, 1, 'only the accept button accepts')
 })
