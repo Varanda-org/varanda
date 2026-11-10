@@ -62,6 +62,11 @@ import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MomentosStrip } from '../ui/MomentosStrip'
 import { canPublishMoment } from '../momentSeen'
 import { useMomentSeen, useMoments } from './Momentos'
+import { useBlocks } from '../blocksProvider'
+import { installationOrigin } from '../installation'
+import { cacheGeneration, keepOnlyAuthors, registerLocalCache } from '../localCaches'
+import { buildSnapshot, initialFeedState, keepOnlyAuthors as snapshotKeepOnly, parseSnapshot, socialSeed, withoutAuthors } from '../feedSnapshot'
+import { clearSnapshot, loadSnapshotText, saveSnapshotText } from '../feedSnapshotStore'
 
 // Feed skip reasons that come from the association's signed blocklist.
 const MODERATION_REASONS = ['blocked', 'revoked-issuer']
@@ -125,6 +130,138 @@ const UNCERTAIN_TOGGLE = 'Não sabemos se deu certo. Toque de novo para reenviar
 const seqOfRef = (ref) => Number(ref.slice(ref.indexOf(':') + 1))
 const authorOfRef = (ref) => ref.slice(0, ref.indexOf(':'))
 
+// A Rua's snapshot (../feedSnapshot.js): the last first page, painted on a
+// cold start while the node starts and feed.read answers. The live first
+// page then replaces it, so the node's blocklist, follow set and deletions
+// still decide what stays.
+const SNAPSHOT_DEBOUNCE_MS = 2000
+// Owner and follow set of the last keepOnlyAuthors this run: the first
+// complete list prunes what was unfollowed while the app was closed, later
+// ones only when the set changed.
+let reconciledFollows = null
+
+// The installation this app talks to: the one native configuration chose,
+// else the page's own origin (the web build is served by its installation
+// and never sets installationOrigin). null when neither exists.
+function snapshotOrigin () {
+  const chosen = installationOrigin()
+  if (typeof chosen === 'string' && chosen !== '') return chosen
+  try {
+    const page = globalThis.location
+    const origin = page && typeof page.origin === 'string' ? page.origin : ''
+    // An opaque origin ('null', file:) names no installation.
+    return origin.startsWith('https://') || origin.startsWith('http://') ? origin : null
+  } catch {
+    return null
+  }
+}
+
+// -> { origin, association, owner }, or null when nothing may be read or
+// written: no own key, no remembered configuration or no installation. The
+// Vitrine runs with config null, so its fixtures never meet this device's
+// real snapshot (the store itself knows nothing of the Vitrine). App.js
+// binds its own-name seed with this same rule.
+export function liveBinding (ownKey, config) {
+  const owner = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
+  const association = config && typeof config.association === 'string' ? config.association : null
+  const origin = snapshotOrigin()
+  if (owner === null || association === null || typeof origin !== 'string' || origin === '') return null
+  return { origin, association, owner }
+}
+
+// -> the stored snapshot of `binding` with at least one row, or null. A text
+// that does not parse for it (damaged, too old, another owner) is removed.
+function readSnapshot (binding) {
+  if (binding === null) return null
+  const text = loadSnapshotText()
+  if (text === null) return null
+  const snapshot = parseSnapshot(text, { ...binding, now: Date.now() })
+  if (snapshot === null) {
+    clearSnapshot()
+    return null
+  }
+  return snapshot.items.length > 0 ? snapshot : null
+}
+
+// Whether the session may write the snapshot for `owner`: the passkey
+// identity (node.passkey.status) is unlocked, not signed out and is that
+// owner. A lock, sign-out or reset wipes the snapshot (node.js); a write
+// after it would bring it back. A node without a passkey identity (the core
+// node) has nothing to lock.
+function sessionAllowsSnapshot (passkey, owner) {
+  if (passkey === null || passkey === undefined) return true
+  const st = passkey.status
+  return st !== null && typeof st === 'object' && st.unlocked === true && st.signedOut !== true &&
+    typeof st.publicKey === 'string' && st.publicKey.toLowerCase() === owner
+}
+
+// A cheap digest of what the snapshot stores for `rows` (the first page):
+// counts, own like/repost state, which originals are at hand and the names
+// and photos of their authors. A change of any of them writes it again.
+function snapshotDigest (rows, social, profileOf) {
+  const parts = []
+  const author = (a) => {
+    const p = profileOf(a)
+    const photo = !p ? '' : p.avatar ? p.avatar.sha256 : p.avatar === null ? 'n' : 'u'
+    parts.push(p ? (p.name || '') + '/' + (p.username || '') + '/' + photo + (p.page ? '/p' + (p.closed ? 'c' : '') + (p.moved ? 'm' : '') : '') : '?')
+  }
+  const target = (t, depth) => {
+    const ref = refOf(t)
+    if (ref === null) return
+    const o = social.originals.get(ref)
+    const post = o && o.kind === 'post' ? o : null
+    parts.push(ref, post ? 'o' : o === null ? 'x' : '-')
+    if (post === null) return
+    author(post.author)
+    if (depth === 0) {
+      target(post.quote, 1)
+      target(post.replyTo, 1)
+    }
+  }
+  for (const row of rows) {
+    const ref = row.kind === 'repost' ? refOf(row.to) : refOf(row)
+    const c = ref === null ? null : social.counts.get(ref)
+    parts.push(ref, c ? [c.replies, c.likes, c.reposts, c.quotes].join('.') : '-', ref !== null && social.eng.liked.has(ref) ? 'L' : '', ref !== null && social.eng.reposted.has(ref) ? 'R' : '')
+    author(row.author)
+    if (row.kind === 'repost') target(row.to, 0)
+    else {
+      target(row.quote, 0)
+      target(row.replyTo, 0)
+    }
+  }
+  return parts.join('|')
+}
+
+// Rewrites the stored snapshot through `change`, checked against its own
+// stored binding: a purge can run before A Rua mounts (the first block list
+// read at launch). A text that does not parse, or a change that fails,
+// removes it.
+function rewriteStored (change) {
+  const text = loadSnapshotText()
+  if (text === null) return
+  let bound = null
+  try {
+    const raw = JSON.parse(text)
+    bound = { origin: raw.origin, association: raw.association }
+  } catch {}
+  const snapshot = bound === null ? null : parseSnapshot(text, bound)
+  const next = snapshot === null ? null : change(snapshot)
+  if (next === null) {
+    clearSnapshot()
+    return
+  }
+  const out = JSON.stringify(next)
+  if (out !== text) saveSnapshotText(out)
+}
+
+// Once per app run: sign-out, lock, reset and an owner or installation
+// change wipe it; a block and an unfollow prune it.
+registerLocalCache({
+  wipe: clearSnapshot,
+  dropAuthors: (keys) => rewriteStored((snapshot) => withoutAuthors(snapshot, keys)),
+  keepOnlyAuthors: (allowed) => rewriteStored((snapshot) => snapshotKeepOnly(snapshot, allowed))
+})
+
 // Originals, counts and the own like/repost state of the rows on screen.
 // - ingest({ shown, need, parents, local, authors, reset }): `shown` = refs
 //   whose counts and own state are wanted (the posts with an action bar);
@@ -142,7 +279,11 @@ const authorOfRef = (ref) => ref.slice(0, ref.indexOf(':'))
 // - persistOf(author): true only for own or followed authors.
 // - toast: the text of the last failed toggle for a moment (when the shell
 //   gives no `onToast`).
-export function useSocial ({ ownKey, onToast }) {
+// Options: `seed` (A Rua's snapshot, socialSeed) fills counts, originals
+// and the own like/repost state before the first ingest; the first reset
+// ingest replaces them. `onFollows(keys)` gets every COMPLETE follow.list
+// answer (lowercase keys), never a partial one.
+export function useSocial ({ ownKey, onToast, seed = null, onFollows }) {
   const node = useNode()
   const names = useNames()
   const { request, hosted } = node
@@ -153,7 +294,18 @@ export function useSocial ({ ownKey, onToast }) {
   const online = node.online !== false
   const { learnMany, resolveMany } = names
   // flags: the index's `indexing` / `complete` of the counts shown.
-  const [social, setSocial] = useState(() => ({ originals: new Map(), counts: new Map(), eng: emptyState(), pending: new Map(), flags: { indexing: false, complete: true } }))
+  const [social, setSocial] = useState(() => ({
+    originals: seed ? new Map(seed.originals) : new Map(),
+    counts: seed ? new Map(seed.counts) : new Map(),
+    eng: seed ? { liked: new Set(seed.liked), reposted: new Set(seed.reposted) } : emptyState(),
+    pending: new Map(),
+    flags: { indexing: false, complete: true }
+  }))
+  // Refs whose count still comes from the seed: the first reset ingest drops
+  // each one it cannot read again, so a stale number never stays on screen.
+  const seededCountsRef = useRef(seed ? new Set(seed.counts.keys()) : null)
+  const onFollowsRef = useRef(onFollows)
+  onFollowsRef.current = onFollows
   const socialRef = useRef(social)
   // Bumped whenever `originals` is dropped (refresh, follows/moderation may
   // have changed): a read started before never writes into the new map.
@@ -245,7 +397,17 @@ export function useSocial ({ ownKey, onToast }) {
     const set = knownRef.current
     try {
       const r = await request('follow.list', { offset: 0, limit: FOLLOW_LIMIT_MAX })
-      for (const k of Array.isArray(r.follows) ? r.follows : []) if (typeof k === 'string') set.add(k.toLowerCase())
+      const keys = []
+      for (const k of Array.isArray(r.follows) ? r.follows : []) {
+        if (typeof k !== 'string') continue
+        set.add(k.toLowerCase())
+        keys.push(k.toLowerCase())
+      }
+      // Only the whole list says who is no longer followed.
+      const complete = Array.isArray(r.follows) && Number.isSafeInteger(r.total) && r.follows.length === r.total && keys.length === r.total
+      if (complete && set === knownRef.current && typeof onFollowsRef.current === 'function') {
+        try { onFollowsRef.current(keys) } catch {}
+      }
     } catch {
       if (set === knownRef.current) followsLoadedRef.current = false
     }
@@ -468,7 +630,23 @@ export function useSocial ({ ownKey, onToast }) {
     // their way, and each answer is weighed against what landed meanwhile.
     const epoch = epochRef.current
     const pass = ++countsPassRef.current
+    const seeded = reset ? seededCountsRef.current : null
+    if (reset) seededCountsRef.current = null
+    // Seeded numbers this read did not answer for go (a number read since,
+    // or moved by a toggle, stays).
+    const dropSeeded = (list) => {
+      if (seeded === null) return
+      const stale = list.filter((ref) => seeded.has(ref) && !countedRef.current.has(ref) && !touchedRef.current.has('liked|' + ref) && !touchedRef.current.has('reposted|' + ref))
+      if (stale.length === 0) return
+      change((prev) => {
+        const counts = new Map(prev.counts)
+        for (const ref of stale) counts.delete(ref)
+        return { counts }
+      })
+    }
+    if (seeded !== null && !(hosted && online && refs.length > 0)) dropSeeded([...seeded])
     if (hosted && online && refs.length > 0) {
+      if (seeded !== null) dropSeeded([...seeded].filter((ref) => !refs.includes(ref)))
       Promise.all(chunks(refs, COUNTS_MAX).map(async (chunk) => {
         const started = ++clockRef.current
         const r = await fetchCounts(chunk)
@@ -476,6 +654,8 @@ export function useSocial ({ ownKey, onToast }) {
         // Flags of an older pass (a refresh reset them since) say nothing
         // about the counts now shown.
         const current = epoch === epochRef.current
+        if (!r.ok) dropSeeded(chunk)
+        else dropSeeded(chunk.filter((ref) => !Object.prototype.hasOwnProperty.call(r.value.counts, ref)))
         if (!r.ok) {
           // This chunk's numbers never arrived. indexing stays as it is; an
           // incomplete index is what CountsNote already explains.
@@ -1294,11 +1474,44 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const now = useNow(60000)
   // The floating publish button sits over the list's end: clear it too.
   const bottomPad = useBottomPad() + layout.fabSize
-  const social = useSocial({ ownKey, onToast })
+  const blocks = useBlocks()
+  // The snapshot is read once, in the first render, so the first frame can
+  // paint it and the first loadNewest (an effect) comes after it.
+  const [boot] = useState(() => {
+    const snapshot = readSnapshot(liveBinding(ownKey, node.config))
+    return { snapshot, social: snapshot === null ? null : socialSeed(snapshot) }
+  })
+  const binding = useMemo(() => liveBinding(ownKey, node.config), [ownKey, node.config])
+  const bindingRef = useRef(binding)
+  bindingRef.current = binding
+  // The own key and the follows of the last complete follow.list: rows of
+  // anyone else never go into the snapshot.
+  const followSetRef = useRef(null)
+  // The armed snapshot write: { gen } = cacheGeneration() when it was armed.
+  const pendingWriteRef = useRef(null)
+  const onFollows = useCallback((keys) => {
+    const b = bindingRef.current
+    if (b === null) return
+    const allowed = new Set([b.owner, ...keys])
+    followSetRef.current = allowed
+    const id = b.owner + '|' + [...allowed].sort().join()
+    if (reconciledFollows === id) return
+    reconciledFollows = id
+    // A complete list (useSocial calls this for no other): the snapshot and
+    // the kept photos drop authors unfollowed on any device, closed app
+    // included. A partial list never reaches here, so it prunes nothing.
+    const pending = pendingWriteRef.current
+    const before = cacheGeneration()
+    keepOnlyAuthors(new Set(allowed))
+    // Only this prune's own bump: an armed write is filtered by this same
+    // set when it runs, so it need not lose to it.
+    if (pending !== null && pending.gen === before) pending.gen = cacheGeneration()
+  }, [])
+  const social = useSocial({ ownKey, onToast, seed: boot.social, onFollows })
   const { ingest } = social
   const moments = useMoments({ ownKey, active: active !== false, tick: refresh })
   const momentSeen = useMomentSeen()
-  const [feed, setFeed] = useState({
+  const [feed, setFeed] = useState(() => ({
     items: [],
     cursor: null,
     atEnd: false,
@@ -1319,8 +1532,11 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     probeOlder: false,
     rangeFrom: null,
     seqBase: null,
-    newer: 0
-  })
+    newer: 0,
+    // Snapshot rows (loadedAt stays null): the first loadNewest still runs
+    // and replaces them.
+    ...(boot.snapshot === null ? {} : initialFeedState(boot.snapshot))
+  }))
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, meta } = feed
   const feedRef = useRef(feed)
   const listRef = useRef(null)
@@ -1339,7 +1555,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   }, [])
 
   const { request, ackFresh } = node
-  const { learnMany, resolveMany } = names
+  const { learnMany, resolveMany, seedMany } = names
   const learnPage = useCallback((items) => {
     learnMany(items.map((i) => [i.author, { name: i.name, username: i.username }]))
     resolveMany(items.map((i) => i.author))
@@ -1347,6 +1563,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   }, [learnMany, resolveMany])
 
   const ownSeenRef = useRef(null)
+  const liveMarkedRef = useRef(false)
   const loadNewest = useCallback(async ({ quiet = false } = {}) => {
     if (quiet) {
       const current = feedRef.current
@@ -1446,6 +1663,10 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
         refreshing: false
       })
       learnPage(page.items)
+      if (!liveMarkedRef.current) {
+        liveMarkedRef.current = true
+        perfMarks().mark('rows-live')
+      }
       // Leave growth that arrived during this read available for the next pill.
       ackFresh(freshKeys(seen).filter((key) => key !== 'own' && seen.fresh[key] === signalsRef.current.fresh[key]))
       ingest({ ...pageNeeds(page.items), reset: true })
@@ -1459,6 +1680,22 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // both: there is nothing more to wait for.
   const bootRef = useRef({ page: false, details: false })
   const socialState = social.social
+  // Snapshot rows on screen: the cover lifts at once. The names are seeds
+  // only, never loaded; the live page's resolveMany still reads the profiles.
+  useEffect(() => {
+    const snapshot = boot.snapshot
+    if (snapshot === null) return
+    perfMarks().mark('rows-snapshot')
+    // Only authors the cache does not know: a remount must not bring back
+    // an older name or photo over one read since.
+    seedMany(Object.entries(snapshot.names))
+    const b = bootRef.current
+    if (typeof onBoot !== 'function' || b.details) return
+    b.page = true
+    b.details = true
+    onBoot('page')
+    onBoot('details')
+  }, [])
   useEffect(() => {
     if (typeof onBoot !== 'function') return
     const b = bootRef.current
@@ -1489,6 +1726,102 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     perfMarks().mark('details')
     onBoot('details')
   }, [onBoot, feed.loadedAt, feed.loadError, feed.items, names.profileOf, socialState, node.hosted, node.online])
+
+  // What the snapshot holds of the live feed: its first page (row keys) and
+  // the load it came from. Every commit that changes it (a refresh, a quiet
+  // or range read, a deleted row) writes the snapshot again.
+  const snapHead = useMemo(() => (loadedAt === null ? null : loadedAt + '|' + items.slice(0, FEED_LIMIT_DEFAULT).map(feedKey).join()), [items, loadedAt])
+  // The head plus what is stored for it: a late count, heart, original or
+  // name changes the key and writes again.
+  const snapKey = useMemo(() => (snapHead === null ? null : snapHead + '#' + snapshotDigest(items.slice(0, FEED_LIMIT_DEFAULT), socialState, names.profileOf)), [snapHead, items, socialState, names.profileOf])
+
+  // The snapshot write: after the live first page changed, once
+  // its first rows have their details, debounced. A purge (sign-out, lock,
+  // block, unfollow) after the write was armed bumps cacheGeneration and
+  // the write is dropped, so it never brings back what was removed.
+  const latestRef = useRef(null)
+  latestRef.current = { feed, social: socialState, profileOf: names.profileOf, persistOf: social.persistOf, blocked: blocks.keys, binding, passkey: node.passkey }
+  const sessionOk = binding !== null && sessionAllowsSnapshot(node.passkey, binding.owner)
+  const writeRef = useRef({ head: null, done: null, timer: null })
+  const writeSnapshotRef = useRef(null)
+  const writeSnapshot = useCallback(() => {
+    const w = writeRef.current
+    w.timer = null
+    const pending = pendingWriteRef.current
+    const latest = latestRef.current
+    if (pending === null || latest.binding === null) return
+    // Locked, signed out, reset or another owner since arming: dropped, and
+    // not armed again (the effect arms anew once the session allows it).
+    if (!sessionAllowsSnapshot(latest.passkey, latest.binding.owner)) {
+      pendingWriteRef.current = null
+      w.head = null
+      return
+    }
+    if (pending.gen !== cacheGeneration()) {
+      // A purge since arming: this write is dropped, and the key stays not
+      // done. The next one is built after the purge, from the rows then
+      // (blocks and follows applied), so it is armed again with the
+      // generation now.
+      pendingWriteRef.current = { gen: cacheGeneration() }
+      w.timer = setTimeout(writeSnapshotRef.current, SNAPSHOT_DEBOUNCE_MS)
+      return
+    }
+    pendingWriteRef.current = null
+    w.done = w.head
+    const allowed = followSetRef.current
+    const all = latest.feed.items
+    const rows = allowed === null ? all : all.filter((i) => allowed.has(i.author))
+    const snapshot = buildSnapshot({
+      ...latest.binding,
+      items: rows,
+      // Rows left out make the given cursor wrong: the last kept row bounds it.
+      cursor: rows.length === all.length ? latest.feed.cursor : null,
+      profileOf: latest.profileOf,
+      counts: latest.social.counts,
+      liked: latest.social.eng.liked,
+      reposted: latest.social.eng.reposted,
+      originals: latest.social.originals,
+      isKnown: latest.persistOf,
+      blocked: latest.blocked
+    })
+    // An empty first page leaves nothing to paint, not the old rows.
+    if (snapshot === null) clearSnapshot()
+    else saveSnapshotText(JSON.stringify(snapshot))
+  }, [])
+  writeSnapshotRef.current = writeSnapshot
+  useEffect(() => {
+    const w = writeRef.current
+    if (!sessionOk) {
+      // The session turned locked (or signed out, reset, another owner): an
+      // armed write is cancelled before it can recreate the wiped snapshot.
+      clearTimeout(w.timer)
+      w.timer = null
+      w.head = null
+      pendingWriteRef.current = null
+      return
+    }
+    if (binding === null || snapKey === null || w.done === snapKey) return
+    const rows = feed.items.slice(0, FEED_FIRST_ROWS)
+    const first = pageNeeds(rows)
+    const flags = socialState.flags
+    const ready = feedDetailsReady({
+      authors: first.authors,
+      shown: first.shown,
+      profileOf: names.profileOf,
+      originals: rows.filter((i) => i.kind === 'repost').map((i) => refOf(i.to)).filter((r) => r !== null),
+      hasOriginal: (ref) => socialState.originals.has(ref),
+      hasCount: (ref) => socialState.counts.has(ref),
+      countsSkipped: node.hosted !== true || node.online === false || flags.indexing === true || flags.complete === false
+    })
+    if (!ready) return
+    if (w.head !== snapKey) {
+      w.head = snapKey
+      pendingWriteRef.current = { gen: cacheGeneration() }
+    }
+    clearTimeout(w.timer)
+    w.timer = setTimeout(writeSnapshot, SNAPSHOT_DEBOUNCE_MS)
+  }, [sessionOk, snapKey, binding, feed.items, names.profileOf, socialState, node.hosted, node.online, writeSnapshot])
+  useEffect(() => () => clearTimeout(writeRef.current.timer), [])
 
   const loadOlder = useCallback(async ({ fromSync = false } = {}) => {
     const current = feedRef.current
@@ -1696,6 +2029,10 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       social.deleteOriginal(t.ref)
       const cur = feedRef.current
       commit({ items: cur.items.filter((i) => (i.kind === 'repost' ? refOf(i.to) : feedKey(i)) !== t.ref) })
+      // The stored copy may hold the deleted post: it goes now, so a dropped
+      // or late rewrite can never show the post at the next launch. The
+      // changed first page writes a new one.
+      clearSnapshot()
       if (typeof onDeletedPost === 'function') onDeletedPost()
       // Cached photos of the deleted post go too, wherever they were shown.
       await revokeDeletedMedia(request, [t.seq])
@@ -1708,7 +2045,13 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // Which handlers exist adds or removes buttons: a change re-renders the rows.
   const offered = Object.keys(handlers).filter((k) => typeof handlers[k] === 'function').join()
   const extra = useMemo(() => ({ profileOf: names.profileOf, now, social: social.social, offered, ownKey }), [names.profileOf, now, social.social, offered, ownKey])
-  const rowCache = useRowPropsCache(items, feedKey, { h: handlers, social })
+  // Snapshot rows (loadedAt null) were stored before the block list now in
+  // force: a blocked author's rows, and reposts of them, never show.
+  const blockedKeys = blocks.keys
+  const shownItems = useMemo(() => (loadedAt !== null || blockedKeys.size === 0
+    ? items
+    : items.filter((i) => !blockedKeys.has(i.author) && !(i.kind === 'repost' && i.to && blockedKeys.has(i.to.author)))), [items, loadedAt, blockedKeys])
+  const rowCache = useRowPropsCache(shownItems, feedKey, { h: handlers, social })
   // One renderItem for the list's life: FlatList re-renders the cells on
   // extraData, and the rows whose props did not change skip their render.
   const renderRef = useRef(null)
@@ -1741,7 +2084,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       <DeletePrompt del={del} />
       <RefreshableList
         listRef={listRef}
-        data={items}
+        data={shownItems}
         keyExtractor={feedKey}
         renderItem={renderItem}
         extraData={extra}
