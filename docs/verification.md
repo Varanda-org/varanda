@@ -6990,3 +6990,43 @@ Limites desta caminhada:
 - O serviço ainda acrescenta registros como escritor da Página e vê associação, membros e horários. Sem a chave válida da época, um bloco selado que ele forja é descartado por quem lê.
 - As épocas de grupo anteriores à primeira renovação eram conhecidas pelo serviço.
 - Nenhuma caixa acima foi marcada nesta documentação.
+
+## 150. Carrossel de fotos nas publicações (PR feat/post-carousel)
+
+Uma publicação com uma foto continua como antes: a foto fica embaixo do texto, na proporção dela (entre 1:2 e 2:1), e um toque abre a tela cheia. Com 2 a 4 fotos, a publicação mostra um quadro só. A forma segue a proporção da primeira foto, presa entre 4:5 (retrato) e 1,91:1 (paisagem), e as outras fotos são cortadas para preencher o quadro. Deslizar para o lado troca a foto. Os pontos ficam embaixo do quadro (o da foto atual na cor de destaque) e a pílula "N de M" fica no canto superior direito da foto. Com o mouse, setas redondas aparecem sobre a foto enquanto o ponteiro está em cima. Um toque abre a tela cheia na mesma foto; lá dá para deslizar, usar as setas ou o teclado (esquerda e direita), e fechar devolve a publicação à última foto vista. O cartão da citação mantém a grade pequena (uma, duas lado a lado, três, 2x2), e a bolha da conversa também mantém a grade. O detalhe de um anúncio da Feira mostra o mesmo carrossel. Só a foto atual e as vizinhas carregam; uma foto que já apareceu continua carregada. Com "reduzir movimento" ligado, as setas trocam sem animação. No anúncio, a foto atual é o próprio botão "foto N de M".
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/carousel.test.js`
+- `node apps/app/test/postActions.test.js`
+- `node apps/app/test/escapeLayer.test.js`
+- `node apps/app/test/platformGate.test.js`
+- `node apps/app/test/themeUsage.test.js`
+
+Caminhada, primeiro no celular, build de depuração do Android e simulador iOS, e depois na web e no PWA:
+
+- [x] Em A Rua, numa publicação com 2, 3 ou 4 fotos, deslizar de lado troca a foto. Os pontos embaixo do quadro e a pílula "N de M" acompanham. Executado em 2026-11-10: no Android (emulador, build de depuração) e no simulador iOS (iPhone 16e), deslizar devagar passa uma foto, um deslize rápido passa uma foto por vez e um arrasto curto e lento volta para a mesma; na web (Chrome), a rolagem lateral do trackpad encaixa na foto mais próxima e a pílula acompanha.
+- [x] Começando o gesto em cima de uma foto, a lista continua rolando na vertical e o puxar para atualizar continua funcionando. Executado em 2026-11-10: rolagem vertical no Android e no iOS, com o carrossel parado na mesma foto; puxar para atualizar só no Android, onde a lista atualiza e a foto fica no lugar.
+- [x] Um arrasto na diagonal, a partir de uma foto, não prende a lista: ela segue rolando ou atualizando, e o carrossel não fica no meio do gesto. Executado em 2026-11-10, no Android: um arrasto de 15 graus troca a foto e um arrasto inclinado rola a lista.
+- [x] O deslize a partir da borda esquerda (24 px) volta a tela, numa conversa e num anúncio. Executado em 2026-11-10: no iOS, a conversa e o anúncio voltam, inclusive com o dedo começando em cima da foto do anúncio (a 20 pt da borda), sem trocar a foto. No Android, o gesto da borda é o Voltar do sistema, e o carrossel não pega o toque.
+- [x] Um toque numa foto do carrossel abre a tela cheia nessa mesma foto, e fechar devolve a publicação a ela. Executado em 2026-11-10 no Android, no iOS e na web: a tela cheia abre na foto do toque, e fechar depois de passar para outra foto deixa a publicação na última foto vista. Na web, o foco do teclado vai para essa foto, e Enter abre a tela cheia nela; só a foto à vista entra na ordem do Tab.
+- [x] Na tela cheia, deslizar e as setas trocam a foto, as teclas esquerda e direita também, e Escape e o Voltar do Android fecham. Executado em 2026-11-10: deslizar e as setas no Android e no iOS, o Voltar no Android, as teclas e o Escape na web.
+- [x] Girar o aparelho e redimensionar a janela deixa a página no lugar, na mesma publicação e na mesma foto. Executado em 2026-11-10, na web: de 1024 para 375 px de largura, o carrossel fica na mesma foto. O app no celular só abre em retrato, então girar não se aplica.
+- [x] Abrir a tela cheia na foto 3 não mostra a foto 1, nem por um instante. Executado em 2026-11-10: no Android, numa gravação da tela a 30 quadros por segundo; na web, medindo a posição da faixa a cada mudança da página antes de desenhar.
+- [ ] O cartão de uma citação mantém a grade pequena (uma, duas lado a lado, três, 2x2).
+- [x] O detalhe de um anúncio da Feira mostra o mesmo carrossel. Executado em 2026-11-10 no Android e no iOS, nos dois sentidos.
+- [ ] A bolha de uma conversa mantém a grade (uma, duas, três ou 2x2).
+- [x] Uma publicação com uma foto só continua na proporção dela (entre 1:2 e 2:1) e o toque abre a tela cheia. Executado em 2026-11-10 no Android.
+- [ ] Uma foto que falhou ("foto indisponível") tenta de novo ao toque.
+- [ ] Uma foto em GIF no carrossel desliza como as outras.
+- [ ] Com "reduzir movimento" ligado, as setas trocam a foto sem animação.
+- [x] Com o mouse, setas redondas aparecem sobre a foto enquanto o ponteiro está em cima. Executado em 2026-11-10 na web: a seta aparece ao passar o ponteiro, troca a foto sem abrir a tela cheia, e a seta da esquerda surge a partir da segunda foto.
+- [x] Dois carrosséis no mesmo feed guardam posições separadas: passar a foto de um não muda o outro. Executado em 2026-11-10 no Android e no iOS.
+- [ ] No anúncio, VoiceOver e TalkBack leem a foto atual como o botão "foto N de M".
+
+Limites desta caminhada:
+
+- Conferido em 2026-11-10 com os dados de demonstração do app (Vitrine), no emulador Android, no simulador iOS e no Chrome. O PWA instalado e o toque de verdade na web do celular não foram conferidos.
+- Ficaram sem conferir, por falta de publicação de exemplo ou para não mexer nos ajustes do sistema: a citação, a bolha da conversa, a foto que falhou, o GIF, "reduzir movimento", VoiceOver e TalkBack. A citação tem uma asserção no código em `postActions.test.js`; a bolha da conversa não usa o `MediaGrid`, então esta mudança não a alcança.
+- Na web, a animação da troca não foi observada (a aba de teste rodava em segundo plano); só a posição final de cada troca.
+- Nas publicações do feed, as fotos continuam dentro do elemento único da publicação para leitores de tela, como antes. É um limite conhecido e fica para uma correção seguinte.
