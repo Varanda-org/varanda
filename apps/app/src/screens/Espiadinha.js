@@ -13,7 +13,7 @@
 // read and verified by the node.
 // Word search in posts is the Busca tab's (screens/Busca.js).
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { StyleSheet, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, PEEK_LIMIT_DEFAULT, PEEK_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -22,8 +22,8 @@ import { shouldReloadOnShow } from '../paging'
 import { HELP } from '../help'
 import {
   PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WARM_QUIET_MS, PEEK_WEB_ONLY_MESSAGE,
-  isExpiredPeekError, isLastPeekPage, isWebOnlyError, mergePage, pageNeeds, peekKey, peekNotice,
-  recordFollow, shouldWarmPeek, skippedText, withoutFollowed
+  getPeekWarmState, isExpiredPeekError, isLastPeekPage, isSeederBusyError, isWebOnlyError, mergePage, pageNeeds, peekKey, peekNotice,
+  recordFollow, shouldWarmPeek, skippedText, subscribePeekWarm, updatePeekWarmState, withoutFollowed
 } from '../peek'
 import { whoOf } from '../who'
 import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useSocial } from './ARua'
@@ -76,8 +76,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   activeRef.current = active
   const refreshRef = useRef(refresh)
   refreshRef.current = refresh
-  // The epoch whose hidden first page was already requested.
-  const warmedEpochRef = useRef(null)
+  const peekWarm = useSyncExternalStore(subscribePeekWarm, getPeekWarmState, getPeekWarmState)
   // pageNeeds held back until the tab is shown.
   const pendingIngestRef = useRef(null)
   // A warm first page kept off screen until the first show: thirty hidden
@@ -213,6 +212,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         reconcileFollows(() => true)
       }
     } catch (err) {
+      if (isSeederBusyError(err)) updatePeekWarmState(node.epoch, { busy: true })
       if (mine !== seqRef.current) return
       // An old node bundle or a native / serve node: never asked again.
       // A quiet miss while hidden sets no error: the first real show loads.
@@ -231,7 +231,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         reconcileFollows(() => true)
       }
     }
-  }, [hosted, peek, commit, ingest, unfollowed, reconcileFollows])
+  }, [hosted, peek, commit, ingest, unfollowed, reconcileFollows, node.epoch])
 
   const loadMore = useCallback(async () => {
     const current = stateRef.current
@@ -272,38 +272,41 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   // a show or a reselect just waits.
   const previous = useRef({ active: false, refresh, scrollToTop })
   const seederVerified = !!(node.signals && node.signals.seederVerified)
-  const syncReady = !!(node.signals && node.signals.ready)
   // Warm the first page while this tab is hidden, once the seeder link is
   // verified, so opening it finds the rows already there. The refresh stored
   // on `previous` is consumed: this read is newer than a bump that arrived
   // before it.
   useEffect(() => {
-    if (!shouldWarmPeek({
+    const warm = getPeekWarmState()
+    const eligible = shouldWarmPeek({
       hosted,
       online: node.online,
       phase: node.phase,
       seederVerified,
-      syncReady,
       visible: node.visible,
       active,
       loadedAt: state.loadedAt,
       loading: state.loading,
       refreshing: state.refreshing,
       unsupported: state.unsupported,
-      attempted: warmedEpochRef.current === node.epoch
-    })) return
+      attempted: warm?.epoch === node.epoch && warm.attempted,
+      busy: warm?.epoch === node.epoch && warm.busy
+    }) && heldRef.current === null
+    updatePeekWarmState(node.epoch, { eligible })
+    if (!eligible) return
     // Only once the app has been quiet: the boot reads come first.
     const wait = node.whenIdle(PEEK_WARM_QUIET_MS)
     wait.promise.then(() => {
       const current = stateRef.current
+      const warm = getPeekWarmState()
       // The tab may have opened, or a read started, during the wait.
-      if (current.loadedAt !== null || current.loading || current.refreshing || activeRef.current || heldRef.current !== null) return
-      warmedEpochRef.current = node.epoch
+      if (warm?.epoch !== node.epoch || warm.busy || warm.attempted || current.loadedAt !== null || current.loading || current.refreshing || activeRef.current || heldRef.current !== null) return
+      updatePeekWarmState(node.epoch, { attempted: true, pending: true })
       previous.current = { ...previous.current, refresh: refreshRef.current }
-      loadFirst({ quiet: true })
+      loadFirst({ quiet: true }).finally(() => updatePeekWarmState(node.epoch, { pending: false }))
     })
     return () => wait.cancel()
-  }, [hosted, node.online, node.phase, seederVerified, syncReady, node.visible, node.epoch, node.whenIdle, active, state.loadedAt, state.loading, state.refreshing, state.unsupported, loadFirst])
+  }, [hosted, node.online, node.phase, seederVerified, node.visible, node.epoch, node.whenIdle, active, state.loadedAt, state.loading, state.refreshing, state.unsupported, loadFirst, peekWarm])
 
   useEffect(() => {
     const prev = previous.current

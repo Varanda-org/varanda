@@ -155,7 +155,7 @@ test('page needs: posts are local and shown; their quote and reply targets are n
   t.alike(pageNeeds([]), { local: new Map(), shown: [], need: [], authors: [] })
 })
 
-test('a hidden ready tab warms its first page only after the seeder link and the sync run are ready', async (t) => {
+test('a hidden ready tab warms after seeder verification without waiting for sync', async (t) => {
   const { shouldWarmPeek, PEEK_WARM_QUIET_MS } = await load()
   const ready = {
     hosted: true,
@@ -173,7 +173,7 @@ test('a hidden ready tab warms its first page only after the seeder link and the
   }
   t.is(shouldWarmPeek(ready), true)
   t.is(shouldWarmPeek({ ...ready, seederVerified: false }), false, 'seederVerified')
-  t.is(shouldWarmPeek({ ...ready, syncReady: false }), false, 'syncReady')
+  t.is(shouldWarmPeek({ ...ready, syncReady: false }), true, 'sync is not needed for the short link')
   t.is(shouldWarmPeek({ ...ready, visible: false }), false, 'visible')
   t.is(shouldWarmPeek({ ...ready, active: true }), false, 'active')
   t.is(shouldWarmPeek({ ...ready, loadedAt: 1 }), false, 'loadedAt')
@@ -184,5 +184,40 @@ test('a hidden ready tab warms its first page only after the seeder link and the
   t.is(shouldWarmPeek({ ...ready, refreshing: true }), false, 'refreshing')
   t.is(shouldWarmPeek({ ...ready, unsupported: true }), false, 'unsupported')
   t.is(shouldWarmPeek({ ...ready, attempted: true }), false, 'attempted')
-  t.is(PEEK_WARM_QUIET_MS, 3000)
+  t.is(shouldWarmPeek({ ...ready, busy: true }), false, 'a refused seeder is left alone this epoch')
+  t.is(PEEK_WARM_QUIET_MS, 500)
+})
+
+test('a full seeder is distinct from an in-flight read or a transport failure', async (t) => {
+  const { isSeederBusyError } = await load()
+  const message = 'Semeador ocupado; tente novamente em instantes.'
+  t.is(isSeederBusyError({ code: 'USAGE', message }), true)
+  for (const err of [null, {}, new Error(message), { code: 'USAGE', message: 'avisos já em andamento' }, { code: 'USAGE', message: 'espiadinha já em andamento' }]) {
+    t.is(isSeederBusyError(err), false)
+  }
+})
+
+test('warm state shares completion and refusal only within the current epoch', async (t) => {
+  const { getPeekWarmState, subscribePeekWarm, updatePeekWarmState } = await load()
+  const updates = []
+  const unsubscribe = subscribePeekWarm(() => updates.push(getPeekWarmState()))
+  updatePeekWarmState(1, { eligible: true })
+  const waiting = getPeekWarmState()
+  updatePeekWarmState(1, { eligible: true })
+  t.is(updates.length, 1, 'unchanged eligibility does not notify again')
+  updatePeekWarmState(1, { attempted: true, pending: true })
+  t.is(getPeekWarmState().pending, true)
+  t.is(waiting.attempted, false, 'subscribers keep stable snapshots')
+  updatePeekWarmState(1, { busy: true })
+  updatePeekWarmState(1, { pending: false, eligible: false })
+  t.is(getPeekWarmState().busy, true, 'settling does not clear a refusal')
+  updatePeekWarmState(2, { eligible: true })
+  t.alike(getPeekWarmState(), { epoch: 2, eligible: true, attempted: false, pending: false, busy: false })
+  const next = getPeekWarmState()
+  updatePeekWarmState(1, { pending: false, busy: true })
+  t.is(getPeekWarmState(), next, 'late errors and completions cannot affect the new epoch')
+  unsubscribe()
+  const count = updates.length
+  updatePeekWarmState(2, { pending: true })
+  t.is(updates.length, count, 'unmounted screens stop receiving updates')
 })
