@@ -475,7 +475,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     stateRef.current = { ...stateRef.current, ...patch }
     setState(stateRef.current)
   }, [])
-  const { request } = node
+  const { request, promote } = node
   const pageKeyRef = useRef(pageKey)
   pageKeyRef.current = pageKey
   const ownKeyRef = useRef(ownKey)
@@ -487,15 +487,22 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // further page. Acting as yourself calls notices.list, as before. Acting
   // as a page calls pagesNotices once per page of that loop. No push opt-in
   // either way: a page has none.
-  const read = useCallback((mine, after = null, onPage) => {
+  const read = useCallback((mine, after = null, onPage, lane) => {
     const live = () => mine === seqRef.current
     const opts = { limit: NOTICES_LIMIT_DEFAULT, after, live, onPage }
-    if (!pageKeyRef.current) return readNotices(request, opts)
+    // The hidden first read passes its lane through. A tap, a poll and a
+    // later page pass none, so they stay on the visible lane.
+    // Each send looks again: a continuation sent after the tab opened goes
+    // on the visible lane (promote only moves the request still waiting).
+    const send = lane
+      ? (method, params) => request(method, params, activeRef.current ? undefined : lane)
+      : request
+    if (!pageKeyRef.current) return readNotices(send, opts)
     const page = pageKeyRef.current
     return readNotices(async (method, params) => {
       if (method !== 'notices.list') throw new Error('Pedido inválido')
       const member = typeof ownKeyRef.current === 'string' ? ownKeyRef.current.toLowerCase() : ''
-      const data = await pagesNotices({ request }, {
+      const data = await pagesNotices({ request: send }, {
         member,
         page,
         after: params ? params.after : undefined,
@@ -635,10 +642,13 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     else settle(plan.settle.list, false, false)
   }, [remoteSeen, seenNamespace, hosted, settle])
 
-  const loadFirst = useCallback(async () => {
+  const loadFirst = useCallback(async (opts) => {
     const current = stateRef.current
     if (!hosted || current.unsupported || current.locked) return
     if (pageKeyRef.current && typeof ownKeyRef.current !== 'string') return
+    // Only the scheduled hidden read sets quiet. A tap passes a press event
+    // or nothing, and stays a visible request.
+    const quiet = !!(opts && opts.quiet === true)
     setAvatarCycle((n) => n + 1)
     const mine = ++seqRef.current
     commit({
@@ -670,7 +680,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         })
         painted = true
         settle(items)
-      })
+      }, quiet ? { priority: 'background', token: opts.token } : undefined)
       if (mine !== seqRef.current) return
       backoffRef.current = false
       if (page.supported === false) {
@@ -829,11 +839,15 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     const shown = active && !prev.active
     const reselected = scrollToTop !== prev.scrollToTop
     const changed = refresh !== prev.refresh
-    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop }
+    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop, warmToken: prev.warmToken }
     if (!active) return
     const current = stateRef.current
     if (current.loading || current.refreshing) {
       if (changed) reloadAfterRef.current = true
+      // Still queued: the same first read moves to the visible lane. Already
+      // in flight, promote does nothing and this show waits, so it is not
+      // sent twice. A pull to refresh is a later visible loadFirst.
+      if (shown) promote(prev.warmToken)
       // Rows a hidden read already painted are on screen now: seen.
       if (shown && current.loadedAt !== null) settle(current.items)
       return
@@ -844,7 +858,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       reloadAfterRef.current = false
       loadFirst()
     } else if (shown && current.loadedAt !== null) settle(current.items)
-  }, [active, refresh, scrollToTop, loadFirst, settle])
+  }, [active, refresh, scrollToTop, loadFirst, settle, promote])
 
   useEffect(() => {
     if (active && !state.loading && !state.refreshing && reloadAfterRef.current) {
@@ -936,8 +950,11 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     wait.promise.then(() => {
       if (!canStart()) return
       firstReadEpochRef.current = node.epoch
-      previous.current = { ...previous.current, refresh: refreshRef.current }
-      loadFirst()
+      // One token per first read, kept with the refresh it consumes, so
+      // opening the tab can promote this request instead of sending it again.
+      const token = Symbol('avisos-warm')
+      previous.current = { ...previous.current, refresh: refreshRef.current, warmToken: token }
+      loadFirst({ quiet: true, token })
     })
     return () => wait.cancel()
   }, [hosted, node.online, node.phase, node.visible, node.signals?.seederVerified, node.epoch, node.whenIdle, active, state.loadedAt, state.loading, state.refreshing, state.loadingMore, unsupported, locked, peekWarm, loadFirst])
