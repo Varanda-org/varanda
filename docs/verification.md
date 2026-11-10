@@ -4373,7 +4373,7 @@ Todas a fazer (nenhuma foi rodada). Primeiro o app no Android (build de debug ap
 
 ## 90. Páginas em comunidades (PR feat/pages-app)
 
-Esta seção foi substituída pela seção 147 para grupos privados como Página.
+Esta seção foi substituída pela seção 149 para grupos privados como Página.
 
 Uma página entra em comunidades e grupos como membro, por núcleos de escritor próprios que o serviço de conta guarda (`pages-groups`). Ela só entra, sai, lê e escreve: nunca cria, admite, bane, nomeia, oculta nem troca a chave de um grupo. Em comunidade de aprovação a página fica "pedida" até os administradores a admitirem. Nos grupos privados o serviço guarda a caixa da página e pode ler as publicações (Termos 15). Contrato em `docs/protocol.md` seção 12 ("Comunidades como página") e `docs/rpc.md` (5.84).
 
@@ -6960,7 +6960,7 @@ Limites desta caminhada:
 - Uma mensagem da Página que nenhum aparelho administrador coletar em 7 dias se perde.
 - O serviço sabe quando um administrador envia, embora não veja a mensagem, o destinatário nem o envelope.
 
-## 147. Grupos privados como página de ponta a ponta, Termos 34 (PR feat/page-e2e-groups)
+## 149. Grupos privados como página de ponta a ponta, Termos 34 (PR feat/page-e2e-groups)
 
 As publicações de uma Página em grupo privado passam a ser seladas no aparelho do dono ou de um administrador. O serviço conserva somente o escritor Ed25519 da Página e acrescenta o bloco que recebe sem abrir o texto. A caixa do grupo vem dos segredos da Página mantidos nos aparelhos administradores. Ao trocar essa caixa, o escritor antigo sai, um escritor novo entra e o grupo fica aguardando a admissão dele e uma época nova. Termos e Política passam para a versão 34.
 
