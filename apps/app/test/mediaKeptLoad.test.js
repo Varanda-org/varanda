@@ -58,7 +58,8 @@ function deferred () {
 
 async function setup (over = {}) {
   const { loadKept } = await loadKeptMod()
-  const { cacheGeneration } = await loadCaches()
+  const { cacheGeneration, setAllowedAuthors } = await loadCaches()
+  setAllowedAuthors(null)
   const store = fakeStore()
   const fetched = { n: 0 }
   const args = {
@@ -271,4 +272,73 @@ test('kept-only mode reads keptUrl and never reaches the loader or the fetch', (
   t.ok(avatar.includes('const canFetch = !keptOnly && node !== null && node.hosted === true'), 'the avatar key stays null, so its loader never runs')
   t.ok(avatar.includes("keptOnlyUrl('avatars', publicKey, picture, persist)"))
   t.ok(avatar.includes('if (keptOnly) return kept'), 'a miss is the initials')
+})
+
+test('an author outside the known allowed set is shown but not kept', async (t) => {
+  const caches = await loadCaches()
+  t.teardown(() => caches.setAllowedAuthors(null))
+  caches.wipeLocalCaches()
+  const { loadKept, store, fetched, args } = await setup()
+  caches.setAllowedAuthors(new Set(['b2'.repeat(32)]))
+  t.is(await loadKept(args), 'blob:fresh-image/jpeg', 'still shown')
+  t.is(fetched.n, 1)
+  t.is(store.calls.keep, 0, 'not kept')
+  caches.setAllowedAuthors(new Set([A]))
+  t.is(await loadKept(args), 'file:///kept/posts/' + A + '-' + CORE + '-1', 'inside the set: kept')
+  t.is(store.calls.keep, 1)
+  store.files.clear()
+  caches.setAllowedAuthors(null)
+  t.is(await loadKept(args), 'file:///kept/posts/' + A + '-' + CORE + '-1', 'no set known: kept')
+  t.is(store.calls.keep, 2)
+})
+
+test('an evicted or cleared URL releases the kept file through the caller\'s store', async (t) => {
+  const { registerKeptStore } = await loadKeptMod()
+  const caches = await loadCaches()
+  const { createMediaCache, onRevokedRanges } = await loadCache()
+  const released = []
+  const store = { ...fakeStore(), releaseKept: (url) => released.push(url) }
+  const cache = createMediaCache({ max: 1, revoke: () => {} })
+  const deps = { onRevokedRanges, bumpCacheGeneration: caches.bumpCacheGeneration, registerLocalCache: caches.registerLocalCache, store, cache }
+  registerKeptStore(deps)
+  registerKeptStore(deps)
+  await cache.get('a', async () => 'file:///kept/posts/a')
+  await cache.get('b', async () => 'file:///kept/posts/b')
+  t.alike(released, ['file:///kept/posts/a'], 'LRU eviction releases once')
+  caches.wipeLocalCaches()
+  t.alike(released, ['file:///kept/posts/a', 'file:///kept/posts/b'], 'a purge clears and releases')
+  const plain = createMediaCache({ max: 1, revoke: () => {} })
+  registerKeptStore({ ...deps, store: fakeStore(), cache: plain })
+  await plain.get('c', async () => 'file:///kept/posts/c')
+  await plain.get('d', async () => 'file:///kept/posts/d')
+  t.is(released.length, 2, 'a store without releaseKept is not called')
+})
+
+// Avatar persist means 'keep on disk': only the own key or a followed one.
+test('source: avatar call sites persist only own or followed keys', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const read = (file) => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')
+  const pessoas = read('screens/Pessoas.js')
+  t.ok(pessoas.includes("picture={pickAvatar(profile, row)} persist={typeof own === 'string' && row.key === own} />"), 'Pessoas: the own row only')
+  t.ok(pessoas.includes('<OwnRow row={item} own={own} profile={profile} onOpen={onOpenMember} />'))
+  t.ok(read('screens/PaginaAjustes.js').includes('publicKey={personKey} size={40} picture={(profile || {}).avatar} persist={false} />'), 'PaginaAjustes: roster never kept')
+  t.ok(read('screens/Paginas.js').includes('publicKey={pageKey} size={44} picture={(profile || {}).avatar} persist={false} />'), 'Paginas: pages never kept')
+  for (const file of ['screens/Pessoas.js', 'screens/PaginaAjustes.js', 'screens/Paginas.js']) {
+    t.absent(/<Avatar[^>]*\spersist\s*\/>/.test(read(file)), file + ': no bare persist')
+  }
+  const strip = read('ui/MomentosStrip.js')
+  t.ok(strip.includes('liveAuthors(data.authors, now)') && strip.includes('publicKey={ownKey}'), 'MomentosStrip: moments.read authors and the own key')
+  t.ok(read('screens/Momentos.js').includes('viewerRings({ authors: data.authors, own: data.own, ownKey: own'), 'Momentos: moments.read authors and the own key')
+})
+
+test('a dropped author is shown but not kept, even when the allowed set lists them', async (t) => {
+  const caches = await loadCaches()
+  t.teardown(() => caches.wipeLocalCaches())
+  caches.wipeLocalCaches()
+  const { loadKept, store, args } = await setup()
+  caches.dropAuthors([A])
+  caches.keepOnlyAuthors(new Set([A]))
+  t.is(await loadKept(args), 'blob:fresh-image/jpeg', 'shown')
+  t.is(store.calls.keep, 0, 'not kept again')
 })

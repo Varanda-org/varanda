@@ -9,7 +9,13 @@
 // (../localCaches.js); a fetch that started before it does not keep its
 // bytes, so work in flight cannot recreate what the purge removed.
 //
-// Pure: every dependency is injected, no React, react-native or Node imports.
+// Defence in depth: once the registry knows the complete allowed set
+// (../localCaches.js allowedAuthor), an author outside it is shown but never
+// kept, whatever persist says.
+//
+// Pure: no React, react-native or Node imports; the store is injected.
+
+import { allowedAuthor } from '../localCaches.js'
 
 const HEX64 = /^[0-9a-f]{64}$/
 
@@ -27,7 +33,7 @@ export async function loadKept ({ kind, author, d, persist, keptUrl, keep, fetch
   const g = !keepable ? null : Number.isSafeInteger(requestedGeneration) ? requestedGeneration : generation()
   const bytes = await fetchBytes(d)
   if (typeof validate === 'function' && !validate(bytes, d)) throw new Error('foto inválida')
-  if (keepable && generation() === g) {
+  if (keepable && generation() === g && allowedAuthor(author)) {
     const uri = keep(kind, author, d, bytes)
     if (typeof uri === 'string' && uri !== '') return uri
   }
@@ -51,9 +57,16 @@ function clearMemory () {
 // no author, so no entry keeps answering with a deleted kept file. A range
 // revoke needs nothing here: revokeMedia already drops those entries.
 // Clearing releases the URLs through the cache's revoke, which ignores kept
-// files. -> true when this call registered the store.
+// files. A URL the cache evicts (or clears) releases the kept file's in-use
+// mark, so the store's trim may delete it again. -> true when this call
+// registered the store.
 export function registerKeptStore ({ onRevokedRanges, bumpCacheGeneration, registerLocalCache, store, cache }) {
-  if (cache && typeof cache.clear === 'function') memoryCaches.add(cache)
+  if (cache && typeof cache.clear === 'function' && !memoryCaches.has(cache)) {
+    memoryCaches.add(cache)
+    if (typeof cache.onEvicted === 'function' && store && typeof store.releaseKept === 'function') {
+      cache.onEvicted((url) => { try { store.releaseKept(url) } catch {} })
+    }
+  }
   if (registered) return false
   registered = true
   onRevokedRanges((ranges) => {
