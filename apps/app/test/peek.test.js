@@ -42,6 +42,8 @@ test('a page is the last one when next is null or the page is empty', async (t) 
   t.is(isLastPeekPage({ items: [item('a', 1)], next: null }), true)
   t.is(isLastPeekPage({ items: [], next: 'cursor' }), true)
   t.is(isLastPeekPage({ items: [item('a', 1)], next: 'cursor' }), false)
+  t.is(isLastPeekPage({ items: [], next: 'cursor', incomplete: true }), false, 'an incomplete empty page goes on')
+  t.is(isLastPeekPage({ items: [], next: null, incomplete: true }), true)
 })
 
 test('withoutAuthor drops every row of one author and keeps the rest in order', async (t) => {

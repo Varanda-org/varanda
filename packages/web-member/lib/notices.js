@@ -4,7 +4,10 @@
 // 'Notices link'): `notices.list` answers "who started following me and
 // whom I do not follow yet, who replied to, quoted or mentioned me, and who
 // liked or reposted my posts" HERE, in the browser. One short-lived seeder
-// link per read: the node proves on 'varanda/notices/3' (or, when the seeder
+// link per read, or per scroll: a read that ends with a cursor leaves its
+// link open NOTICES_LINGER_MS for the chained page of the SAME own key,
+// which reuses its channel and proof; a first page, another own key, a lost
+// link, abort(), close() or the timer closes it. The node proves on 'varanda/notices/3' (or, when the seeder
 // rejects it or leaves it unanswered, 'varanda/notices/2', no likes or
 // reposts, or then 'varanda/notices/1', follows only: activity false) that it
 // owns its diary key (@varanda/core lib/notices-net.js, member role), reads
@@ -40,7 +43,8 @@
 // verified (role 'seeder' and seederCertForKey on the Noise key, as
 // ./sync.js). The stored follows, blocklist and revoked issuers are
 // re-applied on every read, cached evidence included.
-// PRIVACY: ephemeral Noise key, empty inventory, no announce. The proof
+// PRIVACY: ephemeral Noise key, empty inventory (and none asked for:
+// CAP_NO_INVENTORY), no announce. The proof
 // reveals to the seeder only what it already knows: this node's diary key,
 // which the sync link advertises on the same IP. Nothing is stored anywhere.
 // DATA FLOWS: browser memory only: no kv entry, no replica, nothing written;
@@ -51,8 +55,9 @@
 // the verdict and the kind with the current revoked issuers, own context
 // and clock (never a cached name, kind or verdict). A v2 or v3 read also
 // reads the own diary once (the session's ownContext, cached on its length).
-// COST: one WebSocket + Noise + hello + proof + at most NOTICES_MAX_SEEDER_PAGES
-// pages, then per unverified row one memory core and at most
+// COST: one WebSocket + Noise + hello + proof per scroll (a seeder offering
+// discovery sends a lean hello with no inventory), and per read at most
+// NOTICES_MAX_SEEDER_PAGES pages, then per unverified row one memory core and at most
 // NOTICES_MAX_BLOCKS_PER_ROW block requests (block 0 alone and first, then
 // `seq` alone, then blocks 1..2 and the last PEEK_TAIL_BLOCKS with up to
 // NOTICES_WINDOW_INFLIGHT (4) in flight through ./block-window.js, consumed
@@ -71,7 +76,7 @@ const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
 const { decodeBlock, validRecordCopy, isHex64, isCanonicalIso, MAX_LOG_BLOCKS, MAX_LOG_BYTES, MAX_BLOCK_BYTES } = require('@varanda/core/lib/records')
 const { seederCertForKey } = require('@varanda/core/lib/cert')
-const { attachAdmission } = require('@varanda/core/lib/admission')
+const { attachAdmission, CAP_NO_INVENTORY } = require('@varanda/core/lib/admission')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { PEEK_CONNECT_TIMEOUT_MS, PEEK_TAIL_BLOCKS, diaryPeek, retainRecords } = require('@varanda/core/lib/peek')
 const { NOTICES_LIMIT_MAX } = require('@varanda/core/lib/notices')
@@ -101,6 +106,9 @@ const NOTICES_WINDOW_INFLIGHT = 4
 const NOTICES_SLOW_READ_MS = 1000
 // No request starts with less than this left on the read deadline (peek.js).
 const MIN_FETCH_MS = 250
+// A link that ended a read with a next cursor stays open this long for the
+// chained page of the same identity (a scroll), then closes.
+const NOTICES_LINGER_MS = 2000
 const NO_SEEDER = 'sem conexão com o semeador'
 const BUSY = 'avisos já em andamento'
 const UNSUPPORTED = 'aviso: o semeador ainda não envia avisos'
@@ -196,8 +204,9 @@ function isEngagement (type) {
 // log(text): warnings. limits: test-only overrides (connectTimeoutMs,
 // deadlineMs, budgetBytes, parallel, blockTimeoutMs, maxBlocksPerRow,
 // maxSeederPages, cacheTtlMs, cacheMax, requestTimeoutMs, windowInflight,
-// maxFrame) and test hooks (now: the slow-read clock; trace(event): every
-// block get, its outcome, its charge and every accepted block).
+// maxFrame, lingerMs) and test hooks (now: the slow-read clock;
+// trace(event): every block get, its outcome, its charge, every accepted
+// block and every admission message the seeder sent).
 function createNoticer ({ storage, association, seederUrl, createSocket, ownKey, sign, seenToken, log = noop, limits = {} } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
   if (typeof ownKey !== 'function') throw new TypeError('ownKey required')
@@ -218,6 +227,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     // link's frame bound (./peek.js PEEK_MAX_FRAME) fits it with margin.
     maxFrame: PEEK_MAX_FRAME,
     windowInflight: NOTICES_WINDOW_INFLIGHT,
+    lingerMs: NOTICES_LINGER_MS,
     now: Date.now,
     trace: noop,
     ...(limits || {})
@@ -227,6 +237,9 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
   // (facts: what block `seq` signed, never a kind derived from it).
   const cache = new Map()
   let current = null // the running read: { link, cores, aborted, lost, ... }
+  // The link a read left open for its chained page: { link, own, handle, v2,
+  // v3, timer }, or null. Its proof was signed for `own` only.
+  let idle = null
   let closed = false
   let warnedUnsupported = false
 
@@ -260,12 +273,16 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
   // ---- the notices link (mirrors peek.js openLink) ----
 
   // Dials the seeder with an ephemeral Noise key, attaches the muxer, the
-  // admission channel with an EMPTY inventory and every notices channel (on
+  // admission channel with an EMPTY inventory, asking for none
+  // (CAP_NO_INVENTORY: a seeder offering discovery sends a lean hello, an
+  // older one ignores the bit and its inventory is ignored here), and every
+  // notices channel (on
   // the muxer before the hello, so protomux pairs the seeder's open), and
   // resolves once the hello verified exactly as ./sync.js does. The proof is
   // never signed before that: the admission channel opens first, so an
   // honest seeder's hello precedes its challenge. -> the link
-  // { noise, peer, notices, noticesV2, noticesV3, verified }; rejects Error('sem conexão com o semeador'),
+  // { noise, peer, notices, noticesV2, noticesV3, verified, owner }, owner
+  // being the read that uses it (null while idle); rejects Error('sem conexão com o semeador'),
   // or UsageError(SEEDER_BUSY) when the socket closed with 1013 (a fixed
   // text, never the seeder's). The link runs behind a frame guard
   // (./ws-stream.js guardedWsStream): a frame over maxFrame is cut at its
@@ -289,7 +306,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       })
       noise = new NoiseSecretStream(true, stream, { keyPair: crypto.keyPair() })
       noise.on('error', noop)
-      const link = { noise, peer: null, notices: null, noticesV2: null, noticesV3: null, verified: false }
+      const link = { noise, peer: null, notices: null, noticesV2: null, noticesV3: null, verified: false, owner: run }
       run.link = link
       let settled = false
       const finish = (err) => {
@@ -305,11 +322,16 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       }
       const timer = setTimeout(() => finish(new Error(NO_SEEDER)), L.connectTimeoutMs)
       noise.once('close', () => {
-        // A link lost under the read (not closed by its budget cut, its
-        // abort or its end): the fetches in flight end now (their cores are
-        // closed) and the read fails at its next checkpoint.
-        if (run.link === link && !run.aborted && !run.overBudget) run.lost = true
-        for (const c of run.cores) c.close().catch(noop)
+        // A link lost under the read using it now, this one or a chained
+        // one (not closed by its budget cut, its abort or its end): the
+        // fetches in flight end now (their cores are closed) and the read
+        // fails at its next checkpoint. An idle link lost is just forgotten.
+        const owner = link.owner
+        if (owner !== null) {
+          if (owner.link === link && !owner.aborted && !owner.overBudget) owner.lost = true
+          for (const c of owner.cores) c.close().catch(noop)
+        }
+        if (idle !== null && idle.link === link) dropIdle()
         finish(ws.closeCode === 1013 ? new UsageError(SEEDER_BUSY) : new Error(NO_SEEDER))
       })
       noise.once('connect', () => {
@@ -323,7 +345,9 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
           link.peer = attachAdmission(noise, {
             role: 'member',
             have: [],
+            caps: CAP_NO_INVENTORY,
             onmessage: (msg, peer) => {
+              trace({ type: 'admission', msg: msg.type, count: msg.type === 'hello' ? msg.count : null })
               if (msg.type !== 'hello') return
               link.verified = msg.role === 'seeder' &&
                 peer.peerKey !== null &&
@@ -366,15 +390,38 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     return run.lost || run.aborted || run.overBudget === true || link === null || link.noise.destroyed
   }
 
+  function destroyLink (link) {
+    if (link === null) return
+    try { if (link.notices !== null) link.notices.close() } catch {}
+    try { if (link.noticesV2 !== null) link.noticesV2.close() } catch {}
+    try { if (link.noticesV3 !== null) link.noticesV3.close() } catch {}
+    link.noise.destroy()
+  }
+
   function closeLink (run) {
     const link = run.link
     run.link = null
-    if (link !== null) {
-      try { if (link.notices !== null) link.notices.close() } catch {}
-      try { if (link.noticesV2 !== null) link.noticesV2.close() } catch {}
-      try { if (link.noticesV3 !== null) link.noticesV3.close() } catch {}
-      link.noise.destroy()
-    }
+    destroyLink(link)
+  }
+
+  // Forgets the idle link and closes it: its timer, abort(), close(), a
+  // first page, another identity, or its own loss.
+  function dropIdle () {
+    const parked = idle
+    if (parked === null) return
+    idle = null
+    clearTimeout(parked.timer)
+    destroyLink(parked.link)
+  }
+
+  // Takes the idle link out of the idle slot (its timer stopped) for a read
+  // that may adopt it once its own key is known. -> the parked entry or null.
+  function claimIdle () {
+    const parked = idle
+    if (parked === null) return null
+    idle = null
+    clearTimeout(parked.timer)
+    return parked
   }
 
   // Charges a received block to the read's budget (peek.js charge): over it,
@@ -734,6 +781,62 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     return t
   }
 
+  // Dials a new link for `own` and picks its channel and proves on it.
+  // -> { handle, v2, v3 } or { result } (a read that ends here).
+  async function establish (run, own, left) {
+    const dialAt = clock()
+    let link
+    try {
+      link = await openLink(run, own)
+    } finally {
+      run.times.connect += clock() - dialAt
+    }
+    checkAborted(run)
+    run.proofAt = clock()
+    // v3 first, then v2: each carries every older kind. A rejected open
+    // settles false at once, so only a channel the seeder leaves unanswered
+    // is waited for. v1 is consulted when the seeder took neither, and the
+    // channels not used are closed.
+    const supportedV3 = await within(link.noticesV3.supported, Math.min(L.requestTimeoutMs, left()))
+    checkAborted(run)
+    const v3 = supportedV3 === true
+    let supportedV2 = true
+    if (!v3) supportedV2 = await within(link.noticesV2.supported, Math.min(L.requestTimeoutMs, left()))
+    checkAborted(run)
+    // v2 here means the v2 shape (seq cursor, activity), which v3 shares.
+    const v2 = supportedV2 === true
+    let supported = true
+    if (!v2) supported = await within(link.notices.supported, Math.max(1, Math.min(L.requestTimeoutMs, left())))
+    checkAborted(run)
+    // v3 or v2 unanswered and v1 not taken: nothing known yet, the seeder
+    // may answer later.
+    if ((supportedV3 === TIMEOUT || supportedV2 === TIMEOUT) && supported !== true) return { result: { notices: [], next: null, incomplete: true, supported: true, activity: true } }
+    if (supported === TIMEOUT) return { result: { notices: [], next: null, incomplete: true, supported: true, activity: true } }
+    if (supported !== true) {
+      if (!warnedUnsupported) {
+        warnedUnsupported = true
+        warn(UNSUPPORTED)
+      }
+      return { result: { notices: [], next: null, incomplete: false, supported: false, activity: true } }
+    }
+    const handle = v3 ? link.noticesV3 : v2 ? link.noticesV2 : link.notices
+    for (const unused of [link.notices, link.noticesV2, link.noticesV3]) {
+      if (unused !== handle) try { unused.close() } catch {}
+    }
+    let proved
+    try {
+      proved = await within(handle.proved, Math.min(L.requestTimeoutMs, left()))
+    } catch (err) {
+      checkAborted(run)
+      throw err // the identity is locked, or another diary's pair
+    }
+    checkAborted(run)
+    // A proof not sent on a live link within the request timeout: nothing
+    // was read, the seeder may answer later.
+    if (proved !== true) return { result: { notices: [], next: null, incomplete: true, supported: true, activity: true } }
+    return { handle, v2, v3 }
+  }
+
   // ownContext: () => Promise<{ names: Map username -> issuer, posts: Set of
   // seqs }>, the own diary's verified names and post blocks; called only on
   // a v2 or v3 read, so a follows-only read opens no storage core.
@@ -753,58 +856,24 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     // channels and stays neutral (true, no "follows only" banner).
     if (mod.blocked.has(own)) return { notices: [], next: null, incomplete: false, supported: true, activity: true }
 
-    const dialAt = clock()
-    let link
-    try {
-      link = await openLink(run, own)
-    } finally {
-      run.times.connect += clock() - dialAt
-    }
-    checkAborted(run)
-    const proofAt = clock()
-    run.proofAt = proofAt
     const left = () => deadline - Date.now()
-    // v3 first, then v2: each carries every older kind. A rejected open
-    // settles false at once, so only a channel the seeder leaves unanswered
-    // is waited for. v1 is consulted when the seeder took neither, and the
-    // channels not used are closed.
-    const supportedV3 = await within(link.noticesV3.supported, Math.min(L.requestTimeoutMs, left()))
-    checkAborted(run)
-    const v3 = supportedV3 === true
-    let supportedV2 = true
-    if (!v3) supportedV2 = await within(link.noticesV2.supported, Math.min(L.requestTimeoutMs, left()))
-    checkAborted(run)
-    // v2 here means the v2 shape (seq cursor, activity), which v3 shares.
-    const v2 = supportedV2 === true
-    let supported = true
-    if (!v2) supported = await within(link.notices.supported, Math.max(1, Math.min(L.requestTimeoutMs, left())))
-    checkAborted(run)
-    // v3 or v2 unanswered and v1 not taken: nothing known yet, the seeder
-    // may answer later.
-    if ((supportedV3 === TIMEOUT || supportedV2 === TIMEOUT) && supported !== true) return { notices: [], next: null, incomplete: true, supported: true, activity: true }
-    if (supported === TIMEOUT) return { notices: [], next: null, incomplete: true, supported: true, activity: true }
-    if (supported !== true) {
-      if (!warnedUnsupported) {
-        warnedUnsupported = true
-        warn(UNSUPPORTED)
-      }
-      return { notices: [], next: null, incomplete: false, supported: false, activity: true }
+    const parked = run.adopting
+    run.adopting = null
+    let chan
+    if (parked !== null && parked.own === own && !parked.link.noise.destroyed) {
+      // The chained page of the same identity on the link the read before
+      // it left open: its channel and its proof, no new socket. A link
+      // proved for another identity is never adopted.
+      parked.link.owner = run
+      run.link = parked.link
+      run.proofAt = clock()
+      chan = parked
+    } else {
+      if (parked !== null) destroyLink(parked.link)
+      chan = await establish(run, own, left)
+      if (chan.result !== undefined) return chan.result
     }
-    const handle = v3 ? link.noticesV3 : v2 ? link.noticesV2 : link.notices
-    for (const unused of [link.notices, link.noticesV2, link.noticesV3]) {
-      if (unused !== handle) try { unused.close() } catch {}
-    }
-    let proved
-    try {
-      proved = await within(handle.proved, Math.min(L.requestTimeoutMs, left()))
-    } catch (err) {
-      checkAborted(run)
-      throw err // the identity is locked, or another diary's pair
-    }
-    checkAborted(run)
-    // A proof not sent on a live link within the request timeout: nothing
-    // was read, the seeder may answer later.
-    if (proved !== true) return { notices: [], next: null, incomplete: true, supported: true, activity: true }
+    const { handle, v2, v3 } = chan
 
     // The names are filtered with the CURRENT revoked issuers on every read
     // (the own context may be cached across reads).
@@ -818,7 +887,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       }
       posts = oc.posts
     }
-    run.times.proof += clock() - proofAt
+    run.times.proof += clock() - run.proofAt
     run.proofAt = null
     run.rowsAt = clock()
 
@@ -846,6 +915,9 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       }
       checkAborted(run) // unless the link itself was lost: NO_SEEDER
       if (page === TIMEOUT) {
+        // A page left unanswered: the channel may still owe it, so the link
+        // is not kept for a chained page.
+        run.stale = true
         more = true
         run.incomplete = true
         break
@@ -911,6 +983,8 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       const edge = prefix[prefix.length - 1].item
       next = cursorOf(last !== null && compareRows(edge, last) < 0 ? last : edge, v2)
     }
+    // A read that ends with a cursor offers its link to the chained page.
+    if (next !== null) run.chain = { own, handle, v2, v3 }
     return { notices, next, incomplete: run.incomplete, supported: true, activity: v2 }
   }
 
@@ -948,29 +1022,66 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     // (getBlock). times: ms spent dialling up to the verified hello, on the
     // channel support, the proof and the own context, and on the seeder
     // pages and their rows, for the slow-read line.
-    const run = { link: null, cores: new Set(), keyLocks: new Map(), aborted: false, lost: false, budget: 0, pending: 0, overBudget: false, incomplete: false, rowsAt: null, proofAt: null, times: { connect: 0, proof: 0, rows: 0 } }
+    // adopting: the idle link claimed for a chained page until readWith
+    // adopts it (same own key) or closes it. chain: set when the read ends
+    // with a cursor ({ own, handle, v2, v3 }); stale: a page went unanswered.
+    // The budget and the deadline are this read's, whatever link it uses.
+    const run = { link: null, adopting: null, chain: null, stale: false, cores: new Set(), keyLocks: new Map(), aborted: false, lost: false, budget: 0, pending: 0, overBudget: false, incomplete: false, rowsAt: null, proofAt: null, times: { connect: 0, proof: 0, rows: 0 } }
     current = run
+    const parked = claimIdle()
+    // A first page always dials: the scroll it starts is a new one.
+    if (first) {
+      if (parked !== null) destroyLink(parked.link)
+    } else {
+      run.adopting = parked
+    }
     const startedAt = clock()
     try {
       const cursor = first ? null : after.seq === undefined ? { at: after.at, key: after.key } : { at: after.at, key: after.key, seq: after.seq }
       return await readWith(run, { limit, after: cursor }, typeof ownContext === 'function' ? ownContext : async () => ({ names: new Map(), posts: new Set() }))
     } finally {
       slowRead(run, startedAt)
-      closeLink(run)
+      if (run.adopting !== null) destroyLink(run.adopting.link)
+      run.adopting = null
+      if (!park(run)) closeLink(run)
       for (const c of run.cores) c.close().catch(noop)
       // Guarded by identity: an aborted read never touches a newer one.
       if (current === run) current = null
     }
   }
 
+  // Keeps the run's link idle for lingerMs when the read ended with a
+  // cursor on a live, healthy link it still owns, with every row core
+  // closed (two memory cores of one key cannot replicate on one link at
+  // once). -> whether it was kept.
+  function park (run) {
+    const link = run.link
+    if (run.chain === null || link === null || closed || current !== run) return false
+    if (run.aborted || run.lost || run.overBudget || run.stale || run.cores.size > 0 || link.noise.destroyed) return false
+    run.link = null
+    link.owner = null
+    const entry = { link, own: run.chain.own, handle: run.chain.handle, v2: run.chain.v2, v3: run.chain.v3, timer: null }
+    entry.timer = setTimeout(() => {
+      if (idle === entry) dropIdle()
+    }, L.lingerMs)
+    dropIdle()
+    idle = entry
+    return true
+  }
+
   // Destroys the link and ends the running read, and releases the slot at
   // once (peek.js abort): the aborted read throws at its next checkpoint
   // without touching a newer read's state.
   function abort () {
+    // An idle link goes too: the session aborts on every identity change,
+    // lock and detach, and the link carries the old proof.
+    dropIdle()
     const run = current
     if (run === null) return
     current = null
     run.aborted = true
+    if (run.adopting !== null) destroyLink(run.adopting.link)
+    run.adopting = null
     closeLink(run)
     for (const c of run.cores) c.close().catch(noop)
   }
@@ -1000,5 +1111,6 @@ module.exports = {
   NOTICES_CACHE_TTL_MS,
   NOTICES_CACHE_MAX,
   NOTICES_WINDOW_INFLIGHT,
-  NOTICES_SLOW_READ_MS
+  NOTICES_SLOW_READ_MS,
+  NOTICES_LINGER_MS
 }
