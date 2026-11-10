@@ -4235,7 +4235,7 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 
 ## 85. Conversas como página (PR feat/pages-app)
 
-> Superada pela seção 146 para as Conversas de página de ponta a ponta.
+> Superada pela seção 148 para as Conversas de página de ponta a ponta.
 
 Uma Página tem Conversas, mas a chave de mensagens dela fica no serviço de conta, que pode ler as mensagens enviadas e recebidas pela página. Protocolo na seção 12 de `docs/protocol.md` ("Conversas como página"); dados em `docs/design.md` (LGPD); telas em `docs/app.md` ("Páginas"). Termos e Política na versão 15.
 
@@ -6838,7 +6838,101 @@ Limites desta caminhada:
 - Os testes conferem as respostas da demonstração, não a tela. Fotos, controles de oferta e posição só se confirmam no aparelho ou no simulador.
 - Os controles de oferta nunca foram revistos na demonstração antes desta mudança: a caminhada acima é a primeira revisão deles.
 
-## 146. Conversas de página de ponta a ponta, Termos 33 (PR feat/page-e2e-dm)
+## 146. Entrar e criar conta em palavras simples (PR feat/simple-sign-in)
+
+Só apresentação e texto: protocolo, RPC, handlers e o serviço de conta ficam como estão.
+
+O que mudou:
+
+- O primeiro passo "Bem-vindo à Varanda" é uma tela de boas-vindas. Não tem título na barra nem "Passo 1 de 3": só o botão de informação (i) no canto de cima, que abre "Como funciona a entrada" com todas as explicações.
+- O hero tem a cadeira num disco (creme no escuro), o título "Bem-vindo à Varanda" (28 pt) e "Uma rede social feita entre pessoas.".
+- Dois botões grandes de largura total (52 pt) perto de baixo: "Criar minha conta" (cheio) e "Já tenho conta" (contornado). Quando o aparelho já conhece a conta, só "Entrar". Com "Concluir e entrar" esperando, "Criar minha conta" vira secundário.
+- Os avisos (conta não encontrada, conta conhecida que não apareceu, entrada perdida, rede cheia, convite, Feira, conta de outra passkey) aparecem em caixas suaves acima dos botões.
+- O link calmo "Outras formas de entrar" com seta (no lugar de "Mais opções" e "Menos opções") tem o mesmo texto aberto ou fechado; leitores de tela anunciam expandido e recolhido. Some quando nenhuma opção se aplica. Aberto, mostra linhas: "Entrar com outra passkey", "Criar com o celular" ou "Entrar com o celular" (só na web, com QR code) e "Entrar com código de recuperação", cujo campo abre dentro da lista e fica acima do teclado no Android. Abre sozinho depois de uma entrada que não encontra a conta e pode ser fechado.
+- A linha "Para criar a conta ou entrar, basta confirmar com o rosto..." saiu da tela; está na ajuda (i).
+- Quando criar a conta precisa de uma confirmação extra, a tela diz "Falta só confirmar mais uma vez. Toque em Concluir e entrar.". Fechar a janela do Face ID ou da digital mostra "Você fechou a confirmação. Toque de novo quando quiser.".
+- Em Ajustes › Conta o mesmo conteúdo aparece dentro do cartão, sem o hero.
+- Peças novas: `apps/app/src/ui/Welcome.js` (WelcomeHeader), `apps/app/src/ui/OptionRow.js` (OptionsToggle, OptionList, OptionRow, OptionBlock), `Btn large`, `Page grow` e `type.heroTitle`. Nada muda em como a conta é criada ou aberta.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/entrarCard.test.js`, `node apps/app/test/passkeysScreen.test.js`, `node apps/app/test/passkeyTrouble.test.js`, `node apps/app/test/help.test.js`, `node apps/app/test/onboarding.test.js`, `node apps/app/test/signupAdmission.test.js`, `node apps/app/test/sessionStoreNative.test.js` e `node apps/app/test/uiKit.test.js`.
+- `npm ci --ignore-scripts`, `npm run lint`, `npm test` e `npm run demo` (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (Android e iOS) e depois na web e no PWA (390 e 1280 de largura), em claro e escuro:
+
+- [ ] Sem barra com título nem "Passo 1 de 3"; só o botão (i) no canto de cima.
+- [ ] Um só título "Bem-vindo à Varanda".
+- [ ] A cadeira aparece num disco, creme no escuro.
+- [ ] Dois botões de largura total, 52 pt, perto de baixo num celular de 375 pt.
+- [ ] "Outras formas de entrar" tem seta, abre e fecha; TalkBack e VoiceOver anunciam expandido e recolhido.
+- [ ] As linhas da lista têm pelo menos 44 pt.
+- [ ] Sem nenhuma linha para mostrar, o link some.
+- [ ] O campo do código de recuperação abre dentro da lista e fica acima do teclado.
+- [ ] Os avisos aparecem em caixa suave acima dos botões.
+- [ ] Com "Concluir e entrar" esperando, "Criar minha conta" fica secundário.
+- [ ] Texto grande (tamanho de fonte do sistema no máximo): nada cortado.
+- [ ] Movimento reduzido: nenhuma animação nova.
+- [ ] O botão (i) abre "Como funciona a entrada".
+- [ ] Ajustes › Conta mostra o mesmo conteúdo no cartão, sem o hero.
+- [ ] O passo 2 continua com "Passo 2 de 3".
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- O build de debug não conclui uma passkey numa instalação de produção (veja `docs/development.md`). A cerimônia real se confere com o APK de preview do EAS ou no iPhone com o domínio associado.
+- Os estados nativos de criação pendente, código de recuperação e teclado com conta real só se conferem no APK de preview do EAS ou no TestFlight.
+- Os testes conferem textos e ordem no código, não a tela.
+
+## 147. Toda a entrada em layout moderno (PR feat/modern-onboarding)
+
+Só apresentação e texto: protocolo, RPC, handlers, o serviço de conta, a idade e o vínculo Google ficam como estão.
+
+O que mudou:
+
+- Todo passo depois das boas-vindas usa um só layout (`apps/app/src/ui/Stepper.js`): barra do topo sem título, só com o botão (i) nos passos que têm ajuda; "Passo n de 3" centrado com pontos; um disco de 72 pt com um ícone (ou um spinner enquanto espera, ou o avatar do perfil); um título (28 pt, arredondado); uma frase curta; o corpo; botões grandes de largura total (52 pt) perto de baixo, um cheio e o segundo contornado; a terceira escolha como link calmo centrado; avisos em caixas suaves e quentes; nenhum cartão dentro do passo. As explicações ficam no (i).
+- Termos (antes de entrar): ícone "file-text", título "Antes de começar" (ou "Atualizamos os termos" ou "Antes de continuar"), a frase de sempre, os dois documentos como uma lista de linhas que abrem no lugar ("Ler" e "Fechar"), o botão grande "Li e aceito os Termos de Uso e a Política de Privacidade" e, embaixo, "Sem aceitar, não é possível entrar no Varanda.". Ajustes › Termos não mudou.
+- Introdução: título maior e arredondado, botão grande "Próximo" ou "Começar" e "Voltar" como link calmo embaixo.
+- Buscando sua conta: spinner no disco; a linha repetida "Buscando sua conta…" e o "carregando…" saíram.
+- Confirme sua idade: ícone "shield"; o (i) abre "Como funciona a confirmação de idade" (Didit, selfie ou documento, só a faixa guardada, retomar por cerca de uma hora, volta pelo app ou pelo navegador, política de privacidade). As linhas sobre a Didit e "a foto não chega à Varanda" saíram da tela. Os estados ficam em caixas suaves (em análise com continuar, inconclusivo, vencida, recusada, confirmada), com os botões grandes "Verificar minha idade", "Continuar a verificação", "Tentar com um documento" e "Conferir de novo". "Pedir entrada" da Feira fica numa caixa; o convite colado tem "Usar este convite"; a barra de offline repetida do shell fica escondida neste passo.
+- Escolha seu @nome (Google): ícone "at-sign"; o campo @nome e o botão grande "Continuar com o Google"; a linha de privacidade sobre o vínculo Google está no (i). A linha "Sem a liberação da associação, este aparelho não publica nem sincroniza." não aparece mais neste passo (continua nos passos manuais e em Ajustes). A confirmação diz "Quase lá: você vai entrar como @x." com "Confirmar" grande e "Começar de novo" como link calmo. Convite, lista de espera e aviso de volta ficam em caixas suaves. Carregando: "Preparando sua conta…". Antes de abrir o Google: "Vamos abrir o Google. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.". Ajustes › Conta não mudou.
+- Um instante: spinner, a linha "Buscando seu perfil." e "Continuar mesmo assim" depois de 10 s.
+- Como você quer aparecer: o avatar é o herói, com os botões de foto embaixo; nome e bio; "Continuar" grande e "Pular por enquanto" como link calmo (os dois somem enquanto o editor de foto está aberto). A explicação da foto pública foi para o (i).
+- Passos da configuração manual (nativo ou instalação própria): o mesmo quadro, botões grandes e os mesmos textos.
+- Aviso antes da verificação de idade: "Vamos abrir a verificação. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.".
+- Peças: `Stepper`, `StepLink` e `StepNotice`. Nada muda em como a conta, a idade ou o Google funcionam.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/{uiKit,help,onboarding,age,wordCheck,linkReturn,passkeyTrouble,passkeysScreen,signupInvite,account,profileSave,mediaCrop,intro,terms,terms-version,legal,platformGate,themeUsage,splashGate}.test.js`, um arquivo por vez.
+- `npm run lint`, `npm test` e `npm run demo` (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA, claro e escuro:
+
+- [ ] Sem barra com título e com o título uma só vez em todo passo.
+- [ ] "Passo n de 3" certo em cada passo, centrado com pontos.
+- [ ] Botões de largura total e 52 pt; links calmos com 44 pt.
+- [ ] Avisos em caixas suaves, sem cartão dentro do passo.
+- [ ] Termos: as linhas abrem e fecham no lugar ("Ler" e "Fechar") e o aceite segue em frente.
+- [ ] Introdução: "Próximo", "Começar" e "Voltar" funcionam.
+- [ ] Idade: cada estado (em análise, inconclusivo, vencida, recusada, confirmada), a Feira "Pedir entrada", o convite colado com "Usar este convite" e, uma vez, o offline sem barra repetida.
+- [ ] @nome: o formulário, a confirmação "Quase lá", o convite, a lista de espera e o aviso de volta.
+- [ ] Um instante: "Continuar mesmo assim" aparece depois de 10 s.
+- [ ] Perfil: com o editor de foto aberto, "Continuar" e "Pular por enquanto" somem.
+- [ ] Texto grande (tamanho de fonte do sistema no máximo): nada cortado.
+- [ ] Movimento reduzido: nenhuma animação nova.
+- [ ] TalkBack e VoiceOver leem na ordem certa.
+- [ ] O teclado não cobre os campos.
+- [ ] Ajustes › Conta e Ajustes › Termos continuam como eram.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Os testes leem o código-fonte, não a tela.
+- Os fluxos reais do Google e da Didit e o Android não foram exercitados neste PR.
+- Entrar de verdade no nativo precisa do APK de preview do EAS ou do TestFlight.
+
+## 148. Conversas de página de ponta a ponta, Termos 33 (PR feat/page-e2e-dm)
 
 As Conversas de Página passam a ser cifradas de ponta a ponta entre quem escreve e os aparelhos do dono e dos administradores. O serviço de conta não abre a caixa nem as mensagens: só publica a chave pública da caixa, guarda envelopes selados para os membros da lista e assina `varanda-dm-v3\n` mais o digest de 32 bytes que o aparelho preparou. A dona ativa a página, importa antes as linhas antigas quando houver e distribui a nova chave aos administradores. Termos e Política passam para a versão 33.
 

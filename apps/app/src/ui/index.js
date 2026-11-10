@@ -111,12 +111,12 @@ export function useBottomPad () {
   return layout.tabBar + insets.bottom + 96
 }
 
-export function Page ({ children, flush, padBottom = 0, refreshControl }) {
+export function Page ({ children, flush, padBottom = 0, refreshControl, grow }) {
   const styles = useStyles(makeStyles)
   return (
     <ScrollView
       style={styles.scroll}
-      contentContainerStyle={[flush ? styles.pageFlush : styles.pageContent, { paddingBottom: (flush ? 0 : 16) + padBottom }]}
+      contentContainerStyle={[flush ? styles.pageFlush : styles.pageContent, grow && styles.pageGrow, { paddingBottom: (flush ? 0 : 16) + padBottom }]}
       keyboardShouldPersistTaps='handled'
       refreshControl={refreshControl}
     >
@@ -194,7 +194,7 @@ export function Row ({ children }) {
   return <View style={styles.row}>{children}</View>
 }
 
-export function Btn ({ label, icon, onPress, disabled, pending, secondary, danger, accessibilityLabel, block }) {
+export function Btn ({ label, icon, onPress, disabled, pending, secondary, danger, accessibilityLabel, block, expanded, large }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const off = disabled === true || pending === true
@@ -202,15 +202,19 @@ export function Btn ({ label, icon, onPress, disabled, pending, secondary, dange
   return (
     <Pressable
       accessibilityRole='button'
-      accessibilityState={{ disabled: off }}
+      accessibilityState={{ disabled: off, expanded }}
+      // react-native-web does not map accessibilityState.expanded.
+      aria-expanded={expanded}
       accessibilityLabel={accessibilityLabel}
       disabled={off}
       onPress={onPress}
       style={({ pressed }) => [
         styles.btn,
+        large && styles.btnLarge,
         typeof icon === 'string' && styles.btnRow,
         block && styles.btnBlock,
         outline && styles.btnOutline,
+        outline && large && styles.btnOutlineLarge,
         danger && styles.btnDanger,
         off && styles.btnOff,
         pressed && styles.btnPressed
@@ -276,6 +280,7 @@ const makeStyles = (colors) => StyleSheet.create({
   scroll: { flex: 1, backgroundColor: colors.bg },
   pageContent: { padding: 16 },
   pageFlush: {},
+  pageGrow: { flexGrow: 1 },
   column: { width: '100%', maxWidth: layout.column, alignSelf: 'center', gap: 12 },
   section: {
     flexDirection: 'row',
@@ -307,10 +312,12 @@ const makeStyles = (colors) => StyleSheet.create({
     minHeight: 40,
     justifyContent: 'center'
   },
+  btnLarge: { minHeight: 52, paddingVertical: 15 },
   btnRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   confirmStack: { flexDirection: 'column', alignItems: 'stretch', gap: 8 },
   btnBlock: { alignSelf: 'stretch' },
   btnOutline: { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.outline, paddingVertical: 8, paddingHorizontal: 15 },
+  btnOutlineLarge: { paddingVertical: 14 },
   btnDanger: { borderColor: colors.danger },
   btnOff: { opacity: 0.45 },
   btnPressed: { opacity: 0.8 },
