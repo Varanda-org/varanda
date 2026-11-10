@@ -26,7 +26,7 @@ const { createPagesWriter } = require('../lib/account/pages-writer')
 const { createPagesDelegate } = require('../lib/account/pages-delegate')
 const { createPagesNotices } = require('../lib/account/pages-notices')
 const { createAccountServer } = require('../lib/account/server')
-const { accountOrigin, groupStep } = require('../lib/commands/page')
+const { accountOrigin, groupStep, serviceError } = require('../lib/commands/page')
 
 const BIN = path.join(__dirname, '../bin/varanda.js')
 const ORIGIN = 'https://varanda.test'
@@ -66,6 +66,14 @@ test('page cli: VARANDA_ACCOUNT_ORIGIN is https, or http on a loopback host only
   for (const bad of [null, '', 'http://varanda.org', 'ftp://varanda.org', 'https://varanda.org/conta', 'https://u:p@varanda.org', 'https://varanda.org?x', 'nada', 'http://127.0.0.2:1']) {
     t.exception(() => accountOrigin(bad), /VARANDA_ACCOUNT_ORIGIN/, String(bad))
   }
+})
+
+test('page cli: private group tokens read in pt-BR', (t) => {
+  t.is(serviceError('privado').message, 'grupo privado: publique como a página pelo app')
+  t.is(serviceError('privado').token, 'privado')
+  t.is(serviceError('sem-caixa').message, 'a página ainda não ativou as Conversas privadas no app')
+  t.is(serviceError('sem-caixa', true).uncertain, true)
+  t.is(serviceError('outro').token, 'indisponivel', 'an unknown token stays indisponivel')
 })
 
 test('page cli: join, leave and group-post pick the action from --community or --group', async (t) => {

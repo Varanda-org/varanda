@@ -878,6 +878,27 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     })
   }
 
+  // Sets reboxPending before the private memberships move to `groupBox`,
+  // so a move cut short is completed by 'group-rebox'.
+  function markRebox (page, groupBox) {
+    return setFlag(page, (next, r) => {
+      if (!live(r)) throw fail('encerrada')
+      if (!has(r, 'dm') || r.dm.gen < 1 || r.dm.groupBox !== groupBox || r.dm.reboxPending) return false
+      next.dm.reboxPending = true
+    })
+  }
+
+  // Clears reboxPending once every private group of the page moved to
+  // `groupBox` (./pages-groups.js): a rotation to another groupBox committed
+  // meanwhile keeps it set.
+  function settleRebox (page, groupBox) {
+    return setFlag(page, (next, r) => {
+      if (!live(r)) throw fail('encerrada')
+      if (!has(r, 'dm') || r.dm.groupBox !== groupBox || !r.dm.reboxPending) return false
+      next.dm.reboxPending = false
+    })
+  }
+
   function setFlag (page, fn, opts = {}) {
     return enqueue(() => {
       writable()
@@ -1077,6 +1098,8 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     setRoster,
     setDm,
     promoteDm,
+    markRebox,
+    settleRebox,
     pause,
     expectLength,
     isPage,

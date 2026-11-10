@@ -1223,6 +1223,8 @@ function watchFork (core, onFork) {
 // The session's reader (see the header) is withdrawn however the run ends,
 // before it published too. startupSlowMs: the startup watchdog's interval
 // (tests).
+const MAX_PAGE_ROOTS = 64
+
 async function runSync (opts = {}) {
   const reader = (opts && opts.reader) || NO_READER
   const log = opts && typeof opts.log === 'function' ? opts.log : noop
@@ -1312,9 +1314,15 @@ async function syncRun ({
   noPageMigrate = false,
   // async (key) => queues a signed follow of key (member-ops followAdd);
   // null while the session is locked, so a move is then left for later.
-  followPage = null
+  followPage = null,
+  // The roots the pages this device holds the secrets of are in (docs/rpc.md
+  // 5.114), kept paged like the roots the own diary binds: as replicas
+  // only, never an own writer, nothing appended. At most MAX_PAGE_ROOTS.
+  pageRoots = []
 } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
+  const heldPageRoots = [...new Set((Array.isArray(pageRoots) ? pageRoots : [])
+    .filter((k) => typeof k === 'string' && /^[0-9a-f]{64}$/.test(k)))].slice(0, MAX_PAGE_ROOTS)
   // The trust root is checked before anything is opened.
   const config = await store.readConfig(storage)
   if (!config || config.role !== 'member') throw new Error('identidade não encontrada')
@@ -3483,6 +3491,7 @@ async function syncRun ({
       if (entries === null) log('aviso: falha ao ler os grupos do diário')
       for (const key of diaryGroupKeys(entries || [])) adoptDiaryRoot(key)
     }
+    for (const key of heldPageRoots) adoptDiaryRoot(key)
     for (const s of stored) {
       if (s.key !== s.group || !diaryRoots.has(s.key) || !s.community) continue
       diaryCommunities.add(s.key)

@@ -68,7 +68,10 @@ export const TEXTS = Object.freeze({
   'nao-encontrado': 'Não encontrado',
   'em-andamento': 'Pedido ainda em andamento',
   conflito: 'Outro aparelho gravou antes',
-  'rotacao-necessaria': 'A chave da página está sendo trocada; tente de novo em instantes'
+  'rotacao-necessaria': 'A chave da página está sendo trocada; tente de novo em instantes',
+  sequencia: 'Alguém publicou antes; toque para enviar de novo',
+  'aguardando-chave': 'aguardando nova chave',
+  privado: 'Este grupo é privado: a mensagem precisa ser cifrada neste aparelho'
 })
 
 export function pageError (code, nextChangeAt) {
@@ -254,7 +257,9 @@ export const pagesAvatar = (args) => upload('avatar', args, MAX_AVATAR_BYTES)
 
 const PAGELESS = ['create', 'list', 'terms']
 const RECORD_ACTIONS = ['accept', 'remove', 'offer', 'transfer-accept', 'close']
-const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read']
+// A page's post in a private group is sealed on the device (node group.seal)
+// and sent as 'group-seal'; the service cannot read it (docs/rpc.md 5.114).
+const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox']
 // The page's own messages go through the node (5.114); dm-legacy-read and
 // dm-legacy-done serve only the sealed bundle of a legacy page's old ones.
 const DM_ACTIONS = ['dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']

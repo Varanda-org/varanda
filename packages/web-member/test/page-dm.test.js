@@ -230,7 +230,8 @@ test('page secrets: generate, adopt, share, late key catch-up, draft and send as
   t.is((await errorOf(A.web.request('dm.list', { page: P }))).message, NO_PAGE_KEY, 'no secrets held: no page inbox')
   t.is((await errorOf(A.web.request('dm.pageShare', { page: P, member: B.key, box: B.box }))).message, NO_PAGE_KEY)
   t.is((await errorOf(A.web.request('group.seal', { group: P, page: P, text: 'oi' }))).message, NO_PAGE_KEY)
-  t.is((await errorOf(A.web.request('group.read', { group: P, page: P }))).message, NO_PAGE_KEY, 'never the own groups')
+  const unheld = await errorOf(A.web.request('group.read', { group: P, page: P }))
+  t.alike([unheld.code, unheld.message], ['NOT_FOUND', 'grupo não encontrado'], 'never the own groups: an unheld root is not found')
 
   const refused = await errorOf(A.web.request('dm.pageGenerate', { page: P, gen: 1, recipients: [{ member: B.key, box: B.box }] }))
   t.is(refused.message, 'destinatários inválidos', 'the caller must be a recipient')

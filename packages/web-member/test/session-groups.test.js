@@ -139,7 +139,7 @@ test('group and community RPC handler names match the core session and the metho
   t.teardown(() => core.close(), { force: true })
   t.teardown(() => browser.close(), { force: true })
   const keys = (handlers, prefix) => Object.keys(handlers).filter((key) => key.startsWith(prefix)).sort()
-  t.is(keys(core.handlers, 'group.').length, 17)
+  t.is(keys(core.handlers, 'group.').length, 18)
   t.alike(keys(browser.handlers, 'group.'), keys(core.handlers, 'group.'))
   t.alike(keys(browser.handlers, 'community.'), COMMUNITY_METHODS, 'every community method of protocol v2, no community.link')
   t.alike(METHODS.filter((m) => m.startsWith('community.')).sort(), COMMUNITY_METHODS, 'as the rpc method table')
@@ -641,4 +641,78 @@ test('a resumed community.create waits for the roots of its plan', async (t) => 
   push.finish()
   t.alike(await creating, { community: plan.community, group: plan.group })
   t.alike(s.internal, [])
+})
+
+test('group.read and group.seal with a page the identity holds no secrets for never fall through to the own groups', async (t) => {
+  const s = await setup(t)
+  const { community: C, group } = await community(s)
+  const { group: priv } = await s.web.request('group.create', { name: 'Conselho', join: 'approval', visibility: 'private', community: C })
+  const page = 'cd'.repeat(32)
+  const noKey = (visibility) => ({ items: [], next: null, hidden: 0, incomplete: false, sealed: 0, epoch: null, state: 'no-key', role: null, visibility })
+  t.alike(await s.web.request('group.read', { group, page }), noKey('public'), 'the verified header of a public root')
+  t.alike(await s.web.request('group.read', { group: priv, page }), noKey('private'), 'and of a private one')
+  for (const g of [group, priv]) {
+    const err = await errorOf(s.web.request('group.seal', { group: g, page, text: 'oi' }))
+    t.alike([err.code, err.message], ['USAGE', 'sem chave da página'], 'group.seal')
+  }
+  const missing = 'ef'.repeat(32)
+  const err = await errorOf(s.web.request('group.read', { group: missing, page }))
+  t.alike([err.code, err.message], ['NOT_FOUND', 'grupo não encontrado'], 'a root not held here')
+  t.ok((await store.readGroupReplicas(s.storage)).includes(missing), 'listed for the next sync')
+  t.is((await s.web.request('group.read', { group })).state, 'ok', 'the own read is unchanged')
+  t.absent((await store.readGroupReplicas(s.storage)).includes(page))
+})
+
+test('a page root found by peek restarts the continuous run exactly once', async (t) => {
+  const { groupJoinRecord } = require('@varanda/core/lib/records')
+  const page = 'cd'.repeat(32)
+  const root = 'ef'.repeat(32)
+  const join = groupJoinRecord({ group: root, writer: '12'.repeat(32), on: true })
+  const peek = async (key, seqs) => ({
+    length: 2,
+    entries: key === page ? seqs.filter((q) => q < 2).map((q) => ({ seq: q, record: q === 1 ? join : { type: 'genesis' } })) : [],
+    missing: []
+  })
+  const runs = []
+  const sync = require('../lib/sync')
+  const dm = require('../lib/dm')
+  const original = { runSync: sync.runSync, createDmEngine: dm.createDmEngine }
+  const ids = [require.resolve('../lib/node'), require.resolve('../lib/session')]
+  const cached = ids.map((id) => require.cache[id])
+  let factory
+  try {
+    sync.runSync = async ({ signal, onEvent, peeker, once, pageRoots }) => {
+      runs.push({ once, pageRoots: [...pageRoots] })
+      peeker.set(peek)
+      onEvent({ event: 'own-synced', length: 1 })
+      await new Promise((resolve) => {
+        if (signal.aborted) return resolve()
+        signal.addEventListener('abort', resolve)
+      })
+      peeker.clear(peek)
+      return { ok: true, errors: [], peers: 1, seederConfirmed: true }
+    }
+    dm.createDmEngine = (opts) => {
+      const engine = original.createDmEngine(opts)
+      engine.heldPageBoxes = () => [{ page, box: '34'.repeat(32), gen: 1 }]
+      return engine
+    }
+    for (const id of ids) delete require.cache[id]
+    factory = require('../lib/node').createBrowserNode
+  } finally {
+    sync.runSync = original.runSync
+    dm.createDmEngine = original.createDmEngine
+    ids.forEach((id, i) => { require.cache[id] = cached[i] })
+  }
+  const s = await setup(t, { factory })
+  await s.web.request('sync.start')
+  // Well before the fake run's unpublished reader would preempt it
+  // (readerWaitMs): only the roots restart counts here.
+  await until(() => runs.length >= 2, { name: 'restarted', timeoutMs: 2000 })
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  t.is(runs.length, 2, 'one restart, no loop')
+  t.alike(runs[0].pageRoots, [], 'the first run knew no remote root')
+  t.alike(runs[1].pageRoots, [root], 'the next run pages it')
+  t.ok(runs.every((r) => r.once === false))
+  await s.web.request('sync.stop')
 })
