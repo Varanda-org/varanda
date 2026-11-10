@@ -101,7 +101,9 @@ const isMoved = (p) => p.moved === true || (p.movedTo !== undefined && p.movedTo
 const endedNote = (p) => (p.closed === true ? 'encerrada' : isMoved(p) ? 'mudou de chave' : null)
 
 // An unnamed page is never 'sem nome' (rows would look alike) and never a
-// key: a neutral label plus what the row is.
+// key: a neutral label plus what the row is. A page is not the own key and
+// this screen knows no follows (invites and offers come from any page), so
+// its photo is never kept on disk.
 function PageRow ({ pageKey, profile, kind, note, ended = false, onOpen, children }) {
   const styles = useStyles(makeStyles)
   const who = whoOf(profile)
@@ -118,7 +120,7 @@ function PageRow ({ pageKey, profile, kind, note, ended = false, onOpen, childre
         disabled={!onOpen}
         onPress={onOpen}
       >
-        <Avatar name={who.avatarName} publicKey={pageKey} size={44} picture={(profile || {}).avatar} persist />
+        <Avatar name={who.avatarName} publicKey={pageKey} size={44} picture={(profile || {}).avatar} persist={false} />
         <View style={styles.who}>
           <Text style={styles.name} numberOfLines={1}>{title}</Text>
           {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}

@@ -59,6 +59,8 @@ export function excerptOf (text) {
   return line.length > EXCERPT ? line.slice(0, EXCERPT).join('') + '…' : line.join('')
 }
 
+// persist: a ring is the own key or an author of moments.read, which lists
+// followed diaries only (docs/rpc.md 5.113).
 function Ring ({ label, name, unseen, onPress, profile, publicKey, plus }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()

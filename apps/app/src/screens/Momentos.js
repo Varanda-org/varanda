@@ -424,6 +424,8 @@ function Viewer ({ entry, ownKey, isTop = true, onBack, onOpenMember, onMessage,
 
   const ring = rings !== null && pos.ring >= 0 ? rings[pos.ring] : null
   const item = ring ? ring.items[pos.item] : null
+  // The own key or a followed author: viewerRings reads moments.read only,
+  // so the avatar below may persist.
   const author = ring ? ring.author : null
   const mine = author !== null && author === own
   const photo = useMomentPhoto(author, item ? item.seq : null)
