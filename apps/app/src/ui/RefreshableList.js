@@ -1,3 +1,4 @@
+/* global __DEV__, requestAnimationFrame */
 // The one list A Rua, Diário and Seguindo use: a FlatList with
 // pull-to-refresh, infinite scroll, scroll-to-top on a signal and an optional
 // "new items" pill. Native refreshes through RefreshControl; on the web
@@ -44,7 +45,8 @@ import { createElement, isValidElement, useCallback, useEffect, useRef, useState
 import { Animated, FlatList, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
 import { EMPTY_WHEEL, MIN_SPIN_MS, PULL_THRESHOLD, WHEEL_DECAY_MS, pullDecision, pullState, spinRemaining, wheelPullState } from '../pull'
 import { endStep, nearListEnd, spanEnd } from '../paging'
-import { useNode } from '../node'
+import { perfMarks, useNode } from '../node'
+import { createFrameStats, frameLine, monotonicNow, perfEnabled } from '../perfMarks'
 import { Spinner } from './index'
 import { Icon } from './Icon'
 import { NewItemsPill } from './States'
@@ -63,6 +65,11 @@ const LAYOUT_SETTLE_MS = 100
 const UNSTARTED_MS = 1500
 // WheelEvent.deltaMode: lines and pages are turned into pixels.
 const LINE_PX = 16
+// Dev-only frame sampler (EXPO_PUBLIC_VARANDA_PERF=1): a scroll is over this
+// long after its last event.
+const FRAMES_IDLE_MS = 1000
+const FRAME_TAIL_MS = 17
+const FRAMES_PERF = perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: process.env.EXPO_PUBLIC_VARANDA_PERF }, typeof __DEV__ !== 'undefined' && __DEV__)
 
 // A touch that starts in a text field or inside a text selection is not a pull.
 function ignoredTarget (target) {
@@ -441,8 +448,36 @@ export function RefreshableList ({
   // A ref, so a new callback each render does not rebuild onScroll.
   const scrollFrame = useRef(onScrollFrame)
   scrollFrame.current = onScrollFrame
+  // Created only with the marks on, so a normal build has no sampler, timer
+  // or raf loop here.
+  const frames = useRef(null)
+  const framesTimer = useRef(null)
+  const framesLastEvent = useRef(0)
+  const sampleFrames = useCallback(() => {
+    if (!FRAMES_PERF) return
+    if (frames.current === null) frames.current = createFrameStats({ raf: (fn) => requestAnimationFrame(fn), now: monotonicNow })
+    frames.current.start()
+    framesLastEvent.current = monotonicNow()
+    if (framesTimer.current) clearTimeout(framesTimer.current)
+    framesTimer.current = setTimeout(() => {
+      framesTimer.current = null
+      // Frames past the last scroll event (plus one at 60 Hz) are idle.
+      const s = frames.current.stop(framesLastEvent.current + FRAME_TAIL_MS)
+      if (s === null || s.count === 0) return
+      perfMarks().mark('frames', frameLine(s))
+      // Printed at once too: a long scroll session would push it out of the
+      // marks ring before the next report (dev perf builds only).
+      console.log('perf: frames ' + frameLine(s))
+    }, FRAMES_IDLE_MS)
+  }, [])
+  useEffect(() => () => {
+    if (framesTimer.current) clearTimeout(framesTimer.current)
+    framesTimer.current = null
+    if (frames.current !== null) frames.current.stop()
+  }, [])
   const onScroll = useCallback((e) => {
     const ne = e.nativeEvent
+    if (FRAMES_PERF) sampleFrames()
     if (typeof scrollFrame.current === 'function') {
       scrollFrame.current({ y: ne.contentOffset.y, contentHeight: ne.contentSize.height, layoutHeight: ne.layoutMeasurement.height })
     }
@@ -456,7 +491,7 @@ export function RefreshableList ({
       dry.current = 0
       setPaused(false)
     }
-  }, [check, paused])
+  }, [check, paused, sampleFrames])
   const contentSizeChange = useRef(onContentSizeChange)
   contentSizeChange.current = onContentSizeChange
   // Short lists never scroll: their end reach comes from laying them out.
