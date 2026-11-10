@@ -97,6 +97,17 @@ export const HELP = Object.freeze({
       'Se a rede estiver por convite, a entrada é pelo link que alguém que já está na Varanda te enviou.'
     ])
   }),
+  idade: Object.freeze({
+    title: 'Como funciona a confirmação de idade',
+    paragraphs: Object.freeze([
+      'A Varanda é para quem tem 16 anos ou mais. A verificação é feita por um serviço parceiro, a Didit, em geral com uma selfie e às vezes com um documento.',
+      'A foto e o documento não chegam à Varanda. Só a sua faixa de idade fica guardada.',
+      'Se não der para confirmar só pelo rosto, dá para tentar de novo com um documento.',
+      'Se você saiu antes de terminar, a mesma verificação pode ser retomada por cerca de uma hora.',
+      'No app, a verificação abre no navegador. Ao terminar, volte para a Varanda: o resultado é conferido de novo. Na web, a verificação abre nesta aba. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.',
+      'O que é guardado está na Política de Privacidade (Ajustes → Termos e privacidade).'
+    ])
+  }),
   identidade: Object.freeze({
     title: 'Como funciona a conta',
     paragraphs: Object.freeze([
@@ -117,7 +128,8 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Seu nome aparece em cada publicação e no seu perfil. A bio é opcional.',
       'O perfil é público: aparece para todo mundo assim que é publicado.',
-      'Dá para pular agora e preencher depois, em Ajustes → Editar perfil.'
+      'Dá para pular agora e preencher depois, em Ajustes → Editar perfil.',
+      'A foto do perfil é pública. Ela é recortada em quadrado e enviada sem dados de localização. Tirar a foto deixa de mostrá-la no app, mas a cópia enviada continua na rede.'
     ])
   }),
   busca: Object.freeze({

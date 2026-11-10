@@ -43,6 +43,25 @@ test('welcome building blocks', (t) => {
   t.ok(options.includes('onPress={onPress}'), 'tap callback passed directly')
 })
 
+test('onboarding step frame', (t) => {
+  const stepper = read('ui/Stepper.js')
+  for (const name of ['Stepper', 'StepLink', 'StepNotice']) {
+    t.ok(stepper.includes('export function ' + name + ' ('), name + ' export')
+  }
+  t.ok(stepper.includes('type.heroTitle'), 'hero title token')
+  t.ok(stepper.includes('minHeight: layout.hit'), 'link hit target')
+  t.ok(stepper.includes("accessibilityRole='header'"), 'accessible title')
+  t.ok(stepper.includes('paddingTop: space.lg, flexGrow: 1'), 'frame can fill the screen')
+  t.ok(stepper.includes('spacer: { flexGrow: 1'), 'actions sit low')
+  t.ok(stepper.includes('hero !== undefined'), 'a caller hero wins over the icon disc')
+  t.ok(stepper.includes("children === ''"), 'an empty notice draws nothing')
+  t.ok(stepper.includes("accessibilityLabel='Carregando'"), 'the busy disc is announced')
+  t.ok(stepper.includes("importantForAccessibility='no-hide-descendants'"), 'decorative dots are hidden')
+  t.ok(stepper.includes("typeof total === 'number'"), 'progress is optional')
+  t.absent(stepper.includes('numberOfLines'), 'step text wraps')
+  t.absent(stepper.includes('setTimeout'), 'no delayed actions')
+})
+
 test('MoreButton owns an ActionsSheet and hides when nothing is usable', (t) => {
   t.ok(/import \{[^}]*ActionsSheet[^}]*\} from '\.\/ActionsSheet'/.test(more), 'imports ActionsSheet')
   t.ok(/import \{[^}]*usableActions[^}]*\} from '\.\/ActionsSheet'/.test(more), 'imports usableActions')

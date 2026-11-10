@@ -30,7 +30,7 @@ export const STEP_HINTS = {
   vinculo: 'Seu @nome é como as pessoas encontram você.',
   identidade: 'Sua conta é criada neste aparelho.',
   certificado: 'Envie o código à associação e cole o que ela devolver.',
-  carregando: 'Só um instante.',
+  carregando: 'Buscando seu perfil.',
   perfil: 'Seu nome aparece em cada publicação. A bio é opcional.',
   pronto: 'Tudo certo para começar.'
 }

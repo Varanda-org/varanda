@@ -8,7 +8,7 @@ test('help keys match the supported tabs and setup steps', async (t) => {
   const { HELP } = await load()
   t.alike(Object.keys(HELP).sort(), [
     'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'conversas', 'entrar', 'vinculo',
-    'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
+    'idade', 'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
     'instalar', 'denuncia', 'termosAparelho', 'convites', 'feira'
   ].sort())
 })
@@ -80,6 +80,20 @@ test('link help keeps the account and privacy disclosures', async (t) => {
   }
   for (const fact of ['associação', 'Google', 'e-mail nunca']) {
     t.ok(SHORT.link.includes(fact), fact)
+  }
+})
+
+test('age and profile help carry the explanations that left the screens', async (t) => {
+  const { HELP } = await load()
+  t.is(HELP.idade.title, 'Como funciona a confirmação de idade')
+  t.is(HELP.idade.paragraphs.length, 6)
+  const age = HELP.idade.paragraphs.join(' ')
+  for (const fact of ['Didit', 'faixa de idade', 'Política de Privacidade']) {
+    t.ok(age.includes(fact), fact)
+  }
+  t.ok(HELP.perfil.paragraphs.join(' ').includes('sem dados de localização'))
+  for (const paragraph of HELP.idade.paragraphs) {
+    t.absent(paragraph.includes('\u2014'), 'no em dash in the age help')
   }
 })
 
