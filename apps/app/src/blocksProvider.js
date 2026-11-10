@@ -13,7 +13,7 @@ import { diaryPeekSlots } from './engagement'
 import { fetchMember } from './indexClient'
 import { blockedPeekParams, blockedSetOf } from './memberBlocks'
 import { reportBlocks } from './pushBlocks'
-import { dropAuthors, newlyBlocked } from './localCaches'
+import { dropAuthors, newlyBlocked, registerLocalCache } from './localCaches'
 
 const EMPTY = new Set()
 const noop = () => {}
@@ -77,6 +77,9 @@ export function BlocksProvider ({ children }) {
   const [asking, setAsking] = useState(null)
 
   const keysRef = useRef(EMPTY)
+  // A wipe forgets the denied authors with the caches: the next list read
+  // then counts every block as new and denies them again, owner unchanged.
+  useEffect(() => registerLocalCache({ wipe: () => { keysRef.current = EMPTY } }), [])
   const commit = useCallback((next) => {
     // Kept copies of a newly blocked author go before any screen can show
     // them again, whether the block was made here, on another device of the
