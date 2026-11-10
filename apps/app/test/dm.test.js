@@ -578,6 +578,7 @@ test('Conversar is offered only for an open page on a hosted node with pages ena
   const sheetSrc = readFileSync(join(__dirname, '../src/ui/PageNoticeSheet.js'), 'utf8')
   t.ok(src.includes('<PageNoticeSheet') && anuncioSrc.includes('<PageNoticeSheet'), 'the profile and the listing show the shared page notice sheet')
   t.ok(sheetSrc.includes('{PAGE_DM_NOTICE}') && sheetSrc.includes('<ConfirmStack'), 'the sheet shows the notice over a full-width confirm stack')
+  t.ok(sheetSrc.includes("request('dm.lookup', { member: page })") && sheetSrc.includes('{inactive ? <Soft>{PAGE_DM_NOT_ACTIVE}</Soft> : null}'), 'a page without device-held keys gets the extra line')
   t.ok(anuncioSrc.includes('listing.page === true && !pageNoticeSeen(pageNoticeStore(), listing.author)'), 'Conversar on a page listing shows the same notice first')
   t.ok(src.includes("<Pill icon='mensagem' label='Conversar' onPress={openPageConversation}"))
   t.ok(src.includes('onPress={() => onOpenListings(author)}'))
@@ -674,8 +675,11 @@ test('pageDmPlan opens, refuses, notices or goes direct', async (t) => {
 })
 
 test('pageNotice.js stays pure and the notice ends with a period', async (t) => {
-  const { PAGE_DM_NOTICE } = await import('../src/pageNotice.js')
+  const { PAGE_DM_NOTICE, PAGE_DM_NOT_ACTIVE } = await import('../src/pageNotice.js')
   t.ok(PAGE_DM_NOTICE.endsWith('.'))
+  t.is(PAGE_DM_NOTICE, 'As mensagens desta conversa são cifradas entre você e quem administra a página. A associação não lê.')
+  t.is(PAGE_DM_NOT_ACTIVE, 'Esta página ainda não ativou as Conversas privadas. Sua mensagem chega quando ela ativar.')
+  t.absent(/pode ler/.test(PAGE_DM_NOTICE), 'no custody caveat')
   const src = readFileSync(join(__dirname, '../src/pageNotice.js'), 'utf8')
   t.absent(src.split('\n').some((l) => l.startsWith('import ')))
 })
@@ -709,4 +713,12 @@ test('openMessage checks whether a post author is a page before the context chip
   t.absent(slice.includes('hint !== null)'), 'the seeder hint alone never reaches the names cache')
   t.is(slice.split('names.learnMany(').length, 2, 'one guarded learn')
   t.ok(/useEffect\(\(\) => \{\s*intentsRef\.current\.clear\(\)\s*setPageDmAsk\(null\)\s*pageDmPending\.current = null\s*\}, \[ownKey, nodeEpoch\]\)/.test(src), 'a lock or identity switch closes the page notice and drops the pending lookup')
+})
+
+test('pageNotActivated reads the page\'s published dm-key', async (t) => {
+  const { pageNotActivated } = await import('../src/pageNotice.js')
+  t.is(pageNotActivated({ box: null, gen: null }), true, 'no key')
+  t.is(pageNotActivated({ box: 'a'.repeat(64), gen: 1 }), false, 'a gen 1 key may be a new activated page')
+  t.is(pageNotActivated({ box: 'a'.repeat(64), gen: 2 }), false)
+  t.is(pageNotActivated(null), false, 'an unknown read shows nothing extra')
 })

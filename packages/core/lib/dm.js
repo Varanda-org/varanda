@@ -45,6 +45,12 @@ const DM_SIG_PREFIX_V2 = 'varanda-dm-v2\n'
 // v3 signs a digest of the JSON, so a remote holder of a Página's key signs
 // the prefix and a 32-byte digest and never sees the message.
 const DM_V3_PREFIX = 'varanda-dm-v3\n'
+// The service signs a v3 digest with an expiry it chooses (now + TTL). A drop
+// lives at most DM_RETENTION_MS in the pool, so a v3 filed later than its
+// expiry plus that and a day of clock slack was put after its signature
+// expired: a stockpiled signature replayed, for example by a removed admin.
+const DM_V3_TTL_MS = 600000
+const DM_V3_STALE_MS = DM_RETENTION_MS + 86400000
 const DM_KEY_HKDF_SALT = 'varanda/member-dm-box/hkdf/v1'
 const DM_KEY_HKDF_INFO = 'varanda/member-dm-box/x25519/v1'
 const DM_LOCAL_HKDF_SALT = 'varanda/member-dm-local/hkdf/v1'
@@ -90,6 +96,7 @@ const DM_AUDIO_MAX_BYTES = MAX_AUDIO_BYTES + BLOB_MAC_BYTES
 
 const SIG_BYTES = 64
 const LEN_BYTES = 2
+const EXPIRES_BYTES = 8
 const SIG_PREFIX = b4a.from(DM_SIG_PREFIX, 'utf8')
 const SIG_PREFIX_V2 = b4a.from(DM_SIG_PREFIX_V2, 'utf8')
 const SIG_PREFIX_V3 = b4a.from(DM_V3_PREFIX, 'utf8')
@@ -247,16 +254,42 @@ function digestBytes (json) {
   return d
 }
 
-function v3Message (digest) {
-  return b4a.concat([SIG_PREFIX_V3, digest])
+function isExpiresAt (n) {
+  return Number.isSafeInteger(n) && n > 0
 }
 
-function frameInner (json, sig) {
+function uint64be (n) {
+  const out = b4a.alloc(EXPIRES_BYTES)
+  const hi = Math.floor(n / 0x100000000)
+  const lo = n % 0x100000000
+  for (let i = 0; i < 4; i++) {
+    out[3 - i] = (hi >>> (8 * i)) & 0xff
+    out[7 - i] = (lo >>> (8 * i)) & 0xff
+  }
+  return out
+}
+
+function readUint64be (buf, offset) {
+  let hi = 0
+  let lo = 0
+  for (let i = 0; i < 4; i++) {
+    hi = hi * 256 + buf[offset + i]
+    lo = lo * 256 + buf[offset + 4 + i]
+  }
+  return hi * 0x100000000 + lo
+}
+
+function v3Message (digest, expiresAt) {
+  return b4a.concat([SIG_PREFIX_V3, digest, uint64be(expiresAt)])
+}
+
+function frameInner (json, sig, expiresAt) {
   const out = b4a.alloc(DM_INNER_BYTES)
   out[0] = json.byteLength >>> 8
   out[1] = json.byteLength & 0xff
   out.set(json, LEN_BYTES)
   out.set(sig, LEN_BYTES + json.byteLength)
+  if (expiresAt !== undefined) out.set(uint64be(expiresAt), LEN_BYTES + json.byteLength + SIG_BYTES)
   return out
 }
 
@@ -336,32 +369,43 @@ function innerDigest (fields) {
   }
   if (!validBody(body)) throw new TypeError('mensagem inválida')
   const json = b4a.from(canonicalJson(body), 'utf8')
-  if (json.byteLength + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) throw new TypeError('mensagem longa demais')
+  if (json.byteLength + LEN_BYTES + SIG_BYTES + EXPIRES_BYTES > DM_INNER_BYTES) throw new TypeError('mensagem longa demais')
   return { json, digest: b4a.toString(digestBytes(json), 'hex'), body: JSON.parse(canonicalJson(body)) }
 }
 
-// The only bytes a key holder signs through this API: the v3 prefix and a
-// 32-byte digest, so it cannot be led to sign a v1 or v2 inner or any other
-// record of the protocol.
-function signDigest (digestHex, secretKey) {
+// The only bytes a key holder signs through this API: the v3 prefix, a
+// 32-byte digest and the expiry (uint64be ms), so it cannot be led to sign a
+// v1 or v2 inner or any other record of the protocol.
+function signDigest (digestHex, secretKey, expiresAt) {
   if (typeof digestHex !== 'string' || !HEX64_DIGEST.test(digestHex)) throw new TypeError('resumo inválido')
   if (!isBytes(secretKey, 64)) throw new TypeError('chave de assinatura inválida')
-  return b4a.toString(hcrypto.sign(v3Message(b4a.from(digestHex, 'hex')), secretKey), 'hex')
+  if (!isExpiresAt(expiresAt)) throw new TypeError('validade inválida')
+  return b4a.toString(hcrypto.sign(v3Message(b4a.from(digestHex, 'hex'), expiresAt), secretKey), 'hex')
 }
 
-function assembleInner (json, sigHex) {
-  if (!isBytes(json) || json.byteLength < 2 || json.byteLength + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) {
+function assembleInner (json, sigHex, expiresAt) {
+  if (!isBytes(json) || json.byteLength < 2 || json.byteLength + LEN_BYTES + SIG_BYTES + EXPIRES_BYTES > DM_INNER_BYTES) {
     throw new TypeError('mensagem inválida')
   }
   if (typeof sigHex !== 'string' || !HEX128.test(sigHex)) throw new TypeError('assinatura inválida')
-  return frameInner(json, b4a.from(sigHex, 'hex'))
+  if (!isExpiresAt(expiresAt)) throw new TypeError('validade inválida')
+  return frameInner(json, b4a.from(sigHex, 'hex'), expiresAt)
+}
+
+// True for a v3 body filed after its signature's expiry plus DM_V3_STALE_MS:
+// never file it. filedAtMs is the receiver's clock when it files the drop.
+function pageInnerStale (body, filedAtMs) {
+  if (!isPlainObject(body) || body.v !== 3) return false
+  if (!isExpiresAt(body.expiresAt) || !Number.isFinite(filedAtMs)) return true
+  return filedAtMs > body.expiresAt + DM_V3_STALE_MS
 }
 
 // Reads and then zeroes buf (the plaintext from openSealed). Returns the
 // body with `mine` (true when this identity wrote it) or null. opts:
 // { association (hex64, required for a msg), revokedIssuers? (a Set, as in
 // cert.js verifyCert) }. A msg must carry a certificate of that association
-// for `from`, so one member cannot write from throwaway keys.
+// for `from`, so one member cannot write from throwaway keys. A v3 body also
+// carries `expiresAt` (ms) read from its frame; see pageInnerStale.
 function openInner (buf, ownKey, opts = {}) {
   let json = null
   try {
@@ -369,9 +413,6 @@ function openInner (buf, ownKey, opts = {}) {
     const { association, revokedIssuers } = isPlainObject(opts) ? opts : {}
     const len = (buf[0] << 8) | buf[1]
     if (len < 2 || len + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) return null
-    for (let i = LEN_BYTES + len + SIG_BYTES; i < DM_INNER_BYTES; i++) {
-      if (buf[i] !== 0) return null
-    }
     json = b4a.from(buf.subarray(LEN_BYTES, LEN_BYTES + len))
     const sig = b4a.from(buf.subarray(LEN_BYTES + len, LEN_BYTES + len + SIG_BYTES))
     const text = b4a.toString(json, 'utf8')
@@ -379,16 +420,31 @@ function openInner (buf, ownKey, opts = {}) {
     if (!validBody(body)) return null
     // The exact bytes are signed: a reordered or re-escaped JSON is refused.
     if (canonicalJson(body) !== text) return null
-    const signed = body.v === 3 ? v3Message(digestBytes(json)) : b4a.concat([sigPrefix(body.v), json])
+    let pad = LEN_BYTES + len + SIG_BYTES
+    let signed
+    const extra = {}
+    if (body.v === 3) {
+      if (pad + EXPIRES_BYTES > DM_INNER_BYTES) return null
+      const expiresAt = readUint64be(buf, pad)
+      if (!isExpiresAt(expiresAt)) return null
+      pad += EXPIRES_BYTES
+      signed = v3Message(digestBytes(json), expiresAt)
+      extra.expiresAt = expiresAt
+    } else {
+      signed = b4a.concat([sigPrefix(body.v), json])
+    }
+    for (let i = pad; i < DM_INNER_BYTES; i++) {
+      if (buf[i] !== 0) return null
+    }
     if (!hcrypto.verify(signed, sig, b4a.from(body.from, 'hex'))) return null
     if (body.kind === 'ctl') {
       if (body.from !== ownKey) return null
-      return { ...body, mine: true }
+      return { ...body, ...extra, mine: true }
     }
     if (!isHex64(association) || body.cert === null) return null
     if (!certForKey(body.cert, body.from, association, { revokedIssuers }).ok) return null
-    if (body.to === ownKey) return { ...body, mine: false }
-    if (body.from === ownKey) return { ...body, mine: true }
+    if (body.to === ownKey) return { ...body, ...extra, mine: false }
+    if (body.from === ownKey) return { ...body, ...extra, mine: true }
     return null
   } catch {
     return null
@@ -490,6 +546,8 @@ module.exports = Object.freeze({
   DM_SIG_PREFIX,
   DM_SIG_PREFIX_V2,
   DM_V3_PREFIX,
+  DM_V3_TTL_MS,
+  DM_V3_STALE_MS,
   DM_KEY_HKDF_SALT,
   DM_KEY_HKDF_INFO,
   DM_LOCAL_HKDF_SALT,
@@ -532,6 +590,7 @@ module.exports = Object.freeze({
   innerDigest,
   signDigest,
   assembleInner,
+  pageInnerStale,
   openInner,
   sealInner,
   openSealed,

@@ -636,126 +636,231 @@ test('a retry refused for its bytes is definite', async (t) => {
 
 // ---- Conversas as the page ----------------------------------------------------
 
-test('dm drop observer runs once before each send fetch and never for other dm actions', async (t) => {
-  const { pagesDm, setDmDropObserver } = await load()
-  let drops = 0
-  setDmDropObserver(() => { drops++ })
-  t.teardown(() => setDmDropObserver(() => {}))
-  const observed = []
-  const calls = stub(t, (n, url) => {
-    observed.push(drops)
-    return url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { ok: true })
-  })
-  const node = fakeNode()
-  for (const action of ['dm-send', 'dm-set', 'dm-seen', 'dm-list', 'dm-thread', 'dm-send']) {
-    await pagesDm(node, { member: M, page: P, action })
+const DIGEST = 'd1'.repeat(32)
+const BOX = 'b0'.repeat(32)
+const GBOX = 'b1'.repeat(32)
+const OWN_BOX = 'b2'.repeat(32)
+const ADMIN = '11'.repeat(32)
+const EXPIRES = 1767225600000
+const CERT = { member: P }
+
+// A node that signs page statements and answers dm.* from `answers`
+// (a value or a function of params), recording every call in order.
+function dmNode (answers = {}) {
+  const calls = []
+  return {
+    calls,
+    signs: calls,
+    request: async (method, params) => {
+      calls.push({ method, params })
+      if (method === 'page.sign') return { signature: SIG }
+      if (method === 'dm.enable' && !Object.hasOwn(answers, method)) return { box: OWN_BOX, gen: 1, seq: null }
+      const a = answers[method]
+      const r = typeof a === 'function' ? a(params) : a
+      if (r instanceof Error) throw r
+      return r === undefined ? {} : r
+    }
   }
-  t.alike(observed, [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2], 'only send fetches see a new marker')
-  t.is(drops, 2, 'once per send run')
-  t.ok(calls.every((call) => !Object.hasOwn(body(call), 'drops')), 'drops never enters an HTTP body')
-})
+}
 
-test('dm drop observer marks every explicit retry after an uncertain send failure', async (t) => {
-  const { pagesDmSend, setDmDropObserver } = await load()
-  let drops = 0
-  setDmDropObserver(() => { drops++ })
-  t.teardown(() => setDmDropObserver(() => {}))
-  const observed = []
-  const calls = stub(t, (n, url) => {
-    observed.push(drops)
-    if (url.endsWith('/start')) return json(200, { nonce: NONCE })
-    return n < 4 ? new Error('offline') : json(200, { ok: true })
-  })
-  const node = fakeNode()
-  const err = await caught(t, pagesDmSend(node, { member: M, page: P, to: K2, text: 'Oi' }))
-  t.is(err.uncertain, true)
-  t.is(drops, 1, 'initial attempt is marked once')
-  t.is(calls.length, 2, 'no automatic resend')
-  const again = await caught(t, err.retry())
-  t.is(again.uncertain, true)
-  t.is(drops, 2, 'failed explicit retry is marked once more')
-  t.alike(await again.retry(), { ok: true })
-  t.is(drops, 3, 'successful explicit retry is marked once more')
-  t.alike(observed, [0, 1, 2, 3], 'each marker precedes its fetch')
-  t.is(node.signs.length, 1, 'retry never signs again')
-  t.ok(calls.slice(1).every((call) => call.init.body === calls[1].init.body), 'retries preserve the signed body')
-  t.ok(calls.every((call) => !Object.hasOwn(body(call), 'drops')), 'drops never enters an HTTP body')
-})
-
-test('dm builders sign and send the params of dm.list, dm.thread, dm.send, dm.set and dm.seen', async (t) => {
-  const { pagesDmList, pagesDmThread, pagesDmSend, pagesDmSet, pagesDmSeen, pagesDm } = await load()
+test('pagesDm takes the page statements and refuses the removed dm-send, dm-set, dm-seen, dm-list and dm-thread', async (t) => {
+  const { pagesDm } = await load()
+  for (const action of ['dm-send', 'dm-set', 'dm-seen', 'dm-list', 'dm-thread', 'dm-nope']) {
+    const err = await caught(t, pagesDm(fakeNode(), { member: M, page: P, action }))
+    t.is(err.code, 'pedido-invalido', action)
+  }
   const cases = [
-    ['dm-list', pagesDmList, { folder: 'request', limit: 10 }],
-    ['dm-thread', pagesDmThread, { peer: K2, before: 'f'.repeat(32) }],
-    ['dm-send', pagesDmSend, { to: K2, text: 'Oi', replyTo: 'e'.repeat(32) }],
-    ['dm-set', pagesDmSet, { peer: K2, state: 'blocked' }],
-    ['dm-seen', pagesDmSeen, { peer: K2 }]
+    ['dm-legacy-read', { from: 8 }],
+    ['dm-legacy-done', { id: DIGEST }],
+    ['dm-sign', { digest: DIGEST }],
+    ['dm-box-read', {}],
+    ['dm-box-share', { member: ADMIN, gen: 2, sealed: 'x', sig: SIG }]
   ]
-  for (const [action, build, op] of cases) {
+  for (const [action, op] of cases) {
     const calls = stub(t, flow(() => json(200, { ok: true })))
     const node = fakeNode()
-    await build(node, { member: M, page: P, ...op })
+    await pagesDm(node, { member: M, page: P, action, op })
     t.ok(calls[1].url.endsWith('/account/pages/' + action), action)
     t.alike(body(calls[1]).op, op, action)
-    t.is(body(calls[1]).page, P)
     t.alike(node.signs[0].params, { action, nonce: NONCE, page: P, op })
   }
-  await caught(t, pagesDm(fakeNode(), { member: M, page: P, action: 'dm-nope' }))
 })
 
-test('dm-list and dm-thread are reads: a lost answer is plain and retry signs again', async (t) => {
-  const { pagesDmList, pagesDmThread } = await load()
-  for (const [build, extra] of [[pagesDmList, {}], [pagesDmThread, { peer: K2 }]]) {
+test('dm-sign, dm-box-read and dm-legacy-read are reads: a lost answer is plain and retry signs again', async (t) => {
+  const { pagesDm } = await load()
+  for (const [action, op] of [['dm-sign', { digest: DIGEST }], ['dm-box-read', {}], ['dm-legacy-read', { from: 0 }]]) {
     let posts = 0
-    const calls = stub(t, fresh(() => ++posts === 1 ? json(500, {}) : json(200, { conversations: [], messages: [] })))
+    const calls = stub(t, fresh(() => ++posts === 1 ? json(500, {}) : json(200, { signature: SIG })))
     const node = fakeNode()
-    const err = await caught(t, build(node, { member: M, page: P, ...extra }))
-    t.absent(err.uncertain)
+    const err = await caught(t, pagesDm(node, { member: M, page: P, action, op }))
+    t.absent(err.uncertain, action)
     await err.retry()
-    t.is(node.signs.length, 2, 'signed again')
+    t.is(node.signs.length, 2, action + ' signed again')
     const sent = calls.filter((c) => !c.url.endsWith('/start')).map((c) => body(c).nonce)
     t.not(sent[0], sent[1])
   }
 })
 
-test('dm-send after a lost answer is uncertain and retry resends the same signed bytes', async (t) => {
-  const { pagesDmSend } = await load()
+test('the dm-sign answer hands the service expiry to the page send', async (t) => {
+  const { pagesDm } = await load()
+  stub(t, flow(() => json(200, { signature: SIG, expiresAt: EXPIRES })))
+  const signed = await pagesDm(fakeNode(), { member: M, page: P, action: 'dm-sign', op: { digest: DIGEST } })
+  t.alike(signed, { signature: SIG, expiresAt: EXPIRES })
+})
+
+test('dm-box after a lost answer is uncertain and retry resends the same signed bytes', async (t) => {
+  const { pagesDm } = await load()
   let posts = 0
-  const calls = stub(t, flow(() => ++posts === 1 ? json(500, {}) : json(200, { id: 'a'.repeat(32), at: '2026-01-01T00:00:00.000Z' })))
+  const calls = stub(t, flow(() => ++posts === 1 ? json(500, {}) : json(200, { seq: 3, gen: 1 })))
   const node = fakeNode()
-  const err = await caught(t, pagesDmSend(node, { member: M, page: P, to: K2, text: 'Oi' }))
+  const op = { expectedGen: 0, box: BOX, groupBox: GBOX, ownBox: OWN_BOX, shares: [] }
+  const err = await caught(t, pagesDm(node, { member: M, page: P, action: 'dm-box', op }))
   t.is(err.uncertain, true)
-  const res = await err.retry()
-  t.is(res.id, 'a'.repeat(32))
-  t.is(node.signs.length, 1, 'never signs a second message')
-  t.is(calls.filter((c) => c.url.endsWith('/start')).length, 1)
+  t.is((await err.retry()).seq, 3)
+  t.is(node.signs.length, 1, 'never signs again')
   t.alike(calls[1].init.body, calls[2].init.body)
 })
 
-test('page dm request maps dm.* names, skips pull and enable, and softens unknown actions', async (t) => {
-  const { pageDmRequest, pageInboxTitle, PAGE_DM_SOON, PAGE_DM_CUSTODY } = await import('../src/dm-screen.js')
-  const seen = []
-  const request = pageDmRequest(async (action, op) => { seen.push([action, op]); return { ok: true } })
-  await request('dm.list', { folder: 'inbox' })
-  await request('dm.thread', { peer: K2 })
-  await request('dm.send', { to: K2, text: 'x' })
-  await request('dm.set', { peer: K2, state: 'accepted' })
-  await request('dm.seen', { peer: K2 })
-  t.alike(seen.map((s) => s[0]), ['dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen'])
-  t.alike(await request('dm.pull', {}), {})
-  t.alike(await request('dm.enable', {}), {})
-  t.is(seen.length, 5)
+test('the key tokens of the service read as pt-BR', async (t) => {
   const { pageError } = await load()
-  for (const code of ['pedido-invalido', 'nao-encontrado']) {
-    const soon = pageDmRequest(async () => { throw pageError(code) })
-    const err = await caught(t, soon('dm.list', {}))
-    t.is(err.message, PAGE_DM_SOON)
+  t.is(pageError('rotacao-necessaria').message, 'A chave da página está sendo trocada; tente de novo em instantes')
+  t.is(pageError('conflito').code, 'conflito')
+})
+
+test('page dm client reads the node with page and sends through draft, dm-sign and dm.pageSend', async (t) => {
+  const { pageDmClient, pageInboxTitle, PAGE_DM_CUSTODY } = await import('../src/dm-screen.js')
+  const calls = []
+  const signed = []
+  const request = async (method, params) => {
+    calls.push([method, params])
+    if (method === 'dm.pageDraft') return { id: 'a'.repeat(32), digest: DIGEST, at: '2026-01-01T00:00:00.000Z' }
+    if (method === 'dm.pageSend') return { id: 'a'.repeat(32), at: '2026-01-01T00:00:00.000Z' }
+    return { ok: true }
   }
-  const uncertain = Object.assign(new Error('x'), { uncertain: true, retry: () => {} })
-  const err = await caught(t, pageDmRequest(async () => { throw uncertain })('dm.send', {}))
-  t.is(err, uncertain, 'an uncertain write passes through with its retry')
+  const sign = async (digest) => { signed.push(digest); return { signature: SIG, expiresAt: EXPIRES } }
+  const dm = pageDmClient({ request, sign, page: P })
+  await dm('dm.list', { folder: 'inbox' })
+  await dm('dm.thread', { peer: K2 })
+  await dm('dm.seen', { peer: K2 })
+  t.alike(calls.map((c) => c[1].page), [P, P, P], 'reads carry the page')
+  calls.length = 0
+  const sent = await dm('dm.send', { to: K2, text: 'Oi', replyTo: 'e'.repeat(32) })
+  t.is(sent.id, 'a'.repeat(32))
+  t.alike(calls, [
+    ['dm.pageDraft', { page: P, kind: 'msg', to: K2, text: 'Oi', replyTo: 'e'.repeat(32) }],
+    ['dm.pageSend', { page: P, id: 'a'.repeat(32), signature: SIG, expiresAt: EXPIRES }]
+  ])
+  t.alike(signed, [DIGEST], 'the page signs the digest only')
+  calls.length = 0
+  t.alike(await dm('dm.set', { peer: K2, state: 'blocked' }), { ok: true })
+  t.alike(calls[0], ['dm.pageDraft', { page: P, kind: 'ctl', peer: K2, op: 'blocked' }])
+  t.is(calls[1][0], 'dm.pageSend')
+  calls.length = 0
+  await dm('dm.pull', {})
+  t.alike(calls, [['dm.pull', {}]], 'the pull is the node\'s own')
+  t.alike(await dm('dm.enable', {}), {})
   t.is(pageInboxTitle('Padaria'), 'Conversas da página Padaria')
-  t.is(PAGE_DM_CUSTODY, 'A associação pode ler as mensagens desta página')
+  t.is(PAGE_DM_CUSTODY, 'Só quem administra a página lê estas mensagens')
+})
+
+test('an uncertain dm.pageSend keeps a retry of the exact request and never drafts or signs again', async (t) => {
+  const { pageDmClient } = await import('../src/dm-screen.js')
+  const calls = []
+  let sends = 0
+  const request = async (method, params) => {
+    calls.push([method, params])
+    if (method === 'dm.pageDraft') return { id: 'a'.repeat(32), digest: DIGEST, at: 'x' }
+    if (++sends === 1) throw new Error('não deu para confirmar o envio')
+    return { id: 'a'.repeat(32), at: 'x' }
+  }
+  let signs = 0
+  const dm = pageDmClient({ request, sign: async () => { signs++; return { signature: SIG, expiresAt: EXPIRES } }, page: P })
+  const err = await caught(t, dm('dm.send', { to: K2, text: 'Oi' }))
+  t.is(err.uncertain, true)
+  t.is(sends, 1, 'no automatic resend')
+  await err.retry()
+  t.is(signs, 1)
+  t.is(calls.filter((c) => c[0] === 'dm.pageDraft').length, 1)
+  const puts = calls.filter((c) => c[0] === 'dm.pageSend').map((c) => c[1])
+  t.is(puts.length, 2)
+  t.alike(puts[0], { page: P, id: 'a'.repeat(32), signature: SIG, expiresAt: EXPIRES })
+  t.alike(puts[1], puts[0], 'the retry resends identical params, expiresAt included')
+  const plain = pageDmClient({ request: async () => { throw new Error('chave da página não confere') }, sign: async () => ({ signature: SIG }), page: P })
+  const refused = await caught(t, plain('dm.send', { to: K2, text: 'Oi' }))
+  t.absent(refused.uncertain, 'a refusal is not uncertain')
+})
+
+test('an activation retried after two uncertain failures adopts the own share exactly once', async (t) => {
+  const { pagesDmActivate } = await load()
+  let posts = 0
+  stub(t, flow(() => ++posts <= 3 ? json(500, {}) : json(200, { seq: 1, gen: 1 })))
+  const node = dmNode({
+    'dm.lookup': () => ({ box: OWN_BOX, gen: 1 }),
+    'dm.pageGenerate': ({ recipients }) => ({ box: BOX, groupBox: GBOX, shares: recipients.map((r) => ({ member: r.member, sealed: 's', sig: SIG })) }),
+    'dm.pageSecrets': () => ({ ok: true })
+  })
+  const status = { gen: 0, box: null, groupBox: null, share: null, cert: CERT, legacy: false, rotatePending: false }
+  const first = await caught(t, pagesDmActivate(node, { member: M, page: P, status, roster: { owner: M, admins: [] } }))
+  t.is(first.uncertain, true)
+  const second = await caught(t, first.retry())
+  t.is(second.uncertain, true)
+  const third = await caught(t, second.retry())
+  t.is(third.uncertain, true)
+  t.is(node.calls.filter((c) => c.method === 'dm.pageSecrets').length, 0, 'nothing adopted before a success')
+  t.alike(await third.retry(), { gen: 1, missing: [] })
+  t.is(node.calls.filter((c) => c.method === 'dm.pageSecrets').length, 1, 'exactly one adoption')
+  t.is(node.calls.filter((c) => c.method === 'page.sign').length, 1, 'never signed again')
+})
+
+test('page keys: refreshes re-read, a held activation keeps its resend, Enviar chave adopts first', (t) => {
+  const inbox = fs.readFileSync(path.join(__dirname, '../src/screens/Mensagens.js'), 'utf8')
+  t.ok(inbox.includes('}, [dmVersion, pageKey, unlocked, read])'), 'the dmVersion bump reads the keys again')
+  t.ok(inbox.includes('adopted.get(pageKey) !== held'), 'an adopted share is not stored again')
+  t.absent(/setInterval|setTimeout/.test(inbox), 'no timer of its own')
+  t.ok(inbox.includes("{keys.hold\n          ? <Btn label='Tentar de novo' onPress={retry}") || /keys\.hold\s*\?\s*<Btn label='Tentar de novo' onPress=\{retry\}[\s\S]*PAGE_DM_ROTATING|PAGE_DM_ROTATING[\s\S]*keys\.hold\s*\?\s*<Btn label='Tentar de novo' onPress=\{retry\}/.test(inbox), 'mid-rotation the held request can be resent')
+  const ajustes = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
+  t.ok(/if \(dmStatus && dmStatus\.share\) await pagesDmAdopt\(node, \{ page, status: dmStatus \}\)\s*return pagesDmShareTo/.test(ajustes), 'the own share is adopted before sharing')
+})
+
+test('remove carries dmBox in the body, outside the signed op', async (t) => {
+  const { actAs } = await load()
+  const calls = stub(t, flow(() => json(200, { ok: true, dmGen: 3 })))
+  const node = fakeNode()
+  const dmBox = { expectedGen: 2, box: BOX, groupBox: GBOX, ownBox: OWN_BOX, shares: [] }
+  await actAs(node, { member: M, action: 'remove', page: P, op: { gen: 2 }, dmBox })
+  t.alike(body(calls[1]).dmBox, dmBox)
+  t.absent(Object.hasOwn(node.signs[0].params.op, 'dmBox'), 'the node never signs dmBox')
+  const plain = stub(t, flow(() => json(200, { ok: true })))
+  await actAs(fakeNode(), { member: M, action: 'remove', page: P, op: { gen: 2 } })
+  t.absent(Object.hasOwn(body(plain[1]), 'dmBox'), 'no dmBox without device-held keys')
+})
+
+test('move builds dmBox for K2 after start', async (t) => {
+  const { pagesMove } = await load()
+  const calls = stub(t, flow(() => json(200, { ok: true }), { to: K2 }))
+  const seen = []
+  const to = await pagesMove(fakeNode(), {
+    member: M,
+    page: P,
+    op: ({ nonce, to }) => ({ to, nonce }),
+    dmBox: async ({ to }) => { seen.push(to); return { expectedGen: 0, box: BOX, groupBox: GBOX, ownBox: OWN_BOX, shares: [] } }
+  })
+  t.is(to, K2)
+  t.alike(seen, [K2])
+  t.is(body(calls[1]).dmBox.expectedGen, 0)
+})
+
+test('Enviar chave seals for the member\'s dm-key and files the share', async (t) => {
+  const { pagesDmShareTo, pagesDmInviteShare, PAGE_DM_NO_BOX } = await load()
+  const calls = stub(t, flow(() => json(200, { ok: true })))
+  const node = dmNode({ 'dm.lookup': ({ member }) => ({ box: member === ADMIN ? BOX : null, gen: 1 }), 'dm.pageShare': () => ({ gen: 4, sealed: 'S', sig: SIG }) })
+  await pagesDmShareTo(node, { member: M, page: P, to: ADMIN })
+  t.alike(node.calls.find((c) => c.method === 'dm.pageShare').params, { page: P, member: ADMIN, box: BOX })
+  t.alike(body(calls[1]).op, { member: ADMIN, gen: 4, sealed: 'S', sig: SIG })
+  const err = await caught(t, pagesDmShareTo(node, { member: M, page: P, to: K2 }))
+  t.is(err.message, PAGE_DM_NO_BOX)
+  t.alike(await pagesDmInviteShare(node, { page: P, to: ADMIN, status: { gen: 4 } }), { sealed: 'S', sig: SIG })
+  t.is(await pagesDmInviteShare(node, { page: P, to: K2, status: { gen: 4 } }), null, 'no dm-key, no share')
 })
 
 test('a core node with an https account origin sends every page request there', async (t) => {
@@ -837,4 +942,442 @@ test('coreActor forgets a failure', async (t) => {
   await caught(t, coreActor(node))
   fail = false
   t.is((await coreActor(node)).actor, M)
+})
+
+// ---- the legacy bundle and the old sender blocks ---------------------------------
+
+const B1 = '21'.repeat(32)
+const B2 = '22'.repeat(32)
+const BUNDLE = 'be'.repeat(32)
+
+// A fake service and node for a legacy page: 'dm-box-read' names a 3 chunk
+// bundle (served 2 per read, so the import pages), the node files it on the
+// last chunk and lists B1 and B2 as pending blocks until each send succeeds.
+function legacySetup (t, { sendFails = () => null, chunkFails = () => null, doneFails = () => null, bundle = { id: BUNDLE, count: 3 } } = {}) {
+  const real = globalThis.fetch
+  let starts = 0
+  let dones = 0
+  const posted = []
+  let held = bundle
+  globalThis.fetch = async (url, init) => {
+    if (url.endsWith('/start')) return json(200, { nonce: String(++starts).padStart(43, 'n') })
+    const action = url.split('/').pop()
+    const op = JSON.parse(init.body).op
+    posted.push([action, op])
+    if (action === 'dm-box') return json(200, { seq: 9, gen: 2 })
+    if (action === 'dm-box-read') return json(200, { gen: 2, cert: CERT, legacyBundle: held })
+    if (action === 'dm-legacy-read') {
+      if (held === null) return json(404, { error: 'nao-encontrado' })
+      const chunks = []
+      for (let i = op.from; i < Math.min(op.from + 2, held.count); i++) chunks.push({ index: i, sealed: 'c' + i })
+      return json(200, { id: held.id, count: held.count, chunks })
+    }
+    if (action === 'dm-legacy-done') {
+      const f = doneFails(++dones)
+      if (f) return f
+      held = null
+      return json(200, { ok: true })
+    }
+    if (action === 'dm-sign') return json(200, { signature: SIG, expiresAt: '2026-01-01T00:05:00.000Z' })
+    return json(500, {})
+  }
+  t.teardown(() => { globalThis.fetch = real })
+  let sends = 0
+  let chunkCalls = 0
+  const got = new Set()
+  let pending = []
+  const node = dmNode({
+    'dm.lookup': () => ({ box: OWN_BOX, gen: 1 }),
+    'dm.pageGenerate': ({ recipients }) => ({ box: BOX, groupBox: GBOX, shares: recipients.map((r) => ({ member: r.member, sealed: 's', sig: SIG })) }),
+    'dm.pageSecrets': () => ({ ok: true }),
+    'dm.pageLegacyChunk': (params) => {
+      const f = chunkFails(++chunkCalls, params)
+      if (f) return f
+      got.add(params.index)
+      if (got.size < params.count) return { complete: false, added: 0, blocked: 0 }
+      pending = [B1, B2]
+      return { complete: true, added: 5, blocked: 2 }
+    },
+    'dm.pageLegacyBlocks': () => ({ pending: [...pending] }),
+    'dm.pageDraft': ({ peer }) => ({ id: peer.slice(0, 32), digest: DIGEST, at: 'x' }),
+    'dm.pageSend': (params) => {
+      const f = sendFails(++sends, params)
+      if (f) return f
+      pending = pending.filter((p) => p.slice(0, 32) !== params.id)
+      return { id: params.id, at: 'x' }
+    }
+  })
+  const status = { gen: 1, box: 'aa'.repeat(32), groupBox: null, share: null, cert: CERT, legacy: true, rotatePending: false, shared: [] }
+  return { node, posted, status, setPending: (p) => { pending = p } }
+}
+
+const ctlPeers = (node) => node.calls.filter((c) => c.method === 'dm.pageDraft').map((c) => c.params)
+const sendsOf = (node) => node.calls.filter((c) => c.method === 'dm.pageSend').map((c) => c.params)
+const chunksOf = (node) => node.calls.filter((c) => c.method === 'dm.pageLegacyChunk').map((c) => c.params)
+const actionsOf = (posted, action) => posted.filter((p) => p[0] === action).map((p) => p[1])
+
+test('activation of a legacy page imports the 3 chunk bundle, calls done, then re-applies 2 blocks', async (t) => {
+  const { pagesDmActivate } = await load()
+  const { node, posted, status } = legacySetup(t)
+  const r = await pagesDmActivate(node, { member: M, page: P, status, roster: { owner: M, admins: [] } })
+  t.alike(r, { gen: 2, missing: [] })
+  const box = actionsOf(posted, 'dm-box')[0]
+  t.alike(box, { expectedGen: 1, box: BOX, groupBox: GBOX, ownBox: OWN_BOX, shares: [{ member: M, sealed: 's', sig: SIG }] }, 'no imported')
+  t.absent(posted.some((p) => p[0] === 'dm-list' || p[0] === 'dm-thread'), 'no paged import')
+  t.absent(node.calls.some((c) => c.method === 'dm.pageImport'))
+  const secrets = node.calls.find((c) => c.method === 'dm.pageSecrets').params
+  t.alike(secrets, { page: P, gen: 2, sealed: 's', by: M, sig: SIG, box: BOX, groupBox: GBOX, cert: CERT }, 'no legacy envelope')
+  t.alike(actionsOf(posted, 'dm-legacy-read'), [{ from: 0 }, { from: 2 }], '8 at most per read, from the next index')
+  t.alike(chunksOf(node), [0, 1, 2].map((i) => ({ page: P, id: BUNDLE, index: i, count: 3, sealed: 'c' + i })))
+  t.alike(actionsOf(posted, 'dm-legacy-done'), [{ id: BUNDLE }], 'done once, after the node filed it')
+  const methods = node.calls.map((c) => c.method)
+  t.ok(methods.indexOf('dm.pageSecrets') < methods.indexOf('dm.pageLegacyChunk'), 'chunks after the adoption')
+  const order = posted.map((p) => p[0])
+  t.ok(order.indexOf('dm-legacy-done') < order.indexOf('dm-sign'), 'blocks after done')
+  t.alike(ctlPeers(node), [{ page: P, kind: 'ctl', op: 'blocked', peer: B1 }, { page: P, kind: 'ctl', op: 'blocked', peer: B2 }])
+  t.ok(sendsOf(node).every((p) => p.expiresAt === '2026-01-01T00:05:00.000Z'), 'with the expiry dm-sign answered')
+})
+
+test('a page that is not legacy reads no bundle and re-applies nothing', async (t) => {
+  const { pagesDmActivate } = await load()
+  const { node, posted } = legacySetup(t)
+  const status = { gen: 0, box: null, groupBox: null, share: null, cert: CERT, legacy: false, rotatePending: false }
+  t.alike(await pagesDmActivate(node, { member: M, page: P, status, roster: { owner: M, admins: [] } }), { gen: 1, missing: [] })
+  t.alike(posted.map((p) => p[0]), ['dm-box'])
+  t.absent(node.calls.some((c) => c.method === 'dm.pageLegacyBlocks' || c.method === 'dm.pageLegacyChunk'))
+})
+
+test('an interrupted import stands as blocksError; the tap goes on with the same bundle', async (t) => {
+  const { pagesDmActivate, pagesDmLegacyFinish } = await load()
+  const { node, posted, status } = legacySetup(t, { chunkFails: (n) => n === 2 ? new Error('falhou') : null })
+  const r = await pagesDmActivate(node, { member: M, page: P, status, roster: { owner: M, admins: [] } })
+  t.ok(r.blocksError, 'the activation stands')
+  t.is(r.blocksError.step, 'import')
+  t.is(actionsOf(posted, 'dm-legacy-done').length, 0, 'no done for a partial import')
+  t.is(sendsOf(node).length, 0, 'no blocks before the import')
+  const reads = actionsOf(posted, 'dm-legacy-read').length
+  await r.blocksError.retry()
+  t.ok(actionsOf(posted, 'dm-legacy-read').length > reads, 'read again from the first chunk')
+  t.alike(actionsOf(posted, 'dm-legacy-done'), [{ id: BUNDLE }])
+  t.is(sendsOf(node).length, 2)
+  // A later tap on the card (the bundle 'dm-box-read' still names) runs the same steps.
+  const again = await pagesDmLegacyFinish(node, { member: M, page: P, bundle: null })
+  t.alike(again, { done: 0 }, 'nothing left')
+})
+
+test('the inbox card completes an interrupted import on tap', async (t) => {
+  const { pagesDmBoxRead, pagesDmLegacyFinish, pagesDmLegacyPending } = await load()
+  const { legacyBundleOf, legacyCardLabel } = await import('../src/pageSecrets.js')
+  const { node, posted } = legacySetup(t)
+  const status = await pagesDmBoxRead(node, { member: M, page: P })
+  t.is(legacyCardLabel({ bundle: legacyBundleOf(status), pending: await pagesDmLegacyPending(node, { page: P }) }), 'Concluir a importação das conversas antigas')
+  t.is(chunksOf(node).length, 0, 'reading the card label writes nothing')
+  t.alike(await pagesDmLegacyFinish(node, { member: M, page: P, bundle: legacyBundleOf(status) }), { done: 2 })
+  t.alike(actionsOf(posted, 'dm-legacy-done'), [{ id: BUNDLE }])
+  const after = await pagesDmBoxRead(node, { member: M, page: P })
+  t.is(legacyCardLabel({ bundle: legacyBundleOf(after), pending: await pagesDmLegacyPending(node, { page: P }) }), null, 'no card once done')
+})
+
+test('an uncertain dm-legacy-done keeps its retry, then re-applies the blocks', async (t) => {
+  const { pagesDmLegacyFinish } = await load()
+  const { node, posted } = legacySetup(t, { doneFails: (n) => n === 1 ? json(500, {}) : null })
+  const err = await caught(t, pagesDmLegacyFinish(node, { member: M, page: P, bundle: { id: BUNDLE, count: 3 } }))
+  t.is(err.uncertain, true)
+  t.is(err.step, 'import')
+  t.is(sendsOf(node).length, 0)
+  const dones = posted.filter((p) => p[0] === 'dm-legacy-done')
+  t.alike(await err.retry(), { done: 2 })
+  t.is(posted.filter((p) => p[0] === 'dm-legacy-done').length, dones.length + 1, 'done resent once')
+  t.is(chunksOf(node).length, 3, 'no chunk fed again')
+})
+
+test('a failed block stops there; the retry resends the exact request for that peer only', async (t) => {
+  const { pagesDmActivate, pagesDmReapplyBlocks } = await load()
+  const { node, status } = legacySetup(t, { sendFails: (n) => n === 2 ? new Error('não deu para confirmar o envio') : null })
+  const r = await pagesDmActivate(node, { member: M, page: P, status, roster: { owner: M, admins: [] } })
+  t.ok(r.blocksError, 'the activation stands, the blocks report the failure')
+  t.is(r.blocksError.peer, B2)
+  t.is(r.blocksError.step, 'blocks')
+  t.is(r.blocksError.uncertain, true)
+  t.is(sendsOf(node).length, 2, 'stopped at the failure, no automatic resend')
+  await r.blocksError.retry()
+  const sends = sendsOf(node)
+  t.is(sends.length, 3)
+  t.alike(sends[2], sends[1], 'the same uncertain request')
+  t.alike(ctlPeers(node).map((p) => p.peer), [B1, B2], 'B1 is never drafted again')
+  t.alike(await pagesDmReapplyBlocks(node, { member: M, page: P }), { done: 0 }, 'the node lists nothing left')
+})
+
+test('a refused block retries from that peer with a new draft', async (t) => {
+  const { pagesDmReapplyBlocks } = await load()
+  const { node, setPending } = legacySetup(t, { sendFails: (n) => n === 2 ? new Error('rascunho expirado') : null })
+  setPending([B1, B2])
+  const err = await caught(t, pagesDmReapplyBlocks(node, { member: M, page: P }))
+  t.is(err.peer, B2)
+  t.absent(err.uncertain)
+  await err.retry()
+  t.alike(ctlPeers(node).map((p) => p.peer), [B1, B2, B2], 'only B2 again')
+})
+
+test('an activation retry that succeeds surfaces the blocks failure like the first attempt', async (t) => {
+  const { pagesDmActivate } = await load()
+  let boxes = 0
+  const { node, status } = legacySetup(t, { sendFails: () => new Error('rascunho expirado') })
+  const real = globalThis.fetch
+  globalThis.fetch = async (url, init) => url.endsWith('/dm-box') && ++boxes === 1 ? json(500, {}) : real(url, init)
+  t.teardown(() => { globalThis.fetch = real })
+  const err = await caught(t, pagesDmActivate(node, { member: M, page: P, status, roster: { owner: M, admins: [] } }))
+  t.is(err.uncertain, true)
+  const r = await err.retry()
+  t.ok(r.blocksError, 'the retry reports it too')
+  t.is(r.blocksError.step, 'blocks')
+  const inbox = fs.readFileSync(path.join(__dirname, '../src/screens/Mensagens.js'), 'utf8')
+  const retryFn = inbox.slice(inbox.indexOf('const retry = async'), inbox.indexOf('const reapply = async'))
+  t.ok(retryFn.includes('setBlocksHold(out && out.blocksError'), 'the screen holds it after a retry')
+})
+
+test('the legacy steps run only from a tap: the screen read writes nothing', (t) => {
+  const inbox = fs.readFileSync(path.join(__dirname, '../src/screens/Mensagens.js'), 'utf8')
+  const readFn = inbox.slice(inbox.indexOf('const read = useCallback'), inbox.indexOf('}, [pageKey])'))
+  t.absent(/pagesDmLegacyFinish|pagesDmReapplyBlocks|pagesDmActivate|dm\.pageLegacyChunk/.test(readFn), 'no write on open')
+  t.ok(readFn.includes('pagesDmLegacyPeers'), 'the card reads the pending peers')
+  t.is(inbox.split('pagesDmLegacyFinish(').length - 1, 1, 'one call, in reapply')
+  t.absent(inbox.includes('pageNoticeStore'), 'no per-device done list')
+})
+
+test('pagesDmPrepare takes ownBox from the node and refuses a published box that is not its own', async (t) => {
+  const { pagesDmPrepare, PAGE_DM_OWN_BOX_PENDING, PAGE_DM_NO_OWN_BOX } = await load()
+  const gen = ({ recipients }) => ({ box: BOX, groupBox: GBOX, shares: recipients.map((r) => ({ member: r.member, sealed: 's', sig: SIG })) })
+  const roster = { owner: M, admins: [ADMIN] }
+  const good = dmNode({ 'dm.enable': { box: OWN_BOX, gen: 1, seq: null }, 'dm.lookup': ({ member }) => ({ box: member === M ? OWN_BOX : BOX, gen: 1 }), 'dm.pageGenerate': gen })
+  const prep = await pagesDmPrepare(good, { member: M, page: P, status: { gen: 0 }, roster })
+  t.is(prep.dmBox.ownBox, OWN_BOX)
+  t.is(good.calls[0].method, 'dm.enable', 'the node is asked first')
+  const stale = dmNode({ 'dm.enable': { box: OWN_BOX, gen: 2, seq: 5 }, 'dm.lookup': () => ({ box: BOX, gen: 1 }), 'dm.pageGenerate': gen })
+  const err = await caught(t, pagesDmPrepare(stale, { member: M, page: P, status: { gen: 0 }, roster }))
+  t.is(err.message, PAGE_DM_OWN_BOX_PENDING)
+  t.absent(stale.calls.some((c) => c.method === 'dm.pageGenerate'), 'nothing generated for a box the node does not derive')
+  const none = dmNode({ 'dm.enable': new Error('identidade bloqueada: entre com a passkey'), 'dm.lookup': () => ({ box: OWN_BOX, gen: 1 }) })
+  t.is((await caught(t, pagesDmPrepare(none, { member: M, page: P, status: { gen: 0 }, roster }))).message, PAGE_DM_NO_OWN_BOX)
+  t.is(none.calls.filter((c) => c.method === 'dm.enable').length, 1, 'never asked again by itself')
+})
+
+test('a new owner without a share rotates through dm-box with expectedGen the current gen', async (t) => {
+  const { pagesDmActivate } = await load()
+  const calls = stub(t, flow(() => json(200, { seq: 7, gen: 4 })))
+  const node = dmNode({
+    'dm.lookup': ({ member }) => ({ box: member === M ? OWN_BOX : BOX, gen: 1 }),
+    'dm.pageGenerate': ({ gen, recipients }) => ({ box: BOX, groupBox: GBOX, shares: recipients.map((r) => ({ member: r.member, sealed: 's' + gen, sig: SIG })) }),
+    'dm.pageSecrets': () => ({ ok: true })
+  })
+  const status = { gen: 3, box: BOX, groupBox: GBOX, share: null, cert: CERT, legacy: false, rotatePending: false, shared: [ADMIN] }
+  t.alike(await pagesDmActivate(node, { member: M, page: P, status, roster: { owner: M, admins: [ADMIN] } }), { gen: 4, missing: [] })
+  const op = body(calls[1]).op
+  t.is(op.expectedGen, 3)
+  t.alike(op.shares.map((s) => s.member), [M, ADMIN], 'a new gen for the whole roster')
+  t.is(node.calls.find((c) => c.method === 'dm.pageSecrets').params.gen, 4)
+})
+
+test('the inbox keys are per page: a page change resets them and the actions check the page', (t) => {
+  const inbox = fs.readFileSync(path.join(__dirname, '../src/screens/Mensagens.js'), 'utf8')
+  t.ok(inbox.includes('const state = pageKeysOf(stored, pageKey)'), 'a read for another page counts as none')
+  t.ok(inbox.includes('setState({ ...PAGE_KEYS_IDLE, page: pageKey })'), 'the page change resets status, roster and phase')
+  const activateFn = inbox.slice(inbox.indexOf('const activate = async'), inbox.indexOf('const retry = async'))
+  t.ok(activateFn.includes('page !== pageKey'), 'no activation with another page\'s read')
+  t.ok(activateFn.includes('pagesDmActivate(nodeRef.current, { member, page, status, roster })'), 'the page of the read, never the current key with an old roster')
+  const reapplyFn = inbox.slice(inbox.indexOf('const reapply = async'), inbox.indexOf('const legacyLabel'))
+  t.ok(reapplyFn.includes('page !== pageKey'))
+  t.ok(inbox.includes("keys.phase === 'rotate'"), 'the owner without a share gets the new gen')
+  t.ok(inbox.includes('blockPeersLine(keys.peers'), 'the re-apply card names the peers before the tap')
+})
+
+test('the move carries dmBox only with a promoted device gen; an owner without a share offers no Enviar chave', (t) => {
+  const ajustes = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
+  const moveFn = ajustes.slice(ajustes.indexOf('const movePage = () =>'), ajustes.indexOf('const retryLifecycle'))
+  t.ok(moveFn.includes('const dmBox = hasDeviceKeys(dmStatus)'), 'gen 0 with a pending first rotation sends none')
+  t.ok(/const missingKeys = [^\n]*dmStatus\.share \? missingShares/.test(ajustes))
+})
+
+test('pagesDmLegacyPeers lists each pending peer once; a failed read is empty', async (t) => {
+  const { pagesDmLegacyPeers, pagesDmLegacyPending } = await load()
+  const node = dmNode({ 'dm.pageLegacyBlocks': { pending: [B1, B2, B1, 'x'] } })
+  t.alike(await pagesDmLegacyPeers(node, { page: P }), [B1, B2])
+  t.is(await pagesDmLegacyPending(node, { page: P }), 2)
+  t.alike(await pagesDmLegacyPeers(dmNode({ 'dm.pageLegacyBlocks': new Error('x') }), { page: P }), [])
+})
+
+// A service whose remove rotates the page to dmBox's gen and whose
+// 'dm-box-read' then hands back the caller's share of that gen.
+function rotatingService (t, { gen = 2, pending = () => false } = {}) {
+  const real = globalThis.fetch
+  let starts = 0
+  const state = { gen, posted: [] }
+  globalThis.fetch = async (url, init) => {
+    if (url.endsWith('/start')) return json(200, { nonce: String(++starts).padStart(43, 'r') })
+    const action = url.split('/').pop()
+    const b = JSON.parse(init.body)
+    state.posted.push([action, b])
+    if (action === 'remove') {
+      if (b.dmBox.expectedGen !== state.gen) return json(409, { error: 'conflito' })
+      state.gen = b.dmBox.expectedGen + 1
+      return json(200, { ok: true, dmGen: state.gen })
+    }
+    if (action === 'dm-box-read') {
+      if (pending()) return json(200, { gen: state.gen, box: BOX, groupBox: GBOX, share: null, cert: CERT, rotatePending: true })
+      return json(200, { gen: state.gen, box: BOX, groupBox: GBOX, share: { gen: state.gen, sealed: 's' + state.gen, by: M, sig: SIG }, cert: CERT, rotatePending: false })
+    }
+    return json(500, {})
+  }
+  t.teardown(() => { globalThis.fetch = real })
+  return state
+}
+
+const keysNode = () => dmNode({
+  'dm.lookup': ({ member }) => ({ box: member === M ? OWN_BOX : BOX, gen: 1 }),
+  'dm.pageGenerate': ({ gen, recipients }) => ({ box: BOX, groupBox: GBOX, shares: recipients.map((r) => ({ member: r.member, sealed: 's' + gen, sig: SIG })) }),
+  'dm.pageSecrets': () => ({ ok: true })
+})
+
+test('remove A then remove B: gen N+1 is adopted on this device before gen N+2 is generated', async (t) => {
+  const { actAs, pagesDmPrepare, pagesDmExpectAdopt, pagesDmAdoptNew, pagesDmAwaitsAdopt } = await load()
+  const page = '71'.repeat(32)
+  const A = '72'.repeat(32)
+  const B = '73'.repeat(32)
+  const svc = rotatingService(t, { gen: 2 })
+  const node = keysNode()
+  const removeOne = async (who, status, admins) => {
+    const prep = await pagesDmPrepare(node, { member: M, page, status, roster: { owner: M, admins } })
+    pagesDmExpectAdopt(page, prep.gen)
+    await actAs(node, { member: M, action: 'remove', page, op: { remove: who }, dmBox: prep.dmBox })
+    return prep.gen
+  }
+  const g1 = await removeOne(A, { gen: 2, groupBox: GBOX }, [B])
+  t.is(g1, 3)
+  t.ok(pagesDmAwaitsAdopt(page), 'the new gen waits for its adoption')
+  const early = await caught(t, pagesDmPrepare(node, { member: M, page, status: { gen: 3, groupBox: GBOX }, roster: { owner: M, admins: [] } }))
+  t.is(early.code, 'rotacao-necessaria', 'no second rotation before the first is held here')
+  t.is(early.message, 'A chave da página está sendo trocada; tente de novo em instantes')
+  await pagesDmAdoptNew(node, { member: M, page, gen: g1 })
+  t.absent(pagesDmAwaitsAdopt(page))
+  const g2 = await removeOne(B, { gen: 3, groupBox: GBOX }, [])
+  t.is(g2, 4)
+  await pagesDmAdoptNew(node, { member: M, page, gen: g2 })
+  const methods = node.calls.map((c) => c.method + (c.params && Number.isInteger(c.params.gen) ? ':' + c.params.gen : ''))
+  t.ok(methods.indexOf('dm.pageSecrets:3') < methods.indexOf('dm.pageGenerate:4'), 'gen 3 adopted before gen 4 is made')
+  t.alike(node.calls.filter((c) => c.method === 'dm.pageSecrets').map((c) => c.params.gen), [3, 4], 'both gens went into the node')
+  t.is(svc.gen, 4)
+})
+
+test('a new gen still pending on the service: the adoption throws the rotating text and keeps the guard', async (t) => {
+  const { pagesDmAdoptNew, pagesDmExpectAdopt, pagesDmForgetAdopt, pagesDmAwaitsAdopt } = await load()
+  const page = '74'.repeat(32)
+  let pending = true
+  rotatingService(t, { gen: 1, pending: () => pending })
+  const node = keysNode()
+  pagesDmExpectAdopt(page, 1)
+  const err = await caught(t, pagesDmAdoptNew(node, { member: M, page, gen: 1 }))
+  t.is(err.code, 'rotacao-necessaria')
+  t.ok(pagesDmAwaitsAdopt(page))
+  t.absent(node.calls.some((c) => c.method === 'dm.pageSecrets'))
+  pending = false
+  await pagesDmAdoptNew(node, { member: M, page, gen: 1 })
+  t.absent(pagesDmAwaitsAdopt(page), 'the manual retry adopts and lifts the guard')
+  pagesDmExpectAdopt(page, 5)
+  pagesDmForgetAdopt(page, 5)
+  t.absent(pagesDmAwaitsAdopt(page), 'a definite refusal sent no gen')
+})
+
+test('the invite share: a device behind adopts first; a gen that still differs attaches none', async (t) => {
+  const { pagesDmInviteShare } = await load()
+  const page = '75'.repeat(32)
+  let held = 2
+  const node = dmNode({
+    'dm.lookup': () => ({ box: BOX, gen: 1 }),
+    'dm.pageSecrets': (params) => { held = params.gen; return { ok: true } },
+    'dm.pageShare': () => ({ gen: held, sealed: 'S' + held, sig: SIG })
+  })
+  const status = { gen: 3, box: BOX, groupBox: GBOX, cert: CERT, share: { gen: 3, sealed: 's3', by: M, sig: SIG } }
+  t.alike(await pagesDmInviteShare(node, { page, to: ADMIN, status }), { sealed: 'S3', sig: SIG }, 'sealed with the current gen after adopting it')
+  const methods = node.calls.map((c) => c.method)
+  t.ok(methods.indexOf('dm.pageSecrets') < methods.lastIndexOf('dm.pageShare'))
+  held = 2
+  t.is(await pagesDmInviteShare(node, { page, to: ADMIN, status: { ...status, share: null } }), null, 'no own share to adopt: no share, the invite goes out without one')
+  held = 4
+  t.is(await pagesDmInviteShare(node, { page, to: ADMIN, status }), null, 'a held gen ahead of the read is not attached either')
+  t.is(await pagesDmInviteShare(node, { page, to: ADMIN }), null, 'no read, no share')
+})
+
+test('Ajustes adopts the new gen as the last step of a remove and a move, with a manual retry', (t) => {
+  const ajustes = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
+  const removeFn = ajustes.slice(ajustes.indexOf('const remove = (key) =>'), ajustes.indexOf('const missingKeys'))
+  t.ok(removeFn.includes('pagesDmExpectAdopt(page, gen)'), 'the guard goes up before the remove is sent')
+  t.ok(removeFn.includes('if (gen !== null) await adoptNew(page, gen)'), 'adopted after the service took it')
+  t.is(removeFn.split('await adoptNew(page, gen)').length - 1, 2, 'the held retry adopts too')
+  const moveFn = ajustes.slice(ajustes.indexOf('const movePage = () =>'), ajustes.indexOf('// ---- view'))
+  t.ok(moveFn.includes('pagesDmExpectAdopt(to, 1)'))
+  t.ok(moveFn.includes('if (dmBox) await adoptNew(moved, 1)'))
+  t.ok(ajustes.includes("<Pill label='Tentar de novo' onPress={retryAdopt}"), 'a failed adoption keeps a manual retry')
+  t.ok(ajustes.includes('pagesDmInviteShare(node, { page, to: who, status: dmStatus })'), 'the invite seals for the read gen')
+})
+
+test('a fresh device adopts the current share before generating the next gen', async (t) => {
+  const { actAs, pagesDmPrepare, pagesDmExpectAdopt, pagesDmAdoptNew } = await load()
+  const page = '76'.repeat(32)
+  const A = '77'.repeat(32)
+  rotatingService(t, { gen: 2 })
+  const node = keysNode()
+  const status = { gen: 2, box: BOX, groupBox: GBOX, cert: CERT, rotatePending: false, share: { gen: 2, sealed: 's2', by: M, sig: SIG } }
+  const prep = await pagesDmPrepare(node, { member: M, page, status, roster: { owner: M, admins: [] } })
+  pagesDmExpectAdopt(page, prep.gen)
+  await actAs(node, { member: M, action: 'remove', page, op: { remove: A }, dmBox: prep.dmBox })
+  await pagesDmAdoptNew(node, { member: M, page, gen: prep.gen })
+  const methods = node.calls.map((c) => c.method + (c.params && Number.isInteger(c.params.gen) ? ':' + c.params.gen : ''))
+  t.ok(methods.indexOf('dm.pageSecrets:2') >= 0 && methods.indexOf('dm.pageSecrets:2') < methods.indexOf('dm.pageGenerate:3'), 'the current gen is held before the next is made')
+  t.alike(node.calls.filter((c) => c.method === 'dm.pageSecrets').map((c) => c.params.gen), [2, 3], 'then the new gen is adopted')
+  const none = keysNode()
+  await pagesDmPrepare(none, { member: M, page: '78'.repeat(32), status: { gen: 0 }, roster: { owner: M, admins: [] }, gen: 1 })
+  t.absent(none.calls.some((c) => c.method === 'dm.pageSecrets'), 'nothing to adopt without a share')
+  const ajustes = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
+  const moveFn = ajustes.slice(ajustes.indexOf('const movePage = () =>'), ajustes.indexOf('// ---- view'))
+  t.ok(moveFn.includes('if (dmStatus.share) await pagesDmAdopt(node, { page, status: dmStatus })'), 'a move keeps the old page\'s gen too')
+})
+
+test('a core node cannot rotate: remove and move refuse plainly with the app text, never a retry', async (t) => {
+  const { pagesDmPrepare, PAGE_DM_CORE_ONLY } = await load()
+  t.is(PAGE_DM_CORE_ONLY, 'Para remover administradores ou mudar a chave desta página, use o app no celular ou na web.')
+  const status = { gen: 2, groupBox: GBOX }
+  const core = { ...dmNode(), hosted: false }
+  const a = await caught(t, pagesDmPrepare(core, { member: M, page: '79'.repeat(32), status, roster: { owner: M, admins: [] } }))
+  t.is(a.message, PAGE_DM_CORE_ONLY)
+  t.absent(a.uncertain)
+  t.absent(typeof a.retry === 'function', 'no retry loop')
+  t.is(core.calls.length, 0, 'nothing asked of the node')
+  const usage = dmNode({ 'dm.enable': new Error('mensagens diretas disponíveis só no navegador') })
+  const b = await caught(t, pagesDmPrepare(usage, { member: M, page: '7a'.repeat(32), status, roster: { owner: M, admins: [] } }))
+  t.is(b.message, PAGE_DM_CORE_ONLY, 'the node\'s USAGE refusal reads the same')
+  t.absent(usage.calls.some((c) => c.method === 'dm.pageGenerate'))
+  const ajustes = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
+  const removeFn = ajustes.slice(ajustes.indexOf('const remove = (key) =>'), ajustes.indexOf('const missingKeys'))
+  t.ok(removeFn.includes('if (pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)'), 'no remove without rotation')
+  const moveFn = ajustes.slice(ajustes.indexOf('const movePage = () =>'), ajustes.indexOf('// ---- view'))
+  t.ok(moveFn.includes('if (hasDeviceKeys(dmStatus) && pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)'))
+})
+
+test('a guard left by a publication that never reached the service goes with a fresh read of the gen before it', async (t) => {
+  const { pagesDmActivate, pagesDmAwaitsAdopt, pagesDmPrepare, pagesDmExpectAdopt } = await load()
+  const page = '7b'.repeat(32)
+  stub(t, flow(() => new Error('rede caiu')))
+  const node = keysNode()
+  const status = { gen: 0, box: null, groupBox: null, share: null, cert: CERT, legacy: false, rotatePending: false }
+  const err = await caught(t, pagesDmActivate(node, { member: M, page, status, roster: { owner: M, admins: [] } }))
+  t.is(err.uncertain, true)
+  t.ok(pagesDmAwaitsAdopt(page), 'the uncertain publication keeps the guard')
+  // The retry callback is lost with the screen; a fresh read shows gen 0, nothing pending.
+  const prep = await pagesDmPrepare(node, { member: M, page, status, roster: { owner: M, admins: [] } })
+  t.is(prep.gen, 1, 'the new attempt proceeds')
+  pagesDmExpectAdopt(page, 1)
+  const pending = await caught(t, pagesDmPrepare(node, { member: M, page, status: { ...status, rotatePending: true }, roster: { owner: M, admins: [] } }))
+  t.is(pending.code, 'rotacao-necessaria', 'a pending rotation still refuses')
+  const published = await caught(t, pagesDmPrepare(node, { member: M, page, status: { ...status, gen: 1, groupBox: GBOX }, roster: { owner: M, admins: [] } }))
+  t.is(published.code, 'rotacao-necessaria', 'a published gen not adopted here still refuses')
 })

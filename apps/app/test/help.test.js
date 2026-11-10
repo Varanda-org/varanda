@@ -202,3 +202,9 @@ test('the info button is a 44 pt target with the icon kept in place', (t) => {
   t.ok(src.includes('width: layout.hit, height: layout.hit'))
   t.ok(src.includes('style === undefined ? styles.inset : style') && src.includes('inset: { margin: -6 }') && !/button: \{[^}]*margin: -6/.test(src), 'the negative margin applies only without a caller style (the Diário discs keep their place)')
 })
+
+test('the Feira help says only the page\'s admins read a page chat', async (t) => {
+  const { HELP } = await load()
+  t.ok(HELP.feira.paragraphs.includes('Nas conversas com uma Página, só quem administra a página lê as mensagens.'))
+  t.absent(HELP.feira.paragraphs.some((p) => p.includes('pode ler')))
+})

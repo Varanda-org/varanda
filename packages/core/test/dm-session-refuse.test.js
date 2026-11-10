@@ -25,6 +25,19 @@ const CALLS = [
   ['dm.thread', { peer: KEY, before: ID, limit: 10 }, DM_NO],
   ['dm.set', { peer: KEY, state: 'blocked' }, DM_NO],
   ['dm.seen', { peer: KEY }, DM_NO],
+  ['dm.list', { page: KEY }, DM_NO],
+  ['dm.thread', { page: KEY, peer: KEY }, DM_NO],
+  ['dm.set', { page: KEY, peer: KEY, state: 'accepted' }, DM_NO],
+  ['dm.seen', { page: KEY, peer: KEY }, DM_NO],
+  ['dm.pageGenerate', { page: KEY, gen: 1, recipients: [{ member: KEY, box: KEY }] }, DM_NO],
+  ['dm.pageShare', { page: KEY, member: KEY, box: KEY }, DM_NO],
+  ['dm.pageSecrets', { page: KEY, gen: 1, sealed: 'x', by: KEY, sig: 'ef'.repeat(64), box: KEY, groupBox: KEY, cert: {} }, DM_NO],
+  ['dm.pageDraft', { page: KEY, kind: 'msg', to: KEY, text: 'oi' }, DM_NO],
+  ['dm.pageSend', { page: KEY, id: ID, signature: 'ef'.repeat(64), expiresAt: 1 }, DM_NO],
+  ['dm.pageLegacyChunk', { page: KEY, id: KEY, index: 0, count: 1, sealed: 'x' }, DM_NO],
+  ['dm.pageLegacyBlocks', { page: KEY }, DM_NO],
+  ['dm.pageForget', { page: KEY }, DM_NO],
+  ['group.seal', { group: KEY, page: KEY, text: 'oi' }, DM_NO],
   ['dm.reportSign', { nonce: 'n'.repeat(43), target: KEY, reason: 'assedio', quote: 'mensagem' }, SIGN_NO]
 ]
 

@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 32)
+  t.is(LEGAL_VERSION, 33)
   t.is(LEGAL_DATE, '08/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 32, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 33, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
@@ -90,7 +90,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '358228724e3e4c2260c97bb962f4886bc6e8e06754ec020153e68b2da05bd879', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'f2ff27977d36de15030d52af2edd9afea03c6147db2602f6e7dc102b367215dc', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
@@ -116,16 +116,42 @@ test('legal: version 19 describes extra passkeys and the recovery code for the s
   t.ok(text(PRIVACY).includes('um identificador que ele não consegue ligar a uma passkey'))
 })
 
-test('legal: pages are described in Terms and Privacy, including service-readable messages', async (t) => {
+test('legal: pages are described in Terms and Privacy, including end-to-end messages', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.filter(({ heading }) => heading === 'Páginas').flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(TERMS).includes('Só o dono convida e remove administradores'))
   t.ok(text(TERMS).includes('só vale se ela aceitar'))
   t.ok(text(PRIVACY).includes('lista de administradores'))
-  t.ok(text(TERMS).includes('pode ler as mensagens enviadas para a página'))
-  t.ok(text(TERMS).includes('perde o acesso a essas mensagens no momento da remoção'))
+  t.ok(text(TERMS).includes('cifradas de ponta a ponta entre o aparelho de quem conversa com a página e os aparelhos do dono e dos administradores'))
+  t.ok(text(TERMS).includes('Um administrador removido continua com o que já leu'))
   t.ok(text(TERMS).includes('começa uma caixa nova'))
-  t.ok(text(PRIVACY).includes('podem ser lidas pelo serviço de conta'))
+  t.ok(text(PRIVACY).includes('cifradas de ponta a ponta'))
+})
+
+test('legal: version 33 states the residual risks of a page\'s end-to-end Conversas', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const pages = (doc) => doc.sections.filter(({ heading }) => heading === 'Páginas').flatMap(({ paragraphs }) => paragraphs).join(' ')
+  const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(pages(doc).includes('guarda só envelopes de chave selados'), doc.title + ': sealed envelopes only')
+    t.ok(pages(doc).includes('assina as mensagens da página sem vê-las e fica sabendo qual administrador pediu a assinatura de cada mensagem e quando'), doc.title + ': blind signing, who and when')
+    t.ok(pages(doc).includes('quais membros guardam as chaves de mensagens da página'), doc.title + ': key holders')
+    t.ok(pages(doc).includes('as mensagens que essa pessoa ainda enviar para a chave antiga da página também podem ser lidas pela associação'), doc.title + ': old key after activation')
+    t.ok(pages(doc).includes('Por até 8 dias depois da remoção, ele ainda pode enviar, em nome da página, mensagens que já tinha preparado antes de ser removido'), doc.title + ': prepared messages after removal')
+    t.absent(pages(doc).includes('o ponto até onde já leu as mensagens da página'), doc.title + ': no service read cursor')
+    t.ok(pages(doc).includes('As mensagens escritas antes da ativação podiam ser lidas pelo serviço'), doc.title + ': before activation')
+    t.ok(pages(doc).includes('copiadas para o aparelho do dono e depois apagadas no serviço'), doc.title + ': copied, then deleted')
+    t.ok(pages(doc).includes('a associação poderia trocar a chave de mensagens publicada da página por uma chave dela'), doc.title + ': key replacement')
+    t.ok(pages(doc).includes('se recusam a enviar em nome da página e mostram um aviso quando alguém tenta enviar'), doc.title + ': the warning')
+    t.ok(pages(doc).includes('as mensagens enviadas para a chave trocada poderiam ser lidas pela associação'), doc.title + ': until acted on')
+    t.ok(pages(doc).includes('receba em 7 dias se perde'), doc.title + ': 7-day collection')
+    t.absent(all(doc).includes('Ao conversar com uma Página, a associação pode ler essa conversa'), doc.title + ': no service-readable page chat')
+    t.ok(all(doc).includes('A conversa com uma Página que ativou as Conversas privadas é cifrada entre você e quem administra a página'), doc.title + ': Feira line')
+  }
+  t.absent(pages(TERMS).includes('pode ler as mensagens enviadas para a página'))
+  t.absent(pages(PRIVACY).includes('podem ser lidas pelo serviço de conta'))
+  // Private groups change in a later version.
+  t.ok(pages(PRIVACY).includes('pode ler as publicações da página em grupos privados'))
 })
 
 test('legal: version 15 names the group box, the notices custody, the burned name and the automatic follow', async (t) => {
@@ -230,7 +256,7 @@ test('legal: version 28 describes the Feira listings, offers and ratings', async
   t.ok(text(TERMS).includes('A primeira versão, com texto e fotos, continua no diário até o anúncio ser apagado'))
   t.ok(text(TERMS).includes('não é contrato, e aceitá-la não reserva o anúncio'))
   t.ok(text(TERMS).includes('só depois de quem anuncia ter aceitado a oferta'))
-  t.ok(text(TERMS).includes('a associação pode ler essa conversa'))
+  t.ok(text(TERMS).includes('com os limites descritos em Páginas'))
   t.ok(text(PRIVACY).includes('Os anúncios salvos e as buscas salvas ficam só no seu aparelho'))
   t.ok(text(PRIVACY).includes('feira-invites.json'))
 })

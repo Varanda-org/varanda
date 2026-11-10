@@ -131,7 +131,13 @@ test('dm-budget: v3 writes the v2 keys and matches core innerDigest', (t) => {
     const fields = { kind: 'msg', from: issued.hex, to: bia.hex, at: AT, cert: issued.cert, media }
     const free = rpc.dmTextBudget({ ...fields, v: 3 })
     const { json } = dm.innerDigest({ ...fields, text: 'x' })
-    t.is(dm.DM_INNER_BYTES - 66 - json.byteLength, free - 1, 'same size as the v3 inner')
+    t.is(budget.DM_INNER_V3_EXPIRY_BYTES, 8)
+    t.is(dm.DM_INNER_BYTES - 66 - 8 - json.byteLength, free - 1, 'same size as the v3 inner, expiry included')
     t.ok(free <= rpc.dmTextBudget(fields), 'v3 never has more room than v1 or v2')
   }
+  const full = { kind: 'msg', from: issued.hex, to: bia.hex, at: AT, cert: issued.cert, replyTo: 'c'.repeat(32), media: [item(1), item(2), item(3), item(4)] }
+  const free = rpc.dmTextBudget({ ...full, v: 3 })
+  t.ok(free < 4000, 'the budget is below the code point limit here')
+  t.ok(dm.innerDigest({ ...full, text: textOfBytes(free) }), 'text at the v3 budget fits')
+  t.exception.all(() => dm.innerDigest({ ...full, text: textOfBytes(free + 1) }), /mensagem longa demais/, 'one byte more throws')
 })

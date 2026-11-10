@@ -177,43 +177,51 @@ export function sendPlan (hold, text, quoteId, attachments = []) {
   return attachmentSendPlan(hold, text, quoteId, attachments)
 }
 
-// Conversas as a page: the screens call the same dm.* names and this maps
-// them to the page's signed actions. `act(action, op)` is the page's actAs
-// bound to its member and key. dm.pull and dm.enable have no page form (the
-// service holds the page's box and pulls), so they answer nothing.
-export const PAGE_DM_ACTIONS = Object.freeze({
-  'dm.list': 'dm-list',
-  'dm.thread': 'dm-thread',
-  'dm.send': 'dm-send',
-  'dm.set': 'dm-set',
-  'dm.seen': 'dm-seen'
-})
-
-export const PAGE_DM_SOON = 'Conversas da página em breve'
-export const PAGE_DM_CUSTODY = 'A associação pode ler as mensagens desta página'
+// Conversas as a page: the screens call the same dm.* names. The page's
+// conversations live on this device (docs/rpc.md 5.114): dm.list, dm.thread
+// and dm.seen read the node with `page`; dm.send and dm.set draft on the
+// node (dm.pageDraft), the page signs the digest ('dm-sign', `sign(digest)`,
+// answering { signature, expiresAt }: the service picks the expiry) and the
+// node sends it (dm.pageSend). An uncertain dm.pageSend keeps a retry of that
+// exact request; nothing is drafted or signed again.
+export const PAGE_DM_CUSTODY = 'Só quem administra a página lê estas mensagens'
+export const PAGE_DM_UNSURE = 'não deu para confirmar o envio'
 
 export function pageInboxTitle (name) {
   const shown = typeof name === 'string' ? name.trim() : ''
   return shown === '' ? 'Conversas da página' : 'Conversas da página ' + shown
 }
 
-// A service that has no such action yet answers these two: say so, never
-// 'Pedido inválido'. Everything else (and uncertain, retry) passes through.
-export function pageDmFailure (err) {
-  if (!err || (err.code !== 'pedido-invalido' && err.code !== 'nao-encontrado')) return err
-  const soon = new Error(PAGE_DM_SOON)
-  soon.code = err.code
-  return soon
-}
+const PAGE_READS = ['dm.list', 'dm.thread', 'dm.seen']
 
-export function pageDmRequest (act) {
-  return async (method, params) => {
-    const action = PAGE_DM_ACTIONS[method]
-    if (action === undefined) return {}
-    try {
-      return await act(action, params || {})
-    } catch (err) {
-      throw pageDmFailure(err)
+export function pageDmClient ({ request, sign, page }) {
+  const send = async (draftParams) => {
+    const draft = await request('dm.pageDraft', { page, ...draftParams })
+    const { signature, expiresAt } = await sign(draft.digest)
+    const params = { page, id: draft.id, signature, expiresAt }
+    const put = () => request('dm.pageSend', params).catch((err) => {
+      if (err && (err.uncertain === true || err.message === PAGE_DM_UNSURE)) {
+        err.uncertain = true
+        err.retry = put
+      }
+      throw err
+    })
+    return put()
+  }
+  return async (method, params = {}) => {
+    if (PAGE_READS.includes(method)) return request(method, { ...params, page })
+    if (method === 'dm.pull') return request('dm.pull', {})
+    if (method === 'dm.send') {
+      const { to, text, replyTo, fwd } = params
+      const op = { kind: 'msg', to, text }
+      if (replyTo !== undefined) op.replyTo = replyTo
+      if (fwd !== undefined) op.fwd = fwd
+      return send(op)
     }
+    if (method === 'dm.set') {
+      await send({ kind: 'ctl', peer: params.peer, op: params.state })
+      return { ok: true }
+    }
+    return {}
   }
 }

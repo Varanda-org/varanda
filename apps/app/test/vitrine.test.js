@@ -547,7 +547,7 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
   }
 })
 
-const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap', 'identity.recoveryBind', 'profile.delete']
+const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap', 'identity.recoveryBind', 'profile.delete', 'group.seal', 'dm.pageGenerate', 'dm.pageShare', 'dm.pageSecrets', 'dm.pageDraft', 'dm.pageSend', 'dm.pageLegacyChunk', 'dm.pageLegacyBlocks']
 
 function samples (f) {
   const group = f.groups[3].group
@@ -629,6 +629,13 @@ function samples (f) {
     'dm.pull': {},
     'dm.list': {},
     'dm.thread': { peer: member },
+    'dm.pageGenerate': { page: member, gen: 1, recipients: [{ member, box: member }] },
+    'dm.pageShare': { page: member, member, box: member },
+    'dm.pageSecrets': { page: member, gen: 1, sealed: 'abc', by: member, sig: 'ab'.repeat(64), box: member, groupBox: member, cert: {} },
+    'dm.pageDraft': { page: member, kind: 'msg', to: f.own, text: 'Oi' },
+    'dm.pageSend': { page: member, id: 'ab'.repeat(16), signature: 'ab'.repeat(64), expiresAt: 1800000000000 },
+    'dm.pageLegacyChunk': { page: member, id: member, index: 0, count: 1, sealed: 'abc' },
+    'dm.pageLegacyBlocks': { page: member },
     'dm.seen': { peer: member },
     'dm.set': { peer: member, state: 'accepted' },
     'dm.send': { to: member, text: 'Olá!' },
@@ -638,6 +645,7 @@ function samples (f) {
     'group.join': { group },
     'group.leave': { group },
     'group.read': { group },
+    'group.seal': { group, page: group, text: 'Vamos nos encontrar!' },
     'group.post': { group, text: 'Vamos nos encontrar!' },
     'group.seen': { group },
     'group.hide': { group, target: { writer: f.groups[3].items[0].writer, seq: 2 }, on: true },

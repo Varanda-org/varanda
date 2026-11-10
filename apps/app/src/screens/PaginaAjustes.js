@@ -14,6 +14,12 @@
 // Only the owner closes the page or moves it to a new key. An uncertain
 // close or move keeps its signed bytes: 'Tentar de novo' resends them and
 // nothing is signed again.
+//
+// The page's Conversas keys (docs/rpc.md 5.84, 5.114): once activated, an
+// invite carries the invitee's share, a removal carries new keys for the
+// remaining roster (dmBox, prepared once: 'Tentar de novo' resends that same
+// request) and a move carries K2's first keys. Members without a share of the
+// current gen are listed for the owner with 'Enviar chave'.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
@@ -31,7 +37,8 @@ import { fetchMember } from '../indexClient'
 import { planPeeks } from '../thread'
 import { peekAll, refOf } from './Conversa'
 import { revokeUrl, urlFromBytes } from '../media/display'
-import { TEXTS, actAs, pagesAvatar, pagesClose, pagesMove, pagesOrigin, pagesStart } from '../pages'
+import { PAGE_DM_CORE_ONLY, TEXTS, actAs, pagesAvatar, pagesClose, pagesDmAdopt, pagesDmAdoptNew, pagesDmAwaitsAdopt, pagesDmBoxRead, pagesDmExpectAdopt, pagesDmForgetAdopt, pagesDmInviteShare, pagesDmPrepare, pagesDmCoreOnly, pagesDmShareTo, pagesMove, pagesOrigin, pagesStart } from '../pages'
+import { PAGE_DM_CONFLICT, PAGE_DM_KEY_PENDING, PAGE_DM_ROTATING, PAGE_DM_SEND_KEY, hasDeviceKeys, missingShares, pageKeyText } from '../pageSecrets'
 import { FRESH_FAILED, mergeProfile, profileOp } from '../pageProfile'
 import { usePageMember } from './Paginas'
 import { copyText } from '../share'
@@ -65,6 +72,15 @@ const ADMINS_UNAVAILABLE = 'lista de administradores indisponível'
 const MOVE_SOFT = 'Use se desconfiar que a chave vazou. Quem segue continua vendo a página e pode seguir a chave nova.'
 const MOVE_UNKNOWN = 'Não deu para ler o estado da página agora. Tente de novo antes de mudar a chave.'
 const LIFECYCLE_UNCERTAIN = 'Não sabemos se o pedido chegou. Confira a página antes de tentar de novo.'
+const DM_KEYS_UNKNOWN = 'Não deu para ler a chave das Conversas da página. Tente de novo.'
+const SEND_KEY_SOFT = 'Estas pessoas ainda não têm a chave das Conversas da página.'
+
+// A refusal about the page's keys, in the words of the screen.
+const keyFailure = (err) => {
+  if (err && err.uncertain !== true && err.code === 'conflito') err.message = PAGE_DM_CONFLICT
+  if (err && err.uncertain !== true && err.code === 'rotacao-necessaria') err.message = PAGE_DM_ROTATING
+  throw err
+}
 
 // The two steps of 'Encerrar página', naming the @nome.
 const closeWarning = (handle) => 'Encerrar ' + (handle || 'esta página') + '? As publicações deixam de aparecer para quem estiver com o aplicativo em dia. Cópias que alguém já tenha guardado continuam existindo.'
@@ -177,6 +193,12 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
   const [lifeUncertain, setLifeUncertain] = useState(null) // { kind, err, to? }: err.retry() resends the same bytes
   const [movedKey, setMovedKey] = useState(null)
   const [copyNote, setCopyNote] = useState('')
+  const [dmStatus, setDmStatus] = useState(undefined) // 'dm-box-read' answer, null when it failed
+  const [removeHold, setRemoveHold] = useState(null) // the uncertain removal: err.retry() resends it
+  const [shareHold, setShareHold] = useState(null) // { to, err } of an uncertain 'Enviar chave'
+  const [adoptHold, setAdoptHold] = useState(null) // { page, gen, error }: a new gen the service took, not yet held here
+  const [adopting, setAdopting] = useState(false)
+  const shareAct = useAction()
   const seqRef = useRef(0)
   const aliveRef = useRef(true)
   const baseRef = useRef(null)
@@ -200,6 +222,14 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
           st = null
         }
       }
+      let box = null
+      if (value.isOwner === true || value.isAdmin === true) {
+        try {
+          box = await pagesDmBoxRead(node, { member, page })
+        } catch {
+          box = null
+        }
+      }
       let current = baseRef.current
       if (current === null) current = await readProfileOf(node, page)
       if (seq !== seqRef.current) return
@@ -207,6 +237,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
       setProfileFailed(baseRef.current === null)
       setRead(value)
       setStatus(st)
+      setDmStatus(box)
       resolveMany([page, value.owner, ...rosterRows(value).admins, ...(st && st.offer ? [st.offer.to] : [])].filter(Boolean))
     } catch (err) {
       if (seq === seqRef.current) setLoadError(errorText(err))
@@ -373,14 +404,90 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     const who = await memberOf(inviteHandle, pagesOrigin(node))
     if (roster.rows.some((r) => r.key === who)) throw new Error(ALREADY_ADMIN)
     if (roster.admins.length >= MAX_ADMINS) throw new Error(TEXTS.limite)
-    return actAs(node, { member, action: 'invite', page, op: ({ nonce }) => inviteOp(read, who, { nonce }) })
+    const share = hasDeviceKeys(dmStatus) && dmStatus.rotatePending !== true ? await pagesDmInviteShare(node, { page, to: who, status: dmStatus }) : null
+    return actAs(node, { member, action: 'invite', page, op: ({ nonce }) => share === null ? inviteOp(read, who, { nonce }) : { ...inviteOp(read, who, { nonce }), share } })
   }, () => { setInviteHandle(''); changed(); return 'Convite enviado. A pessoa vê o convite em Páginas e tem 7 dias para aceitar.' })
+
+  // The last step of a remove or a move the service took: this device
+  // adopts the own share of the new gen at once (a fresh 'dm-box-read'), so
+  // a second rotation never replaces secrets it did not keep. A failure
+  // stays on screen with a manual retry; the action itself stands.
+  const adoptNew = async (p, gen) => {
+    setAdopting(true)
+    try {
+      await pagesDmAdoptNew(node, { member, page: p, gen })
+      if (aliveRef.current) setAdoptHold(null)
+    } catch (err) {
+      if (aliveRef.current) setAdoptHold({ page: p, gen, error: pageKeyText(err) || errorText(err) })
+    }
+    if (aliveRef.current) setAdopting(false)
+  }
+  const retryAdopt = () => adoptHold && adoptNew(adoptHold.page, adoptHold.gen)
+  // A definite refusal sent no gen; an uncertain one may have: the guard stays.
+  const forgetOnRefusal = (p, gen) => (err) => {
+    if (!err || err.uncertain !== true) pagesDmForgetAdopt(p, gen)
+    throw err
+  }
+
+  const removed = () => { setRemoveHold(null); changed(); return 'Administrador removido.' }
+  const holdRemove = (err) => {
+    setRemoveHold(err && err.uncertain === true && typeof err.retry === 'function' ? err : null)
+    throw err
+  }
 
   const remove = (key) => run(removeAct, async () => {
     setConfirm(null)
     if (!rosterKnown) throw new Error(ADMINS_UNAVAILABLE)
-    return actAs(node, { member, action: 'remove', page, op: ({ nonce }) => removeOp(read, key, { nonce }) })
-  }, () => { changed(); return 'Administrador removido.' })
+    if (dmStatus === undefined || dmStatus === null) throw new Error(DM_KEYS_UNKNOWN)
+    let dmBox
+    let gen = null
+    if (hasDeviceKeys(dmStatus)) {
+      // A core node holds no page keys: the rotation, and so the remove, waits for the app.
+      if (pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)
+      const rest = { owner: roster.owner, admins: roster.admins.filter((k) => k !== key) }
+      const prep = await pagesDmPrepare(node, { member, page, status: dmStatus, roster: rest })
+      dmBox = prep.dmBox
+      gen = prep.gen
+      pagesDmExpectAdopt(page, gen)
+    }
+    const tag = (err) => { if (err) err.adoptGen = gen; throw err }
+    const out = await actAs(node, { member, action: 'remove', page, op: ({ nonce }) => removeOp(read, key, { nonce }), dmBox })
+      .catch(gen === null ? (e) => { throw e } : forgetOnRefusal(page, gen)).catch(tag).catch(keyFailure).catch(holdRemove)
+    if (gen !== null) await adoptNew(page, gen)
+    return out
+  }, removed)
+
+  // The same prepared removal again, only on a tap; then its adoption.
+  const retryRemove = () => {
+    const held = removeHold
+    if (!held) return
+    const gen = Number.isInteger(held.adoptGen) ? held.adoptGen : null
+    return run(removeAct, async () => {
+      const out = await held.retry().catch(gen === null ? (e) => { throw e } : forgetOnRefusal(page, gen)).catch((err) => { if (err) err.adoptGen = gen; throw err }).catch(keyFailure).catch(holdRemove)
+      if (gen !== null) await adoptNew(page, gen)
+      return out
+    }, removed)
+  }
+
+  // An owner without a share of the current gen (after a transfer) holds
+  // nothing to send: the page's Conversas offer a new gen instead.
+  const missingKeys = isOwner && rosterKnown && dmStatus && hasDeviceKeys(dmStatus) && dmStatus.rotatePending !== true && dmStatus.share ? missingShares(dmStatus, roster) : []
+  const shareDone = () => { setShareHold(null); return 'Chave enviada.' }
+  const holdShare = (to) => (err) => {
+    setShareHold(err && err.uncertain === true && typeof err.retry === 'function' ? { to, err } : null)
+    throw err
+  }
+  // A fresh device holds no secrets yet: the own share from the read this
+  // screen made goes in first, as the inbox does.
+  const sendKey = (to) => run(shareAct, async () => {
+    if (dmStatus && dmStatus.share) await pagesDmAdopt(node, { page, status: dmStatus })
+    return pagesDmShareTo(node, { member, page, to }).catch(keyFailure).catch(holdShare(to))
+  }, shareDone)
+  const retryShare = () => {
+    const held = shareHold
+    if (!held) return
+    return run(shareAct, () => held.err.retry().catch(keyFailure).catch(holdShare(held.to)), shareDone)
+  }
 
   const offerPending = !!status && !!status.offer && Date.parse(status.offer.exp) > Date.now()
 
@@ -451,17 +558,35 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     return lifecycle('move', async () => {
       if (!rosterKnown) throw new Error(ADMINS_UNAVAILABLE)
       if (fromSeq === null) throw new Error(MOVE_UNKNOWN)
-      return pagesMove(node, {
+      if (dmStatus === undefined || dmStatus === null) throw new Error(DM_KEYS_UNKNOWN)
+      if (hasDeviceKeys(dmStatus) && pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)
+      // K2 starts with its own keys, gen 1, for the same roster, only when
+      // the page has a promoted device gen: a first rotation still pending
+      // at gen 0 is discarded by the move, so it carries none.
+      const dmBox = hasDeviceKeys(dmStatus)
+        ? async ({ to }) => {
+          // The old page's current gen stays readable on this device.
+          if (dmStatus.share) await pagesDmAdopt(node, { page, status: dmStatus })
+          const made = (await pagesDmPrepare(node, { member, page: to, status: { gen: 0 }, roster: { owner: roster.owner, admins: roster.admins }, gen: 1 })).dmBox
+          pagesDmExpectAdopt(to, 1)
+          return made
+        }
+        : undefined
+      const moved = await pagesMove(node, {
         member,
         page,
         op: ({ nonce, to }) => {
           box.to = to
           return moveOp(read, to, { fromSeq, nonce })
-        }
+        },
+        dmBox
       }).catch((err) => {
         if (err && err.uncertain === true && box.to) err.movedTo = box.to
+        if (dmBox && box.to && (!err || err.uncertain !== true)) pagesDmForgetAdopt(box.to, 1)
         throw err
       })
+      if (dmBox) await adoptNew(moved, 1)
+      return moved
     })
   }
 
@@ -471,18 +596,30 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     if (!u || !u.err || typeof u.err.retry !== 'function') return
     const to = u.kind === 'move' && typeof u.err.movedTo === 'string' ? u.err.movedTo : null
     return lifecycle(u.kind, async () => {
+      let out
       try {
-        return await u.err.retry()
+        out = await u.err.retry()
       } catch (err) {
         if (err && err.uncertain === true && to) err.movedTo = to
+        if (u.kind === 'move' && to && (!err || err.uncertain !== true)) pagesDmForgetAdopt(to, 1)
         throw err
       }
+      if (u.kind === 'move' && to && pagesDmAwaitsAdopt(to)) await adoptNew(to, 1)
+      return out
     }, to)
   }
 
   // ---- view ------------------------------------------------------------------
 
-  const busy = profileAct.pending || inviteAct.pending || removeAct.pending || transferAct.pending || renameAct.pending || lifeAct.pending
+  const adoptCard = adoptHold
+    ? (
+      <>
+        <ErrorText>{adoptHold.error}</ErrorText>
+        <Pill label='Tentar de novo' onPress={retryAdopt} disabled={adopting} pending={adopting} />
+      </>
+      )
+    : null
+  const busy = adopting || profileAct.pending || inviteAct.pending || removeAct.pending || transferAct.pending || renameAct.pending || lifeAct.pending || shareAct.pending
   const who = whoOf(profile)
 
   const photo = (
@@ -585,6 +722,31 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
             )
           : null}
         <ErrorText>{removeAct.error}</ErrorText>
+        {adoptHold && adoptHold.page === page ? adoptCard : null}
+        {removeHold
+          ? (
+            <>
+              <Soft>{PAGE_DM_KEY_PENDING}</Soft>
+              <Pill label='Tentar de novo' onPress={retryRemove} disabled={busy} pending={removeAct.pending} />
+            </>
+            )
+          : null}
+        {missingKeys.length > 0
+          ? (
+            <>
+              <Soft>{SEND_KEY_SOFT}</Soft>
+              {missingKeys.map((key) => (
+                <PersonRow key={'share-' + key} personKey={key} profile={profileOf(key)} role={key === roster.owner ? 'Dono' : 'Administrador'}>
+                  <Pill label={PAGE_DM_SEND_KEY} onPress={() => sendKey(key)} disabled={busy} />
+                </PersonRow>
+              ))}
+              <ErrorText>{shareAct.error}</ErrorText>
+              {shareHold
+                ? <Pill label='Tentar de novo' onPress={retryShare} disabled={busy} pending={shareAct.pending} />
+                : null}
+            </>
+            )
+          : null}
 
         {isOwner
           ? (
@@ -649,6 +811,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
                   </View>
                   )
                 : null}
+              {adoptHold && adoptHold.page !== page ? adoptCard : null}
               {lifeUncertain !== null
                 ? (
                   <View style={styles.confirm}>
