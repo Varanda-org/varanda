@@ -111,7 +111,10 @@
 // (which every Avatar, MediaView, LinkCard and screen reads). useSyncLines()
 // carries the log and useSyncSignals() the folded hints; useNode() keeps
 // sync { active, stopped, starting } and `signals` as a run-flags view
-// (see runFlags) that does not change on download lines.
+// (see runFlags) that does not change on download lines. useHosted() is only
+// the boolean `hosted`: the node value is rebuilt when sync, autoSync or
+// signals change, and a memoized feed row (PostRow) would redraw each time
+// just to read that flag.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { displayText, isMutating } from '@varanda/rpc'
@@ -184,6 +187,9 @@ function appendLine (prev, line) {
 }
 
 const NodeContext = createContext(null)
+// Plain boolean, stable while hosted does not change. PostRow reads this
+// instead of the node value, which is a new object on every sync flag.
+const HostedContext = createContext(false)
 const EMPTY_LINES = Object.freeze([])
 const SyncLinesContext = createContext(EMPTY_LINES)
 const SyncSignalsContext = createContext(EMPTY_SIGNALS)
@@ -193,6 +199,10 @@ const CHAT_MEDIA_CALLS = ['putDm', 'putMoment', 'read', 'forgetReadFile', 'clear
 
 export function useNode () {
   return useContext(NodeContext)
+}
+
+export function useHosted () {
+  return useContext(HostedContext)
 }
 
 // The last sync event and warning lines (at most MAX_SYNC_LINES).
@@ -382,11 +392,13 @@ function VitrineNodeProvider ({ children }) {
     }
   }, [vitrineRequest, groupVersions, followsVersion, getGroupVersion, dmVersion, bumpDm, autoWanted, setAutoSync, visible])
   return (
-    <NodeContext.Provider value={value}>
-      <SyncSignalsContext.Provider value={EMPTY_SIGNALS}>
-        <SyncLinesContext.Provider value={EMPTY_LINES}>{children}</SyncLinesContext.Provider>
-      </SyncSignalsContext.Provider>
-    </NodeContext.Provider>
+    <HostedContext.Provider value>
+      <NodeContext.Provider value={value}>
+        <SyncSignalsContext.Provider value={EMPTY_SIGNALS}>
+          <SyncLinesContext.Provider value={EMPTY_LINES}>{children}</SyncLinesContext.Provider>
+        </SyncSignalsContext.Provider>
+      </NodeContext.Provider>
+    </HostedContext.Provider>
   )
 }
 
@@ -1596,11 +1608,13 @@ function LiveNodeProvider ({ children }) {
   }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, syncView, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, runFlags, ackFresh, setAutoSync, syncNow, whenIdle])
 
   return (
-    <NodeContext.Provider value={value}>
-      <SyncSignalsContext.Provider value={signals}>
-        <SyncLinesContext.Provider value={sync.lines}>{children}</SyncLinesContext.Provider>
-      </SyncSignalsContext.Provider>
-    </NodeContext.Provider>
+    <HostedContext.Provider value={hosted}>
+      <NodeContext.Provider value={value}>
+        <SyncSignalsContext.Provider value={signals}>
+          <SyncLinesContext.Provider value={sync.lines}>{children}</SyncLinesContext.Provider>
+        </SyncSignalsContext.Provider>
+      </NodeContext.Provider>
+    </HostedContext.Provider>
   )
 }
 
