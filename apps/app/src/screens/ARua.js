@@ -44,6 +44,7 @@ import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { applyToggle, countsAfter, diaryPeekSlots, emptyState, mergeCounts, poolMap, secondPassRefs } from '../engagement'
+import { orderRefs } from '../visibleFirst'
 import { DeletePrompt, actingPageKey, isBusy, isDiaryGone, isSeederDown, memberKeyOf, pageEngagement, readEngagement, setEngagement, useActing, useDelete } from './Conversa'
 import { canDelete } from '../deletion'
 import { label as actingLabel } from '../actingAs'
@@ -369,6 +370,80 @@ registerLocalCache({
   keepOnlyAuthors: (allowed) => rewriteStored((snapshot) => snapshotKeepOnly(snapshot, allowed))
 })
 
+// { first, last } inclusive over the viewable row indices, or null when the
+// list has not reported any. FlatList's header is not a row, so the indices
+// are the list's own.
+function visibleRange (viewableItems) {
+  if (!Array.isArray(viewableItems)) return null
+  let first = null
+  let last = null
+  for (const entry of viewableItems) {
+    if (!entry || entry.isViewable === false) continue
+    const index = entry.index
+    if (!Number.isInteger(index) || index < 0) continue
+    if (first === null || index < first) first = index
+    if (last === null || index > last) last = index
+  }
+  if (first === null) return null
+  return { first, last }
+}
+
+// Every ref a row can make resolve ask for, so a quote, a repost original or
+// a reply parent is tied to that row. One further level (what that target
+// quotes or replies to) covers the second pass: a reposted reply's parent is
+// not on the page, but it still belongs to the repost's row.
+function indexByRef (items, originals) {
+  const map = new Map()
+  if (!Array.isArray(items)) return map
+  const known = originals instanceof Map ? originals : null
+  const add = (ref, index) => {
+    if (typeof ref !== 'string') return
+    const at = map.get(ref)
+    if (at) at.push(index)
+    else map.set(ref, [index])
+  }
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+    if (!item || typeof item !== 'object') continue
+    const direct = []
+    const take = (ref) => {
+      if (typeof ref !== 'string') return
+      direct.push(ref)
+      add(ref, i)
+    }
+    if (typeof item.author === 'string' && Number.isSafeInteger(item.seq) && item.seq >= 1) take(feedKey(item))
+    if (item.kind === 'repost') take(refOf(item.to))
+    else {
+      take(refOf(item.quote))
+      take(refOf(item.replyTo))
+    }
+    if (known === null) continue
+    for (let d = 0; d < direct.length; d++) {
+      const original = known.get(direct[d])
+      if (!original || original === TRANSIENT) continue
+      add(refOf(original.quote), i)
+      add(refOf(original.replyTo), i)
+    }
+  }
+  return map
+}
+
+// The row that should decide the ref's place. On screen wins. Otherwise the
+// nearest row below the range (the reader is headed there), else the first row.
+function visibleRowIndex (map, ref, range) {
+  const list = map instanceof Map ? map.get(ref) : null
+  if (!list || list.length === 0) return undefined
+  const ranged = range && Number.isInteger(range.first) && Number.isInteger(range.last) && range.first <= range.last
+  if (!ranged) return list[0]
+  let below = null
+  for (let i = 0; i < list.length; i++) {
+    const index = list[i]
+    if (index >= range.first && index <= range.last) return index
+    if (below === null && index > range.last) below = index
+  }
+  return below === null ? list[0] : below
+}
+
 // Originals, counts and the own like/repost state of the rows on screen.
 // - ingest({ shown, need, parents, local, authors, reset }): `shown` = refs
 //   whose counts and own state are wanted (the posts with an action bar);
@@ -389,8 +464,11 @@ registerLocalCache({
 // Options: `seed` (A Rua's snapshot, socialSeed) fills counts, originals
 // and the own like/repost state before the first ingest; the first reset
 // ingest replaces them. `onFollows(keys)` gets every COMPLETE follow.list
-// answer (lowercase keys), never a partial one.
-export function useSocial ({ ownKey, onToast, seed = null, onFollows }) {
+// answer (lowercase keys), never a partial one. `rowsRef` (the list on
+// screen) and `visibleRangeRef` ({ first, last } inclusive, or null) point
+// the one diary.peek slot at the rows in view. Without them, refs stay in
+// the order resolve was given.
+export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = null, visibleRangeRef = null }) {
   const node = useNode()
   const names = useNames()
   const { request, hosted } = node
@@ -651,8 +729,14 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows }) {
       return replaceNameless && cur !== null && !hasName(cur)
     })
     if (todo.length === 0) return []
+    // diaryPeekSlots is one wide. Authors of the rows on screen are grouped
+    // first, then below, then above, so that slot and resolveMany both start
+    // there. The same refs are still read, once.
+    const range = visibleRangeRef && visibleRangeRef.current
+    const index = indexByRef(rowsRef && rowsRef.current, socialRef.current.originals)
+    const ordered = orderRefs(todo, (ref) => visibleRowIndex(index, ref, range), range)
     const byAuthor = new Map()
-    for (const ref of todo) {
+    for (const ref of ordered) {
       const author = authorOfRef(ref)
       if (!byAuthor.has(author)) byAuthor.set(author, [])
       byAuthor.get(author).push(ref)
@@ -706,10 +790,20 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows }) {
       }
     }
     const items = [...found.values()].filter((i) => i && i !== TRANSIENT)
-    const unnamed = items.filter((i) => isKnown(i.author) && !i.name).map((i) => i.author)
-    if (unnamed.length > 0) resolveMany([...new Set(unnamed)])
+    // Same order as the peeks: a visible author's name is asked before one
+    // off screen. Completion order would let a fast off-screen read cut in.
+    const unnamed = []
+    const seenAuthor = new Set()
+    for (const ref of ordered) {
+      const item = found.get(ref)
+      if (!item || item === TRANSIENT || !isKnown(item.author) || item.name) continue
+      if (seenAuthor.has(item.author)) continue
+      seenAuthor.add(item.author)
+      unnamed.push(item.author)
+    }
+    if (unnamed.length > 0) resolveMany(unnamed)
     return items
-  }, [request, readAuthor, isKnown, change, resolveMany, loadFollows, scheduleNameRetry])
+  }, [request, readAuthor, isKnown, change, resolveMany, loadFollows, scheduleNameRetry, rowsRef, visibleRangeRef])
   resolveRef.current = resolve
 
   const ingestNow = useCallback(async ({ shown = [], need = [], parents = [], local = new Map(), authors = [], reset = false }) => {
@@ -1376,7 +1470,14 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
   const now = useNow(60000)
   // The floating publish button sits over the list's end: clear it too.
   const bottomPad = useBottomPad() + layout.fabSize
-  const social = useSocial({ ownKey, onToast })
+  const visibleRangeRef = useRef(null)
+  const rowsRef = useRef(null)
+  // FlatList throws if this identity changes. The ref it writes is read when
+  // resolve runs, not on the scroll that reported it.
+  const onViewableItemsChanged = useRef((info) => {
+    visibleRangeRef.current = visibleRange(info && info.viewableItems)
+  }).current
+  const social = useSocial({ ownKey, onToast, rowsRef, visibleRangeRef })
   const { ingest } = social
   const { request } = node
   const nodeRef = useRef(node)
@@ -1387,6 +1488,8 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
   const listRef = useRef(null)
   const commit = useCallback((patch) => {
     viewRef.current = { ...viewRef.current, ...patch }
+    // Before ingest, so resolve orders against the list it is about to show.
+    if (Object.prototype.hasOwnProperty.call(patch, 'items')) rowsRef.current = viewRef.current.items
     setView(viewRef.current)
   }, [])
   const page = acting.key
@@ -1503,6 +1606,7 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
   }
 
   const { items, loadedAt, loading, error, incomplete } = view
+  rowsRef.current = items
   let empty
   if (error) empty = <ErrorState message={error} onRetry={load} pending={loading} />
   else if (loadedAt === null) empty = <Skeleton />
@@ -1523,6 +1627,7 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
       <DeletePrompt del={del} />
       <RefreshableList
         listRef={listRef}
+        onViewableItemsChanged={onViewableItemsChanged}
         data={items}
         keyExtractor={feedKey}
         renderItem={renderItem}
@@ -1611,7 +1716,14 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     // set when it runs, so it need not lose to it.
     if (pending !== null && pending.gen === before) pending.gen = cacheGeneration()
   }, [])
-  const social = useSocial({ ownKey, onToast, seed: boot.social, onFollows })
+  const visibleRangeRef = useRef(null)
+  const rowsRef = useRef(null)
+  // FlatList throws if this identity changes. The ref it writes is read when
+  // resolve runs, not on the scroll that reported it.
+  const onViewableItemsChanged = useRef((info) => {
+    visibleRangeRef.current = visibleRange(info && info.viewableItems)
+  }).current
+  const social = useSocial({ ownKey, onToast, seed: boot.social, onFollows, rowsRef, visibleRangeRef })
   const { ingest } = social
   const moments = useMoments({ ownKey, active: active !== false, tick: refresh })
   const momentSeen = useMomentSeen()
@@ -1657,6 +1769,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const seqRef = useRef(0)
   const commit = useCallback((patch) => {
     feedRef.current = { ...feedRef.current, ...patch }
+    // Before ingest, so resolve orders against the list it is about to show.
+    if (Object.prototype.hasOwnProperty.call(patch, 'items')) rowsRef.current = feedRef.current.items
     setFeed(feedRef.current)
   }, [])
 
@@ -2170,6 +2284,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const shownItems = useMemo(() => (loadedAt !== null
     ? items
     : snapshotRowsShown(items, blockedKeys, blockLoad, ownKey, (ref) => shownOriginals.get(ref))), [items, loadedAt, blockedKeys, blockLoad, ownKey, shownOriginals])
+  rowsRef.current = shownItems
   const rowCache = useRowPropsCache(shownItems, feedKey, { h: handlers, social })
   // One renderItem for the list's life: FlatList re-renders the cells on
   // extraData, and the rows whose props did not change skip their render.
@@ -2203,6 +2318,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       <DeletePrompt del={del} />
       <RefreshableList
         listRef={listRef}
+        onViewableItemsChanged={onViewableItemsChanged}
         data={shownItems}
         keyExtractor={feedKey}
         renderItem={renderItem}

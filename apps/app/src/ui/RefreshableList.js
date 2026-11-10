@@ -32,7 +32,11 @@
 // - a refresh awaits the node's syncNow before onRefresh, once per gesture;
 //   never a page reload
 //   (the browser's own pull-to-refresh is stopped by the CSS in
-//   public/index.html, not by preventDefault, which passive listeners ignore).
+//   public/index.html, not by preventDefault, which passive listeners ignore);
+// - onViewableItemsChanged is forwarded only when the caller passes one, with
+//   one constant viewabilityConfig. Both stay the same object for the life of
+//   the list: FlatList throws if either identity changes. A screen that does
+//   not pass the callback keeps the list it had.
 // Empty and short lists stay pullable: the gesture is on the wrapper, not on
 // the content height.
 
@@ -91,6 +95,13 @@ const KEEP_VISIBLE = Object.freeze({ minIndexForVisible: 0, autoscrollToTopThres
 const FIRST_ROWS = 8
 const ROWS_PER_BATCH = 8
 const WINDOW_SCREENS = 7
+// A row counts once a tenth of it is on screen, with no delay: waiting would
+// let off-screen peeks start before the list has said what is in view.
+// FlatList rejects a viewabilityConfig whose identity changes.
+const VIEWABILITY_CONFIG = Object.freeze({
+  itemVisiblePercentThreshold: 10,
+  minimumViewTime: 0
+})
 
 export function RefreshableList ({
   data,
@@ -114,7 +125,8 @@ export function RefreshableList ({
   keepVisiblePosition = false,
   onScrollFrame,
   onContentSizeChange,
-  onUserScroll
+  onUserScroll,
+  onViewableItemsChanged
 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -460,6 +472,17 @@ export function RefreshableList ({
     check()
   }, [check])
 
+  // FlatList throws if onViewableItemsChanged changes identity. One function
+  // reads the latest caller. Turning tracking on later would change the prop
+  // from undefined, so the choice is the first render's.
+  const onViewableRef = useRef(onViewableItemsChanged)
+  onViewableRef.current = onViewableItemsChanged
+  const onViewable = useRef((info) => {
+    const fn = onViewableRef.current
+    if (typeof fn === 'function') fn(info)
+  }).current
+  const trackViewable = useRef(typeof onViewableItemsChanged === 'function').current
+
   // The indicator is never left visible without an active pull or a running
   // refresh: every path that abandons a tracked gesture (a second finger, a
   // rejected lock, a start while tracking) hides it unless a refresh is busy.
@@ -607,6 +630,8 @@ export function RefreshableList ({
         scrollEventThrottle={16}
         dataSet={{ pull: 'y' }}
         maintainVisibleContentPosition={keepVisiblePosition ? KEEP_VISIBLE : undefined}
+        onViewableItemsChanged={trackViewable ? onViewable : undefined}
+        viewabilityConfig={trackViewable ? VIEWABILITY_CONFIG : undefined}
         refreshControl={web
           ? undefined
           : <RefreshControl refreshing={!!refreshing || spinning} onRefresh={runRefresh} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
