@@ -247,3 +247,33 @@ test('beside a pending concluir the missing-account notice names only Concluir e
   t.is(NONE_PENDING_TEXT, 'Nenhuma conta da Varanda neste aparelho. Toque em Concluir e entrar para terminar a conta que você começou a criar.')
   t.absent(/Outras formas de entrar|código/.test(NONE_PENDING_TEXT), 'the code row is hidden while concluir waits')
 })
+
+test('the onboarding link step is restyled in setup only', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'Identidade.js'), 'utf8')
+  const reload = src.split('\n').find((line) => line.startsWith('const RELOAD_TEXT = '))
+  t.ok(reload, 'RELOAD_TEXT is defined')
+  t.absent(reload.includes('passkey'), 'the reload text names no passkey')
+  t.ok(src.includes('<InvitePaste onPasted={usePasted} disabled={busy || feiraBusy} setup={setup} />'))
+  t.ok(src.includes('{recovering && !setup ? <Notice>Buscando sua conta…</Notice> : null}'))
+  t.ok(src.includes('const big = setup ? { block: true, large: true } : {}'))
+  const card = src.slice(src.indexOf('function LinkCard ('), src.indexOf('export default function Identidade'))
+  for (const kept of [
+    '<HelpNote doc={HELP.vinculo}><Body>{SHORT.link}</Body></HelpNote>',
+    "label='Vincular conta Google'",
+    '<Label>conta</Label>',
+    '<Card>\n      {setup ? null : <Label>conta</Label>}',
+    "'Conta Google escolhida. Confirme o vínculo com '",
+    "label='Confirmar vínculo'"
+  ]) {
+    t.ok(card.includes(kept), 'Ajustes keeps ' + kept)
+  }
+  t.ok(src.includes('Sem a liberação da associação'), 'manual setup steps keep the release line')
+  t.ok(src.includes('needsCert && showTech && !(setup && linkMode)'), 'hosted Google step hides it')
+  const large = card.split('\n').filter((line) => line.includes('block large'))
+  t.ok(large.length > 0)
+  for (const line of large) {
+    t.ok(line.includes("label='Confirmar'") || line.includes("label='Continuar com o Google'"), 'block large only on the setup buttons: ' + line.trim())
+  }
+})

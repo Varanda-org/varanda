@@ -6879,3 +6879,51 @@ Limites desta caminhada:
 - O build de debug não conclui uma passkey numa instalação de produção (veja `docs/development.md`). A cerimônia real se confere com o APK de preview do EAS ou no iPhone com o domínio associado.
 - Os estados nativos de criação pendente, código de recuperação e teclado com conta real só se conferem no APK de preview do EAS ou no TestFlight.
 - Os testes conferem textos e ordem no código, não a tela.
+
+## 147. Toda a entrada em layout moderno (PR feat/modern-onboarding)
+
+Só apresentação e texto: protocolo, RPC, handlers, o serviço de conta, a idade e o vínculo Google ficam como estão.
+
+O que mudou:
+
+- Todo passo depois das boas-vindas usa um só layout (`apps/app/src/ui/Stepper.js`): barra do topo sem título, só com o botão (i) nos passos que têm ajuda; "Passo n de 3" centrado com pontos; um disco de 72 pt com um ícone (ou um spinner enquanto espera, ou o avatar do perfil); um título (28 pt, arredondado); uma frase curta; o corpo; botões grandes de largura total (52 pt) perto de baixo, um cheio e o segundo contornado; a terceira escolha como link calmo centrado; avisos em caixas suaves e quentes; nenhum cartão dentro do passo. As explicações ficam no (i).
+- Termos (antes de entrar): ícone "file-text", título "Antes de começar" (ou "Atualizamos os termos" ou "Antes de continuar"), a frase de sempre, os dois documentos como uma lista de linhas que abrem no lugar ("Ler" e "Fechar"), o botão grande "Li e aceito os Termos de Uso e a Política de Privacidade" e, embaixo, "Sem aceitar, não é possível entrar no Varanda.". Ajustes › Termos não mudou.
+- Introdução: título maior e arredondado, botão grande "Próximo" ou "Começar" e "Voltar" como link calmo embaixo.
+- Buscando sua conta: spinner no disco; a linha repetida "Buscando sua conta…" e o "carregando…" saíram.
+- Confirme sua idade: ícone "shield"; o (i) abre "Como funciona a confirmação de idade" (Didit, selfie ou documento, só a faixa guardada, retomar por cerca de uma hora, volta pelo app ou pelo navegador, política de privacidade). As linhas sobre a Didit e "a foto não chega à Varanda" saíram da tela. Os estados ficam em caixas suaves (em análise com continuar, inconclusivo, vencida, recusada, confirmada), com os botões grandes "Verificar minha idade", "Continuar a verificação", "Tentar com um documento" e "Conferir de novo". "Pedir entrada" da Feira fica numa caixa; o convite colado tem "Usar este convite"; a barra de offline repetida do shell fica escondida neste passo.
+- Escolha seu @nome (Google): ícone "at-sign"; o campo @nome e o botão grande "Continuar com o Google"; a linha de privacidade sobre o vínculo Google está no (i). A linha "Sem a liberação da associação, este aparelho não publica nem sincroniza." não aparece mais neste passo (continua nos passos manuais e em Ajustes). A confirmação diz "Quase lá: você vai entrar como @x." com "Confirmar" grande e "Começar de novo" como link calmo. Convite, lista de espera e aviso de volta ficam em caixas suaves. Carregando: "Preparando sua conta…". Antes de abrir o Google: "Vamos abrir o Google. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.". Ajustes › Conta não mudou.
+- Um instante: spinner, a linha "Buscando seu perfil." e "Continuar mesmo assim" depois de 10 s.
+- Como você quer aparecer: o avatar é o herói, com os botões de foto embaixo; nome e bio; "Continuar" grande e "Pular por enquanto" como link calmo (os dois somem enquanto o editor de foto está aberto). A explicação da foto pública foi para o (i).
+- Passos da configuração manual (nativo ou instalação própria): o mesmo quadro, botões grandes e os mesmos textos.
+- Aviso antes da verificação de idade: "Vamos abrir a verificação. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.".
+- Peças: `Stepper`, `StepLink` e `StepNotice`. Nada muda em como a conta, a idade ou o Google funcionam.
+
+Como verificar, a partir da raiz:
+
+- `node apps/app/test/{uiKit,help,onboarding,age,wordCheck,linkReturn,passkeyTrouble,passkeysScreen,signupInvite,account,profileSave,mediaCrop,intro,terms,terms-version,legal,platformGate,themeUsage,splashGate}.test.js`, um arquivo por vez.
+- `npm run lint`, `npm test` e `npm run demo` (a demo termina com "DEMO OK").
+
+Caminhada, primeiro no celular (build de debug do Android e simulador iOS) e depois na web e no PWA, claro e escuro:
+
+- [ ] Sem barra com título e com o título uma só vez em todo passo.
+- [ ] "Passo n de 3" certo em cada passo, centrado com pontos.
+- [ ] Botões de largura total e 52 pt; links calmos com 44 pt.
+- [ ] Avisos em caixas suaves, sem cartão dentro do passo.
+- [ ] Termos: as linhas abrem e fecham no lugar ("Ler" e "Fechar") e o aceite segue em frente.
+- [ ] Introdução: "Próximo", "Começar" e "Voltar" funcionam.
+- [ ] Idade: cada estado (em análise, inconclusivo, vencida, recusada, confirmada), a Feira "Pedir entrada", o convite colado com "Usar este convite" e, uma vez, o offline sem barra repetida.
+- [ ] @nome: o formulário, a confirmação "Quase lá", o convite, a lista de espera e o aviso de volta.
+- [ ] Um instante: "Continuar mesmo assim" aparece depois de 10 s.
+- [ ] Perfil: com o editor de foto aberto, "Continuar" e "Pular por enquanto" somem.
+- [ ] Texto grande (tamanho de fonte do sistema no máximo): nada cortado.
+- [ ] Movimento reduzido: nenhuma animação nova.
+- [ ] TalkBack e VoiceOver leem na ordem certa.
+- [ ] O teclado não cobre os campos.
+- [ ] Ajustes › Conta e Ajustes › Termos continuam como eram.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação.
+- Os testes leem o código-fonte, não a tela.
+- Os fluxos reais do Google e da Didit e o Android não foram exercitados neste PR.
+- Entrar de verdade no nativo precisa do APK de preview do EAS ou do TestFlight.

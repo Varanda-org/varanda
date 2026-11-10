@@ -45,7 +45,7 @@
 // explanations, under 'Outras formas de entrar' (src/entrarCard.js decides
 // when it opens); the explanations are in HELP.entrar.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { Platform, StyleSheet, TextInput, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { parseCertificateText } from '../config'
@@ -73,18 +73,20 @@ import * as AuthSession from '../authSession'
 import { InvitePaste } from './Idade'
 import { holdUnregistered, releaseUnregistered } from './Passkeys'
 import { KeyboardForm } from './Perfil'
-import { Body, Btn, Card, ConfirmStack, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction, useNow } from '../ui'
+import { Body, Btn, Card, ConfirmStack, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Spinner, Title, errorText, useAction, useNow } from '../ui'
 import { refusalOf } from '../wordCheck'
 import { HelpNote } from '../ui/Help'
 import { OptionBlock, OptionList, OptionRow, OptionsToggle } from '../ui/OptionRow'
 import { ShareProfile } from '../ui/ShareProfile'
-import { Stepper } from '../ui/Stepper'
+import { StepLink, StepNotice, Stepper } from '../ui/Stepper'
 import { fonts, radius, space } from '../ui/theme'
 import { WelcomeHeader } from '../ui/Welcome'
 import { useStyles } from '../ui/ThemeProvider'
 import { atName } from '../who'
 
 const WELCOME_TEXT = 'Uma rede social feita entre pessoas.'
+// The Stepper's hero for the setup steps after the welcome ('recuperando' spins).
+const STEP_ICONS = { vinculo: 'at-sign', identidade: 'seguir', certificado: 'ok' }
 // Shown wherever the own key is shown during the setup (the association
 // issues the certificate for it).
 const KEY_NOTE = 'Esta chave é só sua; a associação usa ela para emitir o certificado.'
@@ -168,8 +170,11 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
     } catch {}
   }
 
-  return (
-    <Card>
+  // The setup step has no card and stacks large full-width buttons.
+  const big = plain ? { block: true, large: true } : {}
+  const Buttons = plain ? Fragment : Row
+  const content = (
+    <>
       <Label>{plain ? PLAIN_CODE_LABEL : 'sua chave pública'}</Label>
       <Mono>{key}</Mono>
       {plain ? null : <Soft>{KEY_NOTE}</Soft>}
@@ -189,18 +194,19 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
           />
           )
         : null}
-      <Row>
-        <Btn label={plain ? 'Copiar código' : 'Copiar chave'} secondary onPress={copy} />
-        {canShare ? <Btn label='Compartilhar' secondary onPress={share} /> : null}
-      </Row>
+      <Buttons>
+        <Btn label={plain ? 'Copiar código' : 'Copiar chave'} secondary onPress={copy} {...big} />
+        {canShare ? <Btn label='Compartilhar' secondary onPress={share} {...big} /> : null}
+      </Buttons>
       {copyNote ? <Soft>{copyNote}</Soft> : null}
       <Body>{plain ? PLAIN_SEND_TEXT : 'Envie esta chave à associação; ela emite o certificado de membro (JSON), que você cola abaixo.'}</Body>
       <Label>{plain ? PLAIN_CERT_LABEL : 'certificado de membro (JSON emitido pela associação)'}</Label>
       <Field value={certText} onChangeText={onCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
       <ErrorText>{error}</ErrorText>
-      <Btn label={plain ? PLAIN_SUBMIT : 'Gravar certificado'} onPress={onSubmit} pending={pending} disabled={certText.trim() === ''} />
-    </Card>
+      <Btn label={plain ? PLAIN_SUBMIT : 'Gravar certificado'} onPress={onSubmit} pending={pending} disabled={certText.trim() === ''} {...big} />
+    </>
   )
+  return plain ? <View style={styles.stepBody}>{content}</View> : <Card>{content}</Card>
 }
 
 // The account link (hosted page with a passkey): the association's account
@@ -210,7 +216,7 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
 // this same tab and nothing of the link is kept across the reload, except the
 // profile invite (src/profileLink.js) and a group or community link
 // (src/groupLinkStore) in tab storage, which are never sent to /account/*.
-const RELOAD_TEXT = 'Vamos abrir o Google e, na volta, pedir sua passkey de novo.'
+const RELOAD_TEXT = 'Vamos abrir o Google. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.'
 const RENAME_RULE = 'Depois de trocar, você só poderá mudar de novo daqui a 7 dias.'
 const NAME_RULE = '@nome inválido: de 3 a 20 letras minúsculas, números ou _, começando por letra'
 const LINK_FAILED = 'não foi possível vincular a conta'
@@ -331,8 +337,12 @@ function accepted (key, record) {
   noteDate(key, record.date)
 }
 
-function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChanged, onLinked, onInviteChanged, feira = null }) {
+function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, setup = false, onChanged, onLinked, onInviteChanged, feira = null }) {
   const node = useNode()
+  const styles = useStyles(makeStyles)
+  // The onboarding uses large full-width buttons, Ajustes keeps its compact card.
+  const big = setup ? { block: true, large: true } : {}
+  const Group = setup ? Fragment : Row
   const now = useNow(60000)
   // { key, status, pending } of the last load for this key.
   const [acct, setAcct] = useState(null)
@@ -722,7 +732,12 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
 
   let body
   if (cur === null) {
-    body = acctError ? null : <Soft>carregando…</Soft>
+    // quiet (recovery or a once sync): the frame already shows the spinner.
+    body = acctError
+      ? null
+      : setup
+        ? recovering ? null : (<View style={styles.loading}><Spinner /><Soft style={styles.center}>Preparando sua conta…</Soft></View>)
+        : <Soft>carregando…</Soft>
   } else if (linked) {
     const next = typeof status.nextChangeAt === 'string' ? Date.parse(status.nextChangeAt) : NaN
     const blocked = !Number.isNaN(next) && now < next
@@ -732,25 +747,25 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
         <Label>seu @nome</Label>
         <Body>{displayText(atName(status.username) || NO_NAME)}</Body>
         {/* After the one automatic try (certTried), whatever else cleared the error. */}
-        {!memberCert && status.cert && certTried.current.has(JSON.stringify(status.cert)) && !busy ? <Btn label='Tentar de novo' onPress={receive} /> : null}
-        {memberCert && nameFailed && !busy ? <Btn label='Tentar enviar o @nome de novo' onPress={retryName} /> : null}
+        {!memberCert && status.cert && certTried.current.has(JSON.stringify(status.cert)) && !busy ? <Btn label='Tentar de novo' onPress={receive} {...big} /> : null}
+        {memberCert && nameFailed && !busy ? <Btn label='Tentar enviar o @nome de novo' onPress={retryName} {...big} /> : null}
         {!renameOpen
-          ? <Btn label='Trocar @nome' secondary onPress={() => { setError(''); setNote(''); setRenameOpen(true) }} disabled={busy} />
+          ? <Btn label='Trocar @nome' secondary onPress={() => { setError(''); setNote(''); setRenameOpen(true) }} disabled={busy} {...big} />
           : blocked
             ? (
               <>
                 <Body>{'Você poderá trocar o @nome de novo em ' + formatNextChange(status.nextChangeAt) + '.'}</Body>
-                <Btn label='Fechar' secondary onPress={() => setRenameOpen(false)} />
+                <Btn label='Fechar' secondary onPress={() => setRenameOpen(false)} {...big} />
               </>
               )
             : (
               <>
                 <Field label='novo @nome' placeholder='@nome' value={newName} onChangeText={setNewName} mono />
                 <Body>{RENAME_RULE}</Body>
-                <Row>
-                  <Btn label={'Trocar para @' + displayText(typed || newName.trim().replace(/^@/, ''))} onPress={doRename} pending={busy} disabled={typed === null} />
-                  <Btn label='Cancelar' secondary onPress={() => setRenameOpen(false)} disabled={busy} />
-                </Row>
+                <Group>
+                  <Btn label={'Trocar para @' + displayText(typed || newName.trim().replace(/^@/, ''))} onPress={doRename} pending={busy} disabled={typed === null} {...big} />
+                  <Btn label='Cancelar' secondary onPress={() => setRenameOpen(false)} disabled={busy} {...big} />
+                </Group>
               </>
               )}
       </>
@@ -770,26 +785,28 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
     const required = policy !== undefined && policy !== null
     const hasInvite = loadSignupInvite() !== null
     const inviteBlocked = !waiting && !hasInvite && (inviteNote !== '' || required)
+    const waitlistBody = (
+      <>
+        <Body>{waitlist}</Body>
+        <Btn label='Tentar de novo' onPress={doLink} disabled={busy || isUsername(name) === null} {...big} />
+      </>
+    )
     const waitlistNote = waiting
-      ? (
-        <>
-          <Body>{waitlist}</Body>
-          <Btn label='Tentar de novo' onPress={doLink} disabled={busy || isUsername(name) === null} />
-        </>
-        )
+      ? setup ? <StepNotice>{waitlistBody}</StepNotice> : waitlistBody
       : null
     const inviteLine = inviteBlocked
       ? null
       : inviteNote !== ''
-        ? <Body>{inviteNote}</Body>
-        : required && hasInvite ? <Soft>{INVITE_READY_TEXT}</Soft> : null
-    const inviteNeeded = (
+        ? setup ? <StepNotice><Body>{inviteNote}</Body></StepNotice> : <Body>{inviteNote}</Body>
+        : required && hasInvite ? <Soft style={setup ? styles.center : undefined}>{INVITE_READY_TEXT}</Soft> : null
+    const inviteNeededBody = (
       <>
         <Body>{inviteNote || (feiraDecision !== null && feiraDecision.action === 'needs-invite' ? feiraDecision.text : feiraOffer ? ENTRY_TEXT : INVITE_NEEDED_TEXT)}</Body>
-        {feiraOffer ? <Btn label={feiraTried && !feiraBusy ? 'Tentar de novo' : 'Pedir entrada'} onPress={pressFeiraStart} pending={feiraBusy} /> : null}
-        {NATIVE ? <InvitePaste onPasted={usePasted} disabled={busy || feiraBusy} /> : null}
+        {feiraOffer ? <Btn label={feiraTried && !feiraBusy ? 'Tentar de novo' : 'Pedir entrada'} onPress={pressFeiraStart} pending={feiraBusy} {...big} /> : null}
+        {NATIVE ? <InvitePaste onPasted={usePasted} disabled={busy || feiraBusy} setup={setup} /> : null}
       </>
     )
+    const inviteNeeded = setup ? <StepNotice>{inviteNeededBody}</StepNotice> : inviteNeededBody
     // Until the policy answers, the button waits rather than racing it.
     const linkDisabled = name.trim() === '' || policy === undefined || feiraBusy
     body = (
@@ -800,18 +817,25 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
             <>
               <Body>
                 {setup
-                  ? 'Quase lá: confirme o vínculo com ' + displayText(atName(row.username) || NO_NAME) + '.'
+                  ? 'Quase lá: você vai entrar como ' + displayText(atName(row.username) || NO_NAME) + '.'
                   : 'Conta Google escolhida. Confirme o vínculo com ' + displayText(atName(row.username) || NO_NAME) + '.'}
               </Body>
               {confirmFailed
                 // The mapped message is the card's error line below.
-                ? <Btn label='Usar outra conta Google' onPress={restartLink} disabled={busy} />
-                : (
-                  <>
-                    <Btn label='Confirmar vínculo' onPress={doConfirm} pending={busy} />
-                    <Btn label='Começar de novo' secondary onPress={restartLink} disabled={busy} />
-                  </>
-                  )}
+                ? <Btn label='Usar outra conta Google' onPress={restartLink} disabled={busy} {...big} />
+                : setup
+                  ? (
+                    <>
+                      <Btn label='Confirmar' onPress={doConfirm} pending={busy} block large />
+                      <StepLink label='Começar de novo' onPress={restartLink} disabled={busy} />
+                    </>
+                    )
+                  : (
+                    <>
+                      <Btn label='Confirmar vínculo' onPress={doConfirm} pending={busy} />
+                      <Btn label='Começar de novo' secondary onPress={restartLink} disabled={busy} />
+                    </>
+                    )}
             </>
             )
           : null}
@@ -819,11 +843,10 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
           ? (
             <>
               {inviteBlocked ? null : <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />}
-              <Body>{SHORT.link}</Body>
               {inviteLine}
               {inviteBlocked
                 ? inviteNeeded
-                : waitlistNote || <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={linkDisabled} />}
+                : waitlistNote || <Btn label='Continuar com o Google' onPress={doLink} pending={busy} disabled={linkDisabled} block large />}
             </>
             )
           : null}
@@ -844,12 +867,23 @@ function LinkCard ({ publicKey, memberCert, active, quiet, setup = false, onChan
             )
           : null}
         {!confirmable && !showForm
-          ? <Btn label='Vincular conta Google' secondary onPress={() => { setError(''); setFormOpen(true) }} />
+          ? <Btn label='Vincular conta Google' secondary onPress={() => { setError(''); setFormOpen(true) }} {...big} />
           : null}
       </>
     )
   }
 
+  if (setup) {
+    return (
+      <View style={styles.stepBody}>
+        {returned ? <StepNotice><Notice>{returned}</Notice></StepNotice> : null}
+        {body}
+        <ErrorText>{acctError || error}</ErrorText>
+        {note ? <StepNotice><Notice>{note}</Notice></StepNotice> : null}
+        {acctError ? <Btn label='Tentar de novo' onPress={load} {...big} /> : null}
+      </View>
+    )
+  }
   return (
     <Card>
       {setup ? null : <Label>conta</Label>}
@@ -1537,11 +1571,13 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       )
     : setup
       ? (
-        <Page flush padBottom={16}>
-          <Stepper index={index} total={total} title={STEP_TITLES[step] || title} hint={STEP_HINTS[step] || ''}>
-            {children}
-          </Stepper>
-        </Page>
+        <KeyboardForm>
+          <Page flush grow padBottom={16}>
+            <Stepper index={index} total={total} title={STEP_TITLES[step] || title} hint={STEP_HINTS[step] || ''} icon={STEP_ICONS[step]} busy={step === 'recuperando' || (!locked && info === null && !loadError)}>
+              {children}
+            </Stepper>
+          </Page>
+        </KeyboardForm>
         )
       : (
         <Page>
@@ -1568,9 +1604,19 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       <ErrorText>{loadError}</ErrorText>
       <ErrorText>{withPasskey ? pkError : ''}</ErrorText>
       {withPasskey && regNote ? <Notice>{regNote}</Notice> : null}
-      {recovering ? <Notice>Buscando sua conta…</Notice> : null}
-      {info === null && !loadError ? <Soft>carregando…</Soft> : null}
-      {info !== null && info.publicKey === null
+      {/* In the setup the frame's title and spinner already say it. */}
+      {recovering && !setup ? <Notice>Buscando sua conta…</Notice> : null}
+      {info === null && !loadError && !setup ? <Soft>carregando…</Soft> : null}
+      {info !== null && info.publicKey === null && setup
+        ? (
+          <>
+            <Body>Você ainda não tem uma conta neste aparelho. Crie uma para começar.</Body>
+            <ErrorText>{create.error}</ErrorText>
+            <Btn label='Criar conta' onPress={doCreate} pending={create.pending} block large />
+          </>
+          )
+        : null}
+      {info !== null && info.publicKey === null && !setup
         ? (
           <Card>
             <Body>Você ainda não tem uma conta neste aparelho. Crie uma para começar.</Body>
@@ -1593,7 +1639,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           </Card>
           )
         : null}
-      {needsCert && showTech
+      {needsCert && showTech && !(setup && linkMode)
         ? <Soft>{setup ? 'Sem a liberação da associação, este aparelho não publica nem sincroniza.' : 'Sem o certificado, este aparelho não publica nem sincroniza.'}</Soft>
         : null}
       {showLink && linkMode && info !== null && info.publicKey !== null
@@ -1603,6 +1649,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             memberCert={info.memberCert === true}
             active={active}
             quiet={recovering || onceActive}
+            recovering={recovering}
             setup={setup}
             onChanged={refresh}
             onLinked={setup ? onLinked : undefined}
@@ -1624,17 +1671,27 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           />
           )
         : null}
-      {showTech && needsCert && !withPasskey
+      {showTech && needsCert && !withPasskey && setup
         ? (
-          <Card>
+          <>
             {/* The setup hides the technical card: the association issues
                 the certificate for this key, so it is shown here. */}
-            {setup ? <Label>{PLAIN_CODE_LABEL}</Label> : null}
-            {setup ? <Mono>{displayText(info.publicKey)}</Mono> : null}
-            <Label>{setup ? PLAIN_CERT_LABEL : 'certificado de membro (JSON emitido pela associação)'}</Label>
+            <Label>{PLAIN_CODE_LABEL}</Label>
+            <Mono>{displayText(info.publicKey)}</Mono>
+            <Label>{PLAIN_CERT_LABEL}</Label>
             <Field value={certText} onChangeText={setCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
             <ErrorText>{certError || add.error}</ErrorText>
-            <Btn label={setup ? PLAIN_SUBMIT : 'Gravar certificado'} onPress={doCert} pending={add.pending} disabled={certText.trim() === ''} />
+            <Btn label={PLAIN_SUBMIT} onPress={doCert} pending={add.pending} disabled={certText.trim() === ''} block large />
+          </>
+          )
+        : null}
+      {showTech && needsCert && !withPasskey && !setup
+        ? (
+          <Card>
+            <Label>certificado de membro (JSON emitido pela associação)</Label>
+            <Field value={certText} onChangeText={setCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
+            <ErrorText>{certError || add.error}</ErrorText>
+            <Btn label='Gravar certificado' onPress={doCert} pending={add.pending} disabled={certText.trim() === ''} />
           </Card>
           )
         : null}
@@ -1646,6 +1703,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
 
 const makeStyles = (colors) => StyleSheet.create({
   welcome: { gap: space.md },
+  stepBody: { gap: space.md },
+  loading: { alignItems: 'center', gap: space.sm, paddingVertical: space.lg },
+  center: { textAlign: 'center' },
   noticeBox: { backgroundColor: colors.warm, borderRadius: radius.md, padding: space.md, gap: space.sm },
   manual: {
     backgroundColor: colors.card,

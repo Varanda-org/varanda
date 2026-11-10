@@ -81,7 +81,7 @@ import { ageBlocking, ageErrorText, ageGate, ageReadAllowed, parseReturnAge } fr
 import { ageAnswerOutcome, ageStateShown, nodeVouches } from './src/ageMemory.js'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
-import { STEP_TITLES, onboardingStep } from './src/onboarding'
+import { STEP_HINTS, STEP_TITLES, onboardingStep } from './src/onboarding'
 import { captureInvite, dropInvite, loadInvite, saveInvite } from './src/profileLinkStore'
 import { captureEntryLink, dropEntryLink } from './src/groupLinkStore'
 import { ENTRY_LINK_LABELS, ENTRY_OPEN_TEXT, entryCardText, entryPath } from './src/groupLink'
@@ -98,7 +98,8 @@ import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
 import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, holdBootCover, holdSplash } from './src/splashGate'
-import { Btn, ErrorText, Soft, Spinner, errorText } from './src/ui'
+import { Btn, ErrorText, Page, errorText } from './src/ui'
+import { Stepper } from './src/ui/Stepper'
 import { ThemeProvider, useStyles, useTheme } from './src/ui/ThemeProvider'
 import { Fab } from './src/ui/Fab'
 import { Splash } from './src/ui/Splash'
@@ -201,7 +202,7 @@ const TERMS_REARM_MAX = 5
 const agePolicyDelay = (n) => (n === 0 ? 5000 : n === 1 ? 15000 : 60000)
 // The node.info read for the certificate proof on the age step, same idea.
 const ageInfoDelay = (n) => (n === 0 ? 2000 : n === 1 ? 5000 : n === 2 ? 15000 : 30000)
-const AGE_REDIRECT_TEXT = 'Vamos abrir a verificação e, na volta, pedir sua passkey de novo.'
+const AGE_REDIRECT_TEXT = 'Vamos abrir a verificação. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.'
 
 // The steps the setup branch (Identidade, Idade) renders; the others belong
 // to the shell (spinner, Perfil, the tabs).
@@ -2631,6 +2632,12 @@ function Member () {
   // On a wide web window the setup step and the tabs share one centred column.
   const wide = Platform.OS === 'web' && width > layout.column
   let content
+  // Onboarding steps draw their own title (src/ui/Stepper.js, src/ui/Welcome.js); the bar keeps only the help.
+  const stepBar = (
+    <View style={[styles.helpBar, { paddingTop: insets.top, minHeight: layout.topBar + insets.top }]}>
+      {HELP[step] ? <HelpButton key={step} doc={HELP[step]} /> : null}
+    </View>
+  )
   if (setupStep) {
     // The first setup (identity, member certificate) before the tabs. The
     // tabs never render before a successful node.info confirms both.
@@ -2656,7 +2663,7 @@ function Member () {
         />
       )
     } else if (passkey !== null || info !== null) {
-      // embedded: the top bar above already carries the step's title
+      // embedded: the step frame (or the Ajustes page) carries the title
       // The invite card shows on Entrar only (never in the Ajustes Identidade).
       const inviteProp = action === 'card'
         ? {
@@ -2680,25 +2687,19 @@ function Member () {
       body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={dropLinkReturn} onInviteChanged={reloadCard} invite={inviteProp || entryProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
-        <View style={styles.setupBody}>
-          <ErrorText>{infoError}</ErrorText>
-          <Btn label='tentar de novo' onPress={readInfo} disabled={!ready} />
-        </View>
+        <Page flush grow padBottom={16}>
+          <Stepper index={index} total={total} title={STEP_TITLES[step]} hint={STEP_HINTS[step] || ''} actions={<Btn label='Tentar de novo' onPress={readInfo} disabled={!ready} block large />}>
+            <ErrorText>{infoError}</ErrorText>
+          </Stepper>
+        </Page>
       )
     } else {
-      body = <View style={styles.setupBody}><Soft>carregando…</Soft></View>
+      body = <Page flush grow padBottom={16}><Stepper index={index} total={total} title={STEP_TITLES[step]} hint={STEP_HINTS[step] || ''} busy /></Page>
     }
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        {/* The welcome draws its own chair and title (src/ui/Welcome.js); only the help stays at the top right. */}
-        {step === 'entrar'
-          ? (
-            <View style={[styles.helpBar, { paddingTop: insets.top, minHeight: layout.topBar + insets.top }]}>
-              <HelpButton key={step} doc={HELP.entrar} />
-            </View>
-            )
-          : <TopBar title={STEP_TITLES[step]} right={HELP[step] ? <HelpButton key={step} doc={HELP[step]} /> : null} />}
-        <OfflineNote />
+        {stepBar}
+        {step === 'idade' ? null : <OfflineNote />}
         <ExclusaoRecibo />
         {/* Without the Conexão link (hosted page) the body clears the home indicator itself. */}
         <View style={[styles.flex, connectionLink === null && { paddingBottom: insets.bottom }]}>{body}</View>
@@ -2709,13 +2710,12 @@ function Member () {
     // The own profile is being looked up (sync already runs in the background).
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} />
+        {stepBar}
         <OfflineNote />
-        <View style={styles.center}>
-          <Spinner size='large' />
-          {slow
-            ? <Btn label='Continuar mesmo assim' secondary onPress={() => setSkippedName(true)} />
-            : null}
+        <View style={[styles.flex, { paddingBottom: insets.bottom }]}>
+          <Page flush grow padBottom={16}>
+            <Stepper index={index} total={total} title={STEP_TITLES.carregando} hint={STEP_HINTS.carregando} busy actions={slow ? <Btn label='Continuar mesmo assim' secondary block large onPress={() => setSkippedName(true)} /> : null} />
+          </Page>
         </View>
       </View>
     )
@@ -2724,7 +2724,7 @@ function Member () {
     // (the step machine then shows the tabs) and the welcome toast shows there.
     content = (
       <View style={[styles.shell, wide && styles.shellWide]}>
-        <TopBar title={STEP_TITLES[step]} right={<HelpButton doc={HELP.perfil} />} />
+        {stepBar}
         <OfflineNote />
         <View style={[styles.flex, Platform.OS === 'web' && { paddingBottom: insets.bottom }]}>
           <Perfil
@@ -3320,11 +3320,9 @@ const makeStyles = (colors) => StyleSheet.create({
   // Clear: each StackLayer paints its own background, so a slide shows the
   // screen (or tab) under it.
   layer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
-  center: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', gap: 8 },
   shell: { flex: 1, width: '100%', maxWidth: layout.column, alignSelf: 'center', backgroundColor: colors.bg },
   shellWide: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: colors.line },
   helpBar: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-end', paddingRight: space.sm, backgroundColor: colors.bg },
-  setupBody: { padding: 16, gap: 12 },
   link: { alignItems: 'center', paddingTop: 14, borderTopWidth: 1, borderTopColor: colors.line, backgroundColor: colors.bg },
   linkText: { fontSize: 15, fontWeight: '600', color: colors.accent },
   toast: {
