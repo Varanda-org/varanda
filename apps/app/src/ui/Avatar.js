@@ -30,7 +30,7 @@ import { loadKept, registerKeptStore } from '../media/keptLoad'
 import { bumpCacheGeneration, cacheGeneration, registerLocalCache } from '../localCaches'
 import { isAppClient } from '../appClient'
 import { Icon } from './Icon'
-import { KeptOnlyContext, keptOnlyUrl } from './MediaView'
+import { KeptOnlyContext, keptOnlyUrl, mediaHashDeps } from './MediaView'
 import { stripes } from './theme'
 import { useTheme } from './ThemeProvider'
 
@@ -105,7 +105,7 @@ function useAvatarUrl (publicKey, picture, persist) {
       persist,
       keptUrl: keptStore.keptUrl,
       keep: keptStore.keep,
-      fetchBytes: (d) => fetchAvatarBytes(publicKey, d, { persist, fresh, fetch: mediaFetch() }),
+      fetchBytes: (d) => fetchAvatarBytes(publicKey, d, { ...mediaHashDeps(), persist, fresh, fetch: mediaFetch() }),
       urlFromBytes,
       generation: cacheGeneration,
       requestedGeneration
