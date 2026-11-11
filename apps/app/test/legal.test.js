@@ -90,7 +90,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '41baa41637c231759f16c2c296856ccf86fd43966b568f06221dcb165da0f788', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'c655185dee955dc4b0909c63c89f0e853dec7bd65b8123f5246b614f05d72601', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
@@ -339,5 +339,7 @@ test('legal: version 36 says what stays after deleting the account, number inclu
   const privacy = PRIVACY.sections.flatMap((sec) => sec.paragraphs).join('\n')
   t.ok(terms.includes('O número do celular fica lacrado por até 180 dias e então é apagado.'))
   t.ok(privacy.includes('os @nomes que a conta usou e, por até 180 dias, o número lacrado; numa conta bloqueada, o índice com chave do número fica enquanto o bloqueio durar'))
-  t.ok(privacy.includes('só é entregue mediante ordem judicial ou a seu próprio pedido'))
+  t.ok(privacy.includes('só são entregues mediante ordem judicial ou a seu próprio pedido'))
+  t.ok(privacy.includes('o app não o grava no aparelho'), 'o número passa pelo app quando digitado')
+  t.absent(privacy.includes('nem no navegador'), 'o número é digitado no navegador na web')
 })
