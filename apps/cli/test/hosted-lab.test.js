@@ -4,7 +4,8 @@
 // lab's one origin maps each route to the right backend (fake seeder, fake
 // account service and fake UI, all on 127.0.0.1), the stub hands each lab
 // person a distinct sub behind PKCE, and the lab refuses anything off
-// loopback before it touches the network.
+// loopback before it touches the network. A running lab answers
+// /account/phone/policy and sends a code with no age record.
 
 const test = require('brittle')
 const fs = require('node:fs')
@@ -12,15 +13,19 @@ const http = require('node:http')
 const net = require('node:net')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
-const { spawnSync } = require('node:child_process')
+const { spawnSync, spawn } = require('node:child_process')
 const { WebSocketServer, WebSocket } = require('ws')
+const b4a = require('b4a')
+const crypto = require('hypercore-crypto')
+const { signPhone } = require('@varanda/core/lib/phone')
 const { startLabProxy, routeOf, bootstrapFromEnv, labOrigin, allowedHost, parseArgs, LabUsageError } = require('../scripts/hosted-lab')
 const { createOAuthStub, challengeOf } = require('../scripts/oauth-stub')
-const { tmpDir } = require('./helpers/net')
+const { tmpDir, until } = require('./helpers/net')
 
 const LAB = path.join(__dirname, '..', 'scripts', 'hosted-lab.js')
 const STUB = path.join(__dirname, '..', 'scripts', 'oauth-stub.js')
 const ASSOC = 'ab'.repeat(32)
+const LAB_PHONE = '+5511987654321'
 
 const cleanEnv = {}
 for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('VARANDA_')) cleanEnv[k] = v
@@ -61,6 +66,7 @@ test('the lab origin maps the five routes and the UI fallback', async (t) => {
     ['/media/' + 'cd'.repeat(32) + '/' + 'ef'.repeat(32) + '/1/1', 'seeder', seederPort],
     ['/index/counts/x', 'seeder', seederPort],
     ['/account/age/policy', 'account', accountPort],
+    ['/account/phone/policy', 'account', accountPort],
     ['/account/start', 'account', accountPort],
     ['/', 'ui', uiPort],
     ['/@nome', 'ui', uiPort],
@@ -314,4 +320,103 @@ test('the dataset flags: a seed, a bounded size, rajada only with a dataset', (t
   t.exception(() => parseArgs(['--rajada']), LabUsageError, 'rajada without a dataset')
   t.exception(() => parseArgs(['--dataset-size', '6x20']), LabUsageError, 'a size without a dataset')
   t.is(parseArgs(['--help']).help, true)
+})
+
+function freePort () {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      server.close(() => resolve(port))
+    })
+  })
+}
+
+function postJson (url, origin, body) {
+  return fetch(url, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { origin, 'content-type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(async (res) => {
+    const text = await res.text()
+    let parsed = null
+    try { parsed = JSON.parse(text) } catch {}
+    return { status: res.status, body: parsed }
+  })
+}
+
+test('the running lab answers the phone policy and sends without an age record', async (t) => {
+  t.timeout(120000)
+  const port = await freePort()
+  const child = spawn(process.execPath, [LAB, '--host', '127.0.0.1', '--port', String(port)], {
+    env: cleanEnv,
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', (d) => { stdout += d })
+  child.stderr.on('data', (d) => { stderr += d })
+  let done = false
+  const exited = new Promise((resolve) => {
+    child.once('error', (err) => { stderr += err.message })
+    child.once('close', (code) => {
+      done = true
+      resolve(code)
+    })
+  })
+  t.teardown(async () => {
+    if (!done) child.kill('SIGINT')
+    await Promise.race([
+      exited,
+      new Promise((resolve) => setTimeout(resolve, 12000))
+    ])
+    if (!done) {
+      child.kill('SIGKILL')
+      await Promise.race([
+        exited,
+        new Promise((resolve) => setTimeout(resolve, 2000))
+      ])
+    }
+  }, { force: true })
+
+  // Ages stay null in the lab, so this send is the age gate being open.
+  await until(() => {
+    if (done) throw new Error('lab exited ' + child.exitCode + ': ' + stderr)
+    return stdout.includes('Laboratório hospedado pronto em http://localhost:' + port) &&
+      stdout.includes('código de SMS do laboratório: 123456')
+  }, { timeoutMs: 90000, name: 'laboratório pronto' })
+
+  const base = 'http://127.0.0.1:' + port
+  const origin = 'http://localhost:' + port
+  const policy = await fetch(base + '/account/phone/policy')
+  t.is(policy.status, 200)
+  t.alike(await policy.json(), { required: true })
+  t.alike(await (await fetch(base + '/account/age/policy')).json(), { required: false })
+
+  const config = await (await fetch(base + '/varanda.json')).json()
+  const kp = crypto.keyPair()
+  const member = b4a.toString(kp.publicKey, 'hex')
+  const started = await postJson(base + '/account/phone/start', origin, { member })
+  t.is(started.status, 200, started.body && started.body.error)
+  t.is(started.body && typeof started.body.nonce, 'string')
+  if (!started.body || typeof started.body.nonce !== 'string') return
+  const signature = signPhone({ action: 'send', nonce: started.body.nonce, member, association: config.association }, kp)
+  const sent = await postJson(base + '/account/phone/send', origin, {
+    member,
+    nonce: started.body.nonce,
+    signature,
+    phone: LAB_PHONE
+  })
+  t.is(sent.status, 200, sent.body && sent.body.error)
+  t.alike(sent.body, { state: 'enviado' })
+  t.absent((stdout + stderr).includes(LAB_PHONE), 'the lab output has no phone number')
+
+  child.kill('SIGINT')
+  const code = await Promise.race([
+    exited,
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 12000))
+  ])
+  t.is(code, 0, 'lab exit ' + code)
 })

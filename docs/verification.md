@@ -7678,3 +7678,32 @@ Nenhuma verificação manual foi feita. Build de debug do Android e simulador do
 - [ ] Excluir conta mantém o número lacrado até o prazo.
 - [ ] Um bloqueio da moderação ainda recusa o número depois que o lacre some.
 - [ ] O número não é aceito como fator de recuperação.
+
+## 175. Cadastro só com celular no serviço de conta (PR feat/phone-only-signup-server)
+
+Com a verificação de celular ligada, um membro com celular brasileiro verificado conclui o vínculo sem conta Google. O registro leva `sub` `telefone:<chave hex64>` e `email` vazio. Um build anterior lê esse registro como um vínculo comum: o rótulo passa nas mesmas conferências de um `sub` qualquer, sem operação, campo ou migração novos no diretório. O número continua só no `phone.json`.
+
+O `POST /account/finish` entra no modo celular quando a linha ainda está na fase `reserve` e não tem `sub`, no cookie e no caminho do app com o cabeçalho `V` (`x-varanda-link`). Não chama `redeemed()`: o código `R` só nasce no retorno do Google. A declaração de finish nomeia `telefone:` mais a chave. A ordem é: limite de finish, idade, checagem do celular (`telefone-pendente`), a chave entra no conjunto local `linking` (contagem de finishes em curso), `await phoneRoutes.settled(member)` (que espera `phones.settled`), a checagem do celular de novo, e então `store.finish({ signature, phone: true })`. A checagem de vínculo que as rotas de celular leem, a cada pedido, é `store.status(m).linked || linking.has(m)`. Um registro do mesmo número para outro membro que já estava na fila antes da entrada em `linking` ainda pode encerrar a linha: o `settled` espera, a segunda checagem responde `telefone-pendente` e não grava vínculo. Um registro que entra na fila depois vê o membro como vinculado e responde `telefone-em-uso`. Com convites, `finishInvited` resolve o assunto com `memberForSub(row.sub ?? phoneSub(row.member))`. O código de convite só é gasto quando o vínculo grava. Quem ainda não verificou o celular mantém a linha e o código (403 `telefone-pendente`). `GET /account/pending` numa linha de app feita só com celular responde `expirado`. Sem a verificação de celular, um finish sem resposta do Google continua `expirado`.
+
+`account phone --username <nome>` (com ou sem `@`) é só leitura e imprime no máximo uma linha JSON do único dono do nome (`nameHolder`, atual ou passado). Membro ou conta excluída: `{ username, key, kind, current, deletedAt, phone }`, com `kind` `membro` ou `excluido`, e `phone` as mesmas linhas de `--member` (lista vazia se não houver número). Página (`kind` `pagina`): `owner` e nenhum número, e a chave do `phone.json` não é lida. Página que mudou de chave: também `movedTo`. Página sem registro em `pages.json`: "página sem registro em pages.json". Nome que nunca foi emitido: "nome não encontrado".
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/cli/test/account-phone-signup.test.js`
+- `node apps/cli/test/account-store-phone.test.js`
+- `node apps/cli/test/account-phone-lookup.test.js`
+- `node apps/cli/test/phone-stub.test.js`
+- `node apps/cli/test/readme-help.test.js`
+
+Os testes de cadastro usam o substituto de SMS, que não abre rede e só aceita `123456`, o serviço em `127.0.0.1` e diretório temporário. O bloco Help (R5.12, exact) de `docs/protocol.md` ganha a linha de `account phone --username`, igual à do `HELP` e do bloco "Ajuda" do README.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto:
+
+Laboratório hospedado (`node apps/cli/scripts/hosted-lab.js`, com `npm run web -w apps/app` na porta 8081). O aviso imprime `código de SMS do laboratório: 123456`. O substituto (`apps/cli/scripts/phone-stub.js`) aceita só esse código e não abre rede. A idade fica desligada (`GET /account/age/policy` responde `{ required: false }`) e o celular fica exigido (`GET /account/phone/policy` responde `{ required: true }`).
+
+- [ ] Abra `http://localhost:8080` no Chrome (use `localhost`, não `127.0.0.1`: o `rp.id` da passkey não pode ser um IP). No DevTools, ative o autenticador virtual (ctap2, transporte `internal`, chaves residentes, verificação do usuário e PRF) e toque em Entrar.
+- [ ] Na confirmação do celular, informe um celular brasileiro e o código `123456`. O código é aceito. Um código diferente é recusado. O aviso do laboratório não mostra o número. As telas atuais ainda seguem para a página do laboratório no lugar do Google (Pessoa 1). O vínculo sem conta Google, com `sub` `telefone:`, é o caminho do serviço coberto por `account-phone-signup.test.js`.
+- [ ] `account phone --username <nome>` (com ou sem `@`), no diretório da conta e com `VARANDA_PHONE_KEY`, imprime no máximo uma linha. Membro: `kind` `membro` ou `excluido` e `phone`. Página: `owner`, sem número. Página movida: também `movedTo`. Sem registro em `pages.json`: "página sem registro em pages.json". Nome desconhecido: "nome não encontrado". O laboratório não imprime a chave do `phone.json` (ela fica só no processo) e apaga os dados ao encerrar, então esta consulta se faz num diretório em que a chave é conhecida.
