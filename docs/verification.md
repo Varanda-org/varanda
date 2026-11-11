@@ -7123,7 +7123,7 @@ Nenhuma verificação manual foi feita. Todos os itens estão em aberto:
 
 ## 154. Confirmação do celular no app, Termos e Privacidade 35 (PR3)
 
-Ordem das telas na web hospedada e no app da associação: entrar, idade, telefone, vínculo, Termos 35. Quem já tinha conta fica retido até confirmar o celular. Termos e Política de Privacidade 35 descrevem o celular (sujeitos a revisão jurídica), as páginas do site são o render de `legal.js` e há ajuda "Como funciona a confirmação do celular".
+Ordem das telas na web hospedada e no app da associação: Termos 35, entrar, idade, telefone, vínculo. Quem já tinha conta fica retido até confirmar o celular. Termos e Política de Privacidade 35 descrevem o celular (sujeitos a revisão jurídica), as páginas do site são o render de `legal.js` e há ajuda "Como funciona a confirmação do celular".
 
 Como verificar, a partir da raiz:
 

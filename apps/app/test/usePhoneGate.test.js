@@ -629,7 +629,7 @@ test('an accepted since is read back from node.info until it shows, even when th
     phoneSince: async () => SINCE_DATED
   }, { info: neither, readInfo, infoFree: true })
   t.alike(proofsSent(nodeCalls).filter((p) => 'since' in p), [{ since: SINCE_DATED }], 'the node accepted the since')
-  t.is(r.out.gate, 'off', 'node.info does not show it yet')
+  t.is(r.out.gate, 'needed', 'the accepted since holds the step before node.info shows it')
   const first = reads
   t.ok(first >= 1, 'node.info is read after the store')
   reconnect(r, node)
