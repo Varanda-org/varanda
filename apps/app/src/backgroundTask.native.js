@@ -54,12 +54,12 @@ export const whenForeground = () => gate.wait()
 export const whenActive = () => gate.waitActive()
 
 // When the app was last opened, next to A Rua's snapshot (the app's
-// document dir): { v: 1, at }. Written by every foreground start and every
+// cache dir, never in a device backup): { v: 1, at }. Written by every foreground start and every
 // registration; the task stops for good when it is missing or too old.
 const LAST_USE_FILE = 'varanda-last-open.json'
 
 function lastUseFile () {
-  return new File(Paths.document, LAST_USE_FILE)
+  return new File(Paths.cache, LAST_USE_FILE)
 }
 
 // -> the recorded ms, or null. Never throws.
