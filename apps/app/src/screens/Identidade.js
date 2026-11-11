@@ -524,6 +524,10 @@ function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, s
         setNewName('')
         setRenameOpen(false)
         setNote('Pronto: agora você é @' + username + '. A próxima troca fica liberada em ' + formatNextChange(r.nextChangeAt) + '.')
+      } catch (err) {
+        // As in doLink: the service holds no verified phone for this key.
+        if (err && err.code === 'telefone-pendente' && typeof onPhoneRecheck === 'function') onPhoneRecheck()
+        throw err
       } finally {
         // Awaited: busy clears only once status is fresh, so the effect
         // above never acts on a status that still carries the old record.
