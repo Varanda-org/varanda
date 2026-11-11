@@ -243,6 +243,7 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
 - Result: `{ runId: integer }`, returned as soon as the run has started (it does not wait for the run). `runId` is a safe integer in `1..MAX_ID`, new for every run of the node. A `sync.started` event (section 6) is emitted for the run before this response.
 - No identity yet -> `NOT_FOUND` `'identidade não encontrada'` (no run is started, no event).
 - A second `sync.start` while a run is active -> `USAGE` `'sincronização já em andamento'`. The bootstrap, DHT host and association are node configuration.
+- Browser node: an identity install answers before the DM store finishes unlocking (the unlock runs off the request chain), and a one-shot run reads its page roots only once, at its start. A `once: true` start issued while that unlock is pending therefore waits for it, so the held pages' groups are in the run (a continuous run starts at once and is restarted when the unlock finds roots it lacks). A `sync.stop` issued during that wait cancels the start with `USAGE` `'sincronização interrompida'`; a disconnect cancels it with `USAGE` `'conexão encerrada'`. No run is started in either case.
 
 ### 5.15 `sync.stop`
 

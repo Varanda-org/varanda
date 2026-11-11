@@ -489,6 +489,7 @@ const USAGE_MESSAGES = new Set([
   PEEK_BUSY,
   NOTICES_BUSY
 ])
+
 const USAGE_PATTERNS = [
   /^certificado inválido \([a-z0-9-]{1,40}\)$/,
   /^registro inválido: [a-z0-9-]{1,40}$/
@@ -772,6 +773,9 @@ function readyWithin (ready, ms) {
 // hkdf: the HKDF of passkey.js for every key derived from the PRF of
 // setKeyPair (group box, group writer and direct message keys); absent, it
 // is WebCrypto's. The Bare worklet passes its own: its WebCrypto has none.
+// dmUnlockHook: tests only, (unlock, prf) -> promise around the direct
+// message store unlock that setKeyPair starts off the chain; it must call
+// unlock() at most once. Absent, the unlock runs as is.
 function createBrowserSession ({
   storage,
   association,
@@ -793,7 +797,8 @@ function createBrowserSession ({
   upkeepDelayMs = UPKEEP_DELAY_MS,
   upkeepFullMaxAgeMs = UPKEEP_FULL_MAX_AGE_MS,
   fetchMedia = (...args) => globalThis.fetch(...args),
-  hkdf
+  hkdf,
+  dmUnlockHook = null
 } = {}) {
   const cfg = checkConfig({ storage, association, seederUrl, createSocket })
   const reportInternal = (err) => {
@@ -824,6 +829,7 @@ function createBrowserSession ({
   let lastRunId = 0
   let connection = 0 // epoch, bumped by detach()
   let syncIntent = null // 'continuous' while a user-started continuous run should be running
+  let syncStops = 0 // sync.stop calls: a one-shot start waiting for the unlock is cancelled by one
   // The lease (header): no continuous run is restarted before leaseUntil;
   // leaseSettledSince / leaseMediaSince = when the link became settled /
   // started waiting for a media core (kept across preemptions); borrows =
@@ -872,6 +878,25 @@ function createBrowserSession ({
   let keyPair = null
   let mediaKeyPair = null
   let groupPrf = null
+  // The direct message store unlock setKeyPair starts off the chain (it reads
+  // and opens every local row): settles once that unlock is done or
+  // superseded, never rejects, and is null when none is pending. Every
+  // identity change bumps dmUnlockGen, which makes a pending one a no-op.
+  let dmUnlocking = null
+  let dmUnlockGen = 0
+  // The identity requests are issued for, moved synchronously when an
+  // identity change is CALLED (its chain entry may run later): another key
+  // (setKeyPair; the same key with a new PRF keeps it), a lock or a reset
+  // (no key). A DM request reads identityTarget on arrival, before any wait,
+  // and requires it unchanged after every wait and before every later step
+  // (checkIdentity): queued then, it runs ahead of any later change.
+  let identityTarget = 0
+  let targetKey = null
+
+  function retarget (hex) {
+    if (hex === null || hex !== targetKey) identityTarget++
+    targetKey = hex
+  }
   // The private-group box key pair and the epoch keys opened this session,
   // in memory only (./group-keys.js): locked with every identity change,
   // closed with the session.
@@ -2400,6 +2425,24 @@ function createBrowserSession ({
     restartForRoots({}).catch(noop)
   }
 
+  // After a DM unlock settles: the live continuous run may have started
+  // while the store was locked, without the roots of the stored page
+  // diaries. They are read on its cores, and one restart pages them in
+  // this run's place (the next run reads them in heldPageRoots).
+  const restartForHeldRoots = serial(async () => {
+    const r = run
+    if (r === null || r.once || !(r.pageRoots instanceof Set)) return
+    const pages = dmEngine.heldPageBoxes().map((p) => p.page)
+    if (pages.length === 0) return
+    let roots
+    try {
+      roots = await withCores((c) => member.pageGroupRoots(c, pages))
+    } catch {
+      return
+    }
+    if (run === r && roots.some((key) => !r.pageRoots.has(key))) await stopRun('preempted')
+  })
+
   // group.read and group.seal with `page` (docs/rpc.md 5.114): folded as
   // the page with its group box, never falling through to the own groups. A
   // root not held here is listed in kv groupReplicas, so the next sync run
@@ -2432,6 +2475,116 @@ function createBrowserSession ({
     const own = await requireUnlocked()
     if (!dmEngine.unlocked()) throw new UsageError(store.LOCKED)
     return own
+  }
+
+  // A request that needs the dm keys waits OFF the chain for a pending store
+  // unlock, so a public read queued after it never waits behind the unlock.
+  // Again after each wait: a newer setKeyPair may have replaced it. Callers
+  // loop inline and enqueue in the same tick as the last null check (never
+  // `await dmReady()`, which yields even with nothing pending): an identity
+  // change called right after must queue behind the request, not before it.
+  async function dmReady () {
+    for (let p = dmUnlocking; p !== null; p = dmUnlocking) await p
+  }
+
+  // serial(fn) for every chain step of a request that needs the dm keys
+  // (requireDm, dmEngine.*), first and later stages alike: each step waits
+  // for a pending store unlock and queues in the tick of the last check, so
+  // no step meets an unlock started while the request was off the chain.
+  // `ident`: the request's identityTarget, read on its arrival (a later
+  // step passes the one its request read); checked when the step queues.
+  function serialDm (fn) {
+    const run = serial(fn)
+    return (params, ident = identityTarget) => {
+      if (dmUnlocking === null) {
+        if (ident !== identityTarget) return Promise.reject(new UsageError(store.LOCKED))
+        return run(params)
+      }
+      return (async () => {
+        for (let p = dmUnlocking; p !== null; p = dmUnlocking) await p
+        checkIdentity(ident)
+        return run(params)
+      })()
+    }
+  }
+
+  // fn() for a dm-key use OFF the chain (after a step of a request already
+  // returned): run in the tick no store unlock is pending, so one started
+  // meanwhile (a setKeyPair while the request read or looked up) is waited
+  // for instead of meeting a locked engine.
+  // `ident` (identityTarget on the request's arrival) is checked in that
+  // same tick: a request whose identity changed meanwhile is locked and
+  // changes nothing.
+  function withDmReady (ident, fn) {
+    if (dmUnlocking === null) {
+      checkIdentity(ident)
+      return fn()
+    }
+    return (async () => {
+      for (let p = dmUnlocking; p !== null; p = dmUnlocking) await p
+      checkIdentity(ident)
+      return fn()
+    })()
+  }
+
+  function checkIdentity (ident) {
+    if (ident !== identityTarget) throw new UsageError(store.LOCKED)
+  }
+
+  // The first chain step of a DM request of several steps -> own.
+  const dmIdentity = serialDm(() => requireDm())
+
+  // fn once no DM unlock is pending; `when` picks the requests that need the
+  // dm keys (group.read only with a page).
+  function afterDmUnlock (fn, when = null) {
+    return async (params) => {
+      if (when === null || when(params)) {
+        const ident = identityTarget
+        for (let p = dmUnlocking; p !== null; p = dmUnlocking) await p
+        checkIdentity(ident)
+      }
+      return fn(params)
+    }
+  }
+
+  // The DM store unlock of setKeyPair `gen`, started off the chain once the
+  // identity is installed, so the reads queued behind it go first. `prf` is
+  // this unlock's own copy, zero-filled here exactly once when it settles. A
+  // newer identity change (dmUnlockGen) makes it a no-op; one under way is
+  // stopped by the engine's own generation (the change's lock).
+  async function runDmUnlock (gen, prf) {
+    const current = () => gen === dmUnlockGen && !closed
+    try {
+      if (!current()) return
+      const unlock = () => current() ? dmEngine.unlock(prf) : Promise.resolve()
+      await (dmUnlockHook === null ? unlock() : dmUnlockHook(unlock, prf))
+    } catch (err) {
+      // A superseded unlock can fail on the store its lock wiped: not an error.
+      if (current()) reportInternal(err)
+      return
+    } finally {
+      prf.fill(0)
+    }
+    if (!current() || !dmEngine.unlocked()) return
+    // The dm box pair and the local store key (docs/rpc.md 5.73); the wallet
+    // is checked once after an unlock that has a dm-key.
+    try {
+      if ((await store.readDmKey(storage)) !== null && current() && keyPair !== null) {
+        dmEngine.topUp(keyPair).catch(noop)
+        dmRefresh({}).catch(noop)
+      }
+    } catch (err) {
+      reportInternal(err)
+    }
+    if (!current()) return
+    // A continuous run verified while the store was locked: its dm tick and
+    // remote page scan returned early then.
+    const r = run
+    if (r !== null && !r.once && !r.internal && r.ownSynced) {
+      dmTick()
+      refreshRemotePageRoots().catch(noop)
+    }
+    if (dmEngine.heldPageBoxes().length > 0) restartForHeldRoots({}).catch(noop)
   }
 
   // The newest dm-key of `member` -> { box, gen } (both null when none).
@@ -2522,7 +2675,7 @@ function createBrowserSession ({
   // Off the chain (each read is a diary.peek). -> { items, incomplete }:
   // incomplete when the index is not complete or a writer's blocks could
   // not be read (a failed peek, not an invalid block, which is omitted).
-  async function testimonialPending (own) {
+  async function testimonialPending (own, ident) {
     const index = await testimonialPointers(own)
     const pointers = index.pointers
     let incomplete = index.incomplete
@@ -2549,7 +2702,7 @@ function createBrowserSession ({
     }
     // Newest first, as the app lists them.
     blocks.sort((a, b) => (a.record.at < b.record.at ? 1 : a.record.at > b.record.at ? -1 : 0))
-    const items = member.testimonialPendingRows(own, blocks, shown, openTestimonial, TESTIMONIAL_PENDING_MAX)
+    const items = await withDmReady(ident, () => member.testimonialPendingRows(own, blocks, shown, openTestimonial, TESTIMONIAL_PENDING_MAX))
     return { items, incomplete }
   }
 
@@ -3218,7 +3371,7 @@ function createBrowserSession ({
     // Signs the deal consent for an inbound proposta the local DM store
     // holds; appends nothing. The listing must be an own live root, and the
     // offer must be a message from `rater` naming exactly that listing.
-    'listing.consent': serial(async ({ to, rater, offer }) => {
+    'listing.consent': serialDm(async ({ to, rater, offer }) => {
       const ref = listingRef(to)
       const own = await requireUnlocked()
       if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
@@ -3327,9 +3480,10 @@ function createBrowserSession ({
     // Needs the DM key (the boxes are sealed to it), as the DM reads.
     'testimonial.pending': async () => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
-      const own = await serial(() => requireDm())({})
+      const ident = identityTarget
+      const own = await dmIdentity({}, ident)
       try {
-        return await testimonialPending(own)
+        return await testimonialPending(own, ident)
       } catch (err) {
         throw toRpcError(err, reportInternal)
       }
@@ -3339,22 +3493,23 @@ function createBrowserSession ({
     // it; a block already shown answers its show. Never retried.
     'testimonial.show': async ({ from, seq }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const ident = identityTarget
       const key = from.toLowerCase()
-      await serial(() => requireDm())({})
+      await dmIdentity({}, ident)
       let record = null
       try {
         const r = await diaryPeek({ author: key, seqs: [seq] })
         const e = r.entries.find((x) => x.seq === seq)
         if (e !== undefined) record = e.record
       } catch {}
-      return serial(async (_, epoch) => {
+      return serialDm(async (_, epoch) => {
         await requireDm()
         await ensureCaughtUp(epoch)
         const r = await withStore((c) => member.testimonialShow(c, { from: key, seq, record, open: openTestimonial }))
         if (r.changed) wrote(r.seq)
         await pushAfterWrite()
         return { seq: r.seq, ref: r.ref }
-      })({})
+      })({}, ident)
     },
 
     'testimonial.delete': serial(async ({ to, about }, epoch) => {
@@ -3365,7 +3520,7 @@ function createBrowserSession ({
     // Momentos (docs/rpc.md 5.113): the item must be one this node's
     // momentPutMedia answered in this unlock; published like post.create.
     // A published item is never offered for a second moment.
-    'moment.create': serial(async ({ text, media }, epoch) => {
+    'moment.create': serialDm(async ({ text, media }, epoch) => {
       await requireDm()
       await ensureCaughtUp(epoch)
       const r = await withStore((c) => member.momentCreate(c, { text, media, owned: (item) => dmEngine.isOwnPublicItem(item) }))
@@ -3418,7 +3573,7 @@ function createBrowserSession ({
     // fails: each only warns. Unlocked only, as follow.add. Nothing reaches the
     // other person: the unfollow is an ordinary follow record, and the
     // conversation op is sealed to the own box.
-    'block.set': serial(async ({ key, on }, epoch) => {
+    'block.set': serialDm(async ({ key, on }, epoch) => {
       const own = await requireUnlocked()
       if (key === own) throw new UsageError('não é possível bloquear a própria chave')
       const r = applyBlock(await store.readMemberBlocks(storage), key, on, Math.floor(Date.now() / 1000))
@@ -3613,7 +3768,7 @@ function createBrowserSession ({
       if (params.page !== undefined) return pageGroupOp(member.pageGroupRead, params)
       return withCores((c) => member.groupRead(c, params))
     }),
-    'group.seal': serial((params) => pageGroupOp(member.pageGroupSeal, params)),
+    'group.seal': serialDm((params) => pageGroupOp(member.pageGroupSeal, params)),
     'group.seen': serial(async (params) => {
       const before = await store.readGroupSeen(storage)
       const r = await withCores((c) => member.groupSeen(c, params))
@@ -3665,7 +3820,7 @@ function createBrowserSession ({
     'community.info': serial((params) => withCores((c) => member.communityInfo(c, params))),
     'community.list': serial(() => withCores((c) => member.communityList(c))),
 
-    'dm.enable': serial(async (_, epoch) => {
+    'dm.enable': serialDm(async (_, epoch) => {
       const r = await dmEnable(epoch)
       if (keyPair !== null) dmEngine.topUp(keyPair).catch(noop)
       return r
@@ -3686,32 +3841,36 @@ function createBrowserSession ({
     // runs dm.enable first.
     'dm.send': async ({ to, text, replyTo, media, card, fwd }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const ident = identityTarget
       // Self and a blocked peer are refused before any lookup.
-      await serial(async () => {
+      await serialDm(async () => {
         dmEngine.checkSend(await requireDm(), to)
         if ((await member.memberBlocks(storage)).has(to)) throw new UsageError(DM_BLOCKED)
-      })({})
+      })({}, ident)
       let recipient
       try {
         recipient = to === ownKey ? { box: null } : await dmLookupOf(to)
       } catch (err) {
         throw toRpcError(err, reportInternal)
       }
-      return serial(async (_, epoch) => {
+      return serialDm(async (_, epoch) => {
         const own = await requireDm()
         if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
         return dmEngine.send(own, keyPair, { to, text, fwd, card, replyTo: replyTo === undefined ? null : replyTo, media: media === undefined ? null : media }, recipient.box)
-      })({})
+      })({}, ident)
     },
 
     // Not on the chain: it reads the pool over its own link and writes only
     // kv and the local store (one pull at a time, in the engine).
     'dm.pull': async () => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
-      const own = await serial(() => requireDm())({})
+      const ident = identityTarget
+      const own = await dmIdentity({}, ident)
       try {
-        dmLastPull = Date.now()
-        return await dmEngine.pull(own)
+        return await withDmReady(ident, () => {
+          dmLastPull = Date.now()
+          return dmEngine.pull(own)
+        })
       } catch (err) {
         throw toRpcError(err, reportInternal)
       } finally {
@@ -3721,20 +3880,20 @@ function createBrowserSession ({
 
     // With `page` (5.114) the page's conversations, held under its secrets;
     // the member's own blocks do not apply to them.
-    'dm.list': serial(async (params) => {
+    'dm.list': serialDm(async (params) => {
       return dmEngine.list(await requireDm(), params)
     }),
-    'dm.thread': serial(async (params) => {
+    'dm.thread': serialDm(async (params) => {
       const r = await dmEngine.thread(await requireDm(), params)
       if (params.page !== undefined) return r
       return (await member.memberBlocks(storage)).has(params.peer) ? { ...r, blocked: true } : r
     }),
     // A page's ops are signed by the page key: dm.pageDraft, dm.pageSend.
-    'dm.set': serial(async ({ peer, state, page }) => {
+    'dm.set': serialDm(async ({ peer, state, page }) => {
       if (page !== undefined) throw new UsageError(DM_USE_PAGE_DRAFT)
       return dmEngine.set(await requireDm(), keyPair, { peer, state })
     }),
-    'dm.seen': serial(async ({ peer, page }) => {
+    'dm.seen': serialDm(async ({ peer, page }) => {
       const own = await requireDm()
       if (page !== undefined) return dmEngine.seen(own, peer, page)
       const before = await store.readDmSeen(storage)
@@ -3745,11 +3904,11 @@ function createBrowserSession ({
 
     // ---- Páginas de ponta a ponta (docs/rpc.md 5.114) ----
 
-    'dm.pageGenerate': serial(async (params) => {
+    'dm.pageGenerate': serialDm(async (params) => {
       const own = await requireDm()
       return dmEngine.pageGenerate(own, keyPair, params)
     }),
-    'dm.pageShare': serial(async (params) => {
+    'dm.pageShare': serialDm(async (params) => {
       await requireDm()
       return dmEngine.pageShare(keyPair, params)
     }),
@@ -3759,7 +3918,8 @@ function createBrowserSession ({
     // operation: a reset waits for those, and page.read queues on the chain.
     'dm.pageSecrets': async (params) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
-      const own = await serial(() => requireDm())({})
+      const ident = identityTarget
+      const own = await dmIdentity({}, ident)
       let roster
       try {
         const r = await handlers['page.read']({ key: params.page, full: true })
@@ -3769,7 +3929,7 @@ function createBrowserSession ({
         throw err
       }
       try {
-        return await dmEngine.pageSecrets(own, roster, params)
+        return await withDmReady(ident, () => dmEngine.pageSecrets(own, roster, params))
       } catch (err) {
         throw toRpcError(err, reportInternal)
       }
@@ -3777,7 +3937,8 @@ function createBrowserSession ({
     // The recipient's key is looked up off the chain first, as dm.send's.
     'dm.pageDraft': async (params) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
-      await serial(() => requireDm())({})
+      const ident = identityTarget
+      await dmIdentity({}, ident)
       let box = null
       if (params.kind === 'msg' && params.to !== undefined && params.to !== params.page) {
         try {
@@ -3786,12 +3947,12 @@ function createBrowserSession ({
           throw toRpcError(err, reportInternal)
         }
       }
-      return serial(async () => {
+      return serialDm(async () => {
         await requireDm()
         return dmEngine.pageDraft(params, box)
-      })({})
+      })({}, ident)
     },
-    'dm.pageSend': serial(async (params) => {
+    'dm.pageSend': serialDm(async (params) => {
       await requireDm()
       return dmEngine.pageSend(params)
     }),
@@ -3801,7 +3962,8 @@ function createBrowserSession ({
     // the roster.
     'dm.pageLegacyChunk': async (params) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
-      await serial(() => requireDm())({})
+      const ident = identityTarget
+      await dmIdentity({}, ident)
       // The chain of verified page-origin records, newest first.
       const movedFrom = []
       let at = typeof params.page === 'string' ? params.page : null
@@ -3818,16 +3980,16 @@ function createBrowserSession ({
         movedFrom.push(from)
         at = from
       }
-      return serial(async () => {
+      return serialDm(async () => {
         await requireDm()
         return dmEngine.pageLegacyChunk(params, movedFrom)
-      })({})
+      })({}, ident)
     },
-    'dm.pageLegacyBlocks': serial(async (params) => {
+    'dm.pageLegacyBlocks': serialDm(async (params) => {
       await requireDm()
       return dmEngine.pageLegacyBlocks(params)
     }),
-    'dm.pageForget': serial(async (params) => {
+    'dm.pageForget': serialDm(async (params) => {
       await requireDm()
       return dmEngine.pageForget(params)
     }),
@@ -3872,6 +4034,7 @@ function createBrowserSession ({
     }),
 
     'sync.stop': serial(async () => {
+      syncStops++
       syncIntent = null
       kickLease()
       // The hold clocks survive a preempted end on purpose; an explicit stop
@@ -3885,6 +4048,29 @@ function createBrowserSession ({
       restartWhenIdle(1)
       return syncState()
     })
+  }
+
+  // group.read with a page needs the dm keys (pageGroupOp); its own read
+  // queues at once.
+  handlers['group.read'] = afterDmUnlock(handlers['group.read'], (params) => params.page !== undefined)
+
+  // A one-shot run reads its page roots once, at its start (heldPageRoots),
+  // and restartForHeldRoots never restarts it for roots found later, so it
+  // waits for a pending store unlock: the held pages' groups are then in it.
+  // A continuous run starts at once and is restarted instead.
+  // A stop or a disconnect while it waits cancels it: the start was asked
+  // for before them, and running it afterwards would undo the stop.
+  const syncStartNow = handlers['sync.start']
+  handlers['sync.start'] = (params, ...rest) => {
+    if (dmUnlocking === null || !(params && params.once === true)) return syncStartNow(params, ...rest)
+    const epoch = connection
+    const stops = syncStops
+    return (async () => {
+      for (let p = dmUnlocking; p !== null; p = dmUnlocking) await p
+      if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
+      if (stops !== syncStops) throw rpcError('USAGE', 'sincronização interrompida')
+      return syncStartNow(params, ...rest)
+    })()
   }
 
   // ---- host controls ----
@@ -3968,16 +4154,33 @@ function createBrowserSession ({
     const copy = copyPair(pair)
     let mediaCopy = null
     let prfCopy = null
+    let dmPrf = null
     try {
-      if (prf !== undefined && prf !== null) prfCopy = copyKey(prf, 32)
+      if (prf !== undefined && prf !== null) {
+        prfCopy = copyKey(prf, 32)
+        dmPrf = copyKey(prf, 32)
+      }
       if (media !== undefined && media !== null) mediaCopy = copyPair(media)
     } catch (err) {
       zeroPair(copy)
       zeroPair(mediaCopy)
       if (prfCopy !== null) prfCopy.fill(0)
+      if (dmPrf !== null) dmPrf.fill(0)
       throw err
     }
     cancelGroups()
+    // The same key again (a new PRF read) keeps the requests issued for it.
+    retarget(b4a.toString(copy.publicKey, 'hex'))
+    const dm = supersedeDmUnlock()
+    // The DM store unlock, once started, owns dmPrf; until then it is
+    // dropped here (with the wait released) on any way out.
+    let started = false
+    const dropDm = () => {
+      if (started) return
+      started = true
+      if (dmPrf !== null) dmPrf.fill(0)
+      dm.release()
+    }
     return identityChange(() => serial(async () => {
       // A peek in flight belongs to the previous identity.
       peeker.abort()
@@ -3985,6 +4188,9 @@ function createBrowserSession ({
       noticer.abort()
       noticing = null
       zeroKeyPair()
+      // The lock above stops a previous unlock still under way; it settles
+      // before this one may start, so its own lock never meets this unlock.
+      await dm.previous
       keyPair = copy
       mediaKeyPair = mediaCopy
       groupPrf = prfCopy
@@ -4006,28 +4212,42 @@ function createBrowserSession ({
         } catch (err) {
           if (!(err instanceof UsageError)) reportInternal(err)
         }
-        // The dm box pair and the local store key (docs/rpc.md 5.73); the
-        // wallet is checked once after an unlock that has a dm-key.
-        try {
-          await dmEngine.unlock(prfCopy)
-          if ((await store.readDmKey(storage)) !== null) {
-            dmEngine.topUp(copy).catch(noop)
-            dmRefresh({}).catch(noop)
-          }
-        } catch (err) {
-          reportInternal(err)
-        }
       }
       followChanged()
       // A live continuous run reported its own length while locked and will
       // not report it again.
       if (run !== null && !run.once && !run.internal && Number.isSafeInteger(run.ownLength)) armUpkeep(run.ownLength)
-    })(), { abort: true }).catch((err) => {
+      if (dmPrf !== null) {
+        // The DM store reads and opens every local row: on the next turn,
+        // after this entry returns, while the DM requests wait for it.
+        started = true
+        const gen = dm.gen
+        setTimeout(() => { runDmUnlock(gen, dmPrf).finally(dm.release) }, 0)
+      }
+    })().finally(dropDm), { abort: true }).catch((err) => {
+      dropDm()
       zeroPair(copy)
       zeroPair(mediaCopy)
       if (prfCopy !== null) prfCopy.fill(0)
       throw err
     })
+  }
+
+  // Every identity change: a pending DM unlock becomes a no-op, and a new
+  // wait (the one DM requests now see) starts, released by the caller once
+  // its own unlock settles or it has none. -> { gen, previous, release }:
+  // previous settles with the superseded unlock (never rejects). A wait
+  // also covers the one before it, so no unlock ever overlaps an older one,
+  // even behind a change that failed before awaiting its previous.
+  function supersedeDmUnlock () {
+    const gen = ++dmUnlockGen
+    const previous = dmUnlocking === null ? Promise.resolve() : dmUnlocking
+    let release
+    const unlocking = Promise.all([new Promise((resolve) => { release = resolve }), previous]).then(() => {
+      if (dmUnlocking === unlocking) dmUnlocking = null
+    })
+    dmUnlocking = unlocking
+    return { gen, previous, release }
   }
 
   function isIntIn (value, min, max) {
@@ -4194,10 +4414,15 @@ function createBrowserSession ({
     return (async () => {
       try {
         if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
-        const own = await serial(() => requireDm())({})
-        const pair = keyPair
-        if (pair === null) throw new UsageError(store.LOCKED)
-        return await dmEngine.putMedia(own, pair, voice ? { bytes: copy, mime, width: 0, height: 0, ms, ...dest } : { bytes: copy, mime, width, height, ...dest })
+        const ident = identityTarget
+        const own = await dmIdentity({}, ident)
+        // The pair is read in the tick the engine call starts: an identity
+        // change zero-fills the one it replaces.
+        return await withDmReady(ident, () => {
+          const pair = keyPair
+          if (pair === null) throw new UsageError(store.LOCKED)
+          return dmEngine.putMedia(own, pair, voice ? { bytes: copy, mime, width: 0, height: 0, ms, ...dest } : { bytes: copy, mime, width, height, ...dest })
+        })
       } catch (err) {
         copy.fill(0)
         throw toRpcError(err, reportInternal)
@@ -4221,10 +4446,13 @@ function createBrowserSession ({
     return (async () => {
       try {
         if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
-        const own = await serial(() => requireDm())({})
-        const pair = keyPair
-        if (pair === null) throw new UsageError(store.LOCKED)
-        return await dmEngine.putPublicMedia(own, pair, { bytes: copy, mime, width, height })
+        const ident = identityTarget
+        const own = await dmIdentity({}, ident)
+        return await withDmReady(ident, () => {
+          const pair = keyPair
+          if (pair === null) throw new UsageError(store.LOCKED)
+          return dmEngine.putPublicMedia(own, pair, { bytes: copy, mime, width, height })
+        })
       } catch (err) {
         copy.fill(0)
         throw toRpcError(err, reportInternal)
@@ -4258,8 +4486,9 @@ function createBrowserSession ({
     return (async () => {
       try {
         if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
-        const own = await serial(() => requireDm())({})
-        return await dmEngine.readMedia(own, { from, id, index })
+        const ident = identityTarget
+        const own = await dmIdentity({}, ident)
+        return await withDmReady(ident, () => dmEngine.readMedia(own, { from, id, index }))
       } catch (err) {
         if (err instanceof TypeError) throw err
         throw toRpcError(err, reportInternal)
@@ -4369,8 +4598,13 @@ function createBrowserSession ({
   function clearKeyPair () {
     if (closing !== null) return closing.then(noop)
     cancelGroups()
+    retarget(null)
+    const dm = supersedeDmUnlock()
     return identityChange(() => serial(async () => {
       zeroKeyPair()
+      // A pending DM unlock was stopped by the lock above; it settles before
+      // the cache goes and before any later unlock starts.
+      await dm.previous
       // The identity is locked already; a storage failure while wiping the
       // media cache must not turn the lock into an error (the next unlock
       // under another key wipes it again).
@@ -4379,7 +4613,7 @@ function createBrowserSession ({
       } catch {
         warning('aviso: cache de mídia não apagado')
       }
-    })())
+    })().finally(dm.release))
   }
 
   // The follows kept from before `follow` records existed (member-ops
@@ -4428,7 +4662,8 @@ function createBrowserSession ({
   // the pending follow changes and the per-device migration
   // marker, and locks both keys; 'config' and 'follows' stay. A sync in
   // progress is stopped and not restarted.
-  const resetChain = serial(async () => {
+  // previous: the DM unlock this reset superseded (supersedeDmUnlock).
+  const resetChain = serial(async ({ previous }) => {
     peeker.abort()
     peeking = null
     noticer.abort()
@@ -4454,7 +4689,9 @@ function createBrowserSession ({
     await store.clearFollowsMigrated(storage)
     await store.writeMemberBlocks(storage, [])
     zeroKeyPair()
-    // A pull, send or top-up still unwinding must not see its store go.
+    // A superseded DM unlock (stopped by the lock above) settles before its
+    // store goes, as a pull, send or top-up still unwinding.
+    await previous
     await dmEngine.idle()
     await store.deleteDmData(storage)
     await dmEngine.wipeMedia()
@@ -4530,6 +4767,9 @@ function createBrowserSession ({
       zeroKeyPair()
       boxKeys.close()
       pageGroupKeys.close()
+      // A pending DM unlock (a no-op once closed) settles before the engine
+      // closes.
+      await dmReady()
       await dmEngine.close()
     })()
     return closing
@@ -4554,7 +4794,9 @@ function createBrowserSession ({
     identityStatus: () => identityStatus({}),
     reset: () => {
       cancelGroups()
-      return identityChange(() => resetChain({}), { abort: true })
+      retarget(null)
+      const dm = supersedeDmUnlock()
+      return identityChange(() => resetChain({ previous: dm.previous }).finally(dm.release), { abort: true })
     },
     // 'open' | 'closed'
     get state () {
