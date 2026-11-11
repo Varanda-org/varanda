@@ -1,3 +1,4 @@
+/* global __DEV__, requestAnimationFrame */
 // The one list A Rua, Diário and Seguindo use: a FlatList with
 // pull-to-refresh, infinite scroll, scroll-to-top on a signal and an optional
 // "new items" pill. Native refreshes through RefreshControl; on the web
@@ -32,7 +33,11 @@
 // - a refresh awaits the node's syncNow before onRefresh, once per gesture;
 //   never a page reload
 //   (the browser's own pull-to-refresh is stopped by the CSS in
-//   public/index.html, not by preventDefault, which passive listeners ignore).
+//   public/index.html, not by preventDefault, which passive listeners ignore);
+// - onViewableItemsChanged is forwarded only when the caller passes one, with
+//   one constant viewabilityConfig. Both stay the same object for the life of
+//   the list: FlatList throws if either identity changes. A screen that does
+//   not pass the callback keeps the list it had.
 // Empty and short lists stay pullable: the gesture is on the wrapper, not on
 // the content height.
 
@@ -40,7 +45,8 @@ import { createElement, isValidElement, useCallback, useEffect, useRef, useState
 import { Animated, FlatList, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
 import { EMPTY_WHEEL, MIN_SPIN_MS, PULL_THRESHOLD, WHEEL_DECAY_MS, pullDecision, pullState, spinRemaining, wheelPullState } from '../pull'
 import { endStep, nearListEnd, spanEnd } from '../paging'
-import { useNode } from '../node'
+import { perfMarks, useNode } from '../node'
+import { createFrameStats, frameLine, monotonicNow, perfEnabled } from '../perfMarks'
 import { Spinner } from './index'
 import { Icon } from './Icon'
 import { NewItemsPill } from './States'
@@ -59,6 +65,11 @@ const LAYOUT_SETTLE_MS = 100
 const UNSTARTED_MS = 1500
 // WheelEvent.deltaMode: lines and pages are turned into pixels.
 const LINE_PX = 16
+// Dev-only frame sampler (EXPO_PUBLIC_VARANDA_PERF=1): a scroll is over this
+// long after its last event.
+const FRAMES_IDLE_MS = 1000
+const FRAME_TAIL_MS = 17
+const FRAMES_PERF = perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: process.env.EXPO_PUBLIC_VARANDA_PERF }, typeof __DEV__ !== 'undefined' && __DEV__)
 
 // A touch that starts in a text field or inside a text selection is not a pull.
 function ignoredTarget (target) {
@@ -91,6 +102,13 @@ const KEEP_VISIBLE = Object.freeze({ minIndexForVisible: 0, autoscrollToTopThres
 const FIRST_ROWS = 8
 const ROWS_PER_BATCH = 8
 const WINDOW_SCREENS = 7
+// A row counts once a tenth of it is on screen, with no delay: waiting would
+// let off-screen peeks start before the list has said what is in view.
+// FlatList rejects a viewabilityConfig whose identity changes.
+const VIEWABILITY_CONFIG = Object.freeze({
+  itemVisiblePercentThreshold: 10,
+  minimumViewTime: 0
+})
 
 export function RefreshableList ({
   data,
@@ -114,7 +132,8 @@ export function RefreshableList ({
   keepVisiblePosition = false,
   onScrollFrame,
   onContentSizeChange,
-  onUserScroll
+  onUserScroll,
+  onViewableItemsChanged
 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -429,8 +448,36 @@ export function RefreshableList ({
   // A ref, so a new callback each render does not rebuild onScroll.
   const scrollFrame = useRef(onScrollFrame)
   scrollFrame.current = onScrollFrame
+  // Created only with the marks on, so a normal build has no sampler, timer
+  // or raf loop here.
+  const frames = useRef(null)
+  const framesTimer = useRef(null)
+  const framesLastEvent = useRef(0)
+  const sampleFrames = useCallback(() => {
+    if (!FRAMES_PERF) return
+    if (frames.current === null) frames.current = createFrameStats({ raf: (fn) => requestAnimationFrame(fn), now: monotonicNow })
+    frames.current.start()
+    framesLastEvent.current = monotonicNow()
+    if (framesTimer.current) clearTimeout(framesTimer.current)
+    framesTimer.current = setTimeout(() => {
+      framesTimer.current = null
+      // Frames past the last scroll event (plus one at 60 Hz) are idle.
+      const s = frames.current.stop(framesLastEvent.current + FRAME_TAIL_MS)
+      if (s === null || s.count === 0) return
+      perfMarks().mark('frames', frameLine(s))
+      // Printed at once too: a long scroll session would push it out of the
+      // marks ring before the next report (dev perf builds only).
+      console.log('perf: frames ' + frameLine(s))
+    }, FRAMES_IDLE_MS)
+  }, [])
+  useEffect(() => () => {
+    if (framesTimer.current) clearTimeout(framesTimer.current)
+    framesTimer.current = null
+    if (frames.current !== null) frames.current.stop()
+  }, [])
   const onScroll = useCallback((e) => {
     const ne = e.nativeEvent
+    if (FRAMES_PERF) sampleFrames()
     if (typeof scrollFrame.current === 'function') {
       scrollFrame.current({ y: ne.contentOffset.y, contentHeight: ne.contentSize.height, layoutHeight: ne.layoutMeasurement.height })
     }
@@ -444,7 +491,7 @@ export function RefreshableList ({
       dry.current = 0
       setPaused(false)
     }
-  }, [check, paused])
+  }, [check, paused, sampleFrames])
   const contentSizeChange = useRef(onContentSizeChange)
   contentSizeChange.current = onContentSizeChange
   // Short lists never scroll: their end reach comes from laying them out.
@@ -459,6 +506,17 @@ export function RefreshableList ({
     metrics.current = { ...metrics.current, layout: e.nativeEvent.layout.height }
     check()
   }, [check])
+
+  // FlatList throws if onViewableItemsChanged changes identity. One function
+  // reads the latest caller. Turning tracking on later would change the prop
+  // from undefined, so the choice is the first render's.
+  const onViewableRef = useRef(onViewableItemsChanged)
+  onViewableRef.current = onViewableItemsChanged
+  const onViewable = useRef((info) => {
+    const fn = onViewableRef.current
+    if (typeof fn === 'function') fn(info)
+  }).current
+  const trackViewable = useRef(typeof onViewableItemsChanged === 'function').current
 
   // The indicator is never left visible without an active pull or a running
   // refresh: every path that abandons a tracked gesture (a second finger, a
@@ -607,6 +665,8 @@ export function RefreshableList ({
         scrollEventThrottle={16}
         dataSet={{ pull: 'y' }}
         maintainVisibleContentPosition={keepVisiblePosition ? KEEP_VISIBLE : undefined}
+        onViewableItemsChanged={trackViewable ? onViewable : undefined}
+        viewabilityConfig={trackViewable ? VIEWABILITY_CONFIG : undefined}
         refreshControl={web
           ? undefined
           : <RefreshControl refreshing={!!refreshing || spinning} onRefresh={runRefresh} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}

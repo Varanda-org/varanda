@@ -27,7 +27,7 @@ import { pagesOn } from '../pageGate'
 import { memberKeyOf, useActing } from './Conversa'
 import { CAT_LABELS, UNIT_LABELS } from '../feira'
 import {
-  ACK_TEXT, UNKNOWN_PUBLICATION, destinationOf, emptyForm, holdsPublication, identityOf, kindChoices, photoRoom,
+  ACK_TEXT, MAX_PHOTOS, UNKNOWN_PUBLICATION, destinationOf, emptyForm, holdsPublication, identityOf, kindChoices, photoRoom,
   photosFor, priceFieldLabel, priceModeChoices, retryUsable, submitListing, unitChoices, updateForm
 } from '../feiraCompose'
 import { validDescriptor } from '../media/fetch'
@@ -117,7 +117,7 @@ export default function Anunciar ({ initialPlace = null, onBack, onPublished }) 
     if (!canAttach || locked || encoding) return
     let files
     try {
-      files = await pickImages()
+      files = await pickImages(MAX_PHOTOS)
     } catch {
       return
     }
@@ -142,7 +142,7 @@ export default function Anunciar ({ initialPlace = null, onBack, onPublished }) 
           thumb = urlFromBytes(encoded.bytes, encoded.mime)
           thumbsRef.current.set(id, thumb)
         } catch {}
-        setPhotos((list) => (list.length >= 4 ? list : [...list, { id, encoded, thumb, descriptor: null, identity: null, retry: null }]))
+        setPhotos((list) => (list.length >= MAX_PHOTOS ? list : [...list, { id, encoded, thumb, descriptor: null, identity: null, retry: null }]))
       }
     } finally {
       setEncoding(false)
@@ -296,7 +296,7 @@ export default function Anunciar ({ initialPlace = null, onBack, onPublished }) 
               {!locked ? <View style={styles.photoX}><Icon name='fechar' size={14} color={colors.ink} /></View> : null}
             </Pressable>
           ))}
-          {photos.length < 4 && canAttach
+          {photos.length < MAX_PHOTOS && canAttach
             ? (
               <Pressable accessibilityRole='button' accessibilityLabel='Adicionar foto' disabled={locked || encoding} onPress={attach} style={[styles.photo, styles.photoAdd]}>
                 <Icon name='imagem' size={22} color={colors.soft} />

@@ -4,6 +4,7 @@
 'use strict'
 
 const test = require('brittle')
+const { PEEK_SEQS_MAX: RPC_PEEK_SEQS_MAX } = require('@varanda/rpc')
 
 const load = () => import('../src/feiraClient.js')
 const A = 'ab'.repeat(32)
@@ -134,8 +135,9 @@ test('the core node refusal to read on demand reaches the caller', async (t) => 
   }
 })
 
-test('planPeeks: at most 32 strictly ascending seqs per call, an item never split', async (t) => {
+test('planPeeks: at most the rpc maximum strictly ascending seqs per call, an item never split', async (t) => {
   const { planPeeks, PEEK_SEQS_MAX } = await load()
+  t.is(PEEK_SEQS_MAX, RPC_PEEK_SEQS_MAX, 'the same cap diary.peek enforces')
   const items = Array.from({ length: 30 }, (_, i) => ({ author: A, seq: 10 + i * 3, editSeq: 11 + i * 3, statusSeq: 12 + i * 3 }))
   items.push({ author: B, seq: 4, editSeq: null, statusSeq: null })
   const plan = planPeeks(items, { [A]: hint })

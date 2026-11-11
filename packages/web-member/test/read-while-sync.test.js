@@ -332,8 +332,8 @@ test('borrowed reads of a followed diary the run holds never ask the storage whe
   const F0 = await web.request('feed.read', {})
   const P0 = await web.request('profile.read', { authors: [own, F] })
   const { runId } = await web.request('sync.start', {})
-  // The run published its cores once a borrowed read went through.
-  await web.request('profile.read', { authors: [own] })
+  // The run opened its follows once a borrowed feed read went through.
+  await web.request('feed.read', {})
   const hasCore = storage.hasCore
   const asked = []
   storage.hasCore = function (name) {

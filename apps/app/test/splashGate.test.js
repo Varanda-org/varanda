@@ -10,21 +10,28 @@ test('splash gate: minimum duration only holds boot phases', async (t) => {
   const { holdSplash, HOLD_PHASES, SPLASH_MIN_MS, CONNECT_PATIENCE_MS } = await load()
   t.is(SPLASH_MIN_MS, 1500)
   t.is(CONNECT_PATIENCE_MS, 10000)
-  t.alike(HOLD_PHASES, ['loading', 'connecting', 'ready'])
-  for (const phase of ['loading', 'connecting', 'ready']) {
+  t.alike(HOLD_PHASES, ['loading', 'connecting'])
+  for (const phase of ['loading', 'connecting']) {
     t.is(holdSplash({ phase, elapsedMs: 0 }), true, phase + ' starts held')
     t.is(holdSplash({ phase, elapsedMs: 1499 }), true, phase + ' stays held before minimum')
     t.is(holdSplash({ phase, elapsedMs: 1500 }), false, phase + ' ends hold at minimum')
     t.is(holdSplash({ phase, elapsedMs: 0, released: true }), false, phase + ' stays released')
   }
-  for (const phase of ['config', 'config-error', 'error', 'x']) {
+  for (const phase of ['ready', 'config', 'config-error', 'error', 'x']) {
     t.is(holdSplash({ phase, elapsedMs: 0 }), false, phase + ' is never held')
   }
 })
 
+test('splash gate: a returning member skips the minimum once ready', async (t) => {
+  const { holdSplash } = await load()
+  t.is(holdSplash({ phase: 'ready', elapsedMs: 100, gateNext: false }), false)
+  t.is(holdSplash({ phase: 'ready', elapsedMs: 100, gateNext: true }), true)
+  t.is(holdSplash({ phase: 'connecting', elapsedMs: 100, gateNext: false }), true)
+})
+
 test('splash gate: gateNext holds any phase until the minimum', async (t) => {
   const { holdSplash } = await load()
-  for (const phase of ['config', 'config-error', 'error', 'x']) {
+  for (const phase of ['ready', 'config', 'config-error', 'error', 'x']) {
     t.is(holdSplash({ phase, elapsedMs: 0, gateNext: true }), true, phase + ' held at 0')
     t.is(holdSplash({ phase, elapsedMs: 1499, gateNext: true }), true, phase + ' held at 1499')
     t.is(holdSplash({ phase, elapsedMs: 1500, gateNext: true }), false, phase + ' ends hold at minimum')
@@ -56,7 +63,8 @@ test('splash gate: connection coverage ends at configurable patience', async (t)
 test('splash gate: non-finite elapsed time counts as zero', async (t) => {
   const { holdSplash, coverConnecting } = await load()
   for (const elapsedMs of [NaN, undefined, null, Infinity]) {
-    t.is(holdSplash({ phase: 'ready', elapsedMs }), true)
+    t.is(holdSplash({ phase: 'connecting', elapsedMs }), true)
+    t.is(holdSplash({ phase: 'ready', elapsedMs }), false)
     t.is(coverConnecting({ phase: 'connecting', canConfigure: true, elapsedMs }), true)
   }
 })
@@ -64,7 +72,8 @@ test('splash gate: non-finite elapsed time counts as zero', async (t) => {
 test('splash gate: only literal true releases the splash', async (t) => {
   const { holdSplash, coverConnecting } = await load()
   for (const released of [false, undefined, null, 1]) {
-    t.is(holdSplash({ phase: 'ready', elapsedMs: 0, released }), true)
+    t.is(holdSplash({ phase: 'connecting', elapsedMs: 0, released }), true)
+    t.is(holdSplash({ phase: 'ready', elapsedMs: 0, released, gateNext: true }), true)
     t.is(coverConnecting({ phase: 'connecting', canConfigure: true, elapsedMs: 0, released }), true)
   }
 })
@@ -76,13 +85,15 @@ test('splash gate: pure helper and app integration guards', (t) => {
   t.absent(source.includes('node:'))
   const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
   t.ok(app.includes('holdSplash('))
+  t.ok(app.includes("holdSplash({ phase: ready || seen ? 'ready' : node.phase"))
+  t.ok(app.includes('detailsGraceOver('))
   t.ok(app.includes('coverConnecting('))
   t.absent(app.includes("node.phase === 'connecting' && !node.canConfigure"))
   t.ok(app.includes('coverBoot('))
   t.ok(app.includes('holdBootCover('))
   t.ok(app.includes('settled: bootSettled.current, step })'))
   t.absent(app.includes('bootSettled.current || released.current'))
-  t.ok(app.includes('{coveringBoot ? splash : null}'))
+  t.ok(app.includes('{coveringBoot ? bootCover : null}'))
   t.ok(app.includes('<View style={coveringBoot ? styles.hidden : styles.flex}>{content}</View>'))
   t.ok(app.includes('if (!coveringBoot) bootSettled.current = true'))
   t.absent(app.includes('return splash'))
@@ -148,6 +159,23 @@ test('splash gate: pronto stays covered until A Rua is ready, at most CONTENT_PA
   t.is(holdBootCover({ cover: true, step: 'pronto', elapsedMs: 0, settled: true }), false, 'never after the first reveal')
 })
 
+test('splash gate: details grace starts only after the first page', async (t) => {
+  const { detailsGraceOver, DETAILS_GRACE_MS } = await load()
+  t.is(DETAILS_GRACE_MS, 400)
+  t.is(detailsGraceOver({ page: true, pageAtMs: 1000, nowMs: 1399 }), false)
+  t.is(detailsGraceOver({ page: true, pageAtMs: 1000, nowMs: 1400 }), true)
+  t.is(detailsGraceOver({ page: true, pageAtMs: 1000, nowMs: 1500 }), true)
+  t.is(detailsGraceOver({ page: true, pageAtMs: 1000, nowMs: 999 }), false)
+  t.is(detailsGraceOver({ page: true, pageAtMs: 0, nowMs: 400 }), true)
+  for (const page of [false, undefined, null, 1]) {
+    t.is(detailsGraceOver({ page, pageAtMs: 1000, nowMs: 1400 }), false)
+  }
+  for (const time of [NaN, Infinity, -Infinity, undefined, null, '1000']) {
+    t.is(detailsGraceOver({ page: true, pageAtMs: time, nowMs: 1400 }), false)
+    t.is(detailsGraceOver({ page: true, pageAtMs: 1000, nowMs: time }), false)
+  }
+})
+
 test('splash gate: first rows are ready once their names and counts answered', async (t) => {
   const { feedDetailsReady, FEED_FIRST_ROWS } = await load()
   t.is(FEED_FIRST_ROWS, 6)
@@ -210,4 +238,34 @@ test('splash gate: boot patience yields the real screen when a read hangs', asyn
   const held = { cover: true, step: 'idade', elapsedMs: 0 }
   t.is(holdBootCover({ ...held, released: true }), holdBootCover(held))
   t.is(holdBootCover({ ...held, released: true }), true)
+})
+
+test('splash gate: the cold-start preview only for a live, fresh, gate-free boot', async (t) => {
+  const { previewAllowed, PREVIEW_MAX_AGE_MS, PREVIEW_BLOCKED_STEPS } = await load()
+  t.is(PREVIEW_MAX_AGE_MS, 24 * 60 * 60 * 1000)
+  const now = 1_800_000_000_000
+  const snapshot = { items: [{ kind: 'post' }], savedAt: now - 1000 }
+  const ok = { snapshot, previewCapable: true, gateNext: false, showConexao: false, step: null, locked: false, sessionLive: true, nowMs: now }
+  t.is(previewAllowed(ok), true, 'boot, step unknown')
+  t.is(previewAllowed({ ...ok, step: 'carregando' }), true)
+  t.is(previewAllowed({ ...ok, step: 'pronto' }), true)
+  t.is(previewAllowed({ ...ok, previewCapable: false }), false, 'web')
+  t.is(previewAllowed({ ...ok, previewCapable: undefined }), false)
+  t.is(previewAllowed({ ...ok, snapshot: null }), false)
+  t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, items: [] } }), false, 'no rows')
+  t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, savedAt: now - PREVIEW_MAX_AGE_MS } }), true, 'exactly 24 h')
+  t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, savedAt: now - PREVIEW_MAX_AGE_MS - 1 } }), false, 'stale')
+  t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, savedAt: now + 1 } }), false, 'future savedAt')
+  t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, savedAt: 'x' } }), false)
+  t.is(previewAllowed({ ...ok, nowMs: NaN }), false)
+  t.is(previewAllowed({ ...ok, sessionLive: false }), false, 'no live session')
+  t.is(previewAllowed({ ...ok, sessionLive: undefined }), false)
+  t.is(previewAllowed({ ...ok, gateNext: true }), false, 'intro or terms next')
+  t.is(previewAllowed({ ...ok, gateNext: undefined }), false)
+  t.is(previewAllowed({ ...ok, showConexao: true }), false, 'Conexão')
+  t.is(previewAllowed({ ...ok, locked: true }), false, 'locked')
+  t.alike(PREVIEW_BLOCKED_STEPS, ['entrar', 'recuperando', 'idade', 'vinculo', 'identidade', 'certificado', 'perfil'])
+  for (const step of PREVIEW_BLOCKED_STEPS) t.is(previewAllowed({ ...ok, step }), false, step)
+  t.is(previewAllowed({ ...ok, step: 'outro' }), false, 'an unknown step name')
+  t.is(previewAllowed(), false)
 })

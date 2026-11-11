@@ -21,6 +21,8 @@ const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachNotices, PROTOCOL } = require('@varanda/core/lib/notices-net')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { createBrowserNode } = require('../lib/node')
+const { createNoticer } = require('../lib/notices')
+const { signNoticeProof } = require('@varanda/core/lib/notices')
 const { createMember } = require('../lib/member')
 const { connectSeeder } = require('../lib/seeder-link')
 const { memoryNodeStorage } = require('../lib/node-storage')
@@ -906,4 +908,239 @@ test('a v2 page carrying kind like is never delivered', async (t) => {
   t.alike(r, { notices: [], next: null, incomplete: true, supported: true, activity: true })
   t.is(seeder.pagesV2.length, 1, 'asked, never answered')
   t.alike(internal, [])
+})
+
+// ---- the row window (several evidence blocks of one row in flight) ----
+
+// A trace hook for limits.trace: the events in order, and per author the
+// most gets started and not yet settled at once.
+function tracer () {
+  const events = []
+  const open = new Map()
+  const max = new Map()
+  return {
+    events,
+    max,
+    trace (ev) {
+      events.push(ev)
+      if (ev.type === 'get') {
+        const n = (open.get(ev.key) || 0) + 1
+        open.set(ev.key, n)
+        max.set(ev.key, Math.max(max.get(ev.key) || 0, n))
+      } else if (ev.type === 'settle') {
+        open.set(ev.key, open.get(ev.key) - 1)
+      }
+    }
+  }
+}
+
+// cert, follow of `me` at seq 1, then `posts` posts.
+function follower (assoc, me, at, posts) {
+  const records = [certOf(assoc), () => followRecord({ key: me, on: true, at })]
+  for (let i = 0; i < posts; i++) records.push(() => postRecord({ text: 'p' + i, at: iso(Date.parse(at) - 1000 + i) }))
+  return records
+}
+
+test('row window: up to 4 evidence gets of one row in flight, block 0 and seq alone first (1 with windowInflight 1)', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const state = { cores: [], page: () => ({ items: [], next: null, incomplete: false }) }
+  const seeder = await noticesSeeder(t, { signer: assoc.kp, state })
+  for (const [inflight, expected] of [[4, 4], [1, 1]]) {
+    const tr = tracer()
+    const { web, key: me, internal } = await webNode(t, assoc, seeder.url, { notices: { windowInflight: inflight, trace: tr.trace } })
+    const at = iso(now - HOUR)
+    const F = await diary(t, follower(assoc, me, at, 14))
+    t.is(F.length, 16)
+    state.cores = [F]
+    state.page = (target) => target === me ? { items: [{ key: hex(F.key), seq: 1, at }], next: null, incomplete: false } : { items: [], next: null, incomplete: false }
+    const r = await web.request('notices.list', {})
+    t.alike(keysOf(r), [hex(F.key)])
+    t.is(r.incomplete, false)
+    const key = hex(F.key)
+    t.is(tr.max.get(key), expected, 'at most ' + expected + ' in flight, and that many reached')
+    const gets = tr.events.filter((e) => e.type === 'get' && e.key === key).map((e) => e.seq)
+    t.alike(gets.slice(0, 2), [0, 1], 'block 0, then seq')
+    t.is(gets.length, 11, 'block 0, seq, the head block 2 and the tail 15..8')
+    const settledOf = (seq) => tr.events.findIndex((e) => e.type === 'settle' && e.key === key && e.seq === seq)
+    const firstGetOf = (pred) => tr.events.findIndex((e) => e.type === 'get' && e.key === key && pred(e.seq))
+    t.ok(firstGetOf((s) => s !== 0) > settledOf(0), 'no other block before block 0 arrived')
+    t.ok(firstGetOf((s) => s > 1) > settledOf(1), 'no window block before seq arrived')
+    t.alike(internal, [])
+  }
+})
+
+test('row window: rows and incomplete identical with windowInflight 1 and 4 (tombstone, absent head block, later unlike)', async (t) => {
+  t.timeout(120000)
+  const assoc = association()
+  const now = Date.now()
+  const state = { cores: [], page: empty, pageV2: empty, pageV3: empty }
+  const seeder = await kindedSeeder(t, { signer: assoc.kp, state })
+  const keyPair = crypto.keyPair()
+  const copy = () => ({ publicKey: b4a.from(keyPair.publicKey), secretKey: b4a.from(keyPair.secretKey) })
+  const tr = { 1: tracer(), 4: tracer() }
+  const nodes = {}
+  for (const inflight of [1, 4]) {
+    nodes[inflight] = await webNode(t, assoc, seeder.url, { keyPair: copy(), certify: true, notices: { windowInflight: inflight, blockTimeoutMs: 1000, trace: tr[inflight].trace } })
+  }
+  const me = nodes[1].key
+  t.is(nodes[4].key, me, 'one identity')
+  const p1 = await nodes[1].web.request('post.create', { text: 'primeiro' })
+  const p4 = await nodes[4].web.request('post.create', { text: 'primeiro' })
+  t.is(p4.seq, p1.seq)
+  const to = { author: me, seq: p1.seq }
+  const at = (h) => iso(now - h * HOUR)
+
+  // A tombstone in the tail above its target, which the seeder cleared.
+  const tf = followRecord({ key: me, on: true, at: at(1) })
+  const T = await diary(t, [
+    certOf(assoc),
+    () => profileRecord({ name: 'Tomo', bio: '' }),
+    () => tf,
+    () => postRecord({ text: 'a', at: at(30) }),
+    () => postRecord({ text: 'b', at: at(29) }),
+    () => deleteRecord({ seq: 4 }),
+    () => postRecord({ text: 'c', at: at(28) })
+  ])
+  await T.clear(4)
+  // An absent head block: the tombstone of the profile, cleared.
+  const af = followRecord({ key: me, on: true, at: at(2) })
+  const A = await diary(t, [certOf(assoc), () => profileRecord({ name: 'Antigo', bio: '' }), () => deleteRecord({ seq: 1 }), () => af])
+  await A.clear(2)
+  // A like undone later in the tail.
+  const ul = likeRecord({ to, on: true, at: at(4) })
+  const U = await diary(t, [certOf(assoc), () => ul, () => postRecord({ text: 'x', at: at(3.5) }), () => likeRecord({ to, on: false, at: at(3) })])
+  // A like that stands.
+  const ll = likeRecord({ to, on: true, at: at(5) })
+  const Li = await diary(t, [certOf(assoc), () => profileRecord({ name: 'Lia', bio: '' }), () => ll, () => postRecord({ text: 'y', at: at(4.5) })])
+  state.cores = [T, A, U, Li]
+  state.pageV3 = kindedPages(me, [
+    { key: hex(T.key), seq: 2, at: tf.at, kind: 'follow' },
+    { key: hex(A.key), seq: 3, at: af.at, kind: 'follow' },
+    { key: hex(U.key), seq: 1, at: ul.at, kind: 'like' },
+    { key: hex(Li.key), seq: 2, at: ll.at, kind: 'like' }
+  ])
+
+  const results = {}
+  for (const inflight of [1, 4]) {
+    const r = await nodes[inflight].web.request('notices.list', {})
+    results[inflight] = withoutSeen(t, r)
+    t.alike(nodes[inflight].internal, [])
+  }
+  t.alike(results[4], results[1], 'the same rows, next and incomplete')
+  t.alike(results[1].notices.map((n) => [n.key, n.kind, n.name]), [
+    [hex(T.key), 'follow', 'Tomo'],
+    [hex(A.key), 'follow', null],
+    [hex(Li.key), 'like', 'Lia']
+  ], 'the unlike drops its row; the deleted profile never names one')
+  t.is(results[1].incomplete, true, 'the absent head block leaves the read incomplete')
+  const tKey = hex(T.key)
+  const asked = (n) => tr[n].events.filter((e) => e.type === 'get' && e.key === tKey).map((e) => e.seq)
+  t.absent(asked(1).includes(4), 'serially the deleted block is never asked for')
+  t.ok(asked(4).includes(4), 'with 4 in flight it was already asked for')
+  t.absent(tr[4].events.some((e) => e.type === 'accept' && e.key === tKey && e.seq === 4), 'and never used')
+  t.ok(tr[4].events.some((e) => e.type === 'settle' && e.key === tKey && e.seq === 4 && e.bytes === null), 'its get was cancelled')
+})
+
+test('row window: after the budget cut no get starts', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const state = { cores: [], page: () => ({ items: [], next: null, incomplete: false }) }
+  const seeder = await noticesSeeder(t, { signer: assoc.kp, state })
+  const budgetBytes = 8000
+  const tr = tracer()
+  const { web, key: me, internal } = await webNode(t, assoc, seeder.url, { notices: { budgetBytes, trace: tr.trace } })
+  const items = []
+  for (let i = 0; i < 12; i++) {
+    const at = iso(now - (i + 1) * 1000)
+    const F = await diary(t, follower(assoc, me, at, 6))
+    state.cores.push(F)
+    items.push({ key: hex(F.key), seq: 1, at })
+  }
+  state.page = (target) => target === me ? { items, next: null, incomplete: false } : { items: [], next: null, incomplete: false }
+  const r = await web.request('notices.list', {})
+  t.is(r.incomplete, true, 'the budget cut the read')
+  const cutAt = tr.events.findIndex((e) => e.type === 'charge' && e.budget >= budgetBytes)
+  t.ok(cutAt >= 0, 'the budget was reached')
+  t.absent(tr.events.slice(cutAt + 1).some((e) => e.type === 'get'), 'no get after the cut')
+  t.alike(internal, [])
+})
+
+test('regression: an abort cancels every row window get in flight at once, none waits for its block timeout', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const member = crypto.keyPair()
+  const me = hex(member.publicKey)
+  const at = iso(Date.now() - HOUR)
+  const F = await diary(t, follower(assoc, me, at, 10))
+  t.is(F.length, 12)
+  // The seeder serves block 0, the follow and the head, never the tail.
+  for (let seq = 3; seq < F.length; seq++) await F.clear(seq)
+  const state = { cores: [F], page: (target) => target === me ? { items: [{ key: hex(F.key), seq: 1, at }], next: null, incomplete: false } : { items: [], next: null, incomplete: false } }
+  const seeder = await noticesSeeder(t, { signer: assoc.kp, state })
+  const blockTimeoutMs = 8000
+  const tr = tracer()
+  const noticer = createNoticer({
+    storage: memoryNodeStorage(),
+    association: assoc.hex,
+    seederUrl: seeder.url,
+    createSocket: (u) => {
+      const ws = new WebSocket(u)
+      ws.on('error', noop)
+      return ws
+    },
+    ownKey: async () => me,
+    sign: (payload) => signNoticeProof(payload, member),
+    seenToken: () => '0'.repeat(32),
+    limits: { blockTimeoutMs, windowInflight: 4, trace: tr.trace }
+  })
+  t.teardown(() => noticer.close(), { force: true })
+  const key = hex(F.key)
+  const outstanding = () => {
+    const open = new Set()
+    for (const e of tr.events) {
+      if (e.key !== key || e.seq <= 1) continue
+      if (e.type === 'get') open.add(e.seq)
+      else if (e.type === 'settle') open.delete(e.seq)
+    }
+    return open
+  }
+  const reading = noticer.read({ limit: 5 }).then(() => null, (err) => err)
+  await until(() => outstanding().size === 4, { timeoutMs: 15000, name: '4 window gets in flight' })
+  const abortedAt = Date.now()
+  noticer.abort()
+  await until(() => outstanding().size === 0, { timeoutMs: blockTimeoutMs * 2, name: 'every get settled' })
+  const settledIn = Date.now() - abortedAt
+  t.ok(settledIn < blockTimeoutMs / 4, 'every pending get settled promptly (' + settledIn + ' ms)')
+  t.ok(tr.events.some((e) => e.type === 'closed' && e.key === key && e.cancelled >= 1), 'the row closed its gets\' sessions before its core')
+  const err = await reading
+  t.is(err && err.message, NO_SEEDER, 'the aborted read ended')
+})
+
+test('slow-read line: one local line with the phase times when a read is slow, none when fast', async (t) => {
+  t.timeout(60000)
+  const assoc = association()
+  const now = Date.now()
+  const state = { cores: [], page: () => ({ items: [], next: null, incomplete: false }) }
+  const seeder = await noticesSeeder(t, { signer: assoc.kp, state })
+  let fake = 0
+  const slow = await webNode(t, assoc, seeder.url, { notices: { now: () => (fake += 400) } })
+  const at = iso(now - HOUR)
+  const F = await diary(t, follower(assoc, slow.key, at, 2))
+  state.cores = [F]
+  state.page = () => ({ items: [{ key: hex(F.key), seq: 1, at }], next: null, incomplete: false })
+  const r = await slow.web.request('notices.list', {})
+  t.alike(keysOf(r), [hex(F.key)])
+  const lines = warningsOf(slow.web).filter((l) => l.startsWith('avisos:'))
+  t.is(lines.length, 1, 'one line for the read')
+  t.ok(/^avisos: conexão \d+ ms, suporte e prova \d+ ms, linhas \d+ ms, total \d+ ms$/.test(lines[0]), lines[0])
+  t.absent(/[0-9a-f]{64}/.test(lines[0]), 'no key in the line')
+  t.absent(lines[0].includes('\u2014'), 'no em dash')
+  t.alike(slow.internal, [])
+
+  const fast = await webNode(t, assoc, seeder.url, { notices: { now: () => 0 } })
+  await fast.web.request('notices.list', {})
+  t.alike(warningsOf(fast.web).filter((l) => l.startsWith('avisos:')), [], 'no line for a fast read')
 })

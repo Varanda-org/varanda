@@ -133,7 +133,7 @@ Comandos:
   page terms                 aceita os Termos para o delegado no serviço de conta
   page create                cria uma página (--username, --name, --bio)
   page list                  páginas que você tem ou administra, convites e ofertas
-  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 4)
+  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 10)
   page photo                 foto da página (--page, --file, --name, --bio)
   page follow|unfollow       a página segue ou deixa de seguir uma chave (--page, --key)
   page notices               avisos da página (--page, --limit)
@@ -165,7 +165,7 @@ O diário é uma sequência de blocos JSON. O índice do bloco é o `seq`, a par
 
 - Bloco 0: `{ "type": "member-cert", "cert": <certificado> }`. O campo `cert.member` é a chave pública do diário. Sem esse bloco o diário não recebe perfil, publicação nem resposta.
 - `profile`: nome (1 a 80 caracteres) e bio (0 a 280).
-- `post`: texto (1 a 1000 caracteres). Uma resposta é um `post` com `replyTo` apontando para `<chave>:<seq>` de outra publicação. O `seq` do alvo é um inteiro maior ou igual a 1, porque o bloco 0 é o certificado. Uma publicação pode ter `media`, até 4 fotos de um núcleo de fotos (só a versão web hospedada as grava); com fotos, o texto pode ficar vazio. A CLI mostra só `[foto]` ou `[N fotos]`.
+- `post`: texto (1 a 1000 caracteres). Uma resposta é um `post` com `replyTo` apontando para `<chave>:<seq>` de outra publicação. O `seq` do alvo é um inteiro maior ou igual a 1, porque o bloco 0 é o certificado. Uma publicação pode ter `media`, até 10 fotos de um núcleo de fotos (só a versão web hospedada as grava); com fotos, o texto pode ficar vazio. A CLI mostra só `[foto]` ou `[N fotos]`.
 - `follow`: `follow` e `unfollow` também gravam no diário um registro `follow` (`on` verdadeiro ou falso) quando o bloco 0 já existe. A lista de seguidos fica pública e chega igual a todos os aparelhos do membro.
 - `media-core`: declara um núcleo de fotos do diário.
 
@@ -1333,7 +1333,7 @@ Fora desta fase:
 - Notificações push quando um diário seguido cresce. Comentário `TODO(phase1): push notifications when a followed log grows.` em `packages/core/lib/sync.js` e em `docs/protocol.md` (sync). Esse caso, um aviso quando um diário seguido cresce, continua fora. Os quatro eventos (seguir, resposta, curtida e republicação) já têm push na versão web hospedada, com adesão em Ajustes. Citação e menção ficam só na aba Avisos, dentro do app, junto com o aviso de seguir. Sem contagem nem lista de seguidores dentro de Avisos (a contagem e a lista públicas ficam nos perfis). O app nativo, o `varanda-serve` e a CLI não têm push.
 - Recuperação da chave do diário com chaves limiar FROST. Comentário `TODO(phase2): threshold-key (FROST) recovery of this key.` em `docs/protocol.md` (identidade). A chave fica no `store/` deste dispositivo.
 - Denúncias pela CLI (a denúncia pela versão web e pelo app instalado, inclusive do perfil de outro membro, o painel e a lista de bloqueio assinada já existem). Conversas completas e perfis de quem a pessoa não segue só pela versão web hospedada (índice de engajamento do semeador e leitura sob demanda; `docs/protocol.md` seções 5 e 7). Prazos e retenção das denúncias seguem em aberto (issue #38). Certificado de membro e certificado de semeador não expiram e não são revogados individualmente; só a chave de emissor é revogada, pela lista.
-- Vídeo e a comparação de fotos com listas de hashes de material ilegal (`docs/design.md`, Moderação). Hoje só a versão web hospedada publica fotos e GIFs (até 4 por publicação, 8 MiB cada, 256 MiB por núcleo de fotos, um núcleo por aparelho sem troca); a CLI, o app nativo e o `varanda-serve` só mostram que a publicação tem fotos. Veja `docs/verification.md` seção 16.
+- Vídeo e a comparação de fotos com listas de hashes de material ilegal (`docs/design.md`, Moderação). Hoje só a versão web hospedada publica fotos e GIFs (até 10 por publicação, 8 MiB cada, 256 MiB por núcleo de fotos, um núcleo por aparelho sem troca); a CLI, o app nativo e o `varanda-serve` só mostram que a publicação tem fotos. Veja `docs/verification.md` seção 16.
 - Empacotamento Pear e distribuição fora das lojas. O aplicativo Expo (`apps/app`) já roda o núcleo no Bare (iOS e Android), e a versão web roda o nó no próprio navegador (sincronizando pelo semeador) ou usa o `varanda-serve` na máquina local; ver [docs/app.md](docs/app.md), [docs/verification.md](docs/verification.md) e [docs/development.md](docs/development.md). O CLI continua sendo um programa Node sem etapa de compilação.
 - Relay de certificados por seguidores. O `sync` anuncia só o próprio diário (`packages/core/lib/sync.js` envia `announce` da chave local e ignora `announce` recebido). Um seguidor não apresenta ao semeador o certificado de outra pessoa. Se a autora nunca sincronizou, o semeador não tem a cópia, mesmo que um seguidor já a tenha. Não há comentário `TODO` no código para esse relay. `docs/protocol.md` registra que o `announce` permanece sem autenticação de propósito: qualquer par pode pedir a admissão, e só entra o diário cujo bloco 0 passa na verificação.
 

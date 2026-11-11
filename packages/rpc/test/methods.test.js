@@ -805,6 +805,8 @@ test('listing.*', (t) => {
   const edit = { to, expectedRevision: 0, title: 'Bicicleta', text: 'x', price: 100, unit: 'hora', cat: 'esporte', place, media: null }
   ok(t, 'listing.edit', edit, edit)
   ok(t, 'listing.edit', { ...edit, media: [descriptor] })
+  ok(t, 'listing.edit', { ...edit, media: [descriptor, descriptor, descriptor, descriptor] })
+  bad(t, 'listing.edit', { ...edit, media: [descriptor, descriptor, descriptor, descriptor, descriptor] }, '5th photo')
   const noMedia = { ...edit }
   delete noMedia.media
   bad(t, 'listing.edit', noMedia, 'media is required')
@@ -931,6 +933,10 @@ test('post.create and post.reply with media', (t) => {
   ok(t, 'post.create', { text: 'legenda', media: [d, d, d, d] })
   ok(t, 'post.reply', { to: KEY + ':1', text: '', media: [d] })
   ok(t, 'post.quote', { to: KEY + ':1', text: 'legenda', media: [d, d, d, d] })
+  const ten = new Array(10).fill(d)
+  ok(t, 'post.create', { text: 'legenda', media: ten })
+  ok(t, 'post.reply', { to: KEY + ':1', text: '', media: ten })
+  ok(t, 'post.quote', { to: KEY + ':1', text: 'legenda', media: ten })
   ok(t, 'post.create', { text: 'x', media: [{ ...d, mime: 'image/gif', start: 8192 - 256, blocks: 256, bytes: 256 * 32768, width: 16384, height: 16384 }] })
   ok(t, 'post.create', { text: 'x', media: [{ ...d, blocks: 1, bytes: 1 }] })
   // Without media the text stays 1..MAX_TEXT.
@@ -939,7 +945,7 @@ test('post.create and post.reply with media', (t) => {
   t.is(msg('post.create', { text: 'x'.repeat(MAX_TEXT + 1), media: [d] }), 'parâmetro inválido: text')
   bad(t, 'post.create', { media: [d] }, 'text is required')
   const badMedia = [
-    [], [d, d, d, d, d], null, d, 'x',
+    [], new Array(11).fill(d), null, d, 'x',
     [{ ...d, extra: 1 }],
     [{ ...d, core: KEY.toUpperCase() }],
     [{ ...d, sha256: 'x' }],
@@ -1050,7 +1056,7 @@ test('engagement.read requires distinct refs in a dense bounded array', (t) => {
 })
 
 test('diary.peek requires an author and dense strictly ascending seqs', (t) => {
-  t.is(PEEK_SEQS_MAX, 32)
+  t.is(PEEK_SEQS_MAX, 29)
   t.is(PEEK_TIMEOUT_MS, 8000)
   t.absent(isMutating('diary.peek'))
   const base = { author: KEY, seqs: [1] }
@@ -1605,7 +1611,7 @@ test('log.read', (t) => {
 })
 
 test('feed.read', (t) => {
-  ok(t, 'feed.read', {}, { limit: 27 })
+  ok(t, 'feed.read', {}, { limit: 26 })
   ok(t, 'feed.read', { limit: FEED_LIMIT_MAX }, { limit: FEED_LIMIT_MAX })
   bad(t, 'feed.read', { limit: FEED_LIMIT_MAX + 1 })
   bad(t, 'feed.read', { limit: 0 })
@@ -1616,7 +1622,7 @@ test('feed.read', (t) => {
 test('feed.read before', (t) => {
   const before = { at: '2026-10-24T12:00:00.000Z', author: KEY, seq: 1 }
   ok(t, 'feed.read', { limit: 5, before }, { limit: 5, before })
-  ok(t, 'feed.read', { before }, { limit: 27, before })
+  ok(t, 'feed.read', { before }, { limit: 26, before })
   bad(t, 'feed.read', { before: { ...before, seq: 0 } }, 'seq 0')
   bad(t, 'feed.read', { before: { ...before, seq: 1.5 } }, 'seq 1.5')
   for (const at of ['2026-10-24T12:00:00Z', '2026-10-24', 1, '']) {
@@ -1633,7 +1639,7 @@ test('feed.read before', (t) => {
 
 test('peek.read', (t) => {
   t.absent(isMutating('peek.read'))
-  ok(t, 'peek.read', {}, { limit: 27 })
+  ok(t, 'peek.read', {}, { limit: 26 })
   ok(t, 'peek.read', { limit: PEEK_LIMIT_MAX }, { limit: PEEK_LIMIT_MAX })
   bad(t, 'peek.read', { limit: 0 })
   bad(t, 'peek.read', { limit: PEEK_LIMIT_MAX + 1 })
@@ -1644,7 +1650,7 @@ test('peek.read', (t) => {
 test('peek.read after', (t) => {
   const after = { round: 0, at: '2026-10-24T12:00:00.000Z', author: KEY, seq: 1 }
   ok(t, 'peek.read', { limit: 5, after }, { limit: 5, after })
-  ok(t, 'peek.read', { after }, { limit: 27, after })
+  ok(t, 'peek.read', { after }, { limit: 26, after })
   ok(t, 'peek.read', { after: { ...after, round: 2 } })
   bad(t, 'peek.read', { after: { at: after.at, author: KEY, seq: 1 } }, 'missing round')
   bad(t, 'peek.read', { after: { round: 0, author: KEY, seq: 1 } }, 'missing at')
@@ -2299,7 +2305,7 @@ test('page.* (Páginas)', (t) => {
 
   const keys = []
   for (let i = 0; i < 64; i++) keys.push(i.toString(16).padStart(2, '0').repeat(32))
-  ok(t, 'page.feed', { page: KEY, keys: [KEY] }, { page: KEY, keys: [KEY], limit: 27 })
+  ok(t, 'page.feed', { page: KEY, keys: [KEY] }, { page: KEY, keys: [KEY], limit: 26 })
   ok(t, 'page.feed', { page: KEY, keys, limit: FEED_LIMIT_MAX })
   ok(t, 'page.feed', { page: KEY, keys, limit: 1 })
   bad(t, 'page.feed', { page: KEY, keys: [...keys, 'ff'.repeat(32)] }, '65th feed key')
