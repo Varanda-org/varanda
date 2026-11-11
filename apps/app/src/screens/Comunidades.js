@@ -9,17 +9,24 @@
 // shows the "só na versão web" note, like Avisos, and calls nothing.
 // Props: onBack, onOpenGroup(group), onOpenCommunity(community); both take a
 // hex64 root key. onOpenCommunity also opens a community just made.
+// Minhas comunidades paints the stored 'comunidades' snapshot
+// (../screenSnapshot.js) until community.list answers, only for the member
+// acting as the member.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Keyboard, Pressable, StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
-import { useNode } from '../node'
+import { perfMarks, useNode } from '../node'
+import { cacheGeneration } from '../localCaches'
+import { buildScreenSnapshot } from '../screenSnapshot'
+import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
 import { fetchCommunity, fetchGroup, fetchGroupSearch } from '../indexClient'
 import { queryPath } from '../search'
 import { COMMUNITY_JOIN_LABELS, PAGE_EMPTY_TEXT, PUBLIC_LABEL, membersLabel, pageCommunities, pageErrorText, pageMode, pageRoleOf, roleLabel } from '../groups'
 import { pagesOn } from '../pageGate'
 import { actAs } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
+import { liveBinding } from './ARua'
 import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
 import { refusalOf } from '../wordCheck'
 import { Avatar } from '../ui/Avatar'
@@ -40,6 +47,42 @@ const LIST_DELAY_MS = 800
 const HEX64 = /^[0-9a-f]{64}$/
 // How many search rows get their community name looked up (one index call each).
 const NAMED_HITS = 8
+
+// The binding of the group snapshots (../screenSnapshot.js): the unlocked,
+// signed in member acting as the member, bound by A Rua's rule
+// (liveBinding: null in the Vitrine). A page actor reads and writes none.
+export function memberSnapshotBinding ({ node, acting, pageKey }) {
+  if (pageKey !== null || acting === null || typeof acting !== 'object' || acting.kind !== 'me') return null
+  const st = node && node.passkey ? node.passkey.status : null
+  if (st === null || typeof st !== 'object' || st.unlocked !== true || st.signedOut === true || typeof st.publicKey !== 'string') return null
+  const binding = liveBinding(st.publicKey, node.config)
+  return binding === null ? null : { ...binding, acting }
+}
+
+// Whether `binding` still names the identity `now` names: a lock, sign-out,
+// owner change or page actor since a read began means its answer is not
+// stored.
+export function sameSnapshotBinding (binding, now) {
+  return binding !== null && now !== null && binding.origin === now.origin &&
+    binding.association === now.association && binding.owner === now.owner
+}
+
+// -> the stored rows of `kind` for `binding`, or null when there are none.
+export function readGroupSnapshot (kind, binding) {
+  if (binding === null) return null
+  const snapshot = loadScreenSnapshot(kind, binding)
+  return snapshot === null || snapshot.body.rows.length === 0 ? null : snapshot.body.rows
+}
+
+// Stores a complete live list. `gen` is cacheGeneration() read before the
+// list was asked for: a purge since then discards the write. A list the
+// rules refuse removes the old snapshot instead of leaving it stale.
+export function saveGroupSnapshot (kind, binding, rows, gen) {
+  if (binding === null) return
+  const snapshot = buildScreenSnapshot(kind, { ...binding, rows })
+  if (snapshot === null) clearScreenSnapshot(kind)
+  else saveScreenSnapshot(kind, snapshot, gen)
+}
 
 function communityTitle (row) {
   if (row.state !== 'ready') return 'Comunidade ainda chegando'
@@ -205,7 +248,16 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   const asPage = pageMode({ acting, on: pagesOn({ hosted, accountOrigin: node.accountOrigin }) })
   const pageKey = asPage.key
   const bottomPad = useBottomPad()
-  const [list, setList] = useState({ rows: [], loaded: false, loading: false, error: '' })
+  const snapshotBinding = memberSnapshotBinding({ node, acting, pageKey })
+  const bindingRef = useRef(snapshotBinding)
+  bindingRef.current = snapshotBinding
+  // Stored rows keep loaded false: community.list still runs and replaces
+  // them. Nothing unread is stored; the dots come from live versions.
+  const [list, setList] = useState(() => {
+    const rows = hosted ? readGroupSnapshot('comunidades', snapshotBinding) : null
+    return { rows: rows === null ? [] : rows, loaded: false, loading: false, error: '', seeded: rows !== null }
+  })
+  const liveMarked = useRef(false)
   const [query, setQuery] = useState('')
   const [creating, setCreating] = useState(false)
   const search = useGroupSearch(hosted ? query : '')
@@ -232,15 +284,28 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
         setList({ rows, loaded: true, loading: false, error: '' })
         return
       }
+      const gen = cacheGeneration()
+      const binding = bindingRef.current
       const res = await requestRef.current('community.list', {})
       if (mine !== loadGen.current) return
-      const rows = Array.isArray(res && res.communities) ? res.communities : []
-      setList({ rows: rows.filter((c) => c && typeof c.community === 'string' && HEX64.test(c.community)), loaded: true, loading: false, error: '' })
+      const all = Array.isArray(res && res.communities) ? res.communities : []
+      const rows = all.filter((c) => c && typeof c.community === 'string' && HEX64.test(c.community))
+      setList({ rows, loaded: true, loading: false, error: '' })
+      if (!liveMarked.current) {
+        liveMarked.current = true
+        perfMarks().mark('rows-live:comunidades')
+      }
+      if (sameSnapshotBinding(binding, bindingRef.current)) saveGroupSnapshot('comunidades', binding, rows, gen)
     } catch (err) {
       if (mine !== loadGen.current) return
       setList((l) => ({ ...l, loading: false, error: pageKey !== null ? pageErrorText(err) : errorText(err) }))
     }
   }, [pageKey])
+
+  const seeded = list.seeded === true
+  useEffect(() => {
+    if (seeded) perfMarks().mark('rows-snapshot:comunidades')
+  }, [seeded])
 
   useEffect(() => {
     if (hosted) load()

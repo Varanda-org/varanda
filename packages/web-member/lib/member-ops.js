@@ -184,6 +184,23 @@ async function readBorrowed (core, read) {
   return value
 }
 
+// The core look() finds among the run's lends, or null. The run lends before
+// its startup is over (./sync.js reader): a null lend may only mean "not open
+// yet", so it counts only once the follows are open (cores.opened) and, still
+// null, once the startup sweeps are done (cores.settled). Each is a promise
+// or a function returning one; cores without them are taken as they are.
+async function lentCore (cores, look) {
+  let core = look()
+  if (core !== null) return core
+  for (const step of [cores.opened, cores.settled]) {
+    if (step === undefined || step === null) continue
+    await (typeof step === 'function' ? step() : step)
+    core = look()
+    if (core !== null) return core
+  }
+  return null
+}
+
 // read(core) on the stored replica of `key` (hex64, lowercase) -> its result,
 // or null when there is no local data (nothing is created). The result
 // carries `entries` (and `borrowed`, the core, on the borrowed path); an
@@ -193,7 +210,7 @@ async function withReplica (ctx, key, read) {
   if (cores !== null) {
     // A core the run holds always has bytes stored: the storage is only
     // asked about the others.
-    const core = cores.replica(key)
+    const core = await lentCore(cores, () => cores.replica(key))
     if (core !== null) return { ...(await readBorrowed(core, read)), borrowed: core }
     if (!(await store.replicaExists(ctx.storage, key))) return null
     throw needsExclusive()
@@ -1942,7 +1959,7 @@ async function appendToOwnGroupCore (ctx, entry, record, priv = false) {
 async function withGroupCore (ctx, key, read) {
   const cores = borrowedCores(ctx)
   if (cores !== null) {
-    const core = typeof cores.group === 'function' ? cores.group(key) : null
+    const core = typeof cores.group === 'function' ? await lentCore(cores, () => cores.group(key)) : null
     if (core !== null) {
       const fork = core.fork
       const value = await readBorrowed(core, read)
@@ -1972,22 +1989,273 @@ async function groupCoreState (core) {
 
 // A stored group core's entries (store.readBlocks: no diary deletion fold),
 // read-only -> { entries, length, fork } or null.
-async function readGroupCore (ctx, key) {
-  return withGroupCore(ctx, key, groupCoreState)
+async function readGroupCore (ctx, key, rec = null) {
+  return withNotedGroupCore(ctx, key, rec, groupCoreState)
+}
+
+// ---- group and community fold memo ----
+//
+// ctx.memo (a Map the session owns, cleared with every identity or key
+// change) keeps folds keyed by what they read. A fold records a stamp of
+// every input as it reads it: the stamp is taken before the read, so a
+// stored fold is never older than its signature (an input that grew during
+// the read only causes a recompute). Nothing is persisted.
+
+const MEMO_MAX = 64
+const MEMO_TTL_MS = 30000
+// A replica with more missing blocks than this above its contiguous length
+// is not signed: its stamp would cost as much as the read.
+const MEMO_MAX_HOLES = 4096
+// Tests only: VARANDA_MEMO_CHECK=1 turns the check mode on for every ctx
+// and gives a ctx without a memo one per storage.
+const MEMO_ENV_CHECK = (() => {
+  try {
+    const p = globalThis.process
+    return typeof p === 'object' && p !== null && typeof p.env === 'object' && p.env !== null && p.env.VARANDA_MEMO_CHECK === '1'
+  } catch {
+    return false
+  }
+})()
+const noop = () => {}
+const envMemos = new WeakMap()
+const modStamps = new WeakMap()
+const entryStamps = new WeakMap()
+
+function memoOf (ctx) {
+  if (ctx.memo instanceof Map) return ctx.memo
+  if (!MEMO_ENV_CHECK || ctx.storage === null || typeof ctx.storage !== 'object') return null
+  let m = envMemos.get(ctx.storage)
+  if (m === undefined) envMemos.set(ctx.storage, (m = new Map()))
+  return m
+}
+
+function memoChecks (ctx) {
+  return ctx.memoCheck === true || MEMO_ENV_CHECK
+}
+
+function groupStamp (core) {
+  return core.contiguousLength + ',' + core.length + ',' + core.fork
+}
+
+// readVisible also shows the stored blocks past a hole, so a replica's
+// stamp names each of them (null: too many to sign).
+async function replicaStamp (core) {
+  const contiguous = core.contiguousLength
+  const length = core.length
+  let out = contiguous + ',' + length + ',' + core.fork
+  if (length - contiguous > MEMO_MAX_HOLES) return null
+  for (let i = contiguous; i < length; i++) if (await core.has(i)) out += '.' + i
+  return out
+}
+
+function noteDep (rec, kind, key, stamp) {
+  if (rec === null) return
+  if (stamp === null) rec.ok = false
+  else rec.deps.push({ kind, key, stamp })
+}
+
+// read(core, never): never() says the core can never fold here, whatever
+// it receives later, so the signature leaves it out (the writers of other
+// groups would otherwise be opened on every lookup).
+async function withNotedGroupCore (ctx, key, rec, read) {
+  if (rec === null) return withGroupCore(ctx, key, (core) => read(core, noop))
+  let stamp = 'none'
+  let skip = false
+  const value = await withGroupCore(ctx, key, (core) => {
+    stamp = groupStamp(core)
+    return read(core, () => { skip = true })
+  })
+  if (!skip) noteDep(rec, 'k', key, stamp)
+  return value
+}
+
+function modStamp (mod) {
+  let s = modStamps.get(mod)
+  if (s === undefined) {
+    s = [...mod.blocked].sort().join(',') + '/' + [...mod.revokedIssuers].sort().join(',')
+    modStamps.set(mod, s)
+  }
+  return s
+}
+
+// A diary read whole (store.readAll) is append-only: its length and the
+// blocks that read as null name its content.
+function entriesStamp (entries) {
+  if (!Array.isArray(entries)) return null
+  let s = entryStamps.get(entries)
+  if (s === undefined) {
+    // The seq of an entry that is not at its own index is stamped too: a
+    // sparse read (readVisible past a hole) keeps its length while the
+    // blocks it shows change.
+    s = String(entries.length)
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i]
+      if (e === null || typeof e !== 'object' || e.record === null || e.deleted === true) s += '.' + i
+      else if (e.seq !== undefined && e.seq !== i) s += ':' + i + '=' + e.seq
+    }
+    entryStamps.set(entries, s)
+  }
+  return s
+}
+
+// The key state a private fold opens epochs with: the holder's lock
+// generation, whether it is unlocked and its box key.
+function keyStamp (ctx) {
+  const h = holderOf(ctx)
+  if (h === null) return 'none'
+  return h.token() + ':' + (h.unlocked ? 1 : 0) + ':' + (boxHexOf(ctx) || '-')
+}
+
+// The inputs every fold reads besides its cores and diaries, read once
+// for both the signature and the fold.
+async function memoHead (ctx, base, asPage) {
+  const writers = await store.readGroupWriters(ctx.storage)
+  const replicas = await store.readGroupReplicas(ctx.storage)
+  const own = entriesStamp(base.ownEntries)
+  const local = base.local ? entriesStamp(base.local.entries) : '-'
+  const ok = own !== null && local !== null && typeof base.association === 'string'
+  const sig = [modStamp(base.mod), base.association, JSON.stringify(writers), JSON.stringify(replicas), asPage ? 'p' : 'm', base.ownHex, own,
+    base.local ? base.local.hex + '=' + local : '-', keyStamp(ctx)].join('|')
+  return { kv: { writers, replicas }, sig: ok ? sig : null }
+}
+
+async function depStamp (ctx, base, dep) {
+  if (dep.kind === 'k') {
+    const s = await withGroupCore(ctx, dep.key, groupStamp)
+    return s === null ? 'none' : s
+  }
+  if (dep.kind === 'r') {
+    const r = await withReplica(ctx, dep.key, async (core) => ({ entries: { length: core.length }, stamp: await replicaStamp(core) }))
+    return r === null ? 'none' : r.stamp
+  }
+  return communitySig(ctx, base, dep.key)
+}
+
+// A post more than MAX_FUTURE_MS ahead stays out of the fold until then:
+// the earliest such instant among the records read ends the entry.
+function foldExpiry (value, now) {
+  let at = now + MEMO_TTL_MS
+  if (value === null) return at
+  const lists = [value.input.root.entries, ...value.input.writers.map((w) => w.entries)]
+  for (const entries of lists) {
+    for (const { record } of entries) {
+      if (record === null || typeof record !== 'object' || typeof record.at !== 'string') continue
+      const t = Date.parse(record.at) - grp.MAX_FUTURE_MS
+      if (t > now && t < at) at = t
+    }
+  }
+  return at
+}
+
+function memoKey (kind, key, asPage, base) {
+  return kind + ':' + key + ':' + (asPage ? 'p' : 'm') + ':' + base.ownHex + ':' + (base.local ? base.local.hex : '-')
+}
+
+// The entry's signature when every input it read is unchanged, else null.
+async function liveSig (ctx, base, entry, head) {
+  if (entry === undefined || Date.now() >= entry.expires || head.sig === null || head.sig !== entry.head) return null
+  for (const dep of entry.deps) {
+    if ((await depStamp(ctx, base, dep)) !== dep.stamp) return null
+  }
+  return entry.sig
+}
+
+async function communitySig (ctx, base, key) {
+  const memo = memoOf(ctx)
+  if (memo === null) return null
+  const head = await memoHead(ctx, base, false)
+  return liveSig(ctx, base, memo.get(memoKey('c', key, false, base)), head)
+}
+
+// A stored private fold put its epoch keys in the holder: it is reused only
+// while the holder still has them.
+function epochsHeld (ctx, value) {
+  if (value === null || !Array.isArray(value.epochs) || value.epochs.length === 0) return true
+  const h = holderOf(ctx)
+  return h !== null && value.epochs.every((e) => h.has(e.kid))
+}
+
+// -> { value, sig, expires }: sig null when the fold could not be signed.
+async function memoFold (ctx, base, kind, key, asPage, compute) {
+  const memo = memoOf(ctx)
+  const now = Date.now()
+  if (memo === null) {
+    const kv = { writers: await store.readGroupWriters(ctx.storage), replicas: await store.readGroupReplicas(ctx.storage) }
+    return { value: await compute(kv, null), sig: null, expires: now }
+  }
+  const mk = memoKey(kind, key, asPage, base)
+  const head = await memoHead(ctx, base, asPage)
+  const entry = memo.get(mk)
+  const sig = await liveSig(ctx, base, entry, head)
+  if (sig !== null && epochsHeld(ctx, entry.value)) {
+    memo.delete(mk)
+    memo.set(mk, entry)
+    if (memoChecks(ctx)) {
+      const fresh = await compute(head.kv, null)
+      if (!sameFold(entry.value, fresh)) throw new Error('memo check: stored fold differs from a fresh one (' + mk + ')')
+    }
+    return { value: entry.value, sig, expires: entry.expires }
+  }
+  const rec = { deps: [], ok: head.sig !== null, expires: now + MEMO_TTL_MS }
+  const value = await compute(head.kv, rec)
+  if (!rec.ok) {
+    memo.delete(mk)
+    return { value, sig: null, expires: now }
+  }
+  const expires = Math.min(rec.expires, foldExpiry(value, now))
+  const stored = {
+    head: head.sig,
+    deps: rec.deps,
+    sig: head.sig + '#' + rec.deps.map((d) => d.kind + d.key + '=' + d.stamp).join(';'),
+    expires,
+    value
+  }
+  memo.delete(mk)
+  memo.set(mk, stored)
+  while (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value)
+  return { value, sig: stored.sig, expires }
+}
+
+// Deep equality of two folds (check mode).
+function sameFold (a, b) {
+  if (a === b) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return Number.isNaN(a) && Number.isNaN(b)
+  if (a instanceof Uint8Array || b instanceof Uint8Array) return a instanceof Uint8Array && b instanceof Uint8Array && b4a.equals(a, b)
+  if (a instanceof Map || b instanceof Map) {
+    if (!(a instanceof Map && b instanceof Map) || a.size !== b.size) return false
+    for (const [k, v] of a) if (!b.has(k) || !sameFold(v, b.get(k))) return false
+    return true
+  }
+  if (a instanceof Set || b instanceof Set) {
+    if (!(a instanceof Set && b instanceof Set) || a.size !== b.size) return false
+    return sameFold([...a], [...b])
+  }
+  if (Array.isArray(a) !== Array.isArray(b)) return false
+  const ka = Object.keys(a)
+  const kb = Object.keys(b)
+  if (ka.length !== kb.length) return false
+  for (const k of ka) if (!Object.prototype.hasOwnProperty.call(b, k) || !sameFold(a[k], b[k])) return false
+  return true
 }
 
 // A stored writer core of `group` -> { entries, length, fork, header } or
 // null. Block 0 is decoded first so the cores of other groups are never read
 // in full: every operation on one group would otherwise decode every group
 // core this device holds.
-async function readWriterCoreOf (ctx, key, group) {
-  return withGroupCore(ctx, key, async (core) => {
+async function readWriterCoreOf (ctx, key, group, rec = null) {
+  return withNotedGroupCore(ctx, key, rec, async (core, never) => {
     if (core.contiguousLength === 0 || core.fork !== 0) return null
     let h = null
+    let block = null
     try {
-      h = decodeBlock(await core.get(0, { wait: false, raw: true }))
+      block = await core.get(0, { wait: false, raw: true })
+      h = decodeBlock(block)
     } catch {}
-    if (validateWriterHeader(h) !== null || h.group !== group) return null
+    if (validateWriterHeader(h) !== null || h.group !== group) {
+      // Block 0 of fork 0 never changes, and a later fork never folds.
+      if (block !== null) never()
+      return null
+    }
     return groupCoreState(core)
   })
 }
@@ -2092,35 +2360,46 @@ async function makeGroupRoom (ctx, base, group, more = []) {
 // A diary's entries for a fold of `base`: the own diary (and, in a page
 // fold, this device's identity, read as the own fold reads it) whole unless
 // blocked, any other through feedRead's admission.
-async function foldEntriesOf (ctx, base, d) {
+async function foldEntriesOf (ctx, base, d, rec = null) {
   const { ownHex, ownEntries, association, mod } = base
   if (d === ownHex) return mod.blocked.has(ownHex) ? null : ownEntries
   if (base.local && d === base.local.hex) return mod.blocked.has(d) ? null : base.local.entries
-  return admittedEntries(await replicaRead(ctx, d, mod), d, association, mod)
+  if (rec === null || mod.blocked.has(d)) return admittedEntries(await replicaRead(ctx, d, mod), d, association, mod)
+  let stamp = 'none'
+  const read = await withReplica(ctx, d, async (core) => {
+    stamp = await replicaStamp(core)
+    return { entries: (await store.readVisible(core)).entries, fork: core.fork }
+  })
+  noteDep(rec, 'r', d, stamp)
+  return admittedEntries(read, d, association, mod)
 }
 
 // The fold of `group` from local data, or null when its root is not held.
 // asPage: base.ownHex is a page this device holds the secrets of
 // (pageGroupRead), which has no own writer here.
 async function loadGroup (ctx, base, group, asPage = false) {
+  return (await memoFold(ctx, base, 'g', group, asPage, (kv, rec) => foldGroup(ctx, base, group, asPage, kv, rec))).value
+}
+
+async function foldGroup (ctx, base, group, asPage, kv, rec) {
   const { ownHex, mod } = base
   // A group block in the stored snapshot names the root key: the group reads
   // as unknown to every operation, its local cores stay where they are.
   if (mod.blocked.has(group)) return null
-  const root = await readGroupCore(ctx, group)
+  const root = await readGroupCore(ctx, group, rec)
   if (root === null || root.length === 0 || root.fork !== 0) return null
   const rootHeader = root.entries[0].record
   if (!foldableHeader(rootHeader)) return null
-  const listed = (await store.readGroupWriters(ctx.storage)).find((e) => e.group === group) || null
+  const listed = kv.writers.find((e) => e.group === group) || null
   const own = asPage ? null : listed
-  const keys = new Set(await store.readGroupReplicas(ctx.storage))
+  const keys = new Set(kv.replicas)
   // A page fold keeps this device's identity's writer as a foreign one.
   if (listed !== null) keys.add(listed.key)
   keys.delete(group)
   const writers = []
   const cores = new Map([[group, { diary: rootHeader.diary, at: rootHeader.at, length: root.length, signed: root.signed, entries: root.entries }]])
   for (const key of [...keys].sort()) {
-    const core = await readWriterCoreOf(ctx, key, group)
+    const core = await readWriterCoreOf(ctx, key, group, rec)
     if (core === null) continue
     const h = core.entries[0].record
     if (validateWriterHeader(h) !== null || h.group !== group) continue
@@ -2142,7 +2421,7 @@ async function loadGroup (ctx, base, group, asPage = false) {
   for (const d of new Set([ownHex, rootHeader.diary, ...writers.map((w) => w.diary)])) {
     // A blocked own diary binds none of its writers, as in the core node (the
     // feed keeps its own rule for the own diary).
-    const entries = await foldEntriesOf(ctx, base, d)
+    const entries = await foldEntriesOf(ctx, base, d, rec)
     diaries.set(d, entries)
     if (entries !== null) {
       joins.set(d, groupJoinHistory(entries, group))
@@ -2153,7 +2432,7 @@ async function loadGroup (ctx, base, group, asPage = false) {
   // The parent community named by the immutable header, as buildCommunity
   // takes it (a blocked or unheld parent is null: the fold reads incomplete).
   const community = rootHeader.community
-  const c = isHex64(community) ? await loadCommunity(ctx, base, community) : null
+  const c = isHex64(community) ? await loadNotedCommunity(ctx, base, community, rec) : null
   const input = { root: { key: group, entries: root.entries }, writers, joins, marks, confirms, community: c === null ? null : c.input }
   const priv = rootHeader.visibility === 'private'
   const mine = priv ? mineOf(group, rootHeader, writers, ownHex, boxHexOf(ctx)) : new Set()
@@ -3650,20 +3929,35 @@ function communityKeyOf (community) {
 // null when the root is not held, forked, blocked or no community root.
 // `input` is buildCommunity's (and buildGroup's `community`).
 async function loadCommunity (ctx, base, key) {
+  return (await memoFold(ctx, base, 'c', key, false, (kv, rec) => foldCommunity(ctx, base, key, kv, rec))).value
+}
+
+// loadCommunity inside a group fold: the group's signature carries the
+// community's own, and its entry expires no later than the community's.
+async function loadNotedCommunity (ctx, base, key, rec) {
+  if (rec === null) return loadCommunity(ctx, base, key)
+  const r = await memoFold(ctx, base, 'c', key, false, (kv, inner) => foldCommunity(ctx, base, key, kv, inner))
+  if (r.sig === null) rec.ok = false
+  else noteDep(rec, 'c', key, r.sig)
+  rec.expires = Math.min(rec.expires, r.expires)
+  return r.value
+}
+
+async function foldCommunity (ctx, base, key, kv, rec) {
   const { ownHex, mod } = base
   if (mod.blocked.has(key)) return null
-  const root = await readGroupCore(ctx, key)
+  const root = await readGroupCore(ctx, key, rec)
   if (root === null || root.length === 0 || root.fork !== 0) return null
   const header = root.entries[0].record
   if (!communityHeader(header)) return null
-  const own = (await store.readGroupWriters(ctx.storage)).find((e) => e.group === key) || null
-  const keys = new Set(await store.readGroupReplicas(ctx.storage))
+  const own = kv.writers.find((e) => e.group === key) || null
+  const keys = new Set(kv.replicas)
   if (own !== null) keys.add(own.key)
   keys.delete(key)
   const writers = []
   const cores = new Map([[key, { diary: header.diary, at: header.at, length: root.length, signed: root.signed, entries: root.entries }]])
   for (const k of [...keys].sort()) {
-    const core = await readWriterCoreOf(ctx, k, key)
+    const core = await readWriterCoreOf(ctx, k, key, rec)
     if (core === null) continue
     const h = core.entries[0].record
     writers.push({ key: k, entries: core.entries, diary: h.diary })
@@ -3673,7 +3967,7 @@ async function loadCommunity (ctx, base, key) {
   const joins = new Map()
   const confirms = new Map()
   for (const d of new Set([ownHex, header.diary, ...writers.map((w) => w.diary)])) {
-    const entries = await foldEntriesOf(ctx, base, d)
+    const entries = await foldEntriesOf(ctx, base, d, rec)
     diaries.set(d, entries)
     if (entries !== null) {
       joins.set(d, groupJoinHistory(entries, key))
@@ -4946,7 +5240,7 @@ async function dmLookup (ctx, member) {
     return best === null ? { box: null, gen: null } : { box: best.box, gen: best.gen }
   }
   let entries
-  const borrowed = cores === null ? null : cores.replica(key)
+  const borrowed = cores === null ? null : await lentCore(cores, () => cores.replica(key))
   if (borrowed !== null) {
     entries = await readBorrowed(borrowed, async (core) => (await store.readVisible(core)).entries)
   } else {
@@ -5076,5 +5370,7 @@ module.exports = {
   deviceUpkeep,
   AUTO_ENROL_RESERVE,
   isNeedsExclusive,
-  needsExclusive
+  needsExclusive,
+  lentCore,
+  entriesStamp
 }
