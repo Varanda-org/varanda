@@ -2706,6 +2706,8 @@ function Member () {
           onUncertain={recheckPhone}
           onDropped={recheckPhone}
           onVerified={markPhoneVerified}
+          statusBusy={phone.pending}
+          statusVerified={phone.state === 'verificado' && !phone.error}
           offline={node.online === false}
           index={index}
           total={total}

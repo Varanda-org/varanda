@@ -334,7 +334,10 @@ export function usePhoneGate ({ node, info, hosted, ready, termsOk, locked, memb
       setSinceShown((cur) => (cur === sinceShown ? null : cur))
     }
   }, [ownInfo, proofOp, sinceShown])
-  const gate = phoneGate({ hosted, policy: gatePolicy, state, vouched: proofs.vouched && !clearPending, sinceHeld: proofs.sinceHeld })
+  // A since the node accepted holds before node.info shows it, so a failed
+  // policy read keeps the step in the meantime.
+  const sinceAccepted = sinceUnseen && sinceShown.since !== null
+  const gate = phoneGate({ hosted, policy: gatePolicy, state, vouched: proofs.vouched && !clearPending, sinceHeld: proofs.sinceHeld || sinceAccepted })
   const error = failure !== null && failure.key === readKey ? failure.err : null
   // A status read for the current key has not finished, or the policy is
   // still unknown (its read is retried; the status cannot be asked before).
