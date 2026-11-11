@@ -7093,11 +7093,11 @@ O serviço de conta, com `VARANDA_PHONE_KEY` definida, exige um celular brasilei
 
 O que este PR acrescenta:
 
-- `phone.json` no serviço de conta (Brasil, modo 0600): o número selado e, no mesmo arquivo, o índice com chave. O índice é dado pessoal pseudonimizado, porque quem tem a chave pode enumerar o espaço de números. O número selado fica enquanto a conta existir e até 180 dias depois de Excluir conta, de um bloqueio ou de uma troca de número. Excluir conta encerra a linha viva e mantém o selo nesse prazo.
+- `phone.json` no serviço de conta (Brasil, modo 0600): o número selado e, no mesmo arquivo, o índice com chave. O índice é dado pessoal pseudonimizado, porque quem tem a chave pode enumerar o espaço de números. O número selado fica enquanto a conta existir (a linha viva de uma chave que nunca vinculou some em 7 dias) e até 180 dias depois de Excluir conta, de um bloqueio ou de uma troca de número. Excluir conta encerra a linha viva e mantém o selo nesse prazo.
 - O número não entra em certificado, na camada P2P, em resposta a outro membro, em log nem no painel de moderação. Não é prova de identidade, o serviço não coleta CPF, e o número verificado não é fator de recuperação (a linha "Nunca só SMS" em `docs/design.md`).
 - Se o número já está em uso, a resposta só vem depois de um código certo. Enviar o código responde igual para número livre, em uso ou queimado.
 - O serviço assina e entrega o atestado `phone-verified` (sem número), para o membro verificado abrir o app sem o serviço de conta, e o atestado `phone-since`, que marca que a associação exige um celular. Um registro do aparelho nunca abre a porta (regra do dono de 2026-11-04, estendida ao celular em 2026-11-11). Sem nenhuma das duas provas e sem resposta do serviço, uma instalação que nunca exigiu celular abre como antes.
-- Desbloqueio e liberação por ordem judicial (decisão do dono, 2026-11-11): o desbloqueio devolve o número na varredura seguinte; a liberação libera o número para uma conta nova e a chave antiga continua bloqueada. Nos dois casos o número selado fica até 180 dias. O comando `account phone` faz a liberação e a recusa enquanto o serviço de conta está em execução.
+- Desbloqueio e liberação por ordem judicial (decisão do dono, 2026-11-11): o desbloqueio devolve o número na varredura seguinte, se o bloqueio durou menos de 180 dias (depois disso o membro verifica de novo, `telefone-pendente`); a liberação libera o número para uma conta nova e a chave antiga continua bloqueada. Depois da liberação o número selado fica até 180 dias. Só `account phone --release` faz a liberação, e ele a recusa enquanto o serviço de conta está em execução; `account phone --member` apenas mostra o número e pode rodar com o serviço no ar.
 - Teto dos envios pagos: `VARANDA_PHONE_DAILY_LIMIT`. Não defina `VARANDA_PHONE_KEY` antes de o passo no app estar no ar.
 
 Como verificar, a partir da raiz:
@@ -7106,6 +7106,9 @@ Como verificar, a partir da raiz:
 - `node apps/cli/test/phone-store.test.js`
 - `node apps/cli/test/phone-client.test.js`
 - `node apps/cli/test/account-phone.test.js`
+- `node apps/cli/test/account-phone-cli.test.js`
+- `node apps/cli/test/account-phone-gates.test.js`
+- `node apps/cli/test/account-phone-e2e.test.js`
 - `node apps/cli/test/account-delete.test.js`
 
 Os testes usam o Didit falso em `127.0.0.1` e diretório temporário. Não cobrem o parceiro real nem o checklist de sandbox do README.
