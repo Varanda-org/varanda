@@ -242,8 +242,10 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     try {
       const page = await peek({ limit: PEEK_LIMIT_MAX, after })
       if (mine !== seqRef.current) return
-      // A cursor that did not move ends the list (compared by value).
-      const stuck = page.next !== null && page.next.round === after.round && page.next.at === after.at &&
+      // A cursor that did not move ends the list (compared by value), unless
+      // the page is incomplete: the node's candidate traversal still moved,
+      // and the list's dry-page pause bounds how often it is asked again.
+      const stuck = page.incomplete !== true && page.next !== null && page.next.round === after.round && page.next.at === after.at &&
         page.next.author === after.author && page.next.seq === after.seq
       // Later pages may fetch diaries the first page did not reach: keep the
       // newest counts and never drop an incomplete warning.

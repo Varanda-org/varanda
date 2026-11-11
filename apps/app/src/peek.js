@@ -36,8 +36,11 @@ export function mergePage (currentItems, pageItems) {
   return { items, added }
 }
 
+// An incomplete page with a cursor is not the end even when empty: a node
+// that pages candidates in batches may finish a read before any of them had
+// a row to show, and only a read with that cursor goes on from there.
 export function isLastPeekPage (page) {
-  return page.next === null || page.items.length === 0
+  return page.next === null || (page.items.length === 0 && page.incomplete !== true)
 }
 
 export function withoutAuthor (items, author) {

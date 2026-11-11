@@ -2,12 +2,26 @@
 
 // The Espiadinha in the browser node (docs/rpc.md 5.22): the page of
 // `peek.read` is computed HERE, in the browser, from the seeder's inventory
-// and author-signed blocks fetched into MEMORY over a short-lived dedicated
-// seeder link. The rule (which diaries, which blocks, which order) is
-// @varanda/core lib/peek.js (peekCandidates, peekWindow, diaryPeek,
-// buildPeekPage); this module is the transport and the memory. No seeder
-// change, no new protocol message, no storage write: nothing here writes a
-// key-value entry, opens a replica or opens any core of the node storage.
+// (or its candidate pages) and author-signed blocks fetched into MEMORY over
+// a short-lived dedicated seeder link. The rule (which diaries, which
+// blocks, which order) is @varanda/core lib/peek.js (peekCandidates,
+// peekWindow, diaryPeek, buildPeekPage); this module is the transport and
+// the memory. No storage write: nothing here writes a key-value entry,
+// opens a replica or opens any core of the node storage.
+//
+// BOUNDED LINK: a seeder that offers 'varanda/discovery/1' (CAP_DISCOVERY,
+// @varanda/core lib/discovery-net.js) sends a lean hello to this link
+// (CAP_NO_INVENTORY) and the snapshot loads its candidates in batches of
+// PEEK_CANDIDATES from the seeder's frozen view instead of the whole
+// inventory, so a first page fetches at most one batch of diaries. A batch
+// is asked only when a round runs out before the page is full (buildPeekPage
+// with batchOf and more), at most PEEK_CANDIDATE_PAGES per read, paced by the
+// channel; a timeout, a closed channel or a stale view ends the read
+// incomplete with a usable cursor and restarts the candidate traversal from
+// a fresh first page at the next batch, keeping the snapshot's diaries and
+// batches (a repeated key is ignored). A seeder without discovery gives
+// exactly the pages it gave before. The candidate pages are as untrusted as
+// the inventory: their lengths only pick candidates.
 //
 // TRUST MODEL: compared with A Rua the seeder gains nothing. It can withhold
 // (an inventory entry, a block, a shorter length, an older signed state it
@@ -29,7 +43,10 @@
 // and the page is incomplete. No core is replicated before the verified
 // hello (role 'seeder' and seederCertForKey on the Noise key, exactly as
 // ./sync.js). Peer data never escapes lib/peek.js's copying readers.
-// PRIVACY: the link sends an empty inventory and no announce; it requests
+// PRIVACY: the link sends an empty inventory (asking for none) and no
+// announce; on a bounded link the seeder also learns how many candidate
+// pages were asked (how far the member scrolled; follows are filtered
+// here); it requests
 // the complement of the follow set, which the seeder already learns from
 // the sync link's inventory on the same IP; the own diary is part of what
 // is requested and only hidden from the page, so the request pattern does
@@ -50,8 +67,9 @@
 // flight on the link fits under the budget, so in-flight data is bounded
 // by PEEK_PARALLEL x 3 blocks and the overshoot past the budget stays at
 // one block per worker. A block over MAX_BLOCK_BYTES ends its diary for
-// the snapshot. A page over PEEK_SLOW_READ_MS writes one local timing line
-// (connection, inventory, blocks). FRAMES: the link runs
+// the snapshot. A bounded link adds one candidate page per batch the pages
+// need. A page over PEEK_SLOW_READ_MS writes one local timing line
+// (connection, inventory or candidates, blocks). FRAMES: the link runs
 // behind a frame guard (./ws-stream.js guardedWsStream, @varanda/core
 // lib/frame-guard) bounding every frame the seeder sends after the Noise
 // handshake to PEEK_MAX_FRAME; a frame declaring more cuts the link at its
@@ -85,7 +103,8 @@ const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
 const { decodeBlock, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES, MAX_BLOCK_BYTES } = require('@varanda/core/lib/records')
 const { seederCertForKey } = require('@varanda/core/lib/cert')
-const { attachAdmission } = require('@varanda/core/lib/admission')
+const { attachAdmission, CAP_NO_INVENTORY, CAP_DISCOVERY, MAX_INVENTORY } = require('@varanda/core/lib/admission')
+const { attachDiscovery, DISCOVERY_REQUEST_TIMEOUT_MS, MAX_PAGES_PER_READ } = require('@varanda/core/lib/discovery-net')
 const { UsageError } = require('@varanda/core/lib/errors')
 const {
   PEEK_MAX_ROUNDS,
@@ -136,6 +155,18 @@ const PEEK_SLOW_READ_MS = 1000
 // 1 MiB stays above that worst case and far above both measurements while
 // refusing a frame 8x larger.
 const PEEK_MAX_FRAME = 1048576
+// Diaries asked per candidate page on a bounded link: one batch. A first
+// page then fetches at most this many diaries instead of the whole inventory.
+const PEEK_CANDIDATES = 48
+// Candidate pages one read may ask for (the discovery channel's own per-read
+// bound); the channel paces them at one per DISCOVERY_PACE_MS, the seeder's
+// refill rate, so an honest read never trips the seeder's rate drop.
+const PEEK_CANDIDATE_PAGES = MAX_PAGES_PER_READ
+// The cursor handed back by a bounded page that ran out of candidates before
+// showing anything: it sorts before every item of the snapshot (round 0,
+// batch 0 through the own key, a time no post can carry), so the next read
+// continues from the very start of the snapshot.
+const START_AT = '9999-12-31T23:59:59.999Z'
 // A seeder at its connection cap closes the WebSocket with 1013 (try again
 // later); an older one terminates the socket (1006): NO_SEEDER.
 const CLOSE_TRY_AGAIN = 1013
@@ -209,8 +240,9 @@ async function pool (items, n, fn) {
 // log(text): warnings for the page. limits: test-only overrides of the
 // timings and budgets (connectTimeoutMs, pageTimeoutMs, fetchTimeoutMs,
 // snapshotTtlMs, pageMaxBytes, snapshotMaxBytes, parallel, windowInflight,
-// maxFrame) and test hooks (now: the slow-read clock; trace(event): every
-// block get, its outcome, its charge and every accepted block).
+// maxFrame, candidates, candidatePages, candidateTimeoutMs) and test hooks
+// (now: the slow-read clock; trace(event): every block get, its outcome,
+// its charge, every accepted block and every candidate page asked).
 // ownKey() returns the viewer's lowercase hex64 key or a Promise of it: the
 // viewer's diary is fetched like any candidate (cover for the anonymous
 // link) and hidden from their own page.
@@ -227,12 +259,23 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     parallel: PEEK_PARALLEL,
     windowInflight: PEEK_WINDOW_INFLIGHT,
     maxFrame: PEEK_MAX_FRAME,
+    candidates: PEEK_CANDIDATES,
+    maxCandidates: MAX_INVENTORY,
+    candidatePages: PEEK_CANDIDATE_PAGES,
+    candidateTimeoutMs: DISCOVERY_REQUEST_TIMEOUT_MS,
     now: Date.now,
     trace: noop,
     ...(limits || {})
   }
 
-  // { at, order: [diary] (random fetch order), incomplete, bytes }; a diary:
+  // { at, order: [diary] (random fetch order, batch by batch), incomplete,
+  // bytes, own, batchOf, keys, view, after, more, batch }. batchOf is null on
+  // a snapshot built from a full inventory; on a bounded one it maps every
+  // key that ever entered the snapshot (and the own key, at batch 0) to its
+  // candidate batch and is never pruned, so any cursor of the snapshot stays
+  // valid for its whole life. keys: the keys in `order`. view, after: where
+  // the next candidate page starts (null, null: a fresh first page). more:
+  // further candidate pages may exist. batch: the next batch number. A diary:
   // { key, length (verified, null until block 0), seqs, records, bytes,
   //   fail (sticky verdict of this snapshot), failed (a block did not
   //   arrive), reason, name, username, posts, scanned, capped, exhausted }
@@ -265,11 +308,16 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
 
   // ---- the peek link ----
 
-  // Dials the seeder with an ephemeral Noise key, attaches the muxer and
-  // the admission channel with an EMPTY inventory, verifies the hello
-  // exactly as ./sync.js does and waits for the inventory to complete. One
-  // deadline covers socket, Noise, hello and inventory. -> the link
-  // { noise, peer, incomplete }; rejects Error('sem conexão com o semeador'),
+  // Dials the seeder with an ephemeral Noise key, attaches the muxer, the
+  // discovery channel (member role) and the admission channel with an EMPTY
+  // inventory, asking for none (CAP_NO_INVENTORY), and verifies the hello
+  // exactly as ./sync.js does. A seeder that offers discovery
+  // (CAP_DISCOVERY) and opens the channel makes the link BOUNDED: it
+  // resolves without an inventory and candidates come in pages. Any other
+  // seeder ignores the bit and the link waits for the inventory to complete,
+  // as before discovery. One deadline covers socket, Noise, hello and
+  // inventory (or the discovery open). -> the link
+  // { noise, peer, discovery, bounded, incomplete }; rejects Error('sem conexão com o semeador'),
   // or UsageError(SEEDER_BUSY) when the socket closed with 1013 (a fixed
   // text: nothing the seeder sent is ever echoed). A frame over maxFrame
   // destroys the link (run.lost) and marks the read frameCut: after the
@@ -299,7 +347,10 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
       })
       noise = new NoiseSecretStream(true, stream, { keyPair: crypto.keyPair() })
       noise.on('error', noop)
-      const link = { noise, peer: null, verified: false, incomplete: false }
+      // offered: the verified seeder sent CAP_DISCOVERY; supported: its
+      // discovery channel opened (null until known); inventory: the hello's
+      // inventory completed.
+      const link = { noise, peer: null, discovery: null, bounded: false, verified: false, incomplete: false, offered: false, supported: null, inventory: false }
       run.link = link
       let settled = false
       const finish = (err) => {
@@ -317,6 +368,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
           noise.destroy()
           reject(err)
         } else {
+          if (link.bounded) run.bounded = true
           resolve(link)
         }
       }
@@ -336,9 +388,19 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
         try {
           // The muxer only: no core is attached before the hello verified.
           Hypercore.createProtocolStream(noise)
+          // On the muxer before the hello, so protomux pairs the seeder's
+          // open; a seeder from before discovery rejects it (supported false).
+          link.discovery = attachDiscovery(noise, {
+            role: 'member',
+            requestTimeoutMs: L.candidateTimeoutMs,
+            log: (ev) => {
+              if (ev && ev.event === 'peer-dropped') warn('aviso: par descartado (' + key8(ev.peerKey) + '): ' + ev.reason)
+            }
+          })
           link.peer = attachAdmission(noise, {
             role: 'member',
             have: [],
+            caps: CAP_NO_INVENTORY,
             onmessage: (msg, peer) => {
               if (msg.type !== 'hello') return
               link.verified = msg.role === 'seeder' &&
@@ -348,12 +410,35 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
               if (!link.verified) {
                 warn('aviso: o endereço configurado não respondeu como um semeador verificado (' + key8(peer.peerKey) + ')')
                 finish(new Error(NO_SEEDER))
+                return
               }
+              // Only a verified seeder's offer counts: the candidates of a
+              // bounded link come from the same verified peer.
+              if ((peer.remoteCaps & CAP_DISCOVERY) === 0) return
+              link.offered = true
+              link.discovery.supported.then((ok) => {
+                link.supported = ok === true
+                if (link.supported) {
+                  link.bounded = true
+                  finish(null)
+                } else if (link.inventory) {
+                  // It offered discovery, so its hello was lean, yet the
+                  // channel never opened: the inventory says nothing.
+                  link.incomplete = true
+                  finish(null)
+                }
+              }, noop)
             },
             oninventory: (peer) => {
               if (!link.verified) return
+              link.inventory = true
               link.incomplete = peer.remoteHave.size < peer.remoteCount
-              finish(null)
+              if (!link.offered) {
+                finish(null)
+              } else if (link.supported === false) {
+                link.incomplete = true
+                finish(null)
+              }
             },
             log: (ev) => {
               if (ev && ev.event === 'inventory-timeout') warn('aviso: inventário incompleto (' + key8(ev.peerKey) + ')')
@@ -403,12 +488,112 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     }
   }
 
-  async function buildSnapshot (run, { follows, blocked, own }) {
+  // A full-inventory link gives today's snapshot (batchOf null). A bounded
+  // link gives an empty one with the own key at batch 0 (START_AT), then
+  // asks the first candidate page; a first page that fails leaves it empty
+  // and the read incomplete.
+  async function buildSnapshot (run, ctx) {
+    const { follows, mod, own } = ctx
     const link = await openLink(run)
     checkAborted(run)
-    const candidates = peekCandidates({ inventory: link.peer.remoteHave, follows, blocked })
-    const order = shuffle(candidates.map(newDiary))
-    return { at: Date.now(), order, incomplete: link.incomplete, bytes: 0, own }
+    if (!link.bounded) {
+      const candidates = peekCandidates({ inventory: link.peer.remoteHave, follows, blocked: mod.blocked })
+      const order = shuffle(candidates.map(newDiary))
+      return { at: Date.now(), order, incomplete: link.incomplete, bytes: 0, own, batchOf: null }
+    }
+    const snap = {
+      at: Date.now(),
+      order: [],
+      incomplete: false,
+      bytes: 0,
+      own,
+      batchOf: new Map([[own, 0]]),
+      keys: new Set(),
+      view: null,
+      after: null,
+      more: true,
+      batch: 0
+    }
+    await loadCandidates(run, snap, ctx)
+    return snap
+  }
+
+  // A candidate page could not be trusted to continue the traversal (stale
+  // view, timeout, closed channel): the next one starts a fresh view from
+  // its first page. The snapshot's diaries and batches stay, so a cursor
+  // keeps its meaning, and a key the fresh view repeats is ignored: no row
+  // of the snapshot is shown twice or skipped.
+  function restartCandidates (snap) {
+    snap.view = null
+    snap.after = null
+    snap.more = true
+  }
+
+  // Asks the next candidate page of a bounded snapshot on the read's link
+  // and appends its new candidates as the next batch, shuffled within it.
+  // The lengths are unsigned hints that only pick candidates, exactly as the
+  // inventory's (peekCandidates: hex64, length >= 2, not followed, not
+  // blocked; the own diary stays as cover); every diary is verified from its
+  // block 0 as always. -> true when a page arrived (even with nothing new),
+  // false when none could be asked or none came (the read is incomplete,
+  // and the run asks no further page).
+  async function loadCandidates (run, snap, ctx) {
+    const link = run.link
+    // The hello inventory stopped at MAX_INVENTORY; batches stop there too,
+    // so a seeder that keeps naming new keys (with no blocks to verify)
+    // cannot grow the snapshot for its whole life.
+    if (snap.keys.size >= L.maxCandidates) {
+      snap.more = false
+      return true
+    }
+    if (run.candidatesFailed || run.candidatePages >= L.candidatePages || link === null || !link.bounded) {
+      run.candidatesFailed = true
+      return false
+    }
+    run.candidatePages++
+    const left = ctx.deadline - PEEK_MIN_FETCH_MS - Date.now()
+    trace({ type: 'candidates', view: snap.view, after: snap.after })
+    const askedAt = clock()
+    let res = null
+    let timer = null
+    try {
+      const request = link.discovery.page({ after: snap.after, limit: L.candidates, view: snap.view })
+      // Past the page deadline the answer is not waited for; nothing is
+      // known about the traversal then, so it is kept as it was.
+      const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), Math.max(1, left)) })
+      res = await Promise.race([request.catch(() => false), late])
+    } finally {
+      clearTimeout(timer)
+      run.times.inventory += clock() - askedAt
+    }
+    checkAborted(run)
+    if (res === null) {
+      run.candidatesFailed = true
+      return false
+    }
+    if (res === false || res.stale === true) {
+      restartCandidates(snap)
+      run.candidatesFailed = true
+      return false
+    }
+    snap.view = res.view
+    snap.after = res.next
+    snap.more = res.next !== null
+    const batch = snap.batch++
+    const fresh = peekCandidates({
+      inventory: res.items.map((it) => [it.key, it.length]),
+      follows: ctx.follows,
+      blocked: ctx.mod.blocked
+    }).filter((c) => !snap.keys.has(c.key))
+    const added = shuffle(fresh.map(newDiary))
+    for (const diary of added) {
+      snap.keys.add(diary.key)
+      // The own key keeps batch 0 (START_AT relies on it).
+      if (!snap.batchOf.has(diary.key)) snap.batchOf.set(diary.key, batch)
+      snap.order.push(diary)
+      refresh(diary, ctx)
+    }
+    return true
   }
 
   // Keeps only what lib/peek.js retainRecords keeps and accounts its bytes.
@@ -752,6 +937,10 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     if (cursor !== null && (snapshot === null || Date.now() - snapshot.at > L.snapshotTtlMs)) {
       throw new UsageError('A lista expirou; atualize para continuar.')
     }
+    let snap = snapshot
+    // Checked before EVERY block request, by every worker.
+    const cut = () => Date.now() >= deadline - PEEK_MIN_FETCH_MS || run.budget >= L.pageMaxBytes || snap.bytes >= L.snapshotMaxBytes || run.lost || run.link === null
+    const ctx = { follows, mod, deadline, cut, now: Date.now() }
     if (first) {
       const raw = await ownKey()
       checkAborted(run)
@@ -760,19 +949,44 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
       // The previous snapshot stays until this one exists: a failed refresh
       // must not strand the list on screen. Idle expiry, abort() and close()
       // still drop it.
-      const built = await buildSnapshot(run, { follows, blocked: mod.blocked, own })
+      const built = await buildSnapshot(run, { ...ctx, own })
       checkAborted(run)
       snapshot = built
+      snap = built
     }
-    const snap = snapshot
-    // Checked before EVERY block request, by every worker.
-    const cut = () => Date.now() >= deadline - PEEK_MIN_FETCH_MS || run.budget >= L.pageMaxBytes || snap.bytes >= L.snapshotMaxBytes || run.lost || run.link === null
-    const ctx = { follows, mod, deadline, cut, now: Date.now() }
     for (const diary of snap.order) refresh(diary, ctx)
-    let incomplete = snap.incomplete
+    const bounded = snap.batchOf !== null
+    let incomplete = snap.incomplete || run.candidatesFailed
+    // A bounded page that cannot load the candidates it waits for ends
+    // where it stands: its cursor is its last item, or the cursor it was
+    // given, or START_AT; the next read loads the rest of the round from
+    // there, so nothing it skipped is lost.
+    const held = (p) => {
+      if (p.more !== true) return p
+      const last = p.items[p.items.length - 1]
+      let next
+      if (last !== undefined) next = { round: last.round, at: last.at, author: last.author, seq: last.seq }
+      else if (cursor !== null) next = { round: cursor.round, at: cursor.at, author: cursor.author, seq: cursor.seq }
+      else next = { round: 0, at: START_AT, author: snap.own, seq: 1 }
+      return { items: p.items, next, needs: [] }
+    }
+    const pageOf = (diaries) => buildPeekPage({ diaries, limit, after: cursor, hidden: snap.own, batchOf: snap.batchOf, more: bounded && snap.more })
     let page
     while (true) {
-      page = buildPeekPage({ diaries: visible(snap), limit, after: cursor, hidden: snap.own })
+      page = pageOf(visible(snap))
+      if (page.needs.length === 0 && page.more === true) {
+        // The round ran out before the page filled and the snapshot holds
+        // more candidates: ask the next page on this read's link (opened
+        // when needed), paced by the discovery channel and bounded per read.
+        if (run.link === null && !run.overBudget && !run.lost && !run.candidatesFailed) {
+          await openLink(run)
+          checkAborted(run)
+        }
+        if (!cut() && await loadCandidates(run, snap, ctx)) continue
+        incomplete = true
+        page = held(page)
+        break
+      }
       if (page.needs.length === 0) break
       // A continuation needing no fetch opens no link; one needing fetches
       // opens a fresh one and reuses the cached blocks. A link destroyed by
@@ -791,12 +1005,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
         // before the cursor is missed until a fresh first page; incomplete
         // tells the person to refresh.
         const pending = new Set(page.needs)
-        page = buildPeekPage({
-          diaries: visible(snap).map((d) => (pending.has(d.key) ? { ...d, exhausted: true } : d)),
-          limit,
-          after: cursor,
-          hidden: snap.own
-        })
+        page = held(pageOf(visible(snap).map((d) => (pending.has(d.key) ? { ...d, exhausted: true } : d))))
         break
       }
       const wanted = new Set(page.needs)
@@ -844,7 +1053,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
   function slowRead (run, total) {
     if (run.aborted || !(total > PEEK_SLOW_READ_MS)) return
     const ms = (n) => Math.max(0, Math.round(n)) + ' ms'
-    warn('espiadinha: conexão ' + ms(run.times.connect) + ', inventário ' + ms(run.times.inventory) +
+    warn('espiadinha: conexão ' + ms(run.times.connect) + (run.bounded ? ', candidatos ' : ', inventário ') + ms(run.times.inventory) +
       ', blocos ' + ms(run.times.blocks) + ', total ' + ms(total))
   }
 
@@ -860,9 +1069,13 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     // cores: what closes each window in flight (its gets' sessions, then its
     // memory core). pending: block gets in flight on the link (getBlock).
     // times: ms spent
-    // dialling up to the verified hello, waiting for the inventory and
-    // fetching blocks, for the slow-read line.
-    const run = { link: null, cores: new Set(), aborted: false, lost: false, budget: 0, pending: 0, overBudget: false, frameCut: false, times: { connect: 0, inventory: 0, blocks: 0 } }
+    // dialling up to the verified hello, waiting for the inventory (or, on a
+    // bounded link, the discovery open and the candidate pages) and
+    // fetching blocks, for the slow-read line. candidatePages: candidate
+    // pages asked by this read; candidatesFailed: one could not be asked or
+    // did not come, so this read asks no more; bounded: a link of this read
+    // was bounded.
+    const run = { link: null, cores: new Set(), aborted: false, lost: false, budget: 0, pending: 0, overBudget: false, frameCut: false, candidatePages: 0, candidatesFailed: false, bounded: false, times: { connect: 0, inventory: 0, blocks: 0 } }
     current = run
     const startedAt = clock()
     try {
