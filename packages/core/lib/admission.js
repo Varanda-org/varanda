@@ -40,6 +40,12 @@ const SEND_BURST_MARGIN_DIVISOR = 16
 // count one each. An overflow drops the peer with reason 'send-backlog'.
 const MAX_SEND_BACKLOG = 2 * MAX_INVENTORY + 64
 
+// Capability bits in the channel's open handshake (docs §4). A peer that
+// sends none (every peer before them) has caps 0, and unknown bits are
+// ignored, so either side may be older than the other.
+const CAP_NO_INVENTORY = 1 // a member asks for no inventory
+const CAP_DISCOVERY = 2 // a seeder offers lean hellos and varanda/discovery/1
+
 const HEX64 = /^[0-9a-f]{64}$/
 const HEX64_ANY = /^[0-9a-fA-F]{64}$/
 // A rejected.reason is a token, never free text (S4).
@@ -116,6 +122,31 @@ function validateMessage (msg) {
   }
 }
 
+function isCaps (n) {
+  return Number.isSafeInteger(n) && n >= 0
+}
+
+// The open handshake: one compact uint, and nothing at all for caps 0, so a
+// peer without capabilities opens the channel exactly as before. Decoding is
+// tolerant: no bytes (an older peer) or bytes that do not parse read as 0.
+const capsEncoding = {
+  preencode (state, caps) {
+    if (caps) c.uint.preencode(state, caps)
+  },
+  encode (state, caps) {
+    if (caps) c.uint.encode(state, caps)
+  },
+  decode (state) {
+    if (state.start >= state.end) return 0
+    try {
+      const caps = c.uint.decode(state)
+      return isCaps(caps) ? caps : 0
+    } catch {
+      return 0
+    }
+  }
+}
+
 // Token bucket: `burst` tokens, refilled at `rate` per second, on a
 // monotonic clock (a wall-clock step must not drain or stall it). take()
 // consumes one token when available; force(n) consumes n even into debt (our
@@ -158,6 +189,8 @@ function attachAdmission (socket, opts = {}) {
     onclose = noop,
     oninventory = noop,
     log = noop,
+    caps = 0,
+    lean = false,
     helloTimeoutMs = HELLO_TIMEOUT_MS, // injectable for tests
     messageBurst = MESSAGE_BURST, // injectable for tests
     messageRate = MESSAGE_RATE // injectable for tests
@@ -169,6 +202,9 @@ function attachAdmission (socket, opts = {}) {
   // Never send a hello the receiver rejects (count > MAX_INVENTORY).
   if (have.length > MAX_INVENTORY) throw new TypeError('inventory over MAX_INVENTORY')
   if (!(messageBurst >= 1) || !(messageRate > 0)) throw new TypeError('invalid message rate limits')
+  if (!isCaps(caps)) throw new TypeError('caps must be a non-negative integer')
+  // Only a seeder sends lean hellos; a member's own inventory never shrinks.
+  const offerLean = role === 'seeder' && lean === true
 
   const mux = socket && socket.noiseStream && socket.noiseStream.userData && socket.noiseStream.userData.isProtomux
     ? socket.noiseStream.userData
@@ -209,6 +245,8 @@ function attachAdmission (socket, opts = {}) {
     remoteCert: null,
     remoteCount: null,
     remoteHave: new Map(),
+    remoteCaps: 0,
+    lean: false, // we send this peer no inventory (it asked, we offer it)
     inventoryComplete: false,
     badMessages: 0,
     opened: new Promise((resolve) => { resolveOpened = resolve }),
@@ -218,13 +256,13 @@ function attachAdmission (socket, opts = {}) {
     queued: () => backlogLive // our sends waiting (test inspection)
   }
 
-  const channel = mux.createChannel({ protocol: PROTOCOL, onopen, onclose: onchannelclose })
+  const channel = mux.createChannel({ protocol: PROTOCOL, handshake: capsEncoding, onopen, onclose: onchannelclose })
   if (channel === null) throw new Error('duplicate admission channel')
 
   const message = channel.addMessage({ encoding: c.buffer, onmessage: onraw })
 
   socket._varandaPeer = peer
-  channel.open()
+  channel.open(caps)
   // The hello timeout runs from here (the channel is opened at once): a
   // peer that never opens the channel is dropped too.
   helloTimer = setTimeout(() => {
@@ -255,6 +293,8 @@ function attachAdmission (socket, opts = {}) {
 
   function send (msg) {
     if (closed || !validateMessage(msg)) return false
+    // A lean peer gets no inventory: growth broadcasts are dropped here.
+    if (peer.lean && msg.type === 'have') return true
     pacedSend(msg)
     return true
   }
@@ -360,9 +400,21 @@ function attachAdmission (socket, opts = {}) {
     channel.close()
   }
 
-  function onopen () {
+  function onopen (remoteCaps) {
     if (closed) return
     isOpen = true
+    peer.remoteCaps = isCaps(remoteCaps) ? remoteCaps : 0
+    if (offerLean && (peer.remoteCaps & CAP_NO_INVENTORY)) {
+      peer.lean = true
+      dropQueuedHaves()
+      // A valid v1 hello with no inventory.
+      const hello = { type: 'hello', v: 1, role, count: 0, have: [], cert }
+      rawSend(hello)
+      outbound.force(1)
+      flushBacklog()
+      resolveOpened(true)
+      return
+    }
     const hello = { type: 'hello', v: 1, role, count: have.length, have: have.slice(0, MAX_HELLO_HAVE) }
     if (role === 'seeder') hello.cert = cert
     rawSend(hello)
@@ -373,6 +425,15 @@ function attachAdmission (socket, opts = {}) {
     // Sends made before the channel opened follow the inventory, paced.
     flushBacklog()
     resolveOpened(true)
+  }
+
+  // Haves queued before the channel opened, for a peer that turned out lean.
+  function dropQueuedHaves () {
+    for (const entry of backlog) {
+      if (!entry.live || entry.msg.type !== 'have') continue
+      untrackEntry(entry)
+      killEntry(entry)
+    }
   }
 
   // A channel that closes before it opened, or before a valid hello arrived,
@@ -527,6 +588,8 @@ module.exports = {
   SEND_RATE_DIVISOR,
   SEND_BURST_MARGIN_DIVISOR,
   MAX_SEND_BACKLOG,
+  CAP_NO_INVENTORY,
+  CAP_DISCOVERY,
   HEX64,
   HEX64_ANY,
   REASON_RE,

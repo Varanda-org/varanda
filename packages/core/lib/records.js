@@ -1,8 +1,11 @@
 'use strict'
 
 // Media attachments: a post may carry up to MAX_MEDIA_PER_POST descriptors
-// pointing into a media core (a separate Hypercore whose block 0 is a media
-// header, lib/media.js) that the diary declares with a `media-core` record.
+// (a listing up to feira.MAX_LISTING_MEDIA) pointing into a media core (a
+// separate Hypercore whose block 0 is a media header, lib/media.js) that the
+// diary declares with a `media-core` record. A `delete` record keeps its
+// older limit of MAX_DELETE_RANGES ranges, so readers that predate the post
+// cap still accept it: deleteRecords spreads a post's ranges over several.
 // Moderation lists are signed snapshots outside the diary (lib/blocklist.js).
 // Engagement: `like` and `repost` records toggle a target post ({ author,
 // seq }, seq >= 1) on or off, the last operation per (type, target) wins
@@ -26,7 +29,8 @@ const MEDIA_BLOCK_BYTES = 32768
 const MAX_MEDIA_BLOCKS = 8192 // blocks per media core, header included
 const MAX_MEDIA_BYTES = 268435456 // 256 MiB per media core
 const MAX_MEDIA_CORES = 4 // latest media-core declarations honoured per diary
-const MAX_MEDIA_PER_POST = 4
+const MAX_MEDIA_PER_POST = 10
+const MAX_DELETE_RANGES = 4
 const MAX_MEDIA_ITEM_BLOCKS = 256 // 8 MiB per item
 const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const MAX_MEDIA_DIMENSION = 16384
@@ -375,8 +379,8 @@ function validPreview (card) {
 }
 
 // By index, never every(): a hole in a sparse array is undefined and invalid.
-function validMediaList (media) {
-  if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) return false
+function validMediaList (media, max = MAX_MEDIA_PER_POST) {
+  if (!Array.isArray(media) || media.length < 1 || media.length > max) return false
   for (let i = 0; i < media.length; i++) {
     if (!validDescriptor(media[i])) return false
   }
@@ -385,7 +389,7 @@ function validMediaList (media) {
 
 // By index, never every(): a hole in a sparse array is undefined and invalid.
 function validDeleteRanges (media) {
-  if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) return false
+  if (!Array.isArray(media) || media.length < 1 || media.length > MAX_DELETE_RANGES) return false
   for (let i = 0; i < media.length; i++) {
     const r = media[i]
     if (!isPlainObject(r) || !hasExactKeys(r, DELETE_RANGE_KEYS)) return false
@@ -552,7 +556,7 @@ function check (record, seq) {
   if (type === 'listing' || type === 'listing-edit') {
     const reason = type === 'listing' ? feira.checkListingShape(record) : feira.checkEditShape(record, seq)
     if (reason !== null) return reason
-    if (Object.prototype.hasOwnProperty.call(record, 'media') && !validMediaList(record.media)) return 'media-invalid'
+    if (Object.prototype.hasOwnProperty.call(record, 'media') && !validMediaList(record.media, feira.MAX_LISTING_MEDIA)) return 'media-invalid'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'listing-status') return feira.checkStatusShape(record, seq)
@@ -709,6 +713,17 @@ function deleteRecord ({ seq, at = nowIso(), media } = {}) {
   return build(record, Number.isSafeInteger(seq) ? seq + 1 : 1)
 }
 
+// Every chunk shares one `at`, read once, so the records of one deletion
+// carry the same instant.
+function deleteRecords ({ seq, at = nowIso(), media } = {}) {
+  if (!Array.isArray(media) || media.length <= MAX_DELETE_RANGES) return [deleteRecord({ seq, at, media })]
+  const out = []
+  for (let i = 0; i < media.length; i += MAX_DELETE_RANGES) {
+    out.push(deleteRecord({ seq, at, media: media.slice(i, i + MAX_DELETE_RANGES) }))
+  }
+  return out
+}
+
 function copyPlace (p) {
   if (!isPlainObject(p)) return p
   return { uf: p.uf, city: p.city, bairro: p.bairro }
@@ -862,6 +877,7 @@ module.exports = {
   MAX_MEDIA_BYTES,
   MAX_MEDIA_CORES,
   MAX_MEDIA_PER_POST,
+  MAX_DELETE_RANGES,
   MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES,
   MAX_MEDIA_DIMENSION,
@@ -934,6 +950,7 @@ module.exports = {
   testimonialShowRecord,
   momentRecord,
   deleteRecord,
+  deleteRecords,
   listingRecord,
   listingEditRecord,
   listingStatusRecord,

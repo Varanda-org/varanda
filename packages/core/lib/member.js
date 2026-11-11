@@ -27,6 +27,7 @@ const {
   groupCutRecord,
   groupConfirmRecord,
   deleteRecord,
+  deleteRecords,
   listingRecord,
   listingStatusRecord,
   listingRateRecord,
@@ -489,9 +490,12 @@ async function recordDelete (ctx, { to, kind }) {
       seqs = records.map((r) => r.seq)
     } else {
       const live = liveMediaRefs(raw, seqs)
-      records = pending.map((seq) => {
+      // A reader from before the 10-photo cap rejects a delete with more than
+      // MAX_DELETE_RANGES ranges, so a post's ranges go in several tombstones
+      // of one target, all in this one append.
+      records = pending.flatMap((seq) => {
         const media = freedRanges(recordAt(raw, seq), cores, live)
-        return buildRecord(() => deleteRecord(media.length > 0 ? { seq, at, media } : { seq, at }))
+        return buildRecord(() => deleteRecords(media.length > 0 ? { seq, at, media } : { seq, at }))
       })
     }
     const seq = await appendRecords(diary, records)
