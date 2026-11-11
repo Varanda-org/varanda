@@ -40,11 +40,18 @@
 // PEEK_SNAPSHOT_TTL_MS (the UI keeps the page until the list is refreshed);
 // the association and the account service learn nothing.
 // COST: as docs/rpc.md 5.22 (one WebSocket + Noise + hello/inventory, then
-// per candidate one channel and <= 11 block requests in two phases, 16
-// diaries in parallel, under one page deadline and one byte budget).
-// The budget is charged per block as it arrives and checked before every
-// block request; each worker keeps ONE block in flight and a block over
-// MAX_BLOCK_BYTES ends its diary for the snapshot. FRAMES: the link runs
+// per candidate one channel and <= 11 block requests in two phases, block 0
+// alone and first, then the window with up to PEEK_WINDOW_INFLIGHT (3)
+// blocks in flight (./block-window.js, consumed strictly highest seq
+// first), 16 diaries in parallel, under one page deadline and one byte
+// budget). The budget is charged per block as it arrives, in flight or
+// already abandoned, and checked before every block request; a worker's
+// first get may always go out, a further one only while every get in
+// flight on the link fits under the budget, so in-flight data is bounded
+// by PEEK_PARALLEL x 3 blocks and the overshoot past the budget stays at
+// one block per worker. A block over MAX_BLOCK_BYTES ends its diary for
+// the snapshot. A page over PEEK_SLOW_READ_MS writes one local timing line
+// (connection, inventory, blocks). FRAMES: the link runs
 // behind a frame guard (./ws-stream.js guardedWsStream, @varanda/core
 // lib/frame-guard) bounding every frame the seeder sends after the Noise
 // handshake to PEEK_MAX_FRAME; a frame declaring more cuts the link at its
@@ -96,6 +103,7 @@ const {
   retainRecords
 } = require('@varanda/core/lib/peek')
 const { memoryStorage } = require('./storage')
+const { pipeline } = require('./block-window')
 const { guardedWsStream } = require('./ws-stream')
 const { readerModeration } = require('./member-ops')
 const store = require('./node-store')
@@ -106,20 +114,27 @@ const PEEK_SNAPSHOT_MAX_BYTES = 33554432
 const PEEK_CORE_PAGE_SIZE = 65536
 // No fetch starts with less than this left on the page deadline.
 const PEEK_MIN_FETCH_MS = 250
+// Blocks of one diary's window in flight at once (block 0 always alone and
+// first): about one round trip per 3 blocks instead of one per block.
+const PEEK_WINDOW_INFLIGHT = 3
+// A page slower than this writes one local timing line (never sent).
+const PEEK_SLOW_READ_MS = 1000
 // The largest frame the peek link accepts after the Noise handshake (the
 // FrameGuard bound; sync and seeder links keep MAX_EXTERNAL_FRAME because a
 // member's batches legitimately reach 8 MiB). The peek link receives the
 // seeder's inventory (a hello of at most MAX_HELLO_HAVE = 100 keys inside
 // one admission payload of at most 16 KiB, the rest as one 'have' message
 // each, up to MAX_INVENTORY 4096) and blocks answered for PEEK_PARALLEL
-// workers with ONE block in flight each (<= MAX_BLOCK_BYTES plus its
-// proof), which the seeder may cork into one batch: 16 x ~16.5 KiB is
-// ~264 KiB in the worst legitimate case. MEASURED 2026-10-27
+// workers with up to PEEK_WINDOW_INFLIGHT (3) blocks in flight each (each
+// <= MAX_BLOCK_BYTES plus its proof), which the seeder may cork into one
+// batch: 16 x 3 x 16384 bytes is 768 KiB, ~792 KiB with the proofs, in the
+// worst legitimate case. MEASURED 2026-10-27, with one block in flight
 // (test/frame-guard-client.test.js): a full 7-page read from a real seeder
 // holding 64 diaries of 200 near-4 KiB posts and a media core received 831
 // frames, the largest 11 665 bytes; a full 4096-key inventory from the real
 // admission code, 4027 frames, the largest 9031 bytes.
-// 1 MiB keeps a wide margin over both while refusing a frame 8x larger.
+// 1 MiB stays above that worst case and far above both measurements while
+// refusing a frame 8x larger.
 const PEEK_MAX_FRAME = 1048576
 // A seeder at its connection cap closes the WebSocket with 1013 (try again
 // later); an older one terminates the socket (1006): NO_SEEDER.
@@ -193,7 +208,9 @@ async function pool (items, n, fn) {
 
 // log(text): warnings for the page. limits: test-only overrides of the
 // timings and budgets (connectTimeoutMs, pageTimeoutMs, fetchTimeoutMs,
-// snapshotTtlMs, pageMaxBytes, snapshotMaxBytes, parallel, maxFrame).
+// snapshotTtlMs, pageMaxBytes, snapshotMaxBytes, parallel, windowInflight,
+// maxFrame) and test hooks (now: the slow-read clock; trace(event): every
+// block get, its outcome, its charge and every accepted block).
 // ownKey() returns the viewer's lowercase hex64 key or a Promise of it: the
 // viewer's diary is fetched like any candidate (cover for the anonymous
 // link) and hidden from their own page.
@@ -208,7 +225,10 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     pageMaxBytes: PEEK_PAGE_MAX_BYTES,
     snapshotMaxBytes: PEEK_SNAPSHOT_MAX_BYTES,
     parallel: PEEK_PARALLEL,
+    windowInflight: PEEK_WINDOW_INFLIGHT,
     maxFrame: PEEK_MAX_FRAME,
+    now: Date.now,
+    trace: noop,
     ...(limits || {})
   }
 
@@ -222,6 +242,21 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
 
   function warn (text) {
     try { log(text) } catch {}
+  }
+
+  // Test hook only: every block get, its outcome and every charge.
+  function trace (ev) {
+    try { L.trace(ev) } catch {}
+  }
+
+  // The clock of the slow-read line only (deadlines use Date.now).
+  function clock () {
+    try {
+      const t = L.now()
+      return Number.isFinite(t) ? t : Date.now()
+    } catch {
+      return Date.now()
+    }
   }
 
   function checkAborted (run) {
@@ -242,11 +277,14 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
   // inventory (this link not resolved yet) the read fails with
   // 'sem conexão com o semeador' instead. The warning is logged either way.
   function openLink (run) {
+    const dialAt = clock()
+    let helloAt = null
     return new Promise((resolve, reject) => {
       let socket
       try {
         socket = createSocket(seederUrl)
       } catch {
+        run.times.connect += clock() - dialAt
         reject(new Error(NO_SEEDER))
         return
       }
@@ -268,6 +306,13 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
         if (settled) return
         settled = true
         clearTimeout(timer)
+        const endAt = clock()
+        if (helloAt === null) {
+          run.times.connect += endAt - dialAt
+        } else {
+          run.times.connect += helloAt - dialAt
+          run.times.inventory += endAt - helloAt
+        }
         if (err) {
           noise.destroy()
           reject(err)
@@ -299,6 +344,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
               link.verified = msg.role === 'seeder' &&
                 peer.peerKey !== null &&
                 seederCertForKey(peer.remoteCert, peer.peerKey, association).ok
+              if (link.verified) helloAt = clock()
               if (!link.verified) {
                 warn('aviso: o endereço configurado não respondeu como um semeador verificado (' + key8(peer.peerKey) + ')')
                 finish(new Error(NO_SEEDER))
@@ -460,10 +506,53 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     return raw.byteLength <= MAX_BLOCK_BYTES
   }
 
+  // One raw get on the read's link, counted in run.pending while in flight
+  // and charged to the budget on ARRIVAL, exactly once, whether or not the
+  // window later uses the block. -> { raw, ok (not oversized), t } or
+  // { raw: null, t } when it failed (t: the timeout it was given).
+  function getBlock (run, q, key, seq, t) {
+    run.pending++
+    trace({ type: 'get', key, seq })
+    return q.get(seq, { raw: true, timeout: t }).then((raw) => {
+      run.pending--
+      if (raw === null || raw === undefined) {
+        trace({ type: 'settle', key, seq, bytes: null })
+        return { raw: null, t }
+      }
+      trace({ type: 'settle', key, seq, bytes: raw.byteLength })
+      const ok = charge(run, raw)
+      trace({ type: 'charge', key, seq, bytes: raw.byteLength, budget: run.budget })
+      return { raw, ok, t }
+    }, () => {
+      run.pending--
+      trace({ type: 'settle', key, seq, bytes: null })
+      return { raw: null, t }
+    })
+  }
+
   async function fetchWindow (run, snap, diary, ctx) {
     const link = run.link
     const q = new Hypercore(memoryStorage({ pageSize: PEEK_CORE_PAGE_SIZE }), b4a.from(diary.key, 'hex'), { valueEncoding: 'binary' })
-    run.cores.add(q)
+    const sessions = new Map() // seq -> the session of its window get in flight
+    let win = null
+    let closing = null
+    // What run.cores holds for this window: every path that ends it (its
+    // own end, abort, a lost link, the budget cut) closes through here.
+    // Closing q does NOT close its sessions (hypercore 10), so the window
+    // gets, each on its own session, are cancelled first, then q. Idempotent.
+    const closer = {
+      close () {
+        if (closing === null) {
+          if (win !== null) win.stop()
+          const open = [...sessions.values()]
+          sessions.clear()
+          trace({ type: 'closed', key: diary.key, cancelled: open.length })
+          closing = Promise.allSettled(open.map((s) => s.close())).then(() => q.close())
+        }
+        return closing
+      }
+    }
+    run.cores.add(closer)
     try {
       await q.ready()
       if (run.aborted || run.lost || link === null || link.noise.destroyed) return
@@ -471,11 +560,9 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
       const timeout = () => Math.max(1, Math.min(L.fetchTimeoutMs, ctx.deadline - Date.now()))
       const firstWindow = diary.length === null
       if (firstWindow) {
-        let raw0 = null
         const t0 = timeout()
-        try {
-          raw0 = await q.get(0, { raw: true, timeout: t0 })
-        } catch {}
+        const first = await getBlock(run, q, diary.key, 0, t0)
+        const raw0 = first.raw
         if (raw0 === null) {
           // Ended by the budget cut, a lost link or the page deadline (a
           // timeout shorter than the fetch timeout): not a verdict on the
@@ -488,7 +575,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
           refresh(diary, ctx)
           return
         }
-        if (!charge(run, raw0)) {
+        if (!first.ok) {
           oversized(diary, ctx)
           return
         }
@@ -534,61 +621,104 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
         refresh(diary, ctx)
         return
       }
-      // ONE block in flight per worker (highest seq first, as peekWindow
-      // orders them): the budget is checked before every request and
-      // charged as every block arrives, so in-flight data is bounded by
-      // PEEK_PARALLEL blocks. The blocks are buffered in `got` until the
-      // window is accepted.
+      // Up to L.windowInflight blocks of this diary in flight (highest seq
+      // first, as peekWindow orders them), consumed strictly in that order
+      // so every rule below sees the blocks as a serial read would. The
+      // budget is checked before every request and charged as every block
+      // arrives (getBlock); a block that is already in flight when the
+      // window stops is still charged and then dropped. The window's first
+      // get may always go out (one block per worker, as before); a further
+      // one only while every get in flight on the link still fits under the
+      // page budget, so the overshoot stays at PEEK_PARALLEL blocks. The
+      // blocks are buffered in `got` until the window is accepted.
       const got = []
       const absent = []
       const gone = deletedTargets(diary.records, diary.length)
       let hole = false
-      for (const seq of seqs) {
-        if (ctx.cut()) break
-        // A block a tombstone already read deleted (the window is read
-        // highest seq first, so the tombstone comes before its target) is
-        // never asked for: seeders clear it, and a get would only wait for
-        // the timeout. It counts as fetched, absent.
-        if (gone.has(seq)) {
-          absent.push(seq)
-          continue
+      let mine = 0
+      const GONE = { gone: true }
+      win = pipeline({
+        seqs,
+        inflight: L.windowInflight,
+        canStart: () => !ctx.cut() && run.overBudget !== true &&
+          (mine === 0 || run.budget + (run.pending + 1) * MAX_BLOCK_BYTES < L.pageMaxBytes),
+        start: (seq) => {
+          // A block a tombstone already read deleted is never asked for:
+          // seeders clear it, and a get would only wait for the timeout.
+          if (gone.has(seq)) return GONE
+          // A window already closed starts nothing (q takes no new session).
+          if (closing !== null) return { raw: null, t: 0 }
+          mine++
+          // Each get on its own session of the memory core: closing that
+          // session cancels the get and drops its block request (hypercore
+          // clearRequests), the only per-request cancel hypercore offers.
+          const s = q.session()
+          sessions.set(seq, s)
+          return getBlock(run, s, diary.key, seq, timeout()).finally(() => {
+            mine--
+            sessions.delete(seq)
+            s.close().catch(noop)
+          })
+        },
+        // A block deleted by a tombstone consumed while its get was already
+        // in flight is not waited for: seeders clear it, so the get would
+        // only end at the fetch timeout. Its get is cancelled; it keeps
+        // counting in run.pending, mine and the pipeline's bound until it
+        // settles, and is charged only if a block really arrived first.
+        skip: (seq) => gone.has(seq),
+        cancel: (seq) => {
+          const s = sessions.get(seq)
+          if (s !== undefined) s.close().catch(noop)
         }
-        let raw
-        const t = timeout()
-        try {
-          raw = await q.get(seq, { raw: true, timeout: t })
-        } catch {
-          const timedOut = !run.lost && !run.aborted && !run.overBudget && t >= L.fetchTimeoutMs
-          // A hole the seeder left: the window is never extended past it.
-          // A get ended by the budget cut, a lost link or the page deadline
-          // (a timeout shorter than the fetch timeout) is not one. A head
-          // block too: only a block a tombstone already read deleted counts
-          // as absent (above); any other one may be a live profile or the
-          // tombstone of the block below it, so it is never cached as
-          // fetched and nothing below it is read.
-          if (timedOut) hole = true
-          break
+      })
+      try {
+        for await (const { seq, result } of win) {
+          // A block a tombstone read deleted (the window is read highest seq
+          // first, so the tombstone comes before its target) counts as
+          // fetched, absent, even when its get was already in flight: what
+          // arrived for it is ignored.
+          if (gone.has(seq)) {
+            absent.push(seq)
+            continue
+          }
+          if (result === undefined || result.raw === null) {
+            const timedOut = result !== undefined && !run.lost && !run.aborted && !run.overBudget && result.t >= L.fetchTimeoutMs
+            // A hole the seeder left: the window is never extended past it,
+            // and the lower blocks already in flight are dropped. A get ended
+            // by the budget cut, a lost link or the page deadline (a timeout
+            // shorter than the fetch timeout) is not one. A head block too:
+            // only a block a tombstone already read deleted counts as absent
+            // (above); any other one may be a live profile or the tombstone
+            // of the block below it, so it is never cached as fetched and
+            // nothing below it is read.
+            if (timedOut) hole = true
+            break
+          }
+          if (!result.ok) {
+            oversized(diary, ctx)
+            return
+          }
+          // A later window runs on a fresh core: a block is accepted only
+          // while the core stands at the snapshot's verified length with the
+          // same Merkle roots (checked once the first block upgraded it and
+          // again as every block is consumed); otherwise everything this
+          // window fetched is discarded.
+          if (!firstWindow && !(await sameHistory(q, diary))) {
+            // A cut link is not a verdict either: this window is discarded
+            // and the diary stays pending for a later read.
+            if (cutLink(run, link)) return
+            changed(diary, ctx)
+            return
+          }
+          const record = decodeBlock(result.raw)
+          got.push({ seq, record })
+          trace({ type: 'accept', key: diary.key, seq })
+          const target = tombstoneTarget(record, seq, diary.length)
+          if (target !== null) gone.add(target)
         }
-        if (!charge(run, raw)) {
-          oversized(diary, ctx)
-          return
-        }
-        // A later window runs on a fresh core: a block is accepted only
-        // while the core stands at the snapshot's verified length with the
-        // same Merkle roots (checked once the first block upgraded it and
-        // again after every block); otherwise everything this window
-        // fetched is discarded.
-        if (!firstWindow && !(await sameHistory(q, diary))) {
-          // A cut link is not a verdict either: this window is discarded and
-          // the diary stays pending for a later read.
-          if (cutLink(run, link)) return
-          changed(diary, ctx)
-          return
-        }
-        const record = decodeBlock(raw)
-        got.push({ seq, record })
-        const target = tombstoneTarget(record, seq, diary.length)
-        if (target !== null) gone.add(target)
+      } finally {
+        // The gets still in flight are cancelled when the window closes below.
+        win.stop()
       }
       if (hole) diary.failed = true
       for (const e of got) diary.seqs.add(e.seq)
@@ -602,8 +732,8 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
       diary.failed = true
       refresh(diary, ctx)
     } finally {
-      run.cores.delete(q)
-      await q.close().catch(noop)
+      run.cores.delete(closer)
+      await closer.close().catch(noop)
     }
   }
 
@@ -671,6 +801,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
       }
       const wanted = new Set(page.needs)
       const batch = snap.order.filter((d) => wanted.has(d.key))
+      const blocksAt = clock()
       await pool(batch, L.parallel, async (diary) => {
         if (run.aborted) return
         if (cut()) {
@@ -682,6 +813,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
         // arrives (charge), never through a local read before an await.
         await fetchWindow(run, snap, diary, ctx)
       })
+      run.times.blocks += clock() - blocksAt
       checkAborted(run)
       if (run.overBudget || run.frameCut) incomplete = true
     }
@@ -706,6 +838,16 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     return { items: page.items, next: page.next, diaries: shown.length, skipped, incomplete }
   }
 
+  // A page over PEEK_SLOW_READ_MS writes ONE local line saying where the
+  // time went (the Sincronização screen; it never leaves the device). Only
+  // durations: no key, no address, nothing the seeder sent.
+  function slowRead (run, total) {
+    if (run.aborted || !(total > PEEK_SLOW_READ_MS)) return
+    const ms = (n) => Math.max(0, Math.round(n)) + ' ms'
+    warn('espiadinha: conexão ' + ms(run.times.connect) + ', inventário ' + ms(run.times.inventory) +
+      ', blocos ' + ms(run.times.blocks) + ', total ' + ms(total))
+  }
+
   // -> { items, next, diaries, skipped, incomplete } (docs/rpc.md 5.22).
   // A concurrent read is refused (UsageError 'espiadinha já em andamento');
   // abort() rejects the running one with Error('sem conexão com o semeador').
@@ -715,11 +857,18 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     if (!Number.isSafeInteger(limit) || limit < 1) throw new UsageError('limit inválido')
     const first = after === undefined || after === null
     if (!first && !isPeekCursor(after)) throw new UsageError('after inválido')
-    const run = { link: null, cores: new Set(), aborted: false, lost: false, budget: 0, overBudget: false, frameCut: false }
+    // cores: what closes each window in flight (its gets' sessions, then its
+    // memory core). pending: block gets in flight on the link (getBlock).
+    // times: ms spent
+    // dialling up to the verified hello, waiting for the inventory and
+    // fetching blocks, for the slow-read line.
+    const run = { link: null, cores: new Set(), aborted: false, lost: false, budget: 0, pending: 0, overBudget: false, frameCut: false, times: { connect: 0, inventory: 0, blocks: 0 } }
     current = run
+    const startedAt = clock()
     try {
       return await readWith(run, { limit, cursor: first ? null : after, first })
     } finally {
+      slowRead(run, clock() - startedAt)
       closeLink(run)
       for (const q of run.cores) q.close().catch(noop)
       // Guarded by identity: an aborted read never touches a newer one.
