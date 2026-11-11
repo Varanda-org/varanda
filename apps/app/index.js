@@ -3,6 +3,9 @@ import './src/cryptoPolyfill'
 
 import { registerRootComponent } from 'expo'
 
+// Before the root component: a background launch runs the refresh task
+// (defined at this module's top level) without ever rendering the app.
+import './src/backgroundTask'
 import { sweepMediaCache } from './src/media/display'
 import { trimKept } from './src/media/keep'
 import App from './App'

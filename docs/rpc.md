@@ -239,7 +239,8 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
 
 ### 5.14 `sync.start`
 
-- Params: `{ once?: boolean, timeoutMs?: integer 1000..600000 }`; `once` defaults to `false`; `timeoutMs` is allowed only with `once: true` (else `USAGE` `'timeoutMs só com once'`) and then defaults to 30000.
+- Params: `{ once?: boolean, timeoutMs?: integer 1000..600000, groups?: boolean }`; `once` defaults to `false`; `timeoutMs` is allowed only with `once: true` (else `USAGE` `'timeoutMs só com once'`) and then defaults to 30000.
+- `groups` defaults to `true`. `groups: false` is allowed only with `once: true` (else `USAGE` `'groups: false só com once'`): the run opens no group core, attaches no group channel and asks no group page, and leaves the stored group state (group cores, kv lists) as it stands. It purges no replica a stored group may still need: no unfollowed replica is purged by the replica index, and the revoked-issuer sweep leaves out every diary listed in kv `groupDiaries` or `groupCerts`, which the next run with groups sweeps together with its group cores; only a blocked binding replica is still purged (the blocked sweep). The own diary, the follows, the blocklist, tombstones and the rest of moderation sync as in any once run. The run's reader still publishes (its group lend answers `null`). Only the browser node honours it (the Node member, `packages/core`, accepts and ignores it); the app's normal boot never passes it.
 - Result: `{ runId: integer }`, returned as soon as the run has started (it does not wait for the run). `runId` is a safe integer in `1..MAX_ID`, new for every run of the node. A `sync.started` event (section 6) is emitted for the run before this response.
 - No identity yet -> `NOT_FOUND` `'identidade não encontrada'` (no run is started, no event).
 - A second `sync.start` while a run is active -> `USAGE` `'sincronização já em andamento'`. The bootstrap, DHT host and association are node configuration.

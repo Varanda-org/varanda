@@ -163,7 +163,7 @@ function validId (id) {
 // installed) and rejects CANCELLED. signOut and reset wait for the
 // post-ceremony part in flight (`finishing`) before they delete the stored
 // session, so a save racing 'Sair' is deleted after it.
-export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = PasskeyPrf, store = sessionStore, epoch = keychainEpoch, local = passkeyLocal, enrolStore = passkeyEnrolStore, random = randomBytes, now = Date.now } = {}) {
+export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = PasskeyPrf, store = sessionStore, epoch = keychainEpoch, local = passkeyLocal, enrolStore = passkeyEnrolStore, random = randomBytes, now = Date.now, whenActive = () => Promise.resolve() } = {}) {
   if (typeof request !== 'function') throw new TypeError('request required')
   if (typeof rpIdOf !== 'function') throw new TypeError('rpId required')
 
@@ -906,7 +906,22 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       const st = await request('identity.status')
       if (gen !== generation) throw cancelled()
       const publicKey = st && st.unlocked === true && typeof st.publicKey === 'string' ? st.publicKey : null
-      const record = publicKey !== null ? await store.load({ rpId, publicKey }).catch(() => null) : null
+      // Not readable now (NOT_ACTIVE) is a failure, never "no stored
+      // session": rebinding then would leave the item on the old passkey.
+      // The passkey sheet can leave the app inactive for a moment, so it
+      // waits for the next active state once and reads again, as resume does.
+      const read = () => store.load({ rpId, publicKey }).catch((err) => { if (err && err.code === 'NOT_ACTIVE') throw err; return null })
+      let record = null
+      if (publicKey !== null) {
+        try {
+          record = await read()
+        } catch (err) {
+          if (!err || err.code !== 'NOT_ACTIVE') throw err
+          try { await whenActive() } catch {}
+          if (gen !== generation) throw cancelled()
+          record = await read()
+        }
+      }
       if (gen !== generation) throw cancelled()
       await request('identity.recoveryBind', { credentialId, userId })
       if (gen !== generation) throw cancelled()
@@ -1195,7 +1210,19 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       return
     }
     if (typeof st.publicKey !== 'string') return
-    const record = await store.load({ rpId, publicKey: st.publicKey }).catch(() => null)
+    // The phone locked between the boot's active check and this read: wait
+    // for it to be active again and read once more. Status waits for this
+    // resume, so the app never sees the deferred state as signed out.
+    const read = () => store.load({ rpId, publicKey: st.publicKey })
+    let record = null
+    try {
+      record = await read()
+    } catch (err) {
+      if (!err || err.code !== 'NOT_ACTIVE') return
+      try { await whenActive() } catch {}
+      if (gen !== generation) return
+      record = await read().catch(() => null)
+    }
     if (record === null || gen !== generation) return
     if (typeof st.credentialId === 'string' && st.credentialId !== record.credentialId) {
       try { await store.clear({ rpId, publicKey: st.publicKey }) } catch {}

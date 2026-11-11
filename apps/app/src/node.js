@@ -142,6 +142,7 @@ import { createMarks, devHookRequest, perfEnabled } from './perfMarks'
 import { recoveryFetch } from './account'
 import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 import { wipeLocalCaches } from './localCaches'
+import { cancelBackgroundRefresh, noteForegroundUse, unregisterBackgroundRefresh, whenActive, whenForeground } from './backgroundTask'
 
 const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
 // At import, not in an effect: a page DM send can then never run before the
@@ -765,6 +766,15 @@ function LiveNodeProvider ({ children }) {
     setFollows((f) => ({ version: f.version, count: null }))
     const holder = {}
     try {
+      // A background refresh (src/backgroundTask.native.js) may hold the one
+      // worklet this process may run: it is stopped first, never raced.
+      await cancelBackgroundRefresh()
+      if (obsolete()) return
+      // The latch above may have opened long ago: the start resumes the
+      // stored session from the keychain, readable only while the phone is
+      // unlocked, so the app must be active now.
+      await whenActive()
+      if (obsolete()) return
       const conn = await connectNode(cfg, {
         onEvent,
         onClose: ({ code }) => {
@@ -892,6 +902,16 @@ function LiveNodeProvider ({ children }) {
     // connect below must not be deduplicated into it.
     while (inflightRef.current !== null) await inflightRef.current
     if (obsolete()) return
+    // A process launched in the background (the refresh task, a push on a
+    // locked phone) waits for its first 'active' state before discovering
+    // the configuration, starting the worklet or reading the keychain: the
+    // stored session is readable only while the device is unlocked, and a
+    // failed read deletes it (src/sessionStore.native.js).
+    await whenForeground()
+    if (obsolete()) return
+    // The background refresh stops 14 days after the last time the app was
+    // opened (src/backgroundTask.native.js).
+    noteForegroundUse()
     if (loadInstallation !== null && !installationLoadedRef.current) {
       installationLoadedRef.current = true
       try { await loadInstallation() } catch {}
@@ -981,6 +1001,9 @@ function LiveNodeProvider ({ children }) {
     // A manual configuration: a pending revalidation of the installation's
     // must not replace it, and a connect in flight must not swallow it.
     attemptsRef.current.begin()
+    // A manual core configuration: the hosted account's background refresh
+    // must not run against it.
+    if (!cfg || cfg.kind !== 'hosted') unregisterBackgroundRefresh()
     while (inflightRef.current !== null) await inflightRef.current
     const conn = connRef.current
     setConnection(null)

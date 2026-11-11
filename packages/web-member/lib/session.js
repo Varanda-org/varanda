@@ -1184,7 +1184,7 @@ function createBrowserSession ({
   // internal: a gate or push run of the session itself (its line names it;
   // it never changes syncIntent). onOwnSynced: called on the run's first
   // own-synced. -> the run record.
-  function startRun ({ once, timeoutMs, internal = false, label = null, onOwnSynced = noop, onGroupProgress = noop }) {
+  function startRun ({ once, timeoutMs, groups = true, internal = false, label = null, onOwnSynced = noop, onGroupProgress = noop }) {
     lastRunId = lastRunId >= MAX_ID ? 1 : lastRunId + 1
     const runId = lastRunId
     const epoch = connection
@@ -1222,6 +1222,7 @@ function createBrowserSession ({
           createSocket,
           once,
           timeoutMs: once ? timeoutMs : undefined,
+          groups: once ? groups !== false : true,
           peeker: diaryPeeker,
           reader,
           followPage: syncOptions.followPage !== undefined ? syncOptions.followPage : followMovedPage,
@@ -4101,7 +4102,8 @@ function createBrowserSession ({
       return { signature }
     }),
 
-    'sync.start': serial(async ({ once, timeoutMs }, epoch) => {
+    'sync.start': serial(async ({ once, timeoutMs, groups }, epoch) => {
+      if (groups === false && once !== true) throw rpcError('USAGE', 'groups: false só com once')
       const gone = () => epoch !== connection
       if (gone()) throw rpcError('USAGE', 'conexão encerrada')
       if (run !== null) throw rpcError('USAGE', 'sincronização já em andamento')
@@ -4111,7 +4113,7 @@ function createBrowserSession ({
       if (run !== null) throw rpcError('USAGE', 'sincronização já em andamento')
       syncIntent = once ? null : 'continuous'
       kickLease() // an explicit start ignores the lease's gap
-      const { runId } = startRun({ once, timeoutMs })
+      const { runId } = startRun({ once, timeoutMs, groups })
       return { runId }
     }),
 

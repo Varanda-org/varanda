@@ -48,6 +48,10 @@ export function uploadDirectory () { return new Directory(Paths.cache, 'varanda-
 const audio = `
 export function sweepVoiceCache () { globalThis.__voiceSweeps = (globalThis.__voiceSweeps || 0) + 1 }
 `
+// The foreground gate (react-native AppState on device): always active here.
+const backgroundTask = `
+export function whenActive () { return Promise.resolve() }
+`
 const installation = `
 export function rpIdOf () { return 'varanda.test' }
 export function installationOrigin () { return 'https://varanda.test' }
@@ -67,6 +71,7 @@ const stubs = {
   './native': url(${JSON.stringify(native)}),
   '../media/audio': url(${JSON.stringify(audio)}),
   '../installation': url(${JSON.stringify(installation)}),
+  '../backgroundTask': url(${JSON.stringify(backgroundTask)}),
   '@varanda/rpc': url(${JSON.stringify(rpc)})
 }
 export async function resolve (specifier, context, next) {
