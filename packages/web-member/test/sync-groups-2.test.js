@@ -12,7 +12,7 @@ const { addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, 
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
 const ops = require('../lib/member-ops')
-const { hex, randomKey, member, seederOverWs, indexed, sync, once, named, held, injectWriters, moderatorSnapshot } = require('./helpers/sync-groups')
+const { hex, randomKey, member, seederOverWs, indexed, sync, once, named, held, lender, injectWriters, moderatorSnapshot } = require('./helpers/sync-groups')
 
 test('a key listed with many distinct hostile hints is gated at most the cap', async (t) => {
   t.timeout(180000)
@@ -112,9 +112,10 @@ test('a gate refused on a hostile listing is tried again for another listing of 
   await store.addGroupReplica(c.storage, group)
   const ev = []
   const ac = new AbortController()
-  const run = sync(c, url, ev, { signal: ac.signal, groupPageMs: 500 })
+  const lent = lender()
+  const run = sync(c, url, ev, { signal: ac.signal, groupPageMs: 500, reader: lent.reader })
   await until(() => named(ev, 'group-skipped').some((e) => e.key === w && e.reason === 'wrong-diary'), { name: 'hostile hint refused', timeoutMs: 20000 })
-  await until(async () => (await held(c, w)) !== null, { name: 'the true listing gated', timeoutMs: 20000 })
+  await until(() => lent.held(w) !== null, { name: 'the true listing gated', timeoutMs: 20000 })
   ac.abort()
   await run
   t.pass('the writer is stored after the true listing')
@@ -143,8 +144,9 @@ test('a blocked group root purges every accepted foreign core of the group', asy
   const own = (await store.readGroupWriters(c.storage)).find((e) => e.group === group).key
   const ev = []
   const ac = new AbortController()
-  const run = sync(c, url, ev, { signal: ac.signal })
-  await until(async () => (await held(c, w)) !== null, { name: 'writer held' })
+  const lent = lender()
+  const run = sync(c, url, ev, { signal: ac.signal, reader: lent.reader })
+  await until(() => lent.held(w) !== null, { name: 'writer held' })
   await seeder._offerBlocklist(moderatorSnapshot(assocKp, { blocked: [group] }), null)
   await until(() => named(ev, 'group-skipped').some((e) => e.key === w && e.reason === 'blocked'), { name: 'writer skipped', timeoutMs: 10000 })
   await until(async () => !(await store.groupCoreExists(c.storage, w)), { name: 'writer purged', timeoutMs: 10000 })
