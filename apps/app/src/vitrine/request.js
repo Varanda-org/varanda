@@ -55,6 +55,7 @@ export function createVitrineRequest (fixtures, options) {
   let pullCursor = 0
   let mediaStart = 1
   const age = { ageVerifiedDate: data.now, ageSince: null, ageSinceUntil: null }
+  const phone = { phoneVerifiedDate: data.now, phoneSince: null }
   const reactions = { like: new Map(), repost: new Map() }
   const live = []
   const deleted = new Map()
@@ -464,6 +465,7 @@ export function createVitrineRequest (fixtures, options) {
     'cert.add': () => ({ seq: 0 }),
     'account.sign': signed,
     'age.sign': signed,
+    'phone.sign': signed,
     'invite.sign': signed,
     'inviteCard.sign': signed,
     // The development build never attributes an arbitrary card.
@@ -488,6 +490,12 @@ export function createVitrineRequest (fixtures, options) {
         age.ageSinceUntil = since === null ? null : iso(since.date) ? since.date : data.now
       }
       return age
+    },
+    'phone.proof': ({ verified, since }) => {
+      const iso = (value) => typeof value === 'string' && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value
+      if (verified !== undefined) phone.phoneVerifiedDate = verified === null ? null : iso(verified.date) ? verified.date : data.now
+      if (since !== undefined) phone.phoneSince = since === null ? null : iso(since.since) ? since.since : data.now
+      return phone
     },
     'sync.status': () => sync,
     'sync.start': ({ once }) => {
@@ -657,6 +665,7 @@ export function createVitrineRequest (fixtures, options) {
       memberCert: true,
       memberCertDate: data.now,
       ...age,
+      ...phone,
       followCount: data.follows.length,
       sync,
       publicDht: false,

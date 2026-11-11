@@ -7058,3 +7058,31 @@ Limites desta caminhada:
 - Conferido em 2026-11-10 com os dados de demonstração do app (Vitrine), no emulador Android, no simulador iOS (iPhone 16e) e no Chrome. Na Vitrine, a foto enviada aparece como "foto indisponível" no feed, então a ordem foi conferida pela forma do quadro, que segue a primeira foto, e não pela imagem.
 - Os rótulos das setas e da capa foram conferidos na árvore de acessibilidade (Android e web), sem ligar TalkBack nem VoiceOver.
 - Na Vitrine o envio termina na hora, então as setas indisponíveis durante o envio não foram observadas; o código usa o mesmo bloqueio do "remover".
+
+## 152. Declaração de celular e `phone.sign` (PR1)
+
+A verificação de celular brasileiro ganha uma declaração assinada pela chave do diário, o método `phone.sign` e os dois atestados do serviço de conta, com `phone.proof`. O número e o código não entram na declaração nem nos atestados.
+
+- Declaração `varanda-phone-v1` (`packages/core/lib/phone.js`, `docs/protocol.md` e `docs/rpc.md` 5.115): cinco linhas unidas por LF, sem LF final, sem data, sem número e sem código. As ações são `send`, `check` e `status`. O membro, o nonce e a associação completam as linhas. A chave do diário assina. O número e o código seguem ao lado da assinatura, só até o serviço de conta.
+- `phone.sign`: o nó do navegador assina e devolve só `{ signature: hex128 }`. Precisa de identidade e não precisa de certificado de membro. Não grava diário, não anexa bloco e não fala na rede. O mesmo código é o nó web dentro do app hospedado.
+- Três superfícies do nó. O nó do navegador e o nó web do app hospedado assinam. O nó do núcleo (`packages/core/lib/session.js`), o `varanda-serve` e a CLI respondem USAGE `assinatura disponível só no navegador`, com ou sem identidade, e não abrem nada. Um nó anterior ao método responde USAGE `método desconhecido`.
+- Atestados (`packages/core/lib/phone-proof.js`, `docs/rpc.md` 5.116): `varanda-phone-verified-v1` (o membro tinha um celular verificado naquela data) e `varanda-phone-since-v1` (desde quando a associação exige um celular verificado). Nenhum carrega número. O `phone-since` não avaliza certificado: só marca a exigência da associação.
+- `phone.proof`: params `{ verified?, since? }`. `verified: null` apaga o atestado do membro (em `age.proof` esse `null` é recusado). `since: null` apaga o da associação. Antes de gravar, o nó confere `verified` com a própria chave, a associação e os emissores revogados, e `since` com a associação e os emissores revogados. Um `since` com data anterior à do atestado guardado, quando este ainda confere, é recusado do mesmo jeito, para que um atestado antigo repetido nunca substitua um mais novo. O kv é `phoneVerified` e `phoneSince`, cada um `{ v: 1, proof }`. O resultado é `{ phoneVerifiedDate, phoneSince }`, os mesmos campos de `node.info`. Só no nó do navegador (e no nó web do app hospedado). O nó do núcleo responde USAGE `disponível só no navegador`. Um objeto que não confere responde USAGE `comprovante de celular inválido` e não grava nada.
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node packages/rpc/test/methods.test.js`
+- `node apps/cli/test/cli.test.js`
+- `node packages/core/test/phone.test.js`
+- `node packages/core/test/phone-proof.test.js`
+- `node packages/core/test/page-proof.test.js`
+- `node packages/core/test/session.test.js`
+- `node packages/web-member/test/session.test.js`
+- `node apps/app/test/vitrine.test.js`
+
+O layout dos bytes da declaração e dos atestados está em `packages/core/lib/phone.js` e `packages/core/lib/phone-proof.js`, e os dois testes do núcleo conferem o vetor exato. O bloco Help (R5.12, exact) de `docs/protocol.md` não muda.
+
+### Não verificado
+
+- O nó web dentro do app hospedado (Android e iOS) não foi exercitado: os testes rodam a sessão do navegador no Node. Nesta etapa nenhuma tela chama `phone.sign` nem `phone.proof`.

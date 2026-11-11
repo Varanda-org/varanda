@@ -24,7 +24,7 @@ test('method list and mutating set', (t) => {
     'group.meta', 'group.post', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
-    'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read',
+    'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'profile.delete', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
@@ -590,6 +590,29 @@ test('age.sign', (t) => {
   }
 })
 
+test('phone.sign', (t) => {
+  const base = { action: 'send', nonce: 'n'.repeat(43) }
+  t.absent(isMutating('phone.sign'))
+  ok(t, 'phone.sign', base, base)
+  ok(t, 'phone.sign', { ...base, action: 'check' })
+  ok(t, 'phone.sign', { ...base, action: 'status' })
+  ok(t, 'phone.sign', { ...base, nonce: 'A-_9'.repeat(32) })
+  bad(t, 'phone.sign', {})
+  for (const k of ['action', 'nonce']) {
+    const p = { ...base }
+    delete p[k]
+    bad(t, 'phone.sign', p, 'missing ' + k)
+  }
+  // The caller never chooses the member, the association or the bytes.
+  for (const k of ['member', 'association', 'payload', 'bytes', 'key', 'phone', 'code']) {
+    bad(t, 'phone.sign', { ...base, [k]: 'ab'.repeat(32) }, 'extra ' + k)
+  }
+  for (const action of ['SEND', 'session', '', null, 1]) bad(t, 'phone.sign', { ...base, action }, 'action ' + action)
+  for (const n of ['n'.repeat(42), 'n'.repeat(129), 'n'.repeat(42) + '=', 'n'.repeat(42) + '+', 1]) {
+    bad(t, 'phone.sign', { ...base, nonce: n }, 'nonce ' + n)
+  }
+})
+
 test('age.proof', (t) => {
   const proof = { type: 'age-verified', member: KEY, date: '2026-10-30T12:00:00.000Z' }
   const since = { type: 'age-since', since: '2026-10-29T00:00:00.000Z' }
@@ -613,6 +636,32 @@ test('age.proof', (t) => {
   ok(t, 'age.proof', { verified: { pad: 'x'.repeat(1024 - 10) } })
   bad(t, 'age.proof', { verified: proof, member: KEY }, 'extra key')
   bad(t, 'age.proof', { proof }, 'unknown key')
+})
+
+test('phone.proof', (t) => {
+  const proof = { type: 'phone-verified', member: KEY, date: '2026-10-30T12:00:00.000Z' }
+  const since = { type: 'phone-since', since: '2026-10-29T00:00:00.000Z' }
+  t.absent(isMutating('phone.proof'))
+  ok(t, 'phone.proof', { verified: proof }, { verified: proof })
+  ok(t, 'phone.proof', { since }, { since })
+  ok(t, 'phone.proof', { since: null }, { since: null })
+  // verified: null clears the stored attestation.
+  ok(t, 'phone.proof', { verified: null }, { verified: null })
+  ok(t, 'phone.proof', { verified: proof, since: null }, { verified: proof, since: null })
+  ok(t, 'phone.proof', { verified: proof, since })
+  bad(t, 'phone.proof', {}, 'neither field')
+  t.is(validateParams('phone.proof', {}).message, 'parâmetro obrigatório: verified')
+  for (const v of ['x', 1, [], true]) {
+    bad(t, 'phone.proof', { verified: v }, 'verified ' + JSON.stringify(v))
+    bad(t, 'phone.proof', { since: v }, 'since ' + JSON.stringify(v))
+  }
+  // Size bound only: the node verifies the signature chain.
+  const big = { pad: 'x'.repeat(1024) }
+  bad(t, 'phone.proof', { verified: big }, 'oversize verified')
+  bad(t, 'phone.proof', { since: big }, 'oversize since')
+  ok(t, 'phone.proof', { verified: { pad: 'x'.repeat(1024 - 10) } })
+  bad(t, 'phone.proof', { verified: proof, member: KEY }, 'extra key')
+  bad(t, 'phone.proof', { proof }, 'unknown key')
 })
 
 test('push.sign', (t) => {

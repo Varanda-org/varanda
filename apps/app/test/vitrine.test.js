@@ -33,6 +33,7 @@ const resultKeys = {
   'cert.add': ['seq'],
   'account.sign': ['signature'],
   'age.sign': ['signature'],
+  'phone.sign': ['signature'],
   'invite.sign': ['signature'],
   'inviteCard.sign': ['signature'],
   'inviteCard.verify': ['ok', 'reason'],
@@ -47,6 +48,7 @@ const resultKeys = {
   'page.sign': ['signature'],
   'page.register': ['actor'],
   'age.proof': ['ageVerifiedDate', 'ageSince', 'ageSinceUntil'],
+  'phone.proof': ['phoneVerifiedDate', 'phoneSince'],
   'sync.start': ['runId'],
   'sync.stop': ['stopped'],
   'sync.status': ['state'],
@@ -98,7 +100,7 @@ const resultKeys = {
   'community.admit': ['ok'],
   'community.meta': ['ok'],
   'community.invitePolicy': ['ok'],
-  'node.info': ['publicKey', 'memberCert', 'memberCertDate', 'ageVerifiedDate', 'ageSince', 'ageSinceUntil', 'followCount', 'sync', 'publicDht', 'groups'],
+  'node.info': ['publicKey', 'memberCert', 'memberCertDate', 'ageVerifiedDate', 'ageSince', 'ageSinceUntil', 'phoneVerifiedDate', 'phoneSince', 'followCount', 'sync', 'publicDht', 'groups'],
   'identity.status': ['exists', 'publicKey', 'legacy', 'unlocked', 'synced', 'resumed', 'passkeyKnown', 'credentialId', 'rpId', 'signedOut'],
   'dm.list': ['conversations', 'next', 'requests', 'inboxUnread'],
   'listing.create': ['seq', 'ref'],
@@ -601,6 +603,8 @@ function samples (f) {
     'account.sign': { phase: 'reserve', nonce, username: 'lia_praca', sub: '' },
     'age.sign': { action: 'result', nonce },
     'age.proof': { verified: { date: f.now }, since: null },
+    'phone.sign': { action: 'send', nonce },
+    'phone.proof': { verified: { date: f.now }, since: null },
     'invite.sign': { action: 'issue', nonce },
     'inviteCard.sign': card,
     'inviteCard.verify': { ...card, member: 'ab'.repeat(32), signature: '0'.repeat(128) },
@@ -998,7 +1002,7 @@ test('page signing covers every documented result variant with fake signatures',
   const cancelled = await answer(t, request, 'page.sign', { action: 'offer', nonce, page, op: { ...base, to: null, exp: null } })
   t.is(cancelled.record.to, null)
   t.is(cancelled.record.exp, null)
-  for (const method of ['account.sign', 'age.sign', 'invite.sign', 'inviteCard.sign', 'push.sign', 'report.sign', 'appeal.sign', 'dm.reportSign', 'terms.sign', 'recovery.sign']) {
+  for (const method of ['account.sign', 'age.sign', 'phone.sign', 'invite.sign', 'inviteCard.sign', 'push.sign', 'report.sign', 'appeal.sign', 'dm.reportSign', 'terms.sign', 'recovery.sign']) {
     t.is((await answer(t, request, method, samples(f)[method])).signature, signature)
   }
   // The development build never vouches for a card.
