@@ -4,6 +4,7 @@
 // followed authors only), the byte cap, the strict parse and the filters.
 const test = require('brittle')
 
+const { FEED_LIMIT_DEFAULT } = require('@varanda/rpc')
 const load = () => import('../src/feedSnapshot.js')
 
 const OWN = 'aa'.repeat(32)
@@ -132,8 +133,9 @@ test('build keeps only the first FEED_LIMIT_DEFAULT rows', async (t) => {
   const { buildSnapshot } = await load()
   const items = Array.from({ length: 40 }, (_, i) => post(FOLLOW, 100 - i))
   const s = buildSnapshot({ ...fixture(), items, cursor: { at: at(61), author: FOLLOW, seq: 61 } })
-  t.is(s.items.length, 27)
-  t.alike(s.cursor, { at: at(74), author: FOLLOW, seq: 74 }, 'the cursor moves to the last kept row')
+  t.is(s.items.length, FEED_LIMIT_DEFAULT)
+  const last = 101 - FEED_LIMIT_DEFAULT
+  t.alike(s.cursor, { at: at(last), author: FOLLOW, seq: last }, 'the cursor moves to the last kept row')
 })
 
 test('over the cap, rows go from the end with their dependents', async (t) => {
@@ -143,7 +145,7 @@ test('over the cap, rows go from the end with their dependents', async (t) => {
   const items = []
   const originals = new Map()
   const countMap = new Map()
-  for (let i = 0; i < 27; i++) {
+  for (let i = 0; i < FEED_LIMIT_DEFAULT; i++) {
     const seq = 1000 - i
     items.push(post(FOLLOW, seq, { text: big, quote: { author: FOLLOW, seq: i + 1 } }))
     originals.set(FOLLOW + ':' + (i + 1), post(FOLLOW, i + 1, { text: big }))
@@ -153,7 +155,7 @@ test('over the cap, rows go from the end with their dependents', async (t) => {
   const bytes = Buffer.byteLength(JSON.stringify(s))
   t.ok(bytes <= SNAPSHOT_MAX_BYTES, 'fits: ' + bytes)
   const n = s.items.length
-  t.ok(n > 0 && n < 27, 'some rows dropped: kept ' + n)
+  t.ok(n > 0 && n < FEED_LIMIT_DEFAULT, 'some rows dropped: kept ' + n)
   t.alike(s.items.map((i) => i.seq), items.slice(0, n).map((i) => i.seq), 'a prefix: dropped from the end')
   t.alike(Object.keys(s.originals).sort(), Array.from({ length: n }, (_, i) => FOLLOW + ':' + (i + 1)).sort(), 'originals of dropped rows gone')
   t.alike(Object.keys(s.counts).sort(), items.slice(0, n).map((i) => FOLLOW + ':' + i.seq).sort(), 'counts of dropped rows gone')
@@ -281,9 +283,9 @@ test('parse rejects text over the cap in UTF-8 bytes, not in UTF-16 units', asyn
   const { buildSnapshot, parseSnapshot, SNAPSHOT_MAX_BYTES } = await load()
   const emoji = '\u{1F600}'.repeat(1000)
   const items = []
-  for (let i = 0; i < 27; i++) items.push(post(FOLLOW, 1000 - i, { text: emoji }))
+  for (let i = 0; i < FEED_LIMIT_DEFAULT; i++) items.push(post(FOLLOW, 1000 - i, { text: emoji }))
   const s = buildSnapshot({ ...fixture(), items, cursor: { at: at(974), author: FOLLOW, seq: 974 } })
-  t.is(s.items.length, 27)
+  t.is(s.items.length, FEED_LIMIT_DEFAULT)
   const json = JSON.stringify(s)
   t.ok(parseSnapshot(json, ctx), 'under the cap parses')
   // Legal JSON whitespace fills the text to the cap in UTF-16 units; the emoji
