@@ -176,6 +176,29 @@ function copyJson (value) {
 
 const DELETABLE = ['post', 'like', 'repost', 'profile', 'listing', 'listing-edit']
 
+// The close list in order, in batches of at most 8, never splitting the
+// tombstones of one target: a reader marks a target deleted from its first
+// tombstone, so after a close cut short between two of them the retry
+// (closeDeletes in ./pages-routes.js) would skip the target and never free
+// the rest of its ranges.
+function closeBatches (records) {
+  const batches = []
+  let batch = []
+  let i = 0
+  while (i < records.length) {
+    let end = i + 1
+    while (end < records.length && end - i < 8 && records[i].type === 'delete' && records[end].type === 'delete' && records[end].seq === records[i].seq) end++
+    if (batch.length + end - i > 8) {
+      batches.push(batch)
+      batch = []
+    }
+    batch.push(...records.slice(i, end))
+    i = end
+  }
+  if (batch.length > 0) batches.push(batch)
+  return batches
+}
+
 function validItem (it) {
   return isPlainObject(it) && validDescriptor(it)
 }
@@ -988,7 +1011,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
   // ---- close and move -------------------------------------------------
 
   // Under the page's chain: the unfollows, the group leaves and the
-  // tombstones the caller built, in batches of at most 8, then the
+  // tombstones the caller built, in batches of at most 8 (closeBatches), then the
   // countersigned page-close (`closed` saved with it); the deleted blocks are
   // cleared (block 0 and tombstones never) and the sealed DM rows removed.
   // The page stays announced and served, read only, so later readers get
@@ -1012,7 +1035,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
           for (const r of deletes) await checkDeleteTarget(p, r)
           const all = [...unfollows, ...leaves, ...deletes]
           try {
-            for (let i = 0; i < all.length; i += 8) await appendBatch(p, all.slice(i, i + 8))
+            for (const batch of closeBatches(all)) await appendBatch(p, batch)
             await appendBatch(p, [closeRecord], () => { p.closed = true })
           } catch (err) {
             throw err.code === 'INVALID_RECORD' ? fail('invalido') : err

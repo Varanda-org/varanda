@@ -1,8 +1,12 @@
 // Pure media planning for the composer. No browser or Node dependencies.
-// Same values as packages/core/lib/records.js.
+// Same values as packages/core/lib/records.js, except the chat cap below.
 export const MEDIA_BLOCK_BYTES = 32768
 export const MAX_MEDIA_ITEM_BLOCKS = 256
-export const MAX_MEDIA_PER_POST = 4
+// Same value as packages/core/lib/records.js.
+export const MAX_MEDIA_PER_POST = 10
+// Photos per chat message. DMs and groups stay at four: MAX_GROUP_MEDIA and
+// the DM inner body budget, which were measured for four items.
+export const MAX_MEDIA_PER_MESSAGE = 4
 export const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 export const MAX_MEDIA_DIMENSION = 16384
 export const MAX_IMAGE_SIDE = 2048
@@ -56,7 +60,12 @@ export function toHex (bytes) {
 }
 
 export function gridLayout (n) {
-  return Number.isInteger(n) && n >= 1 && n <= MAX_MEDIA_PER_POST
-    ? ['one', 'two', 'three', 'four'][n - 1]
-    : null
+  const kinds = ['one', 'two', 'three', 'four']
+  return Number.isInteger(n) && n >= 1 && n <= kinds.length ? kinds[n - 1] : null
+}
+
+// A quote card has no room past four tiles, so the rest is only a count.
+export function mosaicLayout (n) {
+  if (!Number.isInteger(n) || n < 1 || n > MAX_MEDIA_PER_POST) return null
+  return { kind: gridLayout(Math.min(n, 4)), more: Math.max(0, n - 4) }
 }

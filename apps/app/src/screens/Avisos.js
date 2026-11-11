@@ -38,8 +38,9 @@ import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_QUIET_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
   NOTICES_UNSUPPORTED_MESSAGE, NOTICES_WEB_ONLY_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
   compareNotices, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
-  needsAvatar, padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, resolveRowAvatars, rowAvatarSource, seenOnScreen, seenUnion, shouldPoll, snippetOf, writeSeenNamespace
+  needsAvatar, padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, resolveRowAvatars, rowAvatarSource, seenOnScreen, seenUnion, shouldPoll, shouldStartNoticesFirstRead, snippetOf, writeSeenNamespace
 } from '../notices'
+import { getPeekWarmState, isSeederBusyError, subscribePeekWarm, updatePeekWarmState } from '../peek'
 import { isRef } from '../nav'
 import { pagesNotices } from '../pages'
 import { LOCKED_MESSAGE } from '../outbox'
@@ -106,6 +107,7 @@ const isLockedError = (err) => Boolean(err && err.code === 'USAGE' && err.messag
 // background poll) is not an error, it is tried again shortly.
 const BUSY_MESSAGE = 'avisos já em andamento'
 const BUSY_RETRY_MS = 1500
+const EMPTY_ROWS = Object.freeze([])
 const isBusyError = (err) => Boolean(err && err.code === 'USAGE' && err.message === BUSY_MESSAGE)
 // A busy node on a next page: shown with its retry, or the list would stall.
 const AVISOS_BUSY_MORE = 'Os avisos ainda estão carregando. Tente de novo.'
@@ -439,6 +441,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const acting = useActing()
   const pageKey = acting.kind === 'page' ? acting.key : null
   const hosted = node.hosted === true && node.passkey !== null
+  const peekWarm = useSyncExternalStore(subscribePeekWarm, getPeekWarmState, getPeekWarmState)
   // The association line is a page notice, and only while the list can load.
   const showReadLine = usePageReadLine(hosted && pageKey !== null)
   const pageHeader = pageKey ? pageNoticesHeader(pageDisplayName(acting)) : null
@@ -472,7 +475,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     stateRef.current = { ...stateRef.current, ...patch }
     setState(stateRef.current)
   }, [])
-  const { request } = node
+  const { request, promote } = node
   const pageKeyRef = useRef(pageKey)
   pageKeyRef.current = pageKey
   const ownKeyRef = useRef(ownKey)
@@ -484,15 +487,22 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // further page. Acting as yourself calls notices.list, as before. Acting
   // as a page calls pagesNotices once per page of that loop. No push opt-in
   // either way: a page has none.
-  const read = useCallback((mine, after = null, onPage) => {
+  const read = useCallback((mine, after = null, onPage, lane) => {
     const live = () => mine === seqRef.current
     const opts = { limit: NOTICES_LIMIT_DEFAULT, after, live, onPage }
-    if (!pageKeyRef.current) return readNotices(request, opts)
+    // The hidden first read passes its lane through. A tap, a poll and a
+    // later page pass none, so they stay on the visible lane.
+    // Each send looks again: a continuation sent after the tab opened goes
+    // on the visible lane (promote only moves the request still waiting).
+    const send = lane
+      ? (method, params) => request(method, params, activeRef.current ? undefined : lane)
+      : request
+    if (!pageKeyRef.current) return readNotices(send, opts)
     const page = pageKeyRef.current
     return readNotices(async (method, params) => {
       if (method !== 'notices.list') throw new Error('Pedido inválido')
       const member = typeof ownKeyRef.current === 'string' ? ownKeyRef.current.toLowerCase() : ''
-      const data = await pagesNotices({ request }, {
+      const data = await pagesNotices({ request: send }, {
         member,
         page,
         after: params ? params.after : undefined,
@@ -504,6 +514,9 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
 
   const activeRef = useRef(active)
   activeRef.current = active
+  // A hidden first read keeps its rows in state but draws none until the tab is shown once.
+  const shownOnceRef = useRef(false)
+  if (active) shownOnceRef.current = true
   const onBadgeRef = useRef(onBadge)
   onBadgeRef.current = onBadge
   const onSeenStateRef = useRef(onSeenState)
@@ -629,10 +642,13 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     else settle(plan.settle.list, false, false)
   }, [remoteSeen, seenNamespace, hosted, settle])
 
-  const loadFirst = useCallback(async () => {
+  const loadFirst = useCallback(async (opts) => {
     const current = stateRef.current
     if (!hosted || current.unsupported || current.locked) return
     if (pageKeyRef.current && typeof ownKeyRef.current !== 'string') return
+    // Only the scheduled hidden read sets quiet. A tap passes a press event
+    // or nothing, and stays a visible request.
+    const quiet = !!(opts && opts.quiet === true)
     setAvatarCycle((n) => n + 1)
     const mine = ++seqRef.current
     commit({
@@ -664,7 +680,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         })
         painted = true
         settle(items)
-      })
+      }, quiet ? { priority: 'background', token: opts.token } : undefined)
       if (mine !== seqRef.current) return
       backoffRef.current = false
       if (page.supported === false) {
@@ -687,6 +703,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       })
       settle(merged)
     } catch (err) {
+      if (isSeederBusyError(err)) updatePeekWarmState(node.epoch, { busy: true })
       if (mine !== seqRef.current) return
       if (painted && !isLockedError(err)) {
         // A continuation failed after rows were shown: they stay, and the
@@ -720,7 +737,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         }
       }
     }
-  }, [hosted, read, commit, settle, badge])
+  }, [hosted, read, commit, settle, badge, node.epoch])
   loadFirstRef.current = loadFirst
 
   const loadMore = useCallback(async () => {
@@ -822,11 +839,15 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     const shown = active && !prev.active
     const reselected = scrollToTop !== prev.scrollToTop
     const changed = refresh !== prev.refresh
-    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop }
+    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop, warmToken: prev.warmToken }
     if (!active) return
     const current = stateRef.current
     if (current.loading || current.refreshing) {
       if (changed) reloadAfterRef.current = true
+      // Still queued: the same first read moves to the visible lane. Already
+      // in flight, promote does nothing and this show waits, so it is not
+      // sent twice. A pull to refresh is a later visible loadFirst.
+      if (shown) promote(prev.warmToken)
       // Rows a hidden read already painted are on screen now: seen.
       if (shown && current.loadedAt !== null) settle(current.items)
       return
@@ -837,7 +858,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       reloadAfterRef.current = false
       loadFirst()
     } else if (shown && current.loadedAt !== null) settle(current.items)
-  }, [active, refresh, scrollToTop, loadFirst, settle])
+  }, [active, refresh, scrollToTop, loadFirst, settle, promote])
 
   useEffect(() => {
     if (active && !state.loading && !state.refreshing && reloadAfterRef.current) {
@@ -911,19 +932,32 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // The poll runs even when the tab is not active (the screen stays mounted).
   const polling = shouldPoll({ hosted, online: node.online, visible: node.visible }) && !unsupported && !locked
   useEffect(() => {
-    // After the sync run is ready too: its boot reads come first.
-    if (!polling || !node.signals || node.signals.seederVerified !== true || node.signals.ready !== true || stateRef.current.loadedAt !== null || firstReadEpochRef.current === node.epoch) return
+    const canStart = () => shouldStartNoticesFirstRead({
+      hosted,
+      online: node.online,
+      phase: node.phase,
+      visible: node.visible,
+      seederVerified: node.signals?.seederVerified,
+      active: activeRef.current,
+      ...stateRef.current,
+      attempted: firstReadEpochRef.current === node.epoch,
+      epoch: node.epoch,
+      peekWarm: getPeekWarmState()
+    })
+    if (!canStart()) return
     // Only once the app has been quiet: the boot reads come first.
     const wait = node.whenIdle(NOTICES_FIRST_READ_QUIET_MS)
     wait.promise.then(() => {
-      const current = stateRef.current
-      if (current.loadedAt !== null || current.loading || current.refreshing || current.loadingMore) return
+      if (!canStart()) return
       firstReadEpochRef.current = node.epoch
-      previous.current = { ...previous.current, refresh: refreshRef.current }
-      loadFirst()
+      // One token per first read, kept with the refresh it consumes, so
+      // opening the tab can promote this request instead of sending it again.
+      const token = Symbol('avisos-warm')
+      previous.current = { ...previous.current, refresh: refreshRef.current, warmToken: token }
+      loadFirst({ quiet: true, token })
     })
     return () => wait.cancel()
-  }, [polling, node.signals?.seederVerified, node.signals?.ready, node.epoch, node.whenIdle, loadFirst])
+  }, [hosted, node.online, node.phase, node.visible, node.signals?.seederVerified, node.epoch, node.whenIdle, active, state.loadedAt, state.loading, state.refreshing, state.loadingMore, unsupported, locked, peekWarm, loadFirst])
 
   useEffect(() => {
     if (!polling) return
@@ -1044,7 +1078,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const snippets = useSnippets(shownItems, node.request, active && hosted && notice === null, loadedAt)
   return (
     <RefreshableList
-      data={shownItems}
+      data={shownOnceRef.current ? shownItems : EMPTY_ROWS}
       keyExtractor={noticeId}
       renderItem={renderItem}
       extraData={{ now, onOpenMember, onOpenThread, unread, snippets, avatars, profileOf }}

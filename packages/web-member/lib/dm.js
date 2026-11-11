@@ -89,7 +89,7 @@ const { mediaBounds, audioBounds, dmTextBytes, DM_MEDIA_KEYS, AUDIO_MS_TOLERANCE
 const { sealBlob, createBlobClient, fetchBlob } = require('./blob')
 const sodium = require('./sodium-browser')
 const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf } = require('./passkey')
-const { createDmStore } = require('./dm-store')
+const { createDmStore, SUMMARY_PAGE } = require('./dm-store')
 const { createPageHolder, NO_PAGE_KEY, KEY_MISMATCH } = require('./page-dm')
 const { openDmLink, openStampLink } = require('./dm-link')
 const store = require('./node-store')
@@ -207,7 +207,7 @@ function zeroPair (pair) {
 // limits (tests): issueBurst, issuePaceMs, topUpEveryMs, topUpRetryMs,
 // budgetBytes, pageMax, openMax, cacheBytesMax (./dm-store.js), link
 // (dm-link limits), blob (./blob.js createBlobClient limits), fetch
-// (./blob.js fetchBlob limits).
+// (./blob.js fetchBlob limits), fold (the dm-fold fold, to count calls).
 // createStore, fetch and mediaOrigin: tests only.
 function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf } = {}) {
   const L = {
@@ -222,9 +222,13 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     link: {},
     blob: {},
     fetch: {},
+    fold: dmFold.fold,
+    // Tests only: the summary write delay and a gate before the own rows load.
+    summaryDelayMs: undefined,
+    loadGate: null,
     ...(limits || {})
   }
-  const local = createStore({ storage, cacheBytesMax: L.cacheBytesMax })
+  const local = createStore({ storage, cacheBytesMax: L.cacheBytesMax, summaryDelayMs: L.summaryDelayMs, loadGate: L.loadGate })
   // The own store; a held page's is { local, prefix, page, ready } (pageCtx).
   const personal = { local, prefix: '', page: null }
   const pages = createPageHolder({ storage, association })
@@ -273,6 +277,11 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // and messages whose blob is gone (this unlock only).
   const opening = new Map()
   const gone = new Set()
+  // The last fold per store (own or a page's): { version, own, follows,
+  // seen, result }. Reused only while the store's version, the self key and
+  // the kv follows and seen texts are all unchanged; every caller only
+  // reads the result. Memory only, dropped on lock and unlock.
+  const foldMemo = new Map()
   // Opens waiting for one of the L.openMax slots, in order; job =
   // { key, background, start, cancel }.
   const openQueue = []
@@ -342,9 +351,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // Any throw leaves no key material behind: the derived pair and key are
-  // zeroed and the store locked.
-  async function unlock (prf) {
+  // zeroed and the store locked. Resolves once the rows are loaded; onKey()
+  // runs before that, once the keys are installed and the list summary
+  // read (keyReady()), so dm.list may answer a first page from it.
+  async function unlock (prf, { onKey = null } = {}) {
     const gen = ++generation
+    foldMemo.clear()
     let pair = null
     let key = null
     let installed = false
@@ -354,10 +366,16 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       pair = await dmBoxKeyPairFromPrf(prf, g, { hkdf })
       key = await dmLocalKeyFromPrf(prf, { hkdf })
       if (gen !== generation) return
-      await local.unlock(key)
+      const full = local.unlock(key)
+      full.catch(noop)
+      await local.keyStage()
       if (gen !== generation) {
         local.lock()
         return
+      }
+      if (!local.keyReady()) {
+        await full
+        throw new UsageError(LOCKED)
       }
       await pages.unlock(key)
       if (gen !== generation) {
@@ -378,6 +396,16 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (key !== null) key.fill(0)
       if (!installed) zeroPair(pair)
     }
+    if (onKey !== null && gen === generation) {
+      try { onKey() } catch {}
+    }
+    try {
+      await local.loaded()
+    } catch (err) {
+      if (gen === generation) lock()
+      throw err
+    }
+    if (gen !== generation || !local.unlocked()) return
     // Ctls left from before go out now (a stamped one needs no new stamp),
     // the own queue first, then each held page's.
     if ((await store.readDmCtlQueue(storage)).length > 0) track(flushQueued())
@@ -396,6 +424,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     pages.lock()
     for (const s of pageStores.values()) s.local.lock()
     pageStores.clear()
+    foldMemo.clear()
     clearPending()
     forgetAllBlobs()
     publicItems.clear()
@@ -404,21 +433,50 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     gone.clear()
   }
 
-  // Lock, sign-out and reset: the plaintext cache goes too (needs no key).
+  // Lock, sign-out and reset: the plaintext cache and every list summary go
+  // too (needs no key).
   function wipeMedia () {
     forgetAllBlobs()
     dropQueued(false, LOCKED)
     opening.clear()
     gone.clear()
-    return track(local.wipeCache())
+    return track(Promise.all([local.wipeCache(), dropPageSummaries()]).then(([r]) => r))
+  }
+
+  // The list summaries of every page this device lists (a reset runs it
+  // before the lists go): a page adopted again under the same secrets must
+  // not meet the summary of the history it forgot.
+  async function dropPageSummaries () {
+    const listed = new Set([...Object.keys(await store.readPageSecrets(storage)), ...await store.readPageStores(storage)])
+    for (const page of listed) await storage.writeJson(store.pageDmPrefix(page) + 'dmSummary', null)
   }
 
   function unlocked () {
     return box !== null && local.unlocked()
   }
 
+  // The keys are installed; the own rows may still be loading.
+  function keyReady () {
+    return box !== null && local.keyReady()
+  }
+
+  // Settles once the own rows of the current unlock are loaded.
+  function loaded () {
+    return local.loaded()
+  }
+
   function requireUnlocked () {
     if (!unlocked()) throw new UsageError(LOCKED)
+  }
+
+  function requireKey () {
+    if (!keyReady()) throw new UsageError(LOCKED)
+  }
+
+  // An operation that needs the rows waits for a load under way.
+  async function whenLoaded () {
+    if (keyReady() && !local.unlocked()) await local.loaded().catch(noop)
+    requireUnlocked()
   }
 
   function boxHex () {
@@ -441,65 +499,164 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // A held page's store, opened once per unlock under its own key. Throws
   // NO_PAGE_KEY for a page this node holds no secrets of, or one being
   // forgotten (a pull then never opens its store again under the forget).
-  async function pageCtx (page) {
-    requireUnlocked()
+  // keyOnly: the page's key and summary suffice (dm.list); its rows may
+  // still be loading.
+  async function pageCtx (page, keyOnly = false) {
+    if (keyOnly) requireKey()
+    else requireUnlocked()
     if (forgetting.has(page)) throw new UsageError(NO_PAGE_KEY)
     pages.need(page)
     let s = pageStores.get(page)
     if (s === undefined) {
       // Listed before anything of it is written, so a reset always finds it.
       await store.notePageStore(storage, page)
-      if (pageStores.get(page) !== undefined) return pageCtx(page)
+      if (pageStores.get(page) !== undefined) return pageCtx(page, keyOnly)
       const prefix = store.pageDmPrefix(page)
-      const lc = createDmStore({ storage, cacheBytesMax: L.cacheBytesMax, prefix })
+      const lc = createDmStore({ storage, cacheBytesMax: L.cacheBytesMax, prefix, summaryDelayMs: L.summaryDelayMs })
       const k = pages.localKeyOf(page)
-      const ready = lc.unlock(k)
-      ready.then(() => k.fill(0), () => k.fill(0))
-      s = { local: lc, prefix, page, ready }
+      // The store copies the key before unlock() returns.
+      const full = lc.unlock(k)
+      k.fill(0)
+      s = { local: lc, prefix, page, ready: lc.keyStage() }
       pageStores.set(page, s)
+      // A failed row load drops the store as a failed key stage does, so
+      // the next call starts a fresh unlock instead of meeting a dead one.
+      const failed = s
+      full.catch(() => {
+        if (pageStores.get(page) === failed) {
+          pageStores.delete(page)
+          foldMemo.delete(failed.local)
+        }
+      })
     }
     try {
       await s.ready
+      if (!keyOnly) await s.local.loaded()
     } catch (err) {
       if (pageStores.get(page) === s) pageStores.delete(page)
       throw err
     }
-    if (pageStores.get(page) !== s || !s.local.unlocked()) throw new UsageError(LOCKED)
+    if (pageStores.get(page) !== s || !(keyOnly ? s.local.keyReady() : s.local.unlocked())) throw new UsageError(LOCKED)
     return s
   }
 
   // The context of a request's optional `page` -> [self, ctx].
-  async function contextOf (own, page) {
+  async function contextOf (own, page, keyOnly = false) {
     if (page === undefined || page === null) return [own, personal]
-    return [page, await pageCtx(page)]
+    return [page, await pageCtx(page, keyOnly)]
+  }
+
+  // The kv follows (own store only) and seen texts a fold reads, with
+  // their sha256 digests (the list summary's).
+  async function foldInputs (ctx) {
+    const follows = ctx === personal ? (await store.readFollows(storage)).map((f) => typeof f === 'string' ? f : f && f.key).filter((k) => typeof k === 'string') : []
+    const storedIds = await store.readDmSeen(storage, ctx.prefix)
+    const followsText = JSON.stringify(follows)
+    const seenText = JSON.stringify(storedIds)
+    return { follows, storedIds, followsText, seenText, followsHash: sha256Hex(b4a.from(followsText, 'utf8')), seenHash: sha256Hex(b4a.from(seenText, 'utf8')) }
   }
 
   // A page follows no one here: its folders come from its ops alone.
+  // The kv reads run on every call (another tab or device may have changed
+  // them); only the fold itself is reused.
   async function folded (own, ctx = personal) {
-    const follows = ctx === personal ? (await store.readFollows(storage)).map((f) => typeof f === 'string' ? f : f && f.key).filter((k) => typeof k === 'string') : []
-    const stored = new Set(await store.readDmSeen(storage, ctx.prefix))
-    const { messages, ops } = ctx.local.snapshot()
+    const gen = generation
+    const { follows, storedIds, followsText, seenText, followsHash, seenHash } = await foldInputs(ctx)
+    const lc = ctx.local
+    const hit = foldMemo.get(lc)
+    if (hit !== undefined && lc.unlocked() && hit.version === lc.version() && hit.own === own && hit.follows === followsText && hit.seen === seenText) return hit.result
+    const version = lc.version()
+    const stored = new Set(storedIds)
+    const { messages, ops } = lc.snapshot()
     const seen = []
     for (const m of messages) {
       if (m.mine) continue
       const k = dmFold.seenKey(m.from, m.id)
-      if (stored.has(ctx.local.seenToken(k))) seen.push(k)
+      if (stored.has(lc.seenToken(k))) seen.push(k)
     }
-    return dmFold.fold({
+    const result = L.fold({
       self: own,
       followSet: follows,
       seen,
       ops,
       messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: m.replyTo, fwd: m.fwd, media: m.media, card: m.card, at: m.at, filedAt: m.filedAt }))
     })
+    // A store locked (or relocked) since is never remembered.
+    const current = ctx === personal || pageStores.get(ctx.page) === ctx
+    if (gen === generation && current && lc.unlocked() && lc.version() === version) {
+      foldMemo.set(lc, { version, own, follows: followsText, seen: seenText, result })
+      if (typeof lc.saveSummary === 'function') {
+        lc.saveSummary({
+          version,
+          follows: followsHash,
+          seen: seenHash,
+          inbox: pageOf(result.inbox, result.requests, 'inbox', SUMMARY_PAGE),
+          requests: pageOf(result.inbox, result.requests, 'request', SUMMARY_PAGE)
+        })
+      }
+    }
+    return result
+  }
+
+  // A first page from the store's summary -> the dm.list result, or null
+  // when it cannot answer (rows loaded, another page, no matching summary).
+  async function summaryList (ctx, folder, limit, before) {
+    if (before !== undefined && before !== null) return null
+    if (typeof ctx.local.summaryFor !== 'function' || ctx.local.unlocked()) return null
+    const gen = generation
+    const inputs = await foldInputs(ctx)
+    if (gen !== generation) throw new UsageError(LOCKED)
+    const s = ctx.local.summaryFor({ follows: inputs.followsHash, seen: inputs.seenHash })
+    if (s === null) return null
+    const p = folder === 'request' ? s.requests : s.inbox
+    // Past the stored page only when it is the whole folder.
+    if (limit > p.conversations.length && p.next !== null) return null
+    const conversations = p.conversations.slice(0, limit)
+    const more = limit < p.conversations.length || p.next !== null
+    const tail = conversations[conversations.length - 1]
+    return { conversations, next: more && tail ? { at: tail.at, peer: tail.peer } : null, requests: p.requests, inboxUnread: p.inboxUnread }
+  }
+
+  // Settles once the rows a dm.list of `page` (or the own) reads are loaded
+  // or failed; never rejects.
+  async function listLoaded ({ page } = {}) {
+    await local.loaded().catch(noop)
+    if (page === undefined || page === null) return
+    const s = pageStores.get(page)
+    if (s !== undefined) await s.local.loaded().catch(noop)
+  }
+
+  // Whether dm.list can answer now without waiting for the own rows: they
+  // are loaded, or (no page, a first page) the summary matches.
+  async function listReady ({ folder = 'inbox', limit = 30, before, page } = {}) {
+    if (!keyReady()) return false
+    if (local.unlocked()) return true
+    if (page !== undefined && page !== null) return false
+    return (await summaryList(personal, folder, limit, before)) !== null
   }
 
   // Order and cursor are the fold's: `at` is the effective time it returns
   // (never re-sorted here by the sender's time).
-  async function list (own, { folder = 'inbox', limit = 30, before, page: pageKey } = {}) {
-    requireUnlocked()
-    const [self, ctx] = await contextOf(own, pageKey)
+  // wait false: on a summary miss with the rows still loading -> null at
+  // once (the session then waits for listLoaded off its chain).
+  async function list (own, { folder = 'inbox', limit = 30, before, page: pageKey } = {}, { wait = true } = {}) {
+    requireKey()
+    const gen = generation
+    const [self, ctx] = await contextOf(own, pageKey, true)
+    if (!ctx.local.unlocked()) {
+      const hit = await summaryList(ctx, folder, limit, before)
+      if (hit !== null) return hit
+      if (!wait) return null
+      await ctx.local.loaded().catch(noop)
+      const current = ctx === personal || pageStores.get(ctx.page) === ctx
+      if (gen !== generation || !current || !ctx.local.unlocked()) throw new UsageError(LOCKED)
+    }
     const { inbox, requests } = await folded(self, ctx)
+    return pageOf(inbox, requests, folder, limit, before)
+  }
+
+  // One dm.list page of a fold's folders.
+  function pageOf (inbox, requests, folder, limit, before) {
     const all = folder === 'request' ? requests : inbox
     let start = 0
     if (before !== undefined && before !== null) {
@@ -539,12 +696,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // A thread with no kept message is 'inbox': a conversation the person may
   // start.
   function threadState (own, peer, c, ctx = personal) {
-    const blocked = !dmFold.canSend({ self: own, peer, ops: ctx.local.snapshot().ops })
+    const blocked = !dmFold.canSend({ self: own, peer, ops: ctx.local.ops() })
     return { folder: c === null ? 'inbox' : c.folder, blocked }
   }
 
   async function thread (own, { peer, before, limit = 30, page }) {
-    requireUnlocked()
+    await whenLoaded()
     const [self, ctx] = await contextOf(own, page)
     const c = await threadOf(self, peer, ctx)
     const state = threadState(self, peer, c, ctx)
@@ -926,7 +1083,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   function canSend (own, peer) {
-    return dmFold.canSend({ self: own, peer, ops: local.snapshot().ops })
+    return dmFold.canSend({ self: own, peer, ops: local.ops() })
   }
 
   // ---- the wallet ----
@@ -1360,7 +1517,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         if (gen !== generation) throw new UsageError(LOCKED)
         const page = await link.page({ after: cursor, limit: L.pageMax })
         const rows = []
-        const ops = local.snapshot().ops
+        // A copy: this page's ctls join it as they are filed.
+        const ops = [...local.ops()]
         const mod = await moderation()
         const missed = []
         for (const item of page.items) {
@@ -1578,7 +1736,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (kind === 'msg') {
       if (typeof to !== 'string' || typeof text !== 'string') throw new UsageError(BAD_TEXT)
       if (to === page) throw new UsageError(SELF_SEND)
-      if (!dmFold.canSend({ self: page, peer: to, ops: ctx.local.snapshot().ops })) throw new UsageError(BLOCKED)
+      if (!dmFold.canSend({ self: page, peer: to, ops: ctx.local.ops() })) throw new UsageError(BLOCKED)
       if (typeof recipientBox !== 'string') throw new UsageError(NO_BOX)
       const reply = replyTo === undefined ? null : replyTo
       if (reply !== null) {
@@ -1658,7 +1816,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       return { id: b.id, at: b.at }
     }
     // The page may have blocked the recipient after this draft was made.
-    if (!dmFold.canSend({ self: page, peer: b.to, ops: ctx.local.snapshot().ops })) throw new UsageError(BLOCKED)
+    if (!dmFold.canSend({ self: page, peer: b.to, ops: ctx.local.ops() })) throw new UsageError(BLOCKED)
     let entry = d.entry
     if (entry === null) {
       const inner = dm.assembleInner(d.json, signature, expiresAt)
@@ -2032,10 +2190,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       const s = pageStores.get(page)
       pageStores.delete(page)
       if (s !== undefined) {
+        foldMemo.delete(s.local)
         try { await s.ready } catch {}
         s.local.lock()
         await s.local.idle()
       }
+      await storage.writeJson(store.pageDmPrefix(page) + 'dmSummary', null)
       await store.deletePageDm(storage, page)
       await pages.forget(page)
       await store.forgetPageStore(storage, page)
@@ -2057,6 +2217,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     unlock,
     lock,
     unlocked,
+    keyReady,
+    loaded,
+    listReady,
+    listLoaded,
     idle,
     boxHex,
     openTestimonial,
@@ -2072,6 +2236,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     forgetPublicItem,
     readPublicMedia,
     wipeMedia,
+    dropPageSummaries,
     set: tracked(set),
     pull: tracked(pull),
     pageGenerate,
@@ -2089,7 +2254,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     topUp,
     walletSize,
     close,
-    get pulling () { return pulling }
+    get pulling () { return pulling },
+    // Tests: how many stores have a remembered fold.
+    get foldMemoSize () { return foldMemo.size }
   }
 }
 

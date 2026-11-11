@@ -101,6 +101,23 @@ export function cachedRow (cache, key, inputs, latest, build) {
   return props
 }
 
+// The seeds of `entries` ([key, value] pairs) whose key the cache `known` (a
+// Map of lowercase keys) has no entry for: a stored copy (A Rua's snapshot)
+// never replaces what this session already learned or read, and the new
+// entries it makes are not loaded, so a resolve still reads them.
+export function absentSeeds (known, entries) {
+  const out = []
+  const seen = new Set()
+  for (const pair of Array.isArray(entries) ? entries : []) {
+    if (!Array.isArray(pair) || typeof pair[0] !== 'string') continue
+    const key = pair[0].toLowerCase()
+    if (seen.has(key) || (known && known.has(key))) continue
+    seen.add(key)
+    out.push(pair)
+  }
+  return out
+}
+
 // Drops the rows no longer in the list, so the cache never outgrows it.
 export function pruneRows (cache, keys) {
   const keep = new Set(keys)

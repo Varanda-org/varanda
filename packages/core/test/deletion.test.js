@@ -152,6 +152,20 @@ test('deletedRanges: only effective tombstones and declared cores', (t) => {
   t.not(deletedRanges(entries, [K2])[0], entries[2].record.media[0], 'a copy')
 })
 
+test('deletedRanges: several tombstones of one target are all effective and their ranges are unioned', (t) => {
+  const ranges = Array.from({ length: 10 }, (_, i) => ({ core: K2, start: 1 + i * 2, blocks: 2 }))
+  const entries = [
+    genesis,
+    post(1, { media: ranges.map((r) => desc(K2, r.start, r.blocks)) }),
+    del(2, 1, ranges.slice(0, 4)),
+    del(3, 1, ranges.slice(4, 8)),
+    del(4, 1, ranges.slice(8))
+  ]
+  for (const e of entries.slice(2)) t.is(validateRecord(e.record, e.seq), null, 'each tombstone is valid with at most 4 ranges')
+  t.alike([...deletedSeqs(entries)], [1], 'the target once')
+  t.alike(deletedRanges(entries, [K2]).sort((a, b) => a.start - b.start), ranges, 'all ten ranges')
+})
+
 test('deletedRanges: never a range a surviving record overlaps', (t) => {
   const shared = { core: K2, start: 1, blocks: 2 }
   const entries = [
