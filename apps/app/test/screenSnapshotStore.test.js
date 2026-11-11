@@ -8,7 +8,7 @@ const test = require('brittle')
 const { register } = require('node:module')
 
 const hooks = `
-const SRC = 'export const Paths = { document: { uri: "file:///stub/Documents/" } }\\n' +
+const SRC = 'export const Paths = { document: { uri: "file:///stub/Documents/" }, cache: { uri: "file:///stub/Caches/" } }\\n' +
   'export class File {\\n' +
   '  constructor (dir, name) { this.uri = dir.uri + name }\\n' +
   '  get exists () { return globalThis.__files.has(this.uri) }\\n' +
@@ -38,7 +38,7 @@ const loadWeb = () => import('../src/screenSnapshotStore.web.js')
 const loadRules = () => import('../src/screenSnapshot.js')
 const loadCaches = () => import('../src/localCaches.js')
 
-const DIR = 'file:///stub/Documents/'
+const DIR = 'file:///stub/Caches/'
 const pathOf = (kind) => DIR + 'varanda-screen-' + kind + '.json'
 
 const OWN = 'aa'.repeat(32)
