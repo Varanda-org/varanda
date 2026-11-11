@@ -131,6 +131,7 @@ import { accountOriginOf } from './pageGate'
 import { slowRequestLine } from './slowRequest'
 import { createIdleTracker } from './idle'
 import { createRequestQueue } from './requestQueue'
+import { createAttempts } from './attempts'
 import { noteOwnDmDrop } from './dmWakeMute'
 import { setDmDropObserver } from './pages'
 import { vitrineEnabled, vitrineLarge } from './vitrine/enabled'
@@ -437,6 +438,12 @@ function LiveNodeProvider ({ children }) {
   const busyRef = useRef(false)
   // The connect in flight (settles, never rejects), or null.
   const inflightRef = useRef(null)
+  // Start attempts (src/attempts.js): begin, forgetConfig and restart take a
+  // new token, so a connect or a background revalidation of an older attempt
+  // can never install its connection or set the phase afterwards.
+  const attemptsRef = useRef(null)
+  if (attemptsRef.current === null) attemptsRef.current = createAttempts()
+  const unmountedRef = useRef(false)
   // sync.start requests in flight: a lookup sent before the sync.started event
   // would preempt a once-run and end it for good (docs/rpc.md 6.1).
   const startingRef = useRef(0)
@@ -608,6 +615,11 @@ function LiveNodeProvider ({ children }) {
     autoTimerRef.current = null
   }, [])
 
+  useEffect(() => {
+    unmountedRef.current = false
+    return () => { unmountedRef.current = true }
+  }, [])
+
   useEffect(() => subscribeOnline(setOnline), [])
   const applyVisible = useCallback(() => {
     const next = effectiveVisible(rawVisibleRef.current, hostedRef.current)
@@ -708,6 +720,15 @@ function LiveNodeProvider ({ children }) {
     // Native, the installation's own configuration (the web kind): hosted
     // only once that connection is ready; a failure is the retry screen.
     const nativeHosted = cfg !== null && typeof cfg === 'object' && cfg.kind === 'hosted'
+    const token = attemptsRef.current.current()
+    const obsolete = () => !attemptsRef.current.isCurrent(token)
+    // A newer attempt began while this one awaited: what it obtained is
+    // closed and the state is left to the newer attempt.
+    const drop = async (conn) => {
+      if (!conn) return
+      if (connRef.current === conn) setConnection(null)
+      try { await conn.close() } catch {}
+    }
     setPhase('connecting')
     setError('')
     setSync({ active: null, lines: [], stopped: null })
@@ -731,12 +752,17 @@ function LiveNodeProvider ({ children }) {
         }
       })
       holder.conn = conn
+      if (obsolete()) return drop(conn)
       setConnection(conn)
       setInfoOrigin(undefined)
       if (save && cfg) {
-        try { await saveConfig(cfg) } catch { setError('a configuração não pôde ser guardada neste aparelho') }
+        let saveErr = false
+        try { await saveConfig(cfg) } catch { saveErr = true }
+        if (obsolete()) return drop(conn)
+        if (saveErr) setError('a configuração não pôde ser guardada neste aparelho')
       }
       const status = await conn.request('sync.status')
+      if (obsolete()) return drop(conn)
       marks.mark('sync.status')
       if (status.state === 'running') {
         setSync((prev) => (prev.active ? prev : { ...prev, active: { runId: status.runId, once: status.once } }))
@@ -749,6 +775,7 @@ function LiveNodeProvider ({ children }) {
       let pkErr = ''
       if (identity !== null) {
         try { pk = await identity.status() } catch (err) { pkErr = errorText(err) }
+        if (obsolete()) return drop(conn)
       }
       marks.mark('identity.status')
       setHasPasskey(identity !== null)
@@ -763,6 +790,7 @@ function LiveNodeProvider ({ children }) {
       setPhase('ready')
       marks.mark('ready')
     } catch (err) {
+      if (obsolete()) return drop(holder.conn)
       setConnection(null)
       if (holder.conn) { try { await holder.conn.close() } catch {} }
       if (cfg) setConfig(cfg) // the form keeps what was tried
@@ -784,6 +812,41 @@ function LiveNodeProvider ({ children }) {
     return run
   }, [connectNow])
 
+  // The background answer of the installation after a start from the
+  // remembered /varanda.json (begin has checked that its attempt is still the
+  // current one). 'same' and 'transport' keep the running node. 'changed' and
+  // 'invalid' take a new attempt (the remembered connect, if still in flight,
+  // ends early), drop the queued requests (CLOSED, never resent) and close
+  // the old connection as forgetConfig does; 'changed' then connects once to
+  // the new configuration.
+  const revalidated = useCallback(async ({ verdict, config: next }) => {
+    if (verdict === 'same') {
+      setHostedSource('live')
+      return
+    }
+    if (verdict !== 'changed' && verdict !== 'invalid') return
+    const token = attemptsRef.current.begin()
+    const obsolete = () => !attemptsRef.current.isCurrent(token) || unmountedRef.current
+    const old = connRef.current
+    setConnection(null)
+    while (inflightRef.current !== null) await inflightRef.current
+    if (old) {
+      if (!obsolete()) setPhase('connecting')
+      try { await old.close() } catch {}
+    }
+    if (obsolete()) return
+    if (verdict === 'changed') {
+      setHostedSource('live')
+      await connect(next)
+      return
+    }
+    setHostedSource(null)
+    setHosted(false)
+    setConfig(null)
+    setError('não foi possível carregar a configuração desta instalação')
+    setPhase('config-error')
+  }, [connect, setConnection])
+
   // Precedence: varanda-serve (no onboarding), then a saved configuration (an
   // explicit manual choice), then the installation's own (not saved, so a
   // changed key in the deployment propagates on reload), then the form. On a
@@ -792,11 +855,18 @@ function LiveNodeProvider ({ children }) {
   // cleared; then the chosen installation's /varanda.json starts the web
   // kind, and with no installation the form is shown.
   const begin = useCallback(async () => {
+    const token = attemptsRef.current.begin()
+    const obsolete = () => !attemptsRef.current.isCurrent(token) || unmountedRef.current
+    // A connect of an older attempt is now obsolete and ends early; the
+    // connect below must not be deduplicated into it.
+    while (inflightRef.current !== null) await inflightRef.current
+    if (obsolete()) return
     if (loadInstallation !== null && !installationLoadedRef.current) {
       installationLoadedRef.current = true
       try { await loadInstallation() } catch {}
     }
     const saved = await loadConfig()
+    if (obsolete()) return
     setConfig(saved)
     if (!canConfigure) return connect(null)
     if (saved !== null) {
@@ -804,21 +874,26 @@ function LiveNodeProvider ({ children }) {
       return connect(saved)
     }
     setPhase('loading')
+    // A returning member starts from the remembered /varanda.json at once;
+    // the live answer then only revalidates it (see revalidated below).
+    const onStatus = (s) => {
+      if (!obsolete()) setHostedSource(s.source === 'live' || s.source === 'remembered' ? s.source : null)
+    }
+    const onRevalidated = (outcome) => {
+      if (obsolete()) return
+      revalidated(outcome)
+    }
     if (loadInstallation !== null && installationOrigin() !== null) {
       setHosted(false)
-      const found = await discoverConfig({
-        onLine: isOnline(),
-        onStatus: (s) => setHostedSource(s.source === 'live' || s.source === 'remembered' ? s.source : null)
-      })
+      const found = await discoverConfig({ onLine: isOnline(), preferRemembered: true, onStatus, onRevalidated })
+      if (obsolete()) return
       if (found !== null) return connect(found)
       setError('não foi possível carregar a configuração desta instalação')
       setPhase('config-error')
       return
     }
-    const found = await discoverConfig({
-      onLine: isOnline(),
-      onStatus: (s) => setHostedSource(s.source === 'live' || s.source === 'remembered' ? s.source : null)
-    })
+    const found = await discoverConfig({ onLine: isOnline(), preferRemembered: true, onStatus, onRevalidated })
+    if (obsolete()) return
     if (found !== null) {
       setHosted(true)
       return connect(found)
@@ -830,7 +905,7 @@ function LiveNodeProvider ({ children }) {
     } else {
       setPhase('config')
     }
-  }, [connect])
+  }, [connect, revalidated])
 
   useEffect(() => {
     if (startedRef.current) return
@@ -846,6 +921,9 @@ function LiveNodeProvider ({ children }) {
 
   // Drop the saved manual configuration and go back to the installation's.
   const forgetConfig = useCallback(async () => {
+    // Also the path of an installation change (Conexao saves it, then calls
+    // this): the older attempt's connect and revalidation become obsolete.
+    attemptsRef.current.begin()
     // A connect in flight (with the configuration being dropped) settles
     // first; its connection is then closed below.
     while (inflightRef.current !== null) await inflightRef.current
@@ -864,6 +942,10 @@ function LiveNodeProvider ({ children }) {
   // (node.close, then terminate) and start it again. The client module
   // handles recover.
   const restart = useCallback(async (cfg) => {
+    // A manual configuration: a pending revalidation of the installation's
+    // must not replace it, and a connect in flight must not swallow it.
+    attemptsRef.current.begin()
+    while (inflightRef.current !== null) await inflightRef.current
     const conn = connRef.current
     setConnection(null)
     if (conn) {

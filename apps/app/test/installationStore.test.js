@@ -20,7 +20,14 @@ export class File {
     if (globalThis.__stubWriteFails) { files.set(this.uri, String(text).slice(0, 5)); throw new Error('disk full') }
     files.set(this.uri, String(text))
   }
-  async text () { if (!files.has(this.uri)) throw new Error('missing'); return files.get(this.uri) }
+  async text () {
+    // A test can hold the next read only; it answers with the text it saw when asked.
+    const text = files.get(this.uri)
+    const gate = globalThis.__stubTextGate
+    if (gate) { globalThis.__stubTextGate = null; await gate }
+    if (text === undefined) throw new Error('missing')
+    return text
+  }
   delete () { files.delete(this.uri) }
   move (dest) {
     if (!files.has(this.uri)) throw new Error('missing')
@@ -68,6 +75,7 @@ async function reset () {
   delete process.env.EXPO_PUBLIC_VARANDA_INSTALLATION
   globalThis.__stubWriteFails = false
   globalThis.__stubMoveFails = null
+  globalThis.__stubTextGate = null
 }
 
 test('no saved installation and no build-time value: null, app flag off', async (t) => {
@@ -356,6 +364,313 @@ test('saving the same installation keeps its remembered answer; another drops it
     globalThis.fetch = realFetch
     await reset()
   }
+})
+
+// preferRemembered: a returning member starts from the remembered answer at
+// once; the live fetch only revalidates it in the background.
+async function rememberA (store) {
+  await store.saveInstallation('https://a.test')
+  globalThis.fetch = jsonAnswer(ASSOC_A, 'https://a.test/varanda.json')
+  mustBeA(await store.discoverConfig())
+}
+function mustBeA (config) {
+  if (!config || config.association !== ASSOC_A) throw new Error('setup: nothing remembered')
+}
+function revalidation () {
+  let settle
+  const settled = new Promise((resolve) => { settle = resolve })
+  const verdicts = []
+  return { settled, verdicts, onRevalidated: (v) => { verdicts.push(v); settle(v) } }
+}
+const ticks = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise((resolve) => setImmediate(resolve)) }
+
+test('preferRemembered: the remembered answer is used at once, the fetch never awaited', async (t) => {
+  const { store } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    await rememberA(store)
+    let asked = 0
+    let fail = null
+    globalThis.fetch = (url, init) => {
+      asked++
+      // Never settles on its own (only the 8 s abort would end it).
+      return new Promise((resolve, reject) => { fail = reject })
+    }
+    const statuses = []
+    const r = revalidation()
+    let done = false
+    const pending = store.discoverConfig({ preferRemembered: true, onStatus: (s) => statuses.push(s.source), onRevalidated: r.onRevalidated })
+    pending.then(() => { done = true })
+    await ticks()
+    t.ok(done, 'resolved without waiting for the installation')
+    const config = await pending
+    t.is(config && config.association, ASSOC_A)
+    t.is(config && config.kind, 'hosted')
+    t.alike(statuses, ['remembered'])
+    t.is(asked, 1, 'the live fetch still runs, detached')
+    t.alike(r.verdicts, [], 'nothing settled yet')
+    fail(new Error('offline'))
+    t.alike(await r.settled, { verdict: 'transport' })
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
+test('preferRemembered: the same answer revalidates as same', async (t) => {
+  const { store } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    await rememberA(store)
+    const r = revalidation()
+    const statuses = []
+    const config = await store.discoverConfig({ preferRemembered: true, onStatus: (s) => statuses.push(s.source), onRevalidated: r.onRevalidated })
+    t.is(config.association, ASSOC_A)
+    t.alike(await r.settled, { verdict: 'same' })
+    await ticks()
+    t.is(r.verdicts.length, 1, 'called exactly once')
+    t.alike(statuses, ['remembered'], 'onStatus still called at most once')
+    t.is(stored().discovered.association, ASSOC_A)
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
+test('preferRemembered: a different association revalidates as changed and is remembered', async (t) => {
+  const { store } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    await rememberA(store)
+    globalThis.fetch = jsonAnswer(ASSOC_B, 'https://a.test/varanda.json')
+    const r = revalidation()
+    const config = await store.discoverConfig({ preferRemembered: true, onRevalidated: r.onRevalidated })
+    t.is(config.association, ASSOC_A, 'the start uses the remembered answer')
+    const v = await r.settled
+    t.is(v.verdict, 'changed')
+    t.is(v.config && v.config.association, ASSOC_B)
+    t.is(v.config && v.config.seederUrl, 'wss://a.test/seeder')
+    t.is(stored().discovered.association, ASSOC_B)
+    globalThis.fetch = async () => { throw new Error('offline') }
+    t.is((await store.discoverConfig()).association, ASSOC_B, 'loadDiscovered now returns the new one')
+    await ticks()
+    t.is(r.verdicts.length, 1)
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
+test('preferRemembered: an invalid body revalidates as invalid and forgets the answer', async (t) => {
+  const { store } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    await rememberA(store)
+    const body = JSON.stringify({ v: 1, association: 'nope' })
+    globalThis.fetch = async () => ({ status: 200, redirected: false, url: 'https://a.test/varanda.json', headers: jsonHeaders(String(Buffer.byteLength(body))), text: async () => body })
+    const r = revalidation()
+    const config = await store.discoverConfig({ preferRemembered: true, onRevalidated: r.onRevalidated })
+    t.is(config.association, ASSOC_A)
+    t.alike(await r.settled, { verdict: 'invalid' })
+    t.alike(stored(), { v: 1, origin: 'https://a.test' }, 'remembered answer forgotten')
+    globalThis.fetch = async () => { throw new Error('offline') }
+    t.is(await store.discoverConfig(), null)
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
+test('preferRemembered: a network failure revalidates as transport and keeps the answer', async (t) => {
+  const { store } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    await rememberA(store)
+    globalThis.fetch = async () => { throw new Error('offline') }
+    const r = revalidation()
+    await store.discoverConfig({ preferRemembered: true, onRevalidated: r.onRevalidated })
+    t.alike(await r.settled, { verdict: 'transport' })
+    t.is(stored().discovered.association, ASSOC_A)
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
+test('preferRemembered without a remembered answer, or offline, keeps the usual path', async (t) => {
+  const { store } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    await store.saveInstallation('https://a.test')
+    let release
+    globalThis.fetch = () => new Promise((resolve) => { release = resolve })
+    const r = revalidation()
+    const statuses = []
+    let done = false
+    const pending = store.discoverConfig({ preferRemembered: true, onStatus: (s) => statuses.push(s.source), onRevalidated: r.onRevalidated })
+    pending.then(() => { done = true })
+    await ticks()
+    t.absent(done, 'with nothing remembered the live answer is awaited')
+    release(await jsonAnswer(ASSOC_A, 'https://a.test/varanda.json')())
+    const config = await pending
+    t.is(config.association, ASSOC_A)
+    t.alike(statuses, ['live'])
+    await ticks()
+    t.alike(r.verdicts, [], 'no revalidation without a remembered start')
+
+    let asked = 0
+    globalThis.fetch = async () => { asked++; throw new Error('offline') }
+    const offline = []
+    const r2 = revalidation()
+    t.is((await store.discoverConfig({ preferRemembered: true, onLine: false, onStatus: (s) => offline.push(s.source), onRevalidated: r2.onRevalidated })).association, ASSOC_A)
+    await ticks()
+    t.is(asked, 0, 'offline: no fetch at all')
+    t.alike(offline, ['remembered'])
+    t.alike(r2.verdicts, [])
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
+test('preferRemembered: another installation chosen before the fetch settles: no callback', async (t) => {
+  const { store } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    await rememberA(store)
+    let release
+    globalThis.fetch = () => new Promise((resolve) => { release = resolve })
+    const r = revalidation()
+    const config = await store.discoverConfig({ preferRemembered: true, onRevalidated: r.onRevalidated })
+    t.is(config.association, ASSOC_A)
+    await store.saveInstallation('https://b.test')
+    release(await jsonAnswer(ASSOC_B, 'https://a.test/varanda.json')())
+    await ticks()
+    t.alike(r.verdicts, [], 'the answer is not the new installation\'s')
+    t.alike(stored(), { v: 1, origin: 'https://b.test' }, 'nothing remembered for b')
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
+test('preferRemembered: another installation saved while the revalidation reads the file is not overwritten', async (t) => {
+  const { store, installation } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    await rememberA(store)
+    let open
+    const gate = new Promise((resolve) => { open = resolve })
+    globalThis.fetch = async (url, init) => {
+      // Hold the next file read: the revalidation's read-modify-write.
+      globalThis.__stubTextGate = gate
+      return jsonAnswer(ASSOC_B, 'https://a.test/varanda.json')()
+    }
+    const r = revalidation()
+    const config = await store.discoverConfig({ preferRemembered: true, onRevalidated: r.onRevalidated })
+    t.is(config.association, ASSOC_A)
+    await ticks()
+    t.absent(globalThis.__stubTextGate, 'the revalidation read is the one being held')
+    t.ok(await store.saveInstallation('https://b.test'), 'b saved while the revalidation read is held')
+    open()
+    await ticks()
+    t.alike(stored(), { v: 1, origin: 'https://b.test' }, 'the file still names b, nothing remembered for a')
+    t.is(installation.installationOrigin(), 'https://b.test')
+    t.is(await store.loadInstallation(), 'https://b.test')
+    t.alike(r.verdicts, [], 'no callback for the old installation')
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
+test('preferRemembered: another installation saved while the cache is read resolves null', async (t) => {
+  const { store } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    await rememberA(store)
+    let asked = 0
+    globalThis.fetch = async () => { asked++; return jsonAnswer(ASSOC_A, 'https://a.test/varanda.json')() }
+    let open
+    globalThis.__stubTextGate = new Promise((resolve) => { open = resolve })
+    const r = revalidation()
+    const pending = store.discoverConfig({ preferRemembered: true, onRevalidated: r.onRevalidated })
+    await ticks()
+    t.ok(await store.saveInstallation('https://b.test'), 'b saved while a\'s cache read is held')
+    open()
+    t.is(await pending, null, 'not a\'s config')
+    await ticks()
+    t.is(asked, 0, 'no live fetch for a')
+    t.alike(r.verdicts, [])
+    t.alike(stored(), { v: 1, origin: 'https://b.test' })
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
+test('an older discovery settling after a newer one writes nothing and calls nothing', async (t) => {
+  const { store } = await load()
+  const realFetch = globalThis.fetch
+  try {
+    await reset()
+    await rememberA(store)
+    let release
+    let asked = 0
+    globalThis.fetch = () => {
+      if (asked++ === 0) return new Promise((resolve) => { release = resolve })
+      return jsonAnswer(ASSOC_B, 'https://a.test/varanda.json')()
+    }
+    const r = revalidation()
+    t.is((await store.discoverConfig({ preferRemembered: true, onRevalidated: r.onRevalidated })).association, ASSOC_A)
+    await ticks()
+    t.is(asked, 1, 'the old revalidation fetch is held')
+    t.is((await store.discoverConfig()).association, ASSOC_B, 'a newer discovery completes with c')
+    t.is(stored().discovered.association, ASSOC_B)
+    const body = JSON.stringify({ v: 1, association: 'nope' })
+    release({ status: 200, redirected: false, url: 'https://a.test/varanda.json', headers: jsonHeaders(String(Buffer.byteLength(body))), text: async () => body })
+    await ticks()
+    t.is(stored().discovered && stored().discovered.association, ASSOC_B, 'the remembered config is still c')
+    t.alike(r.verdicts, [], 'the old callback was not called')
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
+test('node.js starts from the remembered answer and guards every connect step', (t) => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const source = fs.readFileSync(path.join(__dirname, '../src/node.js'), 'utf8')
+  const calls = source.split('discoverConfig({').slice(1)
+  t.is(calls.length, 2, 'both discoverConfig calls')
+  for (const call of calls) t.ok(/^[^}]*preferRemembered: true/.test(call), 'preferRemembered: true')
+  const start = source.indexOf('const connectNow = useCallback(')
+  const end = source.indexOf('// One connect at a time', start)
+  t.ok(start > 0 && end > start)
+  const body = source.slice(start, end)
+  const awaits = body.split('\n').filter((line) => /\bawait (connectNode|saveConfig|conn\.request\('sync\.status'\)|identity\.status\(\))/.test(line))
+  t.is(awaits.length, 4, 'connectNode, saveConfig, sync.status, identity.status')
+  for (const name of ['connectNode', 'saveConfig', "conn.request('sync.status')", 'identity.status()']) {
+    const at = body.indexOf('await ' + name)
+    // connectNode's call spans its callbacks: the check must come before the
+    // connection is installed.
+    const after = name === 'connectNode'
+      ? body.slice(at, body.indexOf('setConnection(conn)', at))
+      : body.slice(at).split('\n').slice(1, 5).join('\n')
+    t.ok(/obsolete\(|isCurrent\(/.test(after), name + ' is followed by a token check')
+  }
+  const catchAt = body.indexOf('} catch (err) {\n      ')
+  t.ok(/isCurrent\(|obsolete\(/.test(body.slice(catchAt, catchAt + 200)), 'the error path checks the token')
 })
 
 test('crypto polyfill: installs only when missing, Web Crypto contract', async (t) => {

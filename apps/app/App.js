@@ -97,7 +97,7 @@ import { useTerms } from './src/useTerms'
 import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
-import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, holdBootCover, holdSplash } from './src/splashGate'
+import { CONNECT_PATIENCE_MS, DETAILS_GRACE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, detailsGraceOver, holdBootCover, holdSplash } from './src/splashGate'
 import { Btn, ErrorText, Page, errorText } from './src/ui'
 import { Stepper } from './src/ui/Stepper'
 import { ThemeProvider, useStyles, useTheme } from './src/ui/ThemeProvider'
@@ -316,10 +316,14 @@ function Member () {
   const bootCoverAt = useRef(null)
   const bootStepRef = useRef(null)
   const bootSettled = useRef(false)
-  // A Rua's first page and the names and counts of its first rows: the
-  // splash covers 'pronto' until both are in (at most CONTENT_PATIENCE_MS).
+  // Names and counts get a short grace after A Rua's first page so slow
+  // detail reads cannot keep a usable feed covered.
   const [feedBoot, setFeedBoot] = useState({ page: false, details: false })
-  const onFeedBoot = useCallback((stage) => setFeedBoot((b) => (b[stage] ? b : { ...b, [stage]: true })), [])
+  const feedPageAt = useRef(null)
+  const onFeedBoot = useCallback((stage) => {
+    if (stage === 'page' && feedPageAt.current === null) feedPageAt.current = Date.now()
+    setFeedBoot((b) => (b[stage] ? b : { ...b, [stage]: true }))
+  }, [])
   const barRef = useRef(0)
   const [, bumpSplash] = useState(0)
   // A timer can fire a few ms before Date.now() reaches the threshold; the
@@ -2464,7 +2468,10 @@ function Member () {
     return () => clearTimeout(t)
   }, [coveringConnect, node.canConfigure])
   const loadingGate = decision === 'loading' || introState === 'loading'
-  const holding = holdSplash({ phase: node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })
+  // Once the node was seen ready the shell may already be up (no fixed
+  // minimum for 'ready'), so a reconnect inside the first 1.5 s must not
+  // bring the splash back and unmount the tree.
+  const holding = holdSplash({ phase: ready || seen ? 'ready' : node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })
   const showIntro = introState === 'show' && !LINK_RETURN && !AGE_RETURN
   const showTerms = decision === 'needed' || decision === 'updated' || decision === 'account'
   const connectingSplash = !ready && !seen && coverConnecting({ phase: node.phase, canConfigure: node.canConfigure, elapsedMs: connectingAt.current === null ? 0 : Date.now() - connectingAt.current, released: released.current })
@@ -2477,7 +2484,14 @@ function Member () {
   // Render-time ref writes, as with released.current = true.
   // Only A Rua as the first screen waits for its rows; a stacked screen (a
   // link opened at boot) or another tab shows at once.
-  const feedReady = feedBoot.details || tab !== 'rua' || topEntry !== null
+  const feedGrace = !feedBoot.details && tab === 'rua' && topEntry === null && detailsGraceOver({ page: feedBoot.page, pageAtMs: feedPageAt.current, nowMs: Date.now() })
+  const feedReady = feedBoot.details || tab !== 'rua' || topEntry !== null || feedGrace
+  useEffect(() => {
+    if (!feedBoot.page || feedBoot.details) return
+    const remaining = Math.max(0, DETAILS_GRACE_MS - (Date.now() - feedPageAt.current))
+    const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
+    return () => clearTimeout(t)
+  }, [feedBoot.page, feedBoot.details])
   const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, infoKnown: info !== null || infoError !== '', profileSlow: slow, feedReady })
   if (atShell && cover && !bootSettled.current && bootStepRef.current !== step) {
     bootStepRef.current = step
@@ -2496,8 +2510,8 @@ function Member () {
   useEffect(() => {
     if (!atShell || coveringBoot || splashEndMarked.current) return
     splashEndMarked.current = true
-    perfMarks().mark('splash-end', feedReady ? 'feedReady' : 'patience')
-  }, [atShell, coveringBoot, feedReady])
+    perfMarks().mark('splash-end', feedGrace ? 'grace' : feedReady ? 'feedReady' : 'patience')
+  }, [atShell, coveringBoot, feedReady, feedGrace])
   const markedTab = useRef(tab)
   useEffect(() => {
     if (markedTab.current === tab) return
