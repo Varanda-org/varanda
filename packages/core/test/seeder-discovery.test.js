@@ -26,7 +26,7 @@ const { attachAdmission, generateNoiseKeyPair, CAP_NO_INVENTORY, CAP_DISCOVERY }
 const { attachDiscovery } = require('../lib/discovery-net')
 const { createSnapshot } = require('../lib/blocklist')
 const { writeBlocklist } = require('../lib/store')
-const { memberCertRecord, postRecord, repostRecord } = require('../lib/records')
+const { memberCertRecord, postRecord, repostRecord, deleteRecord } = require('../lib/records')
 
 const T0 = Date.parse('2026-01-01T00:00:00.000Z')
 
@@ -372,4 +372,35 @@ test('views live their whole TTL: the count cap is the TTL over the rebuild inte
   t.is(DISCOVERY_VIEWS_KEPT * DISCOVERY_REBUILD_MS, DISCOVERY_VIEW_TTL_MS)
   t.is(DISCOVERY_REBUILD_MS, 30000)
   t.is(DISCOVERY_VIEW_TTL_MS, 300000)
+})
+
+test('a deleted post or an undone repost takes its time out of recentAt', async (t) => {
+  t.timeout(90000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, discoveryRebuildMs: REBUILD_MS })
+  const port = await streamServer(t, { current: seeder })
+  const author = await authorStore(t, assoc, [1, 2])
+  const member = await connectMember(t, port, { store: author.store, caps: CAP_NO_INVENTORY })
+  await announceAll(assoc, member, author.diaries)
+  const k = author.diaries.map((d) => d.key)
+  const d0 = author.diaries[0].core
+  await until(() => seeder._served.get(k[0]) && seeder._served.get(k[0]).recentAt === T0 + 60000, { name: 'first post indexed', timeoutMs: 30000 })
+  // A newer post (seq 2), then its deletion: the time goes back to the first post.
+  await d0.append(postRecord({ text: 'apago', at: new Date(T0 + 10 * 60000).toISOString() }))
+  await until(() => seeder._served.get(k[0]).recentAt === T0 + 10 * 60000, { name: 'newer post indexed', timeoutMs: 30000 })
+  await d0.append(deleteRecord({ seq: 2 }))
+  await until(() => seeder._served.get(k[0]).recentAt === T0 + 60000, { name: 'deletion drops its time', timeoutMs: 30000 })
+  t.pass('a deleted post leaves recentAt')
+  // A repost, then its undo.
+  await d0.append(repostRecord({ to: { author: k[1], seq: 1 }, on: true, at: new Date(T0 + 20 * 60000).toISOString() }))
+  await until(() => seeder._served.get(k[0]).recentAt === T0 + 20 * 60000, { name: 'repost indexed', timeoutMs: 30000 })
+  await d0.append(repostRecord({ to: { author: k[1], seq: 1 }, on: false, at: new Date(T0 + 21 * 60000).toISOString() }))
+  await until(() => seeder._served.get(k[0]).recentAt === T0 + 60000, { name: 'undo drops its time', timeoutMs: 30000 })
+  t.pass('an undone repost leaves recentAt')
+  // The discovery cursor carries the time left, never the deleted one.
+  const page = seeder.discoveryPage({ after: null, limit: 1 })
+  const first = page.items[0].key === k[0] ? page : seeder.discoveryPage({ after: page.next, limit: 1, view: page.view })
+  t.ok(first.next === null || first.next.t !== T0 + 10 * 60000)
 })
