@@ -1654,3 +1654,126 @@ test('identity: confirm is one ceremony at a time; lock and signOut cancel it', 
   const installs = client.methods().filter((m) => m === 'identity.install').length
   t.is(installs, 1, 'only the unlock installed')
 })
+
+test('session store: load never reads nor deletes the item while the app is not active', async (t) => {
+  resetStubs()
+  const { createSessionStore, itemKey } = await loadStore()
+  let active = true
+  let reads = 0
+  const now = 1000 * DAY
+  const base = createSessionStore({ now: () => now })
+  await base.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  const store = createSessionStore({ now: () => now, isActive: () => active })
+
+  // A background launch, or a phone locked again during the boot: not
+  // "absent", a distinct refusal.
+  active = false
+  globalThis.__secureGetFails = true
+  const err = await store.load({ rpId: RP, publicKey: PK }).catch((e) => e)
+  t.is(err && err.code, 'NOT_ACTIVE', 'not readable now')
+  t.ok(items().has(itemKey(RP, PK)), 'the item is kept')
+
+  // The read fails because the phone locked while it ran: kept too.
+  const locking = createSessionStore({
+    now: () => now,
+    secureStore: {
+      WHEN_UNLOCKED_THIS_DEVICE_ONLY: 'wutdo',
+      getItemAsync: async () => { reads++; active = false; throw new Error('locked') },
+      setItemAsync: async () => {},
+      deleteItemAsync: async (key) => { items().delete(key) }
+    },
+    isActive: () => active
+  })
+  active = true
+  const late = await locking.load({ rpId: RP, publicKey: PK }).catch((e) => e)
+  t.is(late && late.code, 'NOT_ACTIVE')
+  t.is(reads, 1)
+  t.ok(items().has(itemKey(RP, PK)), 'a failure after the app left the foreground deletes nothing')
+
+  // A failure while active still deletes the broken item.
+  active = true
+  t.is(await store.load({ rpId: RP, publicKey: PK }), null)
+  t.absent(items().has(itemKey(RP, PK)), 'deleted when the read failed while active')
+  globalThis.__secureGetFails = false
+
+  // A state source that throws counts as not active.
+  await base.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  const broken = createSessionStore({ now: () => now, isActive: () => { throw new Error('x') } })
+  t.is((await broken.load({ rpId: RP, publicKey: PK }).catch((e) => e)).code, 'NOT_ACTIVE')
+  t.ok(items().has(itemKey(RP, PK)))
+})
+
+const WRAP_ID = '09'.repeat(16) + '766172616e64612d777261702d76310a'
+
+test('identity: bindPasskey never rebinds while the stored session cannot be read', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createSessionStore, itemKey } = await loadStore()
+  const now = 1000 * DAY
+  await createSessionStore({ now: () => now }).save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  const store = createSessionStore({ now: () => now, isActive: () => false })
+  const client = fakeClient({ status: { exists: true, unlocked: true, publicKey: PK } })
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store })
+  const err = await id.bindPasskey({ credentialId: 'ZnJlc2g', userId: WRAP_ID }).catch((e) => e)
+  t.is(err && err.code, 'NOT_ACTIVE', 'a failure, never "no stored session"')
+  t.absent(client.methods().includes('identity.recoveryBind'), 'the diary keeps its passkey')
+  t.is(JSON.parse(items().get(itemKey(RP, PK))).credentialId, CRED, 'the item is untouched')
+})
+
+test('identity: bindPasskey right after the passkey sheet waits for active once and binds', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createSessionStore, itemKey } = await loadStore()
+  const now = 1000 * DAY
+  await createSessionStore({ now: () => now }).save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  let active = false
+  const store = createSessionStore({ now: () => now, isActive: () => active })
+  const client = fakeClient({ status: { exists: true, unlocked: true, publicKey: PK } })
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store, whenActive: async () => { active = true } })
+  const out = await id.bindPasskey({ credentialId: 'ZnJlc2g', userId: WRAP_ID })
+  t.alike(out, {}, 'the session was saved for the new passkey')
+  t.ok(client.methods().includes('identity.recoveryBind'))
+  t.is(JSON.parse(items().get(itemKey(RP, PK))).credentialId, 'ZnJlc2g', 'the item follows the new passkey')
+})
+
+test('identity: a resume that meets a locked phone waits for active and reads once more', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createSessionStore, itemKey } = await loadStore()
+  const now = 1000 * DAY
+  await createSessionStore({ now: () => now }).save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  let active = false
+  let release
+  const activeAgain = new Promise((resolve) => { release = resolve })
+  let waits = 0
+  const store = createSessionStore({ now: () => now, isActive: () => active })
+  const client = fakeClient({ status: { exists: true, publicKey: PK, passkeyKnown: true, credentialId: CRED } })
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store, whenActive: () => { waits++; return activeAgain } })
+  const resumed = id.resume()
+  await new Promise((resolve) => setImmediate(resolve))
+  t.absent(client.methods().includes('identity.install'), 'nothing installed while locked')
+  t.is(waits, 1)
+  // The shell reads status only after the deferred resume: it never sees
+  // the stored session as missing (no mismatch, no wipe).
+  let statusDone = false
+  const status = id.status().then((st) => { statusDone = true; return st })
+  await new Promise((resolve) => setImmediate(resolve))
+  t.is(statusDone, false, 'status waits for the deferred resume')
+  active = true
+  release()
+  await resumed
+  await status
+  t.ok(client.methods().includes('identity.install'), 'resumed once active')
+  t.ok(items().has(itemKey(RP, PK)))
+
+  // Still not active after the wait: one retry only, and the item stays.
+  resetStubs()
+  await createSessionStore({ now: () => now }).save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  let n = 0
+  const never = createSessionStore({ now: () => now, isActive: () => false })
+  const c2 = fakeClient({ status: { exists: true, publicKey: PK, passkeyKnown: true, credentialId: CRED } })
+  await createNativeIdentity({ request: c2.request, rpId: () => RP, store: never, whenActive: async () => { n++ } }).resume()
+  t.is(n, 1, 'bounded: one wait')
+  t.absent(c2.methods().includes('identity.install'))
+  t.ok(items().has(itemKey(RP, PK)))
+})

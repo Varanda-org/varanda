@@ -67,6 +67,7 @@ import { parseSnapshot } from './src/feedSnapshot'
 import { clearSnapshot, loadSnapshotText, previewCapable } from './src/feedSnapshotStore'
 import { sessionStore } from './src/sessionStore'
 import { cacheGeneration, wipeLocalCaches } from './src/localCaches'
+import { registerBackgroundRefresh, unregisterBackgroundRefresh } from './src/backgroundTask'
 import { makeIntent, validIntent } from './src/privateReply'
 import { NamesProvider, useNames } from './src/names'
 import { BlocksProvider, useBlocks } from './src/blocksProvider'
@@ -296,13 +297,28 @@ function cardPastExpires (card, now) {
 }
 
 // The keychain is never read before this process was in the foreground
-// once: a launch in the background (a push on a locked phone) must not touch
-// it, since a failed read deletes the stored session
-// (src/sessionStore.native.js). A one-way latch for the process.
+// once: a launch in the background (the refresh task, a push on a locked
+// phone) must not touch it, since a failed read deletes the stored session
+// (src/sessionStore.native.js). A one-way latch for the process, the same
+// rule as the boot's (src/foregroundGate.js).
 let activeSeen = false
 function noteAppState (state) {
   if (state === 'active') activeSeen = true
   return activeSeen
+}
+
+// A Rua writes its snapshot a few seconds after the first live page.
+const REFRESH_CHECK_MS = 15000
+
+// Whether the store holds a snapshot the background refresh may renew: of
+// this binding and owner, with at least one row. Read-only. Never throws.
+function refreshSnapshotOk (binding, owner) {
+  try {
+    const snapshot = parseSnapshot(loadSnapshotText(), { ...binding, owner, now: Date.now() })
+    return snapshot !== null && snapshot.items.length > 0
+  } catch {
+    return false
+  }
 }
 
 function setupComplete (info) {
@@ -580,6 +596,36 @@ function Member () {
       if (!settled) previewAsked.current = false
     }
   }, [appActive, previewConfig, previewPhase, previewRetry])
+
+  // The background refresh (src/backgroundTask.native.js): registered only
+  // while a connected, unlocked hosted session has a valid A Rua snapshot of
+  // its own binding and owner on disk (read from the store, since A Rua
+  // writes it after a debounce: checked again when the app leaves the
+  // foreground and a little after the first page), and unregistered as soon
+  // as that stops holding (a core configuration, no passkey, locked, signed
+  // out). Every wipe of the local caches unregisters it too. A no-op on the
+  // web.
+  const refreshHosted = previewConfig !== null && typeof previewConfig === 'object' && previewConfig.kind === 'hosted'
+  const refreshOwner = !locked && pkStatus !== null && pkStatus.signedOut !== true && typeof pkStatus.publicKey === 'string' ? pkStatus.publicKey.toLowerCase() : null
+  const refreshAssociation = refreshHosted ? previewConfig.association : null
+  useEffect(() => {
+    if (previewPhase !== 'ready') return
+    const binding = refreshHosted ? previewBinding(previewConfig) : null
+    if (binding === null || passkey === null || refreshOwner === null) {
+      unregisterBackgroundRefresh()
+      return
+    }
+    const check = () => {
+      if (refreshSnapshotOk(binding, refreshOwner)) registerBackgroundRefresh()
+    }
+    check()
+    const timer = setTimeout(check, REFRESH_CHECK_MS)
+    const sub = AppState.addEventListener('change', (state) => { if (state !== 'active') check() })
+    return () => {
+      clearTimeout(timer)
+      sub.remove()
+    }
+  }, [refreshHosted, refreshAssociation, passkey, refreshOwner, previewPhase, feedBoot.page])
   generationRef.current = generation
 
   const readInfo = useCallback(async () => {
