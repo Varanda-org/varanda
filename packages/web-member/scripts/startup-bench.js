@@ -318,7 +318,8 @@ async function fillGroups (f, groups, blocks) {
 }
 
 async function groupReads (f, groups) {
-  const ctx = { storage: f.storage, association: f.association, keyPair: f.keyPair }
+  // The session's group fold memo (a Map per key pair), as group.list gets it.
+  const ctx = { storage: f.storage, association: f.association, keyPair: f.keyPair, memo: new Map() }
   const timed = async (fn) => {
     const start = process.hrtime.bigint()
     const r = await fn()
