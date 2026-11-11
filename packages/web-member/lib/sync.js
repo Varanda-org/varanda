@@ -1337,6 +1337,10 @@ async function syncRun ({
   // 5.114), kept paged like the roots the own diary binds: as replicas
   // only, never an own writer, nothing appended. At most MAX_PAGE_ROOTS.
   pageRoots = [],
+  // false (a once run only, sync.start `groups`): no group core is opened,
+  // no group channel attached, no group page asked; the reader still
+  // publishes, its group lend answering null.
+  groups: syncGroups = true,
   // Tests only: async (point) awaited at 'follows' (before the follow pass)
   // and at 'sweeps' (once the follows are open, before the index and the
   // sweeps), to hold the startup there.
@@ -3123,7 +3127,12 @@ async function syncRun ({
     }
     return track(serialSweep(async () => {
       for (const core of cores) await core.close()
+      // Without groups a binding diary (kv groupDiaries, or a groupCerts
+      // entry) is left with its group cores, so the next run with groups
+      // sweeps both together instead of judging the cores from groupCerts.
+      const groupSide = syncGroups ? null : new Set([...(await store.readGroupDiaries(storage)), ...(await store.readGroupCerts(storage)).keys()])
       for (const key of keys) {
+        if (groupSide !== null && groupSide.has(key)) continue
         // Inside the group kv chain, where binding diaries open: never a
         // second handle on a key (memoryNodeStorage shares the files, and
         // closing one closes them for the other).
@@ -3170,7 +3179,10 @@ async function syncRun ({
         // binding diary is open or kept for a stored group core: purging it
         // would delete storage under that core and lose the join evidence;
         // an open one's tracker clears what its author deleted.
-        if (stillFollowed.has(key) || noClear || groupDiaries.has(key) || groupDiaryBound(key)) {
+        // Without groups no stored core is loaded, so groupDiaryBound cannot
+        // tell a binding diary (one followed when its core was accepted is
+        // not even listed): nothing is purged, the next run with groups decides.
+        if (stillFollowed.has(key) || noClear || !syncGroups || groupDiaries.has(key) || groupDiaryBound(key)) {
           next.add(key)
           continue
         }
@@ -3384,7 +3396,7 @@ async function syncRun ({
   // A root the own diary binds is paged as a replica, never listed in kv:
   // another device of the same identity joined it. -> true when newly paged.
   function adoptDiaryRoot (key) {
-    if (ending || isBlockedKey(key) || ownGroupKeys.has(key) || ownCommunities.has(key) || localGroups.has(key)) return false
+    if (!syncGroups || ending || isBlockedKey(key) || ownGroupKeys.has(key) || ownCommunities.has(key) || localGroups.has(key)) return false
     if (droppedProbes.has(key)) return false
     // Another root's header (peer data) made it a parent first: the diary's
     // binding wins and its own header decides its kind. A root refused only
@@ -3835,7 +3847,9 @@ async function syncRun ({
   // the own diary or own cores; a followed diary's replica is its follow's
   // (regateRevoked).
   async function sweepRevokedGroups () {
-    if (blocklist.revokedIssuers().size === 0) return
+    // Without groups nothing group-side is loaded: the next run with them
+    // sweeps the whole group state at its start.
+    if (!syncGroups || blocklist.revokedIssuers().size === 0) return
     // Every core carries the certificate its gate verified (or the one kept
     // since): a revocation stops it whether it is gating, in regate or
     // active, also when its binding diary is not stored here.
@@ -4456,6 +4470,7 @@ async function syncRun ({
   // ---- groups: the writer pages on the link ----
 
   function attachLinkGroups (l) {
+    if (!syncGroups) return
     try {
       l.groups = attachGroups(l.noise, {
         role: 'member',
@@ -5129,7 +5144,7 @@ async function syncRun ({
     startup.step('mídia própria')
     await openOwnMedia()
     startup.step('grupos')
-    await openGroups()
+    if (syncGroups) await openGroups()
     // The own diary is lent before its deleted blocks are cleared: a read
     // folds the tombstones itself (presentState), cleared or not.
     if (!ending) reader.set({ diary, replica, group: lentGroup, hold, release, opened: lendOpened, settled: lendSettledP })
@@ -5303,7 +5318,9 @@ async function syncRun ({
     // Binding diaries only once the follows hold their replicas (a followed
     // diary is never opened twice).
     startup.step('diários de grupo')
-    if (!ending) await startGroupDiaries()
+    // Without groups no stored core binds anything here, so this pass would
+    // unlist (and purge) every binding diary.
+    if (!ending && syncGroups) await startGroupDiaries()
     openedDone(!ending)
     if (startupGate !== null) await startupGate('sweeps')
     startup.step('índice de réplicas')
