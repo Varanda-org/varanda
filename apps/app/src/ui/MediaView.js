@@ -119,7 +119,7 @@ function useMedia (author, descriptor, persist) {
 // tapRetry false: a failed photo stays a plain image (no retry button of its
 // own), for a parent control that owns the press, such as a Mural tile; the
 // automatic retries still run.
-export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cover', style, onPress, dark, persist = true, tapRetry = true }) {
+export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cover', style, onPress, dark, persist = true, tapRetry = true, tabIndex }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const local = uri !== undefined
@@ -155,6 +155,7 @@ export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cov
       style={({ pressed }) => [styles.tile, style, pressed && styles.pressed]}
       accessibilityRole='button'
       accessibilityLabel={a11y}
+      tabIndex={tabIndex}
       onPress={press}
     >
       {inner}
