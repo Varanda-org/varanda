@@ -13,14 +13,35 @@ import { diaryPeekSlots } from './engagement'
 import { fetchMember } from './indexClient'
 import { blockedPeekParams, blockedSetOf } from './memberBlocks'
 import { reportBlocks } from './pushBlocks'
-import { dropAuthors, newlyBlocked } from './localCaches'
+import { dropAuthors, newlyBlocked, registerLocalCache } from './localCaches'
 
 const EMPTY = new Set()
 const noop = () => {}
 
+// Whether `keys` is the node's list for the current epoch: 'pending' until
+// block.list answers, 'ok' once it did, 'failed' when it was refused. Screens
+// that show rows stored before this run (A Rua's snapshot) fail closed on
+// 'failed': an empty set then means unknown, not nothing blocked.
+// event: 'epoch' (new node epoch or passkey generation), 'loaded', 'failed'.
+// A refusal after a good read of the same epoch keeps 'ok': that list stands.
+export function nextLoadState (state, event) {
+  if (event === 'epoch') return 'pending'
+  if (event === 'loaded') return 'ok'
+  if (event === 'failed') return state === 'ok' ? 'ok' : 'failed'
+  return state
+}
+
+// Whether a block.list answer may still be used: it is the latest reload
+// asked (`mine` === `latest`) and of the epoch now in force. An older one,
+// answered late, would undo a newer list.
+export function isLatestReload (mine, latest, epochAt, epochNow) {
+  return mine === latest && epochAt === epochNow
+}
+
 const FALLBACK = {
   available: false,
   keys: EMPTY,
+  loadState: 'pending',
   changed: 0,
   has: () => false,
   ask: noop,
@@ -47,10 +68,18 @@ export function BlocksProvider ({ children }) {
   const requestRef = useRef(node.request)
   requestRef.current = node.request
   const [keys, setKeys] = useState(EMPTY)
+  const [loadState, setLoadState] = useState('pending')
+  // Counts the epochs: an answer from an older one never sets the state.
+  const epochRef = useRef(0)
+  // Counts the reloads: only the latest one asked commits or sets the state.
+  const reloadSeqRef = useRef(0)
   const [changed, setChanged] = useState(0)
   const [asking, setAsking] = useState(null)
 
   const keysRef = useRef(EMPTY)
+  // A wipe forgets the denied authors with the caches: the next list read
+  // then counts every block as new and denies them again, owner unchanged.
+  useEffect(() => registerLocalCache({ wipe: () => { keysRef.current = EMPTY } }), [])
   const commit = useCallback((next) => {
     // Kept copies of a newly blocked author go before any screen can show
     // them again, whether the block was made here, on another device of the
@@ -62,13 +91,29 @@ export function BlocksProvider ({ children }) {
     reportBlocks([...next])
   }, [])
 
+  // Only a whole list read marks the epoch 'ok': setBlock's commit adds one
+  // key to what is known, which is not the list after a failed read.
   const reload = useCallback(async (alive = () => true) => {
-    const answer = await requestRef.current('block.list', {})
-    if (alive()) commit(blockedSetOf(answer))
+    const epoch = epochRef.current
+    const seq = ++reloadSeqRef.current
+    const current = () => alive() && isLatestReload(seq, reloadSeqRef.current, epoch, epochRef.current)
+    let answer
+    try {
+      answer = await requestRef.current('block.list', {})
+    } catch (err) {
+      if (current()) setLoadState((s) => nextLoadState(s, 'failed'))
+      throw err
+    }
+    if (!current()) return
+    commit(blockedSetOf(answer))
+    setLoadState((s) => nextLoadState(s, 'loaded'))
   }, [commit])
 
-  // A failed read keeps what is known: the node filters either way.
+  // A failed read keeps what is known: the node filters either way. The
+  // load state says it failed, so stored rows fail closed.
   useEffect(() => {
+    epochRef.current++
+    setLoadState((s) => nextLoadState(s, 'epoch'))
     if (!ready) return
     let live = true
     reload(() => live).catch(noop)
@@ -99,12 +144,13 @@ export function BlocksProvider ({ children }) {
   const value = useMemo(() => ({
     available,
     keys,
+    loadState,
     changed,
     has: (key) => typeof key === 'string' && keys.has(key),
     ask: setAsking,
     setBlock,
     refresh
-  }), [available, keys, changed, setBlock, refresh])
+  }), [available, keys, loadState, changed, setBlock, refresh])
   const askValue = useMemo(() => ({ asking, close: () => setAsking(null) }), [asking])
 
   return (

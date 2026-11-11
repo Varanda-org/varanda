@@ -31,7 +31,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
 import { useNode, useSyncSignals } from './node'
 import { namesQuiet } from './autoSyncPolicy'
-import { applySeed, authoritative, fieldsOf, stableView } from './namesCache'
+import { absentSeeds, applySeed, authoritative, fieldsOf, stableView } from './namesCache'
 
 // The seeder's page hint rides with the name (only a hint: Membro verifies
 // with page.read). profile.read never says it, so it is carried over.
@@ -129,6 +129,8 @@ export function NamesProvider ({ children }) {
 
   const learn = useCallback((key, fields) => apply([[key, fields]]), [apply])
   const learnMany = useCallback((entries) => apply(entries), [apply])
+  // Seeds for keys not in the cache yet only (namesCache.absentSeeds).
+  const seedMany = useCallback((entries) => apply(absentSeeds(cacheRef.current, entries)), [apply])
 
   const quietOk = (now) => namesQuiet({ ...quietRef.current, now, quietMs: QUIET_MS })
 
@@ -384,7 +386,7 @@ export function NamesProvider ({ children }) {
     return p === null ? null : p.name
   }, [profileOf])
 
-  const value = useMemo(() => ({ profileOf, nameOf, learn, learnMany, resolve, resolveMany, invalidate, unsupported }), [profileOf, nameOf, learn, learnMany, resolve, resolveMany, invalidate, unsupported])
+  const value = useMemo(() => ({ profileOf, nameOf, learn, learnMany, seedMany, resolve, resolveMany, invalidate, unsupported }), [profileOf, nameOf, learn, learnMany, seedMany, resolve, resolveMany, invalidate, unsupported])
 
   return <NamesContext.Provider value={value}>{children}</NamesContext.Provider>
 }

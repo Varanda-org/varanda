@@ -63,6 +63,8 @@ import { hostedPage } from './src/configStore'
 import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin } from './src/installation'
+import { parseSnapshot } from './src/feedSnapshot'
+import { clearSnapshot, loadSnapshotText } from './src/feedSnapshotStore'
 import { makeIntent, validIntent } from './src/privateReply'
 import { NamesProvider, useNames } from './src/names'
 import { BlocksProvider, useBlocks } from './src/blocksProvider'
@@ -140,7 +142,7 @@ import { onDmOpen, onDmWake, requestDmOpen } from './src/dm-open'
 import { Comunidade } from './src/screens/Comunidade'
 import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
-import ARua from './src/screens/ARua'
+import ARua, { liveBinding, noteDeleted } from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
 import Conversa, { useActing } from './src/screens/Conversa'
 import Curtidas from './src/screens/Curtidas'
@@ -381,7 +383,14 @@ function Member () {
     setVersion((v) => v + 1)
     setFollowsSignal((v) => v + 1)
   }, [])
+  // Every screen's delete goes through here: A Rua's stored first page may
+  // hold the deleted post, and it must not show again at the next launch
+  // even if A Rua is not visited before the app closes. A Rua may still hold
+  // it in memory: noteDeleted drops an armed write (cache generation) and
+  // none is made until a first page read that starts after this delete.
   const deletedPost = useCallback(() => {
+    noteDeleted()
+    clearSnapshot()
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
   }, [])
@@ -1248,8 +1257,23 @@ function Member () {
   // The own profile (one profile.read through the profiles cache): the
   // onboarding's name step, the Publicar avatar and the own rows.
   const ownKey = info ? info.publicKey : null
-  const { resolve } = names
-  useEffect(() => { if (setupDone && ownKey) resolve(ownKey) }, [setupDone, ownKey, resolve])
+  const { seedMany, resolve } = names
+  // A Rua's snapshot (src/feedSnapshot.js) holds the own name: seeded first,
+  // so the name step does not wait for profile.read, which still answers
+  // for it (a seed is never loaded, and never replaces a known entry).
+  // Bound by A Rua's own rule (liveBinding); the Vitrine has no
+  // configuration, so it never reads the device's real snapshot.
+  const snapshotConfig = node.config
+  useEffect(() => {
+    if (!setupDone || !ownKey) return
+    const binding = liveBinding(ownKey, snapshotConfig)
+    if (binding !== null) {
+      const snapshot = parseSnapshot(loadSnapshotText(), { ...binding, now: Date.now() })
+      const own = snapshot !== null && Object.prototype.hasOwnProperty.call(snapshot.names, binding.owner) ? snapshot.names[binding.owner] : null
+      if (own !== null) seedMany([[ownKey, own]])
+    }
+    resolve(ownKey)
+  }, [setupDone, ownKey, snapshotConfig, seedMany, resolve])
 
   // The onboarding step (src/onboarding.js). A failed lookup is not evidence
   // that the profile is absent: profileKnown is true only once the cache

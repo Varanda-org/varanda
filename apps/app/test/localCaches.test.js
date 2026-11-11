@@ -110,6 +110,16 @@ test('source: blocksProvider drops newly blocked authors in commit', async (t) =
   t.ok(drop > 0 && drop < commit.indexOf('setKeys(next)'), 'drops before the new list is shown')
 })
 
+test('source: a wipe resets what rebuilds the allowed and denied sets', async (t) => {
+  // wipeLocalCaches clears both sets; for the same owner they come back only
+  // if the next block list and follow list are counted as new again.
+  const blocks = read('blocksProvider.js')
+  t.ok(/registerLocalCache\(\{ wipe: \(\) => \{ keysRef\.current = EMPTY \} \}\)/.test(blocks), 'blocksProvider forgets the known blocks on wipe')
+  const arua = read('screens/ARua.js')
+  const reg = arua.slice(arua.indexOf('\nregisterLocalCache({'), arua.indexOf('})', arua.indexOf('\nregisterLocalCache({')))
+  t.ok(/wipe: \(\) => \{\s+reconciledFollows = null/.test(reg), 'A Rua forgets the reconciled follow set on wipe')
+})
+
 test('allowedAuthor: open until a complete set is known, then the set only', async (t) => {
   const lc = await load()
   const own = 'a1'.repeat(32)
