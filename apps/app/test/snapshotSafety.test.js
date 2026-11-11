@@ -220,7 +220,7 @@ test('the stores cap equals the snapshot cap', async (t) => {
 })
 
 const hooks = `
-const SRC = 'export const Paths = { document: { uri: "file:///stub/Documents/" } }\\n' +
+const SRC = 'export const Paths = { document: { uri: "file:///stub/Documents/" }, cache: { uri: "file:///stub/Caches/" } }\\n' +
   'export class File {\\n' +
   '  constructor (dir, name) { this.uri = dir.uri + name }\\n' +
   '  get exists () { return globalThis.__files.has(this.uri) }\\n' +
@@ -238,7 +238,7 @@ export async function resolve (specifier, context, next) {
 `
 register('data:text/javascript,' + encodeURIComponent(hooks))
 
-const PATH = 'file:///stub/Documents/varanda-rua-snapshot.json'
+const PATH = 'file:///stub/Caches/varanda-rua-snapshot.json'
 const CAP = 524288
 
 function files (t, entries) {
