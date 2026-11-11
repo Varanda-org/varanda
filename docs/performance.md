@@ -159,7 +159,7 @@ Mac M4 Pro, Node 24.22.1, com outras sessões usando a máquina (carga média en
 
 ### M4, instalação rápida (pilha de 19 PRs, `docs/perf-m4`, 10/11/2026)
 
-O que mudou: partida pela configuração lembrada e sem tempo fixo de splash; Espiadinha e Avisos com blocos em paralelo e páginas de candidatos; nó que não espera o armazém de mensagens; leitor publicado antes do fim da sincronização da partida; dobras de conversas e grupos com memória; fotos, A Rua e outras telas a partir da última primeira página; A Rua no lugar do splash; fila de pedidos com faixa de segundo plano; hash nativo das fotos; atualização de A Rua com o app fechado. Detalhes de cada PR em `docs/verification.md` seções 150 a 167.
+O que mudou: partida pela configuração lembrada e sem tempo fixo de splash; Espiadinha e Avisos com blocos em paralelo e páginas de candidatos; nó que não espera o armazém de mensagens; leitor publicado antes do fim da sincronização da partida; dobras de conversas e grupos com memória; fotos, A Rua e outras telas a partir da última primeira página; A Rua no lugar do splash; fila de pedidos com faixa de segundo plano; hash nativo das fotos; atualização de A Rua com o app fechado. Detalhes de cada PR em `docs/verification.md` seções 152 a 169.
 
 Nó no Mac M4 Pro, Node v24.22.1, commit 4b8a5e94, conjunto D1 com `--js-verify`. Comando de cada linha (as três execuções de cada caso foram feitas uma depois da outra, cada uma com `--runs 5`; a tabela dá a mediana das três medianas; JSON em saída local, não versionada, arquivos `<caso>-r<n>.json`; carga média de 1 min lida com `uptime` no início de cada execução, em saída local, não versionada):
 
