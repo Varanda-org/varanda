@@ -197,13 +197,15 @@ function isAvatar (v) {
 }
 
 // By index, never every(): a hole in a sparse array is undefined and invalid.
-function isMediaList (v) {
-  if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_MEDIA_PER_POST) return false
+function isMediaList (v, max = L.MAX_MEDIA_PER_POST) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > max) return false
   for (let i = 0; i < v.length; i++) {
     if (!isDescriptor(v[i])) return false
   }
   return true
 }
+
+const isListingMediaList = (v) => isMediaList(v, F.MAX_LISTING_MEDIA)
 
 // Private group items: where the ciphertext lives in the writer's media core
 // (a descriptor without the image size, which ciphertext does not have),
@@ -230,7 +232,7 @@ function isPrivateGroupMediaItem (d) {
 
 // Group media identities are distinct even when their other fields differ.
 function isGroupMediaList (v) {
-  if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_MEDIA_PER_POST) return false
+  if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_GROUP_MEDIA) return false
   const identities = new Set()
   for (let i = 0; i < v.length; i++) {
     const item = v[i]
@@ -966,7 +968,7 @@ const SPECS = {
       unit: req(isListingUnit),
       cat: req(F.isCat),
       place: req(F.isPlace),
-      media: opt(isMediaList)
+      media: opt(isListingMediaList)
     },
     mutating: true,
     cross: listingUnitCross
@@ -984,7 +986,7 @@ const SPECS = {
       unit: req(isListingUnit),
       cat: req(F.isCat),
       place: req(F.isPlace),
-      media: req((v) => v === null || isMediaList(v))
+      media: req((v) => v === null || isListingMediaList(v))
     },
     mutating: true,
     cross: listingUnitCross
@@ -1354,11 +1356,13 @@ const SPECS = {
   'sync.start': {
     fields: {
       once: opt(isBool, false),
-      timeoutMs: opt(int(L.SYNC_TIMEOUT_MIN, L.SYNC_TIMEOUT_MAX))
+      timeoutMs: opt(int(L.SYNC_TIMEOUT_MIN, L.SYNC_TIMEOUT_MAX)),
+      groups: opt(isBool)
     },
     mutating: true,
     cross (given, value) {
       if (hasOwn(given, 'timeoutMs') && value.once !== true) return 'timeoutMs só com once'
+      if (value.groups === false && value.once !== true) return 'groups: false só com once'
       if (value.once === true && !hasOwn(given, 'timeoutMs')) value.timeoutMs = L.SYNC_TIMEOUT_DEFAULT
       return null
     }

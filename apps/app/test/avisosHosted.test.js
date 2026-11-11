@@ -161,3 +161,190 @@ test('Avisos retries avatars once per full reload, not per partial page', (t) =>
   const pollAt = source.indexOf('const poll = useCallback')
   t.absent(source.slice(pollAt, source.indexOf('\n  }, [', pollAt)).includes('setAvatarCycle'))
 })
+
+// Slices the real effect bodies out of the screen source and runs them in a hand-built
+// context, so a new identifier in those effects breaks the test with a ReferenceError.
+function screenCallback (screen, marker, context) {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/' + screen + '.js'), 'utf8')
+  const at = source.indexOf(marker)
+  if (at < 0) throw new Error('Screen callback not found: ' + marker)
+  const start = source.indexOf('(', at) + 1
+  const end = source.indexOf('\n  }, [', start) + '\n  }'.length
+  return require('node:vm').runInNewContext('(' + source.slice(start, end) + ')', context)
+}
+
+// Exercise the actual screen effects without JSX, a platform or a network.
+test('hidden screens serialize the two short links before sync is ready', async (t) => {
+  const peek = await import('../src/peek.js')
+  const notices = await import('../src/notices.js')
+  const waits = []
+  const calls = []
+  const node = {
+    epoch: 10,
+    online: true,
+    visible: true,
+    phase: 'ready',
+    signals: { seederVerified: true, ready: false },
+    whenIdle (ms) {
+      let release
+      const promise = new Promise((resolve) => { release = resolve })
+      waits.push({ ms, resolve: release })
+      return { promise, cancel () {} }
+    }
+  }
+  const state = { loadedAt: null, loading: false, refreshing: false, unsupported: false }
+  const common = {
+    ...peek,
+    ...notices,
+    node,
+    hosted: true,
+    active: false,
+    activeRef: { current: false },
+    state,
+    stateRef: { current: state },
+    previous: { current: {} },
+    refreshRef: { current: 0 }
+  }
+  let finishPeek
+  const peekRead = new Promise((resolve) => { finishPeek = resolve })
+  const warm = screenCallback('Espiadinha', 'useEffect(() => {\n    const warm', {
+    ...common,
+    seederVerified: true,
+    heldRef: { current: null },
+    loadFirst: (opts) => { calls.push(['peek', opts.quiet]); return peekRead }
+  })
+  const firstReadEpochRef = { current: null }
+  const first = screenCallback('Avisos', 'useEffect(() => {\n    const canStart', {
+    ...common,
+    firstReadEpochRef,
+    loadFirst: (opts) => calls.push(['notices'])
+  })
+  warm()
+  first()
+  t.alike(waits.map((w) => w.ms), [500], 'notices waits for Espiadinha, not just a longer timer')
+  waits[0].resolve()
+  await Promise.resolve()
+  t.alike(calls, [['peek', true]])
+  first()
+  t.is(waits.length, 1, 'notices cannot start while the warm read is pending')
+  finishPeek()
+  await Promise.resolve()
+  first()
+  t.alike(waits.map((w) => w.ms), [500, 1000])
+  waits[1].resolve()
+  await Promise.resolve()
+  t.alike(calls, [['peek', true], ['notices']])
+  warm()
+  first()
+  t.is(waits.length, 2, 'neither screen repeats its first read this epoch')
+})
+
+test('a refused seeder cancels both warm reads even after their idle waits were armed', async (t) => {
+  const peek = await import('../src/peek.js')
+  const notices = await import('../src/notices.js')
+  for (const screen of ['Espiadinha', 'Avisos']) {
+    const epoch = screen === 'Espiadinha' ? 11 : 12
+    peek.updatePeekWarmState(epoch, { eligible: false })
+    let release
+    let calls = 0
+    const state = { loadedAt: null, loading: false, refreshing: false, unsupported: false }
+    const context = {
+      ...peek,
+      ...notices,
+      node: {
+        epoch,
+        online: true,
+        visible: true,
+        phase: 'ready',
+        signals: { seederVerified: true, ready: false },
+        whenIdle: () => ({ promise: new Promise((resolve) => { release = resolve }), cancel () {} })
+      },
+      hosted: true,
+      active: false,
+      activeRef: { current: false },
+      seederVerified: true,
+      state,
+      stateRef: { current: state },
+      heldRef: { current: null },
+      firstReadEpochRef: { current: null },
+      previous: { current: {} },
+      refreshRef: { current: 0 },
+      loadFirst: async () => { calls++ }
+    }
+    const marker = screen === 'Espiadinha' ? 'useEffect(() => {\n    const warm' : 'useEffect(() => {\n    const canStart'
+    const effect = screenCallback(screen, marker, context)
+    effect()
+    t.is(typeof release, 'function', screen + ' armed its idle wait')
+    peek.updatePeekWarmState(epoch, { busy: true })
+    release()
+    await Promise.resolve()
+    effect()
+    t.is(calls, 0, screen + ' checks the refusal again before opening a link')
+  }
+})
+
+test('both screens share a seeder refusal and leave explicit reads available', async (t) => {
+  const peek = await import('../src/peek.js')
+  const notices = await import('../src/notices.js')
+  for (const screen of ['Espiadinha', 'Avisos']) {
+    const epoch = screen === 'Espiadinha' ? 13 : 14
+    peek.updatePeekWarmState(epoch, { eligible: true })
+    const activeRef = { current: false }
+    const stateRef = { current: { loadedAt: null, unsupported: false } }
+    let calls = 0
+    const refused = async () => {
+      calls++
+      throw Object.assign(new Error('Semeador ocupado; tente novamente em instantes.'), { code: 'USAGE' })
+    }
+    const context = {
+      ...peek,
+      ...notices,
+      node: { epoch },
+      hosted: true,
+      stateRef,
+      activeRef,
+      seqRef: { current: 0 },
+      commit: (patch) => { stateRef.current = { ...stateRef.current, ...patch } },
+      errorText: (err) => err.message,
+      followedHereRef: { current: new Map() },
+      pendingIngestRef: { current: null },
+      followsPending: { current: false },
+      PEEK_LIMIT_DEFAULT: 30,
+      peek: refused,
+      pageKeyRef: { current: null },
+      ownKeyRef: { current: null },
+      backoffRef: { current: false },
+      setAvatarCycle () {},
+      read: refused,
+      isLockedError: () => false,
+      isBusyError: (err) => err.message === 'avisos já em andamento',
+      setTimeout: () => t.fail('a refused seeder must not schedule a retry')
+    }
+    const loadFirst = screenCallback(screen, 'const loadFirst = useCallback(', context)
+    await loadFirst({ quiet: true })
+    t.is(calls, 1)
+    t.is(peek.getPeekWarmState().busy, true, screen + ' publishes the refusal')
+    t.is(stateRef.current.loading, false)
+    activeRef.current = true
+    await loadFirst()
+    t.is(calls, 2, screen + ' explicit read bypasses the warm refusal and idle wait')
+  }
+})
+
+test('the hidden poll still starts the first read, and rows are not drawn before the first show', (t) => {
+  let loads = 0
+  const poll = screenCallback('Avisos', 'const poll = useCallback', {
+    hosted: true,
+    stateRef: { current: { loadedAt: null, unsupported: false, locked: false } },
+    pageKeyRef: { current: null },
+    ownKeyRef: { current: null },
+    activeRef: { current: false },
+    loadFirst: () => { loads++ }
+  })
+  poll()
+  t.is(loads, 1, 'the 5-minute poll lights the bell while the tab is hidden')
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  t.ok(source.includes('if (active) shownOnceRef.current = true'))
+  t.ok(source.includes('data={shownOnceRef.current ? shownItems : EMPTY_ROWS}'))
+  t.ok(source.includes('const EMPTY_ROWS = Object.freeze([])'))
+})

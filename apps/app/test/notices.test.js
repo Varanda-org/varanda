@@ -27,7 +27,7 @@ test('the fixed texts are the approved Portuguese', async (t) => {
   t.is(NOTICES_INCOMPLETE_TEXT, 'Alguns avisos ainda podem chegar.')
   t.is(SEEN_STORAGE_KEY, 'varanda-notices-seen')
   t.is(NOTICES_POLL_MS, 300000)
-  t.is(NOTICES_FIRST_READ_QUIET_MS, 4000)
+  t.is(NOTICES_FIRST_READ_QUIET_MS, 1000)
   t.is(SEEN_MAX, 2048)
 })
 
@@ -1197,4 +1197,50 @@ test('rowAvatarSource prefers a row photo over older peek answers', async (t) =>
 test('notices helpers keep the pure module free of imports', (t) => {
   const source = require('fs').readFileSync(require.resolve('../src/notices.js'), 'utf8')
   t.is(/^import /m.test(source), false)
+})
+
+test('the hidden first read waits for this epoch peek to settle or become ineligible', async (t) => {
+  const { shouldStartNoticesFirstRead } = await load()
+  const ready = {
+    hosted: true,
+    online: true,
+    phase: 'ready',
+    visible: true,
+    seederVerified: true,
+    syncReady: false,
+    active: false,
+    loadedAt: null,
+    epoch: 2,
+    peekWarm: { epoch: 2, eligible: true, attempted: false, pending: false, busy: false }
+  }
+  const withPeek = (patch) => shouldStartNoticesFirstRead({ ...ready, peekWarm: { ...ready.peekWarm, ...patch } })
+  t.is(shouldStartNoticesFirstRead(ready), false, 'Espiadinha is still waiting for its idle slot')
+  t.is(withPeek({ attempted: true, pending: true }), false, 'attempted is not settled')
+  t.is(withPeek({ eligible: false, attempted: true, pending: true }), false, 'an in-flight warm is still pending after a tab change')
+  t.is(withPeek({ attempted: true }), true, 'settled, even without sync ready')
+  t.is(withPeek({ eligible: false }), true, 'a warm that will not run does not block notices')
+  t.is(withPeek({ epoch: 1, attempted: true }), false, 'an old completion is not this epoch')
+  t.is(shouldStartNoticesFirstRead({ ...ready, peekWarm: null }), false, 'wait for Espiadinha to declare eligibility')
+  for (const patch of [{ attempted: true }, { eligible: false }]) {
+    t.is(withPeek({ ...patch, busy: true }), false, 'a full seeder gets no second warm read')
+  }
+  const settled = { ...ready, peekWarm: { ...ready.peekWarm, attempted: true } }
+  for (const patch of [
+    { hosted: false }, { online: false }, { phase: 'connecting' }, { visible: false },
+    { seederVerified: false }, { active: true }, { loadedAt: 1 }, { loading: true },
+    { refreshing: true }, { loadingMore: true }, { unsupported: true }, { locked: true }, { attempted: true }
+  ]) {
+    t.is(shouldStartNoticesFirstRead({ ...settled, ...patch }), false, JSON.stringify(patch))
+  }
+})
+
+test('peek eligibility releases notices when its warm will not run', async (t) => {
+  const { shouldWarmPeek } = await import('../src/peek.js')
+  const { shouldStartNoticesFirstRead } = await load()
+  const ready = { hosted: true, online: true, phase: 'ready', visible: true, seederVerified: true, active: false, loadedAt: null }
+  for (const patch of [{ hosted: false }, { online: false }, { loadedAt: 1 }, { unsupported: true }, { active: true }]) {
+    const eligible = shouldWarmPeek({ ...ready, ...patch })
+    t.is(eligible, false)
+    t.is(shouldStartNoticesFirstRead({ ...ready, epoch: 1, peekWarm: { epoch: 1, eligible } }), true)
+  }
 })

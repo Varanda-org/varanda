@@ -204,6 +204,16 @@ test('page cli: register, terms, create, post, follow, notices, close as a core 
   t.is(posted.status, 0, posted.stderr)
   t.ok(lastJson(posted.stdout).seq > created.seq, 'the post is a newer block')
 
+  // The count is checked before any file is read: ten missing files get
+  // as far as reading the first, eleven stop at the cap.
+  const missing = (n) => Array.from({ length: n }, (_, i) => ['--file', path.join(data, 'falta' + i + '.jpg')]).flat()
+  const ten = await run(['post', '--page', K, '--text', 'fotos', ...missing(10)])
+  t.is(ten.status, 2)
+  t.ok(ten.stderr.startsWith('uso: não foi possível ler '), 'ten files pass the cap')
+  const eleven = await run(['post', '--page', K, '--text', 'fotos', ...missing(11)])
+  t.is(eleven.status, 2)
+  t.is(eleven.stderr, 'uso: no máximo 10 fotos por publicação\n', 'an eleventh --file is refused')
+
   const followed = await run(['follow', '--page', K, '--key', diary])
   t.is(followed.status, 0, followed.stderr)
   t.ok(Number.isSafeInteger(lastJson(followed.stdout).seq))

@@ -23,8 +23,10 @@ async function launch (options) {
   return res.assets.map(plain).filter(Boolean)
 }
 
-export function pickImages () {
-  return launch({ allowsMultipleSelection: true, selectionLimit: MAX_MEDIA_PER_POST })
+// The default is a diary post. Chat and Feira pass a smaller cap so the
+// system picker stops there instead of offering ten.
+export function pickImages (limit = MAX_MEDIA_PER_POST) {
+  return launch({ allowsMultipleSelection: true, selectionLimit: limit })
 }
 
 export async function pickImage () {
