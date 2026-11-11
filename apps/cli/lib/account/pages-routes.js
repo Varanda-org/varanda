@@ -217,6 +217,8 @@ function createPagesRoutes ({
   pagesNotices = null,
   pagesGroups = null,
   pagesDelegate = null,
+  // member -> void, throws 'telefone-pendente' (server.js phoneChecked).
+  phoneChecked = () => {},
   http
 } = {}) {
   const { send, sendError, readJsonBody, checkPost, checkRawPost, RouteError, refuse, fromStore, keyedWindow } = http
@@ -813,6 +815,8 @@ function createPagesRoutes ({
 
   async function create (body) {
     const { member, page, nonce, op, hash, delegate } = await statement(body, 'create', false)
+    // A core node's delegate actor has no account, so no number of its own.
+    if (delegate === null) phoneChecked(member)
     if (!exactKeys(op, ['username', 'name', 'bio', 'roster']) || !exactKeys(op.roster, ['gen', 'admins', 'prev', 'at', 'nonce'])) {
       throw refuse('pedido-invalido')
     }

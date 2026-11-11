@@ -14,6 +14,7 @@ const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 const { createSeenRoutes } = require('./seen-routes')
 const { createAgeRoutes } = require('./age-routes')
+const { createPhoneRoutes } = require('./phone-routes')
 const { createRecoveryRoutes } = require('./recovery-routes')
 const { createDeleteRoutes } = require('./delete-routes')
 const { createDeletionSweep } = require('./deletion')
@@ -164,6 +165,15 @@ const ERROR_STATUS = Object.freeze({
   // A Feira code on POST /account/age/session: its paid session opens only
   // through POST /account/feira/idade, which the edge limits per address.
   'use-a-rota-da-feira': 409,
+  // Hosted phone verification (./phone-routes.js): no certificate, rename or
+  // invite for a key without a verified Brazilian mobile on record.
+  'telefone-pendente': 403,
+  'telefone-invalido': 400,
+  'telefone-em-uso': 409,
+  'telefone-recusado': 409,
+  'codigo-invalido': 400,
+  'codigo-expirado': 410,
+  'limite-telefone': 429,
   // The age routes could not tell whether something was applied (the provider
   // timed out after maybe creating a session, a write that may have landed):
   // unlike 'indisponivel', the app must not read this as a plain refusal.
@@ -666,6 +676,13 @@ function checkRawPost (req, origin) {
 // `ageDirectoryFloor` (the directoryFloor result of ./age-check-state.js, or
 // null for none) does the same with the latest certificate of an unbanded
 // link.
+// `phoneClient` (a createPhoneClient of ./phone-client.js) and `phones` (an
+// openPhoneStore of ./phone-store.js) turn on hosted phone verification
+// when both are set: authorize, finish, rename/finish and invites/finish
+// then refuse 'telefone-pendente' until the member holds a verified number.
+// Either null keeps today's behaviour and the phone policy route answers
+// { required: false }. `phoneDailyLimit` caps the paid code sends per day,
+// for linked and for unlinked keys each.
 // `pages` (null: every page POST answers 404 and the policy { available:
 // false }) is { keys, writer, pagesStore, dir, blocklist? } for
 // ./pages-routes.js; without a blocklist the moderation desk's is used.
@@ -721,6 +738,9 @@ function createAccountServer ({
   ageSince = null,
   ageCheck = null,
   ageDirectoryFloor = null,
+  phoneClient = null,
+  phones = null,
+  phoneDailyLimit = 200,
   pages = null,
   gif = null,
   gifTransport = {},
@@ -791,6 +811,7 @@ function createAccountServer ({
       association,
       accounts: store,
       terms,
+      phoneChecked,
       log,
       now,
       http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow }
@@ -804,6 +825,7 @@ function createAccountServer ({
     terms,
     seenStore: seen,
     limits: { read: limits.seenRead, write: limits.seenWrite, delete: limits.seenDelete },
+    phoneChecked,
     log,
     now,
     http: { send, sendError, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow }
@@ -828,6 +850,31 @@ function createAccountServer ({
     http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
   })
 
+  // Always mounted, so /account/phone/policy answers even when the feature
+  // is off. Excluir conta also queues a block with no report id
+  // (moderation-store.js requestDeletion): only a block that is not that one
+  // alone burns the number.
+  const phoneRoutes = createPhoneRoutes({
+    client: phoneClient,
+    phones,
+    association,
+    store,
+    ageVerified: (m) => !ageRoutes.required() || ageRoutes.verified(m),
+    linked: (m) => store.status(m).linked,
+    deleted: (m) => store.deletedAt(m) !== null,
+    burnable: (m) => {
+      if (moderation === null) return false
+      const b = moderation.blocked().find((x) => x.member === m)
+      return b !== undefined && (b.reportIds.length > 0 || store.deletedAt(m) === null)
+    },
+    blocked: (m) => moderation !== null && moderation.blocked().some((x) => x.member === m),
+    issuer,
+    log,
+    now,
+    dailyLimit: phoneDailyLimit,
+    http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
+  })
+
   // Excluir conta: always mounted. The sweep purges the other stores for
   // every deleted key; serve() runs it at start and then periodically.
   const deletion = createDeletionSweep({
@@ -840,6 +887,7 @@ function createAccountServer ({
     drops,
     seen,
     passkeys,
+    phones,
     // Bound late: deleteRoutes is created below with this sweep's purge.
     scheduled: () => deleteRoutes.runScheduled(),
     log
@@ -860,6 +908,22 @@ function createAccountServer ({
     purge: deletion.purge,
     isBlocked: inPublishedList,
     notify: (member) => { if (pushRoutes !== null) pushRoutes.notifyDeletion({ member }) },
+    // Burns a blocked member's number before the deletion marks the key.
+    beforeDelete: async (member) => {
+      try {
+        await phoneRoutes.sweepNow()
+      } catch {
+        log({ event: 'telefone', reason: 'varredura-exclusao-falhou' })
+        // Once deleted, a block with no report id no longer burns: a blocked
+        // member's deletion waits until the burn is written. Nobody else is
+        // held by a failing phone store.
+        let held = true
+        try {
+          held = moderation !== null && moderation.blocked().some((x) => x.member === member)
+        } catch {}
+        if (held) throw refuse('indisponivel')
+      }
+    },
     rpId: webauthn.rpId,
     origins: webauthn.origins,
     association,
@@ -921,6 +985,7 @@ function createAccountServer ({
     issuerCert: issuer === null ? null : issuer.cert,
     association,
     origin,
+    phoneChecked,
     log,
     now,
     http: {
@@ -969,6 +1034,7 @@ function createAccountServer ({
     reader: listingReader,
     store,
     pagesStore: pages !== null && pages.pagesStore ? pages.pagesStore : null,
+    phoneChecked,
     log,
     now,
     http: { send, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow }
@@ -988,6 +1054,13 @@ function createAccountServer ({
   // sign-in, a certificate, a rename or an invite. Off, it never refuses.
   function ageChecked (member) {
     if (ageRoutes.required() && !ageRoutes.verified(member)) throw refuse('idade-pendente')
+  }
+
+  // The same with phone verification on: a key without a verified number
+  // gets none of them, nor push on, a seen write, a page or a Feira code
+  // (the route files). Off, it never refuses.
+  function phoneChecked (member) {
+    if (phoneRoutes.required() && !phoneRoutes.verified(member)) throw refuse('telefone-pendente')
   }
 
   // OAuth state -> pending id, written at authorize and deleted at the first
@@ -1266,6 +1339,7 @@ function createAccountServer ({
     // Before reserve: the row stays in 'reserve', so the same row can be
     // authorized once the member has verified.
     ageChecked(row.member)
+    phoneChecked(row.member)
     if (!limits.authorize(row.member)) throw over()
     try {
       store.reserve(row.id)
@@ -1421,6 +1495,7 @@ function createAccountServer ({
     proof({ phase: 'finish', nonce: row.nonce, member: row.member, username: row.username, association, sub: row.sub }, signature)
     if (!limits.finish(row.member)) throw over()
     ageChecked(row.member)
+    phoneChecked(row.member)
     if (!inviting) return finishRow(res, row, signature, false)
     // The same answer store.finish gives once the first finish removed the row.
     if (finishing.has(row.id)) throw refuse('expirado')
@@ -1568,6 +1643,7 @@ function createAccountServer ({
     if (row === undefined || row.member !== member || row.expiresAt <= now()) throw refuse('expirado')
     proof({ phase: 'rename', nonce, member, username: row.username, association, sub: '' }, signature)
     ageChecked(member)
+    phoneChecked(member)
     if (!limits.renameFinish(member)) throw over()
     let result
     try {
@@ -1656,6 +1732,7 @@ function createAccountServer ({
     if (row === undefined || row.member !== member || row.expiresAt <= now()) throw refuse('expirado')
     if (!verifyInvite({ action: 'issue', nonce, member, association }, signature).ok) throw refuse('assinatura-invalida')
     ageChecked(member)
+    phoneChecked(member)
     if (!limits.invitesFinish(member)) throw over()
     invitesAvailable()
     linked(member)
@@ -1732,6 +1809,7 @@ function createAccountServer ({
     if (pushRoutes !== null && pushRoutes.owns(pathname)) return pushRoutes.handle(req, res, url)
     if (seenRoutes.owns(pathname)) return seenRoutes.handle(req, res, url)
     if (ageRoutes.owns(pathname)) return ageRoutes.handle(req, res, url)
+    if (phoneRoutes.owns(pathname)) return phoneRoutes.handle(req, res, url)
     if (recoveryRoutes.owns(pathname)) return recoveryRoutes.handle(req, res, url)
     if (deleteRoutes.owns(pathname)) return deleteRoutes.handle(req, res, url)
     if (passkeyRoutes.owns(pathname)) return passkeyRoutes.handle(req, res, url)
@@ -1834,7 +1912,7 @@ function createAccountServer ({
     return pushRoutes === null ? 0 : pushRoutes.room()
   }
 
-  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
+  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), phoneStats: () => phoneRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), appStats: () => ({ rows: apps.size, google: [...apps.values()].filter((e) => e.google !== null).length }) }
 }
 
 module.exports = {
