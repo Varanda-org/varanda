@@ -1138,7 +1138,7 @@ What the implementation was also checked against, by reading and by the tests ab
 - The app reads as a social app for people: no sync chip (a calm 'Sem internet' note only while offline), refresh by pulling on touch and by the wheel or trackpad on desktop (with a visually hidden, focusable 'Atualizar' for the keyboard), plain-language copy, Diário showing publications only, and Ajustes split into a main list (Editar perfil, Conta e @nome, Guardar dados neste aparelho, Instalar o app, Sair) and a collapsed Avançado (Conexão, Sincronização, Identidade técnica, Recomeçar). Screens: `docs/app.md`; design: `apps/site/artwork/app-design.md`.
 - Staying signed in on the web: the passkey's PRF output is kept sealed (AES-GCM-256 under a non-extractable `CryptoKey`, bound to the rp.id and the identity) in its own IndexedDB database `varanda-session`, so a reload resumes without WebAuthn until 'Sair' or 30 days without opening the app (each open refreshes the period). This reverses the earlier "key only in memory" rule; the trade-off is in `docs/design.md` and `docs/rpc.md` section 11.
 - Follows on every device: `follow` records in the own diary (public), local-first on the browser node (only while unlocked; every queued change signed with the identity key and verified before it is appended), old per-device follows published only after the person confirms them (the Seguindo card 'Pessoas que você seguia neste aparelho', host controls `follows.legacy()` / `confirmLegacy(keys)`), folded back from the diary by the sync (RPC event `follows.changed { count }`). The CLI and the core node append the record too.
-- Photos and GIFs: posts carry up to 4 media descriptors pointing into a per-device media core; the seeder binds media cores to diaries two ways, keeps them under the same `admitted.json` invariants and serves blocks over `GET|HEAD /media/<D>/<K>/<start>/<blocks>`; the hosted PWA verifies every byte (length and SHA-256) before showing it. Images only, no video: the illegal-media hash check is not implemented (Residual risks).
+- Photos and GIFs: posts carry up to 10 media descriptors pointing into a per-device media core; the seeder binds media cores to diaries two ways, keeps them under the same `admitted.json` invariants and serves blocks over `GET|HEAD /media/<D>/<K>/<start>/<blocks>`; the hosted PWA verifies every byte (length and SHA-256) before showing it. Images only, no video: the illegal-media hash check is not implemented (Residual risks).
 - Contract: records `media-core` and `follow`, `post.media`, the media header (`docs/protocol.md` section 2), seeder media admission and the media route (sections 5 and 7), `post.create` / `post.reply` `media`, `FeedItem.media`, `follows.changed`, `report.sign` with an empty quote, and page maxima lowered to `FEED_LIMIT_MAX` 31 and `LOG_LIMIT_MAX` 36 (`docs/rpc.md`).
 
 ### What changed, per area
@@ -7058,3 +7058,34 @@ Limites desta caminhada:
 - Conferido em 2026-11-10 com os dados de demonstração do app (Vitrine), no emulador Android, no simulador iOS (iPhone 16e) e no Chrome. Na Vitrine, a foto enviada aparece como "foto indisponível" no feed, então a ordem foi conferida pela forma do quadro, que segue a primeira foto, e não pela imagem.
 - Os rótulos das setas e da capa foram conferidos na árvore de acessibilidade (Android e web), sem ligar TalkBack nem VoiceOver.
 - Na Vitrine o envio termina na hora, então as setas indisponíveis durante o envio não foram observadas; o código usa o mesmo bloqueio do "remover".
+
+## 152. Até 10 fotos por publicação (PR feat/photo-cap-app)
+
+Publicações, respostas e citações, de pessoas e de Páginas, levam até 10 fotos ou GIFs. No Publicar, "Foto" escolhe até 10 imagens: o seletor nativo para em 10 e, numa segunda escolha com 10 já na publicação, a 11ª é recusada com "até 10 fotos por publicação". As setas reordenam as fotos antes de publicar. O carrossel mostra de 2 a 10 fotos, com um ponto por foto e a pílula "N de M", e a tela cheia percorre todas. No cartão da citação, a grade pequena continua (uma, duas lado a lado, três, 2x2); de 5 fotos em diante, a 2x2 mostra "+N" na quarta foto (N são as fotos que não aparecem) e um toque abre a tela cheia com todas. Os leitores de tela não leem o "+N". O Mural mostra só a capa, com o ícone de várias fotos e sem contagem na tela; o leitor de tela diz "N fotos". Uma lápide continua com no máximo 4 trechos, então apagar uma publicação de 5 a 10 fotos grava 2 ou 3 lápides num só append (10 fotos: 4+4+2). Conversas (mensagens diretas e grupos) e a Feira continuam em 4 fotos. Um app, uma CLI ou um semeador de antes desta mudança não mostra a publicação com mais de 4 fotos, nem o texto, e segue lendo as publicações seguintes do mesmo diário. O feed e a Espiadinha pedem páginas de 26, e o log, de 30. A descrição em `apps/app/store.config.json` diz 10; publicar a ficha na loja é um passo humano. Detalhes em [app.md](app.md) ("Fotos e GIFs").
+
+Como verificar, a partir da raiz:
+
+- `node packages/core/test/records.test.js`
+- `node packages/core/test/delete-session.test.js`
+- `node packages/web-member/test/delete.test.js`
+- `node packages/rpc/test/sizes.test.js`
+- `node packages/rpc/test/methods.test.js`
+- `node apps/cli/test/page-cli.test.js`
+
+Caminhada, primeiro no celular, build de depuração do Android (emulador) e simulador iOS, e depois na web e no PWA:
+
+- [ ] No Publicar, escolher 10 fotos. O seletor nativo para em 10. Tocar em "Foto" de novo com 10 já na publicação: a 11ª é recusada com "até 10 fotos por publicação". Reordenar as fotos e publicar. O carrossel mostra 10 pontos e "N de 10". A tela cheia percorre as 10.
+- [ ] Uma resposta e uma citação com 10 fotos. No cartão da citação, a grade 2x2 mostra "+6" na quarta foto. Um toque nessa foto abre a foto 4 de 10 na tela cheia. O leitor de tela não lê "+6".
+- [ ] No Mural, uma publicação de 10 fotos mostra só a capa, com o ícone de várias fotos, sem contagem na tela. Com TalkBack ou VoiceOver, o quadro é lido como "10 fotos".
+- [ ] `varanda page post --file` com 10 arquivos publica a Página; com 11, a CLI recusa (`uso: no máximo 10 fotos por publicação`).
+- [ ] Apagar uma publicação de 10 fotos: ela sai do feed, as 10 fotos deixam de ser servidas pelo semeador, e o log mostra 3 lápides (4+4+2) num só append.
+- [ ] Mensagem direta, grupo e Feira continuam parando em 4 fotos.
+- [ ] Um app ou uma CLI de antes desta mudança não mostra a publicação de 10 fotos, nem o texto, e continua lendo as publicações seguintes do mesmo diário.
+- [ ] O feed e a Espiadinha carregam em páginas de 26, e o log em páginas de 30, sem "parâmetro inválido".
+- [ ] A descrição de `apps/app/store.config.json` diz até 10 fotos ou GIFs por publicação. Publicar a ficha na loja é um passo humano.
+
+Limites desta caminhada:
+
+- Nenhuma caixa acima foi marcada nesta documentação. A ordem da caminhada é o build de depuração do Android no emulador, o simulador iOS e, depois, a web e o PWA.
+- Os comandos acima cobrem o protocolo, o tamanho das páginas, as lápides e o `page post` da CLI. A caminhada do app ainda não foi executada.
+- Cada lápide guarda no máximo 4 trechos. Por isso, 10 fotos viram 3 lápides (4+4+2) num só append, e quem não atualizou pula a publicação inteira, texto incluído, sem rejeitar o diário.
