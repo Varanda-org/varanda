@@ -1229,7 +1229,8 @@ async function runSync (opts = {}) {
   const reader = (opts && opts.reader) || NO_READER
   const log = opts && typeof opts.log === 'function' ? opts.log : noop
   const onEvent = opts && typeof opts.onEvent === 'function' ? opts.onEvent : noop
-  const startup = startupWatchdog(log, (opts && opts.startupSlowMs) || STARTUP_SLOW_MS)
+  const onStep = opts && typeof opts.onStep === 'function' ? opts.onStep : noop
+  const startup = startupWatchdog(log, (opts && opts.startupSlowMs) || STARTUP_SLOW_MS, onStep)
   try {
     return await syncRun({
       ...opts,
@@ -1246,9 +1247,18 @@ async function runSync (opts = {}) {
   }
 }
 
-function startupWatchdog (log, ms) {
+// onStep(name, msSinceStart): every step transition, the first included;
+// it only reports (the startup bench), a throw from it is ignored.
+function startupWatchdog (log, ms, onStep = noop) {
   const started = Date.now()
+  const t0 = typeof performance !== 'undefined' ? performance.now() : null
+  const note = (name) => {
+    try {
+      onStep(name, t0 === null ? Date.now() - started : performance.now() - t0)
+    } catch {}
+  }
   let step = 'configuração'
+  note(step)
   let connectNoted = false
   let timer = setTimeout(tick, ms)
   function tick () {
@@ -1263,7 +1273,10 @@ function startupWatchdog (log, ms) {
     if (timer !== null) timer = setTimeout(tick, ms)
   }
   return {
-    step (name) { step = name },
+    step (name) {
+      step = name
+      note(name)
+    },
     stop () {
       clearTimeout(timer)
       timer = null
