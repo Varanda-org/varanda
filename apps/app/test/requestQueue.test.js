@@ -291,3 +291,103 @@ test('clear leaves in-flight sends alone and the queue usable', async (t) => {
   held.calls[1].release()
   await third
 })
+
+test('a new visible request starts before waiting background ones', async (t) => {
+  const { createRequestQueue } = await load()
+  const q = createRequestQueue({ maxInFlight: 1 })
+  const held = heldSend()
+  const first = q.run('feed.read', {}, held.send)
+  const bg = q.run('notices.read', { n: 1 }, held.send, { priority: 'background' })
+  const vis = q.run('feed.read', { n: 2 }, held.send)
+  held.calls[0].release()
+  await first
+  t.is(held.calls.length, 2, 'one more request started')
+  t.alike(held.calls[1].params, { n: 2 }, 'the visible one went first')
+  held.calls[1].release()
+  await vis
+  held.calls[2].release()
+  await bg
+})
+
+test('at most two background requests are in flight', async (t) => {
+  const { createRequestQueue } = await load()
+  const q = createRequestQueue()
+  const held = heldSend()
+  const pending = Array.from({ length: 5 }, (_, i) => q.run('notices.read', { i }, held.send, { priority: 'background' }))
+  t.is(held.calls.length, 2, 'two started')
+  const vis = q.run('feed.read', {}, held.send)
+  t.is(held.calls.length, 3, 'a visible request still starts')
+  held.calls[0].release()
+  await pending[0]
+  t.is(held.calls.length, 4, 'the next background one starts as one ends')
+  held.calls[1].release(); held.calls[2].release(); held.calls[3].release()
+  await Promise.all([pending[1], vis, pending[2]])
+  held.calls[4].release()
+  await pending[3]
+  held.calls[5].release()
+  await pending[4]
+  t.ok(held.peak <= 4, 'never more than 2 background plus the visible one')
+})
+
+test('waiting background requests count against the limit while visible slots are free', async (t) => {
+  const { createRequestQueue } = await load()
+  const q = createRequestQueue({ maxWaiting: 3 })
+  const held = heldSend()
+  const pending = Array.from({ length: 5 }, (_, i) => q.run('notices.read', { i }, held.send, { priority: 'background' }))
+  t.is(held.calls.length, 2, 'two in flight, three waiting')
+  await t.exception(q.run('notices.read', { i: 5 }, held.send, { priority: 'background' }), /pedidos demais em andamento/, 'a fourth waiter is refused')
+  const vis = q.run('feed.read', {}, held.send)
+  t.is(held.calls.length, 3, 'a visible request that can start now is never refused')
+  // Release every send as it starts, until all six settled.
+  let released = 0
+  const all = Promise.all([...pending, vis])
+  while (released < 6) {
+    if (released < held.calls.length) held.calls[released++].release()
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  await all
+})
+
+test('promote moves a waiting entry and ignores one in flight', async (t) => {
+  const { createRequestQueue } = await load()
+  const q = createRequestQueue({ maxInFlight: 1 })
+  const held = heldSend()
+  const running = q.run('notices.read', { n: 0 }, held.send, { priority: 'background', token: 'a' })
+  const waitingBg = q.run('notices.read', { n: 1 }, held.send, { priority: 'background', token: 'b' })
+  const later = q.run('feed.read', { n: 2 }, held.send)
+  t.is(q.promote('a'), false, 'in flight is not touched')
+  t.is(q.promote('zzz'), false, 'unknown token')
+  t.is(q.promote('b'), true, 'waiting entry promoted')
+  held.calls[0].release()
+  await running
+  t.alike(held.calls[1].params, { n: 2 }, 'the promoted entry joins the end of the visible lane')
+  held.calls[1].release()
+  await later
+  t.alike(held.calls[2].params, { n: 1 }, 'then it is sent')
+  held.calls[2].release()
+  await waitingBg
+  t.is(held.calls.length, 3, 'nothing was resent')
+})
+
+test('abort removes a waiting entry of either lane and the limit counts both', async (t) => {
+  const { createRequestQueue } = await load()
+  const q = createRequestQueue({ maxInFlight: 1, maxWaiting: 2 })
+  const held = heldSend()
+  const first = q.run('feed.read', {}, held.send)
+  const ac = new AbortController()
+  const bg = q.run('notices.read', {}, held.send, { priority: 'background', signal: ac.signal })
+  const vis = q.run('feed.read', {}, held.send)
+  const over = await q.run('feed.read', {}, held.send).catch((err) => err)
+  t.is(over.message, 'pedidos demais em andamento', 'both lanes count toward the limit')
+  ac.abort()
+  t.is((await bg.catch((err) => err)).name, 'AbortError', 'background entry aborted')
+  const ac2 = new AbortController()
+  const vis2 = q.run('feed.read', {}, held.send, { signal: ac2.signal })
+  ac2.abort()
+  t.is((await vis2.catch((err) => err)).name, 'AbortError', 'visible entry aborted')
+  held.calls[0].release()
+  await first
+  held.calls[1].release()
+  await vis
+  t.is(held.calls.length, 2, 'aborted entries were never sent')
+})

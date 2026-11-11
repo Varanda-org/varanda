@@ -341,6 +341,7 @@ function VitrineNodeProvider ({ children }) {
       sync: { active: null, stopped: null, starting: false },
       epoch: 1,
       request: vitrineRequest,
+      promote: () => false,
       restart: unavailable,
       reconnect: done,
       connect: unavailable,
@@ -1006,7 +1007,7 @@ function LiveNodeProvider ({ children }) {
     if (awaitingRef.current) setWait(Date.now() + PREEMPT_GRACE_MS)
   }, [setWait])
 
-  const request = useCallback((method, params) => {
+  const request = useCallback((method, params, options) => {
     const conn = connRef.current
     if (!conn) return noConnection()
     return requestQueueRef.current.run(method, params, (method, params) => {
@@ -1038,8 +1039,10 @@ function LiveNodeProvider ({ children }) {
       pending.then(done, done)
       pending.then(settled, settled)
       return pending
-    })
+    }, options)
   }, [extendWait])
+
+  const promote = useCallback((token) => (requestQueueRef.current ? requestQueueRef.current.promote(token) : false), [])
 
   const whenIdle = useCallback((quietMs) => idleRef.current.whenIdle(quietMs), [])
 
@@ -1631,8 +1634,8 @@ function LiveNodeProvider ({ children }) {
   const syncView = useMemo(() => ({ active: sync.active, stopped: sync.stopped, starting }), [sync.active, sync.stopped, starting])
   const runFlags = useRunFlags(signals)
   const value = useMemo(() => ({
-    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: syncView, epoch, request, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals: runFlags, ackFresh, setAutoSync, syncNow, whenIdle
-  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, syncView, epoch, request, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, runFlags, ackFresh, setAutoSync, syncNow, whenIdle])
+    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: syncView, epoch, request, promote, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals: runFlags, ackFresh, setAutoSync, syncNow, whenIdle
+  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, syncView, epoch, request, promote, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, runFlags, ackFresh, setAutoSync, syncNow, whenIdle])
 
   return (
     <HostedContext.Provider value={hosted}>

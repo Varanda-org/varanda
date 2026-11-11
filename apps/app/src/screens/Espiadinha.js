@@ -90,7 +90,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     stateRef.current = { ...stateRef.current, ...patch }
     setState(stateRef.current)
   }, [])
-  const { request } = node
+  const { request, promote } = node
 
   // Authors followed while this list is shown (here or elsewhere, lowercase).
   // Every commit of rows drops theirs, so a page read before the follow (one
@@ -109,11 +109,13 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   // The node serves one peek at a time ('espiadinha já em andamento'): a
   // refresh, a follow or a reselect while a page is loading waits for the
   // read in flight instead of being refused (the superseded result is then
-  // dropped by seqRef).
+  // dropped by seqRef). Only the hidden warm read passes a lane. A tap, a
+  // pull and a later page pass none, so they stay visible and are never
+  // placed in the background lane behind that warm read.
   const inflightRef = useRef(null)
-  const peek = useCallback(async (params) => {
+  const peek = useCallback(async (params, options) => {
     while (inflightRef.current !== null) await inflightRef.current
-    const p = request('peek.read', params)
+    const p = request('peek.read', params, options)
     const settled = p.then(noop, noop)
     inflightRef.current = settled
     settled.then(() => { if (inflightRef.current === settled) inflightRef.current = null })
@@ -169,7 +171,9 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       moreError: ''
     })
     try {
-      const page = await peek({ limit: PEEK_LIMIT_DEFAULT })
+      // Hidden warm read only: background, with the token the show transition
+      // promotes. A tap or a pull leaves options empty and stays visible.
+      const page = await peek({ limit: PEEK_LIMIT_DEFAULT }, quiet ? { priority: 'background', token: opts.token } : undefined)
       if (mine !== seqRef.current) return
       // A fresh first page replaces the list: the follows made before it was
       // asked for are the node's to apply. Only those made while it was in
@@ -304,8 +308,11 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       // The tab may have opened, or a read started, during the wait.
       if (warm?.epoch !== node.epoch || warm.busy || warm.attempted || current.loadedAt !== null || current.loading || current.refreshing || activeRef.current || heldRef.current !== null) return
       updatePeekWarmState(node.epoch, { attempted: true, pending: true })
-      previous.current = { ...previous.current, refresh: refreshRef.current }
-      loadFirst({ quiet: true }).finally(() => updatePeekWarmState(node.epoch, { pending: false }))
+      // One token per warm, kept with the refresh this read consumes, so
+      // opening the tab can promote this request instead of sending it again.
+      const token = Symbol('espiadinha-warm')
+      previous.current = { ...previous.current, refresh: refreshRef.current, warmToken: token }
+      loadFirst({ quiet: true, token }).finally(() => updatePeekWarmState(node.epoch, { pending: false }))
     })
     return () => wait.cancel()
   }, [hosted, node.online, node.phase, seederVerified, node.visible, node.epoch, node.whenIdle, active, state.loadedAt, state.loading, state.refreshing, state.unsupported, loadFirst, peekWarm])
@@ -315,7 +322,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     const shown = active && !prev.active
     const reselected = scrollToTop !== prev.scrollToTop
     const changed = refresh !== prev.refresh
-    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop }
+    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop, warmToken: prev.warmToken }
     if (!active) return
     // The warm page goes on screen now; its needs load below, or with the
     // reload when it is already old.
@@ -329,6 +336,10 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     const current = stateRef.current
     if (current.loading || current.refreshing) {
       if (changed) reloadAfterRef.current = true
+      // Still queued: the same warm read moves to the visible lane. Already
+      // in flight, promote does nothing and this show waits, so it is not
+      // sent twice. A pull to refresh is a later visible loadFirst.
+      if (shown) promote(prev.warmToken)
       return
     }
     const stale = shouldReloadOnShow({ loadedAt: current.loadedAt, now: Date.now(), fresh: false })
@@ -347,7 +358,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       followsPending.current = false
       reconcileFollows(() => true)
     }
-  }, [active, refresh, scrollToTop, loadFirst, ingest, reconcileFollows, commit, unfollowed])
+  }, [active, refresh, scrollToTop, loadFirst, ingest, reconcileFollows, commit, unfollowed, promote])
 
   // A warm page nobody has seen is dropped with its node session: its cursor
   // lived in that session's snapshot. The next epoch warms again.
