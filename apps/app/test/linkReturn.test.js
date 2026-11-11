@@ -1,7 +1,6 @@
 'use strict'
 
-// The varanda:// URLs the native app is opened with and the auth session
-// return (src/linkReturn.js).
+// The varanda:// URLs the native app is opened with (src/linkReturn.js).
 const test = require('brittle')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
@@ -265,43 +264,6 @@ test('native store: a convite-invalido answer drops the held code so the field s
   t.ok(invitePasteShown({ native: true, required: true, held: n.loadSignupInvite() !== null, refused: true }))
 })
 
-test('parseSessionReturn: only the installation return page, by exact prefix', async (t) => {
-  const { parseSessionReturn } = await load()
-  await withOrigin(t, 'https://varanda.example')
-  const base = 'https://varanda.example/account/app/conta?'
-  t.alike(parseSessionReturn(base + 'conta=ok&codigo=' + R), { kind: 'conta', outcome: 'ok', code: R })
-  t.alike(parseSessionReturn(base + 'conta=cancelado'), { kind: 'conta', outcome: 'cancelado' })
-  t.alike(parseSessionReturn(base + 'conta=erro&codigo=' + R), { kind: 'conta', outcome: 'erro' }, 'a code rides only on ok')
-  t.alike(parseSessionReturn(base + 'conta=ok&codigo=' + R.slice(0, 42) + 'B'), { kind: 'conta', outcome: 'ok' }, 'non-canonical code')
-  for (const bad of [
-    'https://evil.example/account/app/conta?conta=ok&codigo=' + R,
-    'https://varanda.example.evil/account/app/conta?conta=ok&codigo=' + R,
-    'http://varanda.example/account/app/conta?conta=ok&codigo=' + R,
-    'https://varanda.example@evil.example/account/app/conta?conta=ok&codigo=' + R,
-    'https://evil.example/https://varanda.example/account/app/conta?conta=ok&codigo=' + R,
-    'https://varanda.example/account/app/conta/x?conta=ok&codigo=' + R,
-    'https://varanda.example/account/app/contax?conta=ok&codigo=' + R,
-    'https://varanda.example/account/app/conta#?conta=ok&codigo=' + R,
-    'https://varanda.example/account/app/conta',
-    'https://varanda.example:8443/account/app/conta?conta=ok&codigo=' + R,
-    base + 'conta=ok&codigo=' + R + '&codigo=' + R,
-    base + 'conta=ok&conta=erro',
-    base + 'conta=talvez',
-    base + 'conta=ok\n',
-    'varanda://conta?conta=ok&codigo=' + R,
-    null
-  ]) {
-    t.is(parseSessionReturn(bad), null, String(bad))
-  }
-})
-
-test('parseSessionReturn: nothing without an https installation', async (t) => {
-  const { parseSessionReturn } = await load()
-  t.is(parseSessionReturn('https://varanda.example/account/app/conta?conta=ok&codigo=' + R), null, 'no installation set')
-  await withOrigin(t, 'http://127.0.0.1:8790')
-  t.is(parseSessionReturn('http://127.0.0.1:8790/account/app/conta?conta=ok&codigo=' + R), null, 'loopback http')
-})
-
 test('waitsForInstallation holds only a clean https link while no installation is loaded', async (t) => {
   const { waitsForInstallation, parseAppLink } = await load()
   const { setInstallation } = await import('../src/installation.js')
@@ -320,65 +282,25 @@ test('waitsForInstallation holds only a clean https link while no installation i
   t.is(parseAppLink('https://bora.varanda.app/c/' + KEY), null)
 })
 
-test('linkReturnTaker: a newcomer return belongs to the setup, never to Ajustes', async (t) => {
-  const { linkReturnTaker } = await load()
-  const base = { held: true, termsOk: true }
-  for (const step of ['recuperando', 'idade']) {
-    t.is(linkReturnTaker({ ...base, setupStep: true, step, certMissing: false }), 'wait', step)
-  }
-  t.is(linkReturnTaker({ ...base, setupStep: true, step: 'vinculo', certMissing: true }), 'setup')
-  t.is(linkReturnTaker({ ...base, setupStep: false, step: 'vinculo', certMissing: true }), 'setup')
-  t.is(linkReturnTaker({ ...base, setupStep: true, step: 'vinculo', certMissing: false }), 'wait')
-})
-
-test('linkReturnTaker: nothing is decided behind the terms gate', async (t) => {
-  const { linkReturnTaker } = await load()
-  t.is(linkReturnTaker({ held: true, termsOk: false, step: 'vinculo', certMissing: true }), 'wait')
-  t.is(linkReturnTaker({ held: true, termsOk: false, setupStep: false, step: 'pronto' }), 'wait')
-})
-
-test('linkReturnTaker: a member already certified gets Ajustes > Conta once the tabs show', async (t) => {
-  const { linkReturnTaker } = await load()
-  const base = { held: true, termsOk: true, certMissing: false }
-  t.is(linkReturnTaker({ ...base, setupStep: true, step: 'vinculo' }), 'wait')
-  for (const step of ['pronto', 'perfil', 'carregando']) {
-    t.is(linkReturnTaker({ ...base, setupStep: false, step }), 'conta', step)
-  }
-})
-
-test('linkReturnTaker: nothing held is never taken', async (t) => {
-  const { linkReturnTaker } = await load()
-  for (const held of [false, undefined]) {
-    for (const step of ['vinculo', 'pronto', 'perfil']) {
-      t.is(linkReturnTaker({ held, termsOk: true, setupStep: false, step, certMissing: true }), 'none', String(held) + step)
-    }
-  }
-  t.is(linkReturnTaker({}), 'none')
-  t.is(linkReturnTaker(), 'none')
-  t.is(linkReturnTaker({ held: true }), 'wait')
-  t.is(linkReturnTaker({ held: true, termsOk: true }), 'wait')
-})
-
-test('the shell opens Ajustes > Conta only through linkReturnTaker', (t) => {
+test('the shell has no Google return and no linkReturnTaker', async (t) => {
   const s = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
-  const call = 'linkReturnTaker({ held: linkReturnRef.current, termsOk, setupStep, step, certMissing })'
-  t.ok(s.includes(call))
-  t.ok(s.includes("if (taker === 'conta') setAjustes('conta')"))
-  t.ok(s.includes("if (taker === 'none' || taker === 'wait') return"))
-  t.is(s.split("setAjustes('conta')").length - 1, 1)
-  const at = s.indexOf(call)
-  t.ok(at > s.indexOf('const certMissing = info !== null && info.memberCert !== true'))
-  t.ok(at < s.indexOf("if (linkReturned && step === 'vinculo' && certMissing) signupRef.current = true"))
-  t.absent(s.includes('if (!termsOk || setupStep || !linkReturnRef.current) return'))
-  t.ok(/import \{[^}]*linkReturnTaker[^}]*\} from '\.\/src\/linkReturn'/.test(s))
-  const m = fs.readFileSync(path.join(__dirname, '../src/linkReturn.js'), 'utf8')
-  t.absent(m.includes('Platform'))
+  for (const gone of ['LINK_RETURN', 'linkReturnTaker', 'linkReturnRef', 'dropLinkReturn', 'linkReturned', "setAjustes('conta')"]) {
+    t.absent(s.includes(gone), gone)
+  }
+  const m = await load()
+  t.is(m.linkReturnTaker, undefined)
+  for (const kept of ['createLinkToken', 'parseAppLink', 'parseAppReturn', 'parseInviteInput', 'invitePasteShown', 'dropsHeldInvite', 'isInviteRefusal', 'waitsForInstallation']) {
+    t.is(typeof m[kept], 'function', kept)
+  }
+  const src = fs.readFileSync(path.join(__dirname, '../src/linkReturn.js'), 'utf8')
+  t.absent(src.includes('Platform'))
 })
 
-test('the setup card drops the Google return when it lands the certificate', (t) => {
+test('the signup offer is armed by the setup card when it lands the certificate', (t) => {
   const s = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
-  t.ok(s.includes('const dropLinkReturn = useCallback(() => { linkReturnRef.current = false }, [])'))
-  const prop = 'onLinked={dropLinkReturn}'
+  t.ok(s.includes('const takeLinked = useCallback(() => { signupRef.current = true }, [])'))
+  t.is(s.split('signupRef.current = true').length - 1, 1)
+  const prop = 'onLinked={takeLinked}'
   t.is(s.split(prop).length - 1, 1)
   const open = s.indexOf('<Identidade active={ready} embedded setup')
   t.ok(s.slice(open, s.indexOf('/>', open)).includes(prop))
@@ -387,7 +309,31 @@ test('the setup card drops the Google return when it lands the certificate', (t)
   const call = "if (typeof onLinked === 'function') onLinked()"
   const at = id.indexOf(call)
   t.ok(at > id.indexOf("await node.request('cert.add', { cert })"))
-  t.ok(at < id.indexOf("await node.request('username.add', { record })", at))
   const aj = fs.readFileSync(path.join(__dirname, '../src/screens/Ajustes.js'), 'utf8')
   t.absent(aj.includes('onLinked'))
+})
+
+test('the phone explainer comes before Telefone and its delete never opens the Ajustes list', (t) => {
+  const s = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  t.ok(/import \{ showExplainer \} from '\.\/src\/phoneExplainer'/.test(s))
+  const aviso = "} else if (step === 'telefone' && phoneAviso) {"
+  const base = "} else if (step === 'telefone') {"
+  t.ok(s.includes(aviso))
+  t.ok(s.indexOf(aviso) < s.indexOf(base))
+  t.ok(s.includes('<TelefoneAviso onContinue={() => setPhoneAckFor(member)} onDelete={openAvisoDelete} />'))
+  t.ok(s.includes('const phoneAviso = showExplainer({'))
+  t.ok(s.includes('acknowledged: member !== null && phoneAckFor === member'))
+  t.ok(s.includes("setAjustes(deleteFromAviso && screen !== 'excluir' ? null : screen)"))
+  t.ok(s.includes('screen={ajustes} onNavigate={navigateAjustes}'))
+  t.ok(s.includes('useEffect(() => { if (ajustes === null) setDeleteFromAviso(false) }, [ajustes])'))
+  const open = s.slice(s.indexOf('const openAvisoDelete = useCallback'), s.indexOf('const navigateAjustes'))
+  t.ok(open.includes('setDeleteFromAviso(true)'))
+  t.ok(open.includes("setAjustes('excluir')"))
+  t.absent(/phoneAck[^\n]*(Storage|storage|save|persist)/.test(s))
+})
+
+test('a lock drops the post-signup install offer', (t) => {
+  const s = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  t.ok(s.includes('useEffect(() => {\n    if (!locked) return\n    signupRef.current = false\n    setInstallCardOpen(false)\n  }, [locked])'))
+  t.ok(s.indexOf('signupRef.current = false\n    setInstallCardOpen(false)') > s.indexOf('const [installCardOpen, setInstallCardOpen] = useState(false)'))
 })

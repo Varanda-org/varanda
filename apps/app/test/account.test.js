@@ -34,28 +34,6 @@ test('isUsername normalizes and rejects', async (t) => {
   t.is(isUsername('a'.repeat(20)), 'a'.repeat(20))
 })
 
-test('parseReturn maps the three outcomes', async (t) => {
-  const { parseReturn } = await load()
-  t.is(parseReturn('?conta=ok'), 'conta vinculada')
-  t.is(parseReturn('?conta=erro'), 'não foi possível vincular a conta')
-  t.is(parseReturn('?x=1&conta=cancelado'), 'vínculo cancelado')
-  t.is(parseReturn('?conta=outro'), null)
-  t.is(parseReturn('?conta=toString'), null)
-  t.is(parseReturn(''), null)
-  t.is(parseReturn(undefined), null)
-  t.is(parseReturn('?conta=lista-de-espera'), null, 'the waitlist is not a return notice')
-})
-
-test('parseReturnWaitlist: ?conta=lista-de-espera is the calm waitlist sentence', async (t) => {
-  const { parseReturnWaitlist, toError } = await load()
-  t.is(parseReturnWaitlist('?conta=lista-de-espera'), toError('lista-de-espera').message, 'the same sentence as a 503')
-  t.is(parseReturnWaitlist('?x=1&conta=lista-de-espera'), toError('lista-de-espera').message)
-  t.is(parseReturnWaitlist('?conta=ok'), '')
-  t.is(parseReturnWaitlist('?conta=outro'), '')
-  t.is(parseReturnWaitlist(''), '')
-  t.is(parseReturnWaitlist(undefined), '')
-})
-
 test('usernameMatches', async (t) => {
   const { usernameMatches } = await load()
   t.ok(usernameMatches({ member: M, username: 'ana' }, M, 'ana'))
@@ -77,7 +55,12 @@ test('error mapper uses fixed messages and never a raw body', async (t) => {
   const { toError } = await load()
   t.is(toError('nome-em-uso').message, 'esse nome já está em uso')
   t.is(toError('nome-invalido').message, 'nome inválido')
-  t.is(toError('conta-vinculada').message, 'esta conta Google já está vinculada a outra chave')
+  t.is(toError('conta-vinculada').message, 'Esta chave já tem uma conta Varanda.')
+  t.is(toError('nao-vinculado').message, 'Esta conta ainda não terminou o cadastro.')
+  const old = toError('versao-antiga')
+  t.is(old.message, 'Esta versão do app não cria mais contas. Atualize o Varanda e tente de novo.')
+  t.is(old.code, 'versao-antiga')
+  for (const token of ['conta-vinculada', 'nao-vinculado']) t.absent(/google|celular|telefone/i.test(toError(token).message), token + ' names no Google and no phone')
   t.is(toError('assinatura-invalida').message, 'não foi possível provar a chave')
   t.is(toError('expirado').message, 'o vínculo expirou, comece de novo')
   const waiting = toError('lista-de-espera')
@@ -98,7 +81,6 @@ test('request builders: URL, method, headers, body', async (t) => {
   const calls = stub(t, json(200, { ok: 1 }))
   await a.accountStatus(M)
   await a.startLink({ member: M, username: 'ana' })
-  await a.authorizeLink({ signature: 'ff' })
   await a.finishLink({ signature: 'ff' })
   await a.renameStart({ member: M, username: 'bia' })
   await a.renameFinish({ member: M, nonce: 'n', signature: 'ff' })
@@ -106,7 +88,6 @@ test('request builders: URL, method, headers, body', async (t) => {
   t.alike(calls.map(c => c.init.method + ' ' + c.url), [
     'GET /account/status?member=' + M,
     'POST /account/start',
-    'POST /account/authorize',
     'POST /account/finish',
     'POST /account/rename/start',
     'POST /account/rename/finish',
@@ -120,7 +101,7 @@ test('request builders: URL, method, headers, body', async (t) => {
   t.is(calls[0].init.body, undefined)
   t.is(calls[1].init.headers['content-type'], 'application/json')
   t.alike(JSON.parse(calls[1].init.body), { member: M, username: 'ana' })
-  t.alike(JSON.parse(calls[5].init.body), { member: M, nonce: 'n', signature: 'ff' })
+  t.alike(JSON.parse(calls[4].init.body), { member: M, nonce: 'n', signature: 'ff' })
 })
 
 test('lookupUsername: absolute only with an https account origin', async (t) => {
@@ -138,14 +119,10 @@ test('lookupUsername: absolute only with an https account origin', async (t) => 
   ])
 })
 
-test('404 gives null for pending and lookup, an error elsewhere', async (t) => {
+test('404 gives null for lookup, an error elsewhere', async (t) => {
   const a = await load()
   stub(t, json(404, { error: 'nao-encontrado' }))
-  t.is(await a.readPending(), null)
   t.is(await a.lookupUsername('ana'), null)
-  // The pending route answers "no pending link" with a 404 expirado: still null.
-  stub(t, json(404, { error: 'expirado' }))
-  t.is(await a.readPending(), null)
   await t.exception(a.accountStatus(M))
 })
 
@@ -182,7 +159,7 @@ test('termsStart/termsFinish: nao-vinculado and unexpected bodies', async (t) =>
   stub(t, json(403, { error: 'nao-vinculado' }))
   try { await a.termsStart({ member: M, version: 1 }); t.fail() } catch (e) {
     t.is(e.code, 'nao-vinculado')
-    t.is(e.message, 'esta conta não tem vínculo com uma conta Google')
+    t.is(e.message, 'Esta conta ainda não terminou o cadastro.')
   }
   try { await a.termsFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'nao-vinculado') }
   stub(t, json(200, { nonce: 5 }))
@@ -293,21 +270,14 @@ test('pushCheck: null on any failure or shape', async (t) => {
 const CODE = 'Q'.repeat(43)
 const ISO = '2026-11-02T03:00:00.000Z'
 
-test('invite error tokens and parseReturnInvite', async (t) => {
-  const { toError, parseReturn, parseReturnInvite } = await load()
+test('invite error tokens', async (t) => {
+  const { toError } = await load()
   t.is(toError('convite-obrigatorio').code, 'convite-obrigatorio')
   t.is(toError('convite-obrigatorio').message, 'Para entrar, abra o link de convite que alguém da rede te enviou. Nada sobre você fica guardado enquanto o convite não for usado.')
   t.is(toError('convite-invalido').message, 'Este convite não vale mais: já foi usado, venceu ou não existe. Peça outro link para quem te convidou.')
   t.is(toError('limite-convites').message, 'Você já criou os convites desta semana. Na segunda-feira volta a contar.')
   t.is(toError('convite-aguardando').code, 'convite-aguardando')
   t.is(toError('convite-aguardando').message, 'Seu convite desta semana ainda não chegou. Ele aparece de surpresa, com um aviso.')
-  t.is(parseReturn('?conta=convite-invalido'), null, 'not a return notice')
-  t.is(parseReturnInvite('?conta=convite-invalido'), toError('convite-invalido').message)
-  t.is(parseReturnInvite('?x=1&conta=convite-invalido'), toError('convite-invalido').message)
-  t.is(parseReturnInvite('?conta=lista-de-espera'), '')
-  t.is(parseReturnInvite('?conta=ok'), '')
-  t.is(parseReturnInvite(''), '')
-  t.is(parseReturnInvite(undefined), '')
 })
 
 test('startLink adds the invite only when it is a well-formed code', async (t) => {
@@ -1378,32 +1348,27 @@ test('app client: absolute URLs, header and no credentials only with the flag on
   t.is(a.buildRequest('GET', '/account/status?member=' + M).init.credentials, 'same-origin')
 })
 
-test('app link proofs: appProof, x-varanda-link and x-varanda-redeem only from the app', async (t) => {
+test('app link proofs: appProof, x-varanda-link only from the app', async (t) => {
   const a = await load()
   const { setInstallation } = await import('../src/installation.js')
   const { setAppClient } = await import('../src/appClient.js')
   t.teardown(() => { setInstallation(null); setAppClient(false) })
   const V = 'V'.repeat(42) + 'A'
-  const R = 'R'.repeat(42) + 'A'
   const P = 'P'.repeat(42) + 'A'
   const SIG = 'sig'
 
   // The web: no proof ever goes out, even when the caller passes one.
   let calls = stub(t, json(200, { ok: 1 }))
   await a.startLink({ member: M, username: 'ana', appProof: P, linkSecret: V })
-  await a.authorizeLink({ signature: SIG, linkSecret: V })
-  await a.readPending({ linkSecret: V, redeem: R })
-  await a.finishLink({ signature: SIG, linkSecret: V, redeem: R })
-  await a.readPending()
+  await a.finishLink({ signature: SIG, linkSecret: V })
   await a.finishLink({ signature: SIG })
-  t.is(calls.length, 6)
+  t.is(calls.length, 3)
   t.alike(JSON.parse(calls[0].init.body), { member: M, username: 'ana' }, 'no appProof in the web body')
   for (const c of calls) {
     t.ok(c.url.startsWith('/account/'), 'relative URL ' + c.url)
     t.alike(Object.keys(c.init.headers).filter((h) => h.startsWith('x-varanda')), [], 'no app header on the web')
     t.is(c.init.credentials, 'same-origin')
   }
-  t.alike(calls[2].init.headers, { accept: 'application/json' }, 'web pending headers unchanged')
 
   // The app.
   t.ok(setInstallation('https://example.test'))
@@ -1414,39 +1379,29 @@ test('app link proofs: appProof, x-varanda-link and x-varanda-redeem only from t
   t.absent('x-varanda-link' in calls[0].init.headers, 'a first start holds no V')
   await a.startLink({ member: M, username: 'ana', appProof: P, linkSecret: V })
   t.is(calls[1].init.headers['x-varanda-link'], V, 'a restart presents the held V')
-  t.absent('x-varanda-redeem' in calls[1].init.headers)
   await a.startLink({ member: M, username: 'ana', appProof: 'short', linkSecret: 'bad' })
   t.alike(JSON.parse(calls[2].init.body), { member: M, username: 'ana' }, 'a malformed appProof is not sent')
   t.absent('x-varanda-link' in calls[2].init.headers, 'a malformed V is not sent')
-  await a.authorizeLink({ signature: SIG, linkSecret: V })
+  // The phone finish: V binds the row.
+  await a.finishLink({ signature: SIG, linkSecret: V })
+  t.is(calls[3].url, 'https://example.test/account/finish')
+  t.is(calls[3].init.method, 'POST')
   t.is(calls[3].init.headers['x-varanda-link'], V)
-  t.alike(JSON.parse(calls[3].init.body), { signature: SIG })
-  await a.readPending({ linkSecret: V, redeem: R })
-  t.is(calls[4].init.method, 'GET')
-  t.is(calls[4].init.headers['x-varanda-link'], V)
-  t.is(calls[4].init.headers['x-varanda-redeem'], R)
-  await a.finishLink({ signature: SIG, linkSecret: V, redeem: R })
-  t.is(calls[5].url, 'https://example.test/account/finish')
-  t.is(calls[5].init.headers['x-varanda-link'], V)
-  t.is(calls[5].init.headers['x-varanda-redeem'], R)
-  t.is(calls[5].init.headers['x-varanda-client'], 'app')
-  t.alike(JSON.parse(calls[5].init.body), { signature: SIG }, 'the proofs never go in the body')
-  t.is(calls.length, 6)
+  t.is(calls[3].init.headers['x-varanda-client'], 'app')
+  t.alike(JSON.parse(calls[3].init.body), { signature: SIG }, 'the proofs never go in the body')
+  t.is(calls.length, 4)
 
-  // Without both V and R nothing is asked or sent.
-  t.is(await a.readPending(), null)
-  t.is(await a.readPending({ linkSecret: V }), null)
-  t.is(await a.readPending({ redeem: R }), null)
-  for (const opts of [{}, { linkSecret: V }, { redeem: R }, { linkSecret: V, redeem: 'x' }]) {
+  // Without V no finish is sent.
+  for (const opts of [{}, { linkSecret: 'bad' }]) {
     try {
       await a.finishLink({ signature: SIG, ...opts })
-      t.fail('sent without the proofs')
+      t.fail('sent without V')
     } catch (e) {
       t.is(e.code, 'expirado')
       t.absent(e.uncertain, 'nothing was sent, so nothing is uncertain')
     }
   }
-  t.is(calls.length, 6, 'a native finish or pending without V and R is never sent')
+  t.is(calls.length, 4, 'a native finish without V is never sent')
 })
 
 const LOOKUP = 'cd'.repeat(32)

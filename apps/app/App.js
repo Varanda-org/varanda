@@ -71,7 +71,7 @@ import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
 import { fetchMember } from './src/indexClient'
 import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
 import { pageNoticeStore } from './src/pageNoticeStore'
-import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, parseReturn, parseReturnInvite, parseReturnWaitlist, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
+import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
 import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotBefore } from './src/seenSync'
 import { deletedOf, newReceipt, scheduledOf } from './src/accountDeletion'
@@ -120,6 +120,7 @@ import { readPush, usePush } from './src/usePush'
 import { watchRelease } from './src/pwa'
 import { captureLaunch, listenLaunch } from './src/pushClient'
 import { nextLaunch } from './src/push-state'
+import { launchDue } from './src/launchDue'
 import { loadIcons } from './src/ui/Icon'
 import { TabBar } from './src/ui/TabBar'
 import { TopBar } from './src/ui/TopBar'
@@ -153,7 +154,9 @@ import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
 import Telefone from './src/screens/Telefone'
-import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, linkReturnTaker, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
+import TelefoneAviso from './src/screens/TelefoneAviso'
+import { showExplainer } from './src/phoneExplainer'
+import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro, { canConverseWithPage } from './src/screens/Membro'
 import Depoimentos from './src/screens/Depoimentos'
 import Momentos from './src/screens/Momentos'
@@ -210,17 +213,6 @@ const AGE_REDIRECT_TEXT = 'Vamos abrir a verificação. Na volta, confirme de no
 // The steps the setup branch (Identidade, Idade, Telefone) renders; the
 // others belong to the shell (spinner, Perfil, the tabs).
 const SETUP_STEPS = new Set(['entrar', 'recuperando', 'idade', 'telefone', 'vinculo', 'identidade', 'certificado'])
-
-// True when this page load is the return from the Google step of the account
-// link (?conta=…). Read at import, before any screen renders; only read here:
-// Identidade's LinkCard is the one that removes the query. Native has no
-// location: its Google step returns through the auth session (Identidade).
-const LINK_RETURN = (() => {
-  try {
-    const search = globalThis.location?.search
-    return parseReturn(search) !== null || parseReturnWaitlist(search) !== '' || parseReturnInvite(search) !== ''
-  } catch { return false }
-})()
 
 // True when this page load is the return from the age verification
 // (?idade=volta). Only skips the intro cards: the result is always asked of
@@ -1003,6 +995,29 @@ function Member () {
   const { recheck: recheckPhone, markVerified: markPhoneVerified } = phone
   const phoneClear = !phoneBlocking(phone.gate)
   const phoneErrorShown = phone.error ? (phoneErrorText(phone.error) || errorText(phone.error)) : ''
+  // A member linked before the phone check meets TelefoneAviso before the
+  // Telefone step (src/phoneExplainer.js). The acknowledgement is held for
+  // this launch and this member only, never in device storage. node.hosted,
+  // not ageHosted: the explainer's delete button needs Ajustes > Excluir
+  // conta, which only a hosted node mounts.
+  const [phoneAckFor, setPhoneAckFor] = useState(null)
+  const phoneAviso = showExplainer({
+    hosted: node.hosted === true,
+    linked: member !== null && info !== null && info.publicKey === member && info.memberCert === true,
+    gate: phone.gate,
+    acknowledged: member !== null && phoneAckFor === member
+  })
+  // Excluir conta opened from the explainer: every way out of it (back,
+  // Escape, close) returns to the explainer, never to the Ajustes list.
+  const [deleteFromAviso, setDeleteFromAviso] = useState(false)
+  useEffect(() => { if (ajustes === null) setDeleteFromAviso(false) }, [ajustes])
+  const openAvisoDelete = useCallback(() => {
+    setDeleteFromAviso(true)
+    setAjustes('excluir')
+  }, [])
+  const navigateAjustes = useCallback((screen) => {
+    setAjustes(deleteFromAviso && screen !== 'excluir' ? null : screen)
+  }, [deleteFromAviso])
 
   // The gates: `confirmed` can latch setupDone for a member already linked,
   // so setupDone alone never opens the tabs, autosync, the outbox, the terms
@@ -1158,22 +1173,11 @@ function Member () {
     setAutoSync(ready && !locked && setupDone && !recovering && termsOk && ageClear && phoneClear)
   }, [ready, locked, setupDone, recovering, termsOk, ageClear, phoneClear, setAutoSync])
 
-  // Back from the Google step, the return is decided by linkReturnTaker next to
-  // the signup signal below (it needs step and certMissing, computed there).
-  // The setup's LinkCard also drops it when it lands the certificate (onLinked),
-  // since during the recovery the shell may not have seen info without one.
-  const linkReturnRef = useRef(LINK_RETURN)
-  const dropLinkReturn = useCallback(() => { linkReturnRef.current = false }, [])
-  // Native has no ?conta= load: an auth session's result lands in the
-  // Identidade card that opened it, which is still mounted (the native
-  // install card is always 'none', so the signup offer needs no signal).
-  const linkReturned = LINK_RETURN
-
   // Native: the URLs the app is opened with (Linking's initial URL and its
   // 'url' events), all untrusted. varanda://idade feeds the same path as the
   // web's ?idade= load, and the outcome is always asked of the service again;
   // invite and profile links go to their stores. varanda://conta is not a
-  // return (the Google step comes back only through the auth session). A
+  // return (any app can claim or forge it). A
   // link is never consent to follow or to join.
   // A state, not a ref: a group or community link that arrives while the tabs
   // already show must run the effect that opens it. It carries the
@@ -1338,7 +1342,7 @@ function Member () {
   if (cardKey !== null && ownPublicKey !== null && info.memberCert !== true) eligibleCardRef.current = { card: cardKey, key: ownPublicKey }
   const arrivalEligible = cardKey !== null && eligibleCardRef.current !== null &&
     eligibleCardRef.current.card === cardKey && eligibleCardRef.current.key === ownPublicKey
-  const cardWanted = cardKey !== null && ((cardStage === 'arrival' && arrivalEligible) || (introState === 'show' && !LINK_RETURN && !AGE_RETURN))
+  const cardWanted = cardKey !== null && ((cardStage === 'arrival' && arrivalEligible) || (introState === 'show' && !AGE_RETURN))
   const [cardView, setCardView] = useState(null)
   const cardSeq = useRef(0)
   const resolveCard = useCallback((stage) => {
@@ -1454,26 +1458,19 @@ function Member () {
   useEffect(() => { if (pushMember !== null && node.online !== false) readPush(pushMember) }, [pushMember, node.online])
   useEffect(() => { if (locked) readPush(null) }, [locked])
 
-  // Offered once, right after a signup on this page load. LINK_RETURN alone
-  // also covers an existing member linking Google from Ajustes > Conta, so the
-  // signup signal is 'vinculo' with a node.info that has been read and holds no
-  // certificate: while info is still null the step machine shows 'vinculo' for
-  // that member too. Dismissing also quiets the top-bar note for 30 days.
+  // Offered once, right after a signup on this page load: the setup's
+  // LinkCard calls onLinked only when it lands a new certificate, which a
+  // member who already held one never does. Dismissing also quiets the
+  // top-bar note for 30 days.
   const signupRef = useRef(false)
-  const certMissing = info !== null && info.memberCert !== true
-  // A newcomer's return is finished by the setup's LinkCard, so it is dropped
-  // on the commit the signup signal fires, before setupStep turns false, and
-  // the tabs come up on A Rua with no sheet. Only a member who already held a
-  // certificate (linking from Ajustes > Conta) gets that sheet, once, after
-  // the unlock.
-  useEffect(() => {
-    const taker = linkReturnTaker({ held: linkReturnRef.current, termsOk, setupStep, step, certMissing })
-    if (taker === 'none' || taker === 'wait') return
-    linkReturnRef.current = false
-    if (taker === 'conta') setAjustes('conta')
-  }, [termsOk, setupStep, step, certMissing])
-  useEffect(() => { if (linkReturned && step === 'vinculo' && certMissing) signupRef.current = true }, [linkReturned, step, certMissing])
+  const takeLinked = useCallback(() => { signupRef.current = true }, [])
   const [installCardOpen, setInstallCardOpen] = useState(false)
+  // A lock ends the session: the next account never inherits this offer.
+  useEffect(() => {
+    if (!locked) return
+    signupRef.current = false
+    setInstallCardOpen(false)
+  }, [locked])
   useEffect(() => {
     if (signupRef.current && !setupStep && step === 'pronto' && install.card !== 'none') {
       signupRef.current = false
@@ -2261,9 +2258,7 @@ function Member () {
   useEffect(() => {
     const intent = launchRef.current
     if (intent === null || typeof launchKey !== 'string') return
-    // Ajustes is a sheet, so atTabs is false while it is open: a convite must
-    // still refresh an open Convites now, or a lock before closing drops it.
-    if (!atTabs && !(intent.kind === 'convite' && ajustes !== null)) return
+    if (!launchDue({ kind: intent.kind, atTabs, sheetOpen: ajustes !== null, phoneClear, deleteFromAviso })) return
     launchRef.current = null
     // A DM wake names nobody: Conversas opens for whoever is unlocked.
     if (intent.kind === 'dm') {
@@ -2288,7 +2283,7 @@ function Member () {
         openThread({ ref: intent.ref })
       }
     }
-  }, [launchSeq, atTabs, ajustes, launchKey, clearStack, openThread, enterAvisos, openInvites])
+  }, [launchSeq, atTabs, ajustes, launchKey, clearStack, openThread, enterAvisos, openInvites, phoneClear, deleteFromAviso])
   // The record is untrusted and may have changed in another render: every
   // step re-reads it (from tab storage, or memory when storage refused it).
   // The memory copy keeps the stored record's 1 h limit (readInvite applies
@@ -2412,7 +2407,7 @@ function Member () {
       }
       if (!inviteLinks.isCurrent(link)) return
       openMember(key)
-      // The newcomer back from Google: the profile is open, Seguir is one tap.
+      // The newcomer who just signed up: the profile is open, Seguir is one tap.
       if (action === 'confirm') showToast(confirmText({ username: rec.username }))
     }
     attempt().catch(() => {}).finally(() => {
@@ -2472,8 +2467,8 @@ function Member () {
   barRef.current = bootBar
   const splash = <Splash edges={sideEdges} progress={bootBar} />
   // The intro cards come first, once per device (src/intro.js): presentation
-  // only, so autosync, the outbox and the invite keep waiting for termsOk. A
-  // Google return skips them for that page load without marking them seen.
+  // only, so autosync, the outbox and the invite keep waiting for termsOk. An
+  // age return skips them for that page load without marking them seen.
   // The terms gate, before everything else: Conexao, Entrar (so before
   // Google) while this device has no record of the current version, and the
   // tabs. Once it has one, an account that unlocks without its own entry
@@ -2481,7 +2476,7 @@ function Member () {
   // autosync, the outbox and the invite wait for termsOk. Not gated
   // (documented): the provider's boot, the session resume and the one
   // recovery sync of a diary without its certificate (src/node.js).
-  const gateNext = (introState === 'show' && !LINK_RETURN && !AGE_RETURN) || decision === 'needed' || decision === 'updated' || decision === 'account'
+  const gateNext = (introState === 'show' && !AGE_RETURN) || decision === 'needed' || decision === 'updated' || decision === 'account'
   // The 10 s patience counts only while the splash is what covers the
   // connect, never while the intro cards or the terms are on screen.
   const coveringConnect = !ready && !seen && node.phase === 'connecting' && decision !== 'loading' && introState !== 'loading' && !gateNext
@@ -2495,7 +2490,7 @@ function Member () {
   }, [coveringConnect, node.canConfigure])
   const loadingGate = decision === 'loading' || introState === 'loading'
   const holding = holdSplash({ phase: node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })
-  const showIntro = introState === 'show' && !LINK_RETURN && !AGE_RETURN
+  const showIntro = introState === 'show' && !AGE_RETURN
   const showTerms = decision === 'needed' || decision === 'updated' || decision === 'account'
   const connectingSplash = !ready && !seen && coverConnecting({ phase: node.phase, canConfigure: node.canConfigure, elapsedMs: connectingAt.current === null ? 0 : Date.now() - connectingAt.current, released: released.current })
   const showConexao = !ready && !seen && !connectingSplash
@@ -2566,7 +2561,6 @@ function Member () {
   if (introDue && openWaitAt.current === null) openWaitAt.current = Date.now()
   let opening = openingGate({
     introShow: introDue,
-    linkReturn: LINK_RETURN,
     ageReturn: AGE_RETURN,
     card: cardKey !== null,
     verified: openVerified,
@@ -2692,6 +2686,8 @@ function Member () {
           total={total}
         />
       )
+    } else if (step === 'telefone' && phoneAviso) {
+      body = <TelefoneAviso onContinue={() => setPhoneAckFor(member)} onDelete={openAvisoDelete} />
     } else if (step === 'telefone') {
       // As Idade: the first wait for the status stays under the splash
       // (coverBoot); the busy state remains for a recheck or a patience reveal.
@@ -2733,7 +2729,7 @@ function Member () {
             onDismiss: () => { dropEntryLink(); setPendingLink(null) }
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={dropLinkReturn} onInviteChanged={reloadCard} invite={inviteProp || entryProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} onInfo={takeInfo} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} invite={inviteProp || entryProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
         <Page flush grow padBottom={16}>
@@ -3319,7 +3315,7 @@ function Member () {
           showToast(text)
         }}
       />
-      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} node={node} member={member} phoneGate={phone.gate} phoneKey={phone.key} phoneChecking={phone.pending} phoneVerified={phone.state === 'verificado' && !phone.error} markVerified={markPhoneVerified} recheckPhone={recheckPhone} />
+      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={navigateAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={!deleteFromAviso && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} node={node} member={member} phoneGate={phone.gate} phoneKey={phone.key} phoneChecking={phone.pending} phoneVerified={phone.state === 'verificado' && !phone.error} markVerified={markPhoneVerified} recheckPhone={recheckPhone} />
       {/* Mounted after the splash, so it wins: while the boot cover shows it
           follows the splash, which stays cream on native (Splash.js). */}
       <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />

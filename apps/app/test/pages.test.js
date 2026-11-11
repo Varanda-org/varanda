@@ -107,6 +107,8 @@ test('pageError maps tokens to pt-BR and everything else to unavailable', async 
   t.is(pageError('troca-bloqueada', '2026-01-02T12:00:00.000Z').code, 'troca-bloqueada')
   t.ok(pageError('troca-bloqueada', '2026-01-02T12:00:00.000Z').message.startsWith('Você poderá trocar de novo em '))
   for (const text of Object.values(TEXTS)) t.absent(text.includes(String.fromCharCode(0x2014)), text)
+  t.is(TEXTS['nao-vinculado'], 'Termine o cadastro em Ajustes → Conta e @nome.')
+  t.absent(TEXTS['nao-vinculado'].includes('Google'))
 })
 
 test('policy: available, off, older service and failure all answer a plain object', async (t) => {

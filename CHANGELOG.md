@@ -24,6 +24,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Cadastro no app só com celular, e aviso para quem já tem conta (PR `feat/phone-only-signup-app`): no vínculo a pessoa escolhe o @nome e o app conclui com `sub` `telefone:` mais a chave, sem botão nem volta do Google. Quem já tem conta e ainda não confirmou o celular vê "Agora a Varanda usa o seu celular" uma vez por abertura. Termos e Política de Privacidade 36, sujeitos a revisão jurídica. Detalhes em `docs/verification.md` seção 156.
 - Cadastro no serviço de conta só com celular verificado: o vínculo grava `sub` `telefone:<chave hex64>` e e-mail vazio, sem conta Google. Um build anterior lê o registro como um vínculo comum. O código de convite só é gasto quando o vínculo grava. `account phone --username <nome>` acha a conta pelo nome. Detalhes em `docs/protocol.md` (diretório de contas) e `docs/verification.md` seção 155.
 - Quem usa a web hospedada ou o app da associação agora confirma um celular brasileiro com um código por SMS, inclusive quem já tinha conta. O número não prova identidade e não recupera a conta. Termos e Política de Privacidade 35, sujeitos a revisão jurídica.
 - Verificação de celular no serviço de conta, desligada por padrão. Variáveis novas: `VARANDA_PHONE_KEY` e `VARANDA_PHONE_DAILY_LIMIT`. Não defina `VARANDA_PHONE_KEY` antes de o passo no app estar no ar. Comando novo: `account phone`. Detalhes em `docs/design.md` ("Verificação de celular") e `docs/verification.md` seção 153.

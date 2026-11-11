@@ -50,7 +50,7 @@ export function setDmDropObserver (fn) {
 }
 
 export const TEXTS = Object.freeze({
-  'nao-vinculado': 'Esta conta não tem vínculo com uma conta Google',
+  'nao-vinculado': 'Termine o cadastro em Ajustes → Conta e @nome.',
   'sem-permissao': 'Só o dono pode fazer isso',
   limite: 'Limite atingido',
   'nome-em-uso': 'Esse @nome já está em uso',

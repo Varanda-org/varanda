@@ -1,5 +1,5 @@
-// Helpers for the Google account link (@username). Pure ES module: no React and
-// no Node built-ins, so Metro bundles it and Node's import() loads it in tests.
+// Helpers for the account link (@username). Pure ES module: no React and no
+// Node built-ins, so Metro bundles it and Node's import() loads it in tests.
 // The page talks to the same-origin account service; it cannot verify
 // signatures, so usernameMatches is only a consistency check on data the same
 // origin serves.
@@ -26,19 +26,14 @@ const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_P
 export const INVITE_CODE_RE = /^[A-Za-z0-9_-]{43}$/
 export const INVITE_NEEDED_TEXT = 'Para entrar, abra o link de convite que alguém da rede te enviou. Nada sobre você fica guardado enquanto o convite não for usado.'
 
-const RETURN_NOTICES = {
-  ok: 'conta vinculada',
-  erro: 'não foi possível vincular a conta',
-  cancelado: 'vínculo cancelado'
-}
-
 const ERROR_MESSAGES = {
   'nome-em-uso': 'esse nome já está em uso',
   'nome-invalido': 'nome inválido',
-  'conta-vinculada': 'esta conta Google já está vinculada a outra chave',
+  'conta-vinculada': 'Esta chave já tem uma conta Varanda.',
   'assinatura-invalida': 'não foi possível provar a chave',
   expirado: 'o vínculo expirou, comece de novo',
-  'nao-vinculado': 'esta conta não tem vínculo com uma conta Google',
+  'nao-vinculado': 'Esta conta ainda não terminou o cadastro.',
+  'versao-antiga': 'Esta versão do app não cria mais contas. Atualize o Varanda e tente de novo.',
   'termos-pendentes': 'aceite os termos atuais antes de ligar os avisos',
   'pedido-invalido': 'pedido inválido',
   // Member cap (503). Already-linked members never receive this token.
@@ -99,34 +94,6 @@ export function isUsername (text) {
   const name = (text.startsWith('@') ? text.slice(1) : text).toLowerCase()
   if (!USERNAME_RE.test(name) || HEX6_RE.test(name)) return null
   return name
-}
-
-// ?conta=ok|erro|cancelado -> fixed notice, or null.
-export function parseReturn (search) {
-  if (typeof search !== 'string') return null
-  let value
-  try { value = new URLSearchParams(search).get('conta') } catch { return null }
-  return Object.hasOwn(RETURN_NOTICES, value) ? RETURN_NOTICES[value] : null
-}
-
-// ?conta=lista-de-espera (the service refused the Google callback while the
-// member cap was full, before exchanging the code) -> the calm waitlist
-// sentence, or ''. Not a return notice: the screen shows it as its
-// waitlist state, as for a 503 from start/finish.
-export function parseReturnWaitlist (search) {
-  if (typeof search !== 'string') return ''
-  let value
-  try { value = new URLSearchParams(search).get('conta') } catch { return '' }
-  return value === 'lista-de-espera' ? ERROR_MESSAGES['lista-de-espera'] : ''
-}
-
-// ?conta=convite-invalido (the invite died between /convite and the Google
-// return) -> the calm sentence, or ''. Like the waitlist, not a return notice.
-export function parseReturnInvite (search) {
-  if (typeof search !== 'string') return ''
-  let value
-  try { value = new URLSearchParams(search).get('conta') } catch { return '' }
-  return value === 'convite-invalido' ? ERROR_MESSAGES['convite-invalido'] : ''
 }
 
 export function usernameMatches (record, member, name) {
@@ -299,22 +266,19 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
 
 export const accountStatus = (member, { origin } = {}) =>
   call('GET', '/account/status?member=' + encodeURIComponent(member), undefined, { origin })
-// The native app's sign-in (apps/cli/lib/account/app-return.js) replaces the
-// web's link cookie with V (linkSecret, kept in the app's memory) and R
-// (redeem, from the auth session's result). Both ride in headers, only from
-// the app, and only when well formed.
+// The native app replaces the web's link cookie with V (linkSecret, kept in
+// the app's memory). It rides in a header, only from the app, and only when
+// well formed.
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const isToken = (v) => typeof v === 'string' && TOKEN_RE.test(v)
-function linkHeaders ({ linkSecret, redeem } = {}) {
+function linkHeaders ({ linkSecret } = {}) {
   if (!isAppClient()) return undefined
   const h = {}
   if (isToken(linkSecret)) h['x-varanda-link'] = linkSecret
-  if (isToken(redeem)) h['x-varanda-redeem'] = redeem
   return h
 }
-// An app row past the Google step answers only to V and R together: without
-// both there is nothing to ask, so nothing is sent.
-const appMissingProofs = ({ linkSecret, redeem } = {}) => isAppClient() && !(isToken(linkSecret) && isToken(redeem))
+// The phone finish binds an app row by V alone.
+const appMissingLink = ({ linkSecret } = {}) => isAppClient() && !isToken(linkSecret)
 
 // The invite code goes in only when it is well formed: the service decides
 // whether it is still valid. From the app, appProof (the hash of a fresh V)
@@ -325,15 +289,10 @@ export const startLink = ({ member, username, invite, appProof, linkSecret }) =>
   if (isAppClient() && isToken(appProof)) body.appProof = appProof
   return call('POST', '/account/start', body, { headers: linkHeaders({ linkSecret }) })
 }
-export const authorizeLink = ({ signature, linkSecret }) =>
-  call('POST', '/account/authorize', { signature }, { headers: linkHeaders({ linkSecret }) })
-export const readPending = (opts = {}) => {
-  if (appMissingProofs(opts)) return Promise.resolve(null)
-  return call('GET', '/account/pending', undefined, { allow404: true, headers: linkHeaders(opts) })
-}
-export const finishLink = ({ signature, linkSecret, redeem }) => {
-  if (appMissingProofs({ linkSecret, redeem })) return Promise.reject(toError('expirado'))
-  return call('POST', '/account/finish', { signature }, { headers: linkHeaders({ linkSecret, redeem }) })
+// Posts the signature the screen made (account.sign, phase finish).
+export const finishLink = ({ signature, linkSecret }) => {
+  if (appMissingLink({ linkSecret })) return Promise.reject(toError('expirado'))
+  return call('POST', '/account/finish', { signature }, { headers: linkHeaders({ linkSecret }) })
 }
 export const lookupUsername = (name, { origin } = {}) =>
   call('GET', '/account/username/' + encodeURIComponent(name), undefined, { allow404: true, origin })
@@ -652,7 +611,7 @@ function phoneUnknown () {
   return err
 }
 // The nonce-proved phone routes. Their 'expirado' is a spent phone nonce, not
-// the Google link ERROR_MESSAGES speaks of, so this table wins over it here
+// the account link ERROR_MESSAGES speaks of, so this table wins over it here
 // (toError lets ERROR_MESSAGES win for every other caller).
 const PHONE_MESSAGES = {
   expirado: 'O pedido venceu. Tente de novo.',

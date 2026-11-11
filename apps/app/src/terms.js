@@ -147,12 +147,12 @@ export function shouldSyncTerms ({ hosted, termsOk, ready, online, locked, setup
 // The shell's memory of one member#version sync in this page load: undefined
 // (never tried) or { count, state }. States: 'busy' (a run in flight),
 // 'done', 'transient' (a failure that spent an attempt), 'retry' (armed to
-// run again) and 'so-aparelho' (no Google link: sticky until the Ajustes
+// run again) and 'so-aparelho' (no directory link: sticky until the Ajustes
 // re-arm). Events:
 //   start         a run begins (after a 'done' the count starts over)
 //   ok            the server has the acceptance
 //   fail          any other failure
-//   nao-vinculado the member has no Google link
+//   nao-vinculado the member has no directory link
 //   generation    a lock, unlock or reset dropped the run: armed again and
 //                 the attempt is given back
 //   online        back online: a transient failure is armed again, up to

@@ -547,7 +547,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             : <Page><Soft>carregando…</Soft></Page>}
         </View>
         <View style={shown('conta')}>
-          <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} />
+          <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} onPhoneRecheck={recheckPhone} />
         </View>
         {/* Kept mounted like the others; it drops a shown recovery code as
             soon as it is not the active screen. */}

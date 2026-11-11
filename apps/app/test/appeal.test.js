@@ -58,7 +58,7 @@ test('a text with a lone surrogate can be signed once normalized', async (t) => 
 test('every error token maps to a fixed message', async (t) => {
   const { toError } = await load()
   const cases = {
-    'nao-vinculado': 'Para recorrer, primeiro vincule sua conta Google em Ajustes → Conta e @nome.',
+    'nao-vinculado': 'Termine o cadastro em Ajustes → Conta e @nome.',
     'nao-bloqueado': 'esta conta não está bloqueada',
     'limite-recursos': 'você já recorreu nos últimos 30 dias',
     limite: 'a moderação não pode receber recursos agora',
@@ -109,7 +109,7 @@ test('appealStart and appealSend parse the answers', async (t) => {
 test('failures never expose the body', async (t) => {
   const { appealStart, appealSend } = await load()
   stub(t, json(403, { error: 'nao-vinculado' }))
-  await t.exception(appealStart({ member: M }), /vincule sua conta Google/)
+  await t.exception(appealStart({ member: M }), /Termine o cadastro/)
 
   stub(t, json(403, { error: 'nao-bloqueado' }))
   await t.exception(appealSend({}), /não está bloqueada/)
