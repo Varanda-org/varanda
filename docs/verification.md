@@ -7592,7 +7592,7 @@ Limites desta caminhada:
 - Com 10 fotos no Publicar, a nota "até 10 fotos por publicação" aparece embaixo da barra de ferramentas; no iOS, fica abaixo da dobra e só aparece ao rolar. Num quadro que falhou, o "+6" fica por cima de "foto indisponível".
 - Cada lápide guarda no máximo 4 trechos. Por isso, 10 fotos viram 3 lápides (4+4+2) num só append, e quem não atualizou pula a publicação inteira, texto incluído, sem rejeitar o diário.
 
-## 152. Declaração de celular e `phone.sign` (PR1)
+## 172. Declaração de celular e `phone.sign` (PR1)
 
 A verificação de celular brasileiro ganha uma declaração assinada pela chave do diário, o método `phone.sign` e os dois atestados do serviço de conta, com `phone.proof`. O número e o código não entram na declaração nem nos atestados.
 
