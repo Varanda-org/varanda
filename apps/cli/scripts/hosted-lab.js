@@ -1,14 +1,17 @@
 'use strict'
 
 // The hosted lab: a whole hosted installation on this machine, for checking
-// the web app signed in, in Chrome, without Google, a domain or a phone:
+// the web app signed in, in Chrome, without Google or a domain. Phone
+// verification is the stub of ./phone-stub.js (no SMS provider): the banner
+// prints its code, and with no age store a send needs no age record.
 //   node scripts/hosted-lab.js [--host 127.0.0.1] [--port 8080] [--ui <dist dir> | --expo <http://127.0.0.1:8081>]
 //                              [--dataset <semente> [--dataset-size 60x150] [--rajada]]
 // It starts a loopback hyperdht testnet (or uses VARANDA_BOOTSTRAP, which must
 // be loopback, e.g. from scripts/local-dht.js), an association, a certified
 // seeder with its WebSocket listener (as `seed --ws-port`), and the account
 // service through createAccountServer with the stub of ./oauth-stub.js in
-// place of Google, no age check (GET /account/age/policy answers
+// place of Google, the phone stub (GET /account/phone/policy answers
+// { required: true }), no age check (GET /account/age/policy answers
 // { required: false }), an issuer certified by the lab association and the
 // terms store on. Passkey, terms and the account flow are the real ones.
 // One origin, http://localhost:<port>, carries what Caddy carries in a
@@ -294,10 +297,12 @@ function log (line) {
 }
 
 function steps (origin, opts) {
+  const { STUB_CODE } = require('./phone-stub')
   return [
     '',
     'Laboratório hospedado pronto em ' + origin,
     'Interface: ' + (opts.ui !== null ? 'dist exportado em ' + opts.ui : 'servidor web do Expo em ' + opts.expo + ' (npm run web -w apps/app)'),
+    'código de SMS do laboratório: ' + STUB_CODE,
     '',
     'No Chrome:',
     '  1. Abra ' + origin + ' (use localhost, não 127.0.0.1: o rp.id da passkey não pode ser um IP).',
@@ -386,6 +391,9 @@ async function main () {
   const { openModerationStore } = require('../lib/account/moderation-store')
   const { openPasskeyStore } = require('../lib/account/passkey-store')
   const { createOAuthStub } = require('./oauth-stub')
+  const nodeCrypto = require('node:crypto')
+  const { createPhoneStub } = require('./phone-stub')
+  const { openPhoneStore } = require('../lib/account/phone-store')
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-lab-'))
   const cleanups = []
@@ -467,7 +475,12 @@ async function main () {
     // passkey created in the lab browser is enrolled right after the link,
     // so Excluir conta there runs with the server-side check.
     const passkeys = openPasskeyStore(accountDir)
-    const account = createAccountServer({ association, origin, google, store, issuer, terms, moderation, passkeys, didit: null, ages: null })
+    // Ages stay null, so the base age gate lets a send through. The store
+    // key is random and stays in this process. The banner prints the
+    // sandbox code, never the key.
+    const phoneClient = createPhoneStub()
+    const phones = openPhoneStore(accountDir, { key: nodeCrypto.randomBytes(32) })
+    const account = createAccountServer({ association, origin, google, store, issuer, terms, moderation, passkeys, didit: null, ages: null, phoneClient, phones })
     const accountListener = await account.listen({ host: '127.0.0.1', port: 0 })
     cleanups.push(() => accountListener.close())
     log('serviço de conta no ar (Google substituído pela página do laboratório)')

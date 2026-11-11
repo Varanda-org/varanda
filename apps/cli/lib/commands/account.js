@@ -82,7 +82,7 @@ const {
 // the browser subscriptions live in push.json (./push-store.js). The seeder
 // relays notices to POST /push-event only when both services share
 // VARANDA_PUSH_TOKEN.
-const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]|phone [--release] --member <hex>]'
+const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]|phone [--release] --member <hex>|phone --username <nome>]'
 const PUSH_VAPID_FILE = 'push-vapid.json'
 const B64U_RE = /^[A-Za-z0-9_-]+$/
 const HEX64_RE = /^[0-9a-f]{64}$/
@@ -1307,8 +1307,17 @@ async function run (flags) {
   // --release gives a number back under a court order: it takes the
   // service's lock, so it refuses while the service runs, prints no number
   // and leaves the moderation desk (the key's block) as it is.
+  // --username finds the account that held the name, current or past.
   if (sub === 'phone' && subsub === undefined) {
-    if (flags.member === null) throw new UsageError('informe --member <chave>')
+    if ((flags.member === null) === (flags.username == null)) throw new UsageError('use --member ou --username')
+    if (flags.release && flags.member === null) throw new UsageError('informe --member <chave>')
+    if (flags.username != null) {
+      checkConfig(flags.dataDir, flags.association)
+      for (const line of lookupPhone(flags.dataDir, flags.username, () => readPhoneKey(process.env))) {
+        process.stdout.write(jsonLine(line) + '\n')
+      }
+      return 0
+    }
     const key = readPhoneKey(process.env)
     checkConfig(flags.dataDir, flags.association)
     if (flags.release) {
@@ -1334,6 +1343,46 @@ async function run (flags) {
   }
 
   throw new UsageError(USAGE)
+}
+
+// One line per holder of `username` ('@nome' or 'nome'): usedNames keeps a
+// single holder per name and never gives a member's name to another member,
+// so this is at most one line. A member, current or deleted, carries the
+// numbers `account phone --member` would print (an empty list when none);
+// a page has no number, so it carries its owner key instead (and movedTo
+// when pages.json has it moved) and the phone key is not read. `readKey` is called only for a member.
+function lookupPhone (dataDir, username, readKey) {
+  const name = (username.startsWith('@') ? username.slice(1) : username).toLowerCase()
+  const accounts = openAccountStore(dataDir, { readOnly: true })
+  warnRestored(accounts)
+  const holder = accounts.nameHolder(name)
+  if (holder === null) throw new Error('nome não encontrado')
+  if (holder.kind === 'pagina') {
+    let row
+    try {
+      row = openPagesStore(dataDir, { readOnly: true }).get(holder.key)
+    } catch {
+      throw new Error('pages.json inválido')
+    }
+    // A directory move ahead of pages.json leaves no row, and a row behind
+    // it is the pre-move tombstone: neither may read as the current owner.
+    if (row === null) throw new Error('página sem registro em pages.json')
+    return [{ ...holder, owner: row.owner, ...(row.movedTo !== null ? { movedTo: row.movedTo } : {}) }]
+  }
+  const key = readKey()
+  let phones
+  try {
+    phones = openPhoneStore(dataDir, { key, readOnly: true, disclose: true })
+  } finally {
+    key.fill(0)
+  }
+  let rows
+  try {
+    rows = phones.reveal(holder.key)
+  } catch {
+    throw new Error('phone.json inválido')
+  }
+  return [{ ...holder, phone: rows }]
 }
 
 function fileBytes (file) {
@@ -1408,6 +1457,7 @@ module.exports = {
   checkConfig,
   readEnv,
   releasePhone,
+  lookupPhone,
   closeIfOwned,
   loseLock,
   startTermsHeal,

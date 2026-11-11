@@ -15,6 +15,7 @@ const { createPushRoutes } = require('./push-routes')
 const { createSeenRoutes } = require('./seen-routes')
 const { createAgeRoutes } = require('./age-routes')
 const { createPhoneRoutes } = require('./phone-routes')
+const { phoneSub } = require('./store')
 const { createRecoveryRoutes } = require('./recovery-routes')
 const { createDeleteRoutes } = require('./delete-routes')
 const { createDeletionSweep } = require('./deletion')
@@ -854,13 +855,16 @@ function createAccountServer ({
   // is off. Excluir conta also queues a block with no report id
   // (moderation-store.js requestDeletion): only a block that is not that one
   // alone burns the number.
+  // Members with a phone finish in flight -> count. A number another member
+  // records meanwhile must not end the row this finish is about to link.
+  const linking = new Map()
   const phoneRoutes = createPhoneRoutes({
     client: phoneClient,
     phones,
     association,
     store,
     ageVerified: (m) => !ageRoutes.required() || ageRoutes.verified(m),
-    linked: (m) => store.status(m).linked,
+    linked: (m) => store.status(m).linked || linking.has(m),
     deleted: (m) => store.deletedAt(m) !== null,
     burnable: (m) => {
       if (moderation === null) return false
@@ -1490,18 +1494,43 @@ function createAccountServer ({
     configured()
     const signature = signatureParam(body.signature)
     let row = pendingRow(req)
-    if (apps.has(row.id)) row = redeemed(req, row, true)
-    if (typeof row.sub !== 'string') throw refuse('expirado')
-    proof({ phase: 'finish', nonce: row.nonce, member: row.member, username: row.username, association, sub: row.sub }, signature)
+    // A row still in 'reserve' never went to Google, so only the phone
+    // check can stand in for it. An app row's V (pendingRow) is then its
+    // bearer proof: the R that redeemed() asks for is minted by the Google
+    // callback alone.
+    const phone = phoneRoutes.required() && row.phase === 'reserve' && typeof row.sub !== 'string'
+    if (!phone) {
+      if (apps.has(row.id)) row = redeemed(req, row, true)
+      if (typeof row.sub !== 'string') throw refuse('expirado')
+    }
+    proof({ phase: 'finish', nonce: row.nonce, member: row.member, username: row.username, association, sub: phone ? phoneSub(row.member) : row.sub }, signature)
     if (!limits.finish(row.member)) throw over()
     ageChecked(row.member)
     phoneChecked(row.member)
-    if (!inviting) return finishRow(res, row, signature, false)
+    if (!phone) return finishLinked(res, row, signature, false)
+    const member = row.member
+    linking.set(member, (linking.get(member) ?? 0) + 1)
+    try {
+      // A record of the same number for another member queued before the
+      // line above may still end this member's row: let it land, then look
+      // again. One queued after it sees the member as linked and refuses.
+      await phoneRoutes.settled(member)
+      phoneChecked(member)
+      await finishLinked(res, row, signature, true)
+    } finally {
+      const left = linking.get(member) - 1
+      if (left > 0) linking.set(member, left)
+      else linking.delete(member)
+    }
+  }
+
+  async function finishLinked (res, row, signature, phone) {
+    if (!inviting) return finishRow(res, row, signature, false, phone)
     // The same answer store.finish gives once the first finish removed the row.
     if (finishing.has(row.id)) throw refuse('expirado')
     finishing.add(row.id)
     try {
-      await finishInvited(res, row, signature)
+      await finishInvited(res, row, signature, phone)
     } finally {
       finishing.delete(row.id)
       // A row that survived the refusal keeps its code, so a retry works.
@@ -1517,9 +1546,9 @@ function createAccountServer ({
   // after the link is on disk is the sidecar marked. A refusal never marks
   // it, so the invite stays usable. A failed mark does not undo the link:
   // the sidecar heals through isUsed (the directory is the authority).
-  async function finishInvited (res, row, signature) {
+  async function finishInvited (res, row, signature, phone) {
     const holder = store.lookup(row.username)
-    const known = store.memberForSub(row.sub) !== null || store.status(row.member).linked
+    const known = store.memberForSub(row.sub ?? phoneSub(row.member)) !== null || store.status(row.member).linked
     const plain = known || store.isFull() || (holder !== null && holder.member !== row.member)
     if (!plain) {
       const entry = row.invite === null ? undefined : held.get(row.invite)
@@ -1533,18 +1562,18 @@ function createAccountServer ({
         throw err
       }
     }
-    await finishRow(res, row, signature, true)
+    await finishRow(res, row, signature, true, phone)
   }
 
   // `mark`: the sidecar is marked only when the directory recorded this
   // row's invite on a link. The classification above runs outside the store
   // queue, so an overlapping finish may turn this one into an e-mail update
   // that records no invite.
-  async function finishRow (res, row, signature, mark) {
+  async function finishRow (res, row, signature, mark, phone) {
     const clear = clearCookie(row)
     let result
     try {
-      result = await store.finish(row.id, { signature }, issuer.keyPair, issuer.cert, association)
+      result = await store.finish(row.id, { signature, phone }, issuer.keyPair, issuer.cert, association)
     } catch (err) {
       const routeErr = fromStore(err)
       // A row whose name or key is taken can never produce this link, and
