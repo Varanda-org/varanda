@@ -25,6 +25,8 @@ const { openPagesStore } = require('../account/pages-store')
 const { openAgeStore } = require('../account/age-store')
 const { startAgeCheck, directoryFloor } = require('../account/age-check-state')
 const { createDidit } = require('../account/didit')
+const { createPhoneClient } = require('../account/phone-client')
+const { openPhoneStore, FILE: PHONE_FILE } = require('../account/phone-store')
 const { parseGifConfig } = require('../account/gif-routes')
 const { removeWalletFiles } = require('../account/wallet-cleanup')
 const { generateVapidKeys } = require('../account/web-push')
@@ -80,7 +82,7 @@ const {
 // the browser subscriptions live in push.json (./push-store.js). The seeder
 // relays notices to POST /push-event only when both services share
 // VARANDA_PUSH_TOKEN.
-const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]]'
+const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]|phone [--release] --member <hex>]'
 const PUSH_VAPID_FILE = 'push-vapid.json'
 const B64U_RE = /^[A-Za-z0-9_-]+$/
 const HEX64_RE = /^[0-9a-f]{64}$/
@@ -122,6 +124,9 @@ const DIDIT_KEY_RE = /^[\x21-\x7e]+$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const DIDIT_DAILY_DEFAULT = 200
 const DIDIT_DAILY_MAX = 100000
+const PHONE_DAILY_DEFAULT = 200
+const PHONE_DAILY_MAX = 100000
+const PHONE_KEY_INVALID = 'VARANDA_PHONE_KEY inválida: use 64 caracteres hexadecimais minúsculos'
 
 function print (flags, result, line) {
   process.stdout.write((flags.json ? jsonLine(result) : line) + '\n')
@@ -535,7 +540,7 @@ function readEnv (env, dataDir) {
     if (limits.invitesPerWeek === undefined) throw new UsageError('VARANDA_FEIRA_INVITES_PER_WEEK exige VARANDA_INVITES_PER_WEEK')
     if (groupToken === null) throw new UsageError('VARANDA_FEIRA_INVITES_PER_WEEK exige VARANDA_TRIAGE_TOKEN')
   }
-  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), gif: readGifEnv(env), preview: readPreviewEnv(env), androidCertSha256: readAndroidCertEnv(env) }
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), phone: readPhoneEnv(env, didit), gif: readGifEnv(env), preview: readPreviewEnv(env), androidCertSha256: readAndroidCertEnv(env) }
 }
 
 // VARANDA_ANDROID_CERT_SHA256: the Android app's signing certificate, the
@@ -574,6 +579,37 @@ function readDiditEnv (env) {
     dailyLimit = value
   }
   return { apiKey, workflowId, dailyLimit }
+}
+
+// Hosted phone verification: VARANDA_PHONE_KEY unset or '' is off. Set, it
+// seals and indexes the numbers in phone.json, so a malformed key refuses
+// to start instead of reading as off. The code goes through the same Didit
+// API key, so the age pair must be on: the age band is also the brake on the
+// paid sends. No value is ever echoed.
+// -> { key: Buffer(32), dailyLimit } | null
+function readPhoneEnv (env, diditConfig) {
+  const raw = env.VARANDA_PHONE_KEY
+  if (raw === undefined || raw === '') return null
+  if (typeof raw !== 'string' || !HEX64_RE.test(raw)) throw new UsageError(PHONE_KEY_INVALID)
+  if (diditConfig === null) throw new UsageError('VARANDA_PHONE_KEY exige a verificação de idade ligada (VARANDA_DIDIT_API_KEY e VARANDA_DIDIT_WORKFLOW_ID).')
+  let dailyLimit = PHONE_DAILY_DEFAULT
+  const limit = env.VARANDA_PHONE_DAILY_LIMIT
+  const text = typeof limit === 'string' ? limit.trim() : null
+  if (limit !== undefined && text !== '') {
+    const value = text !== null && CANONICAL_INT_RE.test(text) ? Number(text) : NaN
+    if (!(value >= 1 && value <= PHONE_DAILY_MAX)) throw new UsageError('VARANDA_PHONE_DAILY_LIMIT inválido')
+    dailyLimit = value
+  }
+  return { key: Buffer.from(raw, 'hex'), dailyLimit }
+}
+
+// The key alone, for `account phone`: it needs no Didit pair. Exit 1, and
+// never the value.
+function readPhoneKey (env) {
+  const raw = env.VARANDA_PHONE_KEY
+  if (raw === undefined || raw === '') throw new Error('VARANDA_PHONE_KEY ausente')
+  if (typeof raw !== 'string' || !HEX64_RE.test(raw)) throw new Error(PHONE_KEY_INVALID)
+  return Buffer.from(raw, 'hex')
 }
 
 // GIF search (../account/gif-routes.js): both variables set is on, both
@@ -717,7 +753,7 @@ async function serve (flags, env) {
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
   const pagesConfig = readPagesEnv(env)
-  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, gif, preview, androidCertSha256 } = readEnv(env, flags.dataDir)
+  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, phone: phoneConfig, gif, preview, androidCertSha256 } = readEnv(env, flags.dataDir)
   const { maxMembers = null, invitesPerWeek = null, inviteDrops = null, feiraInvitesPerWeek = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
@@ -766,11 +802,13 @@ async function serve (flags, env) {
   let pageClients = []
   let ages = null
   let stopAgeHeal = null
+  let phones = null
+  let stopPhoneHeal = null
   let stopSeenHeal = null
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore, passkeys)
+      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore, passkeys, phones)
     }
   })
   let listener = null
@@ -880,6 +918,21 @@ async function serve (flags, env) {
     }
     // 'desligada' reminds the operator that nobody is being asked.
     log({ event: 'idade', reason: didit !== null ? 'ligada' : 'desligada' })
+    // Phone verification (phone.json), only with VARANDA_PHONE_KEY set. A
+    // store that does not open (an invalid file or another key) is still
+    // handed to the server: the feature stays required and the gates stay
+    // shut, so a wrong key never reads as the feature being off.
+    let phoneClient = null
+    if (phoneConfig !== null) {
+      phoneClient = createPhoneClient({ apiKey: diditConfig.apiKey })
+      phones = openPhoneStore(flags.dataDir, { key: phoneConfig.key, guard: () => lock.owned() })
+      if (!phones.available()) log({ event: 'telefone', reason: 'indisponivel' })
+      stopPhoneHeal = startHeal(phones, 'telefone', log)
+    } else if (fs.existsSync(path.join(flags.dataDir, PHONE_FILE))) {
+      // Without the key the sweep cannot end or forget any row.
+      log({ event: 'telefone', reason: 'arquivo-sem-chave' })
+    }
+    log({ event: 'telefone', reason: phoneClient !== null ? 'ligada' : 'desligada' })
     log({ event: 'gif', reason: gif !== null ? 'ligada' : 'desligada' })
     log({ event: 'preview', reason: preview ? 'ligada' : 'desligada' })
     // On every start, on or off, so an off period always moves the since
@@ -947,7 +1000,7 @@ async function serve (flags, env) {
       const listingReader = groupToken === null
         ? null
         : createListingReader({ baseUrl: seederHttp, token: groupToken, association, revokedIssuers: () => revokedIssuerSet(moderation.pending().published.snapshot) })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -1007,6 +1060,7 @@ async function serve (flags, env) {
     if (stopDropsHeal !== null) stopDropsHeal()
     if (stopPushHeal !== null) stopPushHeal()
     if (stopAgeHeal !== null) stopAgeHeal()
+    if (stopPhoneHeal !== null) stopPhoneHeal()
     if (stopSeenHeal !== null) stopSeenHeal()
     if (terms !== null && terms.available()) await terms.heal()
     if (recovery !== null && recovery.available()) await recovery.heal()
@@ -1113,10 +1167,10 @@ async function closePageClients (pageClients) {
 // The lock is lost: the store is marked unavailable first, synchronously,
 // so no request still draining during the stop appends beside the writer
 // that took the lock over (store.js, "Writer guard"); then the service
-// stops. The terms, invites, push, seen, age, recovery and passkey stores,
-// the page keys, the page writer and the invite drops too: their next write
-// must not land either.
-function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, recovery = null, seenStore = null, passkeys = null) {
+// stops. The terms, invites, push, seen, age, phone, recovery and passkey
+// stores, the page keys, the page writer and the invite drops too: their
+// next write must not land either.
+function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, recovery = null, seenStore = null, passkeys = null, phones = null) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
   if (recovery !== null) recovery.fail()
@@ -1127,6 +1181,7 @@ function loseLock (store, log, stop, terms = null, invites = null, pushStore = n
   if (pushStore !== null) pushStore.fail()
   if (seenStore !== null) seenStore.fail()
   if (ages !== null) ages.fail()
+  if (phones !== null) phones.fail()
   if (pagesStore !== null) pagesStore.fail()
   if (pageKeys !== null) pageKeys.fail()
   if (pagesWriter !== null) pagesWriter.fail()
@@ -1245,7 +1300,102 @@ async function run (flags) {
     return 0
   }
 
+  // A member's verified numbers, for a court order or the member's own
+  // access request: one JSON line on stdout and nothing else, never logged
+  // and never served over HTTP. Safe while the service runs (phone.json is
+  // replaced whole by rename), and it never opens the issuer key.
+  // --release gives a number back under a court order: it takes the
+  // service's lock, so it refuses while the service runs, prints no number
+  // and leaves the moderation desk (the key's block) as it is.
+  if (sub === 'phone' && subsub === undefined) {
+    if (flags.member === null) throw new UsageError('informe --member <chave>')
+    const key = readPhoneKey(process.env)
+    checkConfig(flags.dataDir, flags.association)
+    if (flags.release) {
+      const { rows, alreadyReleased } = await releasePhone(flags.dataDir, flags.member, key)
+      process.stdout.write(jsonLine({ member: flags.member, released: true, ...(alreadyReleased ? { alreadyReleased } : {}), rows }) + '\n')
+      return 0
+    }
+    let phones
+    try {
+      phones = openPhoneStore(flags.dataDir, { key, readOnly: true, disclose: true })
+    } finally {
+      key.fill(0)
+    }
+    let rows
+    try {
+      rows = phones.reveal(flags.member)
+    } catch {
+      throw new Error('phone.json inválido')
+    }
+    if (rows.length === 0) throw new Error('sem telefone registrado')
+    process.stdout.write(jsonLine({ member: flags.member, rows }) + '\n')
+    return 0
+  }
+
   throw new UsageError(USAGE)
+}
+
+function fileBytes (file) {
+  try {
+    return fs.readFileSync(file)
+  } catch (err) {
+    if (err.code === 'ENOENT') return null
+    throw err
+  }
+}
+
+const PHONE_WRITE_UNSURE = 'a gravação do phone.json falhou e pode ou não ter valido: confira com account phone --member <chave> antes de rodar de novo, sem consertar nem apagar o arquivo'
+
+// -> { rows, alreadyReleased }: the rows the member still has and whether an
+// earlier release was on record. `open` is for tests.
+async function releasePhone (dataDir, member, key, { open = openPhoneStore } = {}) {
+  let lock
+  try {
+    lock = takeLock(dataDir)
+  } catch (err) {
+    if (lockHeld(dataDir)) throw new Error('pare o serviço de conta antes de liberar um número')
+    throw err
+  }
+  try {
+    let phones
+    try {
+      phones = open(dataDir, { key, guard: () => lock.owned() })
+    } finally {
+      key.fill(0)
+    }
+    if (!phones.available()) throw new Error('phone.json inválido')
+    const file = path.join(dataDir, PHONE_FILE)
+    const before = fileBytes(file)
+    // The store exposes no read of its `released` map, so it is read from
+    // the bytes it just validated: a member released earlier whose rows the
+    // retention already removed is a confirmation, not an unknown key.
+    let alreadyReleased = false
+    if (before !== null) {
+      try {
+        const released = JSON.parse(before.toString('utf8')).released
+        alreadyReleased = Object.prototype.hasOwnProperty.call(released, member)
+      } catch {
+        throw new Error('phone.json inválido')
+      }
+    }
+    let rows
+    try {
+      rows = (await phones.release(member)).rows
+    } catch {
+      // A failed write may have renamed the new file into place already, so
+      // only a store that could not read the file is reported as invalid.
+      if (!phones.dirty() && !phones.available()) throw new Error('phone.json inválido')
+      throw new Error(PHONE_WRITE_UNSURE)
+    }
+    // No row left, nothing written and no earlier release: the key never had
+    // a number here, and a mistyped key must not read as a release.
+    const after = fileBytes(file)
+    if (rows === 0 && !alreadyReleased && (before === null || (after !== null && before.equals(after)))) throw new Error('sem telefone registrado')
+    return { rows, alreadyReleased }
+  } finally {
+    lock.release()
+  }
 }
 
 module.exports = {
@@ -1257,6 +1407,7 @@ module.exports = {
   ensureConfig,
   checkConfig,
   readEnv,
+  releasePhone,
   closeIfOwned,
   loseLock,
   startTermsHeal,

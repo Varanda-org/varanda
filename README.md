@@ -101,6 +101,8 @@ Comandos:
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
   account reports            exporta as denúncias com os e-mails do vínculo (--member)
+  account phone              mostra o celular verificado de um membro, para pedido judicial (--member)
+  account phone --release    libera o celular de um membro por ordem judicial, com o serviço parado (--member)
   mod init|show              chave da moderação e estado da lista de bloqueio
   mod cert add               grava o certificado da moderação (--cert-file <f>)
   mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista
@@ -149,7 +151,7 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes
+  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
   --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).
 ```
@@ -230,6 +232,8 @@ Num comando seguinte, `--association` e `VARANDA_ASSOCIATION` são opcionais. Se
 | `VARANDA_DIDIT_WORKFLOW_ID` | Id do workflow do Didit (idade por rosto, com documento de reserva). Chave e id definidos ligam a checagem para todo membro hospedado, inclusive quem já está vinculado; só um dos dois é erro de uso. |
 | `VARANDA_DIDIT_DAILY_LIMIT` | Teto de sessões novas no Didit por dia (padrão: 200), contado à parte para chaves sem vínculo e para membros já vinculados. Opcional. |
 | `VARANDA_AGE_SINCE` | O momento em que a verificação de idade passou a valer nesta instalação, em ISO (`2026-10-29T00:00:00.000Z`), nunca antes. Exige a checagem ligada (`VARANDA_DIDIT_API_KEY` e `VARANDA_DIDIT_WORKFLOW_ID`): sem elas o serviço não sobe. `GET /account/age/since` responde `{ since }` com um atestado assinado na hora pelo emissor (o mesmo vale por no máximo um minuto), datado do momento da assinatura, e `{ since:null }` enquanto não houver faixa registrada ou o serviço não tiver certificado de emissor. O `since` servido nunca é anterior a esse momento, ao início do dia UTC seguinte à primeira faixa registrada, nem à última vez em que a checagem foi ligada (guardada em `age-check.json`, no diretório de dados), nem ao certificado mais recente de um membro vinculado sem faixa registrada. O app guarda o atestado no nó, que confere a assinatura a cada leitura, e libera direto, em qualquer aparelho, a conta cujo certificado tem data entre o `since` e a data do atestado, porque com a checagem ligada o serviço não emite certificado sem faixa de idade registrada. Um atestado só vale para certificados datados até a sua assinatura. Se `age-check.json` estiver inválido, a rota responde 503 `indisponivel` até a operação corrigir o arquivo ou restaurar a cópia mais recente; se o serviço não conseguir gravá-lo ao subir com a checagem desligada, ele não sobe. `GET /account/age/policy` continua respondendo só `{ required }`. Se a checagem for desligada, remova a variável; ao religar, use o novo momento (o serviço já não serve nada anterior ao religamento). Vazia, a rota responde `{ since:null }`; valor fora desse formato impede o serviço de subir. Opcional. |
+| `VARANDA_PHONE_KEY` | Chave da verificação de celular (em `deploy/seeder/.env`; só o serviço `account` a recebe; reiniciar para mudar): 64 caracteres hexadecimais minúsculos, gerados com `openssl rand -hex 32`. Segredo. Vazia, a verificação fica desligada. Definida, sela os números e o índice do `phone.json` e exige a verificação de idade ligada (`VARANDA_DIDIT_API_KEY` e `VARANDA_DIDIT_WORKFLOW_ID`); fora do formato, o serviço não sobe e a mensagem nunca repete o valor. Ver "Verificação de celular (serviço `account`)" antes de definir. |
+| `VARANDA_PHONE_DAILY_LIMIT` | Teto de envios de código por dia, inteiro de 1 a 100000 (padrão: 200; fora disso o serviço se recusa a subir), contado à parte para chaves vinculadas e para chaves ainda sem vínculo. Lida só com `VARANDA_PHONE_KEY` definida. Opcional. |
 | `VARANDA_ACCOUNT_MAX_CONNECTIONS` | Conexões simultâneas do serviço `account`, de 1 a 4096. Padrão 64. |
 | `VARANDA_ACCOUNT_RATE` | Requisições por segundo do balde global do serviço `account`, de 1 a 10000. Padrão 20. |
 | `VARANDA_ACCOUNT_BURST` | Rajada permitida acima da taxa no balde global do serviço `account`, de 1 a 100000. Padrão 100. |
@@ -708,6 +712,59 @@ Diagnóstico: quando o app mostra "A verificação de idade está fora do ar ago
 Os mesmos motivos, com `didit-decisao-` no lugar de `didit-sessao-`, valem para a leitura do resultado.
 
 Antes do lançamento é preciso existir um canal privado de contato para contestação da decisão. Defina-o com os mantenedores; este documento não inventa um.
+
+#### Verificação de celular (serviço `account`)
+
+Com `VARANDA_PHONE_KEY` definida, todo membro hospedado confirma um celular brasileiro antes do vínculo, da troca de @nome, dos convites, do push, da gravação de lidas, da criação de página e dos códigos da Feira (a recusa é `telefone-pendente`). A pessoa digita o número, recebe um código de 6 dígitos por SMS (nunca por WhatsApp) enviado pelo Didit, com a mesma chave da API da verificação de idade, e o digita no app. A faixa de idade vem antes: ela é o freio dos envios pagos.
+
+O que fica guardado: o `phone.json` no volume `account-data` (modo `0600`), com a chave do membro, o número selado (AES-256-GCM, preso à chave do membro), um índice com chave (HMAC) que serve para a unicidade e para os bloqueios, a data da verificação e, quando houver, o fim (`trocado`, `excluida`, `substituido`, `liberado`). O número nunca vai para os certificados, para a camada P2P, para respostas a outros membros, para os registros, para o painel de moderação nem para o `account export`. O serviço assina com a chave do emissor um atestado `phone-verified` (a chave do membro e a data, nunca o número), que o app guarda no nó, para a versão hospedada abrir sem rede; o atestado só é devolvido quando o serviço tem emissor (sem emissor, a verificação vale mas não vem atestado). Se a chave do emissor vazar e for revogada (`mod revoke-issuer`), os atestados que ela assinou também deixam de valer.
+
+Backup: o `phone.json` e a `VARANDA_PHONE_KEY` vão juntos no backup, guardados em lugares separados. Perder a chave é perder todos os números e todos os bloqueios: o serviço falha fechado (o `phone.json` não abre, a etapa responde `indisponivel` e ninguém consegue se verificar) até a operação restaurar a chave certa. Trocar a chave não é suportado: com outra chave o arquivo não abre e nunca é regravado.
+
+Limites: 5 envios por membro por dia, 3 por número por dia, 60 s entre envios e o teto diário `VARANDA_PHONE_DAILY_LIMIT` (padrão 200, à parte para chaves vinculadas e não vinculadas). No dia em que os membros já vinculados passarem a verificar, suba o teto para esse dia. Um número já verificado por outra conta vinculada é recusado (`telefone-em-uso`); o de uma conta bloqueada pela moderação fica preso enquanto o bloqueio durar.
+
+Registros: o evento `telefone` traz só palavras fixas, nunca o número, o código ou a chave. Na partida, `ligada` ou `desligada`; `indisponivel` (o `phone.json` não abriu com esta chave, a verificação continua exigida e a etapa fica fechada); `arquivo-sem-chave` (há um `phone.json` mas a chave não está definida, então nenhuma retenção corre). Em uso: `enviado`, `verificado`, `em-uso`, `recusado-linha` (fixo, VoIP ou descartável), `tipo-desconhecido` (aceito, tipo de linha que o serviço não conhece), `teto-diario`, `armazenamento-indisponivel`, `gravacao-falhou`, `varredura-falhou`, `varredura-exclusao-falhou`, `resultado-desconhecido`, `didit-envio-bloqueado` e, para falhas do Didit, `didit-envio-` ou `didit-checagem-` seguido de `falha` (a resposta do Didit não foi aceita), `http-NNN`, `tempo`, `rede`, `formato` ou `entrada` (com `-campo-<nome>` para cada campo que o Didit apontou). Veja com `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml logs account | grep '"telefone"'`.
+
+O comando `account phone --member <chave>` mostra os números verificados de um membro, para uma ordem judicial ou para o pedido de acesso do próprio membro (LGPD). Precisa da `VARANDA_PHONE_KEY` no ambiente, roda só no servidor (pode rodar com o serviço no ar), não tem rota HTTP, não registra nada e imprime uma linha JSON `{ member, rows }`. Essa saída nunca é colada em issue, chat ou e-mail: entregue-a pelo canal que a ordem ou o pedido indicar.
+
+Ordem de implantação:
+
+1. Implante esta versão do serviço com `VARANDA_PHONE_KEY` vazia. Nada muda para ninguém.
+2. Rode a lista do sandbox abaixo.
+3. Espere a versão web e a versão do app (atualização na loja) com a etapa do celular estarem no ar e serem as que os membros usam. Versões antigas não têm a tela nem o `phone.sign`, e seriam recusadas no cadastro.
+4. Só então defina `VARANDA_PHONE_KEY` e reinicie o `account`.
+
+Resíduo conhecido: um app nativo instalado mais antigo que a etapa do celular não consegue mostrá-la. O serviço recusa a ele o vínculo, a troca de @nome, os convites, o push, a gravação de lidas, a criação de página e os códigos da Feira, mas ele continua publicando no próprio diário pela rede P2P, porque certificados não vencem. Por isso a chave só entra depois que a atualização da loja estiver no ar.
+
+Para desligar de vez: remova a chave e apague o `phone.json`. Remover só a chave deixa o arquivo parado, sem retenção (o registro `arquivo-sem-chave` lembra disso a cada partida).
+
+Lista do sandbox, ANTES de definir a chave (o serviço falha fechado se as respostas do Didit vierem num formato diferente do esperado). Com a mesma chave da API e sem id de workflow:
+
+```sh
+curl -sS -X POST https://verification.didit.me/v3/phone/send/ \
+  -H "x-api-key: $VARANDA_DIDIT_API_KEY" -H "content-type: application/json" \
+  -d '{"phone_number": "+55<número de teste>", "vendor_data": "<texto aleatório>", "options": {"preferred_channel": "sms", "locale": "pt-BR", "code_size": 6}}'
+curl -sS -X POST https://verification.didit.me/v3/phone/check/ \
+  -H "x-api-key: $VARANDA_DIDIT_API_KEY" -H "content-type: application/json" \
+  -d '{"phone_number": "+55<número de teste>", "code": "123456", "voip_number_action": "DECLINE", "disposable_number_action": "DECLINE", "duplicated_phone_number_action": "NO_ACTION"}'
+```
+
+Confira e anote:
+
+- o envio e a checagem com o código de sandbox `123456` respondem `status` (`Success` no envio, `Approved` na checagem);
+- a resposta antes da primeira recarga de crédito (401 ou 403);
+- se um `Retry` no envio é cobrado (a documentação da Didit diz que `Retry` reenvia o código da verificação pendente, e o serviço o trata como `enviado`);
+- os `status` de um código errado e das tentativas esgotadas (hoje `Failed` vira `codigo-invalido`, `Expired or Not Found` vira `codigo-expirado`, e `Declined` sem sinal de linha vira `codigo-expirado`; confira se um número em lista de bloqueio do Didit também chega como `Declined`);
+- o `carrier.type` de um celular brasileiro real e o `country_code` que volta para ele;
+- o que um envio para um número VoIP responde (status e campos do corpo do 400);
+- se existe rota para apagar registros de telefone no Didit (hoje o serviço não chama nenhuma);
+- que `preferred_channel: "sms"` entrega por SMS e nunca por WhatsApp;
+- o preço de um envio de SMS para um número brasileiro.
+
+##### Ordem judicial: desbloqueio e liberação do número
+
+1. A conta ainda existe e a ordem levanta o bloqueio: rode `mod unblock <chave>` num terminal (ele publica a lista). O número deixa de ficar preso na próxima varredura, na partida ou em até uma hora, e, se o bloqueio durou menos de 180 dias, o membro fica com a conta e com o número; passados os 180 dias o número selado já foi apagado e o membro precisa verificar de novo (`telefone-pendente`). Um membro bloqueado pela operação continua com o número preso mesmo depois de excluir a conta; só `mod unblock` (ou um recurso aceito) seguido de uma varredura o solta.
+2. A conta não pode voltar (a pessoa a excluiu, ou a ordem libera só o número): pare o serviço `account`, rode `account phone --release --member <chave>` com a `VARANDA_PHONE_KEY` no ambiente e suba o serviço de novo. O comando toma a mesma trava do serviço, então recusa com o serviço no ar ("pare o serviço de conta antes de liberar um número"), imprime só `{ member, released: true, rows }`, nunca o número, e não mexe na moderação. Rodar de novo para confirmar é seguro: um membro já liberado responde com `alreadyReleased: true`, mesmo depois que a retenção apagou as linhas dele, e só uma chave sem número nem liberação dá "sem telefone registrado". Se a gravação falhar, a liberação pode ou não ter valido: confira com `account phone --member <chave>` antes de rodar de novo e não conserte nem apague o `phone.json`. Depois disso o número pode ser confirmado por outra conta, a chave antiga continua bloqueada e o número selado fica guardado por até 180 dias. `account phone --member` precisa da chave do membro; `account reports --member` só filtra por uma chave que você já tem. Para descobrir a chave, use `account reports` sem `--member` (lista só quem foi denunciado) ou a lista pública de bloqueios (`mod show --json`), que traz também quem foi bloqueado sem denúncia.
 
 #### Páginas (opcional, serviço `account`)
 

@@ -37,6 +37,8 @@ Comandos:
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
   account reports            exporta as denúncias com os e-mails do vínculo (--member)
+  account phone              mostra o celular verificado de um membro, para pedido judicial (--member)
+  account phone --release    libera o celular de um membro por ordem judicial, com o serviço parado (--member)
   mod init|show              chave da moderação e estado da lista de bloqueio
   mod cert add               grava o certificado da moderação (--cert-file <f>)
   mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista
@@ -85,7 +87,7 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes
+  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
   --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).`
 
@@ -215,6 +217,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     undo: false,
     private: false,
     force: false,
+    release: false,
     dataDir: path.join(root, 'data'),
     association: null,
     bootstrap: undefined,
