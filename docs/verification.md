@@ -7620,9 +7620,9 @@ O layout dos bytes da declaração e dos atestados está em `packages/core/lib/p
 
 - O nó web dentro do app hospedado (Android e iOS) não foi exercitado: os testes rodam a sessão do navegador no Node. Nesta etapa nenhuma tela chama `phone.sign` nem `phone.proof`.
 
-## 153. Verificação de celular no serviço de conta (PR2)
+## 173. Verificação de celular no serviço de conta (PR2)
 
-O serviço de conta, com `VARANDA_PHONE_KEY` definida, exige um celular brasileiro (`+55`) de cada membro hospedado. O código de uso único sai só por SMS, pelo mesmo parceiro da verificação de idade. Quem já é membro fica retido até verificar. Sem a variável, o recurso fica desligado e nada muda. A declaração `varanda-phone-v1`, o método `phone.sign` e o formato dos atestados continuam na seção 152.
+O serviço de conta, com `VARANDA_PHONE_KEY` definida, exige um celular brasileiro (`+55`) de cada membro hospedado. O código de uso único sai só por SMS, pelo mesmo parceiro da verificação de idade. Quem já é membro fica retido até verificar. Sem a variável, o recurso fica desligado e nada muda. A declaração `varanda-phone-v1`, o método `phone.sign` e o formato dos atestados continuam na seção 172.
 
 O que este PR acrescenta:
 
