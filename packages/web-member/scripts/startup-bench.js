@@ -443,7 +443,7 @@ function instrument ({ jsVerify }) {
 
 // The app's first reads on the cores the run lends, one after the other.
 async function firstReads (api, { storage, association, ownHex, keys }, opts, c, phases) {
-  const ctx = { storage, association, cores: { diary: api.diary, replica: api.replica, group: api.group } }
+  const ctx = { storage, association, cores: { diary: api.diary, replica: api.replica, group: api.group, opened: api.opened, settled: api.settled } }
   const timed = async (phase, read) => {
     if (!api.hold()) throw new Error('a sincronização não emprestou os núcleos')
     const before = counts(c)
@@ -497,7 +497,7 @@ async function firstReads (api, { storage, association, ownHex, keys }, opts, c,
 // to be published (the run's cores are lent from then on) and answers from the
 // lent cores; times are from sync.start, the chain running them in turn.
 async function earlyReads (api, { storage, association, ownHex }, start, out) {
-  const ctx = { storage, association, cores: { diary: api.diary, replica: api.replica, group: api.group } }
+  const ctx = { storage, association, cores: { diary: api.diary, replica: api.replica, group: api.group, opened: api.opened, settled: api.settled } }
   const since = () => Number(process.hrtime.bigint() - start) / 1e6
   const read = async (name, fn) => {
     if (!api.hold()) throw new Error('a sincronização não emprestou os núcleos')

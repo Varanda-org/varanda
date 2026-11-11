@@ -1522,27 +1522,43 @@ function createBrowserSession ({
   // stopRun waits for every hold, ours included. A startup that has not
   // published the cores within readerWaitMs (slow or stuck storage) is
   // preempted too: every read, and whatever is queued behind it, would
-  // otherwise wait on it with no limit.
+  // otherwise wait on it with no limit. The run publishes before its follow
+  // pass, so a read that needs a core not lent yet waits for the follows
+  // (opened) and then the startup sweeps (settled), all within the same
+  // readerWaitMs from the read's start.
   async function withCores (fn) {
     const r = run
     if (r === null) return withStore(fn)
-    const api = await readyWithin(r.ready, readerWaitMs)
-    if (api === NOT_READY) {
+    const deadline = Date.now() + readerWaitMs
+    const late = () => {
       warning('aviso: leitura sem esperar a partida da sincronização (' + readerWaitMs + ' ms)')
       return withStore(fn)
     }
+    const api = await readyWithin(r.ready, readerWaitMs)
+    if (api === NOT_READY) return late()
     if (api === null || !api.hold()) {
       await r.done
       return withStore(fn)
     }
+    // A startup step past the deadline is a NEEDS_EXCLUSIVE, which every
+    // read already passes on; `timedOut` tells it from a core the run
+    // cannot serve (a borrowed read rewraps errors).
+    let timedOut = false
+    const step = (p) => p === undefined
+      ? undefined
+      : async () => {
+        if ((await readyWithin(p, deadline - Date.now())) !== NOT_READY) return
+        timedOut = true
+        throw member.needsExclusive()
+      }
     try {
-      return await fn({ ...ctx(), cores: { diary: api.diary, replica: api.replica, group: api.group } })
+      return await fn({ ...ctx(), cores: { diary: api.diary, replica: api.replica, group: api.group, opened: step(api.opened), settled: step(api.settled) } })
     } catch (err) {
       if (!member.isNeedsExclusive(err)) throw err
     } finally {
       api.release()
     }
-    return withStore(fn)
+    return timedOut ? late() : withStore(fn)
   }
 
   // Whether the stored replica of `key` is forked, on the run's core when
@@ -1551,7 +1567,7 @@ function createBrowserSession ({
   // it has not closed yet, and a second instance would corrupt it, so that
   // read reruns on the exclusive path.
   async function replicaForked (c, key) {
-    const lent = c.cores ? c.cores.replica(key) : null
+    const lent = c.cores ? await member.lentCore(c.cores, () => c.cores.replica(key)) : null
     if (lent !== null) return lent.fork !== 0
     if (!(await store.replicaExists(c.storage, key))) return false
     if (c.cores) throw member.needsExclusive()
