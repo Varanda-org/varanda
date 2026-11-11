@@ -116,3 +116,20 @@ test('requestDeletion: an uncertain finish is settled by the status, never sent 
   ;({ fx, calls } = effects({ beforeFinish: async () => { throw new Error('push') } }))
   t.alike(await requestDeletion({ prepared, typed: 'ana', ...fx }), { deleted: 'pendente' }, 'a failed push switch-off never stops it')
 })
+
+test('PENDING_TEXT seals an optional phone for up to 180 days and does not name Google', async (t) => {
+  const { PENDING_TEXT } = await load()
+  t.ok(PENDING_TEXT.includes('se houver'))
+  t.ok(PENDING_TEXT.includes('180 dias'))
+  t.ok(PENDING_TEXT.includes('O número do celular, se houver, fica lacrado por até 180 dias e então é apagado.'))
+  t.absent(PENDING_TEXT.includes('Google'))
+})
+
+test('Excluir conta: a page owner without Páginas on screen is told the way forward', (t) => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/ExcluirConta.js'), 'utf8')
+  t.ok(src.includes("const PAGES_LATER = 'Confirme o seu celular primeiro. Depois, encerre ou transfira a página em Páginas.'"))
+  t.ok(src.includes("{typeof onOpenPaginas === 'function' ? <Btn label='Abrir Páginas' onPress={onOpenPaginas} /> : <Body>{PAGES_LATER}</Body>}"))
+  t.absent(src.includes('\u2014'))
+})

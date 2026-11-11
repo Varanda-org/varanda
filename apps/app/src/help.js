@@ -86,13 +86,12 @@ export const HELP = Object.freeze({
     ])
   }),
   vinculo: Object.freeze({
-    title: 'Por que confirmar com o Google',
+    title: 'Por que confirmar o celular',
     paragraphs: Object.freeze([
-      'Para entrar na rede, confirme uma conta Google e escolha seu @nome.',
-      'A associação guarda o vínculo entre a conta Google e a sua conta Varanda para liberar sua conta e seu @nome, atender uma ordem judicial ou bloquear a conta.',
-      'O e-mail nunca vai para o seu diário, para o seu perfil nem para este navegador. A idade não é verificada.',
+      'Para entrar na rede, confirme um celular brasileiro e escolha seu @nome.',
+      'A associação guarda o número lacrado para liberar sua conta e seu @nome, atender uma ordem judicial ou bloquear a conta. Cada número fica em uma conta só. Enquanto durar um bloqueio, o mesmo número não pode ser usado em outra conta.',
+      'O número nunca vai para o seu diário nem para o seu perfil, e não fica guardado neste aparelho. Ele não serve para recuperar a conta.',
       'O que é guardado está na Política de Privacidade (Ajustes → Termos e privacidade).',
-      'Vamos abrir o Google e, na volta, pedir sua passkey de novo.',
       'O @nome tem de 3 a 20 letras minúsculas, números ou _, começando por letra. Você pode trocá-lo depois, uma vez a cada 7 dias.',
       'Se a rede estiver por convite, a entrada é pelo link que alguém que já está na Varanda te enviou.'
     ])
@@ -194,14 +193,13 @@ export const HELP = Object.freeze({
   termosAparelho: Object.freeze({
     title: 'Sobre o registro do aceite',
     paragraphs: Object.freeze([
-      'Esta conta não tem vínculo com uma conta Google, então o aceite fica registrado só neste aparelho.',
-      'Para registrar também na conta, vincule uma conta Google em Ajustes → Conta e @nome.'
+      'Esta conta ainda não terminou o cadastro. Termine o cadastro em Ajustes → Conta e @nome.'
     ])
   })
 })
 
 export const SHORT = Object.freeze({
-  link: 'A associação guarda o vínculo com sua conta Google; o e-mail nunca vai para o seu perfil nem para o seu diário.',
+  link: 'A associação guarda o vínculo com o seu celular; o número nunca vai para o seu perfil nem para o seu diário.',
   followsPublic: 'Quem você segue e quem segue você é público.',
   install: 'Abra o menu do navegador e escolha instalar o app. No iPhone: Compartilhar e depois Adicionar à Tela de Início.',
   reportPrivacy: 'A pessoa denunciada não vê quem denunciou.',

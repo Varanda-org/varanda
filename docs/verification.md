@@ -7707,3 +7707,50 @@ Laboratório hospedado (`node apps/cli/scripts/hosted-lab.js`, com `npm run web 
 - [ ] Abra `http://localhost:8080` no Chrome (use `localhost`, não `127.0.0.1`: o `rp.id` da passkey não pode ser um IP). No DevTools, ative o autenticador virtual (ctap2, transporte `internal`, chaves residentes, verificação do usuário e PRF) e toque em Entrar.
 - [ ] Na confirmação do celular, informe um celular brasileiro e o código `123456`. O código é aceito. Um código diferente é recusado. O aviso do laboratório não mostra o número. As telas atuais ainda seguem para a página do laboratório no lugar do Google (Pessoa 1). O vínculo sem conta Google, com `sub` `telefone:`, é o caminho do serviço coberto por `account-phone-signup.test.js`.
 - [ ] `account phone --username <nome>` (com ou sem `@`), no diretório da conta e com `VARANDA_PHONE_KEY`, imprime no máximo uma linha. Membro: `kind` `membro` ou `excluido` e `phone`. Página: `owner`, sem número. Página movida: também `movedTo`. Sem registro em `pages.json`: "página sem registro em pages.json". Nome desconhecido: "nome não encontrado". O laboratório não imprime a chave do `phone.json` (ela fica só no processo) e apaga os dados ao encerrar, então esta consulta se faz num diretório em que a chave é conhecida.
+
+## 176. Cadastro só com celular no app e aviso para quem já tem conta, Termos 36 (PR feat/phone-only-signup-app)
+
+O app hospedado deixa de abrir o Google para vincular a conta. A seção 175 cobre o serviço: com o celular verificado, o vínculo grava `sub` `telefone:<chave hex64>` e e-mail vazio. Este PR é o caminho no app. `apps/app/src/authorizeUrl.js` saiu. Nenhuma tela chama `authorizeLink` nem lê uma volta `?conta=`.
+
+Membro novo, na ordem de `apps/app/src/onboarding.js`: entrar, idade, telefone, vínculo. O telefone vem antes do @nome, então o aviso "Agora a Varanda usa o seu celular" não aparece neste caminho (ele só abre para quem já tem certificado). No vínculo (`apps/app/src/screens/Identidade.js`, passo "Escolha seu @nome") a pessoa escolhe o @nome e toca em "Confirmar meu celular". O app chama `startLink`, assina `account.sign` com fase `finish` e `sub` `telefone:` mais a chave pública, posta `finishLink` e então `onLinked`. No app nativo, `finishLink` manda só o segredo de vínculo V (`x-varanda-link`), nunca o R: o R só nascia na volta do Google. Na web o finish segue o cookie, sem V e sem R. Não há botão "Continuar com o Google" nem "Vincular conta Google".
+
+Quem já vinculou (em geral com o Google) e ainda não tem celular verificado vê primeiro o aviso (`apps/app/src/phoneExplainer.js`, `apps/app/src/screens/TelefoneAviso.js`, `apps/app/App.js`). O título é "Agora a Varanda usa o seu celular". Os botões são "Confirmar meu celular" e "Excluir minha conta". O aviso vale uma vez nesta abertura e neste membro: o aceite fica só na memória do processo, nada é gravado no aparelho, e a abertura seguinte mostra o aviso de novo se o celular continuar pendente. "Confirmar meu celular" segue para o passo Telefone. "Excluir minha conta" abre Ajustes direto em Excluir conta. Voltar, Escape ou fechar voltam ao aviso, não à lista de Ajustes. Limite conhecido: nesse caminho `onOpenPaginas` não é passado, então Excluir conta de quem é dono de uma página não mostra o botão "Abrir Páginas".
+
+Termos e Política de Privacidade 36 (`apps/app/src/legal.js`, `LEGAL_VERSION` 36, data 11/11/2026; `packages/core/lib/terms.js`, `TERMS_VERSION` 36). A Política tem a seção "Vínculo com o celular". O número lacrado fica enquanto a conta existir e por até 180 dias depois de Excluir conta, de um bloqueio ou de uma troca de número, e então é apagado. O Google não é mais coletado para quem entra agora. Continua o e-mail de quem entrou antes, o login dos moderadores no painel e o push do navegador (Google, Mozilla, Apple ou Microsoft). A lista de bloqueio segue sem nome, número de celular, e-mail ou conta Google. A nota é a das versões anteriores: "Versão 36, sujeita a revisão jurídica. Não é parecer jurídico." As páginas `apps/site/public/termos/` e `apps/site/public/privacidade/` são o render desse texto.
+
+Textos novos de erro do vínculo, em `apps/app/src/account.js`: `conta-vinculada` "Esta chave já tem uma conta Varanda.", `nao-vinculado` "Esta conta ainda não terminou o cadastro.", `versao-antiga` "Esta versão do app não cria mais contas. Atualize o Varanda e tente de novo." O serviço desta leva ainda não responde `versao-antiga`: isso fica para o PR seguinte. Recurso, denúncia, páginas, Convites e a ajuda do aceite no aparelho dizem "Termine o cadastro em Ajustes → Conta e @nome." A ajuda do vínculo se chama "Por que confirmar o celular" e a linha curta diz que a associação guarda o vínculo com o celular. Em Excluir conta, a lista do que é apagado na hora leva "o vínculo com a conta Google, se houver". O número do celular não entra nessa lista: a frase seguinte diz que o número, se houver, fica lacrado por até 180 dias e então é apagado.
+
+Um convite da Feira recusado com `convite-invalido` no vínculo mostra o texto do limite da Feira: "Quem anunciou não tem mais entradas nesta semana. Peça um convite a alguém da rede ou tente na próxima semana."
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/app/test/phoneExplainer.test.js`
+- `node apps/app/test/linkReturn.test.js`
+- `node apps/app/test/account.test.js`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/terms-version.test.js`
+- `node packages/core/test/terms.test.js`
+- `node apps/app/test/help.test.js`
+- `node apps/app/test/appeal.test.js`
+- `node apps/app/test/report.test.js`
+- `node apps/app/test/pages.test.js`
+- `node apps/app/test/accountDeletion.test.js`
+- `node apps/app/test/feiraEntry.test.js`
+- `node apps/site/test/legal.test.js`
+
+Os testes conferem textos, a ordem do aviso e que o finish do app manda V e não manda R. Não abrem aparelho nem rede.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto:
+
+Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA. O build de debug não entra com uma passkey de produção (veja `docs/development.md`). A cerimônia com conta usa o laboratório hospedado (`node apps/cli/scripts/hosted-lab.js`, com `npm run web -w apps/app` na porta 8081). O aviso imprime `código de SMS do laboratório: 123456`. O substituto (`apps/cli/scripts/phone-stub.js`) aceita só esse código e não abre rede. A idade fica desligada (`GET /account/age/policy` responde `{ required: false }`) e o celular fica exigido (`GET /account/phone/policy` responde `{ required: true }`). O texto impresso pelo laboratório ainda manda escolher Pessoa 1 no lugar do Google: o app deste PR não abre essa página.
+
+- [ ] Android, build de debug (emulador ou aparelho, depois de `npm run prepare:native -w apps/app`). O build de debug não entra com uma passkey de produção. Até a tela de entrada, não há "Continuar com o Google" nem "Vincular conta Google". Numa instalação de teste em que a passkey do debug vale: membro novo passa por entrar, idade (quando a instalação exige), telefone e vínculo; no vínculo escolhe o @nome, toca em "Confirmar meu celular" e a conta vincula sem abrir o Google. Quem já tem conta e não tem celular verificado vê primeiro "Agora a Varanda usa o seu celular", com "Confirmar meu celular" e "Excluir minha conta". "Excluir minha conta" abre Ajustes direto em Excluir conta; voltar volta ao aviso. Fechar e abrir de novo, ainda sem celular verificado, mostra o aviso outra vez. Dono de página: Excluir conta aberto por esse aviso não mostra "Abrir Páginas".
+- [ ] iOS, simulador: os mesmos passos. A passkey no simulador só vale num build com o domínio associado (veja `docs/development.md`).
+- [ ] Web, laboratório hospedado. Abra `http://localhost:8080` no Chrome (use `localhost`, não `127.0.0.1`: o `rp.id` da passkey não pode ser um IP). No DevTools, ative o autenticador virtual (ctap2, transporte `internal`, chaves residentes, verificação do usuário e PRF) e toque em Entrar. A idade não é pedida. Na confirmação do celular, informe um celular brasileiro e o código `123456`. O código é aceito. Um código diferente é recusado. O aviso do laboratório não mostra o número. O passo seguinte pede o @nome e o botão é "Confirmar meu celular". Não aparece a página do laboratório no lugar do Google nem uma volta `?conta=`. Depois de confirmar, a conta fica vinculada e as abas abrem. Uma segunda conta não consegue o mesmo número.
+- [ ] Conta já vinculada e sem celular verificado. O laboratório começa vazio a cada execução e este app não vincula pelo Google, então essa conta não se cria nele: use uma instalação de teste com uma conta vinculada pelo Google antes deste PR. "Agora a Varanda usa o seu celular" aparece uma vez nesta abertura. "Excluir minha conta" abre Excluir conta e voltar volta ao aviso. O texto diz que o vínculo com a conta Google, se houver, é apagado, e que o número do celular, se houver, fica lacrado por até 180 dias: o número não está na lista do que é apagado na hora. Dono de página não vê "Abrir Páginas" nesse caminho.
+- [ ] PWA instalado a partir do mesmo `http://localhost:8080`: os mesmos passos do cadastro e do aviso.
+- [ ] Um convite da Feira que o serviço recusa com `convite-invalido` no vínculo mostra "Quem anunciou não tem mais entradas nesta semana. Peça um convite a alguém da rede ou tente na próxima semana."
+- [ ] Termos e Política, versão 36, pedem aceite novo. A Política tem a seção "Vínculo com o celular". A nota diz que a versão está sujeita a revisão jurídica. As páginas do site mostram a versão 36, de 11/11/2026.
