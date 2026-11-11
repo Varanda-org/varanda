@@ -103,8 +103,23 @@ test('display.native: writes under the cache, returns file://, deletes and sweep
   globalThis.__mediaWriteFails = false
   t.is(files().size, before, 'a failed write leaves no file')
 
+  // A photo kept across starts (./keep) shares the varanda-media prefix but
+  // is another directory: neither the sweep nor revokeUrl reaches it.
+  const keptDir = new Directory(new Directory(Paths.cache, 'varanda-media-keep'), 'posts')
+  dirs().add('file:///stub/Caches/varanda-media-keep/')
+  keptDir.create()
+  const kept = new File(keptDir, 'ab'.repeat(16) + '.jpg')
+  kept.create()
+  kept.write(new Uint8Array([3]))
+  t.not(keptDir.uri.slice(0, DIR.length), DIR, 'the kept directory is not under varanda-media/')
+  display.revokeUrl(kept.uri)
+  display.revokeUrl('file:///stub/Caches/varanda-media-keep/' + 'ab'.repeat(16) + '.jpg')
+  t.ok(files().has(kept.uri), 'revokeUrl of a kept URI deletes nothing')
+
   display.sweepMediaCache()
   t.absent(dirs().has(DIR), 'sweep removes the directory')
+  t.ok(files().has(kept.uri), 'the sweep leaves the kept store')
+  t.ok(dirs().has(keptDir.uri), 'and its directory')
   t.absent([...files().keys()].some((k) => k.startsWith(DIR)), 'and every photo')
   t.ok(files().has(outside), 'and nothing else')
   display.sweepMediaCache()

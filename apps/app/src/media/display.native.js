@@ -2,9 +2,11 @@
 // has no blob: URLs, so the bytes go to a file under the cache directory
 // (never Documents) and the Image gets its file:// URI. revokeUrl deletes it,
 // and the whole directory is swept on the module's first use after a start,
-// so photos of authors the device does not follow (persist: false) leave no
-// copy once revoked or by the next start. File names are random, never taken
-// from a peer.
+// so nothing written here outlives the run. File names are random, never
+// taken from a peer. Photos of the own and followed authors that should
+// survive a restart live in a separate store (./keep, directory
+// varanda-media-keep): the sweep removes only varanda-media, and revokeUrl
+// accepts only a 32-hex name inside it, so neither ever deletes a kept file.
 
 import { Directory, File, Paths } from 'expo-file-system'
 

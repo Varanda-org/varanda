@@ -104,6 +104,8 @@ test('the reader exposes the run\'s own diary and open replicas and opens nothin
   const ac = new AbortController()
   const done = sync(m.storage, reader, ac.signal)
   const api = await reader.published
+  // Published before the follow pass: the follows are lent once settled.
+  t.is(await api.settled, true)
 
   t.is(hex(api.diary.key), m.ownHex, 'the own diary')
   const opens = []
@@ -134,6 +136,8 @@ test('a hold keeps the cores open until released', async (t) => {
   const ac = new AbortController()
   const done = sync(m.storage, reader, ac.signal)
   const api = await reader.published
+  // Published before the follow pass: the follows are lent once settled.
+  t.is(await api.settled, true)
   const r = api.replica(m.followHex)
 
   t.is(api.hold(), true, 'a live run grants a hold')

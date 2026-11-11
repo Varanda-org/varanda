@@ -17,6 +17,7 @@ import { rpIdOf, installationOrigin } from '../installation'
 import { createNativeIdentity } from '../identity'
 import { sweepVoiceCache } from '../media/audio'
 import { uploadDirectory } from './native'
+import { whenActive } from '../backgroundTask'
 
 function rpIdOrNull () {
   try {
@@ -97,7 +98,8 @@ function voiceOf ({ ms, kind }) {
 export function webNodeHandle (request) {
   sweepReadDir()
   sweepVoiceCache()
-  const native = createNativeIdentity({ request, rpId: rpIdOrNull })
+  // A resume that meets a locked phone waits for the app to be active.
+  const native = createNativeIdentity({ request, rpId: rpIdOrNull, whenActive })
   native.resume()
   const afterLock = (fn) => async (...args) => {
     try {

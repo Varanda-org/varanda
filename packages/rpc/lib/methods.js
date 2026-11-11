@@ -1318,11 +1318,13 @@ const SPECS = {
   'sync.start': {
     fields: {
       once: opt(isBool, false),
-      timeoutMs: opt(int(L.SYNC_TIMEOUT_MIN, L.SYNC_TIMEOUT_MAX))
+      timeoutMs: opt(int(L.SYNC_TIMEOUT_MIN, L.SYNC_TIMEOUT_MAX)),
+      groups: opt(isBool)
     },
     mutating: true,
     cross (given, value) {
       if (hasOwn(given, 'timeoutMs') && value.once !== true) return 'timeoutMs só com once'
+      if (value.groups === false && value.once !== true) return 'groups: false só com once'
       if (value.once === true && !hasOwn(given, 'timeoutMs')) value.timeoutMs = L.SYNC_TIMEOUT_DEFAULT
       return null
     }

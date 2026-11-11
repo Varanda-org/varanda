@@ -181,7 +181,8 @@ test('sources have no em dash', (t) => {
 test('Mensagem em particular sits in the mais sheet only on a hosted node, for someone else and not a page', (t) => {
   const read = (file) => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')
   const row = read('ui/PostRow.js')
-  t.ok(row.includes('const messageable = fn(onMessage) && node !== null && node.hosted === true && Number.isSafeInteger(seq) && seq > 0'), 'hosted, with a handler and a post seq')
+  t.ok(row.includes('const messageable = fn(onMessage) && hosted === true && Number.isSafeInteger(seq) && seq > 0'), 'hosted, with a handler and a post seq')
+  t.ok(row.includes('const hosted = useHosted()'), 'the flag comes from the stable hosted context')
   t.ok(row.includes("...(messageable ? [{ id: 'message', icon: 'mensagem', label: 'Mensagem em particular' }] : []),"), 'the row only when messageable')
   t.ok(row.includes("if (row.id === 'message') return () => onMessage(author, { context: { author, seq, at, text, hasMedia } })"), 'the post goes as context, never sent')
   const conversa = read('screens/Conversa.js')

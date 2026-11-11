@@ -157,13 +157,15 @@ async function readPeekedProfile (node, page) {
   return null
 }
 
+// The roster is other members, and this screen knows neither the own key
+// nor the follows: their photos are never kept on disk.
 function PersonRow ({ personKey, profile, role, children }) {
   const styles = useStyles(makeStyles)
   const who = whoOf(profile)
   const title = displayText(who.title)
   return (
     <View style={styles.person}>
-      <Avatar name={who.avatarName} publicKey={personKey} size={40} picture={(profile || {}).avatar} persist />
+      <Avatar name={who.avatarName} publicKey={personKey} size={40} picture={(profile || {}).avatar} persist={false} />
       <View style={styles.who}>
         <Text style={styles.name} numberOfLines={1}>{title}</Text>
         <Text style={styles.meta} numberOfLines={1}>{who.subtitle ? displayText(who.subtitle) + ' · ' + role : role}</Text>
