@@ -1,7 +1,8 @@
 // iOS/Android: the per-screen snapshots (./screenSnapshot.js), one text file
-// per kind in the app's document dir (next to varanda-config.json, never
-// inside the node data dir). Read synchronously, so a screen's first frame
-// can paint it. Never throws.
+// per kind in the app's cache dir (never inside the node data dir). The
+// cache is never in an iCloud or computer backup (iOS backs up the document
+// dir), and the OS may drop it, which only costs the snapshots. Read
+// synchronously, so a screen's first frame can paint it. Never throws.
 // The Vitrine (src/vitrine/enabled.js) must never read this device's real
 // snapshots nor write fixtures over them: the caller must not call this
 // store in Vitrine mode.
@@ -13,7 +14,7 @@ import { SCREEN_SNAPSHOT_KINDS, SCREEN_SNAPSHOT_MAX_BYTES, createScreenSnapshotS
 export const previewCapable = true
 
 function file (kind, suffix = '') {
-  return new File(Paths.document, 'varanda-screen-' + kind + '.json' + suffix)
+  return new File(Paths.cache, 'varanda-screen-' + kind + '.json' + suffix)
 }
 
 function removeQuietly (f) {
