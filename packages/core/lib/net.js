@@ -374,6 +374,8 @@ module.exports = {
   MESSAGE_BURST: admission.MESSAGE_BURST,
   MESSAGE_RATE: admission.MESSAGE_RATE,
   MAX_SEND_BACKLOG: admission.MAX_SEND_BACKLOG,
+  CAP_NO_INVENTORY: admission.CAP_NO_INVENTORY,
+  CAP_DISCOVERY: admission.CAP_DISCOVERY,
   topicFor: admission.topicFor,
   parseBootstrap,
   generateNoiseKeyPair,
