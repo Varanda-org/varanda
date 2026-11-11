@@ -11,9 +11,9 @@
 // (createAccountServer with openAccountStore and openModerationStore over
 // one temp dir, VARANDA_MODERATOR_EMAILS = the moderators' e-mails), the
 // real Seeder in-process with its WebSocket entry, three browser sessions
-// (createBrowserNode over memory storage) linked through the B1 flow (the
-// third one the moderator's own diary: the panel admits a moderator only
-// through the Google account linked to a diary), and `mod apply --server`
+// (createBrowserNode over memory storage), two linked by phone and the
+// moderator seeded in the store: the panel admits a moderator only through
+// the Google account linked to a diary, and `mod apply --server`
 // as a child process with --yes (blocks only; a net unblock is held) or
 // in-process with a scripted terminal review (interactive, `ask`) for the
 // unblocks.
@@ -47,6 +47,7 @@ const { createModeratorCert } = require('@varanda/core/lib/cert')
 const { readBlocklist, lockDataDir } = require('@varanda/core/lib/store')
 const { signModRequest, canonicalBody } = require('@varanda/core/lib/mod-request')
 const { testnet, tmpDir, until, localSwarmOptions, bootstrapFlags } = require('./helpers/net')
+const { linkByPhone, phoneServerOptions } = require('./helpers/phone-link')
 const { createGoogle } = require('../lib/account/google')
 const { openAccountStore } = require('../lib/account/store')
 const { openModerationStore } = require('../lib/account/moderation-store')
@@ -65,13 +66,11 @@ const CLIENT_SECRET = 'segredo-mod-e2e'
 const WAIT = { timeoutMs: 45000 }
 // 22-digit subjects: any leak shows up as a plain substring (and as a
 // 16-hex run).
-const ALICE = { sub: '2098765432109876543210', email: 'alice-e2e@example.test' }
-const BOB = { sub: '2198765432109876543211', email: 'bob-e2e@example.test' }
 const MODERATOR = { sub: '2298765432109876543212', email: 'moderadora-e2e@example.test' }
 const STRANGER = { sub: '2398765432109876543213', email: 'intrusa-e2e@example.test' }
 // On the moderators' list, but no diary is linked to this Google account.
 const UNLINKED_MODERATOR = { sub: '2498765432109876543214', email: 'moderador-sem-diario-e2e@example.test' }
-const IDENTITIES = [ALICE, BOB, MODERATOR, STRANGER, UNLINKED_MODERATOR]
+const IDENTITIES = [MODERATOR, STRANGER, UNLINKED_MODERATOR]
 // mod-apply.js: the terminal review's question.
 const CONFIRM = 'Assinar e publicar estas mudanças? [s/N] '
 const SNAPSHOT_KEYS = ['v', 'seq', 'date', 'blocked', 'revokedIssuers', 'moderator', 'moderatorDate', 'moderatorSignature', 'signature']
@@ -290,25 +289,20 @@ async function device (t, { association, seederUrl }) {
   return { node, web, key, internal }
 }
 
-// The B1 link flow (start, reserve proof, Google, callback, finish proof)
-// for `dev` as `who`. -> the finish body ({ cert, usernameRecord, ... }).
-async function link (t, origin, google, dev, username, who) {
-  const b = browser(origin)
-  const started = await b.post('/account/start', { member: dev.key, username })
-  t.is(started.status, 200, username + ': start')
-  const reserve = await dev.web.request('account.sign', { phase: 'reserve', nonce: started.body.nonce, username, sub: '' })
-  const authorized = await b.post('/account/authorize', { signature: reserve.signature })
-  t.is(authorized.status, 200, username + ': authorize')
-  google.as(who)
-  const consent = await fetch(authorized.body.authorizeUrl, { redirect: 'manual' })
-  await consent.text()
-  const back = await b.get(consent.headers.get('location'))
-  t.is(back.location, origin + '/?conta=ok', username + ': callback ok')
-  const pending = await b.get('/account/pending')
-  const proof = await dev.web.request('account.sign', { phase: 'finish', nonce: pending.body.nonce, username, sub: pending.body.sub })
-  const finished = await b.post('/account/finish', { signature: proof.signature })
-  t.is(finished.status, 200, username + ': finish')
-  return finished.body
+async function link (t, origin, dev, username) {
+  const finished = await linkByPhone({
+    origin,
+    member: dev.key,
+    username,
+    sign: ({ action, phase, nonce, sub }) => action
+      ? dev.web.request('phone.sign', { action, nonce })
+      : dev.web.request('account.sign', { phase, nonce, username, sub })
+  })
+  t.is(finished.cert.member, dev.key, username + ': phone link certificate')
+  t.is(finished.usernameRecord.member, dev.key, username + ': username member')
+  t.is(finished.usernameRecord.username, username, username + ': username')
+  t.ok(finished.cert.signature, username + ': signed certificate')
+  return finished
 }
 
 // A report through the real routes: start, report.sign in the session,
@@ -339,7 +333,8 @@ async function modLogin (t, origin, google, who) {
   return { b, back }
 }
 
-function noPersonalData (t, text, label) {
+function noPersonalData (t, text, label, phoneNumbers) {
+  for (const phone of phoneNumbers) t.absent(text.includes(phone) || text.includes(phone.slice(3)), label + ': no phone number')
   for (const who of IDENTITIES) {
     t.absent(text.includes(who.email), label + ': no e-mail')
     t.absent(text.includes(who.sub), label + ': no Google sub')
@@ -418,12 +413,24 @@ test('e2e: report, panel decision, mod apply, seeder enforcement, unblock and th
     check: async () => ({ ok: false, code: 'config' }),
     checkDiary: async ({ diary }) => servedTargets.has(diary) ? { ok: true } : { ok: false, code: 'ausente' }
   }
+  const store = openAccountStore(accountDir)
+  const phoneOptions = phoneServerOptions()
+  const phoneNumbers = []
+  const phoneClient = {
+    ...phoneOptions.phoneClient,
+    send: (args) => {
+      phoneNumbers.push(args.phone)
+      return phoneOptions.phoneClient.send(args)
+    }
+  }
   const server = createAccountServer({
     groupCheck,
     association,
     origin: ORIGIN,
     google: googleFor('/account/callback'),
-    store: openAccountStore(accountDir),
+    store,
+    phones: phoneOptions.phones,
+    phoneClient,
     issuer,
     log: (e) => logs.push(JSON.stringify(e)),
     moderation: openModerationStore(accountDir, { association }),
@@ -478,18 +485,22 @@ test('e2e: report, panel decision, mod apply, seeder enforcement, unblock and th
     return d === null ? null : d.snapshot
   }
 
-  // ---- Alice and Bob: browser sessions linked to Google ----
+  // ---- Alice and Bob: browser sessions linked by phone ----
   const alice = await device(t, { association, seederUrl })
   const bob = await device(t, { association, seederUrl })
   // Linked or not, every 'Bloquear' asks the seeder for a served diary.
   servedTargets.add(alice.key)
-  const aliceLink = await link(t, ORIGIN, google, alice, 'ana', ALICE)
-  await link(t, ORIGIN, google, bob, 'bia', BOB)
+  const aliceLink = await link(t, ORIGIN, alice, 'ana')
+  await link(t, ORIGIN, bob, 'bia')
   // The moderator's own diary, linked to their Google account (the panel's
   // sign-in requires it); neither a reporter nor a target of the reports
   // below until the own-report step.
   const mara = await device(t, { association, seederUrl })
-  await link(t, ORIGIN, google, mara, 'mara', MODERATOR)
+  const moderatorRow = store.start({ member: mara.key, username: 'mara' })
+  store.reserve(moderatorRow.id)
+  store.putGoogle(moderatorRow.id, MODERATOR)
+  await store.finish(moderatorRow.id, { signature: 'a'.repeat(128) }, issuer.keyPair, issuer.cert, association)
+  t.is(store.memberForSub(MODERATOR.sub), mara.key, 'the panel resolves the moderator diary')
 
   // Alice publishes her certificate and a post; the seeder admits her.
   t.alike(await gatedWrite(t, alice.web, 'cert.add', { cert: aliceLink.cert }, 'cert.add'), { seq: 0 })
@@ -555,6 +566,7 @@ test('e2e: report, panel decision, mod apply, seeder enforcement, unblock and th
   t.is(row.reported.member, alice.key)
   t.is(row.quote, 'olá da varanda')
   t.absent(open.text.includes('@'), 'no e-mail in the reports')
+  t.absent(phoneNumbers.some((phone) => open.text.includes(phone) || open.text.includes(phone.slice(3))), 'no phone number in the reports')
   t.absent(open.body.reports.some((r) => r.id === own.body.id), 'the moderator\'s own report is not listed')
   t.absent(open.text.includes(mara.key), 'nor anything filed from their diary')
   const ownDecide = await panel.post('/account/mod/api/reports/' + own.body.id + '/decide', { decision: 'bloquear', note: '' })
@@ -695,15 +707,16 @@ test('e2e: report, panel decision, mod apply, seeder enforcement, unblock and th
   t.is(status.status, 200)
   t.is(status.body.linked, true)
   t.absent(status.text.includes('@'), 'account status carries no e-mail')
+  t.absent(phoneNumbers.some((phone) => status.text.includes(phone) || status.text.includes(phone.slice(3))), 'account status carries no phone number')
   for (const id of [r1.body.id, r2.body.id, r4.body.id, r5.body.id, own.body.id]) t.absent(status.text.includes(id), 'and no report')
   const serviceLog = logs.join('\n')
   t.ok(logs.length > 0, 'the service logged')
   t.absent(serviceLog.includes('@'), 'no e-mail in the service log')
   t.absent(/[0-9a-fA-F]{16}/.test(serviceLog), 'no key, sub or signature in the service log')
   t.absent(serviceLog.includes('127.0.0.1'), 'no address in the service log')
-  noPersonalData(t, serviceLog, 'service log')
-  noPersonalData(t, JSON.stringify(seedEvents), 'seeder events')
-  noPersonalData(t, applyOutputs.join('\n'), 'mod apply output')
-  noPersonalData(t, JSON.stringify(alice.web.events) + JSON.stringify(bob.web.events) + JSON.stringify(mara.web.events), 'session events')
+  noPersonalData(t, serviceLog, 'service log', phoneNumbers)
+  noPersonalData(t, JSON.stringify(seedEvents), 'seeder events', phoneNumbers)
+  noPersonalData(t, applyOutputs.join('\n'), 'mod apply output', phoneNumbers)
+  noPersonalData(t, JSON.stringify(alice.web.events) + JSON.stringify(bob.web.events) + JSON.stringify(mara.web.events), 'session events', phoneNumbers)
   t.is(alice.internal.length + bob.internal.length + mara.internal.length, 0, 'no internal error in the sessions')
 })

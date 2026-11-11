@@ -10,7 +10,7 @@
 // (the age check runs before any certificate, so nothing here syncs).
 // What is proven here and nowhere else: the age requests the session signs
 // (age.sign) are the ones the service verifies; the band lands in age.json
-// and lets that same key through the Google link, whose v2 certificate is
+// and lets that same key through the phone link, whose v2 certificate is
 // unchanged by it; the band survives a restart while an open Didit session
 // does not; and nothing the vendor answers about the person reaches a file,
 // a response or a log line. The route-level cases live in account-age.test.js.
@@ -28,6 +28,8 @@ const { createIssuerCert, certForKey } = require('@varanda/core/lib/cert')
 const { signTerms, TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { verifyAgeVerified } = require('@varanda/core/lib/age-proof')
 const { tmpDir } = require('./helpers/net')
+const { linkByPhone, phoneServerOptions } = require('./helpers/phone-link')
+const { freePort } = require('./helpers/free-port')
 const { startFakeDidit, loopbackFetch } = require('./helpers/fake-didit')
 const { createGoogle } = require('../lib/account/google')
 const { createDidit } = require('../lib/account/didit')
@@ -159,6 +161,19 @@ function isVerified (t, h, body, memberHex, msg = 'verificado') {
   t.alike(verifyAgeVerified(body && body.proof, memberHex, h.association), { ok: true }, msg + ': the proof verifies')
 }
 
+// The service runs on a loopback http origin (the phone link needs one) but
+// Didit only takes an https callback, as in production: the loopback origin
+// is swapped for the public one on the way to the provider.
+function httpsCallback (didit, base) {
+  return {
+    ...didit,
+    createSession: (args) => {
+      if (!args.callback.startsWith(base + '/')) throw new Error('the age callback is not on the service origin')
+      return didit.createSession({ ...args, callback: ORIGIN + args.callback.slice(base.length) })
+    }
+  }
+}
+
 // The whole harness for one scenario. `serve()` opens one service lifetime
 // over `dir` (stores included); `device()` a browser session with a fresh
 // identity; `client(dev)` that browser's cookie jar towards the service.
@@ -171,6 +186,7 @@ async function harness (t, { inviting = false, diditTimeoutMs } = {}) {
   const fake = await startFakeDidit()
   t.teardown(() => fake.close(), { force: true })
   const google = await fakeGoogle(t)
+  const phoneOpts = phoneServerOptions()
   const seederPort = await deadPort()
   const logs = []
   // Every response the service gave: { path, status, text, location, cookie }.
@@ -185,20 +201,24 @@ async function harness (t, { inviting = false, diditTimeoutMs } = {}) {
     const invites = inviting ? openInvitesStore(dir, { now, perWeek: 5, isUsed: (id) => store.inviteUsed(id) }) : null
     const diditOpts = { apiKey: API_KEY, workflowId: WORKFLOW, endpoints: { base: fake.base }, fetch: loopbackFetch(fake.base) }
     if (diditTimeoutMs !== undefined) diditOpts.timeoutMs = diditTimeoutMs
+    let port
+    do { port = await freePort() } while (port === seederPort)
+    const base = 'http://127.0.0.1:' + port
     const server = createAccountServer({
+      ...phoneOpts,
       association,
-      origin: ORIGIN,
+      origin: base,
       google: createGoogle({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: ORIGIN + '/account/callback', endpoints: google.endpoints, fetch: google.fetch }),
       store,
       issuer: { keyPair: issuerKp, cert: issuerCert },
       invites,
-      didit: createDidit(diditOpts),
+      didit: httpsCallback(createDidit(diditOpts), base),
       ages,
       log: (e) => logs.push(JSON.stringify(e)),
       now
     })
-    const listener = await server.listen({ host: '127.0.0.1', port: 0 })
-    const svc = { store, ages, invites, association, issuer: { keyPair: issuerKp, cert: issuerCert }, closed: false, base: 'http://127.0.0.1:' + listener.port }
+    const listener = await server.listen({ host: '127.0.0.1', port })
+    const svc = { store, ages, invites, phones: phoneOpts.phones, association, issuer: { keyPair: issuerKp, cert: issuerCert }, closed: false, base: 'http://127.0.0.1:' + listener.port }
     svc.stop = async () => {
       if (svc.closed) return
       svc.closed = true
@@ -240,7 +260,7 @@ async function harness (t, { inviting = false, diditTimeoutMs } = {}) {
       const init = { method, redirect: 'manual', headers: {} }
       if (withCookie && jar.cookie !== null) init.headers.cookie = COOKIE + '=' + jar.cookie
       if (body !== undefined) {
-        init.headers.origin = ORIGIN
+        init.headers.origin = h.svc.base
         init.headers['content-type'] = 'application/json'
         init.body = JSON.stringify(body)
       }
@@ -264,25 +284,22 @@ async function harness (t, { inviting = false, diditTimeoutMs } = {}) {
       return post('/account/age/' + action, { member: dev.hex, nonce: started.body.nonce, signature, ...extra })
     }
 
-    // The Google link through the fake Google, every proof signed by the
-    // session (account.sign). Stops at the first refusal.
     async function link (username) {
-      const started = await post('/account/start', { member: dev.hex, username })
-      if (started.status !== 200) return { started, auth: started }
-      const reserve = await dev.web.request('account.sign', { phase: 'reserve', nonce: started.body.nonce, username, sub: '' })
-      const auth = await post('/account/authorize', { signature: reserve.signature })
-      if (auth.status !== 200) return { started, auth }
-      const consent = await fetch(new URL(auth.body.authorizeUrl), { redirect: 'manual' })
-      await consent.text()
-      google.account.sub = nextSub()
-      const back = new URL(consent.headers.get('location'))
-      if (back.origin !== ORIGIN) throw new Error('redirect to another origin')
-      const cb = await api('GET', back.pathname + back.search)
-      const pending = await api('GET', '/account/pending')
-      if (pending.status !== 200) return { started, auth, cb, done: pending }
-      const proof = await dev.web.request('account.sign', { phase: 'finish', nonce: pending.body.nonce, username, sub: pending.body.sub })
-      const done = await post('/account/finish', { signature: proof.signature })
-      return { started, auth, cb, done }
+      try {
+        const body = await linkByPhone({
+          origin: h.svc.base,
+          member: dev.hex,
+          username,
+          sign: ({ action, phase, nonce, username, sub }) => action
+            ? dev.web.request('phone.sign', { action, nonce })
+            : dev.web.request('account.sign', { phase, nonce, username, sub }),
+          onResponse: (r) => responses.push({ path: r.path, status: r.status, text: r.text, location: r.headers.get('location') || '', cookie: r.headers.get('set-cookie') || '' })
+        })
+        return { status: 200, body }
+      } catch (err) {
+        if (typeof err.status !== 'number') throw err
+        return { status: err.status, body: { error: err.token }, message: err.message }
+      }
     }
 
     return { jar, api, post, age, link }
@@ -305,7 +322,7 @@ async function harness (t, { inviting = false, diditTimeoutMs } = {}) {
 const DOC = (age) => ({ status: 'Approved', id_verifications: [{ status: 'Approved', age }] })
 const FACE = (age) => ({ status: 'Approved', liveness_checks: [{ status: 'Approved', age_estimation: age }] })
 
-test('age e2e 1: a fresh hosted key verifies 17 by document, then links with Google; the v2 certificate still says unchecked', async (t) => {
+test('age e2e 1: a fresh hosted key verifies 17 by document, then links by phone; the v2 certificate still says unchecked', async (t) => {
   t.timeout(30000)
   const h = await harness(t)
   await h.serve()
@@ -319,11 +336,11 @@ test('age e2e 1: a fresh hosted key verifies 17 by document, then links with Goo
   t.ok(typeof sess.body.url === 'string' && sess.body.url.startsWith('https://verify.didit.test/session/'), 'the fake hosted url')
   t.is(h.creates().length, 1, 'one Didit session')
 
-  // Before the result: the Google sign-in is refused.
+  // Before the result, the phone send is refused.
   const early = await c.link('ana')
-  t.is(early.started.status, 200, 'start answers')
-  t.is(early.auth.status, 403, 'authorize refused')
-  t.alike(early.auth.body, { error: 'idade-pendente' })
+  t.ok(early.message.startsWith('phone/send:'), 'the age gate refuses the send step')
+  t.is(early.status, 403, 'phone send refused')
+  t.alike(early.body, { error: 'idade-pendente' })
   t.is(h.google.seen.length, 0, 'Google never reached')
 
   h.fake.sessions.set(h.lastSession(), DOC(17))
@@ -336,10 +353,11 @@ test('age e2e 1: a fresh hosted key verifies 17 by document, then links with Goo
   t.alike(Object.keys(entry).sort(), ['band', 'checkedAt', 'method'])
 
   const linked = await c.link('ana')
-  t.is(linked.auth.status, 200, 'authorize after the band: ' + linked.auth.text)
-  t.is(linked.cb.location, ORIGIN + '/?conta=ok')
-  t.is(linked.done.status, 200, 'finish: ' + linked.done.text)
-  const { cert } = linked.done.body
+  t.ok(h.svc.phones.verified(dev.hex), 'the phone is verified after the band')
+  t.is((await c.api('GET', '/account/callback?code=retired')).location, h.svc.base + '/?conta=erro')
+  t.is(h.google.seen.length, 0, 'the retired callback makes no outbound request')
+  t.is(linked.status, 200, 'phone finish')
+  const { cert } = linked.body
   t.is(cert.v, 2, 'a v2 certificate')
   t.is(cert.ageBand, 'unchecked', 'the certificate does not carry the band')
   t.ok(certForKey(cert, dev.hex, h.association).ok, 'it verifies for the key')
@@ -364,6 +382,7 @@ async function linkDirect (svc, dev, username) {
   svc.store.putGoogle(row.id, { sub: nextSub(), email: EMAIL })
   const { keyPair, cert } = svc.issuer
   await svc.store.finish(row.id, { signature: 'a'.repeat(128) }, keyPair, cert, svc.association)
+  await svc.phones.record({ member: dev.hex, phone: '+5511987654321', verifiedAt: new Date().toISOString() }, { linked: (m) => svc.store.status(m).linked, burnable: () => false, deleted: () => false })
 }
 
 test('age e2e 2: an already-linked v2 member is held at rename and invites until a face of 25 verifies it; the link is untouched', async (t) => {
@@ -447,8 +466,9 @@ test('age e2e 3: a document of 15 is refused, nothing is stored and the session 
   t.absent(h.svc.ages.verified(dev.hex))
 
   const a = await c.link('caio')
-  t.is(a.auth.status, 403, 'authorize still refused')
-  t.alike(a.auth.body, { error: 'idade-pendente' })
+  t.ok(a.message.startsWith('phone/send:'), 'the age gate refuses the send step')
+  t.is(a.status, 403, 'phone send still refused')
+  t.alike(a.body, { error: 'idade-pendente' })
 
   t.ok(await waitFor(() => h.deletes().length === 1), 'one DELETE')
   const del = h.deletes()[0]
@@ -475,7 +495,7 @@ test('age e2e 4: In Review answers pendente, then an approved face of 22 verifie
   t.is(h.ageFile().members[dev.hex].band, '18+')
   t.ok(await waitFor(() => h.deletes().length === 1), 'deleted once final')
   const linked = await c.link('duda')
-  t.is(linked.done && linked.done.status, 200, 'the link goes through')
+  t.is(linked.status, 200, 'the link goes through')
 })
 
 test('age e2e 5: after a restart the band is still on record and a session left open is forgotten', async (t) => {
@@ -511,7 +531,7 @@ test('age e2e 5: after a restart the band is still on record and a session left 
   t.absent(svc.ages.verified(open.hex))
   t.is(h.ageFile().members[done.hex].band, '18+')
   const linked = await a.link('eva')
-  t.is(linked.done && linked.done.status, 200, 'the verified key links after the restart')
+  t.is(linked.status, 200, 'the verified key links after the restart')
 })
 
 test('age e2e 6: a terms or an invite signature over an age nonce is refused', async (t) => {
@@ -598,7 +618,7 @@ test('age e2e 8: no birth date, document number, session token, api key, session
   t.absent(/16-17|18\+|"band"|"age"|"method"/.test(JSON.stringify(verdict.proof)), 'the proof carries no band, age or method')
   t.ok(await waitFor(() => h.deletes().length === 1), 'deleted')
   const linked = await c.link('fabi')
-  t.is(linked.done && linked.done.status, 200, 'linked')
+  t.is(linked.status, 200, 'linked')
   await h.svc.stop()
 
   const files = []

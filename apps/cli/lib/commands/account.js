@@ -744,6 +744,7 @@ function eventLine (event) {
   switch (event.event) {
     case 'listening': return 'account ' + safe(event.host) + ' ' + safe(event.port)
     case 'ready': return 'account ' + (event.configured ? 'ready' : 'unconfigured')
+    case 'cadastro': return 'cadastro de novas contas desligado: verificação de celular não configurada'
     default: return safe(event.event) + (event.reason === undefined ? '' : ' ' + safe(event.reason))
   }
 }
@@ -759,7 +760,6 @@ async function serve (flags, env) {
   const log = (event) => {
     process.stdout.write((flags.json ? jsonLine(event) : eventLine(event)) + '\n')
   }
-  const google = createGoogle({ clientId, clientSecret, redirectUri: origin + '/account/callback' })
   const googleMod = createGoogle({ clientId, clientSecret, redirectUri: origin + '/account/mod/callback' })
 
   // The lock comes first (single writer), the store after it. Its heartbeat
@@ -933,6 +933,7 @@ async function serve (flags, env) {
       log({ event: 'telefone', reason: 'arquivo-sem-chave' })
     }
     log({ event: 'telefone', reason: phoneClient !== null ? 'ligada' : 'desligada' })
+    if (phoneClient === null) log({ event: 'cadastro' })
     log({ event: 'gif', reason: gif !== null ? 'ligada' : 'desligada' })
     log({ event: 'preview', reason: preview ? 'ligada' : 'desligada' })
     // On every start, on or off, so an off period always moves the since
@@ -1000,7 +1001,7 @@ async function serve (flags, env) {
       const listingReader = groupToken === null
         ? null
         : createListingReader({ baseUrl: seederHttp, token: groupToken, association, revokedIssuers: () => revokedIssuerSet(moderation.pending().published.snapshot) })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -1450,7 +1451,7 @@ async function releasePhone (dataDir, member, key, { open = openPhoneStore } = {
 module.exports = {
   closeOrphanPages,
   commands: {
-    account: { summary: 'serviço de vínculo de conta Google', run }
+    account: { summary: 'serviço de contas', run }
   },
   // For tests.
   ensureConfig,

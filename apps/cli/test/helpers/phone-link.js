@@ -117,8 +117,10 @@ function phoneServerOptions () {
 // x-varanda-link. R is never sent. With app false the link cookie is used.
 // `invite` defaults to null. A string is placed on the /account/start body so
 // a service with invites on can reserve one (reserveInvite reads body.invite).
-// Returns the finish JSON (the link answer).
-async function linkByPhone ({ origin, member, username, sign, app = false, invite = null } = {}) {
+// `onResponse`, when given, is called with { path, request, status, headers,
+// text, body } for every response, so a caller can run its leak checks on all of
+// them. Returns the finish JSON (the link answer).
+async function linkByPhone ({ origin, member, username, sign, app = false, invite = null, onResponse = null } = {}) {
   if (typeof sign !== 'function') throw new TypeError('sign must be a function')
   if (typeof username !== 'string') throw new TypeError('username must be a string')
   if (typeof app !== 'boolean') throw new TypeError('app must be a boolean')
@@ -145,6 +147,8 @@ async function linkByPhone ({ origin, member, username, sign, app = false, invit
     const text = await res.text()
     let parsed = null
     try { parsed = JSON.parse(text) } catch {}
+    // Every response the helper sees, for callers that check leaks.
+    if (onResponse !== null) onResponse({ path: pathname, request: body, status: res.status, headers: res.headers, text, body: parsed })
     return { status: res.status, headers: res.headers, body: parsed }
   }
 
