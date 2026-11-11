@@ -9,7 +9,9 @@
 // a tap retries. A 404 or a network error (blocks reach the seeder a moment
 // after the post) is first retried automatically after 2, 5 and 15 s while
 // the tile is mounted (retryDelay); a length or SHA-256 mismatch never is.
-// URLs live in a shared LRU (../media/cache.js). persist (default true) is
+// URLs live in a shared LRU (../media/cache.js). Photos with persist also go
+// to the kept store (../media/keptLoad.js), read back on the next start with
+// no fetch. persist (default true) is
 // false for authors the device does not follow: their photos are fetched with
 // cache: 'no-store' on the web so nothing of them is kept on the device
 // (natively no cache option: see fetchMedia).
@@ -21,9 +23,12 @@ import { useEffect, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
 import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
-import { loadMediaUrl, validDescriptor } from '../media/fetch'
-import { createMediaCache, mediaKey, retryDelay } from '../media/cache'
+import { fetchMedia, validDescriptor } from '../media/fetch'
+import { createMediaCache, mediaKey, onRevokedRanges, retryDelay } from '../media/cache'
 import { revokeUrl, urlFromBytes } from '../media/display'
+import * as keptStore from '../media/keep'
+import { loadKept, registerKeptStore } from '../media/keptLoad'
+import { bumpCacheGeneration, cacheGeneration, registerLocalCache } from '../localCaches'
 import { isAppClient } from '../appClient'
 import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -33,6 +38,11 @@ import { useStyles, useTheme } from './ThemeProvider'
 const mediaFetch = () => (isAppClient() ? expoFetch : undefined)
 
 const cache = createMediaCache({ max: 64, concurrency: 4, revoke: revokeUrl })
+
+// A deleted photo leaves the kept store too, and sign-out, lock, reset,
+// block and unfollow reach it through the registry. Avatar calls this too;
+// whichever module loads first registers, once per run.
+registerKeptStore({ onRevokedRanges, bumpCacheGeneration, registerLocalCache, store: keptStore, cache })
 
 const isShownUrl = (url) => typeof url === 'string' && (url.startsWith('blob:') || url.startsWith('file:'))
 
@@ -61,7 +71,22 @@ function useMedia (author, descriptor, persist) {
     }
     setResult({ key, url: null, error: false })
     const fresh = attempt > 0
-    cache.get(key, () => loadMediaUrl(author, descriptor, { fresh, persist, urlFromBytes, fetch: mediaFetch() })).then(
+    // Read now, not when the load leaves the queue: a purge while it waits
+    // must still prevent the keep.
+    const requestedGeneration = cacheGeneration()
+    const load = () => loadKept({
+      kind: 'posts',
+      author,
+      d: descriptor,
+      persist,
+      keptUrl: keptStore.keptUrl,
+      keep: keptStore.keep,
+      fetchBytes: (d) => fetchMedia(author, d, { fresh, persist, fetch: mediaFetch() }),
+      urlFromBytes,
+      generation: cacheGeneration,
+      requestedGeneration
+    })
+    cache.get(key, load).then(
       (url) => { if (alive) setResult({ key, url, error: false }) },
       (err) => {
         if (!alive) return

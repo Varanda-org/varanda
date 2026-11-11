@@ -141,6 +141,7 @@ import { vitrineEnabled, vitrineLarge } from './vitrine/enabled'
 import { createMarks, devHookRequest, perfEnabled } from './perfMarks'
 import { recoveryFetch } from './account'
 import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
+import { wipeLocalCaches } from './localCaches'
 
 const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
 // At import, not in an effect: a page DM send can then never run before the
@@ -447,6 +448,19 @@ function LiveNodeProvider ({ children }) {
   }, [])
   const startedRef = useRef(false)
   const installationLoadedRef = useRef(false)
+  // The last installation origin and identity key this session saw: local
+  // caches of other people's content belong to them, so a change wipes them.
+  const originRef = useRef(undefined)
+  const ownerRef = useRef(null)
+  // A different non-null key is a different owner; null (locked, reset)
+  // keeps the last one, so the next unlock is compared against it.
+  const noteOwner = useCallback((st) => {
+    const key = st && typeof st.publicKey === 'string' && st.publicKey !== '' ? st.publicKey : null
+    if (key === null) return
+    if (ownerRef.current !== null && ownerRef.current !== key) wipeLocalCaches()
+    ownerRef.current = key
+  }, [])
+
   const busyRef = useRef(false)
   // The connect in flight (settles, never rejects), or null.
   const inflightRef = useRef(null)
@@ -794,6 +808,7 @@ function LiveNodeProvider ({ children }) {
       setHasMedia(identity !== null && conn.media != null && typeof conn.media.upload === 'function')
       setMediaCaps(identity !== null && conn.media != null ? CHAT_MEDIA_CALLS.filter((k) => typeof conn.media[k] === 'function').join(',') : '')
       setHasLegacy(identity !== null && conn.follows != null && typeof conn.follows.legacy === 'function' && typeof conn.follows.confirmLegacy === 'function')
+      noteOwner(pk)
       setPkStatus(pk)
       setPkError(pkErr)
       bumpGeneration()
@@ -837,6 +852,9 @@ function LiveNodeProvider ({ children }) {
       return
     }
     if (verdict !== 'changed' && verdict !== 'invalid') return
+    // The installation behind the remembered configuration is not the one
+    // whose content the caches hold (or no longer answers for it).
+    wipeLocalCaches()
     const token = attemptsRef.current.begin()
     const obsolete = () => !attemptsRef.current.isCurrent(token) || unmountedRef.current
     const old = connRef.current
@@ -877,6 +895,9 @@ function LiveNodeProvider ({ children }) {
       installationLoadedRef.current = true
       try { await loadInstallation() } catch {}
     }
+    const origin = installationOrigin()
+    if (originRef.current !== undefined && originRef.current !== origin) wipeLocalCaches()
+    originRef.current = origin
     const saved = await loadConfig()
     if (obsolete()) return
     setConfig(saved)
@@ -933,6 +954,8 @@ function LiveNodeProvider ({ children }) {
 
   // Drop the saved manual configuration and go back to the installation's.
   const forgetConfig = useCallback(async () => {
+    // The configuration (and with it the installation) is going away.
+    wipeLocalCaches()
     // Also the path of an installation change (Conexao saves it, then calls
     // this): the older attempt's connect and revalidation become obsolete.
     attemptsRef.current.begin()
@@ -1036,6 +1059,7 @@ function LiveNodeProvider ({ children }) {
     try {
       const st = await conn.identity.status()
       if (connRef.current === conn) {
+        noteOwner(st)
         setPkStatus(st)
         setPkError('')
         if (changed) bumpGeneration()
@@ -1064,6 +1088,9 @@ function LiveNodeProvider ({ children }) {
     if (IDENTITY_OPS.has(name) && requestQueueRef.current) {
       requestQueueRef.current.clear(Object.assign(new Error('a identidade mudou antes do envio'), { code: 'CLOSED' }))
     }
+    // Before the dispatch, so a crash in between leaves no other person's
+    // content behind for whoever opens the app next.
+    if (name === 'lock' || name === 'signOut' || name === 'reset') wipeLocalCaches()
     let pending
     try {
       // A node script without signOut (an older build) locks instead.

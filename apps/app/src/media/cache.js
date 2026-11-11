@@ -122,6 +122,16 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
   // Bumped when ranges are freed. A load samples it at schedule time so a
   // key revoked while it is still queued is never fetched.
   let generation = 0
+  // fn(url) for each URL let go by LRU eviction, replacement or clear(),
+  // never by a range revoke: ./keptLoad.js releases the kept file's in-use
+  // mark so ./keep's trim may delete it again.
+  const evictedListeners = new Set()
+
+  const evicted = (url) => {
+    for (const fn of [...evictedListeners]) {
+      try { fn(url) } catch {}
+    }
+  }
 
   const pump = () => {
     while (active < concurrency && waiting.length > 0) {
@@ -146,13 +156,17 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
     const old = entries.get(key)
     if (old !== undefined) {
       entries.delete(key)
-      if (old !== url) release(old)
+      if (old !== url) {
+        release(old)
+        evicted(old)
+      }
     }
     entries.set(key, url)
     while (entries.size > max) {
       const [oldest, oldUrl] = entries.entries().next().value
       entries.delete(oldest)
       release(oldUrl)
+      evicted(oldUrl)
     }
   }
 
@@ -194,8 +208,20 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
   }
 
   const clear = () => {
-    for (const url of entries.values()) release(url)
+    const urls = [...entries.values()]
     entries.clear()
+    for (const url of urls) {
+      release(url)
+      evicted(url)
+    }
+  }
+
+  // Registers fn(url) for evicted URLs; returns the unsubscribe.
+  const onEvicted = (fn) => {
+    if (typeof fn !== 'function') return () => {}
+    const entry = (url) => fn(url)
+    evictedListeners.add(entry)
+    return () => { evictedListeners.delete(entry) }
   }
 
   // `ranges`: { core, start, blocks } (a descriptor's fields are enough).
@@ -224,6 +250,7 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
     get,
     peek,
     clear,
+    onEvicted,
     revoke: drop,
     get size () { return entries.size },
     get active () { return active },
@@ -233,9 +260,34 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
   return api
 }
 
-// Drops overlapping entries in every cache createMediaCache has returned.
+// Called with the freed ranges by revokeMedia only, never on eviction or
+// clear: an evicted photo is still valid, a deleted one must also leave any
+// persistent copy (../media/keep).
+const revokedListeners = new Set()
+
+// Registers fn(ranges) for range revocations; returns the unsubscribe.
+export function onRevokedRanges (fn) {
+  if (typeof fn !== 'function') return () => {}
+  const entry = (ranges) => fn(ranges)
+  revokedListeners.add(entry)
+  return () => { revokedListeners.delete(entry) }
+}
+
+// Drops overlapping entries in every cache createMediaCache has returned,
+// then tells the listeners. A throwing listener does not stop the others.
 export function revokeMedia (ranges) {
   for (const cache of caches) cache.revoke(ranges)
+  const list = []
+  if (Array.isArray(ranges)) {
+    for (const r of ranges) {
+      const range = asRange(r)
+      if (range !== null) list.push(range)
+    }
+  }
+  if (list.length === 0) return
+  for (const listener of [...revokedListeners]) {
+    try { listener(list.map((r) => ({ ...r }))) } catch {}
+  }
 }
 
 function descriptorRanges (record) {
