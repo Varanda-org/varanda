@@ -264,7 +264,9 @@ test('an equal write after this instance completed the same write is skipped', a
 test('every memo entry is charged its path and a fixed overhead', async (t) => {
   const storage = fileNodeStorage(tmpDir(t))
   t.teardown(() => storage.close(), { force: true })
-  const count = 30000
+  // Every entry costs at least the 64-byte overhead, so this many keys overflow
+  // the 4 MiB memo whatever the temp path length (short on Linux, long on macOS).
+  const count = 4 * 1024 * 1024 / 64 + 1
   for (let i = 0; i < count; i++) await storage.readJson('absent-' + i)
   const size = storage._sizes().memo
   t.ok(size > 0 && size < count, 'missing keys cost bytes, so the memo stopped growing: ' + size)
