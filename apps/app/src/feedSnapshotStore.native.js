@@ -1,7 +1,9 @@
 // iOS/Android: A Rua's snapshot (./feedSnapshot.js) as text in the app's
-// document dir (next to varanda-config.json, never inside the node data
-// dir). Read synchronously, so the first frame of A Rua can paint it.
-// Never throws.
+// cache dir (never inside the node data dir). The cache is never in an
+// iCloud or computer backup (iOS backs up the document dir, and only the
+// node data dir there is excluded), and the OS may drop it, which only
+// costs the snapshot. Read synchronously, so the first frame of A Rua can
+// paint it. Never throws.
 // The Vitrine (src/vitrine/enabled.js) must never read this device's real
 // snapshot nor write fixtures over it: the caller must not call this store
 // in Vitrine mode (test/vitrineGuard.test.js keeps the vitrine flag to a few
@@ -18,7 +20,7 @@ const MAX_BYTES = 524288
 export const previewCapable = true
 
 function file (suffix = '') {
-  return new File(Paths.document, FILE_NAME + suffix)
+  return new File(Paths.cache, FILE_NAME + suffix)
 }
 
 function removeQuietly (f) {
