@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 34)
-  t.is(LEGAL_DATE, '09/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 34, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 35)
+  t.is(LEGAL_DATE, '11/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 35, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
@@ -90,7 +90,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'f17c654975e04bf2fa24b9d1478031734d2693336c1fc43d3d81cc131318f51a', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'f85b044acb8bd90ca1083b99364e3314fd6cc67ffcb79fc3d4acbdca7ec15937', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
@@ -321,4 +321,14 @@ test('legal: version 29 describes momentos that disappear but are not erased', a
   t.ok(text(PRIVACY).includes('sumir não é apagar'))
   t.ok(text(PRIVACY).includes('A foto de um momento fica no semeador por até 7 dias, sem renovação'))
   t.ok(text(PRIVACY).includes('perfil, seguidos, depoimentos, momentos, fotos'))
+})
+
+test('legal: version 35 says the phone is not identity proof nor a recovery factor', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  for (const doc of [TERMS, PRIVACY]) {
+    const text = doc.sections.flatMap((sec) => sec.paragraphs).join('\n')
+    t.ok(/não (prova|é usado para recuperar)/.test(text) || /nunca serve para recuperar/.test(text))
+    t.ok(text.includes('recuperar a conta'))
+    t.is(/prova de identidade|comprova (quem|a identidade)/.test(text), false)
+  }
 })

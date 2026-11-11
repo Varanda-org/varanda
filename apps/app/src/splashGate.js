@@ -22,7 +22,7 @@ export function coverConnecting ({ phase, canConfigure, elapsedMs, released }) {
   return phase === 'loading' || (phase === 'connecting' && (!canConfigure || elapsed < CONNECT_PATIENCE_MS))
 }
 
-// Boot steps paint a disabled age check or 'carregando…' before the read that
+// Boot steps paint a disabled age or phone check or 'carregando…' before the read that
 // says whether the person must act, so a returning member would see them flash
 // before A Rua. The patience reveals the real screen, with its own error text,
 // when a read hangs, so a required age check can never sit under the splash
@@ -48,10 +48,11 @@ export function bootPatienceMs (step) {
   return BOOT_PATIENCE_MS
 }
 
-export function coverBoot ({ step, passkeyKnown, age, ageError, infoKnown, profileSlow, feedReady } = {}) {
+export function coverBoot ({ step, passkeyKnown, age, ageError, phone, phoneError, infoKnown, profileSlow, feedReady } = {}) {
   if (step === 'entrar') return passkeyKnown !== true
   if (step === 'recuperando') return true
   if (step === 'idade') return age === 'loading' && !(typeof ageError === 'string' && ageError !== '')
+  if (step === 'telefone') return phone === 'loading' && !(typeof phoneError === 'string' && phoneError !== '')
   if (step === 'vinculo' || step === 'identidade' || step === 'certificado') return infoKnown !== true
   if (step === 'carregando') return profileSlow !== true
   if (step === 'pronto') return feedReady !== true
