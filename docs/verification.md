@@ -7679,7 +7679,7 @@ Nenhuma verificação manual foi feita. Build de debug do Android e simulador do
 - [ ] Um bloqueio da moderação ainda recusa o número depois que o lacre some.
 - [ ] O número não é aceito como fator de recuperação.
 
-## 155. Cadastro só com celular no serviço de conta (PR feat/phone-only-signup-server)
+## 175. Cadastro só com celular no serviço de conta (PR feat/phone-only-signup-server)
 
 Com a verificação de celular ligada, um membro com celular brasileiro verificado conclui o vínculo sem conta Google. O registro leva `sub` `telefone:<chave hex64>` e `email` vazio. Um build anterior lê esse registro como um vínculo comum: o rótulo passa nas mesmas conferências de um `sub` qualquer, sem operação, campo ou migração novos no diretório. O número continua só no `phone.json`.
 
