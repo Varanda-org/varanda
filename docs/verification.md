@@ -7654,7 +7654,7 @@ Nenhuma verificação manual foi feita. Todos os itens estão em aberto:
 - [ ] Checklist de sandbox do operador no README, antes de definir a chave.
 - [ ] Liberação recusada com o serviço em execução; em seguida, com o serviço parado, o número é confirmado por um segundo membro.
 
-## 154. Confirmação do celular no app, Termos e Privacidade 35 (PR3)
+## 174. Confirmação do celular no app, Termos e Privacidade 35 (PR3)
 
 Ordem das telas na web hospedada e no app da associação: Termos 35, entrar, idade, telefone, vínculo. Quem já tinha conta fica retido até confirmar o celular. Termos e Política de Privacidade 35 descrevem o celular (sujeitos a revisão jurídica), as páginas do site são o render de `legal.js` e há ajuda "Como funciona a confirmação do celular".
 
