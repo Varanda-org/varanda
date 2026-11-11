@@ -7562,6 +7562,7 @@ Como verificar, a partir da raiz:
 
 - `node packages/core/test/records.test.js`
 - `node packages/core/test/delete-session.test.js`
+- `node packages/core/test/seeder-delete.test.js`
 - `node packages/web-member/test/delete.test.js`
 - `node packages/rpc/test/sizes.test.js`
 - `node packages/rpc/test/methods.test.js`
@@ -7569,18 +7570,24 @@ Como verificar, a partir da raiz:
 
 Caminhada, primeiro no celular, build de depuração do Android (emulador) e simulador iOS, e depois na web e no PWA:
 
-- [ ] No Publicar, escolher 10 fotos. O seletor nativo para em 10. Tocar em "Foto" de novo com 10 já na publicação: a 11ª é recusada com "até 10 fotos por publicação". Reordenar as fotos e publicar. O carrossel mostra 10 pontos e "N de 10". A tela cheia percorre as 10.
-- [ ] Uma resposta e uma citação com 10 fotos. No cartão da citação, a grade 2x2 mostra "+6" na quarta foto. Um toque nessa foto abre a foto 4 de 10 na tela cheia. O leitor de tela não lê "+6".
-- [ ] No Mural, uma publicação de 10 fotos mostra só a capa, com o ícone de várias fotos, sem contagem na tela. Com TalkBack ou VoiceOver, o quadro é lido como "10 fotos".
+- [x] No Publicar, escolher 10 fotos. O seletor nativo para em 10. Tocar em "Foto" de novo com 10 já na publicação: a 11ª é recusada com "até 10 fotos por publicação". Reordenar as fotos e publicar. O carrossel mostra 10 pontos e "N de 10". A tela cheia percorre as 10. Executado em 2026-11-11 no Android e no iOS: o seletor do Android recusa a 11ª com "Select up to 10 items", e o do iOS para em 10. Com 10 na publicação, "Foto" mostra "até 10 fotos por publicação". Mover a capa para depois deixa a segunda foto como capa. O carrossel mostra 10 pontos e vai de "1 de 10" a "10 de 10", e a tela cheia chega a "10 de 10".
+- [x] Uma resposta e uma citação com 10 fotos. No cartão da citação, a grade 2x2 mostra "+6" na quarta foto. Um toque nessa foto abre a foto 4 de 10 na tela cheia. Executado em 2026-11-11: no iOS, a resposta e a citação com 10 fotos foram publicadas, e a resposta mostra "1 de 10". No Android e no iOS, a citação de uma publicação de 10 fotos mostra "+6", e o toque abre a tela cheia em "4 de 10".
+- [ ] O leitor de tela não lê o "+6" do cartão da citação.
+- [x] No Mural, uma publicação de 10 fotos mostra só a capa, com o ícone de várias fotos, sem contagem na tela. Executado em 2026-11-11 no Android e no iOS. O toque abre a publicação em "1 de 10".
+- [ ] Com TalkBack ou VoiceOver, o quadro do Mural é lido como "10 fotos".
 - [ ] `varanda page post --file` com 10 arquivos publica a Página; com 11, a CLI recusa (`uso: no máximo 10 fotos por publicação`).
-- [ ] Apagar uma publicação de 10 fotos: ela sai do feed, as 10 fotos deixam de ser servidas pelo semeador, e o log mostra 3 lápides (4+4+2) num só append.
-- [ ] Mensagem direta, grupo e Feira continuam parando em 4 fotos.
+- [x] Apagar uma publicação de 10 fotos: ela sai do feed e do Mural. Executado em 2026-11-11 na Vitrine: no iOS, uma resposta de 10 fotos saiu de A Rua depois de "publicação apagada"; no Android, uma publicação de 10 fotos saiu do Mural.
+- [ ] Depois de apagar uma publicação de 10 fotos, as 10 fotos deixam de ser servidas pelo semeador, e o log mostra 3 lápides (4+4+2) num só append.
+- [x] Mensagem direta, grupo e Feira continuam parando em 4 fotos. Executado em 2026-11-11 no Android e no iOS, numa conversa direta, no grupo "Passeios de bicicleta" e em Anunciar: o seletor do Android recusa a 5ª foto com "Select up to 4 items", e o do iOS diz "Select up to 4 photos.". Nada foi enviado.
 - [ ] Um app ou uma CLI de antes desta mudança não mostra a publicação de 10 fotos, nem o texto, e continua lendo as publicações seguintes do mesmo diário.
 - [ ] O feed e a Espiadinha carregam em páginas de 26, e o log em páginas de 30, sem "parâmetro inválido".
-- [ ] A descrição de `apps/app/store.config.json` diz até 10 fotos ou GIFs por publicação. Publicar a ficha na loja é um passo humano.
+- [x] A descrição de `apps/app/store.config.json` diz até 10 fotos ou GIFs por publicação. Publicar a ficha na loja é um passo humano. Conferido em 2026-11-11 no arquivo; a ficha na loja não foi publicada.
 
 Limites desta caminhada:
 
-- Nenhuma caixa acima foi marcada nesta documentação. A ordem da caminhada é o build de depuração do Android no emulador, o simulador iOS e, depois, a web e o PWA.
-- Os comandos acima cobrem o protocolo, o tamanho das páginas, as lápides e o `page post` da CLI. A caminhada do app ainda não foi executada.
+- Conferido em 2026-11-11 com os dados de demonstração do app (Vitrine), no emulador Android (build de depuração) e no simulador iOS (iPhone 17 Pro). A web e o PWA não foram percorridos nesta caminhada. Antes do PR, a Vitrine na web mostrou o "+6" na citação e abriu a tela cheia em "4 de 10".
+- Para ter uma publicação de 10 fotos que carregam, a caminhada mudou os dados de demonstração só na máquina local (a publicação 16 com 10 fotos e uma citação dela no topo de A Rua), e a mudança foi desfeita. Na Vitrine, a foto enviada aparece como "foto indisponível", e apagar não grava lápide.
+- TalkBack e VoiceOver não foram ouvidos. Na árvore de acessibilidade do Android, o quadro do Mural tem o rótulo "10 fotos, 5 nov". O "+6" não tem rótulo nem recebe foco, e fica dentro da foto de rótulo "foto 4 de 10", num bloco escondido dos leitores de tela (`importantForAccessibility='no-hide-descendants'` no celular, `aria-hidden` na web).
+- A CLI, o semeador, as lápides, os apps antigos e o tamanho das páginas não aparecem na Vitrine. Os comandos acima cobrem esses pontos: `page-cli.test.js` (10 arquivos passam, 11 são recusados), `seeder-delete.test.js` (3 lápides 4+4+2, os 10 trechos recusados, também depois de reiniciar), `delete-session.test.js` e `delete.test.js` do `web-member` (um só append), `records.test.js` (10 fotos aceitas, 11 recusadas), `methods.test.js` e `sizes.test.js` (páginas de 26, 29 e 30). Não há teste com o código de antes desta mudança: o comportamento do app antigo segue do validador antigo, que recusa mais de 4 fotos (`media-invalid`) e pula só aquela publicação.
+- Com 10 fotos no Publicar, a nota "até 10 fotos por publicação" aparece embaixo da barra de ferramentas; no iOS, fica abaixo da dobra e só aparece ao rolar. Num quadro que falhou, o "+6" fica por cima de "foto indisponível".
 - Cada lápide guarda no máximo 4 trechos. Por isso, 10 fotos viram 3 lápides (4+4+2) num só append, e quem não atualizou pula a publicação inteira, texto incluído, sem rejeitar o diário.
