@@ -5,7 +5,7 @@ const { readFileSync, readdirSync, mkdtempSync, rmSync, writeFileSync, mkdirSync
 const { tmpdir } = require('node:os')
 const { spawnSync } = require('node:child_process')
 const { join } = require('node:path')
-const { METHODS, validateResponse, validateParams, FEED_LIMIT_MAX } = require('@varanda/rpc')
+const { METHODS, validateResponse, validateParams, FEED_LIMIT_MAX, LOG_LIMIT_MAX } = require('@varanda/rpc')
 
 const clone = (value) => JSON.parse(JSON.stringify(value))
 const unknown = 'f'.repeat(64)
@@ -1128,7 +1128,7 @@ test('the Mural has photo posts to show: own, followed and not followed', async 
   let before
   const pages = []
   for (;;) {
-    const page = await answer(t, request, 'log.read', { limit: 32, ...(before !== undefined ? { before } : {}) })
+    const page = await answer(t, request, 'log.read', { limit: LOG_LIMIT_MAX, ...(before !== undefined ? { before } : {}) })
     if (page.entries.length === 0) break
     pages.push(page.entries)
     rows.push(...page.entries.map((entry) => ({ seq: entry.seq, entry })))

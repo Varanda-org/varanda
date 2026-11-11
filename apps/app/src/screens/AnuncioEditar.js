@@ -27,7 +27,7 @@ import { memberKeyOf } from './Conversa'
 import { byAuthor } from '../feiraClient'
 import { CAT_LABELS, KIND_LABELS, UNIT_LABELS } from '../feira'
 import {
-  EDIT_CONFLICT, FIRST_EDIT_NOTE, UNKNOWN_EDIT, editModel, firstEdit, holdsPublication, identityOf, keptPhotos, ownerDest,
+  EDIT_CONFLICT, FIRST_EDIT_NOTE, MAX_PHOTOS, UNKNOWN_EDIT, editModel, firstEdit, holdsPublication, identityOf, keptPhotos, ownerDest,
   photoRoom, photosFor, pickListing, priceFieldLabel, priceModeChoices, retryUsable, submitEdit, unitChoices, updateForm
 } from '../feiraCompose'
 import { validDescriptor } from '../media/fetch'
@@ -194,7 +194,7 @@ export default function AnuncioEditar ({ author, seq, me = null, actingPage = nu
     if (!canAttach || locked || encoding) return
     let files
     try {
-      files = await pickImages()
+      files = await pickImages(MAX_PHOTOS)
     } catch {
       return
     }
@@ -219,7 +219,7 @@ export default function AnuncioEditar ({ author, seq, me = null, actingPage = nu
           thumb = urlFromBytes(encoded.bytes, encoded.mime)
           thumbsRef.current.set(id, thumb)
         } catch {}
-        setPhotos((list) => (list.length >= 4 ? list : [...list, { id, encoded, thumb, descriptor: null, identity: null, retry: null }]))
+        setPhotos((list) => (list.length >= MAX_PHOTOS ? list : [...list, { id, encoded, thumb, descriptor: null, identity: null, retry: null }]))
       }
     } finally {
       setEncoding(false)
@@ -377,7 +377,7 @@ export default function AnuncioEditar ({ author, seq, me = null, actingPage = nu
               {!locked ? <View style={styles.photoX}><Icon name='fechar' size={14} color={colors.ink} /></View> : null}
             </Pressable>
           ))}
-          {photos.length < 4 && canAttach
+          {photos.length < MAX_PHOTOS && canAttach
             ? (
               <Pressable accessibilityRole='button' accessibilityLabel='Adicionar foto' disabled={locked || encoding} onPress={attach} style={[styles.photo, styles.photoAdd]}>
                 <Icon name='imagem' size={22} color={colors.soft} />

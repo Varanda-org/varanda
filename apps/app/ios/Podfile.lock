@@ -32,6 +32,9 @@ PODS:
     - ExpoModulesCore
   - ExpoAudio (55.0.18):
     - ExpoModulesCore
+  - ExpoBackgroundTask (55.0.22):
+    - ExpoModulesCore
+    - ExpoTaskManager
   - ExpoClipboard (55.0.17):
     - ExpoModulesCore
   - ExpoCrypto (55.0.19):
@@ -84,6 +87,9 @@ PODS:
     - ReactCommon
   - ExpoSecureStore (55.0.18):
     - ExpoModulesCore
+  - ExpoTaskManager (55.0.20):
+    - ExpoModulesCore
+    - UMAppLoader
   - FBLazyVector (0.83.10)
   - hermes-engine (0.14.1):
     - hermes-engine/Pre-built (= 0.14.1)
@@ -2036,6 +2042,7 @@ PODS:
   - SDWebImageWebPCoder (0.15.0):
     - libwebp (~> 1.0)
     - SDWebImage/Core (~> 5.17)
+  - UMAppLoader (55.0.5)
   - Yoga (0.0.0)
 
 DEPENDENCIES:
@@ -2044,6 +2051,7 @@ DEPENDENCIES:
   - Expo (from `../../../node_modules/expo`)
   - ExpoAsset (from `../../../node_modules/expo-asset/ios`)
   - ExpoAudio (from `../../../node_modules/expo-audio/ios`)
+  - ExpoBackgroundTask (from `../../../node_modules/expo-background-task/ios`)
   - ExpoClipboard (from `../../../node_modules/expo-clipboard/ios`)
   - ExpoCrypto (from `../../../node_modules/expo-crypto/ios`)
   - "ExpoDomWebView (from `../../../node_modules/@expo/dom-webview/ios`)"
@@ -2057,6 +2065,7 @@ DEPENDENCIES:
   - ExpoModulesCore (from `../../../node_modules/expo-modules-core`)
   - ExpoModulesJSI (from `../../../node_modules/expo-modules-core`)
   - ExpoSecureStore (from `../../../node_modules/expo-secure-store/ios`)
+  - ExpoTaskManager (from `../../../node_modules/expo-task-manager/ios`)
   - FBLazyVector (from `../../../node_modules/react-native/Libraries/FBLazyVector`)
   - hermes-engine (from `../../../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
   - PasskeyPrf (from `../modules/passkey-prf/ios`)
@@ -2135,6 +2144,7 @@ DEPENDENCIES:
   - ReactCodegen (from `build/generated/ios/ReactCodegen`)
   - ReactCommon/turbomodule/core (from `../../../node_modules/react-native/ReactCommon`)
   - ReactNativeDependencies (from `../../../node_modules/react-native/third-party-podspecs/ReactNativeDependencies.podspec`)
+  - UMAppLoader (from `../../../node_modules/unimodules-app-loader/ios`)
   - Yoga (from `../../../node_modules/react-native/ReactCommon/yoga`)
 
 SPEC REPOS:
@@ -2154,6 +2164,8 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/expo-asset/ios"
   ExpoAudio:
     :path: "../../../node_modules/expo-audio/ios"
+  ExpoBackgroundTask:
+    :path: "../../../node_modules/expo-background-task/ios"
   ExpoClipboard:
     :path: "../../../node_modules/expo-clipboard/ios"
   ExpoCrypto:
@@ -2180,6 +2192,8 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/expo-modules-core"
   ExpoSecureStore:
     :path: "../../../node_modules/expo-secure-store/ios"
+  ExpoTaskManager:
+    :path: "../../../node_modules/expo-task-manager/ios"
   FBLazyVector:
     :path: "../../../node_modules/react-native/Libraries/FBLazyVector"
   hermes-engine:
@@ -2335,6 +2349,8 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/react-native/ReactCommon"
   ReactNativeDependencies:
     :podspec: "../../../node_modules/react-native/third-party-podspecs/ReactNativeDependencies.podspec"
+  UMAppLoader:
+    :path: "../../../node_modules/unimodules-app-loader/ios"
   Yoga:
     :path: "../../../node_modules/react-native/ReactCommon/yoga"
 
@@ -2344,6 +2360,7 @@ SPEC CHECKSUMS:
   Expo: f2da47e96f1185569920ff464ba6b2e1571c9831
   ExpoAsset: f3c42967e877b950418c217508ac1c6f32be4f99
   ExpoAudio: 507b44eb640d1e0e49d55f38d0b153d3b1fd0f2b
+  ExpoBackgroundTask: 4475ee0ed489294e227282cc0bf7d40c20537752
   ExpoClipboard: ded290c5207322d41d34da299a0aeda94d6680e3
   ExpoCrypto: 219209dfd0fef126db1627b1b9ac989d6a3ce2d0
   ExpoDomWebView: b2e9d601f9cb77d3c97da73234e175b64be91928
@@ -2357,6 +2374,7 @@ SPEC CHECKSUMS:
   ExpoModulesCore: 99b45daa1dfb80b09f7920a928cbd0033c11e106
   ExpoModulesJSI: 1bf2fab061d2c9635ff63b6fcc26747a68af9f12
   ExpoSecureStore: 422f8e24d8ba1693600bc3720f0a71a17ddcbea0
+  ExpoTaskManager: 30a8729c6f6fc1872d96589bffc4ad8d5384b8d9
   FBLazyVector: b88945378388c6651d3725b0e8c2624fbb37ec64
   hermes-engine: a2a9fc7160af80292783f30b771f14a477f29712
   libwebp: af5937a13536ef73f3784d69cc342b98961acf33
@@ -2437,6 +2455,7 @@ SPEC CHECKSUMS:
   ReactNativeDependencies: 6e8598ca6525f2c38334c1daaec4d77ae55fff9b
   SDWebImage: e9fc87c1aab89a8ab1bbd74eba378c6f53be8abf
   SDWebImageWebPCoder: 0e06e365080397465cc73a7a9b472d8a3bd0f377
+  UMAppLoader: 045699ef1cc6afda399a5c78bde728f23bcce213
   Yoga: 3a3ee5afb97f3a990839cfae6092b0540c7441a4
 
 PODFILE CHECKSUM: 73745575230cae285b00c249a33da52d7ce8c04c

@@ -59,7 +59,7 @@ Comandos:
   page terms                 aceita os Termos para o delegado no serviço de conta
   page create                cria uma página (--username, --name, --bio)
   page list                  páginas que você tem ou administra, convites e ofertas
-  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 4)
+  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 10)
   page photo                 foto da página (--page, --file, --name, --bio)
   page follow|unfollow       a página segue ou deixa de seguir uma chave (--page, --key)
   page notices               avisos da página (--page, --limit)

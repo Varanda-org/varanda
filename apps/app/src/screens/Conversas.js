@@ -13,13 +13,18 @@
 // dm.set bump node.dmVersion, which re-reads the inbox. Reads carry a
 // generation: an answer older than a newer read is dropped. Acting as a page,
 // the inbox is the page's (useDmRequest) and its groups stay in Comunidades.
+// The group rows paint the stored 'conversasGrupos' snapshot
+// (../screenSnapshot.js) until the live reads answer, only for the member
+// acting as the member; the inbox is never stored and shows when dm.list
+// answers.
 // Props: { active, onOpenGroup, onOpenCommunity, onOpenThread,
 // onOpenCommunities, onOpenRequests, showInbox, seenTick, composing,
 // onComposing }.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
-import { useNode } from '../node'
+import { perfMarks, useNode } from '../node'
+import { cacheGeneration } from '../localCaches'
 import { useNames } from '../names'
 import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, conversasReadsAllowed, communitiesRow, mergeRows, requestsRow } from '../conversas'
 import { ErrorText, Soft, errorText, useBottomPad, useNow } from '../ui'
@@ -31,7 +36,8 @@ import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, Skeleton } from '../ui/States'
 import { layout, radius, space, type, webInputReset } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
-import { NovaComunidade } from './Comunidades'
+import { NovaComunidade, memberSnapshotBinding, readGroupSnapshot, sameSnapshotBinding, saveGroupSnapshot } from './Comunidades'
+import { useActing } from './Conversa'
 import { NovaConversa } from './NovaConversa'
 import { LOCKED_TEXT, PageInboxNote, useDmRequest } from './Mensagens'
 
@@ -62,17 +68,51 @@ async function eachLimited (items, limit, work) {
   await Promise.all(lanes)
 }
 
+const NO_GROUPS = { rows: [], loaded: false, loading: false, partial: false, error: '' }
+
+// A stored row as the live read would give it, without last post or unread
+// count (never stored). A private group has no stored name: mergeRows shows
+// its placeholder until the live answer.
+function seedRow (r) {
+  const row = { group: r.group, community: r.community, role: r.role, general: r.general, seeded: true }
+  if (r.name !== null) {
+    if (r.general) row.title = r.name
+    else row.name = r.name
+  }
+  return row
+}
+
+// The stored rows for `binding`, with loaded false so community.list and
+// community.info still run and replace them; else no rows.
+function seededGroups (binding) {
+  const rows = readGroupSnapshot('conversasGrupos', binding)
+  return rows === null ? NO_GROUPS : { ...NO_GROUPS, rows: rows.map(seedRow), seeded: true }
+}
+
+// The live rows plus the stored rows of `missed` communities the live read
+// did not list; a live row wins, one row per group.
+function withMissedSeeds (live, shown, missed) {
+  const listed = new Set(live.map((r) => r.group))
+  return live.concat(shown.filter((r) => r.seeded === true && missed.has(r.community) && !listed.has(r.group)))
+}
+
 // The groups the person belongs to, flattened from each community.info with
 // its community set (5.59 group rows carry none). Geral is titled by its
-// community, the name people know it by.
-function useGroupRows ({ enabled, request, versions, seenTick }) {
-  const [state, setState] = useState({ rows: [], loaded: false, loading: false, partial: false, error: '' })
+// community, the name people know it by. `binding`: memberSnapshotBinding,
+// null for a page actor.
+function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
+  const bindingRef = useRef(binding)
+  bindingRef.current = binding
+  const [state, setState] = useState(() => (enabled ? seededGroups(binding) : NO_GROUPS))
   const gen = useRef(0)
   const requestRef = useRef(request)
   requestRef.current = request
+  const liveMarked = useRef(false)
 
   const load = useCallback(async () => {
     const mine = ++gen.current
+    const cacheGen = cacheGeneration()
+    const snapshotBinding = bindingRef.current
     setState((s) => ({ ...s, loading: true }))
     let communities
     try {
@@ -86,12 +126,17 @@ function useGroupRows ({ enabled, request, versions, seenTick }) {
     const wanted = communities.filter((c) => c && typeof c.community === 'string' && HEX64.test(c.community) &&
       c.state === 'ready' && MEMBER_ROLES.has(c.role))
     const rows = []
+    // Communities whose community.info gave no groups or an incomplete list:
+    // their stored rows the answer left out stay listed until a later read
+    // answers for them in full.
+    const missed = new Set()
     let partial = false
     await eachLimited(wanted, INFO_AT_ONCE, async (c) => {
       try {
         const info = await requestRef.current('community.info', { community: c.community })
         if (mine !== gen.current) return
         if (!info || info.incomplete === true) partial = true
+        if (!info || info.incomplete === true) missed.add(c.community)
         const name = info && typeof info.name === 'string' && info.name !== '' ? info.name : (typeof c.name === 'string' ? c.name : '')
         for (const g of (info && Array.isArray(info.groups) ? info.groups : [])) {
           if (!g || typeof g.group !== 'string' || !MEMBER_ROLES.has(g.role)) continue
@@ -101,19 +146,41 @@ function useGroupRows ({ enabled, request, versions, seenTick }) {
         }
       } catch {
         partial = true
+        missed.add(c.community)
       }
     })
     if (mine !== gen.current) return
-    setState({ rows, loaded: true, loading: false, partial, error: '' })
+    setState((s) => ({
+      rows: partial ? withMissedSeeds(rows, s.rows, missed) : rows,
+      loaded: true,
+      loading: false,
+      partial,
+      error: ''
+    }))
+    if (!liveMarked.current) {
+      liveMarked.current = true
+      perfMarks().mark('rows-live:conversas')
+    }
+    // Only a complete list: a partial one would drop the groups it missed.
+    if (!partial && sameSnapshotBinding(snapshotBinding, bindingRef.current)) saveGroupSnapshot('conversasGrupos', snapshotBinding, rows, cacheGen)
   }, [])
 
   useEffect(() => {
-    if (enabled) load()
-    else {
+    if (enabled) {
+      // Enabled after the first render (the node became hosted): the stored
+      // rows go up now, unless rows are already there.
+      setState((s) => (s.loaded || s.rows.length > 0 ? s : seededGroups(bindingRef.current)))
+      load()
+    } else {
       gen.current++
-      setState({ rows: [], loaded: false, loading: false, partial: false, error: '' })
+      setState(NO_GROUPS)
     }
   }, [enabled, load])
+
+  const seeded = state.seeded === true
+  useEffect(() => {
+    if (seeded) perfMarks().mark('rows-snapshot:conversas')
+  }, [seeded])
 
   // Unread counts move with group.seen (no event) and groups.changed (a
   // burst of events costs one read).
@@ -232,7 +299,9 @@ export function Conversas ({
   const allowed = conversasReadsAllowed({ active, shownOnce: shownOnce.current })
 
   const inbox = useInbox({ ready: ready && allowed, dm, dmVersion: node.dmVersion, pageKey })
-  const groups = useGroupRows({ enabled: hosted && allowed && pageKey === null, request: node.request, versions: node.groupVersions, seenTick })
+  const acting = useActing()
+  const snapshotBinding = memberSnapshotBinding({ node, acting, pageKey })
+  const groups = useGroupRows({ enabled: hosted && allowed && pageKey === null, request: node.request, versions: node.groupVersions, seenTick, binding: snapshotBinding })
 
   // A pull that failed may still have filed messages: read again either way.
   const pull = useCallback(async () => {
@@ -330,16 +399,19 @@ export function Conversas ({
   // has seen yet, and those would then land above it. Hold such groups back
   // until the inbox catches up. Não lidas, Grupos and a search list every
   // group: there an unread group must never wait behind unloaded pages.
+  // A stored group row has no time: it stays listed (after the dated rows)
+  // until community.info replaces it.
+  const storedGroupIds = useMemo(() => new Set(groups.rows.filter((r) => r.seeded === true).map((r) => r.group)), [groups.rows])
   const paged = useMemo(() => {
     if (!ready || !inbox.next || inbox.rows.length === 0) return merged
     const oldest = Date.parse(inbox.rows[inbox.rows.length - 1].at)
     if (!Number.isFinite(oldest)) return merged
     return merged.filter((row) => {
-      if (row.kind !== 'group') return true
+      if (row.kind !== 'group' || storedGroupIds.has(row.group)) return true
       const at = row.at === null ? NaN : Date.parse(row.at)
       return Number.isFinite(at) && at >= oldest
     })
-  }, [merged, ready, inbox.next, inbox.rows])
+  }, [merged, ready, inbox.next, inbox.rows, storedGroupIds])
   const needle = query.trim().toLocaleLowerCase('pt-BR')
   // A search keeps the chip: both narrow the same loaded rows, and the
   // pinned rows step aside while it runs.

@@ -13,12 +13,11 @@
 // the submission and the late descriptor is dropped.
 
 import rpc from '@varanda/rpc'
-import { MAX_MEDIA_PER_POST } from './media/plan.js'
 import { KIND_LABELS, statusLabel, statusOptions, unitOptions, validateListingForm, parsePriceText } from './feira.js'
 
 const { feira } = rpc
 
-export const MAX_PHOTOS = MAX_MEDIA_PER_POST
+export const MAX_PHOTOS = feira.MAX_LISTING_MEDIA
 export const ACK_TEXT = 'Público na web e em buscadores'
 export const ACK_ERROR = 'Confirme que o anúncio fica público na web e em buscadores.'
 export const PHOTOS_NOTE = 'até ' + MAX_PHOTOS + ' fotos por anúncio'

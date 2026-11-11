@@ -1,5 +1,7 @@
-// The entrance needs time on screen to be seen. A failure is exempt only when
-// Conexao would show next, so retry and 'Detalhes técnicos' stay reachable:
+// The entrance needs time on screen during loading and connecting. 'ready'
+// skips the minimum so a returning member sees A Rua as soon as it is ready.
+// A failure is exempt when Conexao would show next, so retry and
+// 'Detalhes técnicos' stay reachable:
 // node.js uses 'config' for a failed configurable connection or the first-run
 // form, and 'config-error' for hosted discovery failure. When the intro or the
 // terms gate comes next (gateNext), holding delays nothing anyone needs, so the
@@ -7,7 +9,7 @@
 // mounted so its local state survives.
 export const SPLASH_MIN_MS = 1500
 export const CONNECT_PATIENCE_MS = 10000
-export const HOLD_PHASES = ['loading', 'connecting', 'ready']
+export const HOLD_PHASES = ['loading', 'connecting']
 
 export function holdSplash ({ phase, elapsedMs, released, gateNext }) {
   const elapsed = Number.isFinite(elapsedMs) ? elapsedMs : 0
@@ -31,10 +33,14 @@ export function coverConnecting ({ phase, canConfigure, elapsedMs, released }) {
 // sets once the first real screen has shown.
 export const BOOT_PATIENCE_MS = 10000
 export const RECOVERY_PATIENCE_MS = 65000
-// 'pronto' stays covered until A Rua's first page is on screen with the
-// names and counts of its first rows (feedReady), so the person does not see
-// them fill in; never longer than this, then A Rua finishes in view.
+// A missing first page must not keep A Rua covered forever. Names and counts
+// get only a short grace after the page arrives, then finish in view.
 export const CONTENT_PATIENCE_MS = 5000
+export const DETAILS_GRACE_MS = 400
+
+export function detailsGraceOver ({ page, pageAtMs, nowMs }) {
+  return page === true && Number.isFinite(pageAtMs) && Number.isFinite(nowMs) && nowMs - pageAtMs >= DETAILS_GRACE_MS
+}
 
 export function bootPatienceMs (step) {
   if (step === 'recuperando') return RECOVERY_PATIENCE_MS
@@ -85,4 +91,31 @@ export function holdBootCover ({ cover, elapsedMs, settled, step } = {}) {
   if (settled === true || cover !== true) return false
   const elapsed = Number.isFinite(elapsedMs) ? elapsedMs : 0
   return elapsed < bootPatienceMs(step)
+}
+
+// A returning member's cold start on the phone may show A Rua's saved rows
+// (./feedSnapshot.js) instead of the splash while the node boots. It is a
+// cover, never a step: it shows only where the splash would, and every gate
+// still decides what comes after it. Any doubt keeps the splash.
+// - snapshot: parsed for this installation and association, with rows;
+// - previewCapable: the store's flag (false on the web);
+// - savedAt within PREVIEW_MAX_AGE_MS and not in the future: an older first
+//   page would show what the member may have left behind days ago;
+// - sessionLive: the native session store holds a live record for exactly
+//   the snapshot's owner, the one the resume will use;
+// - no intro, terms or other gate next, no Conexão, not locked;
+// - step: null while it is still unknown (the boot), else not 'entrar' nor a
+//   step that asks the person for something.
+export const PREVIEW_MAX_AGE_MS = 24 * 60 * 60 * 1000
+export const PREVIEW_BLOCKED_STEPS = ['entrar', 'recuperando', 'idade', 'vinculo', 'identidade', 'certificado', 'perfil']
+const PREVIEW_STEPS = ['carregando', 'pronto']
+
+export function previewAllowed ({ snapshot, previewCapable, gateNext, showConexao, step, locked, sessionLive, nowMs } = {}) {
+  if (previewCapable !== true || sessionLive !== true) return false
+  if (gateNext !== false || showConexao !== false || locked !== false) return false
+  if (step !== null && !PREVIEW_STEPS.includes(step)) return false
+  if (snapshot === null || typeof snapshot !== 'object' || !Array.isArray(snapshot.items) || snapshot.items.length === 0) return false
+  const savedAt = snapshot.savedAt
+  if (!Number.isSafeInteger(savedAt) || !Number.isSafeInteger(nowMs)) return false
+  return savedAt <= nowMs && nowMs - savedAt <= PREVIEW_MAX_AGE_MS
 }

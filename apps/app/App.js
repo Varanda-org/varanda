@@ -59,10 +59,15 @@ import { StatusBar } from 'expo-status-bar'
 import { AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, perfMarks, useNode } from './src/node'
-import { hostedPage } from './src/configStore'
+import { hostedPage, rememberedConfig } from './src/configStore'
 import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
-import { installationOrigin } from './src/installation'
+import { installationOrigin, rpIdOf } from './src/installation'
+import { parseSnapshot } from './src/feedSnapshot'
+import { clearSnapshot, loadSnapshotText, previewCapable } from './src/feedSnapshotStore'
+import { sessionStore } from './src/sessionStore'
+import { cacheGeneration, wipeLocalCaches } from './src/localCaches'
+import { registerBackgroundRefresh, unregisterBackgroundRefresh } from './src/backgroundTask'
 import { makeIntent, validIntent } from './src/privateReply'
 import { NamesProvider, useNames } from './src/names'
 import { BlocksProvider, useBlocks } from './src/blocksProvider'
@@ -97,7 +102,7 @@ import { useTerms } from './src/useTerms'
 import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
-import { CONNECT_PATIENCE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, holdBootCover, holdSplash } from './src/splashGate'
+import { CONNECT_PATIENCE_MS, DETAILS_GRACE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, detailsGraceOver, holdBootCover, holdSplash, previewAllowed } from './src/splashGate'
 import { Btn, ErrorText, Page, errorText } from './src/ui'
 import { Stepper } from './src/ui/Stepper'
 import { ThemeProvider, useStyles, useTheme } from './src/ui/ThemeProvider'
@@ -140,7 +145,7 @@ import { onDmOpen, onDmWake, requestDmOpen } from './src/dm-open'
 import { Comunidade } from './src/screens/Comunidade'
 import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
-import ARua from './src/screens/ARua'
+import ARua, { ARuaPreview, liveBinding, noteDeleted, previewBinding } from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
 import Conversa, { useActing } from './src/screens/Conversa'
 import Curtidas from './src/screens/Curtidas'
@@ -291,6 +296,31 @@ function cardPastExpires (card, now) {
   return !!card && typeof card.expires === 'number' && now >= cardExpiredAt(card.expires)
 }
 
+// The keychain is never read before this process was in the foreground
+// once: a launch in the background (the refresh task, a push on a locked
+// phone) must not touch it, since a failed read deletes the stored session
+// (src/sessionStore.native.js). A one-way latch for the process, the same
+// rule as the boot's (src/foregroundGate.js).
+let activeSeen = false
+function noteAppState (state) {
+  if (state === 'active') activeSeen = true
+  return activeSeen
+}
+
+// A Rua writes its snapshot a few seconds after the first live page.
+const REFRESH_CHECK_MS = 15000
+
+// Whether the store holds a snapshot the background refresh may renew: of
+// this binding and owner, with at least one row. Read-only. Never throws.
+function refreshSnapshotOk (binding, owner) {
+  try {
+    const snapshot = parseSnapshot(loadSnapshotText(), { ...binding, owner, now: Date.now() })
+    return snapshot !== null && snapshot.items.length > 0
+  } catch {
+    return false
+  }
+}
+
 function setupComplete (info) {
   return info !== null && info.publicKey !== null && info.memberCert === true
 }
@@ -316,10 +346,14 @@ function Member () {
   const bootCoverAt = useRef(null)
   const bootStepRef = useRef(null)
   const bootSettled = useRef(false)
-  // A Rua's first page and the names and counts of its first rows: the
-  // splash covers 'pronto' until both are in (at most CONTENT_PATIENCE_MS).
+  // Names and counts get a short grace after A Rua's first page so slow
+  // detail reads cannot keep a usable feed covered.
   const [feedBoot, setFeedBoot] = useState({ page: false, details: false })
-  const onFeedBoot = useCallback((stage) => setFeedBoot((b) => (b[stage] ? b : { ...b, [stage]: true })), [])
+  const feedPageAt = useRef(null)
+  const onFeedBoot = useCallback((stage) => {
+    if (stage === 'page' && feedPageAt.current === null) feedPageAt.current = Date.now()
+    setFeedBoot((b) => (b[stage] ? b : { ...b, [stage]: true }))
+  }, [])
   const barRef = useRef(0)
   const [, bumpSplash] = useState(0)
   // A timer can fire a few ms before Date.now() reaches the threshold; the
@@ -377,7 +411,14 @@ function Member () {
     setVersion((v) => v + 1)
     setFollowsSignal((v) => v + 1)
   }, [])
+  // Every screen's delete goes through here: A Rua's stored first page may
+  // hold the deleted post, and it must not show again at the next launch
+  // even if A Rua is not visited before the app closes. A Rua may still hold
+  // it in memory: noteDeleted drops an armed write (cache generation) and
+  // none is made until a first page read that starts after this delete.
   const deletedPost = useCallback(() => {
+    noteDeleted()
+    clearSnapshot()
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
   }, [])
@@ -446,6 +487,145 @@ function Member () {
   const locked = passkey !== null && (pkStatus === null || pkStatus.unlocked !== true)
   const generation = passkey !== null ? passkey.generation : 0
   const generationRef = useRef(generation)
+
+  // --- the cold-start preview (src/splashGate.js previewAllowed) ---
+  // A Rua's saved rows instead of the splash while the node boots, on the
+  // phone only (previewCapable). Read once, and only once the app was active:
+  // the snapshot must parse for this installation and association, and the
+  // session store must hold a live record for exactly its owner on this
+  // rp.id, the record the resume will use. Any doubt or error: the splash.
+  const [appActive, setAppActive] = useState(() => noteAppState(AppState.currentState))
+  useEffect(() => {
+    if (appActive) return
+    const sub = AppState.addEventListener('change', (state) => { if (noteAppState(state)) setAppActive(true) })
+    return () => sub.remove()
+  }, [appActive])
+  const [previewSeed, setPreviewSeed] = useState(null)
+  const previewAsked = useRef(false)
+  // Bumped when a preview attempt was given back (a prune dropped the seed,
+  // or the app left the foreground during a read): the read below runs
+  // again, since neither changes the phase or the configuration it watches.
+  const [previewRetry, setPreviewRetry] = useState(0)
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && !previewAsked.current) setPreviewRetry((n) => n + 1)
+    })
+    return () => sub.remove()
+  }, [])
+  // Latched by a mismatch: the preview never comes back in this mount.
+  const previewDropped = useRef(false)
+  // The association comes from the remembered /varanda.json (disk only),
+  // which is there before the node connects; node.config (a saved manual
+  // configuration) when nothing is remembered. The phase is a dependency
+  // because the installation is loaded by node.js's start: a read that found
+  // no installation yet is tried again on the next phase.
+  const previewConfig = node.config
+  const previewPhase = node.phase
+  // A seed holds the cache generation and the binding it was read under. A
+  // purge since (node.js wipes on a changed installation or association, a
+  // block drops authors) or another binding now makes it stale: it is dropped
+  // and only a fresh read for the binding in force may show a preview again.
+  const previewStale = previewSeed !== null && (
+    previewSeed.gen !== cacheGeneration() ||
+    installationOrigin() !== previewSeed.origin ||
+    (previewConfig !== null && typeof previewConfig === 'object' && previewConfig.association !== previewSeed.association)
+  )
+  // Declared before the read below, so a drop gives the latch back first.
+  useEffect(() => {
+    if (!previewStale) return
+    setPreviewSeed(null)
+    previewAsked.current = false
+    setPreviewRetry((n) => n + 1)
+  }, [previewStale])
+  useEffect(() => {
+    if (!previewCapable || !appActive || previewAsked.current) return
+    let alive = true
+    const gen = cacheGeneration()
+    // At most one attempt in flight: the latch is taken now, and given back
+    // when this attempt is discarded (a phase or configuration change), so
+    // the next run tries again instead of hiding a good snapshot all boot.
+    previewAsked.current = true
+    let settled = false
+    const stillActive = () => AppState.currentState === 'active'
+    rememberedConfig().then((remembered) => {
+      if (!alive) return
+      const binding = previewBinding(remembered || previewConfig)
+      if (binding === null) {
+        settled = true
+        previewAsked.current = false
+        return
+      }
+      let snapshot = null
+      let rpId = null
+      try {
+        snapshot = parseSnapshot(loadSnapshotText(), { ...binding, now: Date.now() })
+        rpId = rpIdOf(installationOrigin())
+      } catch {
+        settled = true
+        return
+      }
+      // The phone may have locked while the configuration was read: the
+      // keychain is only probed in the foreground, and only read-only.
+      settled = true
+      if (snapshot === null || snapshot.items.length === 0) return
+      if (!stillActive()) {
+        // Back in the foreground, the next phase or configuration tries again.
+        previewAsked.current = false
+        return
+      }
+      settled = false
+      return sessionStore.hasLive({ rpId, publicKey: snapshot.owner }).then((live) => {
+        if (!alive) return
+        settled = true
+        if (live !== true) return
+        if (!stillActive()) {
+          // Back in the foreground, the listener above tries again.
+          previewAsked.current = false
+          return
+        }
+        // A purge during the reads: this snapshot may be what it removed.
+        if (cacheGeneration() !== gen) {
+          previewAsked.current = false
+          return
+        }
+        setPreviewSeed({ snapshot, sessionLive: true, gen, origin: binding.origin, association: binding.association })
+      })
+    }).catch(() => { settled = true })
+    return () => {
+      alive = false
+      if (!settled) previewAsked.current = false
+    }
+  }, [appActive, previewConfig, previewPhase, previewRetry])
+
+  // The background refresh (src/backgroundTask.native.js): registered only
+  // while a connected, unlocked hosted session has a valid A Rua snapshot of
+  // its own binding and owner on disk (read from the store, since A Rua
+  // writes it after a debounce: checked again when the app leaves the
+  // foreground and a little after the first page), and unregistered as soon
+  // as that stops holding (a core configuration, no passkey, locked, signed
+  // out). Every wipe of the local caches unregisters it too. A no-op on the
+  // web.
+  const refreshHosted = previewConfig !== null && typeof previewConfig === 'object' && previewConfig.kind === 'hosted'
+  const refreshOwner = !locked && pkStatus !== null && pkStatus.signedOut !== true && typeof pkStatus.publicKey === 'string' ? pkStatus.publicKey.toLowerCase() : null
+  const refreshAssociation = refreshHosted ? previewConfig.association : null
+  useEffect(() => {
+    if (previewPhase !== 'ready') return
+    const binding = refreshHosted ? previewBinding(previewConfig) : null
+    if (binding === null || passkey === null || refreshOwner === null) {
+      unregisterBackgroundRefresh()
+      return
+    }
+    const check = () => {
+      if (refreshSnapshotOk(binding, refreshOwner)) registerBackgroundRefresh()
+    }
+    check()
+    const timer = setTimeout(check, REFRESH_CHECK_MS)
+    const sub = AppState.addEventListener('change', (state) => { if (state !== 'active') check() })
+    return () => {
+      clearTimeout(timer)
+      sub.remove()
+    }
+  }, [refreshHosted, refreshAssociation, passkey, refreshOwner, previewPhase, feedBoot.page])
   generationRef.current = generation
 
   const readInfo = useCallback(async () => {
@@ -1244,8 +1424,23 @@ function Member () {
   // The own profile (one profile.read through the profiles cache): the
   // onboarding's name step, the Publicar avatar and the own rows.
   const ownKey = info ? info.publicKey : null
-  const { resolve } = names
-  useEffect(() => { if (setupDone && ownKey) resolve(ownKey) }, [setupDone, ownKey, resolve])
+  const { seedMany, resolve } = names
+  // A Rua's snapshot (src/feedSnapshot.js) holds the own name: seeded first,
+  // so the name step does not wait for profile.read, which still answers
+  // for it (a seed is never loaded, and never replaces a known entry).
+  // Bound by A Rua's own rule (liveBinding); the Vitrine has no
+  // configuration, so it never reads the device's real snapshot.
+  const snapshotConfig = node.config
+  useEffect(() => {
+    if (!setupDone || !ownKey) return
+    const binding = liveBinding(ownKey, snapshotConfig)
+    if (binding !== null) {
+      const snapshot = parseSnapshot(loadSnapshotText(), { ...binding, now: Date.now() })
+      const own = snapshot !== null && Object.prototype.hasOwnProperty.call(snapshot.names, binding.owner) ? snapshot.names[binding.owner] : null
+      if (own !== null) seedMany([[ownKey, own]])
+    }
+    resolve(ownKey)
+  }, [setupDone, ownKey, snapshotConfig, seedMany, resolve])
 
   // The onboarding step (src/onboarding.js). A failed lookup is not evidence
   // that the profile is absent: profileKnown is true only once the cache
@@ -2464,7 +2659,10 @@ function Member () {
     return () => clearTimeout(t)
   }, [coveringConnect, node.canConfigure])
   const loadingGate = decision === 'loading' || introState === 'loading'
-  const holding = holdSplash({ phase: node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })
+  // Once the node was seen ready the shell may already be up (no fixed
+  // minimum for 'ready'), so a reconnect inside the first 1.5 s must not
+  // bring the splash back and unmount the tree.
+  const holding = holdSplash({ phase: ready || seen ? 'ready' : node.phase, elapsedMs: Date.now() - bootAt, released: released.current, gateNext })
   const showIntro = introState === 'show' && !LINK_RETURN && !AGE_RETURN
   const showTerms = decision === 'needed' || decision === 'updated' || decision === 'account'
   const connectingSplash = !ready && !seen && coverConnecting({ phase: node.phase, canConfigure: node.canConfigure, elapsedMs: connectingAt.current === null ? 0 : Date.now() - connectingAt.current, released: released.current })
@@ -2477,7 +2675,14 @@ function Member () {
   // Render-time ref writes, as with released.current = true.
   // Only A Rua as the first screen waits for its rows; a stacked screen (a
   // link opened at boot) or another tab shows at once.
-  const feedReady = feedBoot.details || tab !== 'rua' || topEntry !== null
+  const feedGrace = !feedBoot.details && tab === 'rua' && topEntry === null && detailsGraceOver({ page: feedBoot.page, pageAtMs: feedPageAt.current, nowMs: Date.now() })
+  const feedReady = feedBoot.details || tab !== 'rua' || topEntry !== null || feedGrace
+  useEffect(() => {
+    if (!feedBoot.page || feedBoot.details) return
+    const remaining = Math.max(0, DETAILS_GRACE_MS - (Date.now() - feedPageAt.current))
+    const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
+    return () => clearTimeout(t)
+  }, [feedBoot.page, feedBoot.details])
   const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, infoKnown: info !== null || infoError !== '', profileSlow: slow, feedReady })
   if (atShell && cover && !bootSettled.current && bootStepRef.current !== step) {
     bootStepRef.current = step
@@ -2496,8 +2701,8 @@ function Member () {
   useEffect(() => {
     if (!atShell || coveringBoot || splashEndMarked.current) return
     splashEndMarked.current = true
-    perfMarks().mark('splash-end', feedReady ? 'feedReady' : 'patience')
-  }, [atShell, coveringBoot, feedReady])
+    perfMarks().mark('splash-end', feedGrace ? 'grace' : feedReady ? 'feedReady' : 'patience')
+  }, [atShell, coveringBoot, feedReady, feedGrace])
   const markedTab = useRef(tab)
   useEffect(() => {
     if (markedTab.current === tab) return
@@ -2549,11 +2754,41 @@ function Member () {
     const t = setTimeout(() => bumpSplash((n) => n + 1), Math.max(0, OPEN_WAIT_MS - (Date.now() - openWaitAt.current)) + 50)
     return () => clearTimeout(t)
   }, [opening])
+  // The preview stands only where the splash would. In the render in which
+  // identity.status names another owner, a locked or signed-out identity, or
+  // Entrar is the real screen, it goes and the local caches of other
+  // people's content are wiped (once). Before the first real screen only: a
+  // later lock is node.js's to handle.
+  const previewKnown = passkey === null || pkStatus !== null || !!passkey.error
+  const previewOwner = previewSeed !== null && !previewStale && !bootSettled.current && !previewDropped.current ? previewSeed.snapshot.owner : null
+  const previewMismatch = previewOwner !== null && (
+    (pkStatus !== null && (pkStatus.unlocked !== true || pkStatus.signedOut === true || typeof pkStatus.publicKey !== 'string' || pkStatus.publicKey.toLowerCase() !== previewOwner)) ||
+    (step === 'entrar' && previewKnown)
+  )
+  if (previewMismatch) {
+    previewDropped.current = true
+    wipeLocalCaches()
+  }
+  // A step whose screen is still covered (coverBoot) is a boot placeholder,
+  // not yet the step; a recovery is always its own step.
+  const previewStep = recovering ? 'recuperando' : (cover ? null : step)
+  const previewOn = previewOwner !== null && !previewMismatch && previewAllowed({
+    snapshot: previewSeed.snapshot,
+    previewCapable,
+    // Not known yet whether a gate comes next counts as one.
+    gateNext: gateNext || loadingGate || opening === 'wait',
+    showConexao,
+    step: previewStep,
+    locked: pkStatus !== null && pkStatus.unlocked !== true,
+    sessionLive: previewSeed.sessionLive,
+    nowMs: Date.now()
+  })
+  const bootCover = previewOn ? <ARuaPreview snapshot={previewSeed.snapshot} progress={bootBar} /> : splash
   // The same root View with the Splash at child 0 is what React preserves
   // across these returns and the final one, so the chair animation does not
   // replay and, on the web, the Splash unmount that removes
   // #varanda-pre-splash happens only when the real screen is ready.
-  if (loadingGate || holding || opening === 'wait') return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
+  if (loadingGate || holding || opening === 'wait') return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{bootCover}</View>
   if (opening === 'card' && openResult !== null) {
     // Como funciona: the intro cards, then back to the card; only Entrar
     // marks them seen.
@@ -2603,7 +2838,7 @@ function Member () {
     // The splash covers loading and connecting, also on the hosted page.
     // A failure or 10 s connecting on a configurable node reveals Conectar;
     // later retries stay there so its local state survives.
-    if (connectingSplash) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
+    if (connectingSplash) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{bootCover}</View>
     released.current = true
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
@@ -3219,7 +3454,7 @@ function Member () {
   // permanent: a conditional one would remount Identidade at the reveal.
   return (
     <View style={[styles.root, coveringBoot && SPLASH_WRAP, { paddingHorizontal: sidePad }]}>
-      {coveringBoot ? splash : null}
+      {coveringBoot ? bootCover : null}
       <View style={coveringBoot ? styles.hidden : styles.flex}>{content}</View>
       {/* The terms gate used to unmount these sheets on a hosted lock as a
           side effect, and a current terms record no longer brings it up. So
@@ -3273,7 +3508,7 @@ function Member () {
       <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} />
       {/* Mounted after the splash, so it wins: while the boot cover shows it
           follows the splash, which stays cream on native (Splash.js). */}
-      <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />
+      <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' || previewOn ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />
     </View>
   )
 }

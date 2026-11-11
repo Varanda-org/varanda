@@ -21,8 +21,9 @@ import { listingView } from './feira.js'
 
 const { feira } = rpc
 
-// docs/rpc.md 5.27 PEEK_SEQS_MAX and 5.110 refs.
-export const PEEK_SEQS_MAX = 32
+// diary.peek refuses a longer seqs list (packages/rpc/lib/limits.js).
+export const PEEK_SEQS_MAX = rpc.PEEK_SEQS_MAX
+// listing.ratings caps refs at 32 (docs/rpc.md 5.110).
 export const RATINGS_REFS_MAX = 32
 
 const HEX64 = /^[0-9a-f]{64}$/
@@ -44,7 +45,7 @@ function seqsOf (item) {
   return out
 }
 
-// -> [{ author, seqs, profileSeq?, usernameSeq? }], each call <= 32 seqs,
+// -> [{ author, seqs, profileSeq?, usernameSeq? }], each call <= PEEK_SEQS_MAX seqs,
 // strictly ascending, every item's seqs in one call. The name hints ride on
 // the author's first call only.
 export function planPeeks (items, authors = {}) {
