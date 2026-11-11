@@ -120,6 +120,18 @@ export function keepPlan (snapshot, max = BG_MAX_KEPT, maxBytes = BG_MAX_KEPT_BY
 // after the node it started is stopped; stopped false only when the start
 // never settled within the deadline plus stopGraceMs, and then settle is a
 // promise that resolves once that node is up and stopped.
+// The originals of `rows`' reposts only, from the previous snapshot's map.
+function repostOriginals (originals, rows) {
+  const out = {}
+  if (!originals || typeof originals !== 'object') return out
+  for (const row of rows) {
+    if (!row || row.kind !== 'repost' || !row.to) continue
+    const ref = row.to.author + ':' + row.to.seq
+    if (Object.prototype.hasOwnProperty.call(originals, ref)) out[ref] = originals[ref]
+  }
+  return out
+}
+
 export async function runRefresh (deps = {}) {
   const {
     snapshot,
@@ -256,13 +268,15 @@ export async function runRefresh (deps = {}) {
       // Rows left out make the page's own bound wrong: the last kept row
       // bounds it then.
       cursor: rows.length === all.length && all.length === page.items.length ? cursorOf(page.items) : null,
-      // The previous snapshot's originals, names and own hearts carry over
-      // for refs still on this page: a save without them would paint
-      // reposts and quotes unresolved. buildSnapshot keeps only those of the
-      // rows it stores, of own or followed and unblocked authors; counts
-      // are left out, as they would be stale.
+      // The previous snapshot's names and own hearts carry over for refs
+      // still on this page, and so do the originals of reposts still on it:
+      // feed.read drops a repost whose target was deleted, so those are
+      // known to stand. A quoted or replied-to post may have been deleted
+      // since and its quoting row stays, so those originals are left out
+      // (shown unresolved until the live page). buildSnapshot keeps only
+      // own or followed, unblocked authors; counts are left out as stale.
       profileOf: (a) => withPageHint(byAuthor.get(a), oldName(snapshot, a)),
-      originals: snapshot.originals,
+      originals: repostOriginals(snapshot.originals, rows),
       liked: snapshot.liked,
       reposted: snapshot.reposted,
       isKnown: (a) => known.has(a),

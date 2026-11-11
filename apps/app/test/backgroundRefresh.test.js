@@ -364,6 +364,34 @@ test('originals, names and hearts carry over only for refs still shown, under th
   t.is(snap.names[FOLLOW].moved, false)
 })
 
+test('a quoted original is not carried over: it may have been deleted since', async (t) => {
+  const { runRefresh } = await load()
+  const { buildSnapshot, parseSnapshot } = await loadSnap()
+  const repost = (author, seq, to) => ({ kind: 'repost', author, name: null, username: null, seq, at: at(seq), to, text: null, replyTo: null, quote: null, media: null, preview: null })
+  const items = [
+    post(FOLLOW, 22, { quote: { author: FOLLOW, seq: 4 } }),
+    repost(FOLLOW, 21, { author: FOLLOW, seq: 1 })
+  ]
+  const built = buildSnapshot({
+    origin: ORIGIN,
+    association: ASSOC,
+    owner: OWN,
+    items,
+    originals: new Map([[FOLLOW + ':4', post(FOLLOW, 4)], [FOLLOW + ':1', post(FOLLOW, 1)]]),
+    profileOf: () => ({ name: 'Antigo', username: null, avatar: null }),
+    isKnown: () => true,
+    now: Date.now() - 7 * HOUR
+  })
+  const previous = parseSnapshot(JSON.stringify(built), { origin: ORIGIN, association: ASSOC })
+  t.ok(previous.originals[FOLLOW + ':4'], 'the old snapshot held the quoted post')
+  const node = fakeNode({ follows: [FOLLOW], blocks: [], feed: items.slice().reverse() })
+  const { saves, deps } = await base({ node, deps: { snapshot: previous } })
+  t.ok((await runRefresh(deps)).saved)
+  const snap = parseSnapshot(saves[0], { origin: ORIGIN, association: ASSOC, owner: OWN })
+  t.absent(snap.originals[FOLLOW + ':4'], 'the quoted post is left unresolved until the live page')
+  t.ok(snap.originals[FOLLOW + ':1'], 'a repost original still carries over')
+})
+
 // A node whose start and stop take time; `log` records when it came up,
 // when it was stopped and when runRefresh resolved.
 function slowNode ({ startMs, stopMs = 0, never = false }) {
