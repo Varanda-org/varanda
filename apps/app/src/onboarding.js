@@ -4,16 +4,19 @@
 // null) or the node is known not to support `profile.read`. Skipping the name
 // ('Continuar mesmo assim', 'Pular por enquanto') bypasses both the loading and
 // the name steps, so the user can always reach the tabs. Hosted members must
-// confirm their age (`ageVerified === false` shows 'idade'), linked or not;
-// the step comes after 'recuperando' so the screen stays mounted while the
-// post-unlock recovery runs, and skipping the name never skips it. An absent
-// `ageVerified` counts as verified, for callers that do not gate on age.
+// confirm their age (`ageVerified === false` shows 'idade') and a Brazilian
+// mobile (`phoneVerified === false` shows 'telefone'), linked or not. Both
+// come after 'recuperando' so the screen stays mounted while the post-unlock
+// recovery runs, and skipping the name never skips them. Age comes before
+// the phone. An absent flag counts as verified, for callers that do not gate
+// on it. Manual mode (native and serve) ignores both flags.
 const TOTAL = 3
 
 export const STEP_TITLES = {
   entrar: 'Bem-vindo à Varanda',
   recuperando: 'Buscando sua conta…',
   idade: 'Confirme sua idade',
+  telefone: 'Confirme seu celular',
   vinculo: 'Escolha seu @nome',
   identidade: 'Criar sua conta',
   // Native and manual setups only.
@@ -27,6 +30,7 @@ export const STEP_HINTS = {
   entrar: 'Crie sua conta ou entre na que já tem. Sem senha e sem e-mail.',
   recuperando: 'Estamos trazendo de volta o que já é seu.',
   idade: 'A Varanda é para quem tem 16 anos ou mais. Só a sua faixa de idade fica guardada.',
+  telefone: 'Use um celular brasileiro. O número não serve para recuperar a conta: ele permite responder a uma ordem judicial e impede que uma conta bloqueada volte.',
   vinculo: 'Seu @nome é como as pessoas encontram você.',
   identidade: 'Sua conta é criada neste aparelho.',
   certificado: 'Envie o código à associação e cole o que ela devolver.',
@@ -37,11 +41,12 @@ export const STEP_HINTS = {
 
 const at = (step, index) => ({ step, index, total: TOTAL })
 
-export function onboardingStep ({ mode, locked, recovering, hasIdentity, memberCert, profileKnown, hasName, skippedName, ageVerified = true }) {
+export function onboardingStep ({ mode, locked, recovering, hasIdentity, memberCert, profileKnown, hasName, skippedName, ageVerified = true, phoneVerified = true }) {
   if (mode === 'hosted') {
     if (locked) return at('entrar', 0)
     if (recovering) return at('recuperando', 1)
     if (ageVerified === false) return at('idade', 1)
+    if (phoneVerified === false) return at('telefone', 1)
     if (!memberCert) return at('vinculo', 1)
   } else {
     if (!hasIdentity) return at('identidade', 0)

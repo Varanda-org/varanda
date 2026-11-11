@@ -24,6 +24,7 @@ Ainda não há versões lançadas: todos os pacotes estão em `0.1.0` e nenhum f
 
 ### Adicionado
 
+- Quem usa a web hospedada ou o app da associação agora confirma um celular brasileiro com um código por SMS, inclusive quem já tinha conta. O número não prova identidade e não recupera a conta. Termos e Política de Privacidade 35, sujeitos a revisão jurídica.
 - Verificação de celular no serviço de conta, desligada por padrão. Variáveis novas: `VARANDA_PHONE_KEY` e `VARANDA_PHONE_DAILY_LIMIT`. Não defina `VARANDA_PHONE_KEY` antes de o passo no app estar no ar. Comando novo: `account phone`. Detalhes em `docs/design.md` ("Verificação de celular") e `docs/verification.md` seção 153.
 - Carrossel de fotos nas publicações: de 2 a 4 fotos, a publicação mostra um quadro só, na proporção da primeira (entre 4:5 e 1,91:1), com pontos embaixo, a pílula "N de M" e setas redondas ao passar o mouse. Deslizar troca a foto. Um toque abre a tela cheia na mesma foto e, ao fechar, a publicação fica na última vista. Uma foto só continua na proporção dela. O cartão da citação e a bolha da conversa mantêm a grade; o anúncio da Feira usa o mesmo carrossel. Com "Reduzir movimento", as setas trocam sem animação. Detalhes em `docs/app.md` ("Fotos e GIFs") e `docs/verification.md` seção 150.
 - Publicar: setas em cada miniatura movem a foto para antes ou para depois, e a primeira foto, marcada "capa", abre o carrossel e aparece no Mural.

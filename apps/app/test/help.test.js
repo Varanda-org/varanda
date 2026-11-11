@@ -8,7 +8,7 @@ test('help keys match the supported tabs and setup steps', async (t) => {
   const { HELP } = await load()
   t.alike(Object.keys(HELP).sort(), [
     'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'conversas', 'entrar', 'vinculo',
-    'idade', 'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
+    'idade', 'telefone', 'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
     'instalar', 'denuncia', 'termosAparelho', 'convites', 'feira'
   ].sort())
 })
@@ -91,6 +91,8 @@ test('age and profile help carry the explanations that left the screens', async 
   for (const fact of ['Didit', 'faixa de idade', 'Política de Privacidade']) {
     t.ok(age.includes(fact), fact)
   }
+  t.is(HELP.telefone.title, 'Como funciona a confirmação do celular')
+  t.ok(HELP.telefone.paragraphs.join(' ').includes('Política de Privacidade'))
   t.ok(HELP.perfil.paragraphs.join(' ').includes('sem dados de localização'))
   for (const paragraph of HELP.idade.paragraphs) {
     t.absent(paragraph.includes('\u2014'), 'no em dash in the age help')

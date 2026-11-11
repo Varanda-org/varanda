@@ -79,6 +79,8 @@ import { enrolWith } from './src/passkeyEnrol'
 import { loadDeletionReceipt, saveDeletionReceipt } from './src/deletionReceiptStore'
 import { ageBlocking, ageErrorText, ageGate, ageReadAllowed, parseReturnAge } from './src/age'
 import { ageAnswerOutcome, ageStateShown, nodeVouches } from './src/ageMemory.js'
+import { phoneBlocking, phoneErrorText } from './src/phone.js'
+import { usePhoneGate } from './src/usePhoneGate'
 import * as nav from './src/nav'
 import { bindHistory } from './src/history'
 import { STEP_HINTS, STEP_TITLES, onboardingStep } from './src/onboarding'
@@ -150,6 +152,7 @@ import Espiadinha from './src/screens/Espiadinha'
 import Introducao from './src/screens/Introducao'
 import Identidade from './src/screens/Identidade'
 import Idade, { AGE_APP_NOTE } from './src/screens/Idade'
+import Telefone from './src/screens/Telefone'
 import { createLinkToken, dropsHeldInvite, invitePasteShown, isInviteRefusal, linkReturnTaker, parseAppLink, parseAppReturn, waitsForInstallation } from './src/linkReturn'
 import Membro, { canConverseWithPage } from './src/screens/Membro'
 import Depoimentos from './src/screens/Depoimentos'
@@ -204,9 +207,9 @@ const agePolicyDelay = (n) => (n === 0 ? 5000 : n === 1 ? 15000 : 60000)
 const ageInfoDelay = (n) => (n === 0 ? 2000 : n === 1 ? 5000 : n === 2 ? 15000 : 30000)
 const AGE_REDIRECT_TEXT = 'Vamos abrir a verificação. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.'
 
-// The steps the setup branch (Identidade, Idade) renders; the others belong
-// to the shell (spinner, Perfil, the tabs).
-const SETUP_STEPS = new Set(['entrar', 'recuperando', 'idade', 'vinculo', 'identidade', 'certificado'])
+// The steps the setup branch (Identidade, Idade, Telefone) renders; the
+// others belong to the shell (spinner, Perfil, the tabs).
+const SETUP_STEPS = new Set(['entrar', 'recuperando', 'idade', 'telefone', 'vinculo', 'identidade', 'certificado'])
 
 // True when this page load is the return from the Google step of the account
 // link (?conta=…). Read at import, before any screen renders; only read here:
@@ -979,12 +982,36 @@ function Member () {
     setAgeSinceTick((n) => n + 1)
   }, [node.online, ageSinceNow, generation, ageOrigin])
 
+  // --- the phone gate (src/phone.js, src/usePhoneGate.js; a hosted node) ---
+  // Same origin rule as the age gate. Nothing in device storage is an input:
+  // the service's answer and the proofs node.info reports decide.
+  const phone = usePhoneGate({
+    node,
+    info,
+    hosted: ageHosted,
+    ready,
+    termsOk,
+    locked,
+    member,
+    origin: ageOrigin,
+    generation,
+    afterProof: ageInfoAfterProof,
+    // The age step reads node.info itself; a recovery or once sync holds it.
+    readInfo,
+    infoFree: ageClear && !recovering && !onceSync
+  })
+  const { recheck: recheckPhone, markVerified: markPhoneVerified } = phone
+  const phoneClear = !phoneBlocking(phone.gate)
+  const phoneErrorShown = phone.error ? (phoneErrorText(phone.error) || errorText(phone.error)) : ''
+
   // The gates: `confirmed` can latch setupDone for a member already linked,
   // so setupDone alone never opens the tabs, autosync, the outbox, the terms
   // sync or the profile invite; ageClear is required everywhere too. Not
   // gated by age (documented, as for the terms): the post-unlock recovery of
-  // the member's own diary, which runs before the age check.
-  const setupStep = locked || (!setupDone && !confirmed) || !ageClear
+  // the member's own diary, which runs before the age check. phoneClear holds
+  // the same places except the terms sync: the service records the terms
+  // without the phone check, and the acceptance must reach it.
+  const setupStep = locked || (!setupDone && !confirmed) || !ageClear || !phoneClear
 
   // The acceptance sent to the account service (hosted, linked members): one
   // start, one signature by the node, one finish, per member and version and
@@ -1128,8 +1155,8 @@ function Member () {
   // clears. The provider does the rest.
   const { setAutoSync } = node
   useEffect(() => {
-    setAutoSync(ready && !locked && setupDone && !recovering && termsOk && ageClear)
-  }, [ready, locked, setupDone, recovering, termsOk, ageClear, setAutoSync])
+    setAutoSync(ready && !locked && setupDone && !recovering && termsOk && ageClear && phoneClear)
+  }, [ready, locked, setupDone, recovering, termsOk, ageClear, phoneClear, setAutoSync])
 
   // Back from the Google step, the return is decided by linkReturnTaker next to
   // the signup signal below (it needs step and certMissing, computed there).
@@ -1264,18 +1291,21 @@ function Member () {
     // keeps the screen, with its error and retry, since the age check needs the
     // key. Nothing is released: setupStep still holds while the age gate does,
     // and the service refuses the link without the check.
-    ageVerified: ageClear || member === null
+    ageVerified: ageClear || member === null,
+    phoneVerified: phoneClear || member === null
   })
   // The latched setupDone rule above decides between the setup branch and the
   // shell's steps; the step machine only names the step within each.
   let { step, index, total } = onboarding
-  if (setupStep && mode !== 'hosted' && !ageClear && member !== null && !locked && !recovering) {
+  if (setupStep && mode !== 'hosted' && (!ageClear || !phoneClear) && member !== null && !locked && !recovering) {
     // A hand-typed configuration on the hosted page: the native steps do not
-    // know the age check, so it takes the screen here.
-    step = 'idade'
+    // know the age or phone check, so it takes the screen here.
+    step = !ageClear ? 'idade' : 'telefone'
     index = 1
   } else if (setupStep && !SETUP_STEPS.has(step)) {
-    step = mode === 'hosted' ? (ageClear || member === null ? 'vinculo' : 'idade') : 'certificado'
+    step = mode === 'hosted'
+      ? (!ageClear && member !== null ? 'idade' : !phoneClear && member !== null ? 'telefone' : 'vinculo')
+      : 'certificado'
     index = 1
   } else if (!setupStep && SETUP_STEPS.has(step)) {
     step = 'pronto'
@@ -1492,7 +1522,7 @@ function Member () {
   // outbox (src/outboxProvider.js) is untouched.
   const outbox = useOutbox()
   useOutboxDrain({
-    enabled: ready && !locked && setupDone && termsOk && ageClear && !(passkey && passkey.recovering) &&
+    enabled: ready && !locked && setupDone && termsOk && ageClear && phoneClear && !(passkey && passkey.recovering) &&
       node.online !== false && node.visible !== false && !(node.sync.active && node.sync.active.once) && node.sync.starting !== true &&
       outbox.available,
     author: ownKey,
@@ -2478,7 +2508,7 @@ function Member () {
   // Only A Rua as the first screen waits for its rows; a stacked screen (a
   // link opened at boot) or another tab shows at once.
   const feedReady = feedBoot.details || tab !== 'rua' || topEntry !== null
-  const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, infoKnown: info !== null || infoError !== '', profileSlow: slow, feedReady })
+  const cover = coverBoot({ step, passkeyKnown: passkey === null || pkStatus !== null || !!passkey.error, age: ageNeeded, ageError, phone: phone.gate, phoneError: phoneErrorShown, infoKnown: info !== null || infoError !== '', profileSlow: slow, feedReady })
   if (atShell && cover && !bootSettled.current && bootStepRef.current !== step) {
     bootStepRef.current = step
     bootCoverAt.current = Date.now()
@@ -2658,6 +2688,25 @@ function Member () {
           invitePaste={ageInvitePaste}
           onInvitePasted={ageInvitePasted}
           feiraEntry={ageFeiraHere ? { offer: ageFeira.offer, busy: ageFeira.busy, tried: ageFeira.tried, onPress: ageFeira.press, note: ageFeiraNote } : null}
+          index={index}
+          total={total}
+        />
+      )
+    } else if (step === 'telefone') {
+      // As Idade: the first wait for the status stays under the splash
+      // (coverBoot); the busy state remains for a recheck or a patience reveal.
+      body = (
+        <Telefone
+          mode='setup'
+          member={member}
+          gateKey={phone.key}
+          checking={phone.gate === 'loading'}
+          checkError={phoneErrorShown}
+          onRecheck={recheckPhone}
+          onUncertain={recheckPhone}
+          onDropped={recheckPhone}
+          onVerified={markPhoneVerified}
+          offline={node.online === false}
           index={index}
           total={total}
         />
@@ -3270,7 +3319,7 @@ function Member () {
           showToast(text)
         }}
       />
-      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} />
+      <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} node={node} member={member} phoneGate={phone.gate} phoneKey={phone.key} phoneChecking={phone.pending} phoneVerified={phone.state === 'verificado' && !phone.error} markVerified={markPhoneVerified} recheckPhone={recheckPhone} />
       {/* Mounted after the splash, so it wins: while the boot cover shows it
           follows the splash, which stays cream on native (Splash.js). */}
       <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />

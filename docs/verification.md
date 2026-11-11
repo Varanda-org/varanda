@@ -7117,3 +7117,28 @@ Nenhuma verificação manual foi feita. Todos os itens estão em aberto:
 - [ ] Recurso desligado (sem `VARANDA_PHONE_KEY`): nada muda.
 - [ ] Checklist de sandbox do operador no README, antes de definir a chave.
 - [ ] Liberação recusada com o serviço em execução; em seguida, com o serviço parado, o número é confirmado por um segundo membro.
+
+## 154. Confirmação do celular no app, Termos e Privacidade 35 (PR3)
+
+Ordem das telas na web hospedada e no app da associação: entrar, idade, telefone, vínculo, Termos 35. Quem já tinha conta fica retido até confirmar o celular. Termos e Política de Privacidade 35 descrevem o celular (sujeitos a revisão jurídica), as páginas do site são o render de `legal.js` e há ajuda "Como funciona a confirmação do celular".
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/app/test/legal.test.js`
+- `node apps/app/test/terms-version.test.js`
+- `node packages/core/test/terms.test.js`
+- `node apps/app/test/help.test.js`
+- `node apps/site/test/legal.test.js`
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Build de debug do Android e simulador do iOS primeiro, depois web e PWA:
+
+- [ ] Um membro que já existia fica retido até confirmar o celular.
+- [ ] Uma segunda conta não consegue pegar o mesmo número.
+- [ ] Um número virtual é recusado.
+- [ ] O número não aparece no painel de moderação nem nos logs.
+- [ ] Excluir conta mantém o número lacrado até o prazo.
+- [ ] Um bloqueio da moderação ainda recusa o número depois que o lacre some.
+- [ ] O número não é aceito como fator de recuperação.

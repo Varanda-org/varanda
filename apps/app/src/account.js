@@ -52,6 +52,13 @@ const ERROR_MESSAGES = {
   // A Feira code sent to the ordinary age route: never shown if the app picks
   // the route right, so it only asks to try again.
   'use-a-rota-da-feira': 'Não deu para abrir a verificação agora. Tente de novo daqui a pouco.',
+  'telefone-pendente': 'Confirme seu celular antes de continuar.',
+  'telefone-invalido': 'Digite um celular brasileiro com DDD, por exemplo (11) 91234-5678.',
+  'telefone-em-uso': 'Este número já está em outra conta ou não pode ser usado.',
+  'telefone-recusado': 'Use um celular brasileiro comum. Números virtuais e fixos não servem.',
+  'codigo-invalido': 'Código incorreto. Confira e tente de novo.',
+  'codigo-expirado': 'O código venceu. Peça um novo.',
+  'limite-telefone': 'Muitas tentativas agora. Tente de novo mais tarde.',
   'limite-gif': 'Limite de buscas de GIF por hoje',
   'nao-autorizado': 'a sessão de busca de GIF expirou',
   'limite-previa': 'Limite de prévias de links por hoje',
@@ -611,6 +618,94 @@ export const ageResult = async ({ member, nonce, signature }) => {
   const err = toError('indisponivel')
   err.uncertain = true
   throw err
+}
+
+// Hosted phone check (src/phone.js, apps/cli/lib/account/phone-routes.js).
+// Unlike agePolicy, null here is "unknown", not "required": phoneGate then
+// decides from the proofs the node holds.
+export const phonePolicy = async () => {
+  if (VITRINE) return { required: false }
+  try {
+    const data = await call('GET', '/account/phone/policy')
+    return exactKeys(data, ['required']) && typeof data.required === 'boolean' ? { required: data.required } : null
+  } catch {
+    return null
+  }
+}
+// Phone attestations are opaque here too, within the node's cap
+// (packages/core/lib/phone-proof.js MAX_PHONE_PROOF_BYTES).
+export const MAX_PHONE_PROOF_BYTES = 1024
+function isPhoneProof (v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v) || Object.getPrototypeOf(v) !== Object.prototype) return false
+  try {
+    return new TextEncoder().encode(JSON.stringify(v)).length <= MAX_PHONE_PROOF_BYTES
+  } catch {
+    return false
+  }
+}
+// Only the state and the proof: nothing else the service sends (a number,
+// say) reaches the caller.
+const phoneVerified = (data) => isPhoneProof(data.proof) ? { state: 'verificado', proof: data.proof } : { state: 'verificado' }
+function phoneUnknown () {
+  const err = toError('indisponivel')
+  err.uncertain = true
+  return err
+}
+// The nonce-proved phone routes. Their 'expirado' is a spent phone nonce, not
+// the Google link ERROR_MESSAGES speaks of, so this table wins over it here
+// (toError lets ERROR_MESSAGES win for every other caller).
+const PHONE_MESSAGES = {
+  expirado: 'O pedido venceu. Tente de novo.',
+  'conta-excluida': 'esta conta já foi excluída'
+}
+async function phoneCall (path, body, opts) {
+  try {
+    return await call('POST', path, body, { ...opts, messages: PHONE_MESSAGES })
+  } catch (err) {
+    if (Object.hasOwn(PHONE_MESSAGES, err.code)) err.message = PHONE_MESSAGES[err.code]
+    throw err
+  }
+}
+// The object, null when the service has none, or undefined on any failure,
+// so a broken read never changes what the node holds.
+export const phoneSince = async () => {
+  // Pending in the Vitrine for the reason ageSince gives.
+  if (VITRINE) return new Promise(() => {})
+  try {
+    const data = await call('GET', '/account/phone/since')
+    if (!exactKeys(data, ['since'])) return undefined
+    if (data.since === null) return null
+    return isPhoneProof(data.since) ? data.since : undefined
+  } catch {
+    return undefined
+  }
+}
+export const phoneStart = async ({ member }) => {
+  const data = await call('POST', '/account/phone/start', { member })
+  if (typeof data.nonce !== 'string') throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+// Asks the provider to text a code (a paid send), so an unknown outcome is
+// uncertain and nothing here sends again. SMS only: no channel goes out.
+export const phoneSend = async ({ member, nonce, signature, phone }) => {
+  const data = await phoneCall('/account/phone/send', { member, nonce, signature, phone }, { uncertain: true, definite: true })
+  if (data.state === 'enviado') return { state: 'enviado' }
+  if (data.state === 'verificado') return phoneVerified(data)
+  throw phoneUnknown()
+}
+// May record the number before it answers, so an unknown outcome is
+// uncertain too.
+export const phoneCheck = async ({ member, nonce, signature, code }) => {
+  const data = await phoneCall('/account/phone/check', { member, nonce, signature, code }, { uncertain: true, definite: true })
+  if (data.state === 'verificado') return phoneVerified(data)
+  throw phoneUnknown()
+}
+// Only reads, so a bad answer changed nothing: never uncertain.
+export const phoneStatus = async ({ member, nonce, signature }) => {
+  const data = await phoneCall('/account/phone/status', { member, nonce, signature })
+  if (data.state === 'verificado') return phoneVerified(data)
+  if (data.state === 'nenhum') return { state: 'nenhum' }
+  throw toError('indisponivel')
 }
 
 // GIF search and link previews through the account service. Every cache of

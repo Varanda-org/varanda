@@ -108,6 +108,15 @@ export const HELP = Object.freeze({
       'O que é guardado está na Política de Privacidade (Ajustes → Termos e privacidade).'
     ])
   }),
+  telefone: Object.freeze({
+    title: 'Como funciona a confirmação do celular',
+    paragraphs: Object.freeze([
+      'A Varanda pede um celular brasileiro para confirmar a conta. O código chega por SMS e dá para pedir um novo depois de um minuto.',
+      'Só vale celular do Brasil: números virtuais e de telefone fixo são recusados.',
+      'Cada número fica em uma conta só. O número não é usado para recuperar a conta.',
+      'O que é guardado está na Política de Privacidade (Ajustes → Termos e privacidade).'
+    ])
+  }),
   identidade: Object.freeze({
     title: 'Como funciona a conta',
     paragraphs: Object.freeze([

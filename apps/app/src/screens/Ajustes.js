@@ -29,6 +29,10 @@
 // the key can still sign; a failure there never stops them.
 // Passkeys e recuperação (hosted passkey node, unlocked) opens the extra
 // passkeys and the recovery code of the account (./Passkeys.js).
+// Trocar o celular sits beside it only while the phone gate is 'ok': that
+// state is hosted with the check required (src/phone.js returns 'off'
+// otherwise). ./Telefone.js mode 'trocar' runs its own check. The service
+// never returns the current number, so neither the row nor the screen shows one.
 // Excluir conta (hosted passkey node, unlocked), under Sair, opens
 // ./ExcluirConta.js: App Store guideline 5.1.1(v), deletion starts in the app.
 // The footer under the list shows the build and the commit the installation
@@ -72,7 +76,8 @@ import ExcluirConta from './ExcluirConta'
 import Convites from './Convites'
 import Identidade from './Identidade'
 import Passkeys from './Passkeys'
-import Perfil from './Perfil'
+import Perfil, { KeyboardForm } from './Perfil'
+import Telefone from './Telefone'
 import Recurso from './Recurso'
 import Bloqueados from './Bloqueados'
 import Sincronizar from './Sincronizar'
@@ -90,6 +95,7 @@ const TITLES = {
   perfil: 'Editar perfil',
   conta: 'Conta e @nome',
   passkeys: 'Passkeys e recuperação',
+  telefone: 'Trocar o celular',
   termos: 'Termos e privacidade',
   aparencia: 'Aparência',
   instalar: 'Instalar o app',
@@ -145,7 +151,7 @@ function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailin
   )
 }
 
-export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, scheduledDeletion = null, onDeletionChanged, onOpenPaginas, inviteNudge = 0 }) {
+export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, scheduledDeletion = null, onDeletionChanged, onOpenPaginas, inviteNudge = 0, node: nodeProp = null, member: gateMember = null, phoneGate = 'off', phoneKey = null, phoneChecking = false, phoneVerified = false, markVerified, recheckPhone }) {
   const styles = useStyles(makeStyles)
   const { colors, mode, setMode } = useTheme()
   const node = useNode()
@@ -326,6 +332,18 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     }
   }
 
+  // gateKey is the shell's phone-gate key: markVerified stores the proof only
+  // for the session the request started under, which keeps the gate open.
+  // No proof means the sheet closed on a status recheck after a lost check:
+  // the status says 'verificado' for the old number too, so it cannot tell
+  // whether the new one was recorded.
+  const onPhoneVerified = (proof, key) => {
+    if (typeof markVerified === 'function') markVerified(proof, key)
+    setSaved(proof === undefined ? 'Não deu para saber se o número mudou. Se precisar, troque de novo.' : 'Celular atualizado.')
+    onNavigate('lista')
+  }
+  const askPhoneAgain = typeof recheckPhone === 'function' ? recheckPhone : undefined
+
   const doPersist = async () => {
     setPersistPending(true)
     try {
@@ -362,6 +380,10 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const profile = own.key ? names.profileOf(own.key) : undefined
   const current = { name: (profile && profile.name) || '', bio: (profile && profile.bio) || '', avatar: profile ? profile.avatar : undefined }
   const account = node.hosted === true && hasPasskey
+  // Prefer the shell member: markVerified only accepts a proof under that key.
+  const phoneMember = typeof gateMember === 'string' ? gateMember : member
+  const phoneNode = nodeProp || node
+  const showChangePhone = account && phoneNode.hosted === true && unlocked && phoneGate === 'ok' && typeof phoneMember === 'string'
   const pushUi = push === null
     ? null
     : pushUiState({
@@ -395,6 +417,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
               {account && unlocked ? <Item icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}
+              {showChangePhone ? <Item icon='phone' label='Trocar o celular' onPress={() => { setSaved(''); onNavigate('telefone') }} /> : null}
               {account ? <Item icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
               {hosted ? <Item icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
               {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
@@ -532,6 +555,27 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           ? (
             <View style={shown('passkeys')}>
               <Passkeys active={ready && screen === 'passkeys'} embedded />
+            </View>
+            )
+          : null}
+        {screen === 'telefone'
+          ? (
+            <View style={styles.flex}>
+              <KeyboardForm>
+                <Page>
+                  <Telefone
+                    mode='trocar'
+                    member={phoneMember}
+                    gateKey={phoneKey}
+                    onVerified={onPhoneVerified}
+                    onUncertain={askPhoneAgain}
+                    onDropped={askPhoneAgain}
+                    offline={phoneNode.online === false}
+                    statusBusy={phoneChecking}
+                    statusVerified={phoneVerified}
+                  />
+                </Page>
+              </KeyboardForm>
             </View>
             )
           : null}

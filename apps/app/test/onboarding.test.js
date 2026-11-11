@@ -82,6 +82,52 @@ test('onboardingStep: skipping the name never skips idade', async (t) => {
   }
 })
 
+test('onboardingStep: age before phone, phone before vinculo', async (t) => {
+  const { onboardingStep } = await load()
+  const base = { ...hosted, ageVerified: false, phoneVerified: false, memberCert: false }
+  t.is(onboardingStep({ ...base, locked: true, recovering: true }).step, 'entrar')
+  t.is(onboardingStep({ ...base, recovering: true }).step, 'recuperando')
+  t.alike(onboardingStep(base), { step: 'idade', index: 1, total: 3 })
+  t.alike(onboardingStep({ ...base, ageVerified: true }), { step: 'telefone', index: 1, total: 3 })
+  t.is(onboardingStep({ ...base, ageVerified: true, phoneVerified: true }).step, 'vinculo')
+})
+
+test('onboardingStep: telefone also applies to already-linked members', async (t) => {
+  const { onboardingStep } = await load()
+  t.alike(onboardingStep({ ...hosted, memberCert: true, phoneVerified: false }), { step: 'telefone', index: 1, total: 3 })
+  t.is(onboardingStep({ ...hosted, memberCert: true, phoneVerified: false, profileKnown: false, hasName: false }).step, 'telefone')
+})
+
+test('onboardingStep: an absent phoneVerified skips telefone', async (t) => {
+  const { onboardingStep } = await load()
+  const base = { ...hosted }
+  delete base.phoneVerified
+  t.is(onboardingStep({ ...base, memberCert: false }).step, 'vinculo')
+  t.is(onboardingStep({ ...base, hasName: false }).step, 'perfil')
+  t.is(onboardingStep(base).step, 'pronto')
+  t.is(onboardingStep({ ...base, phoneVerified: undefined }).step, 'pronto')
+})
+
+test('onboardingStep: skipping the name never skips telefone', async (t) => {
+  const { onboardingStep } = await load()
+  for (const memberCert of [true, false]) {
+    for (const profileKnown of [true, false]) {
+      for (const hasName of [true, false]) {
+        t.is(onboardingStep({ ...hosted, memberCert, profileKnown, hasName, skippedName: true, phoneVerified: false }).step, 'telefone')
+      }
+    }
+  }
+})
+
+test('onboardingStep: manual mode ignores phoneVerified', async (t) => {
+  const { onboardingStep } = await load()
+  for (const mode of ['native', 'serve']) {
+    t.is(onboardingStep({ ...local(mode), phoneVerified: false, hasIdentity: false }).step, 'identidade')
+    t.is(onboardingStep({ ...local(mode), phoneVerified: false, memberCert: false }).step, 'certificado')
+    t.is(onboardingStep({ ...local(mode), phoneVerified: false }).step, 'pronto')
+  }
+})
+
 test('onboardingStep: native and serve ignore ageVerified', async (t) => {
   const { onboardingStep } = await load()
   for (const mode of ['native', 'serve']) {
@@ -98,11 +144,13 @@ test('onboardingStep: the acceptance case', async (t) => {
 
 test('step titles and hints cover every step', async (t) => {
   const { STEP_TITLES, STEP_HINTS } = await load()
-  const steps = ['entrar', 'recuperando', 'idade', 'vinculo', 'identidade', 'certificado', 'carregando', 'perfil', 'pronto']
+  const steps = ['entrar', 'recuperando', 'idade', 'telefone', 'vinculo', 'identidade', 'certificado', 'carregando', 'perfil', 'pronto']
   t.alike(Object.keys(STEP_TITLES).sort(), steps.slice().sort())
   for (const s of steps) t.ok(STEP_HINTS[s].length > 0)
   t.is(STEP_TITLES.idade, 'Confirme sua idade')
   t.is(STEP_HINTS.idade, 'A Varanda é para quem tem 16 anos ou mais. Só a sua faixa de idade fica guardada.')
+  t.is(STEP_TITLES.telefone, 'Confirme seu celular')
+  t.is(STEP_HINTS.telefone, 'Use um celular brasileiro. O número não serve para recuperar a conta: ele permite responder a uma ordem judicial e impede que uma conta bloqueada volte.')
 })
 
 test('step titles and hints avoid technical words', async (t) => {
