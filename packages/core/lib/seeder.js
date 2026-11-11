@@ -4983,7 +4983,9 @@ class Seeder {
     if (!Number.isFinite(at)) return
     const t = Math.max(0, Math.min(at, Date.now()))
     if (!Number.isSafeInteger(t)) return
-    const list = entry.recent.filter((r) => r.seq !== seq && (to === null || r.to !== to))
+    // An entry made before this field existed (or by a test) has none yet.
+    const kept = Array.isArray(entry.recent) ? entry.recent : []
+    const list = kept.filter((r) => r.seq !== seq && (to === null || r.to !== to))
     list.push({ seq, t, to })
     list.sort((a, b) => b.t - a.t)
     if (list.length > DISCOVERY_RECENT_KEPT) list.length = DISCOVERY_RECENT_KEPT
