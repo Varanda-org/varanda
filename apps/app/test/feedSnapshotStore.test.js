@@ -8,7 +8,7 @@ const test = require('brittle')
 const { register } = require('node:module')
 
 const hooks = `
-const SRC = 'export const Paths = { document: { uri: "file:///stub/Documents/" } }\\n' +
+const SRC = 'export const Paths = { document: { uri: "file:///stub/Documents/" }, cache: { uri: "file:///stub/Caches/" } }\\n' +
   'export class File {\\n' +
   '  constructor (dir, name) { this.uri = dir.uri + name }\\n' +
   '  get exists () { return globalThis.__files.has(this.uri) }\\n' +
@@ -36,7 +36,7 @@ register('data:text/javascript,' + encodeURIComponent(hooks))
 const loadNative = () => import('../src/feedSnapshotStore.native.js')
 const loadWeb = () => import('../src/feedSnapshotStore.web.js')
 
-const PATH = 'file:///stub/Documents/varanda-rua-snapshot.json'
+const PATH = 'file:///stub/Caches/varanda-rua-snapshot.json'
 
 function fresh (t, entries = []) {
   globalThis.__files = new Map(entries)
@@ -54,7 +54,7 @@ test('native: a missing file reads as null', async (t) => {
   t.is(previewCapable, true)
 })
 
-test('native: save, load and overwrite in the document dir, no .tmp or .bak left', async (t) => {
+test('native: save, load and overwrite in the cache dir (never backed up), no .tmp or .bak left', async (t) => {
   fresh(t)
   const { loadSnapshotText, saveSnapshotText } = await loadNative()
   saveSnapshotText('{"v":1}')
