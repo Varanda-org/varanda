@@ -190,9 +190,11 @@ test('the snapshot write is guarded by cacheGeneration and debounced', (t) => {
   t.ok(/blocked: latest\.blocked/.test(write), 'the block list in force')
 })
 
-test('the snapshot is read and written on every platform: previewCapable is not consulted', (t) => {
+test('the snapshot is read and written on every platform: previewCapable gates only the App.js preview', (t) => {
   t.absent(/\bpreviewCapable\b/.test(CODE), 'ARua.js')
-  t.absent(/\bpreviewCapable\b/.test(withoutComments(APP_JS)), 'App.js')
+  const app = withoutComments(APP_JS)
+  t.is((app.match(/\bpreviewCapable\b/g) || []).length, 3, 'App.js: only the import, the read guard and the previewAllowed input')
+  t.ok(app.includes('if (!previewCapable || !appActive || previewAsked.current) return'))
 })
 
 test('a write dropped by the generation guard is not done and is armed again', (t) => {
@@ -330,4 +332,100 @@ test('every screen delete clears the stored first page through the shell', (t) =
   const at = app.indexOf('const deletedPost = useCallback(() => {')
   t.ok(at > 0, 'the shared delete handler exists')
   t.ok(app.slice(at, at + 120).includes('clearSnapshot()'), 'it clears the snapshot first')
+})
+
+// The preview region of ARua.js: from its marker to makeStyles.
+function previewRegion () {
+  const at = ARUA.indexOf('// --- the cold-start preview')
+  return withoutComments(ARUA.slice(at, ARUA.indexOf('const makeStyles = ', at)))
+}
+
+test('ARuaPreview sends nothing: no request, no fetch, no handler', (t) => {
+  const region = previewRegion()
+  t.ok(region.includes('export function ARuaPreview ('))
+  t.absent(/\brequest\s*\(/.test(region), 'no request(')
+  t.absent(/node\.request/.test(region), 'no node.request')
+  t.absent(/fetch/i.test(region), 'no fetch')
+  t.absent(/onRefresh|onLoadMore|onOpen|onReply|onReport/.test(region), 'no refresh, paging or tap handler')
+  t.ok(region.includes("pointerEvents='box-only'"), 'rows take no touch of their own')
+  t.ok(region.includes('<KeptOnlyContext.Provider value>'), 'photos only from the kept store')
+  t.absent(/bytes: -1/.test(region), 'valid descriptors: the kept-only mode decides')
+  t.ok(region.includes("perfMarks().mark('preview-shown')"))
+  t.ok(region.includes('<TopBar title=') && region.includes('<RefreshableList'))
+  t.ok(region.includes('<StatusBar style={statusBarStyle(scheme)} />'), 'sets the status bar as the splash did')
+})
+
+test('previewBinding checks installation and association, not the owner', (t) => {
+  const bind = (origin) => helper('previewBinding', { installationOrigin: () => origin }, ['snapshotOrigin'])
+  withLocation(undefined, () => {
+    t.alike(bind(ORIGIN)({ association: ASSOC }), { origin: ORIGIN, association: ASSOC })
+    t.is(bind(ORIGIN)(null), null, 'the Vitrine runs with config null')
+    t.is(bind(null)({ association: ASSOC }), null)
+  })
+})
+
+test('App.js: the preview is fail-closed and never reads the keychain before the app was active', (t) => {
+  const app = withoutComments(APP_JS)
+  t.ok(app.includes('let activeSeen = false'))
+  t.ok(app.includes("if (state === 'active') activeSeen = true"))
+  t.ok(app.includes('useState(() => noteAppState(AppState.currentState))'))
+  t.absent(/sessionStore\.load\(/.test(app), 'never the destructive load')
+  t.is((app.match(/sessionStore\.hasLive\(/g) || []).length, 1, 'one read-only probe')
+  const at = app.indexOf('sessionStore.hasLive(')
+  const guard = app.lastIndexOf('if (!previewCapable || !appActive || previewAsked.current) return', at)
+  t.ok(guard > 0 && at - guard < 1200, 'guarded by the first active state in the same effect')
+  t.ok(app.includes('sessionStore.hasLive({ rpId, publicKey: snapshot.owner })'), 'exactly the snapshot owner')
+  const effect = app.slice(app.indexOf('rememberedConfig().then((remembered) => {'), app.indexOf('}, [appActive, previewConfig, previewPhase, previewRetry])'))
+  t.ok(app.indexOf('}, [appActive, previewConfig, previewPhase, previewRetry])') > 0, 'effect anchors found')
+  t.ok(app.includes("const stillActive = () => AppState.currentState === 'active'"))
+  t.ok(effect.indexOf('if (!stillActive()) {') > 0 && effect.indexOf('if (!stillActive()) {') < effect.indexOf('sessionStore.hasLive('), 'foreground re-checked after the await, before the probe')
+  t.ok(effect.includes('if (live !== true) return') && effect.indexOf('if (!stillActive()) {', effect.indexOf('sessionStore.hasLive(')) > 0, 'and again after the probe')
+  t.ok(effect.includes('if (!settled) previewAsked.current = false'), 'a discarded attempt gives the latch back')
+  t.ok(app.includes('rememberedConfig().then((remembered) => {'), 'the association before the node connects, from disk only')
+  t.ok(app.includes('previewBinding(remembered || previewConfig)') && app.includes('parseSnapshot(loadSnapshotText(), { ...binding, now: Date.now() })'))
+  const mismatch = app.slice(app.indexOf('const previewMismatch ='), app.indexOf('const previewStep ='))
+  t.ok(mismatch.includes('wipeLocalCaches()'), 'the mismatch path wipes the local caches')
+  t.ok(mismatch.includes('pkStatus.publicKey.toLowerCase() !== previewOwner') && mismatch.includes('pkStatus.signedOut === true') && mismatch.includes("step === 'entrar'"))
+  t.ok(app.includes('const previewOn = previewOwner !== null && !previewMismatch && previewAllowed({'))
+  t.ok(app.includes('const bootCover = previewOn ? <ARuaPreview '), 'rendered only when previewAllowed')
+  t.is((app.match(/<ARuaPreview /g) || []).length, 1)
+  t.absent(app.includes('{splash}'), 'every splash use goes through bootCover')
+})
+
+test('sessionStore.web.js and configStore.web.js twins hold nothing for the preview', async (t) => {
+  const { sessionStore } = await import('../src/sessionStore.web.js')
+  t.is(await sessionStore.load({ rpId: 'bora.varanda.app', publicKey: OWN }), null)
+  const web = withoutComments(fs.readFileSync(path.join(APP, 'src/configStore.web.js'), 'utf8'))
+  t.ok(/export async function rememberedConfig \(\) \{\s*return null\s*\}/.test(web))
+  t.is(await sessionStore.hasLive({ rpId: 'bora.varanda.app', publicKey: OWN }), false)
+})
+
+test('App.js: a stale preview (purge or another binding) is dropped and only a fresh read brings one back', (t) => {
+  const app = withoutComments(APP_JS)
+  t.ok(app.includes("import { cacheGeneration, wipeLocalCaches } from './src/localCaches'"))
+  const stale = app.slice(app.indexOf('const previewStale ='), app.indexOf('useEffect(() => {', app.indexOf('const previewStale =')))
+  t.ok(stale.includes('previewSeed.gen !== cacheGeneration()'), 'a purge since the read')
+  t.ok(stale.includes('installationOrigin() !== previewSeed.origin'), 'another installation')
+  t.ok(stale.includes('previewConfig.association !== previewSeed.association'), 'another association')
+  const drop = app.indexOf('if (!previewStale) return')
+  const read = app.indexOf('if (!previewCapable || !appActive || previewAsked.current) return')
+  t.ok(drop > 0 && drop < read, 'the drop effect runs before the read effect')
+  t.ok(app.slice(drop, read).includes('setPreviewSeed(null)') && app.slice(drop, read).includes('previewAsked.current = false'), 'dropped, and the latch given back for a fresh read')
+  const effect = app.slice(read, app.indexOf('}, [appActive, previewConfig, previewPhase, previewRetry])'))
+  t.ok(effect.includes('const gen = cacheGeneration()'), 'the generation is taken before the reads')
+  t.ok(effect.includes('if (cacheGeneration() !== gen) {'), 'a purge during the reads discards the result')
+  t.ok(effect.includes('setPreviewSeed({ snapshot, sessionLive: true, gen, origin: binding.origin, association: binding.association })'))
+  t.ok(app.includes('const previewOwner = previewSeed !== null && !previewStale &&'), 'a stale seed never renders, even before the drop effect')
+  t.absent(/sessionStore\.load\(/.test(app))
+})
+
+test('a dropped or interrupted preview read is retried, not lost for the boot', (t) => {
+  const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  t.ok(app.includes('const [previewRetry, setPreviewRetry] = useState(0)'), 'a retry counter')
+  t.ok(app.includes('}, [appActive, previewConfig, previewPhase, previewRetry])'), 'the read watches it')
+  const drop = app.indexOf('if (!previewStale) return')
+  t.ok(drop > 0 && app.slice(drop, drop + 160).includes('setPreviewRetry((n) => n + 1)'), 'a drop asks again')
+  t.ok(app.includes("if (state === 'active' && !previewAsked.current) setPreviewRetry((n) => n + 1)"), 'a return to the foreground asks again')
+  const probe = app.indexOf('if (live !== true) return')
+  t.ok(probe > 0 && app.slice(probe, probe + 200).includes('previewAsked.current = false'), 'leaving the foreground during the probe gives the latch back')
 })

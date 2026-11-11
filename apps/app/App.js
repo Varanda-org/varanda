@@ -59,12 +59,14 @@ import { StatusBar } from 'expo-status-bar'
 import { AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { NodeProvider, perfMarks, useNode } from './src/node'
-import { hostedPage } from './src/configStore'
+import { hostedPage, rememberedConfig } from './src/configStore'
 import { pagesOn, setCoreReach } from './src/pageGate'
 import { CROSS_ORIGIN_PAGES } from './src/pageReach'
-import { installationOrigin } from './src/installation'
+import { installationOrigin, rpIdOf } from './src/installation'
 import { parseSnapshot } from './src/feedSnapshot'
-import { clearSnapshot, loadSnapshotText } from './src/feedSnapshotStore'
+import { clearSnapshot, loadSnapshotText, previewCapable } from './src/feedSnapshotStore'
+import { sessionStore } from './src/sessionStore'
+import { cacheGeneration, wipeLocalCaches } from './src/localCaches'
 import { makeIntent, validIntent } from './src/privateReply'
 import { NamesProvider, useNames } from './src/names'
 import { BlocksProvider, useBlocks } from './src/blocksProvider'
@@ -99,7 +101,7 @@ import { useTerms } from './src/useTerms'
 import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
 import { useIntro } from './src/useIntro'
-import { CONNECT_PATIENCE_MS, DETAILS_GRACE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, detailsGraceOver, holdBootCover, holdSplash } from './src/splashGate'
+import { CONNECT_PATIENCE_MS, DETAILS_GRACE_MS, SPLASH_MIN_MS, bootPatienceMs, bootProgress, coverBoot, coverConnecting, detailsGraceOver, holdBootCover, holdSplash, previewAllowed } from './src/splashGate'
 import { Btn, ErrorText, Page, errorText } from './src/ui'
 import { Stepper } from './src/ui/Stepper'
 import { ThemeProvider, useStyles, useTheme } from './src/ui/ThemeProvider'
@@ -142,7 +144,7 @@ import { onDmOpen, onDmWake, requestDmOpen } from './src/dm-open'
 import { Comunidade } from './src/screens/Comunidade'
 import { ComunidadeInfo } from './src/screens/ComunidadeInfo'
 import Ajustes from './src/screens/Ajustes'
-import ARua, { liveBinding, noteDeleted } from './src/screens/ARua'
+import ARua, { ARuaPreview, liveBinding, noteDeleted, previewBinding } from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
 import Conversa, { useActing } from './src/screens/Conversa'
 import Curtidas from './src/screens/Curtidas'
@@ -291,6 +293,16 @@ function cardExpiredAt (expires) {
 
 function cardPastExpires (card, now) {
   return !!card && typeof card.expires === 'number' && now >= cardExpiredAt(card.expires)
+}
+
+// The keychain is never read before this process was in the foreground
+// once: a launch in the background (a push on a locked phone) must not touch
+// it, since a failed read deletes the stored session
+// (src/sessionStore.native.js). A one-way latch for the process.
+let activeSeen = false
+function noteAppState (state) {
+  if (state === 'active') activeSeen = true
+  return activeSeen
 }
 
 function setupComplete (info) {
@@ -459,6 +471,115 @@ function Member () {
   const locked = passkey !== null && (pkStatus === null || pkStatus.unlocked !== true)
   const generation = passkey !== null ? passkey.generation : 0
   const generationRef = useRef(generation)
+
+  // --- the cold-start preview (src/splashGate.js previewAllowed) ---
+  // A Rua's saved rows instead of the splash while the node boots, on the
+  // phone only (previewCapable). Read once, and only once the app was active:
+  // the snapshot must parse for this installation and association, and the
+  // session store must hold a live record for exactly its owner on this
+  // rp.id, the record the resume will use. Any doubt or error: the splash.
+  const [appActive, setAppActive] = useState(() => noteAppState(AppState.currentState))
+  useEffect(() => {
+    if (appActive) return
+    const sub = AppState.addEventListener('change', (state) => { if (noteAppState(state)) setAppActive(true) })
+    return () => sub.remove()
+  }, [appActive])
+  const [previewSeed, setPreviewSeed] = useState(null)
+  const previewAsked = useRef(false)
+  // Bumped when a preview attempt was given back (a prune dropped the seed,
+  // or the app left the foreground during a read): the read below runs
+  // again, since neither changes the phase or the configuration it watches.
+  const [previewRetry, setPreviewRetry] = useState(0)
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && !previewAsked.current) setPreviewRetry((n) => n + 1)
+    })
+    return () => sub.remove()
+  }, [])
+  // Latched by a mismatch: the preview never comes back in this mount.
+  const previewDropped = useRef(false)
+  // The association comes from the remembered /varanda.json (disk only),
+  // which is there before the node connects; node.config (a saved manual
+  // configuration) when nothing is remembered. The phase is a dependency
+  // because the installation is loaded by node.js's start: a read that found
+  // no installation yet is tried again on the next phase.
+  const previewConfig = node.config
+  const previewPhase = node.phase
+  // A seed holds the cache generation and the binding it was read under. A
+  // purge since (node.js wipes on a changed installation or association, a
+  // block drops authors) or another binding now makes it stale: it is dropped
+  // and only a fresh read for the binding in force may show a preview again.
+  const previewStale = previewSeed !== null && (
+    previewSeed.gen !== cacheGeneration() ||
+    installationOrigin() !== previewSeed.origin ||
+    (previewConfig !== null && typeof previewConfig === 'object' && previewConfig.association !== previewSeed.association)
+  )
+  // Declared before the read below, so a drop gives the latch back first.
+  useEffect(() => {
+    if (!previewStale) return
+    setPreviewSeed(null)
+    previewAsked.current = false
+    setPreviewRetry((n) => n + 1)
+  }, [previewStale])
+  useEffect(() => {
+    if (!previewCapable || !appActive || previewAsked.current) return
+    let alive = true
+    const gen = cacheGeneration()
+    // At most one attempt in flight: the latch is taken now, and given back
+    // when this attempt is discarded (a phase or configuration change), so
+    // the next run tries again instead of hiding a good snapshot all boot.
+    previewAsked.current = true
+    let settled = false
+    const stillActive = () => AppState.currentState === 'active'
+    rememberedConfig().then((remembered) => {
+      if (!alive) return
+      const binding = previewBinding(remembered || previewConfig)
+      if (binding === null) {
+        settled = true
+        previewAsked.current = false
+        return
+      }
+      let snapshot = null
+      let rpId = null
+      try {
+        snapshot = parseSnapshot(loadSnapshotText(), { ...binding, now: Date.now() })
+        rpId = rpIdOf(installationOrigin())
+      } catch {
+        settled = true
+        return
+      }
+      // The phone may have locked while the configuration was read: the
+      // keychain is only probed in the foreground, and only read-only.
+      settled = true
+      if (snapshot === null || snapshot.items.length === 0) return
+      if (!stillActive()) {
+        // Back in the foreground, the next phase or configuration tries again.
+        previewAsked.current = false
+        return
+      }
+      settled = false
+      return sessionStore.hasLive({ rpId, publicKey: snapshot.owner }).then((live) => {
+        if (!alive) return
+        settled = true
+        if (live !== true) return
+        if (!stillActive()) {
+          // Back in the foreground, the listener above tries again.
+          previewAsked.current = false
+          return
+        }
+        // A purge during the reads: this snapshot may be what it removed.
+        if (cacheGeneration() !== gen) {
+          previewAsked.current = false
+          return
+        }
+        setPreviewSeed({ snapshot, sessionLive: true, gen, origin: binding.origin, association: binding.association })
+      })
+    }).catch(() => { settled = true })
+    return () => {
+      alive = false
+      if (!settled) previewAsked.current = false
+    }
+  }, [appActive, previewConfig, previewPhase, previewRetry])
   generationRef.current = generation
 
   const readInfo = useCallback(async () => {
@@ -2587,11 +2708,41 @@ function Member () {
     const t = setTimeout(() => bumpSplash((n) => n + 1), Math.max(0, OPEN_WAIT_MS - (Date.now() - openWaitAt.current)) + 50)
     return () => clearTimeout(t)
   }, [opening])
+  // The preview stands only where the splash would. In the render in which
+  // identity.status names another owner, a locked or signed-out identity, or
+  // Entrar is the real screen, it goes and the local caches of other
+  // people's content are wiped (once). Before the first real screen only: a
+  // later lock is node.js's to handle.
+  const previewKnown = passkey === null || pkStatus !== null || !!passkey.error
+  const previewOwner = previewSeed !== null && !previewStale && !bootSettled.current && !previewDropped.current ? previewSeed.snapshot.owner : null
+  const previewMismatch = previewOwner !== null && (
+    (pkStatus !== null && (pkStatus.unlocked !== true || pkStatus.signedOut === true || typeof pkStatus.publicKey !== 'string' || pkStatus.publicKey.toLowerCase() !== previewOwner)) ||
+    (step === 'entrar' && previewKnown)
+  )
+  if (previewMismatch) {
+    previewDropped.current = true
+    wipeLocalCaches()
+  }
+  // A step whose screen is still covered (coverBoot) is a boot placeholder,
+  // not yet the step; a recovery is always its own step.
+  const previewStep = recovering ? 'recuperando' : (cover ? null : step)
+  const previewOn = previewOwner !== null && !previewMismatch && previewAllowed({
+    snapshot: previewSeed.snapshot,
+    previewCapable,
+    // Not known yet whether a gate comes next counts as one.
+    gateNext: gateNext || loadingGate || opening === 'wait',
+    showConexao,
+    step: previewStep,
+    locked: pkStatus !== null && pkStatus.unlocked !== true,
+    sessionLive: previewSeed.sessionLive,
+    nowMs: Date.now()
+  })
+  const bootCover = previewOn ? <ARuaPreview snapshot={previewSeed.snapshot} progress={bootBar} /> : splash
   // The same root View with the Splash at child 0 is what React preserves
   // across these returns and the final one, so the chair animation does not
   // replay and, on the web, the Splash unmount that removes
   // #varanda-pre-splash happens only when the real screen is ready.
-  if (loadingGate || holding || opening === 'wait') return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
+  if (loadingGate || holding || opening === 'wait') return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{bootCover}</View>
   if (opening === 'card' && openResult !== null) {
     // Como funciona: the intro cards, then back to the card; only Entrar
     // marks them seen.
@@ -2641,7 +2792,7 @@ function Member () {
     // The splash covers loading and connecting, also on the hosted page.
     // A failure or 10 s connecting on a configurable node reveals Conectar;
     // later retries stay there so its local state survives.
-    if (connectingSplash) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{splash}</View>
+    if (connectingSplash) return <View style={[styles.root, SPLASH_WRAP, { paddingHorizontal: sidePad }]}>{bootCover}</View>
     released.current = true
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
@@ -3257,7 +3408,7 @@ function Member () {
   // permanent: a conditional one would remount Identidade at the reveal.
   return (
     <View style={[styles.root, coveringBoot && SPLASH_WRAP, { paddingHorizontal: sidePad }]}>
-      {coveringBoot ? splash : null}
+      {coveringBoot ? bootCover : null}
       <View style={coveringBoot ? styles.hidden : styles.flex}>{content}</View>
       {/* The terms gate used to unmount these sheets on a hosted lock as a
           side effect, and a current terms record no longer brings it up. So
@@ -3311,7 +3462,7 @@ function Member () {
       <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={setAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} />
       {/* Mounted after the splash, so it wins: while the boot cover shows it
           follows the splash, which stays cream on native (Splash.js). */}
-      <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />
+      <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' || previewOn ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />
     </View>
   )
 }

@@ -32,6 +32,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { StatusBar } from 'expo-status-bar'
 import { ENGAGEMENT_LIMIT_MAX, FEED_LIMIT_DEFAULT, FEED_LIMIT_MAX, FOLLOW_LIMIT_MAX, LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { perfMarks, useNode, useSyncSignals } from '../node'
 import { useNames } from '../names'
@@ -53,6 +54,8 @@ import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { PostRow } from '../ui/PostRow'
+import { KeptOnlyContext } from '../ui/MediaView'
+import { TopBar } from '../ui/TopBar'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { noteLocalWrite } from '../localWrites'
@@ -67,6 +70,7 @@ import { installationOrigin } from '../installation'
 import { bumpCacheGeneration, cacheGeneration, keepOnlyAuthors, registerLocalCache } from '../localCaches'
 import { buildSnapshot, initialFeedState, keepOnlyAuthors as snapshotKeepOnly, parseSnapshot, socialSeed, withoutAuthors } from '../feedSnapshot'
 import { clearSnapshot, loadSnapshotText, saveSnapshotText } from '../feedSnapshotStore'
+import { statusBarStyle } from '../appearance'
 
 // Feed skip reasons that come from the association's signed blocklist.
 const MODERATION_REASONS = ['blocked', 'revoked-issuer']
@@ -255,6 +259,16 @@ export function liveBinding (ownKey, config) {
   const origin = snapshotOrigin()
   if (owner === null || association === null || typeof origin !== 'string' || origin === '') return null
   return { origin, association, owner }
+}
+
+// liveBinding before the owner is known: { origin, association }, or null.
+// App.js parses the cold-start preview with it and checks the owner against
+// the session store and identity.status itself.
+export function previewBinding (config) {
+  const association = config && typeof config.association === 'string' ? config.association : null
+  const origin = snapshotOrigin()
+  if (association === null || typeof origin !== 'string' || origin === '') return null
+  return { origin, association }
 }
 
 // -> the stored snapshot of `binding` with at least one row, or null. A text
@@ -2229,8 +2243,104 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   )
 }
 
+// --- the cold-start preview (App.js, ../splashGate.js previewAllowed) ---
+// A Rua's saved rows shown where the splash would be while the node boots.
+// It sends nothing and reads nothing from the node: no handler is passed
+// (PostRow then offers no action), each row takes no touch of its own so
+// only the list scrolls, nothing loads more or refreshes, names, counts and
+// originals come from the snapshot alone, and photos only from the kept
+// store (KeptOnlyContext): a photo it does not hold stays the loading tile
+// and an avatar the initials, with nothing fetched.
+
+let previewMarked = false
+const noop = () => {}
+
+// What socialRowProps reads of useSocial, from the snapshot alone. Unknown
+// originals stay undefined (still on their way), as before their read.
+function previewSocial (snapshot) {
+  const seed = socialSeed(snapshot)
+  const originals = seed.originals
+  const names = new Map(Object.entries(snapshot.names))
+  return {
+    social: { flags: {}, counts: seed.counts, eng: { liked: seed.liked, reposted: seed.reposted }, pending: new Map() },
+    original: (ref) => originals.get(ref),
+    transient: () => false,
+    pending: () => false,
+    persistOf: () => true,
+    retry: noop,
+    toggle: noop,
+    profileOf: (author) => (names.has(author) ? names.get(author) : undefined),
+    items: snapshot.items
+  }
+}
+
+const PREVIEW_HANDLERS = Object.freeze({})
+
+// progress: the splash's boot progress (0..1); onScrollFrame: the list's
+// scroll position, for the shell.
+export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
+  const styles = useStyles(makeStyles)
+  const { scheme } = useTheme()
+  const now = useNow(60000)
+  const bottomPad = useBottomPad()
+  const blocks = useBlocks()
+  const view = useMemo(() => previewSocial(snapshot), [snapshot])
+  useEffect(() => {
+    if (previewMarked) return
+    previewMarked = true
+    perfMarks().mark('preview-shown')
+  }, [])
+  // The block list in force, as A Rua applies it to its snapshot rows. Before
+  // the node is up it is still 'pending' and the rows show as stored.
+  const blockedKeys = blocks.keys
+  const blockLoad = blocks.loadState
+  const ownKey = snapshot.owner
+  const rows = useMemo(() => snapshotRowsShown(view.items, blockedKeys, blockLoad, ownKey, view.original), [view, blockedKeys, blockLoad, ownKey])
+  const renderItem = useCallback(({ item }) => {
+    let row
+    if (item.kind === 'repost') {
+      const ref = refOf(item.to)
+      const repostedBy = { author: item.author, name: item.name, username: item.username }
+      const post = view.original(ref)
+      row = post
+        ? <PostRow {...socialRowProps({ post, ref, repostedBy, social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS })} />
+        : <RepostPlaceholder repostedBy={repostedBy} missing={post === null} transient={false} />
+    } else {
+      row = <PostRow {...socialRowProps({ post: item, ref: feedKey(item), social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, persist: true })} />
+    }
+    // box-only: the row is the touch target and has no handler, so a tap does
+    // nothing while a drag still scrolls the list.
+    return <View pointerEvents='box-only'>{row}</View>
+  }, [view, now, ownKey])
+  const width = (Math.min(1, Math.max(0, Number.isFinite(progress) ? progress : 0)) * 100) + '%'
+  return (
+    <View style={styles.preview}>
+      <TopBar title='A Rua' />
+      <View style={styles.previewTrack} accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
+        <View style={[styles.previewFill, { width }]} />
+      </View>
+      <KeptOnlyContext.Provider value>
+        <RefreshableList
+          data={rows}
+          keyExtractor={feedKey}
+          renderItem={renderItem}
+          extraData={now}
+          contentContainerStyle={{ paddingBottom: bottomPad }}
+          onScrollFrame={onScrollFrame}
+        />
+      </KeptOnlyContext.Provider>
+      {/* The splash set the status bar in the loading and connecting
+          branches; the preview shows the scheme's own bar instead. */}
+      <StatusBar style={statusBarStyle(scheme)} />
+    </View>
+  )
+}
+
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
+  preview: { flex: 1, backgroundColor: colors.bg },
+  previewTrack: { height: 2, backgroundColor: colors.line },
+  previewFill: { height: 2, backgroundColor: colors.accent },
   footer: { padding: 16, gap: 8 },
   footnote: { ...type.replyMark, fontSize: 12, lineHeight: 16, color: colors.soft, paddingHorizontal: 16, paddingTop: 6, paddingBottom: 2 },
   pageTitle: { ...type.counter, color: colors.ink, fontWeight: '700' },

@@ -19,7 +19,7 @@
 // URI another module already verified (chat photos, ../media/chatMedia.js);
 // it is shown as is and nothing is fetched. Any other scheme is refused.
 
-import { useEffect, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
 import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
@@ -46,12 +46,33 @@ registerKeptStore({ onRevokedRanges, bumpCacheGeneration, registerLocalCache, st
 
 const isShownUrl = (url) => typeof url === 'string' && (url.startsWith('blob:') || url.startsWith('file:'))
 
+// Kept-only mode (A Rua's cold-start preview, ../screens/ARua.js): photos and
+// avatars come from the kept store alone, read synchronously whatever
+// node.hosted says, since the node is still starting. A miss stays the
+// loading tile (initials for an avatar) and nothing is fetched nor handed to
+// the in-memory cache. Off by default: everywhere else nothing changes.
+export const KeptOnlyContext = createContext(false)
+
+// -> the kept file URI, or null. Only what loadKept would keep may be read:
+// persist and a lowercase hex64 author.
+export function keptOnlyUrl (kind, author, d, persist) {
+  if (persist === false || typeof author !== 'string' || !/^[0-9a-f]{64}$/.test(author)) return null
+  try {
+    const url = keptStore.keptUrl(kind, author, d)
+    return isShownUrl(url) ? url : null
+  } catch {
+    return null
+  }
+}
+
 // -> { state: 'off' | 'loading' | 'ok' | 'error', url, retry }
 function useMedia (author, descriptor, persist) {
   const node = useNode()
-  const canFetch = node !== null && node.hosted === true
+  const keptOnly = useContext(KeptOnlyContext) === true
+  const canFetch = !keptOnly && node !== null && node.hosted === true
   const valid = validDescriptor(descriptor)
   const key = valid ? mediaKey(descriptor) : null
+  const kept = useMemo(() => (keptOnly && key ? keptOnlyUrl('posts', author, descriptor, persist) : null), [keptOnly, key, author, persist])
   const [attempt, setAttempt] = useState(0)
   // Automatic retries done for this key (bounded by retryDelay).
   const autoRef = useRef({ key: null, done: 0 })
@@ -108,6 +129,7 @@ function useMedia (author, descriptor, persist) {
     // The descriptor is identified by its key (deps omit the object itself).
   }, [canFetch, author, key, attempt, persist])
   const retry = () => setAttempt((n) => n + 1)
+  if (keptOnly) return kept !== null ? { state: 'ok', url: kept, retry: undefined } : { state: 'loading', url: null, retry: undefined }
   if (!canFetch) return { state: 'off', url: null, retry }
   if (!key) return { state: 'error', url: null, retry }
   if (result.key !== key) return { state: 'loading', url: null, retry }

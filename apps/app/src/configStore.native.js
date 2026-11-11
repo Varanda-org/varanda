@@ -195,6 +195,21 @@ async function loadDiscovered (origin) {
   return value === null ? null : rememberedHosted(value.discovered, { installation: origin })
 }
 
+// The remembered /varanda.json of the current installation, from disk only
+// (never a request), or null. The cold-start preview (App.js) binds A Rua's
+// snapshot with its association before the node connects. Never throws.
+export async function rememberedConfig () {
+  try {
+    const origin = installationOrigin()
+    if (origin === null) return null
+    const remembered = await loadDiscovered(origin)
+    // Another installation chosen during the read: not its answer.
+    return installationOrigin() === origin ? remembered : null
+  } catch {
+    return null
+  }
+}
+
 async function forgetDiscovered (current) {
   const value = await readInstallationValue()
   if (value === null || value.discovered === undefined) return

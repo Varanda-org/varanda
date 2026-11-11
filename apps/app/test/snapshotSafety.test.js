@@ -42,8 +42,7 @@ const ARUA = withoutComments(read('src/screens/ARua.js'))
 const BLOCKS = withoutComments(read('src/blocksProvider.js'))
 const APP_JS = withoutComments(read('App.js'))
 const member = fnText(ARUA, 'MemberARua')
-// The cold-start preview arrives in a later change; checked once it exists.
-const preview = /function ARuaPreview \(/.test(ARUA) ? fnText(ARUA, 'ARuaPreview') : null
+const preview = fnText(ARUA, 'ARuaPreview')
 
 const OWN = 'aa'.repeat(32)
 const FOLLOW = 'bb'.repeat(32)
@@ -122,10 +121,8 @@ test('A Rua and its preview filter stored rows by the load state', (t) => {
   t.ok(/loadedAt !== null\s*\? items\s*: snapshotRowsShown\(items, blockedKeys, blockLoad, ownKey, \(ref\) => shownOriginals\.get\(ref\)\)/.test(member), 'A Rua: snapshot rows only through the helper')
   t.ok(member.includes('const shownOriginals = social.social.originals'))
   t.ok(member.includes('const blockLoad = blocks.loadState'))
-  if (preview !== null) {
-    t.ok(/snapshotRowsShown\(view\.items, blockedKeys, blockLoad, ownKey, view\.original\)/.test(preview), 'the preview, still on screen once the node is up')
-    t.ok(preview.includes('const blockLoad = blocks.loadState'))
-  }
+  t.ok(/snapshotRowsShown\(view\.items, blockedKeys, blockLoad, ownKey, view\.original\)/.test(preview), 'the preview, still on screen once the node is up')
+  t.ok(preview.includes('const blockLoad = blocks.loadState'))
 })
 
 test('a delete: no snapshot write until a first page read started after it', (t) => {

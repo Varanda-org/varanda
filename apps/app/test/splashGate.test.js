@@ -93,7 +93,7 @@ test('splash gate: pure helper and app integration guards', (t) => {
   t.ok(app.includes('holdBootCover('))
   t.ok(app.includes('settled: bootSettled.current, step })'))
   t.absent(app.includes('bootSettled.current || released.current'))
-  t.ok(app.includes('{coveringBoot ? splash : null}'))
+  t.ok(app.includes('{coveringBoot ? bootCover : null}'))
   t.ok(app.includes('<View style={coveringBoot ? styles.hidden : styles.flex}>{content}</View>'))
   t.ok(app.includes('if (!coveringBoot) bootSettled.current = true'))
   t.absent(app.includes('return splash'))
@@ -227,4 +227,34 @@ test('splash gate: boot patience yields the real screen when a read hangs', asyn
   const held = { cover: true, step: 'idade', elapsedMs: 0 }
   t.is(holdBootCover({ ...held, released: true }), holdBootCover(held))
   t.is(holdBootCover({ ...held, released: true }), true)
+})
+
+test('splash gate: the cold-start preview only for a live, fresh, gate-free boot', async (t) => {
+  const { previewAllowed, PREVIEW_MAX_AGE_MS, PREVIEW_BLOCKED_STEPS } = await load()
+  t.is(PREVIEW_MAX_AGE_MS, 24 * 60 * 60 * 1000)
+  const now = 1_800_000_000_000
+  const snapshot = { items: [{ kind: 'post' }], savedAt: now - 1000 }
+  const ok = { snapshot, previewCapable: true, gateNext: false, showConexao: false, step: null, locked: false, sessionLive: true, nowMs: now }
+  t.is(previewAllowed(ok), true, 'boot, step unknown')
+  t.is(previewAllowed({ ...ok, step: 'carregando' }), true)
+  t.is(previewAllowed({ ...ok, step: 'pronto' }), true)
+  t.is(previewAllowed({ ...ok, previewCapable: false }), false, 'web')
+  t.is(previewAllowed({ ...ok, previewCapable: undefined }), false)
+  t.is(previewAllowed({ ...ok, snapshot: null }), false)
+  t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, items: [] } }), false, 'no rows')
+  t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, savedAt: now - PREVIEW_MAX_AGE_MS } }), true, 'exactly 24 h')
+  t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, savedAt: now - PREVIEW_MAX_AGE_MS - 1 } }), false, 'stale')
+  t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, savedAt: now + 1 } }), false, 'future savedAt')
+  t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, savedAt: 'x' } }), false)
+  t.is(previewAllowed({ ...ok, nowMs: NaN }), false)
+  t.is(previewAllowed({ ...ok, sessionLive: false }), false, 'no live session')
+  t.is(previewAllowed({ ...ok, sessionLive: undefined }), false)
+  t.is(previewAllowed({ ...ok, gateNext: true }), false, 'intro or terms next')
+  t.is(previewAllowed({ ...ok, gateNext: undefined }), false)
+  t.is(previewAllowed({ ...ok, showConexao: true }), false, 'Conexão')
+  t.is(previewAllowed({ ...ok, locked: true }), false, 'locked')
+  t.alike(PREVIEW_BLOCKED_STEPS, ['entrar', 'recuperando', 'idade', 'vinculo', 'identidade', 'certificado', 'perfil'])
+  for (const step of PREVIEW_BLOCKED_STEPS) t.is(previewAllowed({ ...ok, step }), false, step)
+  t.is(previewAllowed({ ...ok, step: 'outro' }), false, 'an unknown step name')
+  t.is(previewAllowed(), false)
 })
