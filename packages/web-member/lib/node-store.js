@@ -1962,12 +1962,58 @@ async function deleteAgeProofs (storage) {
   for (const key of ['ageVerified', 'ageSince']) await storage.writeJson(key, null)
 }
 
+// kv phoneVerified / phoneSince = { v: 1, proof }: the account service's
+// signed phone attestations (@varanda/core lib/phone-proof.js), stored like
+// the age ones. They carry no phone number.
+const MAX_PHONE_PROOF_BYTES = 1024
+
+function isPhoneProof (proof) {
+  return proof !== null && typeof proof === 'object' && !Array.isArray(proof) &&
+    b4a.byteLength(JSON.stringify(proof)) <= MAX_PHONE_PROOF_BYTES
+}
+
+async function readPhoneProof (storage, key) {
+  const data = await readKv(storage, key)
+  return isVersioned(data) && isPhoneProof(data.proof) ? data.proof : null
+}
+
+function writePhoneProof (storage, key, proof) {
+  if (proof === null) return storage.writeJson(key, null)
+  if (!isPhoneProof(proof)) throw new TypeError('comprovante de celular inválido')
+  return storage.writeJson(key, { v: 1, proof })
+}
+
+function readPhoneVerified (storage) {
+  return readPhoneProof(storage, 'phoneVerified')
+}
+
+function writePhoneVerified (storage, proof) {
+  return writePhoneProof(storage, 'phoneVerified', proof)
+}
+
+function readPhoneSince (storage) {
+  return readPhoneProof(storage, 'phoneSince')
+}
+
+function writePhoneSince (storage, proof) {
+  return writePhoneProof(storage, 'phoneSince', proof)
+}
+
+async function deletePhoneProofs (storage) {
+  for (const key of ['phoneVerified', 'phoneSince']) await storage.writeJson(key, null)
+}
+
 module.exports = {
   readAgeVerified,
   writeAgeVerified,
   readAgeSince,
   writeAgeSince,
   deleteAgeProofs,
+  readPhoneVerified,
+  writePhoneVerified,
+  readPhoneSince,
+  writePhoneSince,
+  deletePhoneProofs,
   DM_LOCAL,
   openDmLocal,
   deleteDmLocal,

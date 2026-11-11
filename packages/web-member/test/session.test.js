@@ -18,6 +18,7 @@ const { testnet } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
 const { createCert, createIssuerCert, createIssuedCert, createSeederCert, createModeratorCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { createAgeVerified, createAgeSince, ageVerifiedPayload } = require('@varanda/core/lib/age-proof')
+const { createPhoneVerified, createPhoneSince, phoneVerifiedPayload } = require('@varanda/core/lib/phone-proof')
 const { memberCertRecord, profileRecord, postRecord } = require('@varanda/core/lib/records')
 const { FEED_INCOMPLETE_MAX } = require('@varanda/rpc')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
@@ -31,6 +32,7 @@ const { verifyRecovery, blobHashOf } = require('@varanda/core/lib/recovery-proof
 const { verifyInvite } = require('@varanda/core/lib/invite')
 const { signInviteCard, verifyInviteCard } = require('@varanda/core/lib/invite-card')
 const { verifyAge } = require('@varanda/core/lib/age')
+const { verifyPhone } = require('@varanda/core/lib/phone')
 const { verifyPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { createBrowserNode } = require('../lib/node')
 const { createBrowserSession } = require('../lib/session')
@@ -202,6 +204,8 @@ test('before an identity exists', async (t) => {
     ageVerifiedDate: null,
     ageSince: null,
     ageSinceUntil: null,
+    phoneVerifiedDate: null,
+    phoneSince: null,
     followCount: 0,
     sync: { state: 'idle' },
     publicDht: false,
@@ -1293,6 +1297,369 @@ test('age attestations: identity.reset deletes both, another identity keeps only
   await storage.writeJson('ageSince', savedSince)
   await node.setKeyPair(other)
   t.alike(await ageInfo(web), { ageVerifiedDate: null, ageSince: AGE_SINCE }, 'verified no longer verifies, since survives')
+})
+
+test('phone.sign: the unlocked key signs the phone-verification request without a certificate, locked and mismatched refuse', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const nonce = 'A-_9'.repeat(11)
+  const params = { action: 'send', nonce }
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('phone.sign', params))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await setup(t, { storage, assoc, keyPair })
+  const { publicKey: key } = await s.web.request('identity.create')
+  t.is((await s.web.request('node.info')).memberCert, false, 'no certificate')
+  const before = await s.web.request('log.read', {})
+  const fields = { nonce, member: key, association: assoc.hex }
+  const sigs = {}
+  for (const action of ['send', 'check', 'status']) {
+    const r = await s.web.request('phone.sign', { action, nonce })
+    t.alike(Object.keys(r), ['signature'], action + ': only the signature')
+    t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+    t.alike(verifyPhone({ ...fields, action }, r.signature), { ok: true }, action + ': verifies against the diary key')
+    sigs[action] = r.signature
+  }
+  t.alike(verifyPhone({ ...fields, action: 'check' }, sigs.send), { ok: false, reason: 'bad-signature' }, 'another action')
+  t.alike(verifyPhone({ ...fields, action: 'send', nonce: 'B'.repeat(43) }, sigs.send), { ok: false, reason: 'bad-signature' }, 'another nonce')
+
+  // Domain separation both ways against the age request.
+  t.alike(verifyAge({ ...fields, action: 'session' }, sigs.send), { ok: false, reason: 'bad-signature' }, 'a phone request is not an age request')
+  const ageSig = await s.web.request('age.sign', { action: 'session', nonce })
+  t.alike(verifyPhone({ ...fields, action: 'send' }, ageSig.signature), { ok: false, reason: 'bad-signature' }, 'an age request is not a phone request')
+
+  for (const k of ['member', 'association', 'phone', 'code']) {
+    const extra = await errorOf(s.web.request('phone.sign', { ...params, [k]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot pass ' + k)
+  }
+  const unknown = await errorOf(s.web.request('phone.sign', { ...params, action: 'session' }))
+  t.is(unknown.code, 'USAGE', 'an unknown action is refused')
+  const after = await s.web.request('log.read', {})
+  t.is(after.entries.length, before.entries.length, 'diary length unchanged')
+  t.alike(after, before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('phone.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike(s.internal, [], 'no internal error')
+  await s.node.close()
+
+  const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
+  const mismatch = await errorOf(other.web.request('phone.sign', params))
+  t.is(mismatch && mismatch.message, MISMATCH, 'a pair that does not match the stored diary signs nothing')
+})
+
+const PHONE_DATE = '2026-11-11T12:00:00.000Z'
+const PHONE_SINCE = '2026-11-10T00:00:00.000Z'
+const BAD_PHONE_PROOF = 'comprovante de celular inválido'
+
+async function phoneInfo (web) {
+  const { phoneVerifiedDate, phoneSince } = await web.request('node.info')
+  return { phoneVerifiedDate, phoneSince }
+}
+
+test('phone.proof: a valid phone-verified attestation is stored and survives a reopen; every refusal stores nothing', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const issuer = ageIssuer(assoc)
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('phone.proof', { since: null }))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await setup(t, { storage, assoc, keyPair })
+  const { publicKey: key } = await s.web.request('identity.create')
+  t.alike(await phoneInfo(s.web), { phoneVerifiedDate: null, phoneSince: null }, 'a fresh node answers null for both')
+  const before = await s.web.request('log.read', {})
+
+  const good = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const foreign = ageIssuer(association())
+  const stranger = crypto.keyPair()
+  const refused = [
+    ['another member', { verified: createPhoneVerified({ member: 'ab'.repeat(32), date: PHONE_DATE }, issuer.kp, issuer.cert) }],
+    ['an issuer delegated by another association', { verified: createPhoneVerified({ member: key, date: PHONE_DATE }, foreign.kp, foreign.cert) }],
+    ['a good delegation, signed by another key', { verified: { ...good, signature: hex(crypto.sign(phoneVerifiedPayload(good), stranger.secretKey)) } }],
+    ['a phone-since passed as verified', { verified: createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert) }],
+    ['an age-verified passed as verified', { verified: createAgeVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert) }],
+    ['an extra key', { verified: { ...good, phone: '+5511912345678' } }],
+    ['a v2 member certificate passed as verified', { verified: createIssuedCert({ member: key }, issuer.kp, issuer.cert) }],
+    ['a forged since next to a good verified', { verified: good, since: createPhoneSince({ since: PHONE_SINCE }, foreign.kp, foreign.cert) }]
+  ]
+  for (const [label, params] of refused) {
+    const err = await errorOf(s.web.request('phone.proof', params))
+    t.alike([err && err.code, err && err.message], ['USAGE', BAD_PHONE_PROOF], label)
+  }
+  t.is(await storage.readJson('phoneVerified'), null, 'no phoneVerified stored')
+  t.is(await storage.readJson('phoneSince'), null, 'no phoneSince stored')
+  t.alike(await phoneInfo(s.web), { phoneVerifiedDate: null, phoneSince: null }, 'node.info still null')
+
+  // Nothing is signed: a locked identity stores a proof too.
+  await s.node.clearKeyPair()
+  t.alike(await s.web.request('phone.proof', { verified: good }), { phoneVerifiedDate: PHONE_DATE, phoneSince: null })
+  t.alike(await storage.readJson('phoneVerified'), { v: 1, proof: good })
+  for (const n of [1, 2]) t.alike(await phoneInfo(s.web), { phoneVerifiedDate: PHONE_DATE, phoneSince: null }, 'node.info, call ' + n)
+  t.alike(await s.web.request('log.read', {}), before, 'nothing appended to the diary')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+  t.alike(s.internal, [], 'no internal error')
+  await s.node.close()
+
+  const again = await setup(t, { storage, assoc, keyPair })
+  t.alike(await phoneInfo(again.web), { phoneVerifiedDate: PHONE_DATE, phoneSince: null }, 'read and re-verified from kv after a reopen')
+})
+
+test('regression: a hand-planted phone attestation in kv counts only when it verifies', async (t) => {
+  await testnet(t)
+  const { web, node, storage, assoc, keyPair } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const foreign = ageIssuer(association())
+  const good = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const goodSince = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  const unsigned = { ...good, signature: '00'.repeat(64) }
+
+  const forged = [
+    ['unsigned', unsigned, { ...goodSince, signature: '00'.repeat(64) }],
+    ['another association', createPhoneVerified({ member: key, date: PHONE_DATE }, foreign.kp, foreign.cert), createPhoneSince({ since: '1970-01-01T00:00:00.000Z' }, foreign.kp, foreign.cert)],
+    ['another member, a moved since', createPhoneVerified({ member: 'ab'.repeat(32), date: PHONE_DATE }, issuer.kp, issuer.cert), { ...goodSince, since: '1970-01-01T00:00:00.000Z' }],
+    ['age attestations in the phone slots', createAgeVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert), createAgeSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)]
+  ]
+  for (const [label, verified, since] of forged) {
+    await storage.writeJson('phoneVerified', { v: 1, proof: verified })
+    await storage.writeJson('phoneSince', { v: 1, proof: since })
+    // A new pair setting drops the cache, so storage is read again.
+    await node.setKeyPair(keyPair)
+    t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, label + ' reads as null')
+  }
+
+  await storage.writeJson('phoneVerified', { v: 1, proof: good })
+  await storage.writeJson('phoneSince', { v: 1, proof: goodSince })
+  await node.setKeyPair(keyPair)
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: PHONE_DATE, phoneSince: PHONE_SINCE }, 'a planted valid pair is accepted, with no certificate')
+
+  // Cached for the session, re-verified on the next cold read.
+  await storage.writeJson('phoneVerified', { v: 1, proof: unsigned })
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: PHONE_DATE, phoneSince: PHONE_SINCE }, 'cached')
+  await node.setKeyPair(keyPair)
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: PHONE_SINCE }, 'the forged one is refused on the cold read')
+  await storage.writeJson('phoneVerified', { v: 1, proof: 'x'.repeat(2000) })
+  await node.setKeyPair(keyPair)
+  t.is((await phoneInfo(web)).phoneVerifiedDate, null, 'a malformed entry reads as null')
+})
+
+test('phone.proof: an attestation from a revoked issuer is refused and stores nothing', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  await writeBlocklist(storage, snapshot(moderator(assoc.kp), { revokedIssuers: [hex(issuer.kp.publicKey)] }))
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const since = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  for (const [label, params] of [['verified', { verified }], ['since', { since }]]) {
+    const err = await errorOf(web.request('phone.proof', params))
+    t.alike([err && err.code, err && err.message], ['USAGE', BAD_PHONE_PROOF], label)
+  }
+  t.is(await storage.readJson('phoneVerified'), null, 'no phoneVerified stored')
+  t.is(await storage.readJson('phoneSince'), null, 'no phoneSince stored')
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null })
+
+  // Planted in kv, it still reads as null.
+  await storage.writeJson('phoneVerified', { v: 1, proof: verified })
+  await storage.writeJson('phoneSince', { v: 1, proof: since })
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, 'planted: null')
+})
+
+test('regression: a stored phone attestation turns null once a later snapshot revokes its issuer', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const mod = moderator(assoc.kp)
+  await writeBlocklist(storage, snapshot(mod, { seq: 1 }))
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const since = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  t.alike(await web.request('phone.proof', { verified, since }), { phoneVerifiedDate: PHONE_DATE, phoneSince: PHONE_SINCE })
+
+  await writeBlocklist(storage, snapshot(mod, { seq: 2, revokedIssuers: [hex(issuer.kp.publicKey)] }))
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, 'the next node.info drops both')
+
+  await writeBlocklist(storage, snapshot(mod, { seq: 3 }))
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: PHONE_DATE, phoneSince: PHONE_SINCE }, 'un-revoked: back from kv')
+})
+
+test('regression: phone.proof answers against the snapshot stored after its write', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const mod = moderator(assoc.kp)
+  await writeBlocklist(storage, snapshot(mod, { seq: 1 }))
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+
+  const writeJson = storage.writeJson
+  storage.writeJson = async function (name, value) {
+    const r = await writeJson.call(this, name, value)
+    if (name === 'phoneVerified' && value !== null) {
+      storage.writeJson = writeJson
+      await writeBlocklist(storage, snapshot(mod, { seq: 2, revokedIssuers: [hex(issuer.kp.publicKey)] }))
+    }
+    return r
+  }
+  t.alike(await web.request('phone.proof', { verified }), { phoneVerifiedDate: null, phoneSince: null }, 'the answer honours the newer snapshot')
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, 'node.info too')
+})
+
+test('regression: a failed identity.reset does not keep serving cached phone dates', async (t) => {
+  await testnet(t)
+  const { web, node, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const since = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  await web.request('phone.proof', { verified, since })
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: PHONE_DATE, phoneSince: PHONE_SINCE }, 'cached')
+
+  const writeJson = storage.writeJson
+  storage.writeJson = async function (name, value) {
+    if (name === 'phoneVerified' && value === null) throw new Error('falha de disco simulada')
+    return writeJson.call(this, name, value)
+  }
+  await t.exception(node.reset(), 'the reset fails on the phone delete')
+  storage.writeJson = writeJson
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, 'nothing served from the cache')
+})
+
+test('phone.proof: null clears verified or since, forged since refused', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const since = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+
+  // No certificate: a phone-since never depends on one.
+  t.alike(await web.request('phone.proof', { since }), { phoneVerifiedDate: null, phoneSince: PHONE_SINCE })
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: PHONE_SINCE })
+  t.alike(await storage.readJson('phoneSince'), { v: 1, proof: since })
+
+  const foreign = ageIssuer(association())
+  for (const [label, forged] of [
+    ['another association', createPhoneSince({ since: '1970-01-01T00:00:00.000Z' }, foreign.kp, foreign.cert)],
+    ['a moved since', { ...since, since: '1970-01-01T00:00:00.000Z' }],
+    ['a phone-verified passed as since', createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)],
+    ['an age-since passed as since', createAgeSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)]
+  ]) {
+    const err = await errorOf(web.request('phone.proof', { since: forged }))
+    t.alike([err && err.code, err && err.message], ['USAGE', BAD_PHONE_PROOF], label)
+  }
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: PHONE_SINCE }, 'unchanged after the refusals')
+
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  t.alike(await web.request('phone.proof', { verified, since: null }), { phoneVerifiedDate: PHONE_DATE, phoneSince: null }, 'since null clears')
+  t.is(await storage.readJson('phoneSince'), null)
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: PHONE_DATE, phoneSince: null })
+
+  t.alike(await web.request('phone.proof', { verified: null }), { phoneVerifiedDate: null, phoneSince: null }, 'verified null clears')
+  t.is(await storage.readJson('phoneVerified'), null)
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null })
+
+  const empty = await errorOf(web.request('phone.proof', {}))
+  t.is(empty && empty.code, 'USAGE', 'neither field')
+})
+
+test('phone.proof since: an older-dated attestation never replaces a newer one', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const older = createPhoneSince({ since: PHONE_SINCE, date: '2026-11-10T00:00:00.000Z' }, issuer.kp, issuer.cert)
+  const newer = createPhoneSince({ since: '2026-11-11T00:00:00.000Z', date: '2026-11-11T06:00:00.000Z' }, issuer.kp, issuer.cert)
+
+  t.alike(await web.request('phone.proof', { since: newer }), { phoneVerifiedDate: null, phoneSince: newer.since })
+  const err = await errorOf(web.request('phone.proof', { since: older }))
+  t.alike([err && err.code, err && err.message], ['USAGE', BAD_PHONE_PROOF], 'the replay is refused')
+  t.alike(await storage.readJson('phoneSince'), { v: 1, proof: newer }, 'the newer stays in kv')
+  t.is((await web.request('node.info')).phoneSince, newer.since, 'node.info keeps the newer since')
+
+  t.alike(await web.request('phone.proof', { since: newer }), { phoneVerifiedDate: null, phoneSince: newer.since }, 'the same date again is accepted')
+  t.alike(await web.request('phone.proof', { since: null }), { phoneVerifiedDate: null, phoneSince: null }, 'null still clears')
+  t.alike(await web.request('phone.proof', { since: older }), { phoneVerifiedDate: null, phoneSince: PHONE_SINCE }, 'after a clear an older one is accepted')
+})
+
+test('phone and age attestations never stand in for each other', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const phoneVerified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const phoneSince = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  const ageVerified = createAgeVerified({ member: key, date: AGE_DATE }, issuer.kp, issuer.cert)
+  const ageSince = createAgeSince({ since: AGE_SINCE }, issuer.kp, issuer.cert)
+
+  for (const [method, params, message] of [
+    ['phone.proof', { verified: ageVerified }, BAD_PHONE_PROOF],
+    ['phone.proof', { since: ageSince }, BAD_PHONE_PROOF],
+    ['age.proof', { verified: phoneVerified }, BAD_AGE_PROOF],
+    ['age.proof', { since: phoneSince }, BAD_AGE_PROOF]
+  ]) {
+    const err = await errorOf(web.request(method, params))
+    t.alike([err && err.code, err && err.message], ['USAGE', message], method + ' ' + Object.keys(params)[0])
+  }
+  for (const k of ['phoneVerified', 'phoneSince', 'ageVerified', 'ageSince']) t.is(await storage.readJson(k), null, 'no ' + k + ' stored')
+})
+
+test('phone attestations: node.info carries only the two dates, never a phone number', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const since = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  await web.request('phone.proof', { verified, since })
+  const info = await web.request('node.info')
+  t.alike(Object.keys(info).filter((k) => /phone|celular|mobile|msisdn/i.test(k)).sort(), ['phoneSince', 'phoneVerifiedDate'], 'only the two date fields')
+  t.alike([info.phoneVerifiedDate, info.phoneSince], [PHONE_DATE, PHONE_SINCE])
+  t.absent(/\+55\d/.test(JSON.stringify(info)), 'no number in node.info')
+  for (const k of ['phoneVerified', 'phoneSince']) t.absent(/\+55/.test(JSON.stringify(await storage.readJson(k))), 'no number in kv ' + k)
+})
+
+test('phone attestations: identity.reset deletes both, another identity keeps only since', async (t) => {
+  await testnet(t)
+  const { web, node, storage, assoc, keyPair } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const since = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  await web.request('phone.proof', { verified, since })
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: PHONE_DATE, phoneSince: PHONE_SINCE })
+  const savedVerified = await storage.readJson('phoneVerified')
+  const savedSince = await storage.readJson('phoneSince')
+
+  await node.reset()
+  t.is(await storage.readJson('phoneVerified'), null, 'kv phoneVerified gone')
+  t.is(await storage.readJson('phoneSince'), null, 'kv phoneSince gone')
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, 'no identity')
+  await node.setKeyPair(keyPair)
+  t.is((await web.request('identity.create')).publicKey, key)
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, 'the same key recreated does not get them back')
+
+  await node.reset()
+  const other = crypto.keyPair()
+  await node.setKeyPair(other)
+  t.not((await web.request('identity.create')).publicKey, key)
+  await storage.writeJson('phoneVerified', savedVerified)
+  await storage.writeJson('phoneSince', savedSince)
+  await node.setKeyPair(other)
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: PHONE_SINCE }, 'verified no longer verifies, since survives')
 })
 
 test('push.sign: the unlocked key signs the push-subscription statement, locked refuses', async (t) => {

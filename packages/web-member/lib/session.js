@@ -39,7 +39,8 @@
 // the key is USAGE 'identidade bloqueada: entre com a passkey'. The only
 // signatures the session makes outside the diary are account.sign,
 // report.sign, appeal.sign, terms.sign, invite.sign, inviteCard.sign,
-// push.sign and age.sign: the domain-separated account-link statement
+// push.sign, age.sign and phone.sign: the domain-separated account-link
+// statement
 // (@varanda/core lib/account-link.js, prefix 'varanda-account-link-v1'),
 // report statement (@varanda/core lib/report.js, prefix
 // 'varanda-report-v1'), appeal statement (@varanda/core lib/appeal.js,
@@ -48,9 +49,10 @@
 // (@varanda/core lib/invite.js, prefix 'varanda-invite-v1'), signup-invite
 // card (@varanda/core lib/invite-card.js, prefix 'varanda-invite-card-v1'),
 // push-subscription statement (@varanda/core lib/push-proof.js, prefix
-// 'varanda-push-v1') and age-verification request (@varanda/core
-// lib/age.js, prefix 'varanda-age-v1'), whose member and association the
-// session fills in
+// 'varanda-push-v1'), age-verification request (@varanda/core lib/age.js,
+// prefix 'varanda-age-v1') and phone-verification request (@varanda/core
+// lib/phone.js, prefix 'varanda-phone-v1'), whose member and association
+// the session fills in
 // itself, so a caller can never get
 // arbitrary bytes, a certificate or a block signed. Each returns the
 // signature only.
@@ -299,9 +301,11 @@ const { signInvite } = require('@varanda/core/lib/invite')
 const { signInviteCard, isInviteCardExpired } = require('@varanda/core/lib/invite-card')
 const { strictVerifyInviteCard } = require('./invite-card')
 const { signAge } = require('@varanda/core/lib/age')
+const { signPhone } = require('@varanda/core/lib/phone')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { verifyAgeVerified, verifyAgeSince } = require('@varanda/core/lib/age-proof')
+const { verifyPhoneVerified, verifyPhoneSince } = require('@varanda/core/lib/phone-proof')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const member = require('./member-ops')
@@ -363,6 +367,7 @@ const INTERNAL_MESSAGE = 'erro interno'
 const NOT_SYNCED_MESSAGE = 'sincronize com o semeador antes de publicar'
 const BAD_USERNAME_RECORD = 'registro de nome inválido'
 const BAD_AGE_PROOF = 'comprovante de idade inválido'
+const BAD_PHONE_PROOF = 'comprovante de celular inválido'
 const OLD_USERNAME_RECORD = 'registro de nome antigo'
 const SELF_REPORT = 'não é possível denunciar a própria chave'
 const BAD_REPORT = 'denúncia inválida'
@@ -867,6 +872,13 @@ function createBrowserSession ({
   let ageSinceUntil = null
   let ageSinceIssuer = null
   let ageChecked = false
+  // The stored phone attestations (kv phoneVerified / phoneSince), re-verified
+  // and cached like the age ones against the same revoked issuers. Unlike
+  // age-since, phone-since never vouches for a certificate, so no issuer is
+  // kept.
+  let phoneVerifiedDate = null
+  let phoneSinceDate = null
+  let phoneChecked = false
   // The revoked issuers both attestations are checked against (as member
   // certificates and username records are), cached per stored blocklist
   // snapshot: a snapshot a sync run adopted after the first read drops the
@@ -1996,6 +2008,21 @@ function createBrowserSession ({
     return { ageVerifiedDate, ageSince: bound ? ageSinceDate : null, ageSinceUntil: bound ? ageSinceUntil : null }
   }
 
+  // -> { phoneVerifiedDate, phoneSince } for the own key `own`, as ageState:
+  // kv reads only, and an object that does not verify reads as null.
+  async function phoneState (own) {
+    if (own === null) return { phoneVerifiedDate: null, phoneSince: null }
+    const revokedIssuers = await ageRevokedIssuers()
+    if (!phoneChecked) {
+      const verified = await store.readPhoneVerified(storage)
+      const since = await store.readPhoneSince(storage)
+      phoneVerifiedDate = verified !== null && verifyPhoneVerified(verified, own, cfg.association, { revokedIssuers }).ok ? verified.date : null
+      phoneSinceDate = since !== null && verifyPhoneSince(since, cfg.association, { revokedIssuers }).ok ? since.since : null
+      phoneChecked = true
+    }
+    return { phoneVerifiedDate, phoneSince: phoneSinceDate }
+  }
+
   // -> the stored snapshot's revoked issuers (empty when none verifies). The
   // cache key is the snapshot's identity (moderator, moderatorDate, seq and
   // signature: every adopted snapshot differs in one of them), so a large
@@ -2009,6 +2036,7 @@ function createBrowserSession ({
       ageRevoked = (await member.moderation(storage, cfg.association)).revokedIssuers
       ageSnapshotKey = key
       ageChecked = false
+      phoneChecked = false
     }
     return ageRevoked
   }
@@ -2855,6 +2883,7 @@ function createBrowserSession ({
         memberCert,
         memberCertDate: revoked ? null : memberCertDate,
         ...(await ageState(publicKey)),
+        ...(await phoneState(publicKey)),
         followCount: (await store.readFollows(storage)).length,
         sync: syncState(),
         publicDht: false,
@@ -3139,6 +3168,51 @@ function createBrowserSession ({
       if (verified !== undefined) await store.writeAgeVerified(storage, verified)
       if (since !== undefined) await store.writeAgeSince(storage, since)
       return await ageState(own)
+    }),
+
+    // Signs the phone-verification request with the in-memory key
+    // (docs/rpc.md 5.115), exactly like age.sign. The phone number and the
+    // code never reach the node: they go from the client to the account
+    // service beside this signature.
+    'phone.sign': serial(async ({ action, nonce }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      const signature = signPhone({ action, nonce, member: own, association: cfg.association }, keyPair)
+      return { signature }
+    }),
+
+    // Stores the account service's signed phone attestations (docs/rpc.md
+    // 5.116) as age.proof does; null clears either one. Both are verified
+    // before anything is written, so a bad pair stores nothing.
+    'phone.proof': serial(async ({ verified, since }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      const revokedIssuers = await ageRevokedIssuers()
+      if (verified !== undefined && verified !== null && !verifyPhoneVerified(verified, own, cfg.association, { revokedIssuers }).ok) throw new UsageError(BAD_PHONE_PROOF)
+      if (since !== undefined && since !== null) {
+        if (!verifyPhoneSince(since, cfg.association, { revokedIssuers }).ok) throw new UsageError(BAD_PHONE_PROOF)
+        // Monotonic: a replayed older phone-since never replaces a newer one
+        // that still verifies, or a since the association moved would come
+        // back.
+        const stored = await store.readPhoneSince(storage)
+        if (stored !== null && verifyPhoneSince(stored, cfg.association, { revokedIssuers }).ok && Date.parse(since.date) < Date.parse(stored.date)) throw new UsageError(BAD_PHONE_PROOF)
+      }
+      phoneChecked = false
+      if (verified !== undefined) await store.writePhoneVerified(storage, verified)
+      if (since !== undefined) await store.writePhoneSince(storage, since)
+      return await phoneState(own)
     }),
 
     // Signs a page statement or a page record (docs/rpc.md 5.84) with the
@@ -4289,6 +4363,9 @@ function createBrowserSession ({
       ageSinceUntil = null
       ageSinceIssuer = null
       ageChecked = false
+      phoneVerifiedDate = null
+      phoneSinceDate = null
+      phoneChecked = false
       if (prfCopy !== null) {
         // Without the box pair private groups read as locked; the identity
         // itself is unlocked either way.
@@ -4776,6 +4853,9 @@ function createBrowserSession ({
     ageSinceUntil = null
     ageSinceIssuer = null
     ageChecked = false
+    phoneVerifiedDate = null
+    phoneSinceDate = null
+    phoneChecked = false
     await storage.deleteCore(store.DIARY)
     store.forgetLegacy(storage)
     await store.deleteMediaCores(storage)
@@ -4792,6 +4872,7 @@ function createBrowserSession ({
     await store.deleteDmData(storage)
     await dmEngine.wipeMedia()
     await store.deleteAgeProofs(storage)
+    await store.deletePhoneProofs(storage)
     ownKey = null
     diaryInfo = null
     synced = false

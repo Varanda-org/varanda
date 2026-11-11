@@ -364,6 +364,12 @@ const AGE_ACTIONS = ['session', 'result']
 
 const isAgeAction = (v) => typeof v === 'string' && AGE_ACTIONS.includes(v)
 
+// phone.sign (docs/rpc.md 5.115). Duplicated from @varanda/core lib/phone.js
+// (ACTIONS) because this package has no dependencies.
+const PHONE_ACTIONS = ['send', 'check', 'status']
+
+const isPhoneAction = (v) => typeof v === 'string' && PHONE_ACTIONS.includes(v)
+
 // push.sign (docs/rpc.md 5.31). Duplicated from @varanda/core
 // lib/push-proof.js (an https endpoint of 1..2048 printable ASCII
 // characters with no backslash, an empty username, password and hash; p256dh of 1..128 and auth of 1..32 from
@@ -709,6 +715,16 @@ function isAgeProof (v) {
   return utf8ByteLength(JSON.stringify(v)) <= MAX_AGE_PROOF_BYTES
 }
 
+// phone.proof (docs/rpc.md 5.116): an issuer-signed phone attestation; the
+// node verifies it against its own key and the association, this only bounds
+// the size.
+const MAX_PHONE_PROOF_BYTES = 1024
+
+function isPhoneProof (v) {
+  if (!isPlainObject(v)) return false
+  return utf8ByteLength(JSON.stringify(v)) <= MAX_PHONE_PROOF_BYTES
+}
+
 // field(check, { optional, fallback }): `fallback` is filled in when the
 // field is absent (the handler always sees it).
 function req (check) {
@@ -865,6 +881,15 @@ const SPECS = {
       nonce: req(isNonce)
     }
   },
+  // Signs the phone-verification request with the identity key; the node
+  // fills in member and association itself, so a caller never chooses the
+  // bytes.
+  'phone.sign': {
+    fields: {
+      action: req(isPhoneAction),
+      nonce: req(isNonce)
+    }
+  },
   // Stores the account service's signed age attestations in the browser
   // node after verifying them; since: null clears the stored one. A local,
   // idempotent store, so not mutating: the client re-reads node.info.
@@ -872,6 +897,19 @@ const SPECS = {
     fields: {
       verified: opt(isAgeProof),
       since: opt((v) => v === null || isAgeProof(v))
+    },
+    cross (given) {
+      return hasOwn(given, 'verified') || hasOwn(given, 'since') ? null : 'parâmetro obrigatório: verified'
+    }
+  },
+  // Stores the account service's signed phone attestations in the browser
+  // node after verifying them; verified: null or since: null clears the
+  // stored one. A local, idempotent store, so not mutating: the client
+  // re-reads node.info.
+  'phone.proof': {
+    fields: {
+      verified: opt((v) => v === null || isPhoneProof(v)),
+      since: opt((v) => v === null || isPhoneProof(v))
     },
     cross (given) {
       return hasOwn(given, 'verified') || hasOwn(given, 'since') ? null : 'parâmetro obrigatório: verified'
