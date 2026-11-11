@@ -1,10 +1,9 @@
 'use strict'
 
-// End to end, loopback only: the Google account link (B1) from the browser
+// End to end, loopback only: the phone account link from the browser
 // session to a CLI follower. The pieces: an association (CLI), an issuer key
 // certified by it (`account key`, `assoc certify-issuer`, `account cert add`),
-// a fake Google on 127.0.0.1 (/auth answers 302 back to the callback with a
-// code, /token checks PKCE, /userinfo), the account service in-process
+// a phone stub and an unused fake Google on 127.0.0.1, the account service in-process
 // (createAccountServer over a temp data dir, with an injectable clock for
 // the 7-day rename cooldown), a seeder (`seed --ws-port`), a browser node
 // session over memory storage holding a random key pair (as the page holds
@@ -21,6 +20,7 @@
 const test = require('brittle')
 const fs = require('node:fs')
 const http = require('node:http')
+const net = require('node:net')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
 const { spawn } = require('node:child_process')
@@ -36,6 +36,8 @@ const { openAccountStore, COOLDOWN_MS } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
+const { signPhone } = require('@varanda/core/lib/phone')
+const { linkByPhone, phoneServerOptions } = require('./helpers/phone-link')
 const { signInvite } = require('@varanda/core/lib/invite')
 const { openInvitesStore, inviteId, CODE_RE } = require('../lib/account/invites-store')
 const { createAccountServer, loadIssuer, COOKIE } = require('../lib/account/server')
@@ -172,7 +174,7 @@ function accountClient (base) {
     const init = { method, redirect: 'manual', headers: {} }
     if (withCookie && jar.cookie !== null) init.headers.cookie = COOKIE + '=' + jar.cookie
     if (body !== undefined) {
-      init.headers.origin = ORIGIN
+      init.headers.origin = base
       init.headers['content-type'] = 'application/json'
       init.body = JSON.stringify(body)
     }
@@ -185,14 +187,7 @@ function accountClient (base) {
     try { parsed = JSON.parse(text) } catch {}
     return { status: res.status, location: res.headers.get('location'), body: parsed }
   }
-  // A redirect to the public origin, delivered to the loopback service as
-  // the browser would deliver it to the public host.
-  function local (location) {
-    const url = new URL(location)
-    if (url.origin !== ORIGIN) throw new Error('redirect to another origin')
-    return url.pathname + url.search
-  }
-  return { jar, api, local }
+  return { jar, api }
 }
 
 // The page's in-memory client, wired to the node as apps/app wires it (JSON
@@ -268,14 +263,34 @@ async function device (t, { storage, association, seederUrl, keyPair }) {
   return { node, web, internal }
 }
 
-function noPersonalData (t, text, label) {
+async function freePort () {
+  const server = net.createServer()
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  await new Promise((resolve) => server.close(resolve))
+  return port
+}
+
+function observedPhoneOptions () {
+  const opts = phoneServerOptions()
+  const numbers = []
+  const send = opts.phoneClient.send
+  opts.phoneClient.send = (args) => {
+    numbers.push(args.phone)
+    return send(args)
+  }
+  return { ...opts, numbers }
+}
+
+function noPersonalData (t, text, label, numbers) {
+  t.absent(numbers.some((phone) => text.includes(phone) || text.includes(phone.slice(3))), label + ': no phone number')
   t.absent(text.includes(EMAIL), label + ': no e-mail')
   t.absent(text.includes(SUB), label + ': no sub')
   t.absent(text.includes(CLIENT_SECRET), label + ': no secret')
   t.absent(text.includes(ACCESS), label + ': no access token')
 }
 
-test('Google link to a v2 certificate and @username, seen by a CLI follower, renamed after 7 days', async (t) => {
+test('Phone link to a v2 certificate and @username, seen by a CLI follower, renamed after 7 days', async (t) => {
   t.timeout(170000)
   const { bootstrap } = await testnet(t)
 
@@ -291,23 +306,28 @@ test('Google link to a v2 certificate and @username, seen by a CLI follower, ren
   const issuer = loadIssuer(accountDir, association)
   t.ok(issuer !== null, 'the account dir is configured')
 
-  // ---- the account service against the fake Google, with a movable clock ----
+  // ---- the account service with a phone stub and a movable clock ----
   const google = await fakeGoogle(t)
   const clock = { offset: 0 }
   const now = () => Date.now() + clock.offset
   const logs = []
   const termsDir = tmpDir(t, 'varanda-acc-terms-')
+  const phoneOpts = observedPhoneOptions()
+  const port = await freePort()
+  const base = 'http://127.0.0.1:' + port
+  const store = openAccountStore(accountDir, { now })
   const server = createAccountServer({
+    ...phoneOpts,
     association,
-    origin: ORIGIN,
+    origin: base,
     google: createGoogle({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: ORIGIN + '/account/callback', endpoints: google.endpoints, fetch: google.fetch }),
-    store: openAccountStore(accountDir, { now }),
+    store,
     issuer,
     terms: openTermsStore(termsDir),
     log: (e) => logs.push(JSON.stringify(e)),
     now
   })
-  const listener = await server.listen({ host: '127.0.0.1', port: 0 })
+  const listener = await server.listen({ host: '127.0.0.1', port })
   t.teardown(() => listener.close(), { force: true })
   const account = accountClient('http://127.0.0.1:' + listener.port)
 
@@ -330,44 +350,49 @@ test('Google link to a v2 certificate and @username, seen by a CLI follower, ren
   const a = await device(t, { storage: storageA, association, seederUrl, keyPair })
   t.alike(await a.web.request('identity.create'), { publicKey: keyHex, association })
 
-  // ---- link: start, reserve proof, Google, callback ----
   const started = await account.api('POST', '/account/start', { body: { member: keyHex, username: 'ana' } })
   t.is(started.status, 200, 'start')
   t.ok(account.jar.cookie !== null, 'the service set the link cookie')
   const reserve = await a.web.request('account.sign', { phase: 'reserve', nonce: started.body.nonce, username: 'ana', sub: '' })
   const authorized = await account.api('POST', '/account/authorize', { body: { signature: reserve.signature } })
-  t.is(authorized.status, 200, 'the reserve proof the session signed verifies')
-  const authorizeUrl = new URL(authorized.body.authorizeUrl)
-  t.is(authorizeUrl.origin + authorizeUrl.pathname, google.endpoints.authUrl)
-  const consent = await fetch(authorizeUrl, { redirect: 'manual' })
-  await consent.text()
-  t.is(consent.status, 302, 'the fake Google sends the browser back')
-  const callbackPath = account.local(consent.headers.get('location'))
-  t.ok(callbackPath.startsWith('/account/callback?'), 'to the service callback')
+  t.is(authorized.status, 410, 'the Google authorization is retired')
+  t.alike(authorized.body, { error: 'versao-antiga' })
+  t.is(google.seen.length, 0, 'no outbound authorization request')
+  t.absent('authorizeUrl' in authorized.body)
 
-  // Negative: the same callback without the cookie is refused before any
-  // exchange, and links nothing.
+  const callbackPath = '/account/callback?code=' + CODE + '&state=retired'
   const stray = await account.api('GET', callbackPath, { withCookie: false })
   t.is(stray.status, 302)
-  t.is(stray.location, ORIGIN + '/?conta=erro', 'no cookie: ?conta=erro')
+  t.is(stray.location, base + '/?conta=erro', 'no cookie: ?conta=erro')
   t.is(google.tokenCalls(), 0, 'nothing exchanged without the cookie')
   t.alike((await account.api('GET', '/account/status?member=' + keyHex)).body, { linked: false }, 'and no link')
 
   const back = await account.api('GET', callbackPath)
   t.is(back.status, 302)
-  t.is(back.location, ORIGIN + '/?conta=ok', 'with the cookie: ?conta=ok')
-  t.is(google.tokenCalls(), 1, 'one code exchange (PKCE checked by the fake)')
+  t.is(back.location, base + '/?conta=erro', 'with the cookie: still retired')
+  t.is(google.seen.length, 0, 'no outbound request with the cookie either')
 
-  // ---- finish: the proof binds the Google subject; a v2 cert and a username record ----
   const pending = await account.api('GET', '/account/pending')
-  t.is(pending.status, 200)
-  t.is(pending.body.sub, SUB, 'pending carries the subject after the callback')
-  t.is(pending.body.member, keyHex)
-  const finishProof = await a.web.request('account.sign', { phase: 'finish', nonce: pending.body.nonce, username: 'ana', sub: pending.body.sub })
-  const finished = await account.api('POST', '/account/finish', { body: { signature: finishProof.signature } })
-  t.is(finished.status, 200, 'finish')
-  t.is(account.jar.cookie, null, 'the cookie is cleared after finish')
-  const { cert, usernameRecord, nextChangeAt } = finished.body
+  t.is(pending.status, 404)
+  t.alike(pending.body, { error: 'expirado' })
+  store.reserve(account.jar.cookie)
+  store.putGoogle(account.jar.cookie, { sub: SUB, email: EMAIL })
+  const oldProof = await a.web.request('account.sign', { phase: 'finish', nonce: started.body.nonce, username: 'ana', sub: SUB })
+  const oldFinish = await account.api('POST', '/account/finish', { body: { signature: oldProof.signature } })
+  t.is(oldFinish.status, 404, 'an old Google row cannot finish')
+  t.alike(oldFinish.body, { error: 'expirado' })
+
+  const finished = await linkByPhone({
+    origin: base,
+    member: keyHex,
+    username: 'ana',
+    sign: ({ action, phase, nonce, username, sub }) => action
+      ? a.web.request('phone.sign', { action, nonce })
+      : a.web.request('account.sign', { phase, nonce, username, sub })
+  })
+  t.ok(phoneOpts.phones.verified(keyHex), 'the session signed the phone verification')
+  t.ok(store.status(keyHex).linked, 'the phone finish linked the member')
+  const { cert, usernameRecord, nextChangeAt } = finished
   t.is(cert.v, 2, 'a v2 certificate')
   t.alike(Object.keys(cert), ['v', 'member', 'ageBand', 'method', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature'])
   t.is(cert.issuer, issuerKey)
@@ -421,7 +446,7 @@ test('Google link to a v2 certificate and @username, seen by a CLI follower, ren
   await c.node.close()
   t.is((await a.web.request('log.read', {})).entries.length, diaryBefore, 'signing writes nothing to the diary')
   const termsText = fs.readFileSync(path.join(termsDir, 'terms.json'), 'utf8')
-  t.absent(termsText.includes(EMAIL), 'terms.json: no e-mail')
+  t.absent(phoneOpts.numbers.some((phone) => termsText.includes(phone) || termsText.includes(phone.slice(3))), 'terms.json: no phone number')
   t.absent(termsText.includes(SUB), 'terms.json: no sub')
   t.alike(openTermsStore(termsDir, { readOnly: true }).list(keyHex), [{ version: TERMS_VERSION, acceptedAt: accepted.body.acceptedAt }])
 
@@ -490,9 +515,9 @@ test('Google link to a v2 certificate and @username, seen by a CLI follower, ren
 
   // Nothing personal in the service log, the session events or the seeder's
   // output, and no internal error in the session.
-  noPersonalData(t, logs.join('\n'), 'service log')
-  noPersonalData(t, JSON.stringify(a.web.events), 'session events')
-  noPersonalData(t, seed.stdout + seed.stderr, 'seeder output')
+  noPersonalData(t, logs.join('\n'), 'service log', phoneOpts.numbers)
+  noPersonalData(t, JSON.stringify(a.web.events), 'session events', phoneOpts.numbers)
+  noPersonalData(t, seed.stdout + seed.stderr, 'seeder output', phoneOpts.numbers)
   t.is(a.internal.length, 0, 'no internal error on A')
   t.is(b.internal.length, 0, 'no internal error on B')
   seed.kill()
@@ -522,15 +547,18 @@ test('sign-up invites: open, invite-only, single use, restart and back to open',
   const now = () => clock.at
   const logs = []
   const texts = []
-  let seq = 0
+  const phoneOpts = observedPhoneOptions()
 
   // One service lifetime over accountDir; perWeek null is open sign-up.
   async function serve (perWeek) {
     const store = openAccountStore(accountDir, { now })
     const invites = perWeek === null ? null : openInvitesStore(accountDir, { now, perWeek, isUsed: (id) => store.inviteUsed(id) })
+    const port = await freePort()
+    const base = 'http://127.0.0.1:' + port
     const server = createAccountServer({
+      ...phoneOpts,
       association,
-      origin: ORIGIN,
+      origin: base,
       google: createGoogle({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: ORIGIN + '/account/callback', endpoints: google.endpoints, fetch: google.fetch }),
       store,
       issuer,
@@ -538,7 +566,7 @@ test('sign-up invites: open, invite-only, single use, restart and back to open',
       log: (e) => logs.push(JSON.stringify(e)),
       now
     })
-    const listener = await server.listen({ host: '127.0.0.1', port: 0 })
+    const listener = await server.listen({ host: '127.0.0.1', port })
     const svc = { listener, closed: false, base: 'http://127.0.0.1:' + listener.port }
     svc.stop = async () => {
       if (svc.closed) return
@@ -556,7 +584,7 @@ test('sign-up invites: open, invite-only, single use, restart and back to open',
     const init = { method, redirect: 'manual', headers: {} }
     if (cookie) init.headers.cookie = COOKIE + '=' + cookie
     if (body !== undefined) {
-      init.headers.origin = ORIGIN
+      init.headers.origin = svc.base
       init.headers['content-type'] = 'application/json'
       init.body = JSON.stringify(body)
     }
@@ -574,7 +602,6 @@ test('sign-up invites: open, invite-only, single use, restart and back to open',
     const kp = crypto.keyPair()
     return { kp, hex: b4a.toString(kp.publicKey, 'hex') }
   }
-  const sign = (m, phase, nonce, username, sub = '') => signAccountLink({ phase, nonce, member: m.hex, username, association, sub }, m.kp)
 
   async function issue (svc, m) {
     const started = await api(svc, 'POST', '/account/invites/start', { body: { member: m.hex } })
@@ -584,24 +611,18 @@ test('sign-up invites: open, invite-only, single use, restart and back to open',
     return api(svc, 'POST', '/account/invites/finish', { body: { member: m.hex, nonce, signature } })
   }
 
-  // start (with the code, if any) through finish.
   async function link (svc, m, username, code) {
-    const body = { member: m.hex, username }
-    if (code !== undefined) body.invite = code
-    const started = await api(svc, 'POST', '/account/start', { body })
-    if (started.status !== 200) return { started }
-    const cookie = started.cookie
-    const auth = await api(svc, 'POST', '/account/authorize', { cookie, body: { signature: sign(m, 'reserve', started.body.nonce, username) } })
-    const consent = await fetch(new URL(auth.body.authorizeUrl), { redirect: 'manual' })
-    await consent.text()
-    google.account.sub = '30000000000000000' + String(1000 + seq++)
-    const back = new URL(consent.headers.get('location'))
-    const cb = await api(svc, 'GET', back.pathname + back.search, { cookie })
-    const pending = await api(svc, 'GET', '/account/pending', { cookie })
-    const done = pending.status === 200
-      ? await api(svc, 'POST', '/account/finish', { cookie, body: { signature: sign(m, 'finish', pending.body.nonce, username, pending.body.sub) } })
-      : pending
-    return { started, cb, done }
+    const body = await linkByPhone({
+      origin: svc.base,
+      member: m.hex,
+      username,
+      invite: code,
+      sign: (fields) => fields.action
+        ? signPhone({ ...fields, association }, m.kp)
+        : signAccountLink({ ...fields, association }, m.kp),
+      onResponse: (r) => texts.push(r.text, r.headers.get('location') || '', r.headers.get('set-cookie') || '')
+    })
+    return body
   }
 
   const readJson = (file) => JSON.parse(fs.readFileSync(path.join(accountDir, file), 'utf8'))
@@ -610,7 +631,7 @@ test('sign-up invites: open, invite-only, single use, restart and back to open',
   let svc = await serve(null)
   t.alike((await api(svc, 'GET', '/account/invites/policy')).body, { required: false }, 'open: no code required')
   const a = member()
-  t.is((await link(svc, a, 'ana')).done.status, 200, 'open: A links without a code')
+  t.is((await link(svc, a, 'ana')).cert.member, a.hex, 'open: A links without a code')
   t.absent('invites' in (await api(svc, 'GET', '/account/status?member=' + a.hex)).body, 'open: status carries no invites')
   await svc.stop()
 
@@ -638,9 +659,11 @@ test('sign-up invites: open, invite-only, single use, restart and back to open',
 
   // ---- B links with A's first code ----
   const linkedB = await link(svc, b, 'bia', codes[0])
-  t.is(linkedB.started.status, 200, 'B starts with the code')
-  t.is(linkedB.cb.location, ORIGIN + '/?conta=ok', 'the redirect carries no code')
-  t.is(linkedB.done.status, 200, 'B links')
+  t.ok(phoneOpts.phones.verified(b.hex), 'B verified its phone with the invite reserved')
+  const callback = await api(svc, 'GET', '/account/callback?code=' + codes[0])
+  t.is(callback.location, svc.base + '/?conta=erro', 'the retired redirect carries no code')
+  t.is(google.seen.length, 0, 'no outbound request')
+  t.is(linkedB.cert.member, b.hex, 'B links')
   t.absent('invites' in (await api(svc, 'GET', '/account/status?member=' + b.hex)).body, 'B\'s status carries no invite counts')
   const fromB = await issue(svc, b)
   t.is(fromB.status, 200, 'B issues one link')
@@ -659,7 +682,8 @@ test('sign-up invites: open, invite-only, single use, restart and back to open',
   svc = await serve(3)
   t.is((await issue(svc, a)).status, 429, 'A\'s used count persisted')
   t.absent('invites' in (await api(svc, 'GET', '/account/status?member=' + a.hex)).body, 'A\'s status carries no invite counts')
-  t.is((await link(svc, member(), 'duda', codes[1])).done.status, 200, 'a code issued before the restart still links')
+  const dudaKey = member()
+  t.is((await link(svc, dudaKey, 'duda', codes[1])).cert.member, dudaKey.hex, 'a code issued before the restart still links')
   t.is((await api(svc, 'POST', '/account/start', { body: { member: member().hex, username: 'eva', invite: codes[1] } })).status, 404, 'and is then spent')
 
   // ---- account status: counts, never a code ----
@@ -673,12 +697,13 @@ test('sign-up invites: open, invite-only, single use, restart and back to open',
   // ---- back to open: no code needed ----
   svc = await serve(null)
   t.alike((await api(svc, 'GET', '/account/invites/policy')).body, { required: false }, 'open again')
-  t.is((await link(svc, member(), 'eva')).done.status, 200, 'open again: a link without a code works')
+  const evaKey = member()
+  t.is((await link(svc, evaKey, 'eva')).cert.member, evaKey.hex, 'open again: a link without a code works')
   t.is((await api(svc, 'POST', '/account/invites/start', { body: { member: a.hex } })).status, 404, 'no invite routes in open mode')
   await svc.stop()
 
   // ---- no code anywhere but its issue response ----
   const everything = texts.join('\n') + '\n' + logs.join('\n') + '\n' + fs.readFileSync(path.join(accountDir, 'directory.json'), 'utf8') + fs.readFileSync(path.join(accountDir, 'invites.json'), 'utf8')
   for (const code of codes) t.absent(everything.includes(code), 'a code appears in no response, redirect, cookie, log line or file')
-  t.absent(logs.join('\n').includes(EMAIL), 'no e-mail in the log')
+  t.absent(phoneOpts.numbers.some((phone) => logs.join('\n').includes(phone) || logs.join('\n').includes(phone.slice(3))), 'no phone number in the log')
 })

@@ -335,3 +335,70 @@ test('with invites on, an unverified member keeps the row and the code unspent',
   t.ok(s.store.inviteUsed(id))
   t.is(s.invites.check(id), 'convite-invalido')
 })
+
+// A phone store whose settled(member) holds the armed member's finish, once,
+// until the test releases it.
+function heldSettled () {
+  const h = { armed: null, release: null }
+  h.entered = new Promise((resolve) => { h.enter = resolve })
+  h.wrap = (phones) => ({
+    ...phones,
+    settled: async (m) => {
+      if (h.armed !== null && m === h.armed) {
+        h.armed = null
+        await new Promise((resolve) => {
+          h.release = resolve
+          h.enter()
+        })
+      }
+      return phones.settled(m)
+    }
+  })
+  return h
+}
+
+test('an unsigned start for the member cannot evict the row a phone finish is linking', async (t) => {
+  const h = heldSettled()
+  const s = await setup(t, { wrap: h.wrap })
+  const who = member()
+  const started = await s.startLink(who, 'nina')
+  t.is((await s.verify(who, PHONE_A)).body.state, 'verificado')
+  h.armed = who.hex
+  const finishing = s.finishLink(who, started)
+  await h.entered
+  // Enough starts to fill the member's unproven rows and evict the oldest.
+  for (const username of ['olga', 'paula', 'quiteria']) {
+    const other = await s.startLink(who, username)
+    t.is(other.res.status, 400, 'start for ' + username + ' refused')
+    t.is(other.res.body.error, 'pedido-invalido')
+  }
+  h.release()
+  const done = await finishing
+  t.is(done.status, 200)
+  linkedByPhone(t, s, who, done.body)
+  t.is(s.store.lookup('nina')?.member, who.hex)
+  const after = await s.startLink(who, 'rita')
+  t.is(after.res.body.error, 'conta-vinculada', 'once the finish ends, start answers as for any linked key')
+})
+
+test('with invites on, an unsigned start with the same code cannot take over a row a phone finish is linking', async (t) => {
+  const h = heldSettled()
+  const s = await setup(t, { inviting: true, wrap: h.wrap })
+  const { code, id } = await inviteCode(s)
+  const who = member()
+  const started = await s.startLink(who, 'sofia', code)
+  t.is(started.res.status, 200)
+  t.is((await s.verify(who, PHONE_A)).body.state, 'verificado')
+  h.armed = who.hex
+  const finishing = s.finishLink(who, started)
+  await h.entered
+  const other = await s.startLink(who, 'tania', code)
+  t.is(other.res.status, 400)
+  t.is(other.res.body.error, 'pedido-invalido')
+  h.release()
+  const done = await finishing
+  t.is(done.status, 200)
+  linkedByPhone(t, s, who, done.body)
+  t.ok(s.store.inviteUsed(id), 'the link records the invite')
+  t.is(s.invites.check(id), 'convite-invalido', 'the sidecar is marked')
+})

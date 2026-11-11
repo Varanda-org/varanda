@@ -7218,3 +7218,51 @@ Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA. O buil
 - [ ] PWA instalado a partir do mesmo `http://localhost:8080`: os mesmos passos do cadastro e do aviso.
 - [ ] Um convite da Feira que o serviço recusa com `convite-invalido` no vínculo mostra "Quem anunciou não tem mais entradas nesta semana. Peça um convite a alguém da rede ou tente na próxima semana."
 - [ ] Termos e Política, versão 36, pedem aceite novo. A Política tem a seção "Vínculo com o celular". A nota diz que a versão está sujeita a revisão jurídica. As páginas do site mostram a versão 36, de 11/11/2026.
+
+## 157. Fim do vínculo com o Google (PR feat/retire-google-member-link)
+
+O vínculo de membro com o Google acabou. Quem entra agora vincula só com celular brasileiro verificado (seções 155 e 156). Quem já entrou mantém o `sub` e o e-mail do Google no diretório: nada apaga esses campos. `bySub` continua um `sub` para um membro. O `sub` novo é `telefone:` mais a chave. O painel de moderação (`/account/mod/*`) continua entrando com o Google (`googleMod`, volta em `origin + '/account/mod/callback'`). `VARANDA_GOOGLE_CLIENT_ID` e `VARANDA_GOOGLE_CLIENT_SECRET` continuam obrigatórios, porque só o painel os usa, e os arquivos de deploy não mudam. A opção `google` de `createAccountServer` é ignorada. O certificado v2 continua com `method` `'google'`, o mesmo texto fixo para um vínculo de celular: não é um assunto Google.
+
+`POST /account/authorize` (`apps/cli/lib/account/server.js`) responde 410 `{ "error": "versao-antiga" }` antes de qualquer configuração, prova, leitura do diretório ou pedido para fora, e não monta URL do Google. Um build antigo lê esse 4xx como recusa definitiva e não tenta de novo. `GET /account/authorize` não é rota (404 `nao-encontrado`). Authorize, o callback, `GET /account/pending` e `GET /account/app/conta` respondem o mesmo sem emissor: não chamam `configured()`.
+
+`GET /account/callback`, com qualquer consulta, não lê a consulta, não troca código e não faz pedido para fora. Registra `{ event: 'callback', reason: 'aposentado' }` e redireciona (302, `cache-control: no-store`) para `/?conta=erro`. A linha pendente fica como está e nenhum cookie é gravado. A linha humana do processo `account` é `callback aposentado`.
+
+`GET /account/pending` responde 404 `expirado` para todo chamador (cookie, `V` do app em `x-varanda-link`, código de resgate em `x-varanda-redeem`, ou nenhum) e não lê nem grava nada. `GET /account/app/conta` responde 404 `expirado` com ou sem consulta, não ecoa a consulta e não a registra. O código `R` não nasce mais.
+
+`POST /account/finish` que não é finish de celular responde 404 `expirado` depois que o corpo tem assinatura e linha pendente, e antes de conferir essa assinatura: verificação de celular desligada, linha fora da fase `reserve`, ou linha que já tem `sub` (assunto deixado pelo callback aposentado). Sem emissor, o finish continua 503 `indisponivel`. Uma assinatura sobre um assunto Google numa linha ainda na fase `reserve` e sem `sub` é `assinatura-invalida`: a prova espera `telefone:` mais a chave.
+
+Sem `VARANDA_PHONE_KEY` o serviço registra o evento `cadastro`. A linha humana é `cadastro de novas contas desligado: verificação de celular não configurada`. Com `--json` sai `{"event":"cadastro"}`. Ela sai depois da linha `telefone desligada`.
+
+O laboratório hospedado (`apps/cli/scripts/hosted-lab.js`) cadastra só por celular, com `apps/cli/scripts/phone-stub.js`: qualquer celular brasileiro, só o código `123456`. O aviso imprime `código de SMS do laboratório: 123456`. Não há página falsa do Google. `apps/cli/scripts/oauth-stub.js` não existe mais. O laboratório sobe o serviço sem `googleMod` (o log padrão descarta os eventos), então o painel fica desligado nele e a linha `callback aposentado` não aparece no terminal do laboratório.
+
+Ordem de deploy: este PR só entra depois que o app do PR `feat/phone-only-signup-app` (seção 156) está nas lojas e os builds antigos passaram por um ciclo de revisão da loja. Até lá, o servidor do PR `feat/phone-only-signup-server` (seção 155) continua no ar e atende o vínculo pelo Google e o finish de celular.
+
+Quem ainda tem o botão do Google (app instalado de antes do PR da seção 156) recebe o token `versao-antiga`. O app desta árvore traduz o token para "Esta versão do app não cria mais contas. Atualize o Varanda e tente de novo." (`apps/app/src/account.js`). Um binário anterior a essa frase não tem o token na tabela e mostra "serviço indisponível". Nos dois casos o 4xx é recusa definitiva e o Google não abre. O build desta árvore não tem o botão (seção 156).
+
+Como verificar, a partir da raiz:
+
+- `npm run lint`
+- `node apps/cli/test/readme-help.test.js`
+- `node apps/cli/test/account.test.js`
+- `node apps/cli/test/account-phone.test.js`
+- `node apps/cli/test/account-mod.test.js`
+- `node apps/cli/test/hosted-lab.test.js`
+- `node apps/cli/test/phone-stub.test.js`
+
+Os testes usam o serviço em `127.0.0.1`, diretório temporário e o substituto de SMS, que não abre rede. Cobrem o 410 de `POST /account/authorize`, o redirecionamento do callback sem pedido para fora, o `expirado` de pending, da volta do app e do finish que não é de celular, a opção `google` ignorada, o login do painel com o Google e o aviso do laboratório com o código `123456`. Não cobrem aparelho, loja nem a linha `cadastro` do processo `account`.
+
+### Verificação manual
+
+Nenhuma verificação manual foi feita. Todos os itens estão em aberto:
+
+Ordem: build de debug do Android, simulador do iOS, depois a web e o PWA. O build de debug desta árvore não tem botão do Google (seção 156) e não entra com uma passkey de produção (veja `docs/development.md`). O item do botão antigo pede um app instalado de antes do PR `feat/phone-only-signup-app`, apontando para um serviço desta leva. O laboratório hospedado (`node apps/cli/scripts/hosted-lab.js`, com `npm run web -w apps/app` na porta 8081) imprime `código de SMS do laboratório: 123456`. O substituto aceita só esse código e não abre rede. A idade fica desligada (`GET /account/age/policy` responde `{ required: false }`) e o celular fica exigido (`GET /account/phone/policy` responde `{ required: true }`). O texto do laboratório pede um celular brasileiro. O painel de moderação não sobe nesse laboratório.
+
+- [ ] Android, build de debug desta árvore (emulador ou aparelho, depois de `npm run prepare:native -w apps/app`). O build de debug não entra com uma passkey de produção. Até a tela de entrada, não há "Continuar com o Google" nem "Vincular conta Google". O cadastro segue o celular, como na seção 156.
+- [ ] Android, app antigo ainda instalado, o que ainda mostra o botão do Google, contra um serviço desta leva. Toque no botão. O serviço responde 410 `versao-antiga` e o app não abre o Google. Se esse binário já tem a frase desta árvore, o texto é "Esta versão do app não cria mais contas. Atualize o Varanda e tente de novo." Um binário anterior a essa frase mostra "serviço indisponível". A recusa é definitiva: o app não trata a resposta como serviço incerto e não tenta de novo.
+- [ ] iOS, simulador: os mesmos dois passos. A passkey no simulador só vale num build com o domínio associado (veja `docs/development.md`). O app antigo, se ainda tiver o botão, recebe a mesma recusa `versao-antiga` e não abre o Google.
+- [ ] Web, laboratório hospedado. Abra `http://localhost:8080` no Chrome (use `localhost`, não `127.0.0.1`: o `rp.id` da passkey não pode ser um IP). No DevTools, ative o autenticador virtual (ctap2, transporte `internal`, chaves residentes, verificação do usuário e PRF) e toque em Entrar. Informe um celular brasileiro e o código `123456`. O código é aceito. Um código diferente é recusado. O aviso do laboratório não mostra o número. Não aparece página falsa do Google. A conta vincula e as abas abrem.
+- [ ] Web, callback aposentado, no mesmo laboratório: abra `http://localhost:8080/account/callback`, e de novo com `?code=1` e com `?error=access_denied`. Cada endereço redireciona para `http://localhost:8080/?conta=erro`. O laboratório não registra a linha (o log do serviço de conta do laboratório descarta os eventos). Não há pedido ao Google.
+- [ ] PWA instalado a partir do mesmo `http://localhost:8080`: o cadastro por celular com o código `123456`, sem página falsa do Google.
+- [ ] Painel de moderação, num serviço `account` com e-mails de moderador e o cliente Google (o laboratório não sobe o painel): o login ainda abre o Google e a volta é `/account/mod/callback`. Uma conta de moderador que já está no diretório entra. O vínculo de membro novo continua só por celular.
+- [ ] Serviço `account` sem `VARANDA_PHONE_KEY` (o id e o segredo do cliente Google continuam obrigatórios): entre as linhas de arranque, `cadastro de novas contas desligado: verificação de celular não configurada`. Com `--json`, `{"event":"cadastro"}`.
+- [ ] Ordem de deploy: este PR só sobe depois que o app do PR `feat/phone-only-signup-app` está nas lojas e os builds antigos passaram por um ciclo de revisão da loja. Até lá, o servidor do PR `feat/phone-only-signup-server` continua no ar e atende o vínculo pelo Google e o finish de celular.

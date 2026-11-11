@@ -29,12 +29,13 @@ const { createClient, parseMessage, EVENTS, MAX_MESSAGE } = require('@varanda/rp
 const { createIssuerCert, certForKey } = require('@varanda/core/lib/cert')
 const { verifyPhoneVerified, verifyPhoneSince } = require('@varanda/core/lib/phone-proof')
 const { tmpDir } = require('./helpers/net')
+const { freePort } = require('./helpers/free-port')
 const { startFakeDidit, loopbackFetch, PHONE_CODE } = require('./helpers/fake-didit')
 const { createFakePasskey } = require('./helpers/fake-passkey')
 const { createGoogle } = require('../lib/account/google')
 const { createDidit } = require('../lib/account/didit')
 const { createPhoneClient } = require('../lib/account/phone-client')
-const { openAccountStore } = require('../lib/account/store')
+const { openAccountStore, phoneSub } = require('../lib/account/store')
 const { openAgeStore } = require('../lib/account/age-store')
 const { openPhoneStore, FILE: PHONE_FILE } = require('../lib/account/phone-store')
 const { openPasskeyStore } = require('../lib/account/passkey-store')
@@ -168,9 +169,12 @@ async function harness (t) {
     const phones = openPhoneStore(dir, { key: phoneKey })
     const passkeys = openPasskeyStore(dir)
     const moderation = openModerationStore(dir, { association })
+    let port
+    do { port = await freePort() } while (port === seederPort)
+    const base = 'http://127.0.0.1:' + port
     const server = createAccountServer({
       association,
-      origin: ORIGIN,
+      origin: base,
       google: createGoogle({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: ORIGIN + '/account/callback', endpoints: google.endpoints, fetch: google.fetch }),
       store,
       issuer: { keyPair: issuerKp, cert: issuerCert },
@@ -182,7 +186,7 @@ async function harness (t) {
       phones,
       log: (e) => logs.push(JSON.stringify(e))
     })
-    const listener = await server.listen({ host: '127.0.0.1', port: 0 })
+    const listener = await server.listen({ host: '127.0.0.1', port })
     const svc = { store, ages, phones, passkeys, closed: false, base: 'http://127.0.0.1:' + listener.port }
     svc.stop = async () => {
       if (svc.closed) return
@@ -224,7 +228,7 @@ async function harness (t) {
       const init = { method, redirect: 'manual', headers: {} }
       if (jar.cookie !== null) init.headers.cookie = COOKIE + '=' + jar.cookie
       if (body !== undefined) {
-        init.headers.origin = ORIGIN
+        init.headers.origin = h.svc.base
         init.headers['content-type'] = 'application/json'
         init.body = JSON.stringify(body)
       }
@@ -248,26 +252,7 @@ async function harness (t) {
       return post('/account/phone/' + action, { member: dev.hex, nonce: started.body.nonce, signature, ...extra })
     }
 
-    async function link (username) {
-      const started = await post('/account/start', { member: dev.hex, username })
-      if (started.status !== 200) return { started, auth: started }
-      const reserve = await dev.web.request('account.sign', { phase: 'reserve', nonce: started.body.nonce, username, sub: '' })
-      const auth = await post('/account/authorize', { signature: reserve.signature })
-      if (auth.status !== 200) return { started, auth }
-      const consent = await fetch(new URL(auth.body.authorizeUrl), { redirect: 'manual' })
-      await consent.text()
-      google.account.sub = nextSub()
-      const back = new URL(consent.headers.get('location'))
-      if (back.origin !== ORIGIN) throw new Error('redirect to another origin')
-      const cb = await api('GET', back.pathname + back.search)
-      const pending = await api('GET', '/account/pending')
-      if (pending.status !== 200) return { started, auth, cb, done: pending }
-      const proof = await dev.web.request('account.sign', { phase: 'finish', nonce: pending.body.nonce, username, sub: pending.body.sub })
-      const done = await post('/account/finish', { signature: proof.signature })
-      return { started, auth, cb, done }
-    }
-
-    return { jar, api, post, phone, link }
+    return { jar, api, post, phone }
   }
 
   h.reveal = (member) => openPhoneStore(dir, { key: phoneKey, readOnly: true, disclose: true }).reveal(member)
@@ -288,15 +273,21 @@ test('phone e2e: a session verifies its number, stores the proofs, links without
   // the store, as account-phone.test.js does.
   await h.svc.ages.record({ member: dev.hex, band: '18+', method: 'didit', checkedAt: new Date().toISOString() })
 
-  const early = await c.link('ana')
-  t.is(early.started.status, 200, 'start answers')
-  t.is(early.auth.status, 403, 'authorize refused')
-  t.alike(early.auth.body, { error: 'telefone-pendente' })
+  const started = await c.post('/account/start', { member: dev.hex, username: 'ana' })
+  t.is(started.status, 200, 'start answers')
+  const proof = await dev.web.request('account.sign', { phase: 'finish', nonce: started.body.nonce, username: 'ana', sub: phoneSub(dev.hex) })
+  const early = await c.post('/account/finish', { signature: proof.signature })
+  t.is(early.status, 403, 'finish refused before phone verification')
+  t.alike(early.body, { error: 'telefone-pendente' })
   t.is(h.google.seen.length, 0, 'Google never reached')
 
   const sent = await c.phone('send', { phone: PHONE })
   t.is(sent.status, 200, sent.text)
   t.alike(sent.body, { state: 'enviado' })
+  const sends = h.fake.seen.filter((r) => r.path === '/v3/phone/send/')
+  t.is(sends.length, 1, 'one phone send through the real client')
+  t.is(sends[0].body.options.preferred_channel, 'sms')
+  t.is(sends[0].body.phone_number, PHONE, 'the provider received the number')
   const checked = await c.phone('check', { code: PHONE_CODE })
   t.is(checked.status, 200, checked.text)
   t.alike(Object.keys(checked.body), ['state', 'proof'])
@@ -322,18 +313,26 @@ test('phone e2e: a session verifies its number, stores the proofs, links without
   t.is(info.phoneSince, since.since, 'node.info: phoneSince')
   t.is(info.phoneVerifiedDate, verified.date, 'the verified date is kept')
 
-  const linked = await c.link('ana')
-  t.is(linked.auth.status, 200, 'authorize after the number: ' + linked.auth.text)
-  t.is(linked.cb.location, ORIGIN + '/?conta=ok')
-  t.is(linked.done.status, 200, 'finish: ' + linked.done.text)
-  const { cert } = linked.done.body
+  t.is(h.fake.seen.filter((r) => r.path === '/v3/phone/check/').length, 1, 'one code check')
+  t.is((await c.api('GET', '/account/callback?code=retired')).location, h.svc.base + '/?conta=erro')
+  t.is(h.google.seen.length, 0, 'the retired callback makes no outbound request')
+  // The row kept by the refused finish links now that the number is verified.
+  if (c.jar.cookie === null) {
+    const again = await c.post('/account/start', { member: dev.hex, username: 'ana' })
+    t.is(again.status, 200, 'start again after the cookie was cleared')
+    started.body = again.body
+  }
+  const finalProof = await dev.web.request('account.sign', { phase: 'finish', nonce: started.body.nonce, username: 'ana', sub: phoneSub(dev.hex) })
+  const linked = await c.post('/account/finish', { signature: finalProof.signature })
+  t.is(linked.status, 200, 'finish after the number: ' + linked.text)
+  const { cert } = linked.body
   t.ok(certForKey(cert, dev.hex, h.association).ok, 'the certificate verifies for the key')
   t.absent(Object.keys(cert).some((k) => /phone|telefone/i.test(k)), 'no phone field in the certificate')
   t.absent(JSON.stringify(cert).includes(DIGITS), 'no number in the certificate')
 
   // Excluir conta with a stored passkey: immediate.
-  const pk = createFakePasskey({ rpId: 'varanda.test' })
-  const key = keyFromAttestation({ attestationObject: pk.attestationObject(), credentialId: pk.credentialId, rpId: 'varanda.test' })
+  const pk = createFakePasskey({ rpId: new URL(h.svc.base).hostname })
+  const key = keyFromAttestation({ attestationObject: pk.attestationObject(), credentialId: pk.credentialId, rpId: new URL(h.svc.base).hostname })
   await h.svc.passkeys.add({ member: dev.hex, credentialId: pk.credentialId, ...key })
   const st = await c.post('/account/delete/start', { member: dev.hex })
   t.is(st.status, 200, st.text)
@@ -342,7 +341,7 @@ test('phone e2e: a session verifies its number, stores the proofs, links without
     member: dev.hex,
     nonce: st.body.nonce,
     signature,
-    assertion: pk.assert({ challenge: Buffer.from(st.body.nonce, 'base64url'), origin: ORIGIN })
+    assertion: pk.assert({ challenge: Buffer.from(st.body.nonce, 'base64url'), origin: h.svc.base })
   })
   t.is(done.status, 200, done.text)
   t.ok(h.svc.store.deletedAt(dev.hex) !== null, 'the key is deleted')

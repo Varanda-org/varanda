@@ -3,7 +3,7 @@
 // apps/cli/lib/account/phone-routes.js mounted by server.js: hosted
 // verification of a Brazilian mobile with Didit (policy, since, start, send,
 // check, status) and the gates that keep a key without a verified number
-// from a Google sign-in, a certificate, a rename or an invite. Loopback only:
+// from a certificate, a rename or an invite. Loopback only:
 // the Didit fake of helpers/fake-didit.js, a real phone store and a real age
 // store in a tmp dir, members linked in-process, and a Google stub whose
 // exchange is never reached.
@@ -19,7 +19,7 @@ const { signAge } = require('@varanda/core/lib/age')
 const { signPhone } = require('@varanda/core/lib/phone')
 const { verifyPhoneVerified, verifyPhoneSince } = require('@varanda/core/lib/phone-proof')
 const { signInvite } = require('@varanda/core/lib/invite')
-const { openAccountStore } = require('../lib/account/store')
+const { openAccountStore, phoneSub } = require('../lib/account/store')
 const { openAgeStore } = require('../lib/account/age-store')
 const { openPhoneStore } = require('../lib/account/phone-store')
 const { openInvitesStore } = require('../lib/account/invites-store')
@@ -31,6 +31,8 @@ const { createFakePasskey } = require('./helpers/fake-passkey')
 const { createAccountServer, COOKIE } = require('../lib/account/server')
 const { startFakeDidit, loopbackFetch, PHONE_CODE } = require('./helpers/fake-didit')
 const { tmpDir } = require('./helpers/net')
+const { linkByPhone } = require('./helpers/phone-link')
+const { freePort } = require('./helpers/free-port')
 
 const ORIGIN = 'https://varanda.test'
 const API_KEY = 'test-phone-key-123'
@@ -86,7 +88,7 @@ async function linkDirect (store, iss, m, username) {
 // of the fake moderation desk: [{ member, reportIds }].
 // `before(dir, iss)` runs before the stores open.
 // `passkeys: true` opens a passkey store, so Excluir conta can run.
-async function setup (t, { phone = true, age = true, inviting = false, maxMembers = null, dailyLimit, withIssuer = true, key, sendTimeoutMs, burst, before, passkeys = false } = {}) {
+async function setup (t, { loopback = false, phone = true, age = true, inviting = false, maxMembers = null, dailyLimit, withIssuer = true, key, sendTimeoutMs, burst, before, passkeys = false } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = { offset: 0, guardOk: true, blocked: [] }
   c.now = () => Date.now() + c.offset
@@ -107,9 +109,11 @@ async function setup (t, { phone = true, age = true, inviting = false, maxMember
   const google = googleStub()
   const logs = []
   const answers = []
+  const port = loopback ? await freePort() : 0
+  let base = loopback ? 'http://127.0.0.1:' + port : null
   const opts = {
     association: iss.association,
-    origin: ORIGIN,
+    origin: loopback ? base : ORIGIN,
     google,
     store,
     issuer: withIssuer ? { keyPair: iss.keyPair, cert: iss.cert } : null,
@@ -134,15 +138,15 @@ async function setup (t, { phone = true, age = true, inviting = false, maxMember
     opts.ratePerSecond = burst
   }
   const server = createAccountServer(opts)
-  const listener = await server.listen({ host: '127.0.0.1', port: 0 })
+  const listener = await server.listen({ host: '127.0.0.1', port })
   t.teardown(() => listener.close(), { force: true })
-  const base = 'http://127.0.0.1:' + listener.port
+  if (base === null) base = 'http://127.0.0.1:' + listener.port
 
   async function api (method, pathname, { body, cookie } = {}) {
     const init = { method, redirect: 'manual', headers: {} }
     if (cookie) init.headers.cookie = COOKIE + '=' + cookie
     if (body !== undefined) {
-      init.headers.origin = ORIGIN
+      init.headers.origin = loopback ? base : ORIGIN
       init.headers['content-type'] = 'application/json'
       init.body = JSON.stringify(body)
     }
@@ -180,7 +184,7 @@ async function setup (t, { phone = true, age = true, inviting = false, maxMember
   const sends = () => fake.seen.filter((r) => r.path === '/v3/phone/send/')
   const checks = () => fake.seen.filter((r) => r.path === '/v3/phone/check/')
 
-  return { dir, c, iss, store, ages, phones, passkeyStore, phoneKey, invites, fake, google, linked, logs, answers, server, api, post, signFor, start, step, band, verify, sends, checks }
+  return { dir, base, c, iss, store, ages, phones, passkeyStore, phoneKey, invites, fake, google, linked, logs, answers, server, api, post, signFor, start, step, band, verify, sends, checks }
 }
 
 // The published blocklist is c.blocked; Excluir conta's own block request
@@ -217,20 +221,18 @@ function cookieOf (res) {
   return m ? m[1] : null
 }
 
-async function authorize (s, m, username, invite, previous) {
-  const body = { member: m.hex, username }
-  if (invite !== undefined) body.invite = invite
-  const started = await s.post('/account/start', body, previous ? { cookie: previous } : {})
-  if (started.status !== 200) return { started, auth: started }
-  const cookie = cookieOf(started)
-  const auth = await s.post('/account/authorize', { signature: sign(s, m, 'reserve', started.body.nonce, username) }, { cookie })
-  return { started, cookie, auth, nonce: started.body.nonce }
-}
-
-async function finish (s, m, username, cookie) {
-  s.store.putGoogle(cookie, { sub: nextSub(), email: EMAIL })
-  const pending = await s.api('GET', '/account/pending', { cookie })
-  return s.post('/account/finish', { signature: sign(s, m, 'finish', pending.body.nonce, username, pending.body.sub) }, { cookie })
+async function link (s, m, username, invite) {
+  const body = await linkByPhone({
+    origin: s.base,
+    member: m.hex,
+    username,
+    invite,
+    sign: (fields) => fields.action
+      ? signPhone({ ...fields, association: s.iss.association }, m.kp)
+      : signAccountLink({ ...fields, association: s.iss.association }, m.kp),
+    onResponse: (r) => s.answers.push({ pathname: r.path, text: r.text, body: r.body })
+  })
+  return body
 }
 
 async function renameFinish (s, m, username, signer = m) {
@@ -270,7 +272,7 @@ function noPersonalData (t, s, members = []) {
   })
   const all = s.answers.map((a) => a.text).join('\n') + '\n' + s.logs.join('\n')
   const logs = s.logs.join('\n')
-  for (const number of FIXTURES) {
+  for (const number of new Set([...FIXTURES, ...s.sends().map((r) => r.body.phone_number)])) {
     t.absent(all.includes(number) || all.includes(local(number)), 'no number in any answer or log line')
   }
   t.absent(all.includes(PHONE_CODE), 'no code')
@@ -286,7 +288,7 @@ function noPersonalData (t, s, members = []) {
   }
 }
 
-test('phone off: policy not required, since null, every POST refuses, the gates stay open', async (t) => {
+test('phone off: policy not required, since null, phone POSTs and sign-up refuse, existing member gates stay open', async (t) => {
   const s = await setup(t, { phone: false, inviting: true })
   const policy = await s.api('GET', '/account/phone/policy')
   t.is(policy.status, 200)
@@ -308,10 +310,14 @@ test('phone off: policy not required, since null, every POST refuses, the gates 
   const inv = await invitesFinish(s, s.linked)
   t.is(inv.status, 200, inv.text)
   await s.band(m)
-  const a = await authorize(s, m, 'bia', inv.body.code)
-  t.is(a.auth.status, 200, a.auth.text)
-  const done = await finish(s, m, 'bia', a.cookie)
-  t.is(done.status, 200, done.text)
+  const started = await s.post('/account/start', { member: m.hex, username: 'bia', invite: inv.body.code })
+  const cookie = cookieOf(started)
+  const auth = await s.post('/account/authorize', {}, { cookie })
+  t.is(auth.status, 410)
+  t.alike(auth.body, { error: 'versao-antiga' })
+  const done = await s.post('/account/finish', { signature: sign(s, m, 'finish', started.body.nonce, 'bia', phoneSub(m.hex)) }, { cookie })
+  t.is(done.status, 404)
+  t.alike(done.body, { error: 'expirado' })
   t.is(s.sends().length + s.checks().length, 0, 'the provider never called')
   t.alike(s.server.phoneStats(), { nonces: 0, pending: 0 })
 })
@@ -361,8 +367,8 @@ test('phone on: policy, send, check and status, with a proof for that member and
   noPersonalData(t, s, [m])
 })
 
-test('phone gates on: authorize, finish, rename and invites refuse a key without a number only after a valid signature, then allow it', async (t) => {
-  const s = await setup(t, { inviting: true })
+test('phone gates on: authorize is retired; finish, rename and invites require a valid signature and a number', async (t) => {
+  const s = await setup(t, { loopback: true, inviting: true })
   await s.band(s.linked)
 
   const badRename = await renameFinish(s, s.linked, 'ana', member())
@@ -383,37 +389,34 @@ test('phone gates on: authorize, finish, rename and invites refuse a key without
   t.is(issued.status, 200, issued.text)
   const code = issued.body.code
 
-  // A fresh key with a band: authorize refused with no Google URL.
+  // The retired authorize refuses even before checking a signature.
   const m = member()
   await s.band(m)
   const started = await s.post('/account/start', { member: m.hex, username: 'bia', invite: code })
   t.is(started.status, 200, started.text)
   const cookie = cookieOf(started)
   const badAuth = await s.post('/account/authorize', { signature: sign(s, member(), 'reserve', started.body.nonce, 'bia') }, { cookie })
-  t.alike(badAuth.body, { error: 'assinatura-invalida' })
+  t.alike(badAuth.body, { error: 'versao-antiga' })
   const auth = await s.post('/account/authorize', { signature: sign(s, m, 'reserve', started.body.nonce, 'bia') }, { cookie })
-  t.is(auth.status, 403)
-  t.alike(auth.body, { error: 'telefone-pendente' })
+  t.is(auth.status, 410)
+  t.alike(auth.body, { error: 'versao-antiga' })
   t.is(s.google.calls, 0)
 
-  // finish refused too, even with a subject on the row.
-  s.store.reserve(cookie)
-  s.store.putGoogle(cookie, { sub: nextSub(), email: EMAIL })
-  const pending = await s.api('GET', '/account/pending', { cookie })
-  const badFin = await s.post('/account/finish', { signature: sign(s, member(), 'finish', pending.body.nonce, 'bia', pending.body.sub) }, { cookie })
+  // The phone finish still checks the proof before the number.
+  const badFin = await s.post('/account/finish', { signature: sign(s, member(), 'finish', started.body.nonce, 'bia', phoneSub(m.hex)) }, { cookie })
   t.alike(badFin.body, { error: 'assinatura-invalida' })
-  const fin = await s.post('/account/finish', { signature: sign(s, m, 'finish', pending.body.nonce, 'bia', pending.body.sub) }, { cookie })
+  const fin = await s.post('/account/finish', { signature: sign(s, m, 'finish', started.body.nonce, 'bia', phoneSub(m.hex)) }, { cookie })
   t.is(fin.status, 403)
   t.alike(fin.body, { error: 'telefone-pendente' })
   t.absent(s.store.status(m.hex).linked)
 
-  // Verified: a new start, authorize and finish go through.
-  t.alike((await s.verify(m, PHONE_B)).body.state, 'verificado')
-  const b = await authorize(s, m, 'bia', code, cookie)
-  t.is(b.auth.status, 200, b.auth.text)
-  t.is(b.auth.body.authorizeUrl, GOOGLE_URL)
-  const done = await finish(s, m, 'bia', b.cookie)
-  t.is(done.status, 200, done.text)
+  const body = await link(s, m, 'bia', code)
+  const verified = await s.step(m, 'status')
+  t.alike(verified.body.state, 'verificado')
+  t.is(verified.status, 200)
+  t.is(verifyPhoneVerified(verified.body.proof, m.hex, s.iss.association).ok, true)
+  const done = { body }
+  t.is(done.body.cert.v, 2)
   t.ok(s.store.status(m.hex).linked)
 
   // Nothing about the phone in the certificate or /account/status.

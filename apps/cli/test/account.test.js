@@ -1,14 +1,17 @@
 'use strict'
 
 // apps/cli/lib/account/server.js and apps/cli/lib/commands/account.js: the
-// account service against a loopback fake Google (as google.test.js) and the
-// account-link signer with random key pairs. No socket leaves 127.0.0.1: the
-// service binds loopback, the fake provider binds loopback, and the spawned
-// CLI only answers health and refusals (it never reaches the OAuth flow).
+// account service, the phone sign-up (./helpers/phone-link.js and the SMS
+// stub) and the account-link signer with random key pairs. The member Google
+// sign-in is retired: a loopback fake Google (as google.test.js) is still
+// passed in, and its request log proves the retired routes never call out.
+// No socket leaves 127.0.0.1: the service binds loopback, the fake provider
+// binds loopback, and the spawned CLI only answers health and refusals.
 
 const test = require('brittle')
 const fs = require('node:fs')
 const http = require('node:http')
+const net = require('node:net')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
 const { spawn, spawnSync } = require('node:child_process')
@@ -16,18 +19,20 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createIssuerCert, certForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
+const { signPhone, isBrMobile } = require('@varanda/core/lib/phone')
 const { createGoogle } = require('../lib/account/google')
-const { openAccountStore, COOLDOWN_MS, PENDING_TTL_MS } = require('../lib/account/store')
+const { openAccountStore, phoneSub, COOLDOWN_MS, PENDING_TTL_MS } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
-const { openInvitesStore } = require('../lib/account/invites-store')
+const { openInvitesStore, inviteId } = require('../lib/account/invites-store')
 const { createAccountServer, keyedWindow, takeLock, lockHeld, loadIssuer, LOCK_FILE, KEY_FILE, CERT_FILE, COOKIE, MAX_SOCKETS, DEFAULT_RATE, DEFAULT_BURST } = require('../lib/account/server')
 const { readEnv, closeIfOwned, loseLock, startTermsHeal, startHeal, storeUnavailable } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
+const { STUB_CODE } = require('../scripts/phone-stub')
 const { tmpDir, until } = require('./helpers/net')
+const { linkByPhone, phoneServerOptions } = require('./helpers/phone-link')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 const ORIGIN = 'https://varanda.test'
-const APP_RETURN = ORIGIN + '/account/app/conta'
 const CLIENT_ID = 'client-123.apps.googleusercontent.com'
 const CLIENT_SECRET = 'segredo-de-teste'
 // A 22-digit subject: any leak shows as a 16-hex run in a log line.
@@ -88,8 +93,7 @@ async function fakeGoogle (t) {
     if (!String(url).startsWith(base + '/')) throw new Error('non-loopback request')
     return globalThis.fetch(url, init)
   }
-  const tokenCalls = () => seen.filter((r) => r.path === '/token').length
-  return { seen, account, endpoints, fetch, tokenCalls }
+  return { seen, account, endpoints, fetch }
 }
 
 function issuer () {
@@ -111,30 +115,48 @@ function clock () {
   return c
 }
 
-async function setup (t, { configured = true, storeOpts = {}, serverOpts = {} } = {}) {
+// The service checks Origin against its own origin, and the phone driver
+// sends its fetch base as Origin, so the service listens on a port known
+// before it is created.
+async function freePort () {
+  const srv = net.createServer()
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve))
+  const { port } = srv.address()
+  await new Promise((resolve) => srv.close(resolve))
+  return port
+}
+
+// `phone` (default true) turns hosted phone verification on with the SMS
+// stub: the only way a new member links. `google` is still passed (the
+// service ignores it), so `fake.seen` counts any outbound request.
+async function setup (t, { configured = true, phone = true, storeOpts = {}, serverOpts = {} } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = clock()
   const iss = issuer()
   const fake = await fakeGoogle(t)
   const google = createGoogle({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: ORIGIN + '/account/callback', endpoints: fake.endpoints, fetch: fake.fetch })
   const store = openAccountStore(dir, { now: c.now, ...storeOpts })
+  const phoneOpts = phone ? phoneServerOptions() : null
   const logs = []
+  const port = await freePort()
+  const base = 'http://127.0.0.1:' + port
   const server = createAccountServer({
     association: iss.association,
-    origin: ORIGIN,
+    origin: base,
     google,
     store,
     issuer: configured ? { keyPair: iss.keyPair, cert: iss.cert } : null,
     log: (e) => logs.push(JSON.stringify(e)),
     now: c.now,
+    phoneClient: phoneOpts === null ? null : phoneOpts.phoneClient,
+    phones: phoneOpts === null ? null : phoneOpts.phones,
     ...serverOpts
   })
-  const listener = await server.listen({ host: '127.0.0.1', port: 0 })
+  const listener = await server.listen({ host: '127.0.0.1', port })
   t.teardown(() => listener.close(), { force: true })
-  const base = 'http://127.0.0.1:' + listener.port
 
   // { status, headers, body (parsed JSON or null), text }
-  async function api (method, pathname, { body, cookie, origin = ORIGIN, headers = {}, raw } = {}) {
+  async function api (method, pathname, { body, cookie, origin = base, headers = {}, raw } = {}) {
     const init = { method, redirect: 'manual', headers: { ...headers } }
     if (cookie) init.headers.cookie = COOKIE + '=' + cookie
     if (body !== undefined || raw !== undefined) {
@@ -149,7 +171,7 @@ async function setup (t, { configured = true, storeOpts = {}, serverOpts = {} } 
     return { status: res.status, headers: res.headers, body: parsed, text }
   }
 
-  return { dir, c, iss, fake, store, logs, api, base, port: listener.port, listener, server }
+  return { dir, c, iss, fake, store, logs, api, base, origin: base, port: listener.port, listener, server }
 }
 
 function cookieOf (res) {
@@ -162,31 +184,66 @@ function sign (s, m, phase, nonce, username, sub = '') {
   return signAccountLink({ phase, nonce, member: m.hex, username, association: s.iss.association, sub }, m.kp)
 }
 
-// start -> reserve signature -> authorize; -> { cookie, nonce, state }.
-async function authorize (s, m, username) {
+// The finish proof of the phone link: its subject is phoneSub(member).
+function finishSig (s, m, nonce, username) {
+  return sign(s, m, 'finish', nonce, username, phoneSub(m.hex))
+}
+
+// The signer linkByPhone takes: phone steps are varanda-phone-v1
+// statements, the finish the account-link proof.
+function signer (s, m) {
+  return (fields) => fields.phase === 'finish'
+    ? signAccountLink({ ...fields, association: s.iss.association }, m.kp)
+    : signPhone({ ...fields, association: s.iss.association }, m.kp)
+}
+
+// One Brazilian mobile per call, so two members never share a number.
+let phoneSeq = nodeCrypto.randomInt(0, 100000000)
+function freshPhone () {
+  phoneSeq = (phoneSeq + 1) % 100000000
+  const phone = '+55119' + String(phoneSeq).padStart(8, '0')
+  if (!isBrMobile(phone)) throw new Error('bad test phone')
+  return phone
+}
+
+// The phone check alone (start, send, check with STUB_CODE), so a test can
+// drive /account/finish itself; -> the check answer. `headers` go on every
+// step (the app header, for one).
+async function verifyPhone (s, m, { headers, origin } = {}) {
+  const step = async (action, extra) => {
+    const started = await s.api('POST', '/account/phone/start', { origin, headers, body: { member: m.hex } })
+    const nonce = started.body.nonce
+    const signature = signPhone({ action, nonce, member: m.hex, association: s.iss.association }, m.kp)
+    return s.api('POST', '/account/phone/' + action, { origin, headers, body: { member: m.hex, nonce, signature, ...extra } })
+  }
+  const sent = await step('send', { phone: freshPhone() })
+  if (sent.status !== 200) return sent
+  return step('check', { code: STUB_CODE })
+}
+
+// Web start; -> { started, cookie, nonce }.
+async function startLink (s, m, username) {
   const started = await s.api('POST', '/account/start', { body: { member: m.hex, username } })
   if (started.status !== 200) return { started }
-  const cookie = cookieOf(started).id
-  const nonce = started.body.nonce
-  const auth = await s.api('POST', '/account/authorize', { cookie, body: { signature: sign(s, m, 'reserve', nonce, username) } })
-  if (auth.status !== 200) return { started, cookie, nonce, auth }
-  const url = new URL(auth.body.authorizeUrl)
-  return { started, cookie, nonce, auth, url, state: url.searchParams.get('state') }
+  return { started, cookie: cookieOf(started).id, nonce: started.body.nonce }
 }
 
-async function callback (s, cookie, state, extra = 'code=codigo-1') {
-  const query = (state === null ? '' : 'state=' + state + '&') + extra
-  return s.api('GET', '/account/callback?' + query, { cookie })
+// The whole phone link for `m` (helpers/phone-link.js); -> { finish:
+// { status, body } }, the finish answer or the refusal of the step that
+// failed.
+async function link (s, m, username, { app = false } = {}) {
+  try {
+    const body = await linkByPhone({ origin: s.origin, member: m, username, sign: signer(s, m), app })
+    return { finish: { status: 200, body } }
+  } catch (err) {
+    if (typeof err.status !== 'number') throw err
+    return { finish: { status: err.status, body: { error: err.token } } }
+  }
 }
 
-// The whole link for `m`; -> { cookie, result (finish body) }.
-async function link (s, m, username) {
-  const a = await authorize(s, m, username)
-  const cb = await callback(s, a.cookie, a.state)
-  if (cb.status !== 302 || !cb.headers.get('location').endsWith('conta=ok')) throw new Error('callback failed: ' + cb.headers.get('location'))
-  const pending = await s.api('GET', '/account/pending', { cookie: a.cookie })
-  const finish = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: sign(s, m, 'finish', pending.body.nonce, username, pending.body.sub) } })
-  return { ...a, pending, finish }
+// Nothing reached the (retired) Google endpoints.
+function noOutbound (t, s, label) {
+  t.is(s.fake.seen.length, 0, label + ': no outbound request')
 }
 
 // brittle's t.exception rethrows a TypeError as "native" unless awaited
@@ -220,7 +277,7 @@ function noPersonalData (t, text, label) {
   t.absent(text.includes(ACCESS), label + ': no access token')
 }
 
-test('full link: start, reserve proof, Google with PKCE, finish proof, certificate and username record', async (t) => {
+test('full link: start, phone check, finish proof, certificate and username record', async (t) => {
   const s = await setup(t)
   const m = member()
 
@@ -242,36 +299,13 @@ test('full link: start, reserve proof, Google with PKCE, finish proof, certifica
   t.ok(cookie !== null && TOKEN_RE.test(cookie.id), 'cookie carries the pending id')
   t.is(cookie.maxAge, 600)
 
-  const pendingBefore = await s.api('GET', '/account/pending', { cookie: cookie.id })
-  t.alike(pendingBefore.body, { nonce: started.body.nonce, member: m.hex, username: 'ana' }, 'no sub before the callback')
+  const early = await s.api('POST', '/account/finish', { cookie: cookie.id, body: { signature: finishSig(s, m, started.body.nonce, 'ana') } })
+  t.alike([early.status, early.body], [403, { error: 'telefone-pendente' }], 'no link before the phone check')
+  const checked = await verifyPhone(s, m)
+  t.is(checked.status, 200, checked.text)
+  t.is(checked.body.state, 'verificado')
 
-  const auth = await s.api('POST', '/account/authorize', { cookie: cookie.id, body: { signature: sign(s, m, 'reserve', started.body.nonce, 'ana') } })
-  t.is(auth.status, 200)
-  const url = new URL(auth.body.authorizeUrl)
-  t.is(url.origin + url.pathname, s.fake.endpoints.authUrl)
-  t.is(url.searchParams.get('redirect_uri'), ORIGIN + '/account/callback')
-  t.is(url.searchParams.get('client_id'), CLIENT_ID)
-  t.is(url.searchParams.get('code_challenge_method'), 'S256')
-  const state = url.searchParams.get('state')
-  t.ok(TOKEN_RE.test(state), 'state is 32 bytes base64url')
-  const challenge = url.searchParams.get('code_challenge')
-
-  t.is(s.fake.tokenCalls(), 0, 'nothing exchanged yet')
-  const cb = await callback(s, cookie.id, state)
-  t.is(cb.status, 302)
-  t.is(cb.headers.get('location'), ORIGIN + '/?conta=ok')
-  t.is(cb.headers.get('cache-control'), 'no-store')
-  t.is(s.fake.tokenCalls(), 1)
-  const tokenReq = new URLSearchParams(s.fake.seen.find((r) => r.path === '/token').body)
-  t.is(tokenReq.get('code'), 'codigo-1')
-  t.is(tokenReq.get('redirect_uri'), ORIGIN + '/account/callback')
-  t.is(nodeCrypto.createHash('sha256').update(tokenReq.get('code_verifier')).digest('base64url'), challenge, 'PKCE verifier matches the challenge')
-
-  const pending = await s.api('GET', '/account/pending', { cookie: cookie.id })
-  t.is(pending.status, 200)
-  t.alike(pending.body, { nonce: started.body.nonce, member: m.hex, username: 'ana', sub: SUB })
-
-  const finish = await s.api('POST', '/account/finish', { cookie: cookie.id, body: { signature: sign(s, m, 'finish', pending.body.nonce, 'ana', SUB) } })
+  const finish = await s.api('POST', '/account/finish', { cookie: cookie.id, body: { signature: finishSig(s, m, started.body.nonce, 'ana') } })
   t.is(finish.status, 200, 'finish: ' + finish.text)
   t.alike(Object.keys(finish.body).sort(), ['cert', 'nextChangeAt', 'usernameRecord'])
   const { cert, usernameRecord, nextChangeAt } = finish.body
@@ -284,7 +318,7 @@ test('full link: start, reserve proof, Google with PKCE, finish proof, certifica
   t.is(cookieOf(finish).maxAge, 0, 'the cookie is cleared')
   noPersonalData(t, finish.text, 'finish')
 
-  const again = await s.api('POST', '/account/finish', { cookie: cookie.id, body: { signature: sign(s, m, 'finish', pending.body.nonce, 'ana', SUB) } })
+  const again = await s.api('POST', '/account/finish', { cookie: cookie.id, body: { signature: finishSig(s, m, started.body.nonce, 'ana') } })
   t.is(again.status, 404)
   t.alike(again.body, { error: 'expirado' }, 'the row is gone after a successful finish (C8)')
 
@@ -308,89 +342,127 @@ test('full link: start, reserve proof, Google with PKCE, finish proof, certifica
   noPersonalData(t, log, 'log')
   t.absent(HEX16.test(log), 'no 16-hex run in the log')
   t.ok(s.logs.includes(JSON.stringify({ event: 'linked' })))
-  t.ok(s.logs.includes(JSON.stringify({ event: 'callback', reason: 'ok' })))
+  noOutbound(t, s, 'the phone link')
 })
 
-test('callback: the cookie and the state must name the same row before any token call', async (t) => {
+test('callback (retired): every query redirects to /?conta=erro; nothing is read, exchanged or written', async (t) => {
   const s = await setup(t)
   const m = member()
-  const a = await authorize(s, m, 'ana')
-  t.ok(a.state)
+  const a = await startLink(s, m, 'ana')
+  t.ok(a.cookie)
+  const before = JSON.stringify(s.store.get(a.cookie))
 
-  const noCookie = await callback(s, null, a.state)
-  t.is(noCookie.status, 302)
-  t.is(noCookie.headers.get('location'), ORIGIN + '/?conta=erro')
-
-  const foreignState = await callback(s, a.cookie, 'A'.repeat(43))
-  t.is(foreignState.headers.get('location'), ORIGIN + '/?conta=erro')
-
-  const other = await authorize(s, member(), 'bia')
-  const swapped = await callback(s, other.cookie, a.state)
-  t.is(swapped.headers.get('location'), ORIGIN + '/?conta=erro', 'another row\'s cookie with this state')
-  t.is(s.fake.tokenCalls(), 0, 'the token endpoint was never called')
+  for (const [label, cookie, query] of [
+    ['no query', null, ''],
+    ['a code', null, '?state=' + 'A'.repeat(43) + '&code=codigo-1'],
+    ['a live row cookie and a code', a.cookie, '?state=' + 'A'.repeat(43) + '&code=codigo-1'],
+    ['a Google error', a.cookie, '?state=' + 'A'.repeat(43) + '&error=access_denied']
+  ]) {
+    const cb = await s.api('GET', '/account/callback' + query, { cookie })
+    t.is(cb.status, 302, label)
+    t.is(cb.headers.get('location'), s.origin + '/?conta=erro', label + ': the web answer')
+    t.is(cb.headers.get('cache-control'), 'no-store', label + ': not cached')
+    t.is(cb.headers.get('set-cookie'), null, label + ': no cookie set or cleared')
+  }
+  t.is(JSON.stringify(s.store.get(a.cookie)), before, 'the pending row is untouched')
+  noOutbound(t, s, 'callback')
+  t.ok(s.logs.includes(JSON.stringify({ event: 'callback', reason: 'aposentado' })))
   t.absent(s.logs.join('\n').includes('codigo-1'), 'the code is never logged')
-
-  const ok = await callback(s, a.cookie, a.state)
-  t.is(ok.headers.get('location'), ORIGIN + '/?conta=ok')
-  t.is(s.fake.tokenCalls(), 1)
-  const replay = await callback(s, a.cookie, a.state)
-  t.is(replay.headers.get('location'), ORIGIN + '/?conta=erro', 'state is single-use')
-  t.is(s.fake.tokenCalls(), 1, 'a replayed state exchanges nothing')
-  for (const r of s.fake.seen) t.absent(r.path === '/auth', 'the fake authorization page is never fetched')
+  t.absent(s.logs.includes(JSON.stringify({ event: 'callback', reason: 'ok' })), 'never an ok')
 })
 
-test('callback: Google error -> cancelado, failed exchange -> erro, never a code in a redirect', async (t) => {
-  const s = await setup(t)
-  const a = await authorize(s, member(), 'ana')
-  const denied = await callback(s, a.cookie, a.state, 'error=access_denied')
-  t.is(denied.headers.get('location'), ORIGIN + '/?conta=cancelado')
-  t.is(s.fake.tokenCalls(), 0)
-
-  const b = await authorize(s, member(), 'bia')
-  s.fake.account.tokenStatus = 400
-  const failed = await callback(s, b.cookie, b.state, 'code=codigo-ruim')
-  t.is(failed.headers.get('location'), ORIGIN + '/?conta=erro')
-  t.is(s.fake.tokenCalls(), 1)
-  t.absent(failed.headers.get('location').includes('codigo'), 'no code in the redirect')
-  const pending = await s.api('GET', '/account/pending', { cookie: b.cookie })
-  t.absent('sub' in pending.body, 'nothing recorded for the row')
-  t.ok(s.logs.includes(JSON.stringify({ event: 'callback', reason: 'erro' })))
-  t.absent(s.logs.join('\n').includes('codigo-ruim'))
-})
-
-test('signatures: wrong phase, replayed nonce, wrong key and shape are refused', async (t) => {
+test('authorize (retired): 410 versao-antiga before any proof, store call or Google URL', async (t) => {
   const s = await setup(t)
   const m = member()
-  const a = await authorize(s, m, 'ana')
-  t.is(a.auth.status, 200)
+  const a = await startLink(s, m, 'ana')
+  const calls = []
+  for (const name of ['reserve', 'putGoogle', 'markAnswered', 'start', 'finish', 'dropPending']) {
+    const real = s.store[name]
+    s.store[name] = (...args) => {
+      calls.push(name)
+      return real.apply(s.store, args)
+    }
+  }
+  const before = JSON.stringify(s.store.get(a.cookie))
 
-  const replay = await s.api('POST', '/account/authorize', { cookie: a.cookie, body: { signature: sign(s, m, 'reserve', a.nonce, 'ana') } })
-  t.is(replay.status, 400)
-  t.alike(replay.body, { error: 'assinatura-invalida' }, 'the reserve nonce is single-use')
+  for (const [label, opts] of [
+    ['a valid reserve proof', { cookie: a.cookie, body: { signature: sign(s, m, 'reserve', a.nonce, 'ana') } }],
+    ['a malformed signature', { cookie: a.cookie, body: { signature: 'zz' } }],
+    ['no cookie', { body: { signature: sign(s, m, 'reserve', a.nonce, 'ana') } }],
+    ['an app client', { origin: null, headers: { 'x-varanda-client': 'app', 'x-varanda-link': nodeCrypto.randomBytes(32).toString('base64url') }, body: { signature: 'a'.repeat(128) } }]
+  ]) {
+    const r = await s.api('POST', '/account/authorize', opts)
+    t.alike([r.status, r.body], [410, { error: 'versao-antiga' }], label)
+    t.absent(r.text.includes('authorizeUrl'), label + ': no Google URL')
+  }
+  t.alike(calls, [], 'no store call')
+  t.is(JSON.stringify(s.store.get(a.cookie)), before, 'the row stays in reserve')
+  noOutbound(t, s, 'authorize')
+  t.ok(s.logs.includes(JSON.stringify({ event: 'refused', reason: 'versao-antiga' })))
 
-  await callback(s, a.cookie, a.state)
+  // The row is still the member's: the phone link finishes it.
+  t.is((await verifyPhone(s, m)).status, 200)
+  const finish = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: finishSig(s, m, a.nonce, 'ana') } })
+  t.is(finish.status, 200, finish.text)
+})
+
+test('signatures: wrong phase, wrong key, name, subject and shape are refused; the right proof finishes once', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  const a = await startLink(s, m, 'ana')
+  t.is((await verifyPhone(s, m)).status, 200)
+
   const reserveSig = sign(s, m, 'reserve', a.nonce, 'ana')
   const wrongPhase = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: reserveSig } })
   t.alike([wrongPhase.status, wrongPhase.body], [400, { error: 'assinatura-invalida' }], 'a reserve signature does not finish')
 
   const other = member()
-  const wrongKey = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: sign(s, other, 'finish', a.nonce, 'ana', SUB) } })
+  const wrongKey = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: finishSig(s, other, a.nonce, 'ana') } })
   t.alike([wrongKey.status, wrongKey.body], [400, { error: 'assinatura-invalida' }], 'signed by another key')
 
-  const wrongName = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: sign(s, m, 'finish', a.nonce, 'anna', SUB) } })
+  const wrongName = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: finishSig(s, m, a.nonce, 'anna') } })
   t.alike(wrongName.body, { error: 'assinatura-invalida' }, 'signed over another name')
+
+  const googleSub = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  t.alike([googleSub.status, googleSub.body], [400, { error: 'assinatura-invalida' }], 'signed over a Google subject')
 
   const malformed = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: 'zz' } })
   t.alike([malformed.status, malformed.body], [400, { error: 'assinatura-invalida' }])
 
-  const noCookie = await s.api('POST', '/account/finish', { body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  const noCookie = await s.api('POST', '/account/finish', { body: { signature: finishSig(s, m, a.nonce, 'ana') } })
   t.alike([noCookie.status, noCookie.body], [404, { error: 'expirado' }])
 
-  const good = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  const good = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: finishSig(s, m, a.nonce, 'ana') } })
   t.is(good.status, 200, 'the right proof still works after the refusals')
+  const replay = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: finishSig(s, m, a.nonce, 'ana') } })
+  t.alike([replay.status, replay.body], [404, { error: 'expirado' }], 'the nonce is single-use')
 })
 
-test('start: wrong member, taken, 6-hex and reserved names, one member per sub and one sub per member', async (t) => {
+test('finish: a row holding a Google subject (from before the retirement) answers expirado and links nothing', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  t.is((await verifyPhone(s, m)).status, 200)
+  const row = s.store.start({ member: m.hex, username: 'ana' })
+  s.store.reserve(row.id)
+  s.store.putGoogle(row.id, { sub: SUB, email: EMAIL })
+  for (const sub of [SUB, phoneSub(m.hex)]) {
+    const r = await s.api('POST', '/account/finish', { cookie: row.id, body: { signature: sign(s, m, 'finish', row.nonce, 'ana', sub) } })
+    t.alike([r.status, r.body], [404, { error: 'expirado' }], sub === SUB ? 'signed over the Google subject' : 'signed over the phone subject')
+  }
+  t.alike((await s.api('GET', '/account/status?member=' + m.hex)).body, { linked: false })
+  t.is(s.store.memberForSub(SUB), null, 'the Google subject is bound to nobody')
+  noOutbound(t, s, 'finish')
+
+  // A web row the retired authorize had moved past reserve, with no subject.
+  const n = member()
+  t.is((await verifyPhone(s, n)).status, 200)
+  const moved = s.store.start({ member: n.hex, username: 'bia' })
+  s.store.reserve(moved.id)
+  const r = await s.api('POST', '/account/finish', { cookie: moved.id, body: { signature: finishSig(s, n, moved.nonce, 'bia') } })
+  t.alike([r.status, r.body], [404, { error: 'expirado' }], 'a row past reserve')
+})
+
+test('start: wrong member, taken, 6-hex and reserved names, a linked member cannot start again', async (t) => {
   const s = await setup(t)
   const m = member()
   const done = await link(s, m, 'ana')
@@ -412,15 +484,8 @@ test('start: wrong member, taken, 6-hex and reserved names, one member per sub a
   const secondSub = await s.api('POST', '/account/start', { body: { member: m.hex, username: 'bia' } })
   t.alike([secondSub.status, secondSub.body], [409, { error: 'conta-vinculada' }], 'a linked member cannot start again')
 
-  const m2 = member()
-  const sameSub = await link(s, m2, 'bia')
-  t.alike([sameSub.finish.status, sameSub.finish.body], [409, { error: 'conta-vinculada' }], 'the sub is already linked to another member')
-  const status = await s.api('GET', '/account/status?member=' + m2.hex)
-  t.alike(status.body, { linked: false })
-
-  s.fake.account.sub = '2098765432109876543210'
   const fresh = await link(s, member(), 'cris')
-  t.is(fresh.finish.status, 200, 'a new sub links ("bia" is still held by the refused row)')
+  t.is(fresh.finish.status, 200, 'another member links')
 })
 
 test('start: the Vitrine handles shown on varanda.app are reserved', async (t) => {
@@ -436,28 +501,23 @@ test('start: the Vitrine handles shown on varanda.app are reserved', async (t) =
   t.is(near.status, 200, 'only the exact handle is reserved')
 })
 
-test('a name is held once Google answered (not by the key proof) and released after 600 s', async (t) => {
+test('a pending row holds no name; an expired row finishes nothing; the link takes the name', async (t) => {
   const s = await setup(t)
   const m = member()
-  const a = await authorize(s, m, 'ana')
+  const a = await startLink(s, m, 'ana')
+  t.is((await verifyPhone(s, m)).status, 200)
   const notYet = await s.api('POST', '/account/start', { body: { member: member().hex, username: 'ana' } })
-  t.is(notYet.status, 200, 'a key proof alone holds nothing: keys are free')
-  const cb = await callback(s, a.cookie, a.state)
-  t.is(cb.headers.get('location'), ORIGIN + '/?conta=ok')
-  const held = await s.api('POST', '/account/start', { body: { member: member().hex, username: 'ana' } })
-  t.alike(held.body, { error: 'nome-em-uso' }, 'held for the member once Google answered')
+  t.is(notYet.status, 200, 'a pending row holds nothing, even with the phone checked')
   s.c.offset += PENDING_TTL_MS
-  const pending = await s.api('GET', '/account/pending', { cookie: a.cookie })
-  t.alike([pending.status, pending.body], [404, { error: 'expirado' }])
-  const free = await s.api('POST', '/account/start', { body: { member: member().hex, username: 'ana' } })
-  t.is(free.status, 200, 'released')
+  const late = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: finishSig(s, m, a.nonce, 'ana') } })
+  t.alike([late.status, late.body], [404, { error: 'expirado' }], 'the row expired')
+  t.alike((await s.api('GET', '/account/status?member=' + m.hex)).body, { linked: false })
 
-  // The other way round: a row that expired before the callback exchanges nothing.
-  const b = await authorize(s, member(), 'bia')
-  s.c.offset += PENDING_TTL_MS
-  const late = await callback(s, b.cookie, b.state)
-  t.is(late.headers.get('location'), ORIGIN + '/?conta=erro')
-  t.is(s.fake.tokenCalls(), 1, 'only the first callback exchanged a code')
+  const b = await startLink(s, m, 'ana')
+  const done = await s.api('POST', '/account/finish', { cookie: b.cookie, body: { signature: finishSig(s, m, b.nonce, 'ana') } })
+  t.is(done.status, 200, 'a fresh row links: ' + done.text)
+  const held = await s.api('POST', '/account/start', { body: { member: member().hex, username: 'ana' } })
+  t.alike(held.body, { error: 'nome-em-uso' }, 'held once linked')
 })
 
 test('rename: cooldown, key proof over the rename nonce, single-use nonce, old name never reassigned', async (t) => {
@@ -574,17 +634,15 @@ test('rate limits: nothing charged before a proof; per-member windows after a va
   t.is(own.finish.status, 200, 'the victim\'s own signed flow still links')
 
   // Unauthenticated finishes share nothing with a member's valid finish.
-  s.fake.account.sub = '2098765432109876543210'
   const m = member()
-  const a = await authorize(s, m, 'bia')
-  t.is((await callback(s, a.cookie, a.state)).headers.get('location'), ORIGIN + '/?conta=ok')
+  const a = await startLink(s, m, 'bia')
+  t.is((await verifyPhone(s, m)).status, 200)
   s.c.offset += 10 * 1000 // refill the global bucket
   for (let i = 0; i < 30; i++) {
     const r = await s.api('POST', '/account/finish', { body: { signature: 'a'.repeat(128) } })
     t.is(r.status, 404, 'finish without a row ' + (i + 1))
   }
-  const pending = await s.api('GET', '/account/pending', { cookie: a.cookie })
-  const finish = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: sign(s, m, 'finish', pending.body.nonce, 'bia', pending.body.sub) } })
+  const finish = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: finishSig(s, m, a.nonce, 'bia') } })
   t.is(finish.status, 200, 'the member\'s valid finish: ' + finish.text)
 
   // Unauthenticated rename/starts naming a linked member do not block its
@@ -599,21 +657,27 @@ test('rate limits: nothing charged before a proof; per-member windows after a va
   const renamed = await s.api('POST', '/account/rename/finish', { body: { member: victim.hex, nonce, signature: sign(s, victim, 'rename', nonce, 'anita') } })
   t.is(renamed.status, 200, 'the victim\'s own signed rename: ' + renamed.text)
 
-  // The per-member window is charged once the signature verified: 5
-  // authorizes per member per 10 min.
+  // The per-member window is charged once the signature verified: 10
+  // finishes per member per 10 min. A member with no phone checked is
+  // refused after the charge, so its row stays for the next try.
   s.c.offset += 600 * 1000
   const spender = member()
-  for (let i = 0; i < 5; i++) {
-    const r = await authorize(s, spender, 'carla')
-    t.is(r.auth.status, 200, 'signed authorize ' + (i + 1))
+  const sp = await startLink(s, spender, 'carla')
+  const spend = () => s.api('POST', '/account/finish', { cookie: sp.cookie, body: { signature: finishSig(s, spender, sp.nonce, 'carla') } })
+  for (let i = 0; i < 10; i++) {
+    const r = await spend()
+    t.alike([r.status, r.body], [403, { error: 'telefone-pendente' }], 'signed finish ' + (i + 1))
   }
-  const sixth = await authorize(s, spender, 'carla')
-  t.alike([sixth.auth.status, sixth.auth.body], [429, { error: 'pedido-invalido' }], 'the sixth signed authorize')
-  const other = await authorize(s, member(), 'dora')
-  t.is(other.auth.status, 200, 'another member is not affected')
+  const eleventh = await spend()
+  t.alike([eleventh.status, eleventh.body], [429, { error: 'pedido-invalido' }], 'the eleventh signed finish')
+  const otherM = member()
+  const o = await startLink(s, otherM, 'dora')
+  const other = await s.api('POST', '/account/finish', { cookie: o.cookie, body: { signature: finishSig(s, otherM, o.nonce, 'dora') } })
+  t.is(other.status, 403, 'another member is not affected')
   s.c.offset += 600 * 1000
-  const later = await authorize(s, spender, 'carla')
-  t.is(later.auth.status, 200, 'the window passed')
+  const sp2 = await startLink(s, spender, 'carla')
+  const later = await s.api('POST', '/account/finish', { cookie: sp2.cookie, body: { signature: finishSig(s, spender, sp2.nonce, 'carla') } })
+  t.is(later.status, 403, 'the window passed')
 })
 
 test('keyedWindow at capacity admits a new key: expired windows go first, then the oldest', (t) => {
@@ -633,21 +697,31 @@ test('keyedWindow at capacity admits a new key: expired windows go first, then t
   t.ok(w('e'), 'e is new again')
 })
 
-test('callback: an unmatched cookie or state consumes no per-row quota', async (t) => {
+test('pending (retired): 404 expirado for a live row, a V or a redeem code; nothing is read or written', async (t) => {
   const s = await setup(t)
   const m = member()
-  const a = await authorize(s, m, 'ana')
-  for (let i = 0; i < 4; i++) {
-    t.is((await callback(s, null, a.state)).headers.get('location'), ORIGIN + '/?conta=erro', 'no cookie ' + (i + 1))
-    t.is((await callback(s, a.cookie, 'A'.repeat(43))).headers.get('location'), ORIGIN + '/?conta=erro', 'foreign state ' + (i + 1))
+  const a = await startLink(s, m, 'ana')
+  const v = nodeCrypto.randomBytes(32).toString('base64url')
+  const proof = nodeCrypto.createHash('sha256').update(Buffer.from(v, 'base64url')).digest('base64url')
+  const app = await s.api('POST', '/account/start', { origin: null, headers: { 'x-varanda-client': 'app' }, body: { member: member().hex, username: 'bia', appProof: proof } })
+  t.is(app.status, 200)
+  const before = JSON.stringify(s.store.get(a.cookie))
+  for (const [label, opts] of [
+    ['the live row cookie', { cookie: a.cookie }],
+    ['no cookie', {}],
+    ['an app V', { origin: null, headers: { 'x-varanda-client': 'app', 'x-varanda-link': v } }],
+    ['an app V and a redeem code', { origin: null, headers: { 'x-varanda-client': 'app', 'x-varanda-link': v, 'x-varanda-redeem': 'A'.repeat(43) } }]
+  ]) {
+    const r = await s.api('GET', '/account/pending', opts)
+    t.alike([r.status, r.body], [404, { error: 'expirado' }], label)
+    t.absent(r.text.includes(a.nonce), label + ': no nonce')
   }
-  t.is(s.fake.tokenCalls(), 0)
-  const ok = await callback(s, a.cookie, a.state)
-  t.is(ok.headers.get('location'), ORIGIN + '/?conta=ok', 'the matching callback still passes')
-  t.is(s.fake.tokenCalls(), 1)
+  t.is(JSON.stringify(s.store.get(a.cookie)), before, 'the row is untouched')
+  t.is(s.server.appStats().rows, 1, 'the app row stays')
+  noOutbound(t, s, 'pending')
 })
 
-test('unconfigured service: health ok, link routes 503 indisponivel, reads answer', async (t) => {
+test('unconfigured service: health ok, link routes 503 indisponivel, the retired routes answer as ever, reads answer', async (t) => {
   const s = await setup(t, { configured: false })
   const m = member()
   t.alike((await s.api('GET', '/account/health')).body, { status: 'ok' })
@@ -655,19 +729,22 @@ test('unconfigured service: health ok, link routes 503 indisponivel, reads answe
   t.alike([start.status, start.body], [503, { error: 'indisponivel' }])
   t.is(cookieOf(start), null)
   for (const [method, p, body] of [
-    ['POST', '/account/authorize', { signature: 'a'.repeat(128) }],
     ['POST', '/account/finish', { signature: 'a'.repeat(128) }],
     ['POST', '/account/rename/start', { member: m.hex, username: 'ana' }],
-    ['POST', '/account/rename/finish', { member: m.hex, nonce: 'A'.repeat(43), signature: 'a'.repeat(128) }],
-    ['GET', '/account/pending'],
-    ['GET', '/account/callback?state=' + 'A'.repeat(43) + '&code=x']
+    ['POST', '/account/rename/finish', { member: m.hex, nonce: 'A'.repeat(43), signature: 'a'.repeat(128) }]
   ]) {
     const r = await s.api(method, p, body === undefined ? { cookie: 'A'.repeat(43) } : { body, cookie: 'A'.repeat(43) })
     t.alike([r.status, r.body], [503, { error: 'indisponivel' }], method + ' ' + p)
   }
+  const auth = await s.api('POST', '/account/authorize', { cookie: 'A'.repeat(43), body: { signature: 'a'.repeat(128) } })
+  t.alike([auth.status, auth.body], [410, { error: 'versao-antiga' }], 'authorize: a definite refusal, never 503')
+  const pending = await s.api('GET', '/account/pending', { cookie: 'A'.repeat(43) })
+  t.alike([pending.status, pending.body], [404, { error: 'expirado' }])
+  const cb = await s.api('GET', '/account/callback?state=' + 'A'.repeat(43) + '&code=x', { cookie: 'A'.repeat(43) })
+  t.alike([cb.status, cb.headers.get('location')], [302, s.origin + '/?conta=erro'])
   t.alike((await s.api('GET', '/account/status?member=' + m.hex)).body, { linked: false })
   t.is((await s.api('GET', '/account/username/ana')).status, 404)
-  t.is(s.fake.tokenCalls(), 0)
+  noOutbound(t, s, 'unconfigured')
 })
 
 test('createAccountServer refuses an issuer certificate for another association or key', async (t) => {
@@ -682,6 +759,7 @@ test('createAccountServer refuses an issuer certificate for another association 
   throwsMessage(t, () => createAccountServer({ association: iss.association, origin: 'http://example.test', google, store, issuer: null }), /origin/, 'http origin on another host')
   throwsMessage(t, () => createAccountServer({ association: iss.association, origin: 'http://192.168.1.2', google, store, issuer: null }), /origin/, 'http origin on a LAN address')
   t.ok(createAccountServer({ association: iss.association, origin: 'http://localhost:8080', google, store, issuer: null }), 'http://localhost:8080 (the hosted lab) accepted')
+  t.ok(createAccountServer({ association: iss.association, origin: ORIGIN, store, issuer: null }), 'no google option: the member sign-in is retired')
   const server = createAccountServer({ association: iss.association, origin: ORIGIN, google, store, issuer: null })
   throwsMessage(t, () => server.listen({ host: '0.0.0.0', port: 0 }), /account-host/, 'any-address bind')
 
@@ -1332,66 +1410,52 @@ test('member cap: a new start on a full service is 503 lista-de-espera; status, 
 test('member cap: a finish after the cap filled is 503 lista-de-espera and links nothing', async (t) => {
   const s = await setup(t, { storeOpts: { maxMembers: 2 } })
   t.is((await link(s, member(), 'ana')).finish.status, 200)
-  s.fake.account.sub = '2098765432109876543210'
   const late = member()
-  const a = await authorize(s, late, 'bia')
-  t.is((await callback(s, a.cookie, a.state)).headers.get('location'), ORIGIN + '/?conta=ok')
-  const pending = await s.api('GET', '/account/pending', { cookie: a.cookie })
-  s.fake.account.sub = '3098765432109876543210'
+  const a = await startLink(s, late, 'bia')
+  t.is((await verifyPhone(s, late)).status, 200)
   t.is((await link(s, member(), 'cora')).finish.status, 200, 'the cap fills meanwhile')
-  const finish = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: sign(s, late, 'finish', pending.body.nonce, 'bia', pending.body.sub) } })
+  const finish = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: finishSig(s, late, a.nonce, 'bia') } })
   t.alike([finish.status, finish.body], [503, { error: 'lista-de-espera' }])
   t.alike(cookieOf(finish), { id: a.cookie, maxAge: 0 }, 'the link cookie is cleared as on success')
   t.alike((await s.api('GET', '/account/status?member=' + late.hex)).body, { linked: false })
-  t.is((await s.api('GET', '/account/pending', { cookie: a.cookie })).status, 404, 'the pending row is gone')
+  t.is(s.store.get(a.cookie), null, 'the pending row is gone')
   t.is((await s.api('GET', '/account/username/bia')).status, 404)
 })
 
-test('member cap: a callback while the cap is full is refused before the Google code is exchanged', async (t) => {
+test('member cap: the retired callback on a full service redirects with erro and drops nothing', async (t) => {
   const s = await setup(t, { storeOpts: { maxMembers: 2 } })
   t.is((await link(s, member(), 'ana')).finish.status, 200)
   const late = member()
-  const a = await authorize(s, late, 'bia')
-  s.fake.account.sub = '2098765432109876543210'
+  const a = await startLink(s, late, 'bia')
   t.is((await link(s, member(), 'cora')).finish.status, 200, 'the cap fills meanwhile')
-  const calls = s.fake.tokenCalls()
 
-  const cb = await callback(s, a.cookie, a.state)
+  const cb = await s.api('GET', '/account/callback?state=' + 'A'.repeat(43) + '&code=codigo-1', { cookie: a.cookie })
   t.is(cb.status, 302)
-  t.is(cb.headers.get('location'), ORIGIN + '/?conta=lista-de-espera')
-  t.alike(cookieOf(cb), { id: a.cookie, maxAge: 0 }, 'the link cookie is cleared')
-  t.is(s.fake.tokenCalls(), calls, 'the code is never exchanged')
-  t.is((await s.api('GET', '/account/pending', { cookie: a.cookie })).status, 404, 'the pending row is gone')
-  const finish = await s.api('POST', '/account/finish', { cookie: a.cookie, body: { signature: sign(s, late, 'finish', a.nonce, 'bia', '4098765432109876543210') } })
-  t.alike([finish.status, finish.body], [404, { error: 'expirado' }], 'a later finish finds nothing')
-  t.is((await s.api('GET', '/account/username/bia')).status, 404, 'the name is not held')
-
-  t.ok(s.logs.includes(JSON.stringify({ event: 'lista-de-espera' })), 'logged as the bare event')
-  t.absent(s.logs.includes(JSON.stringify({ event: 'callback', reason: 'lista-de-espera' })), 'no callback reason line')
+  t.is(cb.headers.get('location'), s.origin + '/?conta=erro', 'never the waitlist answer of the old flow')
+  t.is(cb.headers.get('set-cookie'), null, 'the link cookie is left alone')
+  t.ok(s.store.get(a.cookie) !== null, 'the pending row is not dropped by the callback')
+  noOutbound(t, s, 'callback on a full service')
+  t.absent(s.logs.includes(JSON.stringify({ event: 'callback', reason: 'lista-de-espera' })), 'no callback waitlist line')
   const log = s.logs.join('\n')
   noPersonalData(t, log, 'log')
   t.absent(log.includes(late.hex), 'log: no member key')
 })
 
-test('member cap: a callback for a key linked meanwhile is not refused by the cap', async (t) => {
+test('member cap: a second finish for a key linked meanwhile is not refused by the cap', async (t) => {
   const s = await setup(t, { storeOpts: { maxMembers: 2 } })
   t.is((await link(s, member(), 'ana')).finish.status, 200)
-  s.fake.account.sub = '2098765432109876543210'
   const m = member()
   // Two link flows for the same key (two tabs); the first fills the last slot.
-  const first = await authorize(s, m, 'bia')
-  const second = await authorize(s, m, 'bia')
-  t.is((await callback(s, first.cookie, first.state)).headers.get('location'), ORIGIN + '/?conta=ok')
-  const p1 = await s.api('GET', '/account/pending', { cookie: first.cookie })
-  const f1 = await s.api('POST', '/account/finish', { cookie: first.cookie, body: { signature: sign(s, m, 'finish', p1.body.nonce, 'bia', p1.body.sub) } })
+  const first = await startLink(s, m, 'bia')
+  const second = await startLink(s, m, 'bia')
+  t.is((await verifyPhone(s, m)).status, 200)
+  const f1 = await s.api('POST', '/account/finish', { cookie: first.cookie, body: { signature: finishSig(s, m, first.nonce, 'bia') } })
   t.is(f1.status, 200, 'the first flow links the key into the last slot')
 
-  const calls = s.fake.tokenCalls()
-  const cb = await callback(s, second.cookie, second.state)
-  t.is(cb.headers.get('location'), ORIGIN + '/?conta=ok', 'the linked key is not sent to the waitlist')
-  t.ok(s.fake.tokenCalls() > calls, 'its code is exchanged as before')
-  const p2 = await s.api('GET', '/account/pending', { cookie: second.cookie })
-  t.is(p2.status, 200, 'its pending row stays for finish()')
+  const f2 = await s.api('POST', '/account/finish', { cookie: second.cookie, body: { signature: finishSig(s, m, second.nonce, 'bia') } })
+  t.absent(f2.body && f2.body.error === 'lista-de-espera', 'the linked key is not sent to the waitlist: ' + f2.text)
+  t.is(f2.status, 200, 'the same account answers again')
+  t.alike(f2.body.cert, f1.body.cert, 'the same certificate')
 })
 
 test('admission: with no member cap the service answers exactly { open: true }', async (t) => {
@@ -1619,62 +1683,41 @@ function appSecret () {
   return { v, proof: nodeCrypto.createHash('sha256').update(Buffer.from(v, 'base64url')).digest('base64url') }
 }
 
-function appHeaders (secret, redeem) {
+function appHeaders (secret) {
   const headers = { ...APP }
   if (secret) headers['x-varanda-link'] = secret.v
-  if (redeem) headers['x-varanda-redeem'] = redeem
   return headers
 }
 
-function appApi (s, method, pathname, { secret, redeem, body } = {}) {
-  return s.api(method, pathname, { origin: null, headers: appHeaders(secret, redeem), body })
+function appApi (s, method, pathname, { secret, body } = {}) {
+  return s.api(method, pathname, { origin: null, headers: appHeaders(secret), body })
 }
 
-// App start (no cookie) -> reserve signature -> authorize with V. `link`:
-// the earlier V the start presents (starting over).
-async function appAuthorize (s, m, username, { secret = appSecret(), invite, link = null } = {}) {
+// App start (no cookie). `link`: the earlier V the start presents (starting
+// over). -> { secret, started, nonce }.
+async function appStart (s, m, username, { secret = appSecret(), invite, link = null } = {}) {
   const body = { member: m.hex, username, appProof: secret.proof }
   if (invite !== undefined) body.invite = invite
   const started = await s.api('POST', '/account/start', { origin: null, headers: appHeaders(link), body })
-  if (started.status !== 200) return { secret, started }
-  const nonce = started.body.nonce
-  const auth = await appApi(s, 'POST', '/account/authorize', { secret, body: { signature: sign(s, m, 'reserve', nonce, username) } })
-  if (auth.status !== 200) return { secret, started, nonce, auth }
-  const url = new URL(auth.body.authorizeUrl)
-  return { secret, started, nonce, auth, state: url.searchParams.get('state') }
+  return { secret, started, nonce: started.status === 200 ? started.body.nonce : null }
 }
 
-// The redeem code of an <origin>/account/app/conta?conta=ok&codigo=R
-// redirect, or null.
-function redeemOf (location) {
-  const prefix = APP_RETURN + '?conta=ok&codigo='
-  if (typeof location !== 'string' || !location.startsWith(prefix)) return null
-  const code = location.slice(prefix.length)
-  return TOKEN_RE.test(code) ? code : null
+function appFinish (s, m, secret, nonce, username) {
+  return appApi(s, 'POST', '/account/finish', { secret, body: { signature: finishSig(s, m, nonce, username) } })
 }
 
-test('app return page: static, strict headers, never echoes the query', async (t) => {
-  // No issuer: the page holds no secret of the server.
+test('app return (retired): 404 expirado with or without a query, never echoes it', async (t) => {
   const s = await setup(t, { configured: false })
   const R = appSecret().v
-  const ok = await s.api('GET', '/account/app/conta?conta=ok&codigo=' + R)
-  t.is(ok.status, 200)
-  t.is(ok.headers.get('content-type'), 'text/html; charset=utf-8')
-  t.is(ok.headers.get('cache-control'), 'no-store')
-  t.is(ok.headers.get('referrer-policy'), 'no-referrer')
-  t.is(ok.headers.get('x-content-type-options'), 'nosniff')
-  t.is(ok.headers.get('content-security-policy'), "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
-  t.is(ok.headers.get('access-control-allow-origin'), null)
-  t.ok(ok.text.includes('Volte ao app Varanda'))
-  t.absent(ok.text.includes(R), 'a valid code in the query is never rendered')
-  t.absent(ok.text.includes('intent:'), 'no intent')
-  t.absent(ok.text.includes('codigo'), 'no code parameter')
-  t.absent(/<script/i.test(ok.text))
-
+  const withCode = await s.api('GET', '/account/app/conta?conta=ok&codigo=' + R)
+  t.alike([withCode.status, withCode.body], [404, { error: 'expirado' }])
+  t.is(withCode.headers.get('cache-control'), 'no-store')
+  t.is(withCode.headers.get('access-control-allow-origin'), null)
+  t.absent(withCode.text.includes(R), 'a code in the query is never rendered')
   const bare = await s.api('GET', '/account/app/conta')
-  t.is(bare.status, 200)
-  t.is(bare.text, ok.text, 'the same page with or without a query')
+  t.alike([bare.status, bare.body], [404, { error: 'expirado' }])
   t.absent(s.logs.join('\n').includes(R), 'the query is never logged')
+  noOutbound(t, s, 'app return')
 })
 
 test('app clients: an Origin-less POST needs the app header and JSON; a present Origin must still match', async (t) => {
@@ -1718,310 +1761,173 @@ test('app start: appProof is required in its exact shape, the answer is { nonce 
   t.is(reused.status, 400, 'a live appProof is not taken by a start without its V')
 })
 
-test('app flow: start, authorize with V, callback by state alone, redeem code, pending and finish with V and R', async (t) => {
+test('app flow: start, phone check and finish with V alone; no cookie; nothing secret logged', async (t) => {
   const s = await setup(t)
   const m = member()
-  const a = await appAuthorize(s, m, 'ana')
-  t.is(a.auth.status, 200, a.auth.text)
-  t.ok(TOKEN_RE.test(a.state))
+  const a = await appStart(s, m, 'ana')
+  t.is(a.started.status, 200, a.started.text)
+  t.is(a.started.headers.get('set-cookie'), null)
 
-  const early = await appApi(s, 'GET', '/account/pending', { secret: a.secret })
-  t.is(early.status, 404, 'no pending answer before the redeem code exists')
+  const early = await appFinish(s, m, a.secret, a.nonce, 'ana')
+  t.alike([early.status, early.body], [403, { error: 'telefone-pendente' }], 'no link before the phone check')
+  const checked = await verifyPhone(s, m, { origin: null, headers: APP })
+  t.is(checked.status, 200, 'the phone steps over the app header: ' + checked.text)
 
-  const cb = await callback(s, null, a.state)
-  t.is(cb.status, 302)
-  const loc = cb.headers.get('location')
-  const R = redeemOf(loc)
-  t.ok(loc.startsWith(APP_RETURN + '?conta=ok&codigo='), 'the https app return, on the service origin: ' + loc)
-  t.ok(R !== null, 'conta=ok&codigo=R: ' + loc)
-  t.is(cb.headers.get('set-cookie'), null)
-  t.is(s.fake.tokenCalls(), 1)
-
-  const noRedeem = await appApi(s, 'GET', '/account/pending', { secret: a.secret })
-  t.is(noRedeem.status, 404, 'V alone is not enough after the callback')
-  const pending = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
-  t.is(pending.status, 200, pending.text)
-  t.alike(pending.body, { nonce: a.nonce, member: m.hex, username: 'ana', sub: SUB })
-
-  const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  const finish = await appFinish(s, m, a.secret, a.nonce, 'ana')
   t.is(finish.status, 200, finish.text)
   t.alike(certForKey(finish.body.cert, m.hex, s.iss.association), { ok: true })
   t.is(finish.headers.get('set-cookie'), null, 'no cookie to clear for an app row')
   t.is((await s.api('GET', '/account/status?member=' + m.hex)).body.linked, true)
+  t.is(s.server.appStats().rows, 0, 'the app entry goes with the row')
 
-  const replay = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
-  t.is(replay.status, 404, 'R and the row are spent')
+  const replay = await appFinish(s, m, a.secret, a.nonce, 'ana')
+  t.is(replay.status, 404, 'the row is spent')
 
   const all = s.logs.join('\n')
-  for (const [label, secret] of [['V', a.secret.v], ['appProof', a.secret.proof], ['R', R], ['state', a.state], ['sub', SUB], ['e-mail', EMAIL], ['nonce', a.nonce]]) {
+  for (const [label, secret] of [['V', a.secret.v], ['appProof', a.secret.proof], ['nonce', a.nonce]]) {
     t.absent(all.includes(secret), 'no ' + label + ' in the logs')
   }
-  t.ok(s.logs.includes(JSON.stringify({ event: 'callback', reason: 'ok' })))
+  noOutbound(t, s, 'app flow')
 })
 
-test('app flow attack: whoever holds V but not R (a shared authorizeUrl) can neither read nor finish; nothing is linked', async (t) => {
+test('app flow: linkByPhone with app true links over the V header path', async (t) => {
   const s = await setup(t)
   const m = member()
-  const a = await appAuthorize(s, m, 'ana')
-  // The victim completes the attacker's authorizeUrl in their own browser:
-  // no cookie, and the redirect carrying R lands on the victim's device.
-  const cb = await callback(s, null, a.state)
-  const R = redeemOf(cb.headers.get('location'))
-  t.ok(R !== null)
+  const done = await link(s, m, 'ana', { app: true })
+  t.is(done.finish.status, 200)
+  t.alike(certForKey(done.finish.body.cert, m.hex, s.iss.association), { ok: true })
+  t.is(done.finish.body.usernameRecord.username, 'ana')
+  t.is((await s.api('GET', '/account/status?member=' + m.hex)).body.linked, true)
+  t.is(s.server.appStats().rows, 0)
+})
 
-  const wrongR = nodeCrypto.randomBytes(32).toString('base64url')
-  for (const redeem of [undefined, wrongR, 'x'.repeat(43), R.slice(0, 42)]) {
-    const p = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem })
-    t.is(p.status, 404, 'pending refused')
-    t.absent(p.text.includes(SUB), 'the victim\'s subject never reaches the attacker')
-    const f = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
-    t.is(f.status, 404, 'finish refused')
-    t.alike(f.body, { error: 'expirado' })
-  }
+test('app flow: without its V nothing finishes an app row; nothing is linked', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  const a = await appStart(s, m, 'ana')
+  t.is((await verifyPhone(s, m)).status, 200)
+
+  const noV = await appFinish(s, m, null, a.nonce, 'ana')
+  t.alike([noV.status, noV.body], [404, { error: 'expirado' }], 'no V')
+  const wrongV = await appFinish(s, m, appSecret(), a.nonce, 'ana')
+  t.alike([wrongV.status, wrongV.body], [404, { error: 'expirado' }], 'another V')
+  const badV = await s.api('POST', '/account/finish', { origin: null, headers: { ...APP, 'x-varanda-link': 'not-a-secret' }, body: { signature: finishSig(s, m, a.nonce, 'ana') } })
+  t.alike([badV.status, badV.body], [404, { error: 'expirado' }], 'a V of the wrong shape')
+  const proofAsV = await s.api('POST', '/account/finish', { origin: null, headers: { ...APP, 'x-varanda-link': a.secret.proof }, body: { signature: finishSig(s, m, a.nonce, 'ana') } })
+  t.alike([proofAsV.status, proofAsV.body], [404, { error: 'expirado' }], 'the appProof is not V')
   t.is((await s.api('GET', '/account/status?member=' + m.hex)).body.linked, false, 'nothing linked')
-  t.is(s.store.memberForSub(SUB), null, 'the subject is bound to nobody')
+  t.is(s.server.appStats().rows, 1, 'the row waits for its V')
 })
 
-test('app flow: a wrong V with the right R fails; the right pair still works', async (t) => {
+test('app flow: a wrong V fails; the right V still works', async (t) => {
   const s = await setup(t)
   const m = member()
-  const a = await appAuthorize(s, m, 'ana')
-  const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
-  const wrongV = await appApi(s, 'POST', '/account/finish', { secret: appSecret(), redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  const a = await appStart(s, m, 'ana')
+  t.is((await verifyPhone(s, m)).status, 200)
+  const wrongV = await appFinish(s, m, appSecret(), a.nonce, 'ana')
   t.is(wrongV.status, 404)
-  const badV = await s.api('GET', '/account/pending', { origin: null, headers: { ...APP, 'x-varanda-link': 'not-a-secret', 'x-varanda-redeem': R } })
-  t.is(badV.status, 404)
-  const ok = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
+  const ok = await appFinish(s, m, a.secret, a.nonce, 'ana')
   t.is(ok.status, 200, ok.text)
 })
 
-test('app flow: a spent R cannot be retried after a refused finish', async (t) => {
+test('app flow: a refused finish keeps the row for V; the successful one spends it', async (t) => {
   const s = await setup(t)
   const m = member()
-  const a = await appAuthorize(s, m, 'ana')
-  const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
-  const bad = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, member(), 'finish', a.nonce, 'ana', SUB) } })
+  const a = await appStart(s, m, 'ana')
+  t.is((await verifyPhone(s, m)).status, 200)
+  const bad = await appApi(s, 'POST', '/account/finish', { secret: a.secret, body: { signature: finishSig(s, member(), a.nonce, 'ana') } })
   t.is(bad.status, 400, 'a bad signature')
-  const again = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
-  t.is(again.status, 404, 'R was spent by the first finish')
+  const good = await appFinish(s, m, a.secret, a.nonce, 'ana')
+  t.is(good.status, 200, good.text)
+  const again = await appFinish(s, m, a.secret, a.nonce, 'ana')
+  t.is(again.status, 404, 'spent by the successful finish')
   t.alike(again.body, { error: 'expirado' })
 })
 
-test('app flow: R stops working three minutes after the callback, for pending and finish alike', async (t) => {
-  const redeemTtl = 180 * 1000 // APP_REDEEM_TTL_MS in server.js
+test('app flow: the row expires with the pending TTL; V then finishes nothing', async (t) => {
   const s = await setup(t)
   const m = member()
-  const a = await appAuthorize(s, m, 'ana')
-  const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
-  s.c.offset += redeemTtl - 1000
-  const inTime = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
-  t.is(inTime.status, 200, 'still redeemable just before the limit: ' + inTime.text)
-  s.c.offset += 1000
-  const late = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
-  t.is(late.status, 404, 'pending refused at the limit')
-  t.alike(late.body, { error: 'expirado' })
-  const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
-  t.is(finish.status, 404, 'finish refused too')
+  const a = await appStart(s, m, 'ana')
+  t.is((await verifyPhone(s, m)).status, 200)
+  s.c.offset += PENDING_TTL_MS
+  const finish = await appFinish(s, m, a.secret, a.nonce, 'ana')
+  t.alike([finish.status, finish.body], [404, { error: 'expirado' }])
   t.is((await s.api('GET', '/account/status?member=' + m.hex)).body.linked, false, 'nothing linked')
 })
 
-test('app flow: every refused callback returns to the https app return with no code; a cookie never names an app row', async (t) => {
-  const s = await setup(t, { storeOpts: { maxMembers: 1 } })
-  const denied = await appAuthorize(s, member(), 'ana')
-  // A stray cookie changes nothing: the state names an app row.
-  const cancel = await callback(s, 'A'.repeat(43), denied.state, 'error=access_denied')
-  t.is(cancel.headers.get('location'), APP_RETURN + '?conta=cancelado')
-  const bad = await appAuthorize(s, member(), 'bia')
-  s.fake.account.tokenStatus = 400
-  t.is((await callback(s, null, bad.state, 'code=codigo-ruim')).headers.get('location'), APP_RETURN + '?conta=erro')
-  s.fake.account.tokenStatus = 200
-  const late = await appAuthorize(s, member(), 'caio')
-  await link(s, member(), 'dani')
-  const full = await callback(s, null, late.state)
-  t.is(full.headers.get('location'), APP_RETURN + '?conta=lista-de-espera')
-  t.is(full.headers.get('set-cookie'), null)
-  const unknown = await callback(s, null, 'A'.repeat(43))
-  t.is(unknown.headers.get('location'), ORIGIN + '/?conta=erro', 'an unknown state names no row and keeps the web answer')
+test('app flow: the retired callback never returns to the app return and never mints a code', async (t) => {
+  const s = await setup(t)
+  const a = await appStart(s, member(), 'ana')
+  t.is(a.started.status, 200)
+  for (const query of ['?state=' + 'A'.repeat(43) + '&code=codigo-1', '?state=' + 'A'.repeat(43) + '&error=access_denied', '']) {
+    const cb = await s.api('GET', '/account/callback' + query)
+    t.is(cb.headers.get('location'), s.origin + '/?conta=erro', 'the web answer: ' + query)
+    t.absent(cb.headers.get('location').includes('codigo'), 'no code')
+    t.is(cb.headers.get('set-cookie'), null)
+  }
+  t.is(s.server.appStats().rows, 1, 'the app row is untouched')
+  noOutbound(t, s, 'app callback')
 })
 
-test('app restart with the same V: the first Google page is dead and returns to the app with erro', async (t) => {
+test('app restart with the same V: the old row is gone and the new one finishes', async (t) => {
   const s = await setup(t)
   const m = member()
-  const a = await appAuthorize(s, m, 'ana')
-  t.is(a.auth.status, 200, a.auth.text)
-  const b = await appAuthorize(s, m, 'ana', { secret: a.secret, link: a.secret })
-  t.is(b.auth.status, 200, 'the holder of V starts over with the same appProof: ' + (b.auth && b.auth.text))
-  t.not(b.state, a.state)
+  const a = await appStart(s, m, 'ana')
+  t.is(a.started.status, 200, a.started.text)
+  const b = await appStart(s, m, 'ana', { secret: a.secret, link: a.secret })
+  t.is(b.started.status, 200, 'the holder of V starts over with the same appProof: ' + b.started.text)
+  t.not(b.nonce, a.nonce)
+  t.is(s.server.appStats().rows, 1, 'one live app row')
 
-  const stale = await callback(s, null, a.state)
-  t.is(stale.status, 302)
-  t.is(stale.headers.get('location'), APP_RETURN + '?conta=erro', 'never the website, never a code')
-  t.is(s.fake.tokenCalls(), 0, 'the old page exchanges nothing')
-  t.is(s.store.memberForSub(SUB), null)
-
-  const R = redeemOf((await callback(s, null, b.state)).headers.get('location'))
-  t.ok(R !== null, 'the new row completes')
-  const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', b.nonce, 'ana', SUB) } })
+  t.is((await verifyPhone(s, m)).status, 200)
+  const old = await appFinish(s, m, a.secret, a.nonce, 'ana')
+  t.alike([old.status, old.body], [400, { error: 'assinatura-invalida' }], 'V now names the new row: the old nonce does not sign it')
+  const finish = await appFinish(s, m, a.secret, b.nonce, 'ana')
   t.is(finish.status, 200, finish.text)
-  const spent = await callback(s, null, b.state)
-  t.is(spent.headers.get('location'), APP_RETURN + '?conta=erro', 'a spent app state also returns to the app')
 })
 
-test('app restart on an invite-only server: V is the bearer proof, an outsider is refused', async (t) => {
+test('app restart on an invite-only server: V is the bearer proof of the old row', async (t) => {
   const holder = {}
   const invites = openInvitesStore(tmpDir(t), { perWeek: 2, isUsed: (id) => holder.store.inviteUsed(id) })
   const s = await setup(t, { serverOpts: { invites } })
   holder.store = s.store
   const { code } = await invites.issue(member().hex)
   const m = member()
-  const a = await appAuthorize(s, m, 'ana', { invite: code })
-  t.is(a.auth.status, 200, a.auth.text)
+  const a = await appStart(s, m, 'ana', { invite: code })
+  t.is(a.started.status, 200, a.started.text)
 
-  const outsider = await s.api('POST', '/account/start', { origin: null, headers: APP, body: { member: m.hex, username: 'ana', invite: code, appProof: appSecret().proof } })
-  t.is(outsider.status, 404, 'no V: the row past reserve is not replaced')
-  t.alike(outsider.body, { error: 'convite-invalido' })
-  const webOutsider = await s.api('POST', '/account/start', { body: { member: m.hex, username: 'ana', invite: code } })
-  t.alike(webOutsider.body, { error: 'convite-invalido' }, 'nor by a web start without the cookie')
-  const wrongV = await s.api('POST', '/account/start', { origin: null, headers: { ...APP, 'x-varanda-link': appSecret().v }, body: { member: m.hex, username: 'ana', invite: code, appProof: appSecret().proof } })
-  t.alike(wrongV.body, { error: 'convite-invalido' }, 'nor with another V')
+  const wrongV = await s.api('POST', '/account/start', { origin: null, headers: { ...APP, 'x-varanda-link': appSecret().v }, body: { member: m.hex, username: 'ana', invite: code, appProof: a.secret.proof } })
+  t.alike([wrongV.status, wrongV.body], [400, { error: 'pedido-invalido' }], 'a live appProof is not taken by a start without its V')
 
   const fresh = appSecret()
   const restart = await s.api('POST', '/account/start', { origin: null, headers: { ...APP, 'x-varanda-link': a.secret.v }, body: { member: m.hex, username: 'ana', invite: code, appProof: fresh.proof } })
   t.is(restart.status, 200, 'the holder of V starts over: ' + restart.text)
-  const gone = await appApi(s, 'POST', '/account/authorize', { secret: a.secret, body: { signature: sign(s, m, 'reserve', a.nonce, 'ana') } })
-  t.is(gone.status, 404, 'the old row is gone with its V')
-  const stale = await callback(s, null, a.state)
-  t.is(stale.headers.get('location'), APP_RETURN + '?conta=erro', 'the taken-over row\'s Google page returns to the app')
-  t.is(s.fake.tokenCalls(), 0, 'and exchanges nothing')
-  const auth = await appApi(s, 'POST', '/account/authorize', { secret: fresh, body: { signature: sign(s, m, 'reserve', restart.body.nonce, 'ana') } })
-  t.is(auth.status, 200, auth.text)
-  const R = redeemOf((await callback(s, null, new URL(auth.body.authorizeUrl).searchParams.get('state'))).headers.get('location'))
-  t.ok(R !== null)
-  const finish = await appApi(s, 'POST', '/account/finish', { secret: fresh, redeem: R, body: { signature: sign(s, m, 'finish', restart.body.nonce, 'ana', SUB) } })
+  t.is((await verifyPhone(s, m)).status, 200)
+  const gone = await appFinish(s, m, a.secret, a.nonce, 'ana')
+  t.alike([gone.status, gone.body], [404, { error: 'expirado' }], 'the old row is gone with its V')
+  const finish = await appFinish(s, m, fresh, restart.body.nonce, 'ana')
   t.is(finish.status, 200, finish.text)
+  t.ok(s.store.inviteUsed(inviteId(code)), 'the invite is spent by the link')
 })
 
-test('app callback: a row evicted during the exchange gets erro, no code, and its Google answer is not kept', async (t) => {
+test('app rows: a row evicted by a start flood finishes nothing and its entry goes', async (t) => {
   const s = await setup(t, { storeOpts: { maxPending: 1 } })
   const m = member()
-  const a = await appAuthorize(s, m, 'ana')
-  t.is(a.auth.status, 200, a.auth.text)
-  // A flood start evicts the unproven app row while Google answers.
-  s.fake.account.onToken = () => s.store.start({ member: member().hex, username: 'bia' })
-  const cb = await callback(s, null, a.state)
-  t.is(s.fake.tokenCalls(), 1, 'the exchange ran')
-  t.is(cb.headers.get('location'), APP_RETURN + '?conta=erro', 'no unredeemable code')
-  t.alike(s.server.appStats(), { rows: 0, google: 0 }, 'the entry and the Google answer are gone')
-})
-
-test('app flood: a row Google answered survives a start flood and still finishes with V and R', async (t) => {
-  const s = await setup(t, { storeOpts: { maxPending: 2 } })
-  const m = member()
-  const a = await appAuthorize(s, m, 'ana')
-  t.is(a.auth.status, 200, a.auth.text)
-  const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
-  t.ok(R !== null)
-  // The answer holds no name before R: another member may still start 'ana'.
-  t.ok(s.store.start({ member: member().hex, username: 'ana' }).id)
-  for (let i = 0; i < 5; i++) s.store.start({ member: member().hex, username: 'flood' + i })
-  const pending = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
-  t.is(pending.status, 200, pending.text)
-  t.alike(pending.body, { nonce: a.nonce, member: m.hex, username: 'ana', sub: SUB })
-  const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana', SUB) } })
-  t.is(finish.status, 200, finish.text)
-  t.is((await s.api('GET', '/account/status?member=' + m.hex)).body.linked, true)
-})
-
-test('app flood: an answered row counts against maxPending, so a full table answers lotado', async (t) => {
-  const s = await setup(t, { storeOpts: { maxPending: 1 } })
-  const a = await appAuthorize(s, member(), 'ana')
-  t.ok(redeemOf((await callback(s, null, a.state)).headers.get('location')) !== null)
-  t.exception(() => s.store.start({ member: member().hex, username: 'bia' }), /lotado/)
-  const started = await s.api('POST', '/account/start', { origin: null, headers: appHeaders(null), body: { member: member().hex, username: 'bia', appProof: appSecret().proof } })
-  t.is(started.status, 503, started.text)
-})
-
-test('app flood: a row Google has not answered is still evicted by a start flood', async (t) => {
-  const s = await setup(t, { storeOpts: { maxPending: 1 } })
-  const a = await appAuthorize(s, member(), 'ana')
-  t.is(a.auth.status, 200, a.auth.text)
+  const a = await appStart(s, m, 'ana')
+  t.is(a.started.status, 200, a.started.text)
+  t.is((await verifyPhone(s, m)).status, 200)
   s.store.start({ member: member().hex, username: 'bia' })
-  const cb = await callback(s, null, a.state)
-  t.is(cb.headers.get('location'), APP_RETURN + '?conta=erro')
-  t.is(s.fake.tokenCalls(), 0, 'the evicted row exchanges nothing')
+  const finish = await appFinish(s, m, a.secret, a.nonce, 'ana')
+  t.alike([finish.status, finish.body], [404, { error: 'expirado' }])
+  t.is(s.server.appStats().rows, 0, 'the entry is gone')
 })
 
-test('app flood: one Google subject keeps at most MAX_PER_SUB answered rows; the table never fills and the newest still finishes', async (t) => {
-  const s = await setup(t, { storeOpts: { maxPending: 3 } })
-  const flows = []
-  for (let i = 0; i < 5; i++) {
-    const m = member()
-    const a = await appAuthorize(s, m, 'ana' + i)
-    t.is(a.started.status, 200, 'start ' + i + ' is never lotado: ' + a.started.text)
-    if (a.started.status !== 200) return
-    t.is(a.auth.status, 200, a.auth.text)
-    const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
-    t.ok(R !== null, 'callback ' + i)
-    flows.push({ m, a, R })
-  }
-  t.is(s.server.appStats().google, 2, 'only the newest two answers are held')
-  t.ok(s.store.start({ member: member().hex, username: 'bia' }).id, 'an unrelated start is not lotado')
-  const old = flows[0]
-  t.is((await appApi(s, 'GET', '/account/pending', { secret: old.a.secret, redeem: old.R })).status, 404, 'the oldest answer was dropped')
-  const { m, a, R } = flows[4]
-  const pending = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
-  t.is(pending.status, 200, pending.text)
-  t.alike(pending.body, { nonce: a.nonce, member: m.hex, username: 'ana4', sub: SUB })
-  const finish = await appApi(s, 'POST', '/account/finish', { secret: a.secret, redeem: R, body: { signature: sign(s, m, 'finish', a.nonce, 'ana4', SUB) } })
-  t.is(finish.status, 200, finish.text)
-})
-
-test('app flood: answered rows of different Google subjects do not evict each other', async (t) => {
-  const s = await setup(t, { storeOpts: { maxPending: 5 } })
-  const flows = []
-  for (const sub of ['2098765432109876543210', '2098765432109876543210', '3098765432109876543210', '3098765432109876543210']) {
-    s.fake.account.sub = sub
-    const m = member()
-    const a = await appAuthorize(s, m, 'u' + flows.length + 'x')
-    t.is(a.auth.status, 200, a.auth.text)
-    const R = redeemOf((await callback(s, null, a.state)).headers.get('location'))
-    t.ok(R !== null)
-    flows.push({ a, R, sub })
-  }
-  t.is(s.server.appStats().google, 4)
-  for (const { a, R, sub } of flows) {
-    const pending = await appApi(s, 'GET', '/account/pending', { secret: a.secret, redeem: R })
-    t.is(pending.status, 200, pending.text)
-    t.is(pending.body.sub, sub)
-  }
-})
-
-test('app callback: a row expired before the callback gets erro and its entry goes', async (t) => {
+test('app rows: an expired row is dropped on the next request of any kind', async (t) => {
   const s = await setup(t)
-  const a = await appAuthorize(s, member(), 'ana')
-  s.c.offset += PENDING_TTL_MS + 1000
-  const cb = await callback(s, null, a.state)
-  t.is(cb.headers.get('location'), APP_RETURN + '?conta=erro')
-  t.is(s.fake.tokenCalls(), 0)
-  t.is(s.server.appStats().rows, 0)
-})
-
-test('app rows: an expired row and the Google answer it holds are dropped on the next request of any kind', async (t) => {
-  const s = await setup(t)
-  const a = await appAuthorize(s, member(), 'ana')
-  t.ok(redeemOf((await callback(s, null, a.state)).headers.get('location')) !== null)
-  t.alike(s.server.appStats(), { rows: 1, google: 1 }, 'held until R is redeemed')
+  const a = await appStart(s, member(), 'ana')
+  t.is(a.started.status, 200)
+  t.alike(s.server.appStats(), { rows: 1 }, 'held while the row lives')
   s.c.offset += PENDING_TTL_MS + 1000
   t.is((await s.api('GET', '/account/username/zoe')).status, 404, 'an unrelated public read')
-  t.alike(s.server.appStats(), { rows: 0, google: 0 }, 'dropped without a later app start')
-})
-
-test('app rows: the Google answer behind an expired R leaves memory on the next request of any kind', async (t) => {
-  const s = await setup(t)
-  const a = await appAuthorize(s, member(), 'ana')
-  t.ok(redeemOf((await callback(s, null, a.state)).headers.get('location')) !== null)
-  t.alike(s.server.appStats(), { rows: 1, google: 1 })
-  s.c.offset += 180 * 1000 // APP_REDEEM_TTL_MS in server.js; the row itself lives on
-  t.is((await s.api('GET', '/account/username/zoe')).status, 404, 'an unrelated public read')
-  t.alike(s.server.appStats(), { rows: 1, google: 0 }, 'the row stays, its Google answer is gone')
+  t.alike(s.server.appStats(), { rows: 0 }, 'dropped without a later app start')
 })

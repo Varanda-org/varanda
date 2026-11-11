@@ -203,7 +203,7 @@ Phone first: `apps/app` is one codebase and a screen is checked on the phone bef
 
 ## Instalação hospedada local
 
-`apps/cli/scripts/hosted-lab.js` sobe uma instalação hospedada inteira nesta máquina, para conferir o app web entrado no Chrome, sem Google, sem domínio e sem celular. Com a interface do Expo já rodando (`npm run web -w apps/app`, porta 8081):
+`apps/cli/scripts/hosted-lab.js` sobe uma instalação hospedada inteira nesta máquina, para conferir o app web entrado no Chrome, sem Google, sem domínio e sem SMS real. O laboratório simula o SMS: aceita qualquer número de celular brasileiro e só o código `123456`, sem precisar de um aparelho. Com a interface do Expo já rodando (`npm run web -w apps/app`, porta 8081):
 
 ```sh
 node apps/cli/scripts/hosted-lab.js                          # http://localhost:8080
@@ -217,12 +217,12 @@ O que ele sobe, no mesmo processo:
 
 - uma rede DHT de teste presa a loopback, ou a que `VARANDA_BOOTSTRAP` aponta (precisa ser loopback, por exemplo a de `apps/cli/scripts/local-dht.js`);
 - uma associação e um semeador certificado, com a entrada WebSocket, como `seed --ws-port`;
-- o serviço de conta, com a loja de termos ligada e sem verificação de idade (`GET /account/age/policy` responde `{ required: false }`);
+- o serviço de conta, com a loja de termos ligada, verificação de celular com SMS simulado e sem verificação de idade (`GET /account/age/policy` responde `{ required: false }`);
 - um só endereço, `http://localhost:<porta>`, que reúne `/varanda.json`, `/seeder`, `/media/*`, `/index/*` e `/account/*`; o resto vai para o servidor do Expo ou para o `dist` exportado.
 
-### Provedor de entrada falso
+### SMS simulado
 
-`apps/cli/scripts/oauth-stub.js` ocupa o lugar do Google só no laboratório, com o mesmo contrato `{ authorizeUrl, exchange }` que o serviço de conta recebe. Sua página de autorização oferece Pessoa 1, Pessoa 2 e Pessoa 3. Cada uma tem um `sub` próprio (`lab-<n>`) e um e-mail (`lab<n>@example.test`), porque a loja recusa um mesmo `sub` ligado a dois membros. O desafio PKCE continua conferido na troca, e cada código vale uma vez, então o fluxo da conta roda como roda contra o Google. A passkey e os termos são os de verdade. Nada disso é ligado à CLI.
+`apps/cli/scripts/phone-stub.js` substitui o cliente de SMS no laboratório, com o mesmo contrato `{ send, check }` do serviço de conta, sem abrir conexão nem enviar SMS. Aceita qualquer número de celular brasileiro; só o código `123456`, mostrado na abertura do laboratório, confirma o número. Outro código com seis dígitos é recusado como `codigo-invalido`. Cada conta precisa de um número diferente. A passkey e os termos são os de verdade. O stub não é usado pelo serviço de produção.
 
 ### Duas pessoas numa troca de mensagens
 
@@ -230,8 +230,8 @@ A identidade fica no navegador e no autenticador virtual do perfil do Chrome. Po
 
 1. Abra `http://localhost:8080`. Use `localhost`, não `127.0.0.1`: o `rp.id` da passkey não pode ser um IP.
 2. Em DevTools › More tools › WebAuthn, ative o ambiente de autenticador virtual e adicione um autenticador CTAP2 com transporte `internal`, chaves residentes, verificação do usuário e PRF. Sem PRF, o app segue o caminho de passkey sem PRF.
-3. Toque em Entrar e escolha Pessoa 1 na página do laboratório.
-4. Em outro perfil do Chrome, repita os passos 1 a 3 com o autenticador desse perfil e escolha Pessoa 2.
+3. Toque em Entrar e cadastre um celular brasileiro usando o código de SMS do laboratório, `123456`. Os termos e a passkey são os de verdade.
+4. Em outro perfil do Chrome, repita os passos 1 a 3 com o autenticador desse perfil e outro número de celular brasileiro: é um número por conta.
 5. Troque uma mensagem direta e uma publicação em grupo entre os dois perfis.
 
 ### Por que o nó do aparelho não envia mensagens diretas
@@ -276,8 +276,8 @@ eas credentials -p android
 - O `.easignore` substitui o `.gitignore` no envio, por isso repete as saídas de build e todos os padrões de segredo, e deixa de fora até o `debug.keystore` (o perfil `preview` compila release).
 - O `.easignore` deixa o `.git` de fora, então o builder lê `EAS_BUILD_GIT_COMMIT_HASH` (ainda não visto neste repositório: a linha `build-info: commit ...` no log do primeiro build confirma; `desconhecido` quer dizer que a variável faltou e o build mesmo assim passou; nunca imprima o ambiente).
 - iOS em ad hoc exige conta Apple Developer. Até lá, use `eas build --profile preview-simulator --platform ios`.
-- Passkey no iOS: `ios/Varanda/Varanda.entitlements` declara `webcredentials:bora.varanda.app` (repetido em `ios.associatedDomains` do `app.json`, para o prebuild) e `ios/Varanda/Info.plist` tem `VarandaWebCredentials` em `true`; `test/hardening.test.js` confere que os dois, o host dos App Links do Android e o `apple-app-site-association` do deploy falam do mesmo app e do mesmo host. A passkey e a volta do Google só funcionam depois de três passos do operador: `VARANDA_IOS_APP_ID=<Team ID>.app.varanda` no `deploy/seeder/.env` da produção; um deploy que publique `https://bora.varanda.app/.well-known/apple-app-site-association` com esse id; e um perfil de provisionamento com Associated Domains. O `eas build` logado na conta Apple sincroniza a capacidade a partir do entitlement (linha `Synced capabilities` no terminal) e confere o perfil com a Apple; sem esse login ele não confere, e o perfil se refaz em `eas credentials -p ios`. A Apple lê o arquivo por uma CDN própria, então a mudança pode demorar a chegar aos aparelhos. O build de simulador não é assinado pelo time e não casa com o arquivo: a entrada se confere no TestFlight, num iPhone com iOS 18 ou mais novo.
-- O módulo local `apps/app/modules/auth-session` devolve ao app a etapa do Google na ligação da conta, sem passar o código pelo esquema `varanda://`. No Android usa Auth Tab (androidx.browser 1.9.0): precisa do Chrome 137 ou mais novo e de `/.well-known/assetlinks.json` com `handle_all_urls`. No iOS usa ASWebAuthenticationSession com retorno https (iOS 17.4 ou mais novo), com o mesmo `webcredentials` e a mesma chave `VarandaWebCredentials` da passkey. O app usa o navegador padrão quando ele tem Auth Tab e, se não tiver, só o Chrome que veio instalado no aparelho (outro app poderia se declarar navegador e devolver um código de outra conta Google); sem nenhum dos dois, pede que a pessoa ligue a conta Google no site, com a mesma passkey.
+- Passkey no iOS: `ios/Varanda/Varanda.entitlements` declara `webcredentials:bora.varanda.app` (repetido em `ios.associatedDomains` do `app.json`, para o prebuild) e `ios/Varanda/Info.plist` tem `VarandaWebCredentials` em `true`; `test/hardening.test.js` confere que os dois, o host dos App Links do Android e o `apple-app-site-association` do deploy falam do mesmo app e do mesmo host. A passkey só funciona depois de três passos do operador: `VARANDA_IOS_APP_ID=<Team ID>.app.varanda` no `deploy/seeder/.env` da produção; um deploy que publique `https://bora.varanda.app/.well-known/apple-app-site-association` com esse id; e um perfil de provisionamento com Associated Domains. O `eas build` logado na conta Apple sincroniza a capacidade a partir do entitlement (linha `Synced capabilities` no terminal) e confere o perfil com a Apple; sem esse login ele não confere, e o perfil se refaz em `eas credentials -p ios`. A Apple lê o arquivo por uma CDN própria, então a mudança pode demorar a chegar aos aparelhos. O build de simulador não é assinado pelo time e não casa com o arquivo: a entrada se confere no TestFlight, num iPhone com iOS 18 ou mais novo.
+- Nas versões do app anteriores a `feat/phone-only-signup-app`, o módulo local `apps/app/modules/auth-session` devolve ao app a etapa do Google na ligação da conta, sem passar o código pelo esquema `varanda://`. No Android usa Auth Tab (androidx.browser 1.9.0): precisa do Chrome 137 ou mais novo e de `/.well-known/assetlinks.json` com `handle_all_urls`. No iOS usa ASWebAuthenticationSession com retorno https (iOS 17.4 ou mais novo), com o mesmo `webcredentials` e a mesma chave `VarandaWebCredentials` da passkey. O app usa o navegador padrão quando ele tem Auth Tab e, se não tiver, só o Chrome que veio instalado no aparelho (outro app poderia se declarar navegador e devolver um código de outra conta Google); sem nenhum dos dois, pede que a pessoa ligue a conta Google no site, com a mesma passkey.
 
 ## Envio para a App Store (EAS)
 

@@ -1,19 +1,18 @@
 'use strict'
 
 // The hosted lab: a whole hosted installation on this machine, for checking
-// the web app signed in, in Chrome, without Google or a domain. Phone
-// verification is the stub of ./phone-stub.js (no SMS provider): the banner
-// prints its code, and with no age store a send needs no age record.
+// the web app signed in, in Chrome, without a domain. Phone verification is
+// the stub of ./phone-stub.js (no SMS provider): the banner prints its code,
+// and with no age store a send needs no age record.
 //   node scripts/hosted-lab.js [--host 127.0.0.1] [--port 8080] [--ui <dist dir> | --expo <http://127.0.0.1:8081>]
 //                              [--dataset <semente> [--dataset-size 60x150] [--rajada]]
 // It starts a loopback hyperdht testnet (or uses VARANDA_BOOTSTRAP, which must
 // be loopback, e.g. from scripts/local-dht.js), an association, a certified
 // seeder with its WebSocket listener (as `seed --ws-port`), and the account
-// service through createAccountServer with the stub of ./oauth-stub.js in
-// place of Google, the phone stub (GET /account/phone/policy answers
-// { required: true }), no age check (GET /account/age/policy answers
-// { required: false }), an issuer certified by the lab association and the
-// terms store on. Passkey, terms and the account flow are the real ones.
+// service through createAccountServer with the phone stub (GET
+// /account/phone/policy answers { required: true }), no age check (GET
+// /account/age/policy answers { required: false }), an issuer certified by
+// the lab association and the terms store on. Passkey, terms and the account flow are the real ones.
 // One origin, http://localhost:<port>, carries what Caddy carries in a
 // deployment: /varanda.json, /seeder, /media/*, /index/*, /account/*, and
 // everything else goes to the Expo web dev server or to an exported dist.
@@ -309,10 +308,10 @@ function steps (origin, opts) {
     '  2. DevTools > More tools > WebAuthn: ative o ambiente de autenticador virtual e adicione',
     '     um autenticador ctap2, transporte internal, com chaves residentes, verificação do usuário',
     '     e PRF. Sem PRF o app segue o caminho de passkey sem PRF.',
-    '  3. Toque em Entrar e siga a conta: no lugar do Google aparece a página do laboratório;',
-    '     escolha Pessoa 1. Os termos e a passkey são os de verdade.',
+    '  3. Toque em Entrar e cadastre um celular brasileiro usando o código de SMS do laboratório.',
+    '     Os termos e a passkey são os de verdade.',
     '  4. Para a segunda pessoa, abra outro perfil do Chrome (não uma aba), repita os passos 1 a 3',
-    '     com o autenticador virtual daquele perfil e escolha Pessoa 2.',
+    '     com o autenticador virtual daquele perfil e outro celular brasileiro.',
     '  5. Troque uma mensagem direta e um post de grupo entre os dois perfis.',
     '',
     'Fora do escopo: entrar de verdade no app nativo.',
@@ -390,7 +389,6 @@ async function main () {
   const { openTermsStore } = require('../lib/account/terms-store')
   const { openModerationStore } = require('../lib/account/moderation-store')
   const { openPasskeyStore } = require('../lib/account/passkey-store')
-  const { createOAuthStub } = require('./oauth-stub')
   const nodeCrypto = require('node:crypto')
   const { createPhoneStub } = require('./phone-stub')
   const { openPhoneStore } = require('../lib/account/phone-store')
@@ -462,10 +460,6 @@ async function main () {
     const issuer = loadIssuer(accountDir, association)
     if (issuer === null) throw new Error('emissor do laboratório inválido')
 
-    const google = createOAuthStub({ redirectUri: origin + '/account/callback' })
-    const stub = await google.listen({ host: '127.0.0.1', port: 0 })
-    cleanups.push(() => stub.close())
-
     const store = openAccountStore(accountDir)
     const terms = openTermsStore(accountDir)
     // The moderation desk without its panel (no Google moderators): Excluir
@@ -480,10 +474,10 @@ async function main () {
     // sandbox code, never the key.
     const phoneClient = createPhoneStub()
     const phones = openPhoneStore(accountDir, { key: nodeCrypto.randomBytes(32) })
-    const account = createAccountServer({ association, origin, google, store, issuer, terms, moderation, passkeys, didit: null, ages: null, phoneClient, phones })
+    const account = createAccountServer({ association, origin, store, issuer, terms, moderation, passkeys, didit: null, ages: null, phoneClient, phones })
     const accountListener = await account.listen({ host: '127.0.0.1', port: 0 })
     cleanups.push(() => accountListener.close())
-    log('serviço de conta no ar (Google substituído pela página do laboratório)')
+    log('serviço de conta no ar (cadastro por celular com SMS simulado)')
 
     const proxy = await startLabProxy({
       host: opts.host,
