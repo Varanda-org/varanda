@@ -27,6 +27,9 @@ const MIN_PLACE = 2
 const MAX_PLACE = 40
 const MAX_PRICE_CENTS = 100000000
 const MAX_LISTINGS = 30
+// Listings keep four photos when the post cap grows, so a listing record
+// valid before stays the only shape a listing can take.
+const MAX_LISTING_MEDIA = 4
 const MAX_RATE_TEXT = 280
 const MAX_CITY_KEY = 48
 const RATE_MIN_AGE_MS = 604800000
@@ -263,6 +266,7 @@ module.exports = {
   MAX_PLACE,
   MAX_PRICE_CENTS,
   MAX_LISTINGS,
+  MAX_LISTING_MEDIA,
   MAX_RATE_TEXT,
   MAX_CITY_KEY,
   RATE_MIN_AGE_MS,

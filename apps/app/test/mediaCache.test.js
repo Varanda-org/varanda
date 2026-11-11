@@ -4,6 +4,7 @@
 // four loads at once. A deletion drops keys by media interval, including a
 // load that is still in flight.
 const test = require('brittle')
+const { validateParams, LOG_LIMIT_MAX } = require('@varanda/rpc')
 const load = () => import('../src/media/cache.js')
 
 const tick = () => new Promise((resolve) => setImmediate(resolve))
@@ -353,7 +354,10 @@ test('revokeDeletedMedia reads on until the effective tombstone', async (t) => {
       }
     }
     return {
-      entries: [{ seq: 20, record: { type: 'delete', seq: 4, at, media: [{ core, start: 2, blocks: 1 }] } }],
+      entries: [
+        { seq: 19, record: { type: 'post', text: 'oi' } },
+        { seq: 20, record: { type: 'delete', seq: 4, at, media: [{ core, start: 2, blocks: 1 }] } }
+      ],
       invalid: [],
       entriesTruncated: 10
     }
@@ -370,4 +374,129 @@ test('revokeDeletedMedia ignores a failed read', async (t) => {
   await cache.get(key, async () => 'blob:keep')
   await revokeDeletedMedia(async () => { throw new Error('falhou') }, [1])
   t.is(cache.peek(key), 'blob:keep')
+})
+
+test('revokeDeletedMedia without a limit sends a log.read page validateParams accepts at LOG_LIMIT_MAX', async (t) => {
+  const { revokeDeletedMedia } = await load()
+  const seen = []
+  await revokeDeletedMedia(async (method, params) => {
+    t.is(method, 'log.read')
+    seen.push(params)
+    return { entries: [], invalid: [], entriesTruncated: 0 }
+  }, [2])
+  t.is(seen.length, 1)
+  const checked = validateParams('log.read', seen[0])
+  t.ok(checked.ok, checked.message || 'log.read params')
+  t.is(seen[0].limit, LOG_LIMIT_MAX)
+})
+
+test('three tombstones of one target carrying 4, 4 and 2 ranges in one log page revoke all ten ranges', async (t) => {
+  const { createMediaCache, mediaKey, revokeDeletedMedia } = await load()
+  const revoked = []
+  const cache = createMediaCache({ revoke: (url) => revoked.push(url) })
+  const core = hex('d')
+  const at = '2026-10-29T00:00:00.000Z'
+  const ranges = Array.from({ length: 10 }, (_, i) => ({ core, start: i + 1, blocks: 1 }))
+  const keys = []
+  for (const range of ranges) {
+    const key = mediaKey(photo(core, range.start, range.blocks, 'e'))
+    keys.push(key)
+    await cache.get(key, async () => 'blob:' + range.start)
+  }
+  const slice = (from, to) => ranges.slice(from, to).map((range) => ({ core: range.core, start: range.start, blocks: range.blocks }))
+  let reads = 0
+  await revokeDeletedMedia(async (method, params) => {
+    t.is(method, 'log.read')
+    reads++
+    t.is(params.before, undefined, 'the ten ranges are on the first page')
+    return {
+      entries: [
+        { seq: 11, record: { type: 'post', text: 'oi' } },
+        { seq: 12, record: { type: 'delete', seq: 4, at, media: slice(0, 4) } },
+        { seq: 13, record: { type: 'delete', seq: 4, at, media: slice(4, 8) } },
+        { seq: 14, record: { type: 'delete', seq: 4, at, media: slice(8, 10) } }
+      ],
+      invalid: [],
+      entriesTruncated: 10
+    }
+  }, [4])
+  t.is(reads, 1, 'one log page')
+  t.is(revoked.length, 10)
+  for (const key of keys) t.is(cache.peek(key), null)
+})
+
+test('three tombstones of one target straddling two log pages revoke all ten ranges', async (t) => {
+  const { createMediaCache, mediaKey, revokeDeletedMedia } = await load()
+  const revoked = []
+  const cache = createMediaCache({ revoke: (url) => revoked.push(url) })
+  const core = hex('f')
+  const at = '2026-10-29T00:00:00.000Z'
+  const ranges = Array.from({ length: 10 }, (_, i) => ({ core, start: i + 1, blocks: 1 }))
+  const keys = []
+  for (const range of ranges) {
+    const key = mediaKey(photo(core, range.start, range.blocks, 'e'))
+    keys.push(key)
+    await cache.get(key, async () => 'blob:' + range.start)
+  }
+  const slice = (from, to) => ranges.slice(from, to).map((range) => ({ core: range.core, start: range.start, blocks: range.blocks }))
+  const calls = []
+  await revokeDeletedMedia(async (method, params) => {
+    t.is(method, 'log.read')
+    t.is(params.limit, 2)
+    calls.push(params.before)
+    if (calls.length === 1) {
+      return {
+        entries: [
+          { seq: 13, record: { type: 'delete', seq: 4, at, media: slice(4, 8) } },
+          { seq: 14, record: { type: 'delete', seq: 4, at, media: slice(8, 10) } }
+        ],
+        invalid: [],
+        entriesTruncated: 12
+      }
+    }
+    return {
+      entries: [
+        { seq: 11, record: { type: 'post', text: 'oi' } },
+        { seq: 12, record: { type: 'delete', seq: 4, at, media: slice(0, 4) } }
+      ],
+      invalid: [],
+      entriesTruncated: 10
+    }
+  }, [4], 2)
+  t.alike(calls, [undefined, 13], 'the oldest tombstone is on the second page')
+  t.is(revoked.length, 10)
+  for (const key of keys) t.is(cache.peek(key), null)
+})
+
+test('a failed read of the next log page still revokes the ranges already in hand', async (t) => {
+  const { createMediaCache, mediaKey, revokeDeletedMedia } = await load()
+  const revoked = []
+  const cache = createMediaCache({ revoke: (url) => revoked.push(url) })
+  const core = hex('f')
+  const at = '2026-10-29T00:00:00.000Z'
+  const ranges = Array.from({ length: 10 }, (_, i) => ({ core, start: i + 1, blocks: 1 }))
+  const keys = []
+  for (const range of ranges) {
+    const key = mediaKey(photo(core, range.start, range.blocks, 'e'))
+    keys.push(key)
+    await cache.get(key, async () => 'blob:' + range.start)
+  }
+  const slice = (from, to) => ranges.slice(from, to).map((range) => ({ core: range.core, start: range.start, blocks: range.blocks }))
+  let reads = 0
+  await revokeDeletedMedia(async () => {
+    reads++
+    if (reads > 1) throw new Error('offline')
+    return {
+      entries: [
+        { seq: 13, record: { type: 'delete', seq: 4, at, media: slice(4, 8) } },
+        { seq: 14, record: { type: 'delete', seq: 4, at, media: slice(8, 10) } }
+      ],
+      invalid: [],
+      entriesTruncated: 12
+    }
+  }, [4], 2)
+  t.is(reads, 2)
+  t.is(revoked.length, 6, 'the six ranges on the first page')
+  for (const key of keys.slice(4)) t.is(cache.peek(key), null)
+  for (const key of keys.slice(0, 4)) t.ok(cache.peek(key) !== null, 'ranges never read stay')
 })

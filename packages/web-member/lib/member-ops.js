@@ -55,6 +55,7 @@ const {
   likeRecord,
   repostRecord,
   deleteRecord,
+  deleteRecords,
   testimonialRecord,
   testimonialShowRecord,
   momentRecord,
@@ -91,7 +92,7 @@ const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
-const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS } = require('@varanda/core/lib/group-media')
+const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
 const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, COMMUNITY_LIST_MAX, feira } = require('@varanda/rpc')
 const listing = require('@varanda/core/lib/listing')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
@@ -543,7 +544,7 @@ function declaredOnly (raw, ownHex, records) {
 // -> { seq, ref }. The cap counts live roots after the catch-up, inside the
 // write.
 async function listingCreate (ctx, { kind, title, text, price, unit, cat, place, media }) {
-  if (hasMedia(media)) await verifyMedia(ctx, media)
+  if (hasMedia(media)) await verifyMedia(ctx, media, null, undefined, feira.MAX_LISTING_MEDIA)
   return withIdentity(ctx, async ({ diary, ownHex }) => {
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
     if (listing.countLive(await store.readRaw(diary)) >= feira.MAX_LISTINGS) throw new UsageError(LISTING_LIMIT)
@@ -564,7 +565,7 @@ async function listingEdit (ctx, { to, expectedRevision, title, text, price, uni
   const current = await withIdentity(ctx, async ({ diary, ownHex }) => ownListing(await store.readRaw(diary), ownHex, to, diary.length))
   const shown = Array.isArray(current.record.media) ? current.record.media : []
   const fresh = hasMedia(media) ? media.filter((d) => !shown.some((s) => deepEqual(s, d))) : []
-  if (fresh.length > 0) await verifyMedia(ctx, fresh)
+  if (fresh.length > 0) await verifyMedia(ctx, fresh, null, undefined, feira.MAX_LISTING_MEDIA)
   return withIdentity(ctx, async ({ diary, ownHex }) => {
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
     const raw = await store.readRaw(diary)
@@ -924,11 +925,14 @@ async function recordDelete (ctx, kind, { to }) {
     const live = liveMediaRefs(raw, targets)
     // One `at` for the whole append marks the tombstones of a pair as one.
     const at = nowIso()
-    const records = pending.map((seq) => {
+    // A reader from before the 10-photo cap rejects a delete with more than
+    // MAX_DELETE_RANGES ranges, so a post's ranges go in several tombstones
+    // of one target, all in one append.
+    const records = pending.flatMap((seq) => {
       const media = descriptorsOf(recordAt(raw, seq))
         .filter((d) => declared.has(d.core) && !live.some((l) => overlaps(l, d)))
         .map((d) => ({ core: d.core, start: d.start, blocks: d.blocks }))
-      return buildRecord(() => deleteRecord(media.length > 0 ? { seq, at, media } : { seq, at }))
+      return buildRecord(() => deleteRecords(media.length > 0 ? { seq, at, media } : { seq, at }))
     })
     let seq
     if (records.length <= APPEND_MAX) {
@@ -936,18 +940,22 @@ async function recordDelete (ctx, kind, { to }) {
         ? await appendOwn(ctx, diary, records[0])
         : await store.appendRecords(diary, records, ctx.limits)
     } else {
-      // Only a writer's many shows get here (a post or a profile pair is at
-      // most 2). One append takes at most APPEND_MAX records, so the
+      // Only a writer's many shows get here (a post is at most 3 tombstones,
+      // a profile pair 2). One append takes at most APPEND_MAX records, so the
       // tombstones go in chunks: every other show of that writer first,
       // newest first, and the targeted show's in the last chunk. A chunk
       // that fails throws like any failed write and the client never
       // resends by itself; while any show of that writer remains, the
       // target is still live (never cleared by sync), so a repeat of the
       // same ref reads its `from` again and finishes the rest.
+      // Ordered by each record's own target, as a target may have several.
       const order = records.map((r, i) => i).sort((a, b) => {
-        if (pending[a] === to.seq) return 1
-        if (pending[b] === to.seq) return -1
-        return pending[b] - pending[a]
+        const sa = records[a].seq
+        const sb = records[b].seq
+        if (sa === sb) return a - b
+        if (sa === to.seq) return 1
+        if (sb === to.seq) return -1
+        return sb - sa
       })
       for (let i = 0; i < order.length; i += APPEND_MAX) {
         const chunk = order.slice(i, i + APPEND_MAX).map((j) => records[j])
@@ -1323,8 +1331,10 @@ async function declareMediaCore (ctx, coreHex) {
 // the own diary declares among its latest `media-core` records, with every
 // block local and the bytes matching; else 'mídia inválida'. inspect, when
 // given, is called with (descriptor, bytes) and a falsy result refuses it.
-async function verifyMedia (ctx, media, inspect = null, valid = (d) => validateDescriptor(d) === null) {
-  if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) throw badMedia()
+// max is the item cap of the record kind: a listing and a group post keep
+// their own, lower than a post's.
+async function verifyMedia (ctx, media, inspect = null, valid = (d) => validateDescriptor(d) === null, max = MAX_MEDIA_PER_POST) {
+  if (!Array.isArray(media) || media.length < 1 || media.length > max) throw badMedia()
   const own = new Set(await store.readMediaCores(ctx.storage))
   const { ownHex, declared } = await withIdentity(ctx, async ({ diary, ownHex }) => ({
     ownHex,
@@ -2682,7 +2692,7 @@ async function groupPost (ctx, { group, text, replyTo = null, media = null, card
   if (withMedia) {
     // A voice note is the only item of its post, never next to photos.
     if (Array.isArray(media) && media.length !== 1 && media.some(isVoiceItem)) throw badMedia()
-    await verifyMedia(ctx, media, null, sealed === true ? validPrivateItem : (d) => validateDescriptor(d) === null || validAudioDescriptor(d))
+    await verifyMedia(ctx, media, null, sealed === true ? validPrivateItem : (d) => validateDescriptor(d) === null || validAudioDescriptor(d), MAX_GROUP_MEDIA)
   }
   if (card && card.image !== null) await verifyMedia(ctx, [card.image], null, sealed === true ? validPrivateItem : (d) => validateDescriptor(d) === null)
   return withGroup(ctx, group, true, async ({ ownHex, g }) => {

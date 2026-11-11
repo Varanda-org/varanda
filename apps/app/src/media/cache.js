@@ -54,9 +54,10 @@ export function mediaKey (d) {
 
 const HEX64 = /^[0-9a-f]{64}$/
 
-// log.read's largest page (docs/rpc.md LOG_LIMIT_MAX). Callers pass the
-// constant; the default keeps this module off the rpc package.
-const LOG_PAGE = 32
+// Matches LOG_LIMIT_MAX. revokeDeletedMedia swallows a refused log.read,
+// so a larger default would leave the deleted photo cached. Inlined so
+// this module stays off the rpc package.
+const LOG_PAGE = 30
 
 // How many newest pages to walk looking for an older tombstone. The one a
 // delete just wrote is on the first page; past this the photo stays cached
@@ -334,6 +335,16 @@ function pageSeqs (log) {
   return { entries, seqs }
 }
 
+// A delete of 5 to 10 photos writes 2 or 3 tombstones of one target at
+// consecutive seqs, so a page that ends on one may cut that run short.
+function runMayContinue (got, want) {
+  if (got.seqs.length === 0) return false
+  const oldest = Math.min(...got.seqs)
+  const e = got.entries.find((x) => x && x.seq === oldest)
+  const record = e && e.record
+  return !!record && record.type === 'delete' && want.has(record.seq)
+}
+
 // Reads the own diary from the head until the tombstones of `seqs` are in
 // hand (they are newer than their targets), then revokes those effective
 // ranges in every live cache. Never throws: the delete already succeeded.
@@ -352,11 +363,17 @@ export async function revokeDeletedMedia (request, seqs, limit = LOG_PAGE) {
     for (let i = 0; i < REVOKE_READ_PAGES; i++) {
       const params = { limit: page }
       if (before !== undefined) params.before = before
-      const log = await request('log.read', params)
+      let log
+      try {
+        log = await request('log.read', params)
+      } catch {
+        // The ranges already in hand are still revoked.
+        break
+      }
       const got = pageSeqs(log)
       entries.push(...got.entries)
       // Newer blocks are already in hand, so the fold can judge these.
-      if (foundEffective(entries, wantSet)) break
+      if (foundEffective(entries, wantSet) && !runMayContinue(got, wantSet)) break
       if (got.seqs.length === 0 || !log || log.entriesTruncated === 0) break
       const oldest = Math.min(...got.seqs)
       if (oldest <= min) break

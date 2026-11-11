@@ -290,6 +290,18 @@ test('verifyMedia refuses foreign, undeclared, missing, wrong-sha and wrong-byte
   await t.exception(() => bad({ core: other }), /mídia inválida/, 'declared but not an own core')
 })
 
+test('verifyMedia: the item cap is checked before any core lookup, a post\'s by default and a lower one when given', async (t) => {
+  await testnet(t, 1)
+  const lookup = { get storage () { throw new Error('core lookup') } }
+  const items = (n) => Array.from({ length: n }, () => ({}))
+  await t.exception(() => ops.verifyMedia(lookup, items(11)), /mídia inválida/, '11 items with the default max')
+  await t.exception(() => ops.verifyMedia(lookup, items(5), null, undefined, 4), /mídia inválida/, '5 items with max 4')
+  await t.exception(() => ops.verifyMedia(lookup, items(10)), /core lookup/, '10 items get past the length check')
+  await t.exception(() => ops.verifyMedia(lookup, items(4), null, undefined, 4), /core lookup/, '4 items with max 4 get past it')
+  const m = await member()
+  await t.exception(() => ops.verifyMedia(m.ctx, items(10)), /mídia inválida/, '10 empty objects fail as descriptors')
+})
+
 test('a post with media is appended and reads back through logRead', async (t) => {
   await testnet(t, 1)
   const m = await member()
