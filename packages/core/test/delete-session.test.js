@@ -8,7 +8,7 @@ const { tmpDir } = require('./helpers/tmp')
 const { newSession, connect, failure } = require('./helpers/net')
 const { initAssociation, issueCertificate } = require('../lib/assoc')
 const storeLib = require('../lib/store')
-const { profileRecord, profileRecords, postRecord, mediaCoreRecord, deleteRecord } = require('../lib/records')
+const { profileRecord, profileRecords, postRecord, mediaCoreRecord, deleteRecord, validateRecord, MAX_DELETE_RANGES } = require('../lib/records')
 
 const BOOTSTRAP = ['127.0.0.1:49737']
 const OTHER = 'ab'.repeat(32)
@@ -249,6 +249,39 @@ test('a tombstone carries only media no surviving record overlaps, in a declared
   t.alike((await record(r1.seq)).media, [{ core: CORE, start: 1, blocks: 1 }], 'undeclared core left out')
   const r2 = await m.call('post.delete', { to: m.publicKey + ':' + shared })
   t.is((await record(r2.seq)).media, undefined, 'a live post overlaps the range')
+})
+
+test('post.delete of a 10-photo post appends three tombstones of at most 4 ranges in one append', async (t) => {
+  const m = await member(t)
+  await appendDirect(m.dataDir, [mediaCoreRecord({ key: CORE, at: AT })])
+  const ten = Array.from({ length: 10 }, (_, i) => descriptor(CORE, 1 + i * 2, 2))
+  const big = await appendDirect(m.dataDir, [postRecord({ text: '', at: AT, media: ten })])
+  const four = await appendDirect(m.dataDir, [postRecord({ text: 'b', at: AT, media: Array.from({ length: 4 }, (_, i) => descriptor(CORE, 30 + i)) })])
+  const before = (await m.call('log.read')).entries.length
+
+  const r = await m.call('post.delete', { to: m.publicKey + ':' + big })
+  t.alike(r, { seq: four + 3, ref: m.publicKey + ':' + (four + 3), changed: true, deleted: [big] })
+  const log = await m.call('log.read')
+  t.is(log.entries.length + log.invalid.length, before + 3, 'one length jump of 3')
+  const tombs = log.entries.slice(-3)
+  t.alike(tombs.map((e) => e.seq), [four + 1, four + 2, four + 3])
+  for (const { seq, record } of tombs) {
+    t.is(record.type, 'delete')
+    t.is(record.seq, big, 'every tombstone targets the post')
+    t.is(record.at, tombs[0].record.at, 'one at for the whole append')
+    t.ok(record.media.length <= MAX_DELETE_RANGES, 'at most 4 ranges')
+    t.is(validateRecord(record, seq), null, 'valid at its seq')
+  }
+  t.alike(tombs.flatMap((e) => e.record.media), ten.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })), 'together the ten ranges')
+
+  t.alike(await m.call('post.delete', { to: m.publicKey + ':' + big }), { seq: r.seq, ref: r.ref, changed: false, deleted: [big] }, 'a repeat writes nothing')
+  t.is((await m.call('log.read')).entries.length, log.entries.length, 'nothing appended')
+
+  const r4 = await m.call('post.delete', { to: m.publicKey + ':' + four })
+  t.is(r4.seq, r.seq + 1, 'a 4-photo post still gets one tombstone')
+  const last = (await m.call('log.read')).entries.slice(-1)[0].record
+  t.is(last.seq, four)
+  t.is(last.media.length, 4)
 })
 
 test('log.read pages with before over a deleted slot', async (t) => {
